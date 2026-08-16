@@ -6,50 +6,50 @@
 
 /* 扩展卡片 */
 .extension-card {
-  background: var(--bg-sidebar);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-md);
-  margin-bottom: var(--space-lg);
-  overflow: visible;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-lg);
+    overflow: visible;
 }
 
 .extension-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  padding: 14px var(--space-lg);
-  background: var(--bg);
-  border-bottom: 1px solid var(--surface);
-  border-radius: var(--radius-md) var(--radius-md) 0 0; /* 与父卡片圆角同步，避免内部直角背景撑出 */
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: 14px var(--space-lg);
+    background: var(--bg);
+    border-bottom: 1px solid var(--surface);
+    border-radius: var(--radius-md) var(--radius-md) 0 0; /* 与父卡片圆角同步，避免内部直角背景撑出 */
 }
 
 .extension-icon {
-  font-size: var(--text-3xl);
-  flex-shrink: 0;
+    font-size: var(--text-3xl);
+    flex-shrink: 0;
 }
 
 .extension-info {
-  flex: 1;
+    flex: 1;
 }
 
 .extension-info h3 {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  font-size: var(--text-xl);
-  font-weight: var(--weight-semibold);
-  color: var(--text);
-  margin-bottom: var(--space-sm);
-  line-height: var(--leading-snug);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    font-size: var(--text-xl);
+    font-weight: var(--weight-semibold);
+    color: var(--text);
+    margin-bottom: var(--space-sm);
+    line-height: var(--leading-snug);
 }
 
 .extension-desc {
-  font-size: var(--text-base);
-  color: var(--text-dim);
-  margin: 0;
+    font-size: var(--text-base);
+    color: var(--text-dim);
+    margin: 0;
 }
 
 .extension-body {
-  padding: var(--space-md) var(--space-lg);
+    padding: var(--space-md) var(--space-lg);
 }

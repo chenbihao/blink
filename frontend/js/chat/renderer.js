@@ -7,17 +7,17 @@
  * - bindLinkOpener：chat 特有的链接点击拦截（绑定 #chat-messages）
  */
 
-import { initMarkdown, renderMarkdown, highlightCodeBlocks } from "../shared/markdown.js";
-import { invoke } from "../shared/tauri.js";
+import {highlightCodeBlocks, initMarkdown, renderMarkdown} from "../shared/markdown.js";
+import {invoke} from "../shared/tauri.js";
 
 // Re-export 供 chat/components.js 使用
-export { renderMarkdown, highlightCodeBlocks };
+export {renderMarkdown, highlightCodeBlocks};
 
 /**
  * 初始化渲染器。委托给共享模块。
  */
 export function initRenderer() {
-  initMarkdown();
+    initMarkdown();
 }
 
 /**
@@ -27,24 +27,24 @@ export function initRenderer() {
  * 在 main.js init() 中调用一次。
  */
 export function bindLinkOpener() {
-  const messagesEl = document.getElementById("chat-messages");
-  if (!messagesEl) return;
-  messagesEl.addEventListener("click", (e) => {
-    const link = e.target.closest("a[href]");
-    if (!link) return;
-    const href = link.getAttribute("href") || "";
-    // 只拦截 http/https/mailto（与 DOMPurify 白名单一致）
-    if (!/^(?:https?|mailto):/i.test(href)) return;
-    e.preventDefault();
-    // 用后端 open_url command（与设置页 openExternalUrl 一致）
-    if (invoke) {
-      invoke("open_url", { url: href }).catch((err) => {
-        console.error("[chat] open_url 失败:", err);
-        // 降级：window.open（在 Tauri 中可能无效，但不会崩溃）
-        window.open(href, "_blank");
-      });
-    } else {
-      window.open(href, "_blank");
-    }
-  });
+    const messagesEl = document.getElementById("chat-messages");
+    if (!messagesEl) return;
+    messagesEl.addEventListener("click", (e) => {
+        const link = e.target.closest("a[href]");
+        if (!link) return;
+        const href = link.getAttribute("href") || "";
+        // 只拦截 http/https/mailto（与 DOMPurify 白名单一致）
+        if (!/^(?:https?|mailto):/i.test(href)) return;
+        e.preventDefault();
+        // 用后端 open_url command（与设置页 openExternalUrl 一致）
+        if (invoke) {
+            invoke("open_url", {url: href}).catch((err) => {
+                console.error("[chat] open_url 失败:", err);
+                // 降级：window.open（在 Tauri 中可能无效，但不会崩溃）
+                window.open(href, "_blank");
+            });
+        } else {
+            window.open(href, "_blank");
+        }
+    });
 }

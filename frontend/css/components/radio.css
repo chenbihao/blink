@@ -8,86 +8,86 @@
    </label> */
 
 .radio {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  cursor: pointer;
-  user-select: none;
-  margin: 0;
-  padding: 0;
-  font-weight: normal;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+    margin: 0;
+    padding: 0;
+    font-weight: normal;
 }
 
 .radio input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
 }
 
 .radio .radio-dot {
-  position: relative;
-  width: 20px;
-  height: 20px;
-  background: var(--surface);
-  border: 2px solid var(--surface-2);
-  border-radius: 50%;
-  transition: all var(--transition-slow) ease;
-  flex-shrink: 0;
-  margin: 0;
-  padding: 0;
+    position: relative;
+    width: 20px;
+    height: 20px;
+    background: var(--surface);
+    border: 2px solid var(--surface-2);
+    border-radius: 50%;
+    transition: all var(--transition-slow) ease;
+    flex-shrink: 0;
+    margin: 0;
+    padding: 0;
 }
 
 .radio:hover .radio-dot {
-  border-color: var(--accent);
-  background: var(--surface-2);
+    border-color: var(--accent);
+    background: var(--surface-2);
 }
 
 .radio input:checked + .radio-dot {
-  border-color: var(--accent);
+    border-color: var(--accent);
 }
 
 .radio input:checked + .radio-dot::after {
-  content: "";
-  position: absolute;
-  display: block;
-  left: 50%;
-  top: 50%;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
-  transform: translate(-50%, -50%);
+    content: "";
+    position: absolute;
+    display: block;
+    left: 50%;
+    top: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    transform: translate(-50%, -50%);
 }
 
 .radio input:focus + .radio-dot {
-  box-shadow: 0 0 0 3px var(--accent-bg);
+    box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
 .radio .label-text {
-  font-size: var(--text-lg);
-  color: var(--text);
-  margin-left: var(--space-sm);
+    font-size: var(--text-lg);
+    color: var(--text);
+    margin-left: var(--space-sm);
 }
 
 /* 行内排列变体（用于多选项并排场景） */
 .radio.radio-inline {
-  gap: var(--space-2xs, 4px);
-  font-size: var(--text-sm, 13px);
-  color: var(--text-dim);
+    gap: var(--space-2xs, 4px);
+    font-size: var(--text-sm, 13px);
+    color: var(--text-dim);
 }
 
 .radio.radio-inline .radio-dot {
-  width: 16px;
-  height: 16px;
+    width: 16px;
+    height: 16px;
 }
 
 .radio.radio-inline .radio-dot::after {
-  width: 8px;
-  height: 8px;
+    width: 8px;
+    height: 8px;
 }
 
 .radio.radio-inline .label-text {
-  font-size: var(--text-sm, 13px);
-  margin-left: var(--space-2xs, 4px);
+    font-size: var(--text-sm, 13px);
+    margin-left: var(--space-2xs, 4px);
 }

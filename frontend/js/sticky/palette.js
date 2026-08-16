@@ -18,13 +18,13 @@
  * @type {string[]}
  */
 export const STICKY_COLORS = [
-  "theme",
-  "yellow",
-  "pink",
-  "purple",
-  "blue",
-  "green",
-  "gray",
+    "theme",
+    "yellow",
+    "pink",
+    "purple",
+    "blue",
+    "green",
+    "gray",
 ];
 
 /**
@@ -42,23 +42,23 @@ export const STICKY_COLORS = [
  * @returns {HTMLButtonElement}
  */
 export function createSwatch(colorId, opts = {}) {
-  const sw = document.createElement("button");
-  // 复用已有 color-swatch + color-{id} class，不重新定义颜色
-  const classes = ["color-swatch", `color-${colorId}`];
-  if (opts.extraClass) classes.push(opts.extraClass);
-  sw.className = classes.join(" ");
-  sw.dataset.color = colorId;
-  sw.title = opts.title ?? colorId;
-  if (opts.selected) {
-    sw.classList.add("selected");
-  }
-  if (opts.onSelect) {
-    sw.addEventListener("click", (e) => {
-      e.stopPropagation();
-      opts.onSelect(colorId);
-    });
-  }
-  return sw;
+    const sw = document.createElement("button");
+    // 复用已有 color-swatch + color-{id} class，不重新定义颜色
+    const classes = ["color-swatch", `color-${colorId}`];
+    if (opts.extraClass) classes.push(opts.extraClass);
+    sw.className = classes.join(" ");
+    sw.dataset.color = colorId;
+    sw.title = opts.title ?? colorId;
+    if (opts.selected) {
+        sw.classList.add("selected");
+    }
+    if (opts.onSelect) {
+        sw.addEventListener("click", (e) => {
+            e.stopPropagation();
+            opts.onSelect(colorId);
+        });
+    }
+    return sw;
 }
 
 /**
@@ -72,21 +72,21 @@ export function createSwatch(colorId, opts = {}) {
  * @returns {HTMLDivElement}
  */
 export function createSwatchRow(opts = {}) {
-  const rowClass = opts.rowClass ?? "ctx-color-row";
-  const swatchExtraClass = opts.swatchExtraClass ?? "ctx-color-swatch";
-  const selectedColor = opts.selectedColor ?? null;
+    const rowClass = opts.rowClass ?? "ctx-color-row";
+    const swatchExtraClass = opts.swatchExtraClass ?? "ctx-color-swatch";
+    const selectedColor = opts.selectedColor ?? null;
 
-  const row = document.createElement("div");
-  row.className = rowClass;
+    const row = document.createElement("div");
+    row.className = rowClass;
 
-  for (const colorId of STICKY_COLORS) {
-    const sw = createSwatch(colorId, {
-      extraClass: swatchExtraClass,
-      selected: colorId === selectedColor,
-      onSelect: opts.onSelect,
-    });
-    row.appendChild(sw);
-  }
+    for (const colorId of STICKY_COLORS) {
+        const sw = createSwatch(colorId, {
+            extraClass: swatchExtraClass,
+            selected: colorId === selectedColor,
+            onSelect: opts.onSelect,
+        });
+        row.appendChild(sw);
+    }
 
-  return row;
+    return row;
 }

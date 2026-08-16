@@ -2,24 +2,24 @@
    基于 Open Props --gray-9~11 / --blue-5，无彩色倾向的干净暗色底。 */
 
 [data-theme="neutral"] {
-  --bg: #212529;           /* --gray-9  */
-  --bg-sidebar: #16191d;  /* --gray-10 */
-  --bg-deep: #0d0f12;     /* --gray-11 */
-  --surface: #343a40;     /* --gray-8  */
-  --surface-2: #495057;   /* --gray-7  */
-  --text: #f1f3f5;        /* --gray-1  */
-  --text-sub: #ced4da;    /* --gray-4  */
-  --text-dim: #adb5bd;    /* --gray-5  */
-  --text-faint: #868e96;  /* --gray-6  */
-  --accent: #339af0;      /* --blue-5  */
-  --accent-bg: rgba(51, 154, 240, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #3b2020;
-  --red-border: #5a3030;
-  --green-bg: #2a3a20;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+    --bg: #212529; /* --gray-9  */
+    --bg-sidebar: #16191d; /* --gray-10 */
+    --bg-deep: #0d0f12; /* --gray-11 */
+    --surface: #343a40; /* --gray-8  */
+    --surface-2: #495057; /* --gray-7  */
+    --text: #f1f3f5; /* --gray-1  */
+    --text-sub: #ced4da; /* --gray-4  */
+    --text-dim: #adb5bd; /* --gray-5  */
+    --text-faint: #868e96; /* --gray-6  */
+    --accent: #339af0; /* --blue-5  */
+    --accent-bg: rgba(51, 154, 240, 0.15);
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --red-bg: #3b2020;
+    --red-border: #5a3030;
+    --green-bg: #2a3a20;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
+    --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }

@@ -3,389 +3,429 @@
 /* ── Root ── */
 /* 0.17.7：不透明背景铁则——透明背景在分数 DPI 下产生 tile seam（渲染斜线）。 */
 .manager-root {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: var(--text-sm);
-  overflow: hidden;
-  /* 中文不斜体铁则 */
-  font-style: normal;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    overflow: hidden;
+    /* 中文不斜体铁则 */
+    font-style: normal;
 }
 
 /* ── Titlebar ── */
 .manager-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 36px;
-  padding: 0 8px 0 16px;
-  background: var(--bg-deep);
-  -webkit-app-region: drag;
-  user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 36px;
+    padding: 0 8px 0 16px;
+    background: var(--bg-deep);
+    -webkit-app-region: drag;
+    user-select: none;
 }
 
 .manager-titlebar-title {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  color: var(--text-sub);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+    color: var(--text-sub);
 }
 
 .manager-titlebar-btns {
-  display: flex;
-  gap: 4px;
-  -webkit-app-region: no-drag;
+    display: flex;
+    gap: 4px;
+    -webkit-app-region: no-drag;
 }
 
 .manager-titlebar-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background var(--transition-base);
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-base);
 }
 
 .manager-titlebar-btn:hover {
-  background: var(--accent-bg);
+    background: var(--accent-bg);
 }
 
 .manager-titlebar-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .manager-titlebar-btn-close:hover {
-  background: var(--red);
-  color: var(--surface);
+    background: var(--red);
+    color: var(--surface);
 }
 
 /* ── Toolbar ── */
 .manager-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border-glow);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border-glow);
 }
 
 /* ── Tabs（0.17.7 回收站）── */
 .manager-tabs {
-  display: flex;
-  gap: 4px;
+    display: flex;
+    gap: 4px;
 }
 
 .manager-tab {
-  padding: 4px 12px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-base);
-  /* 中文不斜体铁则 */
-  font-style: normal;
+    padding: 4px 12px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-base);
+    /* 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .manager-tab:hover {
-  background: var(--accent-bg);
-  color: var(--text);
+    background: var(--accent-bg);
+    color: var(--text);
 }
 
 .manager-tab.active {
-  background: var(--accent);
-  color: var(--bg);
+    background: var(--accent);
+    color: var(--bg);
 }
 
 .manager-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .manager-clear-trash-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--red);
-  background: transparent;
-  color: var(--red);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: all var(--transition-base);
+    padding: 5px 12px;
+    border: 1px solid var(--red);
+    background: transparent;
+    color: var(--red);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    transition: all var(--transition-base);
 }
 
 .manager-clear-trash-btn:hover {
-  background: var(--red);
-  color: var(--surface);
+    background: var(--red);
+    color: var(--surface);
 }
 
 .manager-new-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid var(--surface-2);
-  background: var(--surface);
-  color: var(--text);
-  border-radius: var(--radius-md);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  transition: all var(--transition-base);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--surface-2);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius-md);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    transition: all var(--transition-base);
 }
 
 .manager-new-btn:hover {
-  background: var(--accent-bg);
-  border-color: var(--text-dim);
+    background: var(--accent-bg);
+    border-color: var(--text-dim);
 }
 
 .manager-new-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .manager-count {
-  font-size: var(--text-xs);
-  color: var(--text-dim);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
 }
 
 /* ── List ── */
 .manager-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
 }
 
 .sticky-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  margin-bottom: 4px;
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  border: 1px solid var(--border-glow);
-  transition: all var(--transition-base);
-  cursor: default;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-bottom: 4px;
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    border: 1px solid var(--border-glow);
+    transition: all var(--transition-base);
+    cursor: default;
 }
 
 .sticky-item:hover {
-  background: var(--accent-bg);
-  border-color: var(--surface-2);
+    background: var(--accent-bg);
+    border-color: var(--surface-2);
 }
 
 .sticky-item.is-hidden {
-  background: var(--bg-deep);
-  border-style: dashed;
+    background: var(--bg-deep);
+    border-style: dashed;
 }
 
 .sticky-item.is-hidden .sticky-summary {
-  color: var(--text-sub);
+    color: var(--text-sub);
 }
 
 .sticky-color-bar {
-  width: 4px;
-  height: 24px;
-  border-radius: 2px;
-  flex-shrink: 0;
+    width: 4px;
+    height: 24px;
+    border-radius: 2px;
+    flex-shrink: 0;
 }
 
 /* 色值与 sticky.css 的 --sticky-border 保持一致（Material Design 500 级） */
-.sticky-color-bar.theme  { background: var(--accent); }
-.sticky-color-bar.yellow { background: #fdd835; }
-.sticky-color-bar.green  { background: #a5d6a7; }
-.sticky-color-bar.blue   { background: #90caf9; }
-.sticky-color-bar.pink   { background: #f48fb1; }
-.sticky-color-bar.purple { background: #ce93d8; }
-.sticky-color-bar.gray   { background: #bdbdbd; }
+.sticky-color-bar.theme {
+    background: var(--accent);
+}
+
+.sticky-color-bar.yellow {
+    background: #fdd835;
+}
+
+.sticky-color-bar.green {
+    background: #a5d6a7;
+}
+
+.sticky-color-bar.blue {
+    background: #90caf9;
+}
+
+.sticky-color-bar.pink {
+    background: #f48fb1;
+}
+
+.sticky-color-bar.purple {
+    background: #ce93d8;
+}
+
+.sticky-color-bar.gray {
+    background: #bdbdbd;
+}
 
 .sticky-content {
-  flex: 1;
-  min-width: 0;
+    flex: 1;
+    min-width: 0;
 }
 
 .sticky-summary {
-  font-size: var(--text-sm);
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  /* 0.17.7: 中文不斜体铁则 */
-  font-style: normal;
+    font-size: var(--text-sm);
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* 0.17.7: 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .sticky-meta {
-  font-size: var(--text-xs);
-  color: var(--text-dim);
-  margin-top: 2px;
-  /* 0.17.7: 中文不斜体铁则 */
-  font-style: normal;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    margin-top: 2px;
+    /* 0.17.7: 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .sticky-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--surface-2);
-  color: var(--text-dim);
-  margin-right: 6px;
-  /* 0.17.7: 中文不斜体铁则 */
-  font-style: normal;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    margin-right: 6px;
+    /* 0.17.7: 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .sticky-badge.hidden {
-  background: var(--red-bg);
-  color: var(--text);
-  font-weight: var(--weight-medium);
+    background: var(--red-bg);
+    color: var(--text);
+    font-weight: var(--weight-medium);
 }
 
 .sticky-badge .icon {
-  width: 11px;
-  height: 11px;
+    width: 11px;
+    height: 11px;
 }
 
 .sticky-badge.trashed {
-  background: var(--accent-bg);
-  color: var(--text-sub);
+    background: var(--accent-bg);
+    color: var(--text-sub);
 }
 
 .sticky-actions {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
 }
 
 .sticky-action-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-base);
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-base);
 }
 
 .sticky-action-btn:hover {
-  background: var(--accent-bg);
-  color: var(--text);
+    background: var(--accent-bg);
+    color: var(--text);
 }
 
 .sticky-action-btn.danger:hover {
-  background: var(--red);
-  color: var(--surface);
+    background: var(--red);
+    color: var(--surface);
 }
 
 .sticky-action-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 /* ── Empty state ── */
 .manager-empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  color: var(--text-dim);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-dim);
 }
 
 .manager-empty svg {
-  width: 48px;
-  height: 48px;
-  opacity: 0.4;
+    width: 48px;
+    height: 48px;
+    opacity: 0.4;
 }
 
 .manager-empty-text {
-  font-size: var(--text-sm);
-  color: var(--text-dim);
+    font-size: var(--text-sm);
+    color: var(--text-dim);
 }
 
 .manager-empty-btn {
-  padding: 8px 16px;
-  border: 1px solid var(--surface-2);
-  background: var(--surface);
-  color: var(--text);
-  border-radius: var(--radius-md);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  transition: all var(--transition-base);
+    padding: 8px 16px;
+    border: 1px solid var(--surface-2);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius-md);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    transition: all var(--transition-base);
 }
 
 .manager-empty-btn:hover {
-  background: var(--accent-bg);
-  border-color: var(--text-dim);
+    background: var(--accent-bg);
+    border-color: var(--text-dim);
 }
 
 /* ── Color picker popup ── */
 .color-picker-popup {
-  position: absolute;
-  display: flex;
-  gap: 4px;
-  padding: 6px;
-  background: var(--surface);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 12px var(--shadow);
-  z-index: 9999;
+    position: absolute;
+    display: flex;
+    gap: 4px;
+    padding: 6px;
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 12px var(--shadow);
+    z-index: 9999;
 }
 
 .color-picker-swatch {
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-sm);
-  border: 2px solid transparent;
-  cursor: pointer;
-  padding: 0;
-  transition: border-color var(--transition-base);
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-sm);
+    border: 2px solid transparent;
+    cursor: pointer;
+    padding: 0;
+    transition: border-color var(--transition-base);
 }
 
 .color-picker-swatch.selected {
-  border-color: var(--text);
+    border-color: var(--text);
 }
 
 .color-picker-swatch:hover {
-  border-color: var(--text-sub);
+    border-color: var(--text-sub);
 }
 
 /* 色值与 sticky.css 的 --sticky-border 保持一致 */
-.color-picker-theme  { background: var(--accent); }
-.color-picker-yellow { background: #fdd835; }
-.color-picker-green  { background: #a5d6a7; }
-.color-picker-blue   { background: #90caf9; }
-.color-picker-pink   { background: #f48fb1; }
-.color-picker-purple { background: #ce93d8; }
-.color-picker-gray   { background: #bdbdbd; }
+.color-picker-theme {
+    background: var(--accent);
+}
+
+.color-picker-yellow {
+    background: #fdd835;
+}
+
+.color-picker-green {
+    background: #a5d6a7;
+}
+
+.color-picker-blue {
+    background: #90caf9;
+}
+
+.color-picker-pink {
+    background: #f48fb1;
+}
+
+.color-picker-purple {
+    background: #ce93d8;
+}
+
+.color-picker-gray {
+    background: #bdbdbd;
+}
 
 /* ── Scrollbar ── */
 .manager-list::-webkit-scrollbar {
-  width: 6px;
+    width: 6px;
 }
 
 .manager-list::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 3px;
+    background: var(--surface-2);
+    border-radius: 3px;
 }
 
 .manager-list::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }

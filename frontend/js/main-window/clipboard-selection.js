@@ -37,32 +37,32 @@ let copyGeneration = 0;
 
 /** 获取当前选中 key 列表（按插入顺序排列）。 */
 export function getSelectedKeys() {
-  return [...selectedKeys];
+    return [...selectedKeys];
 }
 
 /** 当前是否有任何选中项。 */
 export function hasSelection() {
-  return selectedKeys.size > 0;
+    return selectedKeys.size > 0;
 }
 
 /** 选中项数量。 */
 export function selectedCount() {
-  return selectedKeys.size;
+    return selectedKeys.size;
 }
 
 /** 获取当前 epoch（批量复制时快照用）。 */
 export function getSelectionEpoch() {
-  return selectionEpoch;
+    return selectionEpoch;
 }
 
 /** 获取当前 copy generation（批量复制发起时快照用）。 */
 export function getCopyGeneration() {
-  return copyGeneration;
+    return copyGeneration;
 }
 
 /** 检查某个 key 是否已选中。 */
 export function isSelected(key) {
-  return selectedKeys.has(key);
+    return selectedKeys.has(key);
 }
 
 // ── 状态变更 ─────────────────────────────────────────────────────────────────
@@ -71,25 +71,25 @@ export function isSelected(key) {
  * 进入剪贴板模式时调用：递增 epoch 使旧选择失效，清空状态。
  */
 export function onEnterMode() {
-  selectionEpoch++;
-  clearSelection();
+    selectionEpoch++;
+    clearSelection();
 }
 
 /**
  * 退出剪贴板模式时调用：递增 epoch + generation，清空状态。
  */
 export function onExitMode() {
-  selectionEpoch++;
-  copyGeneration++;
-  clearSelection();
+    selectionEpoch++;
+    copyGeneration++;
+    clearSelection();
 }
 
 /**
  * 窗口隐藏时调用：递增 generation，清空状态。
  */
 export function onWindowHidden() {
-  copyGeneration++;
-  clearSelection();
+    copyGeneration++;
+    clearSelection();
 }
 
 /**
@@ -97,15 +97,15 @@ export function onWindowHidden() {
  * 选择状态依赖当前结果集，query 变化意味着结果集会变。
  */
 export function onQueryChanged() {
-  copyGeneration++;
-  clearSelection();
+    copyGeneration++;
+    clearSelection();
 }
 
 /**
  * 清空所有选中状态（不清 epoch/generation）。
  */
 export function clearSelection() {
-  selectedKeys = new Set();
+    selectedKeys = new Set();
 }
 
 // ── 选择操作 ─────────────────────────────────────────────────────────────────
@@ -117,14 +117,14 @@ export function clearSelection() {
  * @returns {boolean} 切换后该 key 是否选中
  */
 export function toggleSelection(key) {
-  if (!key) return false;
-  if (selectedKeys.has(key)) {
-    selectedKeys.delete(key);
-    return false;
-  } else {
-    selectedKeys.add(key);
-    return true;
-  }
+    if (!key) return false;
+    if (selectedKeys.has(key)) {
+        selectedKeys.delete(key);
+        return false;
+    } else {
+        selectedKeys.add(key);
+        return true;
+    }
 }
 
 /**
@@ -132,7 +132,7 @@ export function toggleSelection(key) {
  * @param {string[]} allTextKeys 当前全局结果中所有文本项的 hitId
  */
 export function selectAll(allTextKeys) {
-  selectedKeys = new Set(allTextKeys);
+    selectedKeys = new Set(allTextKeys);
 }
 
 /**
@@ -141,14 +141,14 @@ export function selectAll(allTextKeys) {
  * @param {string[]} currentTextKeys 重排后当前全局结果中所有文本项的 hitId
  */
 export function reconcileAfterReorder(currentTextKeys) {
-  const validSet = new Set(currentTextKeys);
-  const newSelected = new Set();
-  for (const key of selectedKeys) {
-    if (validSet.has(key)) {
-      newSelected.add(key);
+    const validSet = new Set(currentTextKeys);
+    const newSelected = new Set();
+    for (const key of selectedKeys) {
+        if (validSet.has(key)) {
+            newSelected.add(key);
+        }
     }
-  }
-  selectedKeys = newSelected;
+    selectedKeys = newSelected;
 }
 
 /**
@@ -156,8 +156,8 @@ export function reconcileAfterReorder(currentTextKeys) {
  * 调用方持有此 generation，复制完成后比对判断是否仍有效。
  */
 export function beginCopy() {
-  copyGeneration++;
-  return copyGeneration;
+    copyGeneration++;
+    return copyGeneration;
 }
 
 /**
@@ -166,14 +166,14 @@ export function beginCopy() {
  * @returns {boolean} true = 仍然有效，可以写剪贴板
  */
 export function isCopyStillValid(gen) {
-  return gen === copyGeneration;
+    return gen === copyGeneration;
 }
 
 // ── 内部辅助（供单测使用）──────────────────────────────────────────────────
 
 /** 重置所有状态（单测用）。 */
 export function _resetForTest() {
-  selectedKeys = new Set();
-  selectionEpoch = 0;
-  copyGeneration = 0;
+    selectedKeys = new Set();
+    selectionEpoch = 0;
+    copyGeneration = 0;
 }

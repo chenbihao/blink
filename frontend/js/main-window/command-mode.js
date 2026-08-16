@@ -9,12 +9,12 @@
 //! 前缀解析纯函数与后端 `terminal.rs::is_command_mode` / `extract_command` 等价对齐，
 //! Rust 侧为权威 spec + 单测载体，此处为运行时执行体。
 
-import { queryEl } from "./dom.js";
+import {queryEl} from "./dom.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
-import { syncWindowSize } from "./window-size.js";
-import { runInTerminal, hideWindow } from "../shared/api.js";
-import { t } from "../i18n/index.js";
+import {syncWindowSize} from "./window-size.js";
+import {hideWindow, runInTerminal} from "../shared/api.js";
+import {t} from "../i18n/index.js";
 
 /** 当前是否处于命令模式。 */
 let active = false;
@@ -30,7 +30,7 @@ let hintEl = null;
  * @returns {boolean}
  */
 export function isCommandMode(input) {
-  return input.startsWith(">");
+    return input.startsWith(">");
 }
 
 /**
@@ -39,33 +39,33 @@ export function isCommandMode(input) {
  * @returns {string|null} 命令文本（无命令时返回 null）
  */
 export function extractCommand(input) {
-  if (!input.startsWith(">")) return null;
-  const command = input.slice(1).trimStart();
-  return command || null;
+    if (!input.startsWith(">")) return null;
+    const command = input.slice(1).trimStart();
+    return command || null;
 }
 
 // ── 状态查询 ──────────────────────────────────────────────────────────────
 
 /** 当前是否处于命令模式。 */
 export function isActive() {
-  return active;
+    return active;
 }
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────
 
 /** 初始化：创建 hint DOM 元素。main.js 启动时调一次。 */
 export function init() {
-  hintEl = document.createElement("div");
-  hintEl.id = "command-hint";
-  hintEl.className = "command-hint hidden";
-  const searchMode = document.getElementById("search-mode");
-  searchMode.appendChild(hintEl);
+    hintEl = document.createElement("div");
+    hintEl.id = "command-hint";
+    hintEl.className = "command-hint hidden";
+    const searchMode = document.getElementById("search-mode");
+    searchMode.appendChild(hintEl);
 }
 
 /** 复位：退出命令模式 + 隐藏 hint（lifecycle shown/hidden 调用）。 */
 export function reset() {
-  active = false;
-  hideHint();
+    active = false;
+    hideHint();
 }
 
 // ── 输入处理 ──────────────────────────────────────────────────────────────
@@ -78,25 +78,25 @@ export function reset() {
  * @returns {boolean} true = 命令模式已处理（search.js 应跳过搜索）；false = 非命令模式（继续搜索）
  */
 export function handleInput(value) {
-  if (isCommandMode(value)) {
-    if (!active) {
-      enter();
+    if (isCommandMode(value)) {
+        if (!active) {
+            enter();
+        }
+        // 有命令时隐藏 hint，无命令时显示 hint
+        const cmd = extractCommand(value);
+        if (cmd) {
+            hideHint();
+        } else {
+            showHint();
+        }
+        return true;
     }
-    // 有命令时隐藏 hint，无命令时显示 hint
-    const cmd = extractCommand(value);
-    if (cmd) {
-      hideHint();
-    } else {
-      showHint();
-    }
-    return true;
-  }
 
-  // 退出命令模式：隐藏 hint，让 search.js 继续正常搜索
-  if (active) {
-    exit();
-  }
-  return false;
+    // 退出命令模式：隐藏 hint，让 search.js 继续正常搜索
+    if (active) {
+        exit();
+    }
+    return false;
 }
 
 // ── 执行 ──────────────────────────────────────────────────────────────────
@@ -108,58 +108,58 @@ export function handleInput(value) {
  * @returns {Promise<boolean>} true = 已执行（无论成功失败）；false = 无命令可执行
  */
 export async function execute() {
-  const cmd = extractCommand(queryEl.value);
-  if (!cmd) return false;
+    const cmd = extractCommand(queryEl.value);
+    if (!cmd) return false;
 
-  try {
-    await runInTerminal(cmd);
-    hideWindow();
-    return true;
-  } catch (e) {
-    console.error("[command-mode] runInTerminal failed:", e);
-    showError(e);
-    return true;
-  }
+    try {
+        await runInTerminal(cmd);
+        hideWindow();
+        return true;
+    } catch (e) {
+        console.error("[command-mode] runInTerminal failed:", e);
+        showError(e);
+        return true;
+    }
 }
 
 // ── 内部 ──────────────────────────────────────────────────────────────────
 
 /** 进入命令模式：清结果 + 清 ghost。 */
 function enter() {
-  active = true;
-  results.clear();
-  ghost.clear();
+    active = true;
+    results.clear();
+    ghost.clear();
 }
 
 /** 退出命令模式：隐藏 hint。 */
 function exit() {
-  active = false;
-  hideHint();
+    active = false;
+    hideHint();
 }
 
 /** 显示 hint（无命令时）。 */
 function showHint() {
-  if (!hintEl) return;
-  hintEl.textContent = t("command.hint");
-  hintEl.classList.remove("hidden");
-  hintEl.classList.remove("command-error");
-  syncWindowSize();
+    if (!hintEl) return;
+    hintEl.textContent = t("command.hint");
+    hintEl.classList.remove("hidden");
+    hintEl.classList.remove("command-error");
+    syncWindowSize();
 }
 
 /** 隐藏 hint。 */
 function hideHint() {
-  if (!hintEl) return;
-  hintEl.classList.add("hidden");
-  hintEl.classList.remove("command-error");
-  syncWindowSize();
+    if (!hintEl) return;
+    hintEl.classList.add("hidden");
+    hintEl.classList.remove("command-error");
+    syncWindowSize();
 }
 
 /** 显示执行错误。 */
 function showError(e) {
-  if (!hintEl) return;
-  const msg = typeof e === "string" ? e : e?.message || String(e);
-  hintEl.textContent = t("command.error", { message: msg });
-  hintEl.classList.remove("hidden");
-  hintEl.classList.add("command-error");
-  syncWindowSize();
+    if (!hintEl) return;
+    const msg = typeof e === "string" ? e : e?.message || String(e);
+    hintEl.textContent = t("command.error", {message: msg});
+    hintEl.classList.remove("hidden");
+    hintEl.classList.add("command-error");
+    syncWindowSize();
 }

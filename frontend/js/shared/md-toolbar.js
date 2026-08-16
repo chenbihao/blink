@@ -15,7 +15,7 @@
 
 // ── 图标 ─────────────────────────────────────────────
 // 0.18 review：从内联 SVG 迁移到 Lucide sprite，统一走 iconHTML()。
-import { iconHTML } from "./icon.js";
+import {iconHTML} from "./icon.js";
 
 // ── DOM 创建 ──────────────────────────────────────────
 
@@ -25,10 +25,10 @@ import { iconHTML } from "./icon.js";
  * @returns {HTMLElement} 工具栏 div 元素（未插入 DOM 树）
  */
 export function createMdToolbar(id = "md-toolbar") {
-  const toolbar = document.createElement("div");
-  toolbar.className = "md-toolbar";
-  toolbar.id = id;
-  toolbar.innerHTML = `
+    const toolbar = document.createElement("div");
+    toolbar.className = "md-toolbar";
+    toolbar.id = id;
+    toolbar.innerHTML = `
     <button class="md-tool-btn" data-cmd="h1" title="标题1">H1</button>
     <button class="md-tool-btn" data-cmd="h2" title="标题2">H2</button>
     <button class="md-tool-btn" data-cmd="h3" title="标题3">H3</button>
@@ -44,7 +44,7 @@ export function createMdToolbar(id = "md-toolbar") {
     <button class="md-tool-btn" data-cmd="blockquote" title="引用">${iconHTML("quote")}</button>
     <button class="md-tool-btn" data-cmd="codeBlock" title="代码块">${iconHTML("code")}</button>
   `;
-  return toolbar;
+    return toolbar;
 }
 
 // ── 事件绑定 ──────────────────────────────────────────
@@ -61,48 +61,48 @@ export function createMdToolbar(id = "md-toolbar") {
  * @returns {Function} cleanup 函数，调用以移除所有监听器
  */
 export function bindMdToolbar(toolbarEl, editor, opts = {}) {
-  const { editorEl, autoHide = false, toggleBtn = null } = opts;
+    const {editorEl, autoHide = false, toggleBtn = null} = opts;
 
-  // 工具栏内部点击不冒泡（防止触发外部关闭逻辑）
-  toolbarEl.addEventListener("click", (e) => {
-    e.stopPropagation();
-  });
-
-  // 绑定工具按钮
-  const btns = toolbarEl.querySelectorAll(".md-tool-btn");
-  btns.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const cmd = btn.dataset.cmd;
-      if (!cmd || !editor) return;
-      executeMdCommand(cmd, editor);
+    // 工具栏内部点击不冒泡（防止触发外部关闭逻辑）
+    toolbarEl.addEventListener("click", (e) => {
+        e.stopPropagation();
     });
-  });
 
-  // autoHide：点击编辑器外部时收起工具栏
-  let docClickHandler = null;
-  if (autoHide) {
-    docClickHandler = (e) => {
-      if (toolbarEl.hidden) return;
-      // 点击编辑器/降级 textarea 时不收起
-      if (editorEl && (editorEl.contains(e.target) || editorEl === e.target)) {
-        return;
-      }
-      // 点击切换按钮本身不收起（由切换按钮逻辑处理）
-      if (toggleBtn && (toggleBtn.contains(e.target) || toggleBtn === e.target)) {
-        return;
-      }
-      toolbarEl.hidden = true;
-      if (toggleBtn) toggleBtn.classList.remove("active");
-    };
-    document.addEventListener("click", docClickHandler);
-  }
+    // 绑定工具按钮
+    const btns = toolbarEl.querySelectorAll(".md-tool-btn");
+    btns.forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const cmd = btn.dataset.cmd;
+            if (!cmd || !editor) return;
+            executeMdCommand(cmd, editor);
+        });
+    });
 
-  // 返回 cleanup 函数
-  return () => {
-    if (docClickHandler) {
-      document.removeEventListener("click", docClickHandler);
+    // autoHide：点击编辑器外部时收起工具栏
+    let docClickHandler = null;
+    if (autoHide) {
+        docClickHandler = (e) => {
+            if (toolbarEl.hidden) return;
+            // 点击编辑器/降级 textarea 时不收起
+            if (editorEl && (editorEl.contains(e.target) || editorEl === e.target)) {
+                return;
+            }
+            // 点击切换按钮本身不收起（由切换按钮逻辑处理）
+            if (toggleBtn && (toggleBtn.contains(e.target) || toggleBtn === e.target)) {
+                return;
+            }
+            toolbarEl.hidden = true;
+            if (toggleBtn) toggleBtn.classList.remove("active");
+        };
+        document.addEventListener("click", docClickHandler);
     }
-  };
+
+    // 返回 cleanup 函数
+    return () => {
+        if (docClickHandler) {
+            document.removeEventListener("click", docClickHandler);
+        }
+    };
 }
 
 // ── 命令执行 ──────────────────────────────────────────
@@ -113,47 +113,47 @@ export function bindMdToolbar(toolbarEl, editor, opts = {}) {
  * @param {Object} editor - Tiptap 编辑器实例
  */
 export function executeMdCommand(cmd, editor) {
-  if (!editor) return;
-  const cmds = editor.commands;
-  switch (cmd) {
-    case "bold":
-      cmds.toggleBold();
-      break;
-    case "italic":
-      cmds.toggleItalic();
-      break;
-    case "strike":
-      cmds.toggleStrike();
-      break;
-    case "code":
-      cmds.toggleCode();
-      break;
-    case "h1":
-      cmds.toggleHeading({ level: 1 });
-      break;
-    case "h2":
-      cmds.toggleHeading({ level: 2 });
-      break;
-    case "h3":
-      cmds.toggleHeading({ level: 3 });
-      break;
-    case "bulletList":
-      cmds.toggleBulletList();
-      break;
-    case "orderedList":
-      cmds.toggleOrderedList();
-      break;
-    case "blockquote":
-      cmds.toggleBlockquote();
-      break;
-    case "codeBlock":
-      cmds.toggleCodeBlock();
-      break;
-    case "taskList":
-      cmds.toggleTaskList();
-      break;
-  }
-  editor.commands.focus();
+    if (!editor) return;
+    const cmds = editor.commands;
+    switch (cmd) {
+        case "bold":
+            cmds.toggleBold();
+            break;
+        case "italic":
+            cmds.toggleItalic();
+            break;
+        case "strike":
+            cmds.toggleStrike();
+            break;
+        case "code":
+            cmds.toggleCode();
+            break;
+        case "h1":
+            cmds.toggleHeading({level: 1});
+            break;
+        case "h2":
+            cmds.toggleHeading({level: 2});
+            break;
+        case "h3":
+            cmds.toggleHeading({level: 3});
+            break;
+        case "bulletList":
+            cmds.toggleBulletList();
+            break;
+        case "orderedList":
+            cmds.toggleOrderedList();
+            break;
+        case "blockquote":
+            cmds.toggleBlockquote();
+            break;
+        case "codeBlock":
+            cmds.toggleCodeBlock();
+            break;
+        case "taskList":
+            cmds.toggleTaskList();
+            break;
+    }
+    editor.commands.focus();
 }
 
 // ── 状态刷新 ──────────────────────────────────────────
@@ -164,25 +164,25 @@ export function executeMdCommand(cmd, editor) {
  * @param {Object} editor - Tiptap 编辑器实例
  */
 export function updateToolbarStates(toolbarEl, editor) {
-  if (!editor) return;
-  const activeStates = {
-    bold: editor.isActive("bold"),
-    italic: editor.isActive("italic"),
-    strike: editor.isActive("strike"),
-    code: editor.isActive("code"),
-    h1: editor.isActive("heading", { level: 1 }),
-    h2: editor.isActive("heading", { level: 2 }),
-    h3: editor.isActive("heading", { level: 3 }),
-    bulletList: editor.isActive("bulletList"),
-    orderedList: editor.isActive("orderedList"),
-    blockquote: editor.isActive("blockquote"),
-    codeBlock: editor.isActive("codeBlock"),
-    taskList: editor.isActive("taskList"),
-  };
-  toolbarEl.querySelectorAll(".md-tool-btn").forEach((btn) => {
-    const cmd = btn.dataset.cmd;
-    if (activeStates[cmd] !== undefined) {
-      btn.classList.toggle("active", activeStates[cmd]);
-    }
-  });
+    if (!editor) return;
+    const activeStates = {
+        bold: editor.isActive("bold"),
+        italic: editor.isActive("italic"),
+        strike: editor.isActive("strike"),
+        code: editor.isActive("code"),
+        h1: editor.isActive("heading", {level: 1}),
+        h2: editor.isActive("heading", {level: 2}),
+        h3: editor.isActive("heading", {level: 3}),
+        bulletList: editor.isActive("bulletList"),
+        orderedList: editor.isActive("orderedList"),
+        blockquote: editor.isActive("blockquote"),
+        codeBlock: editor.isActive("codeBlock"),
+        taskList: editor.isActive("taskList"),
+    };
+    toolbarEl.querySelectorAll(".md-tool-btn").forEach((btn) => {
+        const cmd = btn.dataset.cmd;
+        if (activeStates[cmd] !== undefined) {
+            btn.classList.toggle("active", activeStates[cmd]);
+        }
+    });
 }

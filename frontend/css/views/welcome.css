@@ -3,194 +3,194 @@
    优化：主快捷键与 Chord 快捷键分两组展示，避免误解为全局快捷键。 */
 
 .welcome-root {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  height: 100vh;
-  padding: 24px 20px 16px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-sans, "Segoe UI", system-ui, sans-serif);
-  box-sizing: border-box;
-  overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100vh;
+    padding: 24px 20px 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans, "Segoe UI", system-ui, sans-serif);
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 /* ── Header：Logo + 标题 ─────────────────────────────────────────────────────── */
 
 .welcome-header {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 12px;
 }
 
 .welcome-logo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: var(--radius-lg, 8px);
-  background: var(--accent, #89b4fa);
-  margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-lg, 8px);
+    background: var(--accent, #89b4fa);
+    margin-bottom: 2px;
 }
 
 .welcome-logo-icon {
-  width: 26px;
-  height: 26px;
-  stroke: var(--bg, #1e1e2e);
-  stroke-width: 2.5;
-  fill: none;
+    width: 26px;
+    height: 26px;
+    stroke: var(--bg, #1e1e2e);
+    stroke-width: 2.5;
+    fill: none;
 }
 
 .welcome-title {
-  font-size: 18px;
-  font-weight: 700;
-  margin: 0;
-  color: var(--text);
-  font-style: normal;
+    font-size: 18px;
+    font-weight: 700;
+    margin: 0;
+    color: var(--text);
+    font-style: normal;
 }
 
 .welcome-subtitle {
-  font-size: 12px;
-  margin: 0;
-  color: var(--text-sub, var(--subtext0, #a6adc8));
-  opacity: 0.75;
-  font-style: normal;
+    font-size: 12px;
+    margin: 0;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.75;
+    font-style: normal;
 }
 
 /* ── 快捷键列表 ─────────────────────────────────────────────────────────────── */
 
 .welcome-shortcuts {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  max-width: 320px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 320px;
 }
 
 /* ── 分组容器 ───────────────────────────────────────────────────────────────── */
 
 .welcome-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
 }
 
 /* ── 主快捷键分组 ── */
 
 .welcome-section--main {
-  gap: 6px;
+    gap: 6px;
 }
 
 .welcome-shortcut-row--main {
-  background: color-mix(in srgb, var(--accent, #89b4fa) 14%, var(--surface, var(--surface0, #313244)));
-  border: 1px solid color-mix(in srgb, var(--accent, #89b4fa) 30%, transparent);
+    background: color-mix(in srgb, var(--accent, #89b4fa) 14%, var(--surface, var(--surface0, #313244)));
+    border: 1px solid color-mix(in srgb, var(--accent, #89b4fa) 30%, transparent);
 }
 
 .welcome-shortcut-row--main:hover {
-  background: color-mix(in srgb, var(--accent, #89b4fa) 20%, var(--surface, var(--surface0, #313244)));
+    background: color-mix(in srgb, var(--accent, #89b4fa) 20%, var(--surface, var(--surface0, #313244)));
 }
 
 .welcome-section-hint {
-  margin: 0;
-  padding: 0 4px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-sub, var(--subtext0, #a6adc8));
-  opacity: 0.7;
-  font-style: normal;
+    margin: 0;
+    padding: 0 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.7;
+    font-style: normal;
 }
 
 /* ── Chord 快捷键分组 ── */
 
 .welcome-section--chord {
-  gap: 6px;
+    gap: 6px;
 }
 
 .welcome-section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  padding: 0 4px;
-  margin-top: 4px;
-  font-style: normal;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    padding: 0 4px;
+    margin-top: 4px;
+    font-style: normal;
 }
 
 .welcome-section-desc {
-  margin: 0;
-  padding: 0 4px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-sub, var(--subtext0, #a6adc8));
-  opacity: 0.7;
-  font-style: normal;
+    margin: 0;
+    padding: 0 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.7;
+    font-style: normal;
 }
 
 .welcome-chord-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
 }
 
 /* ── 快捷键行（通用） ─────────────────────────────────────────────────────── */
 
 .welcome-shortcut-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  border-radius: var(--radius-md, 6px);
-  background: var(--surface, var(--surface0, #313244));
-  transition: background var(--transition-fast, 0.1s);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    border-radius: var(--radius-md, 6px);
+    background: var(--surface, var(--surface0, #313244));
+    transition: background var(--transition-fast, 0.1s);
 }
 
 .welcome-shortcut-row:hover {
-  background: var(--surface-hover, var(--surface1, #45475a));
+    background: var(--surface-hover, var(--surface1, #45475a));
 }
 
 .welcome-shortcut-label {
-  font-size: 13px;
-  color: var(--text);
-  font-style: normal;
+    font-size: 13px;
+    color: var(--text);
+    font-style: normal;
 }
 
 .welcome-shortcut-keys {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
 }
 
 /* ── Footer：开始使用按钮 ───────────────────────────────────────────────────── */
 
 .welcome-footer {
-  display: flex;
-  justify-content: center;
-  margin-top: 12px;
+    display: flex;
+    justify-content: center;
+    margin-top: 12px;
 }
 
 .welcome-start-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 32px;
-  font-size: 14px;
-  font-weight: 600;
-  border: none;
-  border-radius: var(--radius-md, 6px);
-  background: var(--accent, #89b4fa);
-  color: var(--bg, #1e1e2e);
-  cursor: pointer;
-  transition: opacity var(--transition-fast, 0.1s), transform var(--transition-fast, 0.1s);
-  font-style: normal;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 32px;
+    font-size: 14px;
+    font-weight: 600;
+    border: none;
+    border-radius: var(--radius-md, 6px);
+    background: var(--accent, #89b4fa);
+    color: var(--bg, #1e1e2e);
+    cursor: pointer;
+    transition: opacity var(--transition-fast, 0.1s), transform var(--transition-fast, 0.1s);
+    font-style: normal;
 }
 
 .welcome-start-btn:hover {
-  opacity: 0.85;
+    opacity: 0.85;
 }
 
 .welcome-start-btn:active {
-  transform: scale(0.97);
+    transform: scale(0.97);
 }

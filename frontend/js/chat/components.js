@@ -4,9 +4,9 @@
  * 负责创建和更新消息 bubble、Tool 状态卡、确认卡片和空状态。
  */
 
-import { renderMarkdown, highlightCodeBlocks } from "./renderer.js";
-import { escapeText } from "./utils.js";
-import { isMcpTool, getMcpToolSource } from "./state.js";
+import {highlightCodeBlocks, renderMarkdown} from "./renderer.js";
+import {escapeText} from "./utils.js";
+import {getMcpToolSource, isMcpTool} from "./state.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -22,48 +22,48 @@ let scrollBottomBtn = null;
 
 /** 判断消息容器是否在底部（允许 80px 阈值） */
 function isAtBottom() {
-  if (!messagesEl) return true;
-  const threshold = 80;
-  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
+    if (!messagesEl) return true;
+    const threshold = 80;
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
 }
 
 /** 创建「回到底部」浮动按钮 */
 function ensureScrollBottomBtn() {
-  if (scrollBottomBtn) return;
-  scrollBottomBtn = document.createElement("button");
-  scrollBottomBtn.className = "chat-scroll-bottom-btn";
-  scrollBottomBtn.title = "回到底部";
-  scrollBottomBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
-  scrollBottomBtn.addEventListener("click", () => {
-    forceScrollToBottom();
-  });
-  // 插入到 chat-messages 的父容器（chat-main）中，absolute 定位
-  const chatMain = messagesEl?.parentElement;
-  if (chatMain) chatMain.appendChild(scrollBottomBtn);
+    if (scrollBottomBtn) return;
+    scrollBottomBtn = document.createElement("button");
+    scrollBottomBtn.className = "chat-scroll-bottom-btn";
+    scrollBottomBtn.title = "回到底部";
+    scrollBottomBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+    scrollBottomBtn.addEventListener("click", () => {
+        forceScrollToBottom();
+    });
+    // 插入到 chat-messages 的父容器（chat-main）中，absolute 定位
+    const chatMain = messagesEl?.parentElement;
+    if (chatMain) chatMain.appendChild(scrollBottomBtn);
 }
 
 /** 强制滚动到底部并重置用户上滚标记 */
 export function forceScrollToBottom() {
-  userScrolledUp = false;
-  if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
-  if (messagesEl) {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
+    userScrolledUp = false;
+    if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+    if (messagesEl) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
 }
 
 /** 绑定 scroll 事件监听用户手动滚动 */
 function bindScrollListener() {
-  if (!messagesEl) return;
-  messagesEl.addEventListener("scroll", () => {
-    if (isAtBottom()) {
-      userScrolledUp = false;
-      if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
-    } else {
-      userScrolledUp = true;
-      ensureScrollBottomBtn();
-      if (scrollBottomBtn) scrollBottomBtn.classList.add("visible");
-    }
-  });
+    if (!messagesEl) return;
+    messagesEl.addEventListener("scroll", () => {
+        if (isAtBottom()) {
+            userScrolledUp = false;
+            if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+        } else {
+            userScrolledUp = true;
+            ensureScrollBottomBtn();
+            if (scrollBottomBtn) scrollBottomBtn.classList.add("visible");
+        }
+    });
 }
 
 /**
@@ -71,9 +71,9 @@ function bindScrollListener() {
  * @param {{onEditMessage?: (msgIndex: number, newText: string) => void}} [callbacks]
  */
 export function initComponents(callbacks = {}) {
-  messagesEl = document.getElementById("chat-messages");
-  onEditMessage = callbacks.onEditMessage || null;
-  bindScrollListener();
+    messagesEl = document.getElementById("chat-messages");
+    onEditMessage = callbacks.onEditMessage || null;
+    bindScrollListener();
 }
 
 /**
@@ -81,18 +81,18 @@ export function initComponents(callbacks = {}) {
  * 当流式 currentAssistantEl 已被清空（如纯 tool 调用后 done），从 DOM 回查。
  */
 export function getLastAssistantEl() {
-  if (!messagesEl) return null;
-  return messagesEl.querySelector(".chat-msg-assistant:last-child");
+    if (!messagesEl) return null;
+    return messagesEl.querySelector(".chat-msg-assistant:last-child");
 }
 
 /**
  * 清空消息容器。
  */
 export function clearMessages() {
-  if (messagesEl) messagesEl.innerHTML = "";
-  // 重置滚动状态
-  userScrolledUp = false;
-  if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+    if (messagesEl) messagesEl.innerHTML = "";
+    // 重置滚动状态
+    userScrolledUp = false;
+    if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
 }
 
 /**
@@ -101,23 +101,23 @@ export function clearMessages() {
  * @returns {HTMLElement|null} 消息元素引用（0.12.5 §5.5 编辑重发需要）
  */
 export function renderUserMessage(text) {
-  if (!messagesEl) return null;
-  const el = document.createElement("div");
-  el.className = "chat-msg chat-msg-user";
-  el.textContent = text;
-  el.dataset.rawText = text;
-  // 0.12.6：hover 操作行（复制 + 编辑 + 重试）
-  const actions = createActionsRow();
-  actions.appendChild(createCopyAction(rawText => el.dataset.rawText || rawText));
-  if (onEditMessage) {
-    actions.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
-  }
-  // 重试 = 重新发送此用户消息（与 assistant 的 retry 对称）
-  actions.appendChild(createRetryAction());
-  el.appendChild(actions);
-  messagesEl.appendChild(el);
-  scrollToBottom();
-  return el;
+    if (!messagesEl) return null;
+    const el = document.createElement("div");
+    el.className = "chat-msg chat-msg-user";
+    el.textContent = text;
+    el.dataset.rawText = text;
+    // 0.12.6：hover 操作行（复制 + 编辑 + 重试）
+    const actions = createActionsRow();
+    actions.appendChild(createCopyAction(rawText => el.dataset.rawText || rawText));
+    if (onEditMessage) {
+        actions.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
+    }
+    // 重试 = 重新发送此用户消息（与 assistant 的 retry 对称）
+    actions.appendChild(createRetryAction());
+    el.appendChild(actions);
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
 }
 
 /**
@@ -125,14 +125,14 @@ export function renderUserMessage(text) {
  * @returns {HTMLElement} 消息元素引用
  */
 export function createAssistantMessage() {
-  if (!messagesEl) return null;
-  const el = document.createElement("div");
-  el.className = "chat-msg chat-msg-assistant streaming waiting";
-  // 等待响应：显示 typing 指示器（三点跳动），首条内容到达时由 update/finalize 替换
-  el.innerHTML = renderTypingIndicator();
-  messagesEl.appendChild(el);
-  scrollToBottom();
-  return el;
+    if (!messagesEl) return null;
+    const el = document.createElement("div");
+    el.className = "chat-msg chat-msg-assistant streaming waiting";
+    // 等待响应：显示 typing 指示器（三点跳动），首条内容到达时由 update/finalize 替换
+    el.innerHTML = renderTypingIndicator();
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
 }
 
 /**
@@ -141,7 +141,7 @@ export function createAssistantMessage() {
  * @returns {string} HTML 字符串
  */
 function renderTypingIndicator() {
-  return `<div class="chat-typing"><span></span><span></span><span></span></div>`;
+    return `<div class="chat-typing"><span></span><span></span><span></span></div>`;
 }
 
 /**
@@ -153,12 +153,12 @@ function renderTypingIndicator() {
  * @param {boolean} [thinkingDone=false] thinking 是否已结束（收起折叠）
  */
 export function updateAssistantMessage(el, text, thinkingText, thinkingDone) {
-  if (!el) return;
-  el.classList.remove("waiting");
-  // 思考过程作为独立气泡，渲染在 assistant 气泡之前
-  const thinkingHtml = renderThinkingBlock(thinkingText, thinkingDone);
-  el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
-  scrollToBottom();
+    if (!el) return;
+    el.classList.remove("waiting");
+    // 思考过程作为独立气泡，渲染在 assistant 气泡之前
+    const thinkingHtml = renderThinkingBlock(thinkingText, thinkingDone);
+    el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
+    scrollToBottom();
 }
 
 /**
@@ -170,38 +170,38 @@ export function updateAssistantMessage(el, text, thinkingText, thinkingDone) {
  * @param {string} [thinkingText] 完整 thinking 文本（可选）
  */
 export function finalizeAssistantMessage(el, text, thinkingText) {
-  if (!el) return;
-  // 0.18.0: 空内容守卫——text/thinking 均 trim 后为空时直接移除元素，不渲染空气泡
-  // 覆盖所有 finalize 路径（done / error / tool_call / handleStop）
-  if (!text?.trim() && !thinkingText?.trim()) {
-    el.remove();
-    return;
-  }
-  el.classList.remove("streaming", "waiting");
-  el.dataset.rawText = text;
-  const thinkingHtml = renderThinkingBlock(thinkingText, true);
-  el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
-  // 0.12.6：hover 操作行（复制 + 重试）
-  const actions = createActionsRow();
-  actions.appendChild(createCopyAction(() => el.dataset.rawText || ""));
-  actions.appendChild(createRetryAction());
-  el.appendChild(actions);
-  injectCodeCopyButtons(el);
-  highlightCodeBlocks(el); // 0.12.5 §5.7：代码块语法高亮
-  scrollToBottom();
+    if (!el) return;
+    // 0.18.0: 空内容守卫——text/thinking 均 trim 后为空时直接移除元素，不渲染空气泡
+    // 覆盖所有 finalize 路径（done / error / tool_call / handleStop）
+    if (!text?.trim() && !thinkingText?.trim()) {
+        el.remove();
+        return;
+    }
+    el.classList.remove("streaming", "waiting");
+    el.dataset.rawText = text;
+    const thinkingHtml = renderThinkingBlock(thinkingText, true);
+    el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
+    // 0.12.6：hover 操作行（复制 + 重试）
+    const actions = createActionsRow();
+    actions.appendChild(createCopyAction(() => el.dataset.rawText || ""));
+    actions.appendChild(createRetryAction());
+    el.appendChild(actions);
+    injectCodeCopyButtons(el);
+    highlightCodeBlocks(el); // 0.12.5 §5.7：代码块语法高亮
+    scrollToBottom();
 }
 
 // ── hover 操作行（0.12.6 重构）────────────────────────────────────────────────
 
 /** SVG 图标常量 */
 const ICONS = {
-  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
-  check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
-  retry: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`,
-  edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
-  // 0.12.7：工具卡片完成图标（Lucide wrench / check / x）
-  toolSuccess: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
-  toolFail: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
+    copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+    check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+    retry: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`,
+    edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+    // 0.12.7：工具卡片完成图标（Lucide wrench / check / x）
+    toolSuccess: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
+    toolFail: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
 };
 
 /**
@@ -210,9 +210,9 @@ const ICONS = {
  * @returns {HTMLElement}
  */
 function createActionsRow() {
-  const row = document.createElement("div");
-  row.className = "chat-msg-actions";
-  return row;
+    const row = document.createElement("div");
+    row.className = "chat-msg-actions";
+    return row;
 }
 
 /**
@@ -223,13 +223,13 @@ function createActionsRow() {
  * @returns {HTMLButtonElement}
  */
 function createIconButton(iconKey, title, onClick) {
-  const btn = document.createElement("button");
-  btn.className = "chat-action-btn";
-  btn.type = "button";
-  btn.title = title;
-  btn.innerHTML = ICONS[iconKey] || "";
-  btn.addEventListener("click", onClick);
-  return btn;
+    const btn = document.createElement("button");
+    btn.className = "chat-action-btn";
+    btn.type = "button";
+    btn.title = title;
+    btn.innerHTML = ICONS[iconKey] || "";
+    btn.addEventListener("click", onClick);
+    return btn;
 }
 
 /**
@@ -238,16 +238,16 @@ function createIconButton(iconKey, title, onClick) {
  * @returns {HTMLButtonElement}
  */
 function createCopyAction(rawTextOrGetter) {
-  const btn = createIconButton("copy", "复制", async () => {
-    const text = typeof rawTextOrGetter === "function" ? rawTextOrGetter() : rawTextOrGetter;
-    try {
-      await navigator.clipboard.writeText(text || "");
-      flashIconDone(btn);
-    } catch (e) {
-      console.error("[chat] 复制失败:", e);
-    }
-  });
-  return btn;
+    const btn = createIconButton("copy", "复制", async () => {
+        const text = typeof rawTextOrGetter === "function" ? rawTextOrGetter() : rawTextOrGetter;
+        try {
+            await navigator.clipboard.writeText(text || "");
+            flashIconDone(btn);
+        } catch (e) {
+            console.error("[chat] 复制失败:", e);
+        }
+    });
+    return btn;
 }
 
 /**
@@ -255,12 +255,12 @@ function createCopyAction(rawTextOrGetter) {
  * @returns {HTMLButtonElement}
  */
 function createRetryAction() {
-  return createIconButton("retry", "重试", () => {
-    // 重试 = 重新发送最后一条用户消息
-    // 通过自定义事件冒泡到 main.js 处理
-    const evt = new CustomEvent("chat:retry", { bubbles: true });
-    document.dispatchEvent(evt);
-  });
+    return createIconButton("retry", "重试", () => {
+        // 重试 = 重新发送最后一条用户消息
+        // 通过自定义事件冒泡到 main.js 处理
+        const evt = new CustomEvent("chat:retry", {bubbles: true});
+        document.dispatchEvent(evt);
+    });
 }
 
 /**
@@ -269,7 +269,7 @@ function createRetryAction() {
  * @returns {HTMLButtonElement}
  */
 function createEditAction(onStartEdit) {
-  return createIconButton("edit", "编辑", onStartEdit);
+    return createIconButton("edit", "编辑", onStartEdit);
 }
 
 /**
@@ -277,13 +277,13 @@ function createEditAction(onStartEdit) {
  * @param {HTMLButtonElement} btn
  */
 function flashIconDone(btn) {
-  const original = btn.innerHTML;
-  btn.innerHTML = ICONS.check;
-  btn.classList.add("chat-action-btn-done");
-  setTimeout(() => {
-    btn.innerHTML = original;
-    btn.classList.remove("chat-action-btn-done");
-  }, 1200);
+    const original = btn.innerHTML;
+    btn.innerHTML = ICONS.check;
+    btn.classList.add("chat-action-btn-done");
+    setTimeout(() => {
+        btn.innerHTML = original;
+        btn.classList.remove("chat-action-btn-done");
+    }, 1200);
 }
 
 /**
@@ -292,24 +292,24 @@ function flashIconDone(btn) {
  * @param {HTMLElement} el 消息元素
  */
 function injectCodeCopyButtons(el) {
-  const codeBlocks = el.querySelectorAll("pre code");
-  codeBlocks.forEach((code) => {
-    const pre = code.parentElement; // <pre>
-    if (!pre || pre.querySelector(".chat-code-copy")) return; // 防重复注入
-    const btn = document.createElement("button");
-    btn.className = "chat-code-copy";
-    btn.title = "复制代码";
-    btn.textContent = "复制";
-    btn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(code.textContent || "");
-        flashIconDone(btn);
-      } catch (e) {
-        console.error("[chat] 代码块复制失败:", e);
-      }
+    const codeBlocks = el.querySelectorAll("pre code");
+    codeBlocks.forEach((code) => {
+        const pre = code.parentElement; // <pre>
+        if (!pre || pre.querySelector(".chat-code-copy")) return; // 防重复注入
+        const btn = document.createElement("button");
+        btn.className = "chat-code-copy";
+        btn.title = "复制代码";
+        btn.textContent = "复制";
+        btn.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(code.textContent || "");
+                flashIconDone(btn);
+            } catch (e) {
+                console.error("[chat] 代码块复制失败:", e);
+            }
+        });
+        pre.appendChild(btn);
     });
-    pre.appendChild(btn);
-  });
 }
 
 // ── 消息编辑重发（0.12.5 §5.5 → 原地编辑重构）────────────────────────────────
@@ -325,95 +325,95 @@ function injectCodeCopyButtons(el) {
  * @param {string} originalText 原始文本
  */
 function startEditMessage(el, originalText) {
-  const allMsgs = messagesEl.querySelectorAll(".chat-msg");
-  const msgIndex = Array.from(allMsgs).indexOf(el);
-  if (msgIndex < 0) return;
+    const allMsgs = messagesEl.querySelectorAll(".chat-msg");
+    const msgIndex = Array.from(allMsgs).indexOf(el);
+    if (msgIndex < 0) return;
 
-  // 切换到编辑态（CSS 控制：隐藏 actions、调整 padding）
-  el.classList.add("editing");
+    // 切换到编辑态（CSS 控制：隐藏 actions、调整 padding）
+    el.classList.add("editing");
 
-  // 创建 textarea，替换文本内容
-  const textarea = document.createElement("textarea");
-  textarea.className = "chat-edit-input";
-  textarea.value = originalText;
-  textarea.rows = 1;
-  textarea.setAttribute("placeholder", "编辑消息…");
+    // 创建 textarea，替换文本内容
+    const textarea = document.createElement("textarea");
+    textarea.className = "chat-edit-input";
+    textarea.value = originalText;
+    textarea.rows = 1;
+    textarea.setAttribute("placeholder", "编辑消息…");
 
-  // 创建左侧确认按钮
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "chat-edit-confirm";
-  confirmBtn.title = "Enter 发送 · Esc 取消";
-  confirmBtn.innerHTML = ICONS.check;
+    // 创建左侧确认按钮
+    const confirmBtn = document.createElement("button");
+    confirmBtn.className = "chat-edit-confirm";
+    confirmBtn.title = "Enter 发送 · Esc 取消";
+    confirmBtn.innerHTML = ICONS.check;
 
-  // 保存原始 text 并清空泡泡内容，放入 textarea
-  el.dataset.rawText = originalText;
-  el.textContent = "";
-  el.appendChild(textarea);
-  el.appendChild(confirmBtn);
-
-  // 自动拉伸：根据 scrollHeight 调整高度，不设 max-height 限制（最多靠 CSS 兜底）
-  const autoResize = () => {
-    textarea.style.height = "auto";
-    textarea.style.height = textarea.scrollHeight + "px";
-  };
-  textarea.addEventListener("input", autoResize);
-  // 延迟一帧计算，确保 DOM 已渲染
-  requestAnimationFrame(() => {
-    autoResize();
-    textarea.focus();
-    textarea.select();
-  });
-
-  let done = false;
-
-  /** 确认编辑 → 调回调或无变化时还原 */
-  const finishEdit = () => {
-    if (done) return;
-    done = true;
-    const newText = textarea.value.trim();
-    if (newText && newText !== originalText) {
-      onEditMessage(msgIndex, newText);
-    } else {
-      restoreMessage();
-    }
-  };
-
-  /** 取消编辑，恢复原消息 */
-  const restoreMessage = () => {
-    el.classList.remove("editing");
-    el.textContent = originalText;
+    // 保存原始 text 并清空泡泡内容，放入 textarea
     el.dataset.rawText = originalText;
-    // 重新注入操作行
-    const row = createActionsRow();
-    row.appendChild(createCopyAction(() => el.dataset.rawText || ""));
-    if (onEditMessage) {
-      row.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || originalText)));
-    }
-    row.appendChild(createRetryAction());
-    el.appendChild(row);
-  };
+    el.textContent = "";
+    el.appendChild(textarea);
+    el.appendChild(confirmBtn);
 
-  textarea.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      finishEdit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      restoreMessage();
-    }
-  });
+    // 自动拉伸：根据 scrollHeight 调整高度，不设 max-height 限制（最多靠 CSS 兜底）
+    const autoResize = () => {
+        textarea.style.height = "auto";
+        textarea.style.height = textarea.scrollHeight + "px";
+    };
+    textarea.addEventListener("input", autoResize);
+    // 延迟一帧计算，确保 DOM 已渲染
+    requestAnimationFrame(() => {
+        autoResize();
+        textarea.focus();
+        textarea.select();
+    });
 
-  confirmBtn.addEventListener("click", finishEdit);
+    let done = false;
 
-  // blur 延迟检测：点击 ✓ 时 textarea 先 blur，等一帧再判断
-  // 点击 ✓ → 确认发送；点击其他地方（blur）→ 取消编辑
-  textarea.addEventListener("blur", () => {
-    setTimeout(() => {
-      if (!done && document.activeElement !== confirmBtn) {
-        restoreMessage();
-      }
-    }, 150);
-  });
+    /** 确认编辑 → 调回调或无变化时还原 */
+    const finishEdit = () => {
+        if (done) return;
+        done = true;
+        const newText = textarea.value.trim();
+        if (newText && newText !== originalText) {
+            onEditMessage(msgIndex, newText);
+        } else {
+            restoreMessage();
+        }
+    };
+
+    /** 取消编辑，恢复原消息 */
+    const restoreMessage = () => {
+        el.classList.remove("editing");
+        el.textContent = originalText;
+        el.dataset.rawText = originalText;
+        // 重新注入操作行
+        const row = createActionsRow();
+        row.appendChild(createCopyAction(() => el.dataset.rawText || ""));
+        if (onEditMessage) {
+            row.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || originalText)));
+        }
+        row.appendChild(createRetryAction());
+        el.appendChild(row);
+    };
+
+    textarea.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            finishEdit();
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            restoreMessage();
+        }
+    });
+
+    confirmBtn.addEventListener("click", finishEdit);
+
+    // blur 延迟检测：点击 ✓ 时 textarea 先 blur，等一帧再判断
+    // 点击 ✓ → 确认发送；点击其他地方（blur）→ 取消编辑
+    textarea.addEventListener("blur", () => {
+        setTimeout(() => {
+            if (!done && document.activeElement !== confirmBtn) {
+                restoreMessage();
+            }
+        }, 150);
+    });
 }
 
 /**
@@ -423,11 +423,11 @@ function startEditMessage(el, originalText) {
  * @returns {string} HTML 字符串
  */
 function renderThinkingBlock(text, collapsed) {
-  if (!text) return "";
-  const openAttr = collapsed ? "" : " open";
-  // Lucide brain 图标内联（chat 窗口未引入 sprite，与 chat.html 现有内联 SVG 风格一致）
-  const icon = `<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg>`;
-  return `<details class="chat-card thinking-block"${openAttr}><summary>${icon}<span class="thinking-label">思考过程</span></summary><div class="thinking-content">${renderMarkdown(text)}</div></details>`;
+    if (!text) return "";
+    const openAttr = collapsed ? "" : " open";
+    // Lucide brain 图标内联（chat 窗口未引入 sprite，与 chat.html 现有内联 SVG 风格一致）
+    const icon = `<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg>`;
+    return `<details class="chat-card thinking-block"${openAttr}><summary>${icon}<span class="thinking-label">思考过程</span></summary><div class="thinking-content">${renderMarkdown(text)}</div></details>`;
 }
 
 /**
@@ -437,41 +437,41 @@ function renderThinkingBlock(text, collapsed) {
  * @returns {HTMLElement} 卡片元素引用
  */
 export function renderToolStatus(toolName, args, opts = {}) {
-  if (!messagesEl) return null;
-  const el = document.createElement("div");
-  // 0.13.6: MCP 工具卡片左边框着色
-  const mcpSource = getMcpToolSource(toolName);
-  el.className = mcpSource ? "chat-tool-card chat-tool-card-mcp" : "chat-tool-card";
-  if (!opts.skipTiming) {
-    el.dataset.startTime = Date.now(); // 0.12.7：记录开始时间，finalize 时算耗时
-  }
-  // 0.12.7：暂存参数，finalizeToolStatus 时合入详情区
-  if (args && args.trim() && args.trim() !== "{}") {
-    el.dataset.args = formatJson(args);
-  }
+    if (!messagesEl) return null;
+    const el = document.createElement("div");
+    // 0.13.6: MCP 工具卡片左边框着色
+    const mcpSource = getMcpToolSource(toolName);
+    el.className = mcpSource ? "chat-tool-card chat-tool-card-mcp" : "chat-tool-card";
+    if (!opts.skipTiming) {
+        el.dataset.startTime = Date.now(); // 0.12.7：记录开始时间，finalize 时算耗时
+    }
+    // 0.12.7：暂存参数，finalizeToolStatus 时合入详情区
+    if (args && args.trim() && args.trim() !== "{}") {
+        el.dataset.args = formatJson(args);
+    }
 
-  const header = document.createElement("div");
-  header.className = "chat-tool-card-header";
-  // 0.13.0：MCP 来源标记——tool 名在 MCP tool 名称集合中时显示 (MCP) 徽章
-  // 0.13.6: 增强——追加 server 名 + transport tooltip
-  let sourceBadge = "";
-  if (mcpSource) {
-    const transportTitle = mcpSource.transport === "http" ? "HTTP" : "stdio";
-    sourceBadge = `<span class="chat-tool-card-source mcp">MCP</span>`
-      + `<span class="chat-tool-card-server" title="${transportTitle}">${escapeText(mcpSource.server_name)}</span>`;
-  } else if (isMcpTool(toolName)) {
-    sourceBadge = '<span class="chat-tool-card-source mcp">MCP</span>';
-  }
-  header.innerHTML = `
+    const header = document.createElement("div");
+    header.className = "chat-tool-card-header";
+    // 0.13.0：MCP 来源标记——tool 名在 MCP tool 名称集合中时显示 (MCP) 徽章
+    // 0.13.6: 增强——追加 server 名 + transport tooltip
+    let sourceBadge = "";
+    if (mcpSource) {
+        const transportTitle = mcpSource.transport === "http" ? "HTTP" : "stdio";
+        sourceBadge = `<span class="chat-tool-card-source mcp">MCP</span>`
+            + `<span class="chat-tool-card-server" title="${transportTitle}">${escapeText(mcpSource.server_name)}</span>`;
+    } else if (isMcpTool(toolName)) {
+        sourceBadge = '<span class="chat-tool-card-source mcp">MCP</span>';
+    }
+    header.innerHTML = `
     <div class="chat-tool-card-spinner"></div>
     <span class="chat-tool-card-name">${escapeText(toolName)}</span>
     ${sourceBadge}
   `;
-  el.appendChild(header);
+    el.appendChild(header);
 
-  messagesEl.appendChild(el);
-  scrollToBottom();
-  return el;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
 }
 
 /**
@@ -480,33 +480,33 @@ export function renderToolStatus(toolName, args, opts = {}) {
  * @param {boolean} success
  */
 export function finalizeToolStatus(el, success) {
-  if (!el) return;
-  const spinner = el.querySelector(".chat-tool-card-spinner");
-  if (spinner) {
-    spinner.className = "chat-tool-card-icon";
-    spinner.innerHTML = success ? ICONS.toolSuccess : ICONS.toolFail;
-    if (!success) {
-      spinner.classList.add("chat-tool-card-icon-error");
+    if (!el) return;
+    const spinner = el.querySelector(".chat-tool-card-spinner");
+    if (spinner) {
+        spinner.className = "chat-tool-card-icon";
+        spinner.innerHTML = success ? ICONS.toolSuccess : ICONS.toolFail;
+        if (!success) {
+            spinner.classList.add("chat-tool-card-icon-error");
+        }
     }
-  }
 
-  // 0.12.7 §6.6：计算并显示耗时（仅对有 startTime 的卡片生效，历史恢复不显示）
-  const startTime = el.dataset.startTime;
-  if (startTime) {
-    const duration = Date.now() - Number(startTime);
-    if (duration >= 0) {
-      const headerEl = el.querySelector(".chat-tool-card-header");
-      if (headerEl && !headerEl.querySelector(".chat-tool-card-duration")) {
-        const durText = duration < 1000
-          ? `${duration}ms`
-          : `${(duration / 1000).toFixed(1)}s`;
-        const durSpan = document.createElement("span");
-        durSpan.className = "chat-tool-card-duration";
-        durSpan.textContent = durText;
-        headerEl.appendChild(durSpan);
-      }
+    // 0.12.7 §6.6：计算并显示耗时（仅对有 startTime 的卡片生效，历史恢复不显示）
+    const startTime = el.dataset.startTime;
+    if (startTime) {
+        const duration = Date.now() - Number(startTime);
+        if (duration >= 0) {
+            const headerEl = el.querySelector(".chat-tool-card-header");
+            if (headerEl && !headerEl.querySelector(".chat-tool-card-duration")) {
+                const durText = duration < 1000
+                    ? `${duration}ms`
+                    : `${(duration / 1000).toFixed(1)}s`;
+                const durSpan = document.createElement("span");
+                durSpan.className = "chat-tool-card-duration";
+                durSpan.textContent = durText;
+                headerEl.appendChild(durSpan);
+            }
+        }
     }
-  }
 }
 
 /**
@@ -516,60 +516,60 @@ export function finalizeToolStatus(el, success) {
  * @param {boolean} success 是否成功
  */
 export function appendToolResult(el, summary, success) {
-  if (!el) return;
-  // 若已有详情区，先移除（防重复）
-  const existing = el.querySelector(".chat-tool-detail");
-  if (existing) existing.remove();
+    if (!el) return;
+    // 若已有详情区，先移除（防重复）
+    const existing = el.querySelector(".chat-tool-detail");
+    if (existing) existing.remove();
 
-  const detail = document.createElement("details");
-  detail.className = "chat-tool-detail" + (success ? "" : " chat-tool-detail-error");
-  const summaryEl = document.createElement("summary");
-  summaryEl.textContent = success ? "详情" : "详情（失败）";
-  detail.appendChild(summaryEl);
+    const detail = document.createElement("details");
+    detail.className = "chat-tool-detail" + (success ? "" : " chat-tool-detail-error");
+    const summaryEl = document.createElement("summary");
+    summaryEl.textContent = success ? "详情" : "详情（失败）";
+    detail.appendChild(summaryEl);
 
-  // 0.12.7：如果有参数，先显示参数区块
-  const argsText = el.dataset.args;
-  if (argsText) {
-    const argsLabel = document.createElement("div");
-    argsLabel.className = "chat-tool-detail-label";
-    argsLabel.textContent = "参数";
-    detail.appendChild(argsLabel);
-    const argsPre = document.createElement("pre");
-    argsPre.textContent = argsText;
-    injectToolCopyBtn(argsPre);
-    detail.appendChild(argsPre);
-  }
+    // 0.12.7：如果有参数，先显示参数区块
+    const argsText = el.dataset.args;
+    if (argsText) {
+        const argsLabel = document.createElement("div");
+        argsLabel.className = "chat-tool-detail-label";
+        argsLabel.textContent = "参数";
+        detail.appendChild(argsLabel);
+        const argsPre = document.createElement("pre");
+        argsPre.textContent = argsText;
+        injectToolCopyBtn(argsPre);
+        detail.appendChild(argsPre);
+    }
 
-  // 结果区块
-  const resultLabel = document.createElement("div");
-  resultLabel.className = "chat-tool-detail-label";
-  resultLabel.textContent = "结果";
-  detail.appendChild(resultLabel);
-  const pre = document.createElement("pre");
-  pre.textContent = formatJson(summary) || "(空结果)";
-  injectToolCopyBtn(pre);
-  detail.appendChild(pre);
+    // 结果区块
+    const resultLabel = document.createElement("div");
+    resultLabel.className = "chat-tool-detail-label";
+    resultLabel.textContent = "结果";
+    detail.appendChild(resultLabel);
+    const pre = document.createElement("pre");
+    pre.textContent = formatJson(summary) || "(空结果)";
+    injectToolCopyBtn(pre);
+    detail.appendChild(pre);
 
-  el.appendChild(detail);
+    el.appendChild(detail);
 }
 
 /**
  * 给工具详情 pre 元素注入复制按钮（复用代码块复制按钮样式）。
  */
 function injectToolCopyBtn(pre) {
-  const btn = document.createElement("button");
-  btn.className = "chat-code-copy";
-  btn.title = "复制";
-  btn.textContent = "复制";
-  btn.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(pre.textContent || "");
-      flashIconDone(btn);
-    } catch (e) {
-      console.error("[chat] 工具详情复制失败:", e);
-    }
-  });
-  pre.appendChild(btn);
+    const btn = document.createElement("button");
+    btn.className = "chat-code-copy";
+    btn.title = "复制";
+    btn.textContent = "复制";
+    btn.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(pre.textContent || "");
+            flashIconDone(btn);
+        } catch (e) {
+            console.error("[chat] 工具详情复制失败:", e);
+        }
+    });
+    pre.appendChild(btn);
 }
 
 /**
@@ -579,20 +579,20 @@ function injectToolCopyBtn(pre) {
  * @param {string} modelName 模型显示名
  */
 export function renderModelLabel(el, modelName) {
-  if (!el || !modelName) return;
-  let footer = el.querySelector(".chat-msg-footer");
-  if (!footer) {
-    footer = document.createElement("div");
-    footer.className = "chat-msg-footer";
-    el.appendChild(footer);
-  }
-  let label = footer.querySelector(".chat-msg-model");
-  if (!label) {
-    label = document.createElement("span");
-    label.className = "chat-msg-model";
-    footer.appendChild(label);
-  }
-  label.textContent = modelName;
+    if (!el || !modelName) return;
+    let footer = el.querySelector(".chat-msg-footer");
+    if (!footer) {
+        footer = document.createElement("div");
+        footer.className = "chat-msg-footer";
+        el.appendChild(footer);
+    }
+    let label = footer.querySelector(".chat-msg-model");
+    if (!label) {
+        label = document.createElement("span");
+        label.className = "chat-msg-model";
+        footer.appendChild(label);
+    }
+    label.textContent = modelName;
 }
 
 /**
@@ -603,20 +603,20 @@ export function renderModelLabel(el, modelName) {
  * @param {number} outputTokens
  */
 export function renderTokenUsage(el, inputTokens, outputTokens) {
-  if (!el) return;
-  let footer = el.querySelector(".chat-msg-footer");
-  if (!footer) {
-    footer = document.createElement("div");
-    footer.className = "chat-msg-footer";
-    el.appendChild(footer);
-  }
-  let usage = footer.querySelector(".chat-token-usage");
-  if (!usage) {
-    usage = document.createElement("span");
-    usage.className = "chat-token-usage";
-    footer.appendChild(usage);
-  }
-  usage.textContent = `↑ ${inputTokens} · ↓ ${outputTokens} tokens`;
+    if (!el) return;
+    let footer = el.querySelector(".chat-msg-footer");
+    if (!footer) {
+        footer = document.createElement("div");
+        footer.className = "chat-msg-footer";
+        el.appendChild(footer);
+    }
+    let usage = footer.querySelector(".chat-token-usage");
+    if (!usage) {
+        usage = document.createElement("span");
+        usage.className = "chat-token-usage";
+        footer.appendChild(usage);
+    }
+    usage.textContent = `↑ ${inputTokens} · ↓ ${outputTokens} tokens`;
 }
 
 /**
@@ -627,21 +627,21 @@ export function renderTokenUsage(el, inputTokens, outputTokens) {
  * @param {number} recallCount FTS5 召回的消息条数
  */
 export function renderRecallBadge(el, recallCount) {
-  if (!el || !recallCount) return;
-  let footer = el.querySelector(".chat-msg-footer");
-  if (!footer) {
-    footer = document.createElement("div");
-    footer.className = "chat-msg-footer";
-    el.appendChild(footer);
-  }
-  let badge = footer.querySelector(".chat-recall-badge");
-  if (!badge) {
-    badge = document.createElement("span");
-    badge.className = "chat-recall-badge";
-    badge.title = "从历史对话中召回的相关上下文";
-    footer.appendChild(badge);
-  }
-  badge.textContent = `🧠 ${recallCount} 条记忆`;
+    if (!el || !recallCount) return;
+    let footer = el.querySelector(".chat-msg-footer");
+    if (!footer) {
+        footer = document.createElement("div");
+        footer.className = "chat-msg-footer";
+        el.appendChild(footer);
+    }
+    let badge = footer.querySelector(".chat-recall-badge");
+    if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "chat-recall-badge";
+        badge.title = "从历史对话中召回的相关上下文";
+        footer.appendChild(badge);
+    }
+    badge.textContent = `🧠 ${recallCount} 条记忆`;
 }
 
 /**
@@ -651,10 +651,10 @@ export function renderRecallBadge(el, recallCount) {
  * @returns {HTMLElement} 卡片元素引用
  */
 export function renderConfirmCard(payload, onConfirm) {
-  if (!messagesEl) return null;
-  const el = document.createElement("div");
-  el.className = "chat-confirm-card";
-  el.innerHTML = `
+    if (!messagesEl) return null;
+    const el = document.createElement("div");
+    el.className = "chat-confirm-card";
+    el.innerHTML = `
     <div class="chat-confirm-card-title">⚠ 危险操作确认</div>
     <div class="chat-confirm-card-tool">
       ${escapeText(payload.tool_type)}: <strong>${escapeText(payload.tool_name)}</strong>
@@ -665,27 +665,27 @@ export function renderConfirmCard(payload, onConfirm) {
       <button class="chat-confirm-btn chat-confirm-btn-approve" data-action="approve">允许执行</button>
     </div>
   `;
-  // 绑定按钮事件
-  el.querySelector("[data-action='reject']").addEventListener("click", () => {
-    onConfirm(payload.confirm_id, false);
-    el.querySelector(".chat-confirm-card-actions").innerHTML =
-      '<span class="chat-confirm-status chat-confirm-status-rejected">✕ 已拒绝</span>';
-  });
-  el.querySelector("[data-action='approve']").addEventListener("click", () => {
-    onConfirm(payload.confirm_id, true);
-    el.querySelector(".chat-confirm-card-actions").innerHTML =
-      '<span class="chat-confirm-status chat-confirm-status-approved">✓ 已确认</span>';
-  });
-  messagesEl.appendChild(el);
-  scrollToBottom();
-  return el;
+    // 绑定按钮事件
+    el.querySelector("[data-action='reject']").addEventListener("click", () => {
+        onConfirm(payload.confirm_id, false);
+        el.querySelector(".chat-confirm-card-actions").innerHTML =
+            '<span class="chat-confirm-status chat-confirm-status-rejected">✕ 已拒绝</span>';
+    });
+    el.querySelector("[data-action='approve']").addEventListener("click", () => {
+        onConfirm(payload.confirm_id, true);
+        el.querySelector(".chat-confirm-card-actions").innerHTML =
+            '<span class="chat-confirm-status chat-confirm-status-approved">✓ 已确认</span>';
+    });
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
 }
 
 function renderSettingConfirmDetails(payload) {
-  if (payload.tool_name !== "update_setting" || !payload.arguments) return "";
-  const args = payload.arguments;
-  const format = (value) => escapeText(JSON.stringify(value) ?? "null");
-  return `<div class="chat-confirm-card-details">
+    if (payload.tool_name !== "update_setting" || !payload.arguments) return "";
+    const args = payload.arguments;
+    const format = (value) => escapeText(JSON.stringify(value) ?? "null");
+    return `<div class="chat-confirm-card-details">
     <div><span>设置</span><strong>${escapeText(args.setting_id || "")}</strong></div>
     <div><span>旧值</span><code>${format(args.old_value)}</code></div>
     <div><span>新值</span><code>${format(args.new_value)}</code></div>
@@ -702,12 +702,12 @@ function renderSettingConfirmDetails(payload) {
  * @returns {HTMLElement}
  */
 export function renderTimeSeparator(timestamp) {
-  if (!messagesEl) return null;
-  const el = document.createElement("div");
-  el.className = "chat-time-sep";
-  el.textContent = formatTimeSeparator(timestamp);
-  messagesEl.appendChild(el);
-  return el;
+    if (!messagesEl) return null;
+    const el = document.createElement("div");
+    el.className = "chat-time-sep";
+    el.textContent = formatTimeSeparator(timestamp);
+    messagesEl.appendChild(el);
+    return el;
 }
 
 /**
@@ -721,37 +721,37 @@ export function renderTimeSeparator(timestamp) {
  * @returns {string}
  */
 function formatTimeSeparator(ts) {
-  const date = new Date(ts * 1000);
-  const now = new Date();
-  const hh = String(date.getHours()).padStart(2, "0");
-  const mm = String(date.getMinutes()).padStart(2, "0");
-  const timeStr = `${hh}:${mm}`;
+    const date = new Date(ts * 1000);
+    const now = new Date();
+    const hh = String(date.getHours()).padStart(2, "0");
+    const mm = String(date.getMinutes()).padStart(2, "0");
+    const timeStr = `${hh}:${mm}`;
 
-  const isSameDay = (a, b) =>
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate();
+    const isSameDay = (a, b) =>
+        a.getFullYear() === b.getFullYear() &&
+        a.getMonth() === b.getMonth() &&
+        a.getDate() === b.getDate();
 
-  if (isSameDay(date, now)) {
-    return timeStr;
-  }
+    if (isSameDay(date, now)) {
+        return timeStr;
+    }
 
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (isSameDay(date, yesterday)) {
-    return `昨天 ${timeStr}`;
-  }
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (isSameDay(date, yesterday)) {
+        return `昨天 ${timeStr}`;
+    }
 
-  // 7 天内显示星期
-  const diffDays = Math.floor((now - date) / (24 * 60 * 60 * 1000));
-  if (diffDays < 7) {
-    const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
-    return `周${weekdays[date.getDay()]} ${timeStr}`;
-  }
+    // 7 天内显示星期
+    const diffDays = Math.floor((now - date) / (24 * 60 * 60 * 1000));
+    if (diffDays < 7) {
+        const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+        return `周${weekdays[date.getDay()]} ${timeStr}`;
+    }
 
-  const M = String(date.getMonth() + 1).padStart(2, "0");
-  const D = String(date.getDate()).padStart(2, "0");
-  return `${M}/${D} ${timeStr}`;
+    const M = String(date.getMonth() + 1).padStart(2, "0");
+    const D = String(date.getDate()).padStart(2, "0");
+    return `${M}/${D} ${timeStr}`;
 }
 
 /**
@@ -765,13 +765,13 @@ function formatTimeSeparator(ts) {
  * @returns {HTMLElement} 信号元素引用
  */
 export function renderSignal(text, type = "info") {
-  if (!messagesEl) return null;
-  const el = document.createElement("div");
-  el.className = `chat-signal chat-signal-${type}`;
-  el.textContent = text;
-  messagesEl.appendChild(el);
-  scrollToBottom();
-  return el;
+    if (!messagesEl) return null;
+    const el = document.createElement("div");
+    el.className = `chat-signal chat-signal-${type}`;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
 }
 
 /**
@@ -779,7 +779,7 @@ export function renderSignal(text, type = "info") {
  * @param {string} message
  */
 export function renderErrorMessage(message) {
-  renderSignal(message, "error");
+    renderSignal(message, "error");
 }
 
 /**
@@ -788,73 +788,73 @@ export function renderErrorMessage(message) {
  * @param {() => void} onOpenSettings
  */
 export function renderEmptyState(providerConfigured, onOpenSettings) {
-  if (!messagesEl) return;
-  messagesEl.innerHTML = "";
-  const el = document.createElement("div");
-  el.className = "chat-empty";
-  if (providerConfigured) {
-    el.innerHTML = `
+    if (!messagesEl) return;
+    messagesEl.innerHTML = "";
+    const el = document.createElement("div");
+    el.className = "chat-empty";
+    if (providerConfigured) {
+        el.innerHTML = `
       <div class="chat-empty-icon">AI</div>
       <h2>Blink AI 对话</h2>
       <p>输入消息开始对话。AI 可以调用工具帮你完成操作。</p>
     `;
-    // 0.12.5 §5.2：引导泡泡——点击预填充到输入框
-    const GUIDE_PROMPTS = [
-      { text: "帮我打开微信", hint: "应用" },
-      { text: "我的 IP 多少", hint: "问答" },
-      { text: "今天天气怎么样", hint: "问答" },
-      { text: "翻译 components", hint: "翻译" },
-      { text: "现在能调用哪些MCP服务", hint: "能力" },
-      { text: "截一下图，然后 pin 到桌面上", hint: "能力" },
-      { text: "blink能做什么？记录到便签中", hint: "能力" },
-    ];
-    const bubblesEl = document.createElement("div");
-    bubblesEl.className = "chat-guide-bubbles";
-    for (const b of GUIDE_PROMPTS) {
-      const btn = document.createElement("button");
-      btn.className = "chat-guide-bubble";
-      const textSpan = document.createElement("span");
-      textSpan.className = "chat-guide-bubble-text";
-      textSpan.textContent = b.text;
-      const hintSpan = document.createElement("span");
-      hintSpan.className = "chat-guide-bubble-hint";
-      hintSpan.textContent = b.hint;
-      btn.appendChild(textSpan);
-      btn.appendChild(hintSpan);
-      btn.addEventListener("click", () => {
-        const input = document.getElementById("chat-input");
-        if (input) {
-          input.value = b.text;
-          input.focus();
-          input.dispatchEvent(new Event("input", { bubbles: true }));
+        // 0.12.5 §5.2：引导泡泡——点击预填充到输入框
+        const GUIDE_PROMPTS = [
+            {text: "帮我打开微信", hint: "应用"},
+            {text: "我的 IP 多少", hint: "问答"},
+            {text: "今天天气怎么样", hint: "问答"},
+            {text: "翻译 components", hint: "翻译"},
+            {text: "现在能调用哪些MCP服务", hint: "能力"},
+            {text: "截一下图，然后 pin 到桌面上", hint: "能力"},
+            {text: "blink能做什么？记录到便签中", hint: "能力"},
+        ];
+        const bubblesEl = document.createElement("div");
+        bubblesEl.className = "chat-guide-bubbles";
+        for (const b of GUIDE_PROMPTS) {
+            const btn = document.createElement("button");
+            btn.className = "chat-guide-bubble";
+            const textSpan = document.createElement("span");
+            textSpan.className = "chat-guide-bubble-text";
+            textSpan.textContent = b.text;
+            const hintSpan = document.createElement("span");
+            hintSpan.className = "chat-guide-bubble-hint";
+            hintSpan.textContent = b.hint;
+            btn.appendChild(textSpan);
+            btn.appendChild(hintSpan);
+            btn.addEventListener("click", () => {
+                const input = document.getElementById("chat-input");
+                if (input) {
+                    input.value = b.text;
+                    input.focus();
+                    input.dispatchEvent(new Event("input", {bubbles: true}));
+                }
+            });
+            bubblesEl.appendChild(btn);
         }
-      });
-      bubblesEl.appendChild(btn);
-    }
-    el.appendChild(bubblesEl);
-  } else {
-    el.innerHTML = `
+        el.appendChild(bubblesEl);
+    } else {
+        el.innerHTML = `
       <div class="chat-empty-icon">!</div>
       <h2>AI 未配置</h2>
       <p>请先在设置中配置 AI Provider 和模型。</p>
       <button class="chat-empty-btn" id="chat-open-settings">打开设置</button>
     `;
-    // 延迟绑定（DOM 刚插入）
-    requestAnimationFrame(() => {
-      const btn = document.getElementById("chat-open-settings");
-      if (btn) btn.addEventListener("click", onOpenSettings);
-    });
-  }
-  messagesEl.appendChild(el);
+        // 延迟绑定（DOM 刚插入）
+        requestAnimationFrame(() => {
+            const btn = document.getElementById("chat-open-settings");
+            if (btn) btn.addEventListener("click", onOpenSettings);
+        });
+    }
+    messagesEl.appendChild(el);
 }
 
 /**
  * 移除空状态。
  */
 export function removeEmptyState() {
-  if (!messagesEl) return;
-  const empty = messagesEl.querySelector(".chat-empty");
-  if (empty) empty.remove();
+    if (!messagesEl) return;
+    const empty = messagesEl.querySelector(".chat-empty");
+    if (empty) empty.remove();
 }
 
 /**
@@ -862,13 +862,13 @@ export function removeEmptyState() {
  * 流式渲染期间每帧调用——若用户已上滚浏览历史，不夺滚动权。
  */
 export function scrollToBottom() {
-  if (!messagesEl) return;
-  if (userScrolledUp) return;
-  requestAnimationFrame(() => {
-    if (!userScrolledUp && messagesEl) {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-  });
+    if (!messagesEl) return;
+    if (userScrolledUp) return;
+    requestAnimationFrame(() => {
+        if (!userScrolledUp && messagesEl) {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+    });
 }
 
 /**
@@ -880,13 +880,13 @@ export function scrollToBottom() {
  * @returns {string}
  */
 function formatJson(str) {
-  if (!str) return str;
-  try {
-    const parsed = JSON.parse(str);
-    return JSON.stringify(parsed, null, 2);
-  } catch {
-    return str;
-  }
+    if (!str) return str;
+    try {
+        const parsed = JSON.parse(str);
+        return JSON.stringify(parsed, null, 2);
+    } catch {
+        return str;
+    }
 }
 
 // ── 0.13.6: 上下文窗口占用指示器 ───────────────────────────────────────────
@@ -897,38 +897,38 @@ function formatJson(str) {
  * @param {{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}|null} status
  */
 export function updateContextIndicator(status) {
-  const el = document.getElementById("chat-context-indicator");
-  if (!el) return;
+    const el = document.getElementById("chat-context-indicator");
+    if (!el) return;
 
-  // 即使没有 status 也显示一个 0% 的空环，让用户知道这里有进度条
-  if (!status || status.context_limit === 0) {
-    el.classList.remove('hidden');
-    el.title = "上下文窗口——发送消息后显示用量";
-    el.innerHTML = `
+    // 即使没有 status 也显示一个 0% 的空环，让用户知道这里有进度条
+    if (!status || status.context_limit === 0) {
+        el.classList.remove('hidden');
+        el.title = "上下文窗口——发送消息后显示用量";
+        el.innerHTML = `
       <svg class="context-ring" viewBox="0 0 20 20">
         <circle cx="10" cy="10" r="8" fill="none" stroke="var(--surface-2, #333)" stroke-width="2"/>
         <text x="10" y="13" text-anchor="middle" class="context-ring-percent">·</text>
       </svg>
     `;
-    return;
-  }
+        return;
+    }
 
-  el.classList.remove('hidden');
-  const percent = Math.min(status.usage_percent, 100);
+    el.classList.remove('hidden');
+    const percent = Math.min(status.usage_percent, 100);
 
-  // 颜色随占比变化
-  const color = percent < 60 ? "var(--text-faint)"
-    : percent < 80 ? "var(--warning, #ffc107)"
-    : "var(--danger, #f44336)";
+    // 颜色随占比变化
+    const color = percent < 60 ? "var(--text-faint)"
+        : percent < 80 ? "var(--warning, #ffc107)"
+            : "var(--danger, #f44336)";
 
-  // SVG 环形进度条
-  const r = 8;
-  const circumference = 2 * Math.PI * r;
-  const offset = circumference * (1 - percent / 100);
-  const tooltip = `${percent}% · ~${status.estimated_tokens.toLocaleString()} / ${status.context_limit.toLocaleString()} tokens`;
+    // SVG 环形进度条
+    const r = 8;
+    const circumference = 2 * Math.PI * r;
+    const offset = circumference * (1 - percent / 100);
+    const tooltip = `${percent}% · ~${status.estimated_tokens.toLocaleString()} / ${status.context_limit.toLocaleString()} tokens`;
 
-  el.title = tooltip;
-  el.innerHTML = `
+    el.title = tooltip;
+    el.innerHTML = `
     <svg class="context-ring" viewBox="0 0 20 20">
       <circle cx="10" cy="10" r="${r}" fill="none" stroke="var(--surface-2, #333)" stroke-width="2"/>
       <circle cx="10" cy="10" r="${r}" fill="none" stroke="${color}" stroke-width="2"
@@ -947,19 +947,19 @@ export function updateContextIndicator(status) {
  * @param {(action: 'compress' | 'clear') => void} onAction
  */
 export function renderContextWarning(usagePercent, onAction) {
-  // 移除已有提示条
-  const existing = document.querySelector(".chat-context-warning");
-  if (existing) existing.remove();
+    // 移除已有提示条
+    const existing = document.querySelector(".chat-context-warning");
+    if (existing) existing.remove();
 
-  // 占用 < 80% 不显示
-  if (usagePercent < 80) return;
+    // 占用 < 80% 不显示
+    if (usagePercent < 80) return;
 
-  const composerBar = document.querySelector(".chat-composer-bar");
-  if (!composerBar) return;
+    const composerBar = document.querySelector(".chat-composer-bar");
+    if (!composerBar) return;
 
-  const warning = document.createElement("div");
-  warning.className = "chat-context-warning";
-  warning.innerHTML = `
+    const warning = document.createElement("div");
+    warning.className = "chat-context-warning";
+    warning.innerHTML = `
     <span class="chat-context-warning-icon">⚡</span>
     <span class="chat-context-warning-text">上下文窗口已使用 ${usagePercent}%，旧消息将被自动压缩。</span>
     <div class="chat-context-warning-actions">
@@ -969,18 +969,18 @@ export function renderContextWarning(usagePercent, onAction) {
     <button class="chat-context-warning-close" title="关闭">×</button>
   `;
 
-  warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
-  warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
-  warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
+    warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
+    warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
+    warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
 
-  // 插入到 composer bar 上方
-  composerBar.parentElement.insertBefore(warning, composerBar);
+    // 插入到 composer bar 上方
+    composerBar.parentElement.insertBefore(warning, composerBar);
 }
 
 /**
  * 移除压缩提示条。
  */
 export function removeContextWarning() {
-  const existing = document.querySelector(".chat-context-warning");
-  if (existing) existing.remove();
+    const existing = document.querySelector(".chat-context-warning");
+    if (existing) existing.remove();
 }

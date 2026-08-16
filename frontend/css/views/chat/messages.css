@@ -4,114 +4,114 @@
 
 /* 系统提示词横幅（0.12.7 §6.5：分组有提示词时显示，在消息流上方，可滚动） */
 .chat-prompt-banner {
-  flex-shrink: 0;
-  margin: 0 var(--space-lg);
-  margin-top: var(--space-sm);
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--surface);
-  border-radius: 8px;
-  background: var(--bg-sidebar);
-  overflow: hidden;
+    flex-shrink: 0;
+    margin: 0 var(--space-lg);
+    margin-top: var(--space-sm);
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--surface);
+    border-radius: 8px;
+    background: var(--bg-sidebar);
+    overflow: hidden;
 }
 
 .chat-prompt-banner[hidden] {
-  display: none;
+    display: none;
 }
 
 .chat-prompt-banner-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
 }
 
 .chat-prompt-banner-icon {
-  width: 14px;
-  height: 14px;
-  color: var(--accent);
-  flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    color: var(--accent);
+    flex-shrink: 0;
 }
 
 .chat-prompt-banner-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-dim);
-  flex: 1;
-  min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    flex: 1;
+    min-width: 0;
 }
 
 .chat-prompt-banner-toggle,
 .chat-prompt-banner-close {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.12s;
-  flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.12s;
+    flex-shrink: 0;
 }
 
 .chat-prompt-banner-toggle svg,
 .chat-prompt-banner-close svg {
-  width: 13px;
-  height: 13px;
+    width: 13px;
+    height: 13px;
 }
 
 .chat-prompt-banner-toggle:hover,
 .chat-prompt-banner-close:hover {
-  color: var(--text);
-  background: var(--surface);
+    color: var(--text);
+    background: var(--surface);
 }
 
 .chat-prompt-banner-toggle {
-  transition: transform 0.15s;
+    transition: transform 0.15s;
 }
 
 /* 折叠态：箭头朝右 + 隐藏 body */
 .chat-prompt-banner[data-collapsed] .chat-prompt-banner-toggle {
-  transform: rotate(-90deg);
+    transform: rotate(-90deg);
 }
 
 .chat-prompt-banner[data-collapsed] .chat-prompt-banner-body {
-  display: none;
+    display: none;
 }
 
 .chat-prompt-banner-body {
-  margin-top: var(--space-xs);
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-sub);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 120px;
-  overflow-y: auto;
-  background: var(--bg-deep);
-  border-radius: 4px;
+    margin-top: var(--space-xs);
+    padding: var(--space-xs) var(--space-sm);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-sub);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 120px;
+    overflow-y: auto;
+    background: var(--bg-deep);
+    border-radius: 4px;
 }
 
 .chat-prompt-banner-body::-webkit-scrollbar {
-  width: 4px;
+    width: 4px;
 }
 
 .chat-prompt-banner-body::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 2px;
+    background: var(--surface-2);
+    border-radius: 2px;
 }
 
 .chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-xl) var(--space-lg);
-  display: flex;
-  flex-direction: column;
-  /* 0.12.7 §6.7：取消统一 gap，改用按元素类型的 margin-top 实现轮次间距分级 */
-  scroll-behavior: smooth;
-  background: var(--bg); /* 0.12.8：不透明背景，消除透明容器导致的 GPU tile seam 锯齿线 */
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-xl) var(--space-lg);
+    display: flex;
+    flex-direction: column;
+    /* 0.12.7 §6.7：取消统一 gap，改用按元素类型的 margin-top 实现轮次间距分级 */
+    scroll-behavior: smooth;
+    background: var(--bg); /* 0.12.8：不透明背景，消除透明容器导致的 GPU tile seam 锯齿线 */
 }
 
 /* 0.12.7 §6.7：轮次间距分级
@@ -120,80 +120,80 @@
    - Signal/时间分隔符：独立元素，中间距
    - 首个子元素无 margin */
 .chat-messages > :first-child {
-  margin-top: 0;
+    margin-top: 0;
 }
 
 .chat-messages > .chat-msg-user {
-  margin-top: var(--space-xl);
+    margin-top: var(--space-xl);
 }
 
 .chat-messages > .chat-msg-assistant,
 .chat-messages > .chat-tool-card {
-  margin-top: var(--space-xs);
+    margin-top: var(--space-xs);
 }
 
 /* 用户消息后的第一条助手消息不需要额外间距（已在 user 的 margin-top 中） */
 .chat-messages > .chat-msg-user + .chat-msg-assistant,
 .chat-messages > .chat-msg-user + .chat-tool-card {
-  margin-top: var(--space-sm);
+    margin-top: var(--space-sm);
 }
 
 .chat-messages > .chat-signal,
 .chat-messages > .chat-time-sep {
-  margin-top: var(--space-md);
-  margin-bottom: var(--space-xs);
+    margin-top: var(--space-md);
+    margin-bottom: var(--space-xs);
 }
 
 .chat-messages::-webkit-scrollbar {
-  width: 6px;
+    width: 6px;
 }
 
 .chat-messages::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
 
 .chat-messages::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 3px;
+    background: var(--surface-2);
+    border-radius: 3px;
 }
 
 /* ── 「回到底部」浮动按钮 ─────────────────────────── */
 
 .chat-scroll-bottom-btn {
-  position: absolute;
-  bottom: 140px;
-  right: 24px;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: var(--surface-2);
-  border: 1px solid var(--surface-3, var(--surface-2));
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  opacity: 0;
-  visibility: hidden;
-  transform: translateY(8px);
-  transition: opacity 0.2s, transform 0.2s, visibility 0.2s;
-  z-index: 10;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    position: absolute;
+    bottom: 140px;
+    right: 24px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface-2);
+    border: 1px solid var(--surface-3, var(--surface-2));
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s, visibility 0.2s;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .chat-scroll-bottom-btn svg {
-  width: 18px;
-  height: 18px;
+    width: 18px;
+    height: 18px;
 }
 
 .chat-scroll-bottom-btn.visible {
-  opacity: 0.85;
-  visibility: visible;
-  transform: translateY(0);
+    opacity: 0.85;
+    visibility: visible;
+    transform: translateY(0);
 }
 
 .chat-scroll-bottom-btn:hover {
-  opacity: 1;
-  background: var(--surface-3, var(--surface-2));
+    opacity: 1;
+    background: var(--surface-3, var(--surface-2));
 }
 

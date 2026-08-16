@@ -7,14 +7,14 @@
  * 无 bundler 铁则：不 import vendor 脚本，通过 window.* 访问。
  */
 
-import { t } from "../i18n/index.js";
+import {t} from "../i18n/index.js";
 
 /**
  * 渲染 typing 指示器（三点跳动动画）。
  * @returns {string} HTML 字符串
  */
 export function renderTypingIndicator() {
-  return '<div class="ai-typing"><span></span><span></span><span></span></div>';
+    return '<div class="ai-typing"><span></span><span></span><span></span></div>';
 }
 
 /**
@@ -26,27 +26,27 @@ export function renderTypingIndicator() {
  * @returns {string} HTML 字符串
  */
 export function renderToolLine(toolName, args) {
-  let argsPreview = "";
-  if (args && args.trim() && args.trim() !== "{}") {
-    try {
-      const parsed = JSON.parse(args);
-      const entries = Object.entries(parsed);
-      if (entries.length > 0) {
-        const parts = entries.slice(0, 3).map(([k, v]) => {
-          const val = typeof v === "string" ? v : JSON.stringify(v);
-          const truncated = val.length > 40 ? val.slice(0, 40) + "…" : val;
-          return `${k}: ${truncated}`;
-        });
-        argsPreview = ` <span class="ai-tool-args">${escapeText(parts.join(" · "))}</span>`;
-      }
-    } catch {
-      // 非 JSON 参数，直接显示
-      const truncated = args.length > 60 ? args.slice(0, 60) + "…" : args;
-      argsPreview = ` <span class="ai-tool-args">${escapeText(truncated)}</span>`;
+    let argsPreview = "";
+    if (args && args.trim() && args.trim() !== "{}") {
+        try {
+            const parsed = JSON.parse(args);
+            const entries = Object.entries(parsed);
+            if (entries.length > 0) {
+                const parts = entries.slice(0, 3).map(([k, v]) => {
+                    const val = typeof v === "string" ? v : JSON.stringify(v);
+                    const truncated = val.length > 40 ? val.slice(0, 40) + "…" : val;
+                    return `${k}: ${truncated}`;
+                });
+                argsPreview = ` <span class="ai-tool-args">${escapeText(parts.join(" · "))}</span>`;
+            }
+        } catch {
+            // 非 JSON 参数，直接显示
+            const truncated = args.length > 60 ? args.slice(0, 60) + "…" : args;
+            argsPreview = ` <span class="ai-tool-args">${escapeText(truncated)}</span>`;
+        }
     }
-  }
-  const spinner = '<span class="ai-tool-spinner"></span>';
-  return `${spinner}<span class="ai-tool-name">${escapeText(toolName)}</span>${argsPreview}`;
+    const spinner = '<span class="ai-tool-spinner"></span>';
+    return `${spinner}<span class="ai-tool-name">${escapeText(toolName)}</span>${argsPreview}`;
 }
 
 /**
@@ -58,14 +58,14 @@ export function renderToolLine(toolName, args) {
  * @returns {string} HTML 字符串
  */
 export function renderToolResultLine(toolName, success, summary) {
-  const icon = success ? "✓" : "✕";
-  const cls = success ? "ai-tool-done" : "ai-tool-fail";
-  let summaryHtml = "";
-  if (summary) {
-    const truncated = summary.length > 80 ? summary.slice(0, 80) + "…" : summary;
-    summaryHtml = ` <span class="ai-tool-summary">${escapeText(truncated)}</span>`;
-  }
-  return `<span class="${cls}">${icon}</span><span class="ai-tool-name">${escapeText(toolName)}</span>${summaryHtml}`;
+    const icon = success ? "✓" : "✕";
+    const cls = success ? "ai-tool-done" : "ai-tool-fail";
+    let summaryHtml = "";
+    if (summary) {
+        const truncated = summary.length > 80 ? summary.slice(0, 80) + "…" : summary;
+        summaryHtml = ` <span class="ai-tool-summary">${escapeText(truncated)}</span>`;
+    }
+    return `<span class="${cls}">${icon}</span><span class="ai-tool-name">${escapeText(toolName)}</span>${summaryHtml}`;
 }
 
 /**
@@ -76,9 +76,9 @@ export function renderToolResultLine(toolName, success, summary) {
  * @returns {HTMLElement} 卡片元素
  */
 export function renderConfirmCard(payload, onConfirm) {
-  const el = document.createElement("div");
-  el.className = "ai-confirm-card";
-  el.innerHTML = `
+    const el = document.createElement("div");
+    el.className = "ai-confirm-card";
+    el.innerHTML = `
     <div class="ai-confirm-card-title">${escapeText(t("ai.confirm_title"))}</div>
     <div class="ai-confirm-card-tool">
       ${escapeText(payload.tool_type || "")}: <strong>${escapeText(payload.tool_name)}</strong>
@@ -89,24 +89,24 @@ export function renderConfirmCard(payload, onConfirm) {
       <button class="ai-confirm-btn ai-confirm-btn-approve" data-action="approve">${escapeText(t("ai.confirm_approve"))}</button>
     </div>
   `;
-  el.querySelector("[data-action='reject']").addEventListener("click", () => {
-    onConfirm(payload.confirm_id, false);
-    el.querySelector(".ai-confirm-card-actions").innerHTML =
-      `<span class="ai-confirm-status ai-confirm-status-rejected">${escapeText(t("ai.confirm_rejected"))}</span>`;
-  });
-  el.querySelector("[data-action='approve']").addEventListener("click", () => {
-    onConfirm(payload.confirm_id, true);
-    el.querySelector(".ai-confirm-card-actions").innerHTML =
-      `<span class="ai-confirm-status ai-confirm-status-approved">${escapeText(t("ai.confirm_approved"))}</span>`;
-  });
-  return el;
+    el.querySelector("[data-action='reject']").addEventListener("click", () => {
+        onConfirm(payload.confirm_id, false);
+        el.querySelector(".ai-confirm-card-actions").innerHTML =
+            `<span class="ai-confirm-status ai-confirm-status-rejected">${escapeText(t("ai.confirm_rejected"))}</span>`;
+    });
+    el.querySelector("[data-action='approve']").addEventListener("click", () => {
+        onConfirm(payload.confirm_id, true);
+        el.querySelector(".ai-confirm-card-actions").innerHTML =
+            `<span class="ai-confirm-status ai-confirm-status-approved">${escapeText(t("ai.confirm_approved"))}</span>`;
+    });
+    return el;
 }
 
 function renderSettingConfirmDetails(payload) {
-  if (payload.tool_name !== "update_setting" || !payload.arguments) return "";
-  const args = payload.arguments;
-  const format = (value) => escapeText(JSON.stringify(value) ?? "null");
-  return `<div class="ai-confirm-card-details">
+    if (payload.tool_name !== "update_setting" || !payload.arguments) return "";
+    const args = payload.arguments;
+    const format = (value) => escapeText(JSON.stringify(value) ?? "null");
+    return `<div class="ai-confirm-card-details">
     <div><span>设置</span><strong>${escapeText(args.setting_id || "")}</strong></div>
     <div><span>旧值</span><code>${format(args.old_value)}</code></div>
     <div><span>新值</span><code>${format(args.new_value)}</code></div>
@@ -123,26 +123,26 @@ function renderSettingConfirmDetails(payload) {
  * @returns {{ schedule: (text: string) => void, cancel: () => void }}
  */
 export function createThrottledRenderer(updateFn) {
-  let rafId = null;
-  let pendingText = "";
+    let rafId = null;
+    let pendingText = "";
 
-  function schedule(text) {
-    pendingText = text;
-    if (rafId !== null) return;
-    rafId = requestAnimationFrame(() => {
-      rafId = null;
-      updateFn(pendingText);
-    });
-  }
-
-  function cancel() {
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
+    function schedule(text) {
+        pendingText = text;
+        if (rafId !== null) return;
+        rafId = requestAnimationFrame(() => {
+            rafId = null;
+            updateFn(pendingText);
+        });
     }
-  }
 
-  return { schedule, cancel };
+    function cancel() {
+        if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+    }
+
+    return {schedule, cancel};
 }
 
 /**
@@ -151,7 +151,7 @@ export function createThrottledRenderer(updateFn) {
  * @returns {string}
  */
 function escapeText(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text ?? "");
-  return div.innerHTML;
+    const div = document.createElement("div");
+    div.textContent = String(text ?? "");
+    return div.innerHTML;
 }

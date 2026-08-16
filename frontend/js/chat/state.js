@@ -69,111 +69,112 @@ let mcpToolSourcesMap = null;
 // ── 状态变更 ─────────────────────────────────────
 
 export function setStreaming(value) {
-  isStreaming = value;
+    isStreaming = value;
 }
 
 export function setActiveRequestId(id) {
-  activeRequestId = id;
+    activeRequestId = id;
 }
 
 export function appendStreamBuffer(text) {
-  streamBuffer += text;
+    streamBuffer += text;
 }
 
 export function resetStreamBuffer() {
-  streamBuffer = "";
+    streamBuffer = "";
 }
 
 export function appendThinkingBuffer(text) {
-  thinkingBuffer += text;
+    thinkingBuffer += text;
 }
 
 export function resetThinkingBuffer() {
-  thinkingBuffer = "";
-  isThinking = false;
+    thinkingBuffer = "";
+    isThinking = false;
 }
 
 export function setThinking(value) {
-  isThinking = value;
+    isThinking = value;
 }
 
 export function setThinkingEnabled(value) {
-  thinkingEnabled = value;
+    thinkingEnabled = value;
 }
 
 export function toggleThinkingEnabled() {
-  thinkingEnabled = !thinkingEnabled;
-  return thinkingEnabled;
+    thinkingEnabled = !thinkingEnabled;
+    return thinkingEnabled;
 }
 
 export function setProviderConfigured(value) {
-  providerConfigured = value;
+    providerConfigured = value;
 }
 
 /** 0.17.6a: 设置临时对话模式。 */
 export function setEphemeralMode(value) {
-  ephemeralMode = value;
+    ephemeralMode = value;
 }
 
 export function setLastUsage(usage) {
-  lastUsage = usage;
+    lastUsage = usage;
 }
 
 /** 0.13.6: 设置上次 FTS5 召回的消息条数。 */
 let lastRecallCount = 0;
+
 export function setLastRecallCount(count) {
-  lastRecallCount = count;
+    lastRecallCount = count;
 }
 
 /** 设置 MCP tool 名称集合（0.13.0）。 */
 export function setMcpToolNames(names) {
-  mcpToolNames = names ? new Set(names) : null;
+    mcpToolNames = names ? new Set(names) : null;
 }
 
 /** 判断 tool 名称是否来自 MCP server（0.13.0）。 */
 export function isMcpTool(name) {
-  return mcpToolNames != null && mcpToolNames.has(name);
+    return mcpToolNames != null && mcpToolNames.has(name);
 }
 
 /** 0.13.6: 设置 MCP tool 来源信息。 */
 export function setMcpToolSources(sources) {
-  mcpToolSourcesMap = sources ? new Map(sources.map((s) => [s.tool_name, s])) : null;
+    mcpToolSourcesMap = sources ? new Map(sources.map((s) => [s.tool_name, s])) : null;
 }
 
 /** 0.13.6: 获取 tool 的 MCP 来源信息。返回 null 表示不是 MCP tool。 */
 export function getMcpToolSource(name) {
-  return mcpToolSourcesMap?.get(name) || null;
+    return mcpToolSourcesMap?.get(name) || null;
 }
 
 /** 设置当前 conversation_id（0.12.4 §6.1：ES module namespace import 只读，需 setter）。 */
 export function setConversationId(id) {
-  conversationId = id;
+    conversationId = id;
 }
 
 /** 设置当前对话所属分组 ID（0.12.6）。 */
 export function setCurrentGroupId(id) {
-  // 防御：groupId 必须是字符串或 null，避免对象/其他类型泄漏到 invoke("chat_prompt")
-  // 导致后端 serde 报 "invalid type: map, expected a string"
-  currentGroupId = typeof id === "string" ? id : null;
+    // 防御：groupId 必须是字符串或 null，避免对象/其他类型泄漏到 invoke("chat_prompt")
+    // 导致后端 serde 报 "invalid type: map, expected a string"
+    currentGroupId = typeof id === "string" ? id : null;
 }
 
 /** 记录一个进行中的 Tool 卡片（按 call_id 索引）。 */
 export function trackToolCall(callId, entry) {
-  if (callId) toolCalls.set(callId, entry);
+    if (callId) toolCalls.set(callId, entry);
 }
 
 /** 按 call_id 取出 Tool 卡片记录（不删除，结果可能多次到达）。 */
 export function getToolCall(callId) {
-  return callId ? toolCalls.get(callId) : null;
+    return callId ? toolCalls.get(callId) : null;
 }
 
 /** 清空所有进行中的 Tool 卡片索引。 */
 export function clearToolCalls() {
-  toolCalls.clear();
+    toolCalls.clear();
 }
 
 export function addMessage(msg) {
-  messages.push(msg);
+    messages.push(msg);
 }
 
 /**
@@ -181,16 +182,16 @@ export function addMessage(msg) {
  * @returns {string} 新的 conversation_id
  */
 export function resetConversation() {
-  conversationId = crypto.randomUUID();
-  messages.length = 0;
-  isStreaming = false;
-  activeRequestId = null;
-  streamBuffer = "";
-  thinkingBuffer = "";
-  isThinking = false;
-  toolCalls.clear();
-  lastUsage = null;
-  currentGroupId = null; // 0.12.6：重置分组上下文
-  ephemeralMode = false; // 0.17.6a：重置临时模式
-  return conversationId;
+    conversationId = crypto.randomUUID();
+    messages.length = 0;
+    isStreaming = false;
+    activeRequestId = null;
+    streamBuffer = "";
+    thinkingBuffer = "";
+    isThinking = false;
+    toolCalls.clear();
+    lastUsage = null;
+    currentGroupId = null; // 0.12.6：重置分组上下文
+    ephemeralMode = false; // 0.17.6a：重置临时模式
+    return conversationId;
 }

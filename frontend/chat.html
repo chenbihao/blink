@@ -1,141 +1,203 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Blink AI</title>
-  <link rel="stylesheet" href="css/entries/chat.css" />
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Blink AI</title>
+    <link href="css/entries/chat.css" rel="stylesheet"/>
 </head>
 <body>
-  <div class="chat-root">
+<div class="chat-root">
     <!-- Titlebar（无边框窗口自绘标题栏） -->
     <div class="chat-titlebar" data-tauri-drag-region>
-      <span class="chat-titlebar-title" data-tauri-drag-region>Blink AI</span>
-      <div class="chat-titlebar-btns">
-        <button class="chat-titlebar-btn" id="titlebar-minimize" title="最小化">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        </button>
-        <button class="chat-titlebar-btn" id="titlebar-maximize" title="最大化">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
-        </button>
-        <button class="chat-titlebar-btn chat-titlebar-btn-close" id="titlebar-close" title="关闭">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
-        </button>
-      </div>
+        <span class="chat-titlebar-title" data-tauri-drag-region>Blink AI</span>
+        <div class="chat-titlebar-btns">
+            <button class="chat-titlebar-btn" id="titlebar-minimize" title="最小化">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <line x1="5" x2="19" y1="12" y2="12"/>
+                </svg>
+            </button>
+            <button class="chat-titlebar-btn" id="titlebar-maximize" title="最大化">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <rect height="14" rx="2" width="14" x="5" y="5"/>
+                </svg>
+            </button>
+            <button class="chat-titlebar-btn chat-titlebar-btn-close" id="titlebar-close" title="关闭">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <line x1="6" x2="18" y1="6" y2="18"/>
+                    <line x1="6" x2="18" y1="18" y2="6"/>
+                </svg>
+            </button>
+        </div>
     </div>
 
     <!-- Body: sidebar + main 横向排列 -->
     <div class="chat-body">
-      <!-- Sidebar（对话列表，push 布局） -->
-      <aside class="chat-sidebar" id="chat-sidebar" data-closed>
-        <div class="chat-sidebar-header">
-          <span class="chat-sidebar-title">对话</span>
-          <div class="chat-sidebar-header-actions">
-            <button class="chat-sidebar-new-group" id="chat-sidebar-new-group" title="新建分组">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
-            </button>
-            <button class="chat-sidebar-ephemeral" id="chat-sidebar-ephemeral" title="临时对话">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            </button>
-            <button class="chat-sidebar-new" id="chat-sidebar-new" title="新对话">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            </button>
-          </div>
-        </div>
-        <div class="chat-sidebar-list" id="chat-sidebar-list"></div>
-      </aside>
-
-      <!-- Main area -->
-      <div class="chat-main">
-        <!-- Header（三段式布局：侧边栏toggle + 对话标题 + 操作按钮） -->
-        <div class="chat-header">
-          <button class="chat-header-btn" id="chat-sidebar-toggle" title="对话列表">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-          </button>
-          <div class="chat-breadcrumb" id="chat-breadcrumb">
-            <span class="chat-breadcrumb-title" id="chat-conversation-title" title="点击重命名">新对话</span>
-            <span class="chat-ephemeral-badge" id="chat-ephemeral-badge" hidden>临时</span>
-          </div>
-          <div class="chat-header-actions">
-            <button class="chat-header-btn" id="chat-promote-ephemeral" title="转为持久对话" hidden>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M21 3l-7 7"/><path d="M8 21H3v-5"/><path d="M3 21l7-7"/></svg>
-            </button>
-            <button class="chat-header-btn" id="chat-new-btn" title="新对话">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            </button>
-            <button class="chat-header-btn" id="chat-settings-btn" title="设置">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            </button>
-          </div>
-        </div>
-
-        <!-- 系统提示词横幅（0.12.7 §6.5：分组有提示词时显示，可滚动非 sticky） -->
-        <div class="chat-prompt-banner" id="chat-prompt-banner" hidden>
-          <div class="chat-prompt-banner-header">
-            <svg class="chat-prompt-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span class="chat-prompt-banner-label">系统提示词</span>
-            <button class="chat-prompt-banner-toggle" id="chat-prompt-banner-toggle" title="展开/收起">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-            </button>
-            <button class="chat-prompt-banner-close" id="chat-prompt-banner-close" title="关闭">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-          </div>
-          <div class="chat-prompt-banner-body" id="chat-prompt-banner-body"></div>
-        </div>
-
-        <!-- Messages -->
-        <div class="chat-messages" id="chat-messages"></div>
-
-        <!-- Composer（语音指示器放在 input-wrap 内部，position:absolute 相对于 input-wrap） -->
-        <div class="chat-composer">
-          <div class="chat-composer-input-wrap">
-            <!-- 0.13.3: /skill 命令提示 -->
-            <div id="skill-hint" class="skill-hint" hidden></div>
-            <!-- 语音指示器（同主窗口风格：5 条波形 + 标签） -->
-            <div id="voice-indicator" class="voice-indicator hidden">
-              <div class="voice-wave">
-                <div class="vw-bar"></div>
-                <div class="vw-bar"></div>
-                <div class="vw-bar"></div>
-                <div class="vw-bar"></div>
-                <div class="vw-bar"></div>
-              </div>
-              <span class="voice-label">语音输入中</span>
+        <!-- Sidebar（对话列表，push 布局） -->
+        <aside class="chat-sidebar" data-closed id="chat-sidebar">
+            <div class="chat-sidebar-header">
+                <span class="chat-sidebar-title">对话</span>
+                <div class="chat-sidebar-header-actions">
+                    <button class="chat-sidebar-new-group" id="chat-sidebar-new-group" title="新建分组">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                            <line x1="12" x2="12" y1="11" y2="17"/>
+                            <line x1="9" x2="15" y1="14" y2="14"/>
+                        </svg>
+                    </button>
+                    <button class="chat-sidebar-ephemeral" id="chat-sidebar-ephemeral" title="临时对话">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" x2="12" y1="8" y2="12"/>
+                            <line x1="12" x2="12.01" y1="16" y2="16"/>
+                        </svg>
+                    </button>
+                    <button class="chat-sidebar-new" id="chat-sidebar-new" title="新对话">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <line x1="12" x2="12" y1="5" y2="19"/>
+                            <line x1="5" x2="19" y1="12" y2="12"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
-            <textarea id="chat-input" rows="1" placeholder="输入消息..." autofocus></textarea>
-            <div class="chat-composer-bar">
-              <div class="chat-composer-bar-left">
-                <button class="chat-thinking-btn" id="chat-thinking-btn" title="深度思考">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-                  <span>深度思考</span>
+            <div class="chat-sidebar-list" id="chat-sidebar-list"></div>
+        </aside>
+
+        <!-- Main area -->
+        <div class="chat-main">
+            <!-- Header（三段式布局：侧边栏toggle + 对话标题 + 操作按钮） -->
+            <div class="chat-header">
+                <button class="chat-header-btn" id="chat-sidebar-toggle" title="对话列表">
+                    <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                         viewBox="0 0 24 24">
+                        <line x1="3" x2="21" y1="6" y2="6"/>
+                        <line x1="3" x2="21" y1="12" y2="12"/>
+                        <line x1="3" x2="21" y1="18" y2="18"/>
+                    </svg>
                 </button>
-                <!-- 模型选择器（移至 composer bar，深度思考旁边） -->
-                <button class="chat-model-trigger" id="chat-model-trigger" title="切换模型">
-                  <span class="chat-model-trigger-label" id="chat-provider-label">加载中...</span>
-                  <svg class="chat-model-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                  <div class="chat-model-dropdown" id="chat-model-dropdown" hidden></div>
-                </button>
-              </div>
-              <!-- 上下文窗口指示器（发送按钮左边） -->
-              <span class="chat-context-indicator" id="chat-context-indicator" title="上下文窗口"></span>
-              <span class="chat-tool-pool" id="chat-tool-pool" hidden></span>
-              <button class="chat-send-btn" id="chat-send-btn" disabled>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-              </button>
+                <div class="chat-breadcrumb" id="chat-breadcrumb">
+                    <span class="chat-breadcrumb-title" id="chat-conversation-title" title="点击重命名">新对话</span>
+                    <span class="chat-ephemeral-badge" hidden id="chat-ephemeral-badge">临时</span>
+                </div>
+                <div class="chat-header-actions">
+                    <button class="chat-header-btn" hidden id="chat-promote-ephemeral" title="转为持久对话">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <path d="M16 3h5v5"/>
+                            <path d="M21 3l-7 7"/>
+                            <path d="M8 21H3v-5"/>
+                            <path d="M3 21l7-7"/>
+                        </svg>
+                    </button>
+                    <button class="chat-header-btn" id="chat-new-btn" title="新对话">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <line x1="12" x2="12" y1="5" y2="19"/>
+                            <line x1="5" x2="19" y1="12" y2="12"/>
+                        </svg>
+                    </button>
+                    <button class="chat-header-btn" id="chat-settings-btn" title="设置">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
-          </div>
+
+            <!-- 系统提示词横幅（0.12.7 §6.5：分组有提示词时显示，可滚动非 sticky） -->
+            <div class="chat-prompt-banner" hidden id="chat-prompt-banner">
+                <div class="chat-prompt-banner-header">
+                    <svg class="chat-prompt-banner-icon" fill="none" stroke="currentColor" stroke-linecap="round"
+                         stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    <span class="chat-prompt-banner-label">系统提示词</span>
+                    <button class="chat-prompt-banner-toggle" id="chat-prompt-banner-toggle" title="展开/收起">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <polyline points="6 9 12 15 18 9"/>
+                        </svg>
+                    </button>
+                    <button class="chat-prompt-banner-close" id="chat-prompt-banner-close" title="关闭">
+                        <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                             stroke-width="2" viewBox="0 0 24 24">
+                            <line x1="18" x2="6" y1="6" y2="18"/>
+                            <line x1="6" x2="18" y1="6" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="chat-prompt-banner-body" id="chat-prompt-banner-body"></div>
+            </div>
+
+            <!-- Messages -->
+            <div class="chat-messages" id="chat-messages"></div>
+
+            <!-- Composer（语音指示器放在 input-wrap 内部，position:absolute 相对于 input-wrap） -->
+            <div class="chat-composer">
+                <div class="chat-composer-input-wrap">
+                    <!-- 0.13.3: /skill 命令提示 -->
+                    <div class="skill-hint" hidden id="skill-hint"></div>
+                    <!-- 语音指示器（同主窗口风格：5 条波形 + 标签） -->
+                    <div class="voice-indicator hidden" id="voice-indicator">
+                        <div class="voice-wave">
+                            <div class="vw-bar"></div>
+                            <div class="vw-bar"></div>
+                            <div class="vw-bar"></div>
+                            <div class="vw-bar"></div>
+                            <div class="vw-bar"></div>
+                        </div>
+                        <span class="voice-label">语音输入中</span>
+                    </div>
+                    <textarea autofocus id="chat-input" placeholder="输入消息..." rows="1"></textarea>
+                    <div class="chat-composer-bar">
+                        <div class="chat-composer-bar-left">
+                            <button class="chat-thinking-btn" id="chat-thinking-btn" title="深度思考">
+                                <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                                     stroke-width="2" viewBox="0 0 24 24">
+                                    <circle cx="12" cy="12" r="10"/>
+                                    <path d="M12 16v-4"/>
+                                    <path d="M12 8h.01"/>
+                                </svg>
+                                <span>深度思考</span>
+                            </button>
+                            <!-- 模型选择器（移至 composer bar，深度思考旁边） -->
+                            <button class="chat-model-trigger" id="chat-model-trigger" title="切换模型">
+                                <span class="chat-model-trigger-label" id="chat-provider-label">加载中...</span>
+                                <svg class="chat-model-caret" fill="none" stroke="currentColor" stroke-linecap="round"
+                                     stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                                <div class="chat-model-dropdown" hidden id="chat-model-dropdown"></div>
+                            </button>
+                        </div>
+                        <!-- 上下文窗口指示器（发送按钮左边） -->
+                        <span class="chat-context-indicator" id="chat-context-indicator" title="上下文窗口"></span>
+                        <span class="chat-tool-pool" hidden id="chat-tool-pool"></span>
+                        <button class="chat-send-btn" disabled id="chat-send-btn">
+                            <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                                 stroke-width="2" viewBox="0 0 24 24">
+                                <line x1="22" x2="11" y1="2" y2="13"/>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
-      </div>
     </div>
-  </div>
+</div>
 
-  <!-- Vendor（全局变量，ES module 通过 window.* 访问） -->
-  <!-- 0.17.6: Cherry Markdown Stream 版 + CSS 替换 marked + purify + highlight -->
-  <script src="vendor/cherry-markdown.stream.min.js"></script>
-  <link href="vendor/cherry-markdown.min.css" rel="stylesheet">
+<!-- Vendor（全局变量，ES module 通过 window.* 访问） -->
+<!-- 0.17.6: Cherry Markdown Stream 版 + CSS 替换 marked + purify + highlight -->
+<script src="vendor/cherry-markdown.stream.min.js"></script>
+<link href="vendor/cherry-markdown.min.css" rel="stylesheet">
 
-  <!-- 入口 -->
-  <script type="module" src="js/chat/main.js"></script>
+<!-- 入口 -->
+<script src="js/chat/main.js" type="module"></script>
 </body>
 </html>

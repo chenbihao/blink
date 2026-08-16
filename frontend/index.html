@@ -2,17 +2,17 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
     <title>Blink</title>
-    <link rel="stylesheet" href="css/entries/main.css"/>
+    <link href="css/entries/main.css" rel="stylesheet"/>
     <!-- 0.17.6: Cherry Markdown Stream 版（主窗口 AI 展示区渲染） -->
-    <link rel="stylesheet" href="vendor/cherry-markdown.min.css"/>
+    <link href="vendor/cherry-markdown.min.css" rel="stylesheet"/>
     <script src="vendor/cherry-markdown.stream.min.js"></script>
 </head>
 <body>
 <!-- #app 整张卡片：只有容器本身可拖动，可点击元素（input/结果项）明确排除。
      不用 deep 模式，避免第一次点击被拖动检测吞掉导致"需要双击" -->
-<div id="app" data-tauri-drag-region>
+<div data-tauri-drag-region id="app">
     <!-- 搜索模式（0.17.6: 独立容器，与 AI 模式 display 切换） -->
     <div id="search-mode">
         <div id="search-bar">
@@ -21,11 +21,11 @@
                      .ghost-typed 与用户输入等宽同字体但透明（占位对齐），
                      .ghost-suggest 灰色半透明显示 "→ fanyi" 类补全后缀，
                      .ghost-chord 单行小字提示 Alt+A/Q/C（仅 chord-visible + 无 ghost-suggest 时显示）。 -->
-                <div id="ghost-overlay" aria-hidden="true"><span class="ghost-typed"></span><span
+                <div aria-hidden="true" id="ghost-overlay"><span class="ghost-typed"></span><span
                         class="ghost-suggest"></span><span class="ghost-chord"></span></div>
-                <input id="query" type="text" autocomplete="off" spellcheck="false"/>
+                <input autocomplete="off" id="query" spellcheck="false" type="text"/>
                 <!-- 0.10 G1 录音指示器：录音中显示音量波动条 + "语音输入中" -->
-                <div id="voice-indicator" class="voice-indicator hidden">
+                <div class="voice-indicator hidden" id="voice-indicator">
                     <div class="voice-wave">
                         <div class="vw-bar"></div>
                         <div class="vw-bar"></div>
@@ -41,14 +41,14 @@
     </div>
 
     <!-- AI 模式（0.17.6: 独立容器，Tab on AI Ghost 进入，ESC 退出） -->
-    <div id="ai-mode" hidden>
+    <div hidden id="ai-mode">
         <div id="ai-input-bar">
-            <span class="ai-mode-indicator" aria-hidden="true">
+            <span aria-hidden="true" class="ai-mode-indicator">
                 <svg class="icon"><use href="#icon-sparkles"/></svg>
                 <span>AI</span>
             </span>
-            <input id="ai-query" type="text" autocomplete="off" spellcheck="false"
-                   placeholder="追问…" data-i18n-placeholder="ai.followup_placeholder"/>
+            <input autocomplete="off" data-i18n-placeholder="ai.followup_placeholder" id="ai-query" placeholder="追问…"
+                   spellcheck="false" type="text"/>
         </div>
         <div id="ai-display">
             <div id="ai-tool-line"></div>
@@ -58,13 +58,13 @@
                 <div id="ai-content"></div>
             </div>
         </div>
-        <div id="ai-footer" class="hidden">
+        <div class="hidden" id="ai-footer">
             <span id="ai-model-label"></span>
         </div>
     </div>
 
     <div id="statusbar"></div>
 </div>
-<script type="module" src="js/main-window/main.js"></script>
+<script src="js/main-window/main.js" type="module"></script>
 </body>
 </html>

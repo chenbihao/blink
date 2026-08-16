@@ -25,7 +25,7 @@
  *   永不进 SQLite / IPC value 序列化路径。
  */
 
-import { invoke } from "./tauri.js";
+import {invoke} from "./tauri.js";
 
 /**
  * 统一配置写入。
@@ -34,5 +34,5 @@ import { invoke } from "./tauri.js";
  * @returns {Promise<void>}
  */
 export async function saveConfig(key, value) {
-  return invoke("set_config", { key, value });
+    return invoke("set_config", {key, value});
 }

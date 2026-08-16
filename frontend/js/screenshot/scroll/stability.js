@@ -10,29 +10,29 @@ const DEFAULT_STABLE_THRESHOLD = 3;
 let _diffBuffer = null;
 
 export function probeMotionScore(previous, current, quantile = DEFAULT_STABLE_QUANTILE) {
-  if (!previous || !current || previous.length === 0 || previous.length !== current.length) {
-    return Infinity;
-  }
-  const len = previous.length;
-  // M5 优化：复用缓冲区，仅在实际需要扩容时分配
-  if (!_diffBuffer || _diffBuffer.length < len) {
-    _diffBuffer = new Uint8Array(len);
-  }
-  const differences = _diffBuffer.subarray(0, len);
-  for (let i = 0; i < len; i++) {
-    differences[i] = Math.abs(previous[i] - current[i]);
-  }
-  differences.sort();
-  const index = Math.min(
-    differences.length - 1,
-    Math.max(0, Math.floor((differences.length - 1) * quantile)),
-  );
-  return differences[index];
+    if (!previous || !current || previous.length === 0 || previous.length !== current.length) {
+        return Infinity;
+    }
+    const len = previous.length;
+    // M5 优化：复用缓冲区，仅在实际需要扩容时分配
+    if (!_diffBuffer || _diffBuffer.length < len) {
+        _diffBuffer = new Uint8Array(len);
+    }
+    const differences = _diffBuffer.subarray(0, len);
+    for (let i = 0; i < len; i++) {
+        differences[i] = Math.abs(previous[i] - current[i]);
+    }
+    differences.sort();
+    const index = Math.min(
+        differences.length - 1,
+        Math.max(0, Math.floor((differences.length - 1) * quantile)),
+    );
+    return differences[index];
 }
 
 export function isProbeStable(previous, current, options = {}) {
-  const threshold = options.threshold ?? DEFAULT_STABLE_THRESHOLD;
-  const quantile = options.quantile ?? DEFAULT_STABLE_QUANTILE;
-  const score = probeMotionScore(previous, current, quantile);
-  return { stable: score <= threshold, score };
+    const threshold = options.threshold ?? DEFAULT_STABLE_THRESHOLD;
+    const quantile = options.quantile ?? DEFAULT_STABLE_QUANTILE;
+    const score = probeMotionScore(previous, current, quantile);
+    return {stable: score <= threshold, score};
 }

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 
-const { isProbeStable, probeMotionScore } = await import(
-  'data:text/javascript;base64,'
-  + Buffer.from(await readFile(new URL('./stability.js', import.meta.url))).toString('base64')
-);
+const {isProbeStable, probeMotionScore} = await import(
+'data:text/javascript;base64,'
++ Buffer.from(await readFile(new URL('./stability.js', import.meta.url))).toString('base64')
+    );
 
 const stillA = new Uint8Array(100).fill(80);
 const stillB = new Uint8Array(100).fill(81);
@@ -13,9 +13,9 @@ assert.equal(isProbeStable(stillA, stillB).stable, true, '轻微采集噪声应�
 const localAnimation = new Uint8Array(stillA);
 localAnimation.fill(180, 0, 20);
 assert.equal(
-  isProbeStable(stillA, localAnimation).stable,
-  true,
-  '小面积动画不应让稳定等待永久超时',
+    isProbeStable(stillA, localAnimation).stable,
+    true,
+    '小面积动画不应让稳定等待永久超时',
 );
 
 const scrolling = new Uint8Array(stillA);

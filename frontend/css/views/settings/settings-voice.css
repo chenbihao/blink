@@ -2,35 +2,35 @@
 /* 使用 Blink 主题 token，与设置页其他 Tab 风格一致 */
 
 #voice .radio-group {
-  display: flex;
-  gap: var(--space-lg, 16px);
+    display: flex;
+    gap: var(--space-lg, 16px);
 }
 
 /* 0.16.0: radio 组件样式已收编到 components/radio.css，此处不再覆写 */
 
 #voice .subsection-title {
-  font-size: var(--text-base, 13px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--text);
-  margin: var(--space-lg, 16px) 0 var(--space-sm, 8px);
-  padding-bottom: var(--space-xs, 4px);
-  border-bottom: 1px solid var(--surface);
+    font-size: var(--text-base, 13px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text);
+    margin: var(--space-lg, 16px) 0 var(--space-sm, 8px);
+    padding-bottom: var(--space-xs, 4px);
+    border-bottom: 1px solid var(--surface);
 }
 
 #voice .setting-hint {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-dim);
-  margin: var(--space-xs, 4px) 0 var(--space-sm, 8px);
-  line-height: var(--leading-normal, 1.5);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-dim);
+    margin: var(--space-xs, 4px) 0 var(--space-sm, 8px);
+    line-height: var(--leading-normal, 1.5);
 }
 
 #voice .setting-hint code {
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-  font-size: var(--text-xs, 11px);
-  color: var(--text-sub);
-  background: var(--surface);
-  padding: 1px var(--space-xs, 5px);
-  border-radius: var(--radius-xs, 2px);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    background: var(--surface);
+    padding: 1px var(--space-xs, 5px);
+    border-radius: var(--radius-xs, 2px);
 }
 
 /* ── 分区卡片（对齐 extension-card 配色体系）────────────────────── */
@@ -40,962 +40,962 @@
    body 透明继承，内部 setting-row 用底边框分隔 */
 
 #voice .voice-section-card {
-  margin: var(--space-md, 12px) 0;
-  background: var(--bg-sidebar);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-md, 10px);
-  overflow: hidden;
+    margin: var(--space-md, 12px) 0;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md, 10px);
+    overflow: hidden;
 }
 
 #voice .voice-section-card-header {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-sm, 10px);
-  padding: var(--space-sm, 10px) var(--space-md, 14px);
-  background: var(--bg);
-  border-bottom: 1px solid var(--surface);
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm, 10px);
+    padding: var(--space-sm, 10px) var(--space-md, 14px);
+    background: var(--bg);
+    border-bottom: 1px solid var(--surface);
 }
 
 /* details 模式的 section-card（如 Python 环境卡）：summary 可点击 */
 #voice details.voice-section-card > summary {
-  list-style: none;
-  cursor: pointer;
-  user-select: none;
-  transition: background var(--transition-fast, 0.1s);
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+    transition: background var(--transition-fast, 0.1s);
 }
 
 #voice details.voice-section-card > summary::-webkit-details-marker {
-  display: none;
+    display: none;
 }
 
 #voice details.voice-section-card > summary:hover {
-  background: var(--surface);
+    background: var(--surface);
 }
 
 /* details 折叠时 header 不需要底边框 */
 #voice details.voice-section-card:not([open]) > summary {
-  border-bottom: none;
+    border-bottom: none;
 }
 
 /* Python 环境摘要文字 */
 #voice .voice-env-summary {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-dim);
-  margin-left: auto;
-  white-space: nowrap;
+    font-size: var(--text-sm, 12px);
+    color: var(--text-dim);
+    margin-left: auto;
+    white-space: nowrap;
 }
 
 #voice .voice-env-summary.ready {
-  color: var(--green);
+    color: var(--green);
 }
 
 #voice .voice-section-card-title {
-  font-size: var(--text-md, 14px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--text);
-  flex-shrink: 0;
+    font-size: var(--text-md, 14px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text);
+    flex-shrink: 0;
 }
 
 #voice .voice-section-card-desc {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-dim);
-  margin-left: auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+    font-size: var(--text-sm, 12px);
+    color: var(--text-dim);
+    margin-left: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 #voice .voice-section-card-body {
-  padding: var(--space-md, 12px) var(--space-md, 14px);
+    padding: var(--space-md, 12px) var(--space-md, 14px);
 }
 
 #voice .voice-section-card-body > .setting-hint:first-child {
-  margin-top: 0;
+    margin-top: 0;
 }
 
 #voice .setting-hint-block {
-  margin-top: var(--space-lg, 16px);
-  padding: var(--space-md, 12px) var(--space-md, 14px);
-  background: var(--bg-sidebar);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-md, 8px);
+    margin-top: var(--space-lg, 16px);
+    padding: var(--space-md, 12px) var(--space-md, 14px);
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md, 8px);
 }
 
 #voice .setting-hint-block p {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-sub);
-  margin: var(--space-xs, 4px) 0;
-  line-height: var(--leading-normal, 1.5);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    margin: var(--space-xs, 4px) 0;
+    line-height: var(--leading-normal, 1.5);
 }
 
 #voice .setting-hint-block strong {
-  color: var(--text);
+    color: var(--text);
 }
 
 /* input 继承设置页通用样式 */
 #voice input[type="text"],
 #voice input[type="password"] {
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md, 6px);
-  padding: var(--space-xs, 6px) var(--space-md, 10px);
-  font-size: var(--text-md, 14px);
-  font-family: inherit;
-  outline: none;
-  height: 32px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md, 6px);
+    padding: var(--space-xs, 6px) var(--space-md, 10px);
+    font-size: var(--text-md, 14px);
+    font-family: inherit;
+    outline: none;
+    height: 32px;
 }
 
 #voice input[type="text"]:focus,
 #voice input[type="password"]:focus {
-  border-color: var(--accent);
+    border-color: var(--accent);
 }
 
 #voice input[type="text"]::placeholder,
 #voice input[type="password"]::placeholder {
-  color: var(--text-faint);
+    color: var(--text-faint);
 }
 
 /* 已配置密钥时 placeholder 变绿（覆盖上面的灰色默认值） */
 #voice input.has-secret-hint::placeholder {
-  color: var(--green, #38a169);
-  opacity: 0.85;
+    color: var(--green, #38a169);
+    opacity: 0.85;
 }
 
 /* ── dimmed 状态（云端模式下本地专属字段不生效）────────────────── */
 
 #voice .setting-row-dimmed {
-  opacity: var(--opacity-dim, 0.6);
+    opacity: var(--opacity-dim, 0.6);
 }
 
 /* ── 云端供应商配置区 ─────────────────────────────────────────── */
 
 #voice-cloud-section input[type="text"],
 #voice-cloud-section input[type="password"] {
-  flex: 1;
-  min-width: 200px;
-  max-width: 420px;
+    flex: 1;
+    min-width: 200px;
+    max-width: 420px;
 }
 
 #voice-cloud-section select {
-  min-width: 200px;
+    min-width: 200px;
 }
 
 /* API Key 输入组 */
 .voice-cloud-key-wrap {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  flex: 1;
-  min-width: 200px;
-  max-width: 500px;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    flex: 1;
+    min-width: 200px;
+    max-width: 500px;
 }
 
 #voice-cloud-section .voice-cloud-key-wrap input[type="password"] {
-  flex: 1;
-  min-width: 0;
-  max-width: none;
+    flex: 1;
+    min-width: 0;
+    max-width: none;
 }
 
 /* 模型 ID 输入组 */
 .voice-cloud-model-wrap {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  flex: 1;
-  min-width: 200px;
-  max-width: 500px;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    flex: 1;
+    min-width: 200px;
+    max-width: 500px;
 }
 
 #voice-cloud-section .voice-cloud-model-wrap input[type="text"] {
-  flex: 1;
-  min-width: 0;
-  max-width: none;
+    flex: 1;
+    min-width: 0;
+    max-width: none;
 }
 
 .voice-cloud-key-btn {
-  padding: var(--space-xs, 6px) var(--space-lg, 16px);
-  font-size: var(--text-sm, 12px);
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md, 6px);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+    padding: var(--space-xs, 6px) var(--space-lg, 16px);
+    font-size: var(--text-sm, 12px);
+    color: var(--accent);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-md, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .voice-cloud-key-btn:hover {
-  background: var(--accent-bg);
-  border-color: var(--accent);
+    background: var(--accent-bg);
+    border-color: var(--accent);
 }
 
 .voice-cloud-key-btn.voice-cloud-key-btn-danger {
-  color: var(--red);
-  background: var(--red-bg);
-  border: 1px solid var(--red-border);
+    color: var(--red);
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
 }
 
 .voice-cloud-key-btn.voice-cloud-key-btn-danger:hover {
-  background: var(--danger-hover-bg);
-  border-color: var(--red);
+    background: var(--danger-hover-bg);
+    border-color: var(--red);
 }
 
 /* 云端测试结果 */
 .voice-cloud-test-wrap {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  flex: 1;
-  min-width: 200px;
-  max-width: 600px;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    flex: 1;
+    min-width: 200px;
+    max-width: 600px;
 }
 
 .voice-cloud-test-result {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-dim);
-  line-height: var(--leading-snug, 1.4);
-  white-space: pre-wrap;
-  word-break: break-word;
+    font-size: var(--text-xs, 11px);
+    color: var(--text-dim);
+    line-height: var(--leading-snug, 1.4);
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .voice-cloud-test-result.success {
-  color: var(--green);
+    color: var(--green);
 }
 
 .voice-cloud-test-result.error {
-  color: var(--red);
+    color: var(--red);
 }
 
 /* 模型列表 */
 #voice .model-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm, 8px);
-  margin-top: var(--space-sm, 8px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm, 8px);
+    margin-top: var(--space-sm, 8px);
 }
 
 #voice .model-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md, 12px);
-  padding: var(--space-sm, 10px) var(--space-md, 12px);
-  background: var(--surface);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-md, 8px);
-  flex-wrap: wrap;
+    display: flex;
+    align-items: center;
+    gap: var(--space-md, 12px);
+    padding: var(--space-sm, 10px) var(--space-md, 12px);
+    background: var(--surface);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md, 8px);
+    flex-wrap: wrap;
 }
 
 #voice .model-info {
-  flex: 1;
-  min-width: 0;
+    flex: 1;
+    min-width: 0;
 }
 
 #voice .model-name {
-  font-size: var(--text-sm, 12px);
-  font-weight: var(--weight-medium, 500);
-  color: var(--text);
+    font-size: var(--text-sm, 12px);
+    font-weight: var(--weight-medium, 500);
+    color: var(--text);
 }
 
 #voice .model-meta {
-  display: flex;
-  gap: var(--space-sm, 8px);
-  align-items: center;
-  margin-top: var(--space-xs, 4px);
-  font-size: var(--text-xs, 11px);
-  color: var(--text-dim);
-  flex-wrap: wrap;
+    display: flex;
+    gap: var(--space-sm, 8px);
+    align-items: center;
+    margin-top: var(--space-xs, 4px);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-dim);
+    flex-wrap: wrap;
 }
 
 #voice .model-badge {
-  padding: 1px var(--space-xs, 6px);
-  border-radius: var(--radius-xs, 4px);
-  background: var(--surface-2);
-  font-size: var(--text-2xs, 10px);
-  color: var(--text-sub);
+    padding: 1px var(--space-xs, 6px);
+    border-radius: var(--radius-xs, 4px);
+    background: var(--surface-2);
+    font-size: var(--text-2xs, 10px);
+    color: var(--text-sub);
 }
 
 #voice .model-badge.streaming {
-  background: var(--green-bg);
-  color: var(--green);
+    background: var(--green-bg);
+    color: var(--green);
 }
 
 #voice .model-params {
-  color: var(--text-sub);
-  font-weight: var(--weight-medium, 500);
+    color: var(--text-sub);
+    font-weight: var(--weight-medium, 500);
 }
 
 #voice .model-status.model-downloaded {
-  color: var(--green);
+    color: var(--green);
 }
 
 #voice .model-status.model-not-downloaded {
-  color: var(--text-faint);
+    color: var(--text-faint);
 }
 
 #voice .model-btn {
-  padding: var(--space-2xs, 4px) var(--space-md, 12px);
-  font-size: var(--text-xs, 11px);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm, 6px);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  transition: background var(--transition-base, 0.15s);
+    padding: var(--space-2xs, 4px) var(--space-md, 12px);
+    font-size: var(--text-xs, 11px);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition-base, 0.15s);
 }
 
 #voice .model-btn:hover {
-  background: var(--surface-2);
+    background: var(--surface-2);
 }
 
 #voice .model-btn.download {
-  border-color: var(--accent);
-  color: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 #voice .model-btn.use {
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: var(--weight-medium, 500);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: var(--weight-medium, 500);
 }
 
 #voice .model-btn.delete {
-  border-color: var(--red);
-  color: var(--red);
+    border-color: var(--red);
+    color: var(--red);
 }
 
 #voice .model-row.model-selected {
-  border-color: var(--accent);
-  background: var(--accent-bg);
+    border-color: var(--accent);
+    background: var(--accent-bg);
 }
 
 #voice .model-badge.selected {
-  background: var(--accent);
-  color: var(--bg);
-  font-weight: var(--weight-medium, 500);
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: var(--weight-medium, 500);
 }
 
 /* 下载进度条 */
 #voice .model-progress {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  width: 100%;
-  margin-top: var(--space-xs, 4px);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    width: 100%;
+    margin-top: var(--space-xs, 4px);
 }
 
 #voice .progress-bar {
-  flex: 1;
-  height: 4px;
-  background: var(--surface-2);
-  border-radius: var(--radius-xs, 2px);
-  overflow: hidden;
+    flex: 1;
+    height: 4px;
+    background: var(--surface-2);
+    border-radius: var(--radius-xs, 2px);
+    overflow: hidden;
 }
 
 #voice .progress-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: var(--radius-xs, 2px);
-  transition: width 0.3s ease;
-  width: 0%;
+    height: 100%;
+    background: var(--accent);
+    border-radius: var(--radius-xs, 2px);
+    transition: width 0.3s ease;
+    width: 0%;
 }
 
 #voice .progress-text {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-dim);
-  min-width: 30px;
-  text-align: right;
+    font-size: var(--text-xs, 11px);
+    color: var(--text-dim);
+    min-width: 30px;
+    text-align: right;
 }
 
 #voice .action-list-empty {
-  text-align: center;
-  padding: var(--space-lg, 16px);
-  color: var(--text-faint);
-  font-size: var(--text-xs, 11px);
+    text-align: center;
+    padding: var(--space-lg, 16px);
+    color: var(--text-faint);
+    font-size: var(--text-xs, 11px);
 }
 
 /* ── 音频设备选择 + 调试 ────────────────────────────────────────────── */
 
 #voice-audio-device {
-  padding: var(--space-xs, 4px) var(--space-sm, 8px);
-  font-size: var(--text-sm, 12px);
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
-  min-width: 200px;
+    padding: var(--space-xs, 4px) var(--space-sm, 8px);
+    font-size: var(--text-sm, 12px);
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    min-width: 200px;
 }
 
 #voice-audio-device:focus {
-  outline: none;
-  border-color: var(--accent);
+    outline: none;
+    border-color: var(--accent);
 }
 
 .audio-test-container {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md, 12px);
-  flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--space-md, 12px);
+    flex: 1;
 }
 
 .audio-test-btn {
-  padding: var(--space-xs, 6px) var(--space-lg, 16px);
-  font-size: var(--text-sm, 12px);
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background var(--transition-base, 0.15s), border-color var(--transition-base, 0.15s);
+    padding: var(--space-xs, 6px) var(--space-lg, 16px);
+    font-size: var(--text-sm, 12px);
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-base, 0.15s), border-color var(--transition-base, 0.15s);
 }
 
 .audio-test-btn:hover {
-  background: var(--surface-2);
+    background: var(--surface-2);
 }
 
 .audio-test-btn.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
 }
 
 .audio-test-meter {
-  flex: 1;
-  height: 8px;
-  background: var(--surface-2);
-  border-radius: var(--radius-sm, 4px);
-  overflow: hidden;
-  border: 1px solid var(--surface-2);
+    flex: 1;
+    height: 8px;
+    background: var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    overflow: hidden;
+    border: 1px solid var(--surface-2);
 }
 
 .audio-test-bar {
-  height: 100%;
-  width: 0%;
-  background: var(--green);
-  border-radius: var(--radius-xs, 3px);
-  transition: width 0.05s linear, background 0.2s;
-  min-width: 0;
+    height: 100%;
+    width: 0%;
+    background: var(--green);
+    border-radius: var(--radius-xs, 3px);
+    transition: width 0.05s linear, background 0.2s;
+    min-width: 0;
 }
 
 /* ── 推理引擎下载 ────────────────────────────────────────────────────── */
 
 #voice .engine-status-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md, 12px);
-  margin: var(--space-sm, 8px) 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-md, 12px);
+    margin: var(--space-sm, 8px) 0;
 }
 
 #voice .setting-row-funasr {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm, 8px);
-  margin: var(--space-sm, 8px) 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm, 8px);
+    margin: var(--space-sm, 8px) 0;
 }
 
 #voice .setting-row-funasr .setting-row-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  padding: var(--space-xs, 6px) 0;
-  border-bottom: 1px solid var(--surface);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    padding: var(--space-xs, 6px) 0;
+    border-bottom: 1px solid var(--surface);
 }
 
 #voice .setting-row-funasr .setting-row-item:last-child {
-  border-bottom: none;
+    border-bottom: none;
 }
 
 #voice .setting-row-funasr .setting-row-item select {
-  min-width: 280px;
+    min-width: 280px;
 }
 
 #voice .engine-auto-start-label {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-dim);
-  cursor: pointer;
-  white-space: nowrap;
+    font-size: var(--text-sm, 12px);
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
 }
 
 #voice .engine-status-info {
-  flex: 1;
-  min-width: 0;
+    flex: 1;
+    min-width: 0;
 }
 
 #voice .engine-status-text {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-dim);
+    font-size: var(--text-sm, 12px);
+    color: var(--text-dim);
 }
 
 #voice .engine-download-btn {
-  padding: var(--space-xs, 6px) var(--space-lg, 16px);
-  font-size: var(--text-sm, 12px);
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md, 6px);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+    padding: var(--space-xs, 6px) var(--space-lg, 16px);
+    font-size: var(--text-sm, 12px);
+    color: var(--accent);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-md, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 #voice .engine-download-btn:hover:not(:disabled) {
-  background: var(--accent-bg);
-  border-color: var(--accent);
+    background: var(--accent-bg);
+    border-color: var(--accent);
 }
 
 #voice .engine-download-btn.installed {
-  color: var(--green);
-  border-color: var(--green);
-  background: var(--green-bg);
-  cursor: default;
+    color: var(--green);
+    border-color: var(--green);
+    background: var(--green-bg);
+    cursor: default;
 }
 
 #voice .engine-download-btn.installed:hover {
-  background: var(--green-bg);
-  border-color: var(--green);
+    background: var(--green-bg);
+    border-color: var(--green);
 }
 
 #voice .engine-progress {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  margin: var(--space-xs, 4px) 0 var(--space-md, 12px);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    margin: var(--space-xs, 4px) 0 var(--space-md, 12px);
 }
 
 /* ── STT 诊断（按钮在统一日志窗口头部）────────────────────────────── */
 
 #voice .stt-diagnose-btn {
-  padding: 3px 10px;
-  font-size: var(--text-xs, 11px);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-xs, 4px);
-  background: var(--surface);
-  color: var(--text-sub);
-  cursor: pointer;
-  transition: background var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
+    padding: 3px 10px;
+    font-size: var(--text-xs, 11px);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-xs, 4px);
+    background: var(--surface);
+    color: var(--text-sub);
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
 }
 
 #voice .stt-diagnose-btn:hover:not(:disabled) {
-  background: var(--surface-2);
-  border-color: var(--accent);
-  color: var(--text);
+    background: var(--surface-2);
+    border-color: var(--accent);
+    color: var(--text);
 }
 
 /* ── 统一日志窗口（FunASR 日志 + 诊断输出共用）────────────────────── */
 
 #voice .voice-log-wrap {
-  margin: var(--space-sm, 10px) 0 var(--space-2xs, 4px);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm, 4px);
-  overflow: hidden;
-  background: var(--bg-deep);
+    margin: var(--space-sm, 10px) 0 var(--space-2xs, 4px);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 4px);
+    overflow: hidden;
+    background: var(--bg-deep);
 }
 
 #voice .voice-log-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-xs, 5px) var(--space-md, 10px);
-  background: var(--bg);
-  border-bottom: 1px solid var(--surface);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-xs, 5px) var(--space-md, 10px);
+    background: var(--bg);
+    border-bottom: 1px solid var(--surface);
 }
 
 #voice .voice-log-title {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-sub);
-  font-weight: var(--weight-semibold, 600);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    font-weight: var(--weight-semibold, 600);
 }
 
 #voice .voice-log-actions {
-  display: flex;
-  gap: var(--space-xs, 6px);
-  align-items: center;
+    display: flex;
+    gap: var(--space-xs, 6px);
+    align-items: center;
 }
 
 #voice .voice-log-clear-btn {
-  background: none;
-  border: none;
-  color: var(--text-sub);
-  font-size: var(--text-xs, 11px);
-  cursor: pointer;
-  padding: var(--space-2xs, 2px) var(--space-xs, 6px);
-  border-radius: var(--radius-xs, 3px);
-  transition: color var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
+    background: none;
+    border: none;
+    color: var(--text-sub);
+    font-size: var(--text-xs, 11px);
+    cursor: pointer;
+    padding: var(--space-2xs, 2px) var(--space-xs, 6px);
+    border-radius: var(--radius-xs, 3px);
+    transition: color var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
 }
 
 #voice .voice-log-clear-btn:hover {
-  color: var(--text);
-  background: var(--surface);
+    color: var(--text);
+    background: var(--surface);
 }
 
 #voice .voice-server-log {
-  background: var(--bg-deep);
-  padding: var(--space-sm, 8px) var(--space-md, 10px);
-  font-size: var(--text-xs, 11px);
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-  color: var(--text-sub);
-  max-height: 240px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
-  line-height: var(--leading-normal, 1.5);
-  min-height: 40px;
-  user-select: text;
-  -webkit-user-select: text;
-  cursor: text;
+    background: var(--bg-deep);
+    padding: var(--space-sm, 8px) var(--space-md, 10px);
+    font-size: var(--text-xs, 11px);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    color: var(--text-sub);
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+    line-height: var(--leading-normal, 1.5);
+    min-height: 40px;
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
 }
 
 /* ── 热词输入框（高级选项卡片内）────────────────────────────────── */
 
 #voice .voice-hotwords-input {
-  width: 100%;
-  min-height: 56px;
-  max-height: 200px;
-  overflow-y: auto;
-  background: var(--bg-sidebar);
-  color: var(--text);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-md, 6px);
-  padding: var(--space-sm, 8px) var(--space-md, 10px);
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-  font-size: var(--text-sm, 12px);
-  line-height: var(--leading-relaxed, 1.6);
-  resize: vertical;
-  outline: none;
-  transition: border-color var(--transition-base, 0.15s);
+    width: 100%;
+    min-height: 56px;
+    max-height: 200px;
+    overflow-y: auto;
+    background: var(--bg-sidebar);
+    color: var(--text);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md, 6px);
+    padding: var(--space-sm, 8px) var(--space-md, 10px);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-size: var(--text-sm, 12px);
+    line-height: var(--leading-relaxed, 1.6);
+    resize: vertical;
+    outline: none;
+    transition: border-color var(--transition-base, 0.15s);
 }
 
 #voice .voice-hotwords-input:focus {
-  border-color: var(--accent);
+    border-color: var(--accent);
 }
 
 #voice .voice-hotwords-input::placeholder {
-  color: var(--text-faint);
+    color: var(--text-faint);
 }
 
 /* ── 高级选项可折叠卡片（嵌套在 FunASR 卡片内，再凹陷一层）──────── */
 
 #voice .voice-advanced-card {
-  margin: var(--space-sm, 10px) 0 var(--space-2xs, 4px);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm, 6px);
-  overflow: hidden;
-  background: var(--bg);
+    margin: var(--space-sm, 10px) 0 var(--space-2xs, 4px);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 6px);
+    overflow: hidden;
+    background: var(--bg);
 }
 
 /* Header / Summary */
 #voice .voice-advanced-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  padding: var(--space-sm, 8px) var(--space-md, 12px);
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-  background: var(--bg);
-  border-bottom: 1px solid var(--surface);
-  transition: background var(--transition-fast, 0.1s);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    padding: var(--space-sm, 8px) var(--space-md, 12px);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    background: var(--bg);
+    border-bottom: 1px solid var(--surface);
+    transition: background var(--transition-fast, 0.1s);
 }
 
 #voice .voice-advanced-header::-webkit-details-marker {
-  display: none;
+    display: none;
 }
 
 #voice .voice-advanced-header:hover {
-  background: var(--surface);
+    background: var(--surface);
 }
 
 #voice .voice-advanced-chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-  color: var(--text-dim);
-  font-size: var(--text-2xs, 10px);
-  transition: transform var(--transition-base, 0.15s);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: var(--text-2xs, 10px);
+    transition: transform var(--transition-base, 0.15s);
 }
 
 #voice .voice-advanced-chevron::before {
-  content: "▶";
+    content: "▶";
 }
 
 #voice .voice-advanced-card[open] .voice-advanced-chevron {
-  transform: rotate(90deg);
+    transform: rotate(90deg);
 }
 
 #voice .voice-advanced-title {
-  font-size: var(--text-sm, 12px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--text);
+    font-size: var(--text-sm, 12px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text);
 }
 
 #voice .voice-advanced-desc {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-dim);
-  margin-left: auto;
+    font-size: var(--text-xs, 11px);
+    color: var(--text-dim);
+    margin-left: auto;
 }
 
 /* Body */
 #voice .voice-advanced-body {
-  padding: var(--space-xs, 4px) var(--space-md, 12px) var(--space-md, 12px);
-  background: var(--bg-deep);
+    padding: var(--space-xs, 4px) var(--space-md, 12px) var(--space-md, 12px);
+    background: var(--bg-deep);
 }
 
 /* Fields */
 #voice .voice-adv-field {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-lg, 16px);
-  padding: var(--space-sm, 10px) 0;
-  border-bottom: 1px solid var(--surface);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-lg, 16px);
+    padding: var(--space-sm, 10px) 0;
+    border-bottom: 1px solid var(--surface);
 }
 
 #voice .voice-adv-field:last-of-type {
-  border-bottom: none;
+    border-bottom: none;
 }
 
 #voice .voice-adv-field--block {
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-xs, 6px);
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-xs, 6px);
 }
 
 #voice .voice-adv-field-label {
-  width: var(--settings-label-width, 180px);
-  flex-shrink: 0;
-  font-size: var(--text-md, 14px);
-  color: var(--text-sub);
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs, 4px);
-  padding-top: 2px;
+    width: var(--settings-label-width, 180px);
+    flex-shrink: 0;
+    font-size: var(--text-md, 14px);
+    color: var(--text-sub);
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs, 4px);
+    padding-top: 2px;
 }
 
 #voice .voice-adv-field--block .voice-adv-field-label {
-  width: auto;
+    width: auto;
 }
 
 #voice .voice-adv-field-control {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 10px);
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 10px);
 }
 
 /* block 模式下 control 不需要 flex（只有 textarea 单元素），用 block 让 textarea 自然填充 */
 #voice .voice-adv-field--block .voice-adv-field-control {
-  display: block;
+    display: block;
 }
 
 #voice .voice-adv-field-hint {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-faint);
-  line-height: var(--leading-normal, 1.5);
+    font-size: var(--text-sm, 12px);
+    color: var(--text-faint);
+    line-height: var(--leading-normal, 1.5);
 }
 
 /* ── VAD 切句参数卡片（嵌套在高级选项内，最深层凹陷）────────────── */
 
 #voice .voice-vad-card {
-  margin-top: var(--space-sm, 10px);
-  padding: var(--space-sm, 10px) var(--space-md, 12px);
-  background: var(--bg-sidebar);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-xs, 4px);
+    margin-top: var(--space-sm, 10px);
+    padding: var(--space-sm, 10px) var(--space-md, 12px);
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-xs, 4px);
 }
 
 #voice .voice-vad-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-sm, 10px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-sm, 10px);
 }
 
 #voice .voice-vad-card-title {
-  font-size: var(--text-sm, 12px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--text-sub);
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs, 4px);
+    font-size: var(--text-sm, 12px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text-sub);
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs, 4px);
 }
 
 #voice .voice-vad-reset-btn {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-sub);
-  background: var(--surface);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-xs, 4px);
-  padding: 2px 10px;
-  cursor: pointer;
-  transition: color var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-xs, 4px);
+    padding: 2px 10px;
+    cursor: pointer;
+    transition: color var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
 }
 
 #voice .voice-vad-reset-btn:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
 }
 
 /* VAD 参数纵向列表 */
 #voice .voice-vad-params {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md, 14px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md, 14px);
 }
 
 #voice .voice-vad-param {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs, 6px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs, 6px);
 }
 
 #voice .voice-vad-param-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
 
 #voice .voice-vad-param-label {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-sub);
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs, 4px);
+    font-size: var(--text-sm, 12px);
+    color: var(--text-sub);
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs, 4px);
 }
 
 #voice .voice-vad-param-value {
-  font-size: var(--text-sm, 12px);
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--accent);
-  background: var(--accent-bg);
-  padding: 1px var(--space-md, 10px);
-  border-radius: var(--radius-pill, 10px);
-  min-width: 56px;
-  text-align: center;
-  white-space: nowrap;
+    font-size: var(--text-sm, 12px);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--accent);
+    background: var(--accent-bg);
+    padding: 1px var(--space-md, 10px);
+    border-radius: var(--radius-pill, 10px);
+    min-width: 56px;
+    text-align: center;
+    white-space: nowrap;
 }
 
 /* 滑动条：填充轨道（左半段强调色，右半段灰色）*/
 #voice .voice-vad-slider {
-  width: 100%;
-  height: 6px;
-  -webkit-appearance: none;
-  appearance: none;
-  background: linear-gradient(
-    to right,
-    var(--accent) 0%,
-    var(--accent) var(--fill-pct, 50%),
-    var(--surface-2) var(--fill-pct, 50%),
-    var(--surface-2) 100%
-  );
-  border-radius: 3px;
-  outline: none;
-  cursor: pointer;
+    width: 100%;
+    height: 6px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: linear-gradient(
+            to right,
+            var(--accent) 0%,
+            var(--accent) var(--fill-pct, 50%),
+            var(--surface-2) var(--fill-pct, 50%),
+            var(--surface-2) 100%
+    );
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
 }
 
 /* 滑动条 thumb（WebKit） */
 #voice .voice-vad-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  border: 2px solid var(--bg);
-  box-shadow: 0 1px 4px var(--shadow);
-  transition: transform var(--transition-fast, 0.1s);
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg);
+    box-shadow: 0 1px 4px var(--shadow);
+    transition: transform var(--transition-fast, 0.1s);
 }
 
 #voice .voice-vad-slider::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
+    transform: scale(1.2);
 }
 
 #voice .voice-vad-slider::-webkit-slider-thumb:active {
-  transform: scale(1.1);
+    transform: scale(1.1);
 }
 
 /* 滑动条 thumb（Firefox） */
 #voice .voice-vad-slider::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  border: 2px solid var(--bg);
-  box-shadow: 0 1px 4px var(--shadow);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg);
+    box-shadow: 0 1px 4px var(--shadow);
 }
 
 #voice .voice-vad-slider::-moz-range-track {
-  height: 6px;
-  background: transparent;
-  border-radius: 3px;
+    height: 6px;
+    background: transparent;
+    border-radius: 3px;
 }
 
 /* min / max 范围标签 */
 #voice .voice-vad-param-range {
-  display: flex;
-  justify-content: space-between;
-  font-size: var(--text-2xs, 10px);
-  color: var(--text-faint);
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--text-2xs, 10px);
+    color: var(--text-faint);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
 }
 
 /* ── 推理设备选择器 ────────────────────────────────────────────────── */
 
 #voice #funasr-device-select {
-  padding: var(--space-xs, 4px) var(--space-sm, 8px);
-  font-size: var(--text-sm, 12px);
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-sm, 4px);
-  cursor: pointer;
-  min-width: 160px;
+    padding: var(--space-xs, 4px) var(--space-sm, 8px);
+    font-size: var(--text-sm, 12px);
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    min-width: 160px;
 }
 
 #voice #funasr-device-select:focus {
-  outline: none;
-  border-color: var(--accent);
+    outline: none;
+    border-color: var(--accent);
 }
 
 #voice #funasr-device-select:disabled {
-  opacity: var(--opacity-dim, 0.5);
-  cursor: not-allowed;
+    opacity: var(--opacity-dim, 0.5);
+    cursor: not-allowed;
 }
 
 /* ── 按钮统一状态（success / running / disabled）────────────────── */
 /* 所有语音 Tab 按钮共用一套状态样式，避免灰色按钮问题 */
 
 #voice .engine-download-btn.success {
-  color: var(--green);
-  border-color: var(--green);
-  background: var(--green-bg);
-  cursor: default;
+    color: var(--green);
+    border-color: var(--green);
+    background: var(--green-bg);
+    cursor: default;
 }
 
 #voice .engine-download-btn.success:hover {
-  background: var(--green-bg);
-  border-color: var(--green);
+    background: var(--green-bg);
+    border-color: var(--green);
 }
 
 #voice .engine-download-btn.running {
-  color: var(--green);
-  border-color: var(--green);
-  background: var(--green-bg);
-  cursor: default;
+    color: var(--green);
+    border-color: var(--green);
+    background: var(--green-bg);
+    cursor: default;
 }
 
 #voice .engine-download-btn.running:hover {
-  background: var(--green-bg);
-  border-color: var(--green);
+    background: var(--green-bg);
+    border-color: var(--green);
 }
 
 /* disabled 统一用 opacity，不变色——避免「灰色按钮」视觉问题 */
@@ -1004,140 +1004,140 @@
 #voice .stt-space-refresh-btn:disabled,
 #voice .stt-space-open-folder-btn:disabled,
 #voice .stt-diagnose-btn:disabled {
-  opacity: var(--opacity-dim, 0.45);
-  cursor: default;
-  /* 保留原色调，仅降低透明度，不再强制变灰 */
-  color: inherit;
-  background: inherit;
-  border-color: inherit;
+    opacity: var(--opacity-dim, 0.45);
+    cursor: default;
+    /* 保留原色调，仅降低透明度，不再强制变灰 */
+    color: inherit;
+    background: inherit;
+    border-color: inherit;
 }
 
 /* ── 空间管理 ────────────────────────────────────────────────────── */
 
 #voice .stt-space-usage {
-  margin-top: 0;
+    margin-top: 0;
 }
 
 #voice .stt-space-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-sm, 8px) var(--space-md, 12px);
-  background: var(--bg);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm, 6px);
-  margin-bottom: var(--space-xs, 6px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-sm, 8px) var(--space-md, 12px);
+    background: var(--bg);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 6px);
+    margin-bottom: var(--space-xs, 6px);
 }
 
 #voice .stt-space-label {
-  font-size: var(--text-sm, 12px);
-  color: var(--text);
+    font-size: var(--text-sm, 12px);
+    color: var(--text);
 }
 
 #voice .stt-space-path {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-faint);
-  margin-top: 2px;
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-  word-break: break-all;
+    font-size: var(--text-xs, 11px);
+    color: var(--text-faint);
+    margin-top: 2px;
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    word-break: break-all;
 }
 
 #voice .stt-space-size {
-  font-size: var(--text-sm, 12px);
-  color: var(--text-dim);
-  font-weight: var(--weight-medium, 500);
-  white-space: nowrap;
-  margin-left: var(--space-md, 12px);
+    font-size: var(--text-sm, 12px);
+    color: var(--text-dim);
+    font-weight: var(--weight-medium, 500);
+    white-space: nowrap;
+    margin-left: var(--space-md, 12px);
 }
 
 #voice .stt-space-total {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: var(--space-sm, 10px);
-  padding: var(--space-sm, 10px) var(--space-md, 12px);
-  background: var(--bg);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm, 6px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: var(--space-sm, 10px);
+    padding: var(--space-sm, 10px) var(--space-md, 12px);
+    background: var(--bg);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 6px);
 }
 
 #voice .stt-space-total-label {
-  font-size: var(--text-sm, 12px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--text);
+    font-size: var(--text-sm, 12px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text);
 }
 
 #voice .stt-space-total-size {
-  font-size: var(--text-md, 14px);
-  font-weight: var(--weight-semibold, 600);
-  color: var(--accent);
+    font-size: var(--text-md, 14px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--accent);
 }
 
 #voice .stt-space-actions {
-  margin-top: var(--space-sm, 10px);
-  display: flex;
-  gap: var(--space-sm, 8px);
-  flex-wrap: wrap;
+    margin-top: var(--space-sm, 10px);
+    display: flex;
+    gap: var(--space-sm, 8px);
+    flex-wrap: wrap;
 }
 
 #voice .stt-space-cleanup-btn {
-  padding: var(--space-xs, 6px) var(--space-lg, 16px);
-  font-size: var(--text-sm, 12px);
-  border: 1px solid var(--red-border);
-  border-radius: var(--radius-md, 6px);
-  background: var(--red-bg);
-  color: var(--red);
-  cursor: pointer;
-  transition: background var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
+    padding: var(--space-xs, 6px) var(--space-lg, 16px);
+    font-size: var(--text-sm, 12px);
+    border: 1px solid var(--red-border);
+    border-radius: var(--radius-md, 6px);
+    background: var(--red-bg);
+    color: var(--red);
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
 }
 
 #voice .stt-space-cleanup-btn:hover:not(:disabled) {
-  background: var(--danger-hover-bg);
-  border-color: var(--red);
+    background: var(--danger-hover-bg);
+    border-color: var(--red);
 }
 
 #voice .stt-space-refresh-btn {
-  padding: var(--space-sm, 8px) var(--space-lg, 16px);
-  font-size: var(--text-base, 13px);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md, 6px);
-  background: var(--surface);
-  color: var(--text-sub);
-  cursor: pointer;
-  transition: background var(--transition-fast, 0.1s);
+    padding: var(--space-sm, 8px) var(--space-lg, 16px);
+    font-size: var(--text-base, 13px);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md, 6px);
+    background: var(--surface);
+    color: var(--text-sub);
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.1s);
 }
 
 #voice .stt-space-refresh-btn:hover:not(:disabled) {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 #voice .stt-space-open-folder-btn {
-  padding: var(--space-sm, 8px) var(--space-lg, 16px);
-  font-size: var(--text-base, 13px);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md, 6px);
-  background: var(--surface);
-  color: var(--text-sub);
-  cursor: pointer;
-  transition: background var(--transition-fast, 0.1s);
+    padding: var(--space-sm, 8px) var(--space-lg, 16px);
+    font-size: var(--text-base, 13px);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md, 6px);
+    background: var(--surface);
+    color: var(--text-sub);
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.1s);
 }
 
 #voice .stt-space-open-folder-btn:hover:not(:disabled) {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 #voice .stt-space-loading {
-  text-align: center;
-  padding: var(--space-lg, 16px);
-  color: var(--text-faint);
-  font-size: var(--text-xs, 11px);
+    text-align: center;
+    padding: var(--space-lg, 16px);
+    color: var(--text-faint);
+    font-size: var(--text-xs, 11px);
 }
 
 #voice .stt-space-hint {
-  font-size: var(--text-xs, 11px);
-  color: var(--text-faint);
-  margin-top: var(--space-sm, 8px);
-  line-height: var(--leading-normal, 1.5);
+    font-size: var(--text-xs, 11px);
+    color: var(--text-faint);
+    margin-top: var(--space-sm, 8px);
+    line-height: var(--leading-normal, 1.5);
 }

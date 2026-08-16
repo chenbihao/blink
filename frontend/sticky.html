@@ -1,95 +1,143 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>便签</title>
-  <link rel="stylesheet" href="css/entries/sticky.css" />
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>便签</title>
+    <link href="css/entries/sticky.css" rel="stylesheet"/>
 </head>
 <body>
-  <div class="sticky-root" id="sticky-root">
+<div class="sticky-root" id="sticky-root">
     <!-- 标题栏（无边框窗口自绘，可拖动） -->
     <div class="sticky-titlebar" data-tauri-drag-region>
-      <div class="sticky-titlebar-left" data-tauri-drag-region>
-        <!-- 颜色选择器 -->
-        <button class="sticky-color-btn" id="btn-color" title="颜色">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
-        </button>
-        <!-- MD工具栏切换（0.18.3） -->
-        <button class="sticky-icon-btn" id="btn-toolbar" title="工具栏">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
-        </button>
-        <!-- 颜色面板（展开式） -->
-        <div class="sticky-color-palette" id="color-palette" hidden>
-          <button class="color-swatch color-theme" data-color="theme" title="主题色"></button>
-          <button class="color-swatch color-yellow" data-color="yellow" title="黄色"></button>
-          <button class="color-swatch color-pink" data-color="pink" title="粉色"></button>
-          <button class="color-swatch color-purple" data-color="purple" title="紫色"></button>
-          <button class="color-swatch color-blue" data-color="blue" title="蓝色"></button>
-          <button class="color-swatch color-green" data-color="green" title="绿色"></button>
-          <button class="color-swatch color-gray" data-color="gray" title="灰色"></button>
+        <div class="sticky-titlebar-left" data-tauri-drag-region>
+            <!-- 颜色选择器 -->
+            <button class="sticky-color-btn" id="btn-color" title="颜色">
+                <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                     viewBox="0 0 24 24">
+                    <circle cx="13.5" cy="6.5" fill="currentColor" r=".5"/>
+                    <circle cx="17.5" cy="10.5" fill="currentColor" r=".5"/>
+                    <circle cx="8.5" cy="7.5" fill="currentColor" r=".5"/>
+                    <circle cx="6.5" cy="12.5" fill="currentColor" r=".5"/>
+                    <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>
+                </svg>
+            </button>
+            <!-- MD工具栏切换（0.18.3） -->
+            <button class="sticky-icon-btn" id="btn-toolbar" title="工具栏">
+                <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                     viewBox="0 0 24 24">
+                    <line x1="4" x2="20" y1="6" y2="6"/>
+                    <line x1="4" x2="20" y1="12" y2="12"/>
+                    <line x1="4" x2="20" y1="18" y2="18"/>
+                </svg>
+            </button>
+            <!-- 颜色面板（展开式） -->
+            <div class="sticky-color-palette" hidden id="color-palette">
+                <button class="color-swatch color-theme" data-color="theme" title="主题色"></button>
+                <button class="color-swatch color-yellow" data-color="yellow" title="黄色"></button>
+                <button class="color-swatch color-pink" data-color="pink" title="粉色"></button>
+                <button class="color-swatch color-purple" data-color="purple" title="紫色"></button>
+                <button class="color-swatch color-blue" data-color="blue" title="蓝色"></button>
+                <button class="color-swatch color-green" data-color="green" title="绿色"></button>
+                <button class="color-swatch color-gray" data-color="gray" title="灰色"></button>
+            </div>
         </div>
-      </div>
-      <div class="sticky-titlebar-right">
-        <!-- 置顶切换 -->
-        <button class="sticky-icon-btn" id="btn-pin" title="置顶">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-        </button>
-        <!-- 更多菜单 -->
-        <button class="sticky-icon-btn" id="btn-more" title="更多">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
-        </button>
-        <!-- 更多菜单（展开式） -->
-        <div class="sticky-more-menu" id="more-menu" hidden>
-          <button class="more-menu-item" id="more-open-editor">在编辑器中打开</button>
-          <button class="more-menu-item" id="more-open-manager">便签管理</button>
-          <button class="more-menu-item" id="more-hide">隐藏</button>
+        <div class="sticky-titlebar-right">
+            <!-- 置顶切换 -->
+            <button class="sticky-icon-btn" id="btn-pin" title="置顶">
+                <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                     viewBox="0 0 24 24">
+                    <path d="M12 17v5"/>
+                    <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
+                </svg>
+            </button>
+            <!-- 更多菜单 -->
+            <button class="sticky-icon-btn" id="btn-more" title="更多">
+                <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                     viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="1"/>
+                    <circle cx="12" cy="5" r="1"/>
+                    <circle cx="12" cy="19" r="1"/>
+                </svg>
+            </button>
+            <!-- 更多菜单（展开式） -->
+            <div class="sticky-more-menu" hidden id="more-menu">
+                <button class="more-menu-item" id="more-open-editor">在编辑器中打开</button>
+                <button class="more-menu-item" id="more-open-manager">便签管理</button>
+                <button class="more-menu-item" id="more-hide">隐藏</button>
+            </div>
+            <!-- 关闭 -->
+            <button class="sticky-icon-btn sticky-icon-btn-close" id="btn-close" title="关闭">
+                <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                     viewBox="0 0 24 24">
+                    <line x1="18" x2="6" y1="6" y2="18"/>
+                    <line x1="6" x2="18" y1="6" y2="18"/>
+                </svg>
+            </button>
         </div>
-        <!-- 关闭 -->
-        <button class="sticky-icon-btn sticky-icon-btn-close" id="btn-close" title="关闭">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
     </div>
 
     <!-- MD工具栏（0.18.3，默认隐藏，点击 btn-toolbar 切换。样式共享 components/md-toolbar.css） -->
-    <div class="md-toolbar sticky-md-toolbar" id="md-toolbar" hidden>
-      <button class="md-tool-btn" data-cmd="h1" title="标题1">H1</button>
-      <button class="md-tool-btn" data-cmd="h2" title="标题2">H2</button>
-      <button class="md-tool-btn" data-cmd="h3" title="标题3">H3</button>
-      <span class="md-tool-sep"></span>
-      <button class="md-tool-btn" data-cmd="bold" title="粗体"><b>B</b></button>
-      <button class="md-tool-btn" data-cmd="italic" title="斜体"><i>I</i></button>
-      <button class="md-tool-btn" data-cmd="strike" title="删除线"><s>S</s></button>
-      <button class="md-tool-btn" data-cmd="code" title="行内代码">&lt;/&gt;</button>
-      <span class="md-tool-sep"></span>
-      <button class="md-tool-btn" data-cmd="bulletList" title="无序列表">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-      </button>
-      <button class="md-tool-btn" data-cmd="orderedList" title="有序列表">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>
-      </button>
-      <button class="md-tool-btn" data-cmd="taskList" title="任务清单">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-      </button>
-      <button class="md-tool-btn" data-cmd="blockquote" title="引用">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 5-1 5-5V5c0-1-1-2-2-2H4c-1 0-2 1-2 2v6c0 1 1 2 2 2h2"/><path d="M15 21c3 0 5-1 5-5V5c0-1-1-2-2-2h-2c-1 0-2 1-2 2v6c0 1 1 2 2 2h2"/></svg>
-      </button>
-      <button class="md-tool-btn" data-cmd="codeBlock" title="代码块">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-      </button>
+    <div class="md-toolbar sticky-md-toolbar" hidden id="md-toolbar">
+        <button class="md-tool-btn" data-cmd="h1" title="标题1">H1</button>
+        <button class="md-tool-btn" data-cmd="h2" title="标题2">H2</button>
+        <button class="md-tool-btn" data-cmd="h3" title="标题3">H3</button>
+        <span class="md-tool-sep"></span>
+        <button class="md-tool-btn" data-cmd="bold" title="粗体"><b>B</b></button>
+        <button class="md-tool-btn" data-cmd="italic" title="斜体"><i>I</i></button>
+        <button class="md-tool-btn" data-cmd="strike" title="删除线"><s>S</s></button>
+        <button class="md-tool-btn" data-cmd="code" title="行内代码">&lt;/&gt;</button>
+        <span class="md-tool-sep"></span>
+        <button class="md-tool-btn" data-cmd="bulletList" title="无序列表">
+            <svg fill="none" height="14" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="14">
+                <line x1="8" x2="21" y1="6" y2="6"/>
+                <line x1="8" x2="21" y1="12" y2="12"/>
+                <line x1="8" x2="21" y1="18" y2="18"/>
+                <line x1="3" x2="3.01" y1="6" y2="6"/>
+                <line x1="3" x2="3.01" y1="12" y2="12"/>
+                <line x1="3" x2="3.01" y1="18" y2="18"/>
+            </svg>
+        </button>
+        <button class="md-tool-btn" data-cmd="orderedList" title="有序列表">
+            <svg fill="none" height="14" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="14">
+                <line x1="10" x2="21" y1="6" y2="6"/>
+                <line x1="10" x2="21" y1="12" y2="12"/>
+                <line x1="10" x2="21" y1="18" y2="18"/>
+                <path d="M4 6h1v4"/>
+                <path d="M4 10h2"/>
+                <path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>
+            </svg>
+        </button>
+        <button class="md-tool-btn" data-cmd="taskList" title="任务清单">
+            <svg fill="none" height="14" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="14">
+                <polyline points="9 11 12 14 22 4"/>
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+        </button>
+        <button class="md-tool-btn" data-cmd="blockquote" title="引用">
+            <svg fill="none" height="14" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="14">
+                <path d="M3 21c3 0 5-1 5-5V5c0-1-1-2-2-2H4c-1 0-2 1-2 2v6c0 1 1 2 2 2h2"/>
+                <path d="M15 21c3 0 5-1 5-5V5c0-1-1-2-2-2h-2c-1 0-2 1-2 2v6c0 1 1 2 2 2h2"/>
+            </svg>
+        </button>
+        <button class="md-tool-btn" data-cmd="codeBlock" title="代码块">
+            <svg fill="none" height="14" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="14">
+                <polyline points="16 18 22 12 16 6"/>
+                <polyline points="8 6 2 12 8 18"/>
+            </svg>
+        </button>
     </div>
 
     <!-- 编辑区（Tiptap IR 即时渲染编辑，输入 markdown 语法实时渲染，存储为 markdown） -->
-    <div class="sticky-editor" id="sticky-editor" contenteditable="false"></div>
-    <div class="sticky-editor-fallback" id="sticky-fallback" hidden>
-      <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false"></textarea>
+    <div class="sticky-editor" contenteditable="false" id="sticky-editor"></div>
+    <div class="sticky-editor-fallback" hidden id="sticky-fallback">
+        <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false"></textarea>
     </div>
-  </div>
+</div>
 
-  <!-- Tiptap IIFE（window.BlinkTiptap，0.18.3 IR 编辑器） -->
-  <script src="vendor/tiptap.bundle.min.js"></script>
-  <!-- 入口 -->
-  <script type="module" src="js/sticky/main.js"></script>
+<!-- Tiptap IIFE（window.BlinkTiptap，0.18.3 IR 编辑器） -->
+<script src="vendor/tiptap.bundle.min.js"></script>
+<!-- 入口 -->
+<script src="js/sticky/main.js" type="module"></script>
 </body>
 </html>

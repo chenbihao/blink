@@ -1,24 +1,24 @@
 /* ── Gruvbox Dark 主题（暖色调：棕底橙黄点缀）────────────────────────────── */
 
 [data-theme="gruvbox"] {
-  --bg: #282828;
-  --bg-sidebar: #1d2021;
-  --bg-deep: #1a1a1a;
-  --surface: #3c3836;
-  --surface-2: #504945;
-  --text: #ebdbb2;
-  --text-sub: #d5c4a1;
-  --text-dim: #a89984;
-  --text-faint: #7c6f64;
-  --accent: #d65d0e;
-  --accent-bg: rgba(214, 93, 14, 0.15);
-  --green: #b8bb26;
-  --red: #fb4934;
-  --red-bg: #3b2020;
-  --red-border: #5a3030;
-  --green-bg: #2a3a20;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(251, 73, 52, 0.12);
+    --bg: #282828;
+    --bg-sidebar: #1d2021;
+    --bg-deep: #1a1a1a;
+    --surface: #3c3836;
+    --surface-2: #504945;
+    --text: #ebdbb2;
+    --text-sub: #d5c4a1;
+    --text-dim: #a89984;
+    --text-faint: #7c6f64;
+    --accent: #d65d0e;
+    --accent-bg: rgba(214, 93, 14, 0.15);
+    --green: #b8bb26;
+    --red: #fb4934;
+    --red-bg: #3b2020;
+    --red-border: #5a3030;
+    --green-bg: #2a3a20;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
+    --danger-hover-bg: rgba(251, 73, 52, 0.12);
 }

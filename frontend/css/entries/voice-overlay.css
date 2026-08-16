@@ -25,71 +25,73 @@
 /* ── Voice overlay 视图 ──────────────────────────────────────────────────── */
 
 body {
-  background: transparent;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  overflow: hidden;
-  user-select: none;
-  /* 给 box-shadow 留空间，避免被窗口边界裁掉 */
-  padding: 10px;
+    background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    /* 给 box-shadow 留空间，避免被窗口边界裁掉 */
+    padding: 10px;
 }
 
 #overlay {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 20px;
-  background: var(--bg);
-  border-radius: 14px;
-  border: 1px solid var(--border-glow);
-  box-shadow: 0 4px 16px var(--shadow);
-  min-width: 200px;
-  max-width: 360px;
-  /* 0.10.6: 窗口由 autoResize() 撑高，overlay 随内容增长 */
-  max-height: 380px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 20px;
+    background: var(--bg);
+    border-radius: 14px;
+    border: 1px solid var(--border-glow);
+    box-shadow: 0 4px 16px var(--shadow);
+    min-width: 200px;
+    max-width: 360px;
+    /* 0.10.6: 窗口由 autoResize() 撑高，overlay 随内容增长 */
+    max-height: 380px;
 }
 
 /* 文本区域 */
 .text {
-  color: var(--text);
-  font-size: 14px;
-  line-height: 1.4;
-  text-align: center;
-  word-break: break-all;
-  min-height: 20px;
-  /* 0.10.6: 超长文本限制高度，超出后滚动；窗口由 autoResize() 撑高至 MAX_HEIGHT */
-  max-height: 280px;
-  overflow-y: auto;
-  /* 滚动条细美化 */
-  scrollbar-width: thin;
-  scrollbar-color: var(--text-dim) transparent;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: center;
+    word-break: break-all;
+    min-height: 20px;
+    /* 0.10.6: 超长文本限制高度，超出后滚动；窗口由 autoResize() 撑高至 MAX_HEIGHT */
+    max-height: 280px;
+    overflow-y: auto;
+    /* 滚动条细美化 */
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-dim) transparent;
 }
 
 /* 0.10.4 伪流式双色文本 */
 .voice-confirmed {
-  color: var(--text);
+    color: var(--text);
 }
 
 .voice-preview {
-  color: var(--text-sub);
-  opacity: 0.6;
+    color: var(--text-sub);
+    opacity: 0.6;
 }
 
 /* 0.10.6: WebKit 滚动条（WebView2 / Chromium） */
 .text::-webkit-scrollbar {
-  width: 4px;
+    width: 4px;
 }
+
 .text::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
+
 .text::-webkit-scrollbar-thumb {
-  background: var(--text-dim);
-  border-radius: 2px;
+    background: var(--text-dim);
+    border-radius: 2px;
 }
 
 /* 提示 */
 .hint {
-  color: var(--text-dim);
-  font-size: 11px;
-  letter-spacing: 0.5px;
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.5px;
 }

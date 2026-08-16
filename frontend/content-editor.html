@@ -1,56 +1,64 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>编辑内容</title>
-  <link rel="stylesheet" href="css/entries/content-editor.css" />
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>编辑内容</title>
+    <link href="css/entries/content-editor.css" rel="stylesheet"/>
 </head>
 <body>
-  <div class="editor-root">
+<div class="editor-root">
     <!-- Titlebar（无边框窗口自绘标题栏） -->
     <div class="editor-titlebar" data-tauri-drag-region>
-      <span class="editor-titlebar-title" id="editor-title" data-tauri-drag-region>编辑内容</span>
-      <div class="editor-titlebar-btns">
-        <button class="editor-titlebar-btn" id="titlebar-minimize" title="最小化">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        </button>
-        <button class="editor-titlebar-btn" id="titlebar-maximize" title="最大化">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
-        </button>
-        <button class="editor-titlebar-btn editor-titlebar-btn-close" id="titlebar-close" title="关闭">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
-        </button>
-      </div>
+        <span class="editor-titlebar-title" data-tauri-drag-region id="editor-title">编辑内容</span>
+        <div class="editor-titlebar-btns">
+            <button class="editor-titlebar-btn" id="titlebar-minimize" title="最小化">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <line x1="5" x2="19" y1="12" y2="12"/>
+                </svg>
+            </button>
+            <button class="editor-titlebar-btn" id="titlebar-maximize" title="最大化">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <rect height="14" rx="2" width="14" x="5" y="5"/>
+                </svg>
+            </button>
+            <button class="editor-titlebar-btn editor-titlebar-btn-close" id="titlebar-close" title="关闭">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <line x1="6" x2="18" y1="6" y2="18"/>
+                    <line x1="6" x2="18" y1="18" y2="6"/>
+                </svg>
+            </button>
+        </div>
     </div>
 
     <!-- Toolbar -->
     <div class="editor-toolbar">
-      <div class="editor-toolbar-left">
-        <!-- MD 格式工具栏（0.18.3：与便签共用 components/md-toolbar.css，默认展示） -->
-        <div class="md-toolbar editor-md-toolbar" id="md-toolbar"></div>
-      </div>
-      <div class="editor-toolbar-right">
-        <span class="editor-status" id="editor-status"></span>
-        <button class="editor-save-btn" id="btn-save" data-i18n="editor.save">保存</button>
-        <button class="editor-cancel-btn" id="btn-cancel" data-i18n="editor.cancel">取消</button>
-      </div>
+        <div class="editor-toolbar-left">
+            <!-- MD 格式工具栏（0.18.3：与便签共用 components/md-toolbar.css，默认展示） -->
+            <div class="md-toolbar editor-md-toolbar" id="md-toolbar"></div>
+        </div>
+        <div class="editor-toolbar-right">
+            <span class="editor-status" id="editor-status"></span>
+            <button class="editor-save-btn" data-i18n="editor.save" id="btn-save">保存</button>
+            <button class="editor-cancel-btn" data-i18n="editor.cancel" id="btn-cancel">取消</button>
+        </div>
     </div>
 
     <!-- Editor body -->
     <div class="editor-body">
-      <!-- 纯文本编辑区（format=plain 时使用） -->
-      <textarea class="editor-textarea" id="editor-textarea" data-i18n-ph="editor.placeholder" placeholder="输入或编辑内容..." spellcheck="false"></textarea>
-      <!-- Tiptap IR 编辑器容器（0.18.3：format=markdown 时使用，替换 Cherry 双栏） -->
-      <div class="editor-tiptap-container" id="editor-tiptap-container" hidden></div>
+        <!-- 纯文本编辑区（format=plain 时使用） -->
+        <textarea class="editor-textarea" data-i18n-ph="editor.placeholder" id="editor-textarea"
+                  placeholder="输入或编辑内容..." spellcheck="false"></textarea>
+        <!-- Tiptap IR 编辑器容器（0.18.3：format=markdown 时使用，替换 Cherry 双栏） -->
+        <div class="editor-tiptap-container" hidden id="editor-tiptap-container"></div>
     </div>
-  </div>
+</div>
 
-  <!-- Vendor -->
-  <!-- Tiptap IIFE（0.18.3：替换 Cherry Markdown 双栏，改为 IR 即时渲染） -->
-  <script src="vendor/tiptap.bundle.min.js"></script>
+<!-- Vendor -->
+<!-- Tiptap IIFE（0.18.3：替换 Cherry Markdown 双栏，改为 IR 即时渲染） -->
+<script src="vendor/tiptap.bundle.min.js"></script>
 
-  <!-- 入口 -->
-  <script type="module" src="js/content-editor/main.js"></script>
+<!-- 入口 -->
+<script src="js/content-editor/main.js" type="module"></script>
 </body>
 </html>

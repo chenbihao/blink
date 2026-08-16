@@ -32,102 +32,112 @@
  * @returns {InputStateCore}
  */
 export function createInputStateCore() {
-  /** @type {number} */ let viewEpoch = 0;
-  /** @type {number} */ let contextRevision = 0;
-  /** @type {boolean} */ let queryEmpty = true;
-  /** @type {boolean} */ let aiMode = false;
-  /** @type {boolean} */ let clipboardMode = false;
-  /** @type {number} */ let lastAppliedRevision = 0;
-  /** @type {InputUiState|null} */ let currentState = null;
+    /** @type {number} */ let viewEpoch = 0;
+    /** @type {number} */ let contextRevision = 0;
+    /** @type {boolean} */ let queryEmpty = true;
+    /** @type {boolean} */ let aiMode = false;
+    /** @type {boolean} */ let clipboardMode = false;
+    /** @type {number} */ let lastAppliedRevision = 0;
+    /** @type {InputUiState|null} */ let currentState = null;
 
-  return {
-    /** 当前 view epoch（0 = 未注册）。 */
-    get viewEpoch() { return viewEpoch; },
-    /** 当前 query 是否为空。 */
-    get queryEmpty() { return queryEmpty; },
-    /** 当前 AI 模式。 */
-    get aiMode() { return aiMode; },
-    /** 当前剪贴板模式。 */
-    get clipboardMode() { return clipboardMode; },
-    /** 最近接受的 UI 状态（null = 尚未收到）。 */
-    get state() { return currentState; },
+    return {
+        /** 当前 view epoch（0 = 未注册）。 */
+        get viewEpoch() {
+            return viewEpoch;
+        },
+        /** 当前 query 是否为空。 */
+        get queryEmpty() {
+            return queryEmpty;
+        },
+        /** 当前 AI 模式。 */
+        get aiMode() {
+            return aiMode;
+        },
+        /** 当前剪贴板模式。 */
+        get clipboardMode() {
+            return clipboardMode;
+        },
+        /** 最近接受的 UI 状态（null = 尚未收到）。 */
+        get state() {
+            return currentState;
+        },
 
-    /**
-     * 设置 view epoch（register 成功后调）。
-     * @param {number} epoch
-     */
-    setViewEpoch(epoch) {
-      viewEpoch = epoch;
-      contextRevision = 0;
-    },
+        /**
+         * 设置 view epoch（register 成功后调）。
+         * @param {number} epoch
+         */
+        setViewEpoch(epoch) {
+            viewEpoch = epoch;
+            contextRevision = 0;
+        },
 
-    /**
-     * 尝试接受一个后端 UI 状态事件/快照。
-     *
-     * 以 revision 去重：只接受比当前 lastAppliedRevision 更大的 revision。
-     * 相同或更小的 revision 被拒绝（旧状态/重复事件）。
-     *
-     * @param {InputUiState} state
-     * @returns {boolean} 是否接受（true = 状态已更新，false = 被丢弃）
-     */
-    applyState(state) {
-      if (!state || typeof state.revision !== "number") return false;
-      // 首次：接受任何 revision（含 0）
-      if (currentState === null) {
-        currentState = state;
-        lastAppliedRevision = state.revision;
-        return true;
-      }
-      // 后续：只接受更大的 revision
-      if (state.revision > lastAppliedRevision) {
-        currentState = state;
-        lastAppliedRevision = state.revision;
-        return true;
-      }
-      return false;
-    },
+        /**
+         * 尝试接受一个后端 UI 状态事件/快照。
+         *
+         * 以 revision 去重：只接受比当前 lastAppliedRevision 更大的 revision。
+         * 相同或更小的 revision 被拒绝（旧状态/重复事件）。
+         *
+         * @param {InputUiState} state
+         * @returns {boolean} 是否接受（true = 状态已更新，false = 被丢弃）
+         */
+        applyState(state) {
+            if (!state || typeof state.revision !== "number") return false;
+            // 首次：接受任何 revision（含 0）
+            if (currentState === null) {
+                currentState = state;
+                lastAppliedRevision = state.revision;
+                return true;
+            }
+            // 后续：只接受更大的 revision
+            if (state.revision > lastAppliedRevision) {
+                currentState = state;
+                lastAppliedRevision = state.revision;
+                return true;
+            }
+            return false;
+        },
 
-    /**
-     * 尝试更新视图上下文（queryEmpty / aiMode / clipboardMode 变化时调）。
-     *
-     * 只在实际变化时返回需要上报的新 context；未变化返回 null。
-     *
-     * @param {boolean} newQueryEmpty
-     * @param {boolean} newAiMode
-     * @param {boolean} newClipboardMode
-     * @returns {ViewContext|null} 需要上报的 context（或 null 表示无变化）
-     */
-    updateContext(newQueryEmpty, newAiMode, newClipboardMode) {
-      if (newQueryEmpty === queryEmpty && newAiMode === aiMode && newClipboardMode === clipboardMode) {
-        return null;
-      }
-      queryEmpty = newQueryEmpty;
-      aiMode = newAiMode;
-      clipboardMode = newClipboardMode;
-      contextRevision += 1;
-      return {
-        viewEpoch,
-        revision: contextRevision,
-        queryEmpty,
-        aiMode,
-        clipboardMode,
-      };
-    },
+        /**
+         * 尝试更新视图上下文（queryEmpty / aiMode / clipboardMode 变化时调）。
+         *
+         * 只在实际变化时返回需要上报的新 context；未变化返回 null。
+         *
+         * @param {boolean} newQueryEmpty
+         * @param {boolean} newAiMode
+         * @param {boolean} newClipboardMode
+         * @returns {ViewContext|null} 需要上报的 context（或 null 表示无变化）
+         */
+        updateContext(newQueryEmpty, newAiMode, newClipboardMode) {
+            if (newQueryEmpty === queryEmpty && newAiMode === aiMode && newClipboardMode === clipboardMode) {
+                return null;
+            }
+            queryEmpty = newQueryEmpty;
+            aiMode = newAiMode;
+            clipboardMode = newClipboardMode;
+            contextRevision += 1;
+            return {
+                viewEpoch,
+                revision: contextRevision,
+                queryEmpty,
+                aiMode,
+                clipboardMode,
+            };
+        },
 
-    /**
-     * WebView reload/recreate 时重置 view epoch。
-     * 旧 epoch 的 context update 后端会丢弃。
-     */
-    reset() {
-      viewEpoch = 0;
-      contextRevision = 0;
-      queryEmpty = true;
-      aiMode = false;
-      clipboardMode = false;
-      lastAppliedRevision = 0;
-      currentState = null;
-    },
-  };
+        /**
+         * WebView reload/recreate 时重置 view epoch。
+         * 旧 epoch 的 context update 后端会丢弃。
+         */
+        reset() {
+            viewEpoch = 0;
+            contextRevision = 0;
+            queryEmpty = true;
+            aiMode = false;
+            clipboardMode = false;
+            lastAppliedRevision = 0;
+            currentState = null;
+        },
+    };
 }
 
 /**

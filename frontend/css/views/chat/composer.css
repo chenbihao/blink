@@ -3,323 +3,323 @@
 /* ── Composer（一体化） ────────────────────────── */
 
 .chat-composer {
-  padding: 0 var(--space-lg) var(--space-lg);
-  flex-shrink: 0;
+    padding: 0 var(--space-lg) var(--space-lg);
+    flex-shrink: 0;
 }
 
 .chat-composer-input-wrap {
-  position: relative;
-  border: 1px solid var(--surface);
-  border-radius: 14px;
-  background: var(--bg-sidebar);
-  transition: border-color 0.15s;
+    position: relative;
+    border: 1px solid var(--surface);
+    border-radius: 14px;
+    background: var(--bg-sidebar);
+    transition: border-color 0.15s;
 }
 
 .chat-composer-input-wrap:focus-within {
-  border-color: var(--accent);
+    border-color: var(--accent);
 }
 
 .chat-composer textarea {
-  display: block;
-  width: 100%;
-  min-height: 56px;
-  max-height: 200px;
-  padding: var(--space-md) var(--space-lg) var(--space-xs);
-  border: none;
-  border-radius: 14px 14px 0 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
-  line-height: 1.5;
-  resize: none;
-  outline: none;
-  box-sizing: border-box;
+    display: block;
+    width: 100%;
+    min-height: 56px;
+    max-height: 200px;
+    padding: var(--space-md) var(--space-lg) var(--space-xs);
+    border: none;
+    border-radius: 14px 14px 0 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    box-sizing: border-box;
 }
 
 .chat-composer textarea::placeholder {
-  color: var(--text-faint);
+    color: var(--text-faint);
 }
 
 .chat-composer-bar {
-display: flex;
-align-items: center;
-justify-content: flex-end;
-padding: var(--space-xs) var(--space-sm);
-gap: var(--space-xs);
-user-select: text;
--webkit-user-select: text;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: var(--space-xs) var(--space-sm);
+    gap: var(--space-xs);
+    user-select: text;
+    -webkit-user-select: text;
 }
 
 .chat-composer-bar-left {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  margin-right: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    margin-right: auto;
 }
 
 /* 上下文窗口指示器（发送按钮左边） */
 .chat-context-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  cursor: pointer;
-  user-select: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    cursor: pointer;
+    user-select: none;
 }
 
 .context-ring {
-  width: 20px;
-  height: 20px;
-  vertical-align: middle;
+    width: 20px;
+    height: 20px;
+    vertical-align: middle;
 }
 
 .context-ring circle {
-  transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
+    transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
 }
 
 .context-ring-percent {
-  font-size: 9px;
-  font-weight: 600;
-  color: var(--text-faint);
-  font-family: ui-monospace, Consolas, monospace;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-faint);
+    font-family: ui-monospace, Consolas, monospace;
 }
 
 .context-compressed {
-  font-size: 10px;
-  color: var(--warning);
-  margin-left: 1px;
+    font-size: 10px;
+    color: var(--warning);
+    margin-left: 1px;
 }
 
 /* 0.13.6: 主动压缩提示条 */
 .chat-context-warning {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  padding: var(--space-2xs) var(--space-sm);
-  margin-bottom: var(--space-2xs);
-  background: var(--warning-bg, rgba(255, 193, 7, 0.1));
-  border: 1px solid var(--warning, #ffc107);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-2xs) var(--space-sm);
+    margin-bottom: var(--space-2xs);
+    background: var(--warning-bg, rgba(255, 193, 7, 0.1));
+    border: 1px solid var(--warning, #ffc107);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text);
 }
 
 .chat-context-warning-icon {
-  font-size: 14px;
-  flex-shrink: 0;
+    font-size: 14px;
+    flex-shrink: 0;
 }
 
 .chat-context-warning-text {
-  flex: 1;
+    flex: 1;
 }
 
 .chat-context-warning-actions {
-  display: flex;
-  gap: var(--space-2xs);
+    display: flex;
+    gap: var(--space-2xs);
 }
 
 .chat-context-warning-btn {
-  padding: 2px 8px;
-  font-size: 11px;
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  transition: background var(--transition-base);
+    padding: 2px 8px;
+    font-size: 11px;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition-base);
 }
 
 .chat-context-warning-btn:hover {
-  background: var(--surface-2);
+    background: var(--surface-2);
 }
 
 .chat-context-warning-close {
-  background: none;
-  border: none;
-  color: var(--text-faint);
-  cursor: pointer;
-  padding: 2px;
-  font-size: 14px;
-  line-height: 1;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 2px;
+    font-size: 14px;
+    line-height: 1;
 }
 
 .chat-context-warning-close:hover {
-  color: var(--text);
+    color: var(--text);
 }
 
 /* ── 深度思考按钮（悬浮在输入框内） ─────────── */
 
 .chat-thinking-btn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2xs);
-  padding: var(--space-2xs) var(--space-sm);
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s;
-  user-select: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2xs);
+    padding: var(--space-2xs) var(--space-sm);
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
 }
 
 .chat-thinking-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .chat-thinking-btn:hover {
-  color: var(--text-sub);
-  background: var(--surface);
+    color: var(--text-sub);
+    background: var(--surface);
 }
 
 .chat-thinking-btn.active {
-  color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    background: var(--accent-bg);
 }
 
 .chat-thinking-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 /* ── 发送/停止按钮（悬浮在输入框内） ─────────── */
 
 .chat-send-btn {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--on-accent);
-  cursor: pointer;
-  transition: opacity 0.15s;
-  flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--on-accent);
+    cursor: pointer;
+    transition: opacity 0.15s;
+    flex-shrink: 0;
 }
 
 .chat-send-btn:hover {
-  opacity: 0.85;
+    opacity: 0.85;
 }
 
 .chat-send-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
+    opacity: 0.3;
+    cursor: not-allowed;
 }
 
 .chat-send-btn svg {
-  width: 16px;
-  height: 16px;
+    width: 16px;
+    height: 16px;
 }
 
 .chat-stop-btn {
-  background: var(--red);
+    background: var(--red);
 }
 
 .chat-stop-btn:hover {
-  background: var(--red);
-  opacity: 0.8;
+    background: var(--red);
+    opacity: 0.8;
 }
 
 /* ── 空状态 ────────────────────────────────────── */
 
 .chat-empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-lg);
-  text-align: center;
-  padding: var(--space-2xl);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-lg);
+    text-align: center;
+    padding: var(--space-2xl);
 }
 
 .chat-empty-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--surface-2);
-  border-radius: 16px;
-  background: var(--surface);
-  color: var(--accent);
-  font-size: 24px;
-  font-weight: 650;
+    width: 56px;
+    height: 56px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--surface-2);
+    border-radius: 16px;
+    background: var(--surface);
+    color: var(--accent);
+    font-size: 24px;
+    font-weight: 650;
 }
 
 .chat-empty h2 {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
 }
 
 .chat-empty p {
-  font-size: 14px;
-  color: var(--text-dim);
-  margin: 0;
-  line-height: 1.6;
+    font-size: 14px;
+    color: var(--text-dim);
+    margin: 0;
+    line-height: 1.6;
 }
 
 .chat-empty-btn {
-  padding: var(--space-sm) var(--space-xl);
-  border: 0;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font: inherit;
-  font-size: 14px;
-  cursor: pointer;
-  transition: opacity 0.15s;
+    padding: var(--space-sm) var(--space-xl);
+    border: 0;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: opacity 0.15s;
 }
 
 .chat-empty-btn:hover {
-  opacity: 0.9;
+    opacity: 0.9;
 }
 
 /* 0.12.5 §5.2：对话窗口引导泡泡 */
 .chat-guide-bubbles {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  max-width: 480px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    max-width: 480px;
 }
 
 .chat-guide-bubble {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border: 1px solid var(--surface-2);
-  border-radius: 20px;
-  background: var(--surface);
-  color: var(--text-sub);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: 1px solid var(--surface-2);
+    border-radius: 20px;
+    background: var(--surface);
+    color: var(--text-sub);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
 }
 
 .chat-guide-bubble:hover {
-  border-color: var(--accent);
-  background: var(--accent-bg);
-  color: var(--text);
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    color: var(--text);
 }
 
 .chat-guide-bubble-text {
-  font-weight: 500;
+    font-weight: 500;
 }
 
 .chat-guide-bubble-hint {
-  font-size: 11px;
-  color: var(--text-dim);
-  padding-left: 6px;
-  border-left: 1px solid var(--surface-2);
+    font-size: 11px;
+    color: var(--text-dim);
+    padding-left: 6px;
+    border-left: 1px solid var(--surface-2);
 }
 
 .chat-guide-bubble:hover .chat-guide-bubble-hint {
-  border-left-color: var(--accent);
-  color: var(--text-sub);
+    border-left-color: var(--accent);
+    color: var(--text-sub);
 }
 

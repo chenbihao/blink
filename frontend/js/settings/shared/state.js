@@ -8,10 +8,10 @@ export let currentConfig = null;
 
 /** 设置当前配置 */
 export function setCurrentConfig(config) {
-  currentConfig = config;
+    currentConfig = config;
 }
 
 /** 获取当前配置 */
 export function getCurrentConfig() {
-  return currentConfig;
+    return currentConfig;
 }

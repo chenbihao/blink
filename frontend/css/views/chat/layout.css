@@ -7,96 +7,96 @@
    产生从左上到右下的锯齿像素线（tile seam）。全链路不透明背景可消除此伪影。 */
 html,
 body {
-  background: var(--bg);
+    background: var(--bg);
 }
 
 /* ── 布局 ──────────────────────────────────────── */
 
 .chat-root {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  position: relative; /* 模型选择器下拉的定位上下文 */
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    position: relative; /* 模型选择器下拉的定位上下文 */
 }
 
 /* ── Titlebar（无边框自绘） ────────────────────── */
 
 .chat-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 32px;
-  padding: 0 var(--space-xs);
-  background: var(--bg);
-  flex-shrink: 0;
-  user-select: none;
-  -webkit-app-region: drag;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 32px;
+    padding: 0 var(--space-xs);
+    background: var(--bg);
+    flex-shrink: 0;
+    user-select: none;
+    -webkit-app-region: drag;
 }
 
 .chat-titlebar-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-dim);
-  padding-left: var(--space-sm);
-  pointer-events: none;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    padding-left: var(--space-sm);
+    pointer-events: none;
 }
 
 .chat-titlebar-btns {
-  display: flex;
-  align-items: center;
-  -webkit-app-region: no-drag;
+    display: flex;
+    align-items: center;
+    -webkit-app-region: no-drag;
 }
 
 .chat-titlebar-btn {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 28px;
-  border: 0;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 28px;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
 }
 
 .chat-titlebar-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .chat-titlebar-btn:hover {
-  background: var(--surface);
-  color: var(--text);
+    background: var(--surface);
+    color: var(--text);
 }
 
 .chat-titlebar-btn-close:hover {
-  background: var(--red);
-  color: var(--on-accent);
+    background: var(--red);
+    color: var(--on-accent);
 }
 
 /* ── Body: sidebar + main 横向排列（0.12.3 push 布局） ── */
 
 .chat-body {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
+    display: flex;
+    flex: 1;
+    overflow: hidden;
 }
 
 /* ── 主区域容器 ───────────────────────────────── */
 
 .chat-main {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  overflow: hidden;
-  background: var(--bg); /* 0.12.8：不透明背景，消除 alpha 混合 tile seam */
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    background: var(--bg); /* 0.12.8：不透明背景，消除 alpha 混合 tile seam */
 }
 
 /* ── 辅助 ──────────────────────────────────────── */
 
 .chat-hidden {
-  display: none !important;
+    display: none !important;
 }

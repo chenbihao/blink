@@ -8,534 +8,556 @@
 //!
 //! 依赖所有子模块：state / tier / provider / model-edit / skill
 
-import { aiState, defaultAIConfig, saveAIConfig } from "./state.js";
-import { renderAITierSelects, renderAITierDegrade, renderAITierBanner, renderMainWindowModelSelect } from "./tier.js";
-import { renderAIProviders, closeAIProviderModal, saveNewProviderFromModal, guessPresetForProvider, clearProviderModelSelect, triggerProviderModelFetch, filterProviderModels, renderProviderModelTags } from "./provider.js";
-import { bindAIModelEditModalEvents } from "./model-edit.js";
-import { loadSkillList, showSkillImportPanel, initSkillImportHandlers } from "./skill.js";
+import {aiState, defaultAIConfig, saveAIConfig} from "./state.js";
+import {renderAITierBanner, renderAITierDegrade, renderAITierSelects, renderMainWindowModelSelect} from "./tier.js";
 import {
-  clampAIHardTimeoutMs,
-  effectiveAIHardTimeoutMs,
-  formatModelContextWindow,
-  memoryExpertVisibility,
+    closeAIProviderModal,
+    filterProviderModels,
+    guessPresetForProvider,
+    renderAIProviders,
+    renderProviderModelTags,
+    saveNewProviderFromModal,
+    triggerProviderModelFetch
+} from "./provider.js";
+import {bindAIModelEditModalEvents} from "./model-edit.js";
+import {initSkillImportHandlers, loadSkillList, showSkillImportPanel} from "./skill.js";
+import {
+    clampAIHardTimeoutMs,
+    effectiveAIHardTimeoutMs,
+    formatModelContextWindow,
+    memoryExpertVisibility,
 } from "./semantics.js";
-import { invoke } from "../../../shared/tauri.js";
-import { t, onLangChange } from "../../../i18n/index.js";
+import {invoke} from "../../../shared/tauri.js";
+import {onLangChange, t} from "../../../i18n/index.js";
 
 // 0.17.8: AI 权限记忆配置的默认值
-const defaultPermissionConfig = { memory_enabled: true, memory_days: 7 };
+const defaultPermissionConfig = {memory_enabled: true, memory_days: 7};
 // 运行时副本，事件回调中读写
-let permissionConfig = { ...defaultPermissionConfig };
+let permissionConfig = {...defaultPermissionConfig};
 
 /**
  * 初始化 AI Tab
  */
 export function initAITab() {
-  loadAIConfig();
-  onLangChange(() => {
-    updateMemoryContextSizeDisplay();
-  });
+    loadAIConfig();
+    onLangChange(() => {
+        updateMemoryContextSizeDisplay();
+    });
 }
 
 /**
  * 加载 AI 配置
  */
 async function loadAIConfig() {
-  try {
-    const cfg = await invoke("get_config_section", { key: "app.ai" });
-    aiState.currentAIConfig = cfg && typeof cfg === "object" ? cfg : defaultAIConfig();
-  } catch (e) {
-    console.error("get_config_section app.ai failed:", e);
-    aiState.currentAIConfig = defaultAIConfig();
-  }
-  normalizeAIConfig(aiState.currentAIConfig);
-  // 密钥存在性 + 掩码提示并行查询
-  aiState.hasSecretMap = new Map();
-  aiState.secretHintMap = new Map();
-  const providers = aiState.currentAIConfig.providers || [];
-  await Promise.all(
-    providers.map(async (p) => {
-      try {
-        const has = await invoke("has_ai_secret", { providerId: p.id });
-        aiState.hasSecretMap.set(p.id, !!has);
-        if (has) {
-          try {
-            const hint = await invoke("get_ai_secret_hint", { providerId: p.id });
-            aiState.secretHintMap.set(p.id, hint || null);
-          } catch {
-            aiState.secretHintMap.set(p.id, null);
-          }
-        }
-      } catch {
-        aiState.hasSecretMap.set(p.id, false);
-      }
-    }),
-  );
-  // 0.17.8: 加载 AI 权限记忆配置（独立分片 app.ai_permission）
-  try {
-    const perm = await invoke("get_config_section", { key: "app.ai_permission" });
-    permissionConfig = perm && typeof perm === "object" ? { ...defaultPermissionConfig, ...perm } : { ...defaultPermissionConfig };
-  } catch (e) {
-    console.warn("get_config_section app.ai_permission failed:", e);
-    permissionConfig = { ...defaultPermissionConfig };
-  }
+    try {
+        const cfg = await invoke("get_config_section", {key: "app.ai"});
+        aiState.currentAIConfig = cfg && typeof cfg === "object" ? cfg : defaultAIConfig();
+    } catch (e) {
+        console.error("get_config_section app.ai failed:", e);
+        aiState.currentAIConfig = defaultAIConfig();
+    }
+    normalizeAIConfig(aiState.currentAIConfig);
+    // 密钥存在性 + 掩码提示并行查询
+    aiState.hasSecretMap = new Map();
+    aiState.secretHintMap = new Map();
+    const providers = aiState.currentAIConfig.providers || [];
+    await Promise.all(
+        providers.map(async (p) => {
+            try {
+                const has = await invoke("has_ai_secret", {providerId: p.id});
+                aiState.hasSecretMap.set(p.id, !!has);
+                if (has) {
+                    try {
+                        const hint = await invoke("get_ai_secret_hint", {providerId: p.id});
+                        aiState.secretHintMap.set(p.id, hint || null);
+                    } catch {
+                        aiState.secretHintMap.set(p.id, null);
+                    }
+                }
+            } catch {
+                aiState.hasSecretMap.set(p.id, false);
+            }
+        }),
+    );
+    // 0.17.8: 加载 AI 权限记忆配置（独立分片 app.ai_permission）
+    try {
+        const perm = await invoke("get_config_section", {key: "app.ai_permission"});
+        permissionConfig = perm && typeof perm === "object" ? {...defaultPermissionConfig, ...perm} : {...defaultPermissionConfig};
+    } catch (e) {
+        console.warn("get_config_section app.ai_permission failed:", e);
+        permissionConfig = {...defaultPermissionConfig};
+    }
 
-  applyAIConfigToUI();
-  bindAIEvents();
+    applyAIConfigToUI();
+    bindAIEvents();
 }
 
 function normalizeAIConfig(cfg) {
-  if (cfg.tier_ultra_light == null && cfg.tier_router != null) {
-    cfg.tier_ultra_light = cfg.tier_router;
-  }
-  delete cfg.tier_router;
-  cfg.chat_config = cfg.chat_config || {};
-  if (!cfg.chat_config.agent_mode) {
-    cfg.chat_config.agent_mode = cfg.chat_config.pure_chat ? "pure_chat" : "full";
-  }
-  delete cfg.chat_config.pure_chat;
-  cfg.chat_config.main_window_model ||= "light";
-  delete cfg.chat_config.title_tier;
+    if (cfg.tier_ultra_light == null && cfg.tier_router != null) {
+        cfg.tier_ultra_light = cfg.tier_router;
+    }
+    delete cfg.tier_router;
+    cfg.chat_config = cfg.chat_config || {};
+    if (!cfg.chat_config.agent_mode) {
+        cfg.chat_config.agent_mode = cfg.chat_config.pure_chat ? "pure_chat" : "full";
+    }
+    delete cfg.chat_config.pure_chat;
+    cfg.chat_config.main_window_model ||= "light";
+    delete cfg.chat_config.title_tier;
 }
 
 /**
  * 应用 AI 配置到 UI
  */
 function applyAIConfigToUI() {
-  const c = aiState.currentAIConfig;
-  const $ = (id) => document.getElementById(id);
-  if ($("ai-enabled")) $("ai-enabled").checked = !!c.enabled;
-  if ($("ai-allow-routing")) $("ai-allow-routing").checked = !!c.allow_intent_routing;
-  if ($("ai-min-query-len")) $("ai-min-query-len").value = c.min_query_len ?? 4;
-  if ($("ai-require-whitespace")) $("ai-require-whitespace").checked = c.require_whitespace !== false;
-  if ($("ai-exclude-pure-numeric")) $("ai-exclude-pure-numeric").checked = c.exclude_pure_numeric !== false;
-  if ($("ai-respect-awareness-url-path")) $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
-  if ($("ai-timeout-ms")) $("ai-timeout-ms").value = effectiveAIHardTimeoutMs(c.slo_hard_timeout_ms);
-  // 对话配置
-  const chatCfg = c.chat_config || { agent_mode: "full", main_window_model: "light", auto_title: false };
-  document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => {
-    input.checked = input.value === (chatCfg.agent_mode || "full");
-  });
-  if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
-  renderMainWindowModelSelect();
-  // 记忆策略配置
-  const memCfg = chatCfg.memory_config || { mode: "token_aware", window_size: 20, trigger_ratio: 0.8, compress_ratio: 0.7, recall_enabled: true, recall_top_k: 3 };
-  if ($("ai-memory-mode")) $("ai-memory-mode").value = memCfg.mode || "token_aware";
-  if ($("ai-memory-window-size")) $("ai-memory-window-size").value = memCfg.window_size ?? 20;
-  if ($("ai-memory-trigger-ratio")) {
-    $("ai-memory-trigger-ratio").value = Math.round((memCfg.trigger_ratio ?? 0.8) * 100);
-  }
-  if ($("ai-memory-compress-ratio")) {
-    $("ai-memory-compress-ratio").value = Math.round((memCfg.compress_ratio ?? 0.7) * 100);
-  }
-  if ($("ai-memory-recall-enabled")) $("ai-memory-recall-enabled").checked = memCfg.recall_enabled !== false;
-  if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
-  updateMemoryConfigVisibility(memCfg.mode || "token_aware", memCfg.recall_enabled !== false);
-  updateMemoryContextSizeDisplay();
-  // Skill 配置
-  const skillCfg = chatCfg.skill_config || { enabled: true };
-  if ($("ai-skill-enabled")) $("ai-skill-enabled").checked = skillCfg.enabled !== false;
-  loadSkillList();
-  // 0.17.8: 权限记忆配置
-  if ($("ai-perm-memory-enabled")) $("ai-perm-memory-enabled").checked = permissionConfig.memory_enabled !== false;
-  if ($("ai-perm-memory-days")) $("ai-perm-memory-days").value = permissionConfig.memory_days ?? 7;
+    const c = aiState.currentAIConfig;
+    const $ = (id) => document.getElementById(id);
+    if ($("ai-enabled")) $("ai-enabled").checked = !!c.enabled;
+    if ($("ai-allow-routing")) $("ai-allow-routing").checked = !!c.allow_intent_routing;
+    if ($("ai-min-query-len")) $("ai-min-query-len").value = c.min_query_len ?? 4;
+    if ($("ai-require-whitespace")) $("ai-require-whitespace").checked = c.require_whitespace !== false;
+    if ($("ai-exclude-pure-numeric")) $("ai-exclude-pure-numeric").checked = c.exclude_pure_numeric !== false;
+    if ($("ai-respect-awareness-url-path")) $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
+    if ($("ai-timeout-ms")) $("ai-timeout-ms").value = effectiveAIHardTimeoutMs(c.slo_hard_timeout_ms);
+    // 对话配置
+    const chatCfg = c.chat_config || {agent_mode: "full", main_window_model: "light", auto_title: false};
+    document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => {
+        input.checked = input.value === (chatCfg.agent_mode || "full");
+    });
+    if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
+    renderMainWindowModelSelect();
+    // 记忆策略配置
+    const memCfg = chatCfg.memory_config || {
+        mode: "token_aware",
+        window_size: 20,
+        trigger_ratio: 0.8,
+        compress_ratio: 0.7,
+        recall_enabled: true,
+        recall_top_k: 3
+    };
+    if ($("ai-memory-mode")) $("ai-memory-mode").value = memCfg.mode || "token_aware";
+    if ($("ai-memory-window-size")) $("ai-memory-window-size").value = memCfg.window_size ?? 20;
+    if ($("ai-memory-trigger-ratio")) {
+        $("ai-memory-trigger-ratio").value = Math.round((memCfg.trigger_ratio ?? 0.8) * 100);
+    }
+    if ($("ai-memory-compress-ratio")) {
+        $("ai-memory-compress-ratio").value = Math.round((memCfg.compress_ratio ?? 0.7) * 100);
+    }
+    if ($("ai-memory-recall-enabled")) $("ai-memory-recall-enabled").checked = memCfg.recall_enabled !== false;
+    if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
+    updateMemoryConfigVisibility(memCfg.mode || "token_aware", memCfg.recall_enabled !== false);
+    updateMemoryContextSizeDisplay();
+    // Skill 配置
+    const skillCfg = chatCfg.skill_config || {enabled: true};
+    if ($("ai-skill-enabled")) $("ai-skill-enabled").checked = skillCfg.enabled !== false;
+    loadSkillList();
+    // 0.17.8: 权限记忆配置
+    if ($("ai-perm-memory-enabled")) $("ai-perm-memory-enabled").checked = permissionConfig.memory_enabled !== false;
+    if ($("ai-perm-memory-days")) $("ai-perm-memory-days").value = permissionConfig.memory_days ?? 7;
 
-  renderAIProviders();
-  renderAITierSelects();
-  renderAITierBanner();
-  loadSystemPromptInfo();
+    renderAIProviders();
+    renderAITierSelects();
+    renderAITierBanner();
+    loadSystemPromptInfo();
 }
 
 /**
  * 加载并展示 system prompt token 信息
  */
 async function loadSystemPromptInfo() {
-  const tokensEl = document.getElementById("ai-prompt-tokens");
-  const metaEl = document.getElementById("ai-prompt-meta");
-  if (!tokensEl || !metaEl) return;
+    const tokensEl = document.getElementById("ai-prompt-tokens");
+    const metaEl = document.getElementById("ai-prompt-meta");
+    if (!tokensEl || !metaEl) return;
 
-  try {
-    const info = await invoke("get_system_prompt_info");
-    const tokens = info.tokens ?? 0;
-    const threshold = info.threshold ?? 1500;
-    const toolsCount = info.tools_count ?? 0;
+    try {
+        const info = await invoke("get_system_prompt_info");
+        const tokens = info.tokens ?? 0;
+        const threshold = info.threshold ?? 1500;
+        const toolsCount = info.tools_count ?? 0;
 
-    tokensEl.textContent = `${tokens} / ${threshold}`;
-    if (tokens > threshold) {
-      tokensEl.className = "ai-prompt-tokens ai-prompt-tokens--over";
-    } else if (tokens > threshold * 0.8) {
-      tokensEl.className = "ai-prompt-tokens ai-prompt-tokens--warn";
-    } else {
-      tokensEl.className = "ai-prompt-tokens";
+        tokensEl.textContent = `${tokens} / ${threshold}`;
+        if (tokens > threshold) {
+            tokensEl.className = "ai-prompt-tokens ai-prompt-tokens--over";
+        } else if (tokens > threshold * 0.8) {
+            tokensEl.className = "ai-prompt-tokens ai-prompt-tokens--warn";
+        } else {
+            tokensEl.className = "ai-prompt-tokens";
+        }
+        metaEl.textContent = t("ai.tools.count", {count: toolsCount});
+    } catch (e) {
+        tokensEl.textContent = "—";
+        tokensEl.className = "ai-prompt-tokens";
+        metaEl.textContent = "";
+        console.warn("[ai] get_system_prompt_info failed:", e);
     }
-    metaEl.textContent = t("ai.tools.count", { count: toolsCount });
-  } catch (e) {
-    tokensEl.textContent = "—";
-    tokensEl.className = "ai-prompt-tokens";
-    metaEl.textContent = "";
-    console.warn("[ai] get_system_prompt_info failed:", e);
-  }
 }
 
 // ── UI helpers ──────────────────────────────────────────────
 
 function updateMemoryConfigVisibility(mode, recallEnabled = true) {
-  const visibility = memoryExpertVisibility(mode, recallEnabled);
-  document.getElementById("ai-memory-window-size-row")?.classList.toggle("hidden", !visibility.fixedCount);
-  document.getElementById("ai-memory-trigger-row")?.classList.toggle("hidden", !visibility.tokenAware);
-  document.getElementById("ai-memory-compress-row")?.classList.toggle("hidden", !visibility.tokenAware);
-  document.getElementById("ai-memory-recall-top-k-row")?.classList.toggle("hidden", !visibility.recallTopK);
+    const visibility = memoryExpertVisibility(mode, recallEnabled);
+    document.getElementById("ai-memory-window-size-row")?.classList.toggle("hidden", !visibility.fixedCount);
+    document.getElementById("ai-memory-trigger-row")?.classList.toggle("hidden", !visibility.tokenAware);
+    document.getElementById("ai-memory-compress-row")?.classList.toggle("hidden", !visibility.tokenAware);
+    document.getElementById("ai-memory-recall-top-k-row")?.classList.toggle("hidden", !visibility.recallTopK);
 }
 
 function updateMemoryContextSizeDisplay() {
-  const el = document.getElementById("ai-memory-context-size");
-  if (!el) return;
-  const cfg = aiState.currentAIConfig;
-  if (!cfg) return;
-  const mainAssign = cfg.tier_main;
-  if (!mainAssign) {
-    el.textContent = t("ai.memory.context_size.unconfigured") || "未配置";
-    return;
-  }
-  const provider = (cfg.providers || []).find((p) => p.id === mainAssign.provider_id);
-  const model = provider && (provider.models || []).find((m) => m.id === mainAssign.model_id);
-  const ctxWindow = model?.context_window;
-  if (!ctxWindow) {
-    el.textContent = t("ai.memory.context_size.unknown") || "未知";
-    return;
-  }
-  el.textContent = formatModelContextWindow(ctxWindow) || (t("ai.memory.context_size.unknown") || "未知");
+    const el = document.getElementById("ai-memory-context-size");
+    if (!el) return;
+    const cfg = aiState.currentAIConfig;
+    if (!cfg) return;
+    const mainAssign = cfg.tier_main;
+    if (!mainAssign) {
+        el.textContent = t("ai.memory.context_size.unconfigured") || "未配置";
+        return;
+    }
+    const provider = (cfg.providers || []).find((p) => p.id === mainAssign.provider_id);
+    const model = provider && (provider.models || []).find((m) => m.id === mainAssign.model_id);
+    const ctxWindow = model?.context_window;
+    if (!ctxWindow) {
+        el.textContent = t("ai.memory.context_size.unknown") || "未知";
+        return;
+    }
+    el.textContent = formatModelContextWindow(ctxWindow) || (t("ai.memory.context_size.unknown") || "未知");
 }
 
 // ── Toast ───────────────────────────────────────────────────
 
 function showAIEnableToast() {
-  const toast = document.getElementById("ai-enable-toast");
-  if (!toast) return;
-  toast.classList.remove('hidden');
-  clearTimeout(showAIEnableToast._t);
-  showAIEnableToast._t = setTimeout(hideAIEnableToast, 8000);
+    const toast = document.getElementById("ai-enable-toast");
+    if (!toast) return;
+    toast.classList.remove('hidden');
+    clearTimeout(showAIEnableToast._t);
+    showAIEnableToast._t = setTimeout(hideAIEnableToast, 8000);
 }
 
 function hideAIEnableToast() {
-  const toast = document.getElementById("ai-enable-toast");
-  if (!toast) return;
-  toast.classList.add('hidden');
-  clearTimeout(showAIEnableToast._t);
+    const toast = document.getElementById("ai-enable-toast");
+    if (!toast) return;
+    toast.classList.add('hidden');
+    clearTimeout(showAIEnableToast._t);
 }
 
 // ── 事件绑定（幂等）─────────────────────────────────────────
 
 function bindAIEvents() {
-  const root = document.getElementById("ai-providers");
-  if (!root || root.dataset.eventsBound === "1") return;
-  root.dataset.eventsBound = "1";
+    const root = document.getElementById("ai-providers");
+    if (!root || root.dataset.eventsBound === "1") return;
+    root.dataset.eventsBound = "1";
 
-  const $ = (id) => document.getElementById(id);
-  const cfg = aiState.currentAIConfig;
+    const $ = (id) => document.getElementById(id);
+    const cfg = aiState.currentAIConfig;
 
-  $("ai-enabled")?.addEventListener("change", (e) => {
-    cfg.enabled = e.target.checked;
-    renderAITierBanner();
-    saveAIConfig();
-  });
-  $("ai-allow-routing")?.addEventListener("change", (e) => {
-    cfg.allow_intent_routing = e.target.checked;
-    saveAIConfig();
-  });
-  $("ai-min-query-len")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    cfg.min_query_len = isNaN(v) ? 4 : Math.max(1, Math.min(20, v));
-    e.target.value = cfg.min_query_len;
-    saveAIConfig();
-  });
-  $("ai-require-whitespace")?.addEventListener("change", (e) => {
-    cfg.require_whitespace = e.target.checked;
-    saveAIConfig();
-  });
-  $("ai-exclude-pure-numeric")?.addEventListener("change", (e) => {
-    cfg.exclude_pure_numeric = e.target.checked;
-    saveAIConfig();
-  });
-  $("ai-respect-awareness-url-path")?.addEventListener("change", (e) => {
-    cfg.respect_awareness_url_path = e.target.checked;
-    saveAIConfig();
-  });
-  document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => input.addEventListener("change", (e) => {
-    if (!e.target.checked) return;
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.agent_mode = e.target.value;
-    saveAIConfig();
-  }));
-  $("ai-main-window-model-mode")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || {};
-    if (e.target.value === "custom") {
-      const custom = $("ai-main-window-custom-model");
-      cfg.chat_config.main_window_model = custom?.value || "light";
-    } else {
-      cfg.chat_config.main_window_model = e.target.value;
-    }
-    renderMainWindowModelSelect();
-    saveAIConfig();
-  });
-  $("ai-main-window-custom-model")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.main_window_model = e.target.value || "light";
-    saveAIConfig();
-  });
-  $("ai-chat-auto-title")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || { auto_title: false };
-    cfg.chat_config.auto_title = e.target.checked;
-    saveAIConfig();
-  });
-  $("ai-memory-mode")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-    cfg.chat_config.memory_config.mode = e.target.value;
-    updateMemoryConfigVisibility(
-      e.target.value,
-      cfg.chat_config.memory_config.recall_enabled !== false,
-    );
-    saveAIConfig();
-  });
-  $("ai-memory-window-size")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-    cfg.chat_config.memory_config.window_size = isNaN(v) ? 20 : Math.max(5, Math.min(100, v));
-    e.target.value = cfg.chat_config.memory_config.window_size;
-    saveAIConfig();
-  });
-  $("ai-memory-trigger-ratio")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    const clamped = isNaN(v) ? 80 : Math.max(50, Math.min(95, v));
-    e.target.value = clamped;
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-    cfg.chat_config.memory_config.trigger_ratio = clamped / 100;
-    saveAIConfig();
-  });
-  $("ai-memory-compress-ratio")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    const clamped = isNaN(v) ? 70 : Math.max(30, Math.min(90, v));
-    e.target.value = clamped;
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-    cfg.chat_config.memory_config.compress_ratio = clamped / 100;
-    saveAIConfig();
-  });
-  $("ai-skill-enabled")?.addEventListener("change", async (e) => {
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.skill_config = cfg.chat_config.skill_config || {};
-    cfg.chat_config.skill_config.enabled = e.target.checked;
-    try {
-      await saveAIConfig();
-      await loadSkillList();
-    } catch (error) {
-      console.error("update skill runtime switch failed:", error);
-    }
-  });
-  $("ai-skill-refresh")?.addEventListener("click", async () => {
-    const btn = $("ai-skill-refresh");
-    if (btn) { btn.disabled = true; btn.textContent = "..."; }
-    try {
-      await invoke("refresh_skills");
-      await loadSkillList();
-      if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
-    } catch (e) {
-      console.error("refresh_skills failed:", e);
-      if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
-    }
-    btn && (btn.disabled = false);
-  });
-
-  $("ai-skill-import-btn")?.addEventListener("click", () => showSkillImportPanel());
-  initSkillImportHandlers();
-
-  // Skill 编辑 modal 事件
-  $("skill-edit-cancel")?.addEventListener("click", () => {
-    const overlay = $("skill-edit-overlay");
-    if (overlay) overlay.classList.add('hidden');
-    const errorEl = $("skill-edit-error");
-    if (errorEl) errorEl.textContent = "";
-  });
-  $("skill-edit-overlay")?.addEventListener("click", (e) => {
-    if (e.target.id === "skill-edit-overlay") {
-      e.target.classList.add('hidden');
-    }
-  });
-  $("skill-edit-save")?.addEventListener("click", async () => {
-    const overlay = $("skill-edit-overlay");
-    if (!overlay) return;
-    const content = $("skill-edit-textarea")?.value || "";
-    const skillDir = overlay.dataset.skillDir;
-    const errorEl = $("skill-edit-error");
-    if (errorEl) errorEl.textContent = "";
-    if (!skillDir) return;
-    try {
-      await invoke("save_skill_md", { skillDir, content });
-      overlay.classList.add('hidden');
-      await invoke("refresh_skills");
-      await loadSkillList();
-    } catch (e) {
-      if (errorEl) errorEl.textContent = String(e);
-      console.error("save_skill_md failed:", e);
-    }
-  });
-  $("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-    cfg.chat_config.memory_config.recall_enabled = e.target.checked;
-    updateMemoryConfigVisibility(cfg.chat_config.memory_config.mode || "token_aware", e.target.checked);
-    saveAIConfig();
-  });
-  $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-    cfg.chat_config.memory_config.recall_top_k = isNaN(v) ? 3 : Math.max(1, Math.min(10, v));
-    e.target.value = cfg.chat_config.memory_config.recall_top_k;
-    saveAIConfig();
-  });
-  $("ai-timeout-ms")?.addEventListener("change", (e) => {
-    cfg.slo_hard_timeout_ms = clampAIHardTimeoutMs(e.target.value);
-    e.target.value = effectiveAIHardTimeoutMs(cfg.slo_hard_timeout_ms);
-    saveAIConfig();
-  });
-
-  ["ultra_light", "light", "main"].forEach((tier) => {
-    $(`ai-tier-${tier.replace('_', '-')}`)?.addEventListener("change", (e) => {
-      const val = e.target.value;
-      if (!val) {
-        cfg[`tier_${tier}`] = null;
-      } else {
-        const sep = val.indexOf("::");
-        const providerId = val.slice(0, sep);
-        const modelId = val.slice(sep + 2);
-        cfg[`tier_${tier}`] = { provider_id: providerId, model_id: modelId };
-      }
-      renderAITierDegrade();
-      renderAITierBanner();
-      if (tier === "main") updateMemoryContextSizeDisplay();
-      saveAIConfig();
+    $("ai-enabled")?.addEventListener("change", (e) => {
+        cfg.enabled = e.target.checked;
+        renderAITierBanner();
+        saveAIConfig();
     });
-  });
+    $("ai-allow-routing")?.addEventListener("change", (e) => {
+        cfg.allow_intent_routing = e.target.checked;
+        saveAIConfig();
+    });
+    $("ai-min-query-len")?.addEventListener("change", (e) => {
+        const v = parseInt(e.target.value, 10);
+        cfg.min_query_len = isNaN(v) ? 4 : Math.max(1, Math.min(20, v));
+        e.target.value = cfg.min_query_len;
+        saveAIConfig();
+    });
+    $("ai-require-whitespace")?.addEventListener("change", (e) => {
+        cfg.require_whitespace = e.target.checked;
+        saveAIConfig();
+    });
+    $("ai-exclude-pure-numeric")?.addEventListener("change", (e) => {
+        cfg.exclude_pure_numeric = e.target.checked;
+        saveAIConfig();
+    });
+    $("ai-respect-awareness-url-path")?.addEventListener("change", (e) => {
+        cfg.respect_awareness_url_path = e.target.checked;
+        saveAIConfig();
+    });
+    document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => input.addEventListener("change", (e) => {
+        if (!e.target.checked) return;
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.agent_mode = e.target.value;
+        saveAIConfig();
+    }));
+    $("ai-main-window-model-mode")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        if (e.target.value === "custom") {
+            const custom = $("ai-main-window-custom-model");
+            cfg.chat_config.main_window_model = custom?.value || "light";
+        } else {
+            cfg.chat_config.main_window_model = e.target.value;
+        }
+        renderMainWindowModelSelect();
+        saveAIConfig();
+    });
+    $("ai-main-window-custom-model")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.main_window_model = e.target.value || "light";
+        saveAIConfig();
+    });
+    $("ai-chat-auto-title")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {auto_title: false};
+        cfg.chat_config.auto_title = e.target.checked;
+        saveAIConfig();
+    });
+    $("ai-memory-mode")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.mode = e.target.value;
+        updateMemoryConfigVisibility(
+            e.target.value,
+            cfg.chat_config.memory_config.recall_enabled !== false,
+        );
+        saveAIConfig();
+    });
+    $("ai-memory-window-size")?.addEventListener("change", (e) => {
+        const v = parseInt(e.target.value, 10);
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.window_size = isNaN(v) ? 20 : Math.max(5, Math.min(100, v));
+        e.target.value = cfg.chat_config.memory_config.window_size;
+        saveAIConfig();
+    });
+    $("ai-memory-trigger-ratio")?.addEventListener("change", (e) => {
+        const v = parseInt(e.target.value, 10);
+        const clamped = isNaN(v) ? 80 : Math.max(50, Math.min(95, v));
+        e.target.value = clamped;
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.trigger_ratio = clamped / 100;
+        saveAIConfig();
+    });
+    $("ai-memory-compress-ratio")?.addEventListener("change", (e) => {
+        const v = parseInt(e.target.value, 10);
+        const clamped = isNaN(v) ? 70 : Math.max(30, Math.min(90, v));
+        e.target.value = clamped;
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.compress_ratio = clamped / 100;
+        saveAIConfig();
+    });
+    $("ai-skill-enabled")?.addEventListener("change", async (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.skill_config = cfg.chat_config.skill_config || {};
+        cfg.chat_config.skill_config.enabled = e.target.checked;
+        try {
+            await saveAIConfig();
+            await loadSkillList();
+        } catch (error) {
+            console.error("update skill runtime switch failed:", error);
+        }
+    });
+    $("ai-skill-refresh")?.addEventListener("click", async () => {
+        const btn = $("ai-skill-refresh");
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = "...";
+        }
+        try {
+            await invoke("refresh_skills");
+            await loadSkillList();
+            if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
+        } catch (e) {
+            console.error("refresh_skills failed:", e);
+            if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
+        }
+        btn && (btn.disabled = false);
+    });
 
-  // 0.17.8: 权限记忆配置事件
-  $("ai-perm-memory-enabled")?.addEventListener("change", (e) => {
-    permissionConfig.memory_enabled = e.target.checked;
-    invoke("set_config", { key: "ai_permission", value: permissionConfig }).catch((e) =>
-      console.error("set_config ai_permission failed:", e),
-    );
-  });
-  $("ai-perm-memory-days")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    permissionConfig.memory_days = isNaN(v) ? 7 : Math.max(1, Math.min(90, v));
-    e.target.value = permissionConfig.memory_days;
-    invoke("set_config", { key: "ai_permission", value: permissionConfig }).catch((e) =>
-      console.error("set_config ai_permission failed:", e),
-    );
-  });
-  $("ai-perm-clear-memory")?.addEventListener("click", async () => {
-    const btn = $("ai-perm-clear-memory");
-    if (btn) { btn.disabled = true; }
-    try {
-      await invoke("clear_all_permission_memory");
-    } catch (e) {
-      console.error("clear_all_permission_memory failed:", e);
-    } finally {
-      if (btn) { btn.disabled = false; }
-    }
-  });
+    $("ai-skill-import-btn")?.addEventListener("click", () => showSkillImportPanel());
+    initSkillImportHandlers();
 
-  // Provider modal 事件
-  $("ai-modal-cancel")?.addEventListener("click", closeAIProviderModal);
-  $("ai-modal-save")?.addEventListener("click", saveNewProviderFromModal);
-  $("ai-modal-kind")?.addEventListener("change", () => {
-    $("ai-modal-preset").value = "custom";
-  });
-  $("ai-modal-base-url")?.addEventListener("input", () => {
-    const bu = $("ai-modal-base-url").value.trim();
-    const kind = $("ai-modal-kind").value;
-    $("ai-modal-preset").value = guessPresetForProvider(kind, bu);
-  });
+    // Skill 编辑 modal 事件
+    $("skill-edit-cancel")?.addEventListener("click", () => {
+        const overlay = $("skill-edit-overlay");
+        if (overlay) overlay.classList.add('hidden');
+        const errorEl = $("skill-edit-error");
+        if (errorEl) errorEl.textContent = "";
+    });
+    $("skill-edit-overlay")?.addEventListener("click", (e) => {
+        if (e.target.id === "skill-edit-overlay") {
+            e.target.classList.add('hidden');
+        }
+    });
+    $("skill-edit-save")?.addEventListener("click", async () => {
+        const overlay = $("skill-edit-overlay");
+        if (!overlay) return;
+        const content = $("skill-edit-textarea")?.value || "";
+        const skillDir = overlay.dataset.skillDir;
+        const errorEl = $("skill-edit-error");
+        if (errorEl) errorEl.textContent = "";
+        if (!skillDir) return;
+        try {
+            await invoke("save_skill_md", {skillDir, content});
+            overlay.classList.add('hidden');
+            await invoke("refresh_skills");
+            await loadSkillList();
+        } catch (e) {
+            if (errorEl) errorEl.textContent = String(e);
+            console.error("save_skill_md failed:", e);
+        }
+    });
+    $("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.recall_enabled = e.target.checked;
+        updateMemoryConfigVisibility(cfg.chat_config.memory_config.mode || "token_aware", e.target.checked);
+        saveAIConfig();
+    });
+    $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {
+        const v = parseInt(e.target.value, 10);
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.recall_top_k = isNaN(v) ? 3 : Math.max(1, Math.min(10, v));
+        e.target.value = cfg.chat_config.memory_config.recall_top_k;
+        saveAIConfig();
+    });
+    $("ai-timeout-ms")?.addEventListener("change", (e) => {
+        cfg.slo_hard_timeout_ms = clampAIHardTimeoutMs(e.target.value);
+        e.target.value = effectiveAIHardTimeoutMs(cfg.slo_hard_timeout_ms);
+        saveAIConfig();
+    });
 
-  // 供应商 modal 模型多选
-  $("ai-provider-model-input")?.addEventListener("focus", () => triggerProviderModelFetch());
-  $("ai-provider-model-input")?.addEventListener("input", (e) => filterProviderModels(e.target.value));
-  $("ai-provider-model-input")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      const val = e.target.value.trim();
-      if (val && !aiState._providerSelectedModels.includes(val)) {
-        aiState._providerSelectedModels.push(val);
-        renderProviderModelTags();
-        e.target.value = "";
-        filterProviderModels("");
-      }
-    }
-  });
-  $("ai-modal-overlay")?.addEventListener("click", (e) => {
-    const dropdown = $("ai-provider-model-dropdown");
-    if (!dropdown || dropdown.classList.contains('hidden')) return;
-    if (e.target.closest("#ai-provider-model-select")) return;
-    dropdown.classList.add('hidden');
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      const modelOverlay = $("ai-model-edit-overlay");
-      if (modelOverlay && !modelOverlay.classList.contains('hidden')) return;
-      const overlay = $("ai-modal-overlay");
-      if (overlay && !overlay.classList.contains('hidden')) {
-        closeAIProviderModal();
-      }
-    }
-  });
+    ["ultra_light", "light", "main"].forEach((tier) => {
+        $(`ai-tier-${tier.replace('_', '-')}`)?.addEventListener("change", (e) => {
+            const val = e.target.value;
+            if (!val) {
+                cfg[`tier_${tier}`] = null;
+            } else {
+                const sep = val.indexOf("::");
+                const providerId = val.slice(0, sep);
+                const modelId = val.slice(sep + 2);
+                cfg[`tier_${tier}`] = {provider_id: providerId, model_id: modelId};
+            }
+            renderAITierDegrade();
+            renderAITierBanner();
+            if (tier === "main") updateMemoryContextSizeDisplay();
+            saveAIConfig();
+        });
+    });
 
-  $("ai-modal-test")?.addEventListener("click", async () => {
-    const btn = $("ai-modal-test");
-    const resultEl = $("ai-modal-test-result");
-    const kind = $("ai-modal-kind").value;
-    const baseUrl = $("ai-modal-base-url").value.trim() || null;
-    const apiKey = $("ai-modal-api-key").value.trim();
-    const overlay = $("ai-modal-overlay");
-    const providerId = overlay.dataset.editProviderId || null;
+    // 0.17.8: 权限记忆配置事件
+    $("ai-perm-memory-enabled")?.addEventListener("change", (e) => {
+        permissionConfig.memory_enabled = e.target.checked;
+        invoke("set_config", {key: "ai_permission", value: permissionConfig}).catch((e) =>
+            console.error("set_config ai_permission failed:", e),
+        );
+    });
+    $("ai-perm-memory-days")?.addEventListener("change", (e) => {
+        const v = parseInt(e.target.value, 10);
+        permissionConfig.memory_days = isNaN(v) ? 7 : Math.max(1, Math.min(90, v));
+        e.target.value = permissionConfig.memory_days;
+        invoke("set_config", {key: "ai_permission", value: permissionConfig}).catch((e) =>
+            console.error("set_config ai_permission failed:", e),
+        );
+    });
+    $("ai-perm-clear-memory")?.addEventListener("click", async () => {
+        const btn = $("ai-perm-clear-memory");
+        if (btn) {
+            btn.disabled = true;
+        }
+        try {
+            await invoke("clear_all_permission_memory");
+        } catch (e) {
+            console.error("clear_all_permission_memory failed:", e);
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+            }
+        }
+    });
 
-    if (!apiKey && !providerId) {
-      resultEl.textContent = t("ai.modal.test.empty_key");
-      resultEl.className = "ai-test-result error";
-      resultEl.classList.remove('hidden');
-      return;
-    }
+    // Provider modal 事件
+    $("ai-modal-cancel")?.addEventListener("click", closeAIProviderModal);
+    $("ai-modal-save")?.addEventListener("click", saveNewProviderFromModal);
+    $("ai-modal-kind")?.addEventListener("change", () => {
+        $("ai-modal-preset").value = "custom";
+    });
+    $("ai-modal-base-url")?.addEventListener("input", () => {
+        const bu = $("ai-modal-base-url").value.trim();
+        const kind = $("ai-modal-kind").value;
+        $("ai-modal-preset").value = guessPresetForProvider(kind, bu);
+    });
 
-    btn.classList.add("testing");
-    btn.textContent = t("ai.modal.test.testing");
-    resultEl.classList.add('hidden');
-    try {
-      const msg = await invoke("test_ai_provider", {
-        kind, baseUrl, apiKey: apiKey || "", providerId: providerId || null,
-      });
-      resultEl.textContent = msg;
-      resultEl.className = "ai-test-result success";
-      resultEl.classList.remove('hidden');
-    } catch (e) {
-      resultEl.textContent = String(e);
-      resultEl.className = "ai-test-result error";
-      resultEl.classList.remove('hidden');
-    } finally {
-      btn.classList.remove("testing");
-      btn.textContent = t("ai.modal.test");
-    }
-  });
+    // 供应商 modal 模型多选
+    $("ai-provider-model-input")?.addEventListener("focus", () => triggerProviderModelFetch());
+    $("ai-provider-model-input")?.addEventListener("input", (e) => filterProviderModels(e.target.value));
+    $("ai-provider-model-input")?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            const val = e.target.value.trim();
+            if (val && !aiState._providerSelectedModels.includes(val)) {
+                aiState._providerSelectedModels.push(val);
+                renderProviderModelTags();
+                e.target.value = "";
+                filterProviderModels("");
+            }
+        }
+    });
+    $("ai-modal-overlay")?.addEventListener("click", (e) => {
+        const dropdown = $("ai-provider-model-dropdown");
+        if (!dropdown || dropdown.classList.contains('hidden')) return;
+        if (e.target.closest("#ai-provider-model-select")) return;
+        dropdown.classList.add('hidden');
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            const modelOverlay = $("ai-model-edit-overlay");
+            if (modelOverlay && !modelOverlay.classList.contains('hidden')) return;
+            const overlay = $("ai-modal-overlay");
+            if (overlay && !overlay.classList.contains('hidden')) {
+                closeAIProviderModal();
+            }
+        }
+    });
 
-  $("ai-toast-enable")?.addEventListener("click", () => {
-    cfg.enabled = true;
-    $("ai-enabled").checked = true;
-    hideAIEnableToast();
-    renderAITierBanner();
-    saveAIConfig();
-  });
-  $("ai-toast-later")?.addEventListener("click", hideAIEnableToast);
+    $("ai-modal-test")?.addEventListener("click", async () => {
+        const btn = $("ai-modal-test");
+        const resultEl = $("ai-modal-test-result");
+        const kind = $("ai-modal-kind").value;
+        const baseUrl = $("ai-modal-base-url").value.trim() || null;
+        const apiKey = $("ai-modal-api-key").value.trim();
+        const overlay = $("ai-modal-overlay");
+        const providerId = overlay.dataset.editProviderId || null;
 
-  bindAIModelEditModalEvents();
+        if (!apiKey && !providerId) {
+            resultEl.textContent = t("ai.modal.test.empty_key");
+            resultEl.className = "ai-test-result error";
+            resultEl.classList.remove('hidden');
+            return;
+        }
+
+        btn.classList.add("testing");
+        btn.textContent = t("ai.modal.test.testing");
+        resultEl.classList.add('hidden');
+        try {
+            const msg = await invoke("test_ai_provider", {
+                kind, baseUrl, apiKey: apiKey || "", providerId: providerId || null,
+            });
+            resultEl.textContent = msg;
+            resultEl.className = "ai-test-result success";
+            resultEl.classList.remove('hidden');
+        } catch (e) {
+            resultEl.textContent = String(e);
+            resultEl.className = "ai-test-result error";
+            resultEl.classList.remove('hidden');
+        } finally {
+            btn.classList.remove("testing");
+            btn.textContent = t("ai.modal.test");
+        }
+    });
+
+    $("ai-toast-enable")?.addEventListener("click", () => {
+        cfg.enabled = true;
+        $("ai-enabled").checked = true;
+        hideAIEnableToast();
+        renderAITierBanner();
+        saveAIConfig();
+    });
+    $("ai-toast-later")?.addEventListener("click", hideAIEnableToast);
+
+    bindAIModelEditModalEvents();
 }

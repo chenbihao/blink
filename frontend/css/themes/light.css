@@ -1,27 +1,27 @@
 /* ── Light 主题（Catppuccin Latte）─────────────────────────────────────────── */
 
 [data-theme="light"] {
-  --bg: #eff1f5;
-  --bg-sidebar: #e6e9ef;
-  --bg-deep: #dce0e8;
-  --surface: #ccd0da;
-  --surface-2: #bcc0cc;
-  --text: #4c4f69;
-  --text-sub: #5c5f77;
-  --text-dim: #6c6f85;
-  --text-faint: #7c7f93;
-  --accent: #1e66f5;
-  --accent-bg: rgba(30, 102, 245, 0.12);
-  --green: #40a02b;
-  --red: #d20f39;
-  --red-bg: #e6d2da;
-  --red-border: #d2b3c2;
-  --green-bg: #d2e3d8;
-  --warning: #fe640b;       /* Catppuccin Latte peach -- 警告态（迁移失败等） */
-  --warning-bg: #ffe6d6;
-  --warning-border: #fec8b0;
-  --shadow: rgba(0, 0, 0, 0.18);
-  --shadow-strong: rgba(0, 0, 0, 0.35);
-  --border-glow: rgba(0, 0, 0, 0.06);
-  --danger-hover-bg: rgba(210, 15, 57, 0.1);
+    --bg: #eff1f5;
+    --bg-sidebar: #e6e9ef;
+    --bg-deep: #dce0e8;
+    --surface: #ccd0da;
+    --surface-2: #bcc0cc;
+    --text: #4c4f69;
+    --text-sub: #5c5f77;
+    --text-dim: #6c6f85;
+    --text-faint: #7c7f93;
+    --accent: #1e66f5;
+    --accent-bg: rgba(30, 102, 245, 0.12);
+    --green: #40a02b;
+    --red: #d20f39;
+    --red-bg: #e6d2da;
+    --red-border: #d2b3c2;
+    --green-bg: #d2e3d8;
+    --warning: #fe640b; /* Catppuccin Latte peach -- 警告态（迁移失败等） */
+    --warning-bg: #ffe6d6;
+    --warning-border: #fec8b0;
+    --shadow: rgba(0, 0, 0, 0.18);
+    --shadow-strong: rgba(0, 0, 0, 0.35);
+    --border-glow: rgba(0, 0, 0, 0.06);
+    --danger-hover-bg: rgba(210, 15, 57, 0.1);
 }

@@ -2,8 +2,8 @@
 //! Tab / ArrowRight 拦截接受 ghost 文本补全（视配置 autosuggest_tab_key）。
 //! Alt 状态由后端事件驱动，不再轮询。chord 触发门禁用 `inputState.isAltDown() || e.altKey`。
 
-import { hideWindow, triggerChord, getAwarenessText } from "../shared/api.js";
-import { activateItem } from "./actions.js";
+import {getAwarenessText, hideWindow, triggerChord} from "../shared/api.js";
+import {activateItem} from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
@@ -12,34 +12,34 @@ import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
-import { queryEl, aiQueryEl, appEl } from "./dom.js";
+import {aiQueryEl, appEl, queryEl} from "./dom.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
-  // 0.8.5 Chord：Alt+字母触发（捕获阶段，最优先；独立于 onNavigation，不依赖 hasItems）
-  document.addEventListener("keydown", onChordTrigger, true);
-  document.addEventListener("keydown", onAutosuggestAccept, true); // 捕获阶段，优先其他 handler
-  document.addEventListener("keydown", onNavigation);
-  document.addEventListener("keydown", onEscape);
-  document.addEventListener("keydown", onBlockModifiers, true);
-  // 滚轮翻页：向上滚 = PageUp，向下滚 = PageDown（整页翻，用鼠标就不用手移到方向键了）
-  // 监听 appEl 而非 resultsEl：window-size.js 的 maxHeight 机制会让窗口在末页
-  // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
-  // 全窗口，滚轮不溢出到背后窗口。
-  appEl.addEventListener("wheel", (e) => {
-    // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
-    if (aiMode.isActive()) return;
-  // 0.18.6: 命令模式无结果可翻页，放行默认行为
-  if (cmdMode.isActive()) return;
-  // 0.19.15: 剪贴板模式有结果，正常翻页
-  e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
-  if (!results.hasItems()) return;
-    if (e.deltaY < 0) {
-      results.pageUp(); // 向上滚 → 上一页（等价于 PageUp）
-    } else {
-      results.pageDown(); // 向下滚 → 下一页（等价于 PageDown）
-    }
-  });
+    // 0.8.5 Chord：Alt+字母触发（捕获阶段，最优先；独立于 onNavigation，不依赖 hasItems）
+    document.addEventListener("keydown", onChordTrigger, true);
+    document.addEventListener("keydown", onAutosuggestAccept, true); // 捕获阶段，优先其他 handler
+    document.addEventListener("keydown", onNavigation);
+    document.addEventListener("keydown", onEscape);
+    document.addEventListener("keydown", onBlockModifiers, true);
+    // 滚轮翻页：向上滚 = PageUp，向下滚 = PageDown（整页翻，用鼠标就不用手移到方向键了）
+    // 监听 appEl 而非 resultsEl：window-size.js 的 maxHeight 机制会让窗口在末页
+    // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
+    // 全窗口，滚轮不溢出到背后窗口。
+    appEl.addEventListener("wheel", (e) => {
+        // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
+        if (aiMode.isActive()) return;
+        // 0.18.6: 命令模式无结果可翻页，放行默认行为
+        if (cmdMode.isActive()) return;
+        // 0.19.15: 剪贴板模式有结果，正常翻页
+        e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
+        if (!results.hasItems()) return;
+        if (e.deltaY < 0) {
+            results.pageUp(); // 向上滚 → 上一页（等价于 PageUp）
+        } else {
+            results.pageDown(); // 向下滚 → 下一页（等价于 PageDown）
+        }
+    });
 }
 
 // ── Autosuggestion Tab 接受 ────────────────────────────────────────
@@ -51,114 +51,114 @@ export function init() {
  * AiMode 下抑制 Tab Ghost 接受（AI 模式无 ghost）。
  */
 function onAutosuggestAccept(e) {
-  // AiMode 下抑制 Tab Ghost 接受
-  if (aiMode.isActive()) return;
-  // 0.18.6: 命令模式下抑制 Tab Ghost 接受
-  if (cmdMode.isActive()) return;
-  // 0.19.15: 剪贴板模式下抑制 Tab Ghost 接受
-  if (clipboardMode.isActive()) return;
-  // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
-  // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
-  if (e.isComposing || e.keyCode === 229) return;
-  const tabKey = autosuggestConfig.getTabKey();
-  if (e.key !== tabKey) return;
-  if (!ghost.hasHint()) return;
-  if (ghost.acceptCurrent()) {
-    e.preventDefault();
-    e.stopPropagation();
-  }
+    // AiMode 下抑制 Tab Ghost 接受
+    if (aiMode.isActive()) return;
+    // 0.18.6: 命令模式下抑制 Tab Ghost 接受
+    if (cmdMode.isActive()) return;
+    // 0.19.15: 剪贴板模式下抑制 Tab Ghost 接受
+    if (clipboardMode.isActive()) return;
+    // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
+    // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
+    if (e.isComposing || e.keyCode === 229) return;
+    const tabKey = autosuggestConfig.getTabKey();
+    if (e.key !== tabKey) return;
+    if (!ghost.hasHint()) return;
+    if (ghost.acceptCurrent()) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
 }
 
 // ── 导航 / 激活 ───────────────────────────────────────────────────────────────
 
 function onNavigation(e) {
-  // 0.18.6: 命令模式 — 只处理 Enter（执行命令），其余导航全部抑制
-  if (cmdMode.isActive()) {
-    if (e.key === "Enter" && !e.isComposing) {
-      e.preventDefault();
-      cmdMode.execute();
-    }
-    return;
-  }
-
-  // 0.20.2: 剪贴板模式多选键盘拦截（Ctrl+A / Ctrl+C）
-  // 单击选中由 results.js mousedown → clipboardMode.handleMousedown 处理
-  // 非多选键返回 false，继续走正常导航
-  if (clipboardMode.isActive()) {
-    if (clipboardMode.handleKeydown(e)) return;
-  }
-
-  // 0.19.15: 剪贴板模式 — 导航/激活与搜索模式一致（复用 results.js），
-  // 但不拦截键盘——结果列表正常可用。
-  // ESC 处理在 onEscape 中单独拦截。
-
-  // 0.17.6: AiMode 下 Enter 发送追问（或确认卡片），不触发结果导航
-  if (aiMode.isActive()) {
-    if (e.key === "Enter" && !e.isComposing) {
-      e.preventDefault();
-      // 确认卡片显示时，Enter 确认操作（不触发追问）
-      if (aiMode.isAwaitingConfirm()) {
-        aiMode.confirmCurrentAction();
-      } else {
-        const text = aiQueryEl.value.trim();
-        if (text) {
-          aiQueryEl.value = "";
-          aiMode.askFollowup(text);
+    // 0.18.6: 命令模式 — 只处理 Enter（执行命令），其余导航全部抑制
+    if (cmdMode.isActive()) {
+        if (e.key === "Enter" && !e.isComposing) {
+            e.preventDefault();
+            cmdMode.execute();
         }
-      }
+        return;
     }
-    return;
-  }
 
-  if (!results.hasItems()) return;
+    // 0.20.2: 剪贴板模式多选键盘拦截（Ctrl+A / Ctrl+C）
+    // 单击选中由 results.js mousedown → clipboardMode.handleMousedown 处理
+    // 非多选键返回 false，继续走正常导航
+    if (clipboardMode.isActive()) {
+        if (clipboardMode.handleKeydown(e)) return;
+    }
 
-  if (e.key === "ArrowDown") {
-    e.preventDefault();
-    results.move(1);
-  } else if (e.key === "ArrowUp") {
-    e.preventDefault();
-    results.move(-1);
-  } else if (e.key === "PageDown") {
-    e.preventDefault();
-    results.pageDown();
-  } else if (e.key === "PageUp") {
-    e.preventDefault();
-    results.pageUp();
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    activateItem(results.getActive());
-  } else if ((inputState.isAltDown() || e.altKey) && /^[1-9]$/.test(e.key)) {
-    // Alt+1~9：直接激活第 N 个候选
-    // 用后端 Alt 快照 || e.altKey，抵抗 WebView synthetic keyup
-    e.preventDefault();
-    activateItem(results.getNth(parseInt(e.key, 10)));
-  }
+    // 0.19.15: 剪贴板模式 — 导航/激活与搜索模式一致（复用 results.js），
+    // 但不拦截键盘——结果列表正常可用。
+    // ESC 处理在 onEscape 中单独拦截。
+
+    // 0.17.6: AiMode 下 Enter 发送追问（或确认卡片），不触发结果导航
+    if (aiMode.isActive()) {
+        if (e.key === "Enter" && !e.isComposing) {
+            e.preventDefault();
+            // 确认卡片显示时，Enter 确认操作（不触发追问）
+            if (aiMode.isAwaitingConfirm()) {
+                aiMode.confirmCurrentAction();
+            } else {
+                const text = aiQueryEl.value.trim();
+                if (text) {
+                    aiQueryEl.value = "";
+                    aiMode.askFollowup(text);
+                }
+            }
+        }
+        return;
+    }
+
+    if (!results.hasItems()) return;
+
+    if (e.key === "ArrowDown") {
+        e.preventDefault();
+        results.move(1);
+    } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        results.move(-1);
+    } else if (e.key === "PageDown") {
+        e.preventDefault();
+        results.pageDown();
+    } else if (e.key === "PageUp") {
+        e.preventDefault();
+        results.pageUp();
+    } else if (e.key === "Enter") {
+        e.preventDefault();
+        activateItem(results.getActive());
+    } else if ((inputState.isAltDown() || e.altKey) && /^[1-9]$/.test(e.key)) {
+        // Alt+1~9：直接激活第 N 个候选
+        // 用后端 Alt 快照 || e.altKey，抵抗 WebView synthetic keyup
+        e.preventDefault();
+        activateItem(results.getNth(parseInt(e.key, 10)));
+    }
 }
 
 // ── ESC 隐藏 ──────────────────────────────────────────────────────────────────
 
 function onEscape(e) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    // AiMode 下 ESC 退出 AI 模式（不 hide 窗口）
-    if (aiMode.isActive()) {
-      aiMode.exitAiMode();
-      return;
+    if (e.key === "Escape") {
+        e.preventDefault();
+        // AiMode 下 ESC 退出 AI 模式（不 hide 窗口）
+        if (aiMode.isActive()) {
+            aiMode.exitAiMode();
+            return;
+        }
+        // 0.20.2: 剪贴板模式下 ESC 顺序：清空多选 → 退出剪贴板模式 → 隐藏窗口
+        if (clipboardMode.isActive()) {
+            // 有多选时先清空选择，不退出模式
+            if (clipboardMode.hasSelection()) {
+                clipboardMode.clearSelection();
+                return;
+            }
+            // 无多选时退出剪贴板模式
+            clipboardMode.exit();
+            return;
+        }
+        ghost.clear();
+        hideWindow();
     }
-    // 0.20.2: 剪贴板模式下 ESC 顺序：清空多选 → 退出剪贴板模式 → 隐藏窗口
-    if (clipboardMode.isActive()) {
-      // 有多选时先清空选择，不退出模式
-      if (clipboardMode.hasSelection()) {
-        clipboardMode.clearSelection();
-        return;
-      }
-      // 无多选时退出剪贴板模式
-      clipboardMode.exit();
-      return;
-    }
-    ghost.clear();
-    hideWindow();
-  }
 }
 
 // ── 屏蔽修饰键/功能键系统默认行为 ─────────────────────────────────────────────
@@ -166,15 +166,15 @@ function onEscape(e) {
 // 不阻止字母数字/方向键/Enter；Alt+数字选候选不受 preventDefault 影响。
 
 function onBlockModifiers(e) {
-  const altDown = inputState.isAltDown() || e.altKey;
-  if (
-    e.key === "Alt" ||
-    e.key === "Meta" ||
-    /^F\d{1,2}$/.test(e.key) ||
-    (altDown && (e.key === " " || e.code === "Space"))
-  ) {
-    e.preventDefault();
-  }
+    const altDown = inputState.isAltDown() || e.altKey;
+    if (
+        e.key === "Alt" ||
+        e.key === "Meta" ||
+        /^F\d{1,2}$/.test(e.key) ||
+        (altDown && (e.key === " " || e.code === "Space"))
+    ) {
+        e.preventDefault();
+    }
 }
 
 // ── Chord 触发：Alt+字母 → trigger_chord ──────────────────────────────
@@ -195,20 +195,20 @@ function onBlockModifiers(e) {
 // 用 `inputState.isAltDown() || e.altKey` 代替纯 `e.altKey`，
 // 后端快照抵抗 WebView synthetic keyup，事件自带 altKey 覆盖状态事件尚未到达的即时边沿。
 async function fireChord(key) {
-  console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
-  let inputText = queryEl.value;
-  let originRef = null;
+    console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
+    let inputText = queryEl.value;
+    let originRef = null;
 
-  // E 需要 contextual 解析（active item 文本 > query > selection > 空白）
-  // S 直接取输入框文本——用户显式输入的内容带过去，但不读 SelectionCache。
-  //   空输入框时 Alt+S 创建空白便签。
-  if (key === "e") {
-    const ctx = await resolveContextualContent();
-    inputText = ctx.text;
-    originRef = ctx.hitId;
-  }
+    // E 需要 contextual 解析（active item 文本 > query > selection > 空白）
+    // S 直接取输入框文本——用户显式输入的内容带过去，但不读 SelectionCache。
+    //   空输入框时 Alt+S 创建空白便签。
+    if (key === "e") {
+        const ctx = await resolveContextualContent();
+        inputText = ctx.text;
+        originRef = ctx.hitId;
+    }
 
-  triggerChord(key, inputText, originRef).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+    triggerChord(key, inputText, originRef).catch((e) => console.warn("[chord] trigger_chord 失败", e));
 }
 
 /**
@@ -221,35 +221,35 @@ async function fireChord(key) {
  * 4. 空白
  */
 async function resolveContextualContent() {
-  // 1. active item 的文本 payload
-  const active = results.getActive();
-  if (active && !active.isError) {
-    const firstAction = active.actions?.[0];
-    if (firstAction?.kind === "copy" && firstAction.payload) {
-      return { text: firstAction.payload, hitId: firstAction.hitId || null };
+    // 1. active item 的文本 payload
+    const active = results.getActive();
+    if (active && !active.isError) {
+        const firstAction = active.actions?.[0];
+        if (firstAction?.kind === "copy" && firstAction.payload) {
+            return {text: firstAction.payload, hitId: firstAction.hitId || null};
+        }
     }
-  }
 
-  // 2. 非空 query
-  const queryText = queryEl.value.trim();
-  if (queryText) {
-    return { text: queryEl.value, hitId: null };
-  }
-
-  // 3. 空闲态 Awareness 选区（仅当 query 为空且无结果时）
-  if (!results.hasItems()) {
-    try {
-      const selectionText = await getAwarenessText();
-      if (selectionText && selectionText.trim()) {
-        return { text: selectionText, hitId: null };
-      }
-    } catch (e) {
-      // 后端未就绪或无选区——静默降级到空白
+    // 2. 非空 query
+    const queryText = queryEl.value.trim();
+    if (queryText) {
+        return {text: queryEl.value, hitId: null};
     }
-  }
 
-  // 4. 空白
-  return { text: "", hitId: null };
+    // 3. 空闲态 Awareness 选区（仅当 query 为空且无结果时）
+    if (!results.hasItems()) {
+        try {
+            const selectionText = await getAwarenessText();
+            if (selectionText && selectionText.trim()) {
+                return {text: selectionText, hitId: null};
+            }
+        } catch (e) {
+            // 后端未就绪或无选区——静默降级到空白
+        }
+    }
+
+    // 4. 空白
+    return {text: "", hitId: null};
 }
 
 // chord 独占模式下的兜底触发路径。
@@ -261,26 +261,26 @@ async function resolveContextualContent() {
 // hook 未吞键，前端 keydown 兜底走此路径触发 chord。两条路径互斥——不会双触发。
 // 维护者注意：不要误以为是双触发 bug 而删除此函数。
 function onChordTrigger(e) {
-  // 用后端 Alt 快照 || e.altKey，抵抗 WebView synthetic keyup
-  if (!(inputState.isAltDown() || e.altKey)) return;
-  if (e.isComposing || e.keyCode === 229) return; // IME 组字放行
-  const key = e.key.toLowerCase();
-  // 用动态 tap 键集合（从 chord 配置派生）
-  if (!chord.getTapKeys().has(key)) return;
+    // 用后端 Alt 快照 || e.altKey，抵抗 WebView synthetic keyup
+    if (!(inputState.isAltDown() || e.altKey)) return;
+    if (e.isComposing || e.keyCode === 229) return; // IME 组字放行
+    const key = e.key.toLowerCase();
+    // 用动态 tap 键集合（从 chord 配置派生）
+    if (!chord.getTapKeys().has(key)) return;
 
-  // 0.20.8: 独占模式内抑制 chord 触发——chord 待命提示已隐藏（input-state.js projectUi），
-  // 触发也应一致屏蔽；Alt+字母放行给模式自身快捷键（剪贴板 Alt+E/Alt+D）。
-  // 不 preventDefault/stopPropagation，键事件继续冒泡给 clipboardMode.handleKeydown。
-  if (clipboardMode.isActive() || cmdMode.isActive()) return;
-  // AI 模式仅保留 Alt+Q 提升对话（模式内设计交互），其余键抑制
-  if (aiMode.isActive() && key !== "q") return;
+    // 0.20.8: 独占模式内抑制 chord 触发——chord 待命提示已隐藏（input-state.js projectUi），
+    // 触发也应一致屏蔽；Alt+字母放行给模式自身快捷键（剪贴板 Alt+E/Alt+D）。
+    // 不 preventDefault/stopPropagation，键事件继续冒泡给 clipboardMode.handleKeydown。
+    if (clipboardMode.isActive() || cmdMode.isActive()) return;
+    // AI 模式仅保留 Alt+Q 提升对话（模式内设计交互），其余键抑制
+    if (aiMode.isActive() && key !== "q") return;
 
-  e.preventDefault(); // 不进输入框
-  e.stopPropagation();
-  // AiMode 下 Alt+Q 触发临时对话提升，不走常规 chord 路径
-  if (aiMode.isActive() && key === "q") {
-    aiMode.promoteToChat();
-    return;
-  }
-  fireChord(key);
+    e.preventDefault(); // 不进输入框
+    e.stopPropagation();
+    // AiMode 下 Alt+Q 触发临时对话提升，不走常规 chord 路径
+    if (aiMode.isActive() && key === "q") {
+        aiMode.promoteToChat();
+        return;
+    }
+    fireChord(key);
 }

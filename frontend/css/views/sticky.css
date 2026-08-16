@@ -2,223 +2,243 @@
 
 /* ── 根布局 ── */
 .sticky-root {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
-  /* 默认背景由 JS 按 color class 设置，fallback 用 --bg */
-  background: var(--sticky-bg, var(--bg));
-  color: var(--sticky-text);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    /* 默认背景由 JS 按 color class 设置，fallback 用 --bg */
+    background: var(--sticky-bg, var(--bg));
+    color: var(--sticky-text);
 }
 
 /* ── 颜色色板（§3.11）── */
 /* 每种颜色定义背景和文字色配对 */
 /* P2-5：色板固定色值是便签产品功能色（跨主题固定），不替换为语义 token */
 .sticky-root.color-theme {
-  --sticky-bg: var(--surface);
-  --sticky-text: var(--text);
-  --sticky-border: var(--surface-2);
-  --sticky-btn-hover: var(--accent-bg);
+    --sticky-bg: var(--surface);
+    --sticky-text: var(--text);
+    --sticky-border: var(--surface-2);
+    --sticky-btn-hover: var(--accent-bg);
 }
 
 .sticky-root.color-yellow {
-  --sticky-bg: #fff9c4;
-  --sticky-text: #5d4037;
-  --sticky-border: #fdd835;
-  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+    --sticky-bg: #fff9c4;
+    --sticky-text: #5d4037;
+    --sticky-border: #fdd835;
+    --sticky-btn-hover: rgba(0, 0, 0, 0.08);
 }
 
 .sticky-root.color-pink {
-  --sticky-bg: #fce4ec;
-  --sticky-text: #5d4037;
-  --sticky-border: #f48fb1;
-  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+    --sticky-bg: #fce4ec;
+    --sticky-text: #5d4037;
+    --sticky-border: #f48fb1;
+    --sticky-btn-hover: rgba(0, 0, 0, 0.08);
 }
 
 .sticky-root.color-purple {
-  --sticky-bg: #f3e5f5;
-  --sticky-text: #4a148c;
-  --sticky-border: #ce93d8;
-  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+    --sticky-bg: #f3e5f5;
+    --sticky-text: #4a148c;
+    --sticky-border: #ce93d8;
+    --sticky-btn-hover: rgba(0, 0, 0, 0.08);
 }
 
 .sticky-root.color-blue {
-  --sticky-bg: #e3f2fd;
-  --sticky-text: #0d47a1;
-  --sticky-border: #90caf9;
-  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+    --sticky-bg: #e3f2fd;
+    --sticky-text: #0d47a1;
+    --sticky-border: #90caf9;
+    --sticky-btn-hover: rgba(0, 0, 0, 0.08);
 }
 
 .sticky-root.color-green {
-  --sticky-bg: #e8f5e9;
-  --sticky-text: #1b5e20;
-  --sticky-border: #a5d6a7;
-  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+    --sticky-bg: #e8f5e9;
+    --sticky-text: #1b5e20;
+    --sticky-border: #a5d6a7;
+    --sticky-btn-hover: rgba(0, 0, 0, 0.08);
 }
 
 .sticky-root.color-gray {
-  --sticky-bg: #f5f5f5;
-  --sticky-text: #424242;
-  --sticky-border: #bdbdbd;
-  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+    --sticky-bg: #f5f5f5;
+    --sticky-text: #424242;
+    --sticky-border: #bdbdbd;
+    --sticky-btn-hover: rgba(0, 0, 0, 0.08);
 }
 
 /* ── 标题栏 ── */
 .sticky-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 32px;
-  padding: 0 4px 0 4px;
-  background: var(--sticky-border, transparent);
-  user-select: none;
-  flex-shrink: 0;
-  -webkit-app-region: drag;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 32px;
+    padding: 0 4px 0 4px;
+    background: var(--sticky-border, transparent);
+    user-select: none;
+    flex-shrink: 0;
+    -webkit-app-region: drag;
 }
 
 .sticky-titlebar-left {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  -webkit-app-region: no-drag;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    -webkit-app-region: no-drag;
 }
 
 .sticky-titlebar-right {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  -webkit-app-region: no-drag;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    -webkit-app-region: no-drag;
 }
 
 /* ── 图标按钮 ── */
 .sticky-icon-btn,
 .sticky-color-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: transparent;
-  color: var(--sticky-text);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background var(--transition-base);
-  position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--sticky-text);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-base);
+    position: relative;
 }
 
 .sticky-icon-btn:hover,
 .sticky-color-btn:hover {
-  background: var(--sticky-btn-hover);
+    background: var(--sticky-btn-hover);
 }
 
 .sticky-icon-btn:active,
 .sticky-color-btn:active {
-  background: color-mix(in srgb, var(--sticky-text) 15%, transparent);
+    background: color-mix(in srgb, var(--sticky-text) 15%, transparent);
 }
 
 .sticky-icon-btn svg,
 .sticky-color-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .sticky-icon-btn-close:hover {
-  background: var(--red);
-  color: var(--on-accent);
+    background: var(--red);
+    color: var(--on-accent);
 }
 
 /* 置顶激活态 */
 .sticky-icon-btn.active {
-  color: var(--sticky-text);
-  background: var(--sticky-btn-hover);
+    color: var(--sticky-text);
+    background: var(--sticky-btn-hover);
 }
 
 /* ── 颜色面板 ── */
 /* 0.18.3：菜单配色随便签颜色统一（非主题色） */
 .sticky-color-palette {
-  position: absolute;
-  top: 30px;
-  left: 0;
-  display: flex;
-  gap: 4px;
-  padding: 6px 8px;
-  background: var(--sticky-bg, var(--surface));
-  border: 1px solid var(--sticky-border, var(--surface-2));
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-modal);
-  z-index: 100;
+    position: absolute;
+    top: 30px;
+    left: 0;
+    display: flex;
+    gap: 4px;
+    padding: 6px 8px;
+    background: var(--sticky-bg, var(--surface));
+    border: 1px solid var(--sticky-border, var(--surface-2));
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-modal);
+    z-index: 100;
 }
 
 .color-swatch {
-  width: 18px;
-  height: 18px;
-  border: 2px solid transparent;
-  border-radius: 50%;
-  cursor: pointer;
-  padding: 0;
-  transition: border-color var(--transition-base);
+    width: 18px;
+    height: 18px;
+    border: 2px solid transparent;
+    border-radius: 50%;
+    cursor: pointer;
+    padding: 0;
+    transition: border-color var(--transition-base);
 }
 
 .color-swatch:hover {
-  border-color: var(--sticky-text);
+    border-color: var(--sticky-text);
 }
 
 .color-swatch.selected {
-  border-color: var(--sticky-text);
+    border-color: var(--sticky-text);
 }
 
 /* 色板固定色值（与 .sticky-root.color-* 配对，跨主题固定） */
-.color-swatch.color-theme { background: var(--surface-2); }
-.color-swatch.color-yellow { background: #fdd835; }
-.color-swatch.color-pink { background: #f48fb1; }
-.color-swatch.color-purple { background: #ce93d8; }
-.color-swatch.color-blue { background: #90caf9; }
-.color-swatch.color-green { background: #a5d6a7; }
-.color-swatch.color-gray { background: #bdbdbd; }
+.color-swatch.color-theme {
+    background: var(--surface-2);
+}
+
+.color-swatch.color-yellow {
+    background: #fdd835;
+}
+
+.color-swatch.color-pink {
+    background: #f48fb1;
+}
+
+.color-swatch.color-purple {
+    background: #ce93d8;
+}
+
+.color-swatch.color-blue {
+    background: #90caf9;
+}
+
+.color-swatch.color-green {
+    background: #a5d6a7;
+}
+
+.color-swatch.color-gray {
+    background: #bdbdbd;
+}
 
 /* ── 更多菜单 ── */
 /* 0.18.3：配色随便签颜色统一 */
 .sticky-more-menu {
-  position: absolute;
-  top: 30px;
-  right: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
-  min-width: 140px;
-  background: var(--sticky-bg, var(--surface));
-  border: 1px solid var(--sticky-border, var(--surface-2));
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-modal);
-  z-index: 100;
+    position: absolute;
+    top: 30px;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    min-width: 140px;
+    background: var(--sticky-bg, var(--surface));
+    border: 1px solid var(--sticky-border, var(--surface-2));
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-modal);
+    z-index: 100;
 }
 
 .more-menu-item {
-  padding: 6px 12px;
-  border: none;
-  background: transparent;
-  color: var(--sticky-text);
-  font-size: var(--text-xs);
-  text-align: left;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background var(--transition-base);
-  /* 0.17.7: 中文不斜体铁则 */
-  font-style: normal;
+    padding: 6px 12px;
+    border: none;
+    background: transparent;
+    color: var(--sticky-text);
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-base);
+    /* 0.17.7: 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .more-menu-item:hover {
-  background: var(--sticky-btn-hover);
+    background: var(--sticky-btn-hover);
 }
 
 .more-menu-danger {
-  color: var(--red);
+    color: var(--red);
 }
 
 .more-menu-danger:hover {
-  background: var(--danger-hover-bg);
+    background: var(--danger-hover-bg);
 }
 
 /* ── 编辑区（Tiptap IR + textarea 降级）── */
@@ -226,298 +246,298 @@
 /* 0.18.3：MD 工具栏样式已抽至 components/md-toolbar.css（与内容编辑器共用）。
    便签端通过 --md-toolbar-* 变量适配色板主题色。 */
 .sticky-md-toolbar {
-  --md-toolbar-bg: var(--sticky-border, transparent);
-  --md-toolbar-text: var(--sticky-text);
-  --md-toolbar-hover: var(--sticky-btn-hover);
-  --md-toolbar-active: color-mix(in srgb, var(--sticky-text) 18%, transparent);
+    --md-toolbar-bg: var(--sticky-border, transparent);
+    --md-toolbar-text: var(--sticky-text);
+    --md-toolbar-hover: var(--sticky-btn-hover);
+    --md-toolbar-active: color-mix(in srgb, var(--sticky-text) 18%, transparent);
 }
 
 /* Tiptap / textarea 编辑器容器（0.18.3） */
 .sticky-editor,
 .sticky-editor-fallback {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  overflow: hidden;
-  background: transparent;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+    background: transparent;
 }
 
 .sticky-editor-fallback {
-  display: flex;
+    display: flex;
 }
 
 /* ProseMirror（Tiptap 内部可编辑区） */
 .sticky-editor .ProseMirror {
-  height: 100%;
-  min-height: 0;
-  padding: 12px 14px;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--sticky-text);
-  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  /* 中文不斜体铁则 */
-  font-style: normal;
-  overflow-y: auto;
-  word-wrap: break-word;
+    height: 100%;
+    min-height: 0;
+    padding: 12px 14px;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--sticky-text);
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    /* 中文不斜体铁则 */
+    font-style: normal;
+    overflow-y: auto;
+    word-wrap: break-word;
 }
 
 /* 空内容占位提示（CSS 方案，无 Placeholder 扩展） */
 .sticky-editor .ProseMirror:empty::before {
-  content: "输入内容...";
-  color: var(--sticky-text);
-  opacity: 0.4;
-  pointer-events: none;
+    content: "输入内容...";
+    color: var(--sticky-text);
+    opacity: 0.4;
+    pointer-events: none;
 }
 
 /* ProseMirror 滚动条（与旧 textarea 一致） */
 .sticky-editor .ProseMirror::-webkit-scrollbar {
-  width: 6px;
+    width: 6px;
 }
 
 .sticky-editor .ProseMirror::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
 
 .sticky-editor .ProseMirror::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--sticky-text) 30%, transparent);
-  border-radius: 3px;
+    background: color-mix(in srgb, var(--sticky-text) 30%, transparent);
+    border-radius: 3px;
 }
 
 .sticky-editor .ProseMirror::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--sticky-text) 50%, transparent);
+    background: color-mix(in srgb, var(--sticky-text) 50%, transparent);
 }
 
 /* ── Markdown 排版（IR 渲染元素样式）── */
 
 .sticky-editor .ProseMirror h1 {
-  font-size: 1.5em;
-  font-weight: 700;
-  margin: 0.6em 0 0.3em;
-  line-height: 1.3;
-  font-style: normal;
+    font-size: 1.5em;
+    font-weight: 700;
+    margin: 0.6em 0 0.3em;
+    line-height: 1.3;
+    font-style: normal;
 }
 
 .sticky-editor .ProseMirror h2 {
-  font-size: 1.3em;
-  font-weight: 700;
-  margin: 0.6em 0 0.3em;
-  line-height: 1.3;
-  font-style: normal;
+    font-size: 1.3em;
+    font-weight: 700;
+    margin: 0.6em 0 0.3em;
+    line-height: 1.3;
+    font-style: normal;
 }
 
 .sticky-editor .ProseMirror h3 {
-  font-size: 1.15em;
-  font-weight: 600;
-  margin: 0.5em 0 0.3em;
-  line-height: 1.3;
-  font-style: normal;
+    font-size: 1.15em;
+    font-weight: 600;
+    margin: 0.5em 0 0.3em;
+    line-height: 1.3;
+    font-style: normal;
 }
 
 .sticky-editor .ProseMirror p {
-  margin: 0.3em 0;
+    margin: 0.3em 0;
 }
 
 .sticky-editor .ProseMirror ul,
 .sticky-editor .ProseMirror ol {
-  margin: 0.3em 0;
-  padding-left: 1.5em;
+    margin: 0.3em 0;
+    padding-left: 1.5em;
 }
 
 .sticky-editor .ProseMirror li {
-  margin: 0.15em 0;
+    margin: 0.15em 0;
 }
 
 .sticky-editor .ProseMirror blockquote {
-  margin: 0.4em 0;
-  padding-left: 0.8em;
-  border-left: 3px solid var(--sticky-border, var(--surface-2));
-  opacity: 0.85;
+    margin: 0.4em 0;
+    padding-left: 0.8em;
+    border-left: 3px solid var(--sticky-border, var(--surface-2));
+    opacity: 0.85;
 }
 
 .sticky-editor .ProseMirror code {
-  font-family: "Cascadia Code", "Consolas", monospace;
-  font-size: 0.9em;
-  background: color-mix(in srgb, var(--sticky-text) 12%, transparent);
-  padding: 1px 4px;
-  border-radius: var(--radius-sm);
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.9em;
+    background: color-mix(in srgb, var(--sticky-text) 12%, transparent);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
 }
 
 .sticky-editor .ProseMirror pre {
-  margin: 0.4em 0;
-  padding: 8px 10px;
-  background: color-mix(in srgb, var(--sticky-text) 8%, transparent);
-  border-radius: var(--radius-sm);
-  overflow-x: auto;
+    margin: 0.4em 0;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--sticky-text) 8%, transparent);
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
 }
 
 .sticky-editor .ProseMirror pre code {
-  background: transparent;
-  padding: 0;
+    background: transparent;
+    padding: 0;
 }
 
 .sticky-editor .ProseMirror strong {
-  font-weight: 700;
+    font-weight: 700;
 }
 
 .sticky-editor .ProseMirror em {
-  font-style: italic;
+    font-style: italic;
 }
 
 .sticky-editor .ProseMirror a {
-  color: var(--accent);
-  text-decoration: underline;
+    color: var(--accent);
+    text-decoration: underline;
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] {
-  list-style: none;
-  padding-left: 0;
+    list-style: none;
+    padding-left: 0;
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li > label {
-  flex-shrink: 0;
-  cursor: pointer;
-  user-select: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border: 1.5px solid var(--sticky-text);
-  border-radius: 3px;
-  opacity: 0.5;
-  transition: all var(--transition-fast);
+    flex-shrink: 0;
+    cursor: pointer;
+    user-select: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--sticky-text);
+    border-radius: 3px;
+    opacity: 0.5;
+    transition: all var(--transition-fast);
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > label {
-  background: var(--sticky-text);
-  opacity: 0.8;
+    background: var(--sticky-text);
+    opacity: 0.8;
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > label::after {
-  content: "";
-  width: 8px;
-  height: 4px;
-  border-left: 2px solid var(--sticky-bg);
-  border-bottom: 2px solid var(--sticky-bg);
-  transform: rotate(-45deg) translate(1px, -1px);
+    content: "";
+    width: 8px;
+    height: 4px;
+    border-left: 2px solid var(--sticky-bg);
+    border-bottom: 2px solid var(--sticky-bg);
+    transform: rotate(-45deg) translate(1px, -1px);
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
-  opacity: 0.5;
-  text-decoration: line-through;
+    opacity: 0.5;
+    text-decoration: line-through;
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li > label > input[type="checkbox"] {
-  display: none;
+    display: none;
 }
 
 .sticky-editor .ProseMirror ul[data-type="taskList"] li > div {
-  flex: 1;
+    flex: 1;
 }
 
 .sticky-editor .ProseMirror hr {
-  border: none;
-  border-top: 1px solid var(--sticky-border, var(--surface-2));
-  margin: 0.6em 0;
+    border: none;
+    border-top: 1px solid var(--sticky-border, var(--surface-2));
+    margin: 0.6em 0;
 }
 
 /* textarea 降级模式（Tiptap 加载失败时用） */
 .sticky-textarea {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-  padding: 12px 14px;
-  border: none;
-  outline: none;
-  resize: none;
-  background: transparent;
-  color: var(--sticky-text);
-  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  overflow-y: auto;
-  /* 中文不斜体铁则 */
-  font-style: normal;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    padding: 12px 14px;
+    border: none;
+    outline: none;
+    resize: none;
+    background: transparent;
+    color: var(--sticky-text);
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    overflow-y: auto;
+    /* 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .sticky-textarea::placeholder {
-  color: var(--sticky-text);
-  opacity: 0.4;
+    color: var(--sticky-text);
+    opacity: 0.4;
 }
 
 .sticky-textarea::-webkit-scrollbar {
-  width: 6px;
+    width: 6px;
 }
 
 .sticky-textarea::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
 
 .sticky-textarea::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--sticky-text) 30%, transparent);
-  border-radius: 3px;
+    background: color-mix(in srgb, var(--sticky-text) 30%, transparent);
+    border-radius: 3px;
 }
 
 .sticky-textarea::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--sticky-text) 50%, transparent);
+    background: color-mix(in srgb, var(--sticky-text) 50%, transparent);
 }
 
 /* ── 右键菜单（0.17.7）── */
 /* 0.18.3：配色随便签颜色统一 */
 .sticky-context-menu {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
-  min-width: 140px;
-  background: var(--sticky-bg, var(--surface));
-  border: 1px solid var(--sticky-border, var(--surface-2));
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-modal);
-  z-index: 200;
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    min-width: 140px;
+    background: var(--sticky-bg, var(--surface));
+    border: 1px solid var(--sticky-border, var(--surface-2));
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-modal);
+    z-index: 200;
 }
 
 .sticky-context-menu .ctx-item {
-  padding: 6px 12px;
-  border: none;
-  background: transparent;
-  color: var(--sticky-text);
-  font-size: var(--text-xs);
-  text-align: left;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background var(--transition-base);
-  /* 中文不斜体铁则 */
-  font-style: normal;
+    padding: 6px 12px;
+    border: none;
+    background: transparent;
+    color: var(--sticky-text);
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-base);
+    /* 中文不斜体铁则 */
+    font-style: normal;
 }
 
 .sticky-context-menu .ctx-item:hover {
-  background: var(--sticky-btn-hover);
+    background: var(--sticky-btn-hover);
 }
 
 .sticky-context-menu .ctx-separator {
-  height: 1px;
-  margin: 2px 0;
-  background: var(--sticky-border, var(--surface-2));
+    height: 1px;
+    margin: 2px 0;
+    background: var(--sticky-border, var(--surface-2));
 }
 
 .sticky-context-menu .ctx-danger {
-  color: var(--red);
+    color: var(--red);
 }
 
 .sticky-context-menu .ctx-danger:hover {
-  background: var(--danger-hover-bg);
+    background: var(--danger-hover-bg);
 }
 
 /*.sticky-context-menu .ctx-submenu-label {*/
@@ -535,49 +555,49 @@
 /*}*/
 
 .sticky-context-menu .ctx-color-row {
-  display: flex;
-  gap: 4px;
-  padding: 4px 8px;
+    display: flex;
+    gap: 4px;
+    padding: 4px 8px;
 }
 
 .sticky-context-menu .ctx-color-swatch {
-  width: 16px;
-  height: 16px;
-  border: 2px solid transparent;
-  border-radius: 50%;
-  cursor: pointer;
-  padding: 0;
-  transition: border-color var(--transition-base);
+    width: 16px;
+    height: 16px;
+    border: 2px solid transparent;
+    border-radius: 50%;
+    cursor: pointer;
+    padding: 0;
+    transition: border-color var(--transition-base);
 }
 
 .sticky-context-menu .ctx-color-swatch:hover {
-  border-color: var(--sticky-text);
+    border-color: var(--sticky-text);
 }
 
 /* ── 0.20.7：原子关闭失败错误提示 ── */
 /* JS showError() 动态创建（sticky/main.js），显隐走 hidden 属性。
    fixed 定位叠加在编辑区上方，不参与 flex 布局，避免撑破便签高度。 */
 .sticky-error-hint {
-  position: fixed;
-  left: 50%;
-  bottom: 40px;
-  transform: translateX(-50%);
-  max-width: calc(100% - 24px);
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--red-border, var(--red));
-  border-radius: var(--radius-md);
-  background: var(--sticky-bg, var(--surface));
-  color: var(--sticky-text, var(--text));
-  font-size: var(--text-xs);
-  /* 中文不斜体铁则 */
-  font-style: normal;
-  box-shadow: var(--shadow-modal);
-  pointer-events: none;
-  z-index: 1000;
+    position: fixed;
+    left: 50%;
+    bottom: 40px;
+    transform: translateX(-50%);
+    max-width: calc(100% - 24px);
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--red-border, var(--red));
+    border-radius: var(--radius-md);
+    background: var(--sticky-bg, var(--surface));
+    color: var(--sticky-text, var(--text));
+    font-size: var(--text-xs);
+    /* 中文不斜体铁则 */
+    font-style: normal;
+    box-shadow: var(--shadow-modal);
+    pointer-events: none;
+    z-index: 1000;
 }
 
 .sticky-error-hint[hidden] {
-  display: none;
+    display: none;
 }
 
 /* 0.18.3：Tiptap IR 编辑器样式。配色统一走 --sticky-* 变量（与色板/按钮一致），

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 
-const { ScrollCaptureSession, attachScrollSessionFacade } = await import(
-  'data:text/javascript;base64,'
-  + Buffer.from(await readFile(new URL('./session.js', import.meta.url))).toString('base64')
-);
+const {ScrollCaptureSession, attachScrollSessionFacade} = await import(
+'data:text/javascript;base64,'
++ Buffer.from(await readFile(new URL('./session.js', import.meta.url))).toString('base64')
+    );
 
 const session = new ScrollCaptureSession();
 assert.equal(session.scrollCapturePhase, 'idle');
@@ -19,8 +19,8 @@ session.scrollCapturePhase = 'editing';
 assert.equal(session.active, true);
 assert.equal(session.capturing, false);
 session.scrollCapturePhase = 'capturing';
-session.scrollFrames.push({ top: 0 });
-session.queuedManualWheel = { delta: 120 };
+session.scrollFrames.push({top: 0});
+session.queuedManualWheel = {delta: 120};
 session.manualWheelVersion = 4;
 const oldGeneration = session.captureGeneration;
 session.reset();
@@ -39,7 +39,9 @@ attached.scrollTrackingState = 'lost';
 assert.equal(shared.scrollTrackingState, 'lost', 'session 写入应从旧 ss 门面可见');
 assert.equal(shared.scrollSession, attached);
 let restoreSelection;
-attached.exitHandler = (restore) => { restoreSelection = restore; };
+attached.exitHandler = (restore) => {
+    restoreSelection = restore;
+};
 attached.exit(false);
 assert.equal(restoreSelection, false, '跨模块退出应经过 session 的唯一生命周期入口');
 

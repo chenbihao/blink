@@ -12,9 +12,9 @@ import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
-import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
-import { applyI18nFromConfig } from "../i18n/index.js";
-import { ensureSpriteLoaded } from "../shared/icon.js";
+import {applyGlassOpacityFromConfig, applyThemeFromConfig} from "../shared/theme.js";
+import {applyI18nFromConfig} from "../i18n/index.js";
+import {ensureSpriteLoaded} from "../shared/icon.js";
 
 // 图标 sprite：早注入，让后续 init() 拼 DOM 时 <use href> 可解析
 // （fire-and-forget，失败降级为无图标，不阻塞主流程 —— 见 icon.js catch 分支）

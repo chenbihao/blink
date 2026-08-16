@@ -3,27 +3,27 @@
    G1 index.html 和 G2 voice-overlay.html 共用此类名和样式。 */
 
 .voice-wave {
-  display: flex;
-  gap: 2px;
-  height: 20px;
-  align-items: center;
+    display: flex;
+    gap: 2px;
+    height: 20px;
+    align-items: center;
 }
 
 .vw-bar {
-  width: 3px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--green, #a6e3a1);
-  transition: height 0.08s ease-out, background 0.25s ease;
-  min-height: 4px;
-  /* idle 呼吸动画：JS 设置 inline style 后通过 [style] 选择器自动禁用 */
-  animation: vw-breathe 1.4s ease-in-out infinite;
+    width: 3px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--green, #a6e3a1);
+    transition: height 0.08s ease-out, background 0.25s ease;
+    min-height: 4px;
+    /* idle 呼吸动画：JS 设置 inline style 后通过 [style] 选择器自动禁用 */
+    animation: vw-breathe 1.4s ease-in-out infinite;
 }
 
 /* 加载态（模型加载中）：波形转蓝色，与录音态绿色区分。
    voice-status 事件加 .voice-loading，voice-recording-start 移除。 */
 .voice-wave.voice-loading .vw-bar {
-  background: var(--accent, #89b4fa);
+    background: var(--accent, #89b4fa);
 }
 
 /* 错误态（STT 未配置 / 服务未启动等）：波形转红色，与加载态蓝色区分。
@@ -31,15 +31,21 @@
    设计铁则：所有语音状态统一在波形动画区域展示——
    绿色=录音中 · 蓝色=加载中 · 红色=错误 */
 .voice-wave.voice-error .vw-bar {
-  background: var(--red, #f38ba8);
+    background: var(--red, #f38ba8);
 }
 
 @keyframes vw-breathe {
-  0%, 100% { height: 4px; opacity: 0.6; }
-  50% { height: 8px; opacity: 1; }
+    0%, 100% {
+        height: 4px;
+        opacity: 0.6;
+    }
+    50% {
+        height: 8px;
+        opacity: 1;
+    }
 }
 
 /* JS 接管后禁用 idle 动画 */
 .vw-bar[style] {
-  animation: none;
+    animation: none;
 }

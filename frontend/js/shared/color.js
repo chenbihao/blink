@@ -32,28 +32,28 @@
  * @returns {ColorResult | null}
  */
 export function parse(input) {
-  const trimmed = (input ?? "").trim();
-  if (!trimmed) return null;
+    const trimmed = (input ?? "").trim();
+    if (!trimmed) return null;
 
-  const first = trimmed.charCodeAt(0);
-  let rgba;
+    const first = trimmed.charCodeAt(0);
+    let rgba;
 
-  if (first === 0x23 /* '#' */) {
-    rgba = parseHex(trimmed);
-  } else {
-    const lower = trimmed.toLowerCase();
-    if (lower.startsWith("rgb")) {
-      rgba = parseRgbLike(trimmed);
-    } else if (lower.startsWith("hsl")) {
-      rgba = parseHslLike(trimmed);
+    if (first === 0x23 /* '#' */) {
+        rgba = parseHex(trimmed);
     } else {
-      return null;
+        const lower = trimmed.toLowerCase();
+        if (lower.startsWith("rgb")) {
+            rgba = parseRgbLike(trimmed);
+        } else if (lower.startsWith("hsl")) {
+            rgba = parseHslLike(trimmed);
+        } else {
+            return null;
+        }
     }
-  }
 
-  if (!rgba) return null;
+    if (!rgba) return null;
 
-  return buildColorResult(trimmed, rgba);
+    return buildColorResult(trimmed, rgba);
 }
 
 /**
@@ -68,17 +68,17 @@ export function parse(input) {
  * @returns {ColorResult[] | null}
  */
 export function parseColorList(input) {
-  const lines = (input ?? "").split(/\r\n|\r|\n/);
-  const results = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const result = parse(trimmed);
-    if (!result) return null; // 任一非空行不可解析 → null
-    results.push(result);
-  }
-  if (results.length >= 2 && results.length <= 8) return results;
-  return null;
+    const lines = (input ?? "").split(/\r\n|\r|\n/);
+    const results = [];
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const result = parse(trimmed);
+        if (!result) return null; // 任一非空行不可解析 → null
+        results.push(result);
+    }
+    if (results.length >= 2 && results.length <= 8) return results;
+    return null;
 }
 
 /**
@@ -88,15 +88,15 @@ export function parseColorList(input) {
  * @returns {ColorResult}
  */
 export function buildColorResult(original, rgba) {
-  const alpha = rgba.a / 255;
-  return {
-    original,
-    rgba,
-    hex: toHex(rgba),
-    rgb: toRgb(rgba),
-    hsl: toHsl(rgba),
-    alpha,
-  };
+    const alpha = rgba.a / 255;
+    return {
+        original,
+        rgba,
+        hex: toHex(rgba),
+        rgb: toRgb(rgba),
+        hsl: toHsl(rgba),
+        alpha,
+    };
 }
 
 // ── HEX 解析 ───────────────────────────────────────────────────────────────
@@ -106,41 +106,41 @@ export function buildColorResult(original, rgba) {
  * @returns {Rgba8 | null}
  */
 function parseHex(s) {
-  const hex = s.slice(1); // skip '#'
-  switch (hex.length) {
-    case 3: {
-      const r = hexNibble(hex.charCodeAt(0));
-      const g = hexNibble(hex.charCodeAt(1));
-      const b = hexNibble(hex.charCodeAt(2));
-      if (r == null || g == null || b == null) return null;
-      return { r: r * 17, g: g * 17, b: b * 17, a: 255 };
+    const hex = s.slice(1); // skip '#'
+    switch (hex.length) {
+        case 3: {
+            const r = hexNibble(hex.charCodeAt(0));
+            const g = hexNibble(hex.charCodeAt(1));
+            const b = hexNibble(hex.charCodeAt(2));
+            if (r == null || g == null || b == null) return null;
+            return {r: r * 17, g: g * 17, b: b * 17, a: 255};
+        }
+        case 4: {
+            const r = hexNibble(hex.charCodeAt(0));
+            const g = hexNibble(hex.charCodeAt(1));
+            const b = hexNibble(hex.charCodeAt(2));
+            const a = hexNibble(hex.charCodeAt(3));
+            if (r == null || g == null || b == null || a == null) return null;
+            return {r: r * 17, g: g * 17, b: b * 17, a: a * 17};
+        }
+        case 6: {
+            const r = hexByte(hex.substring(0, 2));
+            const g = hexByte(hex.substring(2, 4));
+            const b = hexByte(hex.substring(4, 6));
+            if (r == null || g == null || b == null) return null;
+            return {r, g, b, a: 255};
+        }
+        case 8: {
+            const r = hexByte(hex.substring(0, 2));
+            const g = hexByte(hex.substring(2, 4));
+            const b = hexByte(hex.substring(4, 6));
+            const a = hexByte(hex.substring(6, 8));
+            if (r == null || g == null || b == null || a == null) return null;
+            return {r, g, b, a};
+        }
+        default:
+            return null;
     }
-    case 4: {
-      const r = hexNibble(hex.charCodeAt(0));
-      const g = hexNibble(hex.charCodeAt(1));
-      const b = hexNibble(hex.charCodeAt(2));
-      const a = hexNibble(hex.charCodeAt(3));
-      if (r == null || g == null || b == null || a == null) return null;
-      return { r: r * 17, g: g * 17, b: b * 17, a: a * 17 };
-    }
-    case 6: {
-      const r = hexByte(hex.substring(0, 2));
-      const g = hexByte(hex.substring(2, 4));
-      const b = hexByte(hex.substring(4, 6));
-      if (r == null || g == null || b == null) return null;
-      return { r, g, b, a: 255 };
-    }
-    case 8: {
-      const r = hexByte(hex.substring(0, 2));
-      const g = hexByte(hex.substring(2, 4));
-      const b = hexByte(hex.substring(4, 6));
-      const a = hexByte(hex.substring(6, 8));
-      if (r == null || g == null || b == null || a == null) return null;
-      return { r, g, b, a };
-    }
-    default:
-      return null;
-  }
 }
 
 /**
@@ -148,10 +148,10 @@ function parseHex(s) {
  * @returns {number | null}
  */
 function hexNibble(c) {
-  if (c >= 0x30 && c <= 0x39) return c - 0x30; // 0-9
-  if (c >= 0x61 && c <= 0x66) return c - 0x61 + 10; // a-f
-  if (c >= 0x41 && c <= 0x46) return c - 0x41 + 10; // A-F
-  return null;
+    if (c >= 0x30 && c <= 0x39) return c - 0x30; // 0-9
+    if (c >= 0x61 && c <= 0x66) return c - 0x61 + 10; // a-f
+    if (c >= 0x41 && c <= 0x46) return c - 0x41 + 10; // A-F
+    return null;
 }
 
 /**
@@ -159,11 +159,11 @@ function hexNibble(c) {
  * @returns {number | null}
  */
 function hexByte(s) {
-  if (s.length !== 2) return null;
-  const hi = hexNibble(s.charCodeAt(0));
-  const lo = hexNibble(s.charCodeAt(1));
-  if (hi == null || lo == null) return null;
-  return hi * 16 + lo;
+    if (s.length !== 2) return null;
+    const hi = hexNibble(s.charCodeAt(0));
+    const lo = hexNibble(s.charCodeAt(1));
+    if (hi == null || lo == null) return null;
+    return hi * 16 + lo;
 }
 
 // ── rgb()/rgba() 解析 ──────────────────────────────────────────────────────
@@ -173,28 +173,28 @@ function hexByte(s) {
  * @returns {Rgba8 | null}
  */
 function parseRgbLike(s) {
-  const inner = extractFunctionArgs(s, "rgb");
-  if (inner == null) return null;
-  const parts = inner.split(",");
-  switch (parts.length) {
-    case 3: {
-      const r = parseChannel(parts[0]);
-      const g = parseChannel(parts[1]);
-      const b = parseChannel(parts[2]);
-      if (r == null || g == null || b == null) return null;
-      return { r: clampU8(r), g: clampU8(g), b: clampU8(b), a: 255 };
+    const inner = extractFunctionArgs(s, "rgb");
+    if (inner == null) return null;
+    const parts = inner.split(",");
+    switch (parts.length) {
+        case 3: {
+            const r = parseChannel(parts[0]);
+            const g = parseChannel(parts[1]);
+            const b = parseChannel(parts[2]);
+            if (r == null || g == null || b == null) return null;
+            return {r: clampU8(r), g: clampU8(g), b: clampU8(b), a: 255};
+        }
+        case 4: {
+            const r = parseChannel(parts[0]);
+            const g = parseChannel(parts[1]);
+            const b = parseChannel(parts[2]);
+            const a = parseAlpha(parts[3]);
+            if (r == null || g == null || b == null || a == null) return null;
+            return {r: clampU8(r), g: clampU8(g), b: clampU8(b), a: alphaToU8(a)};
+        }
+        default:
+            return null;
     }
-    case 4: {
-      const r = parseChannel(parts[0]);
-      const g = parseChannel(parts[1]);
-      const b = parseChannel(parts[2]);
-      const a = parseAlpha(parts[3]);
-      if (r == null || g == null || b == null || a == null) return null;
-      return { r: clampU8(r), g: clampU8(g), b: clampU8(b), a: alphaToU8(a) };
-    }
-    default:
-      return null;
-  }
 }
 
 /**
@@ -202,15 +202,15 @@ function parseRgbLike(s) {
  * @returns {number | null}
  */
 function parseChannel(s) {
-  s = s.trim();
-  if (s.endsWith("%")) {
-    const pct = parseFloat(s.slice(0, -1));
-    if (isNaN(pct) || pct < 0 || pct > 100) return null;
-    return pct / 100 * 255;
-  }
-  const v = parseFloat(s);
-  if (isNaN(v) || v < 0 || v > 255) return null;
-  return v;
+    s = s.trim();
+    if (s.endsWith("%")) {
+        const pct = parseFloat(s.slice(0, -1));
+        if (isNaN(pct) || pct < 0 || pct > 100) return null;
+        return pct / 100 * 255;
+    }
+    const v = parseFloat(s);
+    if (isNaN(v) || v < 0 || v > 255) return null;
+    return v;
 }
 
 /**
@@ -218,10 +218,10 @@ function parseChannel(s) {
  * @returns {number | null}
  */
 function parseAlpha(s) {
-  s = s.trim();
-  const v = parseFloat(s);
-  if (isNaN(v) || v < 0 || v > 1) return null;
-  return v;
+    s = s.trim();
+    const v = parseFloat(s);
+    if (isNaN(v) || v < 0 || v > 1) return null;
+    return v;
 }
 
 // ── hsl()/hsla() 解析 ──────────────────────────────────────────────────────
@@ -231,30 +231,30 @@ function parseAlpha(s) {
  * @returns {Rgba8 | null}
  */
 function parseHslLike(s) {
-  const inner = extractFunctionArgs(s, "hsl");
-  if (inner == null) return null;
-  const parts = inner.split(",");
-  switch (parts.length) {
-    case 3: {
-      const h = parseHue(parts[0]);
-      const sPct = parsePercent(parts[1]);
-      const lPct = parsePercent(parts[2]);
-      if (h == null || sPct == null || lPct == null) return null;
-      const [r, g, b] = hslToRgb(h, sPct, lPct);
-      return { r: clampU8(r), g: clampU8(g), b: clampU8(b), a: 255 };
+    const inner = extractFunctionArgs(s, "hsl");
+    if (inner == null) return null;
+    const parts = inner.split(",");
+    switch (parts.length) {
+        case 3: {
+            const h = parseHue(parts[0]);
+            const sPct = parsePercent(parts[1]);
+            const lPct = parsePercent(parts[2]);
+            if (h == null || sPct == null || lPct == null) return null;
+            const [r, g, b] = hslToRgb(h, sPct, lPct);
+            return {r: clampU8(r), g: clampU8(g), b: clampU8(b), a: 255};
+        }
+        case 4: {
+            const h = parseHue(parts[0]);
+            const sPct = parsePercent(parts[1]);
+            const lPct = parsePercent(parts[2]);
+            const a = parseAlpha(parts[3]);
+            if (h == null || sPct == null || lPct == null || a == null) return null;
+            const [r, g, b] = hslToRgb(h, sPct, lPct);
+            return {r: clampU8(r), g: clampU8(g), b: clampU8(b), a: alphaToU8(a)};
+        }
+        default:
+            return null;
     }
-    case 4: {
-      const h = parseHue(parts[0]);
-      const sPct = parsePercent(parts[1]);
-      const lPct = parsePercent(parts[2]);
-      const a = parseAlpha(parts[3]);
-      if (h == null || sPct == null || lPct == null || a == null) return null;
-      const [r, g, b] = hslToRgb(h, sPct, lPct);
-      return { r: clampU8(r), g: clampU8(g), b: clampU8(b), a: alphaToU8(a) };
-    }
-    default:
-      return null;
-  }
 }
 
 /**
@@ -262,10 +262,10 @@ function parseHslLike(s) {
  * @returns {number | null}
  */
 function parseHue(s) {
-  s = s.trim();
-  const v = parseFloat(s);
-  if (isNaN(v)) return null;
-  return v;
+    s = s.trim();
+    const v = parseFloat(s);
+    if (isNaN(v)) return null;
+    return v;
 }
 
 /**
@@ -273,13 +273,13 @@ function parseHue(s) {
  * @returns {number | null}
  */
 function parsePercent(s) {
-  s = s.trim();
-  if (s.endsWith("%")) {
-    const pct = parseFloat(s.slice(0, -1));
-    if (isNaN(pct) || pct < 0 || pct > 100) return null;
-    return pct;
-  }
-  return null;
+    s = s.trim();
+    if (s.endsWith("%")) {
+        const pct = parseFloat(s.slice(0, -1));
+        if (isNaN(pct) || pct < 0 || pct > 100) return null;
+        return pct;
+    }
+    return null;
 }
 
 // ── 函数参数提取 ───────────────────────────────────────────────────────────
@@ -291,24 +291,24 @@ function parsePercent(s) {
  * @returns {string | null}
  */
 function extractFunctionArgs(s, fnName) {
-  const lower = s.toLowerCase();
-  const prefixA = fnName + "a(";
-  const prefix = fnName + "(";
+    const lower = s.toLowerCase();
+    const prefixA = fnName + "a(";
+    const prefix = fnName + "(";
 
-  let start;
-  if (lower.startsWith(prefixA)) {
-    start = prefixA.length;
-  } else if (lower.startsWith(prefix)) {
-    start = prefix.length;
-  } else {
-    return null;
-  }
+    let start;
+    if (lower.startsWith(prefixA)) {
+        start = prefixA.length;
+    } else if (lower.startsWith(prefix)) {
+        start = prefix.length;
+    } else {
+        return null;
+    }
 
-  const rest = s.substring(start);
-  const end = rest.lastIndexOf(")");
-  if (end < 0 || end !== rest.length - 1) return null;
+    const rest = s.substring(start);
+    const end = rest.lastIndexOf(")");
+    if (end < 0 || end !== rest.length - 1) return null;
 
-  return rest.substring(0, end);
+    return rest.substring(0, end);
 }
 
 // ── 颜色转换 ───────────────────────────────────────────────────────────────
@@ -319,7 +319,7 @@ function extractFunctionArgs(s, fnName) {
  * @returns {number}
  */
 function roundHalfAway(v) {
-  return Math.round(v);
+    return Math.round(v);
 }
 
 /**
@@ -327,7 +327,7 @@ function roundHalfAway(v) {
  * @returns {number} 0-255 整数
  */
 function clampU8(v) {
-  return Math.max(0, Math.min(255, roundHalfAway(v)));
+    return Math.max(0, Math.min(255, roundHalfAway(v)));
 }
 
 /**
@@ -335,7 +335,7 @@ function clampU8(v) {
  * @returns {number} 0-255 整数
  */
 function alphaToU8(a) {
-  return Math.max(0, Math.min(255, roundHalfAway(a * 255)));
+    return Math.max(0, Math.min(255, roundHalfAway(a * 255)));
 }
 
 /**
@@ -346,18 +346,18 @@ function alphaToU8(a) {
  * @returns {[number, number, number]} - r, g, b as 0-255 float
  */
 function hslToRgb(hDeg, sPct, lPct) {
-  const h = ((hDeg % 360) + 360) % 360 / 360;
-  const s = sPct / 100;
-  const l = lPct / 100;
+    const h = ((hDeg % 360) + 360) % 360 / 360;
+    const s = sPct / 100;
+    const l = lPct / 100;
 
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
 
-  const r = hueToRgb(p, q, h + 1 / 3);
-  const g = hueToRgb(p, q, h);
-  const b = hueToRgb(p, q, h - 1 / 3);
+    const r = hueToRgb(p, q, h + 1 / 3);
+    const g = hueToRgb(p, q, h);
+    const b = hueToRgb(p, q, h - 1 / 3);
 
-  return [r * 255, g * 255, b * 255];
+    return [r * 255, g * 255, b * 255];
 }
 
 /**
@@ -367,12 +367,12 @@ function hslToRgb(hDeg, sPct, lPct) {
  * @returns {number}
  */
 function hueToRgb(p, q, t) {
-  if (t < 0) t += 1;
-  if (t > 1) t -= 1;
-  if (t < 1 / 6) return p + (q - p) * 6 * t;
-  if (t < 0.5) return q;
-  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-  return p;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 0.5) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
 }
 
 // ── Canonical 输出 ─────────────────────────────────────────────────────────
@@ -382,11 +382,11 @@ function hueToRgb(p, q, t) {
  * @returns {string}
  */
 export function toHex(rgba) {
-  const h = (v) => v.toString(16).padStart(2, "0").toUpperCase();
-  if (rgba.a < 255) {
-    return `#${h(rgba.r)}${h(rgba.g)}${h(rgba.b)}${h(rgba.a)}`;
-  }
-  return `#${h(rgba.r)}${h(rgba.g)}${h(rgba.b)}`;
+    const h = (v) => v.toString(16).padStart(2, "0").toUpperCase();
+    if (rgba.a < 255) {
+        return `#${h(rgba.r)}${h(rgba.g)}${h(rgba.b)}${h(rgba.a)}`;
+    }
+    return `#${h(rgba.r)}${h(rgba.g)}${h(rgba.b)}`;
 }
 
 /**
@@ -394,11 +394,11 @@ export function toHex(rgba) {
  * @returns {string}
  */
 export function toRgb(rgba) {
-  const alpha = rgba.a / 255;
-  if (alpha < 1) {
-    return `rgb(${rgba.r}, ${rgba.g}, ${rgba.b}, ${formatAlpha(alpha)})`;
-  }
-  return `rgb(${rgba.r}, ${rgba.g}, ${rgba.b})`;
+    const alpha = rgba.a / 255;
+    if (alpha < 1) {
+        return `rgb(${rgba.r}, ${rgba.g}, ${rgba.b}, ${formatAlpha(alpha)})`;
+    }
+    return `rgb(${rgba.r}, ${rgba.g}, ${rgba.b})`;
 }
 
 /**
@@ -406,12 +406,12 @@ export function toRgb(rgba) {
  * @returns {string}
  */
 export function toHsl(rgba) {
-  const [h, s, l] = rgbToHsl(rgba.r, rgba.g, rgba.b);
-  const alpha = rgba.a / 255;
-  if (alpha < 1) {
-    return `hsl(${h}, ${s}%, ${l}%, ${formatAlpha(alpha)})`;
-  }
-  return `hsl(${h}, ${s}%, ${l}%)`;
+    const [h, s, l] = rgbToHsl(rgba.r, rgba.g, rgba.b);
+    const alpha = rgba.a / 255;
+    if (alpha < 1) {
+        return `hsl(${h}, ${s}%, ${l}%, ${formatAlpha(alpha)})`;
+    }
+    return `hsl(${h}, ${s}%, ${l}%)`;
 }
 
 /**
@@ -422,48 +422,48 @@ export function toHsl(rgba) {
  * @returns {[number, number, number]}
  */
 function rgbToHsl(r, g, b) {
-  const rN = r / 255;
-  const gN = g / 255;
-  const bN = b / 255;
+    const rN = r / 255;
+    const gN = g / 255;
+    const bN = b / 255;
 
-  const max = Math.max(rN, gN, bN);
-  const min = Math.min(rN, gN, bN);
-  const delta = max - min;
+    const max = Math.max(rN, gN, bN);
+    const min = Math.min(rN, gN, bN);
+    const delta = max - min;
 
-  const l = (max + min) / 2;
+    const l = (max + min) / 2;
 
-  let s;
-  if (delta === 0) {
-    s = 0;
-  } else if (l < 0.5) {
-    s = delta / (max + min);
-  } else {
-    s = delta / (2 - max - min);
-  }
-
-  let h;
-  if (delta === 0) {
-    h = 0;
-  } else {
-    let hRaw;
-    if (rN === max) {
-      hRaw = (gN - bN) / delta;
-    } else if (gN === max) {
-      hRaw = 2 + (bN - rN) / delta;
+    let s;
+    if (delta === 0) {
+        s = 0;
+    } else if (l < 0.5) {
+        s = delta / (max + min);
     } else {
-      hRaw = 4 + (rN - gN) / delta;
+        s = delta / (2 - max - min);
     }
-    h = hRaw * 60;
-  }
 
-  const hMod = ((h % 360) + 360) % 360;
-  const hInt = Math.round(hMod) % 360;
+    let h;
+    if (delta === 0) {
+        h = 0;
+    } else {
+        let hRaw;
+        if (rN === max) {
+            hRaw = (gN - bN) / delta;
+        } else if (gN === max) {
+            hRaw = 2 + (bN - rN) / delta;
+        } else {
+            hRaw = 4 + (rN - gN) / delta;
+        }
+        h = hRaw * 60;
+    }
 
-  // s 和 l 保留 1 位小数
-  const sPct = Math.round(s * 1000) / 10;
-  const lPct = Math.round(l * 1000) / 10;
+    const hMod = ((h % 360) + 360) % 360;
+    const hInt = Math.round(hMod) % 360;
 
-  return [hInt, sPct, lPct];
+    // s 和 l 保留 1 位小数
+    const sPct = Math.round(s * 1000) / 10;
+    const lPct = Math.round(l * 1000) / 10;
+
+    return [hInt, sPct, lPct];
 }
 
 /**
@@ -472,10 +472,10 @@ function rgbToHsl(r, g, b) {
  * @returns {string}
  */
 function formatAlpha(a) {
-  if (a === 0) return "0";
-  if (a === 1) return "1";
-  const s = a.toFixed(3);
-  return s.replace(/0+$/, "").replace(/\.$/, "");
+    if (a === 0) return "0";
+    if (a === 1) return "1";
+    const s = a.toFixed(3);
+    return s.replace(/0+$/, "").replace(/\.$/, "");
 }
 
 // ── Swatch Renderer ────────────────────────────────────────────────────────
@@ -491,39 +491,39 @@ function formatAlpha(a) {
  * @returns {HTMLElement}
  */
 export function createSwatch(rgba, opts = {}) {
-  const { className = "", size = 36 } = opts;
+    const {className = "", size = 36} = opts;
 
-  const swatch = document.createElement("span");
-  swatch.className = `color-swatch ${className}`.trim();
-  swatch.style.width = `${size}px`;
-  swatch.style.height = `${size}px`;
-  swatch.style.flexShrink = "0";
-  swatch.style.display = "inline-block";
-  swatch.style.borderRadius = "var(--radius-sm, 4px)";
-  swatch.style.position = "relative";
-  swatch.style.overflow = "hidden";
-  swatch.style.border = "1px solid var(--border, rgba(128,128,128,0.3))";
+    const swatch = document.createElement("span");
+    swatch.className = `color-swatch ${className}`.trim();
+    swatch.style.width = `${size}px`;
+    swatch.style.height = `${size}px`;
+    swatch.style.flexShrink = "0";
+    swatch.style.display = "inline-block";
+    swatch.style.borderRadius = "var(--radius-sm, 4px)";
+    swatch.style.position = "relative";
+    swatch.style.overflow = "hidden";
+    swatch.style.border = "1px solid var(--border, rgba(128,128,128,0.3))";
 
-  // 棋盘底（透明/半透明色显示棋盘格背景）
-  if (rgba.a < 255) {
-    swatch.style.backgroundImage = `
+    // 棋盘底（透明/半透明色显示棋盘格背景）
+    if (rgba.a < 255) {
+        swatch.style.backgroundImage = `
       linear-gradient(45deg, var(--text-weak, #ccc) 25%, transparent 25%),
       linear-gradient(-45deg, var(--text-weak, #ccc) 25%, transparent 25%),
       linear-gradient(45deg, transparent 75%, var(--text-weak, #ccc) 75%),
       linear-gradient(-45deg, transparent 75%, var(--text-weak, #ccc) 75%)
     `.replace(/\s+/g, " ").trim();
-    swatch.style.backgroundSize = `${Math.max(4, size / 3)}px ${Math.max(4, size / 3)}px`;
-    swatch.style.backgroundPosition = `0 0, 0 ${Math.max(4, size / 3) / 2}px, ${Math.max(4, size / 3) / 2}px ${-Math.max(4, size / 3) / 2}px`;
-  }
+        swatch.style.backgroundSize = `${Math.max(4, size / 3)}px ${Math.max(4, size / 3)}px`;
+        swatch.style.backgroundPosition = `0 0, 0 ${Math.max(4, size / 3) / 2}px, ${Math.max(4, size / 3) / 2}px ${-Math.max(4, size / 3) / 2}px`;
+    }
 
-  // 色块层
-  const colorLayer = document.createElement("span");
-  colorLayer.style.position = "absolute";
-  colorLayer.style.inset = "0";
-  colorLayer.style.backgroundColor = `rgba(${rgba.r}, ${rgba.g}, ${rgba.b}, ${(rgba.a / 255).toFixed(4)})`;
-  swatch.appendChild(colorLayer);
+    // 色块层
+    const colorLayer = document.createElement("span");
+    colorLayer.style.position = "absolute";
+    colorLayer.style.inset = "0";
+    colorLayer.style.backgroundColor = `rgba(${rgba.r}, ${rgba.g}, ${rgba.b}, ${(rgba.a / 255).toFixed(4)})`;
+    swatch.appendChild(colorLayer);
 
-  return swatch;
+    return swatch;
 }
 
 /**
@@ -532,7 +532,7 @@ export function createSwatch(rgba, opts = {}) {
  * @returns {boolean}
  */
 export function isColorEntry(entry) {
-  return entry?.source === "color";
+    return entry?.source === "color";
 }
 
 /**
@@ -541,7 +541,7 @@ export function isColorEntry(entry) {
  * @returns {string | null}
  */
 export function getColorPayload(entry) {
-  const action = entry?.actions?.[0];
-  if (!action || action.kind !== "copy") return null;
-  return action.payload ?? null;
+    const action = entry?.actions?.[0];
+    if (!action || action.kind !== "copy") return null;
+    return action.payload ?? null;
 }

@@ -4,75 +4,75 @@
 
 /* 0.12.9：user-select text——用户应可选中复制信号消息（如错误详情） */
 .chat-signal {
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 14px;
-  border-radius: 12px;
-  font-size: 12px;
-  line-height: 1.4;
-  user-select: text;
-  -webkit-user-select: text;
-  max-width: 80%;
-  text-align: center;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 14px;
+    border-radius: 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    user-select: text;
+    -webkit-user-select: text;
+    max-width: 80%;
+    text-align: center;
 }
 
 .chat-signal-icon {
-  flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
 }
 
 /* info：弱色，不打扰。0.12.9：text-faint → text-dim 提升对比度 */
 .chat-signal-info {
-  color: var(--text-dim);
-  background: var(--surface);
+    color: var(--text-dim);
+    background: var(--surface);
 }
 
 /* warning：橙色系（复用 text-dim + accent-bg 区分）。0.12.9：text-sub → text 提升对比度 */
 .chat-signal-warning {
-  color: var(--text);
-  background: var(--accent-bg);
+    color: var(--text);
+    background: var(--accent-bg);
 }
 
 /* error：红色系 */
 .chat-signal-error {
-  color: var(--red);
-  background: var(--red-bg);
-  border: 1px solid var(--red-border);
+    color: var(--red);
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
 }
 
 /* success：绿色系 */
 .chat-signal-success {
-  color: var(--green);
-  background: var(--green-bg);
+    color: var(--green);
+    background: var(--green-bg);
 }
 
 /* ── 时间分隔符（0.12.7 §6.4：IM 式居中时间标签） ──── */
 
 /* 0.12.9：text-faint → text-dim 提升对比度；user-select text 允许选中复制时间 */
 .chat-time-sep {
-  align-self: center;
-  padding: 2px 12px;
-  margin: var(--space-xs) 0;
-  border-radius: 10px;
-  font-size: 11px;
-  color: var(--text-dim);
-  background: var(--surface);
-  user-select: text;
-  -webkit-user-select: text;
+    align-self: center;
+    padding: 2px 12px;
+    margin: var(--space-xs) 0;
+    border-radius: 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface);
+    user-select: text;
+    -webkit-user-select: text;
 }
 
 /* ── 错误消息（0.12.7：重构为 Signal error 的别名，保持向后兼容） ── */
 
 .chat-msg-error {
-  align-self: center;
-  padding: 4px 14px;
-  border-radius: 12px;
-  background: var(--red-bg);
-  border: 1px solid var(--red-border);
-  color: var(--red);
-  font-size: 12px;
+    align-self: center;
+    padding: 4px 14px;
+    border-radius: 12px;
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+    color: var(--red);
+    font-size: 12px;
 }
 

@@ -7,73 +7,76 @@
    0.11.8：align-items 从 center 改 flex-start——让主行位置永远与右侧翻页对齐，
    副行插入时主行不再被向上挤（原 center 布局下 hint-left 长高会推主行上移）。 */
 #statusbar {
-  display: none;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-top: var(--space-md);
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--surface);
-  font-size: var(--text-sm);
-  color: var(--text-dim);
-  min-height: 24px; /* 0.16.1：单行紧凑基线（padding-top 8px + line-height 17px ≈ 25px）。
-     双行（chord 副行）时自然撑高，不固定 32px 以免单行底部空白过多。 */
+    display: none;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-top: var(--space-md);
+    padding-top: var(--space-sm);
+    border-top: 1px solid var(--surface);
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    min-height: 24px;
+    /* 0.16.1：单行紧凑基线（padding-top 8px + line-height 17px ≈ 25px）。
+        双行（chord 副行）时自然撑高，不固定 32px 以免单行底部空白过多。 */
 }
 
 #statusbar.visible {
-  display: flex;
-  margin-top: auto; /* 翻页不缩窗口：maxHeight 撑高 #app 时，statusbar 贴底而非紧跟 results */
+    display: flex;
+    margin-top: auto; /* 翻页不缩窗口：maxHeight 撑高 #app 时，statusbar 贴底而非紧跟 results */
 }
 
 /* 0.10.8 §11.2 方案 2：左侧改为垂直 stack，主行 primary + 可选副行 secondary。
    0.11.8：align-items 已在 #statusbar 上改成 flex-start，primary 位置固定，
    secondary 从 primary 下方自然向下伸展（statusbar 整体长高，右侧翻页仍与 primary 对齐）。 */
 #statusbar .hint-left {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0; /* flex 溢出保护：主行文本长时正常截断，不撑爆右侧翻页位 */
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0; /* flex 溢出保护：主行文本长时正常截断，不撑爆右侧翻页位 */
 }
 
 #statusbar .hint-primary {
-  /* primary 有独立 min-height，保证单行时也占 min-height=32px 的一半基线，
-     副行插入时它自身位置不变（与右侧翻页 flex-start 对齐一致）。 */
-  line-height: 1.4;
+    /* primary 有独立 min-height，保证单行时也占 min-height=32px 的一半基线，
+       副行插入时它自身位置不变（与右侧翻页 flex-start 对齐一致）。 */
+    line-height: 1.4;
 }
 
 #statusbar .hint-secondary {
-  font-size: 0.9em;
-  opacity: var(--opacity-muted);
-  line-height: 1.4;
-  /* secondary 走 chord 键帽 + 标签，本身就是弱信号——比 primary 更淡表达"待命入口" */
+    font-size: 0.9em;
+    opacity: var(--opacity-muted);
+    line-height: 1.4;
+    /* secondary 走 chord 键帽 + 标签，本身就是弱信号——比 primary 更淡表达"待命入口" */
 }
 
 #statusbar .hint-right {
-  font-family: ui-monospace, Consolas, monospace;
+    font-family: ui-monospace, Consolas, monospace;
 }
 
 /* statusbar 里的键帽稍收紧字距，跟 11px 文字视觉对齐；
    相邻键帽之间用 margin-left 表达"连续按键"，键帽外侧文本用 margin-right 隔开一空格。 */
 #statusbar .kbd {
-  font-size: 0.95em;
-  margin-right: 0.2em; /* 键帽后跟文字：Enter 打开 */
+    font-size: 0.95em;
+    margin-right: 0.2em; /* 键帽后跟文字：Enter 打开 */
 }
+
 #statusbar .kbd + .kbd {
-  margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
+    margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
 }
 
 /* 0.8.3 §4.9：Context Suggestion 来源提示（"· 来自划词"）弱化——比常规 hint 更浅,
    让用户扫一眼就知道是元信息不是核心提示。中文不用斜体（辨识度差）。 */
 #statusbar .hint-origin {
-  opacity: var(--opacity-dim);
+    opacity: var(--opacity-dim);
 }
 
 /* Chord 副行的分隔符 / 标签（0.10.8 §11.2：从右侧降级路径改到左侧副行）。
    secondary 已整体 opacity 弱化，chord-sep 再叠低透明度会太糊——保留常规 muted。 */
 #statusbar .chord-sep {
-  color: var(--text-faint);
-  margin: 0 0.5em;
-  font-weight: var(--weight-light);
+    color: var(--text-faint);
+    margin: 0 0.5em;
+    font-weight: var(--weight-light);
 }
+
 #statusbar .chord-label {
-  margin-left: 0.3em;
+    margin-left: 0.3em;
 }

@@ -21,26 +21,26 @@
  * fallback 到 window.devicePixelRatio，再 fallback 到 1。
  */
 export function getRenderScale(meta) {
-  let scaleX, scaleY;
-  if (meta && typeof meta.renderScaleX === 'number' && meta.renderScaleX > 0) {
-    scaleX = meta.renderScaleX;
-  } else {
-    scaleX = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-  }
-  if (meta && typeof meta.renderScaleY === 'number' && meta.renderScaleY > 0) {
-    scaleY = meta.renderScaleY;
-  } else {
-    scaleY = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-  }
-  return { scaleX, scaleY };
+    let scaleX, scaleY;
+    if (meta && typeof meta.renderScaleX === 'number' && meta.renderScaleX > 0) {
+        scaleX = meta.renderScaleX;
+    } else {
+        scaleX = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    }
+    if (meta && typeof meta.renderScaleY === 'number' && meta.renderScaleY > 0) {
+        scaleY = meta.renderScaleY;
+    } else {
+        scaleY = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    }
+    return {scaleX, scaleY};
 }
 
 /**
  * 手动设置 render scale（测试或特殊情况用）。
  */
 export function setRenderScale(meta, scaleX, scaleY) {
-  meta.renderScaleX = scaleX;
-  meta.renderScaleY = scaleY;
+    meta.renderScaleX = scaleX;
+    meta.renderScaleY = scaleY;
 }
 
 /**
@@ -49,21 +49,28 @@ export function setRenderScale(meta, scaleX, scaleY) {
  * @returns {boolean} 是否成功（canvas 尺寸为 0 时返回 false）
  */
 export function syncRenderScale(canvas, meta) {
-  const rect = canvas.getBoundingClientRect();
-  if (canvas.width <= 0 || canvas.height <= 0 ||
-      rect.width <= 0 || rect.height <= 0) {
-    return false;
-  }
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  meta.renderScaleX = scaleX;
-  meta.renderScaleY = scaleY;
-  meta.viewportCssWidth = rect.width;
-  meta.viewportCssHeight = rect.height;
-  if (Math.abs(scaleX - scaleY) > 0.01) {
-    console.warn('[screenshot] render scale X/Y 不一致', { scaleX, scaleY, canvasWidth: canvas.width, canvasHeight: canvas.height, rectWidth: rect.width, rectHeight: rect.height });
-  }
-  return true;
+    const rect = canvas.getBoundingClientRect();
+    if (canvas.width <= 0 || canvas.height <= 0 ||
+        rect.width <= 0 || rect.height <= 0) {
+        return false;
+    }
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    meta.renderScaleX = scaleX;
+    meta.renderScaleY = scaleY;
+    meta.viewportCssWidth = rect.width;
+    meta.viewportCssHeight = rect.height;
+    if (Math.abs(scaleX - scaleY) > 0.01) {
+        console.warn('[screenshot] render scale X/Y 不一致', {
+            scaleX,
+            scaleY,
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+            rectWidth: rect.width,
+            rectHeight: rect.height
+        });
+    }
+    return true;
 }
 
 // ── overlayDpr（仅诊断/fallback，不再作为权威坐标比例） ──────────────────────
@@ -73,10 +80,10 @@ export function syncRenderScale(canvas, meta) {
  * 不参与坐标换算。
  */
 export function overlayDpr(meta) {
-  if (meta && typeof meta.overlayDpi === 'number' && meta.overlayDpi > 0) {
-    return meta.overlayDpi / 96;
-  }
-  return (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    if (meta && typeof meta.overlayDpi === 'number' && meta.overlayDpi > 0) {
+        return meta.overlayDpi / 96;
+    }
+    return (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
 }
 
 // ── 显示器原生 DPR 识别（不参与坐标乘除） ────────────────────────────────────
@@ -86,13 +93,13 @@ export function overlayDpr(meta) {
  * 直接在 physicalDisplays 中命中物理矩形。
  */
 export function monitorDprAtScreen(screenX, screenY, meta) {
-  const displays = (meta && Array.isArray(meta.physicalDisplays)) ? meta.physicalDisplays : [];
-  for (const d of displays) {
-    if (screenX >= d.x && screenX < d.x + d.w && screenY >= d.y && screenY < d.y + d.h) {
-      return d.dpi / 96;
+    const displays = (meta && Array.isArray(meta.physicalDisplays)) ? meta.physicalDisplays : [];
+    for (const d of displays) {
+        if (screenX >= d.x && screenX < d.x + d.w && screenY >= d.y && screenY < d.y + d.h) {
+            return d.dpi / 96;
+        }
     }
-  }
-  return (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    return (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
 }
 
 /**
@@ -100,8 +107,8 @@ export function monitorDprAtScreen(screenX, screenY, meta) {
  * CSS → screen (via renderScale) → 命中 physicalDisplays → 返回 dpi/96
  */
 export function monitorDprAtCss(cssX, cssY, meta) {
-  const screen = cssPointToScreen(cssX, cssY, meta);
-  return monitorDprAtScreen(screen.x, screen.y, meta);
+    const screen = cssPointToScreen(cssX, cssY, meta);
+    return monitorDprAtScreen(screen.x, screen.y, meta);
 }
 
 /**
@@ -120,13 +127,13 @@ export function monitorDprAtCss(cssX, cssY, meta) {
  * position/clamp 逻辑必须使用变换后的视觉宽高（= offsetWidth * uiScale）。
  */
 export function uiScaleAtCss(cssX, cssY, meta) {
-  const monitorDpr = monitorDprAtCss(cssX, cssY, meta);
-  const { scaleX } = getRenderScale(meta);
-  return monitorDpr / scaleX;
+    const monitorDpr = monitorDprAtCss(cssX, cssY, meta);
+    const {scaleX} = getRenderScale(meta);
+    return monitorDpr / scaleX;
 }
 
 // 兼容导出
-export { monitorDprAtCss as dprAtCss, monitorDprAtScreen as dprAtScreen };
+export {monitorDprAtCss as dprAtCss, monitorDprAtScreen as dprAtScreen};
 
 // ── 坐标换算（统一使用 renderScale） ──────────────────────────────────────────
 
@@ -135,42 +142,42 @@ export { monitorDprAtCss as dprAtCss, monitorDprAtScreen as dprAtScreen };
  * bitmap 左上角固定对应 (meta.vx, meta.vy)，与屏幕物理像素 1:1
  */
 export function screenToBitmap(screenX, screenY, meta) {
-  return {
-    x: Math.round(screenX - (meta?.vx || 0)),
-    y: Math.round(screenY - (meta?.vy || 0))
-  };
+    return {
+        x: Math.round(screenX - (meta?.vx || 0)),
+        y: Math.round(screenY - (meta?.vy || 0))
+    };
 }
 
 /**
  * bitmap 坐标 → 屏幕物理坐标
  */
 export function bitmapToScreen(bitmapX, bitmapY, meta) {
-  return {
-    x: Math.round((meta?.vx || 0) + bitmapX),
-    y: Math.round((meta?.vy || 0) + bitmapY)
-  };
+    return {
+        x: Math.round((meta?.vx || 0) + bitmapX),
+        y: Math.round((meta?.vy || 0) + bitmapY)
+    };
 }
 
 /**
  * 屏幕物理坐标 → CSS 坐标（使用 renderScale）
  */
 export function screenPointToCss(screenX, screenY, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  return {
-    x: (screenX - (meta?.vx || 0)) / scaleX,
-    y: (screenY - (meta?.vy || 0)) / scaleY
-  };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    return {
+        x: (screenX - (meta?.vx || 0)) / scaleX,
+        y: (screenY - (meta?.vy || 0)) / scaleY
+    };
 }
 
 /**
  * overlay CSS 坐标 → 屏幕物理坐标（使用 renderScale）
  */
 export function cssPointToScreen(cssX, cssY, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  return {
-    x: Math.round((meta?.vx || 0) + cssX * scaleX),
-    y: Math.round((meta?.vy || 0) + cssY * scaleY)
-  };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    return {
+        x: Math.round((meta?.vx || 0) + cssX * scaleX),
+        y: Math.round((meta?.vy || 0) + cssY * scaleY)
+    };
 }
 
 /**
@@ -180,10 +187,10 @@ export function cssPointToScreen(cssX, cssY, meta) {
  * 不经过 renderScale，避免高 DPI 屏幕上把光标量化到 CSS 像素网格。
  */
 export function screenPointToBitmap(screenX, screenY, meta) {
-  return {
-    x: Math.round(screenX - (meta?.vx || 0)),
-    y: Math.round(screenY - (meta?.vy || 0)),
-  };
+    return {
+        x: Math.round(screenX - (meta?.vx || 0)),
+        y: Math.round(screenY - (meta?.vy || 0)),
+    };
 }
 
 /**
@@ -191,8 +198,8 @@ export function screenPointToBitmap(screenX, screenY, meta) {
  * bitmap 与虚拟桌面物理像素 1:1，CSS = bitmap / renderScale
  */
 export function bitmapPointToCss(bitmapX, bitmapY, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  return { x: bitmapX / scaleX, y: bitmapY / scaleY };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    return {x: bitmapX / scaleX, y: bitmapY / scaleY};
 }
 
 /**
@@ -200,147 +207,147 @@ export function bitmapPointToCss(bitmapX, bitmapY, meta) {
  * bitmap = CSS * renderScale
  */
 export function cssPointToBitmap(cssX, cssY, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  return { x: Math.round(cssX * scaleX), y: Math.round(cssY * scaleY) };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    return {x: Math.round(cssX * scaleX), y: Math.round(cssY * scaleY)};
 }
 
 /**
  * overlay CSS 矩形 → bitmap 矩形
  */
 export function cssRectToBitmap(rect, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  return {
-    x: Math.round(rect.x * scaleX),
-    y: Math.round(rect.y * scaleY),
-    w: Math.round(rect.w * scaleX),
-    h: Math.round(rect.h * scaleY)
-  };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    return {
+        x: Math.round(rect.x * scaleX),
+        y: Math.round(rect.y * scaleY),
+        w: Math.round(rect.w * scaleX),
+        h: Math.round(rect.h * scaleY)
+    };
 }
 
 /**
  * bitmap 矩形 → overlay CSS 矩形
  */
 export function bitmapRectToCss(rect, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  return { x: rect.x / scaleX, y: rect.y / scaleY, w: rect.w / scaleX, h: rect.h / scaleY };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    return {x: rect.x / scaleX, y: rect.y / scaleY, w: rect.w / scaleX, h: rect.h / scaleY};
 }
 
 /**
  * 屏幕物理矩形 → overlay CSS 矩形
  */
 export function screenRectToCss(rect, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  const topLeft = screenPointToCss(rect.x, rect.y, meta);
-  return {
-    x: topLeft.x,
-    y: topLeft.y,
-    w: rect.w / scaleX,
-    h: rect.h / scaleY
-  };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    const topLeft = screenPointToCss(rect.x, rect.y, meta);
+    return {
+        x: topLeft.x,
+        y: topLeft.y,
+        w: rect.w / scaleX,
+        h: rect.h / scaleY
+    };
 }
 
 /**
  * overlay CSS 矩形 → 屏幕物理矩形
  */
 export function cssRectToScreen(rect, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  const topLeft = cssPointToScreen(rect.x, rect.y, meta);
-  return {
-    x: topLeft.x,
-    y: topLeft.y,
-    w: Math.round(rect.w * scaleX),
-    h: Math.round(rect.h * scaleY)
-  };
+    const {scaleX, scaleY} = getRenderScale(meta);
+    const topLeft = cssPointToScreen(rect.x, rect.y, meta);
+    return {
+        x: topLeft.x,
+        y: topLeft.y,
+        w: Math.round(rect.w * scaleX),
+        h: Math.round(rect.h * scaleY)
+    };
 }
 
 // ── 兼容导出（旧名称，逐步迁移调用方） ──────────────────────────────────────
 export {
-  screenPointToCss as screenToCss,
-  cssPointToScreen as cssToScreen,
-  bitmapPointToCss as bitmapToCss,
-  cssPointToBitmap as cssToBitmap,
-  screenRectToCss as rectScreenToCss,
-  cssRectToScreen as rectCssToScreen,
+    screenPointToCss as screenToCss,
+    cssPointToScreen as cssToScreen,
+    bitmapPointToCss as bitmapToCss,
+    cssPointToBitmap as cssToBitmap,
+    screenRectToCss as rectScreenToCss,
+    cssRectToScreen as rectCssToScreen,
 };
 
 /**
  * 转换矩形（屏幕物理坐标 → bitmap 坐标）
  */
 export function rectScreenToBitmap(rect, meta) {
-  const topLeft = screenToBitmap(rect.x, rect.y, meta);
-  return {
-    x: topLeft.x,
-    y: topLeft.y,
-    w: Math.max(0, Math.round(rect.w)),
-    h: Math.max(0, Math.round(rect.h))
-  };
+    const topLeft = screenToBitmap(rect.x, rect.y, meta);
+    return {
+        x: topLeft.x,
+        y: topLeft.y,
+        w: Math.max(0, Math.round(rect.w)),
+        h: Math.max(0, Math.round(rect.h))
+    };
 }
 
 /**
  * 转换矩形（bitmap 坐标 → 屏幕物理坐标）
  */
 export function rectBitmapToScreen(rect, meta) {
-  const topLeft = bitmapToScreen(rect.x, rect.y, meta);
-  return {
-    x: topLeft.x,
-    y: topLeft.y,
-    w: Math.max(0, Math.round(rect.w)),
-    h: Math.max(0, Math.round(rect.h))
-  };
+    const topLeft = bitmapToScreen(rect.x, rect.y, meta);
+    return {
+        x: topLeft.x,
+        y: topLeft.y,
+        w: Math.max(0, Math.round(rect.w)),
+        h: Math.max(0, Math.round(rect.h))
+    };
 }
 
 /**
  * @deprecated 使用 cssRectToBitmap 代替。保留兼容，内部委托。
  */
 export function cssSizeToPhysical(cssSize, cssX, cssY, meta) {
-  const { scaleX, scaleY } = getRenderScale(meta);
-  // 按旧签名：只返回一个值，用 X scale（与旧行为一致）
-  return Math.round(cssSize * scaleX);
+    const {scaleX, scaleY} = getRenderScale(meta);
+    // 按旧签名：只返回一个值，用 X scale（与旧行为一致）
+    return Math.round(cssSize * scaleX);
 }
 
 /**
  * 矩形 clamp：确保矩形在 bitmap 范围内
  */
 export function clampRectToBitmap(rect, bitmapWidth, bitmapHeight) {
-  const x = Math.max(0, Math.min(rect.x, bitmapWidth));
-  const y = Math.max(0, Math.min(rect.y, bitmapHeight));
-  const right = Math.max(x, Math.min(rect.x + rect.w, bitmapWidth));
-  const bottom = Math.max(y, Math.min(rect.y + rect.h, bitmapHeight));
-  return { x, y, w: right - x, h: bottom - y };
+    const x = Math.max(0, Math.min(rect.x, bitmapWidth));
+    const y = Math.max(0, Math.min(rect.y, bitmapHeight));
+    const right = Math.max(x, Math.min(rect.x + rect.w, bitmapWidth));
+    const bottom = Math.max(y, Math.min(rect.y + rect.h, bitmapHeight));
+    return {x, y, w: right - x, h: bottom - y};
 }
 
 /**
  * 矩形 clamp：确保矩形在 CSS overlay 范围内
  */
 export function clampRectToCss(rect, overlayWidth, overlayHeight) {
-  const x = Math.max(0, Math.min(rect.x, overlayWidth));
-  const y = Math.max(0, Math.min(rect.y, overlayHeight));
-  const right = Math.max(x, Math.min(rect.x + rect.w, overlayWidth));
-  const bottom = Math.max(y, Math.min(rect.y + rect.h, overlayHeight));
-  return { x, y, w: right - x, h: bottom - y };
+    const x = Math.max(0, Math.min(rect.x, overlayWidth));
+    const y = Math.max(0, Math.min(rect.y, overlayHeight));
+    const right = Math.max(x, Math.min(rect.x + rect.w, overlayWidth));
+    const bottom = Math.max(y, Math.min(rect.y + rect.h, overlayHeight));
+    return {x, y, w: right - x, h: bottom - y};
 }
 
 /**
  * 点是否在矩形内
  */
 export function pointInRect(px, py, rect) {
-  return px >= rect.x && px < rect.x + rect.w && py >= rect.y && py < rect.y + rect.h;
+    return px >= rect.x && px < rect.x + rect.w && py >= rect.y && py < rect.y + rect.h;
 }
 
 /**
  * 两点距离（CSS 像素）
  */
 export function distanceCss(x1, y1, x2, y2) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  return Math.sqrt(dx * dx + dy * dy);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    return Math.sqrt(dx * dx + dy * dy);
 }
 
 /**
  * 格式化选区信息显示
  */
 export function formatSelectionInfo(screenX, screenY, width, height) {
-  return `(${Math.round(screenX)}, ${Math.round(screenY)}) ${Math.round(width)} × ${Math.round(height)} px`;
+    return `(${Math.round(screenX)}, ${Math.round(screenY)}) ${Math.round(width)} × ${Math.round(height)} px`;
 }
 
 /**
@@ -348,37 +355,39 @@ export function formatSelectionInfo(screenX, screenY, width, height) {
  * fmt: 0=HEX, 1=RGB, 2=HSL
  */
 export function formatColor(r, g, b, fmt) {
-  if (fmt === 1) {
-    return `rgb(${r}, ${g}, ${b})`;
-  }
-  if (fmt === 2) {
-    const [h, s, l] = rgbToHsl(r, g, b);
-    return `hsl(${h}, ${s}%, ${l}%)`;
-  }
-  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
+    if (fmt === 1) {
+        return `rgb(${r}, ${g}, ${b})`;
+    }
+    if (fmt === 2) {
+        const [h, s, l] = rgbToHsl(r, g, b);
+        return `hsl(${h}, ${s}%, ${l}%)`;
+    }
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
 }
 
 /**
  * RGB → HSL 转换
  */
 export function rgbToHsl(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (max === min) return [0, 0, Math.round(l * 100)];
-  const d = max - min;
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h;
-  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-  else if (max === g) h = ((b - r) / d + 2) / 6;
-  else h = ((r - g) / d + 4) / 6;
-  return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return [0, 0, Math.round(l * 100)];
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h;
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+    return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
 }
 
 /** pending-snap 是否已达到自由框选阈值。 */
 export function shouldStartFreeSelection(startX, startY, currentX, currentY, threshold = 3) {
-  return distanceCss(startX, startY, currentX, currentY) >= threshold;
+    return distanceCss(startX, startY, currentX, currentY) >= threshold;
 }
 
 // ── 0.20.6：像素精调纯函数 ──────────────────────────────────────────────────
@@ -396,12 +405,12 @@ export function shouldStartFreeSelection(startX, startY, currentX, currentY, thr
  * @returns {{x,y,w,h}} 钳制后的新矩形（w/h 不变）
  */
 export function moveRect1px(rect, dx, dy, bitmapWidth, bitmapHeight) {
-  const newX = rect.x + dx;
-  const newY = rect.y + dy;
-  // 钳制：选区不超出 bitmap 范围 [0, bitmapWidth - rect.w]
-  const clampedX = Math.max(0, Math.min(newX, Math.max(0, bitmapWidth - rect.w)));
-  const clampedY = Math.max(0, Math.min(newY, Math.max(0, bitmapHeight - rect.h)));
-  return { x: clampedX, y: clampedY, w: rect.w, h: rect.h };
+    const newX = rect.x + dx;
+    const newY = rect.y + dy;
+    // 钳制：选区不超出 bitmap 范围 [0, bitmapWidth - rect.w]
+    const clampedX = Math.max(0, Math.min(newX, Math.max(0, bitmapWidth - rect.w)));
+    const clampedY = Math.max(0, Math.min(newY, Math.max(0, bitmapHeight - rect.h)));
+    return {x: clampedX, y: clampedY, w: rect.w, h: rect.h};
 }
 
 /**
@@ -416,20 +425,36 @@ export function moveRect1px(rect, dx, dy, bitmapWidth, bitmapHeight) {
  * @returns {{x,y,w,h}} 约束+钳制后的矩形
  */
 export function applySquareResize(original, handle, newW, newH, bitmapWidth, bitmapHeight) {
-  const side = Math.max(Math.abs(newW), Math.abs(newH));
-  const s = Math.max(MIN_RESIZE_SIDE, side);
-  let x = original.x, y = original.y, w = s, h = s;
-  // 按 handle 方向确定锚点
-  // 锚点 = 被拖拽边的对侧边
-  if (handle.includes('w')) x = original.x + original.w - s;   // 拖西边 → 锚东
-  if (handle.includes('n')) y = original.y + original.h - s;  // 拖北边 → 锚南
-  // 'e' / 's' 保持 original.x / original.y 不变
-  // 钳制到 bitmap
-  if (x < 0) { const d = -x; x = 0; w = Math.max(MIN_RESIZE_SIDE, s - d); h = w; }
-  if (y < 0) { const d = -y; y = 0; h = Math.max(MIN_RESIZE_SIDE, s - d); w = h; }
-  if (x + w > bitmapWidth) { w = Math.max(MIN_RESIZE_SIDE, bitmapWidth - x); h = w; }
-  if (y + h > bitmapHeight) { h = Math.max(MIN_RESIZE_SIDE, bitmapHeight - y); w = h; }
-  return { x, y, w, h };
+    const side = Math.max(Math.abs(newW), Math.abs(newH));
+    const s = Math.max(MIN_RESIZE_SIDE, side);
+    let x = original.x, y = original.y, w = s, h = s;
+    // 按 handle 方向确定锚点
+    // 锚点 = 被拖拽边的对侧边
+    if (handle.includes('w')) x = original.x + original.w - s;   // 拖西边 → 锚东
+    if (handle.includes('n')) y = original.y + original.h - s;  // 拖北边 → 锚南
+    // 'e' / 's' 保持 original.x / original.y 不变
+    // 钳制到 bitmap
+    if (x < 0) {
+        const d = -x;
+        x = 0;
+        w = Math.max(MIN_RESIZE_SIDE, s - d);
+        h = w;
+    }
+    if (y < 0) {
+        const d = -y;
+        y = 0;
+        h = Math.max(MIN_RESIZE_SIDE, s - d);
+        w = h;
+    }
+    if (x + w > bitmapWidth) {
+        w = Math.max(MIN_RESIZE_SIDE, bitmapWidth - x);
+        h = w;
+    }
+    if (y + h > bitmapHeight) {
+        h = Math.max(MIN_RESIZE_SIDE, bitmapHeight - y);
+        w = h;
+    }
+    return {x, y, w, h};
 }
 
 /** resize 最小边长常量 */
@@ -444,12 +469,12 @@ const MIN_RESIZE_SIDE = 2;
  * @returns {{x,y}} 钳制后的新坐标
  */
 export function moveCrosshair1px(pos, dx, dy, rect) {
-  const newX = pos.x + dx;
-  const newY = pos.y + dy;
-  // 准星限制在选区内 [rect.x, rect.x + rect.w - 1]
-  const clampedX = Math.max(rect.x, Math.min(newX, rect.x + Math.max(0, rect.w - 1)));
-  const clampedY = Math.max(rect.y, Math.min(newY, rect.y + Math.max(0, rect.h - 1)));
-  return { x: clampedX, y: clampedY };
+    const newX = pos.x + dx;
+    const newY = pos.y + dy;
+    // 准星限制在选区内 [rect.x, rect.x + rect.w - 1]
+    const clampedX = Math.max(rect.x, Math.min(newX, rect.x + Math.max(0, rect.w - 1)));
+    const clampedY = Math.max(rect.y, Math.min(newY, rect.y + Math.max(0, rect.h - 1)));
+    return {x: clampedX, y: clampedY};
 }
 
 /**
@@ -457,31 +482,31 @@ export function moveCrosshair1px(pos, dx, dy, rect) {
  * 与 clampRectToBitmap 类似，但确保 w/h 不为负且不越界。
  */
 export function clampRectToBitmapBounds(rect, bitmapWidth, bitmapHeight) {
-  const x = Math.max(0, Math.min(rect.x, Math.max(0, bitmapWidth - 1)));
-  const y = Math.max(0, Math.min(rect.y, Math.max(0, bitmapHeight - 1)));
-  const right = Math.max(x + MIN_RESIZE_SIDE, Math.min(rect.x + rect.w, bitmapWidth));
-  const bottom = Math.max(y + MIN_RESIZE_SIDE, Math.min(rect.y + rect.h, bitmapHeight));
-  return { x, y, w: right - x, h: bottom - y };
+    const x = Math.max(0, Math.min(rect.x, Math.max(0, bitmapWidth - 1)));
+    const y = Math.max(0, Math.min(rect.y, Math.max(0, bitmapHeight - 1)));
+    const right = Math.max(x + MIN_RESIZE_SIDE, Math.min(rect.x + rect.w, bitmapWidth));
+    const bottom = Math.max(y + MIN_RESIZE_SIDE, Math.min(rect.y + rect.h, bitmapHeight));
+    return {x, y, w: right - x, h: bottom - y};
 }
 
 /**
  * 计算像素放大镜在 bitmap 边缘处的安全读取区域及网格偏移。
  */
 export function magnifierSampleRegion(px, py, canvasWidth, canvasHeight, cols = 16, rows = 9) {
-  const halfRows = Math.floor(rows / 2);
-  const halfCols = Math.floor(cols / 2);
-  const desiredX = px - halfCols;
-  const desiredY = py - halfRows;
-  const readX = Math.max(0, desiredX);
-  const readY = Math.max(0, desiredY);
-  const gridOffsetX = readX - desiredX;
-  const gridOffsetY = readY - desiredY;
-  return {
-    readX,
-    readY,
-    gridOffsetX,
-    gridOffsetY,
-    width: Math.max(0, Math.min(cols - gridOffsetX, canvasWidth - readX)),
-    height: Math.max(0, Math.min(rows - gridOffsetY, canvasHeight - readY)),
-  };
+    const halfRows = Math.floor(rows / 2);
+    const halfCols = Math.floor(cols / 2);
+    const desiredX = px - halfCols;
+    const desiredY = py - halfRows;
+    const readX = Math.max(0, desiredX);
+    const readY = Math.max(0, desiredY);
+    const gridOffsetX = readX - desiredX;
+    const gridOffsetY = readY - desiredY;
+    return {
+        readX,
+        readY,
+        gridOffsetX,
+        gridOffsetY,
+        width: Math.max(0, Math.min(cols - gridOffsetX, canvasWidth - readX)),
+        height: Math.max(0, Math.min(rows - gridOffsetY, canvasHeight - readY)),
+    };
 }

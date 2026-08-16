@@ -7,15 +7,15 @@
 //! 语言来源：AppConfig.language（"zh" | "en"），由 applyI18nFromConfig() 异步读取。
 //! 降级：t() 找不到 key → 回退 zh → 再回退到 key 本身，永不抛异常。
 
-import { invoke } from "../shared/tauri.js";
-import { zh } from "./zh.js";
-import { en } from "./en.js";
+import {invoke} from "../shared/tauri.js";
+import {zh} from "./zh.js";
+import {en} from "./en.js";
 
 /** 当前语言（模块私有）。setLang 修改，t/applyI18n 读取。 */
 let currentLang = "zh";
 
 /** zh / en 双语字典。扁平点分 key，两份必须 key 对齐（缺 key 靠 t() 回退兜底）。 */
-const DICT = { zh, en };
+const DICT = {zh, en};
 
 /** 支持的语言集合（setLang 合法性校验用）。 */
 const SUPPORTED = new Set(["zh", "en"]);
@@ -28,14 +28,14 @@ const SUPPORTED = new Set(["zh", "en"]);
  * @returns {string}
  */
 export function t(key, params) {
-  const raw = DICT[currentLang]?.[key] ?? DICT.zh[key] ?? key;
-  if (!params) return raw;
-  return raw.replace(/\{(\w+)\}/g, (_, name) => (params[name] ?? "").toString());
+    const raw = DICT[currentLang]?.[key] ?? DICT.zh[key] ?? key;
+    if (!params) return raw;
+    return raw.replace(/\{(\w+)\}/g, (_, name) => (params[name] ?? "").toString());
 }
 
 /** 读取当前语言。 */
 export function getLang() {
-  return currentLang;
+    return currentLang;
 }
 
 /**
@@ -43,7 +43,7 @@ export function getLang() {
  * @param {string} lang "zh" | "en"
  */
 export function setLang(lang) {
-  currentLang = SUPPORTED.has(lang) ? lang : "zh";
+    currentLang = SUPPORTED.has(lang) ? lang : "zh";
 }
 
 /** 语言切换订阅者。applyI18n 刷完静态文本后触发，供 JS 动态生成的本地化文本（如状态徽章）自行刷新。 */
@@ -55,18 +55,18 @@ const langChangeCallbacks = new Set();
  * @returns {() => void} 取消订阅函数
  */
 export function onLangChange(cb) {
-  langChangeCallbacks.add(cb);
-  return () => langChangeCallbacks.delete(cb);
+    langChangeCallbacks.add(cb);
+    return () => langChangeCallbacks.delete(cb);
 }
 
 const ATTRS = [
-  ["data-i18n", "textContent"],
-  ["data-i18n-ph", "placeholder"],
-  ["data-i18n-title", "title"],
-  ["data-i18n-aria-label", "ariaLabel"],
-  // data-tip 存的是 i18n key，翻译后写入 dataset.tip（CSS tooltip::attr(data-tip) 读它）。
-  // 特殊：不能用 el[prop] 直接映射，dataset 是只读对象，需走 setAttribute。
-  ["data-tip", "__dataset_tip__"],
+    ["data-i18n", "textContent"],
+    ["data-i18n-ph", "placeholder"],
+    ["data-i18n-title", "title"],
+    ["data-i18n-aria-label", "ariaLabel"],
+    // data-tip 存的是 i18n key，翻译后写入 dataset.tip（CSS tooltip::attr(data-tip) 读它）。
+    // 特殊：不能用 el[prop] 直接映射，dataset 是只读对象，需走 setAttribute。
+    ["data-tip", "__dataset_tip__"],
 ];
 
 /**
@@ -81,38 +81,38 @@ const ATTRS = [
  * @param {string} [lang] 不传则用 currentLang（传入时也会 setLang）
  */
 export function applyI18n(lang) {
-  if (lang) setLang(lang);
-  for (const [attr, prop] of ATTRS) {
-    document.querySelectorAll(`[${attr}]`).forEach((el) => {
-      if (prop === "textContent" && el.childElementCount > 0) {
-        // 保留子元素（如 field-hint-icon），只更新第一个文本节点
-        const text = t(el.getAttribute(attr));
-        let textNode = [...el.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
-        if (textNode) {
-          textNode.textContent = text;
-        } else {
-          el.insertBefore(document.createTextNode(text), el.firstChild);
-        }
-      } else if (prop === "__dataset_tip__") {
-        // data-tip 翻译后写回 data-tip 属性（CSS ::after content:attr(data-tip) 读它）
-        el.setAttribute("data-tip", t(el.getAttribute(attr)));
-      } else {
-        el[prop] = t(el.getAttribute(attr));
-      }
-    });
-  }
-  // data-i18n-html：翻译串可含受信任 HTML，走 innerHTML
-  document.querySelectorAll("[data-i18n-html]").forEach((el) => {
-    el.innerHTML = t(el.getAttribute("data-i18n-html"));
-  });
-  // 静态文本刷完后，通知动态文本（状态徽章等 JS 设的 textContent）自行刷新
-  for (const cb of langChangeCallbacks) {
-    try {
-      cb();
-    } catch (e) {
-      console.error("onLangChange callback failed:", e);
+    if (lang) setLang(lang);
+    for (const [attr, prop] of ATTRS) {
+        document.querySelectorAll(`[${attr}]`).forEach((el) => {
+            if (prop === "textContent" && el.childElementCount > 0) {
+                // 保留子元素（如 field-hint-icon），只更新第一个文本节点
+                const text = t(el.getAttribute(attr));
+                let textNode = [...el.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
+                if (textNode) {
+                    textNode.textContent = text;
+                } else {
+                    el.insertBefore(document.createTextNode(text), el.firstChild);
+                }
+            } else if (prop === "__dataset_tip__") {
+                // data-tip 翻译后写回 data-tip 属性（CSS ::after content:attr(data-tip) 读它）
+                el.setAttribute("data-tip", t(el.getAttribute(attr)));
+            } else {
+                el[prop] = t(el.getAttribute(attr));
+            }
+        });
     }
-  }
+    // data-i18n-html：翻译串可含受信任 HTML，走 innerHTML
+    document.querySelectorAll("[data-i18n-html]").forEach((el) => {
+        el.innerHTML = t(el.getAttribute("data-i18n-html"));
+    });
+    // 静态文本刷完后，通知动态文本（状态徽章等 JS 设的 textContent）自行刷新
+    for (const cb of langChangeCallbacks) {
+        try {
+            cb();
+        } catch (e) {
+            console.error("onLangChange callback failed:", e);
+        }
+    }
 }
 
 /**
@@ -120,13 +120,13 @@ export function applyI18n(lang) {
  * 启动时与窗口 shown 刷新时调用。读失败保持 currentLang 默认值。
  */
 export async function applyI18nFromConfig() {
-  try {
-    const cfg = await invoke("get_config");
-    if (cfg && cfg.language) setLang(cfg.language);
-  } catch (e) {
-    console.error("applyI18nFromConfig: 读 config 失败，回退默认语言", e);
-  }
-  applyI18n();
+    try {
+        const cfg = await invoke("get_config");
+        if (cfg && cfg.language) setLang(cfg.language);
+    } catch (e) {
+        console.error("applyI18nFromConfig: 读 config 失败，回退默认语言", e);
+    }
+    applyI18n();
 }
 
 /**
@@ -134,6 +134,6 @@ export async function applyI18nFromConfig() {
  * @param {object} cfg - get_config 返回的 AppConfig 对象
  */
 export function applyI18nFromConfigData(cfg) {
-  if (cfg && cfg.language) setLang(cfg.language);
-  applyI18n();
+    if (cfg && cfg.language) setLang(cfg.language);
+    applyI18n();
 }

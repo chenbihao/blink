@@ -2,10 +2,40 @@
   "name": "return-to-top",
   "generator": "document",
   "frames": [
-    { "top": 0, "direction": 0, "accepted": true, "reason": "first-frame", "confirmedTop": 0 },
-    { "top": 25, "direction": 1, "accepted": true, "reason": "matched", "confirmedTop": 25 },
-    { "top": 50, "direction": 1, "accepted": true, "reason": "matched", "confirmedTop": 50 },
-    { "top": 25, "direction": -1, "accepted": true, "reason": "matched", "confirmedTop": 25 },
-    { "top": 0, "direction": -1, "accepted": true, "reason": "matched", "confirmedTop": 0 }
+    {
+      "top": 0,
+      "direction": 0,
+      "accepted": true,
+      "reason": "first-frame",
+      "confirmedTop": 0
+    },
+    {
+      "top": 25,
+      "direction": 1,
+      "accepted": true,
+      "reason": "matched",
+      "confirmedTop": 25
+    },
+    {
+      "top": 50,
+      "direction": 1,
+      "accepted": true,
+      "reason": "matched",
+      "confirmedTop": 50
+    },
+    {
+      "top": 25,
+      "direction": -1,
+      "accepted": true,
+      "reason": "matched",
+      "confirmedTop": 25
+    },
+    {
+      "top": 0,
+      "direction": -1,
+      "accepted": true,
+      "reason": "matched",
+      "confirmedTop": 0
+    }
   ]
 }

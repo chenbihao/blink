@@ -3,80 +3,80 @@
    2026-07-11 token 替换 */
 
 .btn {
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md);
-  padding: var(--space-sm) var(--space-lg);
-  font-size: var(--text-md);
-  cursor: pointer;
-  transition: background var(--transition-fast);
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--text-md);
+    cursor: pointer;
+    transition: background var(--transition-fast);
 }
 
 .btn:hover {
-  background: var(--surface-2);
+    background: var(--surface-2);
 }
 
 .btn-primary {
-  background: var(--accent);
-  color: var(--bg);
-  border: none;
-  border-radius: var(--radius-md);
-  padding: var(--space-sm) 14px;
-  font-size: var(--text-md);
-  cursor: pointer;
-  transition: background var(--transition-fast);
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: var(--radius-md);
+    padding: var(--space-sm) 14px;
+    font-size: var(--text-md);
+    cursor: pointer;
+    transition: background var(--transition-fast);
 }
 
 .btn-primary:hover {
-  filter: brightness(1.1);
+    filter: brightness(1.1);
 }
 
 .btn-danger {
-  background: var(--red-bg);
-  color: var(--red);
-  border: 1px solid var(--red-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-sm) var(--space-lg);
-  font-size: var(--text-md);
-  cursor: pointer;
-  transition: background var(--transition-fast);
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid var(--red-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--text-md);
+    cursor: pointer;
+    transition: background var(--transition-fast);
 }
 
 .btn-danger:hover {
-  background: var(--red-border);
+    background: var(--red-border);
 }
 
 .btn-small {
-  background: var(--surface);
-  color: var(--text-sub);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md);
-  padding: var(--space-sm) var(--space-lg);
-  font-size: var(--text-base);
-  cursor: pointer;
-  transition: all var(--transition-base);
+    background: var(--surface);
+    color: var(--text-sub);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--text-base);
+    cursor: pointer;
+    transition: all var(--transition-base);
 }
 
 .btn-small:hover {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 /* btn-small + btn-danger 组合：保持小尺寸 + 警告色
    双类选择器（0,2,0）优先级高于单类 .btn-small / .btn-danger（0,1,0），
    确保尺寸走 btn-small、配色走 btn-danger。 */
 .btn-small.btn-danger {
-  background: var(--red-bg);
-  color: var(--red);
-  border: 1px solid var(--red-border);
-  font-size: var(--text-base);
-  transition: all var(--transition-base);
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid var(--red-border);
+    font-size: var(--text-base);
+    transition: all var(--transition-base);
 }
 
 .btn-small.btn-danger:hover {
-  background: var(--red-border);
-  color: var(--red);
+    background: var(--red-border);
+    color: var(--red);
 }
 
 /* btn-sm：紧凑型按钮变体（与 .btn 同色系，仅缩小尺寸）
@@ -85,18 +85,19 @@
    重复定义的单类 .btn（0,1,0）——后者后加载会覆盖单类 .btn-sm 的尺寸。
    inline-flex + justify-center 保证纯图标 / 纯文字 / 图标+文字按钮等高居中。 */
 .btn.btn-sm {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 4px 10px;
-  font-size: var(--text-sm, 13px);
-  line-height: 1.4;
-  min-height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-size: var(--text-sm, 13px);
+    line-height: 1.4;
+    min-height: 26px;
 }
+
 .btn.btn-sm .icon {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 /* btn-link：行内文字链接按钮（跨页跳转 / "查看能力目录"等）。
@@ -104,25 +105,25 @@
    全设置页的页内跳转统一走这一种形态（0.21.10）。
    尺寸跟随所在容器 font-size，图标按 0.9em 缩放。 */
 .btn-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: none;
-  border: none;
-  padding: 2px 0;
-  color: var(--accent);
-  font-size: inherit;
-  font-family: inherit;
-  cursor: pointer;
-  text-decoration: none;
-  transition: opacity var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    color: var(--accent);
+    font-size: inherit;
+    font-family: inherit;
+    cursor: pointer;
+    text-decoration: none;
+    transition: opacity var(--transition-fast);
 }
 
 .btn-link:hover {
-  text-decoration: underline;
+    text-decoration: underline;
 }
 
 .btn-link .icon {
-  width: 0.9em;
-  height: 0.9em;
+    width: 0.9em;
+    height: 0.9em;
 }

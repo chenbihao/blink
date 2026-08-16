@@ -54,11 +54,11 @@ export const MAX_ZOOM = 8;
  * @returns {{ baseCssW: number, baseCssH: number }}
  */
 export function baseCssSize(sourcePixelW, sourcePixelH, sourceDpr) {
-  const dpr = Math.max(1, sourceDpr);
-  return {
-    baseCssW: sourcePixelW / dpr,
-    baseCssH: sourcePixelH / dpr,
-  };
+    const dpr = Math.max(1, sourceDpr);
+    return {
+        baseCssW: sourcePixelW / dpr,
+        baseCssH: sourcePixelH / dpr,
+    };
 }
 
 /**
@@ -74,13 +74,13 @@ export function baseCssSize(sourcePixelW, sourcePixelH, sourceDpr) {
  * @returns {{ physW: number, physH: number }}
  */
 export function displayPhysicalSize(baseCssW, baseCssH, zoom, targetDpr) {
-  const dpr = Math.max(1, targetDpr);
-  const cssW = baseCssW * zoom;
-  const cssH = baseCssH * zoom;
-  return {
-    physW: Math.max(1, Math.round(cssW * dpr)),
-    physH: Math.max(1, Math.round(cssH * dpr)),
-  };
+    const dpr = Math.max(1, targetDpr);
+    const cssW = baseCssW * zoom;
+    const cssH = baseCssH * zoom;
+    return {
+        physW: Math.max(1, Math.round(cssW * dpr)),
+        physH: Math.max(1, Math.round(cssH * dpr)),
+    };
 }
 
 /**
@@ -91,8 +91,8 @@ export function displayPhysicalSize(baseCssW, baseCssH, zoom, targetDpr) {
  * @returns {number}
  */
 export function padPhysical(padCss, targetDpr) {
-  const dpr = Math.max(1, targetDpr);
-  return Math.round(padCss * dpr);
+    const dpr = Math.max(1, targetDpr);
+    return Math.round(padCss * dpr);
 }
 
 /**
@@ -113,12 +113,12 @@ export function padPhysical(padCss, targetDpr) {
  * @returns {{ winX: number, winY: number, winW: number, winH: number }}
  */
 export function physicalWindowRect(imageScreenX, imageScreenY, displayPhysW, displayPhysH, padPhys) {
-  return {
-    winX: Math.round(imageScreenX - padPhys),
-    winY: Math.round(imageScreenY - padPhys),
-    winW: Math.max(1, displayPhysW + 2 * padPhys),
-    winH: Math.max(1, displayPhysH + 2 * padPhys),
-  };
+    return {
+        winX: Math.round(imageScreenX - padPhys),
+        winY: Math.round(imageScreenY - padPhys),
+        winW: Math.max(1, displayPhysW + 2 * padPhys),
+        winH: Math.max(1, displayPhysH + 2 * padPhys),
+    };
 }
 
 /**
@@ -130,10 +130,10 @@ export function physicalWindowRect(imageScreenX, imageScreenY, displayPhysW, dis
  * @returns {{ winX: number, winY: number, winW: number, winH: number, physW: number, physH: number, padPhys: number }}
  */
 export function computeWindowRect(state, targetDpr, padCss = PIN_PAD_CSS) {
-  const { physW, physH } = displayPhysicalSize(state.baseCssW, state.baseCssH, state.zoom, targetDpr);
-  const padPhys = padPhysical(padCss, targetDpr);
-  const rect = physicalWindowRect(state.imageScreenX, state.imageScreenY, physW, physH, padPhys);
-  return { ...rect, physW, physH, padPhys };
+    const {physW, physH} = displayPhysicalSize(state.baseCssW, state.baseCssH, state.zoom, targetDpr);
+    const padPhys = padPhysical(padCss, targetDpr);
+    const rect = physicalWindowRect(state.imageScreenX, state.imageScreenY, physW, physH, padPhys);
+    return {...rect, physW, physH, padPhys};
 }
 
 // ── 缩放锚点 ──────────────────────────────────────────────────────────────
@@ -162,19 +162,19 @@ export function computeWindowRect(state, targetDpr, padCss = PIN_PAD_CSS) {
  * @returns {{ newImageX: number, newImageY: number }}
  */
 export function zoomAroundPointer(
-  pointerScreenX, pointerScreenY,
-  oldImageX, oldImageY,
-  oldPhysW, oldPhysH,
-  newPhysW, newPhysH,
+    pointerScreenX, pointerScreenY,
+    oldImageX, oldImageY,
+    oldPhysW, oldPhysH,
+    newPhysW, newPhysH,
 ) {
-  const safeOldW = Math.max(1, oldPhysW);
-  const safeOldH = Math.max(1, oldPhysH);
-  const anchorX = clamp01((pointerScreenX - oldImageX) / safeOldW);
-  const anchorY = clamp01((pointerScreenY - oldImageY) / safeOldH);
-  return {
-    newImageX: Math.round(pointerScreenX - anchorX * newPhysW),
-    newImageY: Math.round(pointerScreenY - anchorY * newPhysH),
-  };
+    const safeOldW = Math.max(1, oldPhysW);
+    const safeOldH = Math.max(1, oldPhysH);
+    const anchorX = clamp01((pointerScreenX - oldImageX) / safeOldW);
+    const anchorY = clamp01((pointerScreenY - oldImageY) / safeOldH);
+    return {
+        newImageX: Math.round(pointerScreenX - anchorX * newPhysW),
+        newImageY: Math.round(pointerScreenY - anchorY * newPhysH),
+    };
 }
 
 /**
@@ -189,10 +189,10 @@ export function zoomAroundPointer(
  * @returns {{ newImageX: number, newImageY: number }}
  */
 export function zoomAroundCenter(imageCenterX, imageCenterY, newPhysW, newPhysH) {
-  return {
-    newImageX: Math.round(imageCenterX - newPhysW / 2),
-    newImageY: Math.round(imageCenterY - newPhysH / 2),
-  };
+    return {
+        newImageX: Math.round(imageCenterX - newPhysW / 2),
+        newImageY: Math.round(imageCenterY - newPhysH / 2),
+    };
 }
 
 // ── DPI reconcile ─────────────────────────────────────────────────────────
@@ -216,22 +216,22 @@ export function zoomAroundCenter(imageCenterX, imageCenterY, newPhysW, newPhysH)
  * @returns {{ imageScreenX: number, imageScreenY: number, winX: number, winY: number, winW: number, winH: number, physW: number, physH: number, padPhys: number }}
  */
 export function reconcileDpi(state, newDpr, actualWinRect, padCss = PIN_PAD_CSS) {
-  const padPhys = padPhysical(padCss, newDpr);
-  // 从实际窗口位置反推图片位置
-  const imageScreenX = actualWinRect.winX + padPhys;
-  const imageScreenY = actualWinRect.winY + padPhys;
-  // 用新 DPR 重算物理尺寸（CSS 尺寸不变）
-  const { physW, physH } = displayPhysicalSize(state.baseCssW, state.baseCssH, state.zoom, newDpr);
-  // 算最终窗口矩形
-  const rect = physicalWindowRect(imageScreenX, imageScreenY, physW, physH, padPhys);
-  return {
-    imageScreenX,
-    imageScreenY,
-    ...rect,
-    physW,
-    physH,
-    padPhys,
-  };
+    const padPhys = padPhysical(padCss, newDpr);
+    // 从实际窗口位置反推图片位置
+    const imageScreenX = actualWinRect.winX + padPhys;
+    const imageScreenY = actualWinRect.winY + padPhys;
+    // 用新 DPR 重算物理尺寸（CSS 尺寸不变）
+    const {physW, physH} = displayPhysicalSize(state.baseCssW, state.baseCssH, state.zoom, newDpr);
+    // 算最终窗口矩形
+    const rect = physicalWindowRect(imageScreenX, imageScreenY, physW, physH, padPhys);
+    return {
+        imageScreenX,
+        imageScreenY,
+        ...rect,
+        physW,
+        physH,
+        padPhys,
+    };
 }
 
 /**
@@ -243,23 +243,23 @@ export function reconcileDpi(state, newDpr, actualWinRect, padCss = PIN_PAD_CSS)
  * @returns {{ imageScreenX: number, imageScreenY: number }}
  */
 export function imageScreenFromWinRect(winRect, targetDpr, padCss = PIN_PAD_CSS) {
-  const padPhys = padPhysical(padCss, targetDpr);
-  return {
-    imageScreenX: winRect.winX + padPhys,
-    imageScreenY: winRect.winY + padPhys,
-  };
+    const padPhys = padPhysical(padCss, targetDpr);
+    return {
+        imageScreenX: winRect.winX + padPhys,
+        imageScreenY: winRect.winY + padPhys,
+    };
 }
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────
 
 /** clamp 到 [0, 1]。 */
 function clamp01(v) {
-  return Math.max(0, Math.min(1, v));
+    return Math.max(0, Math.min(1, v));
 }
 
 /** clamp zoom 到合法范围。 */
 export function clampZoom(zoom) {
-  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+    return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
 }
 
 /**
@@ -272,8 +272,8 @@ export function clampZoom(zoom) {
  * @returns {{ cx: number, cy: number }}
  */
 export function imageCenter(imageScreenX, imageScreenY, physW, physH) {
-  return {
-    cx: imageScreenX + physW / 2,
-    cy: imageScreenY + physH / 2,
-  };
+    return {
+        cx: imageScreenX + physW / 2,
+        cy: imageScreenY + physH / 2,
+    };
 }

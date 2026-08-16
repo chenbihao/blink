@@ -3,17 +3,17 @@
  * 封装 Tauri invoke 调用，提供统一的错误处理
  */
 
-import { invoke } from "../../shared/tauri.js";
-import { setCurrentConfig } from "./state.js";
+import {invoke} from "../../shared/tauri.js";
+import {setCurrentConfig} from "./state.js";
 
 /**
  * 加载配置并更新共享状态
  * @returns {Promise<Object>} 配置对象
  */
 export async function loadConfig() {
-  const cfg = await invoke("get_config");
-  setCurrentConfig(cfg);
-  return cfg;
+    const cfg = await invoke("get_config");
+    setCurrentConfig(cfg);
+    return cfg;
 }
 
 /**
@@ -22,7 +22,7 @@ export async function loadConfig() {
  * @param {*} value - 配置值
  */
 export async function saveConfigToBackend(key, value) {
-  await invoke("set_config", { key, value });
+    await invoke("set_config", {key, value});
 }
 
 /**
@@ -31,7 +31,7 @@ export async function saveConfigToBackend(key, value) {
  * @returns {Promise<Object>} 引擎配置
  */
 export async function getEngineConfig(engineId) {
-  return await invoke("get_engine_config", { engineId });
+    return await invoke("get_engine_config", {engineId});
 }
 
 /**
@@ -39,7 +39,7 @@ export async function getEngineConfig(engineId) {
  * @returns {Promise<Object>} 上下文配置
  */
 export async function getContextConfig() {
-  return await invoke("get_context_config");
+    return await invoke("get_context_config");
 }
 
 /**
@@ -47,7 +47,7 @@ export async function getContextConfig() {
  * @returns {Promise<Object>} 开始菜单配置
  */
 export async function getStartMenuConfig() {
-  return await invoke("get_start_menu_config");
+    return await invoke("get_start_menu_config");
 }
 
 /**
@@ -55,7 +55,7 @@ export async function getStartMenuConfig() {
  * @returns {Promise<Object>} 计算器配置
  */
 export async function getCalcConfig() {
-  return await invoke("get_calc_config");
+    return await invoke("get_calc_config");
 }
 
 /**
@@ -63,7 +63,7 @@ export async function getCalcConfig() {
  * @returns {Promise<Array>} 内置动作列表
  */
 export async function listBuiltinActions() {
-  return await invoke("list_builtin_actions");
+    return await invoke("list_builtin_actions");
 }
 
 /**
@@ -71,12 +71,12 @@ export async function listBuiltinActions() {
  * @returns {Promise<Array>} 上下文绑定列表
  */
 export async function listContextBindings() {
-  return await invoke("list_context_bindings");
+    return await invoke("list_context_bindings");
 }
 
 /**
  * 隐藏设置窗口
  */
 export async function hideSettingsWindow() {
-  await invoke("hide_settings_window");
+    await invoke("hide_settings_window");
 }

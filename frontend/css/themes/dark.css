@@ -3,27 +3,27 @@
 
 :root,
 [data-theme="dark"] {
-  --bg: #1e1e2e;
-  --bg-sidebar: #181825;
-  --bg-deep: #11111b;
-  --surface: #313244;
-  --surface-2: #45475a;
-  --text: #cdd6f4;
-  --text-sub: #a6adc8;
-  --text-dim: #6c7086;
-  --text-faint: #585b70;
-  --accent: #89b4fa;
-  --accent-bg: rgba(137, 180, 250, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #45273a;
-  --red-border: #6c3a5a;
-  --green-bg: #2a3f4e;
-  --warning: #fab387;       /* Catppuccin Mocha peach -- 警告态（迁移失败等） */
-  --warning-bg: #3a2e3a;
-  --warning-border: #5a4858;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+    --bg: #1e1e2e;
+    --bg-sidebar: #181825;
+    --bg-deep: #11111b;
+    --surface: #313244;
+    --surface-2: #45475a;
+    --text: #cdd6f4;
+    --text-sub: #a6adc8;
+    --text-dim: #6c7086;
+    --text-faint: #585b70;
+    --accent: #89b4fa;
+    --accent-bg: rgba(137, 180, 250, 0.15);
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --red-bg: #45273a;
+    --red-border: #6c3a5a;
+    --green-bg: #2a3f4e;
+    --warning: #fab387; /* Catppuccin Mocha peach -- 警告态（迁移失败等） */
+    --warning-bg: #3a2e3a;
+    --warning-border: #5a4858;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
+    --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }

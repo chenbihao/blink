@@ -3,86 +3,90 @@
 /* ── 消息 bubble ───────────────────────────────── */
 
 .chat-msg {
-  max-width: 90%;
-  padding: var(--space-md) var(--space-lg);
-  border-radius: 16px;
-  line-height: 1.65;
-  font-size: 15px;
-  word-break: break-word;
-  user-select: text;
-  -webkit-user-select: text;
+    max-width: 90%;
+    padding: var(--space-md) var(--space-lg);
+    border-radius: 16px;
+    line-height: 1.65;
+    font-size: 15px;
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
 }
 
 .chat-msg-user {
-  align-self: flex-end;
-  position: relative; /* 编辑按钮绝对定位的上下文（0.12.6 修复：缺少此属性导致按钮漂移到窗口右上角） */
-  background: var(--accent);
-  color: var(--on-accent);
-  border-bottom-right-radius: 4px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    align-self: flex-end;
+    position: relative; /* 编辑按钮绝对定位的上下文（0.12.6 修复：缺少此属性导致按钮漂移到窗口右上角） */
+    background: var(--accent);
+    color: var(--on-accent);
+    border-bottom-right-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .chat-msg-assistant {
-  align-self: flex-start;
-  position: relative; /* 复制按钮绝对定位的上下文（0.12.2 §4.6） */
-  background: var(--bg); /* 0.12.7：与 tool-card 互换，tool 卡片更醒目 */
-  border: 1px solid var(--surface);
-  color: var(--text);
-  border-bottom-left-radius: 4px;
-  max-width: 100%;
+    align-self: flex-start;
+    position: relative; /* 复制按钮绝对定位的上下文（0.12.2 §4.6） */
+    background: var(--bg); /* 0.12.7：与 tool-card 互换，tool 卡片更醒目 */
+    border: 1px solid var(--surface);
+    color: var(--text);
+    border-bottom-left-radius: 4px;
+    max-width: 100%;
 }
 
 /* streaming 态：左侧脉冲条，柔和提示「正在生成」 */
 .chat-msg-assistant.streaming {
-  border-left: 2px solid var(--accent);
-  animation: chat-streaming-pulse 1.8s ease-in-out infinite;
+    border-left: 2px solid var(--accent);
+    animation: chat-streaming-pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes chat-streaming-pulse {
-  0%, 100% { border-left-color: var(--accent); }
-  50% { border-left-color: var(--surface-2); }
+    0%, 100% {
+        border-left-color: var(--accent);
+    }
+    50% {
+        border-left-color: var(--surface-2);
+    }
 }
 
 /* 等待响应态：typing 指示器（三点跳动） */
 .chat-msg-assistant.waiting {
-  border-left: 2px solid var(--surface-2);
-  animation: none;
-  padding: var(--space-md) var(--space-lg);
+    border-left: 2px solid var(--surface-2);
+    animation: none;
+    padding: var(--space-md) var(--space-lg);
 }
 
 .chat-typing {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 20px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 20px;
 }
 
 /* 0.12.9：text-faint → text-dim 提升对比度 */
 .chat-typing span {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  animation: chat-typing-bounce 1.2s ease-in-out infinite;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    animation: chat-typing-bounce 1.2s ease-in-out infinite;
 }
 
 .chat-typing span:nth-child(2) {
-  animation-delay: 0.15s;
+    animation-delay: 0.15s;
 }
 
 .chat-typing span:nth-child(3) {
-  animation-delay: 0.3s;
+    animation-delay: 0.3s;
 }
 
 @keyframes chat-typing-bounce {
-  0%, 60%, 100% {
-    transform: translateY(0);
-    opacity: 0.5;
-  }
-  30% {
-    transform: translateY(-5px);
-    opacity: 1;
-  }
+    0%, 60%, 100% {
+        transform: translateY(0);
+        opacity: 0.5;
+    }
+    30% {
+        transform: translateY(-5px);
+        opacity: 1;
+    }
 }
 
 /* ── Markdown 渲染 ─────────────────────────────── */
@@ -91,49 +95,49 @@
 .chat-msg-assistant i,
 .chat-msg-user em,
 .chat-msg-user i {
-  font-style: normal;
+    font-style: normal;
 }
 
 .chat-msg-assistant p {
-  margin: 0 0 8px;
+    margin: 0 0 8px;
 }
 
 .chat-msg-assistant p:last-child {
-  margin-bottom: 0;
+    margin-bottom: 0;
 }
 
 .chat-msg-assistant ul,
 .chat-msg-assistant ol {
-  margin: 4px 0;
-  padding-left: 20px;
+    margin: 4px 0;
+    padding-left: 20px;
 }
 
 .chat-msg-assistant li {
-  margin: 2px 0;
+    margin: 2px 0;
 }
 
 .chat-msg-assistant code {
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--surface-2);
-  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
-  font-size: 14px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+    font-size: 14px;
 }
 
 .chat-msg-assistant pre {
-  position: relative; /* 代码块复制按钮绝对定位的上下文（0.12.2 §4.6） */
-  margin: 8px 0;
-  padding: var(--space-md);
-  border-radius: 8px;
-  background: var(--bg);
-  overflow-x: auto;
+    position: relative; /* 代码块复制按钮绝对定位的上下文（0.12.2 §4.6） */
+    margin: 8px 0;
+    padding: var(--space-md);
+    border-radius: 8px;
+    background: var(--bg);
+    overflow-x: auto;
 }
 
 .chat-msg-assistant pre code {
-  padding: 0;
-  background: transparent;
-  font-size: 14px;
-  line-height: 1.5;
+    padding: 0;
+    background: transparent;
+    font-size: 14px;
+    line-height: 1.5;
 }
 
 /* ── 代码块语法高亮主题（0.12.5 §5.7）──────────────────────────────────
@@ -143,178 +147,212 @@
 /* 暗色主题（Mocha，默认） */
 :root .hljs,
 [data-theme="dark"] .hljs {
-  color: #cdd6f4;
+    color: #cdd6f4;
 }
+
 :root .hljs-keyword,
 [data-theme="dark"] .hljs-keyword,
 :root .hljs-selector-tag,
 [data-theme="dark"] .hljs-selector-tag,
 :root .hljs-doctag,
 [data-theme="dark"] .hljs-doctag {
-  color: #cba6f7;
-  font-style: normal;
+    color: #cba6f7;
+    font-style: normal;
 }
+
 :root .hljs-built_in,
 [data-theme="dark"] .hljs-built_in,
 :root .hljs-operator,
 [data-theme="dark"] .hljs-operator {
-  color: #89dceb;
+    color: #89dceb;
 }
+
 :root .hljs-type,
 [data-theme="dark"] .hljs-type,
 :root .hljs-class .hljs-title,
 [data-theme="dark"] .hljs-class .hljs-title {
-  color: #eba0ac;
+    color: #eba0ac;
 }
+
 :root .hljs-number,
 [data-theme="dark"] .hljs-number,
 :root .hljs-literal,
 [data-theme="dark"] .hljs-literal {
-  color: #fab387;
+    color: #fab387;
 }
+
 :root .hljs-string,
 [data-theme="dark"] .hljs-string,
 :root .hljs-attr,
 [data-theme="dark"] .hljs-attr,
 :root .hljs-attribute,
 [data-theme="dark"] .hljs-attribute {
-  color: #a6e3a1;
+    color: #a6e3a1;
 }
+
 :root .hljs-property,
 [data-theme="dark"] .hljs-property,
 :root .hljs-meta,
 [data-theme="dark"] .hljs-meta {
-  color: #89b4fa;
+    color: #89b4fa;
 }
+
 :root .hljs-variable,
 [data-theme="dark"] .hljs-variable,
 :root .hljs-template-variable,
 [data-theme="dark"] .hljs-template-variable {
-  color: #f38ba8;
+    color: #f38ba8;
 }
+
 :root .hljs-function .hljs-title,
 [data-theme="dark"] .hljs-function .hljs-title,
 :root .hljs-title.function_,
 [data-theme="dark"] .hljs-title.function_ {
-  color: #89b4fa;
+    color: #89b4fa;
 }
+
 :root .hljs-params,
 [data-theme="dark"] .hljs-params,
 :root .hljs-subst,
 [data-theme="dark"] .hljs-subst {
-  color: #cdd6f4;
+    color: #cdd6f4;
 }
+
 :root .hljs-comment,
 [data-theme="dark"] .hljs-comment {
-  color: #6c7086;
-  font-style: normal;
+    color: #6c7086;
+    font-style: normal;
 }
+
 :root .hljs-symbol,
 [data-theme="dark"] .hljs-symbol,
 :root .hljs-bullet,
 [data-theme="dark"] .hljs-bullet {
-  color: #f2cdcd;
+    color: #f2cdcd;
 }
+
 :root .hljs-regexp,
 [data-theme="dark"] .hljs-regexp {
-  color: #f5c2e7;
+    color: #f5c2e7;
 }
+
 :root .hljs-tag,
 [data-theme="dark"] .hljs-tag,
 :root .hljs-name,
 [data-theme="dark"] .hljs-name {
-  color: #f38ba8;
+    color: #f38ba8;
 }
+
 :root .hljs-deletion,
 [data-theme="dark"] .hljs-deletion {
-  color: #f38ba8;
-  background: rgba(243, 139, 168, 0.15);
+    color: #f38ba8;
+    background: rgba(243, 139, 168, 0.15);
 }
+
 :root .hljs-addition,
 [data-theme="dark"] .hljs-addition {
-  color: #a6e3a1;
-  background: rgba(166, 227, 161, 0.15);
+    color: #a6e3a1;
+    background: rgba(166, 227, 161, 0.15);
 }
+
 :root .hljs-emphasis,
 [data-theme="dark"] .hljs-emphasis {
-  font-style: normal;
+    font-style: normal;
 }
+
 :root .hljs-strong,
 [data-theme="dark"] .hljs-strong {
-  font-weight: 700;
+    font-weight: 700;
 }
 
 /* 亮色主题（Latte） */
 [data-theme="light"] .hljs {
-  color: #4c4f69;
+    color: #4c4f69;
 }
+
 [data-theme="light"] .hljs-keyword,
 [data-theme="light"] .hljs-selector-tag,
 [data-theme="light"] .hljs-doctag {
-  color: #8839ef;
-  font-style: normal;
+    color: #8839ef;
+    font-style: normal;
 }
+
 [data-theme="light"] .hljs-built_in,
 [data-theme="light"] .hljs-operator {
-  color: #04a5e5;
+    color: #04a5e5;
 }
+
 [data-theme="light"] .hljs-type,
 [data-theme="light"] .hljs-class .hljs-title {
-  color: #e64553;
+    color: #e64553;
 }
+
 [data-theme="light"] .hljs-number,
 [data-theme="light"] .hljs-literal {
-  color: #fe640b;
+    color: #fe640b;
 }
+
 [data-theme="light"] .hljs-string,
 [data-theme="light"] .hljs-attr,
 [data-theme="light"] .hljs-attribute {
-  color: #40a02b;
+    color: #40a02b;
 }
+
 [data-theme="light"] .hljs-property,
 [data-theme="light"] .hljs-meta {
-  color: #1e66f5;
+    color: #1e66f5;
 }
+
 [data-theme="light"] .hljs-variable,
 [data-theme="light"] .hljs-template-variable {
-  color: #d20f39;
+    color: #d20f39;
 }
+
 [data-theme="light"] .hljs-function .hljs-title,
 [data-theme="light"] .hljs-title.function_ {
-  color: #1e66f5;
+    color: #1e66f5;
 }
+
 [data-theme="light"] .hljs-params,
 [data-theme="light"] .hljs-subst {
-  color: #4c4f69;
+    color: #4c4f69;
 }
+
 [data-theme="light"] .hljs-comment {
-  color: #9ca0b0;
-  font-style: normal;
+    color: #9ca0b0;
+    font-style: normal;
 }
+
 [data-theme="light"] .hljs-symbol,
 [data-theme="light"] .hljs-bullet {
-  color: #dd7878;
+    color: #dd7878;
 }
+
 [data-theme="light"] .hljs-regexp {
-  color: #ea76cb;
+    color: #ea76cb;
 }
+
 [data-theme="light"] .hljs-tag,
 [data-theme="light"] .hljs-name {
-  color: #d20f39;
+    color: #d20f39;
 }
+
 [data-theme="light"] .hljs-deletion {
-  color: #d20f39;
-  background: rgba(210, 15, 57, 0.12);
+    color: #d20f39;
+    background: rgba(210, 15, 57, 0.12);
 }
+
 [data-theme="light"] .hljs-addition {
-  color: #40a02b;
-  background: rgba(64, 160, 43, 0.12);
+    color: #40a02b;
+    background: rgba(64, 160, 43, 0.12);
 }
+
 [data-theme="light"] .hljs-emphasis {
-  font-style: normal;
+    font-style: normal;
 }
+
 [data-theme="light"] .hljs-strong {
-  font-weight: 700;
+    font-weight: 700;
 }
 
 /* ── hover 操作行（0.12.6：绝对定位浮在消息下方外侧，不占文档流空间） ──── */
@@ -323,109 +361,109 @@
    改用 visibility:hidden + top:100%。opacity+transform 会为每条消息创建独立
    合成层，在分数 DPI（125%/150%）下产生从左上到右下的锯齿像素线。 */
 .chat-msg-actions {
-  position: absolute;
-  top: 100%; /* 替代 bottom:0 + transform:translateY(100%)，无合成层提升 */
-  z-index: 10; /* 置顶：避免被下方消息气泡盖住（DOM 顺序在后的元素默认 paint 在上层） */
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  visibility: hidden; /* 替代 opacity:0，不触发合成层提升 */
-  pointer-events: none; /* 不可见时不拦截鼠标，避免误触 */
-  transition: visibility 0s linear 0.2s; /* 延迟隐藏，配合 animation 淡入 */
-  user-select: none;
-  /* 透明桥接区：从气泡底部到按钮行的 gap，鼠标经过时不会离开 hover 区域 */
-  padding-top: 6px;
+    position: absolute;
+    top: 100%; /* 替代 bottom:0 + transform:translateY(100%)，无合成层提升 */
+    z-index: 10; /* 置顶：避免被下方消息气泡盖住（DOM 顺序在后的元素默认 paint 在上层） */
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    visibility: hidden; /* 替代 opacity:0，不触发合成层提升 */
+    pointer-events: none; /* 不可见时不拦截鼠标，避免误触 */
+    transition: visibility 0s linear 0.2s; /* 延迟隐藏，配合 animation 淡入 */
+    user-select: none;
+    /* 透明桥接区：从气泡底部到按钮行的 gap，鼠标经过时不会离开 hover 区域 */
+    padding-top: 6px;
 }
 
 /* AI 消息：操作行左对齐（与气泡同侧） */
 .chat-msg-assistant .chat-msg-actions {
-  left: 2px;
-  justify-content: flex-start;
+    left: 2px;
+    justify-content: flex-start;
 }
 
 /* 用户消息：操作行右对齐（与气泡同侧） */
 .chat-msg-user .chat-msg-actions {
-  right: 2px;
-  justify-content: flex-end;
+    right: 2px;
+    justify-content: flex-end;
 }
 
 .chat-msg-assistant:hover .chat-msg-actions,
 .chat-msg-user:hover .chat-msg-actions {
-  visibility: visible;
-  pointer-events: auto; /* 可见时恢复交互 */
-  transition: visibility 0s; /* 立即显示，配合 animation 淡入 */
-  animation: blink-fade-in 0.2s ease-out;
+    visibility: visible;
+    pointer-events: auto; /* 可见时恢复交互 */
+    transition: visibility 0s; /* 立即显示，配合 animation 淡入 */
+    animation: blink-fade-in 0.2s ease-out;
 }
 
 /* 图标按钮基础样式 */
 /* 0.12.7：加实底背景，避免悬浮时与下方文本混淆 */
 .chat-action-btn {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
 }
 
 .chat-action-btn svg {
-  width: 15px;
-  height: 15px;
+    width: 15px;
+    height: 15px;
 }
 
 .chat-action-btn:hover {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 /* 用户消息的按钮：与 AI 侧统一使用 --bg 实底 */
 .chat-msg-user .chat-action-btn {
-  background: var(--bg);
-  color: var(--text-faint);
+    background: var(--bg);
+    color: var(--text-faint);
 }
 
 .chat-msg-user .chat-action-btn:hover {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 /* 成功反馈态 */
 .chat-action-btn-done {
-  color: var(--green) !important;
+    color: var(--green) !important;
 }
 
 /* 代码块复制按钮（保持旧风格，绝对定位在代码块右上角） */
 /* 0.12.8：opacity:0 → visibility:hidden，避免合成层提升导致锯齿像素线 */
 .chat-code-copy {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  visibility: hidden;
-  padding: 2px 8px;
-  border: 1px solid var(--surface-2);
-  border-radius: 4px;
-  background: var(--bg-deep);
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, visibility 0s linear 0.15s;
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    visibility: hidden;
+    padding: 2px 8px;
+    border: 1px solid var(--surface-2);
+    border-radius: 4px;
+    background: var(--bg-deep);
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, visibility 0s linear 0.15s;
 }
 
 /* 0.12.8：补充 .chat-tool-detail pre 的 hover 选择器（原仅 .chat-msg-assistant pre） */
 .chat-msg-assistant pre:hover .chat-code-copy,
 .chat-tool-detail pre:hover .chat-code-copy {
-  visibility: visible;
-  transition: background 0.15s, color 0.15s, visibility 0s;
-  animation: blink-fade-in 0.15s ease-out;
+    visibility: visible;
+    transition: background 0.15s, color 0.15s, visibility 0s;
+    animation: blink-fade-in 0.15s ease-out;
 }
 
 .chat-code-copy:hover {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 /* ── 原地编辑态 ────────────────────────────────────────────────
@@ -436,100 +474,100 @@
 
 /* 编辑态：隐藏 hover 操作行 */
 .chat-msg-user.editing .chat-msg-actions {
-visibility: hidden !important;
-pointer-events: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
 }
 
 /* 编辑态 textarea：无缝融入泡泡 */
 .chat-edit-input {
-width: 100%;
-min-height: 1.5em;
-padding: 0;
-border: 0;
-background: transparent;
-color: inherit;
-font-family: inherit;
-font-size: inherit;
-line-height: inherit;
-resize: none;
-outline: none;
-box-sizing: border-box;
-appearance: none;
--webkit-appearance: none;
-overflow: hidden; /* 隐藏滚动条，靠 JS autoResize */
+    width: 100%;
+    min-height: 1.5em;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    resize: none;
+    outline: none;
+    box-sizing: border-box;
+    appearance: none;
+    -webkit-appearance: none;
+    overflow: hidden; /* 隐藏滚动条，靠 JS autoResize */
 }
 
 .chat-edit-input::placeholder {
-color: var(--on-accent);
-opacity: 0.5;
+    color: var(--on-accent);
+    opacity: 0.5;
 }
 
 /* 左侧外浮确认按钮 */
 .chat-edit-confirm {
-position: absolute;
-left: -38px;
-top: 50%;
-transform: translateY(-50%);
-display: grid;
-place-items: center;
-width: 28px;
-height: 28px;
-border: 0;
-border-radius: 50%;
-background: var(--green, #4caf50);
-color: #fff;
-cursor: pointer;
-opacity: 0;
-animation: blink-fade-in 0.15s ease-out 0.05s forwards;
-z-index: 10;
+    position: absolute;
+    left: -38px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--green, #4caf50);
+    color: #fff;
+    cursor: pointer;
+    opacity: 0;
+    animation: blink-fade-in 0.15s ease-out 0.05s forwards;
+    z-index: 10;
 }
 
 .chat-edit-confirm svg {
-width: 16px;
-height: 16px;
+    width: 16px;
+    height: 16px;
 }
 
 .chat-edit-confirm:hover {
-opacity: 0.85;
+    opacity: 0.85;
 }
 
 .chat-msg-assistant blockquote {
-  margin: 8px 0;
-  padding: var(--space-xs) var(--space-md);
-  border-left: 3px solid var(--accent);
-  color: var(--text-sub);
+    margin: 8px 0;
+    padding: var(--space-xs) var(--space-md);
+    border-left: 3px solid var(--accent);
+    color: var(--text-sub);
 }
 
 .chat-msg-assistant table {
-  border-collapse: collapse;
-  margin: 8px 0;
-  width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    width: 100%;
 }
 
 .chat-msg-assistant th,
 .chat-msg-assistant td {
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--surface-2);
-  text-align: left;
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--surface-2);
+    text-align: left;
 }
 
 .chat-msg-assistant th {
-  background: var(--surface);
-  font-weight: 600;
+    background: var(--surface);
+    font-weight: 600;
 }
 
 .chat-msg-assistant a {
-  color: var(--accent);
-  text-decoration: none;
+    color: var(--accent);
+    text-decoration: none;
 }
 
 .chat-msg-assistant a:hover {
-  text-decoration: underline;
+    text-decoration: underline;
 }
 
 .chat-msg-assistant hr {
-  border: 0;
-  border-top: 1px solid var(--surface-2);
-  margin: var(--space-md) 0;
+    border: 0;
+    border-top: 1px solid var(--surface-2);
+    margin: var(--space-md) 0;
 }
 

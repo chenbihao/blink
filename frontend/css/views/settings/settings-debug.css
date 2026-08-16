@@ -6,122 +6,122 @@
 /* ── 调试面板 ─────────────────────────────────────────────────────────────── */
 
 .debug-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
 }
 
 .debug-card {
-  background: var(--bg-sidebar);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-md);
-  padding: 16px;
-  text-align: center;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    text-align: center;
 }
 
 .debug-label {
-  font-size: 12px;
-  color: var(--text-sub);
-  margin-bottom: 8px;
+    font-size: 12px;
+    color: var(--text-sub);
+    margin-bottom: 8px;
 }
 
 .debug-value {
-  font-size: 24px;
-  font-weight: var(--weight-semibold);
-  font-family: ui-monospace, Consolas, monospace;
-  color: var(--green);
+    font-size: 24px;
+    font-weight: var(--weight-semibold);
+    font-family: ui-monospace, Consolas, monospace;
+    color: var(--green);
 }
 
 .debug-value.no-data {
-  font-size: 14px;
-  color: var(--text-faint);
-  font-weight: var(--weight-normal);
+    font-size: 14px;
+    color: var(--text-faint);
+    font-weight: var(--weight-normal);
 }
 
 .debug-value.error {
-  color: var(--red);
+    color: var(--red);
 }
 
 /* ── 性能统计 ─────────────────────────────────────────────────────────────── */
 
 /* 性能统计区 body（外层由 .section-label 承接分隔） */
 #debug .perf-section {
-  margin-top: 4px;
+    margin-top: 4px;
 }
 
 /* 子标题 h4（"慢查询日志"） */
 .perf-subsection-title {
-  font-size: 13px;
-  font-weight: var(--weight-semibold);
-  color: var(--text);
-  margin-top: 20px;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--surface);
+    font-size: 13px;
+    font-weight: var(--weight-semibold);
+    color: var(--text);
+    margin-top: 20px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--surface);
 }
 
 .perf-slow-list {
-  margin-bottom: 12px;
+    margin-bottom: 12px;
 }
 
 .perf-slow-title {
-  font-size: 12px;
-  font-weight: var(--weight-semibold);
-  color: var(--text-sub);
-  margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: var(--weight-semibold);
+    color: var(--text-sub);
+    margin-bottom: 6px;
 }
 
 .perf-slow-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 8px;
-  font-size: 12px;
-  border-bottom: 1px solid var(--surface);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 8px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--surface);
 }
 
 .perf-slow-item:last-child {
-  border-bottom: none;
+    border-bottom: none;
 }
 
 .perf-slow-cat {
-  font-size: 10px;
-  color: var(--text-faint);
-  background: var(--surface);
-  border-radius: var(--radius-sm);
-  padding: 1px 6px;
-  min-width: 50px;
-  text-align: center;
+    font-size: 10px;
+    color: var(--text-faint);
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+    min-width: 50px;
+    text-align: center;
 }
 
 .perf-slow-name {
-  flex: 1;
-  color: var(--text);
-  font-family: ui-monospace, Consolas, monospace;
+    flex: 1;
+    color: var(--text);
+    font-family: ui-monospace, Consolas, monospace;
 }
 
 .perf-slow-time {
-  color: var(--red);
-  font-weight: var(--weight-semibold);
-  font-family: ui-monospace, Consolas, monospace;
-  min-width: 60px;
-  text-align: right;
+    color: var(--red);
+    font-weight: var(--weight-semibold);
+    font-family: ui-monospace, Consolas, monospace;
+    min-width: 60px;
+    text-align: right;
 }
 
 .perf-slow-meta {
-  color: var(--text-faint);
-  font-size: 11px;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+    color: var(--text-faint);
+    font-size: 11px;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .perf-slow-empty {
-  font-size: 12px;
-  color: var(--text-faint);
-  padding: 8px;
+    font-size: 12px;
+    color: var(--text-faint);
+    padding: 8px;
 }
 
 /* ── 调试 Tab：日志区 ─────────────────────────────────────────────────────── */
@@ -129,38 +129,38 @@
 /* 日志设置区底部分割线：后面跟 section-label（性能统计区起点）时去掉，
    由 section-label 自身的 28px margin-top 承接分隔节奏。 */
 #debug .setting-row:has(+ .section-label) {
-  border-bottom: none;
+    border-bottom: none;
 }
 
 /* 工具栏：提示信息 + 操作按钮 */
 #debug .debug-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-  padding: 8px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    padding: 8px 0;
 }
 
 /* 操作按钮组 */
 #debug .debug-actions {
-  display: flex;
-  gap: 8px;
+    display: flex;
+    gap: 8px;
 }
 
 #debug .debug-actions .btn-small {
-  flex-shrink: 0;
+    flex-shrink: 0;
 }
 
 #debug .log-path-row {
-  align-items: flex-start;
-  min-height: auto; /* 纯文本行不需要 48px 统一高度 */
-  padding: var(--space-sm) 0;
+    align-items: flex-start;
+    min-height: auto; /* 纯文本行不需要 48px 统一高度 */
+    padding: var(--space-sm) 0;
 }
 
 #log-file-path {
-  flex: 1;
-  word-break: break-all;
-  font-size: 12px;
-  color: var(--text-sub);
-  line-height: var(--leading-relaxed);
+    flex: 1;
+    word-break: break-all;
+    font-size: 12px;
+    color: var(--text-sub);
+    line-height: var(--leading-relaxed);
 }

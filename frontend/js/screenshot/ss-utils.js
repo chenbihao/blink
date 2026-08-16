@@ -4,15 +4,15 @@
 
 /** 标准化矩形坐标：返回 {x, y, w, h}，w/h 非负 */
 export function norm(x1, y1, x2, y2) {
-  return {
-    x: Math.min(x1, x2), y: Math.min(y1, y2),
-    w: Math.abs(x2 - x1), h: Math.abs(y2 - y1),
-  };
+    return {
+        x: Math.min(x1, x2), y: Math.min(y1, y2),
+        w: Math.abs(x2 - x1), h: Math.abs(y2 - y1),
+    };
 }
 
 /** 点是否在矩形内 */
 export function pointInRect(px, py, rect) {
-  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+    return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
 }
 
 /**
@@ -24,14 +24,14 @@ export function pointInRect(px, py, rect) {
  * @param {string} tool — 当前标注工具（由调用方传入 annot.getTool()）
  */
 export function applySquareConstraint(sx, sy, ex, ey, tool) {
-  if (tool !== 'rect' && tool !== 'ellipse') return null;
-  const dx = ex - sx;
-  const dy = ey - sy;
-  const side = Math.max(Math.abs(dx), Math.abs(dy));
-  return {
-    x: sx + (dx >= 0 ? side : -side),
-    y: sy + (dy >= 0 ? side : -side),
-  };
+    if (tool !== 'rect' && tool !== 'ellipse') return null;
+    const dx = ex - sx;
+    const dy = ey - sy;
+    const side = Math.max(Math.abs(dx), Math.abs(dy));
+    return {
+        x: sx + (dx >= 0 ? side : -side),
+        y: sy + (dy >= 0 ? side : -side),
+    };
 }
 
 /**
@@ -49,19 +49,19 @@ export function applySquareConstraint(sx, sy, ex, ey, tool) {
  * @returns {{ min: number, max: number }}
  */
 export function computePanAxisBounds(imageSize, viewportSize, origin = 0, minVisible = 48) {
-  if (!Number.isFinite(imageSize) || !Number.isFinite(viewportSize) || imageSize <= 0 || viewportSize <= 0) {
-    return { min: origin, max: origin };
-  }
-  if (imageSize <= viewportSize) {
+    if (!Number.isFinite(imageSize) || !Number.isFinite(viewportSize) || imageSize <= 0 || viewportSize <= 0) {
+        return {min: origin, max: origin};
+    }
+    if (imageSize <= viewportSize) {
+        return {
+            min: origin,
+            max: origin + viewportSize - imageSize,
+        };
+    }
     return {
-      min: origin,
-      max: origin + viewportSize - imageSize,
+        min: origin + minVisible - imageSize,
+        max: origin + viewportSize - minVisible,
     };
-  }
-  return {
-    min: origin + minVisible - imageSize,
-    max: origin + viewportSize - minVisible,
-  };
 }
 
 /**
@@ -79,36 +79,36 @@ export function computePanAxisBounds(imageSize, viewportSize, origin = 0, minVis
  * @returns {{ left: number, top: number }}
  */
 export function computeFloatingPlacement({
-  anchorRect, visualWidth, visualHeight, monitorRect, margin = 8,
-  preferred = 'below-center',
-}) {
-  const centerX = anchorRect.x + anchorRect.w / 2;
-  const belowTop = anchorRect.y + anchorRect.h + margin;
-  const aboveTop = anchorRect.y - visualHeight - margin;
+                                             anchorRect, visualWidth, visualHeight, monitorRect, margin = 8,
+                                             preferred = 'below-center',
+                                         }) {
+    const centerX = anchorRect.x + anchorRect.w / 2;
+    const belowTop = anchorRect.y + anchorRect.h + margin;
+    const aboveTop = anchorRect.y - visualHeight - margin;
 
-  let top;
-  if (belowTop + visualHeight <= monitorRect.y + monitorRect.h - margin) {
-    top = belowTop;
-  } else if (aboveTop >= monitorRect.y + margin) {
-    top = aboveTop;
-  } else {
-    top = Math.max(
-      monitorRect.y + margin,
-      Math.min(anchorRect.y, monitorRect.y + monitorRect.h - visualHeight - margin),
+    let top;
+    if (belowTop + visualHeight <= monitorRect.y + monitorRect.h - margin) {
+        top = belowTop;
+    } else if (aboveTop >= monitorRect.y + margin) {
+        top = aboveTop;
+    } else {
+        top = Math.max(
+            monitorRect.y + margin,
+            Math.min(anchorRect.y, monitorRect.y + monitorRect.h - visualHeight - margin),
+        );
+    }
+
+    let left = centerX - visualWidth / 2;
+    left = Math.max(
+        monitorRect.x + margin,
+        Math.min(left, monitorRect.x + monitorRect.w - visualWidth - margin),
     );
-  }
+    top = Math.max(
+        monitorRect.y + margin,
+        Math.min(top, monitorRect.y + monitorRect.h - visualHeight - margin),
+    );
 
-  let left = centerX - visualWidth / 2;
-  left = Math.max(
-    monitorRect.x + margin,
-    Math.min(left, monitorRect.x + monitorRect.w - visualWidth - margin),
-  );
-  top = Math.max(
-    monitorRect.y + margin,
-    Math.min(top, monitorRect.y + monitorRect.h - visualHeight - margin),
-  );
-
-  return { left, top };
+    return {left, top};
 }
 
 /**
@@ -123,11 +123,11 @@ export function computeFloatingPlacement({
  * @returns {{x:number, y:number}}
  */
 export function computeCanvasEditorInitialPosition(cssW, cssH, monitorRect) {
-  const x = cssW <= monitorRect.w
-    ? Math.round(monitorRect.x + (monitorRect.w - cssW) / 2)
-    : monitorRect.x + 12;
-  const y = cssH <= monitorRect.h
-    ? Math.round(monitorRect.y + (monitorRect.h - cssH) / 2)
-    : monitorRect.y + 12;
-  return { x, y };
+    const x = cssW <= monitorRect.w
+        ? Math.round(monitorRect.x + (monitorRect.w - cssW) / 2)
+        : monitorRect.x + 12;
+    const y = cssH <= monitorRect.h
+        ? Math.round(monitorRect.y + (monitorRect.h - cssH) / 2)
+        : monitorRect.y + 12;
+    return {x, y};
 }

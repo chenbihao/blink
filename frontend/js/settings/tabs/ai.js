@@ -22,13 +22,13 @@
  *   model-edit.js 通过回调调用 provider.js 的 renderAIProviders / getExpandedProviderIds / restoreExpandedProviderIds
  */
 
-import { initAITab } from "./ai/core.js";
-import { aiState } from "./ai/state.js";
-import { renderAIProviders, getExpandedProviderIds, restoreExpandedProviderIds } from "./ai/provider.js";
+import {initAITab} from "./ai/core.js";
+import {aiState} from "./ai/state.js";
+import {getExpandedProviderIds, renderAIProviders, restoreExpandedProviderIds} from "./ai/provider.js";
 
 // 注册跨模块回调（打破 provider.js ↔ model-edit.js 循环依赖）
 aiState._renderAIProviders = renderAIProviders;
 aiState._getExpandedProviderIds = getExpandedProviderIds;
 aiState._restoreExpandedProviderIds = restoreExpandedProviderIds;
 
-export { initAITab };
+export {initAITab};

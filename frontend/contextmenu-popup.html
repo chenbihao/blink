@@ -1,69 +1,71 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Context Menu</title>
-  <link rel="stylesheet" href="css/entries/contextmenu.css" />
+    <meta charset="UTF-8">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <title>Context Menu</title>
+    <link href="css/entries/contextmenu.css" rel="stylesheet"/>
 </head>
 <body>
-  <div id="menu" class="context-menu"></div>
+<div class="context-menu" id="menu"></div>
 
-  <script type="module">
-    import { invoke, listen } from "./js/shared/tauri.js";
+<script type="module">
+    import {invoke, listen} from "./js/shared/tauri.js";
 
     /** 应用主题（后端已 resolve auto → light/dark，此处只设属性）。 */
     function applyTheme(theme) {
-      if (theme === "dark") document.documentElement.removeAttribute("data-theme");
-      else document.documentElement.setAttribute("data-theme", theme);
+        if (theme === "dark") document.documentElement.removeAttribute("data-theme");
+        else document.documentElement.setAttribute("data-theme", theme);
     }
 
     /** 渲染菜单项（复用窗口时可反复调用）。 */
     function renderMenu(items) {
-      const menuEl = document.getElementById('menu');
-      menuEl.innerHTML = '';
-      const fragment = document.createDocumentFragment();
-      items.forEach((item, index) => {
-        if (item.separator) {
-          const sep = document.createElement('div');
-          sep.className = 'context-menu-sep';
-          fragment.appendChild(sep);
-          return;
-        }
-        const row = document.createElement('div');
-        row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
-        // 0.18.4：chord 项有 shortcut 字段时，拆成 label + shortcut 两个 span 渲染
-        // 0.20.3：颜色项 shortcut 同行显示，用 has-subtext 标记等宽小号样式
-        if (item.shortcut) {
-          const labelSpan = document.createElement('span');
-          labelSpan.className = 'context-menu-label';
-          labelSpan.textContent = item.label;
-          const shortcutSpan = document.createElement('span');
-          shortcutSpan.className = 'context-menu-shortcut';
-          shortcutSpan.textContent = item.shortcut;
-          row.appendChild(labelSpan);
-          row.appendChild(shortcutSpan);
-          // 颜色格式预览（#xxx / rgb(...) / hsl(...)）→ 等宽小号
-          if (item.shortcut.startsWith('#') || item.shortcut.startsWith('rgb') || item.shortcut.startsWith('hsl')) {
-            row.classList.add('has-subtext');
-          }
-        } else {
-          row.textContent = item.label;
-        }
-        row.addEventListener('mousedown', () => { isClickingItem = true; });
-        row.addEventListener('click', () => {
-          if (invoke) invoke('context_menu_action', { actionId: index });
-          isClickingItem = false;
+        const menuEl = document.getElementById('menu');
+        menuEl.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+        items.forEach((item, index) => {
+            if (item.separator) {
+                const sep = document.createElement('div');
+                sep.className = 'context-menu-sep';
+                fragment.appendChild(sep);
+                return;
+            }
+            const row = document.createElement('div');
+            row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
+            // 0.18.4：chord 项有 shortcut 字段时，拆成 label + shortcut 两个 span 渲染
+            // 0.20.3：颜色项 shortcut 同行显示，用 has-subtext 标记等宽小号样式
+            if (item.shortcut) {
+                const labelSpan = document.createElement('span');
+                labelSpan.className = 'context-menu-label';
+                labelSpan.textContent = item.label;
+                const shortcutSpan = document.createElement('span');
+                shortcutSpan.className = 'context-menu-shortcut';
+                shortcutSpan.textContent = item.shortcut;
+                row.appendChild(labelSpan);
+                row.appendChild(shortcutSpan);
+                // 颜色格式预览（#xxx / rgb(...) / hsl(...)）→ 等宽小号
+                if (item.shortcut.startsWith('#') || item.shortcut.startsWith('rgb') || item.shortcut.startsWith('hsl')) {
+                    row.classList.add('has-subtext');
+                }
+            } else {
+                row.textContent = item.label;
+            }
+            row.addEventListener('mousedown', () => {
+                isClickingItem = true;
+            });
+            row.addEventListener('click', () => {
+                if (invoke) invoke('context_menu_action', {actionId: index});
+                isClickingItem = false;
+            });
+            fragment.appendChild(row);
         });
-        fragment.appendChild(row);
-      });
-      menuEl.appendChild(fragment);
+        menuEl.appendChild(fragment);
     }
 
     /** 后端复用窗口时通过 eval 直接调用此入口（emit 在隐藏态会被 WebView2 丢弃）。 */
     window.__renderContextMenu = function (itemsArray, theme) {
-      if (theme) applyTheme(theme);
-      renderMenu(itemsArray);
+        if (theme) applyTheme(theme);
+        renderMenu(itemsArray);
     };
 
     let isClickingItem = false;
@@ -72,50 +74,52 @@
     const params = new URLSearchParams(window.location.search);
     applyTheme(params.get("theme") || "dark");
     try {
-      const initialItems = JSON.parse(params.get('items') || '[]');
-      renderMenu(initialItems);
+        const initialItems = JSON.parse(params.get('items') || '[]');
+        renderMenu(initialItems);
     } catch (e) {
-      console.error('右键菜单 JSON 解析失败:', e);
+        console.error('右键菜单 JSON 解析失败:', e);
     }
 
     // 预热与首次唤起可能并发：窗口对象已创建时模块脚本未必 ready。
     // 主动 pull 最新载荷，避免后端首次 eval 早于 __renderContextMenu 注册而显示空菜单。
     try {
-      const pending = await invoke('take_context_menu_payload');
-      if (pending) {
-        applyTheme(pending.theme || 'dark');
-        renderMenu(JSON.parse(pending.items || '[]'));
-      }
+        const pending = await invoke('take_context_menu_payload');
+        if (pending) {
+            applyTheme(pending.theme || 'dark');
+            renderMenu(JSON.parse(pending.items || '[]'));
+        }
     } catch (e) {
-      console.error('右键菜单首次载荷读取失败:', e);
+        console.error('右键菜单首次载荷读取失败:', e);
     }
 
     // ── 复用窗口：后端 hide → emit 新数据 → show，此处监听并重新渲染 ──
     // 注意：此事件目前未被后端 emit（后端改用 eval 调 __renderContextMenu），
     // 保留 listener 作为未来 emit 方案的预留。
     listen("blink://context-menu-data", (event) => {
-      const { items, theme } = event.payload;
-      if (theme) applyTheme(theme);
-      try {
-        renderMenu(JSON.parse(items || '[]'));
-      } catch (e) {
-        console.error('context-menu-data JSON 解析失败:', e, items);
-      }
+        const {items, theme} = event.payload;
+        if (theme) applyTheme(theme);
+        try {
+            renderMenu(JSON.parse(items || '[]'));
+        } catch (e) {
+            console.error('context-menu-data JSON 解析失败:', e, items);
+        }
     });
 
     // ESC 关闭
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && invoke) invoke('hide_context_menu');
+        if (e.key === 'Escape' && invoke) invoke('hide_context_menu');
     });
 
     // 失焦关闭：点击菜单项时不立即关闭（等 click 事件执行）
     window.addEventListener('blur', () => {
-      if (isClickingItem) {
-        setTimeout(() => { if (invoke) invoke('hide_context_menu'); }, 100);
-      } else {
-        if (invoke) invoke('hide_context_menu');
-      }
+        if (isClickingItem) {
+            setTimeout(() => {
+                if (invoke) invoke('hide_context_menu');
+            }, 100);
+        } else {
+            if (invoke) invoke('hide_context_menu');
+        }
     });
-  </script>
+</script>
 </body>
 </html>

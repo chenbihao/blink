@@ -13,19 +13,19 @@
    设计准则：docs/production-design/product-principles-原则.md §14.7 键盘提示样式统一。 */
 
 .kbd {
-  display: inline-block;
-  padding: 0.1em 0.4em;
-  min-width: 1.2em;
-  font-size: 0.9em;
-  font-family: -apple-system, "Segoe UI", "SF Mono", Consolas, monospace;
-  font-weight: 500;
-  line-height: 1.2;
-  text-align: center;
-  color: var(--text);
-  background: var(--surface-2);
-  border-radius: var(--radius-sm);
-  vertical-align: 0.05em;
-  white-space: nowrap;
+    display: inline-block;
+    padding: 0.1em 0.4em;
+    min-width: 1.2em;
+    font-size: 0.9em;
+    font-family: -apple-system, "Segoe UI", "SF Mono", Consolas, monospace;
+    font-weight: 500;
+    line-height: 1.2;
+    text-align: center;
+    color: var(--text);
+    background: var(--surface-2);
+    border-radius: var(--radius-sm);
+    vertical-align: 0.05em;
+    white-space: nowrap;
 }
 
 /* 组合键：<span class="kbd-group"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>K</kbd></span>
@@ -33,16 +33,16 @@
    被误读成两个独立操作。gap 收紧到近贴附，让组合视觉更聚合——见
    docs/production-design/design-language.md §"键盘提示"。 */
 .kbd-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.15em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15em;
 }
 
 .kbd-plus {
-  color: var(--text-faint);
-  opacity: var(--opacity-muted);
-  font-size: 0.85em;
-  font-weight: 400;
-  /* 与键帽垂直居中对齐 */
-  line-height: 1;
+    color: var(--text-faint);
+    opacity: var(--opacity-muted);
+    font-size: 0.85em;
+    font-weight: 400;
+    /* 与键帽垂直居中对齐 */
+    line-height: 1;
 }

@@ -3,30 +3,30 @@
    此处仅保留 .plugin-field-row 插件字段行（views/settings.css 提供同名特化覆盖）。 */
 
 :root {
-  --form-label-width: 180px;
+    --form-label-width: 180px;
 }
 
 /* 插件字段行（兼容旧类名） */
 .plugin-field-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  padding: var(--space-sm) 0;
-  border-bottom: 1px solid var(--surface);
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-sm) 0;
+    border-bottom: 1px solid var(--surface);
 }
 
 .plugin-field-row .field-title {
-  width: var(--form-label-width);
-  flex-shrink: 0;
-  color: var(--text-sub);
-  font-size: var(--text-md);
+    width: var(--form-label-width);
+    flex-shrink: 0;
+    color: var(--text-sub);
+    font-size: var(--text-md);
 }
 
 .plugin-field-row .field-desc {
-  flex-basis: 100%;
-  padding-left: calc(var(--form-label-width) + 12px);
-  margin-top: var(--space-xs);
-  color: var(--text-faint);
-  font-size: var(--text-base);
-  line-height: var(--leading-normal);
+    flex-basis: 100%;
+    padding-left: calc(var(--form-label-width) + 12px);
+    margin-top: var(--space-xs);
+    color: var(--text-faint);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
 }

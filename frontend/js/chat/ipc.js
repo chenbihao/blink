@@ -4,8 +4,8 @@
  * 封装 invoke + listen，业务层只调语义化函数。
  */
 
-import { invoke, listen, saveDialog } from "../shared/tauri.js";
-import { EVENTS } from "../shared/event-names.js";
+import {invoke, listen, saveDialog} from "../shared/tauri.js";
+import {EVENTS} from "../shared/event-names.js";
 
 // ── Commands ─────────────────────────────────────
 
@@ -21,13 +21,13 @@ import { EVENTS } from "../shared/event-names.js";
  * @returns {Promise<number>} request_id
  */
 export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
-  return invoke("chat_prompt", {
-    conversationId,
-    message,
-    groupId,
-    targetWindow: opts.targetWindow ?? null,
-    ephemeral: opts.ephemeral ?? null,
-  });
+    return invoke("chat_prompt", {
+        conversationId,
+        message,
+        groupId,
+        targetWindow: opts.targetWindow ?? null,
+        ephemeral: opts.ephemeral ?? null,
+    });
 }
 
 /**
@@ -36,7 +36,7 @@ export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
  * @returns {Promise<boolean>}
  */
 export function chatAbort(requestId) {
-  return invoke("chat_abort", { requestId });
+    return invoke("chat_abort", {requestId});
 }
 
 /**
@@ -44,7 +44,7 @@ export function chatAbort(requestId) {
  * @returns {Promise<{active: {request_id: number, conversation_id: string}|null, provider_configured: boolean, provider_name: string|null, model_name: string|null}>}
  */
 export function getChatStatus() {
-  return invoke("get_chat_status");
+    return invoke("get_chat_status");
 }
 
 /**
@@ -55,7 +55,7 @@ export function getChatStatus() {
  * @returns {Promise<{revision: number, text: string}|null>}
  */
 export function takeChatPrefill() {
-  return invoke("take_chat_prefill");
+    return invoke("take_chat_prefill");
 }
 
 /**
@@ -66,7 +66,7 @@ export function takeChatPrefill() {
  * @returns {Promise<void>}
  */
 export function ackChatPrefill(revision) {
-  return invoke("ack_chat_prefill", { revision });
+    return invoke("ack_chat_prefill", {revision});
 }
 
 /**
@@ -74,7 +74,7 @@ export function ackChatPrefill(revision) {
  * @returns {Promise<Array<{id: string, provider_name: string, model_name: string, is_main: boolean, is_light: boolean, is_selected: boolean}>>}
  */
 export function getChatModels() {
-  return invoke("get_chat_models");
+    return invoke("get_chat_models");
 }
 
 /**
@@ -83,7 +83,7 @@ export function getChatModels() {
  * @returns {Promise<boolean>} true=切换成功
  */
 export function selectChatModel(selectionId) {
-  return invoke("select_chat_model", { selectionId });
+    return invoke("select_chat_model", {selectionId});
 }
 
 /**
@@ -93,14 +93,14 @@ export function selectChatModel(selectionId) {
  * @returns {Promise<boolean>}
  */
 export function confirmChatAction(confirmId, approved) {
-  return invoke("confirm_chat_action", { confirmId, approved });
+    return invoke("confirm_chat_action", {confirmId, approved});
 }
 
 /**
  * 隐藏 chat 窗口。
  */
 export function hideChatWindow() {
-  return invoke("hide_chat_window");
+    return invoke("hide_chat_window");
 }
 
 /**
@@ -108,7 +108,7 @@ export function hideChatWindow() {
  * @returns {Promise<void>}
  */
 export function startChatStt() {
-  return invoke("start_chat_stt");
+    return invoke("start_chat_stt");
 }
 
 /**
@@ -116,7 +116,7 @@ export function startChatStt() {
  * @returns {Promise<void>}
  */
 export function stopChatStt() {
-  return invoke("stop_chat_stt");
+    return invoke("stop_chat_stt");
 }
 
 // ── 多对话管理（0.12.3 Phase B）──────────────────
@@ -126,7 +126,7 @@ export function stopChatStt() {
  * @returns {Promise<Array<{id: string, title: string|null, created_at: number, last_active_at: number, message_count: number}>>}
  */
 export function listChatConversations() {
-  return invoke("list_chat_conversations");
+    return invoke("list_chat_conversations");
 }
 
 /**
@@ -135,7 +135,7 @@ export function listChatConversations() {
  * @returns {Promise<boolean>}
  */
 export function deleteChatConversation(conversationId) {
-  return invoke("delete_chat_conversation", { conversationId });
+    return invoke("delete_chat_conversation", {conversationId});
 }
 
 /**
@@ -145,7 +145,7 @@ export function deleteChatConversation(conversationId) {
  * @returns {Promise<boolean>}
  */
 export function renameChatConversation(conversationId, title) {
-  return invoke("rename_chat_conversation", { conversationId, title });
+    return invoke("rename_chat_conversation", {conversationId, title});
 }
 
 /**
@@ -154,7 +154,7 @@ export function renameChatConversation(conversationId, title) {
  * @returns {Promise<Array<{role: string, text: string, thinking: string|null}>>}
  */
 export function getChatMessages(conversationId) {
-  return invoke("get_chat_messages", { conversationId });
+    return invoke("get_chat_messages", {conversationId});
 }
 
 // ── 导出对话（0.12.5 §5.6）──────────────────
@@ -166,7 +166,7 @@ export function getChatMessages(conversationId) {
  * @returns {Promise<void>}
  */
 export function saveTextFile(path, content) {
-  return invoke("save_text_file", { path, content });
+    return invoke("save_text_file", {path, content});
 }
 
 /**
@@ -180,26 +180,26 @@ export function saveTextFile(path, content) {
  * @returns {Promise<boolean>} true=成功保存，false=用户取消
  */
 export async function exportConversation(conversationId, title) {
-  // 1. 加载对话消息
-  const messages = await getChatMessages(conversationId);
+    // 1. 加载对话消息
+    const messages = await getChatMessages(conversationId);
 
-  // 2. 格式化为 Markdown
-  const markdown = formatConversationMarkdown(title, messages);
+    // 2. 格式化为 Markdown
+    const markdown = formatConversationMarkdown(title, messages);
 
-  // 3. 打开保存对话框获取路径
-  const safeName = (title || "对话")
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
-    .trim()
-    .slice(0, 50) || "对话";
-  const path = await saveDialog({
-    defaultPath: `${safeName}.md`,
-    filters: [{ name: "Markdown", extensions: ["md"] }],
-  });
-  if (!path) return false; // 用户取消
+    // 3. 打开保存对话框获取路径
+    const safeName = (title || "对话")
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+        .trim()
+        .slice(0, 50) || "对话";
+    const path = await saveDialog({
+        defaultPath: `${safeName}.md`,
+        filters: [{name: "Markdown", extensions: ["md"]}],
+    });
+    if (!path) return false; // 用户取消
 
-  // 4. 写文件
-  await saveTextFile(path, markdown);
-  return true;
+    // 4. 写文件
+    await saveTextFile(path, markdown);
+    return true;
 }
 
 /**
@@ -209,37 +209,37 @@ export async function exportConversation(conversationId, title) {
  * @returns {string}
  */
 function formatConversationMarkdown(title, messages) {
-  let md = `# ${title || "对话"}\n\n`;
-  for (const msg of messages) {
-    if (msg.role === "user") {
-      md += `## 用户\n\n${msg.text}\n\n---\n\n`;
-    } else if (msg.role === "assistant") {
-      // 纯工具调用（无文本回复）
-      if (msg.tool_name && !msg.text) {
-        md += `**工具调用：${msg.tool_name}**\n\n`;
-        if (msg.tool_result) {
-          md += `> ${msg.tool_result.replace(/\n/g, "\n> ")}\n\n`;
+    let md = `# ${title || "对话"}\n\n`;
+    for (const msg of messages) {
+        if (msg.role === "user") {
+            md += `## 用户\n\n${msg.text}\n\n---\n\n`;
+        } else if (msg.role === "assistant") {
+            // 纯工具调用（无文本回复）
+            if (msg.tool_name && !msg.text) {
+                md += `**工具调用：${msg.tool_name}**\n\n`;
+                if (msg.tool_result) {
+                    md += `> ${msg.tool_result.replace(/\n/g, "\n> ")}\n\n`;
+                }
+                continue;
+            }
+            md += `## 助手\n\n`;
+            if (msg.thinking) {
+                md += `<details><summary>思考过程</summary>\n\n${msg.thinking}\n\n</details>\n\n`;
+            }
+            if (msg.text) {
+                md += `${msg.text}\n\n`;
+            }
+            if (msg.tool_name) {
+                md += `**工具调用：${msg.tool_name}**\n\n`;
+                if (msg.tool_result) {
+                    md += `> ${msg.tool_result.replace(/\n/g, "\n> ")}\n\n`;
+                }
+            }
+            md += `---\n\n`;
         }
-        continue;
-      }
-      md += `## 助手\n\n`;
-      if (msg.thinking) {
-        md += `<details><summary>思考过程</summary>\n\n${msg.thinking}\n\n</details>\n\n`;
-      }
-      if (msg.text) {
-        md += `${msg.text}\n\n`;
-      }
-      if (msg.tool_name) {
-        md += `**工具调用：${msg.tool_name}**\n\n`;
-        if (msg.tool_result) {
-          md += `> ${msg.tool_result.replace(/\n/g, "\n> ")}\n\n`;
-        }
-      }
-      md += `---\n\n`;
+        // system 消息跳过
     }
-    // system 消息跳过
-  }
-  return md.trimEnd() + "\n";
+    return md.trimEnd() + "\n";
 }
 
 // ── 标题生成（0.12.5 §5.3）──────────────────
@@ -253,7 +253,7 @@ function formatConversationMarkdown(title, messages) {
  * @returns {Promise<void>}
  */
 export function generateConversationTitle(conversationId, firstMessage) {
-  return invoke("generate_conversation_title", { conversationId, firstMessage });
+    return invoke("generate_conversation_title", {conversationId, firstMessage});
 }
 
 // ── 消息编辑重发（0.12.5 §5.5）──────────────────
@@ -265,7 +265,7 @@ export function generateConversationTitle(conversationId, firstMessage) {
  * @returns {Promise<void>}
  */
 export function truncateMessages(conversationId, keepCount) {
-  return invoke("truncate_messages", { conversationId, keepCount });
+    return invoke("truncate_messages", {conversationId, keepCount});
 }
 
 // ── 对话分组（0.12.6）──────────────────────────────────────────
@@ -275,7 +275,7 @@ export function truncateMessages(conversationId, keepCount) {
  * @returns {Promise<Array<{id: string, name: string, system_prompt?: string, parent_id?: string, sort_order: number, expanded: boolean, created_at: number}>>}
  */
 export function listConversationGroups() {
-  return invoke("list_conversation_groups");
+    return invoke("list_conversation_groups");
 }
 
 /**
@@ -286,7 +286,7 @@ export function listConversationGroups() {
  * @returns {Promise<void>}
  */
 export function createConversationGroup(id, name, parentId = null) {
-  return invoke("create_conversation_group", { id, name, parentId });
+    return invoke("create_conversation_group", {id, name, parentId});
 }
 
 /**
@@ -296,7 +296,7 @@ export function createConversationGroup(id, name, parentId = null) {
  * @returns {Promise<boolean>}
  */
 export function renameConversationGroup(groupId, name) {
-  return invoke("rename_conversation_group", { groupId, name });
+    return invoke("rename_conversation_group", {groupId, name});
 }
 
 /**
@@ -305,7 +305,7 @@ export function renameConversationGroup(groupId, name) {
  * @returns {Promise<boolean>}
  */
 export function deleteConversationGroup(groupId) {
-  return invoke("delete_conversation_group", { groupId });
+    return invoke("delete_conversation_group", {groupId});
 }
 
 /**
@@ -315,7 +315,7 @@ export function deleteConversationGroup(groupId) {
  * @returns {Promise<boolean>}
  */
 export function updateConversationGroupSystemPrompt(groupId, prompt) {
-  return invoke("update_conversation_group_system_prompt", { groupId, prompt });
+    return invoke("update_conversation_group_system_prompt", {groupId, prompt});
 }
 
 /**
@@ -325,7 +325,7 @@ export function updateConversationGroupSystemPrompt(groupId, prompt) {
  * @returns {Promise<void>}
  */
 export function moveConversationToGroup(conversationId, groupId) {
-  return invoke("move_conversation_to_group", { conversationId, groupId });
+    return invoke("move_conversation_to_group", {conversationId, groupId});
 }
 
 /**
@@ -335,7 +335,7 @@ export function moveConversationToGroup(conversationId, groupId) {
  * @returns {Promise<void>}
  */
 export function setGroupSortOrder(groupId, sortOrder) {
-  return invoke("set_group_sort_order", { groupId, sortOrder });
+    return invoke("set_group_sort_order", {groupId, sortOrder});
 }
 
 /**
@@ -345,7 +345,7 @@ export function setGroupSortOrder(groupId, sortOrder) {
  * @returns {Promise<void>}
  */
 export function setGroupExpanded(groupId, expanded) {
-  return invoke("set_group_expanded", { groupId, expanded });
+    return invoke("set_group_expanded", {groupId, expanded});
 }
 
 /**
@@ -357,7 +357,7 @@ export function setGroupExpanded(groupId, expanded) {
  * @returns {Promise<string|null>}
  */
 export function getConversationSystemPrompt(conversationId) {
-  return invoke("get_conversation_system_prompt", { conversationId });
+    return invoke("get_conversation_system_prompt", {conversationId});
 }
 
 // ── MCP tool 池（0.13.0）──────────────────────────────────────────
@@ -367,7 +367,7 @@ export function getConversationSystemPrompt(conversationId) {
  * @returns {Promise<void>}
  */
 export function ensureMcpConnected() {
-  return invoke("ensure_mcp_connected");
+    return invoke("ensure_mcp_connected");
 }
 
 /**
@@ -375,7 +375,7 @@ export function ensureMcpConnected() {
  * @returns {Promise<{builtin: number, mcp: number, total: number}>}
  */
 export function getMcpToolPoolSize() {
-  return invoke("get_mcp_tool_pool_size");
+    return invoke("get_mcp_tool_pool_size");
 }
 
 /**
@@ -383,7 +383,7 @@ export function getMcpToolPoolSize() {
  * @returns {Promise<string[]>}
  */
 export function getMcpToolNames() {
-  return invoke("get_mcp_tool_names");
+    return invoke("get_mcp_tool_names");
 }
 
 // ── 0.13.6 上下文窗口状态 ──────────────────────────────────────────
@@ -393,7 +393,7 @@ export function getMcpToolNames() {
  * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}|null>}
  */
 export function getContextWindowStatus() {
-  return invoke("get_context_window_status");
+    return invoke("get_context_window_status");
 }
 
 /**
@@ -402,7 +402,7 @@ export function getContextWindowStatus() {
  * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}>}
  */
 export function compressContextNow(conversationId) {
-  return invoke("compress_context_now", { conversationId });
+    return invoke("compress_context_now", {conversationId});
 }
 
 // ── 0.13.6 MCP tool 来源信息 ──────────────────────────────────────
@@ -412,7 +412,7 @@ export function compressContextNow(conversationId) {
  * @returns {Promise<Array<{tool_name: string, server_name: string, transport: string}>|null>}
  */
 export function getMcpToolSources() {
-  return invoke("get_mcp_tool_sources");
+    return invoke("get_mcp_tool_sources");
 }
 
 // ── Composer bar 悬浮预览快照 ──────────────────────────────────────
@@ -422,7 +422,7 @@ export function getMcpToolSources() {
  * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, builtin_tools: Array<{name: string, description: string}>, mcp_servers: Array<{name: string, transport: string, online: boolean, tool_count: number, tool_names: string[]}>, builtin_count: number, mcp_count: number, total_count: number}>}
  */
 export function getComposerBarSnapshot() {
-  return invoke("get_composer_bar_snapshot");
+    return invoke("get_composer_bar_snapshot");
 }
 
 // ── Events ───────────────────────────────────────
@@ -433,7 +433,7 @@ export function getComposerBarSnapshot() {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenChatStream(handler) {
-  return listen(EVENTS.CHAT_STREAM, handler);
+    return listen(EVENTS.CHAT_STREAM, handler);
 }
 
 /**
@@ -442,7 +442,7 @@ export function listenChatStream(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenChatConfirm(handler) {
-  return listen(EVENTS.CHAT_CONFIRM_ACTION, handler);
+    return listen(EVENTS.CHAT_CONFIRM_ACTION, handler);
 }
 
 /**
@@ -451,7 +451,7 @@ export function listenChatConfirm(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenChatTitleUpdated(handler) {
-  return listen(EVENTS.CHAT_TITLE_UPDATED, handler);
+    return listen(EVENTS.CHAT_TITLE_UPDATED, handler);
 }
 
 /**
@@ -460,7 +460,7 @@ export function listenChatTitleUpdated(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenContextStatus(handler) {
-  return listen(EVENTS.CHAT_CONTEXT_STATUS, handler);
+    return listen(EVENTS.CHAT_CONTEXT_STATUS, handler);
 }
 
 /**
@@ -469,7 +469,7 @@ export function listenContextStatus(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenSkillActivated(handler) {
-  return listen(EVENTS.CHAT_SKILL_ACTIVATED, handler);
+    return listen(EVENTS.CHAT_SKILL_ACTIVATED, handler);
 }
 
 // ── Voice Events（0.12.2 §4.3）─────────────────
@@ -478,40 +478,40 @@ export function listenSkillActivated(handler) {
  * 监听录音开始事件（target="chat" 时进入录音模式）。
  */
 export function listenVoiceRecordingStart(handler) {
-  return listen(EVENTS.VOICE_RECORDING_START, handler);
+    return listen(EVENTS.VOICE_RECORDING_START, handler);
 }
 
 /**
  * 监听语音识别 partial 文本（实时更新 textarea）。
  */
 export function listenVoicePartial(handler) {
-  return listen(EVENTS.VOICE_PARTIAL, handler);
+    return listen(EVENTS.VOICE_PARTIAL, handler);
 }
 
 /**
  * 监听录音结束事件（退出录音模式）。
  */
 export function listenVoiceRecordingEnd(handler) {
-  return listen(EVENTS.VOICE_RECORDING_END, handler);
+    return listen(EVENTS.VOICE_RECORDING_END, handler);
 }
 
 /**
  * 监听语音错误事件。
  */
 export function listenVoiceError(handler) {
-  return listen(EVENTS.VOICE_ERROR, handler);
+    return listen(EVENTS.VOICE_ERROR, handler);
 }
 
 /**
  * 监听语音音量事件（波形动画）。
  */
 export function listenVoiceLevel(handler) {
-  return listen(EVENTS.VOICE_LEVEL, handler);
+    return listen(EVENTS.VOICE_LEVEL, handler);
 }
 
 /**
  * 监听语音状态事件（模型加载中等）。
  */
 export function listenVoiceStatus(handler) {
-  return listen(EVENTS.VOICE_STATUS, handler);
+    return listen(EVENTS.VOICE_STATUS, handler);
 }

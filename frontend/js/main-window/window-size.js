@@ -7,8 +7,8 @@
 //! 翻到末页（不足 PAGE_SIZE 条）时窗口不缩小，避免鼠标滚轮溢出到背后窗口。
 //! 新搜索（seq 变化 / clear）时调 `resetMaxHeight()` 归零，让窗口正确收缩。
 
-import { appEl } from "./dom.js";
-import { resizeWindow } from "../shared/api.js";
+import {appEl} from "./dom.js";
+import {resizeWindow} from "../shared/api.js";
 
 /** 窗口宽度（暂固定，未来可配置）。 */
 const WIDTH = 700;
@@ -26,16 +26,16 @@ let maxHeight = 0;
  * - maxHeight 归零时（新搜索 / clear）→ 按实际内容高度设置
  */
 export function syncWindowSize() {
-  requestAnimationFrame(() => {
-    // offsetHeight 含 padding/border，正是窗口需要的物理内容高度
-    const height = appEl.offsetHeight;
-    if (height > maxHeight) {
-      maxHeight = height;
-    }
-    // 用 minHeight 让 #app 撑满窗口高度（避免 #app 下方出现透明间隙）
-    appEl.style.minHeight = maxHeight + "px";
-    resizeWindow(WIDTH, maxHeight);
-  });
+    requestAnimationFrame(() => {
+        // offsetHeight 含 padding/border，正是窗口需要的物理内容高度
+        const height = appEl.offsetHeight;
+        if (height > maxHeight) {
+            maxHeight = height;
+        }
+        // 用 minHeight 让 #app 撑满窗口高度（避免 #app 下方出现透明间隙）
+        appEl.style.minHeight = maxHeight + "px";
+        resizeWindow(WIDTH, maxHeight);
+    });
 }
 
 /**
@@ -45,6 +45,6 @@ export function syncWindowSize() {
  * 随后的 syncWindowSize() 会按实际内容重新踩踏。
  */
 export function resetMaxHeight() {
-  maxHeight = 0;
-  appEl.style.minHeight = "";
+    maxHeight = 0;
+    appEl.style.minHeight = "";
 }

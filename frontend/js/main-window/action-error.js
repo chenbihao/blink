@@ -8,9 +8,9 @@
 //! - 错误消息走 i18n 本地化，按 code 分档映射
 //! - 日志只记录 action id + error code，不记录正文/剪贴板/选区原文
 
-import { normalizeError } from "../shared/tauri.js";
-import { t } from "../i18n/index.js";
-import { syncWindowSize } from "./window-size.js";
+import {normalizeError} from "../shared/tauri.js";
+import {t} from "../i18n/index.js";
+import {syncWindowSize} from "./window-size.js";
 
 /** statusbar 元素引用。 */
 const statusbarEl = document.getElementById("statusbar");
@@ -30,18 +30,18 @@ const ERROR_DURATION_MS = 3500;
  * 未命中 code 走 fallback 通用错误文案。
  */
 const CODE_I18N_KEYS = {
-  invalid_args: "action.error.invalid_args",
-  invalid_state: "action.error.invalid_state",
-  conflict: "action.error.conflict",
-  invalid_data: "action.error.invalid_data",
-  permission_denied: "action.error.permission_denied",
-  timeout: "action.error.timeout",
-  cancelled: "action.error.cancelled",
-  not_found: "action.error.not_found",
-  internal_error: "action.error.internal",
-  runtime_error: "action.error.runtime",
-  missing_arg: "action.error.missing_arg",
-  unknown_error: "action.error.unknown",
+    invalid_args: "action.error.invalid_args",
+    invalid_state: "action.error.invalid_state",
+    conflict: "action.error.conflict",
+    invalid_data: "action.error.invalid_data",
+    permission_denied: "action.error.permission_denied",
+    timeout: "action.error.timeout",
+    cancelled: "action.error.cancelled",
+    not_found: "action.error.not_found",
+    internal_error: "action.error.internal",
+    runtime_error: "action.error.runtime",
+    missing_arg: "action.error.missing_arg",
+    unknown_error: "action.error.unknown",
 };
 
 /**
@@ -51,9 +51,9 @@ const CODE_I18N_KEYS = {
  * @returns {string} 本地化消息
  */
 function projectErrorMessage(err) {
-  const key = CODE_I18N_KEYS[err.code] ?? CODE_I18N_KEYS.unknown_error;
-  // i18n 模板 {message} 使用后端提供的 message（已是用户可读简短说明）
-  return t(key, { message: err.message });
+    const key = CODE_I18N_KEYS[err.code] ?? CODE_I18N_KEYS.unknown_error;
+    // i18n 模板 {message} 使用后端提供的 message（已是用户可读简短说明）
+    return t(key, {message: err.message});
 }
 
 /**
@@ -69,43 +69,43 @@ function projectErrorMessage(err) {
  * @param {string|object} err invoke promise rejection 值
  */
 export function showActionError(actionId, err) {
-  const normalized = normalizeError(err);
+    const normalized = normalizeError(err);
 
-  // 日志只记录 action id + error code + message 长度，不记录正文
-  console.error(
-    `[action-error] action=${actionId} code=${normalized.code} msg_len=${normalized.message.length} retryable=${normalized.retryable}`
-  );
+    // 日志只记录 action id + error code + message 长度，不记录正文
+    console.error(
+        `[action-error] action=${actionId} code=${normalized.code} msg_len=${normalized.message.length} retryable=${normalized.retryable}`
+    );
 
-  if (!statusbarEl) return;
+    if (!statusbarEl) return;
 
-  // 清除上一个错误提示
-  if (errorTimer) {
-    clearTimeout(errorTimer);
-    errorTimer = null;
-  }
-  if (errorEl) {
-    errorEl.remove();
-    errorEl = null;
-  }
-
-  // 创建错误提示元素并叠加在 statusbar 上方
-  const message = projectErrorMessage(normalized);
-  errorEl = document.createElement("div");
-  errorEl.className = "action-error-hint";
-  errorEl.setAttribute("role", "alert");
-  errorEl.textContent = message;
-  statusbarEl.appendChild(errorEl);
-  statusbarEl.classList.add("has-action-error");
-  syncWindowSize();
-
-  // 定时移除错误提示
-  errorTimer = setTimeout(() => {
-    errorTimer = null;
-    if (errorEl) {
-      errorEl.remove();
-      errorEl = null;
+    // 清除上一个错误提示
+    if (errorTimer) {
+        clearTimeout(errorTimer);
+        errorTimer = null;
     }
-    statusbarEl.classList.remove("has-action-error");
+    if (errorEl) {
+        errorEl.remove();
+        errorEl = null;
+    }
+
+    // 创建错误提示元素并叠加在 statusbar 上方
+    const message = projectErrorMessage(normalized);
+    errorEl = document.createElement("div");
+    errorEl.className = "action-error-hint";
+    errorEl.setAttribute("role", "alert");
+    errorEl.textContent = message;
+    statusbarEl.appendChild(errorEl);
+    statusbarEl.classList.add("has-action-error");
     syncWindowSize();
-  }, ERROR_DURATION_MS);
+
+    // 定时移除错误提示
+    errorTimer = setTimeout(() => {
+        errorTimer = null;
+        if (errorEl) {
+            errorEl.remove();
+            errorEl = null;
+        }
+        statusbarEl.classList.remove("has-action-error");
+        syncWindowSize();
+    }, ERROR_DURATION_MS);
 }

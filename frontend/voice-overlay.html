@@ -1,136 +1,137 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
     <title>Blink Voice</title>
-    <link rel="stylesheet" href="css/entries/voice-overlay.css" />
-  </head>
-  <body>
-    <div id="overlay">
-      <div class="voice-wave" id="wave">
+    <link href="css/entries/voice-overlay.css" rel="stylesheet"/>
+</head>
+<body>
+<div id="overlay">
+    <div class="voice-wave" id="wave">
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
-      </div>
-      <div class="text" id="partial-text">语音输入中…</div>
-      <div class="hint" data-i18n="voice.overlay.hint">松开结束 · ESC 取消</div>
     </div>
-    <script type="module">
-      import { listen, invoke } from "./js/shared/tauri.js";
-      import { EVENTS } from "./js/shared/event-names.js";
-      import { t, applyI18nFromConfig, onLangChange } from "./js/i18n/index.js";
-      import { applyThemeFromConfig } from "./js/shared/theme.js";
+    <div class="text" id="partial-text">语音输入中…</div>
+    <div class="hint" data-i18n="voice.overlay.hint">松开结束 · ESC 取消</div>
+</div>
+<script type="module">
+    import {listen, invoke} from "./js/shared/tauri.js";
+    import {EVENTS} from "./js/shared/event-names.js";
+    import {t, applyI18nFromConfig, onLangChange} from "./js/i18n/index.js";
+    import {applyThemeFromConfig} from "./js/shared/theme.js";
 
-      // 应用主题（与主窗口/设置页统一）
-      applyThemeFromConfig();
+    // 应用主题（与主窗口/设置页统一）
+    applyThemeFromConfig();
 
-      const textEl = document.getElementById("partial-text");
-      const waveEl = document.getElementById("wave");
-      const bars = waveEl.querySelectorAll(".vw-bar");
+    const textEl = document.getElementById("partial-text");
+    const waveEl = document.getElementById("wave");
+    const bars = waveEl.querySelectorAll(".vw-bar");
 
-      // textEl 当前是否显示默认文案（非 partial / status / error 文本）
-      // 用于语言切换时判断是否需要更新默认文案
-      let isDefaultText = true;
+    // textEl 当前是否显示默认文案（非 partial / status / error 文本）
+    // 用于语言切换时判断是否需要更新默认文案
+    let isDefaultText = true;
 
-      // ── 自动撑高（0.10.6）─────────────────────────────────────────────
-      // 文本更新后测量内容高度，调用 Rust 侧 resize_voice_overlay 撑高窗口。
-      // 超长文本由 CSS .text { max-height + overflow-y: auto } 限制，窗口不超过 MAX_HEIGHT。
-      const MIN_HEIGHT = 140;
-      const MAX_HEIGHT = 400;
-      let lastResizeHeight = MIN_HEIGHT;
+    // ── 自动撑高（0.10.6）─────────────────────────────────────────────
+    // 文本更新后测量内容高度，调用 Rust 侧 resize_voice_overlay 撑高窗口。
+    // 超长文本由 CSS .text { max-height + overflow-y: auto } 限制，窗口不超过 MAX_HEIGHT。
+    const MIN_HEIGHT = 140;
+    const MAX_HEIGHT = 400;
+    let lastResizeHeight = MIN_HEIGHT;
 
-      function autoResize() {
+    function autoResize() {
         requestAnimationFrame(() => {
-          const h = Math.min(
-            Math.max(document.body.scrollHeight, MIN_HEIGHT),
-            MAX_HEIGHT,
-          );
-          // 仅在高度变化 > 2px 时调用，避免频繁 IPC
-          if (Math.abs(h - lastResizeHeight) > 2) {
-            lastResizeHeight = h;
-            invoke("resize_voice_overlay", { height: h }).catch(() => {});
-          }
+            const h = Math.min(
+                Math.max(document.body.scrollHeight, MIN_HEIGHT),
+                MAX_HEIGHT,
+            );
+            // 仅在高度变化 > 2px 时调用，避免频繁 IPC
+            if (Math.abs(h - lastResizeHeight) > 2) {
+                lastResizeHeight = h;
+                invoke("resize_voice_overlay", {height: h}).catch(() => {
+                });
+            }
         });
-      }
+    }
 
-      // 初始化 i18n（设置 data-i18n 元素文本 + 触发 onLangChange 回调）
-      applyI18nFromConfig().then(() => {
+    // 初始化 i18n（设置 data-i18n 元素文本 + 触发 onLangChange 回调）
+    applyI18nFromConfig().then(() => {
         if (isDefaultText) textEl.textContent = t("voice.overlay.recording");
-      });
+    });
 
-      // 语言切换时更新默认文案（仅在显示默认文案时）
-      onLangChange(() => {
+    // 语言切换时更新默认文案（仅在显示默认文案时）
+    onLangChange(() => {
         if (isDefaultText) textEl.textContent = t("voice.overlay.recording");
-      });
+    });
 
-      // 监听音量级别 → 驱动波形条高度
-      listen(EVENTS.VOICE_LEVEL, (event) => {
-        const { level, target } = event.payload ?? {};
+    // 监听音量级别 → 驱动波形条高度
+    listen(EVENTS.VOICE_LEVEL, (event) => {
+        const {level, target} = event.payload ?? {};
         if (target !== "g2") return;
         const lv = Math.max(0, Math.min(1, level || 0));
         bars.forEach((bar, i) => {
-          const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
-          // jitter 独立于 lv：即使安静时也有微妙呼吸感
-          const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.08;
-          const h = Math.max(4, (lv * factor + jitter) * 20);
-          bar.style.height = h + "px";
+            const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
+            // jitter 独立于 lv：即使安静时也有微妙呼吸感
+            const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.08;
+            const h = Math.max(4, (lv * factor + jitter) * 20);
+            bar.style.height = h + "px";
         });
-      });
+    });
 
-      // 监听流式 partial 文本
-      // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
-      listen(EVENTS.VOICE_PARTIAL, (event) => {
+    // 监听流式 partial 文本
+    // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
+    listen(EVENTS.VOICE_PARTIAL, (event) => {
         const payload = event.payload ?? {};
         if (payload.target !== "g2") return;
 
         // 优先使用 confirmed + preview 双字段（伪流式）
         if (payload.confirmed !== undefined || payload.preview !== undefined) {
-          const confirmed = payload.confirmed || "";
-          const preview = payload.preview || "";
-          if (confirmed || preview) {
-            // 双色渲染：confirmed 白色 + preview 灰色半透明
-            textEl.innerHTML =
-              '<span class="voice-confirmed"></span>' +
-              '<span class="voice-preview"></span>';
-            textEl.querySelector(".voice-confirmed").textContent = confirmed;
-            textEl.querySelector(".voice-preview").textContent = preview;
+            const confirmed = payload.confirmed || "";
+            const preview = payload.preview || "";
+            if (confirmed || preview) {
+                // 双色渲染：confirmed 白色 + preview 灰色半透明
+                textEl.innerHTML =
+                    '<span class="voice-confirmed"></span>' +
+                    '<span class="voice-preview"></span>';
+                textEl.querySelector(".voice-confirmed").textContent = confirmed;
+                textEl.querySelector(".voice-preview").textContent = preview;
+                isDefaultText = false;
+                autoResize();
+            }
+        } else if (payload.text) {
+            // 兼容旧格式（真流式 / 非流式引擎）
+            textEl.textContent = payload.text;
             isDefaultText = false;
             autoResize();
-          }
-        } else if (payload.text) {
-          // 兼容旧格式（真流式 / 非流式引擎）
-          textEl.textContent = payload.text;
-          isDefaultText = false;
-          autoResize();
         }
-      });
+    });
 
-      // 录音结束 → 重置
-      listen(EVENTS.VOICE_RECORDING_END, () => {
+    // 录音结束 → 重置
+    listen(EVENTS.VOICE_RECORDING_END, () => {
         textEl.textContent = t("voice.overlay.recording");
         isDefaultText = true;
         bars.forEach((bar) => (bar.style.height = "4px"));
         waveEl.classList.remove("voice-loading", "voice-error");
         autoResize();
-      });
+    });
 
-      // 录音开始 → 重置文案（覆盖 voice-status 的加载中文案）
-      listen(EVENTS.VOICE_RECORDING_START, (event) => {
-        const { target } = event.payload ?? {};
+    // 录音开始 → 重置文案（覆盖 voice-status 的加载中文案）
+    listen(EVENTS.VOICE_RECORDING_START, (event) => {
+        const {target} = event.payload ?? {};
         if (target !== "g2") return;
         textEl.textContent = t("voice.overlay.recording");
         isDefaultText = true;
         // 录音开始：波形切回绿色（移除加载态蓝色 + 错误态红色）
         waveEl.classList.remove("voice-loading", "voice-error");
         autoResize();
-      });
+    });
 
-      // 语音状态提示（模型加载中等）
-      listen(EVENTS.VOICE_STATUS, (event) => {
-        const { message, target } = event.payload ?? {};
+    // 语音状态提示（模型加载中等）
+    listen(EVENTS.VOICE_STATUS, (event) => {
+        const {message, target} = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
         isDefaultText = false;
@@ -138,19 +139,19 @@
         waveEl.classList.remove("voice-error");
         waveEl.classList.add("voice-loading");
         autoResize();
-      });
+    });
 
-      // 语音错误提示（STT 未配置 / 服务未启动等）
-      // 波形转红色，与加载态蓝色区分。错误信息显示在文本区域。
-      listen(EVENTS.VOICE_ERROR, (event) => {
-        const { message, target } = event.payload ?? {};
+    // 语音错误提示（STT 未配置 / 服务未启动等）
+    // 波形转红色，与加载态蓝色区分。错误信息显示在文本区域。
+    listen(EVENTS.VOICE_ERROR, (event) => {
+        const {message, target} = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
         isDefaultText = false;
         waveEl.classList.remove("voice-loading"); // 清除可能残留的加载态
         waveEl.classList.add("voice-error");
         autoResize();
-      });
-    </script>
-  </body>
+    });
+</script>
+</body>
 </html>

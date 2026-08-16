@@ -6,43 +6,41 @@
    Layer 3: #toolbar — 工具栏（HTML 元素） */
 
 html, body {
-  margin: 0;
-  padding: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  user-select: none;
-  /*
-   * 极淡的兜底色——canvas 画完前 (~50ms 现在) 让窗口不完全透明,
-   * 避免 DWM 透明窗被穿透到桌面的错觉。
-   *
-   * **不能太黑**：body 是纯色 shade,canvas 最终画面是"截图 * 0.55 + 黑 * 0.45"
-   * (drawDimmed 里的暗色蒙版),两者亮度差太大会让用户看到"先黑幕后画面"的两层感。
-   * 用 0.15 极淡后,视觉上 body 和 canvas 差距小,衔接自然。
-   */
-  background: rgba(0, 0, 0, 0.15);
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+    /*
+     * 极淡的兜底色——canvas 画完前 (~50ms 现在) 让窗口不完全透明,
+     * 避免 DWM 透明窗被穿透到桌面的错觉。
+     *
+     * **不能太黑**：body 是纯色 shade,canvas 最终画面是"截图 * 0.55 + 黑 * 0.45"
+     * (drawDimmed 里的暗色蒙版),两者亮度差太大会让用户看到"先黑幕后画面"的两层感。
+     * 用 0.15 极淡后,视觉上 body 和 canvas 差距小,衔接自然。
+     */
+    background: rgba(0, 0, 0, 0.15);
 }
 
 /* 通用图片编辑复用透明 overlay 外壳，但图片以外不应遮住桌面。
  * 交互控件和 canvas 自身都有不透明像素，仍可正常接收输入；完全透明的空白区域
  * 则保留桌面上下文，也避免普通图片编辑产生“再次截图”的沉浸式错觉。 */
 body.image-editor-mode {
-  background: transparent;
+    background: transparent;
 }
 
 /* 独立图片需要明确的画布边界。棋盘底让透明 PNG 可辨识，描边和阴影把图片从
  * 真实桌面内容中托起；这些都是 canvas 的 CSS 背景，不会进入复制/保存输出。 */
 body.image-editor-mode #canvas.long-image-editing {
-  background-color: #f3f3f3;
-  background-image:
-    linear-gradient(45deg, #d8d8d8 25%, transparent 25%),
+    background-color: #f3f3f3;
+    background-image: linear-gradient(45deg, #d8d8d8 25%, transparent 25%),
     linear-gradient(-45deg, #d8d8d8 25%, transparent 25%),
     linear-gradient(45deg, transparent 75%, #d8d8d8 75%),
     linear-gradient(-45deg, transparent 75%, #d8d8d8 75%);
-  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
-  background-size: 16px 16px;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.28),
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-size: 16px 16px;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28),
     0 12px 36px rgba(0, 0, 0, 0.48);
 }
 
@@ -51,38 +49,38 @@ body.image-editor-mode #canvas.long-image-editing {
  * width/height 属性在 JS 里设，样式只负责铺满 + crosshair 光标。
  */
 #canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  cursor: crosshair;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
 }
 
 /* 选取工具由 JS 根据热区切换 move/resize/crosshair；标注工具统一回到准星。 */
 #canvas[data-tool="select"] {
-  cursor: default;
+    cursor: default;
 }
 
 /* 0.20.5：动态交互层——与 #canvas 完全重叠，但只承载遮罩/边框/手柄等动态内容。
    拖动/缩放时只 clearRect + 重绘此层，不触碰静态底图的 drawImage。
    pointer-events: none 让鼠标事件穿透到 #canvas（它仍负责事件绑定）。 */
 #interaction-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 1;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
 }
 
 /* 标注 canvas：位置和尺寸由 JS 动态设置（覆盖在裁剪区上） */
 #annot-canvas {
-  position: absolute;
-  display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
-  pointer-events: none; /* 让主 canvas 处理鼠标事件；标注绘制通过转发实现 */
-  z-index: 2;
+    position: absolute;
+    display: block; /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
+    pointer-events: none; /* 让主 canvas 处理鼠标事件；标注绘制通过转发实现 */
+    z-index: 2;
 }
 
 /* 0.11.9-c：OCR 阅读模式命中层——位置/尺寸由 JS 动态设置，与 annot-canvas 一致。
@@ -91,110 +89,112 @@ body.image-editor-mode #canvas.long-image-editing {
    才截获鼠标，其它标注工具（矩形/箭头/铅笔…）绘制时鼠标穿透到 canvas。
    `data-tool` 由 chord-screenshot.js 的 selectTool 同步到此元素。 */
 #ocr-hit-canvas {
-  position: absolute;
-  display: none;
-  pointer-events: none;
-  z-index: 3;
-  cursor: text;
-  box-sizing: border-box;
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    z-index: 3;
+    cursor: text;
+    box-sizing: border-box;
 }
 
 #ocr-hit-canvas[data-reading="true"] {
-  display: block;
+    display: block;
 }
 
 #ocr-hit-canvas[data-reading="true"][data-tool="select"] {
-  pointer-events: auto;
-  /* 四边保留 8px 给主 canvas 的 resize 热区；中间仍承接 word 拖选。 */
-  clip-path: inset(8px);
+    pointer-events: auto;
+    /* 四边保留 8px 给主 canvas 的 resize 热区；中间仍承接 word 拖选。 */
+    clip-path: inset(8px);
 }
 
 /* resize 进行中暂时彻底让出鼠标，防止命中层抢走后续事件。 */
 #ocr-hit-canvas[data-reading="true"][data-tool="select"][data-resizing="true"] {
-  pointer-events: none;
+    pointer-events: none;
 }
 
 #size-hint {
-  position: fixed;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: var(--text-base);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
-  pointer-events: none;
-  display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
-  z-index: var(--z-dropdown);
-  white-space: nowrap;
+    position: fixed;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: var(--text-base);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 2px 8px;
+    border-radius: var(--radius-xs);
+    pointer-events: none;
+    display: block; /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
+    z-index: var(--z-dropdown);
+    white-space: nowrap;
 }
 
 #error-hint {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  color: #fff;
-  background: rgba(200, 40, 40, 0.85);
-  padding: 12px 20px;
-  border-radius: var(--radius-sm);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-size: var(--text-lg);
-  pointer-events: none; /* 不能拦截 canvas mousedown（否则拖选失效） */
-  display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #fff;
+    background: rgba(200, 40, 40, 0.85);
+    padding: 12px 20px;
+    border-radius: var(--radius-sm);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: var(--text-lg);
+    pointer-events: none; /* 不能拦截 canvas mousedown（否则拖选失效） */
+    display: block; /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
 }
 
 /* 0.20.6：精调状态提示 */
 .precision-hint {
-  position: fixed;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.65);
-  color: #fff;
-  font-size: var(--text-sm);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(74, 158, 255, 0.4);
-  pointer-events: none;
-  display: block;
-  z-index: var(--z-dropdown);
-  white-space: nowrap;
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: var(--text-sm);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 4px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(74, 158, 255, 0.4);
+    pointer-events: none;
+    display: block;
+    z-index: var(--z-dropdown);
+    white-space: nowrap;
 }
 
 /* ── 选区中央加载转圈（OCR/翻译进行中） ────────────────────────── */
 .sel-loading {
-  position: fixed;
-  z-index: var(--z-dropdown);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  pointer-events: none;
-  transform: translate(-50%, -50%);
+    position: fixed;
+    z-index: var(--z-dropdown);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
 }
 
 .sel-loading-spinner {
-  width: 36px;
-  height: 36px;
-  border: 3px solid rgba(255, 255, 255, 0.25);
-  border-top-color: #fff;
-  border-radius: 50%;
-  animation: sel-loading-spin 0.7s linear infinite;
+    width: 36px;
+    height: 36px;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: sel-loading-spin 0.7s linear infinite;
 }
 
 @keyframes sel-loading-spin {
-  to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .sel-loading-text {
-  color: #fff;
-  font-size: var(--text-sm);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  background: rgba(0, 0, 0, 0.6);
-  padding: 2px 10px;
-  border-radius: var(--radius-xs);
-  white-space: nowrap;
+    color: #fff;
+    font-size: var(--text-sm);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 2px 10px;
+    border-radius: var(--radius-xs);
+    white-space: nowrap;
 }
 
 /* ── 工具栏（0.11.7-a；0.11.8 尺寸放大 1.5×；0.11.8-a 分组重组 + 圆润化；
@@ -204,438 +204,437 @@ body.image-editor-mode #canvas.long-image-editing {
    `positionToolbar` 的 offsetWidth/offsetHeight 天然反映新真值，无需改 JS。 */
 
 #toolbar {
-  position: fixed;
-  display: flex;       /* 0.14.7 W4：默认 flex，由 .hidden class 控制隐藏 */
-  align-items: center;
-  gap: 2px;              /* 0.15.8-fix：3 → 2 紧凑化 */
-  padding: 3px 5px;      /* 0.15.8-fix：4/6 → 3/5 紧凑化 */
-  background: rgba(30, 30, 30, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  /* 0.11.8-a：整体圆润化（PixPin 风格）——外壳 12→10 圆角随尺寸缩 */
-  border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
-  z-index: var(--z-dropdown);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    position: fixed;
+    display: flex; /* 0.14.7 W4：默认 flex，由 .hidden class 控制隐藏 */
+    align-items: center;
+    gap: 2px; /* 0.15.8-fix：3 → 2 紧凑化 */
+    padding: 3px 5px; /* 0.15.8-fix：4/6 → 3/5 紧凑化 */
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    /* 0.11.8-a：整体圆润化（PixPin 风格）——外壳 12→10 圆角随尺寸缩 */
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    z-index: var(--z-dropdown);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
 }
 
 /* 浮入选区内模式（选区下方外部落不到可见屏时的兜底）--加阴影区分层次，
    提示用户工具栏此刻浮在选区上方。背景保持不透明（选区底部通常非关键内容）。 */
 #toolbar.toolbar-floating {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
 }
 
 /* ── 拖动 handle（0.11.8-a）：工具栏最左侧，六点竖排 ─────────────
    点住 + 拖动可移动整条工具栏。移动后 positionToolbar 尊重用户位置，
    下次选区不再自动重定位。新一轮截图会清标记回到自动定位。 */
 .toolbar-drag-handle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 26px;          /* 0.15.8-fix：28 → 26 */
-  cursor: grab;
-  user-select: none;
-  border-radius: 5px;
-  color: rgba(255, 255, 255, 0.35);
-  transition: color 0.12s ease, background 0.12s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 26px; /* 0.15.8-fix：28 → 26 */
+    cursor: grab;
+    user-select: none;
+    border-radius: 5px;
+    color: rgba(255, 255, 255, 0.35);
+    transition: color 0.12s ease, background 0.12s ease;
 }
 
 .toolbar-drag-handle:hover {
-  color: rgba(255, 255, 255, 0.7);
-  background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.7);
+    background: rgba(255, 255, 255, 0.06);
 }
 
 .toolbar-drag-handle:active {
-  cursor: grabbing;
-  background: rgba(255, 255, 255, 0.1);
+    cursor: grabbing;
+    background: rgba(255, 255, 255, 0.1);
 }
 
 /* 六个点组成的抓取指示（径向渐变 dot 双列 × 三行）——CSS 单元素画法：
    background-image 用两组 radial-gradient 定位左右两列点，size 决定行距。 */
 .drag-dots {
-  width: 5px;
-  height: 16px;          /* 0.15.8-fix：18 → 16 */
-  background-image:
-    radial-gradient(circle, currentColor 1.3px, transparent 1.6px),
+    width: 5px;
+    height: 16px; /* 0.15.8-fix：18 → 16 */
+    background-image: radial-gradient(circle, currentColor 1.3px, transparent 1.6px),
     radial-gradient(circle, currentColor 1.3px, transparent 1.6px);
-  background-size: 2.5px 6px;
-  background-position: 0 0, 2.5px 0;
-  background-repeat: repeat-y, repeat-y;
+    background-size: 2.5px 6px;
+    background-position: 0 0, 2.5px 0;
+    background-repeat: repeat-y, repeat-y;
 }
 
 .toolbar-group {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
 }
 
 .toolbar-divider {
-  width: 1px;
-  height: 20px;          /* 0.15.8-fix：22 → 20 紧凑化 */
-  background: rgba(255, 255, 255, 0.15);
-  margin: 0 2px;         /* 0.15.8-fix：3 → 2 紧凑化 */
+    width: 1px;
+    height: 20px; /* 0.15.8-fix：22 → 20 紧凑化 */
+    background: rgba(255, 255, 255, 0.15);
+    margin: 0 2px; /* 0.15.8-fix：3 → 2 紧凑化 */
 }
 
 .tool-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 32px;       /* 0.15.8-fix：34 → 32 紧凑化 */
-  height: 32px;          /* 0.15.8-fix：34 → 32 紧凑化 */
-  padding: 0 5px;        /* 0.15.8-fix：6 → 5 紧凑化 */
-  background: transparent;
-  border: 1px solid transparent;
-  /* 0.11.8-a：PixPin 风格圆润化；0.11.8-b 随按钮缩小 10 → 9 */
-  border-radius: 9px;
-  color: #ddd;
-  font-size: 18px;       /* 0.11.8-b：21 → 18 */
-  cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-  user-select: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px; /* 0.15.8-fix：34 → 32 紧凑化 */
+    height: 32px; /* 0.15.8-fix：34 → 32 紧凑化 */
+    padding: 0 5px; /* 0.15.8-fix：6 → 5 紧凑化 */
+    background: transparent;
+    border: 1px solid transparent;
+    /* 0.11.8-a：PixPin 风格圆润化；0.11.8-b 随按钮缩小 10 → 9 */
+    border-radius: 9px;
+    color: #ddd;
+    font-size: 18px; /* 0.11.8-b：21 → 18 */
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    user-select: none;
 }
 
 /* 0.15.8-fix：图标随工具栏缩小 20 → 18 */
 .tool-btn .icon {
-  width: 18px;
-  height: 18px;
-  vertical-align: middle;
+    width: 18px;
+    height: 18px;
+    vertical-align: middle;
 }
 
 /* 0.15.8-fix：图标随工具栏缩小 20 → 18 */
 .tool-btn .icon-mask {
-  width: 18px;
-  height: 18px;
-  vertical-align: middle;
+    width: 18px;
+    height: 18px;
+    vertical-align: middle;
 }
 
 .tool-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
 }
 
 .tool-btn:active:not(:disabled) {
-  background: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.14);
 }
 
 .tool-btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
+    opacity: 0.35;
+    cursor: not-allowed;
 }
 
 .tool-btn.active {
-  background: rgba(74, 158, 255, 0.25);
-  border-color: rgba(74, 158, 255, 0.6);
-  color: #fff;
+    background: rgba(74, 158, 255, 0.25);
+    border-color: rgba(74, 158, 255, 0.6);
+    color: #fff;
 }
 
 .tool-btn-primary {
-  color: #4ade80;
+    color: #4ade80;
 }
 
 .tool-btn-primary:hover:not(:disabled) {
-  background: rgba(74, 222, 128, 0.15);
-  color: #86efac;
+    background: rgba(74, 222, 128, 0.15);
+    color: #86efac;
 }
 
 #btn-cancel {
-  color: #f87171;
+    color: #f87171;
 }
 
 /* ── 文本标注输入框 ──────────────────────────────────── */
 
 .text-annot-input {
-  position: fixed;
-  z-index: 100;
-  display: inline-block;
-  background: rgba(0, 0, 0, 0.6);
-  border: 1px dashed rgba(74, 158, 255, 0.8);
-  border-radius: var(--radius-xs);
-  color: #fff;
-  /* 0.11.8-e：contenteditable span 版本——padding=0 + line-height=1 让字符 glyph 顶
-     严格贴容器顶，与 canvas fillText textBaseline='top' 严格对齐。
-     用负 margin 抵消 1px border（border 是外扩的 content-box）。 */
-  padding: 0;
-  outline: none;
-  box-sizing: content-box;
-  margin: -1px 0 0 -1px;
-  font-family: sans-serif;
-  line-height: 1;
-  min-width: 8px;
-  max-width: 800px;
-  white-space: pre;
-  cursor: text;
-  /* 空内容时显示 placeholder（data-placeholder） */
+    position: fixed;
+    z-index: 100;
+    display: inline-block;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px dashed rgba(74, 158, 255, 0.8);
+    border-radius: var(--radius-xs);
+    color: #fff;
+    /* 0.11.8-e：contenteditable span 版本——padding=0 + line-height=1 让字符 glyph 顶
+       严格贴容器顶，与 canvas fillText textBaseline='top' 严格对齐。
+       用负 margin 抵消 1px border（border 是外扩的 content-box）。 */
+    padding: 0;
+    outline: none;
+    box-sizing: content-box;
+    margin: -1px 0 0 -1px;
+    font-family: sans-serif;
+    line-height: 1;
+    min-width: 8px;
+    max-width: 800px;
+    white-space: pre;
+    cursor: text;
+    /* 空内容时显示 placeholder（data-placeholder） */
 }
 
 /* contenteditable 版本 placeholder：::before 显示 data-placeholder */
 .text-annot-input:empty::before {
-  content: attr(data-placeholder);
-  color: rgba(255, 255, 255, 0.35);
-  pointer-events: none;
+    content: attr(data-placeholder);
+    color: rgba(255, 255, 255, 0.35);
+    pointer-events: none;
 }
 
 /* ── OCR 结果面板 ──────────────────────────────────────── */
 
 .ocr-panel {
-  position: fixed;
-  z-index: 50;
-  background: rgba(30, 30, 30, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  min-width: 320px;
-  max-width: 560px;
-  width: 520px;
-  max-height: 480px;
-  height: 440px;
-  display: flex;
-  flex-direction: column;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    position: fixed;
+    z-index: 50;
+    background: rgba(30, 30, 30, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    min-width: 320px;
+    max-width: 560px;
+    width: 520px;
+    max-height: 480px;
+    height: 440px;
+    display: flex;
+    flex-direction: column;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
 }
 
 .ocr-panel-header {
-  display: flex;
-  align-items: center;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: #aaa;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  /* 0.11.10 重构：header 作为面板拖动抓手（点 toggle/close 时不启动拖动） */
-  cursor: move;
-  user-select: none;
+    display: flex;
+    align-items: center;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #aaa;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    /* 0.11.10 重构：header 作为面板拖动抓手（点 toggle/close 时不启动拖动） */
+    cursor: move;
+    user-select: none;
 }
 
 /* 操作按钮组：tabs 和 close 之间的居中区域 */
 .ocr-panel-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  justify-content: center;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    justify-content: center;
 }
 
 /* header 内操作按钮（复制/翻译）：与 close 按钮统一高度 */
 .ocr-panel-actions .tool-btn {
-  min-width: 28px;
-  height: 20px;
-  font-size: 11px;
-  padding: 0 8px;
+    min-width: 28px;
+    height: 20px;
+    font-size: 11px;
+    padding: 0 8px;
 }
 
 /* close 按钮推到最右 */
 .ocr-panel-header #ocr-close {
-  margin-left: auto;
+    margin-left: auto;
 }
 
 .ocr-panel-header .tool-btn {
-  min-width: 20px;
-  height: 20px;
-  font-size: 11px;
+    min-width: 20px;
+    height: 20px;
+    font-size: 11px;
 }
 
 /* 「在图上显示」toggle：决定 overlay 显隐，面板与嵌图解耦的核心控件 */
 .ocr-overlay-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--text-sub, #aaa);
-  cursor: pointer;
-  user-select: none;
-  pointer-events: auto;
-  height: 20px;
-  line-height: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-sub, #aaa);
+    cursor: pointer;
+    user-select: none;
+    pointer-events: auto;
+    height: 20px;
+    line-height: 20px;
 }
 
 .ocr-overlay-toggle:hover {
-  color: var(--text, #ddd);
+    color: var(--text, #ddd);
 }
 
 .ocr-overlay-toggle input[type="checkbox"] {
-  margin: 0;
-  cursor: pointer;
-  accent-color: var(--accent, #4a9eff);
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--accent, #4a9eff);
 }
 
 /* 0.11.9-d：OCR 面板双 tab（原文/译文）——头部标签栏 */
 .ocr-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
 }
 
 .ocr-tab {
-  background: transparent;
-  border: none;
-  color: #888;
-  font-size: 12px;
-  padding: 4px 12px;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  user-select: none;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+    background: transparent;
+    border: none;
+    color: #888;
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: var(--radius-xs);
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
 }
 
 .ocr-tab:hover {
-  color: #ddd;
-  background: rgba(255, 255, 255, 0.05);
+    color: #ddd;
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .ocr-tab.active {
-  color: var(--accent, #4a9eff);
-  background: var(--accent-bg, rgba(74, 158, 255, 0.12));
+    color: var(--accent, #4a9eff);
+    background: var(--accent-bg, rgba(74, 158, 255, 0.12));
 }
 
 /* 译文过期标记（原文改动后） */
 .ocr-tab .stale-dot {
-  display: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #f59e0b;
+    display: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f59e0b;
 }
 
 .ocr-tab[data-stale="true"] .stale-dot {
-  display: inline-block;
+    display: inline-block;
 }
 
 .ocr-panel-body {
-  padding: 10px;
-  font-size: 13px;
-  color: #eee;
-  line-height: 1.5;
-  overflow-y: auto;
-  flex: 1;
-  white-space: pre-wrap;
-  word-break: break-all;
+    padding: 10px;
+    font-size: 13px;
+    color: #eee;
+    line-height: 1.5;
+    overflow-y: auto;
+    flex: 1;
+    white-space: pre-wrap;
+    word-break: break-all;
 }
 
 /* OCR 可编辑 textarea（0.11.8）：用户可自由选词复制或编辑 */
 .ocr-panel-textarea {
-  margin: 10px 12px;
-  padding: 10px 12px;
-  min-height: 200px;
-  flex: 1;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-xs);
-  color: #eee;
-  font-size: 14px;
-  font-family: "Cascadia Code", "Consolas", "Segoe UI", "Microsoft YaHei", monospace;
-  line-height: 1.6;
-  resize: none;
-  outline: none;
-  user-select: text;
-  -webkit-user-select: text;
-  overflow-y: auto;
+    margin: 10px 12px;
+    padding: 10px 12px;
+    min-height: 200px;
+    flex: 1;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-xs);
+    color: #eee;
+    font-size: 14px;
+    font-family: "Cascadia Code", "Consolas", "Segoe UI", "Microsoft YaHei", monospace;
+    line-height: 1.6;
+    resize: none;
+    outline: none;
+    user-select: text;
+    -webkit-user-select: text;
+    overflow-y: auto;
 }
 
 .ocr-panel-textarea:focus {
-  border-color: var(--accent, rgba(74, 158, 255, 0.7));
-  box-shadow: 0 0 0 2px var(--accent-bg, rgba(74, 158, 255, 0.15));
+    border-color: var(--accent, rgba(74, 158, 255, 0.7));
+    box-shadow: 0 0 0 2px var(--accent-bg, rgba(74, 158, 255, 0.15));
 }
 
 /* 0.11.9-d：藏起来的 tab（只显示 active tab 的 textarea） */
 .ocr-panel-textarea[hidden] {
-  display: none;
+    display: none;
 }
 
 /* 译文过期视觉：斜纹底 + 提示文字 */
 .ocr-panel-textarea[data-stale="true"] {
-  opacity: 0.6;
+    opacity: 0.6;
 }
 
 /* 翻译中占位态 */
 .ocr-panel-textarea[data-loading="true"] {
-  opacity: 0.5;
+    opacity: 0.5;
 }
 
 /* textarea 自定义滚动条（暗色主题，替代原生丑陋滚动条） */
 .ocr-panel-textarea::-webkit-scrollbar {
-  width: 10px;
+    width: 10px;
 }
 
 .ocr-panel-textarea::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 5px;
-  margin: 4px 0;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 5px;
+    margin: 4px 0;
 }
 
 .ocr-panel-textarea::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 5px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
 }
 
 .ocr-panel-textarea::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.32);
-  background-clip: padding-box;
-  border: 2px solid transparent;
+    background: rgba(255, 255, 255, 0.32);
+    background-clip: padding-box;
+    border: 2px solid transparent;
 }
 
 
 .ocr-panel-hint {
-  font-size: 11px;
-  color: #888;
-  flex: 1;
+    font-size: 11px;
+    color: #888;
+    flex: 1;
 }
 
 /* 0.11.10-i：进阶控件行(背景策略等)——融入面板底部 */
 .ocr-panel-adv {
-  padding: 6px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(30, 30, 30, 0.95);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    padding: 6px 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(30, 30, 30, 0.95);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
 }
 
 .ocr-adv-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-sub, #aaa);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-sub, #aaa);
 }
 
 .ocr-adv-item select {
-  background: var(--surface, rgba(255, 255, 255, 0.06));
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: var(--text, #ddd);
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  cursor: pointer;
+    background: var(--surface, rgba(255, 255, 255, 0.06));
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: var(--text, #ddd);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
 }
 
 /* select 下拉选项：修复白底灰字，走主题配色 */
 .ocr-adv-item select option {
-  background: var(--bg-deep, #1e1e2e);
-  color: var(--text, #eee);
+    background: var(--bg-deep, #1e1e2e);
+    color: var(--text, #eee);
 }
 
 .ocr-adv-item select:hover {
-  background: var(--surface-2, rgba(255, 255, 255, 0.12));
+    background: var(--surface-2, rgba(255, 255, 255, 0.12));
 }
 
 .ocr-adv-item input[type="range"] {
-  accent-color: var(--accent, #4a9eff);
+    accent-color: var(--accent, #4a9eff);
 }
 
 .ocr-adv-item input[type="checkbox"] {
-  accent-color: var(--accent, #4a9eff);
+    accent-color: var(--accent, #4a9eff);
 }
 
 #btn-cancel:hover {
-  background: rgba(248, 113, 113, 0.15);
-  color: #fca5a5;
+    background: rgba(248, 113, 113, 0.15);
+    color: #fca5a5;
 }
 
 /* ── 颜色选择器（0.11.8-b：改实心圆）───────────────────────
@@ -643,169 +642,170 @@ body.image-editor-mode #canvas.long-image-editing {
    → 整颗圆点被色彩填满，视觉上跟 PixPin 等主流截图工具一致。 */
 
 .color-swatch {
-  min-width: 18px;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 3px;
-  cursor: pointer;
-  /* button 默认 background: transparent，被内联 style 的 background:#xxx 覆盖 */
+    min-width: 18px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    cursor: pointer;
+    /* button 默认 background: transparent，被内联 style 的 background:#xxx 覆盖 */
 }
 
 .color-swatch.active {
-  /* active 用双环表达：外描白圈 + 内色圆 */
-  border-color: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.4);
+    /* active 用双环表达：外描白圈 + 内色圆 */
+    border-color: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.4);
 }
 
 .color-input {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: var(--radius-xs);
-  background: transparent;
-  cursor: pointer;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: var(--radius-xs);
+    background: transparent;
+    cursor: pointer;
 }
 
 .color-input::-webkit-color-swatch-wrapper {
-  padding: 1px;
+    padding: 1px;
 }
 
 .color-input::-webkit-color-swatch {
-  border: none;
-  border-radius: 2px;
+    border: none;
+    border-radius: 2px;
 }
 
 /* ── 粗细选择 ──────────────────────────────────────────── */
 
 .width-btn {
-  font-size: 10px;
-  padding: 0 4px;
-  min-width: 24px;
-  height: 22px;
-  letter-spacing: -1px;
+    font-size: 10px;
+    padding: 0 4px;
+    min-width: 24px;
+    height: 22px;
+    letter-spacing: -1px;
 }
 
 .width-btn.active {
-  border-color: rgba(74, 158, 255, 0.6);
-  background: rgba(74, 158, 255, 0.15);
+    border-color: rgba(74, 158, 255, 0.6);
+    background: rgba(74, 158, 255, 0.15);
 }
 
 /* ── 下拉触发器 / 浮层（0.11.8 收起化）────────────────── */
 
 .dropdown-wrap {
-  position: relative;
-  display: inline-flex;
+    position: relative;
+    display: inline-flex;
 }
 
 .dropdown-trigger {
-  display: inline-flex;
-  align-items: center;
+    display: inline-flex;
+    align-items: center;
 }
 
 .dropdown-trigger.menu-open {
-  color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    background: var(--accent-bg);
 }
 
 /* 颜色触发器里的圆点（0.11.8-b：改实心圆，与 .color-swatch 视觉统一） */
 .color-dot {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  line-height: 1;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    line-height: 1;
 }
 
 /* ── 0.15.8-fix：split-btn 已移除，split-main 作为独立按钮 ────────────
    原 split-button 设计（主按钮 + caret 按钮）已改为 hover 自动展开。
    split-main 保留 class 名以兼容 JS 选择器，但样式上等同普通 tool-btn。 */
 .split-main {
-  /* 保持略紧凑的 padding（原 split 时代的遗留值） */
-  padding: 0 4px;
-  min-width: 30px;
+    /* 保持略紧凑的 padding（原 split 时代的遗留值） */
+    padding: 0 4px;
+    min-width: 30px;
 }
 
 .dropdown {
-  position: absolute;
-  top: calc(100% + 2px);  /* 0.15.8-fix：4 → 2 减少 hover 间隙 */
-  left: 0;
-  display: none;
-  flex-direction: column;
-  background: rgba(30, 30, 30, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  /* 0.11.8-a：dropdown 面板圆润化，与工具栏外壳呼应 */
-  border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-  padding: 4px;
-  min-width: 90px;
-  z-index: calc(var(--z-dropdown) + 10);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    position: absolute;
+    top: calc(100% + 2px); /* 0.15.8-fix：4 → 2 减少 hover 间隙 */
+    left: 0;
+    display: none;
+    flex-direction: column;
+    background: rgba(30, 30, 30, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    /* 0.11.8-a：dropdown 面板圆润化，与工具栏外壳呼应 */
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+    min-width: 90px;
+    z-index: calc(var(--z-dropdown) + 10);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
 }
 
 .dropdown[data-open="true"] {
-  display: flex;
+    display: flex;
 }
 
 /* 工具栏位于屏幕底部时，JS 给 dropdown 标记 data-placement="top"。 */
 .dropdown[data-placement="top"] {
-  top: auto;
-  bottom: calc(100% + 2px);  /* 0.15.8-fix：4 → 2 */
+    top: auto;
+    bottom: calc(100% + 2px); /* 0.15.8-fix：4 → 2 */
 }
 
 .dropdown-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  background: transparent;
-  border: none;
-  /* 0.11.8-a：item 圆角略大，跟外壳呼应 */
-  border-radius: 8px;
-  color: #ddd;
-  font-size: 12px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  cursor: pointer;
-  text-align: left;
-  white-space: nowrap;
-  transition: background 0.1s ease, color 0.1s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    background: transparent;
+    border: none;
+    /* 0.11.8-a：item 圆角略大，跟外壳呼应 */
+    border-radius: 8px;
+    color: #ddd;
+    font-size: 12px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+    text-align: left;
+    white-space: nowrap;
+    transition: background 0.1s ease, color 0.1s ease;
 }
 
 .dropdown-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
 }
 
 .dropdown-item.active {
-  background: rgba(74, 158, 255, 0.2);
-  color: #fff;
+    background: rgba(74, 158, 255, 0.2);
+    color: #fff;
 }
 
 .dropdown-item .item-icon {
-  display: inline-flex;
-  width: 18px;
-  justify-content: center;
-  font-size: 14px;
+    display: inline-flex;
+    width: 18px;
+    justify-content: center;
+    font-size: 14px;
 }
 
 /* 0.11.8：dropdown item 里若装 Lucide 图标（马赛克/涂抹/橡皮擦/形状），
    给个明确的尺寸——否则会继承 font-size 14px → 1em=14px 图标偏小；
    与 label（12px）对齐时视觉重量不足。 */
 .dropdown-item .item-icon .icon {
-  width: 16px;
-  height: 16px;
-  stroke-width: 1.75;
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.75;
 }
+
 .dropdown-item .item-icon .icon-mask {
-  width: 16px;
-  height: 16px;
+    width: 16px;
+    height: 16px;
 }
 
 .dropdown-item .item-label {
-  flex: 1;
+    flex: 1;
 }
 
 /* 0.11.8：粗细选择的横线图标 —— 用 CSS 画固定宽度水平线，粗细由 height 表达。
@@ -814,540 +814,548 @@ body.image-editor-mode #canvas.long-image-editing {
    在 .dropdown-item .item-icon（18px 容器）内 width-bar 靠 max-width 收敛；
    在触发器（无容器限制）时占自然 22px。 */
 .width-bar {
-  display: inline-block;
-  width: 22px;
-  max-width: 100%;
-  background: currentColor;
-  border-radius: 1px;
-  vertical-align: middle;
+    display: inline-block;
+    width: 22px;
+    max-width: 100%;
+    background: currentColor;
+    border-radius: 1px;
+    vertical-align: middle;
 }
-.width-bar-thin   { height: 1px; }
-.width-bar-medium { height: 2px; }
-.width-bar-thick  { height: 4px; }
+
+.width-bar-thin {
+    height: 1px;
+}
+
+.width-bar-medium {
+    height: 2px;
+}
+
+.width-bar-thick {
+    height: 4px;
+}
 
 /* 颜色下拉特殊布局：0.15.4 完整色盘 */
 .dropdown-color {
-  padding: 8px;
-  width: 286px;
-  min-width: 286px;
-  max-height: min(720px, calc(100vh - 24px));
-  background: color-mix(in srgb, var(--bg) 96%, transparent);
-  border-color: color-mix(in srgb, var(--text) 18%, transparent);
-  box-shadow: 0 6px 20px var(--shadow);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: auto;
+    padding: 8px;
+    width: 286px;
+    min-width: 286px;
+    max-height: min(720px, calc(100vh - 24px));
+    background: color-mix(in srgb, var(--bg) 96%, transparent);
+    border-color: color-mix(in srgb, var(--text) 18%, transparent);
+    box-shadow: 0 6px 20px var(--shadow);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: auto;
 }
 
 /* JS 生成结果后会切 hidden；显式声明避免 flex/grid author style 覆盖 UA hidden。 */
 .dropdown-color [hidden] {
-  display: none;
+    display: none;
 }
 
 .color-panel-drag {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 24px;
-  margin: -2px -2px 6px;
-  padding: 0 4px 5px;
-  border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
-  color: var(--text-sub);
-  cursor: grab;
-  user-select: none;
-  font-style: normal;
-  position: sticky;
-  top: -2px;
-  z-index: 1;
-  background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 24px;
+    margin: -2px -2px 6px;
+    padding: 0 4px 5px;
+    border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+    color: var(--text-sub);
+    cursor: grab;
+    user-select: none;
+    font-style: normal;
+    position: sticky;
+    top: -2px;
+    z-index: 1;
+    background: var(--bg);
 }
 
 .color-panel-drag:active {
-  cursor: grabbing;
+    cursor: grabbing;
 }
 
 .color-panel-title {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
 }
 
 .color-panel-drag-hint {
-  font-size: 10px;
-  opacity: 0.62;
+    font-size: 10px;
+    opacity: 0.62;
 }
 
 /* 预设色阵列 */
 .color-presets {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 4px;
-  margin-bottom: 2px;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 4px;
+    margin-bottom: 2px;
 }
 
 .color-presets .color-swatch {
-  width: 100%;
-  aspect-ratio: 1;
-  min-width: 0;
+    width: 100%;
+    aspect-ratio: 1;
+    min-width: 0;
 }
 
 /* SV 色盘 */
 .sv-canvas {
-  width: 100%;
-  height: 120px;
-  border-radius: var(--radius-xs);
-  cursor: crosshair;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  display: block;
+    width: 100%;
+    height: 120px;
+    border-radius: var(--radius-xs);
+    cursor: crosshair;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    display: block;
 }
 
 /* 色相条 + 透明度条 + 取色按钮布局 */
 .color-bars {
-  display: flex;
-  gap: 4px;
-  margin: 4px 0;
-  align-items: stretch;
+    display: flex;
+    gap: 4px;
+    margin: 4px 0;
+    align-items: stretch;
 }
 
 .bars-right {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
 }
 
 /* 0.15.12：取色按钮/色彩格式/提取个数宽度统一对齐，加宽到 56px */
 .eyedropper-btn {
-  width: 56px;
-  min-width: 56px;
-  height: 28px;  /* 等于 2 条色条高度 + gap (12 + 4 + 12 = 28) */
-  font-size: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-xs);
-  background: rgba(255, 255, 255, 0.06);
-  color: #ccc;
-  cursor: pointer;
-  transition: background 0.1s ease;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+    width: 56px;
+    min-width: 56px;
+    height: 28px; /* 等于 2 条色条高度 + gap (12 + 4 + 12 = 28) */
+    font-size: 11px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-xs);
+    background: rgba(255, 255, 255, 0.06);
+    color: #ccc;
+    cursor: pointer;
+    transition: background 0.1s ease;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 /* 0.15.12：取色按钮里的图标 */
 .eyedropper-btn .icon {
-  width: 16px;
-  height: 16px;
+    width: 16px;
+    height: 16px;
 }
 
 .eyedropper-btn:hover {
-  background: rgba(74, 158, 255, 0.15);
-  color: #fff;
+    background: rgba(74, 158, 255, 0.15);
+    color: #fff;
 }
 
 /* 色相条 */
 .hue-bar {
-  width: 100%;
-  height: 12px;
-  border-radius: var(--radius-xs);
-  cursor: ew-resize;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  display: block;
+    width: 100%;
+    height: 12px;
+    border-radius: var(--radius-xs);
+    cursor: ew-resize;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    display: block;
 }
 
 /* P1-3：透明度条——标准方形棋盘，最多 1px 微圆角，色相条可保留圆角 */
 .alpha-bar {
-  width: 100%;
-  height: 12px;
-  border-radius: 1px;
-  cursor: ew-resize;
-  border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
-  display: block;
+    width: 100%;
+    height: 12px;
+    border-radius: 1px;
+    cursor: ew-resize;
+    border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
+    display: block;
 }
 
 /* HEX/RGB/HSL 输入行 */
 .color-input-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
 }
 
 /* 0.15.12：宽度与取色按钮/提取个数对齐 */
 .color-format {
-  width: 56px;
-  min-width: 56px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #ccc;
-  font-size: 11px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-style: normal;
-  padding: 3px 4px;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  outline: none;
+    width: 56px;
+    min-width: 56px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #ccc;
+    font-size: 11px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-style: normal;
+    padding: 3px 4px;
+    border-radius: var(--radius-xs);
+    cursor: pointer;
+    outline: none;
 }
 
 .color-format option {
-  background: #2a2a2a;
-  color: #eee;
+    background: #2a2a2a;
+    color: #eee;
 }
 
 .color-value {
-  flex: 1;
-  min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-xs);
-  color: #eee;
-  font-size: 12px;
-  font-family: "Cascadia Code", "Consolas", monospace;
-  outline: none;
-  text-align: center;
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    padding: 0 6px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-xs);
+    color: #eee;
+    font-size: 12px;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    outline: none;
+    text-align: center;
 }
 
 .color-value:focus {
-  border-color: rgba(74, 158, 255, 0.7);
-  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+    border-color: rgba(74, 158, 255, 0.7);
+    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
 }
 
 /* ── 0.20.7：配色提取与可用输出 ────────────────────────── */
 
 .palette-divider {
-  height: 1px;
-  background: color-mix(in srgb, var(--text) 12%, transparent);
-  margin: 8px 0;
+    height: 1px;
+    background: color-mix(in srgb, var(--text) 12%, transparent);
+    margin: 8px 0;
 }
 
 .palette-section-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-  font-style: normal;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 600;
+    font-style: normal;
 }
 
 .palette-source-heading {
-  align-items: center;
+    align-items: center;
 }
 
 .palette-extract-btn {
-  width: auto;
-  height: 22px;
-  padding: 0 9px;
-  background: var(--accent-bg);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: var(--radius-md);
-  color: var(--accent);
-  font-size: 10px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+    width: auto;
+    height: 22px;
+    padding: 0 9px;
+    background: var(--accent-bg);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: var(--radius-md);
+    color: var(--accent);
+    font-size: 10px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .palette-extract-btn:hover {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent);
 }
 
 .palette-extracted {
-  display: block;
-  margin-top: 6px;
+    display: block;
+    margin-top: 6px;
 }
 
 .palette-theme-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
 }
 
 .palette-theme-summary {
-  margin-top: 5px;
-  color: var(--text-sub);
-  font-size: 10px;
-  line-height: 1.35;
-  opacity: 0.78;
-  font-style: normal;
+    margin-top: 5px;
+    color: var(--text-sub);
+    font-size: 10px;
+    line-height: 1.35;
+    opacity: 0.78;
+    font-style: normal;
 }
 
 .palette-theme-color {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 26px;
-  padding: 2px 6px 2px 3px;
-  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface) 48%, transparent);
-  color: var(--text-sub);
-  font: 10px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
-  cursor: pointer;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    padding: 2px 6px 2px 3px;
+    border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface) 48%, transparent);
+    color: var(--text-sub);
+    font: 10px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .palette-theme-color:hover {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .palette-theme-color.is-selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .palette-theme-swatch {
-  width: 20px;
-  height: 20px;
-  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
-  border-radius: var(--radius-sm);
+    width: 20px;
+    height: 20px;
+    border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+    border-radius: var(--radius-sm);
 }
 
 .palette-theme-label {
-  white-space: nowrap;
+    white-space: nowrap;
 }
 
 .palette-swatch {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-xs);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  cursor: pointer;
-  transition: transform 0.1s ease, border-color 0.1s ease;
-  padding: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-xs);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    cursor: pointer;
+    transition: transform 0.1s ease, border-color 0.1s ease;
+    padding: 0;
 }
 
 .palette-swatch:hover {
-  transform: scale(1.12);
-  border-color: rgba(255, 255, 255, 0.5);
+    transform: scale(1.12);
+    border-color: rgba(255, 255, 255, 0.5);
 }
 
 /* 复制反馈 */
 .palette-swatch.copied {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .palette-swatch.is-selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 /* harmony 区域 */
 .palette-harmony {
-  margin-top: 10px;
+    margin-top: 10px;
 }
 
 /* ── 0.20.7：角色色、推荐方案、对比度、复制 UI ─────────────────── */
 
 /* P1-3：操作行——左提示/计数 + 右复制所选 */
 .palette-actions-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  margin-top: 7px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: 7px;
 }
 
 .palette-selection-hint {
-  color: var(--text-sub);
-  font-size: 10px;
-  font-style: normal;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+    color: var(--text-sub);
+    font-size: 10px;
+    font-style: normal;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .palette-copy-wrap {
-  position: relative;
-  display: inline-flex;
-  flex-shrink: 0;
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
 }
 
 .palette-copy-menu {
-  top: calc(100% + 2px);
-  right: 0;
-  left: auto;
-  min-width: 120px;
+    top: calc(100% + 2px);
+    right: 0;
+    left: auto;
+    min-width: 120px;
 }
 
 .palette-copy-all {
-  height: 26px;
-  background: color-mix(in srgb, var(--surface) 78%, transparent);
-  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
-  border-radius: var(--radius-md);
-  color: var(--text-sub);
-  font-size: 11px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+    height: 26px;
+    background: color-mix(in srgb, var(--surface) 78%, transparent);
+    border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+    border-radius: var(--radius-md);
+    color: var(--text-sub);
+    font-size: 11px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
 
 .palette-copy-all:hover {
-  background: var(--accent-bg);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--accent);
+    background: var(--accent-bg);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
 }
 
 .palette-copy-all {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
 }
 
 .palette-copy-all:disabled {
-  cursor: default;
-  opacity: 0.5;
+    cursor: default;
+    opacity: 0.5;
 }
 
 .palette-copy-all .icon {
-  width: 13px;
-  height: 13px;
+    width: 13px;
+    height: 13px;
 }
 
 .palette-more-toggle {
-  width: auto;
-  min-width: 0;
-  margin: 0;
-  white-space: nowrap;
+    width: auto;
+    min-width: 0;
+    margin: 0;
+    white-space: nowrap;
 }
 
 
-
 .palette-empty {
-  font-size: 11px;
-  color: var(--text-dim);
-  padding: 4px 0;
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 4px 0;
 }
 
 /* harmony 方案区域 */
 .harmony-scheme-label {
-  font-size: 11px;
-  color: var(--text);
-  font-weight: 600;
-  font-style: normal;
+    font-size: 11px;
+    color: var(--text);
+    font-weight: 600;
+    font-style: normal;
 }
 
 .harmony-scheme-header {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
 }
 
 .harmony-scheme-description {
-  overflow: hidden;
-  color: var(--text-sub);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.7;
-  font-style: normal;
+    overflow: hidden;
+    color: var(--text-sub);
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.7;
+    font-style: normal;
 }
 
 .harmony-copy-group {
-  padding: 1px 4px;
-  border: 0;
-  background: transparent;
-  color: var(--text-sub);
-  font: 9px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
-  cursor: pointer;
+    padding: 1px 4px;
+    border: 0;
+    background: transparent;
+    color: var(--text-sub);
+    font: 9px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer;
 }
 
 .harmony-copy-group:hover {
-  color: var(--accent);
+    color: var(--accent);
 }
 
 /* P1-3：复制整组下拉菜单容器 */
 .palette-group-copy-wrap {
-  position: relative;
-  display: inline-flex;
+    position: relative;
+    display: inline-flex;
 }
 
 .palette-group-copy-menu {
-  top: calc(100% + 2px);
-  right: 0;
-  left: auto;
-  min-width: 100px;
+    top: calc(100% + 2px);
+    right: 0;
+    left: auto;
+    min-width: 100px;
 }
 
 .harmony-color-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
 }
 
 .harmony-swatches {
-  display: grid;
-  gap: 6px;
-  margin-top: 6px;
+    display: grid;
+    gap: 6px;
+    margin-top: 6px;
 }
 
 .harmony-scheme-card {
-  padding: 5px 6px;
-  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface) 46%, transparent);
+    padding: 5px 6px;
+    border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface) 46%, transparent);
 }
 
 /* P1-2：智能搭配降级状态——边框 + 提示条 */
 .harmony-scheme-card.is-degraded {
-  border-color: color-mix(in srgb, var(--yellow) 40%, transparent);
+    border-color: color-mix(in srgb, var(--yellow) 40%, transparent);
 }
 
 .harmony-degraded-notice {
-  margin: 2px 0 4px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--yellow) 12%, transparent);
-  color: var(--text-sub);
-  font-size: 10px;
-  line-height: 1.4;
+    margin: 2px 0 4px;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--yellow) 12%, transparent);
+    color: var(--text-sub);
+    font-size: 10px;
+    line-height: 1.4;
 }
 
 /* 完整方案区域 */
 .palette-more-schemes {
-  margin-top: 6px;
-  display: grid;
-  gap: 6px;
+    margin-top: 6px;
+    display: grid;
+    gap: 6px;
 }
 
 .palette-generated-heading {
-  color: var(--text-sub);
-  font-size: 10px;
-  line-height: 1.3;
+    color: var(--text-sub);
+    font-size: 10px;
+    line-height: 1.3;
 }
 
 /* 复制失败反馈 */
 .palette-swatch.copy-failed {
-  border-color: var(--red);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
+    border-color: var(--red);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
 }
 
 .palette-copy-all.copy-failed {
-  border-color: var(--red);
-  color: var(--red);
+    border-color: var(--red);
+    color: var(--red);
 }
 
 .palette-copy-status {
-  min-height: 14px;
-  margin-top: 4px;
-  color: var(--text-sub);
-  font-size: 10px;
-  text-align: center;
-  opacity: 0.72;
-  font-style: normal;
+    min-height: 14px;
+    margin-top: 4px;
+    color: var(--text-sub);
+    font-size: 10px;
+    text-align: center;
+    opacity: 0.72;
+    font-style: normal;
 }
 
 .palette-copy-status:empty {
-  display: none;
+    display: none;
 }
 
 /* ── 水印表单（0.11.8-c：内嵌 text-dropdown 视图切换）─────────────
@@ -1356,737 +1364,743 @@ body.image-editor-mode #canvas.long-image-editing {
 
 /* 0.15.13：text dropdown 尺寸与其他 dropdown 对齐（水印表单已移至 sub-panel） */
 .dropdown-text {
-  min-width: 90px;
+    min-width: 90px;
 }
 
 /* 0.15.14：dropdown-view 规则已废弃（text dropdown 移除包裹层，直接放 dropdown-item） */
 
 /* 0.15.2：文字配置视图 */
 .text-style-toggles .tool-btn {
-  min-width: 28px;
-  height: 24px;
-  font-size: 12px;
-  padding: 0 6px;
+    min-width: 28px;
+    height: 24px;
+    font-size: 12px;
+    padding: 0 6px;
 }
 
 .text-style-toggles .tool-btn.active {
-  background: rgba(74, 158, 255, 0.25);
-  border-color: rgba(74, 158, 255, 0.6);
-  color: #fff;
+    background: rgba(74, 158, 255, 0.25);
+    border-color: rgba(74, 158, 255, 0.6);
+    color: #fff;
 }
 
 .wm-form-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 4px 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 12px;
-  color: #ccc;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 12px;
+    color: #ccc;
 }
 
 .wm-back {
-  background: transparent;
-  border: none;
-  color: #aaa;
-  cursor: pointer;
-  font-size: 18px;
-  line-height: 1;
-  padding: 0 4px;
-  border-radius: 6px;
+    background: transparent;
+    border: none;
+    color: #aaa;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 6px;
 }
 
 .wm-back:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
 }
 
 .wm-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 4px;
-  font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 4px;
+    font-size: 12px;
 }
 
 .wm-label {
-  width: 42px;
-  color: #aaa;
-  flex-shrink: 0;
+    width: 42px;
+    color: #aaa;
+    flex-shrink: 0;
 }
 
 .wm-text,
 .wm-layout {
-  flex: 1;
-  min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 6px;
-  color: #eee;
-  font-size: 12px;
-  font-family: inherit;
-  outline: none;
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    padding: 0 6px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: #eee;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
 }
 
 .wm-text:focus,
 .wm-layout:focus {
-  border-color: rgba(74, 158, 255, 0.7);
-  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+    border-color: rgba(74, 158, 255, 0.7);
+    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
 }
 
 .wm-layout option {
-  background: #2a2a2a;
-  color: #eee;
+    background: #2a2a2a;
+    color: #eee;
 }
 
 .wm-opacity {
-  flex: 1;
-  min-width: 0;
-  accent-color: #4a9eff;
-  height: 20px;
-  margin: 0;
+    flex: 1;
+    min-width: 0;
+    accent-color: #4a9eff;
+    height: 20px;
+    margin: 0;
 }
 
 .wm-opacity-val {
-  width: 34px;
-  text-align: right;
-  color: #ccc;
-  font-variant-numeric: tabular-nums;
+    width: 34px;
+    text-align: right;
+    color: #ccc;
+    font-variant-numeric: tabular-nums;
 }
 
 .wm-form-footer {
-  padding: 4px 4px 2px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  margin-top: 2px;
+    padding: 4px 4px 2px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 2px;
 }
 
 .wm-form-footer .tool-btn {
-  min-width: 60px;
-  height: 24px;
-  font-size: 12px;
-  padding: 0 12px;
+    min-width: 60px;
+    height: 24px;
+    font-size: 12px;
+    padding: 0 12px;
 }
 
 /* 0.11.9-a：清除按钮 disabled 态视觉 */
 .wm-form-footer .wm-clear:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 /* ── 0.15.1：模式切换器 ──────────────────────────────── */
 
 .mode-switcher {
-  display: flex;
-  gap: 2px;
-  padding: 2px 4px;
+    display: flex;
+    gap: 2px;
+    padding: 2px 4px;
 }
 
 .mode-btn {
-  flex: 1;
-  padding: 4px 8px;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: #aaa;
-  font-size: 11px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  cursor: pointer;
-  text-align: center;
-  transition: background 0.1s ease, color 0.1s ease;
+    flex: 1;
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: #aaa;
+    font-size: 11px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.1s ease, color 0.1s ease;
 }
 
 .mode-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
 }
 
 .mode-btn.active {
-  background: rgba(74, 158, 255, 0.2);
-  border-color: rgba(74, 158, 255, 0.6);
-  color: #fff;
+    background: rgba(74, 158, 255, 0.2);
+    border-color: rgba(74, 158, 255, 0.6);
+    color: #fff;
 }
 
 /* ── 0.15.9：操作组 undo/redo/reset 三键一组，始终可见 ── */
 
 .undo-group {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
 }
 
 /* 0.15.9：redo 不再 hover 展开，始终可见 */
 .undo-group .btn-redo {
-  display: inline-flex;
+    display: inline-flex;
 }
 
 /* ── 0.15.0：dropdown 内分隔线 ─────────────────────────── */
 
 .dropdown-separator {
-  height: 1px;
-  background: rgba(255, 255, 255, 0.1);
-  margin: 3px 4px;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.1);
+    margin: 3px 4px;
 }
 
 /* ── 0.15.9：放大镜倍率子菜单行 ─────────────────────── */
 
 .magnifier-zoom-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px;
 }
 
 .magnifier-zoom-row .wm-label {
-  width: 42px;
-  color: #aaa;
-  flex-shrink: 0;
-  font-size: 12px;
+    width: 42px;
+    color: #aaa;
+    flex-shrink: 0;
+    font-size: 12px;
 }
 
 .magnifier-zoom-row .zoom-btn {
-  flex: 1;
-  padding: 4px 6px;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: #aaa;
-  font-size: 11px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  cursor: pointer;
-  text-align: center;
-  transition: background 0.1s ease, color 0.1s ease;
+    flex: 1;
+    padding: 4px 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: #aaa;
+    font-size: 11px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.1s ease, color 0.1s ease;
 }
 
 .magnifier-zoom-row .zoom-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
 }
 
 .magnifier-zoom-row .zoom-btn.active {
-  background: rgba(74, 158, 255, 0.2);
-  border-color: rgba(74, 158, 255, 0.6);
-  color: #fff;
+    background: rgba(74, 158, 255, 0.2);
+    border-color: rgba(74, 158, 255, 0.6);
+    color: #fff;
 }
 
 /* ── 0.15.0：虚线样式指示器（笔画样式选择） ──────────────── */
 
 .width-bar.dashed {
-  background: repeating-linear-gradient(
-    to right,
-    currentColor 0,
-    currentColor 4px,
-    transparent 4px,
-    transparent 7px
-  );
+    background: repeating-linear-gradient(
+            to right,
+            currentColor 0,
+            currentColor 4px,
+            transparent 4px,
+            transparent 7px
+    );
 }
 
 /* ── 笔画预览虚圈（0.11.8-c）─────────────────────────────
    铅笔/荧光笔/橡皮擦 hover 选区时显示笔尖大小的虚线圆，
    用户不用真下笔就知道现在会画多粗。JS 更新 width/height/left/top/borderColor。 */
 .stroke-cursor {
-  position: fixed;
-  display: none;
-  border-radius: 50%;
-  border: 1.5px dashed;
-  pointer-events: none;
-  z-index: calc(var(--z-dropdown) + 5);
-  box-sizing: border-box;
-  transition: width 0.06s linear, height 0.06s linear;
+    position: fixed;
+    display: none;
+    border-radius: 50%;
+    border: 1.5px dashed;
+    pointer-events: none;
+    z-index: calc(var(--z-dropdown) + 5);
+    box-sizing: border-box;
+    transition: width 0.06s linear, height 0.06s linear;
 }
 
 /* ── 0.15.8：像素放大镜 ───────────────────────────────
    选区拖拽阶段跟随鼠标，显示 9×16 像素网格 + 坐标 + 色值。
    Shift 切换 HEX/RGB/HSL，C 复制色值。 */
 .pixel-magnifier {
-  position: fixed;
-  z-index: calc(var(--z-dropdown, 100) + 10);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px;
-  border-radius: 8px;
-  background: var(--color-bg-elevated, rgba(30, 30, 35, 0.95));
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  pointer-events: none;
-  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--color-text, rgba(255, 255, 255, 0.9));
+    position: fixed;
+    z-index: calc(var(--z-dropdown, 100) + 10);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 8px;
+    background: var(--color-bg-elevated, rgba(30, 30, 35, 0.95));
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--color-text, rgba(255, 255, 255, 0.9));
 }
 
 .pixel-magnifier.hidden {
-  display: none;
+    display: none;
 }
 
 .pixel-magnifier .pm-grid {
-  display: block;
-  border-radius: 4px;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+    display: block;
+    border-radius: 4px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
 }
 
 .pixel-magnifier .pm-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 0 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0 2px;
 }
 
 .pixel-magnifier .pm-coord {
-  color: var(--color-text-secondary, rgba(255, 255, 255, 0.6));
-  white-space: nowrap;
+    color: var(--color-text-secondary, rgba(255, 255, 255, 0.6));
+    white-space: nowrap;
 }
 
 .pixel-magnifier .pm-color {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--color-text, rgba(255, 255, 255, 0.95));
-  white-space: nowrap;
-  font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--color-text, rgba(255, 255, 255, 0.95));
+    white-space: nowrap;
+    font-weight: 600;
 }
 
 .pixel-magnifier .pm-color-swatch {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  flex-shrink: 0;
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    flex-shrink: 0;
 }
 
 .pixel-magnifier .pm-color-text {
-  flex: 1;
+    flex: 1;
 }
 
 .pixel-magnifier .pm-hint {
-  color: var(--color-text-secondary, rgba(255, 255, 255, 0.4));
-  font-size: 10px;
-  white-space: nowrap;
+    color: var(--color-text-secondary, rgba(255, 255, 255, 0.4));
+    font-size: 10px;
+    white-space: nowrap;
 }
 
 /* ── 统一智能吸附预选框 ──────────────────────
    窗口与控件共用一个元素：几何位置连续形变，层级变化只切换语义色。 */
 .preselection-hint {
-  --preselection-color: var(--preselection-window);
-  position: fixed;
-  z-index: calc(var(--z-dropdown, 100) + 3);
-  opacity: 0;
-  visibility: hidden;
-  border: 3px dashed var(--preselection-color);
-  border-radius: 3px;
-  pointer-events: none;
-  box-sizing: border-box;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--preselection-color) 14%, transparent),
-              0 0 14px color-mix(in srgb, var(--preselection-color) 32%, transparent);
-  transition: left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              opacity var(--transition-fast) ease-out,
-              border-color var(--transition-base) ease-out,
-              box-shadow var(--transition-base) ease-out;
+    --preselection-color: var(--preselection-window);
+    position: fixed;
+    z-index: calc(var(--z-dropdown, 100) + 3);
+    opacity: 0;
+    visibility: hidden;
+    border: 3px dashed var(--preselection-color);
+    border-radius: 3px;
+    pointer-events: none;
+    box-sizing: border-box;
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--preselection-color) 14%, transparent),
+    0 0 14px color-mix(in srgb, var(--preselection-color) 32%, transparent);
+    transition: left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+    top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+    width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+    height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+    opacity var(--transition-fast) ease-out,
+    border-color var(--transition-base) ease-out,
+    box-shadow var(--transition-base) ease-out;
 }
 
 .preselection-hint--control {
-  --preselection-color: var(--preselection-control);
+    --preselection-color: var(--preselection-control);
 }
 
 /* ── 0.15.11：二级面板（水印/文字配置）───────────────
    显示在工具栏下方，不随 hover 展开/关闭。
    水印/文字配置内容不再藏在 dropdown 里，而是直接可见可操作。 */
 .sub-panel {
-  position: fixed;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px 8px;
-  /* 0.15.13：顶部留 24px 给关闭按钮，避免与首行重叠 */
-  padding-top: 24px;
-  background: rgba(30, 30, 30, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 10px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  /* 0.15.12：z-index 低于预选框（preselection-hint +3）和 dropdown（+10） */
-  z-index: calc(var(--z-dropdown) - 1);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  min-width: 210px;
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 8px;
+    /* 0.15.13：顶部留 24px 给关闭按钮，避免与首行重叠 */
+    padding-top: 24px;
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    /* 0.15.12：z-index 低于预选框（preselection-hint +3）和 dropdown（+10） */
+    z-index: calc(var(--z-dropdown) - 1);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-width: 210px;
 }
 
 .sub-panel.hidden {
-  display: none;
+    display: none;
 }
 
 /* 0.15.12：二级面板关闭按钮 */
 .sub-panel-close {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: rgba(255, 255, 255, 0.5);
-  cursor: pointer;
-  border-radius: 4px;
-  font-size: 16px;
-  line-height: 1;
-  padding: 0;
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.5);
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
 }
 
 .sub-panel-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
 }
 
 .sub-panel-close .icon {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .sub-panel-view {
-  display: none;
-  flex-direction: column;
-  gap: 6px;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
 }
 
-.sub-panel[data-view="text-config"] .sub-panel-text-config { display: flex; }
-.sub-panel[data-view="watermark"] .sub-panel-watermark { display: flex; }
+.sub-panel[data-view="text-config"] .sub-panel-text-config {
+    display: flex;
+}
+
+.sub-panel[data-view="watermark"] .sub-panel-watermark {
+    display: flex;
+}
 
 /* ── 字体选择器 ────────────────────────────────── */
 .font-picker {
-  position: relative;
-  flex: 1;
-  min-width: 120px;
+    position: relative;
+    flex: 1;
+    min-width: 120px;
 }
 
 .font-picker .font-search {
-  width: 100%;
-  height: 24px;
-  padding: 0 6px;
-  border-radius: var(--radius-sm, 4px);
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.15));
-  background: var(--color-bg-elevated, rgba(20, 20, 25, 0.95));
-  color: var(--color-text, rgba(255, 255, 255, 0.9));
-  font-size: 12px;
-  font-family: inherit;
-  outline: none;
-  box-sizing: border-box;
+    width: 100%;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.15));
+    background: var(--color-bg-elevated, rgba(20, 20, 25, 0.95));
+    color: var(--color-text, rgba(255, 255, 255, 0.9));
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
 }
 
 .font-picker .font-search:focus {
-  border-color: var(--color-accent, #4a9eff);
+    border-color: var(--color-accent, #4a9eff);
 }
 
 .font-picker .font-dropdown {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  max-height: 200px;
-  overflow-y: auto;
-  margin-top: 2px;
-  padding: 4px 0;
-  border-radius: var(--radius-md, 6px);
-  background: var(--color-bg-elevated, rgba(30, 30, 35, 0.98));
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  z-index: calc(var(--z-dropdown, 100) + 20);
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: 2px;
+    padding: 4px 0;
+    border-radius: var(--radius-md, 6px);
+    background: var(--color-bg-elevated, rgba(30, 30, 35, 0.98));
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    z-index: calc(var(--z-dropdown, 100) + 20);
 }
 
-.font-picker .font-dropdown.hidden { display: none; }
+.font-picker .font-dropdown.hidden {
+    display: none;
+}
 
 .font-picker .font-dropdown::-webkit-scrollbar {
-  width: 6px;
+    width: 6px;
 }
 
 .font-picker .font-dropdown::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
 
 .font-picker .font-dropdown::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
 }
 
 .font-picker .font-dropdown::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.35);
 }
 
 .font-picker .font-item {
-  display: block;
-  width: 100%;
-  padding: 4px 8px;
-  border: none;
-  background: none;
-  color: var(--color-text, rgba(255, 255, 255, 0.85));
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  box-sizing: border-box;
+    display: block;
+    width: 100%;
+    padding: 4px 8px;
+    border: none;
+    background: none;
+    color: var(--color-text, rgba(255, 255, 255, 0.85));
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    box-sizing: border-box;
 }
 
 .font-picker .font-item:hover {
-  background: var(--color-accent-soft, rgba(74, 158, 255, 0.15));
+    background: var(--color-accent-soft, rgba(74, 158, 255, 0.15));
 }
 
 .font-picker .font-item.active {
-  background: var(--color-accent-soft, rgba(74, 158, 255, 0.25));
-  color: var(--color-text, #fff);
+    background: var(--color-accent-soft, rgba(74, 158, 255, 0.25));
+    color: var(--color-text, #fff);
 }
 
 /* ── 0.15.7：长截图专属工具栏 ─────────────────────── */
 .scroll-toolbar {
-  position: fixed;
-  z-index: calc(var(--z-dropdown, 100) + 1);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
-  border-radius: 10px;
-  background: var(--color-bg-elevated, rgba(30, 30, 35, 0.95));
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(8px);
-  font-family: var(--font-ui, system-ui, sans-serif);
-  font-size: 12px;
+    position: fixed;
+    z-index: calc(var(--z-dropdown, 100) + 1);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 8px;
+    border-radius: 10px;
+    background: var(--color-bg-elevated, rgba(30, 30, 35, 0.95));
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+    font-family: var(--font-ui, system-ui, sans-serif);
+    font-size: 12px;
 }
 
 .scroll-toolbar.hidden {
-  display: none;
+    display: none;
 }
 
 .scroll-toolbar .tool-btn {
-  background: transparent;
-  border: none;
-  color: var(--color-text, rgba(255, 255, 255, 0.85));
-  cursor: pointer;
-  padding: 6px 8px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s ease;
+    background: transparent;
+    border: none;
+    color: var(--color-text, rgba(255, 255, 255, 0.85));
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s ease;
 }
 
 .scroll-toolbar .tool-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.08);
 }
 
 .scroll-toolbar .tool-btn.active {
-  background: rgba(74, 158, 255, 0.2);
-  color: #4a9eff;
+    background: rgba(74, 158, 255, 0.2);
+    color: #4a9eff;
 }
 
 .scroll-toolbar .toolbar-divider {
-  width: 1px;
-  height: 20px;
-  background: rgba(255, 255, 255, 0.12);
-  margin: 0 2px;
+    width: 1px;
+    height: 20px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 0 2px;
 }
 
 /* ── 0.15.7：长截图预览缩略图 ─────────────────────── */
 .scroll-preview {
-  position: fixed;
-  z-index: calc(var(--z-dropdown, 100) + 2);
-  border-radius: 8px;
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  background: rgba(0, 0, 0, 0.3);
-  pointer-events: none;
-  image-rendering: auto;
+    position: fixed;
+    z-index: calc(var(--z-dropdown, 100) + 2);
+    border-radius: 8px;
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.3);
+    pointer-events: none;
+    image-rendering: auto;
 }
 
 .scroll-preview.hidden {
-  display: none;
+    display: none;
 }
 
 /* 仅 ?scrollDebug=1 显示的长截图开发诊断。 */
 .scroll-diagnostics {
-  position: fixed;
-  left: var(--space-md);
-  bottom: var(--space-md);
-  z-index: 120;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  max-width: calc(100vw - var(--space-lg) * 2);
-  padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--text);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 12px;
+    position: fixed;
+    left: var(--space-md);
+    bottom: var(--space-md);
+    z-index: 120;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    max-width: calc(100vw - var(--space-lg) * 2);
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
 }
 
 .scroll-diagnostics.hidden {
-  display: none;
+    display: none;
 }
 
 .scroll-diagnostics button {
-  flex: 0 0 auto;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  padding: var(--space-xs) var(--space-sm);
-  background: transparent;
-  color: var(--accent);
+    flex: 0 0 auto;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    padding: var(--space-xs) var(--space-sm);
+    background: transparent;
+    color: var(--accent);
 }
 
 /* 仅 ?ocrDebug=1 显示的 OCR 诊断面板（0.17.5）。 */
 .ocr-diagnostics-panel {
-  position: fixed;
-  left: var(--space-md);
-  bottom: var(--space-md);
-  z-index: 120;
-  max-width: 480px;
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--text);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 12px;
+    position: fixed;
+    left: var(--space-md);
+    bottom: var(--space-md);
+    z-index: 120;
+    max-width: 480px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
 }
 
 .ocr-diagnostics-panel.hidden,
 .ocr-diag-install-guide.hidden {
-  display: none;
+    display: none;
 }
 
 .ocr-diag-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-sm);
-  font-weight: var(--weight-semibold, 600);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-sm);
+    font-weight: var(--weight-semibold, 600);
 }
 
 .ocr-diag-close {
-  flex: 0 0 auto;
-  border: none;
-  background: transparent;
-  color: var(--text-dim, var(--text));
-  cursor: pointer;
-  padding: 2px;
-  border-radius: var(--radius-sm);
+    flex: 0 0 auto;
+    border: none;
+    background: transparent;
+    color: var(--text-dim, var(--text));
+    cursor: pointer;
+    padding: 2px;
+    border-radius: var(--radius-sm);
 }
 
 .ocr-diag-close:hover {
-  color: var(--text);
-  background: var(--surface-2);
+    color: var(--text);
+    background: var(--surface-2);
 }
 
 .ocr-diag-close .icon {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .ocr-diag-section {
-  display: flex;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-xs);
-  align-items: flex-start;
+    display: flex;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xs);
+    align-items: flex-start;
 }
 
 .ocr-diag-label {
-  flex: 0 0 auto;
-  color: var(--text-dim, var(--text));
-  min-width: 5em;
+    flex: 0 0 auto;
+    color: var(--text-dim, var(--text));
+    min-width: 5em;
 }
 
 .ocr-diag-value {
-  flex: 1 1 auto;
-  word-break: break-all;
+    flex: 1 1 auto;
+    word-break: break-all;
 }
 
 .ocr-diag-preview {
-  color: var(--text-dim, var(--text));
-  font-style: normal;
+    color: var(--text-dim, var(--text));
+    font-style: normal;
 }
 
 .ocr-diag-hint {
-  margin: var(--space-xs) 0;
-  color: var(--text-dim, var(--text));
+    margin: var(--space-xs) 0;
+    color: var(--text-dim, var(--text));
 }
 
 .ocr-diag-open-settings {
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  padding: var(--space-xs) var(--space-sm);
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-  font-size: 12px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    padding: var(--space-xs) var(--space-sm);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 12px;
 }
 
 .ocr-diag-open-settings:hover {
-  background: var(--accent);
-  color: var(--surface);
+    background: var(--accent);
+    color: var(--surface);
 }
 
 /* 长截图采集范围。独立于截图 canvas，清除蒙版后仍保留范围参照。 */
 .scroll-capture-frame {
-  position: fixed;
-  z-index: calc(var(--z-dropdown, 100) - 1);
-  box-sizing: border-box;
-  border: 2px solid #4a9eff;
-  border-radius: 2px;
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.5),
+    position: fixed;
+    z-index: calc(var(--z-dropdown, 100) - 1);
+    box-sizing: border-box;
+    border: 2px solid #4a9eff;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5),
     inset 0 0 0 1px rgba(255, 255, 255, 0.28);
-  pointer-events: none;
+    pointer-events: none;
 }
 
 .scroll-capture-frame.hidden {
-  display: none;
+    display: none;
 }
 
 /* 长图编辑边界：选取工具拖动时始终能看到图片范围。 */
 #canvas.long-image-editing {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  box-shadow: var(--shadow-modal);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    box-shadow: var(--shadow-modal);
 }
 
 /* ── Alt 快捷键提示：按住 Alt 时在工具栏按钮右下角显示 kbd 标记 ──────────────
    默认隐藏（opacity:0 + visibility:hidden），body[data-alt-down] 时淡入。
    绝对定位到按钮右下角，不挤占图标空间。 */
 .kbd-hint {
-  position: absolute;
-  bottom: 1px;
-  right: 2px;
-  font-size: 9px;
-  font-family: -apple-system, "Segoe UI", "SF Mono", Consolas, monospace;
-  font-weight: 600;
-  line-height: 1;
-  color: #fff;
-  background: rgba(74, 158, 255, 0.8);
-  border-radius: 3px;
-  padding: 1px 3px;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 0.12s ease, visibility 0.12s ease;
+    position: absolute;
+    bottom: 1px;
+    right: 2px;
+    font-size: 9px;
+    font-family: -apple-system, "Segoe UI", "SF Mono", Consolas, monospace;
+    font-weight: 600;
+    line-height: 1;
+    color: #fff;
+    background: rgba(74, 158, 255, 0.8);
+    border-radius: 3px;
+    padding: 1px 3px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.12s ease, visibility 0.12s ease;
 }
 
 /* .tool-btn 需 position:relative 让 .kbd-hint 定位 */
 .tool-btn {
-  position: relative;
+    position: relative;
 }
 
 body[data-alt-down="true"] .kbd-hint {
-  opacity: 1;
-  visibility: visible;
+    opacity: 1;
+    visibility: visible;
 }

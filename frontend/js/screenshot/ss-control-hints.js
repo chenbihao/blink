@@ -17,14 +17,12 @@
 //!
 //! **降级**：UIA 失败/超时/返回空 → pickableControls 为空，hit-test 退化为纯窗口吸附。
 
-import { ss } from './ss-state.js';
-import { screenshotControlHints } from '../shared/api.js';
-import { listen } from '../shared/tauri.js';
-import { EVENTS } from '../shared/event-names.js';
-import { clampRectToCss, rectScreenToCss, pointInRect } from './ss-selection-geometry.js';
-import {
-  hidePreselectionHint, resetPreselectionHint, showPreselectionHint,
-} from './ss-preselection-hint.js';
+import {ss} from './ss-state.js';
+import {screenshotControlHints} from '../shared/api.js';
+import {listen} from '../shared/tauri.js';
+import {EVENTS} from '../shared/event-names.js';
+import {clampRectToCss, pointInRect, rectScreenToCss} from './ss-selection-geometry.js';
+import {hidePreselectionHint, resetPreselectionHint, showPreselectionHint,} from './ss-preselection-hint.js';
 
 // ── 会话级状态 ──────────────────────────────────────────────────────────────
 
@@ -63,19 +61,19 @@ let hoveredIndex = -1;
  * 每次 setControlTarget 切换窗口、或批次到达时调用。
  */
 function recomputePickableControls() {
-  if (!activeHwnd) {
-    pickableControls = [];
-    return;
-  }
-  const entry = controlCache.get(activeHwnd);
-  if (!entry || entry.physicalHints.length === 0) {
-    pickableControls = [];
-    return;
-  }
-  const meta = (typeof window !== 'undefined' && window.__blinkScreenMeta) || { vx: 0, vy: 0 };
-  const vw = (typeof window !== 'undefined' && window.innerWidth) || 0;
-  const vh = (typeof window !== 'undefined' && window.innerHeight) || 0;
-  pickableControls = normalizeControlHints(entry.physicalHints, meta, vw, vh);
+    if (!activeHwnd) {
+        pickableControls = [];
+        return;
+    }
+    const entry = controlCache.get(activeHwnd);
+    if (!entry || entry.physicalHints.length === 0) {
+        pickableControls = [];
+        return;
+    }
+    const meta = (typeof window !== 'undefined' && window.__blinkScreenMeta) || {vx: 0, vy: 0};
+    const vw = (typeof window !== 'undefined' && window.innerWidth) || 0;
+    const vh = (typeof window !== 'undefined' && window.innerHeight) || 0;
+    pickableControls = normalizeControlHints(entry.physicalHints, meta, vw, vh);
 }
 
 /**
@@ -83,31 +81,31 @@ function recomputePickableControls() {
  * 通过 hwnd + generation 双重校验分发到对应缓存。
  */
 function onControlHintsEvent(event) {
-  const payload = event.payload;
-  if (!payload) return;
+    const payload = event.payload;
+    if (!payload) return;
 
-  // 校验 1：payload.hwnd 必须有对应缓存条目
-  const entry = controlCache.get(payload.hwnd);
-  if (!entry) return;
+    // 校验 1：payload.hwnd 必须有对应缓存条目
+    const entry = controlCache.get(payload.hwnd);
+    if (!entry) return;
 
-  // 校验 2：generation 必须与缓存条目的 generation 一致（防旧请求串流）
-  if (entry.generation !== payload.generation) return;
+    // 校验 2：generation 必须与缓存条目的 generation 一致（防旧请求串流）
+    if (entry.generation !== payload.generation) return;
 
-  if (payload.kind === 'batch' && payload.hints?.length) {
-    // 追加物理坐标 hints 到缓存
-    for (const h of payload.hints) {
-      entry.physicalHints.push(h);
+    if (payload.kind === 'batch' && payload.hints?.length) {
+        // 追加物理坐标 hints 到缓存
+        for (const h of payload.hints) {
+            entry.physicalHints.push(h);
+        }
+        // 只在当前活跃窗口且 generation 匹配时更新显示
+        if (payload.hwnd === activeHwnd && payload.generation === activeGeneration) {
+            recomputePickableControls();
+        }
+    } else if (payload.kind === 'done') {
+        entry.status = 'done';
+        if (payload.hwnd === activeHwnd && payload.generation === activeGeneration) {
+            recomputePickableControls();
+        }
     }
-    // 只在当前活跃窗口且 generation 匹配时更新显示
-    if (payload.hwnd === activeHwnd && payload.generation === activeGeneration) {
-      recomputePickableControls();
-    }
-  } else if (payload.kind === 'done') {
-    entry.status = 'done';
-    if (payload.hwnd === activeHwnd && payload.generation === activeGeneration) {
-      recomputePickableControls();
-    }
-  }
 }
 
 /**
@@ -115,41 +113,41 @@ function onControlHintsEvent(event) {
  * 在第一个请求发出前调用。
  */
 async function ensureListener() {
-  if (unlistenStream) return;
-  unlistenStream = await listen(EVENTS.SCREENSHOT_CONTROL_HINTS, onControlHintsEvent);
+    if (unlistenStream) return;
+    unlistenStream = await listen(EVENTS.SCREENSHOT_CONTROL_HINTS, onControlHintsEvent);
 }
 
 /**
  * 向后端请求控件 hints。已确保缓存条目不存在或已过期。
  */
 async function requestControlHints(hwnd) {
-  // 防抖期间用户可能已移到另一个窗口
-  if (hwnd !== activeHwnd) return;
+    // 防抖期间用户可能已移到另一个窗口
+    if (hwnd !== activeHwnd) return;
 
-  // 再次检查缓存（可能已被 prefetch 填充）
-  const existing = controlCache.get(hwnd);
-  if (existing && (existing.status === 'done' || existing.status === 'loading')) return;
+    // 再次检查缓存（可能已被 prefetch 填充）
+    const existing = controlCache.get(hwnd);
+    if (existing && (existing.status === 'done' || existing.status === 'loading')) return;
 
-  const gen = ++activeGeneration;
-  controlCache.set(hwnd, {
-    status: 'loading',
-    physicalHints: [],
-    generation: gen,
-  });
+    const gen = ++activeGeneration;
+    controlCache.set(hwnd, {
+        status: 'loading',
+        physicalHints: [],
+        generation: gen,
+    });
 
-  await ensureListener();
+    await ensureListener();
 
-  try {
-    await screenshotControlHints(hwnd, gen);
-  } catch (e) {
-    const entry = controlCache.get(hwnd);
-    if (entry && entry.generation === gen) {
-      entry.status = 'failed';
+    try {
+        await screenshotControlHints(hwnd, gen);
+    } catch (e) {
+        const entry = controlCache.get(hwnd);
+        if (entry && entry.generation === gen) {
+            entry.status = 'failed';
+        }
+        if (hwnd === activeHwnd) {
+            console.warn('[screenshot] screenshotControlHints invoke 失败', e);
+        }
     }
-    if (hwnd === activeHwnd) {
-      console.warn('[screenshot] screenshotControlHints invoke 失败', e);
-    }
-  }
 }
 
 // ── 导出 API ──────────────────────────────────────────────────────────────
@@ -167,34 +165,34 @@ async function requestControlHints(hwnd) {
  * @param {number|null} hwnd - 目标窗口 HWND，null 表示鼠标在桌面空白区域
  */
 export function setControlTarget(hwnd) {
-  if (hwnd === activeHwnd) return; // 相同窗口，无操作
+    if (hwnd === activeHwnd) return; // 相同窗口，无操作
 
-  activeHwnd = hwnd;
-  hoveredIndex = -1;
-  hideControlHint();
+    activeHwnd = hwnd;
+    hoveredIndex = -1;
+    hideControlHint();
 
-  if (!hwnd) {
-    // 鼠标在桌面空白区域：清除控件列表，但不清空缓存
+    if (!hwnd) {
+        // 鼠标在桌面空白区域：清除控件列表，但不清空缓存
+        pickableControls = [];
+        return;
+    }
+
+    const entry = controlCache.get(hwnd);
+    if (entry && (entry.status === 'done' || entry.status === 'loading')) {
+        // 缓存命中：同步 activeGeneration 到条目的 generation
+        // 这样后续该窗口的 batch 到达时会更新显示
+        activeGeneration = entry.generation;
+        recomputePickableControls();
+        return;
+    }
+
+    // 无缓存：清除控件列表，防抖后请求
     pickableControls = [];
-    return;
-  }
-
-  const entry = controlCache.get(hwnd);
-  if (entry && (entry.status === 'done' || entry.status === 'loading')) {
-    // 缓存命中：同步 activeGeneration 到条目的 generation
-    // 这样后续该窗口的 batch 到达时会更新显示
-    activeGeneration = entry.generation;
-    recomputePickableControls();
-    return;
-  }
-
-  // 无缓存：清除控件列表，防抖后请求
-  pickableControls = [];
-  if (hoverDebounceTimer) clearTimeout(hoverDebounceTimer);
-  hoverDebounceTimer = setTimeout(() => {
-    hoverDebounceTimer = 0;
-    requestControlHints(hwnd);
-  }, 100);
+    if (hoverDebounceTimer) clearTimeout(hoverDebounceTimer);
+    hoverDebounceTimer = setTimeout(() => {
+        hoverDebounceTimer = 0;
+        requestControlHints(hwnd);
+    }, 100);
 }
 
 /**
@@ -204,43 +202,43 @@ export function setControlTarget(hwnd) {
  * @param {number} hwnd - 预热目标窗口 HWND
  */
 export async function prefetchControlHints(hwnd) {
-  if (!hwnd) return;
-  const existing = controlCache.get(hwnd);
-  if (existing) return; // 已缓存或正在加载
+    if (!hwnd) return;
+    const existing = controlCache.get(hwnd);
+    if (existing) return; // 已缓存或正在加载
 
-  const gen = ++activeGeneration;
-  controlCache.set(hwnd, {
-    status: 'loading',
-    physicalHints: [],
-    generation: gen,
-  });
+    const gen = ++activeGeneration;
+    controlCache.set(hwnd, {
+        status: 'loading',
+        physicalHints: [],
+        generation: gen,
+    });
 
-  await ensureListener();
+    await ensureListener();
 
-  try {
-    await screenshotControlHints(hwnd, gen);
-  } catch (e) {
-    const entry = controlCache.get(hwnd);
-    if (entry && entry.generation === gen) {
-      entry.status = 'failed';
+    try {
+        await screenshotControlHints(hwnd, gen);
+    } catch (e) {
+        const entry = controlCache.get(hwnd);
+        if (entry && entry.generation === gen) {
+            entry.status = 'failed';
+        }
+        console.warn('[screenshot] prefetchControlHints 失败', e);
     }
-    console.warn('[screenshot] prefetchControlHints 失败', e);
-  }
 }
 
 /** 将物理控件矩形转换并裁剪到当前 overlay；完全不可见的控件不进入 hit-test。 */
 export function normalizeControlHints(list, meta, viewportWidth, viewportHeight) {
-  return (list || []).map((c) => {
-      const screenRect = { x: c.x, y: c.y, w: c.w, h: c.h };
-      const cssRect = clampRectToCss(
-        rectScreenToCss(screenRect, meta),
-        viewportWidth,
-        viewportHeight,
-      );
-      return {
-        controlType: c.controlType,
-        ...cssRect,
-      };
+    return (list || []).map((c) => {
+        const screenRect = {x: c.x, y: c.y, w: c.w, h: c.h};
+        const cssRect = clampRectToCss(
+            rectScreenToCss(screenRect, meta),
+            viewportWidth,
+            viewportHeight,
+        );
+        return {
+            controlType: c.controlType,
+            ...cssRect,
+        };
     }).filter((c) => c.w > 0 && c.h > 0);
 }
 
@@ -249,24 +247,24 @@ export function normalizeControlHints(list, meta, viewportWidth, viewportHeight)
  * 清空缓存、递增 generation、解除监听器。
  */
 export function clearControlHints() {
-  // 解除会话级监听器
-  if (unlistenStream) {
-    unlistenStream();
-    unlistenStream = null;
-  }
-  // 清空缓存
-  controlCache.clear();
-  // 重置会话状态
-  activeHwnd = null;
-  activeGeneration++;
-  pickableControls = [];
-  hoveredIndex = -1;
-  // 清除防抖计时器
-  if (hoverDebounceTimer) {
-    clearTimeout(hoverDebounceTimer);
-    hoverDebounceTimer = 0;
-  }
-  resetPreselectionHint();
+    // 解除会话级监听器
+    if (unlistenStream) {
+        unlistenStream();
+        unlistenStream = null;
+    }
+    // 清空缓存
+    controlCache.clear();
+    // 重置会话状态
+    activeHwnd = null;
+    activeGeneration++;
+    pickableControls = [];
+    hoveredIndex = -1;
+    // 清除防抖计时器
+    if (hoverDebounceTimer) {
+        clearTimeout(hoverDebounceTimer);
+        hoverDebounceTimer = 0;
+    }
+    resetPreselectionHint();
 }
 
 /**
@@ -280,65 +278,65 @@ export function clearControlHints() {
  * @returns {boolean} true = 当前悬停在某控件上（应显示控件虚线框）
  */
 export function updateControlHover(cssX, cssY) {
-  if (pickableControls.length === 0) return false;
+    if (pickableControls.length === 0) return false;
 
-  // 选区已确定时不吸附（标注模式）
-  if (ss.isAnnotating) {
-    if (hoveredIndex >= 0) {
-      hoveredIndex = -1;
-      hideControlHint();
+    // 选区已确定时不吸附（标注模式）
+    if (ss.isAnnotating) {
+        if (hoveredIndex >= 0) {
+            hoveredIndex = -1;
+            hideControlHint();
+        }
+        return false;
     }
-    return false;
-  }
 
-  // 控件优先于窗口：找面积最小的命中控件（最精确）
-  let found = -1;
-  let minArea = Infinity;
-  for (let i = 0; i < pickableControls.length; i++) {
-    const c = pickableControls[i];
-    if (pointInRect(cssX, cssY, c)) {
-      const area = c.w * c.h;
-      if (area < minArea) {
-        minArea = area;
-        found = i;
-      }
+    // 控件优先于窗口：找面积最小的命中控件（最精确）
+    let found = -1;
+    let minArea = Infinity;
+    for (let i = 0; i < pickableControls.length; i++) {
+        const c = pickableControls[i];
+        if (pointInRect(cssX, cssY, c)) {
+            const area = c.w * c.h;
+            if (area < minArea) {
+                minArea = area;
+                found = i;
+            }
+        }
     }
-  }
 
-  if (found !== hoveredIndex) {
-    hoveredIndex = found;
-    if (found >= 0) {
-      showControlHint(pickableControls[found]);
-    } else {
-      hideControlHint();
+    if (found !== hoveredIndex) {
+        hoveredIndex = found;
+        if (found >= 0) {
+            showControlHint(pickableControls[found]);
+        } else {
+            hideControlHint();
+        }
     }
-  }
-  return found >= 0;
+    return found >= 0;
 }
 
 /** 获取当前悬停的控件矩形（CSS 坐标）。
  * 单击时调此函数获取吸附目标；返回 null 表示无悬停。 */
 export function getHoveredControlRect() {
-  if (hoveredIndex < 0) return null;
-  const c = pickableControls[hoveredIndex];
-  return { x: c.x, y: c.y, w: c.w, h: c.h };
+    if (hoveredIndex < 0) return null;
+    const c = pickableControls[hoveredIndex];
+    return {x: c.x, y: c.y, w: c.w, h: c.h};
 }
 
 /** 只清除 hover 状态（隐藏虚线框），不清除控件列表。
  * 拖动开始或进入标注模式时调用。 */
 export function clearControlHover() {
-  if (hoveredIndex >= 0) {
-    hoveredIndex = -1;
-    hideControlHint();
-  }
+    if (hoveredIndex >= 0) {
+        hoveredIndex = -1;
+        hideControlHint();
+    }
 }
 
 /** 把统一预选框切换到控件层级，保留与窗口层级的连续几何轨迹。 */
 function showControlHint(c) {
-  showPreselectionHint(c, 'control');
+    showPreselectionHint(c, 'control');
 }
 
 /** 隐藏控件虚线框（淡出） */
 function hideControlHint() {
-  hidePreselectionHint('control');
+    hidePreselectionHint('control');
 }

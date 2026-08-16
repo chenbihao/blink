@@ -27,22 +27,22 @@ let spritePromise = null;
  * 方框，不影响 layout）。
  */
 export function ensureSpriteLoaded() {
-  if (spritePromise) return spritePromise;
-  spritePromise = fetch(SPRITE_URL)
-    .then((r) => {
-      if (!r.ok) throw new Error(`icon sprite fetch failed: HTTP ${r.status}`);
-      return r.text();
-    })
-    .then((text) => {
-      // 首元素注入：<use xlink:href="#icon-xxx"> 在同 document 内解析，
-      // sprite 出现在 <body> 首位即可。display:none 已在 sprite 属性内。
-      document.body.insertAdjacentHTML("afterbegin", text);
-    })
-    .catch((e) => {
-      console.warn("[icon] sprite 加载失败，图标将为空：", e);
-      // 不 rethrow —— 图标缺失不该阻塞主流程
-    });
-  return spritePromise;
+    if (spritePromise) return spritePromise;
+    spritePromise = fetch(SPRITE_URL)
+        .then((r) => {
+            if (!r.ok) throw new Error(`icon sprite fetch failed: HTTP ${r.status}`);
+            return r.text();
+        })
+        .then((text) => {
+            // 首元素注入：<use xlink:href="#icon-xxx"> 在同 document 内解析，
+            // sprite 出现在 <body> 首位即可。display:none 已在 sprite 属性内。
+            document.body.insertAdjacentHTML("afterbegin", text);
+        })
+        .catch((e) => {
+            console.warn("[icon] sprite 加载失败，图标将为空：", e);
+            // 不 rethrow —— 图标缺失不该阻塞主流程
+        });
+    return spritePromise;
 }
 
 /**
@@ -52,22 +52,22 @@ export function ensureSpriteLoaded() {
  * @returns {SVGElement}
  */
 export function renderIcon(name, opts = {}) {
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("class", opts.extraClass ? `icon ${opts.extraClass}` : "icon");
-  // aria-hidden 是无障碍缺省态：图标是装饰性 / 标签仍走文本节点。
-  // 需要独立含义时用 ariaLabel 明确覆盖。
-  if (opts.ariaLabel) {
-    svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", opts.ariaLabel);
-  } else {
-    svg.setAttribute("aria-hidden", "true");
-  }
-  const use = document.createElementNS(NS, "use");
-  // href 是 SVG2 标准；旧引擎（WebView2 一直 Chromium，可放心用）
-  use.setAttribute("href", `#icon-${name}`);
-  svg.appendChild(use);
-  return svg;
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", opts.extraClass ? `icon ${opts.extraClass}` : "icon");
+    // aria-hidden 是无障碍缺省态：图标是装饰性 / 标签仍走文本节点。
+    // 需要独立含义时用 ariaLabel 明确覆盖。
+    if (opts.ariaLabel) {
+        svg.setAttribute("role", "img");
+        svg.setAttribute("aria-label", opts.ariaLabel);
+    } else {
+        svg.setAttribute("aria-hidden", "true");
+    }
+    const use = document.createElementNS(NS, "use");
+    // href 是 SVG2 标准；旧引擎（WebView2 一直 Chromium，可放心用）
+    use.setAttribute("href", `#icon-${name}`);
+    svg.appendChild(use);
+    return svg;
 }
 
 /**
@@ -78,19 +78,19 @@ export function renderIcon(name, opts = {}) {
  * @returns {string}
  */
 export function iconHTML(name, opts = {}) {
-  const cls = opts.extraClass ? `icon ${opts.extraClass}` : "icon";
-  const a11y = opts.ariaLabel
-    ? ` role="img" aria-label="${escapeAttr(opts.ariaLabel)}"`
-    : ' aria-hidden="true"';
-  return `<svg class="${cls}"${a11y}><use href="#icon-${escapeAttr(name)}"/></svg>`;
+    const cls = opts.extraClass ? `icon ${opts.extraClass}` : "icon";
+    const a11y = opts.ariaLabel
+        ? ` role="img" aria-label="${escapeAttr(opts.ariaLabel)}"`
+        : ' aria-hidden="true"';
+    return `<svg class="${cls}"${a11y}><use href="#icon-${escapeAttr(name)}"/></svg>`;
 }
 
 function escapeAttr(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[c]));
+    return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+    }[c]));
 }

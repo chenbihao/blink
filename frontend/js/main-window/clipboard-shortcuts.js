@@ -24,7 +24,7 @@
  * @returns {boolean}
  */
 export function isImeComposing(e) {
-  return !!(e.isComposing || e.keyCode === 229);
+    return !!(e.isComposing || e.keyCode === 229);
 }
 
 /**
@@ -34,7 +34,7 @@ export function isImeComposing(e) {
  * @returns {boolean}
  */
 export function isPureAlt(e) {
-  return !!(e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey);
+    return !!(e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey);
 }
 
 // ── 快捷键类型解析 ─────────────────────────────────────────────────────────────
@@ -54,24 +54,24 @@ export function isPureAlt(e) {
  * - 其它 → "none"
  */
 export function resolveShortcutAction(e, queryIsEmpty) {
-  if (isImeComposing(e)) return "none";
+    if (isImeComposing(e)) return "none";
 
-  const pureAlt = isPureAlt(e);
+    const pureAlt = isPureAlt(e);
 
-  if (pureAlt && (e.key === "e" || e.key === "E")) {
-    return "edit";
-  }
+    if (pureAlt && (e.key === "e" || e.key === "E")) {
+        return "edit";
+    }
 
-  if (pureAlt && (e.key === "d" || e.key === "D")) {
-    return "delete";
-  }
+    if (pureAlt && (e.key === "d" || e.key === "D")) {
+        return "delete";
+    }
 
-  // 裸 Delete：仅 query 为空时等价 Alt+D
-  if (!pureAlt && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === "Delete") {
-    return queryIsEmpty ? "delete" : "none";
-  }
+    // 裸 Delete：仅 query 为空时等价 Alt+D
+    if (!pureAlt && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === "Delete") {
+        return queryIsEmpty ? "delete" : "none";
+    }
 
-  return "none";
+    return "none";
 }
 
 // ── Active 项目标解析 ───────────────────────────────────────────────────────────
@@ -85,13 +85,13 @@ export function resolveShortcutAction(e, queryIsEmpty) {
  *   图片项或无 active 项返回 null。
  */
 export function findEditAction(activeItem) {
-  if (!activeItem) return null;
-  if (activeItem.isImage) return null; // 图片项不响应 Alt+E
+    if (!activeItem) return null;
+    if (activeItem.isImage) return null; // 图片项不响应 Alt+E
 
-  const actions = activeItem.actions;
-  if (!Array.isArray(actions)) return null;
+    const actions = activeItem.actions;
+    if (!Array.isArray(actions)) return null;
 
-  return actions.find((a) => a.kind === "run" && a.runId === "edit_text_item") ?? null;
+    return actions.find((a) => a.kind === "run" && a.runId === "edit_text_item") ?? null;
 }
 
 /**
@@ -103,32 +103,32 @@ export function findEditAction(activeItem) {
  *   无 active 项、非 clipboard 来源、或缺少 id 时返回 null。
  */
 export function findDeleteTarget(activeItem) {
-  if (!activeItem) return null;
+    if (!activeItem) return null;
 
-  // 只有 clipboard 来源的历史项可删除
-  // 颜色降级结果 (source="color") 等非历史项不得删除
-  if (activeItem.source !== "clipboard") return null;
+    // 只有 clipboard 来源的历史项可删除
+    // 颜色降级结果 (source="color") 等非历史项不得删除
+    if (activeItem.source !== "clipboard") return null;
 
-  if (activeItem.isImage) {
-    // 图片项：lnkPath 持有 image_id
-    const id = activeItem.lnkPath;
-    if (!id) return null;
-    return { type: "image", id };
-  }
+    if (activeItem.isImage) {
+        // 图片项：lnkPath 持有 image_id
+        const id = activeItem.lnkPath;
+        if (!id) return null;
+        return {type: "image", id};
+    }
 
-  // 文本项：hitId 在首个 action（copy）上
-  const actions = activeItem.actions;
-  if (!Array.isArray(actions)) return null;
+    // 文本项：hitId 在首个 action（copy）上
+    const actions = activeItem.actions;
+    if (!Array.isArray(actions)) return null;
 
-  const hitId = actions[0]?.hitId;
-  if (!hitId) return null;
+    const hitId = actions[0]?.hitId;
+    if (!hitId) return null;
 
-  return { type: "text", id: hitId };
+    return {type: "text", id: hitId};
 }
 
 // ── 重置（单测用）───────────────────────────────────────────────────────────
 
 /** 无状态模块，无内部状态可重置。保留以保持与其他模块单测的一致性。 */
 export function _resetForTest() {
-  // no-op
+    // no-op
 }

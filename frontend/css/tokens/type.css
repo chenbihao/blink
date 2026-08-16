@@ -2,32 +2,32 @@
    2026-07-11 重设计：9 档字号 + 5 档行高 + 5 档字重，基于全量审计。 */
 
 :root {
-  /* 字体族 */
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Monaco, "Droid Sans Mono", "Source Code Pro", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    /* 字体族 */
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Monaco, "Droid Sans Mono", "Source Code Pro", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
 
-  /* 字号九档（整体 +1px，--text-base 12→13 提升高 DPI 可读性） */
-  --text-2xs: 10px;    /* 角标、极小标签 */
-  --text-xs:  11px;    /* badge 数字、微标签 */
-  --text-sm:  12px;    /* 次要描述 */
-  --text-base: 13px;   /* 设置项、描述文字（最高频） */
-  --text-md:  14px;    /* 按钮、表单 */
-  --text-lg:  15px;    /* 正文、设置页 body */
-  --text-xl:  16px;    /* 小标题 */
-  --text-2xl: 18px;    /* 输入框、标题 */
-  --text-3xl: 20px;    /* 页面标题 */
+    /* 字号九档（整体 +1px，--text-base 12→13 提升高 DPI 可读性） */
+    --text-2xs: 10px; /* 角标、极小标签 */
+    --text-xs: 11px; /* badge 数字、微标签 */
+    --text-sm: 12px; /* 次要描述 */
+    --text-base: 13px; /* 设置项、描述文字（最高频） */
+    --text-md: 14px; /* 按钮、表单 */
+    --text-lg: 15px; /* 正文、设置页 body */
+    --text-xl: 16px; /* 小标题 */
+    --text-2xl: 18px; /* 输入框、标题 */
+    --text-3xl: 20px; /* 页面标题 */
 
-  /* 字重五档 */
-  --weight-light: 300;    /* placeholder、弱化文字 */
-  --weight-normal: 400;   /* 正文 */
-  --weight-medium: 500;   /* 按钮、badge */
-  --weight-semibold: 600; /* 标题、强调 */
-  --weight-bold: 700;     /* AI 徽章、大标题 */
+    /* 字重五档 */
+    --weight-light: 300; /* placeholder、弱化文字 */
+    --weight-normal: 400; /* 正文 */
+    --weight-medium: 500; /* 按钮、badge */
+    --weight-semibold: 600; /* 标题、强调 */
+    --weight-bold: 700; /* AI 徽章、大标题 */
 
-  /* 行高五档 */
-  --leading-none: 1;      /* badge、chip、单行元素 */
-  --leading-tight: 1.2;   /* kbd、紧凑文字 */
-  --leading-snug: 1.4;    /* 列表项、输入框（最常用） */
-  --leading-normal: 1.5;  /* 正文、表单 */
-  --leading-relaxed: 1.6; /* 设置页说明、debug */
+    /* 行高五档 */
+    --leading-none: 1; /* badge、chip、单行元素 */
+    --leading-tight: 1.2; /* kbd、紧凑文字 */
+    --leading-snug: 1.4; /* 列表项、输入框（最常用） */
+    --leading-normal: 1.5; /* 正文、表单 */
+    --leading-relaxed: 1.6; /* 设置页说明、debug */
 }

@@ -8,13 +8,13 @@
  *         MD 工具栏移入 editor-toolbar-left，默认展示。
  */
 
-import { applyThemeFromConfig } from "../shared/theme.js";
-import { applyI18nFromConfig, t } from "../i18n/index.js";
-import { ensureSpriteLoaded } from "../shared/icon.js";
-import { getCurrentWindow, confirmDialog, listen } from "../shared/tauri.js";
-import { EVENTS } from "../shared/event-names.js";
-import { getContentEditorPayload, saveContentEditor, getStickyNote } from "../shared/api.js";
-import { createMdToolbar, bindMdToolbar, updateToolbarStates } from "../shared/md-toolbar.js";
+import {applyThemeFromConfig} from "../shared/theme.js";
+import {applyI18nFromConfig, t} from "../i18n/index.js";
+import {ensureSpriteLoaded} from "../shared/icon.js";
+import {confirmDialog, getCurrentWindow, listen} from "../shared/tauri.js";
+import {EVENTS} from "../shared/event-names.js";
+import {getContentEditorPayload, getStickyNote, saveContentEditor} from "../shared/api.js";
+import {bindMdToolbar, createMdToolbar, updateToolbarStates} from "../shared/md-toolbar.js";
 
 // ── 状态 ──────────────────────────────────────────────
 
@@ -66,68 +66,68 @@ const statusEl = document.getElementById("editor-status");
 // ── 初始化 ────────────────────────────────────────────
 
 async function init() {
-  // 主题 + i18n + 图标
-  await ensureSpriteLoaded();
-  await applyThemeFromConfig();
-  await applyI18nFromConfig();
+    // 主题 + i18n + 图标
+    await ensureSpriteLoaded();
+    await applyThemeFromConfig();
+    await applyI18nFromConfig();
 
-  // 从后端拉取 payload
-  await loadPayload();
+    // 从后端拉取 payload
+    await loadPayload();
 
-  // 绑定事件
-  bindToolbar();
-  bindWindowControls();
-  bindKeyboard();
+    // 绑定事件
+    bindToolbar();
+    bindWindowControls();
+    bindKeyboard();
 
-  // 0.18.3 fix: 监听便签内容变更——当编辑器来源是 sticky 且用户无未保存改动时自动刷新
-  // 0.18.3 fix: 跳过 source="content-editor" 的变更（自己刚保存的，无需 reload）
-  listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
-    const payload = event.payload;
-    if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
-      if (payload.source === "content-editor") return;
-      if (!hasUnsavedChanges()) {
-        reloadFromSticky();
-      }
+    // 0.18.3 fix: 监听便签内容变更——当编辑器来源是 sticky 且用户无未保存改动时自动刷新
+    // 0.18.3 fix: 跳过 source="content-editor" 的变更（自己刚保存的，无需 reload）
+    listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
+        const payload = event.payload;
+        if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
+            if (payload.source === "content-editor") return;
+            if (!hasUnsavedChanges()) {
+                reloadFromSticky();
+            }
+        }
+    });
+
+    // 0.18.3: 生命周期绑定——编辑器从便签打开时，便签关闭/隐藏/删除/回收 时自动关闭编辑器
+    // 递增 sessionGen 确保正在进行的后台保存不会在完成后重新显示窗口
+    listen(EVENTS.STICKY_TRASHED, (event) => {
+        const payload = event.payload;
+        if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
+            lifecycleClose("便签被回收");
+        }
+    });
+
+    listen(EVENTS.STICKY_VISIBILITY_CHANGED, (event) => {
+        const payload = event.payload;
+        if (payload && payload.stickyId === originRef && currentOrigin === "sticky" && payload.visible === false) {
+            lifecycleClose("便签已隐藏");
+        }
+    });
+
+    listen(EVENTS.STICKY_DELETED, (event) => {
+        const payload = event.payload;
+        if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
+            lifecycleClose("便签已删除");
+        }
+    });
+
+    // 注册窗口复用回调（后端 eval 调用）
+    window.__contentEditorReload = loadPayload;
+
+    const win = getCurrentWindow();
+    if (win) {
+        try {
+            await win.show();
+            await win.setFocus();
+        } catch (e) {
+            console.error("[content-editor] show window 失败:", e);
+        }
     }
-  });
 
-  // 0.18.3: 生命周期绑定——编辑器从便签打开时，便签关闭/隐藏/删除/回收 时自动关闭编辑器
-  // 递增 sessionGen 确保正在进行的后台保存不会在完成后重新显示窗口
-  listen(EVENTS.STICKY_TRASHED, (event) => {
-    const payload = event.payload;
-    if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
-      lifecycleClose("便签被回收");
-    }
-  });
-
-  listen(EVENTS.STICKY_VISIBILITY_CHANGED, (event) => {
-    const payload = event.payload;
-    if (payload && payload.stickyId === originRef && currentOrigin === "sticky" && payload.visible === false) {
-      lifecycleClose("便签已隐藏");
-    }
-  });
-
-  listen(EVENTS.STICKY_DELETED, (event) => {
-    const payload = event.payload;
-    if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
-      lifecycleClose("便签已删除");
-    }
-  });
-
-  // 注册窗口复用回调（后端 eval 调用）
-  window.__contentEditorReload = loadPayload;
-
-  const win = getCurrentWindow();
-  if (win) {
-    try {
-      await win.show();
-      await win.setFocus();
-    } catch (e) {
-      console.error("[content-editor] show window 失败:", e);
-    }
-  }
-
-  tracing("editor window: init 完成");
+    tracing("editor window: init 完成");
 }
 
 /**
@@ -135,115 +135,115 @@ async function init() {
  * 窗口首次打开和复用时都会调用。
  */
 async function loadPayload() {
-  // 0.18.3 fix: 立即清除可能残留的 closeTimeout，防止在 await 期间
-  // 旧计时器触发 closeWindow() 导致窗口被隐藏（"一次失败一次成功"竞态）
-  if (closeTimeout) {
-    clearTimeout(closeTimeout);
-    closeTimeout = null;
-  }
-
-  // 0.18.3: 递增代际计数器，使正在进行的后台保存回调不再操作当前状态
-  sessionGen++;
-
-  try {
-    const payload = await getContentEditorPayload();
-    if (!payload) {
-      tracing("loadPayload: 无 payload，可能是窗口已关闭后再次打开");
-      return;
+    // 0.18.3 fix: 立即清除可能残留的 closeTimeout，防止在 await 期间
+    // 旧计时器触发 closeWindow() 导致窗口被隐藏（"一次失败一次成功"竞态）
+    if (closeTimeout) {
+        clearTimeout(closeTimeout);
+        closeTimeout = null;
     }
 
-    // 0.16.13: 归一化 \r\n → \n
-    originalBody = (payload.body || "").replace(/\r\n/g, "\n");
-    originRef = payload.originRef || null;
-    savePolicy = payload.savePolicy || "clipboard_new";
-    currentFormat = payload.format || "plain";
-    currentOrigin = payload.origin || "";
+    // 0.18.3: 递增代际计数器，使正在进行的后台保存回调不再操作当前状态
+    sessionGen++;
 
-    // format=markdown 时使用 Tiptap IR 编辑器
-    if (currentFormat === "markdown" && mdContainerEl) {
-      textareaEl.hidden = true;
-      mdContainerEl.hidden = false;
-      if (mdToolbarEl) mdToolbarEl.style.display = "";
-
-      // 创建或复用 Tiptap 编辑器
-      if (tiptapEditor) {
-        // 复用：设入新内容
-        const json = tiptapEditor.markdown.parse(originalBody);
-        tiptapEditor.commands.setContent(json, false);
-      } else if (window.BlinkTiptap) {
-        try {
-          const { Editor, StarterKit, Markdown, TaskList, TaskItem } = window.BlinkTiptap;
-          tiptapEditor = new Editor({
-            element: mdContainerEl,
-            extensions: [StarterKit, Markdown, TaskList, TaskItem],
-            content: originalBody,
-            contentType: "markdown",
-            editorProps: {
-              attributes: {
-                class: "content-editor-tiptap",
-                spellcheck: "false",
-              },
-            },
-          });
-          // 创建并绑定 MD 格式工具栏（与便签共用逻辑）
-          if (mdToolbarEl) {
-            mdToolbarEl.innerHTML = "";
-            const toolbar = createMdToolbar("md-toolbar-inner");
-            mdToolbarEl.appendChild(toolbar);
-            bindMdToolbar(toolbar, tiptapEditor, { editorEl: mdContainerEl });
-            tiptapEditor.on("selectionUpdate", () => updateToolbarStates(toolbar, tiptapEditor));
-            tiptapEditor.on("transaction", () => updateToolbarStates(toolbar, tiptapEditor));
-          }
-          console.log("[content-editor] Tiptap IR 编辑器初始化成功");
-        } catch (e) {
-          console.error("[content-editor] Tiptap 初始化失败，降级为纯文本:", e);
-          tiptapEditor = null;
-          textareaEl.hidden = false;
-          mdContainerEl.hidden = true;
-          if (mdToolbarEl) mdToolbarEl.style.display = "none";
-          textareaEl.value = originalBody;
+    try {
+        const payload = await getContentEditorPayload();
+        if (!payload) {
+            tracing("loadPayload: 无 payload，可能是窗口已关闭后再次打开");
+            return;
         }
-      } else {
-        console.warn("[content-editor] BlinkTiptap 未加载，降级为纯文本");
-        textareaEl.hidden = false;
-        mdContainerEl.hidden = true;
-        if (mdToolbarEl) mdToolbarEl.style.display = "none";
-        textareaEl.value = originalBody;
-      }
-    } else {
-      // 纯文本模式：显示 textarea，隐藏 Tiptap 编辑器
-      textareaEl.hidden = false;
-      mdContainerEl.hidden = true;
-      if (mdToolbarEl) mdToolbarEl.style.display = "none";
 
-      // 销毁 Tiptap 编辑器（如果之前创建过）
-      if (tiptapEditor) {
-        tiptapEditor.destroy();
-        tiptapEditor = null;
-      }
+        // 0.16.13: 归一化 \r\n → \n
+        originalBody = (payload.body || "").replace(/\r\n/g, "\n");
+        originRef = payload.originRef || null;
+        savePolicy = payload.savePolicy || "clipboard_new";
+        currentFormat = payload.format || "plain";
+        currentOrigin = payload.origin || "";
 
-      // 填充编辑器
-      textareaEl.value = originalBody;
+        // format=markdown 时使用 Tiptap IR 编辑器
+        if (currentFormat === "markdown" && mdContainerEl) {
+            textareaEl.hidden = true;
+            mdContainerEl.hidden = false;
+            if (mdToolbarEl) mdToolbarEl.style.display = "";
+
+            // 创建或复用 Tiptap 编辑器
+            if (tiptapEditor) {
+                // 复用：设入新内容
+                const json = tiptapEditor.markdown.parse(originalBody);
+                tiptapEditor.commands.setContent(json, false);
+            } else if (window.BlinkTiptap) {
+                try {
+                    const {Editor, StarterKit, Markdown, TaskList, TaskItem} = window.BlinkTiptap;
+                    tiptapEditor = new Editor({
+                        element: mdContainerEl,
+                        extensions: [StarterKit, Markdown, TaskList, TaskItem],
+                        content: originalBody,
+                        contentType: "markdown",
+                        editorProps: {
+                            attributes: {
+                                class: "content-editor-tiptap",
+                                spellcheck: "false",
+                            },
+                        },
+                    });
+                    // 创建并绑定 MD 格式工具栏（与便签共用逻辑）
+                    if (mdToolbarEl) {
+                        mdToolbarEl.innerHTML = "";
+                        const toolbar = createMdToolbar("md-toolbar-inner");
+                        mdToolbarEl.appendChild(toolbar);
+                        bindMdToolbar(toolbar, tiptapEditor, {editorEl: mdContainerEl});
+                        tiptapEditor.on("selectionUpdate", () => updateToolbarStates(toolbar, tiptapEditor));
+                        tiptapEditor.on("transaction", () => updateToolbarStates(toolbar, tiptapEditor));
+                    }
+                    console.log("[content-editor] Tiptap IR 编辑器初始化成功");
+                } catch (e) {
+                    console.error("[content-editor] Tiptap 初始化失败，降级为纯文本:", e);
+                    tiptapEditor = null;
+                    textareaEl.hidden = false;
+                    mdContainerEl.hidden = true;
+                    if (mdToolbarEl) mdToolbarEl.style.display = "none";
+                    textareaEl.value = originalBody;
+                }
+            } else {
+                console.warn("[content-editor] BlinkTiptap 未加载，降级为纯文本");
+                textareaEl.hidden = false;
+                mdContainerEl.hidden = true;
+                if (mdToolbarEl) mdToolbarEl.style.display = "none";
+                textareaEl.value = originalBody;
+            }
+        } else {
+            // 纯文本模式：显示 textarea，隐藏 Tiptap 编辑器
+            textareaEl.hidden = false;
+            mdContainerEl.hidden = true;
+            if (mdToolbarEl) mdToolbarEl.style.display = "none";
+
+            // 销毁 Tiptap 编辑器（如果之前创建过）
+            if (tiptapEditor) {
+                tiptapEditor.destroy();
+                tiptapEditor = null;
+            }
+
+            // 填充编辑器
+            textareaEl.value = originalBody;
+        }
+
+        // 设置标题
+        titleEl.textContent = payload.title || t("editor.title.default");
+
+        // 重置状态——saving/allowClose 已在函数开头清除 closeTimeout
+        saving = false;
+        allowClose = false;
+        statusEl.textContent = "";
+        saveBtn.disabled = false;
+
+        // 聚焦编辑器
+        if (currentFormat === "markdown" && tiptapEditor) {
+            tiptapEditor.commands.focus();
+        } else {
+            textareaEl.focus();
+        }
+    } catch (e) {
+        console.error("[content-editor] loadPayload 失败:", e);
     }
-
-    // 设置标题
-    titleEl.textContent = payload.title || t("editor.title.default");
-
-    // 重置状态——saving/allowClose 已在函数开头清除 closeTimeout
-    saving = false;
-    allowClose = false;
-    statusEl.textContent = "";
-    saveBtn.disabled = false;
-
-    // 聚焦编辑器
-    if (currentFormat === "markdown" && tiptapEditor) {
-      tiptapEditor.commands.focus();
-    } else {
-      textareaEl.focus();
-    }
-  } catch (e) {
-    console.error("[content-editor] loadPayload 失败:", e);
-  }
 }
 
 /**
@@ -252,37 +252,37 @@ async function loadPayload() {
  * 仅在用户无未保存改动时执行（hasUnsavedChanges() === false）。
  */
 async function reloadFromSticky() {
-  if (!originRef) return;
-  try {
-    const note = await getStickyNote(originRef);
-    if (!note) {
-      tracing("reloadFromSticky: 便签不存在");
-      return;
-    }
-    const newBody = (note.content || "").replace(/\r\n/g, "\n");
-    originalBody = newBody;
+    if (!originRef) return;
+    try {
+        const note = await getStickyNote(originRef);
+        if (!note) {
+            tracing("reloadFromSticky: 便签不存在");
+            return;
+        }
+        const newBody = (note.content || "").replace(/\r\n/g, "\n");
+        originalBody = newBody;
 
-    if (tiptapEditor) {
-      try {
-        const json = tiptapEditor.markdown.parse(newBody);
-        tiptapEditor.commands.setContent(json, false);
-      } catch (e) {
-        console.error("[content-editor] reloadFromSticky setContent 失败:", e);
-      }
-    } else {
-      textareaEl.value = newBody;
+        if (tiptapEditor) {
+            try {
+                const json = tiptapEditor.markdown.parse(newBody);
+                tiptapEditor.commands.setContent(json, false);
+            } catch (e) {
+                console.error("[content-editor] reloadFromSticky setContent 失败:", e);
+            }
+        } else {
+            textareaEl.value = newBody;
+        }
+        tracing("reloadFromSticky: 已从便签同步最新内容");
+    } catch (e) {
+        console.error("[content-editor] reloadFromSticky 失败:", e);
     }
-    tracing("reloadFromSticky: 已从便签同步最新内容");
-  } catch (e) {
-    console.error("[content-editor] reloadFromSticky 失败:", e);
-  }
 }
 
 // ── 工具栏 ────────────────────────────────────────────
 
 function bindToolbar() {
-  saveBtn.addEventListener("click", handleSave);
-  cancelBtn.addEventListener("click", handleCancel);
+    saveBtn.addEventListener("click", handleSave);
+    cancelBtn.addEventListener("click", handleCancel);
 }
 
 // ── 保存 ──────────────────────────────────────────────
@@ -293,177 +293,177 @@ function bindToolbar() {
  * 递增 sessionGen 确保正在进行的后台保存回调不会重新显示窗口。
  */
 function lifecycleClose(reason) {
-  tracing(`${reason}，自动关闭编辑器`);
-  allowClose = true;
-  sessionGen++;
-  if (closeTimeout) {
-    clearTimeout(closeTimeout);
-    closeTimeout = null;
-  }
-  closeWindow();
+    tracing(`${reason}，自动关闭编辑器`);
+    allowClose = true;
+    sessionGen++;
+    if (closeTimeout) {
+        clearTimeout(closeTimeout);
+        closeTimeout = null;
+    }
+    closeWindow();
 }
 
 async function handleSave() {
-  if (saving) return;
-  saving = true;
-  saveBtn.disabled = true;
+    if (saving) return;
+    saving = true;
+    saveBtn.disabled = true;
 
-  // 获取内容
-  let body;
-  if (tiptapEditor) {
+    // 获取内容
+    let body;
+    if (tiptapEditor) {
+        try {
+            body = tiptapEditor.getMarkdown();
+        } catch (mdErr) {
+            console.error("[content-editor] getMarkdown 失败:", mdErr);
+            body = textareaEl.value;
+        }
+    } else {
+        body = textareaEl.value;
+    }
+
+    // 捕获保存参数——后台保存期间窗口可能被复用，模块级变量会被 loadPayload 重置
+    const savedBody = body;
+    const savedOriginRef = originRef;
+    const savedPolicy = savePolicy;
+    const savedGen = sessionGen;
+
+    tracing(`handleSave: policy=${savedPolicy}, originRef=${savedOriginRef}, bodyLen=${savedBody.length}`);
+
+    // 0.18.3: 立即隐藏窗口——不阻塞用户，保存转为后台进行
+    allowClose = true;
+    closeWindow();
+
+    // 后台保存（不阻塞 UI）——窗口已隐藏，用户无需等待
     try {
-      body = tiptapEditor.getMarkdown();
-    } catch (mdErr) {
-      console.error("[content-editor] getMarkdown 失败:", mdErr);
-      body = textareaEl.value;
+        await saveContentEditor(savedBody, savedOriginRef, savedPolicy);
+        tracing("后台保存成功");
+        // 仅当窗口未被复用（代际未变）时更新状态
+        if (savedGen === sessionGen) {
+            originalBody = savedBody;
+            saving = false;
+        }
+    } catch (e) {
+        console.error("[content-editor] 后台保存失败:", e);
+        const msg = typeof e === "string" ? e : String(e?.message || e);
+        // 仅当窗口未被复用时重新显示并提示错误
+        if (savedGen === sessionGen) {
+            saving = false;
+            saveBtn.disabled = false;
+            allowClose = false;
+            statusEl.textContent = t("editor.saveFailed", {message: msg});
+            const win = getCurrentWindow();
+            if (win) win.show();
+        }
     }
-  } else {
-    body = textareaEl.value;
-  }
-
-  // 捕获保存参数——后台保存期间窗口可能被复用，模块级变量会被 loadPayload 重置
-  const savedBody = body;
-  const savedOriginRef = originRef;
-  const savedPolicy = savePolicy;
-  const savedGen = sessionGen;
-
-  tracing(`handleSave: policy=${savedPolicy}, originRef=${savedOriginRef}, bodyLen=${savedBody.length}`);
-
-  // 0.18.3: 立即隐藏窗口——不阻塞用户，保存转为后台进行
-  allowClose = true;
-  closeWindow();
-
-  // 后台保存（不阻塞 UI）——窗口已隐藏，用户无需等待
-  try {
-    await saveContentEditor(savedBody, savedOriginRef, savedPolicy);
-    tracing("后台保存成功");
-    // 仅当窗口未被复用（代际未变）时更新状态
-    if (savedGen === sessionGen) {
-      originalBody = savedBody;
-      saving = false;
-    }
-  } catch (e) {
-    console.error("[content-editor] 后台保存失败:", e);
-    const msg = typeof e === "string" ? e : String(e?.message || e);
-    // 仅当窗口未被复用时重新显示并提示错误
-    if (savedGen === sessionGen) {
-      saving = false;
-      saveBtn.disabled = false;
-      allowClose = false;
-      statusEl.textContent = t("editor.saveFailed", { message: msg });
-      const win = getCurrentWindow();
-      if (win) win.show();
-    }
-  }
 }
 
 // ── 关闭 / 取消 ───────────────────────────────────────
 
 async function handleCancel() {
-  if (hasUnsavedChanges() && !allowClose) {
-    const confirmed = await confirmDialog(t("editor.unsavedWarning"), {
-      kind: "warning",
-      okLabel: t("editor.discard"),
-      cancelLabel: t("editor.continueEdit"),
-    });
-    if (!confirmed) return;
-  }
-  allowClose = true;
-  closeWindow();
+    if (hasUnsavedChanges() && !allowClose) {
+        const confirmed = await confirmDialog(t("editor.unsavedWarning"), {
+            kind: "warning",
+            okLabel: t("editor.discard"),
+            cancelLabel: t("editor.continueEdit"),
+        });
+        if (!confirmed) return;
+    }
+    allowClose = true;
+    closeWindow();
 }
 
 /** 检查是否有未保存的改动 */
 function hasUnsavedChanges() {
-  let current;
-  if (tiptapEditor) {
-    try {
-      current = tiptapEditor.getMarkdown();
-    } catch {
-      current = textareaEl.value;
+    let current;
+    if (tiptapEditor) {
+        try {
+            current = tiptapEditor.getMarkdown();
+        } catch {
+            current = textareaEl.value;
+        }
+    } else {
+        current = textareaEl.value;
     }
-  } else {
-    current = textareaEl.value;
-  }
-  return current !== originalBody;
+    return current !== originalBody;
 }
 
 /** 关闭窗口（改为 hide 复用模式，不再销毁窗口） */
 function closeWindow() {
-  const win = getCurrentWindow();
-  if (win) {
-    win.hide();
-  }
+    const win = getCurrentWindow();
+    if (win) {
+        win.hide();
+    }
 }
 
 // ── 窗口控制 ──────────────────────────────────────────
 
 function bindWindowControls() {
-  const minBtn = document.getElementById("titlebar-minimize");
-  const maxBtn = document.getElementById("titlebar-maximize");
-  const closeBtn = document.getElementById("titlebar-close");
+    const minBtn = document.getElementById("titlebar-minimize");
+    const maxBtn = document.getElementById("titlebar-maximize");
+    const closeBtn = document.getElementById("titlebar-close");
 
-  if (minBtn) {
-    minBtn.addEventListener("click", () => {
-      getCurrentWindow()?.minimize();
-    });
-  }
+    if (minBtn) {
+        minBtn.addEventListener("click", () => {
+            getCurrentWindow()?.minimize();
+        });
+    }
 
-  if (maxBtn) {
-    maxBtn.addEventListener("click", async () => {
-      const win = getCurrentWindow();
-      if (!win) return;
-      const isMax = await win.isMaximized();
-      if (isMax) {
-        await win.unmaximize();
-      } else {
-        await win.maximize();
-      }
-    });
-  }
+    if (maxBtn) {
+        maxBtn.addEventListener("click", async () => {
+            const win = getCurrentWindow();
+            if (!win) return;
+            const isMax = await win.isMaximized();
+            if (isMax) {
+                await win.unmaximize();
+            } else {
+                await win.maximize();
+            }
+        });
+    }
 
-  if (closeBtn) {
-    closeBtn.addEventListener("click", handleCancel);
-  }
+    if (closeBtn) {
+        closeBtn.addEventListener("click", handleCancel);
+    }
 
-  // 系统级关闭请求（Alt+F4 等）
-  const win = getCurrentWindow();
-  if (win?.onCloseRequested) {
-    win.onCloseRequested(async (event) => {
-      event.preventDefault(); // 始终阻止销毁
-      if (allowClose || !hasUnsavedChanges()) {
-        closeWindow(); // win.hide()
-      } else {
-        handleCancel(); // 显示未保存确认对话框
-      }
-    });
-  }
+    // 系统级关闭请求（Alt+F4 等）
+    const win = getCurrentWindow();
+    if (win?.onCloseRequested) {
+        win.onCloseRequested(async (event) => {
+            event.preventDefault(); // 始终阻止销毁
+            if (allowClose || !hasUnsavedChanges()) {
+                closeWindow(); // win.hide()
+            } else {
+                handleCancel(); // 显示未保存确认对话框
+            }
+        });
+    }
 }
 
 // ── 键盘快捷键 ────────────────────────────────────────
 
 function bindKeyboard() {
-  document.addEventListener("keydown", (e) => {
-    // Ctrl+S：保存
-    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-      e.preventDefault();
-      handleSave();
-      return;
-    }
+    document.addEventListener("keydown", (e) => {
+        // Ctrl+S：保存
+        if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+            e.preventDefault();
+            handleSave();
+            return;
+        }
 
-    // Esc：关闭（有未保存改动时提示）
-    if (e.key === "Escape") {
-      e.preventDefault();
-      handleCancel();
-      return;
-    }
-  });
+        // Esc：关闭（有未保存改动时提示）
+        if (e.key === "Escape") {
+            e.preventDefault();
+            handleCancel();
+
+        }
+    });
 }
 
 // ── 工具 ──────────────────────────────────────────────
 
 /** 简易日志（绕过 frontendLog，直接 console） */
 function tracing(msg) {
-  console.log(`[content-editor] ${msg}`);
+    console.log(`[content-editor] ${msg}`);
 }
 
 // ── 启动 ──────────────────────────────────────────────

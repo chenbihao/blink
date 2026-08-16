@@ -6,12 +6,12 @@
 
 /** HTML 文本转义（防 XSS）。 */
 export function escapeText(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text ?? "");
-  return div.innerHTML;
+    const div = document.createElement("div");
+    div.textContent = String(text ?? "");
+    return div.innerHTML;
 }
 
 /** 属性转义（用于 data-* 和 title 属性，防 XSS）。 */
 export function escapeAttr(text) {
-  return String(text ?? "").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    return String(text ?? "").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }

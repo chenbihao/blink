@@ -22,9 +22,9 @@
 //! 0.11: Alt+Q 划词翻译 chord 已移除，chord-ball 悬浮球已删除。Alt+Space 语音输入
 //! 作为 display-only chord 条目加入提示条（触发仍走 native hotkey hold，不走 trigger_chord）。
 
-import { invoke } from "../shared/tauri.js";
-import { listChordActions } from "../shared/api.js";
-import { queryEl } from "./dom.js";
+import {invoke} from "../shared/tauri.js";
+import {listChordActions} from "../shared/api.js";
+import {queryEl} from "./dom.js";
 
 let chordActions = [];
 let ghostChordEl = null;
@@ -36,15 +36,15 @@ let hintVisible = true;
 
 /** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
 export function init() {
-  ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
-  // 0.16.1：输入框文本变化时重新 render overlay--有文本时清空 chord 提示（让位
-  // keyword 影子），无文本时恢复。chord-visible 由 input-state.js 投影，此处只管内容。
-  queryEl.addEventListener("input", render);
+    ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
+    // 0.16.1：输入框文本变化时重新 render overlay--有文本时清空 chord 提示（让位
+    // keyword 影子），无文本时恢复。chord-visible 由 input-state.js 投影，此处只管内容。
+    queryEl.addEventListener("input", render);
 }
 
 /** 是否启用 Chord（keyboard.js chordEligible 读此值,统一门禁）。 */
 export function isEnabled() {
-  return chordEnabled;
+    return chordEnabled;
 }
 
 /**
@@ -54,11 +54,11 @@ export function isEnabled() {
  * 这些）；无文本时返回全部（overlay 显示全部 chord 提示）。
  */
 export function getActions() {
-  if (!chordEnabled || !hintVisible) return [];
-  const hasText = !!queryEl.value.trim();
-  return hasText
-    ? chordActions.filter((a) => a.requires_input)
-    : chordActions;
+    if (!chordEnabled || !hintVisible) return [];
+    const hasText = !!queryEl.value.trim();
+    return hasText
+        ? chordActions.filter((a) => a.requires_input)
+        : chordActions;
 }
 
 /**
@@ -75,15 +75,15 @@ export function getActions() {
  * Alt+Q（chat）仍可触发并把文本带入对话窗口。
  */
 export function getTapKeys() {
-  const set = new Set();
-  if (!chordEnabled) return set;
-  const hasText = !!queryEl.value.trim();
-  for (const a of chordActions) {
-    if (a.semantic !== "tap") continue;
-    if (hasText && !a.requires_input) continue;
-    set.add(String(a.key).toLowerCase());
-  }
-  return set;
+    const set = new Set();
+    if (!chordEnabled) return set;
+    const hasText = !!queryEl.value.trim();
+    for (const a of chordActions) {
+        if (a.semantic !== "tap") continue;
+        if (hasText && !a.requires_input) continue;
+        set.add(String(a.key).toLowerCase());
+    }
+    return set;
 }
 
 // ── 可见性变化回调（statusbar 订阅用）─────────────────────────────────────
@@ -91,66 +91,66 @@ let onVisibilityChangeCallback = null;
 
 /** 订阅 chord-visible 状态变化（statusbar.init 调一次）。 */
 export function onVisibilityChange(cb) {
-  onVisibilityChangeCallback = cb;
+    onVisibilityChangeCallback = cb;
 }
 
 /** input-state.js projectUi() 调用，通知订阅者重绘。 */
 export function notifyVisibilityChange() {
-  if (onVisibilityChangeCallback) onVisibilityChangeCallback();
+    if (onVisibilityChangeCallback) onVisibilityChangeCallback();
 }
 
 /** 拉取 Chord 动作列表并渲染（shown / config-changed 时调）。 */
 export async function refresh() {
-  // 先刷新配置快照
-  try {
-    const cfg = await invoke("get_config");
-    if (cfg) {
-      // 0.8.7:chord 默认关,读取用 === true 精确判定,不再"缺失当 true"
-      chordEnabled = cfg.chord_enabled === true;
-      hintVisible = cfg.chord_hint_visible !== false;
+    // 先刷新配置快照
+    try {
+        const cfg = await invoke("get_config");
+        if (cfg) {
+            // 0.8.7:chord 默认关,读取用 === true 精确判定,不再"缺失当 true"
+            chordEnabled = cfg.chord_enabled === true;
+            hintVisible = cfg.chord_hint_visible !== false;
+        }
+    } catch (e) {
+        /* 保持默认 false */
     }
-  } catch (e) {
-    /* 保持默认 false */
-  }
 
-  if (!chordEnabled) {
-    // 总开关关 → 清空,不 render
-    chordActions = [];
-    if (ghostChordEl) ghostChordEl.replaceChildren();
-    return;
-  }
+    if (!chordEnabled) {
+        // 总开关关 → 清空,不 render
+        chordActions = [];
+        if (ghostChordEl) ghostChordEl.replaceChildren();
+        return;
+    }
 
-  try {
-    chordActions = await listChordActions();
-  } catch (e) {
-    console.warn("[chord] list_chord_actions 失败", e);
-    chordActions = [];
-  }
-  render();
+    try {
+        chordActions = await listChordActions();
+    } catch (e) {
+        console.warn("[chord] list_chord_actions 失败", e);
+        chordActions = [];
+    }
+    render();
 }
 
 /** 从已读好的 config 对象刷新 chord 配置并拉取动作列表（避免重复 invoke get_config）。
  * @param {object} cfg - get_config 返回的 AppConfig 对象 */
 export async function refreshFromConfigData(cfg) {
-  // 先刷新配置快照
-  if (cfg) {
-    chordEnabled = cfg.chord_enabled === true;
-    hintVisible = cfg.chord_hint_visible !== false;
-  }
+    // 先刷新配置快照
+    if (cfg) {
+        chordEnabled = cfg.chord_enabled === true;
+        hintVisible = cfg.chord_hint_visible !== false;
+    }
 
-  if (!chordEnabled) {
-    chordActions = [];
-    if (ghostChordEl) ghostChordEl.replaceChildren();
-    return;
-  }
+    if (!chordEnabled) {
+        chordActions = [];
+        if (ghostChordEl) ghostChordEl.replaceChildren();
+        return;
+    }
 
-  try {
-    chordActions = await listChordActions();
-  } catch (e) {
-    console.warn("[chord] list_chord_actions 失败", e);
-    chordActions = [];
-  }
-  render();
+    try {
+        chordActions = await listChordActions();
+    } catch (e) {
+        console.warn("[chord] list_chord_actions 失败", e);
+        chordActions = [];
+    }
+    render();
 }
 
 /**
@@ -159,45 +159,45 @@ export async function refreshFromConfigData(cfg) {
  * kbd.js 的 normalize() 会把 "Space" 映射到 KEY_META.space → 显示 "Space"。
  */
 export function chordKeyLabel(key) {
-  return key === " " ? "Space" : key.toUpperCase();
+    return key === " " ? "Space" : key.toUpperCase();
 }
 
 function render() {
-  if (!ghostChordEl) return;
-  ghostChordEl.replaceChildren();
-  // hint_visible=false 时不 render 提示条（触发仍生效）
-  if (!hintVisible) return;
-  if (!chordActions.length) return;
-  // 0.16.1：输入框有文本时不渲染 overlay 提示--此时 chord 提示走 statusbar 副行。
-  // overlay 空间要给 keyword 补全影子让位。互斥显示，不重叠不撑布局。
-  if (queryEl.value.trim()) return;
+    if (!ghostChordEl) return;
+    ghostChordEl.replaceChildren();
+    // hint_visible=false 时不 render 提示条（触发仍生效）
+    if (!hintVisible) return;
+    if (!chordActions.length) return;
+    // 0.16.1：输入框有文本时不渲染 overlay 提示--此时 chord 提示走 statusbar 副行。
+    // overlay 空间要给 keyword 补全影子让位。互斥显示，不重叠不撑布局。
+    if (queryEl.value.trim()) return;
 
-  // 0.16.11：空文本时过滤 hint_hidden_when_empty 的动作（E/S 是 contextual 动作，
-  // 空文本时提示价值低）。触发不受影响——getTapKeys() 仍包含全部 tap 键。
-  const visibleActions = chordActions.filter((a) => !a.hint_hidden_when_empty);
-  if (!visibleActions.length) return;
+    // 0.16.11：空文本时过滤 hint_hidden_when_empty 的动作（E/S 是 contextual 动作，
+    // 空文本时提示价值低）。触发不受影响——getTapKeys() 仍包含全部 tap 键。
+    const visibleActions = chordActions.filter((a) => !a.hint_hidden_when_empty);
+    if (!visibleActions.length) return;
 
-  // 前导两个非断行空格避免紧贴用户光标位（overlay whitespace: pre 保留）
-  ghostChordEl.appendChild(document.createTextNode("  "));
+    // 前导两个非断行空格避免紧贴用户光标位（overlay whitespace: pre 保留）
+    ghostChordEl.appendChild(document.createTextNode("  "));
 
-  visibleActions.forEach((a, i) => {
-    if (i > 0) {
-      const sep = document.createElement("span");
-      sep.className = "chord-sep";
-      sep.textContent = "│"; // 竖线,比 · 视觉更强,能区分不同 chord 分组
-      ghostChordEl.appendChild(sep);
-    }
-    const item = document.createElement("span");
-    item.className = "chord-item";
-    // 紧凑格式：单 kbd 显示键名（Alt 修饰键隐含，省空间）
-    const kbd = document.createElement("kbd");
-    kbd.className = "kbd chord-key";
-    kbd.textContent = chordKeyLabel(a.key);
-    item.appendChild(kbd);
-    const label = document.createElement("span");
-    label.className = "chord-label";
-    label.textContent = a.label;
-    item.appendChild(label);
-    ghostChordEl.appendChild(item);
-  });
+    visibleActions.forEach((a, i) => {
+        if (i > 0) {
+            const sep = document.createElement("span");
+            sep.className = "chord-sep";
+            sep.textContent = "│"; // 竖线,比 · 视觉更强,能区分不同 chord 分组
+            ghostChordEl.appendChild(sep);
+        }
+        const item = document.createElement("span");
+        item.className = "chord-item";
+        // 紧凑格式：单 kbd 显示键名（Alt 修饰键隐含，省空间）
+        const kbd = document.createElement("kbd");
+        kbd.className = "kbd chord-key";
+        kbd.textContent = chordKeyLabel(a.key);
+        item.appendChild(kbd);
+        const label = document.createElement("span");
+        label.className = "chord-label";
+        label.textContent = a.label;
+        item.appendChild(label);
+        ghostChordEl.appendChild(item);
+    });
 }

@@ -2,145 +2,145 @@
 
 /* ── 根布局 ── */
 .editor-root {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
 }
 
 /* ── Titlebar ── */
 .editor-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 36px;
-  padding: 0 8px 0 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--surface-2);
-  user-select: none;
-  flex-shrink: 0;
-  -webkit-app-region: drag;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 36px;
+    padding: 0 8px 0 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--surface-2);
+    user-select: none;
+    flex-shrink: 0;
+    -webkit-app-region: drag;
 }
 
 .editor-titlebar-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
 }
 
 .editor-titlebar-btns {
-  display: flex;
-  gap: 2px;
-  -webkit-app-region: no-drag;
+    display: flex;
+    gap: 2px;
+    -webkit-app-region: no-drag;
 }
 
 .editor-titlebar-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: transparent;
-  color: var(--text-sub);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background var(--transition-fast), color var(--transition-fast);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    color: var(--text-sub);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast), color var(--transition-fast);
 }
 
 .editor-titlebar-btn:hover {
-  background: var(--surface-2);
-  color: var(--text);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 .editor-titlebar-btn:active {
-  background: var(--text-faint);
+    background: var(--text-faint);
 }
 
 .editor-titlebar-btn svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .editor-titlebar-btn-close:hover {
-  background: #e53935;
-  color: #fff;
+    background: #e53935;
+    color: #fff;
 }
 
 /* ── Toolbar ── */
 .editor-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--surface-2);
-  flex-shrink: 0;
-  gap: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--surface-2);
+    flex-shrink: 0;
+    gap: 8px;
 }
 
 .editor-toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
 }
 
 .editor-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
 }
 
 .editor-status {
-  font-size: 11px;
-  color: var(--text-sub);
-  opacity: 0.7;
+    font-size: 11px;
+    color: var(--text-sub);
+    opacity: 0.7;
 }
 
 .editor-save-btn {
-  padding: 5px 16px;
-  border: none;
-  background: var(--accent);
-  color: var(--bg);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: opacity var(--transition-fast);
+    padding: 5px 16px;
+    border: none;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    transition: opacity var(--transition-fast);
 }
 
 .editor-save-btn:hover {
-  opacity: 0.85;
+    opacity: 0.85;
 }
 
 .editor-save-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 .editor-cancel-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--surface-2);
-  background: transparent;
-  color: var(--text-sub);
-  font-size: 12px;
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: all var(--transition-fast);
+    padding: 5px 12px;
+    border: 1px solid var(--surface-2);
+    background: transparent;
+    color: var(--text-sub);
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    transition: all var(--transition-fast);
 }
 
 .editor-cancel-btn:hover {
-  border-color: var(--text-dim);
-  color: var(--text);
+    border-color: var(--text-dim);
+    color: var(--text);
 }
 
 /* ── 编辑区 ── */
@@ -148,179 +148,179 @@
 /* 0.18.3：MD 工具栏主题适配（共有组件在 components/md-toolbar.css） */
 /* 0.18.3：工具栏移入 editor-toolbar-left，去掉 border-bottom（父级 editor-toolbar 已有） */
 .editor-md-toolbar {
-  --md-toolbar-bg: transparent;
-  --md-toolbar-text: var(--text-sub);
-  --md-toolbar-hover: var(--surface-2);
-  --md-toolbar-active: var(--text-faint);
-  border-bottom: none;
+    --md-toolbar-bg: transparent;
+    --md-toolbar-text: var(--text-sub);
+    --md-toolbar-hover: var(--surface-2);
+    --md-toolbar-active: var(--text-faint);
+    border-bottom: none;
 }
 
 .editor-body {
-  flex: 1;
-  overflow: hidden;
-  position: relative;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
 }
 
 .editor-textarea {
-  width: 100%;
-  height: 100%;
-  padding: 16px 20px;
-  border: none;
-  outline: none;
-  resize: none;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", "Microsoft YaHei", monospace;
-  font-size: 14px;
-  line-height: 1.6;
-  tab-size: 4;
+    width: 100%;
+    height: 100%;
+    padding: 16px 20px;
+    border: none;
+    outline: none;
+    resize: none;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Cascadia Code", "JetBrains Mono", "Consolas", "Microsoft YaHei", monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    tab-size: 4;
 }
 
 .editor-textarea::placeholder {
-  color: var(--text-sub);
-  opacity: 0.5;
+    color: var(--text-sub);
+    opacity: 0.5;
 }
 
 /* 滚动条——与 Tiptap 编辑区保持一致 */
 .editor-textarea::-webkit-scrollbar {
-  width: 8px;
+    width: 8px;
 }
 
 .editor-textarea::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
 
 .editor-textarea::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 4px;
+    background: var(--surface-2);
+    border-radius: 4px;
 }
 
 .editor-textarea::-webkit-scrollbar-thumb:hover {
-  background: var(--text-faint);
+    background: var(--text-faint);
 }
 
 /* ── Tiptap IR 编辑器（0.18.3：替换 Cherry 双栏）── */
 .editor-tiptap-container {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
 }
 
 .editor-tiptap-container .ProseMirror {
-  min-height: 100%;
-  padding: 16px 20px;
-  outline: none;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-  font-size: 14px;
-  line-height: 1.6;
-  font-style: normal;
-  overflow-y: auto;
-  word-wrap: break-word;
+    min-height: 100%;
+    padding: 16px 20px;
+    outline: none;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    font-style: normal;
+    overflow-y: auto;
+    word-wrap: break-word;
 }
 
 .editor-tiptap-container .ProseMirror:empty::before {
-  content: "输入或编辑内容...";
-  color: var(--text-sub);
-  opacity: 0.4;
-  pointer-events: none;
+    content: "输入或编辑内容...";
+    color: var(--text-sub);
+    opacity: 0.4;
+    pointer-events: none;
 }
 
 .editor-tiptap-container .ProseMirror::-webkit-scrollbar {
-  width: 8px;
+    width: 8px;
 }
 
 .editor-tiptap-container .ProseMirror::-webkit-scrollbar-track {
-  background: transparent;
+    background: transparent;
 }
 
 .editor-tiptap-container .ProseMirror::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 4px;
+    background: var(--surface-2);
+    border-radius: 4px;
 }
 
 /* Tiptap IR 渲染元素样式 */
 .editor-tiptap-container .ProseMirror h1 {
-  font-size: 1.4em;
-  font-weight: 700;
-  margin: 16px 0 8px;
-  font-style: normal;
+    font-size: 1.4em;
+    font-weight: 700;
+    margin: 16px 0 8px;
+    font-style: normal;
 }
 
 .editor-tiptap-container .ProseMirror h2 {
-  font-size: 1.25em;
-  font-weight: 700;
-  margin: 16px 0 8px;
-  font-style: normal;
+    font-size: 1.25em;
+    font-weight: 700;
+    margin: 16px 0 8px;
+    font-style: normal;
 }
 
 .editor-tiptap-container .ProseMirror h3 {
-  font-size: 1.1em;
-  font-weight: 600;
-  margin: 12px 0 6px;
-  font-style: normal;
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 12px 0 6px;
+    font-style: normal;
 }
 
 .editor-tiptap-container .ProseMirror p {
-  margin: 6px 0;
+    margin: 6px 0;
 }
 
 .editor-tiptap-container .ProseMirror ul,
 .editor-tiptap-container .ProseMirror ol {
-  margin: 6px 0;
-  padding-left: 1.5em;
+    margin: 6px 0;
+    padding-left: 1.5em;
 }
 
 .editor-tiptap-container .ProseMirror li {
-  margin: 3px 0;
+    margin: 3px 0;
 }
 
 .editor-tiptap-container .ProseMirror blockquote {
-  margin: 8px 0;
-  padding: 8px 16px;
-  border-left: 3px solid var(--accent);
-  background: var(--surface);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  color: var(--text-sub);
+    margin: 8px 0;
+    padding: 8px 16px;
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    color: var(--text-sub);
 }
 
 .editor-tiptap-container .ProseMirror code {
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
-  font-size: 0.9em;
-  background: var(--surface-2);
-  padding: 1px 4px;
-  border-radius: var(--radius-sm);
+    font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+    font-size: 0.9em;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
 }
 
 .editor-tiptap-container .ProseMirror pre {
-  margin: 8px 0;
-  padding: 12px 16px;
-  background: var(--surface);
-  border-radius: var(--radius-sm);
-  overflow-x: auto;
+    margin: 8px 0;
+    padding: 12px 16px;
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
 }
 
 .editor-tiptap-container .ProseMirror pre code {
-  background: transparent;
-  padding: 0;
+    background: transparent;
+    padding: 0;
 }
 
 .editor-tiptap-container .ProseMirror strong {
-  font-weight: 700;
+    font-weight: 700;
 }
 
 .editor-tiptap-container .ProseMirror em {
-  font-style: italic;
+    font-style: italic;
 }
 
 .editor-tiptap-container .ProseMirror a {
-  color: var(--accent);
-  text-decoration: underline;
+    color: var(--accent);
+    text-decoration: underline;
 }
 
 .editor-tiptap-container .ProseMirror hr {
-  border: none;
-  border-top: 1px solid var(--surface-2);
-  margin: 12px 0;
+    border: none;
+    border-top: 1px solid var(--surface-2);
+    margin: 12px 0;
 }

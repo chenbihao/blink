@@ -2,50 +2,50 @@
    来源：contextmenu-popup.html:25-59 */
 
 .context-menu {
-  min-width: 170px;
-  padding: var(--space-sm);
-  background: var(--bg);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-card);
-  font-size: var(--text-base);
-  user-select: none;
-  color: var(--text);
+    min-width: 170px;
+    padding: var(--space-sm);
+    background: var(--bg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-card);
+    font-size: var(--text-base);
+    user-select: none;
+    color: var(--text);
 }
 
 .context-menu-item {
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
 }
 
 /* 0.20.3：颜色项 shortcut 与 label 同行，等宽小号 + 淡色 */
 .context-menu-item.has-subtext .context-menu-shortcut {
-  margin-left: auto;
-  font-size: var(--text-sm);
-  font-family: ui-monospace, Consolas, monospace;
-  opacity: 0.55;
-  white-space: pre;
+    margin-left: auto;
+    font-size: var(--text-sm);
+    font-family: ui-monospace, Consolas, monospace;
+    opacity: 0.55;
+    white-space: pre;
 }
 
 .context-menu-item:hover {
-  background: var(--surface);
+    background: var(--surface);
 }
 
 .context-menu-item.danger {
-  color: var(--red);
+    color: var(--red);
 }
 
 .context-menu-item.danger:hover {
-  background: var(--danger-hover-bg);
+    background: var(--danger-hover-bg);
 }
 
 .context-menu-sep {
-  height: 1px;
-  margin: var(--space-xs) var(--space-sm);
-  background: var(--surface);
+    height: 1px;
+    margin: var(--space-xs) var(--space-sm);
+    background: var(--surface);
 }

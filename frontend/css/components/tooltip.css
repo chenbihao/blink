@@ -13,55 +13,55 @@
  */
 
 .tip {
-  position: relative;
+    position: relative;
 }
 
 /* 气泡主体 */
 .tip::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%) translateY(2px);
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%) translateY(2px);
 
-  background: var(--surface-2);
-  color: var(--text);
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm);
-  padding: 5px 9px;
-  font-size: var(--text-xs, 12px);
-  font-weight: var(--weight-normal, 400);
-  line-height: var(--leading-snug, 1.4);
-  white-space: nowrap;
-  max-width: 280px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm);
+    padding: 5px 9px;
+    font-size: var(--text-xs, 12px);
+    font-weight: var(--weight-normal, 400);
+    line-height: var(--leading-snug, 1.4);
+    white-space: nowrap;
+    max-width: 280px;
 
-  box-shadow: 0 4px 12px var(--shadow);
-  z-index: 1000;
-  pointer-events: none;
+    box-shadow: 0 4px 12px var(--shadow);
+    z-index: 1000;
+    pointer-events: none;
 
-  opacity: 0;
-  transition: opacity var(--transition-base, 0.15s) var(--ease-out, ease-out),
-              transform var(--transition-base, 0.15s) var(--ease-out, ease-out);
+    opacity: 0;
+    transition: opacity var(--transition-base, 0.15s) var(--ease-out, ease-out),
+    transform var(--transition-base, 0.15s) var(--ease-out, ease-out);
 }
 
 /* 小三角箭头（指向触发元素） */
 .tip::before {
-  content: "";
-  position: absolute;
-  bottom: calc(100% + 1px);
-  left: 50%;
-  transform: translateX(-50%) translateY(2px);
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 1px);
+    left: 50%;
+    transform: translateX(-50%) translateY(2px);
 
-  border: 5px solid transparent;
-  border-top-color: var(--surface-2);
-  border-bottom: 0;
+    border: 5px solid transparent;
+    border-top-color: var(--surface-2);
+    border-bottom: 0;
 
-  z-index: 1001;
-  pointer-events: none;
+    z-index: 1001;
+    pointer-events: none;
 
-  opacity: 0;
-  transition: opacity var(--transition-base, 0.15s) var(--ease-out, ease-out),
-              transform var(--transition-base, 0.15s) var(--ease-out, ease-out);
+    opacity: 0;
+    transition: opacity var(--transition-base, 0.15s) var(--ease-out, ease-out),
+    transform var(--transition-base, 0.15s) var(--ease-out, ease-out);
 }
 
 /* hover / 键盘聚焦时显现 */
@@ -69,6 +69,6 @@
 .tip:hover::before,
 .tip:focus-within::after,
 .tip:focus-within::before {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
 }

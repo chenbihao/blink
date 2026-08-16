@@ -3,709 +3,709 @@
 /* ── 侧边栏（0.12.3 push 布局，非 overlay） ────── */
 
 .chat-sidebar {
-  width: 240px;
-  flex-shrink: 0;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--surface);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  transition: width 0.2s ease, opacity 0.2s ease, border-color 0.2s ease;
+    width: 240px;
+    flex-shrink: 0;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: width 0.2s ease, opacity 0.2s ease, border-color 0.2s ease;
 }
 
 /* data-closed 属性控制关闭态：宽度收 0 + 透明 + 隐藏边框 */
 .chat-sidebar[data-closed] {
-  width: 0;
-  opacity: 0;
-  border-right-color: transparent;
-  pointer-events: none;
+    width: 0;
+    opacity: 0;
+    border-right-color: transparent;
+    pointer-events: none;
 }
 
 .chat-sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-sm) var(--space-md);
-  border-bottom: 1px solid var(--surface);
-  flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-sm) var(--space-md);
+    border-bottom: 1px solid var(--surface);
+    flex-shrink: 0;
 }
 
 .chat-sidebar-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
 }
 
 .chat-sidebar-new {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.15s;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.15s;
 }
 
 .chat-sidebar-new svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .chat-sidebar-new:hover {
-  color: var(--text);
-  background: var(--surface);
+    color: var(--text);
+    background: var(--surface);
 }
 
 /* 0.17.6a: 临时对话按钮 */
 .chat-sidebar-ephemeral {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.15s;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.15s;
 }
 
 .chat-sidebar-ephemeral svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .chat-sidebar-ephemeral:hover {
-  color: var(--accent);
-  background: var(--surface);
+    color: var(--accent);
+    background: var(--surface);
 }
 
 /* 0.17.6a: 临时对话 badge */
 .chat-ephemeral-badge {
-  display: inline-block;
-  padding: 1px 6px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border-radius: 4px;
-  margin-left: var(--space-xs);
-  font-style: normal;
-  white-space: nowrap;
+    display: inline-block;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-bg);
+    border-radius: 4px;
+    margin-left: var(--space-xs);
+    font-style: normal;
+    white-space: nowrap;
 }
 
 .chat-ephemeral-badge[hidden] {
-  display: none;
+    display: none;
 }
 
 .chat-sidebar-list {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: var(--space-xs);
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: var(--space-xs);
 }
 
 .chat-sidebar-empty {
-  padding: var(--space-xl) var(--space-sm);
-  text-align: center;
-  color: var(--text-faint);
-  font-size: 13px;
-  line-height: 1.6;
+    padding: var(--space-xl) var(--space-sm);
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 13px;
+    line-height: 1.6;
 }
 
 .chat-sidebar-empty-hint {
-  font-size: 11px;
-  opacity: 0.7;
+    font-size: 11px;
+    opacity: 0.7;
 }
 
 .chat-sidebar-item {
-  display: flex;
-  align-items: center;
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.12s;
-  gap: var(--space-xs);
-  position: relative;
+    display: flex;
+    align-items: center;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s;
+    gap: var(--space-xs);
+    position: relative;
 }
 
 /* 对话项 hover：用 --surface 亮色，比分组的 --bg-deep 更突出，体现可操作性 */
 .chat-sidebar-item:hover {
-  background: var(--surface);
+    background: var(--surface);
 }
 
 .chat-sidebar-item.active {
-  background: var(--accent-bg);
+    background: var(--accent-bg);
 }
 
 .chat-sidebar-item.active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: var(--accent);
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
 }
 
 .chat-sidebar-item-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
 }
 
 .chat-sidebar-item-title {
-  font-size: 13px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+    font-size: 13px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .chat-sidebar-item.active .chat-sidebar-item-title {
-  color: var(--accent);
-  font-weight: 500;
+    color: var(--accent);
+    font-weight: 500;
 }
 
 .chat-sidebar-item-meta {
-  font-size: 11px;
-  color: var(--text-faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+    font-size: 11px;
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .chat-sidebar-item-delete {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.12s;
-  flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.12s;
+    flex-shrink: 0;
 }
 
 .chat-sidebar-item-delete svg {
-  width: 12px;
-  height: 12px;
+    width: 12px;
+    height: 12px;
 }
 
 .chat-sidebar-item-delete:hover {
-  color: var(--red);
-  background: var(--danger-hover-bg);
+    color: var(--red);
+    background: var(--danger-hover-bg);
 }
 
 .chat-sidebar-rename-input {
-  width: 100%;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 13px;
-  background: var(--bg);
-  color: var(--text);
-  outline: none;
+    width: 100%;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
 }
 
 /* 0.12.4 §6.4：侧边栏项操作区（悬浮浮层覆盖，不占布局空间） */
 /* 透明背景：靠 hover 时文本 mask-image 渐隐避免视觉冲突，不限 active/hover 配色 */
 /* 0.12.8：opacity:0 + transform:translateY(-50%) → visibility:hidden + top:0;bottom:0 */
 .chat-sidebar-item-actions {
-  position: absolute;
-  right: 4px;
-  top: 0;
-  bottom: 0; /* 替代 top:50% + transform:translateY(-50%)，用拉伸+flex居中 */
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  visibility: hidden;
-  pointer-events: none;
-  transition: visibility 0s linear 0.12s;
-  padding-left: 2px;
-  border-radius: 0 8px 8px 0;
+    position: absolute;
+    right: 4px;
+    top: 0;
+    bottom: 0; /* 替代 top:50% + transform:translateY(-50%)，用拉伸+flex居中 */
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    visibility: hidden;
+    pointer-events: none;
+    transition: visibility 0s linear 0.12s;
+    padding-left: 2px;
+    border-radius: 0 8px 8px 0;
 }
 
 .chat-sidebar-item:hover .chat-sidebar-item-actions {
-  visibility: visible;
-  pointer-events: auto;
-  transition: visibility 0s;
-  animation: blink-fade-in 0.12s ease-out;
+    visibility: visible;
+    pointer-events: auto;
+    transition: visibility 0s;
+    animation: blink-fade-in 0.12s ease-out;
 }
 
 /* 悬浮时文本渐隐（mask-image），避免长标题与透明操作区按钮视觉冲突 */
 /* 双停止点：文本保持完全可见 → 20px 快速淡出 → 到达按钮前完全消失 */
 /* 编辑态排除：避免输入框被 mask 裁切 */
 .chat-sidebar-item:hover:not(.editing) .chat-sidebar-item-info {
-  -webkit-mask-image: linear-gradient(to right, black calc(100% - 86px), transparent calc(100% - 66px));
-  mask-image: linear-gradient(to right, black calc(100% - 86px), transparent calc(100% - 66px));
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 86px), transparent calc(100% - 66px));
+    mask-image: linear-gradient(to right, black calc(100% - 86px), transparent calc(100% - 66px));
 }
 
 /* 编辑态隐藏悬浮操作区 */
 .chat-sidebar-item.editing .chat-sidebar-item-actions {
-  display: none;
+    display: none;
 }
 
 /* 0.12.4 §6.4：重命名按钮 */
 .chat-sidebar-item-rename {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.12s;
-  flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.12s;
+    flex-shrink: 0;
 }
 
 .chat-sidebar-item-rename svg {
-  width: 12px;
-  height: 12px;
+    width: 12px;
+    height: 12px;
 }
 
 .chat-sidebar-item-rename:hover {
-  color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    background: var(--accent-bg);
 }
 
 /* 0.12.5 §5.6：导出按钮（与重命名/删除按钮样式模式一致） */
 .chat-sidebar-item-export {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.12s;
-  flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.12s;
+    flex-shrink: 0;
 }
 
 .chat-sidebar-item-export svg {
-  width: 12px;
-  height: 12px;
+    width: 12px;
+    height: 12px;
 }
 
 .chat-sidebar-item-export:hover {
-  color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    background: var(--accent-bg);
 }
 
 /* 0.12.4 §6.3：删除确认态 */
 .chat-sidebar-item.confirming-delete .chat-sidebar-item-info {
-  opacity: 0.5;
+    opacity: 0.5;
 }
 
 .chat-sidebar-item-cancel-delete,
 .chat-sidebar-item-confirm-delete {
-  border: 0;
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.12s;
-  flex-shrink: 0;
+    border: 0;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.12s;
+    flex-shrink: 0;
 }
 
 .chat-sidebar-item-cancel-delete {
-  background: var(--surface);
-  color: var(--text-dim);
+    background: var(--surface);
+    color: var(--text-dim);
 }
 
 .chat-sidebar-item-cancel-delete:hover {
-  background: var(--surface);
-  color: var(--text);
+    background: var(--surface);
+    color: var(--text);
 }
 
 .chat-sidebar-item-confirm-delete {
-  background: var(--danger-hover-bg);
-  color: var(--red);
-  font-weight: 500;
+    background: var(--danger-hover-bg);
+    color: var(--red);
+    font-weight: 500;
 }
 
 .chat-sidebar-item-confirm-delete:hover {
-  background: var(--red);
-  color: var(--on-accent);
+    background: var(--red);
+    color: var(--on-accent);
 }
 
 /* ── 对话分组树（0.12.6） ────────────────────────── */
 
 /* 侧边栏头部操作区（新建分组 + 新对话按钮） */
 .chat-sidebar-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
 }
 
 .chat-sidebar-new-group {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.15s;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.15s;
 }
 
 .chat-sidebar-new-group svg {
-  width: 14px;
-  height: 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .chat-sidebar-new-group:hover {
-  color: var(--text);
-  background: var(--surface);
+    color: var(--text);
+    background: var(--surface);
 }
 
 /* 分组节点容器 */
 .chat-sidebar-group {
-  margin-bottom: 2px;
+    margin-bottom: 2px;
 }
 
 /* 分组头部行 */
 .chat-sidebar-group-header {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  padding-left: calc(var(--space-sm) + var(--group-indent, 0px));
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.12s;
-  user-select: none;
-  position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: var(--space-xs) var(--space-sm);
+    padding-left: calc(var(--space-sm) + var(--group-indent, 0px));
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s;
+    user-select: none;
+    position: relative;
 }
 
 /* 分组 hover：用 --bg-deep 暗色，比对话项的 --surface 更弱，体现结构性层级 */
 .chat-sidebar-group-header:hover {
-  background: var(--bg-deep);
+    background: var(--bg-deep);
 }
 
 /* 折叠状态：隐藏子内容 */
 .chat-sidebar-group[data-collapsed] .chat-sidebar-group-children {
-  display: none;
+    display: none;
 }
 
 /* 展开箭头 */
 .chat-sidebar-chevron {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  color: var(--text-faint);
-  transition: transform 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    color: var(--text-faint);
+    transition: transform 0.15s;
 }
 
 .chat-sidebar-chevron svg {
-  width: 12px;
-  height: 12px;
+    width: 12px;
+    height: 12px;
 }
 
 /* 文件夹图标 */
 .chat-sidebar-folder-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    color: var(--text-dim);
 }
 
 .chat-sidebar-folder-icon svg {
-  width: 13px;
-  height: 13px;
+    width: 13px;
+    height: 13px;
 }
 
 /* 分组名 */
 .chat-sidebar-group-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  min-width: 0;
-  letter-spacing: 0.2px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+    letter-spacing: 0.2px;
 }
 
 /* 系统提示词指示器：文件夹图标右下角小圆点（始终可见，不与悬浮操作区冲突） */
 .chat-sidebar-group[data-prompt] .chat-sidebar-folder-icon {
-  position: relative;
+    position: relative;
 }
 
 .chat-sidebar-group[data-prompt] .chat-sidebar-folder-icon::after {
-  content: "";
-  position: absolute;
-  bottom: -1px;
-  right: -2px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 1.5px solid var(--surface);
-  box-sizing: content-box;
+    content: "";
+    position: absolute;
+    bottom: -1px;
+    right: -2px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 1.5px solid var(--surface);
+    box-sizing: content-box;
 }
 
 /* 分组操作按钮区 — 悬浮时浮层覆盖右侧，不占布局空间 */
 /* 透明背景：靠 hover 时文本 mask-image 渐隐避免视觉冲突 */
 /* 0.12.8：同 .chat-sidebar-item-actions，移除 opacity+transform 合成层提升 */
 .chat-sidebar-group-actions {
-  position: absolute;
-  right: 4px;
-  top: 0;
-  bottom: 0; /* 替代 top:50% + transform:translateY(-50%)，用拉伸+flex居中 */
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  visibility: hidden;
-  pointer-events: none;
-  transition: visibility 0s linear 0.12s;
-  padding-left: 2px;
-  border-radius: 0 6px 6px 0;
+    position: absolute;
+    right: 4px;
+    top: 0;
+    bottom: 0; /* 替代 top:50% + transform:translateY(-50%)，用拉伸+flex居中 */
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    visibility: hidden;
+    pointer-events: none;
+    transition: visibility 0s linear 0.12s;
+    padding-left: 2px;
+    border-radius: 0 6px 6px 0;
 }
 
 .chat-sidebar-group-header:hover .chat-sidebar-group-actions {
-  visibility: visible;
-  pointer-events: auto;
-  transition: visibility 0s;
-  animation: blink-fade-in 0.12s ease-out;
+    visibility: visible;
+    pointer-events: auto;
+    transition: visibility 0s;
+    animation: blink-fade-in 0.12s ease-out;
 }
 
 /* 悬浮时分组名渐隐（mask-image），编辑态排除 */
 /* 双停止点：文本保持完全可见 → 20px 快速淡出 → 到达按钮前完全消失 */
 .chat-sidebar-group:not(.editing) .chat-sidebar-group-header:hover .chat-sidebar-group-name {
-  -webkit-mask-image: linear-gradient(to right, black calc(100% - 130px), transparent calc(100% - 110px));
-  mask-image: linear-gradient(to right, black calc(100% - 130px), transparent calc(100% - 110px));
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 130px), transparent calc(100% - 110px));
+    mask-image: linear-gradient(to right, black calc(100% - 130px), transparent calc(100% - 110px));
 }
 
 /* 编辑态隐藏悬浮操作区 */
 .chat-sidebar-group.editing .chat-sidebar-group-actions {
-  display: none;
+    display: none;
 }
 
 /* 分组操作按钮（通用） */
 .chat-sidebar-group-btn {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: all 0.12s;
-  flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.12s;
+    flex-shrink: 0;
 }
 
 .chat-sidebar-group-btn svg {
-  width: 12px;
-  height: 12px;
+    width: 12px;
+    height: 12px;
 }
 
 .chat-sidebar-group-btn:hover {
-  color: var(--accent);
-  background: var(--accent-bg);
+    color: var(--accent);
+    background: var(--accent-bg);
 }
 
 .chat-sidebar-group-btn-danger:hover {
-  color: var(--red);
-  background: var(--danger-hover-bg);
+    color: var(--red);
+    background: var(--danger-hover-bg);
 }
 
 /* 提示词按钮已设置态：accent 色提示用户该分组有系统提示词 */
 .chat-sidebar-group-btn-has-prompt {
-  color: var(--accent);
+    color: var(--accent);
 }
 
 /* 分组删除确认态 */
 .chat-sidebar-group.confirming-delete .chat-sidebar-group-header {
-  background: var(--danger-hover-bg);
+    background: var(--danger-hover-bg);
 }
 
 /* 子内容区 */
 .chat-sidebar-group-children {
-  /* 无额外样式，折叠时由 data-collapsed 控制 display:none */
+    /* 无额外样式，折叠时由 data-collapsed 控制 display:none */
 }
 
 /* 对话项缩进（使用 --item-indent 变量） */
 .chat-sidebar-item {
-  padding-left: calc(var(--space-sm) + var(--item-indent, 0px));
+    padding-left: calc(var(--space-sm) + var(--item-indent, 0px));
 }
 
 /* 新建分组内联输入行 */
 .chat-sidebar-new-group-input-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: 6px;
 }
 
 .chat-sidebar-new-group-input-row .chat-sidebar-chevron,
 .chat-sidebar-new-group-input-row .chat-sidebar-folder-icon {
-  opacity: 0.4;
+    opacity: 0.4;
 }
 
 /* 分组名输入框（重命名 + 新建共用） */
 .chat-sidebar-group-name-input {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 13px;
-  font-weight: 500;
-  background: var(--bg);
-  color: var(--text);
-  outline: none;
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 13px;
+    font-weight: 500;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
 }
 
 /* 系统提示词编辑器 */
 .chat-sidebar-prompt-editor {
-  padding: var(--space-xs) var(--space-sm);
-  padding-left: calc(var(--space-sm) + var(--group-indent, 0px) + 20px);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
+    padding: var(--space-xs) var(--space-sm);
+    padding-left: calc(var(--space-sm) + var(--group-indent, 0px) + 20px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
 }
 
 .chat-sidebar-prompt-textarea {
-  width: 100%;
-  border: 1px solid var(--surface);
-  border-radius: 6px;
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 12px;
-  font-family: inherit;
-  line-height: 1.5;
-  background: var(--bg-deep);
-  color: var(--text);
-  outline: none;
-  resize: vertical;
-  min-height: 60px;
-  max-height: 200px;
+    width: 100%;
+    border: 1px solid var(--surface);
+    border-radius: 6px;
+    padding: var(--space-xs) var(--space-sm);
+    font-size: 12px;
+    font-family: inherit;
+    line-height: 1.5;
+    background: var(--bg-deep);
+    color: var(--text);
+    outline: none;
+    resize: vertical;
+    min-height: 60px;
+    max-height: 200px;
 }
 
 .chat-sidebar-prompt-textarea:focus {
-  border-color: var(--accent);
+    border-color: var(--accent);
 }
 
 .chat-sidebar-prompt-editor-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-xs);
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-xs);
 }
 
 .chat-sidebar-prompt-save,
 .chat-sidebar-prompt-cancel {
-  border: 0;
-  border-radius: 4px;
-  padding: 3px 10px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.12s;
+    border: 0;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.12s;
 }
 
 .chat-sidebar-prompt-save {
-  background: var(--accent);
-  color: var(--on-accent);
+    background: var(--accent);
+    color: var(--on-accent);
 }
 
 .chat-sidebar-prompt-save:hover {
-  opacity: 0.9;
+    opacity: 0.9;
 }
 
 .chat-sidebar-prompt-cancel {
-  background: var(--surface);
-  color: var(--text-dim);
+    background: var(--surface);
+    color: var(--text-dim);
 }
 
 .chat-sidebar-prompt-cancel:hover {
-  background: var(--surface);
-  color: var(--text);
+    background: var(--surface);
+    color: var(--text);
 }
 
 /* ── 两栏布局（文件夹顶部 + 默认底部） ────────────── */
 
 /* 文件夹区域标签 */
 .chat-sidebar-section-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: var(--space-xs) var(--space-sm) 2px;
-  user-select: none;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: var(--space-xs) var(--space-sm) 2px;
+    user-select: none;
 }
 
 /* 默认分组区域（底部，始终展开） */
 .chat-sidebar-default-section {
-  margin-top: var(--space-xs);
+    margin-top: var(--space-xs);
 }
 
 .chat-sidebar-default-section.has-folders-above {
-  margin-top: var(--space-sm);
-  padding-top: var(--space-xs);
-  border-top: 1px solid var(--surface);
+    margin-top: var(--space-sm);
+    padding-top: var(--space-xs);
+    border-top: 1px solid var(--surface);
 }
 
 .chat-sidebar-default-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: 6px;
-  user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: 6px;
+    user-select: none;
 }
 
 .chat-sidebar-default-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 /* 0.12.8：opacity:0 → visibility:hidden，避免合成层提升 */
 .chat-sidebar-default-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  visibility: hidden;
-  transition: visibility 0s linear 0.12s;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    visibility: hidden;
+    transition: visibility 0s linear 0.12s;
 }
 
 .chat-sidebar-default-header:hover .chat-sidebar-default-actions {
-  visibility: visible;
-  transition: visibility 0s;
-  animation: blink-fade-in 0.12s ease-out;
+    visibility: visible;
+    transition: visibility 0s;
+    animation: blink-fade-in 0.12s ease-out;
 }
 
 .chat-sidebar-default-empty {
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 12px;
-  color: var(--text-faint);
-  opacity: 0.6;
+    padding: var(--space-xs) var(--space-sm);
+    font-size: 12px;
+    color: var(--text-faint);
+    opacity: 0.6;
 }
 
 /* ── 拖拽排序视觉反馈（纯 mouse 事件，兼容 WebView2） ─── */
@@ -713,57 +713,58 @@
 /* 拖拽中的源元素半透明 */
 .chat-sidebar-group-header.dragging,
 .chat-sidebar-item.dragging {
-  opacity: 0.3;
+    opacity: 0.3;
 }
 
 /* drop target 高亮 */
 /* 分组拖拽排序 → 整行高亮 + 指示线 */
 /* 对话移入文件夹 → 整行高亮（无指示线） */
 .chat-sidebar-group-header.drag-over {
-  background: var(--accent-bg);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+    background: var(--accent-bg);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
 .chat-sidebar-item.drag-over {
-  background: var(--accent-bg);
+    background: var(--accent-bg);
 }
 
 /* 默认区域作为 drop target 的高亮 */
 .chat-sidebar-default-section.drag-over {
-  background: var(--accent-bg);
-  border-radius: 8px;
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+    background: var(--accent-bg);
+    border-radius: 8px;
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
 /* 拖拽幽灵预览（跟随鼠标的克隆体） */
 .chat-sidebar-drag-ghost {
-  opacity: 0.9;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-  border-radius: 8px;
-  background: var(--surface);
-  transition: none;
-  transform: scale(0.96);
+    opacity: 0.9;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    border-radius: 8px;
+    background: var(--surface);
+    transition: none;
+    transform: scale(0.96);
 }
 
 /* drop 指示线（显示插入位置） */
 .chat-sidebar-drop-indicator {
-  position: fixed;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 1px;
-  pointer-events: none;
-  z-index: 99998;
-  box-shadow: 0 0 6px var(--accent-bg);
+    position: fixed;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+    pointer-events: none;
+    z-index: 99998;
+    box-shadow: 0 0 6px var(--accent-bg);
 }
+
 .chat-sidebar-drop-indicator::before {
-  content: '';
-  position: absolute;
-  left: -3px;
-  top: -2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
+    content: '';
+    position: absolute;
+    left: -3px;
+    top: -2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
 }

@@ -3,42 +3,42 @@
    主题文件：themes/{dark,light,gruvbox,...}.css 覆盖此文件的值。 */
 
 :root {
-  /* 背景 */
-  --bg: #1e1e2e;
-  --bg-sidebar: #181825;
-  --bg-deep: #11111b;
+    /* 背景 */
+    --bg: #1e1e2e;
+    --bg-sidebar: #181825;
+    --bg-deep: #11111b;
 
-  /* 表面 */
-  --surface: #313244;
-  --surface-2: #45475a;
+    /* 表面 */
+    --surface: #313244;
+    --surface-2: #45475a;
 
-  /* 文字 */
-  --text: #cdd6f4;
-  --text-sub: #a6adc8;
-  --text-dim: #6c7086;
-  --text-faint: #585b70;
+    /* 文字 */
+    --text: #cdd6f4;
+    --text-sub: #a6adc8;
+    --text-dim: #6c7086;
+    --text-faint: #585b70;
 
-  /* 强调色 */
-  --accent: #89b4fa;
-  --accent-bg: rgba(137, 180, 250, 0.15);
-  --on-accent: #fff; /* 在 accent/品牌色等彩色背景上的前景文字与图形（spinner 描边、AI 徽章字等） */
+    /* 强调色 */
+    --accent: #89b4fa;
+    --accent-bg: rgba(137, 180, 250, 0.15);
+    --on-accent: #fff; /* 在 accent/品牌色等彩色背景上的前景文字与图形（spinner 描边、AI 徽章字等） */
 
-  /* 截图智能预选层级色：窗口深蓝，控件浅蓝 */
-  --preselection-window: #3478d4;
-  --preselection-control: #7fc4ff;
+    /* 截图智能预选层级色：窗口深蓝，控件浅蓝 */
+    --preselection-window: #3478d4;
+    --preselection-control: #7fc4ff;
 
-  /* 状态色 */
-  --green: #a6e3a1;
-  --green-bg: #2a3f4e;
-  --red: #f38ba8;
-  --red-bg: #45273a;
-  --red-border: #6c3a5a;
+    /* 状态色 */
+    --green: #a6e3a1;
+    --green-bg: #2a3f4e;
+    --red: #f38ba8;
+    --red-bg: #45273a;
+    --red-border: #6c3a5a;
 
-  /* 阴影 */
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
+    /* 阴影 */
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
 
-  /* 危险操作 */
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+    /* 危险操作 */
+    --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }

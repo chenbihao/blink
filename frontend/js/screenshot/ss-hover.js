@@ -11,13 +11,11 @@
 //! 后端枚举 ~5-15ms，只在 overlay 加载时调一次。前端 mousemove 做纯 JS
 //! point-in-rect hit-test（O(n)，n 通常 <30），<0.1ms。
 
-import { ss } from './ss-state.js';
-import { screenshotWindowList } from '../shared/api.js';
-import { clampRectToCss, rectScreenToCss, pointInRect } from './ss-selection-geometry.js';
-import { findDisplayCssAt } from './ss-display.js';
-import {
-  hidePreselectionHint, resetPreselectionHint, showPreselectionHint,
-} from './ss-preselection-hint.js';
+import {ss} from './ss-state.js';
+import {screenshotWindowList} from '../shared/api.js';
+import {clampRectToCss, pointInRect, rectScreenToCss} from './ss-selection-geometry.js';
+import {findDisplayCssAt} from './ss-display.js';
+import {hidePreselectionHint, resetPreselectionHint, showPreselectionHint,} from './ss-preselection-hint.js';
 
 /** 缓存的可吸附窗口列表（CSS 坐标） */
 let pickableWindows = [];
@@ -34,64 +32,68 @@ let desktopHintRect = null;
  * 支持会话 generation 防止过期回流。
  */
 export async function loadPickableWindows(requestGen, fetchWindows = screenshotWindowList) {
-  const _t0 = performance.now();
-  console.info('[screenshot] loadPickableWindows start', { gen: requestGen });
-  try {
-    const list = await fetchWindows();
-    const _tFetchEnd = performance.now();
-    
-    // 检查 generation，防止过期回流
-    if (requestGen !== ss.windowListGen) {
-      console.debug('[screenshot] 窗口列表已过期，丢弃', { requestGen, current: ss.windowListGen });
-      return;
-    }
-    
-    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    
-    pickableWindows = normalizePickableWindows(
-      list,
-      meta,
-      window.innerWidth,
-      window.innerHeight,
-    );
+    const _t0 = performance.now();
+    console.info('[screenshot] loadPickableWindows start', {gen: requestGen});
+    try {
+        const list = await fetchWindows();
+        const _tFetchEnd = performance.now();
 
-    console.info('[screenshot] loadPickableWindows done', { count: pickableWindows.length, fetchMs: Math.round(_tFetchEnd - _t0), totalMs: Math.round(performance.now() - _t0) });
-  } catch (e) {
-    // 旧请求的失败与旧请求的成功一样，都不能覆盖新一代列表。
-    if (requestGen !== ss.windowListGen) {
-      console.debug('[screenshot] 旧窗口列表请求失败，忽略', { requestGen, current: ss.windowListGen });
-      return;
+        // 检查 generation，防止过期回流
+        if (requestGen !== ss.windowListGen) {
+            console.debug('[screenshot] 窗口列表已过期，丢弃', {requestGen, current: ss.windowListGen});
+            return;
+        }
+
+        const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+
+        pickableWindows = normalizePickableWindows(
+            list,
+            meta,
+            window.innerWidth,
+            window.innerHeight,
+        );
+
+        console.info('[screenshot] loadPickableWindows done', {
+            count: pickableWindows.length,
+            fetchMs: Math.round(_tFetchEnd - _t0),
+            totalMs: Math.round(performance.now() - _t0)
+        });
+    } catch (e) {
+        // 旧请求的失败与旧请求的成功一样，都不能覆盖新一代列表。
+        if (requestGen !== ss.windowListGen) {
+            console.debug('[screenshot] 旧窗口列表请求失败，忽略', {requestGen, current: ss.windowListGen});
+            return;
+        }
+        console.warn('[screenshot] loadPickableWindows 失败', e);
+        pickableWindows = [];
     }
-    console.warn('[screenshot] loadPickableWindows 失败', e);
-    pickableWindows = [];
-  }
 }
 
 /** 将物理窗口矩形转换并裁剪到当前 overlay；完全不可见的窗口不进入 hit-test。 */
 export function normalizePickableWindows(list, meta, viewportWidth, viewportHeight) {
-  return (list || []).map((w) => {
-    const screenRect = { x: w.x, y: w.y, w: w.w, h: w.h };
-    const cssRect = clampRectToCss(
-      rectScreenToCss(screenRect, meta),
-      viewportWidth,
-      viewportHeight,
-    );
-      return {
-        hwnd: w.hwnd,
-        title: w.title,
-        processName: w.process_name,
-        ...cssRect
-      };
+    return (list || []).map((w) => {
+        const screenRect = {x: w.x, y: w.y, w: w.w, h: w.h};
+        const cssRect = clampRectToCss(
+            rectScreenToCss(screenRect, meta),
+            viewportWidth,
+            viewportHeight,
+        );
+        return {
+            hwnd: w.hwnd,
+            title: w.title,
+            processName: w.process_name,
+            ...cssRect
+        };
     }).filter((w) => w.w > 0 && w.h > 0);
 }
 
 /** 释放窗口列表 + 立即隐藏提示框（overlay 关闭时调） */
 export function clearPickableWindows() {
-  pickableWindows = [];
-  hoveredIndex = -1;
-  desktopHintRect = null;
-  ss.windowListGen++;
-  resetPreselectionHint();
+    pickableWindows = [];
+    hoveredIndex = -1;
+    desktopHintRect = null;
+    ss.windowListGen++;
+    resetPreselectionHint();
 }
 
 /**
@@ -112,51 +114,51 @@ export function clearPickableWindows() {
  * @returns {boolean} true = 当前悬停在某窗口上（应显示虚线框）
  */
 export function updateWindowHover(cssX, cssY, options) {
-  const skipShowHint = options?.skipShowHint === true;
+    const skipShowHint = options?.skipShowHint === true;
 
-  // 选区已确定时不吸附（标注模式）
-  if (ss.isAnnotating) {
-    if (hoveredIndex >= 0 || desktopHintRect) {
-      hoveredIndex = -1;
-      desktopHintRect = null;
-      if (!skipShowHint) hideWindowHint();
+    // 选区已确定时不吸附（标注模式）
+    if (ss.isAnnotating) {
+        if (hoveredIndex >= 0 || desktopHintRect) {
+            hoveredIndex = -1;
+            desktopHintRect = null;
+            if (!skipShowHint) hideWindowHint();
+        }
+        return false;
+    }
+
+    // 0.15.8 R1：从索引 0 开始正序遍历——EnumWindows 返回前景到背景，
+    // 第一个命中即为最前景窗口。
+    let found = -1;
+    for (let i = 0; i < pickableWindows.length; i++) {
+        const w = pickableWindows[i];
+        if (pointInRect(cssX, cssY, w)) {
+            found = i;
+            break;
+        }
+    }
+
+    if (found >= 0) {
+        // 命中窗口：更新索引，清除桌面预选区
+        if (found !== hoveredIndex || desktopHintRect) {
+            hoveredIndex = found;
+            desktopHintRect = null;
+            if (!skipShowHint) showWindowHint(pickableWindows[found]);
+        }
+        return true;
+    }
+
+    // 未命中任何窗口：回退为全屏（当前显示器）预选区
+    const displayRect = findDisplayCssAt(cssX, cssY);
+    if (!desktopHintRect ||
+        desktopHintRect.x !== displayRect.x ||
+        desktopHintRect.y !== displayRect.y ||
+        desktopHintRect.w !== displayRect.w ||
+        desktopHintRect.h !== displayRect.h) {
+        hoveredIndex = -1;
+        desktopHintRect = {...displayRect};
+        if (!skipShowHint) showWindowHint(desktopHintRect);
     }
     return false;
-  }
-
-  // 0.15.8 R1：从索引 0 开始正序遍历——EnumWindows 返回前景到背景，
-  // 第一个命中即为最前景窗口。
-  let found = -1;
-  for (let i = 0; i < pickableWindows.length; i++) {
-    const w = pickableWindows[i];
-    if (pointInRect(cssX, cssY, w)) {
-      found = i;
-      break;
-    }
-  }
-
-  if (found >= 0) {
-    // 命中窗口：更新索引，清除桌面预选区
-    if (found !== hoveredIndex || desktopHintRect) {
-      hoveredIndex = found;
-      desktopHintRect = null;
-      if (!skipShowHint) showWindowHint(pickableWindows[found]);
-    }
-    return true;
-  }
-
-  // 未命中任何窗口：回退为全屏（当前显示器）预选区
-  const displayRect = findDisplayCssAt(cssX, cssY);
-  if (!desktopHintRect ||
-      desktopHintRect.x !== displayRect.x ||
-      desktopHintRect.y !== displayRect.y ||
-      desktopHintRect.w !== displayRect.w ||
-      desktopHintRect.h !== displayRect.h) {
-    hoveredIndex = -1;
-    desktopHintRect = { ...displayRect };
-    if (!skipShowHint) showWindowHint(desktopHintRect);
-  }
-  return false;
 }
 
 /** 获取当前悬停的窗口矩形（CSS 坐标）。
@@ -164,24 +166,24 @@ export function updateWindowHover(cssX, cssY, options) {
  * 桌面预选区激活时返回全屏矩形（无 hwnd），单击桌面可 snap 到全屏。
  * 全屏标注被困问题由 index.js 的"点击选区外部 → 退出标注"解决。 */
 export function getHoveredWindowRect() {
-  if (hoveredIndex >= 0) {
-    const w = pickableWindows[hoveredIndex];
-    return { x: w.x, y: w.y, w: w.w, h: w.h, hwnd: w.hwnd };
-  }
-  if (desktopHintRect) {
-    return { ...desktopHintRect };
-  }
-  return null;
+    if (hoveredIndex >= 0) {
+        const w = pickableWindows[hoveredIndex];
+        return {x: w.x, y: w.y, w: w.w, h: w.h, hwnd: w.hwnd};
+    }
+    if (desktopHintRect) {
+        return {...desktopHintRect};
+    }
+    return null;
 }
 
 /** 0.15.8 R2：只清除 hover 状态（隐藏虚线框），不清除窗口列表。
  * 拖动开始或进入标注模式时调用。 */
 export function clearHover() {
-  if (hoveredIndex >= 0 || desktopHintRect) {
-    hoveredIndex = -1;
-    desktopHintRect = null;
-    hideWindowHint();
-  }
+    if (hoveredIndex >= 0 || desktopHintRect) {
+        hoveredIndex = -1;
+        desktopHintRect = null;
+        hideWindowHint();
+    }
 }
 
 /**
@@ -189,53 +191,53 @@ export function clearHover() {
  * 优先取与选区交叠面积最大的外部顶层窗口；相同面积时保留枚举顺序靠前者。
  */
 export function findWindowForRect(rect) {
-  if (!rect || pickableWindows.length === 0) return null;
-  let best = null;
-  let bestArea = 0;
-  let bestTarget = null;
-  for (const candidate of pickableWindows) {
-    const left = Math.max(rect.x, candidate.x);
-    const top = Math.max(rect.y, candidate.y);
-    const right = Math.min(rect.x + rect.w, candidate.x + candidate.w);
-    const bottom = Math.min(rect.y + rect.h, candidate.y + candidate.h);
-    const area = Math.max(0, right - left) * Math.max(0, bottom - top);
-    if (area > bestArea) {
-      best = candidate;
-      bestArea = area;
-      bestTarget = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    if (!rect || pickableWindows.length === 0) return null;
+    let best = null;
+    let bestArea = 0;
+    let bestTarget = null;
+    for (const candidate of pickableWindows) {
+        const left = Math.max(rect.x, candidate.x);
+        const top = Math.max(rect.y, candidate.y);
+        const right = Math.min(rect.x + rect.w, candidate.x + candidate.w);
+        const bottom = Math.min(rect.y + rect.h, candidate.y + candidate.h);
+        const area = Math.max(0, right - left) * Math.max(0, bottom - top);
+        if (area > bestArea) {
+            best = candidate;
+            bestArea = area;
+            bestTarget = {x: (left + right) / 2, y: (top + bottom) / 2};
+        }
     }
-  }
-  return best ? {
-    hwnd: best.hwnd,
-    title: best.title,
-    processName: best.processName,
-    targetX: bestTarget.x,
-    targetY: bestTarget.y,
-  } : null;
+    return best ? {
+        hwnd: best.hwnd,
+        title: best.title,
+        processName: best.processName,
+        targetX: bestTarget.x,
+        targetY: bestTarget.y,
+    } : null;
 }
 
 /** 把统一预选框切换到窗口层级；几何过渡由 ss-preselection-hint 统一管理。 */
 function showWindowHint(w) {
-  const label = w.processName ? `${w.processName}` : '';
-  const title = w.title ? (label ? `${label} — ${w.title}` : w.title) : label;
-  showPreselectionHint(w, 'window', title);
+    const label = w.processName ? `${w.processName}` : '';
+    const title = w.title ? (label ? `${label} — ${w.title}` : w.title) : label;
+    showPreselectionHint(w, 'window', title);
 }
 
 /** 控件命中时释放窗口层级；若控件已接管统一预选框则不会误隐藏。 */
 export function hideWindowHintIfVisible() {
-  hideWindowHint();
+    hideWindowHint();
 }
 
 /** 控件未命中时把统一预选框切回待显示的窗口或桌面。 */
 export function showWindowHintIfPending() {
-  if (hoveredIndex >= 0) {
-    showWindowHint(pickableWindows[hoveredIndex]);
-  } else if (desktopHintRect) {
-    showWindowHint(desktopHintRect);
-  }
+    if (hoveredIndex >= 0) {
+        showWindowHint(pickableWindows[hoveredIndex]);
+    } else if (desktopHintRect) {
+        showWindowHint(desktopHintRect);
+    }
 }
 
 /** 隐藏窗口虚线框（淡出） */
 function hideWindowHint() {
-  hidePreselectionHint('window');
+    hidePreselectionHint('window');
 }

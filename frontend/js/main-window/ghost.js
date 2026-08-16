@@ -27,7 +27,7 @@
 //!   通道触发 ghost `→ fanyi`。用户 Tab 后重新触发搜索时才命中 Takeover。
 //! - 0.8.3 Context 类同理：Context 命中不进 route()（不产 candidate），只出 Ghost。
 
-import { queryEl } from "./dom.js";
+import {queryEl} from "./dom.js";
 import * as aiMode from "./ai-mode.js";
 
 // 当前 suggestion，形如 { display, replacement, source, confidence, prefixLen }
@@ -61,9 +61,9 @@ let lastQuery = "";
  * 把 scrollLeft 同步过来即可。（0.10.6）
  */
 export function syncScroll() {
-  if (ghostOverlayEl) {
-    ghostOverlayEl.scrollLeft = queryEl.scrollLeft;
-  }
+    if (ghostOverlayEl) {
+        ghostOverlayEl.scrollLeft = queryEl.scrollLeft;
+    }
 }
 
 /**
@@ -81,23 +81,23 @@ export function syncScroll() {
  *   右侧留空间，ratio 仅在未来换用可换行元素时才有意义。
  */
 export function scrollWithMargin(_ratio = 0.8) {
-  const maxScroll = queryEl.scrollWidth - queryEl.clientWidth;
-  if (maxScroll <= 0) {
+    const maxScroll = queryEl.scrollWidth - queryEl.clientWidth;
+    if (maxScroll <= 0) {
+        syncScroll();
+        return;
+    }
+    queryEl.scrollLeft = maxScroll;
     syncScroll();
-    return;
-  }
-  queryEl.scrollLeft = maxScroll;
-  syncScroll();
 }
 
 /** 初始化：绑定 overlay DOM + scroll 同步监听。main.js 启动时调一次。 */
 export function init() {
-  ghostOverlayEl = document.querySelector("#ghost-overlay");
-  ghostTypedEl = document.querySelector("#ghost-overlay .ghost-typed");
-  ghostSuggestEl = document.querySelector("#ghost-overlay .ghost-suggest");
+    ghostOverlayEl = document.querySelector("#ghost-overlay");
+    ghostTypedEl = document.querySelector("#ghost-overlay .ghost-typed");
+    ghostSuggestEl = document.querySelector("#ghost-overlay .ghost-suggest");
 
-  // 0.10.6: #query 水平滚动时同步 ghost overlay——覆盖打字 / IME / 语音输入所有场景
-  queryEl.addEventListener("scroll", syncScroll);
+    // 0.10.6: #query 水平滚动时同步 ghost overlay——覆盖打字 / IME / 语音输入所有场景
+    queryEl.addEventListener("scroll", syncScroll);
 }
 
 /**
@@ -105,11 +105,11 @@ export function init() {
  * @param {(sug: object|null) => void} cb
  */
 export function onChange(cb) {
-  onChangeCallback = cb;
+    onChangeCallback = cb;
 }
 
 function notify() {
-  if (onChangeCallback) onChangeCallback(currentSuggestion);
+    if (onChangeCallback) onChangeCallback(currentSuggestion);
 }
 
 /**
@@ -118,8 +118,8 @@ function notify() {
  * @param {string} text - 当前 IME 组字中的文字（可能带拼音/候选字）
  */
 export function syncTypedText(text) {
-  if (ghostTypedEl) ghostTypedEl.textContent = text;
-  syncScroll();
+    if (ghostTypedEl) ghostTypedEl.textContent = text;
+    syncScroll();
 }
 
 /**
@@ -127,84 +127,84 @@ export function syncTypedText(text) {
  * 调用方保证 ghostTypedEl / ghostSuggestEl 已初始化。
  */
 function renderToDom(query) {
-  if (!currentSuggestion) {
-    ghostTypedEl.textContent = "";
-    ghostSuggestEl.textContent = "";
-    ghostSuggestEl.classList.remove("ghost-context");
-    queryEl.removeAttribute("data-ghost-active");
-    return;
-  }
-  ghostTypedEl.textContent = query;
+    if (!currentSuggestion) {
+        ghostTypedEl.textContent = "";
+        ghostSuggestEl.textContent = "";
+        ghostSuggestEl.classList.remove("ghost-context");
+        queryEl.removeAttribute("data-ghost-active");
+        return;
+    }
+    ghostTypedEl.textContent = query;
 
-  // 只在补全场景（display 非空）画影子文字；已完整场景（display 为空）
-  // overlay 保持空--用户已看到自己的完整输入，加任何影子都是冗余；提示交给 statusbar。
-  //
-  // 0.8.3：Context 类的 display 已是完整独立文本（"翻译 \"the...\""）,不需要 `->` 前缀。
-  // Keyword 类保留 `->` 前缀（表达"补全为..."的语义）。
-  // 0.9.2:AI 类 display 是 "按 Tab 问 AI",不属于补全语义,也不用 `->` 前缀。
-  //
-  // 0.16.1：Context 类不再画影子文字（环境感知是弱信号，不应占输入框影子位打扰
-  // 用户）。overlay 保持空，采纳提示只走 statusbar。currentSuggestion 状态仍正常
-  // 持有--hasHint()/currentDisplay()/currentOrigin() 供 statusbar 读取。
-  if (!currentSuggestion.display) {
-    ghostSuggestEl.textContent = "";
-  } else if (currentSuggestion.source === "context") {
-    // 0.16.1：context 不画影子，只设 data-ghost-active 让 statusbar 知道有 hint
-    ghostSuggestEl.textContent = "";
-  } else if (currentSuggestion.source === "ai") {
-    ghostSuggestEl.textContent = ` ${currentSuggestion.display}`;
-  } else {
-    ghostSuggestEl.textContent = ` -> ${currentSuggestion.display}`;
-  }
-  ghostSuggestEl.classList.toggle(
-    "ghost-context",
-    currentSuggestion.source === "ai",
-  );
-  // 0.16.1：context 类不再画影子，也不需要 ghost-context 样式（影子为空）
-  if (currentSuggestion.display && currentSuggestion.source !== "context") {
-    // 0.16.1：context 类不画影子，不设 data-ghost-active（overlay 无视觉变化），
-    // 也不需要 scrollWithMargin（没有影子要留空间）。但 currentSuggestion 仍持有，
-    // hasHint() 返回 true，statusbar 会展示采纳提示。
-    queryEl.setAttribute("data-ghost-active", "");
-    // 0.10.6: 有影子时调整滚动留出右侧空间给 preview 文本
-    scrollWithMargin();
-  } else {
-    queryEl.removeAttribute("data-ghost-active");
-    syncScroll();
-  }
+    // 只在补全场景（display 非空）画影子文字；已完整场景（display 为空）
+    // overlay 保持空--用户已看到自己的完整输入，加任何影子都是冗余；提示交给 statusbar。
+    //
+    // 0.8.3：Context 类的 display 已是完整独立文本（"翻译 \"the...\""）,不需要 `->` 前缀。
+    // Keyword 类保留 `->` 前缀（表达"补全为..."的语义）。
+    // 0.9.2:AI 类 display 是 "按 Tab 问 AI",不属于补全语义,也不用 `->` 前缀。
+    //
+    // 0.16.1：Context 类不再画影子文字（环境感知是弱信号，不应占输入框影子位打扰
+    // 用户）。overlay 保持空，采纳提示只走 statusbar。currentSuggestion 状态仍正常
+    // 持有--hasHint()/currentDisplay()/currentOrigin() 供 statusbar 读取。
+    if (!currentSuggestion.display) {
+        ghostSuggestEl.textContent = "";
+    } else if (currentSuggestion.source === "context") {
+        // 0.16.1：context 不画影子，只设 data-ghost-active 让 statusbar 知道有 hint
+        ghostSuggestEl.textContent = "";
+    } else if (currentSuggestion.source === "ai") {
+        ghostSuggestEl.textContent = ` ${currentSuggestion.display}`;
+    } else {
+        ghostSuggestEl.textContent = ` -> ${currentSuggestion.display}`;
+    }
+    ghostSuggestEl.classList.toggle(
+        "ghost-context",
+        currentSuggestion.source === "ai",
+    );
+    // 0.16.1：context 类不再画影子，也不需要 ghost-context 样式（影子为空）
+    if (currentSuggestion.display && currentSuggestion.source !== "context") {
+        // 0.16.1：context 类不画影子，不设 data-ghost-active（overlay 无视觉变化），
+        // 也不需要 scrollWithMargin（没有影子要留空间）。但 currentSuggestion 仍持有，
+        // hasHint() 返回 true，statusbar 会展示采纳提示。
+        queryEl.setAttribute("data-ghost-active", "");
+        // 0.10.6: 有影子时调整滚动留出右侧空间给 preview 文本
+        scrollWithMargin();
+    } else {
+        queryEl.removeAttribute("data-ghost-active");
+        syncScroll();
+    }
 }
 
 /** 更新 ghost 显示。suggestion 为 null/undefined 时清空。 */
 export function update(query, suggestion) {
-  const prev = currentSuggestion;
-  currentSuggestion = suggestion || null;
-  lastQuery = query;
-  if (!ghostTypedEl || !ghostSuggestEl) return;
-  if (frozen) {
-    // 语音录音期间：voice-partial 独占 overlay DOM，只更新状态 + notify
-    if (prev !== currentSuggestion) notify();
-    return;
-  }
-  renderToDom(query);
-  if (prev !== currentSuggestion || suggestion) notify();
+    const prev = currentSuggestion;
+    currentSuggestion = suggestion || null;
+    lastQuery = query;
+    if (!ghostTypedEl || !ghostSuggestEl) return;
+    if (frozen) {
+        // 语音录音期间：voice-partial 独占 overlay DOM，只更新状态 + notify
+        if (prev !== currentSuggestion) notify();
+        return;
+    }
+    renderToDom(query);
+    if (prev !== currentSuggestion || suggestion) notify();
 }
 
 /** 清空 ghost（reset / 窗口 hide / 用户 Esc 时调）。 */
 export function clear() {
-  const prev = currentSuggestion;
-  currentSuggestion = null;
-  lastQuery = "";
-  if (frozen) {
+    const prev = currentSuggestion;
+    currentSuggestion = null;
+    lastQuery = "";
+    if (frozen) {
+        if (prev) notify();
+        return;
+    }
+    if (ghostTypedEl) ghostTypedEl.textContent = "";
+    if (ghostSuggestEl) {
+        ghostSuggestEl.textContent = "";
+        ghostSuggestEl.classList.remove("ghost-context");
+    }
+    queryEl.removeAttribute("data-ghost-active");
     if (prev) notify();
-    return;
-  }
-  if (ghostTypedEl) ghostTypedEl.textContent = "";
-  if (ghostSuggestEl) {
-    ghostSuggestEl.textContent = "";
-    ghostSuggestEl.classList.remove("ghost-context");
-  }
-  queryEl.removeAttribute("data-ghost-active");
-  if (prev) notify();
 }
 
 /**
@@ -223,44 +223,44 @@ export function clear() {
  * 返回是否成功接受（无 suggestion 时返回 false，供 keyboard 层判断要不要 preventDefault）。
  */
 export function acceptCurrent() {
-  if (!currentSuggestion) return false;
+    if (!currentSuggestion) return false;
 
-  // AI 类:进入 AI 模式（0.17.6: 改走 ChatService，不再调 trigger_ai）
-  if (currentSuggestion.source === "ai") {
-    const query = currentSuggestion.replacement;
+    // AI 类:进入 AI 模式（0.17.6: 改走 ChatService，不再调 trigger_ai）
+    if (currentSuggestion.source === "ai") {
+        const query = currentSuggestion.replacement;
+        clear();
+        aiMode.enterAiMode(query);
+        return true;
+    }
+
+    const rep = currentSuggestion.replacement;
+    queryEl.value = rep;
+    queryEl.setSelectionRange(rep.length, rep.length);
     clear();
-    aiMode.enterAiMode(query);
+    // 派发 input 事件，让 search.js 的 onInput 走一遍——重新算 route + ghost。
+    queryEl.dispatchEvent(new Event("input", {bubbles: true}));
     return true;
-  }
-
-  const rep = currentSuggestion.replacement;
-  queryEl.value = rep;
-  queryEl.setSelectionRange(rep.length, rep.length);
-  clear();
-  // 派发 input 事件，让 search.js 的 onInput 走一遍——重新算 route + ghost。
-  queryEl.dispatchEvent(new Event("input", { bubbles: true }));
-  return true;
 }
 
 /** 是否有活跃 suggestion（keyboard / statusbar 层查询）。 */
 export function hasHint() {
-  return currentSuggestion !== null;
+    return currentSuggestion !== null;
 }
 
 /** 当前 suggestion 的 display（statusbar 展示 "→ fanyi" 时用）。 */
 export function currentDisplay() {
-  return currentSuggestion?.display || "";
+    return currentSuggestion?.display || "";
 }
 
 /** 当前 suggestion 的 source（statusbar 按源分文案时用）。 */
 export function currentSource() {
-  return currentSuggestion?.source || null;
+    return currentSuggestion?.source || null;
 }
 
 /** 当前 suggestion 的 origin（Context 类才有，statusbar 用来展示"来自划词/剪贴板"）。
  *  值为 "selection" | "clipboard" | null。Keyword 类恒 null。 */
 export function currentOrigin() {
-  return currentSuggestion?.origin || null;
+    return currentSuggestion?.origin || null;
 }
 
 // ── 冻结 API（0.10 语音预览独占 overlay）──────────────────────────────────────
@@ -271,7 +271,7 @@ export function currentOrigin() {
  * voice-partial handler 直接管理 ghostSuggest.textContent 显示 preview。
  */
 export function freeze() {
-  frozen = true;
+    frozen = true;
 }
 
 /**
@@ -279,12 +279,12 @@ export function freeze() {
  * 清除 voice-partial 残留的 voice-preview-text 样式后，用当前 suggestion 重绘。
  */
 export function unfreeze() {
-  frozen = false;
-  if (ghostSuggestEl) {
-    ghostSuggestEl.classList.remove("voice-preview-text");
-  }
-  if (ghostTypedEl && ghostSuggestEl) {
-    renderToDom(lastQuery);
-  }
-  // renderToDom 内部已按有无 display 调用 scrollWithMargin / syncScroll
+    frozen = false;
+    if (ghostSuggestEl) {
+        ghostSuggestEl.classList.remove("voice-preview-text");
+    }
+    if (ghostTypedEl && ghostSuggestEl) {
+        renderToDom(lastQuery);
+    }
+    // renderToDom 内部已按有无 display 调用 scrollWithMargin / syncScroll
 }
