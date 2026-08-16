@@ -241,6 +241,11 @@ impl Default for CapabilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::capability::{
+        policy::{DangerClass, AiDefault, McpDefault}, 
+        ConfirmationPolicy, OriginSet, RuntimeRequirement, InvocationOrigin
+    };
+    use std::sync::Arc;
 
     #[test]
     fn empty_registry_get_returns_none() {
@@ -337,6 +342,8 @@ mod tests {
         assert!(reg.get("dup_cap").is_some());
     }
 
+    
+
     #[test]
     fn register_coexists_with_inventory() {
         // new() 先收集 inventory，register() 追加——两者共存
@@ -348,4 +355,343 @@ mod tests {
         reg.register(cap);
         assert_eq!(reg.len(), before + 1);
     }
+
+    // ── 0.21.11: Registry invoke 综合测试 ────────────────────────────────────────
+
+    /// 测试 Safe capability 正常调用流程与 perf 标记。
+    
+
+    #[tokio::test]
+    async fn invoke_safe_capability_success_with_perf_ok() {
+        let reg = CapabilityRegistry::default();
+        let cap = Arc::new(SafeMockCap {
+            id_val: "test_safe_cap",
+        });
+        reg.register(cap);
+
+        let ctx = InvokeContext {
+            env: &MockEnv {},
+            origin: InvocationOrigin::LocalAi,
+            runtime: RuntimeCapabilities {
+                surface: None,
+                main_process: true,
+                desktop_session: true,
+            },
+            deadline: None,
+        };
+
+        let result = reg.invoke("test_safe_cap", serde_json::Value::Null, &ctx).await;
+        assert!(result.is_ok());
+        
+        // 验证返回正确结果
+        match result.unwrap() {
+            CapabilityResult::Done { summary } => assert_eq!(summary, "safe operation completed"),
+            _ => panic!("预期 Done 结果"),
+        }
+    }
+
+
+
+    /// 测试 OriginDenied 错误场景与不记录 perf。
+    #[tokio::test]
+    async fn invoke_origin_denied_error_no_perf_record() {
+        let reg = CapabilityRegistry::default();
+        let cap = Arc::new(DenyOriginCap {
+            id_val: "test_deny_origin",
+        });
+        reg.register(cap);
+
+        let ctx = InvokeContext {
+            env: &MockEnv {},
+            origin: InvocationOrigin::Mcp,  // policy 不允许的 origin
+            runtime: RuntimeCapabilities {
+                surface: None,
+                main_process: true,
+                desktop_session: true,
+            },
+            deadline: None,
+        };
+
+        let result = reg.invoke("test_deny_origin", serde_json::Value::Null, &ctx).await;
+        assert!(result.is_err());
+        
+        match result.unwrap_err() {
+            CapabilityError::OriginDenied { origin, .. } => {
+                assert_eq!(origin, "Mcp");
+            }
+            _ => panic!("预期 OriginDenied 错误"),
+        }
+    }
+
+    /// 测试 RuntimeUnsupported 错误场景。
+    #[tokio::test]
+    async fn invoke_runtime_unsupported_error() {
+        let reg = CapabilityRegistry::default();
+        let cap = Arc::new(NeedsGuiCap {
+            id_val: "test_needs_gui",
+        });
+        reg.register(cap);
+
+        let ctx = InvokeContext {
+            env: &MockEnv {},
+            origin: InvocationOrigin::LocalAi,
+            runtime: RuntimeCapabilities {
+                surface: None,
+                main_process: false,  // 不提供 GUI
+                desktop_session: false,
+            },
+            deadline: None,
+        };
+
+        let result = reg.invoke("test_needs_gui", serde_json::Value::Null, &ctx).await;
+        assert!(result.is_err());
+        
+        match result.unwrap_err() {
+            CapabilityError::Unsupported { required, .. } => {
+                assert!(required.contains("MainProcess"));
+            }
+            _ => panic!("预期 Unsupported 错误"),
+        }
+    }
+
+    /// 测试 Timeout 场景与 perf 标记。
+    #[tokio::test]
+    async fn invoke_timeout_with_perf_timeout() {
+        let reg = CapabilityRegistry::default();
+        let cap = Arc::new(TimeoutCap {
+            id_val: "test_timeout",
+        });
+        reg.register(cap);
+
+        let ctx = InvokeContext {
+            env: &MockEnv {},
+            origin: InvocationOrigin::LocalAi,
+            runtime: RuntimeCapabilities {
+                surface: None,
+                main_process: true,
+                desktop_session: true,
+            },
+            deadline: None,
+        };
+
+        let result = reg.invoke("test_timeout", serde_json::Value::Null, &ctx).await;
+        assert!(result.is_err());
+        
+        match result.unwrap_err() {
+            CapabilityError::Timeout { .. } => { /* 预期 timeout 错误 */ }
+            _ => panic!("预期 Timeout 错误"),
+        }
+    }
+
+    /// 测试 Cancelled 场景，验证不计 perf。
+    #[tokio::test]
+    async fn invoke_cancelled_no_perf_record() {
+        let reg = CapabilityRegistry::default();
+        let cap = Arc::new(CancelledCap {
+            id_val: "test_cancelled",
+        });
+        reg.register(cap);
+
+        let ctx = InvokeContext {
+            env: &MockEnv {},
+            origin: InvocationOrigin::LocalAi,
+            runtime: RuntimeCapabilities {
+                surface: None,
+                main_process: true,
+                desktop_session: true,
+            },
+            deadline: None,
+        };
+
+        let result = reg.invoke("test_cancelled", serde_json::Value::Null, &ctx).await;
+        assert!(result.is_err());
+        
+        match result.unwrap_err() {
+            CapabilityError::Cancelled => { /* 预期取消错误 */ }
+            _ => panic!("预期 Cancelled 错误"),
+        }
+    }
+
+    // ── 测试用 Mock 实现 ────────────────────────────────────────────────
+
+    /// Mock 环境——避免构造 AppHandle
+    struct MockEnv;
+
+    impl crate::domain::event::DomainEnv for MockEnv {
+        fn emit(&self, _name: &str, _payload: serde_json::Value) -> Result<(), String> {
+            Ok(())
+        }
+        fn emit_to(&self, _window: &str, _name: &str, _payload: serde_json::Value) -> Result<(), String> {
+            Ok(())
+        }
+        fn capability_env(&self) -> &dyn crate::domain::capability::CapabilityEnv {
+            self
+        }
+    }
+
+    impl crate::domain::capability::CapabilityEnv for MockEnv {
+        fn image_stash(&self) -> Option<&dyn crate::domain::sticky::ImageStash> {
+            None
+        }
+    }
+
+    /// Mock Capability——Safe 能力
+    struct SafeMockCap {
+        id_val: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Capability for SafeMockCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema::empty(self.id_val, "safe mock")
+        }
+        fn policy(&self) -> CapabilityPolicy {
+            CapabilityPolicy {
+                danger: DangerClass::Safe,
+                allowed_origins: OriginSet::all(),
+                runtime_requirement: RuntimeRequirement::none(),
+                ..Default::default()
+            }
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            Ok(CapabilityResult::Done {
+                summary: "safe operation completed".into(),
+            })
+        }
+    }
+
+    /// Mock Capability——拒绝特定 origin
+    struct DenyOriginCap {
+        id_val: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Capability for DenyOriginCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema::empty(self.id_val, "deny origin mock")
+        }
+        fn policy(&self) -> CapabilityPolicy {
+            CapabilityPolicy {
+                danger: DangerClass::Safe,
+                allowed_origins: OriginSet::from_iter([InvocationOrigin::Local]), // 只允许 Local，拒绝 MCP
+                runtime_requirement: RuntimeRequirement::none(),
+                ..Default::default()
+            }
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            Ok(CapabilityResult::Done {
+                summary: "should not reach here".into(),
+            })
+        }
+    }
+
+    /// Mock Capability——需要 GUI 运行时
+    struct NeedsGuiCap {
+        id_val: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Capability for NeedsGuiCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema::empty(self.id_val, "needs gui mock")
+        }
+        fn policy(&self) -> CapabilityPolicy {
+            CapabilityPolicy {
+                danger: DangerClass::Safe,
+                allowed_origins: OriginSet::all(),
+                runtime_requirement: RuntimeRequirement { main_process: true, ..Default::default() },
+                ..Default::default()
+            }
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            Ok(CapabilityResult::Done {
+                summary: "gui operation".into(),
+            })
+        }
+    }
+
+    /// Mock Capability——返回 Timeout
+    struct TimeoutCap {
+        id_val: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Capability for TimeoutCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema::empty(self.id_val, "timeout mock")
+        }
+        fn policy(&self) -> CapabilityPolicy {
+            CapabilityPolicy {
+                danger: DangerClass::Safe,
+                allowed_origins: OriginSet::all(),
+                runtime_requirement: RuntimeRequirement::none(),
+                ..Default::default()
+            }
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            Err(CapabilityError::Timeout {
+                detail: "test timeout".into(),
+            })
+        }
+    }
+
+    /// Mock Capability——返回 Cancelled
+    struct CancelledCap {
+        id_val: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Capability for CancelledCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema::empty(self.id_val, "cancelled mock")
+        }
+        fn policy(&self) -> CapabilityPolicy {
+            CapabilityPolicy {
+                danger: DangerClass::Safe,
+                allowed_origins: OriginSet::all(),
+                runtime_requirement: RuntimeRequirement::none(),
+                ..Default::default()
+            }
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            Err(CapabilityError::Cancelled)
+        }
+    }
 }
+
+

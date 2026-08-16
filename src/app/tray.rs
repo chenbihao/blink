@@ -16,10 +16,9 @@ use tauri::menu::{Menu, MenuItem};
 #[derive(Clone, Copy)]
 pub enum TrayText {
     ShowMain,
-    StickyManager,
     ChatWindow,
+    StickyManager,
     Settings,
-    RecoverInputHook,
     About,
     Quit,
 }
@@ -31,17 +30,15 @@ pub enum TrayText {
 pub fn text(lang: &str, key: TrayText) -> &'static str {
     match (lang.starts_with("zh"), key) {
         (true, TrayText::ShowMain) => "显示主窗口",
-        (true, TrayText::StickyManager) => "便签管理",
         (true, TrayText::ChatWindow) => "AI 对话窗口",
+        (true, TrayText::StickyManager) => "便签管理",
         (true, TrayText::Settings) => "设置",
-        (true, TrayText::RecoverInputHook) => "恢复输入钩子",
         (true, TrayText::About) => "关于 Blink",
         (true, TrayText::Quit) => "退出 Blink",
         (false, TrayText::ShowMain) => "Show Main Window",
         (false, TrayText::StickyManager) => "Sticky Manager",
         (false, TrayText::ChatWindow) => "AI Chat Window",
         (false, TrayText::Settings) => "Settings",
-        (false, TrayText::RecoverInputHook) => "Recover Input Hook",
         (false, TrayText::About) => "About Blink",
         (false, TrayText::Quit) => "Quit Blink",
     }
@@ -54,18 +51,11 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
 pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
     // 0.18.4：菜单重组——便签管理 + AI 对话窗口归为 chord 能力组，设置上提
     // 0.19.17：新增「恢复输入钩子」逃生舱——Alt+Space 失效时用户可从此恢复
-    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → recover_hook → about → sep → quit
+    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → about → sep → quit
     let show_main = MenuItem::with_id(
         app,
         "show_main",
         text(lang, TrayText::ShowMain),
-        true,
-        None::<&str>,
-    )?;
-    let sticky_manager = MenuItem::with_id(
-        app,
-        "sticky_manager",
-        text(lang, TrayText::StickyManager),
         true,
         None::<&str>,
     )?;
@@ -76,17 +66,17 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
+    let sticky_manager = MenuItem::with_id(
+        app,
+        "sticky_manager",
+        text(lang, TrayText::StickyManager),
+        true,
+        None::<&str>,
+    )?;
     let settings = MenuItem::with_id(
         app,
         "settings",
         text(lang, TrayText::Settings),
-        true,
-        None::<&str>,
-    )?;
-    let recover_hook = MenuItem::with_id(
-        app,
-        "recover_hook",
-        text(lang, TrayText::RecoverInputHook),
         true,
         None::<&str>,
     )?;
@@ -104,11 +94,11 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
         &[
             &show_main,
             &sep,
-            &sticky_manager,
             &chat_window,
+            &sticky_manager,
             &sep,
             &settings,
-            &recover_hook,
+            // &recover_hook,
             &about,
             &sep,
             &quit,

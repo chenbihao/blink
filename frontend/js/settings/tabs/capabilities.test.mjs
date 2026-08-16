@@ -17,8 +17,15 @@ import {
   exitToggleState,
   buildBindingOps,
   nextMcpExposed,
+  applyMcpChanges,
   matchesFilters,
-  groupLocalStatus,
+  groupExitState,
+  groupLocalOps,
+  groupAiOps,
+  groupMcpChanges,
+  recommendedExitState,
+  recommendedDiff,
+  postureSummary,
 } from "./capabilities-core.js";
 
 // ── 1. 分组 / 来源 / 风险 ─────────────────────────────────────────────────────
@@ -165,12 +172,175 @@ const disabledFeature = { ...feature, local_availability: "disabled" };
 assert.equal(matchesFilters(disabledFeature, { availability: "unavailable" }), true);
 assert.equal(matchesFilters(disabledFeature, { availability: "available" }), false);
 
-// ── 7. 组级三态 ───────────────────────────────────────────────────────────────
+// ── 7. 组级三出口状态 / 批量 ops（0.21.9 组头按列开关） ──────────────────────
 
-assert.equal(groupLocalStatus([allOn, { ...allOn }]), "all_enabled");
-assert.equal(groupLocalStatus([allOn, partial]), "partial");
-assert.equal(groupLocalStatus([partial, { ...partial }]), "all_disabled");
-assert.equal(groupLocalStatus([{ bindings: [] }]), "none"); // 无可启停项
+const row = (over = {}) => ({
+  feature_id: "blink.x",
+  title: "X",
+  source: "builtin",
+  local_availability: "available",
+  bindings: [{ binding_id: "x", kind: "search_keyword", enabled: true }],
+  capability_projection: { danger: "safe", sensitive: false, ai_status: "enabled", mcp_status: "disabled" },
+  ...over,
+});
+
+// groupExitState：local（binding 聚合）
+assert.deepEqual(groupExitState([row(), row()], "local"), {
+  kind: "toggle",
+  checked: true,
+  partial: false,
+});
+assert.deepEqual(
+  groupExitState([row(), row({ bindings: [{ binding_id: "x", kind: "search_keyword", enabled: false }] })], "local"),
+  { kind: "toggle", checked: false, partial: true },
+);
+assert.deepEqual(groupExitState([{ bindings: [] }, { local_availability: "source_unavailable" }], "local"), {
+  kind: "none",
+});
+
+// groupExitState：ai / mcp（投影授权）
+assert.deepEqual(groupExitState([row(), row()], "ai"), { kind: "toggle", checked: true, partial: false });
+assert.deepEqual(
+  groupExitState([row(), row({ capability_projection: { ai_status: "disabled" } })], "ai"),
+  { kind: "toggle", checked: false, partial: true },
+);
+assert.deepEqual(groupExitState([row()], "mcp"), { kind: "toggle", checked: false, partial: false });
+// code_forbidden / 无投影行不参与组级聚合
+assert.deepEqual(groupExitState([{}, { capability_projection: null }], "ai"), { kind: "none" });
+
+// groupLocalOps：只含状态需要变化的 binding
+assert.deepEqual(
+  groupLocalOps(
+    [
+      row({ bindings: [{ binding_id: "a", kind: "search_keyword", enabled: false }] }),
+      row({ bindings: [{ binding_id: "b", kind: "search_keyword", enabled: true }] }),
+    ],
+    true,
+  ),
+  [{ op: "enable", kind: "search_keyword", binding_id: "a" }],
+);
+
+// groupAiOps：[capability_id, enable][]，跳过已一致与无 capability_id 的行
+assert.deepEqual(
+  groupAiOps(
+    [
+      row({ feature_id: "blink.a", capability_id: "a", capability_projection: { ai_status: "disabled" } }),
+      row({ feature_id: "blink.b", capability_id: "b", capability_projection: { ai_status: "enabled" } }),
+      row({ feature_id: "blink.c", capability_id: null }),
+    ],
+    true,
+  ),
+  [["a", true]],
+);
+
+// groupMcpChanges：add/remove 集合
+assert.deepEqual(
+  groupMcpChanges(
+    [
+      row({ feature_id: "blink.a", capability_id: "a", capability_projection: { mcp_status: "disabled" } }),
+      row({ feature_id: "blink.b", capability_id: "b", capability_projection: { mcp_status: "enabled" } }),
+    ],
+    true,
+  ),
+  { add: ["a"], remove: [] },
+);
+assert.deepEqual(
+  groupMcpChanges(
+    [
+      row({ feature_id: "blink.a", capability_id: "a", capability_projection: { mcp_status: "disabled" } }),
+      row({ feature_id: "blink.b", capability_id: "b", capability_projection: { mcp_status: "enabled" } }),
+    ],
+    false,
+  ),
+  { add: [], remove: ["b"] },
+);
+
+// applyMcpChanges：组级批量增删
+assert.deepEqual(applyMcpChanges(["b"], { add: ["a", "b"], remove: ["c"] }), ["a", "b"]);
+assert.deepEqual(applyMcpChanges(["a", "b"], { remove: ["a"] }), ["b"]);
+assert.deepEqual(applyMcpChanges(null, {}), []);
+
+// ── 7b. 推荐态 / 恢复推荐 diff / 姿态摘要（0.21.10） ──────────────────────────
+
+// recommendedExitState：local 可启停 → true；dash 行不适用
+assert.equal(recommendedExitState(row(), "local"), true);
+assert.equal(recommendedExitState(row({ bindings: [] }), "local"), null);
+assert.equal(recommendedExitState(row({ local_availability: "source_unavailable" }), "local"), null);
+
+// recommendedExitState：ai 非危险开 / 危险关；mcp 仅安全能力开；不可授权行 null
+assert.equal(recommendedExitState(row(), "ai"), true);
+assert.equal(
+  recommendedExitState(row({ capability_projection: { danger: "dangerous", ai_status: "enabled" } }), "ai"),
+  false,
+);
+// sensitive 默认开（走运行时确认，不是授权开关的推荐态）
+assert.equal(
+  recommendedExitState(row({ capability_projection: { danger: "safe", sensitive: true, ai_status: "enabled" } }), "ai"),
+  true,
+);
+assert.equal(recommendedExitState(row(), "mcp"), true);
+assert.equal(
+  recommendedExitState(row({ capability_projection: { danger: "safe", sensitive: true, mcp_status: "disabled" } }), "mcp"),
+  false,
+);
+assert.equal(
+  recommendedExitState(row({ capability_projection: { danger: "dangerous", sensitive: false, mcp_status: "disabled" } }), "mcp"),
+  false,
+);
+assert.equal(recommendedExitState({}, "ai"), null);
+assert.equal(
+  recommendedExitState(row({ capability_projection: { ai_status: "code_forbidden" } }), "ai"),
+  null,
+);
+
+// recommendedDiff：干净目录（全推荐态）isClean，不产生任何 op
+assert.deepEqual(
+  recommendedDiff([
+    row({ capability_projection: { danger: "safe", sensitive: false, ai_status: "enabled", mcp_status: "enabled" } }),
+  ]),
+  { bindingOps: [], aiOps: [], mcpAdd: [], mcpRemove: [], isClean: true },
+);
+
+// recommendedDiff：三出口各产生需要的变更，已一致的项不重复（幂等）
+const dirtyFeature = row({
+  feature_id: "blink.lock",
+  capability_id: "lock",
+  bindings: [{ binding_id: "lock", kind: "search_keyword", enabled: true }], // 推荐启用 → 无 local op
+  capability_projection: { danger: "dangerous", ai_status: "enabled", mcp_status: "enabled" }, // 双双偏离
+});
+const offLocal = row({
+  feature_id: "blink.off",
+  capability_id: "off",
+  bindings: [{ binding_id: "off", kind: "search_keyword", enabled: false }], // 推荐启用 → 产生 enable op
+  capability_projection: { danger: "safe", ai_status: "disabled", mcp_status: "disabled" }, // ai 推荐开
+});
+const diff = recommendedDiff([dirtyFeature, offLocal, row()]);
+assert.equal(diff.isClean, false);
+assert.deepEqual(diff.bindingOps, [{ op: "enable", kind: "search_keyword", binding_id: "off" }]);
+assert.deepEqual(diff.aiOps, [
+  ["lock", false], // 危险 → 推荐关
+  ["off", true], // 非危险 → 推荐开
+]);
+assert.deepEqual(diff.mcpAdd, ["off"]); // safe → 推荐暴露
+assert.deepEqual(diff.mcpRemove, ["lock"]); // dangerous → 推荐不暴露
+
+// recommendedDiff：空目录 / null 安全
+assert.deepEqual(recommendedDiff([]), { bindingOps: [], aiOps: [], mcpAdd: [], mcpRemove: [], isClean: true });
+assert.equal(recommendedDiff(null).isClean, true);
+
+// postureSummary：可授权出口计数 + 危险对 AI 开放计数（dash 行不计入分母）
+assert.deepEqual(
+  postureSummary([
+    row(), // ai on / mcp off
+    row({ capability_projection: { danger: "dangerous", ai_status: "enabled", mcp_status: "enabled" } }), // ai on + 危险 / mcp on
+    row({ capability_projection: { ai_status: "disabled", mcp_status: "disabled" } }), // ai off / mcp off
+    {}, // Interaction-only：两口都 dash，不计入
+    row({ capability_projection: { ai_status: "code_forbidden", mcp_status: "disabled" } }), // ai dash / mcp 计
+  ]),
+  { aiOn: 2, aiTotal: 3, mcpOn: 1, mcpTotal: 4, dangerousAiOn: 1 },
+);
+assert.deepEqual(postureSummary([]), { aiOn: 0, aiTotal: 0, mcpOn: 0, mcpTotal: 0, dangerousAiOn: 0 });
+assert.equal(postureSummary(null).aiTotal, 0);
 
 // ── 8. 静态契约核对 ───────────────────────────────────────────────────────────
 
@@ -194,6 +364,11 @@ assert.doesNotMatch(en, /sidebar\.group\.search/);
 // 出口过滤 select 存在（MCP 深链目标）
 assert.match(settingsHtml, /id="filter-exit"/);
 
+// 控件区为单行工具栏：搜索 + 4 个筛选下拉（不再用 80px 定宽等宽字体的 .input-small）
+assert.match(settingsHtml, /class="cap-toolbar"/);
+assert.equal((settingsHtml.match(/class="cap-filter"/g) || []).length, 4);
+assert.doesNotMatch(settingsHtml, /id="filter-\w+" class="input-small"/);
+
 // invoke 字面量只允许已注册 command（§6.2.1 拆分护栏）
 const invokedCommands = [...capsSource.matchAll(/invoke\("([\w]+)"/g)].map((m) => m[1]);
 assert.deepEqual(
@@ -203,6 +378,7 @@ assert.deepEqual(
     "get_mcp_server_config",
     "list_feature_catalog",
     "set_mcp_server_config",
+    "toggle_ai_capabilities",
     "toggle_ai_capability",
   ],
 );
@@ -220,6 +396,42 @@ for (const key of ["apps_files_links", "other_plugin"]) {
   assert.ok(zh.includes(`"capabilities.group.${key}"`), `zh 缺少 capabilities.group.${key}`);
   assert.ok(en.includes(`"capabilities.group.${key}"`), `en 缺少 capabilities.group.${key}`);
 }
+
+// 0.21.9/0.21.10 key（组级列 checkbox / 计数 / 无匹配 / context 芯片提示 / 姿态摘要 /
+// 恢复推荐）双语言齐备；旧"全部启用/禁用"组级按钮 key 已随按列开关移除
+for (const key of [
+  "capabilities.group_toggle.local",
+  "capabilities.group_toggle.ai",
+  "capabilities.group_toggle.mcp",
+  "capabilities.group_count",
+  "capabilities.no_match",
+  "capabilities.binding.context_hint",
+  "capabilities.column.risk",
+  "capabilities.posture.ai",
+  "capabilities.posture.mcp",
+  "capabilities.posture.dangerous_ai",
+  "capabilities.posture.clean",
+  "capabilities.posture.reset",
+  "capabilities.reset.confirm",
+]) {
+  assert.ok(zh.includes(`"${key}"`), `zh 缺少 ${key}`);
+  assert.ok(en.includes(`"${key}"`), `en 缺少 ${key}`);
+}
+assert.doesNotMatch(zh, /capabilities\.group\.enable_all/);
+assert.doesNotMatch(en, /capabilities\.group\.enable_all/);
+
+// 死 key 清理：jump_to_chord 已随 0.21.10 跳转样式统一移除
+assert.doesNotMatch(zh, /capabilities\.action\.jump_to_chord/);
+assert.doesNotMatch(en, /capabilities\.action\.jump_to_chord/);
+
+// 组块矩阵契约：组块 / 组级悬浮批量开关 / 姿态摘要 / 风险列由 JS 渲染
+assert.match(capsSource, /cap-group-block/);
+assert.match(capsSource, /cap-group-toggle/);
+assert.match(capsSource, /cap-posture/);
+assert.match(capsSource, /cap-risk/);
+assert.match(capsSource, /cap-no-match/);
+// context 门禁动作芯片走 context.trigger.* 翻译（不再显示原始 snake_case key）
+assert.match(capsSource, /context\.trigger\./);
 
 // spec-frontend §6.1：不用 style.display 切换显隐
 assert.doesNotMatch(capsSource, /style\.display/);

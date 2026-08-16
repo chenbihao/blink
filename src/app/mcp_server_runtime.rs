@@ -441,6 +441,7 @@ mod tests {
             enabled: false,
             port: DEFAULT_MCP_SERVER_PORT,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config).await;
         let snapshot = runtime.snapshot().await;
@@ -456,6 +457,7 @@ mod tests {
             enabled: true,
             port: 43210,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config).await;
         let snapshot = runtime.snapshot().await;
@@ -481,6 +483,7 @@ mod tests {
             enabled: true,
             port: 43211,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config).await;
         runtime.stop().await;
@@ -496,6 +499,7 @@ mod tests {
             enabled: true,
             port: 43212,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config).await;
         runtime.shutdown().await;
@@ -517,6 +521,7 @@ mod tests {
             enabled: true,
             port: 43213,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config).await;
         let snapshot = runtime.snapshot().await;
@@ -533,6 +538,7 @@ mod tests {
             enabled: true,
             port: 43214,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config1).await;
 
@@ -541,6 +547,7 @@ mod tests {
             enabled: true,
             port: 43214,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config2).await;
 
@@ -559,6 +566,7 @@ mod tests {
             enabled: true,
             port: 43215,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config1).await;
         assert_eq!(runtime.snapshot().await.status, McpServerStatus::Listening);
@@ -568,6 +576,7 @@ mod tests {
             enabled: true,
             port: 43216,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         runtime.apply_config(&config2).await;
         let snapshot = runtime.snapshot().await;

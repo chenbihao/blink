@@ -49,10 +49,10 @@ impl AiCapabilityAccessStore {
 
     /// 判断配置是否需要首次生成推荐集合。
     ///
-    /// 条件：`enabled_capabilities` 为空且 `profile == "recommended"`。
-    /// 一旦生成并持久化，后续即使清空也不自动重新生成（用户可手动重置）。
+    /// 条件：`enabled_capabilities` 为空、`profile == "recommended"` 且 `seeded == false`。
+    /// 0.21.11 修复：添加独立的 seeded 状态，避免用户清空后重启又被重新填充。
     pub fn needs_initial_generation(config: &AiCapabilityAccessConfig) -> bool {
-        config.enabled_capabilities.is_empty() && config.profile == "recommended"
+        config.enabled_capabilities.is_empty() && config.profile == "recommended" && !config.seeded
     }
 
     /// 生成推荐 allowlist——按 §3.4 规则从 CapabilityRegistry 筛选。
@@ -125,6 +125,7 @@ impl AiCapabilityAccessStore {
             schema_version: 1,
             profile: "recommended".to_string(),
             enabled_capabilities: recommended,
+            seeded: true, // 标记已生成推荐集合
         };
 
         if let Err(e) = Self::save(pool, &new_config).await {
@@ -132,6 +133,31 @@ impl AiCapabilityAccessStore {
         }
 
         new_config
+    }
+
+    /// 重置 AI allowlist 为推荐集合（用户显式操作）。
+    ///
+    /// 重新生成推荐集合并覆盖当前配置，设置 `seeded=true`。
+    /// 这是用户显式"恢复推荐"时使用的方法。
+    pub async fn reset_to_recommended(
+        pool: &SqlitePool,
+        registry: &CapabilityRegistry,
+    ) -> Result<AiCapabilityAccessConfig, String> {
+        let recommended = Self::generate_recommended(registry);
+        tracing::info!(
+            count = recommended.len(),
+            "AiCapabilityAccess: 用户显式重置为推荐 allowlist"
+        );
+
+        let new_config = AiCapabilityAccessConfig {
+            schema_version: 1,
+            profile: "recommended".to_string(),
+            enabled_capabilities: recommended,
+            seeded: true, // 显式重置也标记为已种子
+        };
+
+        Self::save(pool, &new_config).await?;
+        Ok(new_config)
     }
 
     /// 获取当前允许的 Capability id 集合（HashSet）。
@@ -145,12 +171,16 @@ impl AiCapabilityAccessStore {
     /// 更新单个 Capability 的启用状态。
     ///
     /// 返回更新后的配置。调用方负责广播 `blink://config-changed`。
+    /// 用户手动修改时自动设置 `seeded=true`，避免被误判为首次初始化。
     pub async fn toggle_capability(
         pool: &SqlitePool,
         capability_id: &str,
         enabled: bool,
     ) -> Result<AiCapabilityAccessConfig, String> {
         let mut config = Self::load(pool).await;
+        // 用户手动修改时，标记为已种子状态
+        config.seeded = true;
+        
         if enabled {
             if !config.enabled_capabilities.contains(&capability_id.to_string()) {
                 config.enabled_capabilities.push(capability_id.to_string());
@@ -165,11 +195,15 @@ impl AiCapabilityAccessStore {
     /// 批量更新 Capability 启用状态。
     ///
     /// 返回更新后的配置。调用方负责广播 `blink://config-changed`。
+    /// 用户手动修改时自动设置 `seeded=true`，避免被误判为首次初始化。
     pub async fn toggle_capabilities(
         pool: &SqlitePool,
         ids_with_enabled: &[(String, bool)],
     ) -> Result<AiCapabilityAccessConfig, String> {
         let mut config = Self::load(pool).await;
+        // 用户手动修改时，标记为已种子状态
+        config.seeded = true;
+        
         for (capability_id, enabled) in ids_with_enabled {
             if *enabled {
                 if !config.enabled_capabilities.contains(capability_id) {
@@ -183,22 +217,6 @@ impl AiCapabilityAccessStore {
         Ok(config)
     }
 
-    /// 重置为推荐集合（用户在设置页点"恢复默认"时调用）。
-    ///
-    /// 重新生成推荐集合并覆盖当前配置。`profile` 保持为 `"recommended"`。
-    pub async fn reset_to_recommended(
-        pool: &SqlitePool,
-        registry: &CapabilityRegistry,
-    ) -> Result<AiCapabilityAccessConfig, String> {
-        let recommended = Self::generate_recommended(registry);
-        let config = AiCapabilityAccessConfig {
-            schema_version: 1,
-            profile: "recommended".to_string(),
-            enabled_capabilities: recommended,
-        };
-        Self::save(pool, &config).await?;
-        Ok(config)
-    }
 }
 
 // ── 单测 ─────────────────────────────────────────────────────────────────────

@@ -57,15 +57,12 @@ async function updateCapabilitiesSummary() {
     const exposedCount = summary.exposed_count || 0;
     const totalCount = summary.total_count || 0;
 
+    // 摘要文本本身即深链（btn-link），hover 有"查看能力目录"提示；
+    // 不再放独立链接按钮，避免一行里两个视觉主体
     container.innerHTML = `
-      <div class="mcp-summary">
-        <span class="mcp-summary-text">
-          ${t("ai.mcp_server.exposed_summary", { exposed_count: exposedCount, total_count: totalCount })}
-        </span>
-        <button class="btn-link btn-small" id="mcp-view-capabilities">
-          ${t("ai.mcp_server.view_capabilities")}
-        </button>
-      </div>
+      <button class="btn-link" id="mcp-view-capabilities" title="${t("ai.mcp_server.view_capabilities")}">
+        ${t("ai.mcp_server.exposed_summary", { exposed_count: exposedCount, total_count: totalCount })}
+      </button>
     `;
   } catch (e) {
     container.innerHTML = '<p class="mcp-error">加载失败: ' + escapeHtml(String(e)) + "</p>";

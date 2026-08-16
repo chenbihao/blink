@@ -101,6 +101,14 @@ export function nextMcpExposed(current, capabilityId, expose) {
   return [...set].sort();
 }
 
+/** 组级 MCP 批量变更的应用结果（add/remove 集合 → 新 exposed 列表） */
+export function applyMcpChanges(current, changes) {
+  const set = new Set(current || []);
+  for (const id of changes?.add || []) set.add(id);
+  for (const id of changes?.remove || []) set.delete(id);
+  return [...set].sort();
+}
+
 /**
  * 组合过滤：搜索词（标题/描述/feature_id/capability_id）+ 来源 + 风险 + 可用性 + 出口。
  * 全部条件 AND 组合；"all" 值跳过对应维度。
@@ -149,14 +157,134 @@ export function matchesFilters(feature, filters) {
   return true;
 }
 
-/** 组内本地状态汇总（三态展示）："all_enabled" | "partial" | "all_disabled" | "none" */
-export function groupLocalStatus(features) {
-  const toggleable = features.filter(
-    (f) => localToggleState(f).kind === "toggle",
+/** 组内某出口实际可操作的行（本地 = 有 binding 可启停；AI/MCP = 投影可授权） */
+function toggleableFeatures(features, exit) {
+  return (features || []).filter((f) =>
+    exit === "local"
+      ? localToggleState(f).kind === "toggle"
+      : exitToggleState(f, exit).kind === "toggle",
   );
-  if (toggleable.length === 0) return "none";
-  const on = toggleable.filter((f) => localToggleState(f).checked).length;
-  if (on === toggleable.length) return "all_enabled";
-  if (on === 0) return "all_disabled";
-  return "partial";
+}
+
+/**
+ * 组级出口状态（组头列开关用）。
+ * - none：组内没有该出口可操作的行 → 不渲染开关
+ * - toggle：checked = 全开；partial = 部分开（渲染 indeterminate 三态）
+ */
+export function groupExitState(features, exit) {
+  const rows = toggleableFeatures(features, exit);
+  if (rows.length === 0) return { kind: "none" };
+  const on = rows.filter((f) =>
+    exit === "local" ? localToggleState(f).checked : exitToggleState(f, exit).checked,
+  ).length;
+  return {
+    kind: "toggle",
+    checked: on === rows.length,
+    partial: on > 0 && on < rows.length,
+  };
+}
+
+/** 组级本地批量 ops（BindingOp[]，只含状态需要变化的 binding） */
+export function groupLocalOps(features, enable) {
+  return toggleableFeatures(features, "local").flatMap((f) =>
+    buildBindingOps(f, enable),
+  );
+}
+
+/** 组级 AI 批量（[capability_id, enable][]，只含状态需要变化的行） */
+export function groupAiOps(features, enable) {
+  return toggleableFeatures(features, "ai")
+    .filter((f) => f.capability_id && exitToggleState(f, "ai").checked !== enable)
+    .map((f) => [f.capability_id, enable]);
+}
+
+/** 组级 MCP 批量变更（add/remove capability_id 列表） */
+export function groupMcpChanges(features, enable) {
+  const add = [];
+  const remove = [];
+  for (const f of toggleableFeatures(features, "mcp")) {
+    if (!f.capability_id) continue;
+    const exposed = exitToggleState(f, "mcp").checked;
+    if (enable && !exposed) add.push(f.capability_id);
+    if (!enable && exposed) remove.push(f.capability_id);
+  }
+  return { add, remove };
+}
+
+// ── 推荐态与姿态摘要（0.21.10） ────────────────────────────────────────────────
+
+/**
+ * 单出口推荐态（phase 0.21 §4.1b 定案的默认策略）。
+ * - local：可启停行推荐启用；dash 行（无 binding / 不可用）不适用，返回 null
+ * - ai：可授权行推荐开启，dangerous 推荐关闭（sensitive 走运行时确认，默认开）
+ * - mcp：仅推荐暴露无风险能力（非 dangerous、非 sensitive）
+ */
+export function recommendedExitState(feature, exit) {
+  if (exit === "local") {
+    return localToggleState(feature).kind === "toggle" ? true : null;
+  }
+  const state = exitToggleState(feature, exit);
+  if (state.kind !== "toggle") return null;
+  if (exit === "mcp") return riskOf(feature) === "safe";
+  return feature.capability_projection?.danger === "dangerous" ? false : true;
+}
+
+/**
+ * 全目录与推荐态的差集（"恢复推荐"用），只含需要变化的项，幂等。
+ * 写回走既有三条批量命令：apply_binding_ops / toggle_ai_capabilities / set_mcp_server_config。
+ */
+export function recommendedDiff(features) {
+  const bindingOps = [];
+  const aiOps = [];
+  const mcpAdd = [];
+  const mcpRemove = [];
+  for (const f of features || []) {
+    if (recommendedExitState(f, "local") === true) {
+      bindingOps.push(...buildBindingOps(f, true));
+    }
+    const aiRec = recommendedExitState(f, "ai");
+    if (aiRec !== null && f.capability_id && exitToggleState(f, "ai").checked !== aiRec) {
+      aiOps.push([f.capability_id, aiRec]);
+    }
+    const mcpRec = recommendedExitState(f, "mcp");
+    if (mcpRec !== null && f.capability_id) {
+      const mcpEnabled = exitToggleState(f, "mcp").checked;
+      if (mcpRec && !mcpEnabled) mcpAdd.push(f.capability_id);
+      if (!mcpRec && mcpEnabled) mcpRemove.push(f.capability_id);
+    }
+  }
+  return {
+    bindingOps,
+    aiOps,
+    mcpAdd,
+    mcpRemove,
+    isClean:
+      bindingOps.length === 0 &&
+      aiOps.length === 0 &&
+      mcpAdd.length === 0 &&
+      mcpRemove.length === 0,
+  };
+}
+
+/**
+ * 姿态摘要（顶部状态行）：可授权出口的开/总数 + 危险能力对 AI 开放的计数。
+ */
+export function postureSummary(features) {
+  const s = { aiOn: 0, aiTotal: 0, mcpOn: 0, mcpTotal: 0, dangerousAiOn: 0 };
+  for (const f of features || []) {
+    const ai = exitToggleState(f, "ai");
+    if (ai.kind === "toggle") {
+      s.aiTotal++;
+      if (ai.checked) {
+        s.aiOn++;
+        if (riskOf(f) === "dangerous") s.dangerousAiOn++;
+      }
+    }
+    const mcp = exitToggleState(f, "mcp");
+    if (mcp.kind === "toggle") {
+      s.mcpTotal++;
+      if (mcp.checked) s.mcpOn++;
+    }
+  }
+  return s;
 }

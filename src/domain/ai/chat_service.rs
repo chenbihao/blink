@@ -659,7 +659,7 @@ impl ChatService {
             let tools: Vec<Box<dyn rig_core::tool::ToolDyn>> = if plan.includes_extensions() {
                 let external_tools = self.mcp_client.collect_tools().await;
                 build_agent_tools(
-                    &self.capability_registry,
+                    self.capability_registry.clone(),
                     external_tools,
                     self.emitter.clone(),
                     self.pending_confirms.clone(),

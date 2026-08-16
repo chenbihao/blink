@@ -264,7 +264,7 @@ function renderCheatsheet(cfg) {
       statusTd.appendChild(badge);
 
       const modifyLink = document.createElement("a");
-      modifyLink.className = "cheatsheet-modify";
+      modifyLink.className = "cheatsheet-modify btn-link";
       modifyLink.textContent = t("hotkey.cheatsheet.modify");
       modifyLink.href = "#";
       modifyLink.addEventListener("click", (e) => {

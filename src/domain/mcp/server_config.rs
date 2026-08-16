@@ -4,12 +4,17 @@
 //! - `enabled`：总开关
 //! - `port`：Streamable HTTP 监听端口（0.19.13，默认 32123）
 //! - `exposed_capabilities`：允许暴露给外部 client 的 Capability id 列表
+//! - `exposure_seeded`：默认暴露集合是否已生成（0.21.10）
 //!
-//! **暴露策略**（§8.4）：不是所有 Capability 都适合暴露。用户在设置页勾选要暴露的能力。
-//! 默认不暴露任何能力（安全优先），用户显式开启后才暴露。
+//! **暴露策略**：0.21.10 起"无风险"能力（非 Dangerous、非 sensitive、代码允许
+//! Mcp 来源且非 Forbidden）在首次启动时静默进入默认暴露集合（与 AI 推荐
+//! allowlist 的首次生成同构）；用户此后可自由增删，清空也不再自动重新生成。
+//! Dangerous / Forbidden 项仍永远被 `ExposureSnapshot` 代码级过滤。
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+
+use crate::domain::capability::{CapabilityPolicy, CapabilityRegistry};
 
 /// MCP server 默认端口。
 pub const DEFAULT_MCP_SERVER_PORT: u16 = 32123;
@@ -37,6 +42,10 @@ pub struct McpServerModeConfig {
     /// 只有在此列表中的能力才会出现在 tool 列表中。
     #[serde(default)]
     pub exposed_capabilities: Vec<String>,
+    /// 默认暴露集合是否已生成过（0.21.10）。
+    /// 区分"从未配置"与"用户清空"——后者不再自动重新生成默认集合。
+    #[serde(default)]
+    pub exposure_seeded: bool,
 }
 
 impl Default for McpServerModeConfig {
@@ -45,6 +54,7 @@ impl Default for McpServerModeConfig {
             enabled: false,
             port: DEFAULT_MCP_SERVER_PORT,
             exposed_capabilities: Vec::new(),
+            exposure_seeded: false,
         }
     }
 }
@@ -100,6 +110,88 @@ impl McpServerModeConfigStore {
         crate::infra::data::config::set_config(pool, Self::KEY, &json)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// 0.21.10：是否需要首次生成默认暴露集合——从未生成且列表为空。
+    pub fn needs_initial_generation(config: &McpServerModeConfig) -> bool {
+        !config.exposure_seeded && config.exposed_capabilities.is_empty()
+    }
+
+    /// 0.21.10：生成默认暴露集合——"无风险"能力（对齐能力目录风险列的空态）。
+    ///
+    /// **规则**：允许 Mcp 来源 + 非 Dangerous + 非 sensitive + 非 Forbidden。
+    /// Dangerous / Forbidden 即使被用户手动加入也会被 ExposureSnapshot 过滤，
+    /// 默认集合自然也不包含它们。与 AI 推荐 allowlist（ai_capability_access）
+    /// 的生成规则同构。
+    pub fn generate_default_exposure(registry: &CapabilityRegistry) -> Vec<String> {
+        let mut ids: Vec<String> = registry
+            .entries()
+            .into_iter()
+            .filter(|(_, cap)| Self::is_safe_default(&cap.policy()))
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// 判断单个 Capability 的 policy 是否进入默认暴露集合（独立方法供单测）。
+    pub fn is_safe_default(policy: &CapabilityPolicy) -> bool {
+        use crate::domain::capability::{DangerClass, InvocationOrigin, McpDefault};
+
+        if !policy.allows_origin(InvocationOrigin::Mcp) {
+            return false;
+        }
+        if policy.danger == DangerClass::Dangerous {
+            return false;
+        }
+        if policy.sensitive {
+            return false;
+        }
+        if policy.mcp_default == McpDefault::Forbidden {
+            return false;
+        }
+        true
+    }
+
+    /// 0.21.10：首次启动静默生成并持久化默认暴露集合（若需要）。
+    ///
+    /// 与 AI allowlist 的 `ensure_recommended` 同构：生成后置 `exposure_seeded`，
+    /// 用户此后清空列表也不会自动重新生成。
+    pub async fn ensure_default_exposure(
+        pool: &SqlitePool,
+        registry: &CapabilityRegistry,
+    ) -> McpServerModeConfig {
+        let mut config = match Self::load(pool).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "MCP server 配置加载失败，跳过默认暴露生成");
+                return McpServerModeConfig::default();
+            }
+        };
+        // 旧版本已有显式暴露列表但没有 seeded 字段：保留原列表，只补迁移标记。
+        // 否则用户之后清空列表，下一次启动会被误判为“从未生成”而重新填充。
+        if !config.exposure_seeded && !config.exposed_capabilities.is_empty() {
+            config.exposure_seeded = true;
+            if let Err(e) = Self::save(pool, &config).await {
+                tracing::warn!(error = %e, "McpServerModeConfig: 已有暴露列表的种子标记持久化失败");
+            }
+            return config;
+        }
+        if !Self::needs_initial_generation(&config) {
+            return config;
+        }
+
+        let ids = Self::generate_default_exposure(registry);
+        tracing::info!(
+            count = ids.len(),
+            "McpServerModeConfig: 首次生成默认暴露集合（无风险能力，静默）"
+        );
+        config.exposed_capabilities = ids;
+        config.exposure_seeded = true;
+        if let Err(e) = Self::save(pool, &config).await {
+            tracing::warn!(error = %e, "McpServerModeConfig: 默认暴露集合持久化失败，使用内存配置");
+        }
+        config
     }
 }
 
@@ -168,6 +260,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["screenshot".into(), "search_files".into()],
+            exposure_seeded: false,
         };
         McpServerModeConfigStore::save(&pool, &config)
             .await
@@ -184,6 +277,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["cap_a".into()],
+            exposure_seeded: false,
         };
         McpServerModeConfigStore::save(&pool, &config1)
             .await
@@ -193,6 +287,7 @@ mod tests {
             enabled: false,
             port: 32124,
             exposed_capabilities: vec!["cap_b".into(), "cap_c".into()],
+            exposure_seeded: false,
         };
         McpServerModeConfigStore::save(&pool, &config2)
             .await
@@ -230,6 +325,7 @@ mod tests {
             enabled: true,
             port: 8080,
             exposed_capabilities: vec!["cap".into()],
+            exposure_seeded: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let de: McpServerModeConfig = serde_json::from_str(&json).unwrap();
@@ -244,6 +340,7 @@ mod tests {
             enabled: true,
             port: 80, // 非法端口
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         let result = McpServerModeConfigStore::save(&pool, &config).await;
         assert!(result.is_err());
@@ -263,5 +360,99 @@ mod tests {
         let config = McpServerModeConfigStore::load(&pool).await.unwrap();
         assert_eq!(config.port, DEFAULT_MCP_SERVER_PORT);
         assert!(config.enabled);
+    }
+
+    // ── 0.21.10 默认暴露集合 ─────────────────────────────────────────────────
+
+    #[test]
+    fn safe_default_exposure_policy_rules() {
+        use crate::domain::capability::{DangerClass, McpDefault, OriginSet};
+
+        // 默认 policy：ALL 来源 + Safe + 非 sensitive + DefaultOff → 进默认集合
+        let base = CapabilityPolicy::default();
+        assert!(McpServerModeConfigStore::is_safe_default(&base));
+
+        // 不允许 Mcp 来源（仅本地）→ 不进
+        let mut p = base.clone();
+        p.allowed_origins = OriginSet::ALL_LOCAL;
+        assert!(!McpServerModeConfigStore::is_safe_default(&p));
+
+        // Dangerous → 不进（代码级还会被 ExposureSnapshot 二次过滤）
+        let mut p = base.clone();
+        p.danger = DangerClass::Dangerous;
+        assert!(!McpServerModeConfigStore::is_safe_default(&p));
+
+        // sensitive（敏感读取）→ 不进
+        let mut p = base.clone();
+        p.sensitive = true;
+        assert!(!McpServerModeConfigStore::is_safe_default(&p));
+
+        // MCP 代码级禁止 → 不进
+        let mut p = base.clone();
+        p.mcp_default = McpDefault::Forbidden;
+        assert!(!McpServerModeConfigStore::is_safe_default(&p));
+    }
+
+    #[test]
+    fn needs_initial_generation_rules() {
+        // 从未配置（默认值）→ 需要
+        assert!(McpServerModeConfigStore::needs_initial_generation(
+            &McpServerModeConfig::default()
+        ));
+
+        // 已生成后用户清空 → 不再自动重新生成
+        let cleared = McpServerModeConfig {
+            exposure_seeded: true,
+            ..Default::default()
+        };
+        assert!(!McpServerModeConfigStore::needs_initial_generation(&cleared));
+
+        // 已有显式列表 → 不需要
+        let mut customized = McpServerModeConfig::default();
+        customized.exposed_capabilities = vec!["cap_a".to_string()];
+        assert!(!McpServerModeConfigStore::needs_initial_generation(&customized));
+    }
+
+    #[tokio::test]
+    async fn ensure_default_exposure_seeds_once_and_persists() {
+        let pool = setup_pool().await;
+        // default registry 经 inventory 收集真实内置能力，安全集非空
+        let registry = CapabilityRegistry::default();
+
+        let config = McpServerModeConfigStore::ensure_default_exposure(&pool, &registry).await;
+        assert!(config.exposure_seeded);
+        assert!(!config.exposed_capabilities.is_empty());
+
+        // 持久化后重读仍带 seeded 标记
+        let reloaded = McpServerModeConfigStore::load(&pool).await.unwrap();
+        assert!(reloaded.exposure_seeded);
+
+        // 用户清空后再次 ensure：不重新生成（seeded 已置位）
+        let mut cleared = reloaded;
+        cleared.exposed_capabilities = vec![];
+        McpServerModeConfigStore::save(&pool, &cleared).await.unwrap();
+        let again = McpServerModeConfigStore::ensure_default_exposure(&pool, &registry).await;
+        assert!(again.exposed_capabilities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_default_exposure_marks_existing_list_as_seeded_without_replacing_it() {
+        let pool = setup_pool().await;
+        let registry = CapabilityRegistry::default();
+        let existing = McpServerModeConfig {
+            exposed_capabilities: vec!["open_url".to_string()],
+            exposure_seeded: false,
+            ..Default::default()
+        };
+        McpServerModeConfigStore::save(&pool, &existing).await.unwrap();
+
+        let migrated =
+            McpServerModeConfigStore::ensure_default_exposure(&pool, &registry).await;
+        assert!(migrated.exposure_seeded);
+        assert_eq!(migrated.exposed_capabilities, vec!["open_url"]);
+
+        let persisted = McpServerModeConfigStore::load(&pool).await.unwrap();
+        assert!(persisted.exposure_seeded);
+        assert_eq!(persisted.exposed_capabilities, vec!["open_url"]);
     }
 }

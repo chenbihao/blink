@@ -508,6 +508,10 @@ pub struct BuiltinActionInfo {
     pub trigger_desc: Option<String>,
     /// 参数来源的可读描述；无参 = `None`
     pub param_desc: Option<String>,
+    /// Context 门禁动作（声明了 context triggers）：关键词命中也必须 Context 命中才召回
+    /// （见 `BuiltinEngine::search` 2a 门禁）。目录页据此不展示"关键词：…"死提示，
+    /// 改以 context 触发条件作为本地入口标签。
+    pub context_gated: bool,
     /// 当前是否启用（用户没在设置页 disable = true；被 disable = false）
     pub enabled: bool,
     /// 默认启用状态——供设置页显示"已改动"视觉提示
@@ -537,6 +541,7 @@ pub fn list_builtin_actions(
                 keywords: a.keywords.iter().map(|k| k.to_string()).collect(),
                 trigger_desc: describe_triggers(a.keywords, a.context),
                 param_desc: describe_param_source(a.param_source),
+                context_gated: !a.context.is_empty(),
                 enabled: !disabled_ids.iter().any(|id| id == a.id),
                 default_enabled: a.default_enabled,
             }

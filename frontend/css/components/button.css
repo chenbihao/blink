@@ -98,3 +98,31 @@
   width: 14px;
   height: 14px;
 }
+
+/* btn-link：行内文字链接按钮（跨页跳转 / "查看能力目录"等）。
+   无边框无底色、accent 色、hover 下划线——与实体按钮（btn/btn-small）区分，
+   全设置页的页内跳转统一走这一种形态（0.21.10）。
+   尺寸跟随所在容器 font-size，图标按 0.9em 缩放。 */
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--accent);
+  font-size: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  transition: opacity var(--transition-fast);
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.btn-link .icon {
+  width: 0.9em;
+  height: 0.9em;
+}

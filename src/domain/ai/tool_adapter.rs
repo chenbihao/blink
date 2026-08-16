@@ -465,13 +465,18 @@ fn derive_tool_deadline() -> Option<std::time::Instant> {
 ///
 /// **设计要点**：
 /// - `definition()` -> `schema.to_rig_tool()`（纯 schema 投影）
-/// - `call()` -> 危险操作先挂起确认 -> `cap.invoke(args, ctx)` -> `CapabilityResult` -> `to_rig_tool_result()`
+/// - `call()` -> 危险操作先挂起确认 -> `registry.invoke(id, args, ctx)` -> `CapabilityResult` -> `to_rig_tool_result()`
 /// - `InvokeContext.deadline` 从 `slo_hard_timeout_ms` 派生（P1.3 硬超时）
+/// 
+/// **0.21.11 变更**：确认通过后调用不再直接 `cap.invoke()`，而是经 `CapabilityRegistry::invoke()`，
+/// 统一来源检查、运行时检查、SLO 与 perf 埋点。
 pub struct CapabilityTool {
+    cap_id: String,  // 0.21.11: 保留 id，调用时经 Registry 路由
     cap: Arc<dyn Capability>,
     schema: crate::domain::capability::CapabilitySchema,
     emitter: Arc<dyn DomainEnv>,
     pending: Arc<PendingConfirms>,
+    registry: Arc<CapabilityRegistry>,  // 0.21.11: 新增 registry 引用
 }
 
 impl CapabilityTool {
@@ -480,13 +485,16 @@ impl CapabilityTool {
         cap: Arc<dyn Capability>,
         emitter: Arc<dyn DomainEnv>,
         pending: Arc<PendingConfirms>,
+        registry: Arc<CapabilityRegistry>,  // 0.21.11: 新增 registry 参数
     ) -> Self {
         let schema = cap.schema();
         Self {
+            cap_id: cap.id().to_string(),  // 0.21.11: 保存 id
             cap,
             schema,
             emitter,
             pending,
+            registry,
         }
     }
 
@@ -553,36 +561,12 @@ impl ToolDyn for CapabilityTool {
                 deadline: derive_tool_deadline(),
             };
 
-            // 0.21.0: 代码级 origin/runtime 门禁（与 registry.invoke 一致）
-            let policy = self.cap.policy();
-            if !policy.allows_origin(ctx.origin) {
-                tracing::warn!(
-                    capability = %self.cap.id(),
-                    origin = %ctx.origin,
-                    allowed = %policy.allowed_origins,
-                    "capability tool: 来源不被允许"
-                );
-                let msg = format!("来源不被允许: {} 不在允许集合内", ctx.origin);
-                return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
-                    ToolErrMsg(msg),
-                )));
-            }
-            let actual_rt = ctx.runtime.as_requirement();
-            if !policy.runtime_satisfied(actual_rt) {
-                tracing::warn!(
-                    capability = %self.cap.id(),
-                    required = %policy.runtime_requirement,
-                    actual = %actual_rt,
-                    "capability tool: 运行时不满足要求"
-                );
-                let msg = format!("运行时不支持: 需要 {}，当前可用 {}", policy.runtime_requirement, actual_rt);
-                return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
-                    ToolErrMsg(msg),
-                )));
-            }
+            // 0.21.11: 删除重复门禁——确认通过后调用 CapabilityRegistry::invoke，
+            // registry 内部会做 origin/runtime 检查，无需在此重复。
+            // 这确保 AI tool 调用走统一路径，获取一致的门禁、SLO 和 perf 埋点。
 
-            // 调用 Capability
-            match self.cap.invoke(args_value, &ctx).await {
+            // 调用 Capability（0.21.11：统一经 CapabilityRegistry::invoke）
+            match self.registry.invoke(&self.cap_id, args_value, &ctx).await {
                 Ok(cap_result) => {
                     let stash = self.emitter.capability_env().image_stash();
                     let contents =
@@ -593,7 +577,7 @@ impl ToolDyn for CapabilityTool {
                 }
                 Err(e) => {
                     // 原始错误类型记日志（保留类型信息供调试），AI 侧拿中文化消息
-                    tracing::warn!(error = %e, capability = %self.cap.id(), "capability invoke 失败");
+                    tracing::warn!(error = %e, capability = %self.cap_id, "capability invoke 失败");
                     let msg = capability_error_to_string(e);
                     Err(rig_core::tool::ToolError::ToolCallError(Box::new(
                         ToolErrMsg(msg),
@@ -657,7 +641,7 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 /// 纯对话模式传空 `HashSet`（tool 池为空）。
 #[allow(dead_code)] // 0.12.1 对话窗口 AgentBuilder 消费
 pub fn build_agent_tools(
-    cap_registry: &CapabilityRegistry,
+    cap_registry: Arc<CapabilityRegistry>,
     external_tools: Vec<Box<dyn ToolDyn>>,
     emitter: Arc<dyn DomainEnv>,
     pending: Arc<PendingConfirms>,
@@ -676,9 +660,13 @@ pub fn build_agent_tools(
                 continue;
             }
         }
-        let tool = CapabilityTool::new(cap, emitter.clone(), pending.clone());
+        
+
+        let tool = CapabilityTool::new(cap, emitter.clone(), pending.clone(), cap_registry.clone());
         tools.push(Box::new(tool));
         cap_count += 1;
+
+
     }
 
     // 2. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）

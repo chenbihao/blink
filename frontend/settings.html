@@ -378,41 +378,40 @@
 </div>
 </div>
 
-<!-- 能力与操作（0.21.6 矩阵表格：行=功能，列=本地/AI/MCP 三出口开关） -->
+<!-- 能力与操作（0.21.9 单表矩阵：行=功能，列=本地/AI/MCP 三出口开关，组头按列批量） -->
 <div id="capabilities" class="panel">
 <h2 data-i18n="panel.capabilities">能力与操作</h2>
 <p class="panel-lede" data-i18n="capabilities.lede">Blink 的所有功能，按组分类展示本地绑定、AI 与 MCP 三出口状态。</p>
 
-<!-- 搜索与过滤 -->
-<div class="capabilities-controls">
-  <div class="search-row">
-    <input type="text" id="capabilities-search" class="input-wide" data-i18n-placeholder="capabilities.search.placeholder" />
+<!-- 搜索与过滤：单行工具栏 -->
+<div class="cap-toolbar">
+  <div class="cap-search">
+    <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+    <input type="text" id="capabilities-search" data-i18n-placeholder="capabilities.search.placeholder" placeholder="搜索功能、ID 或描述..." />
   </div>
-  <div class="filter-row">
-    <select id="filter-source" class="input-small">
-      <option value="all" data-i18n="capabilities.filter.source.all">全部来源</option>
-      <option value="builtin" data-i18n="capabilities.filter.source.builtin">内置</option>
-      <option value="plugin" data-i18n="capabilities.filter.source.plugin">插件</option>
-      <option value="chord" data-i18n="capabilities.filter.source.chord">Chord</option>
-    </select>
-    <select id="filter-risk" class="input-small">
-      <option value="all" data-i18n="capabilities.filter.risk.all">全部风险</option>
-      <option value="safe" data-i18n="capabilities.filter.risk.safe">安全</option>
-      <option value="sensitive" data-i18n="capabilities.filter.risk.sensitive">敏感读取</option>
-      <option value="dangerous" data-i18n="capabilities.filter.risk.dangerous">危险操作</option>
-    </select>
-    <select id="filter-availability" class="input-small">
-      <option value="all" data-i18n="capabilities.filter.availability.all">全部状态</option>
-      <option value="available" data-i18n="capabilities.filter.availability.available">可用</option>
-      <option value="unavailable" data-i18n="capabilities.filter.availability.unavailable">不可用</option>
-    </select>
-    <select id="filter-exit" class="input-small">
-      <option value="all" data-i18n="capabilities.filter.exit.all">全部出口</option>
-      <option value="local" data-i18n="capabilities.filter.exit.local">本地已启用</option>
-      <option value="ai" data-i18n="capabilities.filter.exit.ai">AI 已启用</option>
-      <option value="mcp" data-i18n="capabilities.filter.exit.mcp">MCP 已暴露</option>
-    </select>
-  </div>
+  <select id="filter-source" class="cap-filter">
+    <option value="all" data-i18n="capabilities.filter.source.all">全部来源</option>
+    <option value="builtin" data-i18n="capabilities.filter.source.builtin">内置</option>
+    <option value="plugin" data-i18n="capabilities.filter.source.plugin">插件</option>
+    <option value="chord" data-i18n="capabilities.filter.source.chord">Chord</option>
+  </select>
+  <select id="filter-risk" class="cap-filter">
+    <option value="all" data-i18n="capabilities.filter.risk.all">全部风险</option>
+    <option value="safe" data-i18n="capabilities.filter.risk.safe">安全</option>
+    <option value="sensitive" data-i18n="capabilities.filter.risk.sensitive">敏感读取</option>
+    <option value="dangerous" data-i18n="capabilities.filter.risk.dangerous">危险操作</option>
+  </select>
+  <select id="filter-availability" class="cap-filter">
+    <option value="all" data-i18n="capabilities.filter.availability.all">全部状态</option>
+    <option value="available" data-i18n="capabilities.filter.availability.available">可用</option>
+    <option value="unavailable" data-i18n="capabilities.filter.availability.unavailable">不可用</option>
+  </select>
+  <select id="filter-exit" class="cap-filter">
+    <option value="all" data-i18n="capabilities.filter.exit.all">全部出口</option>
+    <option value="local" data-i18n="capabilities.filter.exit.local">本地已启用</option>
+    <option value="ai" data-i18n="capabilities.filter.exit.ai">AI 已启用</option>
+    <option value="mcp" data-i18n="capabilities.filter.exit.mcp">MCP 已暴露</option>
+  </select>
 </div>
 
 <div id="capabilities-container">
@@ -928,14 +927,14 @@
                 <span class="mcp-runtime-tool-count" id="mcp-server-tool-count"></span>
                 <p class="mcp-runtime-error" id="mcp-server-error-msg"></p>
               </div>
-<!-- 启用后才显示 -->
-<div id="mcp-server-detail" class="hidden">
-<div class="setting-row">
-<label class="setting-label" data-i18n="ai.mcp_server.exposed">暴露的能力</label>
-<div id="mcp-server-capabilities-summary">
-<!-- 由 JS 动态渲染：N/M 摘要 + "查看能力目录" 深链 -->
-</div>
-</div>
+              <!-- 启用后才显示 -->
+              <div id="mcp-server-detail" class="hidden">
+                <div class="setting-row">
+                  <label class="setting-label" data-i18n="ai.mcp_server.exposed">暴露的能力</label>
+                  <div id="mcp-server-capabilities-summary">
+                    <!-- 由 JS 动态渲染：N/M 计数 + "查看能力目录" 链接（btn-link） -->
+                  </div>
+                </div>
                 <!-- 使用方式 -->
                 <div class="mcp-server-usage">
                   <label class="setting-label" data-i18n="ai.mcp_server.usage">使用方式</label>

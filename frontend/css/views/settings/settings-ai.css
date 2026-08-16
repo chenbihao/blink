@@ -1670,10 +1670,10 @@
 
 /* ── MCP Server 使用方式 ─────────────────────────────────────────────────── */
 
+/* 上方"暴露的能力" setting-row 已带 border-bottom 分割线，这里只留间距，
+   不再画第二条（0.21.10 修相邻双线） */
 .mcp-server-usage {
   margin-top: var(--space-md, 16px);
-  padding-top: var(--space-md, 16px);
-  border-top: 1px solid var(--surface);
 }
 
 .mcp-config-block {

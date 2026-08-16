@@ -1107,6 +1107,7 @@ export const zh = {
 "capabilities.group.other_plugin": "其他插件能力",
 
 "capabilities.column.feature": "功能",
+"capabilities.column.risk": "风险",
 
 "capabilities.filter.source.all": "全部来源",
 "capabilities.filter.source.builtin": "内置",
@@ -1149,12 +1150,21 @@ export const zh = {
 
 "capabilities.action.show_details": "显示详情",
 "capabilities.action.edit_key": "编辑键位",
-"capabilities.action.jump_to_chord": "跳转到 Chord 设置",
-"capabilities.group.enable_all": "全部启用",
-"capabilities.group.disable_all": "全部禁用",
-"capabilities.group.partial": "部分启用",
+"capabilities.group_toggle.local": "启停本组全部本地入口",
+"capabilities.group_toggle.ai": "允许 AI 调用本组全部能力",
+"capabilities.group_toggle.mcp": "允许 MCP 调用本组全部能力",
+"capabilities.group_count": "{count} 项",
+"capabilities.no_match": "没有符合条件的功能",
+"capabilities.binding.context_hint": "环境触发：满足条件时自动出现在主窗口",
 "capabilities.error.group_operation_failed": "批量操作失败",
 "capabilities.error.toggle_failed": "开关操作失败",
+
+"capabilities.posture.ai": "AI 已授权 {on}/{total}",
+"capabilities.posture.mcp": "MCP 已暴露 {on}/{total}",
+"capabilities.posture.dangerous_ai": "{count} 项危险能力已对 AI 开放",
+"capabilities.posture.clean": "与推荐配置一致",
+"capabilities.posture.reset": "恢复推荐",
+"capabilities.reset.confirm": "将把全部功能重置为推荐状态：本地入口全部启用、AI 仅保留非危险能力、MCP 仅暴露安全能力。你在此页的自定义调整都会被覆盖，确定继续吗？",
 
 "capabilities.details.feature_id": "功能 ID",
 "capabilities.details.capability_id": "能力 ID",

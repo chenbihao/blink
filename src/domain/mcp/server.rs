@@ -654,6 +654,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["test_cap".into()],
+            exposure_seeded: false,
         };
         let gen1 = exposure.rebuild(&registry, &config).await;
         assert_eq!(gen1, 1);
@@ -669,6 +670,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec![],
+            exposure_seeded: false,
         };
         let gen2 = exposure.rebuild(&registry, &config2).await;
         assert_eq!(gen2, 2);
@@ -686,6 +688,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["zebra".into(), "apple".into(), "mango".into()],
+            exposure_seeded: false,
         };
         exposure.rebuild(&registry, &config).await;
 
@@ -706,6 +709,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["test_cap".into()],
+            exposure_seeded: false,
         };
         exposure.rebuild(&registry, &config).await;
 
@@ -792,6 +796,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["dangerous_cap".into()],
+            exposure_seeded: false,
         };
         exposure.rebuild(&reg, &config).await;
 
@@ -820,6 +825,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["gui_starter_cap".into()],
+            exposure_seeded: false,
         };
         exposure.rebuild(&reg, &config).await;
 
@@ -844,6 +850,7 @@ mod tests {
             enabled: true,
             port: 32123,
             exposed_capabilities: vec!["safe_cap".into()],
+            exposure_seeded: false,
         };
         exposure.rebuild(&reg, &config).await;
 
@@ -873,6 +880,7 @@ mod tests {
         let config = McpServerModeConfig {
             enabled: true,
             port: 32123,
+            exposure_seeded: false,
             exposed_capabilities: vec![
                 "safe_cap".into(),
                 "dangerous_cap".into(),

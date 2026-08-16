@@ -209,7 +209,7 @@ body {
 .about-check-btn {
     margin-left: 8px;
     padding: 2px 8px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface);
     border-radius: var(--radius-sm, 4px);
     background: transparent;
     color: var(--text-sub);
@@ -233,7 +233,7 @@ body {
     padding-left: 10px;
     font-size: var(--text-base);
     color: var(--text-faint);
-    border-left: 1px solid var(--border);
+    border-left: 1px solid var(--surface);
 }
 
 .about-update-link {
@@ -251,7 +251,7 @@ body {
     margin-bottom: var(--space-sm, 8px);
     max-height: 300px;
     overflow-y: auto;
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface);
     border-radius: var(--radius, 6px);
     padding: var(--space-md, 12px);
     font-size: var(--text-sm, 13px);
@@ -1929,13 +1929,13 @@ input.has-secret-hint::placeholder {
     color: var(--text-sub);
     font-weight: var(--weight-medium);
     font-size: var(--text-xs);
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--surface);
     font-style: normal;
 }
 
 .cheatsheet-table td {
     padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--surface);
     vertical-align: middle;
 }
 
@@ -1985,121 +1985,232 @@ input.has-secret-hint::placeholder {
     text-decoration: underline;
 }
 
-/* ══ 0.21.6 能力与操作页面 ══════════════════════════════════════════════════ */
+/* ══ 0.21.10 能力与操作：组块三出口矩阵 ════════════════════════════════════════
+   token 真源：卡片底 --bg-sidebar / 边框与分割线 --surface(-2) / 文本层级
+   --text > --text-sub > --text-faint / 风险色 --warning(sensitive) --red(dangerous)。
+   （0.21.6 首版误用了一批未定义变量 --border/--bg-soft/--text-muted 等，
+   导致卡片无底色无边框、行无分割线、弱化文本全强度——0.21.9 重写修正。
+   0.21.10 在其上改为组块布局：sticky 表头独立成条，每组一个圆角块，
+   块间 flex gap 留白；新增风险图标列 / 组级三态 checkbox / 姿态摘要行。） */
 
-/* 控制面板 */
-.capabilities-controls {
-    margin-bottom: var(--space-lg);
+/* ── 姿态摘要行：授权计数 + 危险警示 + 恢复推荐 ─────────────────────────── */
+.cap-posture {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-md);
-    padding: var(--space-md);
-    background: var(--bg-elevated);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border);
-}
-
-.capabilities-controls .search-row {
-    display: flex;
-    gap: var(--space-sm);
-}
-
-.capabilities-controls .filter-row {
-    display: flex;
-    gap: var(--space-sm);
+    align-items: center;
     flex-wrap: wrap;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
 }
 
-.capabilities-controls .input-wide {
+.cap-posture-dot {
+    color: var(--text-faint);
+}
+
+.cap-posture-warn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--red);
+    font-weight: var(--weight-medium);
+}
+
+.cap-posture-warn .icon {
+    width: 13px;
+    height: 13px;
+}
+
+.cap-posture-spacer {
     flex: 1;
 }
 
-/* 功能组 */
-.capability-group {
-    margin-bottom: var(--space-xl);
-    background: var(--bg-elevated);
+.cap-posture-clean {
+    color: var(--text-faint);
+}
+
+.cap-reset-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.cap-reset-btn .icon {
+    width: 13px;
+    height: 13px;
+}
+
+/* ── 工具栏：搜索 + 筛选单行 ─────────────────────────────────────────────── */
+.cap-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-lg);
+}
+
+.cap-search {
+    position: relative;
+    flex: 1;
+    min-width: 200px;
+}
+
+.cap-search .icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 14px;
+    color: var(--text-faint);
+    pointer-events: none;
+}
+
+.cap-search input {
+    width: 100%;
+    height: 32px;
+    padding: 0 12px 0 32px;
+    box-sizing: border-box;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
     border-radius: var(--radius-md);
-    border: 1px solid var(--border);
+    font-size: var(--text-sm);
+    font-family: inherit;
+    transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+
+.cap-search input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+/* 筛选下拉：自适应宽度 + 常规字体（.input-small 是 80px 定宽等宽字体，
+   为数字输入设计，套在下拉上会挤成一排"按钮"） */
+.cap-filter {
+    height: 32px;
+    padding: 0 8px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+
+.cap-filter:hover {
+    border-color: var(--accent);
+}
+
+.cap-filter:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+/* ── 组块矩阵：sticky 表头条 + 每组一个圆角块，列 = 功能|风险|本地|AI|MCP|详情 ── */
+/* 不用 overflow:hidden 裁表头圆角——非 visible 的 overflow 会让 sticky 表头改以
+   内层为参照滚动容器而失效；表头与组块各自独立带边框圆角。
+   组块自身的 overflow:hidden 只影响块内子元素，sticky 表头不是其后代，不受影响。 */
+.cap-table {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.cap-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 40px 72px 72px 72px 36px;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-xs) var(--space-md);
+    border-bottom: 1px solid var(--surface);
+}
+
+.cap-group-block > .cap-row:last-child {
+    border-bottom: none;
+}
+
+/* 表头：全页唯一一份，独立成条，滚动时吸附在内容区顶部 */
+.cap-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    padding: 8px var(--space-md);
+}
+
+.cap-head .cap-cell {
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    color: var(--text-sub);
+}
+
+.cap-exit-head {
+    text-align: center;
+}
+
+.cap-risk-head {
+    text-align: center;
+}
+
+/* 组块：组头行 + 功能行，独立圆角卡；块间留白由 .cap-table 的 gap 提供 */
+.cap-group-block {
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
     overflow: hidden;
 }
 
-.cap-group-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: var(--space-md);
-    background: var(--bg-soft);
-    border-bottom: 1px solid var(--border);
-    gap: var(--space-md);
-    flex-wrap: wrap;
+/* 组头行：整体放大一档（字体/控件/内距），静态视图只靠大小拉开与子行的层级 */
+.cap-group-row {
+    background: color-mix(in srgb, var(--surface) 45%, transparent);
+    border-bottom: 1px solid var(--surface-2);
+    padding: 10px var(--space-md);
 }
 
-.cap-group-title {
+.cap-group-name {
     display: flex;
     align-items: baseline;
     gap: var(--space-sm);
     min-width: 0;
-}
-
-.cap-group-title h3 {
     font-size: var(--text-md);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text);
 }
 
-.cap-group-state {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
+.cap-group-count {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-normal);
+    color: var(--text-faint);
 }
 
-.cap-group-ops {
-    display: flex;
-    gap: var(--space-sm);
+/* 组级批量开关：全尺寸（比行级 switch-sm 大一档），默认隐藏、
+   悬浮/聚焦组行时才出现——静态视图干净，出现的开关天然是组级操作。
+   用 visibility 而非 opacity+transform（spec-frontend §3.4 不建合成层） */
+.cap-group-toggle {
+    visibility: hidden;
 }
 
-/* 矩阵表格：行 = 功能，列 = 功能 | 本地 | AI | MCP | 详情 */
-.cap-table {
-    display: flex;
-    flex-direction: column;
-}
-
-.cap-item {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 64px 64px 64px 36px;
-    align-items: center;
-    gap: var(--space-xs);
-    padding: var(--space-sm) var(--space-md);
-    border-bottom: 1px solid var(--border);
-}
-
-.cap-item:last-child {
-    border-bottom: none;
-}
-
-.cap-item:not(.cap-head):hover {
-    background: var(--bg-soft);
-}
-
-.cap-head {
-    background: var(--bg-soft);
-    position: sticky;
-    top: 0;
-    z-index: 1;
+.cap-group-row:hover .cap-group-toggle,
+.cap-group-row:focus-within .cap-group-toggle {
+    visibility: visible;
 }
 
 .cap-cell {
     min-width: 0;
 }
 
-.cap-cell-label {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+/* 主列：标题唯一醒目，描述/徽章/芯片逐级弱化 */
+.cap-row:not(.cap-head):not(.cap-group-row):hover {
+    background: color-mix(in srgb, var(--surface) 22%, transparent);
 }
 
-/* 主列：标题 + 徽章 + 说明 + 本地绑定 */
 .cap-main {
     padding: var(--space-xs) 0;
 }
@@ -2112,7 +2223,8 @@ input.has-secret-hint::placeholder {
 }
 
 .cap-title {
-    font-weight: 600;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2121,26 +2233,34 @@ input.has-secret-hint::placeholder {
 }
 
 .cap-desc {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
     line-height: 1.4;
     margin-top: 2px;
 }
 
+/* binding 芯片：标题行内跟在标题/徽章右侧；单行不换行，空间不足时芯片收缩缩略 */
 .cap-bindings {
-    display: flex;
+    display: inline-flex;
     gap: var(--space-xs);
-    flex-wrap: wrap;
-    margin-top: var(--space-xs);
+    flex-wrap: nowrap;
+    overflow: hidden;
+    min-width: 0;
 }
 
 .cap-binding {
     display: inline-block;
+    flex-shrink: 1;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
     padding: 1px 8px;
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    background: var(--bg);
-    border: 1px solid var(--border);
+    color: var(--text-sub);
+    background: var(--bg-deep);
+    border: 1px solid var(--surface);
     border-radius: var(--radius-sm);
     font-style: normal;
 }
@@ -2160,6 +2280,26 @@ input.has-secret-hint::placeholder {
     border-color: var(--accent);
 }
 
+/* 风险列：仅非默认态出图标，safe 留空 */
+.cap-risk {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.cap-risk .icon {
+    width: 14px;
+    height: 14px;
+}
+
+.cap-risk-sensitive {
+    color: var(--warning);
+}
+
+.cap-risk-dangerous {
+    color: var(--red);
+}
+
 /* 出口列 */
 .cap-exit {
     display: flex;
@@ -2168,15 +2308,20 @@ input.has-secret-hint::placeholder {
 }
 
 .cap-dash {
-    color: var(--text-muted);
+    color: var(--text-faint);
     cursor: help;
     user-select: none;
 }
 
-/* 部分启用（部分 binding 开启）的本地开关中间态 */
+/* 部分启用（部分 binding 开启）的本地/组级开关中间态 */
 .cap-exit input:indeterminate + .slider {
     background-color: var(--accent);
     opacity: 0.5;
+}
+
+/* 危险能力对 AI/MCP 开放：开启态开关着警示红（后果可视化） */
+.cap-toggle-dangerous:checked + .slider {
+    background-color: var(--red);
 }
 
 /* 详情展开按钮 */
@@ -2189,7 +2334,7 @@ input.has-secret-hint::placeholder {
 .cap-details-btn {
     background: none;
     border: none;
-    color: var(--text-muted);
+    color: var(--text-sub);
     cursor: pointer;
     padding: var(--space-xs);
     border-radius: var(--radius-sm);
@@ -2200,7 +2345,7 @@ input.has-secret-hint::placeholder {
 
 .cap-details-btn:hover {
     color: var(--text);
-    background: var(--bg-elevated);
+    background: color-mix(in srgb, var(--surface) 45%, transparent);
 }
 
 .cap-details-btn .icon {
@@ -2222,6 +2367,8 @@ input.has-secret-hint::placeholder {
     display: flex;
     flex-direction: column;
     gap: var(--space-xs);
+    padding-left: var(--space-sm);
+    border-left: 2px solid var(--surface);
 }
 
 .cap-detail-row {
@@ -2232,7 +2379,7 @@ input.has-secret-hint::placeholder {
 }
 
 .cap-detail-row dt {
-    color: var(--text-muted);
+    color: var(--text-faint);
     min-width: 96px;
     flex-shrink: 0;
 }
@@ -2240,82 +2387,46 @@ input.has-secret-hint::placeholder {
 .cap-detail-row dd {
     margin: 0;
     font-family: var(--font-mono);
-    color: var(--text);
+    color: var(--text-sub);
     word-break: break-all;
 }
 
-/* 徽章 */
+/* 空目录 / 加载失败 / 过滤无匹配提示 */
+.cap-inline-hint,
+.cap-no-match {
+    padding: var(--space-md) 0;
+    margin: 0;
+}
+
+/* ── 徽章（只标非默认来源：内置是默认态不占视觉；风险走独立图标列） ──────── */
 .badge {
     display: inline-block;
     padding: 2px 8px;
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     border-radius: var(--radius-sm);
-    text-transform: uppercase;
     letter-spacing: 0.5px;
-}
-
-.badge-builtin {
-    background: var(--primary-soft);
-    color: var(--primary);
+    font-style: normal;
 }
 
 .badge-plugin {
-    background: var(--warning-soft);
+    background: var(--warning-bg);
     color: var(--warning);
 }
 
 .badge-chord {
-    background: var(--success-soft);
-    color: var(--success);
+    background: var(--green-bg);
+    color: var(--green);
 }
 
-.badge-unknown {
-    background: var(--muted);
-    color: var(--text);
-}
-
-.badge-safe {
-    background: var(--success-soft);
-    color: var(--success);
-}
-
-.badge-sensitive {
-    background: var(--warning-soft);
-    color: var(--warning);
-}
-
-.badge-dangerous {
-    background: var(--danger-soft);
-    color: var(--danger);
-}
-
-/* MCP 摘要 */
-.mcp-summary {
-    display: flex;
-    align-items: center;
-    gap: var(--space-md);
-    padding: var(--space-md);
-    background: var(--bg-soft);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border);
-}
-
-.mcp-summary-text {
-    font-weight: 500;
-    color: var(--text);
-}
-
-.mcp-summary .btn-link {
-    font-size: var(--text-sm);
-}
+/* ── MCP Server 摘要行（mcp-server.js）：计数文本本身是深链（btn-link） ───── */
 
 /* 错误信息 */
 .mcp-error {
-    color: var(--danger);
+    color: var(--red);
     font-size: var(--text-sm);
     padding: var(--space-md);
-    background: var(--danger-soft);
+    background: var(--red-bg);
     border-radius: var(--radius-sm);
     margin: 0;
 }

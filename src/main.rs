@@ -743,6 +743,13 @@ fn main() {
                     capability_registry.as_ref(),
                 ),
             );
+            // 0.21.10: 首次启动生成 MCP 默认暴露集合（无风险能力，静默）
+            tauri::async_runtime::block_on(
+                crate::domain::mcp::server_config::McpServerModeConfigStore::ensure_default_exposure(
+                    &pools.config,
+                    capability_registry.as_ref(),
+                ),
+            );
             // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
             app.manage(ai_registry);
             // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)

@@ -542,7 +542,7 @@ fn default_permission_days() -> u64 {
 /// - Safe + sensitive 的普通读取能力也默认开启，但调用时仍走 sensitive 确认。
 /// - Dangerous、仅本地、诊断信息采集和诊断恢复类默认关闭。
 /// - 用户修改后以持久化的 capability id 集合为真源；未来新增 Capability 不自动进入已有用户的 allowlist。
-/// - 纯对话模式仍为空 tool 池。
+/// - 纯对话模式仍为空 tool 池.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiCapabilityAccessConfig {
     /// Schema 版本。当前固定为 1。
@@ -557,6 +557,12 @@ pub struct AiCapabilityAccessConfig {
     /// 用户授权的 Capability id 集合——AI tool 池的唯一真源。
     #[serde(default)]
     pub enabled_capabilities: Vec<String>,
+
+    /// 种子状态标记。`false` = 未初始化，需要首次生成推荐集合；
+    /// `true` = 已生成过推荐集合，用户关闭全部能力后应保持为空。
+    /// 0.21.11 新增，解决用户清空 allowlist 后重启又被重新填充的问题。
+    #[serde(default)]
+    pub seeded: bool,
 }
 
 impl Default for AiCapabilityAccessConfig {
@@ -565,6 +571,7 @@ impl Default for AiCapabilityAccessConfig {
             schema_version: default_ai_access_schema_version(),
             profile: default_ai_access_profile(),
             enabled_capabilities: Vec::new(),
+            seeded: false,
         }
     }
 }

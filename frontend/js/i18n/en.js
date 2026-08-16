@@ -1106,6 +1106,7 @@ export const en = {
 "capabilities.group.other_plugin": "Other Plugin Capabilities",
 
 "capabilities.column.feature": "Feature",
+"capabilities.column.risk": "Risk",
 
 "capabilities.filter.source.all": "All Sources",
 "capabilities.filter.source.builtin": "Built-in",
@@ -1148,12 +1149,21 @@ export const en = {
 
 "capabilities.action.show_details": "Show Details",
 "capabilities.action.edit_key": "Edit Key",
-"capabilities.action.jump_to_chord": "Go to Chord Settings",
-"capabilities.group.enable_all": "Enable All",
-"capabilities.group.disable_all": "Disable All",
-"capabilities.group.partial": "Partial",
+"capabilities.group_toggle.local": "Toggle all local entries in this group",
+"capabilities.group_toggle.ai": "Allow AI to invoke all capabilities in this group",
+"capabilities.group_toggle.mcp": "Allow MCP to invoke all capabilities in this group",
+"capabilities.group_count": "{count} items",
+"capabilities.no_match": "No matching features",
+"capabilities.binding.context_hint": "Context trigger: appears automatically when the condition is met",
 "capabilities.error.group_operation_failed": "Batch operation failed",
 "capabilities.error.toggle_failed": "Toggle failed",
+
+"capabilities.posture.ai": "AI granted {on}/{total}",
+"capabilities.posture.mcp": "MCP exposed {on}/{total}",
+"capabilities.posture.dangerous_ai": "{count} dangerous capabilities granted to AI",
+"capabilities.posture.clean": "Matches recommended setup",
+"capabilities.posture.reset": "Reset to recommended",
+"capabilities.reset.confirm": "This resets every feature to the recommended state: all local entries enabled, AI keeps non-dangerous capabilities only, and MCP exposes safe capabilities only. Your custom adjustments on this page will be overwritten. Continue?",
 
 "capabilities.details.feature_id": "Feature ID",
 "capabilities.details.capability_id": "Capability ID",

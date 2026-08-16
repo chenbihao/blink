@@ -80,40 +80,75 @@ impl FeatureCatalogAggregator {
             // 收集该 descriptor 的 binding
             let mut bindings = Vec::new();
 
-            // SearchKeyword binding（所有 builtin action 都有关键词）
-            bindings.push(BindingSummary {
-                binding_id: cap_id.clone(),
-                kind: BindingKind::SearchKeyword,
-                enabled: action.enabled,
-                trigger_label: if use_en {
-                    format!("Keywords: {}", action.keywords.join(", "))
-                } else {
-                    format!("关键词：{}", action.keywords.join("、"))
-                },
-            });
-
-        // context binding 的 target_id 格式为 "builtin:{action_id}"
-        // 需要提取 action_id 来匹配 descriptor
-        for ctx in &context_bindings {
-            let ctx_target_id = ctx["target_id"].as_str().unwrap_or_default();
-            // target_id 格式 "builtin:open_url" → 提取 "open_url"
-            let ctx_action_id = ctx_target_id
-                .strip_prefix("builtin:")
-                .unwrap_or(ctx_target_id);
-            if ctx_action_id == *cap_id {
-                let ctx_key = ctx["key"].as_str().unwrap_or_default().to_string();
-                let enabled = !disabled_context_set.contains(ctx_key.as_str());
+            // Context 门禁动作（参数化，声明了 context triggers）：关键词命中也必须
+            // Context 命中才召回（builtin_engine::search 2a 门禁）——单独展示
+            // "关键词：…"会误导用户以为输入关键词即可唤起。改为：
+            // - 不生成关键词提示；
+            // - 以 context 触发条件（裸 trigger key，前端按 context.trigger.* 翻译）
+            //   作为唯一本地入口标签；
+            // - 开关仍写 action 级 disabled_builtin_actions（SearchKeyword store），
+            //   等价关闭该动作的全部召回路径；binding 粒度的 context 禁用由
+            //   "Ghost 触发规则"面板管理，不在目录内重复表达。
+            if action.context_gated {
+                let trigger_key = context_bindings
+                    .iter()
+                    .find(|ctx| {
+                        ctx["target_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .strip_prefix("builtin:")
+                            .map(|id| id == cap_id.as_str())
+                            .unwrap_or(false)
+                    })
+                    .map(|ctx| {
+                        ctx["trigger_label"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| cap_id.clone());
                 bindings.push(BindingSummary {
-                    binding_id: ctx_key,
-                    kind: BindingKind::ContextBinding,
-                    enabled,
-                    trigger_label: ctx["trigger_label"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
+                    binding_id: cap_id.clone(),
+                    kind: BindingKind::SearchKeyword,
+                    enabled: action.enabled,
+                    trigger_label: trigger_key,
                 });
+            } else {
+                // SearchKeyword binding（无门禁动作：关键词可独立召回）
+                bindings.push(BindingSummary {
+                    binding_id: cap_id.clone(),
+                    kind: BindingKind::SearchKeyword,
+                    enabled: action.enabled,
+                    trigger_label: if use_en {
+                        format!("Keywords: {}", action.keywords.join(", "))
+                    } else {
+                        format!("关键词：{}", action.keywords.join("、"))
+                    },
+                });
+
+                // context binding 的 target_id 格式为 "builtin:{action_id}"
+                // 需要提取 action_id 来匹配 descriptor
+                for ctx in &context_bindings {
+                    let ctx_target_id = ctx["target_id"].as_str().unwrap_or_default();
+                    // target_id 格式 "builtin:open_url" → 提取 "open_url"
+                    let ctx_action_id = ctx_target_id
+                        .strip_prefix("builtin:")
+                        .unwrap_or(ctx_target_id);
+                    if ctx_action_id == *cap_id {
+                        let ctx_key = ctx["key"].as_str().unwrap_or_default().to_string();
+                        let enabled = !disabled_context_set.contains(ctx_key.as_str());
+                        bindings.push(BindingSummary {
+                            binding_id: ctx_key,
+                            kind: BindingKind::ContextBinding,
+                            enabled,
+                            trigger_label: ctx["trigger_label"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        });
+                    }
+                }
             }
-        }
 
             // 本地可用性
             let local_availability = if !action.enabled {
@@ -180,12 +215,19 @@ impl FeatureCatalogAggregator {
                     ChordTarget::VoiceInteraction => None,
                 });
 
+            // 空格键显示为 "Space" 文本（voice_input 的 chord 键是 ' '，
+            // 裸拼会产出 "Alt+ " 尾随空格；对齐 hotkey recorder 的 display 规则）
+            let key_display = if key == " " {
+                "Space".to_string()
+            } else {
+                key.to_uppercase()
+            };
             let trigger_label = if key.is_empty() {
                 label.clone()
             } else if use_en {
-                format!("Alt+{} (hold)", key.to_uppercase())
+                format!("Alt+{} (hold)", key_display)
             } else {
-                format!("Alt+{}", key.to_uppercase())
+                format!("Alt+{}", key_display)
             };
 
             let binding_summary = BindingSummary {
@@ -322,15 +364,16 @@ impl FeatureCatalogAggregator {
             };
 
             let schema = cap_arc.schema();
+            // 目录展示拆分：title = 用户可读短名，description = schema 长句。
+            // schema.description 面向 AI 工具调用（含参数/返回说明），此前直接当
+            // title 会产出"只有超长标题没有描述"的目录行（0.21.10 拆分）。
             let title = if is_plugin {
-                // 尝试从 plugin manifest 获取名称
-                if let Some(pe) = plugin_engine {
-                    find_plugin_name_for_cap(pe, &cap_id, language)
-                } else {
-                    schema.description.clone()
-                }
+                // 尝试从 plugin manifest 获取名称，缺失回退人类化 id
+                plugin_engine
+                    .and_then(|pe| find_plugin_name_for_cap(pe, &cap_id, language))
+                    .unwrap_or_else(|| humanize_capability_id(&cap_id))
             } else {
-                schema.description.clone()
+                capability_short_title(&cap_id, use_en)
             };
 
             let cap_projection =
@@ -364,7 +407,7 @@ impl FeatureCatalogAggregator {
             items.push(FeatureCatalogItem {
                 feature_id,
                 title,
-                description: String::new(),
+                description: schema.description.clone(),
                 group,
                 source,
                 capability_id: Some(cap_id.clone()),
@@ -375,16 +418,88 @@ impl FeatureCatalogAggregator {
             });
         }
 
-        // ── Step 4: 按 group 排序，组内按 title 排序 ────────────────────
+        // ── Step 4: 排序——组升序 → 组内 Chord > 插件 > 普通 → title 升序 ──
+        // （Chord/插件是用户显式配置的入口，排在组内前部更易定位）
         items.sort_by(|a, b| {
-            a.group.cmp(&b.group).then_with(|| a.title.cmp(&b.title))
+            a.group
+                .cmp(&b.group)
+                .then(source_rank(&a.source).cmp(&source_rank(&b.source)))
+                .then_with(|| a.title.cmp(&b.title))
         });
 
         items
     }
 }
 
+/// 组内排序的来源优先级：Chord=0 > Plugin=1 > 普通（Builtin/BuiltinCapability）=2。
+fn source_rank(source: &FeatureSource) -> u8 {
+    match source {
+        FeatureSource::Chord => 0,
+        FeatureSource::Plugin => 1,
+        _ => 2,
+    }
+}
+
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+/// 无 descriptor/chord 覆盖的内置 capability 目录短标题（双语）。
+///
+/// 这些能力只有面向 AI 的 `schema.description`（含参数/返回的长句），目录展示
+/// 需要用户可读短名——与 descriptor 的双语 title 同一风格。未收录的新 id 由
+/// `humanize_capability_id` 兜底，新增能力时在此补一行即可。
+const CAPABILITY_TITLES: &[(&str, &str, &str)] = &[
+    ("analyze_image_palette", "图片取色", "Analyze Image Palette"),
+    ("get_settings", "读取设置", "Read Settings"),
+    ("list_clipboard_images", "剪贴板图片列表", "List Clipboard Images"),
+    ("list_sticky", "便签列表", "List Sticky Notes"),
+    ("list_windows", "窗口列表", "List Windows"),
+    ("ocr_image", "图片识别文字", "OCR Image"),
+    ("pin_image", "贴图", "Pin Image"),
+    ("read_clipboard", "读取剪贴板", "Read Clipboard"),
+    (
+        "read_clipboard_history_image",
+        "读取剪贴板历史图片",
+        "Read Clipboard History Image",
+    ),
+    ("read_sticky", "读取便签", "Read Sticky Note"),
+    ("read_text_file", "读取文本文件", "Read Text File"),
+    ("screenshot", "截图", "Screenshot"),
+    ("search_apps", "搜索应用", "Search Apps"),
+    (
+        "search_clipboard_history",
+        "搜索剪贴板历史",
+        "Search Clipboard History",
+    ),
+    ("search_files", "搜索文件", "Search Files"),
+    ("set_sticky_geometry", "设置便签位置", "Set Sticky Geometry"),
+    (
+        "set_sticky_visibility",
+        "设置便签可见性",
+        "Set Sticky Visibility",
+    ),
+    ("trash_sticky", "回收便签", "Trash Sticky Note"),
+    ("update_setting", "更新设置", "Update Setting"),
+    ("update_sticky", "更新便签", "Update Sticky Note"),
+    ("write_clipboard", "写入剪贴板", "Write Clipboard"),
+];
+
+/// capability-only 目录项的用户可读短标题；未收录 id 回退人类化 id。
+fn capability_short_title(cap_id: &str, use_en: bool) -> String {
+    if let Some((_, zh, en)) = CAPABILITY_TITLES.iter().find(|(id, _, _)| *id == cap_id) {
+        return if use_en { (*en).to_string() } else { (*zh).to_string() };
+    }
+    humanize_capability_id(cap_id)
+}
+
+/// snake_case id → 空格分隔 + 首字母大写（短名表未收录时的兜底标题）。
+fn humanize_capability_id(cap_id: &str) -> String {
+    let replaced = cap_id.replace('_', " ");
+    let mut chars = replaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 /// 从 PluginEngine 查找插件 capability 对应的 plugin_id。
 ///
@@ -404,18 +519,16 @@ fn find_plugin_id_for_cap(
     None
 }
 
-/// 从 PluginEngine 查找插件 capability 对应的插件显示名。
+/// 从 PluginEngine 查找插件 capability 对应的插件显示名；解析不到返回 None
+/// （调用方以人类化 id 兜底，0.21.10 起不再拿 schema 长句当标题）。
 fn find_plugin_name_for_cap(
     pe: &PluginEngine,
     cap_id: &str,
     language: &str,
-) -> String {
-    if let Some(plugin_id) = find_plugin_id_for_cap(pe, cap_id) {
-        if let Some(manifest) = pe.get_manifest(&plugin_id) {
-            return manifest.name.resolve(language);
-        }
-    }
-    cap_id.to_string()
+) -> Option<String> {
+    let plugin_id = find_plugin_id_for_cap(pe, cap_id)?;
+    let manifest = pe.get_manifest(&plugin_id)?;
+    Some(manifest.name.resolve(language))
 }
 
 /// 从 Capability 构建 CatalogCapabilityProjection。
@@ -1137,6 +1250,141 @@ mod tests {
     }
 
     #[test]
+    fn capability_only_item_splits_title_and_description() {        // 0.21.10：无 descriptor/chord 覆盖的 capability 目录项，
+        // title = 短名表用户可读标题，schema 长句进 description——
+        // 不再出现"超长标题 + 空描述"的行；未收录 id 回退人类化。
+        // search_files 经 inventory 自动注册（真实 capability），无需手动注册
+        let cap_reg = CapabilityRegistry::default();
+        cap_reg.register(make_mock_cap("custom_cap_123"));
+
+        let chord_reg = ChordRegistry::default();
+
+        let zh_items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+        let search = zh_items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("search_files"))
+            .expect("应找到 search_files 目录项");
+        assert_eq!(search.title, "搜索文件");
+        // schema 长句（真实描述）完整落到 description，不再被截进 title
+        assert_eq!(
+            search.description,
+            "按关键词搜索本地文件（Everything / 本地目录），返回匹配文件列表。"
+        );
+
+        let custom = zh_items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("custom_cap_123"))
+            .expect("应找到 custom_cap_123 目录项");
+        assert_eq!(custom.title, "Custom cap 123");
+        assert_eq!(custom.description, "mock capability");
+
+        // 英文语言走短名表 en 列
+        let en_items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "en",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+        let search_en = en_items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("search_files"))
+            .expect("应找到 search_files 目录项");
+        assert_eq!(search_en.title, "Search Files");
+    }
+
+    #[test]
+    fn aggregate_sorts_chord_before_builtin_within_group() {
+        // 0.21.10：组内排序 Chord > 插件 > 普通 → title——
+        // Chord 项（title "Z 开头"）应排在同组普通项（title "Aa cap"）之前
+        let mut chord_reg = ChordRegistry::new();
+        chord_reg.register(make_capability_chord("zz_chord", 'z', "zz_sort_cap", "Z 开头"));
+
+        let cap_reg = CapabilityRegistry::default();
+        cap_reg.register(make_mock_cap("aa_sort_cap"));
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let chord_item = items
+            .iter()
+            .find(|i| i.source == FeatureSource::Chord && i.title == "Z 开头")
+            .expect("应找到 chord 目录项");
+        let builtin_item = items
+            .iter()
+            .find(|i| i.title == "Aa sort cap")
+            .expect("应找到普通目录项");
+        assert_eq!(
+            chord_item.group, builtin_item.group,
+            "两个未知 id 应落入同一组"
+        );
+
+        let chord_pos = items
+            .iter()
+            .position(|i| i.feature_id == chord_item.feature_id)
+            .unwrap();
+        let builtin_pos = items
+            .iter()
+            .position(|i| i.feature_id == builtin_item.feature_id)
+            .unwrap();
+        assert!(chord_pos < builtin_pos, "组内 Chord 应排在普通项之前");
+    }
+
+    #[test]
+    fn chord_trigger_label_renders_space_as_text() {
+        // voice_input 的 chord 键是空格——label 应显示 "Alt+Space" 而非尾随空格
+        let mut chord_reg = ChordRegistry::new();
+        chord_reg.register(make_voice_chord("voice_input", ' ', "语音输入"));
+
+        let cap_reg = CapabilityRegistry::default();
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let voice = items
+            .iter()
+            .find(|i| i.feature_id == "chord.voice_input")
+            .expect("应找到 voice_input 目录项");
+        let label = voice
+            .bindings
+            .first()
+            .map(|b| b.trigger_label.clone())
+            .unwrap_or_default();
+        assert_eq!(label, "Alt+Space");
+    }
+
+    #[test]
     fn aggregate_sorts_by_group_then_title() {
         let cap_reg = CapabilityRegistry::default();
         let chord_reg = ChordRegistry::default();
@@ -1204,7 +1452,9 @@ mod tests {
         // 两语言应返回相同数量的目录项
         assert_eq!(items_zh.len(), items_en.len());
 
-        // 英文版本的 keyword binding trigger_label 应含 "Keywords:"
+        // 英文版本的 keyword binding trigger_label 含 "Keywords:"；
+        // Context 门禁动作（open_url 等）的 label 是裸 trigger key（前端翻译），
+        // 不带 "Keywords:" 前缀——这是 0.21.9 的预期行为，不是回归。
         for item in &items_en {
             if let Some(sk) = item
                 .bindings
@@ -1212,8 +1462,11 @@ mod tests {
                 .find(|b| b.kind == BindingKind::SearchKeyword)
             {
                 assert!(
-                    sk.trigger_label.starts_with("Keywords:"),
-                    "英文 trigger_label 应以 'Keywords:' 开头: {}",
+                    sk.trigger_label.starts_with("Keywords:")
+                        || sk.trigger_label
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_'),
+                    "英文 trigger_label 应为 'Keywords:' 前缀或裸 trigger key: {}",
                     sk.trigger_label
                 );
             }
@@ -1221,9 +1474,10 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_context_binding_attached() {
-        // 某些 builtin action 有 context binding（如 open_url 在剪贴板是 URL 时触发）
-        // 验证 context binding 被正确关联到对应 descriptor
+    fn aggregate_gated_action_single_binding() {
+        // Context 门禁动作（open_url）：关键词单独唤不起，不应展示"关键词：…"死提示。
+        // 本地入口收敛为单一 action 级 binding（SearchKeyword store），label 为裸
+        // trigger key（前端按 context.trigger.* 翻译为"剪贴板是 URL"）。
         let cap_reg = CapabilityRegistry::default();
         let chord_reg = ChordRegistry::default();
 
@@ -1239,30 +1493,59 @@ mod tests {
             &HashSet::new(),
         );
 
-        // 找有 context binding 的项（open_url 通常有 clipboard_is_url context trigger）
-        let has_context_binding: bool = items.iter().any(|item| {
-            item.bindings.iter().any(|b| b.kind == BindingKind::ContextBinding)
-        });
+        let open_url = items
+            .iter()
+            .find(|i| i.feature_id == "blink.open_url")
+            .expect("应找到 open_url 目录项");
 
-        // 如果当前 builtin 没有任何 context binding，这个断言也能通过
-        // 但如果有，验证其 enabled 状态正确
-        if has_context_binding {
-            for item in &items {
-                for ctx in item.bindings.iter().filter(|b| b.kind == BindingKind::ContextBinding) {
-                    // 默认无禁用 → enabled = true
-                    assert!(ctx.enabled, "context binding {} 应为 enabled", ctx.binding_id);
-                }
-            }
-        }
+        assert_eq!(open_url.bindings.len(), 1, "门禁动作应只有单一本地入口");
+        let binding = &open_url.bindings[0];
+        assert_eq!(binding.kind, BindingKind::SearchKeyword);
+        assert_eq!(binding.binding_id, "open_url");
+        assert_eq!(binding.trigger_label, "clipboard_is_url");
+        assert!(binding.enabled);
+        assert!(
+            !open_url
+                .bindings
+                .iter()
+                .any(|b| b.kind == BindingKind::ContextBinding),
+            "门禁动作不再单列 ContextBinding（action 级开关已覆盖）"
+        );
     }
 
     #[test]
-    fn aggregate_context_binding_disabled() {
+    fn aggregate_gated_action_disabled_reflects_action_level() {
+        // action 级禁用（disabled_builtin_actions）→ 单一 binding disabled + 不可用
         let cap_reg = CapabilityRegistry::default();
         let chord_reg = ChordRegistry::default();
 
-        // 获取 context binding 的 items
-        let items_default = FeatureCatalogAggregator::aggregate(
+        let items = FeatureCatalogAggregator::aggregate(
+            &["open_url".to_string()],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let open_url = items
+            .iter()
+            .find(|i| i.feature_id == "blink.open_url")
+            .expect("应找到 open_url 目录项");
+        assert!(!open_url.bindings[0].enabled);
+        assert_eq!(open_url.local_availability, LocalAvailability::Disabled);
+    }
+
+    #[test]
+    fn aggregate_keyword_action_keeps_keywords_label() {
+        // 无门禁动作（open_settings）仍展示关键词提示
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
             &[],
             &[],
             &[],
@@ -1274,45 +1557,76 @@ mod tests {
             &HashSet::new(),
         );
 
-        // 找到所有 context binding 的 key
-        let context_keys: Vec<String> = items_default
+        let settings_item = items
             .iter()
-            .flat_map(|item| {
-                item.bindings
-                    .iter()
-                    .filter(|b| b.kind == BindingKind::ContextBinding)
-                    .map(|b| b.binding_id.clone())
-            })
-            .collect();
+            .find(|i| i.feature_id == "blink.open_settings")
+            .expect("应找到 open_settings 目录项");
+        let sk = settings_item
+            .bindings
+            .iter()
+            .find(|b| b.kind == BindingKind::SearchKeyword)
+            .expect("应有 SearchKeyword binding");
+        assert!(sk.trigger_label.starts_with("关键词："), "{}", sk.trigger_label);
+    }
 
-        if !context_keys.is_empty() {
-            // 禁用第一个 context binding
-            let disabled_ctx = vec![context_keys[0].clone()];
-            let items_disabled = FeatureCatalogAggregator::aggregate(
-                &[],
-                &[],
-                &disabled_ctx,
-                "zh",
-                &cap_reg,
-                &chord_reg,
-                None,
-                None,
-                &HashSet::new(),
-            );
+    #[test]
+    fn aggregate_context_binding_attached() {
+        // 0.21.9：门禁动作的 context 触发已折叠进单一 action 级 binding，
+        // 目录不再出现 ContextBinding kind（binding 粒度管理在 Ghost 触发规则面板）。
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
 
-            // 验证对应的 context binding 被标记为 disabled
-            for item in &items_disabled {
-                for ctx in item
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        for item in &items {
+            assert!(
+                !item
                     .bindings
                     .iter()
-                    .filter(|b| b.kind == BindingKind::ContextBinding)
-                {
-                    if ctx.binding_id == context_keys[0] {
-                        assert!(!ctx.enabled, "context binding {} 应被禁用", ctx.binding_id);
-                    }
-                }
-            }
+                    .any(|b| b.kind == BindingKind::ContextBinding),
+                "目录不应再含 ContextBinding binding: {}",
+                item.feature_id
+            );
         }
+    }
+
+    #[test]
+    fn aggregate_context_binding_disabled() {
+        // disabled_context_bindings 不再影响目录展示（目录只投影 action 级开关；
+        // context binding 粒度的启停由 Ghost 触发规则面板管理）。
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &["builtin:open_url::clipboard_is_url".to_string()],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let open_url = items
+            .iter()
+            .find(|i| i.feature_id == "blink.open_url")
+            .expect("应找到 open_url 目录项");
+        assert!(
+            open_url.bindings[0].enabled,
+            "context binding 黑名单不影响目录的 action 级开关投影"
+        );
     }
 
     #[test]
