@@ -193,9 +193,9 @@ async fn create_pool(path: &PathBuf) -> Result<SqlitePool, String> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
-        .pragma("mmap_size", "268435456")   // 256MB mmap
-        .pragma("cache_size", "-20000")      // 20MB page cache
-        .pragma("temp_store", "MEMORY");     // 临时表用内存
+        .pragma("mmap_size", "268435456") // 256MB mmap
+        .pragma("cache_size", "-20000") // 20MB page cache
+        .pragma("temp_store", "MEMORY"); // 临时表用内存
 
     SqlitePoolOptions::new()
         .max_connections(4)

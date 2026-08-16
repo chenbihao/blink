@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 use super::types::*;
 
 use crate::domain::capability::{
-    Capability, CapabilityPolicy, CapabilityRegistry, DangerClass,
-    InvocationOrigin, RuntimeRequirement,
+    Capability, CapabilityPolicy, CapabilityRegistry, DangerClass, InvocationOrigin,
+    RuntimeRequirement,
 };
 use crate::domain::chord::{ChordRegistry, ChordTarget};
 use crate::domain::plugin::PluginEngine;
@@ -158,20 +158,17 @@ impl FeatureCatalogAggregator {
             };
 
             // Capability 投影
-            let cap_projection = cap_registry
-                .get(cap_id)
-                .map(|cap| {
-                    build_capability_projection(
-                        &cap,
-                        FeatureSource::Builtin,
-                        ai_allowlist,
-                        mcp_exposed,
-                    )
-                });
+            let cap_projection = cap_registry.get(cap_id).map(|cap| {
+                build_capability_projection(&cap, FeatureSource::Builtin, ai_allowlist, mcp_exposed)
+            });
 
             let unavailable_reason = if local_availability != LocalAvailability::Available {
                 if !action.enabled {
-                    Some(if use_en { "Disabled by user".into() } else { "用户已禁用".into() })
+                    Some(if use_en {
+                        "Disabled by user".into()
+                    } else {
+                        "用户已禁用".into()
+                    })
                 } else {
                     None
                 }
@@ -244,7 +241,8 @@ impl FeatureCatalogAggregator {
                         items[idx].bindings.push(binding_summary);
                         // 如果 chord 被 disable 但 descriptor 没被 disable，
                         // 本地可用性应反映 chord 的 disable 状态
-                        if !enabled && items[idx].local_availability == LocalAvailability::Available {
+                        if !enabled && items[idx].local_availability == LocalAvailability::Available
+                        {
                             // chord disabled 不等于整个功能不可用——
                             // 只是 chord binding 不可用。保持 Available，binding.enabled=false。
                             // 但如果该功能只有 chord binding 且 chord 被禁用，则应标记 Disabled。
@@ -284,7 +282,11 @@ impl FeatureCatalogAggregator {
                     },
                     capability_projection: cap_projection,
                     unavailable_reason: if !enabled {
-                        Some(if use_en { "Chord disabled".into() } else { "Chord 已禁用".into() })
+                        Some(if use_en {
+                            "Chord disabled".into()
+                        } else {
+                            "Chord 已禁用".into()
+                        })
                     } else {
                         None
                     },
@@ -313,7 +315,11 @@ impl FeatureCatalogAggregator {
                     },
                     capability_projection: None,
                     unavailable_reason: if !enabled {
-                        Some(if use_en { "Chord disabled".into() } else { "Chord 已禁用".into() })
+                        Some(if use_en {
+                            "Chord disabled".into()
+                        } else {
+                            "Chord 已禁用".into()
+                        })
                     } else {
                         None
                     },
@@ -386,9 +392,14 @@ impl FeatureCatalogAggregator {
                     let plugin_id = find_plugin_id_for_cap(pe, &cap_id);
                     if let Some(pid) = plugin_id {
                         if !pe.is_enabled(&pid) {
-                            (LocalAvailability::Disabled, Some(
-                                if use_en { "Plugin disabled".into() } else { "插件已禁用".into() }
-                            ))
+                            (
+                                LocalAvailability::Disabled,
+                                Some(if use_en {
+                                    "Plugin disabled".into()
+                                } else {
+                                    "插件已禁用".into()
+                                }),
+                            )
                         } else {
                             (LocalAvailability::Available, None)
                         }
@@ -396,9 +407,14 @@ impl FeatureCatalogAggregator {
                         (LocalAvailability::Available, None)
                     }
                 } else {
-                    (LocalAvailability::SourceUnavailable, Some(
-                        if use_en { "Plugin engine not available".into() } else { "插件引擎不可用".into() }
-                    ))
+                    (
+                        LocalAvailability::SourceUnavailable,
+                        Some(if use_en {
+                            "Plugin engine not available".into()
+                        } else {
+                            "插件引擎不可用".into()
+                        }),
+                    )
                 }
             } else {
                 (LocalAvailability::Available, None)
@@ -450,7 +466,11 @@ fn source_rank(source: &FeatureSource) -> u8 {
 const CAPABILITY_TITLES: &[(&str, &str, &str)] = &[
     ("analyze_image_palette", "图片取色", "Analyze Image Palette"),
     ("get_settings", "读取设置", "Read Settings"),
-    ("list_clipboard_images", "剪贴板图片列表", "List Clipboard Images"),
+    (
+        "list_clipboard_images",
+        "剪贴板图片列表",
+        "List Clipboard Images",
+    ),
     ("list_sticky", "便签列表", "List Sticky Notes"),
     ("list_windows", "窗口列表", "List Windows"),
     ("ocr_image", "图片识别文字", "OCR Image"),
@@ -486,7 +506,11 @@ const CAPABILITY_TITLES: &[(&str, &str, &str)] = &[
 /// capability-only 目录项的用户可读短标题；未收录 id 回退人类化 id。
 fn capability_short_title(cap_id: &str, use_en: bool) -> String {
     if let Some((_, zh, en)) = CAPABILITY_TITLES.iter().find(|(id, _, _)| *id == cap_id) {
-        return if use_en { (*en).to_string() } else { (*zh).to_string() };
+        return if use_en {
+            (*en).to_string()
+        } else {
+            (*zh).to_string()
+        };
     }
     humanize_capability_id(cap_id)
 }
@@ -504,10 +528,7 @@ fn humanize_capability_id(cap_id: &str) -> String {
 /// 从 PluginEngine 查找插件 capability 对应的 plugin_id。
 ///
 /// 遍历所有 manifest 的 tools，用 `plugin_tool_id` 构造 id 并比对。
-fn find_plugin_id_for_cap(
-    pe: &PluginEngine,
-    cap_id: &str,
-) -> Option<String> {
+fn find_plugin_id_for_cap(pe: &PluginEngine, cap_id: &str) -> Option<String> {
     for manifest in pe.list_manifests() {
         for tool in &manifest.tools {
             let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &tool.name);
@@ -521,11 +542,7 @@ fn find_plugin_id_for_cap(
 
 /// 从 PluginEngine 查找插件 capability 对应的插件显示名；解析不到返回 None
 /// （调用方以人类化 id 兜底，0.21.10 起不再拿 schema 长句当标题）。
-fn find_plugin_name_for_cap(
-    pe: &PluginEngine,
-    cap_id: &str,
-    language: &str,
-) -> Option<String> {
+fn find_plugin_name_for_cap(pe: &PluginEngine, cap_id: &str, language: &str) -> Option<String> {
     let plugin_id = find_plugin_id_for_cap(pe, cap_id)?;
     let manifest = pe.get_manifest(&plugin_id)?;
     Some(manifest.name.resolve(language))
@@ -549,8 +566,7 @@ fn build_capability_projection(
         DangerClass::Dangerous => "dangerous",
     };
 
-    let ai_status =
-        project_ai_exit_status(&policy, cap.id(), ai_allowlist);
+    let ai_status = project_ai_exit_status(&policy, cap.id(), ai_allowlist);
     let mcp_status = project_mcp_exit_status(&policy, cap.id(), mcp_exposed);
 
     let runtime_requirement = format_runtime_requirement(policy.runtime_requirement);
@@ -630,12 +646,9 @@ mod tests {
     use super::*;
     use crate::domain::capability::{
         AiDefault, CapabilityError, CapabilityRegistry, CapabilityResult, CapabilitySchema,
-        ConfirmationPolicy, DangerClass, McpDefault, OriginSet,
-        RuntimeRequirement,
+        ConfirmationPolicy, DangerClass, McpDefault, OriginSet, RuntimeRequirement,
     };
-    use crate::domain::chord::{
-        ChordAction, ChordRegistry, ChordSurface, ChordTarget,
-    };
+    use crate::domain::chord::{ChordAction, ChordRegistry, ChordSurface, ChordTarget};
     use crate::domain::plugin::LocalizableText;
     use std::sync::Arc;
 
@@ -966,8 +979,7 @@ mod tests {
     #[test]
     fn build_projection_for_safe_cap() {
         let cap = make_mock_cap("test_safe_cap");
-        let proj =
-            build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
+        let proj = build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
 
         assert_eq!(proj.capability_id, "test_safe_cap");
         assert_eq!(proj.source, FeatureSource::Builtin);
@@ -987,8 +999,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let proj =
-            build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
+        let proj = build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
 
         assert_eq!(proj.danger, "dangerous");
         assert!(proj.requires_confirmation);
@@ -1004,8 +1015,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let proj =
-            build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
+        let proj = build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
 
         assert!(proj.sensitive);
         assert!(proj.requires_confirmation);
@@ -1022,8 +1032,7 @@ mod tests {
             FeatureSource::BuiltinCapability,
         ] {
             let cap = make_mock_cap("test_source_cap");
-            let proj =
-                build_capability_projection(&cap, source, None, &HashSet::new());
+            let proj = build_capability_projection(&cap, source, None, &HashSet::new());
             assert_eq!(proj.source, source);
         }
     }
@@ -1054,7 +1063,9 @@ mod tests {
         // Builtin source 的项应有 SearchKeyword binding
         for item in items.iter().filter(|i| i.source == FeatureSource::Builtin) {
             assert!(
-                item.bindings.iter().any(|b| b.kind == BindingKind::SearchKeyword),
+                item.bindings
+                    .iter()
+                    .any(|b| b.kind == BindingKind::SearchKeyword),
                 "builtin feature {} 应至少有 SearchKeyword binding",
                 item.feature_id
             );
@@ -1067,7 +1078,10 @@ mod tests {
 
         // BuiltinCapability source 的项（从 CapabilityRegistry inventory 补充的）
         // 可能有空 bindings（无 descriptor/chord 关联）
-        for item in items.iter().filter(|i| i.source == FeatureSource::BuiltinCapability) {
+        for item in items
+            .iter()
+            .filter(|i| i.source == FeatureSource::BuiltinCapability)
+        {
             assert!(
                 item.feature_id.starts_with("blink."),
                 "builtin_capability feature_id 应以 blink. 开头: {}",
@@ -1099,7 +1113,10 @@ mod tests {
             .find(|i| i.feature_id == "blink.open_settings")
             .expect("应找到 open_settings 目录项");
 
-        assert_eq!(settings_item.local_availability, LocalAvailability::Disabled);
+        assert_eq!(
+            settings_item.local_availability,
+            LocalAvailability::Disabled
+        );
         assert!(settings_item.unavailable_reason.is_some());
         // SearchKeyword binding 的 enabled 应为 false
         let sk_binding = settings_item
@@ -1222,7 +1239,7 @@ mod tests {
     fn aggregate_uncovered_capability_standalone() {
         // 注册一个不在 descriptor/chord 中的 capability
         let cap_reg = CapabilityRegistry::default();
-        cap_reg.register(make_mock_cap("custom_cap_123"));
+        cap_reg.register(make_mock_cap("custom_cap_123")).unwrap();
 
         let chord_reg = ChordRegistry::default();
 
@@ -1250,12 +1267,13 @@ mod tests {
     }
 
     #[test]
-    fn capability_only_item_splits_title_and_description() {        // 0.21.10：无 descriptor/chord 覆盖的 capability 目录项，
+    fn capability_only_item_splits_title_and_description() {
+        // 0.21.10：无 descriptor/chord 覆盖的 capability 目录项，
         // title = 短名表用户可读标题，schema 长句进 description——
         // 不再出现"超长标题 + 空描述"的行；未收录 id 回退人类化。
         // search_files 经 inventory 自动注册（真实 capability），无需手动注册
         let cap_reg = CapabilityRegistry::default();
-        cap_reg.register(make_mock_cap("custom_cap_123"));
+        cap_reg.register(make_mock_cap("custom_cap_123")).unwrap();
 
         let chord_reg = ChordRegistry::default();
 
@@ -1312,10 +1330,15 @@ mod tests {
         // 0.21.10：组内排序 Chord > 插件 > 普通 → title——
         // Chord 项（title "Z 开头"）应排在同组普通项（title "Aa cap"）之前
         let mut chord_reg = ChordRegistry::new();
-        chord_reg.register(make_capability_chord("zz_chord", 'z', "zz_sort_cap", "Z 开头"));
+        chord_reg.register(make_capability_chord(
+            "zz_chord",
+            'z',
+            "zz_sort_cap",
+            "Z 开头",
+        ));
 
         let cap_reg = CapabilityRegistry::default();
-        cap_reg.register(make_mock_cap("aa_sort_cap"));
+        cap_reg.register(make_mock_cap("aa_sort_cap")).unwrap();
 
         let items = FeatureCatalogAggregator::aggregate(
             &[],
@@ -1463,7 +1486,8 @@ mod tests {
             {
                 assert!(
                     sk.trigger_label.starts_with("Keywords:")
-                        || sk.trigger_label
+                        || sk
+                            .trigger_label
                             .chars()
                             .all(|c| c.is_ascii_lowercase() || c == '_'),
                     "英文 trigger_label 应为 'Keywords:' 前缀或裸 trigger key: {}",
@@ -1566,7 +1590,11 @@ mod tests {
             .iter()
             .find(|b| b.kind == BindingKind::SearchKeyword)
             .expect("应有 SearchKeyword binding");
-        assert!(sk.trigger_label.starts_with("关键词："), "{}", sk.trigger_label);
+        assert!(
+            sk.trigger_label.starts_with("关键词："),
+            "{}",
+            sk.trigger_label
+        );
     }
 
     #[test]
@@ -1633,18 +1661,20 @@ mod tests {
     fn aggregate_capability_projection_fields() {
         // 注册一个有完整 policy 的 capability
         let cap_reg = CapabilityRegistry::default();
-        cap_reg.register(make_mock_cap_with_policy(
-            "proj_test_cap",
-            CapabilityPolicy {
-                allowed_origins: OriginSet::ALL_LOCAL | OriginSet::CLI,
-                runtime_requirement: RuntimeRequirement::GUI_SURFACE,
-                danger: DangerClass::Dangerous,
-                sensitive: true,
-                ai_default: AiDefault::On,
-                mcp_default: McpDefault::Forbidden,
-                confirmation: ConfirmationPolicy::dangerous(false),
-            },
-        ));
+        cap_reg
+            .register(make_mock_cap_with_policy(
+                "proj_test_cap",
+                CapabilityPolicy {
+                    allowed_origins: OriginSet::ALL_LOCAL | OriginSet::CLI,
+                    runtime_requirement: RuntimeRequirement::GUI_SURFACE,
+                    danger: DangerClass::Dangerous,
+                    sensitive: true,
+                    ai_default: AiDefault::On,
+                    mcp_default: McpDefault::Forbidden,
+                    confirmation: ConfirmationPolicy::dangerous(false),
+                },
+            ))
+            .unwrap();
 
         let chord_reg = ChordRegistry::default();
 
@@ -1684,10 +1714,9 @@ mod tests {
     #[test]
     fn aggregate_no_duplicate_feature_for_same_capability() {
         // 同一个 capability_id 不应在 descriptor 和 chord 之外再独立成项
+        // 0.21.13：default() 从 inventory 收集，open_settings 已自动注册。
+        // 不再手动 register 同 id mock（register 现在对重复 id 返回 Err）。
         let cap_reg = CapabilityRegistry::default();
-        // 注册一个与 builtin descriptor 同 id 的 capability
-        // 这里用 "open_settings"（它通常在 descriptor 中存在）
-        cap_reg.register(make_mock_cap("open_settings"));
 
         let chord_reg = ChordRegistry::default();
 

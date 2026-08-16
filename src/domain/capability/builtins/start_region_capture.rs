@@ -18,9 +18,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 pub struct StartRegionCapture;
@@ -43,7 +42,8 @@ impl Capability for StartRegionCapture {
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
             allowed_origins: OriginSet::ALL_LOCAL,
-            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION | RuntimeRequirement::GUI_SURFACE,
+            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION
+                | RuntimeRequirement::GUI_SURFACE,
             danger: DangerClass::Safe,
             sensitive: false,
             ai_default: AiDefault::On,
@@ -57,10 +57,13 @@ impl Capability for StartRegionCapture {
         _args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
 
         // 检查 DESKTOP_SESSION
         let req = RuntimeRequirement::DESKTOP_SESSION | RuntimeRequirement::GUI_SURFACE;
@@ -71,9 +74,12 @@ impl Capability for StartRegionCapture {
             });
         }
 
-        surface.start_region_capture().await.map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+        surface
+            .start_region_capture()
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
 
         Ok(CapabilityResult::Done {
             summary: "已启动截图选区，等待用户拖选".into(),

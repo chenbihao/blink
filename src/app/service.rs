@@ -184,7 +184,7 @@ impl Service for HotkeyService {
                             // 窗口尚未显示完成时被处理。
                             let app_clone = app.clone();
                             tauri::async_runtime::spawn_blocking(move || {
-                                crate::infra::platform::window::invoke(&app_clone);
+                                crate::app::window_orchestrator::invoke(&app_clone);
                             })
                             .await
                             .ok();
@@ -254,7 +254,8 @@ impl Service for HotkeyService {
                             .inner()
                             .clone();
                         let cap_registry = app
-                            .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
+                            .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>(
+                            )
                             .inner()
                             .clone();
                         if let Err(e) = registry

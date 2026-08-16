@@ -8,9 +8,9 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement, EditorSourceRef,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, EditorSourceRef, InvokeContext, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 pub struct EditClipboardImage;
@@ -47,10 +47,13 @@ impl Capability for EditClipboardImage {
         _args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
 
         // 读取当前剪贴板内容
         let content = crate::domain::clipboard::read_current()

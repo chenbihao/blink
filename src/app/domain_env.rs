@@ -13,19 +13,21 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::ai::chat_service::ChatService;
+use crate::domain::capability::policy::{
+    ContentEditorRequest, EditorSourceRef, SurfaceError, SurfacePort,
+};
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
-use crate::domain::capability::policy::{EditorSourceRef, SurfaceError, SurfacePort, ContentEditorRequest};
-use crate::domain::event::{CapabilityEnv, DomainEnv};
+use crate::domain::event::{CapabilityEnv, EventPort};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
-use crate::domain::sticky::{StickyChangeSource, StickyCloseOutcome, StickyService, StickyWorkflowError};
+use crate::domain::sticky::{
+    StickyChangeSource, StickyCloseOutcome, StickyService, StickyWorkflowError,
+};
 use crate::infra::data::pools::DbPools;
-use crate::infra::platform::screenshot::ScreenCaptureMeta;
-
-/// Tauri 运行时实现的 DomainEnv。
+/// Tauri 运行时环境实现（0.21.14 最小 port 拆分）。
 ///
-/// 内部持有 `AppHandle` + `DbPools` + 各 service 的 `OnceLock`。
-/// 旧 ActionRegistry 刻意不暴露在 DomainEnv 上，避免 AI Capability 反向进入本地执行域。0.21.7 后 ActionRegistry 已删除，此约束由 CapabilityRegistry 唯一入口保证。
+/// 同时实现 `EventPort`、`CapabilityEnv` 和 `SurfacePort`，但消费者只注入
+/// 自身需要的最小 trait。内部持有 `AppHandle` + `DbPools` + 各 service 的 `OnceLock`。
 pub struct TauriDomainEnv {
     app: AppHandle,
     db_pools: DbPools,
@@ -370,8 +372,7 @@ impl CapabilityEnv for TauriDomainEnv {
             ),
         };
 
-        let hide_result =
-            crate::infra::platform::window::hide_sticky_window(&self.app, sticky_id);
+        let hide_result = crate::infra::platform::window::hide_sticky_window(&self.app, sticky_id);
         let emit_result = self
             .app
             .emit(event_name, payload)
@@ -413,20 +414,37 @@ impl CapabilityEnv for TauriDomainEnv {
             crate::infra::platform::window::get_primary_monitor_center(width, height);
         let position = (x.unwrap_or(center_x), y.unwrap_or(center_y));
         // show_translating 固定 false——仅截图翻译 UI 状态机需要该状态。
- crate::infra::platform::window::show_pin_window(
-&self.app,
- crate::infra::platform::window::PinImage::Png(std::sync::Arc::new(png_bytes)),
-position.0, position.1, false,
-)?;
+        crate::infra::platform::window::show_pin_window(
+            &self.app,
+            crate::infra::platform::window::PinImage::Png(std::sync::Arc::new(png_bytes)),
+            position.0,
+            position.1,
+            false,
+        )?;
         Ok(position)
+    }
+}
+
+// ── EventPort 实现（0.21.14）─────────────────────────────────────────────
+//
+// 领域事件发射 port——替代旧 DomainEnv 的 emit/emit_to 方法。
+
+impl EventPort for TauriDomainEnv {
+    fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
+        self.app.emit(event, payload).map_err(|e| e.to_string())
+    }
+
+    fn emit_to(&self, target: &str, event: &str, payload: serde_json::Value) -> Result<(), String> {
+        self.app
+            .emit_to(target, event, payload)
+            .map_err(|e| e.to_string())
     }
 }
 
 // ── SurfacePort 实现（0.21.1）─────────────────────────────────────────────
 //
 // TauriDomainEnv 实现 SurfacePort trait，供 GUI starter Capability 通过
-// InvokeContext.runtime.surface 调用。这是从 DomainEnv 到 SurfacePort 的
-// 桥接——Capability 不直接接触 DomainEnv 的窗口方法，只通过最小化端口访问。
+// InvokeContext.runtime.surface 调用。Capability 不直接接触窗口方法，只通过最小化端口访问。
 
 #[async_trait::async_trait]
 impl SurfacePort for TauriDomainEnv {
@@ -448,7 +466,7 @@ impl SurfacePort for TauriDomainEnv {
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
         // 0.21.2：Chord clipboard_history binding 的 GUI starter target。
         // 旧 ClipboardHistoryAction 的行为：主窗 show + emit CHORD_ENTER_MODE
-        crate::infra::platform::window::invoke(&self.app);
+        crate::app::window_orchestrator::invoke(&self.app);
         let _ = self.app.emit(
             crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
             serde_json::json!({ "mode": "clipboard" }),
@@ -469,11 +487,15 @@ impl SurfacePort for TauriDomainEnv {
             crate::infra::platform::window::wait_frame_after_hide(&app);
         })
         .await
-        .map_err(|e| SurfaceError::CreateFailed { detail: format!("等待 DWM 合成失败: {e}") })?;
+        .map_err(|e| SurfaceError::CreateFailed {
+            detail: format!("等待 DWM 合成失败: {e}"),
+        })?;
 
         let meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
             .await
-            .map_err(|e| SurfaceError::CreateFailed { detail: format!("截屏任务崩溃: {e}") })?
+            .map_err(|e| SurfaceError::CreateFailed {
+                detail: format!("截屏任务崩溃: {e}"),
+            })?
             .map_err(|e| {
                 // 截屏失败也要撤销 cloak
                 crate::infra::platform::window::unhide_after_screenshot(&self.app);
@@ -481,11 +503,10 @@ impl SurfacePort for TauriDomainEnv {
             })?;
 
         crate::infra::platform::window::unhide_after_screenshot(&self.app);
-        crate::infra::platform::window::show_screenshot_overlay(&self.app, meta)
-            .map_err(|e| {
-                crate::infra::platform::screenshot::end_session();
-                SurfaceError::CreateFailed { detail: e }
-            })?;
+        crate::infra::platform::window::show_screenshot_overlay(&self.app, meta).map_err(|e| {
+            crate::infra::platform::screenshot::end_session();
+            SurfaceError::CreateFailed { detail: e }
+        })?;
         Ok(())
     }
 
@@ -494,11 +515,15 @@ impl SurfacePort for TauriDomainEnv {
             EditorSourceRef::ClipboardImage(png_data) => {
                 let meta = crate::infra::platform::image_editor::begin_session(png_data)
                     .map_err(|e| SurfaceError::CreateFailed { detail: e })?;
-                crate::infra::platform::window::show_image_editor_window(&self.app, meta, "clipboard")
-                    .map_err(|e| {
-                        crate::infra::platform::image_editor::end_session();
-                        SurfaceError::CreateFailed { detail: e }
-                    })
+                crate::infra::platform::window::show_image_editor_window(
+                    &self.app,
+                    meta,
+                    "clipboard",
+                )
+                .map_err(|e| {
+                    crate::infra::platform::image_editor::end_session();
+                    SurfaceError::CreateFailed { detail: e }
+                })
             }
             EditorSourceRef::StashRef(_) => Err(SurfaceError::Unavailable {
                 detail: "StashRef 来源的图片编辑器尚未接入".into(),
@@ -519,12 +544,9 @@ impl SurfacePort for TauriDomainEnv {
         let pending = self
             .app
             .state::<crate::app::commands::PendingEditorPayload>();
-        *pending
-            .0
-            .lock()
-            .map_err(|e| SurfaceError::CreateFailed {
-                detail: format!("锁失败: {e}"),
-            })? = Some(payload);
+        *pending.0.lock().map_err(|e| SurfaceError::CreateFailed {
+            detail: format!("锁失败: {e}"),
+        })? = Some(payload);
         crate::infra::platform::window::show_content_editor_window(&self.app)
             .map_err(|e| SurfaceError::CreateFailed { detail: e })
     }
@@ -535,117 +557,6 @@ impl SurfacePort for TauriDomainEnv {
 
     fn exit_app(&self) {
         self.app.exit(0);
-    }
-}
-
-#[async_trait::async_trait]
-impl DomainEnv for TauriDomainEnv {
-    fn capability_env(&self) -> &dyn CapabilityEnv {
-        self
-    }
-
-    // ── 事件发射 ──────────────────────────────────────────────────────────
-
-    fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
-        self.app.emit(event, payload).map_err(|e| e.to_string())
-    }
-
-    fn emit_to(&self, target: &str, event: &str, payload: serde_json::Value) -> Result<(), String> {
-        self.app
-            .emit_to(target, event, payload)
-            .map_err(|e| e.to_string())
-    }
-
-    // ── 状态访问 ──────────────────────────────────────────────────────────
-
-    fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>> {
-        self.cap_registry.get()
-    }
-
-    fn chat_service(&self) -> Option<&Arc<ChatService>> {
-        self.chat_service.get()
-    }
-
-    // ── 窗口操作 ──────────────────────────────────────────────────────────
-
-    fn show_chat_window(&self, initial_text: Option<&str>) -> Result<(), String> {
-        crate::infra::platform::window::show_chat_window(&self.app, initial_text)
-    }
-
-    fn hide_main_window(&self, reason: &str) {
-        crate::infra::platform::window::hide(&self.app, reason);
-    }
-
-    fn hide_for_screenshot(&self) {
-        crate::infra::platform::window::hide_for_screenshot(&self.app);
-    }
-
-    fn unhide_after_screenshot(&self) {
-        crate::infra::platform::window::unhide_after_screenshot(&self.app);
-    }
-
-    fn show_screenshot_overlay(&self, meta: &ScreenCaptureMeta) -> Result<(), String> {
-        crate::infra::platform::window::show_screenshot_overlay(&self.app, meta.clone())
-    }
-
-    fn show_image_editor(&self, png_data: Vec<u8>) -> Result<(), String> {
-        let meta = crate::infra::platform::image_editor::begin_session(png_data)?;
-        if let Err(error) =
-            crate::infra::platform::window::show_image_editor_window(&self.app, meta, "clipboard")
-        {
-            crate::infra::platform::image_editor::end_session();
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn invoke_main_window(&self) {
-        crate::infra::platform::window::invoke(&self.app);
-    }
-
-    fn open_settings(&self) {
-        crate::infra::platform::window::open_settings(&self.app);
-    }
-
-    fn show_sticky_manager(&self) -> Result<(), String> {
-        crate::infra::platform::window::show_sticky_manager_window(&self.app)
-    }
-
-    fn show_content_editor(
-        &self,
-        body: &str,
-        title: Option<&str>,
-        origin: &str,
-        origin_ref: Option<&str>,
-        save_policy: &str,
-    ) -> Result<(), String> {
-        use tauri::Manager;
-        let payload = crate::app::commands::EditableContentPayload {
-            body: body.to_string(),
-            format: "plain".to_string(),
-            title: title.map(|s| s.to_string()),
-            origin: origin.to_string(),
-            origin_ref: origin_ref.map(|s| s.to_string()),
-            save_policy: save_policy.to_string(),
-        };
-        let pending = self
-            .app
-            .state::<crate::app::commands::PendingEditorPayload>();
-        *pending.0.lock().map_err(|e| format!("锁失败: {e}"))? = Some(payload);
-        crate::infra::platform::window::show_content_editor_window(&self.app)
-    }
-
-    fn exit_app(&self) {
-        self.app.exit(0);
-    }
-
-    async fn wait_frame_after_hide(&self) {
-        let app = self.app.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::infra::platform::window::wait_frame_after_hide(&app);
-        })
-        .await
-        .ok();
     }
 }
 
@@ -771,11 +682,7 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl DomainEnv for FakeDomainEnv {
-        fn capability_env(&self) -> &dyn CapabilityEnv {
-            self
-        }
+    impl EventPort for FakeDomainEnv {
         fn emit(&self, _event: &str, _payload: serde_json::Value) -> Result<(), String> {
             Ok(())
         }
@@ -787,41 +694,6 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
-        fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>> {
-            None // 关键：最小运行时不构造 CapabilityRegistry
-        }
-        fn chat_service(&self) -> Option<&Arc<ChatService>> {
-            None
-        }
-        fn show_chat_window(&self, _initial_text: Option<&str>) -> Result<(), String> {
-            Ok(())
-        }
-        fn hide_main_window(&self, _reason: &str) {}
-        fn hide_for_screenshot(&self) {}
-        fn unhide_after_screenshot(&self) {}
-        fn show_screenshot_overlay(&self, _meta: &ScreenCaptureMeta) -> Result<(), String> {
-            Ok(())
-        }
-        fn show_image_editor(&self, _png_data: Vec<u8>) -> Result<(), String> {
-            Ok(())
-        }
-        fn invoke_main_window(&self) {}
-        fn open_settings(&self) {}
-        fn show_sticky_manager(&self) -> Result<(), String> {
-            Ok(())
-        }
-        fn show_content_editor(
-            &self,
-            _body: &str,
-            _title: Option<&str>,
-            _origin: &str,
-            _origin_ref: Option<&str>,
-            _save_policy: &str,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-        fn exit_app(&self) {}
-        async fn wait_frame_after_hide(&self) {}
     }
 
     async fn make_in_memory_pools() -> DbPools {
@@ -843,13 +715,20 @@ mod tests {
     async fn minimal_env_without_cap_registry() {
         let pools = make_in_memory_pools().await;
         let env = FakeDomainEnv { pools };
-        assert!(
-            env.cap_registry().is_none(),
-            "最小运行时 cap_registry 应返回 None"
-        );
         assert!(env.plugin_engine().is_none());
         assert!(env.search_service().is_none());
-        assert!(env.chat_service().is_none());
+    }
+
+    /// 0.21.14：验证最小 port 可作为 trait object 使用——消费者只需 `&dyn EventPort`
+    /// 或 `&dyn CapabilityEnv`，不需知道具体实现类型。
+    #[test]
+    fn port_trait_object_coercion() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pools = rt.block_on(make_in_memory_pools());
+        let env = FakeDomainEnv { pools };
+        let _event_port: &dyn EventPort = &env;
+        let _cap_env: &dyn CapabilityEnv = &env;
+        // 若编译通过，说明 trait object 转换成功
     }
 
     /// 验证 set_* 方法的 OnceLock 语义：首次注入成功，二次注入不覆盖。

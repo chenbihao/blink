@@ -23,7 +23,29 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::domain::config::ContextConfig;
+/// 采集参数（0.21.14）——infra 层不反向依赖 domain::config::ContextConfig。
+///
+/// 由调用方从 `ContextConfig` 构造后传入 `collect()`。
+/// `sensitive_apps` 为小写进程名列表，`collect` 内部做大小写不敏感比较。
+#[derive(Debug, Clone, Default)]
+pub struct CollectParams {
+    /// 总开关。关闭时 collect 返回空快照。
+    pub enabled: bool,
+    /// 剪贴板采集开关。
+    pub clipboard_enabled: bool,
+    /// 敏感应用进程名列表（小写）。
+    pub sensitive_apps: Vec<String>,
+}
+
+impl CollectParams {
+    /// 判断进程名是否在敏感应用黑名单（大小写不敏感）。
+    pub fn is_sensitive(&self, process_name: &str) -> bool {
+        let name = process_name.to_ascii_lowercase();
+        self.sensitive_apps
+            .iter()
+            .any(|s| s.trim().eq_ignore_ascii_case(&name))
+    }
+}
 
 /// 文本类环境项的来源标签（0.8.3 收尾 · 一等公民）。
 ///
@@ -217,7 +239,7 @@ pub struct RunningProcess {
 /// 采集环境快照 —— 按 ContextConfig 过滤（总开关 / 敏感应用 / 剪贴板）。
 ///
 /// Windows 实现见 `windows.rs`。
-pub fn collect(cfg: &ContextConfig) -> AwarenessSnapshot {
+pub fn collect(cfg: &CollectParams) -> AwarenessSnapshot {
     let t0 = std::time::Instant::now();
     // 总开关关闭 → 空快照（完全不采集）
     if !cfg.enabled {

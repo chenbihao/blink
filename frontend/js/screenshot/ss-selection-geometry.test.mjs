@@ -372,7 +372,7 @@ function testFormatSelectionInfo() {
 function testFormatColor() {
   console.log('\n=== 色值格式化 ===');
   assertTrue(formatColor(255, 0, 128, 0) === '#FF0080', 'HEX 格式');
-  assertTrue(formatColor(255, 0, 128, 1) === 'RGB(255, 0, 128)', 'RGB 格式');
+  assertTrue(formatColor(255, 0, 128, 1) === 'rgb(255, 0, 128)', 'RGB 格式');
 }
 
 function testRgbToHsl() {
@@ -428,7 +428,8 @@ function runAllTests() {
 }
 
 if (typeof process !== 'undefined' && process.versions?.node) {
-  runAllTests();
+  const ok = runAllTests();
+  if (!ok) process.exit(1);
 }
 
 export { runAllTests };

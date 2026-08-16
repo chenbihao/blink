@@ -79,7 +79,10 @@ pub async fn apply_binding_ops(
 
     // 广播配置变更——前端所有按 key 订阅的模块自动刷新
     use tauri::Emitter;
-    let _ = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "source": "feature_catalog" }));
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "source": "feature_catalog" }),
+    );
 
     Ok(results)
 }
@@ -111,8 +114,7 @@ pub async fn get_catalog_mcp_summary(
         .filter(|(_, cap)| {
             use crate::domain::capability::policy::{DangerClass, McpDefault};
             let policy = cap.policy();
-            policy.danger != DangerClass::Dangerous
-                && policy.mcp_default != McpDefault::Forbidden
+            policy.danger != DangerClass::Dangerous && policy.mcp_default != McpDefault::Forbidden
         })
         .count();
 

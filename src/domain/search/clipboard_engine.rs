@@ -28,10 +28,10 @@ use std::sync::{Arc, RwLock};
 use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
-use crate::infra::data::clipboard::{
-    ClipboardMeta, query_recent_meta, query_recent_days_meta,
+use crate::infra::data::clipboard::{ClipboardMeta, query_recent_days_meta, query_recent_meta};
+use crate::infra::data::clipboard_images::{
+    ClipboardImageListItem, query_recent_image_list, search_image_list,
 };
-use crate::infra::data::clipboard_images::{ClipboardImageListItem, query_recent_image_list, search_image_list};
 
 /// Engine id — 对应 `SearchEngine::id()` 与 `Route::EngineTakeover.engine_id`。
 pub const ENGINE_ID: &str = "clipboard";

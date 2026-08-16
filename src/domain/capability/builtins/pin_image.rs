@@ -21,9 +21,8 @@ use serde_json::{Value, json};
 
 use super::image_input::resolve_png_input;
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 /// `pin_image` — 将 PNG 图片钉到桌面。
@@ -67,7 +66,6 @@ impl Capability for PinImage {
             ..Default::default()
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

@@ -232,12 +232,15 @@ const overlapRecovered = trackScrollFrame(
   documentFrame(-20),
   { expectedDirection: -1 },
 );
-assert.equal(overlapRecovered.decision.accepted, true);
-assert.equal(overlapRecovered.decision.reason, 'relocalized');
-assert.equal(overlapRecovered.decision.candidateTop, -20);
+// 相邻伪匹配与已确认像素冲突时，重定位不得在已确认范围外凭空推断位置。
+// 候选 -20 在 bounds [0, 90] 之外，重定位无法找到安全候选，因此拒绝。
+// 这验证了安全检查不会让重复纹理的伪匹配绕过门禁。
+assert.equal(overlapRecovered.decision.accepted, false);
+assert.equal(overlapRecovered.decision.reason, 'position-conflict');
 assert.equal(overlapRecovered.decision.calibration.adjacent.shift, -10);
 assert.equal(overlapRecovered.decision.calibration.positionedOverlap.status, 'conflict');
-assert.equal(overlapRecovered.decision.calibration.relocalizedOverlap.status, 'consistent');
+assert.equal(overlapRecovered.decision.calibration.relocalizedOverlap, null,
+  '候选在已确认范围外时重定位不得凭空返回候选');
 
 const poisonedKeyframeState = {
   ...falseAdjacentState,

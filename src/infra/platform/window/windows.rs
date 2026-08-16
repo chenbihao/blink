@@ -75,8 +75,7 @@ static PIN_IMAGE_REGISTRY: OnceLock<Mutex<std::collections::HashMap<u64, PinImag
 
 /// 0.20.4：pin 窗口 label → image seq 映射。
 /// pin 窗口创建/刷新时写入，关闭时清除。
-static PIN_LABEL_TO_SEQ: OnceLock<Mutex<std::collections::HashMap<String, u64>>> =
-    OnceLock::new();
+static PIN_LABEL_TO_SEQ: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
 
 fn pin_label_to_seq() -> &'static Mutex<std::collections::HashMap<String, u64>> {
     PIN_LABEL_TO_SEQ.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -125,7 +124,7 @@ pub fn get_pin_image_by_label(label: &str) -> Option<PinImage> {
     get_pin_image(seq)
 }
 
-use crate::domain::event_names::EventNames;
+use crate::infra::event_names::EventNames;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -444,67 +443,18 @@ fn transition_visibility(visible: bool) {
     crate::infra::platform::hotkey::InputController::update_window(visible, rev);
 }
 
-/// 唤起：采集上下文快照 -> 定位 -> show -> set_focus -> 通知前端。
+/// 主窗口唤起 primitive（0.21.14）：定位 → show → set_focus → emit SHOWN。
 ///
-/// **采集时机很重要**：必须在 show() 之前调用，否则拿到的前台是 Blink 自己。
-pub fn invoke(app: &AppHandle) {
+/// **不含业务编排**：不定位 SearchService / ContextConfig 等领域服务，
+/// 由 app 层 `window_orchestrator::invoke` 负责采集 + 服务更新后调用此 primitive。
+///
+/// 返回 `Ok(())` 表示窗口已成功显示（调用方可继续后续编排），
+/// `Err` 表示窗口获取或 show 失败。
+pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     let t0 = std::time::Instant::now();
 
-    // 1. 先采集上下文快照（show 之前！）
-    //    读内存 ContextConfig（零 IO，热键回调不能 await），按配置过滤采集
-    let context_cfg = app
-        .try_state::<std::sync::Arc<std::sync::RwLock<crate::domain::config::ContextConfig>>>()
-        .map(|c| c.read().unwrap().clone())
-        .unwrap_or_default();
-    let snapshot = crate::infra::platform::context::collect(&context_cfg);
-    if let Some(hwnd) = snapshot
-        .foreground_app
-        .as_ref()
-        .map(|foreground| foreground.hwnd)
-        .filter(|hwnd| *hwnd != 0)
-    {
-        LAST_EXTERNAL_HWND.store(hwnd, Ordering::SeqCst);
-    }
-    tracing::debug!(
-        foreground_app = ?snapshot.foreground_app.as_ref().map(|f| &f.process_name),
-        window_title = ?snapshot.foreground_app.as_ref().map(|f| &f.window_title),
-        "invoke: captured context"
-    );
-
-    // 2. 更新 SearchService 中的快照
-    //
-    // 选区抓取采用「快速捕获 + 慢速异步提取」模式：
-    // - show() 之前：capture_focused_element() 仅做 GetFocusedElement()（O(1)，<5ms）
-    // - show() 之后：spawn 线程做三段式 TextPattern 提取（可能 100-500ms）
-    // 这样窗口显示不被 UIA 阻塞——慢应用上用户不再感到"卡一下才出来"。
-    //
-    // 提取完成后通过 update_selected_text 回填 + emit awareness-updated 触发前端 retrigger。
-    let focused_element = if context_cfg.selection_enabled {
-        let t_capture = std::time::Instant::now();
-        let focused = snapshot
-            .foreground_app
-            .as_ref()
-            .filter(|fg| fg.hwnd != 0)
-            .and_then(|_| crate::infra::platform::selection::capture_focused_element());
-        tracing::debug!(
-            target: "perf",
-            capture_ms = t_capture.elapsed().as_millis(),
-            has_element = focused.is_some(),
-            "[perf] invoke: capture_focused_element (before show)"
-        );
-        focused
-    } else {
-        None
-    };
-
-    if let Some(search_service) =
-        app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
-    {
-        search_service.update_snapshot(snapshot.clone());
-    }
-
     let Some(win) = app.get_webview_window("main") else {
-        return;
+        return Err("main 窗口不存在".into());
     };
 
     let t_show = std::time::Instant::now();
@@ -516,12 +466,12 @@ pub fn invoke(app: &AppHandle) {
     let now = elapsed_ms();
     let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
-    tracing::trace!(grace_ms, "invoke: show + set_focus");
+    tracing::trace!(grace_ms, "show_main_window: show + set_focus");
     // 0.19 修正：show 失败时不能写 Visible——内部状态不能在窗口根本没显示时
     // 被写成 Visible，否则输入状态机误判窗口可见、watchdog 不隐藏。
     if let Err(error) = win.show() {
-        tracing::warn!(%error, "invoke: 主窗口 show 失败，保持 Hidden");
-        return;
+        tracing::warn!(%error, "show_main_window: 主窗口 show 失败，保持 Hidden");
+        return Err(format!("主窗口 show 失败: {error}"));
     }
     // show 成功后建立 Visible（§3.5）：通知输入状态机 window 已可见，
     // native chord session 据此建立。必须在 emit SHOWN 之前。
@@ -529,60 +479,22 @@ pub fn invoke(app: &AppHandle) {
     // set_focus 失败不回滚 Visible——窗口已确实可见，只是焦点没拿到。
     // 记录 warn 便于诊断；前端仍会收到 SHOWN 事件触发输入 focus。
     if let Err(error) = win.set_focus() {
-        tracing::warn!(%error, "invoke: 主窗口显示成功但聚焦失败");
+        tracing::warn!(%error, "show_main_window: 主窗口显示成功但聚焦失败");
     }
     let _ = app.emit(EventNames::SHOWN, ());
     tracing::debug!(
         target: "perf",
         show_ms = t_show.elapsed().as_millis(),
         total_ms = t0.elapsed().as_millis(),
-        "[perf] invoke: show+focus+emit (TOTAL)"
+        "[perf] show_main_window: show+focus+emit (TOTAL)"
     );
+    Ok(())
+}
 
-    // 3. show 之后：异步提取选区（不阻塞窗口显示）
-    //
-    // focused_element 在 show() 之前通过 GetFocusedElement() 捕获，
-    // 此时焦点还在原应用上。show() 之后焦点已移到 Blink，但捕获的 COM 元素
-    // 仍然指向原应用的焦点控件——MTA 公寓下 COM 接口跨线程安全。
-    //
-    // 提取完成后回填 SearchService 快照 + emit awareness-updated 触发前端 retrigger，
-    // 让翻译 Ghost 等依赖选区的建议在选区就绪后自动出现。
-    if let Some(focused) = focused_element {
-        let search_service = app
-            .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
-            .map(|s| s.inner().clone());
-        let app_clone = app.clone();
-        std::thread::spawn(move || {
-            let t_extract = std::time::Instant::now();
-            let grabbed =
-                crate::infra::platform::selection::extract_selection_from_element(&focused)
-                    .or_else(|| {
-                        // UIA 未命中，回退鼠标钩子缓存
-                        let cached = crate::infra::platform::selection::get_last_selection();
-                        if cached.is_some() {
-                            tracing::trace!("invoke: 回退到鼠标钩子选区缓存");
-                        }
-                        cached.map(|(text, _)| text)
-                    });
-            let hit = grabbed.is_some();
-            if let Some(ref text) = grabbed {
-                tracing::debug!(len = text.chars().count(), "invoke: UIA 异步抓取选区成功");
-            }
-            if let Some(ss) = search_service {
-                ss.update_selected_text(grabbed, None);
-                // 通知前端重跑搜索——选区可能刚到，翻译 Ghost 等建议需要更新
-                // 仅在窗口仍可见时 emit（用户可能已 ESC 关闭）
-                if crate::infra::platform::window::is_visible() {
-                    let _ = app_clone.emit(EventNames::AWARENESS_UPDATED, ());
-                }
-            }
-            tracing::debug!(
-                target: "perf",
-                extract_ms = t_extract.elapsed().as_millis(),
-                hit,
-                "[perf] invoke: async UIA extraction (after show)"
-            );
-        });
+/// 0.21.14：记录外部前台窗口 HWND（invoke 编排层在采集后调用）。
+pub fn set_last_external_hwnd(hwnd: isize) {
+    if hwnd != 0 {
+        LAST_EXTERNAL_HWND.store(hwnd, Ordering::SeqCst);
     }
 }
 
@@ -1242,10 +1154,10 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
         win.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                if let Some(cs) = app_clone
-                    .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
-                {
-                    cs.abort_active();
+                // 0.21.14：ChatService abort_active 编排上移到 app 层回调。
+                // infra 层不定位 domain 服务。
+                if let Some(cb) = app_clone.try_state::<ChatCloseCallback>() {
+                    (cb.0)(&app_clone);
                 }
                 if let Some(w) = app_clone.get_webview_window("chat") {
                     let _ = w.hide();
@@ -1272,11 +1184,7 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
     if let (Some(rev), Some(text)) = (prefill_rev, prefill_text) {
         // emit {revision, text} —— 热窗口 listener 立即收到，冷窗口走 take 兜底
         let payload = serde_json::json!({ "revision": rev, "text": text });
-        if let Err(e) = app.emit_to(
-            LABEL,
-            crate::domain::event_names::EventNames::CHAT_PREFILL,
-            payload,
-        ) {
+        if let Err(e) = app.emit_to(LABEL, EventNames::CHAT_PREFILL, payload) {
             tracing::warn!(error = %e, "chat-prefill emit 失败");
         }
     }
@@ -1290,17 +1198,11 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
     Ok(())
 }
 
-/// 隐藏 chat 窗口（Phase 3A）。
+/// 隐藏 chat 窗口 primitive（0.21.14）：只隐藏窗口，不含 ChatService abort 业务编排。
 ///
-/// 先中止 active request，再隐藏窗口。若窗口不存在则 no-op。
-pub fn hide_chat_window(app: &AppHandle) {
-    // 先 abort active request
-    if let Some(cs) =
-        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
-    {
-        cs.abort_active();
-    }
-    // 再隐藏窗口
+/// 业务编排（abort_active）由 app 层 `window_orchestrator::hide_chat_window` 负责。
+/// 若窗口不存在则 no-op。
+pub fn hide_chat_window_primitive(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("chat") {
         let _ = win.hide();
         tracing::debug!("chat window: 已隐藏");
@@ -1480,16 +1382,17 @@ pub fn show_welcome_window(app: &AppHandle) {
         }
     };
 
-    // 关闭时标记 first_run = false（防用户点 X 不点"开始使用"按钮）
+    // 关闭时触发回调（0.21.14：app 层回调负责 first_run=false，infra 不反向依赖 app）
     let app_clone = app.clone();
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { .. } = event {
-            let app = app_clone.clone();
-            tauri::async_runtime::spawn(async move {
-                let pools = app.state::<crate::infra::data::DbPools>();
-                let _ = crate::app::config::update_first_run(&pools.config, false).await;
-                tracing::info!("welcome window: CloseRequested -> first_run = false");
-            });
+            if let Some(cb) = app_clone.try_state::<WelcomeCloseCallback>() {
+                let cb = std::sync::Arc::clone(&cb.0);
+                let app = app_clone.clone();
+                tauri::async_runtime::spawn(async move {
+                    cb(&app);
+                });
+            }
         }
     });
 
@@ -1528,6 +1431,27 @@ pub fn update_sticky_taskbar(app: &AppHandle, sticky_id: &str, always_on_top: bo
 // infra 不得反向依赖 app/domain（spec-architecture §A1）。改为 infra 定义回调槽，
 // app 层启动 wiring 时注入实现。
 
+// ── 0.21.14：窗口事件回调类型 ─────────────────────────────────────────────
+//
+// 与 StickyCloseFallback 同模式：infra 定义回调容器类型，app 层注入闭包实现，
+// infra 层通过 Tauri managed state `try_state` 取出并调用。
+// 这样 infra 不反向依赖 app/domain。
+
+/// chat 窗口关闭回调：`(app) -> ()`，在 CloseRequested 事件中调用。
+pub struct ChatCloseCallback(pub std::sync::Arc<dyn Fn(&AppHandle) + Send + Sync>);
+
+/// welcome 窗口关闭回调：`(app) -> ()`（async spawn 中调用）。
+pub struct WelcomeCloseCallback(pub std::sync::Arc<dyn Fn(&AppHandle) + Send + Sync>);
+
+/// 便签 spare 关闭回调：`(app, sticky_id) -> ()`（async 中调用）。
+pub struct StickySpareCloseCallback(
+    pub  std::sync::Arc<
+        dyn Fn(&AppHandle, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            + Send
+            + Sync,
+    >,
+);
+
 /// 便签窗口 CloseRequested 兜底关闭回调：参数为 (app, sticky_id)。
 /// 实现自行决定异步执行方式；infra 只负责在兜底路径调用。
 pub type StickyCloseFallback = std::sync::Arc<dyn Fn(&AppHandle, &str) + Send + Sync>;
@@ -1541,12 +1465,16 @@ static STICKY_CLOSE_REQUEST_SEQ: AtomicU64 = AtomicU64::new(0);
 /// P0-2：全局 ack channel 注册表。
 /// CloseRequested handler 注册一个 oneshot::Sender，等待前端 sticky_close_ack 命令触发。
 /// 前端 invoke sticky_close_ack 时，通过 request_id 查表发送信号，取消超时降级。
-type AckMap = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>>;
+type AckMap = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
+>;
 static STICKY_CLOSE_ACK_MAP: OnceLock<AckMap> = OnceLock::new();
 
 fn ack_map() -> AckMap {
     STICKY_CLOSE_ACK_MAP
-        .get_or_init(|| std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())))
+        .get_or_init(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+        })
         .clone()
 }
 
@@ -2423,7 +2351,12 @@ pub fn show_image_editor_window(
     let displays_json = build_physical_displays_json();
     let init_js = format!(
         "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: 0, physicalDisplays: {} }}; window.__blinkEditorSource = {{ kind: '{kind}' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height, overlay_dpi, displays_json,
+        meta.virtual_x,
+        meta.virtual_y,
+        meta.width,
+        meta.height,
+        overlay_dpi,
+        displays_json,
         kind = source_kind,
     );
     win.eval(&init_js).map_err(|e| e.to_string())?;
@@ -2654,7 +2587,10 @@ pub fn show_pin_window(
         // 记录最近 pin 的 label
         *last_pin_label().lock().unwrap() = Some(al.clone());
         // 0.20.4：注册 label → seq 映射，供编辑器按 label 查找 pin 图片
-        pin_label_to_seq().lock().unwrap().insert(al.clone(), pin_seq);
+        pin_label_to_seq()
+            .lock()
+            .unwrap()
+            .insert(al.clone(), pin_seq);
 
         tracing::info!(
             png_w,
@@ -2718,7 +2654,10 @@ pub fn show_pin_window(
             // 记录最近 pin 的 label
             *last_pin_label().lock().unwrap() = Some(label.clone());
             // 0.20.4：注册 label → seq 映射
-            pin_label_to_seq().lock().unwrap().insert(label.clone(), pin_seq);
+            pin_label_to_seq()
+                .lock()
+                .unwrap()
+                .insert(label.clone(), pin_seq);
 
             tracing::info!(
                 png_w,
@@ -2813,7 +2752,10 @@ pub fn refresh_pin_image(
     let img_url = format!("http://blink-pin.localhost/{pin_seq}");
 
     // 0.20.4：更新 label → seq 映射（刷新后旧 seq 对应的图片已过时）
-    pin_label_to_seq().lock().unwrap().insert(label.clone(), pin_seq);
+    pin_label_to_seq()
+        .lock()
+        .unwrap()
+        .insert(label.clone(), pin_seq);
 
     // 只换 img.src + 控制指示器，不调 place_at_physical，不调 __blinkResetPin
     let js = format!(
@@ -3127,18 +3069,12 @@ fn create_sticky_spare(app: &AppHandle) {
                             // 等 flush 完成（前端防抖 500ms）
                             tokio::time::sleep(Duration::from_millis(500)).await;
 
-                            // trash 便签
-                            if let Some(svc) = app_c
-                                .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+                            // trash 便签（0.21.14：经 app 层回调，infra 不定位 StickyService）
+                            if let Some(cb) = app_c
+                                .try_state::<StickySpareCloseCallback>()
                             {
-                                if let Err(e) = svc.trash_note(&sid).await {
-                                    tracing::warn!(error = %e, "预热便签关闭时移入回收站失败");
-                                } else {
-                                    let _ = app_c.emit(
-                                        EventNames::STICKY_TRASHED,
-                                        serde_json::json!({ "stickyId": sid }),
-                                    );
-                                }
+                                let cb = std::sync::Arc::clone(&cb.0);
+                                cb(&app_c, &sid).await;
                             }
 
                             // 回收或销毁
@@ -3191,7 +3127,6 @@ pub fn mark_spare_ready(label: &str) {
         tracing::debug!(spare_label = %label, "sticky-spare: 前端已就绪，注册为可用备用窗口");
     }
 }
-
 
 /// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu / voice-overlay /
 /// chord-pin / chat / settings / content-editor / sticky-manager 并立即隐藏。

@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use super::read_sticky::required_id;
 use super::sticky_common::map_sticky_workflow_error;
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,
     RuntimeRequirement,
 };
 
@@ -39,7 +39,6 @@ impl Capability for UpdateSticky {
             sensitive: true,
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

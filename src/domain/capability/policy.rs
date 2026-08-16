@@ -63,6 +63,7 @@ pub enum InvocationOrigin {
 
 impl InvocationOrigin {
     /// 是否属于本地入口（Surface / Command / Ai）。
+    #[allow(dead_code)] // 前瞻性 API：供 origin 分类逻辑消费
     pub fn is_local(self) -> bool {
         matches!(
             self,
@@ -71,11 +72,13 @@ impl InvocationOrigin {
     }
 
     /// 是否属于 AI 入口。
+    #[allow(dead_code)] // 前瞻性 API：供 origin 分类逻辑消费
     pub fn is_ai(self) -> bool {
         self == Self::LocalAi
     }
 
     /// 是否属于外部入口（CLI / MCP）。
+    #[allow(dead_code)] // 前瞻性 API：供 origin 分类逻辑消费
     pub fn is_external(self) -> bool {
         matches!(self, Self::Cli | Self::Mcp)
     }
@@ -102,6 +105,7 @@ impl std::fmt::Display for InvocationOrigin {
 pub struct OriginSet(u8);
 
 impl OriginSet {
+    #[allow(dead_code)] // 前瞻性常量：空集场景
     pub const NONE: Self = Self(0);
     pub const LOCAL_SURFACE: Self = Self(1);
     pub const LOCAL_COMMAND: Self = Self(2);
@@ -110,7 +114,8 @@ impl OriginSet {
     pub const MCP: Self = Self(16);
 
     /// 全部本地入口（Surface + Command + Ai）。
-    pub const ALL_LOCAL: Self = Self(Self::LOCAL_SURFACE.0 | Self::LOCAL_COMMAND.0 | Self::LOCAL_AI.0);
+    pub const ALL_LOCAL: Self =
+        Self(Self::LOCAL_SURFACE.0 | Self::LOCAL_COMMAND.0 | Self::LOCAL_AI.0);
 
     /// 全部来源。
     pub const ALL: Self = Self(Self::ALL_LOCAL.0 | Self::CLI.0 | Self::MCP.0);
@@ -140,6 +145,7 @@ impl OriginSet {
     }
 
     /// 是否为空集。
+    #[allow(dead_code)] // 前瞻性 API：与 NONE 配套
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -230,6 +236,7 @@ impl RuntimeRequirement {
     }
 
     /// 是否无任何运行时要求。
+    #[allow(dead_code)] // 前瞻性 API：供 InvokeContext::runtime_satisfies 链路消费
     pub fn is_none(self) -> bool {
         self.0 == 0
     }
@@ -333,6 +340,7 @@ pub enum SurfaceError {
 
 /// 图片编辑器来源引用——避免传递大 Blob。
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // StashRef 待 0.19.4 ImageStash 引用闭环完整落地后消费
 pub enum EditorSourceRef {
     /// 剪贴板图片字节。
     ClipboardImage(Vec<u8>),
@@ -822,14 +830,8 @@ mod tests {
 
     #[test]
     fn ai_default_serializes() {
-        assert_eq!(
-            serde_json::to_string(&AiDefault::On).unwrap(),
-            "\"on\""
-        );
-        assert_eq!(
-            serde_json::to_string(&AiDefault::Off).unwrap(),
-            "\"off\""
-        );
+        assert_eq!(serde_json::to_string(&AiDefault::On).unwrap(), "\"on\"");
+        assert_eq!(serde_json::to_string(&AiDefault::Off).unwrap(), "\"off\"");
     }
 
     #[test]

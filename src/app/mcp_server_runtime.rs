@@ -45,7 +45,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::capability::CapabilityRegistry;
-use crate::domain::event::DomainEnv;
+use crate::domain::event::{CapabilityEnv, EventPort};
 use crate::domain::mcp::server::{BlinkMcpServer, SharedExposure};
 use crate::domain::mcp::server_config::{DEFAULT_MCP_SERVER_PORT, McpServerModeConfig};
 
@@ -127,7 +127,9 @@ pub struct McpServerRuntime {
     /// CapabilityRegistry——构造 BlinkMcpServer 用。
     cap_registry: Arc<CapabilityRegistry>,
     /// 领域环境——构造 BlinkMcpServer 用。
-    env: Arc<dyn DomainEnv>,
+    cap_env: Arc<dyn CapabilityEnv>,
+    /// 事件发射 port——构造 BlinkMcpServer 用。
+    event_port: Arc<dyn EventPort>,
     /// AI 库连接池——审计日志写入。
     ai_pool: sqlx::SqlitePool,
     /// 内部可变状态（串行化所有操作）。
@@ -140,13 +142,15 @@ impl McpServerRuntime {
     /// 构造后需调用 `apply_config()` 才会按配置启动 listener。
     pub fn new(
         cap_registry: Arc<CapabilityRegistry>,
-        env: Arc<dyn DomainEnv>,
+        cap_env: Arc<dyn CapabilityEnv>,
+        event_port: Arc<dyn EventPort>,
         ai_pool: sqlx::SqlitePool,
     ) -> Self {
         Self {
             exposure: Arc::new(SharedExposure::new()),
             cap_registry,
-            env,
+            cap_env,
+            event_port,
             ai_pool,
             inner: Mutex::new(RuntimeInner::default()),
         }
@@ -320,7 +324,8 @@ impl McpServerRuntime {
 
         // 3. 构造 StreamableHttpService
         let cap_registry = self.cap_registry.clone();
-        let env = self.env.clone();
+        let cap_env = self.cap_env.clone();
+        let event_port = self.event_port.clone();
         let ai_pool = self.ai_pool.clone();
         let exposure = self.exposure.clone();
 
@@ -328,7 +333,8 @@ impl McpServerRuntime {
         let service_factory = move || {
             let server = BlinkMcpServer::new(
                 cap_registry.clone(),
-                env.clone(),
+                cap_env.clone(),
+                event_port.clone(),
                 ai_pool.clone(),
                 exposure.clone(),
             );
@@ -660,20 +666,23 @@ mod tests {
             ) -> Result<i64, crate::domain::sticky::StickyWorkflowError> {
                 unimplemented!("not needed for runtime tests")
             }
-async fn trash_sticky_and_notify(
-&self,
-_sticky_id: &str,
-) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
-unimplemented!("not needed for runtime tests")
-}
-async fn close_sticky_and_notify(
-&self,
-_sticky_id: &str,
-_final_content: &str,
-_expected_updated_at: Option<i64>,
-) -> Result<crate::domain::sticky::StickyCloseOutcome, crate::domain::sticky::StickyWorkflowError> {
-unimplemented!("not needed for runtime tests")
-}
+            async fn trash_sticky_and_notify(
+                &self,
+                _sticky_id: &str,
+            ) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
+                unimplemented!("not needed for runtime tests")
+            }
+            async fn close_sticky_and_notify(
+                &self,
+                _sticky_id: &str,
+                _final_content: &str,
+                _expected_updated_at: Option<i64>,
+            ) -> Result<
+                crate::domain::sticky::StickyCloseOutcome,
+                crate::domain::sticky::StickyWorkflowError,
+            > {
+                unimplemented!("not needed for runtime tests")
+            }
             fn image_stash(&self) -> Option<&Arc<crate::domain::capability::ImageStash>> {
                 None
             }
@@ -686,11 +695,7 @@ unimplemented!("not needed for runtime tests")
                 Err("not implemented".into())
             }
         }
-        #[async_trait::async_trait]
-        impl DomainEnv for FakeEnv {
-            fn capability_env(&self) -> &dyn CapabilityEnv {
-                self
-            }
+        impl EventPort for FakeEnv {
             fn emit(&self, _event: &str, _payload: serde_json::Value) -> Result<(), String> {
                 Ok(())
             }
@@ -702,47 +707,10 @@ unimplemented!("not needed for runtime tests")
             ) -> Result<(), String> {
                 Ok(())
             }
-            fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>> {
-                None
-            }
-            fn chat_service(&self) -> Option<&Arc<crate::domain::ai::chat_service::ChatService>> {
-                None
-            }
-            fn show_chat_window(&self, _initial_text: Option<&str>) -> Result<(), String> {
-                Ok(())
-            }
-            fn hide_main_window(&self, _reason: &str) {}
-            fn hide_for_screenshot(&self) {}
-            fn unhide_after_screenshot(&self) {}
-            fn show_screenshot_overlay(
-                &self,
-                _meta: &crate::infra::platform::screenshot::ScreenCaptureMeta,
-            ) -> Result<(), String> {
-                Ok(())
-            }
-            fn show_image_editor(&self, _png_data: Vec<u8>) -> Result<(), String> {
-                Ok(())
-            }
-            fn invoke_main_window(&self) {}
-            fn open_settings(&self) {}
-            fn show_sticky_manager(&self) -> Result<(), String> {
-                Ok(())
-            }
-            fn show_content_editor(
-                &self,
-                _body: &str,
-                _title: Option<&str>,
-                _origin: &str,
-                _origin_ref: Option<&str>,
-                _save_policy: &str,
-            ) -> Result<(), String> {
-                Ok(())
-            }
-            fn exit_app(&self) {}
-            async fn wait_frame_after_hide(&self) {}
         }
 
-        let env: Arc<dyn DomainEnv> = Arc::new(FakeEnv);
-        McpServerRuntime::new(cap_registry, env, pool)
+        let cap_env: Arc<dyn CapabilityEnv> = Arc::new(FakeEnv);
+        let event_port: Arc<dyn EventPort> = Arc::new(FakeEnv);
+        McpServerRuntime::new(cap_registry, cap_env, event_port, pool)
     }
 }

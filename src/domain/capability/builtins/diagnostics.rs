@@ -11,9 +11,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 // ── BlinkPrintDebugInfo ─────────────────────────────────────────────────────
@@ -42,7 +41,7 @@ impl Capability for BlinkPrintDebugInfo {
             runtime_requirement: RuntimeRequirement::MAIN_PROCESS,
             danger: DangerClass::Safe,
             sensitive: true,
-            ai_default: AiDefault::Off, // 诊断类默认关闭
+            ai_default: AiDefault::Off,          // 诊断类默认关闭
             mcp_default: McpDefault::DefaultOff, // 默认关，可显式开
             confirmation: ConfirmationPolicy::sensitive(),
         }
@@ -197,8 +196,16 @@ fn format_diagnostic_info(
     lines.push("--- Voice / Recorder ---".to_string());
     lines.push(format!(
         "Voice: {}, Recorder: {}",
-        if snapshot.state.voice_idle { "Idle" } else { "Active" },
-        if snapshot.state.recorder_idle { "Idle" } else { "Active" },
+        if snapshot.state.voice_idle {
+            "Idle"
+        } else {
+            "Active"
+        },
+        if snapshot.state.recorder_idle {
+            "Idle"
+        } else {
+            "Active"
+        },
     ));
     lines.push(String::new());
 

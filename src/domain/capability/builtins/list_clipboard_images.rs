@@ -19,8 +19,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,
     RuntimeRequirement,
 };
 use crate::infra::data::clipboard_images;
@@ -55,7 +55,6 @@ impl Capability for ListClipboardImages {
             sensitive: true, // 读剪贴板图片历史属隐私敏感数据
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

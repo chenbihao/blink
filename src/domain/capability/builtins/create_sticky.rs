@@ -19,9 +19,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 /// `create_sticky` — 创建便签并显示桌面窗口。
@@ -69,7 +68,6 @@ impl Capability for CreateSticky {
             sensitive: true, // 写便签内容属隐私
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

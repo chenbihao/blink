@@ -251,7 +251,8 @@ pub fn write_png_to_clipboard(
             // RGBA → BGRA：u32 mask swap（比 chunks_exact_mut(4).swap(0,2) 快 5-14x）
             crate::infra::platform::screenshot::swap_rgba_bgra_in_place(&mut buf);
             tracing::info!(
-                w, h,
+                w,
+                h,
                 png_bytes = png_data.len(),
                 "write_png_to_clipboard: RGBA→BGRA→CF_DIB"
             );

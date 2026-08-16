@@ -12,9 +12,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 /// `open_url` — 用默认浏览器打开 URL。
@@ -46,7 +45,6 @@ impl Capability for OpenUrl {
             ..Default::default()
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

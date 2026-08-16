@@ -70,7 +70,7 @@ impl SearchEngine for ColorEngine {
             source: "color".into(),
             score_detail: Some("color=1.0".into()),
             context_aware: false,
-        color_list_hex: None,
+            color_list_hex: None,
         }]
     }
 }
@@ -78,10 +78,13 @@ impl SearchEngine for ColorEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::infra::platform::context::ContextSnapshot;
+    use std::collections::HashMap;
 
-    fn make_ctx<'a>(history: &'a HashMap<String, (i64, i64)>, snapshot: &'a ContextSnapshot) -> QueryContext<'a> {
+    fn make_ctx<'a>(
+        history: &'a HashMap<String, (i64, i64)>,
+        snapshot: &'a ContextSnapshot,
+    ) -> QueryContext<'a> {
         QueryContext {
             history,
             snapshot,

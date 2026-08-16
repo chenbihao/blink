@@ -192,8 +192,8 @@ pub use scorer::{
 mod builtin_engine;
 pub mod calc;
 mod calc_engine;
-mod color_engine;
 pub(crate) mod clipboard_engine;
+mod color_engine;
 pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
@@ -202,7 +202,13 @@ use builtin_engine::BuiltinEngine;
 use color_engine::ColorEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
 // list_builtin_context_bindings 由 commands::list_context_bindings 合并 builtin 一路用（0.11.8）。
-pub use builtin_engine::{BuiltinActionInfo, list_builtin_actions, list_builtin_context_bindings};
+// 0.21.13: BuiltinResultAction + find_result_action + find_capability_id 供 command 层
+// 显式结果动作与 descriptor → capability target 查找。
+#[allow(unused_imports)]
+pub use builtin_engine::{
+    BuiltinActionInfo, BuiltinResultAction, find_capability_id, find_result_action,
+    find_result_action_by_capability_id, list_builtin_actions, list_builtin_context_bindings,
+};
 use calc_engine::CalcEngine;
 use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;

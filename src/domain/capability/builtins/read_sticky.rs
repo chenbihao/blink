@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use super::sticky_common::map_sticky_error;
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,
     RuntimeRequirement,
 };
 
@@ -33,7 +33,6 @@ impl Capability for ReadSticky {
             sensitive: true,
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

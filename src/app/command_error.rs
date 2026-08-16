@@ -186,9 +186,11 @@ impl From<crate::domain::sticky::StickyWorkflowError> for CommandError {
     fn from(e: crate::domain::sticky::StickyWorkflowError) -> Self {
         match e {
             crate::domain::sticky::StickyWorkflowError::Sticky(err) => err.into(),
-            crate::domain::sticky::StickyWorkflowError::SideEffect { detail } => {
-                Self::new("internal_error", format!("便签界面同步失败: {detail}"), false)
-            }
+            crate::domain::sticky::StickyWorkflowError::SideEffect { detail } => Self::new(
+                "internal_error",
+                format!("便签界面同步失败: {detail}"),
+                false,
+            ),
         }
     }
 }

@@ -8,9 +8,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 pub struct StickyManager;
@@ -47,15 +46,22 @@ impl Capability for StickyManager {
         _args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
         surface.hide_main_window("sticky_manager");
-        surface.open_sticky_manager().map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
-        Ok(CapabilityResult::Done { summary: "已打开便签管理".into() })
+        surface
+            .open_sticky_manager()
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
+        Ok(CapabilityResult::Done {
+            summary: "已打开便签管理".into(),
+        })
     }
 }
 

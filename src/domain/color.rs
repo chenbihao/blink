@@ -393,10 +393,7 @@ fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
 /// alpha < 255 时输出 8 位，否则 6 位。
 pub fn to_hex(rgba: Rgba8) -> String {
     if rgba.a < 255 {
-        format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            rgba.r, rgba.g, rgba.b, rgba.a
-        )
+        format!("#{:02X}{:02X}{:02X}{:02X}", rgba.r, rgba.g, rgba.b, rgba.a)
     } else {
         format!("#{:02X}{:02X}{:02X}", rgba.r, rgba.g, rgba.b)
     }
@@ -754,7 +751,8 @@ mod tests {
     #[test]
     fn parse_color_list_too_many_none() {
         // 超过 8 行 → None
-        let input = "#000000\n#111111\n#222222\n#333333\n#444444\n#555555\n#666666\n#777777\n#888888";
+        let input =
+            "#000000\n#111111\n#222222\n#333333\n#444444\n#555555\n#666666\n#777777\n#888888";
         assert!(parse_color_list(input).is_none());
     }
 
@@ -832,39 +830,75 @@ mod tests {
         for case in &fixture.cases {
             if case.rgba.is_none() {
                 // 非法输入：Rust 应返回 None
-                assert!(parse(&case.input).is_none(),
-                    "非法输入 \"{}\" 应返回 None，但 parse() 返回了 Some", case.input);
+                assert!(
+                    parse(&case.input).is_none(),
+                    "非法输入 \"{}\" 应返回 None，但 parse() 返回了 Some",
+                    case.input
+                );
                 continue;
             }
 
-            let result = parse(&case.input)
-                .unwrap_or_else(|| panic!("合法输入 \"{}\" 应返回 Some，但 parse() 返回了 None", case.input));
+            let result = parse(&case.input).unwrap_or_else(|| {
+                panic!(
+                    "合法输入 \"{}\" 应返回 Some，但 parse() 返回了 None",
+                    case.input
+                )
+            });
 
             let expected = case.rgba.as_ref().unwrap();
-            assert_eq!(result.rgba.r, expected.r.unwrap(),
-                "r mismatch for \"{}\"", case.input);
-            assert_eq!(result.rgba.g, expected.g.unwrap(),
-                "g mismatch for \"{}\"", case.input);
-            assert_eq!(result.rgba.b, expected.b.unwrap(),
-                "b mismatch for \"{}\"", case.input);
-            assert_eq!(result.rgba.a, expected.a.unwrap(),
-                "a mismatch for \"{}\"", case.input);
+            assert_eq!(
+                result.rgba.r,
+                expected.r.unwrap(),
+                "r mismatch for \"{}\"",
+                case.input
+            );
+            assert_eq!(
+                result.rgba.g,
+                expected.g.unwrap(),
+                "g mismatch for \"{}\"",
+                case.input
+            );
+            assert_eq!(
+                result.rgba.b,
+                expected.b.unwrap(),
+                "b mismatch for \"{}\"",
+                case.input
+            );
+            assert_eq!(
+                result.rgba.a,
+                expected.a.unwrap(),
+                "a mismatch for \"{}\"",
+                case.input
+            );
 
-            assert_eq!(result.hex, case.hex.as_deref().unwrap(),
-                "hex mismatch for \"{}\"", case.input);
-            assert_eq!(result.rgb, case.rgb.as_deref().unwrap(),
-                "rgb mismatch for \"{}\"", case.input);
-            assert_eq!(result.hsl, case.hsl.as_deref().unwrap(),
-                "hsl mismatch for \"{}\"", case.input);
+            assert_eq!(
+                result.hex,
+                case.hex.as_deref().unwrap(),
+                "hex mismatch for \"{}\"",
+                case.input
+            );
+            assert_eq!(
+                result.rgb,
+                case.rgb.as_deref().unwrap(),
+                "rgb mismatch for \"{}\"",
+                case.input
+            );
+            assert_eq!(
+                result.hsl,
+                case.hsl.as_deref().unwrap(),
+                "hsl mismatch for \"{}\"",
+                case.input
+            );
 
             checked += 1;
         }
 
-        assert_eq!(checked, pass_count,
-            "fixture 中合法 case 数量不匹配");
+        assert_eq!(checked, pass_count, "fixture 中合法 case 数量不匹配");
         eprintln!(
             "color fixture 测试通过: total={}, pass={}, illegal={}",
-            fixture.cases.len(), pass_count, illegal_count
+            fixture.cases.len(),
+            pass_count,
+            illegal_count
         );
     }
 
@@ -908,7 +942,10 @@ mod tests {
             .join("frontend/js/shared/fixtures/color-literals.json");
 
         if !fixture_path.exists() {
-            eprintln!("跳过 color_list fixture 测试：{} 不存在", fixture_path.display());
+            eprintln!(
+                "跳过 color_list fixture 测试：{} 不存在",
+                fixture_path.display()
+            );
             return;
         }
 
@@ -923,32 +960,65 @@ mod tests {
 
             match (case.expected_count, &case.results) {
                 (None, None) => {
-                    assert!(result.is_none(),
-                        "输入 {:?} 应返回 None，但 parse_color_list 返回了 Some", case.input);
+                    assert!(
+                        result.is_none(),
+                        "输入 {:?} 应返回 None，但 parse_color_list 返回了 Some",
+                        case.input
+                    );
                 }
                 (Some(count), Some(expected_results)) => {
                     let results = result.unwrap_or_else(|| {
-                        panic!("输入 {:?} 应返回 Some，但 parse_color_list 返回了 None", case.input)
+                        panic!(
+                            "输入 {:?} 应返回 Some，但 parse_color_list 返回了 None",
+                            case.input
+                        )
                     });
-                    assert_eq!(results.len(), count,
-                        "输入 {:?} 的结果数量不匹配", case.input);
-                    assert_eq!(results.len(), expected_results.len(),
-                        "输入 {:?} 的 expected_count 与 results 数量不匹配", case.input);
-                    for (i, (r, expected)) in results.iter().zip(expected_results.iter()).enumerate() {
-                        assert_eq!(r.rgba, Rgba8::new(expected.rgba.r, expected.rgba.g, expected.rgba.b, expected.rgba.a),
-                            "输入 {:?} 第 {} 行 RGBA 不匹配", case.input, i);
-                        assert_eq!(r.hex, expected.hex,
-                            "输入 {:?} 第 {} 行 hex 不匹配", case.input, i);
+                    assert_eq!(
+                        results.len(),
+                        count,
+                        "输入 {:?} 的结果数量不匹配",
+                        case.input
+                    );
+                    assert_eq!(
+                        results.len(),
+                        expected_results.len(),
+                        "输入 {:?} 的 expected_count 与 results 数量不匹配",
+                        case.input
+                    );
+                    for (i, (r, expected)) in
+                        results.iter().zip(expected_results.iter()).enumerate()
+                    {
+                        assert_eq!(
+                            r.rgba,
+                            Rgba8::new(
+                                expected.rgba.r,
+                                expected.rgba.g,
+                                expected.rgba.b,
+                                expected.rgba.a
+                            ),
+                            "输入 {:?} 第 {} 行 RGBA 不匹配",
+                            case.input,
+                            i
+                        );
+                        assert_eq!(
+                            r.hex, expected.hex,
+                            "输入 {:?} 第 {} 行 hex 不匹配",
+                            case.input, i
+                        );
                     }
                     checked += 1;
                 }
-                _ => panic!("fixture case {:?} 的 expected_count/results 配置不一致", case.input),
+                _ => panic!(
+                    "fixture case {:?} 的 expected_count/results 配置不一致",
+                    case.input
+                ),
             }
         }
 
         eprintln!(
             "color_list fixture 测试通过: total={}, checked={}",
-            fixture.color_list_cases.len(), checked
+            fixture.color_list_cases.len(),
+            checked
         );
     }
 }

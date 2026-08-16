@@ -14,9 +14,8 @@ use serde_json::{Value, json};
 
 use super::image_input::{parse_byte_array, resolve_image_ref};
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 use crate::domain::clipboard::ClipboardWriteSource;
 
@@ -68,7 +67,6 @@ impl Capability for WriteClipboard {
             ..Default::default()
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

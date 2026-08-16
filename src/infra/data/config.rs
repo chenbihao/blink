@@ -15,9 +15,12 @@ use sqlx::SqlitePool;
 // 配置写入频率极低（仅用户改设置时），读频率极高（每次唤起 7+ 次）。
 // 缓存 Some(String) 结果；None 不缓存（缺失 key 走 default 兜底，不影响正确性）。
 // set 时更新缓存，delete 时移除缓存——保证一致性。
-
+//
+// dead_code 说明：缓存仅在 `#[cfg(not(test))]` 路径消费，test 编译不可见。
+#[allow(dead_code)]
 static CONFIG_CACHE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 
+#[allow(dead_code)]
 fn config_cache() -> &'static RwLock<HashMap<String, String>> {
     CONFIG_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
@@ -96,45 +99,10 @@ pub async fn get_all_config(pool: &SqlitePool) -> HashMap<String, String> {
     rows.into_iter().collect()
 }
 
-// ── 配置迁移（0.4→0.5 + camelCase→snake_case，从 history.rs 迁入）────────────
-
-/// 0.4→0.5 自动迁移：为每个插件初始化默认配置（`plugin:{id}` 不存在则写入默认）。
-/// 迁移完成后写 marker，下次不再执行。
-pub async fn migrate_0_4_to_0_5(
-    pool: &SqlitePool,
-    plugins: &[std::sync::Arc<crate::domain::plugin::PluginHandle>],
-) {
-    const MARKER_KEY: &str = "migration_0_5_done";
-
-    if get_config(pool, MARKER_KEY).await.is_some() {
-        return;
-    }
-    tracing::info!("开始执行 0.4→0.5 配置迁移");
-
-    for plugin in plugins {
-        let plugin_id = plugin.id();
-        let key = format!("plugin:{plugin_id}");
-        if get_config(pool, &key).await.is_none() {
-            let mut default_config = crate::domain::config::PluginConfig::default();
-            default_config.settings = plugin.manifest().default_settings();
-            match serde_json::to_string(&default_config) {
-                Ok(json) => {
-                    if let Err(e) = set_config(pool, &key, &json).await {
-                        tracing::warn!(plugin = %plugin_id, error = %e, "插件配置写入失败");
-                    } else {
-                        tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
-                    }
-                }
-                Err(e) => tracing::warn!(plugin = %plugin_id, error = %e, "插件配置初始化失败"),
-            }
-        }
-    }
-
-    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
-        tracing::warn!(error = %e, "迁移标记写入失败");
-    }
-    tracing::info!("0.4→0.5 配置迁移完成");
-}
+// ── 配置迁移（0.21.14：migrate_0_4_to_0_5 已上移到 app/config.rs）────────────
+//
+// infra 层不反向依赖 domain::plugin::PluginHandle / domain::config::PluginConfig。
+// migrate_0_4_to_0_5 的逻辑现由 app 层负责，调用 infra 的 get/set_config primitive。
 
 /// 0.9.5 前端重构把 camelCase 字段名统一为 snake_case。
 /// 存量 DB 中的旧 JSON 仍是 camelCase，此迁移把字段名改写为 snake_case，跑一次后写 marker 跳过。

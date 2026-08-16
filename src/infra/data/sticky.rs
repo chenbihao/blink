@@ -715,13 +715,14 @@ pub async fn close_note(
 
     if trimmed.is_empty() {
         // 空便签 → 物理删除。revision 守卫确保只删除调用方所见版本的便签。
-        let result =
-            sqlx::query("DELETE FROM sticky_notes WHERE id = ?1 AND trashed = 0 AND updated_at = ?2")
-                .bind(id)
-                .bind(expected)
-                .execute(pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let result = sqlx::query(
+            "DELETE FROM sticky_notes WHERE id = ?1 AND trashed = 0 AND updated_at = ?2",
+        )
+        .bind(id)
+        .bind(expected)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
         if result.rows_affected() == 0 {
             return Ok(Err(classify_failed_write(pool, id, Some(expected)).await?));
         }
@@ -1000,14 +1001,20 @@ mod tests {
     async fn close_note_classifies_missing_and_trashed() {
         let pool = test_pool().await;
         assert_eq!(
-            close_note(&pool, "missing", "x", None).await.unwrap().unwrap_err(),
+            close_note(&pool, "missing", "x", None)
+                .await
+                .unwrap()
+                .unwrap_err(),
             StickyWriteOutcome::NotFound
         );
 
         insert_note(&pool, "gone").await;
         set_trashed(&pool, "gone", true).await.unwrap();
         assert_eq!(
-            close_note(&pool, "gone", "x", None).await.unwrap().unwrap_err(),
+            close_note(&pool, "gone", "x", None)
+                .await
+                .unwrap()
+                .unwrap_err(),
             StickyWriteOutcome::Trashed
         );
     }
@@ -1059,14 +1066,21 @@ mod tests {
         let content_outcome = update_content(&pool, "inter", "hello", Some(note.updated_at))
             .await
             .unwrap();
-        let StickyWriteOutcome::Applied { updated_at: content_rev } = content_outcome else {
+        let StickyWriteOutcome::Applied {
+            updated_at: content_rev,
+        } = content_outcome
+        else {
             panic!("expected applied")
         };
 
         // 再发起几何保存（返回 102）
-        let geom_outcome =
-            update_geometry(&pool, "inter", 10, 20, 300, 400).await.unwrap();
-        let StickyWriteOutcome::Applied { updated_at: geom_rev } = geom_outcome else {
+        let geom_outcome = update_geometry(&pool, "inter", 10, 20, 300, 400)
+            .await
+            .unwrap();
+        let StickyWriteOutcome::Applied {
+            updated_at: geom_rev,
+        } = geom_outcome
+        else {
             panic!("expected applied")
         };
 

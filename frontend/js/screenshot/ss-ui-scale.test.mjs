@@ -294,7 +294,8 @@ function runAllTests() {
 }
 
 if (typeof process !== 'undefined' && process.versions?.node) {
-  runAllTests();
+  const ok = runAllTests();
+  if (!ok) process.exit(1);
 }
 
 export { runAllTests };

@@ -10,9 +10,8 @@ use serde_json::{Value, json};
 use super::image_input::resolve_png_input;
 use super::ocr_engine::{OcrResult, backend};
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 /// `ocr_image` — 识别图片中的文字，返回文本 + 行级坐标。
@@ -46,7 +45,6 @@ impl Capability for OcrImage {
             ..Default::default()
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {

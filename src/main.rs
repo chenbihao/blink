@@ -35,7 +35,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            infra::platform::window::invoke(app);
+            app::window_orchestrator::invoke(app);
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -368,7 +368,7 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     // 0.17.2：托盘菜单第一项"显示主窗口"，走 invoke 全流程拉起搜索框
-                    "show_main" => infra::platform::window::invoke(app),
+                    "show_main" => app::window_orchestrator::invoke(app),
                     "settings" => open_settings(app),
                     "sticky_manager" => {
                         let _ = crate::infra::platform::window::show_sticky_manager_window(app);
@@ -394,7 +394,7 @@ fn main() {
                         ..
                     } = event
                     {
-                        infra::platform::window::invoke(tray.app_handle());
+                        app::window_orchestrator::invoke(tray.app_handle());
                     }
                 })
                 .build(app)?;
@@ -432,7 +432,7 @@ fn main() {
             let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pools.config.clone(), proxy));
             domain_env.set_plugin_engine(plugin_engine.clone());
             // 0.4→0.5 配置迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
-            tauri::async_runtime::block_on(infra::data::config::migrate_0_4_to_0_5(&pools.config, &plugins));
+            tauri::async_runtime::block_on(app::config::migrate_0_4_to_0_5(&pools.config, &plugins));
             // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
             // 此函数读写 config 表，必须用配置库 pool
             tauri::async_runtime::block_on(infra::data::config::migrate_camelcase_to_snake(&pools.config));
@@ -479,7 +479,7 @@ fn main() {
                 calc: calc_config,
             };
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
-                domain_env.clone(),
+                domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
                 pools.history.clone(),
                 domain::search::build_engines(engine_configs, pools.history.clone(), pools.cache.clone()),
                 plugin_engine.clone(),
@@ -592,13 +592,23 @@ fn main() {
                             );
                             continue;
                         }
+                        let adapter_id = adapter.id().to_string();
                         tracing::info!(
                             plugin = %manifest.id,
-                            tool = %adapter.id(),
+                            tool = %adapter_id,
                             danger = ?tool_def.danger_class,
                             "注册插件 tool（Capability）"
                         );
-                        capability_registry.register(std::sync::Arc::new(adapter));
+                        // 0.21.13：register 返回 Result，插件注册前已用 get() 检查去重。
+                        if let Err(e) = capability_registry.register(std::sync::Arc::new(adapter)) {
+                            tracing::error!(
+                                plugin = %manifest.id,
+                                tool = %adapter_id,
+                                error = %e,
+                                "插件 tool 注册失败（id 冲突）"
+                            );
+                            continue;
+                        }
                         plugin_tool_count += 1;
                     }
                 }
@@ -720,7 +730,8 @@ fn main() {
             let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
             let chat_service = std::sync::Arc::new(
                 tauri::async_runtime::block_on(domain::ai::chat_service::ChatService::new(
-                    domain_env.clone(),
+                    domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
+                    domain_env.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
                     ai_registry.clone(),
                     capability_registry.clone(),
                     pending_confirms.clone(),
@@ -828,16 +839,60 @@ fn main() {
             );
             app.manage(sticky_service.clone());
 
+            // 0.21.14：窗口事件回调注册——infra 层通过 Tauri state 消费，
+            // 不反向依赖 domain/app。
+            // chat 窗口 CloseRequested → abort active request
+            app.manage(app::ChatCloseCallback(std::sync::Arc::new(|app: &tauri::AppHandle| {
+                use tauri::Manager;
+                if let Some(cs) =
+                    app.try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
+                {
+                    cs.abort_active();
+                }
+            })));
+            // welcome 窗口 CloseRequested → first_run = false
+            app.manage(app::WelcomeCloseCallback(std::sync::Arc::new(|app: &tauri::AppHandle| {
+                use tauri::Manager;
+                let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = app::config::update_first_run(&pools.config, false).await;
+                    tracing::info!("welcome window: CloseRequested -> first_run = false");
+                });
+            })));
+            // sticky spare close → trash_note + emit STICKY_TRASHED
+            app.manage(app::StickySpareCloseCallback(std::sync::Arc::new(
+                |app: &tauri::AppHandle, sticky_id: &str| {
+                    use tauri::{Emitter, Manager};
+                    let sticky_id = sticky_id.to_string();
+                    let app = app.clone();
+                    Box::pin(async move {
+                        if let Some(svc) = app
+                            .try_state::<std::sync::Arc<domain::sticky::StickyService>>()
+                        {
+                            if let Err(e) = svc.trash_note(&sticky_id).await {
+                                tracing::warn!(error = %e, "预热便签关闭时移入回收站失败");
+                            } else {
+                                let _ = app.emit(
+                                    domain::event_names::EventNames::STICKY_TRASHED,
+                                    serde_json::json!({ "stickyId": sticky_id }),
+                                );
+                            }
+                        }
+                    })
+                },
+            )));
+
             // 0.16.13：便签恢复逻辑已提取为 StickyRecoveryService，纳入 all_services() 编排。
             // 见 src/app/service.rs::StickyRecoveryService。
 
             // 0.19.13: MCP Server Runtime——主进程 Streamable HTTP MCP Server 生命周期管理。
-            // 在 CapabilityRegistry、DomainEnv、pools.ai 都就绪后构造。
+            // 在 CapabilityRegistry、EventPort/CapabilityEnv、pools.ai 都就绪后构造。
             // 启动时按配置自动启动 listener（如果 enabled=true）。
             let mcp_server_runtime = std::sync::Arc::new(
                 app::mcp_server_runtime::McpServerRuntime::new(
                     cap_registry_for_mcp,
-                    domain_env_for_mcp,
+                    domain_env_for_mcp.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
+                    domain_env_for_mcp.clone() as std::sync::Arc<dyn domain::event::EventPort>,
                     pools.ai.clone(),
                 ),
             );

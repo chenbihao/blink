@@ -66,3 +66,53 @@ pub async fn refresh_input_config_with_registry(
 
     crate::infra::platform::hotkey::InputController::update_config(snapshot);
 }
+
+// ── 0.21.14：从 infra/data/config.rs 上移的迁移函数 ─────────────────────────
+//
+// infra 层不反向依赖 domain::plugin::PluginHandle / domain::config::PluginConfig。
+// 迁移逻辑只使用 infra::data::config 的 get/set_config primitive + domain 类型构造。
+
+/// 0.4→0.5 自动迁移：为每个插件初始化默认配置（`plugin:<id>` 不存在则写入默认）。
+/// 迁移完成后写 marker，下次不再执行。
+pub async fn migrate_0_4_to_0_5(
+    pool: &sqlx::SqlitePool,
+    plugins: &[std::sync::Arc<crate::domain::plugin::PluginHandle>],
+) {
+    const MARKER_KEY: &str = "migration_0_5_done";
+
+    if crate::infra::data::config::get_config(pool, MARKER_KEY)
+        .await
+        .is_some()
+    {
+        return;
+    }
+    tracing::info!("开始执行 0.4→0.5 配置迁移");
+
+    for plugin in plugins {
+        let plugin_id = plugin.id();
+        let key = format!("plugin:{plugin_id}");
+        if crate::infra::data::config::get_config(pool, &key)
+            .await
+            .is_none()
+        {
+            let mut default_config = crate::domain::config::PluginConfig::default();
+            default_config.settings = plugin.manifest().default_settings();
+            match serde_json::to_string(&default_config) {
+                Ok(json) => {
+                    if let Err(e) = crate::infra::data::config::set_config(pool, &key, &json).await
+                    {
+                        tracing::warn!(plugin = %plugin_id, error = %e, "插件配置写入失败");
+                    } else {
+                        tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
+                    }
+                }
+                Err(e) => tracing::warn!(plugin = %plugin_id, error = %e, "插件配置初始化失败"),
+            }
+        }
+    }
+
+    if let Err(e) = crate::infra::data::config::set_config(pool, MARKER_KEY, "1").await {
+        tracing::warn!(error = %e, "迁移标记写入失败");
+    }
+    tracing::info!("0.4→0.5 配置迁移完成");
+}

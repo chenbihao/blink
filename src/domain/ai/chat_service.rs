@@ -36,11 +36,11 @@ use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::config::ai_config::{ChatAgentMode, ChatConfig, Tier};
-use crate::domain::event::DomainEnv;
+use crate::domain::event::EventPort;
 use crate::domain::event_names::EventNames;
 use crate::domain::mcp::McpClientManager;
 
-/// Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch/kind 任一变化即 cache miss。
+// Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch/kind 任一变化即 cache miss。
 // ── 0.17.6: 对话类型 ────────────────────────────────────────────────────────
 
 /// 对话类型（0.17.6）。
@@ -311,7 +311,9 @@ impl RequestTracker {
 
 /// 对话服务。
 pub struct ChatService {
-    emitter: Arc<dyn DomainEnv>,
+    emitter: Arc<dyn EventPort>,
+    /// CapabilityEnv 引用——用于构造 InvokeContext 和 image_stash。
+    cap_env: Arc<dyn crate::domain::event::CapabilityEnv>,
     ai_registry: Arc<AIProviderRegistry>,
     capability_registry: Arc<CapabilityRegistry>,
     pending_confirms: Arc<PendingConfirms>,
@@ -351,7 +353,8 @@ impl ChatService {
     /// 0.13.1：memory 持有具体类型 `Arc<SqliteConversationMemory>`（不再是 trait object），
     /// 供 `AgentProvider::new` 注入 `model.context_window` 驱动 token-aware 裁剪。
     pub async fn new(
-        emitter: Arc<dyn DomainEnv>,
+        emitter: Arc<dyn EventPort>,
+        cap_env: Arc<dyn crate::domain::event::CapabilityEnv>,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
         pending_confirms: Arc<PendingConfirms>,
@@ -372,6 +375,7 @@ impl ChatService {
             Self::load_ephemeral_selected_model(&config_pool, &ai_registry).await;
         Self {
             emitter,
+            cap_env,
             ai_registry,
             capability_registry,
             pending_confirms,
@@ -596,7 +600,7 @@ impl ChatService {
     /// 0.12.6：`preamble` 参数支持分组级系统提示词——不同分组的 preamble hash
     /// 不同，cache key 自然失配，触发重建。传空字符串等同默认 `chat_system_prompt()`。
     async fn ensure_provider(
-        &self,
+        self: &Arc<Self>,
         preamble: &str,
         kind: ConversationKind,
         plan: AgentAssemblyPlan,
@@ -630,7 +634,10 @@ impl ChatService {
             // 0.21.5: 加载 AI capability allowlist + 计算 fingerprint
             // allowlist 变化时 fingerprint 不同，触发 Agent 重建
             let ai_allowlist = if plan.includes_extensions() {
-                crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(&self.config_pool).await
+                crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(
+                    &self.config_pool,
+                )
+                .await
             } else {
                 std::collections::HashSet::new()
             };
@@ -662,6 +669,8 @@ impl ChatService {
                     self.capability_registry.clone(),
                     external_tools,
                     self.emitter.clone(),
+                    Some(self.clone()),
+                    self.cap_env.clone(),
                     self.pending_confirms.clone(),
                     Some(&ai_allowlist),
                 )
@@ -1387,17 +1396,13 @@ impl ChatService {
     }
 }
 
-/// 从 Tauri state 获取当前 active request 上下文（request_id, conversation_id）。
+/// 获取当前 active request 上下文（request_id, conversation_id）。
 ///
 /// 供 `tool_adapter` 在 emit dangerous confirm 时注入，前端按 request_id 校验事件归属。
 /// ChatService 未注册时返回 `(0, String::new())`——confirm 仍可工作，只是前端无法校验归属。
-pub fn current_request_context_from_env(env: &dyn DomainEnv) -> (u64, String, String) {
-    if let Some(cs) = env.chat_service() {
-        cs.current_request_context()
-            .unwrap_or((0, String::new(), String::new()))
-    } else {
-        (0, String::new(), String::new())
-    }
+pub fn current_request_context(chat: Option<&Arc<ChatService>>) -> (u64, String, String) {
+    chat.and_then(|cs| cs.current_request_context())
+        .unwrap_or((0, String::new(), String::new()))
 }
 
 /// 计算 preamble 的 hash 值，用于 AgentProvider 缓存 key 的第四元素（0.12.6）。

@@ -665,9 +665,7 @@ fn do_reinstall(reason: state::ReinstallReason) -> bool {
                     *slot = None;
                 }
                 Err(e) => {
-                    if e.code()
-                        == windows::core::HRESULT::from_win32(ERROR_INVALID_HOOK_HANDLE.0)
-                    {
+                    if e.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_HOOK_HANDLE.0) {
                         // 系统可能已经静默移除了 Hook；此时本地句柄只是陈旧快照，
                         // 清掉后继续安装才有机会真正恢复。
                         tracing::warn!(?e, ?reason, "discarding stale hook handle");

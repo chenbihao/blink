@@ -38,29 +38,50 @@ impl FeatureGroup {
     pub fn infer_from_capability_id(cap_id: &str) -> Self {
         match cap_id {
             // 应用/文件与链接
-            "open_url" | "open_path" | "reveal_in_explorer" | "search_apps"
-            | "search_files" => Self::AppsFilesLinks,
+            "open_url" | "open_path" | "reveal_in_explorer" | "search_apps" | "search_files" => {
+                Self::AppsFilesLinks
+            }
 
             // 剪贴板与文本
-            "read_clipboard" | "write_clipboard" | "search_clipboard_history"
-            | "read_clipboard_history_image" | "list_clipboard_images" => Self::ClipboardText,
+            "read_clipboard"
+            | "write_clipboard"
+            | "search_clipboard_history"
+            | "read_clipboard_history_image"
+            | "list_clipboard_images" => Self::ClipboardText,
 
             // 图片与颜色
-            "screenshot" | "ocr_image" | "analyze_image_palette"
-            | "start_region_capture" | "edit_clipboard_image" => Self::ImageColor,
+            "screenshot"
+            | "ocr_image"
+            | "analyze_image_palette"
+            | "start_region_capture"
+            | "edit_clipboard_image" => Self::ImageColor,
 
             // 便签与内容
-            "list_sticky" | "read_sticky" | "create_sticky" | "update_sticky"
-            | "trash_sticky" | "set_sticky_geometry" | "set_sticky_visibility"
-            | "pin_image" | "sticky_manager" | "start_content_editor" => Self::StickyContent,
+            "list_sticky"
+            | "read_sticky"
+            | "create_sticky"
+            | "update_sticky"
+            | "trash_sticky"
+            | "set_sticky_geometry"
+            | "set_sticky_visibility"
+            | "pin_image"
+            | "sticky_manager"
+            | "start_content_editor" => Self::StickyContent,
 
             // 窗口与系统
             "list_windows" | "lock" | "shutdown" | "restart" | "sleep" => Self::WindowSystem,
 
             // Blink 管理与诊断
-            "open_settings" | "open_logs" | "open_data_dir" | "exit_blink"
-            | "clear_history" | "blink_print_debug_info" | "blink_debug_inithook"
-            | "get_settings" | "update_setting" | "open_chat"
+            "open_settings"
+            | "open_logs"
+            | "open_data_dir"
+            | "exit_blink"
+            | "clear_history"
+            | "blink_print_debug_info"
+            | "blink_debug_inithook"
+            | "get_settings"
+            | "update_setting"
+            | "open_chat"
             | "open_clipboard_mode" => Self::BlinkManagement,
 
             _ => Self::OtherPlugin,
@@ -136,6 +157,7 @@ pub enum LocalAvailability {
 /// AI 出口状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // NotApplicable: Interaction-only 无对应 Capability 的投影占位
 pub enum CatalogExitStatus {
     /// 已授权（在用户 allowlist 中——0.21.5 落地，当前从 policy.ai_default 投影）
     Enabled,

@@ -14,9 +14,7 @@ use sqlx::SqlitePool;
 
 use super::types::*;
 
-use crate::domain::config::app_config::{
-    get_config, save_config,
-};
+use crate::domain::config::app_config::{get_config, save_config};
 
 /// 批量执行 binding 操作，写回各 binding store。
 ///
@@ -30,10 +28,7 @@ use crate::domain::config::app_config::{
 /// # 副作用
 /// 成功写入后广播 `blink://config-changed`（由调用方 command 层负责，
 /// 因为 adapter 在 domain 层，不持有 AppHandle）。
-pub async fn apply_binding_batch(
-    pool: &SqlitePool,
-    ops: &[BindingOp],
-) -> Vec<ApplyBindingResult> {
+pub async fn apply_binding_batch(pool: &SqlitePool, ops: &[BindingOp]) -> Vec<ApplyBindingResult> {
     let mut results = Vec::with_capacity(ops.len());
 
     // 预加载当前配置（减少 DB 读次数——所有操作共享一份快照，最后一次性写回）
@@ -66,18 +61,10 @@ fn apply_single_op(
 ) -> ApplyBindingResult {
     match op.kind {
         BindingKind::SearchKeyword => {
-            apply_to_disabled_list(
-                &mut config.disabled_builtin_actions,
-                &op.binding_id,
-                op.op,
-            )
+            apply_to_disabled_list(&mut config.disabled_builtin_actions, &op.binding_id, op.op)
         }
         BindingKind::ContextBinding => {
-            apply_to_disabled_list(
-                &mut config.disabled_context_bindings,
-                &op.binding_id,
-                op.op,
-            )
+            apply_to_disabled_list(&mut config.disabled_context_bindings, &op.binding_id, op.op)
         }
         BindingKind::ChordKey => {
             // chord binding_id 格式为 "chord.{chord_id}"，提取实际 chord_id
@@ -85,11 +72,7 @@ fn apply_single_op(
                 .binding_id
                 .strip_prefix("chord.")
                 .unwrap_or(&op.binding_id);
-            apply_to_disabled_list(
-                &mut config.disabled_chord_actions,
-                chord_id,
-                op.op,
-            )
+            apply_to_disabled_list(&mut config.disabled_chord_actions, chord_id, op.op)
         }
     }
     .map_err(|e| e.to_string())
@@ -164,8 +147,16 @@ mod tests {
         );
 
         assert!(result.success);
-        assert!(!config.disabled_builtin_actions.contains(&"open_settings".to_string()));
-        assert!(config.disabled_builtin_actions.contains(&"lock".to_string())); // 其他不受影响
+        assert!(
+            !config
+                .disabled_builtin_actions
+                .contains(&"open_settings".to_string())
+        );
+        assert!(
+            config
+                .disabled_builtin_actions
+                .contains(&"lock".to_string())
+        ); // 其他不受影响
     }
 
     #[test]
@@ -183,7 +174,11 @@ mod tests {
         );
 
         assert!(result.success);
-        assert!(config.disabled_builtin_actions.contains(&"open_settings".to_string()));
+        assert!(
+            config
+                .disabled_builtin_actions
+                .contains(&"open_settings".to_string())
+        );
     }
 
     #[test]
@@ -237,7 +232,11 @@ mod tests {
         );
 
         assert!(result.success);
-        assert!(config.disabled_chord_actions.contains(&"screenshot".to_string()));
+        assert!(
+            config
+                .disabled_chord_actions
+                .contains(&"screenshot".to_string())
+        );
     }
 
     #[test]
@@ -255,9 +254,11 @@ mod tests {
         );
 
         assert!(result.success);
-        assert!(config
-            .disabled_context_bindings
-            .contains(&"builtin.open_url::clipboard_is_url".to_string()));
+        assert!(
+            config
+                .disabled_context_bindings
+                .contains(&"builtin.open_url::clipboard_is_url".to_string())
+        );
         // 不影响其他列表
         assert!(config.disabled_builtin_actions.is_empty());
         assert!(config.disabled_chord_actions.is_empty());
@@ -291,8 +292,20 @@ mod tests {
             apply_single_op(&mut config, op);
         }
 
-        assert!(config.disabled_builtin_actions.contains(&"open_settings".to_string()));
-        assert!(!config.disabled_builtin_actions.contains(&"lock".to_string()));
-        assert!(config.disabled_chord_actions.contains(&"screenshot".to_string()));
+        assert!(
+            config
+                .disabled_builtin_actions
+                .contains(&"open_settings".to_string())
+        );
+        assert!(
+            !config
+                .disabled_builtin_actions
+                .contains(&"lock".to_string())
+        );
+        assert!(
+            config
+                .disabled_chord_actions
+                .contains(&"screenshot".to_string())
+        );
     }
 }

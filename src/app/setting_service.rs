@@ -118,15 +118,18 @@ pub async fn update_managed_setting(
                     let search = ConfigStore::get::<SearchConfig>(pool).await;
                     let page_size = search.page_size.max(1);
                     let raw_count = value.as_u64().unwrap() as u32;
-                    cfg.display_pages = clipboard::migrate_display_count_to_pages(raw_count, page_size);
+                    cfg.display_pages =
+                        clipboard::migrate_display_count_to_pages(raw_count, page_size);
                     tracing::info!(
-                        raw_count, page_size,
+                        raw_count,
+                        page_size,
                         migrated_pages = cfg.display_pages,
                         "clipboard.display_count alias → display_pages 迁移换算"
                     );
                 }
                 ManagedSettingId::ClipboardDisplayPages => {
-                    cfg.display_pages = clipboard::clamp_display_pages(value.as_u64().unwrap() as u32);
+                    cfg.display_pages =
+                        clipboard::clamp_display_pages(value.as_u64().unwrap() as u32);
                 }
                 ManagedSettingId::ClipboardCandidateLimit => {
                     cfg.candidate_limit = value.as_u64().unwrap() as u32

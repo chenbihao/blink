@@ -67,6 +67,7 @@ pub struct ClipboardConfig {
     /// 新代码不应读写此字段；保存时只写 `display_pages`。
     /// `skip_serializing` 确保保存时不双写旧字段（规划 3.5：只向前迁移）。
     #[serde(default = "default_display_count", skip_serializing)]
+    #[allow(dead_code)] // 0.20.1 废弃字段，仅反序列化迁移用
     pub display_count: u32,
     /// 是否允许搜索剪贴板内容
     #[serde(default = "default_true")]
@@ -176,7 +177,9 @@ pub fn resolve_display_pages_from_json(
                 .unwrap_or(LEGACY_DISPLAY_COUNT_DEFAULT);
             let migrated = migrate_display_count_to_pages(raw_count, page_size);
             tracing::info!(
-                raw_count, page_size, migrated_pages = migrated,
+                raw_count,
+                page_size,
+                migrated_pages = migrated,
                 "clipboard: display_count → display_pages 迁移换算"
             );
             (migrated, true)
@@ -388,13 +391,15 @@ pub async fn query_recent_days_meta(
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
-        id,
-        preview,
-        created_at,
-        source_app,
-        hit_count,
-    })
+    .map(
+        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
+            id,
+            preview,
+            created_at,
+            source_app,
+            hit_count,
+        },
+    )
     .collect()
 }
 
@@ -412,13 +417,15 @@ pub async fn query_recent_meta(pool: &SqlitePool, limit: i64) -> Vec<ClipboardMe
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
-        id,
-        preview,
-        created_at,
-        source_app,
-        hit_count,
-    })
+    .map(
+        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
+            id,
+            preview,
+            created_at,
+            source_app,
+            hit_count,
+        },
+    )
     .collect()
 }
 
@@ -502,7 +509,10 @@ pub async fn get_text_by_id(pool: &SqlitePool, id: &str) -> Option<String> {
 ///
 /// **实现**：逐个 `get_text_by_id` 查询（曾尝试动态 IN 查询但 sqlx 生命周期问题，
 /// 且批量通常 < 50 条，逐查性能足够 < 10ms）。
-pub async fn get_text_batch_by_ids(pool: &SqlitePool, ids: &[&str]) -> Vec<(String, Option<String>)> {
+pub async fn get_text_batch_by_ids(
+    pool: &SqlitePool,
+    ids: &[&str],
+) -> Vec<(String, Option<String>)> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -829,8 +839,14 @@ mod tests {
         // 保存时不双写 display_count（规划 3.5：只向前迁移）
         let cfg = ClipboardConfig::default();
         let json = serde_json::to_value(&cfg).unwrap();
-        assert!(json.get("display_count").is_none(), "序列化不应包含 display_count");
-        assert!(json.get("display_pages").is_some(), "序列化应包含 display_pages");
+        assert!(
+            json.get("display_count").is_none(),
+            "序列化不应包含 display_count"
+        );
+        assert!(
+            json.get("display_pages").is_some(),
+            "序列化应包含 display_pages"
+        );
     }
 
     #[test]

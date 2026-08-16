@@ -12,11 +12,7 @@ use crate::domain::search::SearchResponse;
 /// 不经过 SearchService::search / IntentRouter / get_weights / Route 分派，
 /// 只走 ClipboardEngine。性能最优。
 #[tauri::command]
-pub async fn search_clipboard(
-    app: tauri::AppHandle,
-    query: String,
-    seq: u64,
-) -> SearchResponse {
+pub async fn search_clipboard(app: tauri::AppHandle, query: String, seq: u64) -> SearchResponse {
     tracing::debug!(%query, seq, "search_clipboard: 收到请求");
     let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     // 复用 SearchService 持有的 ClipboardEngine 实例（不重复建池）
@@ -83,7 +79,10 @@ pub async fn search_clipboard_history(
 /// 前端调此命令按需拉取完整 `text`。避免搜索路径预载 500 条完整 text
 /// 导致 MB 级 JSON 序列化开销。
 #[tauri::command]
-pub async fn get_clipboard_text(app: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
+pub async fn get_clipboard_text(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Option<String>, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     let text = crate::infra::data::clipboard::get_text_by_id(pool, &id).await;
     if text.is_none() {

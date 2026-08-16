@@ -14,9 +14,9 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement, ContentEditorRequest,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, ContentEditorRequest, DangerClass, InvokeContext, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 pub struct StartContentEditor;
@@ -77,10 +77,13 @@ impl Capability for StartContentEditor {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
 
         let body = args
             .get("body")
@@ -115,9 +118,11 @@ impl Capability for StartContentEditor {
         };
 
         surface.hide_main_window("start_content_editor");
-        surface.start_content_editor(request).map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+        surface
+            .start_content_editor(request)
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
 
         Ok(CapabilityResult::Done {
             summary: "已启动内容编辑器，等待用户编辑".into(),

@@ -157,6 +157,9 @@ if (typeof window === 'undefined' || !globalThis.window) {
   setMeta({});
 }
 
-runAllTests();
+const _ok = runAllTests();
+if (typeof process !== 'undefined' && process.versions?.node && !_ok) {
+  process.exit(1);
+}
 
 export { runAllTests };

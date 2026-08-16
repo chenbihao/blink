@@ -45,6 +45,7 @@ fn python_dir() -> PathBuf {
 }
 
 /// 获取 blink_stt_server.py 的目标路径。
+#[allow(dead_code)] // STT 脚本路径工具，待 release 流程消费
 pub fn server_script_path() -> PathBuf {
     python_dir().join("blink_stt_server.py")
 }

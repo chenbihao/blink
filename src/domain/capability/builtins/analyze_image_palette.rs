@@ -28,8 +28,8 @@ use serde_json::{Value, json};
 
 use super::image_input::resolve_image_ref;
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,
     RuntimeRequirement,
 };
 use crate::domain::palette;
@@ -84,7 +84,6 @@ impl Capability for AnalyzeImagePalette {
             sensitive: true, // 分析用户屏幕/剪贴板图片内容属隐私敏感数据
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
@@ -364,16 +363,8 @@ fn apply_crop(
     height: usize,
     crop: &Value,
 ) -> Result<(Vec<u8>, usize, usize), CapabilityError> {
-    let x = crop
-        .get("x")
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
-        .max(0) as usize;
-    let y = crop
-        .get("y")
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
-        .max(0) as usize;
+    let x = crop.get("x").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
+    let y = crop.get("y").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
     let w = crop
         .get("w")
         .and_then(Value::as_u64)
@@ -486,7 +477,9 @@ mod tests {
 
     #[test]
     fn apply_crop_full_image() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         let crop = json!({ "x": 0, "y": 0, "w": 2, "h": 2 });
         let (out, w, h) = apply_crop(&rgba, 2, 2, &crop).unwrap();
         assert_eq!((w, h), (2, 2));
@@ -495,7 +488,9 @@ mod tests {
 
     #[test]
     fn apply_crop_top_left_pixel() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         let crop = json!({ "x": 0, "y": 0, "w": 1, "h": 1 });
         let (out, w, h) = apply_crop(&rgba, 2, 2, &crop).unwrap();
         assert_eq!((w, h), (1, 1));
@@ -515,7 +510,9 @@ mod tests {
 
     #[test]
     fn apply_crop_clamps_negative_origin() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         // x=-1, y=-1 → clamp 到 (0, 0)
         let crop = json!({ "x": -1, "y": -1, "w": 2, "h": 2 });
         let (out, w, h) = apply_crop(&rgba, 2, 2, &crop).unwrap();
@@ -525,7 +522,9 @@ mod tests {
 
     #[test]
     fn apply_crop_clamps_overflow() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         // w=10, h=10 但图片只有 2x2 → clamp 到 2x2
         let crop = json!({ "x": 0, "y": 0, "w": 10, "h": 10 });
         let (out, w, h) = apply_crop(&rgba, 2, 2, &crop).unwrap();
@@ -535,7 +534,9 @@ mod tests {
 
     #[test]
     fn apply_crop_zero_size_returns_error() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         let crop = json!({ "x": 0, "y": 0, "w": 0, "h": 1 });
         let err = apply_crop(&rgba, 2, 2, &crop).unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
@@ -543,7 +544,9 @@ mod tests {
 
     #[test]
     fn apply_crop_out_of_bounds_returns_error() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         // x=5, y=5 超出 2x2 图片
         let crop = json!({ "x": 5, "y": 5, "w": 1, "h": 1 });
         let err = apply_crop(&rgba, 2, 2, &crop).unwrap_err();
@@ -552,7 +555,9 @@ mod tests {
 
     #[test]
     fn apply_crop_missing_w_returns_error() {
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         let crop = json!({ "x": 0, "y": 0, "h": 1 });
         let err = apply_crop(&rgba, 2, 2, &crop).unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));

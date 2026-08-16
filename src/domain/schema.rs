@@ -38,6 +38,7 @@ impl Default for ToolSchema {
 
 impl ToolSchema {
     /// 构造无参 schema（无参动作/能力的 default）。
+    #[allow(dead_code)] // 被 CapabilitySchema::empty 包装，直接消费方待迁移
     pub fn empty(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),

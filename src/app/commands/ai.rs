@@ -216,7 +216,7 @@ async fn test_gemini_endpoint(client: &reqwest::Client, url: &str) -> Result<Str
 /// 窗口层保证先中止 active request，再隐藏 WebView。窗口不存在时 no-op。
 #[tauri::command]
 pub fn hide_chat_window(app: tauri::AppHandle) {
-    crate::infra::platform::window::hide_chat_window(&app);
+    crate::app::window_orchestrator::hide_chat_window(&app);
 }
 
 /// 前端 init 时拉取待填充文本（0.19）。

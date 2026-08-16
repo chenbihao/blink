@@ -59,7 +59,7 @@ use tokio::sync::{Mutex, RwLock, oneshot};
 use crate::domain::capability::{Capability, CapabilityError, CapabilityRegistry, InvokeContext};
 use crate::domain::config::ai_config::get_ai_config;
 use crate::domain::config::shards::AiPermissionConfig;
-use crate::domain::event::DomainEnv;
+use crate::domain::event::EventPort;
 use crate::domain::event_names::EventNames;
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
@@ -280,7 +280,7 @@ enum ConfirmOutcome {
 /// 闭环的正确性靠 `PendingConfirms` 的 register/resolve/discard 纯逻辑单测保证。
 async fn await_dangerous_confirm(
     pending: &PendingConfirms,
-    env: &dyn DomainEnv,
+    emitter: &dyn EventPort,
     confirm_id: u64,
     rx: oneshot::Receiver<bool>,
     tool_name: &str,
@@ -291,7 +291,7 @@ async fn await_dangerous_confirm(
     target_window: &str,
 ) -> ConfirmOutcome {
     emit_dangerous_confirm(
-        env,
+        emitter,
         confirm_id,
         tool_name,
         tool_type,
@@ -323,7 +323,8 @@ async fn check_dangerous_confirm(
     is_dangerous: bool,
     rememberable: bool,
     pending: &PendingConfirms,
-    env: &dyn DomainEnv,
+    emitter: &dyn EventPort,
+    chat_service: Option<&std::sync::Arc<crate::domain::ai::chat_service::ChatService>>,
     tool_name: &str,
     tool_type: &'static str,
     args_value: &Value,
@@ -333,7 +334,7 @@ async fn check_dangerous_confirm(
     }
 
     let (req_id, conv_id, target_win) =
-        crate::domain::ai::chat_service::current_request_context_from_env(env);
+        crate::domain::ai::chat_service::current_request_context(chat_service);
 
     // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
     let trusted = rememberable && pending.is_trusted(&conv_id, tool_name).await;
@@ -350,7 +351,7 @@ async fn check_dangerous_confirm(
     let (confirm_id, rx) = pending.register().await;
     match await_dangerous_confirm(
         pending,
-        env,
+        emitter,
         confirm_id,
         rx,
         tool_name,
@@ -414,7 +415,7 @@ struct ConfirmPayload {
 ///
 /// Phase 4：改用 `emit_to("chat")` 定向发送，不向主窗口和其他次级窗口广播。
 fn emit_dangerous_confirm(
-    env: &dyn DomainEnv,
+    emitter: &dyn EventPort,
     confirm_id: u64,
     tool_name: &str,
     tool_type: &'static str,
@@ -439,7 +440,7 @@ fn emit_dangerous_confirm(
     } else {
         target_window
     };
-    if let Err(e) = env.emit_to(
+    if let Err(e) = emitter.emit_to(
         win,
         EventNames::CHAT_CONFIRM_ACTION,
         serde_json::to_value(&payload).unwrap_or_default(),
@@ -467,32 +468,38 @@ fn derive_tool_deadline() -> Option<std::time::Instant> {
 /// - `definition()` -> `schema.to_rig_tool()`（纯 schema 投影）
 /// - `call()` -> 危险操作先挂起确认 -> `registry.invoke(id, args, ctx)` -> `CapabilityResult` -> `to_rig_tool_result()`
 /// - `InvokeContext.deadline` 从 `slo_hard_timeout_ms` 派生（P1.3 硬超时）
-/// 
+///
 /// **0.21.11 变更**：确认通过后调用不再直接 `cap.invoke()`，而是经 `CapabilityRegistry::invoke()`，
 /// 统一来源检查、运行时检查、SLO 与 perf 埋点。
 pub struct CapabilityTool {
-    cap_id: String,  // 0.21.11: 保留 id，调用时经 Registry 路由
+    cap_id: String,
     cap: Arc<dyn Capability>,
     schema: crate::domain::capability::CapabilitySchema,
-    emitter: Arc<dyn DomainEnv>,
+    emitter: Arc<dyn EventPort>,
+    chat_service: Option<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>,
+    cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
     pending: Arc<PendingConfirms>,
-    registry: Arc<CapabilityRegistry>,  // 0.21.11: 新增 registry 引用
+    registry: Arc<CapabilityRegistry>,
 }
 
 impl CapabilityTool {
     /// 构造 CapabilityTool。
     pub fn new(
         cap: Arc<dyn Capability>,
-        emitter: Arc<dyn DomainEnv>,
+        emitter: Arc<dyn EventPort>,
+        chat_service: Option<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>,
+        cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
         pending: Arc<PendingConfirms>,
-        registry: Arc<CapabilityRegistry>,  // 0.21.11: 新增 registry 参数
+        registry: Arc<CapabilityRegistry>,
     ) -> Self {
         let schema = cap.schema();
         Self {
-            cap_id: cap.id().to_string(),  // 0.21.11: 保存 id
+            cap_id: cap.id().to_string(),
             cap,
             schema,
             emitter,
+            chat_service,
+            cap_env,
             pending,
             registry,
         }
@@ -539,6 +546,7 @@ impl ToolDyn for CapabilityTool {
                 self.cap.ai_confirmation_rememberable(),
                 &self.pending,
                 self.emitter.as_ref(),
+                self.chat_service.as_ref(),
                 self.cap.id(),
                 "capability",
                 &args_value,
@@ -551,7 +559,7 @@ impl ToolDyn for CapabilityTool {
             // 构造 InvokeContext（P1.3: 从 slo_hard_timeout_ms 派生 deadline）
             // 0.21.0: 携带 origin=LocalAi + 完整 runtime（AI 在主进程中运行，有 GUI surface）
             let ctx = InvokeContext {
-                env: self.emitter.capability_env(),
+                env: self.cap_env.as_ref(),
                 origin: crate::domain::capability::InvocationOrigin::LocalAi,
                 runtime: crate::domain::capability::RuntimeCapabilities {
                     surface: None, // 0.21.1+ 接入 SurfacePort；当前 AI 不调 GUI starter cap
@@ -568,7 +576,7 @@ impl ToolDyn for CapabilityTool {
             // 调用 Capability（0.21.11：统一经 CapabilityRegistry::invoke）
             match self.registry.invoke(&self.cap_id, args_value, &ctx).await {
                 Ok(cap_result) => {
-                    let stash = self.emitter.capability_env().image_stash();
+                    let stash = self.cap_env.image_stash();
                     let contents =
                         cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
                     Ok(crate::domain::capability::rig_tool_result_to_text(
@@ -626,7 +634,9 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 /// - `cap_registry`: Capability 注册表
 /// - `external_tools`: 外部 tool（如 MCP tool），直接进 tool 池，不经过 CapabilityRegistry
 ///   （0.13.0 §9.3：统一外部 tool 入口，为 MCP tool 留对称性）
-/// - `emitter`: DomainEnv，用于构造 InvokeContext + emit 确认事件
+/// - `emitter`: EventPort，用于 emit 确认事件
+/// - `chat_service`: ChatService 引用，用于获取 request context（可能为 None）
+/// - `cap_env`: CapabilityEnv，用于构造 InvokeContext
 /// - `pending`: 危险确认注册表（`Arc<PendingConfirms>`，由 main.rs manage，对话窗口共享）
 /// - `ai_allowlist`: AI 授权的 Capability id 集合（0.21.5）。`None` = 不过滤（兼容旧测试）；
 ///   `Some(set)` = 只包装 set 中的 Capability。
@@ -643,7 +653,9 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 pub fn build_agent_tools(
     cap_registry: Arc<CapabilityRegistry>,
     external_tools: Vec<Box<dyn ToolDyn>>,
-    emitter: Arc<dyn DomainEnv>,
+    emitter: Arc<dyn EventPort>,
+    chat_service: Option<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>,
+    cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
     pending: Arc<PendingConfirms>,
     ai_allowlist: Option<&std::collections::HashSet<String>>,
 ) -> Vec<Box<dyn ToolDyn>> {
@@ -660,13 +672,17 @@ pub fn build_agent_tools(
                 continue;
             }
         }
-        
 
-        let tool = CapabilityTool::new(cap, emitter.clone(), pending.clone(), cap_registry.clone());
+        let tool = CapabilityTool::new(
+            cap,
+            emitter.clone(),
+            chat_service.clone(),
+            cap_env.clone(),
+            pending.clone(),
+            cap_registry.clone(),
+        );
         tools.push(Box::new(tool));
         cap_count += 1;
-
-
     }
 
     // 2. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）
@@ -845,10 +861,19 @@ mod tests {
             CapabilityError::InvalidArgs { detail: "x".into() },
             CapabilityError::InvalidState { detail: "x".into() },
             CapabilityError::Conflict { detail: "x".into() },
-            CapabilityError::InvalidData { reason: "binary".into(), detail: "x".into() },
+            CapabilityError::InvalidData {
+                reason: "binary".into(),
+                detail: "x".into(),
+            },
             CapabilityError::Permission { detail: "x".into() },
-            CapabilityError::OriginDenied { origin: "mcp".into(), allowed: "all".into() },
-            CapabilityError::Unsupported { required: "gui".into(), actual: "none".into() },
+            CapabilityError::OriginDenied {
+                origin: "mcp".into(),
+                allowed: "all".into(),
+            },
+            CapabilityError::Unsupported {
+                required: "gui".into(),
+                actual: "none".into(),
+            },
             CapabilityError::Timeout { detail: "x".into() },
             CapabilityError::Cancelled,
             CapabilityError::NotFound { id: "x".into() },
@@ -969,7 +994,7 @@ mod tests {
         let cap = Arc::new(MockCap {
             id_val: "entries_test_cap",
         }) as Arc<dyn Capability>;
-        reg.register(cap);
+        reg.register(cap).unwrap();
         let entries = reg.entries();
         assert!(entries.iter().any(|(id, _)| id == "entries_test_cap"));
     }

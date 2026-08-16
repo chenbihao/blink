@@ -76,6 +76,10 @@ impl TextSource {
 ///
 /// `None` = 无参数动作；`Clipboard` / `Selection` = 从 snapshot 抽字符串。
 /// `QueryRest`（`echo hello` 里的 hello）无消费者延后，长句参数走 0.9 AI function calling。
+///
+/// **0.21.13**：`extract` 不再返回裸 `Value::String`，而是由调用方提供目标字段名，
+/// 直接生成 Capability schema 接收的最终 JSON object（如 `{ "url": "..." }`）。
+/// 消除 command 层按 capability id 猜参数形状的兼容桥。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamSource {
     None,
@@ -85,11 +89,14 @@ pub enum ParamSource {
 }
 
 impl ParamSource {
-    /// 按 source 从 snapshot 抽取字符串参数（trim 后空视为 None）。
-    /// 内置动作的 OpenUrl/OpenPath/RevealInExplorer 用此。
+    /// 按 source 从 snapshot 抽取字符串参数，包装为目标字段名的 JSON object。
     ///
-    /// 0.8.3 收尾：改走 `AwarenessSnapshot::find_text` 统一 trim 判定。
-    pub fn extract(&self, snapshot: &AwarenessSnapshot) -> Option<serde_json::Value> {
+    /// 0.21.13：`extract` 直接产出 Capability invoke 可消费的最终参数对象，
+    /// 如 `ParamSource::Clipboard` + `field = "url"` → `{ "url": "https://..." }`。
+    /// `ParamSource::None` 恒返回 `None`（无参能力 invoke 时传 `{}`）。
+    ///
+    /// trim 后空字符串视为 None——避免空白值召回参数化动作。
+    pub fn extract(&self, snapshot: &AwarenessSnapshot, field: &str) -> Option<serde_json::Value> {
         let source = match self {
             ParamSource::None => return None,
             ParamSource::Clipboard => AwarenessSource::Clipboard,
@@ -97,7 +104,7 @@ impl ParamSource {
         };
         snapshot
             .find_text(source)
-            .map(|v| serde_json::Value::String(v.text.to_string()))
+            .map(|v| serde_json::json!({ field: v.text.to_string() }))
     }
 }
 
@@ -298,15 +305,15 @@ mod tests {
     #[test]
     fn param_source_extract_none() {
         let s = AwarenessSnapshot::with_clipboard("hello");
-        assert_eq!(ParamSource::None.extract(&s), None);
+        assert_eq!(ParamSource::None.extract(&s, "value"), None);
     }
 
     #[test]
     fn param_source_extract_clipboard() {
         let s = AwarenessSnapshot::with_clipboard("  hello  ");
         assert_eq!(
-            ParamSource::Clipboard.extract(&s),
-            Some(serde_json::Value::String("hello".to_string())),
+            ParamSource::Clipboard.extract(&s, "value"),
+            Some(serde_json::json!({ "value": "hello" })),
         );
     }
 
@@ -314,8 +321,8 @@ mod tests {
     fn param_source_extract_selection() {
         let s = AwarenessSnapshot::with_selection("  world  ");
         assert_eq!(
-            ParamSource::Selection.extract(&s),
-            Some(serde_json::Value::String("world".to_string())),
+            ParamSource::Selection.extract(&s, "text"),
+            Some(serde_json::json!({ "text": "world" })),
         );
     }
 

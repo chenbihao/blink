@@ -236,21 +236,23 @@ pub fn session_png() -> Option<Arc<Vec<u8>>> {
     let s = guard.as_ref()?;
     // 0.19.14：lazy 编码——首次调用时编码，后续直接返回缓存的 Arc。
     // OnceLock::get_or_init 在只读锁下安全初始化，不需要升级为写锁。
-    let png = s.png_bytes.get_or_init(|| {
-        match encode_png(&s.pixels, s.meta.width, s.meta.height) {
-            Ok(png) => {
-                tracing::debug!(
-                    w = s.meta.width, h = s.meta.height,
-                    "session_png lazy 编码完成"
-                );
-                Arc::new(png)
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "session_png lazy 编码失败");
-                Arc::new(Vec::new())
-            }
-        }
-    });
+    let png =
+        s.png_bytes.get_or_init(
+            || match encode_png(&s.pixels, s.meta.width, s.meta.height) {
+                Ok(png) => {
+                    tracing::debug!(
+                        w = s.meta.width,
+                        h = s.meta.height,
+                        "session_png lazy 编码完成"
+                    );
+                    Arc::new(png)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "session_png lazy 编码失败");
+                    Arc::new(Vec::new())
+                }
+            },
+        );
     Some(Arc::clone(png))
 }
 
@@ -259,6 +261,7 @@ pub fn session_png() -> Option<Arc<Vec<u8>>> {
 ///
 /// 分配新 `Vec<u8>`（不能原地 swap，SESSION 是共享只读的），
 /// 用 u32 指针 cast + `swap_rb_u32` 单遍 copy+swap。
+#[allow(dead_code)] // blink-screenshot://raw 协议入口，待前端 raw 路径落地后消费
 pub fn session_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let guard = SESSION.read().ok()?;
     let s = guard.as_ref()?;
@@ -344,10 +347,7 @@ pub fn active_display_index() -> usize {
         let ok = unsafe { GetCursorPos(&mut pt) };
         if ok.is_ok() {
             for (i, d) in displays.iter().enumerate() {
-                if pt.x >= d.x
-                    && pt.x < d.x + d.w as i32
-                    && pt.y >= d.y
-                    && pt.y < d.y + d.h as i32
+                if pt.x >= d.x && pt.x < d.x + d.w as i32 && pt.y >= d.y && pt.y < d.y + d.h as i32
                 {
                     return i;
                 }

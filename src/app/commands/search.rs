@@ -171,11 +171,16 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 /// 运行内置动作（0.8.0 §1.3 / 0.8.6 §8.1.1 重构）。
 ///
 /// 前端 `Action.kind === "run"` → `invoke("run_builtin_action", { id, arg })`。
-/// `id` 为内置动作注册表 key（如 `"open_settings"`），后端按 id 查找执行。
+/// `id` 为 `SearchAction::RunAction.id`（即 descriptor 的 `capability_id`）。
 ///
 /// **0.21.1**：删除 ActionRegistry → CapabilityRegistry 双 fallback，
 /// 统一走 CapabilityRegistry。13 个旧 Action 已全量迁为 Capability。
-/// `blink_print_debug_info` 返回 Text 结果后，兼容桥在此处完成复制副作用。
+///
+/// **0.21.13**：
+/// - `arg` 已是目标 Capability schema 接收的最终 JSON object（由 `ParamSource::extract`
+///   在领域层直接产出），command 层不再二次猜测参数形状。
+/// - 诊断文本复制改由显式 `BuiltinResultAction::CopyText` 表达，不再按 capability id 特判。
+/// - 复制失败返回错误，不谎报成功。
 ///
 /// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗。
 ///
@@ -198,10 +203,9 @@ pub async fn run_builtin_action(
     // 不再有 Action-first/Capability-fallback——descriptor 的 capability_id 直接指向 Capability。
     let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     if cap_reg.get(&id).is_some() {
-        // 兼容桥：BuiltinEngine 的 ParamSource::extract 返回 Value::String（裸字符串），
-        // Capability invoke 需要 { "url"/"path": value } object 格式。
-        // 0.21.7 删除 execution 模块后可考虑让 ParamSource 直接产 object。
-        let args = convert_legacy_arg_to_capability_args(&id, arg);
+        // 0.21.13：arg 已是最终 JSON object，无需 convert_legacy_arg_to_capability_args。
+        // 无参能力传 `{}`，参数化能力传 `{ "url": "..." }` / `{ "path": "..." }`。
+        let args = arg.unwrap_or_else(|| serde_json::json!({}));
         let ctx = crate::domain::capability::InvokeContext {
             env: env_arc.as_ref(),
             origin: crate::domain::capability::InvocationOrigin::LocalSurface,
@@ -218,17 +222,27 @@ pub async fn run_builtin_action(
                 let projection = cap_reg.get(&id).and_then(|cap| cap.projection());
                 tracing::info!(%id, summary = %result.to_display_text(projection.as_ref()), "run_builtin_action: Capability 执行成功");
 
-                // 0.21.1 兼容桥：blink_print_debug_info / blink_debug_inithook
-                // 旧 Action 会复制诊断信息到剪贴板，新 Capability 只返回 Text。
-                // 本地入口调用时在此处完成复制副作用（ResultAction 层）。
-                if matches!(id.as_str(), "blink_print_debug_info" | "blink_debug_inithook") {
-                    if let crate::domain::capability::CapabilityResult::Text { content, .. } = &result {
+                // 0.21.13：显式结果动作——按 capability id 查 descriptor 声明的 result_action。
+                // 不再按 `blink_print_debug_info` / `blink_debug_inithook` id 特判。
+                // 普通 CapabilityResult::Text 不会自动复制——只有 descriptor 声明了
+                // CopyText 才执行剪贴板写入。
+                if let Some(crate::domain::search::BuiltinResultAction::CopyText { skip_persist }) =
+                    crate::domain::search::find_result_action_by_capability_id(&id)
+                {
+                    if let crate::domain::capability::CapabilityResult::Text { content, .. } =
+                        &result
+                    {
                         if let Err(e) = crate::infra::platform::clipboard::write_text_to_clipboard(
                             content,
                             &id,
-                            true, // skip_persist = true
+                            skip_persist,
                         ) {
-                            tracing::error!(error = %e, "写入诊断信息到剪贴板失败");
+                            tracing::error!(error = %e, %id, "写入结果文本到剪贴板失败");
+                            return Err(crate::app::command_error::CommandError::new(
+                                "clipboard_error",
+                                &format!("写入剪贴板失败: {e}"),
+                                false,
+                            ));
                         }
                     }
                 }
@@ -526,17 +540,17 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
         }
     }
 
-// ── 路径 2：内置参数化动作的 Context binding（0.11.8 补齐） ────────────
-// BuiltinEngine 自判 context、不走 RuleRouter，故需要单独取数。字段格式与路径 1
-// 完全对齐，前端 renderBindingRow 无需区分来源。
-// 0.21.3：不再依赖 ActionRegistry，descriptor 自带双语 title。
-{
-    let disabled_vec: Vec<String> = disabled.iter().cloned().collect();
-    bindings.extend(crate::domain::search::list_builtin_context_bindings(
-        &disabled_vec,
-        &lang,
-    ));
-}
+    // ── 路径 2：内置参数化动作的 Context binding（0.11.8 补齐） ────────────
+    // BuiltinEngine 自判 context、不走 RuleRouter，故需要单独取数。字段格式与路径 1
+    // 完全对齐，前端 renderBindingRow 无需区分来源。
+    // 0.21.3：不再依赖 ActionRegistry，descriptor 自带双语 title。
+    {
+        let disabled_vec: Vec<String> = disabled.iter().cloned().collect();
+        bindings.extend(crate::domain::search::list_builtin_context_bindings(
+            &disabled_vec,
+            &lang,
+        ));
+    }
 
     bindings
 }
@@ -930,7 +944,10 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
     };
 
     // 0.21.0: 走 registry.invoke 执行 origin/runtime 门禁
-    cap_reg.invoke("open_url", args, &ctx).await.map_err(|e| e.to_string())?;
+    cap_reg
+        .invoke("open_url", args, &ctx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -967,30 +984,6 @@ pub async fn open_dir_in_explorer(path: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("打开资源管理器失败: {e}"))?;
     Ok(())
-}
-
-/// 把 BuiltinEngine 的 legacy arg（`Option<Value>`，String 或 None）转为 Capability invoke 需要的格式。
-///
-/// - `open_url` → `{ "url": <string> }`
-/// - `open_path` / `reveal_in_explorer` → `{ "path": <string> }`
-/// - 其他 → 原样传（已经是 object 就透传）
-fn convert_legacy_arg_to_capability_args(
-    id: &str,
-    arg: Option<serde_json::Value>,
-) -> serde_json::Value {
-    // 如果已经是 object，直接透传
-    if let Some(v) = &arg {
-        if v.is_object() {
-            return v.clone();
-        }
-    }
-    // 从 String 提取值（as_ref 避免移动）
-    let s = arg.as_ref().and_then(|v| v.as_str().map(str::to_string));
-    match id {
-        "open_url" => serde_json::json!({ "url": s.unwrap_or_default() }),
-        "open_path" | "reveal_in_explorer" => serde_json::json!({ "path": s.unwrap_or_default() }),
-        _ => arg.unwrap_or(serde_json::json!({})),
-    }
 }
 
 /// 结束一个截图会话（0.11.7-f helper）：清标注模式 + 隐藏 overlay + 清 SESSION。

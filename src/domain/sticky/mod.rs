@@ -367,14 +367,14 @@ impl StickyService {
             Err(StickyWriteOutcome::NotFound) => Err(StickyError::NotFound { id: id.to_string() }),
             Err(StickyWriteOutcome::Trashed) => Err(StickyError::Trashed { id: id.to_string() }),
             // classify_failed_write 只产 NotFound/Trashed/Conflict
-            Err(StickyWriteOutcome::Applied { .. }) => unreachable!("close_note 失败分类不含 Applied"),
-            Err(StickyWriteOutcome::Conflict { actual_updated_at }) => {
-                Err(StickyError::Conflict {
-                    id: id.to_string(),
-                    expected_updated_at: expected_updated_at.unwrap_or_default(),
-                    actual_updated_at,
-                })
+            Err(StickyWriteOutcome::Applied { .. }) => {
+                unreachable!("close_note 失败分类不含 Applied")
             }
+            Err(StickyWriteOutcome::Conflict { actual_updated_at }) => Err(StickyError::Conflict {
+                id: id.to_string(),
+                expected_updated_at: expected_updated_at.unwrap_or_default(),
+                actual_updated_at,
+            }),
         }
     }
 
@@ -409,8 +409,13 @@ impl StickyService {
 }
 
 // ── 0.20.0 derive_sticky_title ──────────────────────────────────────────────
+//
+// dead_code 说明：这组 Markdown 清洗 + 标题派生函数是 0.20.0 为便签窗口标题
+// 准备的，当前前端走 content 截断显示标题，后端 derive 路径待消费。
+// 函数互相调用组成内部闭环，整体标记 dead_code。
 
 /// 便签标题最大字符数。
+#[allow(dead_code)]
 const STICKY_TITLE_MAX_CHARS: usize = 48;
 
 /// 从便签内容派生窗口标题（0.20.0）。
@@ -422,6 +427,7 @@ const STICKY_TITLE_MAX_CHARS: usize = 48;
 /// 4. 空内容回退本地化"便签"（locale 为 "zh" 时返回中文，其他返回 "Sticky"）
 ///
 /// **安全要求**：对中文、emoji、组合字符安全截断（按 char，不按 byte）。
+#[allow(dead_code)] // 0.20.0 标题派生：前端当前走 content 截断，后端路径待消费
 pub fn derive_sticky_title(content: &str, locale: &str) -> String {
     // 1. 取第一条非空行
     let first_line = content
@@ -445,6 +451,7 @@ pub fn derive_sticky_title(content: &str, locale: &str) -> String {
 }
 
 /// 剥离常见 Markdown 标记，返回纯文本。
+#[allow(dead_code)] // 内部函数，被 derive_sticky_title 调用
 fn strip_markdown(s: &str) -> String {
     let mut result = s.to_string();
 
@@ -468,6 +475,7 @@ fn strip_markdown(s: &str) -> String {
 }
 
 /// 剥离行首 Markdown 前缀。
+#[allow(dead_code)] // 内部函数，被 strip_markdown 调用
 fn strip_leading_md_prefix(s: &str) -> String {
     let trimmed = s.trim_start();
     // 标题前缀 # / ## / ###
@@ -484,7 +492,9 @@ fn strip_leading_md_prefix(s: &str) -> String {
     }
     // 无序列表 - / * / +
     if (trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ "))
-        || trimmed == "-" || trimmed == "*" || trimmed == "+"
+        || trimmed == "-"
+        || trimmed == "*"
+        || trimmed == "+"
     {
         return trimmed[1..].trim_start().to_string();
     }
@@ -496,6 +506,7 @@ fn strip_leading_md_prefix(s: &str) -> String {
 }
 
 /// 剥离 `#`/`##`/`###` 等标题前缀，返回剩余内容。
+#[allow(dead_code)] // 内部函数
 fn strip_heading(s: &str) -> Option<String> {
     let hash_count = s.chars().take_while(|&c| c == '#').count();
     if hash_count > 0 && hash_count <= 6 {
@@ -509,6 +520,7 @@ fn strip_heading(s: &str) -> Option<String> {
 }
 
 /// 剥离有序列表前缀 `1.` / `10.` 等。
+#[allow(dead_code)] // 内部函数
 fn strip_ordered_list(s: &str) -> Option<String> {
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() || digits.len() > 3 {
@@ -522,6 +534,7 @@ fn strip_ordered_list(s: &str) -> Option<String> {
 }
 
 /// 剥离任务列表前缀 `- [ ]` / `- [x]` / `* [ ]` 等。
+#[allow(dead_code)] // 内部函数
 fn strip_task_list(s: &str) -> Option<String> {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() >= 5 {
@@ -540,6 +553,7 @@ fn strip_task_list(s: &str) -> Option<String> {
 
 /// 剥离行内标记对（如 `**bold**` → `bold`）。
 /// 移除所有出现的 marker 对，保留中间文本。
+#[allow(dead_code)] // 内部函数
 fn strip_inline_pairs(s: &str, marker: &str) -> String {
     let marker_chars: Vec<char> = marker.chars().collect();
     let chars: Vec<char> = s.chars().collect();
@@ -566,6 +580,7 @@ fn strip_inline_pairs(s: &str, marker: &str) -> String {
 }
 
 /// 从 start 开始查找匹配的闭合 marker。
+#[allow(dead_code)] // 内部函数
 fn find_closing_marker(chars: &[char], start: usize, marker: &[char]) -> Option<usize> {
     let mlen = marker.len();
     let mut i = start;
@@ -579,6 +594,7 @@ fn find_closing_marker(chars: &[char], start: usize, marker: &[char]) -> Option<
 }
 
 /// 剥离 Markdown 链接 `[text](url)` → `text`。
+#[allow(dead_code)] // 内部函数
 fn strip_md_links(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut result = String::with_capacity(chars.len());
@@ -608,11 +624,13 @@ fn strip_md_links(s: &str) -> String {
 }
 
 /// 从 start 开始查找目标字符。
+#[allow(dead_code)] // 内部函数
 fn find_char(chars: &[char], start: usize, target: char) -> Option<usize> {
     (start..chars.len()).find(|&i| chars[i] == target)
 }
 
 /// 本地化回退标题。
+#[allow(dead_code)] // 内部函数
 fn fallback_title(locale: &str) -> String {
     match locale {
         "zh" => "便签".to_string(),
@@ -669,32 +687,47 @@ mod tests {
     #[test]
     fn derive_title_strips_bold() {
         assert_eq!(derive_sticky_title("**bold**", "zh"), "bold");
-        assert_eq!(derive_sticky_title("text **bold** end", "zh"), "text bold end");
+        assert_eq!(
+            derive_sticky_title("text **bold** end", "zh"),
+            "text bold end"
+        );
         assert_eq!(derive_sticky_title("__bold__", "zh"), "bold");
     }
 
     #[test]
     fn derive_title_strips_italic() {
         assert_eq!(derive_sticky_title("*italic*", "zh"), "italic");
-        assert_eq!(derive_sticky_title("text *italic* end", "zh"), "text italic end");
+        assert_eq!(
+            derive_sticky_title("text *italic* end", "zh"),
+            "text italic end"
+        );
     }
 
     #[test]
     fn derive_title_strips_strike() {
         assert_eq!(derive_sticky_title("~~strike~~", "zh"), "strike");
-        assert_eq!(derive_sticky_title("text ~~strike~~ end", "zh"), "text strike end");
+        assert_eq!(
+            derive_sticky_title("text ~~strike~~ end", "zh"),
+            "text strike end"
+        );
     }
 
     #[test]
     fn derive_title_strips_code() {
         assert_eq!(derive_sticky_title("`code`", "zh"), "code");
-        assert_eq!(derive_sticky_title("text `code` end", "zh"), "text code end");
+        assert_eq!(
+            derive_sticky_title("text `code` end", "zh"),
+            "text code end"
+        );
     }
 
     #[test]
     fn derive_title_strips_links() {
         assert_eq!(derive_sticky_title("[text](url)", "zh"), "text");
-        assert_eq!(derive_sticky_title("see [link](http://x.com)", "zh"), "see link");
+        assert_eq!(
+            derive_sticky_title("see [link](http://x.com)", "zh"),
+            "see link"
+        );
     }
 
     #[test]
@@ -728,7 +761,10 @@ mod tests {
     fn derive_title_combined_markdown() {
         assert_eq!(derive_sticky_title("# **Bold Title**", "zh"), "Bold Title");
         assert_eq!(derive_sticky_title("- [x] ~~deleted~~", "zh"), "deleted");
-        assert_eq!(derive_sticky_title("## [Link Title](http://x.com)", "zh"), "Link Title");
+        assert_eq!(
+            derive_sticky_title("## [Link Title](http://x.com)", "zh"),
+            "Link Title"
+        );
     }
 
     #[test]

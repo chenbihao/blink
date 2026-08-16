@@ -20,8 +20,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ProjectionRule,
-    CapabilityPolicy, DangerClass, ConfirmationPolicy,
+    Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, ProjectionRule,
 };
 use crate::domain::plugin::manifest::{DangerClassDef, ToolDef};
 

@@ -12,9 +12,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 pub struct OpenChat;
@@ -59,10 +58,13 @@ impl Capability for OpenChat {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
 
         // 读取可选 prefill 参数
         let prefill: Option<&str> = args
@@ -72,9 +74,11 @@ impl Capability for OpenChat {
 
         // 先隐藏主窗再打开对话窗口（与旧 ChordAction 行为一致）
         surface.hide_main_window("open_chat");
-        surface.open_chat(prefill).map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+        surface
+            .open_chat(prefill)
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
 
         Ok(CapabilityResult::Done {
             summary: "已打开 AI 对话".into(),

@@ -730,7 +730,10 @@ pub async fn get_ai_capability_access(
 ) -> Result<crate::domain::config::shards::AiCapabilityAccessConfig, String> {
     use tauri::Manager;
     let pools = app.state::<crate::infra::data::DbPools>();
-    Ok(crate::domain::config::ai_capability_access::AiCapabilityAccessStore::load(&pools.config).await)
+    Ok(
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::load(&pools.config)
+            .await,
+    )
 }
 
 /// 设置单个 Capability 的 AI 启用状态。

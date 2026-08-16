@@ -8,9 +8,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 pub struct OpenSettings;
@@ -47,16 +46,23 @@ impl Capability for OpenSettings {
         _args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
         // 打开设置前先隐藏主窗口（与旧 Action 行为一致）
         surface.hide_main_window("open_settings");
-        surface.open_settings().map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
-        Ok(CapabilityResult::Done { summary: "已打开设置".into() })
+        surface
+            .open_settings()
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
+        Ok(CapabilityResult::Done {
+            summary: "已打开设置".into(),
+        })
     }
 }
 

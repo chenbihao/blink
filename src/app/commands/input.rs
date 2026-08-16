@@ -34,7 +34,11 @@ pub struct RegisterViewResult {
 /// - `ai_mode`: AI 模式是否活跃（独占模式之一）
 /// - `clipboard_mode`: 剪贴板模式是否活跃（0.20.8 新增，独占模式之一）
 #[tauri::command]
-pub fn register_main_input_view(query_empty: bool, ai_mode: bool, clipboard_mode: bool) -> RegisterViewResult {
+pub fn register_main_input_view(
+    query_empty: bool,
+    ai_mode: bool,
+    clipboard_mode: bool,
+) -> RegisterViewResult {
     let view_epoch = alloc_view_epoch();
     let ctx = MainViewContext {
         view_epoch,

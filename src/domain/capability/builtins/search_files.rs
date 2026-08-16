@@ -13,9 +13,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 use crate::domain::search::file_engine::FileEngine;
 use crate::domain::search::file_engine::FileSearchHit;
@@ -73,7 +72,6 @@ impl Capability for SearchFiles {
             ..Default::default()
         }
     }
-
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
@@ -218,7 +216,7 @@ mod tests {
                 source: "file".into(),
                 score_detail: None,
                 context_aware: false,
-        color_list_hex: None,
+                color_list_hex: None,
             },
             size_bytes: Some(42),
             modified_at: Some(1_700_000_000),

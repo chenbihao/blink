@@ -299,6 +299,7 @@ pub struct ItemResult {
 /// 0.21.7 删除旧变体后，`Invoke` 成为唯一副作用路径。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)] // Invoke 变体：0.21.3 前瞻性协议变体，前端已识别，后端待统一走 Capability 后消费
 pub enum ItemAction {
     /// 复制。`pointer` 指定从 data 取哪个值复制。
     /// 纯展示层短路径，保留专用变体。

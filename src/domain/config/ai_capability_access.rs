@@ -27,6 +27,7 @@ use crate::domain::capability::{
 pub struct AiCapabilityAccessStore;
 
 impl AiCapabilityAccessStore {
+    #[allow(dead_code)] // 存储 key 常量：ConfigStore::get 内部使用 KV 路径，此常量供文档/调试
     const KEY: &'static str = "ai.capability_access";
 
     /// 加载配置。缺失时返回默认值（空 enabled_capabilities）。
@@ -38,10 +39,7 @@ impl AiCapabilityAccessStore {
     }
 
     /// 保存配置。
-    pub async fn save(
-        pool: &SqlitePool,
-        config: &AiCapabilityAccessConfig,
-    ) -> Result<(), String> {
+    pub async fn save(pool: &SqlitePool, config: &AiCapabilityAccessConfig) -> Result<(), String> {
         ConfigStore::set::<AiCapabilityAccessConfig>(pool, config)
             .await
             .map_err(|e| e.to_string())
@@ -180,9 +178,12 @@ impl AiCapabilityAccessStore {
         let mut config = Self::load(pool).await;
         // 用户手动修改时，标记为已种子状态
         config.seeded = true;
-        
+
         if enabled {
-            if !config.enabled_capabilities.contains(&capability_id.to_string()) {
+            if !config
+                .enabled_capabilities
+                .contains(&capability_id.to_string())
+            {
                 config.enabled_capabilities.push(capability_id.to_string());
             }
         } else {
@@ -203,7 +204,7 @@ impl AiCapabilityAccessStore {
         let mut config = Self::load(pool).await;
         // 用户手动修改时，标记为已种子状态
         config.seeded = true;
-        
+
         for (capability_id, enabled) in ids_with_enabled {
             if *enabled {
                 if !config.enabled_capabilities.contains(capability_id) {
@@ -216,7 +217,6 @@ impl AiCapabilityAccessStore {
         Self::save(pool, &config).await?;
         Ok(config)
     }
-
 }
 
 // ── 单测 ─────────────────────────────────────────────────────────────────────
@@ -225,8 +225,7 @@ impl AiCapabilityAccessStore {
 mod tests {
     use super::*;
     use crate::domain::capability::{
-        CapabilityPolicy, CapabilityRegistry, ConfirmationPolicy, DangerClass, InvocationOrigin,
-        OriginSet, RuntimeRequirement, AiDefault, McpDefault,
+        AiDefault, CapabilityPolicy, CapabilityRegistry, ConfirmationPolicy, DangerClass, OriginSet,
     };
     use crate::domain::config::shards::AiCapabilityAccessConfig;
     use crate::domain::config::store::ConfigKey;
@@ -360,6 +359,7 @@ mod tests {
             schema_version: 1,
             profile: "custom".into(),
             enabled_capabilities: vec!["open_url".into(), "search_apps".into()],
+            seeded: true,
         };
         AiCapabilityAccessStore::save(&pool, &config)
             .await
@@ -378,13 +378,21 @@ mod tests {
         let config = AiCapabilityAccessStore::toggle_capability(&pool, "open_url", true)
             .await
             .expect("toggle on");
-        assert!(config.enabled_capabilities.contains(&"open_url".to_string()));
+        assert!(
+            config
+                .enabled_capabilities
+                .contains(&"open_url".to_string())
+        );
 
         // 移除
         let config = AiCapabilityAccessStore::toggle_capability(&pool, "open_url", false)
             .await
             .expect("toggle off");
-        assert!(!config.enabled_capabilities.contains(&"open_url".to_string()));
+        assert!(
+            !config
+                .enabled_capabilities
+                .contains(&"open_url".to_string())
+        );
     }
 
     #[tokio::test]
@@ -424,7 +432,11 @@ mod tests {
             .await
             .expect("batch remove");
         assert_eq!(config.enabled_capabilities.len(), 2);
-        assert!(!config.enabled_capabilities.contains(&"open_url".to_string()));
+        assert!(
+            !config
+                .enabled_capabilities
+                .contains(&"open_url".to_string())
+        );
     }
 
     #[tokio::test]
@@ -447,6 +459,7 @@ mod tests {
             schema_version: 1,
             profile: "custom".into(),
             enabled_capabilities: vec!["my_custom_cap".into()],
+            seeded: true,
         };
         AiCapabilityAccessStore::save(&pool, &initial)
             .await
@@ -483,6 +496,7 @@ mod tests {
             schema_version: 1,
             profile: "custom".into(),
             enabled_capabilities: vec!["my_custom_cap".into()],
+            seeded: true,
         };
         AiCapabilityAccessStore::save(&pool, &custom)
             .await
@@ -495,7 +509,11 @@ mod tests {
         // 重置后 profile 回到 recommended
         assert_eq!(reset.profile, "recommended");
         // 推荐集合不含自定义 cap
-        assert!(!reset.enabled_capabilities.contains(&"my_custom_cap".to_string()));
+        assert!(
+            !reset
+                .enabled_capabilities
+                .contains(&"my_custom_cap".to_string())
+        );
     }
 
     // ── generate_recommended 与真实 registry 集成测试 ─────────────────────
@@ -505,7 +523,14 @@ mod tests {
         let registry = CapabilityRegistry::default();
         let recommended = AiCapabilityAccessStore::generate_recommended(&registry);
         // Dangerous 类不应出现在推荐集合中
-        for dangerous_id in &["lock", "shutdown", "restart", "sleep", "clear_history", "exit_blink"] {
+        for dangerous_id in &[
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+        ] {
             assert!(
                 !recommended.contains(&dangerous_id.to_string()),
                 "Dangerous capability {dangerous_id} 不应在推荐集合中"

@@ -14,8 +14,9 @@ assert.match(indexSource, /scrollButton\.hidden = source === IMAGE_SOURCE\.CLIPB
   '剪贴板编辑必须隐藏截图专属长截图入口');
 assert.match(outputSource, /ss\.editorSession\.canUseCaptureCropFastPath/,
   'SESSION 裁剪快路径必须只由截图来源启用');
-assert.match(outputSource, /source !== IMAGE_SOURCE\.CLIPBOARD/,
-  '输出必须按编辑来源选择截图或通用适配器');
+assert.match(outputSource, /IMAGE_SOURCE\.SCREENSHOT/, 'SCREENSHOT 来源走截图适配器');
+assert.match(outputSource, /IMAGE_SOURCE\.LONG_SCREENSHOT/, 'LONG_SCREENSHOT 来源走截图适配器');
+assert.match(outputSource, /imageEditorPin\(pngBytes/, '其余来源走通用 image-editor 适配器');
 assert.match(outputSource, /imageEditorCancel\(\)/,
   '通用编辑取消不得借用 screenshot_cancel');
 

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-use crate::domain::event::DomainEnv;
+use crate::domain::event::EventPort;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -68,7 +68,7 @@ pub enum EngineConfigUpdate {
 }
 
 pub struct SearchService {
-    env: Arc<dyn DomainEnv>,
+    env: Arc<dyn EventPort>,
     pool: SqlitePool,
     sync_engines: Vec<Arc<dyn SearchEngine>>,
     async_engines: Vec<Arc<dyn SearchEngine>>,
@@ -130,7 +130,7 @@ impl Default for AutosuggestState {
 
 impl SearchService {
     pub fn new(
-        env: Arc<dyn DomainEnv>,
+        env: Arc<dyn EventPort>,
         pool: SqlitePool,
         engines: Vec<Arc<dyn SearchEngine>>,
         plugin_engine: Arc<PluginEngine>,
@@ -446,10 +446,8 @@ impl SearchService {
                 let items = engine.search(arg, &search_ctx).await;
                 let t1 = std::time::Instant::now();
                 // 0.20.1: 不使用 max_results 截断，engine 内部已截断
-                let entries: Vec<AppEntry> = items
-                    .into_iter()
-                    .map(SearchItem::into_app_entry)
-                    .collect();
+                let entries: Vec<AppEntry> =
+                    items.into_iter().map(SearchItem::into_app_entry).collect();
                 tracing::trace!(
                     query = %arg,
                     count = entries.len(),
@@ -488,7 +486,10 @@ impl SearchService {
         // 这样 EngineTakeover（如"剪贴板"→ClipboardEngine）可以跳过 get_weights 全表扫描。
         let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
         let empty_history = std::collections::HashMap::new();
-        let route = self.router.route(q, &empty_history, ranking_hint.as_ref()).await;
+        let route = self
+            .router
+            .route(q, &empty_history, ranking_hint.as_ref())
+            .await;
         let route = self.filter_route(route);
 
         // 只在 Mixed 路径加载 history——sync 引擎（StartMenuEngine 等）用 history 权重
@@ -497,8 +498,7 @@ impl SearchService {
             || matches!(
                 route,
                 Route::EngineTakeover { .. } | Route::AiTrigger { .. }
-            )
-        {
+            ) {
             empty_history
         } else {
             crate::infra::data::history::get_weights(&self.pool).await
@@ -1045,7 +1045,7 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
 /// 即使 items 为空也会 emit（空结果需要通知前端清除占位符）。
 /// empty_source: 空结果时携带的来源 plugin_id，用于前端只清除对应占位符。
 fn emit_results(
-    env: &dyn DomainEnv,
+    env: &dyn EventPort,
     seq: u64,
     items: Vec<SearchItem>,
     limit: usize,
@@ -1168,7 +1168,7 @@ mod tests {
             source: source.into(),
             score_detail: None,
             context_aware: false,
-        color_list_hex: None,
+            color_list_hex: None,
         }
     }
 

@@ -461,10 +461,8 @@ fn begin_and_show(
 /// 读取当前剪贴板 PNG → `begin_session` → `show_image_editor_window`。
 /// 剪贴板无图片时返回结构化错误。
 #[tauri::command]
-pub async fn open_image_editor_from_clipboard(
-    app: tauri::AppHandle,
-) -> Result<(), MediaError> {
-    use crate::domain::clipboard::{read_current, ClipboardContent};
+pub async fn open_image_editor_from_clipboard(app: tauri::AppHandle) -> Result<(), MediaError> {
+    use crate::domain::clipboard::{ClipboardContent, read_current};
 
     check_already_active(&app, "open_image_editor_from_clipboard")?;
 
@@ -485,7 +483,12 @@ pub async fn open_image_editor_from_clipboard(
         }
     };
 
-    begin_and_show(&app, png_data, "clipboard", "open_image_editor_from_clipboard")
+    begin_and_show(
+        &app,
+        png_data,
+        "clipboard",
+        "open_image_editor_from_clipboard",
+    )
 }
 
 /// 0.20.4：从剪贴板历史图片打开编辑器。
@@ -527,7 +530,7 @@ pub async fn open_image_editor_from_pin(
     app: tauri::AppHandle,
     window_label: String,
 ) -> Result<(), MediaError> {
-    use crate::infra::platform::window::{get_pin_image_by_label, PinImage};
+    use crate::infra::platform::window::{PinImage, get_pin_image_by_label};
 
     check_already_active(&app, "open_image_editor_from_pin")?;
 
@@ -551,8 +554,16 @@ pub async fn open_image_editor_from_pin(
                 crate::infra::platform::screenshot::encode_png(&bgra, w, h)
             })
             .await
-            .map_err(|e| MediaError::new("internal_error", format!("spawn_blocking join 失败: {e}"), false))?
-            .map_err(|e| MediaError::new("internal_error", format!("BGRA 编码 PNG 失败: {e}"), false))?
+            .map_err(|e| {
+                MediaError::new(
+                    "internal_error",
+                    format!("spawn_blocking join 失败: {e}"),
+                    false,
+                )
+            })?
+            .map_err(|e| {
+                MediaError::new("internal_error", format!("BGRA 编码 PNG 失败: {e}"), false)
+            })?
         }
     };
 
@@ -904,14 +915,12 @@ pub async fn analyze_palette(
 
             // 从截图 SESSION 裁剪 BGRA → swap 为 RGBA（spawn_blocking 隔离 CPU）
             tokio::task::spawn_blocking(move || {
-                let (bgra, cw, ch) =
-                    crate::infra::platform::screenshot::crop(x, y, w, h)
-                        .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
+                let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
+                    .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
                 // BGRA → RGBA（u32 位运算批量 swap R↔B）
                 let mut rgba = bgra;
                 for chunk in rgba.chunks_exact_mut(4) {
-                    let px =
-                        u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let px = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     let rb = px & 0x00FF00FF;
                     let ga = px & 0xFF00FF00;
                     let swapped = ga | (rb << 16) | (rb >> 16);
@@ -921,23 +930,26 @@ pub async fn analyze_palette(
             })
             .await
             .map_err(|e| {
-                CommandError::new("internal_error", format!("spawn_blocking join 失败: {e}"), false)
+                CommandError::new(
+                    "internal_error",
+                    format!("spawn_blocking join 失败: {e}"),
+                    false,
+                )
             })?
-            .map_err(|e| {
-                CommandError::new("invalid_state", e, false)
-            })?
+            .map_err(|e| CommandError::new("invalid_state", e, false))?
         }
         "editor" => {
             // 从图片编辑会话 SESSION 取原始 PNG
-            let png_bytes = crate::infra::platform::image_editor::session_png().ok_or_else(|| {
-                tracing::warn!("analyze_palette: 图片编辑会话不活跃");
-                CommandError::with_detail(
-                    "invalid_state",
-                    "图片编辑会话不活跃",
-                    false,
-                    serde_json::json!({ "reason": "editor_session_inactive" }),
-                )
-            })?;
+            let png_bytes =
+                crate::infra::platform::image_editor::session_png().ok_or_else(|| {
+                    tracing::warn!("analyze_palette: 图片编辑会话不活跃");
+                    CommandError::with_detail(
+                        "invalid_state",
+                        "图片编辑会话不活跃",
+                        false,
+                        serde_json::json!({ "reason": "editor_session_inactive" }),
+                    )
+                })?;
             let png_bytes = (*png_bytes).clone();
 
             // 解码 PNG → RGBA（spawn_blocking 隔离 CPU）
@@ -946,11 +958,13 @@ pub async fn analyze_palette(
             })
             .await
             .map_err(|e| {
-                CommandError::new("internal_error", format!("spawn_blocking join 失败: {e}"), false)
+                CommandError::new(
+                    "internal_error",
+                    format!("spawn_blocking join 失败: {e}"),
+                    false,
+                )
             })?
-            .map_err(|e| {
-                CommandError::new("invalid_data", format!("PNG 解码失败: {e}"), false)
-            })?;
+            .map_err(|e| CommandError::new("invalid_data", format!("PNG 解码失败: {e}"), false))?;
 
             // P1-4：按可选选区裁剪
             if let Some(crop) = crop {
@@ -974,9 +988,7 @@ pub async fn analyze_palette(
         crate::domain::palette::analyze_palette(&rgba_flat, width, height)
     })
     .await
-    .map_err(|e| {
-        CommandError::new("internal_error", format!("配色分析 task 崩溃: {e}"), false)
-    })?;
+    .map_err(|e| CommandError::new("internal_error", format!("配色分析 task 崩溃: {e}"), false))?;
 
     // 直连 Rust 核心，序列化 PaletteResult 返回前端
     let json = serde_json::to_value(&result).map_err(|e| {
@@ -1035,12 +1047,15 @@ pub async fn generate_palette_schemes(
             false,
         ));
     }
-    let r = u8::from_str_radix(&hex[0..2], 16)
-        .map_err(|e| CommandError::new("invalid_args", format!("anchor_hex R 解析失败: {e}"), false))?;
-    let g = u8::from_str_radix(&hex[2..4], 16)
-        .map_err(|e| CommandError::new("invalid_args", format!("anchor_hex G 解析失败: {e}"), false))?;
-    let b = u8::from_str_radix(&hex[4..6], 16)
-        .map_err(|e| CommandError::new("invalid_args", format!("anchor_hex B 解析失败: {e}"), false))?;
+    let r = u8::from_str_radix(&hex[0..2], 16).map_err(|e| {
+        CommandError::new("invalid_args", format!("anchor_hex R 解析失败: {e}"), false)
+    })?;
+    let g = u8::from_str_radix(&hex[2..4], 16).map_err(|e| {
+        CommandError::new("invalid_args", format!("anchor_hex G 解析失败: {e}"), false)
+    })?;
+    let b = u8::from_str_radix(&hex[4..6], 16).map_err(|e| {
+        CommandError::new("invalid_args", format!("anchor_hex B 解析失败: {e}"), false)
+    })?;
 
     let source: Vec<[u8; 3]> = source_colors.unwrap_or_default();
 
@@ -1050,7 +1065,11 @@ pub async fn generate_palette_schemes(
     })
     .await
     .map_err(|e| {
-        CommandError::new("internal_error", format!("配色方案生成 task 崩溃: {e}"), false)
+        CommandError::new(
+            "internal_error",
+            format!("配色方案生成 task 崩溃: {e}"),
+            false,
+        )
     })?;
 
     let json = serde_json::to_value(&schemes).map_err(|e| {

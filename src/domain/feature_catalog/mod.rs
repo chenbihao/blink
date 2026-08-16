@@ -11,10 +11,10 @@
 //! - IPC 契约：只读 `list_feature_catalog()`；批量写 `apply_binding_batch(ops)`。
 //!   目录刷新由前端订阅 `blink://config-changed`，不新增专用事件。
 
-mod types;
 mod aggregator;
 mod binding_adapter;
+mod types;
 
-pub use types::*;
 pub use aggregator::FeatureCatalogAggregator;
 pub use binding_adapter::apply_binding_batch;
+pub use types::*;

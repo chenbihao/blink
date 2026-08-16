@@ -418,6 +418,7 @@ pub fn recommend_text_color(bg_rgb: Rgb) -> ContrastInfo {
 }
 
 /// 给定前景和背景色，返回对比度和推荐文字色方向
+#[allow(dead_code)] // WCAG 对比度工具，待主题系统消费
 pub fn contrast_with_recommendation(fg_rgb: Rgb, bg_rgb: Rgb) -> ContrastInfo {
     let ratio = contrast_ratio(fg_rgb, bg_rgb);
     let fg_lum = relative_luminance(fg_rgb);
@@ -960,7 +961,7 @@ impl ColorHistogramAccumulator {
     pub fn accumulate(&mut self, rgba_flat: &[u8], start_pixel: usize, end_pixel: usize) {
         let safe_end = end_pixel.min(rgba_flat.len() / 4);
         let c = PALETTE_ALGORITHM_V1;
-        for pixel in start_pixel.max(0)..safe_end {
+        for pixel in start_pixel..safe_end {
             let i = pixel * 4;
             if rgba_flat[i + 3] as f64 / 255.0 < c.min_alpha {
                 continue;
@@ -1116,7 +1117,11 @@ fn find_hue_peak_candidates(
             continue;
         }
         let hue_raw = entry.oklab[2].atan2(entry.oklab[1]).to_degrees();
-        let hue = if hue_raw < 0.0 { hue_raw + 360.0 } else { hue_raw };
+        let hue = if hue_raw < 0.0 {
+            hue_raw + 360.0
+        } else {
+            hue_raw
+        };
         let sector_idx = ((hue / (360.0 / HUE_SECTORS as f64)) as usize) % HUE_SECTORS;
         let sector = &mut sectors[sector_idx];
         sector.count += entry.count;
@@ -1262,7 +1267,10 @@ fn pick_diverse_colors(
 /// 同时生成面积主题之外的两种设计视角：
 /// - 视觉焦点色：保护面积很小、但高色度且与背景反差明显的颜色
 /// - 均衡/界面关键色：背景 + 层级灰 + 多样化点缀
-pub fn extract_design_schemes(entries: &[HistogramEntry], roles: &[RoleColor]) -> Vec<HarmonyScheme> {
+pub fn extract_design_schemes(
+    entries: &[HistogramEntry],
+    roles: &[RoleColor],
+) -> Vec<HarmonyScheme> {
     if entries.is_empty() || roles.is_empty() {
         return vec![];
     }
@@ -1303,7 +1311,10 @@ pub fn extract_design_schemes(entries: &[HistogramEntry], roles: &[RoleColor]) -
     let mut balanced_labs: Vec<OkLab> = Vec::new();
     let append_distinct = |rgb: Rgb, balanced: &mut Vec<Rgb>, balanced_labs: &mut Vec<OkLab>| {
         let lab = rgb_to_oklab(rgb[0], rgb[1], rgb[2]);
-        if balanced_labs.iter().any(|existing| delta_e(*existing, lab) < 0.035) {
+        if balanced_labs
+            .iter()
+            .any(|existing| delta_e(*existing, lab) < 0.035)
+        {
             return;
         }
         balanced.push(rgb);
@@ -1346,7 +1357,12 @@ pub fn extract_design_schemes(entries: &[HistogramEntry], roles: &[RoleColor]) -
             confidence: 1.0,
         },
         HarmonyScheme {
-            label: if interface_like { "界面关键色" } else { "均衡配色" }.into(),
+            label: if interface_like {
+                "界面关键色"
+            } else {
+                "均衡配色"
+            }
+            .into(),
             scheme: "balanced".into(),
             description: if interface_like {
                 "背景、文字层级与状态点缀"
@@ -1385,9 +1401,8 @@ fn generate_smart_pairing(
     let mut seen_rgb: std::collections::HashSet<Rgb> = std::collections::HashSet::new();
 
     // 从 roles 的 RGB 反查 entries 索引
-    let find_entry_by_rgb = |rgb: Rgb| -> Option<usize> {
-        entries.iter().position(|e| e.rgb == rgb)
-    };
+    let find_entry_by_rgb =
+        |rgb: Rgb| -> Option<usize> { entries.iter().position(|e| e.rgb == rgb) };
 
     for role in roles {
         if seen_rgb.insert(role.rgb) {
@@ -1425,7 +1440,7 @@ fn generate_smart_pairing(
     });
 
     if candidate_indices.is_empty() {
-    // 降级：无候选
+        // 降级：无候选
         return HarmonyScheme {
             label: "原图智能搭配".into(),
             scheme: "smart_pairing".into(),
@@ -1450,18 +1465,11 @@ fn generate_smart_pairing(
             .collect()
     } else {
         // 深色主题：优先亮度低的候选
-        candidate_indices
-            .iter()
-            .copied()
-            .take(5)
-            .collect()
+        candidate_indices.iter().copied().take(5).collect()
     };
 
     // 也考虑角色色中标记为 background 的
-    let bg_role_rgb = roles
-        .iter()
-        .find(|r| r.role == "background")
-        .map(|r| r.rgb);
+    let bg_role_rgb = roles.iter().find(|r| r.role == "background").map(|r| r.rgb);
     let mut bg_candidates = bg_candidates;
     if let Some(bg_rgb) = bg_role_rgb {
         if let Some(idx) = find_entry_by_rgb(bg_rgb) {
@@ -1621,11 +1629,7 @@ fn generate_smart_pairing(
         },
         None => {
             // 降级：无法满足 WCAG 硬约束，返回低置信结果（引用均衡配色已有颜色，不发明新颜色）
-            let degraded_colors: Vec<Rgb> = roles
-                .iter()
-                .take(3)
-                .map(|r| r.rgb)
-                .collect();
+            let degraded_colors: Vec<Rgb> = roles.iter().take(3).map(|r| r.rgb).collect();
             HarmonyScheme {
                 label: "原图智能搭配".into(),
                 scheme: "smart_pairing".into(),
@@ -1656,7 +1660,11 @@ pub fn analyze_palette(rgba_flat: &[u8], width: usize, height: usize) -> Palette
 }
 
 /// 从直方图执行聚类与设计分析
-pub fn analyze_palette_histogram(histogram: &ColorHistogram, width: usize, height: usize) -> PaletteResult {
+pub fn analyze_palette_histogram(
+    histogram: &ColorHistogram,
+    width: usize,
+    height: usize,
+) -> PaletteResult {
     if histogram.valid_pixels == 0 || histogram.counts.is_empty() {
         return PaletteResult {
             roles: vec![],
@@ -1680,7 +1688,8 @@ pub fn analyze_palette_histogram(histogram: &ColorHistogram, width: usize, heigh
     let k = if distinct_count <= c.k_max {
         distinct_count
     } else {
-        c.k_max.min(c.k_min.max((distinct_count as f64).sqrt().round() as usize))
+        c.k_max
+            .min(c.k_min.max((distinct_count as f64).sqrt().round() as usize))
     };
     let clusters = weighted_kmeans_cluster(&entries, k);
     let roles = assign_roles(clusters);
@@ -1716,8 +1725,13 @@ pub fn analyze_palette_histogram(histogram: &ColorHistogram, width: usize, heigh
 // ── 输出格式生成 ──────────────────────────────────────────────────────────
 
 /// 将角色色列表输出为纯颜色列表（每行一个 HEX）
+#[allow(dead_code)] // 输出格式工具，待 CLI 导出消费
 pub fn format_as_list(roles: &[RoleColor]) -> String {
-    roles.iter().map(|r| r.hex.as_str()).collect::<Vec<_>>().join("\n")
+    roles
+        .iter()
+        .map(|r| r.hex.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -1759,11 +1773,17 @@ mod tests {
                 assert!(
                     (result[i] - case.oklab[i]).abs() < case.tolerance,
                     "OKLab[{}] mismatch for {}: expected {}, got {}",
-                    i, case.name, case.oklab[i], result[i]
+                    i,
+                    case.name,
+                    case.oklab[i],
+                    result[i]
                 );
             }
         }
-        eprintln!("OKLab fixture 对拍通过: {} cases", fixture.oklab_cases.len());
+        eprintln!(
+            "OKLab fixture 对拍通过: {} cases",
+            fixture.oklab_cases.len()
+        );
     }
 
     // ── Roundtrip 测试（fixture 对拍）──────────────────────────────────────
@@ -1800,11 +1820,18 @@ mod tests {
                 assert!(
                     diff <= case.tolerance,
                     "Roundtrip {} channel {} mismatch: expected ~{}, got {}, tolerance {}",
-                    case.name, i, case.rgba[i], back[i], case.tolerance
+                    case.name,
+                    i,
+                    case.rgba[i],
+                    back[i],
+                    case.tolerance
                 );
             }
         }
-        eprintln!("Roundtrip fixture 对拍通过: {} cases", fixture.roundtrip_cases.len());
+        eprintln!(
+            "Roundtrip fixture 对拍通过: {} cases",
+            fixture.roundtrip_cases.len()
+        );
     }
 
     // ── Palette 测试用例（fixture 对拍）───────────────────────────────────
@@ -1879,9 +1906,12 @@ mod tests {
             // P2：强断言 — 精确角色数
             if let Some(exact) = case.expect_exact_roles {
                 assert_eq!(
-                    result.roles.len(), exact,
+                    result.roles.len(),
+                    exact,
                     "case '{}': exact roles mismatch (expected {}, got {})",
-                    case.name, exact, result.roles.len()
+                    case.name,
+                    exact,
+                    result.roles.len()
                 );
             }
 
@@ -1926,7 +1956,8 @@ mod tests {
 
             // P3：像素可寻断言——所有角色色必须是输入直方图中出现过的真实像素
             let histogram = build_color_histogram(&case.rgba_flat);
-            let input_rgbs: std::collections::HashSet<Rgb> = histogram.colors.iter().copied().collect();
+            let input_rgbs: std::collections::HashSet<Rgb> =
+                histogram.colors.iter().copied().collect();
             for role in &result.roles {
                 assert!(
                     input_rgbs.contains(&role.rgb),
@@ -1937,7 +1968,10 @@ mod tests {
             }
 
             // P3：智能搭配方案断言
-            let smart_pairing = result.recommended.iter().find(|s| s.scheme == "smart_pairing");
+            let smart_pairing = result
+                .recommended
+                .iter()
+                .find(|s| s.scheme == "smart_pairing");
             if let Some(scheme) = smart_pairing {
                 // 像素可寻：智能搭配的所有颜色也必须是真实像素
                 for rgb in &scheme.colors {
@@ -1967,7 +2001,10 @@ mod tests {
                 );
             }
         }
-        eprintln!("Palette fixture 对拍通过: {} cases", fixture.palette_test_cases.len());
+        eprintln!(
+            "Palette fixture 对拍通过: {} cases",
+            fixture.palette_test_cases.len()
+        );
     }
 
     // ── 纯函数单测 ─────────────────────────────────────────────────────────
@@ -2023,7 +2060,9 @@ mod tests {
 
     #[test]
     fn solid_color_has_background() {
-        let rgba = [240, 240, 240, 255, 240, 240, 240, 255, 240, 240, 240, 255, 240, 240, 240, 255];
+        let rgba = [
+            240, 240, 240, 255, 240, 240, 240, 255, 240, 240, 240, 255, 240, 240, 240, 255,
+        ];
         let result = analyze_palette(&rgba, 2, 2);
         assert!(!result.empty);
         assert!(result.roles.iter().any(|r| r.role == "background"));

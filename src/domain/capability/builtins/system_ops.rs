@@ -12,9 +12,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 // ── Lock ────────────────────────────────────────────────────────────────────
@@ -54,7 +53,9 @@ impl Capability for LockWorkstation {
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         let _ = crate::infra::platform::lock::lock_workstation();
-        Ok(CapabilityResult::Done { summary: "已锁定工作站".into() })
+        Ok(CapabilityResult::Done {
+            summary: "已锁定工作站".into(),
+        })
     }
 }
 
@@ -101,7 +102,9 @@ impl Capability for Shutdown {
                 .args(["/s", "/t", "0"])
                 .spawn();
         }
-        Ok(CapabilityResult::Done { summary: "关机指令已发送".into() })
+        Ok(CapabilityResult::Done {
+            summary: "关机指令已发送".into(),
+        })
     }
 }
 
@@ -147,7 +150,9 @@ impl Capability for Restart {
                 .args(["/r", "/t", "0"])
                 .spawn();
         }
-        Ok(CapabilityResult::Done { summary: "重启指令已发送".into() })
+        Ok(CapabilityResult::Done {
+            summary: "重启指令已发送".into(),
+        })
     }
 }
 
@@ -193,7 +198,9 @@ impl Capability for Sleep {
                 .args(["powrprof.dll,SetSuspendState", "0,1,0"])
                 .spawn();
         }
-        Ok(CapabilityResult::Done { summary: "睡眠指令已发送".into() })
+        Ok(CapabilityResult::Done {
+            summary: "睡眠指令已发送".into(),
+        })
     }
 }
 
@@ -236,7 +243,9 @@ impl Capability for ClearHistory {
         let pool = &ctx.env.db_pools().history;
         crate::infra::data::history::clear(&pool).await;
         tracing::info!("搜索历史已清空");
-        Ok(CapabilityResult::Done { summary: "搜索历史已清空".into() })
+        Ok(CapabilityResult::Done {
+            summary: "搜索历史已清空".into(),
+        })
     }
 }
 
@@ -277,13 +286,18 @@ impl Capability for ExitBlink {
         _args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let surface = ctx.runtime.surface.ok_or_else(|| CapabilityError::Unsupported {
-            required: RuntimeRequirement::GUI_SURFACE.to_string(),
-            actual: ctx.runtime.as_requirement().to_string(),
-        })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: RuntimeRequirement::GUI_SURFACE.to_string(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
         surface.hide_main_window("exit_blink");
         surface.exit_app();
-        Ok(CapabilityResult::Done { summary: "Blink 已退出".into() })
+        Ok(CapabilityResult::Done {
+            summary: "Blink 已退出".into(),
+        })
     }
 }
 
@@ -364,7 +378,14 @@ mod tests {
 
     #[test]
     fn all_system_caps_have_non_empty_schema_description() {
-        for s in [LockWorkstation.schema(), Shutdown.schema(), Restart.schema(), Sleep.schema(), ClearHistory.schema(), ExitBlink.schema()] {
+        for s in [
+            LockWorkstation.schema(),
+            Shutdown.schema(),
+            Restart.schema(),
+            Sleep.schema(),
+            ClearHistory.schema(),
+            ExitBlink.schema(),
+        ] {
             assert!(!s.description.is_empty());
         }
     }

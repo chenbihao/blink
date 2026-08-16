@@ -8,9 +8,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
-    RuntimeRequirement,
+    AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
 
 // ── OpenLogs ────────────────────────────────────────────────────────────────
@@ -35,7 +34,8 @@ impl Capability for OpenLogs {
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
             allowed_origins: OriginSet::ALL_LOCAL,
-            runtime_requirement: RuntimeRequirement::MAIN_PROCESS | RuntimeRequirement::DESKTOP_SESSION,
+            runtime_requirement: RuntimeRequirement::MAIN_PROCESS
+                | RuntimeRequirement::DESKTOP_SESSION,
             danger: DangerClass::Safe,
             sensitive: false,
             ai_default: AiDefault::On,
@@ -60,7 +60,9 @@ impl Capability for OpenLogs {
         } else {
             let _ = open::that(&log_dir);
         }
-        Ok(CapabilityResult::Done { summary: "已打开日志文件".into() })
+        Ok(CapabilityResult::Done {
+            summary: "已打开日志文件".into(),
+        })
     }
 }
 
@@ -86,7 +88,8 @@ impl Capability for OpenDataDir {
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
             allowed_origins: OriginSet::ALL_LOCAL,
-            runtime_requirement: RuntimeRequirement::MAIN_PROCESS | RuntimeRequirement::DESKTOP_SESSION,
+            runtime_requirement: RuntimeRequirement::MAIN_PROCESS
+                | RuntimeRequirement::DESKTOP_SESSION,
             danger: DangerClass::Safe,
             sensitive: false,
             ai_default: AiDefault::On,
@@ -104,7 +107,9 @@ impl Capability for OpenDataDir {
         if let Err(e) = open::that(&dir) {
             tracing::error!(error = %e, dir = %dir.display(), "打开数据目录失败");
         }
-        Ok(CapabilityResult::Done { summary: "已打开数据目录".into() })
+        Ok(CapabilityResult::Done {
+            summary: "已打开数据目录".into(),
+        })
     }
 }
 

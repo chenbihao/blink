@@ -405,12 +405,16 @@ mod tests {
             exposure_seeded: true,
             ..Default::default()
         };
-        assert!(!McpServerModeConfigStore::needs_initial_generation(&cleared));
+        assert!(!McpServerModeConfigStore::needs_initial_generation(
+            &cleared
+        ));
 
         // 已有显式列表 → 不需要
         let mut customized = McpServerModeConfig::default();
         customized.exposed_capabilities = vec!["cap_a".to_string()];
-        assert!(!McpServerModeConfigStore::needs_initial_generation(&customized));
+        assert!(!McpServerModeConfigStore::needs_initial_generation(
+            &customized
+        ));
     }
 
     #[tokio::test]
@@ -430,7 +434,9 @@ mod tests {
         // 用户清空后再次 ensure：不重新生成（seeded 已置位）
         let mut cleared = reloaded;
         cleared.exposed_capabilities = vec![];
-        McpServerModeConfigStore::save(&pool, &cleared).await.unwrap();
+        McpServerModeConfigStore::save(&pool, &cleared)
+            .await
+            .unwrap();
         let again = McpServerModeConfigStore::ensure_default_exposure(&pool, &registry).await;
         assert!(again.exposed_capabilities.is_empty());
     }
@@ -444,10 +450,11 @@ mod tests {
             exposure_seeded: false,
             ..Default::default()
         };
-        McpServerModeConfigStore::save(&pool, &existing).await.unwrap();
+        McpServerModeConfigStore::save(&pool, &existing)
+            .await
+            .unwrap();
 
-        let migrated =
-            McpServerModeConfigStore::ensure_default_exposure(&pool, &registry).await;
+        let migrated = McpServerModeConfigStore::ensure_default_exposure(&pool, &registry).await;
         assert!(migrated.exposure_seeded);
         assert_eq!(migrated.exposed_capabilities, vec!["open_url"]);
 

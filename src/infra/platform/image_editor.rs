@@ -76,9 +76,7 @@ pub fn begin_session(png_data: Vec<u8>) -> Result<ImageEditorMeta, String> {
             ));
         }
         None => {
-            return Err(format!(
-                "图片解码预算溢出: {width}x{height}"
-            ));
+            return Err(format!("图片解码预算溢出: {width}x{height}"));
         }
     }
 
@@ -127,7 +125,10 @@ mod tests {
                 height: 1
             }
         );
-        assert_eq!(session_png().as_deref().map(|v| v.as_slice()), Some(ONE_PIXEL_PNG));
+        assert_eq!(
+            session_png().as_deref().map(|v| v.as_slice()),
+            Some(ONE_PIXEL_PNG)
+        );
         end_session();
         assert!(session_png().is_none());
         assert!(begin_session(Vec::new()).is_err());

@@ -422,10 +422,7 @@ impl ChordAction for EditAction {
         ChordTarget::Capability {
             capability_id: "start_content_editor",
             input_param: Some("body"),
-            extra_args: vec![
-                ("origin", "chord"),
-                ("save_policy", "clipboard_new"),
-            ],
+            extra_args: vec![("origin", "chord"), ("save_policy", "clipboard_new")],
             hide_main_before: false, // start_content_editor 自己负责 hide_main_window
         }
     }
@@ -620,7 +617,7 @@ impl ChordRegistry {
         key: &str,
         bindings: &ChordBindings,
         cap_registry: &crate::domain::capability::CapabilityRegistry,
-        env: &dyn crate::domain::event::DomainEnv,
+        env: &dyn crate::domain::event::CapabilityEnv,
         surface_port: Option<&dyn crate::domain::capability::policy::SurfacePort>,
         input_text: Option<&str>,
         origin_ref: Option<&str>,
@@ -637,7 +634,10 @@ impl ChordRegistry {
         match action.target() {
             ChordTarget::VoiceInteraction => {
                 // voice_input 由 native hotkey hold 状态机处理，trigger 路径仅作防御性 Nop。
-                tracing::debug!(id = action.id(), "voice_input chord trigger（Nop：由 hotkey 处理）");
+                tracing::debug!(
+                    id = action.id(),
+                    "voice_input chord trigger（Nop：由 hotkey 处理）"
+                );
             }
             ChordTarget::Capability {
                 capability_id,
@@ -674,7 +674,7 @@ impl ChordRegistry {
                 }
 
                 let ctx = crate::domain::capability::InvokeContext {
-                    env: env.capability_env(),
+                    env,
                     origin: crate::domain::capability::InvocationOrigin::LocalSurface,
                     runtime: crate::domain::capability::RuntimeCapabilities {
                         surface: surface_port,
@@ -849,6 +849,7 @@ mod tests {
         // 0.21.2：ChordAction 不再继承 execution::Action。
         // 验证 trait 定义不包含 execute / title / subtitle / schema / danger_class。
         // 这是编译期保证——如果 ChordAction 仍继承 Action，下面编译不过。
+        #[allow(dead_code)] // 编译期 trait 约束验证：编译通过即测试通过
         fn assert_no_action_supertrait<T: ChordAction>() {}
         // ChatAction / ScreenshotAction / etc 都只 impl ChordAction，不 impl Action。
         // 此测试主要验证 trait 本身不再要求 Action supertrait。
@@ -869,13 +870,13 @@ mod tests {
     #[test]
     fn chat_target_is_open_chat_capability() {
         let registry = build_default_registry();
-        let chat = registry
-            .actions
-            .iter()
-            .find(|a| a.id() == "chat")
-            .unwrap();
+        let chat = registry.actions.iter().find(|a| a.id() == "chat").unwrap();
         match chat.target() {
-            ChordTarget::Capability { capability_id, input_param, .. } => {
+            ChordTarget::Capability {
+                capability_id,
+                input_param,
+                ..
+            } => {
                 assert_eq!(capability_id, "open_chat");
                 assert_eq!(input_param, Some("prefill"));
             }
@@ -892,7 +893,11 @@ mod tests {
             .find(|a| a.id() == "screenshot")
             .unwrap();
         match screenshot.target() {
-            ChordTarget::Capability { capability_id, input_param, .. } => {
+            ChordTarget::Capability {
+                capability_id,
+                input_param,
+                ..
+            } => {
                 assert_eq!(capability_id, "start_region_capture");
                 assert_eq!(input_param, None);
             }
@@ -919,17 +924,26 @@ mod tests {
     #[test]
     fn edit_target_is_start_content_editor() {
         let registry = build_default_registry();
-        let edit = registry
-            .actions
-            .iter()
-            .find(|a| a.id() == "edit")
-            .unwrap();
+        let edit = registry.actions.iter().find(|a| a.id() == "edit").unwrap();
         match edit.target() {
-            ChordTarget::Capability { capability_id, input_param, extra_args, .. } => {
+            ChordTarget::Capability {
+                capability_id,
+                input_param,
+                extra_args,
+                ..
+            } => {
                 assert_eq!(capability_id, "start_content_editor");
                 assert_eq!(input_param, Some("body"));
-                assert!(extra_args.iter().any(|(k, v)| *k == "origin" && *v == "chord"));
-                assert!(extra_args.iter().any(|(k, v)| *k == "save_policy" && *v == "clipboard_new"));
+                assert!(
+                    extra_args
+                        .iter()
+                        .any(|(k, v)| *k == "origin" && *v == "chord")
+                );
+                assert!(
+                    extra_args
+                        .iter()
+                        .any(|(k, v)| *k == "save_policy" && *v == "clipboard_new")
+                );
             }
             _ => panic!("edit target 应为 Capability"),
         }
@@ -944,7 +958,11 @@ mod tests {
             .find(|a| a.id() == "sticky")
             .unwrap();
         match sticky.target() {
-            ChordTarget::Capability { capability_id, input_param, .. } => {
+            ChordTarget::Capability {
+                capability_id,
+                input_param,
+                ..
+            } => {
                 assert_eq!(capability_id, "create_sticky");
                 assert_eq!(input_param, Some("content"));
             }
@@ -964,12 +982,18 @@ mod tests {
         // 用户键位不丢失——binding 配置的 screenshot 字段仍由 ChordBindings 管理。
         let bindings = ChordBindings::default();
         let registry = build_default_registry();
-        assert_eq!(registry.action_id_for_key("a", &bindings), Some("screenshot"));
+        assert_eq!(
+            registry.action_id_for_key("a", &bindings),
+            Some("screenshot")
+        );
 
         // 改绑后仍能匹配
         let mut bindings2 = ChordBindings::default();
         bindings2.get_mut("screenshot").unwrap().key = "x".into();
-        assert_eq!(registry.action_id_for_key("x", &bindings2), Some("screenshot"));
+        assert_eq!(
+            registry.action_id_for_key("x", &bindings2),
+            Some("screenshot")
+        );
         assert_eq!(registry.action_id_for_key("a", &bindings2), None);
     }
 }

@@ -29,7 +29,7 @@ use serde_json::Value;
 use tokio::sync::{RwLock, watch};
 
 use crate::domain::capability::{CapabilityRegistry, CapabilityResult, InvokeContext};
-use crate::domain::event::DomainEnv;
+use crate::domain::event::{CapabilityEnv, EventPort};
 use crate::domain::mcp::projection::capability_schemas_to_mcp_tools;
 use crate::domain::mcp::server_config::McpServerModeConfig;
 use crate::infra::data::ai_audit;
@@ -199,7 +199,7 @@ impl Default for SharedExposure {
 
 /// Blink MCP server——实现 rmcp ServerHandler，暴露 Capability 给外部 client。
 ///
-/// 持有 CapabilityRegistry + DomainEnv + AI DB pool + 共享暴露快照。
+/// 持有 CapabilityRegistry + EventPort + CapabilityEnv + AI DB pool + 共享暴露快照。
 /// `list_tools` / `call_tool` 读取共享快照，call-time 二次校验 allowed 集合。
 ///
 /// **0.19.13**：config / cached_tools 替换为 `Arc<SharedExposure>`，
@@ -208,7 +208,10 @@ pub struct BlinkMcpServer {
     /// 能力注册表——call_tool 的数据源。
     cap_registry: Arc<CapabilityRegistry>,
     /// 领域环境——构造 InvokeContext 用（能力通过它访问 managed state）。
-    env: Arc<dyn DomainEnv>,
+    cap_env: Arc<dyn CapabilityEnv>,
+    /// 事件发射 port——emit 审计/通知用。
+    #[allow(dead_code)]
+    env: Arc<dyn EventPort>,
     /// AI 库连接池——审计日志写入。
     ai_pool: sqlx::SqlitePool,
     /// 共享暴露快照——所有 session 共享。
@@ -221,12 +224,14 @@ impl BlinkMcpServer {
     /// `exposure` 由 `McpServerRuntime` 持有并共享给所有 session。
     pub fn new(
         cap_registry: Arc<CapabilityRegistry>,
-        env: Arc<dyn DomainEnv>,
+        cap_env: Arc<dyn CapabilityEnv>,
+        env: Arc<dyn EventPort>,
         ai_pool: sqlx::SqlitePool,
         exposure: Arc<SharedExposure>,
     ) -> Self {
         Self {
             cap_registry,
+            cap_env,
             env,
             ai_pool,
             exposure,
@@ -333,7 +338,9 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             if let Some(cap) = cap_registry.get(&tool_name) {
                 let policy = cap.policy();
                 use crate::domain::capability::{DangerClass, McpDefault};
-                if policy.danger == DangerClass::Dangerous || policy.mcp_default == McpDefault::Forbidden {
+                if policy.danger == DangerClass::Dangerous
+                    || policy.mcp_default == McpDefault::Forbidden
+                {
                     tracing::warn!(
                         tool = %tool_name,
                         danger = ?policy.danger,
@@ -352,7 +359,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             // 构造 InvokeContext
             // 0.21.0: 携带 origin=Mcp + runtime（MCP server 运行在主进程中，但不应获得 GUI 权限）
             let ctx = InvokeContext {
-                env: env.capability_env(),
+                env: self.cap_env.as_ref(),
                 origin: crate::domain::capability::InvocationOrigin::Mcp,
                 runtime: crate::domain::capability::RuntimeCapabilities {
                     surface: None, // MCP 首版禁止 GUI starter，不注入 surface
@@ -368,7 +375,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 
             let call_tool_result = match result {
                 Ok(cap_result) => {
-                    let stash = env.capability_env().image_stash();
+                    let stash = self.cap_env.image_stash();
                     // 审计日志（caller = mcp_external）
                     let summary = crate::domain::capability::rig_tool_result_to_text(
                         &cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref())),
@@ -629,7 +636,8 @@ mod tests {
             reg.register(std::sync::Arc::new(MockCap {
                 id_val: name.to_string(),
             })
-                as std::sync::Arc<dyn crate::domain::capability::Capability>);
+                as std::sync::Arc<dyn crate::domain::capability::Capability>)
+                .unwrap();
         }
         reg
     }
@@ -789,7 +797,9 @@ mod tests {
         reg.register(std::sync::Arc::new(PolicyMockCap {
             id_val: "dangerous_cap".into(),
             policy: dangerous_policy(),
-        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        })
+            as std::sync::Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
 
         let exposure = SharedExposure::new();
         let config = McpServerModeConfig {
@@ -818,7 +828,9 @@ mod tests {
         reg.register(std::sync::Arc::new(PolicyMockCap {
             id_val: "gui_starter_cap".into(),
             policy: forbidden_gui_policy(),
-        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        })
+            as std::sync::Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
 
         let exposure = SharedExposure::new();
         let config = McpServerModeConfig {
@@ -843,7 +855,9 @@ mod tests {
         reg.register(std::sync::Arc::new(PolicyMockCap {
             id_val: "safe_cap".into(),
             policy: safe_mcp_default_off_policy(),
-        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        })
+            as std::sync::Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
 
         let exposure = SharedExposure::new();
         let config = McpServerModeConfig {
@@ -866,15 +880,21 @@ mod tests {
         reg.register(std::sync::Arc::new(PolicyMockCap {
             id_val: "safe_cap".into(),
             policy: safe_mcp_default_off_policy(),
-        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        })
+            as std::sync::Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
         reg.register(std::sync::Arc::new(PolicyMockCap {
             id_val: "dangerous_cap".into(),
             policy: dangerous_policy(),
-        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        })
+            as std::sync::Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
         reg.register(std::sync::Arc::new(PolicyMockCap {
             id_val: "forbidden_cap".into(),
             policy: forbidden_gui_policy(),
-        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        })
+            as std::sync::Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
 
         let exposure = SharedExposure::new();
         let config = McpServerModeConfig {
