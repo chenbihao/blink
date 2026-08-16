@@ -1,7 +1,11 @@
 <h1 align="center">Blink</h1>
 
 <p align="center">
-  <strong>A smooth launcher for Windows — senses what you're doing, makes every action faster.</strong>
+  <strong>Search is just the beginning.</strong>
+</p>
+
+<p align="center">
+  A smooth Windows launcher that puts search, Chord, AI, and a rich set of local capabilities at your fingertips.
 </p>
 
 <p align="center">
@@ -21,31 +25,15 @@
 
 ---
 
-## More Than a Launcher
+## One Entry Point, More Done
 
-**Build an elegant, smooth launcher that seamlessly integrates common features, using Chord mode to invoke various enhanced capabilities — it's more than just a launcher.**
+Blink is a Windows launcher and a productivity tool built around Chord actions, context awareness, and composable capabilities.
 
-Blink transforms multi-step operations like "select English text → translate", "copy URL → open link", "screenshot → OCR extract text" into a single shortcut or one Tab press. The entire experience revolves around being **smooth** — fast summoning, fast response, short interaction paths.
+Press `Alt + Space` to search apps and files or act directly on what's in front of you: translate selected text, open a copied URL, capture a screenshot and run OCR, or use Chord to quickly access voice input, notes, and AI.
 
-With **Chord mode** (hold Alt + letter key while the main window is open), you can quickly invoke screenshot, translation, voice input and other enhanced capabilities without switching windows or memorizing complex shortcuts.
+These features are not isolated. **Screenshots, the clipboard, notes, OCR, translation**, and **plugins** share the same capability foundation, so content from one context can move directly into another capability—without repeatedly switching apps, saving files, or copying and pasting.
 
-Under the hood, Blink is built on a **unified capability foundation**. Sticky notes, images, the clipboard, screenshots, OCR, translation, and more are no longer isolated features: the output of one capability can flow directly into another, without repeatedly saving files, switching apps, or copying and pasting.
-
-These capabilities can be called by Blink's built-in AI or exposed through a local **MCP Server**. You decide which capabilities to expose, allowing other agents to use the search, plugin, window, image, and sticky-note capabilities running in your current Blink process.
-
----
-
-## Capability Loops: Content Flows Naturally Between Capabilities
-
-Blink's features are not isolated islands. The output of one capability can become the input of another:
-
-- **Image Loop** — Screenshots, windows, and clipboard images can be annotated, processed with OCR, pinned, copied, or saved
-- **Sticky Note Loop** — AI can create, read, update, and recycle sticky notes so temporary content remains actionable
-- **Clipboard Loop** — Text and images can serve as context sources as well as inputs and outputs for other capabilities
-- **AI Invocation** — Blink's built-in AI can combine these capabilities on demand to complete multi-step tasks
-- **MCP Exposure** — Blink can run as a local MCP Server and make user-selected capabilities available to other agents
-
-This is more than putting sticky notes, screenshots, and AI in the same app. They share the same capability semantics and live runtime state, reducing the cost of moving content between separate tools.
+Blink's built-in AI can use these capabilities. With your permission, Blink can also expose them to other agents through its MCP Server.
 
 ---
 
@@ -109,7 +97,7 @@ AI:
 
 Voice input:
 <p align="center">
-  <img src="docs/images/feature-voice.gif" width="680" alt="Voice input"/>
+  <img src="docs/images/feature-chord-voice.gif" width="680" alt="Voice input"/>
 </p>
 
 Other capabilities:
