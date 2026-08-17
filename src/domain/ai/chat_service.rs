@@ -905,6 +905,23 @@ impl ChatService {
             (message.clone(), Vec::new())
         };
 
+        // 0.21.16：发出即保存——Persistent 模式预写用户消息 + 建对话记录。
+        // 与 `append` 的「跳过已预写 user」去重配合，正常完成后不产生重复行；
+        // 中断/失败时用户消息已落库，侧边栏立即可见。
+        // 失败不阻塞对话（warn-and-continue），与「持久化分组失败不影响对话」一致。
+        if kind == ConversationKind::Persistent
+            && let Err(e) = self
+                .persistent_memory()
+                .persist_user_message(&conversation_id, &effective_message)
+                .await
+        {
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                error = %e,
+                "ChatService: 预写用户消息失败（不影响对话）"
+            );
+        }
+
         let skill_summaries = if plan.includes_extensions() {
             self.skill_registry.summaries()
         } else {

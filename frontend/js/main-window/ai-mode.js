@@ -30,6 +30,7 @@ import {
     renderToolResultLine,
     renderTypingIndicator,
 } from "../shared/message-render.js";
+import {iconHTML} from "../shared/icon.js";
 import {
     aiContentEl,
     aiDisplayEl,
@@ -41,7 +42,7 @@ import {
     queryEl,
     searchModeEl,
 } from "./dom.js";
-import {resetMaxHeight, syncWindowSize} from "./window-size.js";
+import {resetMaxHeight, resyncWindowSize, syncWindowSize} from "./window-size.js";
 import {t} from "../i18n/index.js";
 import * as ghost from "./ghost.js";
 import * as search from "./search.js";
@@ -60,6 +61,12 @@ let unlistenStream = null;
 let unlistenConfirm = null;
 let currentQuestion = ""; // 当前轮用户问题文本（折叠摘要用）
 
+/** 用户是否手动上滚（不在底部）——为 true 时暂停自动滚到底部 */
+let userScrolledUp = false;
+
+/** @type {HTMLElement|null} "回到底部" 浮动按钮 */
+let scrollBottomBtn = null;
+
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 
 export function init() {
@@ -67,6 +74,8 @@ export function init() {
     // 注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听
     listen(EVENTS.CHAT_STREAM, handleStreamEvent);
     listen(EVENTS.CHAT_CONFIRM_ACTION, handleConfirmEvent);
+    // 监听 #ai-display 手动滚动（用户上滚时暂停自动跟随）
+    bindScrollListener();
 }
 
 /** 当前是否处于 AI 模式。 */
@@ -118,6 +127,9 @@ export async function enterAiMode(queryText) {
     // 清空展示区
     aiContentEl.innerHTML = "";
     aiToolLineEl.innerHTML = "";
+    // 新会话复位滚动跟随状态 + 隐藏遗留的"回到底部"按钮
+    userScrolledUp = false;
+    if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
     syncWindowSize();
 
     // 发送首条消息
@@ -493,6 +505,8 @@ function handleConfirmEvent(event) {
         // 确认后移除卡片，恢复流式输出
         card.remove();
         awaitingConfirm = false;
+        // 卡片是临时 UI，移除后窗口高度重新贴合实际内容（缩回被卡片撑开的高度）
+        resyncWindowSize();
     });
 
     const responseArea = aiContentEl.querySelector(".ai-response-area");
@@ -584,12 +598,60 @@ function injectCopyButton() {
 }
 
 /**
- * 滚动 #ai-display 到底部，确保最新内容可见。
+ * 判断 #ai-display 是否在底部（允许 80px 阈值）。
  */
-function scrollToBottom() {
+function isAtBottom() {
+    if (!aiDisplayEl) return true;
+    const threshold = 80;
+    return aiDisplayEl.scrollHeight - aiDisplayEl.scrollTop - aiDisplayEl.clientHeight < threshold;
+}
+
+/** 创建「回到底部」浮动按钮（absolute 定位在 #ai-mode 上，不随 #ai-display 内容滚动） */
+function ensureScrollBottomBtn() {
+    if (scrollBottomBtn) return;
+    scrollBottomBtn = document.createElement("button");
+    scrollBottomBtn.className = "ai-scroll-bottom-btn";
+    scrollBottomBtn.title = "回到底部";
+    scrollBottomBtn.innerHTML = iconHTML("chevron-down");
+    scrollBottomBtn.addEventListener("click", () => {
+        forceScrollToBottom();
+    });
+    const aiMode = aiDisplayEl?.parentElement;
+    if (aiMode) aiMode.appendChild(scrollBottomBtn);
+}
+
+/** 强制滚动到底部并重置用户上滚标记 */
+function forceScrollToBottom() {
+    userScrolledUp = false;
+    if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
     if (aiDisplayEl) {
         aiDisplayEl.scrollTop = aiDisplayEl.scrollHeight;
     }
+}
+
+/** 绑定 scroll 事件监听用户手动滚动 */
+function bindScrollListener() {
+    if (!aiDisplayEl) return;
+    aiDisplayEl.addEventListener("scroll", () => {
+        if (isAtBottom()) {
+            userScrolledUp = false;
+            if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+        } else {
+            userScrolledUp = true;
+            ensureScrollBottomBtn();
+            if (scrollBottomBtn) scrollBottomBtn.classList.add("visible");
+        }
+    });
+}
+
+/**
+ * 滚动 #ai-display 到底部，确保最新内容可见。
+ * 用户手动上滚浏览历史时不夺滚动权（与对话窗口一致）。
+ */
+function scrollToBottom() {
+    if (!aiDisplayEl) return;
+    if (userScrolledUp) return;
+    aiDisplayEl.scrollTop = aiDisplayEl.scrollHeight;
 }
 
 /**

@@ -95,7 +95,9 @@ pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), S
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         if !crate::infra::platform::hotkey::read_physical_modifiers().all_up() {
-            tracing::debug!("paste_to_input: 修饰键 500ms 内未松开，跳过注入（保留剪贴板复制语义）");
+            tracing::debug!(
+                "paste_to_input: 修饰键 500ms 内未松开，跳过注入（保留剪贴板复制语义）"
+            );
             return;
         }
         if let Some(hwnd) = prev_hwnd {
@@ -104,7 +106,9 @@ pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), S
         }
         if crate::infra::platform::uia::is_focused_on_text_input() {
             match crate::infra::platform::inject::inject_text(&text) {
-                Ok(()) => tracing::info!(chars = text.chars().count(), "paste_to_input: 文本已上屏"),
+                Ok(()) => {
+                    tracing::info!(chars = text.chars().count(), "paste_to_input: 文本已上屏")
+                }
                 Err(e) => tracing::error!(%e, "paste_to_input: 文本注入失败"),
             }
         } else {

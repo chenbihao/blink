@@ -256,23 +256,6 @@ async function handleSend(message, isEdit = false) {
     forceScrollToBottom();
     state.addMessage({role: "user", content: message});
 
-    // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
-    // 0.17.6a: 临时对话跳过标题生成（不写 SQLite，promote 后由主窗口负责）
-    const isNewConversation = !isEdit && state.messages.length === 1;
-    if (isNewConversation && !state.ephemeralMode) {
-        const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
-        try {
-            await ipc.renameChatConversation(state.conversationId, truncatedTitle);
-            await updateBreadcrumb(truncatedTitle);
-            // 0.12.5 §5.3：异步触发 LLM 命名（不等待，失败静默降级保持截断标题）
-            ipc.generateConversationTitle(state.conversationId, message).catch((e) => {
-                console.warn("[chat] LLM 标题生成失败:", e);
-            });
-        } catch (e) {
-            console.warn("[chat] 截断标题设置失败:", e);
-        }
-    }
-
     // 切换到流式模式
     setStreamingMode();
     state.setStreaming(true);
@@ -288,6 +271,25 @@ async function handleSend(message, isEdit = false) {
             : {};
         const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId, opts);
         state.setActiveRequestId(requestId);
+
+        // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
+        // 0.21.16: 挪到 chatPrompt 成功之后——后端已预写对话记录（发出即保存），
+        // rename 才能命中；此前在 prompt 前调用是 no-op。
+        // 0.17.6a: 临时对话跳过标题生成（不写 SQLite，promote 后由主窗口负责）
+        const isNewConversation = !isEdit && state.messages.length === 1;
+        if (isNewConversation && !state.ephemeralMode) {
+            const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
+            try {
+                await ipc.renameChatConversation(state.conversationId, truncatedTitle);
+                await updateBreadcrumb(truncatedTitle);
+                // 0.12.5 §5.3：异步触发 LLM 命名（不等待，失败静默降级保持截断标题）
+                ipc.generateConversationTitle(state.conversationId, message).catch((e) => {
+                    console.warn("[chat] LLM 标题生成失败:", e);
+                });
+            } catch (e) {
+                console.warn("[chat] 截断标题设置失败:", e);
+            }
+        }
     } catch (e) {
         console.error("[chat] chatPrompt 失败:", e);
         // 移除空的 assistant 消息 DOM（createAssistantMessage 已创建但 chatPrompt 失败）

@@ -244,6 +244,28 @@ pub struct ChatPrefillPayload {
     pub text: String,
 }
 
+/// 0.21.16: 实况落库——把已累计的部分 assistant 回复写入 DB（warn-and-continue）。
+///
+/// 由 `chat_prompt` 的 stream 消费 task 调用（节流 + 非正常结束时的最终 flush）。
+async fn persist_live_assistant(
+    chat: &std::sync::Arc<crate::domain::ai::chat_service::ChatService>,
+    conversation_id: &str,
+    text: &str,
+    thinking: &str,
+) {
+    if let Err(e) = chat
+        .persistent_memory()
+        .persist_assistant_delta(conversation_id, text, thinking)
+        .await
+    {
+        tracing::warn!(
+            conversation_id,
+            error = %e,
+            "实况 assistant 增量落库失败（不影响流式展示）"
+        );
+    }
+}
+
 /// 启动对话 prompt（Phase 4）。
 ///
 /// 调用 `ChatService::prompt()` 获取流式 chunk receiver，spawn 后台 task 逐 chunk
@@ -333,9 +355,48 @@ pub async fn chat_prompt(
     let app_clone = app.clone();
     let conv_id_clone = conv_id.clone();
     let target_win = handle.target_window.clone();
+    // 0.21.16: Persistent 模式在流式期间增量落库部分 assistant 回复（中断/崩溃可回溯断点）
+    let is_persistent = matches!(
+        kind,
+        crate::domain::ai::chat_service::ConversationKind::Persistent
+    );
     tokio::spawn(async move {
         let mut done_sent = false;
+        // 0.21.16: 实况落库累计 + 节流
+        let mut streamed_text = String::new();
+        let mut streamed_thinking = String::new();
+        let mut last_flush = std::time::Instant::now();
+        let chat =
+            app_clone.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>();
+        const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
         while let Some(chunk) = chunks.recv().await {
+            // 0.21.16: 累积文本/思考，节流写入 DB——正常跑完由 append 替换为最终消息
+            if is_persistent && let Some(chat) = chat.as_deref() {
+                let mut should_flush = false;
+                match &chunk {
+                    crate::domain::ai::agent_provider::ChatStreamChunk::Text { text } => {
+                        streamed_text.push_str(text);
+                        should_flush = last_flush.elapsed() >= FLUSH_INTERVAL;
+                    }
+                    crate::domain::ai::agent_provider::ChatStreamChunk::Thinking { text } => {
+                        streamed_thinking.push_str(text);
+                        should_flush = last_flush.elapsed() >= FLUSH_INTERVAL;
+                    }
+                    _ => {}
+                }
+                if should_flush {
+                    persist_live_assistant(
+                        chat,
+                        &conv_id_clone,
+                        &streamed_text,
+                        &streamed_thinking,
+                    )
+                    .await;
+                    last_flush = std::time::Instant::now();
+                }
+            }
+
             let is_done = matches!(
                 chunk,
                 crate::domain::ai::agent_provider::ChatStreamChunk::Done { .. }
@@ -358,6 +419,14 @@ pub async fn chat_prompt(
             if is_done {
                 break;
             }
+        }
+        // 0.21.16: 非正常结束（abort / 流异常无 Done）→ 补一次最终 flush，
+        // 把断点前的完整文本落库。正常 Done 由 rig append 写最终消息，无需 flush。
+        if is_persistent
+            && !done_sent
+            && let Some(chat) = chat.as_deref()
+        {
+            persist_live_assistant(chat, &conv_id_clone, &streamed_text, &streamed_thinking).await;
         }
         // 0.18.0: 不在 Done 瞬间清零 MAIN_WINDOW_AI_ACTIVE——用户可能还在看结果，
         // 看门狗会立即恢复失焦隐藏导致关窗。改为：

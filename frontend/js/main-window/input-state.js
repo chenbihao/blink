@@ -42,10 +42,8 @@ function projectUi() {
     const altDown = state.altDown;
     // 0.19.15: 独占模式（AI / 剪贴板 / 命令）下不显示 chord 待命提示——
     // 用户已在特定模式中交互，Alt+字母待命列表无意义。
-    const inExclusiveMode =
-        aiMode.isActive() || clipboardMode.isActive() || cmdMode.isActive();
-    const chordEligible = chord.isEnabled() && !inExclusiveMode;
-    const showChord = altDown && chordEligible;
+    // 0.21.x: 待命判定收敛到 inChordStandby()（与 SHOWN 保留 readOnly 同口径）。
+    const showChord = inChordStandby();
 
     const prevChordVisible = document.body.classList.contains("chord-visible");
     document.body.classList.toggle("alt-active", altDown);
@@ -80,6 +78,21 @@ function projectUi() {
 export function forceClearReadOnly() {
     wasChordStandby = false;
     queryEl.readOnly = false;
+}
+
+/**
+ * 当前是否 chord 待命态（Alt 按下 && chord 启用 && 非独占模式）。
+ *
+ * 与 projectUi 的 showChord 同口径（后者调用本函数）。
+ * 0.21.x: lifecycle SHOWN 据此决定是否保留 readOnly——首唤起 native 独占会话
+ * 建立前的竞态窗口内不能清 readOnly，否则 IME 组字放行、chord 键落进输入法。
+ */
+export function inChordStandby() {
+    const state = core.state;
+    if (!state || !state.altDown) return false;
+    if (!chord.isEnabled()) return false;
+    if (aiMode.isActive() || clipboardMode.isActive() || cmdMode.isActive()) return false;
+    return true;
 }
 
 // ── Context 上报 ──────────────────────────────────────────────────────────────

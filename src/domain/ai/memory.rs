@@ -39,8 +39,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rig_core::OneOrMany;
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::message::{AssistantContent, Reasoning, Text, UserContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -312,6 +313,11 @@ pub fn token_aware_truncate(
 pub struct SqliteConversationMemory {
     pool: SqlitePool,
     config: Arc<RwLock<MemoryConfig>>,
+    /// 流式「实况回合」标记：conversation_id -> 已写出的部分 assistant 消息 id。
+    ///
+    /// 正常跑完时 `append` 据此删除部分回复行、用 rig 的最终完整消息替换；
+    /// 中断/崩溃时该行保留在 DB，让用户下次进入能看到断在哪。
+    live_turns: RwLock<HashMap<String, i64>>,
 }
 
 impl SqliteConversationMemory {
@@ -324,7 +330,11 @@ impl SqliteConversationMemory {
     ///
     /// `config` 由调用方持有克隆，用于运行时更新 `context_limit`（模型切换时）。
     pub fn with_config(pool: SqlitePool, config: Arc<RwLock<MemoryConfig>>) -> Self {
-        Self { pool, config }
+        Self {
+            pool,
+            config,
+            live_turns: RwLock::new(HashMap::new()),
+        }
     }
 
     /// 获取共享配置句柄（供设置页 IPC 读写 memory 配置，0.13.1.4 将使用）。
@@ -506,6 +516,111 @@ impl SqliteConversationMemory {
         *cfg = new_config;
     }
 
+    // ── 发出即保存 / 实况回合（0.21.16）─────────────────────────────────────
+
+    /// 在 prompt 启动时（发出即保存）预写用户消息 + 建对话记录。
+    ///
+    /// 幂等去重：尾部已是相同 user 消息（重发/重试）则跳过，不产生重复行。
+    /// rig 结束时的 `append` 会跳过这条已写的 user 消息，只补写 assistant。
+    pub async fn persist_user_message(
+        &self,
+        conversation_id: &str,
+        user_msg: &str,
+    ) -> Result<(), String> {
+        let pool = self.pool.clone();
+
+        // 去重：尾部已是同文 user 消息 → 已保存过，跳过
+        if let Some((role, content)) =
+            crate::infra::data::conversations::load_last_message(&pool, conversation_id).await?
+            && role == "user"
+            && Self::user_text_matches(&content, user_msg)
+        {
+            return Ok(());
+        }
+
+        let msg = Message::User {
+            content: OneOrMany::one(UserContent::Text(Text::new(user_msg))),
+        };
+        let title: String = user_msg.chars().take(TITLE_MAX_CHARS).collect();
+        crate::infra::data::conversations::create_conversation(
+            &pool,
+            conversation_id,
+            if title.is_empty() { None } else { Some(&title) },
+        )
+        .await?;
+        crate::infra::data::conversations::append_message(
+            &pool,
+            conversation_id,
+            "user",
+            &serde_json::to_string(&msg).map_err(|e| e.to_string())?,
+        )
+        .await?;
+        crate::infra::data::conversations::touch_conversation(&pool, conversation_id).await?;
+        Ok(())
+    }
+
+    /// 流式期间增量写入部分 assistant 回复（节流由调用方控制）。
+    ///
+    /// 首次写入 INSERT 并记录消息 id；后续 UPDATE 同一行。正常跑完时 `append`
+    /// 会删除该行并用 rig 的最终完整消息替换，避免残留部分回复 / 重复行。
+    /// 中断/崩溃时该行保留，供下次进入查看断点。
+    pub async fn persist_assistant_delta(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        thinking: &str,
+    ) -> Result<(), String> {
+        if text.trim().is_empty() && thinking.trim().is_empty() {
+            return Ok(());
+        }
+        let pool = self.pool.clone();
+        let msg = Self::build_assistant_message(text, thinking);
+        let content = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+
+        let mut live = self.live_turns.write().await;
+        if let Some(id) = live.get(conversation_id).copied() {
+            if crate::infra::data::conversations::update_message_content(&pool, id, &content)
+                .await?
+            {
+                return Ok(());
+            }
+            // 行已被外部删除（如 truncate/clear）→ 回退为重新插入
+            live.remove(conversation_id);
+        }
+        let id = crate::infra::data::conversations::append_message(
+            &pool,
+            conversation_id,
+            "assistant",
+            &content,
+        )
+        .await?;
+        live.insert(conversation_id.to_string(), id);
+        Ok(())
+    }
+
+    /// 构造部分 assistant 消息（Reasoning 在前、Text 在后，与 rig 落库顺序一致）。
+    fn build_assistant_message(text: &str, thinking: &str) -> Message {
+        let mut content: Vec<AssistantContent> = Vec::new();
+        if !thinking.is_empty() {
+            content.push(AssistantContent::Reasoning(Reasoning::new(thinking)));
+        }
+        if !text.is_empty() {
+            content.push(AssistantContent::Text(Text::new(text)));
+        }
+        Message::Assistant {
+            id: None,
+            content: OneOrMany::many(content).expect("实况消息至少含一个内容块"),
+        }
+    }
+
+    /// 判断序列化消息的文本是否与预期 user 文本一致（去重用）。
+    fn user_text_matches(content_json: &str, expected: &str) -> bool {
+        let Ok(msg) = serde_json::from_str::<Message>(content_json) else {
+            return false;
+        };
+        extract_message_text(&msg) == expected
+    }
+
     /// 从 `Message` 变体提取 role 字符串（与 serde tag naming 一致）。
     fn message_role(msg: &Message) -> &'static str {
         match msg {
@@ -640,8 +755,41 @@ impl ConversationMemory for SqliteConversationMemory {
         messages: Vec<Message>,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         let pool = self.pool.clone();
+        let live_turns = &self.live_turns;
 
         Box::pin(async move {
+            // 合并实况回合（0.21.16）：删除流式期间写出的部分 assistant 行，
+            // 由本轮完整消息替换——正常完成后不残留部分回复 / 重复行。
+            let mut live = live_turns.write().await;
+            if let Some(id) = live.remove(conversation_id)
+                && let Err(e) =
+                    crate::infra::data::conversations::delete_message_by_id(&pool, id).await
+            {
+                tracing::warn!(
+                    conversation_id,
+                    id,
+                    error = %e,
+                    "append: 清理实况部分回复行失败（不影响落库）"
+                );
+            }
+
+            // 跳过已被「发出即保存」预写过的 user 消息（尾部同文 user 视为已写）
+            let mut to_insert: &[Message] = &messages;
+            if let Some(first) = messages.first()
+                && matches!(first, Message::User { .. })
+            {
+                let last =
+                    crate::infra::data::conversations::load_last_message(&pool, conversation_id)
+                        .await
+                        .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+                if let Some((role, content)) = last
+                    && role == "user"
+                    && Self::user_text_matches(&content, &extract_message_text(first))
+                {
+                    to_insert = &messages[1..];
+                }
+            }
+
             // 自动创建 conversation 记录（已存在则 IGNORE）
             let title = Self::extract_title(&messages);
             crate::infra::data::conversations::create_conversation(
@@ -652,8 +800,8 @@ impl ConversationMemory for SqliteConversationMemory {
             .await
             .map_err(|e| MemoryError::Backend(Box::from(e)))?;
 
-            // 逐条插入消息
-            for msg in &messages {
+            // 逐条插入消息（跳过已预写的 user）
+            for msg in to_insert {
                 let role = Self::message_role(msg);
                 let content =
                     serde_json::to_string(msg).map_err(|e| MemoryError::Backend(Box::from(e)))?;

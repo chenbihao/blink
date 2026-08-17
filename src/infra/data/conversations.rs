@@ -278,15 +278,15 @@ pub async fn delete_conversation(pool: &SqlitePool, id: &str) -> Result<bool, St
     Ok(result.rows_affected() > 0)
 }
 
-/// 插入一条消息（content 为序列化的 rig Message JSON）。
+/// 插入一条消息（content 为序列化的 rig Message JSON），返回插入的消息 id。
 pub async fn append_message(
     pool: &SqlitePool,
     conversation_id: &str,
     role: &str,
     content: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
     )
     .bind(conversation_id)
@@ -296,7 +296,49 @@ pub async fn append_message(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(result.last_insert_rowid())
+}
+
+/// 加载对话的最后一条消息（role, content）。无消息时返回 None。
+///
+/// 供「发出即保存」去重使用：判断尾部是否已是相同 user 消息，避免重发产生重复行。
+pub async fn load_last_message(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row)
+}
+
+/// 更新指定消息的 content（流式增量写入部分 assistant 回复用）。返回是否命中。
+pub async fn update_message_content(
+    pool: &SqlitePool,
+    id: i64,
+    content: &str,
+) -> Result<bool, String> {
+    let result = sqlx::query("UPDATE messages SET content = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(content)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 删除指定消息（append 合并实况回合时清理流式期间写出的部分回复）。
+pub async fn delete_message_by_id(pool: &SqlitePool, id: i64) -> Result<bool, String> {
+    let result = sqlx::query("DELETE FROM messages WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// 加载对话的最近 N 条消息（按 id 升序返回，即时间顺序）。

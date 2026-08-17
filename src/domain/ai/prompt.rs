@@ -8,7 +8,7 @@
 //! - `tool_result_feedback_prompt(tools, lang)` —— Turn 2 结果回流 system prompt
 //! - `tool_list_section(tools)` —— 工具列表文字段（含 name + description + 参数名 + hint）
 //!
-//! **token 成本控制**（§3.8）：每次构建 system prompt 估算 token 数，超 1500 token
+//! **token 成本控制**（§3.8）：每次构建 system prompt 估算 token 数，超 5000 token
 //! `tracing::warn!` 告警。工具描述走"分层详略"——system prompt 文字段只含 name +
 //! 一句话 description + 参数名（不含 schema），完整 JSON Schema 走 `tools` 协议字段。
 //!
@@ -19,8 +19,8 @@ use crate::domain::ai::skill::{SkillEntry, SkillSummary};
 use crate::domain::schema::ToolSchema;
 use std::collections::HashMap;
 
-/// system prompt token 告警阈值（§3.8：超 1500 token warn）。
-const TOKEN_WARN_THRESHOLD: usize = 1500;
+/// system prompt token 告警阈值（§3.8：超 5000 token warn）。
+const TOKEN_WARN_THRESHOLD: usize = 5000;
 
 /// 工具提示词信息——`ToolSchema` 的超集，多了 `hint` 字段。
 ///
@@ -85,7 +85,7 @@ pub fn build_prompt_infos(
 ///
 /// **为什么不用 `tiktoken-rs`**：文档 §3.8 提到 `tiktoken-rs`，但该 crate 捆绑
 /// ~1.8MB BPE 词表，对"仅监控告警"的场景过重。启发式估算在 ±20% 内足够判断
-/// 是否超 1500 阈值。若 0.12 本地模型需要精确 token 计数（context window 截断），
+/// 是否超 5000 阈值。若 0.12 本地模型需要精确 token 计数（context window 截断），
 /// 再引入 `tiktoken-rs` 替换此函数。
 ///
 /// **估算规则**：

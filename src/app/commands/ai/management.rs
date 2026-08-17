@@ -272,7 +272,7 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         "tokens": tokens,
         "tools_count": tools_count,
         "preview": preview,
-        "threshold": 1500,
+        "threshold": 5000,
     }))
 }
 

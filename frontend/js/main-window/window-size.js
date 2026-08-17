@@ -48,3 +48,20 @@ export function resetMaxHeight() {
     maxHeight = 0;
     appEl.style.minHeight = "";
 }
+
+/**
+ * 以当前实际内容重新基准 maxHeight（允许缩小）。
+ *
+ * 与 syncWindowSize 的区别：syncWindowSize 只增不减（同一会话内窗口只增不减，
+ * 避免翻页/流式过程反复 resize）；本函数先清除 minHeight 让 #app 回到内容驱动
+ * 高度，再按实际高度重新踩踏——用于临时 UI 移除后窗口需缩回的场景（如 AI 确认卡片）。
+ */
+export function resyncWindowSize() {
+    appEl.style.minHeight = "";
+    requestAnimationFrame(() => {
+        const height = appEl.offsetHeight;
+        maxHeight = height;
+        appEl.style.minHeight = maxHeight + "px";
+        resizeWindow(WIDTH, maxHeight);
+    });
+}

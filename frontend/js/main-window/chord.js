@@ -29,17 +29,23 @@ import {queryEl} from "./dom.js";
 let chordActions = [];
 let ghostChordEl = null;
 
-// 配置快照（lifecycle shown 或 config-changed 时刷新）
+// 配置快照（启动预热 / lifecycle shown / config-changed 时刷新）
 // 初值 false：config 还没到时保守禁用,避免"用户没开却弹提示"的一瞬闪现
 let chordEnabled = false;
 let hintVisible = true;
 
-/** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
+/** 初始化：绑定 overlay DOM + 预热 chord 配置。main.js 启动时调一次。 */
 export function init() {
     ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
     // 0.16.1：输入框文本变化时重新 render overlay--有文本时清空 chord 提示（让位
     // keyword 影子），无文本时恢复。chord-visible 由 input-state.js 投影，此处只管内容。
     queryEl.addEventListener("input", render);
+    // 0.21.x：启动预热 chord 配置（chordEnabled/chordActions）。
+    // 若等首个 SHOWN 的异步 get_config 才刷新，首次唤起时 chordEnabled 仍是初值
+    // false——readOnly 禁 IME 兜底（input-state.js）与 onChordTrigger 兜底
+    // （keyboard.js）全部失效，字母落入输入法。预热后首次唤起与后续行为一致。
+    // 窗口此时隐藏，render 无可见副作用；SHOWN 会再次刷新。
+    refresh();
 }
 
 /** 是否启用 Chord（keyboard.js chordEligible 读此值,统一门禁）。 */

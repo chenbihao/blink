@@ -352,7 +352,11 @@ impl ModifierState {
     /// 用物理快照校正内部状态——卡键自愈的最终出口。
     ///
     /// 规则：
-    /// - 物理快照 Up：Down / InferredDown / InjectedDown → Up；清除 raw_devices 残留位。
+    /// - 物理快照 Up：仅清除临时级别 `InjectedDown` / `InferredDown`；**不清真实 `Down`**。
+    ///   真实 `Down` 由非注入 Hook keydown / Raw Input down 确认，只能由真实（非注入）
+    ///   Hook keyup / Raw up 清除——GetAsyncKeyState 会被注入事件污染（如 tao 抢前台时
+    ///   注入的合成 Alt up 会把异步键状态表刷成 up），若用它清真实 Down 会误清用户仍按住的
+    ///   Alt，破坏 chord 会话（0.21.x 首唤起复现，注入序列见 42.745/42.749）。
     /// - 物理快照 Down：Unknown / Up → Down（补漏）；已按下状态保持不变。
     ///
     /// 返回是否有 modifier level 发生了变化（调用方据此决定是否 finalize）。
@@ -362,8 +366,11 @@ impl ModifierState {
             let physical_down = snapshot.is_down(key);
             let current = self.sides[key as usize].level;
             if !physical_down {
-                // 物理松开 → 清除任何按下状态
-                if current.is_pressed() {
+                // 物理松开 → 只清临时/注入级别，真实 Down 保留（见上方注释）
+                if matches!(
+                    current,
+                    ModifierLevel::InjectedDown | ModifierLevel::InferredDown
+                ) {
                     self.sides[key as usize].level = ModifierLevel::Up;
                     changed = true;
                     // 清除 raw_devices 残留位
@@ -3824,6 +3831,43 @@ mod tests {
         );
         assert!(s.chord.is_active(), "Chord session 应已建立");
         assert!(s.ui_state().exclusive_chord_active);
+    }
+
+    // ── 物理快照校正（0.21.x 首唤起回归）──
+
+    /// 0.21.x 首唤起回归：真实 Alt down 后，即使 GetAsyncKeyState 被注入事件污染
+    /// 读成 up（tao 抢前台时注入合成 Alt up 会刷掉异步键状态表），物理快照校正也
+    /// 不能清真实 Down——否则 chord 会话被误清、chord 键落进输入法。
+    #[test]
+    fn physical_snapshot_up_does_not_clear_real_down() {
+        let mut s = armed_state();
+        assert!(s.modifiers.alt_down());
+        assert!(s.chord.is_active());
+
+        // 物理快照读 Alt=up（被注入事件污染的错误读数）
+        let polluted = PhysicalModifierSnapshot::default(); // lalt=false
+        let changed = s.modifiers.apply_physical_snapshot(polluted);
+
+        assert!(!changed, "真实 Down 不应被物理快照清掉");
+        assert!(s.modifiers.alt_down(), "Alt 应保持按下");
+        assert!(s.chord.is_active(), "chord 会话不应被误清");
+    }
+
+    /// 物理快照 Up 仍应清掉临时/注入级别（InjectedDown）——只保护真实 Down。
+    #[test]
+    fn physical_snapshot_up_clears_injected_down() {
+        let mut s = InputState::default();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.alt_down());
+
+        let physical_up = PhysicalModifierSnapshot::default(); // lalt=false
+        let changed = s.modifiers.apply_physical_snapshot(physical_up);
+        assert!(changed);
+        assert!(!s.modifiers.alt_down(), "InjectedDown 应被物理快照清掉");
     }
 
     // ── SessionReset ──

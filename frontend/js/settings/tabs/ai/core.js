@@ -27,7 +27,7 @@ import {
     formatModelContextWindow,
     memoryExpertVisibility,
 } from "./semantics.js";
-import {invoke} from "../../../shared/tauri.js";
+import {confirmDialog, invoke} from "../../../shared/tauri.js";
 import {onLangChange, t} from "../../../i18n/index.js";
 
 // 0.17.8: AI 权限记忆配置的默认值
@@ -172,7 +172,7 @@ async function loadSystemPromptInfo() {
     try {
         const info = await invoke("get_system_prompt_info");
         const tokens = info.tokens ?? 0;
-        const threshold = info.threshold ?? 1500;
+        const threshold = info.threshold ?? 5000;
         const toolsCount = info.tools_count ?? 0;
 
         tokensEl.textContent = `${tokens} / ${threshold}`;
@@ -448,7 +448,7 @@ function bindAIEvents() {
     });
     $("ai-perm-memory-days")?.addEventListener("change", (e) => {
         const v = parseInt(e.target.value, 10);
-        permissionConfig.memory_days = isNaN(v) ? 7 : Math.max(1, Math.min(90, v));
+        permissionConfig.memory_days = isNaN(v) ? 7 : Math.max(1, Math.min(180, v));
         e.target.value = permissionConfig.memory_days;
         invoke("set_config", {key: "ai_permission", value: permissionConfig}).catch((e) =>
             console.error("set_config ai_permission failed:", e),
@@ -456,6 +456,13 @@ function bindAIEvents() {
     });
     $("ai-perm-clear-memory")?.addEventListener("click", async () => {
         const btn = $("ai-perm-clear-memory");
+        // 危险操作：二次确认（Tauri 下 window.confirm 是静默 no-op，走 confirmDialog）
+        const ok = await confirmDialog(t("ai.permission.clear.confirm"), {
+            title: t("common.confirm"),
+            kind: "warning",
+            okLabel: t("ai.permission.clear.btn"),
+        });
+        if (!ok) return;
         if (btn) {
             btn.disabled = true;
         }

@@ -732,7 +732,7 @@ pub async fn update_ai_permission_config(
 ) -> Result<(), String> {
     let config = AiPermissionConfig {
         memory_enabled,
-        memory_days: memory_days.clamp(1, 90),
+        memory_days: memory_days.clamp(1, 180),
     };
     ConfigStore::set(pool, &config).await?;
     tracing::info!(

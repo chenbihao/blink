@@ -19,6 +19,7 @@
     flex-direction: column;
     gap: var(--space-sm);
     -webkit-app-region: no-drag;
+    position: relative; /* 「回到底部」浮动按钮的绝对定位上下文 */
 }
 
 /* ── AI 输入栏 ── */
@@ -88,6 +89,45 @@
 #ai-display::-webkit-scrollbar-thumb {
     background: var(--text-faint);
     border-radius: 2px;
+}
+
+/* ── 「回到底部」浮动按钮 ─────────────────────────── */
+.ai-scroll-bottom-btn {
+    position: absolute;
+    bottom: var(--space-sm);
+    right: var(--space-md);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--surface-2);
+    border: 1px solid var(--surface-3, var(--surface-2));
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(8px);
+    transition: opacity var(--transition-slow), transform var(--transition-slow), visibility var(--transition-slow);
+    z-index: 10;
+    box-shadow: 0 2px 8px var(--shadow);
+}
+
+.ai-scroll-bottom-btn .icon {
+    width: 18px;
+    height: 18px;
+}
+
+.ai-scroll-bottom-btn.visible {
+    opacity: 0.85;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.ai-scroll-bottom-btn:hover {
+    opacity: 1;
+    background: var(--surface-3, var(--surface-2));
 }
 
 /* ── 工具行（单行替换式）── */
@@ -339,6 +379,19 @@
     gap: var(--space-xs);
     margin-bottom: var(--space-sm);
     font-size: var(--text-sm);
+    max-height: 160px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-faint) transparent;
+}
+
+.ai-confirm-card-details::-webkit-scrollbar {
+    width: 4px;
+}
+
+.ai-confirm-card-details::-webkit-scrollbar-thumb {
+    background: var(--text-faint);
+    border-radius: 2px;
 }
 
 .ai-confirm-card-details > div {

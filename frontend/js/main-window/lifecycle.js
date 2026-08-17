@@ -32,7 +32,13 @@ export function init() {
 
     listen(EVENTS.SHOWN, () => {
         // 0.20-fix: 防御性清理 readOnly 残留（HIDDEN 已调 forceClearReadOnly，但双保险）
-        inputState.forceClearReadOnly();
+        // 0.21.x: 但 chord 待命态（Alt 按下）必须保留 readOnly——SHOWN 时机窗内
+        // native 独占会话可能尚未建立（window.visible 翻转竞态），此刻清掉 readOnly
+        // 会让 chord 键落进输入法（onChordTrigger 对 229/组字放行）。HIDDEN 已负责清
+        // 残留，这里仅在非待命态防御性清理。
+        if (!inputState.inChordStandby()) {
+            inputState.forceClearReadOnly();
+        }
         // 0.17.6: AiMode 下 SHOWN 只 focus AI 输入框，不重置搜索状态
         if (aiMode.isActive()) {
             aiQueryEl.focus();
