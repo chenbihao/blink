@@ -125,7 +125,7 @@ pub fn is_text_input_control(control_type_id: i32) -> bool {
 /// 判断当前前台焦点是否在文本输入控件上。
 ///
 /// 在后台线程调用。返回 false 表示获取失败或焦点不在文本输入框。
-#[allow(dead_code)]
+/// 0.21.x 起供剪贴板上屏（paste_to_input）判断目标是否为可注入输入框。
 pub fn is_focused_on_text_input() -> bool {
     focused_control_type()
         .map(is_text_input_control)

@@ -210,6 +210,27 @@ function positionDropdown(dropdown) {
             return;
         }
 
+        // 配色分析有结果时，面板停靠到选区右方（面板较长，放选区下方展开会很别扭）。
+        // 未提取配色（paletteResult 为空）时维持"色按钮下方"的默认停靠。
+        if (ss.paletteResult && ss.selCss) {
+            const sel = ss.selCss;
+            const selMon = findDisplayCssAt(sel.x + sel.w, sel.y);
+            const desiredLeft = Math.max(
+                selMon.x + margin,
+                Math.min(sel.x + sel.w + margin, selMon.x + selMon.w - rect.width - margin),
+            );
+            const desiredTop = Math.max(
+                selMon.y + margin,
+                Math.min(sel.y, selMon.y + selMon.h - rect.height - margin),
+            );
+            dropdown.removeAttribute('data-placement');
+            dropdown.style.bottom = 'auto';
+            dropdown.style.left = `${(desiredLeft - anchor.left) / uiScale}px`;
+            dropdown.style.top = `${(desiredTop - anchor.top) / uiScale}px`;
+            dropdown.style.visibility = '';
+            return;
+        }
+
         const desiredLeft = Math.max(mon.x + margin, Math.min(anchor.left, mon.x + mon.w - rect.width - margin));
         // 二级页面默认停靠在颜色按钮下方；空间不足时只向屏幕内钳制，不翻转到按钮上方。
         const desiredTop = Math.max(
@@ -553,6 +574,8 @@ export function bindToolbar() {
     document.querySelectorAll('.dropdown-wrap').forEach((wrap) => {
         const dd = wrap.querySelector('.dropdown');
         if (!dd) return;
+        // 配色复制菜单（复制所选/复制整组）是右键式菜单，不走工具组 hover 自动展开。
+        if (dd.classList.contains('palette-copy-menu') || dd.classList.contains('palette-group-copy-menu')) return;
         const isColor = dd.id === 'color-dropdown';
 
         if (isColor) {

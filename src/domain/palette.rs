@@ -39,6 +39,34 @@ pub const PALETTE_ALGORITHM_V1: PaletteConstants = PaletteConstants {
     smart_pair_distance_bonus: 3.0,
     smart_chroma_bonus: 4.0,
     smart_degraded_confidence: 0.5,
+    // 显著色（视觉焦点色）提取启发式
+    salient_area_bias: 0.45,
+    salient_area_exponent: 0.15,
+    salient_chroma_min: 0.035,
+    salient_bg_distance_min: 0.055,
+    salient_min_count_factor: 0.000002,
+    salient_smooth_weight: 0.3,
+    salient_chroma_gain: 4.0,
+    salient_chroma_bias: 0.25,
+    salient_contrast_gain: 2.5,
+    salient_contrast_bias: 0.35,
+    salient_rep_area_exponent: 0.12,
+    salient_peak_min_distance: 1,
+    salient_peak_suppress_ratio: 0.6,
+    salient_max_colors: 9,
+    salient_diversity_min_distance: 0.04,
+    balanced_salient_take: 6,
+    // Mean-shift 聚类参数（OKLab 带权模式查找）
+    mean_shift: MeanShiftParams {
+        bandwidth: 0.06,
+        min_ratio: 0.00001,
+        max_iters: 12,
+        convergence: 0.0005,
+        seed_cap: 96,
+        window_cap: 1024,
+    },
+    // MMCQ 聚类参数（中值切分量化）
+    mmcq: MmcqParams { target_colors: 8 },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +101,66 @@ pub struct PaletteConstants {
     pub smart_chroma_bonus: f64,
     /// 智能搭配：降级时的置信度
     pub smart_degraded_confidence: f64,
+    /// 显著色：扇区能量面积项偏置（面积占比低时能量下限，压低面积主导）
+    pub salient_area_bias: f64,
+    /// 显著色：扇区能量面积项指数（越小对面积越不敏感）
+    pub salient_area_exponent: f64,
+    /// 显著色：候选色度阈值
+    pub salient_chroma_min: f64,
+    /// 显著色：背景邻近过滤阈值（仅面积主导背景时生效）
+    pub salient_bg_distance_min: f64,
+    /// 显著色：扇区最小像素数系数（total × 此值，至少 2）
+    pub salient_min_count_factor: f64,
+    /// 显著色：扇区能量平滑权重
+    pub salient_smooth_weight: f64,
+    /// 显著色：能量色度增益
+    pub salient_chroma_gain: f64,
+    /// 显著色：能量色度偏置
+    pub salient_chroma_bias: f64,
+    /// 显著色：能量反差增益
+    pub salient_contrast_gain: f64,
+    /// 显著色：能量反差偏置
+    pub salient_contrast_bias: f64,
+    /// 显著色：代表色评分面积项指数
+    pub salient_rep_area_exponent: f64,
+    /// 显著色：相邻扇区峰值最小距离（扇区数）
+    pub salient_peak_min_distance: usize,
+    /// 显著色：相邻扇区峰值保留的最小能量比（能量相对化 NMS，低于此比值才抑制）
+    pub salient_peak_suppress_ratio: f64,
+    /// 显著色：最大颜色数
+    pub salient_max_colors: usize,
+    /// 显著色：多样选色最小 OKLab 距离
+    pub salient_diversity_min_distance: f64,
+    /// 均衡配色：从显著色取用数量
+    pub balanced_salient_take: usize,
+    /// Mean-shift 聚类参数
+    pub mean_shift: MeanShiftParams,
+    /// MMCQ 聚类参数
+    pub mmcq: MmcqParams,
+}
+
+/// Mean-shift 聚类参数
+#[derive(Debug, Clone, Copy)]
+pub struct MeanShiftParams {
+    /// OKLab 距离带宽（窗口半径）
+    pub bandwidth: f64,
+    /// 模式最小像素占比，低于则丢弃
+    pub min_ratio: f64,
+    /// 单种子最大迭代次数
+    pub max_iters: usize,
+    /// 质心位移小于此值时视为收敛
+    pub convergence: f64,
+    /// 种子数上限（性能：最远点采样覆盖不同色组）
+    pub seed_cap: usize,
+    /// 质心窗口大小上限（count 降序取前 N 作为带权质心参考，控每次扫描成本）
+    pub window_cap: usize,
+}
+
+/// MMCQ（Modified Median Cut）聚类参数
+#[derive(Debug, Clone, Copy)]
+pub struct MmcqParams {
+    /// 目标色数（中值切分的盒数）
+    pub target_colors: usize,
 }
 
 // ── 类型定义 ─────────────────────────────────────────────────────────────
@@ -93,6 +181,20 @@ pub struct ClusterResult {
     pub oklab: OkLab,
     pub count: usize,
     pub ratio: f64,
+}
+
+/// 可选的聚类算法（前端截图面板切换；默认 kmeans 保持既有行为）。
+/// serde snake_case：`kmeans` / `mean_shift` / `mmcq`，与前端取值对齐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusteringAlgo {
+    /// OKLab 加权 k-means（既有默认）
+    #[default]
+    Kmeans,
+    /// Mean-shift 密度聚类（自动定簇数）
+    MeanShift,
+    /// MMCQ 中值切分量化（确定性直方图分盒）
+    Mmcq,
 }
 
 /// 角色色
@@ -215,8 +317,8 @@ pub fn rgb_to_oklab(r: u8, g: u8, b: u8) -> OkLab {
     ]
 }
 
-/// OKLab → sRGB (0-255)
-pub fn oklab_to_rgb(lab: OkLab) -> Rgb {
+/// OKLab → 线性 sRGB [0..1]（未钳制，供色域判定与 RGB 转换共用）
+fn oklab_to_linear_rgb(lab: OkLab) -> [f64; 3] {
     let [l, a, b] = lab;
 
     // OKLab → LMS'（M2 逆矩阵 canonical）
@@ -230,10 +332,16 @@ pub fn oklab_to_rgb(lab: OkLab) -> Rgb {
     let s = s_ * s_ * s_;
 
     // LMS → 线性 sRGB（Ottosson canonical LMS→linear-sRGB 逆矩阵）
-    let lr = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
-    let lg = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
-    let lb = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+    [
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    ]
+}
 
+/// OKLab → sRGB (0-255)
+pub fn oklab_to_rgb(lab: OkLab) -> Rgb {
+    let [lr, lg, lb] = oklab_to_linear_rgb(lab);
     [linear_to_srgb(lr), linear_to_srgb(lg), linear_to_srgb(lb)]
 }
 
@@ -259,15 +367,13 @@ pub fn oklch_to_oklab(lch: OkLch) -> OkLab {
 
 // ── sRGB gamut mapping ────────────────────────────────────────────────────
 
-/// 检查 OKLab 颜色是否在 sRGB 色域内
+/// 检查 OKLab 颜色是否在 sRGB 色域内。
+/// 直接判定线性 RGB 三通道是否落入 [0,1]（精确、无阈值）。
+/// 不能用 roundtrip 距离：8bit 量化会让色域内颜色（近黑区）出现 0.05 量级误差，
+/// 而贴边超色域颜色反而只有 0.0003 量级误差，二者无法分离（0.20.7 起生成方案全被压成灰即此因）。
 fn in_srgb_gamut(lab: OkLab) -> bool {
-    let rgb = oklab_to_rgb(lab);
-    // 如果 roundtrip 回来的 RGB 与原始 OKLab 距离极小，则在色域内
-    let back = rgb_to_oklab(rgb[0], rgb[1], rgb[2]);
-    let dl = lab[0] - back[0];
-    let da = lab[1] - back[1];
-    let db = lab[2] - back[2];
-    (dl * dl + da * da + db * db).sqrt() < 0.0001
+    let [lr, lg, lb] = oklab_to_linear_rgb(lab);
+    (0.0..=1.0).contains(&lr) && (0.0..=1.0).contains(&lg) && (0.0..=1.0).contains(&lb)
 }
 
 /// 将 OKLab 颜色映射到 sRGB 色域内（二分法降色度）
@@ -620,6 +726,330 @@ fn merge_near_colors(clusters: Vec<ClusterResult>) -> Vec<ClusterResult> {
     }
     result.sort_by_key(|c| std::cmp::Reverse(c.count));
     result
+}
+
+// ── Mean-shift 聚类 ───────────────────────────────────────────────────────
+
+/// 带宽窗口内带权质心（返回质心与窗口总权重）。
+fn window_centroid(
+    labs: &[OkLab],
+    weights: &[f64],
+    center: OkLab,
+    bandwidth: f64,
+) -> ([f64; 3], f64) {
+    let mut s = [0.0f64; 3];
+    let mut w = 0.0f64;
+    for (lab, &weight) in labs.iter().zip(weights) {
+        if delta_e(*lab, center) <= bandwidth {
+            s[0] += lab[0] * weight;
+            s[1] += lab[1] * weight;
+            s[2] += lab[2] * weight;
+            w += weight;
+        }
+    }
+    if w == 0.0 {
+        (s, 0.0)
+    } else {
+        ([s[0] / w, s[1] / w, s[2] / w], w)
+    }
+}
+
+/// Mean-shift 密度聚类（OKLab 空间带权模式查找）。
+/// 与 k-means 不同，簇数不预设：每个种子沿密度梯度收敛到局部模式，
+/// 近邻模式按带宽一半合并。确定性：种子用 k-means++ 式最远点采样，
+/// 保证不同色组都有种子（纯 count 截断只会覆盖主导色家族）；迭代顺序固定、无 RNG。
+/// 输出契约与 k-means 一致：count 降序 + rgb 映射回真实桶 + `merge_near_colors` 收尾。
+fn mean_shift_cluster(entries: &[HistogramEntry]) -> Vec<ClusterResult> {
+    let c = PALETTE_ALGORITHM_V1;
+    if entries.is_empty() {
+        return vec![];
+    }
+    let ms = c.mean_shift;
+    let total: usize = entries.iter().map(|e| e.count).sum();
+    if total == 0 {
+        return vec![];
+    }
+    let floor = (2usize).max((total as f64 * ms.min_ratio) as usize);
+
+    // 全部通过 floor 的真实色（噪声已滤除）：种子覆盖用
+    let active: Vec<usize> = (0..entries.len())
+        .filter(|&i| entries[i].count >= floor)
+        .collect();
+    if active.is_empty() {
+        return vec![];
+    }
+
+    // 质心窗口：count 降序取前 window_cap（覆盖质量主体，把每次质心扫描成本封顶；
+    // 低占比点缀仍由种子覆盖，其窗口为空时以种子自身为模式，不丢色组）
+    let mut mass: Vec<usize> = active.clone();
+    mass.sort_by(|&a, &b| {
+        entries[b]
+            .count
+            .cmp(&entries[a].count)
+            .then_with(|| a.cmp(&b))
+    });
+    mass.truncate(mass.len().min(ms.window_cap));
+    let win_labs: Vec<OkLab> = mass.iter().map(|&i| entries[i].oklab).collect();
+    let win_counts: Vec<f64> = mass.iter().map(|&i| entries[i].count as f64).collect();
+
+    // 种子：k-means++ 式最远点采样 over mass（主要色族都在 top-count 窗口内，
+    // 低占比点缀即便不单独成簇也会在最终分配并入最近模式，不影响 top-8 输出）
+    let mut seeds: Vec<usize> = Vec::new();
+    {
+        let mut first = 0;
+        for (i, e) in entries.iter().enumerate() {
+            if e.count > entries[first].count {
+                first = i;
+            }
+        }
+        seeds.push(first);
+        let max_seeds = ms.seed_cap.min(mass.len());
+        while seeds.len() < max_seeds {
+            let mut best = -1isize;
+            let mut best_score = 0.0f64;
+            for (wi, &i) in mass.iter().enumerate() {
+                let min_d = seeds
+                    .iter()
+                    .map(|&s| delta_e(entries[i].oklab, entries[s].oklab))
+                    .fold(f64::INFINITY, f64::min);
+                let score = min_d * min_d * (entries[i].count as f64).sqrt();
+                if score > best_score {
+                    best_score = score;
+                    best = wi as isize;
+                }
+            }
+            if best < 0 || best_score <= 0.0 {
+                break;
+            }
+            seeds.push(mass[best as usize]);
+        }
+    }
+    let seed_labs: Vec<OkLab> = seeds.iter().map(|&i| entries[i].oklab).collect();
+
+    // 每个种子沿密度梯度迭代（窗口=质量集），收敛到已有模式则提前终止。
+    // merge_dist = 带宽一半：近邻模式视为同一（按种子顺序先到先得）
+    let merge_dist = ms.bandwidth * 0.5;
+    let mut modes: Vec<OkLab> = Vec::new();
+    for &s_lab in &seed_labs {
+        let mut p = s_lab;
+        // 起点已落在已有模式附近 → 直接归并，不迭代
+        if modes.iter().any(|m| delta_e(*m, p) < merge_dist) {
+            continue;
+        }
+        for _ in 0..ms.max_iters {
+            let (centroid, w) = window_centroid(&win_labs, &win_counts, p, ms.bandwidth);
+            if w == 0.0 {
+                break;
+            }
+            let moved = delta_e(centroid, p);
+            p = centroid;
+            if moved < ms.convergence {
+                break;
+            }
+            // 漂移到已有模式附近 → 提前终止，不新增模式（多数种子收敛到少数密度峰）
+            if modes.iter().any(|m| delta_e(*m, p) < merge_dist) {
+                break;
+            }
+        }
+        if !modes.iter().any(|m| delta_e(*m, p) < merge_dist) {
+            modes.push(p);
+        }
+    }
+    if modes.is_empty() {
+        return vec![];
+    }
+
+    // 分配所有 entries 到最近模式；rgb 取簇内距模式最近的真实桶（第一遍，供排序/过滤）
+    let mut mode_counts = vec![0usize; modes.len()];
+    let mut mode_nearest_entry = vec![-1isize; modes.len()];
+    let mut mode_nearest_dist = vec![f64::INFINITY; modes.len()];
+    for (i, entry) in entries.iter().enumerate() {
+        let mut nearest = 0;
+        let mut dist = f64::INFINITY;
+        for (m_idx, m) in modes.iter().enumerate() {
+            let d = delta_e(entry.oklab, *m);
+            if d < dist {
+                dist = d;
+                nearest = m_idx;
+            }
+        }
+        mode_counts[nearest] += entry.count;
+        if dist < mode_nearest_dist[nearest] {
+            mode_nearest_dist[nearest] = dist;
+            mode_nearest_entry[nearest] = i as isize;
+        }
+    }
+
+    // 模式按 count 降序：滤除噪声（低于 floor 的已在窗口外）后截断到 k_max，
+    // 其余像素最终统一重分配到最近保留模式。
+    let mut mode_order: Vec<usize> = (0..modes.len())
+        .filter(|&m| mode_counts[m] >= floor)
+        .collect();
+    mode_order.sort_by_key(|&m| std::cmp::Reverse(mode_counts[m]));
+    mode_order.truncate(mode_order.len().min(c.k_max));
+    if mode_order.is_empty() {
+        // 全被过滤时退化为最大模式，保证非空
+        let largest = (0..modes.len())
+            .max_by_key(|&m| mode_counts[m])
+            .expect("modes 非空");
+        mode_order.push(largest);
+    }
+
+    // 最终分配：所有 entries 归到保留模式（丢弃模式的像素并入最近保留模式）
+    let mut cluster_counts = vec![0usize; mode_order.len()];
+    let mut nearest_entry = vec![-1isize; mode_order.len()];
+    let mut nearest_dist = vec![f64::INFINITY; mode_order.len()];
+    for (i, entry) in entries.iter().enumerate() {
+        let mut nearest = 0;
+        let mut dist = f64::INFINITY;
+        for (ki, &m) in mode_order.iter().enumerate() {
+            let d = delta_e(entry.oklab, modes[m]);
+            if d < dist {
+                dist = d;
+                nearest = ki;
+            }
+        }
+        cluster_counts[nearest] += entry.count;
+        if dist < nearest_dist[nearest] {
+            nearest_dist[nearest] = dist;
+            nearest_entry[nearest] = i as isize;
+        }
+    }
+
+    let mut clusters: Vec<ClusterResult> = Vec::new();
+    for (ki, &m) in mode_order.iter().enumerate() {
+        if cluster_counts[ki] == 0 || nearest_entry[ki] < 0 {
+            continue;
+        }
+        let entry_idx = nearest_entry[ki] as usize;
+        clusters.push(ClusterResult {
+            rgb: entries[entry_idx].rgb,
+            oklab: modes[m],
+            count: cluster_counts[ki],
+            ratio: cluster_counts[ki] as f64 / total as f64,
+        });
+    }
+
+    clusters.sort_by_key(|c| std::cmp::Reverse(c.count));
+    merge_near_colors(clusters)
+}
+
+// ── MMCQ 聚类 ─────────────────────────────────────────────────────────────
+
+/// MMCQ（Modified Median Cut）直方图量化：按"占比 × 通道范围"选最大盒，
+/// 沿范围最大通道在占比中位数处劈开，直至目标色数。
+/// 确定性：排序稳定（值相等按索引）、无 RNG。输出契约与 k-means 一致。
+fn mmcq_cluster(entries: &[HistogramEntry]) -> Vec<ClusterResult> {
+    let c = PALETTE_ALGORITHM_V1;
+    if entries.is_empty() {
+        return vec![];
+    }
+    let target = c.mmcq.target_colors.clamp(1, entries.len());
+    let total: usize = entries.iter().map(|e| e.count).sum();
+    if total == 0 {
+        return vec![];
+    }
+
+    // 每个盒 = 一组 entries 索引；初始一个盒含全部
+    let mut boxes: Vec<Vec<usize>> = vec![(0..entries.len()).collect()];
+
+    while boxes.len() < target {
+        // 选 占比 × 最大通道范围 最大的盒与切分轴
+        let mut best: Option<(usize, usize)> = None; // (box_idx, axis)
+        let mut best_score = 0.0f64;
+        for (bi, b) in boxes.iter().enumerate() {
+            if b.len() < 2 {
+                continue;
+            }
+            let pop: usize = b.iter().map(|&i| entries[i].count).sum();
+            let mut mins = [255i32; 3];
+            let mut maxs = [0i32; 3];
+            for &i in b {
+                for ch in 0..3 {
+                    let v = entries[i].rgb[ch] as i32;
+                    mins[ch] = mins[ch].min(v);
+                    maxs[ch] = maxs[ch].max(v);
+                }
+            }
+            let (axis, range) = (0..3)
+                .map(|ch| (ch, maxs[ch] - mins[ch]))
+                .max_by_key(|&(_, r)| r)
+                .expect("三通道总有最大值");
+            if range <= 0 {
+                continue; // 盒内同色，无法再分
+            }
+            let score = pop as f64 * range as f64;
+            if score > best_score {
+                best_score = score;
+                best = Some((bi, axis));
+            }
+        }
+        let Some((bi, axis)) = best else { break };
+
+        // 取走该盒，按 axis 稳定排序后在占比中位数处劈开
+        let mut bucket = boxes.swap_remove(bi);
+        bucket.sort_by(|&a, &b| {
+            entries[a].rgb[axis]
+                .cmp(&entries[b].rgb[axis])
+                .then_with(|| a.cmp(&b))
+        });
+        let half = bucket
+            .iter()
+            .map(|&i| entries[i].count)
+            .sum::<usize>()
+            .div_ceil(2);
+        let mut acc = 0usize;
+        let mut split = bucket.len() - 1;
+        for (pos, &i) in bucket.iter().enumerate() {
+            acc += entries[i].count;
+            if acc >= half {
+                split = pos + 1;
+                break;
+            }
+        }
+        split = split.clamp(1, bucket.len() - 1);
+        let right = bucket.split_off(split);
+        boxes.push(bucket);
+        boxes.push(right);
+    }
+
+    // 从每个盒构建 ClusterResult
+    let mut clusters = Vec::new();
+    for b in &boxes {
+        let mut s = [0.0f64; 3];
+        let mut w = 0.0f64;
+        for &i in b {
+            let weight = entries[i].count as f64;
+            s[0] += entries[i].oklab[0] * weight;
+            s[1] += entries[i].oklab[1] * weight;
+            s[2] += entries[i].oklab[2] * weight;
+            w += weight;
+        }
+        if w == 0.0 {
+            continue;
+        }
+        let centroid = [s[0] / w, s[1] / w, s[2] / w];
+        // rgb 取盒内距质心最近的真实桶
+        let mut nearest = 0;
+        let mut nearest_d = f64::INFINITY;
+        for &i in b {
+            let d = delta_e(entries[i].oklab, centroid);
+            if d < nearest_d {
+                nearest_d = d;
+                nearest = i;
+            }
+        }
+        let count: usize = b.iter().map(|&i| entries[i].count).sum();
+        clusters.push(ClusterResult {
+            rgb: entries[nearest].rgb,
+            oklab: centroid,
+            count,
+            ratio: count as f64 / total as f64,
+        });
+    }
+
+    clusters.sort_by_key(|c| std::cmp::Reverse(c.count));
+    merge_near_colors(clusters)
 }
 
 // ── 角色色分配 ────────────────────────────────────────────────────────────
@@ -1097,23 +1527,65 @@ impl HueSector {
     }
 }
 
+/// 全局显著性（Histogram Contrast 唯一性）：对每个直方图颜色，计算它与
+/// 其它颜色按占比加权的 OKLab 距离之和。值越大 = 颜色越独特、越"引人注目"——
+/// 与全图高频色相近的颜色得分低（即便面积大），稀有且与多数色差异大的得分高。
+///
+/// 参考 Cheng 等《Global Contrast Based Salient Region Detection》（TPAMI 2015）。
+/// 实现细节：参考集按占比截断到 TOP_N 并重归一，避免全直方图 O(n²)。
+fn compute_global_saliency(entries: &[HistogramEntry]) -> Vec<f64> {
+    const TOP_N: usize = 128;
+    let n = entries.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // 占比最高的 TOP_N 色作为参考集（低占比色对加权和贡献可忽略）
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| entries[b].count.cmp(&entries[a].count));
+    let top_n = order.len().min(TOP_N);
+    let top_sum: u64 = order[..top_n]
+        .iter()
+        .map(|&i| entries[i].count as u64)
+        .sum();
+    let top: Vec<(OkLab, f64)> = order[..top_n]
+        .iter()
+        .map(|&i| (entries[i].oklab, entries[i].count as f64 / top_sum as f64))
+        .collect();
+
+    entries
+        .iter()
+        .map(|e| top.iter().map(|(lab, w)| w * delta_e(e.oklab, *lab)).sum())
+        .collect()
+}
+
 /// 在色相环上聚合高色度颜色并找局部峰值。
 /// 每个峰最终仍返回一个原图真实颜色，而不是色相扇区的平均色。
 fn find_hue_peak_candidates(
     entries: &[HistogramEntry],
     bg_lab: OkLab,
+    bg_is_dominant: bool,
 ) -> Vec<(usize, f64, f64, f64)> {
     let total: usize = entries.iter().map(|e| e.count).sum();
     if total == 0 {
         return vec![];
     }
 
+    let c = PALETTE_ALGORITHM_V1;
     let mut sectors: Vec<HueSector> = (0..HUE_SECTORS).map(|_| HueSector::new()).collect();
-    let candidate_min_count = (2usize).max((total as f64 * 0.000002) as usize);
+    let candidate_min_count = (2usize).max((total as f64 * c.salient_min_count_factor) as usize);
+    // 全局唯一性信号：相对全图颜色分布，而非单一背景参考点——
+    // 降级指派背景（无主导色）时，对背景的反差会误压最亮点缀（0.21.15 LYZL 亮黄漏检根因）
+    let global_saliency = compute_global_saliency(entries);
 
     for (i, entry) in entries.iter().enumerate() {
         let background_distance = delta_e(entry.oklab, bg_lab);
-        if entry.chroma < 0.035 || background_distance < 0.055 {
+        if entry.chroma < c.salient_chroma_min {
+            continue;
+        }
+        // 背景为面积主导时才剔除其邻近色；无主导背景时背景色是降级指派，
+        // 不排除背景自身——否则多色均分图里最亮的黄/青会被误当背景而漏检。
+        if bg_is_dominant && background_distance < c.salient_bg_distance_min {
             continue;
         }
         let hue_raw = entry.oklab[2].atan2(entry.oklab[1]).to_degrees();
@@ -1126,7 +1598,7 @@ fn find_hue_peak_candidates(
         let sector = &mut sectors[sector_idx];
         sector.count += entry.count;
         sector.chroma_sum += entry.chroma * entry.count as f64;
-        sector.contrast_sum += background_distance * entry.count as f64;
+        sector.contrast_sum += global_saliency[i] * entry.count as f64;
         sector.entries.push(i);
     }
 
@@ -1137,16 +1609,21 @@ fn find_hue_peak_candidates(
         }
         let average_chroma = sector.chroma_sum / sector.count as f64;
         let average_contrast = sector.contrast_sum / sector.count as f64;
-        sector.energy = (sector.count as f64 / total_f).powf(0.22)
-            * (0.25 + average_chroma * 4.0)
-            * (0.35 + average_contrast * 2.5);
+        // 面积项归一化：低占比有 bias 托底，少量高色度高全局唯一性点缀不被面积压制；
+        // 是否"亮眼"主要由色度与全局唯一性（相对全图分布）决定。
+        let area = c.salient_area_bias
+            + (1.0 - c.salient_area_bias)
+                * (sector.count as f64 / total_f).powf(c.salient_area_exponent);
+        sector.energy = area
+            * (c.salient_chroma_bias + average_chroma * c.salient_chroma_gain)
+            * (c.salient_contrast_bias + average_contrast * c.salient_contrast_gain);
     }
 
     // 平滑能量
     for i in 0..HUE_SECTORS {
         let prev = sectors[(i + HUE_SECTORS - 1) % HUE_SECTORS].energy;
         let next = sectors[(i + 1) % HUE_SECTORS].energy;
-        sectors[i].smoothed_energy = sectors[i].energy + (prev + next) * 0.3;
+        sectors[i].smoothed_energy = sectors[i].energy + (prev + next) * c.salient_smooth_weight;
     }
 
     // 按峰强排序并抑制相邻扇区（非极大值抑制）
@@ -1158,13 +1635,17 @@ fn find_hue_peak_candidates(
         .collect();
     peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+    // 能量相对化 NMS：相邻扇区只在"明显弱于已选峰"时才抑制，
+    // 两个都强（如亮黄与其邻近橄榄）可同时保留，避免小点缀被相邻峰挤掉。
     let mut selected_peaks: Vec<usize> = Vec::new();
     for (peak_idx, _) in &peaks {
-        let overlaps = selected_peaks.iter().any(|chosen| {
-            let distance = (*chosen as i64 - *peak_idx as i64).unsigned_abs() as usize;
-            distance.min(HUE_SECTORS - distance) <= 1
+        let suppressed = selected_peaks.iter().any(|&chosen| {
+            let distance = (chosen as i64 - *peak_idx as i64).unsigned_abs() as usize;
+            distance.min(HUE_SECTORS - distance) <= c.salient_peak_min_distance
+                && sectors[*peak_idx].smoothed_energy
+                    < sectors[chosen].smoothed_energy * c.salient_peak_suppress_ratio
         });
-        if !overlaps {
+        if !suppressed {
             selected_peaks.push(*peak_idx);
         }
     }
@@ -1198,10 +1679,9 @@ fn find_hue_peak_candidates(
         let mut best: Option<(usize, f64)> = None;
         for &idx in candidates {
             let entry = &entries[idx];
-            let background_distance = delta_e(entry.oklab, bg_lab);
-            let score = entry.ratio.powf(0.12)
-                * (0.25 + entry.chroma * 4.0)
-                * (0.35 + background_distance * 3.0);
+            let score = entry.ratio.powf(c.salient_rep_area_exponent)
+                * (c.salient_chroma_bias + entry.chroma * c.salient_chroma_gain)
+                * (c.salient_contrast_bias + global_saliency[idx] * c.salient_contrast_gain);
             if best.is_none_or(|(_, s)| score > s) {
                 best = Some((idx, score));
             }
@@ -1225,6 +1705,7 @@ fn pick_diverse_colors(
     if candidates.is_empty() {
         return vec![];
     }
+    let c = PALETTE_ALGORITHM_V1;
 
     let mut remaining: Vec<(usize, f64)> = candidates.to_vec();
     let mut selected: Vec<usize> = Vec::new();
@@ -1243,7 +1724,7 @@ fn pick_diverse_colors(
                     .map(|&s| delta_e(entries[s].oklab, candidate_lab))
                     .fold(f64::INFINITY, f64::min)
             };
-            if !selected.is_empty() && min_distance < 0.04 {
+            if !selected.is_empty() && min_distance < c.salient_diversity_min_distance {
                 continue;
             }
             let value = score * (0.25 + min_distance * 3.0);
@@ -1282,12 +1763,15 @@ pub fn extract_design_schemes(
     let bg_lab = background.oklab;
 
     // 色相峰值候选
-    let salient_candidates = find_hue_peak_candidates(entries, bg_lab);
+    // 背景占比 >= background_min_ratio 才算面积主导；否则背景色是降级指派，显著色不应排除它。
+    let c = PALETTE_ALGORITHM_V1;
+    let bg_is_dominant = background.ratio >= c.background_min_ratio;
+    let salient_candidates = find_hue_peak_candidates(entries, bg_lab, bg_is_dominant);
     let salient_entries: Vec<(usize, f64)> = salient_candidates
         .iter()
         .map(|(idx, score, _, _)| (*idx, *score))
         .collect();
-    let salient = pick_diverse_colors(&salient_entries, entries, 6);
+    let salient = pick_diverse_colors(&salient_entries, entries, c.salient_max_colors);
 
     // 中性色候选
     let mut neutral_candidates: Vec<(usize, f64)> = entries
@@ -1325,7 +1809,7 @@ pub fn extract_design_schemes(
     for &idx in &neutrals {
         append_distinct(entries[idx].rgb, &mut balanced, &mut balanced_labs);
     }
-    for &idx in salient.iter().take(4) {
+    for &idx in salient.iter().take(c.balanced_salient_take) {
         append_distinct(entries[idx].rgb, &mut balanced, &mut balanced_labs);
     }
     if balanced.len() < 3 {
@@ -1649,13 +2133,23 @@ struct SmartPairingResult {
 
 // ── 完整配色分析入口 ──────────────────────────────────────────────────────
 
-/// 从 RGBA 像素数据执行完整配色分析。
+/// 从 RGBA 像素数据执行完整配色分析（默认 OKLab k-means）。
 ///
 /// 输入为 flat RGBA 数据。
 /// 透明度 < MIN_ALPHA 的像素跳过。
 /// 空样本返回 `empty: true`。
 pub fn analyze_palette(rgba_flat: &[u8], width: usize, height: usize) -> PaletteResult {
-    analyze_palette_histogram(&build_color_histogram(rgba_flat), width, height)
+    analyze_palette_with(rgba_flat, width, height, ClusteringAlgo::default())
+}
+
+/// 指定聚类算法的完整配色分析入口。
+pub fn analyze_palette_with(
+    rgba_flat: &[u8],
+    width: usize,
+    height: usize,
+    algo: ClusteringAlgo,
+) -> PaletteResult {
+    analyze_palette_histogram(&build_color_histogram(rgba_flat), width, height, algo)
 }
 
 /// 从直方图执行聚类与设计分析
@@ -1663,6 +2157,7 @@ pub fn analyze_palette_histogram(
     histogram: &ColorHistogram,
     width: usize,
     height: usize,
+    algo: ClusteringAlgo,
 ) -> PaletteResult {
     if histogram.valid_pixels == 0 || histogram.counts.is_empty() {
         return PaletteResult {
@@ -1684,13 +2179,19 @@ pub fn analyze_palette_histogram(
     let entries = histogram.to_entries();
     let distinct_count = entries.len();
     let c = PALETTE_ALGORITHM_V1;
-    let k = if distinct_count <= c.k_max {
-        distinct_count
-    } else {
-        c.k_max
-            .min(c.k_min.max((distinct_count as f64).sqrt().round() as usize))
+    let clusters = match algo {
+        ClusteringAlgo::Kmeans => {
+            let k = if distinct_count <= c.k_max {
+                distinct_count
+            } else {
+                c.k_max
+                    .min(c.k_min.max((distinct_count as f64).sqrt().round() as usize))
+            };
+            weighted_kmeans_cluster(&entries, k)
+        }
+        ClusteringAlgo::MeanShift => mean_shift_cluster(&entries),
+        ClusteringAlgo::Mmcq => mmcq_cluster(&entries),
     };
-    let clusters = weighted_kmeans_cluster(&entries, k);
     let roles = assign_roles(clusters);
 
     // 默认三组分别回答：整体是什么色、哪里最醒目、怎样组成可用设计色板。
@@ -1756,8 +2257,8 @@ mod tests {
 
     #[test]
     fn oklab_fixture_consistency() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("frontend/js/shared/fixtures/palette-fixtures.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/palette-fixtures.json");
         if !path.exists() {
             eprintln!("跳过 fixture 测试：{} 不存在", path.display());
             return;
@@ -1801,8 +2302,8 @@ mod tests {
 
     #[test]
     fn roundtrip_fixture_consistency() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("frontend/js/shared/fixtures/palette-fixtures.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/palette-fixtures.json");
         if !path.exists() {
             eprintln!("跳过 fixture 测试：{} 不存在", path.display());
             return;
@@ -1860,8 +2361,8 @@ mod tests {
 
     #[test]
     fn palette_fixture_consistency() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("frontend/js/shared/fixtures/palette-fixtures.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/palette-fixtures.json");
         if !path.exists() {
             eprintln!("跳过 fixture 测试：{} 不存在", path.display());
             return;
@@ -2105,5 +2606,257 @@ mod tests {
         }];
         let result = format_as_list(&roles);
         assert_eq!(result, "#FF0000");
+    }
+
+    #[test]
+    fn salient_includes_forced_bg_hue_when_no_dominant_color() {
+        // 回归：多色均分、无主导背景时，最亮的黄会被降级指派为 background。
+        // 视觉焦点色检测不应因此把背景自身的亮黄排除（0.21.15 修复亮黄漏检）。
+        let mut rgba = vec![128u8; 4 * 12 * 6];
+        let hues: [[u8; 3]; 6] = [
+            [220, 50, 50],  // 红
+            [240, 140, 40], // 橙
+            [255, 224, 32], // 亮黄
+            [60, 180, 70],  // 绿
+            [60, 80, 220],  // 蓝
+            [160, 60, 200], // 紫
+        ];
+        for row in 0..6 {
+            for col in 0..12 {
+                let i = (row * 12 + col) * 4;
+                let c = hues[col / 2];
+                rgba[i] = c[0];
+                rgba[i + 1] = c[1];
+                rgba[i + 2] = c[2];
+                rgba[i + 3] = 255;
+            }
+        }
+
+        let result = analyze_palette(&rgba, 12, 6);
+        assert!(!result.empty);
+
+        // 前提：无 35% 主导色，亮黄（明度最高）被降级指派为背景
+        let bg = result.roles.iter().find(|r| r.role == "background");
+        assert!(
+            bg.is_some_and(|r| r.hex == "#FFE020"),
+            "多色均分图应将最亮的黄标为背景（降级指派），实际 roles: {:?}",
+            result.roles
+        );
+
+        // 修复点：视觉焦点色必须包含该亮黄
+        let salient = result
+            .recommended
+            .iter()
+            .find(|s| s.scheme == "salient")
+            .expect("应存在 salient 方案");
+        let salient_hex: Vec<String> = salient
+            .colors
+            .iter()
+            .map(|rgb| rgb_to_hex(rgb[0], rgb[1], rgb[2]))
+            .collect();
+        assert!(
+            salient_hex.contains(&"#FFE020".to_string()),
+            "salient 应包含亮黄 #FFE020，实际: {:?}",
+            salient_hex
+        );
+    }
+
+    #[test]
+    fn real_image_lyzl_analysis_is_stable() {
+        // 真实图片回归锚：蓝色系插画，含零散亮黄点缀（testdata/LYZL.png）。
+        // 验证真实 PNG → 解码 → analyze_palette 全链路无 panic、输出确定。
+        // 该图亮黄像素仅约 0.7% 且零散分布；显著对比度信号改为 HC 全局唯一性
+        // （相对全图分布而非单点背景反差）后，亮黄应进入视觉焦点色（见下方断言）。
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/LYZL.png");
+        assert!(path.exists(), "fixture 缺失: {}", path.display());
+        let bytes = std::fs::read(&path).unwrap();
+        let (rgba, w, h) =
+            crate::infra::platform::screenshot::decode_png_to_rgba(&bytes).expect("PNG 解码失败");
+        assert!(w > 0 && h > 0);
+
+        let result = analyze_palette(&rgba, w as usize, h as usize);
+        assert!(!result.empty);
+        assert!(!result.roles.is_empty());
+        assert!(result.roles.iter().any(|r| r.role == "background"));
+        // 该图为蓝色系插画（hue_concentration 高）
+        assert_eq!(result.theme.family, "蓝色系");
+
+        // 视觉焦点色非空
+        let salient = result
+            .recommended
+            .iter()
+            .find(|s| s.scheme == "salient")
+            .expect("应存在 salient 方案");
+        assert!(!salient.colors.is_empty());
+
+        // HC 全局唯一性显著：零散亮黄点缀（占比 <0.1%）应进入视觉焦点色。
+        // 对比度信号从"对背景单点反差"换为相对全图分布后，不再被降级指派的
+        // 背景（该图无主导色，最亮黄被降级标为背景）误压。
+        let yellow_present = salient.colors.iter().any(|rgb| {
+            let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+            r > 180 && g > 140 && b < 140
+        });
+        assert!(
+            yellow_present,
+            "亮黄点缀应进入视觉焦点色，实际 salient: {:?}",
+            salient.colors
+        );
+
+        // 确定性：同输入两次分析完全一致
+        let result2 = analyze_palette(&rgba, w as usize, h as usize);
+        assert_eq!(result.roles.len(), result2.roles.len());
+        for (r1, r2) in result.roles.iter().zip(result2.roles.iter()) {
+            assert_eq!(r1.rgb, r2.rgb);
+            assert_eq!(r1.role, r2.role);
+        }
+        let salient2 = result2
+            .recommended
+            .iter()
+            .find(|s| s.scheme == "salient")
+            .unwrap();
+        assert_eq!(salient.colors, salient2.colors);
+
+        // 像素可寻：所有角色色来自原图直方图的真实像素
+        let hist = build_color_histogram(&rgba);
+        let input_rgbs: std::collections::HashSet<Rgb> = hist.colors.iter().copied().collect();
+        for role in &result.roles {
+            assert!(
+                input_rgbs.contains(&role.rgb),
+                "角色色 {} 不在原图直方图中",
+                role.hex
+            );
+        }
+    }
+
+    // ── 新聚类算法（Mean-shift / MMCQ）单测 ───────────────────────────────
+
+    /// 生成"深底 + 少量高饱和红点缀"测试像素（alpha 255）
+    fn accent_sample() -> Vec<u8> {
+        let mut rgba = vec![30u8; 4 * 15 * 3];
+        for px in 0..15 * 3 {
+            let i = px * 4;
+            rgba[i + 3] = 255;
+            if px % 15 == 8 {
+                rgba[i] = 255;
+                rgba[i + 1] = 0;
+                rgba[i + 2] = 0;
+            }
+        }
+        rgba
+    }
+
+    #[test]
+    fn mean_shift_small_accent_roles() {
+        // 深底 + 红点缀：Mean-shift 自动聚类应产出背景 + 红强调
+        let rgba = accent_sample();
+        let res = analyze_palette_with(&rgba, 15, 3, ClusteringAlgo::MeanShift);
+        assert!(!res.empty);
+        assert!(
+            res.roles.iter().any(|r| r.role == "background"),
+            "roles: {:?}",
+            res.roles
+        );
+        let red = res.roles.iter().find(|r| r.rgb == [255, 0, 0]);
+        assert!(red.is_some(), "红色点缀应为角色色之一: {:?}", res.roles);
+        assert_eq!(red.unwrap().role, "accent");
+    }
+
+    #[test]
+    fn mmcq_small_accent_roles() {
+        let rgba = accent_sample();
+        let res = analyze_palette_with(&rgba, 15, 3, ClusteringAlgo::Mmcq);
+        assert!(!res.empty);
+        assert!(res.roles.iter().any(|r| r.role == "background"));
+        let red = res.roles.iter().find(|r| r.rgb == [255, 0, 0]);
+        assert!(red.is_some(), "红色点缀应为角色色之一: {:?}", res.roles);
+        assert_eq!(red.unwrap().role, "accent");
+    }
+
+    #[test]
+    fn mean_shift_cluster_contract_and_determinism() {
+        // 契约：count 降序、rgb 像素可寻、ratio 归一、两次一致
+        let mut rgba = vec![128u8; 4 * 12 * 6];
+        let hues: [[u8; 3]; 6] = [
+            [220, 50, 50],  // 红
+            [240, 140, 40], // 橙
+            [255, 224, 32], // 亮黄
+            [60, 180, 70],  // 绿
+            [60, 80, 220],  // 蓝
+            [160, 60, 200], // 紫
+        ];
+        for row in 0..6 {
+            for col in 0..12 {
+                let i = (row * 12 + col) * 4;
+                let c = hues[col / 2];
+                rgba[i] = c[0];
+                rgba[i + 1] = c[1];
+                rgba[i + 2] = c[2];
+                rgba[i + 3] = 255;
+            }
+        }
+        let hist = build_color_histogram(&rgba);
+        let entries = hist.to_entries();
+        let input_rgbs: std::collections::HashSet<Rgb> = hist.colors.iter().copied().collect();
+
+        for algo in [ClusteringAlgo::MeanShift, ClusteringAlgo::Mmcq] {
+            let clusters = match algo {
+                ClusteringAlgo::MeanShift => mean_shift_cluster(&entries),
+                ClusteringAlgo::Mmcq => mmcq_cluster(&entries),
+                ClusteringAlgo::Kmeans => unreachable!(),
+            };
+            assert!(!clusters.is_empty(), "{algo:?} 不应为空");
+            // count 降序
+            for w in clusters.windows(2) {
+                assert!(
+                    w[0].count >= w[1].count,
+                    "{algo:?} clusters 应按 count 降序"
+                );
+            }
+            // rgb 像素可寻 + 确定性
+            for c in &clusters {
+                assert!(
+                    input_rgbs.contains(&c.rgb),
+                    "{algo:?} cluster rgb {:?} 不在直方图中",
+                    c.rgb
+                );
+            }
+            let clusters2 = match algo {
+                ClusteringAlgo::MeanShift => mean_shift_cluster(&entries),
+                ClusteringAlgo::Mmcq => mmcq_cluster(&entries),
+                ClusteringAlgo::Kmeans => unreachable!(),
+            };
+            assert_eq!(clusters.len(), clusters2.len(), "{algo:?} 确定性失败");
+            for (a, b) in clusters.iter().zip(clusters2.iter()) {
+                assert_eq!(a.rgb, b.rgb, "{algo:?} 确定性失败 rgb");
+                assert_eq!(a.count, b.count, "{algo:?} 确定性失败 count");
+            }
+        }
+    }
+
+    #[test]
+    fn all_algos_lyzl_run_and_deterministic() {
+        // LYZL 全链路：三种算法都不 panic、输出确定、主题色系一致（蓝色系）
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/LYZL.png");
+        let bytes = std::fs::read(&path).unwrap();
+        let (rgba, w, h) =
+            crate::infra::platform::screenshot::decode_png_to_rgba(&bytes).expect("PNG 解码失败");
+
+        for algo in [
+            ClusteringAlgo::Kmeans,
+            ClusteringAlgo::MeanShift,
+            ClusteringAlgo::Mmcq,
+        ] {
+            let r1 = analyze_palette_with(&rgba, w as usize, h as usize, algo);
+            assert!(!r1.empty, "{algo:?} LYZL 不应为空");
+            assert!(!r1.roles.is_empty(), "{algo:?} 应产出角色色");
+            assert_eq!(r1.theme.family, "蓝色系", "{algo:?} 主题色系应一致");
+
+            let r2 = analyze_palette_with(&rgba, w as usize, h as usize, algo);
+            assert_eq!(r1.roles.len(), r2.roles.len(), "{algo:?} 确定性失败");
+            for (a, b) in r1.roles.iter().zip(r2.roles.iter()) {
+                assert_eq!(a.rgb, b.rgb);
+                assert_eq!(a.role, b.role);
+            }
+        }
     }
 }

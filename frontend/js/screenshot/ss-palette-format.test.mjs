@@ -209,6 +209,11 @@ describe("formatPaletteColors", () => {
         );
     });
 
+    test("comma mode joins current-format colors with commas", () => {
+        const colors = ["#FFFFFF", "#FF0000"];
+        assert.equal(formatPaletteColors(colors, "comma", getColorFormat, mockPaletteResult.roles), "#FFFFFF, #FF0000");
+    });
+
     test("css mode with empty paletteResult uses fallback names", () => {
         const colors = ["#FF0000", "#00FF00"];
         const result = formatPaletteColors(colors, "css", getColorFormat, null);

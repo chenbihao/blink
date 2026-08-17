@@ -263,6 +263,9 @@ fn main() {
                         .status(200)
                         .header("Content-Type", "image/png")
                         .header("Cache-Control", "no-store")
+                        // 0.20.x：与 blink-screenshot 协议对齐。pin 窗口「保存到剪贴板/另存为/OCR」
+                        // 会把 <img> 画进 canvas 再 toBlob，缺 CORS 头会污染 canvas 导致导出失败。
+                        .header("Access-Control-Allow-Origin", "*")
                         .body(bytes)
                         .unwrap(),
                     None => {
@@ -988,6 +991,8 @@ app::commands::screenshot_copy_rgba,
             app::commands::image_editor_pin,
             app::commands::image_editor_save,
             app::commands::image_editor_cancel,
+            // 0.20.x：pin 来源编辑器的勾按钮——编辑结果替换回原 pin 窗口
+            app::commands::image_editor_apply_to_pin,
             // 0.20.4：多来源图片编辑入口
             app::commands::open_image_editor_from_clipboard,
             app::commands::open_image_editor_from_history,
@@ -1038,6 +1043,7 @@ app::commands::generate_palette_schemes,
             app::commands::open_containing_folder,
             app::commands::open_lnk_target,
             app::commands::copy_to_clipboard,
+            app::commands::paste_to_input,
             app::commands::reset_item_history,
             app::commands::list_running_processes,
             app::commands::show_context_menu,

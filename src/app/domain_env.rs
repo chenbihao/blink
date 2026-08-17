@@ -519,6 +519,7 @@ impl SurfacePort for TauriDomainEnv {
                     &self.app,
                     meta,
                     "clipboard",
+                    None,
                 )
                 .map_err(|e| {
                     crate::infra::platform::image_editor::end_session();

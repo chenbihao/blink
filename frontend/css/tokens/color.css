@@ -34,6 +34,9 @@
     --red-bg: #45273a;
     --red-border: #6c3a5a;
 
+    /* 多选选中环：彩虹渐变（示意跨方案多选，主题可整体覆盖） */
+    --selection-ring: linear-gradient(135deg, #ff4d4f 0%, #ff7a45 16%, #fadb14 33%, #52c41a 50%, #13c2c2 66%, #1677ff 83%, #722ed1 100%);
+
     /* 阴影 */
     --shadow: rgba(0, 0, 0, 0.6);
     --shadow-strong: rgba(0, 0, 0, 0.6);

@@ -379,6 +379,54 @@ pub fn image_editor_pin(
     Ok(())
 }
 
+/// 0.20.x：把编辑结果应用回原 pin 窗口（pin 来源编辑器的勾按钮）。
+///
+/// 语义（与用户确认）：
+/// - 原 pin 窗口仍在 → 按 label 原地替换图片（不重定位、不重置缩放）。
+/// - 原 pin 窗口已关 → 把编辑结果重新 pin 到桌面（光标所在显示器居中）。
+///
+/// raw IPC：body = PNG bytes；header `label` = 原 pin 窗口 label（可选，缺失时视为已关）。
+#[tauri::command]
+pub fn image_editor_apply_to_pin(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    use crate::domain::event::CapabilityEnv;
+    let png_data = extract_png_from_request(&request)?;
+    let label = header_opt_string(request.headers(), "label");
+
+    // 原 pin 窗口仍存在且可见 → 原地替换
+    let window_alive = if let Some(label) = label.as_deref()
+        && app
+            .get_webview_window(label)
+            .map(|win| win.is_visible().unwrap_or(false))
+            .unwrap_or(false)
+    {
+        crate::infra::platform::window::refresh_pin_image_by_label(
+            &app,
+            label,
+            png_data.clone(),
+            false,
+        )?;
+        tracing::info!(label = %label, "编辑图片已替换回原 pin 窗口");
+        true
+    } else {
+        false
+    };
+
+    if !window_alive {
+        let env = app
+            .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+            .inner()
+            .clone();
+        let (screen_x, screen_y) = env.show_pin_image(png_data, None, None)?;
+        tracing::info!(screen_x, screen_y, "编辑图片已重新 pin 到桌面（原 pin 窗口已关）");
+    }
+
+    finish_image_editor_session(&app);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn image_editor_save(
     app: tauri::AppHandle,
@@ -428,10 +476,12 @@ fn check_already_active(app: &tauri::AppHandle, log_ctx: &str) -> Result<(), Med
 ///
 /// `begin_session` → `show_image_editor_window`；若 `show` 失败则回滚 `end_session`。
 /// `source_kind` 传递给前端 `window.__blinkEditorSource.kind`。
+/// `source_label`（0.20.x）仅 pin 来源传原 pin 窗口 label，供前端替换回原窗口。
 fn begin_and_show(
     app: &tauri::AppHandle,
     png_data: Vec<u8>,
     source_kind: &str,
+    source_label: Option<&str>,
     log_ctx: &str,
 ) -> Result<(), MediaError> {
     let png_len = png_data.len();
@@ -441,7 +491,7 @@ fn begin_and_show(
     })?;
 
     if let Err(error) =
-        crate::infra::platform::window::show_image_editor_window(app, meta, source_kind)
+        crate::infra::platform::window::show_image_editor_window(app, meta, source_kind, source_label)
     {
         crate::infra::platform::image_editor::end_session();
         tracing::error!(log_ctx, error = %error, "显示编辑窗口失败");
@@ -487,6 +537,7 @@ pub async fn open_image_editor_from_clipboard(app: tauri::AppHandle) -> Result<(
         &app,
         png_data,
         "clipboard",
+        None,
         "open_image_editor_from_clipboard",
     )
 }
@@ -517,7 +568,13 @@ pub async fn open_image_editor_from_history(
             )
         })?;
 
-    begin_and_show(&app, png_data, "history", "open_image_editor_from_history")
+    begin_and_show(
+        &app,
+        png_data,
+        "history",
+        None,
+        "open_image_editor_from_history",
+    )
 }
 
 /// 0.20.4：从仍显示的 pin 窗口打开编辑器。
@@ -550,7 +607,8 @@ pub async fn open_image_editor_from_pin(
         PinImage::Png(arc) => (*arc).clone(),
         PinImage::Bgra(arc, w, h) => {
             let bgra = (*arc).clone();
-            tokio::task::spawn_blocking(move || {
+            let t_encode = std::time::Instant::now();
+            let png = tokio::task::spawn_blocking(move || {
                 crate::infra::platform::screenshot::encode_png(&bgra, w, h)
             })
             .await
@@ -563,11 +621,26 @@ pub async fn open_image_editor_from_pin(
             })?
             .map_err(|e| {
                 MediaError::new("internal_error", format!("BGRA 编码 PNG 失败: {e}"), false)
-            })?
+            })?;
+            tracing::debug!(
+                window_label = %window_label,
+                w,
+                h,
+                elapsed_ms = t_encode.elapsed().as_millis() as u64,
+                "open_image_editor_from_pin: BGRA→PNG 编码完成"
+            );
+            png
         }
     };
 
-    begin_and_show(&app, png_data, "pin", "open_image_editor_from_pin")
+    // 0.20.x：把原 pin 窗口 label 贯通到编辑器前端，供「勾按钮替换回原窗口」按 label 定位。
+    begin_and_show(
+        &app,
+        png_data,
+        "pin",
+        Some(&window_label),
+        "open_image_editor_from_pin",
+    )
 }
 
 fn save_editor_png(
@@ -876,6 +949,8 @@ pub async fn ocr_image(
 ///
 /// **长截图禁用**：长截图来源在前后端均拒绝配色提取。
 ///
+/// `algo` 可选聚类算法（`kmeans` / `mean_shift` / `mmcq`），缺省或未知值回退 kmeans。
+///
 /// 返回 `PaletteResult` 的 JSON 序列化（直连 Rust 核心，不经 Capability Text 反序列化）。
 #[tauri::command]
 pub async fn analyze_palette(
@@ -885,8 +960,16 @@ pub async fn analyze_palette(
     w: Option<u32>,
     h: Option<u32>,
     crop: Option<CropRect>,
+    algo: Option<String>,
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     use crate::app::command_error::CommandError;
+
+    let algo = match algo.as_deref() {
+        Some("mean_shift") => crate::domain::palette::ClusteringAlgo::MeanShift,
+        Some("mmcq") => crate::domain::palette::ClusteringAlgo::Mmcq,
+        _ => crate::domain::palette::ClusteringAlgo::Kmeans,
+    };
+    tracing::debug!(?algo, "analyze_palette: 聚类算法");
 
     // P1-4：长截图来源拒绝配色提取
     if source == "long-screenshot" {
@@ -985,7 +1068,7 @@ pub async fn analyze_palette(
 
     // P0-1：直调配色核心，不经 JSON 像素数组搬运
     let result = tokio::task::spawn_blocking(move || {
-        crate::domain::palette::analyze_palette(&rgba_flat, width, height)
+        crate::domain::palette::analyze_palette_with(&rgba_flat, width, height, algo)
     })
     .await
     .map_err(|e| CommandError::new("internal_error", format!("配色分析 task 崩溃: {e}"), false))?;

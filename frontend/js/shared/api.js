@@ -125,6 +125,12 @@ export function copyToClipboard(text) {
     return invoke("copy_to_clipboard", {text});
 }
 
+/** 0.21.x：剪贴板「上屏」——后端把文本注入唤起前的前台应用输入框。
+ *  目标非输入框时后端回退为复制（文本写入系统剪贴板）。后端负责隐藏主窗口。 */
+export function pasteToInput(text) {
+    return invoke("paste_to_input", {text});
+}
+
 /** 删除指定剪贴板历史记录（右键菜单用）。id 为 clipboard_history 表主键。 */
 export function deleteClipboardItem(id) {
     return invoke("delete_clipboard_item", {id});
@@ -327,6 +333,15 @@ export function imageEditorSave(pngData, path) {
     const headers = {};
     if (path) headers['path'] = path;
     return invoke('image_editor_save', pngData, {headers});
+}
+
+/** 0.20.x：把编辑结果应用回原 pin 窗口（pin 来源编辑器的勾按钮）。
+ *  @param {string} label 原 pin 窗口 label；原窗口已关时后端自动重新 pin 到桌面。
+ *  raw IPC：PNG 直接传 Uint8Array，label 走 headers。 */
+export function imageEditorApplyToPin(pngData, label) {
+    const headers = {};
+    if (label) headers['label'] = label;
+    return invoke('image_editor_apply_to_pin', pngData, {headers});
 }
 
 export function imageEditorCancel() {

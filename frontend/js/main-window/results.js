@@ -583,7 +583,7 @@ function createItem(app, i) {
     // 用 mousedown 代替 click：避免拖动区域检测拦截了第一次点击（"需要双击" bug）
     li.addEventListener("mousedown", (e) => {
         if (e.button !== 0) return; // 只响应左键
-        // 0.20.2: 剪贴板模式下单击文本项 → 切换选中态；图片项 → 移动光标
+        // 0.21.x: 剪贴板模式下 Ctrl+单击文本项 → 切换选中态；其余 → 移动光标
         if (clipboardMode.handleMousedown(e, li)) return;
         // 0.20.2: 剪贴板模式下普通点击只移动光标到点击项，不直接激活
         if (clipboardMode.isActive()) {
@@ -591,6 +591,15 @@ function createItem(app, i) {
             return;
         }
         activateItem(itemData(li));
+    });
+    // 0.21.x: 剪贴板模式下双击 = Enter（文本项上屏 / 图片项复制）；
+    // 普通模式首击 mousedown 已激活并隐藏，双击无需另处理。
+    li.addEventListener("dblclick", (e) => {
+        if (e.button !== 0) return; // 只响应左键
+        if (clipboardMode.isActive()) {
+            e.preventDefault();
+            clipboardMode.activateByLi(li);
+        }
     });
     return li;
 }
@@ -624,5 +633,5 @@ function updateSelection() {
 /** 把当前选中项 + 翻页信息推给提示栏。 */
 export function refreshStatusbar() {
     const pageCount = allItems.length ? Math.ceil(allItems.length / PAGE_SIZE) : 0;
-    statusbar.update(getActive(), {page: page + 1, pageCount});
+    statusbar.update(getActive(), {page: page + 1, pageCount}, clipboardMode.isActive());
 }

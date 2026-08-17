@@ -15,13 +15,15 @@ const KIND_KEY = {
 /**
  * 由 action 生成提示栏左侧模板 + 参数。
  * @param {{kind: string, hint?: string}} action
+ * @param {boolean} [clipboardMode] 0.21.x：剪贴板模式下文本项 Enter = 上屏（复制兜底），
+ *   提示文案与普通「复制」区分。
  * @returns {{template: string, params: Record<string, string>}}
  *   如 `{ template: "{{key:Enter}} {label}", params: { label: "打开" } }`
  */
-export function actionHint(action) {
+export function actionHint(action, clipboardMode) {
     if (!action) return {template: "", params: {}};
     // 插件自定义动作名（action.hint，来自 manifest）原样使用不翻译；默认动作名走 i18n
-    const key = KIND_KEY[action.kind];
+    const key = clipboardMode && action.kind === "copy" ? "hint.paste_to_input" : KIND_KEY[action.kind];
     const label = action.hint || (key ? t(key) : t("hint.fallback"));
     return {template: t("hint.enter"), params: {label}};
 }

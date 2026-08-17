@@ -7,6 +7,7 @@ import * as annot from './annotation-engine.js';
 import {cssPointToScreen, cssRectToBitmap} from './ss-selection-geometry.js';
 import {
     hideScreenshotOverlay,
+    imageEditorApplyToPin,
     imageEditorCancel,
     imageEditorCopy,
     imageEditorPin,
@@ -270,6 +271,12 @@ export async function outputEditorPng(action, pngBytes, screenX = 0, screenY = 0
     if (ss.editorSession.source === IMAGE_SOURCE.SCREENSHOT
         || ss.editorSession.source === IMAGE_SOURCE.LONG_SCREENSHOT) {
         return outputScreenshotPng(action, pngBytes, screenX, screenY, showTranslating);
+    }
+    // 0.20.x：pin 来源编辑器的勾按钮（copy 动作）语义改为「替换回原 pin 窗口」。
+    // 原窗口已关时后端自动重新 pin 到桌面。label 由后端 open_image_editor_from_pin 注入。
+    if (ss.editorSession.source === IMAGE_SOURCE.PIN && action === 'copy') {
+        const label = window.__blinkEditorSource?.label;
+        return imageEditorApplyToPin(pngBytes, label);
     }
     switch (action) {
         case 'pin':

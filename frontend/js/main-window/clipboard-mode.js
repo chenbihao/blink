@@ -29,7 +29,9 @@ import {
     copyToClipboard,
     deleteClipboardImage,
     deleteClipboardItem,
+    getClipboardText,
     getClipboardTextBatch,
+    pasteToInput,
     recordClipboardHit,
     searchClipboard
 } from "../shared/api.js";
@@ -37,6 +39,7 @@ import {t} from "../i18n/index.js";
 import * as selection from "./clipboard-selection.js";
 import {parse as parseColor} from "../shared/color.js";
 import {activateItem} from "./actions.js";
+import {showActionError} from "./action-error.js";
 import {findDeleteTarget, findEditAction, resolveShortcutAction} from "./clipboard-shortcuts.js";
 
 // 0.20.1: 从 results.js 导入 setClipboardMode，进入/退出模式时设置标志。
@@ -308,11 +311,14 @@ async function doSearch(query, keepPage = false) {
  *    query 非空时保留输入框全选。
  * 3. 存在多选时 Ctrl+C 批量复制；不存在多选时保留输入框原生复制。
  * 4. Esc 顺序：清空多选 → 退出 clipboard mode（由 keyboard.js onEscape 处理）。
+ * 5. Enter / Alt+数字：走 activateByData——文本项上屏（目标输入框）或复制兜底，
+ *    图片项复制。见 dispatchActivate 注释。
  *
  * 鼠标规则（在 results.js mousedown 中由 handleMousedown 处理）：
- * - 单击文本项 → 切换选中态（不需要 Ctrl 修饰键）
+ * - 单击文本项 → 只移动 active 光标（返回 false 交给 results.js setActiveByLi）
+ * - Ctrl+单击文本项 → 切换多选选中态
  * - 单击图片项 → 只移动 active 光标，不选中
- * - Enter → 激活当前项（复制单个项）
+ * - 双击 → activateByLi（与 Enter 同语义：文本上屏 / 图片复制）
  *
  * @param {KeyboardEvent} e
  * @returns {boolean} true = 已处理，keyboard.js 应跳过后续导航逻辑
@@ -444,9 +450,10 @@ let lastTextHitIds = [];
  * 鼠标点击项时的多选拦截。
  * 在 results.js createItem 的 mousedown handler 中调用。
  *
- * 剪贴板模式下：
- * - 单击文本项 → 切换选中态（不需要 Ctrl 修饰键）
- * - 单击图片项 → 只移动光标，不选中（返回 false 让 results.js setActiveByLi 处理）
+ * 剪贴板模式下（0.21.x，方案 A）：
+ * - 单击文本项 → 返回 false，交给 results.js setActiveByLi 只移动 active 光标
+ * - Ctrl+单击文本项 → 切换选中态（多选批量复制用）
+ * - 单击图片项 → 返回 false（不参与多选，同样只移动 active 光标）
  * - 非剪贴板模式 → 不拦截（返回 false）
  *
  * @param {MouseEvent} e
@@ -469,10 +476,15 @@ export function handleMousedown(e, li) {
     }
     if (!hitId) return false;
 
+    // 0.21.x：单击只移动 active 光标（返回 false 交给 results.js）；
+    // 多选 toggle 收敛到 Ctrl+单击，避免「移动光标」与「切换选中」抢同一手势。
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (!ctrl) return false;
+
     e.preventDefault();
     e.stopPropagation();
 
-    // 单击：切换选中态
+    // Ctrl+单击：切换选中态
     selection.toggleSelection(hitId);
     refreshSelectionCss();
     return true;
@@ -610,4 +622,69 @@ async function handleDeleteActive() {
         // 失败时保留结果、模式和选择，显示可见错误
         showStatusError(e?.message || "delete failed");
     }
+}
+
+// ── 0.21.x 激活分派：上屏 / 复制 ────────────────────────────────────────────
+
+/**
+ * 剪贴板模式「激活」统一分派（Enter / Alt+数字 / 双击 共用，保证路径一致）。
+ *
+ * 文本项（LazyCopy）：拉取完整 text → 频率加权 → `paste_to_input` 上屏。
+ *   - 目标（唤起前的前台窗口）在文本输入框 → 直接注入
+ *   - 目标非输入框 → 后端回退为复制（文本写入系统剪贴板），语义与旧 Enter 一致
+ * 图片项 / 其他：复用 activateItem 原复制路径。
+ *
+ * @param {object|null} data results.itemData 形状（actions 数组 / isImage / …）
+ */
+export async function activateByData(data) {
+    if (!data) return;
+    if (data.isError) return;
+
+    const action = data.actions?.[0];
+    const kind = action?.kind;
+
+    // 文本项走上屏（含复制兜底）
+    if (kind === "copy" && action.hitId) {
+        let text = action.payload ?? data.calcValue;
+        if (!text) {
+            try {
+                text = await getClipboardText(action.hitId);
+            } catch (e) {
+                showActionError("get_clipboard_text", e);
+                return; // 保留窗口，让用户察觉并重试
+            }
+        }
+        if (!text) return; // 无可上屏内容（空/缺省），保留窗口
+        // fire-and-forget 频率加权（与 actions.js LazyCopy 一致；失败不阻塞上屏）
+        recordClipboardHit(action.hitId).catch((e) =>
+            console.warn("record_clipboard_hit failed:", e)
+        );
+        try {
+            await pasteToInput(text); // 后端负责隐藏窗口
+        } catch (e) {
+            showActionError("paste_to_input", e);
+        }
+        return;
+    }
+
+    // 图片项 / 其他 → 原激活路径（复制图片等）
+    activateItem(data);
+}
+
+/** 双击项：从 <li> 读出与 results.itemData 一致的数据后走统一分派。 */
+export function activateByLi(li) {
+    let actions = [];
+    try {
+        actions = JSON.parse(li.dataset.actions || "[]");
+    } catch {
+        // ignore
+    }
+    activateByData({
+        lnkPath: li.dataset.lnkPath,
+        source: li.dataset.source || "",
+        calcValue: li.dataset.calcValue,
+        isError: li.dataset.isError === "true",
+        isImage: li.dataset.isImage === "true",
+        actions,
+    });
 }

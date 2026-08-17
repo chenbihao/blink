@@ -299,16 +299,16 @@
             <div class="palette-actions-row" hidden>
                 <span class="palette-selection-hint">Ctrl + 单击可多选</span>
                 <div class="dropdown-wrap palette-copy-wrap">
-                    <button class="palette-copy-all" disabled title="复制 Ctrl+左键多选的颜色">
+                    <button class="palette-copy-all" disabled title="复制 Ctrl+左键多选的颜色（右键选格式）">
                         <svg aria-hidden="true" class="icon">
                             <use href="#icon-copy"/>
                         </svg>
                         <span>复制所选</span></button>
                     <div class="dropdown palette-copy-menu" data-open="false">
-                        <button class="dropdown-item" data-copy-mode="format"><span
+                        <button class="dropdown-item" data-copy-mode="auto"><span
                                 class="item-label">按当前格式复制</span></button>
                         <div class="dropdown-separator"></div>
-                        <button class="dropdown-item" data-copy-mode="list"><span class="item-label">每行一个</span>
+                        <button class="dropdown-item" data-copy-mode="comma"><span class="item-label">逗号拼接</span>
                         </button>
                         <button class="dropdown-item" data-copy-mode="css"><span class="item-label">CSS 变量</span>
                         </button>
@@ -318,8 +318,9 @@
             <div class="palette-harmony" hidden>
                 <div class="palette-section-heading">
                     <span>图片取色</span>
-                    <button class="palette-more-toggle palette-extract-btn" title="基于当前颜色生成配色方案">
-                        生成当前色配色方案
+                    <button class="palette-more-toggle palette-extract-btn" title="以当前色为基准，生成同色/邻近/互补搭配色（非原图提取）">
+                        <span class="palette-more-swatch" hidden></span>
+                        <span class="palette-more-label">生成当前色搭配色</span>
                     </button>
                 </div>
                 <div class="palette-extracted harmony-scheme-card" hidden></div>

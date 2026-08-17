@@ -37,6 +37,8 @@ let copyAllBtn = null;
 let copyStatusEl = null;
 let themeSummaryEl = null;
 let moreToggleEl = null;
+let moreSwatchEl = null; // 生成搭配色按钮上的基准色预览块
+let moreLabelEl = null; // 生成搭配色按钮文案（按钮内独立 span，避免覆盖色块）
 let actionsRowEl = null;
 let selectionHintEl = null; // P1-3：操作行左侧提示/计数
 let copyMenuEl = null; // P1-3：复制模式下拉菜单
@@ -74,7 +76,7 @@ export function resetPaletteState() {
     if (actionsRowEl) actionsRowEl.hidden = true;
     if (copyStatusEl) copyStatusEl.textContent = '';
     if (extractBtn) extractBtn.disabled = false;
-    if (moreToggleEl) moreToggleEl.textContent = '生成当前色配色方案';
+    updateGenerateButtonLabel();
     closeCopyMenu();
     updateCopyButtonLabel();
 }
@@ -230,7 +232,7 @@ function updateCopyButtonLabel() {
     }
     if (copyAllBtn) {
         const label = copyAllBtn.querySelector('span');
-        if (label) label.textContent = count > 0 ? `复制所选` : '复制所选';
+        if (label) label.textContent = '复制所选';
         copyAllBtn.disabled = count === 0;
     }
 }
@@ -283,14 +285,18 @@ function setAnnotationColor(hex) {
 }
 
 function updateGenerateButtonLabel() {
-    if (!moreToggleEl) return;
-    if (ss.paletteMoreExpanded) {
-        moreToggleEl.textContent = '收起配色方案';
-        return;
+    if (!moreLabelEl) return;
+    const hasAnchor = Boolean(ss.paletteAnchorHex);
+    if (moreSwatchEl) {
+        moreSwatchEl.hidden = !hasAnchor;
+        if (hasAnchor) moreSwatchEl.style.background = ss.paletteAnchorHex;
     }
-    moreToggleEl.textContent = ss.paletteAnchorHex
-        ? `生成 ${ss.paletteAnchorHex} 配色方案`
-        : '生成当前色配色方案';
+    // 文案独立写在 label span，避免 textContent 覆盖清掉按钮内的色块预览。
+    moreLabelEl.textContent = ss.paletteMoreExpanded
+        ? '收起搭配色'
+        : hasAnchor
+            ? `生成 ${ss.paletteAnchorHex} 的搭配色`
+            : '生成当前色搭配色';
 }
 
 function togglePaletteSelection(hex) {
@@ -321,7 +327,7 @@ function bindPaletteColor(el, hex) {
 
 /**
  * P1-3：创建带下拉菜单的"复制整组"按钮。
- * 左键直接按当前格式复制；右键或小箭头展开 list/css 模板菜单。
+ * 左键直接按当前格式复制；右键展开 逗号拼接/css 模板菜单。
  */
 function createCopyGroupBtn(scheme) {
     const wrap = document.createElement('div');
@@ -348,7 +354,7 @@ function createCopyGroupBtn(scheme) {
     menuEl.dataset.open = 'false';
     const modes = [
         {mode: 'auto', label: '按当前格式'},
-        {mode: 'list', label: '每行一个'},
+        {mode: 'comma', label: '逗号拼接'},
         {mode: 'css', label: 'CSS 变量'},
     ];
     for (const m of modes) {
@@ -447,12 +453,6 @@ function renderSingleHarmony(scheme, target = harmonySwatches) {
     const card = document.createElement('section');
     card.className = 'harmony-scheme-card';
 
-    // P1-2：降级状态标记——confidence < 1.0 时显示降级指示
-    const isDegraded = typeof scheme.confidence === 'number' && scheme.confidence < 1.0;
-    if (isDegraded) {
-        card.classList.add('is-degraded');
-    }
-
     const header = document.createElement('div');
     header.className = 'harmony-scheme-header';
     const label = document.createElement('span');
@@ -464,14 +464,6 @@ function renderSingleHarmony(scheme, target = harmonySwatches) {
     const copyGroupWrap = createCopyGroupBtn(scheme);
     header.append(label, description, copyGroupWrap);
     card.appendChild(header);
-
-    // 降级提示条
-    if (isDegraded) {
-        const notice = document.createElement('div');
-        notice.className = 'harmony-degraded-notice';
-        notice.textContent = '⚠ 未找到满足 WCAG 可读性约束的组合，已降级展示原图色';
-        card.appendChild(notice);
-    }
 
     // 色块行
     const row = document.createElement('div');
@@ -492,14 +484,23 @@ function renderSingleHarmony(scheme, target = harmonySwatches) {
 /**
  * 渲染完整方案（"更多方案"展开时）。
  * @param {Array} schemes
+ * @param {string} heading
+ * @param {string} [anchorHex] - 有值时在标题前渲染锚点色预览块
  */
-function renderFullSchemes(schemes, heading = '') {
+function renderFullSchemes(schemes, heading = '', anchorHex = '') {
     if (!moreSchemesEl) return;
     moreSchemesEl.innerHTML = '';
     if (heading) {
         const label = document.createElement('div');
         label.className = 'palette-generated-heading';
-        label.textContent = heading;
+        if (anchorHex) {
+            const swatch = document.createElement('span');
+            swatch.className = 'palette-generated-heading-swatch';
+            swatch.style.background = anchorHex;
+            swatch.title = `基准色 ${anchorHex}`;
+            label.appendChild(swatch);
+        }
+        label.append(document.createTextNode(heading));
         moreSchemesEl.appendChild(label);
     }
     schemes.forEach((scheme) => renderSingleHarmony(scheme, moreSchemesEl));
@@ -513,8 +514,12 @@ async function renderGeneratedSchemes() {
             anchorHex: ss.paletteAnchorHex,
             sourceColors,
         });
-        renderFullSchemes(schemes, `基于 ${ss.paletteAnchorHex} 生成 · 非原图提取色`);
+        renderFullSchemes(schemes, `基于 ${ss.paletteAnchorHex} 的搭配色 · 非原图提取色`, ss.paletteAnchorHex);
         replacePaletteColorOrder(schemes);
+        // 面板实线描边跟随当前基准色。
+        if (moreSchemesEl) moreSchemesEl.style.borderColor = ss.paletteAnchorHex;
+        // 卡片填充后面板变高，重新触发定位钳制（避免超出目标显示器）。
+        notifyPaletteLayoutChanged();
     } catch (err) {
         console.warn('[palette] 生成配色方案失败:', err);
         if (copyStatusEl) copyStatusEl.textContent = '生成配色方案失败';
@@ -552,7 +557,7 @@ function formatPaletteColorsForUi(hexColors, mode) {
     return formatPaletteColors(hexColors, mode, getColorFormat, ss.paletteResult?.roles);
 }
 
-/** P1-3：复制整组方案色。支持模式下拉菜单选择 list/css 模板。 */
+/** P1-3：复制整组方案色。支持模式下拉菜单选择 逗号拼接/css 模板。 */
 async function copyScheme(scheme, feedbackEl, mode) {
     const seen = new Set();
     const hexColors = [];
@@ -568,7 +573,7 @@ async function copyScheme(scheme, feedbackEl, mode) {
         : formatPaletteColorsForUi(hexColors, fmt);
     const copied = await copyToClipboard(text, feedbackEl);
     if (copied && copyStatusEl) {
-        const modeLabel = fmt === 'list' ? ' · 每行一个' : fmt === 'css' ? ' · CSS 变量' : '';
+        const modeLabel = fmt === 'comma' ? ' · 逗号拼接' : fmt === 'css' ? ' · CSS 变量' : '';
         copyStatusEl.textContent = `已复制"${scheme.label}"${hexColors.length} 色${modeLabel}`;
     }
 }
@@ -584,7 +589,7 @@ async function copySelected(mode) {
         : formatPaletteColorsForUi(hexColors, fmt);
     const copied = await copyToClipboard(text, copyAllBtn);
     if (copied && copyStatusEl) {
-        const modeLabel = fmt === 'list' ? ' · 每行一个' : fmt === 'css' ? ' · CSS 变量' : ` · ${getColorFormat().toUpperCase()}`;
+        const modeLabel = fmt === 'comma' ? ' · 逗号拼接' : fmt === 'css' ? ' · CSS 变量' : ` · ${getColorFormat().toUpperCase()}`;
         copyStatusEl.textContent = `已复制 ${hexColors.length} 色${modeLabel}`;
     }
 }
@@ -607,6 +612,8 @@ export function initPalette() {
     copyStatusEl = dropdown.querySelector('.palette-copy-status');
     themeSummaryEl = dropdown.querySelector('.palette-theme-summary');
     moreToggleEl = dropdown.querySelector('.palette-more-toggle');
+    moreSwatchEl = dropdown.querySelector('.palette-more-swatch');
+    moreLabelEl = dropdown.querySelector('.palette-more-label');
     actionsRowEl = dropdown.querySelector('.palette-actions-row');
     selectionHintEl = dropdown.querySelector('.palette-selection-hint');
     copyMenuEl = dropdown.querySelector('.palette-copy-menu');
@@ -621,13 +628,19 @@ export function initPalette() {
         extractBtn.addEventListener('mousedown', (e) => e.stopPropagation());
     }
 
-    // P1-3：复制按钮——左键直接按当前格式复制，不展开菜单
+    // P1-3：复制所选——左键按当前格式复制；右键展开格式菜单（与复制整组统一）
     if (copyAllBtn) {
         copyAllBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             // 如果菜单已展开，先关闭再复制
             closeCopyMenu();
             void copySelected();
+        });
+        copyAllBtn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeAllGroupMenus();
+            openCopyMenu();
         });
         copyAllBtn.addEventListener('mousedown', (e) => e.stopPropagation());
     }
@@ -679,9 +692,4 @@ function openCopyMenu() {
 
 function closeCopyMenu() {
     if (copyMenuEl) copyMenuEl.dataset.open = 'false';
-}
-
-function toggleCopyMenu() {
-    if (!copyMenuEl) return;
-    copyMenuEl.dataset.open = copyMenuEl.dataset.open === 'true' ? 'false' : 'true';
 }

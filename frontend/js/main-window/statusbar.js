@@ -29,6 +29,8 @@ const el = document.getElementById("statusbar");
 /** 缓存最近一次 update() 的入参，供 ghost onChange 回调时重绘用。 */
 let lastActive = null;
 let lastPaging = {page: 1, pageCount: 1};
+/** 0.21.x: 是否剪贴板模式（影响 Enter 动作提示文案：上屏 vs 复制）。 */
+let lastClipboardMode = false;
 
 /** 初始化：订阅 ghost + chord 状态。main.js 在 ghost.init() 之后调一次。 */
 export function init() {
@@ -43,12 +45,15 @@ export function init() {
 /**
  * 刷新提示栏。
  * 0.16.1: active.actions 数组，取 actions[0] 的 kind/hint 生成提示。
+ * 0.21.x: clipboardMode 参数供 Enter 提示文案区分（上屏 / 复制）。
  * @param {{actions?: Array<{kind: string, hint?: string}>}|null} active 当前选中项
  * @param {{page: number, pageCount: number}} paging 翻页信息
+ * @param {boolean} [clipboardMode] 是否处于剪贴板模式
  */
-export function update(active, paging) {
+export function update(active, paging, clipboardMode) {
     lastActive = active;
     lastPaging = paging || {page: 1, pageCount: 1};
+    lastClipboardMode = !!clipboardMode;
     render();
 }
 
@@ -133,7 +138,7 @@ function fillPrimary(primary, active, hasHint) {
         primary.appendChild(document.createTextNode(" · "));
         primary.appendChild(renderHint(t("hint.alt_number")));
         primary.appendChild(document.createTextNode(" · "));
-        const {template, params} = actionHint(active.actions?.[0]);
+        const {template, params} = actionHint(active.actions?.[0], lastClipboardMode);
         primary.appendChild(renderHint(template, params));
     }
 }

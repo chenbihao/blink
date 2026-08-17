@@ -87,10 +87,10 @@ export function formatAsCssVariables(roles) {
 }
 
 /**
- * 格式化选色输出。支持 hex/rgb/hsl/list/css 模式。
+ * 格式化选色输出。支持 hex/rgb/hsl/list/comma/css 模式。
  *
  * @param {string[]} hexColors
- * @param {'auto'|'list'|'css'} mode - 'auto' = 复用顶部格式选择
+ * @param {'auto'|'list'|'comma'|'css'} mode - 'auto' = 复用顶部格式选择
  * @param {Function} getColorFormat - 返回当前共享格式 ('hex'|'rgb'|'hsl')
  * @param {Array} [paletteRoles] - 角色色数组（css 模式用）
  * @returns {string}
@@ -98,6 +98,10 @@ export function formatAsCssVariables(roles) {
 export function formatPaletteColors(hexColors, mode, getColorFormat, paletteRoles) {
     const fmt = mode || 'auto';
     if (fmt === 'list') return hexColors.join('\n');
+    if (fmt === 'comma') {
+        const actualFormat = getColorFormat ? getColorFormat() : 'hex';
+        return formatOutput(hexColors, actualFormat).split('\n').join(', ');
+    }
     if (fmt === 'css') {
         const roleByHex = new Map((paletteRoles || []).map((role) => [role.hex, role]));
         const cssRoles = hexColors.map((hex, index) => (

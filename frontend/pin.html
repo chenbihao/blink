@@ -16,7 +16,9 @@
   - 窗口尺寸和位置在同一 rAF 内合并提交，无透明空壳。
 -->
 <div id="container">
-    <img alt="钉图" draggable="false" id="pin-img" src=""/>
+    <!-- 0.20.x：crossorigin 必须配合 blink-pin 协议的 CORS 头，否则把 img 画进 canvas
+         （保存到剪贴板/另存为/OCR）时 canvas 会被污染，toBlob 抛 SecurityError。 -->
+    <img alt="钉图" crossorigin="anonymous" draggable="false" id="pin-img" src=""/>
     <div id="zoom-level">100%</div>
     <!-- 0.18.3：翻译中指示器（不随 img transform: scale 缩放，独立固定视觉大小） -->
     <div class="hidden" id="pin-translating-indicator">

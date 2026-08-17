@@ -61,6 +61,16 @@ fn last_pin_label() -> &'static Mutex<Option<String>> {
     LAST_PIN_LABEL.get_or_init(|| Mutex::new(None))
 }
 
+// 0.20.x：pin 来源打开编辑器时被临时降级的 pin 窗口 label。
+// 编辑器是 always_on_top 截图 overlay 复用窗、但被 cancel_topmost 取消置顶（用户要参考
+// 其它窗口）；而 pin 窗口是置顶的，会盖住编辑器。编辑期间把该 pin 临时降级，
+// 编辑会话结束（hide_image_editor_window）时恢复置顶。
+static EDITOR_DEMOTED_PIN_LABEL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn editor_demoted_pin_label() -> &'static Mutex<Option<String>> {
+    EDITOR_DEMOTED_PIN_LABEL.get_or_init(|| Mutex::new(None))
+}
+
 // ── 0.19.14：pin 图片进程内 registry ──────────────────────
 //
 // pin 窗口通过 `blink-pin:///{seq}` 自定义协议拉取 PNG bytes，
@@ -570,6 +580,36 @@ pub fn cancel_topmost(hwnd: HWND) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
+    }
+}
+
+/// 0.20.x：pin 来源打开编辑器时，把该 pin 窗口临时降级（取消置顶）。
+///
+/// 背景：编辑器复用 always_on_top 的截图 overlay 窗口、但被 `cancel_topmost` 取消置顶
+/// （用户编辑时要能参考其它窗口）；而 pin 窗口本身置顶，会盖住编辑器挡住操作。
+/// 编辑期间把被编辑的 pin 降级，让位于编辑器；编辑会话结束由 `restore_demoted_pin` 恢复。
+fn demote_pin_for_editor(app: &AppHandle, label: &str) {
+    if let Some(win) = app.get_webview_window(label)
+        && let Ok(hwnd) = win.hwnd()
+    {
+        cancel_topmost(HWND(hwnd.0 as _));
+        *editor_demoted_pin_label().lock().unwrap() = Some(label.to_string());
+        tracing::debug!(label = %label, "pin 窗口已临时降级，编辑期间让位于编辑器");
+    }
+}
+
+/// 0.20.x：编辑会话结束，恢复被降级 pin 窗口的置顶。
+///
+/// 仅当窗口仍存在且可见时恢复；用户编辑期间已关掉该 pin（被回收为隐藏 spare）时跳过。
+fn restore_demoted_pin(app: &AppHandle) {
+    let label = editor_demoted_pin_label().lock().unwrap().take();
+    if let Some(label) = label
+        && let Some(win) = app.get_webview_window(&label)
+        && let Ok(hwnd) = win.hwnd()
+        && win.is_visible().unwrap_or(false)
+    {
+        force_topmost(HWND(hwnd.0 as _));
+        tracing::debug!(label = %label, "pin 窗口已恢复置顶");
     }
 }
 
@@ -2277,13 +2317,18 @@ pub fn show_screenshot_overlay(
 ///
 /// `source_kind` 传递给前端 `window.__blinkEditorSource.kind`，用于区分
 /// 来源（clipboard / history / pin），前端据此走不同初始化路径。
+///
+/// `source_label`（0.20.x）仅 pin 来源传入原 pin 窗口 label，注入到
+/// `window.__blinkEditorSource.label`，供「勾按钮替换回原 pin 窗口」按 label 定位。
 pub fn show_image_editor_window(
     app: &AppHandle,
     image: crate::infra::platform::image_editor::ImageEditorMeta,
     source_kind: &str,
+    source_label: Option<&str>,
 ) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
+    let t0 = std::time::Instant::now();
 
     let displays = crate::infra::platform::screenshot::list_displays();
     let display = displays
@@ -2343,8 +2388,12 @@ pub fn show_image_editor_window(
         overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(hwnd);
     }
     let displays_json = build_physical_displays_json();
+    let label_js = match source_label {
+        Some(label) => format!(", label: '{label}'"),
+        None => String::new(),
+    };
     let init_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: 0, physicalDisplays: {} }}; window.__blinkEditorSource = {{ kind: '{kind}' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: 0, physicalDisplays: {} }}; window.__blinkEditorSource = {{ kind: '{kind}'{label_js} }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
         meta.virtual_x,
         meta.virtual_y,
         meta.width,
@@ -2352,8 +2401,16 @@ pub fn show_image_editor_window(
         overlay_dpi,
         displays_json,
         kind = source_kind,
+        label_js = label_js,
     );
     win.eval(&init_js).map_err(|e| e.to_string())?;
+    // 0.20.x：pin 来源编辑——先降级原 pin 窗口（取消置顶），再 show 编辑器。
+    // 顺序很关键：编辑器 show 时是 topmost，随后 cancel_topmost 落到非置顶带顶部，
+    // 仍压在已降级的 pin 之上；若先 show 再降级 pin，降级后的 pin（HWND_NOTOPMOST 放
+    // 到非置顶带顶部）会插到编辑器上方。编辑会话结束（hide_image_editor_window）恢复置顶。
+    if let Some(label) = source_label {
+        demote_pin_for_editor(app, label);
+    }
     win.show().map_err(|e| e.to_string())?;
     if let Ok(hwnd) = win.hwnd() {
         // 0.20.4-fix：图片编辑器不强制置顶——用户可能需要参考其他窗口内容。
@@ -2370,6 +2427,7 @@ pub fn show_image_editor_window(
         created,
         width = image.width,
         height = image.height,
+        elapsed_ms = t0.elapsed().as_millis() as u64,
         "用户图片编辑窗口已显示"
     );
     Ok(())
@@ -2478,6 +2536,8 @@ pub fn hide_image_editor_window(app: &AppHandle) {
     crate::infra::platform::image_editor::end_session();
     // 0.20.4：清除编辑器活跃标志，恢复 watchdog 正常行为
     set_image_editor_active(false);
+    // 0.20.x：恢复编辑期间被降级的 pin 窗口置顶
+    restore_demoted_pin(app);
 }
 
 /// 钉图窗口的物理像素 padding（窗口比图片大一圈，给发光留空间）。
@@ -2723,18 +2783,33 @@ pub fn refresh_pin_image(
             return Ok(());
         }
     };
+    refresh_pin_image_by_label(app, &label, png_data, show_translating)
+}
 
-    let win = match app.get_webview_window(&label) {
+/// 0.20.x：按窗口 label 原地刷新 pin 图片（`refresh_pin_image` 的 label 定向版本）。
+///
+/// 供「编辑 pin 图 → 勾按钮替换回原窗口」使用：多 pin 下 `LAST_PIN_LABEL` 可能指向
+/// 其它窗口，必须按被编辑窗口的 label 精确定位。
+///
+/// 与 `refresh_pin_image` 相同：只换 `img.src`，不动窗口位置和 scale；
+/// 窗口不存在或已 hide 时静默返回 Ok。
+pub fn refresh_pin_image_by_label(
+    app: &AppHandle,
+    label: &str,
+    png_data: Vec<u8>,
+    show_translating: bool,
+) -> Result<(), String> {
+    let win = match app.get_webview_window(label) {
         Some(w) => w,
         None => {
-            tracing::debug!(label = %label, "refresh_pin_image: pin 窗口不存在，静默丢弃");
+            tracing::debug!(label = %label, "refresh_pin_image_by_label: pin 窗口不存在，静默丢弃");
             return Ok(());
         }
     };
 
     // 窗口已 hide 时静默返回（用户已关 pin）
     if !win.is_visible().unwrap_or(false) {
-        tracing::debug!("refresh_pin_image: pin 窗口已隐藏，静默丢弃");
+        tracing::debug!(label = %label, "refresh_pin_image_by_label: pin 窗口已隐藏，静默丢弃");
         return Ok(());
     }
 
@@ -2749,7 +2824,7 @@ pub fn refresh_pin_image(
     pin_label_to_seq()
         .lock()
         .unwrap()
-        .insert(label.clone(), pin_seq);
+        .insert(label.to_string(), pin_seq);
 
     // 只换 img.src + 控制指示器，不调 place_at_physical，不调 __blinkResetPin
     let js = format!(
@@ -3378,6 +3453,20 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- sticky-spare（便签预热窗口，0.18.3 N+1） ---
         // 后台始终保留一个备用便签窗口，被借用后立即创建新的
         create_sticky_spare(&app);
+
+        // 0.20.x：延迟暖渲染编辑器窗口（chord-screenshot）。WebView2 的合成表面在窗口
+        // 首次真正 show 时才建立，首次使用（pin 编辑 / 首次截图）会"慢半拍"。
+        // ⚠️ 不能在各预热窗创建链里同步 show+hide：它走 Tauri 主线程通道且首次合成
+        // 耗时长，撞上用户操作（如右键弹菜单的 show）会排队卡顿。所以等全部预热窗
+        // 建完、再延后到启动更安静的时刻，放独立线程执行，不占主线程外的运行时 worker。
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        if let Some(win) = app.get_webview_window("chord-screenshot") {
+            std::thread::spawn(move || {
+                let _ = win.show();
+                let _ = win.hide();
+            });
+            tracing::debug!("preheat: chord-screenshot 暖渲染已调度");
+        }
 
         tracing::debug!("preheat: 预热完成");
     });

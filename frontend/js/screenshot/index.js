@@ -358,6 +358,9 @@ function resetState() {
     document.body.classList.remove('image-editor-mode');
     const scrollButton = document.getElementById('btn-scroll');
     if (scrollButton) scrollButton.hidden = false;
+    // 0.20.x：恢复 pin 来源编辑时隐藏的「钉图」按钮
+    const pinButton = document.getElementById('btn-pin');
+    if (pinButton) pinButton.hidden = false;
     if (ss.singleClickTimeout) {
         clearTimeout(ss.singleClickTimeout);
         ss.singleClickTimeout = null;
@@ -895,6 +898,9 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     ss.editorSession.beginCanvasSource(source, baseCanvas);
     const scrollButton = document.getElementById('btn-scroll');
     if (scrollButton) scrollButton.hidden = source === IMAGE_SOURCE.CLIPBOARD;
+    // 0.20.x：pin 来源编辑器的勾按钮已是「替换回原窗口」，再保留「钉图」会制造第二份 pin，隐藏掉。
+    const pinButton = document.getElementById('btn-pin');
+    if (pinButton) pinButton.hidden = source === IMAGE_SOURCE.PIN;
 
     // 主 canvas 作为长图可见底图；annotCanvas 只承载透明标注层。
     ss.canvas.width = pw;

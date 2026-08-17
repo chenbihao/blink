@@ -126,11 +126,21 @@ function onNavigation(e) {
         results.pageUp();
     } else if (e.key === "Enter") {
         e.preventDefault();
+        // 0.21.x: 剪贴板模式 Enter = 上屏（文本）或复制（图片），与双击/Alt+数字同语义
+        if (clipboardMode.isActive()) {
+            clipboardMode.activateByData(results.getActive());
+            return;
+        }
         activateItem(results.getActive());
     } else if ((inputState.isAltDown() || e.altKey) && /^[1-9]$/.test(e.key)) {
         // Alt+1~9：直接激活第 N 个候选
         // 用后端 Alt 快照 || e.altKey，抵抗 WebView synthetic keyup
         e.preventDefault();
+        // 0.21.x: 剪贴板模式 Alt+数字与 Enter 同语义（上屏/复制）
+        if (clipboardMode.isActive()) {
+            clipboardMode.activateByData(results.getNth(parseInt(e.key, 10)));
+            return;
+        }
         activateItem(results.getNth(parseInt(e.key, 10)));
     }
 }

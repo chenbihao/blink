@@ -52,6 +52,69 @@ pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 剪贴板「上屏」：把文本直接注入唤起前的前台应用输入框。
+///
+/// 流程（复用语音 G2 的注入链路）：
+/// 1. 先把文本写入系统剪贴板——兜底：注入失败或目标非输入框时，用户仍可手动 Ctrl+V；
+///    同时与现有「复制」语义一致（该条历史顺位置顶）。
+/// 2. 隐藏主窗口（同 hide_window 语义，emit HIDDEN 供前端复位）。
+/// 3. 恢复唤起前记录的外部前台窗口焦点（关 Alt 系统菜单 + UIA SetFocus）。
+/// 4. UIA 判断焦点是否在文本输入控件：
+///    - 是 → `inject_text` SendInput Unicode 逐字符上屏（不污染剪贴板）
+///    - 否 → 保留剪贴板复制语义（文本已在系统剪贴板，用户自行粘贴）
+///
+/// **时序约束**：「是否输入框」判断必须在隐藏并恢复焦点之后——blink 自身聚焦时，
+/// `GetFocusedElement` 拿到的是 blink 的输入框，测不出目标窗口的状态。
+#[tauri::command]
+pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    // 1. 兜底复制（同步等待：保证后续注入/降级路径能读到文本）
+    crate::domain::clipboard::write_text(text.clone(), ClipboardWriteSource::User)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 2. 隐藏主窗口
+    crate::infra::platform::window::hide(&app, "paste_to_input");
+
+    // 3. 恢复焦点 + 判断输入框 + 注入（spawn_blocking：SendInput/UIA 需同线程）
+    //
+    // **Alt+数字 激活时用户仍按着 Alt**。Alt 按住期间 Windows 处于系统菜单态，
+    // `restore_foreground`（SetForegroundWindow/UIA 焦点）与 `inject_text`（SendInput）
+    // 都会被干扰——语音 G2 从无此问题，正因它是 hold 松开后才注入（Alt 已弹起）。
+    // 这里先等修饰键全部物理松开（限时 500ms），超时仍未松开则跳过注入、
+    // 保留剪贴板复制语义（文本已在系统剪贴板），不做失败注入。
+    let prev_hwnd = crate::infra::platform::window::last_external_foreground_hwnd();
+    tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !crate::infra::platform::hotkey::read_physical_modifiers().all_up()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !crate::infra::platform::hotkey::read_physical_modifiers().all_up() {
+            tracing::debug!("paste_to_input: 修饰键 500ms 内未松开，跳过注入（保留剪贴板复制语义）");
+            return;
+        }
+        if let Some(hwnd) = prev_hwnd {
+            crate::infra::platform::window::restore_foreground(hwnd);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if crate::infra::platform::uia::is_focused_on_text_input() {
+            match crate::infra::platform::inject::inject_text(&text) {
+                Ok(()) => tracing::info!(chars = text.chars().count(), "paste_to_input: 文本已上屏"),
+                Err(e) => tracing::error!(%e, "paste_to_input: 文本注入失败"),
+            }
+        } else {
+            tracing::debug!("paste_to_input: 目标焦点不在文本输入控件，保留剪贴板复制语义");
+        }
+    });
+
+    Ok(())
+}
+
 /// 获取最近的剪贴板历史。
 #[tauri::command]
 pub async fn get_clipboard_history(
