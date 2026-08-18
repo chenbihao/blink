@@ -7,7 +7,7 @@ use super::*;
 pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().ai;
     crate::infra::data::ai_audit::clear_all(pool).await;
-    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
+    let _ = crate::infra::data::compact(pool).await; // VACUUM + WAL checkpoint 回收空间
     tracing::info!("AI 审计日志已清空");
     Ok(())
 }
@@ -20,7 +20,7 @@ pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
 pub async fn clear_all_conversations(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().ai;
     crate::infra::data::conversations::clear_all_conversations(pool).await?;
-    crate::infra::data::vacuum(pool).await;
+    let _ = crate::infra::data::compact(pool).await;
     tracing::info!("全部对话历史已清空（分组保留）");
     Ok(())
 }

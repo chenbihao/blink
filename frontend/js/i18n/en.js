@@ -258,6 +258,7 @@ export const en = {
     "storage.optimize.confirm": "This will run VACUUM on all four databases, which may cause brief lag. Continue?",
     "storage.optimize.success": "Storage optimization complete",
     "storage.optimize.failed": "Storage optimization failed: {err}",
+    "storage.optimize.partial_failed": "Storage optimization finished, but {count} database(s) could not be fully compacted (possibly in use)",
     "storage.clear_cache.confirm": "Clear cache DB (performance metrics + icon cache)?",
     "storage.cache.label": "Cache DB",
     "storage.open_folder.label": "Data folder",

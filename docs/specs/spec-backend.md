@@ -149,15 +149,18 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 **清理铁则**：
 1. `clear_cache_db` 只清缓存表（`performance_metrics` + `icon_cache`），**不碰 `clipboard_images`**——后者是用户数据（0.17.0 曾误归缓存，导致历史图片被清掉）
-2. `optimize_storage`（VACUUM）可对 config.db 执行（只回收空闲页，不删数据），与"不得清理 config.db"不冲突
+2. `optimize_storage`（`compact` = VACUUM + WAL checkpoint）可对 config.db 执行（只回收空闲页，不删数据），与"不得清理 config.db"不冲突
 3. `cleanup_all_data`（删整个 `%APPDATA%\blink`）**运行时禁用**——该操作删配置 + 全部用户数据，运行中执行会进入不可恢复状态，仅卸载前手动启用
 
 ### 7.2 SQLite VACUUM 策略
 
-不用 `PRAGMA auto_vacuum`（需建表时设置且不还给 OS），用定期 VACUUM：
-- 启动时 `vacuum_if_needed(pool, 0.2)`（空闲页占比 > 20% 才 VACUUM）
-- 存储页 `optimize_storage` 手动触发四库 VACUUM
-- 增量清理路径只 `DELETE` 不 `VACUUM` 是常态（SQLite `DELETE` 只标记空闲页不缩文件是正常的），由上述两个入口按需回收
+不用 `PRAGMA auto_vacuum`（需建表时设置且不还给 OS），用定期压缩：
+- **WAL 模式铁则（0.21.17）**：四库均 `journal_mode=WAL`，仅 `VACUUM` 不会收缩磁盘文件——空闲页与未 checkpoint 的数据都在 `-wal` 里，且连接池常驻、连接永不关闭，必须追加 `PRAGMA wal_checkpoint(TRUNCATE)` 才能真正截断 `-wal` 并把主库缩到实际大小。统一入口为 `compact(pool)`（= `VACUUM` + `wal_checkpoint(TRUNCATE)`，`src/infra/data/mod.rs`）
+- 启动时 `vacuum_if_needed(pool, 0.2)`（空闲页占比 > 20% 才 `compact`）
+- 存储页 `optimize_storage` 手动触发四库 `compact`，返回各库是否成功（失败通常因数据库被占用）
+- 清理入口（`clear_*` / `clear_perf_data`）在 DELETE 后同样调 `compact` 立即回收空间
+- 增量清理路径只 `DELETE` 不压缩是常态（SQLite `DELETE` 只标记空闲页不缩文件是正常的），由上述入口按需回收
+- 存储页展示与清理统计的"库大小"取 `.db + -wal + -shm` 三文件之和（真实磁盘占用，仅 `.db` 严重偏小）
 
 ### 7.3 大 BLOB 独立表/独立库
 

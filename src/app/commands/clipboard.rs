@@ -207,7 +207,7 @@ pub async fn delete_clipboard_image(app: tauri::AppHandle, image_id: String) -> 
 pub async fn clear_clipboard_images(app: tauri::AppHandle) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     crate::infra::data::clipboard_images::clear_all_images(&pools.cache).await;
-    crate::infra::data::vacuum(&pools.cache).await;
+    let _ = crate::infra::data::compact(&pools.cache).await;
     tracing::info!("剪贴板图片历史已清空");
     Ok(())
 }
@@ -217,7 +217,7 @@ pub async fn clear_clipboard_images(app: tauri::AppHandle) -> Result<(), String>
 pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::clear_all(pool).await;
-    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
+    let _ = crate::infra::data::compact(pool).await; // VACUUM + WAL checkpoint 回收空间
     Ok(())
 }
 

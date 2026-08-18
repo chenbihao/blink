@@ -68,13 +68,13 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
             "config": {
                 "name": "配置库",
                 "file": "blink_config.db",
-                "size_bytes": file_size(&data_dir.join("blink_config.db")),
+                "size_bytes": db_size_bytes(&data_dir, "blink_config.db"),
                 "path": data_dir.join("blink_config.db").display().to_string(),
             },
             "history": {
                 "name": "历史库",
                 "file": "blink_history.db",
-                "size_bytes": file_size(&data_dir.join("blink_history.db")),
+                "size_bytes": db_size_bytes(&data_dir, "blink_history.db"),
                 "path": data_dir.join("blink_history.db").display().to_string(),
                 "history_count": history_count,
                 "clipboard_count": clipboard_count,
@@ -82,7 +82,7 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
             "ai": {
                 "name": "AI 库",
                 "file": "blink_ai.db",
-                "size_bytes": file_size(&data_dir.join("blink_ai.db")),
+                "size_bytes": db_size_bytes(&data_dir, "blink_ai.db"),
                 "path": data_dir.join("blink_ai.db").display().to_string(),
                 "audit_count": ai_audit_count,
                 "conversation_count": ai_conversation_count,
@@ -91,7 +91,7 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
             "cache": {
                 "name": "缓存库",
                 "file": "blink_cache.db",
-                "size_bytes": file_size(&data_dir.join("blink_cache.db")),
+                "size_bytes": db_size_bytes(&data_dir, "blink_cache.db"),
                 "path": data_dir.join("blink_cache.db").display().to_string(),
                 "perf_count": perf_count,
                 "icon_cache_count": icon_cache_count,
@@ -188,15 +188,16 @@ pub async fn clear_cache_db(app: tauri::AppHandle) -> Result<(), String> {
     // 清空 icon_cache
     crate::infra::data::icon_cache::clear_all(&pools.cache).await;
     // 0.16.0: VACUUM 收缩数据库文件
-    crate::infra::data::vacuum(&pools.cache).await;
+    let _ = crate::infra::data::compact(&pools.cache).await;
     tracing::info!("缓存库已清空（performance_metrics + icon_cache）");
     Ok(())
 }
 
 /// 设置页-存储：手动优化存储（0.17.0）。
 ///
-/// 对四个数据库（config / history / ai / cache）无条件执行 VACUUM，回收磁盘空间。
-/// 返回各库的 VACUUM 前后 freelist 信息供前端展示。
+/// 对四个数据库（config / history / ai / cache）无条件执行压缩
+/// （VACUUM + wal_checkpoint(TRUNCATE)，WAL 模式下才能真正回收空间）。
+/// 返回各库压缩前后 freelist 信息与是否成功，供前端展示。
 #[tauri::command]
 pub async fn optimize_storage(app: tauri::AppHandle) -> serde_json::Value {
     let pools = app.state::<crate::infra::data::DbPools>();
@@ -212,7 +213,11 @@ pub async fn optimize_storage(app: tauri::AppHandle) -> serde_json::Value {
             .fetch_one(pool)
             .await
             .unwrap_or((0,));
-        crate::infra::data::vacuum(pool).await;
+        // compact = VACUUM + wal_checkpoint(TRUNCATE)，WAL 模式下才能真正回收空间
+        let (success, error) = match crate::infra::data::compact(pool).await {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e)),
+        };
         let after: (i64,) = sqlx::query_as("PRAGMA freelist_count")
             .fetch_one(pool)
             .await
@@ -221,12 +226,15 @@ pub async fn optimize_storage(app: tauri::AppHandle) -> serde_json::Value {
             db = name,
             before = before.0,
             after = after.0,
-            "optimize_storage: VACUUM 完成"
+            success,
+            "optimize_storage: compact 完成"
         );
         results.push(serde_json::json!({
             "db": name,
             "freelist_before": before.0,
             "freelist_after": after.0,
+            "success": success,
+            "error": error,
         }));
     }
 
@@ -503,7 +511,7 @@ pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>,
 pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
     let rows = crate::infra::data::perf::clear_all(pool).await?;
-    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
+    let _ = crate::infra::data::compact(pool).await; // VACUUM + WAL checkpoint 回收空间
     Ok(rows)
 }
 
@@ -521,6 +529,17 @@ pub async fn recognize_cli_tool(
 /// 获取文件大小（字节），不存在返回 0。
 fn file_size(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// WAL 模式下数据库的真实磁盘占用 = `.db` + `-wal` + `-shm` 三文件之和。
+///
+/// 只统计 `.db` 会漏掉未 checkpoint 的 WAL 数据，数字严重偏小（实测缓存库
+/// `.db` 60KB 而 `-wal` 达 2.8MB）。存储页展示与清理统计都用此口径。
+fn db_size_bytes(data_dir: &std::path::Path, file: &str) -> u64 {
+    let mut total = file_size(&data_dir.join(file));
+    total += file_size(&data_dir.join(format!("{file}-wal")));
+    total += file_size(&data_dir.join(format!("{file}-shm")));
+    total
 }
 
 /// 语义化版本比较：a > b 则返回 true。
@@ -594,7 +613,7 @@ pub async fn get_cleanup_info() -> serde_json::Value {
         "blink_ai.db",
         "blink_cache.db",
     ];
-    let db_total: u64 = db_files.iter().map(|f| file_size(&data_dir.join(f))).sum();
+    let db_total: u64 = db_files.iter().map(|f| db_size_bytes(&data_dir, f)).sum();
 
     // 日志目录
     let logs_dir = crate::infra::utils::paths::logs_dir();

@@ -259,6 +259,7 @@ export const zh = {
     "storage.optimize.confirm": "将对四个数据库执行 VACUUM 收缩操作，期间可能短暂卡顿。继续？",
     "storage.optimize.success": "存储优化完成",
     "storage.optimize.failed": "存储优化失败：{err}",
+    "storage.optimize.partial_failed": "存储优化完成，但 {count} 个数据库未能完全收缩（可能正被占用）",
     "storage.clear_cache.confirm": "确定清空缓存库（性能指标 + 图标缓存）？",
     "storage.cache.label": "缓存库",
     "storage.open_folder.label": "数据目录",

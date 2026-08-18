@@ -93,9 +93,17 @@ export function initStorageTab() {
         const btn = document.getElementById("optimize-storage");
         if (btn) btn.disabled = true;
         try {
-            await optimizeStorage();
+            const res = await optimizeStorage();
             await loadStorageInfo();
-            await messageDialog(t("storage.optimize.success"), {kind: "info"});
+            const failures = (res.results || []).filter((r) => !r.success);
+            if (failures.length > 0) {
+                await messageDialog(
+                    t("storage.optimize.partial_failed", {count: failures.length}),
+                    {kind: "warning"}
+                );
+            } else {
+                await messageDialog(t("storage.optimize.success"), {kind: "info"});
+            }
         } catch (e) {
             console.error("optimize_storage failed:", e);
             await messageDialog(t("storage.optimize.failed", {err: String(e)}), {kind: "error"});

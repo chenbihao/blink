@@ -557,7 +557,7 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
 pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::history::clear(pool).await;
-    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
+    let _ = crate::infra::data::compact(pool).await; // VACUUM + WAL checkpoint 回收空间
     Ok(())
 }
 

@@ -126,6 +126,11 @@ AI 功能：
 
 ## AI、Skill 与 MCP 就绪
 
+能力原子化：
+<p align="center">
+  <img src="docs/images/feature-capability.png" width="680" alt="Chord 模式"/>
+</p>
+
 能力调用：
 <p align="center">
   <img src="docs/images/feature-ai-cap.gif" width="680" alt="Chord 模式"/>

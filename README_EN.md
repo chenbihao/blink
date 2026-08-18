@@ -125,6 +125,11 @@ Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc
 
 ## AI, Skills, and MCP Ready
 
+Capability:
+<p align="center">
+  <img src="docs/images/feature-capability.png" width="680" alt="Chord 模式"/>
+</p>
+
 Capability invocation:
 <p align="center">
   <img src="docs/images/feature-ai-cap.gif" width="680" alt="AI capability invocation"/>
