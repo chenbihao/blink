@@ -52,6 +52,7 @@ use crate::domain::ai::factory::{
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::rig_provider::expose_for_rig;
 use crate::infra::platform::secret;
+use crate::infra::utils::text::single_line;
 
 /// 对话窗口流式输出 chunk(emit 前端 `blink://chat-stream`)。
 ///
@@ -104,11 +105,29 @@ pub enum ChatStreamChunk {
 }
 
 /// 4 种 `ProviderKind` 的具体 `Agent<M>`(`CompletionModel` 非 object-safe,枚举包)。
+///
+/// 四种协议统一使用 `LoggingHttpClient` 作为 HTTP 后端（0.21.16）——设置页「AI HTTP
+/// 请求/响应体日志」开关打开后打印真实请求/响应体，与 `factory::build_*_client` 的
+/// 注入保持一致。
 enum ChatAgent {
-    OpenAI(Agent<openai::completion::CompletionModel>),
-    Anthropic(Agent<anthropic::completion::CompletionModel>),
-    Gemini(Agent<gemini::completion::CompletionModel>),
-    Ollama(Agent<ollama::CompletionModel>),
+    OpenAI(
+        Agent<
+            openai::completion::CompletionModel<crate::infra::utils::http_log::LoggingHttpClient>,
+        >,
+    ),
+    Anthropic(
+        Agent<
+            anthropic::completion::CompletionModel<
+                crate::infra::utils::http_log::LoggingHttpClient,
+            >,
+        >,
+    ),
+    Gemini(
+        Agent<
+            gemini::completion::CompletionModel<crate::infra::utils::http_log::LoggingHttpClient>,
+        >,
+    ),
+    Ollama(Agent<ollama::CompletionModel<crate::infra::utils::http_log::LoggingHttpClient>>),
 }
 
 /// 对话窗口 Agent 封装--持有按当前 `ProviderEntry`+`ModelEntry` 构造的 rig `Agent`。
@@ -347,16 +366,30 @@ impl AgentProvider {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
                     StreamedAssistantContent::Text(t) => {
                         has_content = true;
+                        tracing::trace!(
+                            conversation = %conversation_id,
+                            text = single_line(&t.text),
+                            "run_stream: text delta"
+                        );
                         ChatStreamChunk::Text { text: t.text }
                     }
                     StreamedAssistantContent::Reasoning(r) => {
                         has_content = true;
-                        ChatStreamChunk::Thinking {
-                            text: r.display_text(),
-                        }
+                        let text = r.display_text();
+                        tracing::trace!(
+                            conversation = %conversation_id,
+                            thinking = single_line(&text),
+                            "run_stream: thinking delta"
+                        );
+                        ChatStreamChunk::Thinking { text }
                     }
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
                         has_content = true;
+                        tracing::trace!(
+                            conversation = %conversation_id,
+                            thinking = single_line(&reasoning),
+                            "run_stream: thinking delta"
+                        );
                         ChatStreamChunk::Thinking { text: reasoning }
                     }
                     StreamedAssistantContent::ToolCall {
@@ -364,10 +397,19 @@ impl AgentProvider {
                         internal_call_id,
                     } => {
                         has_content = true;
+                        let tool = tool_call.function.name.clone();
+                        let arguments = tool_call.function.arguments.to_string();
+                        tracing::debug!(
+                            conversation = %conversation_id,
+                            tool = %tool,
+                            call_id = %internal_call_id,
+                            args_chars = arguments.chars().count(),
+                            "run_stream: tool call"
+                        );
                         ChatStreamChunk::ToolCall {
-                            tool: tool_call.function.name.clone(),
+                            tool,
                             call_id: internal_call_id,
-                            arguments: tool_call.function.arguments.to_string(),
+                            arguments,
                         }
                     }
                     _ => continue,
@@ -380,6 +422,13 @@ impl AgentProvider {
                     let summary = summarize_tool_result(&tool_result);
                     // 空内容视为失败（如被拒绝的危险 tool / tool 报错）
                     let success = !summary.is_empty();
+                    tracing::debug!(
+                        conversation = %conversation_id,
+                        call_id = %internal_call_id,
+                        success,
+                        summary_chars = summary.chars().count(),
+                        "run_stream: tool result"
+                    );
                     ChatStreamChunk::ToolResult {
                         call_id: internal_call_id,
                         success,

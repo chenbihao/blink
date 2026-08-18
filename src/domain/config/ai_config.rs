@@ -14,9 +14,9 @@
 //! 4. tracing/log/Debug 三通路不出现原文(SecretString 已守)
 //! 5. serde 序列化 Provider 类型不带 secret 字段(**本文件类型都不含 SecretString**)
 //!
-//! **§3.6 未命中过滤四筛子字段**(默认关):`enabled` / `min_query_len` /
-//! `require_whitespace` / `exclude_pure_numeric` / `respect_awareness_url_path`。
-//! 0.9.1 只落配置项;真决策树留 0.9.2。
+//! **未命中过滤(§3.6)**:`enabled`(是否允许生成 AI 提示)+ `min_query_len`
+//! (普通文本最短长度)是用户配置;URL/路径、纯数字、拉丁必含空格与 CJK 两字符
+//! 阈值是内部固定策略,不暴露为用户配置(见 `domain::ai::gating`)。
 //!
 //! **§5.3 总开关与首次配置耦合**:严格 opt-in——配完 Provider 不自动 flip
 //! `enabled=true`,由前端 toast 引导。删除唯一 Provider 时自动置 false(应用层处理)。
@@ -35,36 +35,15 @@ pub const MAX_AI_HARD_TIMEOUT_MS: u32 = 30_000;
 pub struct AIConfig {
     // ── 总开关(§3.6 铁则 1:默认关) ─────────────────────────────────────────
     /// 主开关——**默认 false**。配完 Provider 不自动 flip(§5.3 严格 opt-in),
-    /// 只能由用户显式打开。
+    /// 只能由用户显式打开。控制是否允许生成 AI Ghost 提示("按 Tab 问 AI")。
     #[serde(default)]
     pub enabled: bool,
 
-    /// 意图路由开关——即使 `enabled=true`,还要再打开此项才允许 AI 决策路由。
-    /// 分两层是为了让"启用 AI 供应商但先只跑手动触发"这个中间态可用。
-    #[serde(default)]
-    pub allow_intent_routing: bool,
-
-    // ── 未命中过滤四筛子(§3.6,阈值 0.9.2 spike 定) ─────────────────────────
-    /// 最短 query 长度。`< min_query_len` 不走 AI,回退 fuzzy。
+    // ── 未命中过滤(§3.6) ─────────────────────────────────────────────────
+    /// 最短 query 长度(普通文本)。`< min_query_len` 不走 AI,回退 fuzzy。
+    /// CJK 使用内部固定阈值 2,不在此配置。
     #[serde(default = "default_min_query_len")]
     pub min_query_len: u8,
-
-    /// CJK(中日韩)最短 query 长度。中文不需要空格分词,"翻译"=2 char 是完整意图。
-    /// `< min_query_len_cjk` 且含 CJK 字符时不走 AI。默认 2。
-    #[serde(default = "default_min_query_len_cjk")]
-    pub min_query_len_cjk: u8,
-
-    /// 必须包含至少一个空格(避免"打错一个字"就打 LLM)。
-    #[serde(default = "default_true")]
-    pub require_whitespace: bool,
-
-    /// 排除纯数字/纯符号 query。
-    #[serde(default = "default_true")]
-    pub exclude_pure_numeric: bool,
-
-    /// 尊重 Awareness 已判定的 URL/文件路径——命中直接 fallback。
-    #[serde(default = "default_true")]
-    pub respect_awareness_url_path: bool,
 
     // ── Provider 列表 ──────────────────────────────────────────────────────
     /// 用户配的 Provider 列表——顺序即 UI 展示顺序(前端可拖拽重排)。
@@ -115,12 +94,7 @@ impl Default for AIConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            allow_intent_routing: false,
             min_query_len: default_min_query_len(),
-            min_query_len_cjk: default_min_query_len_cjk(),
-            require_whitespace: true,
-            exclude_pure_numeric: true,
-            respect_awareness_url_path: true,
             providers: Vec::new(),
             tier_ultra_light: None,
             tier_light: None,
@@ -389,6 +363,11 @@ pub struct ChatConfig {
     #[serde(default = "default_main_window_model")]
     pub main_window_model: String,
 
+    /// 对话窗口 LLM 自动命名的模型策略：`ultra_light` / `light` / `main` / `provider_id:model_id`。
+    /// 默认超轻档——命名是低成本短任务。缺档时按档位链向更高档降级。
+    #[serde(default = "default_title_model")]
+    pub title_model: String,
+
     /// LLM 自动命名开关——开启后新对话首条消息发送后异步调 LLM 生成标题。
     /// 默认关闭——opt-in 设计，用户可能不想消耗 token 生成标题。
     #[serde(default)]
@@ -416,6 +395,7 @@ impl Default for ChatConfig {
             pure_chat: false,
             agent_mode: Some(ChatAgentMode::Full),
             main_window_model: default_main_window_model(),
+            title_model: default_title_model(),
             auto_title: false,
             memory_config: crate::domain::ai::memory::MemoryConfig::default(),
             skill_config: SkillConfig::default(),
@@ -449,6 +429,10 @@ pub enum ChatAgentMode {
 
 fn default_main_window_model() -> String {
     "light".to_string()
+}
+
+fn default_title_model() -> String {
+    "ultra_light".to_string()
 }
 
 // ── SkillConfig（0.13.3）──────────────────────────────────────────────────────
@@ -703,10 +687,6 @@ fn default_min_query_len() -> u8 {
     4
 }
 
-fn default_min_query_len_cjk() -> u8 {
-    2
-}
-
 fn default_true() -> bool {
     true
 }
@@ -767,13 +747,9 @@ mod tests {
     fn default_is_disabled() {
         let c = AIConfig::default();
         assert!(!c.enabled, "默认必须 opt-in（§3.6 铁则 1）");
-        assert!(!c.allow_intent_routing);
         assert!(!c.direct_execute_safe_actions);
         assert!(c.streaming, "流式默认开启");
         assert_eq!(c.min_query_len, 4);
-        assert!(c.require_whitespace);
-        assert!(c.exclude_pure_numeric);
-        assert!(c.respect_awareness_url_path);
         assert!(c.providers.is_empty());
         assert!(c.tier_ultra_light.is_none());
         assert!(c.tier_light.is_none());
@@ -1035,8 +1011,28 @@ mod tests {
         let c: AIConfig = serde_json::from_str(json).unwrap();
         assert!(!c.enabled);
         assert_eq!(c.min_query_len, 4);
-        assert!(c.require_whitespace);
         assert!(c.streaming, "老配置缺 streaming 字段应默认 true");
+        assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn legacy_filter_fields_are_ignored_on_load() {
+        // 收口后 `allow_intent_routing` 与旧过滤开关不再是 AIConfig 字段。
+        // 老配置里这些多余 key 必须被 serde 安全忽略,保证升级兼容(零迁移)。
+        let json = r#"{
+            "enabled": true,
+            "allow_intent_routing": true,
+            "min_query_len": 6,
+            "min_query_len_cjk": 2,
+            "require_whitespace": false,
+            "exclude_pure_numeric": false,
+            "respect_awareness_url_path": false,
+            "providers": []
+        }"#;
+        let c: AIConfig = serde_json::from_str(json).unwrap();
+        assert!(c.enabled);
+        // 用户可配的 min_query_len 仍生效
+        assert_eq!(c.min_query_len, 6);
         assert!(c.providers.is_empty());
     }
 
@@ -1146,12 +1142,7 @@ mod tests {
     fn round_trip_through_json_preserves_all_fields() {
         let original = AIConfig {
             enabled: true,
-            allow_intent_routing: true,
             min_query_len: 8,
-            min_query_len_cjk: 3,
-            require_whitespace: false,
-            exclude_pure_numeric: false,
-            respect_awareness_url_path: true,
             providers: vec![sample_provider("p1", "gpt-4")],
             tier_ultra_light: Some(TierAssignment {
                 provider_id: "p1".to_string(),
@@ -1166,6 +1157,7 @@ mod tests {
                 pure_chat: true,
                 agent_mode: Some(ChatAgentMode::PureChat),
                 main_window_model: "main".to_string(),
+                title_model: "ultra_light".to_string(),
                 auto_title: true,
                 memory_config: crate::domain::ai::memory::MemoryConfig::default(),
                 skill_config: SkillConfig::default(),
@@ -1176,9 +1168,7 @@ mod tests {
         let restored: AIConfig = serde_json::from_str(&s).unwrap();
 
         assert_eq!(restored.enabled, original.enabled);
-        assert_eq!(restored.allow_intent_routing, original.allow_intent_routing);
         assert_eq!(restored.min_query_len, original.min_query_len);
-        assert_eq!(restored.min_query_len_cjk, original.min_query_len_cjk);
         assert_eq!(restored.providers.len(), 1);
         assert_eq!(restored.providers[0].id, "p1");
         assert_eq!(restored.tier_ultra_light, original.tier_ultra_light);
@@ -1260,6 +1250,7 @@ mod tests {
         assert!(!c.chat_config.pure_chat, "pure_chat 默认 false");
         assert_eq!(c.chat_config.effective_agent_mode(), ChatAgentMode::Full);
         assert_eq!(c.chat_config.main_window_model, "light");
+        assert_eq!(c.chat_config.title_model, "ultra_light");
         assert!(!c.chat_config.auto_title, "auto_title 默认 false");
         // 0.13.1: memory_config 默认 TokenAware 模式
         assert_eq!(
@@ -1282,6 +1273,8 @@ mod tests {
         let c: ChatConfig = serde_json::from_str(json).unwrap();
         let serialized = serde_json::to_string(&c).unwrap();
         assert!(c.auto_title);
+        // 旧 title_tier 字段被忽略;命名模型默认回落到超轻档
+        assert_eq!(c.title_model, "ultra_light");
         assert!(!serialized.contains("title_tier"));
     }
 
@@ -1308,6 +1301,7 @@ mod tests {
                 pure_chat: false,
                 agent_mode: Some(ChatAgentMode::Full),
                 main_window_model: "light".to_string(),
+                title_model: "ultra_light".to_string(),
                 auto_title: false,
                 memory_config: crate::domain::ai::memory::MemoryConfig {
                     mode: crate::domain::ai::memory::WindowMode::FixedCount,

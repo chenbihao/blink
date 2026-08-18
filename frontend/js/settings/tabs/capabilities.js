@@ -1,5 +1,5 @@
 /**
- * 能力与操作 Tab 模块（0.21.10 重设计：组块矩阵 + 风险列 + 姿态摘要）
+ * 能力管理 Tab 模块（0.21.10 重设计：组块矩阵 + 风险列 + 姿态摘要）
  *
  * 布局：全页唯一 sticky 表头 + 每组一个独立圆角块（块间留白），
  * 列 = 功能 | 风险 | 本地 | AI | MCP | 详情；
@@ -53,7 +53,7 @@ let loadEpoch = 0;
 let eventsRegistered = false;
 
 /**
- * 初始化能力与操作 Tab
+ * 初始化能力管理 Tab
  */
 export function initCapabilitiesTab() {
     loadCatalog();

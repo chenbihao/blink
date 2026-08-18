@@ -181,22 +181,6 @@
     line-height: var(--leading-normal);
 }
 
-/* AI 三档下拉旁的即时降级提示 */
-.ai-tier-degrade {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 4px 0 8px 4px;
-    min-height: 16px;
-}
-
-.ai-tier-degrade.warning {
-    color: var(--accent);
-}
-
-.ai-tier-degrade.error {
-    color: var(--red);
-}
-
 /* AI 供应商卡片列表容器 */
 #ai-providers-container {
     display: flex;

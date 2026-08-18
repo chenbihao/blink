@@ -48,11 +48,7 @@ export const aiState = {
 export function defaultAIConfig() {
     return {
         enabled: false,
-        allow_intent_routing: false,
         min_query_len: 4,
-        require_whitespace: true,
-        exclude_pure_numeric: true,
-        respect_awareness_url_path: true,
         providers: [],
         tier_ultra_light: null,
         tier_light: null,
@@ -61,6 +57,7 @@ export function defaultAIConfig() {
         chat_config: {
             agent_mode: "full",
             main_window_model: "light",
+            title_model: "ultra_light",
             auto_title: false,
             memory_config: {
                 mode: "token_aware",

@@ -309,8 +309,8 @@ fn main() {
 
             // 日志级别 reload 到配置值（init 时为默认 error）
             infra::utils::logging::update_level(&app_config.log_level);
-            // AI 详细日志开关 reload（0.12.6）
-            infra::utils::logging::update_ai_verbose_log(app_config.ai_verbose_log);
+            // AI HTTP 请求/响应体日志开关 reload（0.21.16，默认关）
+            infra::utils::http_log::set_body_log_enabled(app_config.ai_http_body_log);
 
             // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
             app.manage(pools.clone());

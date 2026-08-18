@@ -9,7 +9,7 @@
 //! 依赖所有子模块：state / tier / provider / model-edit / skill
 
 import {aiState, defaultAIConfig, saveAIConfig} from "./state.js";
-import {renderAITierBanner, renderAITierDegrade, renderAITierSelects, renderMainWindowModelSelect} from "./tier.js";
+import {renderAITierBanner, renderAITierSelects, renderMainWindowModelSelect, renderTitleModelSelect} from "./tier.js";
 import {
     closeAIProviderModal,
     filterProviderModels,
@@ -103,6 +103,7 @@ function normalizeAIConfig(cfg) {
     }
     delete cfg.chat_config.pure_chat;
     cfg.chat_config.main_window_model ||= "light";
+    cfg.chat_config.title_model ||= "ultra_light";
     delete cfg.chat_config.title_tier;
 }
 
@@ -113,11 +114,7 @@ function applyAIConfigToUI() {
     const c = aiState.currentAIConfig;
     const $ = (id) => document.getElementById(id);
     if ($("ai-enabled")) $("ai-enabled").checked = !!c.enabled;
-    if ($("ai-allow-routing")) $("ai-allow-routing").checked = !!c.allow_intent_routing;
     if ($("ai-min-query-len")) $("ai-min-query-len").value = c.min_query_len ?? 4;
-    if ($("ai-require-whitespace")) $("ai-require-whitespace").checked = c.require_whitespace !== false;
-    if ($("ai-exclude-pure-numeric")) $("ai-exclude-pure-numeric").checked = c.exclude_pure_numeric !== false;
-    if ($("ai-respect-awareness-url-path")) $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
     if ($("ai-timeout-ms")) $("ai-timeout-ms").value = effectiveAIHardTimeoutMs(c.slo_hard_timeout_ms);
     // 对话配置
     const chatCfg = c.chat_config || {agent_mode: "full", main_window_model: "light", auto_title: false};
@@ -126,6 +123,7 @@ function applyAIConfigToUI() {
     });
     if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
     renderMainWindowModelSelect();
+    renderTitleModelSelect();
     // 记忆策略配置
     const memCfg = chatCfg.memory_config || {
         mode: "token_aware",
@@ -254,26 +252,10 @@ function bindAIEvents() {
         renderAITierBanner();
         saveAIConfig();
     });
-    $("ai-allow-routing")?.addEventListener("change", (e) => {
-        cfg.allow_intent_routing = e.target.checked;
-        saveAIConfig();
-    });
     $("ai-min-query-len")?.addEventListener("change", (e) => {
         const v = parseInt(e.target.value, 10);
         cfg.min_query_len = isNaN(v) ? 4 : Math.max(1, Math.min(20, v));
         e.target.value = cfg.min_query_len;
-        saveAIConfig();
-    });
-    $("ai-require-whitespace")?.addEventListener("change", (e) => {
-        cfg.require_whitespace = e.target.checked;
-        saveAIConfig();
-    });
-    $("ai-exclude-pure-numeric")?.addEventListener("change", (e) => {
-        cfg.exclude_pure_numeric = e.target.checked;
-        saveAIConfig();
-    });
-    $("ai-respect-awareness-url-path")?.addEventListener("change", (e) => {
-        cfg.respect_awareness_url_path = e.target.checked;
         saveAIConfig();
     });
     document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => input.addEventListener("change", (e) => {
@@ -296,6 +278,22 @@ function bindAIEvents() {
     $("ai-main-window-custom-model")?.addEventListener("change", (e) => {
         cfg.chat_config = cfg.chat_config || {};
         cfg.chat_config.main_window_model = e.target.value || "light";
+        saveAIConfig();
+    });
+    $("ai-chat-title-model-mode")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        if (e.target.value === "custom") {
+            const custom = $("ai-chat-title-custom-model");
+            cfg.chat_config.title_model = custom?.value || "ultra_light";
+        } else {
+            cfg.chat_config.title_model = e.target.value;
+        }
+        renderTitleModelSelect();
+        saveAIConfig();
+    });
+    $("ai-chat-title-custom-model")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.title_model = e.target.value || "ultra_light";
         saveAIConfig();
     });
     $("ai-chat-auto-title")?.addEventListener("change", (e) => {
@@ -432,7 +430,8 @@ function bindAIEvents() {
                 const modelId = val.slice(sep + 2);
                 cfg[`tier_${tier}`] = {provider_id: providerId, model_id: modelId};
             }
-            renderAITierDegrade();
+            // 重建选项以刷新各档位"未指派"内的降级提示
+            renderAITierSelects();
             renderAITierBanner();
             if (tier === "main") updateMemoryContextSizeDisplay();
             saveAIConfig();

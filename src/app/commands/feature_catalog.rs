@@ -13,7 +13,7 @@ use crate::domain::feature_catalog::{
 
 /// 列出功能目录——聚合 builtin descriptor、chord binding 和 capability。
 ///
-/// 前端调用后在"能力与操作"设置页按分组展示（六个功能域 + Chord 快捷入口 + 其他插件）。
+/// 前端调用后在"能力管理"设置页按分组展示（六个功能域 + Chord 快捷入口 + 其他插件）。
 /// AI/MCP 出口状态从用户授权真源（allowlist / exposed_capabilities）投影，
 /// 供目录页三列开关显示实际状态。
 /// 配置变更后前端订阅 `blink://config-changed` 重新调用此命令刷新。

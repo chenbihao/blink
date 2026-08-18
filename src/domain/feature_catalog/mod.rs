@@ -1,7 +1,7 @@
 //! FeatureCatalog —— 面向用户的功能目录聚合层（0.21.4）。
 //!
 //! 把 builtin descriptor、Chord binding、builtin/plugin Capability 聚合为
-//! 统一的目录项，供设置页"能力与操作"子页展示三出口状态（本地/AI/MCP）。
+//! 统一的目录项，供设置页"能力管理"子页展示三出口状态（本地/AI/MCP）。
 //!
 //! **设计原则**（§3.6 / §5.5）：
 //! - Feature / Capability / Binding 三类 id 分栏，不假设同名。

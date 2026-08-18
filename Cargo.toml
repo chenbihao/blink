@@ -1,6 +1,6 @@
 [package]
 name = "blink"
-version = "0.19.17"
+version = "0.21.16"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
@@ -40,6 +40,8 @@ evalexpr = "13.1.0"
 futures = "0.3"
 # http: HeaderName/HeaderValue 类型（rmcp Streamable HTTP transport 需要，已作为传递依赖在树中）
 http = "1"
+# bytes: HTTP 请求/响应体日志包装（infra/utils/http_log.rs）用，rig-core 的 HttpClientExt 依赖
+bytes = "1"
 # sse-stream: SSE 事件流解析（rmcp 依赖，0.13.8 直接用——旧版 SSE transport 实现）
 sse-stream = "0.2.5"
 # thiserror: 错误类型 derive（rmcp 依赖树中已有，0.13.8 直接用——SSE transport 错误类型）

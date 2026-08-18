@@ -134,16 +134,24 @@ impl ProviderFactory for RigFactory {
 pub(crate) fn build_openai_client(
     key: &str,
     base_url: Option<&str>,
-) -> Result<rig_core::providers::openai::CompletionsClient, AIError> {
+) -> Result<
+    rig_core::providers::openai::CompletionsClient<
+        crate::infra::utils::http_log::LoggingHttpClient,
+    >,
+    AIError,
+> {
     use rig_core::providers::openai;
     let url = base_url.filter(|s| !s.is_empty()).ok_or_else(|| {
         AIError::Provider(
             "OpenAI Compatible 协议必须配 base_url(如 https://api.openai.com/v1)".into(),
         )
     })?;
+    // 0.21.16: 注入 LoggingHttpClient——trace 级别打印真实请求/响应体（wire JSON），
+    // 排查 provider 兼容问题（如本地 qwen 思考块）。平时零开销透传。
     openai::CompletionsClient::builder()
         .api_key(key)
         .base_url(url)
+        .http_client(crate::infra::utils::http_log::LoggingHttpClient::default())
         .build()
         .map_err(|_| AIError::Provider("openai-compatible client 构造失败".into()))
 }
@@ -152,9 +160,15 @@ pub(crate) fn build_openai_client(
 pub(crate) fn build_anthropic_client(
     key: &str,
     base_url: Option<&str>,
-) -> Result<rig_core::providers::anthropic::Client, AIError> {
+) -> Result<
+    rig_core::providers::anthropic::Client<crate::infra::utils::http_log::LoggingHttpClient>,
+    AIError,
+> {
     use rig_core::providers::anthropic;
-    let mut builder = anthropic::Client::builder().api_key(key);
+    let mut builder = anthropic::Client::builder()
+        .api_key(key)
+        // 0.21.16: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
+        .http_client(crate::infra::utils::http_log::LoggingHttpClient::default());
     if let Some(url) = base_url.filter(|s| !s.is_empty()) {
         builder = builder.base_url(url);
     }
@@ -168,10 +182,15 @@ pub(crate) fn build_anthropic_client(
 pub(crate) fn build_gemini_client(
     key: &str,
     _base_url: Option<&str>,
-) -> Result<rig_core::providers::gemini::Client, AIError> {
+) -> Result<
+    rig_core::providers::gemini::Client<crate::infra::utils::http_log::LoggingHttpClient>,
+    AIError,
+> {
     use rig_core::providers::gemini;
     gemini::Client::builder()
         .api_key(key)
+        // 0.21.16: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
+        .http_client(crate::infra::utils::http_log::LoggingHttpClient::default())
         .build()
         .map_err(|_| AIError::Provider("gemini client 构造失败".into()))
 }
@@ -180,9 +199,15 @@ pub(crate) fn build_gemini_client(
 /// 无需 API Key（OllamaApiKey::default()=None），base_url 默认 localhost:11434。
 pub(crate) fn build_ollama_client(
     base_url: Option<&str>,
-) -> Result<rig_core::providers::ollama::Client, AIError> {
+) -> Result<
+    rig_core::providers::ollama::Client<crate::infra::utils::http_log::LoggingHttpClient>,
+    AIError,
+> {
     use rig_core::providers::ollama;
-    let mut builder = ollama::Client::builder().api_key(ollama::OllamaApiKey::default());
+    let mut builder = ollama::Client::builder()
+        .api_key(ollama::OllamaApiKey::default())
+        // 0.21.16: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
+        .http_client(crate::infra::utils::http_log::LoggingHttpClient::default());
     if let Some(url) = base_url.filter(|s| !s.is_empty()) {
         builder = builder.base_url(url);
     }

@@ -443,10 +443,11 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.19.17"
+version = "0.21.16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "clap",
  "cpal",

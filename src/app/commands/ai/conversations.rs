@@ -189,8 +189,9 @@ pub async fn get_chat_messages(
 
 /// 异步生成对话标题（0.12.5 §5.3）。
 ///
-/// 读取 `ChatConfig.auto_title` 开关，固定使用超轻档模型，调
-/// `AIProvider::complete()`（非 Agent 路径，单轮补全）生成 6-10 字语义化标题。
+/// 读取 `ChatConfig.auto_title` 开关，按 `ChatConfig.title_model` 策略选模型
+/// （默认超轻档），调 `AIProvider::complete()`（非 Agent 路径，单轮补全）生成
+/// 6-10 字语义化标题。
 ///
 /// 成功后更新 `conversations.title` 并 emit `blink://chat-title-updated` 事件，
 /// 前端更新 header 标题 + 刷新侧边栏。失败静默降级（保持截断标题）。
@@ -200,7 +201,6 @@ pub async fn generate_conversation_title(
     conversation_id: String,
     first_message: String,
 ) -> Result<(), String> {
-    use crate::app::ai_config::Tier;
     use crate::domain::ai::message::{ChatMessage, CompletionRequest, Role};
 
     // 1. 读配置——auto_title 关闭则直接返回
@@ -213,8 +213,9 @@ pub async fn generate_conversation_title(
         return Ok(());
     }
 
-    // 2. 命名固定使用超轻档；未配置时由 Registry 按超轻 → 轻量 → 主档降级。
-    let (provider, _actual_tier) = registry.resolve(Tier::UltraLight).map_err(|e| {
+    // 2. 按"对话窗口命名模型"策略选模型；默认超轻档，缺档时按档位链降级，
+    //    自选模型不可用时同样回退超轻档。
+    let provider = resolve_title_model(&registry, &chat_cfg.title_model).map_err(|e| {
         tracing::warn!(%conversation_id, "标题生成：provider 解析失败: {e}");
         e.to_string()
     })?;
@@ -281,6 +282,47 @@ pub async fn generate_conversation_title(
 
     tracing::info!(%conversation_id, %title, "对话标题已自动生成");
     Ok(())
+}
+
+/// 按"对话窗口命名模型"策略解析 ready provider（LLM 自动命名用）。
+///
+/// - `ultra_light`（默认）/ `light` / `main` → 对应档位；空档由 `resolve_tier`
+///   按"超轻 → 轻量 → 主"降级链自动向更高档降级
+/// - `provider_id:model_id`（自选）→ 显式解析；不可用时回退超轻档
+/// - 其余值 → 回退超轻档
+fn resolve_title_model(
+    registry: &crate::domain::ai::registry::AIProviderRegistry,
+    policy: &str,
+) -> Result<
+    std::sync::Arc<dyn crate::domain::ai::provider::AIProvider>,
+    crate::domain::ai::provider::AIError,
+> {
+    use crate::app::ai_config::Tier;
+
+    // 自选模型：显式解析，失败回退超轻档
+    if let Some((pid, mid)) = policy.split_once(':') {
+        if !pid.is_empty() && !mid.is_empty() {
+            return match registry.resolve_explicit(pid, mid) {
+                Ok(p) => Ok(p),
+                Err(crate::domain::ai::provider::AIError::NotConfigured) => {
+                    tracing::warn!(
+                        provider_id = pid,
+                        model_id = mid,
+                        "标题生成：自选命名模型不可用，回退超轻档"
+                    );
+                    registry.resolve(Tier::UltraLight).map(|(p, _)| p)
+                }
+                Err(other) => Err(other),
+            };
+        }
+    }
+    // 档位策略：默认超轻档
+    let tier = match policy {
+        "main" => Tier::Main,
+        "light" => Tier::Light,
+        _ => Tier::UltraLight,
+    };
+    registry.resolve(tier).map(|(p, _)| p)
 }
 
 /// 截断对话消息——保留前 `keep_count` 条，删除其余（0.12.5 §5.5）。

@@ -362,7 +362,7 @@ const capsSource = await readFile(new URL("./capabilities.js", import.meta.url),
 const zh = await readFile(new URL("../../i18n/zh.js", import.meta.url), "utf8");
 const en = await readFile(new URL("../../i18n/en.js", import.meta.url), "utf8");
 
-// 侧边栏："功能"分组下三个平级子页（引擎/插件/能力与操作），无残留"搜索"分组
+// 侧边栏："功能"分组下三个平级子页（引擎/插件/能力管理），无残留"搜索"分组
 const functionalityGroup = settingsHtml.match(
     /sidebar\.group\.functionality[\s\S]*?<\/div>\s*<div class="sidebar-group">/,
 );

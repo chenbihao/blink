@@ -72,6 +72,14 @@ pub fn pinyin_initials(s: &str) -> String {
         .collect()
 }
 
+/// 将换行/回车替换为可见转义（`\n`/`\r`），保证字符串在日志中保持单行。
+///
+/// AI 流式内容（thinking/text）常携带换行，直接作为 tracing 字段会打断日志行；
+/// 本函数用于日志字段清洗，不改动原始内容。
+pub fn single_line(s: &str) -> String {
+    s.replace('\r', "\\r").replace('\n', "\\n")
+}
+
 /// 提取完整拼音（"微信" → "weixin"，"WeChat" → "wechat"）。
 pub fn pinyin_full(s: &str) -> String {
     let mut result = String::new();
@@ -150,6 +158,20 @@ mod tests {
         let s = String::from("测试 String 类型");
         assert_eq!(s.truncate_chars(4), "测试 S...");
         assert_eq!(s.take_chars(2), "测试");
+    }
+
+    // ── single_line 测试 ─────────────────────────────────────────────
+
+    #[test]
+    fn single_line_escapes_breaks() {
+        assert_eq!(single_line("line1\nline2"), "line1\\nline2");
+        assert_eq!(single_line("a\r\nb"), "a\\r\\nb");
+    }
+
+    #[test]
+    fn single_line_preserves_plain_text() {
+        assert_eq!(single_line("中文没有换行"), "中文没有换行");
+        assert_eq!(single_line(""), "");
     }
 
     #[test]

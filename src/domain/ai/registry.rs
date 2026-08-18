@@ -261,6 +261,34 @@ impl AIProviderRegistry {
         Ok((provider, actual_tier))
     }
 
+    /// 按 (provider_id, model_id) 显式解析到 ready provider——对话窗口命名模型自选。
+    ///
+    /// 与 `resolve(tier)` 一样返回可用的 `Arc<dyn AIProvider>`；不做档位降级，
+    /// provider/model 不存在或已禁用则返回 `NotConfigured`。
+    pub fn resolve_explicit(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<Arc<dyn AIProvider>, AIError> {
+        let config = self.config.read().expect("config lock poisoned");
+        let provider_entry = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id && p.enabled)
+            .ok_or(AIError::NotConfigured)?;
+        let model_entry = provider_entry
+            .models
+            .iter()
+            .find(|m| m.id == model_id && m.enabled)
+            .ok_or(AIError::NotConfigured)?;
+        let epoch = self.secret_epoch.load(Ordering::SeqCst);
+        let fp = compute_provider_fingerprint(provider_entry, epoch);
+        let key = (provider_entry.id.clone(), model_entry.id.clone(), fp);
+
+        let pool = self.providers.read().expect("providers lock poisoned");
+        pool.get(&key).cloned().ok_or(AIError::NotConfigured)
+    }
+
     /// 当前池内 provider 数量——诊断/测试用。
     #[allow(dead_code)]
     pub fn size(&self) -> usize {

@@ -313,7 +313,7 @@ pub async fn chat_prompt(
     let handle = chat
         .prompt(
             conversation_id.clone(),
-            message,
+            message.clone(),
             group_system_prompt,
             kind,
             target.clone(),
@@ -351,6 +351,18 @@ pub async fn chat_prompt(
     let conv_id = handle.conversation_id.clone();
     let mut chunks = handle.chunks;
 
+    // 0.21.16：入参日志——请求边界记录用户消息（debug 级，完整消息 + token 估算），
+    // 配合「流式请求结束」与「完整输入输出」日志形成对话排查闭环。
+    tracing::debug!(
+        request_id,
+        conversation_id = %conv_id,
+        target_window = %target,
+        kind = ?kind,
+        message = %message,
+        message_tokens = crate::domain::ai::memory::estimate_tokens(&message),
+        "chat_prompt: 收到对话请求"
+    );
+
     // spawn 后台 task 消费 chunk 流并定向 emit 到目标窗口
     let app_clone = app.clone();
     let conv_id_clone = conv_id.clone();
@@ -361,11 +373,18 @@ pub async fn chat_prompt(
         crate::domain::ai::chat_service::ConversationKind::Persistent
     );
     tokio::spawn(async move {
+        let task_started = std::time::Instant::now();
+        // 完整输入输出日志的截断保护（防超长回复刷爆单行日志）
+        const LOG_TEXT_MAX: usize = 100_000;
         let mut done_sent = false;
         // 0.21.16: 实况落库累计 + 节流
         let mut streamed_text = String::new();
         let mut streamed_thinking = String::new();
         let mut last_flush = std::time::Instant::now();
+        // 0.21.16: 结束日志汇总字段——tool 次数 / Done 的 token 用量
+        let mut tool_count = 0usize;
+        let mut last_input_tokens = 0u32;
+        let mut last_output_tokens = 0u32;
         let chat =
             app_clone.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>();
         const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -395,6 +414,22 @@ pub async fn chat_prompt(
                     .await;
                     last_flush = std::time::Instant::now();
                 }
+            }
+
+            // 0.21.16: 汇总字段采集——Done 的 token 用量 / tool 调用次数
+            match &chunk {
+                crate::domain::ai::agent_provider::ChatStreamChunk::Done {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
+                    last_input_tokens = *input_tokens;
+                    last_output_tokens = *output_tokens;
+                }
+                crate::domain::ai::agent_provider::ChatStreamChunk::ToolCall { .. } => {
+                    tool_count += 1;
+                }
+                _ => {}
             }
 
             let is_done = matches!(
@@ -428,6 +463,29 @@ pub async fn chat_prompt(
         {
             persist_live_assistant(chat, &conv_id_clone, &streamed_text, &streamed_thinking).await;
         }
+        // 0.21.16: 流式结束日志——里程碑（info）+ 完整输入输出（debug），
+        // 与入参日志（chat_prompt: 收到对话请求）组成对话排查闭环。
+        let elapsed_ms = task_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            request_id,
+            conversation_id = %conv_id_clone,
+            elapsed_ms,
+            done_sent,
+            text_chars = streamed_text.chars().count(),
+            thinking_chars = streamed_thinking.chars().count(),
+            tool_count,
+            input_tokens = last_input_tokens,
+            output_tokens = last_output_tokens,
+            "chat_prompt: 流式请求结束"
+        );
+        tracing::debug!(
+            request_id,
+            conversation_id = %conv_id_clone,
+            message = %message,
+            text = %streamed_text.chars().take(LOG_TEXT_MAX).collect::<String>(),
+            thinking = %streamed_thinking.chars().take(LOG_TEXT_MAX).collect::<String>(),
+            "chat_prompt: 完整输入输出"
+        );
         // 0.18.0: 不在 Done 瞬间清零 MAIN_WINDOW_AI_ACTIVE——用户可能还在看结果，
         // 看门狗会立即恢复失焦隐藏导致关窗。改为：
         // (1) exitAiMode 路径清零（前端 ESC / 切回搜索时调 clear_main_ai_active）

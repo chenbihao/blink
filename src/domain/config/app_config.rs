@@ -62,8 +62,9 @@ pub struct AppConfig {
     pub disabled_chord_actions: Vec<String>,
     #[serde(default = "default_window_opacity")]
     pub window_opacity: f64,
+    /// AI HTTP 请求/响应体日志开关（0.21.16，默认关）。
     #[serde(default = "default_false")]
-    pub ai_verbose_log: bool,
+    pub ai_http_body_log: bool,
     #[serde(default = "default_true")]
     pub first_run: bool,
 }
@@ -96,7 +97,7 @@ impl Default for AppConfig {
             chord_bindings: crate::domain::chord::ChordBindings::default(),
             disabled_chord_actions: Vec::new(),
             window_opacity: default_window_opacity(),
-            ai_verbose_log: false,
+            ai_http_body_log: false,
             first_run: true,
         }
     }
@@ -386,7 +387,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         auto_start: appearance.auto_start,
         log_level: appearance.log_level,
         window_opacity: appearance.window_opacity,
-        ai_verbose_log: appearance.ai_verbose_log,
+        ai_http_body_log: appearance.ai_http_body_log,
         first_run: appearance.first_run,
         surface_takeover_enabled: search.surface_takeover_enabled,
         search_history_enabled: search.search_history_enabled,
@@ -427,7 +428,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
             auto_start: config.auto_start,
             log_level: config.log_level.clone(),
             window_opacity: config.window_opacity,
-            ai_verbose_log: config.ai_verbose_log,
+            ai_http_body_log: config.ai_http_body_log,
             first_run: config.first_run,
         },
     )
@@ -529,9 +530,9 @@ pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), St
     save_config(pool, &config).await
 }
 
-pub async fn update_ai_verbose_log(pool: &SqlitePool, verbose: bool) -> Result<(), String> {
+pub async fn update_ai_http_body_log(pool: &SqlitePool, enabled: bool) -> Result<(), String> {
     let mut config = get_config(pool).await;
-    config.ai_verbose_log = verbose;
+    config.ai_http_body_log = enabled;
     save_config(pool, &config).await
 }
 

@@ -592,16 +592,125 @@ mod tests {
         runtime.stop().await;
     }
 
+    // ── 端到端热更新（真实 rmcp client 连接）──────────────────────────────
+
+    /// 测试用 mock Capability（默认 policy = Safe + 允许全部来源，含 MCP）。
+    struct MockCap(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::domain::capability::Capability for MockCap {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn schema(&self) -> crate::domain::capability::CapabilitySchema {
+            crate::domain::capability::CapabilitySchema::empty(self.0, "mock for e2e")
+        }
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::domain::capability::InvokeContext<'_>,
+        ) -> Result<crate::domain::capability::CapabilityResult, crate::domain::capability::CapabilityError>
+        {
+            Ok(crate::domain::capability::CapabilityResult::Done {
+                summary: "mock".into(),
+            })
+        }
+    }
+
+    /// 端到端验证：暴露清单变化后，已连接的 MCP client `tools/list` 返回新工具数。
+    ///
+    /// 覆盖用户观察到的"切换 MCP 暴露后重新请求工具数量不变"——服务端快照必须实时反映变化。
+    #[tokio::test]
+    async fn hot_update_reflected_in_live_client() {
+        let registry = Arc::new(CapabilityRegistry::new());
+        registry
+            .register(Arc::new(MockCap("cap_a")) as Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
+        registry
+            .register(Arc::new(MockCap("cap_b")) as Arc<dyn crate::domain::capability::Capability>)
+            .unwrap();
+
+        let runtime = create_test_runtime_with_registry(registry).await;
+        let port = 43220;
+        runtime
+            .apply_config(&McpServerModeConfig {
+                enabled: true,
+                port,
+                exposed_capabilities: vec!["cap_a".into()],
+                exposure_seeded: true,
+            })
+            .await;
+        assert_eq!(runtime.snapshot().await.status, McpServerStatus::Listening);
+
+        // 连接真实 rmcp client（Streamable HTTP）
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+        let transport = rmcp::transport::StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!(
+                "http://127.0.0.1:{port}/mcp"
+            )),
+        );
+        let client_info = rmcp::model::ClientInfo::default();
+        use rmcp::ServiceExt;
+        let service = client_info
+            .serve(transport)
+            .await
+            .expect("MCP 握手失败");
+
+        let tools_1 = service.peer().list_all_tools().await.expect("拉取工具失败");
+        assert_eq!(tools_1.len(), 1, "初始应只有 cap_a");
+        assert_eq!(tools_1[0].name, "cap_a");
+
+        // 热更新暴露清单：新增 cap_b（同端口，listener 不重启）
+        runtime
+            .apply_config(&McpServerModeConfig {
+                enabled: true,
+                port,
+                exposed_capabilities: vec!["cap_a".into(), "cap_b".into()],
+                exposure_seeded: true,
+            })
+            .await;
+
+        let tools_2 = service
+            .peer()
+            .list_all_tools()
+            .await
+            .expect("重新拉取工具失败");
+        assert_eq!(tools_2.len(), 2, "热更新后应暴露 cap_a + cap_b");
+        let names: Vec<String> = tools_2.iter().map(|t| t.name.to_string()).collect();
+        assert!(names.iter().any(|n| n == "cap_a"));
+        assert!(names.iter().any(|n| n == "cap_b"));
+
+        // 再撤回 cap_b——工具数应回落到 1
+        runtime
+            .apply_config(&McpServerModeConfig {
+                enabled: true,
+                port,
+                exposed_capabilities: vec!["cap_a".into()],
+                exposure_seeded: true,
+            })
+            .await;
+        let tools_3 = service.peer().list_all_tools().await.expect("再次拉取失败");
+        assert_eq!(tools_3.len(), 1, "撤回后应只剩 cap_a");
+
+        runtime.stop().await;
+    }
+
     // ── 测试辅助 ───────────────────────────────────────────────────────────
 
     /// 创建测试用 runtime（最小 fake env）。
     async fn create_test_runtime() -> McpServerRuntime {
+        create_test_runtime_with_registry(Arc::new(CapabilityRegistry::new())).await
+    }
+
+    /// 创建测试用 runtime，可注入预注册能力的 registry（供端到端热更新测试用）。
+    async fn create_test_runtime_with_registry(
+        cap_registry: Arc<CapabilityRegistry>,
+    ) -> McpServerRuntime {
         // 使用 in-memory SQLite pool
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("failed to create in-memory db");
 
-        let cap_registry = Arc::new(CapabilityRegistry::new());
 
         // 最小 fake DomainEnv——不注入任何 service
         struct FakeEnv;

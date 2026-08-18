@@ -49,16 +49,16 @@ function initLogSettings() {
         });
     }
 
-    // AI 详细日志开关（0.12.6）
-    const aiVerboseCheckbox = document.getElementById("ai-verbose-log");
-    if (aiVerboseCheckbox) {
-        aiVerboseCheckbox.addEventListener("change", async (e) => {
+    // AI HTTP 请求/响应体日志开关（0.21.16）
+    const httpBodyCheckbox = document.getElementById("ai-http-body-log");
+    if (httpBodyCheckbox) {
+        httpBodyCheckbox.addEventListener("change", async (e) => {
             try {
-                await saveConfig("ai_verbose_log", e.target.checked);
+                await saveConfig("ai_http_body_log", e.target.checked);
                 const currentConfig = getCurrentConfig();
-                if (currentConfig) currentConfig.ai_verbose_log = e.target.checked;
+                if (currentConfig) currentConfig.ai_http_body_log = e.target.checked;
             } catch (err) {
-                console.error("update_ai_verbose_log failed:", err);
+                console.error("update_ai_http_body_log failed:", err);
             }
         });
     }
@@ -80,21 +80,21 @@ function initLogSettings() {
     });
 
     loadLogInfo();
-    loadAiVerboseState();
+    loadHttpBodyLogState();
 }
 
 /**
- * 加载 AI 详细日志开关初始状态
+ * 加载 AI HTTP 请求/响应体日志开关初始状态
  */
-async function loadAiVerboseState() {
+async function loadHttpBodyLogState() {
     try {
         const config = await invoke("get_config");
-        const checkbox = document.getElementById("ai-verbose-log");
-        if (checkbox && config?.ai_verbose_log != null) {
-            checkbox.checked = config.ai_verbose_log;
+        const checkbox = document.getElementById("ai-http-body-log");
+        if (checkbox && config?.ai_http_body_log != null) {
+            checkbox.checked = config.ai_http_body_log;
         }
     } catch (e) {
-        console.error("loadAiVerboseState failed:", e);
+        console.error("loadHttpBodyLogState failed:", e);
     }
 }
 

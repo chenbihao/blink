@@ -2,7 +2,7 @@
  * MCP Server Tab 模块
  *
  * 管理 Blink 作为 MCP server 的配置：总开关 + 端口 + 简明状态 + 目录深链。
- * 详细能力管理已迁移至"能力与操作"页。
+ * 详细能力管理已迁移至"能力管理"页。
  *
  * 后端 commands:
  * - get_mcp_server_config — 读取配置（enabled + port + exposed_capabilities）
@@ -73,7 +73,7 @@ async function updateCapabilitiesSummary() {
 function initCapabilitiesLink() {
     document.addEventListener("click", (e) => {
         if (e.target && e.target.id === "mcp-view-capabilities") {
-            // 跳转到能力与操作页，过滤到 MCP 出口列并滚动到控制区
+            // 跳转到能力管理页，过滤到 MCP 出口列并滚动到控制区
             document.querySelector('[data-tab="capabilities"]')?.click();
             setTimeout(() => {
                 const exitFilter = document.getElementById("filter-exit");

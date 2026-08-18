@@ -20,13 +20,13 @@
             <span class="group-title" data-i18n="sidebar.group.functionality">功能</span>
             <button class="tab" data-i18n="tab.engines" data-tab="engines">引擎</button>
             <button class="tab" data-i18n="tab.plugins" data-tab="plugins">插件</button>
-            <button class="tab" data-i18n="tab.capabilities" data-tab="capabilities">能力与操作</button>
+            <button class="tab" data-i18n="tab.capabilities" data-tab="capabilities">能力管理</button>
         </div>
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.ai">AI</span>
             <button class="tab" data-i18n="tab.ai_providers" data-tab="ai-providers">AI 供应商</button>
             <button class="tab" data-i18n="tab.ai_chat" data-tab="ai-chat">AI 对话设置</button>
-            <button class="tab" data-i18n="tab.ai_extensions" data-tab="ai-extensions">AI 扩展</button>
+            <button class="tab" data-i18n="tab.ai_extensions" data-tab="ai-extensions">AI 工具与技能</button>
         </div>
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.interaction">感知与交互</span>
@@ -448,9 +448,9 @@
             </div>
         </div>
 
-        <!-- 能力与操作（0.21.9 单表矩阵：行=功能，列=本地/AI/MCP 三出口开关，组头按列批量） -->
+        <!-- 能力管理（0.21.9 单表矩阵：行=功能，列=本地/AI/MCP 三出口开关，组头按列批量） -->
         <div class="panel" id="capabilities">
-            <h2 data-i18n="panel.capabilities">能力与操作</h2>
+            <h2 data-i18n="panel.capabilities">能力管理</h2>
             <p class="panel-lede" data-i18n="capabilities.lede">Blink 的所有功能，按组分类展示本地绑定、AI 与 MCP
                 三出口状态。</p>
 
@@ -496,13 +496,10 @@
         <!-- ══ AI 供应商（0.9.1 Phase 6 → 0.13.x 拆分）══════════════════════════ -->
         <div class="panel" id="ai-providers">
             <h2 data-i18n="panel.ai_providers">AI 供应商</h2>
-            <p class="panel-lede" data-i18n="ai.lede">打字未命中规则时，AI 尝试理解并推荐操作。密钥存 Windows Credential
+            <p class="panel-lede" data-i18n="ai.lede">管理 AI 供应商与模型，以及主窗口的 AI 提示。密钥存 Windows Credential
                 Manager，SQLite 只存别名。</p>
 
-            <!-- 顶部 banner（有档位降级/未指派时显示，由 JS 控制） -->
-            <div class="ai-banner hidden" id="ai-tier-banner"></div>
-
-            <!-- 总开关 ─────────────────────────────────────────── -->
+            <!-- 主窗口 AI 提示 ───────────────────────────────────── -->
             <div class="extension-card">
                 <div class="extension-header">
                     <div class="extension-icon">
@@ -511,9 +508,9 @@
                         </svg>
                     </div>
                     <div class="extension-info">
-                        <h3 data-i18n="ai.enabled.label">启用 AI 意图辅助</h3>
-                        <p class="extension-desc" data-i18n="ai.enabled.hint">关闭时任何输入都不走
-                            AI（默认关，即使配了供应商也需手动打开）</p>
+                        <h3 data-i18n="ai.enabled.label">启用 AI 提示</h3>
+                        <p class="extension-desc" data-i18n="ai.enabled.hint">本地规则未给出提示时，显示“按 Tab 问
+                            AI”；不会自动调用 AI。</p>
                     </div>
                     <label class="switch">
                         <input id="ai-enabled" type="checkbox"/>
@@ -522,53 +519,7 @@
                 </div>
                 <div class="extension-body">
                     <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.allow_routing.label">允许自动路由<span
-                                class="field-hint-icon" data-i18n-title="ai.allow_routing.hint">ⓘ</span></label>
-                        <label class="switch switch-sm">
-                            <input id="ai-allow-routing" type="checkbox"/>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 供应商列表 ─────────────────────────────────────── -->
-            <div class="section-label" data-i18n="ai.providers.section">供应商 · 密钥独立存于系统凭据管理器</div>
-            <div id="ai-providers-container">
-                <!-- 由 JS 动态渲染：卡片列表 + 「+ 添加供应商」按钮 -->
-            </div>
-
-            <!-- 三档指派 ─────────────────────────────────────── -->
-            <div class="section-label" data-i18n="ai.tiers.section">档位指派 · 未指派档位自动降级到主档</div>
-            <div class="extension-card">
-                <div class="extension-body">
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.tier.ultra_light">超轻档<span class="field-hint-icon"
-                                                                                                 data-i18n-title="ai.tier.ultra_light.hint">ⓘ</span></label>
-                        <select class="input-wide" id="ai-tier-ultra-light"></select>
-                    </div>
-                    <div class="ai-tier-degrade" id="ai-tier-ultra-light-degrade"></div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.tier.light">轻量档<span class="field-hint-icon"
-                                                                                           data-i18n-title="ai.tier.light.hint">ⓘ</span></label>
-                        <select class="input-wide" id="ai-tier-light"></select>
-                    </div>
-                    <div class="ai-tier-degrade" id="ai-tier-light-degrade"></div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.tier.main">主档<span class="field-hint-icon"
-                                                                                        data-i18n-title="ai.tier.main.hint">ⓘ</span></label>
-                        <select class="input-wide" id="ai-tier-main"></select>
-                    </div>
-                    <div class="ai-tier-degrade" id="ai-tier-main-degrade"></div>
-                </div>
-            </div>
-
-            <!-- 未命中过滤四筛子 ─────────────────────────────── -->
-            <div class="section-label" data-i18n="ai.filter.section">未命中过滤 · 什么样的输入才走 AI</div>
-            <div class="extension-card">
-                <div class="extension-body">
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.filter.min_query_len">最短长度<span
+                        <label class="setting-label" data-i18n="ai.filter.min_query_len">最短输入长度<span
                                 class="field-hint-icon" data-i18n-title="ai.filter.min_query_len.hint">ⓘ</span></label>
                         <div class="number-input-wrapper">
                             <input id="ai-min-query-len" max="20" min="1" type="number" value="4"/>
@@ -582,33 +533,13 @@
                             </div>
                         </div>
                     </div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.filter.require_whitespace">必须包含空格<span
-                                class="field-hint-icon"
-                                data-i18n-title="ai.filter.require_whitespace.hint">ⓘ</span></label>
-                        <label class="switch switch-sm">
-                            <input id="ai-require-whitespace" type="checkbox"/>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.filter.exclude_pure_numeric">排除纯数字<span
-                                class="field-hint-icon"
-                                data-i18n-title="ai.filter.exclude_pure_numeric.hint">ⓘ</span></label>
-                        <label class="switch switch-sm">
-                            <input id="ai-exclude-pure-numeric" type="checkbox"/>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.filter.respect_awareness_url_path">剪贴板 URL/路径不走
-                            AI<span class="field-hint-icon" data-i18n-title="ai.filter.respect_awareness_url_path.hint">ⓘ</span></label>
-                        <label class="switch switch-sm">
-                            <input id="ai-respect-awareness-url-path" type="checkbox"/>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
                 </div>
+            </div>
+
+            <!-- 供应商列表 ─────────────────────────────────────── -->
+            <div class="section-label" data-i18n="ai.providers.section">供应商 · 密钥独立存于系统凭据管理器</div>
+            <div id="ai-providers-container">
+                <!-- 由 JS 动态渲染：卡片列表 + 「+ 添加供应商」按钮 -->
             </div>
         </div>
 
@@ -617,33 +548,37 @@
             <h2 data-i18n="panel.ai_chat">AI 对话设置</h2>
             <p class="panel-lede" data-i18n="ai.chat.lede">管理对话行为、自动标题、上下文与本对话的较早内容召回。</p>
 
-            <!-- 对话 ─────────────────────────────────────── -->
+            <!-- 模型与档位 ─────────────────────────────────────── -->
             <div class="extension-card">
                 <div class="extension-header">
                     <div class="extension-icon">
                         <svg aria-hidden="true" class="icon">
-                            <use href="#icon-message-square"/>
+                            <use href="#icon-sparkles"/>
                         </svg>
                     </div>
                     <div class="extension-info">
-                        <h3 data-i18n="ai.chat.section">对话</h3>
-                        <p class="extension-desc" data-i18n="ai.chat.section.desc">对话窗口行为配置</p>
+                        <h3 data-i18n="ai.tiers.card">模型与档位</h3>
+                        <p class="extension-desc" data-i18n="ai.tiers.card.desc">档位不可用时会向更高档降级；主窗口模型是对档位的消费策略</p>
                     </div>
                 </div>
                 <div class="extension-body">
-                    <div class="setting-row ai-agent-mode-row">
-                        <label class="setting-label" data-i18n="ai.chat.agent_mode.label">对话能力模式<span
-                                class="field-hint-icon" data-i18n-title="ai.chat.agent_mode.hint">ⓘ</span></label>
-                        <div aria-label="对话能力模式" class="ai-agent-mode-segmented" data-i18n-aria-label="ai.chat.agent_mode.label"
-                             role="radiogroup">
-                            <label><input name="ai-agent-mode" type="radio" value="full"/><span
-                                    data-i18n="ai.chat.agent_mode.full" data-i18n-title="ai.chat.agent_mode.full.hint">全能力</span></label>
-                            <label><input name="ai-agent-mode" type="radio" value="main_chat_only"/><span
-                                    data-i18n="ai.chat.agent_mode.main_only"
-                                    data-i18n-title="ai.chat.agent_mode.main_only.hint">仅主窗口纯对话</span></label>
-                            <label><input name="ai-agent-mode" type="radio" value="pure_chat"/><span
-                                    data-i18n="ai.chat.agent_mode.pure" data-i18n-title="ai.chat.agent_mode.pure.hint">全部纯对话</span></label>
-                        </div>
+                    <!-- 档位降级/未指派 banner（由 JS 控制） -->
+                    <div class="ai-banner hidden" id="ai-tier-banner"></div>
+
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="ai.tier.ultra_light">超轻档<span class="field-hint-icon"
+                                                                                                 data-i18n-title="ai.tier.ultra_light.hint">ⓘ</span></label>
+                        <select class="input-wide" id="ai-tier-ultra-light"></select>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="ai.tier.light">轻量档<span class="field-hint-icon"
+                                                                                           data-i18n-title="ai.tier.light.hint">ⓘ</span></label>
+                        <select class="input-wide" id="ai-tier-light"></select>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="ai.tier.main">主档<span class="field-hint-icon"
+                                                                                        data-i18n-title="ai.tier.main.hint">ⓘ</span></label>
+                        <select class="input-wide" id="ai-tier-main"></select>
                     </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.chat.main_model.label">主窗口 AI 模型<span
@@ -659,12 +594,57 @@
                         <select class="input-wide" id="ai-main-window-custom-model"></select>
                     </div>
                     <div class="setting-row">
+                        <label class="setting-label" data-i18n="ai.chat.title_model.label">对话窗口命名模型<span
+                                class="field-hint-icon" data-i18n-title="ai.chat.title_model.hint">ⓘ</span></label>
+                        <select class="input-wide" id="ai-chat-title-model-mode">
+                            <option data-i18n="ai.chat.title_model.ultra_light" value="ultra_light">超轻档（默认）</option>
+                            <option data-i18n="ai.chat.title_model.light" value="light">轻量档</option>
+                            <option data-i18n="ai.chat.title_model.main" value="main">主档</option>
+                            <option data-i18n="ai.chat.title_model.custom" value="custom">自选模型</option>
+                        </select>
+                    </div>
+                    <div class="setting-row hidden" id="ai-chat-title-custom-model-row">
+                        <label class="setting-label" data-i18n="ai.chat.title_model.custom_label">自选模型</label>
+                        <select class="input-wide" id="ai-chat-title-custom-model"></select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 对话 ─────────────────────────────────────── -->
+            <div class="extension-card">
+                <div class="extension-header">
+                    <div class="extension-icon">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-message-square"/>
+                        </svg>
+                    </div>
+                    <div class="extension-info">
+                        <h3 data-i18n="ai.chat.section">对话</h3>
+                        <p class="extension-desc" data-i18n="ai.chat.section.desc">对话窗口行为配置</p>
+                    </div>
+                </div>
+                <div class="extension-body">
+                    <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.chat.auto_title.label">LLM 自动命名<span
                                 class="field-hint-icon" data-i18n-title="ai.chat.auto_title.hint">ⓘ</span></label>
                         <label class="switch switch-sm">
                             <input id="ai-chat-auto-title" type="checkbox"/>
                             <span class="slider"></span>
                         </label>
+                    </div>
+                    <div class="setting-row ai-agent-mode-row">
+                        <label class="setting-label" data-i18n="ai.chat.agent_mode.label">对话能力模式<span
+                                class="field-hint-icon" data-i18n-title="ai.chat.agent_mode.hint">ⓘ</span></label>
+                        <div aria-label="对话能力模式" class="ai-agent-mode-segmented" data-i18n-aria-label="ai.chat.agent_mode.label"
+                             role="radiogroup">
+                            <label><input name="ai-agent-mode" type="radio" value="full"/><span
+                                    data-i18n="ai.chat.agent_mode.full" data-i18n-title="ai.chat.agent_mode.full.hint">全能力</span></label>
+                            <label><input name="ai-agent-mode" type="radio" value="main_chat_only"/><span
+                                    data-i18n="ai.chat.agent_mode.main_only"
+                                    data-i18n-title="ai.chat.agent_mode.main_only.hint">仅主窗口纯对话</span></label>
+                            <label><input name="ai-agent-mode" type="radio" value="pure_chat"/><span
+                                    data-i18n="ai.chat.agent_mode.pure" data-i18n-title="ai.chat.agent_mode.pure.hint">全部纯对话</span></label>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -820,9 +800,9 @@
 
         </div>
 
-        <!-- ══ AI 扩展：Skill / MCP client / 工具授权 / MCP Server ════════ -->
+        <!-- ══ AI 工具与技能：Skill / MCP client / 工具授权 / MCP Server ════════ -->
         <div class="panel" id="ai-extensions">
-            <h2 data-i18n="panel.ai_extensions">AI 扩展</h2>
+            <h2 data-i18n="panel.ai_extensions">AI 工具与技能</h2>
             <p class="panel-lede" data-i18n="ai.extensions.lede">管理教 AI 如何工作的 Skill、供 Blink AI
                 使用的外部工具、工具授权，以及面向外部应用的 Blink MCP Server。</p>
 
@@ -1335,7 +1315,7 @@
 
         <!-- Toast:配完 Provider 后询问是否启用总开关（§5.3）─────────────── -->
         <div class="ai-toast hidden" id="ai-enable-toast">
-            <span class="ai-toast-text" data-i18n="ai.saved.toast">供应商已保存。启用 AI 意图辅助？</span>
+            <span class="ai-toast-text" data-i18n="ai.saved.toast">供应商已保存。启用 AI 提示？</span>
             <button class="btn-primary btn-small" data-i18n="ai.saved.enable" id="ai-toast-enable">启用</button>
             <button class="btn-small" data-i18n="ai.saved.later" id="ai-toast-later">稍后</button>
         </div>
@@ -2195,10 +2175,10 @@
             </div>
 
             <div class="setting-row">
-                <label class="setting-label" data-i18n="log.ai_verbose.label">AI 对话完全打印日志<span
-                        class="field-hint-icon" data-i18n-title="log.ai_verbose.hint">ⓘ</span></label>
+                <label class="setting-label" data-i18n="log.http_body.label">AI HTTP 请求/响应体日志<span
+                        class="field-hint-icon" data-i18n-title="log.http_body.hint">ⓘ</span></label>
                 <label class="checkbox">
-                    <input id="ai-verbose-log" type="checkbox">
+                    <input id="ai-http-body-log" type="checkbox">
                     <span class="checkmark"></span>
                 </label>
             </div>

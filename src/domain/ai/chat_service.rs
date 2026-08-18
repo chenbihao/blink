@@ -937,6 +937,11 @@ impl ChatService {
             )
         };
 
+        // 0.21.16: 启动前计算摘要字段——preamble 随后 move 进后台 task，
+        // 在此先取 token 估算值供「prompt 已启动」日志使用。
+        let preamble_tokens = estimate_tokens(&preamble);
+        let skill_count = triggered_skills.len();
+
         if !triggered_skills.is_empty() {
             tracing::info!(
                 request_id,
@@ -1054,6 +1059,12 @@ impl ChatService {
         tracing::info!(
             request_id,
             conversation_id = %conversation_id,
+            kind = ?kind,
+            target_window = %target_window,
+            message_tokens = estimate_tokens(&message),
+            message_chars = message.chars().count(),
+            preamble_tokens,
+            skill_count,
             "ChatService: prompt 已启动"
         );
         Ok(ChatPromptHandle {

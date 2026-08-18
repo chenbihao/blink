@@ -7,7 +7,7 @@
  *
  * 拆分模块（均在 ./ai/ 子目录下）：
  * - ai/state.js      — 共享状态 + 常量 + helpers + saveAIConfig + fetchAvailableModelsFor
- * - ai/tier.js       — tier 路由（renderAITierSelects / renderAITierDegrade / renderAITierBanner）
+ * - ai/tier.js       — tier 路由（renderAITierSelects / renderAITierBanner）
  * - ai/model-edit.js — 模型编辑 modal + 拉取 popover（openAIModelEditModal / bindAIModelEditModalEvents 等）
  * - ai/skill.js      — Skill 列表 + 导入面板 + CLI 识别（loadSkillList / showSkillImportPanel 等）
  * - ai/provider.js   — 供应商渲染 + modal + preset 目录 + 模型多选（renderAIProviders / openAIProviderModal 等）

@@ -59,11 +59,11 @@ pub async fn set_config(
             crate::infra::utils::logging::update_level(&level);
             tracing::info!(%level, "日志级别已切换");
         }
-        "ai_verbose_log" => {
-            let verbose: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_ai_verbose_log(pool, verbose).await?;
-            crate::infra::utils::logging::update_ai_verbose_log(verbose);
-            tracing::info!(verbose, "AI 详细日志开关已切换");
+        "ai_http_body_log" => {
+            let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_ai_http_body_log(pool, enabled).await?;
+            crate::infra::utils::http_log::set_body_log_enabled(enabled);
+            tracing::info!(enabled, "AI HTTP 请求/响应体日志开关已切换");
         }
         "auto_start" => {
             let auto_start: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
