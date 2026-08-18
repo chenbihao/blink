@@ -318,6 +318,9 @@ pub trait SurfacePort: Send + Sync {
     /// 隐藏主窗口（GUI starter Capability 打开新窗口前调用）。
     fn hide_main_window(&self, reason: &str);
 
+    /// 重新显示主窗口（chord 触发失败时恢复被 `hide_main_window` 隐藏的主窗）。
+    fn show_main_window(&self) -> Result<(), String>;
+
     /// 退出应用进程。
     fn exit_app(&self);
 }
@@ -694,6 +697,9 @@ mod tests {
                 Ok(())
             }
             fn hide_main_window(&self, _reason: &str) {}
+            fn show_main_window(&self) -> Result<(), String> {
+                Ok(())
+            }
             fn exit_app(&self) {}
         }
         let caps = RuntimeCapabilities {

@@ -556,6 +556,10 @@ impl SurfacePort for TauriDomainEnv {
         crate::infra::platform::window::hide(&self.app, reason);
     }
 
+    fn show_main_window(&self) -> Result<(), String> {
+        crate::infra::platform::window::show_main_window(&self.app)
+    }
+
     fn exit_app(&self) {
         self.app.exit(0);
     }

@@ -345,8 +345,8 @@ pub struct ScreenshotConfig {
     #[serde(default)]
     pub ocr_debug: bool,
     /// 控件级智能吸附（0.18.2：UIA 逐层 BFS 收集控件矩形，悬停吸附到子控件）。
-    /// 默认关闭——默认体验与现状逐字节一致。
-    #[serde(default)]
+    /// 默认开启；关闭后截图拖拽仅窗口级吸附。
+    #[serde(default = "default_true")]
     pub control_snap: bool,
     /// 控件吸附 BFS 最大深度（0.18.2：控制 UIA 树遍历几层子元素）。
     /// 默认 15。范围 1-20。值越大能识别更深层的控件，但 COM 调用更多、超时风险更大。
@@ -360,6 +360,10 @@ pub struct ScreenshotConfig {
     /// 默认 50。范围 1-200。跳过微型控件以节省 COM 调用预算。
     #[serde(default = "default_control_snap_min_size")]
     pub control_snap_min_size: u32,
+    /// 窗口边缘吸附半径（0.21.x：控件级吸附开启时，鼠标落在窗口四边 R px 内吸附整个窗口，
+    /// 保证在控件铺满窗口时仍能选到整窗）。默认 10。范围 1-200。
+    #[serde(default = "default_window_edge_snap")]
+    pub window_edge_snap: u32,
 }
 
 impl Default for ScreenshotConfig {
@@ -368,10 +372,11 @@ impl Default for ScreenshotConfig {
             prewarm_ocr: true,
             scroll_debug: false,
             ocr_debug: false,
-            control_snap: false,
+            control_snap: true,
             control_snap_depth: default_control_snap_depth(),
             control_snap_deadline_ms: default_control_snap_deadline_ms(),
             control_snap_min_size: default_control_snap_min_size(),
+            window_edge_snap: default_window_edge_snap(),
         }
     }
 }
@@ -440,6 +445,10 @@ fn default_control_snap_deadline_ms() -> u32 {
 
 fn default_control_snap_min_size() -> u32 {
     50
+}
+
+fn default_window_edge_snap() -> u32 {
+    10
 }
 
 fn default_autosuggest_min_score() -> f64 {

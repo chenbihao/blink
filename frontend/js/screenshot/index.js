@@ -45,7 +45,7 @@ import {
     norm,
     pointInRect
 } from "./ss-utils.js";
-import {cssRectToBitmap, getRenderScale, shouldStartFreeSelection, syncRenderScale} from "./ss-selection-geometry.js";
+import {cssRectToBitmap, getRenderScale, pointNearWindowEdge, shouldStartFreeSelection, syncRenderScale} from "./ss-selection-geometry.js";
 import {
     cancelDrawFinalSelectionRaf,
     cancelDrawSelectionRaf,
@@ -726,9 +726,15 @@ function loadEditorConfig(includeCaptureHints) {
                 ss.screenshotConfig.controlSnapDepth = val.controlSnapDepth ?? 15;
                 ss.screenshotConfig.controlSnapDeadlineMs = val.controlSnapDeadlineMs ?? 1000;
                 ss.screenshotConfig.controlSnapMinSize = val.controlSnapMinSize ?? 50;
+                ss.screenshotConfig.windowEdgeSnap = val.windowEdgeSnap ?? 10;
                 refreshDiagnosticsVisibility();
                 refreshOcrDiagnosticsVisibility();
                 // 0.18.x：配置加载完成，触发统一门控
+                configReady = true;
+                maybeStartCaptureHints();
+            } else {
+                // 配置分片未写入（全新安装/从未保存过截图配置）：沿用 ss-state 默认值，
+                // 同样要放行门控，否则窗口列表 / 控件吸附永远不会加载
                 configReady = true;
                 maybeStartCaptureHints();
             }
@@ -1234,13 +1240,27 @@ canvas.addEventListener('mousemove', (e) => {
         // 第一步：窗口 hit-test（仅更新内部索引，不显示 hint）
         updateWindowHover(e.offsetX, e.offsetY, {skipShowHint: true});
         const winRect = getHoveredWindowRect();
-        setControlTarget(winRect?.hwnd ?? null);
-        // 第二步：控件优先 hit-test
-        if (updateControlHover(e.offsetX, e.offsetY)) {
-            // 控件命中：隐藏窗口 hint（可能上次鼠标在窗口空白处时显示了）
-            hideWindowHintIfVisible();
+        // 0.21.x：控件级吸附受 control_snap 开关门控——此前仅预热被门控、运行期恒启用，导致开关无效
+        if (ss.screenshotConfig.controlSnap) {
+            // 窗口边缘吸附：鼠标落在窗口四边 R px 内 → 清控件态、只显示窗口级蓝色框，
+            // 保证控件铺满窗口时仍能选到整窗
+            const edgePx = ss.screenshotConfig.windowEdgeSnap || 0;
+            if (winRect?.hwnd && edgePx > 0 && pointNearWindowEdge(e.offsetX, e.offsetY, winRect, edgePx)) {
+                setControlTarget(null);
+                showWindowHintIfPending();
+            } else {
+                setControlTarget(winRect?.hwnd ?? null);
+                // 第二步：控件优先 hit-test
+                if (updateControlHover(e.offsetX, e.offsetY)) {
+                    // 控件命中：隐藏窗口 hint（可能上次鼠标在窗口空白处时显示了）
+                    hideWindowHintIfVisible();
+                } else {
+                    // 控件未命中或尚未加载：显示窗口级蓝色预选框
+                    showWindowHintIfPending();
+                }
+            }
         } else {
-            // 控件未命中或尚未加载：显示窗口级蓝色预选框
+            // 控件级吸附关闭：仅显示窗口级蓝色预选框
             showWindowHintIfPending();
         }
         updatePixelMagnifier(e.offsetX, e.offsetY);

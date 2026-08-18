@@ -391,13 +391,15 @@ export const zh = {
     "chord.screenshot.ocr_debug.label": "OCR 诊断",
     "chord.screenshot.ocr_debug.hint": "开启后截图工具栏 OCR 按钮旁显示诊断按钮，可查看已安装语言、中文包状态、选区测试结果；排查中文识别不出的问题用",
     "chord.screenshot.control_snap.label": "控件级吸附",
-    "chord.screenshot.control_snap.hint": "截图选区拖拽时悬停吸附到按钮/输入框等子控件（UIA，可调超时/深度/最小尺寸）；默认关闭，开启后琥珀色虚线框=控件吸附，蓝色虚线框=窗口吸附",
+    "chord.screenshot.control_snap.hint": "截图选区拖拽时悬停吸附到按钮/输入框等子控件（UIA，可调超时/深度/最小尺寸）；默认开启，关闭后仅窗口级吸附。琥珀色虚线框=控件吸附，蓝色虚线框=窗口吸附",
     "chord.screenshot.control_snap_depth.label": "遍历深度",
     "chord.screenshot.control_snap_depth.hint": "UIA 树从窗口往下探几层子控件。1=只看顶层，15=能到 WPF/Office/Electron 的深层控件，20=最深。值越大能识别越多控件但 COM 调用更多、超时风险更大",
     "chord.screenshot.control_snap_deadline.label": "超时",
     "chord.screenshot.control_snap_deadline.hint": "UIA 收集的超时时间（毫秒）。异步收集不阻塞截图操作，超时后返回已收集的部分结果。1000ms=1 秒，值越大能识别越多应用但 hints 到达越晚",
     "chord.screenshot.control_snap_min_size.label": "最小识别尺寸",
     "chord.screenshot.control_snap_min_size.hint": "控件宽或高低于此值（物理像素）则完全跳过：既不识别为预选区也不展开其子控件。200px=只识别大控件，50px=中等以上控件，1px=几乎都识别",
+    "chord.screenshot.window_edge_snap.label": "窗口边缘吸附",
+    "chord.screenshot.window_edge_snap.hint": "控件级吸附开启时，鼠标落在窗口四边此距离（屏幕像素，高分屏自动放大为更大物理区域）内直接吸附整个窗口，保证在控件铺满窗口时也能选到整窗。1px≈紧贴边缘，10px=默认，200px=几乎整个窗口都是整窗吸附区",
 
 // ── OCR 诊断面板（0.17.5，仅 ?ocrDebug=1 显示）──
     "screenshot.ocr_diag.title": "OCR 诊断",

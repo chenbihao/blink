@@ -47,10 +47,11 @@ export const ss = {
         prewarmOcr: true,
         scrollDebug: false,
         ocrDebug: false,
-        controlSnap: false,
+        controlSnap: true,
         controlSnapDepth: 15,
         controlSnapDeadlineMs: 1000,
-        controlSnapMinSize: 50
+        controlSnapMinSize: 50,
+        windowEdgeSnap: 10
     },
     selectionRevision: 0,
     translationRevision: 0,

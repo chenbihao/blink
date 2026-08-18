@@ -425,6 +425,7 @@ pub async fn set_config(
             tracing::info!(
                 prewarm_ocr = sc.prewarm_ocr,
                 scroll_debug = sc.scroll_debug,
+                window_edge_snap = sc.window_edge_snap,
                 "截图配置已更新"
             );
         }

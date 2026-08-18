@@ -390,13 +390,15 @@ export const en = {
     "chord.screenshot.ocr_debug.label": "OCR Diagnostics",
     "chord.screenshot.ocr_debug.hint": "When enabled, a diagnostic button appears next to the OCR button in the screenshot toolbar; shows installed languages, Chinese pack status, and selection test results",
     "chord.screenshot.control_snap.label": "Control-level Snap",
-    "chord.screenshot.control_snap.hint": "Snap selection to child controls (buttons, inputs) when hovering during screenshot drag (UIA, adjustable timeout/depth/min-size); off by default. Amber dashed = control snap, blue dashed = window snap",
+    "chord.screenshot.control_snap.hint": "Snap selection to child controls (buttons, inputs) when hovering during screenshot drag (UIA, adjustable timeout/depth/min-size); on by default, disable for window-level snapping only. Amber dashed = control snap, blue dashed = window snap",
     "chord.screenshot.control_snap_depth.label": "Traversal Depth",
     "chord.screenshot.control_snap_depth.hint": "How many levels deep to traverse the UIA tree from the window. 1=top-level only, 15=reaches deep controls in WPF/Office/Electron, 20=deepest. Higher values find more controls but increase COM calls and timeout risk",
     "chord.screenshot.control_snap_deadline.label": "Timeout",
     "chord.screenshot.control_snap_deadline.hint": "UIA collection timeout in milliseconds. Async collection does not block screenshot operations; returns partial results on timeout. 1000ms=1s. Higher values find more apps but hints arrive later",
     "chord.screenshot.control_snap_min_size.label": "Min Control Size",
     "chord.screenshot.control_snap_min_size.hint": "Controls with width or height below this value (physical pixels) are completely skipped: not collected as snap targets and not expanded. 200px=only large controls, 50px=medium+ controls, 1px=almost all",
+    "chord.screenshot.window_edge_snap.label": "Window Edge Snap",
+    "chord.screenshot.window_edge_snap.hint": "With control-level snap on, hovering within this distance (screen px; auto-scaled larger on HiDPI) of any of the window's 4 edges snaps to the whole window, so you can always select the full window even when it is packed with controls. 1px=tight to edge, 10px=default, 200px=nearly the whole window is a window-snap zone",
 
 // ── OCR diagnostics panel (0.17.5, only shown with ?ocrDebug=1) ──
     "screenshot.ocr_diag.title": "OCR Diagnostics",

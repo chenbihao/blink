@@ -190,7 +190,7 @@ const MANAGER_MIN_H: f64 = 400.0;
 
 /// 设置窗口
 const SETTINGS_W: f64 = 960.0;
-const SETTINGS_H: f64 = 680.0;
+const SETTINGS_H: f64 = 710.0;
 const SETTINGS_MIN_W: f64 = 760.0;
 const SETTINGS_MIN_H: f64 = 520.0;
 
@@ -3476,7 +3476,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
 ///
 /// - 已存在：从 iconic 恢复 → 读当前 outer_size 保留用户 resize 过的尺寸 →
 ///   `place_at_physical` 一次原子挪到光标屏中心（避开 WM_DPICHANGED 抢跑）。
-/// - 首次创建：build 完立刻按目标屏 DPI 把 960×680 CSS → 物理尺寸，挪过去。
+/// - 首次创建：build 完立刻按目标屏 DPI 把 960×720 CSS → 物理尺寸，挪过去。
 ///
 /// 语义：用户在哪块屏发起动作（右键 → 打开设置 / 托盘 → 设置），设置就出现在
 /// 那块屏。跟 Universal Action Layer 的直觉一致，也省了跨屏找窗口的动作。
@@ -3526,7 +3526,7 @@ pub fn open_settings(app: &AppHandle) {
         let cur_phys = w.outer_size().unwrap_or_else(|_| {
             tauri::PhysicalSize::new(
                 (960.0 * cur_scale).round() as u32,
-                (680.0 * cur_scale).round() as u32,
+                (720.0 * cur_scale).round() as u32,
             )
         });
         let css_w = (cur_phys.width as f64) / cur_scale;

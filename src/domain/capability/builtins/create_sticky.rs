@@ -25,9 +25,21 @@ use crate::domain::capability::{
 
 /// `create_sticky` — 创建便签并显示桌面窗口。
 ///
-/// 入参：`{ content: String, x?: int, y?: int, w?: int, h?: int }`。
+/// 入参：`{ content?: String, x?: int, y?: int, w?: int, h?: int }`。
+/// `content` 缺省/空白时创建空白便签（Alt+S 空输入框仍唤起空白便签）。
 /// 出参：`Done { summary: "已创建便签 {id}" }`。
 pub struct CreateSticky;
+
+/// 解析 `content` 参数：缺省 / `null` / 空或纯空白 → 空白便签；类型错误 → `InvalidArgs`。
+fn parse_content(args: &Value) -> Result<String, CapabilityError> {
+    match args.get("content") {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.trim().to_string()),
+        Some(_) => Err(CapabilityError::InvalidArgs {
+            detail: "create_sticky: content 参数类型错误，应为字符串".into(),
+        }),
+    }
+}
 
 #[async_trait::async_trait]
 impl Capability for CreateSticky {
@@ -38,13 +50,13 @@ impl Capability for CreateSticky {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "create_sticky".into(),
-            description: "创建一个桌面便签并显示窗口。可指定位置(x/y)和尺寸(w/h)，均为物理像素坐标；不指定则居中显示。返回创建的便签id。".into(),
+            description: "创建一个桌面便签并显示窗口。可指定位置(x/y)和尺寸(w/h)，均为物理像素坐标；不指定则居中显示。content 可省略或为空，此时创建空白便签。返回创建的便签id。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "便签正文内容"
+                        "description": "便签正文内容，省略或为空时创建空白便签"
                     },
                     "x": {
                         "type": "integer",
@@ -63,7 +75,7 @@ impl Capability for CreateSticky {
                         "description": "窗口高度（物理像素），不指定则用默认值 320"
                     }
                 },
-                "required": ["content"]
+                "required": []
             }),
             sensitive: true, // 写便签内容属隐私
         }
@@ -92,14 +104,7 @@ impl Capability for CreateSticky {
             });
         }
 
-        let content = args
-            .get("content")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "create_sticky: 缺少 content 参数或内容为空".into(),
-            })?;
+        let content = parse_content(&args)?;
 
         let x = args.get("x").and_then(Value::as_i64).map(|v| v as i32);
         let y = args.get("y").and_then(Value::as_i64).map(|v| v as i32);
@@ -108,7 +113,7 @@ impl Capability for CreateSticky {
 
         let sticky_id = ctx
             .env
-            .create_sticky_and_show(content, x, y, w, h)
+            .create_sticky_and_show(&content, x, y, w, h)
             .await
             .map_err(|e| CapabilityError::Internal {
                 detail: format!("创建便签失败: {e}"),
@@ -140,7 +145,28 @@ mod tests {
         let s = CreateSticky.schema();
         assert_eq!(s.name, "create_sticky");
         assert_eq!(s.parameters["properties"]["content"]["type"], "string");
-        assert_eq!(s.parameters["required"][0], "content");
+        // content 可省略（空白便签合法，Alt+S 空输入框仍唤起）
+        let required = s.parameters["required"].as_array().unwrap();
+        assert!(!required.iter().any(|v| v == "content"));
+    }
+
+    #[test]
+    fn parse_content_blank_is_allowed() {
+        assert_eq!(parse_content(&json!({})).unwrap(), "");
+        assert_eq!(parse_content(&json!({"content": null})).unwrap(), "");
+        assert_eq!(parse_content(&json!({"content": ""})).unwrap(), "");
+        assert_eq!(parse_content(&json!({"content": "   "})).unwrap(), "");
+    }
+
+    #[test]
+    fn parse_content_trims_and_keeps_text() {
+        assert_eq!(parse_content(&json!({"content": "  hello  "})).unwrap(), "hello");
+    }
+
+    #[test]
+    fn parse_content_rejects_wrong_type() {
+        let e = parse_content(&json!({"content": 42})).unwrap_err();
+        assert!(matches!(e, CapabilityError::InvalidArgs { .. }));
     }
 
     #[test]

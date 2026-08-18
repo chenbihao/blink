@@ -335,6 +335,23 @@ export function pointInRect(px, py, rect) {
 }
 
 /**
+ * 点是否落在矩形某条边的内边缘 px 范围内（0.21.x 窗口边缘吸附用）。
+ *
+ * 调用方保证点已在矩形内（窗口 hit-test 命中）；据此只需判断点到四条边的距离。
+ * 任一边距 < px 即命中——保证控件铺满窗口时仍能通过贴边悬停选到整窗。
+ * rect 为 CSS 坐标矩形 {x, y, w, h}；px <= 0 视为关闭。
+ */
+export function pointNearWindowEdge(px, py, rect, edgePx) {
+    if (!rect || edgePx <= 0) return false;
+    return (
+        px - rect.x < edgePx ||
+        rect.x + rect.w - px < edgePx ||
+        py - rect.y < edgePx ||
+        rect.y + rect.h - py < edgePx
+    );
+}
+
+/**
  * 两点距离（CSS 像素）
  */
 export function distanceCss(x1, y1, x2, y2) {

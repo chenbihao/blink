@@ -25,6 +25,7 @@ import {
     monitorDprAtScreen,
     overlayDpr,
     pointInRect,
+    pointNearWindowEdge,
     rectBitmapToScreen,
     rectScreenToBitmap,
     rgbToHsl,
@@ -370,6 +371,23 @@ function testPointInRect() {
     assertFalse(pointInRect(301, 120, rect), '点在右边外（排他边界）');
 }
 
+function testPointNearWindowEdge() {
+    console.log('\n=== 窗口边缘吸附（内边缘 px 内） ===');
+    const rect = {x: 100, y: 100, w: 200, h: 150};
+    // 四条边内 10px 内命中
+    assertTrue(pointNearWindowEdge(102, 120, rect, 10), '左边缘内');
+    assertTrue(pointNearWindowEdge(298, 120, rect, 10), '右边缘内');
+    assertTrue(pointNearWindowEdge(150, 102, rect, 10), '上边缘内');
+    assertTrue(pointNearWindowEdge(150, 248, rect, 10), '下边缘内');
+    // 中心区域不命中
+    assertFalse(pointNearWindowEdge(200, 175, rect, 10), '中心不命中');
+    // 边距恰好等于 px 视为未命中（严格小于）
+    assertFalse(pointNearWindowEdge(110, 120, rect, 10), '边距等于 px 不命中');
+    // px <= 0 关闭
+    assertFalse(pointNearWindowEdge(102, 120, rect, 0), 'px=0 关闭');
+    assertFalse(pointNearWindowEdge(102, 120, null, 10), '无矩形不命中');
+}
+
 function testDistanceCss() {
     console.log('\n=== CSS 距离计算 ===');
     assertFloatEqual(distanceCss(0, 0, 3, 4), 5, '距离 (0,0) → (3,4) = 5');
@@ -426,6 +444,7 @@ function runAllTests() {
         testCrossDpiClamp();
         testCssSizeToPhysicalDeprecated();
         testPointInRect();
+        testPointNearWindowEdge();
         testDistanceCss();
         testFormatSelectionInfo();
         testFormatColor();

@@ -77,10 +77,11 @@ async function loadChordActions() {
             scrollDebug: sc?.scrollDebug === true,
             ocrDebug: sc?.ocrDebug === true,
             controlSnap: sc?.controlSnap === true,
+            windowEdgeSnap: sc?.windowEdgeSnap ?? 10,
         };
     } catch (e) {
         console.warn("load screenshot config failed:", e);
-        screenshotCfg = {prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: false};
+        screenshotCfg = {prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: true, windowEdgeSnap: 10};
     }
 
     // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
@@ -221,10 +222,11 @@ function renderScreenshotDetail(cfg) {
         prewarmOcr: true,
         scrollDebug: false,
         ocrDebug: false,
-        controlSnap: false,
+        controlSnap: true,
         controlSnapDepth: 15,
         controlSnapDeadlineMs: 1000,
-        controlSnapMinSize: 50
+        controlSnapMinSize: 50,
+        windowEdgeSnap: 10,
     };
     return `<div class="chord-screenshot-detail">
 <div class="chord-field">
@@ -286,8 +288,17 @@ function renderScreenshotDetail(cfg) {
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap_min_size.hint"))}">ⓘ</span>
 </label>
 <div class="chord-field-control">
-<input type="range" class="screenshot-field" data-field="control_snap_min_size" min="1" max="200" step="2" value="${cfg.controlSnapMinSize ?? 50}" />
+<input type="range" class="screenshot-field" data-field="control_snap_min_size" min="1" max="200" step="1" value="${cfg.controlSnapMinSize ?? 50}" />
 <span class="range-value" data-for="control_snap_min_size">${cfg.controlSnapMinSize ?? 50}px</span>
+</div>
+</div>
+<div class="chord-field control-snap-params" style="${cfg.controlSnap === true ? "" : "display:none"}">
+<label class="setting-label chord-field-label">${t("chord.screenshot.window_edge_snap.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.window_edge_snap.hint"))}">ⓘ</span>
+</label>
+<div class="chord-field-control">
+<input type="range" class="screenshot-field" data-field="window_edge_snap" min="1" max="200" step="1" value="${cfg.windowEdgeSnap ?? 10}" />
+<span class="range-value" data-for="window_edge_snap">${cfg.windowEdgeSnap ?? 10}px</span>
 </div>
 </div>
 </div>`;
@@ -435,7 +446,7 @@ function bindRowEvents(container) {
                 if (display) {
                     let suffix = "";
                     if (field === "control_snap_deadline_ms") suffix = "ms";
-                    else if (field === "control_snap_min_size") suffix = "px";
+                    else if (field === "control_snap_min_size" || field === "window_edge_snap") suffix = "px";
                     display.textContent = slider.value + suffix;
                 }
             });
@@ -566,6 +577,7 @@ async function saveScreenshotDetail(container) {
         const controlSnapDepth = parseInt(detail.querySelector('[data-field="control_snap_depth"]')?.value, 10) || 15;
         const controlSnapDeadlineMs = parseInt(detail.querySelector('[data-field="control_snap_deadline_ms"]')?.value, 10) || 1000;
         const controlSnapMinSize = parseInt(detail.querySelector('[data-field="control_snap_min_size"]')?.value, 10) || 50;
+        const windowEdgeSnap = parseInt(detail.querySelector('[data-field="window_edge_snap"]')?.value, 10) || 10;
         await saveConfig("screenshot_config", {
             prewarmOcr,
             scrollDebug,
@@ -573,7 +585,8 @@ async function saveScreenshotDetail(container) {
             controlSnap,
             controlSnapDepth,
             controlSnapDeadlineMs,
-            controlSnapMinSize
+            controlSnapMinSize,
+            windowEdgeSnap
         });
     } catch (e) {
         console.error("save screenshot detail failed:", e);
