@@ -669,7 +669,11 @@ impl ChatService {
             // MCP server 拉 tool（过滤 disabled_tools），与内置 Capability/Action 并列。
             // 0.21.5: 只包装 AI allowlist 中的 Capability（用户授权 + policy 允许 AI）。
             // allowlist 已在 cache_key 构造前加载（ai_allowlist），此处复用。
-            let tools: Vec<Box<dyn rig_core::tool::ToolDyn>> = if plan.includes_extensions() {
+            // 0.42: build_agent_tools 返回 (DynamicTools, McpToolBatch)
+            let (dynamic_tools, mcp_tools): (
+                Vec<rig_agent::tool::DynamicTool>,
+                Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+            ) = if plan.includes_extensions() {
                 let external_tools = self.mcp_client.collect_tools().await;
                 build_agent_tools(
                     self.capability_registry.clone(),
@@ -683,7 +687,7 @@ impl ChatService {
                 )
             } else {
                 tracing::debug!("ChatService: 纯对话模式，Agent tool schema 为空");
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             // 0.17.6: 按 kind 选撞 memory——Persistent 用 SQLite，Ephemeral 用进程内。
             // 0.13.1: context_limit 注入仅对 Persistent 有意义（Ephemeral 不做压缩）。
@@ -703,8 +707,15 @@ impl ChatService {
                 ConversationKind::Ephemeral => self.ephemeral_memory.clone(),
             };
             let provider = Arc::new(
-                AgentProvider::new(&resolved.provider, &resolved.model, tools, preamble, memory)
-                    .await?,
+                AgentProvider::new(
+                    &resolved.provider,
+                    &resolved.model,
+                    dynamic_tools,
+                    mcp_tools,
+                    preamble,
+                    memory,
+                )
+                .await?,
             );
 
             // 构造期间配置可能已更新。只提交仍对应当前 key 的实例。
@@ -881,6 +892,7 @@ impl ChatService {
         group_system_prompt: Option<String>,
         kind: ConversationKind,
         target_window: String,
+        thinking_enabled: bool,
     ) -> Result<ChatPromptHandle, ChatError> {
         let _start_guard = self.start_gate.lock().await;
         if let Some(active) = self.requests.status() {
@@ -1018,7 +1030,12 @@ impl ChatService {
                     //
                     // 当前发送干净的用户消息给 agent：
                     provider
-                        .stream_prompt(&conversation_for_task, &effective_message, chunk_tx)
+                        .stream_prompt(
+                            &conversation_for_task,
+                            &effective_message,
+                            chunk_tx,
+                            thinking_enabled,
+                        )
                         .await;
                 }
                 Err(error) => {

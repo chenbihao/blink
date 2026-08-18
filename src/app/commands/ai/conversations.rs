@@ -231,11 +231,13 @@ pub async fn generate_conversation_title(
                 role: Role::System,
                 content: system_prompt.to_string(),
                 tool_call_id: None,
+                tool_name: None,
             },
             ChatMessage {
                 role: Role::User,
                 content: user_content,
                 tool_call_id: None,
+                tool_name: None,
             },
         ],
         tools: Vec::new(),

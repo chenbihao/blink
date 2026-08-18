@@ -39,7 +39,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::completion::message::{AssistantContent, Reasoning, Text, UserContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
@@ -318,6 +317,13 @@ pub struct SqliteConversationMemory {
     /// 正常跑完时 `append` 据此删除部分回复行、用 rig 的最终完整消息替换；
     /// 中断/崩溃时该行保留在 DB，让用户下次进入能看到断在哪。
     live_turns: RwLock<HashMap<String, i64>>,
+    /// 「发出即保存」预写的当前 user（conversation_id -> user 文本）。
+    ///
+    /// 预写保证中断/失败时用户消息已落库；但 rig 的 `stream_prompt` 会先把
+    /// 记忆 load 出来再**追加一次**当前 prompt——若 load 也带上这条预写 user，
+    /// 请求上下文里同一 user 就会出现两次（模型看到"用户询问了我两次"）。
+    /// `load` 据此丢弃尾部匹配的预写 user；`append` 完成本轮后清除标记。
+    pending_users: RwLock<HashMap<String, String>>,
 }
 
 impl SqliteConversationMemory {
@@ -334,6 +340,7 @@ impl SqliteConversationMemory {
             pool,
             config,
             live_turns: RwLock::new(HashMap::new()),
+            pending_users: RwLock::new(HashMap::new()),
         }
     }
 
@@ -388,9 +395,21 @@ impl SqliteConversationMemory {
 
         let mut messages = Vec::with_capacity(rows.len());
         for (_role, content) in rows {
-            let msg: Message =
-                serde_json::from_str(&content).map_err(|e| MemoryError::Backend(Box::from(e)))?;
-            messages.push(msg);
+            match serde_json::from_str::<Message>(&content) {
+                Ok(msg) => messages.push(msg),
+                Err(e) => {
+                    // 0.42: rig 0.39 历史消息格式不兼容（字段结构变化）。
+                    // 不删数据、不 panic——跳过损坏行，让用户继续使用对话。
+                    // 打 warn 日志供排查，后续可加迁移逻辑。
+                    tracing::warn!(
+                        error = %e,
+                        role = %_role,
+                        content_len = content.len(),
+                        "load_inner: 消息反序列化失败，跳过（可能为旧版格式）"
+                    );
+                    continue;
+                }
+            }
         }
 
         let mut dropped_count = 0usize;
@@ -485,6 +504,24 @@ impl SqliteConversationMemory {
         // drop cfg guard before returning
         drop(cfg);
 
+        // 0.21.16 修复：丢弃「发出即保存」预写的当前 user——rig 会把当前 prompt
+        // 再追加一次，load 若带上这条预写 user，请求上下文里同一 user 就重复了。
+        // 放在返回前丢弃，保证：FTS 召回 query 仍基于当前 user（它是最新消息）、
+        // token-aware 裁剪把当前 user 计入预算（rig 会加回来，预算不能偏松）。
+        // 仅当尾部 user 文本与 pending 标记一致才丢（防误伤历史里真实的同文 user）。
+        if let Some(pending) = self
+            .pending_users
+            .read()
+            .await
+            .get(conversation_id)
+            .cloned()
+            && let Some(last) = messages.last()
+            && matches!(last, Message::User { .. })
+            && extract_message_text(last) == pending
+        {
+            messages.pop();
+        }
+
         Ok(MemoryLoadResult {
             messages,
             dropped_count,
@@ -535,11 +572,17 @@ impl SqliteConversationMemory {
             && role == "user"
             && Self::user_text_matches(&content, user_msg)
         {
+            // 已预写过（如上一轮中断残留）：同样标记为 pending，让 load 丢弃
+            // 这条将被 rig 追加的 user，避免请求上下文重复。
+            self.pending_users
+                .write()
+                .await
+                .insert(conversation_id.to_string(), user_msg.to_string());
             return Ok(());
         }
 
         let msg = Message::User {
-            content: OneOrMany::one(UserContent::Text(Text::new(user_msg))),
+            content: vec![UserContent::Text(Text::new(user_msg))],
         };
         let title: String = user_msg.chars().take(TITLE_MAX_CHARS).collect();
         crate::infra::data::conversations::create_conversation(
@@ -556,6 +599,11 @@ impl SqliteConversationMemory {
         )
         .await?;
         crate::infra::data::conversations::touch_conversation(&pool, conversation_id).await?;
+        // 标记本 user 为「待 rig 追加」——load 时丢弃尾部匹配项，避免请求上下文重复
+        self.pending_users
+            .write()
+            .await
+            .insert(conversation_id.to_string(), user_msg.to_string());
         Ok(())
     }
 
@@ -607,10 +655,7 @@ impl SqliteConversationMemory {
         if !text.is_empty() {
             content.push(AssistantContent::Text(Text::new(text)));
         }
-        Message::Assistant {
-            id: None,
-            content: OneOrMany::many(content).expect("实况消息至少含一个内容块"),
-        }
+        Message::Assistant { id: None, content }
     }
 
     /// 判断序列化消息的文本是否与预期 user 文本一致（去重用）。
@@ -815,6 +860,9 @@ impl ConversationMemory for SqliteConversationMemory {
                 .map_err(|e| MemoryError::Backend(Box::from(e)))?;
             }
 
+            // 本轮完成：清掉 pending 标记——此后该 user 是普通历史消息，load 不再丢弃
+            self.pending_users.write().await.remove(conversation_id);
+
             // 更新 last_active_at
             crate::infra::data::conversations::touch_conversation(&pool, conversation_id)
                 .await
@@ -833,6 +881,7 @@ impl ConversationMemory for SqliteConversationMemory {
             crate::infra::data::conversations::clear_messages(&pool, conversation_id)
                 .await
                 .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            self.pending_users.write().await.remove(conversation_id);
             Ok(())
         })
     }
@@ -935,7 +984,6 @@ impl ConversationMemory for EphemeralConversationMemory {
 mod tests {
     use super::*;
     use rig_core::completion::message::Text;
-    use rig_core::one_or_many::OneOrMany;
 
     async fn setup_pool() -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:")
@@ -949,17 +997,76 @@ mod tests {
 
     fn user_msg(text: &str) -> Message {
         Message::User {
-            content: OneOrMany::one(UserContent::Text(Text::new(text))),
+            content: vec![UserContent::Text(Text::new(text))],
         }
     }
 
     fn assistant_msg(text: &str) -> Message {
         Message::Assistant {
             id: None,
-            content: OneOrMany::one(rig_core::completion::message::AssistantContent::Text(
+            content: vec![rig_core::completion::message::AssistantContent::Text(
                 Text::new(text),
-            )),
+            )],
         }
+    }
+
+    // ── 回归：发出即保存预写 user 不污染请求上下文，落库仍完整（0.21.16 bug）───────
+
+    /// 预写 → load 丢弃预写 user（rig 会追加一次 prompt）→ append 清除标记 →
+    /// 再次 load 恢复完整历史（预写 user 已是一轮普通历史）。
+    #[tokio::test]
+    async fn prewrite_user_skipped_in_load_then_restored_after_append() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool);
+
+        // 1. 发出即保存：预写当前 user → pending 标记 + DB 写入
+        mem.persist_user_message("c1", "hello").await.unwrap();
+        // 2. load：应丢弃预写 user（rig 会把 prompt 追加一次）
+        let loaded = mem.load("c1").await.unwrap();
+        assert!(
+            loaded.is_empty(),
+            "load 不应带出预写 user（避免与 rig 追加的 prompt 重复）: {loaded:?}"
+        );
+
+        // 3. 完成：rig append [user, assistant] → 跳过预写 user，补写 assistant，清标记
+        mem.append("c1", vec![user_msg("hello"), assistant_msg("hi")])
+            .await
+            .unwrap();
+        // 4. load：标记已清，预写 user 作为普通历史出现
+        let loaded = mem.load("c1").await.unwrap();
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert_eq!(
+            texts,
+            vec!["hello".to_string(), "hi".to_string()],
+            "append 后 DB 应完整（user + assistant）: {texts:?}"
+        );
+
+        // 5. 第二轮：预写 world → load 只丢 world，hello/hi 仍在历史
+        mem.persist_user_message("c1", "world").await.unwrap();
+        let loaded = mem.load("c1").await.unwrap();
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert_eq!(
+            texts,
+            vec!["hello".to_string(), "hi".to_string()],
+            "第二轮 load 应丢 world、保留首轮历史: {texts:?}"
+        );
+
+        // 6. 第二轮完成 → 历史四段完整
+        mem.append("c1", vec![user_msg("world"), assistant_msg("world reply")])
+            .await
+            .unwrap();
+        let loaded = mem.load("c1").await.unwrap();
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "hello".to_string(),
+                "hi".to_string(),
+                "world".to_string(),
+                "world reply".to_string()
+            ],
+            "第二轮完成后 DB 应四段完整: {texts:?}"
+        );
     }
 
     // ── 原有测试（0.12.3）──────────────────────────────────────────────────────
@@ -1031,8 +1138,8 @@ mod tests {
 
         // 最近 20 条是 msg 10 ~ msg 29
         let first = match &loaded[0] {
-            Message::User { content } => match &content.first() {
-                UserContent::Text(t) => t.text.clone(),
+            Message::User { content } => match content.first() {
+                Some(UserContent::Text(t)) => t.text.clone(),
                 _ => String::new(),
             },
             _ => String::new(),
@@ -1089,12 +1196,12 @@ mod tests {
         // 写入带 tool_call 的 assistant 消息
         let assistant_with_tool = Message::Assistant {
             id: None,
-            content: OneOrMany::one(rig_core::completion::message::AssistantContent::ToolCall(
-                ToolCall::new(
-                    "call_1".to_string(),
+            content: vec![rig_core::completion::message::AssistantContent::ToolCall(
+                ToolCall::from_wire(
+                    "call_1",
                     ToolFunction::new("search".to_string(), serde_json::json!({"q": "test"})),
                 ),
-            )),
+            )],
         };
 
         mem.append("c1", vec![user_msg("search for test"), assistant_with_tool])
@@ -1106,8 +1213,8 @@ mod tests {
 
         // 第二条是 assistant 消息，应包含 ToolCall
         match &loaded[1] {
-            Message::Assistant { content, .. } => match &content.first() {
-                rig_core::completion::message::AssistantContent::ToolCall(tc) => {
+            Message::Assistant { content, .. } => match content.first() {
+                Some(rig_core::completion::message::AssistantContent::ToolCall(tc)) => {
                     assert_eq!(tc.function.name, "search");
                 }
                 _ => panic!("expected ToolCall in assistant message"),
@@ -1137,11 +1244,12 @@ mod tests {
         // 构造 ToolResult 消息（rig 存为 User + UserContent::ToolResult）
         fn tool_result_msg(id: &str) -> Message {
             Message::User {
-                content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                    id: id.to_string(),
-                    call_id: None,
-                    content: OneOrMany::one(ToolResultContent::text("ok")),
-                })),
+                content: vec![UserContent::ToolResult(ToolResult {
+                    call: rig_core::message::ToolCallId::new_or_mint(id),
+                    provider: None,
+                    name: id.to_string(),
+                    content: vec![ToolResultContent::text("ok")],
+                })],
             }
         }
 
@@ -1186,12 +1294,12 @@ mod tests {
         {
             let tool_call = Message::Assistant {
                 id: None,
-                content: OneOrMany::one(rig_core::completion::message::AssistantContent::ToolCall(
-                    ToolCall::new(
-                        "call_1".to_string(),
+                content: vec![rig_core::completion::message::AssistantContent::ToolCall(
+                    ToolCall::from_wire(
+                        "call_1",
                         ToolFunction::new("search".to_string(), serde_json::json!({})),
                     ),
-                )),
+                )],
             };
             let mut msgs = vec![tool_call.clone(), tool_result_msg("r1")];
             drop_leading_orphan_tool_results(&mut msgs);
@@ -1754,5 +1862,79 @@ mod tests {
 
         // SQLite 中同 ID 对话仍为空
         assert!(sqlite_mem.load("ephemeral-1").await.unwrap().is_empty());
+    }
+
+    // ── 0.42: 旧版消息格式安全加载测试 ──────────────────────────────────
+
+    /// 验证 `load_inner` 遇到旧版/损坏的 JSON 时跳过该行而不 panic，
+    /// 正常消息仍能加载。
+    #[tokio::test]
+    async fn load_inner_skips_legacy_messages_without_panicking() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool.clone());
+
+        // 手动写入一条正常消息 + 一条旧格式（无法反序列化为 rig Message 的 JSON）
+        let good_msg = Message::User {
+            content: vec![UserContent::Text(Text::new("hello"))],
+        };
+        let good_json = serde_json::to_string(&good_msg).unwrap();
+        crate::infra::data::conversations::create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+        crate::infra::data::conversations::append_message(&pool, "c1", "user", &good_json)
+            .await
+            .unwrap();
+
+        // 写入一条损坏的 JSON（旧版格式）
+        crate::infra::data::conversations::append_message(
+            &pool,
+            "c1",
+            "assistant",
+            "{\"old_format\": true, \"unknown_field\": 42}",
+        )
+        .await
+        .unwrap();
+
+        // 再写入一条正常消息
+        let good_msg2 = Message::Assistant {
+            id: None,
+            content: vec![rig_core::completion::message::AssistantContent::Text(
+                Text::new("world"),
+            )],
+        };
+        let good_json2 = serde_json::to_string(&good_msg2).unwrap();
+        crate::infra::data::conversations::append_message(&pool, "c1", "assistant", &good_json2)
+            .await
+            .unwrap();
+
+        // load 应跳过损坏行，返回 2 条正常消息（而非报错）
+        let loaded = mem.load("c1").await.unwrap();
+        assert_eq!(
+            loaded.len(),
+            2,
+            "应跳过损坏行，加载 2 条正常消息，实际: {}",
+            loaded.len()
+        );
+    }
+
+    /// 验证 `load_inner` 全部消息都损坏时返回空 Vec 而非报错。
+    #[tokio::test]
+    async fn load_inner_all_corrupt_returns_empty_vec() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool.clone());
+
+        crate::infra::data::conversations::create_conversation(&pool, "c2", Some("corrupt"))
+            .await
+            .unwrap();
+        crate::infra::data::conversations::append_message(&pool, "c2", "user", "NOT_VALID_JSON{{{")
+            .await
+            .unwrap();
+
+        let loaded = mem.load("c2").await.unwrap();
+        assert!(
+            loaded.is_empty(),
+            "全部损坏时应返回空 Vec，实际: {} 条",
+            loaded.len()
+        );
     }
 }

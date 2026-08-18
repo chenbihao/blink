@@ -420,7 +420,11 @@ pub fn image_editor_apply_to_pin(
             .inner()
             .clone();
         let (screen_x, screen_y) = env.show_pin_image(png_data, None, None)?;
-        tracing::info!(screen_x, screen_y, "编辑图片已重新 pin 到桌面（原 pin 窗口已关）");
+        tracing::info!(
+            screen_x,
+            screen_y,
+            "编辑图片已重新 pin 到桌面（原 pin 窗口已关）"
+        );
     }
 
     finish_image_editor_session(&app);
@@ -490,9 +494,12 @@ fn begin_and_show(
         MediaError::new("internal_error", format!("建立编辑会话失败: {e}"), false)
     })?;
 
-    if let Err(error) =
-        crate::infra::platform::window::show_image_editor_window(app, meta, source_kind, source_label)
-    {
+    if let Err(error) = crate::infra::platform::window::show_image_editor_window(
+        app,
+        meta,
+        source_kind,
+        source_label,
+    ) {
         crate::infra::platform::image_editor::end_session();
         tracing::error!(log_ctx, error = %error, "显示编辑窗口失败");
         return Err(MediaError::new(

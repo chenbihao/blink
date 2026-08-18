@@ -609,8 +609,10 @@ mod tests {
             &self,
             _args: serde_json::Value,
             _ctx: &crate::domain::capability::InvokeContext<'_>,
-        ) -> Result<crate::domain::capability::CapabilityResult, crate::domain::capability::CapabilityError>
-        {
+        ) -> Result<
+            crate::domain::capability::CapabilityResult,
+            crate::domain::capability::CapabilityError,
+        > {
             Ok(crate::domain::capability::CapabilityResult::Done {
                 summary: "mock".into(),
             })
@@ -645,16 +647,11 @@ mod tests {
         // 连接真实 rmcp client（Streamable HTTP）
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
         let transport = rmcp::transport::StreamableHttpClientTransport::from_config(
-            StreamableHttpClientTransportConfig::with_uri(format!(
-                "http://127.0.0.1:{port}/mcp"
-            )),
+            StreamableHttpClientTransportConfig::with_uri(format!("http://127.0.0.1:{port}/mcp")),
         );
         let client_info = rmcp::model::ClientInfo::default();
         use rmcp::ServiceExt;
-        let service = client_info
-            .serve(transport)
-            .await
-            .expect("MCP 握手失败");
+        let service = client_info.serve(transport).await.expect("MCP 握手失败");
 
         let tools_1 = service.peer().list_all_tools().await.expect("拉取工具失败");
         assert_eq!(tools_1.len(), 1, "初始应只有 cap_a");
@@ -710,7 +707,6 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("failed to create in-memory db");
-
 
         // 最小 fake DomainEnv——不注入任何 service
         struct FakeEnv;

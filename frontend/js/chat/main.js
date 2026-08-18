@@ -20,6 +20,7 @@ import {
     isVoiceRecording,
     setInputMode,
     setInputValue,
+    setThinkingEnabled as setComposerThinkingEnabled,
     setStreamingMode,
     showVoiceError,
     showVoiceIndicator,
@@ -86,6 +87,8 @@ async function init() {
         onStop: handleStop,
         onThinkingToggle: handleThinkingToggle,
     });
+    // 深度思考默认开启：同步状态真源与按钮初始视觉，避免首次点击语义反转。
+    setComposerThinkingEnabled(state.thinkingEnabled);
 
     // 0.19：chat prefill 投递（revision 机制防残留/防旧事件误删）
     //
@@ -267,8 +270,8 @@ async function handleSend(message, isEdit = false) {
     try {
         // 0.17.6a: 临时对话模式传 ephemeral:true
         const opts = state.ephemeralMode
-            ? {ephemeral: true, targetWindow: "chat"}
-            : {};
+            ? {ephemeral: true, targetWindow: "chat", thinkingEnabled: state.thinkingEnabled}
+            : {thinkingEnabled: state.thinkingEnabled};
         const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId, opts);
         state.setActiveRequestId(requestId);
 

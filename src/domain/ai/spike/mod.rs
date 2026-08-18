@@ -19,7 +19,6 @@
 
 #![cfg(test)]
 
-pub mod agent;
 pub mod mock_server;
 pub mod secret_hygiene;
 pub mod skeleton;

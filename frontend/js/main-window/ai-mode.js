@@ -225,12 +225,15 @@ async function sendPrompt(message) {
 
     // 滚动到最新内容
     scrollToBottom();
-    syncWindowSize();
+    // 新一轮开始（含 followup 折叠上一轮为单行摘要）用 resync 重新基准：
+    // syncWindowSize 只增不减，会让窗口残留上一轮被折叠掉的高大高度
+    resyncWindowSize();
 
     try {
         const rid = await chatPrompt(conversationId, message, {
             targetWindow: "main",
             ephemeral: true,
+            thinkingEnabled: false,
         });
         requestId = rid;
     } catch (e) {
@@ -394,12 +397,13 @@ function handleDone(chunk) {
     }
     streamRenderer = null;
 
-    // 工具行延迟清空（让用户看到最后工具的结果）
+    // 工具行延迟清空（让用户看到最后工具的结果）。
+    // requestId 判空：防止过期定时器清掉 followup 新一轮的工具行。
     setTimeout(() => {
-        if (!active) return;
+        if (!active || requestId !== null) return;
         aiToolLineEl.innerHTML = "";
-        // 工具行消失后需要同步窗口高度（窗口可能缩短）
-        syncWindowSize();
+        // 工具行消失后窗口可能缩短，用 resync 重新基准高度（syncWindowSize 只增不减）
+        resyncWindowSize();
     }, 2000);
 
     scrollToBottom();

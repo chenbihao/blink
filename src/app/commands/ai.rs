@@ -285,6 +285,7 @@ pub async fn chat_prompt(
     group_id: Option<String>,
     target_window: Option<String>,
     ephemeral: Option<bool>,
+    thinking_enabled: Option<bool>,
 ) -> Result<u64, String> {
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
@@ -317,6 +318,7 @@ pub async fn chat_prompt(
             group_system_prompt,
             kind,
             target.clone(),
+            thinking_enabled.unwrap_or(false),
         )
         .await
         .map_err(|e| match e {

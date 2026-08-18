@@ -40,11 +40,11 @@
 //! 0.9.2 第一步是一次性返回,`first_token_ms = total_ms = start.elapsed()`。
 //! 0.10 上 SSE 时改造成"首 token 到达时刻",字段语义不变——SLO 消费方零改动。
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use rig_core::OneOrMany;
 use rig_core::completion::{
     AssistantContent, CompletionError, CompletionModel as RigCompletionModel,
     CompletionRequest as RigCompletionRequest, Message as RigMessage,
@@ -55,6 +55,7 @@ use tokio::sync::mpsc;
 
 use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
+use crate::domain::ai::thinking::thinking_request_patch;
 use crate::domain::config::ai_config::{CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind};
 use crate::infra::platform::secret::SecretString;
 
@@ -80,6 +81,10 @@ pub(crate) struct RigProvider<M: RigCompletionModel> {
     /// 自定义参数——透传到 rig `additional_params`。构造时把 `Vec<CustomParam>`
     /// 折叠成一个 `serde_json::Value::Object`,请求时若非空就直接塞给 rig。
     custom_params_json: Option<serde_json::Value>,
+    /// 主窗口默认"关闭思考"补丁（0.21.16）——构造时按 provider 敲定（见
+    /// `thinking_request_patch` 的 `thinking_enabled=false` 分支）。与
+    /// `custom_params_json` 合并进 `additional_params`；用户显式配了同 key 时以用户为准。
+    thinking_off_patch: Option<serde_json::Value>,
 }
 
 impl<M: RigCompletionModel> RigProvider<M> {
@@ -87,6 +92,7 @@ impl<M: RigCompletionModel> RigProvider<M> {
     ///
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
     /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
+    /// `base_url` 仅用于按供应商判定 thinking 关闭补丁（DeepSeek vs OpenAI 兼容）。
     #[allow(dead_code)] // 0.9.2 Phase 5b 由 factory 消费
     pub(crate) fn new(
         kind: ProviderKind,
@@ -96,15 +102,20 @@ impl<M: RigCompletionModel> RigProvider<M> {
         default_temperature: Option<f32>,
         default_max_tokens: Option<u32>,
         custom_parameters: &[CustomParam],
+        base_url: Option<&str>,
     ) -> Self {
+        let model_id = model_id.into();
+        // 主窗口默认关闭思考（0.21.16）——开/关补丁同一函数，这里取 false 分支
+        let thinking_off_patch = thinking_request_patch(kind, base_url, &model_id, false);
         Self {
             kind,
-            model_id: model_id.into(),
+            model_id,
             model,
             default_timeout_ms: default_timeout_ms.unwrap_or(DEFAULT_AI_HARD_TIMEOUT_MS),
             default_temperature,
             default_max_tokens,
             custom_params_json: build_custom_params_json(custom_parameters),
+            thinking_off_patch,
         }
     }
 }
@@ -135,7 +146,6 @@ fn build_custom_params_json(params: &[CustomParam]) -> Option<serde_json::Value>
 impl<M> AIProvider for RigProvider<M>
 where
     M: RigCompletionModel + Send + Sync + 'static,
-    <M as RigCompletionModel>::Response: Send,
 {
     fn kind(&self) -> ProviderKind {
         self.kind
@@ -155,6 +165,7 @@ where
             self.default_temperature,
             self.default_max_tokens,
             self.custom_params_json.as_ref(),
+            self.thinking_off_patch.as_ref(),
         )?;
 
         let start = Instant::now();
@@ -193,6 +204,7 @@ where
             self.default_temperature,
             self.default_max_tokens,
             self.custom_params_json.as_ref(),
+            self.thinking_off_patch.as_ref(),
         )?;
 
         let start = Instant::now();
@@ -228,7 +240,7 @@ where
                     }
                     RigStreamChunk::ToolCall { tool_call: tc, .. } => {
                         tool_calls.push(ToolCall {
-                            id: tc.id.clone(),
+                            id: tc.id.to_string(),
                             name: tc.function.name.clone(),
                             arguments: tc.function.arguments.clone(),
                         });
@@ -287,10 +299,15 @@ fn build_rig_request(
     default_temperature: Option<f32>,
     default_max_tokens: Option<u32>,
     custom_params: Option<&serde_json::Value>,
+    thinking_off_patch: Option<&serde_json::Value>,
 ) -> Result<RigCompletionRequest, AIError> {
     // 抽 system → preamble;user 消息进 chat_history
     let mut preamble: Option<String> = None;
     let mut user_msgs: Vec<RigMessage> = Vec::new();
+    // 0.42: 建立 tool_call_id → tool_name 映射，供后续 Role::Tool 消息查询。
+    // 优先使用 ChatMessage::tool_name（0.42 新增）；
+    // 若缺失（旧格式历史消息），从前序 Assistant ToolCall 的 JSON content 中提取 name。
+    let mut tool_name_map: HashMap<String, String> = HashMap::new();
 
     for m in &req.messages {
         match m.role {
@@ -314,13 +331,15 @@ fn build_rig_request(
                             json.get("arguments"),
                         )
                     {
-                        let tool_call = RigToolCall::new(
+                        // 记录 tool_call_id → name 映射，供后续 Role::Tool 查询
+                        tool_name_map.insert(tc_id.clone(), name.to_string());
+                        let tool_call = RigToolCall::from_wire(
                             tc_id.clone(),
                             RigToolFunc::new(name.to_string(), arguments.clone()),
                         );
                         user_msgs.push(RigMessage::Assistant {
                             id: None,
-                            content: OneOrMany::one(AssistantContent::ToolCall(tool_call)),
+                            content: vec![AssistantContent::ToolCall(tool_call)],
                         });
                         continue;
                     }
@@ -334,15 +353,36 @@ fn build_rig_request(
             Role::Tool => {
                 // 0.11.4 Turn 2 回流:tool 结果 → rig 的 UserContent::ToolResult
                 // rig 没有独立的 Tool 消息角色,tool 结果放在 User 消息里
+                // 0.42: Message::tool_result 需要 name 参数,不能用空字符串占位——
+                // 某些供应商（如 Gemini/Anthropic）依赖 name 做配对,空字符串会导致请求失败。
+                //
+                // name 来源优先级：
+                // 1. ChatMessage::tool_name（0.42 新增,由 tool 执行回流处显式携带）
+                // 2. tool_name_map 映射（从前序 Assistant ToolCall 的 JSON content 提取）
+                // 3. 都没有 → 返回带上下文的结构化错误（不传空字符串）
                 let id = m.tool_call_id.clone().unwrap_or_default();
-                user_msgs.push(RigMessage::tool_result(id, &m.content));
+                let name = m
+                    .tool_name
+                    .clone()
+                    .or_else(|| tool_name_map.get(&id).cloned())
+                    .ok_or_else(|| {
+                        AIError::Serialization(format!(
+                            "ToolResult 缺少 tool_name（tool_call_id={id}）—— \
+                             0.42 要求 tool_result 携带真实工具名,请检查 tool 执行回流路径"
+                        ))
+                    })?;
+                user_msgs.push(RigMessage::tool_result(id, &name, &m.content));
             }
         }
     }
 
-    let chat_history = OneOrMany::many(user_msgs).map_err(|_| {
-        AIError::Serialization("CompletionRequest.messages 至少需一条 user 消息".into())
-    })?;
+    // 0.42: chat_history 是 Vec<Message>，不再需要 OneOrMany。空检查手动做。
+    if user_msgs.is_empty() {
+        return Err(AIError::Serialization(
+            "CompletionRequest.messages 至少需一条 user 消息".into(),
+        ));
+    }
+    let chat_history = user_msgs;
 
     // ToolSchema → rig::ToolDefinition(唯一 tool 类型投影)
     let tools = req.tools.iter().map(|s| s.to_rig_tool()).collect();
@@ -370,14 +410,41 @@ fn build_rig_request(
         temperature: effective_temperature,
         max_tokens: effective_max_tokens,
         tool_choice: None,
-        additional_params: custom_params.cloned(),
+        // 0.21.16: 主窗口默认关闭思考——与用户 custom_params 合并（用户显式 key 优先）
+        additional_params: merge_thinking_off_patch(custom_params, thinking_off_patch),
         output_schema: None,
+        // 0.42: 新增字段
+        record_telemetry_content: false,
     })
+}
+
+/// 把「主窗口默认关闭思考」补丁与用户 `custom_params` 合并进 `additional_params`。
+///
+/// 语义：`thinking_off_patch` 是**默认值**——用户在模型层显式配了同一顶层 key 时
+/// 以用户为准（`or_insert` 只补缺失 key），避免覆盖用户刻意的 thinking 配置。
+fn merge_thinking_off_patch(
+    custom_params: Option<&serde_json::Value>,
+    thinking_off_patch: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (custom_params, thinking_off_patch) {
+        (Some(custom), Some(off)) => {
+            let mut merged = custom.clone();
+            if let (Some(map), Some(off_map)) = (merged.as_object_mut(), off.as_object()) {
+                for (key, value) in off_map {
+                    map.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            Some(merged)
+        }
+        (Some(custom), None) => Some(custom.clone()),
+        (None, Some(off)) => Some(off.clone()),
+        (None, None) => None,
+    }
 }
 
 // ── 响应映射:rig → 我们的 ────────────────────────────────────────────────
 
-/// 把 rig `CompletionResponse<T>` 转成我们的 `CompletionResponse`。
+/// 把 rig `CompletionResponse` 转成我们的 `CompletionResponse`。
 ///
 /// **AssistantContent 处理**:
 /// - `Text(t)` → 拼进 `text`(多段用 `\n` 连接)
@@ -385,8 +452,8 @@ fn build_rig_request(
 /// - `Reasoning(_)` / `Image(_)` → **skip**(0.9.2 主窗口不消费)
 ///
 /// **首 token / 总时**:非流式一律等于 elapsed(见文件顶注)。
-pub(crate) fn map_rig_response<T>(
-    rig_resp: rig_core::completion::CompletionResponse<T>,
+pub(crate) fn map_rig_response(
+    rig_resp: rig_core::completion::CompletionResponse,
     elapsed_ms: u32,
 ) -> CompletionResponse {
     let mut texts: Vec<String> = Vec::new();
@@ -396,7 +463,7 @@ pub(crate) fn map_rig_response<T>(
         match c {
             AssistantContent::Text(t) => texts.push(t.text.clone()),
             AssistantContent::ToolCall(tc) => tool_calls.push(ToolCall {
-                id: tc.id.clone(),
+                id: tc.id.to_string(),
                 name: tc.function.name.clone(),
                 arguments: tc.function.arguments.clone(),
             }),
@@ -468,6 +535,8 @@ pub(crate) fn map_rig_error(e: CompletionError) -> AIError {
         CompletionError::ProviderError(msg) => {
             AIError::Provider(format!("供应商错误: {}", sanitize_message(&msg)))
         }
+        // 0.42: 新增的 ProviderResponse 错误变体
+        CompletionError::ProviderResponse(_) => AIError::Provider("供应商响应解析失败".into()),
     }
 }
 
@@ -513,6 +582,16 @@ fn map_http_error(e: rig_core::http_client::Error) -> AIError {
         }
         H::StreamEnded => AIError::Network("流被提前关闭".into()),
         H::NoHeaders => AIError::Network("无法读取响应头".into()),
+        // 0.42: 新增的 InvalidStatusCodeWithDetails 变体（字段：status, body, headers）
+        H::InvalidStatusCodeWithDetails { status, body, .. } => {
+            let clean = sanitize_message(&body);
+            tracing::debug!(
+                target: crate::infra::utils::perf::ai_slo::TARGET,
+                "AI 供应商 HTTP {status} 响应体片段: {}",
+                truncate_chars(&clean, 500),
+            );
+            AIError::Provider(diagnose_status(status.as_u16(), &clean))
+        }
     }
 }
 
@@ -681,7 +760,7 @@ mod tests {
             timeout_ms: None,
         };
         let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("You are helpful."));
         assert_eq!(rig.chat_history.len(), 1);
     }
@@ -701,7 +780,7 @@ mod tests {
             timeout_ms: None,
         };
         let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("a\nb"));
     }
 
@@ -718,7 +797,7 @@ mod tests {
             timeout_ms: None,
         };
         let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
         assert_eq!(rig.tools.len(), 2);
         assert_eq!(rig.tools[0].name, "open_settings");
         assert_eq!(rig.tools[1].name, "lock");
@@ -739,7 +818,7 @@ mod tests {
             timeout_ms: None,
         };
         assert!(matches!(
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None),
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None),
             Err(AIError::Serialization(_))
         ));
     }
@@ -755,7 +834,7 @@ mod tests {
             timeout_ms: None,
         };
         assert!(matches!(
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None),
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None),
             Err(AIError::Serialization(_))
         ));
     }
@@ -782,7 +861,7 @@ mod tests {
             timeout_ms: None,
         };
         let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("feedback prompt"));
         // system 不进 chat_history;4 条消息中 1 条 system → chat_history 3 条
         assert_eq!(rig.chat_history.len(), 3);
@@ -801,8 +880,79 @@ mod tests {
             timeout_ms: None,
         };
         let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
         assert_eq!(rig.chat_history.len(), 2);
+    }
+
+    // ── 0.42: ToolResult tool_name 映射层测试 ──────────────────────────
+
+    /// 验证 `build_rig_request` 在 Tool 消息缺少 `tool_name` 时，
+    /// 能从前序 Assistant ToolCall 的 JSON content 中提取 name。
+    /// 覆盖 OpenAI-compatible wire 语义：tool_call_id 配对 + name 传递。
+    #[test]
+    fn build_rig_request_tool_name_mapped_from_prior_assistant_tool_call() {
+        let assistant_content = serde_json::json!({
+            "name": "search_apps",
+            "arguments": {"query": "微信"},
+        })
+        .to_string();
+        let req = CompletionRequest {
+            messages: vec![
+                ChatMessage::user("打开微信"),
+                ChatMessage::assistant_tool_call("call_123", &assistant_content),
+                // tool 消息没有 tool_name，但前序 Assistant 有 name="search_apps"
+                ChatMessage::tool("call_123", "[{\"title\":\"微信\"}]"),
+            ],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        // 应成功构建（不返回 Serialization 错误）
+        assert_eq!(rig.chat_history.len(), 3);
+    }
+
+    /// 验证 `build_rig_request` 在 Tool 消息有 `tool_name` 时直接使用，
+    /// 不依赖前序映射。覆盖 Gemini wire 语义：name 必须来自真实工具名。
+    #[test]
+    fn build_rig_request_tool_name_uses_explicit_when_provided() {
+        let req = CompletionRequest {
+            messages: vec![
+                ChatMessage::user("打开微信"),
+                ChatMessage::tool_with_name("call_456", "search_apps", "[{\"title\":\"微信\"}]"),
+            ],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        assert_eq!(rig.chat_history.len(), 2);
+    }
+
+    /// 验证 `build_rig_request` 在 Tool 消息既无 `tool_name`、
+    /// 又无前序 Assistant ToolCall 时返回结构化错误（不传空字符串）。
+    #[test]
+    fn build_rig_request_tool_name_missing_returns_structured_error() {
+        let req = CompletionRequest {
+            messages: vec![
+                ChatMessage::user("打开微信"),
+                // tool 消息无 tool_name，且无前序 Assistant ToolCall
+                ChatMessage::tool("call_789", "result data"),
+            ],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let result = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None);
+        assert!(
+            matches!(result, Err(AIError::Serialization(ref msg)) if msg.contains("tool_name")),
+            "缺少 tool_name 时应返回 Serialization 错误，实际: {result:?}"
+        );
     }
 
     // ── 0.9.4 Step 1:模型级参数 fallback ───────────────────────────────
@@ -822,6 +972,7 @@ mod tests {
             &req,
             Some(0.7),
             Some(4096),
+            None,
             None,
         )
         .unwrap();
@@ -846,6 +997,7 @@ mod tests {
             Some(0.7),
             Some(4096),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(rig.temperature, Some(0.0));
@@ -869,9 +1021,35 @@ mod tests {
             None,
             None,
             Some(&extra),
+            None,
         )
         .unwrap();
         assert_eq!(rig.additional_params.as_ref(), Some(&extra));
+    }
+
+    #[test]
+    fn merge_thinking_off_patch_applies_default_and_respects_user_key() {
+        // 无 custom_params → 直接取关闭思考补丁
+        let off = json!({"thinking": {"type": "disabled"}});
+        assert_eq!(
+            merge_thinking_off_patch(None, Some(&off)),
+            Some(off.clone())
+        );
+
+        // 用户 custom_params 无冲突 key → 补丁合并进去
+        let custom = json!({"top_p": 0.9});
+        let merged = merge_thinking_off_patch(Some(&custom), Some(&off)).unwrap();
+        assert_eq!(merged["top_p"], 0.9);
+        assert_eq!(merged["thinking"]["type"], "disabled");
+
+        // 用户显式配了同 key → 以用户为准（不被默认关闭覆盖）
+        let custom_thinking = json!({"thinking": {"type": "enabled", "budget_tokens": 8192}});
+        let merged = merge_thinking_off_patch(Some(&custom_thinking), Some(&off)).unwrap();
+        assert_eq!(merged["thinking"]["type"], "enabled");
+        assert_eq!(merged["thinking"]["budget_tokens"], 8192);
+
+        // 双 None → None
+        assert_eq!(merge_thinking_off_patch(None, None), None);
     }
 
     #[test]
@@ -899,11 +1077,11 @@ mod tests {
 
     // ── map_rig_response ────────────────────────────────────────────────
 
-    /// 构造一个仅含 text 的 rig response(raw_response 用 unit type)
-    fn rig_text_resp(text: &str) -> RigResp<()> {
-        RigResp {
-            choice: OneOrMany::one(AssistantContent::Text(RigText::new(text))),
-            usage: RigUsage {
+    /// 构造一个仅含 text 的 rig response（0.42: CompletionResponse 不再是泛型）
+    fn rig_text_resp(text: &str) -> RigResp {
+        RigResp::new(
+            vec![AssistantContent::Text(RigText::new(text))],
+            RigUsage {
                 input_tokens: 10,
                 output_tokens: 5,
                 total_tokens: 15,
@@ -912,18 +1090,17 @@ mod tests {
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 0,
             },
-            raw_response: (),
-            message_id: None,
-        }
+            "test",
+        )
     }
 
-    fn rig_toolcall_resp(name: &str, args: serde_json::Value) -> RigResp<()> {
-        RigResp {
-            choice: OneOrMany::one(AssistantContent::ToolCall(RigToolCall::new(
-                "call_abc".into(),
+    fn rig_toolcall_resp(name: &str, args: serde_json::Value) -> RigResp {
+        RigResp::new(
+            vec![AssistantContent::ToolCall(RigToolCall::from_wire(
+                "call_abc",
                 RigToolFunc::new(name.into(), args),
-            ))),
-            usage: RigUsage {
+            ))],
+            RigUsage {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
@@ -932,9 +1109,8 @@ mod tests {
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 0,
             },
-            raw_response: (),
-            message_id: None,
-        }
+            "test",
+        )
     }
 
     #[test]
@@ -969,18 +1145,17 @@ mod tests {
 
     #[test]
     fn map_response_mixed_text_and_toolcall() {
-        // OneOrMany::many 需要 non-empty vec
         let items = vec![
             AssistantContent::Text(RigText::new("intro")),
-            AssistantContent::ToolCall(RigToolCall::new(
-                "c1".into(),
+            AssistantContent::ToolCall(RigToolCall::from_wire(
+                "c1",
                 RigToolFunc::new("do".into(), json!({})),
             )),
             AssistantContent::Text(RigText::new("outro")),
         ];
-        let rig = RigResp {
-            choice: OneOrMany::many(items).unwrap(),
-            usage: RigUsage {
+        let rig = RigResp::new(
+            items,
+            RigUsage {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
@@ -989,9 +1164,8 @@ mod tests {
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 0,
             },
-            raw_response: (),
-            message_id: None,
-        };
+            "test",
+        );
         let ours = map_rig_response(rig, 42);
         assert_eq!(ours.text.as_deref(), Some("intro\noutro"));
         assert_eq!(ours.tool_calls.len(), 1);

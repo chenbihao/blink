@@ -53,16 +53,20 @@ png = "0.17"
 open = "5.3.5"
 pinyin = "0.11.0"
 regex = "1.11"
-# rig-core 0.39:tool schema(ToolDefinition) + Provider 接入(0.9.2 起) + 对话窗口 Agent(0.12.1)。
-# default features 已含 derive+reqwest+rustls;额外加 rmcp 让 0.11 MCP schema 投影零适配。
-# test-utils 供 0.12.1 spike 验证 rig Agent API(Phase 6 后随 spike 移除)。
-rig-core = { version = "0.39", features = ["rmcp", "test-utils"] }
-# rmcp: MCP 协议 Rust 实现。
-# - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
-# - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）
-# - transport-streamable-http-client-reqwest: 0.13.6 MCP client 支持 Streamable HTTP 远程 server
-# - transport-streamable-http-server: 0.19.13 MCP server Streamable HTTP transport（主进程托管）
-rmcp = { version = "1.8", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
+# rig-core 0.42:portable provider/message/tool contracts。0.42 起 Agent runtime 拆到 rig-agent。
+# default features 已含 derive+reqwest+rustls;test-utils 供单测 mock 模型。
+# rmcp feature 已转移到 rig-agent（rig-core 0.42 无 rmcp feature）。
+rig-core = { version = "0.42", features = ["test-utils"] }
+# rig-agent 0.42:Agent runtime（builder/stream/hook/tool registry/MCP 集成）。
+# rmcp feature: 让 AgentBuilder 支持 rmcp_tool(s) 注册 + McpClientHandler 自动刷新。
+# test-utils: mock 模型/工具供单测。
+rig-agent = { version = "0.42", features = ["rmcp", "test-utils"] }
+# rmcp 2.x: MCP 协议 Rust 实现（rig-agent 0.42 依赖 rmcp 2）。
+# - client + transport-child-process: MCP client 拉起外部 server 子进程走 stdio JSON-RPC
+# - server + transport-io: MCP server 暴露 Blink 能力给外部 client（stdio 传输）
+# - transport-streamable-http-client-reqwest: MCP client 支持 Streamable HTTP 远程 server
+# - transport-streamable-http-server: MCP server Streamable HTTP transport（主进程托管）
+rmcp = { version = "2", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 # hyper + hyper-util: HTTP 服务器（0.19.13 MCP Streamable HTTP transport 需要）
 # hyper 已作为 reqwest 传递依赖在树中；这里显式启用 server + http1 feature 供主进程 HTTP listener 使用
 hyper = { version = "1", features = ["server", "http1"] }
@@ -111,8 +115,8 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
-"Win32_Devices_HumanInterfaceDevice",
-"Win32_UI_Shell",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",

@@ -27,6 +27,7 @@ pub mod registry;
 pub mod rig_provider;
 pub mod skill;
 pub mod spike;
+pub mod thinking;
 pub mod tool_adapter;
 
 #[allow(unused_imports)] // 0.9.1 Phase 5 起被 AppContext 消费

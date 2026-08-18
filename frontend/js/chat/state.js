@@ -28,8 +28,8 @@ export let thinkingBuffer = "";
 /** @type {boolean} 是否正在接收 thinking 内容 */
 export let isThinking = false;
 
-/** @type {boolean} 是否启用深度思考（显示 thinking 块） */
-export let thinkingEnabled = false;
+/** @type {boolean} 是否启用深度思考（默认开启；跨 Provider 请求适配待 Roadmap 收敛） */
+export let thinkingEnabled = true;
 
 /** @type {boolean} Provider 是否已配置 */
 export let providerConfigured = true;

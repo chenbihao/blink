@@ -27,6 +27,7 @@ export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
         groupId,
         targetWindow: opts.targetWindow ?? null,
         ephemeral: opts.ephemeral ?? null,
+        thinkingEnabled: opts.thinkingEnabled ?? false,
     });
 }
 

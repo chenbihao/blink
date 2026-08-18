@@ -149,7 +149,7 @@ fn parse_level(level: &str) -> String {
     // 诊断需求，keyring 内部 CM 调用细节无价值。
     let transport_noise =
         "hyper=warn,reqwest=warn,hyper_util=warn,h2=warn,rustls=warn,tower=warn,hpack=warn";
-    let ai_noise = "rig=warn,rig_core=warn";
+    let ai_noise = "rig=warn,rig_core=warn,rig_agent=warn";
     let keyring_noise = "keyring=warn,keyring_core=warn";
     match level {
         "trace" => format!(

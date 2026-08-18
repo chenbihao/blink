@@ -22,15 +22,17 @@
 //!
 //! `collect_tools()` 时过滤 `config.disabled_tools` 中的 tool，只把用户启用的喂给 AI。
 
+use rmcp::model::ClientInfo;
+use rmcp::model::Tool as RmcpTool;
+use rmcp::service::RunningService;
+use rmcp::service::ServerSink;
+// 0.42: ToolDyn 移除。MCP tools 由 AgentBuilder::rmcp_tools 直接消费，
+// collect_tools 返回原始 (Tool, ServerSink) 对供 build_agent 使用。
+use rmcp::ServiceExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-
-use rig_core::tool::ToolDyn;
-use rmcp::ServiceExt;
-use rmcp::model::ClientInfo;
-use rmcp::service::RunningService;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
 use crate::domain::mcp::config::{McpServerConfig, McpServerConfigStore};
@@ -797,28 +799,27 @@ impl McpClientManager {
         self.start_server(&config).await
     }
 
-    /// 收集所有已连接 server 的 tool，包装为 `Vec<Box<dyn ToolDyn>>`。
+    /// 收集所有已连接 server 的 tool，返回原始 (Tool, ServerSink) 对。
+    ///
+    /// 0.42: McpTool 成为 pub(crate)，外部不能直接构造。
+    /// 改为返回原始 (rmcp::model::Tool, ServerSink) 对，由 AgentBuilder::rmcp_tools 消费。
     ///
     /// 过滤 `disabled_tools` 中的 tool——只把用户启用的喂给 AI。
-    /// 返回的每个 tool 是 `rig_core::tool::rmcp::McpTool`（已 impl `ToolDyn`）。
-    ///
     /// 使用 `ConnectedServer.rmcp_tools` 缓存（握手时已拉取），不重新调 `list_all_tools`。
-    pub async fn collect_tools(&self) -> Vec<Box<dyn ToolDyn>> {
+    pub async fn collect_tools(&self) -> Vec<(RmcpTool, ServerSink)> {
         let connected = self.connected.read().await;
-        let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+        let mut tools: Vec<(RmcpTool, ServerSink)> = Vec::new();
 
         for (_name, server) in connected.iter() {
             // 获取 peer（ServerSink = Peer<RoleClient>），用于构造 McpTool
             let peer = server.service.peer().clone();
-            // 从缓存的 rmcp tool 列表构造 McpTool，过滤 disabled
+            // 从缓存的 rmcp tool 列表过滤 disabled
             for rmcp_tool in &server.rmcp_tools {
                 let tool_name = rmcp_tool.name.to_string();
                 if server.config.disabled_tools.contains(&tool_name) {
                     continue;
                 }
-                let mcp_tool =
-                    rig_core::tool::rmcp::McpTool::from_mcp_server(rmcp_tool.clone(), peer.clone());
-                tools.push(Box::new(mcp_tool));
+                tools.push((rmcp_tool.clone(), peer.clone()));
             }
         }
 

@@ -13,7 +13,7 @@
 //!
 //! 抽出 `ToolAdapter` 层，把 Capability 包装成 `impl rig::tool::Tool`：
 //! - `CapabilityTool` 包装 `Arc<dyn Capability>`
-//! - `ToolDyn` 动态分发--Args 用 `serde_json::Value`，避免给每个 Capability 写强类型 Args
+//! - `DynamicTool` 动态分发——Args 用 `serde_json::Value`，避免给每个 Capability 写强类型 Args
 //!
 //! ## 0.14.2 边界钉死
 //!
@@ -44,15 +44,15 @@
 //! ## 工厂函数
 //!
 //! `build_agent_tools()` 从 `CapabilityRegistry` 收集所有可用能力，
-//! 返回 `Vec<Box<dyn ToolDyn>>` 供对话窗口 Agent 使用。
+//! 返回 `Vec<DynamicTool>` 供对话窗口 Agent 使用。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use rig_core::tool::ToolDyn;
-use rig_core::wasm_compat::WasmBoxedFuture;
+// 0.42: ToolDyn 移除，改为 rig_agent::tool::DynamicTool（结构体，非 trait）
+use rig_agent::tool::{DynamicTool, ToolExecutionError, ToolOutput};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
@@ -326,7 +326,7 @@ async fn check_dangerous_confirm(
     tool_name: &str,
     tool_type: &'static str,
     args_value: &Value,
-) -> Option<Result<String, rig_core::tool::ToolError>> {
+) -> Option<Result<String, ToolExecutionError>> {
     if !is_dangerous {
         return None;
     }
@@ -382,14 +382,6 @@ fn may_reuse_confirmation(rememberable: bool, trusted: bool) -> bool {
 }
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
-
-/// `ToolCallError` 的消息载体。
-///
-/// 避免滥用 `std::io::Error` 包装纯文本消息（io::Error 语义是 IO 失败，此处只是给 AI 的可读字符串）。
-/// 原始错误类型在 `tracing::warn!` 中已通过 `Display` 记录，AI 侧只需可读消息。
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct ToolErrMsg(String);
 
 /// 危险操作确认事件 payload。
 #[derive(serde::Serialize, Clone)]
@@ -461,7 +453,7 @@ fn derive_tool_deadline() -> Option<std::time::Instant> {
 
 /// Capability 的 Tool 包装器。
 ///
-/// 持有 `Arc<dyn Capability>`，实现 `ToolDyn` 以供 rig Agent 使用。
+/// 持有 `Arc<dyn Capability>`，通过 `to_dynamic_tool()` 产出 `DynamicTool` 以供 rig Agent 使用。
 ///
 /// **设计要点**：
 /// - `definition()` -> `schema.to_rig_tool()`（纯 schema 投影）
@@ -519,84 +511,102 @@ impl CapabilityTool {
     }
 }
 
-impl ToolDyn for CapabilityTool {
-    fn name(&self) -> String {
-        self.cap.id().to_string()
-    }
+// 0.42: CapabilityTool 不再 impl ToolDyn trait，而是提供 to_dynamic_tool() 方法
+// 返回 DynamicTool（rig 0.42 的动态工具结构体，用闭包构造）。
+//
+// DynamicTool::new(name, description, parameters, callback) 中 callback 签名为：
+//   Fn(&mut ToolContext, serde_json::Value) -> Result<ToolOutput, ToolExecutionError>
+// 这与旧 ToolDyn::call(String) -> Result<String, ToolError> 有本质区别：
+// - 参数已是 serde_json::Value（非原始 String）
+// - 返回 ToolOutput（含 Vec<ToolResultContent>，非纯 String）
+// - 错误类型是 ToolExecutionError（非 ToolError）
+impl CapabilityTool {
+    /// 将此 CapabilityTool 包装为 rig 0.42 的 DynamicTool。
+    ///
+    /// DynamicTool callback 内部执行与旧 `ToolDyn::call` 相同的逻辑（0.42 前为 ToolDyn trait）：
+    /// 1. 危险操作确认（四域墙 + 闭环）
+    /// 2. 构造 InvokeContext
+    /// 3. 调用 CapabilityRegistry::invoke
+    /// 4. 投影结果为 ToolOutput
+    pub fn to_dynamic_tool(&self) -> DynamicTool {
+        let cap_id = self.cap_id.clone();
+        let schema = self.schema.clone();
+        let emitter = self.emitter.clone();
+        let chat_service = self.chat_service.clone();
+        let cap_env = self.cap_env.clone();
+        let pending = self.pending.clone();
+        let registry = self.registry.clone();
+        let surface = self.surface.clone();
+        let cap = self.cap.clone();
+        let requires_confirmation = self.requires_confirmation();
+        let rememberable = cap.ai_confirmation_rememberable();
 
-    fn definition<'a>(
-        &'a self,
-        // rig 传入的 prompt 是运行时上下文提示，用于动态调整 schema 描述。
-        // Capability 的 schema 是静态投影，不随 prompt 变化，故故意忽略。
-        _prompt: String,
-    ) -> WasmBoxedFuture<'a, rig_core::completion::ToolDefinition> {
-        Box::pin(async move { self.schema.to_rig_tool() })
-    }
+        DynamicTool::new(
+            cap_id.clone(),
+            schema.description.clone(),
+            schema.to_rig_tool().parameters,
+            move |_ctx, args_value| {
+                let cap_id = cap_id.clone();
+                let emitter = emitter.clone();
+                let chat_service = chat_service.clone();
+                let cap_env = cap_env.clone();
+                let pending = pending.clone();
+                let registry = registry.clone();
+                let surface = surface.clone();
+                let _cap = cap.clone();
+                Box::pin(async move {
+                    // 危险操作确认（四域墙 + 闭环）
+                    if let Some(result) = check_dangerous_confirm(
+                        requires_confirmation,
+                        rememberable,
+                        &pending,
+                        emitter.as_ref(),
+                        chat_service.as_ref(),
+                        &cap_id,
+                        "capability",
+                        &args_value,
+                    )
+                    .await
+                    {
+                        return result.map(ToolOutput::text);
+                    }
 
-    fn call<'a>(
-        &'a self,
-        args: String,
-    ) -> WasmBoxedFuture<'a, Result<String, rig_core::tool::ToolError>> {
-        Box::pin(async move {
-            // 解析 JSON args（先解析，危险操作也要把 args 传给前端确认卡片）
-            let args_value: Value = match serde_json::from_str(&args) {
-                Ok(v) => v,
-                Err(e) => return Err(rig_core::tool::ToolError::JsonError(e)),
-            };
+                    // 构造 InvokeContext（P1.3: 从 slo_hard_timeout_ms 派生 deadline）
+                    let ctx = InvokeContext {
+                        env: cap_env.as_ref(),
+                        origin: crate::domain::capability::InvocationOrigin::LocalAi,
+                        runtime: crate::domain::capability::RuntimeCapabilities {
+                            surface: surface.as_deref(),
+                            main_process: true,
+                            desktop_session: true,
+                        },
+                        deadline: derive_tool_deadline(),
+                    };
 
-            // 危险操作确认（四域墙 + 闭环）
-            if let Some(result) = check_dangerous_confirm(
-                self.requires_confirmation(),
-                self.cap.ai_confirmation_rememberable(),
-                &self.pending,
-                self.emitter.as_ref(),
-                self.chat_service.as_ref(),
-                self.cap.id(),
-                "capability",
-                &args_value,
-            )
-            .await
-            {
-                return result;
-            }
-
-            // 构造 InvokeContext（P1.3: 从 slo_hard_timeout_ms 派生 deadline）
-            // 0.21.0: 携带 origin=LocalAi + 完整 runtime（AI 在主进程中运行，有 GUI surface）
-            let ctx = InvokeContext {
-                env: self.cap_env.as_ref(),
-                origin: crate::domain::capability::InvocationOrigin::LocalAi,
-                runtime: crate::domain::capability::RuntimeCapabilities {
-                    surface: self.surface.as_deref(),
-                    main_process: true,
-                    desktop_session: true,
-                },
-                deadline: derive_tool_deadline(),
-            };
-
-            // 0.21.11: 删除重复门禁——确认通过后调用 CapabilityRegistry::invoke，
-            // registry 内部会做 origin/runtime 检查，无需在此重复。
-            // 这确保 AI tool 调用走统一路径，获取一致的门禁、SLO 和 perf 埋点。
-
-            // 调用 Capability（0.21.11：统一经 CapabilityRegistry::invoke）
-            match self.registry.invoke(&self.cap_id, args_value, &ctx).await {
-                Ok(cap_result) => {
-                    let stash = self.cap_env.image_stash();
-                    let contents =
-                        cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
-                    Ok(crate::domain::capability::rig_tool_result_to_text(
-                        &contents,
-                    ))
-                }
-                Err(e) => {
-                    // 原始错误类型记日志（保留类型信息供调试），AI 侧拿中文化消息
-                    tracing::warn!(error = %e, capability = %self.cap_id, "capability invoke 失败");
-                    let msg = capability_error_to_string(e);
-                    Err(rig_core::tool::ToolError::ToolCallError(Box::new(
-                        ToolErrMsg(msg),
-                    )))
-                }
-            }
-        })
+                    // 调用 Capability（0.21.11：统一经 CapabilityRegistry::invoke）
+                    match registry.invoke(&cap_id, args_value, &ctx).await {
+                        Ok(cap_result) => {
+                            let stash = cap_env.image_stash();
+                            let contents =
+                                cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
+                            // 0.42: 返回 ToolOutput（含 Vec<ToolResultContent>）
+                            match ToolOutput::content(contents) {
+                                Ok(output) => Ok(output),
+                                Err(_) => {
+                                    // content 为空时用文本兜底
+                                    Ok(ToolOutput::text("（无结果）"))
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, capability = %cap_id, "capability invoke 失败");
+                            let msg = capability_error_to_string(e);
+                            Err(ToolExecutionError::other(msg))
+                        }
+                    }
+                })
+            },
+        )
     }
 }
 
@@ -631,13 +641,16 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 
 /// 构建对话窗口 Agent 使用的 tool 池（0.14.2：只含 Capability + 外部 tool）。
 ///
-/// 从 `CapabilityRegistry` 收集所有可用能力，返回 `Vec<Box<dyn ToolDyn>>`
+/// 从 `CapabilityRegistry` 收集所有可用能力，返回 `(Vec<DynamicTool>, Vec<(Tool, ServerSink)>)`
 /// 供 rig `AgentBuilder` 使用。
+///
+/// **0.42 变化**：MCP tools 不再混入 `Vec<DynamicTool>`，而是单独返回
+/// `Vec<(rmcp::model::Tool, ServerSink)>`，由 `AgentBuilder::rmcp_tools` 直接消费。
+/// 这是因为 `McpTool` 在 0.42 中成为 `pub(crate)`，外部无法直接构造。
 ///
 /// **参数**：
 /// - `cap_registry`: Capability 注册表
-/// - `external_tools`: 外部 tool（如 MCP tool），直接进 tool 池，不经过 CapabilityRegistry
-///   （0.13.0 §9.3：统一外部 tool 入口，为 MCP tool 留对称性）
+/// - `external_tools`: 外部 MCP tool（原始 (Tool, ServerSink) 对）
 /// - `emitter`: EventPort，用于 emit 确认事件
 /// - `chat_service`: ChatService 引用，用于获取 request context（可能为 None）
 /// - `cap_env`: CapabilityEnv，用于构造 InvokeContext
@@ -645,27 +658,23 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 /// - `ai_allowlist`: AI 授权的 Capability id 集合（0.21.5）。`None` = 不过滤（兼容旧测试）；
 ///   `Some(set)` = 只包装 set 中的 Capability。
 ///
-/// **返回**：所有可用的 tool（CapabilityTool + external_tools）
-///
-/// **0.14.2 变化**：删除了 `action_registry` 参数和 ActionTool 包装。AI tool 池
-/// 只含 Capability。9 个保留 Action（lock/shutdown/...）不再出现在 tool 池——
-/// 这把"AI 该不该调这个能力"从运行时过滤前置成编译期类型约束。
-/// **危险操作**：危险 Capability 仍会被包装进 tool 池，但调用时挂起等用户确认。
-/// **0.21.5 变化**：增加 `ai_allowlist` 参数——只包装 policy 允许 AI 且用户 enabled 的 Capability。
-/// 纯对话模式传空 `HashSet`（tool 池为空）。
+/// **返回**：`(DynamicTools, McpToolBatch)` 供 `build_agent` 分两步注册
 #[allow(dead_code)] // 0.12.1 对话窗口 AgentBuilder 消费
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent_tools(
     cap_registry: Arc<CapabilityRegistry>,
-    external_tools: Vec<Box<dyn ToolDyn>>,
+    external_tools: Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
     emitter: Arc<dyn EventPort>,
     chat_service: Option<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>,
     cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
     pending: Arc<PendingConfirms>,
     surface: Option<std::sync::Arc<dyn crate::domain::capability::SurfacePort>>,
     ai_allowlist: Option<&std::collections::HashSet<String>>,
-) -> Vec<Box<dyn ToolDyn>> {
-    let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+) -> (
+    Vec<DynamicTool>,
+    Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+) {
+    let mut tools: Vec<DynamicTool> = Vec::new();
 
     // 1. 包装所有 Capability（0.21.5: 仅包装 allowlist 中的）
     let mut cap_count = 0;
@@ -688,23 +697,23 @@ pub fn build_agent_tools(
             cap_registry.clone(),
             surface.clone(),
         );
-        tools.push(Box::new(tool));
+        // 0.42: CapabilityTool 不再 impl ToolDyn，改为产出 DynamicTool
+        tools.push(tool.to_dynamic_tool());
         cap_count += 1;
     }
 
-    // 2. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）
+    // 2. MCP tools 原样返回（0.42: AgentBuilder::rmcp_tools 直接消费）
     let external_count = external_tools.len();
-    tools.extend(external_tools);
 
     tracing::info!(
         capabilities = cap_count,
         skipped = skipped_count,
         external_tools = external_count,
-        total_tools = tools.len(),
+        total_tools = tools.len() + external_count,
         "build_agent_tools: tool 池构建完成（0.21.5: AI allowlist 过滤）"
     );
 
-    tools
+    (tools, external_tools)
 }
 
 #[cfg(test)]

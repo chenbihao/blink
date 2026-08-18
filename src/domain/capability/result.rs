@@ -250,7 +250,7 @@ pub enum CapabilityResult {
     /// → 字节+mime，投影方式由消费方决定（base64/raw/file_url）。
     ///
     /// **不在能力层决定返回形态**（文件还是流还是 base64）——那是消费方约束。
-    /// rig 0.39 的 `DocumentSourceKind`（`Url/Base64/FileId/Raw/String`）印证此设计。
+    /// rig 0.42 的 `DocumentSourceKind`（`Url/Base64/FileId/Raw/String`）印证此设计。
     ///
     /// **已知性能点**：截图 ~14MB clone 不便宜。0.9.7 先 clone 跑通；
     /// 若热路径出现，改 `Arc<Vec<u8>>` 或投影层避免深拷贝。

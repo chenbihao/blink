@@ -37,6 +37,11 @@ pub struct ChatMessage {
     /// Tool 消息专用——关联到哪个 `ToolCall.id`。其他角色为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Tool 消息专用——产生此结果的工具名（对应 `ToolCall.name`）。
+    /// rig 0.42 `Message::tool_result` 需要 name 参数，不可用空字符串占位。
+    /// 其他角色为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 impl ChatMessage {
@@ -46,6 +51,7 @@ impl ChatMessage {
             role: Role::System,
             content: content.into(),
             tool_call_id: None,
+            tool_name: None,
         }
     }
 
@@ -55,6 +61,7 @@ impl ChatMessage {
             role: Role::User,
             content: content.into(),
             tool_call_id: None,
+            tool_name: None,
         }
     }
 
@@ -64,6 +71,7 @@ impl ChatMessage {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
+            tool_name: None,
         }
     }
 
@@ -81,6 +89,7 @@ impl ChatMessage {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_name: None,
         }
     }
 
@@ -90,6 +99,25 @@ impl ChatMessage {
             role: Role::Tool,
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_name: None,
+        }
+    }
+
+    /// 带 tool_call_id 和 tool_name 的 Tool 消息（0.42: rig 需要真实工具名）。
+    ///
+    /// `tool_call_id` 是 Turn 1 AI 返回的 tool call ID。
+    /// `tool_name` 是对应的 `ToolCall.name`（工具的真实名称）。
+    #[allow(dead_code)]
+    pub fn tool_with_name(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_name: Some(tool_name.into()),
         }
     }
 }
@@ -175,6 +203,12 @@ mod tests {
         let tm = ChatMessage::tool("tc_1", "result");
         assert_eq!(tm.role, Role::Tool);
         assert_eq!(tm.tool_call_id, Some("tc_1".to_string()));
+        assert_eq!(tm.tool_name, None);
+
+        let tmn = ChatMessage::tool_with_name("tc_1", "search_apps", "result");
+        assert_eq!(tmn.role, Role::Tool);
+        assert_eq!(tmn.tool_call_id, Some("tc_1".to_string()));
+        assert_eq!(tmn.tool_name.as_deref(), Some("search_apps"));
     }
 
     #[test]
@@ -201,6 +235,22 @@ mod tests {
         assert!(
             !s.contains("tool_call_id"),
             "非 Tool 消息不应含 tool_call_id 字段: {s}"
+        );
+        // tool_name 同样不应出现
+        assert!(
+            !s.contains("tool_name"),
+            "非 Tool 消息不应含 tool_name 字段: {s}"
+        );
+    }
+
+    #[test]
+    fn chat_message_tool_with_name_serializes_tool_name() {
+        let m = ChatMessage::tool_with_name("tc_1", "search_apps", "result");
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("tool_name"), "Tool 消息应含 tool_name 字段: {s}");
+        assert!(
+            s.contains("search_apps"),
+            "tool_name 值应出现在序列化结果中: {s}"
         );
     }
 }

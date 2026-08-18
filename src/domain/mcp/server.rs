@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, InitializeResult,
     ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
@@ -250,12 +250,12 @@ impl BlinkMcpServer {
         let text = crate::domain::capability::rig_tool_result_to_text(
             &result.to_rig_tool_result_with_stash(stash),
         );
-        CallToolResult::success(vec![Content::text(text)])
+        CallToolResult::success(vec![ContentBlock::text(text)])
     }
 
     /// 把错误投影为 MCP CallToolResult（is_error = true）。
     fn error_to_call_tool_result(msg: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(msg.to_string())])
+        CallToolResult::error(vec![ContentBlock::text(msg.to_string())])
     }
 }
 
@@ -266,9 +266,9 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut caps = ServerCapabilities::default();
         // 0.19.13: 声明 tools.listChanged = true，让 client 知道我们支持热刷新
-        let tools_caps = rmcp::model::ToolsCapability {
-            list_changed: Some(true),
-        };
+        // rmcp 2.x: ToolsCapability 是 #[non_exhaustive]，只能用 Default + 字段赋值
+        let mut tools_caps = rmcp::model::ToolsCapability::default();
+        tools_caps.list_changed = Some(true);
         caps.tools = Some(tools_caps);
         let mut info = InitializeResult::new(caps);
         info.server_info = Implementation::new("blink", env!("CARGO_PKG_VERSION"));
@@ -553,7 +553,7 @@ mod tests {
     fn mcp_result_projection_all_variants_roundtrip() {
         use crate::domain::capability::{CapabilityResult, ItemResult};
 
-        // Text → Content::text
+        // Text → ContentBlock::text
         let result = CapabilityResult::Text {
             content: "hello".into(),
             desc: None,
@@ -564,7 +564,7 @@ mod tests {
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert_eq!(text, "hello");
 
-        // Done → Content::text(summary)
+        // Done → ContentBlock::text(summary)
         let result = CapabilityResult::Done {
             summary: "已完成".into(),
         };

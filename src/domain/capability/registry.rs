@@ -161,7 +161,7 @@ impl CapabilityRegistry {
 
     /// 返回所有已注册能力的 `(id, Arc<dyn Capability>)` 对（0.12.0 §2.4）。
     ///
-    /// 供 `build_agent_tools()` 工厂函数遍历所有能力，包装成 `ToolDyn`。
+    /// 供 `build_agent_tools()` 工厂函数遍历所有能力，包装成 `DynamicTool`。
     /// 读锁内一次性 clone 所有 Arc，避免多次锁获取。
     ///
     /// **0.21.13**：返回结果按稳定 id 排序，避免 AI/MCP/设置页顺序漂移。

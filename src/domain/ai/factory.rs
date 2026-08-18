@@ -178,7 +178,7 @@ pub(crate) fn build_anthropic_client(
 }
 
 /// 构造 Google Gemini 协议的 rig client（0.12.1 抽出）。
-/// rig 0.39 gemini builder 不支持 base_url（端点固定 googleapis.com），用户填的忽略。
+/// rig 0.42 gemini builder 不支持 base_url（端点固定 googleapis.com），用户填的忽略。
 pub(crate) fn build_gemini_client(
     key: &str,
     _base_url: Option<&str>,
@@ -247,6 +247,7 @@ fn build_openai_compatible(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
+        base_url,
     )))
 }
 
@@ -266,12 +267,13 @@ fn build_anthropic(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
+        base_url,
     )))
 }
 
 /// Google Gemini GenerateContent 协议——`/v1beta/models/*:generateContent`。
 ///
-/// rig 0.39 里 `gemini::Client::builder()` 支持 `api_key` 但不显式支持 `base_url`
+/// rig 0.42 里 `gemini::Client::builder()` 支持 `api_key` 但不显式支持 `base_url`
 /// (Gemini 端点固定在 googleapis.com);如果用户填了 base_url 我们也不报错,
 /// 仅忽略——避免"填了没用又不知道"的困惑,统一走 rig 默认。
 fn build_gemini(
@@ -289,6 +291,7 @@ fn build_gemini(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
+        base_url,
     )))
 }
 
@@ -330,6 +333,7 @@ fn build_ollama(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
+        base_url,
     )))
 }
 

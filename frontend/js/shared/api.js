@@ -41,6 +41,7 @@ export function runBuiltinAction(id, arg) {
  *  @param {string} [opts.groupId] 分组 ID
  *  @param {string} [opts.targetWindow] 目标窗口（默认 "chat"，主窗口传 "main"）
  *  @param {boolean} [opts.ephemeral] 是否临时对话（默认 false）
+ *  @param {boolean} [opts.thinkingEnabled] 是否启用深度思考（默认 false）
  *  @returns {Promise<number>} request_id */
 export function chatPrompt(conversationId, message, opts = {}) {
     return invoke("chat_prompt", {
@@ -49,6 +50,7 @@ export function chatPrompt(conversationId, message, opts = {}) {
         groupId: opts.groupId ?? null,
         targetWindow: opts.targetWindow ?? null,
         ephemeral: opts.ephemeral ?? null,
+        thinkingEnabled: opts.thinkingEnabled ?? false,
     });
 }
 

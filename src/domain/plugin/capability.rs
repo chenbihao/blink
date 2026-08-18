@@ -13,7 +13,7 @@
 //!
 //! **危险操作**：`danger_class == Dangerous` 的插件 tool 仍可被 AI 调用，但
 //! `CapabilityTool::call`（tool_adapter.rs）的 `check_dangerous_confirm` 会挂起等用户
-//! 确认——弹窗在 ToolDyn 适配层，不进 `cap.invoke()`，不破坏 Capability「不碰 UI」铁则。
+//! 确认——弹窗在 DynamicTool 适配层，不进 `cap.invoke()`，不破坏 Capability「不碰 UI」铁则。
 
 use std::sync::Arc;
 
