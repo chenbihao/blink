@@ -194,10 +194,7 @@ mod tests {
             false,
             Some("none"),
         );
-        assert_eq!(
-            off,
-            Some(serde_json::json!({ "reasoning_effort": "none" }))
-        );
+        assert_eq!(off, Some(serde_json::json!({ "reasoning_effort": "none" })));
         // 自定义-不发送（omit）：返回 None，绝不发可能 400 的字段值
         let omit = thinking_request_patch(
             ProviderKind::OpenAICompatible,

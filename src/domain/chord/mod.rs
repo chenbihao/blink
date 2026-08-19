@@ -696,15 +696,16 @@ impl ChordRegistry {
                             "chord → Capability 执行失败"
                         );
                         // 失败时恢复被 hide_main_before 隐藏的主窗，避免「主窗消失 + 无便签/反馈」
-                        if hide_main_before && let Some(surface) = surface_port {
-                            if let Err(show_err) = surface.show_main_window() {
-                                tracing::warn!(
-                                    id = capability_id,
-                                    chord_id = action.id(),
-                                    error = %show_err,
-                                    "chord → Capability 失败后恢复主窗失败"
-                                );
-                            }
+                        if hide_main_before
+                            && let Some(surface) = surface_port
+                            && let Err(show_err) = surface.show_main_window()
+                        {
+                            tracing::warn!(
+                                id = capability_id,
+                                chord_id = action.id(),
+                                error = %show_err,
+                                "chord → Capability 失败后恢复主窗失败"
+                            );
                         }
                         return Err(e.to_string());
                     }

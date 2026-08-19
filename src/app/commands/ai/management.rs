@@ -383,7 +383,7 @@ pub async fn get_context_window_status(
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
-    Ok(chat.last_context_status())
+    Ok(chat.last_context_status_any())
 }
 
 /// 强制压缩当前对话的上下文窗口（0.13.6）。
@@ -399,8 +399,20 @@ pub async fn compress_context_now(
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
+
+    // 0.21.17: compute_context_status 需要 AgentProvider + ResolvedProviderEntries。
+    // 从缓存获取 provider，从 resolve_current_entries 获取 resolved。
+    let resolved = chat
+        .resolve_current_entries(crate::domain::ai::chat_service::ConversationKind::Persistent)
+        .map_err(|e| e.to_string())?;
+
+    // 从缓存获取 AgentProvider（若缓存未命中则返回错误，提示用户先发一条消息）
+    let provider = chat
+        .cached_agent_ref()
+        .ok_or("Agent 未构造，请先发送一条消息后再压缩")?;
+
     let status = chat
-        .compute_context_status(&conversation_id, None, None)
+        .compute_context_status(&conversation_id, None, None, &provider, &resolved)
         .await;
     let _ = app.emit_to("chat", EventNames::CHAT_CONTEXT_STATUS, &status);
     Ok(status)
@@ -431,35 +443,12 @@ pub async fn get_composer_bar_snapshot(
     let pure_chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .is_some_and(|chat| chat.is_pure_chat_mode());
-    let (
-        estimated_tokens,
-        context_limit,
-        usage_percent,
-        last_compressed,
-        last_compressed_count,
-        last_recall_count,
-        preamble_tokens,
-        pending_message_tokens,
-    ) = if let Some(chat) =
+    let context_status = if let Some(chat) =
         app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
     {
-        let cs = chat.last_context_status();
-        if let Some(s) = cs {
-            (
-                s.estimated_tokens,
-                s.context_limit,
-                s.usage_percent,
-                s.last_compressed,
-                s.last_compressed_count,
-                s.last_recall_count,
-                s.preamble_tokens,
-                s.pending_message_tokens,
-            )
-        } else {
-            (0, 0, 0, false, 0, 0, 0, 0)
-        }
+        chat.last_context_status_any()
     } else {
-        (0, 0, 0, false, 0, 0, 0, 0)
+        None
     };
 
     // ── 中：内置工具（0.14 Capability-only）──
@@ -526,14 +515,76 @@ pub async fn get_composer_bar_snapshot(
     }
 
     Ok(ComposerBarSnapshot {
-        estimated_tokens,
-        context_limit,
-        usage_percent,
-        last_compressed,
-        last_compressed_count,
-        last_recall_count,
-        preamble_tokens,
-        pending_message_tokens,
+        estimated_tokens: context_status
+            .as_ref()
+            .map(|s| s.estimated_tokens)
+            .unwrap_or(0),
+        context_limit: context_status
+            .as_ref()
+            .map(|s| s.context_limit)
+            .unwrap_or(0),
+        usage_percent: context_status
+            .as_ref()
+            .map(|s| s.usage_percent)
+            .unwrap_or(0),
+        last_compressed: context_status
+            .as_ref()
+            .map(|s| s.last_compressed)
+            .unwrap_or(false),
+        last_compressed_count: context_status
+            .as_ref()
+            .map(|s| s.last_compressed_count)
+            .unwrap_or(0),
+        last_recall_count: context_status
+            .as_ref()
+            .map(|s| s.last_recall_count)
+            .unwrap_or(0),
+        preamble_tokens: context_status
+            .as_ref()
+            .map(|s| s.preamble_tokens)
+            .unwrap_or(0),
+        pending_message_tokens: context_status
+            .as_ref()
+            .map(|s| s.pending_message_tokens)
+            .unwrap_or(0),
+        // 0.21.17 扩展字段
+        history_tokens: context_status
+            .as_ref()
+            .map(|s| s.history_tokens)
+            .unwrap_or(0),
+        tools_tokens: context_status.as_ref().map(|s| s.tools_tokens).unwrap_or(0),
+        protocol_overhead_tokens: context_status
+            .as_ref()
+            .map(|s| s.protocol_overhead_tokens)
+            .unwrap_or(0),
+        multimodal_tokens: context_status
+            .as_ref()
+            .map(|s| s.multimodal_tokens)
+            .unwrap_or(0),
+        reserved_output_tokens: context_status
+            .as_ref()
+            .map(|s| s.reserved_output_tokens)
+            .unwrap_or(0),
+        safety_margin_tokens: context_status
+            .as_ref()
+            .map(|s| s.safety_margin_tokens)
+            .unwrap_or(0),
+        effective_input_limit: context_status
+            .as_ref()
+            .map(|s| s.effective_input_limit)
+            .unwrap_or(0),
+        remaining_tokens: context_status
+            .as_ref()
+            .map(|s| s.remaining_tokens)
+            .unwrap_or(0),
+        context_limit_source: context_status
+            .as_ref()
+            .map(|s| s.context_limit_source.clone())
+            .unwrap_or_default(),
+        confidence: context_status
+            .as_ref()
+            .map(|s| s.confidence.clone())
+            .unwrap_or_default(),
         builtin_tools,
         mcp_servers,
         builtin_count,

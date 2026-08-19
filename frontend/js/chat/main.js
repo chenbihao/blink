@@ -721,7 +721,8 @@ function finalizeDone(chunk) {
         }
     }
     // 0.12.2 §4.8：在最后一条 assistant 消息底部显示 token 用量
-    if (chunk && (chunk.input_tokens || chunk.output_tokens)) {
+    // 0.21.17: reported=false 表示供应商未报告 usage，不显示"0 token"误导用户
+    if (chunk && chunk.reported && (chunk.input_tokens || chunk.output_tokens)) {
         // currentAssistantEl 已 null（如纯 tool 调用后 done）时，回查 DOM 最后一条 assistant
         const targetEl = currentAssistantEl || components.getLastAssistantEl?.();
         if (targetEl) {
@@ -730,6 +731,10 @@ function finalizeDone(chunk) {
         state.setLastUsage({
             input_tokens: chunk.input_tokens,
             output_tokens: chunk.output_tokens,
+            total_tokens: chunk.total_tokens || 0,
+            reasoning_tokens: chunk.reasoning_tokens || 0,
+            cached_input_tokens: chunk.cached_input_tokens || 0,
+            reported: true,
         });
     }
     // 0.13.6: 记忆召回 badge

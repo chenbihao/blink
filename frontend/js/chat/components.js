@@ -925,7 +925,10 @@ export function updateContextIndicator(status) {
     const r = 8;
     const circumference = 2 * Math.PI * r;
     const offset = circumference * (1 - percent / 100);
-    const tooltip = `${percent}% · ~${status.estimated_tokens.toLocaleString()} / ${status.context_limit.toLocaleString()} tokens`;
+    const tooltip = `${percent}% · ~${status.estimated_tokens.toLocaleString()} / ${status.context_limit.toLocaleString()} tokens`
+        + (status.remaining_tokens != null ? `\n安全剩余: ${status.remaining_tokens.toLocaleString()} tokens` : "")
+        + (status.context_limit_source === "fallback" ? "\n⚠ 估算回退（未配置 context window）" : "")
+        + (status.confidence === "low" ? "\n⚠ 低精度估算（含多模态）" : "");
 
     el.title = tooltip;
     el.innerHTML = `
@@ -943,38 +946,47 @@ export function updateContextIndicator(status) {
 /**
  * 渲染主动压缩提示条（当 token 占用超 80% 时显示）。
  *
+ * ⚠️ 暂时禁用（需要重新设计优化压缩逻辑）：该横条（含"旧消息将被自动压缩"
+ * 提示与立即压缩/清除按钮）的触发逻辑待重新设计后再启用。保留空函数体，
+ * 调用方（main.js 初始化 + chat-context-status 事件）无需改动；
+ * 恢复时取消下方被注释的代码即可。
+ *
  * @param {number} usagePercent
  * @param {(action: 'compress' | 'clear') => void} onAction
  */
 export function renderContextWarning(usagePercent, onAction) {
+    // 暂时禁用：需要重新设计优化压缩逻辑。
+    return;
+
+    // ── 原实现（注释保留，待重新设计后恢复）────────────────────────────
     // 移除已有提示条
-    const existing = document.querySelector(".chat-context-warning");
-    if (existing) existing.remove();
-
-    // 占用 < 80% 不显示
-    if (usagePercent < 80) return;
-
-    const composerBar = document.querySelector(".chat-composer-bar");
-    if (!composerBar) return;
-
-    const warning = document.createElement("div");
-    warning.className = "chat-context-warning";
-    warning.innerHTML = `
-    <span class="chat-context-warning-icon">⚡</span>
-    <span class="chat-context-warning-text">上下文窗口已使用 ${usagePercent}%，旧消息将被自动压缩。</span>
-    <div class="chat-context-warning-actions">
-      <button class="chat-context-warning-btn" data-action="compress">立即压缩</button>
-      <button class="chat-context-warning-btn" data-action="clear">清除对话</button>
-    </div>
-    <button class="chat-context-warning-close" title="关闭">×</button>
-  `;
-
-    warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
-    warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
-    warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
-
-    // 插入到 composer bar 上方
-    composerBar.parentElement.insertBefore(warning, composerBar);
+    // const existing = document.querySelector(".chat-context-warning");
+    // if (existing) existing.remove();
+    //
+    // // 占用 < 80% 不显示
+    // if (usagePercent < 80) return;
+    //
+    // const composerBar = document.querySelector(".chat-composer-bar");
+    // if (!composerBar) return;
+    //
+    // const warning = document.createElement("div");
+    // warning.className = "chat-context-warning";
+    // warning.innerHTML = `
+    //   <span class="chat-context-warning-icon">⚡</span>
+    //   <span class="chat-context-warning-text">上下文窗口已使用 ${usagePercent}%，旧消息将被自动压缩。</span>
+    //   <div class="chat-context-warning-actions">
+    //     <button class="chat-context-warning-btn" data-action="compress">立即压缩</button>
+    //     <button class="chat-context-warning-btn" data-action="clear">清除对话</button>
+    //   </div>
+    //   <button class="chat-context-warning-close" title="关闭">×</button>
+    // `;
+    //
+    // warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
+    // warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
+    // warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
+    //
+    // // 插入到 composer bar 上方
+    // composerBar.parentElement.insertBefore(warning, composerBar);
 }
 
 /**

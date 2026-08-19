@@ -219,7 +219,7 @@ function renderPopup(snapshot) {
 /**
  * 格式化 token 数（万级别用万单位）。
  */
-function fmtTokens(n) {
+export function fmtTokens(n) {
     if (n >= 10000) {
         return `${(n / 10000).toFixed(1)}万`;
     }
@@ -229,14 +229,25 @@ function fmtTokens(n) {
 /**
  * 上：上下文容量（含提示词统计）。
  */
-function renderContextSection(s) {
+export function renderContextSection(s) {
     const percent = Math.min(s.usage_percent, 100);
     const limit = s.context_limit || 0;
     const tokens = s.estimated_tokens || 0;
     const preambleTokens = s.preamble_tokens || 0;
     const pendingTokens = s.pending_message_tokens || 0;
-    // 历史 token = 总计 - 提示词 - 待发消息
-    const historyTokens = Math.max(0, tokens - preambleTokens - pendingTokens);
+    // 0.21.17: 优先使用后端提供的 history_tokens，否则回退计算
+    const historyTokens = s.history_tokens != null
+        ? s.history_tokens
+        : Math.max(0, tokens - preambleTokens - pendingTokens);
+    const toolsTokens = s.tools_tokens || 0;
+    const protocolOverhead = s.protocol_overhead_tokens || 0;
+    const multimodalTokens = s.multimodal_tokens || 0;
+    const reservedOutput = s.reserved_output_tokens || 0;
+    const safetyMargin = s.safety_margin_tokens || 0;
+    const effectiveInputLimit = s.effective_input_limit || 0;
+    const remainingTokens = s.remaining_tokens != null ? s.remaining_tokens : Math.max(0, effectiveInputLimit - tokens);
+    const contextLimitSource = s.context_limit_source || "";
+    const confidence = s.confidence || "";
 
     if (limit === 0) {
         return `
@@ -250,10 +261,23 @@ function renderContextSection(s) {
 
     const color = percent < 60 ? "var(--text-faint)" : percent < 80 ? "var(--warning, #ffc107)" : "var(--danger, #f44336)";
 
+    // 0.21.17: context limit 来源标签
+    const sourceLabel = contextLimitSource === "fallback"
+        ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
+        : contextLimitSource === "provider_metadata"
+        ? `<span class="cbp-context-source" title="从供应商元数据获取">供应商</span>`
+        : "";
+    // 0.21.17: 置信度标签
+    const confidenceLabel = confidence === "low"
+        ? `<span class="cbp-confidence cbp-confidence-low" title="包含多模态内容，估算精度较低">低精度</span>`
+        : confidence === "medium"
+        ? `<span class="cbp-confidence" title="包含工具定义，估算精度中等">中精度</span>`
+        : "";
+
     return `
     <div class="cbp-section-header">
       <span class="cbp-section-title">上下文容量</span>
-      <span class="cbp-section-count">${percent}%</span>
+      <span class="cbp-section-count">${percent}%${sourceLabel}${confidenceLabel}</span>
     </div>
     <div class="cbp-context-bar">
       <div class="cbp-context-bar-fill" style="width: ${percent}%; background: ${color}"></div>
@@ -276,14 +300,44 @@ function renderContextSection(s) {
         <span class="cbp-breakdown-label">当前消息</span>
         <span class="cbp-breakdown-value">${fmtTokens(pendingTokens)}</span>
       </div>` : ""}
+      ${toolsTokens > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">工具定义</span>
+        <span class="cbp-breakdown-value">${fmtTokens(toolsTokens)}</span>
+      </div>` : ""}
+      ${protocolOverhead > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">协议开销</span>
+        <span class="cbp-breakdown-value">${fmtTokens(protocolOverhead)}</span>
+      </div>` : ""}
+      ${multimodalTokens > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">多模态</span>
+        <span class="cbp-breakdown-value">${fmtTokens(multimodalTokens)}</span>
+      </div>` : ""}
+      <div class="cbp-breakdown-divider"></div>
+      ${reservedOutput > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">输出预留</span>
+        <span class="cbp-breakdown-value">${fmtTokens(reservedOutput)}</span>
+      </div>` : ""}
+      ${safetyMargin > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">安全余量</span>
+        <span class="cbp-breakdown-value">${fmtTokens(safetyMargin)}</span>
+      </div>` : ""}
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">安全剩余</span>
+        <span class="cbp-breakdown-value cbp-breakdown-remaining">${fmtTokens(remainingTokens)}</span>
+      </div>
       ${s.last_compressed ? `
       <div class="cbp-breakdown-row">
-        <span class="cbp-breakdown-label">⚡ 已压缩</span>
+        <span class="cbp-breakdown-label">已压缩</span>
         <span class="cbp-breakdown-value">${s.last_compressed_count} 条</span>
       </div>` : ""}
       ${s.last_recall_count > 0 ? `
       <div class="cbp-breakdown-row">
-        <span class="cbp-breakdown-label">🔗 已召回</span>
+        <span class="cbp-breakdown-label">已召回</span>
         <span class="cbp-breakdown-value">${s.last_recall_count} 条</span>
       </div>` : ""}
     </div>

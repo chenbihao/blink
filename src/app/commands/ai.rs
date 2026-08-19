@@ -278,6 +278,7 @@ async fn persist_live_assistant(
 /// 0.17.6：`target_window`（默认 "chat"）+ `ephemeral`（默认 false）参数。
 /// 主窗口 AI 传 `target_window="main"` + `ephemeral=true`，使用临时对话记忆。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_prompt(
     app: tauri::AppHandle,
     conversation_id: String,
@@ -363,7 +364,7 @@ pub async fn chat_prompt(
         target_window = %target,
         kind = ?kind,
         message = %message,
-        message_tokens = crate::domain::ai::memory::estimate_tokens(&message),
+        message_tokens = crate::domain::ai::token_budget::estimate_text_tokens(&message),
         "chat_prompt: 收到对话请求"
     );
 
@@ -422,13 +423,9 @@ pub async fn chat_prompt(
 
             // 0.21.16: 汇总字段采集——Done 的 token 用量 / tool 调用次数
             match &chunk {
-                crate::domain::ai::agent_provider::ChatStreamChunk::Done {
-                    input_tokens,
-                    output_tokens,
-                    ..
-                } => {
-                    last_input_tokens = *input_tokens;
-                    last_output_tokens = *output_tokens;
+                crate::domain::ai::agent_provider::ChatStreamChunk::Done { usage, .. } => {
+                    last_input_tokens = usage.input_tokens;
+                    last_output_tokens = usage.output_tokens;
                 }
                 crate::domain::ai::agent_provider::ChatStreamChunk::ToolCall { .. } => {
                     tool_count += 1;
@@ -500,8 +497,7 @@ pub async fn chat_prompt(
                 request_id,
                 conversation_id: conv_id_clone.clone(),
                 chunk: crate::domain::ai::agent_provider::ChatStreamChunk::Done {
-                    input_tokens: 0,
-                    output_tokens: 0,
+                    usage: crate::domain::ai::message::Usage::unreported(),
                     model_name: None,
                 },
             };

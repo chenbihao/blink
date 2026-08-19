@@ -34,6 +34,37 @@ pub struct ComposerBarSnapshot {
     pub preamble_tokens: usize,
     /// 当前待发消息估算 token 数。
     pub pending_message_tokens: usize,
+    // ── 0.21.17 扩展：token 预算分项 ──
+    /// 历史消息估算 token 数。
+    #[serde(default)]
+    pub history_tokens: usize,
+    /// 工具定义估算 token 数。
+    #[serde(default)]
+    pub tools_tokens: usize,
+    /// 协议开销 token 数。
+    #[serde(default)]
+    pub protocol_overhead_tokens: usize,
+    /// 多模态内容保守估算 token 数。
+    #[serde(default)]
+    pub multimodal_tokens: usize,
+    /// 输出预留 token 数。
+    #[serde(default)]
+    pub reserved_output_tokens: usize,
+    /// 安全余量 token 数。
+    #[serde(default)]
+    pub safety_margin_tokens: usize,
+    /// 有效输入上限（context_limit - reserved_output - safety_margin）。
+    #[serde(default)]
+    pub effective_input_limit: usize,
+    /// 安全剩余 token 数。
+    #[serde(default)]
+    pub remaining_tokens: usize,
+    /// context limit 来源（"configured" / "fallback"）。
+    #[serde(default)]
+    pub context_limit_source: String,
+    /// 估算置信度（"high" / "medium" / "low"）。
+    #[serde(default)]
+    pub confidence: String,
     // ── 中：内置工具 ──
     pub builtin_tools: Vec<BuiltinToolSummary>,
     // ── 下：MCP 服务 ──

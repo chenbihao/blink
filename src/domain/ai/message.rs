@@ -137,12 +137,112 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-/// Token usage(供应商返回时填充,骨架层不承诺准确性)。
+/// Token usage（供应商返回时填充，骨架层不承诺准确性）。
+///
+/// **0.21.17: 全仓唯一生产 Usage 类型**——`token_budget::FullUsage` 已删除，
+/// `ChatStreamChunk::Done`、`UsageCalibrator`、`CompletionResponse` 全部使用此类型。
+///
+/// 完整保留 Rig 0.42 的七个 usage 字段 + `reported` 标记。
+/// 零值是"供应商没有报告 usage"的约定哨兵，不能直接解释为真实零消耗。
+/// `reported` 字段区分"未报告"和"真实零"，使用 Rig `Usage::has_values()` 语义。
+///
+/// 旧字段 `input_tokens` / `output_tokens` 保持不变，新字段使用 `#[serde(default)]`
+/// 确保旧前端消费端不受影响。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
-#[allow(dead_code)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// 总 token 数（input + output + cache 等）。
+    #[serde(default)]
+    pub total_tokens: u32,
+    /// 缓存命中的输入 token 数（prompt caching）。
+    #[serde(default)]
+    pub cached_input_tokens: u32,
+    /// 缓存创建写入的 token 数（prompt caching 首次写入成本）。
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    /// 工具定义 prompt token 数。
+    #[serde(default)]
+    pub tool_use_prompt_tokens: u32,
+    /// 推理（thinking/reasoning）token 数。
+    #[serde(default)]
+    pub reasoning_tokens: u32,
+    /// 供应商是否报告了 usage。`false` = 未报告（零值是哨兵，不是真实零消耗）。
+    /// 使用 Rig `Usage::has_values()` 语义：Rig Usage 全零时 `reported = false`。
+    #[serde(default)]
+    pub reported: bool,
+}
+
+impl Usage {
+    /// 从 Rig `Usage` 构造——**全仓唯一 from_rig_usage 映射**。
+    ///
+    /// 安全饱和转换 u64 → u32。
+    /// `reported` 使用 Rig `Usage::has_values()` 语义：
+    /// - Rig Usage 全零（= `new()`）→ `reported = false`（供应商未报告）
+    /// - Rig Usage 任一字段非零 → `reported = true`
+    ///
+    /// 这覆盖了 cache-only / reasoning-only / tool-use-only 等部分报告场景。
+    pub fn from_rig_usage(rig_usage: &rig_core::completion::Usage) -> Self {
+        Self {
+            input_tokens: saturate_u64_to_u32(rig_usage.input_tokens),
+            output_tokens: saturate_u64_to_u32(rig_usage.output_tokens),
+            total_tokens: saturate_u64_to_u32(rig_usage.total_tokens),
+            cached_input_tokens: saturate_u64_to_u32(rig_usage.cached_input_tokens),
+            cache_creation_input_tokens: saturate_u64_to_u32(rig_usage.cache_creation_input_tokens),
+            tool_use_prompt_tokens: saturate_u64_to_u32(rig_usage.tool_use_prompt_tokens),
+            reasoning_tokens: saturate_u64_to_u32(rig_usage.reasoning_tokens),
+            reported: rig_usage.has_values(),
+        }
+    }
+
+    /// 未报告的 usage（所有字段为零，`reported` = false）。
+    pub fn unreported() -> Self {
+        Self {
+            reported: false,
+            ..Default::default()
+        }
+    }
+
+    /// 累加另一个 usage（多轮 Agent 累加不丢字段）。
+    #[allow(dead_code)]
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.tool_use_prompt_tokens = self
+            .tool_use_prompt_tokens
+            .saturating_add(other.tool_use_prompt_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
+        // 只要有一方报告了，就标记为已报告
+        self.reported = self.reported || other.reported;
+    }
+
+    /// 是否有实质性的 token 消耗（用于区分空响应）。
+    ///
+    /// `reported = false` 时一律返回 `false`（未报告不等于真实零消耗，但也不等于有消耗）。
+    /// `reported = true` 时任一字段 > 0 返回 `true`。
+    #[allow(dead_code)]
+    pub fn has_real_usage(&self) -> bool {
+        self.reported
+            && (self.input_tokens > 0
+                || self.output_tokens > 0
+                || self.total_tokens > 0
+                || self.cached_input_tokens > 0
+                || self.cache_creation_input_tokens > 0
+                || self.tool_use_prompt_tokens > 0
+                || self.reasoning_tokens > 0)
+    }
+}
+
+/// 安全将 u64 饱和转换为 u32。
+fn saturate_u64_to_u32(v: u64) -> u32 {
+    v.min(u32::MAX as u64) as u32
 }
 
 /// AI 调用请求。

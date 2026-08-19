@@ -11,7 +11,8 @@ use std::time::UNIX_EPOCH;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
 
-use crate::domain::ai::memory::estimate_tokens;
+// 0.21.17: 统一使用 `token_budget` 模块的 `estimate_text_tokens`。
+use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens;
 use crate::domain::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
     ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,

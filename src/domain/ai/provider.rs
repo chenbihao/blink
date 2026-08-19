@@ -161,6 +161,8 @@ pub mod tests {
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        reported: true,
+                        ..Default::default()
                     },
                     first_token_ms: 42,
                     total_ms: 87,

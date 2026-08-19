@@ -727,7 +727,7 @@ export const zh = {
     "ai.memory.compress_ratio.label": "裁剪目标（%）",
     "ai.memory.compress_ratio.hint": "裁剪后保留消息的目标 token 占比。较早消息仍保存在当前持久对话中",
     "ai.memory.context_size.label": "当前模型上下文窗口",
-    "ai.memory.context_size.hint": "主档模型的上下文窗口大小。决定 Token 感知模式的上限。缺失时使用保守默认 8K",
+    "ai.memory.context_size.hint": "主档模型的上下文窗口大小。决定 Token 感知模式的上限。缺失时使用保守默认 32K",
     "ai.memory.context_size.unconfigured": "未配置",
     "ai.memory.context_size.unknown": "未知",
     // 0.13.2 FTS5 召回

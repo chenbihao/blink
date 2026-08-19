@@ -53,7 +53,7 @@ export let ephemeralMode = false;
  */
 export const toolCalls = new Map();
 
-/** @type {{input_tokens: number, output_tokens: number}|null} 最近一次 Done 的 token 用量 */
+/** @type {{input_tokens: number, output_tokens: number, total_tokens?: number, reasoning_tokens?: number, cached_input_tokens?: number, reported?: boolean}|null} 最近一次 Done 的 token 用量 */
 export let lastUsage = null;
 
 /**

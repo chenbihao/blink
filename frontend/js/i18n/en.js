@@ -726,7 +726,7 @@ export const en = {
     "ai.memory.compress_ratio.label": "Trim Target (%)",
     "ai.memory.compress_ratio.hint": "Target token ratio retained after trimming. Earlier messages remain stored in the current persistent conversation",
     "ai.memory.context_size.label": "Current Model Context Window",
-    "ai.memory.context_size.hint": "Main tier model's context window size. Determines the Token Aware mode upper limit. Falls back to conservative 8K default when missing",
+    "ai.memory.context_size.hint": "Main tier model's context window size. Determines the Token Aware mode upper limit. Falls back to conservative 32K default when missing",
     "ai.memory.context_size.unconfigured": "Not configured",
     "ai.memory.context_size.unknown": "Unknown",
     // 0.13.2 FTS5 recall

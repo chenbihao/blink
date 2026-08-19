@@ -79,46 +79,11 @@ pub fn build_prompt_infos(
         .collect()
 }
 
-// ── token 估算 ─────────────────────────────────────────────────────────────────
+// ── token 估算（0.21.17 收敛到 `token_budget`）──────────────────────────────────
 
-/// 估算文本的 token 数（启发式，非精确 BPE）。
-///
-/// **为什么不用 `tiktoken-rs`**：文档 §3.8 提到 `tiktoken-rs`，但该 crate 捆绑
-/// ~1.8MB BPE 词表，对"仅监控告警"的场景过重。启发式估算在 ±20% 内足够判断
-/// 是否超 5000 阈值。若 0.12 本地模型需要精确 token 计数（context window 截断），
-/// 再引入 `tiktoken-rs` 替换此函数。
-///
-/// **估算规则**：
-/// - CJK 字符（中日韩统一表意文字 + 韩文 + 全角符号）：1 token/char
-/// - 其他字符（ASCII 字母/数字/标点/空格）：4 char/token（向上取整）
-///
-/// 这个规则基于 GPT tokenizer 的经验观察：CJK 文本约 1 token/字，英文约
-/// 4 char/token。混合文本按字符类型分别计数后求和。
-pub fn estimate_tokens(text: &str) -> usize {
-    let mut cjk = 0usize;
-    let mut other = 0usize;
-    for ch in text.chars() {
-        if is_cjk(ch) {
-            cjk += 1;
-        } else {
-            other += 1;
-        }
-    }
-    // CJK: ~1 token/char; 非 CJK: ~4 char/token（向上取整）
-    cjk + other.div_ceil(4)
-}
-
-/// 判断字符是否为 CJK（中日韩统一表意文字 + 韩文 + 全角符号）。
-fn is_cjk(ch: char) -> bool {
-    let code = ch as u32;
-    matches!(
-        code,
-        0x3000..=0x9FFF   // CJK 符号和标点 + 统一表意文字 + 假名
-        | 0xAC00..=0xD7AF // 韩文音节
-        | 0xF900..=0xFAFF // CJK 兼容表意文字
-        | 0xFF00..=0xFFEF // 半角/全角形式
-    )
-}
+// 0.21.17: `estimate_tokens` 和 `is_cjk` 已收敛到 `token_budget` 模块。
+// 此处重导出保持 `crate::domain::ai::prompt::estimate_tokens` 调用路径兼容。
+pub use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens;
 
 // ── system prompt 构建 ──────────────────────────────────────────────────────────
 

@@ -190,6 +190,50 @@
     font-family: ui-monospace, Consolas, monospace;
 }
 
+/* 0.21.17: 统一 token 预算扩展样式 */
+
+.cbp-breakdown-divider {
+    height: 1px;
+    background: var(--surface-2, #45475a);
+    margin: 6px 0;
+    opacity: 0.5;
+}
+
+.cbp-breakdown-remaining {
+    color: var(--primary, #89b4fa);
+    font-weight: 600;
+}
+
+.cbp-context-source {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    background: var(--surface-2, #45475a);
+    color: var(--text-dim, #6c7086);
+    vertical-align: middle;
+}
+
+.cbp-context-source-fallback {
+    color: var(--warning, #ffc107);
+}
+
+.cbp-confidence {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    background: var(--surface-2, #45475a);
+    color: var(--text-dim, #6c7086);
+    vertical-align: middle;
+}
+
+.cbp-confidence-low {
+    color: var(--warning, #ffc107);
+}
+
 .cbp-context-empty {
     font-size: 11px;
     color: var(--text-dim, #6c7086);

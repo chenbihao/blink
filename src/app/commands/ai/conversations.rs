@@ -302,21 +302,22 @@ fn resolve_title_model(
     use crate::app::ai_config::Tier;
 
     // 自选模型：显式解析，失败回退超轻档
-    if let Some((pid, mid)) = policy.split_once(':') {
-        if !pid.is_empty() && !mid.is_empty() {
-            return match registry.resolve_explicit(pid, mid) {
-                Ok(p) => Ok(p),
-                Err(crate::domain::ai::provider::AIError::NotConfigured) => {
-                    tracing::warn!(
-                        provider_id = pid,
-                        model_id = mid,
-                        "标题生成：自选命名模型不可用，回退超轻档"
-                    );
-                    registry.resolve(Tier::UltraLight).map(|(p, _)| p)
-                }
-                Err(other) => Err(other),
-            };
-        }
+    if let Some((pid, mid)) = policy.split_once(':')
+        && !pid.is_empty()
+        && !mid.is_empty()
+    {
+        return match registry.resolve_explicit(pid, mid) {
+            Ok(p) => Ok(p),
+            Err(crate::domain::ai::provider::AIError::NotConfigured) => {
+                tracing::warn!(
+                    provider_id = pid,
+                    model_id = mid,
+                    "标题生成：自选命名模型不可用，回退超轻档"
+                );
+                registry.resolve(Tier::UltraLight).map(|(p, _)| p)
+            }
+            Err(other) => Err(other),
+        };
     }
     // 档位策略：默认超轻档
     let tier = match policy {

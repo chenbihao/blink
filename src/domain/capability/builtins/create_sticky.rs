@@ -160,7 +160,10 @@ mod tests {
 
     #[test]
     fn parse_content_trims_and_keeps_text() {
-        assert_eq!(parse_content(&json!({"content": "  hello  "})).unwrap(), "hello");
+        assert_eq!(
+            parse_content(&json!({"content": "  hello  "})).unwrap(),
+            "hello"
+        );
     }
 
     #[test]

@@ -93,7 +93,7 @@ impl<M: RigCompletionModel> RigProvider<M> {
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
     /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
     /// `base_url` 仅用于按供应商判定 thinking 关闭补丁（DeepSeek vs OpenAI 兼容）。
-    #[allow(dead_code)] // 0.9.2 Phase 5b 由 factory 消费
+    #[allow(dead_code, clippy::too_many_arguments)] // 0.9.2 Phase 5b 由 factory 消费
     pub(crate) fn new(
         kind: ProviderKind,
         model_id: impl Into<String>,
@@ -256,9 +256,12 @@ where
         let _ = tx.send(StreamChunk::Done {
             tool_calls,
             // usage 在流结束后从 streaming_resp 聚合状态取
+            // 0.21.17: 流式模式下多数供应商不返回 usage，标记为未报告
             usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,
+                reported: false,
+                ..Default::default()
             },
         });
 
@@ -479,9 +482,21 @@ pub(crate) fn map_rig_response(
         Some(texts.join("\n"))
     };
 
+    // 0.21.17: 完整保留 Rig 的七个 usage 字段 + reported 标记
     let usage = Usage {
         input_tokens: rig_resp.usage.input_tokens.min(u32::MAX as u64) as u32,
         output_tokens: rig_resp.usage.output_tokens.min(u32::MAX as u64) as u32,
+        total_tokens: rig_resp.usage.total_tokens.min(u32::MAX as u64) as u32,
+        cached_input_tokens: rig_resp.usage.cached_input_tokens.min(u32::MAX as u64) as u32,
+        cache_creation_input_tokens: rig_resp
+            .usage
+            .cache_creation_input_tokens
+            .min(u32::MAX as u64) as u32,
+        tool_use_prompt_tokens: rig_resp.usage.tool_use_prompt_tokens.min(u32::MAX as u64) as u32,
+        reasoning_tokens: rig_resp.usage.reasoning_tokens.min(u32::MAX as u64) as u32,
+        reported: rig_resp.usage.input_tokens > 0
+            || rig_resp.usage.output_tokens > 0
+            || rig_resp.usage.total_tokens > 0,
     };
 
     CompletionResponse {
@@ -760,8 +775,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("You are helpful."));
         assert_eq!(rig.chat_history.len(), 1);
     }
@@ -780,8 +795,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("a\nb"));
     }
 
@@ -797,8 +812,8 @@ mod tests {
             temperature: Some(0.2),
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         assert_eq!(rig.tools.len(), 2);
         assert_eq!(rig.tools[0].name, "open_settings");
         assert_eq!(rig.tools[1].name, "lock");
@@ -861,8 +876,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("feedback prompt"));
         // system 不进 chat_history;4 条消息中 1 条 system → chat_history 3 条
         assert_eq!(rig.chat_history.len(), 3);
@@ -880,8 +895,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         assert_eq!(rig.chat_history.len(), 2);
     }
 
@@ -909,8 +924,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         // 应成功构建（不返回 Serialization 错误）
         assert_eq!(rig.chat_history.len(), 3);
     }
@@ -929,8 +944,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+            .unwrap();
         assert_eq!(rig.chat_history.len(), 2);
     }
 
@@ -949,7 +964,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let result = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None);
+        let result =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None);
         assert!(
             matches!(result, Err(AIError::Serialization(ref msg)) if msg.contains("tool_name")),
             "缺少 tool_name 时应返回 Serialization 错误，实际: {result:?}"

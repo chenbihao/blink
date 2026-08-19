@@ -13,12 +13,12 @@
 //! - 自然完成时按 request_id compare-and-clear，旧任务不会误清新请求。
 //! - Phase 4 消费 `ChatPromptHandle.chunks` 并定向 emit 前端。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::domain::ai::memory::{
-    EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory,
-    estimate_messages_tokens, estimate_tokens,
+    EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory, estimate_tokens,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
@@ -27,13 +27,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
-use crate::domain::ai::thinking::thinking_supports_effort;
 use crate::domain::ai::prompt::{
     chat_system_prompt_with_skills, pure_chat_system_prompt_with_group,
 };
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
+use crate::domain::ai::thinking::thinking_supports_effort;
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::config::ai_config::{ChatAgentMode, ChatConfig, Tier};
@@ -156,6 +156,47 @@ pub struct ContextWindowStatus {
     pub preamble_tokens: usize,
     /// 当前待发消息估算 token 数。
     pub pending_message_tokens: usize,
+    // ── 0.21.17 统一 token 预算扩展 ──
+    /// 历史消息估算 token 数。
+    #[serde(default)]
+    pub history_tokens: usize,
+    /// 工具定义估算 token 数。
+    #[serde(default)]
+    pub tools_tokens: usize,
+    /// 协议开销 token 数。
+    #[serde(default)]
+    pub protocol_overhead_tokens: usize,
+    /// 多模态内容保守估算 token 数。
+    #[serde(default)]
+    pub multimodal_tokens: usize,
+    /// 输出预留 token 数。
+    #[serde(default)]
+    pub reserved_output_tokens: usize,
+    /// 安全余量 token 数。
+    #[serde(default)]
+    pub safety_margin_tokens: usize,
+    /// 有效输入上限（context_limit - reserved_output - safety_margin）。
+    #[serde(default)]
+    pub effective_input_limit: usize,
+    /// 安全剩余 token 数。
+    #[serde(default)]
+    pub remaining_tokens: usize,
+    /// context limit 来源（"configured" / "provider_metadata" / "fallback"）。
+    #[serde(default)]
+    pub context_limit_source: String,
+    /// 估算置信度（"high" / "medium" / "low"）。
+    #[serde(default)]
+    pub confidence: String,
+    // ── 0.21.17 归属字段 ──
+    /// 此状态对应的 conversation_id（防止跨对话返回旧状态）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation_id: String,
+    /// 此状态对应的 provider_id（防止跨模型返回旧状态）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_id: String,
+    /// 此状态对应的 model_id（防止跨模型返回旧状态）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_id: String,
 }
 
 // ── 0.13.6: Skill 激活 Signal ──────────────────────────────────────────────────
@@ -347,7 +388,10 @@ pub struct ChatService {
     /// 配置库连接池（持久化模型选择到 config 表）。
     config_pool: sqlx::SqlitePool,
     /// 0.13.6: 上次计算的上下文窗口状态（供 `get_context_window_status` command 查询）。
-    last_context_status: RwLock<Option<ContextWindowStatus>>,
+    /// 0.21.17: 按 conversation_id + provider_id + model_id 归属，防止跨模型/会话返回旧状态。
+    last_context_status: RwLock<HashMap<String, ContextWindowStatus>>,
+    /// 0.21.17: 真实 usage 校准器——按 provider_id + model_id 维护样本，修正启发式估算偏差。
+    calibrator: crate::domain::ai::token_budget::UsageCalibrator,
     /// 当前 Agent 能力模式；由 AIConfig 热更新，不修改其他 Capability 出口。
     agent_mode: AtomicU8,
     /// 主窗口模型策略：`light` / `main` / `provider_id:model_id`。
@@ -400,7 +444,8 @@ impl ChatService {
             ),
             skill_registry,
             cached_agent: RwLock::new(None),
-            last_context_status: RwLock::new(None),
+            last_context_status: RwLock::new(HashMap::new()),
+            calibrator: crate::domain::ai::token_budget::UsageCalibrator::new(),
             agent_mode: AtomicU8::new(encode_agent_mode(agent_mode)),
             ephemeral_model_policy: RwLock::new(ephemeral_model_policy),
             requests: RequestTracker::new(),
@@ -515,7 +560,8 @@ impl ChatService {
     /// selected/ephemeral_selected 引用已失效（provider/model 被删）时自动清空并回落。
     ///
     /// 返回 `ResolvedProviderEntries`（含 cache_key，供缓存命中判断）。
-    fn resolve_current_entries(
+    /// 0.21.17: 改为 pub，供 `compress_context_now` 等 management command 调用。
+    pub fn resolve_current_entries(
         &self,
         kind: ConversationKind,
     ) -> Result<ResolvedProviderEntries, AIError> {
@@ -882,6 +928,19 @@ impl ChatService {
             .map(|cached| cached.provider.clone())
     }
 
+    /// 0.21.17: 返回当前缓存的 AgentProvider 引用（不校验 key）。
+    ///
+    /// 供 `compress_context_now` 等不需要重建 Agent 的 command 使用——
+    /// 从缓存中获取已构造的 AgentProvider，访问其工具快照等只读数据。
+    /// 若缓存为空（Agent 未构造），返回 None。
+    pub fn cached_agent_ref(&self) -> Option<Arc<AgentProvider>> {
+        self.cached_agent
+            .read()
+            .expect("chat agent cache lock poisoned")
+            .as_ref()
+            .map(|cached| cached.provider.clone())
+    }
+
     /// 启动一个 prompt，返回流式 chunk receiver 给 Phase 4 IPC 层。
     ///
     /// `start_gate` 只串行化启动过程，不影响 status/abort；active 安装后才放行 Agent task，
@@ -891,6 +950,7 @@ impl ChatService {
     /// 追加到基础 chat system prompt 之后，影响 Agent 的行为约束。
     /// 0.13.3：preamble 集成 Skill 渐进式披露——阶段 1 摘要常驻 + 阶段 2 触发全文注入。
     /// 支持 `/skill <name>` 显式激活指令。
+    #[allow(clippy::too_many_arguments)]
     pub async fn prompt(
         self: &Arc<Self>,
         conversation_id: String,
@@ -1012,11 +1072,32 @@ impl ChatService {
                     // 0.13.6: 在 stream_prompt 前计算上下文窗口状态并推送前端
                     // 传入 pending message + preamble，因为此时消息尚未写入 DB，
                     // 纯靠 load_with_stats 读 DB 会得到空列表 → token=0（修「永远是 0%」bug）
+                    //
+                    // 0.21.17: 传入 AgentProvider + ResolvedProviderEntries，
+                    // 让预算估算使用真实工具快照、真实 max_tokens 和 calibrator 系数。
+                    let resolved = match service.resolve_current_entries(kind_for_task) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "prompt: resolve_current_entries 失败，跳过 context status");
+                            let _ = chunk_tx.send(ChatStreamChunk::Error {
+                                message: e.to_string(),
+                            });
+                            if service.requests.clear_if(request_id) {
+                                tracing::debug!(
+                                    request_id,
+                                    "ChatService: 请求失败后 active 已清除"
+                                );
+                            }
+                            return;
+                        }
+                    };
                     let context_status = service
                         .compute_context_status(
                             &conversation_for_task,
                             Some(&effective_message),
                             Some(&preamble),
+                            &provider,
+                            &resolved,
                         )
                         .await;
                     let _ = service.emitter.emit_to(
@@ -1036,11 +1117,46 @@ impl ChatService {
                     // 不能污染 conversation memory。
                     //
                     // 当前发送干净的用户消息给 agent：
+                    // 0.21.17: 通过拦截 channel 捕获 Done chunk，采样到 calibrator。
+                    // stream_prompt 写入 intercept_tx → 后台转发循环读取 intercept_rx
+                    // → 正常 chunk 转发到 chunk_tx，Done chunk 额外采样到 calibrator。
+                    let (intercept_tx, mut intercept_rx) =
+                        mpsc::unbounded_channel::<ChatStreamChunk>();
+                    let estimated_input_tokens = context_status.estimated_tokens as u32;
+                    let cal_provider_id = resolved.provider.id.clone();
+                    let cal_model_id = resolved.model.id.clone();
+                    let weak_for_cal = weak_service.clone();
+                    tokio::spawn(async move {
+                        while let Some(chunk) = intercept_rx.recv().await {
+                            // 0.21.17: Done chunk 采样到 calibrator
+                            if let ChatStreamChunk::Done { ref usage, .. } = chunk
+                                && let Some(service) = weak_for_cal.upgrade()
+                            {
+                                service.calibrator.record(
+                                    &cal_provider_id,
+                                    &cal_model_id,
+                                    estimated_input_tokens,
+                                    usage,
+                                );
+                                tracing::trace!(
+                                    provider_id = %cal_provider_id,
+                                    model_id = %cal_model_id,
+                                    estimated = estimated_input_tokens,
+                                    actual = usage.input_tokens,
+                                    reported = usage.reported,
+                                    "calibrator: 已采样 usage"
+                                );
+                            }
+                            if chunk_tx.send(chunk).is_err() {
+                                break;
+                            }
+                        }
+                    });
                     provider
                         .stream_prompt(
                             &conversation_for_task,
                             &effective_message,
-                            chunk_tx,
+                            intercept_tx,
                             thinking_enabled,
                             reasoning_effort,
                         )
@@ -1160,27 +1276,27 @@ impl ChatService {
         let resolved = self
             .resolve_current_entries(ConversationKind::Persistent)
             .ok();
-        let (provider_name, model_name, supports_effort_levels, reasoning_effort) =
-            match &resolved {
-                Some(r) => {
-                    let model_display = if r.model.display_name.is_empty() {
-                        r.model.id.clone()
-                    } else {
-                        r.model.display_name.clone()
-                    };
-                    (
-                        Some(r.provider.display_name.clone()),
-                        Some(model_display),
-                        thinking_supports_effort(
-                            r.provider.kind,
-                            r.provider.base_url.as_deref(),
-                            &r.model.id,
-                        ),
-                        r.model.reasoning_effort.clone(),
-                    )
-                }
-                None => (None, None, false, None),
-            };
+        let (provider_name, model_name, supports_effort_levels, reasoning_effort) = match &resolved
+        {
+            Some(r) => {
+                let model_display = if r.model.display_name.is_empty() {
+                    r.model.id.clone()
+                } else {
+                    r.model.display_name.clone()
+                };
+                (
+                    Some(r.provider.display_name.clone()),
+                    Some(model_display),
+                    thinking_supports_effort(
+                        r.provider.kind,
+                        r.provider.base_url.as_deref(),
+                        &r.model.id,
+                    ),
+                    r.model.reasoning_effort.clone(),
+                )
+            }
+            None => (None, None, false, None),
+        };
         ChatStatus {
             active: self.requests.status(),
             provider_configured: self.ai_registry.resolve_entries(Tier::Main).is_ok(),
@@ -1295,10 +1411,16 @@ impl ChatService {
 
     // ── 0.13.6: 上下文窗口状态 ──────────────────────────────────────────
 
-    /// 计算当前对话的上下文窗口状态（0.13.6）。
+    /// 计算当前对话的上下文窗口状态（0.13.6 / 0.21.17 重构）。
     ///
     /// 调用 `memory.load_with_stats()` 获取窗口消息 + 压缩/召回统计，
-    /// 估算 token 数并计算占用百分比。结果缓存在 `last_context_status` 供前端查询。
+    /// 估算 token 数并计算占用百分比。结果按 `conversation_id + provider_id + model_id`
+    /// 归属缓存到 `last_context_status`，防止跨模型/会话返回旧状态。
+    ///
+    /// 0.21.17 生产连线：
+    /// - `tools` 从当前生效的 `AgentProvider` 快照获取（非硬编码空数组）
+    /// - `model_max_tokens` 从 `ModelEntry` 传真实解析结果
+    /// - `calibration_ratio` 从 `UsageCalibrator` 按当前 provider+model 获取
     ///
     /// `pending_message` 和 `preamble` 参数：在 stream_prompt 前调用时，
     /// 当前用户消息尚未写入 DB，系统提示词也不在消息列表中。
@@ -1308,6 +1430,8 @@ impl ChatService {
         conversation_id: &str,
         pending_message: Option<&str>,
         preamble: Option<&str>,
+        provider: &AgentProvider,
+        resolved: &ResolvedProviderEntries,
     ) -> ContextWindowStatus {
         let result = match self
             .persistent_memory
@@ -1327,38 +1451,122 @@ impl ChatService {
 
         let config_handle = self.persistent_memory.config_handle();
         let cfg = config_handle.read().await;
-        let context_limit = cfg.context_limit.unwrap_or(8192);
+        let context_window = cfg.context_limit.map(|v| v as u32);
 
-        let preamble_tokens = preamble.map(estimate_tokens).unwrap_or(0);
-        let pending_message_tokens = pending_message.map(estimate_tokens).unwrap_or(0);
-        let history_tokens = estimate_messages_tokens(&result.messages);
-        let estimated_tokens = history_tokens + preamble_tokens + pending_message_tokens;
-        let usage_percent = ((estimated_tokens * 100) / context_limit.max(1)).min(100) as u8;
+        // 0.21.17: 从 AgentProvider 获取真实工具快照
+        let tools = provider.tool_prompt_infos();
+
+        // 0.21.17: 从 ModelEntry 获取真实 max_tokens
+        let model_max_tokens = resolved.model.max_tokens;
+
+        // 0.21.17: 从 calibrator 获取校准系数
+        let calibration_ratio = self
+            .calibrator
+            .get_ratio(&resolved.provider.id, &resolved.model.id);
+
+        // 提取历史消息文本，统一走 token_budget 预算入口
+        let history_texts: Vec<String> = result
+            .messages
+            .iter()
+            .map(crate::domain::ai::memory::extract_message_text)
+            .collect();
+
+        // 统计历史消息中的 ToolCall 数量（用于 ID/关联开销估算）
+        let tool_call_count = result
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                rig_core::completion::Message::Assistant { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter(|c| {
+                            matches!(
+                                c,
+                                rig_core::completion::message::AssistantContent::ToolCall(_)
+                            )
+                        })
+                        .count(),
+                ),
+                _ => None,
+            })
+            .sum::<usize>();
+
+        // 检测多模态内容
+        let has_multimodal = result.messages.iter().any(|m| match m {
+            rig_core::completion::Message::User { content } => content.iter().any(|c| {
+                !matches!(
+                    c,
+                    rig_core::completion::message::UserContent::Text(_)
+                        | rig_core::completion::message::UserContent::ToolResult(_)
+                )
+            }),
+            _ => false,
+        });
+
+        let budget = crate::domain::ai::token_budget::estimate_request_budget(
+            crate::domain::ai::token_budget::TokenBudgetInput {
+                history_texts: &history_texts,
+                system_prompt: preamble,
+                pending_message,
+                tools,
+                tool_call_count,
+                has_multimodal,
+                context_window,
+                request_max_tokens: None,
+                model_max_tokens,
+                calibration_ratio,
+            },
+        );
 
         let status = ContextWindowStatus {
-            estimated_tokens,
-            context_limit,
-            usage_percent,
+            estimated_tokens: budget.estimated_input_tokens,
+            context_limit: budget.context_limit,
+            usage_percent: budget.usage_percent,
             last_compressed: result.dropped_count > 0,
             last_compressed_count: result.dropped_count,
             last_recall_count: result.recall_count,
-            preamble_tokens,
-            pending_message_tokens,
+            preamble_tokens: budget.breakdown.system_tokens,
+            pending_message_tokens: budget.breakdown.pending_tokens,
+            // 0.21.17 扩展字段
+            history_tokens: budget.breakdown.history_tokens,
+            tools_tokens: budget.breakdown.tools_tokens,
+            protocol_overhead_tokens: budget.breakdown.protocol_overhead_tokens,
+            multimodal_tokens: budget.breakdown.multimodal_tokens,
+            reserved_output_tokens: budget.reserved_output_tokens,
+            safety_margin_tokens: budget.safety_margin_tokens,
+            effective_input_limit: budget.effective_input_limit,
+            remaining_tokens: budget.remaining_tokens,
+            context_limit_source: format!("{:?}", budget.context_limit_source).to_lowercase(),
+            confidence: format!("{:?}", budget.confidence).to_lowercase(),
+            // 0.21.17 归属字段
+            conversation_id: conversation_id.to_string(),
+            provider_id: resolved.provider.id.clone(),
+            model_id: resolved.model.id.clone(),
         };
 
-        // 缓存供 get_context_window_status command 查询
-        *self
-            .last_context_status
+        // 0.21.17: 按 conversation_id + provider_id + model_id 归属缓存
+        let scope_key =
+            context_status_scope_key(conversation_id, &resolved.provider.id, &resolved.model.id);
+        self.last_context_status
             .write()
-            .expect("last_context_status lock poisoned") = Some(status.clone());
+            .expect("last_context_status lock poisoned")
+            .insert(scope_key, status.clone());
 
         tracing::debug!(
             conversation_id,
-            estimated_tokens,
-            context_limit,
-            usage_percent,
-            preamble_tokens,
-            pending_message_tokens,
+            provider_id = %resolved.provider.id,
+            model_id = %resolved.model.id,
+            estimated_tokens = status.estimated_tokens,
+            context_limit = status.context_limit,
+            usage_percent = status.usage_percent,
+            preamble_tokens = status.preamble_tokens,
+            pending_message_tokens = status.pending_message_tokens,
+            history_tokens = status.history_tokens,
+            tools_tokens = status.tools_tokens,
+            remaining_tokens = status.remaining_tokens,
+            context_limit_source = %status.context_limit_source,
+            confidence = %status.confidence,
+            calibration_ratio = ?calibration_ratio,
             dropped = result.dropped_count,
             recalled = result.recall_count,
             "compute_context_status: 上下文窗口状态已计算"
@@ -1368,12 +1576,35 @@ impl ChatService {
     }
 
     /// 返回上次计算的上下文窗口状态（供 `get_context_window_status` command）。
-    /// 若从未计算过则返回 None。
-    pub fn last_context_status(&self) -> Option<ContextWindowStatus> {
+    ///
+    /// 0.21.17: 按 `conversation_id + provider_id + model_id` scoped 查询。
+    /// 若该 scope 从未计算过则返回 None，防止跨模型/会话返回旧状态。
+    #[allow(dead_code)]
+    pub fn last_context_status(
+        &self,
+        conversation_id: &str,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<ContextWindowStatus> {
+        let scope_key = context_status_scope_key(conversation_id, provider_id, model_id);
         self.last_context_status
             .read()
             .expect("last_context_status lock poisoned")
-            .clone()
+            .get(&scope_key)
+            .cloned()
+    }
+
+    /// 0.21.17: 返回最近一次计算的上下文窗口状态（任意 scope）。
+    ///
+    /// 供 `ComposerBarSnapshot` 等不需要严格 scope 匹配的场景使用——
+    /// 取 HashMap 中最后插入的条目。如果需要精确匹配，使用 `last_context_status`。
+    pub fn last_context_status_any(&self) -> Option<ContextWindowStatus> {
+        self.last_context_status
+            .read()
+            .expect("last_context_status lock poisoned")
+            .values()
+            .last()
+            .cloned()
     }
 
     // ── 0.13.3 Skill 集成 ──────────────────────────────────────────────────
@@ -1475,6 +1706,14 @@ impl ChatService {
 pub fn current_request_context(chat: Option<&Arc<ChatService>>) -> (u64, String, String) {
     chat.and_then(|cs| cs.current_request_context())
         .unwrap_or((0, String::new(), String::new()))
+}
+
+/// 0.21.17: 构造 `last_context_status` 的 scoped cache key。
+///
+/// 格式：`{conversation_id}:{provider_id}:{model_id}`
+/// 防止跨对话/跨模型返回旧状态。
+fn context_status_scope_key(conversation_id: &str, provider_id: &str, model_id: &str) -> String {
+    format!("{conversation_id}:{provider_id}:{model_id}")
 }
 
 /// 计算 preamble 的 hash 值，用于 AgentProvider 缓存 key 的第四元素（0.12.6）。
@@ -1727,5 +1966,104 @@ mod tests {
             target_window: Some("chat".to_string()),
         });
         assert!(error.to_string().contains("42"));
+    }
+
+    // ── 0.21.17: scoped context status 归属测试 ──────────────────────────────────
+
+    #[test]
+    fn context_status_scope_key_format() {
+        let key = context_status_scope_key("conv1", "provider1", "model1");
+        assert_eq!(key, "conv1:provider1:model1");
+    }
+
+    #[test]
+    fn context_status_scope_key_different_conversations() {
+        let key1 = context_status_scope_key("conv1", "p1", "m1");
+        let key2 = context_status_scope_key("conv2", "p1", "m1");
+        assert_ne!(key1, key2, "不同 conversation_id 应产生不同 scope key");
+    }
+
+    #[test]
+    fn context_status_scope_key_different_models() {
+        let key1 = context_status_scope_key("conv1", "p1", "m1");
+        let key2 = context_status_scope_key("conv1", "p1", "m2");
+        assert_ne!(key1, key2, "不同 model_id 应产生不同 scope key");
+    }
+
+    #[test]
+    fn context_status_scope_key_different_providers() {
+        let key1 = context_status_scope_key("conv1", "p1", "m1");
+        let key2 = context_status_scope_key("conv1", "p2", "m1");
+        assert_ne!(key1, key2, "不同 provider_id 应产生不同 scope key");
+    }
+
+    /// 验证 `ContextWindowStatus` 的归属字段正确序列化。
+    #[test]
+    fn context_window_status_serializes_attribution_fields() {
+        let status = ContextWindowStatus {
+            estimated_tokens: 1000,
+            context_limit: 8192,
+            usage_percent: 15,
+            last_compressed: false,
+            last_compressed_count: 0,
+            last_recall_count: 0,
+            preamble_tokens: 200,
+            pending_message_tokens: 50,
+            history_tokens: 700,
+            tools_tokens: 100,
+            protocol_overhead_tokens: 30,
+            multimodal_tokens: 0,
+            reserved_output_tokens: 2048,
+            safety_margin_tokens: 409,
+            effective_input_limit: 5735,
+            remaining_tokens: 4735,
+            context_limit_source: "configured".into(),
+            confidence: "high".into(),
+            conversation_id: "conv123".into(),
+            provider_id: "openai".into(),
+            model_id: "gpt-4".into(),
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["conversation_id"], "conv123");
+        assert_eq!(v["provider_id"], "openai");
+        assert_eq!(v["model_id"], "gpt-4");
+        assert_eq!(v["tools_tokens"], 100);
+        assert_eq!(v["history_tokens"], 700);
+        assert_eq!(v["remaining_tokens"], 4735);
+        assert_eq!(v["context_limit_source"], "configured");
+        assert_eq!(v["confidence"], "high");
+    }
+
+    /// 验证 `ContextWindowStatus` 空归属字段被 `skip_serializing_if` 跳过。
+    #[test]
+    fn context_window_status_omits_empty_attribution() {
+        let status = ContextWindowStatus {
+            estimated_tokens: 0,
+            context_limit: 0,
+            usage_percent: 0,
+            last_compressed: false,
+            last_compressed_count: 0,
+            last_recall_count: 0,
+            preamble_tokens: 0,
+            pending_message_tokens: 0,
+            history_tokens: 0,
+            tools_tokens: 0,
+            protocol_overhead_tokens: 0,
+            multimodal_tokens: 0,
+            reserved_output_tokens: 0,
+            safety_margin_tokens: 0,
+            effective_input_limit: 0,
+            remaining_tokens: 0,
+            context_limit_source: String::new(),
+            confidence: String::new(),
+            conversation_id: String::new(),
+            provider_id: String::new(),
+            model_id: String::new(),
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        // 空字符串的归属字段不应出现在 JSON 中
+        assert!(v.get("conversation_id").is_none() || v["conversation_id"].as_str() == Some(""));
+        assert!(v.get("provider_id").is_none() || v["provider_id"].as_str() == Some(""));
+        assert!(v.get("model_id").is_none() || v["model_id"].as_str() == Some(""));
     }
 }

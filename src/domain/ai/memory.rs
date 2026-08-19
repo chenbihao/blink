@@ -55,7 +55,12 @@ const TOKEN_AWARE_LOAD_BATCH: i64 = 200;
 const TITLE_MAX_CHARS: usize = 50;
 
 /// 保守默认 context limit（ModelEntry.context_window 缺失时使用）。
-const DEFAULT_CONTEXT_LIMIT: usize = 8192;
+const DEFAULT_CONTEXT_LIMIT: usize = 32768;
+
+// 0.21.17: token 估算统一收敛到 `token_budget` 模块，此处仅重导出。
+pub use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens;
+#[allow(unused_imports)]
+pub use crate::domain::ai::token_budget::is_cjk;
 
 // ── MemoryLoadResult（0.13.6）──────────────────────────────────────────────────
 
@@ -100,7 +105,7 @@ pub struct MemoryConfig {
     pub window_size: i64,
 
     /// Context token 上限（从 `ModelEntry.context_window` 注入）。
-    /// None 时使用保守默认（8K）。
+    /// None 时使用保守默认（32K）。
     #[serde(skip)] // 运行时注入，不持久化
     pub context_limit: Option<usize>,
 
@@ -157,48 +162,13 @@ fn default_recall_top_k() -> i64 {
     3
 }
 
-// ── token 估算（0.13.1 §3.3）───────────────────────────────────────────────────
-
-/// 判断字符是否为 CJK 字符（中文/日文/韩文）。
-fn is_cjk(c: char) -> bool {
-    matches!(c as u32,
-        0x4E00..=0x9FFF   // CJK 统一表意文字
-        | 0x3400..=0x4DBF  // CJK 扩展 A
-        | 0x20000..=0x2A6DF // CJK 扩展 B
-        | 0x3040..=0x309F  // 平假名
-        | 0x30A0..=0x30FF  // 片假名
-        | 0xAC00..=0xD7AF   // 韩文音节
-    )
-}
-
-/// 启发式 token 估算（0.13.1 §3.3）。
-///
-/// CJK 字符占比 > 30% 用中文档（chars / 1.5），否则用英文件（chars / 4）。
-/// 误差 ±20% 可接受——压缩阈值留 buffer。
-pub fn estimate_tokens(text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len();
-    let cjk_count = chars.iter().filter(|c| is_cjk(**c)).count();
-    let cjk_ratio = cjk_count as f64 / total as f64;
-
-    let estimate = if cjk_ratio > 0.3 {
-        // 中文为主：1 汉字 ≈ 1-2 token，取 1.5
-        (total as f64 / 1.5) as usize
-    } else {
-        // 英文为主：1 token ≈ 4 chars
-        total / 4
-    };
-
-    estimate.max(1)
-}
+// 0.21.17: `is_cjk` 和 `estimate_tokens` 已收敛到 `token_budget` 模块。
+// 此处通过上方 `pub use` 重导出，保持外部调用路径 `crate::domain::ai::memory::estimate_tokens` 兼容。
 
 /// 从 `Message` 提取文本内容（用于 token 估算）。
 ///
 /// 提取 Text / ToolCall / ToolResult 的文本部分，忽略图片等二进制内容。
-fn extract_message_text(msg: &Message) -> String {
+pub fn extract_message_text(msg: &Message) -> String {
     let mut text = String::new();
     match msg {
         Message::System { content } => {
@@ -352,7 +322,7 @@ impl SqliteConversationMemory {
 
     /// 更新 context_limit（模型切换时调用）。
     ///
-    /// `limit` 为 None 时使用保守默认（8K）。
+    /// `limit` 为 None 时使用保守默认（32K）。
     pub async fn update_context_limit(&self, limit: Option<usize>) {
         let mut cfg = self.config.write().await;
         cfg.context_limit = limit.or(Some(DEFAULT_CONTEXT_LIMIT));

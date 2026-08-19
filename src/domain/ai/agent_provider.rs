@@ -45,8 +45,8 @@ use crate::domain::ai::factory::{
 };
 // 0.17.6: memory 改为 trait object，不再需要具体类型 import
 use crate::domain::ai::provider::AIError;
-use crate::domain::ai::thinking::thinking_request_patch;
 use crate::domain::ai::rig_provider::expose_for_rig;
+use crate::domain::ai::thinking::thinking_request_patch;
 use crate::infra::platform::secret;
 use crate::infra::utils::text::single_line;
 
@@ -57,7 +57,6 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 4096;
 /// 对话窗口流式输出 chunk(emit 前端 `blink://chat-stream`)。
 ///
 /// `run_stream` 消费 rig `MultiTurnStreamItem` 转成此枚举,前端按 `kind` 渲染。
-///
 /// 0.12.2 扩展:
 /// - `ToolCall` 加 `call_id`(`rig internal_call_id`),供与 `ToolResult` 配对。
 /// - 新增 `ToolResult`(来自 `StreamUserItem`),携带摘要(前 50000 字符,图片转 `[image]`)。
@@ -88,11 +87,14 @@ pub enum ChatStreamChunk {
         success: bool,
         summary: String,
     },
-    /// 一轮结束(`FinalResponse`),携带 token 用量 + 模型名。
+    /// 一轮结束（`FinalResponse`），携带 token 用量 + 模型名。
     /// 0.12.3：model_name 供前端在气泡左下角显示。
+    /// 0.21.17：使用统一 `message::Usage` 替代散落的独立字段，`serde(flatten)` 保持 JSON 向后兼容。
     Done {
-        input_tokens: u32,
-        output_tokens: u32,
+        /// 统一 Usage（七字段 + reported）。`serde(flatten)` 展开到 Done 的 JSON 层级。
+        #[serde(flatten)]
+        usage: crate::domain::ai::message::Usage,
+        /// 当前模型显示名（前端在气泡左下角显示）。
         #[serde(skip_serializing_if = "Option::is_none")]
         model_name: Option<String>,
     },
@@ -128,6 +130,10 @@ pub struct AgentProvider {
     kind: ProviderKind,
     base_url: Option<String>,
     model_id: String,
+    /// 0.21.17: 工具定义快照——构造时从 `DynamicTool` + MCP tools 提取，
+    /// 供 `compute_context_status` 估算 tools_tokens 使用。
+    /// 不随 Agent 运行时变化，构造时一次性固化。
+    tool_prompt_infos: Vec<crate::domain::ai::prompt::ToolPromptInfo>,
 }
 
 /// tool loop 上限(§4.4--0.11 主窗口固定 2 次,对话窗口放宽)。
@@ -174,6 +180,11 @@ impl AgentProvider {
 
         // memory 已是 Arc<dyn ConversationMemory>，直接用于 rig AgentBuilder
         let memory_dyn = memory;
+
+        // 0.21.17: 在 tools 被 move 进 build_agent 之前，提取工具定义快照供 token 预算使用。
+        // DynamicTool::definition() 返回 ToolDefinition（name + description + parameters），
+        // rmcp::model::Tool 暴露 name + description + input_schema。
+        let tool_prompt_infos = build_tool_prompt_infos(&tools, &mcp_tools);
 
         // 0.13.x: 将 model 层的 temperature / max_tokens 传入 build_agent，
         // 让 rig AgentBuilder 在构造时固化默认值。Anthropic 的 max_tokens 是必填字段，
@@ -255,7 +266,21 @@ impl AgentProvider {
             kind,
             base_url,
             model_id,
+            tool_prompt_infos,
         })
+    }
+
+    /// 流式 prompt--驱动 agent loop,chunk 经 `tx` emit 前端。
+    ///
+    /// `conversation_id` 贯穿:rig agent 按 id 自动 load/append memory(0.12.1 进程内,
+    /// 0.12.2 持久化)。调用方(commands 层)创建 channel,spawn 此 task,chunk 走
+    /// `blink://chat-stream` 事件。
+    /// 0.21.17: 返回当前 Agent 挂载的工具定义快照，供 token 预算估算使用。
+    ///
+    /// 快照在构造时固化，不随运行时变化。纯 Capability tool 有 hint（来自 manifest），
+    /// MCP tool 无 hint（rmcp Tool 不携带此字段）。
+    pub fn tool_prompt_infos(&self) -> &[crate::domain::ai::prompt::ToolPromptInfo] {
+        &self.tool_prompt_infos
     }
 
     /// 流式 prompt--驱动 agent loop,chunk 经 `tx` emit 前端。
@@ -477,10 +502,9 @@ impl AgentProvider {
                                 .to_string(),
                         }
                     } else {
+                        // 0.21.17: 统一使用 message::Usage::from_rig_usage 映射
                         ChatStreamChunk::Done {
-                            // rig Usage 是 u64,截断到 u32(与 map_rig_response 一致)
-                            input_tokens: usage.input_tokens.min(u32::MAX as u64) as u32,
-                            output_tokens: usage.output_tokens.min(u32::MAX as u64) as u32,
+                            usage: crate::domain::ai::message::Usage::from_rig_usage(&usage),
                             model_name: model_name.clone(),
                         }
                     }
@@ -538,6 +562,45 @@ fn model_display_name(_entry: &ProviderEntry, model: &ModelEntry) -> String {
     } else {
         model.id.clone()
     }
+}
+
+/// 0.21.17: 从 `DynamicTool` + MCP tools 提取 `ToolPromptInfo` 快照。
+///
+/// 在 `AgentProvider::new` 中 `tools` 被 move 进 `build_agent` 之前调用。
+/// - `DynamicTool::definition()` 返回 rig `ToolDefinition`（name + description + parameters）
+/// - `rmcp::model::Tool` 暴露 `name` + `description` + `input_schema`（JsonObject）
+///
+/// MCP tool 的 `input_schema` 是 `Map<String, Value>`，转为 `serde_json::Value::Object`
+/// 以统一到 `ToolPromptInfo.parameters` 的 `Value` 类型。MCP tool 无 `hint` 字段。
+fn build_tool_prompt_infos(
+    tools: &[DynamicTool],
+    mcp_tools: &[(rmcp::model::Tool, rmcp::service::ServerSink)],
+) -> Vec<crate::domain::ai::prompt::ToolPromptInfo> {
+    let mut infos = Vec::with_capacity(tools.len() + mcp_tools.len());
+
+    // 1. DynamicTool（Capability tool）
+    for dt in tools {
+        let def = dt.definition();
+        infos.push(crate::domain::ai::prompt::ToolPromptInfo {
+            name: def.name,
+            description: def.description,
+            parameters: def.parameters,
+            hint: None, // DynamicTool 不携带 hint；hint 在 system prompt 中已拼接
+        });
+    }
+
+    // 2. MCP tool
+    for (tool, _) in mcp_tools {
+        let params = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+        infos.push(crate::domain::ai::prompt::ToolPromptInfo {
+            name: tool.name.to_string(),
+            description: tool.description.as_deref().unwrap_or("").to_string(),
+            parameters: params,
+            hint: None,
+        });
+    }
+
+    infos
 }
 
 /// 从 rig `ToolResult` 提取前端展示摘要(0.12.2 §4.7)。
@@ -799,10 +862,9 @@ mod tests {
         }
         let done = chunks.iter().find_map(|c| match c {
             ChatStreamChunk::Done {
-                input_tokens,
-                output_tokens,
+                usage,
                 model_name: _,
-            } => Some((*input_tokens, *output_tokens)),
+            } => Some((usage.input_tokens, usage.output_tokens)),
             _ => None,
         });
         let (input_tokens, output_tokens) = done.expect("应 emit Done chunk: {chunks:?}");
@@ -838,11 +900,9 @@ mod tests {
         let (input_tokens, _) = chunks
             .iter()
             .find_map(|c| match c {
-                ChatStreamChunk::Done {
-                    input_tokens,
-                    output_tokens,
-                    model_name: _,
-                } => Some((*input_tokens, *output_tokens)),
+                ChatStreamChunk::Done { usage, .. } => {
+                    Some((usage.input_tokens, usage.output_tokens))
+                }
                 _ => None,
             })
             .expect("应 emit Done");
@@ -969,8 +1029,16 @@ mod tests {
         assert_eq!(v["kind"], "thinking");
 
         let done = ChatStreamChunk::Done {
-            input_tokens: 10,
-            output_tokens: 20,
+            usage: crate::domain::ai::message::Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+                cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                tool_use_prompt_tokens: 0,
+                reasoning_tokens: 5,
+                reported: true,
+            },
             model_name: None,
         };
         let v = serde_json::to_value(&done).unwrap();
@@ -1054,9 +1122,9 @@ mod tests {
         crate::infra::data::conversations::init_db(&pool)
             .await
             .expect("init tables");
-        let mem = std::sync::Arc::new(
-            crate::domain::ai::memory::SqliteConversationMemory::new(pool),
-        );
+        let mem = std::sync::Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(
+            pool,
+        ));
 
         // 1. 发出即保存：预写当前 user（与 ChatService::prompt 一致）
         mem.persist_user_message("c1", "hello").await.unwrap();
@@ -1102,5 +1170,98 @@ mod tests {
             1,
             "预写 user 在请求上下文里应恰好 1 次（rig 只追加一次 prompt）: {history:?}"
         );
+    }
+
+    // ── 0.21.17: build_tool_prompt_infos 生产连线测试 ──────────────────────────
+
+    /// 验证 `build_tool_prompt_infos` 从 `DynamicTool` 正确提取 name/description/parameters。
+    #[test]
+    fn build_tool_prompt_infos_extracts_dynamic_tools() {
+        use rig_agent::tool::ToolOutput;
+        let tool1 = DynamicTool::new(
+            "search_apps",
+            "搜索应用",
+            serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}}),
+            |_ctx, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+        );
+        let tool2 = DynamicTool::new(
+            "open_url",
+            "打开网址",
+            serde_json::json!({"type":"object","properties":{"url":{"type":"string"}}}),
+            |_ctx, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+        );
+
+        let infos = build_tool_prompt_infos(&[tool1, tool2], &[]);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].name, "search_apps");
+        assert_eq!(infos[0].description, "搜索应用");
+        assert_eq!(infos[0].parameters["type"], "object");
+        assert!(infos[0].hint.is_none());
+
+        assert_eq!(infos[1].name, "open_url");
+        assert_eq!(infos[1].description, "打开网址");
+    }
+
+    /// 验证 `build_tool_prompt_infos` 空输入返回空列表。
+    #[test]
+    fn build_tool_prompt_infos_empty_returns_empty() {
+        let infos = build_tool_prompt_infos(&[], &[]);
+        assert!(infos.is_empty());
+    }
+
+    /// 验证 `AgentProvider::tool_prompt_infos()` 返回构造时固化的快照。
+    #[tokio::test]
+    async fn agent_provider_tool_prompt_infos_returns_snapshot() {
+        use crate::domain::config::ai_config::{
+            ModelCapability, ModelEntry, ProviderEntry, ProviderKind,
+        };
+        use rig_agent::tool::ToolOutput;
+
+        let tool = DynamicTool::new(
+            "test_tool",
+            "测试工具",
+            serde_json::json!({"type":"object"}),
+            |_ctx, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+        );
+
+        let entry = ProviderEntry {
+            id: "test".into(),
+            display_name: "Test".into(),
+            kind: ProviderKind::OllamaHttp,
+            base_url: Some("http://localhost:11434".into()),
+            secret_ref: String::new(),
+            models: Vec::new(),
+            enabled: true,
+            created_at: 0,
+        };
+        let model = ModelEntry {
+            id: "test-model".into(),
+            display_name: "Test Model".into(),
+            enabled: true,
+            context_window: Some(8192),
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            capabilities: vec![ModelCapability::Chat],
+            reasoning_effort: None,
+            custom_parameters: Vec::new(),
+        };
+
+        let provider = AgentProvider::new(
+            &entry,
+            &model,
+            vec![tool],
+            Vec::new(),
+            "",
+            Arc::new(InMemoryConversationMemory::new()),
+        )
+        .await
+        .expect("AgentProvider 构造成功");
+
+        let infos = provider.tool_prompt_infos();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "test_tool");
+        assert_eq!(infos[0].description, "测试工具");
     }
 }
