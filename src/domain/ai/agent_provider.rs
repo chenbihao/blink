@@ -269,25 +269,28 @@ impl AgentProvider {
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
         thinking_enabled: bool,
+        reasoning_effort: Option<String>,
     ) {
         let model_name = if self.model_name.is_empty() {
             None
         } else {
             Some(self.model_name.clone())
         };
-        // 按 provider + 开关状态计算 thinking 补丁（开/关都显式控制，见 thinking_request_patch）
+        // 按 provider + 开关状态 + 显式等级计算 thinking 补丁（见 thinking_request_patch）
         let thinking_patch = thinking_request_patch(
             self.kind,
             self.base_url.as_deref(),
             &self.model_id,
             thinking_enabled,
+            reasoning_effort.as_deref(),
         );
         // 0.21.16: 思考开关状态打 trace——配合"不隐藏真实思考块"，开关失效时便于及时发现
         tracing::trace!(
             conversation_id = %conversation_id,
             thinking_enabled,
+            reasoning_effort = ?reasoning_effort,
             thinking_patch = ?thinking_patch,
-            "stream_prompt: 思考开关状态"
+            "stream_prompt: 思考开关/强度状态"
         );
         match &self.agent {
             ChatAgent::Agent(a) => {

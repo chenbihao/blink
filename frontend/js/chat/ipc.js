@@ -28,6 +28,20 @@ export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
         targetWindow: opts.targetWindow ?? null,
         ephemeral: opts.ephemeral ?? null,
         thinkingEnabled: opts.thinkingEnabled ?? false,
+        reasoningEffort: opts.reasoningEffort ?? null,
+    });
+}
+
+/**
+ * 设置模型思考强度（0.21.17）。
+ * @param {string} selectionId `"{provider_id}:{model_id}"`
+ * @param {string|null} effort reasoning_effort 线值；null = 清除（auto）
+ * @returns {Promise<boolean>}
+ */
+export function setModelReasoningEffort(selectionId, effort) {
+    return invoke("set_model_reasoning_effort", {
+        selectionId,
+        reasoningEffort: effort ?? null,
     });
 }
 
@@ -42,7 +56,7 @@ export function chatAbort(requestId) {
 
 /**
  * 获取 chat 状态。
- * @returns {Promise<{active: {request_id: number, conversation_id: string}|null, provider_configured: boolean, provider_name: string|null, model_name: string|null}>}
+ * @returns {Promise<{active: {request_id: number, conversation_id: string}|null, provider_configured: boolean, provider_name: string|null, model_name: string|null, supports_effort_levels: boolean, reasoning_effort: string|null}>}
  */
 export function getChatStatus() {
     return invoke("get_chat_status");

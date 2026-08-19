@@ -936,6 +936,7 @@ fn main() {
             app::commands::get_chat_status,
             app::commands::get_chat_models,
             app::commands::select_chat_model,
+            app::commands::set_model_reasoning_effort,
             // 0.17.9: 主窗口 AI 独立模型选择
             app::commands::get_ephemeral_models,
             app::commands::select_ephemeral_model,

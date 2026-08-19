@@ -1401,6 +1401,32 @@
                                    value="4096"/>
                         </div>
                     </div>
+
+                    <!-- 思考强度（0.21.17 + 0.21.18）：reasoning_effort 线值，关=auto(omit)，默认=不发送，自定义留空=不发送 -->
+                    <div class="ai-model-param" id="ai-model-param-reasoning-effort">
+                        <div class="ai-model-param-head">
+                            <label class="setting-label" data-i18n="ai.model_modal.reasoning_effort">思考强度</label>
+                            <label class="switch switch-sm">
+                                <input id="ai-model-edit-reasoning-effort-toggle" type="checkbox"/>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="ai-model-param-body hidden" id="ai-model-param-reasoning-effort-body">
+                            <select id="ai-model-edit-reasoning-effort-select">
+                                <option value="">默认（不发送）</option>
+                                <option value="none">关闭思考（none）</option>
+                                <option value="minimal">极低（minimal）</option>
+                                <option value="low">低（low）</option>
+                                <option value="medium">中（medium）</option>
+                                <option value="high">高（high）</option>
+                                <option value="xhigh">极高（xhigh）</option>
+                                <option value="max">最大（max）</option>
+                                <option value="custom">自定义…</option>
+                            </select>
+                            <input class="ai-model-param-num" id="ai-model-edit-reasoning-effort-custom" type="text"
+                                   placeholder="留空 = 不发送（模型默认档）" hidden/>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- 段三:高级(自定义参数) -->

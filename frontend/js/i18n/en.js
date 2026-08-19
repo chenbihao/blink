@@ -907,6 +907,7 @@ export const en = {
     "ai.model_modal.display_name.ph": "Leave empty to reuse Model ID",
     "ai.model_modal.temperature": "Temperature",
     "ai.model_modal.max_tokens": "Max Output Tokens",
+    "ai.model_modal.reasoning_effort": "Reasoning Effort",
     "ai.model_modal.params.hint": "Leave empty to let the model or calling context decide. This value applies only when the caller does not specify one.",
     "ai.model_modal.custom_params.hint": "Key-value pairs passed to the provider (e.g. top_p, reasoning_effort). Input 0.9 → number, true/false → bool, {...} → JSON.",
     "ai.model_modal.fetch.loading": "Fetching available models…",

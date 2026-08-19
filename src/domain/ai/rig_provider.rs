@@ -106,7 +106,8 @@ impl<M: RigCompletionModel> RigProvider<M> {
     ) -> Self {
         let model_id = model_id.into();
         // 主窗口默认关闭思考（0.21.16）——开/关补丁同一函数，这里取 false 分支
-        let thinking_off_patch = thinking_request_patch(kind, base_url, &model_id, false);
+        // reasoning_effort=None（auto）→ 关 = none；主窗口不暴露思考强度控件
+        let thinking_off_patch = thinking_request_patch(kind, base_url, &model_id, false, None);
         Self {
             kind,
             model_id,

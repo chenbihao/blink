@@ -32,9 +32,6 @@ let onSend = null;
 /** @type {() => void} */
 let onStop = null;
 
-/** @type {(enabled: boolean) => void} */
-let onThinkingToggle = null;
-
 /** @type {boolean} 是否正在语音录音 */
 let voiceRecording = false;
 
@@ -76,7 +73,7 @@ export function filterActiveSkills(skills, query = "") {
 
 /**
  * 初始化 composer。
- * @param {{ onSend: (message: string) => void, onStop: () => void, onThinkingToggle: (enabled: boolean) => void }} callbacks
+ * @param {{ onSend: (message: string) => void, onStop: () => void }} callbacks
  */
 export function initComposer(callbacks) {
     textarea = document.getElementById("chat-input");
@@ -86,7 +83,6 @@ export function initComposer(callbacks) {
     vwBars = voiceIndicator ? voiceIndicator.querySelectorAll(".vw-bar") : [];
     onSend = callbacks.onSend;
     onStop = callbacks.onStop;
-    onThinkingToggle = callbacks.onThinkingToggle;
 
     if (!textarea || !sendBtn) return;
 
@@ -121,15 +117,6 @@ export function initComposer(callbacks) {
 
     // 0.13.3: /skill 命令提示初始化
     skillHintEl = document.getElementById("skill-hint");
-
-    // 深度思考开关
-    if (thinkingBtn) {
-        thinkingBtn.addEventListener("click", () => {
-            const newState = !thinkingBtn.classList.contains("active");
-            thinkingBtn.classList.toggle("active", newState);
-            if (onThinkingToggle) onThinkingToggle(newState);
-        });
-    }
 
     // 初始状态
     updateSendButtonState();
@@ -194,12 +181,18 @@ export function focusInput() {
 }
 
 /**
- * 设置深度思考开关状态。
- * @param {boolean} enabled
+ * 设置思考控件状态（0.21.17）。
+ *
+ * 支持 reasoning_effort 的模型显示「思考 · 档位」标签（label 由 main.js 计算）；
+ * 不支持等级的模型退化为简单开关——`enabled` 控制 `.active` 高亮。
+ * @param {{enabled: boolean, label?: string}} state
  */
-export function setThinkingEnabled(enabled) {
-    if (thinkingBtn) {
-        thinkingBtn.classList.toggle("active", enabled);
+export function setThinkingState({enabled, label}) {
+    if (!thinkingBtn) return;
+    thinkingBtn.classList.toggle("active", enabled);
+    if (label != null) {
+        const labelEl = document.getElementById("chat-thinking-label");
+        if (labelEl) labelEl.textContent = label;
     }
 }
 

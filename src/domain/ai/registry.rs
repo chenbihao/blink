@@ -466,6 +466,7 @@ mod tests {
                             temperature: None,
                             max_tokens: None,
                             custom_parameters: Vec::new(),
+                            reasoning_effort: None,
                             capabilities: vec![ModelCapability::Chat],
                         })
                         .collect(),

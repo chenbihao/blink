@@ -20,7 +20,7 @@ import {
     isVoiceRecording,
     setInputMode,
     setInputValue,
-    setThinkingEnabled as setComposerThinkingEnabled,
+    setThinkingState,
     setStreamingMode,
     showVoiceError,
     showVoiceIndicator,
@@ -85,10 +85,10 @@ async function init() {
     initComposer({
         onSend: handleSend,
         onStop: handleStop,
-        onThinkingToggle: handleThinkingToggle,
     });
-    // 深度思考默认开启：同步状态真源与按钮初始视觉，避免首次点击语义反转。
-    setComposerThinkingEnabled(state.thinkingEnabled);
+    // 0.21.17：思考控件初始视觉按默认态渲染；refreshModelSelector 拉到模型能力后
+    // 再同步真实状态（支持等级 → 强度下拉，否则 → 简单开关）。
+    syncThinkingControl();
 
     // 0.19：chat prefill 投递（revision 机制防残留/防旧事件误删）
     //
@@ -215,6 +215,8 @@ async function init() {
 
     // 模型选择器交互
     bindModelSelector();
+    // 0.21.17：思考控件交互（支持等级 → 下拉；否则 → 简单开关）
+    bindThinkingSelector();
 
     // 0.12.7 §1：面包屑标题编辑（事件委托）
     bindBreadcrumbEdit();
@@ -269,9 +271,12 @@ async function handleSend(message, isEdit = false) {
 
     try {
         // 0.17.6a: 临时对话模式传 ephemeral:true
+        // 0.21.17: 支持等级的模型显式传 reasoning_effort；否则退回 thinkingEnabled
+        const thinkingEnabled = effectiveThinkingEnabled();
+        const reasoningEffort = state.supportsEffort ? state.thinkingEffort : null;
         const opts = state.ephemeralMode
-            ? {ephemeral: true, targetWindow: "chat", thinkingEnabled: state.thinkingEnabled}
-            : {thinkingEnabled: state.thinkingEnabled};
+            ? {ephemeral: true, targetWindow: "chat", thinkingEnabled, reasoningEffort}
+            : {thinkingEnabled, reasoningEffort};
         const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId, opts);
         state.setActiveRequestId(requestId);
 
@@ -427,10 +432,150 @@ async function handleStop() {
     finishStreaming();
 }
 
-// ── 深度思考开关 ────────────────────────────────
+// ── 思考控件（0.21.17：等级下拉 / 简单开关）────────────────
 
-function handleThinkingToggle(enabled) {
-    state.setThinkingEnabled(enabled);
+/** 当前选中模型 id（"{provider}:{model}"），供持久化思考强度用 */
+let currentThinkingModelId = null;
+
+/** 思考等级下拉预设（reasoning_effort 线值，0.21.18 起直接用原文本——
+ * 翻成中文反而对不上供应商档位，如 xhigh/20-50-80）。 */
+const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** 思考强度线值 → 按钮标签文案（null/"" = 默认档：不主动给模型打 patch）。 */
+function effortLabel(effort) {
+    if (effort === null || effort === undefined || effort === "") return "思考 · 默认";
+    if (effort === "none") return "思考关";
+    if (EFFORT_LEVELS.includes(effort)) return "思考 · " + effort;
+    return "思考 · 自定义";
+}
+
+/** 思考是否实际开启（供 payload + thinking chunk 丢弃判断）。 */
+function effectiveThinkingEnabled() {
+    if (state.supportsEffort) return state.thinkingEffort !== "none";
+    return state.thinkingEnabled;
+}
+
+/** 同步思考控件视觉：支持等级的模型显示「思考 · 档位」，否则退化为简单开关。 */
+function syncThinkingControl() {
+    // 无等级概念（简单开关）时隐藏 caret，避免"像有下拉却只是开关"的误导
+    thinkingTrigger?.classList.toggle("no-effort", !state.supportsEffort);
+    if (state.supportsEffort) {
+        setThinkingState({
+            enabled: effectiveThinkingEnabled(),
+            label: effortLabel(state.thinkingEffort),
+        });
+    } else {
+        setThinkingState({enabled: state.thinkingEnabled, label: "深度思考"});
+    }
+}
+
+/** 渲染思考等级下拉（默认档 + 关闭 + 预设档位 + 自定义输入 + 提示）。 */
+function renderThinkingDropdown() {
+    if (!thinkingDropdown) return;
+    const current = state.thinkingEffort ?? ""; // null 与 "" 都视为默认档
+    const isCustom = current !== "" && current !== "none" && !EFFORT_LEVELS.includes(current);
+    let html = "";
+
+    // 默认档（不主动打 patch）+ 关闭
+    html += '<div class="chat-thinking-group">思考</div>';
+    html += `<div class="chat-thinking-option${current === "" ? " chat-thinking-option-selected" : ""}" data-effort="">`;
+    html += '<div class="chat-thinking-option-text">';
+    html += '<span class="chat-thinking-option-title">默认</span>';
+    html += '<span class="chat-thinking-option-sub">不主动给模型打 patch</span>';
+    html += "</div></div>";
+    html += `<div class="chat-thinking-option${current === "none" ? " chat-thinking-option-selected" : ""}" data-effort="none">思考关</div>`;
+
+    // 预设档位（原文本展示，避免中文翻译对不上供应商档位）
+    html += '<div class="chat-thinking-group">思考级别</div>';
+    for (const level of EFFORT_LEVELS) {
+        const selected = current === level;
+        html += `<div class="chat-thinking-option${selected ? " chat-thinking-option-selected" : ""}" data-effort="${level}">${level}</div>`;
+    }
+
+    // 自定义（当前为自定义值时预填）
+    html += '<div class="chat-thinking-group">自定义</div>';
+    html += '<div class="chat-thinking-custom-row">';
+    html += `<input type="text" id="chat-thinking-custom-input" placeholder="留空 = 不发送（模型默认档）" value="${isCustom ? escapeAttr(current) : ""}">`;
+    html += '<button class="chat-thinking-custom-apply" id="chat-thinking-custom-apply">应用</button>';
+    html += "</div>";
+
+    html += '<div class="chat-thinking-hint">该模型支持档位未知：若请求报错，请在此选择或输入一个支持的档位。</div>';
+
+    thinkingDropdown.innerHTML = html;
+}
+
+/** 持久化思考强度并刷新控件（空字符串 = omit 不发送）。 */
+async function applyThinkingEffort(effort) {
+    if (!currentThinkingModelId) return;
+    try {
+        const ok = await ipc.setModelReasoningEffort(currentThinkingModelId, effort);
+        if (ok) {
+            state.setThinkingEffort(effort);
+            syncThinkingControl();
+        } else {
+            console.error("[chat] 设置思考强度失败：模型不存在或已禁用");
+        }
+    } catch (err) {
+        console.error("[chat] 设置思考强度失败:", err);
+    }
+}
+
+/** 绑定思考控件交互：支持等级的模型点击开下拉；否则点击切换简单开关。 */
+function bindThinkingSelector() {
+    thinkingTrigger = document.getElementById("chat-thinking-btn");
+    thinkingDropdown = document.getElementById("chat-thinking-dropdown");
+    if (!thinkingTrigger || !thinkingDropdown) return;
+
+    thinkingTrigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        hideDropdown(); // 0.21.18：先收掉模型下拉，两下拉互斥不同时展开
+        if (state.supportsEffort) {
+            toggleThinkingDropdown();
+        } else {
+            // 简单开关（DeepSeek/Anthropic/Ollama 等无等级概念）
+            state.setThinkingEnabled(!state.thinkingEnabled);
+            syncThinkingControl();
+        }
+    });
+
+    thinkingDropdown.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const opt = e.target.closest(".chat-thinking-option");
+        if (opt && opt.dataset.effort !== undefined) {
+            hideThinkingDropdown();
+            await applyThinkingEffort(opt.dataset.effort);
+            return;
+        }
+        if (e.target.closest("#chat-thinking-custom-apply")) {
+            const input = document.getElementById("chat-thinking-custom-input");
+            const effort = input ? input.value.trim() : "";
+            hideThinkingDropdown();
+            await applyThinkingEffort(effort);
+        }
+    });
+
+    // 点击外部关闭下拉
+    document.addEventListener("click", (e) => {
+        if (!thinkingDropdown.hidden && !thinkingTrigger.contains(e.target)) {
+            hideThinkingDropdown();
+        }
+    });
+}
+
+function toggleThinkingDropdown() {
+    if (thinkingDropdown.hidden) {
+        renderThinkingDropdown();
+        thinkingDropdown.hidden = false;
+        thinkingTrigger.classList.add("active");
+    } else {
+        hideThinkingDropdown();
+    }
+}
+
+function hideThinkingDropdown() {
+    if (!thinkingDropdown) return;
+    thinkingDropdown.hidden = true;
+    if (thinkingTrigger) thinkingTrigger.classList.remove("active");
 }
 
 // ── 流式事件处理 ────────────────────────────────
@@ -444,8 +589,8 @@ function handleStreamEvent(event) {
 
     switch (chunk.kind) {
         case "thinking":
-            // 未启用深度思考时丢弃 thinking chunk
-            if (!state.thinkingEnabled) break;
+            // 未启用深度思考时丢弃 thinking chunk（0.21.17：按有效思考状态判定）
+            if (!effectiveThinkingEnabled()) break;
             state.appendThinkingBuffer(chunk.text);
             state.setThinking(true);
             // 首条 thinking 时创建 assistant DOM
@@ -1178,6 +1323,18 @@ function openSettings() {
 let modelTrigger = null;
 /** @type {HTMLElement} 下拉容器 */
 let modelDropdown = null;
+/** @type {HTMLElement} 供应商模型 flyout（0.21.18：hover 供应商行右侧弹出） */
+let modelFlyout = null;
+/** @type {HTMLElement|null} 当前展开 flyout 的供应商行 */
+let flyoutOwnerRow = null;
+/** @type {number|null} flyout 关闭延迟 timer（§5.3 hover 缓冲） */
+let flyoutCloseTimer = null;
+/** @type {Map<string, Array>|null} provider_name → 模型列表（render 时构建） */
+let providerModels = null;
+/** @type {HTMLElement} 思考控件触发器按钮 */
+let thinkingTrigger = null;
+/** @type {HTMLElement} 思考等级下拉容器 */
+let thinkingDropdown = null;
 
 /**
  * 更新 header 的 provider/model 标签。
@@ -1236,8 +1393,16 @@ async function refreshModelSelector() {
             ipc.getChatStatus(),
         ]);
         state.setProviderConfigured(status.provider_configured);
+        // 0.21.17：从 status 恢复当前生效模型的思考能力（selected 优先，Main 回落）
+        state.setThinkingCapability({
+            effort: status.reasoning_effort ?? null,
+            supportsEffort: status.supports_effort_levels ?? false,
+        });
+        // 记录当前模型 id（"{provider}:{model}"），供思考强度持久化定位
+        currentThinkingModelId = models.find((m) => m.is_selected)?.id ?? null;
         renderModelDropdown(models);
         updateProviderLabel(status);
+        syncThinkingControl();
     } catch (e) {
         console.error("[chat] 刷新模型选择器失败:", e);
     }
@@ -1245,11 +1410,12 @@ async function refreshModelSelector() {
 
 /**
  * 渲染模型选择器下拉。
- * 结构：快捷档（主档/轻量档）+ 分隔线 + 全部模型列表。
+ * 结构：快捷档（主档/轻量档）+ 分隔线 + 启用供应商列表（hover 右侧展开该供应商模型）。
  * @param {Array<{id, provider_name, model_name, is_main, is_light, is_selected}>} models
  */
 function renderModelDropdown(models) {
     if (!modelDropdown) return;
+    hideModelFlyout();
     if (!models || models.length === 0) {
         modelDropdown.innerHTML =
             '<div class="chat-model-empty">暂无可用模型，请先在设置中配置</div>';
@@ -1258,7 +1424,14 @@ function renderModelDropdown(models) {
 
     const mainModel = models.find((m) => m.is_main);
     const lightModel = models.find((m) => m.is_light);
-    const others = models;
+
+    // 按供应商分组（保持出现顺序），供 flyout 渲染与 hover 定位
+    providerModels = new Map();
+    for (const m of models) {
+        const list = providerModels.get(m.provider_name) || [];
+        list.push(m);
+        providerModels.set(m.provider_name, list);
+    }
 
     let html = "";
     // 快捷档区：主档 / 轻量档，显示「档位 · 模型显示名」+ provider 名作为副标题
@@ -1286,22 +1459,86 @@ function renderModelDropdown(models) {
     }
     html += "</div>";
 
-    // 全部模型列表
+    // 供应商列表：hover 右侧弹出该供应商全部模型
     html += '<div class="chat-model-separator"></div>';
     html += '<div class="chat-model-group">';
-    html += '<div class="chat-model-group-title">所有模型</div>';
-    for (const m of others) {
-        html += renderModelOption(
-            m.id,
-            m.model_name,
-            m.provider_name,
-            m.is_selected,
-            ""
-        );
+    html += '<div class="chat-model-group-title">供应商</div>';
+    for (const [provider, list] of providerModels) {
+        html += `<div class="chat-model-provider-row" data-provider="${escapeAttr(provider)}">`;
+        html += `<span class="chat-model-provider-name">${escapeText(provider)}</span>`;
+        html += `<span class="chat-model-provider-count">${list.length}</span>`;
+        html += '<svg class="chat-model-provider-chevron" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>';
+        html += "</div>";
     }
     html += "</div>";
 
     modelDropdown.innerHTML = html;
+
+    // hover 展开 flyout（行每次重渲染，事件绑定在新元素上）
+    modelDropdown.querySelectorAll(".chat-model-provider-row").forEach((row) => {
+        row.addEventListener("mouseenter", () => openModelFlyout(row));
+        row.addEventListener("mouseleave", scheduleCloseModelFlyout);
+    });
+}
+
+/** 在供应商行右侧弹出该供应商的模型 flyout（position: fixed，越界翻转到左侧/钳制上下）。 */
+function openModelFlyout(row) {
+    if (!modelFlyout || !providerModels) return;
+    const provider = row.dataset.provider;
+    const list = provider ? providerModels.get(provider) : null;
+    if (!list || list.length === 0) return;
+
+    cancelCloseModelFlyout();
+    if (flyoutOwnerRow && flyoutOwnerRow !== row) {
+        flyoutOwnerRow.classList.remove("flyout-open");
+    }
+    flyoutOwnerRow = row;
+    row.classList.add("flyout-open");
+
+    // 供应商名已在触发行显示，flyout 贴着该行展开，无需重复标题（0.21.18）
+    let html = "";
+    for (const m of list) {
+        html += renderModelOption(m.id, m.model_name, "", m.is_selected, "");
+    }
+    modelFlyout.innerHTML = html;
+
+    // 先显示再量尺寸（隐藏元素 offsetWidth/Height 为 0）
+    modelFlyout.hidden = false;
+    const rect = row.getBoundingClientRect();
+    const fw = modelFlyout.offsetWidth;
+    const fh = modelFlyout.offsetHeight;
+    let left = rect.right + 4;
+    if (left + fw > window.innerWidth - 8) left = Math.max(8, rect.left - 4 - fw);
+    let top = rect.top;
+    if (top + fh > window.innerHeight - 8) top = Math.max(8, window.innerHeight - 8 - fh);
+    modelFlyout.style.left = left + "px";
+    modelFlyout.style.top = top + "px";
+}
+
+/** 鼠标移出供应商行/ flyout 后延迟关闭（§5.3 hover 缓冲，防跨越间隙误关）。 */
+function scheduleCloseModelFlyout() {
+    if (flyoutCloseTimer) clearTimeout(flyoutCloseTimer);
+    flyoutCloseTimer = setTimeout(() => {
+        flyoutCloseTimer = null;
+        hideModelFlyout();
+    }, 120);
+}
+
+function cancelCloseModelFlyout() {
+    if (flyoutCloseTimer) {
+        clearTimeout(flyoutCloseTimer);
+        flyoutCloseTimer = null;
+    }
+}
+
+/** 隐藏 flyout 并清理供应商行高亮。 */
+function hideModelFlyout() {
+    cancelCloseModelFlyout();
+    if (modelFlyout) modelFlyout.hidden = true;
+    if (flyoutOwnerRow) {
+        flyoutOwnerRow.classList.remove("flyout-open");
+        flyoutOwnerRow = null;
+    }
 }
 
 /**
@@ -1330,42 +1567,58 @@ function renderModelOption(id, label, providerName, selected, badge) {
   </div>`;
 }
 
-/** 绑定模型选择器交互（触发器 toggle + 选项点击 + 外部关闭） */
+/** 绑定模型选择器交互（触发器 toggle + 选项点击 + 供应商 flyout + 外部关闭） */
 function bindModelSelector() {
     modelTrigger = document.getElementById("chat-model-trigger");
     modelDropdown = document.getElementById("chat-model-dropdown");
+    modelFlyout = document.getElementById("chat-model-flyout");
     if (!modelTrigger || !modelDropdown) return;
 
-    // 触发器点击 toggle 下拉
+    // 触发器点击 toggle 下拉（0.21.18：先收掉思考下拉，两下拉互斥不同时展开）
     modelTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
+        hideThinkingDropdown();
         toggleDropdown();
     });
 
     // 下拉项点击（事件委托，因 innerHTML 重渲染）
     // 0.12.4 §6.2：加 stopPropagation 阻止事件冒泡到 trigger，避免 hideDropdown 后被 toggle 重开
-    modelDropdown.addEventListener("click", async (e) => {
+    modelDropdown.addEventListener("click", (e) => {
         e.stopPropagation();
         const opt = e.target.closest(".chat-model-option");
-        if (!opt) return;
-        const id = opt.dataset.modelId || null;
-        hideDropdown();
-        try {
-            const ok = await ipc.selectChatModel(id);
-            if (ok) {
-                await refreshModelSelector();
-            }
-        } catch (err) {
-            console.error("[chat] 切换模型失败:", err);
-        }
+        if (opt) selectChatModel(opt.dataset.modelId || null);
     });
 
-    // 点击外部关闭下拉（下拉现在在触发器内部，所以检查点击是否在触发器外）
+    // flyout 内模型点击（position: fixed，独立于下拉的委托）
+    modelFlyout.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const opt = e.target.closest(".chat-model-option");
+        if (opt) selectChatModel(opt.dataset.modelId || null);
+    });
+
+    // hover 缓冲：flyout 悬停取消关闭（§5.3）
+    modelFlyout.addEventListener("mouseenter", cancelCloseModelFlyout);
+    modelFlyout.addEventListener("mouseleave", scheduleCloseModelFlyout);
+
+    // 点击外部关闭下拉（同时关闭 flyout）
     document.addEventListener("click", (e) => {
         if (!modelDropdown.hidden && !modelTrigger.contains(e.target)) {
             hideDropdown();
         }
     });
+}
+
+/** 切换 chat 运行时选中模型并刷新选择器。 */
+async function selectChatModel(id) {
+    hideDropdown();
+    try {
+        const ok = await ipc.selectChatModel(id);
+        if (ok) {
+            await refreshModelSelector();
+        }
+    } catch (err) {
+        console.error("[chat] 切换模型失败:", err);
+    }
 }
 
 function toggleDropdown() {
@@ -1381,6 +1634,7 @@ function hideDropdown() {
     if (!modelDropdown) return;
     modelDropdown.hidden = true;
     if (modelTrigger) modelTrigger.classList.remove("active");
+    hideModelFlyout();
 }
 
 // ── 绑定 header 按钮 ───────────────────────────

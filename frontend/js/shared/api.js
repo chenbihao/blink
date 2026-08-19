@@ -42,6 +42,7 @@ export function runBuiltinAction(id, arg) {
  *  @param {string} [opts.targetWindow] 目标窗口（默认 "chat"，主窗口传 "main"）
  *  @param {boolean} [opts.ephemeral] 是否临时对话（默认 false）
  *  @param {boolean} [opts.thinkingEnabled] 是否启用深度思考（默认 false）
+ *  @param {string|null} [opts.reasoningEffort] 思考强度线值（0.21.17；null = auto/不发送）
  *  @returns {Promise<number>} request_id */
 export function chatPrompt(conversationId, message, opts = {}) {
     return invoke("chat_prompt", {
@@ -51,6 +52,7 @@ export function chatPrompt(conversationId, message, opts = {}) {
         targetWindow: opts.targetWindow ?? null,
         ephemeral: opts.ephemeral ?? null,
         thinkingEnabled: opts.thinkingEnabled ?? false,
+        reasoningEffort: opts.reasoningEffort ?? null,
     });
 }
 

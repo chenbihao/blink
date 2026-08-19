@@ -150,6 +150,7 @@
 /* ── 深度思考按钮（悬浮在输入框内） ─────────── */
 
 .chat-thinking-btn {
+    position: relative; /* 0.21.17: 承载思考强度下拉 */
     display: flex;
     align-items: center;
     gap: var(--space-2xs);
@@ -182,6 +183,146 @@
 .chat-thinking-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+/* 0.21.17: 思考强度控件（等级下拉 / 简单开关） ─────────── */
+
+.chat-thinking-caret {
+    flex-shrink: 0;
+    width: 12px;
+    height: 12px;
+    opacity: 0.6;
+    transition: transform 0.15s;
+}
+
+/* 无等级概念（简单开关）时隐藏 caret */
+.chat-thinking-btn.no-effort .chat-thinking-caret {
+    display: none;
+}
+
+.chat-thinking-btn.active .chat-thinking-caret {
+    transform: rotate(180deg);
+}
+
+/* 思考强度下拉（向上展开，同模型选择器下拉） */
+/* 0.21.18：min-width 从固定 240px 改为相对按钮——至少与触发器同宽，按内容增长 */
+.chat-thinking-dropdown {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 0;
+    min-width: 100%;
+    max-width: 300px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--bg);
+    border: 1px solid var(--surface);
+    border-radius: 8px;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.25);
+    z-index: 100;
+    padding: var(--space-xs) 0;
+}
+
+.chat-thinking-dropdown[hidden] {
+    display: none;
+}
+
+.chat-thinking-group {
+    padding: var(--space-xs) 8px var(--space-2xs); /* 左 padding 与触发器对齐 */
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.chat-thinking-option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 6px 8px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.15s;
+    text-align: left; /* 触发器是 button 默认 text-align:center，需显式恢复左对齐 */
+}
+
+.chat-thinking-option:hover {
+    background: var(--surface);
+}
+
+.chat-thinking-option-selected {
+    background: var(--accent-bg); /* 与模型下拉选中态一致（accent 底色 + accent 文本） */
+    color: var(--accent);
+}
+
+.chat-thinking-option-selected:hover {
+    background: var(--accent-bg);
+}
+
+/* 0.21.18: 选项内文本列（默认档带弱化副标说明） */
+.chat-thinking-option-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.chat-thinking-option-title {
+    font-size: 13px;
+    line-height: 1.3;
+}
+
+.chat-thinking-option-sub {
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.4;
+}
+
+.chat-thinking-custom-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 4px 8px;
+}
+
+.chat-thinking-custom-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--surface);
+    border-radius: 6px;
+    outline: none;
+}
+
+.chat-thinking-custom-row input:focus {
+    border-color: var(--accent);
+}
+
+.chat-thinking-custom-apply {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.chat-thinking-custom-apply:hover {
+    color: var(--accent);
+}
+
+.chat-thinking-hint {
+    padding: var(--space-xs) 8px;
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.5;
 }
 
 /* ── 发送/停止按钮（悬浮在输入框内） ─────────── */

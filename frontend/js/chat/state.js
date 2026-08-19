@@ -28,8 +28,18 @@ export let thinkingBuffer = "";
 /** @type {boolean} 是否正在接收 thinking 内容 */
 export let isThinking = false;
 
-/** @type {boolean} 是否启用深度思考（默认开启；跨 Provider 请求适配待 Roadmap 收敛） */
+/** @type {boolean} 是否启用深度思考（默认开启；不支持等级的 provider 用简单开关） */
 export let thinkingEnabled = true;
+
+/**
+ * @type {string|null} 当前模型配置的思考强度（reasoning_effort 线值，0.21.17）。
+ * `null` = auto/未配置（跟随旧二值行为）；`"none"` = 关闭；`""` = 不发送（omit）；
+ * 其余 = 该档位原样发送（minimal/low/medium/high/xhigh/max 或自定义）。
+ */
+export let thinkingEffort = null;
+
+/** @type {boolean} 当前模型是否支持 reasoning_effort 等级（0.21.17）。 */
+export let supportsEffort = false;
 
 /** @type {boolean} Provider 是否已配置 */
 export let providerConfigured = true;
@@ -104,6 +114,17 @@ export function setThinkingEnabled(value) {
 export function toggleThinkingEnabled() {
     thinkingEnabled = !thinkingEnabled;
     return thinkingEnabled;
+}
+
+/** 0.21.17: 设置当前模型思考强度（reasoning_effort 线值，null = auto）。 */
+export function setThinkingEffort(value) {
+    thinkingEffort = value ?? null;
+}
+
+/** 0.21.17: 一次更新思考控件所需全部状态（等级 + 是否支持）。 */
+export function setThinkingCapability({effort, supportsEffort: supports}) {
+    thinkingEffort = effort ?? null;
+    supportsEffort = Boolean(supports);
 }
 
 export function setProviderConfigured(value) {

@@ -33,6 +33,7 @@ export function openAIModelEditModal(providerId, modelId) {
         max_tokens: existing?.max_tokens ?? null,
         custom_parameters: (existing?.custom_parameters || []).map((cp) => ({...cp})),
         capabilities: existing?.capabilities ? [...existing.capabilities] : ["chat"],
+        reasoning_effort: existing?.reasoning_effort ?? null,
     };
 
     // 能力复选框回显
@@ -78,6 +79,7 @@ export function openAIModelEditModal(providerId, modelId) {
 
     setupModelParamRow("temperature", aiState._modelEditDraft.temperature, 0.7);
     setupModelParamRow("max-tokens", aiState._modelEditDraft.max_tokens, 4096);
+    setupReasoningEffortRow(aiState._modelEditDraft.reasoning_effort);
 
     renderCustomParams();
 
@@ -100,6 +102,31 @@ function setupModelParamRow(key, currentValue, fallbackValue) {
     const shown = enabled ? currentValue : fallbackValue;
     range.value = shown;
     num.value = shown;
+}
+
+/** 思考强度行（0.21.17 + 0.21.18）：null = auto（toggle 关）；"" = 默认（不发送）；否则回显预设/自定义 */
+function setupReasoningEffortRow(effort) {
+    const $ = (id) => document.getElementById(id);
+    const toggle = $("ai-model-edit-reasoning-effort-toggle");
+    const body = $("ai-model-param-reasoning-effort-body");
+    const select = $("ai-model-edit-reasoning-effort-select");
+    const custom = $("ai-model-edit-reasoning-effort-custom");
+    if (!toggle || !body || !select || !custom) return;
+
+    const enabled = effort != null;
+    toggle.checked = enabled;
+    body.classList.toggle("hidden", !enabled);
+    if (!enabled) return;
+
+    const presets = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    if (effort === "" || presets.includes(effort)) {
+        select.value = effort; // "" = 默认（不发送，用模型默认档）
+        custom.value = "";
+    } else {
+        select.value = "custom";
+        custom.value = effort; // 自定义值（留空 = omit 不发送）
+    }
+    custom.hidden = select.value !== "custom";
 }
 
 /** 渲染自定义参数键值对列表 */
@@ -331,6 +358,17 @@ async function validateAndSaveModel() {
     });
     const capabilities = selectedCaps.length > 0 ? selectedCaps : ["chat"];
 
+    // 思考强度（0.21.17 + 0.21.18）：toggle 关 = auto（null，等同默认不发送）；开 = 默认/预设档位或自定义
+    let reasoning_effort = null;
+    const effortToggle = document.getElementById("ai-model-edit-reasoning-effort-toggle");
+    if (effortToggle && effortToggle.checked) {
+        const select = document.getElementById("ai-model-edit-reasoning-effort-select");
+        const custom = document.getElementById("ai-model-edit-reasoning-effort-custom");
+        reasoning_effort = select?.value === "custom"
+            ? (custom ? custom.value.trim() : "")
+            : (select ? select.value : "");
+    }
+
     const newModel = {
         id,
         display_name: displayName || id,
@@ -342,6 +380,7 @@ async function validateAndSaveModel() {
         max_tokens: maxToggle ? Math.floor(maxVal) : null,
         custom_parameters: cleanedCustom,
         capabilities,
+        reasoning_effort,
     };
 
     if (isEdit) {
@@ -450,6 +489,22 @@ export function bindAIModelEditModalEvents() {
             if (Number.isFinite(v)) range.value = v;
         });
     });
+
+    // 思考强度（0.21.17）：toggle 控制显隐，select 联动自定义输入
+    const effortToggle = $("ai-model-edit-reasoning-effort-toggle");
+    const effortBody = $("ai-model-param-reasoning-effort-body");
+    const effortSelect = $("ai-model-edit-reasoning-effort-select");
+    const effortCustom = $("ai-model-edit-reasoning-effort-custom");
+    if (effortToggle && effortBody) {
+        effortToggle.addEventListener("change", () => {
+            effortBody.classList.toggle("hidden", !effortToggle.checked);
+        });
+    }
+    if (effortSelect && effortCustom) {
+        effortSelect.addEventListener("change", () => {
+            effortCustom.hidden = effortSelect.value !== "custom";
+        });
+    }
 
     $("ai-model-edit-custom-params-add")?.addEventListener("click", () => {
         if (!aiState._modelEditDraft) return;

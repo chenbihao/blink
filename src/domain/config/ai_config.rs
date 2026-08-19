@@ -535,6 +535,15 @@ pub struct ModelEntry {
     #[serde(default)]
     pub custom_parameters: Vec<CustomParam>,
 
+    /// 思考强度（0.21.17）——per-model 的 `reasoning_effort` 线值。
+    ///
+    /// `None` = 未配置（auto：跟随 `thinking_enabled` 旧行为，开启→high / 关闭→none）；
+    /// `Some("none")` = 显式关闭思考；
+    /// `Some("")` = 自定义-不发送（omit，用模型默认档，绝不出 400）；
+    /// 其余字符串 = 该档位原样发送（`minimal/low/medium/high/xhigh/max` 或供应商自定义值）。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+
     /// 模型能力列表（0.12 §2.7）。
     ///
     /// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
@@ -736,6 +745,7 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 custom_parameters: Vec::new(),
+                reasoning_effort: None,
                 capabilities: vec![ModelCapability::Chat],
             }],
             enabled: true,
@@ -883,6 +893,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             custom_parameters: Vec::new(),
+            reasoning_effort: None,
             capabilities: vec![ModelCapability::Chat],
         });
         let c = AIConfig {
@@ -1081,6 +1092,7 @@ mod tests {
                     value: serde_json::json!("raw-string"),
                 },
             ],
+            reasoning_effort: None,
             capabilities: vec![ModelCapability::Chat, ModelCapability::Embedding],
         };
         let s = serde_json::to_string(&m).unwrap();
@@ -1420,6 +1432,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             custom_parameters: Vec::new(),
+            reasoning_effort: None,
             capabilities: vec![ModelCapability::Chat, ModelCapability::Embedding],
         };
         let s = serde_json::to_string(&m).unwrap();

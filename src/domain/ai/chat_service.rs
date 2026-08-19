@@ -27,6 +27,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
+use crate::domain::ai::thinking::thinking_supports_effort;
 use crate::domain::ai::prompt::{
     chat_system_prompt_with_skills, pure_chat_system_prompt_with_group,
 };
@@ -179,12 +180,17 @@ pub struct SkillActivationInfo {
 ///
 /// 0.12.2 扩展：`provider_name` / `model_name` 供前端 header 标签实时展示
 /// 当前生效的 Provider + Model（selected 优先，否则 Main 档回落）。
+///
+/// 0.21.17 扩展：`supports_effort_levels` / `reasoning_effort` 供前端思考控件
+/// 决定显示"强度下拉"还是"简单开关"，并恢复当前模型的思考强度配置。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ChatStatus {
     pub active: Option<ActiveChatStatus>,
     pub provider_configured: bool,
     pub provider_name: Option<String>,
     pub model_name: Option<String>,
+    pub supports_effort_levels: bool,
+    pub reasoning_effort: Option<String>,
 }
 
 /// chat 窗口运行时选中的模型（0.12.2 §4.4）。
@@ -893,6 +899,7 @@ impl ChatService {
         kind: ConversationKind,
         target_window: String,
         thinking_enabled: bool,
+        reasoning_effort: Option<String>,
     ) -> Result<ChatPromptHandle, ChatError> {
         let _start_guard = self.start_gate.lock().await;
         if let Some(active) = self.requests.status() {
@@ -1035,6 +1042,7 @@ impl ChatService {
                             &effective_message,
                             chunk_tx,
                             thinking_enabled,
+                            reasoning_effort,
                         )
                         .await;
                 }
@@ -1152,22 +1160,34 @@ impl ChatService {
         let resolved = self
             .resolve_current_entries(ConversationKind::Persistent)
             .ok();
-        let (provider_name, model_name) = match &resolved {
-            Some(r) => {
-                let model_display = if r.model.display_name.is_empty() {
-                    r.model.id.clone()
-                } else {
-                    r.model.display_name.clone()
-                };
-                (Some(r.provider.display_name.clone()), Some(model_display))
-            }
-            None => (None, None),
-        };
+        let (provider_name, model_name, supports_effort_levels, reasoning_effort) =
+            match &resolved {
+                Some(r) => {
+                    let model_display = if r.model.display_name.is_empty() {
+                        r.model.id.clone()
+                    } else {
+                        r.model.display_name.clone()
+                    };
+                    (
+                        Some(r.provider.display_name.clone()),
+                        Some(model_display),
+                        thinking_supports_effort(
+                            r.provider.kind,
+                            r.provider.base_url.as_deref(),
+                            &r.model.id,
+                        ),
+                        r.model.reasoning_effort.clone(),
+                    )
+                }
+                None => (None, None, false, None),
+            };
         ChatStatus {
             active: self.requests.status(),
             provider_configured: self.ai_registry.resolve_entries(Tier::Main).is_ok(),
             provider_name,
             model_name,
+            supports_effort_levels,
+            reasoning_effort,
         }
     }
 

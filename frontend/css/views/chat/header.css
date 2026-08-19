@@ -260,11 +260,12 @@
 }
 
 /* 模型选择器下拉（向上展开，因触发器在窗口底部 composer bar） */
+/* 0.21.18：min-width 从固定 260px 改为相对按钮——至少与触发器同宽，按内容增长 */
 .chat-model-dropdown {
     position: absolute;
     bottom: calc(100% + 4px);
     left: 0;
-    min-width: 260px;
+    min-width: 100%;
     max-width: 340px;
     max-height: 320px;
     overflow-y: auto;
@@ -296,6 +297,7 @@
 .chat-model-group-title {
     padding: var(--space-xs) 8px var(--space-2xs); /* 左 padding 8px 与触发器对齐 */
     font-size: 11px;
+    font-weight: 600;
     color: var(--text-faint);
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -393,6 +395,73 @@
 .chat-model-badge-placeholder {
     flex-shrink: 0;
     width: 20px; /* 与 badge min-width 一致 */
+}
+
+/* 供应商行（hover 展开模型 flyout，0.21.18） */
+.chat-model-provider-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.1s;
+    text-align: left;
+}
+
+.chat-model-provider-row:hover,
+.chat-model-provider-row.flyout-open {
+    background: var(--surface);
+}
+
+.chat-model-provider-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-model-provider-count {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.chat-model-provider-chevron {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    color: var(--text-faint);
+    opacity: 0.7;
+    transition: color 0.1s, opacity 0.1s;
+}
+
+.chat-model-provider-row:hover .chat-model-provider-chevron,
+.chat-model-provider-row.flyout-open .chat-model-provider-chevron {
+    color: var(--text);
+    opacity: 1;
+}
+
+/* 供应商模型 flyout（position: fixed 避免被下拉 overflow 裁剪；0.21.18） */
+.chat-model-flyout {
+    position: fixed;
+    z-index: 120; /* 高于下拉的 100 */
+    min-width: 200px;
+    max-width: 260px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--bg);
+    border: 1px solid var(--surface);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    padding: var(--space-xs) 0;
+}
+
+.chat-model-flyout[hidden] {
+    display: none;
 }
 
 .chat-header-actions {

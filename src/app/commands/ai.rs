@@ -286,6 +286,7 @@ pub async fn chat_prompt(
     target_window: Option<String>,
     ephemeral: Option<bool>,
     thinking_enabled: Option<bool>,
+    reasoning_effort: Option<String>,
 ) -> Result<u64, String> {
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
@@ -319,6 +320,7 @@ pub async fn chat_prompt(
             kind,
             target.clone(),
             thinking_enabled.unwrap_or(false),
+            reasoning_effort,
         )
         .await
         .map_err(|e| match e {
@@ -636,6 +638,8 @@ pub fn get_chat_status(app: tauri::AppHandle) -> crate::domain::ai::chat_service
             provider_configured: false,
             provider_name: None,
             model_name: None,
+            supports_effort_levels: false,
+            reasoning_effort: None,
         }
     }
 }
@@ -703,6 +707,12 @@ pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                 is_main,
                 is_light,
                 is_selected,
+                supports_effort_levels: crate::domain::ai::thinking::thinking_supports_effort(
+                    provider.kind,
+                    provider.base_url.as_deref(),
+                    &model.id,
+                ),
+                reasoning_effort: model.reasoning_effort.clone(),
             });
         }
     }
@@ -786,6 +796,61 @@ pub async fn select_chat_model(
     Ok(true)
 }
 
+/// 设置模型的思考强度（0.21.17）——对话窗口思考控件持久化 per-model 配置。
+///
+/// `selection_id` = `"{provider_id}:{model_id}"`（同 `select_chat_model`）。
+/// `reasoning_effort`:
+/// - `None` = 清除配置（auto：退回旧二值行为，开启→high / 关闭→none）
+/// - `Some("")` = 自定义-不发送（omit，用模型默认档，绝不出 400）
+/// - `Some("none")` = 显式关闭思考
+/// - 其余 = 该档位原样发送（`minimal/low/medium/high/xhigh/max` 或自定义值）
+///
+/// 复用 `set_config('ai_config')` 完整保存链路：持久化 + registry 热更新 +
+/// AI 缓存同步 + CONFIG_CHANGED 事件（对话窗口监听后刷新思考控件）。
+#[tauri::command]
+pub async fn set_model_reasoning_effort(
+    app: tauri::AppHandle,
+    selection_id: String,
+    reasoning_effort: Option<String>,
+) -> Result<bool, String> {
+    use crate::app::ai_config::ModelCapability;
+
+    let Some(registry) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::registry::AIProviderRegistry>>()
+    else {
+        return Err("AIProviderRegistry 未注册".to_string());
+    };
+    let mut config = registry.config_snapshot();
+
+    // 解析 "{provider_id}:{model_id}"——model_id 可能含冒号，只按第一个冒号切
+    let Some((provider_id, model_id)) = selection_id.split_once(':') else {
+        return Ok(false);
+    };
+    if provider_id.is_empty() || model_id.is_empty() {
+        return Ok(false);
+    }
+
+    let Some(provider) = config.providers.iter_mut().find(|p| p.id == provider_id) else {
+        return Ok(false);
+    };
+    let Some(model) = provider
+        .models
+        .iter_mut()
+        .find(|m| m.id == model_id && m.enabled)
+    else {
+        return Ok(false);
+    };
+    // 仅 Chat 能力模型允许设置（与模型选择器一致）
+    if !model.capabilities.contains(&ModelCapability::Chat) {
+        return Ok(false);
+    }
+    model.reasoning_effort = reasoning_effort.map(|e| e.trim().to_string());
+
+    let value = serde_json::to_value(&config).map_err(|e| e.to_string())?;
+    crate::app::commands::config::set_config(app, "ai_config".to_string(), value).await?;
+    Ok(true)
+}
+
 // ── 0.17.9: Ephemeral（主窗口 AI）独立模型选择 ──────────────────────────────
 
 /// 列出主窗口 AI 可选的所有 Chat 能力模型（0.17.9）。
@@ -856,6 +921,12 @@ pub fn get_ephemeral_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                 is_main,
                 is_light,
                 is_selected,
+                supports_effort_levels: crate::domain::ai::thinking::thinking_supports_effort(
+                    provider.kind,
+                    provider.base_url.as_deref(),
+                    &model.id,
+                ),
+                reasoning_effort: model.reasoning_effort.clone(),
             });
         }
     }
@@ -946,6 +1017,11 @@ pub struct ChatModelOption {
     pub is_main: bool,
     pub is_light: bool,
     pub is_selected: bool,
+    /// 0.21.17：该模型所属 provider 是否支持 reasoning_effort 等级（前端据此
+    /// 决定思考控件是"强度下拉"还是"简单开关"）。
+    pub supports_effort_levels: bool,
+    /// 0.21.17：该模型配置的思考强度（线值；None = auto/未配置）。
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]

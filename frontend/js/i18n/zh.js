@@ -908,6 +908,7 @@ export const zh = {
     "ai.model_modal.display_name.ph": "留空则用 Model ID",
     "ai.model_modal.temperature": "Temperature",
     "ai.model_modal.max_tokens": "Max Output Tokens",
+    "ai.model_modal.reasoning_effort": "思考强度（reasoning_effort）",
     "ai.model_modal.params.hint": "留空 = 由模型或调用场景决定；填值只在调用方未显式指定时生效",
     "ai.model_modal.custom_params.hint": "键值对将透传到供应商请求（如 top_p / reasoning_effort 等）；值输入 0.9 会自动识别为数字，true / false 识别为布尔，{...} 识别为 JSON",
     "ai.model_modal.fetch.loading": "正在获取可用模型…",

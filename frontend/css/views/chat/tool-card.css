@@ -19,30 +19,38 @@
     color: var(--text-sub);
 }
 
-/* 统一滚动条样式（thinking 内容 / tool 详情 / 模型下拉共用） */
+/* 统一滚动条样式（thinking 内容 / tool 详情 / 模型下拉 / 供应商 flyout / 思考强度下拉共用） */
 .thinking-content::-webkit-scrollbar,
 .chat-tool-detail pre::-webkit-scrollbar,
-.chat-model-dropdown::-webkit-scrollbar {
+.chat-model-dropdown::-webkit-scrollbar,
+.chat-model-flyout::-webkit-scrollbar,
+.chat-thinking-dropdown::-webkit-scrollbar {
     width: 6px;
     height: 6px;
 }
 
 .thinking-content::-webkit-scrollbar-track,
 .chat-tool-detail pre::-webkit-scrollbar-track,
-.chat-model-dropdown::-webkit-scrollbar-track {
+.chat-model-dropdown::-webkit-scrollbar-track,
+.chat-model-flyout::-webkit-scrollbar-track,
+.chat-thinking-dropdown::-webkit-scrollbar-track {
     background: transparent;
 }
 
 .thinking-content::-webkit-scrollbar-thumb,
 .chat-tool-detail pre::-webkit-scrollbar-thumb,
-.chat-model-dropdown::-webkit-scrollbar-thumb {
+.chat-model-dropdown::-webkit-scrollbar-thumb,
+.chat-model-flyout::-webkit-scrollbar-thumb,
+.chat-thinking-dropdown::-webkit-scrollbar-thumb {
     background: var(--surface-2);
     border-radius: 3px;
 }
 
 .thinking-content::-webkit-scrollbar-thumb:hover,
 .chat-tool-detail pre::-webkit-scrollbar-thumb:hover,
-.chat-model-dropdown::-webkit-scrollbar-thumb:hover {
+.chat-model-dropdown::-webkit-scrollbar-thumb:hover,
+.chat-model-flyout::-webkit-scrollbar-thumb:hover,
+.chat-thinking-dropdown::-webkit-scrollbar-thumb:hover {
     background: var(--text-faint);
 }
 
