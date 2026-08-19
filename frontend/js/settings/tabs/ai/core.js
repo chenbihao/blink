@@ -171,6 +171,8 @@ async function loadSystemPromptInfo() {
         const info = await invoke("get_system_prompt_info");
         const tokens = info.tokens ?? 0;
         const threshold = info.threshold ?? 5000;
+        const systemTokens = info.system_tokens ?? 0;
+        const toolsTokens = info.tools_tokens ?? 0;
         const toolsCount = info.tools_count ?? 0;
 
         tokensEl.textContent = `${tokens} / ${threshold}`;
@@ -181,7 +183,11 @@ async function loadSystemPromptInfo() {
         } else {
             tokensEl.className = "ai-prompt-tokens";
         }
-        metaEl.textContent = t("ai.tools.count", {count: toolsCount});
+        metaEl.textContent = t("ai.tools.prompt_tokens.meta", {
+            sys: systemTokens,
+            tools: toolsTokens,
+            count: toolsCount,
+        });
     } catch (e) {
         tokensEl.textContent = "—";
         tokensEl.className = "ai-prompt-tokens";

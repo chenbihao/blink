@@ -108,6 +108,20 @@
     padding: var(--space-xs);
 }
 
+/* 滚动条与消息区同款 6px 细滚动条（0.21.18：替代原生样式） */
+.chat-sidebar-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.chat-sidebar-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.chat-sidebar-list::-webkit-scrollbar-thumb {
+    background: var(--surface-2);
+    border-radius: 3px;
+}
+
 .chat-sidebar-empty {
     padding: var(--space-xl) var(--space-sm);
     text-align: center;

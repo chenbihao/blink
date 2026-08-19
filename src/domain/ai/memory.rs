@@ -48,6 +48,10 @@ use tokio::sync::RwLock;
 /// 滑动窗口大小（FixedCount 模式，0.12.3 §5.3：最近 20 条消息）。
 const SLIDING_WINDOW_SIZE: i64 = 20;
 
+/// 临时对话最大保留消息数（0.21.18）。超出丢最旧——主窗口临时对话通常
+/// 短轮次，上限只为防长会话内存与请求无界增长；不做 token 感知压缩。
+const MAX_EPHEMERAL_MESSAGES: usize = 50;
+
 /// TokenAware 模式加载批次大小（加载较多消息后 in-memory 裁剪）。
 const TOKEN_AWARE_LOAD_BATCH: i64 = 200;
 
@@ -109,13 +113,27 @@ pub struct MemoryConfig {
     #[serde(skip)] // 运行时注入，不持久化
     pub context_limit: Option<usize>,
 
-    /// 触发压缩的 token 占比（默认 0.8 = 80% of context_limit）。
+    /// 触发裁剪的 token 占比（默认 0.8）。
+    ///
+    /// 基数是「历史可用预算」而非裸 context_limit——
+    /// 预算已扣除系统提示、工具定义、输出预留、安全余量、召回块预留。
+    /// 0.8 是刻意双重缓冲（预算本身已含安全余量）。
     #[serde(default = "default_trigger_ratio")]
     pub trigger_ratio: f64,
 
-    /// 压缩目标 token 占比（默认 0.7 = 70% of context_limit）。
+    /// 裁剪目标 token 占比（默认 0.7）。
+    ///
+    /// 基数同 `trigger_ratio`——历史可用预算。裁剪后剩余 token ≤ 预算 × compress_ratio。
     #[serde(default = "default_compress_ratio")]
     pub compress_ratio: f64,
+
+    /// 历史可用 token 预算（运行时注入，0.21.18）。
+    ///
+    /// = context_limit − (system + tools + pending + 输出预留 + 安全余量 + 召回块预留)。
+    /// None 时回退旧逻辑（裸 context_limit × trigger/compress）。
+    /// 每轮 prompt 由 `compute_context_status` 注入；模型切换时置 None（等下一轮重新注入）。
+    #[serde(skip)]
+    pub history_budget: Option<usize>,
 
     /// FTS5 召回开关（0.13.2，默认开）。
     /// 开启后，被窗口裁剪的旧消息归档到 FTS5，load() 时 BM25 检索召回相关旧上下文。
@@ -136,6 +154,7 @@ impl Default for MemoryConfig {
             context_limit: None,
             trigger_ratio: default_trigger_ratio(),
             compress_ratio: default_compress_ratio(),
+            history_budget: None,
             recall_enabled: default_recall_enabled(),
             recall_top_k: default_recall_top_k(),
         }
@@ -323,9 +342,21 @@ impl SqliteConversationMemory {
     /// 更新 context_limit（模型切换时调用）。
     ///
     /// `limit` 为 None 时使用保守默认（32K）。
+    ///
+    /// 0.21.18: 同时将 `history_budget` 置 None——旧预算基于旧窗口，必须失效，
+    /// 等下一轮 `compute_context_status` 重新注入。
     pub async fn update_context_limit(&self, limit: Option<usize>) {
         let mut cfg = self.config.write().await;
         cfg.context_limit = limit.or(Some(DEFAULT_CONTEXT_LIMIT));
+        cfg.history_budget = None;
+    }
+
+    /// 注入历史可用预算（每轮 prompt 由 `compute_context_status` 调用，0.21.18）。
+    ///
+    /// `budget` 为 None 时回退到裸 `context_limit` 基准。
+    pub async fn update_history_budget(&self, budget: Option<usize>) {
+        let mut cfg = self.config.write().await;
+        cfg.history_budget = budget;
     }
 
     /// 0.13.6: 带统计的 load——返回消息 + 压缩/召回统计。
@@ -386,11 +417,17 @@ impl SqliteConversationMemory {
 
         // 0.13.1: token-aware 裁剪（仅 TokenAware 模式）
         // 0.13.2: 裁剪出的消息归档到 FTS5
+        // 0.21.18: 裁剪基准从裸 context_limit 换为「历史可用预算」——
+        // history_budget 已预扣 system/tools/pending/输出预留/安全余量/召回块预留。
+        // Fallback 链：history_budget → context_limit → DEFAULT_CONTEXT_LIMIT
         if cfg.mode == WindowMode::TokenAware {
-            let context_limit = cfg.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT);
+            let budget_base = cfg
+                .history_budget
+                .or(cfg.context_limit)
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT);
             let dropped_msgs = token_aware_truncate(
                 &mut messages,
-                context_limit,
+                budget_base,
                 cfg.trigger_ratio,
                 cfg.compress_ratio,
             );
@@ -420,7 +457,7 @@ impl SqliteConversationMemory {
                 tracing::info!(
                     conversation_id,
                     dropped = dropped_msgs.len(),
-                    context_limit,
+                    budget_base,
                     "归档钩子：{} 条消息已归档到 FTS5",
                     dropped_msgs.len()
                 );
@@ -510,6 +547,8 @@ impl SqliteConversationMemory {
         let mut cfg = self.config.write().await;
         // 保留运行时注入的 context_limit（来自 ModelEntry.context_window）
         new_config.context_limit = cfg.context_limit;
+        // 0.21.18: 保留运行时注入的 history_budget（来自 compute_context_status）
+        new_config.history_budget = cfg.history_budget;
         tracing::debug!(
             mode = ?new_config.mode,
             window_size = new_config.window_size,
@@ -518,6 +557,7 @@ impl SqliteConversationMemory {
             recall_enabled = new_config.recall_enabled,
             recall_top_k = new_config.recall_top_k,
             context_limit = ?new_config.context_limit,
+            history_budget = ?new_config.history_budget,
             "apply_config: 更新记忆策略配置"
         );
         *cfg = new_config;
@@ -535,6 +575,10 @@ impl SqliteConversationMemory {
         user_msg: &str,
     ) -> Result<(), String> {
         let pool = self.pool.clone();
+
+        // 0.21.18: 清掉上一轮中断残留的实况标记——断点行留在 DB 供回溯，
+        // 但下一轮不再复用其 id（否则新回合部分回复会覆盖旧断点内容）。
+        self.live_turns.write().await.remove(conversation_id);
 
         // 去重：尾部已是同文 user 消息 → 已保存过，跳过
         if let Some((role, content)) =
@@ -851,6 +895,8 @@ impl ConversationMemory for SqliteConversationMemory {
             crate::infra::data::conversations::clear_messages(&pool, conversation_id)
                 .await
                 .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            // 0.21.18: 对称清理 live_turns——clear 后不应残留实况回合标记
+            self.live_turns.write().await.remove(conversation_id);
             self.pending_users.write().await.remove(conversation_id);
             Ok(())
         })
@@ -865,10 +911,13 @@ impl ConversationMemory for SqliteConversationMemory {
 /// 供 `ChatService` 在 `ConversationKind::Ephemeral` 时注入 rig agent。
 ///
 /// 设计依据：0.12.3 前的 `InMemoryConversationMemory`（已废弃）同思路，复用。
-/// 临时对话不做压缩——通常短轮次，全量留内存。超长后续迭代加 sliding window。
+/// 临时对话不做 token 感知压缩——通常短轮次，全量留内存。
+/// 0.21.18: 加 50 条上限防长会话内存与请求无界增长，超出丢最旧，
+/// 裁剪后复用孤立 ToolResult 丢弃逻辑（与 Persistent 窗口语义一致）。
 ///
 /// `export_messages` + `remove` 供 Chord-Q 提升流程使用：
 /// 导出消息 → 写入 `SqliteConversationMemory` → 清空临时记忆。
+/// 导出的是裁剪后窗口（最旧已丢），可接受——promote 保留近期上下文即可。
 pub struct EphemeralConversationMemory {
     conversations: tokio::sync::RwLock<HashMap<String, Vec<Message>>>,
 }
@@ -927,12 +976,17 @@ impl ConversationMemory for EphemeralConversationMemory {
         messages: Vec<Message>,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         Box::pin(async move {
-            self.conversations
-                .write()
-                .await
+            let mut convs = self.conversations.write().await;
+            let vec = convs
                 .entry(conversation_id.to_string())
-                .or_default()
-                .extend(messages);
+                .or_default();
+            vec.extend(messages);
+            // 0.21.18: 条数上限裁剪——超出丢最旧，复用孤立 ToolResult 丢弃逻辑
+            if vec.len() > MAX_EPHEMERAL_MESSAGES {
+                let overflow = vec.len() - MAX_EPHEMERAL_MESSAGES;
+                vec.drain(0..overflow);
+                drop_leading_orphan_tool_results(vec);
+            }
             Ok(())
         })
     }
@@ -1090,6 +1144,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1387,6 +1442,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1420,6 +1476,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1449,6 +1506,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1483,6 +1541,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1559,6 +1618,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: false, // 先关召回，验证归档
             recall_top_k: 3,
         }));
@@ -1593,6 +1653,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1636,6 +1697,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
         }));
@@ -1674,6 +1736,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
         }));
@@ -1702,6 +1765,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
         }));
@@ -1731,6 +1795,7 @@ mod tests {
             context_limit: None,
             trigger_ratio: 0.8,
             compress_ratio: 0.7,
+            history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
         }));
@@ -1905,6 +1970,299 @@ mod tests {
             loaded.is_empty(),
             "全部损坏时应返回空 Vec，实际: {} 条",
             loaded.len()
+        );
+    }
+
+    // ── 0.21.18: history_budget 裁剪预算测试 ──────────────────────────────
+
+    /// history_budget 优先于 context_limit 作为裁剪基准。
+    ///
+    /// context_limit 设大（100_000）但 history_budget 设小（50）→ 触发裁剪；
+    /// 反之 history_budget 设大 → 不裁剪。证明新基准生效。
+    #[tokio::test]
+    async fn history_budget_overrides_context_limit_for_truncation() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false, // 关召回，隔离裁剪行为
+            recall_top_k: 3,
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 写入 10 条中等长度消息
+        for i in 0..10 {
+            mem.append(
+                "c1",
+                vec![user_msg(&format!("message {i:03} with moderate content"))],
+            )
+            .await
+            .unwrap();
+        }
+
+        // 1. context_limit 大 + history_budget 小 → 应裁剪
+        mem.update_context_limit(Some(100_000)).await;
+        mem.update_history_budget(Some(50)).await;
+        let loaded_small_budget = mem.load("c1").await.unwrap();
+        assert!(
+            loaded_small_budget.len() < 10,
+            "history_budget=50 应触发裁剪，实际: {} 条",
+            loaded_small_budget.len()
+        );
+
+        // 2. history_budget 大 → 不裁剪
+        mem.update_history_budget(Some(100_000)).await;
+        let loaded_big_budget = mem.load("c1").await.unwrap();
+        assert_eq!(
+            loaded_big_budget.len(),
+            10,
+            "history_budget=100_000 不应裁剪，实际: {} 条",
+            loaded_big_budget.len()
+        );
+    }
+
+    /// update_context_limit 应将 history_budget 置 None（模型切换后旧预算失效）。
+    #[tokio::test]
+    async fn update_context_limit_invalidates_history_budget() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false,
+            recall_top_k: 3,
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 写入 10 条中等长度消息
+        for i in 0..10 {
+            mem.append(
+                "c1",
+                vec![user_msg(&format!("message {i:03} with moderate content"))],
+            )
+            .await
+            .unwrap();
+        }
+
+        // 注入小 history_budget → 裁剪
+        mem.update_context_limit(Some(100_000)).await;
+        mem.update_history_budget(Some(50)).await;
+        let loaded_with_budget = mem.load("c1").await.unwrap();
+        assert!(
+            loaded_with_budget.len() < 10,
+            "history_budget=50 应裁剪"
+        );
+
+        // 模型切换 → update_context_limit 应使 history_budget 失效
+        // 新 context_limit 仍是 100_000（大窗口），裁剪应回到 context_limit 基准 → 不裁剪
+        mem.update_context_limit(Some(100_000)).await;
+        let loaded_after_switch = mem.load("c1").await.unwrap();
+        assert_eq!(
+            loaded_after_switch.len(),
+            10,
+            "模型切换后 history_budget 失效，回退到 context_limit=100_000 不应裁剪"
+        );
+    }
+
+    /// apply_config 应保留运行时注入的 history_budget。
+    #[tokio::test]
+    async fn apply_config_preserves_history_budget() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false,
+            recall_top_k: 3,
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 写入消息
+        for i in 0..10 {
+            mem.append(
+                "c1",
+                vec![user_msg(&format!("message {i:03} with moderate content"))],
+            )
+            .await
+            .unwrap();
+        }
+
+        // 注入 context_limit + history_budget
+        mem.update_context_limit(Some(100_000)).await;
+        mem.update_history_budget(Some(50)).await;
+
+        // 模拟设置页改配置
+        let new_config = MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.75, // 改了值
+            compress_ratio: 0.65,
+            history_budget: None, // serde 反序列化后应为 None
+            recall_enabled: false,
+            recall_top_k: 3,
+        };
+        mem.apply_config(new_config).await;
+
+        // 验证 history_budget 被保留
+        let config_handle = mem.config_handle();
+        let cfg = config_handle.read().await;
+        assert_eq!(
+            cfg.history_budget,
+            Some(50),
+            "apply_config 后 history_budget 应保留为 Some(50)"
+        );
+        assert_eq!(
+            cfg.trigger_ratio, 0.75,
+            "trigger_ratio 应已更新为新值"
+        );
+        drop(cfg);
+
+        // 行为验证：history_budget=50 仍生效 → 裁剪
+        let loaded = mem.load("c1").await.unwrap();
+        assert!(
+            loaded.len() < 10,
+            "apply_config 后 history_budget 仍应驱动裁剪"
+        );
+    }
+
+    // ── 0.21.18: 中断残留 live_turns 不被下一轮覆盖 ──────────────────────
+
+    /// 验证流式中断后残留的 live_turn 标记不会被下一轮 persist_assistant_delta
+    /// 复用——修复前第二条 delta 会 UPDATE 旧行，partial1 被覆盖只剩 3 条。
+    #[tokio::test]
+    async fn aborted_live_turn_not_overwritten_by_next_turn() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool);
+
+        // 第一轮：预写 user → 流式部分回复 → 中断（不调 append）
+        mem.persist_user_message("c", "q1").await.unwrap();
+        mem.persist_assistant_delta("c", "partial1", "")
+            .await
+            .unwrap();
+        // 模拟中断：不调 append，live_turns 残留 "c" -> 旧行 id
+
+        // 第二轮：persist_user_message 应清掉残留的 live_turns 标记
+        mem.persist_user_message("c", "q2").await.unwrap();
+        // 第二轮的流式部分回复——不应 UPDATE 第一轮的断点行
+        mem.persist_assistant_delta("c", "partial2", "")
+            .await
+            .unwrap();
+
+        // load 应返回 4 条：q1, partial1, q2, partial2
+        let loaded = mem.load("c").await.unwrap();
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "q1".to_string(),
+                "partial1".to_string(),
+                "q2".to_string(),
+                "partial2".to_string(),
+            ],
+            "中断残留的 partial1 不应被下一轮覆盖，应有 4 条: {texts:?}"
+        );
+    }
+
+    // ── 0.21.18: Ephemeral 条数上限测试 ──────────────────────────────────
+
+    /// 连续 append 80 条单消息 → load ≤ 50，且首条是第 31 条（保留最新）。
+    #[tokio::test]
+    async fn ephemeral_append_caps_at_max() {
+        let mem = EphemeralConversationMemory::new();
+
+        // 写入 80 条 user 消息（编号 0..80）
+        for i in 0..80 {
+            mem.append("c1", vec![user_msg(&format!("msg {i}"))])
+                .await
+                .unwrap();
+        }
+
+        let loaded = mem.load("c1").await.unwrap();
+        assert!(
+            loaded.len() <= MAX_EPHEMERAL_MESSAGES,
+            "load 不应超过上限 {MAX_EPHEMERAL_MESSAGES}，实际: {}",
+            loaded.len()
+        );
+
+        // 首条应是 msg 30（0..80 共 80 条，丢前 30 条，保留 30..80）
+        let first_text = extract_message_text(&loaded[0]);
+        assert!(
+            first_text.contains("msg 30"),
+            "首条应是最旧保留 msg 30，实际: {first_text}"
+        );
+        // 末条应是 msg 79
+        let last_text = extract_message_text(loaded.last().unwrap());
+        assert!(
+            last_text.contains("msg 79"),
+            "末条应是最新 msg 79，实际: {last_text}"
+        );
+    }
+
+    /// 裁剪后开头的孤立 ToolResult 应被丢弃。
+    #[tokio::test]
+    async fn ephemeral_cap_drops_orphan_tool_results() {
+        use rig_core::completion::message::{
+            ToolResult, ToolResultContent,
+        };
+
+        let mem = EphemeralConversationMemory::new();
+
+        // 构造开头为纯 ToolResult 的消息（孤立，无对应 ToolCall）
+        fn tool_result_msg(id: &str) -> Message {
+            Message::User {
+                content: vec![UserContent::ToolResult(ToolResult {
+                    call: rig_core::message::ToolCallId::new_or_mint(id),
+                    provider: None,
+                    name: id.to_string(),
+                    content: vec![ToolResultContent::text("ok")],
+                })],
+            }
+        }
+
+        // 写入 51 条 ToolResult + 1 条普通 user → 共 52 条，超出 50 上限
+        // 裁剪后丢前 2 条，剩 49 条 ToolResult + 1 条 user
+        // 但 drop_leading_orphan_tool_results 会继续丢弃开头的孤立 ToolResult
+        for i in 0..51 {
+            mem.append("c1", vec![tool_result_msg(&format!("r{i}"))])
+                .await
+                .unwrap();
+        }
+        mem.append("c1", vec![user_msg("hello")])
+            .await
+            .unwrap();
+
+        let loaded = mem.load("c1").await.unwrap();
+        // 裁剪 + 丢弃孤立 ToolResult 后，首条不应是纯 ToolResult
+        let first = &loaded[0];
+        let is_pure_tool_result = match first {
+            Message::User { content } => {
+                !content.is_empty()
+                    && content
+                        .iter()
+                        .all(|c| matches!(c, UserContent::ToolResult(_)))
+            }
+            _ => false,
+        };
+        assert!(
+            !is_pure_tool_result,
+            "裁剪后开头的孤立 ToolResult 应被丢弃"
+        );
+        // 应包含末尾的 user "hello"
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert!(
+            texts.contains(&"hello".to_string()),
+            "应保留末尾 user 消息: {texts:?}"
         );
     }
 }

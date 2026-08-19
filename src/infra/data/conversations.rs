@@ -833,22 +833,179 @@ pub async fn search_memory_fts(
         .collect())
 }
 
-/// 将用户消息转为 FTS5 OR 查询字符串。
+/// 将用户消息转为 FTS5 OR 查询字符串（0.21.18 重写分词策略）。
 ///
-/// 1. 按空白拆词
-/// 2. 过滤掉 <3 字符的词（trigram 最低 3 字符）
-/// 3. 每个词用双引号包裹（转义 FTS5 运算符如 `-`、`*`、`(`）
-/// 4. 以 ` OR ` 连接
+/// ## 背景
 ///
-/// 例：`"tell me about Rust"` → `"tell" OR "about" OR "Rust"`
-/// （`me` 被 <3 过滤掉）
+/// `memory_fts` 表使用 `tokenize='trigram'`，trigram 索引每个 ≥3 字符的子串。
+/// 引号短语查询 = 子串包含语义：`"异步编程"` 命中含该 4 字子串的文档。
+///
+/// 旧实现按**空白拆词**做 OR 检索。英文正常；但中文没有空格——整句变成一个
+/// 带引号的长 phrase，trigram 下等价于"要求归档文本包含**整句原样子串**"，
+/// 几乎永远不命中。中文用户的"召回本对话较早内容"形同虚设。
+///
+/// ## 新策略
+///
+/// 逐字符扫描，把 query 切成两类 run，生成 OR 词项：
+///
+/// - **ASCII / 非 CJK 词**：保持原行为（≥3 字符、去内嵌 `"`、双引号包裹）。
+/// - **CJK 连续 run**（用 `is_cjk_char` 判定）：
+///   - 长度 <3 → 跳过（trigram 下限无法命中）；
+///   - 长度 3..=6 → 整段作为一个引号短语（子串匹配，精确且便宜）；
+///   - 长度 >6 → 生成 3 字符滑动窗口（stride 1），每个窗口一个引号词项。
+///
+/// **总量上限** 32 个 OR 词项（防超长用户消息生成巨型 FTS 查询）；超限时保留
+/// 首尾各半（前 16 + 后 16），丢弃中部。词项去重。
+///
+/// 超长 query（>4096 字符）先截取首尾各 2048 字符，防无界收集——
+/// 1MB CJK query 会产生 ~30 万个滑动窗口词项，导致 Vec + HashSet 瞬时占用
+/// 30-40MB。截取后最终只保留 32 个词项，对头尾两段采样与对全量词项保头保尾等价。
+///
+/// 返回 `"term1" OR "term2" OR ...`；无有效词项返回空串（上层已处理空串）。
 fn build_fts_or_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .filter(|w| w.chars().count() >= 3)
-        .map(|w| format!("\"{}\"", w.replace('"', "")))
-        .collect::<Vec<_>>()
-        .join(" OR ")
+    /// OR 词项总量上限，防止超长用户消息生成巨型 FTS 查询拖慢检索。
+    const MAX_TERMS: usize = 32;
+    /// query 字符数截断阈值——超过此值先截取首尾两段。
+    const QUERY_TRUNCATE_THRESHOLD: usize = 4096;
+    /// 截断时保留的首/尾字符数。
+    const QUERY_TRUNCATE_HALF: usize = 2048;
+
+    let char_count = query.chars().count();
+
+    // 超长 query 截取首尾各 2048 字符，防无界收集
+    if char_count > QUERY_TRUNCATE_THRESHOLD {
+        let chars: Vec<char> = query.chars().collect();
+        let head: String = chars[..QUERY_TRUNCATE_HALF].iter().collect();
+        let tail: String = chars[char_count - QUERY_TRUNCATE_HALF..].iter().collect();
+
+        // 对头尾两段分别收集，合并去重
+        let mut terms: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        collect_terms(&head, &mut terms, &mut seen);
+        collect_terms(&tail, &mut terms, &mut seen);
+
+        // 超限时取头部段的词项作前 16、尾部段的词项作后 16
+        if terms.len() > MAX_TERMS {
+            let half = MAX_TERMS / 2;
+            let mut kept: Vec<String> = Vec::with_capacity(MAX_TERMS);
+            kept.extend_from_slice(&terms[..half]);
+            kept.extend_from_slice(&terms[terms.len() - half..]);
+            terms = kept;
+        }
+
+        return terms.join(" OR ");
+    }
+
+    // 常规路径：收集全部词项
+    let mut terms: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_terms(query, &mut terms, &mut seen);
+
+    // 超限时保留首尾各半（前 16 + 后 16），丢弃中部。
+    if terms.len() > MAX_TERMS {
+        let half = MAX_TERMS / 2;
+        let mut kept: Vec<String> = Vec::with_capacity(MAX_TERMS);
+        kept.extend_from_slice(&terms[..half]);
+        kept.extend_from_slice(&terms[terms.len() - half..]);
+        terms = kept;
+    }
+
+    terms.join(" OR ")
+}
+
+/// 从一段 query 文本收集 FTS OR 词项（含去重），无上限截断。
+///
+/// 逐字符扫描，把 query 切成 CJK run 与非 CJK run 交替处理：
+/// - CJK run：由 `push_cjk_terms` 生成词项
+/// - 非 CJK run：按空白拆分，≥3 字符的词生成引号词项
+fn collect_terms(
+    text: &str,
+    terms: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if is_cjk_char(chars[i]) {
+            // 收集连续 CJK run
+            let start = i;
+            while i < chars.len() && is_cjk_char(chars[i]) {
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            push_cjk_terms(&run, terms, seen);
+        } else {
+            // 收集连续非 CJK（ASCII / 空白 / 其他），后续按空白拆分
+            let start = i;
+            while i < chars.len() && !is_cjk_char(chars[i]) {
+                i += 1;
+            }
+            let segment: String = chars[start..i].iter().collect();
+            for word in segment.split_whitespace() {
+                // trigram 下限：<3 字符的词无法命中任何内容，跳过
+                if word.chars().count() < 3 {
+                    continue;
+                }
+                let cleaned = word.replace('"', "");
+                let term = format!("\"{cleaned}\"");
+                if seen.insert(cleaned) {
+                    terms.push(term);
+                }
+            }
+        }
+    }
+}
+
+/// 为一段 CJK run 生成 OR 词项并追加到 `terms`（带去重 + 上限截断）。
+///
+/// - 长度 <3 → 跳过（trigram 下限）；
+/// - 长度 3..=6 → 整段作为一个引号短语；
+/// - 长度 >6 → 3 字符滑动窗口（stride 1），每个窗口一个引号词项。
+fn push_cjk_terms(
+    run: &str,
+    terms: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let chars: Vec<char> = run.chars().collect();
+    let len = chars.len();
+    if len < 3 {
+        return;
+    }
+    if len <= 6 {
+        let cleaned = run.replace('"', "");
+        if seen.insert(cleaned.clone()) {
+            terms.push(format!("\"{cleaned}\""));
+        }
+        return;
+    }
+    // 长度 >6：3 字符滑动窗口（stride 1）
+    for window in chars.windows(3) {
+        let s: String = window.iter().collect();
+        if seen.insert(s.clone()) {
+            terms.push(format!("\"{s}\""));
+        }
+    }
+}
+
+/// 判断字符是否为 CJK（中日韩统一表意文字 + 扩展 A/B + 兼容 + 假名 + 韩文 + 全角形式）。
+///
+/// 与 `domain::ai::token_budget::is_cjk` 镜像，分层禁止跨层引用（infra 不得
+/// `use crate::domain::`）。字符范围保持一致以避免同一仓库内两套 CJK 定义
+/// 产生行为漂移。
+///
+/// P1-3: 改为 pub 供 domain 层测试做双源一致性校验（domain 依赖 infra 合法）。
+pub fn is_cjk_char(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x3000..=0x33FF    // CJK 符号和标点 + 假名（平假名/片假名）
+        | 0x3400..=0x4DBF  // CJK 扩展 A
+        | 0x4E00..=0x9FFF  // CJK 统一表意文字
+        | 0xAC00..=0xD7AF  // 韩文音节
+        | 0xF900..=0xFAFF  // CJK 兼容表意文字
+        | 0xFF00..=0xFFEF  // 半角/全角形式
+        | 0x20000..=0x2A6DF // CJK 扩展 B
+    )
 }
 
 /// 清理指定对话的 FTS5 归档（删除对话 / 清空消息时调用）。
@@ -1598,5 +1755,225 @@ mod tests {
         // 全是短词 → 无有效 query → 空结果
         let recalls = search_memory_fts(&pool, "c1", "Go 语言", 10).await.unwrap();
         assert!(recalls.is_empty(), "全部短于 3 字符的词应返回空结果");
+    }
+
+    // ── 0.21.18 FTS 中文长句召回修复 ───────────────────────────────────
+
+    /// 核心回归：旧实现（空白拆词）下此用例必失败。
+    ///
+    /// 归档内容含 "异步编程" 和 "tokio"，但查询是一个自然长句，
+    /// 旧逻辑把整句作为一个 phrase → 要求归档文本包含整句原样子串 → 不命中。
+    /// 新逻辑（CJK 滑窗）把长句拆成 3 字窗口 OR → 任一窗口命中即召回。
+    #[tokio::test]
+    async fn fts_search_long_chinese_sentence_recall() {
+        let pool = setup_pool().await;
+
+        archive_to_fts(
+            &pool,
+            "c1",
+            "user",
+            "我想学习 Rust 异步编程和 tokio 运行时的生态",
+            "h_long",
+        )
+        .await
+        .unwrap();
+
+        // 长自然句查询——包含 "异步编程" 等关键词，但不是归档内容的原样子串
+        let query = "帮我规划一下异步编程的学习路线应该怎么安排";
+        let recalls = search_memory_fts(&pool, "c1", query, 10)
+            .await
+            .unwrap();
+        assert!(
+            !recalls.is_empty(),
+            "长中文句查询应通过滑窗 OR 召回包含关键词的归档消息"
+        );
+        assert!(
+            recalls
+                .iter()
+                .any(|r| r.content.contains("异步编程")),
+            "召回内容应包含归档的异步编程消息"
+        );
+    }
+
+    /// `build_fts_or_query` 单测：混合中英 → 两类词项都在结果里。
+    #[test]
+    fn fts_query_mixed_cjk_ascii() {
+        // "Rust" ASCII ≥3 保留，"异步编程" 是 4 字 CJK run（≤6 整段短语），
+        // "tokio" ASCII ≥3 保留。
+        let q = build_fts_or_query("Rust 异步编程 tokio");
+        // ASCII 词 "Rust" 和 "tokio" 应作为引号短语出现
+        assert!(q.contains("\"Rust\""), "ASCII 词应保留：{q}");
+        assert!(q.contains("\"tokio\""), "ASCII 词应保留：{q}");
+        // CJK run "异步编程"（4 字 ≤6）应作为整段短语出现
+        assert!(
+            q.contains("\"异步编程\""),
+            "3..=6 CJK run 应整段短语：{q}"
+        );
+        // 结果非空
+        assert!(!q.is_empty(), "混合中英 query 应生成非空 FTS 串");
+    }
+
+    /// `build_fts_or_query` 单测：长 CJK run（20 字）→ 多个 3 字滑窗词项。
+    #[test]
+    fn fts_query_long_cjk_run_sliding_windows() {
+        // 20 字 CJK run → 滑窗 stride 1，窗口数 = 20 - 3 + 1 = 18 个
+        let run = "一二三四五六七八九十一二三四五六七八九十";
+        assert_eq!(run.chars().count(), 20);
+        let q = build_fts_or_query(run);
+        // 应有多个 OR 词项（>1），且以 OR 连接
+        assert!(
+            q.contains(" OR "),
+            "长 CJK run 应生成多个 OR 词项：{q}"
+        );
+        // 词项数 ≤ 32
+        let term_count = q.split(" OR ").count();
+        assert!(
+            term_count <= 32,
+            "OR 词项应 ≤ 32 上限，实际 {term_count}"
+        );
+        // 每个词项应为 3 字（双引号包裹 3 个 CJK 字符）
+        let first_term = q.split(" OR ").next().unwrap();
+        assert!(
+            first_term.starts_with("\""),
+            "词项应双引号包裹：{first_term}"
+        );
+    }
+
+    /// `build_fts_or_query` 单测：2 字 CJK run 被过滤。
+    #[test]
+    fn fts_query_short_cjk_filtered() {
+        // 纯 2 字 CJK → 全被过滤 → 空串
+        let q = build_fts_or_query("你好");
+        assert!(q.is_empty(), "2 字 CJK run 应被过滤，实际：{q}");
+
+        // 混合：2 字 CJK + 有效词 → 2 字被过滤，有效词保留
+        let q = build_fts_or_query("你好 Rust");
+        assert!(
+            q.contains("\"Rust\"") && !q.contains("你好"),
+            "2 字 CJK 过滤，ASCII ≥3 保留：{q}"
+        );
+    }
+
+    /// `build_fts_or_query` 单测：空 query / 全短词 → 空串。
+    #[test]
+    fn fts_query_empty_and_all_short() {
+        assert_eq!(build_fts_or_query(""), "");
+        assert_eq!(build_fts_or_query("   "), "");
+        // 全是 <3 字符的 ASCII + CJK → 空串
+        assert_eq!(build_fts_or_query("Go 语言"), "");
+    }
+
+    /// `build_fts_or_query` 单测：词项内 `"` 被去除。
+    #[test]
+    fn fts_query_strips_embedded_quotes() {
+        // 含内嵌双引号的 ASCII 词 → 去引号后 ≥3 才保留
+        let q = build_fts_or_query("Rus\"t tokyo");
+        // "Rus\"t" → 清理后 "Rust"（4 字）应保留
+        // "tokyo" 应保留
+        assert!(q.contains("\"Rust\""), "内嵌引号应去除：{q}");
+        assert!(q.contains("\"tokyo\""), "正常词应保留：{q}");
+        // 不应出现未转义的裸引号破坏 FTS 语法
+        assert!(
+            !q.contains("\"\"\""),
+            "不应出现连续三引号：{q}"
+        );
+    }
+
+    /// `build_fts_or_query` 单测：词项去重。
+    #[test]
+    fn fts_query_dedup_terms() {
+        // "Rust Rust Rust" → 去重后只一个 "Rust"
+        let q = build_fts_or_query("Rust Rust Rust");
+        let terms: Vec<&str> = q.split(" OR ").collect();
+        assert_eq!(
+            terms.len(),
+            1,
+            "重复词项应去重，实际：{q}"
+        );
+        assert_eq!(terms[0], "\"Rust\"");
+    }
+
+    /// `build_fts_or_query` 单测：32 词项上限，保留首尾各半。
+    #[test]
+    fn fts_query_max_32_terms() {
+        // 生成 40 个不同的 ≥3 字符 ASCII 词
+        let words: Vec<String> = (0..40).map(|i| format!("word{i:02}")).collect();
+        let query = words.join(" ");
+        let q = build_fts_or_query(&query);
+        let terms: Vec<&str> = q.split(" OR ").collect();
+        assert_eq!(
+            terms.len(), 32,
+            "超长 query 应截断到 32 词项，实际 {}", terms.len()
+        );
+        // P1-4: 包含首词 word00 与末词 word39
+        assert!(
+            terms.contains(&"\"word00\""),
+            "应包含首词 word00"
+        );
+        assert!(
+            terms.contains(&"\"word39\""),
+            "应包含末词 word39"
+        );
+        // P1-4: 不含中部词 word20
+        assert!(
+            !terms.contains(&"\"word20\""),
+            "不应包含中部词 word20"
+        );
+    }
+
+    /// 超长 CJK query（8000 字符）截取首尾各 2048 字符后收集，
+    /// 返回 ≤32 词项，且首 3 字窗口与末 3 字窗口都在结果中。
+    #[test]
+    fn fts_query_long_cjk_truncated_to_head_tail() {
+        // 构造 8000 字符的 CJK query。为确保首/末 3 字窗口不被去重丢弃，
+        // 头部和尾部各用一个唯一的"锚点"3 字符序列（不与中部重复）。
+        let head_anchor = "\u{4E00}\u{4E01}\u{4E02}"; // 一丁丂
+        let tail_anchor = "\u{5E00}\u{5E01}\u{5E02}"; // 廡廢廣
+        let filler = "\u{6C34}"; // 水 — 重复填充字符
+
+        let mut query = String::with_capacity(8000);
+        query.push_str(head_anchor);
+        for _ in 0..(8000 - 6) {
+            query.push_str(filler);
+        }
+        query.push_str(tail_anchor);
+        assert_eq!(query.chars().count(), 8000);
+
+        let q = build_fts_or_query(&query);
+        let terms: Vec<&str> = q.split(" OR ").collect();
+
+        // 应 ≤32 词项
+        assert!(
+            terms.len() <= 32,
+            "超长 query 应截断到 ≤32 词项，实际 {}", terms.len()
+        );
+
+        // 首 3 字窗口应在结果中（head_anchor 本身就是一个 3 字符 run，整段作为一个引号短语）
+        assert!(
+            q.contains(&format!("\"{head_anchor}\"")),
+            "应包含首 3 字窗口 \"{head_anchor}\""
+        );
+
+        // 末 3 字窗口应在结果中（tail_anchor 同理）
+        assert!(
+            q.contains(&format!("\"{tail_anchor}\"")),
+            "应包含末 3 字窗口 \"{tail_anchor}\""
+        );
+    }
+
+    /// 4096 字符以内的 query 走原路径不受截断影响。
+    #[test]
+    fn fts_query_under_threshold_not_truncated() {
+        // 构造恰好 4096 字符的 ASCII query（每词 5 字符 + 空格 = 6 字符/词，~681 词）
+        // 实际只需验证不触发 >4096 截断分支即可——用一个短 query 确认走原路径
+        let query: String = "hello world test ".repeat(50); // ~800 字符
+        assert!(query.chars().count() <= 4096);
+
+        let q = build_fts_or_query(&query);
+        // 应正常产生词项（hello / world / test 去重后 3 个）
+        assert!(!q.is_empty(), "短 query 应正常产生词项");
+        assert!(q.contains("\"hello\""), "应包含 hello");
+        assert!(q.contains("\"world\""), "应包含 world");
+        assert!(q.contains("\"test\""), "应包含 test");
     }
 }

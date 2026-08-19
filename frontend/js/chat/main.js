@@ -181,7 +181,7 @@ async function init() {
 
         // 0.13.6: 加载初始上下文窗口状态（即使为 null 也显示空环）
         try {
-            const ctxStatus = await ipc.getContextWindowStatus();
+            const ctxStatus = await ipc.getContextWindowStatus(state.conversationId);
             components.updateContextIndicator(ctxStatus || null);
             if (ctxStatus) {
                 components.renderContextWarning(ctxStatus.usage_percent, handleContextWarningAction);
@@ -1083,6 +1083,20 @@ async function handleSwitchConversation(conversationId, groupId = null) {
     // 0.12.7 §6.5：查询并显示分组系统提示词
     await updatePromptBanner(conversationId);
     updateEphemeralBadge(); // 0.17.6a: 确保 badge 状态正确
+
+    // 0.21.18: 切换对话后刷新上下文容量指示器——之前不刷新，旧对话的百分比
+    // 会残留到下一次 prompt；后端缓存 miss 时按需重算，历史对话也能显示。
+    // 竞态防护：响应回来时校验仍是当前对话，快速连点切换不串台（§5.1）。
+    try {
+        const ctxStatus = await ipc.getContextWindowStatus(conversationId);
+        if (state.conversationId === conversationId) {
+            components.updateContextIndicator(ctxStatus || null);
+        }
+    } catch (e) {
+        if (state.conversationId === conversationId) {
+            components.updateContextIndicator(null);
+        }
+    }
 
     focusInput();
 }

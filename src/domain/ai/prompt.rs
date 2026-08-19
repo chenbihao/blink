@@ -95,6 +95,9 @@ pub use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens
 /// 3. 构建 token 估算 + 超阈值 warn
 ///
 /// `_lang` 参数预留 i18n（0.x 阶段 prompt 用中文，AI 按用户输入语言回答）。
+///
+/// 0.21.18: 运行时调用方已随 0.17.6 AI lane 移除，保留供测试与未来路由复用。
+#[allow(dead_code)]
 pub fn routing_system_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
     let mut prompt =
         String::from("你是 Blink 的意图路由器。用户输入未命中确定性规则,由你判断意图。\n\n");

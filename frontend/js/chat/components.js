@@ -894,7 +894,7 @@ function formatJson(str) {
 /**
  * 更新上下文窗口占用指示器（composer bar 右侧 SVG 环形进度条）。
  *
- * @param {{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}|null} status
+ * @param {{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number}|null} status
  */
 export function updateContextIndicator(status) {
     const el = document.getElementById("chat-context-indicator");

@@ -1321,6 +1321,7 @@ mod tests {
                     context_limit: None,
                     trigger_ratio: 0.85,
                     compress_ratio: 0.65,
+                    history_budget: None,
                     recall_enabled: false,
                     recall_top_k: 5,
                 },

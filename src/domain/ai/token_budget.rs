@@ -162,8 +162,12 @@ pub struct TokenBreakdown {
 pub struct TokenBudget {
     /// 分项拆解。
     pub breakdown: TokenBreakdown,
-    /// 估算的输入 token 总数（history + system + pending + tools + overhead + multimodal）。
+    /// 估算的输入 token 总数（history + system + pending + tools + overhead + multimodal，
+    /// 已应用 calibration_ratio）。
     pub estimated_input_tokens: usize,
+    /// 未应用 calibration_ratio 的输入基线（history+system+pending 的原始估算 + tools + overhead + multimodal）。
+    /// 用于校准器采样，避免校准生效后 ratio 被拉向 1.0 导致反馈回路。
+    pub raw_estimated_input_tokens: usize,
     /// 输出 token 预留。
     pub reserved_output_tokens: usize,
     /// 安全余量 token。
@@ -363,6 +367,14 @@ pub fn estimate_request_budget(input: TokenBudgetInput) -> TokenBudget {
         .saturating_add(protocol_overhead_tokens)
         .saturating_add(multimodal_tokens);
 
+    // raw_estimated_input_tokens：未应用 calibration_ratio 的基线，供校准器采样
+    let raw_estimated_input_tokens = history_tokens
+        .saturating_add(system_tokens)
+        .saturating_add(pending_tokens)
+        .saturating_add(tools_tokens)
+        .saturating_add(protocol_overhead_tokens)
+        .saturating_add(multimodal_tokens);
+
     // remaining
     let remaining_tokens = effective_input_limit.saturating_sub(estimated_input_tokens);
 
@@ -391,6 +403,7 @@ pub fn estimate_request_budget(input: TokenBudgetInput) -> TokenBudget {
             multimodal_tokens,
         },
         estimated_input_tokens,
+        raw_estimated_input_tokens,
         reserved_output_tokens: reserved_output,
         safety_margin_tokens: safety_margin,
         context_limit,
@@ -420,7 +433,6 @@ fn apply_calibration(raw_tokens: usize, ratio: f64) -> usize {
 /// 避免"历史裁剪到 80%，加上工具后仍超限"。
 ///
 /// 返回 history 可用的 token 上限。
-#[allow(dead_code)]
 pub fn compute_history_token_budget(
     context_limit: usize,
     system_tokens: usize,
@@ -1368,5 +1380,225 @@ mod tests {
 
         cal.clear("p1", "m1");
         assert!(cal.get_ratio("p1", "m1").is_none());
+    }
+
+    /// 校准反馈回路修复（P0-1）：使用 raw_estimated_input_tokens 采样后，
+    /// ratio 生效后续样本不会把 ratio 拉向 1.0，真实偏差被保留。
+    #[test]
+    fn calibrator_raw_baseline_stable_across_rounds() {
+        // 模拟：raw=100, actual=150（真实偏差 1.5）
+        // 先用 raw=100 采样达到 MIN_SAMPLES 使 ratio 生效（1.5），
+        // 然后继续 record 多轮，ratio 应稳定在 1.5 不漂移。
+        let cal = UsageCalibrator::new();
+
+        // 第一阶段：采够 MIN_SAMPLES（3）使 ratio 生效
+        for _ in 0..CALIBRATION_MIN_SAMPLES {
+            cal.record(
+                "p",
+                "m",
+                100, // raw_estimated_input_tokens（固定未校准基线）
+                &Usage {
+                    input_tokens: 150, // actual
+                    reported: true,
+                    ..Default::default()
+                },
+            );
+        }
+        let ratio_after_min = cal.get_ratio("p", "m").unwrap();
+        assert!(
+            (ratio_after_min - 1.5).abs() < 0.01,
+            "初始 ratio 应为 1.5，实际 {ratio_after_min}"
+        );
+
+        // 第二阶段：继续 record 多轮（模拟 ratio 生效后的后续请求）
+        // 关键：采样值仍然是 raw=100，不随 ratio 变化
+        for _ in 0..10 {
+            cal.record(
+                "p",
+                "m",
+                100, // raw_estimated_input_tokens 不变
+                &Usage {
+                    input_tokens: 150,
+                    reported: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let ratio_final = cal.get_ratio("p", "m").unwrap();
+        assert!(
+            (ratio_final - 1.5).abs() < 0.01,
+            "多轮后 ratio 应稳定在 1.5 不漂移，实际 {ratio_final}"
+        );
+    }
+
+    // ── P0-3: history_budget 链路测试 ──────────────────────────────────────────
+
+    /// 同输入下工具池从 N 增至 N+1 → estimate_request_budget 的 breakdown.tools_tokens
+    /// 增大 → compute_history_token_budget(...) 严格变小。
+    #[test]
+    fn history_budget_shrinks_when_tools_increase() {
+        let tool = make_tool(
+            "get_weather",
+            "查询天气",
+            json!({"type":"object","properties":{"city":{"type":"string"}}}),
+        );
+
+        // N=1 工具池
+        let budget_n = estimate_request_budget(TokenBudgetInput {
+            history_texts: &["some history".to_string()],
+            system_prompt: Some("system prompt"),
+            pending_message: Some("user message"),
+            tools: std::slice::from_ref(&tool),
+            tool_call_count: 0,
+            has_multimodal: false,
+            context_window: Some(8192),
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+
+        // N+1=2 工具池（加一个不同的工具）
+        let extra_tool = make_tool(
+            "search_web",
+            "搜索网页",
+            json!({"type":"object","properties":{"query":{"type":"string"}}}),
+        );
+        let budget_n1 = estimate_request_budget(TokenBudgetInput {
+            history_texts: &["some history".to_string()],
+            system_prompt: Some("system prompt"),
+            pending_message: Some("user message"),
+            tools: &[tool, extra_tool],
+            tool_call_count: 0,
+            has_multimodal: false,
+            context_window: Some(8192),
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+
+        // 断言链条：tools_tokens 增大
+        assert!(
+            budget_n1.breakdown.tools_tokens > budget_n.breakdown.tools_tokens,
+            "工具池增大后 tools_tokens 应增大"
+        );
+
+        // 断言链条：compute_history_token_budget 严格变小
+        let history_budget_n = compute_history_token_budget(
+            budget_n.context_limit,
+            budget_n.breakdown.system_tokens,
+            budget_n.breakdown.tools_tokens,
+            budget_n.breakdown.pending_tokens,
+            budget_n.reserved_output_tokens,
+            budget_n.safety_margin_tokens,
+        );
+        let history_budget_n1 = compute_history_token_budget(
+            budget_n1.context_limit,
+            budget_n1.breakdown.system_tokens,
+            budget_n1.breakdown.tools_tokens,
+            budget_n1.breakdown.pending_tokens,
+            budget_n1.reserved_output_tokens,
+            budget_n1.safety_margin_tokens,
+        );
+        assert!(
+            history_budget_n1 < history_budget_n,
+            "工具池增大后 history budget 应严格变小: {history_budget_n} -> {history_budget_n1}"
+        );
+    }
+
+    /// request_max_tokens 从 None 变 Some(4096) → reserved_output_tokens 增大 →
+    /// history budget 严格变小。
+    #[test]
+    fn history_budget_shrinks_when_request_max_tokens_set() {
+        let tools = [make_tool("tool", "desc", json!({"type":"object"}))];
+
+        // request_max_tokens = None → reserved_output = DEFAULT_RESERVED_OUTPUT (2048)
+        let budget_none = estimate_request_budget(TokenBudgetInput {
+            history_texts: &["some history".to_string()],
+            system_prompt: Some("system prompt"),
+            pending_message: Some("user message"),
+            tools: &tools,
+            tool_call_count: 0,
+            has_multimodal: false,
+            context_window: Some(8192),
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+
+        // request_max_tokens = Some(4096) → reserved_output = 4096
+        let budget_some = estimate_request_budget(TokenBudgetInput {
+            history_texts: &["some history".to_string()],
+            system_prompt: Some("system prompt"),
+            pending_message: Some("user message"),
+            tools: &tools,
+            tool_call_count: 0,
+            has_multimodal: false,
+            context_window: Some(8192),
+            request_max_tokens: Some(4096),
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+
+        // 断言链条：reserved_output_tokens 增大
+        assert!(
+            budget_some.reserved_output_tokens > budget_none.reserved_output_tokens,
+            "request_max_tokens 设定后 reserved_output_tokens 应增大"
+        );
+
+        // 断言链条：compute_history_token_budget 严格变小
+        let history_budget_none = compute_history_token_budget(
+            budget_none.context_limit,
+            budget_none.breakdown.system_tokens,
+            budget_none.breakdown.tools_tokens,
+            budget_none.breakdown.pending_tokens,
+            budget_none.reserved_output_tokens,
+            budget_none.safety_margin_tokens,
+        );
+        let history_budget_some = compute_history_token_budget(
+            budget_some.context_limit,
+            budget_some.breakdown.system_tokens,
+            budget_some.breakdown.tools_tokens,
+            budget_some.breakdown.pending_tokens,
+            budget_some.reserved_output_tokens,
+            budget_some.safety_margin_tokens,
+        );
+        assert!(
+            history_budget_some < history_budget_none,
+            "request_max_tokens 设定后 history budget 应严格变小: {history_budget_none} -> {history_budget_some}"
+        );
+    }
+
+    // ── P1-3: is_cjk 双源一致性测试 ─────────────────────────────────────────────
+
+    /// `token_budget::is_cjk` 与 `infra::data::conversations::is_cjk_char` 是手工镜像，
+    /// 分层约束不许 infra 反向依赖 domain。此测试在边界码点上断言两函数结果一致，
+    /// 并加绝对断言防止两边同错时测试假绿。
+    #[test]
+    fn is_cjk_matches_infra_mirror() {
+        use crate::infra::data::conversations::is_cjk_char;
+
+        let boundary_codepoints: &[u32] = &[
+            0x2FFF, 0x3000, 0x33FF, 0x3400, 0x4DBF, 0x4DC0, 0x4E00, 0x9FFF, 0xA000,
+            0xABFF, 0xAC00, 0xD7AF, 0xD800, 0xF8FF, 0xF900, 0xFAFF, 0xFB00, 0xFEFF,
+            0xFF00, 0xFFEF, 0x10000, 0x1FFFF, 0x20000, 0x2A6DF, 0x2A6E0,
+        ];
+
+        for &cp in boundary_codepoints {
+            if let Some(ch) = char::from_u32(cp) {
+                let domain_result = is_cjk(ch);
+                let infra_result = is_cjk_char(ch);
+                assert_eq!(
+                    domain_result, infra_result,
+                    "码点 U+{cp:04X}: domain is_cjk={domain_result}, infra is_cjk_char={infra_result} 不一致"
+                );
+            }
+        }
+
+        // 绝对断言：防两边同错时测试假绿
+        assert!(is_cjk('\u{4E00}'), "U+4E00 应为 CJK（domain）");
+        assert!(is_cjk_char('\u{4E00}'), "U+4E00 应为 CJK（infra）");
+        assert!(!is_cjk('\u{0041}'), "U+0041 (A) 不应为 CJK（domain）");
+        assert!(!is_cjk_char('\u{0041}'), "U+0041 (A) 不应为 CJK（infra）");
     }
 }

@@ -222,11 +222,21 @@ pub async fn fetch_ai_models(
 
 /// 获取当前 AI system prompt 信息（0.11.3 §3.8 token 监控）。
 ///
-/// 构建与 AI lane 相同的 tools 列表 + system prompt，返回 token 数 / 工具数 / 预览。
-/// 设置页 AI tab（高级）展示此信息，让用户感知 prompt 体积。
+/// 0.21.18: 展示口径改为「聊天 preamble（含 Skill 阶段 1 摘要）+ AI 授权的
+/// Capability 工具（不含 MCP，下同）」。此前渲染的是 `routing_system_prompt`
+/// （意图路由器，运行时调用方已随 0.17.6 AI lane 移除，现为幽灵指标）。
+///
+/// 返回 JSON（保留旧 key 兼容前端，新增分项）：
+/// - `tokens`: system_tokens + tools_tokens（前端展示用总量）
+/// - `system_tokens`: preamble 估算 token
+/// - `tools_tokens`: 工具定义估算 token
+/// - `tools_count`: 工具数量
+/// - `preview`: preamble 前 200 字符
+/// - `threshold`: 5000（硬编码告警阈值）
 #[tauri::command]
 pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use crate::domain::ai::prompt::{build_prompt_infos, estimate_tokens, routing_system_prompt};
+    use crate::domain::ai::prompt::{build_prompt_infos, chat_system_prompt_with_skills};
+    use crate::domain::ai::token_budget::{estimate_text_tokens, estimate_tools_tokens};
     use crate::domain::capability::CapabilityRegistry;
     use crate::domain::capability::{build_capability_tools, inject_plugin_settings};
     use crate::domain::plugin::PluginEngine;
@@ -235,8 +245,22 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
 
     let cap_reg = app.state::<Arc<CapabilityRegistry>>();
     let plugin_engine = app.state::<Arc<PluginEngine>>();
+    let pools = app.state::<crate::infra::data::DbPools>();
 
-    // 构建 tools 列表（与 service.rs AI lane 同逻辑）
+    // 1. Skill 阶段 1 摘要快照（与对话启动态一致）
+    let skill_summaries = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .map(|chat| chat.skill_summaries())
+        .unwrap_or_default();
+
+    // 2. AI 授权 allowlist
+    let allowlist =
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(
+            &pools.config,
+        )
+        .await;
+
+    // 3. 构建 tools 列表（与 service.rs AI lane 同逻辑）
     let mut tools = build_capability_tools(&cap_reg);
 
     // 参数动态注入 + hints 收集
@@ -259,17 +283,34 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         }
     }
 
-    let tools_count = tools.len();
-    let prompt_infos = build_prompt_infos(tools, &plugin_hints);
-    // lang 不影响 prompt 内容（0.x 用中文），传 "zh"
-    let prompt = routing_system_prompt(&prompt_infos, "zh");
-    let tokens = estimate_tokens(&prompt);
+    // 4. 按 allowlist 过滤——与 tool_adapter.rs 生产过滤语义一致。
+    // policy 级「允许 AI」过滤不复刻，估算略偏保守方向，可接受。
+    tools.retain(|t| allowlist.contains(&t.name));
 
-    // 预览：前 200 字符（设置页展示用）
-    let preview: String = prompt.chars().take(200).collect();
+    let prompt_infos = build_prompt_infos(tools, &plugin_hints);
+
+    // 5. preamble：无分组提示、无触发 Skill，与对话启动态一致
+    let preamble = chat_system_prompt_with_skills(None, &skill_summaries, &[]);
+
+    // 6. 估算
+    let system_tokens = estimate_text_tokens(&preamble);
+    let tools_tokens = estimate_tools_tokens(&prompt_infos);
+    let tools_count = prompt_infos.len();
+
+    // 预览：前 200 字符（设置页展示用，按 char 迭代 UTF-8 安全）
+    let preview: String = preamble.chars().take(200).collect();
+
+    tracing::debug!(
+        system_tokens,
+        tools_tokens,
+        tools_count,
+        "get_system_prompt_info: 聊天 preamble + 已授权工具 token 估算"
+    );
 
     Ok(serde_json::json!({
-        "tokens": tokens,
+        "tokens": system_tokens + tools_tokens,
+        "system_tokens": system_tokens,
+        "tools_tokens": tools_tokens,
         "tools_count": tools_count,
         "preview": preview,
         "threshold": 5000,
@@ -372,24 +413,30 @@ pub async fn test_ai_provider(
 }
 
 /// 获取当前上下文窗口状态（0.13.6）。
-///
-/// 返回上次 `compute_context_status()` 计算的缓存结果。若从未计算过则返回 null。
-/// 前端在聊天窗口加载时调用此 command 获取初始状态。
+/// 返回上下文窗口状态。P0-2: 按 conversation_id 精确查询；0.21.18: 缓存 miss 时
+/// 按需重算（历史对话切换 / 重启后首次查看），边界见
+/// `ChatService::get_or_compute_context_status`。前端在聊天窗口加载与切换对话时调用。
 #[tauri::command]
 pub async fn get_context_window_status(
     app: tauri::AppHandle,
+    conversation_id: String,
 ) -> Result<Option<crate::domain::ai::chat_service::ContextWindowStatus>, String> {
     use tauri::Manager;
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
-    Ok(chat.last_context_status_any())
+    Ok(chat.get_or_compute_context_status(&conversation_id).await)
 }
 
 /// 强制压缩当前对话的上下文窗口（0.13.6）。
 ///
 /// 调用 `memory.load_with_stats()` 走一遍 token_aware_truncate 流程，
 /// 然后返回更新后的上下文窗口状态。
+///
+/// 注意：本命令实际执行的裁剪基于上一轮 stream_prompt 注入的
+/// history_budget（compute_context_status 内部先 load 后注入）；本命令
+/// 注入的新预算不含 pending/system 扣减，仅作兜底，下一轮 stream_prompt
+/// 前会被重算覆盖。
 #[tauri::command]
 pub async fn compress_context_now(
     app: tauri::AppHandle,
@@ -400,8 +447,16 @@ pub async fn compress_context_now(
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
 
+    // 0.21.18: 流式进行中不允许手动压缩——compute_context_status 注入的预算
+    // 与实际 prompt 注入存在时序窗口，那一轮可能少裁。等当前回复完成后再压缩。
+    if chat.current_request_context().is_some() {
+        return Err("对话进行中，请等待当前回复完成后再压缩".to_string());
+    }
+
     // 0.21.17: compute_context_status 需要 AgentProvider + ResolvedProviderEntries。
     // 从缓存获取 provider，从 resolve_current_entries 获取 resolved。
+    // 前提：聊天窗只承载持久对话（ephemeral 走主窗口 AI / Chord-Q，不经过
+    // 本命令），故固定 resolve Persistent kind。
     let resolved = chat
         .resolve_current_entries(crate::domain::ai::chat_service::ConversationKind::Persistent)
         .map_err(|e| e.to_string())?;
@@ -433,9 +488,11 @@ pub async fn clear_all_permission_memory(app: tauri::AppHandle) -> Result<(), St
 /// 获取 composer bar 悬浮预览快照（一次 IPC 聚合上下文 + 内置 tool + MCP 服务）。
 ///
 /// 供前端 composer bar hover popup 使用——避免前端发 4 个 IPC 请求拼装。
+/// P0-2: 按 conversation_id 精确查询上下文状态。
 #[tauri::command]
 pub async fn get_composer_bar_snapshot(
     app: tauri::AppHandle,
+    conversation_id: String,
 ) -> Result<ComposerBarSnapshot, String> {
     use tauri::Manager;
 
@@ -446,7 +503,8 @@ pub async fn get_composer_bar_snapshot(
     let context_status = if let Some(chat) =
         app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
     {
-        chat.last_context_status_any()
+        // 0.21.18: 缓存 miss 时按需重算，历史对话 hover 也能显示容量
+        chat.get_or_compute_context_status(&conversation_id).await
     } else {
         None
     };

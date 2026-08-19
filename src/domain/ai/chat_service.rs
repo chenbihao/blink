@@ -32,7 +32,7 @@ use crate::domain::ai::prompt::{
 };
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
-use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
+use crate::domain::ai::skill::{SkillRegistry, SkillSummary, parse_skill_command};
 use crate::domain::ai::thinking::thinking_supports_effort;
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
@@ -197,6 +197,10 @@ pub struct ContextWindowStatus {
     /// 此状态对应的 model_id（防止跨模型返回旧状态）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model_id: String,
+    /// 未应用 calibration_ratio 的输入基线 token 数（P0-1）。
+    /// 用于校准器采样，避免校准生效后 ratio 被拉向 1.0 导致反馈回路。
+    #[serde(default)]
+    pub raw_estimated_tokens: usize,
 }
 
 // ── 0.13.6: Skill 激活 Signal ──────────────────────────────────────────────────
@@ -388,8 +392,8 @@ pub struct ChatService {
     /// 配置库连接池（持久化模型选择到 config 表）。
     config_pool: sqlx::SqlitePool,
     /// 0.13.6: 上次计算的上下文窗口状态（供 `get_context_window_status` command 查询）。
-    /// 0.21.17: 按 conversation_id + provider_id + model_id 归属，防止跨模型/会话返回旧状态。
-    last_context_status: RwLock<HashMap<String, ContextWindowStatus>>,
+    /// P0-2: 替换为 ContextStatusCache，按 conversation_id 查询，32 条上限淘汰。
+    last_context_status: ContextStatusCache,
     /// 0.21.17: 真实 usage 校准器——按 provider_id + model_id 维护样本，修正启发式估算偏差。
     calibrator: crate::domain::ai::token_budget::UsageCalibrator,
     /// 当前 Agent 能力模式；由 AIConfig 热更新，不修改其他 Capability 出口。
@@ -444,7 +448,7 @@ impl ChatService {
             ),
             skill_registry,
             cached_agent: RwLock::new(None),
-            last_context_status: RwLock::new(HashMap::new()),
+            last_context_status: ContextStatusCache::new(),
             calibrator: crate::domain::ai::token_budget::UsageCalibrator::new(),
             agent_mode: AtomicU8::new(encode_agent_mode(agent_mode)),
             ephemeral_model_policy: RwLock::new(ephemeral_model_policy),
@@ -1118,33 +1122,47 @@ impl ChatService {
                     //
                     // 当前发送干净的用户消息给 agent：
                     // 0.21.17: 通过拦截 channel 捕获 Done chunk，采样到 calibrator。
-                    // stream_prompt 写入 intercept_tx → 后台转发循环读取 intercept_rx
-                    // → 正常 chunk 转发到 chunk_tx，Done chunk 额外采样到 calibrator。
+                    // P0-1: 使用 raw_estimated_tokens（未校准基线）采样，避免 ratio
+                    // 生效后反馈回路把 ratio 拉向 1.0；流中出现 ToolCall 时不采样
+                    //（tool-loop Done usage 口径与请求前估算不符）。
                     let (intercept_tx, mut intercept_rx) =
                         mpsc::unbounded_channel::<ChatStreamChunk>();
-                    let estimated_input_tokens = context_status.estimated_tokens as u32;
+                    let raw_estimated_input_tokens = context_status.raw_estimated_tokens as u32;
                     let cal_provider_id = resolved.provider.id.clone();
                     let cal_model_id = resolved.model.id.clone();
                     let weak_for_cal = weak_service.clone();
                     tokio::spawn(async move {
+                        let mut gate = CalibrationGate::new();
                         while let Some(chunk) = intercept_rx.recv().await {
-                            // 0.21.17: Done chunk 采样到 calibrator
+                            // P0-1: 逐 chunk 观察，跟踪是否出现 ToolCall
+                            gate.observe(&chunk);
+                            // 0.21.17: Done chunk 采样到 calibrator（P0-1: gate 门控）
                             if let ChatStreamChunk::Done { ref usage, .. } = chunk
+                                && gate.should_sample()
                                 && let Some(service) = weak_for_cal.upgrade()
                             {
                                 service.calibrator.record(
                                     &cal_provider_id,
                                     &cal_model_id,
-                                    estimated_input_tokens,
+                                    raw_estimated_input_tokens,
                                     usage,
                                 );
-                                tracing::trace!(
+                                tracing::debug!(
                                     provider_id = %cal_provider_id,
                                     model_id = %cal_model_id,
-                                    estimated = estimated_input_tokens,
+                                    raw_estimated = raw_estimated_input_tokens,
                                     actual = usage.input_tokens,
                                     reported = usage.reported,
-                                    "calibrator: 已采样 usage"
+                                    "calibrator: 已采样 usage（纯文本流）"
+                                );
+                            }
+                            if !gate.should_sample()
+                                && matches!(chunk, ChatStreamChunk::Done { .. })
+                            {
+                                tracing::debug!(
+                                    provider_id = %cal_provider_id,
+                                    model_id = %cal_model_id,
+                                    "calibrator: 跳过采样（流中出现过 ToolCall）"
                                 );
                             }
                             if chunk_tx.send(chunk).is_err() {
@@ -1254,6 +1272,11 @@ impl ChatService {
     /// 0.17.6a: 获取持久化对话记忆的引用（供 promote 写入消息用）。
     pub fn persistent_memory(&self) -> &Arc<SqliteConversationMemory> {
         &self.persistent_memory
+    }
+
+    /// 0.21.18: 设置页 System Prompt Token 估算用：当前 Skill 阶段 1 摘要快照。
+    pub fn skill_summaries(&self) -> Vec<SkillSummary> {
+        self.skill_registry.summaries()
     }
 
     /// 当前 active request 上下文；Phase 4 注入 Dangerous confirm payload。
@@ -1518,6 +1541,57 @@ impl ChatService {
             },
         );
 
+        // 0.21.18: 注入历史裁剪预算——load_inner 的裁剪基准从裸 context_limit
+        // 换为「预扣 system/tools/pending/输出预留/安全余量后的历史可用预算」。
+        // 本方法在每轮 stream_prompt 之前被调用，rig load 发生在 stream_prompt 内部，
+        // 注入先于消费，时序有保证。
+        // Pending 注意：load_inner 裁剪时消息里含预写 user（之后才被丢弃），预算也
+        // 扣了 pending——两边一致，不能"优化"成只算一边，否则预算偏松。
+        let history_budget = crate::domain::ai::token_budget::compute_history_token_budget(
+            budget.context_limit,
+            budget.breakdown.system_tokens,
+            budget.breakdown.tools_tokens,
+            budget.breakdown.pending_tokens,
+            budget.reserved_output_tokens,
+            budget.safety_margin_tokens,
+        );
+
+        // 召回块预留：load 在裁剪之后才插入 <memory> 块，不受预算约束。
+        // 按 worst case 计：recall_top_k × 500 字符（CJK 1 token/char）。
+        let recall_reserve: usize = if cfg.recall_enabled {
+            (cfg.recall_top_k.max(0) as usize).saturating_mul(500)
+        } else {
+            0
+        };
+        let history_budget = history_budget.saturating_sub(recall_reserve);
+
+        if history_budget < 1024 {
+            tracing::warn!(
+                conversation_id,
+                history_budget,
+                context_limit = budget.context_limit,
+                tools_tokens = budget.breakdown.tools_tokens,
+                "历史预算过小：非历史开销（工具/系统提示/预留）已接近或超过窗口"
+            );
+        }
+
+        tracing::debug!(
+            conversation_id,
+            history_budget,
+            recall_reserve,
+            context_limit = budget.context_limit,
+            "compute_context_status: 注入历史裁剪预算"
+        );
+
+        // cfg 守卫已完成使命——必须先释放读锁再注入预算：
+        // update_history_budget 拿同一把 RwLock 的写锁，持读锁 await 写锁会自死锁
+        //（0.21.18 回归：曾在 drop 前调用导致对话流永久无响应）。
+        drop(cfg);
+
+        self.persistent_memory
+            .update_history_budget(Some(history_budget))
+            .await;
+
         let status = ContextWindowStatus {
             estimated_tokens: budget.estimated_input_tokens,
             context_limit: budget.context_limit,
@@ -1542,15 +1616,14 @@ impl ChatService {
             conversation_id: conversation_id.to_string(),
             provider_id: resolved.provider.id.clone(),
             model_id: resolved.model.id.clone(),
+            // P0-1: 未校准基线，供 calibrator 采样
+            raw_estimated_tokens: budget.raw_estimated_input_tokens,
         };
 
-        // 0.21.17: 按 conversation_id + provider_id + model_id 归属缓存
+        // P0-2: 按 conversation_id + provider_id + model_id 归属缓存
         let scope_key =
             context_status_scope_key(conversation_id, &resolved.provider.id, &resolved.model.id);
-        self.last_context_status
-            .write()
-            .expect("last_context_status lock poisoned")
-            .insert(scope_key, status.clone());
+        self.last_context_status.insert(scope_key, status.clone());
 
         tracing::debug!(
             conversation_id,
@@ -1575,36 +1648,57 @@ impl ChatService {
         status
     }
 
-    /// 返回上次计算的上下文窗口状态（供 `get_context_window_status` command）。
+    /// P0-2: 按 conversation_id 查询缓存的上下文窗口状态。
     ///
-    /// 0.21.17: 按 `conversation_id + provider_id + model_id` scoped 查询。
-    /// 若该 scope 从未计算过则返回 None，防止跨模型/会话返回旧状态。
-    #[allow(dead_code)]
-    pub fn last_context_status(
+    /// 多条命中取 seq 最大（最新写入）。若该 conversation 从未计算过则返回 None。
+    pub fn get_context_status_for_conversation(
         &self,
         conversation_id: &str,
-        provider_id: &str,
-        model_id: &str,
     ) -> Option<ContextWindowStatus> {
-        let scope_key = context_status_scope_key(conversation_id, provider_id, model_id);
-        self.last_context_status
-            .read()
-            .expect("last_context_status lock poisoned")
-            .get(&scope_key)
-            .cloned()
+        self.last_context_status.get_for_conversation(conversation_id)
     }
 
-    /// 0.21.17: 返回最近一次计算的上下文窗口状态（任意 scope）。
+    /// 0.21.18: 查询上下文状态，缓存 miss 时按需重算。
     ///
-    /// 供 `ComposerBarSnapshot` 等不需要严格 scope 匹配的场景使用——
-    /// 取 HashMap 中最后插入的条目。如果需要精确匹配，使用 `last_context_status`。
-    pub fn last_context_status_any(&self) -> Option<ContextWindowStatus> {
-        self.last_context_status
-            .read()
-            .expect("last_context_status lock poisoned")
-            .values()
-            .last()
-            .cloned()
+    /// 供历史对话切换 / hover popup 等查看路径使用——估算纯本地
+    /// （DB 消息 + 当前模型快照 + 工具快照），无需持久化：模型 / 工具 /
+    /// 消息任一变化都会让旧值过期，按需重算永远新鲜。
+    ///
+    /// 返回 None 的边界（前端显示空环兜底）：
+    /// - 流式请求进行中——预算注入与 prompt 消费有时序窗口（同
+    ///   `compress_context_now` 的守卫），等下一轮 prompt 事件刷新
+    /// - provider 未构造（本进程尚未发过消息）——避免查看路径触发
+    ///   重量级 Agent 构造（MCP collect 等）
+    /// - 模型解析失败（未配置 provider）
+    ///
+    /// 注入的 history_budget 不含 pending/system 扣减（无待发消息），
+    /// 仅作兜底，下一轮 stream_prompt 前会被重算覆盖。
+    pub async fn get_or_compute_context_status(
+        &self,
+        conversation_id: &str,
+    ) -> Option<ContextWindowStatus> {
+        if let Some(status) = self.get_context_status_for_conversation(conversation_id) {
+            return Some(status);
+        }
+        if self.requests.status().is_some() {
+            tracing::debug!(
+                conversation_id,
+                "get_or_compute_context_status: 流式进行中，跳过按需重算"
+            );
+            return None;
+        }
+        let resolved = self
+            .resolve_current_entries(ConversationKind::Persistent)
+            .ok()?;
+        let provider = self.cached_agent_ref()?;
+        tracing::debug!(
+            conversation_id,
+            "get_or_compute_context_status: 缓存 miss，按需重算"
+        );
+        Some(
+            self.compute_context_status(conversation_id, None, None, &provider, &resolved)
+                .await,
+        )
     }
 
     // ── 0.13.3 Skill 集成 ──────────────────────────────────────────────────
@@ -1714,6 +1808,99 @@ pub fn current_request_context(chat: Option<&Arc<ChatService>>) -> (u64, String,
 /// 防止跨对话/跨模型返回旧状态。
 fn context_status_scope_key(conversation_id: &str, provider_id: &str, model_id: &str) -> String {
     format!("{conversation_id}:{provider_id}:{model_id}")
+}
+
+// ── P0-1: 校准采样门控 ──────────────────────────────────────────────────────
+
+/// 校准采样门控——跟踪本流是否出现过 ToolCall，决定 Done 时是否采样。
+///
+/// tool-loop 的 Done usage 来自 rig FinalResponse（最后一轮请求，含累积历史 +
+/// 工具结果），与请求前估算口径不符，因此流中出现 ToolCall 时不采样。
+/// 纯文本流（无 ToolCall）的 Done usage 口径一致，可安全采样。
+struct CalibrationGate {
+    saw_tool_call: bool,
+}
+
+impl CalibrationGate {
+    fn new() -> Self {
+        Self {
+            saw_tool_call: false,
+        }
+    }
+
+    /// 观察流式 chunk，ToolCall 变体置 saw_tool_call = true。
+    fn observe(&mut self, chunk: &ChatStreamChunk) {
+        if matches!(chunk, ChatStreamChunk::ToolCall { .. }) {
+            self.saw_tool_call = true;
+        }
+    }
+
+    /// 仅在纯文本流（未出现 ToolCall）时允许采样。
+    fn should_sample(&self) -> bool {
+        !self.saw_tool_call
+    }
+}
+
+// ── P0-2: 上下文状态缓存 ────────────────────────────────────────────────────
+
+/// 上下文窗口状态缓存——按 scope_key 存储，按 conversation_id 查询。
+///
+/// 替代旧 `RwLock<HashMap<String, ContextWindowStatus>>`：
+/// - `insert` 使用递增 seq 序号标记时序，支持按 conversation 精确查询最新状态
+/// - 32 条上限防长会话多模型切换缓慢增长，淘汰 seq 最小的 entry
+struct ContextStatusCache {
+    entries: std::sync::RwLock<HashMap<String, (u64, ContextWindowStatus)>>,
+    seq: AtomicU64,
+}
+
+/// 缓存条目上限。
+const CONTEXT_STATUS_CACHE_MAX: usize = 32;
+
+impl ContextStatusCache {
+    fn new() -> Self {
+        Self {
+            entries: std::sync::RwLock::new(HashMap::new()),
+            seq: AtomicU64::new(0),
+        }
+    }
+
+    /// 插入一条上下文状态，seq 自增后写入。超过上限时淘汰 seq 最小的 entry。
+    fn insert(&self, scope_key: String, status: ContextWindowStatus) {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let mut map = self
+            .entries
+            .write()
+            .expect("ContextStatusCache lock poisoned");
+        map.insert(scope_key, (seq, status));
+
+        if map.len() > CONTEXT_STATUS_CACHE_MAX {
+            // 找到 seq 最小的 entry 并淘汰
+            let min_key = map
+                .iter()
+                .min_by_key(|(_, (s, _))| *s)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = min_key {
+                map.remove(&key);
+                tracing::debug!(
+                    evicted_key = %key,
+                    remaining = map.len(),
+                    "ContextStatusCache: 淘汰最旧 entry"
+                );
+            }
+        }
+    }
+
+    /// 按 conversation_id 精确匹配查询，多条命中取 seq 最大。
+    fn get_for_conversation(&self, conversation_id: &str) -> Option<ContextWindowStatus> {
+        let map = self
+            .entries
+            .read()
+            .expect("ContextStatusCache lock poisoned");
+        map.iter()
+            .filter(|(_, (_, status))| status.conversation_id == conversation_id)
+            .max_by_key(|(_, (seq, _))| *seq)
+            .map(|(_, (_, status))| status.clone())
+    }
 }
 
 /// 计算 preamble 的 hash 值，用于 AgentProvider 缓存 key 的第四元素（0.12.6）。
@@ -2022,6 +2209,7 @@ mod tests {
             conversation_id: "conv123".into(),
             provider_id: "openai".into(),
             model_id: "gpt-4".into(),
+            raw_estimated_tokens: 800,
         };
         let v = serde_json::to_value(&status).unwrap();
         assert_eq!(v["conversation_id"], "conv123");
@@ -2032,6 +2220,7 @@ mod tests {
         assert_eq!(v["remaining_tokens"], 4735);
         assert_eq!(v["context_limit_source"], "configured");
         assert_eq!(v["confidence"], "high");
+        assert_eq!(v["raw_estimated_tokens"], 800);
     }
 
     /// 验证 `ContextWindowStatus` 空归属字段被 `skip_serializing_if` 跳过。
@@ -2059,11 +2248,156 @@ mod tests {
             conversation_id: String::new(),
             provider_id: String::new(),
             model_id: String::new(),
+            raw_estimated_tokens: 0,
         };
         let v = serde_json::to_value(&status).unwrap();
         // 空字符串的归属字段不应出现在 JSON 中
         assert!(v.get("conversation_id").is_none() || v["conversation_id"].as_str() == Some(""));
         assert!(v.get("provider_id").is_none() || v["provider_id"].as_str() == Some(""));
         assert!(v.get("model_id").is_none() || v["model_id"].as_str() == Some(""));
+    }
+
+    // ── P0-1: CalibrationGate 测试 ──────────────────────────────────────────
+
+    #[test]
+    fn calibration_gate_pure_text_allows_sampling() {
+        let mut gate = CalibrationGate::new();
+        assert!(gate.should_sample(), "初始状态应允许采样");
+
+        gate.observe(&ChatStreamChunk::Text {
+            text: "hello".into(),
+        });
+        gate.observe(&ChatStreamChunk::Text {
+            text: " world".into(),
+        });
+        assert!(
+            gate.should_sample(),
+            "纯文本流应允许采样"
+        );
+    }
+
+    #[test]
+    fn calibration_gate_tool_call_blocks_sampling() {
+        let mut gate = CalibrationGate::new();
+        gate.observe(&ChatStreamChunk::Text {
+            text: "let me check".into(),
+        });
+        gate.observe(&ChatStreamChunk::ToolCall {
+            tool: "search".into(),
+            call_id: "c1".into(),
+            arguments: "{}".into(),
+        });
+        assert!(
+            !gate.should_sample(),
+            "出现 ToolCall 后不应允许采样"
+        );
+    }
+
+    #[test]
+    fn calibration_gate_tool_result_does_not_block() {
+        let mut gate = CalibrationGate::new();
+        // ToolResult 不应影响判定——只看 ToolCall
+        gate.observe(&ChatStreamChunk::ToolResult {
+            call_id: "c1".into(),
+            success: true,
+            summary: "result".into(),
+        });
+        assert!(
+            gate.should_sample(),
+            "仅 ToolResult 不应阻止采样（只看 ToolCall）"
+        );
+    }
+
+    // ── P0-2: ContextStatusCache 测试 ───────────────────────────────────────
+
+    /// 构造测试用 ContextWindowStatus（只填归属字段 + estimated_tokens）。
+    fn make_test_status(conv: &str, provider: &str, model: &str, tokens: usize) -> ContextWindowStatus {
+        ContextWindowStatus {
+            estimated_tokens: tokens,
+            context_limit: 8192,
+            usage_percent: 10,
+            last_compressed: false,
+            last_compressed_count: 0,
+            last_recall_count: 0,
+            preamble_tokens: 0,
+            pending_message_tokens: 0,
+            history_tokens: 0,
+            tools_tokens: 0,
+            protocol_overhead_tokens: 0,
+            multimodal_tokens: 0,
+            reserved_output_tokens: 2048,
+            safety_margin_tokens: 409,
+            effective_input_limit: 5735,
+            remaining_tokens: 4735,
+            context_limit_source: "configured".into(),
+            confidence: "high".into(),
+            conversation_id: conv.into(),
+            provider_id: provider.into(),
+            model_id: model.into(),
+            raw_estimated_tokens: tokens,
+        }
+    }
+
+    #[test]
+    fn context_status_cache_cross_conversation_isolation() {
+        let cache = ContextStatusCache::new();
+        // conversation A × model M1/M2 与 conversation B × model M1/M2 交错写入
+        cache.insert("A:p:M1".into(), make_test_status("A", "p", "M1", 100));
+        cache.insert("B:p:M1".into(), make_test_status("B", "p", "M1", 200));
+        cache.insert("A:p:M2".into(), make_test_status("A", "p", "M2", 300));
+        cache.insert("B:p:M2".into(), make_test_status("B", "p", "M2", 400));
+
+        // A 查到 M2（seq 最大），B 查到 M2（seq 最大），互不干扰
+        let a = cache.get_for_conversation("A").unwrap();
+        let b = cache.get_for_conversation("B").unwrap();
+        assert_eq!(a.model_id, "M2");
+        assert_eq!(a.estimated_tokens, 300);
+        assert_eq!(b.model_id, "M2");
+        assert_eq!(b.estimated_tokens, 400);
+    }
+
+    #[test]
+    fn context_status_cache_same_conversation_newer_model_wins() {
+        let cache = ContextStatusCache::new();
+        cache.insert("A:p:M1".into(), make_test_status("A", "p", "M1", 100));
+        // 同 conversation 换 model 写入
+        cache.insert("A:p:M2".into(), make_test_status("A", "p", "M2", 200));
+
+        let status = cache.get_for_conversation("A").unwrap();
+        assert_eq!(status.model_id, "M2");
+        assert_eq!(status.estimated_tokens, 200);
+    }
+
+    #[test]
+    fn context_status_cache_never_written_returns_none() {
+        let cache = ContextStatusCache::new();
+        cache.insert("A:p:M1".into(), make_test_status("A", "p", "M1", 100));
+        assert!(cache.get_for_conversation("nonexistent").is_none());
+    }
+
+    #[test]
+    fn context_status_cache_evicts_oldest_at_33() {
+        let cache = ContextStatusCache::new();
+        // 写入 32 条（达到上限）
+        for i in 0..32 {
+            let conv = format!("conv{i}");
+            cache.insert(
+                format!("conv{i}:p:M"),
+                make_test_status(&conv, "p", "M", i),
+            );
+        }
+        // 验证 conv0 仍在
+        assert!(cache.get_for_conversation("conv0").is_some());
+
+        // 写入第 33 条 → 最旧 entry（conv0）被淘汰
+        cache.insert(
+            "conv32:p:M".into(),
+            make_test_status("conv32", "p", "M", 32),
+        );
+        assert!(
+            cache.get_for_conversation("conv0").is_none(),
+            "第 33 条写入后最旧 entry 应被淘汰"
+        );
+        assert!(cache.get_for_conversation("conv32").is_some());
     }
 }

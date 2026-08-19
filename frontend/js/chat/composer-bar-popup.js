@@ -12,6 +12,7 @@
 
 import {getComposerBarSnapshot} from "./ipc.js";
 import {escapeAttr, escapeText} from "./utils.js";
+import * as state from "./state.js";
 
 /** popup DOM 元素 */
 let popupEl = null;
@@ -19,9 +20,10 @@ let popupEl = null;
 /** hover 触发区域（composer bar 右侧 context-indicator 圆圈） */
 let triggerZone = null;
 
-/** 缓存的快照数据 + 过期时间 */
+/** 缓存的快照数据 + 过期时间 + 拉取时的 conversationId */
 let cachedSnapshot = null;
 let cacheExpiry = 0;
+let cachedConversationId = null;
 const CACHE_TTL_MS = 3000;
 
 /** hover 延迟（ms），避免快速划过触发 */
@@ -155,14 +157,17 @@ function positionPopup() {
  */
 async function loadSnapshot() {
     const now = Date.now();
-    if (cachedSnapshot && now < cacheExpiry) {
+    const currentConvId = state.conversationId;
+    // P0-2: 当前 conversationId 与缓存不一致时视为失效，重新拉取
+    if (cachedSnapshot && now < cacheExpiry && cachedConversationId === currentConvId) {
         return cachedSnapshot;
     }
 
     try {
-        const snapshot = await getComposerBarSnapshot();
+        const snapshot = await getComposerBarSnapshot(currentConvId);
         cachedSnapshot = snapshot;
         cacheExpiry = now + CACHE_TTL_MS;
+        cachedConversationId = currentConvId;
         return snapshot;
     } catch (e) {
         console.error("[composer-bar-popup] 加载快照失败:", e);
@@ -176,6 +181,7 @@ async function loadSnapshot() {
 export function invalidateComposerBarCache() {
     cachedSnapshot = null;
     cacheExpiry = 0;
+    cachedConversationId = null;
 }
 
 /**
@@ -190,6 +196,7 @@ export async function refreshPopupIfVisible() {
     // 强制跳过缓存
     cachedSnapshot = null;
     cacheExpiry = 0;
+    cachedConversationId = null;
     const snapshot = await loadSnapshot();
     if (snapshot) {
         renderPopup(snapshot);
@@ -264,8 +271,6 @@ export function renderContextSection(s) {
     // 0.21.17: context limit 来源标签
     const sourceLabel = contextLimitSource === "fallback"
         ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
-        : contextLimitSource === "provider_metadata"
-        ? `<span class="cbp-context-source" title="从供应商元数据获取">供应商</span>`
         : "";
     // 0.21.17: 置信度标签
     const confidenceLabel = confidence === "low"

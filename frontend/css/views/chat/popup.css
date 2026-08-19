@@ -57,7 +57,7 @@
 .composer-bar-popup-error {
     padding: 20px;
     text-align: center;
-    color: var(--text-faint, #6c7086);
+    color: var(--text-dim, #6c7086);
 }
 
 /* ── 通用 section 结构 ── */
@@ -90,13 +90,13 @@
 .cbp-section-count {
     font-size: 11px;
     font-weight: 700;
-    color: var(--text-faint, #6c7086);
+    color: var(--text-sub, #a6adc8);
     font-family: ui-monospace, Consolas, monospace;
 }
 
 .cbp-empty {
     font-size: 11px;
-    color: var(--text-faint, #6c7086);
+    color: var(--text-dim, #6c7086);
     padding: 2px 0;
 }
 
@@ -124,7 +124,7 @@
 
 .cbp-collapse-arrow {
     font-size: 10px;
-    color: var(--text-faint, #6c7086);
+    color: var(--text-dim, #6c7086);
     transition: transform 0.2s ease;
 }
 
@@ -161,9 +161,11 @@
     transition: width 0.3s ease, background 0.3s ease;
 }
 
+/* 0.21.18: 文本对比度修正——正文信息从 faint/dim 升到 text-sub（≥4.5:1），
+   10px 小字升到 11px；弱化只保留给 hint/空态/箭头（spec-frontend §3.2） */
 .cbp-context-detail {
-    font-size: 10px;
-    color: var(--text-faint, #6c7086);
+    font-size: 11px;
+    color: var(--text-sub, #a6adc8);
     font-family: ui-monospace, Consolas, monospace;
     margin-bottom: 6px;
 }
@@ -178,11 +180,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 10px;
+    font-size: 11px;
 }
 
 .cbp-breakdown-label {
-    color: var(--text-dim, #6c7086);
+    color: var(--text-sub, #a6adc8);
 }
 
 .cbp-breakdown-value {
@@ -200,7 +202,9 @@
 }
 
 .cbp-breakdown-remaining {
-    color: var(--primary, #89b4fa);
+    /* 0.21.18: --primary 不存在于 token 体系，曾长期吃硬编码 #89b4fa，
+       浅色主题下几乎不可见——改用真源 --accent */
+    color: var(--accent);
     font-weight: 600;
 }
 
@@ -211,7 +215,7 @@
     border-radius: 3px;
     font-size: 9px;
     background: var(--surface-2, #45475a);
-    color: var(--text-dim, #6c7086);
+    color: var(--text-sub, #a6adc8);
     vertical-align: middle;
 }
 
@@ -226,7 +230,7 @@
     border-radius: 3px;
     font-size: 9px;
     background: var(--surface-2, #45475a);
-    color: var(--text-dim, #6c7086);
+    color: var(--text-sub, #a6adc8);
     vertical-align: middle;
 }
 
