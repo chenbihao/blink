@@ -27,6 +27,7 @@ pub mod registry;
 pub mod rig_provider;
 pub mod skill;
 pub mod spike;
+pub mod summary;
 pub mod thinking;
 pub mod token_budget;
 pub mod tool_adapter;

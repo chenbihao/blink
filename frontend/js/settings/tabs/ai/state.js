@@ -65,7 +65,8 @@ export function defaultAIConfig() {
                 trigger_ratio: 0.8,
                 compress_ratio: 0.7,
                 recall_enabled: true,
-                recall_top_k: 3
+                recall_top_k: 3,
+                summary_enabled: false,
             },
             skill_config: {enabled: true, source_blink: true, source_claude: true, source_zcode: false}
         },

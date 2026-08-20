@@ -42,6 +42,9 @@ export function initAITab() {
     loadAIConfig();
     onLangChange(() => {
         updateMemoryContextSizeDisplay();
+        // 0.21.19: 语言切换时也需重算摘要提示文案
+        const memCfg = aiState.currentAIConfig?.chat_config?.memory_config;
+        updateMemoryBehaviorHint(memCfg?.summary_enabled === true);
     });
 }
 
@@ -142,6 +145,8 @@ function applyAIConfigToUI() {
         $("ai-memory-compress-ratio").value = Math.round((memCfg.compress_ratio ?? 0.7) * 100);
     }
     if ($("ai-memory-recall-enabled")) $("ai-memory-recall-enabled").checked = memCfg.recall_enabled !== false;
+    if ($("ai-memory-summary-enabled")) $("ai-memory-summary-enabled").checked = memCfg.summary_enabled === true;
+    updateMemoryBehaviorHint(memCfg.summary_enabled === true);
     if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
     updateMemoryConfigVisibility(memCfg.mode || "token_aware", memCfg.recall_enabled !== false);
     updateMemoryContextSizeDisplay();
@@ -197,6 +202,34 @@ async function loadSystemPromptInfo() {
 }
 
 // ── UI helpers ──────────────────────────────────────────────
+
+/**
+ * 0.21.19: 根据摘要开关翻转记忆策略区域的提示文案。
+ * 摘要开启时强调"LLM 生成摘要"，关闭时恢复默认"裁剪归档"描述。
+ * 同时翻转 trigger_ratio 的字段级 hint。
+ */
+function updateMemoryBehaviorHint(summaryEnabled) {
+    // panel-hint：通过摘要开关行向上查找同级 extension-body 内的 panel-hint
+    const summaryRow = document.getElementById("ai-memory-summary-row");
+    const hintEl = summaryRow?.closest(".extension-body")?.querySelector(".panel-hint");
+    if (hintEl) {
+        const key = summaryEnabled
+            ? "ai.memory.behavior_hint.summary_on"
+            : "ai.memory.behavior_hint.summary_off";
+        hintEl.textContent = t(key);
+        // 更新 data-i18n 让语言切换时也能用正确的 key
+        hintEl.setAttribute("data-i18n", key);
+    }
+    // trigger_ratio 字段级 hint 同理
+    const triggerHint = document.querySelector("#ai-memory-trigger-row .field-hint-icon");
+    if (triggerHint) {
+        const key = summaryEnabled
+            ? "ai.memory.trigger_ratio.hint.summary_on"
+            : "ai.memory.trigger_ratio.hint.summary_off";
+        triggerHint.setAttribute("title", t(key));
+        triggerHint.setAttribute("data-i18n-title", key);
+    }
+}
 
 function updateMemoryConfigVisibility(mode, recallEnabled = true) {
     const visibility = memoryExpertVisibility(mode, recallEnabled);
@@ -409,6 +442,14 @@ function bindAIEvents() {
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
         cfg.chat_config.memory_config.recall_enabled = e.target.checked;
         updateMemoryConfigVisibility(cfg.chat_config.memory_config.mode || "token_aware", e.target.checked);
+        saveAIConfig();
+    });
+    // 0.21.19: LLM 摘要压缩开关
+    $("ai-memory-summary-enabled")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.summary_enabled = e.target.checked;
+        updateMemoryBehaviorHint(e.target.checked);
         saveAIConfig();
     });
     $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {

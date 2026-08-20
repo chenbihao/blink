@@ -711,6 +711,35 @@ export function renderTimeSeparator(timestamp) {
 }
 
 /**
+ * 渲染摘要压缩分隔线（0.21.19）。
+ *
+ * 在消息列表中插入一条折叠分隔线，标记此处之前的旧消息已被摘要压缩。
+ * 用户可点击展开查看摘要内容。风格与时间分隔符一致——居中、轻量。
+ *
+ * @param {string} summaryText 摘要文本
+ * @param {number} summarizedCount 被摘要的消息数
+ * @returns {HTMLElement} 分隔线元素
+ */
+export function renderSummarySeparator(summaryText, summarizedCount) {
+    if (!messagesEl) return null;
+    // 0.21.19.1 F4: 去重——移除已存在的分隔线，避免多轮推送后列表底部堆叠。
+    // 同时改为 insertBefore 到列表顶部（被摘要的是较早消息，语义上应在顶部）。
+    messagesEl.querySelectorAll(".chat-summary-sep").forEach((el) => el.remove());
+    const el = document.createElement("details");
+    el.className = "chat-summary-sep";
+    const summary = document.createElement("summary");
+    summary.className = "chat-summary-sep-header";
+    summary.innerHTML = `<span class="chat-summary-sep-label">已摘要 ${summarizedCount} 条较早消息</span>`;
+    el.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "chat-summary-sep-body";
+    body.textContent = summaryText;
+    el.appendChild(body);
+    messagesEl.insertBefore(el, messagesEl.firstChild);
+    return el;
+}
+
+/**
  * 格式化时间分隔符文字。
  *
  * - 今天：HH:MM
@@ -939,54 +968,55 @@ export function updateContextIndicator(status) {
         transform="rotate(-90 10 10)"/>
       <text x="10" y="13" text-anchor="middle" class="context-ring-percent">${percent}</text>
     </svg>
-    ${status.last_compressed ? '<span class="context-compressed" title="已自动压缩 ' + status.last_compressed_count + ' 条旧消息">⚡</span>' : ''}
+    ${status.last_compressed ? '<span class="context-compressed" title="已自动压缩 ' + status.last_compressed_count + ' 条旧消息"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="context-badge-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>' : ''}
+    ${status.summary_enabled && status.summarized_count > 0 ? '<span class="context-summary-badge" title="已摘要 ' + status.summarized_count + ' 条消息"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="context-badge-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span>' : ''}
   `;
 }
 
 /**
- * 渲染主动压缩提示条（当 token 占用超 80% 时显示）。
+ * 渲染上下文窗口提示条（当 token 占用超阈值时显示）。
  *
- * ⚠️ 暂时禁用（需要重新设计优化压缩逻辑）：该横条（含"旧消息将被自动压缩"
- * 提示与立即压缩/清除按钮）的触发逻辑待重新设计后再启用。保留空函数体，
- * 调用方（main.js 初始化 + chat-context-status 事件）无需改动；
- * 恢复时取消下方被注释的代码即可。
+ * 0.21.19：恢复并重新设计。根据 summary_enabled 切换文案：
+ * - 摘要开启："旧消息将被自动摘要"，按钮文字"立即摘要"
+ * - 摘要关闭："旧消息将被裁剪归档"，按钮文字"立即裁剪"
  *
- * @param {number} usagePercent
+ * @param {number} usagePercent 当前占用百分比
+ * @param {boolean} summaryEnabled 摘要压缩是否开启
  * @param {(action: 'compress' | 'clear') => void} onAction
  */
-export function renderContextWarning(usagePercent, onAction) {
-    // 暂时禁用：需要重新设计优化压缩逻辑。
-    return;
-
-    // ── 原实现（注释保留，待重新设计后恢复）────────────────────────────
+export function renderContextWarning(usagePercent, summaryEnabled, onAction) {
     // 移除已有提示条
-    // const existing = document.querySelector(".chat-context-warning");
-    // if (existing) existing.remove();
-    //
-    // // 占用 < 80% 不显示
-    // if (usagePercent < 80) return;
-    //
-    // const composerBar = document.querySelector(".chat-composer-bar");
-    // if (!composerBar) return;
-    //
-    // const warning = document.createElement("div");
-    // warning.className = "chat-context-warning";
-    // warning.innerHTML = `
-    //   <span class="chat-context-warning-icon">⚡</span>
-    //   <span class="chat-context-warning-text">上下文窗口已使用 ${usagePercent}%，旧消息将被自动压缩。</span>
-    //   <div class="chat-context-warning-actions">
-    //     <button class="chat-context-warning-btn" data-action="compress">立即压缩</button>
-    //     <button class="chat-context-warning-btn" data-action="clear">清除对话</button>
-    //   </div>
-    //   <button class="chat-context-warning-close" title="关闭">×</button>
-    // `;
-    //
-    // warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
-    // warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
-    // warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
-    //
-    // // 插入到 composer bar 上方
-    // composerBar.parentElement.insertBefore(warning, composerBar);
+    const existing = document.querySelector(".chat-context-warning");
+    if (existing) existing.remove();
+
+    // 占用 < 80% 不显示
+    if (usagePercent < 80) return;
+
+    const composerBar = document.querySelector(".chat-composer-bar");
+    if (!composerBar) return;
+
+    const actionLabel = summaryEnabled ? "立即摘要" : "立即裁剪";
+    const textMsg = summaryEnabled
+        ? `上下文窗口已使用 ${usagePercent}%，旧消息将被自动摘要。`
+        : `上下文窗口已使用 ${usagePercent}%，旧消息将被裁剪归档。`;
+
+    const warning = document.createElement("div");
+    warning.className = "chat-context-warning";
+    warning.innerHTML = `
+        <span class="chat-context-warning-text">${textMsg}</span>
+        <div class="chat-context-warning-actions">
+            <button class="chat-context-warning-btn" data-action="compress">${actionLabel}</button>
+            <button class="chat-context-warning-btn" data-action="clear">清除对话</button>
+        </div>
+        <button class="chat-context-warning-close" title="关闭">×</button>
+    `;
+
+    warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
+    warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
+    warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
+
+    // 插入到 composer bar 上方
+    composerBar.parentElement.insertBefore(warning, composerBar);
 }
 
 /**

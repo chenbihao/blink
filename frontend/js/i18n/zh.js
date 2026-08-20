@@ -735,6 +735,13 @@ export const zh = {
     "ai.memory.recall.hint": "仅在当前持久对话内，用全文检索找回被窗口裁剪的相关较早消息；不会跨对话建立长期记忆",
     "ai.memory.recall_top_k.label": "召回条数（Top-K）",
     "ai.memory.recall_top_k.hint": "每次召回的最多消息条数。默认 3，越大召回越多但消耗更多 token",
+    // 0.21.19: LLM 摘要压缩
+    "ai.memory.summary.label": "LLM 摘要压缩",
+    "ai.memory.summary.hint": "开启后，超出窗口的旧消息将由 LLM 生成摘要并注入上下文头部，而非直接裁剪丢弃。关闭则使用传统裁剪归档策略",
+    "ai.memory.behavior_hint.summary_on": "超出上下文窗口的旧消息将由 LLM 生成摘要并注入窗口头部，保留对话要旨。",
+    "ai.memory.behavior_hint.summary_off": "默认按当前模型的上下文容量自动裁剪并归档；不会调用 LLM 生成摘要。主窗口临时对话不使用这里的持久记忆设置。",
+    "ai.memory.trigger_ratio.hint.summary_on": "当已加载消息的估算 token 超过历史可用预算的此比例时，裁剪较早消息并生成摘要。历史可用预算已扣除系统提示、工具定义、输出预留等非历史开销",
+    "ai.memory.trigger_ratio.hint.summary_off": "当已加载消息的估算 token 超过历史可用预算的此比例时，裁剪较早消息并归档。历史可用预算已扣除系统提示、工具定义、输出预留等非历史开销。不会生成 LLM 摘要",
 // 0.13.3 Skill 约定式
     "ai.skill.section": "Skill 约定式",
     "ai.skill.section.desc": "扫描 SKILL.md 注入对话前导词，增强 AI 知识与行为",

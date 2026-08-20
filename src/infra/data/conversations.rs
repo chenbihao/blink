@@ -120,6 +120,33 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 0.12.6 迁移：conversations 表加 group_id 列（若不存在）
     migrate_add_group_id_column(pool).await?;
 
+    // 0.21.19: conversation_summaries 表（摘要压缩）
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS conversation_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            start_rowid INTEGER NOT NULL,
+            end_rowid INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            token_est INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_conv_summaries_conv ON conversation_summaries(conversation_id, idx)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 0.21.19 迁移：conversations 表加 summarized_until 列（若不存在）
+    migrate_add_summarized_until_column(pool).await?;
+
     // 0.13.2: memory_fts 全文检索虚拟表（trigram 分词器，中文友好）
     // 归档滑动窗口截断的旧消息，供 BM25 检索召回
     sqlx::query(
@@ -136,6 +163,30 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     tracing::debug!("conversations + messages + conversation_groups + memory_fts 表已初始化");
+    Ok(())
+}
+
+/// 0.21.19: 检测 `conversations` 表是否有 `summarized_until` 列，没有则 `ALTER TABLE ADD COLUMN`。
+///
+/// `summarized_until` 是消息 rowid 水位——rowid ≤ 水位的消息已被摘要覆盖，
+/// load 时不进窗口，改注入摘要块。
+async fn migrate_add_summarized_until_column(pool: &SqlitePool) -> Result<(), String> {
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('conversations')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let has_summarized_until = columns.iter().any(|(name,)| name == "summarized_until");
+    if !has_summarized_until {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE conversations ADD COLUMN summarized_until INTEGER DEFAULT 0".to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("conversations 表已迁移：新增 summarized_until 列");
+    }
     Ok(())
 }
 
@@ -231,10 +282,14 @@ type ConversationRow = (String, Option<String>, i64, i64, Option<String>, i64);
 
 /// 列出所有对话（按 last_active_at 倒序），含消息条数和 group_id。
 pub async fn list_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>, String> {
+    // 0.21.19.1 F3: 过滤双下划线前缀的内部临时对话（__summary__/__merge__），
+    // 防止摘要/合并 LLM 调用产生的 orphan 对话在生成期间泄漏到侧边栏。
+    // `__` 前缀保留为内部对话约定；cleanup 仍由摘要任务收尾负责，此为兜底。
     let rows: Vec<ConversationRow> = sqlx::query_as(
         "SELECT c.id, c.title, c.created_at, c.last_active_at, c.group_id, \
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count \
-         FROM conversations c ORDER BY c.last_active_at DESC, c.rowid DESC",
+         FROM conversations c WHERE c.id NOT LIKE '\\_\\_%' ESCAPE '\\' \
+         ORDER BY c.last_active_at DESC, c.rowid DESC",
     )
     .fetch_all(pool)
     .await
@@ -269,6 +324,9 @@ pub async fn delete_conversation(pool: &SqlitePool, id: &str) -> Result<bool, St
 
     // 0.13.2: 级联删除 FTS5 归档
     let _ = clear_memory_fts(pool, id).await;
+
+    // 0.21.19: 级联删除摘要
+    let _ = clear_summaries(pool, id).await;
 
     let result = sqlx::query("DELETE FROM conversations WHERE id = ?1")
         .bind(id)
@@ -364,6 +422,156 @@ pub async fn load_recent_messages(
     Ok(rows)
 }
 
+/// 0.21.19: 加载对话的最近 N 条消息，跳过 rowid ≤ watermark 的消息。
+///
+/// 摘要启用后，水位线以下的消息已被摘要覆盖，不再进窗口。
+/// 返回的消息按 id 升序（时间顺序），同时返回被跳过的消息数。
+pub async fn load_recent_messages_after_watermark(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    limit: i64,
+    watermark: i64,
+) -> Result<(Vec<(String, String)>, usize), String> {
+    if watermark <= 0 {
+        let rows = load_recent_messages(pool, conversation_id, limit).await?;
+        return Ok((rows, 0));
+    }
+    // 子查询取 rowid > watermark 的最后 N 条，外层按 id ASC 排序
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT role, content FROM (
+            SELECT id, role, content FROM messages
+            WHERE conversation_id = ?1 AND id > ?2 ORDER BY id DESC LIMIT ?3
+        ) ORDER BY id ASC",
+    )
+    .bind(conversation_id)
+    .bind(watermark)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 统计被跳过的消息数
+    let skipped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND id <= ?2",
+    )
+    .bind(conversation_id)
+    .bind(watermark)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok((rows, skipped as usize))
+}
+
+/// 0.21.19.1: 加载对话最近 N 条消息（含 rowid），跳过 rowid ≤ watermark 的消息。
+///
+/// 与 `load_recent_messages_after_watermark` 同语义，但额外返回 rowid（`id`），
+/// 供摘要任务的 token 口径压缩边界计算使用（需知道被裁消息的 rowid）。
+/// 返回 `(id, role, content)` 列表，按 id 升序（时间顺序）。
+pub async fn load_window_messages_with_ids_after_watermark(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    limit: i64,
+    watermark: i64,
+) -> Result<Vec<(i64, String, String)>, String> {
+    if watermark <= 0 {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, role, content FROM (\
+                SELECT id, role, content FROM messages \
+                WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2\
+            ) ORDER BY id ASC",
+        )
+        .bind(conversation_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        return Ok(rows);
+    }
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, role, content FROM (\
+            SELECT id, role, content FROM messages \
+            WHERE conversation_id = ?1 AND id > ?2 ORDER BY id DESC LIMIT ?3\
+        ) ORDER BY id ASC",
+    )
+    .bind(conversation_id)
+    .bind(watermark)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 0.21.19: 按 rowid 区间加载消息（用于摘要任务）。
+///
+/// 返回 `(role, content)` 列表，按 id 升序（时间顺序）。
+/// `start_rowid` / `end_rowid` 是闭区间 [start, end]。
+pub async fn load_messages_by_rowid_range(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    start_rowid: i64,
+    end_rowid: i64,
+) -> Result<Vec<(String, String)>, String> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT role, content FROM messages \
+         WHERE conversation_id = ?1 AND id >= ?2 AND id <= ?3 \
+         ORDER BY id ASC",
+    )
+    .bind(conversation_id)
+    .bind(start_rowid)
+    .bind(end_rowid)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows)
+}
+
+/// 0.21.19: 获取摘要压缩边界——窗口外最旧被裁消息的 rowid。
+///
+/// 给定 `window_size`（窗口保留的消息条数），返回窗口内最小 rowid - 1，
+/// 即被裁剪的最后一条消息的 rowid。如果消息总数 ≤ window_size，返回 None
+/// （没有消息被裁剪，不需要摘要）。
+///
+/// 跳过 `watermark` 以下的消息（已摘要）。
+pub async fn get_compress_boundary(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    window_size: i64,
+    watermark: i64,
+) -> Result<Option<i64>, String> {
+    // 取窗口内最小 rowid
+    let window_min: Option<i64> = sqlx::query_scalar(
+        "SELECT MIN(id) FROM (\
+            SELECT id FROM messages \
+            WHERE conversation_id = ?1 AND id > ?2 \
+            ORDER BY id DESC LIMIT ?3\
+        )",
+    )
+    .bind(conversation_id)
+    .bind(watermark)
+    .bind(window_size)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // window_min 为 None → 没有窗口消息（对话为空或全被摘要覆盖）→ 无可摘要
+    // window_min 为 Some(x) → 边界 = x - 1（比窗口最旧消息更早的第一条被裁消息）
+    // 只有当 x - 1 > watermark 时才有可摘要的新消息
+    match window_min {
+        Some(min_id) => {
+            let boundary = min_id - 1;
+            if boundary > watermark {
+                Ok(Some(boundary))
+            } else {
+                Ok(None)
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 /// 清空对话的所有消息（不删 conversation 记录本身）。
 ///
 /// 0.13.2: 同时清理 memory_fts 中该对话的归档。
@@ -376,6 +584,9 @@ pub async fn clear_messages(pool: &SqlitePool, conversation_id: &str) -> Result<
 
     // 0.13.2: 同步清理 FTS5 归档
     let _ = clear_memory_fts(pool, conversation_id).await;
+
+    // 0.21.19: 同步清理摘要
+    let _ = clear_summaries(pool, conversation_id).await;
 
     Ok(())
 }
@@ -457,6 +668,12 @@ pub async fn clear_all_conversations(pool: &SqlitePool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     sqlx::query("DELETE FROM memory_fts")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 0.21.19: 清理全部摘要
+    sqlx::query("DELETE FROM conversation_summaries")
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -1011,6 +1228,246 @@ pub fn is_cjk_char(ch: char) -> bool {
 /// 清理指定对话的 FTS5 归档（删除对话 / 清空消息时调用）。
 pub async fn clear_memory_fts(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
     sqlx::query("DELETE FROM memory_fts WHERE conversation_id = ?1")
+        .bind(conversation_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── 0.21.19: 摘要 CRUD ──────────────────────────────────────────────────────
+
+/// 一条对话摘要记录。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConversationSummary {
+    /// 自增 id。
+    pub id: i64,
+    /// 所属对话 id。
+    pub conversation_id: String,
+    /// 段序号（从 0 开始，同对话内递增）。
+    pub idx: i64,
+    /// 摘要覆盖的消息起始 rowid（含）。
+    pub start_rowid: i64,
+    /// 摘要覆盖的消息截止 rowid（含）。
+    pub end_rowid: i64,
+    /// 摘要文本。
+    pub content: String,
+    /// 摘要文本估算 token 数。
+    pub token_est: i64,
+    /// 创建时间戳。
+    pub created_at: i64,
+}
+
+/// 插入一条摘要 + 推进水位（同事务，防半写）。
+///
+/// `idx` 是段序号；`start_rowid` / `end_rowid` 是摘要覆盖的消息 rowid 区间。
+/// `new_watermark` = `end_rowid`，事务内更新 `conversations.summarized_until`。
+pub async fn insert_summary_and_advance_watermark(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    idx: i64,
+    start_rowid: i64,
+    end_rowid: i64,
+    content: &str,
+    token_est: i64,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "INSERT INTO conversation_summaries \
+         (conversation_id, idx, start_rowid, end_rowid, content, token_est, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(conversation_id)
+    .bind(idx)
+    .bind(start_rowid)
+    .bind(end_rowid)
+    .bind(content)
+    .bind(token_est)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 推进水位——只在 new_watermark > 当前水位时更新
+    sqlx::query(
+        "UPDATE conversations SET summarized_until = ?1 \
+         WHERE id = ?2 AND summarized_until < ?1",
+    )
+    .bind(end_rowid)
+    .bind(conversation_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 获取对话的摘要水位（`summarized_until`）。对话不存在或未摘要时返回 0。
+pub async fn get_summarized_until(pool: &SqlitePool, conversation_id: &str) -> Result<i64, String> {
+    let row: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT summarized_until FROM conversations WHERE id = ?1")
+            .bind(conversation_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(row.and_then(|(v,)| v).unwrap_or(0))
+}
+
+/// 加载对话的所有摘要段（按 idx 升序）。
+pub async fn load_summaries(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<Vec<ConversationSummary>, String> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(i64, String, i64, i64, i64, String, i64, i64)> = sqlx::query_as(
+        "SELECT id, conversation_id, idx, start_rowid, end_rowid, content, token_est, created_at \
+         FROM conversation_summaries WHERE conversation_id = ?1 ORDER BY idx ASC",
+    )
+    .bind(conversation_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, conversation_id, idx, start_rowid, end_rowid, content, token_est, created_at)| {
+                ConversationSummary {
+                    id,
+                    conversation_id,
+                    idx,
+                    start_rowid,
+                    end_rowid,
+                    content,
+                    token_est,
+                    created_at,
+                }
+            },
+        )
+        .collect())
+}
+
+/// 获取摘要段数量（用于判断是否触发段合并）。
+pub async fn count_summaries(pool: &SqlitePool, conversation_id: &str) -> Result<i64, String> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_summaries WHERE conversation_id = ?1",
+    )
+    .bind(conversation_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
+/// 读取最旧的两段摘要（不删除），供段合并构造 prompt。
+///
+/// 返回 `(id, start_rowid, end_rowid, content)` 列表。段数 < 2 时返回 None。
+/// 实际删除+插入在 `replace_oldest_two_with_merged` 中同事务执行，保证原子性。
+pub async fn read_oldest_two_summaries(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<Option<[(i64, i64, i64, String); 2]>, String> {
+    let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "SELECT id, start_rowid, end_rowid, content \
+         FROM conversation_summaries WHERE conversation_id = ?1 \
+         ORDER BY idx ASC LIMIT 2",
+    )
+    .bind(conversation_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if rows.len() < 2 {
+        return Ok(None);
+    }
+
+    let (id1, sr1, er1, content1) = &rows[0];
+    let (id2, sr2, er2, content2) = &rows[1];
+
+    Ok(Some([
+        (*id1, *sr1, *er1, content1.clone()),
+        (*id2, *sr2, *er2, content2.clone()),
+    ]))
+}
+
+/// 段合并落库——同事务删除最旧两段 + 插入合并段 + 重排剩余段 idx。
+///
+/// 删除 `id1` / `id2` 两段，插入合并段（idx=0），剩余段 idx 从 1 开始重排。
+/// 水位保持不变（合并段覆盖原两段的 rowid 区间，水位已是 end_rowid，不需推进）。
+#[allow(clippy::too_many_arguments)]
+pub async fn replace_oldest_two_with_merged(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    id1: i64,
+    id2: i64,
+    merge_start: i64,
+    merge_end: i64,
+    merged_content: &str,
+    token_est: i64,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // 删除最旧两段
+    sqlx::query("DELETE FROM conversation_summaries WHERE id = ?1 OR id = ?2")
+        .bind(id1)
+        .bind(id2)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 插入合并段（idx=0，成为最旧段）
+    sqlx::query(
+        "INSERT INTO conversation_summaries \
+         (conversation_id, idx, start_rowid, end_rowid, content, token_est, created_at) \
+         VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(conversation_id)
+    .bind(merge_start)
+    .bind(merge_end)
+    .bind(merged_content)
+    .bind(token_est)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 重排所有段 idx 从 0 开始连续递增（按 start_rowid ASC 排序）
+    sqlx::query(
+        "UPDATE conversation_summaries SET idx = (\
+            SELECT COUNT(*) FROM conversation_summaries AS s2 \
+            WHERE s2.conversation_id = conversation_summaries.conversation_id \
+            AND s2.start_rowid < conversation_summaries.start_rowid\
+        ) WHERE conversation_id = ?1",
+    )
+    .bind(conversation_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 重置对话的摘要水位为 0（不删摘要数据，仅重置水位让 load 重新带全部消息）。
+///
+/// 关闭摘要开关时调用——已生成的摘要不删除，重新开启后继续可用。
+#[allow(dead_code)]
+pub async fn reset_summarized_until(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
+    sqlx::query("UPDATE conversations SET summarized_until = 0 WHERE id = ?1")
+        .bind(conversation_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 清理指定对话的所有摘要（删除对话时级联调用）。
+pub async fn clear_summaries(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM conversation_summaries WHERE conversation_id = ?1")
         .bind(conversation_id)
         .execute(pool)
         .await
@@ -1975,5 +2432,230 @@ mod tests {
         assert!(q.contains("\"hello\""), "应包含 hello");
         assert!(q.contains("\"world\""), "应包含 world");
         assert!(q.contains("\"test\""), "应包含 test");
+    }
+
+    // ── 0.21.19: 摘要 CRUD 测试 ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn summary_insert_and_get_watermark() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        // 初始水位为 0
+        let wm = get_summarized_until(&pool, "c1").await.unwrap();
+        assert_eq!(wm, 0, "新对话水位应为 0");
+
+        // 插入几条消息拿到 rowid
+        let id1 = append_message(&pool, "c1", "user", "msg1")
+            .await
+            .unwrap();
+        let id2 = append_message(&pool, "c1", "assistant", "reply1")
+            .await
+            .unwrap();
+        let id3 = append_message(&pool, "c1", "user", "msg2")
+            .await
+            .unwrap();
+
+        // 插入摘要覆盖 id1..=id2，推进水位到 id2
+        insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id2, "摘要1", 10)
+            .await
+            .unwrap();
+        let wm = get_summarized_until(&pool, "c1").await.unwrap();
+        assert_eq!(wm, id2, "摘要插入后水位应推进到 end_rowid");
+
+        // 插入第二段摘要覆盖 id3..=id3
+        insert_summary_and_advance_watermark(&pool, "c1", 1, id3, id3, "摘要2", 10)
+            .await
+            .unwrap();
+        let wm = get_summarized_until(&pool, "c1").await.unwrap();
+        assert_eq!(wm, id3, "第二段摘要后水位应推进到 id3");
+    }
+
+    #[tokio::test]
+    async fn summary_load_all_and_count() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        let id1 = append_message(&pool, "c1", "user", "msg1")
+            .await
+            .unwrap();
+        let id2 = append_message(&pool, "c1", "user", "msg2")
+            .await
+            .unwrap();
+
+        insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "段1", 5)
+            .await
+            .unwrap();
+        insert_summary_and_advance_watermark(&pool, "c1", 1, id2, id2, "段2", 5)
+            .await
+            .unwrap();
+
+        let count = count_summaries(&pool, "c1").await.unwrap();
+        assert_eq!(count, 2, "应有 2 段摘要");
+
+        let summaries = load_summaries(&pool, "c1").await.unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].idx, 0);
+        assert_eq!(summaries[1].idx, 1);
+        assert_eq!(summaries[0].content, "段1");
+        assert_eq!(summaries[1].content, "段2");
+    }
+
+    #[tokio::test]
+    async fn summary_load_after_watermark_skips_summarized() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        let id1 = append_message(&pool, "c1", "user", "old msg")
+            .await
+            .unwrap();
+        let _id2 = append_message(&pool, "c1", "user", "new msg")
+            .await
+            .unwrap();
+
+        // 摘要覆盖 id1
+        insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "旧消息摘要", 5)
+            .await
+            .unwrap();
+        let wm = get_summarized_until(&pool, "c1").await.unwrap();
+
+        // 用水位加载：应只返回 id2（跳过 id1）
+        let (rows, skipped) = load_recent_messages_after_watermark(&pool, "c1", 100, wm)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "应只返回 1 条消息（跳过已摘要的）");
+        assert_eq!(skipped, 1, "应跳过 1 条消息");
+
+        // 水位为 0 时等价于 load_recent_messages
+        let (rows, skipped) = load_recent_messages_after_watermark(&pool, "c1", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(skipped, 0);
+    }
+
+    #[tokio::test]
+    async fn summary_take_oldest_two_for_merge() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        let id1 = append_message(&pool, "c1", "user", "msg1")
+            .await
+            .unwrap();
+        let id2 = append_message(&pool, "c1", "user", "msg2")
+            .await
+            .unwrap();
+        let id3 = append_message(&pool, "c1", "user", "msg3")
+            .await
+            .unwrap();
+
+        insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "段1", 5)
+            .await
+            .unwrap();
+        insert_summary_and_advance_watermark(&pool, "c1", 1, id2, id2, "段2", 5)
+            .await
+            .unwrap();
+        insert_summary_and_advance_watermark(&pool, "c1", 2, id3, id3, "段3", 5)
+            .await
+            .unwrap();
+
+        // 读取最旧两段（不删除）
+        let result = read_oldest_two_summaries(&pool, "c1")
+            .await
+            .unwrap();
+        assert!(result.is_some(), "应有 3 段，读最旧 2 段");
+        let pair = result.unwrap();
+        assert_eq!(pair[0].3, "段1");
+        assert_eq!(pair[1].3, "段2");
+
+        // 读取不删除——段数仍为 3
+        let count = count_summaries(&pool, "c1").await.unwrap();
+        assert_eq!(count, 3, "读取后段数应仍为 3（不删除）");
+
+        // 段合并落库：删除最旧两段 + 插入合并段
+        let merge_start = pair[0].1.min(pair[1].1);
+        let merge_end = pair[0].2.max(pair[1].2);
+        replace_oldest_two_with_merged(
+            &pool, "c1", pair[0].0, pair[1].0,
+            merge_start, merge_end, "合并段", 10,
+        )
+        .await
+        .unwrap();
+
+        // 合并后应只剩 2 段（合并段 + 原段3）
+        let count = count_summaries(&pool, "c1").await.unwrap();
+        assert_eq!(count, 2, "合并后应剩 2 段");
+
+        // idx 应连续（0, 1）
+        let summaries = load_summaries(&pool, "c1").await.unwrap();
+        assert_eq!(summaries[0].idx, 0, "合并段 idx 应为 0");
+        assert_eq!(summaries[1].idx, 1, "剩余段 idx 应为 1");
+        assert_eq!(summaries[0].content, "合并段");
+
+        // 只有 1 段时返回 None
+        // 删除一段后只剩 1 段
+        sqlx::query("DELETE FROM conversation_summaries WHERE idx = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let result = read_oldest_two_summaries(&pool, "c1")
+            .await
+            .unwrap();
+        assert!(result.is_none(), "只剩 1 段时应返回 None");
+    }
+
+    #[tokio::test]
+    async fn summary_clear_summaries_on_delete_conversation() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        let id1 = append_message(&pool, "c1", "user", "msg1")
+            .await
+            .unwrap();
+        insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "段1", 5)
+            .await
+            .unwrap();
+        assert_eq!(count_summaries(&pool, "c1").await.unwrap(), 1);
+
+        // 删除对话应级联清理摘要
+        delete_conversation(&pool, "c1").await.unwrap();
+        assert_eq!(count_summaries(&pool, "c1").await.unwrap(), 0);
+    }
+
+    // ── 0.21.19.1 F3: list_conversations 过滤 __ 前缀内部对话 ──────────────────
+
+    #[tokio::test]
+    async fn list_conversations_filters_double_underscore_prefix() {
+        let pool = setup_pool().await;
+        // 正常对话
+        create_conversation(&pool, "real-1", Some("对话1"))
+            .await
+            .unwrap();
+        // 内部临时对话（摘要/合并 LLM 调用产生）
+        create_conversation(&pool, "__summary__c1", Some("tmp-summary"))
+            .await
+            .unwrap();
+        create_conversation(&pool, "__merge__c1", Some("tmp-merge"))
+            .await
+            .unwrap();
+
+        let convs = list_conversations(&pool).await.unwrap();
+        // 只应看到正常对话，内部对话被过滤
+        assert_eq!(convs.len(), 1, "应只返回 1 条正常对话");
+        assert_eq!(convs[0].id, "real-1");
+        assert!(
+            !convs.iter().any(|c| c.id.starts_with("__")),
+            "不应返回 __ 前缀的内部对话"
+        );
     }
 }

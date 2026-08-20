@@ -53,13 +53,13 @@ const SLIDING_WINDOW_SIZE: i64 = 20;
 const MAX_EPHEMERAL_MESSAGES: usize = 50;
 
 /// TokenAware 模式加载批次大小（加载较多消息后 in-memory 裁剪）。
-const TOKEN_AWARE_LOAD_BATCH: i64 = 200;
+pub const TOKEN_AWARE_LOAD_BATCH: i64 = 200;
 
 /// 标题最大字符数（从首条 User 消息提取）。
 const TITLE_MAX_CHARS: usize = 50;
 
 /// 保守默认 context limit（ModelEntry.context_window 缺失时使用）。
-const DEFAULT_CONTEXT_LIMIT: usize = 32768;
+pub const DEFAULT_CONTEXT_LIMIT: usize = 32768;
 
 // 0.21.17: token 估算统一收敛到 `token_budget` 模块，此处仅重导出。
 pub use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens;
@@ -73,12 +73,16 @@ pub use crate::domain::ai::token_budget::is_cjk;
 /// 供 `ChatService::compute_context_status()` 计算上下文窗口占用指示器数据。
 #[derive(Debug, Clone)]
 pub struct MemoryLoadResult {
-    /// 加载的消息列表（已裁剪 + 已召回注入）。
+    /// 加载的消息列表（已裁剪 + 已召回注入 + 摘要块注入）。
     pub messages: Vec<Message>,
     /// 本次 load 被裁剪移出的消息数（token_aware_truncate）。
     pub dropped_count: usize,
     /// 本次 load FTS5 召回的消息数。
     pub recall_count: usize,
+    /// 0.21.19: 被摘要覆盖（水位线以下）的消息数。
+    pub summarized_count: usize,
+    /// 0.21.19: 估算的摘要块 token 数（注入窗口的 `<summary>` 块）。
+    pub summary_tokens: usize,
 }
 
 // ── MemoryConfig（0.13.1）──────────────────────────────────────────────────────
@@ -144,6 +148,13 @@ pub struct MemoryConfig {
     /// 每次召回的最多消息条数。
     #[serde(default = "default_recall_top_k")]
     pub recall_top_k: i64,
+
+    /// 0.21.19: 启用摘要压缩（默认 false）。
+    ///
+    /// 开启后超出窗口的旧消息会被 LLM 压缩为摘要（调用当前模型，消耗少量 token）；
+    /// 关闭则仅裁剪归档（纯截断行为）。已生成的摘要不删除，重新开启后继续可用。
+    #[serde(default)]
+    pub summary_enabled: bool,
 }
 
 impl Default for MemoryConfig {
@@ -157,6 +168,7 @@ impl Default for MemoryConfig {
             history_budget: None,
             recall_enabled: default_recall_enabled(),
             recall_top_k: default_recall_top_k(),
+            summary_enabled: false,
         }
     }
 }
@@ -245,30 +257,21 @@ pub fn token_aware_truncate(
     trigger_ratio: f64,
     compress_ratio: f64,
 ) -> Vec<Message> {
-    let trigger_threshold = (context_limit as f64 * trigger_ratio) as usize;
-    let compress_target = (context_limit as f64 * compress_ratio) as usize;
-
     // 预计算每条消息的 token 数（O(n)），避免循环内重复估算（原 O(n²)）
     let per_message_tokens: Vec<usize> = messages
         .iter()
         .map(|m| estimate_tokens(&extract_message_text(m)))
         .collect();
-    let total_tokens: usize = per_message_tokens.iter().sum();
 
-    if total_tokens <= trigger_threshold {
+    // 0.21.19.1: 裁剪判定复用 compute_truncate_boundary 纯函数（唯一真源）
+    let Some(drop_count) =
+        compute_truncate_boundary(&per_message_tokens, context_limit, trigger_ratio, compress_ratio)
+    else {
         return Vec::new();
-    }
+    };
 
-    // 从旧端逐条计算需要移出的数量（累减 token，直到剩余 ≤ compress_target）
-    let mut dropped_tokens = 0usize;
-    let mut drop_count = 0;
-    for &tokens in &per_message_tokens {
-        if total_tokens - dropped_tokens <= compress_target {
-            break;
-        }
-        dropped_tokens += tokens;
-        drop_count += 1;
-    }
+    let dropped_tokens: usize = per_message_tokens[..drop_count].iter().sum();
+    let total_tokens: usize = per_message_tokens.iter().sum();
 
     // 一次性 drain，比逐条 remove(0) 高效（O(drop_count) vs O(n*drop_count)）
     let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
@@ -285,6 +288,47 @@ pub fn token_aware_truncate(
     }
 
     dropped
+}
+
+/// 0.21.19.1: 计算基于 token 的截断边界（纯函数，`load_inner` 与摘要任务共用）。
+///
+/// 输入 `messages_tokens` 按时间顺序排列（旧 → 新），每元素为单条消息的 token 数。
+/// 若总 token 超过 `budget × trigger_ratio`，则从旧端逐条计入需移出的数量，
+/// 直到剩余 token ≤ `budget × compress_ratio`，返回需移出的消息条数。
+/// 总 token 未达触发阈值时返回 `None`（无需裁剪）。
+///
+/// **这是裁剪判定的唯一真源**——`load_inner` 的 `token_aware_truncate` 与摘要任务的
+/// 压缩边界计算共用此函数，避免出现两份口径各算各的（0.21.19 的 P0 缺陷根因）。
+pub fn compute_truncate_boundary(
+    messages_tokens: &[usize],
+    budget: usize,
+    trigger_ratio: f64,
+    compress_ratio: f64,
+) -> Option<usize> {
+    let trigger_threshold = (budget as f64 * trigger_ratio) as usize;
+    let compress_target = (budget as f64 * compress_ratio) as usize;
+
+    let total_tokens: usize = messages_tokens.iter().sum();
+    if total_tokens <= trigger_threshold {
+        return None;
+    }
+
+    // 从旧端逐条计入需移出的数量，直到剩余 ≤ compress_target
+    let mut dropped_tokens = 0usize;
+    let mut drop_count = 0;
+    for &tokens in messages_tokens {
+        if total_tokens - dropped_tokens <= compress_target {
+            break;
+        }
+        dropped_tokens += tokens;
+        drop_count += 1;
+    }
+
+    if drop_count == 0 {
+        None
+    } else {
+        Some(drop_count)
+    }
 }
 
 // ── SqliteConversationMemory ──────────────────────────────────────────────────
@@ -339,6 +383,14 @@ impl SqliteConversationMemory {
         self.config.clone()
     }
 
+    /// 0.21.19: 获取数据库连接池引用（供摘要任务等需要直接访问 DB 的场景）。
+    ///
+    /// 摘要任务需要读取水位、加载被裁消息、插入摘要——这些都在 data 层，
+    /// 通过 pool 直接调用，不经过 rig memory trait。
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// 更新 context_limit（模型切换时调用）。
     ///
     /// `limit` 为 None 时使用保守默认（32K）。
@@ -386,13 +438,37 @@ impl SqliteConversationMemory {
             WindowMode::TokenAware => TOKEN_AWARE_LOAD_BATCH,
         };
 
-        let rows = crate::infra::data::conversations::load_recent_messages(
-            &pool,
-            conversation_id,
-            load_limit,
-        )
-        .await
-        .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+        // 0.21.19: 摘要启用时，读水位并跳过已摘要的消息
+        let mut summarized_count = 0usize;
+        let mut summary_tokens = 0usize;
+
+        let rows = if cfg.summary_enabled {
+            let watermark = crate::infra::data::conversations::get_summarized_until(
+                &pool,
+                conversation_id,
+            )
+            .await
+            .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            let (rows, skipped) =
+                crate::infra::data::conversations::load_recent_messages_after_watermark(
+                    &pool,
+                    conversation_id,
+                    load_limit,
+                    watermark,
+                )
+                .await
+                .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            summarized_count = skipped;
+            rows
+        } else {
+            crate::infra::data::conversations::load_recent_messages(
+                &pool,
+                conversation_id,
+                load_limit,
+            )
+            .await
+            .map_err(|e| MemoryError::Backend(Box::from(e)))?
+        };
 
         let mut messages = Vec::with_capacity(rows.len());
         for (_role, content) in rows {
@@ -468,6 +544,35 @@ impl SqliteConversationMemory {
         // 丢弃开头所有孤立的 ToolResult 消息。
         drop_leading_orphan_tool_results(&mut messages);
 
+        // 0.21.19: 摘要块注入——在 <memory> 块之前插入 <summary> 块
+        if cfg.summary_enabled && summarized_count > 0 {
+            let summaries =
+                crate::infra::data::conversations::load_summaries(&pool, conversation_id)
+                    .await
+                    .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            if !summaries.is_empty() {
+                let contents: Vec<String> = summaries.iter().map(|s| s.content.clone()).collect();
+                summary_tokens =
+                    crate::domain::ai::summary::estimate_summary_block_tokens(&contents);
+                let block = crate::domain::ai::summary::format_summary_block(&contents);
+                tracing::debug!(
+                    conversation_id,
+                    summary_segments = summaries.len(),
+                    summary_tokens,
+                    summarized_count,
+                    "摘要块注入：{} 段摘要，{} 条消息已被覆盖",
+                    summaries.len(),
+                    summarized_count
+                );
+                messages.insert(
+                    0,
+                    Message::System {
+                        content: block,
+                    },
+                );
+            }
+        }
+
         let mut recall_count = 0usize;
 
         // 0.13.2: FTS5 召回——从最后一条 User 消息提取 query，BM25 检索旧上下文
@@ -533,6 +638,8 @@ impl SqliteConversationMemory {
             messages,
             dropped_count,
             recall_count,
+            summarized_count,
+            summary_tokens,
         })
     }
 
@@ -556,6 +663,7 @@ impl SqliteConversationMemory {
             compress_ratio = new_config.compress_ratio,
             recall_enabled = new_config.recall_enabled,
             recall_top_k = new_config.recall_top_k,
+            summary_enabled = new_config.summary_enabled,
             context_limit = ?new_config.context_limit,
             history_budget = ?new_config.history_budget,
             "apply_config: 更新记忆策略配置"
@@ -1147,6 +1255,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         let mem = SqliteConversationMemory::with_config(pool, config);
 
@@ -1445,6 +1554,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         // 设一个很小的 context_limit 来触发压缩
         config.write().await.context_limit = Some(50);
@@ -1479,6 +1589,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         let mem = SqliteConversationMemory::with_config(pool, config);
 
@@ -1509,6 +1620,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool, config);
@@ -1544,6 +1656,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         let mem = SqliteConversationMemory::with_config(pool, config);
 
@@ -1621,6 +1734,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false, // 先关召回，验证归档
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         // 设很小的 context_limit 触发压缩
         config.write().await.context_limit = Some(50);
@@ -1656,6 +1770,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1700,6 +1815,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1739,6 +1855,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1768,6 +1885,7 @@ mod tests {
             history_budget: None,
             recall_enabled: true,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1798,6 +1916,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         config.write().await.context_limit = Some(100_000);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1991,6 +2110,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false, // 关召回，隔离裁剪行为
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2038,6 +2158,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2084,6 +2205,7 @@ mod tests {
             history_budget: None,
             recall_enabled: false,
             recall_top_k: 3,
+            summary_enabled: false,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2111,6 +2233,7 @@ mod tests {
             history_budget: None, // serde 反序列化后应为 None
             recall_enabled: false,
             recall_top_k: 3,
+            summary_enabled: false,
         };
         mem.apply_config(new_config).await;
 
@@ -2264,5 +2387,220 @@ mod tests {
             texts.contains(&"hello".to_string()),
             "应保留末尾 user 消息: {texts:?}"
         );
+    }
+
+    // ── 0.21.19: 摘要注入与回退测试 ──────────────────────────────────
+
+    /// 摘要启用时，load 应跳过水位以下消息并注入 <summary> 块。
+    #[tokio::test]
+    async fn summary_enabled_injects_block_and_skips_summarized() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false, // 关召回，隔离摘要行为
+            recall_top_k: 3,
+            summary_enabled: true,
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 创建对话记录
+        crate::infra::data::conversations::create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        // 写入 4 条消息
+        let msg_json = |text: &str| serde_json::to_string(&user_msg(text)).unwrap();
+        let id1 = crate::infra::data::conversations::append_message(
+            &pool, "c1", "user", &msg_json("旧消息1"),
+        ).await.unwrap();
+        let id2 = crate::infra::data::conversations::append_message(
+            &pool, "c1", "user", &msg_json("旧消息2"),
+        ).await.unwrap();
+        let _id3 = crate::infra::data::conversations::append_message(
+            &pool, "c1", "user", &msg_json("新消息1"),
+        ).await.unwrap();
+        let _id4 = crate::infra::data::conversations::append_message(
+            &pool, "c1", "user", &msg_json("新消息2"),
+        ).await.unwrap();
+
+        // 插入摘要覆盖 id1..=id2，推进水位到 id2
+        crate::infra::data::conversations::insert_summary_and_advance_watermark(
+            &pool, "c1", 0, id1, id2, "用户讨论了旧消息的摘要", 10,
+        ).await.unwrap();
+
+        let result = mem.load_with_stats("c1").await.unwrap();
+
+        // 应跳过 2 条已摘要消息
+        assert_eq!(result.summarized_count, 2, "应跳过 2 条已摘要消息");
+
+        // 应注入 <summary> 块
+        let has_summary = result.messages.iter().any(|m| {
+            matches!(m, Message::System { content } if content.contains("<summary>"))
+        });
+        assert!(has_summary, "应注入 <summary> 系统消息块");
+
+        // summary_tokens > 0
+        assert!(result.summary_tokens > 0, "摘要块 token 应 > 0");
+
+        // 消息应包含新消息，不含旧消息
+        let texts: Vec<String> = result.messages.iter().map(extract_message_text).collect();
+        assert!(texts.iter().any(|t| t.contains("新消息1")), "应包含新消息1");
+        assert!(texts.iter().any(|t| t.contains("新消息2")), "应包含新消息2");
+        assert!(!texts.iter().any(|t| t.contains("旧消息1")), "不应包含已摘要的旧消息1");
+        assert!(!texts.iter().any(|t| t.contains("旧消息2")), "不应包含已摘要的旧消息2");
+    }
+
+    /// 摘要关闭时（summary_enabled=false），完全回退纯截断行为。
+    #[tokio::test]
+    async fn summary_disabled_falls_back_to_truncation() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false,
+            recall_top_k: 3,
+            summary_enabled: false, // 关闭摘要
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 创建对话记录
+        crate::infra::data::conversations::create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+
+        // 写入消息
+        let msg_json = |text: &str| serde_json::to_string(&user_msg(text)).unwrap();
+        let id1 = crate::infra::data::conversations::append_message(
+            &pool, "c1", "user", &msg_json("旧消息"),
+        ).await.unwrap();
+        let _id2 = crate::infra::data::conversations::append_message(
+            &pool, "c1", "user", &msg_json("新消息"),
+        ).await.unwrap();
+
+        // 即便有摘要数据，关闭时也不应注入
+        crate::infra::data::conversations::insert_summary_and_advance_watermark(
+            &pool, "c1", 0, id1, id1, "旧消息摘要", 5,
+        ).await.unwrap();
+
+        let result = mem.load_with_stats("c1").await.unwrap();
+
+        // 不应有摘要注入
+        assert_eq!(result.summarized_count, 0, "关闭摘要时 summarized_count 应为 0");
+        assert_eq!(result.summary_tokens, 0, "关闭摘要时 summary_tokens 应为 0");
+
+        // 不应有 <summary> 块
+        let has_summary = result.messages.iter().any(|m| {
+            matches!(m, Message::System { content } if content.contains("<summary>"))
+        });
+        assert!(!has_summary, "关闭摘要时不应注入 <summary> 块");
+
+        // 应返回全部消息（未被水位跳过）
+        assert_eq!(result.messages.len(), 2, "应返回全部消息");
+    }
+
+    /// FixedCount 模式不受摘要影响——摘要只在 TokenAware 模式下生效。
+    #[tokio::test]
+    async fn fixed_count_mode_unaffected_by_summary() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::FixedCount,
+            window_size: 10,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false,
+            recall_top_k: 3,
+            summary_enabled: true, // 即使开启，FixedCount 模式也应正常工作
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 写入 5 条消息
+        for i in 0..5 {
+            mem.append("c1", vec![user_msg(&format!("msg {i}"))])
+                .await
+                .unwrap();
+        }
+
+        let loaded = mem.load("c1").await.unwrap();
+        assert_eq!(loaded.len(), 5, "FixedCount 模式应返回全部 5 条消息");
+    }
+
+    // ── 0.21.19.1 F1: compute_truncate_boundary 纯函数单测 ────────────────────
+
+    /// P0 回归核心用例：小预算 + 长消息、对话 < 200 条、超触发阈值 → 边界必须非空。
+    /// 在旧实现（条数口径 200）下该用例必失败（不足 200 条 → 边界 None → 摘要不触发）。
+    #[test]
+    fn compute_truncate_boundary_small_budget_few_messages_nonempty() {
+        // 4 条消息，每条 1000 token，总 4000
+        let tokens = vec![1000usize, 1000, 1000, 1000];
+        // budget=2000, trigger=0.8 → 阈值 1600；4000 > 1600 触发
+        // compress=0.7 → 目标 1400；从旧端移出直到剩余 ≤ 1400
+        // 移出 3 条（剩 1000 ≤ 1400）→ 边界 = Some(3)
+        let boundary = compute_truncate_boundary(&tokens, 2000, 0.8, 0.7);
+        assert_eq!(boundary, Some(3), "4 条 × 1000 token、budget 2000 → 应裁 3 条");
+    }
+
+    /// 未达触发阈值 → None（无需裁剪）。
+    #[test]
+    fn compute_truncate_boundary_below_threshold_none() {
+        let tokens = vec![100, 100, 100]; // 总 300
+        let boundary = compute_truncate_boundary(&tokens, 1000, 0.8, 0.7); // 阈值 800
+        assert_eq!(boundary, None, "总 300 < 阈值 800 → None");
+    }
+
+    /// 边界恰好等于水位（触发阈值恰好等于 total）→ 不触发（≤）。
+    #[test]
+    fn compute_truncate_boundary_at_threshold_none() {
+        let tokens = vec![800usize]; // 总 800 = 阈值 800
+        let boundary = compute_truncate_boundary(&tokens, 1000, 0.8, 0.7);
+        assert_eq!(boundary, None, "总 = 阈值 → 不触发（<=）");
+    }
+
+    /// budget 为 0 → 阈值 0、目标 0；总 > 0 触发，移出全部直到剩余 ≤ 0。
+    #[test]
+    fn compute_truncate_boundary_zero_budget() {
+        let tokens = vec![100, 200];
+        // budget=0 → 阈值 0、目标 0；总 300 > 0 触发
+        // 移出第 1 条（剩 200 > 0）→ 移出第 2 条（剩 0 ≤ 0）→ drop_count=2
+        let boundary = compute_truncate_boundary(&tokens, 0, 0.8, 0.7);
+        assert_eq!(boundary, Some(2), "budget=0 → 全部移出");
+    }
+
+    /// history_budget 缺失走 fallback 链——此测试验证调用方 fallback 逻辑的
+    /// 等价性：None → context_limit → DEFAULT_CONTEXT_LIMIT。纯函数本身只接收一个 budget，
+    /// fallback 在调用方（maybe_spawn_summary_task 与 load_inner 共用同一链）。
+    #[test]
+    fn compute_truncate_boundary_fallback_equivalence() {
+        let tokens = vec![40000usize]; // 远超 32768 默认
+        // DEFAULT_CONTEXT_LIMIT=32768, trigger=0.8 → 26214；40000 > 26214 触发
+        // compress=0.7 → 22937；移出 1 条（剩 0 ≤ 22937）→ Some(1)
+        let boundary =
+            compute_truncate_boundary(&tokens, DEFAULT_CONTEXT_LIMIT, 0.8, 0.7);
+        assert_eq!(boundary, Some(1));
+    }
+
+    /// 单条消息超预算 → 裁 1 条（剩 0）。
+    #[test]
+    fn compute_truncate_boundary_single_message_over_budget() {
+        let tokens = vec![5000];
+        let boundary = compute_truncate_boundary(&tokens, 1000, 0.8, 0.7);
+        assert_eq!(boundary, Some(1));
+    }
+
+    /// 空消息列表 → None。
+    #[test]
+    fn compute_truncate_boundary_empty() {
+        let boundary = compute_truncate_boundary(&[], 1000, 0.8, 0.7);
+        assert_eq!(boundary, None);
     }
 }

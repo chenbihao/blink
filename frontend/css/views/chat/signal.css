@@ -64,6 +64,62 @@
     -webkit-user-select: text;
 }
 
+/* ── 摘要压缩分隔线（0.21.19） ──── */
+
+.chat-summary-sep {
+    align-self: center;
+    width: 90%;
+    margin: var(--space-xs) 0;
+    border: 1px dashed var(--surface-2);
+    border-radius: 8px;
+    background: var(--surface);
+    overflow: hidden;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.chat-summary-sep-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+}
+
+.chat-summary-sep-header::-webkit-details-marker {
+    display: none;
+}
+
+.chat-summary-sep-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    flex: 1;
+}
+
+.chat-summary-sep-body {
+    padding: var(--space-xs) var(--space-sm);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-sub);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+    background: var(--bg-deep);
+    border-top: 1px solid var(--surface);
+}
+
+.chat-summary-sep-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.chat-summary-sep-body::-webkit-scrollbar-thumb {
+    background: var(--surface-2);
+    border-radius: 2px;
+}
+
 /* ── 错误消息（0.12.7：重构为 Signal error 的别名，保持向后兼容） ── */
 
 .chat-msg-error {

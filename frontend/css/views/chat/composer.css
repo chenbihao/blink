@@ -90,6 +90,20 @@
     margin-left: 1px;
 }
 
+/* 0.21.19: 摘要压缩标记 */
+.context-summary-badge {
+    color: var(--accent);
+    margin-left: 1px;
+}
+
+/* 0.21.19: badge 内联 SVG 图标尺寸 */
+.context-compressed .context-badge-icon,
+.context-summary-badge .context-badge-icon {
+    width: 12px;
+    height: 12px;
+    vertical-align: -1px;
+}
+
 /* 0.13.6: 主动压缩提示条 */
 .chat-context-warning {
     display: flex;

@@ -184,7 +184,7 @@ async function init() {
             const ctxStatus = await ipc.getContextWindowStatus(state.conversationId);
             components.updateContextIndicator(ctxStatus || null);
             if (ctxStatus) {
-                components.renderContextWarning(ctxStatus.usage_percent, handleContextWarningAction);
+                components.renderContextWarning(ctxStatus.usage_percent, ctxStatus.summary_enabled, handleContextWarningAction);
             }
         } catch (e) {
             // 即使获取失败也显示空环
@@ -476,14 +476,14 @@ function renderThinkingDropdown() {
     const isCustom = current !== "" && current !== "none" && !EFFORT_LEVELS.includes(current);
     let html = "";
 
-    // 默认档（不主动打 patch）+ 关闭
+    // 默认档（不主动打 patch）+ 关闭——均为中性态，选中时不点亮（仅真实档位/自定义高亮）
     html += '<div class="chat-thinking-group">思考</div>';
-    html += `<div class="chat-thinking-option${current === "" ? " chat-thinking-option-selected" : ""}" data-effort="">`;
+    html += '<div class="chat-thinking-option" data-effort="">';
     html += '<div class="chat-thinking-option-text">';
     html += '<span class="chat-thinking-option-title">默认</span>';
     html += '<span class="chat-thinking-option-sub">不主动给模型打 patch</span>';
     html += "</div></div>";
-    html += `<div class="chat-thinking-option${current === "none" ? " chat-thinking-option-selected" : ""}" data-effort="none">思考关</div>`;
+    html += '<div class="chat-thinking-option" data-effort="none">思考关</div>';
 
     // 预设档位（原文本展示，避免中文翻译对不上供应商档位）
     html += '<div class="chat-thinking-group">思考级别</div>';
@@ -806,15 +806,35 @@ async function handleTitleUpdated(event) {
 function handleContextStatus(event) {
     const status = event.payload;
     components.updateContextIndicator(status);
-    components.renderContextWarning(status.usage_percent, handleContextWarningAction);
+    components.renderContextWarning(status.usage_percent, status.summary_enabled, handleContextWarningAction);
     // 0.13.6: 保存 recall_count 供 finalizeDone 渲染
     state.setLastRecallCount(status.last_recall_count || 0);
-    // MCP 拓扑可能在后台预热或 prompt 准备时变化，
+    // 0.21.19: 有摘要覆盖消息时渲染折叠分隔线
+    if (status.summarized_count > 0) {
+        renderSummarySeparatorIfNeeded(status.summarized_count);
+    }
+    // MCP 拓扑可以在后台预热或 prompt 准备时变化，
     // context-status 事件在 ensure_provider 之后推送，此时 tool 池可能已变，
     // 刷新 composer bar 文本 + 清除 popup 缓存。
     refreshToolPool(true);
     invalidateComposerBarCache();
     refreshPopupIfVisible();
+}
+
+/**
+ * 0.21.19: 异步获取摘要内容并渲染折叠分隔线。
+ * 竞态防护：响应回来时校验仍是当前对话。
+ */
+async function renderSummarySeparatorIfNeeded(summarizedCount) {
+    const convId = state.conversationId;
+    try {
+        const summaryText = await ipc.getContextSummary(convId);
+        if (state.conversationId !== convId || !summaryText) return;
+        components.renderSummarySeparator(summaryText, summarizedCount);
+    } catch (e) {
+        // 摘要获取失败不阻塞对话
+        console.warn("[chat] 获取摘要失败:", e);
+    }
 }
 
 /**
@@ -825,8 +845,13 @@ function handleContextStatus(event) {
 async function handleContextWarningAction(action) {
     if (action === "compress") {
         try {
-            await ipc.compressContextNow(state.conversationId);
+            // 0.21.19: compress_context_now 现在同步触发摘要生成（若 summary_enabled）
+            const result = await ipc.compressContextNow(state.conversationId);
             components.removeContextWarning();
+            // 压缩后刷新上下文指示器
+            if (result) {
+                components.updateContextIndicator(result);
+            }
         } catch (e) {
             console.error("[chat] 压缩失败:", e);
         }
@@ -1091,6 +1116,13 @@ async function handleSwitchConversation(conversationId, groupId = null) {
         const ctxStatus = await ipc.getContextWindowStatus(conversationId);
         if (state.conversationId === conversationId) {
             components.updateContextIndicator(ctxStatus || null);
+            if (ctxStatus) {
+                components.renderContextWarning(ctxStatus.usage_percent, ctxStatus.summary_enabled, handleContextWarningAction);
+                // 0.21.19: 切换对话时也渲染摘要分隔线
+                if (ctxStatus.summarized_count > 0) {
+                    renderSummarySeparatorIfNeeded(ctxStatus.summarized_count);
+                }
+            }
         }
     } catch (e) {
         if (state.conversationId === conversationId) {

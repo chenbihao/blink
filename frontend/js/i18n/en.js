@@ -734,6 +734,13 @@ export const en = {
     "ai.memory.recall.hint": "Uses full-text search only within the current persistent conversation to find relevant earlier messages trimmed from the active window; it is not cross-conversation long-term memory",
     "ai.memory.recall_top_k.label": "Recall Count (Top-K)",
     "ai.memory.recall_top_k.hint": "Maximum number of messages to recall each time. Default 3, higher values recall more but cost more tokens",
+    // 0.21.19: LLM summary compression
+    "ai.memory.summary.label": "LLM Summary Compression",
+    "ai.memory.summary.hint": "When enabled, older messages beyond the window are summarized by the LLM and injected at the context head instead of being trimmed. Disable to use the traditional trim-and-archive strategy",
+    "ai.memory.behavior_hint.summary_on": "Older messages beyond the context window will be summarized by the LLM and injected at the window head, preserving conversation essentials.",
+    "ai.memory.behavior_hint.summary_off": "By default, Blink trims and archives messages according to the current model's context capacity; it does not use an LLM to summarize them. Main-window ephemeral chats are not controlled here.",
+    "ai.memory.trigger_ratio.hint.summary_on": "Trims earlier messages and generates a summary when estimated loaded tokens exceed this share of the history budget. The history budget already deducts system prompts, tool definitions, output reserves and other non-history overhead",
+    "ai.memory.trigger_ratio.hint.summary_off": "Trims and archives earlier messages when estimated loaded tokens exceed this share of the history budget. The history budget already deducts system prompts, tool definitions, output reserves and other non-history overhead. No LLM summary is generated",
 // 0.13.3 Skill convention
     "ai.skill.section": "Skill Convention",
     "ai.skill.section.desc": "Scan SKILL.md to inject conversation preamble, enhancing AI knowledge and behavior",

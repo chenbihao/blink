@@ -332,6 +332,82 @@ impl AgentProvider {
         }
     }
 
+    /// 流式 prompt + max_tokens 覆盖（0.21.19 摘要任务用）。
+    ///
+    /// 与 `stream_prompt` 逻辑一致，额外通过 `merge_additional_params` 注入 `max_tokens`，
+    /// 限制输出长度（摘要任务要求 ≤ 600 token）。
+    pub async fn stream_prompt_with_max_tokens(
+        &self,
+        conversation_id: &str,
+        user_msg: &str,
+        tx: mpsc::UnboundedSender<ChatStreamChunk>,
+        thinking_enabled: bool,
+        reasoning_effort: Option<String>,
+        max_tokens: u64,
+    ) {
+        let model_name = if self.model_name.is_empty() {
+            None
+        } else {
+            Some(self.model_name.clone())
+        };
+        // 思考强制关：reasoning_effort = None
+        let thinking_patch = thinking_request_patch(
+            self.kind,
+            self.base_url.as_deref(),
+            &self.model_id,
+            thinking_enabled,
+            reasoning_effort.as_deref(),
+        );
+
+        // 合并 thinking_patch + max_tokens 到 additional_params
+        let mut params = serde_json::Map::new();
+        if let Some(serde_json::Value::Object(map)) = thinking_patch {
+            params.extend(map);
+        }
+        // max_tokens 字段名因 provider 而异，但 rig 内部会统一映射
+        params.insert(
+            "max_tokens".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(max_tokens)),
+        );
+
+        match &self.agent {
+            ChatAgent::Agent(a) => {
+                Self::run_stream_with_params(
+                    a,
+                    conversation_id,
+                    user_msg,
+                    tx,
+                    model_name,
+                    Some(&params),
+                )
+                .await
+            }
+        }
+    }
+
+    /// `run_stream` 的变体——接受预构造的 additional_params Map（含 max_tokens 等）。
+    ///
+    /// 将 params 包装为 `Value::Object` 后复用 `run_stream` 的消费循环。
+    async fn run_stream_with_params(
+        agent: &Agent,
+        conversation_id: &str,
+        user_msg: &str,
+        tx: mpsc::UnboundedSender<ChatStreamChunk>,
+        model_name: Option<String>,
+        params: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let patch = params.map(|m| serde_json::Value::Object(m.clone()));
+        Self::run_stream(
+            agent,
+            conversation_id,
+            user_msg,
+            tx,
+            model_name,
+            patch.as_ref(),
+        )
+        .await;
+    }
+
     /// 泛型 stream 消费--4 个 `ChatAgent` arm 共用,每个 arm 具体化 M。
     ///
     /// 消费 `MultiTurnStreamItem`(`#[non_exhaustive]`,须 `Ok(_)` 兜底):

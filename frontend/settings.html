@@ -698,6 +698,14 @@
                 <div class="extension-body">
                     <p class="panel-hint" data-i18n="ai.memory.behavior_hint">默认按当前模型的上下文容量自动裁剪并归档；不会调用
                         LLM 生成摘要。</p>
+                    <div class="setting-row" id="ai-memory-summary-row">
+                        <label class="setting-label" data-i18n="ai.memory.summary.label">LLM 摘要压缩<span
+                                class="field-hint-icon" data-i18n-title="ai.memory.summary.hint">ⓘ</span></label>
+                        <label class="switch">
+                            <input id="ai-memory-summary-enabled" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
                     <div class="setting-row" id="ai-memory-recall-row">
                         <label class="setting-label" data-i18n="ai.memory.recall.label">召回本对话较早内容<span
                                 class="field-hint-icon" data-i18n-title="ai.memory.recall.hint">ⓘ</span></label>

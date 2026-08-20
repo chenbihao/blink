@@ -406,7 +406,7 @@ export function getMcpToolNames() {
 /**
  * 获取当前上下文窗口状态（前端初始化时调用）。
  * @param {string} conversationId
- * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number}|null>}
+ * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number, summary_tokens: number, summarized_count: number, summary_enabled: boolean}|null>}
  */
 export function getContextWindowStatus(conversationId) {
     return invoke("get_context_window_status", {conversationId});
@@ -415,10 +415,19 @@ export function getContextWindowStatus(conversationId) {
 /**
  * 强制压缩当前对话的上下文窗口。
  * @param {string} conversationId
- * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number}>}
+ * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number, summary_tokens: number, summarized_count: number, summary_enabled: boolean}>}
  */
 export function compressContextNow(conversationId) {
     return invoke("compress_context_now", {conversationId});
+}
+
+/**
+ * 0.21.19: 获取对话的摘要内容（供渲染折叠分隔线）。
+ * @param {string} conversationId
+ * @returns {Promise<string|null>}
+ */
+export function getContextSummary(conversationId) {
+    return invoke("get_context_summary", {conversationId});
 }
 
 // ── 0.13.6 MCP tool 来源信息 ──────────────────────────────────────
@@ -473,7 +482,7 @@ export function listenChatTitleUpdated(handler) {
 
 /**
  * 监听上下文窗口状态更新事件（0.13.6）。
- * @param {(event: {payload: {estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number}}) => void} handler
+ * @param {(event: {payload: {estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number, summary_tokens: number, summarized_count: number, summary_enabled: boolean}}) => void} handler
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenContextStatus(handler) {

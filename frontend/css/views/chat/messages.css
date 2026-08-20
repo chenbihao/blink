@@ -144,6 +144,12 @@
     margin-bottom: var(--space-xs);
 }
 
+/* 0.21.19: 摘要压缩分隔线 */
+.chat-messages > .chat-summary-sep {
+    margin-top: var(--space-md);
+    margin-bottom: var(--space-xs);
+}
+
 .chat-messages::-webkit-scrollbar {
     width: 6px;
 }

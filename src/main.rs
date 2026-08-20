@@ -1147,6 +1147,8 @@ app::commands::ensure_mcp_connected,
             // 0.13.6 上下文窗口状态
             app::commands::get_context_window_status,
             app::commands::compress_context_now,
+            // 0.21.19 摘要压缩
+            app::commands::get_context_summary,
             // 0.13.4 MCP server（暴露 Blink 能力）
             app::commands::get_mcp_server_config,
             app::commands::set_mcp_server_config,

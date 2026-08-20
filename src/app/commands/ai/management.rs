@@ -428,10 +428,13 @@ pub async fn get_context_window_status(
     Ok(chat.get_or_compute_context_status(&conversation_id).await)
 }
 
-/// 强制压缩当前对话的上下文窗口（0.13.6）。
+/// 强制压缩当前对话的上下文窗口（0.13.6 / 0.21.19 扩展）。
 ///
 /// 调用 `memory.load_with_stats()` 走一遍 token_aware_truncate 流程，
 /// 然后返回更新后的上下文窗口状态。
+///
+/// 0.21.19: 若摘要开关开启且 usage 达到阈值，先同步执行摘要生成
+/// （`maybe_spawn_summary_task`），再 compute_context_status 返回最新状态。
 ///
 /// 注意：本命令实际执行的裁剪基于上一轮 stream_prompt 注入的
 /// history_budget（compute_context_status 内部先 load 后注入）；本命令
@@ -453,10 +456,7 @@ pub async fn compress_context_now(
         return Err("对话进行中，请等待当前回复完成后再压缩".to_string());
     }
 
-    // 0.21.17: compute_context_status 需要 AgentProvider + ResolvedProviderEntries。
-    // 从缓存获取 provider，从 resolve_current_entries 获取 resolved。
-    // 前提：聊天窗只承载持久对话（ephemeral 走主窗口 AI / Chord-Q，不经过
-    // 本命令），故固定 resolve Persistent kind。
+    // 0.21.19: 若摘要开关开启，先同步触发摘要生成
     let resolved = chat
         .resolve_current_entries(crate::domain::ai::chat_service::ConversationKind::Persistent)
         .map_err(|e| e.to_string())?;
@@ -466,11 +466,41 @@ pub async fn compress_context_now(
         .cached_agent_ref()
         .ok_or("Agent 未构造，请先发送一条消息后再压缩")?;
 
+    // 0.21.19.1 F2: maybe_spawn_summary_task 开头检查 summary_enabled + trigger_ratio，
+    // 开关关闭时直接返回不触发 LLM 调用。用 100 强制触发阈值判定（手动压缩时用户已明确要压缩）。
+    chat.maybe_spawn_summary_task(&conversation_id, 100).await;
+
+    // 摘要生成后重新 compute（水位可能已推进，load 结果变化）
     let status = chat
         .compute_context_status(&conversation_id, None, None, &provider, &resolved)
         .await;
     let _ = app.emit_to("chat", EventNames::CHAT_CONTEXT_STATUS, &status);
     Ok(status)
+}
+
+/// 0.21.19: 获取对话的摘要内容（供前端渲染折叠分隔线）。
+///
+/// 返回所有摘要段合并后的文本（按 idx 升序拼接）。
+/// 摘要关闭或无摘要时返回 None。
+#[tauri::command]
+pub async fn get_context_summary(
+    app: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<Option<String>, String> {
+    use tauri::Manager;
+    let pool = &app.state::<crate::infra::data::DbPools>().ai;
+    let summaries = crate::infra::data::conversations::load_summaries(pool, &conversation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if summaries.is_empty() {
+        return Ok(None);
+    }
+    let text = summaries
+        .iter()
+        .map(|s| s.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    Ok(Some(text))
 }
 
 /// 清空所有 AI 权限记忆（设置页-AI对话能力「清除所有权限记忆」按钮，0.17.8）。

@@ -1324,6 +1324,7 @@ mod tests {
                     history_budget: None,
                     recall_enabled: false,
                     recall_top_k: 5,
+                    summary_enabled: false,
                 },
                 skill_config: SkillConfig::default(),
             },
