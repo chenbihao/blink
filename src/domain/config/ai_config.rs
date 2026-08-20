@@ -1325,6 +1325,7 @@ mod tests {
                     recall_enabled: false,
                     recall_top_k: 5,
                     summary_enabled: false,
+                    recall_scope: crate::domain::ai::memory::RecallScope::ThisConversation,
                 },
                 skill_config: SkillConfig::default(),
             },

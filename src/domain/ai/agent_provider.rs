@@ -27,7 +27,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 // 0.42: Agent runtime 迁移到 rig-agent crate
-use rig_agent::agent::{Agent, AgentBuilder, MultiTurnStreamItem};
+use rig_agent::agent::{Agent, AgentBuilder, MultiTurnStreamItem, StreamingResult};
 use rig_agent::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig_agent::tool::DynamicTool;
 use rig_core::client::CompletionClient;
@@ -332,10 +332,27 @@ impl AgentProvider {
         }
     }
 
-    /// 流式 prompt + max_tokens 覆盖（0.21.19 摘要任务用）。
+    /// 流式 prompt + max_tokens 覆盖（0.21.19 摘要任务用 / 0.21.20 rig 一等参数修复）。
     ///
-    /// 与 `stream_prompt` 逻辑一致，额外通过 `merge_additional_params` 注入 `max_tokens`，
+    /// 与 `stream_prompt` 逻辑一致，额外用 rig builder 的一等 `.max_tokens()` 方法
     /// 限制输出长度（摘要任务要求 ≤ 600 token）。
+    ///
+    /// **0.21.20 修复**：旧实现把 `"max_tokens": 600` 塞进 `additional_params` 顶层，
+    /// 但 rig 0.42 对不同供应商的 `AdditionalParameters` 解析路径不同：
+    /// - Gemini：`AdditionalParameters` 只解析 `generationConfig`，其余键 flatten 到请求体
+    ///   顶层被 API 忽略——裸 `max_tokens` 永远到不了 `maxOutputTokens`；
+    /// - Ollama：`additional_params` 会被合入 `options`，但键名应为 `num_predict`，
+    ///   `max_tokens` 键无效；
+    /// - OpenAI 兼容 / Anthropic 恰好顶层 `max_tokens` 正确。
+    ///
+    /// 改用 rig builder 的 `.max_tokens(u64)` 一等参数后，rig 对各协议原生映射
+    /// （Gemini → `generationConfig.maxOutputTokens`、Ollama → `options.num_predict`、
+    /// OpenAI/Anthropic → `max_tokens`），不再静默失效。
+    ///
+    /// **thinking_patch 的 `merge_additional_params` 逻辑保留不动**——thinking 字段
+    /// 各供应商格式不同（DeepSeek `thinking.type` / Anthropic `thinking.budget_tokens`
+    /// 等），走 `merge_additional_params` 是各供应商文档约定的标准注入路径，
+    /// 不受 `max_tokens` 映射问题影响。
     pub async fn stream_prompt_with_max_tokens(
         &self,
         conversation_id: &str,
@@ -359,53 +376,69 @@ impl AgentProvider {
             reasoning_effort.as_deref(),
         );
 
-        // 合并 thinking_patch + max_tokens 到 additional_params
-        let mut params = serde_json::Map::new();
-        if let Some(serde_json::Value::Object(map)) = thinking_patch {
-            params.extend(map);
-        }
-        // max_tokens 字段名因 provider 而异，但 rig 内部会统一映射
-        params.insert(
-            "max_tokens".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(max_tokens)),
-        );
-
         match &self.agent {
             ChatAgent::Agent(a) => {
-                Self::run_stream_with_params(
+                Self::run_stream_with_max_tokens(
                     a,
                     conversation_id,
                     user_msg,
                     tx,
                     model_name,
-                    Some(&params),
+                    thinking_patch.as_ref(),
+                    max_tokens,
                 )
                 .await
             }
         }
     }
 
-    /// `run_stream` 的变体——接受预构造的 additional_params Map（含 max_tokens 等）。
+    /// `run_stream` 的变体——接受 thinking_patch + rig 一等 `max_tokens`。
     ///
-    /// 将 params 包装为 `Value::Object` 后复用 `run_stream` 的消费循环。
-    async fn run_stream_with_params(
+    /// thinking_patch 走 `merge_additional_params`（各供应商 thinking 字段的标准注入路径），
+    /// `max_tokens` 走 rig builder 的 `.max_tokens(u64)` 一等参数（rig 原生映射各协议字段）。
+    async fn run_stream_with_max_tokens(
         agent: &Agent,
         conversation_id: &str,
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
         model_name: Option<String>,
-        params: Option<&serde_json::Map<String, serde_json::Value>>,
+        thinking_patch: Option<&serde_json::Value>,
+        max_tokens: u64,
     ) {
-        let patch = params.map(|m| serde_json::Value::Object(m.clone()));
-        Self::run_stream(
-            agent,
-            conversation_id,
-            user_msg,
-            tx,
-            model_name,
-            patch.as_ref(),
-        )
-        .await;
+        let timeout_ms =
+            crate::domain::config::ai_config::get_ai_config().effective_hard_timeout_ms();
+        let idle_timeout = Duration::from_millis(timeout_ms as u64);
+        let stream_builder = {
+            let builder = agent.stream_prompt(user_msg).conversation(conversation_id);
+            // max_tokens 走 rig 一等参数——rig 0.42 对各协议原生映射：
+            // Gemini → generationConfig.maxOutputTokens、Ollama → options.num_predict、
+            // OpenAI/Anthropic → max_tokens
+            let builder = builder.max_tokens(max_tokens);
+            if let Some(serde_json::Value::Object(map)) = thinking_patch {
+                builder.merge_additional_params(map.clone())
+            } else {
+                builder
+            }
+        };
+        let stream = match tokio::time::timeout(idle_timeout, stream_builder).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                tracing::warn!(
+                    target: crate::infra::utils::perf::ai_slo::TARGET,
+                    conversation = %conversation_id,
+                    timeout_ms,
+                    "run_stream_with_max_tokens: 等待模型首个响应超时"
+                );
+                let _ = tx.send(ChatStreamChunk::Error {
+                    message: format!(
+                        "AI 请求超时（{timeout_ms} 毫秒），请重试或在设置中调整硬超时"
+                    ),
+                });
+                return;
+            }
+        };
+        // 复用 run_stream 的消费循环——传入已构造的 stream
+        Self::consume_stream(stream, conversation_id, tx, model_name, idle_timeout).await;
     }
 
     /// 泛型 stream 消费--4 个 `ChatAgent` arm 共用,每个 arm 具体化 M。
@@ -445,7 +478,7 @@ impl AgentProvider {
                 builder
             }
         };
-        let mut stream = match tokio::time::timeout(idle_timeout, stream_builder).await {
+        let stream = match tokio::time::timeout(idle_timeout, stream_builder).await {
             Ok(stream) => stream,
             Err(_) => {
                 tracing::warn!(
@@ -462,6 +495,28 @@ impl AgentProvider {
                 return;
             }
         };
+        Self::consume_stream(stream, conversation_id, tx, model_name, idle_timeout).await;
+    }
+
+    /// 消费已构造的 `MultiTurnStream`——`run_stream` 与 `run_stream_with_max_tokens` 共用。
+    ///
+    /// 消费 `MultiTurnStreamItem`（`#[non_exhaustive]`，须 `Ok(_)` 兜底）：
+    /// - `StreamAssistantItem(Text)` -> `ChatStreamChunk::Text`
+    /// - `StreamAssistantItem(Reasoning/ReasoningDelta)` -> `ChatStreamChunk::Thinking`
+    /// - `StreamAssistantItem(ToolCall)` -> `ChatStreamChunk::ToolCall { tool, call_id }`
+    /// - `StreamUserItem(ToolResult)` -> `ChatStreamChunk::ToolResult { call_id, summary }`
+    /// - `FinalResponse(resp)` -> `ChatStreamChunk::Done { input_tokens, output_tokens }`
+    /// - `Err` -> `ChatStreamChunk::Error`
+    ///
+    /// **中断**：调用方 drop `tx`（或 task 被 abort）即中断，stream 被 drop 后 rig 内部
+    /// reqwest task 自动 abort（与主窗口 `RigProvider::stream` 一致）。
+    async fn consume_stream(
+        mut stream: StreamingResult,
+        conversation_id: &str,
+        tx: mpsc::UnboundedSender<ChatStreamChunk>,
+        model_name: Option<String>,
+        idle_timeout: Duration,
+    ) {
         let mut done_sent = false;
         // 跟踪是否收到过实质内容（Text/Thinking/ToolCall/ToolResult）。
         // rig 在 SSE 解析失败时可能 yield 一个空 FinalResponse（0 token + 无内容），
@@ -475,13 +530,10 @@ impl AgentProvider {
                     tracing::warn!(
                         target: crate::infra::utils::perf::ai_slo::TARGET,
                         conversation = %conversation_id,
-                        timeout_ms,
-                        "run_stream: 等待模型流式响应超时"
+                        "consume_stream: 等待模型流式响应超时"
                     );
                     let _ = tx.send(ChatStreamChunk::Error {
-                        message: format!(
-                            "AI 请求超时（{timeout_ms} 毫秒），请重试或在设置中调整硬超时"
-                        ),
+                        message: "AI 请求超时，请重试或在设置中调整硬超时".to_string(),
                     });
                     return;
                 }
@@ -493,7 +545,7 @@ impl AgentProvider {
                         tracing::trace!(
                             conversation = %conversation_id,
                             text = single_line(&t.text),
-                            "run_stream: text delta"
+                            "consume_stream: text delta"
                         );
                         ChatStreamChunk::Text { text: t.text }
                     }
@@ -503,9 +555,8 @@ impl AgentProvider {
                         tracing::trace!(
                             conversation = %conversation_id,
                             thinking = single_line(&text),
-                            "run_stream: thinking delta"
+                            "consume_stream: thinking delta"
                         );
-                        // 0.21.16: 不按开关隐藏思考块——开关失效时模型仍思考能及时暴露
                         ChatStreamChunk::Thinking { text }
                     }
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
@@ -513,9 +564,8 @@ impl AgentProvider {
                         tracing::trace!(
                             conversation = %conversation_id,
                             thinking = single_line(&reasoning),
-                            "run_stream: thinking delta"
+                            "consume_stream: thinking delta"
                         );
-                        // 0.21.16: 不按开关隐藏思考块——开关失效时模型仍思考能及时暴露
                         ChatStreamChunk::Thinking { text: reasoning }
                     }
                     StreamedAssistantContent::ToolCall {
@@ -530,7 +580,7 @@ impl AgentProvider {
                             tool = %tool,
                             call_id = %internal_call_id,
                             args_chars = arguments.chars().count(),
-                            "run_stream: tool call"
+                            "consume_stream: tool call"
                         );
                         ChatStreamChunk::ToolCall {
                             tool,
@@ -546,14 +596,13 @@ impl AgentProvider {
                 })) => {
                     has_content = true;
                     let summary = summarize_tool_result(&tool_result);
-                    // 空内容视为失败（如被拒绝的危险 tool / tool 报错）
                     let success = !summary.is_empty();
                     tracing::debug!(
                         conversation = %conversation_id,
                         call_id = %internal_call_id,
                         success,
                         summary_chars = summary.chars().count(),
-                        "run_stream: tool result"
+                        "consume_stream: tool result"
                     );
                     ChatStreamChunk::ToolResult {
                         call_id: internal_call_id,
@@ -564,13 +613,10 @@ impl AgentProvider {
                 Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
                     done_sent = true;
                     let usage = resp.usage();
-                    // 空响应检测：0 token + 无任何内容 → SSE 解析失败 / 服务过载 / 配额耗尽
-                    // rig 在这些场景下不 yield Err，而是 yield 一个空 FinalResponse，
-                    // 若直接发 Done 前端只显示空气泡无任何提示。
                     if !has_content && usage.input_tokens == 0 && usage.output_tokens == 0 {
                         tracing::warn!(
                             conversation = %conversation_id,
-                            "run_stream: 收到空 FinalResponse（0 token + 无内容），\
+                            "consume_stream: 收到空 FinalResponse（0 token + 无内容），\
                              可能是服务过载 / SSE 解析失败 / 配额耗尽"
                         );
                         ChatStreamChunk::Error {
@@ -578,7 +624,6 @@ impl AgentProvider {
                                 .to_string(),
                         }
                     } else {
-                        // 0.21.17: 统一使用 message::Usage::from_rig_usage 映射
                         ChatStreamChunk::Done {
                             usage: crate::domain::ai::message::Usage::from_rig_usage(&usage),
                             model_name: model_name.clone(),
@@ -586,43 +631,36 @@ impl AgentProvider {
                     }
                 }
                 Ok(_) => {
-                    tracing::trace!("run_stream: unknown MultiTurnStreamItem variant, skipped");
+                    tracing::trace!("consume_stream: unknown MultiTurnStreamItem variant, skipped");
                     continue;
                 }
                 Err(e) => {
-                    // 0.12.3 Phase C: 检测 MaxTurnsError 并 emit MaxTurnsReached
-                    // 注意：这里用字符串匹配检测 MaxTurnsError，如果 rig 升级后错误消息
-                    // 格式变化，此检测会失效。若 rig 后续暴露类型化错误，应改用 downcast_ref。
                     let msg = format!("{e}");
                     if msg.contains("MaxTurnsError") || msg.contains("max turns") {
                         ChatStreamChunk::MaxTurnsReached {
                             max_turns: MAX_TURNS,
                         }
                     } else {
-                        // 0.12.9：后端日志记录 SSE / provider 错误详情，便于排查 400 等问题
                         tracing::warn!(
                             target: crate::infra::utils::perf::ai_slo::TARGET,
                             conversation = %conversation_id,
                             error = %msg,
                             error_debug = ?e,
-                            "run_stream: 流式生成错误"
+                            "consume_stream: 流式生成错误"
                         );
                         ChatStreamChunk::Error { message: msg }
                     }
                 }
             };
             if tx.send(chunk).is_err() {
-                // 接收端关闭(用户中断/窗口关)--提前终止
                 return;
             }
         }
-        // 0.12.5：stream 结束但未发送 Done（rig-core 跳过了 SSE 解析错误后连接关闭）
-        // → 发送 Error chunk，避免前端永远收不到结束事件而卡死
         if !done_sent {
             tracing::warn!(
                 target: crate::infra::utils::perf::ai_slo::TARGET,
                 conversation = %conversation_id,
-                "run_stream: 流结束但未收到 Done chunk（SSE 解析异常 / 连接被服务端关闭）"
+                "consume_stream: 流结束但未收到 Done chunk（SSE 解析异常 / 连接被服务端关闭）"
             );
             let _ = tx.send(ChatStreamChunk::Error {
                 message: "AI 返回了无效响应，可能是服务过载或配额耗尽，请稍后重试".to_string(),

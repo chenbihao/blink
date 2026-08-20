@@ -735,6 +735,11 @@ export const zh = {
     "ai.memory.recall.hint": "仅在当前持久对话内，用全文检索找回被窗口裁剪的相关较早消息；不会跨对话建立长期记忆",
     "ai.memory.recall_top_k.label": "召回条数（Top-K）",
     "ai.memory.recall_top_k.hint": "每次召回的最多消息条数。默认 3，越大召回越多但消耗更多 token",
+    // 0.21.20: 召回范围
+    "ai.memory.recall_scope.label": "召回范围",
+    "ai.memory.recall_scope.hint": "控制召回检索范围。仅本对话：只在当前对话内检索；所有对话：跨所有对话检索已归档消息（排除内部临时对话）。开启所有对话后召回内容可能来自其他对话",
+    "ai.memory.recall_scope.this_conversation": "仅本对话",
+    "ai.memory.recall_scope.all_conversations": "所有对话",
     // 0.21.19: LLM 摘要压缩
     "ai.memory.summary.label": "LLM 摘要压缩",
     "ai.memory.summary.hint": "开启后，超出窗口的旧消息将由 LLM 生成摘要并注入上下文头部，而非直接裁剪丢弃。关闭则使用传统裁剪归档策略",

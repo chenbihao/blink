@@ -39,8 +39,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rig_core::completion::Message;
 use rig_core::completion::message::{AssistantContent, Reasoning, Text, UserContent};
+use rig_core::completion::Message;
 use rig_core::memory::{ConversationMemory, MemoryError};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -96,6 +96,20 @@ pub enum WindowMode {
     /// Token-aware 窗口（0.13.1 默认）。
     #[default]
     TokenAware,
+}
+
+/// 0.21.20: FTS5 召回范围（跨对话召回开关）。
+///
+/// 控制召回检索的 `conversation_id` 范围：仅当前对话或跨所有对话。
+/// AllConversations 时必须排除 `__` 前缀的内部临时对话（摘要/合并任务产生的 orphan）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallScope {
+    /// 仅当前对话（默认，向后兼容）。
+    #[default]
+    ThisConversation,
+    /// 跨所有对话（排除 `__` 前缀内部对话）。
+    AllConversations,
 }
 
 /// 记忆策略配置（0.13.1 + 0.13.2）。
@@ -155,6 +169,12 @@ pub struct MemoryConfig {
     /// 关闭则仅裁剪归档（纯截断行为）。已生成的摘要不删除，重新开启后继续可用。
     #[serde(default)]
     pub summary_enabled: bool,
+
+    /// 0.21.20: 召回范围（默认 ThisConversation）。
+    ///
+    /// AllConversations 时 FTS5 检索跨所有对话的已归档消息（排除 `__` 前缀内部对话）。
+    #[serde(default)]
+    pub recall_scope: RecallScope,
 }
 
 impl Default for MemoryConfig {
@@ -169,6 +189,7 @@ impl Default for MemoryConfig {
             recall_enabled: default_recall_enabled(),
             recall_top_k: default_recall_top_k(),
             summary_enabled: false,
+            recall_scope: RecallScope::default(),
         }
     }
 }
@@ -264,9 +285,12 @@ pub fn token_aware_truncate(
         .collect();
 
     // 0.21.19.1: 裁剪判定复用 compute_truncate_boundary 纯函数（唯一真源）
-    let Some(drop_count) =
-        compute_truncate_boundary(&per_message_tokens, context_limit, trigger_ratio, compress_ratio)
-    else {
+    let Some(drop_count) = compute_truncate_boundary(
+        &per_message_tokens,
+        context_limit,
+        trigger_ratio,
+        compress_ratio,
+    ) else {
         return Vec::new();
     };
 
@@ -443,12 +467,10 @@ impl SqliteConversationMemory {
         let mut summary_tokens = 0usize;
 
         let rows = if cfg.summary_enabled {
-            let watermark = crate::infra::data::conversations::get_summarized_until(
-                &pool,
-                conversation_id,
-            )
-            .await
-            .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            let watermark =
+                crate::infra::data::conversations::get_summarized_until(&pool, conversation_id)
+                    .await
+                    .map_err(|e| MemoryError::Backend(Box::from(e)))?;
             let (rows, skipped) =
                 crate::infra::data::conversations::load_recent_messages_after_watermark(
                     &pool,
@@ -564,12 +586,7 @@ impl SqliteConversationMemory {
                     summaries.len(),
                     summarized_count
                 );
-                messages.insert(
-                    0,
-                    Message::System {
-                        content: block,
-                    },
-                );
+                messages.insert(0, Message::System { content: block });
             }
         }
 
@@ -584,6 +601,7 @@ impl SqliteConversationMemory {
                     conversation_id,
                     &query,
                     cfg.recall_top_k,
+                    cfg.recall_scope,
                 )
                 .await
                 {
@@ -664,6 +682,7 @@ impl SqliteConversationMemory {
             recall_enabled = new_config.recall_enabled,
             recall_top_k = new_config.recall_top_k,
             summary_enabled = new_config.summary_enabled,
+            recall_scope = ?new_config.recall_scope,
             context_limit = ?new_config.context_limit,
             history_budget = ?new_config.history_budget,
             "apply_config: 更新记忆策略配置"
@@ -1085,9 +1104,7 @@ impl ConversationMemory for EphemeralConversationMemory {
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         Box::pin(async move {
             let mut convs = self.conversations.write().await;
-            let vec = convs
-                .entry(conversation_id.to_string())
-                .or_default();
+            let vec = convs.entry(conversation_id.to_string()).or_default();
             vec.extend(messages);
             // 0.21.18: 条数上限裁剪——超出丢最旧，复用孤立 ToolResult 丢弃逻辑
             if vec.len() > MAX_EPHEMERAL_MESSAGES {
@@ -1256,6 +1273,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool, config);
 
@@ -1555,6 +1573,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         // 设一个很小的 context_limit 来触发压缩
         config.write().await.context_limit = Some(50);
@@ -1590,6 +1609,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool, config);
 
@@ -1621,6 +1641,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool, config);
@@ -1657,6 +1678,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool, config);
 
@@ -1735,6 +1757,7 @@ mod tests {
             recall_enabled: false, // 先关召回，验证归档
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         // 设很小的 context_limit 触发压缩
         config.write().await.context_limit = Some(50);
@@ -1751,10 +1774,15 @@ mod tests {
         assert!(loaded.len() < 20, "应被裁剪");
 
         // 验证 FTS5 中有归档记录——搜索一个早期消息的关键词
-        let recalls =
-            crate::infra::data::conversations::search_memory_fts(&pool, "c1", "topic_0", 10)
-                .await
-                .unwrap();
+        let recalls = crate::infra::data::conversations::search_memory_fts(
+            &pool,
+            "c1",
+            "topic_0",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(!recalls.is_empty(), "被裁剪的消息应已归档到 FTS5");
     }
 
@@ -1771,6 +1799,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1816,6 +1845,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1856,6 +1886,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1886,6 +1917,7 @@ mod tests {
             recall_enabled: true,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         config.write().await.context_limit = Some(50);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -1917,6 +1949,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         config.write().await.context_limit = Some(100_000);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
@@ -2111,6 +2144,7 @@ mod tests {
             recall_enabled: false, // 关召回，隔离裁剪行为
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2159,6 +2193,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2176,10 +2211,7 @@ mod tests {
         mem.update_context_limit(Some(100_000)).await;
         mem.update_history_budget(Some(50)).await;
         let loaded_with_budget = mem.load("c1").await.unwrap();
-        assert!(
-            loaded_with_budget.len() < 10,
-            "history_budget=50 应裁剪"
-        );
+        assert!(loaded_with_budget.len() < 10, "history_budget=50 应裁剪");
 
         // 模型切换 → update_context_limit 应使 history_budget 失效
         // 新 context_limit 仍是 100_000（大窗口），裁剪应回到 context_limit 基准 → 不裁剪
@@ -2206,6 +2238,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2234,6 +2267,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false,
+            recall_scope: RecallScope::ThisConversation,
         };
         mem.apply_config(new_config).await;
 
@@ -2245,10 +2279,7 @@ mod tests {
             Some(50),
             "apply_config 后 history_budget 应保留为 Some(50)"
         );
-        assert_eq!(
-            cfg.trigger_ratio, 0.75,
-            "trigger_ratio 应已更新为新值"
-        );
+        assert_eq!(cfg.trigger_ratio, 0.75, "trigger_ratio 应已更新为新值");
         drop(cfg);
 
         // 行为验证：history_budget=50 仍生效 → 裁剪
@@ -2335,9 +2366,7 @@ mod tests {
     /// 裁剪后开头的孤立 ToolResult 应被丢弃。
     #[tokio::test]
     async fn ephemeral_cap_drops_orphan_tool_results() {
-        use rig_core::completion::message::{
-            ToolResult, ToolResultContent,
-        };
+        use rig_core::completion::message::{ToolResult, ToolResultContent};
 
         let mem = EphemeralConversationMemory::new();
 
@@ -2361,9 +2390,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        mem.append("c1", vec![user_msg("hello")])
-            .await
-            .unwrap();
+        mem.append("c1", vec![user_msg("hello")]).await.unwrap();
 
         let loaded = mem.load("c1").await.unwrap();
         // 裁剪 + 丢弃孤立 ToolResult 后，首条不应是纯 ToolResult
@@ -2377,10 +2404,7 @@ mod tests {
             }
             _ => false,
         };
-        assert!(
-            !is_pure_tool_result,
-            "裁剪后开头的孤立 ToolResult 应被丢弃"
-        );
+        assert!(!is_pure_tool_result, "裁剪后开头的孤立 ToolResult 应被丢弃");
         // 应包含末尾的 user "hello"
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert!(
@@ -2405,6 +2429,7 @@ mod tests {
             recall_enabled: false, // 关召回，隔离摘要行为
             recall_top_k: 3,
             summary_enabled: true,
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2416,22 +2441,50 @@ mod tests {
         // 写入 4 条消息
         let msg_json = |text: &str| serde_json::to_string(&user_msg(text)).unwrap();
         let id1 = crate::infra::data::conversations::append_message(
-            &pool, "c1", "user", &msg_json("旧消息1"),
-        ).await.unwrap();
+            &pool,
+            "c1",
+            "user",
+            &msg_json("旧消息1"),
+        )
+        .await
+        .unwrap();
         let id2 = crate::infra::data::conversations::append_message(
-            &pool, "c1", "user", &msg_json("旧消息2"),
-        ).await.unwrap();
+            &pool,
+            "c1",
+            "user",
+            &msg_json("旧消息2"),
+        )
+        .await
+        .unwrap();
         let _id3 = crate::infra::data::conversations::append_message(
-            &pool, "c1", "user", &msg_json("新消息1"),
-        ).await.unwrap();
+            &pool,
+            "c1",
+            "user",
+            &msg_json("新消息1"),
+        )
+        .await
+        .unwrap();
         let _id4 = crate::infra::data::conversations::append_message(
-            &pool, "c1", "user", &msg_json("新消息2"),
-        ).await.unwrap();
+            &pool,
+            "c1",
+            "user",
+            &msg_json("新消息2"),
+        )
+        .await
+        .unwrap();
 
         // 插入摘要覆盖 id1..=id2，推进水位到 id2
         crate::infra::data::conversations::insert_summary_and_advance_watermark(
-            &pool, "c1", 0, id1, id2, "用户讨论了旧消息的摘要", 10,
-        ).await.unwrap();
+            &pool,
+            "c1",
+            0,
+            id1,
+            id2,
+            "用户讨论了旧消息的摘要",
+            10,
+        )
+        .await
+        .unwrap();
 
         let result = mem.load_with_stats("c1").await.unwrap();
 
@@ -2439,9 +2492,10 @@ mod tests {
         assert_eq!(result.summarized_count, 2, "应跳过 2 条已摘要消息");
 
         // 应注入 <summary> 块
-        let has_summary = result.messages.iter().any(|m| {
-            matches!(m, Message::System { content } if content.contains("<summary>"))
-        });
+        let has_summary = result
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::System { content } if content.contains("<summary>")));
         assert!(has_summary, "应注入 <summary> 系统消息块");
 
         // summary_tokens > 0
@@ -2451,8 +2505,14 @@ mod tests {
         let texts: Vec<String> = result.messages.iter().map(extract_message_text).collect();
         assert!(texts.iter().any(|t| t.contains("新消息1")), "应包含新消息1");
         assert!(texts.iter().any(|t| t.contains("新消息2")), "应包含新消息2");
-        assert!(!texts.iter().any(|t| t.contains("旧消息1")), "不应包含已摘要的旧消息1");
-        assert!(!texts.iter().any(|t| t.contains("旧消息2")), "不应包含已摘要的旧消息2");
+        assert!(
+            !texts.iter().any(|t| t.contains("旧消息1")),
+            "不应包含已摘要的旧消息1"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("旧消息2")),
+            "不应包含已摘要的旧消息2"
+        );
     }
 
     /// 摘要关闭时（summary_enabled=false），完全回退纯截断行为。
@@ -2469,6 +2529,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: false, // 关闭摘要
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2480,27 +2541,49 @@ mod tests {
         // 写入消息
         let msg_json = |text: &str| serde_json::to_string(&user_msg(text)).unwrap();
         let id1 = crate::infra::data::conversations::append_message(
-            &pool, "c1", "user", &msg_json("旧消息"),
-        ).await.unwrap();
+            &pool,
+            "c1",
+            "user",
+            &msg_json("旧消息"),
+        )
+        .await
+        .unwrap();
         let _id2 = crate::infra::data::conversations::append_message(
-            &pool, "c1", "user", &msg_json("新消息"),
-        ).await.unwrap();
+            &pool,
+            "c1",
+            "user",
+            &msg_json("新消息"),
+        )
+        .await
+        .unwrap();
 
         // 即便有摘要数据，关闭时也不应注入
         crate::infra::data::conversations::insert_summary_and_advance_watermark(
-            &pool, "c1", 0, id1, id1, "旧消息摘要", 5,
-        ).await.unwrap();
+            &pool,
+            "c1",
+            0,
+            id1,
+            id1,
+            "旧消息摘要",
+            5,
+        )
+        .await
+        .unwrap();
 
         let result = mem.load_with_stats("c1").await.unwrap();
 
         // 不应有摘要注入
-        assert_eq!(result.summarized_count, 0, "关闭摘要时 summarized_count 应为 0");
+        assert_eq!(
+            result.summarized_count, 0,
+            "关闭摘要时 summarized_count 应为 0"
+        );
         assert_eq!(result.summary_tokens, 0, "关闭摘要时 summary_tokens 应为 0");
 
         // 不应有 <summary> 块
-        let has_summary = result.messages.iter().any(|m| {
-            matches!(m, Message::System { content } if content.contains("<summary>"))
-        });
+        let has_summary = result
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::System { content } if content.contains("<summary>")));
         assert!(!has_summary, "关闭摘要时不应注入 <summary> 块");
 
         // 应返回全部消息（未被水位跳过）
@@ -2521,6 +2604,7 @@ mod tests {
             recall_enabled: false,
             recall_top_k: 3,
             summary_enabled: true, // 即使开启，FixedCount 模式也应正常工作
+            recall_scope: RecallScope::ThisConversation,
         }));
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
@@ -2547,7 +2631,11 @@ mod tests {
         // compress=0.7 → 目标 1400；从旧端移出直到剩余 ≤ 1400
         // 移出 3 条（剩 1000 ≤ 1400）→ 边界 = Some(3)
         let boundary = compute_truncate_boundary(&tokens, 2000, 0.8, 0.7);
-        assert_eq!(boundary, Some(3), "4 条 × 1000 token、budget 2000 → 应裁 3 条");
+        assert_eq!(
+            boundary,
+            Some(3),
+            "4 条 × 1000 token、budget 2000 → 应裁 3 条"
+        );
     }
 
     /// 未达触发阈值 → None（无需裁剪）。
@@ -2584,8 +2672,7 @@ mod tests {
         let tokens = vec![40000usize]; // 远超 32768 默认
         // DEFAULT_CONTEXT_LIMIT=32768, trigger=0.8 → 26214；40000 > 26214 触发
         // compress=0.7 → 22937；移出 1 条（剩 0 ≤ 22937）→ Some(1)
-        let boundary =
-            compute_truncate_boundary(&tokens, DEFAULT_CONTEXT_LIMIT, 0.8, 0.7);
+        let boundary = compute_truncate_boundary(&tokens, DEFAULT_CONTEXT_LIMIT, 0.8, 0.7);
         assert_eq!(boundary, Some(1));
     }
 

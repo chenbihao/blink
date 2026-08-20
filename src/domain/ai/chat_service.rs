@@ -14,11 +14,11 @@
 //! - Phase 4 消费 `ChatPromptHandle.chunks` 并定向 emit 前端。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::domain::ai::memory::{
-    EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory, estimate_tokens,
+    estimate_tokens, EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
@@ -32,9 +32,11 @@ use crate::domain::ai::prompt::{
 };
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
-use crate::domain::ai::skill::{SkillRegistry, SkillSummary, parse_skill_command};
-use crate::domain::ai::thinking::thinking_supports_effort;
-use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
+use crate::domain::ai::skill::{parse_skill_command, SkillRegistry, SkillSummary};
+use crate::domain::ai::thinking::{
+    parse_supported_reasoning_efforts, pick_fallback_effort, thinking_supports_effort,
+};
+use crate::domain::ai::tool_adapter::{build_agent_tools, PendingConfirms};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::config::ai_config::{ChatAgentMode, ChatConfig, Tier};
 use crate::domain::event::EventPort;
@@ -959,6 +961,50 @@ impl ChatService {
             .map(|cached| cached.provider.clone())
     }
 
+    /// 0.21.20: 为摘要/合并任务构造无工具 AgentProvider（裸 Agent）。
+    ///
+    /// 摘要/合并调用复用 `cached_agent_ref()` 的 Agent——带全套工具池（Capability + MCP），
+    /// 摘要模型若发起 ToolCall 会产生真实副作用。改为构造无工具 Agent 杜绝此风险。
+    ///
+    /// **不进 cached_agent 缓存**——后台任务非热路径、至多每轮 Done 一次，构造含凭据
+    /// 读取可接受；避免缓存失效复杂度。失败则 warn + 返回 None（回退纯截断）。
+    ///
+    /// 构造签名参照 `ensure_provider` 中的 `AgentProvider::new` 调用，工具池传空 vec。
+    /// preamble 用简短固定文本，不影响摘要质量（摘要 prompt 自带角色设定）。
+    async fn build_bare_summary_agent(self: &Arc<Self>) -> Option<Arc<AgentProvider>> {
+        let resolved = match self.resolve_current_entries(ConversationKind::Persistent) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "摘要任务: 解析 provider 失败，回退纯截断"
+                );
+                return None;
+            }
+        };
+        // 摘要任务不需要工具——传空 vec 杜绝 ToolCall 副作用
+        let memory: Arc<dyn rig_core::memory::ConversationMemory> = self.persistent_memory.clone();
+        match AgentProvider::new(
+            &resolved.provider,
+            &resolved.model,
+            Vec::new(),
+            Vec::new(),
+            "You are a conversation summarizer. Produce concise, faithful summaries.",
+            memory,
+        )
+        .await
+        {
+            Ok(provider) => Some(Arc::new(provider)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "摘要任务: 裸 Agent 构造失败，回退纯截断"
+                );
+                None
+            }
+        }
+    }
+
     /// 启动一个 prompt，返回流式 chunk receiver 给 Phase 4 IPC 层。
     ///
     /// `start_gate` 只串行化启动过程，不影响 status/abort；active 安装后才放行 Agent task，
@@ -1155,6 +1201,27 @@ impl ChatService {
                     };
                     let summary_conv_id = conversation_for_task.clone();
                     let weak_for_summary = weak_service.clone();
+
+                    // 0.21.20 T2: reasoning_effort 400 自愈——oneshot 信号通道。
+                    // 拦截器检测到可降级的 400 Error chunk 时，不转发该 Error，
+                    // 而是经此 oneshot 把 fallback effort 发给外层重试循环。
+                    // 外层在 stream_prompt().await 返回后用短 timeout 等信号（防竞态）。
+                    let (retry_tx, retry_rx) = tokio::sync::oneshot::channel::<String>();
+                    // retry_tx 用 Mutex<Option> 包裹——send() 消耗 self，只发一次，
+                    // 且需要在 spawn 的 async move 块中访问（需 Send 内部可变性）
+                    let retry_tx = std::sync::Mutex::new(Some(retry_tx));
+                    // retry_rx 只在外层循环中使用（不在 spawn 块中），
+                    // 用普通 Option + take() 即可，无需 Mutex
+                    let mut retry_rx_opt = Some(retry_rx);
+                    // 门禁：仅当确实发送了 reasoning_effort 时才可能降级
+                    let can_retry_effort = reasoning_effort.as_ref().is_some_and(|e| !e.is_empty())
+                        && thinking_supports_effort(
+                            resolved.provider.kind,
+                            resolved.provider.base_url.as_deref(),
+                            &resolved.model.id,
+                        );
+                    let retry_effort_for_interceptor = reasoning_effort.clone();
+
                     tokio::spawn(async move {
                         let mut gate = CalibrationGate::new();
                         while let Some(chunk) = intercept_rx.recv().await {
@@ -1193,6 +1260,37 @@ impl ChatService {
                             // 必须先 send chunk 再 spawn——摘要是后台优化项，
                             // 不能阻塞 Done chunk 传递给前端（否则前端卡在"生成中"）
                             let is_done = matches!(chunk, ChatStreamChunk::Done { .. });
+
+                            // 0.21.20 T2: reasoning_effort 400 自愈检测。
+                            // 拦截 Error chunk，若门禁通过且能解析出支持的档位，
+                            // 则不转发 Error，经 oneshot 发 fallback 给外层重试。
+                            // （只触发一次——retry_tx 消费后后续 Error 原样转发）
+                            if !is_done
+                                && can_retry_effort
+                                && let ChatStreamChunk::Error { ref message } = chunk
+                                && let Some(supported) = parse_supported_reasoning_efforts(message)
+                            {
+                                let attempted =
+                                    retry_effort_for_interceptor.as_deref().unwrap_or("");
+                                if let Some(fallback) = pick_fallback_effort(attempted, &supported)
+                                {
+                                    tracing::info!(
+                                        conversation_id = %summary_conv_id,
+                                        attempted = %attempted,
+                                        fallback = %fallback,
+                                        supported = ?supported,
+                                        "T2: reasoning_effort 400 自愈——降级重试"
+                                    );
+                                    // 不转发 Error chunk，发信号给外层
+                                    if let Some(tx) =
+                                        retry_tx.lock().ok().and_then(|mut g| g.take())
+                                    {
+                                        let _ = tx.send(fallback);
+                                    }
+                                    continue; // 跳过此 Error chunk
+                                }
+                            }
+
                             if chunk_tx.send(chunk).is_err() {
                                 break;
                             }
@@ -1204,24 +1302,56 @@ impl ChatService {
                                 let conv_id = summary_conv_id.clone();
                                 tokio::spawn(async move {
                                     service
-                                        .maybe_spawn_summary_task(
-                                            &conv_id,
-                                            summary_usage_percent,
-                                        )
+                                        .maybe_spawn_summary_task(&conv_id, summary_usage_percent)
                                         .await;
                                 });
                             }
                         }
                     });
-                    provider
-                        .stream_prompt(
-                            &conversation_for_task,
-                            &effective_message,
-                            intercept_tx,
-                            thinking_enabled,
-                            reasoning_effort,
-                        )
-                        .await;
+                    // 0.21.20 T2: 重试循环——最多 2 次尝试（初始 + 1 次降级重试）
+                    let mut current_effort = reasoning_effort.clone();
+                    for attempt in 0..2u8 {
+                        provider
+                            .stream_prompt(
+                                &conversation_for_task,
+                                &effective_message,
+                                intercept_tx.clone(),
+                                thinking_enabled,
+                                current_effort.clone(),
+                            )
+                            .await;
+                        // 首次尝试后检查是否有降级信号（短 timeout 防竞态：
+                        // Error chunk 可能略晚于流结束到达拦截器）
+                        if attempt == 0 {
+                            // 取出 retry_rx（只等一次）
+                            if let Some(rx) = retry_rx_opt.take() {
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(200),
+                                    rx,
+                                )
+                                .await
+                                {
+                                    Ok(Ok(fallback)) => {
+                                        // 降级重试——换 effort 再跑一次
+                                        current_effort = Some(fallback);
+                                        continue;
+                                    }
+                                    Ok(Err(_)) | Err(_) => {
+                                        // 无信号或超时——首次结果即为最终结果
+                                        break;
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            // 第二次（重试）流式的 Error 原样转发，不再自愈
+                            break;
+                        }
+                    }
+                    // 显式 drop intercept_tx——关闭拦截器 channel，让拦截器 task 的
+                    // recv 循环自然退出（intercept_rx.recv() 返回 None → break）
+                    drop(intercept_tx);
                 }
                 Err(error) => {
                     // 0.12.9：provider 构造失败时记录日志，便于排查配置/密钥问题
@@ -1336,7 +1466,10 @@ impl ChatService {
     /// 返回 chat 状态快照。
     ///
     /// 0.12.2：`provider_name`/`model_name` 反映当前生效模型（selected 优先，Main 回落），
-    /// 供前端 header 标签展示。`provider_configured` 沿用 Main 档语义（兼容旧前端）。
+    /// 供前端 header 标签展示。
+    /// 0.21.20：`provider_configured` 改为基于 `resolve_current_entries` 而非裸 `Tier::Main`。
+    /// 此前仅查 Main 档，用户在模型选择器选了模型但 Main 档未配置时，`provider_configured=false`
+    /// 导致前端显示"请先在设置中配置供应商"空状态，与左下角已选模型矛盾。
     pub fn status(&self) -> ChatStatus {
         // 0.17.9: status 供对话窗口调用，走 Persistent 路径
         let resolved = self
@@ -1365,7 +1498,7 @@ impl ChatService {
         };
         ChatStatus {
             active: self.requests.status(),
-            provider_configured: self.ai_registry.resolve_entries(Tier::Main).is_ok(),
+            provider_configured: resolved.is_some(),
             provider_name,
             model_name,
             supports_effort_levels,
@@ -1608,7 +1741,20 @@ impl ChatService {
         } else {
             0
         };
-        let history_budget = history_budget.saturating_sub(recall_reserve);
+
+        // 0.21.20 T3: 摘要块预留——<summary> 块在 load_inner 裁剪之后才插入，
+        // 不受预算约束却占用窗口 → 预算偏松。按 result.summary_tokens（已估算）预扣。
+        // 口径说明：摘要块文本同时计入 messages→history_tokens（用量侧），
+        // 预算侧预留是上限侧——与召回块 reserve 完全同构，不是双算，不要"优化"掉任何一侧。
+        let summary_reserve: usize = if cfg.summary_enabled {
+            result.summary_tokens
+        } else {
+            0
+        };
+
+        let history_budget = history_budget
+            .saturating_sub(recall_reserve)
+            .saturating_sub(summary_reserve);
 
         if history_budget < 1024 {
             tracing::warn!(
@@ -1616,6 +1762,8 @@ impl ChatService {
                 history_budget,
                 context_limit = budget.context_limit,
                 tools_tokens = budget.breakdown.tools_tokens,
+                recall_reserve,
+                summary_reserve,
                 "历史预算过小：非历史开销（工具/系统提示/预留）已接近或超过窗口"
             );
         }
@@ -1624,6 +1772,7 @@ impl ChatService {
             conversation_id,
             history_budget,
             recall_reserve,
+            summary_reserve,
             context_limit = budget.context_limit,
             "compute_context_status: 注入历史裁剪预算"
         );
@@ -1964,9 +2113,9 @@ impl ChatService {
             let messages_text = crate::domain::ai::summary::format_messages_for_summary(&messages);
             let prompt = crate::domain::ai::summary::build_summary_prompt(&messages_text);
 
-            // 8. 获取缓存的 AgentProvider
-            let Some(provider) = self.cached_agent_ref() else {
-                tracing::debug!(conversation_id, "摘要任务: Agent 未构造，跳过（首次对话无缓存）");
+            // 8. 0.21.20: 构造无工具裸 Agent（杜绝 ToolCall 副作用）
+            let Some(provider) = self.build_bare_summary_agent().await else {
+                tracing::debug!(conversation_id, "摘要任务: 裸 Agent 构造失败，跳过（回退纯截断）");
                 return;
             };
 
@@ -2105,18 +2254,14 @@ impl ChatService {
         conversation_id: &str,
         pool: &sqlx::SqlitePool,
     ) {
-        let count = match crate::infra::data::conversations::count_summaries(
-            pool,
-            conversation_id,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(conversation_id, error = %e, "段合并: 查询段数失败");
-                return;
-            }
-        };
+        let count =
+            match crate::infra::data::conversations::count_summaries(pool, conversation_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(conversation_id, error = %e, "段合并: 查询段数失败");
+                    return;
+                }
+            };
 
         if !crate::domain::ai::summary::should_merge_summaries(count as usize) {
             return;
@@ -2145,9 +2290,13 @@ impl ChatService {
         let merge_conv_id = format!("__merge__{conversation_id}");
         let (merge_tx, mut merge_rx) = mpsc::unbounded_channel::<ChatStreamChunk>();
 
-        let Some(provider) = self.cached_agent_ref() else {
-            tracing::warn!(conversation_id, "段合并: Agent 未构造，跳过");
-            return;
+        // 0.21.20: 构造无工具裸 Agent（杜绝 ToolCall 副作用）
+        let provider = match self.build_bare_summary_agent().await {
+            Some(p) => p,
+            None => {
+                tracing::warn!(conversation_id, "段合并: 裸 Agent 构造失败，跳过");
+                return;
+            }
         };
 
         let provider_clone = provider.clone();
@@ -2156,11 +2305,16 @@ impl ChatService {
         let merge_prompt_clone = merge_prompt.clone();
 
         let llm_task = tokio::spawn(async move {
-            provider_clone.stream_prompt_with_max_tokens(
-                &conv_id_for_llm, &merge_prompt_clone, merge_tx, false, None,
-                crate::domain::ai::summary::SUMMARY_MAX_TOKENS as u64,
-            )
-            .await;
+            provider_clone
+                .stream_prompt_with_max_tokens(
+                    &conv_id_for_llm,
+                    &merge_prompt_clone,
+                    merge_tx,
+                    false,
+                    None,
+                    crate::domain::ai::summary::SUMMARY_MAX_TOKENS as u64,
+                )
+                .await;
         });
 
         let mut merged_text = String::new();
@@ -2265,7 +2419,8 @@ impl ChatService {
         &self,
         conversation_id: &str,
     ) -> Option<ContextWindowStatus> {
-        self.last_context_status.get_for_conversation(conversation_id)
+        self.last_context_status
+            .get_for_conversation(conversation_id)
     }
 
     /// 0.21.18: 查询上下文状态，缓存 miss 时按需重算。
@@ -2898,10 +3053,7 @@ mod tests {
         gate.observe(&ChatStreamChunk::Text {
             text: " world".into(),
         });
-        assert!(
-            gate.should_sample(),
-            "纯文本流应允许采样"
-        );
+        assert!(gate.should_sample(), "纯文本流应允许采样");
     }
 
     #[test]
@@ -2915,10 +3067,7 @@ mod tests {
             call_id: "c1".into(),
             arguments: "{}".into(),
         });
-        assert!(
-            !gate.should_sample(),
-            "出现 ToolCall 后不应允许采样"
-        );
+        assert!(!gate.should_sample(), "出现 ToolCall 后不应允许采样");
     }
 
     #[test]
@@ -2939,7 +3088,12 @@ mod tests {
     // ── P0-2: ContextStatusCache 测试 ───────────────────────────────────────
 
     /// 构造测试用 ContextWindowStatus（只填归属字段 + estimated_tokens）。
-    fn make_test_status(conv: &str, provider: &str, model: &str, tokens: usize) -> ContextWindowStatus {
+    fn make_test_status(
+        conv: &str,
+        provider: &str,
+        model: &str,
+        tokens: usize,
+    ) -> ContextWindowStatus {
         ContextWindowStatus {
             estimated_tokens: tokens,
             context_limit: 8192,
@@ -3012,10 +3166,7 @@ mod tests {
         // 写入 32 条（达到上限）
         for i in 0..32 {
             let conv = format!("conv{i}");
-            cache.insert(
-                format!("conv{i}:p:M"),
-                make_test_status(&conv, "p", "M", i),
-            );
+            cache.insert(format!("conv{i}:p:M"), make_test_status(&conv, "p", "M", i));
         }
         // 验证 conv0 仍在
         assert!(cache.get_for_conversation("conv0").is_some());
@@ -3038,9 +3189,10 @@ mod tests {
     fn summary_in_flight_guard_releases_on_drop() {
         let flag = std::sync::atomic::AtomicBool::new(false);
         // 抢占
-        assert!(flag
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok());
+        assert!(
+            flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        );
         // guard 持有引用——作用域结束后 Drop 应释放标志
         {
             let _guard = SummaryInFlightGuard(&flag);

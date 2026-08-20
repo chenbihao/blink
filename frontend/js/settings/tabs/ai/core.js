@@ -148,6 +148,8 @@ function applyAIConfigToUI() {
     if ($("ai-memory-summary-enabled")) $("ai-memory-summary-enabled").checked = memCfg.summary_enabled === true;
     updateMemoryBehaviorHint(memCfg.summary_enabled === true);
     if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
+    // 0.21.20: 召回范围
+    if ($("ai-memory-recall-scope")) $("ai-memory-recall-scope").value = memCfg.recall_scope || "this_conversation";
     updateMemoryConfigVisibility(memCfg.mode || "token_aware", memCfg.recall_enabled !== false);
     updateMemoryContextSizeDisplay();
     // Skill 配置
@@ -237,6 +239,8 @@ function updateMemoryConfigVisibility(mode, recallEnabled = true) {
     document.getElementById("ai-memory-trigger-row")?.classList.toggle("hidden", !visibility.tokenAware);
     document.getElementById("ai-memory-compress-row")?.classList.toggle("hidden", !visibility.tokenAware);
     document.getElementById("ai-memory-recall-top-k-row")?.classList.toggle("hidden", !visibility.recallTopK);
+    // 0.21.20: 召回范围行——与召回 Top-K 同步显示/隐藏
+    document.getElementById("ai-memory-recall-scope-row")?.classList.toggle("hidden", !visibility.recallTopK);
 }
 
 function updateMemoryContextSizeDisplay() {
@@ -450,6 +454,13 @@ function bindAIEvents() {
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
         cfg.chat_config.memory_config.summary_enabled = e.target.checked;
         updateMemoryBehaviorHint(e.target.checked);
+        saveAIConfig();
+    });
+    // 0.21.20: 召回范围
+    $("ai-memory-recall-scope")?.addEventListener("change", (e) => {
+        cfg.chat_config = cfg.chat_config || {};
+        cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
+        cfg.chat_config.memory_config.recall_scope = e.target.value;
         saveAIConfig();
     });
     $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {

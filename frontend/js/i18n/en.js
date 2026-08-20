@@ -734,6 +734,11 @@ export const en = {
     "ai.memory.recall.hint": "Uses full-text search only within the current persistent conversation to find relevant earlier messages trimmed from the active window; it is not cross-conversation long-term memory",
     "ai.memory.recall_top_k.label": "Recall Count (Top-K)",
     "ai.memory.recall_top_k.hint": "Maximum number of messages to recall each time. Default 3, higher values recall more but cost more tokens",
+    // 0.21.20: Recall scope
+    "ai.memory.recall_scope.label": "Recall Scope",
+    "ai.memory.recall_scope.hint": "Controls the search range for recall. This conversation: search only within the current conversation; All conversations: search archived messages across all conversations (excludes internal temporary conversations). When set to all conversations, recalled content may come from other conversations",
+    "ai.memory.recall_scope.this_conversation": "This conversation",
+    "ai.memory.recall_scope.all_conversations": "All conversations",
     // 0.21.19: LLM summary compression
     "ai.memory.summary.label": "LLM Summary Compression",
     "ai.memory.summary.hint": "When enabled, older messages beyond the window are summarized by the LLM and injected at the context head instead of being trimmed. Disable to use the traditional trim-and-archive strategy",

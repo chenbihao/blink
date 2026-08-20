@@ -83,6 +83,106 @@ fn is_deepseek_base(base_url: Option<&str>, model_id: &str) -> bool {
         || model_id.to_ascii_lowercase().starts_with("deepseek")
 }
 
+// ── T2: reasoning_effort 400 自愈（0.21.20）──────────────────────────────────
+
+/// 从 API 400 错误消息中解析 `reasoning_effort` 的合法档位列表。
+///
+/// OpenAI 风格 400 错误体形如：
+/// `Unsupported value: 'xhigh' is not a valid value for 'reasoning_effort'.
+///  Supported values are: 'minimal', 'low', 'medium', 'high'.`
+///
+/// 大小写不敏感匹配 `reasoning_effort` 上下文 + `Supported values are:` 后的引号列表。
+/// 解析不到 → None（非 OpenAI 风格错误，如 DeepSeek/Anthropic/Ollama 的 400 不匹配）。
+pub(crate) fn parse_supported_reasoning_efforts(message: &str) -> Option<Vec<String>> {
+    let lower = message.to_ascii_lowercase();
+    // 必须同时出现 reasoning_effort 和 supported values
+    if !lower.contains("reasoning_effort") || !lower.contains("supported values are") {
+        return None;
+    }
+    // 截取 "Supported values are:" 之后的部分
+    let after = lower.split("supported values are").nth(1)?;
+    // 提取所有引号内的值——兼容 ' 和 " 引号
+    let mut values = Vec::new();
+    let mut in_quote = false;
+    let mut current = String::new();
+    for ch in after.chars() {
+        if ch == '\'' || ch == '"' {
+            if in_quote {
+                if !current.is_empty() {
+                    values.push(current.clone());
+                    current.clear();
+                }
+                in_quote = false;
+            } else {
+                in_quote = true;
+            }
+        } else if in_quote {
+            current.push(ch);
+        }
+    }
+    if values.is_empty() {
+        None
+    } else {
+        // 去重，保持顺序
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<String> = values
+            .into_iter()
+            .filter(|v| seen.insert(v.clone()))
+            .collect();
+        Some(deduped)
+    }
+}
+
+/// 已知 reasoning_effort 档位排序——值越大思考越强。
+///
+/// `minimal` < `low` < `medium` < `high`。
+/// `xhigh` / `max` 等视作高于 `high`（排序值为 4）。
+/// 未知自定义值也视作高于 `high`（保守降级）。
+fn effort_rank(effort: &str) -> u8 {
+    match effort.to_ascii_lowercase().as_str() {
+        "minimal" => 0,
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        // xhigh / max / 其他自定义值 → 高于 high
+        _ => 4,
+    }
+}
+
+/// 从支持的档位列表中选择 fallback 档位。
+///
+/// 策略：选「不高于 attempted 的最高支持档」。
+/// - 若 attempted 是已知档位（minimal/low/medium/high），选 ≤ 其排名的最高支持档；
+/// - 若 attempted 是未知自定义值（rank=4），取支持列表中排名最高的档；
+/// - 若支持列表为空 → None。
+/// - 若找不到不高于 attempted 的档（attempted 太低）→ 取支持列表最低档。
+pub(crate) fn pick_fallback_effort(attempted: &str, supported: &[String]) -> Option<String> {
+    if supported.is_empty() {
+        return None;
+    }
+    let attempted_rank = effort_rank(attempted);
+    // 尝试选不高于 attempted 的最高支持档
+    let mut best: Option<(u8, &str)> = None;
+    for s in supported {
+        let rank = effort_rank(s);
+        if rank <= attempted_rank {
+            match best {
+                None => best = Some((rank, s)),
+                Some((br, _)) if rank > br => best = Some((rank, s)),
+                _ => {}
+            }
+        }
+    }
+    match best {
+        Some((_, s)) => Some(s.to_string()),
+        // 找不到不高于 attempted 的 → 取支持列表最低档
+        None => supported
+            .iter()
+            .min_by_key(|s| effort_rank(s))
+            .map(|s| s.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +430,202 @@ mod tests {
             None,
             "gemini-3-pro",
         ));
+    }
+
+    // ── T2: parse_supported_reasoning_efforts / pick_fallback_effort ──────────
+
+    /// 标准 OpenAI 400 错误体——解析出 4 个合法档位。
+    #[test]
+    fn parse_standard_openai_400() {
+        let msg = "Unsupported value: 'xhigh' is not a valid value for 'reasoning_effort'. Supported values are: 'minimal', 'low', 'medium', 'high'.";
+        let result = parse_supported_reasoning_efforts(msg);
+        assert_eq!(
+            result,
+            Some(vec![
+                "minimal".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ])
+        );
+    }
+
+    /// 大小写不敏感——消息全大写也能解析。
+    #[test]
+    fn parse_case_insensitive() {
+        let msg = "UNSUPPORTED VALUE: 'XHIGH' IS NOT A VALID VALUE FOR 'REASONING_EFFORT'. SUPPORTED VALUES ARE: 'MINIMAL', 'LOW', 'MEDIUM', 'HIGH'.";
+        let result = parse_supported_reasoning_efforts(msg);
+        assert_eq!(
+            result,
+            Some(vec![
+                "minimal".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ])
+        );
+    }
+
+    /// 无 Supported values 列表 → None。
+    #[test]
+    fn parse_no_supported_values_returns_none() {
+        let msg = "Invalid reasoning_effort value";
+        assert_eq!(parse_supported_reasoning_efforts(msg), None);
+    }
+
+    /// 非 reasoning_effort 相关的 400 → None。
+    #[test]
+    fn parse_non_reasoning_effort_400_returns_none() {
+        let msg = "Unsupported value: 'foo' is not a valid value for 'temperature'. Supported values are: '0', '1', '2'.";
+        assert_eq!(parse_supported_reasoning_efforts(msg), None);
+    }
+
+    /// DeepSeek thinking.type 的 400 不含 supported values → None。
+    #[test]
+    fn parse_deepseek_400_returns_none() {
+        let msg = "Invalid thinking type: enabled";
+        assert_eq!(parse_supported_reasoning_efforts(msg), None);
+    }
+
+    /// 双引号也能解析。
+    #[test]
+    fn parse_double_quotes() {
+        let msg = "Unsupported value: \"xhigh\" is not a valid value for \"reasoning_effort\". Supported values are: \"minimal\", \"low\", \"medium\", \"high\".";
+        let result = parse_supported_reasoning_efforts(msg);
+        assert_eq!(
+            result,
+            Some(vec![
+                "minimal".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ])
+        );
+    }
+
+    /// 去重——重复档位只保留一份。
+    #[test]
+    fn parse_dedup_values() {
+        let msg = "Unsupported value for 'reasoning_effort'. Supported values are: 'low', 'low', 'high', 'high'.";
+        let result = parse_supported_reasoning_efforts(msg);
+        assert_eq!(result, Some(vec!["low".to_string(), "high".to_string(),]));
+    }
+
+    /// pick_fallback_effort: attempted=xhigh（未知高值）→ 选支持列表中最高档 high。
+    #[test]
+    fn fallback_xhigh_picks_high() {
+        let supported = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ];
+        assert_eq!(
+            pick_fallback_effort("xhigh", &supported),
+            Some("high".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: attempted=high → 选 high（恰好匹配）。
+    #[test]
+    fn fallback_high_picks_high() {
+        let supported = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ];
+        assert_eq!(
+            pick_fallback_effort("high", &supported),
+            Some("high".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: attempted=medium → 选 medium（不选 high，因 high > medium）。
+    #[test]
+    fn fallback_medium_picks_medium() {
+        let supported = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ];
+        assert_eq!(
+            pick_fallback_effort("medium", &supported),
+            Some("medium".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: attempted=low → 选 low。
+    #[test]
+    fn fallback_low_picks_low() {
+        let supported = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ];
+        assert_eq!(
+            pick_fallback_effort("low", &supported),
+            Some("low".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: attempted=minimal → 选 minimal（恰好最低）。
+    #[test]
+    fn fallback_minimal_picks_minimal() {
+        let supported = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ];
+        assert_eq!(
+            pick_fallback_effort("minimal", &supported),
+            Some("minimal".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: 支持列表不含 minimal（如老 o1 只收 low/medium/high），
+    /// attempted=minimal → 取支持列表最低档 low。
+    #[test]
+    fn fallback_minimal_with_no_minimal_picks_low() {
+        let supported = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
+        assert_eq!(
+            pick_fallback_effort("minimal", &supported),
+            Some("low".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: 自定义值 20-50-80 → 取支持列表最高档。
+    #[test]
+    fn fallback_custom_value_picks_highest() {
+        let supported = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ];
+        assert_eq!(
+            pick_fallback_effort("20-50-80", &supported),
+            Some("high".to_string())
+        );
+    }
+
+    /// pick_fallback_effort: 空支持列表 → None。
+    #[test]
+    fn fallback_empty_supported_returns_none() {
+        assert_eq!(pick_fallback_effort("high", &[]), None);
+    }
+
+    /// pick_fallback_effort: 支持列表只有 high，attempted=low → 取 high（兜底取最低档=唯一档）。
+    #[test]
+    fn fallback_only_high_attempted_low() {
+        let supported = vec!["high".to_string()];
+        // low 的 rank=1, high 的 rank=3, 3 > 1 → 无不高于的档 → 兜底取最低=high
+        assert_eq!(
+            pick_fallback_effort("low", &supported),
+            Some("high".to_string())
+        );
     }
 }

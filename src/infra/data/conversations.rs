@@ -451,14 +451,13 @@ pub async fn load_recent_messages_after_watermark(
     .map_err(|e| e.to_string())?;
 
     // 统计被跳过的消息数
-    let skipped: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND id <= ?2",
-    )
-    .bind(conversation_id)
-    .bind(watermark)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let skipped: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND id <= ?2")
+            .bind(conversation_id)
+            .bind(watermark)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok((rows, skipped as usize))
 }
@@ -1016,6 +1015,7 @@ pub async fn search_memory_fts(
     conversation_id: &str,
     query: &str,
     limit: i64,
+    scope: crate::domain::ai::memory::RecallScope,
 ) -> Result<Vec<MemoryRecall>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
@@ -1027,18 +1027,38 @@ pub async fn search_memory_fts(
         return Ok(Vec::new());
     }
 
-    // BM25：分数越低越相关（FTS5 的 bm25() 返回负值，越负越相关）
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT content, role FROM memory_fts
-         WHERE memory_fts MATCH ?1 AND conversation_id = ?2
-         ORDER BY bm25(memory_fts)
-         LIMIT ?3",
-    )
-    .bind(&fts_query)
-    .bind(conversation_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
+    // 0.21.20: 按 recall_scope 选择过滤范围
+    // - ThisConversation：仅当前对话（原行为）
+    // - AllConversations：跨所有对话，但排除 __ 前缀内部对话（防摘要/合并 orphan 泄漏）
+    let rows: Vec<(String, String)> = match scope {
+        crate::domain::ai::memory::RecallScope::ThisConversation => {
+            // BM25：分数越低越相关（FTS5 的 bm25() 返回负值，越负越相关）
+            sqlx::query_as(
+                "SELECT content, role FROM memory_fts
+                 WHERE memory_fts MATCH ?1 AND conversation_id = ?2
+                 ORDER BY bm25(memory_fts)
+                 LIMIT ?3",
+            )
+            .bind(&fts_query)
+            .bind(conversation_id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        crate::domain::ai::memory::RecallScope::AllConversations => {
+            // 跨所有对话——排除 __ 前缀内部对话（摘要/合并 orphan）
+            sqlx::query_as(
+                "SELECT content, role FROM memory_fts
+                 WHERE memory_fts MATCH ?1 AND conversation_id NOT LIKE '\\_\\_%' ESCAPE '\\'
+                 ORDER BY bm25(memory_fts)
+                 LIMIT ?2",
+            )
+            .bind(&fts_query)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+    }
     .map_err(|e| {
         tracing::warn!(error = %e, %fts_query, "FTS5 检索失败");
         e.to_string()
@@ -1456,7 +1476,10 @@ pub async fn replace_oldest_two_with_merged(
 ///
 /// 关闭摘要开关时调用——已生成的摘要不删除，重新开启后继续可用。
 #[allow(dead_code)]
-pub async fn reset_summarized_until(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
+pub async fn reset_summarized_until(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<(), String> {
     sqlx::query("UPDATE conversations SET summarized_until = 0 WHERE id = ?1")
         .bind(conversation_id)
         .execute(pool)
@@ -2005,7 +2028,15 @@ mod tests {
             .unwrap();
 
         // 搜索 "Rust" 应返回相关消息
-        let recalls = search_memory_fts(&pool, "c1", "Rust", 3).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "Rust",
+            3,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(!recalls.is_empty(), "应能搜到包含 Rust 的消息");
         assert!(recalls.iter().any(|r| r.content.contains("Rust")));
     }
@@ -2023,7 +2054,15 @@ mod tests {
             .unwrap();
 
         // 搜索应只返回一条（trigram 需要 3+ 字符，用「重复的」搜索）
-        let recalls = search_memory_fts(&pool, "c1", "重复的", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "重复的",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert_eq!(recalls.len(), 1, "幂等归档：同 hash 不重复插入");
     }
 
@@ -2039,17 +2078,41 @@ mod tests {
             .unwrap();
 
         // c1 搜索只返回 c1 的归档
-        let recalls = search_memory_fts(&pool, "c1", "Rust", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "Rust",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert_eq!(recalls.len(), 1);
         assert!(recalls[0].content.contains("Rust"));
 
         // c2 搜索只返回 c2 的归档
-        let recalls = search_memory_fts(&pool, "c2", "Python", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c2",
+            "Python",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert_eq!(recalls.len(), 1);
         assert!(recalls[0].content.contains("Python"));
 
         // c1 搜索 Python 应无结果
-        let recalls = search_memory_fts(&pool, "c1", "Python", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "Python",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(recalls.is_empty(), "对话隔离：c1 不应搜到 c2 的归档");
     }
 
@@ -2071,13 +2134,27 @@ mod tests {
         .unwrap();
 
         // trigram 分词器：搜 "异步编程" 应命中含 "异步编程" 的消息
-        let recalls = search_memory_fts(&pool, "c1", "异步编程", 10)
-            .await
-            .unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "异步编程",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(!recalls.is_empty(), "trigram 中文子串匹配应生效");
 
         // 搜 "tokio" 应命中 assistant 消息
-        let recalls = search_memory_fts(&pool, "c1", "tokio", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "tokio",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(!recalls.is_empty(), "英文关键词也应可搜到");
     }
 
@@ -2089,18 +2166,30 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !search_memory_fts(&pool, "c1", "清理的", 10)
-                .await
-                .unwrap()
-                .is_empty()
+            !search_memory_fts(
+                &pool,
+                "c1",
+                "清理的",
+                10,
+                crate::domain::ai::memory::RecallScope::ThisConversation
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
 
         clear_memory_fts(&pool, "c1").await.unwrap();
         assert!(
-            search_memory_fts(&pool, "c1", "清理的", 10)
-                .await
-                .unwrap()
-                .is_empty()
+            search_memory_fts(
+                &pool,
+                "c1",
+                "清理的",
+                10,
+                crate::domain::ai::memory::RecallScope::ThisConversation
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -2114,18 +2203,30 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !search_memory_fts(&pool, "c1", "级联删除", 10)
-                .await
-                .unwrap()
-                .is_empty()
+            !search_memory_fts(
+                &pool,
+                "c1",
+                "级联删除",
+                10,
+                crate::domain::ai::memory::RecallScope::ThisConversation
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
 
         delete_conversation(&pool, "c1").await.unwrap();
         assert!(
-            search_memory_fts(&pool, "c1", "级联删除", 10)
-                .await
-                .unwrap()
-                .is_empty(),
+            search_memory_fts(
+                &pool,
+                "c1",
+                "级联删除",
+                10,
+                crate::domain::ai::memory::RecallScope::ThisConversation
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "删除对话应级联清理 FTS5 归档"
         );
     }
@@ -2140,18 +2241,30 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !search_memory_fts(&pool, "c1", "清空消息", 10)
-                .await
-                .unwrap()
-                .is_empty()
+            !search_memory_fts(
+                &pool,
+                "c1",
+                "清空消息",
+                10,
+                crate::domain::ai::memory::RecallScope::ThisConversation
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
 
         clear_messages(&pool, "c1").await.unwrap();
         assert!(
-            search_memory_fts(&pool, "c1", "清空消息", 10)
-                .await
-                .unwrap()
-                .is_empty(),
+            search_memory_fts(
+                &pool,
+                "c1",
+                "清空消息",
+                10,
+                crate::domain::ai::memory::RecallScope::ThisConversation
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "清空消息应同步清理 FTS5 归档"
         );
     }
@@ -2163,10 +2276,26 @@ mod tests {
             .await
             .unwrap();
 
-        let recalls = search_memory_fts(&pool, "c1", "", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(recalls.is_empty(), "空 query 应返回空结果");
 
-        let recalls = search_memory_fts(&pool, "c1", "   ", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "   ",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(recalls.is_empty(), "纯空格 query 应返回空结果");
     }
 
@@ -2184,9 +2313,15 @@ mod tests {
 
         // 多词 query：AND 语义会要求全部命中，OR 语义只需任一命中
         // “Rust 和 Python 区别” — AND 下无命中（无消息同时含两者），OR 下命中两条
-        let recalls = search_memory_fts(&pool, "c1", "Rust 和 Python 区别", 10)
-            .await
-            .unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "Rust 和 Python 区别",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             recalls.len(),
             2,
@@ -2204,13 +2339,27 @@ mod tests {
 
         // “Go” 只有 2 字符，被过滤；“语言” 只有 2 字符也被过滤
         // 但 “并发模型” 4 字符可命中
-        let recalls = search_memory_fts(&pool, "c1", "Go 语言 并发模型", 10)
-            .await
-            .unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "Go 语言 并发模型",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(!recalls.is_empty(), "短词过滤后仍有有效词可命中");
 
         // 全是短词 → 无有效 query → 空结果
-        let recalls = search_memory_fts(&pool, "c1", "Go 语言", 10).await.unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            "Go 语言",
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(recalls.is_empty(), "全部短于 3 字符的词应返回空结果");
     }
 
@@ -2237,17 +2386,21 @@ mod tests {
 
         // 长自然句查询——包含 "异步编程" 等关键词，但不是归档内容的原样子串
         let query = "帮我规划一下异步编程的学习路线应该怎么安排";
-        let recalls = search_memory_fts(&pool, "c1", query, 10)
-            .await
-            .unwrap();
+        let recalls = search_memory_fts(
+            &pool,
+            "c1",
+            query,
+            10,
+            crate::domain::ai::memory::RecallScope::ThisConversation,
+        )
+        .await
+        .unwrap();
         assert!(
             !recalls.is_empty(),
             "长中文句查询应通过滑窗 OR 召回包含关键词的归档消息"
         );
         assert!(
-            recalls
-                .iter()
-                .any(|r| r.content.contains("异步编程")),
+            recalls.iter().any(|r| r.content.contains("异步编程")),
             "召回内容应包含归档的异步编程消息"
         );
     }
@@ -2262,10 +2415,7 @@ mod tests {
         assert!(q.contains("\"Rust\""), "ASCII 词应保留：{q}");
         assert!(q.contains("\"tokio\""), "ASCII 词应保留：{q}");
         // CJK run "异步编程"（4 字 ≤6）应作为整段短语出现
-        assert!(
-            q.contains("\"异步编程\""),
-            "3..=6 CJK run 应整段短语：{q}"
-        );
+        assert!(q.contains("\"异步编程\""), "3..=6 CJK run 应整段短语：{q}");
         // 结果非空
         assert!(!q.is_empty(), "混合中英 query 应生成非空 FTS 串");
     }
@@ -2278,16 +2428,10 @@ mod tests {
         assert_eq!(run.chars().count(), 20);
         let q = build_fts_or_query(run);
         // 应有多个 OR 词项（>1），且以 OR 连接
-        assert!(
-            q.contains(" OR "),
-            "长 CJK run 应生成多个 OR 词项：{q}"
-        );
+        assert!(q.contains(" OR "), "长 CJK run 应生成多个 OR 词项：{q}");
         // 词项数 ≤ 32
         let term_count = q.split(" OR ").count();
-        assert!(
-            term_count <= 32,
-            "OR 词项应 ≤ 32 上限，实际 {term_count}"
-        );
+        assert!(term_count <= 32, "OR 词项应 ≤ 32 上限，实际 {term_count}");
         // 每个词项应为 3 字（双引号包裹 3 个 CJK 字符）
         let first_term = q.split(" OR ").next().unwrap();
         assert!(
@@ -2330,10 +2474,7 @@ mod tests {
         assert!(q.contains("\"Rust\""), "内嵌引号应去除：{q}");
         assert!(q.contains("\"tokyo\""), "正常词应保留：{q}");
         // 不应出现未转义的裸引号破坏 FTS 语法
-        assert!(
-            !q.contains("\"\"\""),
-            "不应出现连续三引号：{q}"
-        );
+        assert!(!q.contains("\"\"\""), "不应出现连续三引号：{q}");
     }
 
     /// `build_fts_or_query` 单测：词项去重。
@@ -2342,11 +2483,7 @@ mod tests {
         // "Rust Rust Rust" → 去重后只一个 "Rust"
         let q = build_fts_or_query("Rust Rust Rust");
         let terms: Vec<&str> = q.split(" OR ").collect();
-        assert_eq!(
-            terms.len(),
-            1,
-            "重复词项应去重，实际：{q}"
-        );
+        assert_eq!(terms.len(), 1, "重复词项应去重，实际：{q}");
         assert_eq!(terms[0], "\"Rust\"");
     }
 
@@ -2359,23 +2496,16 @@ mod tests {
         let q = build_fts_or_query(&query);
         let terms: Vec<&str> = q.split(" OR ").collect();
         assert_eq!(
-            terms.len(), 32,
-            "超长 query 应截断到 32 词项，实际 {}", terms.len()
+            terms.len(),
+            32,
+            "超长 query 应截断到 32 词项，实际 {}",
+            terms.len()
         );
         // P1-4: 包含首词 word00 与末词 word39
-        assert!(
-            terms.contains(&"\"word00\""),
-            "应包含首词 word00"
-        );
-        assert!(
-            terms.contains(&"\"word39\""),
-            "应包含末词 word39"
-        );
+        assert!(terms.contains(&"\"word00\""), "应包含首词 word00");
+        assert!(terms.contains(&"\"word39\""), "应包含末词 word39");
         // P1-4: 不含中部词 word20
-        assert!(
-            !terms.contains(&"\"word20\""),
-            "不应包含中部词 word20"
-        );
+        assert!(!terms.contains(&"\"word20\""), "不应包含中部词 word20");
     }
 
     /// 超长 CJK query（8000 字符）截取首尾各 2048 字符后收集，
@@ -2402,7 +2532,8 @@ mod tests {
         // 应 ≤32 词项
         assert!(
             terms.len() <= 32,
-            "超长 query 应截断到 ≤32 词项，实际 {}", terms.len()
+            "超长 query 应截断到 ≤32 词项，实际 {}",
+            terms.len()
         );
 
         // 首 3 字窗口应在结果中（head_anchor 本身就是一个 3 字符 run，整段作为一个引号短语）
@@ -2448,15 +2579,11 @@ mod tests {
         assert_eq!(wm, 0, "新对话水位应为 0");
 
         // 插入几条消息拿到 rowid
-        let id1 = append_message(&pool, "c1", "user", "msg1")
-            .await
-            .unwrap();
+        let id1 = append_message(&pool, "c1", "user", "msg1").await.unwrap();
         let id2 = append_message(&pool, "c1", "assistant", "reply1")
             .await
             .unwrap();
-        let id3 = append_message(&pool, "c1", "user", "msg2")
-            .await
-            .unwrap();
+        let id3 = append_message(&pool, "c1", "user", "msg2").await.unwrap();
 
         // 插入摘要覆盖 id1..=id2，推进水位到 id2
         insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id2, "摘要1", 10)
@@ -2480,12 +2607,8 @@ mod tests {
             .await
             .unwrap();
 
-        let id1 = append_message(&pool, "c1", "user", "msg1")
-            .await
-            .unwrap();
-        let id2 = append_message(&pool, "c1", "user", "msg2")
-            .await
-            .unwrap();
+        let id1 = append_message(&pool, "c1", "user", "msg1").await.unwrap();
+        let id2 = append_message(&pool, "c1", "user", "msg2").await.unwrap();
 
         insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "段1", 5)
             .await
@@ -2547,15 +2670,9 @@ mod tests {
             .await
             .unwrap();
 
-        let id1 = append_message(&pool, "c1", "user", "msg1")
-            .await
-            .unwrap();
-        let id2 = append_message(&pool, "c1", "user", "msg2")
-            .await
-            .unwrap();
-        let id3 = append_message(&pool, "c1", "user", "msg3")
-            .await
-            .unwrap();
+        let id1 = append_message(&pool, "c1", "user", "msg1").await.unwrap();
+        let id2 = append_message(&pool, "c1", "user", "msg2").await.unwrap();
+        let id3 = append_message(&pool, "c1", "user", "msg3").await.unwrap();
 
         insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "段1", 5)
             .await
@@ -2568,9 +2685,7 @@ mod tests {
             .unwrap();
 
         // 读取最旧两段（不删除）
-        let result = read_oldest_two_summaries(&pool, "c1")
-            .await
-            .unwrap();
+        let result = read_oldest_two_summaries(&pool, "c1").await.unwrap();
         assert!(result.is_some(), "应有 3 段，读最旧 2 段");
         let pair = result.unwrap();
         assert_eq!(pair[0].3, "段1");
@@ -2584,8 +2699,14 @@ mod tests {
         let merge_start = pair[0].1.min(pair[1].1);
         let merge_end = pair[0].2.max(pair[1].2);
         replace_oldest_two_with_merged(
-            &pool, "c1", pair[0].0, pair[1].0,
-            merge_start, merge_end, "合并段", 10,
+            &pool,
+            "c1",
+            pair[0].0,
+            pair[1].0,
+            merge_start,
+            merge_end,
+            "合并段",
+            10,
         )
         .await
         .unwrap();
@@ -2606,9 +2727,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let result = read_oldest_two_summaries(&pool, "c1")
-            .await
-            .unwrap();
+        let result = read_oldest_two_summaries(&pool, "c1").await.unwrap();
         assert!(result.is_none(), "只剩 1 段时应返回 None");
     }
 
@@ -2619,9 +2738,7 @@ mod tests {
             .await
             .unwrap();
 
-        let id1 = append_message(&pool, "c1", "user", "msg1")
-            .await
-            .unwrap();
+        let id1 = append_message(&pool, "c1", "user", "msg1").await.unwrap();
         insert_summary_and_advance_watermark(&pool, "c1", 0, id1, id1, "段1", 5)
             .await
             .unwrap();

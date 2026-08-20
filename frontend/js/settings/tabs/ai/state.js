@@ -67,6 +67,7 @@ export function defaultAIConfig() {
                 recall_enabled: true,
                 recall_top_k: 3,
                 summary_enabled: false,
+                recall_scope: "this_conversation",
             },
             skill_config: {enabled: true, source_blink: true, source_claude: true, source_zcode: false}
         },

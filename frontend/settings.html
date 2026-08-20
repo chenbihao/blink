@@ -345,7 +345,8 @@
                                     <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
                                             type="button">▲
                                     </button>
-                                    <button aria-label="减少" class="spinner-down" data-i18n-aria-label="spinner.decrease"
+                                    <button aria-label="减少" class="spinner-down"
+                                            data-i18n-aria-label="spinner.decrease"
                                             type="button">▼
                                     </button>
                                 </div>
@@ -361,7 +362,8 @@
                                     <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
                                             type="button">▲
                                     </button>
-                                    <button aria-label="减少" class="spinner-down" data-i18n-aria-label="spinner.decrease"
+                                    <button aria-label="减少" class="spinner-down"
+                                            data-i18n-aria-label="spinner.decrease"
                                             type="button">▼
                                     </button>
                                 </div>
@@ -416,7 +418,8 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.python.path">Python 路径<span
                                 class="field-hint-icon" data-i18n-title="engine.python.hint">ⓘ</span></label>
-                        <input class="input-wide" data-i18n-ph="engine.python.path.ph" id="python-path" placeholder="自动探测或手动输入..."
+                        <input class="input-wide" data-i18n-ph="engine.python.path.ph" id="python-path"
+                               placeholder="自动探测或手动输入..."
                                type="text"/>
                         <button class="btn-small" data-i18n="engine.browse" id="python-browse">浏览</button>
                     </div>
@@ -431,7 +434,8 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.node.path">Node 路径<span class="field-hint-icon"
                                                                                                  data-i18n-title="engine.node.hint">ⓘ</span></label>
-                        <input class="input-wide" data-i18n-ph="engine.node.path.ph" id="node-path" placeholder="自动探测或手动输入..."
+                        <input class="input-wide" data-i18n-ph="engine.node.path.ph" id="node-path"
+                               placeholder="自动探测或手动输入..."
                                type="text"/>
                         <button class="btn-small" data-i18n="engine.browse" id="node-browse">浏览</button>
                     </div>
@@ -460,7 +464,8 @@
                     <svg aria-hidden="true" class="icon">
                         <use href="#icon-search"/>
                     </svg>
-                    <input data-i18n-placeholder="capabilities.search.placeholder" id="capabilities-search" placeholder="搜索功能、ID 或描述..."
+                    <input data-i18n-placeholder="capabilities.search.placeholder" id="capabilities-search"
+                           placeholder="搜索功能、ID 或描述..."
                            type="text"/>
                 </div>
                 <select class="cap-filter" id="filter-source">
@@ -496,7 +501,8 @@
         <!-- ══ AI 供应商（0.9.1 Phase 6 → 0.13.x 拆分）══════════════════════════ -->
         <div class="panel" id="ai-providers">
             <h2 data-i18n="panel.ai_providers">AI 供应商</h2>
-            <p class="panel-lede" data-i18n="ai.lede">管理 AI 供应商与模型，以及主窗口的 AI 提示。密钥存 Windows Credential
+            <p class="panel-lede" data-i18n="ai.lede">管理 AI 供应商与模型，以及主窗口的 AI 提示。密钥存 Windows
+                Credential
                 Manager，SQLite 只存别名。</p>
 
             <!-- 主窗口 AI 提示 ───────────────────────────────────── -->
@@ -558,7 +564,8 @@
                     </div>
                     <div class="extension-info">
                         <h3 data-i18n="ai.tiers.card">模型与档位</h3>
-                        <p class="extension-desc" data-i18n="ai.tiers.card.desc">档位不可用时会向更高档降级；主窗口模型是对档位的消费策略</p>
+                        <p class="extension-desc" data-i18n="ai.tiers.card.desc">
+                            档位不可用时会向更高档降级；主窗口模型是对档位的消费策略</p>
                     </div>
                 </div>
                 <div class="extension-body">
@@ -597,7 +604,8 @@
                         <label class="setting-label" data-i18n="ai.chat.title_model.label">对话窗口命名模型<span
                                 class="field-hint-icon" data-i18n-title="ai.chat.title_model.hint">ⓘ</span></label>
                         <select class="input-wide" id="ai-chat-title-model-mode">
-                            <option data-i18n="ai.chat.title_model.ultra_light" value="ultra_light">超轻档（默认）</option>
+                            <option data-i18n="ai.chat.title_model.ultra_light" value="ultra_light">超轻档（默认）
+                            </option>
                             <option data-i18n="ai.chat.title_model.light" value="light">轻量档</option>
                             <option data-i18n="ai.chat.title_model.main" value="main">主档</option>
                             <option data-i18n="ai.chat.title_model.custom" value="custom">自选模型</option>
@@ -635,7 +643,8 @@
                     <div class="setting-row ai-agent-mode-row">
                         <label class="setting-label" data-i18n="ai.chat.agent_mode.label">对话能力模式<span
                                 class="field-hint-icon" data-i18n-title="ai.chat.agent_mode.hint">ⓘ</span></label>
-                        <div aria-label="对话能力模式" class="ai-agent-mode-segmented" data-i18n-aria-label="ai.chat.agent_mode.label"
+                        <div aria-label="对话能力模式" class="ai-agent-mode-segmented"
+                             data-i18n-aria-label="ai.chat.agent_mode.label"
                              role="radiogroup">
                             <label><input name="ai-agent-mode" type="radio" value="full"/><span
                                     data-i18n="ai.chat.agent_mode.full" data-i18n-title="ai.chat.agent_mode.full.hint">全能力</span></label>
@@ -714,6 +723,18 @@
                             <span class="slider"></span>
                         </label>
                     </div>
+                    <div class="setting-row hidden" id="ai-memory-recall-scope-row">
+                        <label class="setting-label" data-i18n="ai.memory.recall_scope.label">召回范围<span
+                                class="field-hint-icon" data-i18n-title="ai.memory.recall_scope.hint">ⓘ</span></label>
+                        <select class="input-wide" id="ai-memory-recall-scope">
+                            <option data-i18n="ai.memory.recall_scope.this_conversation" value="this_conversation">
+                                仅本对话
+                            </option>
+                            <option data-i18n="ai.memory.recall_scope.all_conversations" value="all_conversations">
+                                所有对话
+                            </option>
+                        </select>
+                    </div>
                     <div class="setting-row" id="ai-memory-context-display-row">
                         <label class="setting-label" data-i18n="ai.memory.context_size.label">当前模型上下文窗口<span
                                 class="field-hint-icon" data-i18n-title="ai.memory.context_size.hint">ⓘ</span></label>
@@ -741,7 +762,8 @@
                                     <input id="ai-memory-window-size" max="100" min="5" step="1" type="number"
                                            value="20"/>
                                     <div class="number-spinner">
-                                        <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                        <button aria-label="增加" class="spinner-up"
+                                                data-i18n-aria-label="spinner.increase"
                                                 type="button">▲
                                         </button>
                                         <button aria-label="减少" class="spinner-down"
@@ -758,7 +780,8 @@
                                     <input id="ai-memory-trigger-ratio" max="95" min="50" step="5" type="number"
                                            value="80"/>
                                     <div class="number-spinner">
-                                        <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                        <button aria-label="增加" class="spinner-up"
+                                                data-i18n-aria-label="spinner.increase"
                                                 type="button">▲
                                         </button>
                                         <button aria-label="减少" class="spinner-down"
@@ -774,7 +797,8 @@
                                     <input id="ai-memory-compress-ratio" max="90" min="30" step="5" type="number"
                                            value="70"/>
                                     <div class="number-spinner">
-                                        <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                        <button aria-label="增加" class="spinner-up"
+                                                data-i18n-aria-label="spinner.increase"
                                                 type="button">▲
                                         </button>
                                         <button aria-label="减少" class="spinner-down"
@@ -792,7 +816,8 @@
                                     <input id="ai-memory-recall-top-k" max="10" min="1" step="1" type="number"
                                            value="3"/>
                                     <div class="number-spinner">
-                                        <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                        <button aria-label="增加" class="spinner-up"
+                                                data-i18n-aria-label="spinner.increase"
                                                 type="button">▲
                                         </button>
                                         <button aria-label="减少" class="spinner-down"
@@ -863,7 +888,8 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.permission.clear.label">清除所有权限记忆<span
                                 class="field-hint-icon" data-i18n-title="ai.permission.clear.hint">ⓘ</span></label>
-                        <button class="btn-small btn-danger" data-i18n="ai.permission.clear.btn" id="ai-perm-clear-memory"
+                        <button class="btn-small btn-danger" data-i18n="ai.permission.clear.btn"
+                                id="ai-perm-clear-memory"
                                 type="button">立即清除
                         </button>
                     </div>
@@ -902,7 +928,8 @@
                         <p class="panel-hint">选择 CLI 工具，自动运行 --help 解析子命令和选项，生成 SKILL.md
                             供编辑后保存。</p>
                         <div class="cli-recognizer-row">
-                            <input class="input-wide" id="cli-recognizer-input" placeholder="C:\Program Files\Git\bin\git.exe"
+                            <input class="input-wide" id="cli-recognizer-input"
+                                   placeholder="C:\Program Files\Git\bin\git.exe"
                                    type="text"/>
                             <button class="btn btn-sm" id="cli-recognizer-browse" title="浏览文件">
                                 <svg aria-hidden="true" class="icon">
@@ -1121,7 +1148,8 @@
                     <!-- 端口配置（始终可见） -->
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.mcp_server.port">监听端口</label>
-                        <input class="input-small mcp-port-input" id="mcp-server-port-input" max="65535" min="1024" type="number"
+                        <input class="input-small mcp-port-input" id="mcp-server-port-input" max="65535" min="1024"
+                               type="number"
                                value="32123"/>
                         <span class="mcp-port-hint" data-i18n="ai.mcp_server.port_hint">范围 1024–65535</span>
                     </div>
@@ -1187,12 +1215,14 @@
                         </div>
                         <div class="setting-row">
                             <label class="setting-label" data-i18n="ai.mcp.form.args">参数</label>
-                            <input class="input-wide" id="mcp-form-args" placeholder="空格分隔，如 -y @modelcontextprotocol/server-filesystem"
+                            <input class="input-wide" id="mcp-form-args"
+                                   placeholder="空格分隔，如 -y @modelcontextprotocol/server-filesystem"
                                    type="text"/>
                         </div>
                         <div class="setting-row">
                             <label class="setting-label" data-i18n="ai.mcp.form.env">环境变量</label>
-                            <input class="input-wide" id="mcp-form-env" placeholder="KEY=value, 逗号分隔，如 API_KEY=xxx, DEBUG=true"
+                            <input class="input-wide" id="mcp-form-env"
+                                   placeholder="KEY=value, 逗号分隔，如 API_KEY=xxx, DEBUG=true"
                                    type="text"/>
                         </div>
                     </div>
@@ -1205,7 +1235,8 @@
                         </div>
                         <div class="setting-row">
                             <label class="setting-label">请求头（可选）</label>
-                            <textarea class="input-wide" id="mcp-form-headers" placeholder="Authorization: Bearer token&#10;X-Custom: value"
+                            <textarea class="input-wide" id="mcp-form-headers"
+                                      placeholder="Authorization: Bearer token&#10;X-Custom: value"
                                       rows="4"></textarea>
                         </div>
                     </div>
@@ -1221,7 +1252,8 @@
                 <!-- JSON 配置（实时双向同步） -->
                 <div class="mcp-form-json-section">
                     <label class="setting-label">JSON 配置</label>
-                    <textarea class="input-wide" id="mcp-form-json" placeholder='{"mcpServers": {"my-server": {"command": "npx", "args": ["-y", "server"]}}}'
+                    <textarea class="input-wide" id="mcp-form-json"
+                              placeholder='{"mcpServers": {"my-server": {"command": "npx", "args": ["-y", "server"]}}}'
                               rows="8"></textarea>
                 </div>
                 <p class="modal-error" id="mcp-form-error"></p>
@@ -1355,7 +1387,8 @@
                         聚焦自动拉取可用模型，输入关键词筛选；也可手动输入</p>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.model_modal.display_name">显示名</label>
-                        <input class="input-wide" data-i18n-ph="ai.model_modal.display_name.ph" id="ai-model-edit-display-name"
+                        <input class="input-wide" data-i18n-ph="ai.model_modal.display_name.ph"
+                               id="ai-model-edit-display-name"
                                type="text"/>
                     </div>
                     <div class="setting-row">
@@ -1388,7 +1421,8 @@
                         <div class="ai-model-param-body hidden" id="ai-model-param-temperature-body">
                             <input id="ai-model-edit-temperature-range" max="2" min="0" step="0.01" type="range"
                                    value="0.7"/>
-                            <input class="ai-model-param-num" id="ai-model-edit-temperature-num" max="2" min="0" step="0.01"
+                            <input class="ai-model-param-num" id="ai-model-edit-temperature-num" max="2" min="0"
+                                   step="0.01"
                                    type="number" value="0.7"/>
                         </div>
                     </div>
@@ -1405,7 +1439,8 @@
                         <div class="ai-model-param-body hidden" id="ai-model-param-max-tokens-body">
                             <input id="ai-model-edit-max-tokens-range" max="32768" min="256" step="256" type="range"
                                    value="4096"/>
-                            <input class="ai-model-param-num" id="ai-model-edit-max-tokens-num" min="1" step="1" type="number"
+                            <input class="ai-model-param-num" id="ai-model-edit-max-tokens-num" min="1" step="1"
+                                   type="number"
                                    value="4096"/>
                         </div>
                     </div>
@@ -1431,8 +1466,8 @@
                                 <option value="max">最大（max）</option>
                                 <option value="custom">自定义…</option>
                             </select>
-                            <input class="ai-model-param-num" id="ai-model-edit-reasoning-effort-custom" type="text"
-                                   placeholder="留空 = 不发送（模型默认档）" hidden/>
+                            <input class="ai-model-param-num" hidden id="ai-model-edit-reasoning-effort-custom"
+                                   placeholder="留空 = 不发送（模型默认档）" type="text"/>
                         </div>
                     </div>
                 </div>
@@ -1517,7 +1552,8 @@
                         <label class="setting-label" data-i18n="voice.mode.label">STT 模式</label>
                         <div class="radio-group">
                             <label class="radio"><input checked id="voice-mode-cloud" name="voice-mode"
-                                                        type="radio" value="cloud"/> <span class="radio-dot"></span><span
+                                                        type="radio" value="cloud"/> <span
+                                    class="radio-dot"></span><span
                                     class="label-text" data-i18n="voice.mode.cloud">云端</span></label>
                             <label class="radio"><input id="voice-mode-local" name="voice-mode" type="radio"
                                                         value="local"/> <span class="radio-dot"></span><span
@@ -1580,10 +1616,12 @@
                             <div class="voice-cloud-key-wrap">
                                 <input autocomplete="off" data-i18n-ph="voice.cloud.api_key.ph" id="voice-cloud-api-key"
                                        placeholder="sk-..." type="password"/>
-                                <button class="voice-cloud-key-btn" data-i18n="voice.cloud.api_key.save_btn" id="voice-cloud-key-save-btn"
+                                <button class="voice-cloud-key-btn" data-i18n="voice.cloud.api_key.save_btn"
+                                        id="voice-cloud-key-save-btn"
                                         type="button">保存
                                 </button>
-                                <button class="voice-cloud-key-btn voice-cloud-key-btn-danger" data-i18n="voice.cloud.api_key.clear_btn"
+                                <button class="voice-cloud-key-btn voice-cloud-key-btn-danger"
+                                        data-i18n="voice.cloud.api_key.clear_btn"
                                         id="voice-cloud-key-clear-btn"
                                         type="button">清除
                                 </button>
@@ -1593,7 +1631,8 @@
                         <div class="setting-row">
                             <label class="setting-label" data-i18n="voice.cloud.test.label">连接测试</label>
                             <div class="voice-cloud-test-wrap">
-                                <button class="voice-cloud-key-btn" data-i18n="voice.cloud.test.btn" id="voice-cloud-test-btn"
+                                <button class="voice-cloud-key-btn" data-i18n="voice.cloud.test.btn"
+                                        id="voice-cloud-test-btn"
                                         type="button">测试
                                 </button>
                                 <span class="voice-cloud-test-result" id="voice-cloud-test-result"></span>
@@ -1646,7 +1685,8 @@
                             </label>
                             <button class="engine-download-btn" disabled id="funasr-start-btn" type="button">启动服务
                             </button>
-                            <button class="engine-download-btn" data-i18n="voice.local.funasr.stop_btn" disabled id="funasr-stop-btn"
+                            <button class="engine-download-btn" data-i18n="voice.local.funasr.stop_btn" disabled
+                                    id="funasr-stop-btn"
                                     type="button">停止服务
                             </button>
                         </div>
@@ -1672,13 +1712,16 @@
                             <div class="voice-log-header">
                                 <span class="voice-log-title" data-i18n="voice.local.log.title">服务日志</span>
                                 <div class="voice-log-actions">
-                                    <button class="stt-diagnose-btn" data-i18n="voice.local.log.diagnose_btn" id="stt-diagnose-btn"
+                                    <button class="stt-diagnose-btn" data-i18n="voice.local.log.diagnose_btn"
+                                            id="stt-diagnose-btn"
                                             type="button">诊断 STT
                                     </button>
-                                    <button class="voice-log-clear-btn" data-i18n="voice.local.log.copy_btn" id="funasr-log-copy-btn"
+                                    <button class="voice-log-clear-btn" data-i18n="voice.local.log.copy_btn"
+                                            id="funasr-log-copy-btn"
                                             type="button">复制
                                     </button>
-                                    <button class="voice-log-clear-btn" data-i18n="voice.local.log.clear_btn" id="funasr-log-clear-btn"
+                                    <button class="voice-log-clear-btn" data-i18n="voice.local.log.clear_btn"
+                                            id="funasr-log-clear-btn"
                                             type="button">清空
                                     </button>
                                 </div>
@@ -1720,7 +1763,8 @@
                                                                                               title="英文逗号分隔，每项格式「词 权重」（权重 1-100，默认 100）。热词可提升专有名词、品牌名、缩写的识别准确率。">ⓘ</span>
                             </div>
                             <div class="voice-adv-field-control">
-                                <textarea class="voice-hotwords-input" data-i18n-ph="voice.local.hotwords.ph" id="voice-hotwords"
+                                <textarea class="voice-hotwords-input" data-i18n-ph="voice.local.hotwords.ph"
+                                          id="voice-hotwords"
                                           placeholder="逗号分隔，如：美团 100, 快手 80, Blink 100"
                                           rows="2"></textarea>
                             </div>
@@ -1749,7 +1793,8 @@
                                         data-i18n="voice.local.vad.title">VAD 切句参数</span><span
                                         class="field-hint-icon" data-i18n-title="voice.local.vad.hint"
                                         title="控制伪流式引擎何时判定用户停顿从而触发句尾定稿。离麦克风远时声音能量低，可调低静默阈值；说话连贯时可调低静默时长加快定稿。">ⓘ</span></span>
-                                <button class="voice-vad-reset-btn" data-i18n="voice.local.vad.reset" id="voice-vad-reset-btn"
+                                <button class="voice-vad-reset-btn" data-i18n="voice.local.vad.reset"
+                                        id="voice-vad-reset-btn"
                                         type="button">恢复默认
                                 </button>
                             </div>
@@ -1894,7 +1939,7 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="general.autosuggest.min_score.label"
                                for="autosuggest-min-score">模糊阈值<span class="field-hint-icon"
-                                                                                             data-i18n-title="general.autosuggest.min_score.hint">ⓘ</span></label>
+                                                                         data-i18n-title="general.autosuggest.min_score.hint">ⓘ</span></label>
                         <div class="number-input-wrapper">
                             <input id="autosuggest-min-score" inputmode="decimal" max="0.95" min="0.5" step="0.05"
                                    type="number" value="0.70"/>
@@ -1911,7 +1956,7 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="general.autosuggest.tab_key.label"
                                for="autosuggest-tab-key">接受补全键<span class="field-hint-icon"
-                                                                                             data-i18n-title="general.autosuggest.tab_key.hint">ⓘ</span></label>
+                                                                         data-i18n-title="general.autosuggest.tab_key.hint">ⓘ</span></label>
                         <select id="autosuggest-tab-key">
                             <option value="Tab">Tab</option>
                             <option value="ArrowRight">→ (右箭头)</option>
