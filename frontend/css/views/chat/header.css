@@ -203,7 +203,7 @@
     color: var(--text-faint);
     font-size: 12px;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    transition: background var(--transition-base), color var(--transition-base);
     overflow: visible;
 }
 
@@ -258,7 +258,7 @@
     width: 12px;
     height: 12px;
     opacity: 0.6;
-    transition: transform 0.15s;
+    transition: transform var(--transition-base);
 }
 
 .chat-model-trigger.active .chat-model-caret {
@@ -322,7 +322,7 @@
     padding: 6px 8px 6px 8px;
     border-radius: 6px;
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
     text-align: left;
 }
 
@@ -411,13 +411,24 @@
     padding: 6px 8px;
     border-radius: 6px;
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
     text-align: left;
 }
 
 .chat-model-provider-row:hover,
-.chat-model-provider-row.flyout-open {
+.chat-model-provider-row.flyout-open,
+.chat-model-provider-row.is-selected {
     background: var(--surface);
+}
+
+.chat-model-provider-row.is-selected {
+    color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.chat-model-provider-row.is-selected .chat-model-provider-name,
+.chat-model-provider-row.is-selected .chat-model-provider-count {
+    color: inherit;
 }
 
 .chat-model-provider-name {
@@ -442,7 +453,7 @@
     height: 14px;
     color: var(--text-faint);
     opacity: 0.7;
-    transition: color 0.1s, opacity 0.1s;
+    transition: color var(--transition-fast), opacity var(--transition-fast);
 }
 
 .chat-model-provider-row:hover .chat-model-provider-chevron,
@@ -485,7 +496,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    transition: background var(--transition-base), color var(--transition-base);
 }
 
 .chat-header-btn:hover {

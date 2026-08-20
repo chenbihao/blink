@@ -116,6 +116,7 @@ ICON_LIST = [
     "plug",             # MCP 外部工具 section
     "puzzle",           # Skill 约定式 section
     "message-square",   # 对话 section
+    "cable",            # 对话窗口跳转 AI 供应商设置
     "database",         # 记忆策略 section
 
     # MD 工具栏图标（0.18 review：md-toolbar.js 从内联 SVG 迁移到 Lucide sprite）

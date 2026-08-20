@@ -248,6 +248,7 @@ fn build_openai_compatible(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
 }
@@ -269,6 +270,7 @@ fn build_anthropic(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
 }
@@ -294,6 +296,7 @@ fn build_gemini(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
 }
@@ -337,6 +340,7 @@ fn build_ollama(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
 }

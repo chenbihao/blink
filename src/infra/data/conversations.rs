@@ -17,6 +17,15 @@
 
 use sqlx::SqlitePool;
 
+// 0.21.23: CJK 判定单一真源下沉 infra::utils::text（原 is_cjk_char 手工镜像已删）
+use crate::infra::utils::text::is_cjk;
+
+/// 内部临时对话 ID 前缀约定（0.21.19.1 F3）：摘要/合并的 LLM 调用用带前缀的
+/// conversation_id 隔离，不污染原对话 memory；`list_conversations` 按 `__`
+/// 前缀过滤（SQL 里的 `\\_\\_%` 与此约定对应）。构造处统一引用常量，禁裸字符串。
+pub const SUMMARY_CONV_PREFIX: &str = "__summary__";
+pub const MERGE_CONV_PREFIX: &str = "__merge__";
+
 /// 一条对话记录（列表展示用）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Conversation {
@@ -1086,7 +1095,7 @@ pub async fn search_memory_fts(
 /// 逐字符扫描，把 query 切成两类 run，生成 OR 词项：
 ///
 /// - **ASCII / 非 CJK 词**：保持原行为（≥3 字符、去内嵌 `"`、双引号包裹）。
-/// - **CJK 连续 run**（用 `is_cjk_char` 判定）：
+/// - **CJK 连续 run**（用 `is_cjk` 判定）：
 ///   - 长度 <3 → 跳过（trigram 下限无法命中）；
 ///   - 长度 3..=6 → 整段作为一个引号短语（子串匹配，精确且便宜）；
 ///   - 长度 >6 → 生成 3 字符滑动窗口（stride 1），每个窗口一个引号词项。
@@ -1163,10 +1172,10 @@ fn collect_terms(
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0usize;
     while i < chars.len() {
-        if is_cjk_char(chars[i]) {
+        if is_cjk(chars[i]) {
             // 收集连续 CJK run
             let start = i;
-            while i < chars.len() && is_cjk_char(chars[i]) {
+            while i < chars.len() && is_cjk(chars[i]) {
                 i += 1;
             }
             let run: String = chars[start..i].iter().collect();
@@ -1174,7 +1183,7 @@ fn collect_terms(
         } else {
             // 收集连续非 CJK（ASCII / 空白 / 其他），后续按空白拆分
             let start = i;
-            while i < chars.len() && !is_cjk_char(chars[i]) {
+            while i < chars.len() && !is_cjk(chars[i]) {
                 i += 1;
             }
             let segment: String = chars[start..i].iter().collect();
@@ -1222,27 +1231,6 @@ fn push_cjk_terms(
             terms.push(format!("\"{s}\""));
         }
     }
-}
-
-/// 判断字符是否为 CJK（中日韩统一表意文字 + 扩展 A/B + 兼容 + 假名 + 韩文 + 全角形式）。
-///
-/// 与 `domain::ai::token_budget::is_cjk` 镜像，分层禁止跨层引用（infra 不得
-/// `use crate::domain::`）。字符范围保持一致以避免同一仓库内两套 CJK 定义
-/// 产生行为漂移。
-///
-/// P1-3: 改为 pub 供 domain 层测试做双源一致性校验（domain 依赖 infra 合法）。
-pub fn is_cjk_char(ch: char) -> bool {
-    let code = ch as u32;
-    matches!(
-        code,
-        0x3000..=0x33FF    // CJK 符号和标点 + 假名（平假名/片假名）
-        | 0x3400..=0x4DBF  // CJK 扩展 A
-        | 0x4E00..=0x9FFF  // CJK 统一表意文字
-        | 0xAC00..=0xD7AF  // 韩文音节
-        | 0xF900..=0xFAFF  // CJK 兼容表意文字
-        | 0xFF00..=0xFFEF  // 半角/全角形式
-        | 0x20000..=0x2A6DF // CJK 扩展 B
-    )
 }
 
 /// 清理指定对话的 FTS5 归档（删除对话 / 清空消息时调用）。
@@ -1380,6 +1368,23 @@ pub async fn count_summaries(pool: &SqlitePool, conversation_id: &str) -> Result
     .await
     .map_err(|e| e.to_string())?;
     Ok(count)
+}
+
+/// 0.21.23: 最近一次摘要落库时间（unix 秒，记忆健康度一览用）。
+///
+/// 无摘要段时返回 None。
+pub async fn latest_summary_created_at(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<Option<i64>, String> {
+    let at: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT MAX(created_at) FROM conversation_summaries WHERE conversation_id = ?1",
+    )
+    .bind(conversation_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(at.flatten())
 }
 
 /// 读取最旧的两段摘要（不删除），供段合并构造 prompt。
@@ -2758,11 +2763,11 @@ mod tests {
         create_conversation(&pool, "real-1", Some("对话1"))
             .await
             .unwrap();
-        // 内部临时对话（摘要/合并 LLM 调用产生）
-        create_conversation(&pool, "__summary__c1", Some("tmp-summary"))
+        // 内部临时对话（摘要/合并 LLM 调用产生）——用常量构造，钉住前缀约定
+        create_conversation(&pool, &format!("{}c1", SUMMARY_CONV_PREFIX), Some("tmp-summary"))
             .await
             .unwrap();
-        create_conversation(&pool, "__merge__c1", Some("tmp-merge"))
+        create_conversation(&pool, &format!("{}c1", MERGE_CONV_PREFIX), Some("tmp-merge"))
             .await
             .unwrap();
 

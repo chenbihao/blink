@@ -13,6 +13,7 @@
 import {getComposerBarSnapshot} from "./ipc.js";
 import {escapeAttr, escapeText} from "./utils.js";
 import * as state from "./state.js";
+import {t} from "../i18n/index.js";
 
 /** popup DOM 元素 */
 let popupEl = null;
@@ -204,15 +205,18 @@ export async function refreshPopupIfVisible() {
 }
 
 /**
- * 渲染 popup 内容（三段式：上下文 / 内置工具 / MCP 服务）。
+ * 渲染 popup 内容（四段式：上下文 / 记忆健康度 / 内置工具 / MCP 服务）。
  */
 function renderPopup(snapshot) {
     const ctxHtml = renderContextSection(snapshot);
+    const memoryHtml = renderMemorySection(snapshot);
     const builtinHtml = renderBuiltinSection(snapshot);
     const mcpHtml = renderMcpSection(snapshot);
 
     popupEl.innerHTML = `
     <div class="cbp-section cbp-context">${ctxHtml}</div>
+    <div class="cbp-divider"></div>
+    <div class="cbp-section cbp-memory">${memoryHtml}</div>
     <div class="cbp-divider"></div>
     <div class="cbp-section cbp-builtin" data-collapsed>${builtinHtml}</div>
     <div class="cbp-divider"></div>
@@ -224,12 +228,9 @@ function renderPopup(snapshot) {
 }
 
 /**
- * 格式化 token 数（万级别用万单位）。
+ * 格式化 token 数，保留完整数字便于直接比较容量。
  */
 export function fmtTokens(n) {
-    if (n >= 10000) {
-        return `${(n / 10000).toFixed(1)}万`;
-    }
     return n.toLocaleString();
 }
 
@@ -266,21 +267,21 @@ export function renderContextSection(s) {
     `;
     }
 
-    const color = percent < 60 ? "var(--text-faint)" : percent < 80 ? "var(--warning, #ffc107)" : "var(--danger, #f44336)";
+    const color = percent < 60 ? "var(--text-faint)" : percent < 80 ? "var(--warning)" : "var(--red)";
 
-// 0.21.17: context limit 来源标签
-// 0.21.21: 加 Tiered 档位估算标注
-const sourceLabel = contextLimitSource === "fallback"
-? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
-: contextLimitSource === "tiered"
-? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，按端点归属分档估算">分档估算</span>`
-: "";
+    // 0.21.17: context limit 来源标签
+    // 0.21.21: 加 Tiered 档位估算标注
+    const sourceLabel = contextLimitSource === "fallback"
+        ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
+        : contextLimitSource === "tiered"
+            ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，按端点归属分档估算">分档估算</span>`
+            : "";
     // 0.21.17: 置信度标签
     const confidenceLabel = confidence === "low"
         ? `<span class="cbp-confidence cbp-confidence-low" title="包含多模态内容，估算精度较低">低精度</span>`
         : confidence === "medium"
-        ? `<span class="cbp-confidence" title="包含工具定义，估算精度中等">中精度</span>`
-        : "";
+            ? `<span class="cbp-confidence" title="包含工具定义，估算精度中等">中精度</span>`
+            : "";
 
     return `
     <div class="cbp-section-header">
@@ -348,6 +349,76 @@ const sourceLabel = contextLimitSource === "fallback"
         <span class="cbp-breakdown-label">已召回</span>
         <span class="cbp-breakdown-value">${s.last_recall_count} 条</span>
       </div>` : ""}
+    </div>
+  `;
+}
+
+/**
+ * 相对时间格式化（记忆健康度「最近一次摘要」）。
+ * @param {number} unixSec unix 秒
+ * @returns {string}
+ */
+function fmtRelativeTime(unixSec) {
+    const diffSec = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
+    if (diffSec < 60) return t("chat.memory_health.just_now");
+    if (diffSec < 3600) return t("chat.memory_health.minutes_ago", {n: Math.floor(diffSec / 60)});
+    if (diffSec < 86400) return t("chat.memory_health.hours_ago", {n: Math.floor(diffSec / 3600)});
+    return t("chat.memory_health.days_ago", {n: Math.floor(diffSec / 86400)});
+}
+
+/**
+ * 0.21.23: 记忆健康度一览——当前策略 / 摘要段数 / 最近一次摘要。
+ *
+ * 收口「压缩策略开关（设置页）+ 手动压缩（提示条）+ 跨对话召回（设置页）」
+ * 分散两处的发现性问题：普通用户难走完「知道有压缩 → 打开摘要 → 知道何时
+ * 生效」链路，一览让策略与生效状态在容量环 popup 一眼可见。
+ */
+export function renderMemorySection(s) {
+    const m = s.memory;
+    if (!m) return "";
+
+    // 压缩策略：摘要开（触发水位 N%）/ 仅裁剪
+    const policyLabel = m.summary_enabled
+        ? t("chat.memory_health.policy_summary", {percent: m.trigger_percent})
+        : t("chat.memory_health.policy_trim");
+
+    // 状态行摘要：段数 / 被覆盖消息数 / 上轮裁剪条数
+    const lastSummary = m.last_summary_at != null
+        ? fmtRelativeTime(m.last_summary_at)
+        : t("chat.memory_health.no_summary_yet");
+
+    return `
+    <div class="cbp-section-header">
+      <span class="cbp-section-title">${t("chat.memory_health.title")}</span>
+      <span class="cbp-section-count">${policyLabel}</span>
+    </div>
+    <div class="cbp-context-breakdown">
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">${t("chat.memory_health.compression")}</span>
+        <span class="cbp-breakdown-value">${m.summary_enabled ? t("chat.memory_health.summary_on") : t("chat.memory_health.summary_off")}</span>
+      </div>
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">${t("chat.memory_health.recall")}</span>
+        <span class="cbp-breakdown-value">${m.recall_enabled ? t("chat.memory_health.recall_on") : t("chat.memory_health.recall_off")}</span>
+      </div>
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">${t("chat.memory_health.segments")}</span>
+        <span class="cbp-breakdown-value">${t("chat.memory_health.segment_count", {n: m.summary_segments})}</span>
+      </div>
+      ${m.summarized_count > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">${t("chat.memory_health.covered")}</span>
+        <span class="cbp-breakdown-value">${t("chat.memory_health.covered_count", {n: m.summarized_count})}</span>
+      </div>` : ""}
+      ${m.last_compressed_count > 0 ? `
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">${t("chat.memory_health.last_trimmed")}</span>
+        <span class="cbp-breakdown-value">${t("chat.memory_health.trimmed_count", {n: m.last_compressed_count})}</span>
+      </div>` : ""}
+      <div class="cbp-breakdown-row">
+        <span class="cbp-breakdown-label">${t("chat.memory_health.last_summary")}</span>
+        <span class="cbp-breakdown-value">${lastSummary}</span>
+      </div>
     </div>
   `;
 }

@@ -25,37 +25,40 @@ struct CatalogFile {
 }
 
 /// 嵌入的精简模型目录 JSON。
-const MODEL_CATALOG_JSON: &str =
-    include_str!("../../../resources/model_context_windows.json");
+const MODEL_CATALOG_JSON: &str = include_str!("../../../resources/model_context_windows.json");
+
+/// 解析后的目录缓存——目录编译期固定，进程内解析一次即可。
+static CATALOG: std::sync::OnceLock<Vec<CatalogEntry>> = std::sync::OnceLock::new();
 
 /// 解析嵌入的模型目录。失败时返回空 Vec（静默降级——目录是优化项不是正确性依赖）。
-fn parse_catalog() -> Vec<CatalogEntry> {
-    let catalog: CatalogFile = match serde_json::from_str(MODEL_CATALOG_JSON) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "model_catalog: 内置目录 JSON 解析失败，降级为空");
-            return Vec::new();
-        }
-    };
-    // 防御性排序：按前缀长度降序，确保更长的前缀先匹配。
-    // JSON 文件已预排序，但此处再做一次保证正确性不依赖文件顺序。
-    let mut models = catalog.models;
-    models.sort_by_key(|b| std::cmp::Reverse(b.prefix.len()));
-    models
+fn parse_catalog() -> &'static [CatalogEntry] {
+    CATALOG.get_or_init(|| {
+        let catalog: CatalogFile = match serde_json::from_str(MODEL_CATALOG_JSON) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "model_catalog: 内置目录 JSON 解析失败，降级为空");
+                return Vec::new();
+            }
+        };
+        // 防御性排序：按前缀长度降序，确保更长的前缀先匹配。
+        // JSON 文件已预排序，但此处再做一次保证正确性不依赖文件顺序。
+        let mut models = catalog.models;
+        models.sort_by_key(|b| std::cmp::Reverse(b.prefix.len()));
+        models
+    })
 }
 
 /// 按 model id 前缀匹配查找推荐的 context_window。
 ///
 /// 前缀冲突取更长者（如 `gpt-4o-mini` 优先于 `gpt-4`）——
-/// 目录 JSON 已按前缀长度降序排列，取第一个匹配即可。
+/// 目录已按前缀长度降序排列，取第一个匹配即可。
 ///
 /// 返回 `None` 表示无匹配——调用方应 fallback 到档位估算或 32K。
 ///
 /// **铁则**：只做弹窗预填推荐值，用户可改，绝不静默覆盖已配置值。
 pub fn lookup_context_window(model_id: &str) -> Option<u32> {
-    let catalog = parse_catalog();
     // 目录已按前缀长度降序排列，取第一个匹配
-    catalog
+    parse_catalog()
         .iter()
         .find(|entry| model_id.starts_with(&entry.prefix))
         .map(|entry| entry.context_window)

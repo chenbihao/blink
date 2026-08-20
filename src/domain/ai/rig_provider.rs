@@ -56,7 +56,9 @@ use tokio::sync::mpsc;
 use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::domain::ai::thinking::thinking_request_patch;
-use crate::domain::config::ai_config::{CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind, ThinkingStyle};
+use crate::domain::config::ai_config::{
+    CustomParam, ProviderKind, ThinkingStyle, DEFAULT_AI_HARD_TIMEOUT_MS,
+};
 use crate::infra::platform::secret::SecretString;
 
 /// rig-core 承载的 `AIProvider` 实体。泛型 M 由 factory 按 `ProviderKind` 敲定。
@@ -93,6 +95,8 @@ impl<M: RigCompletionModel> RigProvider<M> {
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
     /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
     /// `base_url` 仅用于按供应商判定 thinking 关闭补丁（DeepSeek vs OpenAI 兼容）。
+    /// `reasoning_effort` 透传 `ModelEntry.reasoning_effort`——0.21.22.1 前主窗口
+    /// 硬编码 None，per-model 的思考强度配置对主窗口不生效。
     #[allow(dead_code, clippy::too_many_arguments)] // 0.9.2 Phase 5b 由 factory 消费
     pub(crate) fn new(
         kind: ProviderKind,
@@ -103,13 +107,23 @@ impl<M: RigCompletionModel> RigProvider<M> {
         default_max_tokens: Option<u32>,
         custom_parameters: &[CustomParam],
         base_url: Option<&str>,
+        reasoning_effort: Option<&str>,
         thinking_style: Option<ThinkingStyle>,
     ) -> Self {
         let model_id = model_id.into();
-        // 主窗口默认关闭思考（0.21.16）——开/关补丁同一函数，这里取 false 分支
-        // reasoning_effort=None（auto）→ 关 = none；主窗口不暴露思考强度控件
-        // 0.21.22: style=Effort 下摘要请求对齐非 deepseek 现状（omit），保持一致性
-        let thinking_off_patch = thinking_request_patch(kind, base_url, &model_id, false, None, thinking_style);
+        // 主窗口默认关闭思考（0.21.16）——开/关补丁同一函数，这里取 false 分支。
+        // EffortLevels 分支只看 reasoning_effort（thinking_enabled 不参与）：
+        // - None（未配置）→ omit，模型用默认档——gpt-5.x 等默认开推理的模型
+        //   会继续思考，须 per-model 配 "none" 才真正关闭（thinking.rs 单一真源，
+        //   与对话窗口 agent_provider 同一份语义）。
+        let thinking_off_patch = thinking_request_patch(
+            kind,
+            base_url,
+            &model_id,
+            false,
+            reasoning_effort,
+            thinking_style,
+        );
         Self {
             kind,
             model_id,
@@ -484,22 +498,10 @@ pub(crate) fn map_rig_response(
         Some(texts.join("\n"))
     };
 
-    // 0.21.17: 完整保留 Rig 的七个 usage 字段 + reported 标记
-    let usage = Usage {
-        input_tokens: rig_resp.usage.input_tokens.min(u32::MAX as u64) as u32,
-        output_tokens: rig_resp.usage.output_tokens.min(u32::MAX as u64) as u32,
-        total_tokens: rig_resp.usage.total_tokens.min(u32::MAX as u64) as u32,
-        cached_input_tokens: rig_resp.usage.cached_input_tokens.min(u32::MAX as u64) as u32,
-        cache_creation_input_tokens: rig_resp
-            .usage
-            .cache_creation_input_tokens
-            .min(u32::MAX as u64) as u32,
-        tool_use_prompt_tokens: rig_resp.usage.tool_use_prompt_tokens.min(u32::MAX as u64) as u32,
-        reasoning_tokens: rig_resp.usage.reasoning_tokens.min(u32::MAX as u64) as u32,
-        reported: rig_resp.usage.input_tokens > 0
-            || rig_resp.usage.output_tokens > 0
-            || rig_resp.usage.total_tokens > 0,
-    };
+    // 0.21.17: 完整保留 Rig 的七个 usage 字段 + reported 标记——统一走
+    // `Usage::from_rig_usage`（全仓唯一映射），此前手写映射的 reported 只查
+    // 3 个字段，cache-only / reasoning-only 报告会被误判为未报告
+    let usage = Usage::from_rig_usage(&rig_resp.usage);
 
     CompletionResponse {
         text,
@@ -762,6 +764,75 @@ mod tests {
         Text as RigText, ToolCall as RigToolCall, ToolFunction as RigToolFunc,
     };
     use serde_json::json;
+
+    // ── RigProvider::new 的 reasoning_effort 透传（0.21.22.1）───────────
+    //
+    // 主窗口构造链：factory → RigProvider::new → thinking_off_patch。
+    // 这里钉住「per-model reasoning_effort 必须进 thinking_off_patch」，
+    // 防止再次退回硬编码 None（gpt-5.x 默认开推理的模型会静默烧 token）。
+
+    /// 用 openai 兼容 client 构造一个不出网的 RigProvider（构造不发请求），
+    /// 返回其 thinking_off_patch。
+    fn off_patch(
+        base_url: &str,
+        model_id: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Option<serde_json::Value> {
+        use rig_agent::prelude::CompletionClient;
+        let client =
+            crate::domain::ai::factory::build_openai_client("sk-test", Some(base_url)).unwrap();
+        let rig_model = client.completion_model(model_id);
+        RigProvider::new(
+            ProviderKind::OpenAICompatible,
+            model_id,
+            rig_model,
+            None,
+            None,
+            None,
+            &[],
+            Some(base_url),
+            reasoning_effort,
+            None,
+        )
+        .thinking_off_patch
+    }
+
+    #[test]
+    fn main_window_reasoning_effort_none_config_omits_patch() {
+        // 未配置（None）→ omit：不打 patch，模型用默认档（0.21.18 语义）
+        assert!(
+            off_patch("https://api.example.com/v1", "gpt-5", None).is_none(),
+            "未配置 effort 应 omit"
+        );
+    }
+
+    #[test]
+    fn main_window_reasoning_effort_explicit_none_sends_none() {
+        assert_eq!(
+            off_patch("https://api.example.com/v1", "gpt-5", Some("none")),
+            Some(json!({"reasoning_effort": "none"})),
+            "显式 none 应真正关闭思考"
+        );
+    }
+
+    #[test]
+    fn main_window_reasoning_effort_level_passthrough() {
+        assert_eq!(
+            off_patch("https://api.example.com/v1", "gpt-5", Some("low")),
+            Some(json!({"reasoning_effort": "low"})),
+            "显式档位应原样下发"
+        );
+    }
+
+    #[test]
+    fn main_window_deepseek_base_ignores_effort() {
+        // DeepSeek 底座走 thinking.type 开关，reasoning_effort 不参与
+        assert_eq!(
+            off_patch("https://api.deepseek.com/v1", "deepseek-chat", Some("none")),
+            Some(json!({"thinking": {"type": "disabled"}})),
+            "DeepSeek 底座应走 thinking.type=disabled"
+        );
+    }
 
     // ── build_rig_request ───────────────────────────────────────────────
 

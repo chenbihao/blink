@@ -111,11 +111,6 @@ export function setThinkingEnabled(value) {
     thinkingEnabled = value;
 }
 
-export function toggleThinkingEnabled() {
-    thinkingEnabled = !thinkingEnabled;
-    return thinkingEnabled;
-}
-
 /** 0.21.17: 设置当前模型思考强度（reasoning_effort 线值，null = auto）。 */
 export function setThinkingEffort(value) {
     thinkingEffort = value ?? null;

@@ -69,6 +69,9 @@ pub struct ComposerBarSnapshot {
     pub builtin_tools: Vec<BuiltinToolSummary>,
     // ── 下：MCP 服务 ──
     pub mcp_servers: Vec<McpServerSummary>,
+    // ── 0.21.23: 记忆健康度一览（压缩策略 / 摘要段 / 最近一次摘要）──
+    #[serde(default)]
+    pub memory: crate::domain::ai::chat_service::MemoryHealthSummary,
     // ── 汇总 ──
     pub builtin_count: usize,
     pub mcp_count: usize,

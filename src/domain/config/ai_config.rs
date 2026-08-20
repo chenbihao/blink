@@ -559,9 +559,10 @@ pub struct ModelEntry {
 
     /// 思考强度（0.21.17）——per-model 的 `reasoning_effort` 线值。
     ///
-    /// `None` = 未配置（auto：跟随 `thinking_enabled` 旧行为，开启→high / 关闭→none）；
+    /// `None` / `Some("")` = 不发送该字段（omit，用模型默认档，绝不出 400）——
+    ///   0.21.18 起 None（未配置）与 ""（显式默认）语义统一，`thinking_enabled`
+    ///   不再参与 EffortLevels 分支的取值；
     /// `Some("none")` = 显式关闭思考；
-    /// `Some("")` = 自定义-不发送（omit，用模型默认档，绝不出 400）；
     /// 其余字符串 = 该档位原样发送（`minimal/low/medium/high/xhigh/max` 或供应商自定义值）。
     #[serde(default)]
     pub reasoning_effort: Option<String>,

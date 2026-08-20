@@ -52,10 +52,7 @@ pub fn should_merge_summaries(summary_count: usize) -> bool {
 /// 返回 `(start_rowid, end_rowid)`——当前水位 + 1 到本轮裁剪边界。
 /// `watermark` 是已摘要到的 rowid；`compress_boundary` 是本轮被裁剪的最后一条消息 rowid。
 /// 如果 `compress_boundary <= watermark` 表示没有新消息需要摘要，返回 None。
-pub fn compute_summary_range(
-    watermark: i64,
-    compress_boundary: i64,
-) -> Option<(i64, i64)> {
+pub fn compute_summary_range(watermark: i64, compress_boundary: i64) -> Option<(i64, i64)> {
     if compress_boundary <= watermark {
         return None;
     }
@@ -115,9 +112,7 @@ pub fn build_summary_prompt(messages_text: &str) -> String {
 /// 从消息列表构造被裁消息的文本拼接（用于摘要 prompt 输入）。
 ///
 /// 跳过图片等多模态内容，只取文本部分。
-pub fn format_messages_for_summary(
-    messages: &[rig_core::completion::Message],
-) -> String {
+pub fn format_messages_for_summary(messages: &[rig_core::completion::Message]) -> String {
     use rig_core::completion::Message;
     let mut buf = String::new();
     for msg in messages {
@@ -162,7 +157,8 @@ mod tests {
 
     #[test]
     fn format_summary_block_multiple() {
-        let block = format_summary_block(&["段1".to_string(), "段2".to_string(), "段3".to_string()]);
+        let block =
+            format_summary_block(&["段1".to_string(), "段2".to_string(), "段3".to_string()]);
         assert!(block.starts_with("<summary>"));
         assert!(block.ends_with("</summary>"));
         assert!(block.contains("段1"));
@@ -235,11 +231,13 @@ mod tests {
 
     #[test]
     fn format_messages_for_summary_skips_empty() {
-        use rig_core::completion::message::{AssistantContent, Text};
         use rig_core::completion::Message;
+        use rig_core::completion::message::{AssistantContent, Text};
         let msgs = vec![
             Message::User {
-                content: vec![rig_core::completion::message::UserContent::Text(Text::new("hello"))],
+                content: vec![rig_core::completion::message::UserContent::Text(Text::new(
+                    "hello",
+                ))],
             },
             Message::Assistant {
                 id: None,

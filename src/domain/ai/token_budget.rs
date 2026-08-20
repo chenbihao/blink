@@ -12,6 +12,8 @@
 //! - `effective_input_limit = context_window - reserved_output - safety_margin`
 //! - 百分比基于安全输入容量 `estimated_input / effective_input_limit`，而非 `context_window`
 
+use std::collections::HashMap;
+
 use crate::domain::ai::prompt::ToolPromptInfo;
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
@@ -66,11 +68,9 @@ pub const CALIBRATION_RATIO_MIN: f64 = 0.5;
 pub const CALIBRATION_RATIO_MAX: f64 = 2.0;
 
 /// 校准器最大样本数。
-#[allow(dead_code)]
 pub const CALIBRATION_MAX_SAMPLES: usize = 20;
 
 /// 校准器启用所需最小样本数。
-#[allow(dead_code)]
 pub const CALIBRATION_MIN_SAMPLES: usize = 3;
 
 // ── 0.21.21: 兜底按 base_url 归属分档 ──────────────────────────────────────
@@ -178,17 +178,12 @@ fn extract_host_from_base_url(base_url: &str) -> &str {
 /// ③ localhost/127.0.0.1/::1/私网 IP 与 Ollama 原生 kind → 32K（`TIERED_LOCAL_CONTEXT_LIMIT`）
 ///
 /// 纯函数，无 IO——base_url 字符串解析。
-pub fn tiered_fallback_context_limit(
-    kind: TierProviderKind,
-    base_url: Option<&str>,
-) -> usize {
+pub fn tiered_fallback_context_limit(kind: TierProviderKind, base_url: Option<&str>) -> usize {
     match kind {
         // Ollama 原生 kind → 本地推理，恒 32K
         TierProviderKind::Ollama => TIERED_LOCAL_CONTEXT_LIMIT,
         // Anthropic/Gemini 官方封闭集合 → 128K
-        TierProviderKind::Anthropic | TierProviderKind::Gemini => {
-            TIERED_PUBLIC_CONTEXT_LIMIT
-        }
+        TierProviderKind::Anthropic | TierProviderKind::Gemini => TIERED_PUBLIC_CONTEXT_LIMIT,
         // OpenAICompatible：看 base_url
         TierProviderKind::OpenAiCompatible => {
             let Some(url) = base_url.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -207,22 +202,10 @@ pub fn tiered_fallback_context_limit(
 
 // ── CJK 判断 ──────────────────────────────────────────────────────────────────
 
-/// 判断字符是否为 CJK（中日韩统一表意文字 + 韩文 + 全角符号 + 假名）。
-///
-/// 合并 `memory.rs` 和 `prompt.rs` 两套 `is_cjk` 的并集，取最宽覆盖。
-pub fn is_cjk(ch: char) -> bool {
-    let code = ch as u32;
-    matches!(
-        code,
-        0x3000..=0x33FF    // CJK 符号和标点 + 假名（平假名/片假名）
-        | 0x3400..=0x4DBF  // CJK 扩展 A
-        | 0x4E00..=0x9FFF  // CJK 统一表意文字
-        | 0xAC00..=0xD7AF  // 韩文音节
-        | 0xF900..=0xFAFF  // CJK 兼容表意文字
-        | 0xFF00..=0xFFEF  // 半角/全角形式
-        | 0x20000..=0x2A6DF // CJK 扩展 B
-    )
-}
+// 0.21.23: `is_cjk` 实现下沉 `infra::utils::text`（全仓单一真源）。
+// 原 domain/infra 手工镜像 + 双源一致性测试已删；此处 re-export 保持
+// `domain::ai::token_budget::is_cjk` / `domain::ai::memory::is_cjk` 路径不变。
+pub use crate::infra::utils::text::is_cjk;
 
 // ── 文本 token 估算（唯一真源）──────────────────────────────────────────────
 
@@ -577,10 +560,11 @@ pub fn estimate_request_budget(input: TokenBudgetInput) -> TokenBudget {
 ///
 /// 校准只修正内容估算（history/system/pending），不能覆盖工具、输出预留和安全余量。
 /// 系数被限制在 [CALIBRATION_RATIO_MIN, CALIBRATION_RATIO_MAX] 范围内。
+/// 下界 1：非零估算经 clamp 相乘后截断不为零（raw=1 × 0.5 = 0.5 → 0，钳回 1）。
 fn apply_calibration(raw_tokens: usize, ratio: f64) -> usize {
     let clamped_ratio = ratio.clamp(CALIBRATION_RATIO_MIN, CALIBRATION_RATIO_MAX);
     let adjusted = (raw_tokens as f64 * clamped_ratio) as usize;
-    adjusted.max(raw_tokens.min(1)) // 至少保留原始值的最小下界
+    adjusted.max(raw_tokens.min(1))
 }
 
 // ── memory 裁剪预算 ───────────────────────────────────────────────────────────
@@ -616,6 +600,7 @@ pub fn compute_history_token_budget(
 /// `from_rig_usage` / `unreported` / `add` / `has_real_usage` 方法在 `message::Usage` 上。
 pub use crate::domain::ai::message::Usage;
 
+
 // ── 真实 usage 校准器 ──────────────────────────────────────────────────────────
 
 /// 进程内、有界的 provider/model 级 usage 校准器。
@@ -643,7 +628,6 @@ impl Default for UsageCalibrator {
     }
 }
 
-#[allow(dead_code)]
 impl UsageCalibrator {
     pub fn new() -> Self {
         Self {
@@ -725,6 +709,7 @@ impl UsageCalibrator {
     }
 
     /// 清除指定 provider/model 的样本（模型/配置切换后调用）。
+    #[allow(dead_code)] // 预留：配置热更新时失效校准样本的入口，暂无调用方
     pub fn clear(&self, provider_id: &str, model_id: &str) {
         let mut map = self.samples.write().expect("calibrator lock poisoned");
         map.remove(&(provider_id.to_string(), model_id.to_string()));
@@ -737,8 +722,6 @@ impl UsageCalibrator {
         map.clear();
     }
 }
-
-use std::collections::HashMap;
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────
 
@@ -828,7 +811,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.breakdown.history_tokens, 0);
@@ -853,7 +836,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         let three = estimate_request_budget(TokenBudgetInput {
@@ -867,7 +850,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert!(three.breakdown.protocol_overhead_tokens > one.breakdown.protocol_overhead_tokens);
@@ -886,7 +869,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         let with_tools = estimate_request_budget(TokenBudgetInput {
@@ -904,7 +887,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert!(with_tools.breakdown.tools_tokens > 0);
@@ -940,7 +923,7 @@ tiered_fallback_limit: None,
             request_max_tokens: Some(4096),
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.reserved_output_tokens, 4096);
@@ -963,7 +946,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         // 8192 * 0.05 = 409.6 → 409, clamped to [256, 4096] → 409
@@ -984,7 +967,7 @@ tiered_fallback_limit: None,
             request_max_tokens: Some(100),
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         // 不应 panic，不应下溢
@@ -1007,7 +990,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.context_limit, 1);
@@ -1031,7 +1014,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.context_limit, FALLBACK_CONTEXT_LIMIT);
@@ -1051,7 +1034,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.confidence, EstimateConfidence::Low);
@@ -1072,7 +1055,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.usage_percent, 100);
@@ -1092,7 +1075,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.remaining_tokens, 0);
@@ -1112,7 +1095,7 @@ tiered_fallback_limit: None,
             request_max_tokens: Some(100_000),
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.reserved_output_tokens, 1000);
@@ -1137,7 +1120,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         let without_tools = estimate_request_budget(TokenBudgetInput {
@@ -1151,7 +1134,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         assert!(without_tools.estimated_input_tokens < with_tools.estimated_input_tokens);
@@ -1630,7 +1613,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         // N+1=2 工具池（加一个不同的工具）
@@ -1650,7 +1633,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         // 断言链条：tools_tokens 增大
@@ -1700,7 +1683,7 @@ tiered_fallback_limit: None,
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         // request_max_tokens = Some(4096) → reserved_output = 4096
@@ -1715,7 +1698,7 @@ tiered_fallback_limit: None,
             request_max_tokens: Some(4096),
             model_max_tokens: None,
             calibration_ratio: None,
-tiered_fallback_limit: None,
+            tiered_fallback_limit: None,
         });
 
         // 断言链条：reserved_output_tokens 增大
@@ -1746,40 +1729,6 @@ tiered_fallback_limit: None,
             "request_max_tokens 设定后 history budget 应严格变小: {history_budget_none} -> {history_budget_some}"
         );
     }
-
-    // ── P1-3: is_cjk 双源一致性测试 ─────────────────────────────────────────────
-
-    /// `token_budget::is_cjk` 与 `infra::data::conversations::is_cjk_char` 是手工镜像，
-    /// 分层约束不许 infra 反向依赖 domain。此测试在边界码点上断言两函数结果一致，
-    /// 并加绝对断言防止两边同错时测试假绿。
-    #[test]
-    fn is_cjk_matches_infra_mirror() {
-        use crate::infra::data::conversations::is_cjk_char;
-
-        let boundary_codepoints: &[u32] = &[
-            0x2FFF, 0x3000, 0x33FF, 0x3400, 0x4DBF, 0x4DC0, 0x4E00, 0x9FFF, 0xA000,
-            0xABFF, 0xAC00, 0xD7AF, 0xD800, 0xF8FF, 0xF900, 0xFAFF, 0xFB00, 0xFEFF,
-            0xFF00, 0xFFEF, 0x10000, 0x1FFFF, 0x20000, 0x2A6DF, 0x2A6E0,
-        ];
-
-        for &cp in boundary_codepoints {
-            if let Some(ch) = char::from_u32(cp) {
-                let domain_result = is_cjk(ch);
-                let infra_result = is_cjk_char(ch);
-                assert_eq!(
-                    domain_result, infra_result,
-                    "码点 U+{cp:04X}: domain is_cjk={domain_result}, infra is_cjk_char={infra_result} 不一致"
-                );
-            }
-        }
-
-        // 绝对断言：防两边同错时测试假绿
-        assert!(is_cjk('\u{4E00}'), "U+4E00 应为 CJK（domain）");
-        assert!(is_cjk_char('\u{4E00}'), "U+4E00 应为 CJK（infra）");
-        assert!(!is_cjk('\u{0041}'), "U+0041 (A) 不应为 CJK（domain）");
-        assert!(!is_cjk_char('\u{0041}'), "U+0041 (A) 不应为 CJK（infra）");
-    }
-
     // ── 0.21.21: tiered_fallback_context_limit 测试 ──────────────────────────
 
     #[test]
@@ -1789,7 +1738,10 @@ tiered_fallback_limit: None,
             TIERED_PUBLIC_CONTEXT_LIMIT
         );
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::Anthropic, Some("https://api.anthropic.com")),
+            tiered_fallback_context_limit(
+                TierProviderKind::Anthropic,
+                Some("https://api.anthropic.com")
+            ),
             TIERED_PUBLIC_CONTEXT_LIMIT
         );
     }
@@ -1830,15 +1782,24 @@ tiered_fallback_limit: None,
     #[test]
     fn tiered_openai_compatible_public_domain_returns_128k() {
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("https://api.deepseek.com")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("https://api.deepseek.com")
+            ),
             TIERED_PUBLIC_CONTEXT_LIMIT
         );
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("https://api.moonshot.cn/v1")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("https://api.moonshot.cn/v1")
+            ),
             TIERED_PUBLIC_CONTEXT_LIMIT
         );
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("https://openrouter.ai/api/v1")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("https://openrouter.ai/api/v1")
+            ),
             TIERED_PUBLIC_CONTEXT_LIMIT
         );
     }
@@ -1846,11 +1807,17 @@ tiered_fallback_limit: None,
     #[test]
     fn tiered_openai_compatible_localhost_returns_32k() {
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://localhost:8080/v1")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://localhost:8080/v1")
+            ),
             TIERED_LOCAL_CONTEXT_LIMIT
         );
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://127.0.0.1:1234")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://127.0.0.1:1234")
+            ),
             TIERED_LOCAL_CONTEXT_LIMIT
         );
     }
@@ -1858,15 +1825,24 @@ tiered_fallback_limit: None,
     #[test]
     fn tiered_openai_compatible_private_ip_returns_32k() {
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://10.0.0.5:8080")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://10.0.0.5:8080")
+            ),
             TIERED_LOCAL_CONTEXT_LIMIT
         );
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://172.16.5.1:8080")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://172.16.5.1:8080")
+            ),
             TIERED_LOCAL_CONTEXT_LIMIT
         );
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://192.168.1.100:8080")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://192.168.1.100:8080")
+            ),
             TIERED_LOCAL_CONTEXT_LIMIT
         );
     }
@@ -1875,7 +1851,10 @@ tiered_fallback_limit: None,
     fn tiered_openai_compatible_172_31_returns_32k() {
         // 172.31.x.x 是私网段上界
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://172.31.0.1:8080")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://172.31.0.1:8080")
+            ),
             TIERED_LOCAL_CONTEXT_LIMIT
         );
     }
@@ -1884,7 +1863,10 @@ tiered_fallback_limit: None,
     fn tiered_openai_compatible_172_32_returns_128k() {
         // 172.32.x.x 不是私网段
         assert_eq!(
-            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://172.32.0.1:8080")),
+            tiered_fallback_context_limit(
+                TierProviderKind::OpenAiCompatible,
+                Some("http://172.32.0.1:8080")
+            ),
             TIERED_PUBLIC_CONTEXT_LIMIT
         );
     }

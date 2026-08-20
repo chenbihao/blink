@@ -184,10 +184,11 @@
 }
 
 .chat-tool-card-server {
-    font-size: 10px;
-    color: var(--text-dim);
+    font-size: 11px;
+    color: var(--text-sub);
     padding: 1px 4px;
-    background: var(--surface-2);
+    background: var(--surface-3, var(--surface-2));
+    border: 1px solid var(--surface-2);
     border-radius: 3px;
     flex-shrink: 0;
     max-width: 120px;

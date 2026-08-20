@@ -729,7 +729,8 @@ export function renderSummarySeparator(summaryText, summarizedCount) {
     el.className = "chat-summary-sep";
     const summary = document.createElement("summary");
     summary.className = "chat-summary-sep-header";
-    summary.innerHTML = `<span class="chat-summary-sep-label">已摘要 ${summarizedCount} 条较早消息</span>`;
+    summary.innerHTML = `<span class="chat-signal chat-signal-info">消息已压缩</span>`;
+    summary.title = `已压缩 ${summarizedCount} 条较早消息，点击查看压缩内容`;
     el.appendChild(summary);
     const body = document.createElement("div");
     body.className = "chat-summary-sep-body";
@@ -737,6 +738,16 @@ export function renderSummarySeparator(summaryText, summarizedCount) {
     el.appendChild(body);
     messagesEl.insertBefore(el, messagesEl.firstChild);
     return el;
+}
+
+/**
+ * 移除摘要折叠分隔线。
+ *
+ * summarized_count 回落为 0（关闭摘要开关 / 原地清空消息）时调用，
+ * 否则旧分隔线会残留到下一次切换对话。
+ */
+export function removeSummarySeparator() {
+    messagesEl?.querySelectorAll(".chat-summary-sep").forEach((el) => el.remove());
 }
 
 /**
@@ -945,10 +956,10 @@ export function updateContextIndicator(status) {
     el.classList.remove('hidden');
     const percent = Math.min(status.usage_percent, 100);
 
-    // 颜色随占比变化
+    // 颜色随占比变化（--warning/--red 均为正式主题 token，勿回退 hardcode）
     const color = percent < 60 ? "var(--text-faint)"
-        : percent < 80 ? "var(--warning, #ffc107)"
-            : "var(--danger, #f44336)";
+        : percent < 80 ? "var(--warning)"
+            : "var(--red)";
 
     // SVG 环形进度条
     const r = 8;
@@ -956,8 +967,8 @@ export function updateContextIndicator(status) {
     const offset = circumference * (1 - percent / 100);
     const tooltip = `${percent}% · ~${status.estimated_tokens.toLocaleString()} / ${status.context_limit.toLocaleString()} tokens`
         + (status.remaining_tokens != null ? `\n安全剩余: ${status.remaining_tokens.toLocaleString()} tokens` : "")
-        + (status.context_limit_source === "fallback" ? "\n⚠ 估算回退（未配置 context window）" : "")
-        + (status.confidence === "low" ? "\n⚠ 低精度估算（含多模态）" : "");
+        + (status.context_limit_source === "fallback" ? "\n估算回退（未配置 context window）" : "")
+        + (status.confidence === "low" ? "\n低精度估算（含多模态）" : "");
 
     el.title = tooltip;
     el.innerHTML = `
@@ -969,7 +980,7 @@ export function updateContextIndicator(status) {
       <text x="10" y="13" text-anchor="middle" class="context-ring-percent">${percent}</text>
     </svg>
     ${status.last_compressed ? '<span class="context-compressed" title="已自动压缩 ' + status.last_compressed_count + ' 条旧消息"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="context-badge-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>' : ''}
-    ${status.summary_enabled && status.summarized_count > 0 ? '<span class="context-summary-badge" title="已摘要 ' + status.summarized_count + ' 条消息"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="context-badge-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span>' : ''}
+    ${status.summary_enabled && status.summarized_count > 0 ? '<span class="context-summary-badge" title="已压缩 ' + status.summarized_count + ' 条消息"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="context-badge-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span>' : ''}
   `;
 }
 
@@ -977,12 +988,12 @@ export function updateContextIndicator(status) {
  * 渲染上下文窗口提示条（当 token 占用超阈值时显示）。
  *
  * 0.21.19：恢复并重新设计。根据 summary_enabled 切换文案：
- * - 摘要开启："旧消息将被自动摘要"，按钮文字"立即摘要"
+ * - 压缩开启："旧消息将被自动压缩"，按钮文字"立即压缩"
  * - 摘要关闭："旧消息将被裁剪归档"，按钮文字"立即裁剪"
  *
  * @param {number} usagePercent 当前占用百分比
  * @param {boolean} summaryEnabled 摘要压缩是否开启
- * @param {(action: 'compress' | 'clear') => void} onAction
+ * @param {(action: 'compress') => void} onAction
  */
 export function renderContextWarning(usagePercent, summaryEnabled, onAction) {
     // 移除已有提示条
@@ -992,31 +1003,27 @@ export function renderContextWarning(usagePercent, summaryEnabled, onAction) {
     // 占用 < 80% 不显示
     if (usagePercent < 80) return;
 
-    const composerBar = document.querySelector(".chat-composer-bar");
-    if (!composerBar) return;
+    if (!messagesEl) return;
 
-    const actionLabel = summaryEnabled ? "立即摘要" : "立即裁剪";
+    const actionLabel = "立即压缩";
     const textMsg = summaryEnabled
-        ? `上下文窗口已使用 ${usagePercent}%，旧消息将被自动摘要。`
+        ? `上下文窗口已使用 ${usagePercent}%，旧消息将被自动压缩。`
         : `上下文窗口已使用 ${usagePercent}%，旧消息将被裁剪归档。`;
 
     const warning = document.createElement("div");
-    warning.className = "chat-context-warning";
+    warning.className = "chat-context-warning chat-signal chat-signal-warning";
     warning.innerHTML = `
         <span class="chat-context-warning-text">${textMsg}</span>
         <div class="chat-context-warning-actions">
             <button class="chat-context-warning-btn" data-action="compress">${actionLabel}</button>
-            <button class="chat-context-warning-btn" data-action="clear">清除对话</button>
         </div>
         <button class="chat-context-warning-close" title="关闭">×</button>
     `;
 
     warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
-    warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
     warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
-
-    // 插入到 composer bar 上方
-    composerBar.parentElement.insertBefore(warning, composerBar);
+    messagesEl.appendChild(warning);
+    scrollToBottom();
 }
 
 /**
@@ -1026,3 +1033,26 @@ export function removeContextWarning() {
     const existing = document.querySelector(".chat-context-warning");
     if (existing) existing.remove();
 }
+
+/**
+ * 0.21.23: 压缩按钮 loading 态（手动压缩异步化——摘要后台执行期间禁用防重复触发）。
+ *
+ * loading 解除信号：下一个 CHAT_CONTEXT_STATUS 事件（摘要完成推送）重渲染提示条，
+ * 或 main.js 的 35s 兜底超时。
+ * @param {boolean} loading
+ */
+export function setContextWarningLoading(loading) {
+    const warning = document.querySelector(".chat-context-warning");
+    const btn = warning?.querySelector('[data-action="compress"]');
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.classList.toggle("loading", loading);
+    if (loading) {
+        if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+        btn.textContent = "压缩中…";
+    } else if (btn.dataset.label) {
+        btn.textContent = btn.dataset.label;
+        delete btn.dataset.label;
+    }
+}
+

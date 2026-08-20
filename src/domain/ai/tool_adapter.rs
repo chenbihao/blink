@@ -716,6 +716,21 @@ pub fn build_agent_tools(
     (tools, external_tools)
 }
 
+/// 与 `build_agent_tools` 的 allowlist 过滤同一口径：allowlist ∩ 注册表实际条目数。
+///
+/// preamble 的 `builtin_count` 等展示口径用——直接 `allowlist.len()` 会把已注销
+/// 的陈旧授权条目也计入，高于实际入池数（0.21.22.1 修正）。
+pub fn count_allowlisted_capabilities(
+    cap_registry: &CapabilityRegistry,
+    ai_allowlist: &std::collections::HashSet<String>,
+) -> usize {
+    cap_registry
+        .entries()
+        .iter()
+        .filter(|(id, _)| ai_allowlist.contains(id))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,7 +790,51 @@ mod tests {
         let (id2, _rx2) = pc.register().await;
         let (id3, _rx3) = pc.register().await;
         assert!(id2 > id1, "id 应单调递增");
-        assert!(id3 > id2);
+        assert!(id3 > id2, "id 应单调递增");
+    }
+
+    // ── count_allowlisted_capabilities（0.21.22.1 展示口径同源）─────────
+
+    struct CountCap {
+        id_val: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::capability::Capability for CountCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema::empty(self.id_val, "count test")
+        }
+
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            unreachable!("count 测试不执行 capability")
+        }
+    }
+
+    #[test]
+    fn count_allowlisted_capabilities_intersects_registry() {
+        use crate::domain::capability::CapabilityRegistry;
+        use std::collections::HashSet;
+
+        let reg = CapabilityRegistry::default();
+        reg.register(std::sync::Arc::new(CountCap { id_val: "cap_a" })).unwrap();
+        reg.register(std::sync::Arc::new(CountCap { id_val: "cap_b" })).unwrap();
+
+        let allowlist: HashSet<String> =
+            ["cap_a", "stale_removed_cap"].iter().map(|s| s.to_string()).collect();
+        // allowlist 含 2 条但 cap_b 未授权、stale_removed_cap 已注销：
+        // 精确交集 = 1，直接 len() 会误报 2
+        assert_eq!(count_allowlisted_capabilities(&reg, &allowlist), 1);
+
+        let empty = HashSet::new();
+        assert_eq!(count_allowlisted_capabilities(&reg, &empty), 0);
     }
 
     // ── 对话级信任列表单测 ──────────────────────────────────────────────

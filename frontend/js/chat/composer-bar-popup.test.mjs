@@ -7,21 +7,24 @@ globalThis.window.__TAURI__ = {
         invoke: async () => ({}),
     },
     event: {
-        listen: async () => ({unlisten: () => {}}),
+        listen: async () => ({
+            unlisten: () => {
+            }
+        }),
     },
 };
 
 // Dynamic import after mock is set up
-const {fmtTokens, renderContextSection} = await import("./composer-bar-popup.js");
+const {fmtTokens, renderContextSection, renderMemorySection} = await import("./composer-bar-popup.js");
 
 // ── fmtTokens ──
 
 assert.equal(fmtTokens(0), "0");
 assert.equal(fmtTokens(999), "999");
-assert.equal(fmtTokens(10000), "1.0万");
-assert.equal(fmtTokens(12345), "1.2万");
-assert.equal(fmtTokens(100000), "10.0万");
-assert.equal(fmtTokens(50000), "5.0万");
+assert.equal(fmtTokens(10000), "10,000");
+assert.equal(fmtTokens(12345), "12,345");
+assert.equal(fmtTokens(100000), "100,000");
+assert.equal(fmtTokens(50000), "50,000");
 
 // ── renderContextSection: 空状态 ──
 
@@ -161,8 +164,8 @@ assert.equal(fmtTokens(50000), "5.0万");
         confidence: "high",
     });
 
-    // 85% 应使用 danger 颜色变量
-    assert.ok(html.includes("--danger"), "85% 应使用 danger 颜色");
+    // 85% 应使用危险色 token（--red 是正式主题 token，此前误用不存在的 --danger）
+    assert.ok(html.includes("--red"), "85% 应使用 --red 颜色");
 }
 
 // ── renderContextSection: 安全剩余回退计算 ──
@@ -200,6 +203,56 @@ assert.equal(fmtTokens(50000), "5.0万");
     assert.ok(html.includes("3 条"), "应展示压缩消息条数");
     assert.ok(html.includes("已召回"), "last_recall_count>0 应展示已召回行");
     assert.ok(html.includes("2 条"), "应展示召回消息条数");
+}
+
+// ── renderMemorySection: 记忆健康度一览（0.21.23）──
+
+{
+    // 后端未提供 memory 字段（旧快照兼容）→ 空串
+    assert.equal(renderMemorySection({}), "", "无 memory 字段应返回空串");
+}
+
+{
+    const html = renderMemorySection({
+        memory: {
+            summary_enabled: true,
+            trigger_percent: 80,
+            window_mode: "token_aware",
+            recall_enabled: true,
+            summary_segments: 3,
+            last_summary_at: Math.floor(Date.now() / 1000) - 120, // 2 分钟前
+            summarized_count: 42,
+            last_compressed_count: 5,
+        },
+    });
+    assert.ok(html.includes("记忆健康度"), "应有标题");
+    assert.ok(html.includes("摘要 · 80%"), "策略应为摘要 + 触发水位");
+    assert.ok(html.includes("摘要压缩"), "摘要开启应展示策略行");
+    assert.ok(html.includes("跨对话召回"), "应展示跨对话召回行");
+    assert.ok(html.includes("3 段"), "应展示摘要段数");
+    assert.ok(html.includes("42 条"), "summarized_count>0 应展示被摘要消息行");
+    assert.ok(html.includes("5 条"), "last_compressed_count>0 应展示上轮裁剪行");
+    assert.ok(html.includes("2 分钟前"), "应展示最近一次摘要相对时间");
+}
+
+{
+    const html = renderMemorySection({
+        memory: {
+            summary_enabled: false,
+            trigger_percent: 80,
+            window_mode: "token_aware",
+            recall_enabled: false,
+            summary_segments: 0,
+            last_summary_at: null,
+            summarized_count: 0,
+            last_compressed_count: 0,
+        },
+    });
+    assert.ok(html.includes("仅裁剪"), "摘要关闭时策略应为仅裁剪");
+    assert.ok(html.includes("可在设置开启摘要"), "应引导到设置开启摘要");
+    assert.ok(html.includes("尚未生成"), "无摘要时应显示尚未生成");
+    assert.ok(!html.includes("被摘要消息"), "summarized_count=0 不应展示被摘要消息行");
+    assert.ok(!html.includes("上轮裁剪"), "last_compressed_count=0 不应展示上轮裁剪行");
 }
 
 console.log("Composer bar popup token budget tests passed");

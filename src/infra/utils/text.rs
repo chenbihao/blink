@@ -58,6 +58,26 @@ impl StringTruncateExt for String {
     }
 }
 
+/// 判断字符是否为 CJK（中日韩统一表意文字 + 韩文 + 全角符号 + 假名）。
+///
+/// 0.21.23: 全仓唯一实现（原 domain `token_budget::is_cjk` 与 infra
+/// `conversations::is_cjk_char` 手工镜像 + 一致性测试，现下沉单一真源；
+/// domain 依赖 infra 合法）。合并 `memory.rs` 和 `prompt.rs` 两套旧 `is_cjk`
+/// 的并集，取最宽覆盖。
+pub fn is_cjk(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x3000..=0x33FF    // CJK 符号和标点 + 假名（平假名/片假名）
+        | 0x3400..=0x4DBF  // CJK 扩展 A
+        | 0x4E00..=0x9FFF  // CJK 统一表意文字
+        | 0xAC00..=0xD7AF  // 韩文音节
+        | 0xF900..=0xFAFF  // CJK 兼容表意文字
+        | 0xFF00..=0xFFEF  // 半角/全角形式
+        | 0x20000..=0x2A6DF // CJK 扩展 B
+    )
+}
+
 /// 提取拼音首字母（"微信" → "wx"，"WeChat" → "wechat"）。
 pub fn pinyin_initials(s: &str) -> String {
     s.chars()
@@ -172,6 +192,39 @@ mod tests {
     fn single_line_preserves_plain_text() {
         assert_eq!(single_line("中文没有换行"), "中文没有换行");
         assert_eq!(single_line(""), "");
+    }
+
+    // ── is_cjk 测试（0.21.23 下沉单一真源，承接原双源一致性测试的边界断言）──
+
+    #[test]
+    fn is_cjk_boundary_codepoints() {
+        let inside = [
+            0x3000u32, 0x33FF, 0x3400, 0x4DBF, 0x4E00, 0x9FFF, 0xAC00, 0xD7AF, 0xF900, 0xFAFF,
+            0xFF00, 0xFFEF, 0x20000, 0x2A6DF,
+        ];
+        for cp in inside {
+            assert!(is_cjk(char::from_u32(cp).unwrap()), "U+{cp:04X} 应为 CJK");
+        }
+        let outside = [
+            0x2FFFu32, 0x4DC0, 0xA000, 0xABFF, 0xE000, 0xFB00, 0xFEFF, 0xFFF0, 0x10000, 0x1FFFF,
+            0x2A6E0,
+        ];
+        for cp in outside {
+            assert!(
+                !is_cjk(char::from_u32(cp).unwrap()),
+                "U+{cp:04X} 不应为 CJK"
+            );
+        }
+    }
+
+    #[test]
+    fn is_cjk_common_scripts() {
+        assert!(is_cjk('中'));
+        assert!(is_cjk('あ')); // 平假名
+        assert!(is_cjk('한')); // 韩文音节
+        assert!(is_cjk('，')); // 全角逗号（FF0C）
+        assert!(!is_cjk('A'));
+        assert!(!is_cjk(' '));
     }
 
     #[test]

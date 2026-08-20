@@ -245,8 +245,7 @@ pub async fn fetch_ai_models(
     if let Ok(mut models) = result {
         for m in &mut models {
             if m.context_window.is_none() {
-                m.context_window =
-                    crate::domain::ai::model_catalog::lookup_context_window(&m.id);
+                m.context_window = crate::domain::ai::model_catalog::lookup_context_window(&m.id);
             }
         }
         return Ok(models);
@@ -260,6 +259,9 @@ pub async fn fetch_ai_models(
 /// Capability 工具（不含 MCP，下同）」。此前渲染的是 `routing_system_prompt`
 /// （意图路由器，运行时调用方已随 0.17.6 AI lane 移除，现为幽灵指标）。
 ///
+/// 0.21.22.1: tools 侧优先取缓存 Agent 的真实 tool 池快照（含 MCP 工具，
+/// 与预算侧同源）；无缓存时退回 0.21.18 的估算口径。
+///
 /// 返回 JSON（保留旧 key 兼容前端，新增分项）：
 /// - `tokens`: system_tokens + tools_tokens（前端展示用总量）
 /// - `system_tokens`: preamble 估算 token
@@ -269,7 +271,9 @@ pub async fn fetch_ai_models(
 /// - `threshold`: 5000（硬编码告警阈值）
 #[tauri::command]
 pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use crate::domain::ai::prompt::{build_prompt_infos, chat_system_prompt_with_skills, ToolSourceSummary};
+    use crate::domain::ai::prompt::{
+        build_prompt_infos, chat_system_prompt_with_skills, ToolSourceSummary,
+    };
     use crate::domain::ai::token_budget::{estimate_text_tokens, estimate_tools_tokens};
     use crate::domain::capability::CapabilityRegistry;
     use crate::domain::capability::{build_capability_tools, inject_plugin_settings};
@@ -294,7 +298,7 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         )
         .await;
 
-    // 3. 构建 tools 列表（与 service.rs AI lane 同逻辑）
+    // 3. 估算口径（兜底）：与 service.rs AI lane 同逻辑
     let mut tools = build_capability_tools(&cap_reg);
 
     // 参数动态注入 + hints 收集
@@ -321,10 +325,25 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
     // policy 级「允许 AI」过滤不复刻，估算略偏保守方向，可接受。
     tools.retain(|t| allowlist.contains(&t.name));
 
-    let prompt_infos = build_prompt_infos(tools, &plugin_hints);
+    let estimated_infos = build_prompt_infos(tools, &plugin_hints);
+
+    // 0.21.22.1: 展示口径与预算侧同源——优先取当前缓存 Agent 的真实 tool 池快照
+    // （`AgentProvider::tool_prompt_infos`，含 MCP 工具与 allowlist 实际过滤；
+    // 缓存 key 含 mcp/allowlist epoch，命中即代表池未漂移）。无缓存（尚未发过
+    // 消息）或纯对话模式（池为空）时退回上方估算口径。
+    let live_pool = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .and_then(|chat| chat.cached_agent_ref())
+        .filter(|provider| !provider.tool_prompt_infos().is_empty())
+        .map(|provider| provider.tool_prompt_infos().to_vec());
+    let (prompt_infos, uses_live_pool) = match live_pool {
+        Some(infos) => (infos, true),
+        None => (estimated_infos, false),
+    };
 
     // 5. preamble：无分组提示、无触发 Skill，与对话启动态一致
-    let preamble = chat_system_prompt_with_skills(None, &skill_summaries, &[], &ToolSourceSummary::default());
+    let preamble =
+        chat_system_prompt_with_skills(None, &skill_summaries, &[], &ToolSourceSummary::default());
 
     // 6. 估算
     let system_tokens = estimate_text_tokens(&preamble);
@@ -338,7 +357,8 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         system_tokens,
         tools_tokens,
         tools_count,
-        "get_system_prompt_info: 聊天 preamble + 已授权工具 token 估算"
+        uses_live_pool,
+        "get_system_prompt_info: 聊天 preamble + 工具 token（live=真实池快照，estimate=估算兜底）"
     );
 
     Ok(serde_json::json!({
@@ -462,13 +482,24 @@ pub async fn get_context_window_status(
     Ok(chat.get_or_compute_context_status(&conversation_id).await)
 }
 
-/// 强制压缩当前对话的上下文窗口（0.13.6 / 0.21.19 扩展）。
+/// 0.21.23: 手动压缩结果——command 立即返回，摘要后台执行。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompressContextOutcome {
+    /// 摘要任务是否已后台触发（summary_enabled 且无在途任务）。
+    /// 完成后经 `CHAT_CONTEXT_STATUS` 事件推送最新状态。
+    pub summary_triggered: bool,
+    /// 是否因已有摘要任务在途而跳过（本轮仅裁剪，前端显式提示）。
+    pub summary_in_flight: bool,
+    /// 立即返回的裁剪后状态（不含后台摘要结果）。
+    pub status: crate::domain::ai::chat_service::ContextWindowStatus,
+}
+
+/// 强制压缩当前对话的上下文窗口（0.13.6 / 0.21.19 扩展 / 0.21.23 异步化）。
 ///
-/// 调用 `memory.load_with_stats()` 走一遍 token_aware_truncate 流程，
-/// 然后返回更新后的上下文窗口状态。
-///
-/// 0.21.19: 若摘要开关开启且 usage 达到阈值，先同步执行摘要生成
-/// （`maybe_spawn_summary_task`），再 compute_context_status 返回最新状态。
+/// 裁剪部分（`load_with_stats` 走 token_aware_truncate，纯本地 DB 操作）同步
+/// 完成后立即返回；摘要生成（LLM，最长 30s）后台执行，完成后经
+/// `CHAT_CONTEXT_STATUS` 事件推送（`maybe_spawn_summary_task` 收尾已 emit）。
+/// 此前同步 await 摘要让 IPC 挂起最长 30s。
 ///
 /// 注意：本命令实际执行的裁剪基于上一轮 stream_prompt 注入的
 /// history_budget（compute_context_status 内部先 load 后注入）；本命令
@@ -478,7 +509,7 @@ pub async fn get_context_window_status(
 pub async fn compress_context_now(
     app: tauri::AppHandle,
     conversation_id: String,
-) -> Result<crate::domain::ai::chat_service::ContextWindowStatus, String> {
+) -> Result<CompressContextOutcome, String> {
     use tauri::Manager;
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
@@ -490,7 +521,6 @@ pub async fn compress_context_now(
         return Err("对话进行中，请等待当前回复完成后再压缩".to_string());
     }
 
-    // 0.21.19: 若摘要开关开启，先同步触发摘要生成
     let resolved = chat
         .resolve_current_entries(crate::domain::ai::chat_service::ConversationKind::Persistent)
         .map_err(|e| e.to_string())?;
@@ -500,16 +530,39 @@ pub async fn compress_context_now(
         .cached_agent_ref()
         .ok_or("Agent 未构造，请先发送一条消息后再压缩")?;
 
-    // 0.21.19.1 F2: maybe_spawn_summary_task 开头检查 summary_enabled + trigger_ratio，
-    // 开关关闭时直接返回不触发 LLM 调用。用 100 强制触发阈值判定（手动压缩时用户已明确要压缩）。
-    chat.maybe_spawn_summary_task(&conversation_id, 100).await;
-
-    // 摘要生成后重新 compute（水位可能已推进，load 结果变化）
+    // 裁剪 + 立即返回的状态（0.21.19.1 F2: 摘要开关关闭时只走这一步）。
+    // 不在此 emit CHAT_CONTEXT_STATUS——返回值已携带状态（前端 updateContextIndicator
+    // 直接消费），即时 emit 会与摘要完成事件混淆：前端用「下一个事件 = 摘要完成」
+    // 解除压缩按钮 loading 态，摘要完成由 maybe_spawn_summary_task 收尾 emit 推送。
     let status = chat
         .compute_context_status(&conversation_id, None, None, &provider, &resolved)
         .await;
-    let _ = app.emit_to("chat", EventNames::CHAT_CONTEXT_STATUS, &status);
-    Ok(status)
+
+    // 0.21.23: 摘要后台触发——in-flight 时显式标注（旧实现静默跳过摘要只返回裁剪）。
+    // check-then-spawn 之间存在极窄竞态（另一摘要恰好在此启动），spawned 任务
+    // 内部的 in-flight guard 会兜底跳过，前端 35s loading 超时兜底收回。
+    let summary_enabled = chat.summary_enabled_snapshot().await;
+    let (summary_triggered, summary_in_flight) = if !summary_enabled {
+        (false, false)
+    } else if chat.is_summary_in_flight() {
+        tracing::debug!(conversation_id = %conversation_id, "手动压缩: 摘要进行中，本轮仅裁剪");
+        (false, true)
+    } else {
+        let chat = chat.inner().clone();
+        let conv = conversation_id.clone();
+        tokio::spawn(async move {
+            // 手动压缩时用户已明确要压缩——用 100 强制触发阈值判定
+            chat.maybe_spawn_summary_task(&conv, 100).await;
+        });
+        tracing::info!(conversation_id = %conversation_id, "手动压缩: 裁剪完成，摘要任务已后台触发");
+        (true, false)
+    };
+
+    Ok(CompressContextOutcome {
+        summary_triggered,
+        summary_in_flight,
+        status,
+    })
 }
 
 /// 0.21.19: 获取对话的摘要内容（供前端渲染折叠分隔线）。
@@ -636,77 +689,40 @@ pub async fn get_composer_bar_snapshot(
         });
     }
 
+    // 无 ChatService / 状态未计算时用 Default 兜底（全零 + 空串，与旧 unwrap_or 行为一致）
+    let cs = context_status.unwrap_or_default();
+
+    // 0.21.23: 记忆健康度一览（压缩策略 / 摘要段数 / 最近一次摘要）——
+    // 收口「知道有压缩 → 打开摘要 → 知道何时生效」链路的发现性问题
+    let memory = if let Some(chat) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+    {
+        chat.memory_health_summary(&conversation_id).await
+    } else {
+        Default::default()
+    };
+
     Ok(ComposerBarSnapshot {
-        estimated_tokens: context_status
-            .as_ref()
-            .map(|s| s.estimated_tokens)
-            .unwrap_or(0),
-        context_limit: context_status
-            .as_ref()
-            .map(|s| s.context_limit)
-            .unwrap_or(0),
-        usage_percent: context_status
-            .as_ref()
-            .map(|s| s.usage_percent)
-            .unwrap_or(0),
-        last_compressed: context_status
-            .as_ref()
-            .map(|s| s.last_compressed)
-            .unwrap_or(false),
-        last_compressed_count: context_status
-            .as_ref()
-            .map(|s| s.last_compressed_count)
-            .unwrap_or(0),
-        last_recall_count: context_status
-            .as_ref()
-            .map(|s| s.last_recall_count)
-            .unwrap_or(0),
-        preamble_tokens: context_status
-            .as_ref()
-            .map(|s| s.preamble_tokens)
-            .unwrap_or(0),
-        pending_message_tokens: context_status
-            .as_ref()
-            .map(|s| s.pending_message_tokens)
-            .unwrap_or(0),
+        estimated_tokens: cs.estimated_tokens,
+        context_limit: cs.context_limit,
+        usage_percent: cs.usage_percent,
+        last_compressed: cs.last_compressed,
+        last_compressed_count: cs.last_compressed_count,
+        last_recall_count: cs.last_recall_count,
+        preamble_tokens: cs.preamble_tokens,
+        pending_message_tokens: cs.pending_message_tokens,
         // 0.21.17 扩展字段
-        history_tokens: context_status
-            .as_ref()
-            .map(|s| s.history_tokens)
-            .unwrap_or(0),
-        tools_tokens: context_status.as_ref().map(|s| s.tools_tokens).unwrap_or(0),
-        protocol_overhead_tokens: context_status
-            .as_ref()
-            .map(|s| s.protocol_overhead_tokens)
-            .unwrap_or(0),
-        multimodal_tokens: context_status
-            .as_ref()
-            .map(|s| s.multimodal_tokens)
-            .unwrap_or(0),
-        reserved_output_tokens: context_status
-            .as_ref()
-            .map(|s| s.reserved_output_tokens)
-            .unwrap_or(0),
-        safety_margin_tokens: context_status
-            .as_ref()
-            .map(|s| s.safety_margin_tokens)
-            .unwrap_or(0),
-        effective_input_limit: context_status
-            .as_ref()
-            .map(|s| s.effective_input_limit)
-            .unwrap_or(0),
-        remaining_tokens: context_status
-            .as_ref()
-            .map(|s| s.remaining_tokens)
-            .unwrap_or(0),
-        context_limit_source: context_status
-            .as_ref()
-            .map(|s| s.context_limit_source.clone())
-            .unwrap_or_default(),
-        confidence: context_status
-            .as_ref()
-            .map(|s| s.confidence.clone())
-            .unwrap_or_default(),
+        history_tokens: cs.history_tokens,
+        tools_tokens: cs.tools_tokens,
+        protocol_overhead_tokens: cs.protocol_overhead_tokens,
+        multimodal_tokens: cs.multimodal_tokens,
+        reserved_output_tokens: cs.reserved_output_tokens,
+        safety_margin_tokens: cs.safety_margin_tokens,
+        effective_input_limit: cs.effective_input_limit,
+        remaining_tokens: cs.remaining_tokens,
+        context_limit_source: cs.context_limit_source,
+        confidence: cs.confidence,
+        memory,
         builtin_tools,
         mcp_servers,
         builtin_count,
@@ -732,22 +748,18 @@ async fn fetch_ollama_models(
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| {
-                    v.get("models").and_then(|m| m.as_array()).map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| {
-                                m.get("name").and_then(|n| n.as_str()).map(String::from)
-                            })
-                            .collect::<Vec<_>>()
-                    })
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| {
+                v.get("models").and_then(|m| m.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect::<Vec<_>>()
                 })
-                .unwrap_or_default()
-        }
+            })
+            .unwrap_or_default(),
         Ok(resp) => {
             let status = resp.status().as_u16();
             return Err(format!(
@@ -766,19 +778,27 @@ async fn fetch_ollama_models(
     }
 
     // Step 2: 对每个模型走 /api/show 获取 context_length
+    // 0.21.22.1: 并发拉取（本地 ollama，并发安全）——串行时 20 个模型约 1s+，
+    // 设置页拉列表明显卡顿。失败静默降级 None，与原串行语义一致。
     let base_url = url.trim_end_matches("/api/tags");
     let show_url = format!("{base_url}/api/show");
 
-    let mut models = Vec::with_capacity(model_names.len());
-    for name in &model_names {
-        let context_window = fetch_ollama_context_length(client, &show_url, name)
-            .await
-            .unwrap_or(None);
-        models.push(ModelMeta {
-            id: name.clone(),
-            context_window,
-        });
-    }
+    let fetched = futures::future::join_all(model_names.iter().map(|name| {
+        let show_url = show_url.clone();
+        async move {
+            let context_window = fetch_ollama_context_length(client, &show_url, name)
+                .await
+                .unwrap_or(None);
+            ModelMeta {
+                id: name.clone(),
+                context_window,
+            }
+        }
+    }))
+    .await;
+
+    let mut models = Vec::with_capacity(fetched.len());
+    models.extend(fetched);
 
     models.sort();
     Ok(models)

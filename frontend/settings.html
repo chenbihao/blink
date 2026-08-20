@@ -1455,10 +1455,11 @@
                             </label>
                         </div>
                         <div class="ai-model-param-body hidden" id="ai-model-param-context-window-body">
-                            <input class="ai-model-param-num" id="ai-model-edit-context-window-num" min="1024"
-                                   step="1024" type="number" value="8192"
-                                   data-i18n-ph="ai.model_modal.context_window.ph"/>
-                            <span class="ai-model-param-hint" data-i18n="ai.model_modal.context_window.hint">关闭时自动估算</span>
+                            <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.context_window.ph" id="ai-model-edit-context-window-num"
+                                   min="1024" step="1024" type="number"
+                                   value="8192"/>
+                            <span class="ai-model-param-hint"
+                                  data-i18n="ai.model_modal.context_window.hint">关闭时自动估算</span>
                         </div>
                     </div>
 
@@ -1466,13 +1467,16 @@
                     <div class="ai-model-param" id="ai-model-param-thinking-style">
                         <div class="ai-model-param-head">
                             <label class="setting-label" data-i18n="ai.model_modal.thinking_style">思考控件形态</label>
-                            <select id="ai-model-edit-thinking-style-select" class="ai-model-edit-inline-select">
-                                <option value="auto" data-i18n="ai.model_modal.thinking_style.auto">自动</option>
-                                <option value="effort" data-i18n="ai.model_modal.thinking_style.effort">强制强度下拉</option>
-                                <option value="toggle" data-i18n="ai.model_modal.thinking_style.toggle">强制开关</option>
+                            <select class="ai-model-edit-inline-select" id="ai-model-edit-thinking-style-select">
+                                <option data-i18n="ai.model_modal.thinking_style.auto" value="auto">自动</option>
+                                <option data-i18n="ai.model_modal.thinking_style.effort" value="effort">强制强度下拉
+                                </option>
+                                <option data-i18n="ai.model_modal.thinking_style.toggle" value="toggle">强制开关
+                                </option>
                             </select>
                         </div>
-                        <p class="ai-model-param-hint" data-i18n="ai.model_modal.thinking_style.hint">自动按启发式判定；强制可覆盖 deepseek 模型名误判</p>
+                        <p class="ai-model-param-hint" data-i18n="ai.model_modal.thinking_style.hint">自动按启发式判定；强制可覆盖
+                            deepseek 模型名误判</p>
                     </div>
 
                     <!-- 思考强度（0.21.17 + 0.21.18）：reasoning_effort 线值，关=auto(omit)，默认=不发送，自定义留空=不发送 -->
@@ -1485,18 +1489,18 @@
                             </label>
                         </div>
                         <div class="ai-model-param-body hidden" id="ai-model-param-reasoning-effort-body">
+                            <!-- 0.21.23: 预设档位 option（minimal..max）由 model-edit.js 按
+                                 shared/effort-levels.js 单源动态渲染，静态只保留默认/none/自定义锚点 -->
                             <select id="ai-model-edit-reasoning-effort-select">
-                                <option value="">默认（不发送）</option>
-                                <option value="none">关闭思考（none）</option>
-                                <option value="minimal">极低（minimal）</option>
-                                <option value="low">低（low）</option>
-                                <option value="medium">中（medium）</option>
-                                <option value="high">高（high）</option>
-                                <option value="xhigh">极高（xhigh）</option>
-                                <option value="max">最大（max）</option>
-                                <option value="custom">自定义…</option>
+                                <option data-i18n="ai.model_modal.reasoning_effort.default" value="">默认（不发送）
+                                </option>
+                                <option data-i18n="ai.model_modal.reasoning_effort.none" value="none">关闭思考（none）
+                                </option>
+                                <option data-i18n="ai.model_modal.reasoning_effort.custom" value="custom">自定义…
+                                </option>
                             </select>
-                            <input class="ai-model-param-num" hidden id="ai-model-edit-reasoning-effort-custom"
+                            <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.reasoning_effort.custom_ph" hidden
+                                   id="ai-model-edit-reasoning-effort-custom"
                                    placeholder="留空 = 不发送（模型默认档）" type="text"/>
                         </div>
                     </div>

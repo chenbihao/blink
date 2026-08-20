@@ -38,7 +38,6 @@
 /* ── AI Tab 专用（0.9.1 Phase 6）─────────────────────────────────────────── */
 
 .ai-expert-settings {
-    border-top: 1px solid var(--surface);
     margin-top: var(--space-sm, 8px);
     padding-top: var(--space-sm, 8px);
 }

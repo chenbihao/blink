@@ -11,6 +11,7 @@ import {aiState, escapeAttr, escapeHtml, fetchAvailableModelsFor, saveAIConfig} 
 import {renderAITierBanner, renderAITierSelects} from "./tier.js";
 import {t} from "../../../i18n/index.js";
 import {iconHTML} from "../../../shared/icon.js";
+import {EFFORT_LEVELS} from "../../../shared/effort-levels.js";
 
 /**
  * 打开模型编辑 modal。modelId 为 null 时是"新增"模式。
@@ -135,6 +136,28 @@ function setupThinkingStyleRow(style, providerKind) {
     select.value = style || "auto";
 }
 
+/**
+ * 0.21.23: 同步思考强度下拉的预设档位 option（单一真源 EFFORT_LEVELS）。
+ *
+ * 静态 HTML 只保留结构锚点（默认 / none / custom 三项）；预设档位在打开弹窗时
+ * 按 EFFORT_LEVELS 渲染（幂等——与现状一致时跳过），文案走
+ * `ai.model_modal.reasoning_effort.{level}` i18n key。档位增减只改共享常量。
+ */
+function ensureReasoningEffortPresetOptions(select) {
+    const current = [...select.options].map((o) => o.value);
+    const expected = ["", "none", ...EFFORT_LEVELS, "custom"];
+    if (current.length === expected.length && current.every((v, i) => v === expected[i])) return;
+
+    const customOption = select.querySelector('option[value="custom"]');
+    for (const level of EFFORT_LEVELS) {
+        const opt = document.createElement("option");
+        opt.value = level;
+        opt.dataset.i18n = `ai.model_modal.reasoning_effort.${level}`;
+        opt.textContent = t(`ai.model_modal.reasoning_effort.${level}`);
+        select.insertBefore(opt, customOption);
+    }
+}
+
 /** 思考强度行（0.21.17 + 0.21.18）：null = auto（toggle 关）；"" = 默认（不发送）；否则回显预设/自定义 */
 function setupReasoningEffortRow(effort) {
     const $ = (id) => document.getElementById(id);
@@ -143,13 +166,14 @@ function setupReasoningEffortRow(effort) {
     const select = $("ai-model-edit-reasoning-effort-select");
     const custom = $("ai-model-edit-reasoning-effort-custom");
     if (!toggle || !body || !select || !custom) return;
+    ensureReasoningEffortPresetOptions(select);
 
     const enabled = effort != null;
     toggle.checked = enabled;
     body.classList.toggle("hidden", !enabled);
     if (!enabled) return;
 
-    const presets = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    const presets = ["none", ...EFFORT_LEVELS];
     if (effort === "" || presets.includes(effort)) {
         select.value = effort; // "" = 默认（不发送，用模型默认档）
         custom.value = "";
@@ -272,6 +296,15 @@ async function performModelFetch() {
     }
 }
 
+/** 模型拉取列表的 context_window 标注：1000 进制取整（128000→128K，1000000→1M）。 */
+function formatContextWindowLabel(cw) {
+    if (cw >= 1000000) {
+        const m = cw / 1000000;
+        return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+    }
+    return `${Math.round(cw / 1000)}K`;
+}
+
 function renderModelFetchList(filter) {
     const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
     if (!dropdown) return;
@@ -304,8 +337,9 @@ function renderModelFetchList(filter) {
         .slice(0, 100);
 
     let itemsHtml = filtered.map((m) => {
-        // 0.21.21: 显示 context_window 标注
-        const cwLabel = m.context_window != null ? ` <span class="ai-model-fetch-cw" title="${t("ai.model_modal.context_window.fetched")}">${(m.context_window / 1024).toFixed(0)}K</span>` : "";
+        // 0.21.21: 显示 context_window 标注（按 1000 进制取整——业界容量是营销数：
+        // 128000 → 128K、1000000 → 1M；÷1024 会显示成 125K/977K）
+        const cwLabel = m.context_window != null ? ` <span class="ai-model-fetch-cw" title="${t("ai.model_modal.context_window.fetched")}">${formatContextWindowLabel(m.context_window)}</span>` : "";
         return `<div class="ai-model-fetch-item" data-model-id="${escapeAttr(m.id)}" data-context-window="${m.context_window != null ? m.context_window : ""}">${escapeHtml(m.id)}${cwLabel}</div>`;
     }).join("");
 

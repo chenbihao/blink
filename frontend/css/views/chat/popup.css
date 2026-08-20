@@ -208,9 +208,10 @@
     font-weight: 600;
 }
 
-.cbp-context-source {
+/* 徽章样式：来源标签与置信度标签共用（仅 margin-left 与修饰类不同） */
+.cbp-context-source,
+.cbp-confidence {
     display: inline-block;
-    margin-left: 6px;
     padding: 1px 5px;
     border-radius: 3px;
     font-size: 9px;
@@ -219,23 +220,17 @@
     vertical-align: middle;
 }
 
-.cbp-context-source-fallback {
-    color: var(--warning, #ffc107);
+.cbp-context-source {
+    margin-left: 6px;
 }
 
 .cbp-confidence {
-    display: inline-block;
     margin-left: 4px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-size: 9px;
-    background: var(--surface-2, #45475a);
-    color: var(--text-sub, #a6adc8);
-    vertical-align: middle;
 }
 
+.cbp-context-source-fallback,
 .cbp-confidence-low {
-    color: var(--warning, #ffc107);
+    color: var(--warning);
 }
 
 .cbp-context-empty {

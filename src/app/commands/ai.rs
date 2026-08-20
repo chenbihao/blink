@@ -829,8 +829,7 @@ pub async fn select_chat_model(
 ///
 /// `selection_id` = `"{provider_id}:{model_id}"`（同 `select_chat_model`）。
 /// `reasoning_effort`:
-/// - `None` = 清除配置（auto：退回旧二值行为，开启→high / 关闭→none）
-/// - `Some("")` = 自定义-不发送（omit，用模型默认档，绝不出 400）
+/// - `None` / `Some("")` = 不发送该字段（omit，用模型默认档，绝不出 400；0.21.18 起二者语义统一）
 /// - `Some("none")` = 显式关闭思考
 /// - 其余 = 该档位原样发送（`minimal/low/medium/high/xhigh/max` 或自定义值）
 ///

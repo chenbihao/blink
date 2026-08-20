@@ -12,7 +12,7 @@
     border: 1px solid var(--surface);
     border-radius: 14px;
     background: var(--bg-sidebar);
-    transition: border-color 0.15s;
+    transition: border-color var(--transition-base);
 }
 
 .chat-composer-input-wrap:focus-within {
@@ -110,10 +110,7 @@
     align-items: center;
     gap: var(--space-xs);
     padding: var(--space-2xs) var(--space-sm);
-    margin-bottom: var(--space-2xs);
-    background: var(--warning-bg, rgba(255, 193, 7, 0.1));
-    border: 1px solid var(--warning, #ffc107);
-    border-radius: var(--radius-sm);
+    max-width: min(90%, 620px);
     font-size: 12px;
     color: var(--text);
 }
@@ -147,6 +144,29 @@
     background: var(--surface-2);
 }
 
+/* 0.21.23: 手动压缩异步化——摘要后台执行期间按钮 loading 态（禁用 + 弱化 + 脉冲） */
+.chat-context-warning-btn.loading {
+    opacity: 0.6;
+    cursor: progress;
+    animation: chat-warning-btn-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-context-warning-btn:disabled {
+    pointer-events: none;
+}
+
+@keyframes chat-warning-btn-pulse {
+
+    0%,
+    100% {
+        opacity: 0.6;
+    }
+
+    50% {
+        opacity: 0.85;
+    }
+}
+
 .chat-context-warning-close {
     background: none;
     border: none;
@@ -175,7 +195,7 @@
     color: var(--text-faint);
     font-size: 12px;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: all var(--transition-base);
     user-select: none;
 }
 
@@ -206,7 +226,7 @@
     width: 12px;
     height: 12px;
     opacity: 0.6;
-    transition: transform 0.15s;
+    transition: transform var(--transition-base);
 }
 
 /* 无等级概念（简单开关）时隐藏 caret */
@@ -257,7 +277,7 @@
     font-size: 13px;
     color: var(--text);
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background var(--transition-base);
     text-align: left; /* 触发器是 button 默认 text-align:center，需显式恢复左对齐 */
 }
 
@@ -325,7 +345,7 @@
     border: 1px solid transparent;
     border-radius: 6px;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    transition: background var(--transition-base), color var(--transition-base);
 }
 
 .chat-thinking-custom-apply:hover {
@@ -351,7 +371,7 @@
     background: var(--accent);
     color: var(--on-accent);
     cursor: pointer;
-    transition: opacity 0.15s;
+    transition: opacity var(--transition-base);
     flex-shrink: 0;
 }
 
@@ -426,7 +446,7 @@
     font: inherit;
     font-size: 14px;
     cursor: pointer;
-    transition: opacity 0.15s;
+    transition: opacity var(--transition-base);
 }
 
 .chat-empty-btn:hover {
@@ -453,7 +473,7 @@
     color: var(--text-sub);
     font-size: 13px;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: all var(--transition-base);
 }
 
 .chat-guide-bubble:hover {
@@ -477,4 +497,3 @@
     border-left-color: var(--accent);
     color: var(--text-sub);
 }
-

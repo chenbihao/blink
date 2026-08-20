@@ -286,10 +286,7 @@ pub fn chat_system_prompt_with_skills(
     if !tool_sources.is_empty() {
         prompt.push_str("\n\n【工具来源】\n");
         if tool_sources.builtin_count > 0 {
-            prompt.push_str(&format!(
-                "- 内置能力：{} 个\n",
-                tool_sources.builtin_count
-            ));
+            prompt.push_str(&format!("- 内置能力：{} 个\n", tool_sources.builtin_count));
         }
         for (server_name, tool_names) in &tool_sources.mcp_servers {
             prompt.push_str(&format!(
@@ -756,7 +753,8 @@ mod tests {
             make_summary("rust-debug", "Debug Rust errors", SkillSource::Blink, true),
             make_summary("translator", "Translate text", SkillSource::Claude, false),
         ];
-        let prompt = chat_system_prompt_with_skills(None, &summaries, &[], &ToolSourceSummary::default());
+        let prompt =
+            chat_system_prompt_with_skills(None, &summaries, &[], &ToolSourceSummary::default());
         assert!(prompt.contains("可用技能"));
         assert!(prompt.contains("[blink] rust-debug"));
         assert!(prompt.contains("Debug Rust errors"));
@@ -783,7 +781,12 @@ mod tests {
             dir_path: std::path::PathBuf::from("/tmp"),
             source_cli_path: None,
         }];
-        let prompt = chat_system_prompt_with_skills(None, &summaries, &triggered, &ToolSourceSummary::default());
+        let prompt = chat_system_prompt_with_skills(
+            None,
+            &summaries,
+            &triggered,
+            &ToolSourceSummary::default(),
+        );
         assert!(prompt.contains("已激活技能详情"));
         assert!(prompt.contains("Rust Debug Workflow"));
         assert!(prompt.contains("Read error"));
@@ -797,7 +800,12 @@ mod tests {
 
     #[test]
     fn chat_prompt_with_skills_preserves_group_prompt() {
-        let prompt = chat_system_prompt_with_skills(Some("你是翻译助手"), &[], &[], &ToolSourceSummary::default());
+        let prompt = chat_system_prompt_with_skills(
+            Some("你是翻译助手"),
+            &[],
+            &[],
+            &ToolSourceSummary::default(),
+        );
         assert!(prompt.contains("分组指令"));
         assert!(prompt.contains("你是翻译助手"));
     }
@@ -810,7 +818,12 @@ mod tests {
             SkillSource::Blink,
             false,
         )];
-        let prompt = chat_system_prompt_with_skills(Some("你是助手"), &summaries, &[], &ToolSourceSummary::default());
+        let prompt = chat_system_prompt_with_skills(
+            Some("你是助手"),
+            &summaries,
+            &[],
+            &ToolSourceSummary::default(),
+        );
         assert!(prompt.contains("分组指令"), "分组指令应保留");
         assert!(prompt.contains("可用技能"), "技能摘要应追加");
     }
@@ -827,16 +840,28 @@ mod tests {
         let tool_sources = ToolSourceSummary {
             builtin_count: 3,
             mcp_servers: vec![
-                ("github".to_string(), vec!["create_issue".to_string(), "list_prs".to_string()]),
+                (
+                    "github".to_string(),
+                    vec!["create_issue".to_string(), "list_prs".to_string()],
+                ),
                 ("filesystem".to_string(), vec!["read_file".to_string()]),
             ],
         };
         let prompt = chat_system_prompt_with_skills(None, &[], &[], &tool_sources);
         assert!(prompt.contains("【工具来源】"), "应有工具来源段");
         assert!(prompt.contains("内置能力：3 个"), "应有内置能力数量");
-        assert!(prompt.contains("MCP server \"github\""), "应有 github server 名");
-        assert!(prompt.contains("create_issue, list_prs"), "应有 github 工具名清单");
-        assert!(prompt.contains("MCP server \"filesystem\""), "应有 filesystem server 名");
+        assert!(
+            prompt.contains("MCP server \"github\""),
+            "应有 github server 名"
+        );
+        assert!(
+            prompt.contains("create_issue, list_prs"),
+            "应有 github 工具名清单"
+        );
+        assert!(
+            prompt.contains("MCP server \"filesystem\""),
+            "应有 filesystem server 名"
+        );
         assert!(prompt.contains("read_file"), "应有 filesystem 工具名");
     }
 
@@ -849,7 +874,10 @@ mod tests {
         let prompt = chat_system_prompt_with_skills(None, &[], &[], &tool_sources);
         assert!(prompt.contains("【工具来源】"), "应有工具来源段");
         assert!(prompt.contains("内置能力：5 个"), "应有内置能力数量");
-        assert!(!prompt.contains("MCP server"), "无 MCP server 不应输出 MCP 行");
+        assert!(
+            !prompt.contains("MCP server"),
+            "无 MCP server 不应输出 MCP 行"
+        );
     }
 
     #[test]

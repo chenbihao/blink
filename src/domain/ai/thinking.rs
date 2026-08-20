@@ -113,9 +113,9 @@ pub(crate) fn thinking_request_patch(
             // Gemini：尚未接入
             ProviderKind::GeminiGenerateContent => None,
             // OpenAICompatible 不应到达此分支（被 DeepSeekSwitch/EffortLevels 覆盖）
-            ProviderKind::OpenAICompatible => unreachable!(
-                "OpenAICompatible resolved to PlainSwitch — resolve_thinking_mode bug"
-            ),
+            ProviderKind::OpenAICompatible => {
+                unreachable!("OpenAICompatible resolved to PlainSwitch — resolve_thinking_mode bug")
+            }
         },
     }
 }
@@ -442,7 +442,8 @@ mod tests {
     fn ollama_toggles_think_flag() {
         let on = thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", true, None, None);
         assert_eq!(on, Some(serde_json::json!({ "think": true })));
-        let off = thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", false, None, None);
+        let off =
+            thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", false, None, None);
         assert_eq!(off, Some(serde_json::json!({ "think": false })));
     }
 
@@ -812,9 +813,19 @@ mod tests {
     /// resolve_thinking_mode: 非 OAICompatible 时 style 不生效，恒为 PlainSwitch。
     #[test]
     fn resolve_non_oai_ignores_style() {
-        for style in [None, Some(ThinkingStyle::Auto), Some(ThinkingStyle::Effort), Some(ThinkingStyle::Toggle)] {
+        for style in [
+            None,
+            Some(ThinkingStyle::Auto),
+            Some(ThinkingStyle::Effort),
+            Some(ThinkingStyle::Toggle),
+        ] {
             assert_eq!(
-                resolve_thinking_mode(ProviderKind::AnthropicMessages, None, "claude-3-7-sonnet", style),
+                resolve_thinking_mode(
+                    ProviderKind::AnthropicMessages,
+                    None,
+                    "claude-3-7-sonnet",
+                    style
+                ),
                 ThinkingMode::PlainSwitch
             );
             assert_eq!(
@@ -822,7 +833,12 @@ mod tests {
                 ThinkingMode::PlainSwitch
             );
             assert_eq!(
-                resolve_thinking_mode(ProviderKind::GeminiGenerateContent, None, "gemini-3-pro", style),
+                resolve_thinking_mode(
+                    ProviderKind::GeminiGenerateContent,
+                    None,
+                    "gemini-3-pro",
+                    style
+                ),
                 ThinkingMode::PlainSwitch
             );
         }

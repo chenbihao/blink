@@ -276,15 +276,11 @@ impl AgentProvider {
         })
     }
 
-    /// 流式 prompt--驱动 agent loop,chunk 经 `tx` emit 前端。
+    /// 当前 Agent 挂载的工具定义快照（0.21.17）。
     ///
-    /// `conversation_id` 贯穿:rig agent 按 id 自动 load/append memory(0.12.1 进程内,
-    /// 0.12.2 持久化)。调用方(commands 层)创建 channel,spawn 此 task,chunk 走
-    /// `blink://chat-stream` 事件。
-    /// 0.21.17: 返回当前 Agent 挂载的工具定义快照，供 token 预算估算使用。
-    ///
-    /// 快照在构造时固化，不随运行时变化。纯 Capability tool 有 hint（来自 manifest），
-    /// MCP tool 无 hint（rmcp Tool 不携带此字段）。
+    /// 构造时从 `DynamicTool` + MCP tools 提取并固化，不随运行时变化——
+    /// 供 `compute_context_status` 估算 tools_tokens 使用。
+    /// 纯 Capability tool 有 hint（来自 manifest），MCP tool 无 hint（rmcp Tool 不携带此字段）。
     pub fn tool_prompt_infos(&self) -> &[crate::domain::ai::prompt::ToolPromptInfo] {
         &self.tool_prompt_infos
     }
