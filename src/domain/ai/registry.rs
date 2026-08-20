@@ -467,6 +467,7 @@ mod tests {
                             max_tokens: None,
                             custom_parameters: Vec::new(),
                             reasoning_effort: None,
+                            thinking_style: None,
                             capabilities: vec![ModelCapability::Chat],
                         })
                         .collect(),

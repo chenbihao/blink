@@ -47,6 +47,7 @@ use crate::domain::ai::factory::{
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::rig_provider::expose_for_rig;
 use crate::domain::ai::thinking::thinking_request_patch;
+use crate::domain::config::ai_config::ThinkingStyle;
 use crate::infra::platform::secret;
 use crate::infra::utils::text::single_line;
 
@@ -130,6 +131,8 @@ pub struct AgentProvider {
     kind: ProviderKind,
     base_url: Option<String>,
     model_id: String,
+    /// 0.21.22: per-model 思考控件形态逃生口——构造时从 `ModelEntry.thinking_style` 固化
+    thinking_style: Option<ThinkingStyle>,
     /// 0.21.17: 工具定义快照——构造时从 `DynamicTool` + MCP tools 提取，
     /// 供 `compute_context_status` 估算 tools_tokens 使用。
     /// 不随 Agent 运行时变化，构造时一次性固化。
@@ -196,6 +199,8 @@ impl AgentProvider {
         let kind = entry.kind;
         let base_url = entry.base_url.clone();
         let model_id = model.id.clone();
+        // 0.21.22: per-model thinking_style 逃生口
+        let thinking_style = model.thinking_style;
 
         let agent = match entry.kind {
             ProviderKind::OpenAICompatible => {
@@ -266,6 +271,7 @@ impl AgentProvider {
             kind,
             base_url,
             model_id,
+            thinking_style,
             tool_prompt_infos,
         })
     }
@@ -301,13 +307,14 @@ impl AgentProvider {
         } else {
             Some(self.model_name.clone())
         };
-        // 按 provider + 开关状态 + 显式等级计算 thinking 补丁（见 thinking_request_patch）
+        // 按 provider + 开关状态 + 显式等级 + per-model style 计算 thinking 补丁
         let thinking_patch = thinking_request_patch(
             self.kind,
             self.base_url.as_deref(),
             &self.model_id,
             thinking_enabled,
             reasoning_effort.as_deref(),
+            self.thinking_style,
         );
         // 0.21.16: 思考开关状态打 trace——配合"不隐藏真实思考块"，开关失效时便于及时发现
         tracing::trace!(
@@ -374,6 +381,7 @@ impl AgentProvider {
             &self.model_id,
             thinking_enabled,
             reasoning_effort.as_deref(),
+            self.thinking_style,
         );
 
         match &self.agent {
@@ -1359,6 +1367,7 @@ mod tests {
             max_tokens: None,
             capabilities: vec![ModelCapability::Chat],
             reasoning_effort: None,
+            thinking_style: None,
             custom_parameters: Vec::new(),
         };
 

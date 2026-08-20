@@ -1389,13 +1389,52 @@ let thinkingDropdown = null;
 
 /**
  * 更新 header 的 provider/model 标签。
- * 只显示模型 display name，不显示 provider 名和 badge。
- * @param {object} status ChatStatus（model_name）
+ * 显示「供应商 · 模型名」一行：provider 弱色小字 + 模型名主体。
+ * provider_name 为 null/空时只显示模型名，不渲染悬空的「·」分隔符。
+ * 禁止 innerHTML 拼接（XSS）——用 textContent 逐子 span 赋值。
+ * @param {object} status ChatStatus（provider_name, model_name）
  */
 function updateProviderLabel(status) {
     const label = document.getElementById("chat-provider-label");
     if (!label) return;
-    label.textContent = status.model_name || "未配置模型";
+
+    const providerName = status.provider_name && String(status.provider_name).trim();
+    const modelName = status.model_name && String(status.model_name).trim();
+
+    // 首次渲染时构建子 span 结构（provider · model），后续调用直接用 children 取
+    if (label.children.length === 0) {
+        label.textContent = "";
+        label.appendChild(Object.assign(document.createElement("span"), { className: "chat-model-provider" }));
+        const sep = document.createElement("span");
+        sep.className = "chat-model-trigger-sep";
+        sep.textContent = "·";
+        label.appendChild(sep);
+        label.appendChild(Object.assign(document.createElement("span"), { className: "chat-model-name" }));
+    }
+
+    // 首次创建后结构固定，直接用 children 索引避免每次 querySelector
+    const providerEl = label.children[0];
+    const sepEl = label.children[1];
+    const nameEl = label.children[2];
+
+    if (providerName && modelName) {
+        providerEl.textContent = providerName;
+        providerEl.hidden = false;
+        sepEl.hidden = false;
+        nameEl.textContent = modelName;
+    } else if (modelName) {
+        // 只有模型名，隐藏 provider 和分隔符
+        providerEl.textContent = "";
+        providerEl.hidden = true;
+        sepEl.hidden = true;
+        nameEl.textContent = modelName;
+    } else {
+        // 两者皆空
+        providerEl.textContent = "";
+        providerEl.hidden = true;
+        sepEl.hidden = true;
+        nameEl.textContent = "未配置模型";
+    }
 }
 
 /**

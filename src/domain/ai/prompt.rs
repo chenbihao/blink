@@ -39,6 +39,26 @@ pub struct ToolPromptInfo {
     pub hint: Option<String>,
 }
 
+/// 工具来源摘要（0.21.22）——喂给 chat preamble 的「工具来源」段。
+///
+/// 内置能力数量 + 各在线 MCP server 的工具名清单。
+/// 由 `McpClientManager::tool_source_summary()` 产出，
+/// `chat_system_prompt_with_skills` 消费。
+#[derive(Debug, Clone, Default)]
+pub struct ToolSourceSummary {
+    /// 内置能力（Capability）工具数量
+    pub builtin_count: usize,
+    /// 各在线 MCP server 名 → 工具名清单（已过滤 disabled）
+    pub mcp_servers: Vec<(String, Vec<String>)>,
+}
+
+impl ToolSourceSummary {
+    /// 是否为空——内置和 MCP 都没有工具
+    pub fn is_empty(&self) -> bool {
+        self.builtin_count == 0 && self.mcp_servers.is_empty()
+    }
+}
+
 impl ToolPromptInfo {
     /// 从 `ToolSchema` 构造（无 hint）。
     #[allow(dead_code)] // 便利 API，build_prompt_infos 批量构造时用 from_schema_with_hint
@@ -258,8 +278,27 @@ pub fn chat_system_prompt_with_skills(
     group_prompt: Option<&str>,
     skill_summaries: &[SkillSummary],
     triggered_skills: &[SkillEntry],
+    tool_sources: &ToolSourceSummary,
 ) -> String {
     let mut prompt = chat_system_prompt_with_group(group_prompt);
+
+    // 0.21.22: 「工具来源」段——仅 extensions 模式注入
+    if !tool_sources.is_empty() {
+        prompt.push_str("\n\n【工具来源】\n");
+        if tool_sources.builtin_count > 0 {
+            prompt.push_str(&format!(
+                "- 内置能力：{} 个\n",
+                tool_sources.builtin_count
+            ));
+        }
+        for (server_name, tool_names) in &tool_sources.mcp_servers {
+            prompt.push_str(&format!(
+                "- MCP server \"{}\"：{}\n",
+                server_name,
+                tool_names.join(", ")
+            ));
+        }
+    }
 
     // 阶段 1：所有 Skill 摘要（常驻，~50 token/skill）
     if !skill_summaries.is_empty() {
@@ -717,7 +756,7 @@ mod tests {
             make_summary("rust-debug", "Debug Rust errors", SkillSource::Blink, true),
             make_summary("translator", "Translate text", SkillSource::Claude, false),
         ];
-        let prompt = chat_system_prompt_with_skills(None, &summaries, &[]);
+        let prompt = chat_system_prompt_with_skills(None, &summaries, &[], &ToolSourceSummary::default());
         assert!(prompt.contains("可用技能"));
         assert!(prompt.contains("[blink] rust-debug"));
         assert!(prompt.contains("Debug Rust errors"));
@@ -744,7 +783,7 @@ mod tests {
             dir_path: std::path::PathBuf::from("/tmp"),
             source_cli_path: None,
         }];
-        let prompt = chat_system_prompt_with_skills(None, &summaries, &triggered);
+        let prompt = chat_system_prompt_with_skills(None, &summaries, &triggered, &ToolSourceSummary::default());
         assert!(prompt.contains("已激活技能详情"));
         assert!(prompt.contains("Rust Debug Workflow"));
         assert!(prompt.contains("Read error"));
@@ -752,13 +791,13 @@ mod tests {
 
     #[test]
     fn chat_prompt_with_skills_empty_equals_group_prompt() {
-        let prompt = chat_system_prompt_with_skills(None, &[], &[]);
+        let prompt = chat_system_prompt_with_skills(None, &[], &[], &ToolSourceSummary::default());
         assert_eq!(prompt, chat_system_prompt());
     }
 
     #[test]
     fn chat_prompt_with_skills_preserves_group_prompt() {
-        let prompt = chat_system_prompt_with_skills(Some("你是翻译助手"), &[], &[]);
+        let prompt = chat_system_prompt_with_skills(Some("你是翻译助手"), &[], &[], &ToolSourceSummary::default());
         assert!(prompt.contains("分组指令"));
         assert!(prompt.contains("你是翻译助手"));
     }
@@ -771,7 +810,7 @@ mod tests {
             SkillSource::Blink,
             false,
         )];
-        let prompt = chat_system_prompt_with_skills(Some("你是助手"), &summaries, &[]);
+        let prompt = chat_system_prompt_with_skills(Some("你是助手"), &summaries, &[], &ToolSourceSummary::default());
         assert!(prompt.contains("分组指令"), "分组指令应保留");
         assert!(prompt.contains("可用技能"), "技能摘要应追加");
     }
@@ -779,5 +818,44 @@ mod tests {
     /// 辅助：构造单元素 Vec
     fn tools_vec(tool: &[ToolPromptInfo]) -> Vec<ToolPromptInfo> {
         tool.to_vec()
+    }
+
+    // ── T2: tool_source preamble 格式测试（0.21.22）──
+
+    #[test]
+    fn chat_prompt_with_tool_sources_includes_mcp_section() {
+        let tool_sources = ToolSourceSummary {
+            builtin_count: 3,
+            mcp_servers: vec![
+                ("github".to_string(), vec!["create_issue".to_string(), "list_prs".to_string()]),
+                ("filesystem".to_string(), vec!["read_file".to_string()]),
+            ],
+        };
+        let prompt = chat_system_prompt_with_skills(None, &[], &[], &tool_sources);
+        assert!(prompt.contains("【工具来源】"), "应有工具来源段");
+        assert!(prompt.contains("内置能力：3 个"), "应有内置能力数量");
+        assert!(prompt.contains("MCP server \"github\""), "应有 github server 名");
+        assert!(prompt.contains("create_issue, list_prs"), "应有 github 工具名清单");
+        assert!(prompt.contains("MCP server \"filesystem\""), "应有 filesystem server 名");
+        assert!(prompt.contains("read_file"), "应有 filesystem 工具名");
+    }
+
+    #[test]
+    fn chat_prompt_with_tool_sources_only_builtin() {
+        let tool_sources = ToolSourceSummary {
+            builtin_count: 5,
+            mcp_servers: vec![],
+        };
+        let prompt = chat_system_prompt_with_skills(None, &[], &[], &tool_sources);
+        assert!(prompt.contains("【工具来源】"), "应有工具来源段");
+        assert!(prompt.contains("内置能力：5 个"), "应有内置能力数量");
+        assert!(!prompt.contains("MCP server"), "无 MCP server 不应输出 MCP 行");
+    }
+
+    #[test]
+    fn chat_prompt_with_empty_tool_sources_omits_section() {
+        let tool_sources = ToolSourceSummary::default();
+        let prompt = chat_system_prompt_with_skills(None, &[], &[], &tool_sources);
+        assert!(!prompt.contains("【工具来源】"), "空工具来源不应输出段落");
     }
 }

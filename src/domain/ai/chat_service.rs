@@ -1077,6 +1077,23 @@ impl ChatService {
         } else {
             Vec::new()
         };
+        // 0.21.22: 工具来源摘要——仅 extensions 模式注入 preamble
+        let tool_sources = if plan.includes_extensions() {
+            let mcp_servers = self.mcp_client.tool_source_summary().await;
+            // builtin_count 取 AI allowlist 实际启用的数量——与 ensure_provider
+            // 中 build_agent_tools 的 allowlist 过滤口径一致，不报全部注册数。
+            let ai_allowlist =
+                crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(
+                    &self.config_pool,
+                )
+                .await;
+            crate::domain::ai::prompt::ToolSourceSummary {
+                builtin_count: ai_allowlist.len(),
+                mcp_servers,
+            }
+        } else {
+            crate::domain::ai::prompt::ToolSourceSummary::default()
+        };
         let preamble = if !plan.includes_extensions() {
             pure_chat_system_prompt_with_group(group_system_prompt.as_deref())
         } else {
@@ -1084,6 +1101,7 @@ impl ChatService {
                 group_system_prompt.as_deref(),
                 &skill_summaries,
                 &triggered_skills,
+                &tool_sources,
             )
         };
 
@@ -1226,6 +1244,7 @@ impl ChatService {
                             resolved.provider.kind,
                             resolved.provider.base_url.as_deref(),
                             &resolved.model.id,
+                            resolved.model.thinking_style,
                         );
                     let retry_effort_for_interceptor = reasoning_effort.clone();
 
@@ -1517,6 +1536,7 @@ impl ChatService {
                         r.provider.kind,
                         r.provider.base_url.as_deref(),
                         &r.model.id,
+                        r.model.thinking_style,
                     ),
                     r.model.reasoning_effort.clone(),
                 )

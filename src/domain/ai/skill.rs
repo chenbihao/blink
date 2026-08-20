@@ -1669,7 +1669,8 @@ Options:
 
         // 7. 验证触发的 skill 可注入 preamble
         use crate::domain::ai::prompt::chat_system_prompt_with_skills;
-        let prompt = chat_system_prompt_with_skills(None, &summaries, &matched);
+        use crate::domain::ai::prompt::ToolSourceSummary;
+        let prompt = chat_system_prompt_with_skills(None, &summaries, &matched, &ToolSourceSummary::default());
         assert!(prompt.contains("blink-cli"), "preamble 应包含 skill name");
         assert!(prompt.contains("可用技能"), "应有技能摘要段");
         assert!(

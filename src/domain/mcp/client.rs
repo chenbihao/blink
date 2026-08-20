@@ -810,16 +810,26 @@ impl McpClientManager {
         let connected = self.connected.read().await;
         let mut tools: Vec<(RmcpTool, ServerSink)> = Vec::new();
 
-        for (_name, server) in connected.iter() {
+        for (name, server) in connected.iter() {
             // 获取 peer（ServerSink = Peer<RoleClient>），用于构造 McpTool
             let peer = server.service.peer().clone();
+            // 0.21.22: 给 description 加 [MCP:{server名}] 前缀，让 LLM 区分工具来源
+            let source_prefix = format!("[MCP:{name}] ");
             // 从缓存的 rmcp tool 列表过滤 disabled
             for rmcp_tool in &server.rmcp_tools {
                 let tool_name = rmcp_tool.name.to_string();
                 if server.config.disabled_tools.contains(&tool_name) {
                     continue;
                 }
-                tools.push((rmcp_tool.clone(), peer.clone()));
+                let mut tool = rmcp_tool.clone();
+                tool.description = Some(
+                    format!(
+                        "{source_prefix}{}",
+                        tool.description.as_deref().unwrap_or("")
+                    )
+                    .into(),
+                );
+                tools.push((tool, peer.clone()));
             }
         }
 
@@ -898,6 +908,27 @@ impl McpClientManager {
             }
         }
         sources
+    }
+
+    /// 0.21.22: 获取工具来源摘要——server 名 → 非 disabled tool 名清单。
+    ///
+    /// 供 chat preamble 「工具来源」段注入。只返回 connected + 非 disabled 的 server→tools。
+    pub async fn tool_source_summary(&self) -> Vec<(String, Vec<String>)> {
+        let connected = self.connected.read().await;
+        let mut summary = Vec::new();
+        for (server_name, server) in connected.iter() {
+            let mut tool_names = Vec::new();
+            for tool in &server.rmcp_tools {
+                let name = tool.name.to_string();
+                if !server.config.disabled_tools.contains(&name) {
+                    tool_names.push(name);
+                }
+            }
+            if !tool_names.is_empty() {
+                summary.push((server_name.clone(), tool_names));
+            }
+        }
+        summary
     }
 
     /// 更新单个 server 的 disabled_tools 并刷新 tool 列表缓存。

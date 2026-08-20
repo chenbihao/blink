@@ -4,7 +4,58 @@
 //! 不同供应商的"开启/关闭思考"字段结构完全不同，这里把「供应商 → 开/关各发什么」
 //! 收敛成单一纯函数 `thinking_request_patch`，两个调用方共享同一份逻辑。
 
-use crate::domain::config::ai_config::ProviderKind;
+use crate::domain::config::ai_config::{ProviderKind, ThinkingStyle};
+
+/// 思考控件形态（0.21.22）——`resolve_thinking_mode` 返回的三态。
+///
+/// - `DeepSeekSwitch`：控件开关，请求发 `thinking.type`（DeepSeek 底座格式）
+/// - `EffortLevels`：控件下拉，请求发 `reasoning_effort`
+/// - `PlainSwitch`：控件开关，请求发各 provider 自有格式（Anthropic/Ollama/Gemini）
+///
+/// `thinking_supports_effort` 判断 `EffortLevels` vs 其他；
+/// `thinking_request_patch` 据此分支决定发送格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThinkingMode {
+    /// DeepSeek 底座开关——发 `thinking.type`
+    DeepSeekSwitch,
+    /// OpenAI reasoning_effort 等级下拉——发 `reasoning_effort`
+    EffortLevels,
+    /// 非 OAICompatible 的简单开关——发各自格式
+    PlainSwitch,
+}
+
+/// 判定思考控件形态的单一真源（0.21.22）。
+///
+/// 语义：
+/// - `style = Auto`（None 或 `Some(Auto)`）：完全现状——启发式判定
+/// - `style = Effort`：强制 `EffortLevels`——控件下拉，不走 DeepSeek 分支
+/// - `style = Toggle`：强制 `DeepSeekSwitch`（OAICompatible）或 `PlainSwitch`（其余）——控件开关
+///
+/// 非 `OpenAICompatible` 时 style 不生效，维持各自格式。
+pub(crate) fn resolve_thinking_mode(
+    kind: ProviderKind,
+    base_url: Option<&str>,
+    model_id: &str,
+    style: Option<ThinkingStyle>,
+) -> ThinkingMode {
+    match kind {
+        ProviderKind::OpenAICompatible => match style {
+            Some(ThinkingStyle::Effort) => ThinkingMode::EffortLevels,
+            Some(ThinkingStyle::Toggle) => ThinkingMode::DeepSeekSwitch,
+            None | Some(ThinkingStyle::Auto) => {
+                if is_deepseek_base(base_url, model_id) {
+                    ThinkingMode::DeepSeekSwitch
+                } else {
+                    ThinkingMode::EffortLevels
+                }
+            }
+        },
+        // 非 OAICompatible：style 不生效，维持各自格式
+        ProviderKind::AnthropicMessages
+        | ProviderKind::OllamaHttp
+        | ProviderKind::GeminiGenerateContent => ThinkingMode::PlainSwitch,
+    }
+}
 
 /// 供应商特定的 thinking 请求补丁（纯函数，请求时按 provider + 开关状态敲定）。
 ///
@@ -33,43 +84,53 @@ pub(crate) fn thinking_request_patch(
     model_id: &str,
     thinking_enabled: bool,
     reasoning_effort: Option<&str>,
+    style: Option<ThinkingStyle>,
 ) -> Option<serde_json::Value> {
-    match kind {
-        // DeepSeek 底座（官方 base_url 或 deepseek 前缀模型名）走 thinking.type
-        ProviderKind::OpenAICompatible if is_deepseek_base(base_url, model_id) => Some(
-            serde_json::json!({ "thinking": { "type": if thinking_enabled { "enabled" } else { "disabled" } } }),
-        ),
+    let mode = resolve_thinking_mode(kind, base_url, model_id, style);
+    match mode {
+        // DeepSeek 底座走 thinking.type（style=Toggle 强制 OAICompatible 也走这里）
+        ThinkingMode::DeepSeekSwitch => Some(serde_json::json!({
+            "thinking": { "type": if thinking_enabled { "enabled" } else { "disabled" } }
+        })),
         // OpenAI 官方 / 其他 OpenAI 兼容：Chat Completions 用 reasoning_effort 控制推理
-        ProviderKind::OpenAICompatible => match reasoning_effort {
-            // 默认档（未配置 None 或显式 ""）：omit——不发送该字段，用模型默认档，
-            // 绝不用会触发 400 的字段值（0.21.18 起 None 与 "" 语义统一）
+        ThinkingMode::EffortLevels => match reasoning_effort {
+            // 默认档（未配置 None 或显式 ""）：omit——不发送该字段，用模型默认档
             None | Some("") => None,
             // 显式等级：none（关闭）或任何档位/自定义值原样发送
             Some(level) => Some(serde_json::json!({ "reasoning_effort": level })),
         },
-        // Anthropic：开启必带 budget_tokens（须小于 max_tokens），关闭只发 disabled
-        ProviderKind::AnthropicMessages if thinking_enabled => Some(serde_json::json!({
-            "thinking": { "type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET }
-        })),
-        ProviderKind::AnthropicMessages => Some(serde_json::json!({
-            "thinking": { "type": "disabled" }
-        })),
-        // Ollama：本地模型，think 开关（仅支持思考的模型生效）
-        ProviderKind::OllamaHttp => Some(serde_json::json!({ "think": thinking_enabled })),
-        // Gemini：尚未接入
-        ProviderKind::GeminiGenerateContent => None,
+        // 非 OAICompatible 的各自格式
+        ThinkingMode::PlainSwitch => match kind {
+            // Anthropic：开启必带 budget_tokens（须小于 max_tokens），关闭只发 disabled
+            ProviderKind::AnthropicMessages if thinking_enabled => Some(serde_json::json!({
+                "thinking": { "type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET }
+            })),
+            ProviderKind::AnthropicMessages => Some(serde_json::json!({
+                "thinking": { "type": "disabled" }
+            })),
+            // Ollama：本地模型，think 开关
+            ProviderKind::OllamaHttp => Some(serde_json::json!({ "think": thinking_enabled })),
+            // Gemini：尚未接入
+            ProviderKind::GeminiGenerateContent => None,
+            // OpenAICompatible 不应到达此分支（被 DeepSeekSwitch/EffortLevels 覆盖）
+            ProviderKind::OpenAICompatible => unreachable!(
+                "OpenAICompatible resolved to PlainSwitch — resolve_thinking_mode bug"
+            ),
+        },
     }
 }
 
-/// 该 provider 是否支持 `reasoning_effort` 等级（0.21.17）——前端据此决定
-/// 思考控件是"强度下拉"还是"简单开关"。仅 OpenAI 兼容且非 DeepSeek 底座支持；
-/// 其余（DeepSeek/Anthropic/Ollama/Gemini）走简单开关。
+/// 该 provider 是否支持 `reasoning_effort` 等级（0.21.17 + 0.21.22）——前端据此决定
+/// 思考控件是"强度下拉"还是"简单开关"。
+///
+/// 0.21.22 起走 `resolve_thinking_mode` 单一真源：`EffortLevels` → true，其余 → false。
 pub(crate) fn thinking_supports_effort(
     kind: ProviderKind,
     base_url: Option<&str>,
     model_id: &str,
+    style: Option<ThinkingStyle>,
 ) -> bool {
-    matches!(kind, ProviderKind::OpenAICompatible) && !is_deepseek_base(base_url, model_id)
+    resolve_thinking_mode(kind, base_url, model_id, style) == ThinkingMode::EffortLevels
 }
 
 /// Anthropic 开启思考的默认 token 预算——须在 1024..max_tokens 之间。
@@ -197,6 +258,7 @@ mod tests {
             "deepseek-v4-flash",
             true,
             None,
+            None,
         );
         assert_eq!(
             on,
@@ -207,6 +269,7 @@ mod tests {
             Some("https://api.deepseek.com/v1"),
             "deepseek-v4-flash",
             false,
+            None,
             None,
         );
         assert_eq!(
@@ -220,6 +283,7 @@ mod tests {
             "deepseek-v4-flash",
             true,
             Some("medium"),
+            None,
         );
         assert_eq!(
             with_effort,
@@ -235,6 +299,7 @@ mod tests {
             Some("https://one-api.example.com/v1"),
             "deepseek-v4-flash",
             true,
+            None,
             None,
         );
         assert_eq!(
@@ -253,6 +318,7 @@ mod tests {
             "gpt-5.4-mini",
             true,
             None,
+            None,
         );
         assert_eq!(on, None);
         let off = thinking_request_patch(
@@ -260,6 +326,7 @@ mod tests {
             Some("https://api.openai.com/v1"),
             "gpt-5.4-mini",
             false,
+            None,
             None,
         );
         assert_eq!(off, None);
@@ -269,6 +336,7 @@ mod tests {
             "gpt-5.4-mini",
             true,
             Some(""),
+            None,
         );
         assert_eq!(explicit_default, None);
     }
@@ -282,6 +350,7 @@ mod tests {
             "gpt-5.4-mini",
             true,
             Some("medium"),
+            None,
         );
         assert_eq!(
             medium,
@@ -293,6 +362,7 @@ mod tests {
             "gpt-5.4-mini",
             false,
             Some("none"),
+            None,
         );
         assert_eq!(off, Some(serde_json::json!({ "reasoning_effort": "none" })));
         // 自定义-不发送（omit）：返回 None，绝不发可能 400 的字段值
@@ -302,6 +372,7 @@ mod tests {
             "gpt-5.4-mini",
             true,
             Some(""),
+            None,
         );
         assert_eq!(omit, None);
     }
@@ -315,6 +386,7 @@ mod tests {
             "some-model",
             true,
             Some("xhigh"),
+            None,
         );
         assert_eq!(
             custom,
@@ -326,6 +398,7 @@ mod tests {
             "kimi-k2.6",
             true,
             Some("20-50-80"),
+            None,
         );
         assert_eq!(
             proxy_custom,
@@ -342,6 +415,7 @@ mod tests {
             "claude-3-7-sonnet",
             true,
             None,
+            None,
         );
         assert_eq!(
             on,
@@ -355,6 +429,7 @@ mod tests {
             "claude-3-7-sonnet",
             false,
             None,
+            None,
         );
         assert_eq!(
             off,
@@ -365,9 +440,9 @@ mod tests {
     /// Ollama：开 → think=true，关 → think=false。
     #[test]
     fn ollama_toggles_think_flag() {
-        let on = thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", true, None);
+        let on = thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", true, None, None);
         assert_eq!(on, Some(serde_json::json!({ "think": true })));
-        let off = thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", false, None);
+        let off = thinking_request_patch(ProviderKind::OllamaHttp, None, "qwen3", false, None, None);
         assert_eq!(off, Some(serde_json::json!({ "think": false })));
     }
 
@@ -381,6 +456,7 @@ mod tests {
                     None,
                     "gemini-3-pro",
                     enabled,
+                    None,
                     None,
                 ),
                 None
@@ -396,39 +472,46 @@ mod tests {
             ProviderKind::OpenAICompatible,
             Some("https://api.openai.com/v1"),
             "gpt-5.4-mini",
+            None,
         ));
         // 任意 OpenAI 兼容代理（非 deepseek）→ 支持
         assert!(thinking_supports_effort(
             ProviderKind::OpenAICompatible,
             Some("https://proxy.example.com/v1"),
             "qwen3-max",
+            None,
         ));
         // DeepSeek 底座（模型名/官方 base_url）→ 不支持
         assert!(!thinking_supports_effort(
             ProviderKind::OpenAICompatible,
             None,
             "deepseek-v4-flash",
+            None,
         ));
         assert!(!thinking_supports_effort(
             ProviderKind::OpenAICompatible,
             Some("https://api.deepseek.com/v1"),
             "chat",
+            None,
         ));
         // Anthropic / Ollama / Gemini → 不支持
         assert!(!thinking_supports_effort(
             ProviderKind::AnthropicMessages,
             None,
             "claude-3-7-sonnet",
+            None,
         ));
         assert!(!thinking_supports_effort(
             ProviderKind::OllamaHttp,
             None,
             "qwen3",
+            None,
         ));
         assert!(!thinking_supports_effort(
             ProviderKind::GeminiGenerateContent,
             None,
             "gemini-3-pro",
+            None,
         ));
     }
 
@@ -627,5 +710,237 @@ mod tests {
             pick_fallback_effort("low", &supported),
             Some("high".to_string())
         );
+    }
+
+    // ── T3: resolve_thinking_mode 三态矩阵 + style 覆盖 ──────────────────────
+
+    /// resolve_thinking_mode: Auto（None）完全维持现状启发式。
+    #[test]
+    fn resolve_auto_maintains_heuristic() {
+        // OpenAI 官方 + Auto → EffortLevels
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://api.openai.com/v1"),
+                "gpt-5.4-mini",
+                None,
+            ),
+            ThinkingMode::EffortLevels
+        );
+        // DeepSeek 官方 base_url + Auto → DeepSeekSwitch
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://api.deepseek.com/v1"),
+                "chat",
+                None,
+            ),
+            ThinkingMode::DeepSeekSwitch
+        );
+        // DeepSeek 模型名 + 非 deepseek base_url + Auto → DeepSeekSwitch
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://one-api.example.com/v1"),
+                "deepseek-v4-flash",
+                None,
+            ),
+            ThinkingMode::DeepSeekSwitch
+        );
+        // Some(Auto) 等同 None
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://api.openai.com/v1"),
+                "gpt-5.4-mini",
+                Some(ThinkingStyle::Auto),
+            ),
+            ThinkingMode::EffortLevels
+        );
+    }
+
+    /// resolve_thinking_mode: Effort 强制 EffortLevels——即使模型名是 deepseek。
+    #[test]
+    fn resolve_effort_forces_effort_levels() {
+        // deepseek 模型名 + 非 deepseek base_url + Effort → EffortLevels（不再降级为开关）
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://one-api.example.com/v1"),
+                "deepseek-v4-flash",
+                Some(ThinkingStyle::Effort),
+            ),
+            ThinkingMode::EffortLevels
+        );
+        // deepseek 官方 base_url + Effort → 仍 EffortLevels
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://api.deepseek.com/v1"),
+                "deepseek-v4-flash",
+                Some(ThinkingStyle::Effort),
+            ),
+            ThinkingMode::EffortLevels
+        );
+    }
+
+    /// resolve_thinking_mode: Toggle 强制 DeepSeekSwitch（OAICompatible）——即使非 deepseek。
+    #[test]
+    fn resolve_toggle_forces_switch_for_oai() {
+        // OpenAI 官方 + Toggle → DeepSeekSwitch（控件开关，发 thinking.type）
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://api.openai.com/v1"),
+                "gpt-5.4-mini",
+                Some(ThinkingStyle::Toggle),
+            ),
+            ThinkingMode::DeepSeekSwitch
+        );
+        // 任意代理 + Toggle → DeepSeekSwitch
+        assert_eq!(
+            resolve_thinking_mode(
+                ProviderKind::OpenAICompatible,
+                Some("https://proxy.example.com/v1"),
+                "qwen3-max",
+                Some(ThinkingStyle::Toggle),
+            ),
+            ThinkingMode::DeepSeekSwitch
+        );
+    }
+
+    /// resolve_thinking_mode: 非 OAICompatible 时 style 不生效，恒为 PlainSwitch。
+    #[test]
+    fn resolve_non_oai_ignores_style() {
+        for style in [None, Some(ThinkingStyle::Auto), Some(ThinkingStyle::Effort), Some(ThinkingStyle::Toggle)] {
+            assert_eq!(
+                resolve_thinking_mode(ProviderKind::AnthropicMessages, None, "claude-3-7-sonnet", style),
+                ThinkingMode::PlainSwitch
+            );
+            assert_eq!(
+                resolve_thinking_mode(ProviderKind::OllamaHttp, None, "qwen3", style),
+                ThinkingMode::PlainSwitch
+            );
+            assert_eq!(
+                resolve_thinking_mode(ProviderKind::GeminiGenerateContent, None, "gemini-3-pro", style),
+                ThinkingMode::PlainSwitch
+            );
+        }
+    }
+
+    /// thinking_request_patch: style=Effort 下 deepseek 模型名走 reasoning_effort 而非 thinking.type。
+    #[test]
+    fn effort_style_deepseek_model_uses_reasoning_effort() {
+        // deepseek 模型名 + 非 deepseek base_url + style=Effort → 发 reasoning_effort
+        let patch = thinking_request_patch(
+            ProviderKind::OpenAICompatible,
+            Some("https://one-api.example.com/v1"),
+            "deepseek-v4-flash",
+            true,
+            Some("medium"),
+            Some(ThinkingStyle::Effort),
+        );
+        assert_eq!(
+            patch,
+            Some(serde_json::json!({ "reasoning_effort": "medium" }))
+        );
+        // 默认档 omit
+        let omit = thinking_request_patch(
+            ProviderKind::OpenAICompatible,
+            Some("https://one-api.example.com/v1"),
+            "deepseek-v4-flash",
+            true,
+            None,
+            Some(ThinkingStyle::Effort),
+        );
+        assert_eq!(omit, None);
+    }
+
+    /// thinking_request_patch: style=Toggle 下 OpenAI 官方模型走 thinking.type。
+    #[test]
+    fn toggle_style_openai_uses_thinking_type() {
+        let on = thinking_request_patch(
+            ProviderKind::OpenAICompatible,
+            Some("https://api.openai.com/v1"),
+            "gpt-5.4-mini",
+            true,
+            None,
+            Some(ThinkingStyle::Toggle),
+        );
+        assert_eq!(
+            on,
+            Some(serde_json::json!({ "thinking": { "type": "enabled" } }))
+        );
+        let off = thinking_request_patch(
+            ProviderKind::OpenAICompatible,
+            Some("https://api.openai.com/v1"),
+            "gpt-5.4-mini",
+            false,
+            None,
+            Some(ThinkingStyle::Toggle),
+        );
+        assert_eq!(
+            off,
+            Some(serde_json::json!({ "thinking": { "type": "disabled" } }))
+        );
+    }
+
+    /// thinking_supports_effort: style=Effort 使 deepseek 模型也返回 true。
+    #[test]
+    fn effort_style_makes_deepseek_support_effort() {
+        assert!(thinking_supports_effort(
+            ProviderKind::OpenAICompatible,
+            Some("https://one-api.example.com/v1"),
+            "deepseek-v4-flash",
+            Some(ThinkingStyle::Effort),
+        ));
+        // style=Toggle 使 OpenAI 官方也返回 false
+        assert!(!thinking_supports_effort(
+            ProviderKind::OpenAICompatible,
+            Some("https://api.openai.com/v1"),
+            "gpt-5.4-mini",
+            Some(ThinkingStyle::Toggle),
+        ));
+    }
+
+    /// ModelEntry serde: 老配置缺 thinking_style 字段 → None（零迁移）。
+    #[test]
+    fn model_entry_serde_legacy_without_thinking_style() {
+        use crate::domain::config::ai_config::ModelEntry;
+        // 最小老配置——无 thinking_style 字段
+        let legacy = serde_json::json!({
+            "id": "test-model",
+            "display_name": "Test",
+            "enabled": true,
+            "capabilities": ["chat"]
+        });
+        let entry: ModelEntry = serde_json::from_value(legacy).expect("反序列化应成功");
+        assert_eq!(entry.thinking_style, None);
+    }
+
+    /// ModelEntry serde: thinking_style 各值正确解析。
+    #[test]
+    fn model_entry_serde_with_thinking_style() {
+        use crate::domain::config::ai_config::{ModelEntry, ThinkingStyle};
+        let with_effort = serde_json::json!({
+            "id": "m1", "display_name": "M1", "enabled": true,
+            "capabilities": ["chat"], "thinking_style": "effort"
+        });
+        let entry: ModelEntry = serde_json::from_value(with_effort).expect("反序列化应成功");
+        assert_eq!(entry.thinking_style, Some(ThinkingStyle::Effort));
+
+        let with_toggle = serde_json::json!({
+            "id": "m2", "display_name": "M2", "enabled": true,
+            "capabilities": ["chat"], "thinking_style": "toggle"
+        });
+        let entry: ModelEntry = serde_json::from_value(with_toggle).expect("反序列化应成功");
+        assert_eq!(entry.thinking_style, Some(ThinkingStyle::Toggle));
+
+        let with_auto = serde_json::json!({
+            "id": "m3", "display_name": "M3", "enabled": true,
+            "capabilities": ["chat"], "thinking_style": "auto"
+        });
+        let entry: ModelEntry = serde_json::from_value(with_auto).expect("反序列化应成功");
+        assert_eq!(entry.thinking_style, Some(ThinkingStyle::Auto));
     }
 }

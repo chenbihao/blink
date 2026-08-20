@@ -238,6 +238,12 @@
     flex-shrink: 0;
 }
 
+/* 触发器内的「·」分隔符（弱化，与 provider 同色） */
+.chat-model-trigger-sep {
+    color: var(--text-faint);
+    flex-shrink: 0;
+}
+
 /* 模型名称 */
 .chat-model-name {
     overflow: hidden;

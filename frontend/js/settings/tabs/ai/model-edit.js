@@ -35,6 +35,7 @@ export function openAIModelEditModal(providerId, modelId) {
         custom_parameters: (existing?.custom_parameters || []).map((cp) => ({...cp})),
         capabilities: existing?.capabilities ? [...existing.capabilities] : ["chat"],
         reasoning_effort: existing?.reasoning_effort ?? null,
+        thinking_style: existing?.thinking_style ?? null,
     };
 
     // 能力复选框回显
@@ -82,6 +83,7 @@ export function openAIModelEditModal(providerId, modelId) {
     setupModelParamRow("max-tokens", aiState._modelEditDraft.max_tokens, 4096);
     setupContextWindowRow(aiState._modelEditDraft.context_window);
     setupReasoningEffortRow(aiState._modelEditDraft.reasoning_effort);
+    setupThinkingStyleRow(aiState._modelEditDraft.thinking_style, provider.kind);
 
     renderCustomParams();
 
@@ -117,6 +119,20 @@ function setupContextWindowRow(currentValue) {
     toggle.checked = enabled;
     body.classList.toggle("hidden", !enabled);
     num.value = enabled ? currentValue : 8192;
+}
+
+/** 思考控件形态行（0.21.22）：仅 OpenAICompatible 时显示 */
+function setupThinkingStyleRow(style, providerKind) {
+    const $ = (id) => document.getElementById(id);
+    const row = $("ai-model-param-thinking-style");
+    const select = $("ai-model-edit-thinking-style-select");
+    if (!row || !select) return;
+    // 仅 OpenAICompatible 显示
+    const isOAI = providerKind === "openai_compatible";
+    row.classList.toggle("hidden", !isOAI);
+    if (!isOAI) return;
+    // null / undefined / "auto" → auto
+    select.value = style || "auto";
 }
 
 /** 思考强度行（0.21.17 + 0.21.18）：null = auto（toggle 关）；"" = 默认（不发送）；否则回显预设/自定义 */
@@ -408,6 +424,15 @@ async function validateAndSaveModel() {
         return false;
     }
 
+    // 思考控件形态（0.21.22）
+    const thinkingStyleSelect = document.getElementById("ai-model-edit-thinking-style-select");
+    const thinkingStyleRow = document.getElementById("ai-model-param-thinking-style");
+    let thinking_style = null;
+    if (thinkingStyleSelect && thinkingStyleRow && !thinkingStyleRow.classList.contains("hidden")) {
+        const val = thinkingStyleSelect.value;
+        thinking_style = (val && val !== "auto") ? val : null;
+    }
+
     const newModel = {
         id,
         display_name: displayName || id,
@@ -420,6 +445,7 @@ async function validateAndSaveModel() {
         custom_parameters: cleanedCustom,
         capabilities,
         reasoning_effort,
+        thinking_style,
     };
 
     if (isEdit) {

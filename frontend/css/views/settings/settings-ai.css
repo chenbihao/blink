@@ -1053,6 +1053,12 @@
     margin: 0;
 }
 
+/* 0.21.22: thinking_style 行内 select（紧凑，放在 param-head 右侧） */
+.ai-model-edit-inline-select {
+    min-width: 140px;
+    flex-shrink: 0;
+}
+
 .ai-model-param-body {
     display: flex;
     align-items: center;

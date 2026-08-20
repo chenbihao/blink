@@ -248,6 +248,7 @@ fn build_openai_compatible(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.thinking_style,
     )))
 }
 
@@ -268,6 +269,7 @@ fn build_anthropic(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.thinking_style,
     )))
 }
 
@@ -292,6 +294,7 @@ fn build_gemini(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.thinking_style,
     )))
 }
 
@@ -334,6 +337,7 @@ fn build_ollama(
         model.max_tokens,
         &model.custom_parameters,
         base_url,
+        model.thinking_style,
     )))
 }
 
@@ -377,6 +381,7 @@ mod tests {
             max_tokens: None,
             custom_parameters: Vec::new(),
             reasoning_effort: None,
+            thinking_style: None,
             capabilities: vec![ModelCapability::Chat],
         }
     }

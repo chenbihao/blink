@@ -743,7 +743,7 @@
                         </div>
                     </div>
                     <details class="ai-expert-settings">
-                        <summary data-i18n="ai.memory.expert.summary">专家设置</summary>
+                        <summary data-i18n="ai.memory.expert.summary">窗口与压缩策略</summary>
                         <div class="ai-expert-settings-body">
                             <div class="setting-row">
                                 <label class="setting-label" data-i18n="ai.memory.mode.label">窗口模式<span
@@ -1460,6 +1460,19 @@
                                    data-i18n-ph="ai.model_modal.context_window.ph"/>
                             <span class="ai-model-param-hint" data-i18n="ai.model_modal.context_window.hint">关闭时自动估算</span>
                         </div>
+                    </div>
+
+                    <!-- 思考控件形态（0.21.22）：per-model 逃生口，强制下拉或开关 -->
+                    <div class="ai-model-param" id="ai-model-param-thinking-style">
+                        <div class="ai-model-param-head">
+                            <label class="setting-label" data-i18n="ai.model_modal.thinking_style">思考控件形态</label>
+                            <select id="ai-model-edit-thinking-style-select" class="ai-model-edit-inline-select">
+                                <option value="auto" data-i18n="ai.model_modal.thinking_style.auto">自动</option>
+                                <option value="effort" data-i18n="ai.model_modal.thinking_style.effort">强制强度下拉</option>
+                                <option value="toggle" data-i18n="ai.model_modal.thinking_style.toggle">强制开关</option>
+                            </select>
+                        </div>
+                        <p class="ai-model-param-hint" data-i18n="ai.model_modal.thinking_style.hint">自动按启发式判定；强制可覆盖 deepseek 模型名误判</p>
                     </div>
 
                     <!-- 思考强度（0.21.17 + 0.21.18）：reasoning_effort 线值，关=auto(omit)，默认=不发送，自定义留空=不发送 -->

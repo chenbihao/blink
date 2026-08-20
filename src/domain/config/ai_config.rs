@@ -263,6 +263,28 @@ pub enum ProviderKind {
     OllamaHttp,
 }
 
+/// 思考控件形态 per-model 逃生口（0.21.22）——`ModelEntry.thinking_style`。
+///
+/// `Auto` = 完全现状（启发式：base_url 含 deepseek.com 或模型名 deepseek 前缀 →
+/// DeepSeek 开关，其余 OpenAICompatible → reasoning_effort 下拉，非 OAICompatible → 各自格式）；
+/// `Effort` = 强制按 OpenAI `reasoning_effort` 处理（控件下拉，不走 DeepSeek 分支）；
+/// `Toggle` = 强制开关（控件开关，reasoning_effort 二值：开→omit 默认档，关→"none"）。
+///
+/// 仅对 `OpenAICompatible` 生效；Anthropic/Ollama/Gemini 忽略此字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThinkingStyle {
+    /// 自动（启发式判定）——老配置缺字段时的默认值，零迁移
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    /// 强制按 OpenAI reasoning_effort 处理——控件下拉，请求发 reasoning_effort
+    #[serde(rename = "effort")]
+    Effort,
+    /// 强制开关——控件开关，开→omit（模型默认档），关→"none"
+    #[serde(rename = "toggle")]
+    Toggle,
+}
+
 impl ProviderKind {
     /// 是否为本地推理 provider（0.11.4 改进 2 §2.2.2 三态配置用）。
     ///
@@ -544,6 +566,15 @@ pub struct ModelEntry {
     #[serde(default)]
     pub reasoning_effort: Option<String>,
 
+    /// 思考控件形态逃生口（0.21.22）——per-model 强制指定思考控件形态。
+    ///
+    /// `None` = auto（与老配置兼容，零迁移）；
+    /// `Some(ThinkingStyle::Effort)` = 强制 reasoning_effort 下拉；
+    /// `Some(ThinkingStyle::Toggle)` = 强制开关。
+    /// 仅 `OpenAICompatible` 生效，其余 provider 忽略。
+    #[serde(default)]
+    pub thinking_style: Option<ThinkingStyle>,
+
     /// 模型能力列表（0.12 §2.7）。
     ///
     /// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
@@ -746,6 +777,7 @@ mod tests {
                 max_tokens: None,
                 custom_parameters: Vec::new(),
                 reasoning_effort: None,
+                thinking_style: None,
                 capabilities: vec![ModelCapability::Chat],
             }],
             enabled: true,
@@ -894,6 +926,7 @@ mod tests {
             max_tokens: None,
             custom_parameters: Vec::new(),
             reasoning_effort: None,
+            thinking_style: None,
             capabilities: vec![ModelCapability::Chat],
         });
         let c = AIConfig {
@@ -1093,6 +1126,7 @@ mod tests {
                 },
             ],
             reasoning_effort: None,
+            thinking_style: None,
             capabilities: vec![ModelCapability::Chat, ModelCapability::Embedding],
         };
         let s = serde_json::to_string(&m).unwrap();
@@ -1436,6 +1470,7 @@ mod tests {
             max_tokens: None,
             custom_parameters: Vec::new(),
             reasoning_effort: None,
+            thinking_style: None,
             capabilities: vec![ModelCapability::Chat, ModelCapability::Embedding],
         };
         let s = serde_json::to_string(&m).unwrap();

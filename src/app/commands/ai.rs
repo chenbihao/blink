@@ -739,6 +739,7 @@ pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                     provider.kind,
                     provider.base_url.as_deref(),
                     &model.id,
+                    model.thinking_style,
                 ),
                 reasoning_effort: model.reasoning_effort.clone(),
             });
@@ -953,6 +954,7 @@ pub fn get_ephemeral_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                     provider.kind,
                     provider.base_url.as_deref(),
                     &model.id,
+                    model.thinking_style,
                 ),
                 reasoning_effort: model.reasoning_effort.clone(),
             });

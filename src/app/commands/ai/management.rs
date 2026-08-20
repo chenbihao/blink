@@ -269,7 +269,7 @@ pub async fn fetch_ai_models(
 /// - `threshold`: 5000（硬编码告警阈值）
 #[tauri::command]
 pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use crate::domain::ai::prompt::{build_prompt_infos, chat_system_prompt_with_skills};
+    use crate::domain::ai::prompt::{build_prompt_infos, chat_system_prompt_with_skills, ToolSourceSummary};
     use crate::domain::ai::token_budget::{estimate_text_tokens, estimate_tools_tokens};
     use crate::domain::capability::CapabilityRegistry;
     use crate::domain::capability::{build_capability_tools, inject_plugin_settings};
@@ -324,7 +324,7 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
     let prompt_infos = build_prompt_infos(tools, &plugin_hints);
 
     // 5. preamble：无分组提示、无触发 Skill，与对话启动态一致
-    let preamble = chat_system_prompt_with_skills(None, &skill_summaries, &[]);
+    let preamble = chat_system_prompt_with_skills(None, &skill_summaries, &[], &ToolSourceSummary::default());
 
     // 6. 估算
     let system_tokens = estimate_text_tokens(&preamble);

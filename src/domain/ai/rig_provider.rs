@@ -56,7 +56,7 @@ use tokio::sync::mpsc;
 use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::domain::ai::thinking::thinking_request_patch;
-use crate::domain::config::ai_config::{CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind};
+use crate::domain::config::ai_config::{CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind, ThinkingStyle};
 use crate::infra::platform::secret::SecretString;
 
 /// rig-core 承载的 `AIProvider` 实体。泛型 M 由 factory 按 `ProviderKind` 敲定。
@@ -103,11 +103,13 @@ impl<M: RigCompletionModel> RigProvider<M> {
         default_max_tokens: Option<u32>,
         custom_parameters: &[CustomParam],
         base_url: Option<&str>,
+        thinking_style: Option<ThinkingStyle>,
     ) -> Self {
         let model_id = model_id.into();
         // 主窗口默认关闭思考（0.21.16）——开/关补丁同一函数，这里取 false 分支
         // reasoning_effort=None（auto）→ 关 = none；主窗口不暴露思考强度控件
-        let thinking_off_patch = thinking_request_patch(kind, base_url, &model_id, false, None);
+        // 0.21.22: style=Effort 下摘要请求对齐非 deepseek 现状（omit），保持一致性
+        let thinking_off_patch = thinking_request_patch(kind, base_url, &model_id, false, None, thinking_style);
         Self {
             kind,
             model_id,
