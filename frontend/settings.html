@@ -1445,6 +1445,23 @@
                         </div>
                     </div>
 
+                    <!-- 上下文窗口（0.21.21）——toggle 关 = 自动估算（分级兜底）；开 = 手动指定 -->
+                    <div class="ai-model-param" id="ai-model-param-context-window">
+                        <div class="ai-model-param-head">
+                            <label class="setting-label" data-i18n="ai.model_modal.context_window">上下文窗口</label>
+                            <label class="switch switch-sm">
+                                <input id="ai-model-edit-context-window-toggle" type="checkbox"/>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="ai-model-param-body hidden" id="ai-model-param-context-window-body">
+                            <input class="ai-model-param-num" id="ai-model-edit-context-window-num" min="1024"
+                                   step="1024" type="number" value="8192"
+                                   data-i18n-ph="ai.model_modal.context_window.ph"/>
+                            <span class="ai-model-param-hint" data-i18n="ai.model_modal.context_window.hint">关闭时自动估算</span>
+                        </div>
+                    </div>
+
                     <!-- 思考强度（0.21.17 + 0.21.18）：reasoning_effort 线值，关=auto(omit)，默认=不发送，自定义留空=不发送 -->
                     <div class="ai-model-param" id="ai-model-param-reasoning-effort">
                         <div class="ai-model-param-head">

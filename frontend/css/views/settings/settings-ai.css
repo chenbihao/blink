@@ -1076,6 +1076,71 @@
     font-family: var(--font-mono, ui-monospace, monospace);
 }
 
+/* 上下文窗口行的提示文字（0.21.21） */
+.ai-model-param-hint {
+    font-size: var(--text-sm);
+    color: var(--text-faint);
+    font-style: normal;
+}
+
+/* 拉取列表中的上下文窗口标注（0.21.21） */
+.ai-model-fetch-cw {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    padding: 1px 4px;
+    margin-left: 6px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    flex-shrink: 0;
+}
+
+/* 模型拉取下拉列表项（0.21.21: model-edit.js renderModelFetchList 使用） */
+.ai-model-fetch-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: var(--text-base);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.ai-model-fetch-item:hover {
+    background: var(--surface);
+}
+
+.ai-model-fetch-item.ai-manual-add {
+    color: var(--accent);
+    font-weight: var(--weight-medium);
+    border-top: 1px solid var(--surface-2);
+}
+
+.ai-model-fetch-item.ai-manual-add:hover {
+    background: var(--accent-bg);
+}
+
+.ai-model-fetch-loading,
+.ai-model-fetch-error {
+    padding: 12px 10px;
+    font-size: var(--text-base);
+    color: var(--text-faint);
+    text-align: center;
+}
+
+.ai-model-fetch-error {
+    color: var(--red);
+}
+
+.ai-model-fetch-empty {
+    padding: 12px 10px;
+    font-size: var(--text-base);
+    color: var(--text-faint);
+    text-align: center;
+}
+
 /* 自定义参数键值对 */
 .ai-model-custom-params {
     display: flex;

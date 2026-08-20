@@ -59,7 +59,10 @@ pub const TOKEN_AWARE_LOAD_BATCH: i64 = 200;
 const TITLE_MAX_CHARS: usize = 50;
 
 /// 保守默认 context limit（ModelEntry.context_window 缺失时使用）。
-pub const DEFAULT_CONTEXT_LIMIT: usize = 32768;
+///
+/// 0.21.21: 常量收敛到 `token_budget::FALLBACK_CONTEXT_LIMIT`，此处重导出保持
+/// 外部调用路径 `crate::domain::ai::memory::DEFAULT_CONTEXT_LIMIT` 兼容。
+pub use crate::domain::ai::token_budget::FALLBACK_CONTEXT_LIMIT as DEFAULT_CONTEXT_LIMIT;
 
 // 0.21.17: token 估算统一收敛到 `token_budget` 模块，此处仅重导出。
 pub use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens;

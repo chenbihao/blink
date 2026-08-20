@@ -102,7 +102,10 @@ export function escapeAttr(s) {
     return escapeHtml(s);
 }
 
-/** 从后端拉取供应商可用模型列表（供应商 modal 和模型编辑 popover 共用） */
+/** 从后端拉取供应商可用模型列表（供应商 modal 和模型编辑 popover 共用）
+ * 0.21.21: 返回 ModelMeta 富结构（含 context_window）
+ * @returns {Promise<Array<{id: string, context_window?: number}>|null>}
+ */
 export async function fetchAvailableModelsFor(kind, baseUrl, providerId) {
     const apiKey = document.getElementById("ai-modal-api-key")?.value?.trim() || null;
     const models = await invoke("fetch_ai_models", {

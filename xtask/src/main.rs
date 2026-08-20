@@ -6,6 +6,7 @@
 //!   cargo xtask release --debug  同上，但用 debug profile（DevTools 可用，F12 打开）
 //!   cargo xtask tiptap    打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
 //!   cargo xtask icons     拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
+//!   cargo xtask models    从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
 //! 不可控）并用相对路径定位 ps1，在 CI 的 tauri-action 上下文里找不到脚本。
@@ -137,12 +138,34 @@ fn copy_plugins() {
     println!("✅ 插件拷贝完成");
 }
 
+/// 从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json（调用 Python 脚本）。
+///
+/// 与 `cargo xtask icons`（Lucide 图标 Python 脚本）同性质——预处理产物，
+/// 运行时 `include_str!` 嵌入零文件依赖。
+fn fetch_models() {
+    let root = workspace_root();
+    let script = root
+        .join("xtask")
+        .join("scripts")
+        .join("fetch-model-context-windows.py");
+    if !script.exists() {
+        panic!("找不到模型目录拉取脚本: {}", script.display());
+    }
+    println!("📋 从 LiteLLM 精选主流模型目录 ...");
+    let py = which_python();
+    run(
+        py.as_str(),
+        &[script.to_str().unwrap(), root.to_str().unwrap()],
+        &root,
+    );
+    println!("✅ 模型目录生成完成");
+}
+
 /// 拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）。
 ///
 /// Python 脚本仅用标准库（urllib），由 xtask 锚定 workspace 根路径并传入，
 /// 避免为一次性下载器引入 Rust HTTP 依赖。
-fn fetch_icons() {
-    let root = workspace_root();
+fn fetch_icons() {    let root = workspace_root();
     let script = root
         .join("xtask")
         .join("scripts")
@@ -236,9 +259,10 @@ fn main() {
         }
         "icons" => fetch_icons(),    // 拉取 Lucide 图标生成 sprite
         "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
+        "models" => fetch_models(), // 从 LiteLLM 精选主流模型目录
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap|models> [--debug]"
             )
         }
     }

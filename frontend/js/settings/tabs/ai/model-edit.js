@@ -29,6 +29,7 @@ export function openAIModelEditModal(providerId, modelId) {
         id: existing?.id ?? "",
         display_name: existing?.display_name ?? "",
         enabled: existing?.enabled !== false,
+        context_window: existing?.context_window ?? null,
         temperature: existing?.temperature ?? null,
         max_tokens: existing?.max_tokens ?? null,
         custom_parameters: (existing?.custom_parameters || []).map((cp) => ({...cp})),
@@ -79,6 +80,7 @@ export function openAIModelEditModal(providerId, modelId) {
 
     setupModelParamRow("temperature", aiState._modelEditDraft.temperature, 0.7);
     setupModelParamRow("max-tokens", aiState._modelEditDraft.max_tokens, 4096);
+    setupContextWindowRow(aiState._modelEditDraft.context_window);
     setupReasoningEffortRow(aiState._modelEditDraft.reasoning_effort);
 
     renderCustomParams();
@@ -102,6 +104,19 @@ function setupModelParamRow(key, currentValue, fallbackValue) {
     const shown = enabled ? currentValue : fallbackValue;
     range.value = shown;
     num.value = shown;
+}
+
+/** 上下文窗口行（0.21.21）：null = 自动估算（toggle 关）；Some(n) = 手动指定 */
+function setupContextWindowRow(currentValue) {
+    const $ = (id) => document.getElementById(id);
+    const toggle = $("ai-model-edit-context-window-toggle");
+    const body = $("ai-model-param-context-window-body");
+    const num = $("ai-model-edit-context-window-num");
+    if (!toggle || !body || !num) return;
+    const enabled = currentValue != null;
+    toggle.checked = enabled;
+    body.classList.toggle("hidden", !enabled);
+    num.value = enabled ? currentValue : 8192;
 }
 
 /** 思考强度行（0.21.17 + 0.21.18）：null = auto（toggle 关）；"" = 默认（不发送）；否则回显预设/自定义 */
@@ -233,6 +248,7 @@ async function performModelFetch() {
     aiState._modelFetchCache = {models: [], error: null, loading: true};
     renderModelFetchList("");
     try {
+        // 0.21.21: models 现在是 ModelMeta 数组 [{id, context_window?}]
         const models = await fetchAvailableModelsFor(provider.kind, provider.base_url, providerId);
         aiState._modelFetchCache = {models: models || [], error: null, loading: false};
     } catch (e) {
@@ -265,13 +281,17 @@ function renderModelFetchList(filter) {
 
     const q = (filter || "").trim();
     const qLower = q.toLowerCase();
-    const filtered = cache.models
-        .filter((m) => (q ? m.toLowerCase().includes(qLower) : true))
+    // 0.21.21: models 是 ModelMeta 数组 {id, context_window?}
+    const modelItems = (cache.models || []).map(m => typeof m === "string" ? {id: m} : m);
+    const filtered = modelItems
+        .filter((m) => (q ? m.id.toLowerCase().includes(qLower) : true))
         .slice(0, 100);
 
-    let itemsHtml = filtered.map((m) =>
-        `<div class="ai-model-fetch-item" data-model-id="${escapeAttr(m)}">${escapeHtml(m)}</div>`
-    ).join("");
+    let itemsHtml = filtered.map((m) => {
+        // 0.21.21: 显示 context_window 标注
+        const cwLabel = m.context_window != null ? ` <span class="ai-model-fetch-cw" title="${t("ai.model_modal.context_window.fetched")}">${(m.context_window / 1024).toFixed(0)}K</span>` : "";
+        return `<div class="ai-model-fetch-item" data-model-id="${escapeAttr(m.id)}" data-context-window="${m.context_window != null ? m.context_window : ""}">${escapeHtml(m.id)}${cwLabel}</div>`;
+    }).join("");
 
     // 无匹配 + 有输入 → 显示手动添加选项
     if (filtered.length === 0 && q) {
@@ -283,7 +303,7 @@ function renderModelFetchList(filter) {
     }
 
     // 有匹配但输入文本本身不在列表中 → 也显示手动添加
-    if (q && filtered.length > 0 && !cache.models.some((m) => m.toLowerCase() === qLower)) {
+    if (q && filtered.length > 0 && !modelItems.some((m) => m.id.toLowerCase() === qLower)) {
         itemsHtml += `<div class="ai-model-fetch-item ai-manual-add" data-model-id="${escapeAttr(q)}">
       <span>+ ${escapeHtml(t("ai.model_modal.manual_add", {id: q}))}</span>
     </div>`;
@@ -294,6 +314,17 @@ function renderModelFetchList(filter) {
         item.addEventListener("click", () => {
             const input = document.getElementById("ai-model-edit-id");
             if (input) input.value = item.dataset.modelId;
+            // 0.21.21: 选中下拉项时预填 context_window
+            const cwVal = item.dataset.contextWindow;
+            if (cwVal && cwVal !== "") {
+                const cwInput = document.getElementById("ai-model-edit-context-window-num");
+                const cwToggle = document.getElementById("ai-model-edit-context-window-toggle");
+                if (cwInput && cwToggle) {
+                    cwInput.value = cwVal;
+                    cwToggle.checked = true;
+                    cwInput.closest(".ai-model-param-body")?.classList.remove("hidden");
+                }
+            }
             closeModelFetchDropdown();
         });
     });
@@ -369,11 +400,19 @@ async function validateAndSaveModel() {
             : (select ? select.value : "");
     }
 
+    // 上下文窗口（0.21.21）：toggle 开 = 手动指定；关 = null（自动估算）
+    const cwToggle = $("ai-model-edit-context-window-toggle").checked;
+    const cwVal = Number($("ai-model-edit-context-window-num").value);
+    if (cwToggle && (!Number.isFinite(cwVal) || cwVal < 1024)) {
+        errorEl.textContent = t("ai.model_modal.err.context_window_range");
+        return false;
+    }
+
     const newModel = {
         id,
         display_name: displayName || id,
         enabled: isEdit ? aiState._modelEditDraft.enabled : true,
-        context_window: null,
+        context_window: cwToggle ? Math.floor(cwVal) : null,
         input_price_per_million: null,
         output_price_per_million: null,
         temperature: tempToggle ? tempVal : null,
@@ -391,7 +430,7 @@ async function validateAndSaveModel() {
         }
         const old = provider.models[idx];
         newModel.enabled = old.enabled !== false;
-        newModel.context_window = old.context_window ?? null;
+        // context_window 已由表单收集（0.21.21），不再用 old 覆盖
         newModel.input_price_per_million = old.input_price_per_million ?? null;
         newModel.output_price_per_million = old.output_price_per_million ?? null;
         provider.models[idx] = newModel;
@@ -489,6 +528,15 @@ export function bindAIModelEditModalEvents() {
             if (Number.isFinite(v)) range.value = v;
         });
     });
+
+    // 上下文窗口（0.21.21）：只有 toggle + num，没有 range slider
+    const cwToggle = $("ai-model-edit-context-window-toggle");
+    const cwBody = $("ai-model-param-context-window-body");
+    if (cwToggle && cwBody) {
+        cwToggle.addEventListener("change", () => {
+            cwBody.classList.toggle('hidden', !cwToggle.checked);
+        });
+    }
 
     // 思考强度（0.21.17）：toggle 控制显隐，select 联动自定义输入
     const effortToggle = $("ai-model-edit-reasoning-effort-toggle");

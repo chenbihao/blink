@@ -117,6 +117,28 @@ pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, S
 
 /// 用 CM 里已存的密钥拉取可用模型列表(0.9.4)。
 ///
+/// 0.21.21: 模型元数据——fetch_ai_models 返回富结构。
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ModelMeta {
+    /// 模型 id（如 `gpt-5-nano`）。
+    pub id: String,
+    /// 上下文窗口大小（从 API 响应解析，可能为 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+}
+
+impl Ord for ModelMeta {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for ModelMeta {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// 获取供应商可用模型列表。
 ///
 /// **密钥优先级**:api_key 非空 → 用 api_key;否则 provider_id 非空 → 从 CM 读。
@@ -127,14 +149,14 @@ pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, S
 /// - `api_key`: 明文密钥(新增供应商时前端传入);可空
 /// - `provider_id`: 已保存供应商的 UUID,用于从 CM 读密钥;可空
 ///
-/// **返回**:模型 id 列表;拉取失败返回错误。
+/// **返回**:模型元数据列表（含 id + context_window）;拉取失败返回错误。
 #[tauri::command]
 pub async fn fetch_ai_models(
     kind: String,
     base_url: Option<String>,
     api_key: Option<String>,
     provider_id: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<ModelMeta>, String> {
     use crate::app::ai_config::ProviderKind;
 
     // 密钥优先级:输入框 → CM
@@ -217,6 +239,18 @@ pub async fn fetch_ai_models(
         }
     };
     // effective_key(String) 在这里出作用域
+
+    // 0.21.21: API 未返回 context_window 时，用内置目录预填推荐值。
+    // 铁则：只做推荐预填，绝不覆盖 API 返回的值或用户已配置的值。
+    if let Ok(mut models) = result {
+        for m in &mut models {
+            if m.context_window.is_none() {
+                m.context_window =
+                    crate::domain::ai::model_catalog::lookup_context_window(&m.id);
+            }
+        }
+        return Ok(models);
+    }
     result
 }
 
@@ -685,15 +719,21 @@ pub async fn get_composer_bar_snapshot(
 ///
 /// ollama API: `GET /api/tags`（无需认证）
 /// - Response: `{ "models": [{ "name": "llama3:latest", ... }] }`
-async fn fetch_ollama_models(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
-    match client
+///
+/// 0.21.21: 改走 `/api/show` POST 获取 context_length（`/api/tags` 无 context 字段）
+async fn fetch_ollama_models(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<ModelMeta>, String> {
+    // Step 1: 获取模型列表
+    let model_names = match client
         .get(url)
         .header("Accept", "application/json")
         .send()
         .await
     {
         Ok(resp) if resp.status().is_success() => {
-            let models = resp
+            resp
                 .json::<serde_json::Value>()
                 .await
                 .ok()
@@ -701,32 +741,94 @@ async fn fetch_ollama_models(client: &reqwest::Client, url: &str) -> Result<Vec<
                     v.get("models").and_then(|m| m.as_array()).map(|arr| {
                         arr.iter()
                             .filter_map(|m| {
-                                m.get("name")
-                                    .and_then(|n| n.as_str())
-                                    .map(|s| s.to_string())
+                                m.get("name").and_then(|n| n.as_str()).map(String::from)
                             })
                             .collect::<Vec<_>>()
                     })
                 })
-                .unwrap_or_default();
-            if models.is_empty() {
-                Err("ollama 返回空列表(可能未拉取模型,尝试 ollama pull llama3)".to_string())
-            } else {
-                let mut sorted = models;
-                sorted.sort();
-                Ok(sorted)
-            }
+                .unwrap_or_default()
         }
         Ok(resp) => {
             let status = resp.status().as_u16();
-            Err(format!(
+            return Err(format!(
                 "ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"
-            ))
+            ));
         }
-        Err(e) => Err(format!(
-            "ollama 连接失败: {e},确认 ollama serve 已启动且地址正确"
-        )),
+        Err(e) => {
+            return Err(format!(
+                "ollama 连接失败: {e},确认 ollama serve 已启动且地址正确"
+            ));
+        }
+    };
+
+    if model_names.is_empty() {
+        return Err("ollama 返回空列表(可能未拉取模型,尝试 ollama pull llama3)".to_string());
     }
+
+    // Step 2: 对每个模型走 /api/show 获取 context_length
+    let base_url = url.trim_end_matches("/api/tags");
+    let show_url = format!("{base_url}/api/show");
+
+    let mut models = Vec::with_capacity(model_names.len());
+    for name in &model_names {
+        let context_window = fetch_ollama_context_length(client, &show_url, name)
+            .await
+            .unwrap_or(None);
+        models.push(ModelMeta {
+            id: name.clone(),
+            context_window,
+        });
+    }
+
+    models.sort();
+    Ok(models)
+}
+
+/// 0.21.21: 从 ollama /api/show 获取模型 context_length。
+///
+/// POST body: `{"model": "<id>"}`
+/// Response `model_info` 中键形如 `*.context_length`，取 value。
+async fn fetch_ollama_context_length(
+    client: &reqwest::Client,
+    show_url: &str,
+    model_name: &str,
+) -> Result<Option<u32>, String> {
+    let resp = client
+        .post(show_url)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"model": model_name}))
+        .send()
+        .await
+        .map_err(|e| format!("ollama /api/show 请求失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Ok(None); // 静默失败
+    }
+
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("ollama /api/show 响应解析失败: {e}"))?;
+
+    // model_info 里的键形如 llama.context_length / general.context_length
+    let model_info = body.get("model_info").or_else(|| body.get("parameters"));
+    if let Some(info) = model_info.and_then(|v| v.as_object()) {
+        for (key, value) in info {
+            if key.ends_with(".context_length") || key.ends_with("context_length") {
+                if let Some(n) = value.as_u64() {
+                    return Ok(Some(n as u32));
+                }
+                // 有时是字符串
+                if let Some(s) = value.as_str()
+                    && let Ok(n) = s.parse::<u32>()
+                {
+                    return Ok(Some(n));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// 获取 Anthropic 模型列表。
@@ -738,7 +840,7 @@ async fn fetch_anthropic_models(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<ModelMeta>, String> {
     match client
         .get(url)
         .header("x-api-key", api_key)
@@ -756,7 +858,17 @@ async fn fetch_anthropic_models(
                     v.get("data").and_then(|d| d.as_array()).map(|arr| {
                         arr.iter()
                             .filter_map(|m| {
-                                m.get("id").and_then(|id| id.as_str()).map(String::from)
+                                m.get("id").and_then(|id| id.as_str()).map(|id| {
+                                    // 0.21.21: Anthropic context_window 字段
+                                    let context_window = m
+                                        .get("context_window")
+                                        .and_then(|v| v.as_u64())
+                                        .map(|v| v as u32);
+                                    ModelMeta {
+                                        id: id.to_string(),
+                                        context_window,
+                                    }
+                                })
                             })
                             .collect::<Vec<_>>()
                     })

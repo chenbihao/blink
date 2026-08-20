@@ -732,6 +732,24 @@ impl ChatService {
                 ai_capability_epoch,
             };
 
+            // 0.21.21: context_limit 注入挪到缓存命中 early-return 之前——
+            // 保证每轮都注入当前对话 resolved model 的值，缓存命中时不跳过。
+            // memory 的 load_inner 裁剪 fallback 链
+            // history_budget → context_limit → DEFAULT_CONTEXT_LIMIT 仍消费注入值。
+            // 注意：compute_context_status 现已直读 resolved.model.context_window，
+            // 此注入仅供 memory load_inner 裁剪 fallback 使用（history_budget 优先级不变）。
+            if kind == ConversationKind::Persistent {
+                let context_limit = resolved.model.context_window.map(|u| u as usize);
+                self.persistent_memory
+                    .update_context_limit(context_limit)
+                    .await;
+                tracing::debug!(
+                    model = %resolved.model.id,
+                    context_limit = ?context_limit,
+                    "ChatService: 已注入 context_limit 到 persistent_memory (缓存命中前)"
+                );
+            }
+
             if let Some(provider) = self.cached_provider(&cache_key) {
                 return Ok(provider);
             }
@@ -762,20 +780,9 @@ impl ChatService {
                 (Vec::new(), Vec::new())
             };
             // 0.17.6: 按 kind 选撞 memory——Persistent 用 SQLite，Ephemeral 用进程内。
-            // 0.13.1: context_limit 注入仅对 Persistent 有意义（Ephemeral 不做压缩）。
+            // 0.21.21: context_limit 注入已挪到缓存命中之前（上方），此处不再重复。
             let memory: Arc<dyn rig_core::memory::ConversationMemory> = match kind {
-                ConversationKind::Persistent => {
-                    let context_limit = resolved.model.context_window.map(|u| u as usize);
-                    self.persistent_memory
-                        .update_context_limit(context_limit)
-                        .await;
-                    tracing::debug!(
-                        model = %resolved.model.id,
-                        context_limit = ?context_limit,
-                        "ChatService: 已注入 context_limit 到 persistent_memory"
-                    );
-                    self.persistent_memory.clone()
-                }
+                ConversationKind::Persistent => self.persistent_memory.clone(),
                 ConversationKind::Ephemeral => self.ephemeral_memory.clone(),
             };
             let provider = Arc::new(
@@ -1294,6 +1301,26 @@ impl ChatService {
                             if chunk_tx.send(chunk).is_err() {
                                 break;
                             }
+                            // 0.21.21 A3: Done 后一律重算 context_status 并 emit——
+                            // 环/popup 不再滞后一轮（之前只在 summary_enabled 时重算）。
+                            // 摘要后台任务完成时还会再推一次，属预期（前端幂等渲染）。
+                            if is_done
+                                && let Some(service) = weak_for_summary.upgrade()
+                            {
+                                let conv_id = summary_conv_id.clone();
+                                tokio::spawn(async move {
+                                    // 竞态守卫：与下一轮发送竞态用 requests.status() 守卫
+                                    if service.requests.status().is_some() {
+                                        tracing::debug!(
+                                            conversation_id = %conv_id,
+                                            "Done 后重算：检测到新请求已启动，跳过重算"
+                                        );
+                                        return;
+                                    }
+                                    service.emit_context_status_updated(&conv_id).await;
+                                });
+                            }
+                            // 0.21.19: 摘要任务（summary_enabled 时额外 spawn）
                             if is_done
                                 && summary_enabled
                                 && let Some(service) = weak_for_summary.upgrade()
@@ -1652,7 +1679,38 @@ impl ChatService {
 
         let config_handle = self.persistent_memory.config_handle();
         let cfg = config_handle.read().await;
-        let context_window = cfg.context_limit.map(|v| v as u32);
+        // 0.21.21: 容量上限直读 per-model context_window（去全局化），
+        // cfg.context_limit 降为 fallback——仅当模型未配置时兜底。
+        // 之前读 cfg.context_limit 会冻结缓存命中时的旧值（ensure_provider
+        // 注入跳过），多对话交错时全局单值后写者赢。
+        // 0.21.21 A2: context_window 仍为 None 时，按 base_url 归属分档兜底
+        // （官方/公网 → 128K，localhost/私网/Ollama → 32K）。
+        // tiered_fallback_limit 传给 estimate_request_budget，让 source 标注为 Tiered。
+        let tiered_fallback_limit = {
+            let kind = match resolved.provider.kind {
+                crate::domain::config::ai_config::ProviderKind::OpenAICompatible => {
+                    crate::domain::ai::token_budget::TierProviderKind::OpenAiCompatible
+                }
+                crate::domain::config::ai_config::ProviderKind::AnthropicMessages => {
+                    crate::domain::ai::token_budget::TierProviderKind::Anthropic
+                }
+                crate::domain::config::ai_config::ProviderKind::GeminiGenerateContent => {
+                    crate::domain::ai::token_budget::TierProviderKind::Gemini
+                }
+                crate::domain::config::ai_config::ProviderKind::OllamaHttp => {
+                    crate::domain::ai::token_budget::TierProviderKind::Ollama
+                }
+            };
+            crate::domain::ai::token_budget::tiered_fallback_context_limit(
+                kind,
+                resolved.provider.base_url.as_deref(),
+            )
+        };
+        // context_window 优先级：model.config_window > cfg.context_limit（注入值）
+        let context_window = resolved
+            .model
+            .context_window
+            .or(cfg.context_limit.map(|v| v as u32));
 
         // 0.21.17: 从 AgentProvider 获取真实工具快照
         let tools = provider.tool_prompt_infos();
@@ -1713,6 +1771,7 @@ impl ChatService {
                 tool_call_count,
                 has_multimodal,
                 context_window,
+                tiered_fallback_limit: Some(tiered_fallback_limit),
                 request_max_tokens: None,
                 model_max_tokens,
                 calibration_ratio,
@@ -2224,7 +2283,7 @@ impl ChatService {
             self.maybe_merge_summaries(conversation_id, &pool).await;
 
             // 12. 推送更新后的上下文状态到前端
-            self.emit_summary_updated(conversation_id).await;
+            self.emit_context_status_updated(conversation_id).await;
         }
         .await;
 
@@ -2383,23 +2442,24 @@ impl ChatService {
         );
     }
 
-    /// 0.21.19: 推送摘要更新后的上下文状态到前端。
+    /// 0.21.21: 推送上下文状态更新到前端（泛化语义，原 emit_summary_updated）。
     ///
-    /// 重新计算 context_status 并 emit，让前端更新压缩分隔线等 UI。
-    async fn emit_summary_updated(&self, conversation_id: &str) {
+    /// 重新计算 context_status 并 emit，让前端更新容量环 / popup 等 UI。
+    /// 0.21.19 原为摘要完成后的推送入口；0.21.21 扩展为 Done 后通用重算入口。
+    async fn emit_context_status_updated(&self, conversation_id: &str) {
         let resolved = match self.resolve_current_entries(ConversationKind::Persistent) {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(
                     conversation_id,
                     error = %e,
-                    "emit_summary_updated: 解析 provider 失败，跳过推送"
+                    "emit_context_status_updated: 解析 provider 失败，跳过推送"
                 );
                 return;
             }
         };
         let Some(provider) = self.cached_agent_ref() else {
-            tracing::debug!(conversation_id, "emit_summary_updated: Agent 未构造，跳过");
+            tracing::debug!(conversation_id, "emit_context_status_updated: Agent 未构造，跳过");
             return;
         };
         let status = self
@@ -3232,6 +3292,80 @@ mod tests {
         assert!(
             !cfg.summary_enabled,
             "默认 summary_enabled 应为 false（摘要是可选优化项）"
+        );
+    }
+
+    // ── 0.21.21: 容量取值去全局化测试 ──────────────────────────────────
+
+    /// 验证常量收敛：memory::DEFAULT_CONTEXT_LIMIT 与 token_budget::FALLBACK_CONTEXT_LIMIT
+    /// 指向同一值，不应出现两份独立定义。
+    #[test]
+    fn constant_convergence_default_context_limit() {
+        assert_eq!(
+            crate::domain::ai::memory::DEFAULT_CONTEXT_LIMIT,
+            crate::domain::ai::token_budget::FALLBACK_CONTEXT_LIMIT,
+            "DEFAULT_CONTEXT_LIMIT 应与 FALLBACK_CONTEXT_LIMIT 同值（常量收敛）"
+        );
+        assert_eq!(
+            crate::domain::ai::memory::DEFAULT_CONTEXT_LIMIT,
+            32768
+        );
+    }
+
+    /// 验证 compute_context_status 优先读 resolved.model.context_window。
+    /// 通过 estimate_request_budget 的 context_window 参数间接验证——
+    /// compute_context_status 现在传 resolved.model.context_window.or(cfg.context_limit)，
+    /// 而非仅读 cfg.context_limit。
+    #[test]
+    fn budget_uses_model_context_window_when_configured() {
+        // 模型配置了 context_window=131072
+        let budget = crate::domain::ai::token_budget::estimate_request_budget(
+            crate::domain::ai::token_budget::TokenBudgetInput {
+                history_texts: &[],
+                system_prompt: None,
+                pending_message: None,
+                tools: &[],
+                tool_call_count: 0,
+                has_multimodal: false,
+                context_window: Some(131072),
+                tiered_fallback_limit: None,
+                request_max_tokens: None,
+                model_max_tokens: None,
+                calibration_ratio: None,
+            },
+        );
+        assert_eq!(budget.context_limit, 131072);
+        assert_eq!(
+            budget.context_limit_source,
+            crate::domain::ai::token_budget::ContextLimitSource::Configured
+        );
+    }
+
+    /// 验证 context_window 缺失时使用 fallback。
+    #[test]
+    fn budget_falls_back_when_model_context_window_none() {
+        let budget = crate::domain::ai::token_budget::estimate_request_budget(
+            crate::domain::ai::token_budget::TokenBudgetInput {
+                history_texts: &[],
+                system_prompt: None,
+                pending_message: None,
+                tools: &[],
+                tool_call_count: 0,
+                has_multimodal: false,
+                context_window: None,
+                tiered_fallback_limit: None,
+                request_max_tokens: None,
+                model_max_tokens: None,
+                calibration_ratio: None,
+            },
+        );
+        assert_eq!(
+            budget.context_limit,
+            crate::domain::ai::token_budget::FALLBACK_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            budget.context_limit_source,
+            crate::domain::ai::token_budget::ContextLimitSource::Fallback
         );
     }
 }

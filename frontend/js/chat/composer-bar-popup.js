@@ -268,10 +268,13 @@ export function renderContextSection(s) {
 
     const color = percent < 60 ? "var(--text-faint)" : percent < 80 ? "var(--warning, #ffc107)" : "var(--danger, #f44336)";
 
-    // 0.21.17: context limit 来源标签
-    const sourceLabel = contextLimitSource === "fallback"
-        ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
-        : "";
+// 0.21.17: context limit 来源标签
+// 0.21.21: 加 Tiered 档位估算标注
+const sourceLabel = contextLimitSource === "fallback"
+? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
+: contextLimitSource === "tiered"
+? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，按端点归属分档估算">分档估算</span>`
+: "";
     // 0.21.17: 置信度标签
     const confidenceLabel = confidence === "low"
         ? `<span class="cbp-confidence cbp-confidence-low" title="包含多模态内容，估算精度较低">低精度</span>`

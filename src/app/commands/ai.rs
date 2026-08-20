@@ -8,7 +8,8 @@ async fn fetch_openai_models(
     client: &reqwest::Client,
     urls: &[String],
     api_key: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<crate::app::commands::ai::management::ModelMeta>, String> {
+    use crate::app::commands::ai::management::ModelMeta;
     let mut last_err = String::new();
     for url in urls {
         match client
@@ -32,11 +33,30 @@ async fn fetch_openai_models(
                         arr.map(|a| {
                             a.iter()
                                 .filter_map(|m| {
+                                    // 0.21.21: opportunistically 解析 context_length
+                                    let context_window = m
+                                        .get("context_length")
+                                        .and_then(|v| v.as_u64())
+                                        .map(|v| v as u32)
+                                        .or_else(|| {
+                                            // OpenRouter 用 context_length 字段
+                                            m.get("context_window")
+                                                .and_then(|v| v.as_u64())
+                                                .map(|v| v as u32)
+                                        });
                                     m.get("id")
                                         .and_then(|id| id.as_str())
-                                        .map(String::from)
+                                        .map(|id| ModelMeta {
+                                            id: id.to_string(),
+                                            context_window,
+                                        })
                                         .or_else(|| {
-                                            m.get("name").and_then(|n| n.as_str()).map(String::from)
+                                            m.get("name").and_then(|n| n.as_str()).map(|name| {
+                                                ModelMeta {
+                                                    id: name.to_string(),
+                                                    context_window,
+                                                }
+                                            })
                                         })
                                 })
                                 .collect::<Vec<_>>()
@@ -66,7 +86,11 @@ async fn fetch_openai_models(
     Err(format!("获取模型失败: {last_err}"))
 }
 
-async fn fetch_gemini_models(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
+async fn fetch_gemini_models(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<crate::app::commands::ai::management::ModelMeta>, String> {
+    use crate::app::commands::ai::management::ModelMeta;
     match client
         .get(url)
         .header("Accept", "application/json")
@@ -86,6 +110,14 @@ async fn fetch_gemini_models(client: &reqwest::Client, url: &str) -> Result<Vec<
                                     .and_then(|n| n.as_str())
                                     .map(|s| s.replace("models/", ""))
                                     .filter(|n| n.to_lowercase().contains("gemini"))
+                                    .map(|id| {
+                                        // 0.21.21: Gemini inputTokenLimit → context_window
+                                        let context_window = m
+                                            .get("inputTokenLimit")
+                                            .and_then(|v| v.as_u64())
+                                            .map(|v| v as u32);
+                                        ModelMeta { id, context_window }
+                                    })
                             })
                             .collect::<Vec<_>>()
                     })

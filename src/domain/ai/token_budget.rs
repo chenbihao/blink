@@ -19,6 +19,19 @@ use crate::domain::ai::prompt::ToolPromptInfo;
 /// 保守默认 context limit（`ModelEntry.context_window` 缺失时使用）。
 pub const FALLBACK_CONTEXT_LIMIT: usize = 32768;
 
+/// 0.21.21: 公网/官方端点兜底窗口（128K）。
+///
+/// 适用于官方封闭集合（Anthropic/Gemini 原生 kind；OpenAICompatible 且 base_url 为空）
+/// 以及 OpenAICompatible 公网域名端点（GLM/DeepSeek/Moonshot/硅基流动/聚合网关——
+/// 当前主力人群，当前代 ≥128K）。
+pub const TIERED_PUBLIC_CONTEXT_LIMIT: usize = 131072;
+
+/// 0.21.21: localhost/私网/Ollama 兜底窗口（32K）。
+///
+/// 适用于 localhost/127.0.0.1/::1/私网 IP（10./172.16-31./192.168.）
+/// 与 Ollama 原生 kind——本地推理 llama.cpp/vLLM/LM Studio，窗口 4K–32K 居多。
+pub const TIERED_LOCAL_CONTEXT_LIMIT: usize = 32768;
+
 /// 每条消息的固定协议开销（role 标签 + 分隔符等，启发式）。
 const PER_MESSAGE_OVERHEAD: usize = 4;
 
@@ -59,6 +72,138 @@ pub const CALIBRATION_MAX_SAMPLES: usize = 20;
 /// 校准器启用所需最小样本数。
 #[allow(dead_code)]
 pub const CALIBRATION_MIN_SAMPLES: usize = 3;
+
+// ── 0.21.21: 兜底按 base_url 归属分档 ──────────────────────────────────────
+
+/// Provider 类型——与 `ai_config::ProviderKind` 对齐，但收敛为 token_budget 内部枚举
+/// 以保持 domain 不反依赖 app 层。
+///
+/// 纯函数 `tiered_fallback_context_limit` 消费此枚举 + base_url 计算兜底窗口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierProviderKind {
+    /// OpenAI Chat Completions 协议（含官方 + 兼容端点）。
+    OpenAiCompatible,
+    /// Anthropic Messages 协议（官方封闭集合）。
+    Anthropic,
+    /// Google Gemini GenerateContent 协议（官方封闭集合）。
+    Gemini,
+    /// ollama HTTP API（本地推理）。
+    Ollama,
+}
+
+/// 判断 host 是否为本地/私网地址。
+///
+/// 识别：`localhost` / `127.x.x.x` / `::1` / `10.x` / `172.16-31.x` / `192.168.x`。
+/// 纯函数，无 IO——从 base_url 字符串中提取 host 部分判定。
+pub fn is_local_or_private_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches(':').to_lowercase();
+    if host == "localhost" || host == "::1" {
+        return true;
+    }
+    // IPv4 私网段判定
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4
+        && let (Ok(a), Ok(b), _, _) = (
+            parts[0].parse::<u8>(),
+            parts[1].parse::<u8>(),
+            parts[2].parse::<u8>(),
+            parts[3].parse::<u8>(),
+        )
+    {
+        // 127.x.x.x (loopback)
+        if a == 127 {
+            return true;
+        }
+        // 10.x.x.x (Class A private)
+        if a == 10 {
+            return true;
+        }
+        // 172.16-31.x.x (Class B private)
+        if a == 172 && (16..=31).contains(&b) {
+            return true;
+        }
+        // 192.168.x.x (Class C private)
+        if a == 192 && b == 168 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 从 base_url 提取 host（不含端口）。
+///
+/// 输入如 `http://localhost:11434` → `localhost`；
+/// `https://api.deepseek.com` → `api.deepseek.com`。
+fn extract_host_from_base_url(base_url: &str) -> &str {
+    let url = base_url.trim();
+    // 去掉协议前缀
+    let after_scheme = if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        rest
+    } else {
+        url
+    };
+    // 取第一个 '/' 或结尾前的部分作为 host:port
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // 处理 IPv6 地址 [::1]:8080 的情况
+    if let Some(rest) = host_port.strip_prefix('[') {
+        // IPv6 with brackets: [::1]:8080
+        if let Some(end) = rest.find(']') {
+            return &rest[..end];
+        }
+    }
+    // 去掉端口——从右侧找最后一个 ':'
+    // 但要避免误切 IPv6 地址（如 ::1，不含方括号的情况不会到这里，
+    // 因为 strip_prefix('[') 已处理）
+    if let Some(colon_pos) = host_port.rfind(':') {
+        // 确保这不是 IPv6 地址内部的 ':'（IPv6 不带方括号的情况）
+        // 简单检查：如果 ':' 前有多个 ':'，则可能是 IPv6
+        let before_colon = &host_port[..colon_pos];
+        if before_colon.matches(':').count() > 0 {
+            // IPv6 地址（如 ::1）— 不切端口，直接返回
+            return host_port;
+        }
+        return before_colon;
+    }
+    host_port
+}
+
+/// 0.21.21: 按 (ProviderKind, base_url) 归属分档计算兜底 context limit。
+///
+/// 三档定案（phase §5.22，勿改）：
+/// ① 官方封闭集合（Anthropic/Gemini 原生 kind；OpenAICompatible 且 base_url 为空）
+///   → 128K（`TIERED_PUBLIC_CONTEXT_LIMIT`）
+/// ② OpenAICompatible 公网域名 → 128K
+/// ③ localhost/127.0.0.1/::1/私网 IP 与 Ollama 原生 kind → 32K（`TIERED_LOCAL_CONTEXT_LIMIT`）
+///
+/// 纯函数，无 IO——base_url 字符串解析。
+pub fn tiered_fallback_context_limit(
+    kind: TierProviderKind,
+    base_url: Option<&str>,
+) -> usize {
+    match kind {
+        // Ollama 原生 kind → 本地推理，恒 32K
+        TierProviderKind::Ollama => TIERED_LOCAL_CONTEXT_LIMIT,
+        // Anthropic/Gemini 官方封闭集合 → 128K
+        TierProviderKind::Anthropic | TierProviderKind::Gemini => {
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        }
+        // OpenAICompatible：看 base_url
+        TierProviderKind::OpenAiCompatible => {
+            let Some(url) = base_url.map(str::trim).filter(|s| !s.is_empty()) else {
+                // base_url 为空 = OpenAI 官方 → 128K
+                return TIERED_PUBLIC_CONTEXT_LIMIT;
+            };
+            let host = extract_host_from_base_url(url);
+            if is_local_or_private_host(host) {
+                TIERED_LOCAL_CONTEXT_LIMIT
+            } else {
+                TIERED_PUBLIC_CONTEXT_LIMIT
+            }
+        }
+    }
+}
 
 // ── CJK 判断 ──────────────────────────────────────────────────────────────────
 
@@ -135,6 +280,9 @@ pub enum ContextLimitSource {
     /// 从 Provider 元数据获取（未来扩展预留）。
     #[allow(dead_code)]
     ProviderMetadata,
+    /// 0.21.21: `ModelEntry.context_window` 缺失，按 base_url 归属分档兜底
+    /// （官方/公网 → 128K，localhost/私网/Ollama → 32K）。
+    Tiered,
     /// `ModelEntry.context_window` 缺失，使用 32K 保守 fallback。
     #[default]
     Fallback,
@@ -275,6 +423,9 @@ pub struct TokenBudgetInput<'a> {
     pub has_multimodal: bool,
     /// context window 大小。
     pub context_window: Option<u32>,
+    /// 0.21.21: 按 base_url 归属分档的兜底窗口（context_window 为 None 时使用）。
+    /// 调用方通过 `tiered_fallback_context_limit` 计算。None 时回退 `FALLBACK_CONTEXT_LIMIT`。
+    pub tiered_fallback_limit: Option<usize>,
     /// 当前请求显式 max_tokens。
     pub request_max_tokens: Option<u32>,
     /// 当前模型默认 max_tokens。
@@ -301,7 +452,14 @@ pub fn estimate_request_budget(input: TokenBudgetInput) -> TokenBudget {
     // 1. context_limit + 来源
     let (context_limit, source) = match input.context_window {
         Some(cw) if cw > 0 => (cw as usize, ContextLimitSource::Configured),
-        _ => (FALLBACK_CONTEXT_LIMIT, ContextLimitSource::Fallback),
+        _ => {
+            // 0.21.21: 按 base_url 归属分档兜底
+            if let Some(tiered) = input.tiered_fallback_limit {
+                (tiered, ContextLimitSource::Tiered)
+            } else {
+                (FALLBACK_CONTEXT_LIMIT, ContextLimitSource::Fallback)
+            }
+        }
     };
 
     // 2. reserved_output + safety_margin
@@ -670,6 +828,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.breakdown.history_tokens, 0);
@@ -694,6 +853,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         let three = estimate_request_budget(TokenBudgetInput {
@@ -707,6 +867,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert!(three.breakdown.protocol_overhead_tokens > one.breakdown.protocol_overhead_tokens);
@@ -725,6 +886,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         let with_tools = estimate_request_budget(TokenBudgetInput {
@@ -742,6 +904,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert!(with_tools.breakdown.tools_tokens > 0);
@@ -777,6 +940,7 @@ mod tests {
             request_max_tokens: Some(4096),
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.reserved_output_tokens, 4096);
@@ -799,6 +963,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         // 8192 * 0.05 = 409.6 → 409, clamped to [256, 4096] → 409
@@ -819,6 +984,7 @@ mod tests {
             request_max_tokens: Some(100),
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         // 不应 panic，不应下溢
@@ -841,6 +1007,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.context_limit, 1);
@@ -864,6 +1031,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.context_limit, FALLBACK_CONTEXT_LIMIT);
@@ -883,6 +1051,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.confidence, EstimateConfidence::Low);
@@ -903,6 +1072,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.usage_percent, 100);
@@ -922,6 +1092,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.remaining_tokens, 0);
@@ -941,6 +1112,7 @@ mod tests {
             request_max_tokens: Some(100_000),
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert_eq!(budget.reserved_output_tokens, 1000);
@@ -965,6 +1137,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         let without_tools = estimate_request_budget(TokenBudgetInput {
@@ -978,6 +1151,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         assert!(without_tools.estimated_input_tokens < with_tools.estimated_input_tokens);
@@ -1456,6 +1630,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         // N+1=2 工具池（加一个不同的工具）
@@ -1475,6 +1650,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         // 断言链条：tools_tokens 增大
@@ -1524,6 +1700,7 @@ mod tests {
             request_max_tokens: None,
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         // request_max_tokens = Some(4096) → reserved_output = 4096
@@ -1538,6 +1715,7 @@ mod tests {
             request_max_tokens: Some(4096),
             model_max_tokens: None,
             calibration_ratio: None,
+tiered_fallback_limit: None,
         });
 
         // 断言链条：reserved_output_tokens 增大
@@ -1600,5 +1778,168 @@ mod tests {
         assert!(is_cjk_char('\u{4E00}'), "U+4E00 应为 CJK（infra）");
         assert!(!is_cjk('\u{0041}'), "U+0041 (A) 不应为 CJK（domain）");
         assert!(!is_cjk_char('\u{0041}'), "U+0041 (A) 不应为 CJK（infra）");
+    }
+
+    // ── 0.21.21: tiered_fallback_context_limit 测试 ──────────────────────────
+
+    #[test]
+    fn tiered_anthropic_returns_128k() {
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::Anthropic, None),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::Anthropic, Some("https://api.anthropic.com")),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_gemini_returns_128k() {
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::Gemini, None),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_ollama_returns_32k() {
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::Ollama, None),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::Ollama, Some("http://localhost:11434")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_openai_compatible_empty_base_url_returns_128k() {
+        // base_url 为空 = OpenAI 官方 → 128K
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, None),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("")),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_openai_compatible_public_domain_returns_128k() {
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("https://api.deepseek.com")),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("https://api.moonshot.cn/v1")),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("https://openrouter.ai/api/v1")),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_openai_compatible_localhost_returns_32k() {
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://localhost:8080/v1")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://127.0.0.1:1234")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_openai_compatible_private_ip_returns_32k() {
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://10.0.0.5:8080")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://172.16.5.1:8080")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://192.168.1.100:8080")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_openai_compatible_172_31_returns_32k() {
+        // 172.31.x.x 是私网段上界
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://172.31.0.1:8080")),
+            TIERED_LOCAL_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn tiered_openai_compatible_172_32_returns_128k() {
+        // 172.32.x.x 不是私网段
+        assert_eq!(
+            tiered_fallback_context_limit(TierProviderKind::OpenAiCompatible, Some("http://172.32.0.1:8080")),
+            TIERED_PUBLIC_CONTEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn is_local_or_private_host_all_variants() {
+        assert!(is_local_or_private_host("localhost"));
+        assert!(is_local_or_private_host("127.0.0.1"));
+        assert!(is_local_or_private_host("127.0.0.1:8080"));
+        assert!(is_local_or_private_host("::1"));
+        assert!(is_local_or_private_host("10.0.0.1"));
+        assert!(is_local_or_private_host("172.16.0.1"));
+        assert!(is_local_or_private_host("172.31.0.1"));
+        assert!(!is_local_or_private_host("172.15.0.1"));
+        assert!(!is_local_or_private_host("172.32.0.1"));
+        assert!(is_local_or_private_host("192.168.0.1"));
+        assert!(!is_local_or_private_host("8.8.8.8"));
+        assert!(!is_local_or_private_host("api.deepseek.com"));
+    }
+
+    #[test]
+    fn budget_uses_tiered_fallback_when_context_window_none() {
+        let budget = estimate_request_budget(TokenBudgetInput {
+            history_texts: &[],
+            system_prompt: None,
+            pending_message: None,
+            tools: &[],
+            tool_call_count: 0,
+            has_multimodal: false,
+            context_window: None,
+            tiered_fallback_limit: Some(131072),
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+        assert_eq!(budget.context_limit, 131072);
+        assert_eq!(budget.context_limit_source, ContextLimitSource::Tiered);
+    }
+
+    #[test]
+    fn budget_uses_fallback_when_tiered_also_none() {
+        let budget = estimate_request_budget(TokenBudgetInput {
+            history_texts: &[],
+            system_prompt: None,
+            pending_message: None,
+            tools: &[],
+            tool_call_count: 0,
+            has_multimodal: false,
+            context_window: None,
+            tiered_fallback_limit: None,
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+        assert_eq!(budget.context_limit, FALLBACK_CONTEXT_LIMIT);
+        assert_eq!(budget.context_limit_source, ContextLimitSource::Fallback);
     }
 }
