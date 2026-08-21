@@ -24,7 +24,6 @@ import {initSkillImportHandlers, loadSkillList, showSkillImportPanel} from "./sk
 import {
     clampAIHardTimeoutMs,
     effectiveAIHardTimeoutMs,
-    formatModelContextWindow,
     memoryExpertVisibility,
 } from "./semantics.js";
 import {confirmDialog, invoke} from "../../../shared/tauri.js";
@@ -41,7 +40,6 @@ let permissionConfig = {...defaultPermissionConfig};
 export function initAITab() {
     loadAIConfig();
     onLangChange(() => {
-        updateMemoryContextSizeDisplay();
         // 0.21.19: 语言切换时也需重算摘要提示文案
         const memCfg = aiState.currentAIConfig?.chat_config?.memory_config;
         updateMemoryBehaviorHint(memCfg?.summary_enabled === true);
@@ -151,7 +149,6 @@ function applyAIConfigToUI() {
     // 0.21.20: 召回范围
     if ($("ai-memory-recall-scope")) $("ai-memory-recall-scope").value = memCfg.recall_scope || "this_conversation";
     updateMemoryConfigVisibility(memCfg.mode || "token_aware", memCfg.recall_enabled !== false);
-    updateMemoryContextSizeDisplay();
     // Skill 配置
     const skillCfg = chatCfg.skill_config || {enabled: true};
     if ($("ai-skill-enabled")) $("ai-skill-enabled").checked = skillCfg.enabled !== false;
@@ -241,26 +238,6 @@ function updateMemoryConfigVisibility(mode, recallEnabled = true) {
     document.getElementById("ai-memory-recall-top-k-row")?.classList.toggle("hidden", !visibility.recallTopK);
     // 0.21.20: 召回范围行——与召回 Top-K 同步显示/隐藏
     document.getElementById("ai-memory-recall-scope-row")?.classList.toggle("hidden", !visibility.recallTopK);
-}
-
-function updateMemoryContextSizeDisplay() {
-    const el = document.getElementById("ai-memory-context-size");
-    if (!el) return;
-    const cfg = aiState.currentAIConfig;
-    if (!cfg) return;
-    const mainAssign = cfg.tier_main;
-    if (!mainAssign) {
-        el.textContent = t("ai.memory.context_size.unconfigured") || "未配置";
-        return;
-    }
-    const provider = (cfg.providers || []).find((p) => p.id === mainAssign.provider_id);
-    const model = provider && (provider.models || []).find((m) => m.id === mainAssign.model_id);
-    const ctxWindow = model?.context_window;
-    if (!ctxWindow) {
-        el.textContent = t("ai.memory.context_size.unknown") || "未知";
-        return;
-    }
-    el.textContent = formatModelContextWindow(ctxWindow) || (t("ai.memory.context_size.unknown") || "未知");
 }
 
 // ── Toast ───────────────────────────────────────────────────
@@ -491,7 +468,6 @@ function bindAIEvents() {
             // 重建选项以刷新各档位"未指派"内的降级提示
             renderAITierSelects();
             renderAITierBanner();
-            if (tier === "main") updateMemoryContextSizeDisplay();
             saveAIConfig();
         });
     });

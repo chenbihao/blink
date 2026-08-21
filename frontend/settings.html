@@ -735,13 +735,6 @@
                             </option>
                         </select>
                     </div>
-                    <div class="setting-row" id="ai-memory-context-display-row">
-                        <label class="setting-label" data-i18n="ai.memory.context_size.label">当前模型上下文窗口<span
-                                class="field-hint-icon" data-i18n-title="ai.memory.context_size.hint">ⓘ</span></label>
-                        <div class="number-input-wrapper number-input-readonly">
-                            <span class="ai-prompt-tokens" id="ai-memory-context-size">—</span>
-                        </div>
-                    </div>
                     <details class="ai-expert-settings">
                         <summary data-i18n="ai.memory.expert.summary">窗口与压缩策略</summary>
                         <div class="ai-expert-settings-body">
@@ -888,7 +881,7 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.permission.clear.label">清除所有权限记忆<span
                                 class="field-hint-icon" data-i18n-title="ai.permission.clear.hint">ⓘ</span></label>
-                        <button class="btn-small btn-danger" data-i18n="ai.permission.clear.btn"
+                        <button class="btn btn-small btn-danger" data-i18n="ai.permission.clear.btn"
                                 id="ai-perm-clear-memory"
                                 type="button">立即清除
                         </button>
@@ -975,8 +968,8 @@
                               spellcheck="false"></textarea>
                     <p class="modal-error" id="skill-edit-error"></p>
                     <div class="modal-actions">
-                        <button class="btn-small" id="skill-edit-cancel">取消</button>
-                        <button class="btn-primary" id="skill-edit-save">保存</button>
+                        <button class="btn btn-small" id="skill-edit-cancel">取消</button>
+                        <button class="btn btn-primary" id="skill-edit-save">保存</button>
                     </div>
                 </div>
             </div>
@@ -1033,8 +1026,8 @@
                     </div>
 
                     <div class="modal-actions">
-                        <button class="btn-small" id="skill-import-cancel">取消</button>
-                        <button class="btn-primary" disabled id="skill-import-confirm">导入选中</button>
+                        <button class="btn btn-small" id="skill-import-cancel">取消</button>
+                        <button class="btn btn-primary" disabled id="skill-import-confirm">导入选中</button>
                     </div>
                 </div>
             </div>
@@ -1114,8 +1107,8 @@
                     </div>
                     <p class="modal-error" id="mcp-import-error"></p>
                     <div class="modal-actions">
-                        <button class="btn-small" id="mcp-import-cancel">取消</button>
-                        <button class="btn-primary" disabled id="mcp-import-confirm">确认导入</button>
+                        <button class="btn btn-small" id="mcp-import-cancel">取消</button>
+                        <button class="btn btn-primary" disabled id="mcp-import-confirm">确认导入</button>
                     </div>
                 </div>
             </div>
@@ -1258,8 +1251,8 @@
                 </div>
                 <p class="modal-error" id="mcp-form-error"></p>
                 <div class="modal-actions">
-                    <button class="btn-small" data-i18n="ai.mcp.form.cancel" id="mcp-form-cancel">取消</button>
-                    <button class="btn-primary" data-i18n="ai.mcp.form.save" id="mcp-form-save">保存</button>
+                    <button class="btn btn-small" data-i18n="ai.mcp.form.cancel" id="mcp-form-cancel">取消</button>
+                    <button class="btn btn-primary" data-i18n="ai.mcp.form.save" id="mcp-form-save">保存</button>
                 </div>
             </div>
         </div>
@@ -1318,7 +1311,7 @@
                         <div class="ai-modal-api-key-row">
                             <input autocomplete="off" class="input-wide" data-i18n-ph="ai.modal.api_key.ph"
                                    id="ai-modal-api-key" type="password"/>
-                            <button class="btn-small ai-test-btn" data-i18n="ai.modal.test" id="ai-modal-test"
+                            <button class="btn btn-small ai-test-btn" data-i18n="ai.modal.test" id="ai-modal-test"
                                     type="button">测试
                             </button>
                         </div>
@@ -1347,8 +1340,8 @@
 
                 <p class="modal-error" id="ai-modal-error"></p>
                 <div class="modal-actions">
-                    <button class="btn-small" data-i18n="ai.modal.cancel" id="ai-modal-cancel">取消</button>
-                    <button class="btn-primary" data-i18n="ai.modal.save" id="ai-modal-save">保存</button>
+                    <button class="btn btn-small" data-i18n="ai.modal.cancel" id="ai-modal-cancel">取消</button>
+                    <button class="btn btn-primary" data-i18n="ai.modal.save" id="ai-modal-save">保存</button>
                 </div>
             </div>
         </div>
@@ -1356,8 +1349,8 @@
         <!-- Toast:配完 Provider 后询问是否启用总开关（§5.3）─────────────── -->
         <div class="ai-toast hidden" id="ai-enable-toast">
             <span class="ai-toast-text" data-i18n="ai.saved.toast">供应商已保存。启用 AI 提示？</span>
-            <button class="btn-primary btn-small" data-i18n="ai.saved.enable" id="ai-toast-enable">启用</button>
-            <button class="btn-small" data-i18n="ai.saved.later" id="ai-toast-later">稍后</button>
+            <button class="btn btn-primary btn-sm" data-i18n="ai.saved.enable" id="ai-toast-enable">启用</button>
+            <button class="btn btn-small" data-i18n="ai.saved.later" id="ai-toast-later">稍后</button>
         </div>
 
         <!-- 模型编辑 modal（0.9.4 Step 1）───────────────────────────────
@@ -1374,22 +1367,23 @@
                 <div class="ai-modal-section">
                     <div class="ai-modal-section-label" data-i18n="ai.model_modal.section.basic">基础</div>
                     <div class="setting-row">
-                        <label class="setting-label" data-i18n="ai.model_modal.model_id">Model ID</label>
+                        <label class="setting-label"><span data-i18n="ai.model_modal.model_id">Model ID</span><span
+                                class="field-hint-icon" data-i18n-title="ai.model_modal.model_id.hint">ⓘ</span></label>
                         <div class="ai-model-edit-id-wrap" id="ai-model-edit-id-wrap">
-                            <input autocomplete="off" class="input-wide" data-i18n-ph="ai.model_modal.model_id.ph"
-                                   id="ai-model-edit-id" type="text"/>
+                            <input autocomplete="off" autocapitalize="off" class="input-wide"
+                                   data-1p-ignore data-form-type="other" data-i18n-ph="ai.model_modal.model_id.ph"
+                                   data-lpignore="true" id="ai-model-edit-id" name="blink-model-id"
+                                   spellcheck="false" type="text"/>
                             <div class="ai-model-edit-fetch-dropdown hidden" id="ai-model-edit-fetch-dropdown">
                                 <!-- 由 JS 动态渲染 -->
                             </div>
                         </div>
                     </div>
-                    <p class="modal-hint" data-i18n="ai.model_modal.model_id.hint">
-                        聚焦自动拉取可用模型，输入关键词筛选；也可手动输入</p>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.model_modal.display_name">显示名</label>
-                        <input class="input-wide" data-i18n-ph="ai.model_modal.display_name.ph"
-                               id="ai-model-edit-display-name"
-                               type="text"/>
+                        <input autocomplete="section-blink-model nickname" class="input-wide" data-1p-ignore data-form-type="other"
+                               data-i18n-ph="ai.model_modal.display_name.ph" data-lpignore="true"
+                               id="ai-model-edit-display-name" name="blink-model-display-label" type="text"/>
                     </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.model_modal.capabilities">能力</label>
@@ -1405,14 +1399,15 @@
 
                 <!-- 段二:调用参数 -->
                 <div class="ai-modal-section">
-                    <div class="ai-modal-section-label" data-i18n="ai.model_modal.section.params">调用参数</div>
-                    <p class="modal-hint" data-i18n="ai.model_modal.params.hint">留空 =
-                        由模型或调用场景决定；填值只在调用方未显式指定时生效</p>
+                    <div class="ai-modal-section-label"><span data-i18n="ai.model_modal.section.params">调用参数</span><span
+                            class="field-hint-icon" data-i18n-title="ai.model_modal.params.hint">ⓘ</span></div>
 
                     <!-- Temperature 覆盖开关 + slider -->
                     <div class="ai-model-param" id="ai-model-param-temperature">
                         <div class="ai-model-param-head">
-                            <label class="setting-label" data-i18n="ai.model_modal.temperature">Temperature</label>
+                            <div class="ai-model-param-title"><label class="setting-label"
+                                    data-i18n="ai.model_modal.temperature">Temperature</label><span
+                                    class="field-hint-icon" data-i18n-title="ai.model_modal.temperature.hint">ⓘ</span></div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-temperature-toggle" type="checkbox"/>
                                 <span class="slider"></span>
@@ -1430,43 +1425,55 @@
                     <!-- Max Tokens 覆盖开关 + input -->
                     <div class="ai-model-param" id="ai-model-param-max-tokens">
                         <div class="ai-model-param-head">
-                            <label class="setting-label" data-i18n="ai.model_modal.max_tokens">Max Output Tokens</label>
+                            <div class="ai-model-param-title">
+                                <label class="setting-label" data-i18n="ai.model_modal.max_tokens">Max Output Tokens</label>
+                                <span class="field-hint-icon" data-i18n-title="ai.model_modal.max_tokens.hint">ⓘ</span>
+                            </div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-max-tokens-toggle" type="checkbox"/>
                                 <span class="slider"></span>
                             </label>
                         </div>
                         <div class="ai-model-param-body hidden" id="ai-model-param-max-tokens-body">
-                            <input id="ai-model-edit-max-tokens-range" max="32768" min="256" step="256" type="range"
-                                   value="4096"/>
+                            <div class="ai-capacity-control">
+                                <input id="ai-model-edit-max-tokens-range" max="8" min="0" step="1" type="range" value="4"/>
+                                <div class="ai-capacity-marks" id="ai-model-edit-max-tokens-marks"></div>
+                            </div>
                             <input class="ai-model-param-num" id="ai-model-edit-max-tokens-num" min="1" step="1"
                                    type="number"
-                                   value="4096"/>
+                                   value="16384"/>
                         </div>
                     </div>
 
                     <!-- 上下文窗口（0.21.21）——toggle 关 = 自动估算（分级兜底）；开 = 手动指定 -->
                     <div class="ai-model-param" id="ai-model-param-context-window">
                         <div class="ai-model-param-head">
-                            <label class="setting-label" data-i18n="ai.model_modal.context_window">上下文窗口</label>
+                            <div class="ai-model-param-title">
+                                <label class="setting-label" data-i18n="ai.model_modal.context_window">上下文窗口</label>
+                                <span class="field-hint-icon" data-i18n-title="ai.model_modal.context_window.hint">ⓘ</span>
+                            </div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-context-window-toggle" type="checkbox"/>
                                 <span class="slider"></span>
                             </label>
                         </div>
                         <div class="ai-model-param-body hidden" id="ai-model-param-context-window-body">
+                            <div class="ai-capacity-control">
+                                <input id="ai-model-edit-context-window-range" max="8" min="0" step="1" type="range" value="4"/>
+                                <div class="ai-capacity-marks" id="ai-model-edit-context-window-marks"></div>
+                            </div>
                             <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.context_window.ph" id="ai-model-edit-context-window-num"
                                    min="1024" step="1024" type="number"
-                                   value="8192"/>
-                            <span class="ai-model-param-hint"
-                                  data-i18n="ai.model_modal.context_window.hint">关闭时自动估算</span>
+                                   value="131072"/>
                         </div>
                     </div>
 
                     <!-- 思考控件形态（0.21.22）：per-model 逃生口，强制下拉或开关 -->
                     <div class="ai-model-param" id="ai-model-param-thinking-style">
                         <div class="ai-model-param-head">
-                            <label class="setting-label" data-i18n="ai.model_modal.thinking_style">思考控件形态</label>
+                            <div class="ai-model-param-title"><label class="setting-label"
+                                    data-i18n="ai.model_modal.thinking_style">思考控件显示方式（兼容）</label><span
+                                    class="field-hint-icon" data-i18n-title="ai.model_modal.thinking_style.hint">ⓘ</span></div>
                             <select class="ai-model-edit-inline-select" id="ai-model-edit-thinking-style-select">
                                 <option data-i18n="ai.model_modal.thinking_style.auto" value="auto">自动</option>
                                 <option data-i18n="ai.model_modal.thinking_style.effort" value="effort">强制强度下拉
@@ -1475,14 +1482,14 @@
                                 </option>
                             </select>
                         </div>
-                        <p class="ai-model-param-hint" data-i18n="ai.model_modal.thinking_style.hint">自动按启发式判定；强制可覆盖
-                            deepseek 模型名误判</p>
                     </div>
 
                     <!-- 思考强度（0.21.17 + 0.21.18）：reasoning_effort 线值，关=auto(omit)，默认=不发送，自定义留空=不发送 -->
                     <div class="ai-model-param" id="ai-model-param-reasoning-effort">
                         <div class="ai-model-param-head">
-                            <label class="setting-label" data-i18n="ai.model_modal.reasoning_effort">思考强度</label>
+                            <div class="ai-model-param-title"><label class="setting-label"
+                                    data-i18n="ai.model_modal.reasoning_effort">思考强度</label><span
+                                    class="field-hint-icon" data-i18n-title="ai.model_modal.reasoning_effort.hint">ⓘ</span></div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-reasoning-effort-toggle" type="checkbox"/>
                                 <span class="slider"></span>
@@ -1507,15 +1514,13 @@
                 </div>
 
                 <!-- 段三:高级(自定义参数) -->
-                <div class="ai-modal-section">
-                    <div class="ai-modal-section-label" data-i18n="ai.model_modal.section.advanced">高级</div>
-                    <p class="modal-hint" data-i18n="ai.model_modal.custom_params.hint">键值对将透传到供应商请求（如
-                        top_p / reasoning_effort 等）；值输入 0.9 会自动识别为数字，true / false 识别为布尔，{...} 识别为
-                        JSON</p>
+                <div class="ai-modal-section ai-model-advanced-section">
+                    <div class="ai-modal-section-label"><span data-i18n="ai.model_modal.section.advanced">高级</span><span
+                            class="field-hint-icon" data-i18n-title="ai.model_modal.custom_params.hint">ⓘ</span></div>
                     <div class="ai-model-custom-params" id="ai-model-edit-custom-params">
                         <!-- 由 JS 动态渲染 -->
                     </div>
-                    <button class="btn-small ai-model-custom-params-add" data-i18n="ai.model_modal.custom_params.add"
+                    <button class="btn btn-small ai-model-custom-params-add" data-i18n="ai.model_modal.custom_params.add"
                             id="ai-model-edit-custom-params-add" type="button">+
                         添加参数
                     </button>
@@ -1523,11 +1528,11 @@
 
                 <p class="modal-error" id="ai-model-edit-error"></p>
                 <div class="modal-actions">
-                    <button class="btn-small" data-i18n="ai.model_modal.cancel" id="ai-model-edit-cancel">取消</button>
-                    <button class="btn-primary btn-continue" data-i18n="ai.model_modal.save_continue"
+                    <button class="btn btn-small" data-i18n="ai.model_modal.cancel" id="ai-model-edit-cancel">取消</button>
+                    <button class="btn btn-primary btn-continue" data-i18n="ai.model_modal.save_continue"
                             id="ai-model-edit-continue">继续添加
                     </button>
-                    <button class="btn-primary" data-i18n="ai.model_modal.save" id="ai-model-edit-save">保存</button>
+                    <button class="btn btn-primary" data-i18n="ai.model_modal.save" id="ai-model-edit-save">保存</button>
                 </div>
             </div>
         </div>

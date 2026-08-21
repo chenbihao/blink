@@ -263,6 +263,8 @@ pub enum ContextLimitSource {
     /// 从 Provider 元数据获取（未来扩展预留）。
     #[allow(dead_code)]
     ProviderMetadata,
+    /// 从 Blink 内置精简模型目录按模型 id 匹配。
+    Catalog,
     /// 0.21.21: `ModelEntry.context_window` 缺失，按 base_url 归属分档兜底
     /// （官方/公网 → 128K，localhost/私网/Ollama → 32K）。
     Tiered,
@@ -599,7 +601,6 @@ pub fn compute_history_token_budget(
 /// 0.21.17: `Usage` 已删除，所有代码统一使用 `message::Usage`。
 /// `from_rig_usage` / `unreported` / `add` / `has_real_usage` 方法在 `message::Usage` 上。
 pub use crate::domain::ai::message::Usage;
-
 
 // ── 真实 usage 校准器 ──────────────────────────────────────────────────────────
 

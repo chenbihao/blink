@@ -4,7 +4,7 @@
 //! 由 `cargo xtask models` 生成 `resources/model_context_windows.json`，
 //! 运行时 `include_str!` 嵌入，零文件依赖。
 //!
-//! **铁则**：只做弹窗预填推荐值，用户可改，绝不静默覆盖已配置值。
+//! **铁则**：用户显式配置值优先；目录用于弹窗预填和运行时缺省识别。
 
 use serde::Deserialize;
 
@@ -55,12 +55,18 @@ fn parse_catalog() -> &'static [CatalogEntry] {
 ///
 /// 返回 `None` 表示无匹配——调用方应 fallback 到档位估算或 32K。
 ///
-/// **铁则**：只做弹窗预填推荐值，用户可改，绝不静默覆盖已配置值。
+/// **铁则**：只在模型未显式配置窗口时使用，绝不覆盖用户值。
 pub fn lookup_context_window(model_id: &str) -> Option<u32> {
-    // 目录已按前缀长度降序排列，取第一个匹配
+    // 聚合网关常返回 `provider/model`；目录只维护最后一段的标准模型 id。
+    // ASCII 小写匹配兼容用户手填的大小写差异。
+    let normalized = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_ascii_lowercase();
     parse_catalog()
         .iter()
-        .find(|entry| model_id.starts_with(&entry.prefix))
+        .find(|entry| normalized.starts_with(&entry.prefix.to_ascii_lowercase()))
         .map(|entry| entry.context_window)
 }
 
@@ -120,10 +126,14 @@ mod tests {
     }
 
     #[test]
-    fn lookup_case_sensitive_prefix() {
-        // 前缀匹配是大小写敏感的——模型 id 在业界通常小写
+    fn lookup_is_case_insensitive() {
         let result = lookup_context_window("GPT-4o");
-        assert_eq!(result, None);
+        assert_eq!(result, Some(128000));
+    }
+
+    #[test]
+    fn lookup_strips_gateway_provider_prefix() {
+        assert_eq!(lookup_context_window("deepseek/deepseek-chat"), Some(65536));
     }
 
     #[test]

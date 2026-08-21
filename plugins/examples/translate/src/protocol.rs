@@ -63,16 +63,6 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct HttpResponse {
-    pub id: String,
-    pub status: u16,
-    #[serde(default)]
-    pub body: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct PluginResponse {
     pub id: String,
@@ -116,8 +106,5 @@ pub enum PluginAction {
     None,
     Copy {
         text: String,
-    },
-    Open {
-        path: String,
     },
 }

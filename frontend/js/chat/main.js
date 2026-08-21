@@ -40,12 +40,15 @@ import {initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible}
 // invalidateComposerBarCache 仍在 handleContextStatus 中使用
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
 import {t} from "../i18n/index.js";
+import {createEarlyStreamBuffer} from "../shared/early-stream-buffer.js";
+import {ensureSpriteLoaded} from "../shared/icon.js";
 
 /** 流式渲染节流：requestAnimationFrame 句柄 */
 let rafHandle = 0;
 
 /** 当前 assistant 消息 DOM 引用 */
 let currentAssistantEl = null;
+const earlyStreamBuffer = createEarlyStreamBuffer();
 
 /** 对话窗口是否已被用户实际打开（区分预热 vs 真正显示）。
  *  preheat 在启动 3s 后创建隐藏的 chat 窗口，JS init() 会执行但窗口不可见。
@@ -58,6 +61,9 @@ let currentToolEl = null;
 // ── 初始化 ──────────────────────────────────────
 
 async function init() {
+    // chat 窗口也消费 Lucide sprite（如供应商设置的 cable 图标）。
+    // 非阻塞加载，避免次级窗口首次初始化时延后事件监听器注册。
+    ensureSpriteLoaded();
     // 主题初始化 + 实时跟随
     applyThemeFromConfig();
     // 0.12.2 §4.9: ai_config 变更时刷新模型选择器（复用 config-changed 事件）
@@ -272,6 +278,7 @@ async function handleSend(message, isEdit = false) {
 
     // 创建 assistant 消息 DOM
     currentAssistantEl = components.createAssistantMessage();
+    earlyStreamBuffer.begin(state.conversationId);
 
     try {
         // 0.17.6a: 临时对话模式传 ephemeral:true
@@ -283,6 +290,7 @@ async function handleSend(message, isEdit = false) {
             : {thinkingEnabled, reasoningEffort};
         const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId, opts);
         state.setActiveRequestId(requestId);
+        for (const payload of earlyStreamBuffer.resolve(requestId)) dispatchStreamPayload(payload);
 
         // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
         // 0.21.16: 挪到 chatPrompt 成功之后——后端已预写对话记录（发出即保存），
@@ -303,6 +311,7 @@ async function handleSend(message, isEdit = false) {
             }
         }
     } catch (e) {
+        earlyStreamBuffer.clear();
         console.error("[chat] chatPrompt 失败:", e);
         // 移除空的 assistant 消息 DOM（createAssistantMessage 已创建但 chatPrompt 失败）
         if (currentAssistantEl) {
@@ -439,11 +448,19 @@ async function handleStop() {
 // ── 流式事件处理 ────────────────────────────────
 
 function handleStreamEvent(event) {
-    const {request_id, conversation_id, chunk} = event.payload;
+    const payload = event.payload;
+    const {request_id, conversation_id} = payload;
+    if (state.activeRequestId == null && earlyStreamBuffer.capture(payload)) return;
 
     // 忽略不属于当前请求的 chunk
     if (request_id !== state.activeRequestId) return;
     if (conversation_id !== state.conversationId) return;
+
+    dispatchStreamPayload(payload);
+}
+
+function dispatchStreamPayload(payload) {
+    const {chunk} = payload;
 
     switch (chunk.kind) {
         case "thinking":

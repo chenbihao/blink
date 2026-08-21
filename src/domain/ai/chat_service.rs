@@ -13,10 +13,12 @@
 //! - 自然完成时按 request_id compare-and-clear，旧任务不会误清新请求。
 //! - Phase 4 消费 `ChatPromptHandle.chunks` 并定向 emit 前端。
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use crate::domain::ai::memory::{estimate_tokens, EphemeralConversationMemory, SqliteConversationMemory};
+use crate::domain::ai::memory::{
+    EphemeralConversationMemory, SqliteConversationMemory, estimate_tokens,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -29,10 +31,10 @@ use crate::domain::ai::prompt::{
 };
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
-use crate::domain::ai::skill::{parse_skill_command, SkillRegistry, SkillSummary};
+use crate::domain::ai::skill::{SkillRegistry, SkillSummary, parse_skill_command};
 use crate::domain::ai::thinking::thinking_supports_effort;
 use crate::domain::ai::tool_adapter::{
-    build_agent_tools, count_allowlisted_capabilities, PendingConfirms,
+    PendingConfirms, build_agent_tools, count_allowlisted_capabilities,
 };
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::config::ai_config::{ChatAgentMode, ChatConfig, Tier};
@@ -667,7 +669,41 @@ impl ChatService {
             // 注意：compute_context_status 现已直读 resolved.model.context_window，
             // 此注入仅供 memory load_inner 裁剪 fallback 使用（history_budget 优先级不变）。
             if kind == ConversationKind::Persistent {
-                let context_limit = resolved.model.context_window.map(|u| u as usize);
+                let catalog_limit = resolved
+                    .model
+                    .context_window
+                    .is_none()
+                    .then(|| {
+                        crate::domain::ai::model_catalog::lookup_context_window(&resolved.model.id)
+                    })
+                    .flatten();
+                let tier_kind = match resolved.provider.kind {
+                    crate::domain::config::ai_config::ProviderKind::OpenAICompatible => {
+                        crate::domain::ai::token_budget::TierProviderKind::OpenAiCompatible
+                    }
+                    crate::domain::config::ai_config::ProviderKind::AnthropicMessages => {
+                        crate::domain::ai::token_budget::TierProviderKind::Anthropic
+                    }
+                    crate::domain::config::ai_config::ProviderKind::GeminiGenerateContent => {
+                        crate::domain::ai::token_budget::TierProviderKind::Gemini
+                    }
+                    crate::domain::config::ai_config::ProviderKind::OllamaHttp => {
+                        crate::domain::ai::token_budget::TierProviderKind::Ollama
+                    }
+                };
+                let context_limit = Some(
+                    resolved
+                        .model
+                        .context_window
+                        .or(catalog_limit)
+                        .map(|value| value as usize)
+                        .unwrap_or_else(|| {
+                            crate::domain::ai::token_budget::tiered_fallback_context_limit(
+                                tier_kind,
+                                resolved.provider.base_url.as_deref(),
+                            )
+                        }),
+                );
                 self.persistent_memory
                     .update_context_limit(context_limit)
                     .await;
@@ -1108,6 +1144,7 @@ impl ChatService {
                         reasoning_effort.clone(),
                         context_status.raw_estimated_tokens as u32,
                         kind_for_task == ConversationKind::Persistent,
+                        request_id,
                     )
                     .await;
                 }

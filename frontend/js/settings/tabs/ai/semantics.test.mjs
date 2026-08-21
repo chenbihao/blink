@@ -32,6 +32,7 @@ assert.equal(formatModelContextWindow(null), null);
 
 const settingsHtml = await readFile(new URL("../../../../settings.html", import.meta.url), "utf8");
 const coreSource = await readFile(new URL("./core.js", import.meta.url), "utf8");
+const providerSource = await readFile(new URL("./provider.js", import.meta.url), "utf8");
 
 for (const panel of ["ai-providers", "ai-chat", "ai-extensions"]) {
     assert.match(settingsHtml, new RegExp(`id="${panel}"`));
@@ -68,5 +69,19 @@ assert.match(coreSource, /cfg\.chat_config\.main_window_model/);
 assert.doesNotMatch(coreSource, /allow_intent_routing/);
 assert.doesNotMatch(coreSource, /ctxWindow\s*\*\s*0\.6/);
 assert.doesNotMatch(coreSource, /≈.*轮/);
+
+// AI 弹窗按钮必须带基础 btn 类，避免仅使用变体类导致尺寸级联不一致。
+for (const buttonId of [
+    "ai-modal-cancel",
+    "ai-modal-save",
+    "ai-model-edit-cancel",
+    "ai-model-edit-continue",
+    "ai-model-edit-save",
+]) {
+    assert.match(settingsHtml, new RegExp(`class="[^"]*\\bbtn\\b[^"]*"[^>]*id="${buttonId}"`));
+}
+
+// i18n 文案占位符是 {model}；删除确认必须传同名参数。
+assert.match(providerSource, /t\("ai\.model\.delete\.confirm", \{model:/);
 
 console.log("AI settings semantics tests passed");

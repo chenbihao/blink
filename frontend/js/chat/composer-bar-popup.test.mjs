@@ -88,6 +88,20 @@ assert.equal(fmtTokens(50000), "50,000");
     assert.ok(html.includes("估算"), "fallback 应显示'估算'文本");
 }
 
+// ── renderContextSection: catalog 来源展示 ──
+
+{
+    const html = renderContextSection({
+        usage_percent: 10,
+        context_limit: 65536,
+        estimated_tokens: 4000,
+        context_limit_source: "catalog",
+        confidence: "high",
+    });
+    assert.ok(html.includes("目录识别"), "catalog 来源应明确展示为目录识别");
+    assert.ok(html.includes("65,536"), "目录容量应使用真实值");
+}
+
 // ── renderContextSection: medium 置信度展示 ──
 
 {

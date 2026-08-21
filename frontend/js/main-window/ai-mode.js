@@ -44,6 +44,7 @@ import {
 } from "./dom.js";
 import {resetMaxHeight, resyncWindowSize, syncWindowSize} from "./window-size.js";
 import {t} from "../i18n/index.js";
+import {createEarlyStreamBuffer} from "../shared/early-stream-buffer.js";
 import * as ghost from "./ghost.js";
 import * as search from "./search.js";
 import * as results from "./results.js";
@@ -53,6 +54,7 @@ import * as results from "./results.js";
 let active = false;
 let conversationId = null;
 let requestId = null;
+const earlyStreamBuffer = createEarlyStreamBuffer();
 let streamBuffer = "";
 let streamRenderer = null;
 let throttle = null;
@@ -150,6 +152,7 @@ export function exitAiMode() {
         );
         requestId = null;
     }
+    earlyStreamBuffer.clear();
 
     // 0.18.0: 清除看门狗 AI 活跃标志（即使 request 已 Done 也要清）
     clearMainAiActive().catch((e) =>
@@ -202,6 +205,7 @@ async function sendPrompt(message) {
     streamBuffer = "";
     awaitingConfirm = false;
     currentQuestion = message;
+    earlyStreamBuffer.begin(conversationId);
 
     // 构建当前轮 DOM：用户消息 + AI 回复区（含 typing 动画）
     aiContentEl.innerHTML = "";
@@ -236,7 +240,9 @@ async function sendPrompt(message) {
             thinkingEnabled: false,
         });
         requestId = rid;
+        for (const payload of earlyStreamBuffer.resolve(rid)) dispatchStreamPayload(payload);
     } catch (e) {
+        earlyStreamBuffer.clear();
         handlePromptError(e);
     }
 }
@@ -294,10 +300,18 @@ export async function promoteToChat() {
  */
 function handleStreamEvent(event) {
     if (!active) return;
-    const {request_id, conversation_id, chunk} = event.payload;
+    const payload = event.payload;
+    const {request_id, conversation_id} = payload;
+    if (requestId === null && earlyStreamBuffer.capture(payload)) return;
     // 忽略不属于当前请求的 chunk
     if (request_id !== requestId) return;
     if (conversation_id !== conversationId) return;
+
+    dispatchStreamPayload(payload);
+}
+
+function dispatchStreamPayload(payload) {
+    const {chunk} = payload;
 
     switch (chunk.kind) {
         case "text":

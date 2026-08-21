@@ -12,6 +12,13 @@ import {renderAITierBanner, renderAITierSelects} from "./tier.js";
 import {t} from "../../../i18n/index.js";
 import {iconHTML} from "../../../shared/icon.js";
 import {EFFORT_LEVELS} from "../../../shared/effort-levels.js";
+import {
+    CONTEXT_WINDOW_STOPS,
+    MAX_OUTPUT_TOKEN_STOPS,
+    formatCapacityStop,
+    nearestStopIndex,
+} from "./capacity-scale.js";
+import {formatContextWindowLabel} from "./model-meta.js";
 
 /**
  * 打开模型编辑 modal。modelId 为 null 时是"新增"模式。
@@ -81,7 +88,7 @@ export function openAIModelEditModal(providerId, modelId) {
     aiState._modelFetchCache = null;
 
     setupModelParamRow("temperature", aiState._modelEditDraft.temperature, 0.7);
-    setupModelParamRow("max-tokens", aiState._modelEditDraft.max_tokens, 4096);
+    setupCapacityParamRow("max-tokens", aiState._modelEditDraft.max_tokens, 16384, MAX_OUTPUT_TOKEN_STOPS);
     setupContextWindowRow(aiState._modelEditDraft.context_window);
     setupReasoningEffortRow(aiState._modelEditDraft.reasoning_effort);
     setupThinkingStyleRow(aiState._modelEditDraft.thinking_style, provider.kind);
@@ -119,7 +126,33 @@ function setupContextWindowRow(currentValue) {
     const enabled = currentValue != null;
     toggle.checked = enabled;
     body.classList.toggle("hidden", !enabled);
-    num.value = enabled ? currentValue : 8192;
+    const shown = enabled ? currentValue : 131072;
+    num.value = shown;
+    setupCapacityRange("context-window", shown, CONTEXT_WINDOW_STOPS);
+}
+
+function setupCapacityParamRow(key, currentValue, fallbackValue, stops) {
+    const toggle = document.getElementById(`ai-model-edit-${key}-toggle`);
+    const body = document.getElementById(`ai-model-param-${key}-body`);
+    const num = document.getElementById(`ai-model-edit-${key}-num`);
+    if (!toggle || !body || !num) return;
+    const enabled = currentValue != null;
+    const shown = enabled ? currentValue : fallbackValue;
+    toggle.checked = enabled;
+    body.classList.toggle("hidden", !enabled);
+    num.value = shown;
+    setupCapacityRange(key, shown, stops);
+}
+
+function setupCapacityRange(key, value, stops) {
+    const range = document.getElementById(`ai-model-edit-${key}-range`);
+    const marks = document.getElementById(`ai-model-edit-${key}-marks`);
+    if (!range) return;
+    range.min = "0";
+    range.max = String(stops.length - 1);
+    range.step = "1";
+    range.value = String(nearestStopIndex(stops, value));
+    if (marks) marks.innerHTML = stops.map((stop) => `<span>${formatCapacityStop(stop)}</span>`).join("");
 }
 
 /** 思考控件形态行（0.21.22）：仅 OpenAICompatible 时显示 */
@@ -296,15 +329,6 @@ async function performModelFetch() {
     }
 }
 
-/** 模型拉取列表的 context_window 标注：1000 进制取整（128000→128K，1000000→1M）。 */
-function formatContextWindowLabel(cw) {
-    if (cw >= 1000000) {
-        const m = cw / 1000000;
-        return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
-    }
-    return `${Math.round(cw / 1000)}K`;
-}
-
 function renderModelFetchList(filter) {
     const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
     if (!dropdown) return;
@@ -371,6 +395,7 @@ function renderModelFetchList(filter) {
                 const cwToggle = document.getElementById("ai-model-edit-context-window-toggle");
                 if (cwInput && cwToggle) {
                     cwInput.value = cwVal;
+                    setupCapacityRange("context-window", Number(cwVal), CONTEXT_WINDOW_STOPS);
                     cwToggle.checked = true;
                     cwInput.closest(".ai-model-param-body")?.classList.remove("hidden");
                 }
@@ -571,7 +596,7 @@ export function bindAIModelEditModalEvents() {
     const overlay = $("ai-model-edit-overlay");
     if (!overlay) return;
 
-    ["temperature", "max-tokens"].forEach((key) => {
+    ["temperature"].forEach((key) => {
         const toggle = $(`ai-model-edit-${key}-toggle`);
         const body = $(`ai-model-param-${key}-body`);
         const range = $(`ai-model-edit-${key}-range`);
@@ -589,14 +614,8 @@ export function bindAIModelEditModalEvents() {
         });
     });
 
-    // 上下文窗口（0.21.21）：只有 toggle + num，没有 range slider
-    const cwToggle = $("ai-model-edit-context-window-toggle");
-    const cwBody = $("ai-model-param-context-window-body");
-    if (cwToggle && cwBody) {
-        cwToggle.addEventListener("change", () => {
-            cwBody.classList.toggle('hidden', !cwToggle.checked);
-        });
-    }
+    bindCapacityRange("max-tokens", MAX_OUTPUT_TOKEN_STOPS);
+    bindCapacityRange("context-window", CONTEXT_WINDOW_STOPS);
 
     // 思考强度（0.21.17）：toggle 控制显隐，select 联动自定义输入
     const effortToggle = $("ai-model-edit-reasoning-effort-toggle");
@@ -664,4 +683,19 @@ export function bindAIModelEditModalEvents() {
             }
         });
     }
+}
+
+function bindCapacityRange(key, stops) {
+    const range = document.getElementById(`ai-model-edit-${key}-range`);
+    const num = document.getElementById(`ai-model-edit-${key}-num`);
+    const toggle = document.getElementById(`ai-model-edit-${key}-toggle`);
+    const body = document.getElementById(`ai-model-param-${key}-body`);
+    if (!range || !num || !toggle || !body) return;
+    toggle.addEventListener("change", () => body.classList.toggle("hidden", !toggle.checked));
+    range.addEventListener("input", () => {
+        num.value = String(stops[Number(range.value)] ?? stops[0]);
+    });
+    num.addEventListener("input", () => {
+        range.value = String(nearestStopIndex(stops, num.value));
+    });
 }

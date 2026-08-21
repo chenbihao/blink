@@ -111,6 +111,11 @@
     width: 100px;
 }
 
+/* 模型编辑沿用设置页统一标签列；历史 modal 100px 覆盖会破坏全页控件左缘。 */
+#ai-model-edit-overlay .modal-card .setting-label {
+    width: var(--settings-label-width);
+}
+
 .modal-hint {
     font-size: var(--text-base);
     color: var(--text-dim);
@@ -129,6 +134,24 @@
     justify-content: flex-end;
     gap: 8px;
     padding-top: 8px;
+}
+
+/* AI 弹窗底部按钮统一尺寸；主次层级只由颜色/边框表达。 */
+#ai-modal-overlay .modal-actions > button,
+#ai-model-edit-overlay .modal-actions > button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 76px;
+    min-height: 36px;
+    padding: 8px 16px;
+    font-size: var(--text-md);
+    line-height: 1.3;
+}
+
+#ai-modal-overlay .modal-actions,
+#ai-model-edit-overlay .modal-actions {
+    padding-top: 12px;
 }
 
 /* AI 供应商 modal 三段分区(0.9.4)——品牌 · 连接 · 模型 */
@@ -150,6 +173,12 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     padding: 2px 0 6px;
+}
+
+#ai-model-edit-overlay .ai-modal-section-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .btn-primary {
@@ -1038,18 +1067,41 @@
 
 /* 参数行(temperature / max_tokens)——头部 label + toggle,body 折叠区 */
 .ai-model-param {
-    padding: 6px 0;
+    padding: 10px 12px;
+    margin-top: 8px;
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface) 35%, transparent);
 }
 
 .ai-model-param-head {
-    display: flex;
+    display: grid;
+    grid-template-columns: var(--settings-label-width) minmax(0, 1fr);
     align-items: center;
-    justify-content: space-between;
     gap: 12px;
 }
 
 .ai-model-param-head .setting-label {
     margin: 0;
+}
+
+.ai-model-param-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    width: var(--settings-label-width);
+}
+
+#ai-model-edit-overlay .ai-model-param-title .setting-label {
+    width: auto;
+    flex: 0 1 auto;
+}
+
+.ai-model-param-head > .switch,
+.ai-model-param-head > .ai-model-edit-inline-select {
+    margin-left: 0;
+    justify-self: start;
 }
 
 /* 0.21.22: thinking_style 行内 select（紧凑，放在 param-head 右侧） */
@@ -1062,11 +1114,32 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 0 4px;
+    padding: 8px 0 4px calc(var(--settings-label-width) + 12px);
 }
 
 .ai-model-param-body input[type="range"] {
+    width: 100%;
+}
+
+.ai-capacity-control {
     flex: 1;
+    min-width: 0;
+}
+
+.ai-capacity-marks {
+    display: flex;
+    justify-content: space-between;
+    gap: 2px;
+    margin-top: 3px;
+    color: var(--text-faint);
+    font-size: 9px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    user-select: none;
+}
+
+.ai-capacity-marks span {
+    min-width: 0;
+    text-align: center;
 }
 
 .ai-model-param-num {
@@ -1154,17 +1227,34 @@
     padding: 4px 0 8px;
 }
 
+.ai-model-advanced-section {
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface) 48%, transparent);
+}
+
+.ai-model-advanced-section .ai-model-custom-params {
+    margin-top: 8px;
+    padding: 0;
+}
+
 .ai-model-custom-params-empty {
     font-size: var(--text-sm);
     color: var(--text-faint);
-    padding: 6px 0;
+    padding: 14px 10px;
     text-align: center;
     font-style: normal;
+    border: 1px dashed var(--surface-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
 }
 
 .ai-model-custom-param-row {
-    display: flex;
-    gap: 6px;
+    display: grid;
+    grid-template-columns: minmax(110px, 0.7fr) minmax(160px, 1.3fr) 30px;
+    gap: 8px;
     align-items: center;
 }
 
@@ -1182,7 +1272,7 @@
 }
 
 .ai-model-custom-param-key {
-    flex: 0 0 30%;
+    width: 100%;
 }
 
 .ai-model-custom-param-del {
@@ -1203,8 +1293,9 @@
 }
 
 .ai-model-custom-params-add {
-    margin-top: 2px;
+    margin-top: 10px;
     align-self: flex-start;
+    border-style: dashed;
 }
 
 /* ── 供应商 modal 模型多选（输入框聚焦拉取）────────────── */
@@ -1250,7 +1341,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 7px 10px;
     font-size: var(--text-base);
     font-family: var(--font-mono, ui-monospace, monospace);
     color: var(--text);
@@ -1264,7 +1355,42 @@
 
 .ai-provider-model-dropdown-item input[type="checkbox"] {
     pointer-events: none;
-    accent-color: var(--accent);
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    border: 1px solid var(--surface-3, var(--surface-2));
+    border-radius: 4px;
+    background: var(--surface);
+    display: grid;
+    place-items: center;
+    flex: 0 0 15px;
+}
+
+.ai-provider-model-dropdown-item input[type="checkbox"]::after {
+    content: "";
+    width: 7px;
+    height: 4px;
+    border-left: 2px solid var(--bg);
+    border-bottom: 2px solid var(--bg);
+    transform: rotate(-45deg) scale(0);
+    transition: transform var(--transition-fast);
+}
+
+.ai-provider-model-dropdown-item input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.ai-provider-model-dropdown-item input[type="checkbox"]:checked::after {
+    transform: rotate(-45deg) scale(1);
+}
+
+.ai-provider-model-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .ai-provider-model-dropdown-item.is-already {
@@ -1506,9 +1632,41 @@
 }
 
 .ai-model-cap-checks .checkbox-inline input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
+    appearance: none;
+    display: grid;
+    place-content: center;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
     cursor: pointer;
+    transition: background var(--transition-base), border-color var(--transition-base);
+}
+
+.ai-model-cap-checks .checkbox-inline input[type="checkbox"]::after {
+    content: "";
+    width: 8px;
+    height: 4px;
+    border-left: 2px solid var(--bg);
+    border-bottom: 2px solid var(--bg);
+    transform: rotate(-45deg) scale(0);
+    transition: transform var(--transition-fast);
+}
+
+.ai-model-cap-checks .checkbox-inline input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.ai-model-cap-checks .checkbox-inline input[type="checkbox"]:checked::after {
+    transform: rotate(-45deg) scale(1);
+}
+
+.ai-model-cap-checks .checkbox-inline input[type="checkbox"]:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    outline-offset: 2px;
 }
 
 /* ── 0.12 §2.7: 本地模型 Tab ────────────────────────────────────────── */

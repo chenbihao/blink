@@ -267,7 +267,7 @@ impl TranslateEngine for AliEngine {
         let tgt = lang_direct(target_lang);
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let nonce = uuid_like();
-        let mut params = vec![
+        let params = vec![
             ("Format", "JSON".into()),
             ("Version", "2018-10-12".into()),
             ("AccessKeyId", access_key_id.to_string()),
@@ -335,7 +335,7 @@ impl TranslateEngine for AliEngine {
         let tgt = lang_direct(target_lang);
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let nonce = uuid_like();
-        let mut params = vec![
+        let params = vec![
             ("Format", "JSON".into()),
             ("Version", "2018-10-12".into()),
             ("AccessKeyId", access_key_id.to_string()),
@@ -401,7 +401,7 @@ impl AliEngine {
     /// 阿里 RPC 签名公共逻辑:排序 → HMAC-SHA1 → 拼最终 body。
     /// 单条 (`TranslateGeneral`) 和批量 (`GetBatchTranslate`) 共用。
     fn sign_and_build(
-        params: Vec<((&str, String))>,
+        params: Vec<(&str, String)>,
         access_key_secret: &str,
     ) -> Option<EngineRequest> {
         let mut params = params;

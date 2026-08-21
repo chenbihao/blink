@@ -15,6 +15,7 @@ import {openAIModelEditModal} from "./model-edit.js";
 import {confirmDialog, invoke} from "../../../shared/tauri.js";
 import {t} from "../../../i18n/index.js";
 import {iconHTML} from "../../../shared/icon.js";
+import {fetchedContextWindow, formatContextWindowLabel} from "./model-meta.js";
 
 // ════════════════════════════════════════════════════════════
 //  供应商列表渲染
@@ -397,7 +398,7 @@ async function deleteModelFromProvider(providerId, modelId) {
     const model = (provider.models || []).find((m) => m.id === modelId);
     if (!model) return;
     const ok = await confirmDialog(
-        t("ai.model.delete.confirm", {id: modelId, name: model.display_name || modelId}),
+        t("ai.model.delete.confirm", {model: model.display_name || modelId}),
         {title: t("ai.model.delete"), kind: "warning"},
     );
     if (!ok) return;
@@ -939,7 +940,7 @@ async function saveNewProvider({kind, displayName, baseUrl, apiKey, errEl, selec
         id: modelId,
         display_name: modelId,
         enabled: true,
-        context_window: null,
+        context_window: fetchedContextWindow(aiState._providerModelCache?.models, modelId),
         input_price_per_million: null,
         output_price_per_million: null,
         temperature: null,
@@ -1009,7 +1010,7 @@ async function saveEditedProvider(providerId, {displayName, baseUrl, apiKey, err
             id: modelId,
             display_name: modelId,
             enabled: true,
-            context_window: null,
+            context_window: fetchedContextWindow(aiState._providerModelCache?.models, modelId),
             input_price_per_million: null,
             output_price_per_million: null,
             temperature: null,
@@ -1177,8 +1178,10 @@ export function filterProviderModels(filter) {
 
     const q = (filter || "").trim();
     const qLower = q.toLowerCase();
-    const filtered = cache.models
-        .filter((m) => (q ? m.toLowerCase().includes(qLower) : true))
+    // 0.21.21 后端返回 ModelMeta {id, context_window}；旧 string 缓存继续兼容。
+    const modelItems = (cache.models || []).map((m) => typeof m === "string" ? {id: m} : m);
+    const filtered = modelItems
+        .filter((m) => (q ? m.id.toLowerCase().includes(qLower) : true))
         .slice(0, 100);
 
     const selectedSet = new Set(aiState._providerSelectedModels);
@@ -1186,25 +1189,29 @@ export function filterProviderModels(filter) {
     const provider = editPid ? (aiState.currentAIConfig.providers || []).find((p) => p.id === editPid) : null;
     const providerModelIds = new Set((provider?.models || []).map((m) => m.id));
 
-    let itemsHtml = filtered.map((m) => {
+    let itemsHtml = filtered.map((meta) => {
+        const m = meta.id;
+        const cwLabel = meta.context_window != null
+            ? `<span class="ai-model-fetch-cw" title="${escapeAttr(t("ai.model_modal.context_window.fetched"))}">${formatContextWindowLabel(meta.context_window)}</span>`
+            : "";
         const isSelected = selectedSet.has(m);
         const isProviderExisting = providerModelIds.has(m) && !isSelected;
         if (isSelected) {
             return `<label class="ai-provider-model-dropdown-item" data-model-id="${escapeAttr(m)}">
         <input type="checkbox" checked data-model-id="${escapeAttr(m)}" />
-        <span>${escapeHtml(m)}</span>
+        <span class="ai-provider-model-name">${escapeHtml(m)}</span>${cwLabel}
       </label>`;
         }
         if (isProviderExisting) {
             return `<label class="ai-provider-model-dropdown-item is-already" data-model-id="${escapeAttr(m)}">
         <input type="checkbox" disabled data-model-id="${escapeAttr(m)}" />
-        <span>${escapeHtml(m)}</span>
+        <span class="ai-provider-model-name">${escapeHtml(m)}</span>${cwLabel}
         <span class="added-label">${escapeHtml(t("ai.model_modal.added"))}</span>
       </label>`;
         }
         return `<label class="ai-provider-model-dropdown-item" data-model-id="${escapeAttr(m)}">
       <input type="checkbox" data-model-id="${escapeAttr(m)}" />
-      <span>${escapeHtml(m)}</span>
+      <span class="ai-provider-model-name">${escapeHtml(m)}</span>${cwLabel}
     </label>`;
     }).join("");
 
@@ -1220,7 +1227,7 @@ export function filterProviderModels(filter) {
         itemsHtml += `<div class="ai-provider-model-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.empty"))}</div>`;
     }
 
-    if (q && filtered.length > 0 && !cache.models.some((m) => m.toLowerCase() === qLower) && !selectedSet.has(q) && !providerModelIds.has(q)) {
+    if (q && filtered.length > 0 && !modelItems.some((m) => m.id.toLowerCase() === qLower) && !selectedSet.has(q) && !providerModelIds.has(q)) {
         itemsHtml += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
       <span>+ ${escapeHtml(t("ai.model_modal.manual_add", {id: q}))}</span>
     </div>`;

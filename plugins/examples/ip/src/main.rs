@@ -50,7 +50,8 @@ enum CoreToPlugin {
     #[serde(rename = "tool_call")]
     ToolCall {
         id: String,
-        tool_name: String,
+        #[serde(rename = "tool_name")]
+        _tool_name: String,
         #[serde(default)]
         arguments: serde_json::Value,
         #[serde(default)]
@@ -96,12 +97,7 @@ struct HttpRequest {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
-    #[serde(default = "default_timeout")]
     timeout_ms: u64,
-}
-
-fn default_timeout() -> u64 {
-    10000
 }
 
 /// 插件响应
@@ -129,7 +125,6 @@ enum PluginAction {
 /// 挂起的查询上下文：等待 HTTP 响应
 struct PendingQuery {
     query_id: String,
-    use_ipv6: bool,
     local_ip: Option<String>,
     local_ipv6: Option<String>,
     /// 是否来自 tool-call（决定返回 Response 还是 RawResult）
@@ -191,7 +186,6 @@ fn main() {
                         http_id.clone(),
                         PendingQuery {
                             query_id: id,
-                            use_ipv6,
                             local_ip,
                             local_ipv6,
                             is_tool_call: false,
@@ -291,7 +285,7 @@ fn main() {
             }
             CoreToPlugin::ToolCall {
                 id,
-                tool_name: _,
+                _tool_name: _,
                 arguments,
                 settings,
             } => {
@@ -327,7 +321,6 @@ fn main() {
                         http_id.clone(),
                         PendingQuery {
                             query_id: id,
-                            use_ipv6,
                             local_ip,
                             local_ipv6,
                             is_tool_call: true,

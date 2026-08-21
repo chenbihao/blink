@@ -22,6 +22,10 @@ use crate::domain::ai::thinking::{
 
 use super::ChatService;
 
+fn should_skip_done_recompute(active_request_id: Option<u64>, completed_request_id: u64) -> bool {
+    active_request_id.is_some_and(|active_id| active_id != completed_request_id)
+}
+
 // ── P0-1: 校准采样门控 ──────────────────────────────────────────────────────
 
 /// 校准采样门控——跟踪本流是否出现过 ToolCall，决定 Done 时是否采样。
@@ -74,6 +78,7 @@ pub(super) async fn run_intercepted_stream(
     reasoning_effort: Option<String>,
     raw_estimated_input_tokens: u32,
     is_persistent: bool,
+    request_id: u64,
 ) {
     let weak_service: Weak<ChatService> = Arc::downgrade(service);
 
@@ -186,11 +191,17 @@ pub(super) async fn run_intercepted_stream(
             // （边界计算不受影响，水位口径未变）。
             // 摘要后台任务完成时还会再推一次，属预期（前端幂等渲染）。
             // 仅 Persistent——Ephemeral 对话不落库，重算读空库、摘要白跑。
-            if is_done && is_persistent && let Some(service) = weak_for_summary.upgrade() {
+            if is_done
+                && is_persistent
+                && let Some(service) = weak_for_summary.upgrade()
+            {
                 let conv_id = summary_conv_id.clone();
                 tokio::spawn(async move {
                     // 竞态守卫：与下一轮发送竞态用 requests.status() 守卫
-                    if service.requests.status().is_some() {
+                    if should_skip_done_recompute(
+                        service.requests.status().map(|active| active.request_id),
+                        request_id,
+                    ) {
                         tracing::debug!(
                             conversation_id = %conv_id,
                             "Done 后重算：检测到新请求已启动，跳过重算"
@@ -259,6 +270,13 @@ pub(super) async fn run_intercepted_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn done_recompute_only_skips_a_different_active_request() {
+        assert!(!should_skip_done_recompute(Some(7), 7));
+        assert!(!should_skip_done_recompute(None, 7));
+        assert!(should_skip_done_recompute(Some(8), 7));
+    }
 
     // ── P0-1: CalibrationGate 测试 ──────────────────────────────────────────
 

@@ -241,11 +241,16 @@ impl ChatService {
                 resolved.provider.base_url.as_deref(),
             )
         };
-        // context_window 优先级：model.config_window > cfg.context_limit（注入值）
-        let context_window = resolved
+        // context_window 优先级：用户/Provider 已保存值 > 内置模型目录 > 端点分档。
+        // 不再读取 memory.cfg.context_limit：它是运行时裁剪注入值，反向读回会把
+        // catalog/tiered 来源误标为 configured，并可能带入上一个模型的旧值。
+        let catalog_context_window = resolved
             .model
             .context_window
-            .or(cfg.context_limit.map(|v| v as u32));
+            .is_none()
+            .then(|| crate::domain::ai::model_catalog::lookup_context_window(&resolved.model.id))
+            .flatten();
+        let context_window = resolved.model.context_window.or(catalog_context_window);
 
         // 0.21.17: 从 AgentProvider 获取真实工具快照
         let tools = provider.tool_prompt_infos();
@@ -297,7 +302,7 @@ impl ChatService {
             _ => false,
         });
 
-        let budget = crate::domain::ai::token_budget::estimate_request_budget(
+        let mut budget = crate::domain::ai::token_budget::estimate_request_budget(
             crate::domain::ai::token_budget::TokenBudgetInput {
                 history_texts: &history_texts,
                 system_prompt: preamble,
@@ -312,6 +317,10 @@ impl ChatService {
                 calibration_ratio,
             },
         );
+        if resolved.model.context_window.is_none() && catalog_context_window.is_some() {
+            budget.context_limit_source =
+                crate::domain::ai::token_budget::ContextLimitSource::Catalog;
+        }
 
         // 0.21.18: 注入历史裁剪预算——load_inner 的裁剪基准从裸 context_limit
         // 换为「预扣 system/tools/pending/输出预留/安全余量后的历史可用预算」。

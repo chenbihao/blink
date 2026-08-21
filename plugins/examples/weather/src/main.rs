@@ -50,7 +50,8 @@ enum CoreToPlugin {
     #[serde(rename = "tool_call")]
     ToolCall {
         id: String,
-        tool_name: String,
+        #[serde(rename = "tool_name")]
+        _tool_name: String,
         #[serde(default)]
         arguments: serde_json::Value,
         #[serde(default)]
@@ -235,7 +236,7 @@ fn main() {
             }
             CoreToPlugin::ToolCall {
                 id,
-                tool_name: _,
+                _tool_name: _,
                 arguments,
                 settings,
             } => {
