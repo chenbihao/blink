@@ -15,6 +15,7 @@
 import {confirmDialog, invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {getLang, onLangChange, t} from "../../i18n/index.js";
+import {copyToClipboard} from "../../shared/api.js";
 
 /**
  * 保存 STT 配置。
@@ -610,7 +611,7 @@ async function initFunasrEnv(config) {
             const text = _logLines.join("\n");
             if (!text) return;
             try {
-                await navigator.clipboard.writeText(text);
+                await copyToClipboard(text);
                 logCopyBtn.textContent = t("voice.local.log.copied");
                 setTimeout(() => {
                     logCopyBtn.textContent = t("voice.local.log.copy_btn");

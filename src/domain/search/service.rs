@@ -6,7 +6,7 @@
 //!
 //! 由 `commands::search_apps` 经 `app.state::<Arc<SearchService>>()` 调用（0.14.6 后通过 DomainEnv）。
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -81,6 +81,8 @@ pub struct SearchService {
     snapshot: Arc<RwLock<ContextSnapshot>>,
     /// 融合后返回前端的最大结果数（AppConfig.max_results 热更新，搜索热路径零 IO）。
     max_results: Arc<AtomicUsize>,
+    /// 是否允许从主搜索框通过 `clip/剪贴板` 召回历史。Alt+C 专用模式不受此开关影响。
+    clipboard_search_enabled: Arc<AtomicBool>,
     /// 用户禁用的内置动作 id 列表（0.8.0 §1.3）。
     /// BuiltinEngine 通过 QueryContext 只读，设置页保存时经 `update_disabled_builtin_actions`
     /// 热更新。读多写少，用 RwLock；每次 search 短时 read 不阻塞。
@@ -155,6 +157,7 @@ impl SearchService {
             latest_seq: Arc::new(AtomicU64::new(0)),
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
             max_results: Arc::new(AtomicUsize::new(50)),
+            clipboard_search_enabled: Arc::new(AtomicBool::new(true)),
             disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
             disabled_context_bindings: Arc::new(RwLock::new(Vec::new())),
             autosuggest: Arc::new(RwLock::new(AutosuggestState::default())),
@@ -330,6 +333,26 @@ impl SearchService {
             }
         }
         tracing::debug!(limit, "ClipboardEngine 候选池上限已热更新");
+    }
+
+    /// 热更新主搜索框的剪贴板历史召回门禁。Alt+C 仍可显式打开历史。
+    pub fn update_clipboard_search_enabled(&self, enabled: bool) {
+        self.clipboard_search_enabled
+            .store(enabled, Ordering::Relaxed);
+        tracing::debug!(enabled, "ClipboardEngine 主搜索召回开关已热更新");
+    }
+
+    /// 更新剪贴板搜索保留期；0 表示搜索全部历史。
+    pub fn update_clipboard_retention_days(&self, days: u32) {
+        for engine in &self.sync_engines {
+            if let Some(clip) = engine
+                .as_any()
+                .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
+            {
+                clip.update_retention_days(days);
+            }
+        }
+        tracing::debug!(days, "ClipboardEngine 搜索保留期已热更新");
     }
 
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
@@ -710,6 +733,12 @@ impl SearchService {
         arg: crate::domain::intent::ExecArg,
         search_ctx: &QueryContext<'_>,
     ) -> Vec<AppEntry> {
+        if engine_id == super::clipboard_engine::ENGINE_ID
+            && !self.clipboard_search_enabled.load(Ordering::Relaxed)
+        {
+            tracing::debug!("ClipboardEngine 主搜索召回已关闭");
+            return Vec::new();
+        }
         let arg_str = arg.to_plugin_string();
         let mut items = Vec::new();
         for engine in &self.sync_engines {
@@ -855,9 +884,16 @@ impl SearchService {
                 route
             }
             // EngineTakeover 不走 plugin 的 enabled / min_arg_length 检查——
-            // 本体 engine 由本体决定生死（如 ClipboardEngine 通过 ClipboardService cfg.enabled
-            // 控制监听器；search 阶段无第二重开关）。带参 engine 也不设参数长度门槛
+            // 本体 engine 由本体决定生死；ClipboardEngine 的主搜索召回开关在下方单独门禁。
+            // 带参 engine 不设参数长度门槛
             // （剪贴板搜索 "a" 一个字符也合理，engine 自决定 fuzzy 阈值）。
+            Route::EngineTakeover { ref engine_id, .. }
+                if engine_id == super::clipboard_engine::ENGINE_ID
+                    && !self.clipboard_search_enabled.load(Ordering::Relaxed) =>
+            {
+                tracing::debug!("ClipboardEngine 主搜索召回已关闭,降级普通搜索");
+                Route::Mixed { candidates: vec![] }
+            }
             Route::EngineTakeover { .. } => route,
             // AiTrigger 同 EngineTakeover——"ai" 是本体保留前缀，不走 plugin 检查。
             Route::AiTrigger { .. } => route,

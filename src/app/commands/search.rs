@@ -881,12 +881,48 @@ pub async fn list_running_processes() -> Vec<crate::infra::platform::context::Ru
 
 /// 录制快捷键（阻塞，直到用户按下组合键或超时）。
 #[tauri::command]
-pub async fn record_hotkey() -> Result<serde_json::Value, String> {
-    // 在阻塞线程中等待录制（事件由 ll_proc 喂入 recorder 状态机）
-    let result =
-        tokio::task::spawn_blocking(crate::infra::platform::hotkey::record_hotkey_blocking)
-            .await
-            .map_err(|e| e.to_string())?;
+pub async fn record_hotkey(
+    app: tauri::AppHandle,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
+    let started_at = std::time::Instant::now();
+    tracing::info!(request_id = %request_id, "record_hotkey_requested");
+    // 先注册 ready 通道，再启动阻塞录制。前端监听 HOTKEY_RECORDING_READY 后才显示
+    // “正在录制”，避免 IPC/线程池调度较慢时用户首键落在 recorder armed 之前。
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::task::spawn_blocking(move || {
+        crate::infra::platform::hotkey::record_hotkey_blocking(|session_id| {
+            let _ = ready_tx.send(session_id);
+        })
+    });
+
+    if let Ok(session_id) = ready_rx.await {
+        tracing::info!(
+            request_id = %request_id,
+            session_id,
+            ready_ms = started_at.elapsed().as_millis() as u64,
+            "record_hotkey_ready"
+        );
+        if let Err(error) = app.emit(
+            EventNames::HOTKEY_RECORDING_READY,
+            serde_json::json!({ "requestId": request_id, "sessionId": session_id }),
+        ) {
+            tracing::warn!(
+                request_id = %request_id,
+                session_id,
+                error = %error,
+                "record_hotkey_ready_emit_failed"
+            );
+        }
+    } else {
+        tracing::warn!(
+            request_id = %request_id,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "record_hotkey_not_armed"
+        );
+    }
+
+    let result = task.await.map_err(|e| e.to_string())?;
 
     match result {
         Some(record) => {
@@ -895,11 +931,20 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
                 "key": record.key,
                 "display": record.display,
             });
-            tracing::debug!("record_hotkey: → Ok display={}", record.display);
+            tracing::info!(
+                request_id = %request_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                display = %record.display,
+                "record_hotkey_succeeded"
+            );
             Ok(val)
         }
         None => {
-            tracing::warn!("record_hotkey: → Err (None)");
+            tracing::warn!(
+                request_id = %request_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "record_hotkey_failed"
+            );
             Err("录制超时或取消".to_string())
         }
     }

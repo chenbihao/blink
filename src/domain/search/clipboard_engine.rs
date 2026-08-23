@@ -77,6 +77,8 @@ pub struct ClipboardEngine {
     /// 搜索候选池上限快照（`candidate_limit` 配置项）。
     /// 控制搜索时拉多少条元数据做 fuzzy 匹配。默认 500。
     candidate_limit: Arc<RwLock<usize>>,
+    /// 搜索保留天数；0 表示不按时间过滤。
+    retention_days: Arc<RwLock<u32>>,
 }
 
 impl ClipboardEngine {
@@ -88,6 +90,7 @@ impl ClipboardEngine {
             display_pages: Arc::new(RwLock::new(DEFAULT_DISPLAY_PAGES)),
             page_size: Arc::new(RwLock::new(DEFAULT_PAGE_SIZE)),
             candidate_limit: Arc::new(RwLock::new(DEFAULT_CANDIDATE_LIMIT)),
+            retention_days: Arc::new(RwLock::new(30)),
         }
     }
 
@@ -136,6 +139,10 @@ impl ClipboardEngine {
         };
         *self.candidate_limit.write().unwrap() = clamped;
     }
+
+    pub fn update_retention_days(&self, days: u32) {
+        *self.retention_days.write().unwrap() = days;
+    }
 }
 
 #[async_trait::async_trait]
@@ -172,6 +179,7 @@ impl SearchEngine for ClipboardEngine {
         let arg = query.trim();
         let limit = self.effective_limit() as i64;
         let candidate_limit = *self.candidate_limit.read().unwrap() as i64;
+        let retention_days = *self.retention_days.read().unwrap();
         let lang = self.language.read().unwrap().clone();
         let t0 = std::time::Instant::now();
 
@@ -196,12 +204,17 @@ impl SearchEngine for ClipboardEngine {
             (text, images)
         } else {
             // 搜索场景：文本 fuzzy + 图片 SQL LIKE 并行
-            // 文本：拉近 30 天元数据（不含 text），nucleo 匹配 preview
+            // 文本：按配置保留期拉元数据（0=全部，不含 text），nucleo 匹配 preview
             // 图片：SQL LIKE 过滤 source_app / source_path（不下全量再 Rust 过滤）
-            let (text_metas, image_items) = tokio::join!(
-                query_recent_days_meta(&self.pool, 30, candidate_limit),
-                search_image_list(&self.cache_pool, arg, limit)
-            );
+            let text_query = async {
+                if retention_days == 0 {
+                    query_recent_meta(&self.pool, candidate_limit).await
+                } else {
+                    query_recent_days_meta(&self.pool, retention_days, candidate_limit).await
+                }
+            };
+            let (text_metas, image_items) =
+                tokio::join!(text_query, search_image_list(&self.cache_pool, arg, limit));
             // nucleo fuzzy match on preview（不含 text）
             let text_matched = fuzzy_match_metas(&text_metas, arg, limit as usize);
             (text_matched, image_items)
@@ -217,7 +230,9 @@ impl SearchEngine for ClipboardEngine {
         for item in image_items {
             combined.push((item.created_at, ClipboardEntry::Image(item)));
         }
-        combined.sort_by_key(|x| std::cmp::Reverse(x.0));
+        combined.sort_by_key(|(created_at, entry)| {
+            std::cmp::Reverse((*created_at, id_recency(entry.id())))
+        });
 
         let combined_len_before_take = combined.len();
         let result: Vec<SearchItem> = combined
@@ -278,6 +293,22 @@ fn to_search_item(meta: ClipboardMeta, index: usize, lang: &str) -> SearchItem {
 enum ClipboardEntry {
     Text(ClipboardMeta),
     Image(ClipboardImageListItem),
+}
+
+impl ClipboardEntry {
+    fn id(&self) -> &str {
+        match self {
+            Self::Text(meta) => &meta.id,
+            Self::Image(meta) => &meta.id,
+        }
+    }
+}
+
+fn id_recency(id: &str) -> u128 {
+    id.rsplit('_')
+        .next()
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or(0)
 }
 
 /// ClipboardImageListItem → SearchItem（0.16.4）。
@@ -728,6 +759,27 @@ mod tests {
         let engine = ClipboardEngine::new(pool, cache_pool);
         engine.update_page_size(0);
         assert_eq!(*engine.page_size.read().unwrap(), DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn retention_days_is_hot_updatable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let cache_pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool, cache_pool);
+        engine.update_retention_days(0);
+        assert_eq!(*engine.retention_days.read().unwrap(), 0);
+        engine.update_retention_days(90);
+        assert_eq!(*engine.retention_days.read().unwrap(), 90);
+    }
+
+    #[test]
+    fn id_recency_parses_text_and_image_ids() {
+        assert_eq!(id_recency("clip_123"), 123);
+        assert_eq!(id_recency("clipimg_456"), 456);
+        assert_eq!(id_recency("legacy"), 0);
     }
 
     // ── 0.17.9 resolve_source_desc 单测 ──────────────────────────────────

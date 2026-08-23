@@ -230,12 +230,19 @@ async fn save_suggestion(app: &tauri::AppHandle, cfg: &SuggestionConfig) -> Resu
 async fn save_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     ConfigStore::set(pool, cfg).await?;
-    crate::infra::platform::clipboard::set_active(cfg.enabled);
+    crate::infra::platform::clipboard::update_runtime_config(cfg);
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
         // 0.20.1: 转发 display_pages（而非旧 display_count）
         service.update_clipboard_display_pages(cfg.display_pages);
         service.update_clipboard_candidate_limit(cfg.candidate_limit);
+        service.update_clipboard_search_enabled(cfg.search_enabled);
+        service.update_clipboard_retention_days(cfg.retention_days);
     }
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::clipboard::cleanup_old(&pools.history, cfg.retention_days).await;
+    crate::infra::data::clipboard::cleanup_excess(&pools.history, cfg.max_items).await;
+    crate::infra::data::clipboard_images::cleanup_excess_images(&pools.cache, cfg.max_image_items)
+        .await;
     emit_changed(app, "clipboard:config");
     Ok(())
 }

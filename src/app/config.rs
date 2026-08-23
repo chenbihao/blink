@@ -3,6 +3,7 @@
 //! 所有配置类型 + 操作函数已迁入 `domain::config`。
 //! 此文件保留 re-export 以避免 app 层大量 import 改动。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tauri::Manager;
@@ -13,6 +14,9 @@ pub use crate::domain::config::shards::*;
 pub use crate::domain::config::store::*;
 
 // ── 输入配置快照刷新 ──────────────────────────────────────────────────────────
+
+/// Hook 配置快照版本。按刷新完成顺序递增，供 reducer 拒绝陈旧消息。
+static INPUT_CONFIG_REVISION: AtomicU64 = AtomicU64::new(1);
 
 /// 刷新输入配置快照并推送到 hook 线程。
 ///
@@ -53,7 +57,7 @@ pub async fn refresh_input_config_with_registry(
     };
 
     let snapshot = crate::infra::platform::hotkey::InputConfigSnapshot {
-        revision: 0,
+        revision: INPUT_CONFIG_REVISION.fetch_add(1, Ordering::Relaxed),
         hotkey: crate::infra::platform::hotkey::NormalizedHotkey {
             modifiers: config.hotkey.modifiers.clone(),
             key: config.hotkey.key.clone(),

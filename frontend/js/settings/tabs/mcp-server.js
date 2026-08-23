@@ -13,6 +13,7 @@
 import {invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {t} from "../../i18n/index.js";
+import {copyToClipboard} from "../../shared/api.js";
 
 /**
  * 初始化 MCP Server 配置区。
@@ -258,7 +259,7 @@ function initCopyConfig() {
         if (!pre) return;
         const text = pre.textContent || "";
         try {
-            await navigator.clipboard.writeText(text);
+            await copyToClipboard(text);
             // 临时反馈
             const span = btn.querySelector("span");
             if (span) {

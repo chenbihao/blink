@@ -569,6 +569,23 @@ impl ChordRegistry {
             .map(|a| a.id())
     }
 
+    /// 返回生效键冲突。一个键映射到多个动作时 `.find()` 会让后续动作永远不可达，
+    /// 因此配置写入前必须拒绝这类绑定。
+    pub fn binding_conflicts(&self, bindings: &ChordBindings) -> Vec<(String, Vec<String>)> {
+        let mut by_key: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for action in &self.actions {
+            let key = bindings
+                .effective_key(action.id(), action.default_key())
+                .to_lowercase();
+            by_key.entry(key).or_default().push(action.id().to_string());
+        }
+        by_key
+            .into_iter()
+            .filter(|(_, action_ids)| action_ids.len() > 1)
+            .collect()
+    }
+
     /// 派生 native exclusive chord 可吞的键集合。
     ///
     /// 只含 enabled、Tap 语义、`requires_input=false`（空 query 可 native 触发）的键。
@@ -766,6 +783,21 @@ mod tests {
             ChordSemantic::Tap
         );
         assert_eq!(bindings.chat.modifiers, vec!["alt"]);
+    }
+
+    #[test]
+    fn duplicate_effective_keys_are_reported() {
+        let registry = build_default_registry();
+        let mut bindings = ChordBindings::default();
+        bindings.screenshot.key = "q".to_string();
+
+        let conflicts = registry.binding_conflicts(&bindings);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, "q");
+        assert_eq!(
+            conflicts[0].1,
+            vec!["chat".to_string(), "screenshot".to_string()]
+        );
     }
 
     #[test]

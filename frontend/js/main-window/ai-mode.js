@@ -19,6 +19,7 @@ import {
     chatPrompt,
     clearMainAiActive,
     confirmChatAction,
+    copyToClipboard,
     getEphemeralModels,
     promoteEphemeralConversation
 } from "../shared/api.js";
@@ -603,7 +604,7 @@ function injectCopyButton() {
     btn.textContent = t("ai.copy");
     btn.addEventListener("click", async () => {
         try {
-            await navigator.clipboard.writeText(streamBuffer);
+            await copyToClipboard(streamBuffer);
             btn.textContent = t("ai.copied");
             setTimeout(() => {
                 btn.textContent = t("ai.copy");

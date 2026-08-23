@@ -1229,11 +1229,18 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
             };
         }
 
+        // 主热键优先于 Chord。若用户把主热键改成 Alt+字母，而该字母也是
+        // Chord 键，窗口可见时仍必须能用同一主热键 toggle 隐藏。
+        if matches!(&state.gesture, GestureState::Idle) {
+            try_arm(state, &e.key, e.source, e.time_ms, &mut result);
+        }
+
         // Chord 独占吞键
-        if let ChordSession::Active {
-            session_id,
-            last_triggered_key,
-        } = &state.chord
+        if matches!(&state.gesture, GestureState::Idle)
+            && let ChordSession::Active {
+                session_id,
+                last_triggered_key,
+            } = &state.chord
         {
             let key_lower = e.key.to_lowercase();
             if state.config.exclusive_tap_keys.contains(&key_lower) {
@@ -1260,11 +1267,6 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
                 result.effects.extend(finalize(state));
                 return result;
             }
-        }
-
-        // 未 armed：尝试 arm（gesture 仍 Armed 时不 arm 新 gesture）
-        if matches!(&state.gesture, GestureState::Idle) {
-            try_arm(state, &e.key, e.source, e.time_ms, &mut result);
         }
     } else {
         // 非修饰键 up
@@ -1318,6 +1320,14 @@ fn try_arm(
     let frozen_hotkey = config.hotkey.clone();
     let frozen_tap_threshold = config.tap_threshold;
     let gesture_id = state.alloc_gesture_id();
+    tracing::info!(
+        gesture_id,
+        key,
+        modifiers_mask = state.modifiers.pressed_mask(),
+        window_visible = state.window.visible,
+        source = ?source,
+        "main_hotkey_gesture_armed"
+    );
     state.gesture = GestureState::Armed {
         gesture_id,
         key: key.to_string(),
@@ -1379,6 +1389,11 @@ fn try_release(
                 // 双保险：timer 未 fire 但已超阈值 → HoldReleased
                 // 使用 frozen_tap_threshold
                 let _ = armed_at_ms; // armed_at_ms 在真实 adapter 中用于时间比较
+                tracing::info!(
+                    gesture_id,
+                    window_visible = state.window.visible,
+                    "main_hotkey_tap_emitted"
+                );
                 result.effects.push(InputEffect::Tap {
                     gesture_id,
                     triggered_at: now,
@@ -1585,6 +1600,14 @@ fn reduce_recorder_mode(state: &mut InputState, mode: RecorderMode) -> ReduceRes
 // ── ConfigChanged 处理 ─────────────────────────────────────────────────────
 
 fn reduce_config_changed(state: &mut InputState, snapshot: InputConfigSnapshot) -> ReduceResult {
+    // 配置刷新可能由多个 async command 并发完成；拒绝已被更新快照超越的消息。
+    // revision=0 仅保留给默认值与单元测试，生产快照从 1 开始递增。
+    if snapshot.revision > 0
+        && state.config_revision > 0
+        && snapshot.revision <= state.config_revision
+    {
+        return ReduceResult::pass();
+    }
     // Armed 期间：当前 gesture 冻结自己的配置副本，不更新
     // 新配置从下一次 gesture 生效
     state.config_revision = snapshot.revision;
@@ -2327,6 +2350,58 @@ mod tests {
         );
         assert_eq!(r.propagation, Propagation::Swallow);
         assert!(has_chord_triggered(&r.effects));
+    }
+
+    #[test]
+    fn main_hotkey_wins_when_its_key_is_also_a_chord_key() {
+        let mut config = alt_space_config();
+        config.hotkey.key = "a".to_string();
+        let mut s = InputState::default();
+        reduce(&mut s, InputEvent::ConfigChanged(config), Instant::now());
+        reduce(&mut s, window_visible(), Instant::now());
+        reduce(
+            &mut s,
+            InputEvent::ViewContextChanged(ready_view()),
+            Instant::now(),
+        );
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert!(s.chord.is_active());
+
+        let down = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down("a", 200)),
+            Instant::now(),
+        );
+        assert!(!has_chord_triggered(&down.effects));
+        assert!(matches!(s.gesture, GestureState::Armed { .. }));
+
+        let up = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_up("a", 220)),
+            Instant::now(),
+        );
+        assert!(has_tap(&up.effects));
+    }
+
+    #[test]
+    fn stale_config_revision_is_discarded() {
+        let mut s = InputState::default();
+        let mut newest = alt_space_config();
+        newest.revision = 2;
+        newest.hotkey.key = "x".to_string();
+        reduce(&mut s, InputEvent::ConfigChanged(newest), Instant::now());
+
+        let mut stale = alt_space_config();
+        stale.revision = 1;
+        stale.hotkey.key = "y".to_string();
+        reduce(&mut s, InputEvent::ConfigChanged(stale), Instant::now());
+
+        assert_eq!(s.config_revision, 2);
+        assert_eq!(s.config.hotkey.key, "x");
     }
 
     // ── 窗口由托盘/单实例打开后再按 Alt → Chord Session ──

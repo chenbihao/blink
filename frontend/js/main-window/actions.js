@@ -9,6 +9,7 @@
 
 import {
     copyClipboardImage,
+    copyToClipboard,
     createStickyNote,
     getClipboardText,
     hideWindow,
@@ -52,7 +53,7 @@ export async function activateItem(data) {
         }
         if (text) {
             try {
-                await navigator.clipboard.writeText(text);
+                await copyToClipboard(text);
             } catch (e) {
                 showActionError("clipboard_write", e);
                 return; // 保留窗口，让用户察觉并重试

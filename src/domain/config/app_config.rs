@@ -52,7 +52,7 @@ pub struct AppConfig {
     pub autosuggest_tab_key: String,
     #[serde(default)]
     pub disabled_context_bindings: Vec<String>,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub chord_enabled: bool,
     #[serde(default = "default_true")]
     pub chord_hint_visible: bool,
@@ -92,7 +92,7 @@ impl Default for AppConfig {
             autosuggest_min_score: 0.7,
             autosuggest_tab_key: "Tab".to_string(),
             disabled_context_bindings: Vec::new(),
-            chord_enabled: false,
+            chord_enabled: true,
             chord_hint_visible: true,
             chord_bindings: crate::domain::chord::ChordBindings::default(),
             disabled_chord_actions: Vec::new(),
@@ -1062,6 +1062,6 @@ mod tests {
         assert_eq!(loaded.language, "zh");
         assert_eq!(loaded.theme, "auto");
         // 缺失字段应使用默认值
-        assert!(!loaded.chord_enabled);
+        assert!(loaded.chord_enabled);
     }
 }

@@ -111,7 +111,7 @@ export async function refresh() {
     try {
         const cfg = await invoke("get_config");
         if (cfg) {
-            // 0.8.7:chord 默认关,读取用 === true 精确判定,不再"缺失当 true"
+            // 精确消费持久化配置；新安装默认值由后端 ChordConfig 单一真源提供。
             chordEnabled = cfg.chord_enabled === true;
             hintVisible = cfg.chord_hint_visible !== false;
         }

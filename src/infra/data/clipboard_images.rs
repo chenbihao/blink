@@ -155,7 +155,7 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
 pub async fn query_recent_images(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageMeta> {
     sqlx::query_as::<_, ClipboardImageMeta>(
         "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
-         FROM clipboard_images ORDER BY created_at DESC LIMIT ?1",
+         FROM clipboard_images ORDER BY created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -173,7 +173,7 @@ pub async fn query_recent_days_images(
     let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
     sqlx::query_as::<_, ClipboardImageMeta>(
         "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
-         FROM clipboard_images WHERE created_at > ?1 ORDER BY created_at DESC LIMIT ?2",
+         FROM clipboard_images WHERE created_at > ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
     )
     .bind(cutoff)
     .bind(limit)
@@ -202,7 +202,7 @@ pub struct ClipboardImageListItem {
 pub async fn query_recent_image_list(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageListItem> {
     sqlx::query_as::<_, ClipboardImageListItem>(
         "SELECT id, width, height, created_at, source_app, source_path
-         FROM clipboard_images ORDER BY created_at DESC LIMIT ?1",
+         FROM clipboard_images ORDER BY created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -228,7 +228,7 @@ pub async fn search_image_list(
         "SELECT id, width, height, created_at, source_app, source_path
          FROM clipboard_images
          WHERE source_app LIKE ?1 OR source_path LIKE ?1
-         ORDER BY created_at DESC LIMIT ?2",
+         ORDER BY created_at DESC, id DESC LIMIT ?2",
     )
     .bind(&pattern)
     .bind(limit)
@@ -315,7 +315,7 @@ pub async fn cleanup_excess_images(pool: &SqlitePool, max_items: u32) {
         let excess = count.0 - max_items as i64;
         let _ = sqlx::query(
             "DELETE FROM clipboard_images WHERE id IN (
-                SELECT id FROM clipboard_images ORDER BY created_at ASC LIMIT ?1
+                SELECT id FROM clipboard_images ORDER BY created_at ASC, id ASC LIMIT ?1
             )",
         )
         .bind(excess)

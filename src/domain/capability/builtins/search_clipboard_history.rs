@@ -94,17 +94,29 @@ impl Capability for SearchClipboardHistory {
         let max_results = args
             .get("max_results")
             .and_then(Value::as_u64)
-            .map(|n| n as i64)
+            .map(|n| n.min(5000) as i64)
             .unwrap_or(30);
 
-        let pool = &ctx.env.db_pools().history;
+        let pools = ctx.env.db_pools();
+        let cfg = crate::domain::config::ConfigStore::get::<
+            crate::infra::data::clipboard::ClipboardConfig,
+        >(&pools.config)
+        .await;
+        let pool = &pools.history;
 
         // 铁则 1：用 deadline 包裹 DB 查询
         let items = tokio::time::timeout_at(ctx.deadline_or_far_future(), async {
             if query.trim().is_empty() {
                 query_recent(pool, max_results).await
             } else {
-                search_history(pool, query, max_results).await
+                search_history(
+                    pool,
+                    query,
+                    max_results,
+                    cfg.retention_days,
+                    cfg.candidate_limit,
+                )
+                .await
             }
         })
         .await

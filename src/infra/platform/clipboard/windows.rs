@@ -31,6 +31,9 @@ const THUMB_MAX_EDGE: u32 = 256;
 /// 记录最近一次入库的 (text_hash, ts_ms)；10 秒内同文本再来直接跳过。
 static DEDUP_STATE: Mutex<Option<(u64, u128)>> = Mutex::new(None);
 const DEDUP_WINDOW_MS: u128 = 10_000;
+/// 保证异步入库顺序与 WM_CLIPBOARDUPDATE 顺序一致，避免同内容“删旧留新”反向覆盖。
+static TEXT_PERSIST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static IMAGE_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(super) fn start_watcher_thread() {
     if let Err(e) = std::thread::Builder::new()
@@ -120,12 +123,21 @@ fn on_clipboard_change() {
     };
 
     // 黑名单：前台窗口标题命中则不记（密码管理器等）—— 自写入跳过
-    if let Some(ref title) = title_for_blacklist
-        && let Some(s) = state()
-    {
+    if let Some(s) = state() {
         let bl = s.blacklist.read().unwrap();
-        if clipboard::is_blacklisted(title, &bl) {
-            tracing::debug!(title = %title, "剪贴板：前台黑名单，跳过");
+        let title_hit = title_for_blacklist
+            .as_deref()
+            .is_some_and(|title| clipboard::is_blacklisted(title, &bl));
+        let process_hit = self_write.is_none()
+            && source_app
+                .as_deref()
+                .is_some_and(|process| clipboard::is_blacklisted(process, &bl));
+        if title_hit || process_hit {
+            tracing::debug!(
+                title = title_for_blacklist.as_deref().unwrap_or(""),
+                process = source_app.as_deref().unwrap_or(""),
+                "剪贴板：前台黑名单，跳过"
+            );
             return;
         }
     }
@@ -183,11 +195,17 @@ fn on_clipboard_change() {
             hit_count: 0,
         };
         let pool = s.pool.clone();
-        let max_items = s.max_items;
+        let max_items = s.max_items.load(std::sync::atomic::Ordering::Relaxed);
         tauri::async_runtime::spawn(async move {
+            let _order_guard = TEXT_PERSIST_LOCK.lock().await;
             match clipboard::save_item(&pool, &item).await {
                 Ok(_) => tracing::trace!(id = %item.id, preview = %preview, "剪贴板：已入库"),
                 Err(e) => {
+                    if let Ok(mut guard) = DEDUP_STATE.lock()
+                        && *guard == Some((text_hash, now_ms))
+                    {
+                        *guard = None;
+                    }
                     tracing::warn!(?e, "剪贴板 save_item 失败");
                     return;
                 }
@@ -201,8 +219,12 @@ fn on_clipboard_change() {
     // 文本读取失败 → 尝试 CF_DIB（截图、画图、浏览器复制图片等）
     // P2-#20 fix: 检查 capture_images 配置，false 时跳过图片采集
     let Some(s) = state() else { return };
-    if !s.capture_images {
+    if !s.capture_images.load(std::sync::atomic::Ordering::Relaxed) {
         tracing::trace!("剪贴板：capture_images=false, 跳过图片采集");
+        return;
+    }
+    if skip_persist {
+        tracing::trace!("剪贴板：自写入 skip_persist, 跳过图片入库");
         return;
     }
     tracing::trace!("剪贴板：无文本,尝试读取图片 CF_DIB");
@@ -213,54 +235,46 @@ fn on_clipboard_change() {
         tracing::trace!("剪贴板：无文本也无图片,跳过");
         return;
     };
-    // 解码 DIB → BGRA 像素 + 尺寸
-    let Some((bgra, width, height)) = decode_dib(&dib) else {
-        tracing::debug!("剪贴板：CF_DIB 解码失败,跳过");
-        return;
-    };
-    // 编码为完整 PNG
-    let png_data = match bgra_to_png(&bgra, width, height) {
-        Ok(png) => png,
-        Err(e) => {
-            tracing::warn!(?e, "剪贴板：BGRA→PNG 编码失败");
-            return;
-        }
-    };
-    // 生成缩略图
-    let thumb_data = match make_thumbnail_png(&bgra, width, height) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(?e, "剪贴板：缩略图生成失败");
-            // 缩略图失败不阻塞入库——用完整 PNG 兜底
-            png_data.clone()
-        }
-    };
-    // 计算 sha256 用于内容去重
-    let sha256 = compute_sha256(&png_data);
-    let image_id = clipboard_images::generate_image_id();
-    let image_item = ClipboardImage {
-        id: image_id.clone(),
-        png_blob: png_data,
-        thumb_blob: thumb_data,
-        width,
-        height,
-        sha256,
-        created_at: now_ts(),
-        source_app: source_app.clone(),
-        source_path: source_path.clone(),
-    };
-
-    // 0.17.9：自写入 skip_persist（历史回贴场景）跳过入库
-    if skip_persist {
-        tracing::trace!(
-            "剪贴板：自写入 skip_persist, 跳过图片入库（保留原记录的 source_app/source_path）"
-        );
-        return;
-    }
-
     let cache_pool = s.cache_pool.clone();
-    let max_image_items = s.max_image_items;
+    let max_image_items = s.max_image_items.load(std::sync::atomic::Ordering::Relaxed);
+    let image_id = clipboard_images::generate_image_id();
+    let created_at = now_ts();
     tauri::async_runtime::spawn(async move {
+        let _order_guard = IMAGE_PROCESS_LOCK.lock().await;
+        let processed = tauri::async_runtime::spawn_blocking(move || {
+            let Some((bgra, width, height)) = decode_dib(&dib) else {
+                return Err("CF_DIB 解码失败".to_string());
+            };
+            let png_data =
+                bgra_to_png(&bgra, width, height).map_err(|e| format!("BGRA→PNG 编码失败: {e}"))?;
+            let thumb_data = make_thumbnail_png(&bgra, width, height).unwrap_or_else(|e| {
+                tracing::debug!(?e, "剪贴板：缩略图生成失败,使用完整 PNG 兜底");
+                png_data.clone()
+            });
+            Ok(ClipboardImage {
+                id: image_id,
+                sha256: compute_sha256(&png_data),
+                png_blob: png_data,
+                thumb_blob: thumb_data,
+                width,
+                height,
+                created_at,
+                source_app,
+                source_path,
+            })
+        })
+        .await;
+        let image_item = match processed {
+            Ok(Ok(item)) => item,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "剪贴板图片处理失败,跳过");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(?e, "剪贴板图片处理任务失败");
+                return;
+            }
+        };
         match clipboard_images::save_image(&cache_pool, &image_item).await {
             Ok(_) => tracing::trace!(
                 id = %image_item.id,

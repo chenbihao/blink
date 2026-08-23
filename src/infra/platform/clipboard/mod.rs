@@ -10,7 +10,8 @@
 //! 只在剪贴板文本通过 title 黑名单 + 去重后同步调 hook。调用侧（`main.rs`）负责
 //! ContextConfig 门控 + 回写 SearchService。listener 架构解耦精神保持。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -26,11 +27,11 @@ pub(super) struct State {
     /// cache 库——clipboard_images 表所在（0.16.4 图片历史）。
     cache_pool: SqlitePool,
     blacklist: RwLock<Vec<String>>,
-    max_items: u32,
+    max_items: AtomicU32,
     /// 图片上限（0.16.4）。独立配置，§5.5「独立配置」。
-    max_image_items: u32,
+    max_image_items: AtomicU32,
     /// 是否采集剪贴板图片（0.16.4）。false 时跳过 CF_DIB 采集。
-    capture_images: bool,
+    capture_images: AtomicBool,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -54,6 +55,7 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// 自写入标记 TTL——写入到 WM_CLIPBOARDUPDATE 到达之间的兜底超时。
 /// 正常流程 <50ms，500ms 留足余量（大 DIB 写入 + 系统调度延迟）。
 const SELF_WRITE_TTL: Duration = Duration::from_millis(500);
+const MAX_PENDING_SELF_WRITES: usize = 32;
 
 /// 自写入标记语义 key 常量。
 pub const SELF_LABEL_SCREENSHOT: &str = "blink:screenshot";
@@ -63,6 +65,7 @@ pub const SELF_LABEL_BLINK: &str = "blink:ai";
 
 /// 进程级自写入标记（0.17.9）。
 struct SelfWriteMark {
+    id: u64,
     /// 语义 key（`blink:screenshot` / `blink:repost` / `blink:ai`）。
     label: String,
     /// `true` = 跳过入库但保留 `notify_change`（历史回贴场景）。
@@ -71,19 +74,89 @@ struct SelfWriteMark {
     timestamp: Instant,
 }
 
-static SELF_WRITE: Mutex<Option<SelfWriteMark>> = Mutex::new(None);
+#[derive(Default)]
+struct PendingSelfWrites {
+    marks: VecDeque<SelfWriteMark>,
+}
+
+impl PendingSelfWrites {
+    fn push(&mut self, mark: SelfWriteMark) {
+        self.discard_expired();
+        if self.marks.len() >= MAX_PENDING_SELF_WRITES
+            && let Some(dropped) = self.marks.pop_front()
+        {
+            tracing::debug!(label = %dropped.label, "自写入标记队列已满,丢弃最旧标记");
+        }
+        self.marks.push_back(mark);
+    }
+
+    fn cancel(&mut self, id: u64) {
+        if let Some(index) = self.marks.iter().position(|mark| mark.id == id) {
+            self.marks.remove(index);
+        }
+    }
+
+    fn take(&mut self) -> Option<SelfWriteMark> {
+        self.discard_expired();
+        self.marks.pop_front()
+    }
+
+    fn discard_expired(&mut self) {
+        while self
+            .marks
+            .front()
+            .is_some_and(|mark| mark.timestamp.elapsed() > SELF_WRITE_TTL)
+        {
+            if let Some(mark) = self.marks.pop_front() {
+                tracing::trace!(label = %mark.label, "自写入标记已过期,丢弃");
+            }
+        }
+    }
+}
+
+static SELF_WRITE: Mutex<PendingSelfWrites> = Mutex::new(PendingSelfWrites {
+    marks: VecDeque::new(),
+});
+static NEXT_SELF_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// 打自写入标记（写入剪贴板前调）。
 ///
 /// 内聚在 `clipboard` 模块：`write_*` 外壳函数内部调，调用方只多传 `&str` label。
-fn mark_self_write(label: &str, skip_persist: bool) {
+fn mark_self_write(label: &str, skip_persist: bool) -> Option<u64> {
+    if !ACTIVE.load(Ordering::Relaxed) {
+        return None;
+    }
+    let id = NEXT_SELF_WRITE_ID.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut guard) = SELF_WRITE.lock() {
-        *guard = Some(SelfWriteMark {
+        guard.push(SelfWriteMark {
+            id,
             label: label.to_string(),
             skip_persist,
             timestamp: Instant::now(),
         });
     }
+    Some(id)
+}
+
+fn cancel_self_write(id: u64) {
+    if let Ok(mut guard) = SELF_WRITE.lock() {
+        guard.cancel(id);
+    }
+}
+
+fn with_self_write_mark<T>(
+    label: &str,
+    skip_persist: bool,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let id = mark_self_write(label, skip_persist);
+    let result = operation();
+    if result.is_err()
+        && let Some(id) = id
+    {
+        cancel_self_write(id);
+    }
+    result
 }
 
 /// 消费自写入标记（监听器 `on_clipboard_change` 开头调）。
@@ -92,11 +165,7 @@ fn mark_self_write(label: &str, skip_persist: bool) {
 /// 取出即清空（一次性语义），防止后续非自写入的剪贴板变化误命中。
 pub(super) fn take_self_write() -> Option<(String, bool)> {
     let mut guard = SELF_WRITE.lock().ok()?;
-    let mark = guard.take()?; // 取出即清空
-    if mark.timestamp.elapsed() > SELF_WRITE_TTL {
-        tracing::trace!(label = %mark.label, "自写入标记已过期,丢弃");
-        return None;
-    }
+    let mark = guard.take()?;
     Some((mark.label, mark.skip_persist))
 }
 
@@ -115,8 +184,9 @@ pub fn write_bgra_to_clipboard(
     label: &str,
     skip_persist: bool,
 ) -> Result<(), String> {
-    mark_self_write(label, skip_persist);
-    windows::write_bgra_to_clipboard_raw(pixels, width, height)
+    with_self_write_mark(label, skip_persist, || {
+        windows::write_bgra_to_clipboard_raw(pixels, width, height)
+    })
 }
 
 /// 剪贴板文本变化的观察者回调（0.9.2.1）。
@@ -147,9 +217,9 @@ pub fn start_listener(pool: SqlitePool, cache_pool: SqlitePool, cfg: ClipboardCo
         pool,
         cache_pool,
         blacklist: RwLock::new(cfg.blacklist_keywords.clone()),
-        max_items: cfg.max_items,
-        max_image_items: cfg.max_image_items,
-        capture_images: cfg.capture_images,
+        max_items: AtomicU32::new(cfg.max_items),
+        max_image_items: AtomicU32::new(cfg.max_image_items),
+        capture_images: AtomicBool::new(cfg.capture_images),
     });
     ACTIVE.store(cfg.enabled, Ordering::Relaxed);
     #[cfg(target_os = "windows")]
@@ -162,16 +232,32 @@ pub fn start_listener(pool: SqlitePool, cache_pool: SqlitePool, cfg: ClipboardCo
 
 /// 热切换开关（0.8.7 起 `update_clipboard_enabled` 会调它做真热切）。
 pub fn set_active(active: bool) {
-    ACTIVE.store(active, Ordering::Relaxed);
+    let changed = ACTIVE.swap(active, Ordering::Relaxed) != active;
+    if changed && let Ok(mut pending) = SELF_WRITE.lock() {
+        pending.marks.clear();
+    }
     tracing::debug!(active, "剪贴板监听 active 切换");
 }
 
-/// 热更新黑名单（设置页改调）。
-#[allow(dead_code)] // 设置页 API 预留（当前 commands 层直接更新 config）
-pub fn set_blacklist(keywords: Vec<String>) {
+/// 热更新监听器运行时配置。监听窗口和数据库连接保持不变。
+pub fn update_runtime_config(cfg: &ClipboardConfig) {
     if let Some(s) = STATE.get() {
-        *s.blacklist.write().unwrap() = keywords;
+        *s.blacklist.write().unwrap() = cfg.blacklist_keywords.clone();
+        s.max_items.store(cfg.max_items, Ordering::Relaxed);
+        s.max_image_items
+            .store(cfg.max_image_items, Ordering::Relaxed);
+        s.capture_images
+            .store(cfg.capture_images, Ordering::Relaxed);
     }
+    set_active(cfg.enabled);
+    tracing::debug!(
+        enabled = cfg.enabled,
+        max_items = cfg.max_items,
+        max_image_items = cfg.max_image_items,
+        capture_images = cfg.capture_images,
+        blacklist_count = cfg.blacklist_keywords.len(),
+        "剪贴板监听运行时配置已热更新"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -220,7 +306,8 @@ pub(super) fn notify_change(text: &str) {
 /// 再走 `write_bgra_to_clipboard_raw` 写入 CF_DIB。相比直接传 BGRA 多一次解码 + swap
 /// 开销，但避免了前端传 BGRA 的 IPC 大 payload（PNG 压缩后小 5-10x）。
 ///
-/// **0.17.9**：先 `mark_self_write`，再解码 + 调 raw（不经过 `write_bgra_to_clipboard` 外壳，避免重复打标）。
+/// 解码完成后再打自写标记并调用 raw，避免大图解码耗尽标记 TTL；
+/// 不经过 `write_bgra_to_clipboard` 外壳，避免重复打标。
 #[cfg(target_os = "windows")]
 pub fn write_png_to_clipboard(
     png_data: &[u8],
@@ -228,7 +315,6 @@ pub fn write_png_to_clipboard(
     skip_persist: bool,
 ) -> Result<(), String> {
     use png::ColorType;
-    mark_self_write(label, skip_persist);
     tracing::debug!(bytes = png_data.len(), "write_png_to_clipboard: 开始解码");
 
     let decoder = png::Decoder::new(std::io::Cursor::new(png_data));
@@ -243,12 +329,10 @@ pub fn write_png_to_clipboard(
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| format!("PNG 解码失败: {e}"))?;
-    // 截断到实际解码字节数（`output_buffer_size` 可能包含 padding）
     buf.truncate(info.buffer_size());
 
-    match info.color_type {
+    let bgra = match info.color_type {
         ColorType::Rgba => {
-            // RGBA → BGRA：u32 mask swap（比 chunks_exact_mut(4).swap(0,2) 快 5-14x）
             crate::infra::platform::screenshot::swap_rgba_bgra_in_place(&mut buf);
             tracing::info!(
                 w,
@@ -256,37 +340,30 @@ pub fn write_png_to_clipboard(
                 png_bytes = png_data.len(),
                 "write_png_to_clipboard: RGBA→BGRA→CF_DIB"
             );
-            windows::write_bgra_to_clipboard_raw(&buf, w, h)
+            buf
         }
-        ColorType::Rgb => {
-            // RGB → 扩展为 BGRA（A=255）
-            let mut bgra = Vec::with_capacity((w as usize) * (h as usize) * 4);
-            for chunk in buf.chunks_exact(3) {
-                bgra.extend_from_slice(&[chunk[2], chunk[1], chunk[0], 255]);
-            }
-            windows::write_bgra_to_clipboard_raw(&bgra, w, h)
+        ColorType::Rgb => buf
+            .chunks_exact(3)
+            .flat_map(|chunk| [chunk[2], chunk[1], chunk[0], 255])
+            .collect(),
+        ColorType::GrayscaleAlpha => buf
+            .chunks_exact(2)
+            .flat_map(|chunk| [chunk[0], chunk[0], chunk[0], chunk[1]])
+            .collect(),
+        ColorType::Grayscale => buf
+            .iter()
+            .flat_map(|gray| [*gray, *gray, *gray, 255])
+            .collect(),
+        other => {
+            return Err(format!(
+                "不支持的 PNG 颜色类型: {other:?}，期望 RGBA/RGB/Grayscale/GrayscaleAlpha"
+            ));
         }
-        ColorType::GrayscaleAlpha => {
-            // GrayscaleAlpha → 扩展为 BGRA（灰度值三通道相同）
-            let mut bgra = Vec::with_capacity((w as usize) * (h as usize) * 4);
-            for chunk in buf.chunks_exact(2) {
-                let gray = chunk[0];
-                bgra.extend_from_slice(&[gray, gray, gray, chunk[1]]);
-            }
-            windows::write_bgra_to_clipboard_raw(&bgra, w, h)
-        }
-        ColorType::Grayscale => {
-            // Grayscale → 扩展为 BGRA（灰度值三通道相同，A=255）
-            let mut bgra = Vec::with_capacity((w as usize) * (h as usize) * 4);
-            for &gray in &buf {
-                bgra.extend_from_slice(&[gray, gray, gray, 255]);
-            }
-            windows::write_bgra_to_clipboard_raw(&bgra, w, h)
-        }
-        other => Err(format!(
-            "不支持的 PNG 颜色类型: {other:?}，期望 RGBA/RGB/Grayscale/GrayscaleAlpha"
-        )),
-    }
+    };
+
+    with_self_write_mark(label, skip_persist, || {
+        windows::write_bgra_to_clipboard_raw(&bgra, w, h)
+    })
 }
 
 /// 读当前剪贴板文本（0.9.7 read_clipboard Capability）。
@@ -312,8 +389,9 @@ pub fn read_current_image() -> Option<Vec<u8>> {
 /// 内部先 `mark_self_write(label, skip_persist)`，再调 `write_text_to_clipboard_raw`。
 #[cfg(target_os = "windows")]
 pub fn write_text_to_clipboard(text: &str, label: &str, skip_persist: bool) -> Result<(), String> {
-    mark_self_write(label, skip_persist);
-    windows::write_text_to_clipboard_raw(text)
+    with_self_write_mark(label, skip_persist, || {
+        windows::write_text_to_clipboard_raw(text)
+    })
 }
 
 #[cfg(test)]
@@ -321,67 +399,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn take_self_write_returns_none_when_no_mark() {
-        // 确保没有残留标记
-        if let Ok(mut guard) = SELF_WRITE.lock() {
-            *guard = None;
-        }
-        let result = take_self_write();
-        assert!(result.is_none(), "无标记时应返回 None");
+    fn pending_self_writes_is_fifo() {
+        let mut pending = PendingSelfWrites::default();
+        pending.push(mark(1, "first", false, Instant::now()));
+        pending.push(mark(2, "second", true, Instant::now()));
+        assert_eq!(pending.take().map(|item| item.label), Some("first".into()));
+        assert_eq!(pending.take().map(|item| item.label), Some("second".into()));
     }
 
     #[test]
-    fn take_self_write_returns_label_and_skip_after_mark() {
-        if let Ok(mut guard) = SELF_WRITE.lock() {
-            *guard = None;
-        }
-        mark_self_write("blink:screenshot", false);
-        let result = take_self_write();
-        assert!(result.is_some(), "打标后应能取到");
-        let (label, skip) = result.unwrap();
-        assert_eq!(label, "blink:screenshot");
-        assert!(!skip, "skip_persist=false 应保留");
+    fn pending_self_writes_can_cancel_specific_mark() {
+        let mut pending = PendingSelfWrites::default();
+        pending.push(mark(1, "first", false, Instant::now()));
+        pending.push(mark(2, "failed", false, Instant::now()));
+        pending.push(mark(3, "third", false, Instant::now()));
+        pending.cancel(2);
+        assert_eq!(pending.take().map(|item| item.id), Some(1));
+        assert_eq!(pending.take().map(|item| item.id), Some(3));
     }
 
     #[test]
-    fn take_self_write_clears_mark() {
-        if let Ok(mut guard) = SELF_WRITE.lock() {
-            *guard = None;
-        }
-        mark_self_write("blink:test", true);
-        let first = take_self_write();
-        assert!(first.is_some(), "首次 take 应命中");
-        let second = take_self_write();
-        assert!(second.is_none(), "二次 take 应返回 None（已清空）");
+    fn pending_self_writes_discards_expired_prefix() {
+        let mut pending = PendingSelfWrites::default();
+        pending.push(mark(
+            1,
+            "expired",
+            false,
+            Instant::now() - Duration::from_secs(2),
+        ));
+        pending.push(mark(2, "current", true, Instant::now()));
+        let current = pending.take().expect("current mark");
+        assert_eq!(current.id, 2);
+        assert!(current.skip_persist);
     }
 
-    #[test]
-    fn take_self_write_preserves_skip_persist_true() {
-        if let Ok(mut guard) = SELF_WRITE.lock() {
-            *guard = None;
-        }
-        mark_self_write("blink:repost", true);
-        let result = take_self_write();
-        assert!(result.is_some());
-        let (_, skip) = result.unwrap();
-        assert!(skip, "skip_persist=true 应保留");
-    }
-
-    #[test]
-    fn take_self_write_expired_mark_returns_none() {
-        // 直接构造过期标记（绕过 mark_self_write 的时间戳）
-        if let Ok(mut guard) = SELF_WRITE.lock() {
-            *guard = Some(SelfWriteMark {
-                label: "blink:expired".to_string(),
-                skip_persist: false,
-                timestamp: Instant::now() - Duration::from_secs(2),
-            });
-        }
-        let result = take_self_write();
-        assert!(result.is_none(), "过期标记应返回 None");
-        // 过期标记也应被清空
-        if let Ok(guard) = SELF_WRITE.lock() {
-            assert!(guard.is_none(), "过期标记 take 后应清空");
+    fn mark(id: u64, label: &str, skip_persist: bool, timestamp: Instant) -> SelfWriteMark {
+        SelfWriteMark {
+            id,
+            label: label.into(),
+            skip_persist,
+            timestamp,
         }
     }
 

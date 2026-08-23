@@ -279,6 +279,15 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
     // P1-#15 fix: 删旧留新包在事务里，防止 DELETE 成功 INSERT 失败导致数据丢失
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
+    // 重复复制同一文本时保留历史命中权重，避免频率排序被重置。
+    let previous_hit_count: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(hit_count), 0) FROM clipboard_history WHERE text = ?1",
+    )
+    .bind(&item.text)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // 删旧留新：先按文本内容删除同内容旧记录
     sqlx::query("DELETE FROM clipboard_history WHERE text = ?1 AND id != ?2")
         .bind(&item.text)
@@ -295,7 +304,7 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
     .bind(&item.preview)
     .bind(item.created_at)
     .bind(&item.source_app)
-    .bind(item.hit_count)
+    .bind(item.hit_count.max(previous_hit_count.max(0) as u32))
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -307,7 +316,7 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
 /// 查询最近的剪贴板条目。
 pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<ClipboardItem> {
     sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
-        "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history ORDER BY created_at DESC LIMIT ?1",
+        "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history ORDER BY created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -333,7 +342,7 @@ pub async fn query_recent_days(pool: &SqlitePool, days: u32, limit: i64) -> Vec<
     let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
     sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
         "SELECT id, text, preview, created_at, source_app, hit_count \
-         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC LIMIT ?2",
+         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
     )
     .bind(cutoff)
     .bind(limit)
@@ -383,7 +392,7 @@ pub async fn query_recent_days_meta(
     let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
     sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
         "SELECT id, preview, created_at, source_app, hit_count \
-         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC LIMIT ?2",
+         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
     )
     .bind(cutoff)
     .bind(limit)
@@ -410,7 +419,7 @@ pub async fn query_recent_days_meta(
 pub async fn query_recent_meta(pool: &SqlitePool, limit: i64) -> Vec<ClipboardMeta> {
     sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
         "SELECT id, preview, created_at, source_app, hit_count \
-         FROM clipboard_history ORDER BY created_at DESC LIMIT ?1",
+         FROM clipboard_history ORDER BY created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -429,12 +438,19 @@ pub async fn query_recent_meta(pool: &SqlitePool, limit: i64) -> Vec<ClipboardMe
     .collect()
 }
 
-/// 模糊搜索剪贴板内容（限定近 30 天，与默认 retention_days 对齐）。
-///
-/// **0.11.5 改动**：原先查最近 200 条做 fuzzy 候选池，现改为查近 30 天的记录——
-/// 这样即使保留期内的记录超过 200 条也能被搜到。30 天与 `retention_days` 默认值对齐。
-pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<ClipboardItem> {
-    let items = query_recent_days(pool, 30, 500).await;
+/// 模糊搜索剪贴板内容。保留期与候选池上限由当前配置传入；0 天表示全部历史。
+pub async fn search(
+    pool: &SqlitePool,
+    query: &str,
+    limit: i64,
+    retention_days: u32,
+    candidate_limit: u32,
+) -> Vec<ClipboardItem> {
+    let items = if retention_days == 0 {
+        query_recent(pool, candidate_limit as i64).await
+    } else {
+        query_recent_days(pool, retention_days, candidate_limit as i64).await
+    };
 
     // 使用 nucleo 模糊匹配
     use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -462,7 +478,7 @@ pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<Clipboard
     scored.sort_by_key(|x| std::cmp::Reverse(x.0));
     scored
         .into_iter()
-        .take(limit as usize)
+        .take(limit.max(0) as usize)
         .map(|(_, item)| item)
         .collect()
 }
@@ -579,7 +595,7 @@ pub async fn cleanup_excess(pool: &SqlitePool, max_items: u32) {
     if count.0 > max_items as i64 {
         let excess = count.0 - max_items as i64;
         let _ = sqlx::query(
-            "DELETE FROM clipboard_history WHERE id IN (SELECT id FROM clipboard_history ORDER BY created_at ASC LIMIT ?1)",
+            "DELETE FROM clipboard_history WHERE id IN (SELECT id FROM clipboard_history ORDER BY created_at ASC, id ASC LIMIT ?1)",
         )
         .bind(excess)
         .execute(pool)
@@ -640,6 +656,67 @@ pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_db(&pool).await.unwrap();
+        pool
+    }
+
+    fn item(id: &str, text: &str, created_at: i64, hit_count: u32) -> ClipboardItem {
+        ClipboardItem {
+            id: id.into(),
+            text: text.into(),
+            preview: text.into(),
+            created_at,
+            source_app: None,
+            hit_count,
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_text_preserves_hit_count() {
+        let pool = test_pool().await;
+        save_item(&pool, &item("clip_1", "same", 1, 7))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_2", "same", 2, 0))
+            .await
+            .unwrap();
+        let rows = query_recent(&pool, 10).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "clip_2");
+        assert_eq!(rows[0].hit_count, 7);
+    }
+
+    #[tokio::test]
+    async fn same_second_items_use_id_as_stable_recency_tiebreaker() {
+        let pool = test_pool().await;
+        save_item(&pool, &item("clip_100", "older", 10, 0))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_200", "newer", 10, 0))
+            .await
+            .unwrap();
+        let rows = query_recent(&pool, 10).await;
+        assert_eq!(rows[0].id, "clip_200");
+        assert_eq!(rows[1].id, "clip_100");
+    }
+
+    #[tokio::test]
+    async fn search_respects_retention_and_zero_means_all_history() {
+        let pool = test_pool().await;
+        let old = chrono::Utc::now().timestamp() - 40 * 86400;
+        save_item(&pool, &item("clip_1", "old searchable", old, 0))
+            .await
+            .unwrap();
+        assert!(search(&pool, "searchable", 10, 30, 500).await.is_empty());
+        assert_eq!(search(&pool, "searchable", 10, 0, 500).await.len(), 1);
+    }
 
     #[test]
     fn make_preview_truncates_long_text() {

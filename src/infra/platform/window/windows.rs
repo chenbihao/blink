@@ -137,7 +137,9 @@ pub fn get_pin_image_by_label(label: &str) -> Option<PinImage> {
 use crate::infra::event_names::EventNames;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{
+    GetLastError, HWND, LPARAM, LRESULT, POINT, SetLastError, WIN32_ERROR, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmFlush,
     DwmSetWindowAttribute,
@@ -512,10 +514,16 @@ pub fn set_last_external_hwnd(hwnd: isize) {
 /// 同时隐藏右键菜单窗口（保留窗口供下次复用）。
 pub fn hide(app: &AppHandle, reason: &str) {
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-        tracing::debug!(reason, "hide: state -> HIDDEN");
-        transition_visibility(false);
-        let _ = app.emit(EventNames::HIDDEN, ());
+        match win.hide() {
+            Ok(()) => {
+                tracing::debug!(reason, "hide: state -> HIDDEN");
+                transition_visibility(false);
+                let _ = app.emit(EventNames::HIDDEN, ());
+            }
+            Err(error) => {
+                tracing::warn!(reason, %error, "hide: 主窗口隐藏失败，保留可见状态");
+            }
+        }
     }
     // 主窗口隐藏时联动隐藏右键菜单（保留窗口供下次复用）
     if let Some(menu_win) = app.get_webview_window("context-menu") {
@@ -715,6 +723,7 @@ pub fn is_visible() -> bool {
 }
 
 const WM_SYSCOMMAND: u32 = 0x0112;
+const WM_NCDESTROY: u32 = 0x0082;
 const SC_KEYMENU: usize = 0xF100;
 
 /// 各窗口的原始窗口过程（0.12.4 §6.6：从 OnceLock 改为 HashMap 支持多窗口）。
@@ -732,9 +741,10 @@ pub fn install_sysmenu_blocker(hwnd: HWND) {
         // 检查是否已安装——避免重复 SetWindowLongPtrW 返回 sysmenu_block_proc 自身，
         // 导致 CallWindowProcW(sysmenu_block_proc, ...) 无限递归 → stack overflow。
         // （0.12.5 修复：此前注释称"重复安装安全"是错误的）
-        let already_installed = ORIGINAL_WNDPROCS
+        let mut map = ORIGINAL_WNDPROCS
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let already_installed = map
             .as_ref()
             .map(|m| m.contains_key(&(hwnd.0 as isize)))
             .unwrap_or(false);
@@ -742,12 +752,23 @@ pub fn install_sysmenu_blocker(hwnd: HWND) {
             return;
         }
 
+        // SetWindowLongPtrW 返回 0 既可能是失败，也可能是旧值为 0；按 Win32
+        // 约定先清 last-error，再据 GetLastError 判定，失败时绝不能写入“已安装”。
+        SetLastError(WIN32_ERROR(0));
         let original = SetWindowLongPtrW(
             hwnd,
             GWLP_WNDPROC,
             sysmenu_block_proc as *const () as usize as isize,
         );
-        let mut map = ORIGINAL_WNDPROCS.lock().unwrap();
+        let error = GetLastError();
+        if original == 0 {
+            tracing::warn!(
+                hwnd = hwnd.0 as isize,
+                win32_error = error.0,
+                "install_sysmenu_blocker: 安装系统菜单拦截器失败"
+            );
+            return;
+        }
         map.get_or_insert_with(std::collections::HashMap::new)
             .insert(hwnd.0 as isize, original);
         tracing::debug!(
@@ -765,16 +786,21 @@ unsafe extern "system" fn sysmenu_block_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_KEYMENU {
+        tracing::info!(
+            hwnd = hwnd.0 as isize,
+            wparam = wparam.0,
+            "sysmenu_blocker_intercepted_keymenu"
+        );
         return LRESULT(0);
     }
     let original = ORIGINAL_WNDPROCS
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_ref()
-        .and_then(|m| m.get(&(hwnd.0 as isize)))
+        .and_then(|entries| entries.get(&(hwnd.0 as isize)))
         .copied()
         .unwrap_or(0);
-    if original != 0 {
+    let result = if original != 0 {
         // edition 2024：unsafe fn 内的 unsafe 操作需显式 unsafe block
         unsafe {
             let proc: WNDPROC = std::mem::transmute::<isize, WNDPROC>(original);
@@ -782,7 +808,16 @@ unsafe extern "system" fn sysmenu_block_proc(
         }
     } else {
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    };
+    if msg == WM_NCDESTROY {
+        let mut map = ORIGINAL_WNDPROCS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entries) = map.as_mut() {
+            entries.remove(&(hwnd.0 as isize));
+        }
     }
+    result
 }
 
 /// 前台窗口是否为我们的主窗口（拿不到窗口/句柄时保守返回 true，避免误隐藏）。
@@ -3008,9 +3043,18 @@ pub fn hide_for_screenshot(app: &AppHandle) {
         if let Ok(hwnd) = win.hwnd() {
             apply_cloak(HWND(hwnd.0 as _), true);
         }
-        let _ = win.hide();
-        transition_visibility(false);
-        let _ = app.emit(EventNames::HIDDEN, ());
+        match win.hide() {
+            Ok(()) => {
+                transition_visibility(false);
+                let _ = app.emit(EventNames::HIDDEN, ());
+            }
+            Err(error) => {
+                if let Ok(hwnd) = win.hwnd() {
+                    apply_cloak(HWND(hwnd.0 as _), false);
+                }
+                tracing::warn!(%error, "hide_for_screenshot: 主窗口隐藏失败，已撤销 cloak");
+            }
+        }
     }
     // 联动隐藏右键菜单（保留窗口供下次复用）
     if let Some(menu_win) = app.get_webview_window("context-menu") {
@@ -3356,6 +3400,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                     if let Ok(hwnd) = win.hwnd() {
                         let hwnd = HWND(hwnd.0 as _);
                         strip_window_border(hwnd);
+                        install_sysmenu_blocker(hwnd);
                         enable_rounded_corners(hwnd);
                     }
                     tracing::debug!("preheat: settings ✓");
@@ -3578,6 +3623,7 @@ pub fn open_settings(app: &AppHandle) {
     if let Ok(h) = win.hwnd() {
         let hwnd = HWND(h.0 as _);
         strip_window_border(hwnd);
+        install_sysmenu_blocker(hwnd);
         enable_rounded_corners(hwnd);
         place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
         let _ = win.show();

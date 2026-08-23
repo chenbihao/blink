@@ -161,7 +161,7 @@ impl ConfigKey for SuggestionConfig {
 /// Chord 交互分片。总开关 + 提示可见性 + 键位绑定（0.10.7）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChordConfig {
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub chord_enabled: bool,
     #[serde(default = "default_true")]
     pub chord_hint_visible: bool,
@@ -172,7 +172,7 @@ pub struct ChordConfig {
 impl Default for ChordConfig {
     fn default() -> Self {
         Self {
-            chord_enabled: false,
+            chord_enabled: true,
             chord_hint_visible: true,
             bindings: crate::domain::chord::ChordBindings::default(),
         }

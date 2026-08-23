@@ -14,9 +14,13 @@
  *   后端录制期间 `is_recording()` 短路在 chord 吞键之前，能正常录到 Alt+字母。
  * - tooltip 直接用 t() 渲染 title 属性（动态生成 HTML 不走 applyI18n）。
  */
-import {invoke} from "../../shared/tauri.js";
+import {invoke, listen} from "../../shared/tauri.js";
+import {EVENTS} from "../../shared/event-names.js";
+import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
+
+let actionsLoadRevision = 0;
 
 /**
  * 初始化 Chord 动作 Tab
@@ -35,6 +39,15 @@ export function initChordTab() {
             loadChordActions();
         }
     });
+
+    // AI/STT 总开关决定 chat/voice_input 是否进入 Chord 列表。设置窗口常驻复用，
+    // 必须消费后端配置广播，否则首次加载出的 4 项会一直保留到窗口重建。
+    listen(EVENTS.CONFIG_CHANGED, (event) => {
+        const key = event.payload?.key;
+        if (key === "ai_config" || key === "stt:config") {
+            loadChordActions();
+        }
+    }).catch((e) => console.error("listen config-changed for chord failed:", e));
 }
 
 /**
@@ -43,11 +56,13 @@ export function initChordTab() {
 async function loadChordActions() {
     const container = document.getElementById("chord-actions-container");
     if (!container) return;
+    const revision = ++actionsLoadRevision;
 
     let actions = [];
     try {
         // list_all_chord_actions 返回全部动作（含被禁用的），含 key/semantic/label/surface/enabled
         actions = await invoke("list_all_chord_actions");
+        if (revision !== actionsLoadRevision) return;
     } catch (e) {
         console.error("list_all_chord_actions failed:", e);
         return;
@@ -62,6 +77,7 @@ async function loadChordActions() {
     let clipboardCfg = null;
     try {
         const fullCfg = await invoke("get_config");
+        if (revision !== actionsLoadRevision) return;
         if (fullCfg?.clipboard) clipboardCfg = fullCfg.clipboard;
     } catch (e) {
         console.warn("load clipboard config failed:", e);
@@ -71,6 +87,7 @@ async function loadChordActions() {
     let screenshotCfg = null;
     try {
         const sc = await invoke("get_config_section", {key: "screenshot:config"});
+        if (revision !== actionsLoadRevision) return;
         // 与后端 ScreenshotConfig 的 serde camelCase 对齐;字段缺失走默认
         screenshotCfg = {
             prewarmOcr: sc?.prewarmOcr !== false,
@@ -83,6 +100,8 @@ async function loadChordActions() {
         console.warn("load screenshot config failed:", e);
         screenshotCfg = {prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: true, windowEdgeSnap: 10};
     }
+
+    if (revision !== actionsLoadRevision) return;
 
     // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
     const CHORD_SUBTITLE = {
@@ -471,11 +490,14 @@ async function startRecording(btn) {
 
     const origCombo = comboEl.textContent;
     btn.disabled = true;
-    btn.classList.add("recording");
-    comboEl.textContent = t("chord.binding.recording");
+    const suppress = (e) => e.preventDefault();
+    document.addEventListener("keydown", suppress, true);
 
     try {
-        const result = await invoke("record_hotkey");
+        const result = await recordHotkey(() => {
+            btn.classList.add("recording");
+            comboEl.textContent = t("chord.binding.recording");
+        });
         // 校验：必须是 Alt（任一侧）+ 字母，不允许其他修饰键
         const hasAlt = Array.isArray(result.modifiers) && result.modifiers.some(
             (m) => m === "alt" || m === "lalt" || m === "ralt",
@@ -512,6 +534,7 @@ async function startRecording(btn) {
         console.warn("record chord key failed:", err);
         comboEl.textContent = origCombo;
     } finally {
+        document.removeEventListener("keydown", suppress, true);
         btn.disabled = false;
         btn.classList.remove("recording");
     }

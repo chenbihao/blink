@@ -136,8 +136,19 @@ pub async fn search_clipboard_history(
     query: String,
     limit: Option<i64>,
 ) -> Vec<crate::infra::data::clipboard::ClipboardItem> {
-    let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::search(pool, &query, limit.unwrap_or(20)).await
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let cfg = crate::domain::config::ConfigStore::get::<
+        crate::infra::data::clipboard::ClipboardConfig,
+    >(&pools.config)
+    .await;
+    crate::infra::data::clipboard::search(
+        &pools.history,
+        &query,
+        limit.unwrap_or(20).clamp(0, 5000),
+        cfg.retention_days,
+        cfg.candidate_limit,
+    )
+    .await
 }
 
 /// 按 id 拉取完整 text（延迟加载）。

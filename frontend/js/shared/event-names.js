@@ -17,6 +17,8 @@ export const EVENTS = Object.freeze({
     // ── 输入状态 ──
     /** 后端输入 UI 状态变化。payload: { revision, altDown, windowVisible, exclusiveChordActive }。 */
     INPUT_STATE_CHANGED: 'blink://input-state-changed',
+    /** 快捷键 recorder 已完成后端 armed。payload: { requestId }。 */
+    HOTKEY_RECORDING_READY: 'blink://hotkey-recording-ready',
 
     // ── 搜索 ──
     RESULTS: 'blink://results',

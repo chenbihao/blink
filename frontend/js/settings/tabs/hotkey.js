@@ -6,6 +6,7 @@
 import {invoke} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {renderCombo} from "../../shared/kbd.js";
+import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {getCurrentConfig} from "../shared/state.js";
 
@@ -87,15 +88,16 @@ async function startRecording() {
 
     hotkeyRecordBtn.disabled = true;
     hotkeyResetBtn.disabled = true;
-    hotkeyRecordBtn.classList.add("recording");
-    hotkeyRecordBtn.textContent = t("hotkey.recording");
 
     // 录制期间吞掉所有键盘事件的默认行为
     const suppress = (e) => e.preventDefault();
     document.addEventListener("keydown", suppress, true);
 
     try {
-        const result = await invoke("record_hotkey");
+        const result = await recordHotkey(() => {
+            hotkeyRecordBtn.classList.add("recording");
+            hotkeyRecordBtn.textContent = t("hotkey.recording");
+        });
         console.log("[startRecording] record_hotkey resolved:", JSON.stringify(result));
 
         await saveConfig("hotkey", {

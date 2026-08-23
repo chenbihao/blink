@@ -151,6 +151,16 @@ pub async fn set_config(
             // chord 键位绑定（设置页改键用）
             let bindings: crate::domain::chord::ChordBindings =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let conflicts = app
+                .state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                .binding_conflicts(&bindings);
+            if let Some((conflict_key, action_ids)) = conflicts.first() {
+                return Err(format!(
+                    "Chord 键 Alt+{} 已被多个动作占用：{}",
+                    conflict_key.to_uppercase(),
+                    action_ids.join(", ")
+                ));
+            }
             crate::app::config::update_chord_bindings(pool, bindings.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());

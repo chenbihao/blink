@@ -602,6 +602,11 @@ fn try_reinstall_if_safe() {
         let Some(state) = guard.as_mut() else {
             return false;
         };
+        // recorder.rs 是按键录制生命周期的同步真源；控制消息尚未被 reducer
+        // 消费的短窗口内也禁止卸载 Hook。
+        if recorder::is_recording() {
+            return false;
+        }
         let physical = read_physical_modifier_snapshot();
 
         // 手动恢复必须先解除 stale modifier/gesture/chord 对门禁的自锁。
@@ -728,12 +733,38 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
     // 录制短路（优先于所有其他逻辑）
     if recorder::is_recording() {
+        let session_id = recorder::active_session_id();
+        tracing::info!(
+            session_id,
+            vk,
+            scan_code = kb.scanCode,
+            message = msg,
+            flags = ?kb.flags,
+            "hotkey_recorder_hook_event"
+        );
         feed_recorder(vk, wparam);
         // 录制期间吞掉 Alt+Space（WebView2 无法拦截系统菜单）
         if vk == VK_SPACE.0 as u32 && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0 {
+            tracing::info!(session_id, "hotkey_recorder_alt_space_swallowed");
             return LRESULT(1);
         }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
+    // 主热键专项诊断：只记录 Alt，以及物理 Alt 按下时的 Space。
+    // 不记录其他普通按键，避免把用户日常输入写入日志。
+    let physical_alt_down = unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0;
+    let is_alt_vk = vk == VK_MENU.0 as u32 || vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32;
+    let is_main_hotkey_probe = is_alt_vk || (vk == VK_SPACE.0 as u32 && physical_alt_down);
+    if is_main_hotkey_probe {
+        tracing::info!(
+            vk,
+            scan_code = kb.scanCode,
+            message = msg,
+            flags = ?kb.flags,
+            physical_alt_down,
+            "main_hotkey_hook_event"
+        );
     }
 
     // 归一化 Hook 事件
@@ -767,6 +798,15 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
         reduce_and_apply(state, InputEvent::HookKey(event), now)
     });
+
+    if is_main_hotkey_probe {
+        tracing::info!(
+            vk,
+            message = msg,
+            propagation = ?propagation,
+            "main_hotkey_hook_dispatched"
+        );
+    }
 
     if matches!(propagation, Propagation::Swallow) {
         LRESULT(1)

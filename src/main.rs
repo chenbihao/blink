@@ -508,6 +508,9 @@ fn main() {
             search_service.update_language(app_config.language.clone());
             // 初始化 ClipboardEngine 展示页数快照（0.20.1：display_pages 配置项）
             search_service.update_clipboard_display_pages(app_config.clipboard.display_pages);
+            search_service.update_clipboard_search_enabled(app_config.clipboard.search_enabled);
+            search_service.update_clipboard_retention_days(app_config.clipboard.retention_days);
+            search_service.update_clipboard_candidate_limit(app_config.clipboard.candidate_limit);
             // 0.20.1: 同步 page_size 到 ClipboardEngine（effective_limit = display_pages × page_size）
             search_service.update_clipboard_page_size(app_config.page_size);
             // 启动后台清理（0.12.0 §2.2.4）：搜索历史 + 剪贴板历史 + AI 审计日志

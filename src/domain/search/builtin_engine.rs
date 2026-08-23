@@ -26,7 +26,6 @@ use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger, Param
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinResultAction {
     /// 把 `CapabilityResult::Text.content` 复制到剪贴板。
-    /// `skip_persist = true` 避免诊断文本进入剪贴板历史。
     CopyText { skip_persist: bool },
 }
 
@@ -254,7 +253,9 @@ const ACTIONS: &[BuiltinAction] = &[
         context: &[],
         param_source: ParamSource::None,
         param_field: "",
-        result_action: Some(BuiltinResultAction::CopyText { skip_persist: true }),
+        result_action: Some(BuiltinResultAction::CopyText {
+            skip_persist: false,
+        }),
         default_enabled: true,
     },
     BuiltinAction {
@@ -277,7 +278,9 @@ const ACTIONS: &[BuiltinAction] = &[
         context: &[],
         param_source: ParamSource::None,
         param_field: "",
-        result_action: Some(BuiltinResultAction::CopyText { skip_persist: true }),
+        result_action: Some(BuiltinResultAction::CopyText {
+            skip_persist: false,
+        }),
         default_enabled: true,
     },
     // ── 0.8.0 §1.3 参数化动作 ───────────────────────────────────────────────
@@ -1453,15 +1456,19 @@ mod tests {
         let debug_info_action = find_result_action("blink_print_debug_info");
         assert_eq!(
             debug_info_action,
-            Some(BuiltinResultAction::CopyText { skip_persist: true }),
-            "blink_print_debug_info 应声明 CopyText {{ skip_persist: true }}"
+            Some(BuiltinResultAction::CopyText {
+                skip_persist: false
+            }),
+            "blink_print_debug_info 应复制并进入剪贴板历史"
         );
 
         let inithook_action = find_result_action("blink_debug_inithook");
         assert_eq!(
             inithook_action,
-            Some(BuiltinResultAction::CopyText { skip_persist: true }),
-            "blink_debug_inithook 应声明 CopyText {{ skip_persist: true }}"
+            Some(BuiltinResultAction::CopyText {
+                skip_persist: false
+            }),
+            "blink_debug_inithook 应复制并进入剪贴板历史"
         );
     }
 
@@ -1480,7 +1487,9 @@ mod tests {
     fn find_result_action_by_capability_id_works() {
         assert_eq!(
             find_result_action_by_capability_id("blink_print_debug_info"),
-            Some(BuiltinResultAction::CopyText { skip_persist: true })
+            Some(BuiltinResultAction::CopyText {
+                skip_persist: false
+            })
         );
         assert_eq!(find_result_action_by_capability_id("open_settings"), None);
     }

@@ -224,15 +224,42 @@ fn send_control(msg: ControlMsg) {
 /// 排空控制队列（hook 线程 WindowProc 调用）。
 pub fn drain_control_messages() -> Vec<ControlMsg> {
     let head = CONTROL_HEAD.swap(std::ptr::null_mut(), Ordering::Acquire);
+    collect_control_messages(head)
+}
+
+fn collect_control_messages(mut current: *mut ControlNode) -> Vec<ControlMsg> {
     let mut result = Vec::new();
-    let mut current = head;
     while !current.is_null() {
         // Safety: swap 给了我们独占访问权，回收 Box
         let node = unsafe { Box::from_raw(current) };
         result.push(node.msg);
         current = node.next;
     }
+    // Treiber stack 的遍历顺序是 LIFO；控制状态必须按 send_control 的线性化
+    // 顺序消费，否则旧 Config/VoicePhase 会覆盖刚应用的新状态。
+    result.reverse();
     result
+}
+
+#[cfg(test)]
+mod control_queue_tests {
+    use super::*;
+
+    #[test]
+    fn treiber_nodes_are_consumed_in_send_order() {
+        let first = Box::into_raw(Box::new(ControlNode {
+            msg: ControlMsg::Stop,
+            next: std::ptr::null_mut(),
+        }));
+        let second = Box::into_raw(Box::new(ControlNode {
+            msg: ControlMsg::ManualRecovery,
+            next: first,
+        }));
+
+        let drained = collect_control_messages(second);
+        assert!(matches!(drained[0], ControlMsg::Stop));
+        assert!(matches!(drained[1], ControlMsg::ManualRecovery));
+    }
 }
 
 // ── 物理修饰键快照（主线程诊断用）────────────────────────────────────────────

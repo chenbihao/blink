@@ -7,6 +7,7 @@
 import {highlightCodeBlocks, renderMarkdown} from "./renderer.js";
 import {escapeText} from "./utils.js";
 import {getMcpToolSource, isMcpTool} from "./state.js";
+import {copyToClipboard} from "../shared/api.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -241,7 +242,7 @@ function createCopyAction(rawTextOrGetter) {
     const btn = createIconButton("copy", "复制", async () => {
         const text = typeof rawTextOrGetter === "function" ? rawTextOrGetter() : rawTextOrGetter;
         try {
-            await navigator.clipboard.writeText(text || "");
+            await copyToClipboard(text || "");
             flashIconDone(btn);
         } catch (e) {
             console.error("[chat] 复制失败:", e);
@@ -302,7 +303,7 @@ function injectCodeCopyButtons(el) {
         btn.textContent = "复制";
         btn.addEventListener("click", async () => {
             try {
-                await navigator.clipboard.writeText(code.textContent || "");
+                await copyToClipboard(code.textContent || "");
                 flashIconDone(btn);
             } catch (e) {
                 console.error("[chat] 代码块复制失败:", e);
@@ -563,7 +564,7 @@ function injectToolCopyBtn(pre) {
     btn.textContent = "复制";
     btn.addEventListener("click", async () => {
         try {
-            await navigator.clipboard.writeText(pre.textContent || "");
+            await copyToClipboard(pre.textContent || "");
             flashIconDone(btn);
         } catch (e) {
             console.error("[chat] 工具详情复制失败:", e);

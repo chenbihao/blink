@@ -6,10 +6,10 @@
 //! 因此平台无关——未来加平台只需实现各自的事件源 + 「原始键码 → 键名」映射,
 //! 喂给同一个状态机。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 录制结果。
 pub struct RecordResult {
@@ -39,22 +39,70 @@ enum RecordOutcome {
 
 /// 录制状态(全局单例)。
 struct RecorderState {
+    /// 串行化录制启动，保证 sender/modifiers 完成初始化后才发布 recording=true。
+    begin_lock: Mutex<()>,
     /// 是否正在录制。
     recording: AtomicBool,
+    /// 录制会话号，仅用于把 command / hook / recorder 日志串起来。
+    next_session_id: AtomicU64,
+    active_session_id: AtomicU64,
     /// 完成通知通道(录制开始时创建,完成后发送)。
-    sender: Mutex<Option<mpsc::Sender<RecordOutcome>>>,
+    sender: Mutex<Option<(u64, mpsc::Sender<RecordOutcome>)>>,
     /// 当前按下的修饰键集合(具体名,用于组合键快照与单独修饰键判定)。
-    pressed_modifiers: Mutex<Vec<String>>,
+    /// 会话号与内容绑定，避免超时边界上的旧 Hook 回调污染下一次录制。
+    pressed_modifiers: Mutex<(u64, Vec<String>)>,
+}
+
+impl RecorderState {
+    fn new() -> Self {
+        Self {
+            begin_lock: Mutex::new(()),
+            recording: AtomicBool::new(false),
+            next_session_id: AtomicU64::new(1),
+            active_session_id: AtomicU64::new(0),
+            sender: Mutex::new(None),
+            pressed_modifiers: Mutex::new((0, Vec::new())),
+        }
+    }
 }
 
 static RECORDER: OnceLock<RecorderState> = OnceLock::new();
 
 fn get_recorder() -> &'static RecorderState {
-    RECORDER.get_or_init(|| RecorderState {
-        recording: AtomicBool::new(false),
-        sender: Mutex::new(None),
-        pressed_modifiers: Mutex::new(Vec::new()),
-    })
+    RECORDER.get_or_init(RecorderState::new)
+}
+
+/// 原子地建立一次录制会话。返回 receiver 即表示 recorder 已 armed。
+fn begin_recording(state: &RecorderState) -> Option<(mpsc::Receiver<RecordOutcome>, u64)> {
+    let _begin_guard = state.begin_lock.lock().ok()?;
+    if state.recording.load(Ordering::Acquire) {
+        tracing::warn!(
+            active_session_id = state.active_session_id.load(Ordering::Acquire),
+            "hotkey_recorder_begin_rejected: already recording"
+        );
+        return None;
+    }
+
+    let session_id = state.next_session_id.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = mpsc::channel();
+    if let Ok(mut slot) = state.sender.lock() {
+        *slot = Some((session_id, tx));
+    } else {
+        return None;
+    }
+    if let Ok(mut mods) = state.pressed_modifiers.lock() {
+        mods.0 = session_id;
+        mods.1.clear();
+    } else {
+        if let Ok(mut slot) = state.sender.lock() {
+            *slot = None;
+        }
+        return None;
+    }
+
+    state.active_session_id.store(session_id, Ordering::Release);
+    state.recording.store(true, Ordering::Release);
+    Some((rx, session_id))
 }
 
 /// 录制快捷键(阻塞,直到用户按下组合键、取消或超时)。
@@ -63,56 +111,56 @@ fn get_recorder() -> &'static RecorderState {
 ///
 /// 在 `spawn_blocking` 中调用:用 `mpsc::channel` + `recv_timeout` 等待
 /// `feed` 的结果,替代了旧的 10ms 轮询。
-pub fn record_hotkey_blocking() -> Option<RecordResult> {
+pub fn record_hotkey_blocking(on_ready: impl FnOnce(u64)) -> Option<RecordResult> {
     let state = get_recorder();
+    let started_at = Instant::now();
 
-    // 先准备好通道与状态(此时 recording 仍为 false,feed 会直接 return、不介入)。
-    let (tx, rx) = mpsc::channel();
-    if let Ok(mut slot) = state.sender.lock() {
-        *slot = Some(tx);
-    }
-    if let Ok(mut mods) = state.pressed_modifiers.lock() {
-        mods.clear();
-    }
+    // 启动过程必须整体串行：旧实现先覆盖 sender、最后才 CAS recording，第二个并发
+    // 调用会覆盖活动录制的 sender 后再 CAS 失败，导致两个调用一起超时。
+    let (rx, session_id) = begin_recording(state)?;
+    super::InputController::update_recorder(super::RecorderMode::Recording {
+        recorder_id: session_id,
+    });
+    tracing::info!(session_id, "hotkey_recorder_armed");
 
-    // 最后才开启录制(Release):保证上面的写在 feed 线程可见后它才能介入,
-    // 避免「down 已 push 却被本函数的 clear 清掉」的竞态。CAS 同时防并发录制。
-    if state
-        .recording
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        // 已有录制进行中:回滚 sender。
-        if let Ok(mut slot) = state.sender.lock() {
-            *slot = None;
-        }
-        return None;
-    }
+    // ready 回调发生在 armed 之后、阻塞等待之前。command 层据此通知前端，前端只有
+    // 收到 ready 才展示“正在录制”，消除较慢机器上首键早于 recorder armed 的竞态。
+    on_ready(session_id);
 
     // 阻塞等待结果(超时 10s,与前端文案「10秒超时」一致)。
     let result = match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(RecordOutcome::Recorded(r)) => {
-            tracing::debug!("recorder: recv Recorded key={}", r.key);
+            tracing::info!(
+                session_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                display = %r.display,
+                "hotkey_recorder_completed"
+            );
             Some(r)
         }
         Ok(RecordOutcome::Cancelled) => {
-            tracing::debug!("recorder: recv Cancelled");
+            tracing::info!(
+                session_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "hotkey_recorder_cancelled"
+            );
             None
         }
         Err(e) => {
-            tracing::warn!("recorder: recv Err {:?}", e);
+            tracing::warn!(
+                session_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error = ?e,
+                "hotkey_recorder_wait_failed"
+            );
             None
         }
     };
 
-    // 清理
-    state.recording.store(false, Ordering::Release);
-    if let Ok(mut slot) = state.sender.lock() {
-        *slot = None;
-    }
-    if let Ok(mut mods) = state.pressed_modifiers.lock() {
-        mods.clear();
-    }
+    // 只有阻塞等待方拥有会话清理权。recording 必须最后复位，否则下一次录制
+    // 可能在本会话清理 sender/modifiers 前启动并被旧清理误伤。
+    cleanup_session(state, session_id);
+    super::InputController::update_recorder(super::RecorderMode::Idle);
 
     result
 }
@@ -128,8 +176,9 @@ pub fn is_recording() -> bool {
 /// 如果当前未在录制，无操作。
 pub fn cancel() {
     let state = get_recorder();
-    if state.recording.load(Ordering::Acquire) {
-        finish(state, RecordOutcome::Cancelled);
+    let session_id = state.active_session_id.load(Ordering::Acquire);
+    if session_id != 0 && state.recording.load(Ordering::Acquire) {
+        finish(state, session_id, RecordOutcome::Cancelled);
     }
 }
 
@@ -145,22 +194,30 @@ pub fn feed(input: RecordInput) {
     if !state.recording.load(Ordering::Acquire) {
         return;
     }
+    let session_id = state.active_session_id.load(Ordering::Acquire);
+    if session_id == 0 {
+        return;
+    }
 
     match input {
         RecordInput::KeyDown(name) => {
             if name == "Escape" {
-                finish(state, RecordOutcome::Cancelled);
+                finish(state, session_id, RecordOutcome::Cancelled);
                 return;
             }
             // 主键按下即完成,快照当前修饰键
             let modifiers = state
                 .pressed_modifiers
                 .lock()
-                .map(|mods| mods.clone())
-                .unwrap_or_default();
+                .ok()
+                .and_then(|mods| (mods.0 == session_id).then(|| mods.1.clone()));
+            let Some(modifiers) = modifiers else {
+                return;
+            };
             let display = format_display(&modifiers, &name);
             finish(
                 state,
+                session_id,
                 RecordOutcome::Recorded(RecordResult {
                     modifiers,
                     key: name,
@@ -170,9 +227,10 @@ pub fn feed(input: RecordInput) {
         }
         RecordInput::ModifierDown(name) => {
             if let Ok(mut mods) = state.pressed_modifiers.lock()
-                && !mods.contains(&name)
+                && mods.0 == session_id
+                && !mods.1.contains(&name)
             {
-                mods.push(name);
+                mods.1.push(name);
             }
         }
         RecordInput::ModifierUp(name) => {
@@ -183,8 +241,8 @@ pub fn feed(input: RecordInput) {
                 .pressed_modifiers
                 .lock()
                 .map(|mut mods| {
-                    if mods.contains(&name) {
-                        mods.retain(|m| m != &name);
+                    if mods.0 == session_id && mods.1.contains(&name) {
+                        mods.1.retain(|m| m != &name);
                         true
                     } else {
                         false
@@ -195,6 +253,7 @@ pub fn feed(input: RecordInput) {
                 let display = format_display(&[], &name);
                 finish(
                     state,
+                    session_id,
                     RecordOutcome::Recorded(RecordResult {
                         modifiers: vec![],
                         key: name,
@@ -213,18 +272,48 @@ pub fn feed(input: RecordInput) {
 /// 状态机把右 Alt 误录成 `LeftCtrl`。状态机自身不认识 AltGr,保持可移植。
 pub fn drop_modifier(name: &str) {
     let state = get_recorder();
-    if let Ok(mut mods) = state.pressed_modifiers.lock() {
-        mods.retain(|m| m != name);
+    let session_id = state.active_session_id.load(Ordering::Acquire);
+    if let Ok(mut mods) = state.pressed_modifiers.lock()
+        && mods.0 == session_id
+    {
+        mods.1.retain(|m| m != name);
     }
 }
 
-/// 完成录制:发送结果并复位 `recording` 标志。
-fn finish(state: &'static RecorderState, outcome: RecordOutcome) {
+/// 完成录制：只发送当前会话结果。生命周期标志由阻塞等待方统一清理。
+fn finish(state: &RecorderState, session_id: u64, outcome: RecordOutcome) {
+    if state.active_session_id.load(Ordering::Acquire) != session_id {
+        return;
+    }
     if let Ok(mut slot) = state.sender.lock()
-        && let Some(tx) = slot.take()
+        && slot.as_ref().is_some_and(|(id, _)| *id == session_id)
+        && let Some((_, tx)) = slot.take()
     {
         let _ = tx.send(outcome);
     }
+}
+
+/// 清理指定会话。begin_lock 与 session id 双重保护，旧会话绝不清理新会话。
+fn cleanup_session(state: &RecorderState, session_id: u64) {
+    let _begin_guard = state
+        .begin_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.active_session_id.load(Ordering::Acquire) != session_id {
+        return;
+    }
+    if let Ok(mut slot) = state.sender.lock()
+        && slot.as_ref().is_some_and(|(id, _)| *id == session_id)
+    {
+        *slot = None;
+    }
+    if let Ok(mut mods) = state.pressed_modifiers.lock()
+        && mods.0 == session_id
+    {
+        mods.1.clear();
+        mods.0 = 0;
+    }
+    state.active_session_id.store(0, Ordering::Release);
     state.recording.store(false, Ordering::Release);
 }
 
@@ -275,4 +364,76 @@ fn format_display(modifiers: &[String], key: &str) -> String {
     parts.push(key_display);
 
     parts.join("+")
+}
+
+/// 当前录制会话号；0 表示未录制。仅用于平台层诊断日志。
+pub fn active_session_id() -> u64 {
+    get_recorder().active_session_id.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_begin_does_not_overwrite_active_sender() {
+        let state = RecorderState::new();
+        let (rx, session_id) = begin_recording(&state).expect("first begin should arm recorder");
+        assert_ne!(session_id, 0);
+        assert!(state.recording.load(Ordering::Acquire));
+
+        assert!(begin_recording(&state).is_none());
+        let sender_present = state.sender.lock().unwrap().is_some();
+        assert!(sender_present, "second begin must preserve active sender");
+
+        state
+            .sender
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .1
+            .send(RecordOutcome::Cancelled)
+            .unwrap();
+        assert!(matches!(rx.recv().unwrap(), RecordOutcome::Cancelled));
+    }
+
+    #[test]
+    fn completed_session_stays_exclusive_until_owner_cleanup() {
+        let state = RecorderState::new();
+        let (rx, first_id) = begin_recording(&state).expect("first begin should arm recorder");
+
+        finish(&state, first_id, RecordOutcome::Cancelled);
+        assert!(matches!(rx.recv().unwrap(), RecordOutcome::Cancelled));
+        assert!(
+            state.recording.load(Ordering::Acquire),
+            "finish must not publish idle before owner cleanup"
+        );
+        assert!(
+            begin_recording(&state).is_none(),
+            "a new session must not enter the old cleanup window"
+        );
+
+        cleanup_session(&state, first_id);
+        let (_, second_id) = begin_recording(&state).expect("begin should work after cleanup");
+        assert_ne!(first_id, second_id);
+        cleanup_session(&state, second_id);
+    }
+
+    #[test]
+    fn stale_session_cannot_finish_current_sender() {
+        let state = RecorderState::new();
+        let (_, first_id) = begin_recording(&state).expect("first begin should arm recorder");
+        cleanup_session(&state, first_id);
+        let (second_rx, second_id) =
+            begin_recording(&state).expect("second begin should arm recorder");
+
+        finish(&state, first_id, RecordOutcome::Cancelled);
+        assert!(matches!(
+            second_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(state.active_session_id.load(Ordering::Acquire), second_id);
+        cleanup_session(&state, second_id);
+    }
 }
