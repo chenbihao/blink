@@ -1,0 +1,251 @@
+{
+  "version": "1.0",
+  "license": "CC0-1.0",
+  "fonts": {
+    "('cjk', 20)": {
+      "path": "C:/Windows/Fonts/msyh.ttc",
+      "hash": "d79c55e68b1131ee"
+    },
+    "('cjk', 28)": {
+      "path": "C:/Windows/Fonts/msyh.ttc",
+      "hash": "d79c55e68b1131ee"
+    },
+    "('cjk', 24)": {
+      "path": "C:/Windows/Fonts/msyh.ttc",
+      "hash": "d79c55e68b1131ee"
+    },
+    "('cjk', 22)": {
+      "path": "C:/Windows/Fonts/msyh.ttc",
+      "hash": "d79c55e68b1131ee"
+    },
+    "('cjk', 12)": {
+      "path": "C:/Windows/Fonts/msyh.ttc",
+      "hash": "d79c55e68b1131ee"
+    }
+  },
+  "items": [
+    {
+      "image": "chinese/basic-1.png",
+      "expected_text": "你好世界\n这是测试文本",
+      "subset": "chinese",
+      "language": "zh",
+      "orientation": "horizontal",
+      "width": 400,
+      "height": 120,
+      "sha256": "0ef934c8aedb9ce8c86df1bdde7fcd6a941831f0c2c02ed057dc3db8ce217082"
+    },
+    {
+      "image": "chinese/basic-2.png",
+      "expected_text": "欢迎使用Blink启动器",
+      "subset": "chinese",
+      "language": "zh",
+      "orientation": "horizontal",
+      "width": 400,
+      "height": 60,
+      "sha256": "8832a228aeef704d9c74012223e468f793148ad888fb1488685dc27e00aa735c"
+    },
+    {
+      "image": "chinese/basic-3.png",
+      "expected_text": "设置\n系统\n关于\n帮助",
+      "subset": "chinese",
+      "language": "zh",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 160,
+      "sha256": "56da67baebb8d5b5b968e88acead564c16a3d2ee1c784c346c518db1235d909b"
+    },
+    {
+      "image": "english/basic-1.png",
+      "expected_text": "Hello World\nThis is a test",
+      "subset": "english",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 400,
+      "height": 120,
+      "sha256": "89ba533a5057cb76a292d73be88c5b6d9ebdbc4d2bd104752476538294f266cb"
+    },
+    {
+      "image": "english/basic-2.png",
+      "expected_text": "Settings System About Help",
+      "subset": "english",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 400,
+      "height": 60,
+      "sha256": "c69e7bdb59651d76a4870909c0948a63a5989d54de7df7f232b6f91e63f556d5"
+    },
+    {
+      "image": "english/basic-3.png",
+      "expected_text": "The quick brown fox jumps over the lazy dog",
+      "subset": "english",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 500,
+      "height": 50,
+      "sha256": "20eb8da7127b18e9ee66d454813f7fd0efb2ce011b4238cae5553b676644de23"
+    },
+    {
+      "image": "japanese/basic-1.png",
+      "expected_text": "こんにちは世界\nこれはテストです",
+      "subset": "japanese",
+      "language": "ja",
+      "orientation": "horizontal",
+      "width": 400,
+      "height": 120,
+      "sha256": "be118ae2d2386e87ff0ab66b261f63202d0419bab0dde42c159d14ac66a3eef1"
+    },
+    {
+      "image": "japanese/basic-2.png",
+      "expected_text": "設定\nシステム\nバージョン",
+      "subset": "japanese",
+      "language": "ja",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 160,
+      "sha256": "66985d02ee06e8248a0af67dfc7de61bed6a52c87021110c514d8fea585f410a"
+    },
+    {
+      "image": "mixed/cjk-en-1.png",
+      "expected_text": "温度25度\n湿度60%",
+      "subset": "mixed",
+      "language": "zh+en",
+      "orientation": "horizontal",
+      "width": 300,
+      "height": 120,
+      "sha256": "4412975b9a259041a58d538eb48bd7fdea319ede7de6f6cfcde7bb5fe638a0e3"
+    },
+    {
+      "image": "mixed/cjk-en-2.png",
+      "expected_text": "API key: abc123",
+      "subset": "mixed",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 400,
+      "height": 60,
+      "sha256": "1c340c043d9e0736936abab68f8b4b6004d7cf875e28e677987daa8b5ddec5f3"
+    },
+    {
+      "image": "vertical/vert-1.png",
+      "expected_text": "縦書き\nテスト\n日本語",
+      "subset": "vertical",
+      "language": "ja",
+      "orientation": "vertical",
+      "width": 120,
+      "height": 200,
+      "sha256": "f256e116d9118d8bf853ddc7cbe0ddfdbb992f6ac479c960e7fee738cd84dfd2"
+    },
+    {
+      "image": "vertical/vert-2.png",
+      "expected_text": "垂直排列\n中文测试",
+      "subset": "vertical",
+      "language": "zh",
+      "orientation": "vertical",
+      "width": 120,
+      "height": 200,
+      "sha256": "73400706f369980457b888a6ec53c8560a7539a7b7d150e49c0ce88454b04f29"
+    },
+    {
+      "image": "small-font/small-1.png",
+      "expected_text": "Small font text 12px",
+      "subset": "small-font",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 300,
+      "height": 50,
+      "sha256": "aaa16c4a7d16afd75cbd629d540beb44706be7e2be502acbed7df5835a378557"
+    },
+    {
+      "image": "small-font/small-2.png",
+      "expected_text": "小字号文字测试",
+      "subset": "small-font",
+      "language": "zh",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 40,
+      "sha256": "f6ff8ae4911038920e4417e41f28bd69bb1b7d03ce23a0e8e305a9fa680bb8d0"
+    },
+    {
+      "image": "light-ui/light-1.png",
+      "expected_text": "Settings\nPreferences\nAbout",
+      "subset": "light-ui",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 120,
+      "sha256": "d199a6d8fc25e3d8963bdc7901bc02d5921140a5817e933550ed6632d02aa55f"
+    },
+    {
+      "image": "light-ui/light-2.png",
+      "expected_text": "设置\n偏好设置\n关于",
+      "subset": "light-ui",
+      "language": "zh",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 120,
+      "sha256": "d616e7cdf79e0a39b4cf5fd1cf36d93e8a8956f8cadee6a353c14d72f3f8273e"
+    },
+    {
+      "image": "dark-ui/dark-1.png",
+      "expected_text": "Settings\nPreferences\nAbout",
+      "subset": "dark-ui",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 120,
+      "sha256": "3824fba285b06e7f834f23a6b231528c450c6b6f4c5fadf480febed6c974bfea"
+    },
+    {
+      "image": "dark-ui/dark-2.png",
+      "expected_text": "设置\n偏好设置\n关于",
+      "subset": "dark-ui",
+      "language": "zh",
+      "orientation": "horizontal",
+      "width": 200,
+      "height": 120,
+      "sha256": "3403a2fa8563a48102059e6655c2444261bdf6dcf5209dbc5056dc7f5fd9a5de"
+    },
+    {
+      "image": "medium/medium-1.png",
+      "expected_text": "This is a 1440p screenshot replacement for benchmark.\nIt contains multiple lines of text\nat various sizes and positions.\nThe goal is to test OCR performance\non realistic screen content.\n中文测试：你好世界\n日本語テスト：こんにちは\nMixed: API key abc123 Temperature 25C",
+      "subset": "medium",
+      "language": "en+zh+ja",
+      "orientation": "horizontal",
+      "width": 2560,
+      "height": 1440,
+      "sha256": "ccd32e6e82963561dfe34140f9d0c43131901b7fd125196d13193cceb412b163"
+    },
+    {
+      "image": "dpi/dpi-100-1.png",
+      "expected_text": "100% DPI test",
+      "subset": "dpi",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 300,
+      "height": 50,
+      "dpi_scale": 100,
+      "sha256": "1b19f173db6bd8d6081e996a14fdf6461a041a1e644560f7ba6ac33538aab017"
+    },
+    {
+      "image": "dpi/dpi-150-1.png",
+      "expected_text": "150% DPI test",
+      "subset": "dpi",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 450,
+      "height": 75,
+      "dpi_scale": 150,
+      "sha256": "e857d31ef050b86e3fd5fa805f540e12ece04c97961af2a29a158260ef201421"
+    },
+    {
+      "image": "dpi/dpi-200-1.png",
+      "expected_text": "200% DPI test",
+      "subset": "dpi",
+      "language": "en",
+      "orientation": "horizontal",
+      "width": 600,
+      "height": 100,
+      "dpi_scale": 200,
+      "sha256": "570e0dcc715b94c6453ff56d1026651de726c1cad8442bc9d0b90b6ae01ecae2"
+    }
+  ]
+}

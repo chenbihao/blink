@@ -52,3 +52,10 @@ desktop.ini
 # Plugins
 # Rust 插件构建输出（release 打包时临时生成，开发期不存在）
 plugins/builtin/*/bin/
+
+# PP-OCRv6 spike — 不提交 venv、模型、缓存、下载产物或 benchmark 临时输出
+xtask/spikes/ppocrv6/.venv/
+xtask/spikes/ppocrv6/uv-cache/
+xtask/spikes/ppocrv6/model-cache/
+xtask/spikes/ppocrv6/results/
+xtask/spikes/ppocrv6/*.png.bak

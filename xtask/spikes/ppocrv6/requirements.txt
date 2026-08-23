@@ -1,0 +1,27 @@
+# PP-OCRv6 Spike — 精确依赖锁定
+#
+# PaddleOCR 3.7 随附 PP-OCRv6（2026-06-11 发布）。
+# PaddlePaddle 3.1.0 CPU wheel 从 PyPI 安装（PP-OCRv6 要求 3.1.0+）。
+# 精确版本/wheel URL/SHA-256 见 lock.json（由 install.ps1 首次安装时填充）。
+#
+# 安装命令（由 install.ps1 执行）：
+#   uv pip install --python <venv_python> -r requirements.txt --cache-dir <uv_cache>
+
+# ── PaddlePaddle CPU（Windows x64，PyPI）──
+paddlepaddle==3.1.0
+
+# ── PaddleOCR 3.7（PP-OCRv6）──
+paddleocr==3.7.0
+
+# ── 服务依赖 ──
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# ── 图像/工具 ──
+pillow==11.1.0
+numpy>=1.26,<2.3
+pyarrow==18.1.0
+
+# ── CER 计算依赖（evaluate 用）──
+jiwer==3.0.5

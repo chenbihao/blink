@@ -1,0 +1,68 @@
+{
+  "$comment": "PP-OCRv6 Spike 依赖精确锁。候选版本——install.ps1 首次安装后填充实际 SHA-256。",
+  "$schema": "spike-lock/v1",
+  "python": {
+    "$comment": "Blink/uv 托管的 Python 版本",
+    "version": "3.12",
+    "source": "uv-managed standalone build",
+    "note": "uv 自动下载 Python 3.12 standalone build，不依赖系统 Python。精确 patch/build 由 uv 解析。"
+  },
+  "uv": {
+    "$comment": "uv 版本——锁定到发布时的 latest tag",
+    "version": "0.7.13",
+    "download_url": "https://github.com/astral-sh/uv/releases/download/0.7.13/uv-x86_64-pc-windows-msvc.zip",
+    "sha256": null,
+    "$note_sha": "uv zip 的 SHA-256 在 install.ps1 首次运行时计算并记录到 results/uv_sha256.txt"
+  },
+  "paddlepaddle": {
+    "version": "3.1.0",
+    "index": "PyPI",
+    "wheel_url": "https://pypi.org/project/paddlepaddle/3.1.0/",
+    "sha256": null,
+    "$note": "PaddlePaddle 3.1.0 CPU wheel 从 PyPI 安装。PP-OCRv6 要求 PaddlePaddle 3.1.0+（3.0.0 的推理引擎有 strides 属性类型 bug）。SHA-256 在首次安装时由 install.ps1 计算实际 wheel 文件 hash。"
+  },
+  "paddleocr": {
+    "version": "3.7.0",
+    "index": "PyPI",
+    "wheel_url": "https://files.pythonhosted.org/packages/d2/79/2ade66cf72074a3d2a013e2ba1f256d6116fec797b908fc1b4f9c320d8c4/paddleocr-3.7.0-py3-none-any.whl",
+    "wheel_sha256": "c0f0a81ad4112727f30c6fcf986ac0ef6a120d31ee0991a01fae0357ee32d338",
+    "$note": "PaddleOCR 3.7.0 随附 PP-OCRv6 作为默认 pipeline（2026-06-11 发布）。SHA-256 来自 PyPI。"
+  },
+  "models": {
+    "$comment": "PP-OCRv6 官方模型。PaddleOCR 3.7 默认使用 PP-OCRv6_medium；三档通过 ocr_version + text_detection/recognition_model_name 选择。",
+    "ocr_version": "PP-OCRv6",
+    "tiny": {
+      "det_model_name": "PP-OCRv6_tiny_det",
+      "rec_model_name": "PP-OCRv6_tiny_rec",
+      "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/",
+      "det_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_infer.tar",
+      "rec_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_infer.tar",
+      "params": "1.5M",
+      "$note": "tiny 档：49 种语言（不含日文）。超轻量 1.5M params，适合 edge/IoT。"
+    },
+    "small": {
+      "det_model_name": "PP-OCRv6_small_det",
+      "rec_model_name": "PP-OCRv6_small_rec",
+      "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/",
+      "det_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_infer.tar",
+      "rec_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_infer.tar",
+      "params": "7.7M",
+      "$note": "small 档：50 种语言（含中文/英文/日文）。7.7M params，平衡精度与效率。"
+    },
+    "medium": {
+      "det_model_name": "PP-OCRv6_medium_det",
+      "rec_model_name": "PP-OCRv6_medium_rec",
+      "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/",
+      "det_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_det_infer.tar",
+      "rec_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_infer.tar",
+      "params": "34.5M",
+      "$note": "medium 档：50 种语言（含中文/英文/日文）。34.5M params，最高精度。PaddleOCR 3.7 默认模型。"
+    }
+  },
+  "supply_chain_risks": [
+    "PaddlePaddle PyPI wheel 的传递依赖版本可能随时间变化（numpy/pyarrow 等）",
+    "PaddleOCR 模型从 paddle-model-ecology.bj.bcebos.com 下载，上游不提供稳定 checksum",
+    "PaddleOCR 3.7.x patch 版本可能切换模型 revision",
+    "以上风险在 decision.md §9 的「供应链残余风险」节逐项列出"
+  ]
+}
