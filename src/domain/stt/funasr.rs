@@ -198,18 +198,35 @@ pub struct FunasrEnv {
 /// 适用于 Tauri async 命令中调用，避免阻塞 UI 线程。
 pub async fn get_env_status_async(server_port: u16, server_model: String) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status_async().await;
+    let (torch_installed, torch_version, torch_cuda_available, funasr_installed, funasr_version) =
+        tokio::task::spawn_blocking(|| {
+            let (torch_installed, torch_version) = crate::infra::platform::python::check_torch();
+            let torch_cuda_available =
+                torch_installed && crate::infra::platform::python::check_torch_cuda();
+            let (funasr_installed, funasr_version) = crate::infra::platform::python::check_funasr();
+            (
+                torch_installed,
+                torch_version,
+                torch_cuda_available,
+                funasr_installed,
+                funasr_version,
+            )
+        })
+        .await
+        .unwrap_or((false, None, false, false, None));
+    let env_ready = py_status.env_ready && torch_installed && funasr_installed;
 
     FunasrEnv {
         uv_available: py_status.uv_available,
         uv_version: py_status.uv_version,
         venv_exists: py_status.venv_exists,
         venv_python_version: py_status.venv_python_version,
-        torch_installed: py_status.torch_installed,
-        torch_version: py_status.torch_version,
-        torch_cuda_available: py_status.torch_cuda_available,
-        funasr_installed: py_status.funasr_installed,
-        funasr_version: py_status.funasr_version,
-        env_ready: py_status.env_ready,
+        torch_installed,
+        torch_version,
+        torch_cuda_available,
+        funasr_installed,
+        funasr_version,
+        env_ready,
         server_running: SERVER_RUNNING.load(Ordering::SeqCst),
         server_port,
         server_model,

@@ -134,9 +134,18 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
 
     // 检查 Python 环境是否就绪，未就绪则自动安装
     let py_status = crate::infra::platform::python::check_status_async().await;
-    if !py_status.env_ready || (device == "cuda" && !py_status.torch_cuda_available) {
-        let need_cuda_reinstall =
-            device == "cuda" && py_status.torch_installed && !py_status.torch_cuda_available;
+    let (torch_installed, funasr_installed, torch_cuda_available) =
+        tokio::task::spawn_blocking(|| {
+            let (torch, _) = crate::infra::platform::python::check_torch();
+            let (funasr, _) = crate::infra::platform::python::check_funasr();
+            let cuda = torch && crate::infra::platform::python::check_torch_cuda();
+            (torch, funasr, cuda)
+        })
+        .await
+        .unwrap_or((false, false, false));
+    let funasr_env_ready = py_status.env_ready && torch_installed && funasr_installed;
+    if !funasr_env_ready || (device == "cuda" && !torch_cuda_available) {
+        let need_cuda_reinstall = device == "cuda" && torch_installed && !torch_cuda_available;
         let _ = app.emit(
             EventNames::FUNASR_SERVER_STATUS,
             serde_json::json!({ "stage": "setup_env", "message": "正在安装 Python 环境..." }),

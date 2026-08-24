@@ -19,6 +19,8 @@
 
 pub mod log_pipe;
 pub mod process;
+pub mod providers;
+pub mod runtime;
 pub mod state;
 #[cfg(test)]
 mod tests;

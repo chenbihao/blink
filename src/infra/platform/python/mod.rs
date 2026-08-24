@@ -84,26 +84,17 @@ pub struct PythonEnvStatus {
     /// venv 中的 Python 版本（如 "Python 3.12.8"）
     pub venv_python_version: Option<String>,
 
-    // ── torch ──
-    /// torch（PyTorch）是否已安装在 venv 中
-    pub torch_installed: bool,
-    /// torch 版本号
-    pub torch_version: Option<String>,
-    /// 已安装的 PyTorch 是否支持 CUDA（`torch.cuda.is_available()`）
-    ///
-    /// CPU-only build 返回 false。用于诊断 GPU 是否真正生效，
-    /// 以及在切换到 CUDA 模式时判断是否需要重装 PyTorch。
-    pub torch_cuda_available: bool,
-
-    // ── funasr ──
-    /// funasr 包是否已安装在 venv 中
-    pub funasr_installed: bool,
-    /// funasr 版本号
-    pub funasr_version: Option<String>,
-
-    // ── 综合 ──
-    /// 环境是否完全就绪（uv + venv + torch + funasr 四者齐备）
+    /// 由 provider/descriptor 投影的通用包状态。旧兼容环境在没有 descriptor
+    /// 时为空；引擎层不得再要求 infra 暴露专属布尔字段。
+    pub packages: Vec<PythonPackageStatus>,
+    /// provider 基础环境是否就绪（uv + venv）。
     pub env_ready: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PythonPackageStatus {
+    pub name: String,
+    pub installed_version: Option<String>,
 }
 
 // ── 路径 ─────────────────────────────────────────────────────────────────
@@ -662,25 +653,7 @@ pub fn check_status() -> PythonEnvStatus {
         None
     };
 
-    let (torch_installed, torch_version) = if venv_exists {
-        check_torch()
-    } else {
-        (false, None)
-    };
-
-    // 只在 torch 已安装时才检查 CUDA 支持（避免无意义的子进程调用）
-    let torch_cuda_available = torch_installed && check_torch_cuda();
-    if torch_installed {
-        tracing::info!(torch_cuda_available, "PyTorch CUDA 支持检测");
-    }
-
-    let (funasr_installed, funasr_version) = if venv_exists {
-        check_funasr()
-    } else {
-        (false, None)
-    };
-
-    let env_ready = uv_available && venv_exists && torch_installed && funasr_installed;
+    let env_ready = uv_available && venv_exists;
 
     PythonEnvStatus {
         uv_available,
@@ -688,11 +661,7 @@ pub fn check_status() -> PythonEnvStatus {
         uv_version,
         venv_exists,
         venv_python_version,
-        torch_installed,
-        torch_version,
-        torch_cuda_available,
-        funasr_installed,
-        funasr_version,
+        packages: Vec::new(),
         env_ready,
     }
 }
@@ -712,11 +681,7 @@ pub async fn check_status_async() -> PythonEnvStatus {
                 uv_version: None,
                 venv_exists: false,
                 venv_python_version: None,
-                torch_installed: false,
-                torch_version: None,
-                torch_cuda_available: false,
-                funasr_installed: false,
-                funasr_version: None,
+                packages: Vec::new(),
                 env_ready: false,
             }
         })
@@ -764,15 +729,17 @@ pub async fn setup_with_progress(
     // 但当 device == "cuda" 时，需额外验证已安装的 PyTorch 是否含 CUDA 支持——
     // 如果之前以 CPU 模式安装了 CPU-only PyTorch，切换到 CUDA 后需重装。
     let status = check_status();
-    let need_torch_reinstall =
-        device == "cuda" && status.torch_installed && !status.torch_cuda_available;
+    let (torch_installed, _) = check_torch();
+    let (funasr_installed, _) = check_funasr();
+    let torch_cuda_available = torch_installed && check_torch_cuda();
+    let need_torch_reinstall = device == "cuda" && torch_installed && !torch_cuda_available;
 
     if need_torch_reinstall {
         tracing::warn!("配置为 CUDA 模式但已安装的 PyTorch 不含 CUDA 支持，将重装 PyTorch");
         on_log("[Blink] ⚠️ 检测到当前 PyTorch 为 CPU 版，正在重装 CUDA 版 PyTorch...");
     }
 
-    if status.env_ready && !need_torch_reinstall {
+    if status.env_ready && torch_installed && funasr_installed && !need_torch_reinstall {
         tracing::info!("Python 环境已就绪，跳过安装");
         on_progress("complete", "ready");
         return Ok(());
@@ -813,7 +780,7 @@ pub async fn setup_with_progress(
 
     // Step 3: 安装包（torch + funasr）
     // 当 need_torch_reinstall 时，即使 torch 已安装也需重装（CPU→CUDA）
-    if !status.torch_installed || !status.funasr_installed || need_torch_reinstall {
+    if !torch_installed || !funasr_installed || need_torch_reinstall {
         // CPU→CUDA 重装：先彻底卸载旧 PyTorch，再安装 CUDA 版。
         // --reinstall-package / --force-reinstall 都不够可靠——
         // uv 检测到版本号匹配会复用缓存的 CPU wheel，不会真正替换为 CUDA 变体。
@@ -878,7 +845,7 @@ pub async fn setup_with_progress(
             // Step 3a: torch
             // need_torch_reinstall 时即使 torch 已安装也需重装（CPU→CUDA）
             // 先 uninstall 已在上面完成，此处直接安装
-            if !status.torch_installed || need_torch_reinstall {
+            if !torch_installed || need_torch_reinstall {
                 let is_cuda = device == "cuda";
                 let (index_url, desc) = if is_cuda {
                     (
@@ -896,7 +863,7 @@ pub async fn setup_with_progress(
             on_log("[Blink] ✅ PyTorch 安装完成");
 
             // Step 3b: funasr + server 依赖 + torch_complex
-            if !status.funasr_installed || need_torch_reinstall {
+            if !funasr_installed || need_torch_reinstall {
                 on_progress("funasr", "installing");
                 on_log("[Blink] 安装 funasr + fastapi + uvicorn[standard]...");
                 // numba>=0.59 强制使用支持 Python 3.12 的版本，避免 llvmlite 编译失败
