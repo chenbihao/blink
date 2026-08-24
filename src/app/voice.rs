@@ -303,6 +303,29 @@ impl VoiceService {
             }
         }
 
+        // 0.22.3 Task A: 从 LocalEngineService 获取受限连接快照（endpoint + token）
+        // 必须在 session 锁之前执行，因为 get_connection 是 async
+        let connection = {
+            let svc = self
+                .app
+                .try_state::<std::sync::Arc<crate::app::local_engine::LocalEngineService>>();
+            match svc {
+                Some(s) => {
+                    let engine_id = crate::infra::local_engine::runtime::EngineId::new(
+                        crate::app::local_engine::funasr::FUNASR_ENGINE_ID,
+                    )
+                    .unwrap_or_else(|_| {
+                        crate::infra::local_engine::runtime::EngineId::new("funasr").unwrap()
+                    });
+                    match s.get_connection(&engine_id).await {
+                        Ok(Some(conn)) => Some(conn),
+                        _ => None,
+                    }
+                }
+                None => None,
+            }
+        };
+
         // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
         let mut session = self.session.lock().unwrap();
 
@@ -312,7 +335,7 @@ impl VoiceService {
             return false;
         }
 
-        let engine = match crate::domain::stt::create_engine() {
+        let engine = match crate::domain::stt::create_engine(connection) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");

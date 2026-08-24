@@ -1,6 +1,7 @@
 //! stt 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
-use super::diagnostic::{bytes_to_mb, dir_size_bytes};
+// bytes_to_mb/dir_size_bytes 从 diagnostic 模块导入的旧 maintenance.rs 用途
+// 已移除——maintenance.rs 现使用 app::local_engine::funasr::bytes_to_mb_pub
 use crate::domain::event_names::EventNames;
 use crate::domain::stt::SttEngine;
 use tauri::{Emitter, Manager};
@@ -403,5 +404,6 @@ pub(crate) fn copy_dir_recursive(
 
 static AUDIO_TEST_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[allow(deprecated)]
 mod maintenance;
 pub use maintenance::*;

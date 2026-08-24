@@ -58,6 +58,9 @@ pub struct LocalSttEngine {
     server_port: u16,
     /// FunASR 模型标识（传给 /v1/audio/transcriptions 的 model 字段）
     funasr_model: String,
+    /// 服务 token（用于 X-Engine-Token header 鉴权）
+    /// 0.22.3 Task A: stop/重启后旧 token 的请求会被 Python server 拒绝（401）
+    token: Option<String>,
     /// 是否已在创建时确认服务就绪
     #[allow(dead_code)]
     server_ready: bool,
@@ -66,10 +69,13 @@ pub struct LocalSttEngine {
 impl LocalSttEngine {
     /// 创建本地 STT 引擎。
     ///
-    /// 从 SttConfig 读取端口配置，检查 funasr-server 是否就绪。
-    /// 如果服务未就绪，返回错误（提示用户在设置页启动服务）。
-    pub fn new(config: &crate::domain::config::stt_config::SttConfig) -> Result<Self, String> {
-        let port = config.local_engine.server_port;
+    /// 0.22.3 Task A: `port` 和 `token` 来自 LocalEngineService 的 `LocalEngineConnection`，
+    /// 不再从 SttConfig 读取 preferred port。token 用于 X-Engine-Token 鉴权。
+    pub fn new(
+        config: &crate::domain::config::stt_config::SttConfig,
+        port: u16,
+        token: String,
+    ) -> Result<Self, String> {
         let model = config.local_engine.funasr_model.clone();
 
         let ready = super::funasr::is_server_ready(port);
@@ -88,6 +94,7 @@ impl LocalSttEngine {
             sample_rate: 16000,
             server_port: port,
             funasr_model: model,
+            token: Some(token),
             server_ready: true,
         })
     }
@@ -99,6 +106,7 @@ impl LocalSttEngine {
             sample_rate: 16000,
             server_port: port,
             funasr_model: "iic/SenseVoiceSmall".to_string(),
+            token: None,
             server_ready: super::funasr::is_server_ready(port),
         }
     }
@@ -111,16 +119,33 @@ impl LocalSttEngine {
 
     /// 调用 FunASR server 的 OpenAI 兼容 API 做语音转录。
     ///
-    /// 复用 [`super::wav::transcribe_async`]，只是目标指向 localhost 且无需 API key。
+    /// 0.22.3 Task A: 本地请求携带 `X-Engine-Token` header 鉴权。
+    /// 复用 [`super::wav::transcribe_async`]，token 作为 api_key 传入以复用 Bearer auth 机制。
     async fn transcribe_via_server(&self, wav_bytes: &[u8]) -> Result<String, String> {
         let base_url = super::funasr::server_base_url(self.server_port);
         let url = format!("{base_url}/audio/transcriptions");
 
         tracing::debug!(%url, samples = self.samples.lock().unwrap().len(), "FunASR 转录请求");
 
-        super::wav::transcribe_async(&url, None, &self.funasr_model, wav_bytes)
-            .await
-            .map_err(|e| e.to_string())
+        // token 通过 X-Engine-Token header 传递，而非 Bearer auth
+        // transcribe_with_client 的 api_key 参数用于 Bearer auth（云端），
+        // 本地引擎需要手动添加 X-Engine-Token header
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+
+        let url_clone = url.clone();
+        let result = super::wav::transcribe_with_token(
+            &client,
+            &url_clone,
+            self.token.as_deref(),
+            &self.funasr_model,
+            wav_bytes,
+        )
+        .await;
+
+        result.map_err(|e| e.to_string())
     }
 }
 

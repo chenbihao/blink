@@ -58,6 +58,12 @@ export const EVENTS = Object.freeze({
     FUNASR_SERVER_STATUS: 'blink://funasr-server-status',
     AUDIO_TEST_LEVEL: 'blink://audio-test-level',
 
+    // ── 本地引擎（0.22.3）──
+    /** 通用引擎状态快照。payload: { engine_id, service_epoch, revision, snapshot } */
+    LOCAL_ENGINE_STATUS: 'blink://local-engine-status',
+    /** 通用引擎日志条目。payload: { engine_id, instance_id, seq, timestamp, level, text } */
+    LOCAL_ENGINE_LOG: 'blink://local-engine-log',
+
     // ── 便签（0.16.7）──
     STICKY_CREATED: 'blink://sticky-created',
     STICKY_DELETED: 'blink://sticky-deleted',

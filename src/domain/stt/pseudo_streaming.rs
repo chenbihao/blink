@@ -59,6 +59,9 @@ pub struct PseudoStreamingSttEngine {
     server_port: u16,
     /// FunASR 模型标识
     funasr_model: String,
+    /// 服务 token（用于 X-Engine-Token header 鉴权）
+    /// 0.22.3 Task A: stop/重启后旧 token 的请求会被 Python server 拒绝（401）
+    token: Option<String>,
     /// 采样率
     sample_rate: u32,
 }
@@ -128,9 +131,13 @@ impl SentenceBuffer {
 impl PseudoStreamingSttEngine {
     /// 创建伪流式 STT 引擎。
     ///
-    /// 从 SttConfig 读取端口和模型配置，检查 funasr-server 是否就绪。
-    pub fn new(config: &crate::domain::config::stt_config::SttConfig) -> Result<Self, String> {
-        let port = config.local_engine.server_port;
+    /// 0.22.3 Task A: `port` 和 `token` 来自 LocalEngineService 的 `LocalEngineConnection`，
+    /// token 用于 X-Engine-Token 鉴权。
+    pub fn new(
+        config: &crate::domain::config::stt_config::SttConfig,
+        port: u16,
+        token: String,
+    ) -> Result<Self, String> {
         let model = config.local_engine.funasr_model.clone();
 
         let ready = super::funasr::is_server_ready(port);
@@ -175,6 +182,7 @@ impl PseudoStreamingSttEngine {
             client,
             server_port: port,
             funasr_model: model,
+            token: Some(token),
             sample_rate: 16000,
         })
     }
@@ -225,10 +233,10 @@ impl PseudoStreamingSttEngine {
         let wav_bytes = super::wav::pcm_to_wav(&trimmed, self.sample_rate, 1);
         let url = self.transcription_url();
 
-        let text = super::wav::transcribe_with_client(
+        let text = super::wav::transcribe_with_token(
             &self.client,
             &url,
-            None,
+            self.token.as_deref(),
             &self.funasr_model,
             &wav_bytes,
         )
@@ -255,6 +263,7 @@ impl PseudoStreamingSttEngine {
         let client = self.client.clone();
         let url = self.transcription_url();
         let model = self.funasr_model.clone();
+        let token = self.token.clone();
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
@@ -262,7 +271,14 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&sentence_samples, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await
+            match super::wav::transcribe_with_token(
+                &client,
+                &url,
+                token.as_deref(),
+                &model,
+                &wav_bytes,
+            )
+            .await
             {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
@@ -302,6 +318,7 @@ impl PseudoStreamingSttEngine {
         let client = self.client.clone();
         let url = self.transcription_url();
         let model = self.funasr_model.clone();
+        let token = self.token.clone();
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
@@ -309,7 +326,14 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await
+            match super::wav::transcribe_with_token(
+                &client,
+                &url,
+                token.as_deref(),
+                &model,
+                &wav_bytes,
+            )
+            .await
             {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
@@ -959,6 +983,7 @@ mod tests {
             client: reqwest::Client::new(),
             server_port: 8000,
             funasr_model: "test".to_string(),
+            token: None,
             sample_rate: 16000,
         };
 
@@ -976,5 +1001,34 @@ mod tests {
             "reset 应递增 preview_generation"
         );
         assert_eq!(inner.sentences.confirmed_text(), "");
+    }
+
+    // 验证带 token 字段的引擎能正常构造和 reset
+    #[test]
+    fn engine_with_token_constructs_and_resets() {
+        let engine = PseudoStreamingSttEngine {
+            inner: Arc::new(Mutex::new(PseudoInner {
+                vad: EnergyVad::new(16000),
+                sentences: SentenceBuffer::new(),
+                samples: vec![0.1; 100],
+                last_preview: Instant::now(),
+                preview_in_flight: false,
+                latest_preview: String::new(),
+                finalize_in_flight: false,
+                pending_confirmed: None,
+                preview_generation: 0,
+            })),
+            client: reqwest::Client::new(),
+            server_port: 8000,
+            funasr_model: "test".to_string(),
+            token: Some("test-token-abcdef0123456789".to_string()),
+            sample_rate: 16000,
+        };
+
+        engine.reset();
+
+        let inner = engine.inner.lock().unwrap();
+        assert!(inner.samples.is_empty());
+        assert_eq!(inner.preview_generation, 1);
     }
 }

@@ -157,9 +157,14 @@ pub(crate) mod wav;
 /// - Local 模式 + StreamingMode::Pseudo → PseudoStreamingSttEngine (VAD + 预览) ⭐ 默认
 /// - Local 模式 + StreamingMode::Off → LocalSttEngine (HTTP 非流式)
 ///
+/// **0.22.3 Task A**: Local 模式下使用 `LocalEngineConnection`（包含 endpoint + token），
+/// STT 请求携带 `X-Engine-Token` 鉴权。无运行实例时返回错误。
+///
 /// **不会回退到 Mock 引擎**——未启用 / 未配置 / 服务未就绪时返回 Err，
 /// 由调用方（VoiceService）决定如何向用户反馈错误。
-pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
+pub fn create_engine(
+    connection: Option<crate::app::local_engine::service::LocalEngineConnection>,
+) -> Result<Box<dyn SttEngine>, String> {
     let config = crate::domain::config::stt_config::get_stt_config();
 
     if !config.enabled {
@@ -175,35 +180,59 @@ pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
                 Err("云端 STT 未配置供应商，请在设置页中配置".to_string())
             }
         }
-        crate::domain::config::stt_config::SttMode::Local => match config.streaming_mode {
-            crate::domain::config::stt_config::StreamingMode::Pseudo => {
-                match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
-                    Ok(engine) => {
-                        tracing::info!("STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
-                        Ok(Box::new(engine))
-                    }
-                    Err(e) => {
-                        tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
-                        match local::LocalSttEngine::new(&config) {
-                            Ok(engine) => {
-                                tracing::info!("STT 引擎: local (FunASR, 非流式回退)");
-                                Ok(Box::new(engine))
+        crate::domain::config::stt_config::SttMode::Local => {
+            // 0.22.3 Task A: 从 connection 快照提取 port 和 token
+            let conn = match connection {
+                Some(c) => c,
+                None => {
+                    return Err("FunASR 服务未运行。请在设置页启动服务。\
+                         （preferred port 只代表偏好，不代表实际监听地址）"
+                        .to_string());
+                }
+            };
+            // 从 endpoint base_url (http://127.0.0.1:port) 提取端口
+            let port = conn
+                .endpoint
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(8100);
+            let token = conn.token.clone();
+
+            match config.streaming_mode {
+                crate::domain::config::stt_config::StreamingMode::Pseudo => {
+                    match pseudo_streaming::PseudoStreamingSttEngine::new(
+                        &config,
+                        port,
+                        token.clone(),
+                    ) {
+                        Ok(engine) => {
+                            tracing::info!(port, "STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
+                            Ok(Box::new(engine))
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
+                            match local::LocalSttEngine::new(&config, port, token) {
+                                Ok(engine) => {
+                                    tracing::info!(port, "STT 引擎: local (FunASR, 非流式回退)");
+                                    Ok(Box::new(engine))
+                                }
+                                Err(e) => Err(format!("STT 引擎创建失败: {e}")),
                             }
-                            Err(e) => Err(format!("STT 引擎创建失败: {e}")),
                         }
                     }
                 }
-            }
-            crate::domain::config::stt_config::StreamingMode::Off => {
-                match local::LocalSttEngine::new(&config) {
-                    Ok(engine) => {
-                        tracing::info!("STT 引擎: local (FunASR)");
-                        Ok(Box::new(engine))
+                crate::domain::config::stt_config::StreamingMode::Off => {
+                    match local::LocalSttEngine::new(&config, port, token) {
+                        Ok(engine) => {
+                            tracing::info!(port, "STT 引擎: local (FunASR)");
+                            Ok(Box::new(engine))
+                        }
+                        Err(e) => Err(format!("STT 引擎创建失败: {e}")),
                     }
-                    Err(e) => Err(format!("STT 引擎创建失败: {e}")),
                 }
             }
-        },
+        }
     }
 }
 

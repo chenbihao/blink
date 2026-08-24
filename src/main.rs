@@ -815,19 +815,92 @@ fn main() {
             // 后台预热次级窗口（1s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
 
+            // 0.22.3: 构造进程级 LocalEngineService（全进程唯一实例）
+            //
+            // - 编译期注册 FunASR adapter
+            // - TauriEventPort 负责通用事件投影 + 旧 FunASR 兼容投影
+            // - service_epoch 在构造时生成，Blink 实例生命周期内不变
+            // - 禁止创建多个 service 实例
+            // - 0.22.3: 安装走 RuntimeProvider transaction（ProviderDescriptor + PythonVenvProvider）
+            let funasr_adapter = crate::app::local_engine::funasr::make_funasr_adapter();
+            let engine_registry = std::sync::Arc::new(
+                crate::app::local_engine::EngineRegistry::new_with_adapters(vec![funasr_adapter]),
+            );
+            let event_port = crate::app::local_engine::make_event_port(app.handle().clone());
+
+            // 构造 provider descriptors map + python provider（安装事务用）
+            let funasr_descriptor =
+                crate::app::local_engine::funasr::make_funasr_provider_descriptor();
+            let python_provider =
+                crate::app::local_engine::funasr::make_funasr_python_provider();
+            let mut provider_descriptors = std::collections::HashMap::new();
+            provider_descriptors.insert(funasr_descriptor.engine_id.clone(), funasr_descriptor);
+
+            let local_engine_service =
+                crate::app::local_engine::LocalEngineService::new_with_providers(
+                    engine_registry,
+                    event_port,
+                    provider_descriptors,
+                    python_provider,
+                );
+            app.manage(local_engine_service.clone());
+            tracing::info!(
+                epoch = local_engine_service.epoch().0,
+                "LocalEngineService 已构造（funasr adapter 已注册）"
+            );
+
             // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
+            //
+            // 0.22.3: 改为调用 LocalEngineService.start("funasr")
+            // 语义不变：仍只在 SttMode::Local 且 auto_start_server=true 时启动
+            // 保留延迟/非阻塞策略，不能增加 Alt+Space 启动路径负担
             {
                 let stt_config = app::stt_config::get_stt_config();
                 if stt_config.enabled
                     && stt_config.mode == app::stt_config::SttMode::Local
                     && stt_config.local_engine.auto_start_server
                 {
-                    let app_clone = app.handle().clone();
+                    let svc = local_engine_service.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         tracing::info!("自动启动 funasr-server（auto_start_server 已开启）");
-                        // 复用 start_funasr_server 命令逻辑（包含环境检查 + 子进程管理）
-                        let _ = app::commands::start_funasr_server(app_clone).await;
+
+                        // 构建 AdapterConfig
+                        let config = crate::app::stt_config::get_stt_config();
+                        let local = &config.local_engine;
+                        let funasr_config =
+                            crate::app::local_engine::funasr::FunasrEngineConfig::from_stt_config(local);
+                        let compute_preference = if local.device == "cuda" {
+                            Some(crate::infra::local_engine::runtime::ComputePreference::Cuda)
+                        } else {
+                            Some(crate::infra::local_engine::runtime::ComputePreference::Cpu)
+                        };
+                        let adapter_config = crate::domain::local_engine::AdapterConfig {
+                            preferred_port: Some(local.server_port),
+                            compute_preference,
+                            engine_config: funasr_config.to_json(),
+                        };
+
+                        let engine_id = crate::infra::local_engine::runtime::EngineId::new(
+                            crate::app::local_engine::funasr::FUNASR_ENGINE_ID,
+                        )
+                        .expect("funasr engine id is valid");
+
+                        // 0.22.3: 环境检查 + 安装统一走 LocalEngineService
+                        // 不再直接调用 platform::python::setup_with_progress
+                        if let Err(e) = svc.ensure_installed(&engine_id, adapter_config.clone()).await {
+                            tracing::error!(%e, "自动启动: 环境安装失败");
+                            return;
+                        }
+
+                        match svc.start(&engine_id, adapter_config).await {
+                            Ok(()) => {
+                                tracing::info!("funasr-server 已通过 LocalEngineService 自动启动");
+                            }
+                            Err(e) => {
+                                tracing::error!(%e, "funasr-server 自动启动失败");
+                            }
+                        }
                     });
                 }
             }
@@ -1225,8 +1298,13 @@ app::commands::ensure_mcp_connected,
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
 
-                // Blink 退出时 kill funasr-server 子进程，避免孤儿进程
-                crate::app::commands::shutdown_funasr_server_blocking();
+                // Blink 退出时通过 LocalEngineService 统一回收所有受管实例（0.22.3）
+                // 单个引擎失败不能阻止其他实例或 MCP 等服务退出清理。
+                if let Some(svc) = _app
+                    .try_state::<std::sync::Arc<crate::app::local_engine::LocalEngineService>>()
+                {
+                    svc.shutdown_all_blocking();
+                }
                 // 0.13.0: 停止所有 MCP server 子进程
                 if let Some(mcp) = _app.try_state::<std::sync::Arc<domain::mcp::McpClientManager>>() {
                     // P1-#16 fix: 加超时兜底，防止 mcp.stop_all() 无限挂住退出

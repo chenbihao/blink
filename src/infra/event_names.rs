@@ -67,6 +67,14 @@ impl EventNames {
     pub const FUNASR_SERVER_STATUS: &str = "blink://funasr-server-status";
     pub const AUDIO_TEST_LEVEL: &str = "blink://audio-test-level";
 
+    // ── 本地引擎（0.22.3）──
+    /// 通用引擎状态快照。payload: `{ engine_id, service_epoch, revision, snapshot }`。
+    /// 旧 FunASR 专属事件 `FUNASR_SERVER_STATUS` 由 app 层兼容投影从此事件派生。
+    pub const LOCAL_ENGINE_STATUS: &str = "blink://local-engine-status";
+    /// 通用引擎日志条目。payload: `{ engine_id, instance_id, seq, timestamp, level, text }`。
+    /// 旧 FunASR 专属事件 `FUNASR_SERVER_LOG` 由 app 层兼容投影从此事件派生。
+    pub const LOCAL_ENGINE_LOG: &str = "blink://local-engine-log";
+
     // ── 便签（0.16.7-0.16.10）──
     /// 便签被创建。payload: `{ stickyId }`
     pub const STICKY_CREATED: &str = "blink://sticky-created";

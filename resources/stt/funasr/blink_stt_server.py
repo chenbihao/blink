@@ -19,6 +19,7 @@ HTTP 端点路径和响应格式与官方 funasr-server 完全兼容，
 """
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -31,7 +32,7 @@ from typing import Optional
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse
 
 # ── 全局状态 ──────────────────────────────────────────────────────────────
@@ -58,6 +59,55 @@ def get_args() -> argparse.Namespace:
     if _args is None:
         raise RuntimeError("Server not initialized: _args is None")
     return _args
+
+
+def _token_fingerprint(token: str) -> str:
+    """计算 token 的 fingerprint（SHA-256 前 16 hex 字符）。
+
+    0.22.3 Task D: 改为 SHA-256 固定前缀，与 Rust 侧 `token_fingerprint` 一致。
+    日志中只能记录 fingerprint，不能记录明文 token。
+    """
+    h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"fp:{h[:16]}"
+
+
+# ── 0.22.3 Task D: Token 认证 ─────────────────────────────────────────────
+
+def _get_engine_token() -> Optional[str]:
+    """从环境变量读取引擎 token。
+
+    0.22.3 Task D: token 不通过命令行参数暴露，只从环境变量读取。
+    """
+    return os.environ.get("BLINK_ENGINE_TOKEN")
+
+
+def _get_engine_id() -> str:
+    """从环境变量读取引擎 id。"""
+    return os.environ.get("BLINK_ENGINE_ID", "funasr")
+
+
+def _get_instance_id() -> Optional[str]:
+    """从环境变量读取实例 id。"""
+    return os.environ.get("BLINK_INSTANCE_ID")
+
+
+def _verify_token(request: Request) -> bool:
+    """验证请求中的 X-Engine-Token header。
+
+    0.22.3 Task G: fail closed——没有 BLINK_ENGINE_TOKEN 时拒绝所有请求。
+    token 缺失或不匹配返回 False（调用方返回 401）。
+    token 不写日志。
+    """
+    engine_token = _get_engine_token()
+    if not engine_token:
+        # 未配置 token——fail closed，不允许任何请求
+        return False
+
+    request_token = request.headers.get("X-Engine-Token")
+    if not request_token:
+        return False
+
+    return request_token == engine_token
 
 
 # ── 模型名解析 ────────────────────────────────────────────────────────────
@@ -272,23 +322,75 @@ def _postprocess_text(raw_text: str) -> str:
 # ── HTTP 端点 ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
-async def health():
-    """健康检查。返回模型加载状态。
+async def health(request: Request):
+    """健康检查。返回模型加载状态 + 服务身份回显。
+
+    0.22.3 Task D: 验证 X-Engine-Token header。token 缺失/不匹配返回 401。
+    0.22.3 扩展：
+    - 回显 engine_id / instance_id / token_fingerprint / endpoint
+      供 Rust 侧 `ServiceIdentityInput::verify` 核对身份。
+    - 旧版 server 不回显这些字段，Rust 侧兼容降级为 Unreachable。
 
     响应字段：
     - ``status``: 始终为 "ok"（HTTP 层面服务正常）
     - ``model_loaded``: 模型是否已加载完毕（兼容旧字段）
     - ``model_status``: 模型加载状态枚举
-      - ``"idle"``: 尚未开始加载
-      - ``"loading"``: 正在下载/加载中（首次需从 ModelScope 下载 ~234MB）
-      - ``"ready"``: 模型已就绪，可接受转录请求
-      - ``"error"``: 加载失败
+    - ``engine_id``: 引擎 id（从环境变量读取）
+    - ``instance_id``: 实例 id（从环境变量读取）
+    - ``token_fingerprint``: token 的 SHA-256 fingerprint
+    - ``endpoint``: 实际监听端点
+    - ``backend``: 推理后端（cpu/cuda）
+    - ``device_name``: 设备名
+    - ``model_id``: 模型 id
+    - ``model_revision``: 模型版本
     """
-    return JSONResponse({
+    # 0.22.3 Task D: token 验证
+    if not _verify_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    args = get_args()
+    response = {
         "status": "ok",
         "model_loaded": _model is not None,
         "model_status": _model_status,
-    })
+    }
+
+    # 0.22.3 Task D: 从环境变量读取身份（不从命令行参数）
+    engine_id = _get_engine_id()
+    instance_id = _get_instance_id()
+    engine_token = _get_engine_token()
+
+    if engine_id:
+        response["engine_id"] = engine_id
+    if instance_id:
+        response["instance_id"] = instance_id
+    if engine_token:
+        response["token_fingerprint"] = _token_fingerprint(engine_token)
+    if hasattr(args, "port"):
+        response["endpoint"] = f"127.0.0.1:{args.port}"
+
+    # 推理后端信息
+    if _model is not None:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                response["backend"] = "cuda"
+                response["device_name"] = torch.cuda.get_device_name(0)
+            else:
+                response["backend"] = "cpu"
+                response["device_name"] = "CPU"
+        except ImportError:
+            response["backend"] = args.device
+            response["device_name"] = args.device.upper()
+    else:
+        response["backend"] = args.device
+        response["device_name"] = args.device.upper()
+
+    # 模型 id / revision
+    response["model_id"] = getattr(args, "model", "")
+    response["model_revision"] = "funasr-1.x"
+
+    return JSONResponse(response)
 
 
 @app.get("/v1/models")
@@ -309,6 +411,7 @@ async def list_models():
 
 @app.post("/v1/audio/transcriptions")
 async def transcribe(
+    request: Request,
     file: UploadFile = File(...),
     model: str = Form(default=""),
     hotword: Optional[str] = Form(default=None),
@@ -316,10 +419,16 @@ async def transcribe(
 ):
     """非流式转录（OpenAI 兼容 API）。
 
+    0.22.3 Task D: 验证 X-Engine-Token header。token 缺失/不匹配返回 401。
+
     支持 FunASR 增强参数（官方 server 未暴露）：
     - hotword: 热词字符串（每行 "词 权重"）
     - use_itn: ITN 开关 ("true"/"false")
     """
+    # 0.22.3 Task D: token 验证
+    if not _verify_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
     args = get_args()
 
     # 读取上传的音频
@@ -478,6 +587,8 @@ def parse_args():
         "--use-itn", action="store_true", default=True,
         help="启用 ITN 逆文本归一化"
     )
+    # 0.22.3 Task G: 身份参数已移除 CLI，只通过环境变量传入
+    # BLINK_ENGINE_TOKEN / BLINK_ENGINE_ID / BLINK_INSTANCE_ID
     return parser.parse_args()
 
 
@@ -493,10 +604,11 @@ def main():
         stream=sys.stdout,
     )
 
-    # 启动 uvicorn
+    # 0.22.3：绑定 127.0.0.1（loopback only），与 Endpoint 协议一致。
+    # 不再绑定 0.0.0.0——本地引擎服务只允许 loopback 访问。
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=_args.port,
         log_level="info",
     )

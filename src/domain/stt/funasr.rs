@@ -27,7 +27,6 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::infra::local_engine::{
     LaunchRequest, ManagedProcess, ManagedProcessError, ProcessStatus, ShutdownConfig,
@@ -41,10 +40,11 @@ const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/bl
 /// 可能需要 3-5 分钟。后续启动仅模型加载，通常 30-60 秒。
 pub const SERVER_STARTUP_TIMEOUT_SECS: u64 = 300;
 
-/// 全局 server 进程句柄（由 LocalSttEngine 管理）。
-static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
-
 // ── Python 脚本释放 ────────────────────────────────────────────────────────
+//
+// 0.22.3：SERVER_RUNNING 全局已移除——server 运行状态由 ManagedProcess /
+// LocalEngineService 管理。mark_server_stopped 保留为 no-op 以兼容
+// maintenance.rs 的调用点（H6 wiring 时替换为 LocalEngineService）。
 
 /// 获取 `%APPDATA%\blink\python\` 目录路径。
 fn python_dir() -> PathBuf {
@@ -184,7 +184,7 @@ pub struct FunasrEnv {
     pub env_ready: bool,
 
     // ── server 状态 ──
-    /// server 是否正在运行
+    /// server 是否正在运行（0.22.3：由 app 层从 ManagedProcess 填充）
     pub server_running: bool,
     /// 当前配置的监听端口
     pub server_port: u16,
@@ -196,7 +196,17 @@ pub struct FunasrEnv {
 ///
 /// 将 Python 子进程检测放到 `spawn_blocking` 线程池执行。
 /// 适用于 Tauri async 命令中调用，避免阻塞 UI 线程。
-pub async fn get_env_status_async(server_port: u16, server_model: String) -> FunasrEnv {
+/// 获取环境 + 服务的完整状态（异步版，不阻塞 async 运行时）。
+///
+/// 将 Python 子进程检测放到 `spawn_blocking` 线程池执行。
+///
+/// 0.22.3：`server_running` 参数由调用方（app 层）从 ManagedProcess
+/// 查询后传入。domain 层不再持有全局可变状态。
+pub async fn get_env_status_async(
+    server_port: u16,
+    server_model: String,
+    server_running: bool,
+) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status_async().await;
     let (torch_installed, torch_version, torch_cuda_available, funasr_installed, funasr_version) =
         tokio::task::spawn_blocking(|| {
@@ -227,7 +237,7 @@ pub async fn get_env_status_async(server_port: u16, server_model: String) -> Fun
         funasr_installed,
         funasr_version,
         env_ready,
-        server_running: SERVER_RUNNING.load(Ordering::SeqCst),
+        server_running,
         server_port,
         server_model,
     }
@@ -346,12 +356,11 @@ pub fn is_server_ready(port: u16) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let addr = format!("localhost:{port}");
+    // 0.22.3：直接使用 127.0.0.1，与 Endpoint 协议一致。
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
-        // 500ms 超时：服务正常时 localhost TCP 连接毫秒级返回；
+        &addr,
+        // 500ms 超时：服务正常时 loopback TCP 连接毫秒级返回；
         // 服务未启动时 Windows 上未监听端口会等满超时（非 RST），2s 太长会阻塞调用方。
         Duration::from_millis(500),
     )
@@ -412,7 +421,8 @@ pub enum ModelLoadStatus {
 /// - `commands.rs` 启动流程的轮询（区分 "服务已启动但模型还在下载" 与 "模型就绪"）
 /// - `local.rs` 的 `finalize()` 检查（提供更精准的错误提示）
 pub async fn check_model_loaded(port: u16) -> ModelLoadStatus {
-    let url = format!("http://localhost:{port}/health");
+    // 0.22.3：使用 127.0.0.1 而非 localhost，与 Endpoint 协议一致。
+    let url = format!("http://127.0.0.1:{port}/health");
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -567,6 +577,9 @@ pub fn build_launch_request(params: &ServerStartParams) -> Result<LaunchRequest,
         args.push("--use-itn".into());
     }
 
+    // 0.22.3 Task G: 身份参数只通过环境变量传入，不出现在命令行
+    // BLINK_ENGINE_TOKEN / BLINK_ENGINE_ID / BLINK_INSTANCE_ID 由 service 层注入
+
     // 受限环境变量
     let mut env = HashMap::new();
     // Python 输出无缓冲 + UTF-8 模式（修复 Windows 控制台中文乱码）
@@ -623,7 +636,6 @@ pub async fn start_server(
         // 我们的进程在运行，检查端口是否就绪
         if is_server_ready(port) {
             tracing::info!(port, "blink_stt_server 已在运行");
-            SERVER_RUNNING.store(true, Ordering::SeqCst);
             return Ok(false);
         }
         // 我们的进程在运行但端口未就绪——可能还在启动中
@@ -662,21 +674,27 @@ pub async fn start_server(
         _ => format!("ManagedProcess 启动失败: {e}"),
     })?;
 
-    SERVER_RUNNING.store(true, Ordering::SeqCst);
-
     tracing::info!("blink_stt_server 子进程已启动（ManagedProcess），等待模型加载...");
 
     Ok(true)
 }
 
-/// 标记 server 已停止（子进程退出时调用）。
+/// 标记 server 已停止。
+///
+/// 0.22.3：此函数现为 no-op——server 运行状态由 ManagedProcess /
+/// LocalEngineService 统一管理。保留函数签名以兼容 maintenance.rs
+/// 的现有调用点（H6 wiring 时由 LocalEngineService 替换）。
+#[deprecated(note = "0.22.3: server 运行状态由 ManagedProcess 管理，此函数为 no-op")]
 pub fn mark_server_stopped() {
-    SERVER_RUNNING.store(false, Ordering::SeqCst);
+    // no-op：ManagedProcess 的 ProcessStatus 是唯一的运行状态真源。
 }
 
 /// 生成 server 的 base_url（供 HTTP 转录使用）。
+///
+/// 0.22.3：使用 `127.0.0.1` 而非 `localhost`，与 LocalEngineService 的
+/// Endpoint 协议一致——Endpoint 只允许 loopback。
 pub fn server_base_url(port: u16) -> String {
-    format!("http://localhost:{port}/v1")
+    format!("http://127.0.0.1:{port}/v1")
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ pub mod event; // 0.14.6 §2.2 / 0.21.14：领域环境抽象（EventPort + Capa
 pub mod event_names; // 0.14.6 §3.3 / 0.21.14：blink:// 事件名常量（infra 重导出，避免反向依赖）
 pub mod feature_catalog; // 0.21.4：功能目录聚合层
 pub mod intent;
+pub mod local_engine; // 0.22.3：本地引擎领域协议（状态/描述符/adapter 契约）
 pub mod mcp; // 0.13.0：MCP client（消费外部 tool，包装进 Tool 适配层）
 pub mod palette; // 0.20.7：配色核心（OKLab/OKLCH/聚类/角色/搭配/对比度，Rust 单一真源）
 pub mod plugin;

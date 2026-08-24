@@ -265,6 +265,65 @@ pub async fn transcribe_async(
     transcribe_with_client(&client, url, api_key, model_id, wav_bytes).await
 }
 
+/// 异步 HTTP 转录请求（本地 FunASR server，携带 X-Engine-Token）。
+///
+/// 0.22.3 Task A: 本地引擎专用——token 通过 `X-Engine-Token` header 鉴权，
+/// 不使用 Bearer auth（Bearer 是云端 API 的鉴权方式）。
+///
+/// - `client`：复用的 HTTP 客户端
+/// - `url`：完整 URL（如 `http://127.0.0.1:8000/v1/audio/transcriptions`）
+/// - `token`：服务 token（用于 `X-Engine-Token` header），None 时无鉴权（诊断模式）
+/// - `model_id`：模型标识
+/// - `wav_bytes`：WAV 格式音频字节
+///
+/// 返回识别文本。HTTP 错误或 JSON 解析失败转为 [`super::SttError`]。
+pub async fn transcribe_with_token(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    model_id: &str,
+    wav_bytes: &[u8],
+) -> Result<String, super::SttError> {
+    use reqwest::multipart;
+
+    let part = multipart::Part::bytes(wav_bytes.to_vec())
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| super::SttError::Engine(format!("multipart 构建失败: {e}")))?;
+
+    let form = multipart::Form::new()
+        .text("model", model_id.to_string())
+        .part("file", part);
+
+    let mut req = client.post(url).multipart(form);
+    if let Some(tok) = token {
+        req = req.header("X-Engine-Token", tok);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| super::SttError::Engine(format!("HTTP 请求失败: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(super::SttError::Engine(format!("HTTP {status}: {body}")));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TranscriptionResponse {
+        text: String,
+    }
+
+    let result: TranscriptionResponse = resp
+        .json()
+        .await
+        .map_err(|e| super::SttError::Engine(format!("JSON 解析失败: {e}")))?;
+
+    Ok(result.text)
+}
+
 // ── HTTP 转录（Chat-Completion ASR 接口）─────────────────────────────────
 
 /// 通过 chat completions API 做语音转文字（Mimo 等供应商）。
