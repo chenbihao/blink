@@ -167,12 +167,7 @@ impl Service for HotkeyService {
                         // toggle:已可见则隐藏(仅快捷键;单实例重复运行仍走 invoke 总是显示)
                         let visible = crate::infra::platform::window::is_visible();
                         let ai_active = crate::infra::platform::window::is_main_ai_active();
-                        tracing::info!(
-                            gesture_id,
-                            visible,
-                            ai_active,
-                            "main_hotkey_tap_received"
-                        );
+                        tracing::info!(gesture_id, visible, ai_active, "main_hotkey_tap_received");
                         if visible {
                             // AI 活跃时不隐藏，而是 set_focus + emit SHOWN
                             // 防止用户在 AI 生成过程中误按热键导致窗口消失

@@ -824,11 +824,15 @@ mod tests {
         use std::collections::HashSet;
 
         let reg = CapabilityRegistry::default();
-        reg.register(std::sync::Arc::new(CountCap { id_val: "cap_a" })).unwrap();
-        reg.register(std::sync::Arc::new(CountCap { id_val: "cap_b" })).unwrap();
+        reg.register(std::sync::Arc::new(CountCap { id_val: "cap_a" }))
+            .unwrap();
+        reg.register(std::sync::Arc::new(CountCap { id_val: "cap_b" }))
+            .unwrap();
 
-        let allowlist: HashSet<String> =
-            ["cap_a", "stale_removed_cap"].iter().map(|s| s.to_string()).collect();
+        let allowlist: HashSet<String> = ["cap_a", "stale_removed_cap"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         // allowlist 含 2 条但 cap_b 未授权、stale_removed_cap 已注销：
         // 精确交集 = 1，直接 len() 会误报 2
         assert_eq!(count_allowlisted_capabilities(&reg, &allowlist), 1);

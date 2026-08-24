@@ -11,8 +11,8 @@
 //! 不持锁跨 await，不阻塞主 prompt 链路。任何失败只 warn! 并回退纯截断——
 //! 摘要是优化项，不是正确性依赖。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc;
 
@@ -634,10 +634,7 @@ impl ChatService {
     ///
     /// 供 `get_composer_bar_snapshot` 聚合进 popup；估算纯本地（config + 两条
     /// 轻量 SQL + 缓存读取），无 LLM 调用。
-    pub async fn memory_health_summary(
-        &self,
-        conversation_id: &str,
-    ) -> MemoryHealthSummary {
+    pub async fn memory_health_summary(&self, conversation_id: &str) -> MemoryHealthSummary {
         let cfg = {
             let cfg_handle = self.persistent_memory.config_handle();
             let cfg_guard = cfg_handle.read().await;
@@ -645,19 +642,15 @@ impl ChatService {
         };
         let pool = self.persistent_memory.pool();
 
-        let summary_segments = crate::infra::data::conversations::count_summaries(
-            pool,
-            conversation_id,
-        )
-        .await
-        .unwrap_or(0);
-        let last_summary_at = crate::infra::data::conversations::latest_summary_created_at(
-            pool,
-            conversation_id,
-        )
-        .await
-        .ok()
-        .flatten();
+        let summary_segments =
+            crate::infra::data::conversations::count_summaries(pool, conversation_id)
+                .await
+                .unwrap_or(0);
+        let last_summary_at =
+            crate::infra::data::conversations::latest_summary_created_at(pool, conversation_id)
+                .await
+                .ok()
+                .flatten();
 
         let (summarized_count, last_compressed_count) = self
             .get_context_status_for_conversation(conversation_id)

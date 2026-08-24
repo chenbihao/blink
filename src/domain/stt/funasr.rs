@@ -23,8 +23,15 @@
 //!
 //! 详见 [`crate::infra::platform::python`] 模块文档。
 
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::infra::local_engine::{
+    LaunchRequest, ManagedProcess, ManagedProcessError, ProcessStatus, ShutdownConfig,
+};
 
 /// 嵌入的 blink_stt_server.py 脚本（随 Rust 二进制发布）。
 const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/blink_stt_server.py");
@@ -218,7 +225,17 @@ pub async fn get_env_status_async(server_port: u16, server_model: String) -> Fun
 /// - `rtf_avg: 0.227: 100%|██████████|...` — RTF 平均值 + 进度条
 /// - `100%|██████████| 1/1 [00:00<00:00, 8.24it/s]` — tqdm 进度条
 /// - 纯 ANSI 转义序列（`\x1b[34m` 等）
-fn is_funasr_noise(line: &str) -> bool {
+pub(crate) fn is_funasr_noise(line: &str) -> bool {
+    // 委托给公共入口
+    is_funasr_noise_pub(line)
+}
+
+/// 公共入口：判断一行 funasr 日志是否为噪声（应过滤掉）。
+///
+/// 0.22.1：app 层从 ManagedProcess 日志流过滤时调用此函数。
+/// FunASR 的 tqdm/ANSI 噪声过滤属于 FunASR adapter/app 投影逻辑，
+/// 不应硬编码进通用 ManagedProcess。
+pub fn is_funasr_noise_pub(line: &str) -> bool {
     // tqdm 进度条行
     if line.contains("it/s]") {
         return true;
@@ -472,40 +489,17 @@ impl ServerStartParams {
     }
 }
 
-// ── server 启动 ───────────────────────────────────────────────────────────
+// ── server 启动（0.22.1 迁移到 ManagedProcess）───────────────────────────
 
-/// 启动 blink_stt_server 子进程（异步）。
+/// 构建 FunASR 的 LaunchRequest（由可信的 Rust 调用方构造）。
 ///
-/// 使用 Blink 自管理的 venv 中的 Python 启动 `blink_stt_server.py`。
-/// 如果环境未就绪（venv 不存在或 funasr 未安装），返回错误提示用户安装。
-///
-/// # ⚠️ 管道死锁防范
-///
-/// 子进程的 stdout/stderr 设为 `piped()`，但**必须持续读取**，否则
-/// OS 管道缓冲区（Windows ~4KB）写满后子进程会永久阻塞在 write 上。
-/// 本函数内部已 spawn 两个 tokio task 分别读取 stdout/stderr，转发到
-/// tracing 日志和返回的 channel。
-///
-/// 如果端口已被占用（服务已在运行），直接返回 Ok(None)。
-pub async fn start_server(
-    params: &ServerStartParams,
-) -> Result<
-    Option<(
-        tokio::process::Child,
-        tokio::sync::mpsc::UnboundedReceiver<String>,
-    )>,
-    String,
-> {
+/// 保留 FunASR 特有的启动参数、脚本路径、环境变量构造。
+/// 通用 Command spawn、双管道排空、child wait、stop、进程树回收
+/// 进入 infra/local_engine/ManagedProcess。
+pub fn build_launch_request(params: &ServerStartParams) -> Result<LaunchRequest, String> {
     let model = &params.model;
     let port = params.port;
     let device = &params.device;
-
-    // 如果服务已就绪，无需启动
-    if is_server_ready(port) {
-        tracing::info!(port, "blink_stt_server 已在运行");
-        SERVER_RUNNING.store(true, Ordering::SeqCst);
-        return Ok(None);
-    }
 
     // 检查 Python 环境是否就绪
     let python_path = crate::infra::platform::python::venv_python();
@@ -535,122 +529,127 @@ pub async fn start_server(
         model,
         port,
         device,
-        "启动 blink_stt_server 子进程",
+        "构建 blink_stt_server LaunchRequest",
     );
 
-    // 构建启动命令: python blink_stt_server.py --model ... --port ... --device ...
-    let mut cmd_display =
-        format!("python blink_stt_server.py --model {model} --port {port} --device {device}");
-    if let Some(ref hw_path) = params.hotwords_path {
-        cmd_display.push_str(&format!(" --hotwords {}", hw_path.display()));
-    }
-    if params.use_itn {
-        cmd_display.push_str(" --use-itn");
-    }
-    tracing::info!("blink_stt_server 启动命令: {cmd_display}");
-
-    let mut cmd = crate::infra::platform::no_window_tokio(tokio::process::Command::new(&python));
-    cmd.arg(&script_path)
-        .args(["--model", model])
-        .args(["--port", &port.to_string()])
-        .args(["--device", device]);
+    // 构建参数列表
+    let mut args: Vec<OsString> = Vec::new();
+    args.push(script_path.into());
+    args.push("--model".into());
+    args.push(model.clone().into());
+    args.push("--port".into());
+    args.push(port.to_string().into());
+    args.push("--device".into());
+    args.push(device.clone().into());
 
     if let Some(ref hw_path) = params.hotwords_path {
-        cmd.arg("--hotwords").arg(hw_path);
+        args.push("--hotwords".into());
+        args.push(hw_path.clone().into());
     }
     if params.use_itn {
-        cmd.arg("--use-itn");
+        args.push("--use-itn".into());
     }
 
+    // 受限环境变量
+    let mut env = HashMap::new();
     // Python 输出无缓冲 + UTF-8 模式（修复 Windows 控制台中文乱码）
-    cmd.env("PYTHONUNBUFFERED", "1");
-    cmd.env("PYTHONUTF8", "1");
-    cmd.env("PYTHONIOENCODING", "utf-8");
+    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+    env.insert("PYTHONUTF8".to_string(), "1".to_string());
+    env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
 
-    // 将 ModelScope 模型缓存重定向到 Blink 自管理目录，
-    // 避免模型文件游离在 ~/.cache/modelscope，清理时一键删除。
+    // 将 ModelScope 模型缓存重定向到 Blink 自管理目录
     let models_dir = python_dir().join("models");
     if let Err(e) = std::fs::create_dir_all(&models_dir) {
         tracing::warn!(%e, "创建 models 目录失败，ModelScope 将使用默认缓存路径");
     } else {
         let models_path = models_dir.display().to_string();
         tracing::info!(path = %models_path, "ModelScope 缓存目录");
-        cmd.env("MODELSCOPE_CACHE", &models_path);
+        env.insert("MODELSCOPE_CACHE".to_string(), models_path);
     }
 
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动 blink_stt_server 失败: {e}"))?;
+    Ok(LaunchRequest {
+        executable: python,
+        args,
+        current_dir: None,
+        env,
+        instance_id: crate::infra::local_engine::process::generate_instance_id_pub(),
+        label: "funasr".to_string(),
+        shutdown: ShutdownConfig::default(),
+    })
+}
 
-    // ── 提取管道句柄，spawn 异步读取 task ──
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+/// 启动 blink_stt_server 子进程（0.22.1 迁移到 ManagedProcess）。
+///
+/// 使用 Blink 自管理的 venv 中的 Python 启动 `blink_stt_server.py`。
+/// 如果环境未就绪（venv 不存在或 funasr 未安装），返回错误提示用户安装。
+///
+/// **0.22.1 变更**：通用 Command spawn、双管道排空、child wait、stop、
+/// 进程树回收不再在本函数中实现，而是委托给 `infra::local_engine::ManagedProcess`。
+/// 本函数只负责构造 `LaunchRequest` 和应用 FunASR 特有日志过滤。
+///
+/// 如果端口已被占用且 ManagedProcess 有活跃进程，返回 Ok(false)。
+/// 如果端口被占但 ManagedProcess 无活跃进程（未知占用者），返回错误。
+pub async fn start_server(
+    params: &ServerStartParams,
+    managed: &Arc<ManagedProcess>,
+) -> Result<bool, String> {
+    let port = params.port;
 
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // 检查 ManagedProcess 是否已有活跃进程
+    let state = managed.snapshot().await;
+    let is_our_process_running = matches!(
+        state.status,
+        ProcessStatus::Running { .. } | ProcessStatus::Starting
+    );
 
-    if let Some(stdout) = stdout {
-        let tx = log_tx.clone();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let s = String::from_utf8_lossy(&buf);
-                        for part in s.split('\r') {
-                            let trimmed = part.trim_end_matches(['\n', '\r']);
-                            if trimmed.is_empty() || is_funasr_noise(trimmed) {
-                                continue;
-                            }
-                            tracing::debug!("{}", trimmed);
-                            let _ = tx.send(trimmed.to_string());
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+    if is_our_process_running {
+        // 我们的进程在运行，检查端口是否就绪
+        if is_server_ready(port) {
+            tracing::info!(port, "blink_stt_server 已在运行");
+            SERVER_RUNNING.store(true, Ordering::SeqCst);
+            return Ok(false);
+        }
+        // 我们的进程在运行但端口未就绪——可能还在启动中
+        tracing::info!(port, "blink_stt_server 正在启动中");
+        return Ok(false);
     }
 
-    if let Some(stderr) = stderr {
-        let tx = log_tx.clone();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut reader = BufReader::new(stderr);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let s = String::from_utf8_lossy(&buf);
-                        for part in s.split('\r') {
-                            let trimmed = part.trim_end_matches(['\n', '\r']);
-                            if trimmed.is_empty() || is_funasr_noise(trimmed) {
-                                continue;
-                            }
-                            tracing::debug!("{}", trimmed);
-                            let _ = tx.send(trimmed.to_string());
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+    // 我们的进程未运行，但端口被占 → 未知进程
+    if is_server_ready(port) {
+        tracing::warn!(port, "端口被未知进程占用，不自动终止");
+        return Err(format!(
+            "端口 {port} 被未知进程占用，Blink 不会自动终止未知进程。请更换端口或手动关闭占用端口的程序。"
+        ));
     }
 
-    drop(log_tx);
+    // 构建 LaunchRequest（FunASR 特有参数/脚本/环境变量）
+    let req = build_launch_request(params)?;
+
+    tracing::info!(
+        "blink_stt_server 启动命令: python {} --model {} --port {} --device {}",
+        req.executable.display(),
+        params.model,
+        port,
+        params.device,
+    );
+
+    // 通过 ManagedProcess 启动（通用 spawn + Job Object + 双管道排空 + wait task）
+    managed.start(&req).await.map_err(|e| match e {
+        ManagedProcessError::AlreadyRunning { .. } => "blink_stt_server 已在运行".to_string(),
+        ManagedProcessError::SpawnFailed { message } => {
+            format!("启动 blink_stt_server 失败: {message}")
+        }
+        ManagedProcessError::JobObjectFailed { message } => {
+            format!("Windows Job Object 分配失败: {message}")
+        }
+        _ => format!("ManagedProcess 启动失败: {e}"),
+    })?;
 
     SERVER_RUNNING.store(true, Ordering::SeqCst);
 
-    tracing::info!("blink_stt_server 子进程已启动，等待模型加载...");
+    tracing::info!("blink_stt_server 子进程已启动（ManagedProcess），等待模型加载...");
 
-    Ok(Some((child, log_rx)))
+    Ok(true)
 }
 
 /// 标记 server 已停止（子进程退出时调用）。

@@ -8,8 +8,8 @@
 //! - 历史裁剪预算注入（`update_history_budget`）：先算预算再注入，时序在 rig load 之前
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::domain::ai::agent_provider::AgentProvider;
 use crate::domain::ai::memory::MemoryLoadResult;

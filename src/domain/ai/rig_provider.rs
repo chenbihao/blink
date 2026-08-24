@@ -57,7 +57,7 @@ use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, To
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::domain::ai::thinking::thinking_request_patch;
 use crate::domain::config::ai_config::{
-    CustomParam, ProviderKind, ThinkingStyle, DEFAULT_AI_HARD_TIMEOUT_MS,
+    CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind, ThinkingStyle,
 };
 use crate::infra::platform::secret::SecretString;
 

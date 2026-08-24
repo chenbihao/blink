@@ -341,7 +341,10 @@ fn lint_frontend() {
     let mut files = Vec::new();
     collect_css_files(&css_dir, &mut files);
 
-    println!("🔍 检查 CSS hex fallback（基线 {} 个文件 / 总量上限）...", VAR_HEX_FALLBACK_BASELINE.len());
+    println!(
+        "🔍 检查 CSS hex fallback（基线 {} 个文件 / 总量上限）...",
+        VAR_HEX_FALLBACK_BASELINE.len()
+    );
     let mut violations: Vec<String> = Vec::new();
     for file in &files {
         let rel = file
@@ -372,6 +375,9 @@ fn lint_frontend() {
         for v in &violations {
             eprintln!("❌ {v}");
         }
-        panic!("lint 失败：{} 个文件超出 hex fallback 基线", violations.len());
+        panic!(
+            "lint 失败：{} 个文件超出 hex fallback 基线",
+            violations.len()
+        );
     }
 }

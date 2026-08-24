@@ -2764,12 +2764,20 @@ mod tests {
             .await
             .unwrap();
         // 内部临时对话（摘要/合并 LLM 调用产生）——用常量构造，钉住前缀约定
-        create_conversation(&pool, &format!("{}c1", SUMMARY_CONV_PREFIX), Some("tmp-summary"))
-            .await
-            .unwrap();
-        create_conversation(&pool, &format!("{}c1", MERGE_CONV_PREFIX), Some("tmp-merge"))
-            .await
-            .unwrap();
+        create_conversation(
+            &pool,
+            &format!("{}c1", SUMMARY_CONV_PREFIX),
+            Some("tmp-summary"),
+        )
+        .await
+        .unwrap();
+        create_conversation(
+            &pool,
+            &format!("{}c1", MERGE_CONV_PREFIX),
+            Some("tmp-merge"),
+        )
+        .await
+        .unwrap();
 
         let convs = list_conversations(&pool).await.unwrap();
         // 只应看到正常对话，内部对话被过滤

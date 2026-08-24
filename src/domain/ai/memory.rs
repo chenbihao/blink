@@ -39,8 +39,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rig_core::completion::message::{AssistantContent, Reasoning, Text, UserContent};
 use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, Reasoning, Text, UserContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -63,7 +63,6 @@ const TITLE_MAX_CHARS: usize = 50;
 /// 0.21.21: 常量收敛到 `token_budget::FALLBACK_CONTEXT_LIMIT`，此处重导出保持
 /// 外部调用路径 `crate::domain::ai::memory::DEFAULT_CONTEXT_LIMIT` 兼容。
 pub use crate::domain::ai::token_budget::FALLBACK_CONTEXT_LIMIT as DEFAULT_CONTEXT_LIMIT;
-
 
 // 0.21.17: token 估算统一收敛到 `token_budget` 模块，此处仅重导出。
 pub use crate::domain::ai::token_budget::estimate_text_tokens as estimate_tokens;

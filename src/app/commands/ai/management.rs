@@ -272,7 +272,7 @@ pub async fn fetch_ai_models(
 #[tauri::command]
 pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     use crate::domain::ai::prompt::{
-        build_prompt_infos, chat_system_prompt_with_skills, ToolSourceSummary,
+        ToolSourceSummary, build_prompt_infos, chat_system_prompt_with_skills,
     };
     use crate::domain::ai::token_budget::{estimate_text_tokens, estimate_tools_tokens};
     use crate::domain::capability::CapabilityRegistry;

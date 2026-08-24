@@ -132,6 +132,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Memory",
     "Win32_System_Shutdown",
     "Win32_System_LibraryLoader",
+    "Win32_System_JobObjects",
     "Win32_System_RemoteDesktop",
     "Win32_Globalization",
     "Win32_Graphics_Dwm",

@@ -403,11 +403,7 @@ mod tests {
 
         for (idx, item) in manifest.items.iter().enumerate() {
             let img_path = corpus_dir.join(&item.image);
-            assert!(
-                img_path.exists(),
-                "图片不存在: {}",
-                img_path.display()
-            );
+            assert!(img_path.exists(), "图片不存在: {}", img_path.display());
 
             let png_data = std::fs::read(&img_path).unwrap();
             let result = backend.recognize_raw(&png_data).await.expect("OCR 失败");
@@ -452,11 +448,7 @@ mod tests {
             let dist = char_edit_distance(ocr_text.trim(), item.expected_text.trim());
             let ref_len = item.expected_text.trim().chars().count();
             let cer = if ref_len == 0 {
-                if ocr_text.trim().is_empty() {
-                    0.0
-                } else {
-                    1.0
-                }
+                if ocr_text.trim().is_empty() { 0.0 } else { 1.0 }
             } else {
                 dist as f64 / ref_len as f64
             };
