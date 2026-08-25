@@ -817,24 +817,35 @@ fn main() {
 
             // 0.22.3: 构造进程级 LocalEngineService（全进程唯一实例）
             //
-            // - 编译期注册 FunASR adapter
+            // - 编译期注册 FunASR + PaddleOCR adapter
             // - TauriEventPort 负责通用事件投影 + 旧 FunASR 兼容投影
             // - service_epoch 在构造时生成，Blink 实例生命周期内不变
             // - 禁止创建多个 service 实例
             // - 0.22.3: 安装走 RuntimeProvider transaction（ProviderDescriptor + PythonVenvProvider）
+            // - 0.22.4: 同时注册 paddleocr adapter + OcrCoordinator（OcrBackendRouter）
             let funasr_adapter = crate::app::local_engine::funasr::make_funasr_adapter();
+            let paddleocr_adapter = crate::app::local_engine::paddleocr::make_paddleocr_adapter();
             let engine_registry = std::sync::Arc::new(
-                crate::app::local_engine::EngineRegistry::new_with_adapters(vec![funasr_adapter]),
+                crate::app::local_engine::EngineRegistry::new_with_adapters(vec![
+                    funasr_adapter,
+                    paddleocr_adapter,
+                ]),
             );
             let event_port = crate::app::local_engine::make_event_port(app.handle().clone());
 
             // 构造 provider descriptors map + python provider（安装事务用）
             let funasr_descriptor =
                 crate::app::local_engine::funasr::make_funasr_provider_descriptor();
+            let paddleocr_descriptor =
+                crate::app::local_engine::paddleocr::make_paddleocr_provider_descriptor();
             let python_provider =
-                crate::app::local_engine::funasr::make_funasr_python_provider();
+                crate::app::local_engine::paddleocr::make_paddleocr_python_provider();
             let mut provider_descriptors = std::collections::HashMap::new();
             provider_descriptors.insert(funasr_descriptor.engine_id.clone(), funasr_descriptor);
+            provider_descriptors.insert(
+                paddleocr_descriptor.engine_id.clone(),
+                paddleocr_descriptor,
+            );
 
             let local_engine_service =
                 crate::app::local_engine::LocalEngineService::new_with_providers(
@@ -846,8 +857,38 @@ fn main() {
             app.manage(local_engine_service.clone());
             tracing::info!(
                 epoch = local_engine_service.epoch().0,
-                "LocalEngineService 已构造（funasr adapter 已注册）"
+                "LocalEngineService 已构造（funasr + paddleocr adapter 已注册）"
             );
+
+            // 0.22.4: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
+            //
+            // - OcrCoordinator 持有 LocalEngineService 受限依赖
+            // - 路由 windows/paddleocr/auto 三种模式
+            // - in-flight tracker + singleflight + idle TTL
+            // - ocr_image Capability 和截图 OCR 通过 router() 获取实例
+            // Task 18: 保存 Arc 用于 app 退出时 shutdown
+            let ocr_coordinator = crate::app::local_engine::ocr_coordinator::OcrCoordinator::new(
+                local_engine_service.clone(),
+            );
+            // Task 18: 注册为 managed state，供 shutdown 时使用
+            app.manage(ocr_coordinator.clone());
+            crate::domain::ocr::router::install_router(ocr_coordinator);
+            tracing::info!("OcrCoordinator 已安装为 OcrBackendRouter");
+
+            // 0.22.4 / Task 15: 初始化 OcrConfig 缓存——从 SQLite 读取，而非 default
+            // 使用 load_and_init_cache helper——与测试路径调用相同逻辑
+            {
+                let ocr_config = tauri::async_runtime::block_on(
+                    crate::domain::config::ocr_config::load_and_init_cache(&pools.config),
+                );
+                tracing::info!(
+                    backend = ?ocr_config.backend,
+                    model = ?ocr_config.paddle_model,
+                    lifecycle = ?ocr_config.lifecycle,
+                    compute_preference = ?ocr_config.compute_preference,
+                    "OcrConfig 已从 SQLite 加载"
+                );
+            }
 
             // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
             //
@@ -1084,8 +1125,17 @@ app::commands::screenshot_copy_rgba,
             app::commands::screenshot_cursor_position,
             app::commands::screenshot_forward_wheel,
             app::commands::list_system_fonts,
-            app::commands::ocr_image,
-            app::commands::ocr_diagnose,
+app::commands::ocr_image,
+app::commands::cancel_ocr_request, // 0.22.4
+app::commands::ocr_diagnose,
+            app::commands::get_ocr_config, // 0.22.4
+            app::commands::set_ocr_config, // 0.22.4
+            // 0.22.4: PaddleOCR 管理命令
+            app::commands::install_paddleocr,
+            app::commands::repair_paddleocr,
+            app::commands::start_paddleocr,
+            app::commands::stop_paddleocr,
+            app::commands::get_paddleocr_status,
             app::commands::translate_text,
             app::commands::translate_lines,
             app::commands::analyze_palette,
@@ -1304,6 +1354,17 @@ app::commands::ensure_mcp_connected,
                     .try_state::<std::sync::Arc<crate::app::local_engine::LocalEngineService>>()
                 {
                     svc.shutdown_all_blocking();
+                }
+                // Task 18: OcrCoordinator shutdown——取消 idle 定时器并停止 PaddleOCR
+                if let Some(coordinator) = _app
+                    .try_state::<std::sync::Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
+                {
+                    tauri::async_runtime::block_on(async {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            coordinator.shutdown(),
+                        ).await;
+                    });
                 }
                 // 0.13.0: 停止所有 MCP server 子进程
                 if let Some(mcp) = _app.try_state::<std::sync::Arc<domain::mcp::McpClientManager>>() {

@@ -12,9 +12,40 @@ import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
 import {cssPointToScreen, cssRectToBitmap, uiScaleAtCss} from './ss-selection-geometry.js';
 import {enterReadingMode} from './ss-reading.js';
 import * as annot from './annotation-engine.js';
-import {copyToClipboard, ocrImage, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
+import {copyToClipboard, ocrImage, cancelOcrRequest, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
 import {normalizeError} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
+
+// ════════════════════════════════════════════════════════════
+//  OCR Request Cancellation (Task 6)
+// ════════════════════════════════════════════════════════════
+
+/**
+ * 取消当前 active OCR 请求（如果有）。
+ *
+ * 在以下节点调用：
+ * - ESC
+ * - 重选
+ * - exitAnnotationMode
+ * - reset session
+ * - 新截图 session
+ * - overlay hide
+ * - prewarm 被替换
+ *
+ * 旧请求的 finally 只能清理自己的 loading/ocrBusy，
+ * 不得修改新 session 的 DOM/overlay/translation/pin。
+ */
+export function cancelActiveOcr() {
+    if (ss.activeOcrHandle) {
+        const handle = ss.activeOcrHandle;
+        ss.activeOcrHandle = null;
+        handle.cancel().catch(() => {});
+    }
+    // 同时取消预热（如果有）
+    if (ss.ocrPrewarm) {
+        ss.ocrPrewarm = null;
+    }
+}
 
 // ════════════════════════════════════════════════════════════
 //  UI Helpers
@@ -348,7 +379,17 @@ export async function doTranslateAndPin() {
 
         if (!ocrResult) {
             // Fresh OCR：复用已合成的原图 PNG
-            ocrResult = await ocrImage(rawPng);
+            // Task 6: 使用 handle 接口，支持取消
+            const handle = ocrImage(rawPng, ss.editorSession.epoch, ss.selectionRevision);
+            ss.activeOcrHandle = handle;
+            try {
+                const {result} = await handle.promise;
+                ocrResult = result;
+            } finally {
+                if (ss.activeOcrHandle === handle) {
+                    ss.activeOcrHandle = null;
+                }
+            }
         }
 
         if (!ocrResult || !ocrResult.lines || ocrResult.lines.length === 0) {
@@ -485,8 +526,13 @@ function _runOcrFresh(opts = {}) {
     showSelLoading('识别中…');
     if (typeof ss._compositeSelection !== 'function') return;
     ss._compositeSelection((pngBytes) => {
-        ocrImage(pngBytes)
-            .then((result) => {
+        // Task 6: 同步产生 requestId，立即暴露 cancel()
+        const handle = ocrImage(pngBytes, ss.editorSession.epoch, revision);
+        ss.activeOcrHandle = handle;
+
+        handle.promise
+            .then(({result}) => {
+                // 旧请求的 finally 会清理 activeOcrHandle
                 if (revision !== ss.selectionRevision) {
                     console.debug('[screenshot] 丢弃旧选区 OCR 结果', {revision, current: ss.selectionRevision});
                     return;
@@ -518,6 +564,10 @@ function _runOcrFresh(opts = {}) {
                 console.error(`[screenshot] ocr 失败 [${err.code}] ${err.message}`);
             })
             .finally(() => {
+                // 只有当当前 handle 仍是自己时才清理
+                if (ss.activeOcrHandle === handle) {
+                    ss.activeOcrHandle = null;
+                }
                 if (revision === ss.selectionRevision) {
                     ss.ocrBusy = false;
                     updateOutputButtonsDisabled();

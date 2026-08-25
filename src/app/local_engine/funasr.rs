@@ -384,41 +384,49 @@ pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
                     name: "torch".to_string(),
                     version: "2.5.0".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "torchaudio".to_string(),
                     version: "2.5.0".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "torch_complex".to_string(),
                     version: "0.4.3".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "numba".to_string(),
                     version: ">=0.59".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "funasr".to_string(),
                     version: "1.3.0".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "fastapi".to_string(),
                     version: "0.115.6".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "uvicorn".to_string(),
                     version: "0.34.0".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "python-multipart".to_string(),
                     version: "0.0.20".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
             ],
             uv_version: "0.6.10".to_string(),
@@ -706,6 +714,7 @@ fn map_funasr_health(raw_health: &serde_json::Value) -> HealthMapping {
         backend: backend_obs,
         model_id,
         model_revision,
+        model_content_fingerprint: None,
     }
 }
 

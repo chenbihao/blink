@@ -220,6 +220,7 @@ mod tests {
                     backend: None,
                     model_id: None,
                     model_revision: None,
+                    model_content_fingerprint: None,
                 }
             }
             fn self_test(&self) -> AdapterSelfTest {

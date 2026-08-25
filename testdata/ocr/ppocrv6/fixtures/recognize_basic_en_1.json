@@ -1,0 +1,33 @@
+{
+  "request_id": "fixture-en-1",
+  "engine": "paddleocr",
+  "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
+  "model_revision": "ppocrv6-tiny",
+  "image_width": 400,
+  "image_height": 80,
+  "lines": [
+    {
+      "text": "Hello World",
+      "rect": {"x": 10, "y": 15, "w": 180, "h": 35},
+      "word_indices": [0, 1],
+      "confidence": 0.97
+    }
+  ],
+  "words": [
+    {
+      "text": "Hello",
+      "rect": {"x": 10, "y": 15, "w": 80, "h": 35},
+      "line_index": 0,
+      "confidence": 0.98
+    },
+    {
+      "text": "World",
+      "rect": {"x": 100, "y": 15, "w": 90, "h": 35},
+      "line_index": 0,
+      "confidence": 0.96
+    }
+  ],
+  "elapsed_ms": 0,
+  "native_word_boxes": 2,
+  "fallback_word_boxes": 0
+}

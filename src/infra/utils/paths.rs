@@ -34,6 +34,13 @@ pub fn python_dir() -> PathBuf {
     app_data_dir().join("python")
 }
 
+/// 模型缓存根目录：`%APPDATA%\blink\models`
+///
+/// 引擎专属模型缓存使用 `runtime::engine_model_cache_dir(EngineId)` 作为唯一真源。
+pub fn models_dir() -> PathBuf {
+    app_data_dir().join("models")
+}
+
 /// 数据库文件路径：`%APPDATA%\blink\{db_name}`
 pub fn db_path(db_name: &str) -> PathBuf {
     app_data_dir().join(db_name)

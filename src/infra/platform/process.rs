@@ -416,10 +416,12 @@ mod tests {
 
     #[test]
     fn test_probe_port_occupied_unused_port() {
-        // 使用动态端口（0 表示由 OS 分配）来测试未占用端口
-        // 59999 在大多数机器上未被占用，但不是绝对保证
-        // 改为测试一个明确未监听的端口范围
-        let port = 59999;
+        // 使用 OS 分配的临时端口（bind :0），避免并行测试端口冲突。
+        // 绑定后立即 drop，probe_port_occupied 对该端口应返回 false。
+        // 注意：drop 后存在极短竞争窗口，但在大多数 CI/本地环境下可接受。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
         let result = probe_port_occupied(port);
         // 如果恰好被占用，测试不失败——这是环境依赖的
         if !result {

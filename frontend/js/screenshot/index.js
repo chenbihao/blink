@@ -78,6 +78,7 @@ import {
     showTransientHint,
     updateOutputButtonsDisabled,
     updateOverlayButtonsActive,
+    cancelActiveOcr,
 } from "./ss-ocr.js";
 import {
     cleanupCanvasVisuals,
@@ -318,6 +319,8 @@ window.__blinkOpenImageEditor = function () {
 function resetState() {
     const _t0 = performance.now();
     console.debug('[screenshot] resetState start');
+    // Task 6: 取消在途 OCR 请求
+    cancelActiveOcr();
     resetScrollCaptureSession();
     cancelSelectionNudge();
     const {canvas, ctx, annotCanvas, annotCtx, sizeHint, toolbar, errorHint} = ss;
@@ -961,13 +964,19 @@ function triggerOcrPrewarm(pw, ph) {
         console.debug('[screenshot] 预热 OCR 跳过(选区过小)', {pw, ph});
         return;
     }
-    if (ss.ocrPrewarm) return;
+    // Task 6: prewarm 被替换时取消旧的
+    if (ss.ocrPrewarm) {
+        cancelActiveOcr();
+    }
     const revision = ss.selectionRevision;
     const startTs = performance.now();
     ss.ocrPrewarm = new Promise((resolve) => {
         compositeSelection((pngBytes) => {
-            ocrImage(pngBytes)
-                .then((result) => {
+            // Task 6: 使用 handle 接口，支持取消
+            const handle = ocrImage(pngBytes, ss.editorSession.epoch, revision);
+            ss.activeOcrHandle = handle;
+            handle.promise
+                .then(({result}) => {
                     if (revision !== ss.selectionRevision) {
                         console.debug('[screenshot] 丢弃旧选区 OCR 预热结果', {
                             revision,
@@ -984,6 +993,11 @@ function triggerOcrPrewarm(pw, ph) {
                     const err = normalizeError(rawErr);
                     console.warn(`[screenshot] OCR 预热失败 [${err.code}] (用户点识别时会重试)`);
                     resolve(null);
+                })
+                .finally(() => {
+                    if (ss.activeOcrHandle === handle) {
+                        ss.activeOcrHandle = null;
+                    }
                 });
         });
     });
@@ -992,6 +1006,8 @@ function triggerOcrPrewarm(pw, ph) {
 /** 退出标注模式（清除选区，回到可拖选状态） */
 function exitAnnotationMode() {
     console.debug('[screenshot] exitAnnotationMode');
+    // Task 6: 取消在途 OCR 请求
+    cancelActiveOcr();
     cancelSelectionNudge();
     if (ss._annotRaf) {
         cancelAnimationFrame(ss._annotRaf);

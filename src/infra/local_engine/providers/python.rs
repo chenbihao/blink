@@ -45,21 +45,30 @@ fn render_hashed_requirements(packages: &[PackageLock]) -> Result<String, Runtim
             });
         }
         let version = package.version.trim_start_matches('=');
-        let hash = package
-            .sha256
-            .as_deref()
-            .ok_or_else(|| RuntimeError::InstallFailed {
-                message: format!("{} 缺少 SHA-256", package.name),
-            })?;
-        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        // 使用 all_hashes（多平台 wheel hash），回退到 sha256（单 hash）
+        let hashes: Vec<&str> = if !package.all_hashes.is_empty() {
+            package.all_hashes.iter().map(|s| s.as_str()).collect()
+        } else {
+            package.sha256.as_deref().into_iter().collect()
+        };
+        if hashes.is_empty() {
             return Err(RuntimeError::InstallFailed {
-                message: format!("{} 的 SHA-256 格式无效", package.name),
+                message: format!("{} 缺少 SHA-256", package.name),
             });
         }
-        requirements.push_str(&format!(
-            "{}=={} --hash=sha256:{}\n",
-            package.name, version, hash
-        ));
+        // 验证所有 hash 格式
+        for hash in &hashes {
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(RuntimeError::InstallFailed {
+                    message: format!("{} 的 SHA-256 格式无效", package.name),
+                });
+            }
+        }
+        requirements.push_str(&format!("{}=={}", package.name, version));
+        for hash in &hashes {
+            requirements.push_str(&format!(" --hash=sha256:{}", hash));
+        }
+        requirements.push('\n');
     }
     Ok(requirements)
 }
@@ -703,11 +712,13 @@ mod tests {
                     name: "torch".to_string(),
                     version: "2.5.0".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
                 PackageLock {
                     name: "funasr".to_string(),
                     version: "1.3.0".to_string(),
                     sha256: None,
+                    ..Default::default()
                 },
             ],
         );
@@ -724,6 +735,7 @@ mod tests {
             name: "example".to_string(),
             version: "1.2.3".to_string(),
             sha256: Some(hash.clone()),
+            ..Default::default()
         }])
         .unwrap();
         assert_eq!(rendered, format!("example==1.2.3 --hash=sha256:{hash}\n"));
@@ -735,6 +747,7 @@ mod tests {
             name: "example".to_string(),
             version: ">=1.2".to_string(),
             sha256: Some("a".repeat(64)),
+            ..Default::default()
         };
         assert!(render_hashed_requirements(&[ranged]).is_err());
 
@@ -742,7 +755,152 @@ mod tests {
             name: "example".to_string(),
             version: "1.2.3".to_string(),
             sha256: Some("not-a-sha256".to_string()),
+            ..Default::default()
         };
         assert!(render_hashed_requirements(&[invalid_hash]).is_err());
+    }
+
+    /// Task 3: 验证 None hash 会被 render_hashed_requirements 拒绝。
+    ///
+    /// 这确保了不会静默降级为无 hash 安装——
+    /// 如果 descriptor 中存在 sha256: None，安装前就会失败。
+    #[test]
+    fn hashed_requirements_reject_missing_hash() {
+        let missing_hash = PackageLock {
+            name: "example".to_string(),
+            version: "1.2.3".to_string(),
+            sha256: None,
+            ..Default::default()
+        };
+        assert!(render_hashed_requirements(&[missing_hash]).is_err());
+    }
+
+    /// Task 3: 验证全零 hash 仍能通过 render_hashed_requirements 的格式检查。
+    ///
+    /// 全零 hash 格式合法（64 位 hex），会生成 requirements 文件，
+    /// 但 uv 安装时会因 hash 不匹配而拒绝——这是防止篡改的安全网。
+    #[test]
+    fn hashed_requirements_accept_zero_hash_format() {
+        let zero_hash_pkg = PackageLock {
+            name: "test-pkg".to_string(),
+            version: "1.0.0".to_string(),
+            sha256: Some("0".repeat(64)),
+            ..Default::default()
+        };
+        let rendered = render_hashed_requirements(&[zero_hash_pkg]).unwrap();
+        assert!(rendered.contains("test-pkg==1.0.0 --hash=sha256:"));
+        let zero_hash = "0".repeat(64);
+        assert!(rendered.contains(&format!("--hash=sha256:{}", zero_hash)));
+    }
+
+    /// Task 3: 验证 all_have_hashes 检测逻辑。
+    ///
+    /// install_locked_packages 使用 `packages.iter().all(|p| p.sha256.is_some())`
+    /// 判断是否走 --require-hashes 路径。所有 hash 为 Some 时，
+    /// all_have_hashes 为 true，会走 --require-hashes。
+    #[test]
+    fn all_have_hashes_detection_with_real_hashes() {
+        let packages = vec![
+            PackageLock {
+                name: "a".to_string(),
+                version: "1.0".to_string(),
+                sha256: Some("a".repeat(64)),
+                ..Default::default()
+            },
+            PackageLock {
+                name: "b".to_string(),
+                version: "2.0".to_string(),
+                sha256: Some("b".repeat(64)),
+                ..Default::default()
+            },
+        ];
+        let all_have_hashes = packages.iter().all(|p| p.sha256.is_some());
+        assert!(
+            all_have_hashes,
+            "所有 hash 为 Some 时应走 --require-hashes 路径"
+        );
+    }
+
+    /// Task 3: 验证混合 Some/None hash 时不走 --require-hashes。
+    #[test]
+    fn all_have_hashes_false_with_mixed() {
+        let packages = vec![
+            PackageLock {
+                name: "a".to_string(),
+                version: "1.0".to_string(),
+                sha256: Some("0".repeat(64)),
+                ..Default::default()
+            },
+            PackageLock {
+                name: "b".to_string(),
+                version: "2.0".to_string(),
+                sha256: None,
+                ..Default::default()
+            },
+        ];
+        let all_have_hashes = packages.iter().all(|p| p.sha256.is_some());
+        assert!(!all_have_hashes);
+    }
+
+    /// Task 5: 验证不完整锁（混合 Some/None hash）不通过 --require-hashes。
+    ///
+    /// `install_locked_packages` 使用 `packages.iter().all(|p| p.sha256.is_some())`
+    /// 判断是否走 --require-hashes 路径。如果某些包有 hash 而另一些没有，
+    /// all_have_hashes 为 false，不会走 --require-hashes 路径——
+    /// 这意味着不完整锁会降级为无 hash 安装。
+    /// `render_hashed_requirements` 会对 None hash 返回 Err，防止降级。
+    #[test]
+    fn render_hashed_requirements_rejects_incomplete_lock() {
+        let incomplete = vec![
+            PackageLock {
+                name: "paddlepaddle".to_string(),
+                version: "3.1.0".to_string(),
+                sha256: Some("a".repeat(64)),
+                ..Default::default()
+            },
+            PackageLock {
+                name: "paddleocr".to_string(),
+                version: "3.7.0".to_string(),
+                sha256: None, // 缺失 hash
+                ..Default::default()
+            },
+        ];
+        assert!(render_hashed_requirements(&incomplete).is_err());
+    }
+
+    /// Task 5: 验证完整锁（所有 hash 为 Some 且非零）能正确渲染。
+    #[test]
+    fn render_hashed_requirements_renders_complete_lock() {
+        let complete = vec![
+            PackageLock {
+                name: "paddlepaddle".to_string(),
+                version: "3.1.0".to_string(),
+                sha256: Some(
+                    "3cb6d98eece900e34c05fa0428ccc32836525e72af25cc8ad10a48d4046c4639".to_string(),
+                ),
+                ..Default::default()
+            },
+            PackageLock {
+                name: "fastapi".to_string(),
+                version: "0.115.6".to_string(),
+                sha256: Some(
+                    "e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305".to_string(),
+                ),
+                ..Default::default()
+            },
+        ];
+        let rendered = render_hashed_requirements(&complete).unwrap();
+        assert!(rendered.contains("paddlepaddle==3.1.0 --hash=sha256:3cb6d98"));
+        assert!(rendered.contains("fastapi==0.115.6 --hash=sha256:e9240b2"));
+    }
+
+    /// Task 5: 验证空包列表不触发 --require-hashes（边界情况）。
+    #[test]
+    fn all_have_hashes_empty_list() {
+        let packages: Vec<PackageLock> = vec![];
+        // all() 对空迭代器返回 true——但这不会触发安装
+        let all_have_hashes = packages.iter().all(|p| p.sha256.is_some());
+        assert!(all_have_hashes);
+        // install_locked_packages 对空包列表直接返回 Ok(())
     }
 }

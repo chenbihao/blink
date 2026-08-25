@@ -512,7 +512,8 @@ mod tests {
 
     #[test]
     fn allocate_selects_preferred_port_when_free() {
-        // 使用一个极大概率空闲的端口
+        // 使用 Mutex 串行化端口分配测试，防止并行 TOCTOU 竞争
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         let port = find_free_port();
         let allocator = EndpointAllocator::with_defaults(port);
         let endpoint = allocator.allocate().expect("应成功分配");
@@ -523,6 +524,7 @@ mod tests {
 
     #[test]
     fn allocate_switches_to_candidate_range_when_preferred_occupied() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         // 占用 preferred port
         let preferred = find_free_port();
         let _guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, preferred)).unwrap();
@@ -547,6 +549,7 @@ mod tests {
 
     #[test]
     fn allocate_returns_error_when_no_range_and_preferred_occupied() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         let preferred = find_free_port();
         let _guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, preferred)).unwrap();
 
@@ -563,6 +566,7 @@ mod tests {
 
     #[test]
     fn allocate_returns_error_when_all_candidates_occupied() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         // 占用一段连续端口
         let start = find_free_port();
         let count = 5u16;
@@ -596,6 +600,7 @@ mod tests {
 
     #[test]
     fn allocate_respects_max_retries() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         // 占用 preferred + 足够多的候选端口
         let preferred = find_free_port();
         let _g1 = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, preferred)).unwrap();
@@ -644,6 +649,7 @@ mod tests {
 
     #[test]
     fn unknown_occupant_does_not_kill() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         // 占用一个端口（模拟未知进程占用）
         let port = find_free_port();
         let _guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
@@ -680,6 +686,7 @@ mod tests {
 
     #[test]
     fn allocated_endpoints_are_all_loopback() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
         let port = find_free_port();
         let allocator = EndpointAllocator::with_defaults(port);
         let endpoint = allocator.allocate().unwrap();
@@ -935,7 +942,18 @@ mod tests {
 
     // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
+    /// 串行化端口分配测试的全局 Mutex。
+    ///
+    /// `find_free_port()` 存在 TOCTOU 竞争窗口：drop listener 后端口可被其他并行测试
+    /// 占用。使用 Mutex 串行化整个「find_free_port → bind → allocate」流程，
+    /// 消除并行测试间的端口冲突。**不要求 `--test-threads=1`**——
+    /// 只串行化使用 `find_free_port` 的测试，其他测试仍并行执行。
+    static PORT_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 查找一个当前空闲的端口。
+    ///
+    /// **必须在 `PORT_TEST_GUARD` 锁内调用**——drop listener 后端口变为可用，
+    /// 如果不持锁，另一个并行测试可能在此窗口内占用该端口。
     fn find_free_port() -> u16 {
         // 绑定 127.0.0.1:0 让 OS 分配一个空闲端口
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

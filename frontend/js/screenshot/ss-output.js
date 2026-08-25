@@ -21,7 +21,7 @@ import {
     screenshotSave,
 } from '../shared/api.js';
 import {IMAGE_SOURCE} from './image-editor-session.js';
-import {hideSelLoading, showTransientHint} from './ss-ocr.js';
+import {cancelActiveOcr, hideSelLoading, showTransientHint} from './ss-ocr.js';
 
 /**
  * 清理画布视觉状态——在输出完成（copy/pin/save/cancel）后、窗口隐藏前调用。
@@ -461,6 +461,8 @@ export function doCancel() {
         console.warn('[screenshot] doCancel: cancelInProgress still true, ignoring');
         return;
     }
+    // Task 6: 取消在途 OCR 请求
+    cancelActiveOcr();
     ss.cancelInProgress = true;
     setTimeout(() => {
         ss.cancelInProgress = false;

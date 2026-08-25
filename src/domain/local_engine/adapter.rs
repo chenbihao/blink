@@ -66,6 +66,11 @@ pub struct HealthMapping {
     pub model_id: Option<String>,
     /// 模型 revision（可选，health 回报的实际模型 revision）。
     pub model_revision: Option<String>,
+    /// 模型内容指纹（可选，health 回报的实际模型文件内容指纹）。
+    ///
+    /// 与 `model_revision` 分离：revision 是逻辑版本标识，
+    /// fingerprint 是实际缓存文件的内容哈希，用于检测模型文件损坏/篡改。
+    pub model_content_fingerprint: Option<String>,
 }
 
 // ── AdapterSelfTest ──────────────────────────────────────────────────────────
@@ -368,6 +373,7 @@ mod tests {
                     .get("model_revision")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                model_content_fingerprint: None,
             }
         }
 

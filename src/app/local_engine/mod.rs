@@ -38,6 +38,8 @@
 
 pub mod event_port;
 pub mod funasr;
+pub mod ocr_coordinator; // 0.22.4：OCR Coordinator（路由 + 生命周期 + 并发）
+pub mod paddleocr; // 0.22.4：PaddleOCR adapter
 pub mod registry;
 pub mod service;
 

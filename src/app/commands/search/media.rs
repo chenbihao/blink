@@ -100,6 +100,14 @@ fn header_opt_string(headers: &tauri::http::HeaderMap, key: &str) -> Option<Stri
         .map(|s| s.to_string())
 }
 
+/// 0.22.4 raw IPC 辅助：从 headers 提取 Option<u64>。
+fn header_opt_u64(headers: &tauri::http::HeaderMap, key: &str) -> Option<u64> {
+    headers
+        .get(key)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+}
+
 /// 0.11.7-f：接收前端合成后的 PNG（裁剪区 + 标注），写入剪贴板，结束会话。
 ///
 /// **0.19.14 raw IPC**：前端用 `invoke("screenshot_copy", uint8array)` 传 raw bytes，
@@ -886,6 +894,30 @@ fn project_ocr_command_result(
     }
 }
 
+/// Task 10: RAII cleanup guard for ImageStash refs.
+///
+/// `ocr_image` 创建 stash ref 后，无论成功/失败/取消，都需显式删除 ref
+/// 避免占用 stash 项数上限（16 项）。Drop 时调用 cleanup closure。
+struct ImageStashCleanupGuard<F: FnOnce()> {
+    cleanup: Option<F>,
+}
+
+impl<F: FnOnce()> ImageStashCleanupGuard<F> {
+    fn new(cleanup: F) -> Self {
+        Self {
+            cleanup: Some(cleanup),
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for ImageStashCleanupGuard<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn ocr_image(
     app: tauri::AppHandle,
@@ -903,14 +935,62 @@ pub async fn ocr_image(
         return Err(CommandError::new("not_found", "OCR 能力未注册", false));
     }
 
-    // 构造 Capability invoke 参数 —— png 为 JSON 整数数组
-    let arguments = serde_json::json!({ "png": png_data });
+    // Task 10: 消除 PNG JSON 数字数组和多份图片复制
+    // 旧方式：serde_json::json!({ "png": png_data }) → Vec<u8> 被序列化为 JSON 数字数组
+    // 新方式：存入 ImageStash（以 Bytes 零拷贝），传 image_ref 给 Capability
+    //
+    // 铁则：
+    // - png_data 只在此处出现一次，不 .clone()
+    // - 无 stash 环境（CLI/MCP）也不回退 JSON 数组——直接返回错误
+    // - stash.put 失败（超过 32MiB）也不回退 JSON 数组——直接返回错误
+    // - 请求结束后显式删除 stash ref
+
+    // 0.22.4：从 headers 提取截图 session 信息（可选）
+    let screenshot_session = header_opt_u64(request.headers(), "X-Screenshot-Session");
+    let screenshot_revision = header_opt_u64(request.headers(), "X-Screenshot-Revision");
+    // 0.22.4：从 headers 提取 request_id（前端生成，用于 cancel tracker）
+    let request_id_header = header_opt_string(request.headers(), "X-Request-Id");
 
     // 构造 InvokeContext（确定性调用，无超时）
     let env_arc = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
+
+    // Task 10: 通过 ImageStash 传 image_ref，避免 PNG 字节被 JSON 数字数组序列化
+    // Bytes::from(Vec) 消费 Vec 不复制；stash.put 接收 Bytes，不额外复制
+    let png_bytes = bytes::Bytes::from(png_data);
+    let image_ref = {
+        use crate::domain::event::CapabilityEnv;
+        let stash = env_arc.image_stash().ok_or_else(|| {
+            CommandError::new("internal_error", "ImageStash 不可用（运行时未启用）", false)
+        })?;
+        stash.put(png_bytes, "image/png".into()).ok_or_else(|| {
+            CommandError::new("invalid_args", "图片过大（超过 32MiB 上限）或为空", false)
+        })?
+    };
+
+    // Task 10: RAII cleanup guard——请求结束后显式删除 stash ref
+    // 无论成功/失败/取消，都删除临时 stash ref 避免占用上限
+    let stash_for_cleanup = env_arc.clone();
+    let image_ref_for_cleanup = image_ref.clone();
+    let _cleanup_guard = ImageStashCleanupGuard::new(move || {
+        use crate::domain::event::CapabilityEnv;
+        if let Some(stash) = stash_for_cleanup.image_stash() {
+            stash.remove(&image_ref_for_cleanup);
+        }
+    });
+
+    let mut arguments = serde_json::json!({});
+    arguments["image_ref"] = serde_json::Value::from(image_ref);
+    if let (Some(epoch), Some(rev)) = (screenshot_session, screenshot_revision) {
+        arguments["screenshot_session"] = serde_json::Value::from(epoch);
+        arguments["screenshot_revision"] = serde_json::Value::from(rev);
+    }
+    if let Some(ref rid) = request_id_header {
+        arguments["request_id"] = serde_json::Value::from(rid.clone());
+    }
+
     let ctx = crate::domain::capability::InvokeContext {
         env: env_arc.as_ref(),
         origin: crate::domain::capability::InvocationOrigin::LocalCommand,
@@ -938,6 +1018,20 @@ pub async fn ocr_image(
         .unwrap_or(0);
     tracing::debug!(text_len, "OCR 识别完成");
     Ok(json)
+}
+
+/// 0.22.4：取消在途的 OCR 请求。
+///
+/// 前端在选区变化或用户取消时调用，通过 `request_id` 取消后端正在处理的 OCR 请求。
+/// 返回 `true` 表示成功取消，`false` 表示请求已完成或不存在。
+#[tauri::command]
+pub async fn cancel_ocr_request(
+    request_id: String,
+) -> Result<bool, crate::app::command_error::CommandError> {
+    let tracker = crate::domain::ocr::context::ocr_request_tracker();
+    let cancelled = tracker.cancel(&request_id);
+    tracing::info!(request_id = %request_id, cancelled, "cancel_ocr_request");
+    Ok(cancelled)
 }
 
 /// 0.20.7：分析截图选区或图片编辑会话的配色方案。
@@ -1205,10 +1299,26 @@ fn crop_rgba(rgba: &[u8], width: usize, height: usize, crop: &CropRect) -> (Vec<
 /// **0.19.1**：本命令保留为诊断专用直调 `ocr_engine::backend()`——`available_languages()`
 /// 和 `engine_language()` 是 `OcrBackend` trait 的诊断方法，不在 OcrImage Capability
 /// （只做 `recognize`）的职责范围内。为诊断面板单独建 Capability 属过度工程。
+///
+/// **0.22.4**：优先使用 `OcrBackendRouter::diagnose()` 获取路由诊断快照
+/// （包含 PaddleOCR 状态、in-flight、fallback 等）。如果未安装 router，
+/// 回退到直接调用 `backend()`。
 #[tauri::command]
 pub async fn ocr_diagnose(
     _app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    // 0.22.4：优先使用 OcrBackendRouter 诊断
+    if let Some(router) = crate::domain::ocr::router::router() {
+        let diag = router.diagnose().await;
+        return Ok(serde_json::to_value(&diag).unwrap_or_else(|_| {
+            serde_json::json!({
+                "configured_backend": format!("{:?}", diag.configured_backend),
+                "error": "diagnostics serialization failed"
+            })
+        }));
+    }
+
+    // 回退：直接调用 WinRT backend 诊断
     let backend = crate::domain::capability::builtins::ocr_engine::backend();
     let available = backend.available_languages().await;
     let engine_lang = backend.engine_language().await;
@@ -1219,6 +1329,48 @@ pub async fn ocr_diagnose(
         "engine_language": engine_lang,
         "has_chinese": has_chinese,
     }))
+}
+
+/// 0.22.4：读取 OCR 配置。
+#[tauri::command]
+pub async fn get_ocr_config(
+    _app: tauri::AppHandle,
+) -> Result<crate::domain::config::ocr_config::OcrConfig, String> {
+    Ok(crate::domain::config::ocr_config::get_ocr_config())
+}
+
+/// 0.22.4：保存 OCR 配置。
+#[tauri::command]
+pub async fn set_ocr_config(
+    app: tauri::AppHandle,
+    config: crate::domain::config::ocr_config::OcrConfig,
+) -> Result<(), String> {
+    // 校验
+    config
+        .validate()
+        .map_err(|e| format!("OCR 配置校验失败: {e}"))?;
+
+    // 保存到 SQLite ConfigStore
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    crate::domain::config::store::ConfigStore::set(pool, &config)
+        .await
+        .map_err(|e| format!("保存 OCR 配置失败: {e}"))?;
+
+    // 更新内存缓存
+    crate::domain::config::ocr_config::update_cache(&config);
+
+    // 广播配置变更事件
+    let _ = app.emit(
+        crate::domain::event_names::EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "scope": "ocr" }),
+    );
+
+    tracing::info!(
+        backend = %config.backend,
+        paddle_model = %config.paddle_model,
+        "OCR 配置已保存"
+    );
+    Ok(())
 }
 
 /// 0.11.9-d：翻译文本命令——OCR 面板/工具栏"翻译"按钮的后端入口。
@@ -2165,4 +2317,405 @@ fn parse_translate_batch_payload(
         .iter()
         .map(|value| value.as_str().map(str::to_string))
         .collect()
+}
+
+// ── 0.22.4 PaddleOCR 管理命令 ──────────────────────────────────────────────
+//
+// Task 5: 提供最小、受限的 PaddleOCR 管理协议。
+//
+// **安全约束**：
+// - engine_id 由编译期常量 `PADDLEOCR_ENGINE_ID` 锁定，不接受前端传入。
+// - 前端不能提交 runtime kind、URL、executable、argv、script 或 env。
+// - 所有执行参数由 adapter 从 locked artifact 解析。
+
+use std::sync::Arc;
+
+use crate::app::local_engine::LocalEngineService;
+use crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID;
+use crate::domain::local_engine::AdapterConfig;
+use crate::infra::local_engine::runtime::EngineId;
+use tauri::Manager;
+
+/// 从 Tauri managed state 获取 `LocalEngineService` 引用。
+fn get_engine_service(app: &tauri::AppHandle) -> Result<Arc<LocalEngineService>, String> {
+    app.try_state::<Arc<LocalEngineService>>()
+        .map(|s| s.inner().clone())
+        .ok_or_else(|| "LocalEngineService 尚未注册".to_string())
+}
+
+/// Task 16: 从 Tauri managed state 获取 `OcrCoordinator` 引用。
+///
+/// 管理命令（install/repair/start/stop）执行后必须通知 coordinator，
+/// 使其清理缓存的 start_state/start_result、取消旧 idle timer、递增 epoch。
+fn get_ocr_coordinator(
+    app: &tauri::AppHandle,
+) -> Option<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>> {
+    app.try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
+        .map(|s| s.inner().clone())
+}
+
+/// Task 16: 通知 OcrCoordinator 外部管理命令改变了引擎状态。
+///
+/// 在 install/repair/start/stop 成功后调用，使 coordinator 清理缓存状态。
+async fn notify_coordinator_state_change(app: &tauri::AppHandle) {
+    if let Some(coordinator) = get_ocr_coordinator(app) {
+        coordinator.notify_external_state_change().await;
+    }
+}
+
+/// 构建编译期锁定的 PaddleOCR EngineId。
+fn paddleocr_engine_id() -> EngineId {
+    EngineId::new(PADDLEOCR_ENGINE_ID).expect("paddleocr engine id is valid")
+}
+
+/// 从当前 OcrConfig 构建 PaddleOCR AdapterConfig。
+///
+/// 配置只包含业务参数（模型选择、计算偏好），不包含执行参数。
+///
+/// **Task 14**: `compute_preference` 从 `OcrConfig` 读取，不再硬编码。
+/// 用户在设置页选择的 `auto` / `cpu` 会真正传递给 install/start/profile resolve。
+fn build_paddleocr_adapter_config() -> AdapterConfig {
+    let ocr_config = crate::domain::config::ocr_config::get_ocr_config();
+    let engine_config =
+        crate::app::local_engine::paddleocr::PaddleOcrEngineConfig::from_ocr_config();
+    AdapterConfig {
+        preferred_port: None,
+        compute_preference: Some(ocr_config.compute_preference),
+        engine_config: engine_config.to_json(),
+    }
+}
+
+/// 安装 PaddleOCR 引擎环境（uv venv + paddlepaddle + paddleocr + fastapi）。
+///
+/// 走现有 `LocalEngineService::install` → `InstallTransaction`，
+/// 不新造安装器。安装过程通过 `blink://local-engine-status` 事件投影进度。
+#[tauri::command]
+pub async fn install_paddleocr(
+    app: tauri::AppHandle,
+) -> Result<(), crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+    let svc =
+        get_engine_service(&app).map_err(|e| CommandError::new("internal_error", e, false))?;
+    let engine_id = paddleocr_engine_id();
+    let adapter_config = build_paddleocr_adapter_config();
+
+    svc.install(&engine_id, adapter_config).await.map_err(|e| {
+        CommandError::new("install_failed", format!("PaddleOCR 安装失败: {e}"), true)
+    })?;
+
+    // Task 16: 通知 OcrCoordinator 外部状态变更——清理缓存
+    notify_coordinator_state_change(&app).await;
+
+    tracing::info!("PaddleOCR 引擎安装完成");
+    Ok(())
+}
+
+/// 修复 PaddleOCR 环境（先停止再重新安装）。
+///
+/// 适用于缓存损坏、self-test 失败等场景。
+///
+/// **安全 repair 流程**：
+/// 1. 通过 coordinator lifecycle 进入 Stopping，停止当前 PaddleOCR 实例
+/// 2. 校验目标绝对路径位于 `%APPDATA%\blink\models\paddleocr`，防御 `..`、symlink/junction
+/// 3. 只清理 paddleocr 模型缓存，不碰其他引擎或公共缓存
+/// 4. 删除失败时返回结构化错误（不静默 warn）
+/// 5. 重新安装并验证恢复
+/// 6. 失败时返回结构化错误
+#[tauri::command]
+pub async fn repair_paddleocr(
+    app: tauri::AppHandle,
+) -> Result<(), crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+    let svc =
+        get_engine_service(&app).map_err(|e| CommandError::new("internal_error", e, false))?;
+    let engine_id = paddleocr_engine_id();
+
+    // 1. 通过 coordinator lifecycle 进入 repair 模式，阻止新 lease 并条件停止当前实例
+    //    begin_repair 会：设 repair_mode → 取消 idle timer → 等 in-flight → conditional_stop → Idle(next gen)
+    //    Task 6: 返回 RepairGuard RAII——确保无论 repair 路径如何结束，end_repair 都会被调用
+    let _repair_guard = if let Some(coordinator) = get_ocr_coordinator(&app) {
+        Some(coordinator.begin_repair().await)
+    } else {
+        None
+    };
+    // 也直接调 svc.stop 确保进程退出（begin_repair 已包含，但双重保障）
+    let _ = svc.stop(&engine_id).await;
+
+    // 2. 安全清理 PaddleOCR 模型缓存——路径防御
+    let model_cache_dir = crate::infra::local_engine::runtime::engine_model_cache_dir(&engine_id);
+    let blink_root = crate::infra::utils::paths::app_data_dir();
+    let canonical_cache = blink_root.join("models").join("paddleocr");
+
+    // 2a. 防御 `..` 路径遍历——组件中不得出现 ".."
+    for component in model_cache_dir.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(CommandError::new(
+                "repair_safety_violation",
+                format!(
+                    "模型缓存路径包含 `..` 组件，疑似路径遍历攻击：{}",
+                    model_cache_dir.display()
+                ),
+                false,
+            ));
+        }
+    }
+
+    // 2b. 校验目标绝对路径位于 `%APPDATA%\blink\models\paddleocr`
+    //     canonicalize 会解析 symlink/junction 到真实路径
+    let canonical_cache = canonical_cache.canonicalize().unwrap_or(canonical_cache);
+    let actual_cache = model_cache_dir
+        .canonicalize()
+        .unwrap_or(model_cache_dir.clone());
+    if actual_cache != canonical_cache {
+        return Err(CommandError::new(
+            "repair_safety_violation",
+            format!(
+                "模型缓存路径校验失败: 期望 {} 但实际 {}（疑似 symlink/junction 重定向）",
+                canonical_cache.display(),
+                actual_cache.display()
+            ),
+            false,
+        ));
+    }
+
+    // 2c. 防御 symlink/junction——canonicalize 后的路径不得指向 Blink 专属目录之外
+    //     检查 canonical 路径是否以 `%APPDATA%\blink\models\paddleocr` 开头
+    let blink_models_root = blink_root.join("models");
+    let blink_models_canonical = blink_models_root
+        .canonicalize()
+        .unwrap_or(blink_models_root);
+    if !actual_cache.starts_with(&blink_models_canonical) {
+        return Err(CommandError::new(
+            "repair_safety_violation",
+            format!(
+                "模型缓存路径越界：{} 不在 Blink models 目录 {} 内",
+                actual_cache.display(),
+                blink_models_canonical.display()
+            ),
+            false,
+        ));
+    }
+
+    // 2d. 额外检查：目标路径的文件系统类型不应是 symlink（即使 canonicalize 已解析）
+    //     如果 cache dir 本身是 symlink，metadata().file_type().is_symlink() 会为 true
+    if let Ok(meta) = std::fs::symlink_metadata(&model_cache_dir) {
+        if meta.file_type().is_symlink() {
+            return Err(CommandError::new(
+                "repair_safety_violation",
+                format!(
+                    "模型缓存路径是 symlink，拒绝清理：{}",
+                    model_cache_dir.display()
+                ),
+                false,
+            ));
+        }
+    }
+
+    // 3. 只清理 paddleocr 模型缓存——删除失败时返回结构化错误
+    //    Task 6: 清理失败必须 fail-closed——不继续安装
+    if actual_cache.exists() {
+        tracing::info!(path = %actual_cache.display(), "清理 PaddleOCR 模型缓存");
+        if let Err(e) = std::fs::remove_dir_all(&actual_cache) {
+            return Err(CommandError::new(
+                "repair_cleanup_failed",
+                format!(
+                    "清理 PaddleOCR 模型缓存失败（可能有文件被占用）：{e}（路径：{}）",
+                    actual_cache.display()
+                ),
+                true,
+            ));
+        }
+    }
+
+    // 4. 清理旧的 generation（如果有）
+    //    Task 6: cleanup 失败也是 fail-closed
+    if let Err(e) = svc.cleanup(&engine_id).await {
+        return Err(CommandError::new(
+            "repair_cleanup_failed",
+            format!("清理旧 generation 失败：{e}"),
+            true,
+        ));
+    }
+
+    // 5. 重新安装
+    let adapter_config = build_paddleocr_adapter_config();
+    svc.install(&engine_id, adapter_config).await.map_err(|e| {
+        CommandError::new("repair_failed", format!("PaddleOCR 修复失败: {e}"), true)
+    })?;
+
+    // 5b. 恢复验证——确认安装后环境状态为 Ready
+    let status = svc.get_status(&engine_id).await.map_err(|e| {
+        CommandError::new(
+            "repair_verification_failed",
+            format!("修复后状态查询失败: {e}"),
+            false,
+        )
+    })?;
+    if status.status.environment != crate::domain::local_engine::status::EnvironmentHealth::Ready {
+        return Err(CommandError::new(
+            "repair_verification_failed",
+            format!("修复后环境状态非 Ready: {:?}", status.status.environment),
+            true,
+        ));
+    }
+
+    // 5c. start 并等待模型 Ready（Handoff B.V.6）
+    let adapter_config = build_paddleocr_adapter_config();
+    svc.start(&engine_id, adapter_config).await.map_err(|e| {
+        CommandError::new("repair_start_failed", format!("修复后启动失败: {e}"), true)
+    })?;
+
+    // 等待 model Ready（最多 120s）
+    let model_ready =
+        wait_for_model_ready(&svc, &engine_id, std::time::Duration::from_secs(120)).await;
+    if !model_ready {
+        // RepairGuard RAII 会自动调用 end_repair()
+        return Err(CommandError::new(
+            "repair_model_timeout",
+            "修复后模型加载超时（120s）",
+            true,
+        ));
+    }
+
+    // 5d. 验证 health model contract/fingerprint（Handoff B.V.7）
+    let status = svc.get_status(&engine_id).await.map_err(|e| {
+        CommandError::new(
+            "repair_verification_failed",
+            format!("修复后状态查询失败: {e}"),
+            false,
+        )
+    })?;
+    if status.status.model != crate::domain::local_engine::status::ModelHealth::Ready {
+        // RepairGuard RAII 会自动调用 end_repair()
+        return Err(CommandError::new(
+            "repair_model_not_ready",
+            format!("修复后模型状态非 Ready: {:?}", status.status.model),
+            true,
+        ));
+    }
+
+    // 6. 退出 repair 模式，恢复正常生命周期
+    //    Task 6: RepairGuard RAII 在 drop 时自动调用 end_repair()
+    //    成功路径需要 disarm 取消自动退出，然后手动调用 end_repair + notify
+    if let Some(coordinator) = get_ocr_coordinator(&app) {
+        coordinator.notify_external_state_change().await;
+    }
+
+    tracing::info!("PaddleOCR 引擎修复完成（含 start + model ready 验证）");
+    Ok(())
+}
+
+/// 等待模型 Ready，轮询直到 Ready 或超时。
+async fn wait_for_model_ready(
+    svc: &crate::app::local_engine::service::LocalEngineService,
+    engine_id: &crate::infra::local_engine::runtime::EngineId,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_secs(1);
+    loop {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        match svc.get_status(engine_id).await {
+            Ok(status) => {
+                if status.status.model == crate::domain::local_engine::status::ModelHealth::Ready {
+                    return true;
+                }
+                if status.status.model == crate::domain::local_engine::status::ModelHealth::Failed {
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%e, "wait_for_model_ready: 状态查询失败");
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// 启动 PaddleOCR 引擎。
+///
+/// 如果环境未安装，先自动安装。
+#[tauri::command]
+pub async fn start_paddleocr(
+    app: tauri::AppHandle,
+) -> Result<(), crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+    let svc =
+        get_engine_service(&app).map_err(|e| CommandError::new("internal_error", e, false))?;
+    let engine_id = paddleocr_engine_id();
+    let adapter_config = build_paddleocr_adapter_config();
+
+    // 确保环境已安装
+    svc.ensure_installed(&engine_id, adapter_config.clone())
+        .await
+        .map_err(|e| {
+            CommandError::new(
+                "install_failed",
+                format!("PaddleOCR 环境安装失败: {e}"),
+                true,
+            )
+        })?;
+
+    // 启动引擎
+    svc.start(&engine_id, adapter_config)
+        .await
+        .map_err(|e| CommandError::new("start_failed", format!("PaddleOCR 启动失败: {e}"), true))?;
+
+    // Task 16: 通知 OcrCoordinator 外部状态变更——清理缓存
+    notify_coordinator_state_change(&app).await;
+
+    tracing::info!("PaddleOCR 引擎已启动");
+    Ok(())
+}
+
+/// 停止 PaddleOCR 引擎。
+#[tauri::command]
+pub async fn stop_paddleocr(
+    app: tauri::AppHandle,
+) -> Result<(), crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+    let svc =
+        get_engine_service(&app).map_err(|e| CommandError::new("internal_error", e, false))?;
+    let engine_id = paddleocr_engine_id();
+
+    svc.stop(&engine_id).await.map_err(|e| {
+        CommandError::new("stop_failed", format!("停止 PaddleOCR 失败: {e}"), false)
+    })?;
+
+    // Task 16: 通知 OcrCoordinator 外部状态变更——清理缓存
+    notify_coordinator_state_change(&app).await;
+
+    tracing::info!("PaddleOCR 引擎已停止");
+    Ok(())
+}
+
+/// 查询 PaddleOCR 引擎状态。
+///
+/// 返回结构化状态快照，包含 environment/process/service/model 各维度。
+#[tauri::command]
+pub async fn get_paddleocr_status(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+    let svc =
+        get_engine_service(&app).map_err(|e| CommandError::new("internal_error", e, false))?;
+    let engine_id = paddleocr_engine_id();
+
+    let snapshot = svc.get_status(&engine_id).await.map_err(|e| {
+        CommandError::new(
+            "status_query_failed",
+            format!("查询 PaddleOCR 状态失败: {e}"),
+            false,
+        )
+    })?;
+
+    // 投影为前端友好的 JSON
+    Ok(serde_json::to_value(&snapshot).unwrap_or_else(|_| {
+        serde_json::json!({
+            "engine_id": PADDLEOCR_ENGINE_ID,
+            "error": "status serialization failed"
+        })
+    }))
 }

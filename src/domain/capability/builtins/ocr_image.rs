@@ -1,7 +1,12 @@
-//! `ocr_image` Capability（0.11.7-c，0.11.7-f 走 backend 注入）。
+//! `ocr_image` Capability（0.11.7-c，0.11.7-f 走 backend 注入，0.22.4 走 router）。
 //!
 //! 接收 PNG 字节，返回 OCR 识别结果（文本 + 行级坐标）。
-//! 通过 `ocr_engine::backend()` 拿注入的 backend，可测试替换（`install_backend`）。
+//! 通过 `OcrBackendRouter` 路由到 windows/paddleocr/auto 后端。
+//!
+//! **0.22.4**：
+//! - 优先使用 `OcrBackendRouter`（支持 windows/paddleocr/auto 路由）。
+//! - 可选参数 `screenshot_session` / `screenshot_revision` 携带截图来源信息。
+//! - `StructuredOcrError` 正确映射到 `CapabilityError`（不全部拍平为 Internal）。
 
 use std::sync::Arc;
 
@@ -13,6 +18,7 @@ use crate::domain::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
     ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
+use crate::domain::ocr::error::OcrErrorCategory;
 
 /// `ocr_image` — 识别图片中的文字，返回文本 + 行级坐标。
 pub struct OcrImage;
@@ -38,6 +44,14 @@ impl Capability for OcrImage {
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": "PNG 图片字节数组（与 image_ref 二选一）"
+                    },
+                    "screenshot_session": {
+                        "type": "integer",
+                        "description": "截图 session epoch（可选，来自截图 overlay 时传入）"
+                    },
+                    "screenshot_revision": {
+                        "type": "integer",
+                        "description": "截图选区 revision（可选，同一 session 内重选递增）"
                     }
                 }
             }),
@@ -62,10 +76,75 @@ impl Capability for OcrImage {
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4）
+        // Task 10: resolve_png_input 返回 Bytes（Arc-backed），零拷贝
         let stash = ctx.env.image_stash();
         let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
 
-        // 调用注入的 OCR backend
+        // 0.22.4：优先使用 OcrBackendRouter（支持 windows/paddleocr/auto 路由）
+        // 如果未安装 router（测试/旧环境），回退到直接调用 backend()
+        if let Some(router) = crate::domain::ocr::router::router() {
+            // 0.22.4：优先使用前端传入的 request_id（用于 cancel tracker），
+            // 如果没有则自动生成
+            let request_id = args
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "ocr-cap-{}-{:x}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos()
+                    )
+                });
+
+            // 从 args 中提取截图来源信息（可选）
+            let screenshot_session = args.get("screenshot_session").and_then(|v| v.as_u64());
+            let screenshot_revision = args.get("screenshot_revision").and_then(|v| v.as_u64());
+
+            // 根据是否有截图来源信息选择 context 构造方式
+            let ocr_ctx = if let (Some(epoch), Some(rev)) =
+                (screenshot_session, screenshot_revision)
+            {
+                crate::domain::ocr::context::OcrRequestContext::for_screenshot(
+                    &request_id,
+                    None,
+                    epoch,
+                    rev,
+                )
+            } else {
+                crate::domain::ocr::context::OcrRequestContext::for_capability(&request_id, None)
+            };
+
+            // 注册到全局 OcrRequestTracker，使前端可通过 cancel_ocr_request 取消
+            // Task 6: 使用 RAII guard，drop 时自动 unregister
+            let tracker = crate::domain::ocr::context::ocr_request_tracker();
+            let _tracker_guard = tracker.register(&request_id, ocr_ctx.cancellation.clone());
+
+            // Task 10: png_bytes 是 Bytes（Arc-backed），直接传给 router（零拷贝）
+            let route_result = router.recognize(png_bytes, &ocr_ctx).await;
+
+            // _tracker_guard drop 时自动注销
+
+            // 将 StructuredOcrError 正确映射到 CapabilityError
+            if let Some(err) = &route_result.error {
+                return Err(map_structured_error_to_capability(err));
+            }
+
+            let result = route_result.result.unwrap();
+            return Ok(CapabilityResult::Text {
+                content: serde_json::to_string(&result as &OcrResult)
+                    .unwrap_or_else(|_| result.text.clone()),
+                desc: None,
+            });
+        }
+
+        // 回退：直接调用全局 backend()（测试/旧环境）
         let b = backend();
         let result = b
             .recognize(&png_bytes)
@@ -86,6 +165,42 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
     factory: || Arc::new(OcrImage) as Arc<dyn Capability>,
 });
 
+// ── StructuredOcrError → CapabilityError 映射（0.22.4） ──────────────────────
+
+/// 将 `StructuredOcrError` 映射到 `CapabilityError`。
+///
+/// **不全部拍平为 `Internal(String)`**：
+/// - `EnvironmentMissing` → `InvalidState`（环境未就绪，状态不对）
+/// - `DecodeError` → `InvalidData`（图片数据无效）
+/// - `Timeout` → `Timeout`
+/// - `Cancelled` → `Cancelled`
+/// - `ProtocolError` / `StartFailed` / `ModelNotReady` / `BackendUnavailable` → `Internal`
+///   （这些是后端基础设施错误，调用方无法直接行动）
+fn map_structured_error_to_capability(
+    err: &crate::domain::ocr::error::StructuredOcrError,
+) -> CapabilityError {
+    match err.category {
+        OcrErrorCategory::EnvironmentMissing => CapabilityError::InvalidState {
+            detail: err.message.clone(),
+        },
+        OcrErrorCategory::DecodeError => CapabilityError::InvalidData {
+            reason: "decode_error".to_string(),
+            detail: err.message.clone(),
+        },
+        OcrErrorCategory::Timeout => CapabilityError::Timeout {
+            detail: err.message.clone(),
+        },
+        OcrErrorCategory::Cancelled => CapabilityError::Cancelled,
+        // 以下为后端基础设施错误，映射为 Internal
+        OcrErrorCategory::StartFailed
+        | OcrErrorCategory::ModelNotReady
+        | OcrErrorCategory::ProtocolError
+        | OcrErrorCategory::BackendUnavailable => CapabilityError::Internal {
+            detail: format!("[{err}]"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ocr_engine::{FakeOcrBackend, install_backend};
@@ -102,9 +217,62 @@ mod tests {
         assert_eq!(s.name, "ocr_image");
         assert_eq!(s.parameters["properties"]["png"]["type"], "array");
         assert_eq!(s.parameters["properties"]["image_ref"]["type"], "string");
+        // 0.22.4: screenshot_session / screenshot_revision 可选参数
+        assert_eq!(
+            s.parameters["properties"]["screenshot_session"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            s.parameters["properties"]["screenshot_revision"]["type"],
+            "integer"
+        );
         // 0.19.4: png 不再 required，与 image_ref 二选一
         let required = s.parameters.get("required");
         assert!(required.is_none() || required.unwrap().as_array().unwrap().is_empty());
+    }
+
+    // ── StructuredOcrError → CapabilityError 映射测试（0.22.4） ───────────
+
+    #[test]
+    fn map_environment_missing_to_invalid_state() {
+        let err = crate::domain::ocr::error::StructuredOcrError::environment_missing();
+        let cap_err = map_structured_error_to_capability(&err);
+        assert!(matches!(cap_err, CapabilityError::InvalidState { .. }));
+    }
+
+    #[test]
+    fn map_decode_error_to_invalid_data() {
+        let err = crate::domain::ocr::error::StructuredOcrError::decode_error("bad png");
+        let cap_err = map_structured_error_to_capability(&err);
+        assert!(matches!(cap_err, CapabilityError::InvalidData { .. }));
+    }
+
+    #[test]
+    fn map_timeout_to_timeout() {
+        let err = crate::domain::ocr::error::StructuredOcrError::timeout();
+        let cap_err = map_structured_error_to_capability(&err);
+        assert!(matches!(cap_err, CapabilityError::Timeout { .. }));
+    }
+
+    #[test]
+    fn map_cancelled_to_cancelled() {
+        let err = crate::domain::ocr::error::StructuredOcrError::cancelled();
+        let cap_err = map_structured_error_to_capability(&err);
+        assert!(matches!(cap_err, CapabilityError::Cancelled));
+    }
+
+    #[test]
+    fn map_start_failed_to_internal() {
+        let err = crate::domain::ocr::error::StructuredOcrError::start_failed("port in use");
+        let cap_err = map_structured_error_to_capability(&err);
+        assert!(matches!(cap_err, CapabilityError::Internal { .. }));
+    }
+
+    #[test]
+    fn map_protocol_error_to_internal() {
+        let err = crate::domain::ocr::error::StructuredOcrError::protocol_error("HTTP 500");
+        let cap_err = map_structured_error_to_capability(&err);
+        assert!(matches!(cap_err, CapabilityError::Internal { .. }));
     }
 
     /// Capability 通过 backend() 拿注入的 FakeOcrBackend。

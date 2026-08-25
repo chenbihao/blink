@@ -91,6 +91,7 @@ impl Capability for PinImage {
         }
 
         // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4）
+        // Task 10: resolve_png_input 返回 Bytes（零拷贝 from stash）
         let stash = ctx.env.image_stash();
         let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
 
@@ -101,12 +102,13 @@ impl Capability for PinImage {
         tracing::debug!(x, y, bytes = png_bytes.len(), "pin_image: 开始 pin 图");
 
         // 调共享语义桥接：位置兜底与窗口创建只保留一个实现。
-        let (x, y) =
-            ctx.env
-                .show_pin_image(png_bytes, x, y)
-                .map_err(|e| CapabilityError::Internal {
-                    detail: format!("pin 图失败: {e}"),
-                })?;
+        // Task 10: show_pin_image 接收 Vec<u8>，从 Bytes 转换
+        let (x, y) = ctx
+            .env
+            .show_pin_image(png_bytes.to_vec(), x, y)
+            .map_err(|e| CapabilityError::Internal {
+                detail: format!("pin 图失败: {e}"),
+            })?;
 
         tracing::info!(x, y, "pin_image: 图片已钉到桌面");
 

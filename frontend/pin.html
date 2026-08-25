@@ -846,9 +846,12 @@
     async function runPinOcr(autoTranslate) {
         if (ocrBusy) return;
         ocrBusy = true;
+        let ocrHandle = null;
         try {
             const png = await pinImageToPng();
-            const result = await ocrImage(png);
+            // Task 11: ocrImage 返回 handle，不是 promise；用 .promise 取结果
+            ocrHandle = ocrImage(png);
+            const {result} = await ocrHandle.promise;
             showPinOcrPanel((result && result.text) || '');
             if (autoTranslate) {
                 setTimeout(doPinTranslate, 0);
@@ -857,6 +860,8 @@
             const err = normalizeError(e);
             console.error(`[pin OCR] [${err.code}] ${err.message}`);
             showPinOcrPanel(`识别失败：${err.message}`);
+            // Task 11: 出错时取消在途请求
+            if (ocrHandle) ocrHandle.cancel().catch(() => {});
         } finally {
             ocrBusy = false;
         }

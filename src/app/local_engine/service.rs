@@ -319,6 +319,55 @@ impl LocalEngineService {
         result
     }
 
+    /// 返回引擎当前的身份信息（endpoint + token）。
+    ///
+    /// 0.22.4：OCR Coordinator 需要获取 PaddleOCR server 的 endpoint 和 token
+    /// 来发送 HTTP /recognize 请求。
+    ///
+    /// 如果引擎未运行或身份未设置，返回 `None`。
+    pub async fn get_current_identity(
+        &self,
+        engine_id: &EngineId,
+    ) -> Result<Option<crate::infra::local_engine::port::ServiceIdentityInput>, LocalEngineError>
+    {
+        self.validate_engine_id(engine_id)?;
+        let entries = self.entries.read().await;
+        let entry = entries.get(engine_id).ok_or_else(|| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Unsupported,
+                ErrorPhase::Request,
+                "未知引擎",
+                format!("engine_id '{}' 不在 registry 中", engine_id),
+            )
+        })?;
+        let ci = entry.current_identity.lock().await;
+        Ok(ci.clone())
+    }
+
+    /// 返回当前运行实例的 InstanceToken（用于条件停止）。
+    ///
+    /// 如果引擎未运行，返回 `None`。
+    pub async fn get_current_instance_token(
+        &self,
+        engine_id: &EngineId,
+    ) -> Result<Option<crate::infra::local_engine::state::InstanceToken>, LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let entries = self.entries.read().await;
+        let entry = entries.get(engine_id).ok_or_else(|| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Unsupported,
+                ErrorPhase::Request,
+                "未知引擎",
+                format!("engine_id '{}' 不在 registry 中", engine_id),
+            )
+        })?;
+        let mp = entry.managed_process.lock().await;
+        match mp.as_ref() {
+            Some(managed) => Ok(Some(managed.current_token().await)),
+            None => Ok(None),
+        }
+    }
+
     /// 返回引擎诊断信息。
     pub async fn get_diagnostics(
         &self,
@@ -1116,6 +1165,123 @@ impl LocalEngineService {
         }
     }
 
+    /// 条件停止：只停止指定 instance token 的实例。
+    ///
+    /// 如果当前实例的 token 与传入的 token 不匹配（已有新实例接管），
+    /// 直接返回 Ok(())，不停止新实例。
+    ///
+    /// 用于 OcrCoordinator 的 lease 管理：旧 timer 或旧 startup task
+    /// 不得停止/覆盖新实例。
+    pub async fn stop_if_current(
+        &self,
+        engine_id: &EngineId,
+        instance_token: &crate::infra::local_engine::state::InstanceToken,
+    ) -> Result<(), LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let entry = self.get_entry(engine_id).await?;
+
+        let _gate = entry.op_gate.lock().await;
+
+        let managed = {
+            let mp = entry.managed_process.lock().await;
+            mp.clone()
+        };
+
+        match managed {
+            Some(mp) => {
+                // 条件检查：token 不匹配则跳过
+                if !mp.is_current_token(instance_token).await {
+                    tracing::info!(
+                        engine = %engine_id,
+                        "stop_if_current: token 不匹配，跳过停止（新实例已接管）"
+                    );
+                    return Ok(());
+                }
+
+                // 标记 desired=Stopped, process=Stopping
+                self.commit_status_internal(engine_id, None, |status| {
+                    status.desired = DesiredState::Stopped;
+                    status.process = ProcessState::Stopping;
+                })
+                .await?;
+
+                match mp.stop_if_current(instance_token).await {
+                    Ok(()) => {
+                        self.commit_status_internal(engine_id, None, |status| {
+                            status.process = ProcessState::Stopped;
+                            status.service = ServiceHealth::Unknown;
+                            status.model = ModelHealth::Unknown;
+                        })
+                        .await?;
+
+                        // 取消旧日志 pump
+                        {
+                            let mut lc = entry.log_pump_cancel.lock().await;
+                            if let Some(cancel) = lc.take() {
+                                tracing::debug!(engine = %engine_id, "stop_if_current: 取消日志 pump");
+                                cancel.cancel();
+                            }
+                        }
+
+                        // 清理 identity/profile
+                        let saved_instance_id = {
+                            let ci = entry.current_identity.lock().await;
+                            ci.as_ref().map(|i| i.instance_id.clone())
+                        };
+                        {
+                            let mut ci = entry.current_identity.lock().await;
+                            *ci = None;
+                        }
+                        {
+                            let mut cp = entry.current_profile.lock().await;
+                            *cp = None;
+                        }
+                        {
+                            let mut mp_guard = entry.managed_process.lock().await;
+                            *mp_guard = None;
+                        }
+
+                        // 从同步 registry 移除
+                        if let Some(instance_id) = saved_instance_id {
+                            let pkey = ProcessKey {
+                                engine_id: engine_id.clone(),
+                                instance_id,
+                            };
+                            let mut reg = self.process_registry.lock().unwrap();
+                            reg.remove(&pkey);
+                        }
+
+                        tracing::info!(engine = %engine_id, "引擎已条件停止（token 匹配）");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let err =
+                            LocalEngineError::from_process(ErrorPhase::Stop, "条件停止失败", &e);
+                        self.commit_status_internal(engine_id, None, |status| {
+                            status.process = ProcessState::Exited {
+                                reason: format!("stop_if_current failed: {e}"),
+                            };
+                            status.last_error = Some(err.clone());
+                        })
+                        .await?;
+                        Err(err)
+                    }
+                }
+            }
+            None => {
+                // 已 Stopped，幂等返回
+                self.commit_status_internal(engine_id, None, |status| {
+                    status.desired = DesiredState::Stopped;
+                    if status.process == ProcessState::Starting {
+                        status.process = ProcessState::Stopped;
+                    }
+                })
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
     // ── repair / cleanup 骨架 ───────────────────────────────────────────────
 
     /// 修复引擎环境（骨架）。
@@ -1682,6 +1848,62 @@ impl LocalEngineService {
             ));
         }
 
+        // ── 模型身份校验（model_id + model_revision + fingerprint） ──
+        // health 报告的 model_id 和 model_revision 必须与 descriptor 一致。
+        // Ready 必须有合法 fingerprint。
+        let descriptor = entry.adapter.descriptor();
+        let expected_model_id = &descriptor.model_contract.model_id;
+        let expected_revision = &descriptor.model_contract.revision;
+
+        if let Some(ref health_model_id) = mapping.model_id {
+            if health_model_id != expected_model_id {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::IdentityVerification,
+                    ErrorPhase::Health,
+                    "model_id 不匹配",
+                    format!(
+                        "health 报告 model_id='{health_model_id}'，descriptor 期望='{expected_model_id}'"
+                    ),
+                ));
+            }
+        }
+
+        if let Some(ref health_revision) = mapping.model_revision {
+            if health_revision != expected_revision {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::IdentityVerification,
+                    ErrorPhase::Health,
+                    "model_revision 不匹配",
+                    format!(
+                        "health 报告 model_revision='{health_revision}'，descriptor 期望='{expected_revision}'"
+                    ),
+                ));
+            }
+        }
+
+        // Ready 必须有合法 fingerprint（非空、非全零）
+        if mapping.model == ModelHealth::Ready {
+            match &mapping.model_content_fingerprint {
+                None => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::ModelNotReady,
+                        ErrorPhase::Health,
+                        "模型 Ready 但缺少 fingerprint",
+                        "health 报告 model=Ready 但 model_content_fingerprint 为 None",
+                    ));
+                }
+                Some(fp) if fp.is_empty() || fp.chars().all(|c| c == '0') => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::ModelNotReady,
+                        ErrorPhase::Health,
+                        "模型 Ready 但 fingerprint 无效",
+                        "health 报告 model=Ready 但 model_content_fingerprint 为空或全零",
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         // backend 一致性验证
         if let Some(ref obs) = mapping.backend {
             let profile = entry.current_profile.lock().await;
@@ -1984,6 +2206,7 @@ mod tests {
                     backend: None,
                     model_id: None,
                     model_revision: None,
+                    model_content_fingerprint: None,
                 }
             }
 

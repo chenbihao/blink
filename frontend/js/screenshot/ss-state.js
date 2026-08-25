@@ -43,6 +43,8 @@ export const ss = {
     ocrBusy: false,            // 显式 OCR 请求门禁
     translationBusy: false,    // 图上译文请求中
     ocrPrewarm: null,          // Promise<OcrResult> | null
+    // Task 6: 当前 active OCR request handle（{requestId, promise, cancel} | null）
+    activeOcrHandle: null,
     screenshotConfig: {
         prewarmOcr: true,
         scrollDebug: false,

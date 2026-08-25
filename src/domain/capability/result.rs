@@ -74,7 +74,10 @@ impl CapabilityResult {
             CapabilityResult::Blob { mime, bytes, .. } if mime.starts_with("image/") => {
                 if let Some(stash) = stash {
                     // 尝试移入 stash
-                    if let Some(image_ref) = stash.put(bytes.clone(), mime.clone()) {
+                    // Task 10: Bytes::from(Vec) 消费 Vec 不复制
+                    if let Some(image_ref) =
+                        stash.put(bytes::Bytes::from(bytes.clone()), mime.clone())
+                    {
                         // TTL 固定 15 分钟，直接用常量避免额外 get 调用
                         let size_bytes = bytes.len();
                         let structured = serde_json::json!({

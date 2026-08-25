@@ -1,0 +1,81 @@
+{
+  "request_id": "fixture-cjk-1",
+  "engine": "paddleocr",
+  "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
+  "model_revision": "ppocrv6-tiny",
+  "image_width": 500,
+  "image_height": 120,
+  "lines": [
+    {
+      "text": "你好世界",
+      "rect": {"x": 20, "y": 10, "w": 200, "h": 40},
+      "word_indices": [0, 1, 2, 3],
+      "confidence": 0.95
+    },
+    {
+      "text": "OCR 文字识别",
+      "rect": {"x": 20, "y": 60, "w": 300, "h": 40},
+      "word_indices": [4, 5, 6, 7, 8],
+      "confidence": 0.93
+    }
+  ],
+  "words": [
+    {
+      "text": "你",
+      "rect": {"x": 20, "y": 10, "w": 40, "h": 40},
+      "line_index": 0,
+      "confidence": 0.96
+    },
+    {
+      "text": "好",
+      "rect": {"x": 65, "y": 10, "w": 40, "h": 40},
+      "line_index": 0,
+      "confidence": 0.97
+    },
+    {
+      "text": "世",
+      "rect": {"x": 110, "y": 10, "w": 40, "h": 40},
+      "line_index": 0,
+      "confidence": 0.94
+    },
+    {
+      "text": "界",
+      "rect": {"x": 155, "y": 10, "w": 40, "h": 40},
+      "line_index": 0,
+      "confidence": 0.93
+    },
+    {
+      "text": "O",
+      "rect": {"x": 20, "y": 60, "w": 30, "h": 40},
+      "line_index": 1,
+      "confidence": 0.92
+    },
+    {
+      "text": "C",
+      "rect": {"x": 55, "y": 60, "w": 25, "h": 40},
+      "line_index": 1,
+      "confidence": 0.91
+    },
+    {
+      "text": "R",
+      "rect": {"x": 85, "y": 60, "w": 25, "h": 40},
+      "line_index": 1,
+      "confidence": 0.90
+    },
+    {
+      "text": "文字",
+      "rect": {"x": 120, "y": 60, "w": 80, "h": 40},
+      "line_index": 1,
+      "confidence": 0.95
+    },
+    {
+      "text": "识别",
+      "rect": {"x": 210, "y": 60, "w": 80, "h": 40},
+      "line_index": 1,
+      "confidence": 0.94
+    }
+  ],
+  "elapsed_ms": 0,
+  "native_word_boxes": 9,
+  "fallback_word_boxes": 0
+}

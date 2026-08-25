@@ -162,6 +162,75 @@ fn fetch_models() {
     println!("✅ 模型目录生成完成");
 }
 
+/// 检查嵌入的 Python 资源脚本语法（py_compile）。
+///
+/// 在 release 流程中验证所有随 Rust 二进制发布的 .py 脚本可以正确编译，
+/// 避免 IndentationError 或 ImportError 等问题到生产环境才暴露。
+///
+/// 使用 Blink 托管 Python（如果可用）或系统 Python 执行。
+/// 无 Python 时 panic（Windows release 必须有 Python）。
+fn check_python_resources() {
+    let root = workspace_root();
+    let py_scripts = [
+        (
+            "resources/ocr/paddleocr/blink_ocr_server.py",
+            "Blink PP-OCRv6 OCR Server",
+        ),
+        (
+            "resources/stt/funasr/blink_stt_server.py",
+            "Blink FunASR STT Server",
+        ),
+    ];
+
+    let py = which_python();
+    let mut failures = Vec::new();
+
+    println!("🐍 检查 Python 资源语法（py_compile）...");
+    for (rel_path, desc) in &py_scripts {
+        let full = root.join(rel_path);
+        if !full.exists() {
+            failures.push(format!("{desc}: 文件不存在 ({rel_path})"));
+            continue;
+        }
+
+        let compile_cmd = format!(
+            "from pathlib import Path; compile(Path(r'{}').read_text(encoding='utf-8'), '{}', 'exec')",
+            full.display(),
+            full.file_name().unwrap_or_default().to_string_lossy()
+        );
+
+        let result = Command::new(&py)
+            .arg("-c")
+            .arg(&compile_cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(&root)
+            .output();
+
+        match result {
+            Ok(out) if out.status.success() => {
+                println!("  ✓ {desc} 语法正确");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                failures.push(format!("{desc}: 语法错误\n{stderr}"));
+            }
+            Err(e) => {
+                failures.push(format!("{desc}: Python 执行失败: {e}"));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        for f in &failures {
+            eprintln!("❌ {f}");
+        }
+        panic!("Python 资源语法检查失败: {} 个错误", failures.len());
+    }
+    println!("✅ Python 资源语法检查通过");
+}
+
 /// 拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）。
 ///
 /// Python 脚本仅用标准库（urllib），由 xtask 锚定 workspace 根路径并传入，
@@ -250,6 +319,7 @@ fn main() {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
             build_plugins(true, debug); // 打包期：编译 + 复制到 bin
+            check_python_resources(); // 检查嵌入的 Python 脚本语法
             let root = workspace_root();
             if debug {
                 println!("📦 cargo tauri build --debug（DevTools 可用）...");

@@ -8,6 +8,7 @@
 //! - `image_ref` 从 `ImageStash` 解析，检查 MIME 是否为 `image/*`
 //! - 无 stash 运行时用 `image_ref` → `InvalidArgs`（明确报错，不静默降级）
 
+use bytes::Bytes;
 use serde_json::Value;
 
 use crate::domain::capability::{CapabilityError, ImageStash};
@@ -16,12 +17,16 @@ use crate::domain::capability::{CapabilityError, ImageStash};
 ///
 /// 供 `pin_image`（`bytes_key="png"`）和 `ocr_image`（`bytes_key="png"`）使用。
 ///
-/// **返回**：解析成功返回 PNG 字节；失败返回 `InvalidArgs`。
+/// **Task 10**: 返回 `Bytes`（Arc-backed），`clone()` 零字节复制。
+/// 当从 `ImageStash` 读取时，直接返回 `StashedImage.bytes`（只增加 Arc 引用计数）。
+/// 当从 JSON 字节数组解析时，收集到 `Bytes` 后返回。
+///
+/// **返回**：解析成功返回 PNG 字节（`Bytes`）；失败返回 `InvalidArgs`。
 pub fn resolve_png_input(
     args: &Value,
     stash: Option<&ImageStash>,
     bytes_key: &str,
-) -> Result<Vec<u8>, CapabilityError> {
+) -> Result<Bytes, CapabilityError> {
     let has_ref = args.get("image_ref").is_some();
     let has_bytes = args.get(bytes_key).is_some();
 
@@ -45,15 +50,17 @@ pub fn resolve_png_input(
                 detail: format!("{bytes_key} 数据为空"),
             });
         }
-        Ok(bytes)
+        Ok(Bytes::from(bytes))
     }
 }
 
 /// 解析并校验 `image_ref` 指向的图片字节。
+///
+/// **Task 10**: 返回 `Bytes`——直接返回 `StashedImage.bytes`，零拷贝。
 pub fn resolve_image_ref(
     args: &Value,
     stash: Option<&ImageStash>,
-) -> Result<Vec<u8>, CapabilityError> {
+) -> Result<Bytes, CapabilityError> {
     let ref_val = args
         .get("image_ref")
         .and_then(Value::as_str)
@@ -74,6 +81,7 @@ pub fn resolve_image_ref(
             detail: format!("image_ref 指向的不是图片（mime: {}）", img.mime),
         });
     }
+    // Task 10: 零拷贝——直接返回 StashedImage.bytes（Bytes clone 只增 Arc 引用计数）
     Ok(img.bytes)
 }
 
@@ -108,22 +116,26 @@ mod tests {
     fn resolve_png_from_bytes() {
         let args = json!({ "png": [0x89, 0x50, 0x4E, 0x47] });
         let result = resolve_png_input(&args, None, "png").unwrap();
-        assert_eq!(result, vec![0x89, 0x50, 0x4E, 0x47]);
+        assert_eq!(result.as_ref(), &[0x89, 0x50, 0x4E, 0x47]);
     }
 
     #[test]
     fn resolve_png_from_ref() {
         let stash = ImageStash::new();
-        let token = stash.put(vec![1, 2, 3, 4], "image/png".into()).unwrap();
+        let token = stash
+            .put(bytes::Bytes::from(vec![1, 2, 3, 4]), "image/png".into())
+            .unwrap();
         let args = json!({ "image_ref": token });
         let result = resolve_png_input(&args, Some(&stash), "png").unwrap();
-        assert_eq!(result, vec![1, 2, 3, 4]);
+        assert_eq!(result.as_ref(), &[1, 2, 3, 4]);
     }
 
     #[test]
     fn resolve_both_ref_and_bytes_is_error() {
         let stash = ImageStash::new();
-        let token = stash.put(vec![1], "image/png".into()).unwrap();
+        let token = stash
+            .put(bytes::Bytes::from(vec![1]), "image/png".into())
+            .unwrap();
         let args = json!({ "image_ref": token, "png": [0x89] });
         let err = resolve_png_input(&args, Some(&stash), "png").unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));

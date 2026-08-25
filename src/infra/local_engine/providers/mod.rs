@@ -159,7 +159,7 @@ pub struct BinaryInstallPlan {
 ///
 /// 包含 SHA-256 hash 时，安装使用 `--require-hashes` 强校验，
 /// 确保安装的 wheel 与 descriptor 声明的 hash 完全一致。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackageLock {
     /// 包名（如 `torch`、`funasr`）。
     pub name: String,
@@ -170,7 +170,16 @@ pub struct PackageLock {
     /// 如果提供，安装时使用 `--require-hashes` 强校验。
     /// 如果为 `None`，表示上游不提供稳定 checksum（如 PaddlePaddle），
     /// 此时安装不使用 `--require-hashes`，但 manifest 记录 `ChecksumSource::DownloadSource`。
+    ///
+    /// 对于多平台 wheel，这是第一个 hash（用于摘要/标识）。
+    /// `all_hashes` 包含所有平台 wheel 的 hash，用于 `--require-hashes` 安装。
     pub sha256: Option<String>,
+    /// 所有平台 wheel 的 SHA-256 hash 列表。
+    ///
+    /// `--require-hashes` 需要列出所有 hash 让 pip 匹配正确平台的 wheel。
+    /// 如果为空，则使用 `sha256`（向后兼容）。
+    #[serde(default)]
+    pub all_hashes: Vec<String>,
 }
 
 // ── RuntimeProvider trait ─────────────────────────────────────────────────
