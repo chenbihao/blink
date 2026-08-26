@@ -36,6 +36,7 @@
 //! 5. `map_health` 必须把 FunASR 的 HTTP /health 响应映射为领域统一的
 //!    ServiceHealth / ModelHealth / BackendObservation。
 
+pub mod dto;
 pub mod event_port;
 pub mod funasr;
 pub mod ocr_coordinator; // 0.22.4：OCR Coordinator（路由 + 生命周期 + 并发）
@@ -48,4 +49,4 @@ pub use event_port::{TauriEventPort, make_event_port};
 #[allow(unused_imports)]
 pub use registry::{EngineRegistry, RegistryEntry, RegistryLookup};
 #[allow(unused_imports)]
-pub use service::{EventPort, LocalEngineService, NoopEventPort};
+pub use service::{EventPort, LocalEngineService, NoopEventPort, StructuredLogEntry};

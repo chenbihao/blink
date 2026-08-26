@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-08-21T11:44:45Z",
+  "generatedAt": "2026-08-26T12:23:12Z",
   "icons": [
     "aperture",
     "audio-lines",
@@ -15,7 +15,9 @@
     "code",
     "command",
     "copy",
+    "cpu",
     "database",
+    "download",
     "eraser",
     "external-link",
     "eye",
@@ -40,6 +42,7 @@
     "log-out",
     "menu",
     "message-square",
+    "mic",
     "moon",
     "mouse-pointer-2",
     "move-up-right",
@@ -48,6 +51,7 @@
     "pencil-sparkles",
     "pin",
     "pipette",
+    "play",
     "plug",
     "plus",
     "power",
@@ -75,6 +79,7 @@
     "triangle-alert",
     "undo-2",
     "volume-2",
+    "wrench",
     "x",
     "zap"
   ]

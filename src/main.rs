@@ -1331,6 +1331,18 @@ app::commands::ensure_mcp_connected,
             app::commands::toggle_ai_capability,
             app::commands::toggle_ai_capabilities,
             app::commands::reset_ai_capability_access,
+            // 0.22.5: 通用本地引擎管理命令
+            app::commands::get_local_engine_catalog,
+            app::commands::get_local_engine_status,
+            app::commands::get_local_engine_logs,
+            app::commands::install_local_engine,
+            app::commands::start_local_engine,
+            app::commands::stop_local_engine,
+            app::commands::repair_local_engine,
+            // 0.22.5 H2: storage / cleanup / cancel
+            app::commands::get_local_engine_storage,
+            app::commands::cleanup_local_engine,
+            app::commands::cancel_local_engine_operation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -25,6 +25,7 @@ use crate::domain::local_engine::{
 };
 use crate::infra::local_engine::runtime::EngineId;
 
+use super::dto::{EngineLogDto, EngineStatusDto, project_status};
 use super::service::EventPort;
 
 /// Tauri 事件投影出口。
@@ -45,19 +46,15 @@ impl TauriEventPort {
 impl EventPort for TauriEventPort {
     /// 广播引擎状态快照。
     ///
-    /// 通用事件 `blink://local-engine-status` payload:
-    /// `{ engine_id, service_epoch, revision, snapshot }`
+    /// 通用事件 `blink://local-engine-status` payload 与 `get_local_engine_status`
+    /// command 返回的 `EngineStatusDto` **完全相同**——两者调用同一个 `project_status`
+    /// 投影函数，前端只维护一套解析器。
     ///
     /// 兼容投影：如果 engine_id 是 funasr，额外 emit 旧
     /// `blink://funasr-server-status` 事件，payload 格式 `{ stage, ... }`。
     fn emit_status(&self, snapshot: &EngineStatusSnapshot) {
-        // ── 通用事件 ──
-        let payload = serde_json::json!({
-            "engine_id": snapshot.engine_id.as_str(),
-            "service_epoch": &snapshot.service_epoch,
-            "revision": snapshot.revision,
-            "snapshot": &snapshot.status,
-        });
+        // ── 通用事件：与 query 使用同一 DTO shape ──
+        let payload: EngineStatusDto = project_status(snapshot);
         let _ = self.app.emit(EventNames::LOCAL_ENGINE_STATUS, payload);
 
         // ── 旧 FunASR 兼容投影 ──
@@ -69,21 +66,22 @@ impl EventPort for TauriEventPort {
 
     /// 广播引擎日志条目。
     ///
-    /// 通用事件 `blink://local-engine-log` payload:
-    /// `{ engine_id, instance_id, seq, timestamp, level, text }`
+    /// 通用事件 `blink://local-engine-log` payload 与 `get_local_engine_logs`
+    /// command 返回的 `EngineLogDto` **完全相同**——`seq` 字符串化，
+    /// 前端历史与实时事件使用同一去重逻辑。
     ///
     /// 兼容投影：如果 engine_id 是 funasr，额外 emit 旧
     /// `blink://funasr-server-log` 事件，payload 格式 `{ line }`。
     fn emit_log(&self, engine_id: &EngineId, instance_id: &str, seq: u64, line: &str) {
-        // ── 通用事件 ──
-        let payload = serde_json::json!({
-            "engine_id": engine_id.as_str(),
-            "instance_id": instance_id,
-            "seq": seq,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "level": "info",
-            "text": line,
-        });
+        // ── 通用事件：与 query 使用同一 DTO shape ──
+        let payload = EngineLogDto {
+            engine_id: engine_id.as_str().to_string(),
+            instance_id: instance_id.to_string(),
+            seq: seq.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: "info".to_string(),
+            text: line.to_string(),
+        };
         let _ = self.app.emit(EventNames::LOCAL_ENGINE_LOG, payload);
 
         // ── 旧 FunASR 兼容投影 ──

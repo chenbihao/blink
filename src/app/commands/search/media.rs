@@ -2529,13 +2529,9 @@ pub async fn repair_paddleocr(
 
     // 4. 清理旧的 generation（如果有）
     //    Task 6: cleanup 失败也是 fail-closed
-    if let Err(e) = svc.cleanup(&engine_id).await {
-        return Err(CommandError::new(
-            "repair_cleanup_failed",
-            format!("清理旧 generation 失败：{e}"),
-            true,
-        ));
-    }
+    //    0.22.5: 旧 svc.cleanup(engine_id) 已移除，generation 切换由 install 内部处理。
+    //    旧 generation 可通过 get_local_engine_storage + cleanup_local_engine 手动清理。
+    tracing::info!(engine = %engine_id, "跳过旧 generation 清理（由 install 事务内部处理）");
 
     // 5. 重新安装
     let adapter_config = build_paddleocr_adapter_config();

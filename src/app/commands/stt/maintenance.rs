@@ -512,7 +512,8 @@ pub async fn cleanup_stt_space(app: tauri::AppHandle) -> Result<(), String> {
     let _ = svc.stop(&engine_id).await; // 忽略错误——即使停止失败也继续清理
 
     // 通过 service.cleanup 标记操作
-    let _ = svc.cleanup(&engine_id).await;
+    // 0.22.5: 旧 svc.cleanup(engine_id) 已移除，清理由 cleanup_funasr_engine 执行。
+    // 旧 generation 可通过 get_local_engine_storage + cleanup_local_engine 手动清理。
 
     // 真实清理由 cleanup_funasr_engine 执行
     crate::app::local_engine::funasr::cleanup_funasr_engine().map_err(|e| e)?;

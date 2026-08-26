@@ -125,6 +125,14 @@ ICON_LIST = [
     "list-checks",      # 任务清单
     "quote",            # 引用
     "code",             # 代码块
+
+    # 本地模型运行时（0.22.5：引擎卡片 renderer + section 图标）
+    "cpu",              # 本地模型运行时 section + 引擎默认图标
+    "mic",              # FunASR 语音识别引擎
+    "download",         # 安装引擎
+    "play",             # 启动引擎
+    "wrench",           # 修复引擎
+    # 已有：square（停止）、trash-2（清理）、x（取消）、terminal（日志）、server、scan-text
 ]
 
 # ── 路径 ───────────────────────────────────────────────────────────────────────

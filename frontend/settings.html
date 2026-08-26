@@ -240,8 +240,12 @@
 
         <!-- 引擎 -->
         <div class="panel" id="engines">
-            <h2 data-i18n="panel.engines">搜索引擎</h2>
-            <p class="panel-lede" data-i18n="engines.lede">应用 / 文件 / 计算器 / 内置动作 —— 搜索候选的来源。</p>
+            <h2 data-i18n="panel.engines">引擎</h2>
+            <p class="panel-lede" data-i18n="engines.lede">搜索候选来源、脚本解释器与 Blink 托管本地模型运行时。</p>
+
+            <!-- 搜索候选来源 -->
+            <h3 class="section-heading" data-i18n="engines.section.search_sources">搜索候选来源</h3>
+            <p class="section-desc" data-i18n="engines.section.search_sources.desc">应用 / 文件 / 计算器 —— 构成主窗口搜索结果。</p>
 
             <!-- 应用搜索（StartMenu） -->
             <div class="extension-card">
@@ -392,7 +396,11 @@
                 </div>
             </div>
 
-            <!-- 脚本解释器（Phase 0.6 新增） -->
+            <!-- 用户脚本解释器 -->
+            <h3 class="section-heading" data-i18n="engines.section.script_interpreters">用户脚本解释器</h3>
+            <p class="section-desc" data-i18n="engines.section.script_interpreters.desc">Python / Node.js 解释器用于运行脚本插件。这是你系统上的解释器，Blink 不会修改它。</p>
+            <p class="section-note" data-i18n="engines.section.script_interpreters.note">与下方 Blink 托管运行时不同：脚本解释器读取你的 PATH 或手动配置路径，不共享隔离环境。</p>
+
             <div class="extension-card">
                 <div class="extension-header">
                     <div class="extension-icon">
@@ -441,6 +449,78 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Blink 托管本地模型运行时 -->
+            <h3 class="section-heading" id="local-model-runtime" data-i18n="engines.section.local_runtime">Blink 托管本地模型运行时</h3>
+            <p class="section-desc" data-i18n="engines.section.local_runtime.desc">FunASR / PaddleOCR 等本地模型由 Blink 独立管理，使用隔离的 Python 运行时，不读取你的脚本解释器配置。</p>
+
+            <!-- 无 JS 降级：显示基础 loading / empty / error -->
+            <noscript>
+                <div class="le-nojs-fallback" role="alert">
+                    <p data-i18n="local_engine.nojs.message">需要启用 JavaScript 才能管理本地模型运行时。</p>
+                </div>
+            </noscript>
+
+            <!-- loading live region（JS 控制显隐） -->
+            <div class="le-loading-region" id="le-loading-region" role="status" aria-live="polite" hidden>
+                <svg aria-hidden="true" class="icon le-loading-icon">
+                    <use href="#icon-refresh-cw"/>
+                </svg>
+                <span data-i18n="local_engine.loading">正在加载引擎信息…</span>
+            </div>
+
+            <!-- error live region -->
+            <div class="le-error-region" id="le-error-region" role="alert" aria-live="assertive" hidden>
+                <svg aria-hidden="true" class="icon le-error-icon">
+                    <use href="#icon-triangle-alert"/>
+                </svg>
+                <span id="le-error-text" data-i18n="local_engine.load_failed">加载引擎信息失败</span>
+            </div>
+
+            <!-- empty live region -->
+            <div class="le-empty-region" id="le-empty-region" role="status" aria-live="polite" hidden>
+                <span data-i18n="local_engine.empty">没有可用的本地模型引擎。</span>
+            </div>
+
+            <!-- engine card 容器（由 H3 renderer 装配） -->
+            <div class="le-cards-container" id="le-cards-container" aria-live="polite">
+                <!-- JS 装配卡片 -->
+            </div>
+
+            <!-- 全局/公共 storage 区域 -->
+            <div class="le-shared-storage" id="le-shared-storage" hidden>
+                <h4 class="le-shared-storage-title" data-i18n="local_engine.storage.shared_title">公共缓存</h4>
+                <p class="le-shared-storage-desc" data-i18n="local_engine.storage.shared_desc">多个引擎共享的缓存资产。清理公共缓存不影响引擎运行，但可能导致引擎下次启动时需要重新下载依赖。</p>
+                <div class="le-shared-storage-content" id="le-shared-storage-content"></div>
+                <button class="btn btn-small le-shared-cleanup-btn" id="le-shared-cleanup-btn" type="button" hidden>
+                    <svg aria-hidden="true" class="icon">
+                        <use href="#icon-trash-2"/>
+                    </svg>
+                    <span data-i18n="local_engine.storage.shared_cleanup">清理公共缓存</span>
+                </button>
+            </div>
+
+            <!-- cleanup modal -->
+            <div class="le-cleanup-modal" id="le-cleanup-modal" role="dialog" aria-modal="true" aria-labelledby="le-cleanup-title" hidden>
+                <div class="le-cleanup-overlay" data-le-cleanup-close></div>
+                <div class="le-cleanup-dialog">
+                    <div class="le-cleanup-header">
+                        <h3 class="le-cleanup-title" id="le-cleanup-title" data-i18n="local_engine.cleanup.title">清理确认</h3>
+                        <button class="le-cleanup-close" data-le-cleanup-close type="button" aria-label="关闭">
+                            <svg aria-hidden="true" class="icon">
+                                <use href="#icon-x"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="le-cleanup-body" id="le-cleanup-body"></div>
+                    <div class="le-cleanup-actions">
+                        <button class="btn btn-small" data-le-cleanup-close type="button" data-i18n="local_engine.cleanup.cancel">取消</button>
+                        <button class="btn btn-primary btn-small" id="le-cleanup-confirm" type="button" data-i18n="local_engine.cleanup.confirm">确认清理</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- log modal 已移除：卡片内日志组件（le-card-log）是唯一日志入口，避免死 UI -->
         </div>
 
         <!-- 插件 -->
@@ -1546,7 +1626,7 @@
         <div class="panel" id="voice">
             <h2 data-i18n="panel.voice">语音输入</h2>
             <p class="panel-lede" data-i18n-html="voice.lede" id="voice-lede">按住 Alt+Space 说话，松开后文字自动上屏。云端
-                STT 需配置供应商，本地 STT 需安装 FunASR 环境。</p>
+                STT 需配置供应商，本地 STT 需在引擎页安装 FunASR 环境。</p>
 
             <!-- 0.11.8：基础配置卡（总开关 + 音频设备 + 调试 + STT 模式），与其它 tab extension-card 视觉统一 -->
             <div class="extension-card">
@@ -1683,90 +1763,32 @@
 
             <!-- 本地配置 ──────────────────────────────────────────────── -->
             <div class="hidden" id="voice-local-section">
-                <!-- Python 环境卡片（可折叠：环境就绪时默认收起，仅显示摘要） -->
-                <details class="voice-section-card voice-env-card" id="python-env-card">
-                    <summary class="voice-section-card-header">
-                        <span class="voice-section-card-title"
-                              data-i18n="voice.local.python_env.title">Python 环境</span>
-                        <span class="voice-env-summary" id="python-env-summary">检查中...</span>
-                    </summary>
-                    <div class="voice-section-card-body">
-                        <p class="setting-hint" data-i18n-html="voice.local.python_env.hint" id="voice-python-env-hint">
-                            Blink 通过 <code>uv</code> 自动管理独立的 Python 3.12 环境，安装 PyTorch + funasr，无需手动安装
-                            Python 或 pip 包。</p>
-                        <div class="engine-status-row">
-                            <div class="engine-status-info" id="engine-status-info">
-                                <span class="engine-status-text" id="funasr-status-text">检查中...</span>
-                            </div>
-                            <button class="engine-download-btn" id="funasr-setup-btn" type="button">安装环境</button>
+                <!-- FunASR 运行时管理跳转入口（生命周期管理已迁至引擎页） -->
+                <div class="voice-runtime-link-card">
+                    <div class="voice-runtime-link-info">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-cpu"/>
+                        </svg>
+                        <div>
+                            <h4 data-i18n="voice.local.runtime_link.title">FunASR 本地引擎</h4>
+                            <p data-i18n="voice.local.runtime_link.desc">环境安装、服务启停、设备切换、日志查看已迁移至引擎页。</p>
                         </div>
                     </div>
-                </details>
+                    <button class="btn btn-small voice-runtime-link-btn" id="voice-goto-engines-btn" type="button">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-external-link"/>
+                        </svg>
+                        <span data-i18n="voice.local.runtime_link.btn">前往本地模型运行时</span>
+                    </button>
+                </div>
 
-                <!-- FunASR 服务卡片 -->
-                <div class="voice-section-card">
-                    <div class="voice-section-card-header">
-                        <span class="voice-section-card-title" data-i18n="voice.local.funasr.title">FunASR 服务</span>
-                        <span class="voice-section-card-desc" data-i18n="voice.local.funasr.desc">本地推理服务 · 模型 · 日志</span>
+                <!-- FunASR 本地模型选择（业务设置，非生命周期管理） -->
+                <div class="setting-row voice-model-select-row">
+                    <div class="setting-row-info">
+                        <span class="setting-row-label" data-i18n="voice.local.model.label">模型</span>
                     </div>
-                    <div class="voice-section-card-body">
-                        <!-- 服务状态行（第一眼要看的，放最前面） -->
-                        <div class="engine-status-row">
-                            <div class="engine-status-info" id="funasr-server-status-info">
-                                <span class="engine-status-text" id="funasr-server-status-text"></span>
-                            </div>
-                            <label class="engine-auto-start-label" data-i18n="voice.local.funasr.auto_start.label"
-                                   data-i18n-title="voice.local.funasr.auto_start.hint"
-                                   title="开启后 Blink 启动时自动在后台启动 funasr-server（延迟 5s 懒加载）">自动启动</label>
-                            <label class="switch switch-sm">
-                                <input id="funasr-auto-start-toggle" type="checkbox"/>
-                                <span class="slider"></span>
-                            </label>
-                            <button class="engine-download-btn" disabled id="funasr-start-btn" type="button">启动服务
-                            </button>
-                            <button class="engine-download-btn" data-i18n="voice.local.funasr.stop_btn" disabled
-                                    id="funasr-stop-btn"
-                                    type="button">停止服务
-                            </button>
-                        </div>
-
-                        <div class="setting-row-funasr">
-                            <div class="setting-row-item">
-                                <label class="setting-label" data-i18n="voice.local.device.label">推理设备<span
-                                        class="field-hint-icon" data-i18n-title="voice.local.device.hint"
-                                        title="CPU 通用性好且内存占用低；CUDA 需 NVIDIA GPU + CUDA Toolkit，推理更快。切换后需重启服务生效。">ⓘ</span></label>
-                                <select id="funasr-device-select">
-                                    <option data-i18n="voice.local.device.cpu" selected value="cpu">CPU</option>
-                                    <option data-i18n="voice.local.device.cuda" value="cuda">CUDA (GPU)</option>
-                                </select>
-                            </div>
-                            <div class="setting-row-item">
-                                <label class="setting-label" data-i18n="voice.local.model.label">模型</label>
-                                <select id="funasr-model-select"></select>
-                            </div>
-                        </div>
-
-                        <!-- 统一日志窗口（诊断按钮 + 日志区共用） -->
-                        <div class="voice-log-wrap">
-                            <div class="voice-log-header">
-                                <span class="voice-log-title" data-i18n="voice.local.log.title">服务日志</span>
-                                <div class="voice-log-actions">
-                                    <button class="stt-diagnose-btn" data-i18n="voice.local.log.diagnose_btn"
-                                            id="stt-diagnose-btn"
-                                            type="button">诊断 STT
-                                    </button>
-                                    <button class="voice-log-clear-btn" data-i18n="voice.local.log.copy_btn"
-                                            id="funasr-log-copy-btn"
-                                            type="button">复制
-                                    </button>
-                                    <button class="voice-log-clear-btn" data-i18n="voice.local.log.clear_btn"
-                                            id="funasr-log-clear-btn"
-                                            type="button">清空
-                                    </button>
-                                </div>
-                            </div>
-                            <pre class="voice-server-log" id="voice-server-log"></pre>
-                        </div>
+                    <div class="setting-row-control">
+                        <select class="voice-model-select" id="voice-local-model-select"></select>
                     </div>
                 </div>
 
@@ -1885,19 +1907,6 @@
                     </div>
                 </details>
 
-                <!-- 空间管理卡片 -->
-                <div class="voice-section-card">
-                    <div class="voice-section-card-header">
-                        <span class="voice-section-card-title" data-i18n="voice.local.space.title">空间管理</span>
-                        <span class="voice-section-card-desc"
-                              data-i18n="voice.local.space.desc">Python 环境 · 模型缓存占用</span>
-                    </div>
-                    <div class="voice-section-card-body">
-                        <div class="stt-space-usage" id="stt-space-usage">
-                            <div class="stt-space-loading" data-i18n="voice.local.space.loading">加载中...</div>
-                        </div>
-                    </div>
-                </div>
             </div>
 
             <!-- 使用说明 -->

@@ -1,38 +1,37 @@
 /**
- * 语音输入 Tab 模块（0.10）
- * STT 配置：总开关 / 模式切换 / 云端供应商（独立配置）/ FunASR 本地服务管理 / 音频设备选择 + 调试
+ * 语音输入 Tab 模块（0.22.5 重构）
+ * STT 配置：总开关 / 模式切换 / 云端供应商 / 音频设备选择 + 调试 / 高级选项（热词 / ITN / VAD）
+ *
+ * FunASR 生命周期管理（环境安装 / 服务启停 / 设备切换 / 日志 / 空间管理）
+ * 已迁移至引擎页「本地模型运行时」区域（engines/local-runtime）。
+ * 本模块仅保留语音业务配置，并提供跳转入口。
  *
  * 云端 STT 架构（独立模式）：
  * - 配置完全独立于 AIConfig——用户在语音设置页直接配置 kind/base_url/model_id
  * - API Key 用 stt:cloud 前缀存在 Credential Manager 里，不与 AI 供应商共用
  * - 支持预设快捷填充（OpenAI / Groq / MiMo）
- *
- * 本地 STT 架构：
- * - 工具箱：FunASR（modelscope/阿里达摩院，Python 原生）
- * - 服务：funasr-server（OpenAI 兼容 API, localhost:8000）
- * - 模型：FunASR 自动管理（首次启动时从 ModelScope 自动下载）
  */
-import {confirmDialog, invoke, listen} from "../../shared/tauri.js";
+import {invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
-import {getLang, onLangChange, t} from "../../i18n/index.js";
-import {copyToClipboard} from "../../shared/api.js";
+import {onLangChange, t} from "../../i18n/index.js";
+import {ensureLocalRuntimeMounted, waitForEngineCard} from "../index.js";
 
 /**
  * 保存 STT 配置。
  * scope 决定后端控制台日志打印哪个区段，避免改本地配置时把云端字段也全部打印出来：
  * - "global": 总开关 / 模式 / 流式 / 音频设备
  * - "cloud":  云端供应商
- * - "local":  本地引擎（模型 / 设备 / 热词 / ITN / VAD）
+ * - "local":  本地引擎（热词 / ITN / VAD）
  */
 function saveSttConfig(cfg, scope) {
     invoke("set_stt_config", {config: cfg, scope}).catch(console.error);
 }
 
 /**
- * 初始化语音输入 Tab（轻量：只绑定事件 + 加载配置，不跑探测命令）。
+ * 初始化语音输入 Tab。
  *
- * 昂贵的探测命令（get_funasr_env / get_stt_space_usage / list_stt_models）
- * 延迟到用户首次切换到语音 Tab 时才执行（见 activateVoiceTab）。
+ * FunASR 生命周期管理已迁移至引擎页，本模块不再 invoke
+ * get_funasr_env / setup_python_env / start_funasr_server / stop_funasr_server。
  */
 export async function initVoiceTab() {
     const panel = document.getElementById("voice");
@@ -81,20 +80,17 @@ export async function initVoiceTab() {
         });
     }
 
-    // 音频设备选择
+    // 音频设备
     const deviceSelect = document.getElementById("voice-audio-device");
     if (deviceSelect) {
+        // 加载音频设备列表
         try {
             const devices = await invoke("list_audio_devices");
-
-            const defaultDev = devices.find((d) => d.is_default);
-            const defaultOption = deviceSelect.querySelector('option[value=""]');
-            if (defaultOption && defaultDev) {
-                defaultOption.textContent = t("voice.audio_device.default_with_name", {name: defaultDev.name});
-            } else if (defaultOption) {
-                defaultOption.textContent = t("voice.audio_device.default");
-            }
-
+            deviceSelect.innerHTML = "";
+            const defaultOpt = document.createElement("option");
+            defaultOpt.value = "";
+            defaultOpt.textContent = t("voice.audio_device.default");
+            deviceSelect.appendChild(defaultOpt);
             for (const dev of devices) {
                 const opt = document.createElement("option");
                 opt.value = dev.id;
@@ -285,32 +281,45 @@ export async function initVoiceTab() {
     // 模式可见性
     updateModeVisibility();
 
-    // ── 延迟激活：首次切换到语音 Tab 时才跑探测命令 ──
-    let activated = false;
+    // FunASR 本地模型选择（业务设置）
+    initLocalModelSelect(config);
 
-    async function activateVoiceTab() {
-        if (activated) return;
-        activated = true;
-
-        // FunASR 环境管理 + 统一日志 + 诊断 + 设备切换（含 refreshEnv 探测）
-        initFunasrEnv(config);
-
-        // 本地模型选择（下拉框）
-        loadLocalModels(config);
-
-        // 空间管理（含 get_stt_space_usage 探测）
-        initSpaceManagement();
-    }
-
-    // 监听语音 Tab 按钮点击，首次点击时激活
-    const voiceTabBtn = document.querySelector('.tab[data-tab="voice"]');
-    if (voiceTabBtn) {
-        voiceTabBtn.addEventListener("click", activateVoiceTab, {once: true});
-    }
-
-    // 如果设置页打开时语音 Tab 已是激活状态（如从深链跳转），立即激活
-    if (voiceTabBtn?.classList.contains("active")) {
-        activateVoiceTab();
+    // ── 跳转入口：点击切换到引擎页并定位 FunASR 卡片 ──
+    const gotoEnginesBtn = document.getElementById("voice-goto-engines-btn");
+    if (gotoEnginesBtn) {
+        gotoEnginesBtn.addEventListener("click", async () => {
+            const enginesTabBtn = document.querySelector('.tab[data-tab="engines"]');
+            if (enginesTabBtn) {
+                enginesTabBtn.click();
+            }
+            try {
+                // 1. 激活 engines tab（上面 click 已做）
+                // 2. await runtime mount
+                await ensureLocalRuntimeMounted();
+                // 3. await funasr card 已渲染
+                const funasrCard = await waitForEngineCard("funasr");
+                if (funasrCard) {
+                    // 4. scrollIntoView
+                    funasrCard.scrollIntoView({behavior: "smooth", block: "center"});
+                    // 5. focus（card 有 tabindex="-1"）
+                    funasrCard.focus({preventScroll: true});
+                } else {
+                    // mount 失败或卡片未渲染——聚焦 error region
+                    const errorRegion = document.getElementById("le-error-region");
+                    if (errorRegion && !errorRegion.hidden) {
+                        errorRegion.scrollIntoView({behavior: "smooth", block: "center"});
+                        const textEl = document.getElementById("le-error-text");
+                        if (textEl) textEl.focus({preventScroll: true});
+                    } else {
+                        // 兑现 fallback：滚动到 section anchor
+                        const anchor = document.getElementById("local-model-runtime");
+                        if (anchor) anchor.scrollIntoView({behavior: "smooth"});
+                    }
+                }
+            } catch (e) {
+                console.error("[voice] goto engines failed:", e);
+            }
+        });
     }
 
     function updateModeVisibility() {
@@ -336,63 +345,7 @@ export async function initVoiceTab() {
         }
     }
 
-    async function loadLocalModels(cfg) {
-        const select = document.getElementById("funasr-model-select");
-        if (!select) return;
-
-        let models = [];
-        try {
-            models = await invoke("list_stt_models");
-        } catch (e) {
-            console.error("list_stt_models failed:", e);
-            return;
-        }
-
-        if (!Array.isArray(models) || models.length === 0) {
-            select.innerHTML = `<option value="">${t("voice.local.model.empty")}</option>`;
-            return;
-        }
-
-        select.innerHTML = models
-            .map((m) => {
-                const selected = m.is_selected ? "selected" : "";
-                const sizeStr = m.size_mb >= 1024
-                    ? t("voice.local.model.size_gb", {size: (m.size_mb / 1024).toFixed(1)})
-                    : t("voice.local.model.size_mb", {size: m.size_mb});
-                const label = t("voice.local.model.option", {name: m.display_name, params: m.params, size: sizeStr});
-                return `<option value="${m.id}" ${selected} title="${m.description || ""}">${label}</option>`;
-            })
-            .join("");
-
-        // 如果当前没有选中的，默认选第一个
-        if (!models.some((m) => m.is_selected) && models.length > 0) {
-            select.value = models[0].id;
-        }
-
-        select.addEventListener("change", async () => {
-            const modelId = select.value;
-            if (!modelId) return;
-
-            try {
-                await invoke("download_stt_model", {modelId});
-                const m = models.find((m) => m.id === modelId);
-                if (m) {
-                    appendLog(t("voice.local.model.switched_log", {name: m.display_name}));
-                    // 同步 config（download_stt_model 已持久化 funasr_model + local_model_id）
-                    cfg.local_engine.funasr_model = m.funasr_model_id;
-                    cfg.local_model_id = modelId;
-
-                    // 如果服务正在运行，提示重启
-                    const isRunning = startBtn?.classList.contains("running");
-                    if (isRunning) {
-                        appendLog(t("voice.local.model.switched_running_log"));
-                    }
-                }
-            } catch (e) {
-                console.error("download_stt_model failed:", e);
-            }
-        });
-    }
+    // loadLocalModels 已迁移至引擎页 local-runtime controller
 }
 
 // ── 0.10.3 高级选项（热词 / ITN / VAD）──────────────────
@@ -553,490 +506,6 @@ function initVadConfig(config) {
     }
 }
 
-// ── 模块级统一日志（供 initFunasrEnv 和 initSpaceManagement 共享）──
-
-const _MAX_LOG_LINES = 200;
-let _logLines = [];
-
-function appendLog(line) {
-    const locale = getLang() === "en" ? "en-US" : "zh-CN";
-    const ts = new Date().toLocaleTimeString(locale, {hour12: false});
-    _logLines.push(`[${ts}] ${line}`);
-    if (_logLines.length > _MAX_LOG_LINES) {
-        _logLines = _logLines.slice(-_MAX_LOG_LINES);
-    }
-    const logPre = document.getElementById("voice-server-log");
-    if (logPre) {
-        logPre.textContent = _logLines.join("\n");
-        logPre.scrollTop = logPre.scrollHeight;
-    }
-}
-
-function clearLog() {
-    _logLines = [];
-    const logPre = document.getElementById("voice-server-log");
-    if (logPre) logPre.textContent = "";
-}
-
-// ── Python 环境 + FunASR 服务管理 + 统一日志 + 诊断 + 设备切换 ──
-
-async function initFunasrEnv(config) {
-    const setupBtn = document.getElementById("funasr-setup-btn");
-    const startBtn = document.getElementById("funasr-start-btn");
-    const stopBtn = document.getElementById("funasr-stop-btn");
-    const statusText = document.getElementById("funasr-status-text");
-    const serverStatusText = document.getElementById("funasr-server-status-text");
-    const logPre = document.getElementById("voice-server-log");
-    const logClearBtn = document.getElementById("funasr-log-clear-btn");
-    const logCopyBtn = document.getElementById("funasr-log-copy-btn");
-    const diagnoseBtn = document.getElementById("stt-diagnose-btn");
-    const deviceSelect = document.getElementById("funasr-device-select");
-
-    if (!setupBtn && !startBtn && !statusText) return;
-
-    // 检测完成前禁用启动按钮，避免用户无效点击（后端 get_funasr_env 需跑 Python 子进程）
-    if (startBtn) {
-        startBtn.textContent = t("voice.local.funasr.btn_checking");
-        startBtn.disabled = true;
-    }
-
-    // 日志缓冲已提升为模块级（appendLog / clearLog），此处仅绑定按钮事件
-
-    if (logClearBtn) {
-        logClearBtn.addEventListener("click", clearLog);
-    }
-
-    if (logCopyBtn) {
-        logCopyBtn.addEventListener("click", async () => {
-            const text = _logLines.join("\n");
-            if (!text) return;
-            try {
-                await copyToClipboard(text);
-                logCopyBtn.textContent = t("voice.local.log.copied");
-                setTimeout(() => {
-                    logCopyBtn.textContent = t("voice.local.log.copy_btn");
-                }, 1500);
-            } catch (e) {
-                console.error("clipboard write failed:", e);
-                // fallback: 选中日志区域文本
-                if (logPre) {
-                    const range = document.createRange();
-                    range.selectNodeContents(logPre);
-                    const sel = window.getSelection();
-                    sel.removeAllRanges();
-                    sel.addRange(range);
-                }
-            }
-        });
-    }
-
-    // ── 设备选择 ──
-    if (deviceSelect) {
-        // 回显当前配置
-        deviceSelect.value = config.local_engine.device || "cpu";
-        deviceSelect.addEventListener("change", () => {
-            const newDevice = deviceSelect.value;
-            config.local_engine.device = newDevice;
-            saveSttConfig(config, "local");
-            appendLog(t("voice.local.device.switched_log", {device: newDevice.toUpperCase()}));
-
-            // 如果服务正在运行，提示重启
-            const isRunning = startBtn?.classList.contains("running");
-            if (isRunning) {
-                appendLog(t("voice.local.device.switched_running_log"));
-            }
-        });
-    }
-
-    // ── 自动启动服务开关 ──
-    const autoStartToggle = document.getElementById("funasr-auto-start-toggle");
-    if (autoStartToggle) {
-        autoStartToggle.checked = config.local_engine.auto_start_server || false;
-        autoStartToggle.addEventListener("change", () => {
-            config.local_engine.auto_start_server = autoStartToggle.checked;
-            saveSttConfig(config, "local");
-            if (autoStartToggle.checked) {
-                appendLog(t("voice.local.funasr.auto_start.log_enabled"));
-                // 如果服务还没启动，立即启动一次
-                const isRunning = startBtn?.classList.contains("running");
-                if (!isRunning && startBtn) {
-                    appendLog(t("voice.local.funasr.auto_start.log_starting_now"));
-                    startBtn.click();
-                }
-            }
-        });
-    }
-
-    // ── 查询初始状态 ──
-    // 缓存最近一次的 env 快照，语言切换时用它重渲染（避免重新 IPC 探测）
-    let _lastEnv = null;
-
-    async function refreshEnv() {
-        try {
-            const env = await invoke("get_funasr_env");
-            _lastEnv = env;
-            updateEnvUI(env);
-            return env;
-        } catch (e) {
-            console.error("get_funasr_env failed:", e);
-            if (statusText) statusText.textContent = t("voice.local.python_env.status_query_failed");
-            // 探测失败：恢复按钮为默认文案但保持禁用（环境未知，不应允许启动）
-            if (startBtn) {
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-                startBtn.disabled = true;
-            }
-        }
-    }
-
-    await refreshEnv();
-
-    // 语言切换时用缓存的 env 快照重渲染所有状态文本/按钮文案
-    // （这些元素文本由 updateEnvUI 动态控制，不能带 data-i18n，否则 applyI18n 会覆盖）
-    // 同时纠正诊断按钮的瞬态文案（诊断进行中时 applyI18n 会重置为空闲态默认值）
-    onLangChange(() => {
-        if (_lastEnv) updateEnvUI(_lastEnv);
-        if (diagnoseBtn?.disabled) {
-            diagnoseBtn.textContent = t("voice.local.diagnose.running");
-        }
-    });
-
-    // ── 安装环境按钮 ──
-    if (setupBtn) {
-        setupBtn.addEventListener("click", async () => {
-            setupBtn.classList.remove("success");
-            setupBtn.textContent = t("voice.local.python_env.installing");
-            if (statusText) statusText.textContent = t("voice.local.python_env.install_status_installing");
-            appendLog(t("voice.local.python_env.install_log_start"));
-
-            try {
-                await invoke("setup_python_env");
-            } catch (e) {
-                console.error("setup_python_env failed:", e);
-                if (statusText) statusText.textContent = t("voice.local.python_env.install_status_failed", {err: e});
-                appendLog(t("voice.local.python_env.install_log_failed", {err: e}));
-                setupBtn.textContent = t("voice.local.python_env.install_btn");
-            }
-        });
-    }
-
-    // ── 启动服务按钮 ──
-    if (startBtn) {
-        startBtn.addEventListener("click", async () => {
-            startBtn.classList.remove("running");
-            startBtn.textContent = t("voice.local.funasr.btn_starting");
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.start_status_starting");
-            appendLog(t("voice.local.funasr.log_starting"));
-
-            try {
-                await invoke("start_funasr_server");
-            } catch (e) {
-                console.error("start_funasr_server failed:", e);
-                if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.start_failed", {err: e});
-                appendLog(t("voice.local.funasr.start_failed", {err: e}));
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-            }
-        });
-    }
-
-    // ── 停止服务按钮 ──
-    if (stopBtn) {
-        stopBtn.addEventListener("click", async () => {
-            stopBtn.disabled = true;
-            appendLog(t("voice.local.funasr.log_stopping"));
-            try {
-                await invoke("stop_funasr_server");
-                if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_stopped");
-                appendLog(t("voice.local.funasr.log_stopped"));
-                startBtn.classList.remove("running");
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-                startBtn.disabled = false;
-                stopBtn.disabled = false;
-            } catch (e) {
-                console.error("stop_funasr_server failed:", e);
-                appendLog(t("voice.local.funasr.stop_failed", {err: e}));
-            }
-            refreshEnv();
-        });
-    }
-
-    // ── 诊断按钮 ──
-    if (diagnoseBtn) {
-        diagnoseBtn.addEventListener("click", async () => {
-            diagnoseBtn.disabled = true;
-            diagnoseBtn.textContent = t("voice.local.diagnose.running");
-            appendLog(t("voice.local.diagnose.log_start"));
-
-            try {
-                const report = await invoke("diagnose_stt");
-                // 格式化诊断报告到日志窗口
-                const env = report.funasr_env || {};
-                appendLog(t("voice.local.diagnose.log_uv", {
-                    status: env.uv_available ? "✅" : "❌",
-                    version: env.uv_version || ""
-                }));
-                appendLog(t("voice.local.diagnose.log_venv", {
-                    status: env.venv_exists ? "✅" : "❌",
-                    version: env.venv_python_version || ""
-                }));
-                appendLog(t("voice.local.diagnose.log_torch", {
-                    status: env.torch_installed ? "✅" : "❌",
-                    version: env.torch_version || ""
-                }));
-                appendLog(t("voice.local.diagnose.log_funasr", {
-                    status: env.funasr_installed ? "✅" : "❌",
-                    version: env.funasr_version || ""
-                }));
-                appendLog(t("voice.local.diagnose.log_server_running", {
-                    status: env.server_running ? "✅" : "❌",
-                    port: env.server_port
-                }));
-                appendLog(t("voice.local.diagnose.log_server_ready", {status: env.server_ready ? "✅" : "❌"}));
-                if (env.model_status) {
-                    appendLog(t("voice.local.diagnose.log_model_status", {status: env.model_status}));
-                }
-                if (env.websocket_ready !== undefined) {
-                    appendLog(t("voice.local.diagnose.log_websocket_ready", {
-                        status: env.websocket_ready ? "✅" : "❌",
-                        err: env.websocket_error ? "(" + env.websocket_error + ")" : ""
-                    }));
-                }
-
-                const cfg = report.config || {};
-                appendLog(t("voice.local.diagnose.log_config", {
-                    mode: cfg.mode,
-                    model: cfg.local_model_id || "—",
-                    device: cfg.device,
-                    streaming: cfg.streaming_mode
-                }));
-
-                if (report.api_test) {
-                    const api = report.api_test;
-                    if (api.skipped) {
-                        appendLog(t("voice.local.diagnose.log_api_skip", {reason: api.reason}));
-                    } else if (api.result?.success) {
-                        appendLog(t("voice.local.diagnose.log_api_success", {text: api.result.text}));
-                    } else if (api.result?.error) {
-                        appendLog(t("voice.local.diagnose.log_api_fail", {err: api.result.error}));
-                    }
-                }
-                appendLog(t("voice.local.diagnose.log_end"));
-            } catch (e) {
-                appendLog(t("voice.local.diagnose.log_failed", {err: e}));
-            } finally {
-                diagnoseBtn.disabled = false;
-                diagnoseBtn.textContent = t("voice.local.diagnose.title");
-            }
-        });
-    }
-
-    // ── 监听 Python 环境安装进度 ──
-    listen(EVENTS.PYTHON_ENV_PROGRESS, (event) => {
-        const p = event.payload;
-        if (!p) return;
-
-        if (p.stage === "complete" && p.status === "ready") {
-            if (statusText) statusText.textContent = t("voice.local.python_env.install_status_done");
-            if (setupBtn) {
-                setupBtn.classList.add("success");
-                setupBtn.textContent = t("voice.local.python_env.install_btn_ready");
-            }
-            if (startBtn) startBtn.disabled = false;
-            appendLog(t("voice.local.python_env.install_log_done"));
-            refreshEnv();
-        } else if (p.stage === "error") {
-            if (statusText) statusText.textContent = t("voice.local.python_env.install_status_failed", {err: p.error || ""});
-            if (setupBtn) {
-                setupBtn.classList.remove("success");
-                setupBtn.textContent = t("voice.local.python_env.install_btn");
-            }
-            appendLog(t("voice.local.python_env.install_log_failed", {err: p.error || ""}));
-        } else {
-            // 进度更新
-            const messages = {
-                uv: {starting: t("voice.install.uv.starting"), done: t("voice.install.uv.done")},
-                venv: {starting: t("voice.install.venv.starting"), done: t("voice.install.venv.done")},
-                torch: {installing: t("voice.install.torch.installing"), done: t("voice.install.torch.done")},
-                funasr: {installing: t("voice.install.funasr.installing"), done: t("voice.install.funasr.done")},
-            };
-            const msg = messages[p.stage]?.[p.status];
-            if (msg && statusText) statusText.textContent = msg;
-            if (msg) appendLog(`[Blink] ${msg}`);
-        }
-    });
-
-    // ── 回补历史日志 ──
-    // 服务可能在设置页打开前就自启动（auto_start_server），此时前端
-    // listen 尚未注册，日志只存在于后端缓冲区。先拉取历史日志再注册监听。
-    try {
-        const history = await invoke("get_funasr_log_history");
-        if (Array.isArray(history) && history.length > 0) {
-            _logLines = history.slice(-_MAX_LOG_LINES);
-            if (logPre) {
-                logPre.textContent = _logLines.join("\n");
-                logPre.scrollTop = logPre.scrollHeight;
-            }
-        }
-    } catch (e) {
-        console.error("[voice] get_funasr_log_history failed:", e);
-    }
-
-    // ── 监听 funasr-server 日志输出 ──
-    listen(EVENTS.FUNASR_SERVER_LOG, (event) => {
-        const line = event.payload?.line;
-        if (line) appendLog(line);
-    });
-
-    // ── 监听服务状态事件 ──
-    listen(EVENTS.FUNASR_SERVER_STATUS, (event) => {
-        const p = event.payload;
-        if (!p) return;
-
-        if (p.stage === "ready") {
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_ready", {model: p.model});
-            if (startBtn) {
-                startBtn.classList.add("running");
-                startBtn.textContent = t("voice.local.funasr.btn_running");
-                startBtn.disabled = false;
-            }
-            if (stopBtn) stopBtn.disabled = false;
-            appendLog(t("voice.local.funasr.log_started", {model: p.model}));
-        } else if (p.stage === "already_running") {
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_ready", {model: p.model});
-            if (startBtn) {
-                startBtn.classList.add("running");
-                startBtn.textContent = t("voice.local.funasr.btn_running");
-                startBtn.disabled = false;
-            }
-            if (stopBtn) stopBtn.disabled = false;
-            appendLog(t("voice.local.funasr.log_already_running", {model: p.model}));
-        } else if (p.stage === "error") {
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_error", {err: p.error || ""});
-            if (startBtn) {
-                startBtn.classList.remove("running");
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-                startBtn.disabled = false;
-            }
-            if (stopBtn) stopBtn.disabled = true;
-            appendLog(t("voice.local.funasr.log_error", {err: p.error || ""}));
-        } else if (p.stage === "starting") {
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_starting", {
-                model: p.model,
-                port: p.port
-            });
-            appendLog(t("voice.local.funasr.log_starting_detail", {
-                model: p.model,
-                port: p.port,
-                device: config.local_engine.device
-            }));
-        } else if (p.stage === "loading_model") {
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_loading_model", {model: p.model});
-            if (startBtn) {
-                startBtn.textContent = t("voice.local.funasr.btn_loading_model");
-                startBtn.disabled = true;
-            }
-            appendLog(t("voice.local.funasr.log_loading_model"));
-        } else if (p.stage === "setup_env") {
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_setup_env");
-            appendLog(t("voice.local.funasr.log_setup_env"));
-        }
-    });
-
-    function updateEnvUI(env) {
-        if (!statusText) return;
-
-        const parts = [];
-
-        if (!env.uv_available) {
-            parts.push(t("voice.env.uv.not_installed"));
-        } else {
-            parts.push(t("voice.env.uv.installed", {version: env.uv_version || ""}));
-        }
-
-        if (!env.venv_exists) {
-            parts.push(t("voice.env.venv.not_created"));
-        } else {
-            parts.push(t("voice.env.venv.created", {version: env.venv_python_version || ""}));
-        }
-
-        if (!env.torch_installed) {
-            parts.push(t("voice.env.torch.not_installed"));
-        } else {
-            parts.push(t("voice.env.torch.installed", {version: env.torch_version || ""}));
-        }
-
-        if (!env.funasr_installed) {
-            parts.push(t("voice.env.funasr.not_installed"));
-        } else {
-            parts.push(t("voice.env.funasr.installed", {version: env.funasr_version || ""}));
-        }
-
-        // 综合状态 + 按钮控制（不置灰，用绿色样式标记成功）
-        if (env.env_ready) {
-            if (setupBtn) {
-                setupBtn.classList.add("success");
-                setupBtn.textContent = t("voice.local.python_env.install_btn_ready");
-                setupBtn.disabled = false;
-            }
-            if (startBtn && !env.server_running) {
-                startBtn.classList.remove("running");
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-                startBtn.disabled = false;
-            }
-        } else {
-            if (setupBtn) {
-                setupBtn.classList.remove("success");
-                setupBtn.textContent = t("voice.local.python_env.install_btn");
-                setupBtn.disabled = false;
-            }
-            if (startBtn) {
-                startBtn.classList.remove("running");
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-                startBtn.disabled = true;
-            }
-        }
-
-        // 服务运行状态
-        if (env.server_running) {
-            if (startBtn) {
-                startBtn.classList.add("running");
-                startBtn.textContent = t("voice.local.funasr.btn_running");
-                startBtn.disabled = false;
-            }
-            if (stopBtn) stopBtn.disabled = false;
-            if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.server_running", {model: env.server_model});
-        } else {
-            if (startBtn && env.env_ready) {
-                startBtn.classList.remove("running");
-                startBtn.textContent = t("voice.local.funasr.start_btn");
-                startBtn.disabled = false;
-            }
-            if (stopBtn) stopBtn.disabled = true;
-        }
-
-        // 设备选择器在服务运行时禁用
-        if (deviceSelect) {
-            deviceSelect.disabled = env.server_running;
-        }
-
-        statusText.innerHTML = parts.join("<br>");
-
-        // Python 环境卡片：环境就绪时自动收起（仅显示摘要），未就绪时自动展开
-        const envCard = document.getElementById("python-env-card");
-        const envSummary = document.getElementById("python-env-summary");
-        if (envCard && envSummary) {
-            if (env.env_ready) {
-                envSummary.textContent = t("voice.local.python_env.summary_ready");
-                envSummary.classList.add("ready");
-                envCard.open = false;
-            } else {
-                envSummary.textContent = t("voice.local.python_env.summary_not_ready");
-                envSummary.classList.remove("ready");
-                envCard.open = true;
-            }
-        }
-    }
-}
-
 // ── 音频调试测试 ──────────────────────────────────────────────────────
 
 let audioTestActive = false;
@@ -1101,145 +570,72 @@ function initAudioTest(config) {
     });
 }
 
-// ── helper ────────────────────────────────────────────────────────────
+// ── FunASR 本地模型选择（业务设置） ──────────────────────────────────────────
 
+/**
+ * 初始化本地模型选择器。
+ *
+ * 模型列表来自后端 `list_stt_models`，选择后通过 `download_stt_model` 保存。
+ * 这是语音业务设置（选哪个模型），不是生命周期管理（安装/启停）。
+ */
+async function initLocalModelSelect(config) {
+    const select = document.getElementById("voice-local-model-select");
+    if (!select) return;
+
+    // 加载模型列表
+    let models;
+    try {
+        models = await invoke("list_stt_models");
+    } catch (e) {
+        console.error("list_stt_models failed:", e);
+        return;
+    }
+
+    if (!models || models.length === 0) {
+        const empty = document.createElement("option");
+        empty.textContent = t("voice.local.model.empty");
+        empty.disabled = true;
+        select.appendChild(empty);
+        return;
+    }
+
+    // 填充选项
+    for (const m of models) {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        const sizeStr = m.size_mb >= 1024
+            ? t("voice.local.model.size_gb", {size: (m.size_mb / 1024).toFixed(1)})
+            : t("voice.local.model.size_mb", {size: m.size_mb});
+        opt.textContent = t("voice.local.model.option", {name: m.display_name, params: m.params, size: sizeStr});
+        if (m.is_selected) {
+            opt.selected = true;
+        }
+        select.appendChild(opt);
+    }
+
+    // 选择变更 → 保存
+    select.addEventListener("change", async () => {
+        const modelId = select.value;
+        try {
+            await invoke("download_stt_model", {modelId});
+            // 更新 config 中的 funasr_model
+            const model = models.find((m) => m.id === modelId);
+            if (model) {
+                config.local_engine.funasr_model = model.funasr_model_id;
+                config.local_model_id = modelId;
+            }
+        } catch (e) {
+            console.error("download_stt_model failed:", e);
+        }
+    });
+}
+
+// ── FunASR 生命周期管理已迁移至引擎页 local-runtime controller ──
+// 以下函数保留为空壳，防止外部引用报错（后端旧兼容 commands 暂不删除）
+async function initFunasrEnv(_config) {
+    // migrated to engines/local-runtime
+}
 
 async function initSpaceManagement() {
-    const container = document.getElementById("stt-space-usage");
-    if (!container) return;
-
-    // 缓存最近一次加载的数据，语言切换时用它重渲染（避免重新探测）
-    let lastData = null;
-
-    async function loadUsage() {
-        // 首次加载时显示 loading；刷新时保留旧内容避免闪屏
-        const isFirstLoad = !container.querySelector(".stt-space-row");
-        if (isFirstLoad) {
-            container.innerHTML = `<div class="stt-space-loading">${t("voice.local.space.loading")}</div>`;
-        }
-        try {
-            const data = await invoke("get_stt_space_usage");
-            lastData = data;
-            renderUsage(data);
-        } catch (e) {
-            console.error("get_stt_space_usage failed:", e);
-            container.innerHTML = `<div class="stt-space-loading">${t("voice.local.space.load_failed")}</div>`;
-        }
-    }
-
-    // 语言切换时用缓存数据重渲染（仅在已加载过的情况下）
-    onLangChange(() => {
-        if (lastData) renderUsage(lastData);
-    });
-
-    function renderUsage(data) {
-        const items = data.items || [];
-        const total = data.total_mb || 0;
-
-        let html = items.map((item) => `
-      <div class="stt-space-row">
-        <div>
-          <div class="stt-space-label">${item.label}</div>
-          <div class="stt-space-path">${item.path}</div>
-        </div>
-        <div class="stt-space-size">${formatSize(item.size_mb)}</div>
-      </div>
-    `).join("");
-
-        html += `
-      <div class="stt-space-total">
-        <span class="stt-space-total-label">${t("voice.local.space.total_label")}</span>
-        <span class="stt-space-total-size">${formatSize(total)}</span>
-      </div>
-      <div class="stt-space-actions">
-        <button type="button" class="stt-space-cleanup-btn" id="stt-space-cleanup-btn">${t("voice.local.space.cleanup_btn")}</button>
-        <button type="button" class="stt-space-open-folder-btn" id="stt-space-open-folder-btn">${t("voice.local.space.open_folder_btn")}</button>
-        <button type="button" class="stt-space-refresh-btn" id="stt-space-refresh-btn">${t("voice.local.space.refresh_btn")}</button>
-      </div>
-      <p class="stt-space-hint">
-        ${t("voice.local.space.hint")}
-      </p>
-    `;
-
-        container.innerHTML = html;
-
-        const cleanupBtn = document.getElementById("stt-space-cleanup-btn");
-        if (cleanupBtn) {
-            cleanupBtn.addEventListener("click", async () => {
-                // 检查服务是否正在运行——如果在运行，提醒用户先停止
-                let serverRunning = false;
-                try {
-                    const env = await invoke("get_funasr_env");
-                    serverRunning = env.server_running;
-                } catch (e) {
-                    // 查询失败，继续清理流程
-                }
-
-                if (serverRunning) {
-                    const confirmed = await confirmDialog(t("voice.local.space.cleanup_confirm_body"));
-                    if (!confirmed) return;
-                    appendLog(t("voice.local.space.cleanup_log_stopping"));
-                    try {
-                        await invoke("stop_funasr_server");
-                        appendLog(t("voice.local.space.cleanup_log_stopped"));
-
-                        // 同步重置启动/停止按钮状态（服务已在后端停止）
-                        const startBtn = document.getElementById("funasr-start-btn");
-                        const stopBtn = document.getElementById("funasr-stop-btn");
-                        const serverStatusText = document.getElementById("funasr-server-status-text");
-                        if (startBtn) {
-                            startBtn.classList.remove("running");
-                            startBtn.textContent = t("voice.local.funasr.start_btn");
-                            startBtn.disabled = false;
-                        }
-                        if (stopBtn) stopBtn.disabled = true;
-                        if (serverStatusText) serverStatusText.textContent = t("voice.local.space.cleanup_status_stopped");
-                    } catch (e) {
-                        console.error("stop_funasr_server failed:", e);
-                        appendLog(t("voice.local.space.cleanup_log_stop_failed", {err: e}));
-                    }
-                }
-
-                cleanupBtn.disabled = true;
-                cleanupBtn.textContent = t("voice.local.space.cleanup_btn_cleaning");
-                try {
-                    await invoke("cleanup_stt_space");
-                    cleanupBtn.textContent = t("voice.local.space.cleanup_btn_done");
-                    appendLog(t("voice.local.space.cleanup_log_done"));
-                    setTimeout(() => {
-                        loadUsage();
-                    }, 1000);
-                } catch (e) {
-                    console.error("cleanup_stt_space failed:", e);
-                    cleanupBtn.textContent = t("voice.local.space.cleanup_btn_failed");
-                    cleanupBtn.disabled = false;
-                }
-            });
-        }
-
-        const refreshBtn = document.getElementById("stt-space-refresh-btn");
-        if (refreshBtn) {
-            refreshBtn.addEventListener("click", loadUsage);
-        }
-
-        const openFolderBtn = document.getElementById("stt-space-open-folder-btn");
-        if (openFolderBtn) {
-            openFolderBtn.addEventListener("click", async () => {
-                try {
-                    await invoke("open_stt_folder");
-                } catch (e) {
-                    console.error("open_stt_folder failed:", e);
-                    appendLog(t("voice.local.space.log_open_failed", {err: e}));
-                }
-            });
-        }
-    }
-
-    function formatSize(mb) {
-        if (mb < 1) return `${(mb * 1024).toFixed(0)} KB`;
-        if (mb < 1024) return `${mb.toFixed(1)} MB`;
-        return `${(mb / 1024).toFixed(2)} GB`;
-    }
-
-    await loadUsage();
+    // migrated to engines/local-runtime
 }

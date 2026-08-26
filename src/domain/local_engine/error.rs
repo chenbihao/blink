@@ -223,6 +223,8 @@ pub enum LocalEngineErrorCode {
     InvalidConfig,
     /// 操作不支持（如 engine_id 不在 allowlist）。
     Unsupported,
+    /// 操作被取消。
+    Cancelled,
     /// 操作被拒绝（如迟到 operation_id）。
     Rejected,
     /// 服务不可达。

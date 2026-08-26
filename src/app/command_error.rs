@@ -195,6 +195,39 @@ impl From<crate::domain::sticky::StickyWorkflowError> for CommandError {
     }
 }
 
+// ── LocalEngineError 映射（0.22.5）────────────────────────────────────────
+
+/// LocalEngineError → CommandError 映射。
+///
+/// 稳定 code 保留为 snake_case，detail 投影 phase + 原始 detail。
+impl From<crate::domain::local_engine::LocalEngineError> for CommandError {
+    fn from(e: crate::domain::local_engine::LocalEngineError) -> Self {
+        use crate::domain::local_engine::{ErrorPhase, LocalEngineErrorCode};
+
+        let retryable = matches!(
+            e.code,
+            LocalEngineErrorCode::Timeout
+                | LocalEngineErrorCode::PortConflict
+                | LocalEngineErrorCode::Rejected
+                | LocalEngineErrorCode::ServiceUnreachable
+                | LocalEngineErrorCode::ModelNotReady
+        );
+
+        let detail = serde_json::json!({
+            "phase": format!("{:?}", e.phase).to_lowercase(),
+            "detail": e.detail,
+        });
+
+        // code: serde 序列化为 snake_case 字符串（Debug 格式不保留 snake_case）
+        let code = serde_json::to_value(e.code)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{:?}", e.code).to_lowercase());
+
+        Self::with_detail(&code, e.action_hint, retryable, detail)
+    }
+}
+
 // ── 测试 ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
