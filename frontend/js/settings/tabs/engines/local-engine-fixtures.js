@@ -127,6 +127,7 @@ export function makeLog(engineId, instanceId, seq, text, overrides = {}) {
     return deepMerge({
         engine_id: engineId,
         instance_id: instanceId,
+        operation_id: null,
         seq: String(seq),
         timestamp: "2026-08-26T00:00:00Z",
         level: "info",
@@ -175,6 +176,40 @@ export function makeStorage(engineId, overrides = {}) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * 构造 ModelCatalogItemDto mock。
+ * @param {Object} overrides
+ */
+export function makeModel(overrides = {}) {
+    return deepMerge({
+        engine_id: "funasr",
+        model_id: "iic/SenseVoiceSmall",
+        display_name: "SenseVoiceSmall",
+        estimated_size_mb: 234,
+        install_state: "installed",
+        verification_state: "verified",
+        compatibility: "compatible",
+        is_selected: false,
+        is_active: false,
+        model_revision: "v1",
+        descriptor_model_id: "iic/SenseVoiceSmall",
+    }, overrides);
+}
+
+/**
+ * 构造 EnginePreferencesDto mock。
+ * @param {Object} overrides
+ */
+export function makePreferences(overrides = {}) {
+    return deepMerge({
+        engine_id: "funasr",
+        compute_preference: "cpu",
+        auto_start: false,
+        lifecycle: null,
+        requires_rebuild: false,
+    }, overrides);
+}
 
 function deepMerge(target, source) {
     // null/undefined → 直接替换

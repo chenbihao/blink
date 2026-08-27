@@ -64,7 +64,7 @@ impl EventPort for TauriEventPort {
         }
     }
 
-    /// 广播引擎日志条目。
+    /// 广播引擎日志条目（运行时日志，以 `instance_id` 隔离）。
     ///
     /// 通用事件 `blink://local-engine-log` payload 与 `get_local_engine_logs`
     /// command 返回的 `EngineLogDto` **完全相同**——`seq` 字符串化，
@@ -77,6 +77,7 @@ impl EventPort for TauriEventPort {
         let payload = EngineLogDto {
             engine_id: engine_id.as_str().to_string(),
             instance_id: instance_id.to_string(),
+            operation_id: None,
             seq: seq.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             level: "info".to_string(),
@@ -91,6 +92,31 @@ impl EventPort for TauriEventPort {
                 serde_json::json!({ "line": line }),
             );
         }
+    }
+
+    /// 广播安装日志条目（安装时日志，以 `operation_id` 隔离）。
+    ///
+    /// 与运行时日志共用 `blink://local-engine-log` 事件，
+    /// payload 中的 `operation_id` 字段区分安装日志。
+    /// `instance_id` 为空字符串，前端可通过 `operation_id` 过滤安装日志。
+    fn emit_install_log(
+        &self,
+        engine_id: &EngineId,
+        operation_id: &str,
+        seq: u64,
+        level: &str,
+        text: &str,
+    ) {
+        let payload = EngineLogDto {
+            engine_id: engine_id.as_str().to_string(),
+            instance_id: String::new(),
+            operation_id: Some(operation_id.to_string()),
+            seq: seq.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: level.to_string(),
+            text: text.to_string(),
+        };
+        let _ = self.app.emit(EventNames::LOCAL_ENGINE_LOG, payload);
     }
 }
 

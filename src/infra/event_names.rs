@@ -62,16 +62,79 @@ impl EventNames {
     pub const CONTEXT_MENU_ACTION: &str = "blink://context-menu-action";
 
     // ── Python 环境 / FunASR / 音频测试 ──
+    /// 预留：Python 环境安装进度事件，当前版本由 LOCAL_ENGINE_STATUS 统一投影。
+    #[allow(dead_code)]
     pub const PYTHON_ENV_PROGRESS: &str = "blink://python-env-progress";
     pub const FUNASR_SERVER_LOG: &str = "blink://funasr-server-log";
     pub const FUNASR_SERVER_STATUS: &str = "blink://funasr-server-status";
     pub const AUDIO_TEST_LEVEL: &str = "blink://audio-test-level";
 
     // ── 本地引擎（0.22.3）──
-    /// 通用引擎状态快照。payload: `{ engine_id, service_epoch, revision, snapshot }`。
+    /// 通用引擎状态快照。payload: `EngineStatusDto`。
+    ///
+    /// ```json
+    /// {
+    ///   "engine_id": "funasr",
+    ///   "service_epoch": "epoch-0016a3f4...",
+    ///   "revision": "3",
+    ///   "status": {
+    ///     "desired": "running",
+    ///     "operation": {
+    ///       "kind": "installing",
+    ///       "operation_id": "op-abc123",
+    ///       "stage": "downloading",
+    ///       "cancellable": true
+    ///     },
+    ///     "environment": "ready",
+    ///     "process": { "state": "running", "pid": 1234 },
+    ///     "service": "healthy",
+    ///     "model": "ready",
+    ///     "backend": { ... },
+    ///     "last_error": null
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// 前端去重：`engine_id + service_epoch + revision`。
+    /// `operation.kind` wire 值见 `OperationKind`（idle/installing/.../cleaning）。
+    /// `operation.stage` wire 值见 `OperationStage`（pending/preparing/.../failed）。
+    /// i18n key：`local_engine.operation.{kind}` / `local_engine.operation.stage.{stage}`。
+    ///
     /// 旧 FunASR 专属事件 `FUNASR_SERVER_STATUS` 由 app 层兼容投影从此事件派生。
     pub const LOCAL_ENGINE_STATUS: &str = "blink://local-engine-status";
-    /// 通用引擎日志条目。payload: `{ engine_id, instance_id, seq, timestamp, level, text }`。
+
+    /// 通用引擎日志条目。payload: `EngineLogDto`。
+    ///
+    /// **运行时日志**（instance_id 隔离）：
+    /// ```json
+    /// {
+    ///   "engine_id": "funasr",
+    ///   "instance_id": "inst-abc123",
+    ///   "operation_id": null,
+    ///   "seq": "42",
+    ///   "timestamp": "2026-01-15T10:30:00+00:00",
+    ///   "level": "info",
+    ///   "text": "server ready on port 10021"
+    /// }
+    /// ```
+    ///
+    /// **安装日志**（operation_id 隔离）：
+    /// ```json
+    /// {
+    ///   "engine_id": "funasr",
+    ///   "instance_id": "",
+    ///   "operation_id": "op-abc123",
+    ///   "seq": "5",
+    ///   "timestamp": "2026-01-15T10:31:00+00:00",
+    ///   "level": "info",
+    ///   "text": "uv pip install --require-hashes torch==2.5.0"
+    /// }
+    /// ```
+    ///
+    /// 前端去重：`engine_id + (instance_id 或 operation_id) + seq`。
+    /// `seq` 为字符串（避免 JS u64 精度丢失）。
+    /// 安装日志通过 `operation_id` 过滤；运行时日志通过 `instance_id` 过滤。
+    ///
     /// 旧 FunASR 专属事件 `FUNASR_SERVER_LOG` 由 app 层兼容投影从此事件派生。
     pub const LOCAL_ENGINE_LOG: &str = "blink://local-engine-log";
 

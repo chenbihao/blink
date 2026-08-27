@@ -1253,11 +1253,18 @@ export const en = {
     "local_engine.status.model": "Model",
 
     "local_engine.operation.install": "Install",
+    "local_engine.operation.installing": "Installing",
     "local_engine.operation.start": "Start",
     "local_engine.operation.stop": "Stop",
     "local_engine.operation.repair": "Repair",
+    "local_engine.operation.repairing": "Repairing",
     "local_engine.operation.cleanup": "Cleanup",
+    "local_engine.operation.cleaning": "Cleaning",
+    "local_engine.operation.delete": "Delete",
     "local_engine.operation.cancel": "Cancel",
+    "local_engine.operation.updating": "Update",
+    "local_engine.operation.migrating": "Migrate",
+    "local_engine.operation.rolling_back": "Rollback",
     "local_engine.operation.stage.downloading": "Downloading",
     "local_engine.operation.stage.installing": "Installing",
     "local_engine.operation.stage.starting": "Starting",
@@ -1266,6 +1273,15 @@ export const en = {
     "local_engine.operation.stage.cleaning": "Cleaning",
     "local_engine.operation.stage.idle": "Idle",
     "local_engine.operation.stage.pending": "Pending",
+    "local_engine.operation.stage.preparing": "Preparing",
+    "local_engine.operation.stage.verifying": "Verifying",
+    "local_engine.operation.stage.promoting": "Promoting",
+    "local_engine.operation.stage.switching": "Switching",
+    "local_engine.operation.stage.validating": "Validating",
+    "local_engine.operation.stage.completed": "Completed",
+    "local_engine.operation.stage.cancelled": "Cancelled",
+    "local_engine.operation.stage.failed": "Failed",
+    "local_engine.operation.stage.done": "Done",
 
     "local_engine.backend.requested": "Requested device",
     "local_engine.backend.resolved": "Resolved profile",
@@ -1347,4 +1363,125 @@ export const en = {
     "voice.local.runtime_link.title": "FunASR Local Engine",
     "voice.local.runtime_link.desc": "Environment setup, service start/stop, device selection, and logs have been migrated to the Engines tab.",
     "voice.local.runtime_link.btn": "Go to Local Model Runtime",
+
+    // ── Runtime foundation (0.22.6) ──
+    "local_engine.foundation.title": "Runtime Foundation",
+    "local_engine.foundation.desc": "Shared Python runtime and public cache for all engines. Read-only.",
+    "local_engine.foundation.python_provider": "Python provider",
+    "local_engine.foundation.runtime_kind": "Runtime type",
+    "local_engine.foundation.uv_source": "uv source",
+    "local_engine.foundation.uv_version": "uv version",
+    "local_engine.foundation.managed_python": "Managed Python",
+    "local_engine.foundation.shared_cache": "Shared cache",
+    "local_engine.foundation.root_dir": "Root directory",
+    "local_engine.foundation.refresh": "Refresh",
+    "local_engine.foundation.open_dir": "Open root directory",
+    "local_engine.foundation.open_engine_dir": "Open engine directory",
+    "local_engine.foundation.collapsed_hint": "Expand to view uv/Python/cache foundation info",
+    "local_engine.foundation.no_data": "No foundation data available",
+    "local_engine.foundation.python_venv": "Python virtual environment",
+
+    // ── FunASR auto_start toggle (0.22.6) ──
+    "local_engine.config.auto_start": "Auto-start on launch",
+    "local_engine.config.auto_start_hint": "Automatically start FunASR service after Blink launches",
+
+    // ── Engine card: configured vs active model (0.22.6) ──
+    "local_engine.model.configured": "Configured model",
+    "local_engine.model.active": "Active model",
+    "local_engine.model.mismatch_hint": "Configuration does not match the active model. Restart to apply.",
+    "local_engine.model.pending_restart": "Pending restart",
+    "local_engine.model.not_effective": "Not effective",
+
+    // ── Model list (0.22.6) ──
+    "local_engine.model.list.title": "Models",
+    "local_engine.model.list.empty": "No model candidates",
+    "local_engine.model.column.name": "Model",
+    "local_engine.model.column.size": "Size",
+    "local_engine.model.column.status": "Status",
+    "local_engine.model.column.actions": "Actions",
+    "local_engine.model.action.download": "Download",
+    "local_engine.model.action.cancel": "Cancel",
+    "local_engine.model.action.repair": "Repair",
+    "local_engine.model.action.delete": "Delete",
+    "local_engine.model.action.download_confirm_title": "Download model",
+    "local_engine.model.action.download_confirm_desc": "Estimated size {size}. You can cancel during download. Start downloading?",
+    "local_engine.model.action.download_confirm_btn": "Download",
+    "local_engine.model.action.delete_confirm_title": "Delete model",
+    "local_engine.model.action.delete_confirm_desc": "Deleting will free cache space. This cannot be undone.",
+    "local_engine.model.action.delete_confirm_btn": "Delete",
+
+    // ── Model install state (12 states, aligned with backend to_string) ──
+    "local_engine.model.state.not_installed": "Not installed",
+    "local_engine.model.state.downloading": "Downloading",
+    "local_engine.model.state.staging": "Staging",
+    "local_engine.model.state.verifying": "Verifying",
+    "local_engine.model.state.installed": "Installed",
+    "local_engine.model.state.repairing": "Repairing",
+    "local_engine.model.state.download_failed": "Download failed",
+    "local_engine.model.state.staging_failed": "Staging failed",
+    "local_engine.model.state.verification_failed": "Verification failed",
+    "local_engine.model.state.repair_failed": "Repair failed",
+    "local_engine.model.state.deleting": "Deleting",
+    "local_engine.model.state.delete_blocked": "Delete blocked",
+
+    // ── Model verification state (5 states) ──
+    "local_engine.model.verification.unknown": "Unknown",
+    "local_engine.model.verification.verified": "Verified",
+    "local_engine.model.verification.mismatched": "Mismatched",
+    "local_engine.model.verification.unverified": "Unverified",
+    "local_engine.model.verification.corrupted": "Corrupted",
+
+    // ── Model compatibility ──
+    "local_engine.model.compatibility.unknown": "Unknown",
+    "local_engine.model.compatibility.compatible": "Compatible",
+    "local_engine.model.compatibility.incompatible": "Incompatible",
+
+    // ── Model operation kind (reuse install/repair, add delete) ──
+    "local_engine.operation.delete": "Delete",
+
+    // ── Model operation stage (partially overlap engine stages, add preparing/promoting/done/cancelled/failed) ──
+    "local_engine.operation.stage.preparing": "Preparing",
+    "local_engine.operation.stage.promoting": "Promoting",
+    "local_engine.operation.stage.done": "Done",
+    "local_engine.operation.stage.cancelled": "Cancelled",
+    "local_engine.operation.stage.failed": "Failed",
+
+    // ── Delete conflict (structured) ──
+    "local_engine.model.conflict.title": "Cannot delete",
+    "local_engine.model.conflict.referenced_by_config": "Config {field}={value} references this model",
+    "local_engine.model.conflict.active_in_instance": "Running instance {instance} is using this model",
+    "local_engine.model.conflict.referenced_by_descriptor": "Engine default model {model} references this model",
+
+    // ── Diagnostics (0.22.6) ──
+    "local_engine.diagnostic.title": "Diagnostics",
+    "local_engine.diagnostic.btn": "Diagnostics",
+    "local_engine.diagnostic.copy": "Copy diagnostics",
+    "local_engine.diagnostic.env": "Environment",
+    "local_engine.diagnostic.process": "Process",
+    "local_engine.diagnostic.service": "Service",
+    "local_engine.diagnostic.pid": "PID",
+    "local_engine.diagnostic.recent_logs": "Recent logs",
+    "local_engine.diagnostic.no_logs": "No logs",
+    "local_engine.diagnostic.loading": "Running diagnostics…",
+
+    // ── Orphan engine stop (0.22.6) ──
+    "local_engine.diagnostic.stop_orphan": "Stop orphan process",
+    "local_engine.diagnostic.stop_orphan_confirm": "This will terminate the leftover engine process and clear its lease. Continue?",
+"local_engine.diagnostic.orphan_stopped": "Orphan process terminated",
+"local_engine.diagnostic.orphan_not_stopped": "Failed to stop: {reason}",
+"local_engine.diagnostic.orphan_error": "Operation failed: {error}",
+"local_engine.diagnostic.cancel": "Cancel",
+"local_engine.diagnostic.confirm": "Confirm",
+
+    // ── Log source labels (distinguish operation vs instance) ──
+    "local_engine.log.source.operation": "Operation",
+    "local_engine.log.source.instance": "Instance",
+
+    // ── Voice tab local model selector (0.22.6 H4) ──
+    "voice.local.model.select_label": "Local STT model",
+    "voice.local.model.empty": "No installed models available",
+    "voice.local.model.goto_engines_install": "Go to Engines to install",
+    "voice.local.model.goto_engines_hint": "Download a FunASR model from the Engines tab first",
+    "voice.local.model.option": "{engine} · {model}",
+    "voice.local.model.save_failed": "Selection failed, rolled back",
 };

@@ -860,6 +860,165 @@ fn main() {
                 "LocalEngineService 已构造（funasr + paddleocr adapter 已注册）"
             );
 
+            // 0.22.6 H5: 构造 ModelService 并注册为 managed state
+            //
+            // ModelService 独立于 LocalEngineService，专注模型资产生命周期
+            // （下载/校验/删除/修复），与引擎进程管理正交。
+            // 目前只注册 FunASR 模型。
+            let model_service = std::sync::Arc::new(
+                crate::app::local_engine::model_service::make_funasr_model_service(),
+            );
+            app.manage(model_service);
+            tracing::info!("ModelService 已构造（funasr 模型已注册）");
+
+            // 0.22.6.6: 后台扫描遗留 lease——基于证据的 fail-closed 恢复
+            //
+            // 不阻塞 Alt+Space 主链路——在 spawn 的 async task 中执行。
+            // 所有阻塞操作（进程查询、文件扫描）均移至 spawn_blocking。
+            //
+            // 恢复策略（fail-closed）：
+            // 1. 扫描 lease 文件（spawn_blocking）
+            // 2. 对每个 lease 构造 ProcessEvidence（spawn_blocking 中查询 OS）
+            // 3. 尝试 health 验证（async reqwest）
+            // 4. 调用 decide_recovery 纯函数决策
+            // 5. PidNotFound → 清除 stale lease
+            //    其他 DoNotAdopt → 只产结构化诊断日志，不自动 kill/adopt
+            //    Adoptable → 记录 info 日志（仍不自动接管，由用户在设置页确认）
+            {
+                tauri::async_runtime::spawn(async move {
+                    // 延迟 2s 避免与启动竞争——扫描不紧急
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                    // 0.22.6.6: lease 文件扫描移至 spawn_blocking（同步 IO）
+                    let leases = tokio::task::spawn_blocking(|| {
+                        crate::infra::local_engine::lease::scan_leases()
+                    })
+                    .await
+                    .unwrap_or_default();
+
+                    if leases.is_empty() {
+                        tracing::debug!("lease 扫描: 无遗留 lease");
+                        return;
+                    }
+
+                    tracing::warn!(
+                        count = leases.len(),
+                        "lease 扫描: 发现遗留 lease（上次 Blink 可能非正常退出）"
+                    );
+
+                    for lease in &leases {
+                        tracing::warn!(
+                            engine_id = %lease.engine_id,
+                            instance_id = %lease.instance_id,
+                            pid = lease.pid,
+                            endpoint = %lease.endpoint,
+                            "遗留 lease 发现——开始基于证据的恢复决策"
+                        );
+
+                        // 0.22.6.6: 在 spawn_blocking 中查询进程身份
+                        // （OpenProcess / QueryFullProcessImageNameW / GetProcessTimes 均为阻塞调用）
+                        let pid = lease.pid;
+                        let process_evidence =
+                            tokio::task::spawn_blocking(move || {
+                                crate::infra::local_engine::lease_recovery::build_process_evidence(pid)
+                            })
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    engine_id = %lease.engine_id,
+                                    pid = lease.pid,
+                                    error = %e,
+                                    "spawn_blocking 查询进程身份失败"
+                                );
+                                crate::infra::local_engine::lease::ProcessEvidence {
+                                    pid_exists: false,
+                                    actual_executable: None,
+                                    actual_creation_time_ms: None,
+                                }
+                            });
+
+                        // 尝试 health 验证（async reqwest）
+                        let health_evidence =
+                            crate::infra::local_engine::lease_recovery::probe_health_evidence(
+                                &lease.endpoint,
+                            )
+                            .await;
+
+                        // 调用纯函数 decide_recovery
+                        let decision = crate::infra::local_engine::lease::decide_recovery(
+                            lease,
+                            &process_evidence,
+                            health_evidence.as_ref(),
+                        );
+
+                        match &decision {
+                            crate::infra::local_engine::lease::RecoveryDecision::Adoptable {
+                                engine_id,
+                                instance_id,
+                                pid,
+                            } => {
+                                // 全部证据闭合——但仍不自动接管
+                                // 由用户在设置页确认是否手动停止/接管
+                                tracing::info!(
+                                    engine_id = %engine_id,
+                                    instance_id = %instance_id,
+                                    pid,
+                                    "lease 恢复决策: Adoptable（全部证据闭合）——不自动接管，需用户在设置页确认"
+                                );
+                            }
+                            crate::infra::local_engine::lease::RecoveryDecision::DoNotAdopt(diag) => {
+                                use crate::infra::local_engine::lease::RecoveryReason::*;
+                                match &diag.reason {
+                                    PidNotFound => {
+                                        tracing::info!(
+                                            engine_id = %diag.engine_id,
+                                            pid = diag.pid,
+                                            reason = "PidNotFound",
+                                            detail = %diag.detail,
+                                            "lease 恢复决策: PID 不存在——清除 stale lease"
+                                        );
+                                        // 清除 stale lease（spawn_blocking 中的同步 IO）
+                                        let engine_id = lease.engine_id.clone();
+                                        let instance_id = lease.instance_id.clone();
+                                        if let Err(e) =
+                                            tokio::task::spawn_blocking(move || {
+                                                crate::infra::local_engine::lease::remove_lease(
+                                                    &engine_id,
+                                                    &instance_id,
+                                                )
+                                            })
+                                            .await
+                                            .unwrap_or_else(|e| {
+                                                Err(crate::infra::local_engine::lease::LeaseError::Io(
+                                                    format!("spawn_blocking 失败: {e}"),
+                                                ))
+                                            })
+                                        {
+                                            tracing::warn!(
+                                                engine_id = %lease.engine_id,
+                                                error = %e,
+                                                "清除 stale lease 失败"
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        // 其他原因——只产结构化诊断，不自动 kill/adopt
+                                        tracing::warn!(
+                                            engine_id = %diag.engine_id,
+                                            instance_id = %diag.instance_id,
+                                            pid = diag.pid,
+                                            reason = ?diag.reason,
+                                            detail = %diag.detail,
+                                            "lease 恢复决策: DoNotAdopt——不接管，需用户在设置页确认"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             // 0.22.4: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
             //
             // - OcrCoordinator 持有 LocalEngineService 受限依赖
@@ -893,13 +1052,15 @@ fn main() {
             // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
             //
             // 0.22.3: 改为调用 LocalEngineService.start("funasr")
-            // 语义不变：仍只在 SttMode::Local 且 auto_start_server=true 时启动
-            // 保留延迟/非阻塞策略，不能增加 Alt+Space 启动路径负担
+            // 0.22.6 H4: 自启语义——只有语音功能启用、本地模式、选择模型可用且
+            // auto_start=true 时启动；读取/保存本身不隐式启动。
+            // 是否立即启动由显式 start action 决定。
             {
                 let stt_config = app::stt_config::get_stt_config();
                 if stt_config.enabled
                     && stt_config.mode == app::stt_config::SttMode::Local
                     && stt_config.local_engine.auto_start_server
+                    && stt_config.local_stt_selection.is_some()
                 {
                     let svc = local_engine_service.clone();
                     tauri::async_runtime::spawn(async move {
@@ -1229,6 +1390,9 @@ app::commands::toggle_default_trigger,
             app::commands::list_stt_models,
             app::commands::download_stt_model,
             app::commands::delete_stt_model,
+            // 0.22.6 H4: 新 STT 选择命令
+            app::commands::list_selectable_stt_models,
+            app::commands::set_local_stt_selection,
             app::commands::cancel_voice_recording,
             app::commands::is_voice_recording,
             app::commands::list_audio_devices,
@@ -1337,12 +1501,28 @@ app::commands::ensure_mcp_connected,
             app::commands::get_local_engine_logs,
             app::commands::install_local_engine,
             app::commands::start_local_engine,
-            app::commands::stop_local_engine,
-            app::commands::repair_local_engine,
+app::commands::stop_local_engine,
+// 0.22.6.6: 手动停止孤儿引擎进程
+app::commands::stop_orphan_engine,
+app::commands::repair_local_engine,
             // 0.22.5 H2: storage / cleanup / cancel
             app::commands::get_local_engine_storage,
             app::commands::cleanup_local_engine,
             app::commands::cancel_local_engine_operation,
+            // 0.22.6 H4: 引擎偏好命令
+            app::commands::get_local_engine_preferences,
+            app::commands::set_local_engine_preferences,
+            // 0.22.6 H4: 只读运行时诊断与打开目录命令
+            app::commands::get_runtime_foundation_status,
+            app::commands::get_engine_diagnostics,
+            app::commands::open_engine_folder,
+            app::commands::open_runtime_folder,
+            // 0.22.6 H5: 模型生命周期命令
+            app::commands::list_engine_models,
+            app::commands::install_engine_model,
+            app::commands::delete_engine_model,
+            app::commands::repair_engine_model,
+            app::commands::cancel_model_operation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -37,6 +37,7 @@ use crate::domain::local_engine::{
     LocalEngineAdapter, LocalEngineError, LocalEngineErrorCode, ModelHealth, OperationKind,
     OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
 };
+use crate::infra::local_engine::lease::{ProcessLease, remove_lease, write_lease};
 use crate::infra::local_engine::port::{
     EndpointAllocator, IdentityVerification, ServiceIdentityInput, ServiceIdentityResult,
     generate_service_token,
@@ -46,11 +47,93 @@ use crate::infra::local_engine::runtime::{
     self, BackendState, ComputeBackend, ComputePreference, EngineId, ResolvedProfile,
     generate_operation_id,
 };
+use crate::infra::local_engine::state::ProcessStatus;
 
+use crate::infra::local_engine::providers::InstallSink;
 use crate::infra::local_engine::providers::ProviderDescriptor;
 use crate::infra::local_engine::providers::python::PythonVenvProvider;
 
 use super::registry::EngineRegistry;
+
+// ── InstallSinkAdapter (0.22.6 H5) ──────────────────────────────────────
+
+/// `InstallSink` 适配器——把 infra 层安装进度/日志桥接到 `EventPort`。
+///
+/// 持有 `EventPort` 引用、`engine_id`、`operation_id` 和日志序号计数器。
+/// `on_stage` 把阶段变更通过 `emit_status` 的 `operation.stage` 投影广播。
+/// `on_log` 把安装日志行通过 `emit_install_log` 广播，以 `operation_id` 隔离。
+///
+/// **洪泛保护**：使用简单的速率限制——每秒最多 50 条日志。
+/// **线程安全**：所有字段通过 `Mutex` 保护。
+struct InstallSinkAdapter {
+    event_port: Arc<dyn EventPort>,
+    engine_id: EngineId,
+    operation_id: String,
+    log_seq: std::sync::Mutex<u64>,
+    /// 上次速率限制窗口重置时间（毫秒）
+    rate_window: std::sync::Mutex<(std::time::Instant, u32)>,
+}
+
+impl InstallSinkAdapter {
+    fn new(event_port: Arc<dyn EventPort>, engine_id: EngineId, operation_id: String) -> Self {
+        Self {
+            event_port,
+            engine_id,
+            operation_id,
+            log_seq: std::sync::Mutex::new(0),
+            rate_window: std::sync::Mutex::new((std::time::Instant::now(), 0)),
+        }
+    }
+
+    /// 速率限制检查——每秒最多 50 条日志。
+    /// 返回 true 表示允许通过，false 表示被限流。
+    fn check_rate_limit(&self) -> bool {
+        let mut window = self.rate_window.lock().unwrap();
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(window.0);
+        if elapsed.as_secs() >= 1 {
+            // 重置窗口
+            *window = (now, 1);
+            true
+        } else if window.1 >= 50 {
+            // 超过限制
+            false
+        } else {
+            window.1 += 1;
+            true
+        }
+    }
+}
+
+impl InstallSink for InstallSinkAdapter {
+    fn on_stage(&self, stage: &str) {
+        tracing::debug!(
+            engine = %self.engine_id,
+            op = %self.operation_id,
+            stage = stage,
+            "install sink: stage"
+        );
+        // 阶段变更不需要 emit——InstallTransaction 内部不更新 EngineStatus，
+        // service 层在 install/repair 方法中通过 commit_status_internal 更新阶段。
+        // 这里只做 tracing 日志。
+    }
+
+    fn on_log(&self, level: &str, text: &str) {
+        // 速率限制
+        if !self.check_rate_limit() {
+            return;
+        }
+
+        let seq = {
+            let mut s = self.log_seq.lock().unwrap();
+            *s += 1;
+            *s
+        };
+
+        self.event_port
+            .emit_install_log(&self.engine_id, &self.operation_id, seq, level, text);
+    }
+}
 
 // ── StructuredLogEntry ─────────────────────────────────────────────────────
 
@@ -155,8 +238,22 @@ pub trait EventPort: Send + Sync {
     /// 广播引擎状态快照。
     fn emit_status(&self, snapshot: &EngineStatusSnapshot);
 
-    /// 广播引擎日志条目。
+    /// 广播引擎日志条目（运行时日志，以 `instance_id` 隔离）。
     fn emit_log(&self, engine_id: &EngineId, instance_id: &str, seq: u64, line: &str);
+
+    /// 广播安装日志条目（安装时日志，以 `operation_id` 隔离）。
+    ///
+    /// `level` 是 "info" / "warn" / "error"。
+    /// `text` 是已做 UTF-8 lossy + 长度截断的日志行。
+    /// `seq` 在同一 `operation_id` 内单调递增。
+    fn emit_install_log(
+        &self,
+        engine_id: &EngineId,
+        operation_id: &str,
+        seq: u64,
+        level: &str,
+        text: &str,
+    );
 }
 
 /// 空实现（测试/无事件场景用）。
@@ -166,6 +263,15 @@ pub struct NoopEventPort;
 impl EventPort for NoopEventPort {
     fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {}
     fn emit_log(&self, _engine_id: &EngineId, _instance_id: &str, _seq: u64, _line: &str) {}
+    fn emit_install_log(
+        &self,
+        _engine_id: &EngineId,
+        _operation_id: &str,
+        _seq: u64,
+        _level: &str,
+        _text: &str,
+    ) {
+    }
 }
 
 // ── LocalEngineService ────────────────────────────────────────────────────
@@ -204,7 +310,10 @@ pub struct LocalEngineService {
     /// 同步 process registry——独立于 async entries 锁。
     /// `shutdown_all_blocking` 直接读取此字段，不访问 entries。
     /// start 在 spawn 后登记，stop/spawn失败/health失败后移除。
-    process_registry: std::sync::Mutex<HashMap<ProcessKey, Arc<ManagedProcess>>>,
+    /// 0.22.6.4: 使用 Arc 包装，使 exit monitor 能持有引用并在验证身份后
+    /// 安全移除对应 ProcessKey 条目，避免 registry 泄漏。
+    /// 不形成强引用环：Arc 指向 Mutex，不指向 LocalEngineService 自身。
+    process_registry: Arc<std::sync::Mutex<HashMap<ProcessKey, Arc<ManagedProcess>>>>,
 }
 
 #[allow(dead_code)]
@@ -270,7 +379,7 @@ impl LocalEngineService {
             event_port,
             provider_descriptors,
             python_provider,
-            process_registry: std::sync::Mutex::new(HashMap::new()),
+            process_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
 
         // 0.22.3 Task B: 后台探测每个引擎的 current generation
@@ -449,6 +558,13 @@ impl LocalEngineService {
         self.set_operation_id(engine_id, Some(operation_id.clone()))
             .await;
 
+        // 0.22.6.2: 创建取消 token——install 是可取消的操作
+        let cancel_token = CancellationToken::new();
+        {
+            let mut oc = entry.operation_cancel.lock().await;
+            *oc = Some((operation_id.clone(), cancel_token.clone()));
+        }
+
         // 标记操作进行中
         self.commit_status_internal(engine_id, Some(&operation_id), |status| {
             status.operation = EngineOperation {
@@ -507,7 +623,14 @@ impl LocalEngineService {
             &self.python_provider,
         );
 
-        let install_result = transaction.execute(preference).await;
+        let sink_adapter = InstallSinkAdapter::new(
+            self.event_port.clone(),
+            engine_id.clone(),
+            operation_id.clone(),
+        );
+        let install_result = transaction
+            .execute(preference, Some(&cancel_token), Some(&sink_adapter))
+            .await;
 
         match install_result {
             Ok(result) => {
@@ -551,14 +674,18 @@ impl LocalEngineService {
                     "环境安装失败（InstallTransaction）",
                     &e,
                 );
+                // finish_operation_with_error 会清除 operation_id（set None），
+                // 所以标记 Broken 必须用 None operation_id 提交（fail-closed）
                 self.finish_operation_with_error(engine_id, &operation_id, &err)
                     .await?;
-                // 标记环境为 Broken
-                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                // 标记环境为 Broken（operation_id 已清除，用 None 提交）
+                self.commit_status_internal(engine_id, None, |status| {
                     status.environment = EnvironmentHealth::Broken;
                 })
                 .await
                 .ok();
+                // 0.22.6.3: 清理取消 token（install 失败时防泄露）
+                self.clear_cancel_token(engine_id).await;
                 Err(err)
             }
         }
@@ -654,7 +781,18 @@ impl LocalEngineService {
     /// 3. adapter `self_test` 通过
     /// 缺少任何一项都不标记 Ready。
     async fn do_probe(&self, engine_id: &EngineId, entry: &EngineEntry) -> Result<(), String> {
-        // 读 current.json
+        // 0.22.6.2: 先尝试恢复 current.json（缺失/损坏/无效 manifest）
+        //
+        // 如果 current.json 不存在或指向无效 manifest，尝试从 generations/ 扫描
+        // 最新的有效 generation 恢复指针。恢复时传入 descriptor 做契约验证。
+        let descriptor = self.provider_descriptors.get(engine_id);
+        if let Err(e) =
+            crate::infra::local_engine::providers::recover_current_pointer(engine_id, descriptor)
+        {
+            tracing::warn!(engine = %engine_id, %e, "探测: recover_current_pointer 失败");
+        }
+
+        // 读 current.json（可能在恢复后已更新）
         let pointer = runtime::read_current_pointer(engine_id)
             .map_err(|e| format!("读取 current.json 失败: {e}"))?;
 
@@ -1038,6 +1176,15 @@ impl LocalEngineService {
                 })
                 .await?;
 
+                // 0.22.6.6: spawn 成功后立即写 lease
+                // 此时 PID、executable、creation_time_ms 均已从 OS 获取，
+                // token_fingerprint 可从 identity_input 计算。
+                // 如果 Blink 在 health 验证期间崩溃，lease 已存在，
+                // 下次启动的恢复扫描能发现此遗留进程。
+                // health 验证失败时，rollback_started_instance 会清理此 lease。
+                self.write_lease_for_engine(engine_id, &managed, &identity_input, &endpoint, &req)
+                    .await;
+
                 // health 验证——只有 Model Ready 才返回 Ok
                 // 任何失败（timeout/mismatch/backend/ModelFailed）执行统一 rollback
                 match self
@@ -1059,6 +1206,15 @@ impl LocalEngineService {
                         })
                         .await?;
                         tracing::info!(engine = %engine_id, "引擎 health 验证通过，Model Ready");
+
+                        // 0.22.6.6: lease 已在 spawn 后立即写入（上方），
+                        // health 验证通过后不需要重新写入——所有字段在 spawn 时已就绪。
+                        // health 验证失败时，rollback_started_instance 会清理 lease。
+
+                        // 0.22.6.3: spawn exit monitor——监听进程意外退出
+                        // server crash 后状态必须收敛到 Exited/Unreachable/Failed
+                        self.spawn_exit_monitor(engine_id, &managed, &entry, &instance_id, &pkey);
+
                         Ok(())
                     }
                     Err(err) => {
@@ -1137,6 +1293,18 @@ impl LocalEngineService {
                             let ci = entry.current_identity.lock().await;
                             ci.as_ref().map(|i| i.instance_id.clone())
                         };
+
+                        // 0.22.6.1: 删除 lease（只删除匹配 instance 的 lease）
+                        if let Some(ref inst_id) = saved_instance_id {
+                            if let Err(e) = remove_lease(&engine_id.to_string(), inst_id) {
+                                tracing::warn!(
+                                    engine = %engine_id,
+                                    instance = %inst_id,
+                                    %e,
+                                    "stop: 删除 lease 失败（继续清理）"
+                                );
+                            }
+                        }
 
                         // 清理 identity/profile
                         {
@@ -1403,7 +1571,15 @@ impl LocalEngineService {
             &self.python_provider,
         );
 
-        match transaction.execute(preference).await {
+        let sink_adapter = InstallSinkAdapter::new(
+            self.event_port.clone(),
+            engine_id.clone(),
+            operation_id.clone(),
+        );
+        match transaction
+            .execute(preference, Some(&cancel_token), Some(&sink_adapter))
+            .await
+        {
             Ok(result) => {
                 tracing::info!(
                     engine = %engine_id,
@@ -1987,6 +2163,193 @@ impl LocalEngineService {
         }
     }
 
+    // ── stop_orphan_engine（0.22.6.6）─────────────────────────────────────
+
+    /// 手动停止孤儿引擎进程。
+    ///
+    /// 当 lease 恢复扫描发现遗留进程时，用户可通过设置页手动调用此方法终止。
+    ///
+    /// **安全策略**（fail-closed）：
+    /// 1. 扫描 lease 文件，查找指定 engine 的 lease
+    /// 2. 使用 `build_process_evidence` 查询 OS 进程身份
+    /// 3. 使用 `probe_health_evidence` 探测 health 端点
+    /// 4. 调用 `decide_recovery` 纯函数做恢复判定
+    /// 5. 如果判定为 `Adoptable`，使用 `kill_process_tree_verified` 验证身份后终止
+    /// 6. 终止后清除 lease 文件
+    ///
+    /// 证据不足时返回错误，不降级为仅 PID kill。
+    pub async fn stop_orphan_engine(
+        &self,
+        engine_id: &EngineId,
+    ) -> Result<super::dto::OrphanStopResultDto, LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let engine_id_str = engine_id.to_string();
+
+        // 1. 扫描 lease 文件，查找匹配的 lease
+        let leases =
+            tokio::task::spawn_blocking(|| crate::infra::local_engine::lease::scan_leases())
+                .await
+                .map_err(|e| {
+                    LocalEngineError::with_detail(
+                        LocalEngineErrorCode::Internal,
+                        ErrorPhase::Request,
+                        "扫描 lease 失败",
+                        format!("spawn_blocking join 错误: {e}"),
+                    )
+                })?;
+
+        let lease = leases
+            .iter()
+            .find(|l| l.engine_id == engine_id_str)
+            .cloned();
+
+        let lease = match lease {
+            Some(l) => l,
+            None => {
+                return Ok(super::dto::OrphanStopResultDto {
+                    engine_id: engine_id_str,
+                    stopped: false,
+                    reason: "lease_not_found".to_string(),
+                    detail: Some("未找到该引擎的 lease 文件".to_string()),
+                });
+            }
+        };
+
+        // 2. 在 spawn_blocking 中构建进程证据
+        let pid = lease.pid;
+        let process_evidence = tokio::task::spawn_blocking(move || {
+            crate::infra::local_engine::lease_recovery::build_process_evidence(pid)
+        })
+        .await
+        .map_err(|e| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Internal,
+                ErrorPhase::Request,
+                "查询进程证据失败",
+                format!("spawn_blocking join 错误: {e}"),
+            )
+        })?;
+
+        // 3. 异步探测 health 端点
+        let health_evidence =
+            crate::infra::local_engine::lease_recovery::probe_health_evidence(&lease.endpoint)
+                .await;
+
+        // 4. 调用 decide_recovery 做恢复判定
+        let decision = crate::infra::local_engine::lease::decide_recovery(
+            &lease,
+            &process_evidence,
+            health_evidence.as_ref(),
+        );
+
+        let result = match &decision {
+            crate::infra::local_engine::lease::RecoveryDecision::Adoptable { pid, .. } => {
+                // 5. 使用 kill_process_tree_verified 验证身份后终止
+                let expected_exe = std::path::PathBuf::from(&lease.executable);
+                let expected_creation = lease.creation_time_ms;
+                let pid_val = *pid;
+
+                let kill_result = tokio::task::spawn_blocking(move || {
+                    crate::infra::platform::process::kill_process_tree_verified(
+                        pid_val,
+                        &expected_exe,
+                        expected_creation,
+                    )
+                })
+                .await
+                .map_err(|e| {
+                    LocalEngineError::with_detail(
+                        LocalEngineErrorCode::Internal,
+                        ErrorPhase::Stop,
+                        "终止进程失败",
+                        format!("spawn_blocking join 错误: {e}"),
+                    )
+                })?;
+
+                match kill_result {
+                    Ok(()) => {
+                        // 6. 清除 lease 文件
+                        if let Err(e) =
+                            crate::infra::local_engine::lease::remove_lease_force(&engine_id_str)
+                        {
+                            tracing::warn!(
+                                engine = %engine_id_str,
+                                %e,
+                                "孤儿进程已终止但清除 lease 失败"
+                            );
+                        }
+
+                        super::dto::OrphanStopResultDto {
+                            engine_id: engine_id_str,
+                            stopped: true,
+                            reason: "adoptable_killed".to_string(),
+                            detail: Some(format!("进程 {} 已验证身份并终止", lease.pid)),
+                        }
+                    }
+                    Err(e) => super::dto::OrphanStopResultDto {
+                        engine_id: engine_id_str,
+                        stopped: false,
+                        reason: "kill_failed".to_string(),
+                        detail: Some(format!("终止进程失败: {e}")),
+                    },
+                }
+            }
+            crate::infra::local_engine::lease::RecoveryDecision::DoNotAdopt(diag) => {
+                let reason_str = match &diag.reason {
+                    crate::infra::local_engine::lease::RecoveryReason::PidNotFound => {
+                        // 进程已退出，清除 stale lease
+                        if let Err(e) =
+                            crate::infra::local_engine::lease::remove_lease_force(&engine_id_str)
+                        {
+                            tracing::warn!(
+                                engine = %engine_id_str,
+                                %e,
+                                "PID 不存在但清除 lease 失败"
+                            );
+                        }
+                        "pid_not_exist".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::ExecutableMismatch {
+                        ..
+                    } => "executable_mismatch".to_string(),
+                    crate::infra::local_engine::lease::RecoveryReason::CreationTimeMismatch {
+                        ..
+                    } => "creation_time_mismatch".to_string(),
+                    crate::infra::local_engine::lease::RecoveryReason::CreationTimeMissing => {
+                        "creation_time_missing".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::ProcessQueryFailed => {
+                        "process_query_failed".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::TokenFingerprintMismatch => {
+                        "token_fingerprint_mismatch".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::InstanceIdMismatch => {
+                        "instance_id_mismatch".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::EngineIdMismatch => {
+                        "engine_id_mismatch".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::HealthUnreachable => {
+                        "health_unreachable".to_string()
+                    }
+                    crate::infra::local_engine::lease::RecoveryReason::SchemaVersion { .. } => {
+                        "schema_version_mismatch".to_string()
+                    }
+                };
+
+                super::dto::OrphanStopResultDto {
+                    engine_id: engine_id_str,
+                    stopped: false,
+                    reason: reason_str,
+                    detail: Some(diag.detail.clone()),
+                }
+            }
+        };
+
+        Ok(result)
+    }
+
     // ── 内部辅助 ────────────────────────────────────────────────────────────
 
     /// 验证 engine_id 在 registry 中。
@@ -2042,10 +2405,13 @@ impl LocalEngineService {
             };
         }
 
-        // 验证 operation_id
+        // 验证 operation_id（fail-closed）
+        //
+        // 0.22.6.3: 如果 current_operation_id 为 None，任何携带 operation_id
+        // 的提交都必须被拒绝——这防止迟到的任务（已取消/失败）覆写新状态。
         let current_op_id = entry.current_operation_id.lock().await;
-        if let Some(ref current) = *current_op_id {
-            if let Some(submitted) = operation_id {
+        match (&*current_op_id, operation_id) {
+            (Some(current), Some(submitted)) => {
                 if submitted != current.as_str() {
                     return Err(LocalEngineError::with_detail(
                         LocalEngineErrorCode::Rejected,
@@ -2057,14 +2423,35 @@ impl LocalEngineService {
                         ),
                     ));
                 }
-            } else {
+            }
+            // 有活跃操作但提交未携带 operation_id → 拒绝
+            (Some(current), None) => {
                 return Err(LocalEngineError::with_detail(
                     LocalEngineErrorCode::Rejected,
                     ErrorPhase::Request,
                     "操作进行中，请等待",
-                    "有活跃操作但提交未携带 operation_id".to_string(),
+                    format!("有活跃操作但提交未携带 operation_id (current={current})"),
                 ));
             }
+            // 0.22.6.3: 无活跃操作但提交携带 operation_id → fail-closed 拒绝
+            // 防止迟到的任务（已取消/已失败的 operation）覆写新状态
+            (None, Some(submitted)) => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    submitted_op = %submitted,
+                    "提交携带 operation_id 但无活跃操作，拒绝（fail-closed）"
+                );
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Rejected,
+                    ErrorPhase::Request,
+                    "操作已过期",
+                    format!(
+                        "提交携带 operation_id={submitted} 但无活跃操作（可能已取消/完成/失败）"
+                    ),
+                ));
+            }
+            // 无活跃操作且提交不携带 operation_id → 允许（非操作状态转换）
+            (None, None) => {}
         }
         drop(current_op_id);
 
@@ -2461,6 +2848,267 @@ impl LocalEngineService {
         Ok(mapping)
     }
 
+    // ── lease 写入辅助（0.22.6.1） ─────────────────────────────────────────
+
+    /// 为引擎实例写入持久化 lease。
+    ///
+    /// 在 health 验证全闭合后调用——从 `ManagedProcess` 获取进程身份
+    /// （PID、可执行路径、创建时间），从 `ServiceIdentityInput` 获取
+    /// token fingerprint，从 `current.json` 获取 generation_id。
+    ///
+    /// 写入失败只打 warn 日志，不影响 start 成功返回（lease 是辅助证据，
+    /// 不是运行时强依赖）。
+    async fn write_lease_for_engine(
+        &self,
+        engine_id: &EngineId,
+        managed: &Arc<ManagedProcess>,
+        identity_input: &ServiceIdentityInput,
+        endpoint: &crate::infra::local_engine::port::Endpoint,
+        #[allow(unused_variables)] req: &LaunchRequest,
+    ) {
+        // 从 ManagedProcess 获取进程身份
+        let snapshot = managed.snapshot().await;
+        let identity = match &snapshot.identity {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    "write_lease: ManagedProcess 无 identity，跳过 lease 写入"
+                );
+                return;
+            }
+        };
+
+        // 获取 generation_id（current.json 的 install_id）
+        let generation_id = match runtime::read_current_pointer(engine_id) {
+            Ok(Some(ref p)) => p.install_id.clone(),
+            Ok(None) => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    "write_lease: 无 current.json，generation_id 用空串"
+                );
+                String::new()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    error = %e,
+                    "write_lease: 读取 current.json 失败，generation_id 用空串"
+                );
+                String::new()
+            }
+        };
+
+        let lease = ProcessLease::new(
+            engine_id.to_string(),
+            identity.instance_id.clone(),
+            identity.pid,
+            identity.start_time_ms,
+            identity.executable.to_string_lossy().to_string(),
+            endpoint.base_url(),
+            identity_input.token_fingerprint(),
+            generation_id,
+        );
+
+        if let Err(e) = write_lease(&lease) {
+            tracing::warn!(
+                engine = %engine_id,
+                instance = %lease.instance_id,
+                pid = lease.pid,
+                error = %e,
+                "write_lease: 写入 lease 失败（不影响运行时）"
+            );
+        }
+    }
+
+    // ── exit monitor（0.22.6.3）─────────────────────────────────────────────
+
+    /// Spawn 进程退出监听 task。
+    ///
+    /// 在 health 验证通过后调用，监听 `ManagedProcess` 的状态变更。
+    /// 当收到 `ProcessStatus::Exited` 时执行 `handle_process_exit`。
+    ///
+    /// **设计约束**：
+    /// - task 内不持有 `&self`（生命周期不够），只持有 Arc 字段
+    /// - task 内直接操作 `entry.status` 的 RwLock（等价于 commit_status_internal
+    ///   但不检查 operation_id——exit 事件是异步到达的，不经过 op_gate）
+    /// - 通过 `entry.managed_process` 的 instance_id 验证：如果已 restart，
+    ///   旧 monitor 的 exit 事件不会覆盖新实例状态
+    fn spawn_exit_monitor(
+        &self,
+        engine_id: &EngineId,
+        managed: &Arc<ManagedProcess>,
+        entry: &Arc<EngineEntry>,
+        instance_id: &str,
+        pkey: &ProcessKey,
+    ) {
+        let engine_id = engine_id.clone();
+        let managed = Arc::clone(managed);
+        let entry = Arc::clone(entry);
+        let event_port = Arc::clone(&self.event_port);
+        let epoch = self.epoch.clone();
+        let instance_id = instance_id.to_string();
+        let pkey = pkey.clone();
+        // 0.22.6.4: 传入 process_registry 的 Arc 引用，使 exit monitor
+        // 能在验证身份后移除对应 ProcessKey 条目，避免 registry 泄漏。
+        // 不形成强引用环：registry 是 LocalEngineService 拥有的 Mutex<HashMap>，
+        // 这里克隆的是 Arc 到同一 Mutex 的引用，不持有 LocalEngineService 自身。
+        let process_registry = Arc::clone(&self.process_registry);
+
+        tokio::spawn(async move {
+            let mut rx = managed.subscribe_status();
+
+            loop {
+                if rx.changed().await.is_err() {
+                    // sender dropped——进程已清理，退出 monitor
+                    break;
+                }
+
+                let status = rx.borrow().clone();
+                if !status.is_exited() {
+                    continue;
+                }
+
+                tracing::warn!(
+                    engine = %engine_id,
+                    instance = %instance_id,
+                    status = ?status,
+                    "exit monitor: 收到进程退出事件"
+                );
+
+                // 0.22.6.3: 验证此 managed 仍是 entry 的当前实例
+                // 如果已 restart（新 start 替换了 managed_process），旧 exit 事件不生效
+                let is_current = {
+                    let mp = entry.managed_process.lock().await;
+                    if let Some(ref current) = *mp {
+                        current
+                            .is_current_token(&managed.current_token().await)
+                            .await
+                    } else {
+                        false
+                    }
+                };
+
+                if !is_current {
+                    tracing::info!(
+                        engine = %engine_id,
+                        instance = %instance_id,
+                        "exit monitor: managed 已不是当前实例（可能 restart），忽略旧 exit 事件"
+                    );
+                    break;
+                }
+
+                // 收到 exit 事件且验证为当前实例——执行状态收敛
+                let exit_reason = match &status {
+                    ProcessStatus::Exited { reason } => format!("{reason:?}"),
+                    _ => unreachable!(),
+                };
+
+                // 取消旧日志 pump——确保退出后旧实例日志不再投影
+                {
+                    let mut lc = entry.log_pump_cancel.lock().await;
+                    if let Some(cancel) = lc.take() {
+                        tracing::debug!(engine = %engine_id, "exit monitor: 取消日志 pump");
+                        cancel.cancel();
+                    }
+                }
+
+                // 取出 instance_id 用于 lease 删除
+                let saved_instance_id = {
+                    let ci = entry.current_identity.lock().await;
+                    ci.as_ref().map(|i| i.instance_id.clone())
+                };
+
+                // 删除 lease
+                if let Some(ref inst_id) = saved_instance_id {
+                    if let Err(e) = remove_lease(&engine_id.to_string(), inst_id) {
+                        tracing::warn!(
+                            engine = %engine_id,
+                            instance = %inst_id,
+                            %e,
+                            "exit monitor: 删除 lease 失败（继续清理）"
+                        );
+                    }
+                }
+
+                // 清理 identity/profile
+                {
+                    let mut ci = entry.current_identity.lock().await;
+                    *ci = None;
+                }
+                {
+                    let mut cp = entry.current_profile.lock().await;
+                    *cp = None;
+                }
+                {
+                    let mut mp = entry.managed_process.lock().await;
+                    *mp = None;
+                }
+
+                // 0.22.6.4: 从 process_registry 移除——exit monitor 持有
+                // process_registry 的 Arc 引用，在验证身份后安全移除。
+                // is_current 检查已确保不会误删新实例的条目。
+                {
+                    let mut reg = process_registry.lock().unwrap();
+                    reg.remove(&pkey);
+                    tracing::debug!(
+                        engine = %engine_id,
+                        instance = %instance_id,
+                        "exit monitor: 已从 process_registry 移除"
+                    );
+                }
+
+                // 置错误终态：process=Exited, service=Unreachable, model=Unknown
+                {
+                    let mut status_guard = entry.status.write().await;
+
+                    // epoch 验证——新 epoch 重置状态
+                    if status_guard.service_epoch != epoch {
+                        *status_guard = EngineStatus {
+                            service_epoch: epoch.clone(),
+                            ..Default::default()
+                        };
+                    }
+
+                    let new_revision = status_guard.revision + 1;
+                    let exit_err = LocalEngineError::with_detail(
+                        LocalEngineErrorCode::NotRunning,
+                        ErrorPhase::Stop,
+                        "进程意外退出",
+                        exit_reason.clone(),
+                    );
+
+                    status_guard.desired = DesiredState::Stopped;
+                    status_guard.process = ProcessState::Exited {
+                        reason: exit_reason,
+                    };
+                    status_guard.service = ServiceHealth::Unreachable;
+                    status_guard.model = ModelHealth::Unknown;
+                    status_guard.last_error = Some(exit_err);
+                    status_guard.revision = new_revision;
+
+                    // 广播状态变更
+                    let snapshot = EngineStatusSnapshot {
+                        engine_id: engine_id.clone(),
+                        service_epoch: epoch,
+                        revision: new_revision,
+                        status: status_guard.clone(),
+                    };
+                    event_port.emit_status(&snapshot);
+                }
+
+                tracing::warn!(
+                    engine = %engine_id,
+                    instance = %instance_id,
+                    "exit monitor: 状态已收敛到 Exited/Unreachable，current identity 已清理"
+                );
+
+                // exit 事件只处理一次
+                break;
+            }
+        });
+    }
+
     // ── rollback ────────────────────────────────────────────────────────────
 
     /// 统一回滚已启动实例——start 失败时调用。
@@ -2471,6 +3119,9 @@ impl LocalEngineService {
     /// 3. 从 process_registry 移除
     /// 4. 从 EngineEntry 移除 managed_process
     /// 5. 置错误终态（process=Exited, service=Unreachable, last_error=err）
+    ///
+    /// **0.22.6.1**: rollback 时也尝试删除 lease（如果已写入）。
+    /// lease 删除使用 instance_id 验证，不会误删新实例的 lease。
     async fn rollback_started_instance(
         &self,
         engine_id: &EngineId,
@@ -2523,11 +3174,30 @@ impl LocalEngineService {
             *mp = None;
         }
 
+        // 0.22.6.1: 删除 lease（只删除匹配 instance 的 lease）
+        // rollback 意味着 start 失败——如果 lease 已写入则清理
+        if let Err(e) = remove_lease(&engine_id.to_string(), instance_id) {
+            tracing::warn!(
+                engine = %engine_id,
+                instance = instance_id,
+                error = %e,
+                "rollback: 删除 lease 失败（继续清理）"
+            );
+        }
+
         // 从同步 registry 移除
         {
             let mut reg = self.process_registry.lock().unwrap();
             reg.remove(pkey);
         }
+
+        // 0.22.6.3: 首次激活失败时触发 generation 回滚
+        //
+        // start 失败意味着当前 current generation 不可用。如果有 previous
+        // generation，原子切回 previous，让用户能继续使用旧版本。
+        // 新 generation 标记为 deferred cleanup，下次清理时移除。
+        self.rollback_generation_on_activation_failure(engine_id)
+            .await;
 
         // 置错误终态
         let _ = self
@@ -2541,6 +3211,79 @@ impl LocalEngineService {
                 status.last_error = Some(error.clone());
             })
             .await;
+    }
+
+    /// 首次激活失败时的 generation 回滚。
+    ///
+    /// 0.22.6.3: 当 start（spawn/health）失败时，如果存在 previous generation，
+    /// 原子切回 previous current.json，并将失败的 generation 标记为
+    /// deferred cleanup。如果没有 previous generation，不操作（保持 current 指向）。
+    ///
+    /// **设计取舍**：
+    /// - 只在 start 失败时回滚 generation——install 失败时 staging 已被
+    ///   InstallTransaction 清理，current.json 仍指向旧的可用 generation。
+    /// - 回滚 generation 不影响 rollback_started_instance 的进程清理——
+    ///   两者独立，进程清理总在 generation 回滚之前完成。
+    /// - 标记 deferred cleanup 而非立即删除——避免文件锁问题（Windows）。
+    async fn rollback_generation_on_activation_failure(&self, engine_id: &EngineId) {
+        use crate::infra::local_engine::providers::{mark_deferred_cleanup, rollback_to_previous};
+
+        // 读取 current 指针
+        let current = match runtime::read_current_pointer(engine_id) {
+            Ok(Some(ptr)) => ptr,
+            Ok(None) => {
+                tracing::debug!(engine = %engine_id, "无 current generation，跳过 generation 回滚");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    error = %e,
+                    "读取 current.json 失败，跳过 generation 回滚"
+                );
+                return;
+            }
+        };
+
+        // 尝试回滚到 previous generation
+        match rollback_to_previous(engine_id) {
+            Ok(Some(previous_id)) => {
+                tracing::info!(
+                    engine = %engine_id,
+                    from = %current.install_id,
+                    to = %previous_id,
+                    "首次激活失败，已回滚 generation 到 previous"
+                );
+                // 标记失败的 generation 为 deferred cleanup
+                if let Err(e) = mark_deferred_cleanup(
+                    engine_id,
+                    &current.install_id,
+                    "首次激活失败（spawn/health），回滚到 previous",
+                ) {
+                    tracing::warn!(
+                        engine = %engine_id,
+                        install = %current.install_id,
+                        error = %e,
+                        "标记 deferred cleanup 失败（不影响回滚）"
+                    );
+                }
+            }
+            Ok(None) => {
+                tracing::info!(
+                    engine = %engine_id,
+                    install = %current.install_id,
+                    "无可回滚的 previous generation，保持 current 指向"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    install = %current.install_id,
+                    error = %e,
+                    "generation 回滚失败（current 保持指向当前 generation）"
+                );
+            }
+        }
     }
 }
 
@@ -2652,9 +3395,7 @@ async fn pump_logs_to_event_port(
 fn scan_engine_storage_blocking(
     engine_id: &EngineId,
 ) -> Result<super::dto::EngineStorageDto, crate::infra::local_engine::runtime::RuntimeError> {
-    use crate::infra::local_engine::runtime::{
-        ArtifactId, CleanupScope, RuntimeKind, read_current_pointer,
-    };
+    use crate::infra::local_engine::runtime::{ArtifactId, RuntimeKind, read_current_pointer};
 
     let mut targets = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -4140,5 +4881,480 @@ mod tests {
         assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
         // cancellable 应为 true（repair 是可取消操作）
         assert!(snapshot.status.operation.cancellable);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6.3 确定性测试：server crash recovery
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 验证 exit monitor 收到进程退出后状态收敛到 Exited/Unreachable。
+    ///
+    /// 场景：进程从 Running 退出 → exit monitor 验证 instance token 仍匹配 →
+    /// 清理 identity/profile/lease → 状态收敛到 process=Exited, service=Unreachable。
+    ///
+    /// 此测试验证 ManagedProcessState 层面的退出提交逻辑，
+    /// 确保旧 generation 的退出事件不会覆盖新实例。
+    #[tokio::test]
+    async fn crash_recovery_old_exit_does_not_overwrite_new_instance() {
+        use crate::infra::local_engine::state::{
+            CommitResult, ExitReason, ManagedProcessState, ProcessStatus,
+        };
+
+        let mut state = ManagedProcessState::initial();
+
+        // gen=1 start
+        let token1 = state.begin_start();
+        let identity = crate::infra::local_engine::state::ProcessIdentity {
+            pid: 1234,
+            executable: std::path::PathBuf::from("/test/fake"),
+            start_time_ms: 0,
+            instance_id: token1.instance_id.clone(),
+        };
+        assert_eq!(
+            state.try_commit_running(&token1, 1234, identity),
+            CommitResult::Committed
+        );
+        assert_eq!(state.status, ProcessStatus::Running { pid: 1234 });
+
+        // 模拟 crash——进程以非零码退出
+        let ok = state.try_commit_exit(&token1, ExitReason::NonZeroExit { code: 1 });
+        assert!(ok, "当前 generation 的退出应被接受");
+        assert!(state.status.is_exited(), "状态应转为 Exited");
+
+        // gen=2 start（新实例——模拟 restart）
+        let token2 = state.begin_start();
+        assert_ne!(token1.generation, token2.generation);
+
+        // 旧 gen 的退出事件再次到达——应被拒绝
+        let ok = state.try_commit_exit(&token1, ExitReason::NonZeroExit { code: 1 });
+        assert!(!ok, "旧 generation 的退出事件不应覆盖新实例");
+
+        // 新实例状态不变
+        assert_eq!(state.status, ProcessStatus::Starting);
+    }
+
+    /// 验证 exit monitor 的身份验证逻辑——token 不匹配时忽略旧 exit。
+    #[tokio::test]
+    async fn crash_recovery_token_mismatch_ignores_exit() {
+        use crate::infra::local_engine::state::{ExitReason, ManagedProcessState, ProcessStatus};
+
+        let mut state = ManagedProcessState::initial();
+        let token1 = state.begin_start();
+
+        // gen=2 start（restart 发生在 exit 之前）
+        let _token2 = state.begin_start();
+
+        // gen=1 的 exit 事件到达——generation 不匹配，应被拒绝
+        let ok = state.try_commit_exit(&token1, ExitReason::NonZeroExit { code: 1 });
+        assert!(!ok, "旧 generation exit 不应覆盖新实例");
+
+        // 新实例状态仍为 Starting
+        assert_eq!(state.status, ProcessStatus::Starting);
+    }
+
+    /// 验证 ProcessStatus::Exited 标记。
+    #[tokio::test]
+    async fn crash_recovery_exited_status_is_terminal() {
+        use crate::infra::local_engine::state::{ExitReason, ManagedProcessState, ProcessStatus};
+
+        let mut state = ManagedProcessState::initial();
+        let token = state.begin_start();
+        state.set_status_exited(ExitReason::NonZeroExit { code: 42 });
+
+        assert!(state.status.is_exited());
+        assert!(!state.status.is_active());
+
+        // 从 Exited 再次提交 Exited 应被拒绝
+        let ok = state.try_commit_exit(&token, ExitReason::NormalExit { code: 0 });
+        assert!(!ok, "从 Exited 不应再次转为 Exited");
+
+        assert_eq!(
+            state.status,
+            ProcessStatus::Exited {
+                reason: ExitReason::NonZeroExit { code: 42 }
+            }
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6.6 回归测试：stop_orphan_engine
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── stop_orphan_engine 对未知 engine_id 返回 Unsupported ──
+
+    #[tokio::test]
+    async fn stop_orphan_engine_rejects_unknown_engine() {
+        let svc = make_service("engine-a");
+        let unknown = EngineId::new("no-such-engine").unwrap();
+
+        let result = svc.stop_orphan_engine(&unknown).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, LocalEngineErrorCode::Unsupported);
+    }
+
+    // ── stop_orphan_engine 无 lease 时返回 lease_not_found ──
+
+    #[tokio::test]
+    async fn stop_orphan_engine_returns_lease_not_found_when_no_lease() {
+        let svc = make_service("engine-a");
+        let eid = EngineId::new("engine-a").unwrap();
+
+        // 清理可能存在的旧 lease
+        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-a");
+
+        let result = svc.stop_orphan_engine(&eid).await.unwrap();
+        assert!(!result.stopped);
+        assert_eq!(result.reason, "lease_not_found");
+        assert!(result.detail.is_some());
+    }
+
+    // ── stop_orphan_engine 有 stale lease（PID 不存在）时返回 pid_not_exist ──
+
+    #[tokio::test]
+    async fn stop_orphan_engine_returns_pid_not_exist_for_stale_lease() {
+        let svc = make_service("engine-stale");
+        let eid = EngineId::new("engine-stale").unwrap();
+
+        // 清理可能存在的旧 lease
+        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-stale");
+
+        // 写入一个 stale lease（PID 99999 几乎确定不存在）
+        let lease = crate::infra::local_engine::lease::ProcessLease::new(
+            "engine-stale",
+            "inst-stale-001",
+            99999,
+            1700000000000,
+            "C:/nonexistent/python.exe",
+            "127.0.0.1:59999",
+            "fp:stale00000000000",
+            "gen-stale",
+        );
+        crate::infra::local_engine::lease::write_lease(&lease).unwrap();
+
+        let result = svc.stop_orphan_engine(&eid).await.unwrap();
+        assert!(!result.stopped);
+        assert_eq!(result.reason, "pid_not_exist");
+        assert!(result.detail.is_some());
+
+        // 验证 stale lease 已被清除
+        let leases = crate::infra::local_engine::lease::scan_leases();
+        assert!(
+            !leases.iter().any(|l| l.engine_id == "engine-stale"),
+            "stale lease 应已清除"
+        );
+    }
+
+    // ── stop_orphan_engine 有 lease 但 health 不可达时返回 health_unreachable ──
+
+    #[tokio::test]
+    async fn stop_orphan_engine_returns_health_unreachable() {
+        let svc = make_service("engine-health");
+        let eid = EngineId::new("engine-health").unwrap();
+
+        // 清理可能存在的旧 lease
+        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-health");
+
+        // 写入一个 lease，PID 为当前进程（存在但不是引擎进程）
+        let current_pid = std::process::id();
+        let lease = crate::infra::local_engine::lease::ProcessLease::new(
+            "engine-health",
+            "inst-health-001",
+            current_pid,
+            crate::infra::platform::process::get_process_creation_time_ms(current_pid).unwrap_or(0),
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            "127.0.0.1:59998",
+            "fp:health0000000000",
+            "gen-health",
+        );
+        crate::infra::local_engine::lease::write_lease(&lease).unwrap();
+
+        let result = svc.stop_orphan_engine(&eid).await.unwrap();
+        assert!(!result.stopped);
+        // health 不可达（127.0.0.1:59998 上没有服务）
+        assert_eq!(result.reason, "health_unreachable");
+
+        // 清理
+        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-health");
+    }
+
+    // ── stop_orphan_engine 的 OrphanStopResultDto 不暴露 PID/路径 ──
+
+    #[tokio::test]
+    async fn stop_orphan_engine_result_dto_does_not_expose_sensitive_fields() {
+        let svc = make_service("engine-dto");
+        let eid = EngineId::new("engine-dto").unwrap();
+
+        // 清理可能存在的旧 lease
+        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-dto");
+
+        // 无 lease 时返回 lease_not_found——DTO 不含 PID/路径
+        let result = svc.stop_orphan_engine(&eid).await.unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json.get("pid").is_none(), "不应暴露 pid");
+        assert!(json.get("executable").is_none(), "不应暴露 executable");
+        assert!(json.get("endpoint").is_none(), "不应暴露 endpoint");
+        assert!(json.get("token").is_none(), "不应暴露 token");
+        assert!(json.get("instance_id").is_none(), "不应暴露 instance_id");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6 H5: InstallSinkAdapter 测试
+    // 洪泛保护、seq 单调递增、operation_id 隔离、失败终态
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 用于测试的 EventPort 实现——捕获所有 emit 的日志和状态。
+    struct RecordingEventPort {
+        install_logs: std::sync::Mutex<Vec<(String, String, u64, String, String)>>,
+        // (engine_id, operation_id, seq, level, text)
+        status_snapshots: std::sync::Mutex<Vec<String>>,
+        runtime_logs: std::sync::Mutex<Vec<(String, String, u64, String)>>,
+        // (engine_id, instance_id, seq, line)
+    }
+
+    impl RecordingEventPort {
+        fn new() -> Self {
+            Self {
+                install_logs: std::sync::Mutex::new(Vec::new()),
+                status_snapshots: std::sync::Mutex::new(Vec::new()),
+                runtime_logs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn install_logs(&self) -> Vec<(String, String, u64, String, String)> {
+            self.install_logs.lock().unwrap().clone()
+        }
+
+        fn runtime_logs(&self) -> Vec<(String, String, u64, String)> {
+            self.runtime_logs.lock().unwrap().clone()
+        }
+    }
+
+    impl EventPort for RecordingEventPort {
+        fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {
+            self.status_snapshots
+                .lock()
+                .unwrap()
+                .push("status".to_string());
+        }
+
+        fn emit_log(&self, engine_id: &EngineId, instance_id: &str, seq: u64, line: &str) {
+            self.runtime_logs.lock().unwrap().push((
+                engine_id.to_string(),
+                instance_id.to_string(),
+                seq,
+                line.to_string(),
+            ));
+        }
+
+        fn emit_install_log(
+            &self,
+            engine_id: &EngineId,
+            operation_id: &str,
+            seq: u64,
+            level: &str,
+            text: &str,
+        ) {
+            self.install_logs.lock().unwrap().push((
+                engine_id.to_string(),
+                operation_id.to_string(),
+                seq,
+                level.to_string(),
+                text.to_string(),
+            ));
+        }
+    }
+
+    // ── InstallSinkAdapter seq 单调递增 ──
+
+    #[test]
+    fn install_sink_adapter_seq_monotonic() {
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-seq").unwrap();
+        let adapter =
+            InstallSinkAdapter::new(event_port.clone(), engine_id, "op-seq-test".to_string());
+
+        // 发送 10 条日志
+        for i in 0..10 {
+            adapter.on_log("info", &format!("log line {i}"));
+        }
+
+        let logs = event_port.install_logs();
+        assert_eq!(logs.len(), 10, "应收到 10 条安装日志");
+
+        // 验证 seq 从 1 开始单调递增
+        for (i, (_, _, seq, _, _)) in logs.iter().enumerate() {
+            assert_eq!(*seq, (i + 1) as u64, "seq 应从 1 开始单调递增");
+        }
+    }
+
+    // ── InstallSinkAdapter 洪泛保护：超过 50 条/秒被限流 ──
+
+    #[test]
+    fn install_sink_adapter_flood_protection_drops_excess() {
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-flood").unwrap();
+        let adapter =
+            InstallSinkAdapter::new(event_port.clone(), engine_id, "op-flood-test".to_string());
+
+        // 在同一秒内发送 100 条日志
+        for i in 0..100 {
+            adapter.on_log("info", &format!("flood line {i}"));
+        }
+
+        let logs = event_port.install_logs();
+        // 洪泛保护：最多 50 条通过
+        assert!(
+            logs.len() <= 50,
+            "洪泛保护应限制每秒最多 50 条日志，实际通过 {} 条",
+            logs.len()
+        );
+        assert!(
+            logs.len() >= 40,
+            "洪泛保护应至少允许接近 50 条日志通过，实际通过 {} 条",
+            logs.len()
+        );
+    }
+
+    // ── InstallSinkAdapter operation_id 隔离 ──
+
+    #[test]
+    fn install_sink_adapter_operation_id_isolation() {
+        // 两个不同 operation_id 的 adapter 不应共享 seq
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-iso").unwrap();
+
+        let adapter1 = InstallSinkAdapter::new(
+            event_port.clone(),
+            engine_id.clone(),
+            "op-iso-1".to_string(),
+        );
+        let adapter2 = InstallSinkAdapter::new(
+            event_port.clone(),
+            engine_id.clone(),
+            "op-iso-2".to_string(),
+        );
+
+        // 各发 5 条日志
+        for i in 0..5 {
+            adapter1.on_log("info", &format!("op1 line {i}"));
+            adapter2.on_log("info", &format!("op2 line {i}"));
+        }
+
+        let logs = event_port.install_logs();
+        assert_eq!(logs.len(), 10, "两个 operation 共应收到 10 条日志");
+
+        // 分组验证：每个 operation_id 的 seq 独立从 1 递增
+        let op1_logs: Vec<_> = logs
+            .iter()
+            .filter(|(_, op, _, _, _)| op == "op-iso-1")
+            .collect();
+        let op2_logs: Vec<_> = logs
+            .iter()
+            .filter(|(_, op, _, _, _)| op == "op-iso-2")
+            .collect();
+        assert_eq!(op1_logs.len(), 5);
+        assert_eq!(op2_logs.len(), 5);
+
+        for (i, (_, _, seq, _, _)) in op1_logs.iter().enumerate() {
+            assert_eq!(*seq, (i + 1) as u64, "op-iso-1 seq 应从 1 递增");
+        }
+        for (i, (_, _, seq, _, _)) in op2_logs.iter().enumerate() {
+            assert_eq!(*seq, (i + 1) as u64, "op-iso-2 seq 应从 1 递增");
+        }
+    }
+
+    // ── InstallSinkAdapter 旧 operation 不污染新 operation ──
+
+    #[test]
+    fn install_sink_adapter_old_operation_does_not_pollute_new() {
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-old-op").unwrap();
+
+        // 旧 operation 发日志
+        let old_adapter =
+            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-old".to_string());
+        for i in 0..3 {
+            old_adapter.on_log("info", &format!("old line {i}"));
+        }
+
+        // 新 operation 发日志
+        let new_adapter =
+            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-new".to_string());
+        for i in 0..3 {
+            new_adapter.on_log("info", &format!("new line {i}"));
+        }
+
+        let logs = event_port.install_logs();
+
+        // 旧 operation 的日志只属于 op-old
+        let old_logs: Vec<_> = logs
+            .iter()
+            .filter(|(_, op, _, _, _)| op == "op-old")
+            .collect();
+        let new_logs: Vec<_> = logs
+            .iter()
+            .filter(|(_, op, _, _, _)| op == "op-new")
+            .collect();
+        assert_eq!(old_logs.len(), 3);
+        assert_eq!(new_logs.len(), 3);
+
+        // 新 operation 的 seq 从 1 开始，不受旧 operation 影响
+        for (i, (_, _, seq, _, _)) in new_logs.iter().enumerate() {
+            assert_eq!(
+                *seq,
+                (i + 1) as u64,
+                "新 operation seq 应从 1 开始，不受旧 operation 影响"
+            );
+        }
+    }
+
+    // ── 运行时日志与安装日志隔离 ──
+
+    #[test]
+    fn runtime_logs_and_install_logs_are_isolated() {
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-rt-vs-install").unwrap();
+
+        // 发送运行时日志（以 instance_id 隔离）
+        event_port.emit_log(&engine_id, "inst-abc", 1, "runtime log 1");
+        event_port.emit_log(&engine_id, "inst-abc", 2, "runtime log 2");
+
+        // 发送安装日志（以 operation_id 隔离）
+        event_port.emit_install_log(&engine_id, "op-xyz", 1, "info", "install log 1");
+
+        let rt_logs = event_port.runtime_logs();
+        let install_logs = event_port.install_logs();
+
+        // 运行时日志只含 instance_id
+        assert_eq!(rt_logs.len(), 2);
+        assert!(rt_logs.iter().all(|(_, inst, _, _)| inst == "inst-abc"));
+
+        // 安装日志只含 operation_id
+        assert_eq!(install_logs.len(), 1);
+        assert!(install_logs.iter().all(|(_, op, _, _, _)| op == "op-xyz"));
+
+        // 两者不交叉污染
+        assert!(install_logs.iter().all(|(_, op, _, _, _)| op != "inst-abc"));
+        assert!(rt_logs.iter().all(|(_, inst, _, _)| inst != "op-xyz"));
+    }
+
+    // ── on_stage 不 emit 任何事件（只做 tracing） ──
+
+    #[test]
+    fn install_sink_adapter_on_stage_does_not_emit() {
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-stage").unwrap();
+        let adapter =
+            InstallSinkAdapter::new(event_port.clone(), engine_id, "op-stage-test".to_string());
+
+        // on_stage 不应产生任何 emit
+        adapter.on_stage("preparing");
+        adapter.on_stage("downloading");
+        adapter.on_stage("completed");
+
+        let logs = event_port.install_logs();
+        assert!(logs.is_empty(), "on_stage 不应 emit 安装日志");
     }
 }

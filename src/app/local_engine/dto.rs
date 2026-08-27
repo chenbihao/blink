@@ -170,12 +170,22 @@ pub struct ProcessStateDto {
 // ── Log DTO ──────────────────────────────────────────────────────────────────
 
 /// 结构化日志 DTO——历史查询与 `LOCAL_ENGINE_LOG` 实时事件共用。
+///
+/// 运行时日志使用 `instance_id` 隔离；安装时日志使用 `operation_id` 隔离。
+/// `operation_id` 仅在安装/修复日志中存在，运行时日志为 `None`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineLogDto {
     /// 引擎 id。
     pub engine_id: String,
-    /// 实例 id（用于按 instance 隔离日志）。
+    /// 实例 id（用于按 instance 隔离运行时日志）。
+    ///
+    /// 安装日志时此字段为空字符串。
     pub instance_id: String,
+    /// 安装操作 id（用于按 operation 隔离安装日志）。
+    ///
+    /// 运行时日志时此字段为 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     /// 序号（单调递增，消费者用于去重/检测 gap）。
     pub seq: String,
     /// 时间戳（RFC 3339）。
@@ -272,6 +282,10 @@ fn project_status_wire(status: &EngineStatus) -> EngineStatusWire {
 ///
 /// `instance_id` 从外部传入——因为 `LogEntry` 本身不含 instance_id
 /// （它属于 ManagedProcess 实例，service 在查询时知道是哪个实例）。
+///
+/// 预留：当前 LOCAL_ENGINE_LOG 事件由 service 内联投影，此函数供未来
+/// 统一日志投影入口使用。
+#[allow(dead_code)]
 pub fn project_log(
     engine_id: &str,
     instance_id: &str,
@@ -288,6 +302,7 @@ pub fn project_log(
     EngineLogDto {
         engine_id: engine_id.to_string(),
         instance_id: instance_id.to_string(),
+        operation_id: None,
         seq: entry.seq.to_string(),
         timestamp,
         level: level.to_string(),
@@ -518,6 +533,10 @@ pub enum StorageTargetKindDto {
 
 impl StorageTargetKindDto {
     /// 从字符串解析（command 层用）。
+    ///
+    /// 预留：当前 command 层直接使用 enum 变体构造，此方法供未来
+    /// 从前端字符串参数构造时使用。
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "engine_generation" => Some(Self::EngineGeneration),
@@ -530,6 +549,10 @@ impl StorageTargetKindDto {
     }
 
     /// 转字符串。
+    ///
+    /// 预留：当前 DTO 序列化由 serde derive 处理，此方法供未来
+    /// 手动序列化或日志输出时使用。
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::EngineGeneration => "engine_generation",
@@ -593,6 +616,25 @@ pub struct CancelResultDto {
     pub reason: Option<String>,
 }
 
+// ── Orphan Stop 结果 DTO（0.22.6.6）──────────────────────────────────────────
+
+/// 孤儿引擎停止结果 DTO——`stop_orphan_engine` command 返回。
+///
+/// 包含终止状态和诊断信息，不暴露 PID/路径等敏感字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanStopResultDto {
+    /// 引擎 id。
+    pub engine_id: String,
+    /// 是否成功终止孤儿进程。
+    pub stopped: bool,
+    /// 诊断原因（如 "lease_not_found"、"pid_not_exist"、"adoptable_killed"、
+    /// "verification_failed" 等）。
+    pub reason: String,
+    /// 可读详情（不含敏感信息）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 // ── Engine Preferences DTO（0.22.5 H2）────────────────────────────────────────
 
 /// 引擎受限偏好 DTO——`get_local_engine_preferences` 返回。
@@ -600,6 +642,9 @@ pub struct CancelResultDto {
 /// 只包含闭合字段，不暴露 executable/argv/env/path/url/runtime kind。
 /// 字段按引擎支持情况填充：funasr 有 compute_preference + auto_start，
 /// paddleocr 有 compute_preference + lifecycle。
+///
+///
+/// 0.22.6 H4：对应 Tauri command `get_local_engine_preferences` 已注册到 invoke_handler。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnginePreferencesDto {
     /// 引擎 id。
@@ -622,6 +667,9 @@ pub struct EnginePreferencesDto {
 /// **闭合字段**：只接受 `compute_preference`、`auto_start`、`lifecycle`。
 /// 禁止包含 executable/argv/env/path/url/runtime kind 或任意 engine_config。
 /// 未知字段在反序列化时被拒绝（`#[serde(deny_unknown_fields)]`）。
+///
+///
+/// 0.22.6 H4：对应 Tauri command `set_local_engine_preferences` 已注册到 invoke_handler。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnginePreferencesPatchDto {
@@ -834,6 +882,7 @@ mod tests {
         let dto = EngineLogDto {
             engine_id: "funasr".to_string(),
             instance_id: "inst-abc".to_string(),
+            operation_id: None,
             seq: "12345".to_string(),
             timestamp: "2026-08-26T00:00:00Z".to_string(),
             level: "info".to_string(),

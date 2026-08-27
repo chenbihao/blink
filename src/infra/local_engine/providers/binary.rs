@@ -13,8 +13,8 @@
 use std::path::Path;
 
 use super::{
-    CompatibilityCheck, InstallPlan, ManifestExtension, PrepareResult, ProviderCleanupScope,
-    ResolvedProfile, RuntimeError, RuntimeProvider,
+    CompatibilityCheck, InstallPlan, InstallSink, ManifestExtension, PrepareResult,
+    ProviderCleanupScope, ResolvedProfile, RuntimeError, RuntimeProvider,
 };
 use crate::infra::local_engine::runtime;
 
@@ -106,6 +106,8 @@ impl RuntimeProvider for ManagedBinaryProvider {
         staging_dir: &Path,
         plan: &InstallPlan,
         _resolved_profile: &ResolvedProfile,
+        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        _sink: Option<&dyn InstallSink>,
     ) -> Result<PrepareResult, RuntimeError> {
         let binary_plan = match plan {
             InstallPlan::ManagedBinary(p) => p,
@@ -155,6 +157,8 @@ impl RuntimeProvider for ManagedBinaryProvider {
         &self,
         _generation_dir: &Path,
         plan: &InstallPlan,
+        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        _sink: Option<&dyn InstallSink>,
     ) -> Result<(), RuntimeError> {
         let binary_plan = match plan {
             InstallPlan::ManagedBinary(p) => p,

@@ -268,11 +268,99 @@ pub async fn install_uv() -> Result<PathBuf, String> {
 /// 确保 uv 可用（查找 → 本地安装）。
 ///
 /// 如果 uv 已在 PATH 或本地安装，直接返回路径；否则下载安装。
+///
+/// **0.22.6 H2**：此函数仍保留向后兼容性，但 `PythonVenvProvider`
+/// 不再调用它。Provider 改为调用 `install_uv_to_dir` 安装到
+/// `runtime::uv_install_dir()`，只使用 Blink 托管的 uv。
 pub async fn ensure_uv() -> Result<PathBuf, String> {
     if let Some(path) = find_uv() {
         return Ok(path);
     }
     install_uv().await
+}
+
+/// 下载并安装 uv 到指定目录（0.22.6 H2）。
+///
+/// 与 `install_uv` 类似，但不扫描 PATH，直接下载安装到 `target_dir`。
+/// 返回安装后的 `uv.exe` 完整路径。
+///
+/// **设计铁则**：此函数只安装到 Blink 托管目录（由调用方传入
+/// `runtime::uv_install_dir()`），不静默接受 PATH 中任意版本 uv。
+pub async fn install_uv_to_dir(target_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(target_dir).map_err(|e| format!("创建 uv 目录失败: {e}"))?;
+
+    // ── 下载 uv zip ──
+    tracing::info!(url = UV_DOWNLOAD_URL, "下载 uv 二进制到 Blink 托管目录...");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(UV_DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+
+    let resp = client
+        .get(UV_DOWNLOAD_URL)
+        .send()
+        .await
+        .map_err(|e| format!("下载 uv 失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("下载 uv 失败: HTTP {}", resp.status()));
+    }
+
+    let zip_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取 uv 下载内容失败: {e}"))?;
+
+    tracing::info!(size = zip_bytes.len(), "uv zip 下载完成");
+
+    // ── 用 zip crate 解压（纯 Rust，无 PowerShell 依赖）──
+    let extract_dir = target_dir.join("extract");
+    if extract_dir.exists() {
+        let _ = std::fs::remove_dir_all(&extract_dir);
+    }
+    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建解压目录失败: {e}"))?;
+
+    let cursor = std::io::Cursor::new(&zip_bytes[..]);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("打开 zip 失败: {e}"))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("读取 zip 条目失败: {e}"))?;
+
+        let outpath = match file.enclosed_name() {
+            Some(path) => extract_dir.join(path),
+            None => continue,
+        };
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&outpath).map_err(|e| format!("创建目录失败: {e}"))?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {e}"))?;
+            }
+            let mut outfile =
+                std::fs::File::create(&outpath).map_err(|e| format!("创建文件失败: {e}"))?;
+            std::io::copy(&mut file, &mut outfile).map_err(|e| format!("写入文件失败: {e}"))?;
+        }
+    }
+
+    tracing::info!("uv zip 解压完成（纯 Rust zip crate）");
+
+    // ── 在解压目录中查找 uv.exe ──
+    let uv_exe = find_file_recursive(&extract_dir, "uv.exe")
+        .ok_or_else(|| "解压后未找到 uv.exe".to_string())?;
+
+    // ── 复制 uv.exe 到目标位置 ──
+    let target = target_dir.join("uv.exe");
+    std::fs::copy(&uv_exe, &target).map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
+
+    // ── 清理临时文件 ──
+    let _ = std::fs::remove_dir_all(&extract_dir);
+
+    tracing::info!(path = %target.display(), "Blink 托管 uv 安装完成");
+    Ok(target)
 }
 
 // ── venv 管理 ────────────────────────────────────────────────────────────

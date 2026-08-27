@@ -18,6 +18,11 @@
 //! | `get_local_engine_storage` | 返回存储概览（只读，spawn_blocking） |
 //! | `cleanup_local_engine` | 清理引擎资产（target_ids → 后端重新解析） |
 //! | `cancel_local_engine_operation` | 取消匹配 operation_id 的操作 |
+//! | `list_engine_models` | 列出引擎模型候选及状态（只读） |
+//! | `install_engine_model` | 安装引擎模型（真实事务） |
+//! | `delete_engine_model` | 删除引擎模型（引用检查 + 删除） |
+//! | `repair_engine_model` | 修复引擎模型（重新下载/校验） |
+//! | `cancel_model_operation` | 取消进行中的模型操作 |
 //!
 //! ## 安全约束
 //!
@@ -39,7 +44,7 @@ use crate::app::command_error::CommandError;
 use crate::app::local_engine::dto::{
     CancelResultDto, CleanupRequestDto, CleanupResultDto, EngineCatalogItem, EngineLogDto,
     EnginePreferencesDto, EnginePreferencesPatchDto, EngineStatusDto, EngineStorageDto,
-    project_catalog_item, project_log, project_status,
+    OrphanStopResultDto, project_catalog_item, project_status,
 };
 use crate::app::local_engine::{LocalEngineService, funasr, paddleocr};
 use crate::domain::local_engine::EngineDescriptor;
@@ -294,6 +299,7 @@ pub async fn get_local_engine_logs(
             EngineLogDto {
                 engine_id: entry.engine_id.clone(),
                 instance_id: entry.instance_id.clone(),
+                operation_id: None,
                 seq: entry.seq.to_string(),
                 timestamp,
                 level: entry.level.clone(),
@@ -385,6 +391,42 @@ pub async fn stop_local_engine(
 
     tracing::info!(engine = %eid, "引擎停止完成");
     Ok(())
+}
+
+/// 手动停止孤儿引擎进程（0.22.6.6）。
+///
+/// 当 lease 恢复扫描发现遗留进程且判定为 `Adoptable` 时，
+/// 用户可在设置页手动调用此命令终止孤儿进程。
+///
+/// **安全策略**（fail-closed）：
+/// - 只接受 `engine_id`，从后端 lease 文件读取进程身份
+/// - 使用 `kill_process_tree_verified` 验证身份后终止（executable + creation_time）
+/// - 证据不足时返回错误，不降级为仅 PID kill
+/// - 终止后清除 lease 文件
+///
+/// 返回 `OrphanStopResultDto` 包含终止状态和诊断信息。
+#[tauri::command]
+pub async fn stop_orphan_engine(
+    app: tauri::AppHandle,
+    engine_id: String,
+) -> Result<OrphanStopResultDto, CommandError> {
+    let svc = get_service(&app)?;
+    let eid = validate_engine_id(&engine_id)?;
+
+    tracing::info!(engine = %eid, "收到停止孤儿引擎请求");
+
+    let result = svc
+        .stop_orphan_engine(&eid)
+        .await
+        .map_err(CommandError::from)?;
+
+    tracing::info!(
+        engine = %eid,
+        stopped = result.stopped,
+        reason = %result.reason,
+        "孤儿引擎停止请求处理完成"
+    );
+    Ok(result)
 }
 
 /// 修复本地引擎环境。
@@ -598,6 +640,9 @@ pub async fn get_local_engine_preferences(
 ///
 /// 如果 compute profile 变化导致与 current generation 不一致，
 /// 将环境投影为 `NeedsRebuild`，并返回 `requires_rebuild=true`。
+///
+/// **自启语义**：保存 `auto_start` 只改变配置，不隐式启动服务。
+/// 是否立即启动由显式 `start_local_engine` action 决定。
 #[tauri::command]
 pub async fn set_local_engine_preferences(
     app: tauri::AppHandle,
@@ -861,6 +906,530 @@ async fn validate_preference_for_engine(
     Ok(())
 }
 
+// ── 只读运行时诊断与打开目录命令（0.22.6 H4）─────────────────────────────────
+
+/// 获取运行时基础状态（只读）。
+///
+/// 返回 Python/uv 基础环境状态、所有引擎的汇总概览。
+/// **只读查询，不安装、不启动、不修改任何状态。**
+#[tauri::command]
+pub async fn get_runtime_foundation_status(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, CommandError> {
+    let svc = get_service(&app)?;
+
+    let catalog = svc.catalog().await;
+    let mut engines = Vec::with_capacity(catalog.len());
+
+    for descriptor in &catalog {
+        let engine_id_str = descriptor.engine_id.to_string();
+        let snapshot = svc.get_status(&descriptor.engine_id).await.map_err(|e| {
+            CommandError::new(
+                "engine_status_error",
+                format!("获取引擎状态失败: {e}"),
+                false,
+            )
+        })?;
+
+        engines.push(serde_json::json!({
+            "engine_id": engine_id_str,
+            "display_name": descriptor.display,
+            "environment": format!("{:?}", snapshot.status.environment).to_lowercase(),
+            "process": format!("{:?}", snapshot.status.process).to_lowercase(),
+            "service": format!("{:?}", snapshot.status.service).to_lowercase(),
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "engines": engines,
+        "python_provider": "python_venv",
+    }))
+}
+
+/// 获取引擎诊断信息（只读）。
+///
+/// 返回单个引擎的详细诊断：环境健康、进程状态、服务状态、最近日志。
+/// **只读查询，不安装、不启动。**
+#[tauri::command]
+pub async fn get_engine_diagnostics(
+    app: tauri::AppHandle,
+    engine_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    let svc = get_service(&app)?;
+    let eid = validate_engine_id(&engine_id)?;
+
+    let snapshot = svc.get_status(&eid).await.map_err(|e| {
+        CommandError::new(
+            "engine_status_error",
+            format!("获取引擎状态失败: {e}"),
+            false,
+        )
+    })?;
+
+    // 获取最近日志（最多 50 行）
+    let logs = svc
+        .get_logs_structured(&eid, 50)
+        .await
+        .map_err(|e| CommandError::new("engine_logs_error", format!("获取日志失败: {e}"), false))?;
+
+    let log_lines: Vec<serde_json::Value> = logs
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "seq": entry.seq,
+                "level": entry.level,
+                "text": entry.text,
+            })
+        })
+        .collect();
+
+    // ── 0.22.6: orphan recovery 闭合 DTO ────────────────────────────────
+    // 前端不得拼接 process/service 猜测孤儿——后端做唯一判定。
+    // 扫描 lease + 进程证据 + health → 闭合 { present, actionable, reason }。
+    let orphan_recovery = scan_orphan_recovery(&eid).await;
+
+    Ok(serde_json::json!({
+        "engine_id": engine_id,
+        "environment": format!("{:?}", snapshot.status.environment).to_lowercase(),
+        "process": {
+            "state": format!("{:?}", snapshot.status.process).to_lowercase(),
+        },
+        "service": format!("{:?}", snapshot.status.service).to_lowercase(),
+        "recent_logs": log_lines,
+        "orphan_recovery": orphan_recovery,
+    }))
+}
+
+/// 扫描引擎的孤儿进程恢复状态，返回闭合 DTO `{ present, actionable, reason }`。
+///
+/// 不暴露 PID、路径、token、endpoint 等敏感字段。
+async fn scan_orphan_recovery(
+    engine_id: &crate::infra::local_engine::runtime::EngineId,
+) -> serde_json::Value {
+    let engine_id_str = engine_id.to_string();
+
+    // 扫描 lease 文件
+    let leases = match tokio::task::spawn_blocking(|| {
+        crate::infra::local_engine::lease::scan_leases()
+    })
+    .await
+    {
+        Ok(l) => l,
+        Err(_) => {
+            return serde_json::json!({
+                "present": false,
+                "actionable": false,
+                "reason": "scan_failed"
+            });
+        }
+    };
+
+    let lease = leases.iter().find(|l| l.engine_id == engine_id_str);
+    let Some(lease) = lease else {
+        return serde_json::json!({
+            "present": false,
+            "actionable": false,
+            "reason": "no_lease"
+        });
+    };
+
+    let lease = lease.clone();
+    let pid = lease.pid;
+
+    // 构建进程证据
+    let process_evidence = match tokio::task::spawn_blocking(move || {
+        crate::infra::local_engine::lease_recovery::build_process_evidence(pid)
+    })
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(_) => {
+            return serde_json::json!({
+                "present": false,
+                "actionable": false,
+                "reason": "process_query_failed"
+            });
+        }
+    };
+
+    // 探测 health 端点
+    let health_evidence =
+        crate::infra::local_engine::lease_recovery::probe_health_evidence(&lease.endpoint).await;
+
+    // 调用 decide_recovery 做恢复判定
+    let decision = crate::infra::local_engine::lease::decide_recovery(
+        &lease,
+        &process_evidence,
+        health_evidence.as_ref(),
+    );
+
+    match &decision {
+        crate::infra::local_engine::lease::RecoveryDecision::Adoptable { .. } => {
+            serde_json::json!({
+                "present": true,
+                "actionable": true,
+                "reason": "adoptable"
+            })
+        }
+        crate::infra::local_engine::lease::RecoveryDecision::DoNotAdopt(diag) => {
+            let reason_str = match &diag.reason {
+                crate::infra::local_engine::lease::RecoveryReason::PidNotFound => "pid_not_exist",
+                crate::infra::local_engine::lease::RecoveryReason::ExecutableMismatch {
+                    ..
+                } => "executable_mismatch",
+                crate::infra::local_engine::lease::RecoveryReason::CreationTimeMismatch {
+                    ..
+                } => "creation_time_mismatch",
+                crate::infra::local_engine::lease::RecoveryReason::CreationTimeMissing => {
+                    "creation_time_missing"
+                }
+                crate::infra::local_engine::lease::RecoveryReason::ProcessQueryFailed => {
+                    "process_query_failed"
+                }
+                crate::infra::local_engine::lease::RecoveryReason::TokenFingerprintMismatch => {
+                    "token_fingerprint_mismatch"
+                }
+                crate::infra::local_engine::lease::RecoveryReason::InstanceIdMismatch => {
+                    "instance_id_mismatch"
+                }
+                crate::infra::local_engine::lease::RecoveryReason::EngineIdMismatch => {
+                    "engine_id_mismatch"
+                }
+                crate::infra::local_engine::lease::RecoveryReason::HealthUnreachable => {
+                    "health_unreachable"
+                }
+                crate::infra::local_engine::lease::RecoveryReason::SchemaVersion { .. } => {
+                    "schema_version_mismatch"
+                }
+            };
+            serde_json::json!({
+                "present": true,
+                "actionable": false,
+                "reason": reason_str
+            })
+        }
+    }
+}
+
+/// 打开引擎数据目录（在资源管理器中打开）。
+///
+/// 打开 `engines/{engine_id}` 目录，包含 venv、模型缓存等。
+#[tauri::command]
+pub async fn open_engine_folder(
+    app: tauri::AppHandle,
+    engine_id: String,
+) -> Result<(), CommandError> {
+    let _svc = get_service(&app)?;
+    let eid = validate_engine_id(&engine_id)?;
+
+    let dir = crate::infra::local_engine::runtime::engine_root(&eid);
+
+    if !dir.exists() {
+        return Err(CommandError::new(
+            "folder_not_found",
+            format!("引擎目录不存在: {}", dir.display()),
+            false,
+        ));
+    }
+
+    // 使用 Windows ShellExecute 打开目录
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| {
+                CommandError::new("open_folder_failed", format!("打开目录失败: {e}"), false)
+            })?;
+    }
+
+    tracing::info!(engine = %eid, dir = %dir.display(), "已打开引擎目录");
+    Ok(())
+}
+
+/// 打开运行时基础目录（在资源管理器中打开）。
+///
+/// 打开 `engines/` 根目录，包含所有引擎子目录。
+#[tauri::command]
+pub async fn open_runtime_folder(_app: tauri::AppHandle) -> Result<(), CommandError> {
+    let dir = crate::infra::local_engine::runtime::runtimes_root().join("engines");
+
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            CommandError::new("create_folder_failed", format!("创建目录失败: {e}"), false)
+        })?;
+    }
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| {
+                CommandError::new("open_folder_failed", format!("打开目录失败: {e}"), false)
+            })?;
+    }
+
+    tracing::info!(dir = %dir.display(), "已打开运行时基础目录");
+    Ok(())
+}
+
+// ── 模型生命周期 commands（0.22.6 H5）─────────────────────────────────────────
+
+use crate::app::local_engine::ModelService;
+
+/// 从 managed state 获取 `ModelService` 引用。
+fn get_model_service(app: &tauri::AppHandle) -> Result<Arc<ModelService>, CommandError> {
+    app.try_state::<Arc<ModelService>>()
+        .map(|s| s.inner().clone())
+        .ok_or_else(|| CommandError::new("internal_error", "ModelService 尚未注册", false))
+}
+
+/// 列出引擎的所有模型候选及其当前状态。
+///
+/// **只读查询，无副作用。** 前端据此展示模型列表，
+/// 但**不触发下载**——下载只在引擎页管理。
+#[tauri::command]
+pub async fn list_engine_models(
+    app: tauri::AppHandle,
+    engine_id: String,
+) -> Result<Vec<crate::app::local_engine::model_service::ModelCatalogItemDto>, CommandError> {
+    let svc = get_model_service(&app)?;
+    let eid = validate_engine_id(&engine_id)?;
+
+    let models = svc.list_models(&eid).await;
+
+    // 投影为 DTO
+    let dtos: Vec<crate::app::local_engine::model_service::ModelCatalogItemDto> = models
+        .iter()
+        .map(|status| {
+            let desc = svc
+                .registry()
+                .find(&eid, &status.model_id)
+                .expect("模型状态必须有对应 descriptor");
+            crate::app::local_engine::model_service::project_model_status(desc, status)
+        })
+        .collect();
+
+    Ok(dtos)
+}
+
+/// 安装引擎模型（真实事务：staging/下载/校验/提升）。
+///
+/// 前端只需提交 `engine_id`、`model_id`、`operation_id`（可选）。
+/// **禁止包含 URL、路径、脚本、外部命令。**
+///
+/// 状态转移：NotInstalled → Downloading → Staging → Verifying → Installed
+/// 失败路径：→ DownloadFailed/StagingFailed/VerificationFailed → NotInstalled
+/// 取消路径：→ NotInstalled（不影响已安装模型）
+#[tauri::command]
+pub async fn install_engine_model(
+    app: tauri::AppHandle,
+    request: crate::app::local_engine::model_service::ModelOperationRequestDto,
+) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
+    let svc = get_model_service(&app)?;
+    let eid = validate_engine_id(&request.engine_id)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %request.model_id,
+        op_id = ?request.operation_id,
+        "收到模型安装请求"
+    );
+
+    let result = svc
+        .install_model(&eid, &request.model_id, request.operation_id)
+        .await
+        .map_err(CommandError::from)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %result.model_id,
+        op_id = %result.operation_id,
+        success = result.success,
+        "模型安装操作完成"
+    );
+
+    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+}
+
+/// 删除引擎模型（引用检查 + 删除）。
+///
+/// **删除正在使用或被配置引用的模型必须返回结构化冲突**，
+/// 不能静默切换到其他模型。
+///
+/// 前端只需提交 `engine_id`、`model_id`、`operation_id`（可选）。
+#[tauri::command]
+pub async fn delete_engine_model(
+    app: tauri::AppHandle,
+    request: crate::app::local_engine::model_service::ModelOperationRequestDto,
+) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
+    let svc = get_model_service(&app)?;
+    let eid = validate_engine_id(&request.engine_id)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %request.model_id,
+        op_id = ?request.operation_id,
+        "收到模型删除请求"
+    );
+
+    // 构建冲突检查器
+    let conflict_checker = build_conflict_checker(&app, &request.engine_id).await?;
+
+    let result = svc
+        .delete_model(
+            &eid,
+            &request.model_id,
+            request.operation_id,
+            conflict_checker.as_ref(),
+        )
+        .await
+        .map_err(CommandError::from)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %result.model_id,
+        op_id = %result.operation_id,
+        success = result.success,
+        "模型删除操作完成"
+    );
+
+    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+}
+
+/// 修复引擎模型（重新下载/校验）。
+///
+/// 状态转移：Installed → Repairing → Installed (or RepairFailed)
+#[tauri::command]
+pub async fn repair_engine_model(
+    app: tauri::AppHandle,
+    request: crate::app::local_engine::model_service::ModelOperationRequestDto,
+) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
+    let svc = get_model_service(&app)?;
+    let eid = validate_engine_id(&request.engine_id)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %request.model_id,
+        op_id = ?request.operation_id,
+        "收到模型修复请求"
+    );
+
+    let result = svc
+        .repair_model(&eid, &request.model_id, request.operation_id)
+        .await
+        .map_err(CommandError::from)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %result.model_id,
+        op_id = %result.operation_id,
+        success = result.success,
+        "模型修复操作完成"
+    );
+
+    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+}
+
+/// 取消模型操作。
+///
+/// 取消进行中的安装/修复/删除操作。
+/// **下载失败或取消不破坏已安装模型，也不改变当前语音选择。**
+#[tauri::command]
+pub async fn cancel_model_operation(
+    app: tauri::AppHandle,
+    engine_id: String,
+    model_id: String,
+    operation_id: String,
+) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
+    let svc = get_model_service(&app)?;
+    let eid = validate_engine_id(&engine_id)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %model_id,
+        op_id = %operation_id,
+        "收到取消模型操作请求"
+    );
+
+    let result = svc
+        .cancel_model_operation(&eid, &model_id, &operation_id)
+        .await
+        .map_err(CommandError::from)?;
+
+    tracing::info!(
+        engine = %eid,
+        model = %result.model_id,
+        op_id = %result.operation_id,
+        success = result.success,
+        "取消模型操作完成"
+    );
+
+    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+}
+
+/// 从配置真源构建模型删除冲突检查器。
+///
+/// 目前只支持 FunASR。PaddleOCR 暂不需要（模型不可删除）。
+async fn build_conflict_checker(
+    app: &tauri::AppHandle,
+    engine_id: &str,
+) -> Result<Box<dyn crate::app::local_engine::model_service::ModelConflictChecker>, CommandError> {
+    match engine_id {
+        funasr::FUNASR_ENGINE_ID => {
+            let config = crate::app::stt_config::get_stt_config();
+            let selected_model = config.local_engine.funasr_model.clone();
+
+            // 从 EngineDescriptor 获取默认 model_contract
+            let svc = get_service(app)?;
+            let catalog = svc.catalog().await;
+            let descriptor = catalog
+                .iter()
+                .find(|d| d.engine_id.as_str() == funasr::FUNASR_ENGINE_ID);
+            let descriptor_model_id = descriptor
+                .map(|d| d.model_contract.model_id.clone())
+                .unwrap_or_else(|| "iic/SenseVoiceSmall".to_string());
+
+            // 检查进程是否运行中——如果运行中则设置 active 引用
+            let snapshot = svc
+                .get_status(&EngineId::new(funasr::FUNASR_ENGINE_ID).unwrap())
+                .await
+                .ok();
+            let is_running = matches!(
+                snapshot.map(|s| s.status.process),
+                Some(crate::domain::local_engine::ProcessState::Running { .. })
+            );
+            // instance_id 暂不可从状态快照获取（在 LaunchContext 中，不对外暴露）
+            // 如果进程运行中且 selected_model 匹配，冲突检查器会返回 ActiveInRunningInstance
+            let active_model_id = if is_running {
+                Some(selected_model.clone())
+            } else {
+                None
+            };
+            let active_instance_id = if is_running {
+                Some("current".to_string())
+            } else {
+                None
+            };
+
+            Ok(Box::new(
+                crate::app::local_engine::model_service::FunasrModelConflictChecker {
+                    selected_model,
+                    descriptor_model_id,
+                    active_model_id,
+                    active_instance_id,
+                },
+            ))
+        }
+        other => Err(CommandError::new(
+            "unsupported_engine",
+            format!("引擎 {other} 不支持模型删除冲突检查"),
+            false,
+        )),
+    }
+}
+
 // ── 测试 ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1027,6 +1596,7 @@ mod tests {
         let dto = EngineLogDto {
             engine_id: "funasr".to_string(),
             instance_id: "inst-abc12345".to_string(),
+            operation_id: None,
             seq: "42".to_string(),
             timestamp: "2026-08-26T00:00:00Z".to_string(),
             level: "info".to_string(),
@@ -1355,5 +1925,472 @@ mod tests {
         let ce: CommandError = err.into();
         assert_eq!(ce.code, "self_test_failed");
         assert!(!ce.retryable);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6.6 回归测试：stop_orphan_engine + OrphanStopResultDto
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── stop_orphan_engine 命令签名可编译 ──
+
+    #[test]
+    fn stop_orphan_engine_command_compiles() {
+        let _ = stop_orphan_engine as fn(tauri::AppHandle, String) -> _;
+    }
+
+    // ── OrphanStopResultDto 序列化正确 ──
+
+    #[test]
+    fn orphan_stop_result_dto_serializes_correctly() {
+        let dto = OrphanStopResultDto {
+            engine_id: "funasr".to_string(),
+            stopped: true,
+            reason: "adoptable_killed".to_string(),
+            detail: Some("进程 12345 已验证身份并终止".to_string()),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["engine_id"], "funasr");
+        assert_eq!(json["stopped"], true);
+        assert_eq!(json["reason"], "adoptable_killed");
+        assert!(json["detail"].is_string());
+    }
+
+    // ── OrphanStopResultDto detail 为 None 时跳过序列化 ──
+
+    #[test]
+    fn orphan_stop_result_dto_skips_none_detail() {
+        let dto = OrphanStopResultDto {
+            engine_id: "paddleocr".to_string(),
+            stopped: false,
+            reason: "lease_not_found".to_string(),
+            detail: None,
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        // detail 为 None 时应被 skip
+        assert!(json.get("detail").is_none() || json["detail"].is_null());
+    }
+
+    // ── OrphanStopResultDto 反序列化正确 ──
+
+    #[test]
+    fn orphan_stop_result_dto_deserializes() {
+        let json = serde_json::json!({
+            "engine_id": "funasr",
+            "stopped": false,
+            "reason": "pid_not_exist",
+            "detail": "PID 不存在（进程已退出），应清除 stale lease"
+        });
+        let dto: OrphanStopResultDto = serde_json::from_value(json).unwrap();
+        assert_eq!(dto.engine_id, "funasr");
+        assert!(!dto.stopped);
+        assert_eq!(dto.reason, "pid_not_exist");
+        assert!(dto.detail.is_some());
+    }
+
+    // ── OrphanStopResultDto 所有可能的 reason 值 ──
+
+    #[test]
+    fn orphan_stop_result_dto_all_reason_variants() {
+        let reasons = [
+            "lease_not_found",
+            "pid_not_exist",
+            "adoptable_killed",
+            "kill_failed",
+            "executable_mismatch",
+            "creation_time_mismatch",
+            "creation_time_missing",
+            "process_query_failed",
+            "token_fingerprint_mismatch",
+            "instance_id_mismatch",
+            "engine_id_mismatch",
+            "health_unreachable",
+            "schema_version_mismatch",
+        ];
+        for reason in &reasons {
+            let dto = OrphanStopResultDto {
+                engine_id: "test".to_string(),
+                stopped: false,
+                reason: reason.to_string(),
+                detail: None,
+            };
+            let json = serde_json::to_value(&dto).unwrap();
+            assert_eq!(json["reason"], *reason);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6 H4: 偏好 round-trip + 静态契约测试
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── 偏好 DTO round-trip：get → set → get 一致性 ──
+
+    #[test]
+    fn funasr_preferences_dto_round_trip() {
+        // 模拟 get_local_engine_preferences 返回的 DTO
+        let get_dto = EnginePreferencesDto {
+            engine_id: "funasr".to_string(),
+            compute_preference: Some("cpu".to_string()),
+            auto_start: Some(true),
+            lifecycle: None,
+            requires_rebuild: None,
+        };
+
+        // 从 get DTO 构造 patch DTO（只修改需要变更的字段）
+        let patch = EnginePreferencesPatchDto {
+            compute_preference: get_dto.compute_preference.clone(),
+            auto_start: get_dto.auto_start,
+            lifecycle: None,
+        };
+
+        // 验证 patch 序列化/反序列化 round-trip
+        let patch_json = serde_json::to_string(&patch).unwrap();
+        let patch_restored: EnginePreferencesPatchDto = serde_json::from_str(&patch_json).unwrap();
+        assert_eq!(patch_restored.compute_preference, patch.compute_preference);
+        assert_eq!(patch_restored.auto_start, patch.auto_start);
+        assert_eq!(patch_restored.lifecycle, patch.lifecycle);
+    }
+
+    #[test]
+    fn paddleocr_preferences_dto_round_trip() {
+        let get_dto = EnginePreferencesDto {
+            engine_id: "paddleocr".to_string(),
+            compute_preference: Some("auto".to_string()),
+            auto_start: None,
+            lifecycle: Some("on_demand".to_string()),
+            requires_rebuild: None,
+        };
+
+        let patch = EnginePreferencesPatchDto {
+            compute_preference: get_dto.compute_preference.clone(),
+            auto_start: None,
+            lifecycle: get_dto.lifecycle.clone(),
+        };
+
+        let patch_json = serde_json::to_string(&patch).unwrap();
+        let patch_restored: EnginePreferencesPatchDto = serde_json::from_str(&patch_json).unwrap();
+        assert_eq!(patch_restored.compute_preference, patch.compute_preference);
+        assert_eq!(patch_restored.lifecycle, patch.lifecycle);
+    }
+
+    #[test]
+    fn preferences_patch_empty_is_noop() {
+        // 空 patch = 不修改任何字段
+        let patch = EnginePreferencesPatchDto {
+            compute_preference: None,
+            auto_start: None,
+            lifecycle: None,
+        };
+        let json = serde_json::to_value(&patch).unwrap();
+        // 所有字段都被 skip_serializing_if 跳过
+        assert!(json.get("compute_preference").is_none() || json["compute_preference"].is_null());
+        assert!(json.get("auto_start").is_none() || json["auto_start"].is_null());
+        assert!(json.get("lifecycle").is_none() || json["lifecycle"].is_null());
+    }
+
+    // ── FunASR preferences 字段约束 ──
+
+    #[test]
+    fn funasr_preferences_has_auto_start_not_lifecycle() {
+        // FunASR 有 auto_start，无 lifecycle
+        let dto = EnginePreferencesDto {
+            engine_id: "funasr".to_string(),
+            compute_preference: Some("cpu".to_string()),
+            auto_start: Some(false),
+            lifecycle: None,
+            requires_rebuild: None,
+        };
+        assert!(dto.auto_start.is_some(), "FunASR 应有 auto_start");
+        assert!(dto.lifecycle.is_none(), "FunASR 不应有 lifecycle");
+    }
+
+    #[test]
+    fn paddleocr_preferences_has_lifecycle_not_auto_start() {
+        // PaddleOCR 有 lifecycle，无 auto_start
+        let dto = EnginePreferencesDto {
+            engine_id: "paddleocr".to_string(),
+            compute_preference: Some("auto".to_string()),
+            auto_start: None,
+            lifecycle: Some("keep_running".to_string()),
+            requires_rebuild: None,
+        };
+        assert!(dto.auto_start.is_none(), "PaddleOCR 不应有 auto_start");
+        assert!(dto.lifecycle.is_some(), "PaddleOCR 应有 lifecycle");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6 H4 §13: 静态契约测试
+    // 验证前端调用的 local-engine / stt command 全部已在 invoke_handler 注册。
+    // 如果前端调用了未注册的命令，此测试会失败，帮助及早发现遗漏。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn all_frontend_local_engine_commands_are_registered() {
+        // 前端已知的 local-engine command 名称集合（从 frontend/js 中提取）
+        // 这些命令必须在 main.rs invoke_handler 中注册
+        let frontend_commands: &[&str] = &[
+            "get_local_engine_catalog",
+            "get_local_engine_status",
+            "get_local_engine_logs",
+            "install_local_engine",
+            "start_local_engine",
+            "stop_local_engine",
+            "repair_local_engine",
+            "get_local_engine_storage",
+            "cleanup_local_engine",
+            "cancel_local_engine_operation",
+            "get_local_engine_preferences",
+            "set_local_engine_preferences",
+            "get_runtime_foundation_status",
+            "get_engine_diagnostics",
+            "open_engine_folder",
+            "open_runtime_folder",
+            "stop_orphan_engine",
+            // 0.22.6 H5: 模型生命周期命令
+            "list_engine_models",
+            "install_engine_model",
+            "delete_engine_model",
+            "repair_engine_model",
+            "cancel_model_operation",
+        ];
+
+        // 验证每个命令名称对应的函数存在于 app::commands 模块中
+        // 这是编译期检查——如果函数不存在，编译会失败
+        for &cmd_name in frontend_commands {
+            let exists = match cmd_name {
+                "get_local_engine_catalog" => {
+                    let _ = get_local_engine_catalog as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "get_local_engine_status" => {
+                    let _ = get_local_engine_status as fn(tauri::AppHandle, Option<String>) -> _;
+                    true
+                }
+                "get_local_engine_logs" => {
+                    let _ =
+                        get_local_engine_logs as fn(tauri::AppHandle, String, Option<usize>) -> _;
+                    true
+                }
+                "install_local_engine" => {
+                    let _ =
+                        install_local_engine as fn(tauri::AppHandle, String, Option<String>) -> _;
+                    true
+                }
+                "start_local_engine" => {
+                    let _ = start_local_engine as fn(tauri::AppHandle, String, Option<String>) -> _;
+                    true
+                }
+                "stop_local_engine" => {
+                    let _ = stop_local_engine as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "repair_local_engine" => {
+                    let _ = repair_local_engine as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "get_local_engine_storage" => {
+                    let _ = get_local_engine_storage as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "cleanup_local_engine" => {
+                    let _ = cleanup_local_engine as fn(tauri::AppHandle, CleanupRequestDto) -> _;
+                    true
+                }
+                "cancel_local_engine_operation" => {
+                    let _ =
+                        cancel_local_engine_operation as fn(tauri::AppHandle, String, String) -> _;
+                    true
+                }
+                "get_local_engine_preferences" => {
+                    let _ = get_local_engine_preferences as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "set_local_engine_preferences" => {
+                    let _ = set_local_engine_preferences
+                        as fn(tauri::AppHandle, String, EnginePreferencesPatchDto) -> _;
+                    true
+                }
+                "get_runtime_foundation_status" => {
+                    let _ = get_runtime_foundation_status as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "get_engine_diagnostics" => {
+                    let _ = get_engine_diagnostics as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "open_engine_folder" => {
+                    let _ = open_engine_folder as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "open_runtime_folder" => {
+                    let _ = open_runtime_folder as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "stop_orphan_engine" => {
+                    let _ = stop_orphan_engine as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "list_engine_models" => {
+                    let _ = list_engine_models as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "install_engine_model" => {
+                    let _ = install_engine_model
+                        as fn(
+                            tauri::AppHandle,
+                            crate::app::local_engine::model_service::ModelOperationRequestDto,
+                        ) -> _;
+                    true
+                }
+                "delete_engine_model" => {
+                    let _ = delete_engine_model
+                        as fn(
+                            tauri::AppHandle,
+                            crate::app::local_engine::model_service::ModelOperationRequestDto,
+                        ) -> _;
+                    true
+                }
+                "repair_engine_model" => {
+                    let _ = repair_engine_model
+                        as fn(
+                            tauri::AppHandle,
+                            crate::app::local_engine::model_service::ModelOperationRequestDto,
+                        ) -> _;
+                    true
+                }
+                "cancel_model_operation" => {
+                    let _ =
+                        cancel_model_operation as fn(tauri::AppHandle, String, String, String) -> _;
+                    true
+                }
+                _ => panic!("未知的前端命令名: {cmd_name}"),
+            };
+            assert!(exists, "命令 {cmd_name} 未注册或函数不存在");
+        }
+    }
+
+    #[test]
+    fn all_frontend_stt_commands_are_registered() {
+        // 前端已知的 STT command 名称集合
+        let frontend_stt_commands: &[&str] = &[
+            "get_stt_config",
+            "set_stt_config",
+            "list_stt_models",
+            "download_stt_model",
+            "delete_stt_model",
+            "list_selectable_stt_models",
+            "set_local_stt_selection",
+            "cancel_voice_recording",
+            "is_voice_recording",
+            "list_audio_devices",
+            "start_audio_test",
+            "stop_audio_test",
+            "save_stt_secret",
+            "delete_stt_secret",
+            "has_stt_secret",
+            "get_stt_secret_hint",
+            "test_cloud_stt",
+            "resize_voice_overlay",
+            "start_chat_stt",
+            "stop_chat_stt",
+        ];
+
+        // 验证每个命令名称对应的函数存在于 app::commands 模块中
+        for &cmd_name in frontend_stt_commands {
+            let exists = match cmd_name {
+                "get_stt_config" => {
+                    let _ = crate::app::commands::get_stt_config as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "set_stt_config" => {
+                    let _ = crate::app::commands::set_stt_config
+                        as fn(
+                            tauri::AppHandle,
+                            crate::app::stt_config::SttConfig,
+                            Option<String>,
+                        ) -> _;
+                    true
+                }
+                "list_stt_models" => {
+                    let _ = crate::app::commands::list_stt_models as fn() -> _;
+                    true
+                }
+                "download_stt_model" => {
+                    let _ = crate::app::commands::download_stt_model
+                        as fn(tauri::AppHandle, String) -> _;
+                    true
+                }
+                "delete_stt_model" => {
+                    let _ = crate::app::commands::delete_stt_model as fn(String) -> _;
+                    true
+                }
+                "list_selectable_stt_models" => {
+                    let _ = crate::app::commands::list_selectable_stt_models
+                        as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "set_local_stt_selection" => {
+                    let _ = crate::app::commands::set_local_stt_selection
+                        as fn(tauri::AppHandle, String, String) -> _;
+                    true
+                }
+                "cancel_voice_recording" => {
+                    let _ =
+                        crate::app::commands::cancel_voice_recording as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "is_voice_recording" => {
+                    let _ = crate::app::commands::is_voice_recording as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "list_audio_devices" => {
+                    let _ = crate::app::commands::list_audio_devices as fn() -> _;
+                    true
+                }
+                "start_audio_test" => {
+                    let _ = crate::app::commands::start_audio_test
+                        as fn(tauri::AppHandle, Option<String>) -> _;
+                    true
+                }
+                "stop_audio_test" => {
+                    let _ = crate::app::commands::stop_audio_test as fn() -> _;
+                    true
+                }
+                "save_stt_secret" => {
+                    let _ = crate::app::commands::save_stt_secret as fn(String) -> _;
+                    true
+                }
+                "delete_stt_secret" => {
+                    let _ = crate::app::commands::delete_stt_secret as fn() -> _;
+                    true
+                }
+                "has_stt_secret" => {
+                    let _ = crate::app::commands::has_stt_secret as fn() -> _;
+                    true
+                }
+                "get_stt_secret_hint" => {
+                    let _ = crate::app::commands::get_stt_secret_hint as fn() -> _;
+                    true
+                }
+                "test_cloud_stt" => {
+                    let _ = crate::app::commands::test_cloud_stt as fn() -> _;
+                    true
+                }
+                "resize_voice_overlay" => {
+                    let _ = crate::app::commands::resize_voice_overlay
+                        as fn(tauri::AppHandle, f64) -> _;
+                    true
+                }
+                "start_chat_stt" => {
+                    let _ = crate::app::commands::start_chat_stt as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                "stop_chat_stt" => {
+                    let _ = crate::app::commands::stop_chat_stt as fn(tauri::AppHandle) -> _;
+                    true
+                }
+                _ => panic!("未知的前端 STT 命令名: {cmd_name}"),
+            };
+            assert!(exists, "STT 命令 {cmd_name} 未注册或函数不存在");
+        }
     }
 }

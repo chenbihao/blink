@@ -21,11 +21,16 @@ pub enum OcrRequestOrigin {
 }
 
 /// 截图请求来源信息。
+///
+/// 预留诊断字段：`session_epoch` / `selection_revision` 在当前版本
+/// 尚未被后端逻辑读取，但保留用于未来日志关联和请求追踪。
 #[derive(Debug, Clone)]
 pub struct ScreenshotOrigin {
     /// 截图 session epoch（每次新截图 session 递增）。
+    #[allow(dead_code)]
     pub session_epoch: u64,
     /// 选区 revision（同一 session 内重选递增）。
+    #[allow(dead_code)]
     pub selection_revision: u64,
 }
 
@@ -56,6 +61,9 @@ pub struct OcrRequestContext {
     pub cancellation: CancellationToken,
 
     /// 请求来源。
+    /// 预留：当前版本尚未在 `recognize_with_context` 实现中读取 `origin`，
+    /// 但保留用于未来按来源区分超时/优先级。
+    #[allow(dead_code)]
     pub origin: OcrRequestOrigin,
 }
 
@@ -125,11 +133,15 @@ impl OcrRequestContext {
     }
 
     /// 返回是否来自截图 Interaction。
+    /// 预留诊断方法：当前版本无 caller，保留供未来请求追踪使用。
+    #[allow(dead_code)]
     pub fn is_from_screenshot(&self) -> bool {
         matches!(self.origin, OcrRequestOrigin::Screenshot(_))
     }
 
     /// 返回截图来源信息（如果来自截图）。
+    /// 预留诊断方法：当前版本无 caller，保留供未来请求追踪使用。
+    #[allow(dead_code)]
     pub fn screenshot_origin(&self) -> Option<&ScreenshotOrigin> {
         match &self.origin {
             OcrRequestOrigin::Screenshot(s) => Some(s),
@@ -262,6 +274,7 @@ impl OcrRequestTracker {
     }
 
     /// 返回当前在途请求数量（诊断用）。
+    #[allow(dead_code)] // 预留诊断方法，未来供 /health 端点或设置页使用
     pub fn in_flight_count(&self) -> usize {
         self.requests.read().map(|r| r.len()).unwrap_or(0)
     }

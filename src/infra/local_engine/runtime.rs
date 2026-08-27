@@ -619,6 +619,34 @@ pub enum RuntimeError {
     #[error("self-test 失败: {message}")]
     SelfTestFailed { message: String },
 
+    /// 磁盘空间不足。
+    #[error("磁盘空间不足: {message}")]
+    InsufficientDiskSpace { message: String },
+
+    /// 网络不可达或下载失败。
+    #[error("网络/下载失败: {message}")]
+    NetworkUnreachable { message: String },
+
+    /// artifact 或 hash 校验失败（文件损坏）。
+    #[error("artifact/hash 损坏: {message}")]
+    ArtifactCorrupted { message: String },
+
+    /// current.json 指向的 generation manifest 与 descriptor 契约不符。
+    #[error("manifest 契约不符: {message}")]
+    ManifestContractMismatch { message: String },
+
+    /// 操作被取消。
+    #[error("操作被取消: {message}")]
+    OperationCancelled { message: String },
+
+    /// generation 目录验证失败（文件缺失或不可读）。
+    #[error("generation 目录验证失败: {message}")]
+    GenerationVerificationFailed { message: String },
+
+    /// 回滚失败——无法切回 previous generation。
+    #[error("回滚失败: {message}")]
+    RollbackFailed { message: String },
+
     #[error("compute profile 解析失败: {message}")]
     ProfileResolutionFailed { message: String },
 
@@ -645,6 +673,79 @@ pub enum RuntimeError {
 
     #[error("JSON 错误: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+// ── RuntimeError 分类辅助 ──────────────────────────────────────────────────
+
+impl RuntimeError {
+    /// 返回稳定的错误分类字符串（用于日志和前端映射）。
+    ///
+    /// 分类维度：
+    /// - `disk_full`: 磁盘不足
+    /// - `network`: 断网/下载失败
+    /// - `corrupted`: artifact/hash 损坏
+    /// - `self_test`: self-test 失败
+    /// - `profile`: compute profile 解析失败
+    /// - `backend`: backend 不匹配
+    /// - `cancelled`: 操作被取消
+    /// - `pointer`: current.json / manifest 指针问题
+    /// - `install`: 通用安装失败
+    /// - `cleanup`: 清理失败
+    /// - `staging`: staging 创建/提升失败
+    /// - `internal`: IO/JSON/其他内部错误
+    /// - `config`: 配置/路径校验错误
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::InsufficientDiskSpace { .. } => "disk_full",
+            Self::NetworkUnreachable { .. } => "network",
+            Self::ArtifactCorrupted { .. } => "corrupted",
+            Self::SelfTestFailed { .. } => "self_test",
+            Self::ProfileResolutionFailed { .. } | Self::ExplicitBackendFailed { .. } => "profile",
+            Self::BackendMismatch { .. } => "backend",
+            Self::OperationCancelled { .. } => "cancelled",
+            Self::CurrentPointerMissing
+            | Self::CurrentPointerParseFailed { .. }
+            | Self::ManifestParseFailed { .. }
+            | Self::ManifestSerializeFailed { .. }
+            | Self::ManifestSchemaIncompatible { .. }
+            | Self::ManifestContractMismatch { .. } => "pointer",
+            Self::StagingCreateFailed { .. }
+            | Self::GenerationPromoteFailed { .. }
+            | Self::CurrentPointerSwitchFailed { .. } => "staging",
+            Self::GenerationNotFound { .. }
+            | Self::GenerationVerificationFailed { .. }
+            | Self::RollbackFailed { .. } => "pointer",
+            Self::InstallFailed { .. } => "install",
+            Self::CleanupFailed { .. } | Self::ArtifactStillReferenced { .. } => "cleanup",
+            Self::MigrationFailed { .. } => "install",
+            Self::InvalidEngineId { .. }
+            | Self::InvalidArtifactId { .. }
+            | Self::PathTraversal { .. } => "config",
+            Self::Io(_) | Self::Json(_) => "internal",
+        }
+    }
+
+    /// 从 IO 错误推断是否为磁盘空间不足。
+    ///
+    /// Windows: ERROR_DISK_FULL (112) / ERROR_HANDLE_DISK_FULL (39)
+    /// Unix: ENOSPC (28)
+    pub fn from_io_disk_space(e: std::io::Error) -> Self {
+        #[cfg(windows)]
+        let is_disk_full = matches!(
+            e.raw_os_error(),
+            Some(112) | Some(39) // ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL
+        );
+        #[cfg(not(windows))]
+        let is_disk_full = matches!(e.raw_os_error(), Some(28)); // ENOSPC
+
+        if is_disk_full {
+            Self::InsufficientDiskSpace {
+                message: format!("磁盘空间不足: {e}"),
+            }
+        } else {
+            Self::Io(e)
+        }
+    }
 }
 
 // ── 路径安全 API ───────────────────────────────────────────────────────────
@@ -711,6 +812,11 @@ pub fn refcount_path(runtime_kind: RuntimeKind, artifact_id: &ArtifactId) -> Pat
 
 /// 模型缓存根目录：`%APPDATA%\blink\models`
 pub fn models_root() -> PathBuf {
+    #[cfg(test)]
+    {
+        return runtimes_root().join("models");
+    }
+    #[cfg(not(test))]
     crate::infra::utils::paths::app_data_dir().join("models")
 }
 
@@ -721,11 +827,21 @@ pub fn engine_model_cache_dir(engine_id: &EngineId) -> PathBuf {
 
 /// 旧 FunASR venv 路径：`%APPDATA%\blink\python\venv`（兼容迁移用）。
 pub fn legacy_funasr_venv_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        return python_shared_root().join("venv");
+    }
+    #[cfg(not(test))]
     crate::infra::utils::paths::python_dir().join("venv")
 }
 
 /// Python 公共资产根目录：`%APPDATA%\blink\python`
 pub fn python_shared_root() -> PathBuf {
+    #[cfg(test)]
+    {
+        return runtimes_root().join("python");
+    }
+    #[cfg(not(test))]
     crate::infra::utils::paths::python_dir()
 }
 
@@ -865,15 +981,45 @@ fn atomic_replace(from: &Path, to: &Path) -> Result<(), std::io::Error> {
             .collect();
 
         let flags = MOVE_FILE_FLAGS(MOVEFILE_REPLACE_EXISTING.0 | MOVEFILE_WRITE_THROUGH.0);
-        let result = unsafe {
-            MoveFileExW(
-                PCWSTR(source_wide.as_ptr()),
-                PCWSTR(target_wide.as_ptr()),
-                flags,
-            )
-        };
 
-        result.map_err(std::io::Error::other)
+        // MoveFileExW 偶发"拒绝访问 (0x80070005)"——杀软实时扫描或并发
+        // 测试竞争短暂占用文件句柄。这是暂态错误，有限次重试即可恢复。
+        // 生产路径（单引擎安装）几乎不会遇到；重试只为消除测试 flaky。
+        const MAX_RETRIES: u32 = 5;
+        let mut last_err: Option<windows::core::Error> = None;
+        for attempt in 0..MAX_RETRIES {
+            let result = unsafe {
+                MoveFileExW(
+                    PCWSTR(source_wide.as_ptr()),
+                    PCWSTR(target_wide.as_ptr()),
+                    flags,
+                )
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // 0x80070005 = ERROR_ACCESS_DENIED（杀软/文件锁竞争）
+                    // 不用 E_ACCESS_DENIED 常量（某些 windows crate 版本不含它）
+                    if e.code() == windows::core::HRESULT::from_win32(0x80070005)
+                        && attempt + 1 < MAX_RETRIES
+                    {
+                        tracing::debug!(
+                            attempt = attempt + 1,
+                            max = MAX_RETRIES,
+                            "MoveFileExW 暂态拒绝访问，重试"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10 * (1 << attempt)));
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(std::io::Error::other(e));
+                }
+            }
+        }
+        // 所有重试用尽
+        Err(std::io::Error::other(last_err.unwrap_or_else(|| {
+            windows::core::Error::from(windows::Win32::Foundation::E_FAIL)
+        })))
     }
 
     #[cfg(not(windows))]

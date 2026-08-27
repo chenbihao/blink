@@ -97,6 +97,7 @@ impl StructuredOcrError {
     }
 
     /// 环境未安装错误（附安装入口提示）。
+    #[allow(dead_code)] // 预留：供未来 OCR 后端切换时使用
     pub fn environment_missing() -> Self {
         Self::new(
             OcrErrorCategory::EnvironmentMissing,
@@ -170,6 +171,10 @@ impl From<&crate::domain::capability::builtins::ocr_engine::OcrError> for Struct
 }
 
 /// 便捷构造 trait。
+///
+/// 预留：`StructuredOcrError` 已有同名构造方法，此 trait 提供替代调用路径。
+/// 当前版本无 caller，保留供未来错误处理统一入口使用。
+#[allow(dead_code)]
 pub trait OcrErrorExt {
     fn environment_missing() -> StructuredOcrError;
     fn start_failed(msg: impl Into<String>) -> StructuredOcrError;

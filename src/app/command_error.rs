@@ -202,7 +202,7 @@ impl From<crate::domain::sticky::StickyWorkflowError> for CommandError {
 /// 稳定 code 保留为 snake_case，detail 投影 phase + 原始 detail。
 impl From<crate::domain::local_engine::LocalEngineError> for CommandError {
     fn from(e: crate::domain::local_engine::LocalEngineError) -> Self {
-        use crate::domain::local_engine::{ErrorPhase, LocalEngineErrorCode};
+        use crate::domain::local_engine::LocalEngineErrorCode;
 
         let retryable = matches!(
             e.code,

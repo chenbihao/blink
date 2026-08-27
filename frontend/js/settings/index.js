@@ -6,7 +6,7 @@
  */
 
 import {applyTheme} from "../shared/theme.js";
-import {applyI18n, setLang} from "../i18n/index.js";
+import {applyI18n, setLang, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
 import {hideSettingsWindow, loadConfig} from "./shared/ipc.js";
 import {setCurrentConfig} from "./shared/state.js";
@@ -119,6 +119,10 @@ async function mountLocalRuntime() {
         if (state.size === 0) {
             if (emptyRegion) emptyRegion.hidden = false;
         }
+
+        // 0.22.6: 初始化运行时底座（只读）
+        initFoundation();
+
         // resolve mount resolvers
         for (const resolve of _mountResolvers) resolve();
         _mountResolvers = [];
@@ -162,6 +166,112 @@ function disposeLocalRuntime() {
     if (loadingRegion) loadingRegion.hidden = true;
     if (errorRegion) errorRegion.hidden = true;
     if (emptyRegion) emptyRegion.hidden = true;
+
+    // 0.22.6: 清空底座
+    const foundationBody = document.getElementById("le-foundation-body");
+    if (foundationBody) foundationBody.textContent = "";
+}
+
+// ── 0.22.6: 运行时底座（只读）─────────────────────────────────────────────
+
+/**
+ * 初始化运行时底座区域。
+ * 绑定刷新和打开根目录按钮，拉取底座状态。
+ */
+function initFoundation() {
+    const refreshBtn = document.getElementById("le-foundation-refresh");
+    const openBtn = document.getElementById("le-foundation-open");
+
+    // 绑定刷新按钮（只绑一次）
+    if (refreshBtn && !refreshBtn.dataset.leWired) {
+        refreshBtn.dataset.leWired = "1";
+        refreshBtn.addEventListener("click", () => {
+            refreshFoundation();
+        });
+    }
+
+    // 绑定打开根目录按钮（只绑一次）
+    if (openBtn && !openBtn.dataset.leWired) {
+        openBtn.dataset.leWired = "1";
+        openBtn.addEventListener("click", () => {
+            if (_leController && !_leController.isDisposed()) {
+                _leController.openRuntimeFolder().catch((e) => {
+                    console.error("[local-engine] openRuntimeFolder failed:", e);
+                });
+            }
+        });
+    }
+
+    // 首次拉取底座状态
+    refreshFoundation();
+}
+
+/**
+ * 刷新运行时底座状态。
+ */
+async function refreshFoundation() {
+    if (!_leController || _leController.isDisposed()) return;
+
+    const body = document.getElementById("le-foundation-body");
+    if (!body) return;
+
+    // loading 占位
+    body.textContent = "";
+    const loading = document.createElement("div");
+    loading.className = "le-foundation-no-data";
+    loading.textContent = t("local_engine.foundation.no_data");
+    body.appendChild(loading);
+
+    try {
+        const foundation = await _leController.getFoundationStatus();
+        renderFoundationBody(body, foundation);
+    } catch (e) {
+        body.textContent = "";
+        const errEl = document.createElement("div");
+        errEl.className = "le-foundation-no-data";
+        errEl.textContent = e?.message || String(e);
+        body.appendChild(errEl);
+    }
+}
+
+/**
+ * 渲染底座内容。
+ * @param {HTMLElement} body
+ * @param {Object} foundation - RuntimeFoundationDto
+ */
+function renderFoundationBody(body, foundation) {
+    body.textContent = "";
+    if (!foundation) {
+        const empty = document.createElement("div");
+        empty.className = "le-foundation-no-data";
+        empty.textContent = t("local_engine.foundation.no_data");
+        body.appendChild(empty);
+        return;
+    }
+
+    const rows = [
+        {label: t("local_engine.foundation.python_provider"), value: foundation.python_provider || "—"},
+        {label: t("local_engine.foundation.runtime_kind"), value: foundation.runtime_kind || "—"},
+        {label: t("local_engine.foundation.uv_source"), value: foundation.uv_source || "—"},
+        {label: t("local_engine.foundation.uv_version"), value: foundation.uv_version || "—"},
+        {label: t("local_engine.foundation.managed_python"), value: foundation.managed_python || "—"},
+        {label: t("local_engine.foundation.shared_cache"), value: foundation.shared_cache || "—"},
+        {label: t("local_engine.foundation.root_dir"), value: foundation.root_dir || "—"},
+    ];
+
+    for (const row of rows) {
+        const el = document.createElement("div");
+        el.className = "le-foundation-row";
+        const label = document.createElement("span");
+        label.className = "le-info-label";
+        label.textContent = row.label;
+        const value = document.createElement("span");
+        value.className = "le-info-value";
+        value.textContent = row.value;
+        el.appendChild(label);
+        el.appendChild(value);
+        body.appendChild(el);
+    }
 }
 
 /**
@@ -432,6 +542,9 @@ async function init() {
         // 语言切换时刷新已 mount 的卡片文案
         onLangChange(() => {
             if (_leController && _leController.isMounted()) {
+                // 刷新底座文案
+                refreshFoundation();
+
                 const container = document.getElementById("le-cards-container");
                 if (container) {
                     const state = _leController.getState();

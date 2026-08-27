@@ -573,61 +573,118 @@ function initAudioTest(config) {
 // ── FunASR 本地模型选择（业务设置） ──────────────────────────────────────────
 
 /**
- * 初始化本地模型选择器。
+ * 初始化本地模型选择器（0.22.6 重构）。
  *
- * 模型列表来自后端 `list_stt_models`，选择后通过 `download_stt_model` 保存。
- * 这是语音业务设置（选哪个模型），不是生命周期管理（安装/启停）。
+ * 模型列表来自后端 `list_engine_models`（engine_id="funasr"），
+ * **只列出已安装（install_state==="installed"）的模型**，以"引擎 · 模型"格式显示。
+ * 选择通过 `set_local_stt_selection` 保存——后端会验证模型已安装且可用，不触发下载。
+ *
+ * 无已安装模型时显示空状态 + 前往引擎页安装 CTA。
  */
 async function initLocalModelSelect(config) {
     const select = document.getElementById("voice-local-model-select");
     if (!select) return;
 
-    // 加载模型列表
+    // 读取当前选择的 engine_id + model_id
+    const currentEngineId = config.local_stt_selection?.engine_id || "funasr";
+    const currentModelId = config.local_stt_selection?.model_id || config.local_engine?.funasr_model || "";
+
+    // 拉取引擎模型列表
     let models;
     try {
-        models = await invoke("list_stt_models");
+        models = await invoke("list_engine_models", {engineId: "funasr"});
     } catch (e) {
-        console.error("list_stt_models failed:", e);
+        console.error("list_engine_models failed:", e);
+        // 降级：显示错误占位
+        select.textContent = "";
+        const errOpt = document.createElement("option");
+        errOpt.textContent = t("voice.local.model.save_failed");
+        errOpt.disabled = true;
+        errOpt.selected = true;
+        select.appendChild(errOpt);
         return;
     }
 
-    if (!models || models.length === 0) {
+    // 只保留已安装且可用的模型
+    const installed = (models || []).filter((m) => m.install_state === "installed");
+
+    if (installed.length === 0) {
+        // 无已安装模型 → 空状态 + CTA
+        select.textContent = "";
         const empty = document.createElement("option");
         empty.textContent = t("voice.local.model.empty");
         empty.disabled = true;
+        empty.selected = true;
         select.appendChild(empty);
+
+        // 显示 CTA 区域
+        showEmptyModelCta();
         return;
     }
 
-    // 填充选项
-    for (const m of models) {
+    // 填充选项：以"引擎 · 模型"格式显示
+    for (const m of installed) {
         const opt = document.createElement("option");
-        opt.value = m.id;
-        const sizeStr = m.size_mb >= 1024
-            ? t("voice.local.model.size_gb", {size: (m.size_mb / 1024).toFixed(1)})
-            : t("voice.local.model.size_mb", {size: m.size_mb});
-        opt.textContent = t("voice.local.model.option", {name: m.display_name, params: m.params, size: sizeStr});
-        if (m.is_selected) {
+        opt.value = m.model_id;
+        // 显示格式：FunASR · SenseVoiceSmall
+        const engineName = "FunASR";
+        const modelName = m.display_name || m.model_id;
+        opt.textContent = `${engineName} · ${modelName}`;
+        if (m.is_selected || m.model_id === currentModelId) {
             opt.selected = true;
         }
         select.appendChild(opt);
     }
 
-    // 选择变更 → 保存
+    // 选择变更 → 通过 set_local_stt_selection 保存
     select.addEventListener("change", async () => {
         const modelId = select.value;
+        const engineId = "funasr"; // 当前只支持 funasr
         try {
-            await invoke("download_stt_model", {modelId});
-            // 更新 config 中的 funasr_model
-            const model = models.find((m) => m.id === modelId);
-            if (model) {
-                config.local_engine.funasr_model = model.funasr_model_id;
-                config.local_model_id = modelId;
-            }
+            await invoke("set_local_stt_selection", {engineId, modelId});
+            // 更新 config
+            config.local_stt_selection = {engine_id: engineId, model_id: modelId};
+            config.local_model_id = modelId;
+            config.local_engine.funasr_model = modelId;
         } catch (e) {
-            console.error("download_stt_model failed:", e);
+            console.error("set_local_stt_selection failed:", e);
+            // 回滚 select 到之前选中的值
+            const prev = installed.find((m) => m.is_selected);
+            if (prev) select.value = prev.model_id;
         }
     });
+}
+
+/**
+ * 显示"无已安装模型"空状态 CTA。
+ * 在模型选择器下方插入一个引导用户前往引擎页安装模型的提示。
+ */
+function showEmptyModelCta() {
+    const selectRow = document.querySelector(".voice-model-select-row");
+    if (!selectRow) return;
+    // 避免重复插入
+    if (document.getElementById("voice-model-empty-cta")) return;
+
+    const cta = document.createElement("div");
+    cta.id = "voice-model-empty-cta";
+    cta.className = "le-voice-empty-cta";
+
+    const text = document.createElement("span");
+    text.textContent = t("voice.local.model.goto_engines_hint");
+    cta.appendChild(text);
+
+    const btn = document.createElement("button");
+    btn.className = "btn btn-small";
+    btn.type = "button";
+    btn.textContent = t("voice.local.model.goto_engines_install");
+    btn.addEventListener("click", () => {
+        // 复用已有的跳转入口逻辑
+        const gotoBtn = document.getElementById("voice-goto-engines-btn");
+        if (gotoBtn) gotoBtn.click();
+    });
+    cta.appendChild(btn);
+
+    selectRow.insertAdjacentElement("afterend", cta);
 }
 
 // ── FunASR 生命周期管理已迁移至引擎页 local-runtime controller ──

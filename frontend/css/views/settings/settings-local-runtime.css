@@ -6,12 +6,12 @@
 /* ── section heading / desc ────────────────────────────────────────────────── */
 
 #engines .section-heading {
-    font-size: var(--font-size-lg, 1.1rem);
+    font-size: var(--text-lg);
     font-weight: 600;
-    color: var(--color-text-primary, #e2e8f0);
+    color: var(--text);
     margin: 1.5rem 0 0.5rem;
     padding-top: 0.75rem;
-    border-top: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
+    border-top: 1px solid var(--surface);
     font-style: normal;
 }
 
@@ -22,20 +22,20 @@
 }
 
 #engines .section-desc {
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     margin: 0 0 0.75rem;
     font-style: normal;
 }
 
 #engines .section-note {
-    font-size: var(--font-size-xs, 0.75rem);
-    color: var(--color-text-tertiary, #718096);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     margin: 0 0 1rem;
     padding: 0.5rem 0.75rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.03));
-    border-left: 3px solid var(--color-accent, #4299e1);
+    background: var(--surface-2);
+    border-left: 3px solid var(--accent);
     font-style: normal;
 }
 
@@ -44,9 +44,9 @@
 #engines .le-nojs-fallback {
     padding: 1rem 1.25rem;
     border-radius: var(--radius-md, 8px);
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.05));
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
-    color: var(--color-text-secondary, #a0aec0);
+    background: var(--surface-2);
+    border: 1px solid var(--surface);
+    color: var(--text-sub);
     font-style: normal;
 }
 
@@ -60,14 +60,14 @@
     gap: 0.5rem;
     padding: 0.75rem 1rem;
     border-radius: var(--radius-md, 8px);
-    font-size: var(--font-size-sm, 0.875rem);
+    font-size: var(--text-sm);
     font-style: normal;
     min-height: 2.5rem;
 }
 
 #engines .le-loading-region {
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.03));
-    color: var(--color-text-secondary, #a0aec0);
+    background: var(--surface-2);
+    color: var(--text-sub);
 }
 
 #engines .le-loading-region .le-loading-icon {
@@ -80,13 +80,13 @@
 }
 
 #engines .le-error-region {
-    background: var(--color-danger-bg, rgba(229, 62, 62, 0.1));
-    color: var(--color-danger, #e53e3e);
-    border: 1px solid var(--color-danger-border, rgba(229, 62, 62, 0.2));
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid var(--red-border);
 }
 
 #engines .le-empty-region {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
 }
 
 /* ── engine cards container ─────────────────────────────────────────────────── */
@@ -116,20 +116,20 @@
 }
 
 #engines .le-badge {
-    font-size: var(--font-size-xs, 0.75rem);
+    font-size: var(--text-xs);
     padding: 0.125rem 0.5rem;
     border-radius: var(--radius-sm, 4px);
     font-style: normal;
 }
 
 #engines .le-badge-cap {
-    background: var(--color-accent-bg, rgba(66, 153, 225, 0.15));
-    color: var(--color-accent, #4299e1);
+    background: var(--accent-bg);
+    color: var(--accent);
 }
 
 #engines .le-badge-lifecycle {
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.08));
-    color: var(--color-text-secondary, #a0aec0);
+    background: var(--surface-2);
+    color: var(--text-sub);
 }
 
 /* ── status grid ────────────────────────────────────────────────────────────── */
@@ -144,18 +144,17 @@
 #engines .le-status-item {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 0.5rem;
 }
 
 #engines .le-status-label {
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     font-style: normal;
 }
 
 #engines .le-status-value {
-    font-size: var(--font-size-sm, 0.875rem);
+    font-size: var(--text-sm);
     font-style: normal;
 }
 
@@ -168,23 +167,23 @@
     gap: 0.5rem;
     padding: 0.5rem 0;
     min-height: 2rem;
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     font-style: normal;
 }
 
 #engines .le-op-kind {
     font-weight: 600;
-    color: var(--color-accent, #4299e1);
+    color: var(--accent);
 }
 
 #engines .le-op-stage {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
 }
 
 #engines .le-op-id {
-    font-size: var(--font-size-xs, 0.75rem);
-    color: var(--color-text-tertiary, #718096);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     margin-left: auto;
 }
 
@@ -192,7 +191,7 @@
 
 #engines .le-backend-info {
     padding: 0.5rem 0;
-    border-top: 1px solid var(--color-border, rgba(255, 255, 255, 0.06));
+    border-top: 1px solid var(--surface);
 }
 
 #engines .le-backend-row {
@@ -200,24 +199,24 @@
     align-items: center;
     gap: 0.5rem;
     margin-bottom: 0.25rem;
-    font-size: var(--font-size-sm, 0.875rem);
+    font-size: var(--text-sm);
     font-style: normal;
 }
 
 #engines .le-backend-fallback {
-    color: var(--color-warning, #dd6b20);
-    font-size: var(--font-size-xs, 0.75rem);
+    color: var(--warning);
+    font-size: var(--text-xs);
     font-style: normal;
 }
 
 #engines .le-info-label {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     min-width: 5rem;
     font-style: normal;
 }
 
 #engines .le-info-value {
-    color: var(--color-text-secondary, #a0aec0);
+    color: var(--text-sub);
     font-style: normal;
 }
 
@@ -233,14 +232,76 @@
     align-items: center;
     gap: 0.5rem;
     margin-bottom: 0.25rem;
-    font-size: var(--font-size-sm, 0.875rem);
+    font-size: var(--text-sm);
     font-style: normal;
 }
 
 #engines .le-storage-releasable {
-    color: var(--color-warning, #dd6b20);
-    font-size: var(--font-size-xs, 0.75rem);
+    color: var(--warning);
+    font-size: var(--text-xs);
     font-style: normal;
+}
+
+/* ── engine config (adapter hook 区域) ──────────────────────────────────────── */
+/* 与 backend-info / storage-info 共用 label-value 视觉语言；
+   select 复用设置页统一下拉外观（surface 底 + 自定义箭头），不裸用浏览器默认。 */
+
+#engines .le-card-config {
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+#engines .le-config-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+    font-style: normal;
+}
+
+#engines .le-config-label {
+    width: var(--settings-label-width);
+    flex-shrink: 0;
+    color: var(--text-sub);
+    font-size: var(--text-md);
+    font-style: normal;
+}
+
+#engines .le-config-select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0.25rem 1.5rem 0.25rem 0.5rem;
+    font-size: var(--text-sm);
+    height: 28px;
+    min-width: 120px;
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236c7086'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    cursor: pointer;
+    font-style: normal;
+    transition: border-color var(--transition-fast, 0.1s);
+}
+
+#engines .le-config-select:hover {
+    border-color: var(--text-faint);
+}
+
+#engines .le-config-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+#engines .le-config-select:disabled {
+    opacity: var(--opacity-dim, 0.5);
+    cursor: not-allowed;
 }
 
 /* ── actions ────────────────────────────────────────────────────────────────── */
@@ -249,7 +310,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
-    padding: 0.5rem 0;
+    padding: 0.5rem 16px;
     min-height: 2.5rem;
 }
 
@@ -257,7 +318,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: var(--font-size-sm, 0.875rem);
+    font-size: var(--text-sm);
     font-style: normal;
 }
 
@@ -273,34 +334,34 @@
 #engines .le-card-error {
     padding: 0.5rem 0.75rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--color-danger-bg, rgba(229, 62, 62, 0.08));
-    border: 1px solid var(--color-danger-border, rgba(229, 62, 62, 0.15));
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
     min-height: 2rem;
     font-style: normal;
 }
 
 #engines .le-error-main {
-    color: var(--color-danger, #e53e3e);
-    font-size: var(--font-size-sm, 0.875rem);
+    color: var(--red);
+    font-size: var(--text-sm);
     font-style: normal;
 }
 
 #engines .le-error-hint {
-    color: var(--color-text-secondary, #a0aec0);
-    font-size: var(--font-size-xs, 0.75rem);
+    color: var(--text-sub);
+    font-size: var(--text-xs);
     margin-top: 0.25rem;
     font-style: normal;
 }
 
 #engines .le-error-detail {
     margin-top: 0.5rem;
-    font-size: var(--font-size-xs, 0.75rem);
+    font-size: var(--text-xs);
     font-style: normal;
 }
 
 #engines .le-error-detail summary {
     cursor: pointer;
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     font-style: normal;
 }
 
@@ -308,9 +369,9 @@
     margin-top: 0.25rem;
     padding: 0.5rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--color-surface-elevated, rgba(0, 0, 0, 0.2));
-    color: var(--color-text-tertiary, #718096);
-    font-size: var(--font-size-xs, 0.75rem);
+    background: var(--bg-deep);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
     white-space: pre-wrap;
     word-break: break-all;
     font-style: normal;
@@ -326,8 +387,8 @@
 #engines .le-card-log {
     margin-top: 0.5rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--color-surface-elevated, rgba(0, 0, 0, 0.15));
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.06));
+    background: var(--bg-deep);
+    border: 1px solid var(--surface);
     overflow: hidden;
 }
 
@@ -342,13 +403,13 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.06));
-    font-size: var(--font-size-xs, 0.75rem);
+    border-bottom: 1px solid var(--surface);
+    font-size: var(--text-xs);
     font-style: normal;
 }
 
 #engines .le-log-instance {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     margin-right: auto;
     font-style: normal;
 }
@@ -357,8 +418,8 @@
     max-height: 240px;
     overflow-y: auto;
     padding: 0.5rem 0.75rem;
-    font-family: var(--font-mono, "Cascadia Code", "JetBrains Mono", monospace);
-    font-size: var(--font-size-xs, 0.75rem);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
     scroll-behavior: smooth;
 }
 
@@ -371,42 +432,42 @@
 }
 
 #engines .le-log-time {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     flex-shrink: 0;
     font-style: normal;
 }
 
 #engines .le-log-level {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     flex-shrink: 0;
     min-width: 3rem;
     text-transform: uppercase;
-    font-size: var(--font-size-2xs, 0.6875rem);
+    font-size: var(--text-2xs);
     font-style: normal;
 }
 
 #engines .le-log-text {
-    color: var(--color-text-secondary, #a0aec0);
+    color: var(--text-sub);
     word-break: break-word;
     font-style: normal;
 }
 
-#engines .le-log-info .le-log-level { color: var(--color-text-tertiary, #718096); }
-#engines .le-log-warn .le-log-level { color: var(--color-warning, #dd6b20); }
-#engines .le-log-error .le-log-level { color: var(--color-danger, #e53e3e); }
+#engines .le-log-info .le-log-level { color: var(--text-dim); }
+#engines .le-log-warn .le-log-level { color: var(--warning); }
+#engines .le-log-error .le-log-level { color: var(--red); }
 
 #engines .le-log-separator {
     text-align: center;
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     padding: 0.5rem 0;
-    font-size: var(--font-size-2xs, 0.6875rem);
-    border-bottom: 1px dashed var(--color-border, rgba(255, 255, 255, 0.06));
+    font-size: var(--text-2xs);
+    border-bottom: 1px dashed var(--surface);
     margin-bottom: 0.25rem;
     font-style: normal;
 }
 
 #engines .le-log-empty {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     text-align: center;
     padding: 1rem 0;
     font-style: normal;
@@ -417,29 +478,29 @@
 #engines .le-shared-storage {
     padding: 1rem 1.25rem;
     border-radius: var(--radius-md, 8px);
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.03));
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
+    background: var(--surface-2);
+    border: 1px solid var(--surface);
     margin-bottom: 1rem;
 }
 
 #engines .le-shared-storage-title {
-    font-size: var(--font-size-base, 1rem);
+    font-size: var(--text-base);
     font-weight: 600;
-    color: var(--color-text-primary, #e2e8f0);
+    color: var(--text);
     margin: 0 0 0.5rem;
     font-style: normal;
 }
 
 #engines .le-shared-storage-desc {
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     margin: 0 0 0.75rem;
     font-style: normal;
 }
 
 #engines .le-shared-storage-content {
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-tertiary, #718096);
+    font-size: var(--text-sm);
+    color: var(--text-dim);
     margin-bottom: 0.75rem;
     font-style: normal;
 }
@@ -472,15 +533,15 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: var(--color-overlay, rgba(0, 0, 0, 0.5));
+    background: var(--shadow);
     cursor: pointer;
 }
 
 #engines .le-cleanup-dialog {
     position: relative;
-    background: var(--color-surface, #1a1a2e);
+    background: var(--surface);
     border-radius: var(--radius-lg, 12px);
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.1));
+    border: 1px solid var(--surface-2);
     max-width: 500px;
     width: 90%;
     max-height: 80vh;
@@ -493,13 +554,13 @@
     align-items: center;
     justify-content: space-between;
     padding: 1rem 1.25rem;
-    border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.06));
+    border-bottom: 1px solid var(--surface);
 }
 
 #engines .le-cleanup-title {
-    font-size: var(--font-size-lg, 1.1rem);
+    font-size: var(--text-lg);
     font-weight: 600;
-    color: var(--color-text-primary, #e2e8f0);
+    color: var(--text);
     margin: 0;
     font-style: normal;
 }
@@ -507,7 +568,7 @@
 #engines .le-cleanup-close {
     background: none;
     border: none;
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     cursor: pointer;
     padding: 0.25rem;
     border-radius: var(--radius-sm, 4px);
@@ -516,16 +577,16 @@
 }
 
 #engines .le-cleanup-close:hover {
-    color: var(--color-text-primary, #e2e8f0);
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.05));
+    color: var(--text);
+    background: var(--surface-2);
 }
 
 #engines .le-cleanup-body {
     padding: 1rem 1.25rem;
     overflow-y: auto;
     flex: 1;
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     font-style: normal;
 }
 
@@ -534,14 +595,14 @@
     justify-content: flex-end;
     gap: 0.5rem;
     padding: 0.75rem 1.25rem;
-    border-top: 1px solid var(--color-border, rgba(255, 255, 255, 0.06));
+    border-top: 1px solid var(--surface);
 }
 
 /* ── cleanup modal targets list ─────────────────────────────────────────────── */
 
 #engines .le-cleanup-desc {
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     margin: 0 0 0.75rem;
     font-style: normal;
 }
@@ -558,8 +619,8 @@
     gap: 0.5rem;
     padding: 0.5rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.02));
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.04));
+    background: var(--surface-2);
+    border: 1px solid var(--surface);
     font-style: normal;
 }
 
@@ -585,7 +646,7 @@
 
 #engines .le-cleanup-item-title {
     font-weight: 600;
-    color: var(--color-text-primary, #e2e8f0);
+    color: var(--text);
     font-style: normal;
 }
 
@@ -594,19 +655,19 @@
 #engines .le-cleanup-item-flags,
 #engines .le-cleanup-item-affected,
 #engines .le-cleanup-item-refcount {
-    font-size: var(--font-size-xs, 0.75rem);
-    color: var(--color-text-tertiary, #718096);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     font-style: normal;
 }
 
 #engines .le-cleanup-item-blocked {
-    font-size: var(--font-size-xs, 0.75rem);
-    color: var(--color-danger, #e53e3e);
+    font-size: var(--text-xs);
+    color: var(--red);
     font-style: normal;
 }
 
 #engines .le-cleanup-empty {
-    color: var(--color-text-tertiary, #718096);
+    color: var(--text-dim);
     text-align: center;
     padding: 1rem 0;
     font-style: normal;
@@ -616,20 +677,20 @@
     margin-top: 0.75rem;
     padding: 0.5rem 0.75rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--color-danger-bg, rgba(229, 62, 62, 0.08));
-    border: 1px solid var(--color-danger-border, rgba(229, 62, 62, 0.15));
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
     font-style: normal;
 }
 
 #engines .le-cleanup-error-main {
-    color: var(--color-danger, #e53e3e);
-    font-size: var(--font-size-sm, 0.875rem);
+    color: var(--red);
+    font-size: var(--text-sm);
     font-style: normal;
 }
 
 #engines .le-cleanup-error-hint {
-    color: var(--color-text-secondary, #a0aec0);
-    font-size: var(--font-size-xs, 0.75rem);
+    color: var(--text-sub);
+    font-size: var(--text-xs);
     margin-top: 0.25rem;
     font-style: normal;
 }
@@ -641,8 +702,8 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.25rem 0;
-    font-size: var(--font-size-xs, 0.75rem);
-    color: var(--color-text-tertiary, #718096);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     font-style: normal;
 }
 
@@ -657,8 +718,8 @@
     gap: 1rem;
     padding: 1rem 1.25rem;
     border-radius: var(--radius-md, 8px);
-    background: var(--color-surface-elevated, rgba(255, 255, 255, 0.03));
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
+    background: var(--surface-2);
+    border: 1px solid var(--surface);
     margin-bottom: 1rem;
 }
 
@@ -671,21 +732,21 @@
 #voice .voice-runtime-link-info .icon {
     width: 1.5rem;
     height: 1.5rem;
-    color: var(--color-accent, #4299e1);
+    color: var(--accent);
     flex-shrink: 0;
 }
 
 #voice .voice-runtime-link-info h4 {
-    font-size: var(--font-size-base, 1rem);
+    font-size: var(--text-base);
     font-weight: 600;
-    color: var(--color-text-primary, #e2e8f0);
+    color: var(--text);
     margin: 0 0 0.25rem;
     font-style: normal;
 }
 
 #voice .voice-runtime-link-info p {
-    font-size: var(--font-size-sm, 0.875rem);
-    color: var(--color-text-secondary, #a0aec0);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
     margin: 0;
     font-style: normal;
 }
@@ -694,4 +755,341 @@
     font-style: normal;
     white-space: nowrap;
     flex-shrink: 0;
+}
+
+/* ── runtime foundation (0.22.6) ────────────────────────────────────────────
+   默认折叠的只读面板，展示 uv/Python/缓存/根目录等底座信息。 */
+
+#engines .le-foundation {
+    margin-bottom: 1rem;
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface-2);
+    overflow: hidden;
+}
+
+#engines .le-foundation > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 0.75rem 1rem;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-style: normal;
+    user-select: none;
+}
+
+#engines .le-foundation > summary::-webkit-details-marker {
+    display: none;
+}
+
+#engines .le-foundation > summary::before {
+    content: "";
+    display: inline-block;
+    width: 0.75rem;
+    height: 0.75rem;
+    background: var(--text-dim);
+    flex-shrink: 0;
+    clip-path: polygon(0 0, 100% 50%, 0 100%);
+    transition: transform var(--transition-fast, 0.1s);
+    transform: rotate(0deg);
+}
+
+#engines .le-foundation[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+#engines .le-foundation-desc {
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    margin: 0 1rem 0.5rem;
+    font-style: normal;
+}
+
+#engines .le-foundation-body {
+    padding: 0 1rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+#engines .le-foundation-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+    font-style: normal;
+}
+
+#engines .le-foundation-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem 0.75rem;
+}
+
+#engines .le-foundation-no-data {
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    padding: 0.5rem 1rem;
+    font-style: normal;
+}
+
+/* ── diagnostic region (0.22.6) ────────────────────────────────────────────── */
+
+#engines .le-diagnostic-region {
+    margin-bottom: 1rem;
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface-2);
+    padding: 1rem 1.25rem;
+    font-style: normal;
+}
+
+#engines .le-diagnostic-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+#engines .le-diagnostic-title {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+    font-style: normal;
+}
+
+#engines .le-diagnostic-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+#engines .le-diagnostic-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem 1rem;
+    margin-bottom: 0.75rem;
+}
+
+#engines .le-diagnostic-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+    font-style: normal;
+}
+
+#engines .le-diagnostic-logs {
+    margin-top: 0.5rem;
+    border-top: 1px solid var(--surface);
+    padding-top: 0.5rem;
+}
+
+#engines .le-diagnostic-logs-title {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    margin-bottom: 0.25rem;
+    font-style: normal;
+}
+
+#engines .le-diagnostic-logs-list {
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: var(--bg-deep);
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--surface);
+}
+
+#engines .le-diagnostic-logs-empty {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 1rem 0;
+    font-style: normal;
+}
+
+#engines .le-diagnostic-loading {
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+    padding: 1rem 0;
+    font-style: normal;
+}
+
+/* ── per-engine model list (0.22.6) ────────────────────────────────────────── */
+
+#engines .le-model-list {
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--surface);
+}
+
+#engines .le-model-list-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-sub);
+    margin: 0 0 0.5rem;
+    font-style: normal;
+}
+
+#engines .le-model-table {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 0.25rem 0.5rem;
+    align-items: center;
+}
+
+#engines .le-model-row {
+    display: contents;
+}
+
+#engines .le-model-cell {
+    font-size: var(--text-sm);
+    padding: 0.25rem 0;
+    font-style: normal;
+}
+
+#engines .le-model-name {
+    color: var(--text);
+    font-weight: 500;
+}
+
+#engines .le-model-size {
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+}
+
+#engines .le-model-status {
+    font-size: var(--text-xs);
+    white-space: nowrap;
+}
+
+#engines .le-model-actions {
+    display: flex;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+
+#engines .le-model-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: var(--text-xs);
+    padding: 0.125rem 0.375rem;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--surface-2);
+    background: var(--surface);
+    color: var(--text-sub);
+    cursor: pointer;
+    font-style: normal;
+    transition: border-color var(--transition-fast, 0.1s), color var(--transition-fast, 0.1s);
+}
+
+#engines .le-model-btn:hover:not(:disabled) {
+    border-color: var(--text-faint);
+    color: var(--text);
+}
+
+#engines .le-model-btn:disabled {
+    opacity: var(--opacity-dim, 0.5);
+    cursor: not-allowed;
+}
+
+#engines .le-model-btn-danger {
+    color: var(--red);
+}
+
+#engines .le-model-btn-danger:hover:not(:disabled) {
+    border-color: var(--red-border);
+}
+
+#engines .le-model-btn-primary {
+    color: var(--accent);
+}
+
+#engines .le-model-empty {
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    padding: 0.5rem 0;
+    font-style: normal;
+}
+
+/* ── model mismatch hint (configured vs active) (0.22.6) ───────────────────── */
+
+#engines .le-model-mismatch {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    font-size: var(--text-xs);
+    color: var(--accent);
+    margin: 0.375rem 0;
+    font-style: normal;
+}
+
+#engines .le-model-config-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+    margin-bottom: 0.25rem;
+    font-style: normal;
+}
+
+/* ── delete conflict display (structured, no silent fallback) (0.22.6) ──────── */
+
+#engines .le-model-conflict {
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+    margin: 0.375rem 0;
+    font-style: normal;
+}
+
+#engines .le-model-conflict-title {
+    color: var(--red);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    font-style: normal;
+}
+
+#engines .le-model-conflict-reason {
+    color: var(--text-sub);
+    font-size: var(--text-xs);
+    font-style: normal;
+}
+
+/* ── voice page empty state CTA (0.22.6) ───────────────────────────────────── */
+
+#voice .le-voice-empty-cta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface-2);
+    border: 1px dashed var(--surface);
+    font-style: normal;
+}
+
+#voice .le-voice-empty-cta-text {
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    font-style: normal;
+}
+
+#voice .le-voice-empty-cta-btn {
+    font-style: normal;
 }

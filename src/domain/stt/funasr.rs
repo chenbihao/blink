@@ -1,36 +1,33 @@
-//! Blink STT Server Python 环境管理 + 生命周期（0.10.3）。
+//! Blink STT Server Python 环境工具 + HTTP 健康检查（0.22.6）。
 //!
 //! ## 设计
 //!
-//! 0.10.3 使用自定义 `blink_stt_server.py` 替换官方 `funasr-server`，
-//! 统一支持非流式 HTTP + 流式 WebSocket + 热词/ITN 增强参数。
-//!
-//! 本模块负责：
+//! 本模块提供 FunASR STT 所需的纯工具函数和 HTTP 健康检查：
 //! 1. 嵌入 `blink_stt_server.py` 并在启动时释放到 `%APPDATA%\blink\python\`
-//! 2. 通过 [`infra::platform::python`] 模块管理 uv + venv + funasr 安装
-//! 3. 启动 / 停止 blink_stt_server 子进程（使用 venv 中的 Python）
-//! 4. 健康检查（确认服务就绪）
+//! 2. 热词文件生成（逗号分隔 → 换行分隔）
+//! 3. HTTP 健康检查（`/health` 端点模型加载状态查询）
+//! 4. TCP 端口预检 + server base URL 构造
+//! 5. FunASR 日志噪声过滤
+//! 6. 诊断状态聚合（`FunasrEnv`，兼容旧前端事件）
+//!
+//! ## 0.22.6 变更
+//!
+//! ServerStartParams / build_launch_request / start_server / mark_server_stopped
+//! 已删除。启动逻辑完全由 `app/local_engine/funasr.rs` 的 `FunasrAdapter::prepare_launch`
+//! 通过 `LocalEngineService` 统一管理，使用 generation-based 隔离环境。
 //!
 //! ## 兼容性
 //!
 //! HTTP 端点路径和响应格式与官方 `funasr-server` 完全一致，
 //! 现有 Rust 侧的 `LocalSttEngine` / `PseudoStreamingSttEngine` 和 `check_model_loaded()` 无需修改。
 //!
-//! ## uv 自管理环境
+//! ## 旧全局 venv
 //!
-//! Blink 通过 uv 创建独立的 Python 虚拟环境（Python 3.12），用户无需手动安装
-//! Python 或 pip 包。环境位于 `%APPDATA%\blink\python\venv\`。
-//!
-//! 详见 [`crate::infra::platform::python`] 模块文档。
+//! `get_env_status_async` 中的 `check_status_async` / `check_torch` / `check_funasr`
+//! 仍读取旧全局 venv（`%APPDATA%\blink\python\venv`），仅供兼容诊断展示。
+//! 新安装路径为 `runtimes/engines/funasr/generations/{install_id}/venv`。
 
-use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
-
-use crate::infra::local_engine::{
-    LaunchRequest, ManagedProcess, ManagedProcessError, ProcessStatus, ShutdownConfig,
-};
 
 /// 嵌入的 blink_stt_server.py 脚本（随 Rust 二进制发布）。
 const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/blink_stt_server.py");
@@ -41,13 +38,14 @@ const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/bl
 pub const SERVER_STARTUP_TIMEOUT_SECS: u64 = 300;
 
 // ── Python 脚本释放 ────────────────────────────────────────────────────────
-//
-// 0.22.3：SERVER_RUNNING 全局已移除——server 运行状态由 ManagedProcess /
-// LocalEngineService 管理。mark_server_stopped 保留为 no-op 以兼容
-// maintenance.rs 的调用点（H6 wiring 时替换为 LocalEngineService）。
 
 /// 获取 `%APPDATA%\blink\python\` 目录路径。
 fn python_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        return crate::infra::local_engine::runtime::python_shared_root();
+    }
+    #[cfg(not(test))]
     crate::infra::utils::paths::python_dir()
 }
 
@@ -342,7 +340,7 @@ fn strip_ansi(s: &str) -> String {
 /// 也**不区分端口占用者是否为 Blink 管理的子进程**。
 ///
 /// 以下情况都会返回 `true`：
-/// - Blink 通过 `start_funasr_server` 启动的子进程正在监听
+/// - Blink 通过 LocalEngineService 启动的子进程正在监听
 /// - Blink 崩溃后遗留的孤儿进程仍在监听（child handle 已丢失）
 /// - 其他程序恰好占用了同一端口
 ///
@@ -477,217 +475,11 @@ pub async fn check_model_ready_or_error(port: u16) -> Result<(), String> {
     }
 }
 
-// ── server 启动参数 ────────────────────────────────────────────────────────────────
-
-/// blink_stt_server 启动参数（0.10.3）。
-#[derive(Debug, Clone)]
-pub struct ServerStartParams {
-    /// 非流式模型标识（如 "sensevoice"）
-    pub model: String,
-    /// 监听端口
-    pub port: u16,
-    /// 推理设备: "cpu" 或 "cuda"
-    pub device: String,
-    /// 热词文件路径（None = 不启用热词）
-    pub hotwords_path: Option<PathBuf>,
-    /// ITN 开关
-    pub use_itn: bool,
-}
-
-impl ServerStartParams {
-    /// 从 SttConfig 构建（读取配置 + 写热词文件）。
-    pub fn from_config() -> Result<Self, String> {
-        let config = crate::domain::config::stt_config::get_stt_config();
-        let local = &config.local_engine;
-
-        // 释放 Python 脚本
-        ensure_server_script()?;
-
-        // 写热词文件
-        let hotwords_path = write_hotwords_file(&local.hotwords);
-
-        Ok(Self {
-            model: local.funasr_model.clone(),
-            port: local.server_port,
-            device: local.device.clone(),
-            hotwords_path,
-            use_itn: local.use_itn,
-        })
-    }
-}
-
-// ── server 启动（0.22.1 迁移到 ManagedProcess）───────────────────────────
-
-/// 构建 FunASR 的 LaunchRequest（由可信的 Rust 调用方构造）。
-///
-/// 保留 FunASR 特有的启动参数、脚本路径、环境变量构造。
-/// 通用 Command spawn、双管道排空、child wait、stop、进程树回收
-/// 进入 infra/local_engine/ManagedProcess。
-pub fn build_launch_request(params: &ServerStartParams) -> Result<LaunchRequest, String> {
-    let model = &params.model;
-    let port = params.port;
-    let device = &params.device;
-
-    // 检查 Python 环境是否就绪
-    let python_path = crate::infra::platform::python::venv_python();
-    if python_path.is_none() {
-        return Err(
-            "Python 环境未就绪。请在设置页「语音输入」→「本地模式」中点击「安装环境」按钮。\
-             （Blink 会自动下载 uv + Python 3.12 + torch + funasr）"
-                .to_string(),
-        );
-    }
-    let python = python_path.unwrap();
-
-    // 检查 funasr 是否已安装
-    let (funasr_ok, funasr_ver) = crate::infra::platform::python::check_funasr();
-    if !funasr_ok {
-        return Err(
-            "funasr 包未安装。请在设置页点击「安装环境」按钮，Blink 会自动完成安装。".to_string(),
-        );
-    }
-
-    // 确保 blink_stt_server.py 已释放
-    let script_path = ensure_server_script()?;
-
-    tracing::info!(
-        script = %script_path.display(),
-        ?funasr_ver,
-        model,
-        port,
-        device,
-        "构建 blink_stt_server LaunchRequest",
-    );
-
-    // 构建参数列表
-    let mut args: Vec<OsString> = Vec::new();
-    args.push(script_path.into());
-    args.push("--model".into());
-    args.push(model.clone().into());
-    args.push("--port".into());
-    args.push(port.to_string().into());
-    args.push("--device".into());
-    args.push(device.clone().into());
-
-    if let Some(ref hw_path) = params.hotwords_path {
-        args.push("--hotwords".into());
-        args.push(hw_path.clone().into());
-    }
-    if params.use_itn {
-        args.push("--use-itn".into());
-    }
-
-    // 0.22.3 Task G: 身份参数只通过环境变量传入，不出现在命令行
-    // BLINK_ENGINE_TOKEN / BLINK_ENGINE_ID / BLINK_INSTANCE_ID 由 service 层注入
-
-    // 受限环境变量
-    let mut env = HashMap::new();
-    // Python 输出无缓冲 + UTF-8 模式（修复 Windows 控制台中文乱码）
-    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
-    env.insert("PYTHONUTF8".to_string(), "1".to_string());
-    env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
-
-    // 将 ModelScope 模型缓存重定向到 Blink 自管理目录
-    let models_dir = python_dir().join("models");
-    if let Err(e) = std::fs::create_dir_all(&models_dir) {
-        tracing::warn!(%e, "创建 models 目录失败，ModelScope 将使用默认缓存路径");
-    } else {
-        let models_path = models_dir.display().to_string();
-        tracing::info!(path = %models_path, "ModelScope 缓存目录");
-        env.insert("MODELSCOPE_CACHE".to_string(), models_path);
-    }
-
-    Ok(LaunchRequest {
-        executable: python,
-        args,
-        current_dir: None,
-        env,
-        instance_id: crate::infra::local_engine::process::generate_instance_id_pub(),
-        label: "funasr".to_string(),
-        shutdown: ShutdownConfig::default(),
-    })
-}
-
-/// 启动 blink_stt_server 子进程（0.22.1 迁移到 ManagedProcess）。
-///
-/// 使用 Blink 自管理的 venv 中的 Python 启动 `blink_stt_server.py`。
-/// 如果环境未就绪（venv 不存在或 funasr 未安装），返回错误提示用户安装。
-///
-/// **0.22.1 变更**：通用 Command spawn、双管道排空、child wait、stop、
-/// 进程树回收不再在本函数中实现，而是委托给 `infra::local_engine::ManagedProcess`。
-/// 本函数只负责构造 `LaunchRequest` 和应用 FunASR 特有日志过滤。
-///
-/// 如果端口已被占用且 ManagedProcess 有活跃进程，返回 Ok(false)。
-/// 如果端口被占但 ManagedProcess 无活跃进程（未知占用者），返回错误。
-pub async fn start_server(
-    params: &ServerStartParams,
-    managed: &Arc<ManagedProcess>,
-) -> Result<bool, String> {
-    let port = params.port;
-
-    // 检查 ManagedProcess 是否已有活跃进程
-    let state = managed.snapshot().await;
-    let is_our_process_running = matches!(
-        state.status,
-        ProcessStatus::Running { .. } | ProcessStatus::Starting
-    );
-
-    if is_our_process_running {
-        // 我们的进程在运行，检查端口是否就绪
-        if is_server_ready(port) {
-            tracing::info!(port, "blink_stt_server 已在运行");
-            return Ok(false);
-        }
-        // 我们的进程在运行但端口未就绪——可能还在启动中
-        tracing::info!(port, "blink_stt_server 正在启动中");
-        return Ok(false);
-    }
-
-    // 我们的进程未运行，但端口被占 → 未知进程
-    if is_server_ready(port) {
-        tracing::warn!(port, "端口被未知进程占用，不自动终止");
-        return Err(format!(
-            "端口 {port} 被未知进程占用，Blink 不会自动终止未知进程。请更换端口或手动关闭占用端口的程序。"
-        ));
-    }
-
-    // 构建 LaunchRequest（FunASR 特有参数/脚本/环境变量）
-    let req = build_launch_request(params)?;
-
-    tracing::info!(
-        "blink_stt_server 启动命令: python {} --model {} --port {} --device {}",
-        req.executable.display(),
-        params.model,
-        port,
-        params.device,
-    );
-
-    // 通过 ManagedProcess 启动（通用 spawn + Job Object + 双管道排空 + wait task）
-    managed.start(&req).await.map_err(|e| match e {
-        ManagedProcessError::AlreadyRunning { .. } => "blink_stt_server 已在运行".to_string(),
-        ManagedProcessError::SpawnFailed { message } => {
-            format!("启动 blink_stt_server 失败: {message}")
-        }
-        ManagedProcessError::JobObjectFailed { message } => {
-            format!("Windows Job Object 分配失败: {message}")
-        }
-        _ => format!("ManagedProcess 启动失败: {e}"),
-    })?;
-
-    tracing::info!("blink_stt_server 子进程已启动（ManagedProcess），等待模型加载...");
-
-    Ok(true)
-}
-
-/// 标记 server 已停止。
-///
-/// 0.22.3：此函数现为 no-op——server 运行状态由 ManagedProcess /
-/// LocalEngineService 统一管理。保留函数签名以兼容 maintenance.rs
-/// 的现有调用点（H6 wiring 时由 LocalEngineService 替换）。
-#[deprecated(note = "0.22.3: server 运行状态由 ManagedProcess 管理，此函数为 no-op")]
-pub fn mark_server_stopped() {
-    // no-op：ManagedProcess 的 ProcessStatus 是唯一的运行状态真源。
-}
+// ── server 启动参数（0.22.6 已移除 legacy 启动路径）──────────────────────
+//
+// 0.22.6：ServerStartParams / build_launch_request / start_server / mark_server_stopped
+// 已删除。启动逻辑完全由 app/local_engine/funasr.rs 的 FunasrAdapter::prepare_launch
+// 通过 LocalEngineService 统一管理。此模块仅保留工具函数和 HTTP 健康检查。
 
 /// 生成 server 的 base_url（供 HTTP 转录使用）。
 ///

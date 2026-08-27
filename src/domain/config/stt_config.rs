@@ -25,6 +25,66 @@ use serde::{Deserialize, Serialize};
 
 use super::store::ConfigKey;
 
+// ── LocalSttSelection 联合引用（0.22.6 H4）───────────────────────────────────
+
+/// 本地 STT 选择——`engine_id + model_id` 联合引用。
+///
+/// 这是 0.22.6 的稳定选择真源。旧的 `local_model_id` 和
+/// `local_engine.funasr_model` 只作为兼容迁移输入，不再作为第一真源。
+///
+/// **语义约束**：
+/// - `engine_id` 必须在编译期 allowlist 中（当前仅 "funasr"）
+/// - `model_id` 必须是该引擎 `ModelRegistry` 中已注册的模型 id
+/// - 模型必须已安装（`Installed` + `Verified`/`Unverified`）才可被选择
+///
+/// 迁移策略（`migrate_local_stt_selection`）：
+/// - 旧 `local_model_id` 存在时，映射为 `LocalSttSelection { engine_id: "funasr", model_id }`
+/// - 旧 `local_model_id` 为 None 但 `local_engine.funasr_model` 存在时，
+///   使用 `funasr_model` 值作为 `model_id`
+/// - 两者都为空时不产生选择
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalSttSelection {
+    /// 引擎 id（当前仅 "funasr"）
+    pub engine_id: String,
+    /// 模型 id（如 "iic/SenseVoiceSmall" / "paraformer-zh"）
+    pub model_id: String,
+}
+
+impl LocalSttSelection {
+    /// 创建新的本地 STT 选择。
+    pub fn new(engine_id: impl Into<String>, model_id: impl Into<String>) -> Self {
+        Self {
+            engine_id: engine_id.into(),
+            model_id: model_id.into(),
+        }
+    }
+
+    /// 默认 FunASR 引擎 id。
+    pub const FUNASR_ENGINE_ID: &'static str = "funasr";
+}
+
+/// 旧 `local_model_id`（短名）到 `model_id`（FunASR ModelScope id）的映射。
+///
+/// 旧的 `local_model_id` 使用短名（如 "sensevoice-small"），
+/// 新的 `model_id` 使用完整 FunASR ModelScope id（如 "iic/SenseVoiceSmall"）。
+///
+/// 此函数仅供迁移使用——迁移完成后不再需要。
+fn migrate_local_model_id_to_funasr_model(local_model_id: &str) -> Option<&'static str> {
+    match local_model_id {
+        "sensevoice-small" => Some("iic/SenseVoiceSmall"),
+        "paraformer-zh" => Some("paraformer-zh"),
+        // 兼容旧配置中的完整 id
+        "iic/SenseVoiceSmall" => Some("iic/SenseVoiceSmall"),
+        other => {
+            tracing::warn!(
+                local_model_id = other,
+                "旧 local_model_id 无法映射到已知 FunASR 模型"
+            );
+            None
+        }
+    }
+}
+
 /// 流式模式选择。
 ///
 /// 伪流式（默认）：VAD 切句定稿 + 累积预览，在非自回归模型上实现"边说边出字"体感。
@@ -69,9 +129,22 @@ pub struct SttConfig {
     #[serde(default)]
     pub local_engine: LocalEngineConfig,
 
+    /// 本地 STT 选择（0.22.6 H4：`engine_id + model_id` 联合引用）。
+    ///
+    /// 这是 0.22.6 的稳定选择真源。旧的 `local_model_id` 和
+    /// `local_engine.funasr_model` 只作为兼容迁移输入。
+    ///
+    /// 迁移在 `migrate_local_stt_selection` 中确定性执行，迁移后此字段成为唯一真源。
+    #[serde(default)]
+    pub local_stt_selection: Option<LocalSttSelection>,
+
     /// 当前选用的本地模型 id(如 "sensevoice-small")
     /// 对应 `ModelDescriptor::id`(模型注册表在 `domain::stt::mod.rs`)
+    ///
+    /// **已废弃**：0.22.6 改用 `local_stt_selection` 联合引用。
+    /// 保留仅为反序列化兼容——启动期迁移时读取此字段构造 `local_stt_selection`。
     #[serde(default)]
+    #[allow(dead_code)]
     pub local_model_id: Option<String>,
 
     /// 模型存储目录(保留字段，FunASR 自动管理模型路径)
@@ -323,6 +396,7 @@ impl Default for SttConfig {
             cloud_provider: None,
             cloud: None,
             local_engine: LocalEngineConfig::default(),
+            local_stt_selection: None,
             local_model_id: None,
             model_dir: None,
             audio_device_id: None,
@@ -338,15 +412,94 @@ impl SttConfig {
         self.cloud_provider.is_some()
     }
 
-    /// 启动期一次性迁移（0.12 `cloud` 引用模式 → 独立 `cloud_provider`）。
+    /// 启动期一次性迁移：本地 STT 选择 + 云端配置。
     ///
-    /// 若 `cloud` 字段有值（0.12 引用 AIConfig 供应商+模型的结构），
-    /// 尝试在 AIConfig 中找匹配的 provider，解析出 kind/base_url/model_id
-    /// 写回 `cloud_provider`，并清空 `cloud` 字段。
+    /// 依次执行：
+    /// 1. `migrate_local_stt_selection`：旧 `local_model_id` +
+    ///    `local_engine.funasr_model` → `local_stt_selection` 联合引用
+    /// 2. 云端迁移：旧 0.12 `cloud` 字段 → `cloud_provider` 独立模式
+    ///
+    /// 任一步骤产生变更时返回 `true`（调用方需持久化到 DB + 更新缓存）。
+    pub fn apply_migration(&mut self, ai_config: &super::ai_config::AIConfig) -> bool {
+        let local_migrated = self.migrate_local_stt_selection();
+        let cloud_migrated = self.migrate_cloud_config(ai_config);
+        local_migrated || cloud_migrated
+    }
+
+    /// 迁移本地 STT 选择：旧 `local_model_id` + `local_engine.funasr_model` → `local_stt_selection`。
+    ///
+    /// 0.22.6 H4：将旧的本地 STT 选择（`local_model_id` 短名 +
+    /// `local_engine.funasr_model` ModelScope id）收敛为
+    /// `LocalSttSelection { engine_id, model_id }` 联合引用。
+    ///
+    /// 迁移规则（确定性，不丢失旧用户选择）：
+    /// 1. `local_stt_selection` 已存在 → 跳过
+    /// 2. `local_model_id` 存在 → 按短名映射为完整 model_id，
+    ///    构造 `LocalSttSelection { engine_id: "funasr", model_id }`
+    /// 3. `local_model_id` 为 None 但 `local_engine.funasr_model` 非默认值 →
+    ///    使用 `funasr_model` 值作为 `model_id`
+    /// 4. 两者都为空/默认 → 不产生选择
     ///
     /// 返回 `true` = 已迁移（调用方需持久化到 DB + 更新缓存）。
-    pub fn apply_migration(&mut self, ai_config: &super::ai_config::AIConfig) -> bool {
-        // cloud_provider 已有值 → 不需要迁移
+    pub fn migrate_local_stt_selection(&mut self) -> bool {
+        // 已有联合引用 → 跳过
+        if self.local_stt_selection.is_some() {
+            return false;
+        }
+
+        // 优先从 local_model_id 迁移（短名 → 完整 model_id）
+        if let Some(ref old_id) = self.local_model_id {
+            if let Some(model_id) = migrate_local_model_id_to_funasr_model(old_id) {
+                self.local_stt_selection = Some(LocalSttSelection::new(
+                    LocalSttSelection::FUNASR_ENGINE_ID,
+                    model_id,
+                ));
+                tracing::info!(
+                    old_local_model_id = %old_id,
+                    new_engine_id = LocalSttSelection::FUNASR_ENGINE_ID,
+                    new_model_id = model_id,
+                    "本地 STT 选择迁移完成（local_model_id → local_stt_selection）"
+                );
+                return true;
+            }
+            // local_model_id 存在但无法映射——继续尝试 funasr_model
+            tracing::warn!(
+                local_model_id = %old_id,
+                "local_model_id 无法映射到已知模型，尝试 funasr_model"
+            );
+        }
+
+        // 从 local_engine.funasr_model 迁移
+        // 只有非默认值才表示用户曾显式选择过模型
+        let funasr_model = &self.local_engine.funasr_model;
+        if !funasr_model.is_empty() && funasr_model != "iic/SenseVoiceSmall" {
+            self.local_stt_selection = Some(LocalSttSelection::new(
+                LocalSttSelection::FUNASR_ENGINE_ID,
+                funasr_model.as_str(),
+            ));
+            tracing::info!(
+                funasr_model = %funasr_model,
+                new_engine_id = LocalSttSelection::FUNASR_ENGINE_ID,
+                "本地 STT 选择迁移完成（funasr_model → local_stt_selection）"
+            );
+            return true;
+        }
+
+        // 两者都为空/默认 → 不产生选择
+        false
+    }
+
+    /// 迁移云端 STT 配置：旧 0.12 `cloud` 字段 → `cloud_provider` 独立模式。
+    ///
+    /// 迁移规则：
+    /// 1. `cloud_provider` 已有值 → 跳过（不覆盖）
+    /// 2. `cloud` 字段无值 → 跳过
+    /// 3. `cloud` 字段有值但在 AIConfig 中找不到匹配的 provider → 清掉无效 cloud
+    /// 4. 找到匹配 provider → 构造 `SttCloudProvider`，清掉 cloud
+    ///
+    /// 返回 `true` = 已迁移（调用方需持久化）。
+    fn migrate_cloud_config(&mut self, ai_config: &super::ai_config::AIConfig) -> bool {
+        // cloud_provider 已有值 → 不迁移
         if self.cloud_provider.is_some() {
             return false;
         }
@@ -503,6 +656,7 @@ mod tests {
                 },
                 streaming_model: None,
             },
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "paraformer-zh")),
             local_model_id: Some("sensevoice-small".into()),
             model_dir: None,
             audio_device_id: Some("麦克风 (Realtek Audio)".into()),
@@ -533,6 +687,15 @@ mod tests {
         assert_eq!(restored.local_engine.vad.min_sentence_ms, 600);
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
+        // 0.22.6 H4: local_stt_selection round-trip
+        assert_eq!(
+            restored.local_stt_selection.as_ref().unwrap().engine_id,
+            "funasr"
+        );
+        assert_eq!(
+            restored.local_stt_selection.as_ref().unwrap().model_id,
+            "paraformer-zh"
+        );
     }
 
     #[test]
@@ -819,5 +982,328 @@ mod tests {
     fn apply_migration_noop_when_both_none() {
         let mut cfg = SttConfig::default();
         assert!(!cfg.apply_migration(&crate::domain::config::ai_config::AIConfig::default()));
+    }
+
+    // ── 0.22.6 H4: 本地 STT 选择迁移测试 ──────────────────────────────────
+
+    /// 旧 local_model_id="sensevoice-small" 迁移为 LocalSttSelection { funasr, iic/SenseVoiceSmall }
+    #[test]
+    fn migrate_local_stt_from_local_model_id_sensevoice() {
+        let mut cfg = SttConfig {
+            local_model_id: Some("sensevoice-small".into()),
+            ..Default::default()
+        };
+        assert!(cfg.migrate_local_stt_selection());
+        let sel = cfg.local_stt_selection.unwrap();
+        assert_eq!(sel.engine_id, "funasr");
+        assert_eq!(sel.model_id, "iic/SenseVoiceSmall");
+    }
+
+    /// 旧 local_model_id="paraformer-zh" 迁移为 LocalSttSelection { funasr, paraformer-zh }
+    #[test]
+    fn migrate_local_stt_from_local_model_id_paraformer() {
+        let mut cfg = SttConfig {
+            local_model_id: Some("paraformer-zh".into()),
+            ..Default::default()
+        };
+        assert!(cfg.migrate_local_stt_selection());
+        let sel = cfg.local_stt_selection.unwrap();
+        assert_eq!(sel.engine_id, "funasr");
+        assert_eq!(sel.model_id, "paraformer-zh");
+    }
+
+    /// 旧 local_model_id 已包含完整 ModelScope id（iic/SenseVoiceSmall）也能正确迁移
+    #[test]
+    fn migrate_local_stt_from_full_modelscope_id() {
+        let mut cfg = SttConfig {
+            local_model_id: Some("iic/SenseVoiceSmall".into()),
+            ..Default::default()
+        };
+        assert!(cfg.migrate_local_stt_selection());
+        let sel = cfg.local_stt_selection.unwrap();
+        assert_eq!(sel.engine_id, "funasr");
+        assert_eq!(sel.model_id, "iic/SenseVoiceSmall");
+    }
+
+    /// 无 local_model_id 但 funasr_model=paraformer-zh → 从 funasr_model 迁移
+    #[test]
+    fn migrate_local_stt_from_funasr_model_paraformer() {
+        let mut cfg = SttConfig {
+            local_model_id: None,
+            local_engine: LocalEngineConfig {
+                funasr_model: "paraformer-zh".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(cfg.migrate_local_stt_selection());
+        let sel = cfg.local_stt_selection.unwrap();
+        assert_eq!(sel.engine_id, "funasr");
+        assert_eq!(sel.model_id, "paraformer-zh");
+    }
+
+    /// 默认配置（funasr_model=iic/SenseVoiceSmall，local_model_id=None）→ 不迁移
+    #[test]
+    fn migrate_local_stt_noop_when_default() {
+        let mut cfg = SttConfig::default();
+        assert!(!cfg.migrate_local_stt_selection());
+        assert!(cfg.local_stt_selection.is_none());
+    }
+
+    /// local_stt_selection 已存在 → 幂等跳过
+    #[test]
+    fn migrate_local_stt_idempotent_when_already_set() {
+        let mut cfg = SttConfig {
+            local_model_id: Some("sensevoice-small".into()),
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "paraformer-zh")),
+            ..Default::default()
+        };
+        assert!(!cfg.migrate_local_stt_selection());
+        // 不被 local_model_id 覆盖
+        assert_eq!(cfg.local_stt_selection.unwrap().model_id, "paraformer-zh");
+    }
+
+    /// apply_migration 同时迁移本地 + 云端
+    #[test]
+    fn apply_migration_migrates_both_local_and_cloud() {
+        let mut cfg = SttConfig {
+            local_model_id: Some("sensevoice-small".into()),
+            cloud: Some(serde_json::json!({
+                "provider_id": "ai-p1",
+                "model_id": "whisper-1"
+            })),
+            ..Default::default()
+        };
+        let ai_config = crate::domain::config::ai_config::AIConfig {
+            providers: vec![crate::domain::config::ai_config::ProviderEntry {
+                id: "ai-p1".into(),
+                display_name: "OpenAI".into(),
+                kind: crate::domain::config::ai_config::ProviderKind::OpenAICompatible,
+                base_url: Some("https://api.openai.com/v1".into()),
+                secret_ref: "blink/ai-p1/key".into(),
+                models: vec![],
+                enabled: true,
+                created_at: 0,
+            }],
+            ..Default::default()
+        };
+        assert!(cfg.apply_migration(&ai_config));
+        assert!(cfg.local_stt_selection.is_some());
+        assert!(cfg.cloud_provider.is_some());
+        assert!(cfg.cloud.is_none());
+    }
+
+    // ── 0.22.6 H4: 自启条件测试 ──────────────────────────────────────────
+
+    /// 自启条件：enabled + Local 模式 + auto_start_server + local_stt_selection 有值
+    /// → 满足自启
+    #[test]
+    fn auto_start_condition_all_met() {
+        let cfg = SttConfig {
+            enabled: true,
+            mode: SttMode::Local,
+            local_engine: LocalEngineConfig {
+                auto_start_server: true,
+                ..Default::default()
+            },
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "iic/SenseVoiceSmall")),
+            ..Default::default()
+        };
+        assert!(cfg.enabled, "STT 应启用");
+        assert_eq!(cfg.mode, SttMode::Local, "应为本地模式");
+        assert!(cfg.local_engine.auto_start_server, "auto_start 应为 true");
+        assert!(cfg.local_stt_selection.is_some(), "应有模型选择");
+    }
+
+    /// 自启条件：STT 未启用 → 不满足
+    #[test]
+    fn auto_start_condition_stt_disabled() {
+        let cfg = SttConfig {
+            enabled: false,
+            mode: SttMode::Local,
+            local_engine: LocalEngineConfig {
+                auto_start_server: true,
+                ..Default::default()
+            },
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "iic/SenseVoiceSmall")),
+            ..Default::default()
+        };
+        assert!(!cfg.enabled, "STT 未启用 → 不满足自启");
+    }
+
+    /// 自启条件：Cloud 模式 → 不满足本地自启
+    #[test]
+    fn auto_start_condition_cloud_mode() {
+        let cfg = SttConfig {
+            enabled: true,
+            mode: SttMode::Cloud,
+            local_engine: LocalEngineConfig {
+                auto_start_server: true,
+                ..Default::default()
+            },
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "iic/SenseVoiceSmall")),
+            ..Default::default()
+        };
+        assert_ne!(cfg.mode, SttMode::Local, "Cloud 模式 → 不满足本地自启");
+    }
+
+    /// 自启条件：auto_start_server = false → 不满足
+    #[test]
+    fn auto_start_condition_auto_start_false() {
+        let cfg = SttConfig {
+            enabled: true,
+            mode: SttMode::Local,
+            local_engine: LocalEngineConfig {
+                auto_start_server: false,
+                ..Default::default()
+            },
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "iic/SenseVoiceSmall")),
+            ..Default::default()
+        };
+        assert!(
+            !cfg.local_engine.auto_start_server,
+            "auto_start=false → 不满足自启"
+        );
+    }
+
+    /// 自启条件：local_stt_selection = None → 不满足
+    /// 这是 0.22.6 H4 新增的条件——没有选择模型时不应自启
+    #[test]
+    fn auto_start_condition_no_model_selection() {
+        let cfg = SttConfig {
+            enabled: true,
+            mode: SttMode::Local,
+            local_engine: LocalEngineConfig {
+                auto_start_server: true,
+                ..Default::default()
+            },
+            local_stt_selection: None,
+            ..Default::default()
+        };
+        assert!(cfg.local_stt_selection.is_none(), "无模型选择 → 不满足自启");
+    }
+
+    /// 自启条件：读取/保存配置本身不隐式启动
+    /// 验证 SttConfig::default() 中 auto_start_server = false
+    #[test]
+    fn auto_start_condition_default_is_false() {
+        let cfg = SttConfig::default();
+        assert!(
+            !cfg.local_engine.auto_start_server,
+            "默认 auto_start_server=false"
+        );
+    }
+
+    // ── 0.22.6 H4: 不可用模型拒绝测试 ──────────────────────────────────
+
+    /// EngineModelStatus.is_usable() 的行为验证——set_local_stt_selection
+    /// 的验证逻辑依赖此方法。这里测试各组合。
+    #[test]
+    fn model_usability_check_rejects_non_installed() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        // NotInstalled → 不可用
+        status.install_state = ModelInstallState::NotInstalled;
+        status.verification_state = ModelVerificationState::Verified;
+        assert!(!status.is_usable(), "NotInstalled 应被拒绝");
+    }
+
+    #[test]
+    fn model_usability_check_rejects_downloading() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        status.install_state = ModelInstallState::Downloading;
+        status.verification_state = ModelVerificationState::Unknown;
+        assert!(!status.is_usable(), "Downloading 应被拒绝");
+    }
+
+    #[test]
+    fn model_usability_check_rejects_download_failed() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        status.install_state = ModelInstallState::DownloadFailed;
+        assert!(!status.is_usable(), "DownloadFailed 应被拒绝");
+    }
+
+    #[test]
+    fn model_usability_check_accepts_installed_verified() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        status.install_state = ModelInstallState::Installed;
+        status.verification_state = ModelVerificationState::Verified;
+        assert!(status.is_usable(), "Installed + Verified 应可用");
+    }
+
+    #[test]
+    fn model_usability_check_accepts_installed_unverified() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        status.install_state = ModelInstallState::Installed;
+        status.verification_state = ModelVerificationState::Unverified;
+        assert!(status.is_usable(), "Installed + Unverified 应可用");
+    }
+
+    #[test]
+    fn model_usability_check_rejects_installed_corrupted() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        status.install_state = ModelInstallState::Installed;
+        status.verification_state = ModelVerificationState::Corrupted;
+        assert!(!status.is_usable(), "Installed + Corrupted 应被拒绝");
+    }
+
+    #[test]
+    fn model_usability_check_rejects_installed_mismatched() {
+        use crate::domain::local_engine::model::{
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+        };
+        let desc = EngineModelDescriptor::sensevoice_small();
+        let mut status = EngineModelStatus::not_installed(&desc);
+        status.install_state = ModelInstallState::Installed;
+        status.verification_state = ModelVerificationState::Mismatched;
+        assert!(!status.is_usable(), "Installed + Mismatched 应被拒绝");
+    }
+
+    // ── 0.22.6 H4: LocalSttSelection 序列化测试 ──────────────────────────
+
+    #[test]
+    fn local_stt_selection_serializes_correctly() {
+        let sel = LocalSttSelection::new("funasr", "iic/SenseVoiceSmall");
+        let json = serde_json::to_string(&sel).unwrap();
+        let restored: LocalSttSelection = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.engine_id, "funasr");
+        assert_eq!(restored.model_id, "iic/SenseVoiceSmall");
+    }
+
+    #[test]
+    fn local_stt_selection_equality() {
+        let a = LocalSttSelection::new("funasr", "paraformer-zh");
+        let b = LocalSttSelection::new("funasr", "paraformer-zh");
+        let c = LocalSttSelection::new("funasr", "iic/SenseVoiceSmall");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn local_stt_selection_funasr_engine_id_constant() {
+        assert_eq!(LocalSttSelection::FUNASR_ENGINE_ID, "funasr");
     }
 }

@@ -1,13 +1,14 @@
 //! xtask — Blink 构建编排工具
 //!
 //! 用法：
-//!   cargo xtask plugins   编译 Rust 插件（仅编译到 target/release，不复制到 bin）
-//!   cargo xtask release   编译插件 + 复制到 bin + cargo tauri build（本地一键打包）
-//!   cargo xtask release --debug  同上，但用 debug profile（DevTools 可用，F12 打开）
-//!   cargo xtask tiptap    打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
-//!   cargo xtask icons     拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
-//!   cargo xtask models    从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
-//!   cargo xtask lint      前端防新增检查（CSS 禁止新增带 hex fallback 的 var()）
+//!   cargo xtask plugins        编译 Rust 插件（仅编译到 target/release，不复制到 bin）
+//!   cargo xtask release        编译插件 + 复制到 bin + release 资源校验 + cargo tauri build
+//!   cargo xtask release --debug 同上，但用 debug profile（DevTools 可用，F12 打开）
+//!   cargo xtask release-check   仅运行 release 资源前置校验（不打包）
+//!   cargo xtask tiptap         打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
+//!   cargo xtask icons          拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
+//!   cargo xtask models         从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
+//!   cargo xtask lint           前端防新增检查（CSS 禁止新增带 hex fallback 的 var()）
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
 //! 不可控）并用相对路径定位 ps1，在 CI 的 tauri-action 上下文里找不到脚本。
@@ -16,6 +17,21 @@
 //!
 //! 重要：只有 release 打包才复制到 plugins/builtin/<id>/bin/
 //!      开发期 bin 目录不存在，避免 Tauri resources 递归扫描爆炸。
+//!
+//! ## release 资源校验（0.22.6.4）
+//!
+//! `check_release_resources()` 是 release 前置门禁，可由 `cargo xtask release-check`
+//! 单独运行，也在 `cargo xtask release` 流程中自动执行。校验内容：
+//!
+//! 1. **嵌入脚本存在且语法正确**：所有 `include_str!` 引用的 .py 脚本必须存在且
+//!    Python `compile()` 通过。
+//! 2. **锁文件可解析**：`locked-requirements.txt` 每个包条目必须含 `==版本` 和
+//!    至少一个 `--hash=sha256:`。
+//! 3. **manifest/schema 一致**：`lock.json` 的 `$schema` 字段存在，且包含代码引用
+//!    的 model id 字段。
+//! 4. **必要许可存在**：项目根 `LICENSE` 和 Lucide `LICENSE.lucide.txt` 必须存在。
+//! 5. **排除规则**：`resources/` 目录下不包含模型文件（.pt/.pth/.onnx/.gguf/
+//!    .params）、staging/generation 子目录、venv、下载缓存或 `__pycache__`。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -153,82 +169,367 @@ fn fetch_models() {
         panic!("找不到模型目录拉取脚本: {}", script.display());
     }
     println!("📋 从 LiteLLM 精选主流模型目录 ...");
-    let py = which_python();
-    run(
-        py.as_str(),
-        &[script.to_str().unwrap(), root.to_str().unwrap()],
-        &root,
-    );
+    let (py_cmd, py_args) = which_python();
+    let mut args = py_args.clone();
+    args.push(script.to_str().unwrap().to_string());
+    args.push(root.to_str().unwrap().to_string());
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run(py_cmd.as_str(), &args_ref, &root);
     println!("✅ 模型目录生成完成");
 }
 
-/// 检查嵌入的 Python 资源脚本语法（py_compile）。
-///
-/// 在 release 流程中验证所有随 Rust 二进制发布的 .py 脚本可以正确编译，
-/// 避免 IndentationError 或 ImportError 等问题到生产环境才暴露。
-///
-/// 使用 Blink 托管 Python（如果可用）或系统 Python 执行。
-/// 无 Python 时 panic（Windows release 必须有 Python）。
-fn check_python_resources() {
-    let root = workspace_root();
-    let py_scripts = [
-        (
-            "resources/ocr/paddleocr/blink_ocr_server.py",
-            "Blink PP-OCRv6 OCR Server",
-        ),
-        (
-            "resources/stt/funasr/blink_stt_server.py",
-            "Blink FunASR STT Server",
-        ),
-    ];
+// ── release 资源前置校验（0.22.6.4）────────────────────────────────────────
+//
+// 背景：0.22 引入本地模型运行时，resources/ 下新增了嵌入的 Python server 脚本、
+// 依赖锁文件和模型元数据。release 构建必须证明这些资源入包且可验证，
+// 同时证明模型文件、staging/generation/venv/cache 不入包。
+//
+// 资源策略：所有运行时需要的脚本/锁/元数据通过 `include_str!` 嵌入 Rust 二进制
+// （编译期保证存在），tauri.conf.json 的 bundle resources 只包含 plugins/builtin/**/*。
+// 本检查在 release 前验证这些 `include_str!` 引用的文件确实存在且有效。
 
-    let py = which_python();
+/// 所有通过 `include_str!` 嵌入 Rust 二进制的资源文件清单。
+/// 新增嵌入资源时必须在此登记，否则 release-check 不会覆盖它。
+const EMBEDDED_RESOURCES: &[(&str, &str, EmbeddedKind)] = &[
+    (
+        "resources/ocr/paddleocr/blink_ocr_server.py",
+        "Blink PP-OCRv6 OCR Server",
+        EmbeddedKind::PythonScript,
+    ),
+    (
+        "resources/stt/funasr/blink_stt_server.py",
+        "Blink FunASR STT Server",
+        EmbeddedKind::PythonScript,
+    ),
+    (
+        "resources/ocr/paddleocr/locked-requirements.txt",
+        "PaddleOCR locked requirements",
+        EmbeddedKind::LockedRequirements,
+    ),
+    (
+        "resources/ocr/paddleocr/lock.json",
+        "PaddleOCR model metadata",
+        EmbeddedKind::ModelMetadata,
+    ),
+    (
+        "resources/model_context_windows.json",
+        "AI model context windows catalog",
+        EmbeddedKind::JsonData,
+    ),
+];
+
+/// 嵌入资源类型——决定校验策略。
+#[derive(Clone, Copy)]
+enum EmbeddedKind {
+    PythonScript,
+    LockedRequirements,
+    ModelMetadata,
+    JsonData,
+}
+
+/// 必须存在的许可文件清单。
+const REQUIRED_LICENSES: &[(&str, &str)] = &[
+    ("LICENSE", "Blink 项目根许可（MIT）"),
+    (
+        "frontend/assets/icons/LICENSE.lucide.txt",
+        "Lucide 图标许可（ISC）",
+    ),
+];
+
+/// 不应出现在 resources/ 目录下的模型文件扩展名。
+const FORBIDDEN_MODEL_EXTS: &[&str] = &[".pt", ".pth", ".onnx", ".gguf", ".params", ".bin"];
+
+/// 不应出现在 resources/ 目录下的子目录名。
+const FORBIDDEN_DIRS: &[&str] = &[
+    "staging",
+    "generations",
+    "venv",
+    "env",
+    "cache",
+    "download",
+    "downloads",
+    "models",
+    "__pycache__",
+];
+
+/// release 资源前置校验总入口。
+///
+/// 校验五项：脚本语法、锁文件完整性、manifest/schema 一致性、
+/// 许可文件存在、排除规则（无模型/staging/generation/venv/cache/__pycache__）。
+fn check_release_resources() {
+    println!("🔒 release 资源前置校验开始...");
     let mut failures = Vec::new();
 
-    println!("🐍 检查 Python 资源语法（py_compile）...");
-    for (rel_path, desc) in &py_scripts {
+    // 1. 嵌入脚本存在且语法正确 + 锁文件可解析 + manifest/schema 一致
+    check_embedded_resources(&mut failures);
+
+    // 2. 必要许可文件存在
+    check_required_licenses(&mut failures);
+
+    // 3. 排除规则：resources/ 下无模型/staging/generation/venv/cache/__pycache__
+    check_exclusion_rules(&mut failures);
+
+    if !failures.is_empty() {
+        for f in &failures {
+            eprintln!("❌ {f}");
+        }
+        panic!("release 资源校验失败：{} 个错误", failures.len());
+    }
+    println!("✅ release 资源前置校验全部通过");
+}
+
+/// 校验所有 `include_str!` 嵌入资源：存在性 + 类型相关的内容校验。
+fn check_embedded_resources(failures: &mut Vec<String>) {
+    let root = workspace_root();
+    let py = which_python();
+
+    println!("📋 校验嵌入资源（{} 项）...", EMBEDDED_RESOURCES.len());
+    for (rel_path, desc, kind) in EMBEDDED_RESOURCES {
         let full = root.join(rel_path);
         if !full.exists() {
             failures.push(format!("{desc}: 文件不存在 ({rel_path})"));
             continue;
         }
 
-        let compile_cmd = format!(
-            "from pathlib import Path; compile(Path(r'{}').read_text(encoding='utf-8'), '{}', 'exec')",
-            full.display(),
-            full.file_name().unwrap_or_default().to_string_lossy()
-        );
+        let Ok(content) = std::fs::read_to_string(&full) else {
+            failures.push(format!("{desc}: 读取失败 ({rel_path})"));
+            continue;
+        };
 
-        let result = Command::new(&py)
-            .arg("-c")
-            .arg(&compile_cmd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(&root)
-            .output();
+        if content.is_empty() {
+            failures.push(format!("{desc}: 文件为空 ({rel_path})"));
+            continue;
+        }
 
-        match result {
-            Ok(out) if out.status.success() => {
-                println!("  ✓ {desc} 语法正确");
+        match kind {
+            EmbeddedKind::PythonScript => {
+                check_python_syntax(&full, rel_path, desc, &py, failures);
             }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                failures.push(format!("{desc}: 语法错误\n{stderr}"));
+            EmbeddedKind::LockedRequirements => {
+                check_locked_requirements(&content, desc, failures);
             }
-            Err(e) => {
-                failures.push(format!("{desc}: Python 执行失败: {e}"));
+            EmbeddedKind::ModelMetadata => {
+                check_model_metadata(&content, desc, failures);
+            }
+            EmbeddedKind::JsonData => {
+                check_json_valid(&content, desc, failures);
+            }
+        }
+    }
+}
+
+/// Python 脚本语法校验（使用 Python `compile()`）。
+fn check_python_syntax(
+    full: &Path,
+    _rel_path: &str,
+    desc: &str,
+    py: &(String, Vec<String>),
+    failures: &mut Vec<String>,
+) {
+    let compile_cmd = format!(
+        "from pathlib import Path; compile(Path(r'{}').read_text(encoding='utf-8'), '{}', 'exec')",
+        full.display(),
+        full.file_name().unwrap_or_default().to_string_lossy()
+    );
+
+    let (py_cmd, py_args) = py;
+    let mut cmd = Command::new(py_cmd);
+    cmd.args(py_args)
+        .arg("-c")
+        .arg(&compile_cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(workspace_root());
+    let result = cmd.output();
+
+    match result {
+        Ok(out) if out.status.success() => {
+            println!("  ✓ {desc} 语法正确");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            failures.push(format!("{desc}: Python 语法错误\n{stderr}"));
+        }
+        Err(e) => {
+            failures.push(format!("{desc}: Python 执行失败: {e}"));
+        }
+    }
+}
+
+/// 锁文件校验：每行包定义必须含 `==` 版本约束和至少一个 `--hash=sha256:`。
+/// 空行和注释行跳过。
+fn check_locked_requirements(content: &str, desc: &str, failures: &mut Vec<String>) {
+    let mut package_count = 0u32;
+    let mut hash_count = 0u32;
+    let mut missing_hash: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // 续行（以 --hash 开头）属于上一个包
+        if trimmed.starts_with("--hash") {
+            hash_count += 1;
+            continue;
+        }
+        // 包行：name==version
+        if trimmed.contains("==") {
+            package_count += 1;
+            // 检查同行的 hash（可能在续行）
+            if !trimmed.contains("--hash=sha256:") {
+                // 可能 hash 在续行，先记录包名
+                let pkg_name = trimmed.split("==").next().unwrap_or(trimmed);
+                missing_hash.push(pkg_name.to_string());
             }
         }
     }
 
-    if !failures.is_empty() {
-        for f in &failures {
-            eprintln!("❌ {f}");
+    // 重新扫描：对每个包行，检查后续续行是否有 --hash
+    let lines: Vec<&str> = content.lines().collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let line = lines[idx].trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("--hash") {
+            idx += 1;
+            continue;
         }
-        panic!("Python 资源语法检查失败: {} 个错误", failures.len());
+        if line.contains("==") {
+            // 检查同行和后续续行是否有 --hash
+            let mut has_hash = line.contains("--hash=sha256:");
+            let mut j = idx + 1;
+            while j < lines.len() && lines[j].trim().starts_with("--hash") {
+                if lines[j].contains("sha256") {
+                    has_hash = true;
+                }
+                j += 1;
+            }
+            if !has_hash {
+                let pkg = line.split("==").next().unwrap_or(line);
+                failures.push(format!("{desc}: 包 {pkg} 缺少 --hash=sha256: 校验"));
+            }
+        }
+        idx += 1;
     }
-    println!("✅ Python 资源语法检查通过");
+
+    if package_count == 0 {
+        failures.push(format!("{desc}: 锁文件未包含任何包定义"));
+    } else {
+        println!("  ✓ {desc}: {package_count} 个包, {hash_count} 个 hash 条目");
+    }
+}
+
+/// 模型元数据 JSON 校验：$schema 字段存在，且包含 models 字段。
+fn check_model_metadata(content: &str, desc: &str, failures: &mut Vec<String>) {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(json) => {
+            if json.get("$schema").is_none() {
+                failures.push(format!("{desc}: 缺少 $schema 字段"));
+            }
+            if json.get("models").is_none() {
+                failures.push(format!("{desc}: 缺少 models 字段"));
+            }
+            println!("  ✓ {desc}: JSON 结构有效");
+        }
+        Err(e) => {
+            failures.push(format!("{desc}: JSON 解析失败: {e}"));
+        }
+    }
+}
+
+/// 普通 JSON 数据校验。
+fn check_json_valid(content: &str, desc: &str, failures: &mut Vec<String>) {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(_) => {
+            println!("  ✓ {desc}: JSON 有效");
+        }
+        Err(e) => {
+            failures.push(format!("{desc}: JSON 解析失败: {e}"));
+        }
+    }
+}
+
+/// 校验必要许可文件存在。
+fn check_required_licenses(failures: &mut Vec<String>) {
+    let root = workspace_root();
+    println!("📋 校验许可文件（{} 项）...", REQUIRED_LICENSES.len());
+    for (rel_path, desc) in REQUIRED_LICENSES {
+        let full = root.join(rel_path);
+        if !full.exists() {
+            failures.push(format!("{desc}: 文件不存在 ({rel_path})"));
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&full) else {
+            failures.push(format!("{desc}: 读取失败 ({rel_path})"));
+            continue;
+        };
+        if content.is_empty() {
+            failures.push(format!("{desc}: 文件为空 ({rel_path})"));
+            continue;
+        }
+        println!("  ✓ {desc}");
+    }
+}
+
+/// 排除规则校验：resources/ 目录下不应有模型文件、staging/generation/venv/cache/__pycache__。
+fn check_exclusion_rules(failures: &mut Vec<String>) {
+    let root = workspace_root();
+    let resources_dir = root.join("resources");
+    println!("🚫 校验排除规则（resources/ 下无模型/staging/venv/cache/__pycache__）...");
+
+    let mut found_forbidden: Vec<String> = Vec::new();
+    scan_forbidden_in_dir(&resources_dir, &resources_dir, &mut found_forbidden);
+
+    if found_forbidden.is_empty() {
+        println!("  ✓ resources/ 目录干净（无禁止文件/目录）");
+    } else {
+        for item in &found_forbidden {
+            failures.push(format!("排除规则违反: {item}"));
+        }
+    }
+}
+
+/// 递归扫描目录，查找禁止的文件扩展名和子目录名。
+fn scan_forbidden_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if FORBIDDEN_DIRS.iter().any(|d| *d == name) {
+                    found.push(format!("禁止目录: resources/{rel}/"));
+                    // 不递归进入禁止目录
+                    continue;
+                }
+            }
+            scan_forbidden_in_dir(base, &path, found);
+        } else if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext_lower = format!(".{ext}").to_lowercase();
+                if FORBIDDEN_MODEL_EXTS
+                    .iter()
+                    .any(|e| *e == ext_lower.as_str())
+                {
+                    found.push(format!("禁止模型文件: resources/{rel}"));
+                }
+            }
+            // 检查 __pycache__ 残留
+            if let Some(parent) = path.parent()
+                && parent.file_name().is_some_and(|n| n == "__pycache__")
+            {
+                found.push(format!("禁止 __pycache__ 文件: resources/{rel}"));
+            }
+        }
+    }
 }
 
 /// 拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）。
@@ -246,30 +547,55 @@ fn fetch_icons() {
     }
     println!("🎨 拉取 Lucide 图标并生成 SVG sprite ...");
     // 优先使用 python3，回退到 python
-    let py = which_python();
-    run(
-        py.as_str(),
-        &[script.to_str().unwrap(), root.to_str().unwrap()],
-        &root,
-    );
+    let (py_cmd, py_args) = which_python();
+    let mut args = py_args.clone();
+    args.push(script.to_str().unwrap().to_string());
+    args.push(root.to_str().unwrap().to_string());
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run(py_cmd.as_str(), &args_ref, &root);
     println!("✅ 图标 sprite 生成完成");
 }
 
-/// 查找可用的 Python 解释器（python3 优先，回退 python）。
-fn which_python() -> String {
+/// 查找可用的 Python 解释器（python3 优先，回退 python，再回退 py launcher）。
+///
+/// Windows 上 `python3`/`python` 可能是 Microsoft Store 别名（不工作），
+/// 因此也尝试 `py -3`（官方 Python launcher）作为最后回退。
+///
+/// 返回 (命令, 额外参数) 元组——调用方用 `Command::new(cmd).args(&prefix)` 构建命令。
+fn which_python() -> (String, Vec<String>) {
+    // 先尝试直接命令
     for cmd in &["python3", "python"] {
-        if Command::new(cmd)
-            .arg("--version")
+        // 验证能真正执行代码（Store alias 的 exit code 仍为 0 但不工作）
+        let test = Command::new(cmd)
+            .arg("-c")
+            .arg("print('ok')")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        if let Ok(out) = test
+            && out.status.success()
+            && String::from_utf8_lossy(&out.stdout).trim() == "ok"
         {
-            return cmd.to_string();
+            return (cmd.to_string(), vec![]);
         }
     }
-    panic!("找不到 Python 解释器，请安装 Python 3.8+ 并确保 python/python3 在 PATH 中");
+    // 回退到 py launcher（Windows 官方 Python launcher）
+    let test = Command::new("py")
+        .arg("-3")
+        .arg("-c")
+        .arg("print('ok')")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    if let Ok(out) = test
+        && out.status.success()
+        && String::from_utf8_lossy(&out.stdout).trim() == "ok"
+    {
+        return ("py".to_string(), vec!["-3".to_string()]);
+    }
+    panic!("找不到 Python 解释器，请安装 Python 3.8+ 并确保 python/python3/py 在 PATH 中");
 }
 
 /// 打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）。
@@ -319,7 +645,7 @@ fn main() {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
             build_plugins(true, debug); // 打包期：编译 + 复制到 bin
-            check_python_resources(); // 检查嵌入的 Python 脚本语法
+            check_release_resources(); // release 资源前置校验（含 Python 语法）
             let root = workspace_root();
             if debug {
                 println!("📦 cargo tauri build --debug（DevTools 可用）...");
@@ -329,13 +655,14 @@ fn main() {
                 run("cargo", &["tauri", "build"], &root);
             }
         }
-        "icons" => fetch_icons(),    // 拉取 Lucide 图标生成 sprite
-        "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
-        "models" => fetch_models(),  // 从 LiteLLM 精选主流模型目录
-        "lint" => lint_frontend(),   // 前端防新增检查（var hex fallback 冻结基线）
+        "release-check" => check_release_resources(), // 仅运行 release 资源前置校验
+        "icons" => fetch_icons(),                     // 拉取 Lucide 图标生成 sprite
+        "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
+        "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
+        "lint" => lint_frontend(),                    // 前端防新增检查（var hex fallback 冻结基线）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap|models|lint> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|icons|tiptap|models|lint> [--debug]"
             )
         }
     }

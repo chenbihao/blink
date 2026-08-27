@@ -48,6 +48,11 @@ _model_lock = None     # threading.Lock
 # "FastAPI 已就绪但模型还在下载" 与 "模型已就绪可推理"。
 _model_status = "idle"
 
+# 0.22.6 H1: 模型内容指纹（model_content_fingerprint）
+# 模型 Ready 时计算，基于 ModelScope 缓存文件的内容 SHA-256。
+# 用于检测模型文件损坏/篡改。非空、非全零。
+_model_content_fingerprint: Optional[str] = None
+
 # 启动参数
 _args: Optional[argparse.Namespace] = None
 
@@ -143,6 +148,120 @@ def _resolve_model_id(name: str) -> str:
     return name
 
 
+# ── 0.22.6 H1: 模型内容指纹 ────────────────────────────────────────────────
+
+def _get_modelscope_cache_dir() -> str:
+    """获取 ModelScope 缓存目录路径。
+
+    优先使用 MODELSCOPE_CACHE 环境变量（由 Rust adapter 注入），
+    回退到默认 ~/.cache/modelscope。
+    """
+    return os.environ.get(
+        "MODELSCOPE_CACHE",
+        os.path.join(os.path.expanduser("~"), ".cache", "modelscope"),
+    )
+
+
+def _compute_model_content_fingerprint(model_name: str) -> Optional[str]:
+    """计算模型缓存文件的内容指纹。
+
+    0.22.6 H1: 在模型 Ready 时计算稳定、非空、非全零的内容指纹。
+    基于 ModelScope 缓存目录中的实际模型文件内容做 SHA-256。
+
+    ModelScope 缓存目录结构（典型）：
+      MODELSCOPE_CACHE/
+        iic/
+          SenseVoiceSmall/
+            model.pt
+            configuration.json
+            ...
+
+    指纹计算方式（与 PaddleOCR server 一致的原则）：
+    - 收集目标模型目录下的所有文件
+    - 按相对路径排序
+    - 对 (相对路径 + 文件内容) 依次更新 SHA-256 hasher
+    - 返回 hexdigest()
+
+    返回 None 表示无法计算指纹（模型文件不存在或路径无法定位）。
+    """
+    try:
+        cache_dir = _get_modelscope_cache_dir()
+        if not os.path.isdir(cache_dir):
+            return None
+
+        # 解析模型名到 ModelScope 完整 ID
+        resolved = _resolve_model_id(model_name)
+
+        # ModelScope 缓存中模型目录路径：cache_dir/{namespace}/{model_name}/
+        # 如 iic/SenseVoiceSmall → cache_dir/iic/SenseVoiceSmall/
+        if "/" in resolved:
+            parts = resolved.split("/", 1)
+            namespace, model_dir_name = parts[0], parts[1]
+        else:
+            namespace = "iic"
+            model_dir_name = resolved
+
+        model_dir = os.path.join(cache_dir, namespace, model_dir_name)
+
+        if not os.path.isdir(model_dir):
+            # 尝试在 cache_dir 下递归查找匹配的目录
+            # ModelScope 有时将模型存储在子目录中
+            found = False
+            for root, dirs, _ in os.walk(cache_dir):
+                for d in dirs:
+                    if d == model_dir_name or d == resolved:
+                        model_dir = os.path.join(root, d)
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                return None
+
+        # 收集模型目录下所有文件（递归）
+        target_files = []
+        for root, _, files in os.walk(model_dir):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    rel = os.path.relpath(fp, model_dir)
+                    rel_normalized = rel.replace("\\", "/")
+                    target_files.append((rel_normalized, fp))
+                except OSError:
+                    pass
+
+        if not target_files:
+            return None
+
+        # 按相对路径排序
+        target_files.sort(key=lambda x: x[0])
+
+        # 计算指纹：对 (相对路径 + 文件内容) 做 SHA-256
+        hasher = hashlib.sha256()
+        for rel_path, abs_path in target_files:
+            hasher.update(rel_path.encode("utf-8"))
+            hasher.update(b"\x00")  # 分隔符
+            try:
+                with open(abs_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(65536), b""):
+                        hasher.update(chunk)
+            except OSError as e:
+                logger.warning(f"读取模型文件失败 {abs_path}: {e}")
+                return None
+            hasher.update(b"\x00")  # 分隔符
+
+        fingerprint = hasher.hexdigest()
+
+        # 验证非空、非全零
+        if not fingerprint or all(c == "0" for c in fingerprint):
+            return None
+
+        return fingerprint
+    except Exception as e:
+        logger.warning(f"计算模型内容指纹失败: {e}")
+        return None
+
+
 # ── 模型类型检测 ────────────────────────────────────────────────────────
 
 def _is_sensevoice(model_name: str) -> bool:
@@ -169,7 +288,7 @@ def _load_model():
     加载状态通过全局 ``_model_status`` 跟踪（idle → loading → ready/error），
     供 /health 端点暴露给 Rust 侧判断服务是否真正可用。
     """
-    global _model, _model_lock, _model_status
+    global _model, _model_lock, _model_status, _model_content_fingerprint
     if _model is not None:
         return _model
 
@@ -206,7 +325,12 @@ def _load_model():
 
             _model = AutoModel(**kwargs)
             _model_status = "ready"
-            logger.info(f"模型 {args.model} 加载完成")
+            # 0.22.6 H1: 模型 Ready 时计算内容指纹
+            _model_content_fingerprint = _compute_model_content_fingerprint(args.model)
+            logger.info(
+                f"模型 {args.model} 加载完成, "
+                f"content_fingerprint={_model_content_fingerprint[:16] if _model_content_fingerprint else 'None'}..."
+            )
             return _model
         except Exception as e:
             _model_status = "error"
@@ -343,6 +467,7 @@ async def health(request: Request):
     - ``device_name``: 设备名
     - ``model_id``: 模型 id
     - ``model_revision``: 模型版本
+    - ``model_content_fingerprint``: 模型内容指纹（仅 Ready 时返回）
     """
     # 0.22.3 Task D: token 验证
     if not _verify_token(request):
@@ -389,6 +514,10 @@ async def health(request: Request):
     # 模型 id / revision
     response["model_id"] = getattr(args, "model", "")
     response["model_revision"] = "funasr-1.x"
+
+    # 0.22.6 H1: 模型内容指纹（仅在 Ready 时返回）
+    if _model_status == "ready":
+        response["model_content_fingerprint"] = _model_content_fingerprint
 
     return JSONResponse(response)
 

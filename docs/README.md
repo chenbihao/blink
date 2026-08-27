@@ -56,7 +56,7 @@
 | **0.19** | [0.19-capability-closure.md](./phases/0.19-capability-closure.md) | 能力闭环（便签/文本真实闭环 / 行为一致性 / 图片编辑解耦 / 自然语言设置 / AI 设置与纯对话 / MCP 生命周期） | ✅ |
 | **0.20** | [0.20-content-visual-workflow.md](./phases/0.20-content-visual-workflow.md) | 高频内容与视觉工作流（便签可靠性 / 剪贴板多选 / 颜色 / 图片编辑 / 截图性能与精调） | ✅ |
 | **0.21** | [0.21-capability-unification-feature-catalog.md](./phases/0.21-capability-unification-feature-catalog.md) | Capability 唯一执行入口、Action 全量分流、功能目录及 AI/MCP 出口策略 | ✅ |
-| **0.22** | [0.22-local-model-runtime-ppocrv6.md](./phases/0.22-local-model-runtime-ppocrv6.md) | 本地模型运行时（隔离 Python 环境 + 通用生命周期）与 PP-OCRv6 | 📋 |
+| **0.22** | [0.22-local-model-runtime-ppocrv6.md](./phases/0.22-local-model-runtime-ppocrv6.md) | 本地模型运行时（隔离 Python 环境 + 通用生命周期）与 PP-OCRv6 | 🚧 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
 
@@ -83,7 +83,7 @@
 | 0.19.x | 能力闭环（基础感知执行 + 便签/文本闭环 + 行为收敛 + 图片编辑解耦 + 自然语言设置 + AI 设置与纯对话 + MCP 生命周期） | 🚧 0.19.1~0.19.4 完成；0.19.5~0.19.11 已规划 |
 | 0.20.x | 高频内容与视觉工作流（便签 / 剪贴板 / 颜色 / 图片编辑 / 截图性能与精调） | 📋 规划中 |
 | 0.21.x | Capability 唯一原子执行入口、Action 全量分流删除、功能目录与 AI/MCP 授权、AI 对话预算、摘要与记忆链路 | ✅ 0.21.0~0.21.23 完成 |
-| 0.22.x | 本地模型运行时、FunASR 生命周期迁移、PP-OCRv6 可选后端与 WinRT 回退 | 📋 规划中 |
+| 0.22.x | 本地模型运行时、FunASR 生命周期与模型资产迁移、PP-OCRv6 可选后端与 WinRT 回退 | 🚧 0.22.6 迁移闭环与发布硬化中 |
 | 未立项 | 见 roadmap：subagent / proactivity / 同步 / 远期向量与 RAG 观察 | 🔮 候选池 |
 
 ---

@@ -331,8 +331,11 @@ fn paths_match_case_insensitive(a: &Path, b: &Path) -> bool {
 }
 
 /// 获取进程的可执行文件路径（用于身份验证）。
+///
+/// 公开接口，供 lease 恢复路径在 `spawn_blocking` 中查询进程身份。
+/// 返回 `None` 表示进程不存在或权限不足。
 #[cfg(windows)]
-fn get_process_executable(pid: u32) -> Option<std::path::PathBuf> {
+pub fn get_process_executable(pid: u32) -> Option<std::path::PathBuf> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -398,6 +401,46 @@ pub fn get_process_creation_time_ms(pid: u32) -> Option<u64> {
 }
 
 // ── 端口探测（只读，不杀进程）──
+
+/// 非 Windows 平台的 `get_process_executable` stub。
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn get_process_executable(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// 检查指定 PID 的进程是否仍然存在（存活）。
+///
+/// 公开接口，供 lease 恢复路径判断进程是否已退出。
+/// Windows 使用 `OpenProcess` + `GetExitCodeProcess`，非 Windows 回退 `kill(pid, 0)`。
+#[cfg(windows)]
+pub fn pid_exists(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let process = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => h,
+            Err(_) => return false, // 无法打开——进程不存在或无权限
+        };
+
+        let mut exit_code: u32 = 0;
+        let ret = GetExitCodeProcess(process, &mut exit_code);
+        let _ = CloseHandle(process);
+
+        // STILL_ACTIVE 的值为 259（0x103），表示进程仍在运行
+        ret.is_ok() && exit_code as i32 == STILL_ACTIVE.0
+    }
+}
+
+/// 非 Windows 平台的 `pid_exists` stub。
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn pid_exists(_pid: u32) -> bool {
+    false
+}
 
 /// 只读探测端口是否被占用（TCP connect）。
 ///

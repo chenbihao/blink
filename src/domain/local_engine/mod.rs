@@ -35,6 +35,7 @@
 pub mod adapter;
 pub mod descriptor;
 pub mod error;
+pub mod model;
 pub mod status;
 
 // 复用 infra 类型重导出（方便 adapter 实现者引用）
@@ -59,6 +60,15 @@ pub use status::{
     BackendInfo, DesiredState, EngineOperation, EngineStatus, EngineStatusSnapshot,
     EnvironmentHealth, FallbackEntry, FallbackOutcome, ModelHealth, OperationKind, OperationStage,
     ProcessState, ServiceEpoch, ServiceHealth, StatusCommitGuard,
+};
+
+// ── 模型资产生命周期类型重导出（0.22.6 H3）─────────────────────────────────
+#[allow(unused_imports)]
+pub use model::{
+    DeleteConflictReason, EngineModelDescriptor, EngineModelStatus, ModelCompatibility,
+    ModelDeleteConflict, ModelIdentityVerification, ModelInstallState, ModelOperationKind,
+    ModelOperationRequest, ModelOperationResult, ModelOperationStage, ModelVerificationState,
+    transition_install_state,
 };
 
 // ── 领域层纯逻辑测试 ──────────────────────────────────────────────────────

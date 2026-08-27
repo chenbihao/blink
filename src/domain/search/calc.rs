@@ -7,6 +7,7 @@
 ///
 /// 支持：四则运算、括号、取余（`%`）、`sqrt`。
 /// 不支持：三角函数、对数（非 launcher 场景）。
+/// 当用户刚输入尾部运算符或 `=` 时，保留前一个已完成表达式的结果。
 pub fn try_eval(query: &str) -> Option<String> {
     let q = query.trim();
     if q.is_empty() {
@@ -16,9 +17,45 @@ pub fn try_eval(query: &str) -> Option<String> {
     if !q.contains(|c: char| "+-*/^%()".contains(c)) && !q.contains("sqrt") {
         return None;
     }
+    eval_complete(q).or_else(|| {
+        let prefix = completed_prefix(q)?;
+        // "7+" 还没有产生过一个完整运算，不将纯数字 7 冒充成计算结果。
+        if !has_arithmetic_intent(prefix) {
+            return None;
+        }
+        eval_complete(prefix)
+    })
+}
+
+/// 对一个完整表达式求值。
+fn eval_complete(expression: &str) -> Option<String> {
     // 整数转浮点：避免 "2/3=0"（整数除法截断），变成 "2.0/3.0" → 0.666667
-    let q = ints_to_float(q);
-    evalexpr::eval(&q).ok().map(format_result)
+    let expression = ints_to_float(expression);
+    evalexpr::eval(&expression).ok().map(format_result)
+}
+
+/// 只剥离输入中明确表示“尚未完成”的尾部，避免将任意错误文本当成公式。
+fn completed_prefix(expression: &str) -> Option<&str> {
+    let mut prefix = expression.trim_end();
+    let original_len = prefix.len();
+
+    if let Some(without_equals) = prefix.strip_suffix('=') {
+        prefix = without_equals.trim_end();
+    }
+
+    while prefix
+        .chars()
+        .last()
+        .is_some_and(|c| matches!(c, '+' | '-' | '*' | '/' | '^'))
+    {
+        prefix = prefix[..prefix.len() - 1].trim_end();
+    }
+
+    (prefix.len() < original_len && !prefix.is_empty()).then_some(prefix)
+}
+
+fn has_arithmetic_intent(expression: &str) -> bool {
+    expression.contains(|c: char| "+-*/^%()".contains(c)) || expression.contains("sqrt")
 }
 
 /// 格式化计算结果：整数结果不带小数点，浮点最多 6 位有效数字。
@@ -118,5 +155,19 @@ mod tests {
         // 整数结果不带小数点
         assert_eq!(try_eval("4/2").as_deref(), Some("2"));
         assert_eq!(try_eval("2.0*3").as_deref(), Some("6"));
+    }
+
+    #[test]
+    fn eval_keeps_last_complete_result_while_typing() {
+        assert_eq!(try_eval("7+9+").as_deref(), Some("16"));
+        assert_eq!(try_eval("7+9= ").as_deref(), Some("16"));
+        assert_eq!(try_eval("7+9*-").as_deref(), Some("16"));
+    }
+
+    #[test]
+    fn eval_does_not_recover_from_arbitrary_invalid_suffix() {
+        assert_eq!(try_eval("7+9x"), None);
+        assert_eq!(try_eval("7+"), None);
+        assert_eq!(try_eval("="), None);
     }
 }

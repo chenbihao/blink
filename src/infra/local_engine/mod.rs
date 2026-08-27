@@ -22,6 +22,8 @@
 //! 耗时 spawn/wait 不长期持有全局锁。
 //! 旧 generation 的退出事件不能覆盖新 generation 状态。
 
+pub mod lease;
+pub mod lease_recovery;
 pub mod log_pipe;
 pub mod port;
 pub mod process;
@@ -31,6 +33,14 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
+#[allow(unused_imports)]
+pub use lease::{
+    HealthEvidence, LEASE_SCHEMA_VERSION, LeaseError, ProcessEvidence, ProcessLease,
+    RecoveryDecision, RecoveryDiagnostics, RecoveryReason, decide_recovery, remove_lease,
+    remove_lease_force, scan_leases, write_lease,
+};
+#[allow(unused_imports)]
+pub use lease_recovery::{build_process_evidence, probe_health_evidence};
 #[allow(unused_imports)]
 pub use log_pipe::{LogEntry, LogPipeConfig, LogSource, LogSubscriber};
 #[allow(unused_imports)]

@@ -59,9 +59,35 @@ export const EVENTS = Object.freeze({
     AUDIO_TEST_LEVEL: 'blink://audio-test-level',
 
     // ── 本地引擎（0.22.3）──
-    /** 通用引擎状态快照。payload: { engine_id, service_epoch, revision, snapshot } */
+    /**
+     * 通用引擎状态快照。payload: EngineStatusDto
+     *
+     * shape:
+     * { engine_id, service_epoch, revision,
+     *   status: { desired, operation: { kind, operation_id, stage, cancellable },
+     *             environment, process: { state, pid?, reason? },
+     *             service, model, backend, last_error? } }
+     *
+     * 前端去重：engine_id + service_epoch + revision。
+     * operation.kind wire 值：idle/installing/updating/repairing/migrating/rolling_back/cleaning
+     * operation.stage wire 值：pending/preparing/downloading/verifying/promoting/switching/validating/completed/cancelled/failed
+     * i18n key：local_engine.operation.{kind} / local_engine.operation.stage.{stage}
+     */
     LOCAL_ENGINE_STATUS: 'blink://local-engine-status',
-    /** 通用引擎日志条目。payload: { engine_id, instance_id, seq, timestamp, level, text } */
+
+    /**
+     * 通用引擎日志条目。payload: EngineLogDto
+     *
+     * 运行时日志（instance_id 隔离）:
+     * { engine_id, instance_id, operation_id: null, seq, timestamp, level, text }
+     *
+     * 安装日志（operation_id 隔离）:
+     * { engine_id, instance_id: "", operation_id: "op-xxx", seq, timestamp, level, text }
+     *
+     * 前端去重：engine_id + (instance_id 或 operation_id) + seq。
+     * seq 为字符串（避免 JS u64 精度丢失）。
+     * 安装日志通过 operation_id 过滤；运行时日志通过 instance_id 过滤。
+     */
     LOCAL_ENGINE_LOG: 'blink://local-engine-log',
 
     // ── 便签（0.16.7）──

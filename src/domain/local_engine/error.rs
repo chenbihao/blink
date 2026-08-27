@@ -73,73 +73,76 @@ impl LocalEngineError {
     }
 
     /// 从 infra 层 RuntimeError 转换（保留内部上下文）。
+    ///
+    /// 0.22.6.2: 映射新结构化错误变体到稳定错误码。
+    /// 新增映射：InsufficientDiskSpace → DiskFull, NetworkUnreachable → NetworkError,
+    /// ArtifactCorrupted → ArtifactCorrupted, OperationCancelled → Cancelled,
+    /// ManifestContractMismatch → EnvironmentBroken,
+    /// GenerationVerificationFailed → EnvironmentBroken, RollbackFailed → EnvironmentBroken。
     pub fn from_runtime(
         phase: ErrorPhase,
         hint: impl Into<String>,
         err: &crate::infra::local_engine::runtime::RuntimeError,
     ) -> Self {
+        use crate::infra::local_engine::runtime::RuntimeError as RE;
+
         let code = match err {
-            crate::infra::local_engine::runtime::RuntimeError::InvalidEngineId { .. }
-            | crate::infra::local_engine::runtime::RuntimeError::InvalidArtifactId { .. }
-            | crate::infra::local_engine::runtime::RuntimeError::PathTraversal { .. } => {
-                LocalEngineErrorCode::InvalidConfig
-            }
+            // 配置/路径校验错误
+            RE::InvalidEngineId { .. }
+            | RE::InvalidArtifactId { .. }
+            | RE::PathTraversal { .. } => LocalEngineErrorCode::InvalidConfig,
 
-            crate::infra::local_engine::runtime::RuntimeError::GenerationNotFound { .. }
-            | crate::infra::local_engine::runtime::RuntimeError::CurrentPointerMissing { .. }
-            | crate::infra::local_engine::runtime::RuntimeError::CurrentPointerParseFailed {
-                ..
-            }
-            | crate::infra::local_engine::runtime::RuntimeError::ManifestParseFailed { .. }
-            | crate::infra::local_engine::runtime::RuntimeError::ManifestSerializeFailed {
-                ..
-            }
-            | crate::infra::local_engine::runtime::RuntimeError::ManifestSchemaIncompatible {
-                ..
-            } => LocalEngineErrorCode::EnvironmentBroken,
+            // 指针/manifest 损坏 → EnvironmentBroken
+            RE::GenerationNotFound { .. }
+            | RE::CurrentPointerMissing { .. }
+            | RE::CurrentPointerParseFailed { .. }
+            | RE::ManifestParseFailed { .. }
+            | RE::ManifestSerializeFailed { .. }
+            | RE::ManifestSchemaIncompatible { .. }
+            | RE::ManifestContractMismatch { .. }
+            | RE::GenerationVerificationFailed { .. }
+            | RE::RollbackFailed { .. } => LocalEngineErrorCode::EnvironmentBroken,
 
-            crate::infra::local_engine::runtime::RuntimeError::StagingCreateFailed { .. }
-            | crate::infra::local_engine::runtime::RuntimeError::GenerationPromoteFailed {
-                ..
-            }
-            | crate::infra::local_engine::runtime::RuntimeError::CurrentPointerSwitchFailed {
-                ..
-            }
-            | crate::infra::local_engine::runtime::RuntimeError::InstallFailed { .. } => {
-                LocalEngineErrorCode::InstallFailed
-            }
+            // staging/install 失败
+            RE::StagingCreateFailed { .. }
+            | RE::GenerationPromoteFailed { .. }
+            | RE::CurrentPointerSwitchFailed { .. }
+            | RE::InstallFailed { .. } => LocalEngineErrorCode::InstallFailed,
 
-            crate::infra::local_engine::runtime::RuntimeError::SelfTestFailed { .. } => {
-                LocalEngineErrorCode::SelfTestFailed
-            }
+            // 磁盘不足 → 新错误码
+            RE::InsufficientDiskSpace { .. } => LocalEngineErrorCode::DiskFull,
 
-            crate::infra::local_engine::runtime::RuntimeError::ProfileResolutionFailed {
-                ..
-            }
-            | crate::infra::local_engine::runtime::RuntimeError::ExplicitBackendFailed { .. } => {
+            // 网络不可达 → 新错误码
+            RE::NetworkUnreachable { .. } => LocalEngineErrorCode::NetworkError,
+
+            // artifact/hash 损坏 → 新错误码
+            RE::ArtifactCorrupted { .. } => LocalEngineErrorCode::ArtifactCorrupted,
+
+            // self-test 失败
+            RE::SelfTestFailed { .. } => LocalEngineErrorCode::SelfTestFailed,
+
+            // 操作被取消
+            RE::OperationCancelled { .. } => LocalEngineErrorCode::Cancelled,
+
+            // profile 解析失败
+            RE::ProfileResolutionFailed { .. } | RE::ExplicitBackendFailed { .. } => {
                 LocalEngineErrorCode::ProfileUnresolved
             }
 
-            crate::infra::local_engine::runtime::RuntimeError::BackendMismatch { .. } => {
-                LocalEngineErrorCode::BackendMismatch
-            }
+            // backend 不匹配
+            RE::BackendMismatch { .. } => LocalEngineErrorCode::BackendMismatch,
 
-            crate::infra::local_engine::runtime::RuntimeError::CleanupFailed { .. } => {
-                LocalEngineErrorCode::CleanupFailed
-            }
+            // 清理失败
+            RE::CleanupFailed { .. } => LocalEngineErrorCode::CleanupFailed,
 
-            crate::infra::local_engine::runtime::RuntimeError::ArtifactStillReferenced {
-                ..
-            } => LocalEngineErrorCode::ArtifactReferenced,
+            // 共享 artifact 仍被引用
+            RE::ArtifactStillReferenced { .. } => LocalEngineErrorCode::ArtifactReferenced,
 
-            crate::infra::local_engine::runtime::RuntimeError::MigrationFailed { .. } => {
-                LocalEngineErrorCode::MigrationFailed
-            }
+            // 迁移失败
+            RE::MigrationFailed { .. } => LocalEngineErrorCode::MigrationFailed,
 
-            crate::infra::local_engine::runtime::RuntimeError::Io(_)
-            | crate::infra::local_engine::runtime::RuntimeError::Json(_) => {
-                LocalEngineErrorCode::Internal
-            }
+            // IO/JSON → Internal
+            RE::Io(_) | RE::Json(_) => LocalEngineErrorCode::Internal,
         };
 
         Self {
@@ -223,6 +226,12 @@ pub enum LocalEngineErrorCode {
     InvalidConfig,
     /// 操作不支持（如 engine_id 不在 allowlist）。
     Unsupported,
+    /// 磁盘空间不足。
+    DiskFull,
+    /// 网络不可达或下载失败。
+    NetworkError,
+    /// artifact/hash 损坏。
+    ArtifactCorrupted,
     /// 操作被取消。
     Cancelled,
     /// 操作被拒绝（如迟到 operation_id）。
@@ -325,6 +334,60 @@ mod tests {
         let proc_err = crate::infra::local_engine::process::ManagedProcessError::NotRunning;
         let err = LocalEngineError::from_process(ErrorPhase::Stop, "进程未运行", &proc_err);
         assert_eq!(err.code, LocalEngineErrorCode::NotRunning);
+    }
+
+    #[test]
+    fn from_runtime_maps_new_error_codes() {
+        use crate::infra::local_engine::runtime::RuntimeError;
+
+        // InsufficientDiskSpace → DiskFull
+        let err = RuntimeError::InsufficientDiskSpace {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Install, "磁盘不足", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::DiskFull);
+
+        // NetworkUnreachable → NetworkError
+        let err = RuntimeError::NetworkUnreachable {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Install, "网络不可达", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::NetworkError);
+
+        // ArtifactCorrupted → ArtifactCorrupted
+        let err = RuntimeError::ArtifactCorrupted {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Install, "文件损坏", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::ArtifactCorrupted);
+
+        // OperationCancelled → Cancelled
+        let err = RuntimeError::OperationCancelled {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Install, "操作取消", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::Cancelled);
+
+        // ManifestContractMismatch → EnvironmentBroken
+        let err = RuntimeError::ManifestContractMismatch {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Install, "契约不符", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::EnvironmentBroken);
+
+        // GenerationVerificationFailed → EnvironmentBroken
+        let err = RuntimeError::GenerationVerificationFailed {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Install, "验证失败", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::EnvironmentBroken);
+
+        // RollbackFailed → EnvironmentBroken
+        let err = RuntimeError::RollbackFailed {
+            message: "test".to_string(),
+        };
+        let mapped = LocalEngineError::from_runtime(ErrorPhase::Rollback, "回滚失败", &err);
+        assert_eq!(mapped.code, LocalEngineErrorCode::EnvironmentBroken);
     }
 
     #[test]

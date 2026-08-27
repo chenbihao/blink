@@ -482,6 +482,30 @@
                 <span data-i18n="local_engine.empty">没有可用的本地模型引擎。</span>
             </div>
 
+            <!-- 运行时底座（默认折叠，只读）0.22.6 -->
+            <details class="le-foundation" id="le-foundation">
+                <summary class="le-foundation-summary" data-i18n="local_engine.foundation.title">运行时底座</summary>
+                <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">所有引擎共享的 Python 运行时与公共缓存，只读展示。</p>
+                <div class="le-foundation-body" id="le-foundation-body">
+                    <!-- JS 装配底座信息 -->
+                </div>
+                <div class="le-foundation-actions">
+                    <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh" type="button">
+                        <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
+                        <span data-i18n="local_engine.foundation.refresh">刷新</span>
+                    </button>
+                    <button class="btn btn-small le-foundation-open" id="le-foundation-open" type="button">
+                        <svg aria-hidden="true" class="icon"><use href="#icon-folder-open"/></svg>
+                        <span data-i18n="local_engine.foundation.open_dir">打开根目录</span>
+                    </button>
+                </div>
+            </details>
+
+            <!-- 通用诊断区（JS 装配）0.22.6 -->
+            <div class="le-diagnostic-region" id="le-diagnostic-region" hidden>
+                <!-- JS 装配诊断内容 -->
+            </div>
+
             <!-- engine card 容器（由 H3 renderer 装配） -->
             <div class="le-cards-container" id="le-cards-container" aria-live="polite">
                 <!-- JS 装配卡片 -->

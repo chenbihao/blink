@@ -108,6 +108,13 @@ pub struct EngineOperation {
 }
 
 /// 操作种类。
+///
+/// **Wire 格式（serde snake_case）**：`idle`、`installing`、`updating`、
+/// `repairing`、`migrating`、`rolling_back`、`cleaning`。
+///
+/// **i18n key 约定**：`local_engine.operation.{wire_value}`，
+/// 如 `local_engine.operation.installing`。
+/// 前端通过 `i18n.t('local_engine.operation.' + kind.to_string())` 获取显示文本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
@@ -142,6 +149,14 @@ impl std::fmt::Display for OperationKind {
 }
 
 /// 操作阶段。
+///
+/// **Wire 格式（serde snake_case）**：`pending`、`preparing`、`downloading`、
+/// `verifying`、`promoting`、`switching`、`validating`、`completed`、
+/// `cancelled`、`failed`。
+///
+/// **i18n key 约定**：`local_engine.operation.stage.{wire_value}`，
+/// 如 `local_engine.operation.stage.downloading`。
+/// 前端通过 `i18n.t('local_engine.operation.stage.' + stage.to_string())` 获取显示文本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStage {
@@ -992,5 +1007,111 @@ mod tests {
             ..Default::default()
         };
         assert!(s4.is_available_for_requests());
+    }
+
+    // ── Wire 格式稳定性测试（0.22.6 H5）──────────────────────────────────
+    // 这些值是前端 i18n key 的一部分，不能随意更改。
+    // 如果需要新增值，只能追加，不能修改现有值。
+
+    #[test]
+    fn operation_kind_wire_values_stable() {
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Idle).unwrap(),
+            "\"idle\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Installing).unwrap(),
+            "\"installing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Updating).unwrap(),
+            "\"updating\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Repairing).unwrap(),
+            "\"repairing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Migrating).unwrap(),
+            "\"migrating\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::RollingBack).unwrap(),
+            "\"rolling_back\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Cleaning).unwrap(),
+            "\"cleaning\""
+        );
+    }
+
+    #[test]
+    fn operation_stage_wire_values_stable() {
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Preparing).unwrap(),
+            "\"preparing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Downloading).unwrap(),
+            "\"downloading\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Verifying).unwrap(),
+            "\"verifying\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Promoting).unwrap(),
+            "\"promoting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Switching).unwrap(),
+            "\"switching\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Validating).unwrap(),
+            "\"validating\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationStage::Failed).unwrap(),
+            "\"failed\""
+        );
+    }
+
+    #[test]
+    fn operation_kind_display_matches_wire() {
+        // Display 实现必须与 serde wire 值一致
+        assert_eq!(OperationKind::Idle.to_string(), "idle");
+        assert_eq!(OperationKind::Installing.to_string(), "installing");
+        assert_eq!(OperationKind::Updating.to_string(), "updating");
+        assert_eq!(OperationKind::Repairing.to_string(), "repairing");
+        assert_eq!(OperationKind::Migrating.to_string(), "migrating");
+        assert_eq!(OperationKind::RollingBack.to_string(), "rolling_back");
+        assert_eq!(OperationKind::Cleaning.to_string(), "cleaning");
+    }
+
+    #[test]
+    fn operation_stage_display_matches_wire() {
+        assert_eq!(OperationStage::Pending.to_string(), "pending");
+        assert_eq!(OperationStage::Preparing.to_string(), "preparing");
+        assert_eq!(OperationStage::Downloading.to_string(), "downloading");
+        assert_eq!(OperationStage::Verifying.to_string(), "verifying");
+        assert_eq!(OperationStage::Promoting.to_string(), "promoting");
+        assert_eq!(OperationStage::Switching.to_string(), "switching");
+        assert_eq!(OperationStage::Validating.to_string(), "validating");
+        assert_eq!(OperationStage::Completed.to_string(), "completed");
+        assert_eq!(OperationStage::Cancelled.to_string(), "cancelled");
+        assert_eq!(OperationStage::Failed.to_string(), "failed");
     }
 }

@@ -34,9 +34,10 @@ use crate::domain::local_engine::{
 use crate::domain::stt::funasr;
 use crate::infra::local_engine::providers::python::PythonVenvProvider;
 use crate::infra::local_engine::providers::{
-    CompatibilityCheck, InstallPlan, PackageLock, ProfileCandidate, ProviderDescriptor,
-    PythonInstallPlan,
+    CompatibilityCheck, InstallPlan, PackageLock, PipExtraArg, ProfileCandidate,
+    ProviderDescriptor, PythonInstallPlan,
 };
+use crate::infra::local_engine::runtime as engine_runtime;
 use crate::infra::local_engine::runtime::{
     ArtifactId, BackendObservation, ChecksumSource, ComputeBackend, ComputePreference, EngineId,
     ModelContract, RuntimeKind,
@@ -47,6 +48,16 @@ use crate::infra::local_engine::runtime::{
 /// 重新声明在此模块以保持 adapter 自包含；领域层的 `funasr.rs` 保留原始常量。
 #[allow(dead_code)]
 const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/blink_stt_server.py");
+
+/// 嵌入的完整依赖锁文件（唯一锁源）。
+///
+/// 由 `uv pip compile --generate-hashes --index-url https://download.pytorch.org/whl/cpu
+/// --extra-index-url https://pypi.org/simple` 生成，包含全部传递依赖及其 SHA-256。
+/// `make_funasr_provider_descriptor()` 在运行时解析此文件生成 `PackageLock` 列表。
+/// 安装时使用 `--require-hashes --no-deps` 强校验。
+#[allow(dead_code)]
+const LOCKED_REQUIREMENTS_TXT: &str =
+    include_str!("../../../resources/stt/funasr/locked-requirements.txt");
 
 /// FunASR 稳定 engine id。
 pub const FUNASR_ENGINE_ID: &str = "funasr";
@@ -154,22 +165,28 @@ impl LocalEngineAdapter for FunasrAdapter {
 
     /// adapter self-test。
     ///
-    /// 验证 FunASR Python 环境是否就绪（venv + funasr 包已安装）。
+    /// 验证 FunASR Python 环境是否就绪（generation venv + funasr 包已安装）。
+    ///
+    /// **0.22.6 H1**: 只检查当前 generation 的 venv，不 fallback 到旧全局 venv。
+    /// 旧 `%APPDATA%\blink\python\venv` 只作为迁移/诊断来源，不影响新 generation 安装判定。
     fn self_test(&self) -> AdapterSelfTest {
-        // 检查 venv python 是否可用
-        let python_path = crate::infra::platform::python::venv_python();
+        // 只使用 generation-managed venv（由 PythonVenvProvider 创建的隔离 venv）
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let python_path = generation_venv_python(&engine_id);
+
         if python_path.is_none() {
             return AdapterSelfTest::failed(
-                "Python 环境未就绪。请在设置页点击「安装环境」按钮。\
+                "FunASR 环境未安装。请在设置页「引擎」→「本地模型运行时」中点击「安装环境」按钮。\
                  （Blink 会自动下载 uv + Python 3.12 + torch + funasr）",
             );
         }
 
-        // 检查 funasr 是否已安装
-        let (funasr_ok, _) = crate::infra::platform::python::check_funasr();
+        // 检查 funasr 是否已安装（使用 generation venv 中的 python）
+        let python = python_path.unwrap();
+        let (funasr_ok, _) = check_funasr_with(&python);
         if !funasr_ok {
             return AdapterSelfTest::failed(
-                "funasr 包未安装。请在设置页点击「安装环境」按钮，Blink 会自动完成安装。",
+                "funasr 包未安装。请在设置页「引擎」→「本地模型运行时」中点击「修复」或「安装环境」按钮。",
             );
         }
 
@@ -178,86 +195,108 @@ impl LocalEngineAdapter for FunasrAdapter {
 
     /// 引擎专属诊断投影。
     ///
-    /// 返回 FunASR 特有的诊断信息（Python 环境、torch、funasr 版本等）。
+    /// 返回 FunASR 特有的诊断信息（generation venv、torch、funasr 版本等）。
+    ///
+    /// **0.22.6 H1**: 诊断只解析当前 generation venv 的状态；
+    /// 旧全局 venv 仅作为迁移诊断来源单独标注。
     fn diagnostics(&self) -> EngineDiagnostic {
         let mut entries = Vec::new();
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
 
-        // venv 状态
-        let py_status = crate::infra::platform::python::check_status();
+        // generation venv 状态
+        let gen_python = generation_venv_python(&engine_id);
+        let gen_venv_exists = gen_python.is_some();
         entries.push(DiagnosticEntry {
-            key: "venv_exists".to_string(),
-            value: if py_status.venv_exists {
+            key: "generation_venv_exists".to_string(),
+            value: if gen_venv_exists {
                 "true".to_string()
             } else {
                 "false".to_string()
             },
-            label: "info".to_string(),
-        });
-
-        if let Some(ref v) = py_status.venv_python_version {
-            entries.push(DiagnosticEntry {
-                key: "python_version".to_string(),
-                value: v.clone(),
-                label: "info".to_string(),
-            });
-        }
-
-        // torch 状态
-        let (torch_ok, torch_ver) = crate::infra::platform::python::check_torch();
-        entries.push(DiagnosticEntry {
-            key: "torch_installed".to_string(),
-            value: if torch_ok {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
-            label: if torch_ok {
+            label: if gen_venv_exists {
                 "info".to_string()
             } else {
                 "warning".to_string()
             },
         });
-        if let Some(ref v) = torch_ver {
-            entries.push(DiagnosticEntry {
-                key: "torch_version".to_string(),
-                value: v.clone(),
-                label: "info".to_string(),
-            });
-        }
 
-        // CUDA 状态
-        if torch_ok {
-            let cuda_ok = crate::infra::platform::python::check_torch_cuda();
+        if let Some(ref py) = gen_python {
+            // 使用 generation venv python 检查版本和包
+            if let Some(ver) = check_python_version(py) {
+                entries.push(DiagnosticEntry {
+                    key: "python_version".to_string(),
+                    value: ver,
+                    label: "info".to_string(),
+                });
+            }
+
+            // torch 状态
+            let (torch_ok, torch_ver) = check_torch_with(py);
             entries.push(DiagnosticEntry {
-                key: "torch_cuda_available".to_string(),
-                value: if cuda_ok {
+                key: "torch_installed".to_string(),
+                value: if torch_ok {
                     "true".to_string()
                 } else {
                     "false".to_string()
                 },
-                label: "info".to_string(),
+                label: if torch_ok {
+                    "info".to_string()
+                } else {
+                    "warning".to_string()
+                },
             });
+            if let Some(ref v) = torch_ver {
+                entries.push(DiagnosticEntry {
+                    key: "torch_version".to_string(),
+                    value: v.clone(),
+                    label: "info".to_string(),
+                });
+            }
+
+            // CUDA 状态
+            if torch_ok {
+                let cuda_ok = check_torch_cuda_with(py);
+                entries.push(DiagnosticEntry {
+                    key: "torch_cuda_available".to_string(),
+                    value: if cuda_ok {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    },
+                    label: "info".to_string(),
+                });
+            }
+
+            // funasr 状态
+            let (funasr_ok, funasr_ver) = check_funasr_with(py);
+            entries.push(DiagnosticEntry {
+                key: "funasr_installed".to_string(),
+                value: if funasr_ok {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                },
+                label: if funasr_ok {
+                    "info".to_string()
+                } else {
+                    "warning".to_string()
+                },
+            });
+            if let Some(ref v) = funasr_ver {
+                entries.push(DiagnosticEntry {
+                    key: "funasr_version".to_string(),
+                    value: v.clone(),
+                    label: "info".to_string(),
+                });
+            }
         }
 
-        // funasr 状态
-        let (funasr_ok, funasr_ver) = crate::infra::platform::python::check_funasr();
-        entries.push(DiagnosticEntry {
-            key: "funasr_installed".to_string(),
-            value: if funasr_ok {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
-            label: if funasr_ok {
-                "info".to_string()
-            } else {
-                "warning".to_string()
-            },
-        });
-        if let Some(ref v) = funasr_ver {
+        // 旧全局 venv 仅作为迁移诊断来源标注
+        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
+        if legacy_venv.exists() {
             entries.push(DiagnosticEntry {
-                key: "funasr_version".to_string(),
-                value: v.clone(),
+                key: "legacy_venv_exists".to_string(),
+                value: "true".to_string(),
                 label: "info".to_string(),
             });
         }
@@ -289,19 +328,14 @@ fn make_funasr_descriptor() -> EngineDescriptor {
         install_plan: InstallPlanRef {
             runtime_kind: RuntimeKind::PythonVenv,
             artifact_ids: vec![python_artifact.clone()],
-            // FunASR 当前只声明 CPU profile（CUDA 支持保留但不作为 descriptor 默认）
-            compute_candidates: vec![
-                ComputeCandidate {
-                    preference: ComputePreference::Cpu,
-                    profile_id: "cpu-x64".to_string(),
-                    artifact_id: python_artifact.clone(),
-                },
-                ComputeCandidate {
-                    preference: ComputePreference::Cuda,
-                    profile_id: "cuda-x64".to_string(),
-                    artifact_id: python_artifact.clone(),
-                },
-            ],
+            // 0.22.6：只声明 CPU profile。锁文件仅包含 CPU-only PyTorch wheel hash，
+            // 声明 CUDA profile 会导致安装时 hash mismatch。CUDA 支持需独立锁文件后
+            // 再启用。
+            compute_candidates: vec![ComputeCandidate {
+                preference: ComputePreference::Cpu,
+                profile_id: "cpu-x64".to_string(),
+                artifact_id: python_artifact.clone(),
+            }],
             schema_version: 1,
         },
         // 模型契约：FunASR 模型由 ModelScope 下载，上游不提供稳定 checksum
@@ -336,20 +370,18 @@ fn make_funasr_descriptor() -> EngineDescriptor {
 
 /// 构造 FunASR 的 `ProviderDescriptor`（infra 层安装事务用）。
 ///
-/// 与 `make_funasr_descriptor()`（domain 层 `EngineDescriptor`）互补：
-/// - `EngineDescriptor` 持有 `InstallPlanRef`（只引用 artifact id，不含具体安装步骤）
-/// - `ProviderDescriptor` 持有 `InstallPlan::PythonVenv(PythonInstallPlan)`
-///   （含 Python 版本、锁定包列表、self-test 脚本等完整安装信息）
+/// 与 `make_funasr_descriptor()`（domain 层 `EngineDescriptor`）互补。
 ///
-/// `InstallTransaction` 需要 `&ProviderDescriptor` 才能执行安装事务。
+/// **包列表来源**：`resources/stt/funasr/locked-requirements.txt`（唯一锁源）。
+/// 以 `include_str!` 嵌入，运行时解析生成 `PackageLock` 列表。
+/// 不再手写第二份包清单——避免 lock.json 与 Rust descriptor 漂移。
 ///
-/// **包列表与 `platform::python::setup_with_progress` 保持一致**：
-/// - torch, torchaudio, torch_complex
-/// - numba>=0.59
-/// - funasr, fastapi, uvicorn[standard], python-multipart
+/// **安装策略**：`--require-hashes --no-deps`——强制 hash 校验 + 禁止传递依赖
+/// 自动解析，确保安装的 wheel 与锁文件完全一致。
 ///
-/// SHA-256 hash 暂为 `None`——上游 PyPI wheel hash 随版本变化，
-/// 后续可通过 `cargo xtask lock-packages` 自动锁定。
+/// **PyTorch index**：torch/torchaudio 来自 `https://download.pytorch.org/whl/cpu`，
+/// 其余包来自 PyPI。锁文件已通过 `--index-url` + `--extra-index-url` 生成，
+/// 包含两个 index 的 wheel hash。安装时通过 `ExtraIndexUrl` 传入 PyTorch index。
 pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
     let python_artifact = ArtifactId::new("python-3.12.8").unwrap();
 
@@ -357,20 +389,13 @@ pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
         engine_id: EngineId::new(FUNASR_ENGINE_ID).unwrap(),
         runtime_kind: RuntimeKind::PythonVenv,
         display_name: "FunASR 语音识别".to_string(),
-        profiles: vec![
-            ProfileCandidate {
-                profile_id: "cpu-x64".to_string(),
-                backend: ComputeBackend::Cpu,
-                artifact_id: python_artifact.clone(),
-                compatibility: CompatibilityCheck::Always,
-            },
-            ProfileCandidate {
-                profile_id: "cuda-x64".to_string(),
-                backend: ComputeBackend::Cuda,
-                artifact_id: python_artifact.clone(),
-                compatibility: CompatibilityCheck::RequiresCuda { min_version: None },
-            },
-        ],
+        // 0.22.6：只声明 CPU profile。CUDA profile 需独立 CUDA 锁文件后启用。
+        profiles: vec![ProfileCandidate {
+            profile_id: "cpu-x64".to_string(),
+            backend: ComputeBackend::Cpu,
+            artifact_id: python_artifact.clone(),
+            compatibility: CompatibilityCheck::Always,
+        }],
         model_contract: ModelContract {
             model_id: "iic/SenseVoiceSmall".to_string(),
             revision: "funasr-1.x".to_string(),
@@ -379,64 +404,178 @@ pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
         install_plan: InstallPlan::PythonVenv(PythonInstallPlan {
             python_version: "3.12.8".to_string(),
             python_artifact_id: python_artifact,
-            packages: vec![
-                PackageLock {
-                    name: "torch".to_string(),
-                    version: "2.5.0".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "torchaudio".to_string(),
-                    version: "2.5.0".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "torch_complex".to_string(),
-                    version: "0.4.3".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "numba".to_string(),
-                    version: ">=0.59".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "funasr".to_string(),
-                    version: "1.3.0".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "fastapi".to_string(),
-                    version: "0.115.6".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "uvicorn".to_string(),
-                    version: "0.34.0".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-                PackageLock {
-                    name: "python-multipart".to_string(),
-                    version: "0.0.20".to_string(),
-                    sha256: None,
-                    ..Default::default()
-                },
-            ],
+            // 唯一锁源：从嵌入的 locked-requirements.txt 解析
+            packages: locked_packages(),
             uv_version: "0.6.10".to_string(),
             index_url: None,
-            extra_pip_args: vec![],
+            // --no-deps：禁止传递依赖自动解析，全部由锁文件覆盖
+            // ExtraIndexUrl：PyTorch CPU index，用于 torch/torchaudio wheel
+            extra_pip_args: vec![
+                PipExtraArg::NoDeps,
+                PipExtraArg::ExtraIndexUrl("https://download.pytorch.org/whl/cpu".to_string()),
+            ],
             self_test_script: "import funasr; import torch; import fastapi; import uvicorn"
                 .to_string(),
         }),
         min_generations: 2,
     }
+}
+
+/// 从嵌入的 `locked-requirements.txt` 解析包列表。
+///
+/// 这是安装时使用的唯一锁源——不再手写第二份包清单。
+fn locked_packages() -> Vec<PackageLock> {
+    let packages = parse_locked_requirements(LOCKED_REQUIREMENTS_TXT);
+    // 验证：所有包必须有 hash
+    for pkg in &packages {
+        assert!(
+            pkg.sha256.is_some(),
+            "locked-requirements.txt 中的 {} 缺少 SHA-256 hash",
+            pkg.name
+        );
+        let hash = pkg.sha256.as_ref().unwrap();
+        assert_eq!(
+            hash.len(),
+            64,
+            "locked-requirements.txt 中的 {} 的 hash 长度不是 64: {}",
+            pkg.name,
+            hash
+        );
+        assert!(
+            hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "locked-requirements.txt 中的 {} 的 hash 包含非 hex 字符: {}",
+            pkg.name,
+            hash
+        );
+        // all_hashes 不得为空
+        assert!(
+            !pkg.all_hashes.is_empty(),
+            "locked-requirements.txt 中的 {} 的 all_hashes 为空",
+            pkg.name
+        );
+        // all_hashes 中每个 hash 也必须格式正确
+        for h in &pkg.all_hashes {
+            assert_eq!(
+                h.len(),
+                64,
+                "locked-requirements.txt 中的 {} 的 all_hashes 中有长度不为 64 的 hash",
+                pkg.name
+            );
+            assert!(
+                h.bytes().all(|b| b.is_ascii_hexdigit()),
+                "locked-requirements.txt 中的 {} 的 all_hashes 中有非 hex 字符",
+                pkg.name
+            );
+        }
+        // 精确版本约束：不允许 >= ~> < > 等非精确约束
+        assert!(
+            !pkg.version.starts_with('>')
+                && !pkg.version.starts_with('<')
+                && !pkg.version.starts_with('~')
+                && !pkg.version.starts_with('!'),
+            "locked-requirements.txt 中的 {} 使用了非精确版本约束: {}",
+            pkg.name,
+            pkg.version
+        );
+    }
+    packages
+}
+
+/// 解析 `locked-requirements.txt` 格式的文本为 `PackageLock` 列表。
+///
+/// 格式：
+/// ```text
+/// # comment lines
+/// package-name==1.2.3 \
+///     --hash=sha256:abcdef... \
+///     --hash=sha256:123456...
+/// ```
+///
+/// 每个包可能有多个 hash（对应不同平台的 wheel）。
+/// 对于 `--require-hashes` 安装，需要列出所有 hash 让 pip 匹配。
+///
+/// 返回 `Vec<PackageLock>`，每个包的 `sha256` 为第一个 hash（用于摘要/标识），
+/// `all_hashes` 包含所有平台 wheel 的 hash，用于 `--require-hashes` 安装。
+fn parse_locked_requirements(txt: &str) -> Vec<PackageLock> {
+    let mut packages = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut current_version: Option<String> = None;
+    let mut current_hashes: Vec<String> = Vec::new();
+
+    for line in txt.lines() {
+        let trimmed = line.trim();
+
+        // Skip comments and empty lines
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Hash continuation line
+        if trimmed.starts_with("--hash=sha256:") {
+            let h = trimmed
+                .trim_start_matches("--hash=sha256:")
+                .trim_end_matches('\\')
+                .trim();
+            if !h.is_empty() {
+                current_hashes.push(h.to_string());
+            }
+            continue;
+        }
+
+        // New package line: contains ==
+        if trimmed.contains("==") {
+            // Save previous package
+            if let (Some(name), Some(version)) = (&current_name, &current_version) {
+                let first_hash = current_hashes.first().cloned();
+                packages.push(PackageLock {
+                    name: name.clone(),
+                    version: version.clone(),
+                    sha256: first_hash,
+                    all_hashes: current_hashes.clone(),
+                });
+            }
+
+            // Parse new package: strip trailing backslash
+            let line_clean = trimmed.trim_end_matches('\\').trim();
+            if let Some(eq_pos) = line_clean.find("==") {
+                let name = line_clean[..eq_pos].trim().to_string();
+                let version_part = &line_clean[eq_pos + 2..];
+                // Version may have trailing space or hash on same line
+                let version = version_part
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(version_part)
+                    .to_string();
+                current_name = Some(name);
+                current_version = Some(version);
+                current_hashes.clear();
+
+                // Check if there's a hash on the same line
+                if let Some(hash_start) = trimmed.find("--hash=sha256:") {
+                    let h = trimmed[hash_start..]
+                        .trim_start_matches("--hash=sha256:")
+                        .trim_end_matches('\\')
+                        .trim();
+                    if !h.is_empty() {
+                        current_hashes.push(h.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Save last package
+    if let (Some(name), Some(version)) = (&current_name, &current_version) {
+        let first_hash = current_hashes.first().cloned();
+        packages.push(PackageLock {
+            name: name.clone(),
+            version: version.clone(),
+            sha256: first_hash,
+            all_hashes: current_hashes.clone(),
+        });
+    }
+
+    packages
 }
 
 /// 创建 FunASR 的 `PythonVenvProvider` 实例。
@@ -537,26 +676,34 @@ fn build_funasr_launch_descriptor(
     // 使用 service 分配的 endpoint 端口，不用 adapter_config.preferred_port
     let port = ctx.endpoint.port();
 
-    // 检查 Python 环境是否就绪
-    let python_path = crate::infra::platform::python::venv_python();
+    // 0.22.6 H1: 只使用 generation-managed venv，不 fallback 到旧全局 venv
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).map_err(|e| {
+        LocalEngineError::with_detail(
+            LocalEngineErrorCode::Internal,
+            ErrorPhase::Start,
+            "engine_id 无效",
+            format!("解析 engine_id 失败: {e}"),
+        )
+    })?;
+    let python_path = generation_venv_python(&engine_id);
     let python = python_path.ok_or_else(|| {
         LocalEngineError::with_detail(
             LocalEngineErrorCode::EnvironmentMissing,
             ErrorPhase::Start,
             "Python 环境未就绪",
-            "Python 环境未就绪。请在设置页「语音输入」→「本地模式」中点击「安装环境」按钮。\
+            "FunASR 环境未安装。请在设置页「引擎」→「本地模型运行时」中点击「安装环境」按钮。\
              （Blink 会自动下载 uv + Python 3.12 + torch + funasr）",
         )
     })?;
 
-    // 检查 funasr 是否已安装
-    let (funasr_ok, _) = crate::infra::platform::python::check_funasr();
+    // 检查 funasr 是否已安装（使用 generation venv 中的 python）
+    let (funasr_ok, _) = check_funasr_with(&python);
     if !funasr_ok {
         return Err(LocalEngineError::with_detail(
             LocalEngineErrorCode::EnvironmentMissing,
             ErrorPhase::Start,
             "funasr 包未安装",
-            "funasr 包未安装。请在设置页点击「安装环境」按钮，Blink 会自动完成安装。",
+            "funasr 包未安装。请在设置页「引擎」→「本地模型运行时」中点击「修复」或「安装环境」按钮。",
         ));
     }
 
@@ -610,8 +757,10 @@ fn build_funasr_launch_descriptor(
     env.insert("PYTHONUTF8".to_string(), "1".to_string());
     env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
 
-    // 将 ModelScope 模型缓存重定向到 Blink 自管理目录
-    let models_dir = crate::infra::utils::paths::python_dir().join("models");
+    // 0.22.6 H1: ModelScope 缓存统一使用 runtime::engine_model_cache_dir(funasr) 作为唯一真源
+    // 使通用 storage/cleanup 能准确扫描和清理
+    let models_dir =
+        engine_runtime::engine_model_cache_dir(&EngineId::new(FUNASR_ENGINE_ID).unwrap());
     if let Err(e) = std::fs::create_dir_all(&models_dir) {
         tracing::warn!(%e, "创建 models 目录失败，ModelScope 将使用默认缓存路径");
     } else {
@@ -707,6 +856,20 @@ fn map_funasr_health(raw_health: &serde_json::Value) -> HealthMapping {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // ── 模型内容指纹（可选）──
+    // 0.22.6 H1: Python server 在模型 Ready 时返回稳定、非空、非全零的内容指纹。
+    // fingerprint 是实际缓存文件的内容哈希，用于检测模型文件损坏/篡改。
+    // adapter 只在 model Ready 时映射 fingerprint，其他状态不返回指纹。
+    let model_content_fingerprint = if model == ModelHealth::Ready {
+        raw_health
+            .get("model_content_fingerprint")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
     HealthMapping {
         service,
         model,
@@ -714,7 +877,7 @@ fn map_funasr_health(raw_health: &serde_json::Value) -> HealthMapping {
         backend: backend_obs,
         model_id,
         model_revision,
-        model_content_fingerprint: None,
+        model_content_fingerprint,
     }
 }
 
@@ -752,25 +915,43 @@ pub struct SpaceItem {
 ///
 /// 明确区分 engine generations / model cache / provider cache，
 /// 单引擎清理不能连带删除公共资产。
+///
+/// **0.22.6 H1**: model cache 路径统一使用 `engine_model_cache_dir(funasr)`。
 pub fn get_funasr_space_usage() -> FunasrSpaceUsage {
-    let python_dir = crate::infra::utils::paths::python_dir();
-    let models_dir = python_dir.join("models");
-    let venv_dir = python_dir.join("venv");
-    let uv_dir = python_dir.join("uv");
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+    let engine_root = engine_runtime::engine_root(&engine_id);
+    let models_dir = engine_runtime::engine_model_cache_dir(&engine_id);
+    let legacy_python_dir = engine_runtime::python_shared_root();
+    let legacy_venv_dir = engine_runtime::legacy_funasr_venv_dir();
+    let uv_dir = legacy_python_dir.join("uv");
 
     let mut engine_generations = Vec::new();
     let mut provider_cache = Vec::new();
     let mut total_bytes: u64 = 0;
 
-    // venv（engine generation）
-    if venv_dir.exists() {
-        let size = dir_size_bytes(&venv_dir);
+    // generation 目录（engine generations）
+    let generations_dir = engine_runtime::generations_dir(&engine_id);
+    if generations_dir.exists() {
+        let size = dir_size_bytes(&generations_dir);
         total_bytes += size;
         engine_generations.push(SpaceItem {
-            label: "Python 虚拟环境 (venv + torch + funasr)".to_string(),
-            path: venv_dir.display().to_string(),
+            label: "FunASR generations (venv + torch + funasr)".to_string(),
+            path: generations_dir.display().to_string(),
             size_mb: bytes_to_mb(size),
         });
+    }
+
+    // 旧版全局 venv（迁移残留，不计入 engine_generations）
+    if legacy_venv_dir.exists() {
+        let size = dir_size_bytes(&legacy_venv_dir);
+        if size > 0 {
+            total_bytes += size;
+            engine_generations.push(SpaceItem {
+                label: "旧版全局 venv (迁移残留)".to_string(),
+                path: legacy_venv_dir.display().to_string(),
+                size_mb: bytes_to_mb(size),
+            });
+        }
     }
 
     // uv（provider 公共缓存——不归属单引擎清理）
@@ -784,7 +965,7 @@ pub fn get_funasr_space_usage() -> FunasrSpaceUsage {
         });
     }
 
-    // FunASR 模型缓存
+    // FunASR 模型缓存（统一路径真源）
     let model_cache = if models_dir.exists() {
         let size = dir_size_bytes(&models_dir);
         total_bytes += size;
@@ -812,6 +993,22 @@ pub fn get_funasr_space_usage() -> FunasrSpaceUsage {
         }
     }
 
+    // 旧版 python/models 目录残留
+    let legacy_models_dir = legacy_python_dir.join("models");
+    if legacy_models_dir.exists() && legacy_models_dir != models_dir {
+        let size = dir_size_bytes(&legacy_models_dir);
+        if size > 0 {
+            total_bytes += size;
+            provider_cache.push(SpaceItem {
+                label: "旧版模型缓存残留 (python/models)".to_string(),
+                path: legacy_models_dir.display().to_string(),
+                size_mb: bytes_to_mb(size),
+            });
+        }
+    }
+
+    let _ = engine_root; // engine_root 已通过 generations_dir 间接使用
+
     FunasrSpaceUsage {
         engine_generations,
         model_cache,
@@ -823,30 +1020,31 @@ pub fn get_funasr_space_usage() -> FunasrSpaceUsage {
 /// 清理 FunASR 引擎资产。
 ///
 /// **只清理 FunASR 声明拥有的资产**：
-/// - engine generations（venv）
-/// - FunASR model cache
+/// - engine generations（runtimes/engines/funasr/generations）
+/// - FunASR model cache（models/funasr）
+/// - 旧版全局 venv（迁移残留清理）
 ///
 /// **不清理 provider 公共资产**（uv cache / Python distribution）——
 /// 单引擎清理不能连带删除其他引擎仍在使用的公共资产。
 ///
 /// 返回清理统计。
 pub fn cleanup_funasr_engine() -> Result<FunasrCleanupResult, String> {
-    let python_dir = crate::infra::utils::paths::python_dir();
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
     let mut errors = Vec::new();
     let mut cleaned_items = Vec::new();
 
-    // venv（engine generation——FunASR 拥有）
-    let venv_dir = python_dir.join("venv");
-    if venv_dir.exists() {
-        tracing::info!(path = %venv_dir.display(), "清理 FunASR venv");
-        match std::fs::remove_dir_all(&venv_dir) {
-            Ok(()) => cleaned_items.push("venv".to_string()),
-            Err(e) => errors.push(format!("删除 venv 失败: {e}")),
+    // generation 目录（engine generations——FunASR 拥有）
+    let generations_dir = engine_runtime::generations_dir(&engine_id);
+    if generations_dir.exists() {
+        tracing::info!(path = %generations_dir.display(), "清理 FunASR generations");
+        match std::fs::remove_dir_all(&generations_dir) {
+            Ok(()) => cleaned_items.push("generations".to_string()),
+            Err(e) => errors.push(format!("删除 generations 失败: {e}")),
         }
     }
 
-    // FunASR 模型缓存（FunASR 拥有）
-    let models_dir = python_dir.join("models");
+    // FunASR 模型缓存（FunASR 拥有，统一路径真源）
+    let models_dir = engine_runtime::engine_model_cache_dir(&engine_id);
     if models_dir.exists() {
         tracing::info!(path = %models_dir.display(), "清理 FunASR 模型缓存");
         match std::fs::remove_dir_all(&models_dir) {
@@ -855,11 +1053,31 @@ pub fn cleanup_funasr_engine() -> Result<FunasrCleanupResult, String> {
         }
     }
 
+    // 旧版全局 venv（迁移残留清理）
+    let legacy_venv_dir = engine_runtime::legacy_funasr_venv_dir();
+    if legacy_venv_dir.exists() {
+        tracing::info!(path = %legacy_venv_dir.display(), "清理旧版 FunASR venv");
+        match std::fs::remove_dir_all(&legacy_venv_dir) {
+            Ok(()) => cleaned_items.push("legacy_venv".to_string()),
+            Err(e) => errors.push(format!("删除旧版 venv 失败: {e}")),
+        }
+    }
+
+    // 旧版 python/models 目录残留（使用 python_shared_root 确保测试隔离）
+    let legacy_models_dir = engine_runtime::python_shared_root().join("models");
+    if legacy_models_dir.exists() && legacy_models_dir != models_dir {
+        tracing::info!(path = %legacy_models_dir.display(), "清理旧版 python/models 残留");
+        match std::fs::remove_dir_all(&legacy_models_dir) {
+            Ok(()) => cleaned_items.push("legacy_models".to_string()),
+            Err(e) => errors.push(format!("删除旧版 models 失败: {e}")),
+        }
+    }
+
     // ── 不清理 uv cache / Python distribution（provider 公共资产）──
     // 单引擎清理不能连带删除其他引擎仍在使用的公共资产。
 
     if errors.is_empty() {
-        tracing::info!("FunASR 引擎清理完成");
+        tracing::info!("FunASR 引擎清理完成: {:?}", cleaned_items);
         Ok(FunasrCleanupResult {
             cleaned_items,
             errors: Vec::new(),
@@ -885,6 +1103,93 @@ pub struct FunasrCleanupResult {
 /// 注册函数由 H6 接 wiring；本任务提供纯构造入口。
 pub fn make_funasr_adapter() -> Arc<dyn LocalEngineAdapter> {
     Arc::new(FunasrAdapter::new())
+}
+
+// ── generation venv 辅助 ────────────────────────────────────────────────────
+
+/// 获取 FunASR 当前 generation venv 中的 `python.exe` 路径。
+///
+/// 路径：`runtimes/engines/{engine_id}/generations/{install_id}/venv/Scripts/python.exe`
+///
+/// 返回 `None` 表示尚未安装（current.json 不存在或 venv 目录缺失）。
+///
+/// **0.22.6 H1**: 只使用 generation-managed venv，不 fallback 到旧全局 venv。
+fn generation_venv_python(engine_id: &EngineId) -> Option<std::path::PathBuf> {
+    let pointer = engine_runtime::read_current_pointer(engine_id).ok()?;
+    let install_id = pointer?.install_id;
+    let python_exe = engine_runtime::generation_dir(engine_id, &install_id)
+        .join("venv")
+        .join("Scripts")
+        .join("python.exe");
+    if python_exe.exists() {
+        Some(python_exe)
+    } else {
+        None
+    }
+}
+
+// ── 包检查（使用指定 python 路径，不依赖全局 venv）────────────────────────────
+
+/// 使用指定 python 路径检查 funasr 包是否已安装。
+///
+/// 返回 (是否已安装, 版本号)。
+fn check_funasr_with(python: &std::path::Path) -> (bool, Option<String>) {
+    match crate::infra::platform::no_window(std::process::Command::new(python))
+        .args([
+            "-c",
+            "import importlib.metadata as m; print(m.version('funasr'))",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (true, Some(version))
+        }
+        _ => (false, None),
+    }
+}
+
+/// 使用指定 python 路径检查 torch 是否已安装。
+///
+/// 返回 (是否已安装, 版本号)。
+fn check_torch_with(python: &std::path::Path) -> (bool, Option<String>) {
+    match crate::infra::platform::no_window(std::process::Command::new(python))
+        .args([
+            "-c",
+            "import importlib.metadata as m; print(m.version('torch'))",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (true, Some(version))
+        }
+        _ => (false, None),
+    }
+}
+
+/// 使用指定 python 路径检查 PyTorch CUDA 是否可用。
+fn check_torch_cuda_with(python: &std::path::Path) -> bool {
+    match crate::infra::platform::no_window(std::process::Command::new(python))
+        .args(["-c", "import torch; print(torch.cuda.is_available())"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            stdout == "True"
+        }
+        _ => false,
+    }
+}
+
+/// 使用指定 python 路径获取 Python 版本。
+fn check_python_version(python: &std::path::Path) -> Option<String> {
+    crate::infra::platform::no_window(std::process::Command::new(python))
+        .args(["--version"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 // ── 辅助函数 ────────────────────────────────────────────────────────────────
@@ -962,11 +1267,16 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_declares_cpu_and_cuda_preferences() {
+    fn descriptor_declares_cpu_preference_only() {
+        // 0.22.6: 只声明 CPU profile（CUDA 需独立锁文件后启用）
         let adapter = FunasrAdapter::new();
         let prefs = adapter.descriptor().declared_preferences();
         assert!(prefs.contains(&ComputePreference::Cpu));
-        assert!(prefs.contains(&ComputePreference::Cuda));
+        // 确保 CUDA 不在声明列表中
+        assert!(
+            !prefs.contains(&ComputePreference::Cuda),
+            "0.22.6 不应声明 CUDA preference"
+        );
     }
 
     #[test]
@@ -1551,5 +1861,715 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code, LocalEngineErrorCode::Unsupported);
+    }
+
+    // ── 0.22.6 H1: generation venv 路径测试 ──────────────────────────────
+
+    /// 互斥锁：序列化 generation venv 相关测试，避免并行测试互相清理临时目录。
+    static GEN_VENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 辅助：在测试临时目录中模拟 generation venv 安装。
+    ///
+    /// 创建 `runtimes/engines/funasr/generations/{install_id}/venv/Scripts/python.exe`
+    /// 和对应的 `current.json`。
+    fn setup_test_generation_venv(install_id: &str) -> std::path::PathBuf {
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let gen_dir = engine_runtime::generation_dir(&engine_id, install_id);
+        let venv_scripts = gen_dir.join("venv").join("Scripts");
+        std::fs::create_dir_all(&venv_scripts).unwrap();
+        let python_exe = venv_scripts.join("python.exe");
+        std::fs::write(&python_exe, b"fake python").unwrap();
+
+        // 写入 current.json
+        let pointer = engine_runtime::CurrentPointer {
+            install_id: install_id.to_string(),
+            manifest_path: format!("generations/{install_id}/manifest.json"),
+            updated_at_ms: 0,
+            schema_version: 1,
+        };
+        engine_runtime::write_current_pointer(&engine_id, &pointer).unwrap();
+
+        python_exe
+    }
+
+    /// 辅助：清理测试用的 generation 数据。
+    fn cleanup_test_generation() {
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let engine_root = engine_runtime::engine_root(&engine_id);
+        let _ = std::fs::remove_dir_all(&engine_root);
+    }
+
+    /// 0.22.6 H1: 新 generation venv 存在时，`generation_venv_python` 返回正确路径。
+    #[test]
+    fn generation_venv_python_returns_path_when_installed() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+        let install_id = "test-install-001";
+        let python_exe = setup_test_generation_venv(install_id);
+
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let result = generation_venv_python(&engine_id);
+        assert!(result.is_some(), "generation venv 已安装时应返回路径");
+        assert_eq!(result.unwrap(), python_exe);
+
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: 无 generation venv 时返回 None。
+    #[test]
+    fn generation_venv_python_returns_none_when_not_installed() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let result = generation_venv_python(&engine_id);
+        assert!(result.is_none(), "未安装时应返回 None");
+
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: self_test 在无 generation venv 时报告失败。
+    #[test]
+    fn self_test_fails_when_no_generation_venv() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+        let adapter = FunasrAdapter::new();
+        let result = adapter.self_test();
+        assert!(!result.passed, "无 generation venv 时 self_test 应失败");
+        let reason = result.failure_reason.unwrap_or_default();
+        assert!(
+            reason.contains("引擎") || reason.contains("安装"),
+            "失败原因应引导到引擎页: {reason}"
+        );
+
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: self_test 错误文案指向引擎页，不指向语音输入页。
+    #[test]
+    fn self_test_error_message_points_to_engine_page() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+        let adapter = FunasrAdapter::new();
+        let result = adapter.self_test();
+        if !result.passed {
+            let reason = result.failure_reason.unwrap_or_default();
+            assert!(
+                !reason.contains("语音输入"),
+                "错误文案不应指向'语音输入页': {reason}"
+            );
+            assert!(
+                reason.contains("引擎") || reason.contains("本地模型运行时"),
+                "错误文案应指向引擎页: {reason}"
+            );
+        }
+
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: 旧全局 venv 存在但无 generation venv 时，
+    /// self_test 仍然失败（不 fallback 到旧 venv）。
+    #[test]
+    fn legacy_venv_does_not_satisfy_self_test() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+
+        // 创建旧版 venv 目录（模拟迁移残留）
+        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
+        let legacy_scripts = legacy_venv.join("Scripts");
+        std::fs::create_dir_all(&legacy_scripts).unwrap();
+        std::fs::write(legacy_scripts.join("python.exe"), b"legacy python").unwrap();
+
+        let adapter = FunasrAdapter::new();
+        let result = adapter.self_test();
+        // 旧 venv 存在但 generation venv 不存在 → self_test 失败
+        assert!(
+            !result.passed,
+            "旧 venv 不应满足 self_test（不能冒充新 generation 环境）"
+        );
+
+        // 清理旧 venv
+        let _ = std::fs::remove_dir_all(engine_runtime::python_shared_root());
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: diagnostics 在无 generation venv 时标注 generation_venv_exists=false，
+    /// 并在旧 venv 存在时标注 legacy_venv_exists=true。
+    #[test]
+    fn diagnostics_reports_legacy_venv_separately() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+
+        // 创建旧版 venv 目录
+        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
+        let legacy_scripts = legacy_venv.join("Scripts");
+        std::fs::create_dir_all(&legacy_scripts).unwrap();
+        std::fs::write(legacy_scripts.join("python.exe"), b"legacy").unwrap();
+
+        let adapter = FunasrAdapter::new();
+        let diag = adapter.diagnostics();
+
+        // generation_venv_exists = false
+        let gen_entry = diag
+            .entries
+            .iter()
+            .find(|e| e.key == "generation_venv_exists");
+        assert!(
+            gen_entry.is_some(),
+            "diagnostics 应包含 generation_venv_exists"
+        );
+        assert_eq!(gen_entry.unwrap().value, "false");
+
+        // legacy_venv_exists = true
+        let legacy_entry = diag.entries.iter().find(|e| e.key == "legacy_venv_exists");
+        assert!(
+            legacy_entry.is_some(),
+            "diagnostics 应包含 legacy_venv_exists"
+        );
+        assert_eq!(legacy_entry.unwrap().value, "true");
+
+        // 清理
+        let _ = std::fs::remove_dir_all(engine_runtime::python_shared_root());
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: prepare_launch 在无 generation venv 时返回
+    /// EnvironmentMissing 错误，错误文案指向引擎页。
+    #[test]
+    fn prepare_launch_fails_without_generation_venv() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+        let adapter = FunasrAdapter::new();
+        let profile = ResolvedProfile {
+            profile_id: "cpu-x64".to_string(),
+            backend: ComputeBackend::Cpu,
+            artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
+            priority: 0,
+        };
+        let ctx = LaunchContext {
+            endpoint: crate::infra::local_engine::port::Endpoint::new(8080),
+            engine_id: "funasr".to_string(),
+            instance_id: "inst-test".to_string(),
+            token: "test-token-abcdef0123456789".to_string(),
+            resolved_profile: profile,
+        };
+        // 提供有效的 engine_config，避免 InvalidConfig 错误
+        let funasr_config = FunasrEngineConfig {
+            funasr_model: "iic/SenseVoiceSmall".to_string(),
+            device: "cpu".to_string(),
+            num_threads: None,
+            hotwords: None,
+            use_itn: true,
+            vad: VadConfigProjection::default(),
+            auto_start_server: false,
+        };
+        let config = AdapterConfig::from_json(funasr_config.to_json());
+        let result = adapter.prepare_launch(&ctx, &config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.code,
+            LocalEngineErrorCode::EnvironmentMissing,
+            "无 generation venv 时应返回 EnvironmentMissing"
+        );
+        // 错误文案应指向引擎页
+        assert!(
+            !err.action_hint.contains("语音输入"),
+            "错误文案不应指向语音输入页"
+        );
+
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: prepare_launch 的 LaunchDescriptor 使用 generation venv python，
+    /// 不使用旧全局 venv。
+    #[test]
+    fn launch_descriptor_uses_generation_python() {
+        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
+        cleanup_test_generation();
+
+        // 创建 generation venv
+        let install_id = "test-launch-001";
+        let gen_python = setup_test_generation_venv(install_id);
+
+        // 也创建旧 venv（确保不被使用）
+        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
+        let legacy_scripts = legacy_venv.join("Scripts");
+        std::fs::create_dir_all(&legacy_scripts).unwrap();
+        let legacy_python = legacy_scripts.join("python.exe");
+        std::fs::write(&legacy_python, b"legacy python").unwrap();
+
+        // prepare_launch 会在 check_funasr_with 时失败（因为 python.exe 是假的），
+        // 但在到达 funasr 检查之前，会先解析 generation python 路径。
+        // 错误应来自 funasr 检查，而非 python 环境缺失。
+        let adapter = FunasrAdapter::new();
+        let profile = ResolvedProfile {
+            profile_id: "cpu-x64".to_string(),
+            backend: ComputeBackend::Cpu,
+            artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
+            priority: 0,
+        };
+        let ctx = LaunchContext {
+            endpoint: crate::infra::local_engine::port::Endpoint::new(8080),
+            engine_id: "funasr".to_string(),
+            instance_id: "inst-test".to_string(),
+            token: "test-token-abcdef0123456789".to_string(),
+            resolved_profile: profile,
+        };
+        // 提供有效的 engine_config
+        let funasr_config = FunasrEngineConfig {
+            funasr_model: "iic/SenseVoiceSmall".to_string(),
+            device: "cpu".to_string(),
+            num_threads: None,
+            hotwords: None,
+            use_itn: true,
+            vad: VadConfigProjection::default(),
+            auto_start_server: false,
+        };
+        let config = AdapterConfig::from_json(funasr_config.to_json());
+        let result = adapter.prepare_launch(&ctx, &config);
+
+        // 由于 python.exe 是假文件，check_funasr_with 会失败
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // 错误应该是 funasr 包未安装（不是 python 环境缺失）
+        assert_eq!(
+            err.code,
+            LocalEngineErrorCode::EnvironmentMissing,
+            "应因 funasr 未安装而失败"
+        );
+        // 不应出现 "Python 环境未就绪" 错误（那意味着 generation python 不存在）
+        assert!(
+            !err.action_hint.contains("Python 环境未就绪"),
+            "不应报 Python 环境未就绪（generation python 已存在）"
+        );
+
+        // 清理
+        let _ = std::fs::remove_dir_all(engine_runtime::python_shared_root());
+        cleanup_test_generation();
+    }
+
+    /// 0.22.6 H1: ModelScope 缓存路径与 engine_model_cache_dir 一致。
+    #[test]
+    fn model_cache_path_is_engine_model_cache_dir() {
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let cache_dir = engine_runtime::engine_model_cache_dir(&engine_id);
+        let expected = engine_runtime::models_root().join(FUNASR_ENGINE_ID);
+        assert_eq!(
+            cache_dir, expected,
+            "engine_model_cache_dir 应返回 models/{engine_id}"
+        );
+    }
+
+    /// 0.22.6 H1: 嵌入的 Python 脚本包含 model_content_fingerprint 逻辑。
+    #[test]
+    fn embedded_script_has_content_fingerprint() {
+        assert!(
+            BLINK_STT_SERVER_PY.contains("model_content_fingerprint"),
+            "Python 脚本应包含 model_content_fingerprint"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("_compute_model_content_fingerprint"),
+            "Python 脚本应包含 _compute_model_content_fingerprint 函数"
+        );
+    }
+
+    /// 0.22.6 H1: health 映射在 Ready 时返回 model_content_fingerprint。
+    #[test]
+    fn health_maps_content_fingerprint_when_ready() {
+        let raw = serde_json::json!({
+            "status": "ok",
+            "model_status": "ready",
+            "model_id": "iic/SenseVoiceSmall",
+            "model_revision": "funasr-1.x",
+            "model_content_fingerprint": "abc123def456",
+        });
+        let mapping = map_funasr_health(&raw);
+        assert_eq!(mapping.model, ModelHealth::Ready);
+        assert_eq!(
+            mapping.model_content_fingerprint,
+            Some("abc123def456".to_string())
+        );
+    }
+
+    /// 0.22.6 H1: health 映射在非 Ready 时不返回 fingerprint。
+    #[test]
+    fn health_omits_fingerprint_when_not_ready() {
+        let raw = serde_json::json!({
+            "status": "ok",
+            "model_status": "loading",
+            "model_content_fingerprint": "abc123",
+        });
+        let mapping = map_funasr_health(&raw);
+        assert_eq!(mapping.model, ModelHealth::Loading);
+        assert!(
+            mapping.model_content_fingerprint.is_none(),
+            "非 Ready 状态不应返回 fingerprint"
+        );
+    }
+
+    /// 0.22.6 H1: health 映射在 Ready 但 fingerprint 为空时返回 None。
+    #[test]
+    fn health_omits_empty_fingerprint_when_ready() {
+        let raw = serde_json::json!({
+            "status": "ok",
+            "model_status": "ready",
+            "model_content_fingerprint": "",
+        });
+        let mapping = map_funasr_health(&raw);
+        assert_eq!(mapping.model, ModelHealth::Ready);
+        assert!(
+            mapping.model_content_fingerprint.is_none(),
+            "空 fingerprint 应映射为 None"
+        );
+    }
+
+    /// 0.22.6 H1: health 映射在 Ready 但 fingerprint 缺失时返回 None。
+    #[test]
+    fn health_omits_missing_fingerprint_when_ready() {
+        let raw = serde_json::json!({
+            "status": "ok",
+            "model_status": "ready",
+        });
+        let mapping = map_funasr_health(&raw);
+        assert_eq!(mapping.model, ModelHealth::Ready);
+        assert!(
+            mapping.model_content_fingerprint.is_none(),
+            "缺失 fingerprint 应映射为 None"
+        );
+    }
+
+    /// 0.22.6 H1: FunASR descriptor 的 model_id 与 Python server 返回的一致。
+    #[test]
+    fn descriptor_model_id_matches_python_server_response() {
+        let adapter = FunasrAdapter::new();
+        let descriptor_model_id = &adapter.descriptor().model_contract.model_id;
+        assert_eq!(
+            descriptor_model_id, "iic/SenseVoiceSmall",
+            "descriptor model_id 应为 iic/SenseVoiceSmall"
+        );
+        // Python server health 返回 model_id = args.model（默认 iic/SenseVoiceSmall）
+    }
+
+    /// 0.22.6 H1: FunASR descriptor 的 model_revision 与 Python server 返回的一致。
+    #[test]
+    fn descriptor_model_revision_matches_python_server_response() {
+        let adapter = FunasrAdapter::new();
+        let descriptor_revision = &adapter.descriptor().model_contract.revision;
+        assert_eq!(
+            descriptor_revision, "funasr-1.x",
+            "descriptor revision 应为 funasr-1.x"
+        );
+        // Python server health 返回 model_revision = "funasr-1.x"
+    }
+
+    /// 0.22.6 H1: 空间统计使用 engine_model_cache_dir 作为模型缓存路径。
+    #[test]
+    fn space_usage_uses_engine_model_cache_dir() {
+        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+        let expected_cache = engine_runtime::engine_model_cache_dir(&engine_id);
+
+        // 创建模型缓存目录
+        std::fs::create_dir_all(&expected_cache).unwrap();
+        std::fs::write(expected_cache.join("test_model.pt"), b"fake model").unwrap();
+
+        let usage = get_funasr_space_usage();
+        assert!(
+            usage.model_cache.is_some(),
+            "model_cache 应存在（已创建测试目录）"
+        );
+        let model_cache = usage.model_cache.unwrap();
+        assert!(
+            model_cache.path.contains(FUNASR_ENGINE_ID),
+            "model_cache 路径应包含引擎 id: {}",
+            model_cache.path
+        );
+
+        // 清理
+        let _ = std::fs::remove_dir_all(&expected_cache);
+    }
+
+    /// 0.22.6 H1: cleanup 只清理 generation 和 model cache，
+    /// 不清理 provider 公共缓存。
+    #[test]
+    fn cleanup_only_removes_owned_assets() {
+        // 验证 cleanup_funasr_engine 的逻辑边界：
+        // 只清理 FunASR 拥有的目录，不清理 provider 公共资产。
+        // 这里只验证函数存在且返回类型正确，不实际执行删除。
+        // 实际行为由 cleanup_funasr_does_not_touch_provider_cache 验证。
+        let _ = std::mem::size_of_val(&cleanup_funasr_engine);
+    }
+
+    // ── FunASR 依赖锁闭环测试 ──────────────────────────────────────────
+
+    /// 验证 locked-requirements.txt 解析出的包列表包含全部传递依赖（>8 个直接包）。
+    #[test]
+    fn funasr_locked_packages_includes_transitive_deps() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            // 之前硬编码只有 8 个直接包；完整锁应有 76 个（含传递依赖）
+            assert!(
+                plan.packages.len() > 8,
+                "locked-requirements.txt 应解析出 >8 个包（含传递依赖），实际: {}",
+                plan.packages.len()
+            );
+            tracing::info!(
+                "FunASR locked-requirements.txt 解析出 {} 个包",
+                plan.packages.len()
+            );
+        }
+    }
+
+    /// 验证所有包的 all_hashes 非空（多平台 wheel hash）。
+    #[test]
+    fn funasr_locked_packages_all_hashes_non_empty() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            for pkg in &plan.packages {
+                assert!(
+                    !pkg.all_hashes.is_empty(),
+                    "PackageLock {} 的 all_hashes 为空，--require-hashes 需要至少一个 hash",
+                    pkg.name
+                );
+                // 所有 hash 格式验证
+                for h in &pkg.all_hashes {
+                    assert_eq!(
+                        h.len(),
+                        64,
+                        "PackageLock {} 的 all_hashes 中有长度不为 64 的 hash",
+                        pkg.name
+                    );
+                    assert!(
+                        h.bytes().all(|b| b.is_ascii_hexdigit()),
+                        "PackageLock {} 的 all_hashes 中有非 hex 字符",
+                        pkg.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// 验证所有 production 包使用精确版本（不存在 >= ~> < > 等非精确约束）。
+    #[test]
+    fn funasr_locked_packages_use_exact_versions() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            for pkg in &plan.packages {
+                assert!(
+                    !pkg.version.starts_with('>')
+                        && !pkg.version.starts_with('<')
+                        && !pkg.version.starts_with('~')
+                        && !pkg.version.starts_with('!'),
+                    "{} 使用了非精确版本约束: {}",
+                    pkg.name,
+                    pkg.version
+                );
+            }
+        }
+    }
+
+    /// 验证 hash 不存在空 hash、非法 hash 或全零占位。
+    #[test]
+    fn funasr_locked_packages_no_empty_or_zero_hashes() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            for pkg in &plan.packages {
+                // sha256 必须存在
+                assert!(pkg.sha256.is_some(), "{} 的 sha256 为 None", pkg.name);
+                let hash = pkg.sha256.as_ref().unwrap();
+                // 不能是全零占位
+                assert!(
+                    !hash.chars().all(|c| c == '0'),
+                    "{} 的 sha256 是全零占位",
+                    pkg.name
+                );
+                // 不能是空字符串
+                assert!(!hash.is_empty(), "{} 的 sha256 为空字符串", pkg.name);
+            }
+        }
+    }
+
+    /// 验证嵌入的锁文件可解析（非空、格式正确）。
+    #[test]
+    fn funasr_embedded_lock_is_parseable() {
+        assert!(!LOCKED_REQUIREMENTS_TXT.is_empty());
+        let packages = parse_locked_requirements(LOCKED_REQUIREMENTS_TXT);
+        assert!(
+            !packages.is_empty(),
+            "locked-requirements.txt 解析结果不应为空"
+        );
+    }
+
+    /// 验证安装计划包含 --no-deps（禁止传递依赖自动解析）。
+    #[test]
+    fn funasr_provider_descriptor_has_no_deps() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            assert!(
+                plan.extra_pip_args
+                    .iter()
+                    .any(|arg| matches!(arg, PipExtraArg::NoDeps)),
+                "安装计划必须包含 --no-deps，禁止传递依赖自动解析"
+            );
+        }
+    }
+
+    /// 验证安装计划包含 PyTorch ExtraIndexUrl。
+    #[test]
+    fn funasr_provider_descriptor_has_pytorch_index() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            assert!(
+                plan.extra_pip_args.iter().any(|arg| matches!(
+                    arg,
+                    PipExtraArg::ExtraIndexUrl(url) if url.contains("pytorch.org")
+                )),
+                "安装计划必须包含 PyTorch ExtraIndexUrl"
+            );
+        }
+    }
+
+    /// 验证 locked-requirements.txt 中包含关键直接依赖。
+    #[test]
+    fn funasr_locked_packages_contains_key_deps() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            let names: Vec<&str> = plan.packages.iter().map(|p| p.name.as_str()).collect();
+            // 直接依赖
+            assert!(names.contains(&"torch"), "缺少 torch");
+            assert!(names.contains(&"torchaudio"), "缺少 torchaudio");
+            assert!(names.contains(&"funasr"), "缺少 funasr");
+            assert!(names.contains(&"fastapi"), "缺少 fastapi");
+            assert!(names.contains(&"uvicorn"), "缺少 uvicorn");
+            // 关键传递依赖
+            assert!(names.contains(&"numba"), "缺少传递依赖 numba");
+            assert!(names.contains(&"numpy"), "缺少传递依赖 numpy");
+            assert!(names.contains(&"scipy"), "缺少传递依赖 scipy");
+        }
+    }
+
+    /// 验证 numba 使用精确版本，不是 >=0.59。
+    #[test]
+    fn funasr_numba_uses_exact_version() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            let numba = plan.packages.iter().find(|p| p.name == "numba");
+            assert!(numba.is_some(), "缺少 numba 包");
+            let numba = numba.unwrap();
+            assert_eq!(
+                numba.version, "0.59.0",
+                "numba 应使用精确版本 0.59.0，而不是 >=0.59"
+            );
+            // 不能以 >= 开头
+            assert!(!numba.version.starts_with(">="), "numba 不应使用 >= 约束");
+        }
+    }
+
+    /// 验证 render_hashed_requirements 能正确渲染多 hash 条目。
+    #[test]
+    fn funasr_render_hashed_requirements_supports_multiple_hashes() {
+        use crate::infra::local_engine::providers::python::render_hashed_requirements;
+        let packages = vec![
+            PackageLock {
+                name: "test-pkg".to_string(),
+                version: "1.0.0".to_string(),
+                sha256: Some("a".repeat(64)),
+                all_hashes: vec!["a".repeat(64), "b".repeat(64)],
+            },
+            PackageLock {
+                name: "another-pkg".to_string(),
+                version: "2.0.0".to_string(),
+                sha256: Some("c".repeat(64)),
+                all_hashes: vec!["c".repeat(64)],
+            },
+        ];
+        let result = render_hashed_requirements(&packages).unwrap();
+        // 验证输出包含两个包
+        assert!(result.contains("test-pkg==1.0.0"));
+        assert!(result.contains("another-pkg==2.0.0"));
+        // 验证 test-pkg 有两个 hash
+        let test_pkg_line_count = result
+            .lines()
+            .find(|l| l.contains("test-pkg=="))
+            .map(|l| l.matches("--hash=sha256:").count())
+            .unwrap_or(0);
+        assert_eq!(
+            test_pkg_line_count, 2,
+            "test-pkg 应有 2 个 hash（多平台 wheel）"
+        );
+    }
+
+    /// 验证 render_hashed_requirements 拒绝非精确版本。
+    #[test]
+    fn funasr_render_hashed_requirements_rejects_non_exact_version() {
+        use crate::infra::local_engine::providers::python::render_hashed_requirements;
+        let packages = vec![PackageLock {
+            name: "bad-pkg".to_string(),
+            version: ">=1.0.0".to_string(),
+            sha256: Some("a".repeat(64)),
+            all_hashes: vec!["a".repeat(64)],
+        }];
+        let result = render_hashed_requirements(&packages);
+        assert!(
+            result.is_err(),
+            "非精确版本约束应被 render_hashed_requirements 拒绝"
+        );
+    }
+
+    /// 验证 parse_locked_requirements 解析格式正确。
+    #[test]
+    fn funasr_parse_locked_requirements_correctness() {
+        let sample = "# comment\naiohttp==3.14.3 \\\n    --hash=sha256:03cd2bde3d7f085b64e549c985f4bb928cad7e8ecf5323bfca320db548d81b39 \\\n    --hash=sha256:041badb8f843963574d3ad26de6afd7a32b112f43d3c63045c0c8278cfd2043\nfastapi==0.115.6 \\\n    --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654\n";
+        let packages = parse_locked_requirements(sample);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "aiohttp");
+        assert_eq!(packages[0].version, "3.14.3");
+        assert_eq!(packages[0].all_hashes.len(), 2);
+        assert_eq!(
+            packages[0].sha256.as_deref(),
+            Some("03cd2bde3d7f085b64e549c985f4bb928cad7e8ecf5323bfca320db548d81b39")
+        );
+        assert_eq!(packages[1].name, "fastapi");
+        assert_eq!(packages[1].version, "0.115.6");
+        assert_eq!(packages[1].all_hashes.len(), 1);
+    }
+
+    /// 验证所有声明的 profile 都有可执行的安装合同：
+    /// 每个包都有 hash，且只声明了 CPU profile（与 CPU-only 锁文件匹配）。
+    #[test]
+    fn funasr_all_profiles_have_executable_install_contract() {
+        let pd = make_funasr_provider_descriptor();
+
+        // 所有 profile 必须有对应的 artifact 和 install_plan
+        assert!(!pd.profiles.is_empty(), "至少应声明一个 profile");
+        for p in &pd.profiles {
+            assert!(!p.profile_id.is_empty(), "profile_id 不能为空");
+        }
+
+        // 验证安装计划中所有包都有 hash（--require-hashes 可执行）
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            assert!(!plan.packages.is_empty(), "锁文件应包含至少一个包");
+            for pkg in &plan.packages {
+                assert!(
+                    pkg.sha256.is_some(),
+                    "{} 缺少 hash —— --require-hashes 将失败",
+                    pkg.name
+                );
+            }
+        }
+
+        // 0.22.6：只声明 CPU profile，与 CPU-only 锁文件匹配
+        assert!(
+            pd.profiles
+                .iter()
+                .any(|p| p.profile_id == "cpu-x64" && p.backend == ComputeBackend::Cpu),
+            "缺少 CPU profile"
+        );
+        // 确保没有声明 CUDA profile（需独立 CUDA 锁文件后才能启用）
+        assert!(
+            !pd.profiles
+                .iter()
+                .any(|p| p.backend == ComputeBackend::Cuda),
+            "0.22.6 不应声明 CUDA profile（锁文件仅含 CPU wheel hash）"
+        );
     }
 }

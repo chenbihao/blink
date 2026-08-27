@@ -42,11 +42,14 @@ import {
     markErrorRendered,
     clearLogs,
     getEngineIds,
+    setModels,
+    setPreferences,
 } from "./local-engine-state.js";
 
 // ── 命令清单（与后端 commands/local_engine.rs 逐一核对）─────────────────────────
 
 const COMMANDS = Object.freeze({
+    // H3: 引擎生命周期
     GET_CATALOG: "get_local_engine_catalog",
     GET_STATUS: "get_local_engine_status",
     GET_LOGS: "get_local_engine_logs",
@@ -57,6 +60,20 @@ const COMMANDS = Object.freeze({
     REPAIR: "repair_local_engine",
     CLEANUP: "cleanup_local_engine",
     CANCEL: "cancel_local_engine_operation",
+    STOP_ORPHAN: "stop_orphan_engine",
+    // H4: 偏好与诊断
+    GET_PREFERENCES: "get_local_engine_preferences",
+    SET_PREFERENCES: "set_local_engine_preferences",
+    GET_FOUNDATION: "get_runtime_foundation_status",
+    GET_DIAGNOSTICS: "get_engine_diagnostics",
+    OPEN_ENGINE_FOLDER: "open_engine_folder",
+    OPEN_RUNTIME_FOLDER: "open_runtime_folder",
+    // H5: 模型生命周期
+    LIST_MODELS: "list_engine_models",
+    INSTALL_MODEL: "install_engine_model",
+    DELETE_MODEL: "delete_engine_model",
+    REPAIR_MODEL: "repair_engine_model",
+    CANCEL_MODEL_OP: "cancel_model_operation",
 });
 
 // ── controller ─────────────────────────────────────────────────────────────────
@@ -242,6 +259,30 @@ export function createLocalEngineController(callbacks = {}) {
         }
     }
 
+    /**
+     * 拉取所有引擎的模型列表与 preferences（0.22.6）。
+     * 在 catalog pull 之后调用——需要 engine_id 列表。
+     */
+    async function pullModelsAndPreferences() {
+        const engineIds = getEngineIds(state);
+        for (const engineId of engineIds) {
+            // 模型列表（只读查询，无副作用）
+            try {
+                const models = await invoke(COMMANDS.LIST_MODELS, {engineId});
+                state = setModels(state, engineId, models);
+            } catch (e) {
+                console.warn(`[local-engine] pull models for ${engineId} failed:`, e);
+            }
+            // preferences
+            try {
+                const prefs = await invoke(COMMANDS.GET_PREFERENCES, {engineId});
+                state = setPreferences(state, engineId, prefs);
+            } catch (e) {
+                console.warn(`[local-engine] pull preferences for ${engineId} failed:`, e);
+            }
+        }
+    }
+
     // ── 公开 API ──────────────────────────────────────────────────────────────
 
     return {
@@ -288,11 +329,12 @@ export function createLocalEngineController(callbacks = {}) {
                 return;
             }
 
-            // 2. pull catalog → status → logs
+            // 2. pull catalog → status → logs → models + preferences
             try {
                 await pullCatalog();
                 await pullStatus();
                 await pullLogs();
+                await pullModelsAndPreferences();
             } catch (e) {
                 if (gen !== mountGeneration || disposed) {
                     // 旧 generation → 不激活
@@ -314,9 +356,13 @@ export function createLocalEngineController(callbacks = {}) {
             mounted = true;
             notifyStateChange();
 
-            // 5. 后台拉取 storage（不阻塞初始渲染）
+            // 5. 后台拉取 storage + 刷新 models（不阻塞初始渲染）
             pullAllStorage().catch((e) => {
                 console.warn("[local-engine] background storage pull failed:", e);
+            });
+            // 后台再刷一次 models/preferences（初始 pull 可能在 status 之前）
+            pullModelsAndPreferences().catch((e) => {
+                console.warn("[local-engine] background models pull failed:", e);
             });
         },
 
@@ -417,6 +463,32 @@ export function createLocalEngineController(callbacks = {}) {
         },
 
         /**
+         * 停止孤儿引擎进程（0.22.6）。
+         *
+         * 当 lease 恢复扫描发现遗留进程时，用户可手动调用此命令终止孤儿进程。
+         * 后端通过 PID + 创建时间 + 路径 + token 验证身份后终止。
+         *
+         * 此方法不走 _executeAction（不设置 pending action），
+         * 因为孤儿停止是一次性诊断操作，不经过正常 install/start/stop 生命周期。
+         *
+         * @param {string} engineId
+         * @returns {Promise<{engine_id: string, stopped: boolean, reason: string, detail?: string}>}
+         */
+        async stopOrphan(engineId) {
+            if (!mounted || disposed) return;
+            try {
+                const result = await invoke(COMMANDS.STOP_ORPHAN, {engineId});
+                // 停止后刷新状态（lease 可能已清除）
+                await this.refreshStatus();
+                return result;
+            } catch (e) {
+                const err = normalizeError(e);
+                if (callbacks.onError) callbacks.onError(err);
+                throw err;
+            }
+        },
+
+        /**
          * 修复引擎。
          * @param {string} engineId
          */
@@ -505,6 +577,7 @@ export function createLocalEngineController(callbacks = {}) {
             try {
                 await pullStatus();
                 await pullLogs();
+                await pullModelsAndPreferences();
             } catch (e) {
                 if (callbacks.onError) callbacks.onError(normalizeError(e));
             }
@@ -520,6 +593,178 @@ export function createLocalEngineController(callbacks = {}) {
             buffering = false;
             flushBuffer();
             notifyStateChange();
+        },
+
+        // ── 0.22.6: 模型操作 ────────────────────────────────────────────────
+
+        /**
+         * 安装（下载）引擎模型。
+         * @param {string} engineId
+         * @param {string} modelId
+         * @returns {Promise<Object>} ModelOperationResultDto
+         */
+        async installModel(engineId, modelId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            const operationId = `install-model-${modelId}-${Date.now()}`;
+            return invoke(COMMANDS.INSTALL_MODEL, {
+                request: {
+                    engine_id: engineId,
+                    model_id: modelId,
+                    operation_id: operationId,
+                },
+            }).then((result) => {
+                // 刷新模型列表
+                this._refreshModels(engineId);
+                return result;
+            }).catch((e) => {
+                const err = normalizeError(e);
+                if (callbacks.onError) callbacks.onError(err);
+                throw err;
+            });
+        },
+
+        /**
+         * 修复引擎模型。
+         * @param {string} engineId
+         * @param {string} modelId
+         * @returns {Promise<Object>} ModelOperationResultDto
+         */
+        async repairModel(engineId, modelId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            const operationId = `repair-model-${modelId}-${Date.now()}`;
+            return invoke(COMMANDS.REPAIR_MODEL, {
+                request: {
+                    engine_id: engineId,
+                    model_id: modelId,
+                    operation_id: operationId,
+                },
+            }).then((result) => {
+                this._refreshModels(engineId);
+                return result;
+            }).catch((e) => {
+                const err = normalizeError(e);
+                if (callbacks.onError) callbacks.onError(err);
+                throw err;
+            });
+        },
+
+        /**
+         * 删除引擎模型（结构化冲突由调用方处理）。
+         * @param {string} engineId
+         * @param {string} modelId
+         * @returns {Promise<Object>} ModelOperationResultDto
+         */
+        async deleteModel(engineId, modelId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            const operationId = `delete-model-${modelId}-${Date.now()}`;
+            return invoke(COMMANDS.DELETE_MODEL, {
+                request: {
+                    engine_id: engineId,
+                    model_id: modelId,
+                    operation_id: operationId,
+                },
+            }).then((result) => {
+                this._refreshModels(engineId);
+                return result;
+            }).catch((e) => {
+                // 不做静默 fallback——结构化冲突由调用方展示
+                const err = normalizeError(e);
+                throw err;
+            });
+        },
+
+        /**
+         * 取消模型操作。
+         * @param {string} engineId
+         * @param {string} modelId
+         * @param {string} operationId
+         * @returns {Promise<Object>} ModelOperationResultDto
+         */
+        async cancelModelOperation(engineId, modelId, operationId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            return invoke(COMMANDS.CANCEL_MODEL_OP, {
+                engineId,
+                modelId,
+                operationId,
+            }).then((result) => {
+                this._refreshModels(engineId);
+                return result;
+            }).catch((e) => {
+                const err = normalizeError(e);
+                if (callbacks.onError) callbacks.onError(err);
+                throw err;
+            });
+        },
+
+        // ── 0.22.6: 底座与诊断 ──────────────────────────────────────────────
+
+        /**
+         * 拉取运行时底座状态（只读）。
+         * @returns {Promise<Object>}
+         */
+        async getFoundationStatus() {
+            if (disposed) throw new Error("controller 已 disposed");
+            return invoke(COMMANDS.GET_FOUNDATION);
+        },
+
+        /**
+         * 拉取引擎诊断信息（只读）。
+         * @param {string} engineId
+         * @returns {Promise<Object>}
+         */
+        async getDiagnostics(engineId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            return invoke(COMMANDS.GET_DIAGNOSTICS, {engineId});
+        },
+
+        /**
+         * 打开引擎数据目录。
+         * @param {string} engineId
+         */
+        async openEngineFolder(engineId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            return invoke(COMMANDS.OPEN_ENGINE_FOLDER, {engineId});
+        },
+
+        /**
+         * 打开运行时根目录。
+         */
+        async openRuntimeFolder() {
+            if (disposed) throw new Error("controller 已 disposed");
+            return invoke(COMMANDS.OPEN_RUNTIME_FOLDER);
+        },
+
+        // ── 0.22.6: preferences 保存 ────────────────────────────────────────
+
+        /**
+         * 保存引擎偏好（闭合命令，失败回滚由调用方处理）。
+         * @param {string} engineId
+         * @param {Object} patch - EnginePreferencesPatchDto
+         * @returns {Promise<Object>} EnginePreferencesDto
+         */
+        async savePreferences(engineId, patch) {
+            if (disposed) throw new Error("controller 已 disposed");
+            const result = await invoke(COMMANDS.SET_PREFERENCES, {engineId, patch});
+            // 更新状态中的 preferences
+            state = setPreferences(state, engineId, result);
+            notifyStateChange();
+            return result;
+        },
+
+        // ── 内部辅助 ──────────────────────────────────────────────────────────
+
+        /**
+         * 刷新单个引擎的模型列表。
+         * @param {string} engineId
+         */
+        async _refreshModels(engineId) {
+            try {
+                const models = await invoke(COMMANDS.LIST_MODELS, {engineId});
+                state = setModels(state, engineId, models);
+                notifyStateChange();
+            } catch (e) {
+                console.warn(`[local-engine] refresh models for ${engineId} failed:`, e);
+            }
         },
 
         // ── 内部辅助 ──────────────────────────────────────────────────────────

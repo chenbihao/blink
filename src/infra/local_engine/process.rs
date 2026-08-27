@@ -1147,6 +1147,18 @@ impl ManagedProcess {
         self.log_pipe.truncated_line_count()
     }
 
+    /// 订阅进程状态变更通知（0.22.6.3）。
+    ///
+    /// 返回 `watch::Receiver<ProcessStatus>`，调用方可以：
+    /// - `rx.borrow().clone()` 获取当前状态快照
+    /// - `rx.changed().await` 等待状态变更
+    ///
+    /// `LocalEngineService` 使用此方法监听进程意外退出，
+    /// 在 server crash 后收敛 `EngineStatus` 到 Exited/Unreachable。
+    pub fn subscribe_status(&self) -> watch::Receiver<ProcessStatus> {
+        self.status_notify.subscribe()
+    }
+
     // ── shutdown_blocking ──────────────────────────────────────────────────
 
     /// 应用退出时的同步 kill-on-close 路径。

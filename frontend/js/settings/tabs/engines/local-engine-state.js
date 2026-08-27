@@ -81,6 +81,10 @@ export function createInitialEntry() {
         currentInstanceId: null,
         pendingAction: null,
         lastRenderedError: null,
+        // 0.22.6: 模型列表（ModelCatalogItemDto 数组）
+        models: null,
+        // 0.22.6: preferences DTO（EnginePreferencesDto）
+        preferences: null,
     };
 }
 
@@ -266,20 +270,29 @@ export function appendLog(state, logDto) {
 
     const entry = state.get(engineId) || createInitialEntry();
 
-    // 旧 instance 的迟到日志不进入当前实时日志区
-    if (entry.currentInstanceId && logDto.instance_id !== entry.currentInstanceId) {
+    // 0.22.6: operation 日志（operation_id 非 null）不按 instance_id 过滤——
+    // 安装/修复/删除操作可能在没有运行实例时产生日志。
+    // 只对 instance 日志（operation_id 为 null/undefined）做 instance 过滤。
+    const isOperationLog = logDto.operation_id != null;
+    if (!isOperationLog && entry.currentInstanceId && logDto.instance_id !== entry.currentInstanceId) {
         return state;
     }
 
-    // 去重：engine_id + instance_id + seq
-    const dedupKey = `${logDto.instance_id}:${logDto.seq}`;
-    const existingKeys = new Set(entry.logs.map((l) => `${l.instanceId}:${l.seq}`));
+    // 去重：engine_id + instance_id + seq + source
+    // 0.22.6: operation 日志用 operation_id 做来源标识，instance 日志用 instance_id
+    const source = isOperationLog ? logDto.operation_id : logDto.instance_id;
+    const dedupKey = `${source}:${logDto.seq}`;
+    const existingKeys = new Set(entry.logs.map((l) => `${l.source}:${l.seq}`));
     if (existingKeys.has(dedupKey)) {
         return state;
     }
 
     const logEntry = {
+        source,
+        // 保留 instanceId 用于向后兼容（旧代码可能读 instanceId）
         instanceId: logDto.instance_id,
+        // 0.22.6: 标记日志来源——'operation' 或 'instance'
+        sourceKind: isOperationLog ? "operation" : "instance",
         seq: logDto.seq,
         timestamp: logDto.timestamp,
         level: logDto.level,
@@ -295,8 +308,10 @@ export function appendLog(state, logDto) {
     const newEntry = {
         ...entry,
         logs: boundedLogs,
-        // 更新 currentInstanceId（首次或 instance 切换）
-        currentInstanceId: entry.currentInstanceId || logDto.instance_id,
+        // 更新 currentInstanceId（首次或 instance 切换）——仅 instance 日志驱动
+        currentInstanceId: isOperationLog
+            ? entry.currentInstanceId
+            : (entry.currentInstanceId || logDto.instance_id),
     };
 
     return setEntry(state, engineId, newEntry);
@@ -323,13 +338,18 @@ export function setLogHistory(state, engineId, logDtos) {
         }
     }
 
-    const logs = logDtos.map((dto) => ({
-        instanceId: dto.instance_id,
-        seq: dto.seq,
-        timestamp: dto.timestamp,
-        level: dto.level,
-        text: dto.text,
-    }));
+    const logs = logDtos.map((dto) => {
+        const isOp = dto.operation_id != null;
+        return {
+            source: isOp ? dto.operation_id : dto.instance_id,
+            instanceId: dto.instance_id,
+            sourceKind: isOp ? "operation" : "instance",
+            seq: dto.seq,
+            timestamp: dto.timestamp,
+            level: dto.level,
+            text: dto.text,
+        };
+    });
 
     // bounded
     const boundedLogs = logs.length > MAX_LOG_LINES
@@ -420,6 +440,34 @@ export function clearLogs(state, engineId) {
     const entry = state.get(engineId);
     if (!entry) return state;
     return setEntry(state, engineId, {...entry, logs: []});
+}
+
+// ── 0.22.6: 模型列表与 preferences reducer ───────────────────────────────────
+
+/**
+ * 设置引擎模型列表（全量替换）。
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {string} engineId
+ * @param {Object[]} models - ModelCatalogItemDto 数组
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function setModels(state, engineId, models) {
+    if (!engineId) return state;
+    const entry = state.get(engineId) || createInitialEntry();
+    return setEntry(state, engineId, {...entry, models: models || []});
+}
+
+/**
+ * 设置引擎 preferences DTO。
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {string} engineId
+ * @param {Object|null} preferences - EnginePreferencesDto
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function setPreferences(state, engineId, preferences) {
+    if (!engineId) return state;
+    const entry = state.get(engineId) || createInitialEntry();
+    return setEntry(state, engineId, {...entry, preferences});
 }
 
 /**

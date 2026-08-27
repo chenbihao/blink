@@ -2,6 +2,8 @@
 
 // bytes_to_mb/dir_size_bytes 从 diagnostic 模块导入的旧 maintenance.rs 用途
 // 已移除——maintenance.rs 现使用 app::local_engine::funasr::bytes_to_mb_pub
+use crate::app::command_error::CommandError;
+use crate::app::stt_config::LocalSttSelection;
 use crate::domain::event_names::EventNames;
 use crate::domain::stt::SttEngine;
 use tauri::{Emitter, Manager};
@@ -154,6 +156,7 @@ pub async fn set_stt_config(
         Some("local") => {
             tracing::info!(
                 scope = "local",
+                local_stt_selection = ?config.local_stt_selection,
                 local_model_id = ?config.local_model_id,
                 funasr_model = %config.local_engine.funasr_model,
                 device = %config.local_engine.device,
@@ -190,10 +193,186 @@ pub async fn set_stt_config(
     Ok(())
 }
 
-/// 列出可用 STT 模型。
+/// 列出可选 STT 模型（仅返回已安装且可用的模型）。
 ///
-/// 新方案中模型由 FunASR 自动管理（首次使用时自动从 ModelScope 下载）。
-/// 此接口返回模型元数据，供前端展示和选择。
+/// 0.22.6 H4：语音页选择时只能选择已安装、校验通过、支持 STT 且当前兼容的模型。
+/// 此命令**不触发下载**——未安装的模型不会出现在列表中。
+///
+/// 返回的 DTO 包含 `engine_id`、`model_id`、`display_name`、`is_selected`。
+#[tauri::command]
+pub async fn list_selectable_stt_models(
+    app: tauri::AppHandle,
+) -> Result<Vec<serde_json::Value>, CommandError> {
+    // 从 ModelService 获取已注册模型列表
+    let model_svc = app
+        .try_state::<std::sync::Arc<crate::app::local_engine::ModelService>>()
+        .map(|s| s.inner().clone());
+
+    let config = crate::app::stt_config::get_stt_config();
+    let selected = config.local_stt_selection.as_ref();
+
+    // 如果 ModelService 已注册，使用 H3 的状态数据
+    if let Some(svc) = model_svc {
+        let funasr_id =
+            crate::infra::local_engine::runtime::EngineId::new("funasr").map_err(|e| {
+                CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
+            })?;
+
+        let models = svc.list_models(&funasr_id).await;
+        let registry = svc.registry();
+
+        let result: Vec<serde_json::Value> = models
+            .iter()
+            .filter_map(|m| {
+                // 只返回已安装且可用的模型
+                if !m.is_usable() {
+                    return None;
+                }
+                if !matches!(
+                    m.compatibility,
+                    crate::domain::local_engine::ModelCompatibility::Compatible
+                        | crate::domain::local_engine::ModelCompatibility::Unknown
+                ) {
+                    return None;
+                }
+                // 从 registry 获取 display_name / description
+                let desc = registry.find(&funasr_id, &m.model_id)?;
+                let is_selected = selected
+                    .map(|s| s.engine_id == "funasr" && s.model_id == m.model_id)
+                    .unwrap_or(false);
+                Some(serde_json::json!({
+                    "engine_id": "funasr",
+                    "model_id": m.model_id,
+                    "display_name": desc.display_name,
+                    "description": desc.description,
+                    "is_selected": is_selected,
+                    "install_state": m.install_state.to_string(),
+                }))
+            })
+            .collect();
+        return Ok(result);
+    }
+
+    // ModelService 未注册时回退到旧 model_registry（已安装的才返回）
+    let models = crate::domain::stt::model_registry();
+    let result: Vec<serde_json::Value> = models
+        .iter()
+        .filter(|m| {
+            // 旧路径：检查模型缓存目录是否有文件
+            let funasr_id = crate::infra::local_engine::runtime::EngineId::new("funasr").unwrap();
+            let cache_dir = crate::infra::local_engine::runtime::engine_model_cache_dir(&funasr_id)
+                .join(m.funasr_model_id);
+            cache_dir.exists()
+                && std::fs::read_dir(&cache_dir)
+                    .map(|mut it| it.next().is_some())
+                    .unwrap_or(false)
+        })
+        .map(|m| {
+            let is_selected = selected
+                .map(|s| s.engine_id == "funasr" && s.model_id == m.funasr_model_id)
+                .unwrap_or(false);
+            serde_json::json!({
+                "engine_id": "funasr",
+                "model_id": m.funasr_model_id,
+                "display_name": m.display_name,
+                "description": m.description,
+                "is_selected": is_selected,
+                "install_state": "installed",
+            })
+        })
+        .collect();
+    Ok(result)
+}
+
+/// 设置本地 STT 选择（闭合命令）。
+///
+/// 0.22.6 H4：保存前必须验证模型已安装、校验通过、支持 STT 且当前兼容。
+/// 如果模型未安装或不可用，返回结构化错误（不触发下载）。
+///
+/// 保存成功后广播 `CONFIG_CHANGED` 事件。
+#[tauri::command]
+pub async fn set_local_stt_selection(
+    app: tauri::AppHandle,
+    engine_id: String,
+    model_id: String,
+) -> Result<(), CommandError> {
+    // 1. 验证 engine_id 在 allowlist 中（当前仅 "funasr"）
+    if engine_id != LocalSttSelection::FUNASR_ENGINE_ID {
+        return Err(CommandError::new(
+            "invalid_engine_id",
+            format!("不支持的 engine_id: {engine_id}"),
+            false,
+        ));
+    }
+
+    // 2. 如果 ModelService 已注册，验证模型已安装且可用
+    if let Some(svc) = app.try_state::<std::sync::Arc<crate::app::local_engine::ModelService>>() {
+        let funasr_eid =
+            crate::infra::local_engine::runtime::EngineId::new(&engine_id).map_err(|e| {
+                CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
+            })?;
+
+        let status = svc
+            .get_model_status(&funasr_eid, &model_id)
+            .await
+            .map_err(CommandError::from)?;
+
+        if !status.is_usable() {
+            return Err(CommandError::with_detail(
+                "model_not_available",
+                format!(
+                    "模型未安装或不可用: {model_id}（当前状态: {}）",
+                    status.install_state
+                ),
+                false,
+                serde_json::json!({
+                    "engine_id": engine_id,
+                    "model_id": model_id,
+                    "install_state": status.install_state.to_string(),
+                    "verification_state": status.verification_state.to_string(),
+                }),
+            ));
+        }
+    }
+
+    // 3. 更新配置
+    let mut config = crate::app::stt_config::get_stt_config();
+    config.local_stt_selection = Some(LocalSttSelection::new(&engine_id, &model_id));
+    // 同步旧字段（向后兼容）
+    config.local_model_id = Some(model_id.clone());
+    config.local_engine.funasr_model = model_id.clone();
+
+    // 4. 持久化到数据库
+    let pool = app
+        .try_state::<crate::infra::data::DbPools>()
+        .ok_or_else(|| CommandError::new("internal_error", "DbPools 尚未注册", false))?;
+    crate::domain::config::store::ConfigStore::set(&pool.config, &config)
+        .await
+        .map_err(|e| CommandError::new("save_failed", format!("保存 STT 配置失败: {e}"), false))?;
+
+    // 5. 更新内存缓存
+    crate::app::stt_config::update_cache(&config);
+
+    // 6. 广播配置变更
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "stt:config", "scope": "local_stt_selection" }),
+    );
+
+    tracing::info!(
+        engine_id = %engine_id,
+        model_id = %model_id,
+        "本地 STT 选择已保存"
+    );
+
+    Ok(())
+}
+
+/// 列出可用 STT 模型（旧接口，保留向后兼容）。
+///
+/// **已废弃**：0.22.6 改用 `list_selectable_stt_models`。
+/// 新接口只返回已安装且可用的模型，不触发下载。
+#[deprecated(note = "0.22.6: 改用 list_selectable_stt_models")]
 #[tauri::command]
 pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
     let models = crate::domain::stt::model_registry();
@@ -202,7 +381,12 @@ pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
     let result: Vec<serde_json::Value> = models
         .iter()
         .map(|m| {
-            let is_selected = config.local_model_id.as_deref() == Some(m.id);
+            let is_selected = config
+                .local_stt_selection
+                .as_ref()
+                .map(|s| s.engine_id == "funasr" && s.model_id == m.funasr_model_id)
+                .unwrap_or(false)
+                || config.local_model_id.as_deref() == Some(m.id);
             serde_json::json!({
             "id": m.id,
             "display_name": m.display_name,
@@ -222,11 +406,15 @@ pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
     Ok(result)
 }
 
-/// 选择本地 STT 模型。
+/// 选择本地 STT 模型（旧接口，已废弃）。
 ///
-/// 新方案中模型由 FunASR 自动管理（首次启动 funasr-server 时自动下载）。
-/// 此命令设置配置中的 `local_model_id` 和 `funasr_model` 并持久化到数据库，
-/// 实际模型下载在 funasr-server 首次启动时由 FunASR 自动完成。
+/// **已废弃**：0.22.6 改用 `set_local_stt_selection`。
+///
+/// 此命令的实际行为是**配置代理**——它只更新配置中的模型选择，
+/// **不直接触发下载**。实际模型下载在 funasr-server 首次启动时由 FunASR 自动完成。
+///
+/// 新代码应使用 `set_local_stt_selection`，它会验证模型已安装且可用。
+#[deprecated(note = "0.22.6: 改用 set_local_stt_selection; 此命令只做配置代理，不触发下载")]
 #[tauri::command]
 pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
     let model =
@@ -235,15 +423,21 @@ pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Resu
     tracing::info!(
         model = %model_id,
         funasr_model = model.funasr_model_id,
-        "选择 STT 模型（FunASR 自动管理下载）",
+        "[已废弃] download_stt_model: 配置代理（不触发下载，实际下载由 FunASR 自动管理）",
     );
 
     // 更新配置：设置选中的模型 + funasr_model 标识
     let mut config = crate::app::stt_config::get_stt_config();
+    // 同步更新 local_stt_selection（新真源）
+    config.local_stt_selection = Some(LocalSttSelection::new(
+        LocalSttSelection::FUNASR_ENGINE_ID,
+        model.funasr_model_id,
+    ));
+    // 向后兼容旧字段
     config.local_model_id = Some(model_id);
     config.local_engine.funasr_model = model.funasr_model_id.to_string();
 
-    // 持久化到数据库（否则重启后丢失模型选择）
+    // 持久化到数据库
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::ConfigStore::set(pool, &config)
         .await
@@ -252,18 +446,26 @@ pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Resu
     // 更新内存缓存
     crate::app::stt_config::update_cache(&config);
 
+    // 广播配置变更
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "stt:config", "scope": "local_stt_selection" }),
+    );
+
     Ok(())
 }
 
-/// 取消选择 STT 模型。
+/// 取消选择 STT 模型（旧接口，保留向后兼容）。
 ///
-/// 新方案中模型由 FunASR 管理，此命令仅清除配置中的选中状态。
+/// **已废弃**：0.22.6 改用 `set_local_stt_selection` 清空选择。
+#[deprecated(note = "0.22.6: 改用 set_local_stt_selection")]
 #[tauri::command]
 pub async fn delete_stt_model(model_id: String) -> Result<(), String> {
-    tracing::info!(model = %model_id, "取消选择 STT 模型");
+    tracing::info!(model = %model_id, "[已废弃] delete_stt_model: 清除模型选择");
     let mut config = crate::app::stt_config::get_stt_config();
     if config.local_model_id.as_deref() == Some(model_id.as_str()) {
         config.local_model_id = None;
+        config.local_stt_selection = None;
         crate::app::stt_config::update_cache(&config);
     }
     Ok(())

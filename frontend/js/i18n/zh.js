@@ -1254,11 +1254,18 @@ export const zh = {
     "local_engine.status.model": "模型",
 
     "local_engine.operation.install": "安装",
+    "local_engine.operation.installing": "安装",
     "local_engine.operation.start": "启动",
     "local_engine.operation.stop": "停止",
     "local_engine.operation.repair": "修复",
+    "local_engine.operation.repairing": "修复",
     "local_engine.operation.cleanup": "清理",
+    "local_engine.operation.cleaning": "清理",
+    "local_engine.operation.delete": "删除",
     "local_engine.operation.cancel": "取消",
+    "local_engine.operation.updating": "更新",
+    "local_engine.operation.migrating": "迁移",
+    "local_engine.operation.rolling_back": "回滚",
     "local_engine.operation.stage.downloading": "下载中",
     "local_engine.operation.stage.installing": "安装中",
     "local_engine.operation.stage.starting": "启动中",
@@ -1267,6 +1274,15 @@ export const zh = {
     "local_engine.operation.stage.cleaning": "清理中",
     "local_engine.operation.stage.idle": "空闲",
     "local_engine.operation.stage.pending": "等待中",
+    "local_engine.operation.stage.preparing": "准备中",
+    "local_engine.operation.stage.verifying": "校验中",
+    "local_engine.operation.stage.promoting": "提升中",
+    "local_engine.operation.stage.switching": "切换中",
+    "local_engine.operation.stage.validating": "验证中",
+    "local_engine.operation.stage.completed": "已完成",
+    "local_engine.operation.stage.cancelled": "已取消",
+    "local_engine.operation.stage.failed": "已失败",
+    "local_engine.operation.stage.done": "完成",
 
     "local_engine.backend.requested": "请求设备",
     "local_engine.backend.resolved": "解析配置",
@@ -1348,4 +1364,125 @@ export const zh = {
     "voice.local.runtime_link.title": "FunASR 本地引擎",
     "voice.local.runtime_link.desc": "环境安装、服务启停、设备切换、日志查看已迁移至引擎页。",
     "voice.local.runtime_link.btn": "前往本地模型运行时",
+
+    // ── 运行时底座（0.22.6）──
+    "local_engine.foundation.title": "运行时底座",
+    "local_engine.foundation.desc": "所有引擎共享的 Python 运行时与公共缓存，只读展示。",
+    "local_engine.foundation.python_provider": "Python 提供方",
+    "local_engine.foundation.runtime_kind": "运行时类型",
+    "local_engine.foundation.uv_source": "uv 来源",
+    "local_engine.foundation.uv_version": "uv 版本",
+    "local_engine.foundation.managed_python": "托管 Python",
+    "local_engine.foundation.shared_cache": "公共缓存",
+    "local_engine.foundation.root_dir": "根目录",
+    "local_engine.foundation.refresh": "刷新",
+    "local_engine.foundation.open_dir": "打开根目录",
+    "local_engine.foundation.open_engine_dir": "打开引擎目录",
+    "local_engine.foundation.collapsed_hint": "点开查看 uv/Python/缓存等底座信息",
+    "local_engine.foundation.no_data": "暂无底座信息",
+    "local_engine.foundation.python_venv": "Python 虚拟环境",
+
+    // ── FunASR auto_start 开关（0.22.6）──
+    "local_engine.config.auto_start": "启动时自动运行",
+    "local_engine.config.auto_start_hint": "Blink 启动后自动启动 FunASR 服务",
+
+    // ── 引擎卡片：配置模型 vs 实际加载模型（0.22.6）──
+    "local_engine.model.configured": "配置模型",
+    "local_engine.model.active": "实际加载",
+    "local_engine.model.mismatch_hint": "配置与实际加载不一致，待重启后生效",
+    "local_engine.model.pending_restart": "待重启",
+    "local_engine.model.not_effective": "未生效",
+
+    // ── 模型列表（0.22.6）──
+    "local_engine.model.list.title": "模型",
+    "local_engine.model.list.empty": "暂无模型候选",
+    "local_engine.model.column.name": "模型",
+    "local_engine.model.column.size": "体积",
+    "local_engine.model.column.status": "状态",
+    "local_engine.model.column.actions": "操作",
+    "local_engine.model.action.download": "下载",
+    "local_engine.model.action.cancel": "取消",
+    "local_engine.model.action.repair": "修复",
+    "local_engine.model.action.delete": "删除",
+    "local_engine.model.action.download_confirm_title": "下载模型",
+    "local_engine.model.action.download_confirm_desc": "预计体积 {size}，下载过程中可取消。是否开始下载？",
+    "local_engine.model.action.download_confirm_btn": "下载",
+    "local_engine.model.action.delete_confirm_title": "删除模型",
+    "local_engine.model.action.delete_confirm_desc": "删除后将释放缓存空间，无法撤销。",
+    "local_engine.model.action.delete_confirm_btn": "删除",
+
+    // ── 模型安装状态（12 态，与后端 to_string 对齐）──
+    "local_engine.model.state.not_installed": "未安装",
+    "local_engine.model.state.downloading": "下载中",
+    "local_engine.model.state.staging": "暂存中",
+    "local_engine.model.state.verifying": "校验中",
+    "local_engine.model.state.installed": "已安装",
+    "local_engine.model.state.repairing": "修复中",
+    "local_engine.model.state.download_failed": "下载失败",
+    "local_engine.model.state.staging_failed": "暂存失败",
+    "local_engine.model.state.verification_failed": "校验失败",
+    "local_engine.model.state.repair_failed": "修复失败",
+    "local_engine.model.state.deleting": "删除中",
+    "local_engine.model.state.delete_blocked": "删除被阻止",
+
+    // ── 模型校验状态（5 态）──
+    "local_engine.model.verification.unknown": "未知",
+    "local_engine.model.verification.verified": "已校验",
+    "local_engine.model.verification.mismatched": "身份不匹配",
+    "local_engine.model.verification.unverified": "未校验",
+    "local_engine.model.verification.corrupted": "损坏",
+
+    // ── 模型兼容性 ──
+    "local_engine.model.compatibility.unknown": "未知",
+    "local_engine.model.compatibility.compatible": "兼容",
+    "local_engine.model.compatibility.incompatible": "不兼容",
+
+    // ── 模型操作种类（与引擎操作种类复用 install/repair，新增 delete）──
+    "local_engine.operation.delete": "删除",
+
+    // ── 模型操作阶段（与引擎操作阶段部分重叠，新增 preparing/promoting/done/cancelled/failed）──
+    "local_engine.operation.stage.preparing": "准备中",
+    "local_engine.operation.stage.promoting": "提升中",
+    "local_engine.operation.stage.done": "已完成",
+    "local_engine.operation.stage.cancelled": "已取消",
+    "local_engine.operation.stage.failed": "已失败",
+
+    // ── 删除冲突（结构化）──
+    "local_engine.model.conflict.title": "无法删除",
+    "local_engine.model.conflict.referenced_by_config": "配置 {field}={value} 引用了此模型",
+    "local_engine.model.conflict.active_in_instance": "运行实例 {instance} 正在使用此模型",
+    "local_engine.model.conflict.referenced_by_descriptor": "引擎默认模型 {model} 引用了此模型",
+
+    // ── 通用诊断（0.22.6）──
+    "local_engine.diagnostic.title": "诊断",
+    "local_engine.diagnostic.btn": "诊断",
+    "local_engine.diagnostic.copy": "复制诊断",
+    "local_engine.diagnostic.env": "环境",
+    "local_engine.diagnostic.process": "进程",
+    "local_engine.diagnostic.service": "服务",
+    "local_engine.diagnostic.pid": "PID",
+    "local_engine.diagnostic.recent_logs": "最近日志",
+    "local_engine.diagnostic.no_logs": "无日志",
+    "local_engine.diagnostic.loading": "诊断中…",
+
+    // ── 孤儿引擎停止（0.22.6）──
+    "local_engine.diagnostic.stop_orphan": "停止孤儿进程",
+    "local_engine.diagnostic.stop_orphan_confirm": "将终止遗留的引擎进程并清理 lease。是否继续？",
+"local_engine.diagnostic.orphan_stopped": "孤儿进程已终止",
+"local_engine.diagnostic.orphan_not_stopped": "未能终止进程：{reason}",
+"local_engine.diagnostic.orphan_error": "操作失败：{error}",
+"local_engine.diagnostic.cancel": "取消",
+"local_engine.diagnostic.confirm": "确认",
+
+    // ── 日志来源标签（区分 operation vs instance）──
+    "local_engine.log.source.operation": "操作",
+    "local_engine.log.source.instance": "实例",
+
+    // ── 语音页本地模型选择器（0.22.6 H4）──
+    "voice.local.model.select_label": "本地 STT 模型",
+    "voice.local.model.empty": "没有可用的已安装模型",
+    "voice.local.model.goto_engines_install": "前往引擎页安装",
+    "voice.local.model.goto_engines_hint": "需要先在引擎页下载 FunASR 模型",
+    "voice.local.model.option": "{engine} · {model}",
+    "voice.local.model.save_failed": "选择失败，已回滚",
 };

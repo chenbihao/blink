@@ -180,6 +180,41 @@ export function renderEngineCard(container, entry, controller, i18n) {
         }
     }
 
+    // ── 0.22.6: 模型列表区 ──────────────────────────────────────────────
+    body.appendChild(renderModelList(entry, controller, i18n));
+
+    // ── 0.22.6: 引擎目录 + 诊断按钮区 ────────────────────────────────────
+    const toolBar = document.createElement("div");
+    toolBar.className = "le-card-toolbar";
+    toolBar.style.cssText =
+        "display:flex;gap:0.5rem;padding:0.5rem 0;border-top:1px solid var(--surface);";
+
+    const openDirBtn = document.createElement("button");
+    openDirBtn.className = "btn btn-small le-action-btn";
+    openDirBtn.type = "button";
+    openDirBtn.appendChild(renderIcon("folder-open", {extraClass: "le-action-icon"}));
+    const openDirLabel = document.createElement("span");
+    openDirLabel.textContent = tt(i18n, "local_engine.foundation.open_engine_dir", "打开引擎目录");
+    openDirBtn.appendChild(openDirLabel);
+    openDirBtn.addEventListener("click", () => {
+        controller?.openEngineFolder?.(engineId).catch(() => {});
+    });
+    toolBar.appendChild(openDirBtn);
+
+    const diagBtn = document.createElement("button");
+    diagBtn.className = "btn btn-small le-action-btn";
+    diagBtn.type = "button";
+    diagBtn.appendChild(renderIcon("stethoscope", {extraClass: "le-action-icon"}));
+    const diagLabel = document.createElement("span");
+    diagLabel.textContent = tt(i18n, "local_engine.diagnostic.btn", "诊断");
+    diagBtn.appendChild(diagLabel);
+    diagBtn.addEventListener("click", () => {
+        showEngineDiagnostics(entry, controller, i18n, diagBtn);
+    });
+    toolBar.appendChild(diagBtn);
+
+    body.appendChild(toolBar);
+
     // ── actions ──────────────────────────────────────────────────────────
     const actions = document.createElement("div");
     actions.className = "le-card-actions";
@@ -253,6 +288,12 @@ function updateCardContent(card, entry, controller, i18n) {
         if (logList) {
             updateLogList(logList, entry, i18n);
         }
+    }
+
+    // 0.22.6: 更新模型列表
+    const modelList = card.querySelector(".le-model-list");
+    if (modelList) {
+        updateModelList(modelList, entry, controller, i18n);
     }
 }
 
@@ -612,6 +653,470 @@ function updateErrorArea(container, entry, i18n) {
     }
 }
 
+// ── 0.22.6: 模型状态 i18n 映射 ────────────────────────────────────────────────
+
+const MODEL_STATE_I18N_PREFIX = "local_engine.model.state.";
+const MODEL_VERIFICATION_I18N_PREFIX = "local_engine.model.verification.";
+const MODEL_COMPATIBILITY_I18N_PREFIX = "local_engine.model.compatibility.";
+
+/**
+ * 将 install_state wire value 映射为 i18n 文案。
+ * wire value 是 snake_case（如 "not_installed"、"download_failed"）。
+ */
+function modelStateLabel(installState) {
+    if (!installState) return "—";
+    const key = `${MODEL_STATE_I18N_PREFIX}${installState}`;
+    const label = t(key);
+    return label !== key ? label : installState;
+}
+
+/**
+ * 将 verification_state wire value 映射为 i18n 文案。
+ */
+function modelVerificationLabel(verificationState) {
+    if (!verificationState) return "";
+    const key = `${MODEL_VERIFICATION_I18N_PREFIX}${verificationState}`;
+    const label = t(key);
+    return label !== key ? label : verificationState;
+}
+
+// ── 0.22.6: 模型列表渲染 ─────────────────────────────────────────────────────
+
+/**
+ * 渲染模型列表区。
+ * @param {Object} entry - EngineStateEntry
+ * @param {Object} controller
+ * @param {Object} i18n
+ * @returns {HTMLElement}
+ */
+function renderModelList(entry, controller, i18n) {
+    const div = document.createElement("div");
+    div.className = "le-model-list";
+    updateModelList(div, entry, controller, i18n);
+    return div;
+}
+
+/**
+ * 更新模型列表内容。
+ * @param {HTMLElement} container
+ * @param {Object} entry
+ * @param {Object} controller
+ * @param {Object} i18n
+ */
+function updateModelList(container, entry, controller, i18n) {
+    container.textContent = "";
+
+    const models = entry.models;
+    if (!models || models.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "le-model-empty";
+        empty.textContent = tt(i18n, "local_engine.model.list.empty", "暂无模型候选");
+        container.appendChild(empty);
+        return;
+    }
+
+    const title = document.createElement("div");
+    title.className = "le-model-list-title";
+    title.textContent = tt(i18n, "local_engine.model.list.title", "模型");
+    container.appendChild(title);
+
+    const table = document.createElement("div");
+    table.className = "le-model-table";
+
+    for (const model of models) {
+        const row = document.createElement("div");
+        row.className = "le-model-row";
+
+        // 模型名
+        const nameCell = document.createElement("div");
+        nameCell.className = "le-model-cell le-model-name";
+        nameCell.textContent = model.display_name || model.model_id;
+        // 标记 selected/active
+        if (model.is_selected) {
+            const badge = document.createElement("span");
+            badge.className = "le-badge le-badge-cap";
+            badge.textContent = tt(i18n, "local_engine.model.configured", "配置");
+            badge.style.marginLeft = "0.375rem";
+            nameCell.appendChild(badge);
+        }
+        if (model.is_active) {
+            const badge = document.createElement("span");
+            badge.className = "le-badge le-badge-lifecycle";
+            badge.textContent = tt(i18n, "local_engine.model.active", "实际加载");
+            badge.style.marginLeft = "0.375rem";
+            nameCell.appendChild(badge);
+        }
+        row.appendChild(nameCell);
+
+        // 体积
+        const sizeCell = document.createElement("div");
+        sizeCell.className = "le-model-cell le-model-size";
+        sizeCell.textContent = model.estimated_size_mb != null
+            ? formatMB(model.estimated_size_mb)
+            : "—";
+        row.appendChild(sizeCell);
+
+        // 状态
+        const statusCell = document.createElement("div");
+        statusCell.className = "le-model-cell le-model-status";
+        const stateText = modelStateLabel(model.install_state);
+        statusCell.textContent = stateText;
+        // 校验状态附加
+        const verText = modelVerificationLabel(model.verification_state);
+        if (verText && verText !== model.verification_state) {
+            const verSpan = document.createElement("span");
+            verSpan.style.marginLeft = "0.25rem";
+            verSpan.style.fontSize = "var(--text-2xs)";
+            verSpan.style.color = "var(--text-dim)";
+            verSpan.textContent = `(${verText})`;
+            statusCell.appendChild(verSpan);
+        }
+        row.appendChild(statusCell);
+
+        // 操作按钮
+        const actionsCell = document.createElement("div");
+        actionsCell.className = "le-model-cell le-model-actions";
+        actionsCell.appendChild(renderModelActions(model, entry, controller, i18n));
+        row.appendChild(actionsCell);
+
+        table.appendChild(row);
+    }
+
+    container.appendChild(table);
+}
+
+/**
+ * 渲染单个模型的操作按钮。
+ * 根据 install_state 决定可用操作。
+ */
+function renderModelActions(model, entry, controller, i18n) {
+    const frag = document.createDocumentFragment();
+    const state = model.install_state;
+    const engineId = model.engine_id;
+    const modelId = model.model_id;
+
+    // NotInstalled → 下载
+    if (state === "not_installed" || state === "download_failed"
+        || state === "staging_failed" || state === "verification_failed") {
+        const btn = document.createElement("button");
+        btn.className = "le-model-btn le-model-btn-primary";
+        btn.type = "button";
+        btn.appendChild(renderIcon("download", {extraClass: "le-action-icon"}));
+        const label = document.createElement("span");
+        label.textContent = tt(i18n, "local_engine.model.action.download", "下载");
+        btn.appendChild(label);
+        btn.addEventListener("click", () => {
+            // 确认下载
+            const sizeText = model.estimated_size_mb != null
+                ? formatMB(model.estimated_size_mb)
+                : "—";
+            const confirmMsg = tt(i18n,
+                "local_engine.model.action.download_confirm_desc",
+                "预计体积 {size}，下载过程中可取消。是否开始下载？", {size: sizeText});
+            if (!confirm(confirmMsg)) return;
+            controller?.installModel?.(engineId, modelId).catch(() => {});
+        });
+        frag.appendChild(btn);
+    }
+
+    // Downloading/Staging/Verifying/Repairing/Deleting → 取消
+    if (["downloading", "staging", "verifying", "repairing", "deleting"].includes(state)) {
+        const btn = document.createElement("button");
+        btn.className = "le-model-btn";
+        btn.type = "button";
+        btn.appendChild(renderIcon("x", {extraClass: "le-action-icon"}));
+        const label = document.createElement("span");
+        label.textContent = tt(i18n, "local_engine.model.action.cancel", "取消");
+        btn.appendChild(label);
+        btn.addEventListener("click", () => {
+            controller?.cancelModelOperation?.(engineId, modelId, "").catch(() => {});
+        });
+        frag.appendChild(btn);
+    }
+
+    // Installed → 修复 + 删除
+    if (state === "installed") {
+        const repairBtn = document.createElement("button");
+        repairBtn.className = "le-model-btn";
+        repairBtn.type = "button";
+        repairBtn.appendChild(renderIcon("wrench", {extraClass: "le-action-icon"}));
+        const repairLabel = document.createElement("span");
+        repairLabel.textContent = tt(i18n, "local_engine.model.action.repair", "修复");
+        repairBtn.appendChild(repairLabel);
+        repairBtn.addEventListener("click", () => {
+            controller?.repairModel?.(engineId, modelId).catch(() => {});
+        });
+        frag.appendChild(repairBtn);
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "le-model-btn le-model-btn-danger";
+        delBtn.type = "button";
+        delBtn.appendChild(renderIcon("trash-2", {extraClass: "le-action-icon"}));
+        const delLabel = document.createElement("span");
+        delLabel.textContent = tt(i18n, "local_engine.model.action.delete", "删除");
+        delBtn.appendChild(delLabel);
+        delBtn.addEventListener("click", () => {
+            const confirmMsg = tt(i18n,
+                "local_engine.model.action.delete_confirm_desc",
+                "删除后将释放缓存空间，无法撤销。");
+            if (!confirm(confirmMsg)) return;
+            controller?.deleteModel?.(engineId, modelId).catch((err) => {
+                // 结构化冲突展示
+                showModelDeleteConflict(err, engineId, modelId, i18n, delBtn);
+            });
+        });
+        frag.appendChild(delBtn);
+    }
+
+    // delete_blocked → 不可操作
+    if (state === "delete_blocked") {
+        const span = document.createElement("span");
+        span.className = "le-model-status";
+        span.style.color = "var(--red)";
+        span.textContent = tt(i18n, "local_engine.model.state.delete_blocked", "删除被阻止");
+        frag.appendChild(span);
+    }
+
+    return frag;
+}
+
+/**
+ * 展示删除模型的结构化冲突。
+ * 从 CommandError 的 detail 字段解析 ModelDeleteConflictDto。
+ */
+function showModelDeleteConflict(err, engineId, modelId, i18n, anchorEl) {
+    // CommandError shape: { code, message, detail, retryable }
+    const detail = err?.detail;
+    if (!detail || typeof detail !== "object") {
+        // 直接展示 message
+        const conflict = document.createElement("div");
+        conflict.className = "le-model-conflict";
+        const title = document.createElement("div");
+        title.className = "le-model-conflict-title";
+        title.textContent = tt(i18n, "local_engine.model.conflict.title", "无法删除");
+        conflict.appendChild(title);
+        const reason = document.createElement("div");
+        reason.className = "le-model-conflict-reason";
+        reason.textContent = err?.message || String(err);
+        conflict.appendChild(reason);
+        anchorEl.parentElement?.insertBefore(conflict, anchorEl.nextSibling);
+        return;
+    }
+
+    const conflict = document.createElement("div");
+    conflict.className = "le-model-conflict";
+    const title = document.createElement("div");
+    title.className = "le-model-conflict-title";
+    title.textContent = tt(i18n, "local_engine.model.conflict.title", "无法删除");
+    conflict.appendChild(title);
+
+    // detail.reasons 是 DeleteConflictReasonDto 数组
+    const reasons = detail.reasons || [];
+    for (const r of reasons) {
+        const reasonEl = document.createElement("div");
+        reasonEl.className = "le-model-conflict-reason";
+        if (r.referenced_by_config) {
+            reasonEl.textContent = tt(i18n,
+                "local_engine.model.conflict.referenced_by_config",
+                "配置 {field}={value} 引用了此模型",
+                {field: r.referenced_by_config.config_field, value: r.referenced_by_config.config_value});
+        } else if (r.active_in_running_instance) {
+            reasonEl.textContent = tt(i18n,
+                "local_engine.model.conflict.active_in_instance",
+                "运行实例 {instance} 正在使用此模型",
+                {instance: r.active_in_running_instance.instance_id});
+        } else if (r.referenced_by_descriptor) {
+            reasonEl.textContent = tt(i18n,
+                "local_engine.model.conflict.referenced_by_descriptor",
+                "引擎默认模型 {model} 引用了此模型",
+                {model: r.referenced_by_descriptor.descriptor_model_id});
+        } else {
+            reasonEl.textContent = JSON.stringify(r);
+        }
+        conflict.appendChild(reasonEl);
+    }
+
+    // 插入到 anchor 元素后面
+    anchorEl.parentElement?.insertBefore(conflict, anchorEl.nextSibling);
+}
+
+/**
+ * 展示引擎诊断信息。
+ * 从后端 get_engine_diagnostics 拉取并展示。
+ */
+function showEngineDiagnostics(entry, controller, i18n, anchorBtn) {
+    const engineId = entry.catalog?.engine_id;
+    if (!engineId || !controller?.getDiagnostics) return;
+
+    // 在按钮下方插入诊断面板
+    let diagPanel = anchorBtn.parentElement?.querySelector(".le-diagnostic-inline");
+    if (diagPanel) {
+        // toggle
+        diagPanel.hidden = !diagPanel.hidden;
+        return;
+    }
+
+    diagPanel = document.createElement("div");
+    diagPanel.className = "le-diagnostic-inline";
+    diagPanel.style.cssText =
+        "margin-top:0.5rem;padding:0.75rem;border-radius:var(--radius-sm,4px);" +
+        "background:var(--bg-deep);border:1px solid var(--surface);font-style:normal;";
+
+    const loading = document.createElement("div");
+    loading.className = "le-diagnostic-loading";
+    loading.textContent = tt(i18n, "local_engine.diagnostic.loading", "诊断中…");
+    diagPanel.appendChild(loading);
+
+    anchorBtn.parentElement.appendChild(diagPanel);
+
+    controller.getDiagnostics(engineId).then((diag) => {
+        loading.remove();
+        renderDiagnosticContent(diagPanel, diag, i18n, engineId);
+    }).catch((e) => {
+        loading.remove();
+        const errEl = document.createElement("div");
+        errEl.style.color = "var(--red)";
+        errEl.style.fontSize = "var(--text-sm)";
+        errEl.style.fontStyle = "normal";
+        errEl.textContent = e?.message || String(e);
+        diagPanel.appendChild(errEl);
+    });
+}
+
+/**
+ * 渲染诊断内容。
+ */
+function renderDiagnosticContent(container, diag, i18n, engineId) {
+    container.textContent = "";
+
+    // 基本信息
+    const grid = document.createElement("div");
+    grid.className = "le-diagnostic-grid";
+    grid.style.cssText =
+        "display:grid;grid-template-columns:1fr 1fr;gap:0.25rem 1rem;margin-bottom:0.5rem;";
+
+    const items = [
+        {label: tt(i18n, "local_engine.diagnostic.env", "环境"), value: diag.environment || "—"},
+        {label: tt(i18n, "local_engine.diagnostic.process", "进程"), value: diag.process?.state || "—"},
+        {label: tt(i18n, "local_engine.diagnostic.service", "服务"), value: diag.service || "—"},
+    ];
+
+    for (const item of items) {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:0.5rem;font-size:var(--text-sm);font-style:normal;";
+        const label = document.createElement("span");
+        label.className = "le-info-label";
+        label.textContent = item.label;
+        const value = document.createElement("span");
+        value.className = "le-info-value";
+        value.textContent = item.value;
+        row.appendChild(label);
+        row.appendChild(value);
+        grid.appendChild(row);
+    }
+    container.appendChild(grid);
+
+    // 最近日志
+    const logs = diag.recent_logs || [];
+    if (logs.length > 0) {
+        const logsTitle = document.createElement("div");
+        logsTitle.style.cssText =
+            "font-size:var(--text-xs);color:var(--text-dim);margin-bottom:0.25rem;font-style:normal;";
+        logsTitle.textContent = tt(i18n, "local_engine.diagnostic.recent_logs", "最近日志");
+        container.appendChild(logsTitle);
+
+        const logsList = document.createElement("div");
+        logsList.style.cssText =
+            "max-height:180px;overflow-y:auto;padding:0.5rem 0.75rem;" +
+            "font-family:var(--font-mono);font-size:var(--text-xs);" +
+            "background:var(--bg-deep);border-radius:var(--radius-sm,4px);" +
+            "border:1px solid var(--surface);";
+        for (const log of logs) {
+            const line = document.createElement("div");
+            line.style.cssText =
+                "display:flex;gap:0.5rem;padding:0.125rem 0;line-height:1.4;font-style:normal;";
+            const level = document.createElement("span");
+            level.style.cssText =
+                "flex-shrink:0;min-width:3rem;text-transform:uppercase;font-size:var(--text-2xs);";
+            level.textContent = log.level || "info";
+            const text = document.createElement("span");
+            text.style.cssText =
+                "color:var(--text-sub);word-break:break-word;";
+            text.textContent = log.text;
+            line.appendChild(level);
+            line.appendChild(text);
+            logsList.appendChild(line);
+        }
+        container.appendChild(logsList);
+    } else {
+        const noLogs = document.createElement("div");
+        noLogs.style.cssText =
+            "color:var(--text-dim);font-size:var(--text-xs);font-style:normal;";
+        noLogs.textContent = tt(i18n, "local_engine.diagnostic.no_logs", "无日志");
+        container.appendChild(noLogs);
+    }
+
+    // 复制诊断按钮
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn btn-small";
+    copyBtn.style.cssText = "margin-top:0.5rem;font-style:normal;";
+    copyBtn.textContent = tt(i18n, "local_engine.diagnostic.copy", "复制诊断");
+    copyBtn.addEventListener("click", () => {
+        const text = JSON.stringify(diag, null, 2);
+        navigator.clipboard?.writeText(text).catch(() => {});
+    });
+    container.appendChild(copyBtn);
+
+    // ── 0.22.6: 停止孤儿引擎按钮 ──────────────────────────────────
+    // 后端提供闭合 DTO { present, actionable, reason }，
+    // 前端只检查 actionable === true 来决定是否显示停止入口。
+    // 不拼接 process/service，不检查 legacy_venv_exists。
+    const orphanRecovery = diag.orphan_recovery;
+    if (orphanRecovery && orphanRecovery.actionable === true && controller?.stopOrphan) {
+        const orphanBtn = document.createElement("button");
+        orphanBtn.className = "btn btn-small le-action-btn le-orphan-stop";
+        orphanBtn.type = "button";
+        orphanBtn.appendChild(renderIcon("ghost", {extraClass: "le-action-icon"}));
+        const orphanLabel = document.createElement("span");
+        orphanLabel.textContent = tt(i18n, "local_engine.diagnostic.stop_orphan", "停止孤儿进程");
+        orphanBtn.appendChild(orphanLabel);
+        orphanBtn.addEventListener("click", () => {
+            // 使用确认模态，不使用原生 confirm()
+            const confirmMsg = tt(i18n,
+                "local_engine.diagnostic.stop_orphan_confirm",
+                "将终止遗留的引擎进程并清理 lease。是否继续？");
+            showOrphanConfirmModal(confirmMsg, () => {
+                // 防重入：per-engine in-flight
+                if (orphanBtn.dataset.inFlight === "true") return;
+                orphanBtn.dataset.inFlight = "true";
+                orphanBtn.disabled = true;
+                controller.stopOrphan(engineId).then((result) => {
+                    orphanBtn.disabled = false;
+                    orphanBtn.dataset.inFlight = "false";
+                    // 使用通知机制，不使用 alert()
+                    const msg = result?.stopped
+                        ? tt(i18n, "local_engine.diagnostic.orphan_stopped", "孤儿进程已终止")
+                        : tt(i18n, "local_engine.diagnostic.orphan_not_stopped", "未能终止进程：{reason}", {reason: result?.reason || "unknown"});
+                    showOrphanNotification(msg, result?.stopped !== false);
+                    // 刷新 diagnostics 和 status
+                    if (typeof controller.refreshStatus === "function") {
+                        controller.refreshStatus().catch(() => {});
+                    }
+                }).catch((e) => {
+                    orphanBtn.disabled = false;
+                    orphanBtn.dataset.inFlight = "false";
+                    const errMsg = e?.message || String(e);
+                    showOrphanNotification(
+                        tt(i18n, "local_engine.diagnostic.orphan_error", "操作失败：{error}", {error: errMsg}),
+                        false
+                    );
+                });
+            });
+        });
+        container.appendChild(orphanBtn);
+    }
+}
+
 // ── 日志组件 ──────────────────────────────────────────────────────────────────
 
 function renderLogComponent(entry, controller, i18n) {
@@ -750,4 +1255,91 @@ function formatMB(mb) {
 
 function cssEscape(s) {
     return String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`);
+}
+
+// ── 0.22.6: orphan 确认模态 + 通知 ──────────────────────────────────────────
+
+/**
+ * 显示确认模态（不使用原生 confirm()）。
+ * 使用已有的 overlay/modal 样式，模拟 cleanup modal 的行为。
+ * @param {string} message - 确认文案
+ * @param {Function} onConfirm - 用户确认时回调
+ */
+function showOrphanConfirmModal(message, onConfirm) {
+    // 查找或创建 overlay
+    let overlay = document.querySelector(".le-orphan-modal-overlay");
+    if (overlay) {
+        overlay.remove();
+    }
+
+    overlay = document.createElement("div");
+    overlay.className = "le-orphan-modal-overlay";
+    overlay.style.cssText =
+        "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;" +
+        "background:rgba(0,0,0,0.4);z-index:10000;";
+
+    const modal = document.createElement("div");
+    modal.className = "le-orphan-modal";
+    modal.style.cssText =
+        "max-width:400px;padding:1.5rem;border-radius:var(--radius-md,8px);" +
+        "background:var(--bg-card,#1e1e2e);border:1px solid var(--surface);" +
+        "font-style:normal;text-align:center;";
+
+    const msg = document.createElement("p");
+    msg.style.cssText = "margin:0 0 1rem 0;color:var(--text);font-size:var(--text-sm);";
+    msg.textContent = message;
+    modal.appendChild(msg);
+
+    const btnRow = document.createElement("div");
+    btnRow.style.cssText = "display:flex;gap:0.5rem;justify-content:center;";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn btn-small";
+    cancelBtn.textContent = tt(null, "local_engine.diagnostic.cancel", "取消");
+    cancelBtn.addEventListener("click", () => overlay.remove());
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.className = "btn btn-primary btn-small";
+    confirmBtn.textContent = tt(null, "local_engine.diagnostic.confirm", "确认");
+    confirmBtn.addEventListener("click", () => {
+        overlay.remove();
+        onConfirm();
+    });
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(confirmBtn);
+    modal.appendChild(btnRow);
+    overlay.appendChild(modal);
+
+    // 点击 overlay 外部关闭
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+
+    document.body.appendChild(overlay);
+}
+
+/**
+ * 显示通知消息（不使用原生 alert()）。
+ * @param {string} message - 通知文案
+ * @param {boolean} isSuccess - 是否为成功消息
+ */
+function showOrphanNotification(message, isSuccess) {
+    let notif = document.querySelector(".le-orphan-notification");
+    if (notif) notif.remove();
+
+    notif = document.createElement("div");
+    notif.className = "le-orphan-notification";
+    notif.style.cssText =
+        "position:fixed;bottom:1rem;right:1rem;padding:0.75rem 1rem;" +
+        "border-radius:var(--radius-sm,4px);font-size:var(--text-sm);font-style:normal;" +
+        "z-index:10000;max-width:360px;word-break:break-word;" +
+        `background:${isSuccess ? "var(--green-dim,#1a3a1a)" : "var(--red-dim,#3a1a1a)"};` +
+        `color:${isSuccess ? "var(--green)" : "var(--red)"};` +
+        "border:1px solid var(--surface);";
+    notif.textContent = message;
+    document.body.appendChild(notif);
+
+    // 3 秒后自动消失
+    setTimeout(() => notif.remove(), 3000);
 }

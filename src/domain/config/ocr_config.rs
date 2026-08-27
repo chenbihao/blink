@@ -133,6 +133,7 @@ impl OcrConfig {
     }
 
     /// 是否需要 PaddleOCR 引擎（backend 为 paddleocr 或 auto）。
+    #[allow(dead_code)] // 预留：供未来路由逻辑使用
     pub fn needs_paddleocr(&self) -> bool {
         matches!(
             self.backend,
@@ -159,9 +160,13 @@ impl OcrConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct OcrRuntimeSnapshot {
     pub backend: OcrBackendKind,
+    /// 预留：当前快照逻辑不读取此字段，保留供未来诊断使用。
+    #[allow(dead_code)]
     pub paddle_model: PaddleModel,
     pub lifecycle: OcrLifecycle,
     pub idle_ttl_seconds: u32,
+    /// 预留：当前快照逻辑不读取此字段，保留供未来诊断使用。
+    #[allow(dead_code)]
     pub compute_preference: ComputePreference,
 }
 

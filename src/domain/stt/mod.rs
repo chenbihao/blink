@@ -160,6 +160,9 @@ pub(crate) mod wav;
 /// **0.22.3 Task A**: Local 模式下使用 `LocalEngineConnection`（包含 endpoint + token），
 /// STT 请求携带 `X-Engine-Token` 鉴权。无运行实例时返回错误。
 ///
+/// **0.22.6 H4**: Local 模式下从 `local_stt_selection` 联合引用解析 engine/model。
+/// 当前只需支持已注册的 Python FunASR，不实现 GGUF。
+///
 /// **不会回退到 Mock 引擎**——未启用 / 未配置 / 服务未就绪时返回 Err，
 /// 由调用方（VoiceService）决定如何向用户反馈错误。
 pub fn create_engine(
@@ -169,6 +172,17 @@ pub fn create_engine(
 
     if !config.enabled {
         return Err("STT 未启用，请在设置页开启语音输入".to_string());
+    }
+
+    // 0.22.6 H4: Local 模式下记录联合引用
+    if config.mode == crate::domain::config::stt_config::SttMode::Local {
+        if let Some(ref sel) = config.local_stt_selection {
+            tracing::debug!(
+                engine_id = %sel.engine_id,
+                model_id = %sel.model_id,
+                "本地 STT 选择（联合引用）"
+            );
+        }
     }
 
     match config.mode {

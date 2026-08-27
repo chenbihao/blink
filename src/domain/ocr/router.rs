@@ -28,6 +28,8 @@ use crate::domain::ocr::error::StructuredOcrError;
 #[derive(Debug, Clone)]
 pub struct RouteDecision {
     /// 配置的 backend 种类。
+    /// 预留：当前实现只使用 `selected_backend`，保留 `configured_backend` 供诊断/日志。
+    #[allow(dead_code)]
     pub configured_backend: OcrBackendKind,
     /// 本次实际选择的 backend。
     pub selected_backend: OcrBackendKind,
