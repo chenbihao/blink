@@ -734,7 +734,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     // 录制短路（优先于所有其他逻辑）
     if recorder::is_recording() {
         let session_id = recorder::active_session_id();
-        tracing::info!(
+        tracing::trace!(
             session_id,
             vk,
             scan_code = kb.scanCode,
@@ -745,7 +745,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         feed_recorder(vk, wparam);
         // 录制期间吞掉 Alt+Space（WebView2 无法拦截系统菜单）
         if vk == VK_SPACE.0 as u32 && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0 {
-            tracing::info!(session_id, "hotkey_recorder_alt_space_swallowed");
+            tracing::trace!(session_id, "hotkey_recorder_alt_space_swallowed");
             return LRESULT(1);
         }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -757,7 +757,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     let is_alt_vk = vk == VK_MENU.0 as u32 || vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32;
     let is_main_hotkey_probe = is_alt_vk || (vk == VK_SPACE.0 as u32 && physical_alt_down);
     if is_main_hotkey_probe {
-        tracing::info!(
+        tracing::trace!(
             vk,
             scan_code = kb.scanCode,
             message = msg,
@@ -800,7 +800,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     });
 
     if is_main_hotkey_probe {
-        tracing::info!(
+        tracing::trace!(
             vk,
             message = msg,
             propagation = ?propagation,

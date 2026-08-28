@@ -545,6 +545,36 @@ test("setLogHistory 替换不追加", () => {
     assert.equal(entry.logs[1].text, "history log 2");
 });
 
+// ── 额外：setLogHistory 不得清空 operation 日志 ────────────────────────────────
+
+test("setLogHistory 保留正在进行的 operation 日志（下载中 focus 刷新不清空）", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+
+    // 模拟下载中：实时 operation 日志（operation_id 非 null，引擎未运行）
+    const opLog = (seq, text) => makeLog("funasr", "", seq, text, {
+        operation_id: "install-model-paraformer-zh-1",
+    });
+    state = appendLog(state, opLog("1", "[INFO] 开始下载模型: paraformer-zh"));
+    state = appendLog(state, opLog("2", "[INFO] 下载主模型: paraformer-zh"));
+
+    // 窗口 focus → refreshStatus → pullLogs：引擎没跑，历史为空数组
+    state = setLogHistory(state, "funasr", []);
+
+    let entry = getEntry(state, "funasr");
+    assert.equal(entry.logs.length, 2, "空历史 pull 不得清空 operation 日志");
+    assert.equal(entry.logs[1].text, "[INFO] 下载主模型: paraformer-zh");
+
+    // 引擎运行中的 pull（instance 历史）同样不得清掉 operation 日志
+    state = setLogHistory(state, "funasr", [
+        makeLog("funasr", "inst-9", "1", "server log 1"),
+    ]);
+    entry = getEntry(state, "funasr");
+    assert.equal(entry.logs.length, 3, "instance 历史替换后 operation 日志仍在");
+    assert.equal(entry.logs[0].text, "server log 1");
+    assert.equal(entry.logs[2].text, "[INFO] 下载主模型: paraformer-zh");
+});
+
 // ── 额外：epoch 变化时清空旧 instance 日志 ─────────────────────────────────────
 
 test("epoch 变化时清空旧 instance 日志", () => {

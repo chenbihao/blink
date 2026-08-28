@@ -46,6 +46,8 @@ export const MAX_LOG_LINES = 500;
  * @property {string|null} currentInstanceId - 当前 instance id（用于隔离日志）
  * @property {PendingAction|null} pendingAction - 用户触发的待完成操作
  * @property {Object|null} lastRenderedError - 最近渲染过的错误快照（防重复渲染）
+ * @property {string|null} autoExpandedOpId - 已自动展开日志的 operation_id（防止重复展开）
+ * @property {boolean} logAutoExpand - 一次性标志：要求 renderer 自动展开日志区
  */
 
 /**
@@ -85,6 +87,13 @@ export function createInitialEntry() {
         models: null,
         // 0.22.6: preferences DTO（EnginePreferencesDto）
         preferences: null,
+        // 0.22.6: 模型级 pending action（按 model_id 索引）
+        // Map<model_id, {kind, operationId, timestamp}>
+        pendingModelActions: null,
+        // 0.22.6: 已自动展开日志的 operation_id（防止同一 operation 重复展开）
+        autoExpandedOpId: null,
+        // 0.22.6: 一次性标志——renderer 消费后清除
+        logAutoExpand: false,
     };
 }
 
@@ -239,6 +248,17 @@ export function mergeStatus(state, statusDto) {
     const newInstance = extractInstanceId(statusDto);
     const instanceChanged = newInstance && newInstance !== entry.currentInstanceId;
 
+    // 检测后端推送的新 operation_id → 设置自动展开标志
+    let logAutoExpand = entry.logAutoExpand;
+    let autoExpandedOpId = entry.autoExpandedOpId;
+    const newOp = statusDto.status?.operation;
+    if (newOp && newOp.operation_id
+        && newOp.operation_id !== autoExpandedOpId
+        && newOp.kind !== "idle"
+        && !["completed", "cancelled", "failed"].includes(newOp.stage)) {
+        logAutoExpand = true;
+    }
+
     const newEntry = {
         ...entry,
         status: statusDto,
@@ -246,6 +266,8 @@ export function mergeStatus(state, statusDto) {
         // instance 切换时清空旧日志，不混入当前流
         logs: instanceChanged ? [] : entry.logs,
         lastRenderedError: entry.lastRenderedError,
+        logAutoExpand,
+        autoExpandedOpId,
     };
 
     return setEntry(state, engineId, newEntry);
@@ -351,10 +373,18 @@ export function setLogHistory(state, engineId, logDtos) {
         };
     });
 
-    // bounded
-    const boundedLogs = logs.length > MAX_LOG_LINES
-        ? logs.slice(logs.length - MAX_LOG_LINES)
+    // 安装/修复等 operation 日志只存在于实时事件流（后端历史只存引擎
+    // 进程日志）——pull 替换时必须保留，否则窗口 focus 触发的 refreshStatus
+    // 会把正在下载的安装日志整个清空。
+    const existingOpLogs = entry.logs.filter((l) => l.sourceKind === "operation");
+    const mergedLogs = existingOpLogs.length > 0
+        ? [...logs, ...existingOpLogs]
         : logs;
+
+    // bounded
+    const boundedLogs = mergedLogs.length > MAX_LOG_LINES
+        ? mergedLogs.slice(mergedLogs.length - MAX_LOG_LINES)
+        : mergedLogs;
 
     const newEntry = {
         ...entry,
@@ -384,6 +414,10 @@ export function setStorage(state, storageDto) {
  * operation action/result 必须绑定 operation_id。
  * 迟到 completion（旧 operation_id）不覆盖新 operation。
  *
+ * 当新的 operation 开始时（action 非 null 且 operationId 与之前不同），
+ * 设置 `logAutoExpand` 标志——renderer 消费时自动展开日志区。
+ * 只对预期产生有用日志的操作展开（install/repair/start/stop/cleanup）。
+ *
  * @param {Map<string, EngineStateEntry>} state
  * @param {string} engineId
  * @param {{kind: string, operationId: string}|null} action
@@ -407,7 +441,21 @@ export function setPendingAction(state, engineId, action) {
         timestamp: Date.now(),
     } : null;
 
-    return setEntry(state, engineId, {...entry, pendingAction});
+    // 新 operation 出现 → 设置自动展开标志
+    // install/repair/start/stop/cleanup 预期产生有用日志
+    // cancel 和 null（清除）不展开
+    let logAutoExpand = entry.logAutoExpand;
+    let autoExpandedOpId = entry.autoExpandedOpId;
+    if (action && action.operationId
+        && action.operationId !== autoExpandedOpId
+        && ["install", "repair", "start", "stop", "cleanup"].includes(action.kind)) {
+        logAutoExpand = true;
+    } else if (action === null) {
+        // 清除操作 → 重置标志（防止操作完成后仍保持展开状态）
+        logAutoExpand = false;
+    }
+
+    return setEntry(state, engineId, {...entry, pendingAction, logAutoExpand, autoExpandedOpId});
 }
 
 /**
@@ -468,6 +516,68 @@ export function setPreferences(state, engineId, preferences) {
     if (!engineId) return state;
     const entry = state.get(engineId) || createInitialEntry();
     return setEntry(state, engineId, {...entry, preferences});
+}
+
+/**
+ * 设置模型级 pending action（按 model_id 索引）。
+ *
+ * 模型安装/修复操作开始时设置 `logAutoExpand` 标志。
+ *
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {string} engineId
+ * @param {string} modelId
+ * @param {{kind: string, operationId: string}|null} action
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function setPendingModelAction(state, engineId, modelId, action) {
+    if (!engineId || !modelId) return state;
+    const entry = state.get(engineId) || createInitialEntry();
+    const actions = new Map(entry.pendingModelActions || []);
+
+    let logAutoExpand = entry.logAutoExpand;
+    let autoExpandedOpId = entry.autoExpandedOpId;
+
+    if (action === null) {
+        actions.delete(modelId);
+    } else {
+        actions.set(modelId, {
+            kind: action.kind,
+            operationId: action.operationId,
+            timestamp: Date.now(),
+        });
+        // 模型安装/修复操作开始时自动展开日志
+        if (action.operationId
+            && action.operationId !== autoExpandedOpId
+            && ["install", "repair"].includes(action.kind)) {
+            logAutoExpand = true;
+        }
+    }
+
+    return setEntry(state, engineId, {...entry, pendingModelActions: actions, logAutoExpand, autoExpandedOpId});
+}
+
+/**
+ * 获取模型级 pending action。
+ * @param {EngineStateEntry} entry
+ * @param {string} modelId
+ * @returns {{kind: string, operationId: string, timestamp: number}|null}
+ */
+export function getPendingModelAction(entry, modelId) {
+    if (!entry || !entry.pendingModelActions) return null;
+    return entry.pendingModelActions.get(modelId) || null;
+}
+
+/**
+ * 返回 UI 应展示的模型安装状态。前端已发起但后端列表尚未刷新的操作优先。
+ */
+export function getEffectiveModelInstallState(entry, model) {
+    const pending = getPendingModelAction(entry, model?.model_id);
+    const pendingState = {
+        install: "downloading",
+        repair: "repairing",
+        delete: "deleting",
+    }[pending?.kind];
+    return pendingState || model?.install_state || "not_installed";
 }
 
 /**
@@ -543,6 +653,43 @@ export function hasActiveOperation(entry) {
     if (op.kind === "idle") return false;
     // 已结束的阶段不算活跃
     return !["completed", "cancelled", "failed"].includes(op.stage);
+}
+
+/**
+ * 消费 logAutoExpand 标志——如果为 true，返回 true 并将其清除。
+ *
+ * 这是一个不可变操作：返回新 state 和标志值。
+ * Renderer 在 `updateCardContent` 中调用此函数：
+ * - 如果返回的 `shouldExpand` 为 true，展开 `.le-card-log`。
+ * - 如果为 false，不做任何事（用户手动收起后不会被重新展开）。
+ *
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {string} engineId
+ * @returns {{ state: Map<string, EngineStateEntry>, shouldExpand: boolean }}
+ */
+export function consumeLogAutoExpand(state, engineId) {
+    if (!engineId) return {state, shouldExpand: false};
+    const entry = state.get(engineId);
+    if (!entry || !entry.logAutoExpand) return {state, shouldExpand: false};
+
+    // 消费标志——记录已展开的 operation_id，清除标志
+    // autoExpandedOpId 设置为当前 pendingAction 或 pendingModelActions 中的 operationId
+    let currentOpId = entry.pendingAction?.operationId || null;
+    if (!currentOpId && entry.pendingModelActions) {
+        for (const [, pa] of entry.pendingModelActions) {
+            if (pa.operationId) {
+                currentOpId = pa.operationId;
+                break;
+            }
+        }
+    }
+
+    const newEntry = {
+        ...entry,
+        logAutoExpand: false,
+        autoExpandedOpId: currentOpId || entry.autoExpandedOpId,
+    };
+    return {state: setEntry(state, engineId, newEntry), shouldExpand: true};
 }
 
 /**

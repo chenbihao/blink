@@ -25,6 +25,7 @@
 pub mod lease;
 pub mod lease_recovery;
 pub mod log_pipe;
+pub mod model_storage;
 pub mod port;
 pub mod process;
 pub mod providers;

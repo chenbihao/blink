@@ -605,8 +605,12 @@ async function initLocalModelSelect(config) {
         return;
     }
 
-    // 只保留已安装且可用的模型
-    const installed = (models || []).filter((m) => m.install_state === "installed");
+    // 只保留已安装且校验通过的模型（排除 Corrupted/Mismatched 等不可用状态）
+    const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
+    const installed = (models || []).filter(
+        (m) => m.install_state === "installed"
+            && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
+    );
 
     if (installed.length === 0) {
         // 无已安装模型 → 空状态 + CTA
@@ -646,6 +650,14 @@ async function initLocalModelSelect(config) {
             config.local_stt_selection = {engine_id: engineId, model_id: modelId};
             config.local_model_id = modelId;
             config.local_engine.funasr_model = modelId;
+
+            // 检查是否有 active 模型（当前运行中）且与新选择不同 → 显示"待重启"提示
+            const activeModel = installed.find((m) => m.is_active);
+            if (activeModel && activeModel.model_id !== modelId) {
+                showRestartHint();
+            } else {
+                hideRestartHint();
+            }
         } catch (e) {
             console.error("set_local_stt_selection failed:", e);
             // 回滚 select 到之前选中的值
@@ -653,6 +665,31 @@ async function initLocalModelSelect(config) {
             if (prev) select.value = prev.model_id;
         }
     });
+}
+
+/**
+ * 显示"待重启"提示：用户切换了模型，但当前运行的服务还使用旧模型。
+ * 需要前往引擎页重启服务才能生效。
+ */
+function showRestartHint() {
+    let hint = document.getElementById("voice-model-restart-hint");
+    if (!hint) {
+        hint = document.createElement("div");
+        hint.id = "voice-model-restart-hint";
+        hint.className = "le-voice-restart-hint";
+        const selectRow = document.querySelector(".voice-model-select-row");
+        if (selectRow) {
+            selectRow.insertAdjacentElement("afterend", hint);
+        }
+    }
+    hint.textContent = t("voice.local.model.restart_hint");
+    hint.hidden = false;
+}
+
+/** 隐藏"待重启"提示。 */
+function hideRestartHint() {
+    const hint = document.getElementById("voice-model-restart-hint");
+    if (hint) hint.hidden = true;
 }
 
 /**

@@ -24,6 +24,9 @@ import {
     setLogHistory,
     getEntry,
     MAX_LOG_LINES,
+    setPendingModelAction,
+    getPendingModelAction,
+    getEffectiveModelInstallState,
 } from "./local-engine-state.js";
 import {
     funasrCatalog,
@@ -47,10 +50,10 @@ function makeInstLog(instanceId, seq, text, overrides = {}) {
 let testCount = 0;
 let passCount = 0;
 
-function test(name, fn) {
+async function test(name, fn) {
     testCount++;
     try {
-        fn();
+        await fn();
         passCount++;
         console.log(`  ✓ ${name}`);
     } catch (e) {
@@ -61,9 +64,12 @@ function test(name, fn) {
     }
 }
 
+// 所有测试在一个 async IIFE 中顺序执行，确保 await 正确等待
+await (async () => {
+
 // ── 1. setModels：全量替换模型列表 ──────────────────────────────────────────
 
-test("setModels：全量替换模型列表", () => {
+await test("setModels：全量替换模型列表", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -81,7 +87,7 @@ test("setModels：全量替换模型列表", () => {
 
 // ── 2. setPreferences：设置引擎偏好 ──────────────────────────────────────────
 
-test("setPreferences：设置引擎偏好", () => {
+await test("setPreferences：设置引擎偏好", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -100,7 +106,7 @@ test("setPreferences：设置引擎偏好", () => {
 
 // ── 3. appendLog：operation 日志与 instance 日志隔离 ──────────────────────────
 
-test("appendLog：operation 日志不做 instance 过滤", () => {
+await test("appendLog：operation 日志不做 instance 过滤", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -122,7 +128,7 @@ test("appendLog：operation 日志不做 instance 过滤", () => {
 
 // ── 4. appendLog：instance 日志做 instance 过滤 ──────────────────────────────
 
-test("appendLog：旧 instance 日志不进入当前实时日志区", () => {
+await test("appendLog：旧 instance 日志不进入当前实时日志区", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -138,7 +144,7 @@ test("appendLog：旧 instance 日志不进入当前实时日志区", () => {
 
 // ── 5. appendLog：相同 source + seq 去重 ──────────────────────────────────────
 
-test("appendLog：相同 source + seq 去重", () => {
+await test("appendLog：相同 source + seq 去重", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -163,7 +169,7 @@ test("appendLog：相同 source + seq 去重", () => {
 
 // ── 6. setLogHistory：历史日志的 sourceKind 标记 ──────────────────────────────
 
-test("setLogHistory：历史日志的 sourceKind 标记", () => {
+await test("setLogHistory：历史日志的 sourceKind 标记", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -181,50 +187,82 @@ test("setLogHistory：历史日志的 sourceKind 标记", () => {
     assert.equal(entry.logs[1].source, "op-1");
 });
 
-// ── 7. 语音页模型选择器：只过滤已安装模型 ──────────────────────────────────────
+// ── 7. 语音页模型选择器：只过滤已安装且校验通过的模型 ──────────────────────────────
 
-test("语音页模型选择器：只过滤已安装模型", () => {
+await test("语音页模型选择器：只过滤已安装且校验通过的模型", () => {
     // 模拟后端返回的模型列表
     const models = [
-        makeModel({model_id: "sensevoice", install_state: "installed", is_selected: true}),
-        makeModel({model_id: "paraformer", install_state: "not_installed"}),
-        makeModel({model_id: "whisper", install_state: "download_failed"}),
+        makeModel({model_id: "sensevoice", install_state: "installed", verification_state: "verified", is_selected: true}),
+        makeModel({model_id: "paraformer", install_state: "not_installed", verification_state: "unknown"}),
+        makeModel({model_id: "whisper", install_state: "download_failed", verification_state: "unknown"}),
+        makeModel({model_id: "broken", install_state: "installed", verification_state: "corrupted"}),
+        makeModel({model_id: "mismatched", install_state: "installed", verification_state: "mismatched"}),
     ];
 
-    // 模拟语音页过滤逻辑
-    const installed = models.filter((m) => m.install_state === "installed");
-    assert.equal(installed.length, 1, "只有 installed 状态的模型应出现");
+    // 模拟语音页过滤逻辑（与 voice.js initLocalModelSelect 一致）
+    const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
+    const installed = models.filter(
+        (m) => m.install_state === "installed"
+            && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
+    );
+    assert.equal(installed.length, 1, "只有 installed + verified 的模型应出现");
     assert.equal(installed[0].model_id, "sensevoice");
 });
 
 // ── 8. 语音页模型选择器：无已安装模型时返回空列表 ──────────────────────────────
 
-test("语音页模型选择器：无已安装模型时返回空列表", () => {
+await test("语音页模型选择器：无已安装模型时返回空列表", () => {
     const models = [
-        makeModel({model_id: "sensevoice", install_state: "not_installed"}),
-        makeModel({model_id: "paraformer", install_state: "downloading"}),
+        makeModel({model_id: "sensevoice", install_state: "not_installed", verification_state: "unknown"}),
+        makeModel({model_id: "paraformer", install_state: "downloading", verification_state: "unknown"}),
     ];
 
-    const installed = models.filter((m) => m.install_state === "installed");
+    const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
+    const installed = models.filter(
+        (m) => m.install_state === "installed"
+            && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
+    );
     assert.equal(installed.length, 0, "无已安装模型");
 });
 
 // ── 9. 语音页模型选择器：is_selected 标记正确 ──────────────────────────────────
 
-test("语音页模型选择器：is_selected 标记正确", () => {
+await test("语音页模型选择器：is_selected 标记正确", () => {
     const models = [
-        makeModel({model_id: "sensevoice", install_state: "installed", is_selected: true}),
-        makeModel({model_id: "paraformer", install_state: "installed", is_selected: false}),
+        makeModel({model_id: "sensevoice", install_state: "installed", verification_state: "verified", is_selected: true}),
+        makeModel({model_id: "paraformer", install_state: "installed", verification_state: "verified", is_selected: false}),
     ];
 
-    const installed = models.filter((m) => m.install_state === "installed");
+    const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
+    const installed = models.filter(
+        (m) => m.install_state === "installed"
+            && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
+    );
     const selected = installed.find((m) => m.is_selected);
     assert.equal(selected.model_id, "sensevoice");
 });
 
+// ── 9b. 语音页模型选择器：Corrupted/Mismatched 被排除 ──────────────────────────
+
+await test("语音页模型选择器：Corrupted 和 Mismatched 模型被排除", () => {
+    const models = [
+        makeModel({model_id: "ok", install_state: "installed", verification_state: "verified"}),
+        makeModel({model_id: "corrupt", install_state: "installed", verification_state: "corrupted"}),
+        makeModel({model_id: "mismatch", install_state: "installed", verification_state: "mismatched"}),
+    ];
+
+    const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
+    const installed = models.filter(
+        (m) => m.install_state === "installed"
+            && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
+    );
+    assert.equal(installed.length, 1, "Corrupted 和 Mismatched 应被排除");
+    assert.equal(installed[0].model_id, "ok");
+});
+
 // ── 10. preferences 回滚场景模拟 ──────────────────────────────────────────────
 
-test("preferences 回滚：保存失败时 UI 恢复原值", () => {
+await test("preferences 回滚：保存失败时 UI 恢复原值", () => {
     // 模拟 voice.js 中的回滚逻辑
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
@@ -245,7 +283,7 @@ test("preferences 回滚：保存失败时 UI 恢复原值", () => {
 
 // ── 11. 日志 bounded：超过 MAX_LOG_LINES 截断 ─────────────────────────────────
 
-test("appendLog：超过 MAX_LOG_LINES 截断保留最新", () => {
+await test("appendLog：超过 MAX_LOG_LINES 截断保留最新", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -262,7 +300,7 @@ test("appendLog：超过 MAX_LOG_LINES 截断保留最新", () => {
 
 // ── 12. operation 日志 + instance 日志混合 bounded ──────────────────────────
 
-test("appendLog：operation + instance 日志混合 bounded", () => {
+await test("appendLog：operation + instance 日志混合 bounded", () => {
     let state = createInitialState();
     state = setCatalog(state, [funasrCatalog]);
 
@@ -283,7 +321,7 @@ test("appendLog：operation + instance 日志混合 bounded", () => {
 
 // ── 13. stop_orphan_engine: command 常量与后端对齐 ──────────────────────────────
 
-test("stop_orphan_engine: COMMANDS 常量值为 stop_orphan_engine", async () => {
+await test("stop_orphan_engine: COMMANDS 常量值为 stop_orphan_engine", async () => {
     // 动态导入 controller 模块以读取 COMMANDS 常量
     // local-runtime.js 在模块加载时访问 window.__TAURI__，需先设置
     if (!globalThis.window) globalThis.window = {};
@@ -301,7 +339,7 @@ test("stop_orphan_engine: COMMANDS 常量值为 stop_orphan_engine", async () =>
 
 // ── 14. stop_orphan_engine: controller.stopOrphan 方法存在且返回 Promise ──────────
 
-test("stop_orphan_engine: controller.stopOrphan 方法存在且返回 Promise", async () => {
+await test("stop_orphan_engine: controller.stopOrphan 方法存在且返回 Promise", async () => {
     if (!globalThis.window) globalThis.window = {};
     if (!globalThis.window.__TAURI__) {
         globalThis.window.__TAURI__ = {
@@ -317,7 +355,7 @@ test("stop_orphan_engine: controller.stopOrphan 方法存在且返回 Promise", 
 
 // ── 15. stop_orphan_engine: OrphanStopResultDto 契约验证 ──────────────────────────
 
-test("stop_orphan_engine: OrphanStopResultDto 契约验证", () => {
+await test("stop_orphan_engine: OrphanStopResultDto 契约验证", () => {
     // 模拟后端返回的 OrphanStopResultDto
     const dto = {
         engine_id: "funasr",
@@ -341,7 +379,7 @@ test("stop_orphan_engine: OrphanStopResultDto 契约验证", () => {
 
 // ── 16. stop_orphan_engine: 所有 reason 变体可序列化 ──────────────────────────
 
-test("stop_orphan_engine: 所有 reason 变体可序列化", () => {
+await test("stop_orphan_engine: 所有 reason 变体可序列化", () => {
     const reasons = [
         "lease_not_found",
         "pid_not_exist",
@@ -364,7 +402,7 @@ test("stop_orphan_engine: 所有 reason 变体可序列化", () => {
 
 // ── 17. orphan_recovery DTO: actionable=false 不显示停止入口 ──────────────────
 
-test("orphan_recovery: actionable=false 不显示停止入口", () => {
+await test("orphan_recovery: actionable=false 不显示停止入口", () => {
     const diag = {
         orphan_recovery: {present: false, actionable: false, reason: "no_lease"},
     };
@@ -377,7 +415,7 @@ test("orphan_recovery: actionable=false 不显示停止入口", () => {
 
 // ── 18. orphan_recovery DTO: actionable=true 显示停止入口 ──────────────────────
 
-test("orphan_recovery: actionable=true 显示停止入口", () => {
+await test("orphan_recovery: actionable=true 显示停止入口", () => {
     const diag = {
         orphan_recovery: {present: true, actionable: true, reason: "adoptable"},
     };
@@ -388,7 +426,7 @@ test("orphan_recovery: actionable=true 显示停止入口", () => {
 
 // ── 19. orphan_recovery: 无 orphan_recovery 字段时不显示 ──────────────────────
 
-test("orphan_recovery: 无 orphan_recovery 字段时不显示", () => {
+await test("orphan_recovery: 无 orphan_recovery 字段时不显示", () => {
     const diag = {process: {state: "running"}, service: "unreachable"};
     const shouldShow = !!(diag.orphan_recovery && diag.orphan_recovery.actionable === true);
     assert.equal(shouldShow, false, "无 orphan_recovery 字段不显示按钮");
@@ -396,7 +434,7 @@ test("orphan_recovery: 无 orphan_recovery 字段时不显示", () => {
 
 // ── 20. orphan_recovery: legacy_venv_exists 不单独触发显示 ───────────────────
 
-test("orphan_recovery: legacy_venv_exists 不单独触发显示", () => {
+await test("orphan_recovery: legacy_venv_exists 不单独触发显示", () => {
     // 旧逻辑拼接 legacy_venv_exists，新逻辑只看 orphan_recovery.actionable
     const diag = {
         process: {state: "stopped"},
@@ -410,7 +448,7 @@ test("orphan_recovery: legacy_venv_exists 不单独触发显示", () => {
 
 // ── 21. orphan_recovery: process running + service unreachable 不单独触发 ───
 
-test("orphan_recovery: process running + service unreachable 不单独触发", () => {
+await test("orphan_recovery: process running + service unreachable 不单独触发", () => {
     // 旧逻辑拼接 process/service，新逻辑只看 orphan_recovery.actionable
     const diag = {
         process: {state: "running"},
@@ -423,7 +461,7 @@ test("orphan_recovery: process running + service unreachable 不单独触发", (
 
 // ── 22. orphan_recovery: 不暴露 PID/路径/token/endpoint ──────────────────────
 
-test("orphan_recovery: DTO 不暴露 PID/路径/token/endpoint", () => {
+await test("orphan_recovery: DTO 不暴露 PID/路径/token/endpoint", () => {
     const diag = {
         orphan_recovery: {present: true, actionable: true, reason: "adoptable"},
     };
@@ -439,7 +477,7 @@ test("orphan_recovery: DTO 不暴露 PID/路径/token/endpoint", () => {
 
 // ── 23. stop_orphan_engine: mock invoke 验证 command 和参数 ──────────────────
 
-test("stop_orphan_engine: mock invoke 验证 command 和参数", async () => {
+await test("stop_orphan_engine: mock invoke 验证 command 和参数", async () => {
     if (!globalThis.window) globalThis.window = {};
     let invokeCalled = false;
     let invokeCmd = null;
@@ -472,7 +510,7 @@ test("stop_orphan_engine: mock invoke 验证 command 和参数", async () => {
 
 // ── 24. stop_orphan_engine: 连续点击只 invoke 一次（防重入） ──────────────────
 
-test("stop_orphan_engine: 防重入逻辑验证", async () => {
+await test("stop_orphan_engine: 防重入逻辑验证", async () => {
     if (!globalThis.window) globalThis.window = {};
     let invokeCount = 0;
     globalThis.window.__TAURI__ = {
@@ -514,7 +552,7 @@ test("stop_orphan_engine: 防重入逻辑验证", async () => {
 
 // ── 25. stop_orphan_engine: 成功后刷新 diagnostics/status ──────────────────────
 
-test("stop_orphan_engine: 成功后调用 refreshStatus", async () => {
+await test("stop_orphan_engine: 成功后调用 refreshStatus", async () => {
     if (!globalThis.window) globalThis.window = {};
     let refreshCalled = false;
     globalThis.window.__TAURI__ = {
@@ -541,7 +579,7 @@ test("stop_orphan_engine: 成功后调用 refreshStatus", async () => {
 
 // ── 26. stop_orphan_engine: 结构化失败正常展示 ──────────────────────────────
 
-test("stop_orphan_engine: 结构化失败返回 reason", async () => {
+await test("stop_orphan_engine: 结构化失败返回 reason", async () => {
     if (!globalThis.window) globalThis.window = {};
     globalThis.window.__TAURI__ = {
         core: {
@@ -565,7 +603,7 @@ test("stop_orphan_engine: 结构化失败返回 reason", async () => {
 
 // ── 27. stop_orphan_engine: invoke 失败抛出异常 ──────────────────────────────
 
-test("stop_orphan_engine: invoke 失败抛出异常", async () => {
+await test("stop_orphan_engine: invoke 失败抛出异常", async () => {
     if (!globalThis.window) globalThis.window = {};
     globalThis.window.__TAURI__ = {
         core: {
@@ -591,9 +629,213 @@ test("stop_orphan_engine: invoke 失败抛出异常", async () => {
     );
 });
 
+// ── 28. IPC 契约：set_local_stt_selection 调用参数验证 ──────────────────────
+
+await test("IPC 契约：set_local_stt_selection 参数 shape", async () => {
+    if (!globalThis.window) globalThis.window = {};
+    let capturedCmd = null;
+    let capturedArgs = null;
+    globalThis.window.__TAURI__ = {
+        core: {
+            invoke: async (cmd, args) => {
+                if (cmd === "set_local_stt_selection") {
+                    capturedCmd = cmd;
+                    capturedArgs = args;
+                    return;
+                }
+                return {};
+            },
+        },
+        event: {listen: async () => () => {}},
+    };
+    const {invoke} = await import("../../../shared/tauri.js");
+    await invoke("set_local_stt_selection", {engineId: "funasr", modelId: "iic/SenseVoiceSmall"});
+    assert.equal(capturedCmd, "set_local_stt_selection");
+    assert.deepEqual(capturedArgs, {engineId: "funasr", modelId: "iic/SenseVoiceSmall"});
+});
+
+// ── 29. IPC 契约：list_engine_models 返回 ModelCatalogItemDto shape ──────────
+
+await test("IPC 契约：list_engine_models 返回 DTO 含必要字段", async () => {
+    if (!globalThis.window) globalThis.window = {};
+    globalThis.window.__TAURI__ = {
+        core: {
+            invoke: async (cmd) => {
+                if (cmd === "list_engine_models") {
+                    return [{
+                        engine_id: "funasr",
+                        model_id: "iic/SenseVoiceSmall",
+                        display_name: "SenseVoiceSmall",
+                        description: "test",
+                        revision: "v1",
+                        estimated_size_mb: 234,
+                        install_state: "installed",
+                        verification_state: "verified",
+                        cache_size_bytes: 245000000,
+                        is_selected: true,
+                        is_active: false,
+                        compatibility: "compatible",
+                    }];
+                }
+                return {};
+            },
+        },
+        event: {listen: async () => () => {}},
+    };
+    const {invoke} = await import("../../../shared/tauri.js");
+    const models = await invoke("list_engine_models", {engineId: "funasr"});
+    assert.equal(models.length, 1);
+    const m = models[0];
+    // 验证 ModelCatalogItemDto 必须包含的字段
+    assert.equal(typeof m.engine_id, "string");
+    assert.equal(typeof m.model_id, "string");
+    assert.equal(typeof m.display_name, "string");
+    assert.equal(typeof m.install_state, "string");
+    assert.equal(typeof m.verification_state, "string");
+    assert.equal(typeof m.is_selected, "boolean");
+    assert.equal(typeof m.is_active, "boolean");
+    assert.equal(typeof m.compatibility, "string");
+});
+
+// ── 30. IPC 契约：LOCAL_ENGINE_INSTALL_STAGE 事件 payload shape ──────────────
+
+await test("IPC 契约：install_stage 事件 payload shape", () => {
+    // 模拟后端 emit 的 payload
+    const payload = {
+        engine_id: "funasr",
+        operation_id: "install-model-sensevoice-1234567890",
+        stage: "downloading",
+    };
+    assert.equal(payload.engine_id, "funasr");
+    assert.equal(typeof payload.operation_id, "string");
+    assert.equal(typeof payload.stage, "string");
+    // stage 应是已知枚举值之一
+    const validStages = ["downloading", "staging", "verifying", "installed", "failed", "cancelled"];
+    assert.ok(validStages.includes(payload.stage), `stage 应为已知值: ${payload.stage}`);
+});
+
 // ── summary ────────────────────────────────────────────────────────────────────
 
-console.log(`\n${passCount}/${testCount} tests passed.`);
-if (passCount !== testCount) {
-    process.exit(1);
-}
+// ── 31. pendingModelAction：设置和获取 operation_id ────────────────────────
+
+await test("pendingModelAction：设置和获取 operation_id", () => {
+    let state = createInitialState();
+    const engineId = "funasr";
+    const modelId = "iic/SenseVoiceSmall";
+    const opId = "install-model-sensevoice-1234567890";
+
+    // 设置 pending model action
+    state = setPendingModelAction(state, engineId, modelId, {
+        kind: "install",
+        operationId: opId,
+    });
+
+    const entry = getEntry(state, engineId);
+    assert.ok(entry, "entry should exist");
+
+    const pending = getPendingModelAction(entry, modelId);
+    assert.ok(pending, "pending action should exist");
+    assert.equal(pending.kind, "install");
+    assert.equal(pending.operationId, opId);
+    assert.equal(typeof pending.timestamp, "number");
+});
+
+// ── 32. pendingModelAction：清除后获取返回 null ───────────────────────────
+
+await test("pendingModelAction：清除后获取返回 null", () => {
+    let state = createInitialState();
+    const engineId = "funasr";
+    const modelId = "iic/SenseVoiceSmall";
+    const opId = "repair-model-sensevoice-9876543210";
+
+    // 设置
+    state = setPendingModelAction(state, engineId, modelId, {
+        kind: "repair",
+        operationId: opId,
+    });
+
+    // 清除
+    state = setPendingModelAction(state, engineId, modelId, null);
+
+    const entry = getEntry(state, engineId);
+    const pending = getPendingModelAction(entry, modelId);
+    assert.equal(pending, null);
+});
+
+// ── 33. pendingModelAction：多模型独立隔离 ────────────────────────────────
+
+await test("pendingModelAction：多模型独立隔离", () => {
+    let state = createInitialState();
+    const engineId = "funasr";
+    const model1 = "iic/SenseVoiceSmall";
+    const model2 = "iic/paraformer-zh";
+    const opId1 = "install-model-sensevoice-1111";
+    const opId2 = "repair-model-paraformer-2222";
+
+    // 设置两个模型的 pending action
+    state = setPendingModelAction(state, engineId, model1, {
+        kind: "install",
+        operationId: opId1,
+    });
+    state = setPendingModelAction(state, engineId, model2, {
+        kind: "repair",
+        operationId: opId2,
+    });
+
+    const entry = getEntry(state, engineId);
+    const p1 = getPendingModelAction(entry, model1);
+    const p2 = getPendingModelAction(entry, model2);
+    assert.equal(p1.operationId, opId1);
+    assert.equal(p1.kind, "install");
+    assert.equal(p2.operationId, opId2);
+    assert.equal(p2.kind, "repair");
+
+    // 清除 model1 不影响 model2
+    state = setPendingModelAction(state, engineId, model1, null);
+    const entry2 = getEntry(state, engineId);
+    assert.equal(getPendingModelAction(entry2, model1), null);
+    assert.ok(getPendingModelAction(entry2, model2), "model2 pending should still exist");
+});
+
+// ── 34. pendingModelAction：无 entry 时返回 null ───────────────────────────
+
+await test("pendingModelAction：无 entry 时返回 null", () => {
+    const state = createInitialState();
+    const entry = getEntry(state, "nonexistent");
+    assert.equal(getPendingModelAction(entry, "some-model"), null);
+});
+
+await test("pendingModelAction：安装请求立即覆盖陈旧模型状态", () => {
+    let state = createInitialState();
+    const model = makeModel({install_state: "not_installed"});
+    state = setPendingModelAction(state, "funasr", model.model_id, {
+        kind: "install",
+        operationId: "install-op",
+    });
+    assert.equal(
+        getEffectiveModelInstallState(getEntry(state, "funasr"), model),
+        "downloading",
+    );
+});
+
+await test("pendingModelAction：修复与删除请求映射为可取消状态", () => {
+    const model = makeModel({install_state: "installed"});
+    for (const [kind, expected] of [["repair", "repairing"], ["delete", "deleting"]]) {
+        let state = createInitialState();
+        state = setPendingModelAction(state, "funasr", model.model_id, {
+            kind,
+            operationId: `${kind}-op`,
+        });
+        assert.equal(getEffectiveModelInstallState(getEntry(state, "funasr"), model), expected);
+    }
+});
+
+})(); // end async IIFE
+
+// IIFE 完成后打印 summary（.then 确保在 IIFE 之后执行）
+await (async () => {
+    console.log(`\n${passCount}/${testCount} tests passed.`);
+    if (passCount !== testCount) {
+        process.exit(1);
+    }
+})();

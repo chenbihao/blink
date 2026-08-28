@@ -138,6 +138,25 @@ impl EventNames {
     /// 旧 FunASR 专属事件 `FUNASR_SERVER_LOG` 由 app 层兼容投影从此事件派生。
     pub const LOCAL_ENGINE_LOG: &str = "blink://local-engine-log";
 
+    /// 安装阶段变更事件（0.22.6 H4）。
+    ///
+    /// 当 `InstallTransaction` 内部阶段切换时（preparing→downloading→verifying→
+    /// promoting→switching→validating→completed），通过此事件实时广播给前端。
+    /// 前端可据此显示安装进度条/阶段文本，不等 `LOCAL_ENGINE_STATUS` 的
+    /// `revision` 变化。
+    ///
+    /// payload:
+    /// ```json
+    /// {
+    ///   "engine_id": "funasr",
+    ///   "operation_id": "op-abc123",
+    ///   "stage": "downloading"
+    /// }
+    /// ```
+    ///
+    /// `stage` 值与 `OperationStage` 的 wire 格式一致（snake_case）。
+    pub const LOCAL_ENGINE_INSTALL_STAGE: &str = "blink://local-engine-install-stage";
+
     // ── 便签（0.16.7-0.16.10）──
     /// 便签被创建。payload: `{ stickyId }`
     pub const STICKY_CREATED: &str = "blink://sticky-created";

@@ -169,6 +169,47 @@ pub struct ProcessStateDto {
 
 // ── Log DTO ──────────────────────────────────────────────────────────────────
 
+/// 闭合的日志级别枚举——app 协议层使用，serde lower-case wire 值。
+///
+/// 前端接收稳定的 `info` | `warn` | `error` | `debug` | `trace`。
+/// 对未知外部输入（如第三方库的日志前缀）有明确 fallback 到 `debug`。
+///
+/// 不扩大到 domain 层——只在 app 协议层闭合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineLogLevel {
+    Info,
+    Warn,
+    Error,
+    Debug,
+    Trace,
+}
+
+impl EngineLogLevel {
+    /// 从任意字符串解析为闭合枚举，未知值 fallback 到 `Debug`。
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "info" => Self::Info,
+            "warn" => Self::Warn,
+            "error" => Self::Error,
+            "trace" => Self::Trace,
+            _ => Self::Debug,
+        }
+    }
+}
+
+impl std::fmt::Display for EngineLogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => f.write_str("info"),
+            Self::Warn => f.write_str("warn"),
+            Self::Error => f.write_str("error"),
+            Self::Debug => f.write_str("debug"),
+            Self::Trace => f.write_str("trace"),
+        }
+    }
+}
+
 /// 结构化日志 DTO——历史查询与 `LOCAL_ENGINE_LOG` 实时事件共用。
 ///
 /// 运行时日志使用 `instance_id` 隔离；安装时日志使用 `operation_id` 隔离。
@@ -190,8 +231,8 @@ pub struct EngineLogDto {
     pub seq: String,
     /// 时间戳（RFC 3339）。
     pub timestamp: String,
-    /// 日志级别（"info" / "warn" / "error" / "debug" / "trace"）。
-    pub level: String,
+    /// 日志级别（闭合枚举，serde lower-case wire 值）。
+    pub level: EngineLogLevel,
     /// 文本内容。
     pub text: String,
 }
@@ -291,10 +332,7 @@ pub fn project_log(
     instance_id: &str,
     entry: &crate::infra::local_engine::log_pipe::LogEntry,
 ) -> EngineLogDto {
-    let level = match entry.source {
-        crate::infra::local_engine::log_pipe::LogSource::Stdout => "info",
-        crate::infra::local_engine::log_pipe::LogSource::Stderr => "warn",
-    };
+    let level = super::service::classify_engine_log(entry.source, &entry.text);
     let timestamp = chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
@@ -305,7 +343,7 @@ pub fn project_log(
         operation_id: None,
         seq: entry.seq.to_string(),
         timestamp,
-        level: level.to_string(),
+        level,
         text: entry.text.clone(),
     }
 }
@@ -369,7 +407,7 @@ fn map_preference_to_backend(p: ComputePreference) -> ComputeBackend {
 ///
 /// 消除 serde enum `snake_case` 序列化导致的 unit/data variant shape 不一致问题。
 /// 前端只需按 `state` 字段分支，`pid` / `reason` 是可选字段。
-fn project_process_state(process: &ProcessState) -> ProcessStateDto {
+pub fn project_process_state(process: &ProcessState) -> ProcessStateDto {
     match process {
         ProcessState::Stopped => ProcessStateDto {
             state: "stopped".to_string(),
@@ -406,7 +444,7 @@ fn desired_to_string(d: crate::domain::local_engine::DesiredState) -> String {
     }
 }
 
-fn environment_health_to_string(h: crate::domain::local_engine::EnvironmentHealth) -> String {
+pub fn environment_health_to_string(h: crate::domain::local_engine::EnvironmentHealth) -> String {
     match h {
         crate::domain::local_engine::EnvironmentHealth::Missing => "missing".to_string(),
         crate::domain::local_engine::EnvironmentHealth::Ready => "ready".to_string(),
@@ -415,7 +453,7 @@ fn environment_health_to_string(h: crate::domain::local_engine::EnvironmentHealt
     }
 }
 
-fn service_health_to_string(s: crate::domain::local_engine::ServiceHealth) -> String {
+pub fn service_health_to_string(s: crate::domain::local_engine::ServiceHealth) -> String {
     match s {
         crate::domain::local_engine::ServiceHealth::Unknown => "unknown".to_string(),
         crate::domain::local_engine::ServiceHealth::Unreachable => "unreachable".to_string(),
@@ -641,7 +679,7 @@ pub struct OrphanStopResultDto {
 ///
 /// 只包含闭合字段，不暴露 executable/argv/env/path/url/runtime kind。
 /// 字段按引擎支持情况填充：funasr 有 compute_preference + auto_start，
-/// paddleocr 有 compute_preference + lifecycle。
+/// paddleocr 有 compute_preference + ocr_backend + lifecycle。
 ///
 ///
 /// 0.22.6 H4：对应 Tauri command `get_local_engine_preferences` 已注册到 invoke_handler。
@@ -654,6 +692,9 @@ pub struct EnginePreferencesDto {
     /// 自动启动（仅 FunASR 支持）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_start: Option<bool>,
+    /// OCR 路由后端（仅 PaddleOCR 支持）：windows / paddleocr / auto。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_backend: Option<String>,
     /// 生命周期策略（仅 PaddleOCR / descriptor 允许的引擎支持）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<String>,
@@ -664,7 +705,7 @@ pub struct EnginePreferencesDto {
 
 /// 引擎偏好 patch DTO——`set_local_engine_preferences` 接收。
 ///
-/// **闭合字段**：只接受 `compute_preference`、`auto_start`、`lifecycle`。
+/// **闭合字段**：只接受 `compute_preference`、`auto_start`、`ocr_backend`、`lifecycle`。
 /// 禁止包含 executable/argv/env/path/url/runtime kind 或任意 engine_config。
 /// 未知字段在反序列化时被拒绝（`#[serde(deny_unknown_fields)]`）。
 ///
@@ -679,9 +720,72 @@ pub struct EnginePreferencesPatchDto {
     /// 自动启动（可选；仅 FunASR 支持；不提供则不修改）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_start: Option<bool>,
+    /// OCR 路由后端（可选；仅 PaddleOCR 支持；不提供则不修改）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_backend: Option<String>,
     /// 生命周期策略（可选；仅 PaddleOCR / descriptor 允许的引擎支持；不提供则不修改）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<String>,
+}
+
+// ── 诊断 DTO ─────────────────────────────────────────────────────────────────
+
+/// 引擎详细诊断 DTO——`get_engine_diagnostics` command 返回。
+///
+/// 闭合 DTO，替代旧 `serde_json::json!` 手拼响应。
+/// environment/process/service 使用稳定 wire 值，禁止 `format!("{:?}", ...)`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineDiagnosticsDto {
+    /// 引擎 id。
+    pub engine_id: String,
+    /// 环境观测状态（稳定 wire 值：`missing` / `ready` / `broken` / `needs_rebuild`）。
+    pub environment: String,
+    /// 进程观测状态投影。
+    pub process: ProcessStateDto,
+    /// 服务健康观测（稳定 wire 值：`unknown` / `unreachable` / `healthy` / `degraded`）。
+    pub service: String,
+    /// 引擎专属诊断条目列表（各 adapter 自行定义）。
+    pub adapter_diagnostics: Vec<DiagnosticEntryDto>,
+    /// 最近日志条目（双源合并后的截断列表）。
+    pub recent_logs: Vec<EngineLogDto>,
+    /// 孤儿进程恢复状态。
+    pub orphan_recovery: OrphanRecoveryDto,
+}
+
+/// 单条诊断条目 DTO。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticEntryDto {
+    /// 条目 key（稳定标识，前端 i18n 引用）。
+    pub key: String,
+    /// 显示值（不含敏感信息）。
+    pub value: String,
+    /// 条目标签（`info` / `warning` / `error`）。
+    pub label: String,
+}
+
+/// 孤儿进程恢复状态 DTO。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanRecoveryDto {
+    /// 是否存在孤儿 lease。
+    pub present: bool,
+    /// 是否可执行恢复操作。
+    pub actionable: bool,
+    /// 原因说明（稳定 wire 值）。
+    pub reason: String,
+}
+
+/// 从 domain `EngineDiagnostic` 投影为 DTO。
+pub fn project_diagnostics(
+    diag: &crate::domain::local_engine::EngineDiagnostic,
+) -> Vec<DiagnosticEntryDto> {
+    diag.entries
+        .iter()
+        .map(|e| DiagnosticEntryDto {
+            key: e.key.clone(),
+            value: e.value.clone(),
+            label: e.label.clone(),
+        })
+        .collect()
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────────
@@ -885,7 +989,7 @@ mod tests {
             operation_id: None,
             seq: "12345".to_string(),
             timestamp: "2026-08-26T00:00:00Z".to_string(),
-            level: "info".to_string(),
+            level: EngineLogLevel::Info,
             text: "test log".to_string(),
         };
         let json = serde_json::to_value(&dto).unwrap();
@@ -1020,6 +1124,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             compute_preference: Some("cpu".to_string()),
             auto_start: Some(true),
+            ocr_backend: None,
             lifecycle: None,
             requires_rebuild: None,
         };
@@ -1038,6 +1143,7 @@ mod tests {
             engine_id: "paddleocr".to_string(),
             compute_preference: Some("auto".to_string()),
             auto_start: None,
+            ocr_backend: Some("paddleocr".to_string()),
             lifecycle: Some("on_demand".to_string()),
             requires_rebuild: Some(true),
         };
@@ -1046,6 +1152,7 @@ mod tests {
         assert_eq!(json["compute_preference"], "auto");
         // auto_start 为 None 被 skip
         assert!(json.get("auto_start").is_none() || json["auto_start"].is_null());
+        assert_eq!(json["ocr_backend"], "paddleocr");
         assert_eq!(json["lifecycle"], "on_demand");
         assert_eq!(json["requires_rebuild"], true);
     }
@@ -1056,6 +1163,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             compute_preference: Some("cpu".to_string()),
             auto_start: Some(true),
+            ocr_backend: None,
             lifecycle: None,
             requires_rebuild: None,
         };

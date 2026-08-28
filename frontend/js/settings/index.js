@@ -372,16 +372,30 @@ function formatSharedBytes(bytes) {
  * @param {Object} controller
  * @param {"engine"|"shared"} mode
  */
-function openCleanupModal(engineId, entry, controller, mode) {
+async function openCleanupModal(engineId, entry, controller, mode) {
     if (!_cleanupModal) return;
     const cleanupModalEl = document.getElementById("le-cleanup-modal");
     if (engineId && cleanupModalEl) {
         cleanupModalEl.dataset.leCleanupEngineId = engineId;
     }
-    const targets = entry?.storage?.targets || [];
+
+    // storage 是异步拉取的（get_local_engine_storage 扫描磁盘）——刚进入
+    // engines tab 时 entry.storage 可能还没到。缺失时现场拉一次再打开，
+    // 避免清理面板空白。
+    let targets = entry?.storage?.targets;
+    if (!targets && engineId && typeof controller?.refreshStorage === "function") {
+        try {
+            await controller.refreshStorage(engineId);
+            const fresh = controller.getState?.()?.get(engineId);
+            targets = fresh?.storage?.targets;
+        } catch (e) {
+            console.warn("[settings] refresh storage for cleanup failed:", e);
+        }
+    }
+
     _cleanupModal.open({
         triggerEl: document.activeElement,
-        targets,
+        targets: targets || [],
         mode,
     });
 }

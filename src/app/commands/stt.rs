@@ -253,35 +253,11 @@ pub async fn list_selectable_stt_models(
         return Ok(result);
     }
 
-    // ModelService 未注册时回退到旧 model_registry（已安装的才返回）
-    let models = crate::domain::stt::model_registry();
-    let result: Vec<serde_json::Value> = models
-        .iter()
-        .filter(|m| {
-            // 旧路径：检查模型缓存目录是否有文件
-            let funasr_id = crate::infra::local_engine::runtime::EngineId::new("funasr").unwrap();
-            let cache_dir = crate::infra::local_engine::runtime::engine_model_cache_dir(&funasr_id)
-                .join(m.funasr_model_id);
-            cache_dir.exists()
-                && std::fs::read_dir(&cache_dir)
-                    .map(|mut it| it.next().is_some())
-                    .unwrap_or(false)
-        })
-        .map(|m| {
-            let is_selected = selected
-                .map(|s| s.engine_id == "funasr" && s.model_id == m.funasr_model_id)
-                .unwrap_or(false);
-            serde_json::json!({
-                "engine_id": "funasr",
-                "model_id": m.funasr_model_id,
-                "display_name": m.display_name,
-                "description": m.description,
-                "is_selected": is_selected,
-                "install_state": "installed",
-            })
-        })
-        .collect();
-    Ok(result)
+    // ModelService 未注册时 fail-closed——不回退到旧"目录非空即已安装"扫描逻辑。
+    // 旧扫描无法区分 Installed/Corrupted/Mismatched，且不参与正式链路。
+    // 返回空列表让前端知道没有可选模型（而非误报已安装）。
+    tracing::warn!("ModelService 未注册，selectable models 返回空列表（fail-closed）");
+    Ok(Vec::new())
 }
 
 /// 设置本地 STT 选择（闭合命令）。
@@ -305,34 +281,41 @@ pub async fn set_local_stt_selection(
         ));
     }
 
-    // 2. 如果 ModelService 已注册，验证模型已安装且可用
-    if let Some(svc) = app.try_state::<std::sync::Arc<crate::app::local_engine::ModelService>>() {
-        let funasr_eid =
-            crate::infra::local_engine::runtime::EngineId::new(&engine_id).map_err(|e| {
-                CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
-            })?;
+    // 2. ModelService 是选择验证的唯一真源；缺失时禁止持久化任意模型。
+    let svc = app
+        .try_state::<std::sync::Arc<crate::app::local_engine::ModelService>>()
+        .ok_or_else(|| {
+            CommandError::new(
+                "model_service_unavailable",
+                "模型服务尚未就绪，无法验证本地 STT 选择",
+                true,
+            )
+        })?;
+    let funasr_eid =
+        crate::infra::local_engine::runtime::EngineId::new(&engine_id).map_err(|e| {
+            CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
+        })?;
 
-        let status = svc
-            .get_model_status(&funasr_eid, &model_id)
-            .await
-            .map_err(CommandError::from)?;
+    let status = svc
+        .get_model_status(&funasr_eid, &model_id)
+        .await
+        .map_err(CommandError::from)?;
 
-        if !status.is_usable() {
-            return Err(CommandError::with_detail(
-                "model_not_available",
-                format!(
-                    "模型未安装或不可用: {model_id}（当前状态: {}）",
-                    status.install_state
-                ),
-                false,
-                serde_json::json!({
-                    "engine_id": engine_id,
-                    "model_id": model_id,
-                    "install_state": status.install_state.to_string(),
-                    "verification_state": status.verification_state.to_string(),
-                }),
-            ));
-        }
+    if !status.is_usable() {
+        return Err(CommandError::with_detail(
+            "model_not_available",
+            format!(
+                "模型未安装或不可用: {model_id}（当前状态: {}）",
+                status.install_state
+            ),
+            false,
+            serde_json::json!({
+                "engine_id": engine_id,
+                "model_id": model_id,
+                "install_state": status.install_state.to_string(),
+                "verification_state": status.verification_state.to_string(),
+            }),
+        ));
     }
 
     // 3. 更新配置

@@ -41,6 +41,7 @@ pub mod event_port;
 pub mod funasr;
 pub mod model_service; // 0.22.6 H3：模型资产生命周期编排
 pub mod ocr_coordinator; // 0.22.4：OCR Coordinator（路由 + 生命周期 + 并发）
+pub mod operation_log_store; // 会话内 operation 日志回放
 pub mod paddleocr; // 0.22.4：PaddleOCR adapter
 pub mod registry;
 pub mod service;
@@ -49,6 +50,8 @@ pub mod service;
 pub use event_port::{TauriEventPort, make_event_port};
 #[allow(unused_imports)]
 pub use model_service::ModelService;
+#[allow(unused_imports)]
+pub use operation_log_store::OperationLogStore;
 #[allow(unused_imports)]
 pub use registry::{EngineRegistry, RegistryEntry, RegistryLookup};
 #[allow(unused_imports)]

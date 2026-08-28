@@ -1333,6 +1333,7 @@ export const en = {
     "local_engine.log.instance": "Instance",
     "local_engine.log.no_instance": "No instance",
     "local_engine.log.copy": "Copy",
+    "local_engine.log.copied": "Copied",
     "local_engine.log.clear": "Clear",
     "local_engine.log.empty": "No logs",
     "local_engine.log.instance_changed": "Instance changed",
@@ -1347,6 +1348,8 @@ export const en = {
 
     // ── Engine card config area (0.22.5 H2) ──
     "local_engine.config.compute_preference": "Compute device",
+    "local_engine.config.runtime_policy": "Runtime policy",
+    "local_engine.config.ocr_backend": "Screenshot OCR engine",
     "local_engine.config.lifecycle": "Lifecycle",
     "local_engine.config.requires_rebuild": "Needs rebuild",
     "local_engine.config.requires_rebuild_hint": "Compute device changed. Rebuild the environment to apply.",
@@ -1384,6 +1387,9 @@ export const en = {
     // ── FunASR auto_start toggle (0.22.6) ──
     "local_engine.config.auto_start": "Auto-start on launch",
     "local_engine.config.auto_start_hint": "Automatically start FunASR service after Blink launches",
+    "local_engine.ocr_backend.windows": "Windows OCR (system)",
+    "local_engine.ocr_backend.paddleocr": "PaddleOCR (local)",
+    "local_engine.ocr_backend.auto": "Automatic",
 
     // ── Engine card: configured vs active model (0.22.6) ──
     "local_engine.model.configured": "Configured model",
@@ -1455,12 +1461,13 @@ export const en = {
     // ── Diagnostics (0.22.6) ──
     "local_engine.diagnostic.title": "Diagnostics",
     "local_engine.diagnostic.btn": "Diagnostics",
+    "local_engine.diagnostic.collapse": "Hide diagnostics",
     "local_engine.diagnostic.copy": "Copy diagnostics",
     "local_engine.diagnostic.env": "Environment",
     "local_engine.diagnostic.process": "Process",
     "local_engine.diagnostic.service": "Service",
     "local_engine.diagnostic.pid": "PID",
-    "local_engine.diagnostic.recent_logs": "Recent logs",
+    "local_engine.diagnostic.recent_logs": "Recent runtime logs (diagnostic snapshot)",
     "local_engine.diagnostic.no_logs": "No logs",
     "local_engine.diagnostic.loading": "Running diagnostics…",
 
@@ -1484,4 +1491,5 @@ export const en = {
     "voice.local.model.goto_engines_hint": "Download a FunASR model from the Engines tab first",
     "voice.local.model.option": "{engine} · {model}",
     "voice.local.model.save_failed": "Selection failed, rolled back",
+    "voice.local.model.restart_hint": "Model switched — restart the service in Engines to load the new model",
 };

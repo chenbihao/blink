@@ -132,6 +132,7 @@ ICON_LIST = [
     "download",         # 安装引擎
     "play",             # 启动引擎
     "wrench",           # 修复引擎
+    "stethoscope",      # 引擎诊断按钮（0.22.6：诊断面板入口）
     # 已有：square（停止）、trash-2（清理）、x（取消）、terminal（日志）、server、scan-text
 ]
 

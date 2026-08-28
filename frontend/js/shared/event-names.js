@@ -90,6 +90,20 @@ export const EVENTS = Object.freeze({
      */
     LOCAL_ENGINE_LOG: 'blink://local-engine-log',
 
+    /**
+     * 安装阶段变更事件（0.22.6 H4）。
+     *
+     * 当 InstallTransaction 内部阶段切换时实时广播：
+     * preparing → downloading → verifying → promoting → switching → validating → completed
+     *
+     * payload:
+     * { engine_id, operation_id, stage }
+     *
+     * stage 值与 LOCAL_ENGINE_STATUS 的 operation.stage 一致（snake_case）。
+     * 前端可据此实时显示安装进度，不等 LOCAL_ENGINE_STATUS 的 revision 变化。
+     */
+    LOCAL_ENGINE_INSTALL_STAGE: 'blink://local-engine-install-stage',
+
     // ── 便签（0.16.7）──
     STICKY_CREATED: 'blink://sticky-created',
     STICKY_DELETED: 'blink://sticky-deleted',

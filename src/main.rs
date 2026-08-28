@@ -831,7 +831,15 @@ fn main() {
                     paddleocr_adapter,
                 ]),
             );
-            let event_port = crate::app::local_engine::make_event_port(app.handle().clone());
+            // 会话内 operation 日志回放存储——与环境/模型安装共用同一个 EventPort。
+            let operation_log_store = std::sync::Arc::new(
+                crate::app::local_engine::OperationLogStore::new(),
+            );
+            app.manage(operation_log_store.clone());
+            let event_port = crate::app::local_engine::make_event_port(
+                app.handle().clone(),
+                operation_log_store.clone(),
+            );
 
             // 构造 provider descriptors map + python provider（安装事务用）
             let funasr_descriptor =
@@ -850,7 +858,7 @@ fn main() {
             let local_engine_service =
                 crate::app::local_engine::LocalEngineService::new_with_providers(
                     engine_registry,
-                    event_port,
+                    event_port.clone(),
                     provider_descriptors,
                     python_provider,
                 );
@@ -865,9 +873,24 @@ fn main() {
             // ModelService 独立于 LocalEngineService，专注模型资产生命周期
             // （下载/校验/删除/修复），与引擎进程管理正交。
             // 目前只注册 FunASR 模型。
+            //
+            // B2: worker 使用真实 FunasrModelInstallWorker（ModelScope 下载）。
+            // 注入共享 event_port——模型安装日志/阶段实时广播到前端日志面板。
             let model_service = std::sync::Arc::new(
-                crate::app::local_engine::model_service::make_funasr_model_service(),
+                crate::app::local_engine::model_service::ModelService::new(
+                    crate::app::local_engine::model_service::make_funasr_model_registry(),
+                    std::sync::Arc::new(
+                        crate::app::local_engine::model_service::FunasrModelInstallWorker::new(),
+                    ),
+                    event_port,
+                ),
             );
+            // B2: 从磁盘恢复模型状态（manifest → Installed/Corrupted）
+            if let Err(e) =
+                tauri::async_runtime::block_on(model_service.restore_states_from_disk())
+            {
+                tracing::warn!(error = %e, "ModelService 磁盘状态恢复失败（不阻塞启动）");
+            }
             app.manage(model_service);
             tracing::info!("ModelService 已构造（funasr 模型已注册）");
 

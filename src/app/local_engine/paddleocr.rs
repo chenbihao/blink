@@ -191,6 +191,13 @@ impl LocalEngineAdapter for PaddleocrAdapter {
         map_paddleocr_health(raw_health)
     }
 
+    /// PaddleOCR 目前由受信任的 Python wrapper 在专属缓存中下载模型，
+    /// 并由 wrapper manifest 校验 det/rec 文件与内容指纹；尚未迁入统一
+    /// ModelService generation，因此不能要求 model_storage current pointer。
+    fn uses_managed_model_storage(&self) -> bool {
+        false
+    }
+
     /// adapter self-test。
     ///
     /// 验证 PaddleOCR Python 环境是否就绪（generation venv + paddlepaddle + paddleocr 已安装）。
@@ -816,7 +823,7 @@ pub(crate) fn ensure_ocr_server_script_in(
 ///   "engine_id": "paddleocr",
 ///   "instance_id": "uuid-4",
 ///   "token_fingerprint": "fp: + 16 hex",
-///   "endpoint": "http://127.0.0.1:9100",
+///   "endpoint": "127.0.0.1:9100",
 ///   "service_state": "healthy",
 ///   "model_state": "Ready",
 ///   "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
@@ -1088,6 +1095,12 @@ mod tests {
     fn descriptor_has_on_demand_lifecycle() {
         let adapter = PaddleocrAdapter::new();
         assert_eq!(adapter.descriptor().lifecycle, LifecyclePolicy::OnDemand);
+    }
+
+    #[test]
+    fn paddleocr_model_identity_is_managed_by_wrapper_manifest() {
+        let adapter = PaddleocrAdapter::new();
+        assert!(!adapter.uses_managed_model_storage());
     }
 
     #[test]
@@ -1537,6 +1550,18 @@ mod tests {
         let path1 = ensure_ocr_server_script_in(tmp.path()).unwrap();
         let path2 = ensure_ocr_server_script_in(tmp.path()).unwrap();
         assert_eq!(path1, path2);
+    }
+
+    #[test]
+    fn embedded_ocr_server_echoes_canonical_endpoint_authority() {
+        assert!(
+            BLINK_OCR_SERVER_PY.contains("_ENDPOINT = f\"{args.host}:{args.port}\""),
+            "PaddleOCR health endpoint 必须使用 host:port canonical authority"
+        );
+        assert!(
+            !BLINK_OCR_SERVER_PY.contains("_ENDPOINT = f\"http://{args.host}:{args.port}\""),
+            "身份 endpoint 不得混用 HTTP base URL"
+        );
     }
 
     // ── 完整依赖锁测试 ──────────────────────────────────────────────────────

@@ -38,16 +38,17 @@ use crate::domain::local_engine::{
     OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
 };
 use crate::infra::local_engine::lease::{ProcessLease, remove_lease, write_lease};
+use crate::infra::local_engine::model_storage as mstore;
 use crate::infra::local_engine::port::{
     EndpointAllocator, IdentityVerification, ServiceIdentityInput, ServiceIdentityResult,
     generate_service_token,
 };
 use crate::infra::local_engine::process::{LaunchRequest, ManagedProcess, ShutdownConfig};
 use crate::infra::local_engine::runtime::{
-    self, BackendState, ComputeBackend, ComputePreference, EngineId, ResolvedProfile,
-    generate_operation_id,
+    self, BackendState, ComputeBackend, ComputePreference, EngineId, ModelContract,
+    ResolvedProfile, generate_operation_id,
 };
-use crate::infra::local_engine::state::ProcessStatus;
+use crate::infra::local_engine::state::{ProcessIdentity, ProcessStatus};
 
 use crate::infra::local_engine::providers::InstallSink;
 use crate::infra::local_engine::providers::ProviderDescriptor;
@@ -60,7 +61,7 @@ use super::registry::EngineRegistry;
 /// `InstallSink` 适配器——把 infra 层安装进度/日志桥接到 `EventPort`。
 ///
 /// 持有 `EventPort` 引用、`engine_id`、`operation_id` 和日志序号计数器。
-/// `on_stage` 把阶段变更通过 `emit_status` 的 `operation.stage` 投影广播。
+/// `on_stage` 通过 `emit_install_stage` 广播阶段变更给前端。
 /// `on_log` 把安装日志行通过 `emit_install_log` 广播，以 `operation_id` 隔离。
 ///
 /// **洪泛保护**：使用简单的速率限制——每秒最多 50 条日志。
@@ -113,9 +114,9 @@ impl InstallSink for InstallSinkAdapter {
             stage = stage,
             "install sink: stage"
         );
-        // 阶段变更不需要 emit——InstallTransaction 内部不更新 EngineStatus，
-        // service 层在 install/repair 方法中通过 commit_status_internal 更新阶段。
-        // 这里只做 tracing 日志。
+        // 0.22.6 H4: 通过 emit_install_stage 广播阶段变更给前端
+        self.event_port
+            .emit_install_stage(&self.engine_id, &self.operation_id, stage);
     }
 
     fn on_log(&self, level: &str, text: &str) {
@@ -130,8 +131,26 @@ impl InstallSink for InstallSinkAdapter {
             *s
         };
 
+        // 安装器原始输出默认进入 debug；明确的 warn/error 保留级别。
+        // UI 仍接收完整的受限流日志，后端排障时可通过 debug 日志查看同一条目。
+        let log_level = super::dto::EngineLogLevel::from_str_lossy(level);
+        match log_level {
+            super::dto::EngineLogLevel::Error => {
+                tracing::error!(engine = %self.engine_id, op = %self.operation_id, seq, output = text, "本地引擎安装输出")
+            }
+            super::dto::EngineLogLevel::Warn => {
+                tracing::warn!(engine = %self.engine_id, op = %self.operation_id, seq, output = text, "本地引擎安装输出")
+            }
+            super::dto::EngineLogLevel::Trace => {
+                tracing::trace!(engine = %self.engine_id, op = %self.operation_id, seq, output = text, "本地引擎安装输出")
+            }
+            _ => {
+                tracing::debug!(engine = %self.engine_id, op = %self.operation_id, seq, output = text, "本地引擎安装输出")
+            }
+        }
+
         self.event_port
-            .emit_install_log(&self.engine_id, &self.operation_id, seq, level, text);
+            .emit_install_log(&self.engine_id, &self.operation_id, seq, log_level, text);
     }
 }
 
@@ -151,10 +170,37 @@ pub struct StructuredLogEntry {
     pub seq: u64,
     /// 时间戳（Unix 毫秒）。
     pub timestamp_ms: u64,
-    /// 日志级别（"info" / "warn"）。
+    /// 日志级别（"error" / "warn" / "info" / "debug" / "trace"）。
     pub level: String,
     /// 文本内容。
     pub text: String,
+}
+
+/// 从子进程输出内容推断展示/tracing 级别。
+///
+/// stdout/stderr 只是传输通道，不等于日志级别：Paddle/PaddleX 会把下载进度写到
+/// stderr，若直接映射为 warn 会产生大量伪告警。受信任 wrapper 的显式前缀优先，
+/// 未分类输出降为 debug。
+pub(super) fn classify_engine_log(
+    _source: crate::infra::local_engine::log_pipe::LogSource,
+    text: &str,
+) -> super::dto::EngineLogLevel {
+    use super::dto::EngineLogLevel;
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("[ERROR]")
+        || trimmed.starts_with("ERROR:")
+        || trimmed.starts_with("Traceback ")
+    {
+        EngineLogLevel::Error
+    } else if trimmed.starts_with("[WARN]") || trimmed.starts_with("WARNING:") {
+        EngineLogLevel::Warn
+    } else if trimmed.starts_with("[INFO]") || trimmed.starts_with("[STATE]") {
+        EngineLogLevel::Info
+    } else if trimmed.starts_with("[TRACE]") {
+        EngineLogLevel::Trace
+    } else {
+        EngineLogLevel::Debug
+    }
 }
 
 // ── LocalEngineConnection ─────────────────────────────────────────────────
@@ -239,11 +285,18 @@ pub trait EventPort: Send + Sync {
     fn emit_status(&self, snapshot: &EngineStatusSnapshot);
 
     /// 广播引擎日志条目（运行时日志，以 `instance_id` 隔离）。
-    fn emit_log(&self, engine_id: &EngineId, instance_id: &str, seq: u64, line: &str);
+    fn emit_log(
+        &self,
+        engine_id: &EngineId,
+        instance_id: &str,
+        seq: u64,
+        level: super::dto::EngineLogLevel,
+        line: &str,
+    );
 
     /// 广播安装日志条目（安装时日志，以 `operation_id` 隔离）。
     ///
-    /// `level` 是 "info" / "warn" / "error"。
+    /// `level` 是闭合枚举 `EngineLogLevel`。
     /// `text` 是已做 UTF-8 lossy + 长度截断的日志行。
     /// `seq` 在同一 `operation_id` 内单调递增。
     fn emit_install_log(
@@ -251,9 +304,15 @@ pub trait EventPort: Send + Sync {
         engine_id: &EngineId,
         operation_id: &str,
         seq: u64,
-        level: &str,
+        level: super::dto::EngineLogLevel,
         text: &str,
     );
+
+    /// 广播安装阶段变更（0.22.6 H4）。
+    ///
+    /// 前端通过此事件实时显示安装进度（preparing/downloading/verifying/...）。
+    /// `stage` 是稳定的 wire 字符串（对应 `OperationStage` 的 Display 值）。
+    fn emit_install_stage(&self, engine_id: &EngineId, operation_id: &str, stage: &str);
 }
 
 /// 空实现（测试/无事件场景用）。
@@ -262,16 +321,25 @@ pub struct NoopEventPort;
 
 impl EventPort for NoopEventPort {
     fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {}
-    fn emit_log(&self, _engine_id: &EngineId, _instance_id: &str, _seq: u64, _line: &str) {}
+    fn emit_log(
+        &self,
+        _engine_id: &EngineId,
+        _instance_id: &str,
+        _seq: u64,
+        _level: super::dto::EngineLogLevel,
+        _line: &str,
+    ) {
+    }
     fn emit_install_log(
         &self,
         _engine_id: &EngineId,
         _operation_id: &str,
         _seq: u64,
-        _level: &str,
+        _level: super::dto::EngineLogLevel,
         _text: &str,
     ) {
     }
+    fn emit_install_stage(&self, _engine_id: &EngineId, _operation_id: &str, _stage: &str) {}
 }
 
 // ── LocalEngineService ────────────────────────────────────────────────────
@@ -1097,6 +1165,9 @@ impl LocalEngineService {
             status.desired = DesiredState::Running;
             status.process = ProcessState::Starting;
             status.service = ServiceHealth::Unknown;
+            // 新一轮显式启动已经接管状态，旧实例的错误不应继续挂在界面上。
+            // 本轮若失败，rollback 会写入新的 last_error。
+            status.last_error = None;
             status.operation = EngineOperation {
                 kind: OperationKind::Idle,
                 operation_id: String::new(),
@@ -1276,6 +1347,7 @@ impl LocalEngineService {
                             status.process = ProcessState::Stopped;
                             status.service = ServiceHealth::Unknown;
                             status.model = ModelHealth::Unknown;
+                            status.last_error = None;
                         })
                         .await?;
 
@@ -1353,6 +1425,7 @@ impl LocalEngineService {
                     if status.process == ProcessState::Starting {
                         status.process = ProcessState::Stopped;
                     }
+                    status.last_error = None;
                 })
                 .await?;
                 Ok(())
@@ -1406,6 +1479,7 @@ impl LocalEngineService {
                             status.process = ProcessState::Stopped;
                             status.service = ServiceHealth::Unknown;
                             status.model = ModelHealth::Unknown;
+                            status.last_error = None;
                         })
                         .await?;
 
@@ -1470,6 +1544,7 @@ impl LocalEngineService {
                     if status.process == ProcessState::Starting {
                         status.process = ProcessState::Stopped;
                     }
+                    status.last_error = None;
                 })
                 .await?;
                 Ok(())
@@ -1990,7 +2065,7 @@ impl LocalEngineService {
     /// 查询引擎结构化日志（含 instance_id + seq）。
     ///
     /// 返回 `Vec<StructuredLogEntry>`，每条包含 `engine_id`、`instance_id`、
-    /// `seq`、`timestamp_ms`、`level`（"info"/"warn"）、`text`。
+    /// `seq`、`timestamp_ms`、`level`、`text`。
     ///
     /// 历史与 `LOCAL_ENGINE_LOG` 实时事件使用同一 shape。
     /// 如果引擎未运行但有 `last_managed_process`，从上一实例读取 bounded history。
@@ -2012,7 +2087,7 @@ impl LocalEngineService {
         let mp = entry.managed_process.lock().await;
         if let Some(managed) = mp.as_ref() {
             let history = managed.log_history().await;
-            let logs: Vec<StructuredLogEntry> = history
+            let mut logs: Vec<StructuredLogEntry> = history
                 .into_iter()
                 .rev()
                 .take(max_lines)
@@ -2021,14 +2096,12 @@ impl LocalEngineService {
                     instance_id: instance_id.clone().unwrap_or_default(),
                     seq: entry.seq,
                     timestamp_ms: entry.timestamp_ms,
-                    level: match entry.source {
-                        crate::infra::local_engine::log_pipe::LogSource::Stdout => "info",
-                        crate::infra::local_engine::log_pipe::LogSource::Stderr => "warn",
-                    }
-                    .to_string(),
+                    level: classify_engine_log(entry.source, &entry.text).to_string(),
                     text: entry.text,
                 })
                 .collect();
+            // ring buffer 是正序；先从尾部截取，再恢复为正序供 UI 与实时事件拼接。
+            logs.reverse();
             return Ok(logs);
         }
         drop(mp);
@@ -2037,7 +2110,7 @@ impl LocalEngineService {
         let last_mp = entry.last_managed_process.lock().await;
         if let Some(managed) = last_mp.as_ref() {
             let history = managed.log_history().await;
-            let logs: Vec<StructuredLogEntry> = history
+            let mut logs: Vec<StructuredLogEntry> = history
                 .into_iter()
                 .rev()
                 .take(max_lines)
@@ -2046,14 +2119,11 @@ impl LocalEngineService {
                     instance_id: instance_id.clone().unwrap_or_default(),
                     seq: entry.seq,
                     timestamp_ms: entry.timestamp_ms,
-                    level: match entry.source {
-                        crate::infra::local_engine::log_pipe::LogSource::Stdout => "info",
-                        crate::infra::local_engine::log_pipe::LogSource::Stderr => "warn",
-                    }
-                    .to_string(),
+                    level: classify_engine_log(entry.source, &entry.text).to_string(),
                     text: entry.text,
                 })
                 .collect();
+            logs.reverse();
             return Ok(logs);
         }
 
@@ -2774,39 +2844,117 @@ impl LocalEngineService {
         }
 
         // ── 模型身份校验（model_id + model_revision + fingerprint） ──
-        // health 报告的 model_id 和 model_revision 必须与 descriptor 一致。
-        // Ready 必须有合法 fingerprint。
+        // 统一 ModelService 管理的引擎从 model_storage manifest 动态获取期望身份；
+        // adapter 自管模型的引擎使用编译期 descriptor 身份，并由 adapter health
+        // 契约负责校验其专属 manifest 产生的 content fingerprint。
         let descriptor = entry.adapter.descriptor();
-        let expected_model_id = &descriptor.model_contract.model_id;
-        let expected_revision = &descriptor.model_contract.revision;
+        let engine_id = &descriptor.engine_id;
 
-        if let Some(ref health_model_id) = mapping.model_id {
-            if health_model_id != expected_model_id {
-                return Err(LocalEngineError::with_detail(
-                    LocalEngineErrorCode::IdentityVerification,
-                    ErrorPhase::Health,
-                    "model_id 不匹配",
-                    format!(
-                        "health 报告 model_id='{health_model_id}'，descriptor 期望='{expected_model_id}'"
-                    ),
-                ));
+        // managed 模式 fail-closed：未安装/损坏时不回退 descriptor。
+        // adapter-managed 模式显式使用 descriptor，fingerprint 由 health 提供。
+        // asset_key 真源 = 配置选中的模型（funasr 读 SttConfig.funasr_model），
+        // 不能用 descriptor 硬编码默认值——用户可能装了 paraformer-zh 而默认是
+        // SenseVoiceSmall，按默认查找会误报"模型未安装"。
+        let selected_model_id = if engine_id.as_str() == super::funasr::FUNASR_ENGINE_ID {
+            Some(
+                crate::app::stt_config::get_stt_config()
+                    .local_engine
+                    .funasr_model,
+            )
+        } else {
+            None
+        };
+        let (expected_model_id, expected_revision, expected_fingerprint) =
+            match resolve_expected_model_identity(
+                engine_id,
+                selected_model_id.as_deref(),
+                &descriptor.model_contract,
+                entry.adapter.uses_managed_model_storage(),
+            ) {
+                Ok(identity) => identity,
+                Err(reason) => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::ModelNotReady,
+                        ErrorPhase::Health,
+                        "模型身份解析失败",
+                        format!("无法从 manifest 获取模型身份: {reason}"),
+                    ));
+                }
+            };
+
+        if mapping.model == ModelHealth::Ready {
+            match mapping.model_id.as_deref() {
+                Some(health_model_id) if health_model_id == expected_model_id => {}
+                Some(health_model_id) => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "model_id 不匹配",
+                        format!(
+                            "health 报告 model_id='{health_model_id}'，期望='{expected_model_id}'"
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "模型 Ready 但缺少 model_id",
+                        "health 报告 model=Ready 但 model_id 为 None",
+                    ));
+                }
+            }
+
+            match mapping.model_revision.as_deref() {
+                Some(health_revision) if health_revision == expected_revision => {}
+                Some(health_revision) => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "model_revision 不匹配",
+                        format!(
+                            "health 报告 model_revision='{health_revision}'，期望='{expected_revision}'"
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "模型 Ready 但缺少 model_revision",
+                        "health 报告 model=Ready 但 model_revision 为 None",
+                    ));
+                }
+            }
+        } else {
+            if let Some(ref health_model_id) = mapping.model_id {
+                if health_model_id != &expected_model_id {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "model_id 不匹配",
+                        format!(
+                            "health 报告 model_id='{health_model_id}'，期望='{expected_model_id}'"
+                        ),
+                    ));
+                }
+            }
+
+            if let Some(ref health_revision) = mapping.model_revision {
+                if health_revision != &expected_revision {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "model_revision 不匹配",
+                        format!(
+                            "health 报告 model_revision='{health_revision}'，期望='{expected_revision}'"
+                        ),
+                    ));
+                }
             }
         }
 
-        if let Some(ref health_revision) = mapping.model_revision {
-            if health_revision != expected_revision {
-                return Err(LocalEngineError::with_detail(
-                    LocalEngineErrorCode::IdentityVerification,
-                    ErrorPhase::Health,
-                    "model_revision 不匹配",
-                    format!(
-                        "health 报告 model_revision='{health_revision}'，descriptor 期望='{expected_revision}'"
-                    ),
-                ));
-            }
-        }
-
-        // Ready 必须有合法 fingerprint（非空、非全零）
+        // Ready 必须有合法 64-hex fingerprint；managed 模式还必须与 manifest 一致。
         if mapping.model == ModelHealth::Ready {
             match &mapping.model_content_fingerprint {
                 None => {
@@ -2817,12 +2965,27 @@ impl LocalEngineService {
                         "health 报告 model=Ready 但 model_content_fingerprint 为 None",
                     ));
                 }
-                Some(fp) if fp.is_empty() || fp.chars().all(|c| c == '0') => {
+                Some(fp) if !is_valid_model_fingerprint(fp) => {
                     return Err(LocalEngineError::with_detail(
                         LocalEngineErrorCode::ModelNotReady,
                         ErrorPhase::Health,
                         "模型 Ready 但 fingerprint 无效",
-                        "health 报告 model=Ready 但 model_content_fingerprint 为空或全零",
+                        "health 报告 model=Ready 但 model_content_fingerprint 不是 64 位小写 hex",
+                    ));
+                }
+                Some(fp)
+                    if expected_fingerprint
+                        .as_ref()
+                        .is_some_and(|expected| fp != expected) =>
+                {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::IdentityVerification,
+                        ErrorPhase::Health,
+                        "fingerprint 不匹配",
+                        format!(
+                            "health 报告 fingerprint='{fp}'，manifest 期望='{}'",
+                            expected_fingerprint.as_deref().unwrap_or_default()
+                        ),
                     ));
                 }
                 _ => {}
@@ -2899,16 +3062,8 @@ impl LocalEngineService {
             }
         };
 
-        let lease = ProcessLease::new(
-            engine_id.to_string(),
-            identity.instance_id.clone(),
-            identity.pid,
-            identity.start_time_ms,
-            identity.executable.to_string_lossy().to_string(),
-            endpoint.base_url(),
-            identity_input.token_fingerprint(),
-            generation_id,
-        );
+        let lease =
+            build_process_lease(engine_id, identity, identity_input, endpoint, generation_id);
 
         if let Err(e) = write_lease(&lease) {
             tracing::warn!(
@@ -3287,6 +3442,31 @@ impl LocalEngineService {
     }
 }
 
+/// 用服务身份与 OS 进程证据构造持久化 lease。
+///
+/// `ManagedProcess` 的 `ProcessIdentity::instance_id` 是 infra 状态机用于隔离
+/// generation 的内部 token；health、回滚与恢复协议使用的是
+/// `ServiceIdentityInput::instance_id`。lease 必须保存后者，否则 start 回滚时
+/// 无法通过 instance 校验删除本次写入的 lease。
+fn build_process_lease(
+    engine_id: &EngineId,
+    process_identity: &ProcessIdentity,
+    service_identity: &ServiceIdentityInput,
+    endpoint: &crate::infra::local_engine::port::Endpoint,
+    generation_id: String,
+) -> ProcessLease {
+    ProcessLease::new(
+        engine_id.to_string(),
+        service_identity.instance_id.clone(),
+        process_identity.pid,
+        process_identity.start_time_ms,
+        process_identity.executable.to_string_lossy().to_string(),
+        endpoint.base_url(),
+        service_identity.token_fingerprint(),
+        generation_id,
+    )
+}
+
 // ── 日志投影辅助 ──────────────────────────────────────────────────────────
 
 /// 把 ManagedProcess 的实时日志转发到 EventPort。
@@ -3340,11 +3520,21 @@ async fn pump_logs_to_event_port(
 
                         match current_instance_id {
                             Some(ref current) if current == &instance_id => {
-                                // 身份匹配——emit 日志（instance_id 为真实来源实例）
+                                // 身份匹配——同时进入 Blink tracing 与 UI 日志流。
+                                // 未分类的第三方输出降为 debug，避免下载进度污染默认日志。
+                                let level = classify_engine_log(log_entry.source, &log_entry.text);
+                                match level {
+                                    super::dto::EngineLogLevel::Error => tracing::error!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                    super::dto::EngineLogLevel::Warn => tracing::warn!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                    super::dto::EngineLogLevel::Info => tracing::info!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                    super::dto::EngineLogLevel::Trace => tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                    _ => tracing::debug!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                }
                                 event_port.emit_log(
                                     &engine_id,
                                     &instance_id,
                                     log_entry.seq,
+                                    level,
                                     &log_entry.text,
                                 );
                             }
@@ -3384,6 +3574,86 @@ async fn pump_logs_to_event_port(
             }
         }
     }
+}
+
+// ── 动态模型身份解析（0.22.6 B2）─────────────────────────────────────────
+
+/// 从 model_storage manifest 动态解析当前安装的模型身份。
+///
+/// 返回 `(model_id, revision, fingerprint)` 三元组（如果模型已安装且有效）。
+///
+/// **asset_key 真源**：managed 模式下用 `selected_model_id`（配置选中的模型，
+/// 如 funasr 的 `funasr_model`）查找 manifest；`fallback_contract.model_id`
+/// 只是 descriptor 默认占位——用户可能安装/选择了其他模型（如装了
+/// paraformer-zh 而 descriptor 默认 SenseVoiceSmall），按硬编码查找会
+/// 误报"模型未安装"。
+///
+/// **0.22.6 B2 fail-closed 铁则**：模型未安装、损坏或恢复失败时返回 `Err`，
+/// 不再回退到 descriptor 静态值。调用方必须将此视为启动/健康检查失败。
+///
+/// 这确保 health Ready 校验只与实际安装的 manifest 比对，
+/// 而非与 descriptor 中编译期常量比对——防止
+/// "下载了模型 A 但 health 期望模型 B" 的静默通过。
+fn resolve_expected_model_identity(
+    engine_id: &EngineId,
+    selected_model_id: Option<&str>,
+    fallback_contract: &ModelContract,
+    uses_managed_model_storage: bool,
+) -> Result<(String, String, Option<String>), String> {
+    if !uses_managed_model_storage {
+        return Ok((
+            fallback_contract.model_id.clone(),
+            fallback_contract.revision.clone(),
+            None,
+        ));
+    }
+
+    // 使用配置选中的 model_id 作为 asset_key 的来源
+    let model_id_for_key = selected_model_id
+        .filter(|m| !m.is_empty())
+        .unwrap_or(&fallback_contract.model_id);
+    let asset_key = mstore::encode_asset_key(model_id_for_key);
+    match mstore::restore_model_state(engine_id, &asset_key) {
+        Ok(mstore::RestoredModelState::Installed { manifest, .. }) => Ok((
+            manifest.model_id,
+            manifest.revision,
+            Some(manifest.content_fingerprint),
+        )),
+        Ok(mstore::RestoredModelState::Corrupted { reason, .. }) => {
+            tracing::warn!(
+                engine_id = %engine_id,
+                model_id = %model_id_for_key,
+                reason = %reason,
+                "模型状态 Corrupted——fail-closed，不回退到 descriptor 静态身份"
+            );
+            Err(format!("模型状态 Corrupted: {reason}"))
+        }
+        Ok(mstore::RestoredModelState::NotInstalled) => {
+            tracing::debug!(
+                engine_id = %engine_id,
+                model_id = %model_id_for_key,
+                "模型未安装——fail-closed，不回退到 descriptor 静态身份"
+            );
+            Err(format!("模型未安装: {model_id_for_key}"))
+        }
+        Err(e) => {
+            tracing::warn!(
+                engine_id = %engine_id,
+                model_id = %model_id_for_key,
+                error = %e,
+                "模型状态恢复失败——fail-closed，不回退到 descriptor 静态身份"
+            );
+            Err(format!("模型状态恢复失败: {e}"))
+        }
+    }
+}
+
+fn is_valid_model_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.len() == 64
+        && fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && !fingerprint.bytes().all(|byte| byte == b'0')
 }
 
 // ── 存储扫描辅助（spawn_blocking 执行）────────────────────────────────────
@@ -3770,6 +4040,37 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    #[test]
+    fn lease_uses_service_instance_id_instead_of_process_generation_id() {
+        let engine_id = EngineId::new("paddleocr").unwrap();
+        let endpoint = crate::infra::local_engine::port::Endpoint::new(8100);
+        let service_identity = ServiceIdentityInput {
+            engine_id: engine_id.to_string(),
+            instance_id: "inst-service".to_string(),
+            token: "test-token".to_string(),
+            endpoint: endpoint.clone(),
+        };
+        let process_identity = ProcessIdentity {
+            pid: 4242,
+            executable: std::path::PathBuf::from("python.exe"),
+            start_time_ms: 123_456,
+            instance_id: "inst-process-generation".to_string(),
+        };
+
+        let lease = build_process_lease(
+            &engine_id,
+            &process_identity,
+            &service_identity,
+            &endpoint,
+            "gen-test".to_string(),
+        );
+
+        assert_eq!(lease.instance_id, "inst-service");
+        assert_ne!(lease.instance_id, process_identity.instance_id);
+        assert_eq!(lease.pid, process_identity.pid);
+        assert_eq!(lease.endpoint, "http://127.0.0.1:8100");
+    }
+
     // ── Fake Adapter ────────────────────────────────────────────────────────
 
     /// 构建 fake adapter（可配置 self_test 通过/失败）。
@@ -3987,11 +4288,20 @@ mod tests {
         let svc = make_service("engine-a");
         let eid = EngineId::new("engine-a").unwrap();
 
+        let entry = svc.get_entry(&eid).await.unwrap();
+        entry.status.write().await.last_error = Some(LocalEngineError::with_detail(
+            LocalEngineErrorCode::NotRunning,
+            ErrorPhase::Stop,
+            "进程意外退出",
+            "stale error from previous instance",
+        ));
+
         let result = svc.stop(&eid).await;
         assert!(result.is_ok());
 
         let snapshot = svc.get_status(&eid).await.unwrap();
         assert_eq!(snapshot.status.desired, DesiredState::Stopped);
+        assert!(snapshot.status.last_error.is_none());
     }
 
     // ── 验收场景 6：catalog / get_all_status 查询 API 正确返回 ─────────────
@@ -5111,6 +5421,8 @@ mod tests {
         status_snapshots: std::sync::Mutex<Vec<String>>,
         runtime_logs: std::sync::Mutex<Vec<(String, String, u64, String)>>,
         // (engine_id, instance_id, seq, line)
+        install_stages: std::sync::Mutex<Vec<(String, String, String)>>,
+        // (engine_id, operation_id, stage)
     }
 
     impl RecordingEventPort {
@@ -5119,6 +5431,7 @@ mod tests {
                 install_logs: std::sync::Mutex::new(Vec::new()),
                 status_snapshots: std::sync::Mutex::new(Vec::new()),
                 runtime_logs: std::sync::Mutex::new(Vec::new()),
+                install_stages: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -5128,6 +5441,10 @@ mod tests {
 
         fn runtime_logs(&self) -> Vec<(String, String, u64, String)> {
             self.runtime_logs.lock().unwrap().clone()
+        }
+
+        fn install_stages(&self) -> Vec<(String, String, String)> {
+            self.install_stages.lock().unwrap().clone()
         }
     }
 
@@ -5139,7 +5456,14 @@ mod tests {
                 .push("status".to_string());
         }
 
-        fn emit_log(&self, engine_id: &EngineId, instance_id: &str, seq: u64, line: &str) {
+        fn emit_log(
+            &self,
+            engine_id: &EngineId,
+            instance_id: &str,
+            seq: u64,
+            _level: crate::app::local_engine::dto::EngineLogLevel,
+            line: &str,
+        ) {
             self.runtime_logs.lock().unwrap().push((
                 engine_id.to_string(),
                 instance_id.to_string(),
@@ -5153,7 +5477,7 @@ mod tests {
             engine_id: &EngineId,
             operation_id: &str,
             seq: u64,
-            level: &str,
+            level: crate::app::local_engine::dto::EngineLogLevel,
             text: &str,
         ) {
             self.install_logs.lock().unwrap().push((
@@ -5162,6 +5486,14 @@ mod tests {
                 seq,
                 level.to_string(),
                 text.to_string(),
+            ));
+        }
+
+        fn emit_install_stage(&self, engine_id: &EngineId, operation_id: &str, stage: &str) {
+            self.install_stages.lock().unwrap().push((
+                engine_id.to_string(),
+                operation_id.to_string(),
+                stage.to_string(),
             ));
         }
     }
@@ -5318,11 +5650,29 @@ mod tests {
         let engine_id = EngineId::new("test-rt-vs-install").unwrap();
 
         // 发送运行时日志（以 instance_id 隔离）
-        event_port.emit_log(&engine_id, "inst-abc", 1, "runtime log 1");
-        event_port.emit_log(&engine_id, "inst-abc", 2, "runtime log 2");
+        event_port.emit_log(
+            &engine_id,
+            "inst-abc",
+            1,
+            crate::app::local_engine::dto::EngineLogLevel::Info,
+            "runtime log 1",
+        );
+        event_port.emit_log(
+            &engine_id,
+            "inst-abc",
+            2,
+            crate::app::local_engine::dto::EngineLogLevel::Info,
+            "runtime log 2",
+        );
 
         // 发送安装日志（以 operation_id 隔离）
-        event_port.emit_install_log(&engine_id, "op-xyz", 1, "info", "install log 1");
+        event_port.emit_install_log(
+            &engine_id,
+            "op-xyz",
+            1,
+            crate::app::local_engine::dto::EngineLogLevel::Info,
+            "install log 1",
+        );
 
         let rt_logs = event_port.runtime_logs();
         let install_logs = event_port.install_logs();
@@ -5340,21 +5690,145 @@ mod tests {
         assert!(rt_logs.iter().all(|(_, inst, _, _)| inst != "op-xyz"));
     }
 
-    // ── on_stage 不 emit 任何事件（只做 tracing） ──
+    // ── 0.22.6 H4: on_stage 通过 emit_install_stage 广播阶段变更 ──
 
     #[test]
-    fn install_sink_adapter_on_stage_does_not_emit() {
+    fn install_sink_adapter_on_stage_emits_install_stage() {
         let event_port = Arc::new(RecordingEventPort::new());
         let engine_id = EngineId::new("test-stage").unwrap();
-        let adapter =
-            InstallSinkAdapter::new(event_port.clone(), engine_id, "op-stage-test".to_string());
+        let adapter = InstallSinkAdapter::new(
+            event_port.clone(),
+            engine_id.clone(),
+            "op-stage-test".to_string(),
+        );
 
-        // on_stage 不应产生任何 emit
+        // on_stage 应通过 emit_install_stage 广播阶段变更
         adapter.on_stage("preparing");
         adapter.on_stage("downloading");
+        adapter.on_stage("verifying");
         adapter.on_stage("completed");
 
+        let stages = event_port.install_stages();
+        assert_eq!(stages.len(), 4, "on_stage 应产生 4 个阶段事件");
+        assert_eq!(stages[0].2, "preparing");
+        assert_eq!(stages[1].2, "downloading");
+        assert_eq!(stages[2].2, "verifying");
+        assert_eq!(stages[3].2, "completed");
+
+        // 验证 engine_id 和 operation_id 正确传递
+        assert!(stages.iter().all(|(eid, _, _)| eid == "test-stage"));
+        assert!(stages.iter().all(|(_, op, _)| op == "op-stage-test"));
+
+        // on_stage 不应产生安装日志（emit_install_log）
         let logs = event_port.install_logs();
         assert!(logs.is_empty(), "on_stage 不应 emit 安装日志");
+    }
+
+    /// 验证安装阶段事件的 operation_id 隔离。
+    #[test]
+    fn install_sink_adapter_stage_operation_id_isolation() {
+        let event_port = Arc::new(RecordingEventPort::new());
+        let engine_id = EngineId::new("test-stage-iso").unwrap();
+
+        // 两个不同 operation_id 的 adapter
+        let adapter1 =
+            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-aaa".to_string());
+        let adapter2 =
+            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-bbb".to_string());
+
+        adapter1.on_stage("preparing");
+        adapter2.on_stage("downloading");
+
+        let stages = event_port.install_stages();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].1, "op-aaa");
+        assert_eq!(stages[1].1, "op-bbb");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6 B2: expected model identity 策略测试
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// managed model storage 在模型未安装时返回 Err（不回退到 descriptor）。
+    #[test]
+    fn resolve_identity_fails_when_not_installed() {
+        let engine_id = EngineId::new("test-identity-not-installed").unwrap();
+        let contract = crate::infra::local_engine::runtime::ModelContract {
+            model_id: "test-model-not-installed".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+        };
+
+        let result = resolve_expected_model_identity(&engine_id, None, &contract, true);
+        assert!(result.is_err(), "模型未安装时应返回 Err");
+        assert!(
+            result.unwrap_err().contains("未安装"),
+            "错误信息应包含 '未安装'"
+        );
+    }
+
+    #[test]
+    fn resolve_identity_uses_descriptor_for_adapter_managed_model() {
+        let engine_id = EngineId::new("paddleocr").unwrap();
+        let contract = crate::infra::local_engine::runtime::ModelContract {
+            model_id: "PP-OCRv6:det:rec".to_string(),
+            revision: "ppocrv6-tiny".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+        };
+
+        let identity = resolve_expected_model_identity(&engine_id, None, &contract, false).unwrap();
+        assert_eq!(identity.0, contract.model_id);
+        assert_eq!(identity.1, contract.revision);
+        assert_eq!(identity.2, None);
+    }
+
+    #[test]
+    fn model_fingerprint_requires_nonzero_lowercase_sha256_hex() {
+        assert!(is_valid_model_fingerprint(&"a1".repeat(32)));
+        assert!(!is_valid_model_fingerprint(&"A1".repeat(32)));
+        assert!(!is_valid_model_fingerprint(&"0".repeat(64)));
+        assert!(!is_valid_model_fingerprint("abc123"));
+    }
+
+    #[test]
+    fn engine_log_level_uses_explicit_wrapper_prefixes() {
+        use crate::app::local_engine::dto::EngineLogLevel;
+        use crate::infra::local_engine::log_pipe::LogSource;
+
+        assert_eq!(
+            classify_engine_log(LogSource::Stdout, "[INFO] ready"),
+            EngineLogLevel::Info
+        );
+        assert_eq!(
+            classify_engine_log(LogSource::Stdout, "[STATE] model_state=Ready"),
+            EngineLogLevel::Info
+        );
+        assert_eq!(
+            classify_engine_log(LogSource::Stderr, "[WARN] retry"),
+            EngineLogLevel::Warn
+        );
+        assert_eq!(
+            classify_engine_log(LogSource::Stderr, "[ERROR] failed"),
+            EngineLogLevel::Error
+        );
+        assert_eq!(
+            classify_engine_log(LogSource::Stderr, "Traceback (most recent call last):"),
+            EngineLogLevel::Error
+        );
+    }
+
+    #[test]
+    fn unclassified_engine_output_is_debug_not_stderr_warning() {
+        use crate::app::local_engine::dto::EngineLogLevel;
+        use crate::infra::local_engine::log_pipe::LogSource;
+
+        assert_eq!(
+            classify_engine_log(LogSource::Stderr, "[================] 32.52%"),
+            EngineLogLevel::Debug
+        );
+        assert_eq!(
+            classify_engine_log(LogSource::Stderr, "Extracting PP-OCRv6_tiny_rec_infer.tar"),
+            EngineLogLevel::Debug
+        );
     }
 }

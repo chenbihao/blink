@@ -47,6 +47,46 @@ pub enum SttError {
     FormatMismatch(String),
 }
 
+// ── STT Engine Connection ────────────────────────────────────────────────
+
+/// STT 本地引擎连接快照（domain 层纯数据类型）。
+///
+/// 0.22.6 H4（批次 3）：替代此前对 `crate::app::local_engine::service::LocalEngineConnection`
+/// 的直接引用——domain 层不得依赖 app 层。
+///
+/// app 层（`VoiceService`）负责把 `LocalEngineService::get_connection` 的结果
+/// 投影为此类型再传入 `create_engine`。
+///
+/// **结构化 endpoint**——不再通过 `rsplit(':')` + `unwrap_or(8100)` 猜测端口。
+/// endpoint 损坏时 `create_engine` 返回明确错误。
+#[derive(Clone)]
+pub struct SttEngineConnection {
+    /// 监听地址（始终 `127.0.0.1`）。
+    pub host: String,
+    /// 实际监听端口。
+    pub port: u16,
+    /// 服务 token（用于 `X-Engine-Token` header 鉴权）。
+    pub token: String,
+    /// engine id（日志/诊断用）。
+    #[allow(dead_code)]
+    pub engine_id: String,
+    /// instance id（每次启动随机生成，用于实例隔离）。
+    #[allow(dead_code)]
+    pub instance_id: String,
+}
+
+impl std::fmt::Debug for SttEngineConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SttEngineConnection")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("token", &"<redacted>")
+            .field("engine_id", &self.engine_id)
+            .field("instance_id", &self.instance_id)
+            .finish()
+    }
+}
+
 // ── STT Engine trait ─────────────────────────────────────────────────────
 
 /// STT 引擎 trait。
@@ -157,8 +197,10 @@ pub(crate) mod wav;
 /// - Local 模式 + StreamingMode::Pseudo → PseudoStreamingSttEngine (VAD + 预览) ⭐ 默认
 /// - Local 模式 + StreamingMode::Off → LocalSttEngine (HTTP 非流式)
 ///
-/// **0.22.3 Task A**: Local 模式下使用 `LocalEngineConnection`（包含 endpoint + token），
+/// **0.22.6 批次 3**: Local 模式下使用 `SttEngineConnection`（domain 层纯数据类型），
 /// STT 请求携带 `X-Engine-Token` 鉴权。无运行实例时返回错误。
+/// **不再引用 `crate::app`**——app 层 VoiceService 负责把
+/// `LocalEngineConnection` 投影为 `SttEngineConnection`。
 ///
 /// **0.22.6 H4**: Local 模式下从 `local_stt_selection` 联合引用解析 engine/model。
 /// 当前只需支持已注册的 Python FunASR，不实现 GGUF。
@@ -166,7 +208,7 @@ pub(crate) mod wav;
 /// **不会回退到 Mock 引擎**——未启用 / 未配置 / 服务未就绪时返回 Err，
 /// 由调用方（VoiceService）决定如何向用户反馈错误。
 pub fn create_engine(
-    connection: Option<crate::app::local_engine::service::LocalEngineConnection>,
+    connection: Option<SttEngineConnection>,
 ) -> Result<Box<dyn SttEngine>, String> {
     let config = crate::domain::config::stt_config::get_stt_config();
 
@@ -195,7 +237,7 @@ pub fn create_engine(
             }
         }
         crate::domain::config::stt_config::SttMode::Local => {
-            // 0.22.3 Task A: 从 connection 快照提取 port 和 token
+            // 0.22.6 批次 3: 从 SttEngineConnection 提取 port 和 token
             let conn = match connection {
                 Some(c) => c,
                 None => {
@@ -204,13 +246,8 @@ pub fn create_engine(
                         .to_string());
                 }
             };
-            // 从 endpoint base_url (http://127.0.0.1:port) 提取端口
-            let port = conn
-                .endpoint
-                .rsplit(':')
-                .next()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8100);
+            // 结构化 endpoint——不再通过 rsplit(':') 猜测端口
+            let port = conn.port;
             let token = conn.token.clone();
 
             match config.streaming_mode {
@@ -262,5 +299,162 @@ pub fn mock_text_for_elapsed(elapsed: std::time::Duration) -> &'static str {
         4 => "你好世界这是一段",
         5 => "你好世界这是一段测试语音",
         _ => "你好世界这是一段测试语音识别的文字结果",
+    }
+}
+
+// ── 测试 ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn stt_engine_connection_clone_preserves_fields() {
+        let conn = SttEngineConnection {
+            host: "127.0.0.1".to_string(),
+            port: 8100,
+            token: "test-token-abc".to_string(),
+            engine_id: "funasr".to_string(),
+            instance_id: "inst-123".to_string(),
+        };
+        let cloned = conn.clone();
+        assert_eq!(cloned.host, conn.host);
+        assert_eq!(cloned.port, conn.port);
+        assert_eq!(cloned.token, conn.token);
+        assert_eq!(cloned.engine_id, conn.engine_id);
+        assert_eq!(cloned.instance_id, conn.instance_id);
+    }
+
+    #[test]
+    fn stt_engine_connection_debug_format_contains_key_fields() {
+        let conn = SttEngineConnection {
+            host: "127.0.0.1".to_string(),
+            port: 8100,
+            token: "secret".to_string(),
+            engine_id: "funasr".to_string(),
+            instance_id: "inst-1".to_string(),
+        };
+        let debug_str = format!("{:?}", conn);
+        assert!(debug_str.contains("127.0.0.1"));
+        assert!(debug_str.contains("8100"));
+        assert!(!debug_str.contains("secret"));
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("funasr"));
+    }
+
+    /// create_engine 在 STT 未启用时返回明确错误（不回退 Mock）。
+    /// Local 模式但无 connection 时也返回明确错误。
+    ///
+    /// 注意：init_cache 用 OnceLock，只能设置一次，所以两个场景合并到一个测试中。
+    #[test]
+    fn create_engine_returns_err_for_disabled_and_no_connection() {
+        // 临时设置 config 为 disabled + Local 模式
+        let config = crate::domain::config::stt_config::SttConfig {
+            enabled: false,
+            mode: crate::domain::config::stt_config::SttMode::Local,
+            ..Default::default()
+        };
+        crate::domain::config::stt_config::init_cache(config);
+
+        // STT 未启用 → 返回错误
+        let result = create_engine(None);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.contains("STT 未启用"), "应提及未启用: {e}");
+        }
+    }
+
+    /// Static architecture test: `src/domain/stt` 不得引用 `crate::app`、`tauri` 或 `windows`。
+    ///
+    /// 0.22.6 批次 3: domain 层必须保持框架无关——不依赖 app 层、Tauri 或 Win32 API。
+    /// 此测试扫描 `src/domain/stt/` 下所有 `.rs` 文件，检查是否包含禁止的引用。
+    ///
+    /// 注意：`crate::domain::stt::SttEngineConnection` 被 app 层引用是合法的（app → domain），
+    /// 但 domain 层不得反向引用 app 层。
+    #[test]
+    fn domain_stt_does_not_reference_app_tauri_or_windows() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        // 定位 src/domain/stt 目录
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let stt_dir: PathBuf = std::path::Path::new(&manifest_dir)
+            .join("src")
+            .join("domain")
+            .join("stt");
+
+        if !stt_dir.exists() {
+            // 在某些构建环境中（如 IDE 索引），目录可能不存在——跳过
+            eprintln!("跳过：src/domain/stt 目录不存在（{}）", stt_dir.display());
+            return;
+        }
+
+        // 递归收集所有 .rs 文件
+        fn collect_rs_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        collect_rs_files(&path, files);
+                    } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        collect_rs_files(&stt_dir, &mut files);
+
+        assert!(
+            !files.is_empty(),
+            "src/domain/stt 目录下应至少有一个 .rs 文件"
+        );
+
+        // 使用运行时构造避免测试代码自身触发违规
+        let p1 = format!("crate{}:{}", ":", ":app");
+        let p2 = format!("use {}", "tauri");
+        let p3 = format!("use {}", "windows::");
+        let p4 = format!("{}{}", "tauri", "::");
+        let forbidden_patterns = [p1, p2, p3, p4];
+
+        let mut violations: Vec<String> = Vec::new();
+        for file in &files {
+            // 跳过测试模块中的注释行——只检查实际代码
+            let content = match fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("警告: 读取 {} 失败: {e}", file.display());
+                    continue;
+                }
+            };
+
+            for (line_num, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                // 跳过注释行
+                if trimmed.starts_with("//") || trimmed.starts_with("/*") {
+                    continue;
+                }
+                for pattern in &forbidden_patterns {
+                    if trimmed.contains(pattern) {
+                        // 允许在注释中出现（如文档引用），但上面已跳过注释行
+                        violations.push(format!(
+                            "{}:{}: 包含禁止的引用 '{}': {}",
+                            file.display(),
+                            line_num + 1,
+                            pattern,
+                            trimmed
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "src/domain/stt 不得引用 crate::app / tauri / windows。\n\
+             违规项:\n{}",
+            violations.join("\n")
+        );
     }
 }

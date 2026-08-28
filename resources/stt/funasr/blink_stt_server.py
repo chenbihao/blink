@@ -12,6 +12,9 @@ HTTP 端点路径和响应格式与官方 funasr-server 完全兼容，
 
 模型 lazy load：只有实际收到请求时才加载对应模型。
 
+0.22.6: 模型加载改为只从 BLINK_MODEL_PAYLOAD_DIR 指向的本地 payload 目录加载，
+不触发隐式网络下载。payload 目录不存在或模型文件缺失时直接报错。
+
 用法:
     python blink_stt_server.py --model SenseVoiceSmall --port 8000 --device cpu
     python blink_stt_server.py --model SenseVoiceSmall --port 8000 --device cpu \
@@ -23,11 +26,13 @@ import hashlib
 import io
 import json
 import os
+import struct
 import sys
 import tempfile
 import traceback
 import wave
 import logging
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -48,10 +53,23 @@ _model_lock = None     # threading.Lock
 # "FastAPI 已就绪但模型还在下载" 与 "模型已就绪可推理"。
 _model_status = "idle"
 
-# 0.22.6 H1: 模型内容指纹（model_content_fingerprint）
-# 模型 Ready 时计算，基于 ModelScope 缓存文件的内容 SHA-256。
+# 0.22.6 H1/B2: 模型内容指纹（model_content_fingerprint）
+# 模型 Ready 时计算，基于 payload 目录的 canonical fingerprint。
+# 与 Rust model_storage.rs::compute_content_fingerprint 逐字节一致。
 # 用于检测模型文件损坏/篡改。非空、非全零。
 _model_content_fingerprint: Optional[str] = None
+
+# 0.22.6 B2: 动态模型身份（从环境变量注入，不使用静态 descriptor 合同）
+# BLINK_MODEL_ID: 本次启动的 canonical model id
+# BLINK_MODEL_REVISION: 本次启动的 model revision
+# BLINK_MODEL_PAYLOAD_DIR: 已安装 generation 的 payload 目录路径
+# BLINK_MODEL_FINGERPRINT: manifest 中记录的 fingerprint（用于运行时比对）
+# BLINK_MODEL_SUBMODELS: 逗号分隔的子模型 id 列表（如 "fsmn-vad,ct-punc"）
+_model_id_expected: Optional[str] = None
+_model_revision_expected: Optional[str] = None
+_model_payload_dir: Optional[str] = None
+_model_fingerprint_expected: Optional[str] = None
+_model_submodels: list = []
 
 # 启动参数
 _args: Optional[argparse.Namespace] = None
@@ -150,113 +168,98 @@ def _resolve_model_id(name: str) -> str:
 
 # ── 0.22.6 H1: 模型内容指纹 ────────────────────────────────────────────────
 
-def _get_modelscope_cache_dir() -> str:
-    """获取 ModelScope 缓存目录路径。
+# ── 0.22.6 B2: Rust/Python 共享 canonical fingerprint ──────────────────────
+#
+# 以下算法必须与 Rust 侧 model_storage.rs::compute_content_fingerprint 逐字节一致。
+#
+# 算法：
+# 1. 递归枚举 payload 下的普通文件。
+# 2. 使用相对于 payload 根目录的规范化 `/` 路径。
+# 3. 按 UTF-8 相对路径字节排序。
+# 4. 对每个文件依次哈希：
+#    - 相对路径长度（u64 LE）与相对路径字节；
+#    - 文件大小（u64 LE）；
+#    - 文件内容。
+# 5. 排除 Blink 自己的 manifest、current pointer、临时文件、下载锁和 staging 元数据。
+# 6. 最终输出小写 64 位 hex SHA-256。
 
-    优先使用 MODELSCOPE_CACHE 环境变量（由 Rust adapter 注入），
-    回退到默认 ~/.cache/modelscope。
+
+def _collect_files(root: Path, current: Path, files: list) -> None:
+    """递归收集文件，排除 Blink 元数据文件。"""
+    if not current.is_dir():
+        return
+
+    for entry in current.iterdir():
+        name = entry.name
+
+        # 排除 Blink 元数据文件
+        if name in ("manifest.json", "current.json"):
+            continue
+        if name.startswith(".tmp_"):
+            continue
+        if name == ".download_lock":
+            continue
+
+        if entry.is_dir():
+            _collect_files(root, entry, files)
+        elif entry.is_file():
+            rel = entry.relative_to(root)
+            rel_str = "/".join(rel.parts)
+            files.append((rel_str, entry))
+
+
+def compute_content_fingerprint(payload_dir: Path) -> str:
+    """计算目录的 content fingerprint（确定性目录聚合 SHA-256）。
+
+    与 Rust 侧 model_storage.rs::compute_content_fingerprint 逐字节一致。
     """
-    return os.environ.get(
-        "MODELSCOPE_CACHE",
-        os.path.join(os.path.expanduser("~"), ".cache", "modelscope"),
-    )
+    files: list = []
+    _collect_files(payload_dir, payload_dir, files)
+
+    # 按相对路径字节排序
+    files.sort(key=lambda x: x[0].encode("utf-8"))
+
+    hasher = hashlib.sha256()
+
+    for rel_path, abs_path in files:
+        rel_bytes = rel_path.encode("utf-8")
+        rel_len = len(rel_bytes)
+
+        # u64 LE: 相对路径长度
+        hasher.update(struct.pack("<Q", rel_len))
+        # 相对路径字节
+        hasher.update(rel_bytes)
+
+        # 读取文件
+        with open(abs_path, "rb") as f:
+            content = f.read()
+        size = len(content)
+
+        # u64 LE: 文件大小
+        hasher.update(struct.pack("<Q", size))
+        # 文件内容
+        hasher.update(content)
+
+    return hasher.hexdigest()
 
 
-def _compute_model_content_fingerprint(model_name: str) -> Optional[str]:
-    """计算模型缓存文件的内容指纹。
+def _compute_model_content_fingerprint() -> Optional[str]:
+    """计算当前 payload 目录的 content fingerprint。
 
-    0.22.6 H1: 在模型 Ready 时计算稳定、非空、非全零的内容指纹。
-    基于 ModelScope 缓存目录中的实际模型文件内容做 SHA-256。
-
-    ModelScope 缓存目录结构（典型）：
-      MODELSCOPE_CACHE/
-        iic/
-          SenseVoiceSmall/
-            model.pt
-            configuration.json
-            ...
-
-    指纹计算方式（与 PaddleOCR server 一致的原则）：
-    - 收集目标模型目录下的所有文件
-    - 按相对路径排序
-    - 对 (相对路径 + 文件内容) 依次更新 SHA-256 hasher
-    - 返回 hexdigest()
-
-    返回 None 表示无法计算指纹（模型文件不存在或路径无法定位）。
+    0.22.6 B2: 使用 BLINK_MODEL_PAYLOAD_DIR 指向的 payload 目录，
+    不再扫描 ModelScope 缓存目录。
     """
+    payload_dir = _model_payload_dir
+    if not payload_dir:
+        return None
+    payload_path = Path(payload_dir)
+    if not payload_path.is_dir():
+        return None
     try:
-        cache_dir = _get_modelscope_cache_dir()
-        if not os.path.isdir(cache_dir):
+        fp = compute_content_fingerprint(payload_path)
+        if not fp or all(c == "0" for c in fp):
             return None
-
-        # 解析模型名到 ModelScope 完整 ID
-        resolved = _resolve_model_id(model_name)
-
-        # ModelScope 缓存中模型目录路径：cache_dir/{namespace}/{model_name}/
-        # 如 iic/SenseVoiceSmall → cache_dir/iic/SenseVoiceSmall/
-        if "/" in resolved:
-            parts = resolved.split("/", 1)
-            namespace, model_dir_name = parts[0], parts[1]
-        else:
-            namespace = "iic"
-            model_dir_name = resolved
-
-        model_dir = os.path.join(cache_dir, namespace, model_dir_name)
-
-        if not os.path.isdir(model_dir):
-            # 尝试在 cache_dir 下递归查找匹配的目录
-            # ModelScope 有时将模型存储在子目录中
-            found = False
-            for root, dirs, _ in os.walk(cache_dir):
-                for d in dirs:
-                    if d == model_dir_name or d == resolved:
-                        model_dir = os.path.join(root, d)
-                        found = True
-                        break
-                if found:
-                    break
-            if not found:
-                return None
-
-        # 收集模型目录下所有文件（递归）
-        target_files = []
-        for root, _, files in os.walk(model_dir):
-            for f in files:
-                fp = os.path.join(root, f)
-                try:
-                    rel = os.path.relpath(fp, model_dir)
-                    rel_normalized = rel.replace("\\", "/")
-                    target_files.append((rel_normalized, fp))
-                except OSError:
-                    pass
-
-        if not target_files:
-            return None
-
-        # 按相对路径排序
-        target_files.sort(key=lambda x: x[0])
-
-        # 计算指纹：对 (相对路径 + 文件内容) 做 SHA-256
-        hasher = hashlib.sha256()
-        for rel_path, abs_path in target_files:
-            hasher.update(rel_path.encode("utf-8"))
-            hasher.update(b"\x00")  # 分隔符
-            try:
-                with open(abs_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(65536), b""):
-                        hasher.update(chunk)
-            except OSError as e:
-                logger.warning(f"读取模型文件失败 {abs_path}: {e}")
-                return None
-            hasher.update(b"\x00")  # 分隔符
-
-        fingerprint = hasher.hexdigest()
-
-        # 验证非空、非全零
-        if not fingerprint or all(c == "0" for c in fingerprint):
-            return None
-
-        return fingerprint
+        return fp
     except Exception as e:
         logger.warning(f"计算模型内容指纹失败: {e}")
         return None
@@ -274,16 +277,89 @@ def _is_sensevoice(model_name: str) -> bool:
     return "sensevoice" in name_lower
 
 
+# ── payload 路径解析 ──────────────────────────────────────────────────────
+
+def _find_model_dir_in_payload(payload_dir: Path, model_id: str) -> Optional[Path]:
+    """在 payload 目录中查找模型目录。
+
+    ModelScope 下载的模型会以特定目录结构存放在 cache 中。
+    通常路径形如：
+      {cache}/iic/SenseVoiceSmall/  (rclone 结构)
+    或
+      {cache}/model_id/             (简化结构)
+
+    我们搜索 payload 目录下的所有子目录，找到包含模型文件
+    （.pt, .bin, config.yaml 等）的目录。
+    """
+    # 首先尝试 model_id 作为子目录路径
+    candidate = payload_dir / model_id
+    if candidate.is_dir() and _has_model_files(candidate):
+        return candidate
+
+    # 尝试 model_id 的最后一段作为目录名
+    short_name = model_id.split("/")[-1]
+    candidate = payload_dir / short_name
+    if candidate.is_dir() and _has_model_files(candidate):
+        return candidate
+
+    # 递归搜索——找到第一个含模型文件的目录
+    for entry in payload_dir.rglob("*"):
+        if entry.is_dir() and _has_model_files(entry):
+            # 确保目录名包含 model_id 的关键部分
+            dir_name = entry.name.lower()
+            key = short_name.lower()
+            if key in dir_name or model_id.lower() in str(entry.relative_to(payload_dir)).lower():
+                return entry
+
+    return None
+
+
+def _has_model_files(dir_path: Path) -> bool:
+    """检查目录是否包含模型文件。"""
+    model_extensions = {".pt", ".bin", ".onnx", ".yaml", ".json"}
+    for entry in dir_path.iterdir():
+        if entry.is_file() and entry.suffix.lower() in model_extensions:
+            return True
+    return False
+
+
+def _resolve_local_model_path(payload_dir: Path, model_id: str) -> str:
+    """解析模型在 payload 目录中的本地路径。
+
+    如果找到对应目录，返回绝对路径。
+    如果找不到，fail-closed 返回错误。
+
+    这是关键的安全检查——确保 AutoModel 只使用本地 payload 中的模型文件，
+    不触发隐式网络下载。
+    """
+    model_dir = _find_model_dir_in_payload(payload_dir, model_id)
+    if model_dir is not None:
+        return str(model_dir)
+
+    # 无法在 payload 中找到模型——fail closed
+    raise RuntimeError(
+        f"模型 '{model_id}' 未在 payload 目录 '{payload_dir}' 中找到。"
+        "请确保模型已正确安装。Blink 不允许隐式网络下载。"
+    )
+
+
 # ── 模型加载 ──────────────────────────────────────────────────────────
 
 def _load_model():
     """加载模型，lazy load。
+
+    0.22.6 B2: 从本地 payload 目录加载模型，不触发隐式下载。
+    如果 payload 目录不存在或模型文件缺失，直接返回 error，
+    不从远程 ModelScope 下载。
 
     模型类型自动适配子模型配置：
     - SenseVoice: 内置 VAD + 标点 + ITN，无需子模型
     - Paraformer / SeacoParaformer: 需配置 vad_model + punc_model
       - vad_model="fsmn-vad": 语音端点检测（~3MB）
       - punc_model="ct-punc": 标点恢复 + ITN（~1.1GB）
+
+    0.22.6: VAD 和 punc 子模型也必须从 payload 本地路径加载，
+    不允许 AutoModel 隐式下载子模型。
 
     加载状态通过全局 ``_model_status`` 跟踪（idle → loading → ready/error），
     供 /health 端点暴露给 Rust 侧判断服务是否真正可用。
@@ -304,29 +380,71 @@ def _load_model():
         _model_status = "loading"
         logger.info(f"加载模型: {args.model}, device={args.device}")
 
+        # 0.22.6 B2: 从本地 payload 目录加载，不触发隐式下载
+        payload_dir = _model_payload_dir
+        if not payload_dir or not os.path.isdir(payload_dir):
+            _model_status = "error"
+            logger.error(
+                f"模型 payload 目录不存在: {payload_dir}。"
+                "请先在设置页安装模型。"
+            )
+            raise RuntimeError(
+                f"Model payload directory not found: {payload_dir}"
+            )
+
+        payload_path = Path(payload_dir)
+
         try:
             from funasr import AutoModel
 
             resolved_model = _resolve_model_id(args.model)
+
+            # 解析主模型的本地路径
+            main_model_path = _resolve_local_model_path(payload_path, resolved_model)
+
             kwargs = {
-                "model": resolved_model,
+                "model": main_model_path,
                 "device": args.device,
                 "disable_update": True,  # 跳过更新检查，减少日志噪声
             }
 
             # Paraformer / SeacoParaformer 需要额外的 VAD 和标点子模型。
             # SenseVoice 内置了这些功能，不需要（也不应该）添加子模型。
+            #
+            # 0.22.6: 子模型也必须从 payload 本地路径加载。
+            # 使用 BLINK_MODEL_SUBMODELS 环境变量获取子模型 id 列表，
+            # 然后在 payload 目录中解析它们的本地路径。
             if not _is_sensevoice(args.model):
-                kwargs["vad_model"] = "fsmn-vad"
-                kwargs["punc_model"] = "ct-punc"
-                logger.info(f"检测到非 SenseVoice 模型，自动配置 vad_model=fsmn-vad, punc_model=ct-punc")
+                # 从环境变量获取子模型列表
+                submodels = _model_submodels
+
+                if not submodels:
+                    raise RuntimeError(
+                        "非 SenseVoice 模型缺少 BLINK_MODEL_SUBMODELS；"
+                        "拒绝使用短名回退以避免运行期隐式下载"
+                    )
+
+                logger.info(f"检测到非 SenseVoice 模型，配置子模型: {submodels}")
+                vad_id = next((sm for sm in submodels if "vad" in sm), None)
+                punc_id = next((sm for sm in submodels if "punc" in sm), None)
+                if not vad_id or not punc_id:
+                    raise RuntimeError(
+                        "非 SenseVoice 模型必须同时声明 VAD 与标点子模型"
+                    )
+
+                vad_path = _resolve_local_model_path(payload_path, vad_id)
+                punc_path = _resolve_local_model_path(payload_path, punc_id)
+                kwargs["vad_model"] = vad_path
+                kwargs["punc_model"] = punc_path
+                logger.info(f"VAD 子模型本地路径: {vad_path}")
+                logger.info(f"punc 子模型本地路径: {punc_path}")
             else:
                 logger.info(f"检测到 SenseVoice 模型，使用内置 VAD/标点/ITN")
 
             _model = AutoModel(**kwargs)
             _model_status = "ready"
-            # 0.22.6 H1: 模型 Ready 时计算内容指纹
-            _model_content_fingerprint = _compute_model_content_fingerprint(args.model)
+            # 0.22.6 B2: 模型 Ready 时计算 canonical fingerprint
+            _model_content_fingerprint = _compute_model_content_fingerprint()
             logger.info(
                 f"模型 {args.model} 加载完成, "
                 f"content_fingerprint={_model_content_fingerprint[:16] if _model_content_fingerprint else 'None'}..."
@@ -511,11 +629,11 @@ async def health(request: Request):
         response["backend"] = args.device
         response["device_name"] = args.device.upper()
 
-    # 模型 id / revision
-    response["model_id"] = getattr(args, "model", "")
-    response["model_revision"] = "funasr-1.x"
+    # 0.22.6 B2: 动态模型身份（从环境变量注入，不使用静态 descriptor 合同）
+    response["model_id"] = _model_id_expected or getattr(args, "model", "")
+    response["model_revision"] = _model_revision_expected or "funasr-1.x"
 
-    # 0.22.6 H1: 模型内容指纹（仅在 Ready 时返回）
+    # 0.22.6 B2: 模型内容指纹（仅在 Ready 时返回）
     if _model_status == "ready":
         response["model_content_fingerprint"] = _model_content_fingerprint
 
@@ -673,7 +791,7 @@ async def lifespan(app_instance):
     logger.info("=" * 60)
 
     # 预加载模型（后台，避免阻塞 server 启动）
-    # 首次安装后模型需从 ModelScope 下载（~234MB），可能需要数分钟。
+    # 模型从本地 payload 加载，不触发网络下载。
     # _model_status 会在 _load_model 内部经历 idle → loading → ready/error，
     # Rust 侧通过 /health 轮询此状态，在模型就绪前不会报告服务 "ready"。
     import asyncio
@@ -721,10 +839,60 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    global _args
-    _args = parse_args()
+def _init_dynamic_model_identity():
+    """从环境变量读取动态模型身份（0.22.6 B2）。
 
+    启动身份从 Manifest 动态获取，而非静态 Descriptor 硬编码。
+    Rust adapter 在 prepare_launch 时从 model_storage manifest 读取
+    model_id / revision / payload_dir / fingerprint，通过环境变量注入。
+
+    环境变量：
+    - BLINK_MODEL_ID: canonical model id（如 iic/SenseVoiceSmall）
+    - BLINK_MODEL_REVISION: model revision
+    - BLINK_MODEL_PAYLOAD_DIR: 已安装 generation 的 payload 目录绝对路径
+    - BLINK_MODEL_FINGERPRINT: manifest 中记录的 fingerprint（用于运行时比对）
+    - BLINK_MODEL_SUBMODELS: 逗号分隔的子模型 id 列表（如 "fsmn-vad,ct-punc"）
+
+    如果 BLINK_MODEL_PAYLOAD_DIR 缺失，model_status 将在 _load_model 时报错，
+    不触发隐式网络下载。
+    """
+    global _model_id_expected, _model_revision_expected
+    global _model_payload_dir, _model_fingerprint_expected, _model_submodels
+
+    _model_id_expected = os.environ.get("BLINK_MODEL_ID")
+    _model_revision_expected = os.environ.get("BLINK_MODEL_REVISION")
+    _model_payload_dir = os.environ.get("BLINK_MODEL_PAYLOAD_DIR")
+    _model_fingerprint_expected = os.environ.get("BLINK_MODEL_FINGERPRINT")
+
+    submodels_str = os.environ.get("BLINK_MODEL_SUBMODELS", "")
+    if submodels_str:
+        _model_submodels = [
+            s.strip() for s in submodels_str.split(",") if s.strip()
+        ]
+    else:
+        _model_submodels = []
+
+    logger.info("=" * 60)
+    logger.info("动态模型身份（从 Manifest 注入）:")
+    logger.info(f"  model_id:       {_model_id_expected or '(未注入)'}")
+    logger.info(f"  revision:       {_model_revision_expected or '(未注入)'}")
+    logger.info(f"  payload_dir:    {_model_payload_dir or '(未注入)'}")
+    logger.info(
+        f"  fingerprint:    "
+        f"{_model_fingerprint_expected[:16] + '...' if _model_fingerprint_expected else '(未注入)'}"
+    )
+    logger.info(f"  submodels:      {_model_submodels or '(无)'}")
+    logger.info("=" * 60)
+
+    # fail-closed: payload_dir 缺失时记录警告，_load_model 会报错
+    if not _model_payload_dir:
+        logger.warning(
+            "BLINK_MODEL_PAYLOAD_DIR 未注入——模型加载将失败。"
+            "请确保模型已正确安装。"
+        )
+
+
+if __name__ == "__main__":
     # 配置日志
     logging.basicConfig(
         level=logging.INFO,
@@ -733,15 +901,15 @@ def main():
         stream=sys.stdout,
     )
 
-    # 0.22.3：绑定 127.0.0.1（loopback only），与 Endpoint 协议一致。
-    # 不再绑定 0.0.0.0——本地引擎服务只允许 loopback 访问。
+    # 初始化动态模型身份（在 parse_args 之前）
+    _init_dynamic_model_identity()
+    _args = parse_args()
+
+    # 启动 server（绑定 127.0.0.1，loopback only）
+    import uvicorn
     uvicorn.run(
         app,
         host="127.0.0.1",
         port=_args.port,
         log_level="info",
     )
-
-
-if __name__ == "__main__":
-    main()

@@ -415,9 +415,14 @@ pub enum ModelLoadStatus {
 /// 通过 `GET /health` 端点的 `model_status` 字段判断模型加载状态。
 /// 仅当返回 [`ModelLoadStatus::Ready`] 时，转录请求才能立即响应。
 ///
-/// 用于：
-/// - `commands.rs` 启动流程的轮询（区分 "服务已启动但模型还在下载" 与 "模型就绪"）
-/// - `local.rs` 的 `finalize()` 检查（提供更精准的错误提示）
+/// **0.22.6 批次 3**：此函数不携带 token，Python server 的 `/health`
+/// 端点要求 `X-Engine-Token` 鉴权——无 token 的请求返回 401，
+/// 此函数因此会把正常服务误报为 `Unreachable`。
+///
+/// **生产调用方必须改用 [`check_model_loaded_with_token`]**。
+/// 此函数保留仅供：
+/// - maintenance 诊断命令（明确标记为不参与正式链路）
+/// - `#[cfg(test)]` 测试中不需要 token 的场景
 pub async fn check_model_loaded(port: u16) -> ModelLoadStatus {
     // 0.22.3：使用 127.0.0.1 而非 localhost，与 Endpoint 协议一致。
     let url = format!("http://127.0.0.1:{port}/health");
@@ -452,7 +457,122 @@ pub async fn check_model_loaded(port: u16) -> ModelLoadStatus {
                 Err(_) => ModelLoadStatus::Unreachable,
             }
         }
+        // 0.22.6: 401 表示服务在运行但 token 缺失——对无 token 调用方来说是 Unreachable
         _ => ModelLoadStatus::Unreachable,
+    }
+}
+
+/// Token-aware 模型健康检查（0.22.6 批次 3 H4）。
+///
+/// 使用结构化 `SttEngineConnection`（host + port + token + engine_id + instance_id）
+/// 做 `/health` 请求，携带 `X-Engine-Token` header。
+///
+/// **这是生产链路唯一合法的 health 检查方式**——
+/// Python server 的 `/health` 端点强制要求 token，
+/// 无 token 的 [`check_model_loaded`] 会得到 401 并报告 `Unreachable`。
+///
+/// 返回 [`ModelLoadStatus`]，与 `check_model_loaded` 语义一致。
+/// 401/403 返回 `Unreachable`（鉴权失败 = 无法确认服务身份）。
+pub async fn check_model_loaded_with_token(
+    conn: &crate::domain::stt::SttEngineConnection,
+) -> ModelLoadStatus {
+    let url = format!("http://{}:{}/health", conn.host, conn.port);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return ModelLoadStatus::Unreachable,
+    };
+
+    let resp = match client
+        .get(&url)
+        .header("X-Engine-Token", &conn.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return ModelLoadStatus::Unreachable,
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        // 401/403 = token 错误或服务身份不匹配
+        // 对调用方来说，鉴权失败 = 无法确认服务身份 = Unreachable
+        tracing::debug!(
+            host = %conn.host,
+            port = conn.port,
+            http_status = status.as_u16(),
+            "token-aware health: HTTP 非 2xx，视为 Unreachable"
+        );
+        return ModelLoadStatus::Unreachable;
+    }
+
+    match resp.json::<serde_json::Value>().await {
+        Ok(v) => {
+            // 身份字段是鉴权结果的一部分：缺失、类型错误或不匹配均 fail-closed。
+            match v.get("engine_id").and_then(|s| s.as_str()) {
+                Some(resp_engine) if resp_engine == conn.engine_id => {}
+                actual => {
+                    tracing::warn!(
+                        expected = %conn.engine_id,
+                        actual = ?actual,
+                        "health 缺少或回显错误的 engine_id，拒绝连接"
+                    );
+                    return ModelLoadStatus::Unreachable;
+                }
+            }
+            match v.get("instance_id").and_then(|s| s.as_str()) {
+                Some(resp_instance) if resp_instance == conn.instance_id => {}
+                actual => {
+                    tracing::warn!(
+                        expected = %conn.instance_id,
+                        actual = ?actual,
+                        "health 缺少或回显错误的 instance_id，拒绝连接"
+                    );
+                    return ModelLoadStatus::Unreachable;
+                }
+            }
+
+            match v.get("model_status").and_then(|s| s.as_str()) {
+                Some("ready") => ModelLoadStatus::Ready,
+                Some("loading") => ModelLoadStatus::Loading,
+                Some("error") => ModelLoadStatus::Error,
+                Some("idle") => ModelLoadStatus::Idle,
+                _ => {
+                    if v.get("model_loaded").and_then(|b| b.as_bool()) == Some(true) {
+                        ModelLoadStatus::Ready
+                    } else {
+                        ModelLoadStatus::Loading
+                    }
+                }
+            }
+        }
+        Err(_) => ModelLoadStatus::Unreachable,
+    }
+}
+
+/// Token-aware 模型就绪检查，不就绪则返回对应的错误消息（0.22.6 批次 3）。
+///
+/// 供 `LocalSttEngine` 和 `PseudoStreamingSttEngine` 共用。
+/// 使用结构化连接快照，确保 health 和 transcribe 使用同一 endpoint/token。
+pub async fn check_model_ready_or_error_with_token(
+    conn: &crate::domain::stt::SttEngineConnection,
+) -> Result<(), String> {
+    match check_model_loaded_with_token(conn).await {
+        ModelLoadStatus::Ready => Ok(()),
+        ModelLoadStatus::Loading | ModelLoadStatus::Idle => Err(format!(
+            "模型正在加载中（{}:{}），请稍后在设置页等待加载完成后重试。",
+            conn.host, conn.port
+        )),
+        ModelLoadStatus::Error => Err(format!(
+            "模型加载失败（{}:{}），请在设置页查看日志或检查网络连接后重启服务。",
+            conn.host, conn.port
+        )),
+        ModelLoadStatus::Unreachable => Err(format!(
+            "FunASR 服务不可达或鉴权失败（{}:{}）。请确认服务已在设置页启动，且未发生重启。",
+            conn.host, conn.port
+        )),
     }
 }
 
@@ -744,6 +864,441 @@ mod tests {
         assert!(
             BLINK_STT_SERVER_PY.contains("_postprocess_text(raw_text)"),
             "transcribe 端点应调用 _postprocess_text"
+        );
+    }
+
+    // ── Hermetic 集成测试（0.22.6 批次 3）──────────────────────────────────
+    //
+    // 使用 tokio::net::TcpListener 启动 fake HTTP server，模拟 FunASR 的
+    // /health 和 /v1/audio/transcriptions 端点。完全自包含，不依赖网络
+    // 或外部进程。
+
+    /// 启动一个 fake FunASR HTTP server，返回 (port, token, engine_id, instance_id)。
+    ///
+    /// server 行为：
+    /// - `GET /health`（携带正确 X-Engine-Token）→ 200 + model_status=ready + identity 回显
+    /// - `GET /health`（无 token / 错 token）→ 401
+    /// - `POST /v1/audio/transcriptions`（携带正确 token）→ 200 + {"text": "你好世界"}
+    /// - 其他请求 → 404
+    async fn start_fake_funasr_server() -> (u16, String, String, String) {
+        start_fake_funasr_server_with_identity(true, true).await
+    }
+
+    #[test]
+    fn embedded_script_forbids_implicit_submodel_downloads() {
+        assert!(BLINK_STT_SERVER_PY.contains("拒绝使用短名回退以避免运行期隐式下载"));
+        assert!(!BLINK_STT_SERVER_PY.contains("kwargs[\"vad_model\"] = \"fsmn-vad\""));
+        assert!(!BLINK_STT_SERVER_PY.contains("kwargs[\"punc_model\"] = \"ct-punc\""));
+    }
+
+    async fn start_fake_funasr_server_with_identity(
+        include_engine_id: bool,
+        include_instance_id: bool,
+    ) -> (u16, String, String, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "test-token-abc123def456".to_string();
+        let engine_id = "funasr".to_string();
+        let instance_id = "inst-fake-001".to_string();
+
+        let token_clone = token.clone();
+        let engine_id_clone = engine_id.clone();
+        let instance_id_clone = instance_id.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+
+                let token = token_clone.clone();
+                let engine_id = engine_id_clone.clone();
+                let instance_id = instance_id_clone.clone();
+
+                tokio::spawn(async move {
+                    // 循环读取直到收到完整的 HTTP headers（\r\n\r\n）。
+                    // POST 请求的 body 可能很大（WAV ~64KB），
+                    // 但我们只需 headers 来路由——body 读完即可丢弃。
+                    let mut buf = vec![0u8; 8192];
+                    let mut total = 0;
+                    let header_end = loop {
+                        if total >= buf.len() {
+                            buf.resize(buf.len() * 2, 0);
+                        }
+                        let n = socket.read(&mut buf[total..]).await.unwrap_or(0);
+                        if n == 0 {
+                            break None;
+                        }
+                        total += n;
+                        let s = String::from_utf8_lossy(&buf[..total]);
+                        if let Some(idx) = s.find("\r\n\r\n") {
+                            break Some(idx);
+                        }
+                    };
+                    // header_end 为 None 表示连接关闭前未收到完整 headers
+                    let header_end = match header_end {
+                        Some(e) => e,
+                        None => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..header_end + 4]);
+
+                    // 解析请求行和 headers
+                    let (first_line, _rest) =
+                        request.split_once("\r\n").unwrap_or((request.as_ref(), ""));
+                    let method_path = first_line.split_whitespace().collect::<Vec<_>>();
+                    let (method, path) = (method_path.get(0), method_path.get(1));
+
+                    // 检查 X-Engine-Token header
+                    let has_valid_token = request
+                        .lines()
+                        .any(|line| line.eq_ignore_ascii_case(&format!("X-Engine-Token: {token}")));
+
+                    // 对 POST 请求，读取并丢弃 body 以避免 reqwest 因连接过早关闭报 502。
+                    // Content-Length 指定了 body 大小，header_end+4 之后已读的部分是 body 开头。
+                    if method == Some(&"POST") {
+                        // 解析 Content-Length
+                        let content_length: usize = request
+                            .lines()
+                            .find_map(|line| {
+                                let lower = line.to_ascii_lowercase();
+                                if lower.starts_with("content-length:") {
+                                    lower
+                                        .trim_start_matches("content-length:")
+                                        .trim()
+                                        .parse()
+                                        .ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+
+                        // 已读 body 字节数
+                        let body_already_read = total.saturating_sub(header_end + 4);
+                        let remaining = content_length.saturating_sub(body_already_read);
+                        // 读取剩余 body
+                        let mut discard = vec![0u8; 4096];
+                        let mut left = remaining;
+                        while left > 0 {
+                            let to_read = left.min(discard.len());
+                            match socket.read(&mut discard[..to_read]).await {
+                                Ok(0) => break,
+                                Ok(n) => left -= n,
+                                Err(_) => break,
+                            }
+                        }
+                    }
+
+                    let response = if method == Some(&"GET") && path == Some(&"/health") {
+                        if has_valid_token {
+                            let mut body = serde_json::json!({
+                                "status": "ok",
+                                "model_loaded": true,
+                                "model_status": "ready",
+                            });
+                            if include_engine_id {
+                                body["engine_id"] = serde_json::Value::String(engine_id);
+                            }
+                            if include_instance_id {
+                                body["instance_id"] = serde_json::Value::String(instance_id);
+                            }
+                            let body_str = body.to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body_str.len(),
+                                body_str
+                            )
+                        } else {
+                            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_string()
+                        }
+                    } else if method == Some(&"POST") && path == Some(&"/v1/audio/transcriptions") {
+                        if has_valid_token {
+                            let body = r#"{"text":"你好世界"}"#;
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        } else {
+                            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_string()
+                        }
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (port, token, engine_id, instance_id)
+    }
+
+    /// 构造一个 SttEngineConnection 用于测试。
+    fn make_connection(
+        port: u16,
+        token: &str,
+        engine_id: &str,
+        instance_id: &str,
+    ) -> crate::domain::stt::SttEngineConnection {
+        crate::domain::stt::SttEngineConnection {
+            host: "127.0.0.1".to_string(),
+            port,
+            token: token.to_string(),
+            engine_id: engine_id.to_string(),
+            instance_id: instance_id.to_string(),
+        }
+    }
+
+    /// Hermetic 测试：token-aware health 检查成功。
+    #[tokio::test]
+    async fn hermetic_token_aware_health_success() {
+        let (port, token, engine_id, instance_id) = start_fake_funasr_server().await;
+        let conn = make_connection(port, &token, &engine_id, &instance_id);
+
+        let status = check_model_loaded_with_token(&conn).await;
+        assert_eq!(status, ModelLoadStatus::Ready);
+    }
+
+    /// Hermetic 测试：缺 token / 错 token 返回 Unreachable（鉴权失败）。
+    #[tokio::test]
+    async fn hermetic_wrong_token_returns_unreachable() {
+        let (port, _token, engine_id, instance_id) = start_fake_funasr_server().await;
+        let conn = make_connection(port, "wrong-token", &engine_id, &instance_id);
+
+        let status = check_model_loaded_with_token(&conn).await;
+        assert_eq!(
+            status,
+            ModelLoadStatus::Unreachable,
+            "错 token 应返回 Unreachable（鉴权失败）"
+        );
+    }
+
+    /// Hermetic 测试：错 instance_id 返回 Unreachable（服务已重启）。
+    #[tokio::test]
+    async fn hermetic_wrong_instance_id_returns_unreachable() {
+        let (port, token, engine_id, _real_instance) = start_fake_funasr_server().await;
+        let conn = make_connection(port, &token, &engine_id, "stale-instance-id");
+
+        let status = check_model_loaded_with_token(&conn).await;
+        assert_eq!(
+            status,
+            ModelLoadStatus::Unreachable,
+            "错 instance_id 应返回 Unreachable（旧连接不能误连新实例）"
+        );
+    }
+
+    #[tokio::test]
+    async fn hermetic_missing_identity_fields_return_unreachable() {
+        for (include_engine_id, include_instance_id) in [(false, true), (true, false)] {
+            let (port, token, engine_id, instance_id) =
+                start_fake_funasr_server_with_identity(include_engine_id, include_instance_id)
+                    .await;
+            let conn = make_connection(port, &token, &engine_id, &instance_id);
+            assert_eq!(
+                check_model_loaded_with_token(&conn).await,
+                ModelLoadStatus::Unreachable,
+                "health identity 缺失时必须 fail-closed"
+            );
+        }
+    }
+
+    /// Hermetic 测试：check_model_ready_or_error_with_token 成功时返回 Ok。
+    #[tokio::test]
+    async fn hermetic_ready_or_error_success() {
+        let (port, token, engine_id, instance_id) = start_fake_funasr_server().await;
+        let conn = make_connection(port, &token, &engine_id, &instance_id);
+
+        let result = check_model_ready_or_error_with_token(&conn).await;
+        assert!(result.is_ok(), "模型就绪时应返回 Ok");
+    }
+
+    /// Hermetic 测试：check_model_ready_or_error_with_token 鉴权失败时返回 Err。
+    #[tokio::test]
+    async fn hermetic_ready_or_error_auth_failure() {
+        let (port, _token, engine_id, instance_id) = start_fake_funasr_server().await;
+        let conn = make_connection(port, "bad-token", &engine_id, &instance_id);
+
+        let result = check_model_ready_or_error_with_token(&conn).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("不可达") || err.contains("鉴权"),
+            "错误消息应提及不可达或鉴权: {err}"
+        );
+    }
+
+    /// Hermetic 测试：完整安装→转录链路。
+    ///
+    /// 模拟完整流程：
+    /// 1. 启动 fake server
+    /// 2. 构造连接快照
+    /// 3. token-aware health 检查 → Ready
+    /// 4. 使用同一连接发送最小音频 fixture → 收到确定转录结果
+    #[tokio::test]
+    async fn hermetic_authenticated_health_and_transcribe_contract() {
+        use crate::domain::stt::wav;
+
+        let (port, token, engine_id, instance_id) = start_fake_funasr_server().await;
+        let conn = make_connection(port, &token, &engine_id, &instance_id);
+
+        // 1. token-aware health 检查
+        let status = check_model_loaded_with_token(&conn).await;
+        assert_eq!(status, ModelLoadStatus::Ready);
+
+        // 2. 使用同一连接做转录
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        // 最小音频 fixture：1 秒静音 WAV
+        let samples = vec![0.0f32; 16000];
+        let wav_bytes = wav::pcm_to_wav(&samples, 16000, 1);
+        let url = format!("http://127.0.0.1:{port}/v1/audio/transcriptions");
+
+        let result = wav::transcribe_with_token(
+            &client,
+            &url,
+            Some(&conn.token),
+            "iic/SenseVoiceSmall",
+            &wav_bytes,
+        )
+        .await;
+
+        assert!(result.is_ok(), "转录应成功: {:?}", result.err());
+        let text = result.unwrap();
+        assert_eq!(text, "你好世界", "转录结果应为确定的文本");
+    }
+
+    /// 跨层闭环：真实 ModelService staging/promote → 新服务从 manifest 恢复 →
+    /// selection gate 可用 → 动态 endpoint/token health → LocalSttEngine 转录。
+    #[tokio::test]
+    async fn hermetic_install_restore_selection_gate_health_and_transcribe() {
+        use std::sync::Arc;
+
+        use crate::app::local_engine::model_service::{FakeInstaller, ModelRegistry, ModelService};
+        use crate::domain::local_engine::EngineModelDescriptor;
+        use crate::domain::stt::{SttEngine, local::LocalSttEngine};
+        use crate::infra::local_engine::{model_storage, runtime};
+
+        let _storage_guard =
+            crate::app::local_engine::model_service::acquire_model_storage_test_lock().await;
+
+        let unique = format!(
+            "e2e-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let engine_id = runtime::EngineId::new("funasr").unwrap();
+        let descriptor = EngineModelDescriptor {
+            engine_id: engine_id.clone(),
+            model_id: unique.clone(),
+            display_name: "Hermetic E2E".to_string(),
+            description: "test model".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: runtime::ChecksumSource::Unverified,
+            estimated_size_mb: Some(1),
+            compatibility_schema: 1,
+        };
+        let registry = ModelRegistry::new_with_models(vec![descriptor]);
+        let asset_key = model_storage::encode_asset_key(&unique);
+        let asset_root = model_storage::asset_root(&engine_id, &asset_key).unwrap();
+
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(asset_root);
+
+        let installer = Arc::new(FakeInstaller::success());
+        let service = ModelService::new(
+            registry.clone(),
+            installer.clone(),
+            Arc::new(crate::app::local_engine::service::NoopEventPort),
+        );
+        let installed = service
+            .install_model(&engine_id, &unique, Some("e2e-install".to_string()))
+            .await
+            .unwrap();
+        assert!(
+            installed.success,
+            "模型安装事务应成功: {:?}",
+            installed.error
+        );
+
+        let restored_service = ModelService::new(
+            registry,
+            installer,
+            Arc::new(crate::app::local_engine::service::NoopEventPort),
+        );
+        restored_service.restore_states_from_disk().await.unwrap();
+        let restored = restored_service
+            .get_model_status(&engine_id, &unique)
+            .await
+            .unwrap();
+        assert!(restored.is_usable(), "恢复后的模型必须通过 selection gate");
+
+        let (port, token, server_engine_id, instance_id) = start_fake_funasr_server().await;
+        let conn = make_connection(port, &token, &server_engine_id, &instance_id);
+        let mut config = crate::domain::config::stt_config::SttConfig::default();
+        config.local_engine.funasr_model = unique;
+        let stt = LocalSttEngine::from_connection(&config, conn).unwrap();
+        stt.transcribe_chunk(&vec![0.0; 16000]).await.unwrap();
+        assert_eq!(stt.finalize().await.unwrap(), "你好世界");
+    }
+
+    /// Hermetic 测试：错 token 的转录请求失败。
+    #[tokio::test]
+    async fn hermetic_wrong_token_transcribe_fails() {
+        use crate::domain::stt::wav;
+
+        let (port, _token, _engine_id, _instance_id) = start_fake_funasr_server().await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let samples = vec![0.0f32; 1600];
+        let wav_bytes = wav::pcm_to_wav(&samples, 16000, 1);
+        let url = format!("http://127.0.0.1:{port}/v1/audio/transcriptions");
+
+        let result = wav::transcribe_with_token(
+            &client,
+            &url,
+            Some("wrong-token"),
+            "iic/SenseVoiceSmall",
+            &wav_bytes,
+        )
+        .await;
+
+        assert!(result.is_err(), "错 token 的转录请求应失败");
+    }
+
+    /// Hermetic 测试：无 token 时健康状态为 Unreachable。
+    ///
+    /// 对应 port-only check_model_loaded 在 0.22.6 下的行为——
+    /// Python server 强制要求 token，无 token 返回 401 → Unreachable。
+    #[tokio::test]
+    async fn hermetic_no_token_health_is_unreachable() {
+        let (port, _token, _engine_id, _instance_id) = start_fake_funasr_server().await;
+
+        // 使用旧的 port-only 检查（无 token）
+        let status = check_model_loaded(port).await;
+        assert_eq!(
+            status,
+            ModelLoadStatus::Unreachable,
+            "无 token 的 health 检查在 0.22.6 下应返回 Unreachable"
         );
     }
 }

@@ -54,17 +54,17 @@ fn funasr_engine_id() -> EngineId {
 }
 
 /// 从 SttConfig 构建 AdapterConfig（保留 funasr_model、device、hotwords、ITN、VAD、port）。
+///
+/// **0.22.6 归一化**：历史配置 `device=cuda` 归一化为 `Cpu`。
+/// descriptor 只声明 CPU profile，显式 `Cuda` 会在 `resolve_profile` 中直接失败。
 fn build_adapter_config() -> AdapterConfig {
     let config = crate::app::stt_config::get_stt_config();
     let local = &config.local_engine;
     let funasr_config =
         crate::app::local_engine::funasr::FunasrEngineConfig::from_stt_config(local);
 
-    let compute_preference = if local.device == "cuda" {
-        Some(crate::infra::local_engine::runtime::ComputePreference::Cuda)
-    } else {
-        Some(crate::infra::local_engine::runtime::ComputePreference::Cpu)
-    };
+    // 0.22.6: 无论 device 值如何，compute_preference 都归一化为 Cpu
+    let compute_preference = Some(crate::infra::local_engine::runtime::ComputePreference::Cpu);
 
     AdapterConfig {
         preferred_port: Some(local.server_port),
@@ -297,9 +297,29 @@ pub async fn diagnose_stt(app: tauri::AppHandle) -> Result<serde_json::Value, St
     )
     .await;
 
-    let server_ready_tcp = crate::domain::stt::funasr::is_server_ready(port);
+    // 0.22.6: 诊断命令使用 token-aware health 检查（从 LocalEngineService 获取连接）
+    // 不再用 port-only check_model_loaded——Python /health 强制要求 token
+    let conn = match svc.get_connection(&engine_id).await {
+        Ok(Some(c)) => {
+            // 投影为 SttEngineConnection 用于 token-aware health
+            let parsed = crate::app::voice::parse_endpoint_pub(&c.endpoint);
+            parsed.map(|(host, port)| crate::domain::stt::SttEngineConnection {
+                host,
+                port,
+                token: c.token,
+                engine_id: c.engine_id,
+                instance_id: c.instance_id,
+            })
+        }
+        _ => None,
+    };
+    let server_ready_tcp = match &conn {
+        Some(c) => crate::domain::stt::funasr::is_server_ready(c.port),
+        None => false,
+    };
     let model_status = if server_ready_tcp {
-        crate::domain::stt::funasr::check_model_loaded(port).await
+        let conn = conn.as_ref().expect("conn verified as Some above");
+        crate::domain::stt::funasr::check_model_loaded_with_token(conn).await
     } else {
         crate::domain::stt::funasr::ModelLoadStatus::Unreachable
     };
@@ -358,9 +378,11 @@ pub async fn diagnose_stt(app: tauri::AppHandle) -> Result<serde_json::Value, St
 
     if server_ready {
         tracing::info!("诊断: 开始 API 测试（下载示例音频）");
+        // 0.22.6: 使用连接快照中的 port（而非配置 preferred port）
+        let diag_port = conn.as_ref().map(|c| c.port).unwrap_or(port);
         match test_audio_via_server(
             "https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/BAC009S0764W0121.wav",
-            port,
+            diag_port,
         )
         .await
         {

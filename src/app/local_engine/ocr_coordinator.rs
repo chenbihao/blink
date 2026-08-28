@@ -1696,6 +1696,18 @@ impl OcrBackendRouter for OcrCoordinator {
                 None
             },
         };
+        tracing::debug!(
+            request_id = %ctx.request_id,
+            configured_backend = %route_result.decision.configured_backend,
+            selected_backend = %route_result.decision.selected_backend,
+            fallback_reason = ?route_result.decision.fallback_reason,
+            success = route_result.result.is_some(),
+            total_elapsed_ms = route_result.total_elapsed_ms,
+            start_wait_ms = route_result.start_wait_ms,
+            recognize_ms = route_result.recognize_ms,
+            fallback_ms = route_result.fallback_ms,
+            "OCR 路由完成"
+        );
         self.update_diagnosis(lightweight_diagnosis);
         route_result
     }

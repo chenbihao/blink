@@ -1,7 +1,11 @@
 //! Tauri 桥接：统一封装 invoke / event.listen / dialog.ask 的获取。
 //! 兼容 withGlobalTauri 注入的全局对象，屏蔽 TAU.core.invoke ?? TAU.invoke 差异。
 
-const TAU = window.__TAURI__;
+// 动态读取 window.__TAURI__，避免模块加载时一次性绑定后测试无法 mock
+// 生产环境 __TAURI__ 在页面加载前已注入，性能无影响
+function getTAU() {
+    return window.__TAURI__;
+}
 
 // Tauri 2 + WebView2 下 window.alert/confirm/prompt 是**静默 no-op**——
 // 前端代码里 `if (!confirm(...)) return` 会永远走到 return 之后（confirm 返回 undefined → falsy）
@@ -17,7 +21,14 @@ const TAU = window.__TAURI__;
 });
 
 /** 调用 Rust command。 */
-export const invoke = TAU?.core?.invoke ?? TAU?.invoke;
+export function invoke(cmd, args) {
+    const TAU = getTAU();
+    const fn = TAU?.core?.invoke ?? TAU?.invoke;
+    if (typeof fn !== "function") {
+        return Promise.reject(new Error(`invoke 不可用：__TAURI__ 未注入（${cmd}）`));
+    }
+    return fn(cmd, args);
+}
 
 // ── IPC 错误归一化（0.14.7 W3）──────────────────────────────────────────────
 
@@ -50,6 +61,7 @@ export function normalizeError(err) {
 
 /** 监听后端事件（返回 unlisten promise）。事件系统不可用时返回 no-op。 */
 export function listen(event, handler) {
+    const TAU = getTAU();
     if (TAU?.event?.listen) {
         return TAU.event.listen(event, handler);
     }
@@ -64,6 +76,7 @@ export function listen(event, handler) {
  * 返回选中的文件路径，用户取消时返回 null。
  */
 export async function saveDialog(opts) {
+    const TAU = getTAU();
     const save = TAU?.dialog?.save;
     if (typeof save !== "function") {
         throw new Error("保存对话框不可用");
@@ -76,6 +89,7 @@ export async function saveDialog(opts) {
  * 用于 minimize / maximize / close 等窗口操作。
  */
 export function getCurrentWindow() {
+    const TAU = getTAU();
     return TAU?.window?.getCurrentWindow?.();
 }
 

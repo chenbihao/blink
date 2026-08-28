@@ -107,6 +107,12 @@ pub enum PipExtraArg {
     /// 指定额外的 package index URL（如 PyTorch CUDA index）。
     /// 对应 `--extra-index-url <url>`。
     ExtraIndexUrl(String),
+    /// 允许 uv 跨全部 package index 选择与锁定版本匹配的候选。
+    /// 对应 `--index-strategy unsafe-best-match`。
+    ///
+    /// 仅用于同时依赖 PyPI 与框架专用 wheel index 的完整 hash 锁安装；
+    /// 不应作为普通安装的默认策略。
+    IndexStrategyUnsafeBestMatch,
     /// 指定 `--no-deps`（不安装依赖，仅安装指定包）。
     /// 用于避免传递依赖版本漂移。
     NoDeps,

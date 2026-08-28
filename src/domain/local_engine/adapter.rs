@@ -196,6 +196,17 @@ pub trait LocalEngineAdapter: Send + Sync {
     /// 把引擎特有的 health 响应映射为领域统一的 service/model 健康状态。
     fn map_health(&self, raw_health: &serde_json::Value) -> HealthMapping;
 
+    /// 模型身份是否由 Blink 统一 model storage 的 generation manifest 管理。
+    ///
+    /// 默认启用：Ready health 必须与 model storage 中已安装 generation 的
+    /// model id、revision 和 content fingerprint 完全一致。
+    /// 尚未迁入统一 model storage、但由受信任 wrapper 自行校验专属 manifest
+    /// 的引擎可显式返回 false；此时仍按 descriptor 校验 id/revision，并要求
+    /// health 在 Ready 时提供合法 content fingerprint。
+    fn uses_managed_model_storage(&self) -> bool {
+        true
+    }
+
     /// adapter self-test。
     ///
     /// 在安装后和启动前执行，验证引擎环境是否可用。

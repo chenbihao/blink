@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 import uuid
 
 # UTF-8 安全（spec-backend §九）
@@ -621,9 +622,14 @@ async def recognize(
 
     try:
         _pil_img = _PILImage.open(io.BytesIO(png_bytes))
+        # 屏幕截图 PNG 通常带 alpha 通道（RGBA/4 通道），而 PaddleX 识别预处理
+        # 只接受 3 通道输入，4 通道会在 rec 阶段触发无消息的 assert 失败。
+        # 解码后统一归一为 RGB（convert 会保留宽高）。
+        if _pil_img.mode != "RGB":
+            _pil_img = _pil_img.convert("RGB")
         _img_array = _np.array(_pil_img)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"image_decode_failed: {e}")
+        raise HTTPException(status_code=400, detail=f"image_decode_failed: {type(e).__name__}: {e}")
 
     # 实际 PNG width/height——供 Rust mapper 做 rect 边界校验
     image_width = _pil_img.width
@@ -645,7 +651,12 @@ async def recognize(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=408, detail="timeout_exceeded")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"ocr_failed: {e}")
+        # PaddleX 内部异常可能 str 为空（如无消息 AssertionError），
+        # detail 必须带异常类型才可排查；traceback 打到 stderr 供日志采集。
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, detail=f"ocr_failed: {type(e).__name__}: {e}"
+        )
 
     # 映射 PaddleOCR 3.7 predict() 结果到 OcrResult 兼容格式
     lines = []
@@ -895,7 +906,10 @@ def main():
     os.makedirs(args.model_cache, exist_ok=True)
 
     _TOKEN = args.token
-    _ENDPOINT = f"http://{args.host}:{args.port}"
+    # 身份协议中的 endpoint 使用 canonical authority（host:port），
+    # 与 Rust Endpoint::to_string() 以及 FunASR health 回显保持一致。
+    # 业务请求使用的 base URL 由宿主侧单独构造，不能混入身份字段。
+    _ENDPOINT = f"{args.host}:{args.port}"
 
     print(f"[INFO] Blink PP-OCRv6 OCR server 启动 (PaddleOCR 3.7 API)", flush=True)
     print(f"[INFO] engine_id={_ENGINE_ID} instance_id={_INSTANCE_ID}", flush=True)

@@ -42,9 +42,11 @@ use std::sync::Arc;
 
 use crate::app::command_error::CommandError;
 use crate::app::local_engine::dto::{
-    CancelResultDto, CleanupRequestDto, CleanupResultDto, EngineCatalogItem, EngineLogDto,
-    EnginePreferencesDto, EnginePreferencesPatchDto, EngineStatusDto, EngineStorageDto,
-    OrphanStopResultDto, project_catalog_item, project_status,
+    CancelResultDto, CleanupRequestDto, CleanupResultDto, DiagnosticEntryDto, EngineCatalogItem,
+    EngineDiagnosticsDto, EngineLogDto, EngineLogLevel, EnginePreferencesDto,
+    EnginePreferencesPatchDto, EngineStatusDto, EngineStorageDto, OrphanRecoveryDto,
+    OrphanStopResultDto, environment_health_to_string, project_catalog_item, project_diagnostics,
+    project_status, service_health_to_string,
 };
 use crate::app::local_engine::{LocalEngineService, funasr, paddleocr};
 use crate::domain::local_engine::EngineDescriptor;
@@ -62,6 +64,105 @@ fn get_service(app: &tauri::AppHandle) -> Result<Arc<LocalEngineService>, Comman
         .ok_or_else(|| CommandError::new("internal_error", "LocalEngineService 尚未注册", false))
 }
 
+/// 合并 instance 日志和 operation 日志，去重、排序、截断。
+///
+/// 去重身份：`(source_kind, source_id, seq)`
+/// - instance 日志：`("instance", instance_id, seq)`
+/// - operation 日志：`("operation", operation_id, seq)`
+///
+/// 合并后按 timestamp 排序；timestamp 相同时用 `(source_kind, source_id, seq)` 做稳定 tie-break。
+/// 最后统一执行 `max_lines` 截断。
+async fn get_merged_logs(
+    app: &tauri::AppHandle,
+    svc: &LocalEngineService,
+    eid: &EngineId,
+    max_lines: usize,
+) -> Vec<EngineLogDto> {
+    // ── source 1: instance 日志 ──
+    let instance_logs = match svc.get_logs_structured(eid, max_lines).await {
+        Ok(logs) => logs,
+        Err(e) => {
+            tracing::warn!(engine_id = %eid, error = %e, "获取 instance 日志失败");
+            Vec::new()
+        }
+    };
+
+    let mut merged: Vec<((&str, String, u64), EngineLogDto)> = instance_logs
+        .iter()
+        .map(|entry| {
+            let timestamp = chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            let dto = EngineLogDto {
+                engine_id: entry.engine_id.clone(),
+                instance_id: entry.instance_id.clone(),
+                operation_id: None,
+                seq: entry.seq.to_string(),
+                timestamp,
+                level: EngineLogLevel::from_str_lossy(&entry.level),
+                text: entry.text.clone(),
+            };
+            (("instance", entry.instance_id.clone(), entry.seq), dto)
+        })
+        .collect();
+
+    // ── source 2: operation 日志 ──
+    if let Some(store) =
+        app.try_state::<std::sync::Arc<crate::app::local_engine::OperationLogStore>>()
+    {
+        let op_logs = store.query(eid);
+        for log in op_logs {
+            let dto = EngineLogDto {
+                engine_id: log.engine_id.clone(),
+                instance_id: String::new(),
+                operation_id: Some(log.operation_id.clone()),
+                seq: log.seq.to_string(),
+                timestamp: log.timestamp.clone(),
+                level: EngineLogLevel::from_str_lossy(&log.level),
+                text: log.text.clone(),
+            };
+            merged.push((("operation", log.operation_id.clone(), log.seq), dto));
+        }
+    }
+
+    // ── 去重 ──
+    let mut seen: std::collections::HashSet<(&str, String, u64)> = std::collections::HashSet::new();
+    merged.retain(|(key, _)| seen.insert(key.clone()));
+
+    // ── 排序：timestamp + 稳定 tie-break ──
+    merged.sort_by(|a, b| {
+        let cmp = a.1.timestamp.cmp(&b.1.timestamp);
+        if cmp != std::cmp::Ordering::Equal {
+            return cmp;
+        }
+        let kind_cmp = a.0.0.cmp(b.0.0);
+        if kind_cmp != std::cmp::Ordering::Equal {
+            return kind_cmp;
+        }
+        let sid_cmp = a.0.1.cmp(&b.0.1);
+        if sid_cmp != std::cmp::Ordering::Equal {
+            return sid_cmp;
+        }
+        a.0.2.cmp(&b.0.2)
+    });
+
+    // ── 截断 ──
+    let start = if merged.len() > max_lines {
+        merged.len() - max_lines
+    } else {
+        0
+    };
+
+    merged[start..].iter().map(|(_, dto)| dto.clone()).collect()
+}
+
+/// 从 `ProcessState` 投影为 `ProcessStateDto`（复用 dto.rs 中的投影函数）。
+fn project_process_state_dto(
+    process: &crate::domain::local_engine::ProcessState,
+) -> crate::app::local_engine::dto::ProcessStateDto {
+    crate::app::local_engine::dto::project_process_state(process)
+}
+
 /// 验证 engine_id 并返回 `EngineId`。
 fn validate_engine_id(engine_id: &str) -> Result<EngineId, CommandError> {
     EngineId::new(engine_id).map_err(|e| {
@@ -72,17 +173,15 @@ fn validate_engine_id(engine_id: &str) -> Result<EngineId, CommandError> {
 /// 从配置真源读取当前 compute preference。
 ///
 /// - funasr → 从 `SttConfig.local_engine.device` 映射
+///   - 0.22.6 归一化：历史 `cuda` 归一化为 `cpu`（descriptor 只声明 CPU profile）
 /// - paddleocr → 从 `OcrConfig.compute_preference` 读取
 /// - 其他 → Auto
 fn current_compute_preference(engine_id: &str) -> ComputePreference {
     match engine_id {
         funasr::FUNASR_ENGINE_ID => {
-            let config = crate::app::stt_config::get_stt_config();
-            if config.local_engine.device == "cuda" {
-                ComputePreference::Cuda
-            } else {
-                ComputePreference::Cpu
-            }
+            // 0.22.6: 历史 device=cuda 归一化为 Cpu
+            // descriptor 只声明 CPU profile，无需读取 config.local_engine.device
+            ComputePreference::Cpu
         }
         paddleocr::PADDLEOCR_ENGINE_ID => {
             crate::domain::config::ocr_config::get_ocr_config().compute_preference
@@ -97,6 +196,10 @@ fn current_compute_preference(engine_id: &str) -> ComputePreference {
 /// 此函数根据 `engine_id` 从现有配置真源构造：
 /// - funasr → `SttConfig.local_engine`
 /// - paddleocr → `OcrConfig` / `PaddleOcrEngineConfig`
+///
+/// **配置归一化**：FunASR 历史配置可能残留 `device=cuda`，但 0.22.6 descriptor
+/// 只声明 CPU profile（CUDA 需独立锁文件后启用）。此处将 `cuda` 归一化为 `Cpu`，
+/// 避免显式 `Cuda` 偏好在 `resolve_profile` 中因无 CUDA profile 而直接报错。
 fn build_adapter_config_for_engine(
     engine_id: &str,
 ) -> Result<crate::domain::local_engine::AdapterConfig, CommandError> {
@@ -104,13 +207,20 @@ fn build_adapter_config_for_engine(
         funasr::FUNASR_ENGINE_ID => {
             let config = crate::app::stt_config::get_stt_config();
             let local = &config.local_engine;
-            let funasr_config = funasr::FunasrEngineConfig::from_stt_config(local);
 
+            // 0.22.6 配置归一化：历史 device=cuda 归一化为 cpu
+            // descriptor 只声明 CPU profile，显式 Cuda 会在 resolve_profile 中失败
             let compute_preference = if local.device == "cuda" {
-                Some(ComputePreference::Cuda)
+                tracing::warn!(
+                    device = %local.device,
+                    "FunASR 历史配置 device=cuda，归一化为 Cpu（0.22.6 仅支持 CPU profile）"
+                );
+                Some(ComputePreference::Cpu)
             } else {
                 Some(ComputePreference::Cpu)
             };
+
+            let funasr_config = funasr::FunasrEngineConfig::from_stt_config(local);
 
             Ok(crate::domain::local_engine::AdapterConfig {
                 preferred_port: Some(local.server_port),
@@ -273,6 +383,17 @@ pub async fn get_local_engine_status(
 /// 历史与 `LOCAL_ENGINE_LOG` 实时事件使用同一 shape。
 ///
 /// **只读查询，无副作用。**
+///
+/// 合并两个日志来源：
+/// - **instance 日志**：来自 `ManagedProcess` ring buffer（`LocalEngineService::get_logs_structured`）
+/// - **operation 日志**：来自 `OperationLogStore`（会话内回放，环境/模型安装日志）
+///
+/// 去重身份：`(source_kind, source_id, seq)`
+/// - instance 日志：`("instance", instance_id, seq)`
+/// - operation 日志：`("operation", operation_id, seq)`
+///
+/// 合并后按 timestamp 排序；timestamp 相同时用 `(source_kind, source_id, seq)` 做稳定 tie-break。
+/// 最后统一执行 `max_lines` 截断。
 #[tauri::command]
 pub async fn get_local_engine_logs(
     app: tauri::AppHandle,
@@ -283,32 +404,84 @@ pub async fn get_local_engine_logs(
     let eid = validate_engine_id(&engine_id)?;
     let max = max_lines.unwrap_or(500);
 
-    let logs = svc
+    // ── source 1: instance 日志（ManagedProcess ring buffer）──
+    let instance_logs = svc
         .get_logs_structured(&eid, max)
         .await
         .map_err(|e| CommandError::new("engine_logs_error", format!("获取日志失败: {e}"), false))?;
 
-    // 把 StructuredLogEntry 投影为 EngineLogDto
-    let dtos: Vec<EngineLogDto> = logs
+    // 把 StructuredLogEntry 投影为 (dedup_key, EngineLogDto)
+    // dedup_key = ("instance", instance_id, seq)
+    let mut merged: Vec<((&str, String, u64), EngineLogDto)> = instance_logs
         .iter()
         .map(|entry| {
             let timestamp = chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
-            EngineLogDto {
+            let dto = EngineLogDto {
                 engine_id: entry.engine_id.clone(),
                 instance_id: entry.instance_id.clone(),
                 operation_id: None,
                 seq: entry.seq.to_string(),
                 timestamp,
-                level: entry.level.clone(),
+                level: EngineLogLevel::from_str_lossy(&entry.level),
                 text: entry.text.clone(),
-            }
+            };
+
+            (("instance", entry.instance_id.clone(), entry.seq), dto)
         })
         .collect();
 
-    Ok(dtos)
+    // ── source 2: operation 日志（OperationLogStore 会话内回放）──
+    if let Some(store) =
+        app.try_state::<std::sync::Arc<crate::app::local_engine::OperationLogStore>>()
+    {
+        let op_logs = store.query(&eid);
+        for log in op_logs {
+            let dto = EngineLogDto {
+                engine_id: log.engine_id.clone(),
+                instance_id: String::new(),
+                operation_id: Some(log.operation_id.clone()),
+                seq: log.seq.to_string(),
+                timestamp: log.timestamp.clone(),
+                level: EngineLogLevel::from_str_lossy(&log.level),
+                text: log.text.clone(),
+            };
+            merged.push((("operation", log.operation_id.clone(), log.seq), dto));
+        }
+    }
+
+    // ── 去重：相同 (source_kind, source_id, seq) 只保留第一条 ──
+    let mut seen: std::collections::HashSet<(&str, String, u64)> = std::collections::HashSet::new();
+    merged.retain(|(key, _)| seen.insert(key.clone()));
+
+    // ── 排序：按 timestamp 正序；timestamp 相同时用 (source_kind, source_id, seq) tie-break ──
+    merged.sort_by(|a, b| {
+        let cmp = a.1.timestamp.cmp(&b.1.timestamp);
+        if cmp != std::cmp::Ordering::Equal {
+            return cmp;
+        }
+        // 稳定 tie-break：先 source_kind，再 source_id，再 seq
+        let kind_cmp = a.0.0.cmp(b.0.0);
+        if kind_cmp != std::cmp::Ordering::Equal {
+            return kind_cmp;
+        }
+        let sid_cmp = a.0.1.cmp(&b.0.1);
+        if sid_cmp != std::cmp::Ordering::Equal {
+            return sid_cmp;
+        }
+        a.0.2.cmp(&b.0.2)
+    });
+
+    // ── 统一截断：取最后 max_lines 条（保留最新的）──
+    let start = if merged.len() > max {
+        merged.len() - max
+    } else {
+        0
+    };
+
+    Ok(merged[start..].iter().map(|(_, dto)| dto.clone()).collect())
 }
 
 /// 安装本地引擎环境。
@@ -563,7 +736,7 @@ pub async fn cancel_local_engine_operation(
 /// 获取引擎受限偏好（0.22.5 H2）。
 ///
 /// 返回闭合字段：`compute_preference`、`auto_start`（仅 FunASR）、
-/// `lifecycle`（仅 PaddleOCR）、`requires_rebuild`。
+/// `ocr_backend` / `lifecycle`（仅 PaddleOCR）、`requires_rebuild`。
 ///
 /// **只读查询，不启动服务、不安装环境。**
 #[tauri::command]
@@ -577,15 +750,14 @@ pub async fn get_local_engine_preferences(
     let dto = match engine_id.as_str() {
         funasr::FUNASR_ENGINE_ID => {
             let config = crate::app::stt_config::get_stt_config();
-            let compute_pref = if config.local_engine.device == "cuda" {
-                "cuda".to_string()
-            } else {
-                "cpu".to_string()
-            };
+            // 0.22.6 归一化：历史 device=cuda 投影为 cpu
+            // descriptor 只声明 CPU profile，前端不应看到 cuda 选项
+            let compute_pref = "cpu".to_string();
             EnginePreferencesDto {
                 engine_id: engine_id.clone(),
                 compute_preference: Some(compute_pref),
                 auto_start: Some(config.local_engine.auto_start_server),
+                ocr_backend: None,
                 lifecycle: None,
                 requires_rebuild: None,
             }
@@ -596,6 +768,7 @@ pub async fn get_local_engine_preferences(
                 engine_id: engine_id.clone(),
                 compute_preference: Some(preference_to_string_local(ocr_config.compute_preference)),
                 auto_start: None,
+                ocr_backend: Some(ocr_config.backend.to_string()),
                 lifecycle: Some(ocr_config.lifecycle.to_string()),
                 requires_rebuild: None,
             }
@@ -630,7 +803,7 @@ pub async fn get_local_engine_preferences(
 /// 保存引擎受限偏好（0.22.5 H2）。
 ///
 /// patch 只接受闭合字段：`compute_preference`、`auto_start`（仅 FunASR）、
-/// `lifecycle`（仅 PaddleOCR）。
+/// `ocr_backend` / `lifecycle`（仅 PaddleOCR）。
 ///
 /// **禁止包含** executable/argv/env/path/url/runtime kind 或任意 engine_config。
 /// 未知字段在反序列化时被拒绝（`#[serde(deny_unknown_fields)]`）。
@@ -668,10 +841,9 @@ pub async fn set_local_engine_preferences(
                 // 验证属于该引擎 descriptor 声明项
                 validate_preference_for_engine(&svc, &eid, pref).await?;
 
-                let new_device = match pref {
-                    ComputePreference::Cuda => "cuda".to_string(),
-                    _ => "cpu".to_string(),
-                };
+                // 0.22.6 归一化：FunASR descriptor 只声明 CPU profile
+                // 无论用户提交 cpu 还是 auto 还是 cuda，最终都归一化为 cpu
+                let new_device = "cpu".to_string();
                 if config.local_engine.device != new_device {
                     profile_changed = true;
                     config.local_engine.device = new_device;
@@ -734,6 +906,11 @@ pub async fn set_local_engine_preferences(
                 }
             }
 
+            // 应用 OCR 路由后端 patch（仅 PaddleOCR）
+            if let Some(ref backend_str) = patch.ocr_backend {
+                ocr_config.backend = parse_ocr_backend(backend_str)?;
+            }
+
             // 应用 lifecycle patch（仅 PaddleOCR）
             if let Some(ref lifecycle_str) = patch.lifecycle {
                 let new_lifecycle = parse_ocr_lifecycle(lifecycle_str)?;
@@ -757,6 +934,7 @@ pub async fn set_local_engine_preferences(
 
             tracing::info!(
                 engine = %eid,
+                ocr_backend = %ocr_config.backend,
                 compute_preference = ?ocr_config.compute_preference,
                 lifecycle = %ocr_config.lifecycle,
                 "PaddleOCR 偏好已保存"
@@ -794,15 +972,12 @@ pub async fn set_local_engine_preferences(
     let dto = match engine_id.as_str() {
         funasr::FUNASR_ENGINE_ID => {
             let config = crate::app::stt_config::get_stt_config();
-            let compute_pref = if config.local_engine.device == "cuda" {
-                "cuda".to_string()
-            } else {
-                "cpu".to_string()
-            };
+            // 0.22.6 归一化：无论配置中 device 值是什么，前端总是看到 cpu
             EnginePreferencesDto {
                 engine_id: engine_id.clone(),
-                compute_preference: Some(compute_pref),
+                compute_preference: Some("cpu".to_string()),
                 auto_start: Some(config.local_engine.auto_start_server),
+                ocr_backend: None,
                 lifecycle: None,
                 requires_rebuild: if requires_rebuild { Some(true) } else { None },
             }
@@ -813,6 +988,7 @@ pub async fn set_local_engine_preferences(
                 engine_id: engine_id.clone(),
                 compute_preference: Some(preference_to_string_local(ocr_config.compute_preference)),
                 auto_start: None,
+                ocr_backend: Some(ocr_config.backend.to_string()),
                 lifecycle: Some(ocr_config.lifecycle.to_string()),
                 requires_rebuild: if requires_rebuild { Some(true) } else { None },
             }
@@ -837,6 +1013,24 @@ fn parse_compute_preference(s: &str) -> Result<ComputePreference, CommandError> 
         other => Err(CommandError::new(
             "invalid_compute_preference",
             format!("未知的 compute preference: {other}"),
+            false,
+        )),
+    }
+}
+
+/// 从字符串解析 OCR 路由后端。
+fn parse_ocr_backend(
+    value: &str,
+) -> Result<crate::domain::ocr::config::OcrBackendKind, CommandError> {
+    use crate::domain::ocr::config::OcrBackendKind;
+
+    match value {
+        "windows" => Ok(OcrBackendKind::Windows),
+        "paddleocr" => Ok(OcrBackendKind::PaddleOcr),
+        "auto" => Ok(OcrBackendKind::Auto),
+        other => Err(CommandError::new(
+            "invalid_ocr_backend",
+            format!("未知的 OCR backend: {other}"),
             false,
         )),
     }
@@ -869,11 +1063,24 @@ fn preference_to_string_local(p: ComputePreference) -> String {
 }
 
 /// 验证 compute preference 属于该引擎 descriptor 声明项。
+///
+/// **策略性偏好**（`Auto`、`GpuAuto`）总是通过验证——它们不是显式 backend，
+/// 而是由 `InstallTransaction::resolve_profile` 按 descriptor 声明的候选顺序
+/// 逐个尝试兼容性检查后解析为具体 profile。因此不需要出现在 `compute_candidates` 中。
+///
+/// **显式偏好**（`Cpu`、`Cuda`、`Vulkan`、`Directml`）必须出现在 descriptor 的
+/// `compute_candidates` 中——显式偏好失败不回退，所以必须确保 descriptor 声明了
+/// 对应的 profile。
 async fn validate_preference_for_engine(
     svc: &LocalEngineService,
     engine_id: &EngineId,
     preference: ComputePreference,
 ) -> Result<(), CommandError> {
+    // 策略性偏好总是允许——由 resolver 解析为具体 profile
+    if !preference.is_explicit() {
+        return Ok(());
+    }
+
     let catalog = svc.catalog().await;
     let descriptor = catalog
         .iter()
@@ -949,15 +1156,19 @@ pub async fn get_runtime_foundation_status(
 /// 获取引擎诊断信息（只读）。
 ///
 /// 返回单个引擎的详细诊断：环境健康、进程状态、服务状态、最近日志。
-/// **只读查询，不安装、不启动。**
+/// **只读查询，不安装、不启动。** 不下载音频、不执行实际转写。
+///
+/// 调用 `LocalEngineService::get_status()` + `get_diagnostics()` + 双源日志查询 + orphan recovery，
+/// 返回闭合 `EngineDiagnosticsDto`，不再使用 `json!` 手拼。
 #[tauri::command]
 pub async fn get_engine_diagnostics(
     app: tauri::AppHandle,
     engine_id: String,
-) -> Result<serde_json::Value, CommandError> {
+) -> Result<EngineDiagnosticsDto, CommandError> {
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
+    // ── 1. 状态快照 ──
     let snapshot = svc.get_status(&eid).await.map_err(|e| {
         CommandError::new(
             "engine_status_error",
@@ -966,46 +1177,41 @@ pub async fn get_engine_diagnostics(
         )
     })?;
 
-    // 获取最近日志（最多 50 行）
-    let logs = svc
-        .get_logs_structured(&eid, 50)
-        .await
-        .map_err(|e| CommandError::new("engine_logs_error", format!("获取日志失败: {e}"), false))?;
+    // ── 2. adapter 专属诊断 ──
+    let adapter_diag = svc.get_diagnostics(&eid).await.map_err(|e| {
+        CommandError::new(
+            "engine_diagnostics_error",
+            format!("获取诊断失败: {e}"),
+            false,
+        )
+    })?;
+    let adapter_diagnostics: Vec<DiagnosticEntryDto> = project_diagnostics(&adapter_diag);
 
-    let log_lines: Vec<serde_json::Value> = logs
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "seq": entry.seq,
-                "level": entry.level,
-                "text": entry.text,
-            })
-        })
-        .collect();
+    // ── 3. 双源日志查询（instance + operation）──
+    // 使用与 get_local_engine_logs 相同的合并逻辑，但固定 50 行上限
+    let recent_logs = get_merged_logs(&app, &svc, &eid, 50).await;
 
-    // ── 0.22.6: orphan recovery 闭合 DTO ────────────────────────────────
-    // 前端不得拼接 process/service 猜测孤儿——后端做唯一判定。
-    // 扫描 lease + 进程证据 + health → 闭合 { present, actionable, reason }。
+    // ── 4. orphan recovery ──
     let orphan_recovery = scan_orphan_recovery(&eid).await;
 
-    Ok(serde_json::json!({
-        "engine_id": engine_id,
-        "environment": format!("{:?}", snapshot.status.environment).to_lowercase(),
-        "process": {
-            "state": format!("{:?}", snapshot.status.process).to_lowercase(),
-        },
-        "service": format!("{:?}", snapshot.status.service).to_lowercase(),
-        "recent_logs": log_lines,
-        "orphan_recovery": orphan_recovery,
-    }))
+    // ── 5. 投影为闭合 DTO ──
+    Ok(EngineDiagnosticsDto {
+        engine_id: engine_id,
+        environment: environment_health_to_string(snapshot.status.environment.clone()),
+        process: project_process_state_dto(&snapshot.status.process),
+        service: service_health_to_string(snapshot.status.service),
+        adapter_diagnostics,
+        recent_logs,
+        orphan_recovery,
+    })
 }
 
-/// 扫描引擎的孤儿进程恢复状态，返回闭合 DTO `{ present, actionable, reason }`。
+/// 扫描引擎的孤儿进程恢复状态，返回闭合 DTO。
 ///
 /// 不暴露 PID、路径、token、endpoint 等敏感字段。
 async fn scan_orphan_recovery(
     engine_id: &crate::infra::local_engine::runtime::EngineId,
-) -> serde_json::Value {
+) -> OrphanRecoveryDto {
     let engine_id_str = engine_id.to_string();
 
     // 扫描 lease 文件
@@ -1016,21 +1222,21 @@ async fn scan_orphan_recovery(
     {
         Ok(l) => l,
         Err(_) => {
-            return serde_json::json!({
-                "present": false,
-                "actionable": false,
-                "reason": "scan_failed"
-            });
+            return OrphanRecoveryDto {
+                present: false,
+                actionable: false,
+                reason: "scan_failed".to_string(),
+            };
         }
     };
 
     let lease = leases.iter().find(|l| l.engine_id == engine_id_str);
     let Some(lease) = lease else {
-        return serde_json::json!({
-            "present": false,
-            "actionable": false,
-            "reason": "no_lease"
-        });
+        return OrphanRecoveryDto {
+            present: false,
+            actionable: false,
+            reason: "no_lease".to_string(),
+        };
     };
 
     let lease = lease.clone();
@@ -1044,11 +1250,11 @@ async fn scan_orphan_recovery(
     {
         Ok(evidence) => evidence,
         Err(_) => {
-            return serde_json::json!({
-                "present": false,
-                "actionable": false,
-                "reason": "process_query_failed"
-            });
+            return OrphanRecoveryDto {
+                present: false,
+                actionable: false,
+                reason: "process_query_failed".to_string(),
+            };
         }
     };
 
@@ -1065,11 +1271,11 @@ async fn scan_orphan_recovery(
 
     match &decision {
         crate::infra::local_engine::lease::RecoveryDecision::Adoptable { .. } => {
-            serde_json::json!({
-                "present": true,
-                "actionable": true,
-                "reason": "adoptable"
-            })
+            OrphanRecoveryDto {
+                present: true,
+                actionable: true,
+                reason: "adoptable".to_string(),
+            }
         }
         crate::infra::local_engine::lease::RecoveryDecision::DoNotAdopt(diag) => {
             let reason_str = match &diag.reason {
@@ -1102,11 +1308,11 @@ async fn scan_orphan_recovery(
                     "schema_version_mismatch"
                 }
             };
-            serde_json::json!({
-                "present": true,
-                "actionable": false,
-                "reason": reason_str
-            })
+            OrphanRecoveryDto {
+                present: true,
+                actionable: false,
+                reason: reason_str.to_string(),
+            }
         }
     }
 }
@@ -1599,7 +1805,7 @@ mod tests {
             operation_id: None,
             seq: "42".to_string(),
             timestamp: "2026-08-26T00:00:00Z".to_string(),
-            level: "info".to_string(),
+            level: EngineLogLevel::Info,
             text: "test log line".to_string(),
         };
         let json = serde_json::to_value(&dto).unwrap();
@@ -1741,6 +1947,22 @@ mod tests {
     #[test]
     fn parse_ocr_lifecycle_invalid() {
         assert!(parse_ocr_lifecycle("always_on").is_err());
+    }
+
+    #[test]
+    fn parse_ocr_backend_accepts_closed_values() {
+        use crate::domain::ocr::config::OcrBackendKind;
+
+        assert_eq!(
+            parse_ocr_backend("windows").unwrap(),
+            OcrBackendKind::Windows
+        );
+        assert_eq!(
+            parse_ocr_backend("paddleocr").unwrap(),
+            OcrBackendKind::PaddleOcr
+        );
+        assert_eq!(parse_ocr_backend("auto").unwrap(), OcrBackendKind::Auto);
+        assert!(parse_ocr_backend("remote").is_err());
     }
 
     // ── preference_to_string_local 覆盖所有变体 ──
@@ -2031,6 +2253,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             compute_preference: Some("cpu".to_string()),
             auto_start: Some(true),
+            ocr_backend: None,
             lifecycle: None,
             requires_rebuild: None,
         };
@@ -2039,6 +2262,7 @@ mod tests {
         let patch = EnginePreferencesPatchDto {
             compute_preference: get_dto.compute_preference.clone(),
             auto_start: get_dto.auto_start,
+            ocr_backend: None,
             lifecycle: None,
         };
 
@@ -2056,6 +2280,7 @@ mod tests {
             engine_id: "paddleocr".to_string(),
             compute_preference: Some("auto".to_string()),
             auto_start: None,
+            ocr_backend: Some("paddleocr".to_string()),
             lifecycle: Some("on_demand".to_string()),
             requires_rebuild: None,
         };
@@ -2063,12 +2288,14 @@ mod tests {
         let patch = EnginePreferencesPatchDto {
             compute_preference: get_dto.compute_preference.clone(),
             auto_start: None,
+            ocr_backend: get_dto.ocr_backend.clone(),
             lifecycle: get_dto.lifecycle.clone(),
         };
 
         let patch_json = serde_json::to_string(&patch).unwrap();
         let patch_restored: EnginePreferencesPatchDto = serde_json::from_str(&patch_json).unwrap();
         assert_eq!(patch_restored.compute_preference, patch.compute_preference);
+        assert_eq!(patch_restored.ocr_backend, patch.ocr_backend);
         assert_eq!(patch_restored.lifecycle, patch.lifecycle);
     }
 
@@ -2078,12 +2305,14 @@ mod tests {
         let patch = EnginePreferencesPatchDto {
             compute_preference: None,
             auto_start: None,
+            ocr_backend: None,
             lifecycle: None,
         };
         let json = serde_json::to_value(&patch).unwrap();
         // 所有字段都被 skip_serializing_if 跳过
         assert!(json.get("compute_preference").is_none() || json["compute_preference"].is_null());
         assert!(json.get("auto_start").is_none() || json["auto_start"].is_null());
+        assert!(json.get("ocr_backend").is_none() || json["ocr_backend"].is_null());
         assert!(json.get("lifecycle").is_none() || json["lifecycle"].is_null());
     }
 
@@ -2096,6 +2325,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             compute_preference: Some("cpu".to_string()),
             auto_start: Some(false),
+            ocr_backend: None,
             lifecycle: None,
             requires_rebuild: None,
         };
@@ -2110,10 +2340,12 @@ mod tests {
             engine_id: "paddleocr".to_string(),
             compute_preference: Some("auto".to_string()),
             auto_start: None,
+            ocr_backend: Some("auto".to_string()),
             lifecycle: Some("keep_running".to_string()),
             requires_rebuild: None,
         };
         assert!(dto.auto_start.is_none(), "PaddleOCR 不应有 auto_start");
+        assert!(dto.ocr_backend.is_some(), "PaddleOCR 应有 ocr_backend");
         assert!(dto.lifecycle.is_some(), "PaddleOCR 应有 lifecycle");
     }
 
@@ -2392,5 +2624,212 @@ mod tests {
             };
             assert!(exists, "STT 命令 {cmd_name} 未注册或函数不存在");
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0.22.6.7 端到端契约测试：compute preference 契约
+    // 验证 Validator ↔ Resolver 语义一致性、配置归一化、单源真值
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// `is_explicit()` 对策略性偏好返回 false，对显式偏好返回 true。
+    #[test]
+    fn contract_is_explicit_distinguishes_strategic_and_explicit() {
+        // 策略性偏好——不应被 validate_preference_for_engine 拒绝
+        assert!(!ComputePreference::Auto.is_explicit());
+        assert!(!ComputePreference::GpuAuto.is_explicit());
+        // 显式偏好——需要 descriptor 声明
+        assert!(ComputePreference::Cpu.is_explicit());
+        assert!(ComputePreference::Cuda.is_explicit());
+        assert!(ComputePreference::Vulkan.is_explicit());
+        assert!(ComputePreference::Directml.is_explicit());
+    }
+
+    /// PaddleOCR descriptor 只声明 CPU profile——验证 `Auto` 不在候选列表中，
+    /// 但 `Auto` 作为策略性偏好应被 validator 允许。
+    #[test]
+    fn contract_paddleocr_auto_not_in_candidates_but_allowed() {
+        use crate::domain::local_engine::adapter::LocalEngineAdapter;
+
+        let descriptor = paddleocr::PaddleocrAdapter::new().descriptor().clone();
+
+        // Auto 不在 compute_candidates 中
+        assert!(
+            !descriptor.has_preference(ComputePreference::Auto),
+            "PaddleOCR descriptor 不应声明 Auto 候选（Auto 是策略性偏好）"
+        );
+        // Cpu 在 compute_candidates 中
+        assert!(
+            descriptor.has_preference(ComputePreference::Cpu),
+            "PaddleOCR descriptor 应声明 Cpu 候选"
+        );
+        // Cuda 不在 compute_candidates 中
+        assert!(
+            !descriptor.has_preference(ComputePreference::Cuda),
+            "PaddleOCR descriptor 不应声明 Cuda 候选"
+        );
+    }
+
+    /// FunASR descriptor 只声明 CPU profile——与 PaddleOCR 同理。
+    #[test]
+    fn contract_funasr_auto_not_in_candidates_but_allowed() {
+        use crate::domain::local_engine::adapter::LocalEngineAdapter;
+
+        let descriptor = funasr::FunasrAdapter::new().descriptor().clone();
+
+        assert!(
+            !descriptor.has_preference(ComputePreference::Auto),
+            "FunASR descriptor 不应声明 Auto 候选（Auto 是策略性偏好）"
+        );
+        assert!(
+            descriptor.has_preference(ComputePreference::Cpu),
+            "FunASR descriptor 应声明 Cpu 候选"
+        );
+        assert!(
+            !descriptor.has_preference(ComputePreference::Cuda),
+            "FunASR 0.22.6 不应声明 Cuda 候选"
+        );
+    }
+
+    /// `build_adapter_config_for_engine` 为 PaddleOCR 构造的 compute_preference
+    /// 可以是 `Auto`（来自 OcrConfig），验证它不报错。
+    #[test]
+    fn contract_paddleocr_build_adapter_config_succeeds_with_auto() {
+        // PaddleOCR 的 compute_preference 来自 OcrConfig，默认是 Auto
+        let config = build_adapter_config_for_engine("paddleocr").unwrap();
+        // 验证 compute_preference 存在（可能是 Auto 或 Cpu，取决于配置）
+        assert!(
+            config.compute_preference.is_some(),
+            "PaddleOCR AdapterConfig 必须有 compute_preference"
+        );
+    }
+
+    /// `build_adapter_config_for_engine` 为 FunASR 构造的 compute_preference
+    /// 始终为 `Cpu`，即使历史配置 device=cuda 也不传 Cuda。
+    #[test]
+    fn contract_funasr_build_adapter_config_always_cpu() {
+        let config = build_adapter_config_for_engine("funasr").unwrap();
+        // 无论 SttConfig.local_engine.device 是什么，compute_preference 都应为 Cpu
+        assert_eq!(
+            config.compute_preference,
+            Some(ComputePreference::Cpu),
+            "FunASR AdapterConfig compute_preference 必须为 Cpu（0.22.6 归一化）"
+        );
+    }
+
+    /// `current_compute_preference` 为 FunASR 始终返回 Cpu。
+    #[test]
+    fn contract_funasr_current_compute_preference_always_cpu() {
+        let pref = current_compute_preference("funasr");
+        assert_eq!(
+            pref,
+            ComputePreference::Cpu,
+            "FunASR current_compute_preference 必须为 Cpu"
+        );
+    }
+
+    /// `parse_compute_preference` 覆盖所有变体。
+    #[test]
+    fn contract_parse_compute_preference_all_variants() {
+        assert_eq!(
+            parse_compute_preference("auto").unwrap(),
+            ComputePreference::Auto
+        );
+        assert_eq!(
+            parse_compute_preference("gpu_auto").unwrap(),
+            ComputePreference::GpuAuto
+        );
+        assert_eq!(
+            parse_compute_preference("cpu").unwrap(),
+            ComputePreference::Cpu
+        );
+        assert_eq!(
+            parse_compute_preference("cuda").unwrap(),
+            ComputePreference::Cuda
+        );
+        assert_eq!(
+            parse_compute_preference("vulkan").unwrap(),
+            ComputePreference::Vulkan
+        );
+        assert_eq!(
+            parse_compute_preference("directml").unwrap(),
+            ComputePreference::Directml
+        );
+    }
+
+    /// PaddleOCR ProviderDescriptor 只声明 CPU profile（`Always` 兼容）。
+    /// 验证 Auto 策略可以通过 resolve_profile 解析为 CPU backend。
+    #[test]
+    fn contract_paddleocr_provider_descriptor_only_cpu() {
+        let descriptor = paddleocr::make_paddleocr_provider_descriptor();
+
+        // 只有一个 CPU profile
+        assert_eq!(descriptor.profiles.len(), 1);
+        assert_eq!(
+            descriptor.profiles[0].backend,
+            crate::infra::local_engine::runtime::ComputeBackend::Cpu
+        );
+        // compatibility 是 Always
+        assert!(matches!(
+            descriptor.profiles[0].compatibility,
+            crate::infra::local_engine::providers::CompatibilityCheck::Always
+        ));
+    }
+
+    /// FunASR ProviderDescriptor 只声明 CPU profile（`Always` 兼容）。
+    #[test]
+    fn contract_funasr_provider_descriptor_only_cpu() {
+        let descriptor = funasr::make_funasr_provider_descriptor();
+
+        assert_eq!(descriptor.profiles.len(), 1);
+        assert_eq!(
+            descriptor.profiles[0].backend,
+            crate::infra::local_engine::runtime::ComputeBackend::Cpu
+        );
+        assert!(matches!(
+            descriptor.profiles[0].compatibility,
+            crate::infra::local_engine::providers::CompatibilityCheck::Always
+        ));
+    }
+
+    /// 前端 `handleActionClick` 不传 `compute_preference`（null）时，
+    /// 后端 `install_local_engine` / `start_local_engine` 接受 `Option::None`，
+    /// 由 `build_adapter_config_for_engine` 从配置真源构造。
+    /// 此测试验证 build_adapter_config_for_engine 不依赖前端传入的 preference。
+    #[test]
+    fn contract_build_adapter_config_independent_of_frontend_preference() {
+        // 模拟前端传 null compute_preference 的场景：
+        // install_local_engine 中 build_adapter_config_for_engine 先构造默认 config，
+        // 然后只有当前端提交了 Some(pref_str) 时才覆盖。
+        // 如果前端传 null（None），则使用 build_adapter_config 的默认值。
+
+        let funasr_config = build_adapter_config_for_engine("funasr").unwrap();
+        assert_eq!(
+            funasr_config.compute_preference,
+            Some(ComputePreference::Cpu)
+        );
+
+        let paddleocr_config = build_adapter_config_for_engine("paddleocr").unwrap();
+        assert!(paddleocr_config.compute_preference.is_some());
+    }
+
+    /// 验证 `is_explicit()` + `has_preference` 组合的语义一致性：
+    /// - 策略性偏好（Auto/GpuAuto）→ is_explicit() = false → validator 放行
+    /// - 显式偏好（Cpu/Cuda/...）→ is_explicit() = true → validator 检查 has_preference
+    #[test]
+    fn contract_validator_semantics_consistent() {
+        use crate::domain::local_engine::adapter::LocalEngineAdapter;
+
+        let paddleocr_desc = paddleocr::PaddleocrAdapter::new().descriptor().clone();
+
+        // Auto: is_explicit = false → validator 应放行（不需要在 candidates 中）
+        assert!(!ComputePreference::Auto.is_explicit());
+
+        // Cpu: is_explicit = true → validator 检查 has_preference
+        assert!(ComputePreference::Cpu.is_explicit());
+        assert!(paddleocr_desc.has_preference(ComputePreference::Cpu));
+
+        // Cuda: is_explicit = true → validator 检查 has_preference → 不存在 → 拒绝
+        assert!(ComputePreference::Cuda.is_explicit());
+        assert!(!paddleocr_desc.has_preference(ComputePreference::Cuda));
     }
 }

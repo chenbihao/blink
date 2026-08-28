@@ -55,6 +55,8 @@ function registerFunasrHook() {
             const autoStart = prefs?.auto_start ?? false;
             const requiresRebuild = prefs?.requires_rebuild === true;
 
+            appendConfigHeading(container, t("local_engine.config.runtime_policy"));
+
             // ── compute preference 选择器 ──────────────────────────────
             const computeRow = document.createElement("div");
             computeRow.className = "le-config-row";
@@ -115,13 +117,26 @@ function registerFunasrHook() {
             const autoStartLabel = document.createElement("label");
             autoStartLabel.className = "le-config-label";
             autoStartLabel.textContent = t("local_engine.config.auto_start");
+            autoStartLabel.htmlFor = "le-funasr-auto-start";
             autoStartRow.appendChild(autoStartLabel);
+
+            const autoStartControl = document.createElement("div");
+            autoStartControl.className = "le-config-control le-config-control-switch";
+
+            const switchLabel = document.createElement("label");
+            switchLabel.className = "le-switch";
 
             const autoStartToggle = document.createElement("input");
             autoStartToggle.type = "checkbox";
-            autoStartToggle.className = "le-config-checkbox";
+            autoStartToggle.className = "le-switch-input";
             autoStartToggle.checked = autoStart;
             autoStartToggle.id = "le-funasr-auto-start";
+
+            const switchTrack = document.createElement("span");
+            switchTrack.className = "le-switch-track";
+            switchTrack.setAttribute("aria-hidden", "true");
+            switchLabel.appendChild(autoStartToggle);
+            switchLabel.appendChild(switchTrack);
 
             autoStartToggle.addEventListener("change", async () => {
                 const newVal = autoStartToggle.checked;
@@ -140,22 +155,16 @@ function registerFunasrHook() {
             const autoStartHint = document.createElement("span");
             autoStartHint.className = "le-config-hint";
             autoStartHint.textContent = t("local_engine.config.auto_start_hint");
-            autoStartHint.style.fontSize = "var(--text-xs)";
-            autoStartHint.style.color = "var(--text-dim)";
-            autoStartHint.style.fontStyle = "normal";
 
-            autoStartRow.appendChild(autoStartToggle);
-            autoStartRow.appendChild(autoStartHint);
+            autoStartControl.appendChild(switchLabel);
+            autoStartControl.appendChild(autoStartHint);
+            autoStartRow.appendChild(autoStartControl);
             container.appendChild(autoStartRow);
 
             // ── requires_rebuild 提示 ──────────────────────────────────
             if (requiresRebuild) {
                 const rebuildHint = document.createElement("div");
                 rebuildHint.className = "le-config-rebuild-hint";
-                rebuildHint.style.cssText =
-                    "padding:0.375rem 0.625rem;border-radius:var(--radius-sm,4px);" +
-                    "background:var(--accent-bg);border:1px solid var(--accent);" +
-                    "font-size:var(--text-xs);color:var(--accent);font-style:normal;margin-top:0.25rem;";
                 rebuildHint.textContent = t("local_engine.config.requires_rebuild_hint");
                 container.appendChild(rebuildHint);
             }
@@ -196,8 +205,44 @@ function registerPaddleOcrHook() {
 
             const prefs = entry.preferences;
             const currentCompute = prefs?.compute_preference || catalog.current_compute_preference || "auto";
+            const currentBackend = prefs?.ocr_backend || "windows";
             const currentLifecycle = prefs?.lifecycle || catalog.lifecycle || "on_demand";
             const requiresRebuild = prefs?.requires_rebuild === true;
+
+            appendConfigHeading(container, t("local_engine.config.runtime_policy"));
+
+            // ── OCR 路由后端 ───────────────────────────────────────────
+            const backendRow = document.createElement("div");
+            backendRow.className = "le-config-row";
+
+            const backendLabel = document.createElement("label");
+            backendLabel.className = "le-config-label";
+            backendLabel.textContent = t("local_engine.config.ocr_backend");
+            backendRow.appendChild(backendLabel);
+
+            const backendSelect = document.createElement("select");
+            backendSelect.className = "le-config-select";
+            for (const backend of ["windows", "paddleocr", "auto"]) {
+                const option = document.createElement("option");
+                option.value = backend;
+                option.textContent = t(`local_engine.ocr_backend.${backend}`, backend);
+                option.selected = backend === currentBackend;
+                backendSelect.appendChild(option);
+            }
+            backendSelect.addEventListener("change", async (event) => {
+                const next = event.target.value;
+                try {
+                    await invoke("set_local_engine_preferences", {
+                        engineId: "paddleocr",
+                        patch: {ocr_backend: next},
+                    });
+                } catch (err) {
+                    console.error("[paddleocr-hook] save OCR backend failed:", err);
+                    backendSelect.value = currentBackend;
+                }
+            });
+            backendRow.appendChild(backendSelect);
+            container.appendChild(backendRow);
 
             // ── compute preference 选择器 ──────────────────────────────
             const computeRow = document.createElement("div");
@@ -289,10 +334,6 @@ function registerPaddleOcrHook() {
             if (requiresRebuild) {
                 const rebuildHint = document.createElement("div");
                 rebuildHint.className = "le-config-rebuild-hint";
-                rebuildHint.style.cssText =
-                    "padding:0.375rem 0.625rem;border-radius:var(--radius-sm,4px);" +
-                    "background:var(--accent-bg);border:1px solid var(--accent);" +
-                    "font-size:var(--text-xs);color:var(--accent);font-style:normal;margin-top:0.25rem;";
                 rebuildHint.textContent = t("local_engine.config.requires_rebuild_hint");
                 container.appendChild(rebuildHint);
             }
@@ -371,6 +412,13 @@ function renderModelConfigRow(container, entry, engineId) {
         mismatch.appendChild(text);
         container.appendChild(mismatch);
     }
+}
+
+function appendConfigHeading(container, text) {
+    const heading = document.createElement("div");
+    heading.className = "le-config-heading";
+    heading.textContent = text;
+    container.appendChild(heading);
 }
 
 // ── 汇总注册入口 ──────────────────────────────────────────────────────────────

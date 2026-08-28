@@ -50,18 +50,21 @@ const FINALIZE_WAIT_TIMEOUT_MS: u64 = 3000;
 /// 伪流式 STT 引擎。
 ///
 /// 组合 VAD 切句 + 累积预览，在非自回归 SenseVoice 上实现"边说边出字"体感。
+///
+/// 0.22.6 批次 3: 存储完整 `SttEngineConnection` 快照，确保 health 检查和
+/// 转录请求使用同一 endpoint/token——不再分别用 port 和 token 猜测。
 pub struct PseudoStreamingSttEngine {
     /// 内部状态
     inner: Arc<Mutex<PseudoInner>>,
     /// 复用 HTTP client（避免每次建连）
     client: reqwest::Client,
-    /// funasr-server 监听端口
-    server_port: u16,
+    /// 连接快照（host + port + token + engine_id + instance_id）
+    ///
+    /// 0.22.6: health 和 transcribe 共用此快照，保证同一连接。
+    /// 服务重启后旧连接的 token/instance_id 不匹配新实例，请求被拒绝。
+    connection: Option<crate::domain::stt::SttEngineConnection>,
     /// FunASR 模型标识
     funasr_model: String,
-    /// 服务 token（用于 X-Engine-Token header 鉴权）
-    /// 0.22.3 Task A: stop/重启后旧 token 的请求会被 Python server 拒绝（401）
-    token: Option<String>,
     /// 采样率
     sample_rate: u32,
 }
@@ -131,8 +134,8 @@ impl SentenceBuffer {
 impl PseudoStreamingSttEngine {
     /// 创建伪流式 STT 引擎。
     ///
-    /// 0.22.3 Task A: `port` 和 `token` 来自 LocalEngineService 的 `LocalEngineConnection`，
-    /// token 用于 X-Engine-Token 鉴权。
+    /// 0.22.6 批次 3: `port` 和 `token` 来自 `SttEngineConnection`（由 app 层从
+    /// `LocalEngineService::get_connection` 投影而来）。health 和 transcribe 使用同一连接快照。
     pub fn new(
         config: &crate::domain::config::stt_config::SttConfig,
         port: u16,
@@ -180,9 +183,71 @@ impl PseudoStreamingSttEngine {
                 preview_generation: 0,
             })),
             client,
-            server_port: port,
+            connection: Some(crate::domain::stt::SttEngineConnection {
+                host: "127.0.0.1".to_string(),
+                port,
+                token,
+                engine_id: String::new(),
+                instance_id: String::new(),
+            }),
             funasr_model: model,
-            token: Some(token),
+            sample_rate: 16000,
+        })
+    }
+
+    /// 从 `SttEngineConnection` 创建伪流式 STT 引擎（0.22.6 批次 3）。
+    ///
+    /// 这是推荐的生产构造方式——连接快照包含完整的 host/port/token/IDs，
+    /// health 和 transcribe 共用同一快照。
+    pub fn from_connection(
+        config: &crate::domain::config::stt_config::SttConfig,
+        conn: crate::domain::stt::SttEngineConnection,
+    ) -> Result<Self, String> {
+        let model = config.local_engine.funasr_model.clone();
+
+        let ready = super::funasr::is_server_ready(conn.port);
+        if !ready {
+            return Err(format!(
+                "FunASR 服务未在端口 {} 上运行。\
+                 请在设置页「语音输入」→「本地模式」中点击「启动服务」按钮。",
+                conn.port
+            ));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+
+        let vad_cfg = &config.local_engine.vad;
+        tracing::info!(
+            port = conn.port, model = %model,
+            silence_threshold = vad_cfg.silence_threshold,
+            min_silence_ms = vad_cfg.min_silence_ms,
+            min_sentence_ms = vad_cfg.min_sentence_ms,
+            "伪流式 STT 引擎: VAD + HTTP 轮询 (就绪)"
+        );
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(PseudoInner {
+                vad: EnergyVad::with_params(
+                    16000,
+                    vad_cfg.silence_threshold,
+                    vad_cfg.min_silence_ms,
+                    vad_cfg.min_sentence_ms,
+                ),
+                sentences: SentenceBuffer::new(),
+                samples: Vec::new(),
+                last_preview: Instant::now(),
+                preview_in_flight: false,
+                latest_preview: String::new(),
+                finalize_in_flight: false,
+                pending_confirmed: None,
+                preview_generation: 0,
+            })),
+            client,
+            connection: Some(conn),
+            funasr_model: model,
             sample_rate: 16000,
         })
     }
@@ -209,22 +274,31 @@ impl PseudoStreamingSttEngine {
         .to_string()
     }
 
-    /// HTTP 转录 URL。
+    /// HTTP 转录 URL（0.22.6: 使用连接快照中的 host:port）。
     fn transcription_url(&self) -> String {
-        format!(
-            "{}/audio/transcriptions",
-            super::funasr::server_base_url(self.server_port)
-        )
+        let conn = match &self.connection {
+            Some(c) => c,
+            None => return String::new(), // 诊断模式无连接
+        };
+        format!("http://{}:{}/v1/audio/transcriptions", conn.host, conn.port)
     }
 
     /// 异步 HTTP 转录（同步等待结果）。
+    ///
+    /// 0.22.6: 使用连接快照做 token-aware health 检查 + 转录请求，
+    /// 确保 health 和 transcribe 使用同一 endpoint/token。
     async fn transcribe_samples(&self, samples: &[f32]) -> Result<String, SttError> {
         if samples.is_empty() {
             return Ok(String::new());
         }
 
-        // 检查模型是否已加载完毕（区分 HTTP 未就绪 / 模型加载中 / 模型就绪）
-        super::funasr::check_model_ready_or_error(self.server_port)
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| SttError::Engine("伪流式引擎无连接快照".to_string()))?;
+
+        // 0.22.6: token-aware health 检查，确保模型就绪
+        super::funasr::check_model_ready_or_error_with_token(conn)
             .await
             .map_err(SttError::Engine)?;
 
@@ -236,7 +310,7 @@ impl PseudoStreamingSttEngine {
         let text = super::wav::transcribe_with_token(
             &self.client,
             &url,
-            self.token.as_deref(),
+            Some(&conn.token),
             &self.funasr_model,
             &wav_bytes,
         )
@@ -248,6 +322,8 @@ impl PseudoStreamingSttEngine {
     }
 
     /// 后台 spawn 一个定稿识别 task。
+    ///
+    /// 0.22.6: 使用连接快照中的 token，确保与 health 检查使用同一连接。
     fn spawn_sentence_finalize(&self, sentence_samples: Vec<f32>) {
         if sentence_samples.is_empty() {
             return;
@@ -263,7 +339,7 @@ impl PseudoStreamingSttEngine {
         let client = self.client.clone();
         let url = self.transcription_url();
         let model = self.funasr_model.clone();
-        let token = self.token.clone();
+        let token = self.connection.as_ref().map(|c| c.token.clone());
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
@@ -302,6 +378,8 @@ impl PseudoStreamingSttEngine {
     }
 
     /// 后台 spawn 一个预览识别 task。
+    ///
+    /// 0.22.6: 使用连接快照中的 token，确保与 health 检查使用同一连接。
     fn spawn_preview_recognition(&self, samples_snapshot: Vec<f32>) {
         if samples_snapshot.is_empty() {
             return;
@@ -318,7 +396,7 @@ impl PseudoStreamingSttEngine {
         let client = self.client.clone();
         let url = self.transcription_url();
         let model = self.funasr_model.clone();
-        let token = self.token.clone();
+        let token = self.connection.as_ref().map(|c| c.token.clone());
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
@@ -981,9 +1059,8 @@ mod tests {
                 preview_generation: 0,
             })),
             client: reqwest::Client::new(),
-            server_port: 8000,
+            connection: None,
             funasr_model: "test".to_string(),
-            token: None,
             sample_rate: 16000,
         };
 
@@ -1019,9 +1096,14 @@ mod tests {
                 preview_generation: 0,
             })),
             client: reqwest::Client::new(),
-            server_port: 8000,
+            connection: Some(crate::domain::stt::SttEngineConnection {
+                host: "127.0.0.1".to_string(),
+                port: 8000,
+                token: "test-token-abcdef0123456789".to_string(),
+                engine_id: "funasr".to_string(),
+                instance_id: "inst-test".to_string(),
+            }),
             funasr_model: "test".to_string(),
-            token: Some("test-token-abcdef0123456789".to_string()),
             sample_rate: 16000,
         };
 

@@ -39,6 +39,8 @@ import {
     setLogHistory,
     setStorage,
     setPendingAction,
+    setPendingModelAction,
+    getPendingModelAction,
     markErrorRendered,
     clearLogs,
     getEngineIds,
@@ -99,11 +101,20 @@ export function createLocalEngineController(callbacks = {}) {
     /**
      * 通知状态变化。
      */
+    // 高频日志事件（下载时每行一条）会触发整卡重渲染——合并为最多
+    // ~12 次/秒，避免按钮 hover 闪烁、点击落空与 DOM 抖动。
+    let notifyTimer = null;
+
     function notifyStateChange() {
         if (disposed) return;
-        if (callbacks.onStateChange) {
-            callbacks.onStateChange(new Map(state));
-        }
+        if (notifyTimer != null) return;
+        notifyTimer = setTimeout(() => {
+            notifyTimer = null;
+            if (disposed) return;
+            if (callbacks.onStateChange) {
+                callbacks.onStateChange(new Map(state));
+            }
+        }, 80);
     }
 
     /**
@@ -153,6 +164,37 @@ export function createLocalEngineController(callbacks = {}) {
     }
 
     /**
+     * 处理安装阶段变更事件（0.22.6 H4）。
+     *
+     * payload: { engine_id, operation_id, stage }
+     *
+     * 前端据此实时显示安装进度，不等 LOCAL_ENGINE_STATUS 的 revision 变化。
+     * 安装阶段变更时，直接更新对应引擎的 operation.stage。
+     *
+     * @param {Object} payload - { engine_id, operation_id, stage }
+     */
+    function handleInstallStageEvent(payload) {
+        if (disposed) return;
+
+        // 缓冲期间先存起来
+        if (buffering) {
+            eventBuffer.push({type: "install_stage", payload});
+            return;
+        }
+
+        if (!mounted) return;
+
+        // 将 stage 投影到 EngineStatus.operation.stage
+        const {engine_id, stage} = payload;
+        const engineState = state.get(engine_id);
+        if (engineState && engineState.status && engineState.status.operation) {
+            engineState.status.operation.stage = stage;
+            // 通知 UI 更新
+            notifyStateChange();
+        }
+    }
+
+    /**
      * 注册事件监听器。
      * 如果部分注册成功后失败，回滚已注册的 listener。
      */
@@ -169,6 +211,12 @@ export function createLocalEngineController(callbacks = {}) {
                 handleLogEvent(event.payload);
             });
             registered.push(unlistenLog);
+
+            // 0.22.6 H4: 安装阶段变更事件
+            const unlistenInstallStage = await listen(EVENTS.LOCAL_ENGINE_INSTALL_STAGE, (event) => {
+                handleInstallStageEvent(event.payload);
+            });
+            registered.push(unlistenInstallStage);
 
             unlisteners = registered;
         } catch (e) {
@@ -198,6 +246,13 @@ export function createLocalEngineController(callbacks = {}) {
                 state = mergeStatus(state, buffered.payload);
             } else if (buffered.type === "log") {
                 state = appendLog(state, buffered.payload);
+            } else if (buffered.type === "install_stage") {
+                // 0.22.6 H4: 安装阶段变更
+                const {engine_id, stage} = buffered.payload;
+                const engineState = state.get(engine_id);
+                if (engineState && engineState.status && engineState.status.operation) {
+                    engineState.status.operation.stage = stage;
+                }
             }
         }
         eventBuffer = [];
@@ -380,6 +435,10 @@ export function createLocalEngineController(callbacks = {}) {
             mountGeneration++; // 使进行中的 mount 失效
             eventBuffer = [];
             activeActions.clear();
+            if (notifyTimer != null) {
+                clearTimeout(notifyTimer);
+                notifyTimer = null;
+            }
 
             for (const unlisten of unlisteners) {
                 if (typeof unlisten === "function") {
@@ -606,6 +665,12 @@ export function createLocalEngineController(callbacks = {}) {
         async installModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
             const operationId = `install-model-${modelId}-${Date.now()}`;
+            // 发起前存入 state，供取消按钮使用
+            state = setPendingModelAction(state, engineId, modelId, {
+                kind: "install",
+                operationId,
+            });
+            notifyStateChange();
             return invoke(COMMANDS.INSTALL_MODEL, {
                 request: {
                     engine_id: engineId,
@@ -613,10 +678,15 @@ export function createLocalEngineController(callbacks = {}) {
                     operation_id: operationId,
                 },
             }).then((result) => {
+                // 清除 pending model action
+                state = setPendingModelAction(state, engineId, modelId, null);
+                notifyStateChange();
                 // 刷新模型列表
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
+                state = setPendingModelAction(state, engineId, modelId, null);
+                notifyStateChange();
                 const err = normalizeError(e);
                 if (callbacks.onError) callbacks.onError(err);
                 throw err;
@@ -632,6 +702,12 @@ export function createLocalEngineController(callbacks = {}) {
         async repairModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
             const operationId = `repair-model-${modelId}-${Date.now()}`;
+            // 发起前存入 state，供取消按钮使用
+            state = setPendingModelAction(state, engineId, modelId, {
+                kind: "repair",
+                operationId,
+            });
+            notifyStateChange();
             return invoke(COMMANDS.REPAIR_MODEL, {
                 request: {
                     engine_id: engineId,
@@ -639,9 +715,13 @@ export function createLocalEngineController(callbacks = {}) {
                     operation_id: operationId,
                 },
             }).then((result) => {
+                state = setPendingModelAction(state, engineId, modelId, null);
+                notifyStateChange();
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
+                state = setPendingModelAction(state, engineId, modelId, null);
+                notifyStateChange();
                 const err = normalizeError(e);
                 if (callbacks.onError) callbacks.onError(err);
                 throw err;
@@ -657,6 +737,11 @@ export function createLocalEngineController(callbacks = {}) {
         async deleteModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
             const operationId = `delete-model-${modelId}-${Date.now()}`;
+            state = setPendingModelAction(state, engineId, modelId, {
+                kind: "delete",
+                operationId,
+            });
+            notifyStateChange();
             return invoke(COMMANDS.DELETE_MODEL, {
                 request: {
                     engine_id: engineId,
@@ -664,9 +749,13 @@ export function createLocalEngineController(callbacks = {}) {
                     operation_id: operationId,
                 },
             }).then((result) => {
+                state = setPendingModelAction(state, engineId, modelId, null);
+                notifyStateChange();
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
+                state = setPendingModelAction(state, engineId, modelId, null);
+                notifyStateChange();
                 // 不做静默 fallback——结构化冲突由调用方展示
                 const err = normalizeError(e);
                 throw err;
@@ -682,11 +771,25 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async cancelModelOperation(engineId, modelId, operationId) {
             if (disposed) throw new Error("controller 已 disposed");
+            // 如果未传 operationId，尝试从 pending model action 中获取
+            if (!operationId) {
+                const entry = state.get(engineId);
+                const pending = getPendingModelAction(entry, modelId);
+                if (pending) {
+                    operationId = pending.operationId;
+                }
+            }
+            if (!operationId) {
+                // 无 operationId 无法取消
+                console.warn("[local-engine] cancelModelOperation: no operationId available");
+                return;
+            }
             return invoke(COMMANDS.CANCEL_MODEL_OP, {
                 engineId,
                 modelId,
                 operationId,
             }).then((result) => {
+                state = setPendingModelAction(state, engineId, modelId, null);
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {

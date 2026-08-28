@@ -39,14 +39,18 @@
  */
 
 import {renderIcon, iconHTML} from "../../../shared/icon.js";
+import {copyToClipboard} from "../../../shared/api.js";
+import {confirmDialog} from "../../../shared/tauri.js";
 import {t} from "../../../i18n/index.js";
 import {processDisplay, processClass} from "./local-engine-process.js";
+import {formatLocalLogTimestamp, formatLogLine} from "./local-engine-log-format.js";
 import {
     isEngineReady,
     hasActiveOperation,
     isOperationCancellable,
     getPrimaryAction,
     isActionBlocked,
+    getEffectiveModelInstallState,
 } from "./local-engine-state.js";
 
 // ── 受限 adapter hook 注册表 ──────────────────────────────────────────────────
@@ -186,8 +190,6 @@ export function renderEngineCard(container, entry, controller, i18n) {
     // ── 0.22.6: 引擎目录 + 诊断按钮区 ────────────────────────────────────
     const toolBar = document.createElement("div");
     toolBar.className = "le-card-toolbar";
-    toolBar.style.cssText =
-        "display:flex;gap:0.5rem;padding:0.5rem 0;border-top:1px solid var(--surface);";
 
     const openDirBtn = document.createElement("button");
     openDirBtn.className = "btn btn-small le-action-btn";
@@ -202,18 +204,24 @@ export function renderEngineCard(container, entry, controller, i18n) {
     toolBar.appendChild(openDirBtn);
 
     const diagBtn = document.createElement("button");
-    diagBtn.className = "btn btn-small le-action-btn";
+    diagBtn.className = "btn btn-small le-action-btn le-diagnostic-toggle";
     diagBtn.type = "button";
+    diagBtn.setAttribute("aria-expanded", "false");
     diagBtn.appendChild(renderIcon("stethoscope", {extraClass: "le-action-icon"}));
     const diagLabel = document.createElement("span");
     diagLabel.textContent = tt(i18n, "local_engine.diagnostic.btn", "诊断");
     diagBtn.appendChild(diagLabel);
+    diagBtn.appendChild(renderIcon("chevron-down", {extraClass: "le-action-icon le-disclosure-icon"}));
+    const diagPanel = document.createElement("div");
+    diagPanel.className = "le-diagnostic-inline";
+    diagPanel.hidden = true;
     diagBtn.addEventListener("click", () => {
-        showEngineDiagnostics(entry, controller, i18n, diagBtn);
+        showEngineDiagnostics(entry, controller, i18n, diagBtn, diagLabel, diagPanel);
     });
     toolBar.appendChild(diagBtn);
 
     body.appendChild(toolBar);
+    body.appendChild(diagPanel);
 
     // ── actions ──────────────────────────────────────────────────────────
     const actions = document.createElement("div");
@@ -284,6 +292,34 @@ function updateCardContent(card, entry, controller, i18n) {
     // 更新日志区
     const logArea = card.querySelector(".le-card-log");
     if (logArea) {
+        // 0.22.6: 新 operation 自动展开日志区
+        // 基于 entry.logAutoExpand 标志（reducer 在新 operation 出现时设置）。
+        // DOM 上记录已展开的 operation_id，防止同一 operation 重复展开。
+        // 用户手动收起后不会被重新展开——因为标志只在 operation_id 跃迁时设置。
+        if (entry.logAutoExpand) {
+            // 确定当前活跃的 operation_id
+            let currentOpId = entry.pendingAction?.operationId || null;
+            if (!currentOpId && entry.pendingModelActions) {
+                for (const [, pa] of entry.pendingModelActions) {
+                    if (pa.operationId) {
+                        currentOpId = pa.operationId;
+                        break;
+                    }
+                }
+            }
+            // 如果 DOM 上记录的 opId 与当前不同 → 展开
+            const alreadyExpanded = logArea.dataset.autoExpandedOp === currentOpId;
+            if (!alreadyExpanded && currentOpId) {
+                logArea.hidden = false;
+                logArea.dataset.autoExpandedOp = currentOpId;
+                // 同步日志按钮的 aria-expanded
+                const logBtn = card.querySelector('.le-log-toggle');
+                if (logBtn) {
+                    logBtn.setAttribute('aria-expanded', 'true');
+                }
+            }
+        }
+
         const logList = logArea.querySelector(".le-log-list");
         if (logList) {
             updateLogList(logList, entry, i18n);
@@ -507,9 +543,21 @@ function updateStorageInfo(div, entry, i18n) {
 // ── actions 按钮 ───────────────────────────────────────────────────────────────
 
 function updateActions(container, entry, controller, i18n) {
+    // 脏检查：下载等高频状态推送期间，按钮组的外观输入未变时跳过重建。
+    // 全量重建会丢失 hover/press 状态（闪烁、点击落空）和日志按钮的
+    // aria-expanded ——每条日志事件都会走到这里，重建必须杜绝。
+    const primary = getPrimaryAction(entry);
+    const sigParts = [`primary=${primary}`];
+    for (const kind of ["install", "start", "stop", "repair", "cleanup"]) {
+        sigParts.push(`${kind}=${isActionBlocked(entry, kind)}`);
+    }
+    sigParts.push(`cancel=${isOperationCancellable(entry)}`);
+    const sig = sigParts.join("|");
+    if (container.dataset.renderSig === sig) return;
+    container.dataset.renderSig = sig;
+
     container.textContent = "";
 
-    const primary = getPrimaryAction(entry);
     const buttons = [
         {kind: "install", label: tt(i18n, "local_engine.action.install", "安装"), icon: "download"},
         {kind: "start", label: tt(i18n, "local_engine.action.start", "启动"), icon: "play"},
@@ -569,14 +617,16 @@ function updateActions(container, entry, controller, i18n) {
 
 function handleActionClick(kind, entry, controller, i18n) {
     const engineId = entry.catalog.engine_id;
-    const computePref = entry.catalog.current_compute_preference;
 
     switch (kind) {
         case "install":
-            controller.install(engineId, computePref).catch(() => {});
+            // 不传 compute_preference：由后端从配置真源构造 AdapterConfig
+            // 前端 catalog.current_compute_preference 可能是过期快照
+            controller.install(engineId, null).catch(() => {});
             break;
         case "start":
-            controller.start(engineId, computePref).catch(() => {});
+            // 不传 compute_preference：由后端从配置真源构造 AdapterConfig
+            controller.start(engineId, null).catch(() => {});
             break;
         case "stop":
             controller.stop(engineId).catch(() => {});
@@ -644,9 +694,7 @@ function updateErrorArea(container, entry, i18n) {
         const copyBtn = document.createElement("button");
         copyBtn.className = "btn btn-small le-error-copy";
         copyBtn.textContent = tt(i18n, "local_engine.error.copy", "复制诊断");
-        copyBtn.addEventListener("click", () => {
-            navigator.clipboard?.writeText(detail).catch(() => {});
-        });
+        copyBtn.addEventListener("click", () => copyTextWithFeedback(copyBtn, detail, i18n));
         detailArea.appendChild(copyBtn);
 
         container.appendChild(detailArea);
@@ -704,9 +752,24 @@ function renderModelList(entry, controller, i18n) {
  * @param {Object} i18n
  */
 function updateModelList(container, entry, controller, i18n) {
+    // 脏检查：模型行的外观输入（模型集合 + 各自安装/校验/选中状态 + pending
+    // 操作）未变时跳过重建——下载期间高频状态推送不应重建模型行按钮
+    // （hover 闪烁、点击落空）。
+    const models = entry.models;
+    const sigParts = [];
+    for (const model of models || []) {
+        sigParts.push(
+            `${model.model_id}:${getEffectiveModelInstallState(entry, model)}`
+            + `:${model.verification_state}:${model.is_selected ? 1 : 0}`
+            + `:${model.is_active ? 1 : 0}`
+        );
+    }
+    const sig = sigParts.join("|");
+    if (container.dataset.renderSig === sig) return;
+    container.dataset.renderSig = sig;
+
     container.textContent = "";
 
-    const models = entry.models;
     if (!models || models.length === 0) {
         const empty = document.createElement("div");
         empty.className = "le-model-empty";
@@ -759,7 +822,7 @@ function updateModelList(container, entry, controller, i18n) {
         // 状态
         const statusCell = document.createElement("div");
         statusCell.className = "le-model-cell le-model-status";
-        const stateText = modelStateLabel(model.install_state);
+        const stateText = modelStateLabel(getEffectiveModelInstallState(entry, model));
         statusCell.textContent = stateText;
         // 校验状态附加
         const verText = modelVerificationLabel(model.verification_state);
@@ -791,7 +854,7 @@ function updateModelList(container, entry, controller, i18n) {
  */
 function renderModelActions(model, entry, controller, i18n) {
     const frag = document.createDocumentFragment();
-    const state = model.install_state;
+    const state = getEffectiveModelInstallState(entry, model);
     const engineId = model.engine_id;
     const modelId = model.model_id;
 
@@ -806,15 +869,18 @@ function renderModelActions(model, entry, controller, i18n) {
         label.textContent = tt(i18n, "local_engine.model.action.download", "下载");
         btn.appendChild(label);
         btn.addEventListener("click", () => {
-            // 确认下载
+            // 确认下载（confirmDialog：原生 confirm 在 Tauri 2 WebView2 下被
+            // tauri.js 拦截抛错，绝不可用）
             const sizeText = model.estimated_size_mb != null
                 ? formatMB(model.estimated_size_mb)
                 : "—";
             const confirmMsg = tt(i18n,
                 "local_engine.model.action.download_confirm_desc",
                 "预计体积 {size}，下载过程中可取消。是否开始下载？", {size: sizeText});
-            if (!confirm(confirmMsg)) return;
-            controller?.installModel?.(engineId, modelId).catch(() => {});
+            confirmDialog(confirmMsg, {kind: "info"}).then((ok) => {
+                if (!ok) return;
+                controller?.installModel?.(engineId, modelId).catch(() => {});
+            });
         });
         frag.appendChild(btn);
     }
@@ -829,7 +895,15 @@ function renderModelActions(model, entry, controller, i18n) {
         label.textContent = tt(i18n, "local_engine.model.action.cancel", "取消");
         btn.appendChild(label);
         btn.addEventListener("click", () => {
-            controller?.cancelModelOperation?.(engineId, modelId, "").catch(() => {});
+            // 从 pending model action 中获取真实 operationId
+            const pendingActions = entry.pendingModelActions || new Map();
+            const pending = pendingActions.get(modelId);
+            const opId = pending?.operationId || "";
+            if (!opId) {
+                console.warn("[local-engine] cancel: no operationId for", modelId);
+                return;
+            }
+            controller?.cancelModelOperation?.(engineId, modelId, opId).catch(() => {});
         });
         frag.appendChild(btn);
     }
@@ -859,10 +933,12 @@ function renderModelActions(model, entry, controller, i18n) {
             const confirmMsg = tt(i18n,
                 "local_engine.model.action.delete_confirm_desc",
                 "删除后将释放缓存空间，无法撤销。");
-            if (!confirm(confirmMsg)) return;
-            controller?.deleteModel?.(engineId, modelId).catch((err) => {
-                // 结构化冲突展示
-                showModelDeleteConflict(err, engineId, modelId, i18n, delBtn);
+            confirmDialog(confirmMsg, {kind: "warning"}).then((ok) => {
+                if (!ok) return;
+                controller?.deleteModel?.(engineId, modelId).catch((err) => {
+                    // 结构化冲突展示
+                    showModelDeleteConflict(err, engineId, modelId, i18n, delBtn);
+                });
             });
         });
         frag.appendChild(delBtn);
@@ -942,42 +1018,48 @@ function showModelDeleteConflict(err, engineId, modelId, i18n, anchorEl) {
 
 /**
  * 展示引擎诊断信息。
- * 从后端 get_engine_diagnostics 拉取并展示。
+ * 从后端 get_engine_diagnostics 拉取并展示；面板内提供"重新诊断"按钮。
  */
-function showEngineDiagnostics(entry, controller, i18n, anchorBtn) {
+function showEngineDiagnostics(entry, controller, i18n, anchorBtn, label, diagPanel) {
     const engineId = entry.catalog?.engine_id;
     if (!engineId || !controller?.getDiagnostics) return;
 
-    // 在按钮下方插入诊断面板
-    let diagPanel = anchorBtn.parentElement?.querySelector(".le-diagnostic-inline");
-    if (diagPanel) {
-        // toggle
-        diagPanel.hidden = !diagPanel.hidden;
+    if (!diagPanel.hidden) {
+        diagPanel.hidden = true;
+        anchorBtn.setAttribute("aria-expanded", "false");
+        label.textContent = tt(i18n, "local_engine.diagnostic.btn", "诊断");
         return;
     }
 
-    diagPanel = document.createElement("div");
-    diagPanel.className = "le-diagnostic-inline";
-    diagPanel.style.cssText =
-        "margin-top:0.5rem;padding:0.75rem;border-radius:var(--radius-sm,4px);" +
-        "background:var(--bg-deep);border:1px solid var(--surface);font-style:normal;";
+    diagPanel.hidden = false;
+    anchorBtn.setAttribute("aria-expanded", "true");
+    label.textContent = tt(i18n, "local_engine.diagnostic.collapse", "收起诊断");
+    refreshEngineDiagnostics(entry, controller, i18n, diagPanel);
+}
+
+/**
+ * 拉取并渲染诊断内容（可重复调用——"重新诊断"按钮复用）。
+ */
+function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
+    const engineId = entry.catalog?.engine_id;
+    diagPanel.textContent = "";
+    const requestId = String((Number(diagPanel.dataset.requestId) || 0) + 1);
+    diagPanel.dataset.requestId = requestId;
 
     const loading = document.createElement("div");
     loading.className = "le-diagnostic-loading";
     loading.textContent = tt(i18n, "local_engine.diagnostic.loading", "诊断中…");
     diagPanel.appendChild(loading);
 
-    anchorBtn.parentElement.appendChild(diagPanel);
-
     controller.getDiagnostics(engineId).then((diag) => {
-        loading.remove();
-        renderDiagnosticContent(diagPanel, diag, i18n, engineId);
+        if (diagPanel.hidden || diagPanel.dataset.requestId !== requestId) return;
+        renderDiagnosticContent(diagPanel, diag, i18n, engineId, entry, () => {
+            refreshEngineDiagnostics(entry, controller, i18n, diagPanel);
+        });
     }).catch((e) => {
-        loading.remove();
+        if (diagPanel.hidden || diagPanel.dataset.requestId !== requestId) return;
         const errEl = document.createElement("div");
-        errEl.style.color = "var(--red)";
-        errEl.style.fontSize = "var(--text-sm)";
-        errEl.style.fontStyle = "normal";
+        errEl.className = "le-diagnostic-error";
         errEl.textContent = e?.message || String(e);
         diagPanel.appendChild(errEl);
     });
@@ -986,14 +1068,32 @@ function showEngineDiagnostics(entry, controller, i18n, anchorBtn) {
 /**
  * 渲染诊断内容。
  */
-function renderDiagnosticContent(container, diag, i18n, engineId) {
+function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefresh) {
     container.textContent = "";
+
+    // 头部：标题 + 重新诊断按钮（诊断是快照——状态变化后需手动重新拉取）
+    const header = document.createElement("div");
+    header.className = "le-diagnostic-header";
+    const title = document.createElement("span");
+    title.className = "le-diagnostic-title";
+    title.textContent = tt(i18n, "local_engine.diagnostic.title", "引擎诊断");
+    header.appendChild(title);
+    if (typeof onRefresh === "function") {
+        const refreshBtn = document.createElement("button");
+        refreshBtn.className = "btn btn-small le-action-btn";
+        refreshBtn.type = "button";
+        refreshBtn.appendChild(renderIcon("refresh-cw", {extraClass: "le-action-icon"}));
+        const refreshLabel = document.createElement("span");
+        refreshLabel.textContent = tt(i18n, "local_engine.diagnostic.refresh", "重新诊断");
+        refreshBtn.appendChild(refreshLabel);
+        refreshBtn.addEventListener("click", onRefresh);
+        header.appendChild(refreshBtn);
+    }
+    container.appendChild(header);
 
     // 基本信息
     const grid = document.createElement("div");
     grid.className = "le-diagnostic-grid";
-    grid.style.cssText =
-        "display:grid;grid-template-columns:1fr 1fr;gap:0.25rem 1rem;margin-bottom:0.5rem;";
 
     const items = [
         {label: tt(i18n, "local_engine.diagnostic.env", "环境"), value: diag.environment || "—"},
@@ -1003,7 +1103,7 @@ function renderDiagnosticContent(container, diag, i18n, engineId) {
 
     for (const item of items) {
         const row = document.createElement("div");
-        row.style.cssText = "display:flex;align-items:center;gap:0.5rem;font-size:var(--text-sm);font-style:normal;";
+        row.className = "le-diagnostic-item";
         const label = document.createElement("span");
         label.className = "le-info-label";
         label.textContent = item.label;
@@ -1016,33 +1116,44 @@ function renderDiagnosticContent(container, diag, i18n, engineId) {
     }
     container.appendChild(grid);
 
-    // 最近日志
-    const logs = diag.recent_logs || [];
+    // 最近日志：后端只保存引擎 server 进程日志——引擎从未运行（如安装模型/
+    // 启动失败排查场景）时为空。此时回退到前端实时积累的日志（含安装/
+    // 操作日志），保证诊断面板始终有可看的内容。
+    let logs = diag.recent_logs || [];
+    let logsSource = "server";
+    if (logs.length === 0 && entry?.logs?.length > 0) {
+        logs = entry.logs.slice(-50).map((l) => ({
+            timestamp: l.timestamp,
+            level: l.level,
+            text: l.text,
+        }));
+        logsSource = "session";
+    }
     if (logs.length > 0) {
         const logsTitle = document.createElement("div");
-        logsTitle.style.cssText =
-            "font-size:var(--text-xs);color:var(--text-dim);margin-bottom:0.25rem;font-style:normal;";
-        logsTitle.textContent = tt(i18n, "local_engine.diagnostic.recent_logs", "最近日志");
+        logsTitle.className = "le-diagnostic-logs-title";
+        logsTitle.textContent = tt(i18n, "local_engine.diagnostic.recent_logs", "最近日志")
+            + (logsSource === "session"
+                ? tt(i18n, "local_engine.diagnostic.logs_from_session", "（本次会话）")
+                : "");
         container.appendChild(logsTitle);
 
         const logsList = document.createElement("div");
-        logsList.style.cssText =
-            "max-height:180px;overflow-y:auto;padding:0.5rem 0.75rem;" +
-            "font-family:var(--font-mono);font-size:var(--text-xs);" +
-            "background:var(--bg-deep);border-radius:var(--radius-sm,4px);" +
-            "border:1px solid var(--surface);";
+        logsList.className = "le-diagnostic-logs-list";
         for (const log of logs) {
             const line = document.createElement("div");
-            line.style.cssText =
-                "display:flex;gap:0.5rem;padding:0.125rem 0;line-height:1.4;font-style:normal;";
+            line.className = "le-log-line";
+            const time = document.createElement("span");
+            time.className = "le-log-time";
+            time.textContent = formatLocalLogTimestamp(log.timestamp);
+            time.title = log.timestamp || "";
             const level = document.createElement("span");
-            level.style.cssText =
-                "flex-shrink:0;min-width:3rem;text-transform:uppercase;font-size:var(--text-2xs);";
+            level.className = "le-log-level";
             level.textContent = log.level || "info";
             const text = document.createElement("span");
-            text.style.cssText =
-                "color:var(--text-sub);word-break:break-word;";
+            text.className = "le-log-text";
             text.textContent = log.text;
+            line.appendChild(time);
             line.appendChild(level);
             line.appendChild(text);
             logsList.appendChild(line);
@@ -1050,20 +1161,18 @@ function renderDiagnosticContent(container, diag, i18n, engineId) {
         container.appendChild(logsList);
     } else {
         const noLogs = document.createElement("div");
-        noLogs.style.cssText =
-            "color:var(--text-dim);font-size:var(--text-xs);font-style:normal;";
+        noLogs.className = "le-diagnostic-logs-empty";
         noLogs.textContent = tt(i18n, "local_engine.diagnostic.no_logs", "无日志");
         container.appendChild(noLogs);
     }
 
     // 复制诊断按钮
     const copyBtn = document.createElement("button");
-    copyBtn.className = "btn btn-small";
-    copyBtn.style.cssText = "margin-top:0.5rem;font-style:normal;";
+    copyBtn.className = "btn btn-small le-diagnostic-copy";
     copyBtn.textContent = tt(i18n, "local_engine.diagnostic.copy", "复制诊断");
     copyBtn.addEventListener("click", () => {
         const text = JSON.stringify(diag, null, 2);
-        navigator.clipboard?.writeText(text).catch(() => {});
+        copyTextWithFeedback(copyBtn, text, i18n);
     });
     container.appendChild(copyBtn);
 
@@ -1138,8 +1247,8 @@ function renderLogComponent(entry, controller, i18n) {
     copyBtn.className = "btn btn-small le-log-copy";
     copyBtn.textContent = tt(i18n, "local_engine.log.copy", "复制");
     copyBtn.addEventListener("click", () => {
-        const text = entry.logs.map((l) => `[${l.timestamp}] [${l.level}] ${l.text}`).join("\n");
-        navigator.clipboard?.writeText(text).catch(() => {});
+        const text = entry.logs.map(formatLogLine).join("\n");
+        copyTextWithFeedback(copyBtn, text, i18n);
     });
     toolbar.appendChild(copyBtn);
 
@@ -1163,9 +1272,20 @@ function renderLogComponent(entry, controller, i18n) {
 }
 
 function updateLogList(list, entry, i18n) {
+    // 脏检查：日志集合未变时跳过（长度 + 尾行 source:seq 唯一标识；
+    // 截断丢头部时尾行 seq 变化仍会触发重建）。
+    const logs = entry.logs;
+    const last = logs[logs.length - 1];
+    const sig = `${logs.length}:${last ? `${last.source}:${last.seq}` : ""}`;
+    if (list.dataset.renderSig === sig) return;
+    list.dataset.renderSig = sig;
+
+    // 用户上翻查看历史日志时不要强制拉底——仅当已停在底部附近才跟随滚动。
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+
     list.textContent = "";
 
-    if (entry.logs.length === 0) {
+    if (logs.length === 0) {
         const empty = document.createElement("div");
         empty.className = "le-log-empty";
         empty.textContent = tt(i18n, "local_engine.log.empty", "暂无日志");
@@ -1175,7 +1295,7 @@ function updateLogList(list, entry, i18n) {
 
     // instance 分隔线
     let lastInstance = null;
-    for (const log of entry.logs) {
+    for (const log of logs) {
         // instance 切换时插入分隔线
         if (lastInstance !== null && lastInstance !== log.instanceId) {
             const sep = document.createElement("div");
@@ -1190,7 +1310,8 @@ function updateLogList(list, entry, i18n) {
 
         const time = document.createElement("span");
         time.className = "le-log-time";
-        time.textContent = log.timestamp;
+        time.textContent = formatLocalLogTimestamp(log.timestamp);
+        time.title = log.timestamp || "";
 
         const level = document.createElement("span");
         level.className = "le-log-level";
@@ -1206,8 +1327,34 @@ function updateLogList(list, entry, i18n) {
         list.appendChild(line);
     }
 
-    // 滚动到底部
-    list.scrollTop = list.scrollHeight;
+    // 滚动到底部（仅当更新前已在底部附近）
+    if (nearBottom) {
+        list.scrollTop = list.scrollHeight;
+    }
+}
+
+/**
+ * 通过后端剪贴板 command 复制文本。
+ * WebView 中 navigator.clipboard 可能因权限/焦点被静默拒绝，不能作为可靠路径。
+ */
+async function copyTextWithFeedback(button, text, i18n) {
+    if (!text || button.dataset.copying === "true") return;
+    const original = button.textContent;
+    button.dataset.copying = "true";
+    button.disabled = true;
+    try {
+        await copyToClipboard(text);
+        button.textContent = tt(i18n, "local_engine.log.copied", "已复制");
+    } catch (error) {
+        console.error("[local-engine] copy failed:", error);
+        button.textContent = tt(i18n, "local_engine.log.copy_failed", "复制失败");
+    } finally {
+        window.setTimeout(() => {
+            button.textContent = original;
+            button.disabled = false;
+            button.dataset.copying = "false";
+        }, 1200);
+    }
 }
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -1235,9 +1382,10 @@ function makeValue(text) {
     return span;
 }
 
-function tt(i18n, key, fallback) {
-    if (i18n && typeof i18n.t === "function") return i18n.t(key) || fallback;
-    return t(key) !== key ? t(key) : fallback;
+function tt(i18n, key, fallback, params) {
+    if (i18n && typeof i18n.t === "function") return i18n.t(key, params) || fallback;
+    const raw = t(key, params);
+    return raw !== key ? raw : fallback;
 }
 
 function formatBytes(bytes) {

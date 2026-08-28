@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use sha2::Digest;
+
 use super::{no_window, no_window_tokio};
 
 /// Blink 管理的 Python 版本。
@@ -48,9 +50,29 @@ use super::{no_window, no_window_tokio};
 /// （包括 editdistance），避免 C 编译失败。3.13+ 部分包尚无预编译 wheel。
 const PYTHON_VERSION: &str = "3.12";
 
-/// uv 下载地址（GitHub releases，x86_64 Windows）。
-const UV_DOWNLOAD_URL: &str =
-    "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip";
+/// uv 固定版本（供应链锁定）。
+///
+/// 放弃 `latest` 路径，改用固定版本 + SHA-256 强校验，
+/// 防止供应链劫持或 CDN 篡改。
+///
+/// 升级 uv 时需同步更新此常量、`UV_ARCHIVE_URL` 和 `UV_SHA256`。
+const UV_VERSION: &str = "0.12.7";
+
+/// uv 下载地址（固定版本，GitHub releases，x86_64 Windows）。
+///
+/// 使用 `releases.astral.sh` CDN（GitHub 官方 release asset mirror），
+/// 避免 `latest` 重定向带来的不可预测性。
+const UV_ARCHIVE_URL: &str =
+    "https://releases.astral.sh/github/uv/releases/download/0.12.7/uv-x86_64-pc-windows-msvc.zip";
+
+/// uv zip 包的 SHA-256（供应链强校验）。
+///
+/// 下载后必须校验此 hash，不匹配则拒绝安装并清理残留。
+/// 升级 uv 版本时必须同步更新此值——可通过以下命令获取：
+/// ```sh
+/// curl -sL https://releases.astral.sh/github/uv/releases/download/{VERSION}/uv-x86_64-pc-windows-msvc.zip.sha256
+/// ```
+const UV_SHA256: &str = "bf1518af459a3915511a11fdc6e2f43ef9a2afa138b9d498eeb9642fe9d85218";
 
 /// uv 下载超时（秒）。
 const UV_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
@@ -187,12 +209,18 @@ fn get_uv_version(uv_path: &Path) -> Option<String> {
 ///
 /// 从 GitHub releases 下载 uv zip 包，用纯 Rust `zip` crate 解压，
 /// 提取 `uv.exe` 到 `%APPDATA%\blink\python\uv\uv.exe`。
+///
+/// **供应链锁定**：下载后校验 SHA-256，不匹配则拒绝安装并清理残留。
 pub async fn install_uv() -> Result<PathBuf, String> {
     let uv_dir = uv_install_dir();
     std::fs::create_dir_all(&uv_dir).map_err(|e| format!("创建 uv 目录失败: {e}"))?;
 
     // ── 下载 uv zip ──
-    tracing::info!(url = UV_DOWNLOAD_URL, "下载 uv 二进制...");
+    tracing::info!(
+        url = UV_ARCHIVE_URL,
+        version = UV_VERSION,
+        "下载 uv 二进制..."
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(UV_DOWNLOAD_TIMEOUT_SECS))
@@ -200,7 +228,7 @@ pub async fn install_uv() -> Result<PathBuf, String> {
         .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
 
     let resp = client
-        .get(UV_DOWNLOAD_URL)
+        .get(UV_ARCHIVE_URL)
         .send()
         .await
         .map_err(|e| format!("下载 uv 失败: {e}"))?;
@@ -215,6 +243,20 @@ pub async fn install_uv() -> Result<PathBuf, String> {
         .map_err(|e| format!("读取 uv 下载内容失败: {e}"))?;
 
     tracing::info!(size = zip_bytes.len(), "uv zip 下载完成");
+
+    // ── SHA-256 校验（供应链锁定） ──
+    let actual_hash = format!("{:x}", sha2::Sha256::digest(&zip_bytes));
+    if actual_hash != UV_SHA256 {
+        tracing::error!(
+            expected = UV_SHA256,
+            actual = %actual_hash,
+            "uv zip SHA-256 校验失败"
+        );
+        return Err(format!(
+            "uv zip SHA-256 校验失败: 期望 {UV_SHA256}，实际 {actual_hash}"
+        ));
+    }
+    tracing::info!(hash = %actual_hash, "uv zip SHA-256 校验通过");
 
     // ── 用 zip crate 解压（纯 Rust，无 PowerShell 依赖）──
     let extract_dir = uv_dir.join("extract");
@@ -254,9 +296,20 @@ pub async fn install_uv() -> Result<PathBuf, String> {
     let uv_exe = find_file_recursive(&extract_dir, "uv.exe")
         .ok_or_else(|| "解压后未找到 uv.exe".to_string())?;
 
-    // ── 复制 uv.exe 到目标位置 ──
+    // ── 原子提升：先写到临时文件再 rename，避免半写状态 ──
     let target = local_uv_exe();
-    std::fs::copy(&uv_exe, &target).map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
+    let staging_exe = uv_dir.join("uv.exe.staging");
+    std::fs::copy(&uv_exe, &staging_exe).map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
+
+    // rename 是原子操作（同卷）；如果 target 已存在则先删除
+    if target.exists() {
+        let _ = std::fs::remove_file(&target);
+    }
+    std::fs::rename(&staging_exe, &target).map_err(|e| {
+        // rename 失败则清理 staging 文件
+        let _ = std::fs::remove_file(&staging_exe);
+        format!("原子提升 uv.exe 失败: {e}")
+    })?;
 
     // ── 清理临时文件 ──
     let _ = std::fs::remove_dir_all(&extract_dir);
@@ -286,33 +339,86 @@ pub async fn ensure_uv() -> Result<PathBuf, String> {
 ///
 /// **设计铁则**：此函数只安装到 Blink 托管目录（由调用方传入
 /// `runtime::uv_install_dir()`），不静默接受 PATH 中任意版本 uv。
-pub async fn install_uv_to_dir(target_dir: &Path) -> Result<PathBuf, String> {
+///
+/// **供应链锁定**：下载后校验 SHA-256，不匹配则拒绝安装并清理残留。
+/// 下载可通过 `cancel_token` 取消——取消后清理已下载的部分字节。
+pub async fn install_uv_to_dir(
+    target_dir: &Path,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<PathBuf, String> {
     std::fs::create_dir_all(target_dir).map_err(|e| format!("创建 uv 目录失败: {e}"))?;
 
+    // ── 取消检查：在下载前 ──
+    if let Some(ct) = cancel_token {
+        if ct.is_cancelled() {
+            return Err("uv 下载在开始前被取消".to_string());
+        }
+    }
+
     // ── 下载 uv zip ──
-    tracing::info!(url = UV_DOWNLOAD_URL, "下载 uv 二进制到 Blink 托管目录...");
+    tracing::info!(
+        url = UV_ARCHIVE_URL,
+        version = UV_VERSION,
+        "下载 uv 二进制到 Blink 托管目录..."
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(UV_DOWNLOAD_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
 
-    let resp = client
-        .get(UV_DOWNLOAD_URL)
-        .send()
-        .await
-        .map_err(|e| format!("下载 uv 失败: {e}"))?;
+    let resp_future = client.get(UV_ARCHIVE_URL).send();
+
+    let resp = if let Some(ct) = cancel_token {
+        tokio::select! {
+            biased;
+            _ = ct.cancelled() => {
+                tracing::info!("uv 下载在 HTTP 请求阶段被取消");
+                return Err("uv 下载被取消".to_string());
+            }
+            r = resp_future => r.map_err(|e| format!("下载 uv 失败: {e}"))?,
+        }
+    } else {
+        resp_future
+            .await
+            .map_err(|e| format!("下载 uv 失败: {e}"))?
+    };
 
     if !resp.status().is_success() {
         return Err(format!("下载 uv 失败: HTTP {}", resp.status()));
     }
 
-    let zip_bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取 uv 下载内容失败: {e}"))?;
+    let bytes_future = resp.bytes();
+    let zip_bytes = if let Some(ct) = cancel_token {
+        tokio::select! {
+            biased;
+            _ = ct.cancelled() => {
+                tracing::info!("uv 下载在读取内容阶段被取消");
+                return Err("uv 下载被取消".to_string());
+            }
+            b = bytes_future => b.map_err(|e| format!("读取 uv 下载内容失败: {e}"))?,
+        }
+    } else {
+        bytes_future
+            .await
+            .map_err(|e| format!("读取 uv 下载内容失败: {e}"))?
+    };
 
     tracing::info!(size = zip_bytes.len(), "uv zip 下载完成");
+
+    // ── SHA-256 校验（供应链锁定） ──
+    let actual_hash = format!("{:x}", sha2::Sha256::digest(&zip_bytes));
+    if actual_hash != UV_SHA256 {
+        tracing::error!(
+            expected = UV_SHA256,
+            actual = %actual_hash,
+            "uv zip SHA-256 校验失败"
+        );
+        return Err(format!(
+            "uv zip SHA-256 校验失败: 期望 {UV_SHA256}，实际 {actual_hash}"
+        ));
+    }
+    tracing::info!(hash = %actual_hash, "uv zip SHA-256 校验通过");
 
     // ── 用 zip crate 解压（纯 Rust，无 PowerShell 依赖）──
     let extract_dir = target_dir.join("extract");
@@ -352,9 +458,20 @@ pub async fn install_uv_to_dir(target_dir: &Path) -> Result<PathBuf, String> {
     let uv_exe = find_file_recursive(&extract_dir, "uv.exe")
         .ok_or_else(|| "解压后未找到 uv.exe".to_string())?;
 
-    // ── 复制 uv.exe 到目标位置 ──
+    // ── 原子提升：先写到临时文件再 rename，避免半写状态 ──
     let target = target_dir.join("uv.exe");
-    std::fs::copy(&uv_exe, &target).map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
+    let staging_exe = target_dir.join("uv.exe.staging");
+    std::fs::copy(&uv_exe, &staging_exe).map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
+
+    // rename 是原子操作（同卷）；如果 target 已存在则先删除
+    if target.exists() {
+        let _ = std::fs::remove_file(&target);
+    }
+    std::fs::rename(&staging_exe, &target).map_err(|e| {
+        // rename 失败则清理 staging 文件
+        let _ = std::fs::remove_file(&staging_exe);
+        format!("原子提升 uv.exe 失败: {e}")
+    })?;
 
     // ── 清理临时文件 ──
     let _ = std::fs::remove_dir_all(&extract_dir);
@@ -1056,5 +1173,69 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(find_file_recursive(&tmp, "nonexistent.exe").is_none());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── 0.22.6 H3: 供应链锁定测试 ──────────────────────────────────────────
+
+    /// 验证 uv 版本常量已固定（非 `latest`）。
+    #[test]
+    fn uv_version_is_pinned() {
+        assert!(!UV_VERSION.is_empty(), "UV_VERSION 不应为空");
+        assert!(
+            UV_VERSION
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()),
+            "UV_VERSION 应以数字开头，got: {UV_VERSION}"
+        );
+    }
+
+    /// 验证 uv 下载 URL 使用固定版本而非 `latest`。
+    #[test]
+    fn uv_archive_url_is_versioned() {
+        assert!(
+            !UV_ARCHIVE_URL.contains("/latest/"),
+            "UV_ARCHIVE_URL 不应使用 latest 路径: {UV_ARCHIVE_URL}"
+        );
+        assert!(
+            UV_ARCHIVE_URL.contains(UV_VERSION),
+            "UV_ARCHIVE_URL 应包含 UV_VERSION={UV_VERSION}: {UV_ARCHIVE_URL}"
+        );
+    }
+
+    /// 验证 uv SHA-256 常量是有效的 64 位十六进制字符串。
+    #[test]
+    fn uv_sha256_is_valid_hex() {
+        assert_eq!(
+            UV_SHA256.len(),
+            64,
+            "SHA-256 应为 64 个字符，got: {}",
+            UV_SHA256.len()
+        );
+        assert!(
+            UV_SHA256.bytes().all(|b| b.is_ascii_hexdigit()),
+            "SHA-256 应为十六进制，got: {UV_SHA256}"
+        );
+        assert!(
+            !UV_SHA256.chars().all(|c| c == '0'),
+            "SHA-256 不应为全零（需更新为真实 hash）"
+        );
+    }
+
+    /// 验证 SHA-256 校验逻辑：正确 hash 通过，错误 hash 拒绝。
+    #[test]
+    fn sha256_verification_logic() {
+        let test_bytes = b"hello world";
+        let correct_hash = format!("{:x}", sha2::Sha256::digest(test_bytes));
+        let wrong_hash = "0".repeat(64);
+
+        // 正确 hash 应匹配
+        assert_eq!(
+            correct_hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+
+        // 错误 hash 不匹配
+        assert_ne!(correct_hash, wrong_hash);
     }
 }

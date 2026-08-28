@@ -24,9 +24,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 use tokio::process::Child;
+use tokio::sync::Mutex;
 
 use super::{
     CompatibilityCheck, InstallPlan, InstallSink, ManifestExtension, PackageLock, PipExtraArg,
@@ -79,6 +81,22 @@ pub fn render_hashed_requirements(packages: &[PackageLock]) -> Result<String, Ru
     Ok(requirements)
 }
 use crate::infra::platform::python;
+
+// ── Singleflight: 跨引擎并发 ensure_uv 锁 ──────────────────────────────────
+
+/// 全局 ensure_uv 互斥锁。
+///
+/// **0.22.6 H3**：防止多个引擎（如 FunASR + PaddleOCR）并发安装时
+/// 争抢共享的 `uv` 目录——同一时间只允许一个 `ensure_uv` 执行下载/安装，
+/// 其余等待者复用第一个完成的结果。
+///
+/// 使用 `OnceLock` 实现 lazy init（const fn 不可用 tokio::sync::Mutex::new）。
+static UV_ENSURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// 获取全局 ensure_uv 锁。
+fn uv_ensure_lock() -> &'static Mutex<()> {
+    UV_ENSURE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // ── uv 版本比较 ─────────────────────────────────────────────────────────────
 
@@ -194,9 +212,17 @@ impl PythonVenvProvider {
     /// 不静默接受 PATH 中任意版本 uv。如果本地 uv 不存在，下载安装到
     /// Blink 托管目录。
     ///
-    /// 复用 `infra/platform/python::install_uv` 的下载逻辑，但下载后
-    /// 只安装到 `runtime::uv_install_dir()` 下的 `uv.exe`。
-    async fn ensure_uv(&mut self) -> Result<PathBuf, RuntimeError> {
+    /// **0.22.6 H3**：使用全局 `Singleflight` 锁——防止多个引擎并发
+    /// 安装时争抢共享的 `uv` 目录。同一时间只允许一个 `ensure_uv`
+    /// 执行下载/安装，其余等待者复用第一个完成的结果。
+    ///
+    /// **0.22.6 H2**：`cancel_token` 传播到 `install_uv_to_dir`，
+    /// 支持在下载阶段取消。
+    async fn ensure_uv(
+        &mut self,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        sink: Option<&dyn InstallSink>,
+    ) -> Result<PathBuf, RuntimeError> {
         if let Some(ref cached) = self.uv_path {
             if cached.exists() {
                 return Ok(cached.clone());
@@ -207,14 +233,44 @@ impl PythonVenvProvider {
         let local_uv = runtime::local_uv_exe();
 
         if !local_uv.exists() {
+            // Singleflight: 获取全局锁，防止并发下载
+            let lock = uv_ensure_lock();
+            let _guard = lock.lock().await;
+
+            // 双重检查：在等待锁期间，另一个引擎可能已完成安装
+            if local_uv.exists() {
+                tracing::debug!(
+                    path = %local_uv.display(),
+                    "在等待 Singleflight 锁期间，uv 已被其他引擎安装完成"
+                );
+                self.uv_path = Some(local_uv.clone());
+                return Ok(local_uv);
+            }
+
+            // 取消检查：获取锁后再次检查
+            if let Some(ct) = cancel_token {
+                if ct.is_cancelled() {
+                    return Err(RuntimeError::OperationCancelled {
+                        message: "ensure_uv 在获取锁后被取消".to_string(),
+                    });
+                }
+            }
+
             tracing::info!("Blink 托管 uv 不存在，开始下载安装...");
+            if let Some(s) = sink {
+                s.on_log("info", "正在下载安装 Blink 托管 uv...");
+            }
+
             // 复用 platform/python 的下载逻辑，但确保安装到 runtime 声明的目录
-            let uv_path = python::install_uv_to_dir(&runtime::uv_install_dir())
+            let uv_path = python::install_uv_to_dir(&runtime::uv_install_dir(), cancel_token)
                 .await
                 .map_err(|e| RuntimeError::InstallFailed {
                     message: format!("下载安装 Blink 托管 uv 失败: {e}"),
                 })?;
             tracing::info!(path = %uv_path.display(), "Blink 托管 uv 安装完成");
+            if let Some(s) = sink {
+                s.on_log("info", &format!("uv 安装完成: {}", uv_path.display()));
+            }
             self.uv_path = Some(uv_path.clone());
             return Ok(uv_path);
         }
@@ -398,6 +454,9 @@ impl PythonVenvProvider {
             match arg {
                 PipExtraArg::ExtraIndexUrl(url) => {
                     cmd.args(["--extra-index-url", url]);
+                }
+                PipExtraArg::IndexStrategyUnsafeBestMatch => {
+                    cmd.args(["--index-strategy", "unsafe-best-match"]);
                 }
                 PipExtraArg::NoDeps => {
                     cmd.arg("--no-deps");
@@ -737,6 +796,25 @@ async fn run_child_with_cancel(
     label: &str,
     sink: Option<&dyn InstallSink>,
 ) -> Result<std::process::Output, RuntimeError> {
+    // uv/pip 可能再派生 Python 等子进程。仅 kill 直接 child 会让后代继续持有
+    // stdout/stderr 管道，导致取消看似成功却要等整条命令自然退出。
+    #[cfg(windows)]
+    let mut job_handle = {
+        let pid = child.id().ok_or_else(|| RuntimeError::InstallFailed {
+            message: format!("无法获取 {label} 进程 PID"),
+        })?;
+        match crate::infra::platform::process::assign_job_object(pid) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(RuntimeError::InstallFailed {
+                    message: format!("{label} Job Object 分配失败: {e}"),
+                });
+            }
+        }
+    };
+
     // 取 child 的 stdin 避免管道死锁
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -810,7 +888,12 @@ async fn run_child_with_cancel(
                 }
                 // 终止子进程
                 let _ = child.start_kill();
-                let _ = child.wait().await;
+                #[cfg(windows)]
+                drop(job_handle.take());
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    child.wait(),
+                ).await;
                 return Err(RuntimeError::OperationCancelled {
                     message: format!("{label} 被取消"),
                 });
@@ -1060,7 +1143,7 @@ impl RuntimeProvider for PythonVenvProvider {
         if let Some(s) = sink {
             s.on_log("info", "正在确保 uv 可用...");
         }
-        let uv_path = provider.ensure_uv().await?;
+        let uv_path = provider.ensure_uv(cancel_token, sink).await?;
 
         // 1b. 校验实际 uv 版本满足声明版本
         Self::verify_uv_version(&uv_path, &python_plan.uv_version)?;
@@ -1571,7 +1654,7 @@ mod tests {
         // 但关键是验证：不扫描 PATH
         // 这里只验证缓存逻辑
         if runtime::local_uv_exe().exists() {
-            let path = provider.ensure_uv().await.unwrap();
+            let path = provider.ensure_uv(None, None).await.unwrap();
             assert_eq!(path, runtime::local_uv_exe());
         }
     }

@@ -32,6 +32,7 @@ use crate::domain::local_engine::{
     ResourceBudget, ServiceHealth,
 };
 use crate::domain::stt::funasr;
+use crate::infra::local_engine::model_storage as mstore;
 use crate::infra::local_engine::providers::python::PythonVenvProvider;
 use crate::infra::local_engine::providers::{
     CompatibilityCheck, InstallPlan, PackageLock, PipExtraArg, ProfileCandidate,
@@ -75,8 +76,30 @@ pub const FUNASR_ENGINE_ID: &str = "funasr";
 ///   `prepare_launch` 从 descriptor 锁定的 artifact + `SttConfig` 自行解析。
 /// - **不发送 Tauri 事件**：返回纯数据，由 app 层桥接。
 /// - **不持有 AppHandle**：adapter 是纯逻辑，不接触 Tauri。
+/// 包检查函数类型。
+///
+/// 检查指定 python 路径中某包是否已安装，返回 (是否已安装, 版本号)。
+type PackageChecker = fn(&std::path::Path, &str) -> (bool, Option<String>);
+
+/// 默认包检查器：通过执行 `python -c "import importlib.metadata"` 检查。
+fn default_package_checker(python: &std::path::Path, package: &str) -> (bool, Option<String>) {
+    let script = format!("import importlib.metadata as m; print(m.version('{package}'))");
+    match crate::infra::platform::no_window(std::process::Command::new(python))
+        .args(["-c", &script])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (true, Some(version))
+        }
+        _ => (false, None),
+    }
+}
+
 pub struct FunasrAdapter {
     descriptor: EngineDescriptor,
+    /// 包检查器（可注入，测试时替换为 mock 避免执行假 python.exe）
+    package_checker: PackageChecker,
 }
 
 impl FunasrAdapter {
@@ -86,6 +109,16 @@ impl FunasrAdapter {
     pub fn new() -> Self {
         Self {
             descriptor: make_funasr_descriptor(),
+            package_checker: default_package_checker,
+        }
+    }
+
+    /// 创建带自定义包检查器的 adapter（测试用）。
+    #[cfg(test)]
+    pub fn new_with_package_checker(checker: PackageChecker) -> Self {
+        Self {
+            descriptor: make_funasr_descriptor(),
+            package_checker: checker,
         }
     }
 }
@@ -140,7 +173,8 @@ impl LocalEngineAdapter for FunasrAdapter {
 
         // 构建 LaunchDescriptor（FunASR 特有参数/脚本/环境变量）
         // 使用 ctx.endpoint.port() 作为 --port，不用 config.preferred_port
-        let launch = build_funasr_launch_descriptor(&funasr_config, config, &ctx)?;
+        let launch =
+            build_funasr_launch_descriptor(&funasr_config, config, &ctx, self.package_checker)?;
 
         Ok(ResolvedLaunch {
             profile: ctx.resolved_profile.clone(),
@@ -183,7 +217,7 @@ impl LocalEngineAdapter for FunasrAdapter {
 
         // 检查 funasr 是否已安装（使用 generation venv 中的 python）
         let python = python_path.unwrap();
-        let (funasr_ok, _) = check_funasr_with(&python);
+        let (funasr_ok, _) = (self.package_checker)(&python, "funasr");
         if !funasr_ok {
             return AdapterSelfTest::failed(
                 "funasr 包未安装。请在设置页「引擎」→「本地模型运行时」中点击「修复」或「安装环境」按钮。",
@@ -381,7 +415,9 @@ fn make_funasr_descriptor() -> EngineDescriptor {
 ///
 /// **PyTorch index**：torch/torchaudio 来自 `https://download.pytorch.org/whl/cpu`，
 /// 其余包来自 PyPI。锁文件已通过 `--index-url` + `--extra-index-url` 生成，
-/// 包含两个 index 的 wheel hash。安装时通过 `ExtraIndexUrl` 传入 PyTorch index。
+/// 包含两个 index 的 wheel hash。安装时通过 `ExtraIndexUrl` 传入 PyTorch index，
+/// 并以 `unsafe-best-match` 允许 uv 为锁定版本跨索引查找候选；精确版本、
+/// `--require-hashes` 与 `--no-deps` 继续约束最终安装内容。
 pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
     let python_artifact = ArtifactId::new("python-3.12.8").unwrap();
 
@@ -413,6 +449,7 @@ pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
             extra_pip_args: vec![
                 PipExtraArg::NoDeps,
                 PipExtraArg::ExtraIndexUrl("https://download.pytorch.org/whl/cpu".to_string()),
+                PipExtraArg::IndexStrategyUnsafeBestMatch,
             ],
             self_test_script: "import funasr; import torch; import fastapi; import uvicorn"
                 .to_string(),
@@ -656,6 +693,24 @@ impl FunasrEngineConfig {
 
 /// 构建 FunASR 的 `LaunchDescriptor`。
 ///
+/// 返回模型 id 对应的子模型列表。
+///
+/// 与 Python installer 的 `ALLOWED_MODELS` submodels 字段保持一致。
+/// - SenseVoice 系列：内置 VAD/标点/ITN，无需子模型
+/// - paraformer-zh：需要 fsmn-vad + ct-punc
+///
+/// 返回空 Vec 表示无需子模型。
+fn funasr_submodels_for(model_id: &str) -> Vec<&'static str> {
+    let name_lower = model_id.to_lowercase();
+    if name_lower.contains("sensevoice") {
+        Vec::new()
+    } else if name_lower.contains("paraformer") {
+        vec!["fsmn-vad", "ct-punc"]
+    } else {
+        Vec::new()
+    }
+}
+
 /// 从 `FunasrEngineConfig` 产生启动请求，保留：
 /// - `funasr_model`
 /// - device/计算偏好现有语义
@@ -670,6 +725,7 @@ fn build_funasr_launch_descriptor(
     funasr_config: &FunasrEngineConfig,
     _adapter_config: &AdapterConfig,
     ctx: &LaunchContext,
+    package_checker: PackageChecker,
 ) -> Result<LaunchDescriptor, LocalEngineError> {
     let model = &funasr_config.funasr_model;
     let device = &funasr_config.device;
@@ -697,7 +753,7 @@ fn build_funasr_launch_descriptor(
     })?;
 
     // 检查 funasr 是否已安装（使用 generation venv 中的 python）
-    let (funasr_ok, _) = check_funasr_with(&python);
+    let (funasr_ok, _) = package_checker(&python, "funasr");
     if !funasr_ok {
         return Err(LocalEngineError::with_detail(
             LocalEngineErrorCode::EnvironmentMissing,
@@ -757,16 +813,96 @@ fn build_funasr_launch_descriptor(
     env.insert("PYTHONUTF8".to_string(), "1".to_string());
     env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
 
-    // 0.22.6 H1: ModelScope 缓存统一使用 runtime::engine_model_cache_dir(funasr) 作为唯一真源
-    // 使通用 storage/cleanup 能准确扫描和清理
+    // 0.22.6 B2: MODELSCOPE_CACHE fail-closed——创建失败直接返回错误，不 fallback
+    // 到用户默认缓存（~/.cache/modelscope），避免模型文件散落到不可控位置。
     let models_dir =
         engine_runtime::engine_model_cache_dir(&EngineId::new(FUNASR_ENGINE_ID).unwrap());
     if let Err(e) = std::fs::create_dir_all(&models_dir) {
-        tracing::warn!(%e, "创建 models 目录失败，ModelScope 将使用默认缓存路径");
-    } else {
-        let models_path = models_dir.display().to_string();
-        tracing::info!(path = %models_path, "ModelScope 缓存目录");
-        env.insert("MODELSCOPE_CACHE".to_string(), models_path);
+        return Err(LocalEngineError::with_detail(
+            LocalEngineErrorCode::Internal,
+            ErrorPhase::Start,
+            "MODELSCOPE_CACHE 目录创建失败",
+            format!(
+                "创建 ModelScope 缓存目录失败: {e}。Blink 不 fallback 到用户默认缓存——请检查磁盘空间和权限。"
+            ),
+        ));
+    }
+    let models_path = models_dir.display().to_string();
+    tracing::info!(path = %models_path, "ModelScope 缓存目录");
+    env.insert("MODELSCOPE_CACHE".to_string(), models_path);
+
+    // 0.22.6 B2: 从 model_storage manifest 动态获取模型身份
+    // 不使用 descriptor 中静态硬编码的 model_contract——而是从当前安装的
+    // generation manifest 中读取 model_id/revision/payload_dir/fingerprint。
+    // 这样 health Ready 校验可以核对实际安装的模型身份，而非 descriptor 静态值。
+    let canonical_model_id = &funasr_config.funasr_model;
+    let asset_key = mstore::encode_asset_key(canonical_model_id);
+    let funasr_engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+    match mstore::restore_model_state(&funasr_engine_id, &asset_key) {
+        Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
+            // 从 manifest 注入动态模型身份环境变量
+            env.insert("BLINK_MODEL_ID".to_string(), manifest.model_id.clone());
+            env.insert(
+                "BLINK_MODEL_REVISION".to_string(),
+                manifest.revision.clone(),
+            );
+            // payload 目录绝对路径
+            let payload_dir =
+                mstore::model_payload_dir(&funasr_engine_id, &asset_key, &manifest.install_id)
+                    .map_err(|e| {
+                        LocalEngineError::with_detail(
+                            LocalEngineErrorCode::Internal,
+                            ErrorPhase::Start,
+                            "payload 目录路径计算失败",
+                            e.to_string(),
+                        )
+                    })?;
+            env.insert(
+                "BLINK_MODEL_PAYLOAD_DIR".to_string(),
+                payload_dir.display().to_string(),
+            );
+            env.insert(
+                "BLINK_MODEL_FINGERPRINT".to_string(),
+                manifest.content_fingerprint.clone(),
+            );
+            // 0.22.6 B2: 注入子模型列表（VAD/punc 等）
+            // 从静态映射获取子模型列表——与 Python installer 的 ALLOWED_MODELS 一致。
+            // SenseVoice 内置 VAD/标点/ITN，无需子模型；
+            // Paraformer 需要 fsmn-vad + ct-punc。
+            let submodels = funasr_submodels_for(&manifest.model_id);
+            if !submodels.is_empty() {
+                env.insert("BLINK_MODEL_SUBMODELS".to_string(), submodels.join(","));
+            }
+            tracing::info!(
+                model_id = %manifest.model_id,
+                revision = %manifest.revision,
+                install_id = %manifest.install_id,
+                fingerprint = %manifest.content_fingerprint,
+                submodels = ?submodels,
+                "从 manifest 注入动态模型身份"
+            );
+        }
+        Ok(mstore::RestoredModelState::Corrupted { reason, .. }) => {
+            tracing::warn!(
+                model_id = %canonical_model_id,
+                reason = %reason,
+                "模型状态 Corrupted——不注入 payload_dir，Python 将报错"
+            );
+            // 不注入 BLINK_MODEL_*——Python server 会因 payload_dir 缺失而报错
+        }
+        Ok(mstore::RestoredModelState::NotInstalled) => {
+            tracing::warn!(
+                model_id = %canonical_model_id,
+                "模型未安装——不注入 payload_dir"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                model_id = %canonical_model_id,
+                error = %e,
+                "模型状态恢复失败——不注入 payload_dir"
+            );
+        }
     }
 
     Ok(LaunchDescriptor {
@@ -2098,10 +2234,17 @@ mod tests {
         let legacy_python = legacy_scripts.join("python.exe");
         std::fs::write(&legacy_python, b"legacy python").unwrap();
 
-        // prepare_launch 会在 check_funasr_with 时失败（因为 python.exe 是假的），
-        // 但在到达 funasr 检查之前，会先解析 generation python 路径。
+        // 0.22.6 B2: 使用 mock 包检查器避免执行假 python.exe（挂死风险）。
+        // mock 检查器总是返回 (false, None)，模拟 funasr 未安装。
+        // 这验证了 prepare_launch 能正确解析 generation python 路径，
+        // 并在 funasr 检查失败时返回正确的错误类型。
+        fn mock_checker(_python: &std::path::Path, _pkg: &str) -> (bool, Option<String>) {
+            (false, None)
+        }
+
+        // prepare_launch 使用 mock 包检查器，在 funasr 检查时返回 false，
         // 错误应来自 funasr 检查，而非 python 环境缺失。
-        let adapter = FunasrAdapter::new();
+        let adapter = FunasrAdapter::new_with_package_checker(mock_checker);
         let profile = ResolvedProfile {
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
@@ -2128,7 +2271,7 @@ mod tests {
         let config = AdapterConfig::from_json(funasr_config.to_json());
         let result = adapter.prepare_launch(&ctx, &config);
 
-        // 由于 python.exe 是假文件，check_funasr_with 会失败
+        // mock 检查器返回 (false, None)，模拟 funasr 未安装
         assert!(result.is_err());
         let err = result.unwrap_err();
         // 错误应该是 funasr 包未安装（不是 python 环境缺失）
@@ -2428,6 +2571,49 @@ mod tests {
         }
     }
 
+    /// FunASR 的完整锁横跨 PyPI 与 PyTorch CPU index，必须允许跨索引匹配锁定版本。
+    #[test]
+    fn funasr_provider_descriptor_has_cross_index_strategy() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            assert!(
+                plan.extra_pip_args
+                    .iter()
+                    .any(|arg| matches!(arg, PipExtraArg::IndexStrategyUnsafeBestMatch)),
+                "FunASR 多索引锁安装必须启用 unsafe-best-match"
+            );
+        }
+    }
+
+    /// Windows CPU profile 必须锁到 PyTorch 官方 cp312 win_amd64 CPU wheel。
+    #[test]
+    fn funasr_pytorch_packages_lock_windows_cpu_wheels() {
+        let pd = make_funasr_provider_descriptor();
+        if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
+            let torch = plan
+                .packages
+                .iter()
+                .find(|pkg| pkg.name == "torch")
+                .unwrap();
+            assert_eq!(torch.version, "2.5.0+cpu");
+            assert_eq!(
+                torch.all_hashes,
+                ["3815a38bbe31d0c546a33a0c59a5426563e94aea6d32eb4cf07b6a99bfa7130f"]
+            );
+
+            let torchaudio = plan
+                .packages
+                .iter()
+                .find(|pkg| pkg.name == "torchaudio")
+                .unwrap();
+            assert_eq!(torchaudio.version, "2.5.0+cpu");
+            assert_eq!(
+                torchaudio.all_hashes,
+                ["c972268b2711662d7e01479c38bb49b3da0a38b678f78451c545d4f36384f5ad"]
+            );
+        }
+    }
+
     /// 验证 locked-requirements.txt 中包含关键直接依赖。
     #[test]
     fn funasr_locked_packages_contains_key_deps() {
@@ -2571,5 +2757,36 @@ mod tests {
                 .any(|p| p.backend == ComputeBackend::Cuda),
             "0.22.6 不应声明 CUDA profile（锁文件仅含 CPU wheel hash）"
         );
+    }
+
+    // ── 0.22.6 B2: 子模型映射测试 ──
+
+    /// SenseVoice 系列模型无需子模型。
+    #[test]
+    fn submodels_for_sensevoice_is_empty() {
+        assert!(funasr_submodels_for("iic/SenseVoiceSmall").is_empty());
+        assert!(funasr_submodels_for("SenseVoice").is_empty());
+    }
+
+    /// Paraformer 系列模型需要 VAD + punc 子模型。
+    #[test]
+    fn submodels_for_paraformer_has_vad_and_punc() {
+        let subs = funasr_submodels_for("paraformer-zh");
+        assert_eq!(subs, vec!["fsmn-vad", "ct-punc"]);
+    }
+
+    /// 未知模型返回空子模型列表（安全默认值）。
+    #[test]
+    fn submodels_for_unknown_model_is_empty() {
+        assert!(funasr_submodels_for("some-unknown-model").is_empty());
+    }
+
+    /// 大小写不敏感的子模型匹配。
+    #[test]
+    fn submodels_for_case_insensitive() {
+        let subs = funasr_submodels_for("Paraformer-ZH");
+        assert_eq!(subs, vec!["fsmn-vad", "ct-punc"]);
+
+        assert!(funasr_submodels_for("SENSEVOICESMALL").is_empty());
     }
 }

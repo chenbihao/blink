@@ -1334,6 +1334,7 @@ export const zh = {
     "local_engine.log.instance": "实例",
     "local_engine.log.no_instance": "无实例",
     "local_engine.log.copy": "复制",
+    "local_engine.log.copied": "已复制",
     "local_engine.log.clear": "清空",
     "local_engine.log.empty": "暂无日志",
     "local_engine.log.instance_changed": "实例切换",
@@ -1348,6 +1349,8 @@ export const zh = {
 
     // ── 引擎卡片配置区（0.22.5 H2）──
     "local_engine.config.compute_preference": "计算设备",
+    "local_engine.config.runtime_policy": "运行策略",
+    "local_engine.config.ocr_backend": "截图 OCR 引擎",
     "local_engine.config.lifecycle": "生命周期",
     "local_engine.config.requires_rebuild": "需要重建",
     "local_engine.config.requires_rebuild_hint": "计算设备已变更，需要重建环境才能生效。",
@@ -1385,6 +1388,9 @@ export const zh = {
     // ── FunASR auto_start 开关（0.22.6）──
     "local_engine.config.auto_start": "启动时自动运行",
     "local_engine.config.auto_start_hint": "Blink 启动后自动启动 FunASR 服务",
+    "local_engine.ocr_backend.windows": "Windows OCR（系统）",
+    "local_engine.ocr_backend.paddleocr": "PaddleOCR（本地）",
+    "local_engine.ocr_backend.auto": "自动选择",
 
     // ── 引擎卡片：配置模型 vs 实际加载模型（0.22.6）──
     "local_engine.model.configured": "配置模型",
@@ -1456,12 +1462,13 @@ export const zh = {
     // ── 通用诊断（0.22.6）──
     "local_engine.diagnostic.title": "诊断",
     "local_engine.diagnostic.btn": "诊断",
+    "local_engine.diagnostic.collapse": "收起诊断",
     "local_engine.diagnostic.copy": "复制诊断",
     "local_engine.diagnostic.env": "环境",
     "local_engine.diagnostic.process": "进程",
     "local_engine.diagnostic.service": "服务",
     "local_engine.diagnostic.pid": "PID",
-    "local_engine.diagnostic.recent_logs": "最近日志",
+    "local_engine.diagnostic.recent_logs": "最近运行日志（诊断快照）",
     "local_engine.diagnostic.no_logs": "无日志",
     "local_engine.diagnostic.loading": "诊断中…",
 
@@ -1485,4 +1492,5 @@ export const zh = {
     "voice.local.model.goto_engines_hint": "需要先在引擎页下载 FunASR 模型",
     "voice.local.model.option": "{engine} · {model}",
     "voice.local.model.save_failed": "选择失败，已回滚",
+    "voice.local.model.restart_hint": "模型已切换，请在引擎页重启服务以加载新模型",
 };

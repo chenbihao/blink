@@ -25,21 +25,33 @@ use crate::domain::local_engine::{
 };
 use crate::infra::local_engine::runtime::EngineId;
 
-use super::dto::{EngineLogDto, EngineStatusDto, project_status};
+use super::dto::{EngineLogDto, EngineLogLevel, EngineStatusDto, project_status};
+use super::operation_log_store::{OperationLogEntry, OperationLogStore};
 use super::service::EventPort;
 
 /// Tauri 事件投影出口。
 ///
 /// 持有 `AppHandle`，把 service 产生的通用事件 emit 到前端。
 /// 同时做旧 FunASR 兼容投影——禁止启动第二套 polling/state producer。
+///
+/// 安装日志（`emit_install_log`）同时写入共享 `OperationLogStore`，
+/// 供 IPC command 会话内回放。
 pub struct TauriEventPort {
     app: AppHandle,
+    /// 会话内 operation 日志存储——与实时事件同时写入。
+    operation_log_store: Arc<OperationLogStore>,
 }
 
 impl TauriEventPort {
     /// 创建 TauriEventPort。
-    pub fn new(app: AppHandle) -> Self {
-        Self { app }
+    ///
+    /// `operation_log_store` 由 app 层构造为 managed state，
+    /// 在安装日志路径同时写入 store 和实时 Tauri 事件。
+    pub fn new(app: AppHandle, operation_log_store: Arc<OperationLogStore>) -> Self {
+        Self {
+            app,
+            operation_log_store,
+        }
     }
 }
 
@@ -72,7 +84,14 @@ impl EventPort for TauriEventPort {
     ///
     /// 兼容投影：如果 engine_id 是 funasr，额外 emit 旧
     /// `blink://funasr-server-log` 事件，payload 格式 `{ line }`。
-    fn emit_log(&self, engine_id: &EngineId, instance_id: &str, seq: u64, line: &str) {
+    fn emit_log(
+        &self,
+        engine_id: &EngineId,
+        instance_id: &str,
+        seq: u64,
+        level: EngineLogLevel,
+        line: &str,
+    ) {
         // ── 通用事件：与 query 使用同一 DTO shape ──
         let payload = EngineLogDto {
             engine_id: engine_id.as_str().to_string(),
@@ -80,7 +99,7 @@ impl EventPort for TauriEventPort {
             operation_id: None,
             seq: seq.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            level: "info".to_string(),
+            level,
             text: line.to_string(),
         };
         let _ = self.app.emit(EventNames::LOCAL_ENGINE_LOG, payload);
@@ -104,19 +123,44 @@ impl EventPort for TauriEventPort {
         engine_id: &EngineId,
         operation_id: &str,
         seq: u64,
-        level: &str,
+        level: EngineLogLevel,
         text: &str,
     ) {
+        let timestamp = chrono::Utc::now().to_rfc3339();
         let payload = EngineLogDto {
             engine_id: engine_id.as_str().to_string(),
             instance_id: String::new(),
             operation_id: Some(operation_id.to_string()),
             seq: seq.to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            level: level.to_string(),
+            timestamp: timestamp.clone(),
+            level,
             text: text.to_string(),
         };
         let _ = self.app.emit(EventNames::LOCAL_ENGINE_LOG, payload);
+
+        // 同时写入会话内 operation 日志存储
+        self.operation_log_store.append(OperationLogEntry {
+            engine_id: engine_id.to_string(),
+            operation_id: operation_id.to_string(),
+            seq,
+            timestamp,
+            level: level.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    /// 广播安装阶段变更（0.22.6 H4）。
+    ///
+    /// 前端通过 `blink://local-engine-install-stage` 事件实时显示安装进度。
+    fn emit_install_stage(&self, engine_id: &EngineId, operation_id: &str, stage: &str) {
+        let payload = serde_json::json!({
+            "engine_id": engine_id.as_str(),
+            "operation_id": operation_id,
+            "stage": stage,
+        });
+        let _ = self
+            .app
+            .emit(EventNames::LOCAL_ENGINE_INSTALL_STAGE, payload);
     }
 }
 
@@ -166,6 +210,12 @@ fn project_funasr_status(status: &EngineStatus) -> serde_json::Value {
 }
 
 /// 工厂函数——创建 `Arc<dyn EventPort>`。
-pub fn make_event_port(app: AppHandle) -> Arc<dyn EventPort> {
-    Arc::new(TauriEventPort::new(app))
+///
+/// `operation_log_store` 由 app 层构造为 managed state，
+/// 在安装日志路径同时写入 store 和实时 Tauri 事件。
+pub fn make_event_port(
+    app: AppHandle,
+    operation_log_store: Arc<OperationLogStore>,
+) -> Arc<dyn EventPort> {
+    Arc::new(TauriEventPort::new(app, operation_log_store))
 }

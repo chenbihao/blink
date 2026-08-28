@@ -234,6 +234,11 @@ impl VoiceService {
     ///
     /// `set_voice_flag`：是否通知输入状态机进入 Recording（仅热键路径需要）。
     /// 返回 `true` = 录音已启动。
+    ///
+    /// **0.22.6 批次 3**：本地模式下先从 `LocalEngineService` 获取连接快照
+    /// （endpoint + token + engine_id + instance_id），再做 token-aware health 检查。
+    /// 不再用配置中的 preferred port 做 port-only health——动态分配的 endpoint
+    /// 可能与 preferred port 不一致，且 Python /health 强制要求 token 鉴权。
     async fn begin_recording(
         &self,
         config: &crate::app::stt_config::SttConfig,
@@ -244,68 +249,14 @@ impl VoiceService {
 
         let target = self.session.lock().unwrap().target;
 
-        // ── 服务就绪检查：本地模式下检查 FunASR 服务是否运行 ──
-        let need_check = match config.mode {
-            SttMode::Local => true,
-            SttMode::Cloud => config.cloud_provider.is_none(),
-        };
-        if need_check {
-            let (ready, msg) = match config.mode {
-                SttMode::Local => {
-                    let port = config.local_engine.server_port;
-                    if crate::domain::stt::funasr::is_server_ready_async(port).await {
-                        (true, String::new())
-                    } else {
-                        (
-                            false,
-                            "FunASR 服务未启动，请在设置页「语音输入」中启动服务".to_string(),
-                        )
-                    }
-                }
-                SttMode::Cloud => (false, "云端 STT 未配置供应商，请在设置页中配置".to_string()),
-            };
-            if !ready {
-                tracing::warn!(target = ?target, %msg, "语音录音中止：服务未就绪");
-                self.emit_voice_error(target, &msg);
-                return false;
-            }
-
-            // ── 模型加载状态检查（本地模式）──
-            // TCP 端口可达不代表模型已就绪——uvicorn 先绑定端口，模型加载需 30-60s。
-            // 单次检查 /health 端点：Ready → 继续；Loading → 反馈并返回（不阻塞事件循环）。
-            if config.mode == SttMode::Local {
-                let port = config.local_engine.server_port;
-
-                let status = crate::domain::stt::funasr::check_model_loaded(port).await;
-                match status {
-                    ModelLoadStatus::Ready => {
-                        // 模型就绪，继续录音流程
-                    }
-                    ModelLoadStatus::Loading | ModelLoadStatus::Idle => {
-                        // 模型加载中 → 向用户反馈，不等待（避免阻塞热键事件循环）
-                        tracing::info!(target = ?target, "模型加载中,跳过本次录音");
-                        self.emit_voice_status(target, "模型加载中，请稍候再试");
-                        return false;
-                    }
-                    ModelLoadStatus::Error => {
-                        let msg = "模型加载失败，请检查设置页日志";
-                        tracing::warn!(target = ?target, %msg);
-                        self.emit_voice_error(target, msg);
-                        return false;
-                    }
-                    ModelLoadStatus::Unreachable => {
-                        let msg = "服务连接失败，请检查设置页中服务状态";
-                        tracing::warn!(target = ?target, %msg);
-                        self.emit_voice_error(target, msg);
-                        return false;
-                    }
-                }
-            }
-        }
-
-        // 0.22.3 Task A: 从 LocalEngineService 获取受限连接快照（endpoint + token）
-        // 必须在 session 锁之前执行，因为 get_connection 是 async
-        let connection = {
+        // 0.22.6 批次 3: 本地模式下先获取连接，再做 token-aware health 检查
+        //
+        // 流程：get_connection → TCP 预检 → token-aware /health → create_engine
+        //
+        // 不再用 config.local_engine.server_port 做 port-only health：
+        // 1. preferred port 只是启动偏好，不一定是实际监听端口
+        // 2. Python /health 强制要求 X-Engine-Token，无 token 的请求返回 401
+        let connection = if config.mode == SttMode::Local {
             let svc = self
                 .app
                 .try_state::<std::sync::Arc<crate::app::local_engine::LocalEngineService>>();
@@ -318,11 +269,108 @@ impl VoiceService {
                         crate::infra::local_engine::runtime::EngineId::new("funasr").unwrap()
                     });
                     match s.get_connection(&engine_id).await {
-                        Ok(Some(conn)) => Some(conn),
-                        _ => None,
+                        Ok(Some(conn)) => {
+                            // 投影：LocalEngineConnection → SttEngineConnection
+                            // endpoint 格式为 "http://127.0.0.1:port"，解析出 host 和 port
+                            let parsed = parse_endpoint(&conn.endpoint);
+                            match parsed {
+                                Some((host, port)) => {
+                                    Some(crate::domain::stt::SttEngineConnection {
+                                        host,
+                                        port,
+                                        token: conn.token,
+                                        engine_id: conn.engine_id,
+                                        instance_id: conn.instance_id,
+                                    })
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        endpoint = %conn.endpoint,
+                                        "LocalEngineConnection endpoint 解析失败,跳过连接"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        Ok(None) => None, // 服务未运行
+                        Err(e) => {
+                            tracing::warn!(%e, "get_connection 查询失败");
+                            None
+                        }
                     }
                 }
-                None => None,
+                None => None, // LocalEngineService 未注册
+            }
+        } else {
+            None
+        };
+
+        // ── 服务就绪检查 ──
+        let need_check = match config.mode {
+            SttMode::Local => true,
+            SttMode::Cloud => config.cloud_provider.is_none(),
+        };
+        if need_check {
+            // 0.22.6: 本地模式下必须先获取连接，再检查服务状态
+            // 无连接 = 服务未运行，直接中止
+            if config.mode == SttMode::Local && connection.is_none() {
+                let msg = "FunASR 服务未运行，请在设置页「语音输入」中启动服务";
+                tracing::warn!(target = ?target, %msg, "语音录音中止：无连接");
+                self.emit_voice_error(target, msg);
+                return false;
+            }
+
+            let (ready, msg) = match config.mode {
+                SttMode::Local => {
+                    let conn = connection.as_ref().expect("connection 已在上方验证为 Some");
+                    // TCP 预检：用连接中的 host:port（非配置 preferred port）
+                    if !crate::domain::stt::funasr::is_server_ready_async(conn.port).await {
+                        (
+                            false,
+                            "FunASR 服务未启动，请在设置页「语音输入」中启动服务".to_string(),
+                        )
+                    } else {
+                        (true, String::new())
+                    }
+                }
+                SttMode::Cloud => (false, "云端 STT 未配置供应商，请在设置页中配置".to_string()),
+            };
+            if !ready {
+                tracing::warn!(target = ?target, %msg, "语音录音中止：服务未就绪");
+                self.emit_voice_error(target, &msg);
+                return false;
+            }
+
+            // ── 模型加载状态检查（本地模式）──
+            // 0.22.6: 使用 token-aware health 检查，不再用 port-only check_model_loaded
+            // TCP 端口可达不代表模型已就绪——uvicorn 先绑定端口，模型加载需 30-60s。
+            // 必须携带 X-Engine-Token，否则 /health 返回 401
+            if config.mode == SttMode::Local {
+                let conn = connection.as_ref().expect("connection 已在上方验证为 Some");
+                let status = crate::domain::stt::funasr::check_model_loaded_with_token(conn).await;
+                match status {
+                    ModelLoadStatus::Ready => {
+                        // 模型就绪，继续录音流程
+                    }
+                    ModelLoadStatus::Loading | ModelLoadStatus::Idle => {
+                        tracing::info!(target = ?target, "模型加载中,跳过本次录音");
+                        self.emit_voice_status(target, "模型加载中，请稍候再试");
+                        return false;
+                    }
+                    ModelLoadStatus::Error => {
+                        let msg = "模型加载失败，请检查设置页日志";
+                        tracing::warn!(target = ?target, %msg);
+                        self.emit_voice_error(target, msg);
+                        return false;
+                    }
+                    ModelLoadStatus::Unreachable => {
+                        // 0.22.6: Unreachable 包括 401（token 不匹配）和连接失败
+                        let msg = "服务连接失败或鉴权失败，请检查设置页中服务状态";
+                        tracing::warn!(target = ?target, %msg);
+                        self.emit_voice_error(target, msg);
+                        return false;
+                    }
+                }
             }
         };
 
@@ -717,6 +765,39 @@ async fn finalize_engine(engine: Option<Arc<dyn SttEngine>>) -> String {
     }
 }
 
+/// 从 endpoint URL 解析出 host 和 port。
+///
+/// endpoint 格式预期为 `http://127.0.0.1:port` 或 `http://host:port`。
+/// 解析失败返回 None（由调用方决定降级行为）。
+///
+/// 0.22.6 批次 3 H4: 替代此前 domain 层的 `rsplit(':')` 字符串猜测——
+/// app 层负责结构化解析，domain 层只接收纯数据。
+fn parse_endpoint(endpoint: &str) -> Option<(String, u16)> {
+    parse_endpoint_pub(endpoint)
+}
+
+/// `parse_endpoint` 的公共入口，供 maintenance 等诊断命令复用。
+///
+/// 0.22.6: diagnosis 命令需要从 `LocalEngineConnection.endpoint` 解析
+/// host/port 以做 token-aware health 检查。
+pub fn parse_endpoint_pub(endpoint: &str) -> Option<(String, u16)> {
+    // 去掉 scheme 前缀
+    let host_port = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+
+    // 去掉末尾可能的 path
+    let host_port = host_port.split('/').next().unwrap_or(host_port);
+
+    // host:port 分割
+    let colon = host_port.rfind(':')?;
+    let host = &host_port[..colon];
+    let port_str = &host_port[colon + 1..];
+    let port: u16 = port_str.parse().ok()?;
+    Some((host.to_string(), port))
+}
+
 /// 计算 PCM 样本的音量级别（0.0 ~ 1.0），用于前端波形条可视化。
 ///
 /// 使用 RMS（均方根）+ 噪声门限 + 平方根曲线：
@@ -745,7 +826,7 @@ fn compute_rms(samples: &[f32]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_rms;
+    use super::{compute_rms, parse_endpoint};
 
     #[test]
     fn rms_empty_returns_zero() {
@@ -798,5 +879,46 @@ mod tests {
         assert!(level > 0.0, "小信号应非零");
         // 线性值 ≈ 0.06，sqrt 后 ≈ 0.25，应明显大于线性值
         assert!(level > 0.06, "sqrt 曲线应增强小信号: got {level}");
+    }
+
+    // ── parse_endpoint 单测 ──
+
+    #[test]
+    fn parse_endpoint_localhost_with_port() {
+        let (host, port) = parse_endpoint("http://127.0.0.1:8100").unwrap();
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 8100);
+    }
+
+    #[test]
+    fn parse_endpoint_https_scheme() {
+        let (host, port) = parse_endpoint("https://127.0.0.1:443").unwrap();
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn parse_endpoint_with_trailing_path() {
+        let (host, port) = parse_endpoint("http://127.0.0.1:8100/health").unwrap();
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 8100);
+    }
+
+    #[test]
+    fn parse_endpoint_no_scheme() {
+        // 无 scheme 前缀也能解析
+        let (host, port) = parse_endpoint("127.0.0.1:8100").unwrap();
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 8100);
+    }
+
+    #[test]
+    fn parse_endpoint_no_port_returns_none() {
+        assert!(parse_endpoint("http://127.0.0.1").is_none());
+    }
+
+    #[test]
+    fn parse_endpoint_invalid_port_returns_none() {
+        assert!(parse_endpoint("http://127.0.0.1:abc").is_none());
     }
 }
