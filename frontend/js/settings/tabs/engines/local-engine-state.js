@@ -1,30 +1,31 @@
 /**
- * 纯状态 reducer —— 本地引擎运行时前端状态层（0.22.5 H3）。
+ * 纯状态 reducer —— 本地引擎运行时前端状态层（0.22.5 H3，0.22.6 收敛）。
  *
  * 按 engine_id 保存：
  * - catalog item（描述符投影）
- * - status snapshot（三维观测快照）
+ * - status snapshot（观测快照，含后端推导的 available）
  * - storage snapshot（存储概览）
  * - logs（结构化日志，bounded）
  * - pending UI action（用户触发的操作 kind + operation_id）
- * - last rendered error（最近渲染过的错误，防重复渲染）
+ * - models / preferences / pending model actions（0.22.6）
  *
  * ## 合并规则（铁则）
  *
  * ### epoch / revision
  * - 比较 engine_id。
- * - service_epoch **不同**：接受新 epoch，并清空旧 epoch 的 revision 门和旧 instance 日志。
+ * - service_epoch **不同**：接受新 epoch，并清空旧 epoch 的 revision 门和旧日志。
  *   **不能比较 service_epoch 大小，只比较是否相同。**
- * - 同 epoch：只接受 revision 更大的状态。
+ * - 同 epoch：只接受 revision 更大的状态（revision 是字符串化 u64，
+ *   数值比较，禁止字典序）。
  *
  * ### 日志去重
- * - 日志按 `engine_id + instance_id + seq` 去重。
- * - 当前 instance 变化后，旧 instance 的迟到日志**不得**进入当前实时日志区；
- *   可作为明确标注的历史查看，但不能混入当前流。
+ * - 日志按 `source + seq` 去重（source = operation_id 或 instance_id）。
+ * - 当前 instance 变化后，旧 instance 的迟到日志**不得**进入当前实时日志区。
  *
  * ### operation
  * - operation action/result 必须绑定 operation_id。
- * - 迟到 completion（旧 operation_id）不覆盖新 operation。
+ * - 迟到 completion（旧 operation_id）不覆盖新 operation；
+ *   install_stage 事件同理（applyInstallStage 校验 operation_id）。
  *
  * @module local-engine-state
  */
@@ -45,8 +46,6 @@ export const MAX_LOG_LINES = 500;
  * @property {LogEntry[]} logs - bounded 实时日志数组
  * @property {string|null} currentInstanceId - 当前 instance id（用于隔离日志）
  * @property {PendingAction|null} pendingAction - 用户触发的待完成操作
- * @property {Object|null} lastRenderedError - 最近渲染过的错误快照（防重复渲染）
- * @property {string|null} autoExpandedOpId - 已自动展开日志的 operation_id（防止重复展开）
  * @property {boolean} logAutoExpand - 一次性标志：要求 renderer 自动展开日志区
  */
 
@@ -61,7 +60,8 @@ export const MAX_LOG_LINES = 500;
 /**
  * 日志条目。
  * @typedef {Object} LogEntry
- * @property {string} instanceId
+ * @property {string} source - 日志来源标识（operation_id 或 instance_id）
+ * @property {string} sourceKind - "operation" | "instance"
  * @property {string} seq
  * @property {string} timestamp
  * @property {string} level
@@ -82,7 +82,6 @@ export function createInitialEntry() {
         logs: [],
         currentInstanceId: null,
         pendingAction: null,
-        lastRenderedError: null,
         // 0.22.6: 模型列表（ModelCatalogItemDto 数组）
         models: null,
         // 0.22.6: preferences DTO（EnginePreferencesDto）
@@ -90,9 +89,7 @@ export function createInitialEntry() {
         // 0.22.6: 模型级 pending action（按 model_id 索引）
         // Map<model_id, {kind, operationId, timestamp}>
         pendingModelActions: null,
-        // 0.22.6: 已自动展开日志的 operation_id（防止同一 operation 重复展开）
-        autoExpandedOpId: null,
-        // 0.22.6: 一次性标志——renderer 消费后清除
+        // 0.22.6: 一次性标志——renderer 展开后由 DOM 侧记录 opId 防重复
         logAutoExpand: false,
     };
 }
@@ -108,22 +105,6 @@ export function createInitialState() {
 // ── 辅助 ──────────────────────────────────────────────────────────────────────
 
 /**
- * 获取或创建引擎条目（纯函数，不修改原 Map，返回新 Map）。
- * @param {Map<string, EngineStateEntry>} state
- * @param {string} engineId
- * @returns {{ state: Map<string, EngineStateEntry>, entry: EngineStateEntry }}
- */
-function ensureEntry(state, engineId) {
-    if (state.has(engineId)) {
-        return {state, entry: state.get(engineId)};
-    }
-    const newEntry = createInitialEntry();
-    const newMap = new Map(state);
-    newMap.set(engineId, newEntry);
-    return {state: newMap, entry: newEntry};
-}
-
-/**
  * 替换 Map 中某个引擎的条目，返回新 Map（不可变更新）。
  * @param {Map<string, EngineStateEntry>} state
  * @param {string} engineId
@@ -137,34 +118,20 @@ function setEntry(state, engineId, newEntry) {
 }
 
 /**
- * 解析 revision 字符串为可比较的数值。
- * service_epoch/revision 在 wire 上是字符串（JS u64 精度问题），但 revision 本身是 u64 单调递增。
- * 对于 > Number.MAX_SAFE_INTEGER 的情况用字符串比较。
+ * 比较两个 revision 字符串（wire 上是字符串防 JS 精度丢失，值本身是 u64）。
+ *
+ * 铁则：不能用普通字符串字典序——字典序下 "9" > "10"。
+ * 全部走 BigInt 数值比较；解析失败（非法输入）fail closed 视为不大于。
  * @param {string} a
  * @param {string} b
  * @returns {boolean} a > b
  */
 function revisionGreaterThan(a, b) {
-    const numA = Number(a);
-    const numB = Number(b);
-    if (Number.isSafeInteger(numA) && Number.isSafeInteger(numB)) {
-        return numA > numB;
+    try {
+        return BigInt(a) > BigInt(b);
+    } catch {
+        return false;
     }
-    // 回退到字符串比较（适用于超大数值）
-    return a > b;
-}
-
-/**
- * 判断两个错误对象是否"相同"（防重复渲染）。
- * 按 code + phase 比较。
- * @param {Object|null} a
- * @param {Object|null} b
- * @returns {boolean}
- */
-function errorsEqual(a, b) {
-    if (a === b) return true;
-    if (!a || !b) return false;
-    return a.code === b.code && a.phase === b.phase;
 }
 
 // ── Reducer actions ───────────────────────────────────────────────────────────
@@ -205,35 +172,19 @@ export function mergeStatus(state, statusDto) {
 
     // 首次状态
     if (!entry.status) {
-        const newEntry = {
-            ...entry,
-            status: statusDto,
-            currentInstanceId: extractInstanceId(statusDto),
-            lastRenderedError: null,
-        };
-        // 新 epoch 时清空旧 instance 日志
-        if (statusDto.status && statusDto.status.process) {
-            // 有新 instance → 清旧日志
-            const newInstance = extractInstanceId(statusDto);
-            if (newInstance && newInstance !== entry.currentInstanceId) {
-                newEntry.logs = [];
-            }
-        }
-        return setEntry(state, engineId, newEntry);
+        return setEntry(state, engineId, {...entry, status: statusDto});
     }
 
     const oldStatus = entry.status;
 
-    // epoch 不同 → 接受新 epoch，清空旧 revision 门和旧 instance 日志
+    // epoch 不同 → 接受新 epoch，清空旧 revision 门和旧 epoch 日志。
+    // 不能比较 service_epoch 大小，只比较是否相同。
     if (oldStatus.service_epoch !== statusDto.service_epoch) {
-        const newInstance = extractInstanceId(statusDto);
         const newEntry = {
             ...entry,
             status: statusDto,
-            currentInstanceId: newInstance,
-            lastRenderedError: null,
-            // 新 epoch → 清空旧 instance 日志（不能混入当前流）
-            logs: newInstance !== entry.currentInstanceId ? [] : entry.logs,
+            // 已绑定运行实例时清空旧日志，不能混入当前流
+            logs: entry.currentInstanceId != null ? [] : entry.logs,
         };
         return setEntry(state, engineId, newEntry);
     }
@@ -245,15 +196,10 @@ export function mergeStatus(state, statusDto) {
     }
 
     // 同 epoch + 更大 revision → 接受
-    const newInstance = extractInstanceId(statusDto);
-    const instanceChanged = newInstance && newInstance !== entry.currentInstanceId;
-
-    // 检测后端推送的新 operation_id → 设置自动展开标志
+    // 检测后端推送的新 operation → 设置自动展开标志（DOM 侧按 opId 幂等）
     let logAutoExpand = entry.logAutoExpand;
-    let autoExpandedOpId = entry.autoExpandedOpId;
     const newOp = statusDto.status?.operation;
     if (newOp && newOp.operation_id
-        && newOp.operation_id !== autoExpandedOpId
         && newOp.kind !== "idle"
         && !["completed", "cancelled", "failed"].includes(newOp.stage)) {
         logAutoExpand = true;
@@ -262,15 +208,44 @@ export function mergeStatus(state, statusDto) {
     const newEntry = {
         ...entry,
         status: statusDto,
-        currentInstanceId: instanceChanged ? newInstance : entry.currentInstanceId,
-        // instance 切换时清空旧日志，不混入当前流
-        logs: instanceChanged ? [] : entry.logs,
-        lastRenderedError: entry.lastRenderedError,
         logAutoExpand,
-        autoExpandedOpId,
     };
 
     return setEntry(state, engineId, newEntry);
+}
+
+/**
+ * 应用安装阶段事件（blink://local-engine-install-stage）。
+ *
+ * 迟到事件拒绝：payload 的 operation_id 必须与当前状态里的 operation_id
+ * 一致才应用；不匹配（旧操作残留/异引擎串扰）直接丢弃，不改写 stage。
+ *
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {Object} payload - { engine_id, operation_id, stage }
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function applyInstallStage(state, payload) {
+    const engineId = payload?.engine_id;
+    const stage = payload?.stage;
+    if (!engineId || !stage) return state;
+
+    const entry = state.get(engineId);
+    if (!entry || !entry.status) return state;
+
+    const currentOp = entry.status.status?.operation;
+    if (!currentOp || currentOp.kind === "idle") return state;
+    if (currentOp.operation_id && payload.operation_id !== currentOp.operation_id) {
+        return state;
+    }
+
+    const newStatus = {
+        ...entry.status,
+        status: {
+            ...entry.status.status,
+            operation: {...currentOp, stage},
+        },
+    };
+    return setEntry(state, engineId, {...entry, status: newStatus});
 }
 
 /**
@@ -311,8 +286,6 @@ export function appendLog(state, logDto) {
 
     const logEntry = {
         source,
-        // 保留 instanceId 用于向后兼容（旧代码可能读 instanceId）
-        instanceId: logDto.instance_id,
         // 0.22.6: 标记日志来源——'operation' 或 'instance'
         sourceKind: isOperationLog ? "operation" : "instance",
         seq: logDto.seq,
@@ -364,7 +337,6 @@ export function setLogHistory(state, engineId, logDtos) {
         const isOp = dto.operation_id != null;
         return {
             source: isOp ? dto.operation_id : dto.instance_id,
-            instanceId: dto.instance_id,
             sourceKind: isOp ? "operation" : "instance",
             seq: dto.seq,
             timestamp: dto.timestamp,
@@ -427,14 +399,6 @@ export function setPendingAction(state, engineId, action) {
     if (!engineId) return state;
     const entry = state.get(engineId) || createInitialEntry();
 
-    // 如果已有 pending action 且新 action 的 operationId 不同，
-    // 且旧 action 尚未完成 → 不覆盖（但允许 null 清除）
-    if (action && entry.pendingAction && entry.pendingAction.operationId !== action.operationId) {
-        // 旧 operation 未完成时不接受新 action（除非新 action 是 null 清除）
-        // 但这里允许覆盖——因为后端 operation_id 会保证串行化
-        // 实际防护在 reducer 外部（controller）做 single-flight
-    }
-
     const pendingAction = action ? {
         kind: action.kind,
         operationId: action.operationId,
@@ -445,9 +409,7 @@ export function setPendingAction(state, engineId, action) {
     // install/repair/start/stop/cleanup 预期产生有用日志
     // cancel 和 null（清除）不展开
     let logAutoExpand = entry.logAutoExpand;
-    let autoExpandedOpId = entry.autoExpandedOpId;
     if (action && action.operationId
-        && action.operationId !== autoExpandedOpId
         && ["install", "repair", "start", "stop", "cleanup"].includes(action.kind)) {
         logAutoExpand = true;
     } else if (action === null) {
@@ -455,26 +417,7 @@ export function setPendingAction(state, engineId, action) {
         logAutoExpand = false;
     }
 
-    return setEntry(state, engineId, {...entry, pendingAction, logAutoExpand, autoExpandedOpId});
-}
-
-/**
- * 标记错误为已渲染（防重复渲染）。
- * @param {Map<string, EngineStateEntry>} state
- * @param {string} engineId
- * @param {Object|null} error
- * @returns {Map<string, EngineStateEntry>}
- */
-export function markErrorRendered(state, engineId, error) {
-    if (!engineId) return state;
-    const entry = state.get(engineId) || createInitialEntry();
-
-    // 只在错误实际变化时更新
-    if (errorsEqual(entry.lastRenderedError, error)) {
-        return state;
-    }
-
-    return setEntry(state, engineId, {...entry, lastRenderedError: error});
+    return setEntry(state, engineId, {...entry, pendingAction, logAutoExpand});
 }
 
 /**
@@ -535,7 +478,6 @@ export function setPendingModelAction(state, engineId, modelId, action) {
     const actions = new Map(entry.pendingModelActions || []);
 
     let logAutoExpand = entry.logAutoExpand;
-    let autoExpandedOpId = entry.autoExpandedOpId;
 
     if (action === null) {
         actions.delete(modelId);
@@ -547,13 +489,12 @@ export function setPendingModelAction(state, engineId, modelId, action) {
         });
         // 模型安装/修复操作开始时自动展开日志
         if (action.operationId
-            && action.operationId !== autoExpandedOpId
             && ["install", "repair"].includes(action.kind)) {
             logAutoExpand = true;
         }
     }
 
-    return setEntry(state, engineId, {...entry, pendingModelActions: actions, logAutoExpand, autoExpandedOpId});
+    return setEntry(state, engineId, {...entry, pendingModelActions: actions, logAutoExpand});
 }
 
 /**
@@ -580,14 +521,6 @@ export function getEffectiveModelInstallState(entry, model) {
     return pendingState || model?.install_state || "not_installed";
 }
 
-/**
- * 清空所有引擎状态（dispose 时使用）。
- * @returns {Map<string, EngineStateEntry>}
- */
-export function resetState() {
-    return createInitialState();
-}
-
 // ── 查询函数（纯读取） ─────────────────────────────────────────────────────────
 
 /**
@@ -610,24 +543,10 @@ export function getEngineIds(state) {
 }
 
 /**
- * 从状态 DTO 中提取 instance_id。
+ * 判断引擎是否"就绪可用"。
  *
- * instance_id 不在 status DTO 中——它只在 log DTO 中。
- * process 状态变化可以间接标志 instance 切换，但这里不做猜测，返回 null，
- * 由 log 流驱动 currentInstanceId。
- *
- * @param {Object} statusDto
- * @returns {string|null}
- */
-function extractInstanceId(statusDto) {
-    return null;
-}
-
-/**
- * 判断引擎是否"就绪可用"（process running 不等于 ready）。
- *
- * 正交铁则：process Running 不自动推出 service Healthy 或 model Ready。
- * 只有 desired=running && service=healthy/degraded && model=ready 才算可用。
+ * 可用性业务规则（desired/service/model 推导）由后端推导并投影为
+ * `status.available`（0.22.6 协议）——前端只消费，不复制推导规则。
  *
  * @param {EngineStateEntry} entry
  * @returns {boolean}
@@ -636,9 +555,7 @@ export function isEngineReady(entry) {
     if (!entry || !entry.status) return false;
     const s = entry.status.status;
     if (!s) return false;
-    return s.desired === "running"
-        && (s.service === "healthy" || s.service === "degraded")
-        && s.model === "ready";
+    return s.available === true;
 }
 
 /**
@@ -653,43 +570,6 @@ export function hasActiveOperation(entry) {
     if (op.kind === "idle") return false;
     // 已结束的阶段不算活跃
     return !["completed", "cancelled", "failed"].includes(op.stage);
-}
-
-/**
- * 消费 logAutoExpand 标志——如果为 true，返回 true 并将其清除。
- *
- * 这是一个不可变操作：返回新 state 和标志值。
- * Renderer 在 `updateCardContent` 中调用此函数：
- * - 如果返回的 `shouldExpand` 为 true，展开 `.le-card-log`。
- * - 如果为 false，不做任何事（用户手动收起后不会被重新展开）。
- *
- * @param {Map<string, EngineStateEntry>} state
- * @param {string} engineId
- * @returns {{ state: Map<string, EngineStateEntry>, shouldExpand: boolean }}
- */
-export function consumeLogAutoExpand(state, engineId) {
-    if (!engineId) return {state, shouldExpand: false};
-    const entry = state.get(engineId);
-    if (!entry || !entry.logAutoExpand) return {state, shouldExpand: false};
-
-    // 消费标志——记录已展开的 operation_id，清除标志
-    // autoExpandedOpId 设置为当前 pendingAction 或 pendingModelActions 中的 operationId
-    let currentOpId = entry.pendingAction?.operationId || null;
-    if (!currentOpId && entry.pendingModelActions) {
-        for (const [, pa] of entry.pendingModelActions) {
-            if (pa.operationId) {
-                currentOpId = pa.operationId;
-                break;
-            }
-        }
-    }
-
-    const newEntry = {
-        ...entry,
-        logAutoExpand: false,
-        autoExpandedOpId: currentOpId || entry.autoExpandedOpId,
-    };
-    return {state: setEntry(state, engineId, newEntry), shouldExpand: true};
 }
 
 /**

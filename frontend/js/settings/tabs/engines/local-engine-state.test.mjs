@@ -281,8 +281,7 @@ test("旧 operation completion 不结束新 operation", () => {
 // ── 8. dispose 后不再处理事件（controller 层概念验证）──────────────────────────
 
 test("dispose 后不再处理事件（reducer 侧纯函数验证）", () => {
-    // reducer 是纯函数，dispose 在 controller 层控制
-    // 这里验证 resetState 返回空状态
+    // reducer 是纯函数，dispose 在 controller 层控制——重新 createInitialState 即等效清空
     let state = createInitialState();
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
@@ -313,11 +312,11 @@ test("renderer 对 incompatible option 禁用（通过 catalog compute_options �
 
 // ── 10. process running + model loading 不显示 ready ──────────────────────────
 
-test("process running + model loading 不显示 ready", () => {
+test("isEngineReady 消费后端推导的 status.available", () => {
     let state = createInitialState();
     state = setCatalog(state, makeCatalog());
 
-    // process running + service healthy + model loading → NOT ready
+    // available=false（推导规则在后端）→ NOT ready
     state = mergeStatus(state, makeStatus({
         engine_id: "funasr",
         service_epoch: "epoch-1",
@@ -327,13 +326,14 @@ test("process running + model loading 不显示 ready", () => {
             process: processState.running(1234),
             service: "healthy",
             model: "loading",
+            available: false,
         },
     }));
 
     let entry = getEntry(state, "funasr");
-    assert.equal(isEngineReady(entry), false, "process running + model loading 不应显示 ready");
+    assert.equal(isEngineReady(entry), false, "available=false 不应显示 ready");
 
-    // process running + service healthy + model ready → ready
+    // available=true → ready
     state = mergeStatus(state, makeStatus({
         engine_id: "funasr",
         service_epoch: "epoch-1",
@@ -343,13 +343,14 @@ test("process running + model loading 不显示 ready", () => {
             process: processState.running(1234),
             service: "healthy",
             model: "ready",
+            available: true,
         },
     }));
 
     entry = getEntry(state, "funasr");
-    assert.equal(isEngineReady(entry), true, "所有维度都就绪时应显示 ready");
+    assert.equal(isEngineReady(entry), true, "available=true 应显示 ready");
 
-    // process running 但 service unreachable → NOT ready
+    // available 缺省 → NOT ready（fail closed）
     state = mergeStatus(state, makeStatus({
         engine_id: "funasr",
         service_epoch: "epoch-1",
@@ -357,13 +358,13 @@ test("process running + model loading 不显示 ready", () => {
         status: {
             desired: "running",
             process: processState.running(1234),
-            service: "unreachable",
+            service: "healthy",
             model: "ready",
         },
     }));
 
     entry = getEntry(state, "funasr");
-    assert.equal(isEngineReady(entry), false, "process running 但 service unreachable 不应显示 ready");
+    assert.equal(isEngineReady(entry), false, "available 缺省时 fail closed");
 });
 
 // ── 11. PaddleOCR 没有 descriptor 声明的 GPU 选项 ─────────────────────────────

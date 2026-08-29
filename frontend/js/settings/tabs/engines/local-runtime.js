@@ -35,13 +35,13 @@ import {
     createInitialState,
     setCatalog,
     mergeStatus,
+    applyInstallStage,
     appendLog,
     setLogHistory,
     setStorage,
     setPendingAction,
     setPendingModelAction,
     getPendingModelAction,
-    markErrorRendered,
     clearLogs,
     getEngineIds,
     setModels,
@@ -169,7 +169,8 @@ export function createLocalEngineController(callbacks = {}) {
      * payload: { engine_id, operation_id, stage }
      *
      * 前端据此实时显示安装进度，不等 LOCAL_ENGINE_STATUS 的 revision 变化。
-     * 安装阶段变更时，直接更新对应引擎的 operation.stage。
+     * stage 投影到 EngineStatus.operation.stage——operation_id 不匹配的迟到
+     * 事件由 reducer 拒绝（applyInstallStage）。
      *
      * @param {Object} payload - { engine_id, operation_id, stage }
      */
@@ -184,14 +185,8 @@ export function createLocalEngineController(callbacks = {}) {
 
         if (!mounted) return;
 
-        // 将 stage 投影到 EngineStatus.operation.stage
-        const {engine_id, stage} = payload;
-        const engineState = state.get(engine_id);
-        if (engineState && engineState.status && engineState.status.operation) {
-            engineState.status.operation.stage = stage;
-            // 通知 UI 更新
-            notifyStateChange();
-        }
+        state = applyInstallStage(state, payload);
+        notifyStateChange();
     }
 
     /**
@@ -247,12 +242,8 @@ export function createLocalEngineController(callbacks = {}) {
             } else if (buffered.type === "log") {
                 state = appendLog(state, buffered.payload);
             } else if (buffered.type === "install_stage") {
-                // 0.22.6 H4: 安装阶段变更
-                const {engine_id, stage} = buffered.payload;
-                const engineState = state.get(engine_id);
-                if (engineState && engineState.status && engineState.status.operation) {
-                    engineState.status.operation.stage = stage;
-                }
+                // 0.22.6 H4: 安装阶段变更（迟到事件由 reducer 拒绝）
+                state = applyInstallStage(state, buffered.payload);
             }
         }
         eventBuffer = [];
@@ -485,12 +476,14 @@ export function createLocalEngineController(callbacks = {}) {
 
         /**
          * 安装引擎。
+         * 返回 {engine_id, operation_id, end_state}——end_state 为
+         * "completed"|"cancelled"，cancelled 是正常终态不是错误。
          * @param {string} engineId
          * @param {string|null} computePreference
          */
         async install(engineId, computePreference = null) {
             return this._executeAction(engineId, "install", async () => {
-                await invoke(COMMANDS.INSTALL, {
+                return invoke(COMMANDS.INSTALL, {
                     engineId,
                     computePreference,
                 });
@@ -504,7 +497,7 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async start(engineId, computePreference = null) {
             return this._executeAction(engineId, "start", async () => {
-                await invoke(COMMANDS.START, {
+                return invoke(COMMANDS.START, {
                     engineId,
                     computePreference,
                 });
@@ -517,7 +510,7 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async stop(engineId) {
             return this._executeAction(engineId, "stop", async () => {
-                await invoke(COMMANDS.STOP, {engineId});
+                return invoke(COMMANDS.STOP, {engineId});
             });
         },
 
@@ -549,11 +542,12 @@ export function createLocalEngineController(callbacks = {}) {
 
         /**
          * 修复引擎。
+         * 返回 {engine_id, operation_id, end_state}，同 install。
          * @param {string} engineId
          */
         async repair(engineId) {
             return this._executeAction(engineId, "repair", async () => {
-                await invoke(COMMANDS.REPAIR, {engineId});
+                return invoke(COMMANDS.REPAIR, {engineId});
             });
         },
 
@@ -564,7 +558,7 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async cleanup(engineId, targetIds) {
             return this._executeAction(engineId, "cleanup", async () => {
-                await invoke(COMMANDS.CLEANUP, {
+                return invoke(COMMANDS.CLEANUP, {
                     request: {
                         engine_id: engineId,
                         target_ids: targetIds,
@@ -874,9 +868,10 @@ export function createLocalEngineController(callbacks = {}) {
 
         /**
          * 执行操作 action（single-flight 防护）。
+         * 返回 fn 的结构化结果（如 install 的 {engine_id, operation_id, end_state}）。
          * @param {string} engineId
          * @param {string} actionKind
-         * @param {() => Promise<void>} fn
+         * @param {() => Promise<*>} fn
          */
         async _executeAction(engineId, actionKind, fn) {
             if (disposed) throw new Error("controller 已 disposed");
@@ -898,10 +893,12 @@ export function createLocalEngineController(callbacks = {}) {
             notifyStateChange();
 
             try {
-                await fn();
-                // 成功后清除 pending action
+                const result = await fn();
+                // 成功（含 end_state=cancelled）后清除 pending action——
+                // completed/cancelled 都必须退出忙碌状态
                 state = setPendingAction(state, engineId, null);
                 notifyStateChange();
+                return result;
             } catch (e) {
                 const err = normalizeError(e);
                 // 失败也清除 pending action（错误通过状态事件反馈）

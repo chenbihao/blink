@@ -74,11 +74,13 @@ export function makeCatalog() {
 /**
  * 构建 status DTO。
  * wire shape: { engine_id, service_epoch, revision, status: EngineStatusWire }
- * EngineStatusWire: { desired, operation, environment, process, service, model, backend, last_error }
+ * EngineStatusWire: { desired, operation, environment, process, service, model, available, backend, last_error }
  *
  * **process 使用 ProcessStateDto shape**：
  *   { state: "stopped" | "starting" | "running" | "stopping" | "exited", pid?: number, reason?: string }
- * 不再使用旧 serde enum shape（{stopped: null} / {running: {pid: 1234}}）。
+ *
+ * `available` 是后端推导的一键可用性（desired=running && service 可用 && model ready），
+ * 前端只消费不推导。
  */
 export function makeStatus(overrides = {}) {
     const base = {
@@ -92,6 +94,7 @@ export function makeStatus(overrides = {}) {
             process: {state: "stopped"},
             service: "unknown",
             model: "unknown",
+            available: false,
             backend: {
                 requested_preference: "cpu",
                 resolved_profile: null,

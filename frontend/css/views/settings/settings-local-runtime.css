@@ -777,8 +777,7 @@
 #engines .le-cleanup-item-scope,
 #engines .le-cleanup-item-size,
 #engines .le-cleanup-item-flags,
-#engines .le-cleanup-item-affected,
-#engines .le-cleanup-item-refcount {
+#engines .le-cleanup-item-affected {
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-style: normal;
@@ -1289,5 +1288,100 @@
     border: 1px solid var(--warning-border, rgba(221, 107, 32, 0.2));
     color: var(--warning-text, #dd6b20);
     font-size: var(--text-sm);
+    font-style: normal;
+}
+
+/* ── 模型列表徽章与附加态（0.22.6 收敛：inline style 迁入 CSS）──────────────── */
+
+/* 模型名后的 selected/active 徽章间距 */
+#engines .le-model-name .le-model-badge {
+    margin-left: 0.375rem;
+}
+
+/* 模型状态旁的校验附加文案 */
+#engines .le-model-verification {
+    margin-left: 0.25rem;
+    font-size: var(--text-2xs, 0.6875rem);
+    color: var(--text-dim);
+    font-style: normal;
+}
+
+/* delete_blocked 状态文字 */
+#engines .le-model-state-blocked {
+    color: var(--red);
+    font-style: normal;
+}
+
+/* ── orphan 恢复：确认模态 + 通知（0.22.6 收敛：style.cssText 迁入 CSS）────── */
+
+.le-orphan-modal-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--shadow);
+    z-index: 10000;
+}
+
+.le-orphan-modal {
+    max-width: 400px;
+    padding: 1.5rem;
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    font-style: normal;
+    text-align: center;
+}
+
+.le-orphan-modal-msg {
+    margin: 0 0 1rem 0;
+    color: var(--text);
+    font-size: var(--text-sm);
+    font-style: normal;
+}
+
+.le-orphan-modal-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+}
+
+.le-orphan-notification {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-sm, 4px);
+    font-size: var(--text-sm);
+    font-style: normal;
+    z-index: 10000;
+    max-width: 360px;
+    word-break: break-word;
+    border: 1px solid var(--surface);
+}
+
+.le-orphan-notification-ok {
+    background: var(--green-bg);
+    color: var(--green);
+}
+
+.le-orphan-notification-err {
+    background: var(--red-bg);
+    color: var(--red);
+}
+
+/* ── 运行时底座：引擎概览行（0.22.6 新 DTO）────────────────────────────────── */
+
+#engines .le-foundation-engine-name {
+    min-width: 5em;
+    font-weight: 600;
+    color: var(--text);
+    font-style: normal;
+}
+
+#engines .le-foundation-engine-status {
+    display: inline-flex;
+    gap: 0.375rem;
     font-style: normal;
 }

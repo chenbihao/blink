@@ -28,6 +28,8 @@ import {initMcpServerSection} from "./tabs/mcp-server.js";
 import {createLocalEngineController} from "./tabs/engines/local-runtime.js";
 import {renderEngineCard} from "./tabs/engines/local-engine-card.js";
 import {getEngineIds} from "./tabs/engines/local-engine-state.js";
+import {processDisplay, processClass} from "./tabs/engines/local-engine-process.js";
+import {statusClass} from "./tabs/engines/local-engine-card-utils.js";
 import {registerLocalEngineHooks, unregisterLocalEngineHooks} from "./tabs/engines/local-engine-hooks.js";
 import {createCleanupModal, aggregateSharedTargets} from "./tabs/engines/local-engine-cleanup-modal.js";
 import {onLangChange} from "../i18n/index.js";
@@ -236,12 +238,16 @@ async function refreshFoundation() {
 
 /**
  * 渲染底座内容。
+ * DTO shape（0.22.6）：{ engines: [{engine_id, display_name, environment,
+ * process(对象), service}], python_provider }——python_provider 是内部提供方
+ * 概念，不展示；每个引擎渲染 环境/进程/服务 概览行。
  * @param {HTMLElement} body
  * @param {Object} foundation - RuntimeFoundationDto
  */
 function renderFoundationBody(body, foundation) {
     body.textContent = "";
-    if (!foundation) {
+    const engines = foundation?.engines;
+    if (!Array.isArray(engines) || engines.length === 0) {
         const empty = document.createElement("div");
         empty.className = "le-foundation-no-data";
         empty.textContent = t("local_engine.foundation.no_data");
@@ -249,28 +255,31 @@ function renderFoundationBody(body, foundation) {
         return;
     }
 
-    const rows = [
-        {label: t("local_engine.foundation.python_provider"), value: foundation.python_provider || "—"},
-        {label: t("local_engine.foundation.runtime_kind"), value: foundation.runtime_kind || "—"},
-        {label: t("local_engine.foundation.uv_source"), value: foundation.uv_source || "—"},
-        {label: t("local_engine.foundation.uv_version"), value: foundation.uv_version || "—"},
-        {label: t("local_engine.foundation.managed_python"), value: foundation.managed_python || "—"},
-        {label: t("local_engine.foundation.shared_cache"), value: foundation.shared_cache || "—"},
-        {label: t("local_engine.foundation.root_dir"), value: foundation.root_dir || "—"},
-    ];
+    for (const engine of engines) {
+        const row = document.createElement("div");
+        row.className = "le-foundation-row";
 
-    for (const row of rows) {
-        const el = document.createElement("div");
-        el.className = "le-foundation-row";
-        const label = document.createElement("span");
-        label.className = "le-info-label";
-        label.textContent = row.label;
-        const value = document.createElement("span");
-        value.className = "le-info-value";
-        value.textContent = row.value;
-        el.appendChild(label);
-        el.appendChild(value);
-        body.appendChild(el);
+        const name = document.createElement("span");
+        name.className = "le-info-label le-foundation-engine-name";
+        name.textContent = engine.display_name || engine.engine_id || "—";
+
+        const badges = document.createElement("span");
+        badges.className = "le-info-value le-foundation-engine-status";
+        const items = [
+            {value: engine.environment, cls: statusClass(engine.environment)},
+            {value: processDisplay(engine.process), cls: processClass(engine.process)},
+            {value: engine.service, cls: statusClass(engine.service)},
+        ];
+        for (const item of items) {
+            const badge = document.createElement("span");
+            badge.className = `le-status-value status-badge ${item.cls}`;
+            badge.textContent = item.value;
+            badges.appendChild(badge);
+        }
+
+        row.appendChild(name);
+        row.appendChild(badges);
+        body.appendChild(row);
     }
 }
 
@@ -328,13 +337,8 @@ function renderSharedStorage(state) {
             label.textContent = target.label_fallback || target.target_id;
             const size = document.createElement("span");
             size.textContent = formatSharedBytes(target.size_bytes);
-            const ref = document.createElement("span");
-            ref.textContent = target.reference_count != null
-                ? `×${target.reference_count}`
-                : "";
             row.appendChild(label);
             row.appendChild(size);
-            row.appendChild(ref);
             content.appendChild(row);
         }
     }

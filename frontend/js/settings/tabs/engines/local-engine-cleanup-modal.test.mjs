@@ -179,23 +179,23 @@ test("aggregateSharedTargets：空状态返回空数组", () => {
     assert.equal(aggregateSharedTargets(new Map()).length, 0);
 });
 
-test("aggregateSharedTargets：只返回 shared/provider 类型", () => {
+test("aggregateSharedTargets：只返回后端标记 shared 的 target", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "gen:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
-            {target_id: "shared:py", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
-            {target_id: "cache:1", kind: "provider_download_cache", shared: false, engine_id: "funasr"},
+            {target_id: "slot:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
+            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
+            {target_id: "cache:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
         ]}}],
     ]);
     const result = aggregateSharedTargets(state);
-    assert.equal(result.length, 2);
-    assert.deepEqual(result.map((t) => t.target_id).sort(), ["cache:1", "shared:py"]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].target_id, "shared:python_venv:py312");
 });
 
-test("aggregateSharedTargets：target.shared=true 也被识别为共享", () => {
+test("aggregateSharedTargets：target.shared=true 的 generation 也被识别为共享", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "gen:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
+            {target_id: "slot:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
             {target_id: "shared-asset", kind: "engine_generation", shared: true, engine_id: "funasr"},
         ]}}],
     ]);
@@ -207,27 +207,26 @@ test("aggregateSharedTargets：target.shared=true 也被识别为共享", () => 
 test("aggregateSharedTargets：跨引擎同 target_id 去重并合并", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "shared:py", kind: "provider_shared_artifact", shared: true, engine_id: "funasr", reference_count: 2},
+            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
         ]}}],
         ["paddleocr", {storage: {targets: [
-            {target_id: "shared:py", kind: "provider_shared_artifact", shared: true, engine_id: "paddleocr", reference_count: 3},
+            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "paddleocr"},
         ]}}],
     ]);
     const result = aggregateSharedTargets(state);
     assert.equal(result.length, 1, "同 target_id 应去重");
     assert.ok(result[0].affected_engine_ids.includes("funasr"));
     assert.ok(result[0].affected_engine_ids.includes("paddleocr"));
-    assert.equal(result[0].reference_count, 3, "取较大 reference_count");
 });
 
 test("aggregateSharedTargets：不同 target_id 不合并", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "shared:py", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
-            {target_id: "cache:dl", kind: "provider_download_cache", shared: false, engine_id: "funasr"},
+            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
+            {target_id: "download_cache:python_venv", kind: "provider_download_cache", shared: true, engine_id: "funasr"},
         ]}}],
         ["paddleocr", {storage: {targets: [
-            {target_id: "shared:py", kind: "provider_shared_artifact", shared: true, engine_id: "paddleocr"},
+            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "paddleocr"},
         ]}}],
     ]);
     assert.equal(aggregateSharedTargets(state).length, 2);

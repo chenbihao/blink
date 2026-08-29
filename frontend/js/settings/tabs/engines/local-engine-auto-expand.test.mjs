@@ -84,18 +84,9 @@ test("同一 operation 后续刷新不重复触发", () => {
     entry = getEntry(state, "funasr");
     assert.equal(entry.logAutoExpand, false, "清除后不触发");
 
-    // 再次设置同一 operationId → 不触发（autoExpandedOpId 已记录）
-    // 注意：autoExpandedOpId 在 consumeLogAutoExpand 时才设置，
-    // 但在 reducer 中 setPendingAction 不消费标志——它只设置。
-    // 所以第二次设置同一 opId 时，logAutoExpand 不会被重新设置
-    // （因为 opId === autoExpandedOpId? 不——autoExpandedOpId 只在 consume 时设置）
-    // 这里验证的是：如果 entry.logAutoExpand 已经是 false（被消费过），
-    // 同一 opId 再次 setPendingAction 不会重新设置。
-    // 由于 autoExpandedOpId 在 reducer 中只在 consumeLogAutoExpand 时设置，
-    // 而 setPendingAction 检查的是 autoExpandedOpId，
-    // 所以如果 autoExpandedOpId 仍然是 null，同一 opId 会重新设置 logAutoExpand。
-    // 这是预期的——autoExpandedOpId 的实际记录在 DOM-side 完成。
-    // 这里测试的是 reducer 行为，不是 DOM 行为。
+    // 再次设置同一 operationId → reducer 层不做去重（标志是布尔值），
+    // DOM 侧按 data-auto-expanded-op 记录的 operation_id 幂等，
+    // 所以这里验证的是 reducer 行为，不是 DOM 行为。
     // 实际 DOM-side 幂等由 data-auto-expanded-op 保证。
 });
 
@@ -267,7 +258,6 @@ test("初始状态不自动展开", () => {
     state = setCatalog(state, makeCatalog());
     const entry = getEntry(state, "funasr");
     assert.equal(entry.logAutoExpand, false, "初始状态不应触发 logAutoExpand");
-    assert.equal(entry.autoExpandedOpId, null, "初始 autoExpandedOpId 应为 null");
 });
 
 // ── 10. 不同引擎互不影响 ─────────────────────────────────────────────────────

@@ -1,13 +1,13 @@
 /**
- * 清理确认 modal（0.22.5 H3）。
+ * 清理确认 modal（0.22.5 H3，0.22.6 收敛）。
  *
  * 铁则：
  * - cleanup 按钮点击只打开 modal，绝不直接 invoke cleanup。
  * - modal 从最新 storage DTO 渲染后端返回的精确 targets。
- * - 每项显示 scope/标签/size/current/previous/shared/removable/blocked_reason/受影响引擎。
+ * - 每项显示 标签/size/current/shared/removable/blocked_reason/受影响引擎。
  * - target 文本只用 textContent，不信任或渲染前端拼造路径。
- * - current generation 和 blocked target 禁止选择。
- * - 默认不全选高风险项（shared/removable 才选；current/blocked 不选）。
+ * - current 和 blocked target 禁止选择。
+ * - 默认不全选高风险项（非 shared 且 removable 才默认选）。
  * - confirm 只提交用户勾选的 target_id；后端重新解析 target_id。
  * - confirm 期间禁用重复提交。
  * - 成功后关闭 modal 并刷新 status/storage。
@@ -17,13 +17,13 @@
  * - dispose/tab 切换时强制关闭 modal 并清除 pending targets。
  *
  * 公共缓存单独确认：
- * - 聚合所有 engine storage snapshot 中的 shared/provider targets。
- * - 按 target_id 去重，显示 reference_count / affected_engine_ids。
- * - 与单引擎 generation/model cache 分区。
+ * - 聚合所有 engine storage snapshot 中的 shared targets（后端 shared 标志）。
+ * - 按 target_id 去重，显示 affected_engine_ids。
+ * - 与单引擎分区。
  * - 公共缓存不进入普通"清理此引擎"的默认选择。
  * - 点击"清理公共缓存"打开独立风险确认状态。
- * - 有引用/blocked/不可安全删除时禁用并展示原因。
- * - 不允许前端构造任意 provider target。
+ * - blocked/不可安全删除时禁用并展示原因。
+ * - 不允许前端构造任意共享 target。
  *
  * modal 与键盘：
  * - hidden/aria-hidden/aria-modal 一致状态。
@@ -39,21 +39,18 @@
  * @module local-engine-cleanup-modal
  */
 
-import {iconHTML} from "../../../shared/icon.js";
 import {t} from "../../../i18n/index.js";
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
 /**
- * target kind 是否为公共/共享资产（需要单独确认）。
+ * target 是否为公共/共享资产（需要单独确认）。
+ * 只消费后端声明的 `shared` 标志——不按 kind 字符串复制后端分类规则。
  * @param {Object} target - StorageTargetDto
  * @returns {boolean}
  */
 function isSharedTarget(target) {
-    if (!target) return false;
-    if (target.shared) return true;
-    const kind = target.kind;
-    return kind === "provider_shared_artifact" || kind === "provider_download_cache";
+    return !!target?.shared;
 }
 
 /**
@@ -267,13 +264,12 @@ export function createCleanupModal(opts) {
         size.textContent = formatBytes(target.size_bytes);
         info.appendChild(size);
 
-        // flags: current/previous/shared/removable
+        // flags: current/shared/removable
         const flags = document.createElement("span");
         flags.className = "le-cleanup-item-flags";
         const flagParts = [];
         if (target.current) flagParts.push(tt("local_engine.cleanup.flag.current", "当前"));
-        if (target.previous) flagParts.push(tt("local_engine.cleanup.flag.previous", "上一代"));
-        if (target.shared || isShared) flagParts.push(tt("local_engine.cleanup.flag.shared", "共享"));
+        if (target.shared) flagParts.push(tt("local_engine.cleanup.flag.shared", "共享"));
         if (target.removable) flagParts.push(tt("local_engine.cleanup.flag.removable", "可清理"));
         flags.textContent = flagParts.join(" · ");
         info.appendChild(flags);
@@ -284,14 +280,6 @@ export function createCleanupModal(opts) {
             affected.className = "le-cleanup-item-affected";
             affected.textContent = `${tt("local_engine.cleanup.affected_engines", "影响引擎")}: ${target.affected_engine_ids.join(", ")}`;
             info.appendChild(affected);
-        }
-
-        // reference_count
-        if (target.reference_count != null) {
-            const ref = document.createElement("span");
-            ref.className = "le-cleanup-item-refcount";
-            ref.textContent = `${tt("local_engine.cleanup.refcount", "引用")}: ${target.reference_count}`;
-            info.appendChild(ref);
         }
 
         // blocked_reason
@@ -507,9 +495,8 @@ export function createCleanupModal(opts) {
 /**
  * 从多个引擎的 storage snapshot 中聚合公共/共享 targets。
  *
- * - 按 target_id 去重。
- * - 合并 reference_count / affected_engine_ids。
- * - 只返回 shared/provider kind 的 target。
+ * - 只返回后端标记 `shared` 的 target（不按 kind 复制后端分类规则）。
+ * - 按 target_id 去重，合并 affected_engine_ids。
  *
  * @param {Map<string, Object>} state - engine_id → EngineStateEntry
  * @returns {Array} 聚合后的 shared targets
@@ -533,11 +520,6 @@ export function aggregateSharedTargets(state) {
                 merged.set(target.target_id, {
                     ...existing,
                     affected_engine_ids: Array.from(affected),
-                    // 取较大的 reference_count
-                    reference_count: Math.max(
-                        existing.reference_count || 0,
-                        target.reference_count || 0,
-                    ),
                 });
             } else {
                 const affected = new Set();
