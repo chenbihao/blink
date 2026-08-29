@@ -156,18 +156,21 @@ impl LogPipe {
     }
 
     /// 获取无订阅者时的消息计数（信号性指标）。
+    #[allow(dead_code)] // test flood/subscription assertions
     pub fn no_subscriber_count(&self) -> u64 {
         self.no_subscriber_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 获取截断行计数。
+    #[allow(dead_code)] // test flood/subscription assertions
     pub fn truncated_line_count(&self) -> u64 {
         self.truncated_line_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 获取 broadcast 接收者数量。
+    #[allow(dead_code)] // test flood/subscription assertions
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
     }
@@ -305,11 +308,6 @@ impl LineAccumulator {
         self.overflowing = false;
 
         (text, was_overflowing)
-    }
-
-    /// 当前是否有未完成的行。
-    pub fn has_pending(&self) -> bool {
-        !self.buf.is_empty() || self.overflowing
     }
 }
 

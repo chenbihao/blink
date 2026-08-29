@@ -16,7 +16,7 @@
 //! promote:    staging → slot-{candidate}（rename）
 //! pre-switch: journal.phase = Switched（指针切换之前写）
 //! switch:     deployment.json → candidate（原子替换）
-//! verify:     重读 manifest + provider self-test；失败 → 自动回滚 previous
+//! verify:     重读 manifest + artifact identity；失败 → 自动回滚 previous
 //! commit:     journal.phase = Committed → 删除旧 slot（占用记 residue）→ 清 journal
 //! ```
 //!
@@ -75,9 +75,10 @@ pub struct ProfileCandidate {
 
 /// 兼容性检查类型（provider 负责实现实际检查逻辑）。
 ///
-/// 闭合协议枚举：GPU/feature 分支由 ManagedBinary provider 落地时构造，
-/// 当前 PythonVenv 只使用 `Always`。
-#[allow(dead_code)]
+/// 闭合协议枚举，只保留 0.22.7 GGUF 链路明确需要的最小集合
+/// （cuda / vulkan / cpu feature）；GPU/feature 分支由 ManagedBinary
+/// provider 落地时构造，当前 PythonVenv 只使用 `Always`。
+#[allow(dead_code)] // 0.22.7 ManagedBinary 协议位——变体由 binary descriptor 构造
 #[derive(Debug, Clone)]
 pub enum CompatibilityCheck {
     /// 总是兼容（如 CPU x64）。
@@ -86,8 +87,6 @@ pub enum CompatibilityCheck {
     RequiresCuda { min_version: Option<String> },
     /// 需要 Vulkan 驱动。
     RequiresVulkan,
-    /// 需要 DirectML 支持的 GPU。
-    RequiresDirectml,
     /// 需要 CPU feature（如 AVX2）。
     RequiresCpuFeature { feature: String },
 }
@@ -383,6 +382,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
         if let Some(s) = sink {
             s.on_stage("preparing");
+            s.on_log("info", "正在准备安装环境...");
         }
 
         // ── 1. resolve profile ──
@@ -463,7 +463,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             }
         };
 
-        // ── 4. self-test（staging 内） ──
+        // ── 4. self-test（staging 内，候选环境验证）──
         if let Some(ct) = cancel_token {
             if ct.is_cancelled() {
                 let _ = std::fs::remove_dir_all(&staging);
@@ -479,6 +479,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
         if let Some(s) = sink {
             s.on_stage("verifying");
+            s.on_log("info", "正在验证候选环境...");
         }
 
         if let Err(e) = self
@@ -486,10 +487,10 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             .self_test(&staging, &self.descriptor.install_plan, cancel_token, sink)
             .await
         {
-            tracing::warn!(%e, "self-test 失败，清理 staging");
+            tracing::warn!(%e, "候选环境 self-test 失败，清理 staging");
             if let Some(s) = sink {
                 s.on_stage("failed");
-                s.on_log("error", &format!("self-test 失败: {e}"));
+                s.on_log("error", &format!("候选环境验证失败: {e}"));
             }
             let _ = std::fs::remove_dir_all(&staging);
             let _ = DeploymentStore::clear_journal(engine_id);
@@ -498,6 +499,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
         if let Some(s) = sink {
             s.on_stage("promoting");
+            s.on_log("info", "正在提升新环境...");
         }
 
         // ── 5. build manifest extension + manifest（先写进 staging） ──
@@ -565,6 +567,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         // ── 7. pre-switch: journal 先推进到 Switched，再切换指针 ──
         if let Some(s) = sink {
             s.on_stage("switching");
+            s.on_log("info", "正在切换到新环境...");
         }
         DeploymentStore::advance_phase(engine_id, &mut journal, TransactionPhase::Switched)?;
 
@@ -590,6 +593,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         // ── 8. 切换后验证：失败自动回滚 previous ──
         if let Some(s) = sink {
             s.on_stage("validating");
+            s.on_log("info", "正在执行切换后验证...");
         }
 
         if let Err(e) = self
@@ -597,6 +601,9 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             .await
         {
             tracing::error!(%e, "切换后验证失败，自动回滚到 previous 部署");
+            if let Some(s) = sink {
+                s.on_log("error", &format!("切换后验证失败，正在回滚: {e}"));
+            }
             if let Err(rollback_err) = Self::rollback_switch(engine_id, &journal, candidate_slot) {
                 tracing::error!(%rollback_err, "回滚失败——启动恢复将按 journal fail-closed 处理");
                 // 保留 journal 让下次启动恢复；返回原错误
@@ -633,6 +640,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
         if let Some(s) = sink {
             s.on_stage("completed");
+            s.on_log("info", "安装完成");
         }
 
         Ok(InstallResult {
@@ -675,9 +683,12 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
     /// 指针切换后的验证。
     ///
-    /// - 读取刚写入的 manifest 确认完整性（schema + artifact hash + self-test）
+    /// - 读取刚写入的 manifest 确认完整性（schema + artifact identity）
     /// - 验证 artifact identity 一致性
-    /// - 对 active slot 重新执行 provider self-test（不信任持久化布尔值）
+    ///
+    /// 完整 provider self-test 已在同一不可变 candidate slot 提升前执行。
+    /// 提升是同卷原子 rename，不改变 payload 内容；切换后重复执行 torch/funasr
+    /// import 只会把安装时间翻倍。运行时可用性由后续 start + token health 验证。
     ///
     /// 失败时调用方执行自动回滚。
     async fn verify_after_switch(
@@ -726,21 +737,11 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             });
         }
 
-        // 验证阶段不可取消、不上报日志
-        self.provider
-            .self_test(
-                &slot.dir(engine_id),
-                &self.descriptor.install_plan,
-                None,
-                None,
-            )
-            .await?;
-
         tracing::info!(
             engine = %engine_id,
             install = %install_id,
             sha256 = %manifest.artifact.sha256,
-            "切换后 provider 验证通过"
+            "切换后 manifest 与 artifact identity 验证通过"
         );
         Ok(())
     }
@@ -1065,10 +1066,8 @@ mod tests {
         cpu_only: bool,
         prepare_ok: bool,
         self_test_ok: bool,
-        /// verify_after_switch 阶段的 self_test 是否失败（模拟切换后验证失败）。
-        post_switch_self_test_fails: bool,
-        /// self_test 调用计数（区分 staging 与切换后验证）。
-        self_test_calls: AtomicUsize,
+        /// 写入不可信的 self_test 标记，模拟切换后 manifest 验证失败。
+        post_switch_verification_fails: bool,
     }
 
     impl FakeProvider {
@@ -1078,8 +1077,7 @@ mod tests {
                 cpu_only: false,
                 prepare_ok,
                 self_test_ok,
-                post_switch_self_test_fails: false,
-                self_test_calls: AtomicUsize::new(0),
+                post_switch_verification_fails: false,
             }
         }
 
@@ -1090,7 +1088,7 @@ mod tests {
         }
 
         fn with_post_switch_failure(mut self) -> Self {
-            self.post_switch_self_test_fails = true;
+            self.post_switch_verification_fails = true;
             self
         }
     }
@@ -1144,18 +1142,11 @@ mod tests {
             _cancel_token: Option<&tokio_util::sync::CancellationToken>,
             _sink: Option<&dyn InstallSink>,
         ) -> Result<(), RuntimeError> {
-            let n = self.self_test_calls.fetch_add(1, Ordering::SeqCst);
-            // 第 1 次 = staging 内 self-test；第 2 次 = 切换后验证
-            let ok = if n == 0 {
-                self.self_test_ok
-            } else {
-                !self.post_switch_self_test_fails
-            };
-            if ok {
+            if self.self_test_ok {
                 Ok(())
             } else {
                 Err(RuntimeError::SelfTestFailed {
-                    message: format!("fake self-test failure #{n}"),
+                    message: "fake self-test failure".to_string(),
                 })
             }
         }
@@ -1171,7 +1162,7 @@ mod tests {
                 packages: Vec::new(),
                 uv_version: "0.6.10".to_string(),
                 index_url: None,
-                self_test_passed: true,
+                self_test_passed: !self.post_switch_verification_fails,
             }))
         }
     }

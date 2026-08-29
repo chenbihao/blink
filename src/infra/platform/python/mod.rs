@@ -43,12 +43,6 @@ use sha2::Digest;
 
 use super::no_window;
 
-/// Blink 管理的 Python 版本。
-///
-/// FunASR 1.3.x 兼容 Python 3.8-3.12；3.12 有所有依赖的预编译 wheel
-/// （包括 editdistance），避免 C 编译失败。3.13+ 部分包尚无预编译 wheel。
-const PYTHON_VERSION: &str = "3.12";
-
 /// uv 固定版本（供应链锁定）。
 ///
 /// 放弃 `latest` 路径，改用固定版本 + SHA-256 强校验，
@@ -76,30 +70,19 @@ const UV_SHA256: &str = "bf1518af459a3915511a11fdc6e2f43ef9a2afa138b9d498eeb9642
 /// uv 下载超时（秒）。
 const UV_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 
-/// Python 包安装超时（秒）。funasr + torch 及其依赖体积较大。
-const PIP_INSTALL_TIMEOUT_SECS: u64 = 600;
-
-/// PyTorch CPU 版本下载索引 URL。
-///
-/// FunASR 依赖 PyTorch，但不在 pip 依赖中声明（ML 包惯例，
-/// 因为 torch 有 CPU/CUDA 多种变体）。我们安装 CPU 版本以避免
-/// 下载巨大的 CUDA 包（CPU ~200MB vs CUDA ~2GB）。
-const TORCH_CPU_INDEX_URL: &str = "https://download.pytorch.org/whl/cpu";
-
 // ── 路径 ─────────────────────────────────────────────────────────────────
 
-/// 获取 blink python 根目录（`%APPDATA%\blink\python\`）。
+/// 获取 blink python 根目录（%APPDATA% 下 blink/python）。
+/// 生产路径已迁入 runtime 托管目录；本模块测试仍以此验证路径语义。
+#[allow(dead_code)]
 fn python_dir() -> PathBuf {
     crate::infra::utils::paths::python_dir()
 }
 
+/// 旧版全局 venv 目录（仅测试引用，验证路径拼接语义）。
+#[allow(dead_code)]
 fn venv_dir() -> PathBuf {
     python_dir().join("venv")
-}
-
-pub fn venv_funasr_server() -> Option<PathBuf> {
-    let path = venv_dir().join("Scripts").join("funasr-server.exe");
-    if path.exists() { Some(path) } else { None }
 }
 
 // ── uv 安装 ──────────────────────────────────────────────────────────────

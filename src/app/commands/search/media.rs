@@ -2603,7 +2603,7 @@ pub async fn repair_paddleocr(
 
 /// 等待模型 Ready，轮询直到 Ready 或超时。
 async fn wait_for_model_ready(
-    svc: &crate::app::local_engine::service::EngineManager,
+    svc: &crate::app::local_engine::EngineManager,
     engine_id: &crate::infra::local_engine::runtime::EngineId,
     timeout: std::time::Duration,
 ) -> bool {

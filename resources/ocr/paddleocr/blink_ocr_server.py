@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import struct
 import sys
 import threading
 import time
@@ -28,6 +29,15 @@ import uuid
 sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# rect 归一化 seam（纯 stdlib，与 test_ocr_rect.py 共用同一套生产实现）
+from ocr_rect import extract_results
+
+# ── OCR 输入资源预算（0.22.6.1，与 Rust 侧 input_budget.rs 契约锁定） ──
+# Rust 测试会校验本文件中的这三行字面量，防止两侧静默漂移。
+MAX_BODY_BYTES = 32 * 1024 * 1024      # compressed/input bytes ≤ 32 MiB
+MAX_DIMENSION = 16384                  # 单边 ≤ 16384 px
+MAX_DECODED_BYTES = 256 * 1024 * 1024  # decoded RGB/RGBA 预算 ≤ 256 MiB（按 4 通道计）
 
 # ── 模型身份常量（/health 与 /recognize 使用同一套常量） ──
 
@@ -55,6 +65,26 @@ def model_id_for(tier):
     """根据模型档位生成 model_id 字符串。"""
     names = MODEL_MAP.get(tier, MODEL_MAP["tiny"])
     return f"PP-OCRv6:{names['det']}:{names['rec']}"
+
+
+def _parse_png_header(png_bytes):
+    """解析 PNG header（signature + IHDR），header 级尺寸检查用。
+
+    完整解码之前执行——避免在完成尺寸预算检查前进行无界像素解码。
+
+    返回 ``(error, (width, height))``：error 为 None 表示 header 合法。
+    """
+    if len(png_bytes) < 24:
+        return ("body shorter than PNG header", (0, 0))
+    PNG_SIG = b"\x89PNG\r\n\x1a\n"
+    if png_bytes[:8] != PNG_SIG:
+        return ("invalid PNG signature", (0, 0))
+    if png_bytes[12:16] != b"IHDR":
+        return ("missing IHDR chunk", (0, 0))
+    width, height = struct.unpack(">II", png_bytes[16:24])
+    if width == 0 or height == 0:
+        return ("zero image dimensions", (0, 0))
+    return (None, (width, height))
 
 
 # ── 全局状态 ──
@@ -612,8 +642,42 @@ async def recognize(
     # 读取 raw binary body
     png_bytes = await request.body()
 
-    if len(png_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="image_too_large")
+    # ── 输入资源预算（0.22.6.1）──
+    # 与 Rust 侧 input_budget.rs 相同的信任边界；body 上限统一 32 MiB。
+    # 在完整解码（PIL → numpy）之前先做 header 级检查，避免无界解码。
+    if len(png_bytes) > MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"input_too_large: compressed bytes={len(png_bytes)} "
+                f"exceeds max={MAX_BODY_BYTES}"
+            ),
+        )
+    if not png_bytes:
+        raise HTTPException(status_code=400, detail="image_decode_failed: empty body")
+
+    header_error, (image_width, image_height) = _parse_png_header(png_bytes)
+    if header_error is not None:
+        raise HTTPException(status_code=400, detail=f"image_decode_failed: {header_error}")
+    if image_width > MAX_DIMENSION or image_height > MAX_DIMENSION:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"input_too_large: dimensions={image_width}x{image_height} "
+                f"exceeds max_side={MAX_DIMENSION}"
+            ),
+        )
+    # checked 预算：width * height * 4（按 RGBA 上界计），乘法显式防溢出
+    # （Python int 无溢出，此处保持与 Rust checked arithmetic 相同的边界语义）
+    decoded_bytes = image_width * image_height * 4
+    if decoded_bytes > MAX_DECODED_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"input_too_large: decoded={decoded_bytes} bytes "
+                f"({image_width}x{image_height}x4) exceeds max={MAX_DECODED_BYTES}"
+            ),
+        )
 
     # 执行 OCR（在 worker thread 中，避免阻塞 event loop）
     # PaddleOCR 3.7 predict() 只接受 str(文件路径) 或 numpy.ndarray，不接受 bytes
@@ -632,6 +696,15 @@ async def recognize(
         raise HTTPException(status_code=400, detail=f"image_decode_failed: {type(e).__name__}: {e}")
 
     # 实际 PNG width/height——供 Rust mapper 做 rect 边界校验
+    # header 与解码结果不一致说明 PNG 内部损坏，按解码错误处理
+    if (_pil_img.width, _pil_img.height) != (image_width, image_height):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"image_decode_failed: header size {image_width}x{image_height} "
+                f"mismatch decoded {_pil_img.width}x{_pil_img.height}"
+            ),
+        )
     image_width = _pil_img.width
     image_height = _pil_img.height
 
@@ -678,7 +751,7 @@ async def recognize(
             except Exception:
                 page_data = page_result
 
-            _extract_results(page_data, lines, words)
+            _extract_results_into(page_data, lines, words, image_width, image_height)
 
     # 重新统计 native vs fallback
     for w in words:
@@ -702,153 +775,20 @@ async def recognize(
     }
 
 
-def _make_rect_from_poly(poly_points):
-    """从 4 点多边形构造合法 rect。
+def _extract_results_into(page_data, lines, words, image_width, image_height):
+    """委托给 ocr_rect.extract_results（生产映射唯一实现）。
 
-    返回 dict 或 None（无法构造合法 rect 时）。
+    rect 归一化与 line/word 映射语义全部在 ocr_rect.py（纯 stdlib seam），
+    本包装只补上 stderr 诊断回调。
     """
-    try:
-        xs = [float(p[0]) for p in poly_points]
-        ys = [float(p[1]) for p in poly_points]
-    except (TypeError, IndexError, ValueError):
-        return None
-    if not xs or not ys:
-        return None
-    x = round(min(xs))
-    y = round(min(ys))
-    w = round(max(xs) - min(xs))
-    h = round(max(ys) - min(ys))
-    return _make_valid_rect(x, y, w, h)
-
-
-def _make_rect_from_box(box):
-    """从 [x1, y1, x2, y2] 构造合法 rect。
-
-    返回 dict 或 None（无法构造合法 rect 时）。
-    """
-    try:
-        x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
-    except (TypeError, IndexError, ValueError):
-        return None
-    x = round(min(x1, x2))
-    y = round(min(y1, y2))
-    w = round(abs(x2 - x1))
-    h = round(abs(y2 - y1))
-    return _make_valid_rect(x, y, w, h)
-
-
-def _make_valid_rect(x, y, w, h):
-    """检查 rect 是否合法：x>=0, y>=0, w>0, h>0。
-
-    返回 dict 或 None（不合法时）。
-    """
-    if x < 0 or y < 0 or w <= 0 or h <= 0:
-        return None
-    return {"x": x, "y": y, "w": w, "h": h}
-
-
-def _extract_results(page_data, lines, words):
-    """从 PaddleOCR 3.7 predict() 结果提取 line/word 数据。
-
-    铁则：
-    - 过滤空 text line（不输出 Rust 必然拒绝的数据）。
-    - 不得输出零宽高、负数、越界 rect。
-    - native word box 不合法时使用 line rect 作为 fallback；
-      如果 line rect 也不合法，跳过该 line。
-    - line.word_indices 与 word.line_index 必须双向一致。
-    """
-    if not page_data:
-        return
-
-    # PaddleOCR 3.7 数据嵌套在 "res" 字段下
-    if isinstance(page_data, dict) and "res" in page_data:
-        res = page_data["res"]
-    elif isinstance(page_data, dict):
-        res = page_data
-    else:
-        return
-
-    if not isinstance(res, dict):
-        return
-
-    rec_texts = res.get("rec_texts", [])
-    rec_scores = res.get("rec_scores", [])
-    dt_polys = res.get("dt_polys", [])
-    rec_boxes = res.get("rec_boxes", [])
-    text_word_boxes = res.get("text_word_boxes", [])
-    text_word = res.get("text_word", [])
-
-    for i, text in enumerate(rec_texts):
-        # ── 过滤空 text line ──
-        if not text or not text.strip():
-            continue
-
-        # ── 构造合法 line rect ──
-        line_rect = None
-        if i < len(dt_polys) and dt_polys[i]:
-            line_rect = _make_rect_from_poly(dt_polys[i])
-        if line_rect is None and i < len(rec_boxes) and rec_boxes[i]:
-            line_rect = _make_rect_from_box(rec_boxes[i])
-
-        # line rect 不合法时跳过该 line（不输出 Rust 必然拒绝的数据）
-        if line_rect is None:
-            print(
-                f"[WARN] line[{i}] rect 不合法，跳过",
-                file=sys.stderr,
-                flush=True,
-            )
-            continue
-
-        line_idx = len(lines)
-        conf = rec_scores[i] if i < len(rec_scores) else 0.0
-
-        # ── Word 级数据 ──
-        line_word_indices = []
-        if i < len(text_word_boxes) and i < len(text_word):
-            word_boxes_i = text_word_boxes[i]
-            word_texts_i = text_word[i]
-            for j, w_box in enumerate(word_boxes_i):
-                w_text = word_texts_i[j] if j < len(word_texts_i) else ""
-                # 过滤空 word text
-                if not w_text or not w_text.strip():
-                    continue
-
-                # 尝试构造合法 word rect
-                word_rect = None
-                if isinstance(w_box, (list, tuple)) and len(w_box) >= 4:
-                    word_rect = _make_rect_from_box(w_box)
-
-                # native word box 不合法时使用 line rect 作为 fallback
-                if word_rect is None:
-                    word_rect = line_rect
-
-                words.append({
-                    "text": w_text,
-                    "rect": word_rect,
-                    "line_index": line_idx,
-                    "_native": word_rect is not line_rect,
-                })
-                line_word_indices.append(len(words) - 1)
-        else:
-            # Fallback: 用文本拆分作为 word
-            word_texts = text.split()
-            if not word_texts:
-                word_texts = [text]
-            for wt in word_texts:
-                words.append({
-                    "text": wt,
-                    "rect": line_rect,
-                    "line_index": line_idx,
-                    "_native": False,
-                })
-                line_word_indices.append(len(words) - 1)
-
-        lines.append({
-            "text": text,
-            "rect": line_rect,
-            "word_indices": line_word_indices,
-            "confidence": round(float(conf), 4),
-        })
+    extract_results(
+        page_data,
+        lines,
+        words,
+        image_width,
+        image_height,
+        warn=lambda msg: print(msg, file=sys.stderr, flush=True),
+    )
 
 
 @app.post("/shutdown")

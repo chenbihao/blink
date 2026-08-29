@@ -25,6 +25,7 @@
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod input_budget;
 pub mod router;
 
 // ── re-export 共享类型（定义仍在 ocr_engine.rs，避免大范围改名）──────────────
@@ -46,6 +47,8 @@ pub use context::{
 };
 #[allow(unused_imports)]
 pub use error::{OcrErrorCategory, StructuredOcrError};
+#[allow(unused_imports)]
+pub use input_budget::validate_ocr_input;
 #[allow(unused_imports)]
 pub use router::{OcrBackendRouter, RouteDecision, RouteResult};
 
@@ -72,7 +75,7 @@ mod domain_tests {
 
     #[test]
     fn ocr_error_category_distinct_variants() {
-        // 至少 8 种错误类型
+        // 至少 8 种错误类型（0.22.6.1 起含 InputTooLarge 共 9 种）
         let categories = [
             OcrErrorCategory::EnvironmentMissing,
             OcrErrorCategory::StartFailed,
@@ -81,6 +84,7 @@ mod domain_tests {
             OcrErrorCategory::Cancelled,
             OcrErrorCategory::ProtocolError,
             OcrErrorCategory::DecodeError,
+            OcrErrorCategory::InputTooLarge,
             OcrErrorCategory::BackendUnavailable,
         ];
         // 所有变体互不相同

@@ -46,6 +46,7 @@ import {
     getEngineIds,
     setModels,
     setPreferences,
+    bindRealOperationId,
 } from "./local-engine-state.js";
 
 // ── 命令清单（与后端 commands/local_engine.rs 逐一核对）─────────────────────────
@@ -118,6 +119,25 @@ export function createLocalEngineController(callbacks = {}) {
     }
 
     /**
+     * 合并一条 EngineStatusDto 到状态。
+     *
+     * 0.22.6.1：合并后执行乐观 pending → 真实 operation_id 绑定——
+     * synthetic id 只表达"请求已发出"，收到后端状态后绑定真实 id，
+     * 使 install_stage 事件的 operation_id 校验能够命中。
+     *
+     * @param {Object} statusDto - EngineStatusDto
+     */
+    function applyStatusDto(statusDto) {
+        state = mergeStatus(state, statusDto);
+        const engineId = statusDto?.engine_id;
+        if (!engineId) return;
+        const entry = state.get(engineId);
+        if (entry?.status) {
+            state = bindRealOperationId(state, engineId, entry.status);
+        }
+    }
+
+    /**
      * 处理状态事件。
      *
      * payload 是 EngineStatusDto：`{ engine_id, service_epoch, revision, status }`。
@@ -136,8 +156,7 @@ export function createLocalEngineController(callbacks = {}) {
 
         if (!mounted) return;
 
-        // payload 本身就是 EngineStatusDto，直接合并
-        state = mergeStatus(state, payload);
+        applyStatusDto(payload);
         notifyStateChange();
     }
 
@@ -238,7 +257,7 @@ export function createLocalEngineController(callbacks = {}) {
         for (const buffered of eventBuffer) {
             if (buffered.type === "status") {
                 // payload 本身就是 EngineStatusDto
-                state = mergeStatus(state, buffered.payload);
+                applyStatusDto(buffered.payload);
             } else if (buffered.type === "log") {
                 state = appendLog(state, buffered.payload);
             } else if (buffered.type === "install_stage") {
@@ -263,7 +282,7 @@ export function createLocalEngineController(callbacks = {}) {
     async function pullStatus() {
         const statuses = await invoke(COMMANDS.GET_STATUS, {engineId: null});
         for (const dto of statuses) {
-            state = mergeStatus(state, dto);
+            applyStatusDto(dto);
         }
     }
 
@@ -869,6 +888,14 @@ export function createLocalEngineController(callbacks = {}) {
         /**
          * 执行操作 action（single-flight 防护）。
          * 返回 fn 的结构化结果（如 install 的 {engine_id, operation_id, end_state}）。
+         *
+         * 0.22.6.1 反馈闭环：
+         * - 点击后立即 setPendingAction（乐观 pending → UI 立即显示忙碌）；
+         * - 成功/失败都执行一次受 epoch/revision 防护的 refreshStatus——
+         *   偶发丢失 completed status event 时也能退出 busy；失败时最终状态
+         *   （如 rollback error）同样可见；
+         * - 不让前端自己推导安装成功——以后端终态（status operation 终态 +
+         *   command 返回的 end_state）为准。
          * @param {string} engineId
          * @param {string} actionKind
          * @param {() => Promise<*>} fn
@@ -884,7 +911,7 @@ export function createLocalEngineController(callbacks = {}) {
             }
             activeActions.set(key, true);
 
-            // 设置 pending action
+            // 设置 pending action（乐观 pending：立即显示 pending/starting）
             const operationId = `${actionKind}-${Date.now()}`;
             state = setPendingAction(state, engineId, {
                 kind: actionKind,
@@ -898,12 +925,16 @@ export function createLocalEngineController(callbacks = {}) {
                 // completed/cancelled 都必须退出忙碌状态
                 state = setPendingAction(state, engineId, null);
                 notifyStateChange();
+                // 完成后受 epoch/revision 防护的状态刷新（兜底丢失的终态事件）
+                this.refreshStatus().catch(() => {});
                 return result;
             } catch (e) {
                 const err = normalizeError(e);
                 // 失败也清除 pending action（错误通过状态事件反馈）
                 state = setPendingAction(state, engineId, null);
                 notifyStateChange();
+                // 失败后刷新最终状态，使 rollback error / last_error 可见
+                this.refreshStatus().catch(() => {});
                 if (callbacks.onError) callbacks.onError(err);
                 throw err;
             } finally {

@@ -126,9 +126,9 @@ impl std::fmt::Display for OcrLifecycle {
 /// 首版只允许 `auto` | `cpu`。
 /// 未验证的 cuda/vulkan/directml 不得开放。
 ///
-/// 使用 `runtime::ComputePreference`，但在 `OcrConfig::validate` 中
-/// 限制只接受 `Auto` | `Cpu`。
-pub type ComputePreference = crate::infra::local_engine::runtime::ComputePreference;
+/// 直接引用 domain 唯一定义（`domain::local_engine::identity`——infra 只是
+/// re-export 该定义），保持 domain 不依赖 infra 的分层铁则。
+pub type ComputePreference = crate::domain::local_engine::identity::ComputePreference;
 
 /// 默认空闲 TTL（秒）。
 pub const DEFAULT_IDLE_TTL_SECONDS: u32 = 300;

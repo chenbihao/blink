@@ -643,6 +643,9 @@ export function getPrimaryAction(entry) {
 /**
  * 判断某个 action 是否被 operation gate 阻止。
  * 如果有活跃操作，则除 cancel 外的其他 action 被禁用。
+ *
+ * 0.22.6.1：乐观 pending 同样构成忙碌——用户已点击但后端 operation 状态
+ * 尚未到达时按钮立即禁用（点击启动后应有即时反馈，不能看起来毫无反应）。
  * @param {EngineStateEntry} entry
  * @param {string} actionKind
  * @returns {boolean}
@@ -650,5 +653,55 @@ export function getPrimaryAction(entry) {
 export function isActionBlocked(entry, actionKind) {
     if (actionKind === "cancel") return !isOperationCancellable(entry);
     if (actionKind === "log" || actionKind === "cleanup") return false; // 日志和清理可在任何时候查看
+    // 乐观 pending：请求已发出、后端 operation 尚未到达
+    if (entry?.pendingAction) return true;
     return hasActiveOperation(entry);
+}
+
+/**
+ * 计算设备选择器的展示模式（0.22.6.1）。
+ *
+ * 引擎只有一个可用 compute 选项时返回 "static"——renderer 渲染只读展示
+ * 而非 select，避免制造"可以选择 CUDA"的错觉（FunASR 0.22.6 只有 CPU）。
+ *
+ * @param {Array<{preference: string, compatible?: boolean}>|null} computeOptions
+ * @returns {"select"|"static"}
+ */
+export function computeOptionsDisplayMode(computeOptions) {
+    if (!Array.isArray(computeOptions)) return "select";
+    const selectable = computeOptions.filter((opt) => opt.compatible !== false);
+    return selectable.length <= 1 ? "static" : "select";
+}
+
+/**
+ * 把乐观 pending 绑定到后端真实 operation_id（0.22.6.1）。
+ *
+ * 前端创建的是 synthetic pending operation id，后端使用真实 operation id。
+ * synthetic id 只表达"请求已发出"，收到后端状态后应绑定真实 operation_id。
+ *
+ * 绑定条件（全部满足才绑定）：
+ * - 该引擎存在 pendingAction（synthetic id）；
+ * - 当前已接受的状态快照携带活跃 operation（kind != idle 且未到终态）；
+ * - operation_id 与 synthetic id 不同。
+ *
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {string} engineId
+ * @param {Object} statusDto - 当前已接受的 EngineStatusDto
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function bindRealOperationId(state, engineId, statusDto) {
+    const entry = state.get(engineId);
+    if (!entry || !entry.pendingAction) return state;
+    const op = statusDto?.status?.operation;
+    if (!op || op.kind === "idle") return state;
+    if (["completed", "cancelled", "failed"].includes(op.stage)) return state;
+    if (!op.operation_id || op.operation_id === entry.pendingAction.operationId) {
+        return state;
+    }
+    // synthetic id 不参与后端 install_stage 的身份校验——绑定真实 id 后，
+    // applyInstallStage 的 operation_id 校验才能命中后端推送的阶段事件
+    return setPendingAction(state, engineId, {
+        kind: entry.pendingAction.kind,
+        operationId: op.operation_id,
+    });
 }

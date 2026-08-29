@@ -55,10 +55,6 @@ pub enum PortError {
     /// 候选端口范围无效（如 start > end）。
     #[error("候选端口范围无效: start={start}, end={end}")]
     InvalidRange { start: u16, end: u16 },
-    /// 端口冲突但无法终止占用者（未知进程占用）。
-    /// 不自动 kill，只报告冲突。
-    #[error("端口 {port} 被未知进程占用")]
-    UnknownOccupant { port: u16 },
 }
 
 // ── EndpointAllocator ──────────────────────────────────────────────────────
@@ -120,21 +116,6 @@ impl EndpointAllocator {
             DEFAULT_MAX_RETRIES,
         )
         .expect("默认范围有效")
-    }
-
-    /// 返回首选端口。
-    pub fn preferred_port(&self) -> u16 {
-        self.preferred_port
-    }
-
-    /// 返回候选范围。
-    pub fn candidate_range(&self) -> Option<(u16, u16)> {
-        self.candidate_range
-    }
-
-    /// 返回最大重试次数。
-    pub fn max_retries(&self) -> usize {
-        self.max_retries
     }
 
     /// 生成候选端口序列（迭代器）。
@@ -422,6 +403,7 @@ impl Default for ConflictRetryPolicy {
 
 impl ConflictRetryPolicy {
     /// 创建冲突重试策略。
+    #[allow(dead_code)] // test policy semantics
     pub fn new(max_attempts: usize) -> Self {
         Self {
             max_attempts: max_attempts.max(1),
@@ -429,6 +411,7 @@ impl ConflictRetryPolicy {
     }
 
     /// 返回最大尝试次数。
+    #[allow(dead_code)] // test policy semantics
     pub fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -653,10 +636,6 @@ mod tests {
             Err(PortError::PreferredPortOccupied { port: p }) => {
                 assert_eq!(p, port);
                 // 成功——没有触发任何 kill/terminate 动作
-            }
-            Err(PortError::UnknownOccupant { port: p }) => {
-                assert_eq!(p, port);
-                // 也可以接受——报告了冲突但没有 kill
             }
             Err(e) => {
                 // 其他错误也可以接受，关键是没有 kill 副作用

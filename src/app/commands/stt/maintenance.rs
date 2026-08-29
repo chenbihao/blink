@@ -4,7 +4,7 @@
 //!
 //! 以下命令未发版且前端 0 引用，已随 0.22.6 引擎架构收敛删除。
 //! 生命周期/状态/日志/空间职责统一由通用 local_engine 命令承载
-//! （见 `app/commands/local_engine.rs`）：
+//! （见 `app/commands/local_engine/`）：
 //!
 //! | 已删除 command | 替代 |
 //! |---|---|

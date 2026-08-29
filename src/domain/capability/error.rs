@@ -49,6 +49,24 @@ pub enum CapabilityError {
     /// 能力不存在（id 未注册——AI 幻觉调了不存在的 tool）。
     #[error("能力不存在: {id}")]
     NotFound { id: String },
+    /// 后端引擎/基础设施错误（0.22.6.1）——本地引擎协议层的结构化错误。
+    ///
+    /// 承载稳定 `category`（如 `protocol_error` / `start_failed` /
+    /// `model_not_ready` / `backend_unavailable`），使 Capability → CommandError
+    /// 投影能保留稳定分类码，诊断不必再解析 "[protocol_error]" 字符串。
+    /// `message` 对普通用户保持友好文案；`retryable` 透传后端判定。
+    #[error("{message}")]
+    Backend {
+        /// 稳定错误分类码（snake_case，如 "protocol_error"）。
+        category: String,
+        /// 用户可读的简短说明。
+        message: String,
+        /// 可选的结构化诊断详情。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        /// 错误是否可重试。
+        retryable: bool,
+    },
     /// 内部错误（Win32 失败/IO 错误）。
     #[error("内部错误: {detail}")]
     Internal { detail: String },

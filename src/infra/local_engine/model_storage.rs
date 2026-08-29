@@ -1,17 +1,15 @@
 //! 模型资产存储协议（0.22.6 H3-model）。
 //!
-//! 独立于引擎 runtime generation 体系——模型资产有自己的
-//! `models/{engine_id}/{asset_key}/generations/{install_id}/payload/` 结构，
-//! 与引擎 venv generation 正交。
+//! 每个模型资产使用 `slots/{slot_id}` + `active.json` 的单 active revision
+//! 事务。slot、journal 与 residue 都是内部实现，不构成历史版本产品语义。
 //!
 //! ## 设计铁则
 //!
-//! - **manifest 是唯一真源**：`Installed` 状态只能从有效 manifest + current pointer
+//! - **manifest 是唯一真源**：`Installed` 状态只能从有效 manifest + active pointer
 //!   + payload + fingerprint 全部一致恢复。禁止仅凭目录非空推断 Installed。
-//! - **asset_key 安全编码**：不直接把 `iic/SenseVoiceSmall` 当路径拼接，
-//!   而是做确定性安全编码（只允许 `[a-z0-9-]`，其他字符替换为 `-`）。
-//! - **generation 隔离**：每次安装/修复创建新 generation，校验通过后
-//!   原子切换 `current.json`；失败时旧 generation 不受影响。
+//! - **asset_key 无碰撞编码**：可读 slug 后追加 canonical model id 的 hash。
+//! - **slot 隔离**：每次安装/修复创建 candidate slot，校验通过后
+//!   原子切换 `active.json`；失败时旧 active 不受影响。
 //! - **content fingerprint 确定性**：Rust 和 Python 使用完全相同的
 //!   目录聚合 SHA-256 算法，确保跨语言一致性。
 
@@ -29,8 +27,8 @@ use super::runtime::{
 /// 模型 manifest schema 版本。
 pub const MODEL_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// 模型 current.json schema 版本。
-pub const MODEL_CURRENT_POINTER_SCHEMA_VERSION: u32 = 1;
+/// 模型 active.json schema 版本。
+pub const MODEL_ACTIVE_POINTER_SCHEMA_VERSION: u32 = 1;
 
 /// fingerprint 算法标识。
 pub const CONTENT_FINGERPRINT_ALGORITHM: &str = "directory_aggregate_sha256_v1";
@@ -45,7 +43,7 @@ pub const CONTENT_FINGERPRINT_ALGORITHM: &str = "directory_aggregate_sha256_v1";
 /// - 其他字符（`/`、`_`、`.` 等）替换为 `-`
 /// - 连续 `-` 压缩为单个 `-`
 /// - 去除首尾 `-`
-/// - 非空保证（若结果为空，使用 `model` 兜底）
+/// - 追加 canonical model id SHA-256 的前 12 hex，消除 slug 碰撞
 ///
 /// 例如：`iic/SenseVoiceSmall` → `iic-sensevoicesmall`
 pub fn encode_asset_key(model_id: &str) -> String {
@@ -70,11 +68,11 @@ pub fn encode_asset_key(model_id: &str) -> String {
     // 去除首尾 `-`
     let trimmed = key.trim_matches('-');
 
-    if trimmed.is_empty() {
-        "model".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    let slug = if trimmed.is_empty() { "model" } else { trimmed };
+    let slug = &slug[..slug.len().min(100)];
+    let digest = Sha256::digest(model_id.as_bytes());
+    let suffix = format!("{:x}", digest);
+    format!("{slug}-{}", &suffix[..12])
 }
 
 /// 校验 asset_key（只允许 `[a-z0-9-]`，防路径逃逸）。
@@ -123,48 +121,45 @@ pub fn asset_root(engine_id: &EngineId, asset_key: &str) -> Result<PathBuf, Runt
     Ok(engine_model_root(engine_id).join(asset_key))
 }
 
-/// current.json 路径：`models/{engine_id}/{asset_key}/current.json`
-pub fn model_current_pointer_path(
+/// active.json 路径：`models/{engine_id}/{asset_key}/active.json`
+pub fn model_active_pointer_path(
     engine_id: &EngineId,
     asset_key: &str,
 ) -> Result<PathBuf, RuntimeError> {
-    Ok(asset_root(engine_id, asset_key)?.join("current.json"))
+    Ok(asset_root(engine_id, asset_key)?.join("active.json"))
 }
 
-/// generations 目录：`models/{engine_id}/{asset_key}/generations/`
-pub fn model_generations_dir(
+/// slots 目录：`models/{engine_id}/{asset_key}/slots/`
+pub fn model_slots_dir(engine_id: &EngineId, asset_key: &str) -> Result<PathBuf, RuntimeError> {
+    Ok(asset_root(engine_id, asset_key)?.join("slots"))
+}
+
+/// 单个内部 slot 目录。
+pub fn model_slot_dir(
     engine_id: &EngineId,
     asset_key: &str,
+    slot_id: &str,
 ) -> Result<PathBuf, RuntimeError> {
-    Ok(asset_root(engine_id, asset_key)?.join("generations"))
+    validate_install_id(slot_id)?;
+    Ok(model_slots_dir(engine_id, asset_key)?.join(slot_id))
 }
 
-/// 单个 generation 目录：`models/{engine_id}/{asset_key}/generations/{install_id}/`
-pub fn model_generation_dir(
-    engine_id: &EngineId,
-    asset_key: &str,
-    install_id: &str,
-) -> Result<PathBuf, RuntimeError> {
-    validate_install_id(install_id)?;
-    Ok(model_generations_dir(engine_id, asset_key)?.join(install_id))
-}
-
-/// manifest 路径：`models/{engine_id}/{asset_key}/generations/{install_id}/manifest.json`
+/// slot manifest 路径。
 pub fn model_manifest_path(
     engine_id: &EngineId,
     asset_key: &str,
-    install_id: &str,
+    slot_id: &str,
 ) -> Result<PathBuf, RuntimeError> {
-    Ok(model_generation_dir(engine_id, asset_key, install_id)?.join("manifest.json"))
+    Ok(model_slot_dir(engine_id, asset_key, slot_id)?.join("manifest.json"))
 }
 
-/// payload 目录：`models/{engine_id}/{asset_key}/generations/{install_id}/payload/`
+/// slot payload 目录。
 pub fn model_payload_dir(
     engine_id: &EngineId,
     asset_key: &str,
-    install_id: &str,
+    slot_id: &str,
 ) -> Result<PathBuf, RuntimeError> {
-    Ok(model_generation_dir(engine_id, asset_key, install_id)?.join("payload"))
+    Ok(model_slot_dir(engine_id, asset_key, slot_id)?.join("payload"))
 }
 
 /// staging 目录：`models/{engine_id}/{asset_key}/staging/`
@@ -226,7 +221,7 @@ pub fn model_operation_staging_payload_dir(
 
 // ── ModelManifest ───────────────────────────────────────────────────────────
 
-/// 模型 generation 的不可变 manifest。
+/// 模型 slot 的不可变 manifest。
 ///
 /// manifest 是模型 Installed 状态的唯一真源。
 /// 目录存在或非空不足以证明 Installed——必须 manifest + current pointer +
@@ -243,8 +238,8 @@ pub struct ModelManifest {
     pub revision: String,
     /// 下载来源/溯源信息。
     pub source: ModelSource,
-    /// 安装 id（generation 目录名）。
-    pub install_id: String,
+    /// 内部 slot id。
+    pub slot_id: String,
     /// 安装时间（Unix 毫秒）。
     pub installed_at_ms: u64,
     /// content fingerprint 算法标识。
@@ -294,64 +289,64 @@ pub struct ModelContractIdentity {
     pub checksum_source_kind: String,
 }
 
-// ── ModelCurrentPointer ─────────────────────────────────────────────────────
+// ── ModelActivePointer ──────────────────────────────────────────────────────
 
-/// `current.json` 指针文件内容。
+/// `active.json` 指针文件内容。
 ///
 /// 采用同目录临时文件 + replace/rename 原子写入。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelCurrentPointer {
-    /// 当前 generation 的 install id。
-    pub install_id: String,
+pub struct ModelActivePointer {
+    /// 当前 active slot id。
+    pub slot_id: String,
     /// 更新时间（Unix 毫秒）。
     pub updated_at_ms: u64,
     /// schema 版本。
     pub schema_version: u32,
 }
 
-// ── current.json 读写 ──────────────────────────────────────────────────────
+// ── active.json 读写 ───────────────────────────────────────────────────────
 
-/// 读取 current.json。
+/// 读取 active.json。
 ///
 /// 如果文件不存在返回 `Ok(None)`（模型未安装）。
-pub fn read_model_current_pointer(
+pub fn read_model_active_pointer(
     engine_id: &EngineId,
     asset_key: &str,
-) -> Result<Option<ModelCurrentPointer>, RuntimeError> {
-    let path = model_current_pointer_path(engine_id, asset_key)?;
+) -> Result<Option<ModelActivePointer>, RuntimeError> {
+    let path = model_active_pointer_path(engine_id, asset_key)?;
     if !path.exists() {
         return Ok(None);
     }
     let content = std::fs::read_to_string(&path)?;
-    let pointer: ModelCurrentPointer =
+    let pointer: ModelActivePointer =
         serde_json::from_str(&content).map_err(|e| RuntimeError::CurrentPointerParseFailed {
             message: format!("{e}"),
         })?;
     Ok(Some(pointer))
 }
 
-/// 原子写入 current.json。
-pub fn write_model_current_pointer(
+/// 原子写入 active.json。
+pub fn write_model_active_pointer(
     engine_id: &EngineId,
     asset_key: &str,
-    pointer: &ModelCurrentPointer,
+    pointer: &ModelActivePointer,
 ) -> Result<(), RuntimeError> {
-    let path = model_current_pointer_path(engine_id, asset_key)?;
+    let path = model_active_pointer_path(engine_id, asset_key)?;
     atomic_write_json(&path, pointer)
 }
 
 // ── manifest 读写 ───────────────────────────────────────────────────────────
 
-/// 读取 generation manifest。
+/// 读取 slot manifest。
 pub fn read_model_manifest(
     engine_id: &EngineId,
     asset_key: &str,
-    install_id: &str,
+    slot_id: &str,
 ) -> Result<ModelManifest, RuntimeError> {
-    let path = model_manifest_path(engine_id, asset_key, install_id)?;
+    let path = model_manifest_path(engine_id, asset_key, slot_id)?;
     if !path.exists() {
         return Err(RuntimeError::GenerationNotFound {
-            install_id: install_id.to_string(),
+            install_id: slot_id.to_string(),
         });
     }
     let content = std::fs::read_to_string(&path)?;
@@ -368,14 +363,14 @@ pub fn read_model_manifest(
     Ok(manifest)
 }
 
-/// 写入 generation manifest（在 generation 目录内）。
+/// 写入 slot manifest。
 pub fn write_model_manifest(
     engine_id: &EngineId,
     asset_key: &str,
-    install_id: &str,
+    slot_id: &str,
     manifest: &ModelManifest,
 ) -> Result<(), RuntimeError> {
-    let dir = model_generation_dir(engine_id, asset_key, install_id)?;
+    let dir = model_slot_dir(engine_id, asset_key, slot_id)?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("manifest.json");
     atomic_write_json(&path, manifest)
@@ -386,18 +381,18 @@ pub fn write_model_manifest(
 /// 从磁盘恢复的模型状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoredModelState {
-    /// 已安装：current pointer + manifest + payload 目录结构链有效。
+    /// 已安装：active pointer + manifest + payload 目录结构链有效。
     /// （不含内容 hash——完整校验走 [`verify_model_payload`]。）
     Installed {
-        install_id: String,
+        slot_id: String,
         manifest: ModelManifest,
     },
     /// 损坏：pointer/manifest/payload 目录结构链任一损坏或不一致。
     Corrupted {
-        install_id: Option<String>,
+        slot_id: Option<String>,
         reason: String,
     },
-    /// 未安装：没有有效 current generation。
+    /// 未安装：没有有效 active revision。
     NotInstalled,
 }
 
@@ -413,7 +408,8 @@ pub fn restore_model_state(
     engine_id: &EngineId,
     asset_key: &str,
 ) -> Result<RestoredModelState, RuntimeError> {
-    let pointer_path = model_current_pointer_path(engine_id, asset_key)?;
+    recover_model_transaction(engine_id, asset_key)?;
+    let pointer_path = model_active_pointer_path(engine_id, asset_key)?;
     if !pointer_path.exists() {
         return Ok(RestoredModelState::NotInstalled);
     }
@@ -422,37 +418,37 @@ pub fn restore_model_state(
         Ok(c) => c,
         Err(e) => {
             return Ok(RestoredModelState::Corrupted {
-                install_id: None,
-                reason: format!("读取 current.json 失败: {e}"),
+                slot_id: None,
+                reason: format!("读取 active.json 失败: {e}"),
             });
         }
     };
 
-    let pointer: ModelCurrentPointer = match serde_json::from_str(&pointer_content) {
+    let pointer: ModelActivePointer = match serde_json::from_str(&pointer_content) {
         Ok(p) => p,
         Err(e) => {
             return Ok(RestoredModelState::Corrupted {
-                install_id: None,
-                reason: format!("解析 current.json 失败: {e}"),
+                slot_id: None,
+                reason: format!("解析 active.json 失败: {e}"),
             });
         }
     };
 
-    if pointer.schema_version != MODEL_CURRENT_POINTER_SCHEMA_VERSION {
+    if pointer.schema_version != MODEL_ACTIVE_POINTER_SCHEMA_VERSION {
         return Ok(RestoredModelState::Corrupted {
-            install_id: Some(pointer.install_id.clone()),
+            slot_id: Some(pointer.slot_id.clone()),
             reason: format!(
-                "current.json schema 版本不兼容: expected={}, actual={}",
-                MODEL_CURRENT_POINTER_SCHEMA_VERSION, pointer.schema_version
+                "active.json schema 版本不兼容: expected={}, actual={}",
+                MODEL_ACTIVE_POINTER_SCHEMA_VERSION, pointer.schema_version
             ),
         });
     }
 
-    let manifest = match read_model_manifest(engine_id, asset_key, &pointer.install_id) {
+    let manifest = match read_model_manifest(engine_id, asset_key, &pointer.slot_id) {
         Ok(m) => m,
         Err(e) => {
             return Ok(RestoredModelState::Corrupted {
-                install_id: Some(pointer.install_id.clone()),
+                slot_id: Some(pointer.slot_id.clone()),
                 reason: format!("manifest 读取失败: {e}"),
             });
         }
@@ -461,7 +457,7 @@ pub fn restore_model_state(
     // 验证 manifest schema
     if manifest.schema_version != MODEL_MANIFEST_SCHEMA_VERSION {
         return Ok(RestoredModelState::Corrupted {
-            install_id: Some(pointer.install_id.clone()),
+            slot_id: Some(pointer.slot_id.clone()),
             reason: format!(
                 "manifest schema 版本不兼容: expected={}, actual={}",
                 MODEL_MANIFEST_SCHEMA_VERSION, manifest.schema_version
@@ -472,7 +468,7 @@ pub fn restore_model_state(
     // 验证 manifest identity
     if manifest.engine_id != *engine_id {
         return Ok(RestoredModelState::Corrupted {
-            install_id: Some(pointer.install_id.clone()),
+            slot_id: Some(pointer.slot_id.clone()),
             reason: format!(
                 "manifest engine_id 不匹配: expected={}, actual={}",
                 engine_id, manifest.engine_id
@@ -481,24 +477,31 @@ pub fn restore_model_state(
     }
 
     // 验证 payload 目录存在（结构校验——不读内容、不 hash）
-    let payload_dir = match model_payload_dir(engine_id, asset_key, &pointer.install_id) {
+    if manifest.slot_id != pointer.slot_id {
+        return Ok(RestoredModelState::Corrupted {
+            slot_id: Some(pointer.slot_id.clone()),
+            reason: "active pointer 与 manifest slot_id 不一致".to_string(),
+        });
+    }
+
+    let payload_dir = match model_payload_dir(engine_id, asset_key, &pointer.slot_id) {
         Ok(p) => p,
         Err(e) => {
             return Ok(RestoredModelState::Corrupted {
-                install_id: Some(pointer.install_id.clone()),
+                slot_id: Some(pointer.slot_id.clone()),
                 reason: format!("payload 路径计算失败: {e}"),
             });
         }
     };
     if !payload_dir.exists() {
         return Ok(RestoredModelState::Corrupted {
-            install_id: Some(pointer.install_id.clone()),
+            slot_id: Some(pointer.slot_id.clone()),
             reason: "payload 目录不存在".to_string(),
         });
     }
 
     Ok(RestoredModelState::Installed {
-        install_id: pointer.install_id,
+        slot_id: pointer.slot_id,
         manifest,
     })
 }
@@ -516,7 +519,7 @@ pub fn verify_model_payload(
     asset_key: &str,
     manifest: &ModelManifest,
 ) -> Result<(), String> {
-    let payload_dir = match model_payload_dir(engine_id, asset_key, &manifest.install_id) {
+    let payload_dir = match model_payload_dir(engine_id, asset_key, &manifest.slot_id) {
         Ok(p) => p,
         Err(e) => return Err(format!("payload 路径计算失败: {e}")),
     };
@@ -652,7 +655,7 @@ fn collect_files(
         let name_str = name.to_string_lossy();
 
         // 排除 Blink 元数据文件
-        if name_str == "manifest.json" || name_str == "current.json" {
+        if name_str == "manifest.json" || name_str == "active.json" {
             continue;
         }
         // 排除临时文件（以 .tmp_ 开头）
@@ -685,86 +688,364 @@ fn collect_files(
     Ok(())
 }
 
-/// 扫描目录占用大小（用于诊断/清理）。
-pub fn scan_dir_size(path: &Path) -> u64 {
-    let mut size = 0;
-    if path.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    size += scan_dir_size(&p);
-                } else if p.is_file() {
-                    size += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                }
-            }
-        }
-    } else if path.is_file() {
-        size += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    }
-    size
+// ── 单 active slot 事务 ────────────────────────────────────────────────────
+//
+// 提交协议（崩溃安全）：
+//
+// ```text
+// write journal(Preparing, candidate, previous)
+//   → move payload → slots/{candidate}/payload
+//   → write candidate manifest
+//   → write active.json → candidate      ← 唯一原子提交点
+//   → write journal(Committed)
+//   → delete previous slot（失败记为有界 residue）
+//   → remove journal
+// ```
+//
+// 恢复判定不单独信任 journal phase，**必须核对 active pointer**：
+// 指针写入与 journal 更新为两步，中间崩溃时 journal 仍是 `Preparing`
+// 但指针已切换——此时按已提交处理（完成旧 slot 清理），绝不删除
+// 指针已指向的 candidate。铁则：**恢复路径永远不删除 active pointer
+// 当前指向的 slot**。
+
+const MODEL_TRANSACTION_SCHEMA_VERSION: u32 = 1;
+const MAX_CLEANUP_RESIDUES: usize = 8;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ModelTransactionPhase {
+    Preparing,
+    Committed,
 }
 
-// ── 原子提升 ───────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelTransaction {
+    schema_version: u32,
+    operation_id: String,
+    candidate_slot_id: String,
+    previous_slot_id: Option<String>,
+    phase: ModelTransactionPhase,
+}
 
-/// 将 staging payload 原子提升为正式 generation。
-///
-/// 步骤：
-/// 1. 创建 generation 目录
-/// 2. 计算指纹
-/// 3. 写入 manifest
-/// 4. 原子切换 current.json
-/// 5. 成功后 staging 可清理
-pub fn promote_staging_to_generation(
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CleanupResidue {
+    slot_id: String,
+    attempts: u32,
+    last_error: String,
+}
+
+fn transaction_path(engine_id: &EngineId, asset_key: &str) -> Result<PathBuf, RuntimeError> {
+    Ok(asset_root(engine_id, asset_key)?.join("transaction.json"))
+}
+
+fn residue_path(engine_id: &EngineId, asset_key: &str) -> Result<PathBuf, RuntimeError> {
+    Ok(asset_root(engine_id, asset_key)?.join("cleanup-residue.json"))
+}
+
+fn write_transaction(
     engine_id: &EngineId,
     asset_key: &str,
-    install_id: &str,
+    tx: &ModelTransaction,
+) -> Result<(), RuntimeError> {
+    atomic_write_json(&transaction_path(engine_id, asset_key)?, tx)
+}
+
+fn remove_transaction(engine_id: &EngineId, asset_key: &str) -> Result<(), RuntimeError> {
+    let path = transaction_path(engine_id, asset_key)?;
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn remember_residue(
+    engine_id: &EngineId,
+    asset_key: &str,
+    slot_id: &str,
+    error: &str,
+) -> Result<(), RuntimeError> {
+    let path = residue_path(engine_id, asset_key)?;
+    let mut residues: Vec<CleanupResidue> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if let Some(item) = residues.iter_mut().find(|item| item.slot_id == slot_id) {
+        item.attempts = item.attempts.saturating_add(1);
+        item.last_error = error.to_string();
+    } else {
+        residues.push(CleanupResidue {
+            slot_id: slot_id.to_string(),
+            attempts: 1,
+            last_error: error.to_string(),
+        });
+    }
+    if residues.len() > MAX_CLEANUP_RESIDUES {
+        residues.drain(..residues.len() - MAX_CLEANUP_RESIDUES);
+    }
+    atomic_write_json(&path, &residues)
+}
+
+/// 删除 slot 对应的 residue 记录（重试删除成功或 slot 已消失时调用）。
+fn forget_residue(
+    engine_id: &EngineId,
+    asset_key: &str,
+    slot_id: &str,
+) -> Result<(), RuntimeError> {
+    let path = residue_path(engine_id, asset_key)?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(()),
+    };
+    let mut residues: Vec<CleanupResidue> = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let before = residues.len();
+    residues.retain(|item| item.slot_id != slot_id);
+    if residues.len() == before {
+        return Ok(());
+    }
+    if residues.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    } else {
+        atomic_write_json(&path, &residues)?;
+    }
+    Ok(())
+}
+
+/// 清除已不再对应磁盘目录的 residue 记录（有界重试的收敛终点）。
+fn prune_residues(engine_id: &EngineId, asset_key: &str) -> Result<(), RuntimeError> {
+    let path = residue_path(engine_id, asset_key)?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(()),
+    };
+    let residues: Vec<CleanupResidue> = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let remaining: Vec<CleanupResidue> = residues
+        .into_iter()
+        .filter(|item| {
+            model_slot_dir(engine_id, asset_key, &item.slot_id)
+                .map(|p| p.exists())
+                .unwrap_or(false)
+        })
+        .collect();
+    if remaining.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    } else {
+        atomic_write_json(&path, &remaining)?;
+    }
+    Ok(())
+}
+
+fn remove_or_record_residue(
+    engine_id: &EngineId,
+    asset_key: &str,
+    slot_id: &str,
+) -> Result<(), RuntimeError> {
+    let path = model_slot_dir(engine_id, asset_key, slot_id)?;
+    if !path.exists() {
+        forget_residue(engine_id, asset_key, slot_id)?;
+        return Ok(());
+    }
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => forget_residue(engine_id, asset_key, slot_id),
+        Err(error) => remember_residue(engine_id, asset_key, slot_id, &error.to_string()),
+    }
+}
+
+/// 恢复未完成的模型事务。只读取 journal、pointer、manifest 和目录结构，不 hash payload。
+///
+/// 判定规则见模块头「提交协议」：`Preparing` 分支必须核对 active pointer——
+/// 指针已指向 candidate 说明提交点已越过，按已提交完成清理；否则回滚删除
+/// candidate。任何分支都不会删除 active pointer 当前指向的 slot。
+pub fn recover_model_transaction(
+    engine_id: &EngineId,
+    asset_key: &str,
+) -> Result<(), RuntimeError> {
+    let path = transaction_path(engine_id, asset_key)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let tx: ModelTransaction =
+        serde_json::from_str(&raw).map_err(|error| RuntimeError::ManifestParseFailed {
+            message: format!("model transaction parse failed: {error}"),
+        })?;
+    if tx.schema_version != MODEL_TRANSACTION_SCHEMA_VERSION {
+        return Err(RuntimeError::ManifestSchemaIncompatible {
+            expected: MODEL_TRANSACTION_SCHEMA_VERSION,
+            actual: tx.schema_version,
+        });
+    }
+
+    // active pointer 是唯一提交真源。读取/解析失败必须 fail-closed：保留
+    // journal 和所有 slot，禁止把「无法确认」降级成可执行删除的状态。
+    let active_pointer = read_model_active_pointer(engine_id, asset_key)?;
+    let active_slot = active_pointer
+        .as_ref()
+        .map(|pointer| pointer.slot_id.as_str());
+    let active_points_to_candidate = active_slot == Some(tx.candidate_slot_id.as_str());
+
+    let committed = match tx.phase {
+        ModelTransactionPhase::Preparing => {
+            // 崩溃点在「指针写入之后、journal 更新之前」——指针是原子提交点，
+            // 已落盘即视为已提交，完成旧 slot 清理（roll forward）。
+            active_points_to_candidate
+        }
+        ModelTransactionPhase::Committed if active_points_to_candidate => true,
+        ModelTransactionPhase::Committed => {
+            return Err(RuntimeError::TransactionJournalInvalid {
+                message: format!(
+                    "model transaction committed but active pointer mismatch: candidate={}, active={}",
+                    tx.candidate_slot_id,
+                    active_slot.unwrap_or("<none>")
+                ),
+            });
+        }
+    };
+
+    if committed {
+        if let Some(previous) = tx.previous_slot_id.as_deref()
+            && previous != tx.candidate_slot_id
+        {
+            remove_or_record_residue(engine_id, asset_key, previous)?;
+        }
+    } else {
+        // 指针未切换（仍指向旧 active 或不存在）→ 回滚：candidate 是孤儿，删除。
+        remove_or_record_residue(engine_id, asset_key, &tx.candidate_slot_id)?;
+    }
+    remove_transaction(engine_id, asset_key)
+}
+
+/// 将已校验 staging payload 提交为唯一 active slot。
+///
+/// 提交顺序见模块头「提交协议」：journal(Preparing) → payload/manifest 就位 →
+/// **指针切换（原子提交点）** → journal(Committed) → 删旧 slot → 撤 journal。
+/// 指针切换前的任何失败都保持旧 active 不动（candidate 由调用方或恢复路径回收）。
+pub fn promote_staging_to_active_slot(
+    engine_id: &EngineId,
+    asset_key: &str,
+    slot_id: &str,
     operation_id: &str,
     manifest: &ModelManifest,
 ) -> Result<(), RuntimeError> {
     let staging_payload = model_operation_staging_payload_dir(engine_id, asset_key, operation_id)?;
-    let generation_dir = model_generation_dir(engine_id, asset_key, install_id)?;
-    let target_payload = generation_dir.join("payload");
+    let slot_dir = model_slot_dir(engine_id, asset_key, slot_id)?;
+    let target_payload = slot_dir.join("payload");
 
-    // 确保目标不存在（如果是 repair，旧 generation 应已清理或使用新 install_id）
-    if generation_dir.exists() {
+    // 候选 slot id 必须全新（slot id 由每次操作独立生成；repair 也使用新 id）
+    if slot_dir.exists() {
         return Err(RuntimeError::GenerationPromoteFailed {
-            message: format!("generation 目录已存在: {}", generation_dir.display()),
+            message: format!("candidate slot 已存在: {}", slot_dir.display()),
         });
     }
 
-    // 创建 generation 目录
-    std::fs::create_dir_all(&generation_dir)?;
+    let previous_slot_id = read_model_active_pointer(engine_id, asset_key)?.map(|p| p.slot_id);
+    let transaction = ModelTransaction {
+        schema_version: MODEL_TRANSACTION_SCHEMA_VERSION,
+        operation_id: operation_id.to_string(),
+        candidate_slot_id: slot_id.to_string(),
+        previous_slot_id: previous_slot_id.clone(),
+        phase: ModelTransactionPhase::Preparing,
+    };
+    write_transaction(engine_id, asset_key, &transaction)?;
+
+    // 提交点前的失败：清 candidate + journal（恢复路径是同一语义的兜底）
+    let abort = |slot_dir: &Path| {
+        let _ = std::fs::remove_dir_all(slot_dir);
+        let _ = remove_transaction(engine_id, asset_key);
+    };
+
+    std::fs::create_dir_all(&slot_dir)?;
 
     // 移动 payload（同卷 rename 是原子的）
     if staging_payload.exists() {
-        std::fs::rename(&staging_payload, &target_payload).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&generation_dir);
-            RuntimeError::GenerationPromoteFailed {
+        if let Err(e) = std::fs::rename(&staging_payload, &target_payload) {
+            abort(&slot_dir);
+            return Err(RuntimeError::GenerationPromoteFailed {
                 message: format!("payload 移动失败: {e}"),
-            }
-        })?;
+            });
+        }
     } else {
         // payload 不存在（空模型？）——创建空目录
         std::fs::create_dir_all(&target_payload)?;
     }
 
     // 写入 manifest
-    if let Err(e) = write_model_manifest(engine_id, asset_key, install_id, manifest) {
-        let _ = std::fs::remove_dir_all(&generation_dir);
+    if let Err(e) = write_model_manifest(engine_id, asset_key, slot_id, manifest) {
+        abort(&slot_dir);
         return Err(e);
     }
 
-    // 原子切换 current.json
-    let pointer = ModelCurrentPointer {
-        install_id: install_id.to_string(),
+    // ── 原子提交点：切换 active.json ──
+    // 成功后事务即视为已提交；此后的失败只影响旧 slot 清理（residue 兜底），
+    // 不再回滚。失败则旧 active 保持原样，candidate/journal 由 abort 清理
+    // （清理失败时恢复路径按 Preparing + 指针未切换回滚）。
+    let pointer = ModelActivePointer {
+        slot_id: slot_id.to_string(),
         updated_at_ms: now_ms(),
-        schema_version: MODEL_CURRENT_POINTER_SCHEMA_VERSION,
+        schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
     };
-
-    if let Err(e) = write_model_current_pointer(engine_id, asset_key, &pointer) {
-        let _ = std::fs::remove_dir_all(&generation_dir);
+    if let Err(e) = write_model_active_pointer(engine_id, asset_key, &pointer) {
+        abort(&slot_dir);
         return Err(e);
+    }
+
+    // journal 记录提交事实（崩溃时恢复按「指针已指向 candidate」同样 roll forward）。
+    // 从这里开始不得再向调用方报告普通安装失败：active pointer 已经提交，
+    // 后续只属于可恢复的事务收尾。
+    let mut transaction = transaction;
+    transaction.phase = ModelTransactionPhase::Committed;
+    if let Err(error) = write_transaction(engine_id, asset_key, &transaction) {
+        tracing::warn!(
+            engine = %engine_id,
+            asset_key,
+            slot_id,
+            %error,
+            "模型已提交，但 Committed journal 写入失败；按 active pointer 尝试收尾"
+        );
+        if let Err(recovery_error) = recover_model_transaction(engine_id, asset_key) {
+            tracing::warn!(
+                engine = %engine_id,
+                asset_key,
+                slot_id,
+                %recovery_error,
+                "模型已提交，事务收尾暂未完成；保留 journal 供后续恢复"
+            );
+        }
+        return Ok(());
+    }
+
+    // 删除旧 slot（失败记为有界 residue，可重试收敛）
+    if let Some(previous) = previous_slot_id.as_deref()
+        && previous != slot_id
+        && let Err(error) = remove_or_record_residue(engine_id, asset_key, previous)
+    {
+        tracing::warn!(
+            engine = %engine_id,
+            asset_key,
+            slot_id,
+            previous_slot_id = previous,
+            %error,
+            "模型已提交，旧 slot 清理暂未完成；保留 Committed journal"
+        );
+        return Ok(());
+    }
+    if let Err(error) = remove_transaction(engine_id, asset_key) {
+        tracing::warn!(
+            engine = %engine_id,
+            asset_key,
+            slot_id,
+            %error,
+            "模型已提交，但 transaction journal 暂未清除；后续恢复将幂等收尾"
+        );
     }
 
     Ok(())
@@ -783,54 +1064,49 @@ pub fn cleanup_staging(
     Ok(())
 }
 
-/// 删除 generation（current pointer + generation 目录）。
-///
-/// 用于 delete_model：先删除 generation 目录，再删除 current.json。
-/// 如果 generation 目录删除失败，返回错误（不谎报 NotInstalled）。
-pub fn delete_model_generation(engine_id: &EngineId, asset_key: &str) -> Result<(), RuntimeError> {
-    // 先读取 current pointer 获取 install_id
-    let pointer = read_model_current_pointer(engine_id, asset_key)?;
-    if pointer.is_none() {
+/// 删除当前 installed model。冲突规则由 EngineManager 在调用前裁决。
+pub fn delete_active_model(engine_id: &EngineId, asset_key: &str) -> Result<(), RuntimeError> {
+    let pointer = read_model_active_pointer(engine_id, asset_key)?;
+    let Some(pointer) = pointer else {
         return Err(RuntimeError::GenerationNotFound {
-            install_id: "no current pointer".to_string(),
+            install_id: "no active pointer".to_string(),
         });
-    }
-    let pointer = pointer.unwrap();
+    };
 
-    // 删除 generation 目录
-    let gen_dir = model_generation_dir(engine_id, asset_key, &pointer.install_id)?;
-    if gen_dir.exists() {
-        std::fs::remove_dir_all(&gen_dir).map_err(|e| RuntimeError::CleanupFailed {
-            message: format!("删除 generation 目录失败: {e}"),
+    let slot_dir = model_slot_dir(engine_id, asset_key, &pointer.slot_id)?;
+    if slot_dir.exists() {
+        std::fs::remove_dir_all(&slot_dir).map_err(|e| RuntimeError::CleanupFailed {
+            message: format!("删除 active model slot 失败: {e}"),
         })?;
     }
 
-    // 删除 current.json
-    let pointer_path = model_current_pointer_path(engine_id, asset_key)?;
+    let pointer_path = model_active_pointer_path(engine_id, asset_key)?;
     if pointer_path.exists() {
         std::fs::remove_file(&pointer_path).map_err(|e| RuntimeError::CleanupFailed {
-            message: format!("删除 current.json 失败: {e}"),
+            message: format!("删除 active.json 失败: {e}"),
         })?;
     }
+
+    // 已删除的 active slot 不再是 residue 候选
+    let _ = forget_residue(engine_id, asset_key, &pointer.slot_id);
 
     Ok(())
 }
 
-/// 清理旧 generations（保留 current）。
-///
-/// 用于安装成功后清理旧 generation（deferred cleanup）。
-pub fn cleanup_old_generations(
+/// 重试清理非 active slot 和有界 residue。
+pub fn cleanup_inactive_slots(
     engine_id: &EngineId,
     asset_key: &str,
-    current_install_id: &str,
+    active_slot_id: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    let gens_dir = model_generations_dir(engine_id, asset_key)?;
-    if !gens_dir.exists() {
+    let slots_dir = model_slots_dir(engine_id, asset_key)?;
+    if !slots_dir.exists() {
+        prune_residues(engine_id, asset_key)?;
         return Ok(Vec::new());
     }
 
     let mut cleaned = Vec::new();
-    let entries = std::fs::read_dir(&gens_dir)?;
+    let entries = std::fs::read_dir(&slots_dir)?;
 
     for entry in entries {
         let entry = entry?;
@@ -838,7 +1114,7 @@ pub fn cleanup_old_generations(
         let name_str = name.to_string_lossy();
 
         // 跳过 current
-        if name_str == current_install_id {
+        if name_str == active_slot_id {
             continue;
         }
 
@@ -852,16 +1128,20 @@ pub fn cleanup_old_generations(
             if let Err(e) = std::fs::remove_dir_all(&path) {
                 tracing::warn!(
                     engine_id = %engine_id,
-                    asset_key = %asset_key,
-                    install_id = %name_str,
+                    asset_key = asset_key,
+                    slot_id = %name_str,
                     error = %e,
-                    "清理旧 generation 失败（跳过）"
+                    "清理非 active slot 失败，保留为 cleanup residue"
                 );
+                remember_residue(engine_id, asset_key, &name_str, &e.to_string())?;
             } else {
                 cleaned.push(name_str.to_string());
             }
         }
     }
+
+    // 已成功删除（或早已消失）的 slot 对应 residue 记录一并收敛
+    prune_residues(engine_id, asset_key)?;
 
     Ok(cleaned)
 }
@@ -877,45 +1157,47 @@ mod tests {
 
     #[test]
     fn encode_iic_sensevoice_small() {
-        assert_eq!(
-            encode_asset_key("iic/SenseVoiceSmall"),
-            "iic-sensevoicesmall"
-        );
+        assert!(encode_asset_key("iic/SenseVoiceSmall").starts_with("iic-sensevoicesmall-"));
     }
 
     #[test]
     fn encode_paraformer_zh() {
-        assert_eq!(encode_asset_key("paraformer-zh"), "paraformer-zh");
+        assert!(encode_asset_key("paraformer-zh").starts_with("paraformer-zh-"));
     }
 
     #[test]
     fn encode_with_underscores() {
-        assert_eq!(encode_asset_key("my_model_v2"), "my-model-v2");
+        assert!(encode_asset_key("my_model_v2").starts_with("my-model-v2-"));
     }
 
     #[test]
     fn encode_with_dots() {
-        assert_eq!(encode_asset_key("model.v2.0"), "model-v2-0");
+        assert!(encode_asset_key("model.v2.0").starts_with("model-v2-0-"));
     }
 
     #[test]
     fn encode_empty_falls_back_to_model() {
-        assert_eq!(encode_asset_key("///"), "model");
+        assert!(encode_asset_key("///").starts_with("model-"));
     }
 
     #[test]
     fn encode_uppercase_to_lowercase() {
-        assert_eq!(encode_asset_key("HelloWorld"), "helloworld");
+        assert!(encode_asset_key("HelloWorld").starts_with("helloworld-"));
     }
 
     #[test]
     fn encode_compresses_double_hyphens() {
-        assert_eq!(encode_asset_key("a//b"), "a-b");
+        assert!(encode_asset_key("a//b").starts_with("a-b-"));
     }
 
     #[test]
     fn encode_trims_leading_trailing_hyphens() {
-        assert_eq!(encode_asset_key("/a/b/"), "a-b");
+        assert!(encode_asset_key("/a/b/").starts_with("a-b-"));
+    }
+
+    #[test]
+    fn asset_keys_do_not_collide_when_slugs_match() {
+        assert_ne!(encode_asset_key("a/b"), encode_asset_key("a-b"));
     }
 
     #[test]
@@ -1076,8 +1358,8 @@ mod tests {
         write_file(&dir, "model.bin", b"model_data");
         // manifest.json 应被排除
         write_file(&dir, "manifest.json", b"should_be_excluded");
-        // current.json 应被排除
-        write_file(&dir, "current.json", b"should_be_excluded");
+        // active.json 应被排除
+        write_file(&dir, "active.json", b"should_be_excluded");
         // 临时文件应被排除
         write_file(&dir, ".tmp_file", b"should_be_excluded");
         // 下载锁应被排除
@@ -1210,9 +1492,9 @@ mod tests {
     fn golden_fingerprint_empty_with_manifest_excluded() {
         let dir = make_fixture("golden_empty_meta");
 
-        // 只写 manifest.json + current.json（都应被排除）
+        // 只写 manifest.json + active.json（都应被排除）
         write_file(&dir, "manifest.json", b"{\"test\":true}");
-        write_file(&dir, "current.json", b"{\"install_id\":\"test\"}");
+        write_file(&dir, "active.json", b"{\"slot_id\":\"test\"}");
 
         let fp = compute_content_fingerprint(&dir).unwrap();
         assert_eq!(fp.file_count, 0);
@@ -1298,9 +1580,8 @@ mod tests {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-restore-installed";
 
-        // 创建 generation + payload + manifest + current.json
-        let install_id = "gen-test-0001";
-        let payload_dir = model_payload_dir(&engine, asset_key, install_id).unwrap();
+        let slot_id = "slot-test-0001";
+        let payload_dir = model_payload_dir(&engine, asset_key, slot_id).unwrap();
         std::fs::create_dir_all(&payload_dir).unwrap();
         write_file(&payload_dir, "model.bin", b"model_data");
 
@@ -1315,7 +1596,7 @@ mod tests {
                 source: "test".to_string(),
                 downloaded_at_ms: now_ms(),
             },
-            install_id: install_id.to_string(),
+            slot_id: slot_id.to_string(),
             installed_at_ms: now_ms(),
             content_fingerprint_algorithm: CONTENT_FINGERPRINT_ALGORITHM.to_string(),
             content_fingerprint: fp.fingerprint.clone(),
@@ -1329,23 +1610,23 @@ mod tests {
             },
         };
 
-        write_model_manifest(&engine, asset_key, install_id, &manifest).unwrap();
+        write_model_manifest(&engine, asset_key, slot_id, &manifest).unwrap();
 
-        let pointer = ModelCurrentPointer {
-            install_id: install_id.to_string(),
+        let pointer = ModelActivePointer {
+            slot_id: slot_id.to_string(),
             updated_at_ms: now_ms(),
-            schema_version: MODEL_CURRENT_POINTER_SCHEMA_VERSION,
+            schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
         };
-        write_model_current_pointer(&engine, asset_key, &pointer).unwrap();
+        write_model_active_pointer(&engine, asset_key, &pointer).unwrap();
 
         // 恢复 → Installed
         let state = restore_model_state(&engine, asset_key).unwrap();
         match state {
             RestoredModelState::Installed {
-                install_id: iid,
+                slot_id: restored_slot,
                 manifest: m,
             } => {
-                assert_eq!(iid, install_id);
+                assert_eq!(restored_slot, slot_id);
                 assert_eq!(m.model_id, "test-model");
                 assert_eq!(m.content_fingerprint, fp.fingerprint);
             }
@@ -1362,8 +1643,8 @@ mod tests {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-restore-corrupted-fp";
 
-        let install_id = "gen-test-corrupt-0001";
-        let payload_dir = model_payload_dir(&engine, asset_key, install_id).unwrap();
+        let slot_id = "slot-test-corrupt-0001";
+        let payload_dir = model_payload_dir(&engine, asset_key, slot_id).unwrap();
         std::fs::create_dir_all(&payload_dir).unwrap();
         write_file(&payload_dir, "model.bin", b"model_data");
 
@@ -1376,7 +1657,7 @@ mod tests {
                 source: "test".to_string(),
                 downloaded_at_ms: now_ms(),
             },
-            install_id: install_id.to_string(),
+            slot_id: slot_id.to_string(),
             installed_at_ms: now_ms(),
             content_fingerprint_algorithm: CONTENT_FINGERPRINT_ALGORITHM.to_string(),
             content_fingerprint: "wrong_fingerprint".to_string(), // 故意错误
@@ -1390,14 +1671,14 @@ mod tests {
             },
         };
 
-        write_model_manifest(&engine, asset_key, install_id, &manifest).unwrap();
+        write_model_manifest(&engine, asset_key, slot_id, &manifest).unwrap();
 
-        let pointer = ModelCurrentPointer {
-            install_id: install_id.to_string(),
+        let pointer = ModelActivePointer {
+            slot_id: slot_id.to_string(),
             updated_at_ms: now_ms(),
-            schema_version: MODEL_CURRENT_POINTER_SCHEMA_VERSION,
+            schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
         };
-        write_model_current_pointer(&engine, asset_key, &pointer).unwrap();
+        write_model_active_pointer(&engine, asset_key, &pointer).unwrap();
 
         // restore 只做结构校验 → Installed（不做 GB hash）
         match restore_model_state(&engine, asset_key).unwrap() {
@@ -1419,7 +1700,7 @@ mod tests {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-restore-corrupted-payload";
 
-        let install_id = "gen-test-corrupt-0002";
+        let slot_id = "slot-test-corrupt-0002";
         // 不创建 payload 目录
 
         let manifest = ModelManifest {
@@ -1431,7 +1712,7 @@ mod tests {
                 source: "test".to_string(),
                 downloaded_at_ms: now_ms(),
             },
-            install_id: install_id.to_string(),
+            slot_id: slot_id.to_string(),
             installed_at_ms: now_ms(),
             content_fingerprint_algorithm: CONTENT_FINGERPRINT_ALGORITHM.to_string(),
             content_fingerprint: "any".to_string(),
@@ -1445,14 +1726,14 @@ mod tests {
             },
         };
 
-        write_model_manifest(&engine, asset_key, install_id, &manifest).unwrap();
+        write_model_manifest(&engine, asset_key, slot_id, &manifest).unwrap();
 
-        let pointer = ModelCurrentPointer {
-            install_id: install_id.to_string(),
+        let pointer = ModelActivePointer {
+            slot_id: slot_id.to_string(),
             updated_at_ms: now_ms(),
-            schema_version: MODEL_CURRENT_POINTER_SCHEMA_VERSION,
+            schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
         };
-        write_model_current_pointer(&engine, asset_key, &pointer).unwrap();
+        write_model_active_pointer(&engine, asset_key, &pointer).unwrap();
 
         // 恢复 → Corrupted（payload 不存在）
         let state = restore_model_state(&engine, asset_key).unwrap();
@@ -1471,11 +1752,11 @@ mod tests {
     // ── promote + delete ─────────────────────────────────────────────────
 
     #[test]
-    fn promote_staging_creates_generation_and_pointer() {
+    fn promote_staging_commits_single_active_slot() {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-promote";
         let operation_id = "op-test-promote-0001";
-        let install_id = "gen-test-promote-0001";
+        let slot_id = "slot-test-promote-0001";
 
         // 创建 staging payload
         let staging_payload =
@@ -1494,7 +1775,7 @@ mod tests {
                 source: "test".to_string(),
                 downloaded_at_ms: now_ms(),
             },
-            install_id: install_id.to_string(),
+            slot_id: slot_id.to_string(),
             installed_at_ms: now_ms(),
             content_fingerprint_algorithm: CONTENT_FINGERPRINT_ALGORITHM.to_string(),
             content_fingerprint: fp.fingerprint.clone(),
@@ -1508,17 +1789,16 @@ mod tests {
             },
         };
 
-        promote_staging_to_generation(&engine, asset_key, install_id, operation_id, &manifest)
+        promote_staging_to_active_slot(&engine, asset_key, slot_id, operation_id, &manifest)
             .unwrap();
 
-        // 验证 generation + payload + manifest + current.json 存在
-        let gen_payload = model_payload_dir(&engine, asset_key, install_id).unwrap();
-        assert!(gen_payload.exists());
-        assert!(gen_payload.join("model.bin").exists());
+        let slot_payload = model_payload_dir(&engine, asset_key, slot_id).unwrap();
+        assert!(slot_payload.exists());
+        assert!(slot_payload.join("model.bin").exists());
 
-        let pointer = read_model_current_pointer(&engine, asset_key).unwrap();
+        let pointer = read_model_active_pointer(&engine, asset_key).unwrap();
         assert!(pointer.is_some());
-        assert_eq!(pointer.unwrap().install_id, install_id);
+        assert_eq!(pointer.unwrap().slot_id, slot_id);
 
         // 清理
         let root = asset_root(&engine, asset_key).unwrap();
@@ -1526,12 +1806,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_generation_removes_pointer_and_dir() {
+    fn delete_active_model_removes_pointer_and_slot() {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-delete";
 
-        let install_id = "gen-test-delete-0001";
-        let payload_dir = model_payload_dir(&engine, asset_key, install_id).unwrap();
+        let slot_id = "slot-test-delete-0001";
+        let payload_dir = model_payload_dir(&engine, asset_key, slot_id).unwrap();
         std::fs::create_dir_all(&payload_dir).unwrap();
         write_file(&payload_dir, "model.bin", b"data");
 
@@ -1544,7 +1824,7 @@ mod tests {
                 source: "test".to_string(),
                 downloaded_at_ms: now_ms(),
             },
-            install_id: install_id.to_string(),
+            slot_id: slot_id.to_string(),
             installed_at_ms: now_ms(),
             content_fingerprint_algorithm: CONTENT_FINGERPRINT_ALGORITHM.to_string(),
             content_fingerprint: "fake".to_string(),
@@ -1558,22 +1838,22 @@ mod tests {
             },
         };
 
-        write_model_manifest(&engine, asset_key, install_id, &manifest).unwrap();
-        let pointer = ModelCurrentPointer {
-            install_id: install_id.to_string(),
+        write_model_manifest(&engine, asset_key, slot_id, &manifest).unwrap();
+        let pointer = ModelActivePointer {
+            slot_id: slot_id.to_string(),
             updated_at_ms: now_ms(),
-            schema_version: MODEL_CURRENT_POINTER_SCHEMA_VERSION,
+            schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
         };
-        write_model_current_pointer(&engine, asset_key, &pointer).unwrap();
+        write_model_active_pointer(&engine, asset_key, &pointer).unwrap();
 
         // 删除
-        delete_model_generation(&engine, asset_key).unwrap();
+        delete_active_model(&engine, asset_key).unwrap();
 
         // 验证
-        let pointer_path = model_current_pointer_path(&engine, asset_key).unwrap();
+        let pointer_path = model_active_pointer_path(&engine, asset_key).unwrap();
         assert!(!pointer_path.exists());
-        let gen_dir = model_generation_dir(&engine, asset_key, install_id).unwrap();
-        assert!(!gen_dir.exists());
+        let slot_dir = model_slot_dir(&engine, asset_key, slot_id).unwrap();
+        assert!(!slot_dir.exists());
 
         // 清理
         let root = asset_root(&engine, asset_key).unwrap();
@@ -1581,11 +1861,521 @@ mod tests {
     }
 
     #[test]
-    fn delete_generation_fails_when_no_pointer() {
+    fn delete_active_model_fails_when_no_pointer() {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-delete-no-pointer";
 
-        let result = delete_model_generation(&engine, asset_key);
+        let result = delete_active_model(&engine, asset_key);
         assert!(result.is_err());
+    }
+
+    // ── 单 active slot 事务：提交与崩溃恢复 ─────────────────────────────
+
+    /// 构造带真实 fingerprint 的测试 manifest。
+    fn test_manifest(engine: &EngineId, slot_id: &str, fp: &ContentFingerprint) -> ModelManifest {
+        ModelManifest {
+            schema_version: MODEL_MANIFEST_SCHEMA_VERSION,
+            engine_id: engine.clone(),
+            model_id: "test-model".to_string(),
+            revision: "v1".to_string(),
+            source: ModelSource::Unverified {
+                source: "test".to_string(),
+                downloaded_at_ms: now_ms(),
+            },
+            slot_id: slot_id.to_string(),
+            installed_at_ms: now_ms(),
+            content_fingerprint_algorithm: CONTENT_FINGERPRINT_ALGORITHM.to_string(),
+            content_fingerprint: fp.fingerprint.clone(),
+            payload_size_bytes: fp.total_size_bytes,
+            file_count: fp.file_count,
+            compatibility_schema: 1,
+            model_contract_identity: ModelContractIdentity {
+                model_id: "test-model".to_string(),
+                revision: "v1".to_string(),
+                checksum_source_kind: "unverified".to_string(),
+            },
+        }
+    }
+
+    /// 通过 staging → promote 完整安装一个 slot 并置为 active。
+    fn install_slot(engine: &EngineId, asset_key: &str, slot_id: &str, op_id: &str) {
+        let staging = model_operation_staging_payload_dir(engine, asset_key, op_id).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        write_file(
+            &staging,
+            "model.bin",
+            format!("payload-{slot_id}").as_bytes(),
+        );
+        let fp = compute_content_fingerprint(&staging).unwrap();
+        let manifest = test_manifest(engine, slot_id, &fp);
+        promote_staging_to_active_slot(engine, asset_key, slot_id, op_id, &manifest).unwrap();
+    }
+
+    /// 在磁盘上手工构造「candidate slot 已就位但未切指针」的中间态。
+    fn materialize_candidate(engine: &EngineId, asset_key: &str, slot_id: &str) {
+        let payload = model_payload_dir(engine, asset_key, slot_id).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+        write_file(
+            &payload,
+            "model.bin",
+            format!("payload-{slot_id}").as_bytes(),
+        );
+        let fp = compute_content_fingerprint(&payload).unwrap();
+        let manifest = test_manifest(engine, slot_id, &fp);
+        write_model_manifest(engine, asset_key, slot_id, &manifest).unwrap();
+    }
+
+    /// 手工写 journal（模拟崩溃现场）。
+    fn write_journal(
+        engine: &EngineId,
+        asset_key: &str,
+        candidate: &str,
+        previous: Option<&str>,
+        phase: ModelTransactionPhase,
+    ) {
+        let tx = ModelTransaction {
+            schema_version: MODEL_TRANSACTION_SCHEMA_VERSION,
+            operation_id: "op-crash-sim".to_string(),
+            candidate_slot_id: candidate.to_string(),
+            previous_slot_id: previous.map(str::to_string),
+            phase,
+        };
+        write_transaction(engine, asset_key, &tx).unwrap();
+    }
+
+    fn journal_exists(engine: &EngineId, asset_key: &str) -> bool {
+        transaction_path(engine, asset_key).unwrap().exists()
+    }
+
+    #[test]
+    fn update_promote_deletes_previous_and_keeps_single_active() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-update-single-active";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-update-0001");
+        install_slot(&engine, asset_key, "slot-new-0002", "op-update-0002");
+
+        // 稳定状态只剩一个 active slot
+        let pointer = read_model_active_pointer(&engine, asset_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pointer.slot_id, "slot-new-0002");
+        assert!(
+            !model_slot_dir(&engine, asset_key, "slot-old-0001")
+                .unwrap()
+                .exists()
+        );
+        assert!(
+            model_slot_dir(&engine, asset_key, "slot-new-0002")
+                .unwrap()
+                .exists()
+        );
+        assert!(!journal_exists(&engine, asset_key));
+
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { slot_id, .. } => {
+                assert_eq!(slot_id, "slot-new-0002");
+            }
+            other => panic!("expected Installed, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// 崩溃点：journal=Preparing 且指针未切换（仍指向旧 active）→ 回滚删 candidate。
+    #[test]
+    fn recovery_preparing_before_pointer_rolls_back_to_old_active() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-crash-preparing-rollback";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-crash-0001");
+        materialize_candidate(&engine, asset_key, "slot-cand-0002");
+        write_journal(
+            &engine,
+            asset_key,
+            "slot-cand-0002",
+            Some("slot-old-0001"),
+            ModelTransactionPhase::Preparing,
+        );
+
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { slot_id, .. } => {
+                assert_eq!(slot_id, "slot-old-0001", "回滚后旧 active 保持");
+            }
+            other => panic!("expected Installed, got {:?}", other),
+        }
+        // candidate 已回滚删除；journal 已消费
+        assert!(
+            !model_slot_dir(&engine, asset_key, "slot-cand-0002")
+                .unwrap()
+                .exists()
+        );
+        assert!(!journal_exists(&engine, asset_key));
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// 崩溃窗口：active.json 已切到 candidate 但 journal 仍是 Preparing
+    /// （指针写入与 journal 更新之间崩溃）→ 按已提交处理，绝不删除
+    /// 指针已指向的 candidate，只完成旧 slot 清理。
+    #[test]
+    fn recovery_preparing_after_pointer_write_rolls_forward() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-crash-window-rollforward";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-crash-0001");
+        materialize_candidate(&engine, asset_key, "slot-cand-0002");
+        write_journal(
+            &engine,
+            asset_key,
+            "slot-cand-0002",
+            Some("slot-old-0001"),
+            ModelTransactionPhase::Preparing,
+        );
+        // 模拟提交点已越过：指针已指向 candidate
+        write_model_active_pointer(
+            &engine,
+            asset_key,
+            &ModelActivePointer {
+                slot_id: "slot-cand-0002".to_string(),
+                updated_at_ms: now_ms(),
+                schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
+
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { slot_id, .. } => {
+                assert_eq!(slot_id, "slot-cand-0002", "指针指向的 candidate 必须存活");
+            }
+            other => panic!("expected Installed, got {:?}", other),
+        }
+        // 旧 slot 完成清理；candidate 仍在；journal 已消费
+        assert!(
+            !model_slot_dir(&engine, asset_key, "slot-old-0001")
+                .unwrap()
+                .exists()
+        );
+        assert!(
+            model_slot_dir(&engine, asset_key, "slot-cand-0002")
+                .unwrap()
+                .exists()
+        );
+        assert!(!journal_exists(&engine, asset_key));
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// 崩溃点：journal=Committed、旧 slot 尚未删除 → 完成已提交清理。
+    #[test]
+    fn recovery_committed_finishes_previous_cleanup() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-crash-committed-cleanup";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-crash-0001");
+        materialize_candidate(&engine, asset_key, "slot-cand-0002");
+        write_model_active_pointer(
+            &engine,
+            asset_key,
+            &ModelActivePointer {
+                slot_id: "slot-cand-0002".to_string(),
+                updated_at_ms: now_ms(),
+                schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
+        write_journal(
+            &engine,
+            asset_key,
+            "slot-cand-0002",
+            Some("slot-old-0001"),
+            ModelTransactionPhase::Committed,
+        );
+
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { slot_id, .. } => {
+                assert_eq!(slot_id, "slot-cand-0002");
+            }
+            other => panic!("expected Installed, got {:?}", other),
+        }
+        assert!(
+            !model_slot_dir(&engine, asset_key, "slot-old-0001")
+                .unwrap()
+                .exists()
+        );
+        assert!(!journal_exists(&engine, asset_key));
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// 崩溃点：首次安装 Committed（无 previous）→ 只消费 journal。
+    #[test]
+    fn recovery_committed_first_install_without_previous() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-crash-committed-first";
+        materialize_candidate(&engine, asset_key, "slot-first-0001");
+        write_model_active_pointer(
+            &engine,
+            asset_key,
+            &ModelActivePointer {
+                slot_id: "slot-first-0001".to_string(),
+                updated_at_ms: now_ms(),
+                schema_version: MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
+        write_journal(
+            &engine,
+            asset_key,
+            "slot-first-0001",
+            None,
+            ModelTransactionPhase::Committed,
+        );
+
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { slot_id, .. } => {
+                assert_eq!(slot_id, "slot-first-0001");
+            }
+            other => panic!("expected Installed, got {:?}", other),
+        }
+        assert!(!journal_exists(&engine, asset_key));
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// journal 声称 Committed，但 active 仍指向 previous：事务事实不一致，
+    /// 必须 fail-closed，保留两个 slot 与 journal 供显式恢复。
+    #[test]
+    fn recovery_committed_pointer_mismatch_preserves_all_data() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-committed-pointer-mismatch";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-mismatch-0001");
+        materialize_candidate(&engine, asset_key, "slot-cand-0002");
+        write_journal(
+            &engine,
+            asset_key,
+            "slot-cand-0002",
+            Some("slot-old-0001"),
+            ModelTransactionPhase::Committed,
+        );
+
+        let error = recover_model_transaction(&engine, asset_key).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeError::TransactionJournalInvalid { .. }
+        ));
+        assert_eq!(
+            read_model_active_pointer(&engine, asset_key)
+                .unwrap()
+                .unwrap()
+                .slot_id,
+            "slot-old-0001"
+        );
+        assert!(
+            model_slot_dir(&engine, asset_key, "slot-old-0001")
+                .unwrap()
+                .exists(),
+            "当前 active 不得被删除"
+        );
+        assert!(
+            model_slot_dir(&engine, asset_key, "slot-cand-0002")
+                .unwrap()
+                .exists(),
+            "不一致事务的 candidate 也应保留供显式恢复"
+        );
+        assert!(journal_exists(&engine, asset_key));
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// active pointer 无法解析时不能猜测提交状态，更不能删除任何 slot。
+    #[test]
+    fn recovery_corrupted_pointer_preserves_all_data_and_journal() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-corrupted-pointer-preserve";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-corrupt-0001");
+        materialize_candidate(&engine, asset_key, "slot-cand-0002");
+        write_journal(
+            &engine,
+            asset_key,
+            "slot-cand-0002",
+            Some("slot-old-0001"),
+            ModelTransactionPhase::Committed,
+        );
+        std::fs::write(
+            model_active_pointer_path(&engine, asset_key).unwrap(),
+            b"{not-json",
+        )
+        .unwrap();
+
+        let error = recover_model_transaction(&engine, asset_key).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeError::CurrentPointerParseFailed { .. }
+        ));
+        assert!(
+            model_slot_dir(&engine, asset_key, "slot-old-0001")
+                .unwrap()
+                .exists()
+        );
+        assert!(
+            model_slot_dir(&engine, asset_key, "slot-cand-0002")
+                .unwrap()
+                .exists()
+        );
+        assert!(journal_exists(&engine, asset_key));
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// 指针切换失败（active.json 被只读阻塞）→ 旧 active 保持，candidate 回收。
+    #[test]
+    fn pointer_switch_failure_keeps_old_active() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-pointer-switch-fail";
+        install_slot(&engine, asset_key, "slot-old-0001", "op-psf-0001");
+
+        // 阻塞 active.json 的原子替换（MoveFileEx 不能替换只读文件）
+        let pointer_path = model_active_pointer_path(&engine, asset_key).unwrap();
+        let mut perms = std::fs::metadata(&pointer_path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&pointer_path, perms).unwrap();
+
+        let staging =
+            model_operation_staging_payload_dir(&engine, asset_key, "op-psf-0002").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        write_file(&staging, "model.bin", b"payload-new");
+        let fp = compute_content_fingerprint(&staging).unwrap();
+        let manifest = test_manifest(&engine, "slot-new-0002", &fp);
+        let result = promote_staging_to_active_slot(
+            &engine,
+            asset_key,
+            "slot-new-0002",
+            "op-psf-0002",
+            &manifest,
+        );
+        assert!(result.is_err(), "只读 active.json 必须使指针切换失败");
+
+        // 旧 active 未被破坏
+        let pointer = read_model_active_pointer(&engine, asset_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pointer.slot_id, "slot-old-0001");
+        assert!(!journal_exists(&engine, asset_key));
+        assert!(
+            !model_slot_dir(&engine, asset_key, "slot-new-0002")
+                .unwrap()
+                .exists(),
+            "失败的 candidate 应被回收"
+        );
+
+        // 解除阻塞后旧 active 仍可正常恢复
+        let mut perms = std::fs::metadata(&pointer_path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&pointer_path, perms).unwrap();
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { slot_id, .. } => assert_eq!(slot_id, "slot-old-0001"),
+            other => panic!("expected Installed, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// cancellation 只清理匹配 operation 的 staging。
+    #[test]
+    fn cleanup_staging_only_removes_matching_operation() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-staging-scope";
+        for op in ["op-a-0001", "op-b-0002"] {
+            let dir = model_operation_staging_payload_dir(&engine, asset_key, op).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            write_file(&dir, "model.bin", b"data");
+        }
+
+        cleanup_staging(&engine, asset_key, "op-a-0001").unwrap();
+        assert!(
+            !model_operation_staging_dir(&engine, asset_key, "op-a-0001")
+                .unwrap()
+                .exists(),
+            "匹配 operation 的 staging 已清理"
+        );
+        assert!(
+            model_operation_staging_dir(&engine, asset_key, "op-b-0002")
+                .unwrap()
+                .exists(),
+            "其他 operation 的 staging 不受影响"
+        );
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
+    }
+
+    /// 旧 slot 删除失败（文件被占用）记为 residue；重试成功后 residue 收敛清除。
+    #[test]
+    fn residue_recorded_when_locked_and_cleared_after_retry() {
+        let engine = EngineId::new("funasr").unwrap();
+        let asset_key = "tx-residue-retry";
+        install_slot(&engine, asset_key, "slot-active-0001", "op-res-0001");
+
+        // 构造暂时无法删除的非 active slot：以无 FILE_SHARE_DELETE 的句柄
+        // 占住 payload 文件（模拟杀软扫描/进程占用——Rust std 的 POSIX 语义
+        // remove_dir_all 无法删除被此类句柄占用的文件）
+        let locked_slot = "slot-locked-0002";
+        let payload = model_payload_dir(&engine, asset_key, locked_slot).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+        write_file(&payload, "model.bin", b"locked");
+        let locked_file = payload.join("model.bin");
+        let held = {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::Win32::Foundation::GENERIC_READ;
+            use windows::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            };
+            use windows::core::PCWSTR;
+            let wide: Vec<u16> = locked_file
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // SAFETY: wide 以 NUL 结尾；句柄随后用 CloseHandle 释放
+            unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    GENERIC_READ.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, // 不含 FILE_SHARE_DELETE
+                    None,
+                    OPEN_EXISTING,
+                    Default::default(),
+                    None,
+                )
+            }
+            .unwrap()
+        };
+
+        let cleaned = cleanup_inactive_slots(&engine, asset_key, "slot-active-0001").unwrap();
+        assert!(cleaned.is_empty(), "暂时无法删除的 slot 不应被清理");
+        assert!(
+            model_slot_dir(&engine, asset_key, locked_slot)
+                .unwrap()
+                .exists()
+        );
+        // residue 已记录
+        let residue_file = residue_path(&engine, asset_key).unwrap();
+        let residues: Vec<CleanupResidue> =
+            serde_json::from_str(&std::fs::read_to_string(&residue_file).unwrap()).unwrap();
+        assert_eq!(residues.len(), 1);
+        assert_eq!(residues[0].slot_id, locked_slot);
+
+        // 解除占用后重试 → slot 删除 + residue 记录收敛清除
+        {
+            use windows::Win32::Foundation::CloseHandle;
+            // SAFETY: held 由本测试的 CreateFileW 创建，仅关闭一次
+            let _ = unsafe { CloseHandle(held) };
+        }
+        let cleaned = cleanup_inactive_slots(&engine, asset_key, "slot-active-0001").unwrap();
+        assert_eq!(cleaned, vec![locked_slot.to_string()]);
+        assert!(
+            !model_slot_dir(&engine, asset_key, locked_slot)
+                .unwrap()
+                .exists()
+        );
+        assert!(!residue_file.exists(), "重试成功后 residue 记录应被清除");
+
+        let _ = std::fs::remove_dir_all(asset_root(&engine, asset_key).unwrap());
     }
 }

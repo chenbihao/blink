@@ -543,7 +543,7 @@ function initAudioTest(config) {
             audioTestActive = false;
             btn.textContent = t("voice.audio_test.start");
             btn.classList.remove("active");
-            bar.style.background = "var(--color-danger, #e53e3e)";
+            bar.style.background = "var(--red)";
             bar.style.width = "100%";
             bar.textContent = e;
         }
@@ -561,11 +561,11 @@ function initAudioTest(config) {
         const pct = Math.max(0, Math.min(100, level * 100));
         bar.style.width = `${pct}%`;
         if (pct < 5) {
-            bar.style.background = "var(--color-danger, #e53e3e)";
+            bar.style.background = "var(--red)";
         } else if (pct > 90) {
-            bar.style.background = "var(--color-warning, #dd6b20)";
+            bar.style.background = "var(--warning)";
         } else {
-            bar.style.background = "var(--color-success, #38a169)";
+            bar.style.background = "var(--green)";
         }
     });
 }

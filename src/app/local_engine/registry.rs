@@ -65,10 +65,21 @@ impl EngineRegistry {
     }
 
     /// 创建带指定 adapter 列表的注册表（测试用）。
+    ///
+    /// 构造时逐个执行 `descriptor.validate()`——描述符是编译期声明，
+    /// 内部不一致（runtime_kind 不匹配、候选引用未声明 artifact）属于
+    /// wiring 错误，必须在构造时 fail-fast，而不是等到首次 install/start。
     pub fn new_with_adapters(adapters: Vec<Arc<dyn LocalEngineAdapter>>) -> Self {
         let mut entries = HashMap::new();
         for adapter in adapters {
-            let id = adapter.descriptor().engine_id.clone();
+            let descriptor = adapter.descriptor();
+            descriptor.validate().unwrap_or_else(|e| {
+                panic!(
+                    "engine '{}' descriptor 校验失败（编译期声明错误）: {e}",
+                    descriptor.engine_id
+                )
+            });
+            let id = descriptor.engine_id.clone();
             entries.insert(id, RegistryEntry { adapter });
         }
         Self { entries }
@@ -174,7 +185,6 @@ mod tests {
                         lifecycle: LifecyclePolicy::Manual,
                         timeouts: EngineTimeouts::default(),
                         resource_budget: ResourceBudget::default(),
-                        cleanup: CleanupPolicy::default(),
                     },
                 }
             }
@@ -201,7 +211,6 @@ mod tests {
                 }
                 Ok(ResolvedLaunch {
                     profile: ctx.resolved_profile.clone(),
-                    fallback: None,
                     launch: LaunchDescriptor {
                         executable: std::path::PathBuf::from("/fake/executable"),
                         args: vec!["--serve".to_string()],

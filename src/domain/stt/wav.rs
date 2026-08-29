@@ -120,6 +120,7 @@ pub fn write_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<
 ///
 /// 简化版解析器：跳过非 data chunk，只读 PCM data。
 /// 供诊断命令和测试共用。
+#[cfg(test)]
 pub fn parse_wav_to_f32(data: &[u8]) -> Result<Vec<f32>, String> {
     // RIFF header
     if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {

@@ -26,6 +26,7 @@
 import {registerAdapterHook, unregisterAdapterHook} from "./local-engine-card.js";
 import {invoke} from "../../../shared/tauri.js";
 import {t} from "../../../i18n/index.js";
+import {computeOptionsDisplayMode} from "./local-engine-state.js";
 
 // ── FunASR hook ───────────────────────────────────────────────────────────────
 
@@ -57,7 +58,9 @@ function registerFunasrHook() {
 
             appendConfigHeading(container, t("local_engine.config.runtime_policy"));
 
-            // ── compute preference 选择器 ──────────────────────────────
+            // ── compute preference（0.22.6.1：单一可用选项时隐藏选择器）──
+            // FunASR descriptor 只声明 CPU profile——渲染只读展示而非 select，
+            // 避免制造"可以选择 CUDA"的错觉。
             const computeRow = document.createElement("div");
             computeRow.className = "le-config-row";
 
@@ -66,49 +69,61 @@ function registerFunasrHook() {
             computeLabel.textContent = t("local_engine.config.compute_preference");
             computeRow.appendChild(computeLabel);
 
-            const select = document.createElement("select");
-            select.className = "le-config-select";
+            const computeMode = computeOptionsDisplayMode(catalog.compute_options);
+            if (computeMode === "static") {
+                const staticValue = document.createElement("span");
+                staticValue.className = "le-config-static";
+                staticValue.textContent = t(
+                    `local_engine.compute.${currentCompute}`,
+                    currentCompute
+                );
+                computeRow.appendChild(staticValue);
+                container.appendChild(computeRow);
+            } else {
+                const select = document.createElement("select");
+                select.className = "le-config-select";
 
-            for (const opt of catalog.compute_options) {
-                const option = document.createElement("option");
-                option.value = opt.preference;
-                option.textContent = t(`local_engine.compute.${opt.preference}`, opt.preference);
-                option.disabled = !opt.compatible;
-                if (opt.disabled_reason) {
-                    option.title = opt.disabled_reason;
+                for (const opt of catalog.compute_options) {
+                    const option = document.createElement("option");
+                    option.value = opt.preference;
+                    option.textContent = t(`local_engine.compute.${opt.preference}`, opt.preference);
+                    option.disabled = !opt.compatible;
+                    if (opt.disabled_reason) {
+                        option.title = opt.disabled_reason;
+                    }
+                    if (opt.preference === currentCompute) {
+                        option.selected = true;
+                    }
+                    select.appendChild(option);
                 }
-                if (opt.preference === currentCompute) {
-                    option.selected = true;
-                }
-                select.appendChild(option);
+
+                // 失败回滚：保存失败时恢复 select 原值
+                select.addEventListener("change", async (e) => {
+                    const newPref = e.target.value;
+                    const oldPref = currentCompute;
+                    try {
+                        const result = await invoke("set_local_engine_preferences", {
+                            engineId: "funasr",
+                            patch: {compute_preference: newPref},
+                        });
+                        // 如果需要重建，提示用户
+                        if (result?.requires_rebuild) {
+                            console.info("[funasr-hook] compute profile changed, needs rebuild");
+                        }
+                        // 刷新 status（environment 可能变为 needs_rebuild）
+                        if (controller?.isMounted()) {
+                            controller.refreshStatus().catch(() => {});
+                        }
+                    } catch (err) {
+                        console.error("[funasr-hook] save compute preference failed:", err);
+                        // 回滚 select
+                        select.value = oldPref;
+                    }
+                });
+
+                computeRow.appendChild(select);
+                container.appendChild(computeRow);
             }
-
-            // 失败回滚：保存失败时恢复 select 原值
-            select.addEventListener("change", async (e) => {
-                const newPref = e.target.value;
-                const oldPref = currentCompute;
-                try {
-                    const result = await invoke("set_local_engine_preferences", {
-                        engineId: "funasr",
-                        patch: {compute_preference: newPref},
-                    });
-                    // 如果需要重建，提示用户
-                    if (result?.requires_rebuild) {
-                        console.info("[funasr-hook] compute profile changed, needs rebuild");
-                    }
-                    // 刷新 status（environment 可能变为 needs_rebuild）
-                    if (controller?.isMounted()) {
-                        controller.refreshStatus().catch(() => {});
-                    }
-                } catch (err) {
-                    console.error("[funasr-hook] save compute preference failed:", err);
-                    // 回滚 select
-                    select.value = oldPref;
-                }
-            });
-
-            computeRow.appendChild(select);
-            container.appendChild(computeRow);
 
             // ── auto_start 开关 ────────────────────────────────────────
             const autoStartRow = document.createElement("div");

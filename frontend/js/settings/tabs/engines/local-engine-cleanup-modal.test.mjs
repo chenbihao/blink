@@ -160,12 +160,11 @@ function makeModal(overrides = {}) {
 
 function makeTarget(overrides = {}) {
     return {
-        target_id: "gen:old",
-        kind: "engine_generation",
-        label_fallback: "上一环境",
+        target_id: "environment:slot-b",
+        kind: "engine_environment",
+        label_fallback: "残留环境",
         size_bytes: 2000 * 1024 * 1024,
         current: false,
-        previous: true,
         removable: true,
         shared: false,
         blocked_reason: null,
@@ -182,21 +181,21 @@ test("aggregateSharedTargets：空状态返回空数组", () => {
 test("aggregateSharedTargets：只返回后端标记 shared 的 target", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "slot:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
-            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
-            {target_id: "cache:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
+            {target_id: "environment:slot-a", kind: "engine_environment", shared: false, engine_id: "funasr"},
+            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "funasr"},
+            {target_id: "cache:staging", kind: "engine_cache", shared: false, engine_id: "funasr"},
         ]}}],
     ]);
     const result = aggregateSharedTargets(state);
     assert.equal(result.length, 1);
-    assert.equal(result[0].target_id, "shared:python_venv:py312");
+    assert.equal(result[0].target_id, "shared_runtime:python_venv:py312");
 });
 
 test("aggregateSharedTargets：target.shared=true 的 generation 也被识别为共享", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "slot:1", kind: "engine_generation", shared: false, engine_id: "funasr"},
-            {target_id: "shared-asset", kind: "engine_generation", shared: true, engine_id: "funasr"},
+            {target_id: "environment:slot-a", kind: "engine_environment", shared: false, engine_id: "funasr"},
+            {target_id: "shared-asset", kind: "engine_environment", shared: true, engine_id: "funasr"},
         ]}}],
     ]);
     const result = aggregateSharedTargets(state);
@@ -207,10 +206,10 @@ test("aggregateSharedTargets：target.shared=true 的 generation 也被识别为
 test("aggregateSharedTargets：跨引擎同 target_id 去重并合并", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
+            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "funasr"},
         ]}}],
         ["paddleocr", {storage: {targets: [
-            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "paddleocr"},
+            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "paddleocr"},
         ]}}],
     ]);
     const result = aggregateSharedTargets(state);
@@ -222,11 +221,11 @@ test("aggregateSharedTargets：跨引擎同 target_id 去重并合并", () => {
 test("aggregateSharedTargets：不同 target_id 不合并", () => {
     const state = new Map([
         ["funasr", {storage: {targets: [
-            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "funasr"},
-            {target_id: "download_cache:python_venv", kind: "provider_download_cache", shared: true, engine_id: "funasr"},
+            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "funasr"},
+            {target_id: "shared_download_cache:python_venv", kind: "shared_download_cache", shared: true, engine_id: "funasr"},
         ]}}],
         ["paddleocr", {storage: {targets: [
-            {target_id: "shared:python_venv:py312", kind: "provider_shared_artifact", shared: true, engine_id: "paddleocr"},
+            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "paddleocr"},
         ]}}],
     ]);
     assert.equal(aggregateSharedTargets(state).length, 2);
@@ -283,7 +282,7 @@ test("createCleanupModal：正常 targets 渲染后启用确认按钮", () => {
 test("createCleanupModal：current generation 不可选 → 确认按钮禁用", () => {
     const {modal, confirmBtn} = makeModal();
     modal.open({
-        targets: [makeTarget({current: true, removable: false, blocked_reason: "current_generation"})],
+        targets: [makeTarget({current: true, removable: false, blocked_reason: "current_environment"})],
         mode: "engine",
     });
     assert.equal(confirmBtn.disabled, true);
@@ -303,7 +302,7 @@ test("createCleanupModal：shared target 默认不选但有非 shared 时按钮�
     modal.open({
         targets: [
             makeTarget(),
-            makeTarget({target_id: "shared:py", kind: "provider_shared_artifact", shared: true, label_fallback: "共享 Python"}),
+            makeTarget({target_id: "shared_runtime:py", kind: "shared_runtime", shared: true, label_fallback: "共享 Python"}),
         ],
         mode: "engine",
     });
@@ -313,7 +312,7 @@ test("createCleanupModal：shared target 默认不选但有非 shared 时按钮�
 test("createCleanupModal：只有 shared target → 按钮禁用（默认不选 shared）", () => {
     const {modal, confirmBtn} = makeModal();
     modal.open({
-        targets: [makeTarget({target_id: "shared:py", kind: "provider_shared_artifact", shared: true})],
+        targets: [makeTarget({target_id: "shared_runtime:py", kind: "shared_runtime", shared: true})],
         mode: "engine",
     });
     assert.equal(confirmBtn.disabled, true, "只有 shared target 时默认不选 → 按钮应禁用");
@@ -327,7 +326,7 @@ await asyncTest("createCleanupModal：confirm 成功后关闭 modal", async () =
     const {modal, modalEl, confirmBtn} = makeModal({
         onConfirm: async (ids, mode) => {
             called = true;
-            assert.deepEqual(ids, ["gen:old"]);
+            assert.deepEqual(ids, ["environment:slot-b"]);
             assert.equal(mode, "engine");
         },
     });

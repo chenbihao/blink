@@ -165,17 +165,20 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
     factory: || Arc::new(OcrImage) as Arc<dyn Capability>,
 });
 
-// ── StructuredOcrError → CapabilityError 映射（0.22.4） ──────────────────────
+// ── StructuredOcrError → CapabilityError 映射（0.22.4，0.22.6.1 结构化收敛） ──
 
 /// 将 `StructuredOcrError` 映射到 `CapabilityError`。
 ///
 /// **不全部拍平为 `Internal(String)`**：
 /// - `EnvironmentMissing` → `InvalidState`（环境未就绪，状态不对）
-/// - `DecodeError` → `InvalidData`（图片数据无效）
+/// - `DecodeError` → `InvalidData { reason: "decode_error" }`
+/// - `InputTooLarge` → `InvalidData { reason: "input_too_large" }`
 /// - `Timeout` → `Timeout`
 /// - `Cancelled` → `Cancelled`
-/// - `ProtocolError` / `StartFailed` / `ModelNotReady` / `BackendUnavailable` → `Internal`
-///   （这些是后端基础设施错误，调用方无法直接行动）
+/// - `ProtocolError` / `StartFailed` / `ModelNotReady` / `BackendUnavailable` →
+///   `Backend { category, message, detail, retryable }`——稳定分类码在
+///   Capability → CommandError 投影中原样保留，诊断不再依靠解析
+///   字符串中的 "[protocol_error]"。
 fn map_structured_error_to_capability(
     err: &crate::domain::ocr::error::StructuredOcrError,
 ) -> CapabilityError {
@@ -187,16 +190,23 @@ fn map_structured_error_to_capability(
             reason: "decode_error".to_string(),
             detail: err.message.clone(),
         },
+        OcrErrorCategory::InputTooLarge => CapabilityError::InvalidData {
+            reason: "input_too_large".to_string(),
+            detail: err.message.clone(),
+        },
         OcrErrorCategory::Timeout => CapabilityError::Timeout {
             detail: err.message.clone(),
         },
         OcrErrorCategory::Cancelled => CapabilityError::Cancelled,
-        // 以下为后端基础设施错误，映射为 Internal
+        // 后端基础设施错误——保留稳定分类码的 Backend 变体
         OcrErrorCategory::StartFailed
         | OcrErrorCategory::ModelNotReady
         | OcrErrorCategory::ProtocolError
-        | OcrErrorCategory::BackendUnavailable => CapabilityError::Internal {
-            detail: format!("[{err}]"),
+        | OcrErrorCategory::BackendUnavailable => CapabilityError::Backend {
+            category: err.category.to_string(),
+            message: err.message.clone(),
+            detail: err.detail.as_ref().map(|d| d.to_string()),
+            retryable: err.retryable,
         },
     }
 }
@@ -262,17 +272,174 @@ mod tests {
     }
 
     #[test]
-    fn map_start_failed_to_internal() {
+    fn map_start_failed_to_backend_with_category() {
         let err = crate::domain::ocr::error::StructuredOcrError::start_failed("port in use");
         let cap_err = map_structured_error_to_capability(&err);
-        assert!(matches!(cap_err, CapabilityError::Internal { .. }));
+        match &cap_err {
+            CapabilityError::Backend {
+                category,
+                message,
+                retryable,
+                ..
+            } => {
+                assert_eq!(category, "start_failed");
+                assert_eq!(message, "port in use");
+                assert!(*retryable, "start_failed 的 retryable 语义必须透传");
+            }
+            other => panic!("start_failed 应映射为 Backend，实际 {other:?}"),
+        }
     }
 
     #[test]
-    fn map_protocol_error_to_internal() {
+    fn map_protocol_error_to_backend_with_category() {
         let err = crate::domain::ocr::error::StructuredOcrError::protocol_error("HTTP 500");
         let cap_err = map_structured_error_to_capability(&err);
-        assert!(matches!(cap_err, CapabilityError::Internal { .. }));
+        match &cap_err {
+            CapabilityError::Backend { category, .. } => {
+                assert_eq!(category, "protocol_error");
+            }
+            other => panic!("protocol_error 应映射为 Backend，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_input_too_large_to_invalid_data() {
+        let err = crate::domain::ocr::error::StructuredOcrError::input_too_large(
+            "OCR 输入 30000000 字节超出上限 33554432",
+            serde_json::json!({"field": "compressed_bytes", "actual": 30000000u64, "max": 33554432u64}),
+        );
+        let cap_err = map_structured_error_to_capability(&err);
+        match &cap_err {
+            CapabilityError::InvalidData { reason, detail } => {
+                assert_eq!(reason, "input_too_large");
+                assert!(detail.contains("30000000"));
+            }
+            other => panic!("input_too_large 应映射为 InvalidData，实际 {other:?}"),
+        }
+    }
+
+    // ── 0.22.6.1 序列化/投影测试：decode_error / input_too_large /
+    //    protocol_error / timeout / cancelled ─────────────────────────────
+
+    /// StructuredOcrError 序列化保留稳定 category（snake_case）。
+    #[test]
+    fn structured_ocr_error_serializes_stable_category() {
+        use crate::domain::ocr::error::StructuredOcrError;
+        let cases = [
+            (StructuredOcrError::decode_error("bad png"), "decode_error"),
+            (
+                StructuredOcrError::input_too_large("too big", serde_json::json!({})),
+                "input_too_large",
+            ),
+            (
+                StructuredOcrError::protocol_error("shape"),
+                "protocol_error",
+            ),
+            (StructuredOcrError::timeout(), "timeout"),
+            (StructuredOcrError::cancelled(), "cancelled"),
+        ];
+        for (err, expected) in &cases {
+            let v = serde_json::to_value(err).unwrap();
+            assert_eq!(v["category"], *expected, "{err:?} category 序列化漂移");
+        }
+    }
+
+    /// CapabilityError::Backend 序列化保留 kind=backend + category + retryable。
+    #[test]
+    fn capability_backend_error_serializes_stably() {
+        let e = CapabilityError::Backend {
+            category: "protocol_error".to_string(),
+            message: "响应 request_id 不匹配".to_string(),
+            detail: Some("expected=a got=b".to_string()),
+            retryable: false,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "backend");
+        assert_eq!(v["category"], "protocol_error");
+        assert_eq!(v["retryable"], false);
+        assert_eq!(v["detail"], "expected=a got=b");
+    }
+
+    /// Capability → CommandError 投影：OCR 各错误分类保留
+    /// stable code / message / detail / retryable，诊断不再解析 "[[...]]" 字符串。
+    #[test]
+    fn capability_to_command_error_projection_preserves_structure() {
+        use crate::app::command_error::CommandError;
+        use crate::domain::ocr::error::StructuredOcrError;
+
+        struct Case {
+            name: &'static str,
+            cap: CapabilityError,
+            expected_code: &'static str,
+            expected_retryable: bool,
+        }
+        let cases = vec![
+            Case {
+                name: "decode_error",
+                cap: map_structured_error_to_capability(&StructuredOcrError::decode_error(
+                    "PNG header 非法",
+                )),
+                expected_code: "invalid_data",
+                expected_retryable: false,
+            },
+            Case {
+                name: "input_too_large",
+                cap: map_structured_error_to_capability(&StructuredOcrError::input_too_large(
+                    "decoded 像素超出上限",
+                    serde_json::json!({"field": "decoded_bytes"}),
+                )),
+                expected_code: "invalid_data",
+                expected_retryable: false,
+            },
+            Case {
+                name: "protocol_error",
+                cap: map_structured_error_to_capability(&StructuredOcrError::protocol_error(
+                    "响应缺少 request_id",
+                )),
+                expected_code: "protocol_error",
+                expected_retryable: false,
+            },
+            Case {
+                name: "timeout",
+                cap: map_structured_error_to_capability(&StructuredOcrError::timeout()),
+                expected_code: "timeout",
+                expected_retryable: true,
+            },
+            Case {
+                name: "cancelled",
+                cap: map_structured_error_to_capability(&StructuredOcrError::cancelled()),
+                expected_code: "cancelled",
+                expected_retryable: false,
+            },
+        ];
+
+        for case in cases {
+            let ce: CommandError = case.cap.into();
+            assert_eq!(ce.code, case.expected_code, "case={}", case.name);
+            assert_eq!(ce.retryable, case.expected_retryable, "case={}", case.name);
+            assert!(
+                !ce.message.contains("[["),
+                "case={} message 不得再携带 [[category]] 括号伪协议",
+                case.name
+            );
+            // detail 保留结构化字段（timeout/cancelled 无载荷 detail）
+            let detail = ce.detail;
+            match case.name {
+                "decode_error" | "input_too_large" => {
+                    let detail = detail.expect("invalid_data 投影应保留 detail");
+                    assert!(
+                        detail.get("reason").is_some(),
+                        "case={} detail.reason 应保留",
+                        case.name
+                    );
+                }
+                "protocol_error" => {
+                    let detail = detail.expect("backend 投影应保留 detail");
+                    assert_eq!(detail["category"], "protocol_error");
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Capability 通过 backend() 拿注入的 FakeOcrBackend。

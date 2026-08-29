@@ -151,6 +151,10 @@ pub enum ModelIdentityVerification {
 
 impl ModelIdentityVerification {
     /// 是否匹配。
+    ///
+    /// 当前生产路径通过 EngineManager 的 health 校验返回结构化错误表达
+    /// 不匹配；此方法作为协议完备性保留，由模块测试行使。
+    #[allow(dead_code)]
     pub fn is_matched(&self) -> bool {
         matches!(self, Self::Matched { .. })
     }
@@ -282,26 +286,14 @@ impl std::fmt::Display for ModelInstallState {
 
 impl ModelInstallState {
     /// 是否处于活跃操作中（不可并发启动新操作）。
+    ///
+    /// 当前变更互斥的唯一真源是 `EngineOperationCoordinator` 的 claim
+    /// （key = engine_id），此方法仅作为协议完备性保留，由模块测试行使。
+    #[allow(dead_code)]
     pub fn is_busy(&self) -> bool {
         matches!(
             self,
             Self::Downloading | Self::Staging | Self::Verifying | Self::Repairing | Self::Deleting
-        )
-    }
-
-    /// 是否已安装。
-    pub fn is_installed(&self) -> bool {
-        matches!(self, Self::Installed)
-    }
-
-    /// 是否处于失败状态。
-    pub fn is_failed(&self) -> bool {
-        matches!(
-            self,
-            Self::DownloadFailed
-                | Self::StagingFailed
-                | Self::VerificationFailed
-                | Self::RepairFailed
         )
     }
 }
@@ -520,101 +512,7 @@ impl ModelDeleteConflict {
     }
 }
 
-// ── 模型状态机转移逻辑 ────────────────────────────────────────────────────
-
-/// 模型状态机转移结果。
-///
-/// `Ok(new_state)` 表示转移成功；
-/// `Err` 表示非法转移（如从 NotInstalled 直接到 Installed）。
-pub fn transition_install_state(
-    current: &ModelInstallState,
-    target: ModelInstallState,
-) -> Result<ModelInstallState, LocalEngineError> {
-    use ModelInstallState::*;
-
-    let allowed = match (current, &target) {
-        // NotInstalled → Downloading / Deleting(无操作)
-        (NotInstalled, Downloading) => true,
-        (NotInstalled, NotInstalled) => true,
-
-        // Downloading → Staging / DownloadFailed / NotInstalled(取消)
-        (Downloading, Staging) => true,
-        (Downloading, DownloadFailed) => true,
-        (Downloading, NotInstalled) => true,
-
-        // Staging → Verifying / StagingFailed / NotInstalled(取消)
-        (Staging, Verifying) => true,
-        (Staging, StagingFailed) => true,
-        (Staging, NotInstalled) => true,
-
-        // Verifying → Installed / VerificationFailed
-        (Verifying, Installed) => true,
-        (Verifying, VerificationFailed) => true,
-
-        // DownloadFailed → Downloading(重试) / NotInstalled
-        (DownloadFailed, Downloading) => true,
-        (DownloadFailed, NotInstalled) => true,
-
-        // StagingFailed → Downloading(重试) / NotInstalled
-        (StagingFailed, Downloading) => true,
-        (StagingFailed, NotInstalled) => true,
-
-        // VerificationFailed → Downloading(重新下载) / NotInstalled
-        (VerificationFailed, Downloading) => true,
-        (VerificationFailed, NotInstalled) => true,
-
-        // Installed → Repairing / Deleting / Installed
-        (Installed, Repairing) => true,
-        (Installed, Deleting) => true,
-        (Installed, DeleteBlocked) => true,
-        (Installed, Installed) => true,
-
-        // Repairing → Installed / RepairFailed
-        (Repairing, Installed) => true,
-        (Repairing, RepairFailed) => true,
-
-        // RepairFailed → Repairing(重试) / Installed
-        (RepairFailed, Repairing) => true,
-        (RepairFailed, Installed) => true,
-
-        // Deleting → NotInstalled / DeleteBlocked
-        (Deleting, NotInstalled) => true,
-        (Deleting, DeleteBlocked) => true,
-
-        // DeleteBlocked → Deleting(强制删除? 不允许) / Installed
-        (DeleteBlocked, Installed) => true,
-
-        // 同状态自环
-        _ => current == &target,
-    };
-
-    if allowed {
-        Ok(target)
-    } else {
-        Err(LocalEngineError::with_detail(
-            LocalEngineErrorCode::InvalidConfig,
-            ErrorPhase::Config,
-            "非法状态转移",
-            format!("模型状态机不允许从 {current} 转移到 {target}"),
-        ))
-    }
-}
-
 // ── 模型操作请求/结果 ────────────────────────────────────────────────────
-
-/// 模型操作请求（前端提交，闭合字段）。
-///
-/// **前端不提交 URL、任意路径、脚本或外部命令**。
-/// 前端只提供 `engine_id`、`model_id` 和 `operation_id`（可选）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelOperationRequest {
-    /// 引擎 id。
-    pub engine_id: String,
-    /// 模型 id。
-    pub model_id: String,
-    /// 操作 id（可选，用于取消关联）。
-    pub operation_id: Option<String>,
-}
 
 /// 模型操作结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -729,153 +627,6 @@ mod tests {
             Some("para123fingerprint"),
         );
         assert!(result.unwrap().is_matched());
-    }
-
-    // ── ModelInstallState 状态机 ──────────────────────────────────────────
-
-    #[test]
-    fn state_machine_not_installed_to_downloading() {
-        let result = transition_install_state(
-            &ModelInstallState::NotInstalled,
-            ModelInstallState::Downloading,
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), ModelInstallState::Downloading);
-    }
-
-    #[test]
-    fn state_machine_downloading_to_staging() {
-        let result =
-            transition_install_state(&ModelInstallState::Downloading, ModelInstallState::Staging);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_staging_to_verifying() {
-        let result =
-            transition_install_state(&ModelInstallState::Staging, ModelInstallState::Verifying);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_verifying_to_installed() {
-        let result =
-            transition_install_state(&ModelInstallState::Verifying, ModelInstallState::Installed);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_not_installed_to_installed_rejected() {
-        // 不能跳过中间步骤
-        let result = transition_install_state(
-            &ModelInstallState::NotInstalled,
-            ModelInstallState::Installed,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn state_machine_installed_to_deleting() {
-        let result =
-            transition_install_state(&ModelInstallState::Installed, ModelInstallState::Deleting);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_deleting_to_not_installed() {
-        let result = transition_install_state(
-            &ModelInstallState::Deleting,
-            ModelInstallState::NotInstalled,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_installed_to_repairing() {
-        let result =
-            transition_install_state(&ModelInstallState::Installed, ModelInstallState::Repairing);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_downloading_to_download_failed() {
-        let result = transition_install_state(
-            &ModelInstallState::Downloading,
-            ModelInstallState::DownloadFailed,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_download_failed_to_downloading_retry() {
-        let result = transition_install_state(
-            &ModelInstallState::DownloadFailed,
-            ModelInstallState::Downloading,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_downloading_cancel_to_not_installed() {
-        let result = transition_install_state(
-            &ModelInstallState::Downloading,
-            ModelInstallState::NotInstalled,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_staging_cancel_to_not_installed() {
-        let result =
-            transition_install_state(&ModelInstallState::Staging, ModelInstallState::NotInstalled);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_deleting_to_delete_blocked() {
-        let result = transition_install_state(
-            &ModelInstallState::Installed,
-            ModelInstallState::DeleteBlocked,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_delete_blocked_to_installed() {
-        let result = transition_install_state(
-            &ModelInstallState::DeleteBlocked,
-            ModelInstallState::Installed,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn state_machine_busy_states() {
-        assert!(ModelInstallState::Downloading.is_busy());
-        assert!(ModelInstallState::Staging.is_busy());
-        assert!(ModelInstallState::Verifying.is_busy());
-        assert!(ModelInstallState::Repairing.is_busy());
-        assert!(ModelInstallState::Deleting.is_busy());
-        assert!(!ModelInstallState::NotInstalled.is_busy());
-        assert!(!ModelInstallState::Installed.is_busy());
-        assert!(!ModelInstallState::DownloadFailed.is_busy());
-    }
-
-    #[test]
-    fn state_machine_failed_states() {
-        assert!(ModelInstallState::DownloadFailed.is_failed());
-        assert!(ModelInstallState::StagingFailed.is_failed());
-        assert!(ModelInstallState::VerificationFailed.is_failed());
-        assert!(ModelInstallState::RepairFailed.is_failed());
-        assert!(!ModelInstallState::Installed.is_failed());
-        assert!(!ModelInstallState::NotInstalled.is_failed());
-    }
-
-    #[test]
-    fn state_machine_installed_state() {
-        assert!(ModelInstallState::Installed.is_installed());
-        assert!(!ModelInstallState::NotInstalled.is_installed());
-        assert!(!ModelInstallState::Downloading.is_installed());
     }
 
     // ── DeleteConflict ──────────────────────────────────────────────────

@@ -3,8 +3,8 @@
 //! ## 背景
 //!
 //! 0.22.1 新增 Windows Job Object 支持，用于 ManagedProcess 的进程树回收。
-//! 原有的 `find_pid_by_port` / `kill_process_by_pid` 保留，但 `kill_process_by_port`
-//! 不再出现在本地引擎生命周期路径中（0.22.1 收敛）。
+//! 0.22.6 敌对式 review 清理：按端口自动 kill 的组合工具已删除；
+//! `find_pid_by_port` / `probe_port_occupied` 仅保留给测试做只读端口诊断。
 //!
 //! ## Windows Job Object 策略
 //!
@@ -31,7 +31,7 @@ use std::path::Path;
 /// （IPv4 + IPv6），返回第一个匹配的 PID。
 ///
 /// 返回 `None` 表示端口未被监听或查找失败。
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub fn find_pid_by_port(port: u16) -> Option<u32> {
     let output = crate::infra::platform::no_window(std::process::Command::new("netstat"))
         .args(["-ano"])
@@ -55,7 +55,7 @@ pub fn find_pid_by_port(port: u16) -> Option<u32> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), test))]
 pub fn find_pid_by_port(_port: u16) -> Option<u32> {
     None
 }
@@ -89,20 +89,6 @@ pub fn kill_process_by_pid(pid: u32) -> Result<(), String> {
 #[cfg(not(windows))]
 pub fn kill_process_by_pid(_pid: u32) -> Result<(), String> {
     Err("非 Windows 平台不支持 kill_process_by_pid".to_string())
-}
-
-/// 查找并终止占用指定端口的进程（组合工具）。
-///
-/// **⚠️ 0.22.1 收敛**：此函数不再出现在本地引擎/FunASR 生命周期路径中。
-/// 仅供非引擎路径的兼容用途使用。
-///
-/// 如果端口被监听，找到 PID 并 kill，返回被 kill 的 PID。
-/// 如果端口未被监听，返回 `None`。
-pub fn kill_process_by_port(port: u16) -> Option<u32> {
-    let pid = find_pid_by_port(port)?;
-    tracing::info!(pid, port, "找到占用端口的进程，正在终止");
-    let _ = kill_process_by_pid(pid);
-    Some(pid)
 }
 
 // ── Windows Job Object ────────────────────────────────────────────────────
@@ -169,11 +155,6 @@ mod job_object {
                 }
                 Ok(())
             }
-        }
-
-        /// 获取原始 handle（仅供测试用）。
-        pub fn raw_handle(&self) -> HANDLE {
-            self.handle
         }
     }
 
@@ -445,6 +426,7 @@ pub fn pid_exists(_pid: u32) -> bool {
 /// 只读探测端口是否被占用（TCP connect）。
 ///
 /// 不终止任何进程，仅检测 127.0.0.1:port 是否有 TCP 监听。
+#[cfg(test)]
 pub fn probe_port_occupied(port: u16) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;

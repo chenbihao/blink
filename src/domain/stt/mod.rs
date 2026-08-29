@@ -180,16 +180,15 @@ pub fn create_engine(
                         .to_string());
                 }
             };
-            // 结构化 endpoint——不再通过 rsplit(':') 猜测端口
+            // 使用完整连接快照构造引擎——finalize/preview 的身份 fail-closed
+            // 校验需要 engine_id/instance_id 与服务器回显匹配，只传 port/token
+            // 的空身份快照会被真实服务器的 /health 拒绝。
             let port = conn.port;
-            let token = conn.token.clone();
-
             match config.streaming_mode {
                 crate::domain::config::stt_config::StreamingMode::Pseudo => {
-                    match pseudo_streaming::PseudoStreamingSttEngine::new(
+                    match pseudo_streaming::PseudoStreamingSttEngine::from_connection(
                         &config,
-                        port,
-                        token.clone(),
+                        conn.clone(),
                     ) {
                         Ok(engine) => {
                             tracing::info!(port, "STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
@@ -197,7 +196,7 @@ pub fn create_engine(
                         }
                         Err(e) => {
                             tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
-                            match local::LocalSttEngine::new(&config, port, token) {
+                            match local::LocalSttEngine::from_connection(&config, conn) {
                                 Ok(engine) => {
                                     tracing::info!(port, "STT 引擎: local (FunASR, 非流式回退)");
                                     Ok(Box::new(engine))
@@ -208,7 +207,7 @@ pub fn create_engine(
                     }
                 }
                 crate::domain::config::stt_config::StreamingMode::Off => {
-                    match local::LocalSttEngine::new(&config, port, token) {
+                    match local::LocalSttEngine::from_connection(&config, conn) {
                         Ok(engine) => {
                             tracing::info!(port, "STT 引擎: local (FunASR)");
                             Ok(Box::new(engine))

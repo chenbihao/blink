@@ -20,11 +20,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::identity::{BackendObservation, ResolvedProfile, RuntimePlan};
+use super::identity::{BackendObservation, ResolvedProfile};
 
 use super::descriptor::EngineDefinition;
 use super::error::LocalEngineError;
-use super::status::{EnvironmentHealth, FallbackOutcome, ModelHealth, ServiceHealth};
+use super::status::{EnvironmentHealth, ModelHealth, ServiceHealth};
 
 // ── LaunchDescriptor ───────────────────────────────────────────────────────
 
@@ -152,12 +152,14 @@ pub struct LaunchContext {
 // ── ResolvedLaunch ─────────────────────────────────────────────────────────
 
 /// adapter 解析后的启动信息（包含 profile 解析结果和启动描述）。
+///
+/// fallback 不在此表达——compute profile 的兼容性回退只发生在
+/// `InstallTransaction::resolve_profile`（结果记录进部署 manifest 并在
+/// start 时冻结）；adapter 启动路径使用 manifest 已解析的 profile。
 #[derive(Debug, Clone)]
 pub struct ResolvedLaunch {
     /// 解析后的 profile。
     pub profile: ResolvedProfile,
-    /// fallback 结果（如果发生了 fallback）。
-    pub fallback: Option<FallbackOutcome>,
     /// 启动描述。
     pub launch: LaunchDescriptor,
 }
@@ -216,16 +218,6 @@ pub trait LocalEngineAdapter: Send + Sync {
     ///
     /// 返回有限的额外诊断信息供 UI 展示，不暴露内部实现细节。
     fn diagnostics(&self) -> EngineDiagnostic;
-
-    /// 运行时种类（便捷方法，从 descriptor 获取）。
-    fn runtime_kind(&self) -> RuntimePlan {
-        self.descriptor().runtime_kind
-    }
-
-    /// 能力种类（便捷方法，从 descriptor 获取）。
-    fn capability_kind(&self) -> super::descriptor::CapabilityKind {
-        self.descriptor().capability_kind
-    }
 }
 
 // ── AdapterConfig ──────────────────────────────────────────────────────────
@@ -249,15 +241,6 @@ impl AdapterConfig {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// 从 JSON 值创建配置。
-    pub fn from_json(json: serde_json::Value) -> Self {
-        Self {
-            preferred_port: None,
-            compute_preference: None,
-            engine_config: json,
-        }
-    }
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -266,8 +249,8 @@ impl AdapterConfig {
 mod tests {
     use super::*;
     use crate::domain::local_engine::descriptor::{
-        CapabilityKind, CleanupPolicy, EngineDefinition, EngineDisplay, EngineTimeouts,
-        InstallPlanRef, LifecyclePolicy, ResourceBudget,
+        CapabilityKind, EngineDefinition, EngineDisplay, EngineTimeouts, InstallPlanRef,
+        LifecyclePolicy, ResourceBudget,
     };
     use crate::domain::local_engine::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
     use crate::domain::local_engine::identity::{
@@ -312,7 +295,6 @@ mod tests {
                     lifecycle: LifecyclePolicy::Manual,
                     timeouts: EngineTimeouts::default(),
                     resource_budget: ResourceBudget::default(),
-                    cleanup: CleanupPolicy::default(),
                 },
             }
         }
@@ -352,7 +334,6 @@ mod tests {
 
             Ok(ResolvedLaunch {
                 profile: ctx.resolved_profile.clone(),
-                fallback: None,
                 launch,
             })
         }
@@ -515,13 +496,6 @@ mod tests {
         // executable 和 args 由 adapter 从 descriptor 锁定的 artifact 解析
         // 不从前端接收
         assert!(resolved.launch.executable.components().count() > 0);
-    }
-
-    #[test]
-    fn adapter_runtime_kind_matches_descriptor() {
-        let adapter = TestAdapter::new();
-        assert_eq!(adapter.runtime_kind(), RuntimePlan::PythonVenv);
-        assert_eq!(adapter.capability_kind(), CapabilityKind::Stt);
     }
 
     #[test]

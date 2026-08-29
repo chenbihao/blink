@@ -18,8 +18,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::local_engine::{
-    CapabilityKind, CleanupPolicy, EngineDefinition, EngineStatus, EngineStatusSnapshot,
-    LifecyclePolicy, ProcessState, ResourceBudget,
+    CapabilityKind, EngineDefinition, EngineStatus, EngineStatusSnapshot, LifecyclePolicy,
+    ProcessState, ResourceBudget,
 };
 use crate::infra::local_engine::runtime::{ComputeBackend, ComputePreference, RuntimePlan};
 
@@ -57,8 +57,6 @@ pub struct EngineCatalogItem {
     pub compute_options: Vec<ComputeOptionDto>,
     /// 当前保存的 compute preference（字符串）。
     pub current_compute_preference: String,
-    /// cleanup 能力摘要。
-    pub cleanup_summary: CleanupSummaryDto,
 }
 
 /// 资源预算 DTO。
@@ -87,17 +85,6 @@ pub struct ComputeOptionDto {
     /// 不兼容时的稳定原因（i18n key 或人类可读文案）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
-}
-
-/// cleanup 能力摘要 DTO。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CleanupSummaryDto {
-    /// 引擎拥有的子目录列表。
-    pub owned_subdirs: Vec<String>,
-    /// 是否有模型缓存。
-    pub has_model_cache: bool,
-    /// 是否有日志目录。
-    pub has_log_dir: bool,
 }
 
 // ── Status DTO ───────────────────────────────────────────────────────────────
@@ -291,7 +278,6 @@ pub fn project_catalog_item(
         resource_budget: project_resource_budget(&descriptor.resource_budget),
         compute_options,
         current_compute_preference: preference_to_string(current_preference),
-        cleanup_summary: project_cleanup_summary(&descriptor.cleanup),
     }
 }
 
@@ -322,35 +308,6 @@ fn project_status_wire(status: &EngineStatus) -> EngineStatusWire {
             .last_error
             .as_ref()
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null)),
-    }
-}
-
-/// 从 `LogEntry` 投影日志 DTO。
-///
-/// `instance_id` 从外部传入——因为 `LogEntry` 本身不含 instance_id
-/// （它属于 ManagedProcess 实例，service 在查询时知道是哪个实例）。
-///
-/// 预留：当前 LOCAL_ENGINE_LOG 事件由 service 内联投影，此函数供未来
-/// 统一日志投影入口使用。
-#[allow(dead_code)]
-pub fn project_log(
-    engine_id: &str,
-    instance_id: &str,
-    entry: &crate::infra::local_engine::log_pipe::LogEntry,
-) -> EngineLogDto {
-    let level = super::service::classify_engine_log(entry.source, &entry.text);
-    let timestamp = chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-
-    EngineLogDto {
-        engine_id: engine_id.to_string(),
-        instance_id: instance_id.to_string(),
-        operation_id: None,
-        seq: entry.seq.to_string(),
-        timestamp,
-        level,
-        text: entry.text.clone(),
     }
 }
 
@@ -488,14 +445,6 @@ fn project_resource_budget(b: &ResourceBudget) -> ResourceBudgetDto {
     }
 }
 
-fn project_cleanup_summary(c: &CleanupPolicy) -> CleanupSummaryDto {
-    CleanupSummaryDto {
-        owned_subdirs: c.owned_subdirs.clone(),
-        has_model_cache: c.has_model_cache,
-        has_log_dir: c.has_log_dir,
-    }
-}
-
 // ── Storage DTO（0.22.5 H2）──────────────────────────────────────────────────
 
 /// 引擎存储概览——`get_local_engine_storage` 返回。
@@ -522,7 +471,7 @@ pub struct EngineStorageDto {
 pub struct StorageTargetDto {
     /// 稳定目标 id——前端用此 id 提交清理。
     ///
-    /// 格式由后端定义，编码了 scope + engine_id + 附加键（如 install_id 或 artifact_id）。
+    /// 格式由后端定义，编码 scope + engine_id + 附加键（如 slot 或 artifact id）。
     /// 前端不解析此 id，只在 cleanup 请求中原样提交。
     pub target_id: String,
     /// 目标种类。
@@ -535,10 +484,8 @@ pub struct StorageTargetDto {
     pub label_fallback: String,
     /// 占用字节数。
     pub size_bytes: u64,
-    /// 是否为当前 generation（不可删除）。
+    /// 是否为当前使用中的对象（当前环境，不可删除）。
     pub current: bool,
-    /// 是否为上一 generation（可删除）。
-    pub previous: bool,
     /// 是否可清理。
     pub removable: bool,
     /// 是否为共享资产。
@@ -560,52 +507,24 @@ pub struct StorageTargetDto {
 }
 
 /// 存储目标种类（wire 字符串）。
+///
+/// 只表达用户可理解的对象类别，不暴露内部 slot/journal/residue/generation
+/// 或 provider 类型名。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageTargetKindDto {
-    /// 引擎 generation（venv 或 managed binary 环境）。
-    EngineGeneration,
-    /// 引擎模型缓存。
-    EngineModelCache,
-    /// Provider 共享 artifact（如 Python distribution）。
-    ProviderSharedArtifact,
-    /// Provider 下载缓存（如 uv cache）。
-    ProviderDownloadCache,
-    /// 旧版遗留资产（仅确实可证明归属该引擎时）。
-    LegacyOwnedAsset,
-}
-
-impl StorageTargetKindDto {
-    /// 从字符串解析（command 层用）。
-    ///
-    /// 预留：当前 command 层直接使用 enum 变体构造，此方法供未来
-    /// 从前端字符串参数构造时使用。
-    #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "engine_generation" => Some(Self::EngineGeneration),
-            "engine_model_cache" => Some(Self::EngineModelCache),
-            "provider_shared_artifact" => Some(Self::ProviderSharedArtifact),
-            "provider_download_cache" => Some(Self::ProviderDownloadCache),
-            "legacy_owned_asset" => Some(Self::LegacyOwnedAsset),
-            _ => None,
-        }
-    }
-
-    /// 转字符串。
-    ///
-    /// 预留：当前 DTO 序列化由 serde derive 处理，此方法供未来
-    /// 手动序列化或日志输出时使用。
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::EngineGeneration => "engine_generation",
-            Self::EngineModelCache => "engine_model_cache",
-            Self::ProviderSharedArtifact => "provider_shared_artifact",
-            Self::ProviderDownloadCache => "provider_download_cache",
-            Self::LegacyOwnedAsset => "legacy_owned_asset",
-        }
-    }
+    /// 引擎环境（当前部署或其清理残留）。
+    EngineEnvironment,
+    /// 已安装模型资产（删除走模型管理，带引用检查）。
+    InstalledModel,
+    /// 引擎私有缓存（staging 残留、引擎自有缓存目录）。
+    EngineCache,
+    /// 共享托管运行时（跨引擎只读运行时，如 Blink 托管 Python）。
+    SharedRuntime,
+    /// 共享下载缓存（如 uv 下载缓存）。
+    SharedDownloadCache,
+    /// 旧版遗留资产。
+    LegacyAsset,
 }
 
 // ── Cleanup 请求/结果 DTO ────────────────────────────────────────────────────
@@ -633,7 +552,7 @@ pub struct CleanupResultDto {
     pub operation_id: String,
     /// 已清理的目标 id 列表。
     pub cleaned_target_ids: Vec<String>,
-    /// 被跳过的目标 id 列表（如 current generation、被引用的共享资产）。
+    /// 被跳过的目标 id 列表（如 active deployment、被引用的共享资产）。
     pub skipped_target_ids: Vec<String>,
     /// 已释放字节数。
     pub released_bytes: u64,
@@ -1050,22 +969,6 @@ mod tests {
         let deserialized: ProcessStateDto = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.state, "running");
         assert_eq!(deserialized.pid, Some(9999));
-    }
-
-    // ── project_log 投影 seq 为字符串 ──────────────────────────────────────────
-
-    #[test]
-    fn project_log_seq_is_string() {
-        let entry = crate::infra::local_engine::log_pipe::LogEntry {
-            seq: 42,
-            timestamp_ms: 1724630400000,
-            source: crate::infra::local_engine::log_pipe::LogSource::Stdout,
-            text: "test line".to_string(),
-        };
-        let dto = project_log("funasr", "inst-abc", &entry);
-        let json = serde_json::to_value(&dto).unwrap();
-        assert!(json["seq"].is_string());
-        assert_eq!(json["seq"], "42");
     }
 
     // ── EnginePreferencesPatchDto deny_unknown_fields ──────────────────────────

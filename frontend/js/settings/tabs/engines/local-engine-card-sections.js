@@ -84,6 +84,9 @@ export function renderOperationInfo(entry, i18n) {
 
 /**
  * 当前操作 = kind + stage。operation_id 是内部事务标识，不展示。
+ *
+ * 0.22.6.1：乐观 pending（请求已发出、后端 operation 尚未到达）时
+ * 立即显示 "kind + 等待中"——点击启动/安装后不能看起来毫无反应。
  * @param {HTMLElement} div
  * @param {Object} entry
  * @param {Object} i18n
@@ -91,6 +94,27 @@ export function renderOperationInfo(entry, i18n) {
 export function updateOperationInfo(div, entry, i18n) {
     const op = entry.status?.status?.operation;
     if (!op || op.kind === "idle") {
+        if (entry.pendingAction) {
+            // 乐观 pending 展示
+            div.hidden = false;
+            div.textContent = "";
+
+            const kind = document.createElement("span");
+            kind.className = "le-op-kind";
+            kind.textContent = tt(
+                i18n,
+                `local_engine.operation.${entry.pendingAction.kind}`,
+                entry.pendingAction.kind
+            );
+
+            const stage = document.createElement("span");
+            stage.className = "le-op-stage";
+            stage.textContent = tt(i18n, "local_engine.operation.stage.pending", "pending");
+
+            div.appendChild(kind);
+            div.appendChild(stage);
+            return;
+        }
         div.hidden = true;
         div.textContent = "";
         return;

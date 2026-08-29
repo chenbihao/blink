@@ -245,11 +245,6 @@ impl ComputePreference {
     pub fn is_explicit(&self) -> bool {
         matches!(self, Self::Cpu | Self::Cuda | Self::Vulkan | Self::Directml)
     }
-
-    /// 是否为 GPU backend（gpu_auto 只在这些之间选择）。
-    pub fn is_gpu_backend(&self) -> bool {
-        matches!(self, Self::Cuda | Self::Vulkan | Self::Directml)
-    }
 }
 
 impl std::fmt::Display for ComputePreference {
@@ -515,6 +510,8 @@ impl Endpoint {
     }
 
     /// 返回 `127.0.0.1:port` 的 SocketAddr。
+    /// 当前生产路径只用 `base_url`/`port`；由 infra port 模块测试行使。
+    #[allow(dead_code)]
     pub fn socket_addr(&self) -> std::net::SocketAddr {
         std::net::SocketAddr::from(([127, 0, 0, 1], self.port))
     }
@@ -536,15 +533,6 @@ impl std::fmt::Display for Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compute_preference_is_gpu_backend() {
-        assert!(!ComputePreference::Auto.is_gpu_backend());
-        assert!(!ComputePreference::Cpu.is_gpu_backend());
-        assert!(ComputePreference::Cuda.is_gpu_backend());
-        assert!(ComputePreference::Vulkan.is_gpu_backend());
-        assert!(ComputePreference::Directml.is_gpu_backend());
-    }
 
     #[test]
     fn engine_id_valid() {

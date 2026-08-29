@@ -140,8 +140,6 @@ pub enum LeaseError {
     InstanceMismatch { expected: String, actual: String },
     #[error("lease 路径不属于 Blink runtime 根目录: {0}")]
     PathOutsideRuntime(String),
-    #[error("lease 文件不存在")]
-    NotFound,
 }
 
 /// 原子写入 lease 文件。

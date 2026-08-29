@@ -1226,7 +1226,7 @@ mod tests {
     #[test]
     fn model_usability_check_rejects_download_failed() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelDescriptor, EngineModelStatus, ModelInstallState,
         };
         let desc = EngineModelDescriptor::sensevoice_small();
         let mut status = EngineModelStatus::not_installed(&desc);

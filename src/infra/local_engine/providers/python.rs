@@ -199,6 +199,7 @@ impl PythonVenvProvider {
     }
 
     /// 创建只允许 CPU 的 PythonVenvProvider（测试用）。
+    #[allow(dead_code)]
     pub fn cpu_only() -> Self {
         Self {
             uv_path: None,
@@ -505,11 +506,13 @@ impl PythonVenvProvider {
         Ok(())
     }
 
-    /// 执行 self-test 脚本。
+    /// 执行 self-test 脚本（候选环境验证）。
     ///
     /// 在 venv 中执行 descriptor 声明的 Python 代码片段。
     ///
     /// **0.22.6 H2**：取消时终止子进程。
+    /// **0.22.6.1**：self-test 可能耗时数十秒（torch import）——超过 10s 后
+    /// 每 10s 发出一次低频"仍在执行"提示（带已持续秒数），非洪泛。
     async fn run_self_test_script(
         &self,
         venv_dir: &Path,
@@ -529,7 +532,10 @@ impl PythonVenvProvider {
             return Ok(());
         }
 
-        tracing::info!("执行 self-test...");
+        tracing::info!("执行候选环境 self-test...");
+        if let Some(s) = sink {
+            s.on_log("info", "正在验证候选环境（self-test）...");
+        }
 
         let mut cmd = tokio::process::Command::new(&python_exe);
         cmd.args(["-c", script]);
@@ -537,8 +543,24 @@ impl PythonVenvProvider {
         cmd.stderr(std::process::Stdio::piped());
 
         let no_window_cmd = crate::infra::platform::no_window_tokio(cmd);
-        let output =
-            run_command_with_cancel(no_window_cmd, cancel_token, "self-test", sink).await?;
+        let run_future = run_command_with_cancel(no_window_cmd, cancel_token, "self-test", sink);
+        tokio::pin!(run_future);
+
+        // 仍在执行提示：>10s 后每 10s 一次（低频、带已持续秒数）
+        const HINT_INTERVAL_SECS: u64 = 10;
+        let mut elapsed_secs: u64 = 0;
+        let output = loop {
+            tokio::select! {
+                result = &mut run_future => break result?,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(HINT_INTERVAL_SECS)) => {
+                    elapsed_secs += HINT_INTERVAL_SECS;
+                    tracing::debug!("self-test 仍在执行（已 {elapsed_secs}s）");
+                    if let Some(s) = sink {
+                        s.on_log("info", &format!("self-test 仍在执行（已 {elapsed_secs}s）..."));
+                    }
+                }
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -551,7 +573,10 @@ impl PythonVenvProvider {
             });
         }
 
-        tracing::info!("self-test 通过");
+        tracing::info!("候选环境 self-test 通过");
+        if let Some(s) = sink {
+            s.on_log("info", "候选环境验证通过");
+        }
         Ok(())
     }
 
@@ -632,12 +657,13 @@ impl PythonVenvProvider {
             })
             .collect()
     }
-
     /// 查询只读运行时底座状态（不触发安装）。
     ///
     /// **0.22.6 H2**：提供只读 `RuntimeFoundationStatus` 数据结构，
     /// 至少包含 uv 来源、路径的安全展示、版本、托管 Python 状态、cache/root 状态。
     /// 查询不得触发安装。
+    /// 当前生产 command 以 json! 投影底座状态；本方法由模块测试行使。
+    #[allow(dead_code)]
     pub fn foundation_status() -> RuntimeFoundationStatus {
         let uv_path = runtime::local_uv_exe();
         let uv_exists = uv_path.exists();
@@ -695,12 +721,13 @@ impl Default for PythonVenvProvider {
     }
 }
 
-// ── RuntimeFoundationStatus ──────────────────────────────────────────────────
+// ── RuntimeFoundationStatus（底座状态协议，当前由模块测试行使）──────────────
 
 /// 只读运行时底座状态（0.22.6 H2）。
 ///
 /// 提供 uv 来源、路径的安全展示、版本、托管 Python 状态、cache/root 状态。
 /// **查询不得触发安装**——此结构只读取已存在的文件系统状态。
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeFoundationStatus {
     /// uv 来源。
@@ -724,6 +751,7 @@ pub struct RuntimeFoundationStatus {
 }
 
 /// uv 来源分类。
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UvSource {
@@ -1102,13 +1130,6 @@ impl RuntimeProvider for PythonVenvProvider {
                 // Vulkan 驱动检查（未来实现）
                 Ok(false)
             }
-            CompatibilityCheck::RequiresDirectml => {
-                if !self.allow_gpu {
-                    return Ok(false);
-                }
-                // DirectML 检查（未来实现）
-                Ok(false)
-            }
             CompatibilityCheck::RequiresCpuFeature { .. } => {
                 // Python venv 不关心 CPU feature（由 ManagedBinary 处理）
                 Ok(true)
@@ -1181,13 +1202,11 @@ impl RuntimeProvider for PythonVenvProvider {
             )
             .await?;
 
-        // 4. self-test
-        if let Some(s) = sink {
-            s.on_log("info", "执行 self-test...");
-        }
-        provider
-            .run_self_test_script(&venv_dir, &python_plan.self_test_script, cancel_token, sink)
-            .await?;
+        // 0.22.6.1：**不在 prepare_environment 内执行完整 self-test**——
+        // 此前的重复执行（prepare 内 1 次 + promote 前 1 次 + 切换后 1 次）
+        // 会让安装日志出现三遍"执行 self-test"。完整验证统一由
+        // `InstallTransaction` 编排：promote 前 provider.self_test（候选
+        // 环境验证）+ 切换后 verify_after_switch（切换后验证）。
 
         // 以本次 generation 实际使用的解释器内容作为可复核身份，不能把
         // `uv-verified` 之类标签冒充 SHA-256。
@@ -1224,14 +1243,9 @@ impl RuntimeProvider for PythonVenvProvider {
             });
         }
 
-        // self-test 已在 prepare_environment 中执行，这里只做最终验证
-        // 检查 python.exe 存在
-        let python_exe = venv_dir.join("Scripts").join("python.exe");
-        if !python_exe.exists() {
-            return Err(RuntimeError::SelfTestFailed {
-                message: "python.exe 不存在".to_string(),
-            });
-        }
+        // 0.22.6.1：这是 promote 前唯一一次完整 self-test（候选环境验证）——
+        // prepare_environment 不再重复执行。
+        // 此前此处只做"最终验证"，完整脚本执行曾发生在 prepare_environment。
 
         // 如果 self_test_script 非空且非 "pass"，执行一次
         if !python_plan.self_test_script.is_empty() && python_plan.self_test_script != "pass" {

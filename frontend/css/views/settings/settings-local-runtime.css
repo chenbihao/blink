@@ -323,6 +323,17 @@
     cursor: not-allowed;
 }
 
+/* 单一可用 compute 选项的只读展示（0.22.6.1：隐藏选择器，避免可选错觉） */
+#engines .le-config-static {
+    color: var(--text);
+    font-size: var(--text-sm);
+    font-style: normal;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 0.25rem;
+}
+
 /* ── actions ────────────────────────────────────────────────────────────────── */
 
 #engines .le-card-actions {
@@ -1284,9 +1295,9 @@
     margin-top: 0.5rem;
     padding: 0.5rem 0.75rem;
     border-radius: var(--radius-md, 8px);
-    background: var(--warning-bg, rgba(221, 107, 32, 0.08));
-    border: 1px solid var(--warning-border, rgba(221, 107, 32, 0.2));
-    color: var(--warning-text, #dd6b20);
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    color: var(--warning);
     font-size: var(--text-sm);
     font-style: normal;
 }

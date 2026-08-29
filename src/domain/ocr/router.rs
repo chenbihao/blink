@@ -78,11 +78,17 @@ impl RouteResult {
     }
 
     /// 失败结果。
+    ///
+    /// **耗时铁则（0.22.6.1）**：不把"未执行"与"执行后失败"都记成 0——
+    /// 执行过的阶段必须保留真实耗时（cancellation/timeout 发生在哪个阶段，
+    /// 此前已消耗的时间同样保留）；未执行的阶段才记 0。
     pub fn error(
         decision: RouteDecision,
         error: StructuredOcrError,
         total_elapsed_ms: u64,
         start_wait_ms: u64,
+        recognize_ms: u64,
+        fallback_ms: u64,
     ) -> Self {
         Self {
             decision,
@@ -90,8 +96,8 @@ impl RouteResult {
             error: Some(error),
             total_elapsed_ms,
             start_wait_ms,
-            recognize_ms: 0,
-            fallback_ms: 0,
+            recognize_ms,
+            fallback_ms,
         }
     }
 
@@ -327,13 +333,55 @@ mod tests {
             selected_backend: OcrBackendKind::PaddleOcr,
             fallback_reason: None,
         };
-        let result = RouteResult::error(decision, StructuredOcrError::environment_missing(), 50, 0);
+        let result = RouteResult::error(
+            decision,
+            StructuredOcrError::environment_missing(),
+            50,
+            0,
+            0,
+            0,
+        );
         assert!(result.result.is_none());
         assert!(result.error.is_some());
         assert_eq!(
             result.error.unwrap().category,
             crate::domain::ocr::error::OcrErrorCategory::EnvironmentMissing
         );
+    }
+
+    /// 0.22.6.1：失败结果必须保留已执行阶段的真实耗时——
+    /// 不把"执行后失败"与"未执行"都记成 0。
+    #[test]
+    fn route_result_error_preserves_elapsed_stages() {
+        let decision = RouteDecision {
+            configured_backend: OcrBackendKind::Auto,
+            selected_backend: OcrBackendKind::PaddleOcr,
+            fallback_reason: Some("PaddleOCR 失败 fallback".to_string()),
+        };
+        // PaddleOCR 识别 4200ms 后失败，WinRT fallback 又失败
+        let result = RouteResult::error(
+            decision,
+            StructuredOcrError::protocol_error("HTTP 500"),
+            5000,
+            300,
+            4200,
+            500,
+        );
+        assert_eq!(result.total_elapsed_ms, 5000);
+        assert_eq!(result.start_wait_ms, 300);
+        assert_eq!(result.recognize_ms, 4200, "执行后失败必须保留 recognize_ms");
+        assert_eq!(result.fallback_ms, 500, "执行过的 fallback 必须保留耗时");
+
+        // cancellation/timeout 发生在识别阶段——此前已消耗的时间同样保留
+        let decision2 = RouteDecision {
+            configured_backend: OcrBackendKind::PaddleOcr,
+            selected_backend: OcrBackendKind::PaddleOcr,
+            fallback_reason: None,
+        };
+        let cancelled =
+            RouteResult::error(decision2, StructuredOcrError::timeout(), 1200, 100, 1100, 0);
+        assert_eq!(cancelled.recognize_ms, 1100);
+        assert_eq!(cancelled.start_wait_ms, 100);
     }
 
     #[test]

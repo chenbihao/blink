@@ -31,6 +31,9 @@ use crate::infra::local_engine::runtime;
 /// - 创建 venv
 /// - 执行 pip install
 /// - 读取用户代码解释器
+/// 0.22.7 GGUF spike 的接入位：协议与 manifest/self-test 契约已冻结，
+/// 网络安装/解包/验证按首个真实 binary 引擎（funasr-gguf）落地时实现。
+#[allow(dead_code)]
 pub struct ManagedBinaryProvider {
     /// 是否允许 GPU backend（测试时可关闭）。
     allow_gpu: bool,
@@ -43,6 +46,7 @@ impl ManagedBinaryProvider {
     }
 
     /// 创建只允许 CPU 的 ManagedBinaryProvider（测试用）。
+    #[allow(dead_code)]
     pub fn cpu_only() -> Self {
         Self { allow_gpu: false }
     }
@@ -55,6 +59,7 @@ impl Default for ManagedBinaryProvider {
 }
 
 #[async_trait::async_trait]
+#[allow(dead_code)]
 impl RuntimeProvider for ManagedBinaryProvider {
     fn kind(&self) -> runtime::RuntimePlan {
         runtime::RuntimePlan::ManagedBinary
@@ -79,13 +84,6 @@ impl RuntimeProvider for ManagedBinaryProvider {
                 }
                 // Vulkan 驱动检查（未来实现）
                 // 目前保守返回 false
-                Ok(false)
-            }
-            CompatibilityCheck::RequiresDirectml => {
-                if !self.allow_gpu {
-                    return Ok(false);
-                }
-                // DirectML 检查（未来实现）
                 Ok(false)
             }
             CompatibilityCheck::RequiresCpuFeature { feature } => {
@@ -212,6 +210,7 @@ impl RuntimeProvider for ManagedBinaryProvider {
 
 /// 检查 CPU 是否支持 AVX2。
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 fn check_avx2() -> bool {
     // 使用 std::arch x86_64 intrinsics 检测 AVX2 支持
     // 简化实现：x64 处理器通常支持 AVX2（自 Haswell / Excavator 起）
@@ -221,6 +220,7 @@ fn check_avx2() -> bool {
 
 /// 检查 CPU 是否支持 AVX。
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 fn check_avx() -> bool {
     is_x86_feature_detected!("avx")
 }

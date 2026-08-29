@@ -51,19 +51,6 @@ impl CommandError {
             retryable,
         }
     }
-
-    /// 兼容层：从旧字符串错误创建 fallback CommandError。
-    ///
-    /// 用于尚未迁移的 Result<_, String> commands。
-    #[allow(dead_code)]
-    pub fn from_string(message: impl Into<String>) -> Self {
-        Self {
-            code: "unknown_error".into(),
-            message: message.into(),
-            detail: None,
-            retryable: false,
-        }
-    }
 }
 
 impl std::fmt::Display for CommandError {
@@ -118,6 +105,20 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
                 false,
                 serde_json::json!({ "id": id }),
             ),
+            Backend {
+                category,
+                message,
+                detail,
+                retryable,
+            } => {
+                // 0.22.6.1：后端结构化错误保留 stable category/code、message、
+                // detail、retryable——诊断直接读结构化字段，不再解析字符串。
+                let mut detail_json = serde_json::json!({ "category": category });
+                if let Some(d) = detail {
+                    detail_json["detail"] = serde_json::Value::String(d);
+                }
+                Self::with_detail(&category, message, retryable, detail_json)
+            }
             Internal { detail } => {
                 Self::new("internal_error", format!("内部错误: {detail}"), false)
             }
@@ -255,14 +256,6 @@ mod tests {
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["code"], "not_found");
         assert_eq!(json["detail"]["id"], "test_cap");
-    }
-
-    #[test]
-    fn command_error_from_string_creates_fallback() {
-        let e = CommandError::from_string("some old error");
-        assert_eq!(e.code, "unknown_error");
-        assert_eq!(e.message, "some old error");
-        assert!(!e.retryable);
     }
 
     #[test]

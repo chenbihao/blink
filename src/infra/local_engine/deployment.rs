@@ -17,7 +17,7 @@
 //! promote:    staging → slot-{candidate}（rename）
 //! pre-switch: journal.phase = Switched                        ← 指针切换之前写
 //! switch:     deployment.json → candidate（原子替换）
-//! verify:     重读 manifest + provider self-test；失败 → 自动回滚
+//! verify:     重读 manifest + artifact identity；失败 → 自动回滚
 //! commit:     journal.phase = Committed → 删除旧 slot（失败记 residue）→ 清除 journal
 //! ```
 //!

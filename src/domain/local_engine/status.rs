@@ -25,7 +25,7 @@ use crate::domain::local_engine::identity::{
     BackendVerificationResult, ComputePreference, ResolvedProfile,
 };
 
-use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
+use super::error::LocalEngineError;
 
 // ── ServiceEpoch ──────────────────────────────────────────────────────────
 
@@ -212,16 +212,12 @@ impl Default for EngineOperation {
 
 impl EngineOperation {
     /// 是否为活跃操作（非 Idle）。
+    ///
+    /// 当前生产路径通过 `EngineOperationCoordinator` 的 claim 判定 busy；
+    /// 此方法作为快照语义的规范判断保留，由模块测试行使。
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.kind != OperationKind::Idle
-    }
-
-    /// 是否已结束（Completed / Cancelled / Failed）。
-    pub fn is_finished(&self) -> bool {
-        matches!(
-            self.stage,
-            OperationStage::Completed | OperationStage::Cancelled | OperationStage::Failed
-        )
     }
 }
 
@@ -489,22 +485,6 @@ impl Default for EngineStatus {
 }
 
 impl EngineStatus {
-    /// 创建新 epoch 的初始状态。
-    /// revision 从 0 开始；旧 epoch 的 revision 不能压住新 epoch。
-    pub fn new_epoch() -> Self {
-        Self {
-            service_epoch: ServiceEpoch::new(),
-            ..Default::default()
-        }
-    }
-
-    /// 判断是否可以从 desired Stopped 安全推出"用户不需要引擎运行"。
-    ///
-    /// 注意：这不是 observed state，只是用户意图。
-    pub fn is_desired_stopped(&self) -> bool {
-        self.desired == DesiredState::Stopped
-    }
-
     /// 操作结束收尾：把 operation 归位 Idle。
     ///
     /// **铁则**：操作结束后 `active_operation` 必须变为 None——
@@ -550,140 +530,6 @@ impl EngineStatus {
     }
 }
 
-// ── StatusCommitGuard ──────────────────────────────────────────────────────
-
-/// 状态提交守卫——验证 operation_id 和 epoch 匹配后才允许提交。
-///
-/// 迟到操作（operation_id 不匹配或 epoch 不匹配）不能提交状态。
-#[derive(Debug, Clone)]
-pub struct StatusCommitGuard {
-    epoch: ServiceEpoch,
-    current_operation_id: Option<String>,
-    revision: u64,
-}
-
-impl StatusCommitGuard {
-    /// 为当前状态创建提交守卫。
-    pub fn for_status(status: &EngineStatus) -> Self {
-        Self {
-            epoch: status.service_epoch.clone(),
-            current_operation_id: if status.operation.is_active() {
-                Some(status.operation.operation_id.clone())
-            } else {
-                None
-            },
-            revision: status.revision,
-        }
-    }
-
-    /// 检查提交是否被允许。
-    ///
-    /// 条件：
-    /// 1. epoch 必须匹配（防跨 epoch 覆盖）
-    /// 2. 如果有活跃操作，operation_id 必须匹配（防迟到操作覆盖）
-    /// 3. 新 revision 必须严格大于当前 revision
-    pub fn can_commit(
-        &self,
-        epoch: &ServiceEpoch,
-        operation_id: Option<&str>,
-        new_revision: u64,
-    ) -> Result<(), LocalEngineError> {
-        // 1. epoch 必须匹配
-        if epoch != &self.epoch {
-            return Err(LocalEngineError::with_detail(
-                LocalEngineErrorCode::Rejected,
-                ErrorPhase::Request,
-                "状态已过期，请刷新",
-                format!("epoch 不匹配: expected={}, got={}", self.epoch, epoch),
-            ));
-        }
-
-        // 2. operation_id 门控
-        if let Some(ref current_op) = self.current_operation_id {
-            if let Some(submitted_op) = operation_id {
-                if submitted_op != current_op.as_str() {
-                    return Err(LocalEngineError::with_detail(
-                        LocalEngineErrorCode::Rejected,
-                        ErrorPhase::Request,
-                        "操作已过期",
-                        format!(
-                            "operation_id 不匹配: expected={}, got={}",
-                            current_op, submitted_op
-                        ),
-                    ));
-                }
-            } else {
-                // 有活跃操作但提交未带 operation_id
-                return Err(LocalEngineError::with_detail(
-                    LocalEngineErrorCode::Rejected,
-                    ErrorPhase::Request,
-                    "操作进行中，请等待",
-                    "有活跃操作但提交未携带 operation_id".to_string(),
-                ));
-            }
-        }
-
-        // 3. revision 必须严格递增
-        if new_revision <= self.revision {
-            return Err(LocalEngineError::with_detail(
-                LocalEngineErrorCode::Rejected,
-                ErrorPhase::Request,
-                "状态已过期",
-                format!(
-                    "revision 非递增: current={}, submitted={}",
-                    self.revision, new_revision
-                ),
-            ));
-        }
-
-        Ok(())
-    }
-}
-
-// ── FallbackTracker ─────────────────────────────────────────────────────────
-
-/// fallback 语义追踪器。
-///
-/// 区分"显式 backend 失败"和"auto fallback"：
-/// - 显式 backend（cpu/cuda/vulkan/directml）失败：返回可行动错误，不回退。
-/// - auto fallback：按候选顺序回退，记录每次失败原因。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FallbackOutcome {
-    /// 显式 backend 失败（不回退，返回错误）。
-    ExplicitBackendFailed {
-        preference: ComputePreference,
-        reason: String,
-    },
-    /// auto fallback 成功解析到一个 profile。
-    AutoFallbackResolved {
-        rejected: Vec<FallbackEntry>,
-        resolved: ResolvedProfile,
-    },
-    /// auto fallback 全部候选失败。
-    AutoFallbackExhausted { rejected: Vec<FallbackEntry> },
-}
-
-impl std::fmt::Display for FallbackOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ExplicitBackendFailed { preference, reason } => {
-                write!(f, "explicit {} failed: {}", preference, reason)
-            }
-            Self::AutoFallbackResolved { rejected, resolved } => {
-                write!(
-                    f,
-                    "auto fallback resolved to {} ({} rejected)",
-                    resolved.profile_id,
-                    rejected.len()
-                )
-            }
-            Self::AutoFallbackExhausted { rejected } => {
-                write!(f, "auto fallback exhausted ({} rejected)", rejected.len())
-            }
-        }
-    }
-}
-
 // ── EngineStatusSnapshot ───────────────────────────────────────────────────
 
 /// 引擎状态快照（用于事件发布 / IPC 传输）。
@@ -705,49 +551,10 @@ pub struct EngineStatusSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use super::super::error::{ErrorPhase, LocalEngineErrorCode};
     use super::*;
 
     // ── revision 严格递增 ──────────────────────────────────────────────────
-
-    #[test]
-    fn revision_strictly_increases() {
-        let guard = StatusCommitGuard {
-            epoch: ServiceEpoch(42),
-            current_operation_id: None,
-            revision: 5,
-        };
-
-        // revision 6 > 5，允许
-        assert!(guard.can_commit(&ServiceEpoch(42), None, 6).is_ok());
-
-        // revision 5 == 5，拒绝
-        let err = guard.can_commit(&ServiceEpoch(42), None, 5).unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-
-        // revision 4 < 5，拒绝
-        let err = guard.can_commit(&ServiceEpoch(42), None, 4).unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-    }
-
-    // ── 新 epoch 与旧 epoch 不可直接按 revision 覆盖 ─────────────────────
-
-    #[test]
-    fn new_epoch_rejects_old_epoch_commits() {
-        let old_epoch = ServiceEpoch(42);
-        let new_epoch = ServiceEpoch(99);
-        let guard = StatusCommitGuard {
-            epoch: old_epoch,
-            current_operation_id: None,
-            revision: 1000,
-        };
-
-        // 旧 epoch 的 revision 1001 > 1000，但 epoch 不匹配，拒绝
-        let err = guard.can_commit(&new_epoch, None, 1001).unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-        assert!(err.detail.contains("epoch"));
-    }
-
-    // ── desired Running + process Starting 等组合可表达 ───────────────────
 
     #[test]
     fn desired_running_with_process_starting_is_expressible() {
@@ -773,7 +580,6 @@ mod tests {
 
         assert_eq!(status.desired, DesiredState::Stopped);
         assert_eq!(status.process, ProcessState::Stopping);
-        assert!(status.is_desired_stopped());
         assert!(!status.is_available_for_requests());
     }
 
@@ -837,58 +643,6 @@ mod tests {
         assert!(!status.is_available_for_requests());
     }
 
-    // ── operation_id 匹配门，迟到操作不能提交 ──────────────────────────────
-
-    #[test]
-    fn operation_id_gate_rejects_mismatched() {
-        let guard = StatusCommitGuard {
-            epoch: ServiceEpoch(1),
-            current_operation_id: Some("op-current-001".to_string()),
-            revision: 10,
-        };
-
-        // 匹配的 operation_id，允许
-        assert!(
-            guard
-                .can_commit(&ServiceEpoch(1), Some("op-current-001"), 11)
-                .is_ok()
-        );
-
-        // 不匹配的 operation_id，拒绝
-        let err = guard
-            .can_commit(&ServiceEpoch(1), Some("op-late-002"), 11)
-            .unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-        assert!(err.detail.contains("operation_id"));
-    }
-
-    #[test]
-    fn operation_id_gate_rejects_missing_id_when_active() {
-        let guard = StatusCommitGuard {
-            epoch: ServiceEpoch(1),
-            current_operation_id: Some("op-active".to_string()),
-            revision: 10,
-        };
-
-        // 有活跃操作但提交未带 operation_id
-        let err = guard.can_commit(&ServiceEpoch(1), None, 11).unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-    }
-
-    #[test]
-    fn operation_id_gate_allows_missing_id_when_idle() {
-        let guard = StatusCommitGuard {
-            epoch: ServiceEpoch(1),
-            current_operation_id: None,
-            revision: 10,
-        };
-
-        // Idle 时允许不带 operation_id
-        assert!(guard.can_commit(&ServiceEpoch(1), None, 11).is_ok());
-    }
-
-    // ── 错误序列化字段稳定 ─────────────────────────────────────────────────
-
     #[test]
     fn error_serialization_roundtrip_preserves_all_fields() {
         let err = LocalEngineError::with_detail(
@@ -920,50 +674,6 @@ mod tests {
         // 高概率不同（混合了 pid + counter + 时间戳）
         // 注意：理论上可能碰撞，但实际不会
         assert_ne!(e1, e2);
-    }
-
-    // ── 显式 backend 失败与 auto fallback 语义不混淆 ───────────────────────
-
-    #[test]
-    fn explicit_backend_failure_vs_auto_fallback_semantics() {
-        // 显式 backend 失败——不回退
-        let explicit = FallbackOutcome::ExplicitBackendFailed {
-            preference: ComputePreference::Cuda,
-            reason: "no CUDA device found".to_string(),
-        };
-        assert!(matches!(
-            explicit,
-            FallbackOutcome::ExplicitBackendFailed { .. }
-        ));
-
-        // auto fallback 成功——记录拒绝项
-        let auto = FallbackOutcome::AutoFallbackResolved {
-            rejected: vec![FallbackEntry {
-                rejected_profile: "cuda-sm86".to_string(),
-                reason: "no_cuda_device".to_string(),
-                detail: "NVIDIA driver not found".to_string(),
-            }],
-            resolved: ResolvedProfile {
-                profile_id: "cpu-x64".to_string(),
-                backend: crate::domain::local_engine::identity::ComputeBackend::Cpu,
-                artifact_id: crate::domain::local_engine::identity::ArtifactId::new(
-                    "python-3.12.8",
-                )
-                .unwrap(),
-                priority: 1,
-            },
-        };
-        assert!(matches!(auto, FallbackOutcome::AutoFallbackResolved { .. }));
-
-        // 两者不能互相混淆
-        assert!(!matches!(
-            explicit,
-            FallbackOutcome::AutoFallbackResolved { .. }
-        ));
-        assert!(!matches!(
-            auto,
-            FallbackOutcome::ExplicitBackendFailed { .. }
-        ));
     }
 
     // ── 状态快照序列化 ─────────────────────────────────────────────────────

@@ -633,6 +633,7 @@ fn capability_error_to_string(e: CapabilityError) -> String {
         CapabilityError::Timeout { detail } => format!("超时: {detail}"),
         CapabilityError::Cancelled => "已取消".to_string(),
         CapabilityError::NotFound { id } => format!("未找到: {id}"),
+        CapabilityError::Backend { message, .. } => message.clone(),
         CapabilityError::Internal { detail } => format!("内部错误: {detail}"),
     }
 }

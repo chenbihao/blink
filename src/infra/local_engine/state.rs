@@ -65,19 +65,7 @@ pub enum ExitReason {
     WaitError { message: String },
 }
 
-impl ExitReason {
-    /// 是否为异常退出（非正常/非主动停止）。
-    pub fn is_abnormal(&self) -> bool {
-        matches!(
-            self,
-            ExitReason::NonZeroExit { .. }
-                | ExitReason::StartFailed { .. }
-                | ExitReason::ForceKilled { .. }
-                | ExitReason::WaitError { .. }
-                | ExitReason::StartCancelled
-        )
-    }
-}
+impl ExitReason {}
 
 /// 每次启动的唯一身份令牌。
 ///
@@ -241,6 +229,7 @@ impl ManagedProcessState {
     }
 
     /// 检查当前 generation 是否已被取消。
+    #[allow(dead_code)] // test cancellation semantics
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }

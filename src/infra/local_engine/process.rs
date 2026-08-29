@@ -56,20 +56,12 @@ use super::state::{
 pub enum ManagedProcessError {
     #[error("进程已在运行 (generation {generation})")]
     AlreadyRunning { generation: u64 },
-    #[error("进程未运行")]
-    NotRunning,
     #[error("启动失败: {message}")]
     SpawnFailed { message: String },
-    #[error("进程已退出: {reason}")]
-    AlreadyExited { reason: String },
     #[error("停止失败: {message}")]
     StopFailed { message: String },
     #[error("Windows Job Object 分配失败: {message}")]
     JobObjectFailed { message: String },
-    #[error("端口冲突: 端口 {port} 被未知进程占用")]
-    PortConflict { port: u16 },
-    #[error("身份验证失败，拒绝终止: {message}")]
-    IdentityVerificationFailed { message: String },
     #[error("内部状态不一致: {message}")]
     InternalInconsistency { message: String },
 }
@@ -113,12 +105,15 @@ pub struct LaunchRequest {
     pub args: Vec<OsString>,
     pub current_dir: Option<PathBuf>,
     pub env: HashMap<String, String>,
+    /// 当前启动路径用独立 instance_id 变量传递；字段保留供测试断言。
+    #[allow(dead_code)]
     pub instance_id: String,
     pub label: String,
     pub shutdown: ShutdownConfig,
 }
 
 impl LaunchRequest {
+    #[allow(dead_code)] // 测试便捷构造
     pub fn new(executable: PathBuf, label: impl Into<String>) -> Self {
         Self {
             executable,
@@ -232,8 +227,8 @@ impl StartOperation {
 /// stop operation 的完成结果（可 Clone，供所有 waiter 共享）。
 #[derive(Debug, Clone)]
 pub enum StopOutcome {
-    /// stop 成功完成，进程树已回收。
-    Done { reason: ExitReason },
+    /// stop 成功完成，进程树已回收（退出原因经 ProcessStatus::Exited 事件传播）。
+    Done,
     /// stop 失败。
     Failed { message: String },
 }
@@ -243,14 +238,13 @@ pub enum StopOutcome {
 /// 首个 stop 在单次 inner lock 内原子创建并标记为 executor。
 /// 看到 Stopping 的后续 stop 只订阅已存在的 StopOperation。
 struct StopOperation {
-    token: InstanceToken,
     completion: OperationCompletion<StopOutcome>,
 }
 
 impl StopOperation {
-    fn new(token: InstanceToken) -> (Self, watch::Receiver<Option<StopOutcome>>) {
+    fn new() -> (Self, watch::Receiver<Option<StopOutcome>>) {
         let (completion, rx) = OperationCompletion::new();
-        (Self { token, completion }, rx)
+        (Self { completion }, rx)
     }
 
     /// 完成此 operation。
@@ -392,6 +386,7 @@ impl ManagedProcess {
     }
 
     /// 获取日志配置（只读，唯一真源）。
+    #[allow(dead_code)] // 测试/诊断用配置读取
     pub fn log_config(&self) -> &LogPipeConfig {
         &self.log_config
     }
@@ -744,7 +739,7 @@ impl ManagedProcess {
                     let force_timeout = inner.force_stop_timeout;
 
                     // 原子创建 StopOperation 并成为 executor
-                    let (stop_op, _stop_rx) = StopOperation::new(token.clone());
+                    let (stop_op, _stop_rx) = StopOperation::new();
                     let stop_op = Arc::new(stop_op);
                     inner.stop_op = Some(Arc::clone(&stop_op));
 
@@ -794,7 +789,7 @@ impl ManagedProcess {
                     let force_timeout = inner.force_stop_timeout;
 
                     // 原子创建 StopOperation 并成为 executor
-                    let (stop_op, _stop_rx) = StopOperation::new(token.clone());
+                    let (stop_op, _stop_rx) = StopOperation::new();
                     let stop_op = Arc::new(stop_op);
                     inner.stop_op = Some(Arc::clone(&stop_op));
 
@@ -834,7 +829,7 @@ impl ManagedProcess {
                 }
                 // 读取最终结果
                 match stop_rx.borrow().clone() {
-                    Some(StopOutcome::Done { .. }) => Ok(()),
+                    Some(StopOutcome::Done) => Ok(()),
                     Some(StopOutcome::Failed { message }) => {
                         Err(ManagedProcessError::StopFailed { message })
                     }
@@ -930,9 +925,7 @@ impl ManagedProcess {
                 }
 
                 // 完成 StopOperation
-                stop_op.complete(StopOutcome::Done {
-                    reason: exit_reason,
-                });
+                stop_op.complete(StopOutcome::Done);
                 Ok(())
             }
 
@@ -958,7 +951,7 @@ impl ManagedProcess {
                         let code = status.code();
                         let reason = ExitReason::Stopped { code };
                         tracing::info!(pid, gen = token.generation, "ManagedProcess: stopped (force kill)");
-                        (reason.clone(), StopOutcome::Done { reason })
+                        (reason, StopOutcome::Done)
                     }
                     Ok(Err(e)) => {
                         let reason = ExitReason::WaitError {
@@ -1000,7 +993,7 @@ impl ManagedProcess {
                                 if inner.state.is_current(&token) {
                                     inner.state.set_status_exited(reason.clone());
                                 }
-                                stop_op.complete(StopOutcome::Done { reason });
+                                stop_op.complete(StopOutcome::Done);
                                 return Ok(());
                             }
                         }
@@ -1011,7 +1004,7 @@ impl ManagedProcess {
                             deadline_exceeded: true,
                         };
                         tracing::info!(pid, gen = token.generation, ?final_wait, "Job Object 回收后 child 退出");
-                        (reason.clone(), StopOutcome::Done { reason })
+                        (reason, StopOutcome::Done)
                     }
                 };
 
@@ -1078,6 +1071,7 @@ impl ManagedProcess {
     /// 等待进程退出（async）。如果进程已退出或未运行，立即返回。
     ///
     /// 使用 watch channel 而非固定轮询，避免超时伪装成功。
+    #[allow(dead_code)] // 测试断言进程终态用
     pub async fn wait(&self) -> Result<ProcessStatus, ManagedProcessError> {
         {
             let inner = self.inner.lock().await;
@@ -1143,6 +1137,7 @@ impl ManagedProcess {
     }
 
     /// 获取截断行计数。
+    #[allow(dead_code)] // 测试断言日志洪泛截断用
     pub fn log_truncated_count(&self) -> u64 {
         self.log_pipe.truncated_line_count()
     }
@@ -1458,7 +1453,6 @@ fn get_os_creation_time_ms(_pid: u32) -> u64 {
 #[cfg(test)]
 mod operation_completion_tests {
     use super::{OperationCompletion, StopOutcome};
-    use crate::infra::local_engine::state::ExitReason;
 
     #[test]
     fn completion_is_once_only_and_late_subscriber_reads_first_result() {
@@ -1489,14 +1483,12 @@ mod operation_completion_tests {
             Some(StopOutcome::Failed { ref message }) if message == "forced failure"
         ));
 
-        // 保证这个测试同时覆盖枚举仍可携带成功退出原因，避免测试辅助漂移。
-        let _ = StopOutcome::Done {
-            reason: ExitReason::Stopped { code: Some(0) },
-        };
+        let _ = StopOutcome::Done;
     }
 }
 
-/// 生成随机 instance_id（公开接口，供 LaunchRequest 构造方调用）。
+/// 生成随机 instance_id（公开接口，供 LaunchRequest 构造方/测试调用）。
+#[allow(dead_code)] // 测试用便捷入口；链条下游由本项激活
 pub fn generate_instance_id_pub() -> String {
     generate_instance_id()
 }

@@ -1,0 +1,34 @@
+{
+  "request_id": "fixture-rect-oob-1",
+  "image_width": 1188,
+  "image_height": 800,
+  "comment": "0.22.6.1 越界 rect 修复 fixture：原始 PaddleOCR 形状输出（dt_polys/text_word_boxes 含越界、负坐标、取整漂移与完全出界数据）。resources/ocr/paddleocr/test_ocr_rect.py 用生产映射（ocr_rect.extract_results）归一化，并与 rect_normalized_out_of_bounds.json 逐字段比对；Rust 端 ocr_coordinator 测试消费 normalized 文件走 map_paddleocr_response 严格校验。",
+  "page_data": {
+    "res": {
+      "rec_texts": ["Blink 本地引擎", "negative poly", "rounding edge", "ghost line", ""],
+      "rec_scores": [0.97, 0.95, 0.93, 0.91, 0.5],
+      "dt_polys": [
+        [[40, 30], [1259.0, 30], [1259.0, 80], [40, 80]],
+        [[-12.5, 120.4], [300, 120.4], [300, 170], [-12.5, 170]],
+        [[0.6, 220], [1188.4, 220], [1188.4, 262], [0.6, 262]],
+        [[1300, 300], [1500, 300], [1500, 350], [1300, 350]],
+        [[10, 400], [200, 400], [200, 440], [10, 440]]
+      ],
+      "rec_boxes": [],
+      "text_word_boxes": [
+        [[40, 30, 200, 80], [200, 30, 400, 80], [1500, 30, 1600, 80], [40, 500, 140, 560]],
+        [[0, 120, 150, 170]],
+        [[0.6, 220, 700, 262], [700, 220, 1188.4, 262]],
+        [],
+        []
+      ],
+      "text_word": [
+        ["Blink", "本地", "outside", "faraway"],
+        ["negative"],
+        ["round", "edge"],
+        ["ghost"],
+        []
+      ]
+    }
+  }
+}

@@ -135,32 +135,6 @@ impl Default for ResourceBudget {
     }
 }
 
-// ── CleanupPolicy ─────────────────────────────────────────────────────────
-
-/// 引擎 cleanup 声明。
-///
-/// 声明引擎拥有哪些子目录和资产，清理只作用于声明范围内的资产。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CleanupPolicy {
-    /// 引擎拥有的子目录列表（相对于引擎根目录）。
-    /// 清理只作用于这些目录。
-    pub owned_subdirs: Vec<String>,
-    /// 是否拥有独立模型缓存目录。
-    pub has_model_cache: bool,
-    /// 是否拥有独立日志目录。
-    pub has_log_dir: bool,
-}
-
-impl Default for CleanupPolicy {
-    fn default() -> Self {
-        Self {
-            owned_subdirs: Vec::new(),
-            has_model_cache: true,
-            has_log_dir: true,
-        }
-    }
-}
-
 // ── EngineTimeouts ─────────────────────────────────────────────────────────
 
 /// 引擎超时与空闲 TTL 配置。
@@ -189,7 +163,7 @@ impl Default for EngineTimeouts {
 /// 引擎描述符（静态事实声明，编译期内置）。
 ///
 /// descriptor 声明引擎的稳定身份、能力种类、运行时种类、安装计划引用、
-/// 模型契约、生命周期策略、超时/空闲 TTL、资源预算和 cleanup 声明。
+/// 模型契约、生命周期策略、超时/空闲 TTL 和资源预算。
 ///
 /// **不接受前端动态传入**：descriptor 由 Rust 编译期声明，
 /// 前端只能传 `engine_id` 与有限动作。
@@ -213,8 +187,6 @@ pub struct EngineDefinition {
     pub timeouts: EngineTimeouts,
     /// 资源预算提示。
     pub resource_budget: ResourceBudget,
-    /// cleanup 声明。
-    pub cleanup: CleanupPolicy,
 }
 
 // ── EngineDisplay ──────────────────────────────────────────────────────────
@@ -283,15 +255,6 @@ impl EngineDefinition {
             .any(|c| c.preference == pref)
     }
 
-    /// 返回此 descriptor 声明的所有 compute preference 列表。
-    pub fn declared_preferences(&self) -> Vec<ComputePreference> {
-        self.install_plan
-            .compute_candidates
-            .iter()
-            .map(|c| c.preference)
-            .collect()
-    }
-
     /// 检查 resolved profile 是否在此 descriptor 声明的候选范围内。
     pub fn is_profile_allowed(&self, resolved: &ResolvedProfile) -> bool {
         self.install_plan
@@ -342,7 +305,6 @@ mod tests {
             lifecycle: LifecyclePolicy::Manual,
             timeouts: EngineTimeouts::default(),
             resource_budget: ResourceBudget::default(),
-            cleanup: CleanupPolicy::default(),
         }
     }
 

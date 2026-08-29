@@ -29,11 +29,6 @@ export const funasrCatalog = {
         {preference: "cuda", profile_id: "cuda12", backend: "cuda", compatible: false, disabled_reason: "本机无 CUDA GPU"},
     ],
     current_compute_preference: "cpu",
-    cleanup_summary: {
-        owned_subdirs: ["generations", "logs"],
-        has_model_cache: true,
-        has_log_dir: true,
-    },
 };
 
 export const paddleocrCatalog = {
@@ -58,11 +53,6 @@ export const paddleocrCatalog = {
         {preference: "cpu", profile_id: "cpu-x64", backend: "cpu", compatible: true, disabled_reason: null},
     ],
     current_compute_preference: "auto",
-    cleanup_summary: {
-        owned_subdirs: ["generations", "logs"],
-        has_model_cache: true,
-        has_log_dir: true,
-    },
 };
 
 export function makeCatalog() {
@@ -145,28 +135,26 @@ export function makeStorage(engineId, overrides = {}) {
         engine_id: engineId,
         targets: [
             {
-                target_id: "gen:current",
-                kind: "engine_generation",
+                target_id: "environment:slot-a",
+                kind: "engine_environment",
                 engine_id: engineId,
-                label_key: "local_engine.storage.engine_generation",
+                label_key: "local_engine.storage.engine_environment",
                 label_fallback: "当前环境",
                 size_bytes: 3000 * 1024 * 1024,
                 current: true,
-                previous: false,
                 removable: false,
                 shared: false,
                 requires_separate_confirmation: false,
-                blocked_reason: "current_generation",
+                blocked_reason: "current_environment",
             },
             {
-                target_id: "gen:old",
-                kind: "engine_generation",
+                target_id: "environment:slot-b",
+                kind: "engine_environment",
                 engine_id: engineId,
-                label_key: "local_engine.storage.engine_generation",
-                label_fallback: "上一环境",
+                label_key: "local_engine.storage.engine_environment",
+                label_fallback: "残留环境",
                 size_bytes: 2900 * 1024 * 1024,
                 current: false,
-                previous: true,
                 removable: true,
                 shared: false,
                 requires_separate_confirmation: false,

@@ -70,48 +70,12 @@ pub struct LocalSttEngine {
 }
 
 impl LocalSttEngine {
-    /// 创建本地 STT 引擎。
-    ///
-    /// 0.22.6 批次 3: `port` 和 `token` 来自 `SttEngineConnection`（由 app 层从
-    /// `EngineManager::get_connection` 投影而来），不再从 SttConfig 读取
-    /// preferred port。health 和 transcribe 使用同一连接快照。
-    pub fn new(
-        config: &crate::domain::config::stt_config::SttConfig,
-        port: u16,
-        token: String,
-    ) -> Result<Self, String> {
-        let model = config.local_engine.funasr_model.clone();
-
-        let ready = super::funasr::is_server_ready(port);
-        if !ready {
-            return Err(format!(
-                "FunASR 服务未在端口 {port} 上运行。\
-                 请在设置页「语音输入」→「本地模式」中点击「启动服务」按钮。\
-                 （首次使用需先点击「安装环境」，Blink 会自动安装 Python + funasr）"
-            ));
-        }
-
-        tracing::info!(port, model = %model, "本地 STT 引擎: FunASR server (就绪)");
-
-        Ok(Self {
-            samples: Mutex::new(Vec::new()),
-            sample_rate: 16000,
-            connection: Some(crate::domain::stt::SttEngineConnection {
-                host: "127.0.0.1".to_string(),
-                port,
-                token,
-                engine_id: String::new(),
-                instance_id: String::new(),
-            }),
-            funasr_model: model,
-            server_ready: true,
-        })
-    }
-
     /// 从 `SttEngineConnection` 创建本地 STT 引擎（0.22.6 批次 3）。
     ///
-    /// 这是推荐的生产构造方式——连接快照包含完整的 host/port/token/IDs，
-    /// health 和 transcribe 共用同一快照。
+    /// 推荐的生产构造方式——连接快照包含完整的 host/port/token/engine_id/
+    /// instance_id，health 与 transcribe 共用同一快照；finalize 的身份
+    /// fail-closed 校验依赖快照中的身份字段（`new` 构造的空身份无法通过
+    /// 真实服务器的 engine_id/instance_id 回显比对）。
     pub fn from_connection(
         config: &crate::domain::config::stt_config::SttConfig,
         conn: crate::domain::stt::SttEngineConnection,
@@ -142,6 +106,7 @@ impl LocalSttEngine {
     ///
     /// 0.22.6: 诊断模式不携带 token，仅用于 TCP 级别探测。
     /// 不参与正式录音链路。
+    #[cfg(test)]
     pub fn for_diagnostic(port: u16) -> Self {
         Self {
             samples: Mutex::new(Vec::new()),

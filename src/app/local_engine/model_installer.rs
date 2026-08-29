@@ -140,7 +140,7 @@ impl BoundedInstallSink {
 /// - 洪泛保护由内部缓冲上限与 installer 侧 `disable_progress_bar` 共同保证。
 pub struct BroadcastingInstallSink {
     inner: BoundedInstallSink,
-    event_port: Arc<dyn super::service::EventPort>,
+    event_port: Arc<dyn super::EventPort>,
     engine_id: EngineId,
     operation_id: String,
     log_seq: std::sync::atomic::AtomicU64,
@@ -149,7 +149,7 @@ pub struct BroadcastingInstallSink {
 impl BroadcastingInstallSink {
     pub fn new(
         inner: BoundedInstallSink,
-        event_port: Arc<dyn super::service::EventPort>,
+        event_port: Arc<dyn super::EventPort>,
         engine_id: EngineId,
         operation_id: String,
     ) -> Self {
@@ -348,11 +348,11 @@ const BLINK_MODEL_INSTALLER_PY: &str =
 
 /// FunASR 专用模型安装 worker（B2）。
 ///
-/// 使用 current generation venv 中的 Python 运行 `blink_model_installer.py`，
+/// 使用 active deployment venv 中的 Python 运行 `blink_model_installer.py`，
 /// 通过 ModelScope 官方库下载模型到 staging payload 目录。
 ///
 /// **铁则**：
-/// - 只使用 current generation venv 中的 Python
+/// - 只使用 active deployment venv 中的 Python
 /// - 只接受编译期 allowlist 中的 model id/revision
 /// - Rust adapter 将 canonical model id 映射为固定 worker 参数
 /// - 前端和通用 command 不得提供 URL、Python 路径、脚本路径或环境变量
@@ -396,8 +396,8 @@ impl FunasrModelInstallWorker {
         Ok(script_path)
     }
 
-    /// 查找 current generation venv 中的 python.exe。
-    fn find_generation_python() -> Option<std::path::PathBuf> {
+    /// 查找 active deployment venv 中的 python.exe。
+    fn find_active_deployment_python() -> Option<std::path::PathBuf> {
         let engine_id = EngineId::new("funasr").ok()?;
         // active 部署（slot + pointer）中的 venv python
         let (_pointer, dir) =
@@ -430,10 +430,10 @@ impl ModelInstallWorker for FunasrModelInstallWorker {
         cancel_token: CancellationToken,
         sink: Option<Arc<dyn InstallSink>>,
     ) -> Result<ModelDownloadOutcome, ModelDownloadError> {
-        // 1. 查找 current generation venv 中的 Python
+        // 1. 查找 active deployment venv 中的 Python
         let python =
-            Self::find_generation_python().ok_or_else(|| ModelDownloadError::Internal {
-                message: "FunASR generation venv 未安装——请先安装环境".to_string(),
+            Self::find_active_deployment_python().ok_or_else(|| ModelDownloadError::Internal {
+                message: "FunASR active deployment venv 未安装——请先安装环境".to_string(),
             })?;
 
         // 2. 释放 installer 脚本

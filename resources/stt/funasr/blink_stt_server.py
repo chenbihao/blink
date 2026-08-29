@@ -581,8 +581,9 @@ async def health(request: Request):
     - ``instance_id``: 实例 id（从环境变量读取）
     - ``token_fingerprint``: token 的 SHA-256 fingerprint
     - ``endpoint``: 实际监听端点
-    - ``backend``: 推理后端（cpu/cuda）
-    - ``device_name``: 设备名
+    - ``requested_backend``: 启动参数请求的设备（始终回传）
+    - ``backend``: 实际推理执行后端（仅模型已建立执行后端后回传）
+    - ``device_name``: 实际设备名（与 backend 同条件回传）
     - ``model_id``: 模型 id
     - ``model_revision``: 模型版本
     - ``model_content_fingerprint``: 模型内容指纹（仅 Ready 时返回）
@@ -612,7 +613,14 @@ async def health(request: Request):
     if hasattr(args, "port"):
         response["endpoint"] = f"127.0.0.1:{args.port}"
 
-    # 推理后端信息
+    # ── requested/actual 语义（0.22.6.1）──
+    # - requested_backend：启动参数请求的设备（始终回传，可能为 cpu/cuda）。
+    # - backend / device_name：实际推理执行后端，仅在模型已实际建立执行后端
+    #   （_model 非 None）后根据 torch 观测回传；未建立前不回传 backend——
+    #   不得把请求设备字符串（CPU/CUDA）冒充真实设备观察。
+    #   Rust 宿主据此实现 backend 最终一致性：Loading/Idle 期间不校验，
+    #   Model Ready 后必须能观测到 actual backend。
+    response["requested_backend"] = args.device
     if _model is not None:
         try:
             import torch
@@ -623,11 +631,8 @@ async def health(request: Request):
                 response["backend"] = "cpu"
                 response["device_name"] = "CPU"
         except ImportError:
-            response["backend"] = args.device
-            response["device_name"] = args.device.upper()
-    else:
-        response["backend"] = args.device
-        response["device_name"] = args.device.upper()
+            # torch 不可用 → 无法观测真实执行后端，不回传 backend 字段
+            logger.warning("torch 不可用，无法观测实际执行后端，health 不回传 backend")
 
     # 0.22.6 B2: 动态模型身份（从环境变量注入，不使用静态 descriptor 合同）
     response["model_id"] = _model_id_expected or getattr(args, "model", "")

@@ -37,6 +37,8 @@ pub enum OcrErrorCategory {
     ProtocolError,
     /// 图片解码失败。
     DecodeError,
+    /// 输入超出资源预算（compressed bytes / 单边尺寸 / decoded 像素预算）。
+    InputTooLarge,
     /// 后端不可用（无 WinRT、无 PaddleOCR 连接）。
     BackendUnavailable,
 }
@@ -51,6 +53,7 @@ impl std::fmt::Display for OcrErrorCategory {
             OcrErrorCategory::Cancelled => write!(f, "cancelled"),
             OcrErrorCategory::ProtocolError => write!(f, "protocol_error"),
             OcrErrorCategory::DecodeError => write!(f, "decode_error"),
+            OcrErrorCategory::InputTooLarge => write!(f, "input_too_large"),
             OcrErrorCategory::BackendUnavailable => write!(f, "backend_unavailable"),
         }
     }
@@ -141,6 +144,11 @@ impl StructuredOcrError {
         Self::new(OcrErrorCategory::DecodeError, msg, false)
     }
 
+    /// 输入超出资源预算（带实际值与允许上限，不记录图片内容）。
+    pub fn input_too_large(message: impl Into<String>, detail: serde_json::Value) -> Self {
+        Self::with_detail(OcrErrorCategory::InputTooLarge, message, false, detail)
+    }
+
     /// 后端不可用错误。
     pub fn backend_unavailable(msg: impl Into<String>) -> Self {
         Self::new(OcrErrorCategory::BackendUnavailable, msg, false)
@@ -167,49 +175,6 @@ impl From<&crate::domain::capability::builtins::ocr_engine::OcrError> for Struct
             OcrError::Decode(msg) => StructuredOcrError::decode_error(msg.clone()),
             OcrError::Unsupported => StructuredOcrError::backend_unavailable("当前平台不支持 OCR"),
         }
-    }
-}
-
-/// 便捷构造 trait。
-///
-/// 预留：`StructuredOcrError` 已有同名构造方法，此 trait 提供替代调用路径。
-/// 当前版本无 caller，保留供未来错误处理统一入口使用。
-#[allow(dead_code)]
-pub trait OcrErrorExt {
-    fn environment_missing() -> StructuredOcrError;
-    fn start_failed(msg: impl Into<String>) -> StructuredOcrError;
-    fn model_not_ready(state: impl Into<String>) -> StructuredOcrError;
-    fn timeout() -> StructuredOcrError;
-    fn cancelled() -> StructuredOcrError;
-    fn protocol_error(msg: impl Into<String>) -> StructuredOcrError;
-    fn decode_error(msg: impl Into<String>) -> StructuredOcrError;
-    fn backend_unavailable(msg: impl Into<String>) -> StructuredOcrError;
-}
-
-impl OcrErrorExt for StructuredOcrError {
-    fn environment_missing() -> StructuredOcrError {
-        StructuredOcrError::environment_missing()
-    }
-    fn start_failed(msg: impl Into<String>) -> StructuredOcrError {
-        StructuredOcrError::start_failed(msg)
-    }
-    fn model_not_ready(state: impl Into<String>) -> StructuredOcrError {
-        StructuredOcrError::model_not_ready(state)
-    }
-    fn timeout() -> StructuredOcrError {
-        StructuredOcrError::timeout()
-    }
-    fn cancelled() -> StructuredOcrError {
-        StructuredOcrError::cancelled()
-    }
-    fn protocol_error(msg: impl Into<String>) -> StructuredOcrError {
-        StructuredOcrError::protocol_error(msg)
-    }
-    fn decode_error(msg: impl Into<String>) -> StructuredOcrError {
-        StructuredOcrError::decode_error(msg)
-    }
-    fn backend_unavailable(msg: impl Into<String>) -> StructuredOcrError {
-        StructuredOcrError::backend_unavailable(msg)
     }
 }
 

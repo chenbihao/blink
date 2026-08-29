@@ -122,6 +122,9 @@ impl OperationLogStore {
     }
 
     /// 查询指定引擎指定 operation 的日志。
+    /// 当前生产路径使用 `query`（双源合并去重）；本方法由模块测试行使，
+    /// 验证按 operation_id 的隔离读取语义。
+    #[allow(dead_code)]
     pub fn query_operation(
         &self,
         engine_id: &EngineId,

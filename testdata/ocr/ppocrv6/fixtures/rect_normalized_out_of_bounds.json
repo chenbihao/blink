@@ -1,0 +1,125 @@
+{
+  "request_id": "fixture-rect-oob-1",
+  "engine": "paddleocr",
+  "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
+  "model_revision": "ppocrv6-tiny",
+  "image_width": 1188,
+  "image_height": 800,
+  "lines": [
+    {
+      "text": "Blink 本地引擎",
+      "rect": {
+        "x": 40,
+        "y": 30,
+        "w": 1148,
+        "h": 50
+      },
+      "word_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "confidence": 0.97
+    },
+    {
+      "text": "negative poly",
+      "rect": {
+        "x": 0,
+        "y": 120,
+        "w": 300,
+        "h": 50
+      },
+      "word_indices": [
+        4
+      ],
+      "confidence": 0.95
+    },
+    {
+      "text": "rounding edge",
+      "rect": {
+        "x": 1,
+        "y": 220,
+        "w": 1187,
+        "h": 42
+      },
+      "word_indices": [
+        5,
+        6
+      ],
+      "confidence": 0.93
+    }
+  ],
+  "words": [
+    {
+      "text": "Blink",
+      "rect": {
+        "x": 40,
+        "y": 30,
+        "w": 160,
+        "h": 50
+      },
+      "line_index": 0
+    },
+    {
+      "text": "本地",
+      "rect": {
+        "x": 200,
+        "y": 30,
+        "w": 200,
+        "h": 50
+      },
+      "line_index": 0
+    },
+    {
+      "text": "outside",
+      "rect": {
+        "x": 40,
+        "y": 30,
+        "w": 1148,
+        "h": 50
+      },
+      "line_index": 0
+    },
+    {
+      "text": "faraway",
+      "rect": {
+        "x": 40,
+        "y": 30,
+        "w": 1148,
+        "h": 50
+      },
+      "line_index": 0
+    },
+    {
+      "text": "negative",
+      "rect": {
+        "x": 0,
+        "y": 120,
+        "w": 150,
+        "h": 50
+      },
+      "line_index": 1
+    },
+    {
+      "text": "round",
+      "rect": {
+        "x": 1,
+        "y": 220,
+        "w": 699,
+        "h": 42
+      },
+      "line_index": 2
+    },
+    {
+      "text": "edge",
+      "rect": {
+        "x": 700,
+        "y": 220,
+        "w": 488,
+        "h": 42
+      },
+      "line_index": 2
+    }
+  ]
+}

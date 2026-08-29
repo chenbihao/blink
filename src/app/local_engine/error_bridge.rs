@@ -73,15 +73,9 @@ pub fn from_process(
 ) -> LocalEngineError {
     let code = match err {
         ManagedProcessError::AlreadyRunning { .. } => LocalEngineErrorCode::AlreadyRunning,
-        ManagedProcessError::NotRunning => LocalEngineErrorCode::NotRunning,
         ManagedProcessError::SpawnFailed { .. } => LocalEngineErrorCode::SpawnFailed,
-        ManagedProcessError::AlreadyExited { .. } => LocalEngineErrorCode::AlreadyExited,
         ManagedProcessError::StopFailed { .. } => LocalEngineErrorCode::StopFailed,
         ManagedProcessError::JobObjectFailed { .. } => LocalEngineErrorCode::JobObjectFailed,
-        ManagedProcessError::PortConflict { .. } => LocalEngineErrorCode::PortConflict,
-        ManagedProcessError::IdentityVerificationFailed { .. } => {
-            LocalEngineErrorCode::IdentityVerification
-        }
         ManagedProcessError::InternalInconsistency { .. } => LocalEngineErrorCode::Internal,
     };
 
@@ -135,8 +129,10 @@ mod tests {
 
     #[test]
     fn from_process_maps_codes() {
-        let proc_err = ManagedProcessError::NotRunning;
-        let err = from_process(ErrorPhase::Stop, "进程未运行", &proc_err);
-        assert_eq!(err.code, LocalEngineErrorCode::NotRunning);
+        let proc_err = ManagedProcessError::StopFailed {
+            message: "test".to_string(),
+        };
+        let err = from_process(ErrorPhase::Stop, "停止失败", &proc_err);
+        assert_eq!(err.code, LocalEngineErrorCode::StopFailed);
     }
 }

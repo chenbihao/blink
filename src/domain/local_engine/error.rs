@@ -43,20 +43,6 @@ impl std::fmt::Display for LocalEngineError {
 }
 
 impl LocalEngineError {
-    /// 快捷构造：指定 code、phase、action_hint，detail 从 Display 推导。
-    pub fn new(
-        code: LocalEngineErrorCode,
-        phase: ErrorPhase,
-        action_hint: impl Into<String>,
-    ) -> Self {
-        Self {
-            code,
-            phase,
-            action_hint: action_hint.into(),
-            detail: String::new(),
-        }
-    }
-
     /// 带内部诊断上下文构造。
     pub fn with_detail(
         code: LocalEngineErrorCode,
@@ -215,10 +201,11 @@ mod tests {
 
     #[test]
     fn error_display_contains_code_and_phase() {
-        let err = LocalEngineError::new(
+        let err = LocalEngineError::with_detail(
             LocalEngineErrorCode::Timeout,
             ErrorPhase::Health,
             "健康检查超时",
+            "",
         );
         let display = format!("{err}");
         assert!(display.contains("Timeout"));

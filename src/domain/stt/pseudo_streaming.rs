@@ -132,72 +132,9 @@ impl SentenceBuffer {
 }
 
 impl PseudoStreamingSttEngine {
-    /// 创建伪流式 STT 引擎。
-    ///
-    /// 0.22.6 批次 3: `port` 和 `token` 来自 `SttEngineConnection`（由 app 层从
-    /// `EngineManager::get_connection` 投影而来）。health 和 transcribe 使用同一连接快照。
-    pub fn new(
-        config: &crate::domain::config::stt_config::SttConfig,
-        port: u16,
-        token: String,
-    ) -> Result<Self, String> {
-        let model = config.local_engine.funasr_model.clone();
-
-        let ready = super::funasr::is_server_ready(port);
-        if !ready {
-            return Err(format!(
-                "FunASR 服务未在端口 {port} 上运行。\
-                 请在设置页「语音输入」→「本地模式」中点击「启动服务」按钮。"
-            ));
-        }
-
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
-
-        let vad_cfg = &config.local_engine.vad;
-        tracing::info!(
-            port, model = %model,
-            silence_threshold = vad_cfg.silence_threshold,
-            min_silence_ms = vad_cfg.min_silence_ms,
-            min_sentence_ms = vad_cfg.min_sentence_ms,
-            "伪流式 STT 引擎: VAD + HTTP 轮询 (就绪)"
-        );
-
-        Ok(Self {
-            inner: Arc::new(Mutex::new(PseudoInner {
-                vad: EnergyVad::with_params(
-                    16000,
-                    vad_cfg.silence_threshold,
-                    vad_cfg.min_silence_ms,
-                    vad_cfg.min_sentence_ms,
-                ),
-                sentences: SentenceBuffer::new(),
-                samples: Vec::new(),
-                last_preview: Instant::now(),
-                preview_in_flight: false,
-                latest_preview: String::new(),
-                finalize_in_flight: false,
-                pending_confirmed: None,
-                preview_generation: 0,
-            })),
-            client,
-            connection: Some(crate::domain::stt::SttEngineConnection {
-                host: "127.0.0.1".to_string(),
-                port,
-                token,
-                engine_id: String::new(),
-                instance_id: String::new(),
-            }),
-            funasr_model: model,
-            sample_rate: 16000,
-        })
-    }
-
     /// 从 `SttEngineConnection` 创建伪流式 STT 引擎（0.22.6 批次 3）。
     ///
-    /// 这是推荐的生产构造方式——连接快照包含完整的 host/port/token/IDs，
+    /// 推荐的生产构造方式——连接快照包含完整身份（host/port/token/IDs），
     /// health 和 transcribe 共用同一快照。
     pub fn from_connection(
         config: &crate::domain::config::stt_config::SttConfig,

@@ -1,11 +1,11 @@
 //! 本地引擎领域协议。
 //!
-//! 定义 provider-neutral、框架无关的本地引擎身份、状态、描述符、操作协调、
+//! 定义 provider-neutral、框架无关的本地引擎身份、状态、描述符、操作结果、
 //! 错误分类和纯状态提交逻辑。
 //!
 //! ## 分层归属
 //!
-//! - `domain/local_engine`：稳定 id、声明、状态类型、操作协调器、错误分类、
+//! - `domain/local_engine`：稳定 id、声明、状态类型、操作结果、错误分类、
 //!   生命周期策略和引擎特有的启动/健康适配接口；**不依赖 infra、不发送
 //!   Tauri 事件、不持有 AppHandle、不直接使用 windows crate**。
 //! - `infra/local_engine`：启动/停止子进程、排空管道、PID 身份验证、端口探测、
@@ -45,8 +45,8 @@ pub use adapter::{
 };
 #[allow(unused_imports)]
 pub use descriptor::{
-    CapabilityKind, CleanupPolicy, ComputeCandidate, EngineDefinition, EngineDisplay,
-    EngineTimeouts, InstallPlanRef, LifecyclePolicy, ResourceBudget,
+    CapabilityKind, ComputeCandidate, EngineDefinition, EngineDisplay, EngineTimeouts,
+    InstallPlanRef, LifecyclePolicy, ResourceBudget,
 };
 #[allow(unused_imports)]
 pub use error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
@@ -61,16 +61,15 @@ pub use identity::{
 pub use model::{
     DeleteConflictReason, EngineModelDescriptor, EngineModelStatus, ModelCompatibility,
     ModelDeleteConflict, ModelIdentityVerification, ModelInstallState, ModelOperationKind,
-    ModelOperationRequest, ModelOperationResult, ModelOperationStage, ModelVerificationState,
-    transition_install_state,
+    ModelOperationResult, ModelOperationStage, ModelVerificationState,
 };
 #[allow(unused_imports)]
-pub use operation::{CancelOutcome, EngineOperationCoordinator, OperationGuard};
+pub use operation::CancelOutcome;
 #[allow(unused_imports)]
 pub use status::{
     BackendInfo, DesiredState, EngineOperation, EngineStatus, EngineStatusSnapshot,
-    EnvOperationEndState, EnvironmentHealth, FallbackEntry, FallbackOutcome, ModelHealth,
-    OperationKind, OperationStage, ProcessState, ServiceEpoch, ServiceHealth, StatusCommitGuard,
+    EnvOperationEndState, EnvironmentHealth, FallbackEntry, ModelHealth, OperationKind,
+    OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
 };
 
 // ── 领域层纯逻辑测试 ──────────────────────────────────────────────────────
@@ -142,7 +141,6 @@ mod domain_tests {
             lifecycle: LifecyclePolicy::Manual,
             timeouts: EngineTimeouts::default(),
             resource_budget: ResourceBudget::default(),
-            cleanup: CleanupPolicy::default(),
         };
 
         // 声明的 profile 允许

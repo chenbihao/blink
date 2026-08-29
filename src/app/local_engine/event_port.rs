@@ -25,9 +25,9 @@ use crate::domain::local_engine::{
 };
 use crate::infra::local_engine::runtime::EngineId;
 
+use super::EventPort;
 use super::dto::{EngineLogDto, EngineLogLevel, EngineStatusDto, project_status};
 use super::operation_log_store::{OperationLogEntry, OperationLogStore};
-use super::service::EventPort;
 
 /// Tauri 事件投影出口。
 ///

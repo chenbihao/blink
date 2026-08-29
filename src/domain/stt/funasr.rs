@@ -35,6 +35,7 @@ const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/bl
 /// server 启动超时（秒）。
 /// 首次启动需要从 ModelScope 下载模型（~234MB），加上 PyTorch 加载，
 /// 可能需要 3-5 分钟。后续启动仅模型加载，通常 30-60 秒。
+#[cfg(test)]
 pub const SERVER_STARTUP_TIMEOUT_SECS: u64 = 300;
 
 // ── Python 脚本释放 ────────────────────────────────────────────────────────
@@ -166,7 +167,7 @@ pub(crate) fn normalize_hotwords(raw: &str) -> String {
 /// server 启动后 uvicorn 先绑定 TCP 端口，但模型可能还在加载（30-60s），
 /// 此时 TCP 连接成功但 HTTP 请求会失败。
 ///
-/// 用于快速预检（如 `LocalSttEngine::new` 中的快速失败判断）。
+/// 用于快速预检（如 `LocalSttEngine::from_connection` 中的快速失败判断）。
 /// 在需要确保模型真正就绪的场景，使用 [`check_model_loaded`]。
 /// 在需要清理孤儿进程的场景，使用 `infra::platform::process::kill_process_by_port`。
 pub fn is_server_ready(port: u16) -> bool {
@@ -353,6 +354,7 @@ pub async fn check_model_ready_or_error_with_token(
 ///
 /// 0.22.3：使用 `127.0.0.1` 而非 `localhost`，与 EngineManager 的
 /// Endpoint 协议一致——Endpoint 只允许 loopback。
+#[cfg(test)]
 pub fn server_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/v1")
 }
@@ -818,15 +820,16 @@ mod tests {
         assert_eq!(text, "你好世界", "转录结果应为确定的文本");
     }
 
-    /// 跨层闭环：真实 ModelService staging/promote → 新服务从 manifest 恢复 →
-    /// selection gate 可用 → 动态 endpoint/token health → LocalSttEngine 转录。
+    /// 跨层闭环：真实模型安装事务（model_storage staging/promote）→
+    /// 服务从 manifest 恢复 → selection gate 可用 → 动态 endpoint/token
+    /// health → LocalSttEngine 转录。
     #[tokio::test]
     async fn hermetic_install_restore_selection_gate_health_and_transcribe() {
         use std::sync::Arc;
 
         use crate::app::local_engine::model_installer::{FakeInstaller, ModelRegistry};
         use crate::app::local_engine::registry::EngineRegistry;
-        use crate::app::local_engine::service::{EngineManager, NoopEventPort};
+        use crate::app::local_engine::{EngineManager, NoopEventPort};
         use crate::domain::local_engine::EngineModelDescriptor;
         use crate::domain::stt::{SttEngine, local::LocalSttEngine};
         use crate::infra::local_engine::{model_storage, runtime};
