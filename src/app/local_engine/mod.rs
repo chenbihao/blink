@@ -20,6 +20,7 @@
 //! `blink://local-engine-status` / `blink://local-engine-log`，
 //! 并做旧 FunASR 兼容投影。
 
+pub mod config_source; // AdapterConfig 配置真源（唯一入口，去重 commands/maintenance/service）
 pub mod dto;
 pub mod error_bridge;
 pub mod event_port;

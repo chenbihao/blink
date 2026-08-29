@@ -225,6 +225,31 @@ impl EngineOperation {
     }
 }
 
+// ── EnvOperationEndState ─────────────────────────────────────────────────────
+
+/// 环境变更操作（install/repair）的正常终态。
+///
+/// **取消是正常终态**——操作被用户取消时以 `Cancelled` 结束，
+/// 不包装成 `LocalEngineError::Cancelled` 由 command 二次解码。
+/// 失败仍走 `Err(LocalEngineError)`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvOperationEndState {
+    /// 操作完成（事务提交 + self-test 通过）。
+    Completed,
+    /// 操作被用户取消（事务已回滚，环境保持原状）。
+    Cancelled,
+}
+
+impl std::fmt::Display for EnvOperationEndState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed => f.write_str("completed"),
+            Self::Cancelled => f.write_str("cancelled"),
+        }
+    }
+}
+
 // ── ProcessState ────────────────────────────────────────────────────────────
 
 /// 进程观测状态（domain 层投影，复用 infra ProcessStatus 语义）。
@@ -478,6 +503,16 @@ impl EngineStatus {
     /// 注意：这不是 observed state，只是用户意图。
     pub fn is_desired_stopped(&self) -> bool {
         self.desired == DesiredState::Stopped
+    }
+
+    /// 操作结束收尾：把 operation 归位 Idle。
+    ///
+    /// **铁则**：操作结束后 `active_operation` 必须变为 None——
+    /// 不允许 `kind=Installing && stage=Completed` 的混合状态驻留快照
+    /// （前端会把 kind!=Idle 判定为 busy）。操作结果由 command response
+    /// 或 completed event 表达，不驻留在 operation 字段。
+    pub fn clear_operation(&mut self) {
+        self.operation = EngineOperation::default();
     }
 
     /// 判断进程是否活跃（Starting/Running/Stopping）。
@@ -1115,5 +1150,60 @@ mod tests {
         assert_eq!(OperationStage::Completed.to_string(), "completed");
         assert_eq!(OperationStage::Cancelled.to_string(), "cancelled");
         assert_eq!(OperationStage::Failed.to_string(), "failed");
+    }
+
+    // ── 操作终态语义（0.22.6 phase B）────────────────────────────────────
+
+    /// clear_operation 归位 Idle——操作结束后不留 Installing+Completed 混合状态。
+    #[test]
+    fn clear_operation_resets_to_idle() {
+        let mut status = EngineStatus {
+            operation: EngineOperation {
+                kind: OperationKind::Installing,
+                operation_id: "op-1".to_string(),
+                stage: OperationStage::Completed,
+                cancellable: true,
+            },
+            ..Default::default()
+        };
+        // 混合状态是 busy——这正是要消除的
+        assert!(status.operation.is_active());
+
+        status.clear_operation();
+        assert_eq!(status.operation.kind, OperationKind::Idle);
+        assert!(!status.operation.is_active());
+    }
+
+    /// 环境操作终态 wire 值稳定——前端 i18n/分支依赖这些字符串。
+    #[test]
+    fn env_operation_end_state_wire_values_stable() {
+        assert_eq!(
+            serde_json::to_string(&EnvOperationEndState::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnvOperationEndState::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+        assert_eq!(EnvOperationEndState::Completed.to_string(), "completed");
+        assert_eq!(EnvOperationEndState::Cancelled.to_string(), "cancelled");
+    }
+
+    /// CancelOutcome 序列化带 outcome tag，取消是正常语义非错误。
+    #[test]
+    fn cancel_outcome_serialization_has_outcome_tag() {
+        use crate::domain::local_engine::CancelOutcome;
+        let cancelled = serde_json::to_value(CancelOutcome::Cancelled).unwrap();
+        assert_eq!(cancelled["outcome"], "cancelled");
+
+        let no_op = serde_json::to_value(CancelOutcome::NoActiveOperation).unwrap();
+        assert_eq!(no_op["outcome"], "no_active_operation");
+
+        let mismatched = serde_json::to_value(CancelOutcome::Mismatched {
+            current_operation_id: "op-current".to_string(),
+        })
+        .unwrap();
+        assert_eq!(mismatched["outcome"], "mismatched");
+        assert_eq!(mismatched["current_operation_id"], "op-current");
     }
 }

@@ -442,6 +442,33 @@ impl ConflictRetryPolicy {
     }
 }
 
+// ── address-in-use 识别 ────────────────────────────────────────────────────
+
+/// 判断一段进程输出是否为**明确的**地址占用错误。
+///
+/// **铁则**：只匹配明确的 address-in-use 文案——其他任何失败
+/// （ImportError、缺依赖、配置错误等）一律返回 false，不触发重新分配。
+/// 未知进程占用端口永远只换端口重试，绝不终止占用者。
+///
+/// 覆盖：
+/// - Windows：`WSAEADDRINUSE` / `(OS error 10048)` / "Only one usage of each socket address"
+/// - Linux：`Address already in use` / `[Errno 98]`
+/// - 常见 Python 服务器（uvicorn/hyper）绑定失败的表述
+pub fn is_explicit_address_in_use(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    const MARKERS: [&str; 8] = [
+        "address already in use",
+        "only one usage of each socket address",
+        "wsaeaddrinuse",
+        "os error 10048",
+        "winerror 10048",
+        "[errno 10048]",
+        "[errno 98]",
+        "error while attempting to bind on address",
+    ];
+    MARKERS.iter().any(|m| lowered.contains(m))
+}
+
 // ── 测试 ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -904,10 +931,96 @@ mod tests {
         assert!(matches!(result, Err(PortError::InvalidRange { .. })));
     }
 
+    // ── address-in-use 分类器（bind race 确定性测试）────────────────────────
+
+    #[test]
+    fn address_in_use_classifier_matches_explicit_markers() {
+        // Windows WinError 10048
+        assert!(is_explicit_address_in_use(
+            "OSError: [WinError 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。"
+        ));
+        assert!(is_explicit_address_in_use(
+            "[Errno 10048] error while attempting to bind on address ('127.0.0.1', 8100)"
+        ));
+        // Linux errno 98
+        assert!(is_explicit_address_in_use(
+            "OSError: [Errno 98] Address already in use"
+        ));
+        // 英文直述
+        assert!(is_explicit_address_in_use(
+            "socket.bind(): Address already in use"
+        ));
+        // Windows 英文文案
+        assert!(is_explicit_address_in_use(
+            "error: Only one usage of each socket address (protocol/network address/port) is normally permitted."
+        ));
+        // WSAEADDRINUSE
+        assert!(is_explicit_address_in_use("bind failed: WSAEADDRINUSE"));
+        // 大小写不敏感
+        assert!(is_explicit_address_in_use("ADDRESS ALREADY IN USE"));
+    }
+
+    #[test]
+    fn address_in_use_classifier_rejects_other_failures() {
+        // 其他失败一律不匹配——不触发重新分配
+        assert!(!is_explicit_address_in_use(
+            "ModuleNotFoundError: No module named 'funasr'"
+        ));
+        assert!(!is_explicit_address_in_use("ImportError: torch missing"));
+        assert!(!is_explicit_address_in_use("Killed"));
+        assert!(!is_explicit_address_in_use(""));
+        assert!(!is_explicit_address_in_use(
+            "OSError: [Errno 13] Permission denied"
+        ));
+        // 端口号数字本身出现不构成占用证据
+        assert!(!is_explicit_address_in_use("listening on port 10048"));
+    }
+
+    /// bind race 确定性测试：探测空闲后端口被抢——
+    /// 重新分配必须选出另一个端口，且整个过程不终止任何进程。
+    #[test]
+    fn allocator_reallocates_different_port_after_bind_race() {
+        let _lock = PORT_TEST_GUARD.lock().unwrap();
+        // 模拟 probe-then-bind race：allocator 探测 P1 空闲并返回；
+        // 在子进程真正 bind 前，"另一个进程"占住了 P1。
+        let first = find_free_port();
+        let allocator = EndpointAllocator::with_defaults(first);
+        let probed = allocator.allocate().expect("首次探测应成功");
+        assert_eq!(probed.port(), first);
+
+        // race 发生：P1 被抢
+        let _race_winner = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, probed.port()))
+            .expect("模拟竞争者占用 probe 到的端口");
+
+        // 重新分配——必须给出不同的端口（候选范围内第一个非占用者），
+        // 且不产生任何 kill 动作（allocator 无此能力，类型层面成立）。
+        let reallocated = allocator.allocate().expect("重新分配应成功");
+        assert_ne!(
+            reallocated.port(),
+            probed.port(),
+            "bind race 后重新分配不应再选中同一端口"
+        );
+        assert!(reallocated.socket_addr().ip().is_loopback());
+    }
+
+    /// bind race 重试必须有限——重试次数由 ConflictRetryPolicy 封顶。
+    #[test]
+    fn bind_race_retry_is_bounded_by_policy() {
+        let policy = ConflictRetryPolicy::default();
+        let mut attempt = 1usize;
+        let mut retried = 0usize;
+        while policy.should_retry(attempt) {
+            retried += 1;
+            attempt += 1;
+        }
+        // 默认 3 次尝试 = 首次 + 最多 2 次重试
+        assert_eq!(retried, policy.max_attempts() - 1);
+        assert!(retried < 5, "重试必须有界");
+    }
+
     // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
-    /// 串行化端口分配测试的全局 Mutex。
-    ///
+    /// 串行化端口分配测试的全局 Mutex。    ///
     /// `find_free_port()` 存在 TOCTOU 竞争窗口：drop listener 后端口可被其他并行测试
     /// 占用。使用 Mutex 串行化整个「find_free_port → bind → allocate」流程，
     /// 消除并行测试间的端口冲突。**不要求 `--test-threads=1`**——

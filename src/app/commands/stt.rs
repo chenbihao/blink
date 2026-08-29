@@ -1,11 +1,8 @@
 //! stt 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
-// bytes_to_mb/dir_size_bytes 从 diagnostic 模块导入的旧 maintenance.rs 用途
-// 已移除——maintenance.rs 现使用 app::local_engine::funasr::bytes_to_mb_pub
 use crate::app::command_error::CommandError;
 use crate::app::stt_config::LocalSttSelection;
 use crate::domain::event_names::EventNames;
-use crate::domain::stt::SttEngine;
 use tauri::{Emitter, Manager};
 
 /// 启动 chat 窗口语音录音（0.12.2 §4.3）。
@@ -198,64 +195,55 @@ pub async fn set_stt_config(
 /// 0.22.6 H4：语音页选择时只能选择已安装、校验通过、支持 STT 且当前兼容的模型。
 /// 此命令**不触发下载**——未安装的模型不会出现在列表中。
 ///
+/// **薄投影铁则（0.22.6 phase B）**："哪些模型可选"的过滤规则归
+/// `EngineManager::list_selectable_models`（单一业务真相）——
+/// 本命令只做参数适配 + DTO 投影 + is_selected 标注。
+///
 /// 返回的 DTO 包含 `engine_id`、`model_id`、`display_name`、`is_selected`。
 #[tauri::command]
 pub async fn list_selectable_stt_models(
     app: tauri::AppHandle,
 ) -> Result<Vec<serde_json::Value>, CommandError> {
-    // 从 EngineManager 获取模型状态（单一业务真相）
+    // 从 EngineManager 获取已过滤的可选模型（单一业务真相）
     let svc = app
         .try_state::<std::sync::Arc<crate::app::local_engine::EngineManager>>()
         .map(|s| s.inner().clone());
 
+    let Some(svc) = svc else {
+        // EngineManager 未注册时 fail-closed——返回空列表，
+        // 让前端知道没有可选模型（而非误报已安装）。
+        tracing::warn!("EngineManager 未注册，selectable models 返回空列表（fail-closed）");
+        return Ok(Vec::new());
+    };
+
+    let funasr_id = crate::infra::local_engine::runtime::EngineId::new("funasr").map_err(|e| {
+        CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
+    })?;
+
+    let selectable = svc
+        .list_selectable_models(&funasr_id)
+        .await
+        .map_err(CommandError::from)?;
     let config = crate::app::stt_config::get_stt_config();
     let selected = config.local_stt_selection.as_ref();
 
-    if let Some(svc) = svc {
-        let funasr_id =
-            crate::infra::local_engine::runtime::EngineId::new("funasr").map_err(|e| {
-                CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
-            })?;
-
-        let models = svc.list_models(&funasr_id).await;
-        let registry = svc.model_registry();
-
-        let result: Vec<serde_json::Value> = models
-            .iter()
-            .filter_map(|m| {
-                // 只返回已安装且可用的模型
-                if !m.is_usable() {
-                    return None;
-                }
-                if !matches!(
-                    m.compatibility,
-                    crate::domain::local_engine::ModelCompatibility::Compatible
-                        | crate::domain::local_engine::ModelCompatibility::Unknown
-                ) {
-                    return None;
-                }
-                // 从 registry 获取 display_name / description
-                let desc = registry.find(&funasr_id, &m.model_id)?;
-                let is_selected = selected
-                    .map(|s| s.engine_id == "funasr" && s.model_id == m.model_id)
-                    .unwrap_or(false);
-                Some(serde_json::json!({
-                    "engine_id": "funasr",
-                    "model_id": m.model_id,
-                    "display_name": desc.display_name,
-                    "description": desc.description,
-                    "is_selected": is_selected,
-                    "install_state": m.install_state.to_string(),
-                }))
+    let result: Vec<serde_json::Value> = selectable
+        .iter()
+        .map(|(desc, status)| {
+            let is_selected = selected
+                .map(|s| s.engine_id == "funasr" && s.model_id == status.model_id)
+                .unwrap_or(false);
+            serde_json::json!({
+                "engine_id": "funasr",
+                "model_id": status.model_id,
+                "display_name": desc.display_name,
+                "description": desc.description,
+                "is_selected": is_selected,
+                "install_state": status.install_state.to_string(),
             })
-            .collect();
-        return Ok(result);
-    }
-
-    // EngineManager 未注册时 fail-closed——返回空列表，
-    // 让前端知道没有可选模型（而非误报已安装）。
-    tracing::warn!("EngineManager 未注册，selectable models 返回空列表（fail-closed）");
-    Ok(Vec::new())
+        })
+        .collect();
+    Ok(result)
 }
 
 /// 设置本地 STT 选择（闭合命令）。
@@ -349,110 +337,12 @@ pub async fn set_local_stt_selection(
     Ok(())
 }
 
-/// 列出可用 STT 模型（旧接口，保留向后兼容）。
-///
-/// **已废弃**：0.22.6 改用 `list_selectable_stt_models`。
-/// 新接口只返回已安装且可用的模型，不触发下载。
-#[deprecated(note = "0.22.6: 改用 list_selectable_stt_models")]
-#[tauri::command]
-pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
-    let models = crate::domain::stt::model_registry();
-    let config = crate::app::stt_config::get_stt_config();
-
-    let result: Vec<serde_json::Value> = models
-        .iter()
-        .map(|m| {
-            let is_selected = config
-                .local_stt_selection
-                .as_ref()
-                .map(|s| s.engine_id == "funasr" && s.model_id == m.funasr_model_id)
-                .unwrap_or(false)
-                || config.local_model_id.as_deref() == Some(m.id);
-            serde_json::json!({
-            "id": m.id,
-            "display_name": m.display_name,
-            "engine": m.engine,
-            "params": m.params,
-            "size_mb": m.size_mb,
-            "languages": m.languages,
-            "device": m.device,
-                "description": m.description,
-                "funasr_model_id": m.funasr_model_id,
-                "is_selected": is_selected,
-                // 兼容前端: 新方案中模型由 FunASR 自动管理,"已就绪"状态取决于服务是否运行
-                "status": "managed_by_funasr",
-            })
-        })
-        .collect();
-    Ok(result)
-}
-
-/// 选择本地 STT 模型（旧接口，已废弃）。
-///
-/// **已废弃**：0.22.6 改用 `set_local_stt_selection`。
-///
-/// 此命令的实际行为是**配置代理**——它只更新配置中的模型选择，
-/// **不直接触发下载**。实际模型下载在 funasr-server 首次启动时由 FunASR 自动完成。
-///
-/// 新代码应使用 `set_local_stt_selection`，它会验证模型已安装且可用。
-#[deprecated(note = "0.22.6: 改用 set_local_stt_selection; 此命令只做配置代理，不触发下载")]
-#[tauri::command]
-pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
-    let model =
-        crate::domain::stt::find_model(&model_id).ok_or_else(|| format!("未知模型: {model_id}"))?;
-
-    tracing::info!(
-        model = %model_id,
-        funasr_model = model.funasr_model_id,
-        "[已废弃] download_stt_model: 配置代理（不触发下载，实际下载由 FunASR 自动管理）",
-    );
-
-    // 更新配置：设置选中的模型 + funasr_model 标识
-    let mut config = crate::app::stt_config::get_stt_config();
-    // 同步更新 local_stt_selection（新真源）
-    config.local_stt_selection = Some(LocalSttSelection::new(
-        LocalSttSelection::FUNASR_ENGINE_ID,
-        model.funasr_model_id,
-    ));
-    // 向后兼容旧字段
-    config.local_model_id = Some(model_id);
-    config.local_engine.funasr_model = model.funasr_model_id.to_string();
-
-    // 持久化到数据库
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::ConfigStore::set(pool, &config)
-        .await
-        .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
-
-    // 更新内存缓存
-    crate::app::stt_config::update_cache(&config);
-
-    // 广播配置变更
-    let _ = app.emit(
-        EventNames::CONFIG_CHANGED,
-        serde_json::json!({ "key": "stt:config", "scope": "local_stt_selection" }),
-    );
-
-    Ok(())
-}
-
-/// 取消选择 STT 模型（旧接口，保留向后兼容）。
-///
-/// **已废弃**：0.22.6 改用 `set_local_stt_selection` 清空选择。
-#[deprecated(note = "0.22.6: 改用 set_local_stt_selection")]
-#[tauri::command]
-pub async fn delete_stt_model(model_id: String) -> Result<(), String> {
-    tracing::info!(model = %model_id, "[已废弃] delete_stt_model: 清除模型选择");
-    let mut config = crate::app::stt_config::get_stt_config();
-    if config.local_model_id.as_deref() == Some(model_id.as_str()) {
-        config.local_model_id = None;
-        config.local_stt_selection = None;
-        crate::app::stt_config::update_cache(&config);
-    }
-    Ok(())
-}
-
 /// 取消语音录音(ESC 中断)。
+///
+/// 0.22.6 phase B：旧 STT 模型命令（list_stt_models / download_stt_model /
+/// delete_stt_model）已删除——未发版且前端 0 引用，模型生命周期统一走
+/// `list_engine_models` / `install_engine_model` / `delete_engine_model`
+/// 与 `set_local_stt_selection`。
 #[tauri::command]
 pub fn cancel_voice_recording(app: tauri::AppHandle) {
     if let Some(vs) = app.try_state::<std::sync::Arc<crate::app::voice::VoiceService>>() {

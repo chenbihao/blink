@@ -65,12 +65,12 @@ pub use model::{
     transition_install_state,
 };
 #[allow(unused_imports)]
-pub use operation::{EngineOperationCoordinator, OperationGuard};
+pub use operation::{CancelOutcome, EngineOperationCoordinator, OperationGuard};
 #[allow(unused_imports)]
 pub use status::{
     BackendInfo, DesiredState, EngineOperation, EngineStatus, EngineStatusSnapshot,
-    EnvironmentHealth, FallbackEntry, FallbackOutcome, ModelHealth, OperationKind, OperationStage,
-    ProcessState, ServiceEpoch, ServiceHealth, StatusCommitGuard,
+    EnvOperationEndState, EnvironmentHealth, FallbackEntry, FallbackOutcome, ModelHealth,
+    OperationKind, OperationStage, ProcessState, ServiceEpoch, ServiceHealth, StatusCommitGuard,
 };
 
 // ── 领域层纯逻辑测试 ──────────────────────────────────────────────────────

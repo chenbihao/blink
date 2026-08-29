@@ -20,10 +20,41 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 use super::identity::EngineId;
+
+// ── CancelOutcome ───────────────────────────────────────────────────────────
+
+/// 取消请求的结果——取消是正常协议语义，**不用错误类型表达**。
+///
+/// 调用方（command 层）直接投影为 IPC 响应，不再解码
+/// `LocalEngineError::Cancelled` 伪装的"成功错误"。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CancelOutcome {
+    /// 取消信号已发送给匹配的活跃操作。
+    ///
+    /// worker 结束前 claim 仍由其 guard 持有——取消是终态请求，
+    /// 实际收尾由 worker 以 `Cancelled` 终态结束。
+    Cancelled,
+    /// 当前没有活跃操作（已完成/已失败/未开始）。
+    NoActiveOperation,
+    /// operation_id 与当前活跃操作不匹配——不触发任何 token。
+    Mismatched {
+        /// 当前活跃操作的 id（供前端核对）。
+        current_operation_id: String,
+    },
+}
+
+impl CancelOutcome {
+    /// 是否成功发出取消信号。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+    }
+}
 
 /// 活跃 claim 记录。
 #[derive(Debug, Clone)]
@@ -107,32 +138,22 @@ impl EngineOperationCoordinator {
 
     /// 取消匹配 `operation_id` 的活跃操作。
     ///
-    /// - 无活跃操作 → `NotRunning`（completed operation 不再是 busy state）；
-    /// - operation_id 不匹配 → `Rejected`（不触发任何 token）；
-    /// - 匹配 → 触发该 token。claim 仍由 worker 的 guard 持有，
-    ///   直到 worker 真正结束才释放。
-    pub fn cancel(&self, engine_id: &EngineId, operation_id: &str) -> Result<(), LocalEngineError> {
+    /// - 无活跃操作 → `CancelOutcome::NoActiveOperation`
+    ///   （completed operation 不再是 busy state）；
+    /// - operation_id 不匹配 → `CancelOutcome::Mismatched`（不触发任何 token）；
+    /// - 匹配 → 触发该 token，返回 `CancelOutcome::Cancelled`。
+    ///   claim 仍由 worker 的 guard 持有，直到 worker 真正结束才释放。
+    pub fn cancel(&self, engine_id: &EngineId, operation_id: &str) -> CancelOutcome {
         let claims = self.lock();
         match claims.get(engine_id) {
-            None => Err(LocalEngineError::with_detail(
-                LocalEngineErrorCode::NotRunning,
-                ErrorPhase::Request,
-                "引擎当前没有进行中的操作",
-                format!("engine_id={} 无活跃 operation", engine_id),
-            )),
+            None => CancelOutcome::NoActiveOperation,
             Some(active) if active.operation_id == operation_id => {
                 active.cancel_token.cancel();
-                Ok(())
+                CancelOutcome::Cancelled
             }
-            Some(active) => Err(LocalEngineError::with_detail(
-                LocalEngineErrorCode::Rejected,
-                ErrorPhase::Request,
-                "操作 id 不匹配，拒绝取消",
-                format!(
-                    "engine_id={} 当前 operation_id={}，请求取消 {}",
-                    engine_id, active.operation_id, operation_id
-                ),
-            )),
+            Some(active) => CancelOutcome::Mismatched {
+                current_operation_id: active.operation_id.clone(),
+            },
         }
     }
 
@@ -273,18 +294,24 @@ mod tests {
         let engine = eid("funasr");
 
         let guard = coord.try_claim(&engine, "op-1").unwrap();
-        // 错配 → Rejected，且不触发 token
-        let err = coord.cancel(&engine, "op-stale").unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
+        // 错配 → Mismatched，且不触发 token
+        match coord.cancel(&engine, "op-stale") {
+            CancelOutcome::Mismatched {
+                current_operation_id,
+            } => {
+                assert_eq!(current_operation_id, "op-1");
+            }
+            other => panic!("应返回 Mismatched: {other:?}"),
+        }
         assert!(!guard.is_cancelled());
 
         // 匹配 → 触发 token
-        coord.cancel(&engine, "op-1").unwrap();
+        assert!(coord.cancel(&engine, "op-1").is_cancelled());
         assert!(guard.is_cancelled());
     }
 
     #[test]
-    fn cancel_after_completion_is_not_running() {
+    fn cancel_after_completion_is_no_active_operation() {
         let coord = EngineOperationCoordinator::new();
         let engine = eid("funasr");
 
@@ -292,8 +319,10 @@ mod tests {
         guard.release();
 
         // completed operation 不再是 busy state
-        let err = coord.cancel(&engine, "op-1").unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::NotRunning);
+        assert_eq!(
+            coord.cancel(&engine, "op-1"),
+            CancelOutcome::NoActiveOperation
+        );
     }
 
     /// cancel 后旧 worker 尚未退出（guard 仍持有）时，
@@ -304,7 +333,7 @@ mod tests {
         let engine = eid("funasr");
 
         let guard = coord.try_claim(&engine, "op-1").unwrap();
-        coord.cancel(&engine, "op-1").unwrap();
+        assert!(coord.cancel(&engine, "op-1").is_cancelled());
 
         // worker 尚未结束——即使已被取消，也不能立即开始下一个操作
         let err = coord.try_claim(&engine, "op-2").unwrap_err();
@@ -367,7 +396,7 @@ mod tests {
         });
 
         // 取消操作
-        coord.cancel(&engine, "op-install").unwrap();
+        assert!(coord.cancel(&engine, "op-install").is_cancelled());
 
         // worker 尚未退出：下一个操作仍被拒绝
         let err = coord.try_claim(&engine, "op-next").unwrap_err();

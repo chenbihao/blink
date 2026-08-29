@@ -1059,6 +1059,11 @@ fn main() {
             // 0.22.6 H4: 自启语义——只有语音功能启用、本地模式、选择模型可用且
             // auto_start=true 时启动；读取/保存本身不隐式启动。
             // 是否立即启动由显式 start action 决定。
+            //
+            // 0.22.6 phase B: AdapterConfig 从 config_source 唯一入口构造
+            // （与 commands/repair 共享同一份规则，含 device=cuda→Cpu 归一化）。
+            // setup 本身只做轻量恢复；此处的启动是用户显式偏好（auto_start_server），
+            // 且全程异步后台执行，不进入 Alt+Space 主链路。
             {
                 let stt_config = app::stt_config::get_stt_config();
                 if stt_config.enabled
@@ -1071,32 +1076,26 @@ fn main() {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         tracing::info!("自动启动 funasr-server（auto_start_server 已开启）");
 
-                        // 构建 AdapterConfig
-                        let config = crate::app::stt_config::get_stt_config();
-                        let local = &config.local_engine;
-                        let funasr_config =
-                            crate::app::local_engine::funasr::FunasrEngineConfig::from_stt_config(local);
-                        let compute_preference = if local.device == "cuda" {
-                            Some(crate::infra::local_engine::runtime::ComputePreference::Cuda)
-                        } else {
-                            Some(crate::infra::local_engine::runtime::ComputePreference::Cpu)
-                        };
-                        let adapter_config = crate::domain::local_engine::AdapterConfig {
-                            preferred_port: Some(local.server_port),
-                            compute_preference,
-                            engine_config: funasr_config.to_json(),
-                        };
-
                         let engine_id = crate::infra::local_engine::runtime::EngineId::new(
                             crate::app::local_engine::funasr::FUNASR_ENGINE_ID,
                         )
                         .expect("funasr engine id is valid");
+                        let adapter_config = match crate::app::local_engine::config_source::adapter_config_for_engine(&engine_id) {
+                            Some(c) => c,
+                            None => {
+                                tracing::error!("自动启动: 无法从配置真源构造 AdapterConfig");
+                                return;
+                            }
+                        };
 
                         // 0.22.3: 环境检查 + 安装统一走 EngineManager
                         // 不再直接调用 platform::python::setup_with_progress
-                        if let Err(e) = svc.ensure_installed(&engine_id, adapter_config.clone()).await {
-                            tracing::error!(%e, "自动启动: 环境安装失败");
-                            return;
+                        match svc.ensure_installed(&engine_id, adapter_config.clone()).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!(%e, "自动启动: 环境安装失败");
+                                return;
+                            }
                         }
 
                         match svc.start(&engine_id, adapter_config).await {
@@ -1391,9 +1390,10 @@ app::commands::toggle_default_trigger,
             // 0.10 STT / 语音
             app::commands::get_stt_config,
             app::commands::set_stt_config,
-            app::commands::list_stt_models,
-            app::commands::download_stt_model,
-            app::commands::delete_stt_model,
+            // 0.22.6 phase B: 旧 STT 模型命令（list_stt_models/download_stt_model/
+            // delete_stt_model）已删除——未发版且前端 0 引用，
+            // 模型生命周期统一走 list_engine_models/install_engine_model/
+            // delete_engine_model + set_local_stt_selection。
             // 0.22.6 H4: 新 STT 选择命令
             app::commands::list_selectable_stt_models,
             app::commands::set_local_stt_selection,
@@ -1402,20 +1402,16 @@ app::commands::toggle_default_trigger,
             app::commands::list_audio_devices,
             app::commands::start_audio_test,
             app::commands::stop_audio_test,
-            app::commands::get_funasr_env,
-            app::commands::get_funasr_log_history,
-            app::commands::setup_python_env,
-            app::commands::start_funasr_server,
-            app::commands::stop_funasr_server,
-            app::commands::diagnose_stt,
+            // 0.22.6 phase B: 旧 FunASR lifecycle 兼容命令已删除
+            // （get_funasr_env/get_funasr_log_history/setup_python_env/
+            //   start_funasr_server/stop_funasr_server/diagnose_stt/
+            //   get_stt_space_usage/cleanup_stt_space/open_stt_folder），
+            // 统一走通用 local_engine 命令；test_cloud_stt（云端诊断）保留。
             app::commands::test_cloud_stt,
             app::commands::save_stt_secret,
             app::commands::delete_stt_secret,
             app::commands::has_stt_secret,
             app::commands::get_stt_secret_hint,
-            app::commands::get_stt_space_usage,
-            app::commands::cleanup_stt_space,
-            app::commands::open_stt_folder,
             app::commands::resize_voice_overlay,
             app::commands::get_default_hotkey,
             // 0.13.0 MCP client

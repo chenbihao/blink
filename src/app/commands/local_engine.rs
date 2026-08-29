@@ -43,10 +43,10 @@ use std::sync::Arc;
 use crate::app::command_error::CommandError;
 use crate::app::local_engine::dto::{
     CancelResultDto, CleanupRequestDto, CleanupResultDto, DiagnosticEntryDto, EngineCatalogItem,
-    EngineDiagnosticsDto, EngineLogDto, EngineLogLevel, EnginePreferencesDto,
-    EnginePreferencesPatchDto, EngineStatusDto, EngineStorageDto, OrphanRecoveryDto,
-    OrphanStopResultDto, environment_health_to_string, project_catalog_item, project_diagnostics,
-    project_status, service_health_to_string,
+    EngineDiagnosticsDto, EngineLogDto, EngineLogLevel, EngineOperationFinishedDto,
+    EnginePreferencesDto, EnginePreferencesPatchDto, EngineStatusDto, EngineStorageDto,
+    OrphanRecoveryDto, OrphanStopResultDto, environment_health_to_string, project_catalog_item,
+    project_diagnostics, project_process_state, project_status, service_health_to_string,
 };
 use crate::app::local_engine::{EngineManager, funasr, paddleocr};
 use crate::domain::local_engine::EngineDefinition;
@@ -172,78 +172,31 @@ fn validate_engine_id(engine_id: &str) -> Result<EngineId, CommandError> {
 
 /// 从配置真源读取当前 compute preference。
 ///
-/// - funasr → 从 `SttConfig.local_engine.device` 映射
-///   - 0.22.6 归一化：历史 `cuda` 归一化为 `cpu`（descriptor 只声明 CPU profile）
-/// - paddleocr → 从 `OcrConfig.compute_preference` 读取
-/// - 其他 → Auto
+/// 真源在 [`crate::app::local_engine::config_source`]——command 层不再
+/// 复制归一化规则（0.22.6：funasr descriptor 只声明 CPU profile）。
 fn current_compute_preference(engine_id: &str) -> ComputePreference {
-    match engine_id {
-        funasr::FUNASR_ENGINE_ID => {
-            // 0.22.6: 历史 device=cuda 归一化为 Cpu
-            // descriptor 只声明 CPU profile，无需读取 config.local_engine.device
-            ComputePreference::Cpu
-        }
-        paddleocr::PADDLEOCR_ENGINE_ID => {
-            crate::domain::config::ocr_config::get_ocr_config().compute_preference
-        }
-        _ => ComputePreference::Auto,
-    }
+    EngineId::new(engine_id)
+        .map(|eid| crate::app::local_engine::config_source::current_compute_preference(&eid))
+        .unwrap_or(ComputePreference::Auto)
 }
 
 /// 从配置真源构造 `AdapterConfig`。
 ///
 /// **禁止前端直接提交 `AdapterConfig.engine_config`**。
-/// 此函数根据 `engine_id` 从现有配置真源构造：
-/// - funasr → `SttConfig.local_engine`
-/// - paddleocr → `OcrConfig` / `PaddleOcrEngineConfig`
-///
-/// **配置归一化**：FunASR 历史配置可能残留 `device=cuda`，但 0.22.6 descriptor
-/// 只声明 CPU profile（CUDA 需独立锁文件后启用）。此处将 `cuda` 归一化为 `Cpu`，
-/// 避免显式 `Cuda` 偏好在 `resolve_profile` 中因无 CUDA profile 而直接报错。
+/// 唯一构造入口在 [`crate::app::local_engine::config_source`]——
+/// 与 EngineManager（repair）、wiring（自启）共用同一份规则，
+/// 避免 repair 用 A 配置装、start 用 B 配置跑的规则漂移。
 fn build_adapter_config_for_engine(
     engine_id: &str,
 ) -> Result<crate::domain::local_engine::AdapterConfig, CommandError> {
-    match engine_id {
-        funasr::FUNASR_ENGINE_ID => {
-            let config = crate::app::stt_config::get_stt_config();
-            let local = &config.local_engine;
-
-            // 0.22.6 配置归一化：历史 device=cuda 归一化为 cpu
-            // descriptor 只声明 CPU profile，显式 Cuda 会在 resolve_profile 中失败
-            let compute_preference = if local.device == "cuda" {
-                tracing::warn!(
-                    device = %local.device,
-                    "FunASR 历史配置 device=cuda，归一化为 Cpu（0.22.6 仅支持 CPU profile）"
-                );
-                Some(ComputePreference::Cpu)
-            } else {
-                Some(ComputePreference::Cpu)
-            };
-
-            let funasr_config = funasr::FunasrEngineConfig::from_stt_config(local);
-
-            Ok(crate::domain::local_engine::AdapterConfig {
-                preferred_port: Some(local.server_port),
-                compute_preference,
-                engine_config: funasr_config.to_json(),
-            })
-        }
-        paddleocr::PADDLEOCR_ENGINE_ID => {
-            let ocr_config = crate::domain::config::ocr_config::get_ocr_config();
-            let engine_config = paddleocr::PaddleOcrEngineConfig::from_ocr_config();
-
-            Ok(crate::domain::local_engine::AdapterConfig {
-                preferred_port: None,
-                compute_preference: Some(ocr_config.compute_preference),
-                engine_config: engine_config.to_json(),
-            })
-        }
-        other => Err(CommandError::new(
+    let eid = validate_engine_id(engine_id)?;
+    crate::app::local_engine::config_source::adapter_config_for_engine(&eid).ok_or_else(|| {
+        CommandError::new(
             "unsupported_engine",
-            format!("不支持的引擎: {other}"),
+            format!("不支持的引擎: {engine_id}"),
             false,
-        )),
-    }
+        )
+    })
 }
 
 /// 为 catalog item 计算兼容性结果。
@@ -489,12 +442,16 @@ pub async fn get_local_engine_logs(
 /// 前端只需提交 `engine_id`，不提交 executable/argv/env/脚本路径。
 /// `compute_preference` 可选，如提交则必须属于该引擎 descriptor 声明项。
 /// action command 内部从现有配置真源构造 `AdapterConfig`。
+///
+/// 返回结构化终态：`end_state = "completed" | "cancelled"`——
+/// **取消是正常终态**，前端不应把 cancelled 当失败处理。
+/// 失败走 CommandError（保留 code/phase/detail 结构）。
 #[tauri::command]
 pub async fn install_local_engine(
     app: tauri::AppHandle,
     engine_id: String,
     compute_preference: Option<String>,
-) -> Result<(), CommandError> {
+) -> Result<EngineOperationFinishedDto, CommandError> {
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
     let mut adapter_config = build_adapter_config_for_engine(&engine_id)?;
@@ -507,12 +464,17 @@ pub async fn install_local_engine(
         adapter_config.compute_preference = Some(pref);
     }
 
-    svc.install(&eid, adapter_config)
+    let (operation_id, end_state) = svc
+        .install(&eid, adapter_config)
         .await
-        .map_err(|e| CommandError::new("install_failed", format!("安装失败: {e}"), true))?;
+        .map_err(CommandError::from)?;
 
-    tracing::info!(engine = %eid, "引擎安装完成");
-    Ok(())
+    tracing::info!(engine = %eid, ?end_state, "引擎安装结束");
+    Ok(EngineOperationFinishedDto {
+        engine_id: engine_id,
+        operation_id: operation_id.unwrap_or_default(),
+        end_state: end_state.to_string(),
+    })
 }
 
 /// 启动本地引擎服务。
@@ -537,11 +499,11 @@ pub async fn start_local_engine(
     // 确保环境已安装
     svc.ensure_installed(&eid, adapter_config.clone())
         .await
-        .map_err(|e| CommandError::new("environment_missing", format!("环境未就绪: {e}"), true))?;
+        .map_err(CommandError::from)?;
 
     svc.start(&eid, adapter_config)
         .await
-        .map_err(|e| CommandError::new("start_failed", format!("启动失败: {e}"), true))?;
+        .map_err(CommandError::from)?;
 
     tracing::info!(engine = %eid, "引擎启动完成");
     Ok(())
@@ -558,9 +520,7 @@ pub async fn stop_local_engine(
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
-    svc.stop(&eid)
-        .await
-        .map_err(|e| CommandError::new("stop_failed", format!("停止失败: {e}"), true))?;
+    svc.stop(&eid).await.map_err(CommandError::from)?;
 
     tracing::info!(engine = %eid, "引擎停止完成");
     Ok(())
@@ -604,21 +564,24 @@ pub async fn stop_orphan_engine(
 
 /// 修复本地引擎环境。
 ///
-/// 前端只需提交 `engine_id`。
+/// 返回结构化终态：`end_state = "completed" | "cancelled"`——
+/// **取消是正常终态**，前端不应把 cancelled 当失败处理。
 #[tauri::command]
 pub async fn repair_local_engine(
     app: tauri::AppHandle,
     engine_id: String,
-) -> Result<(), CommandError> {
+) -> Result<EngineOperationFinishedDto, CommandError> {
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
-    svc.repair(&eid)
-        .await
-        .map_err(|e| CommandError::new("repair_failed", format!("修复失败: {e}"), true))?;
+    let (operation_id, end_state) = svc.repair(&eid).await.map_err(CommandError::from)?;
 
-    tracing::info!(engine = %eid, "引擎修复完成");
-    Ok(())
+    tracing::info!(engine = %eid, ?end_state, "引擎修复结束");
+    Ok(EngineOperationFinishedDto {
+        engine_id: engine_id,
+        operation_id: operation_id.unwrap_or_default(),
+        end_state: end_state.to_string(),
+    })
 }
 
 /// 获取本地引擎存储概览。
@@ -698,6 +661,9 @@ pub async fn cleanup_local_engine(
 ///
 /// 取消完全匹配且声明 cancellable 的操作。
 /// 旧 `operation_id` 不得取消新操作。
+///
+/// **取消是正常协议语义**：service 返回 `CancelOutcome`，本命令只做
+/// 参数适配与投影，不再解码 `LocalEngineError::Cancelled` 伪装的错误。
 #[tauri::command]
 pub async fn cancel_local_engine_operation(
     app: tauri::AppHandle,
@@ -707,20 +673,30 @@ pub async fn cancel_local_engine_operation(
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
-    let err = svc.cancel_operation(&eid, &operation_id).await;
+    let outcome = svc.cancel_operation(&eid, &operation_id).await;
 
-    // cancel_operation 返回 LocalEngineError——成功取消也返回 Cancelled error
-    // 需要区分：Cancelled code = 成功取消，Rejected = 未取消
-    let cancelled = err.code == crate::domain::local_engine::LocalEngineErrorCode::Cancelled;
-
-    let result = CancelResultDto {
-        engine_id: engine_id,
-        operation_id: operation_id,
-        cancelled,
-        reason: if cancelled {
-            None
-        } else {
-            Some(err.action_hint.clone())
+    let result = match &outcome {
+        crate::domain::local_engine::CancelOutcome::Cancelled => CancelResultDto {
+            engine_id: engine_id.clone(),
+            operation_id: operation_id.clone(),
+            cancelled: true,
+            reason: None,
+        },
+        crate::domain::local_engine::CancelOutcome::NoActiveOperation => CancelResultDto {
+            engine_id: engine_id.clone(),
+            operation_id: operation_id.clone(),
+            cancelled: false,
+            reason: Some("当前没有进行中的操作".to_string()),
+        },
+        crate::domain::local_engine::CancelOutcome::Mismatched {
+            current_operation_id,
+        } => CancelResultDto {
+            engine_id: engine_id.clone(),
+            operation_id: operation_id.clone(),
+            cancelled: false,
+            reason: Some(format!(
+                "操作 id 不匹配（当前活跃: {current_operation_id}）"
+            )),
         },
     };
 
@@ -1138,12 +1114,13 @@ pub async fn get_runtime_foundation_status(
             )
         })?;
 
+        // 状态投影复用 dto 真源函数——不在 command 层复制状态推断规则
         engines.push(serde_json::json!({
             "engine_id": engine_id_str,
             "display_name": descriptor.display,
-            "environment": format!("{:?}", snapshot.status.environment).to_lowercase(),
-            "process": format!("{:?}", snapshot.status.process).to_lowercase(),
-            "service": format!("{:?}", snapshot.status.service).to_lowercase(),
+            "environment": environment_health_to_string(snapshot.status.environment.clone()),
+            "process": project_process_state(&snapshot.status.process),
+            "service": service_health_to_string(snapshot.status.service),
         }));
     }
 
@@ -1673,19 +1650,12 @@ mod tests {
         assert_eq!(s.len(), 6 + 16);
     }
 
-    // ── 旧 FunASR commands/events 未移除 ──
+    // ── 旧 FunASR lifecycle 命令已删除（0.22.6 phase B）──
+    // 未发版且前端 0 引用：get_funasr_env / setup_python_env / start_funasr_server /
+    // stop_funasr_server / get_funasr_log_history 已随 maintenance 瘦身删除。
+    // 若恢复引用请改走通用 local_engine 命令（get_local_engine_status 等）。
 
-    #[test]
-    fn old_funasr_commands_still_exist() {
-        // 验证旧 commands 函数仍可编译
-        let _ = crate::app::commands::get_funasr_env as fn(tauri::AppHandle) -> _;
-        let _ = crate::app::commands::setup_python_env as fn(tauri::AppHandle) -> _;
-        let _ = crate::app::commands::start_funasr_server as fn(tauri::AppHandle) -> _;
-        let _ = crate::app::commands::stop_funasr_server as fn(tauri::AppHandle) -> _;
-        let _ = crate::app::commands::get_funasr_log_history as fn(tauri::AppHandle) -> _;
-    }
-
-    // ── 旧事件常量未移除 ──
+    // ── 旧事件常量仍存在（旧前端兼容投影仍在用）──
 
     #[test]
     fn old_funasr_event_constants_still_exist() {
@@ -1756,6 +1726,7 @@ mod tests {
                 },
                 service: "unknown".to_string(),
                 model: "unknown".to_string(),
+                available: false,
                 backend: serde_json::Value::Null,
                 last_error: None,
             },
@@ -1826,6 +1797,21 @@ mod tests {
         let _ = get_local_engine_storage as fn(tauri::AppHandle, String) -> _;
         let _ = cleanup_local_engine as fn(tauri::AppHandle, CleanupRequestDto) -> _;
         let _ = cancel_local_engine_operation as fn(tauri::AppHandle, String, String) -> _;
+    }
+
+    // ── install/repair 返回结构化终态（取消是正常终态，非错误）──
+
+    #[test]
+    fn install_result_dto_shape() {
+        let dto = EngineOperationFinishedDto {
+            engine_id: "funasr".to_string(),
+            operation_id: "op-001".to_string(),
+            end_state: "cancelled".to_string(),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["engine_id"], "funasr");
+        assert_eq!(json["operation_id"], "op-001");
+        assert_eq!(json["end_state"], "cancelled");
     }
 
     // ── preferences commands 签名可编译 ──
@@ -2425,9 +2411,7 @@ mod tests {
         let frontend_stt_commands: &[&str] = &[
             "get_stt_config",
             "set_stt_config",
-            "list_stt_models",
-            "download_stt_model",
-            "delete_stt_model",
+            // 0.22.6 phase B: list_stt_models/download_stt_model/delete_stt_model 已删除
             "list_selectable_stt_models",
             "set_local_stt_selection",
             "cancel_voice_recording",
@@ -2459,19 +2443,6 @@ mod tests {
                             crate::app::stt_config::SttConfig,
                             Option<String>,
                         ) -> _;
-                    true
-                }
-                "list_stt_models" => {
-                    let _ = crate::app::commands::list_stt_models as fn() -> _;
-                    true
-                }
-                "download_stt_model" => {
-                    let _ = crate::app::commands::download_stt_model
-                        as fn(tauri::AppHandle, String) -> _;
-                    true
-                }
-                "delete_stt_model" => {
-                    let _ = crate::app::commands::delete_stt_model as fn(String) -> _;
                     true
                 }
                 "list_selectable_stt_models" => {

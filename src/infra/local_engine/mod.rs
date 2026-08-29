@@ -49,7 +49,7 @@ pub use log_pipe::{LogEntry, LogPipeConfig, LogSource, LogSubscriber};
 pub use port::{
     ConflictRetryPolicy, Endpoint, EndpointAllocator, IdentityMismatch, IdentityVerification,
     PortError, ServiceIdentityInput, ServiceIdentityResult, generate_service_token,
-    token_fingerprint,
+    is_explicit_address_in_use, token_fingerprint,
 };
 #[allow(unused_imports)]
 pub use process::ManagedProcessError;

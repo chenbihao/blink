@@ -132,7 +132,7 @@ pub struct EngineStatusWire {
     pub desired: String,
     /// 当前长操作。
     pub operation: serde_json::Value,
-    /// 环境观测状态。
+    /// 环境观测状态（部署状态：missing / ready / broken / needs_rebuild）。
     pub environment: String,
     /// 进程观测状态（显式 DTO，前端不猜测 serde enum shape）。
     pub process: ProcessStateDto,
@@ -140,7 +140,12 @@ pub struct EngineStatusWire {
     pub service: String,
     /// 模型健康观测。
     pub model: String,
-    /// 计算设备三层信息。
+    /// **可用性（0.22.6 phase B）**：desired=Running && service 可用 && model Ready。
+    ///
+    /// 由后端按三维正交状态推导（`EngineStatus::is_available_for_requests`），
+    /// 前端不再自行从 process/service/model 猜测"能不能用"。
+    pub available: bool,
+    /// 计算设备三层信息（含 resolved profile / backend 校验 / fallback 记录）。
     pub backend: serde_json::Value,
     /// 最近一次错误（如果有）。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,6 +316,7 @@ fn project_status_wire(status: &EngineStatus) -> EngineStatusWire {
         process: project_process_state(&status.process),
         service: service_health_to_string(status.service),
         model: model_health_to_string(status.model.clone()),
+        available: status.is_available_for_requests(),
         backend: serde_json::to_value(&status.backend).unwrap_or(serde_json::Value::Null),
         last_error: status
             .last_error
@@ -654,6 +660,20 @@ pub struct CancelResultDto {
     pub reason: Option<String>,
 }
 
+/// 环境变更操作（install/repair）结果 DTO——0.22.6 phase B。
+///
+/// **取消是正常终态**：`end_state="cancelled"` 不是错误——前端不应把
+/// 该响应当失败处理。失败走 CommandError（保留结构化 code/phase/detail）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineOperationFinishedDto {
+    /// 引擎 id。
+    pub engine_id: String,
+    /// 本次操作的 id（与 status 事件中的 operation_id 对应）。
+    pub operation_id: String,
+    /// 操作终态：`completed` | `cancelled`。
+    pub end_state: String,
+}
+
 // ── Orphan Stop 结果 DTO（0.22.6.6）──────────────────────────────────────────
 
 /// 孤儿引擎停止结果 DTO——`stop_orphan_engine` command 返回。
@@ -968,6 +988,7 @@ mod tests {
                 },
                 service: "unknown".to_string(),
                 model: "unknown".to_string(),
+                available: false,
                 backend: json!(null),
                 last_error: None,
             },
