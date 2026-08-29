@@ -5,7 +5,7 @@
 //! - 中途修改配置不能改变在途请求。
 //!
 //! 具体实现（`OcrBackendRouterImpl`）在 `app/local_engine/ocr_backend.rs`，
-//! 持有 `LocalEngineService` 和 `OcrConfig` 受限依赖。
+//! 持有 `EngineManager` 和 `OcrConfig` 受限依赖。
 //!
 //! ## 路由语义（§3.9）
 //!

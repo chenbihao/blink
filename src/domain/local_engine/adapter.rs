@@ -20,9 +20,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::local_engine::runtime::{BackendObservation, ResolvedProfile, RuntimeKind};
+use super::identity::{BackendObservation, ResolvedProfile, RuntimePlan};
 
-use super::descriptor::EngineDescriptor;
+use super::descriptor::EngineDefinition;
 use super::error::LocalEngineError;
 use super::status::{EnvironmentHealth, FallbackOutcome, ModelHealth, ServiceHealth};
 
@@ -138,7 +138,7 @@ pub struct DiagnosticEntry {
 #[derive(Debug, Clone)]
 pub struct LaunchContext {
     /// service 分配的 endpoint（child 必须绑定此端口）。
-    pub endpoint: crate::infra::local_engine::port::Endpoint,
+    pub endpoint: super::identity::Endpoint,
     /// engine id（用于身份验证）。
     pub engine_id: String,
     /// instance id（由 service 每次启动随机生成）。
@@ -177,7 +177,7 @@ pub struct ResolvedLaunch {
 /// - **不是任意进程托管器**：只服务于编译期内置引擎。
 pub trait LocalEngineAdapter: Send + Sync {
     /// 返回此 adapter 对应的引擎描述符。
-    fn descriptor(&self) -> &EngineDescriptor;
+    fn descriptor(&self) -> &EngineDefinition;
 
     /// 从已校验配置、resolved profile 和受控启动上下文产生受限启动描述。
     ///
@@ -218,7 +218,7 @@ pub trait LocalEngineAdapter: Send + Sync {
     fn diagnostics(&self) -> EngineDiagnostic;
 
     /// 运行时种类（便捷方法，从 descriptor 获取）。
-    fn runtime_kind(&self) -> RuntimeKind {
+    fn runtime_kind(&self) -> RuntimePlan {
         self.descriptor().runtime_kind
     }
 
@@ -239,7 +239,7 @@ pub struct AdapterConfig {
     /// 首选端口（None = 自动分配）。
     pub preferred_port: Option<u16>,
     /// 用户请求的 compute preference。
-    pub compute_preference: Option<crate::infra::local_engine::runtime::ComputePreference>,
+    pub compute_preference: Option<super::identity::ComputePreference>,
     /// 引擎专属配置（闭合 JSON，各 adapter 自行解析）。
     pub engine_config: serde_json::Value,
 }
@@ -266,25 +266,24 @@ impl AdapterConfig {
 mod tests {
     use super::*;
     use crate::domain::local_engine::descriptor::{
-        CapabilityKind, CleanupPolicy, EngineDescriptor, EngineDisplay, EngineTimeouts,
+        CapabilityKind, CleanupPolicy, EngineDefinition, EngineDisplay, EngineTimeouts,
         InstallPlanRef, LifecyclePolicy, ResourceBudget,
     };
     use crate::domain::local_engine::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
-    use crate::infra::local_engine::runtime::EngineId;
-    use crate::infra::local_engine::runtime::{
-        ArtifactId, ComputeBackend, ComputePreference, ResolvedProfile, RuntimeKind,
+    use crate::domain::local_engine::identity::{
+        ArtifactId, ComputeBackend, ComputePreference, EngineId, ResolvedProfile, RuntimePlan,
     };
 
     /// 测试用 adapter——只验证契约行为，不实现真实引擎。
     struct TestAdapter {
-        descriptor: EngineDescriptor,
+        descriptor: EngineDefinition,
     }
 
     impl TestAdapter {
         fn new() -> Self {
             let artifact_id = ArtifactId::new("test-artifact").unwrap();
             Self {
-                descriptor: EngineDescriptor {
+                descriptor: EngineDefinition {
                     engine_id: EngineId::new("test-engine").unwrap(),
                     display: EngineDisplay {
                         name: "Test Engine".to_string(),
@@ -293,9 +292,9 @@ mod tests {
                         version: "0.1.0".to_string(),
                     },
                     capability_kind: CapabilityKind::Stt,
-                    runtime_kind: RuntimeKind::PythonVenv,
+                    runtime_kind: RuntimePlan::PythonVenv,
                     install_plan: InstallPlanRef {
-                        runtime_kind: RuntimeKind::PythonVenv,
+                        runtime_kind: RuntimePlan::PythonVenv,
                         artifact_ids: vec![artifact_id.clone()],
                         compute_candidates: vec![super::super::descriptor::ComputeCandidate {
                             preference: ComputePreference::Cpu,
@@ -304,11 +303,11 @@ mod tests {
                         }],
                         schema_version: 1,
                     },
-                    model_contract: crate::infra::local_engine::runtime::ModelContract {
+                    model_contract: crate::domain::local_engine::identity::ModelContract {
                         model_id: "test-model".to_string(),
                         revision: "v1.0".to_string(),
                         checksum_source:
-                            crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+                            crate::domain::local_engine::identity::ChecksumSource::Unverified,
                     },
                     lifecycle: LifecyclePolicy::Manual,
                     timeouts: EngineTimeouts::default(),
@@ -320,7 +319,7 @@ mod tests {
     }
 
     impl LocalEngineAdapter for TestAdapter {
-        fn descriptor(&self) -> &EngineDescriptor {
+        fn descriptor(&self) -> &EngineDefinition {
             &self.descriptor
         }
 
@@ -405,7 +404,7 @@ mod tests {
 
     fn make_launch_context(profile: &ResolvedProfile) -> LaunchContext {
         LaunchContext {
-            endpoint: crate::infra::local_engine::port::Endpoint::new(8080),
+            endpoint: crate::domain::local_engine::identity::Endpoint::new(8080),
             engine_id: "test-engine".to_string(),
             instance_id: "inst-test".to_string(),
             token: "test-token-abcdef0123456789".to_string(),
@@ -521,7 +520,7 @@ mod tests {
     #[test]
     fn adapter_runtime_kind_matches_descriptor() {
         let adapter = TestAdapter::new();
-        assert_eq!(adapter.runtime_kind(), RuntimeKind::PythonVenv);
+        assert_eq!(adapter.runtime_kind(), RuntimePlan::PythonVenv);
         assert_eq!(adapter.capability_kind(), CapabilityKind::Stt);
     }
 

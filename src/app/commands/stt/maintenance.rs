@@ -6,7 +6,7 @@
 //! 安装和清理真源。每个生命周期 command 只做：
 //!
 //! 1. 读取/校验调用参数或现有配置
-//! 2. 调用 `LocalEngineService` 的 funasr 操作
+//! 2. 调用 `EngineManager` 的 funasr 操作
 //! 3. 将结构化错误/状态投影为旧返回格式
 //!
 //! ## 已删除
@@ -21,30 +21,30 @@
 //!
 //! ## 云端 STT 诊断
 //!
-//! `test_cloud_stt` 不迁移到 `LocalEngineService`——它是云端 STT 诊断路径，
+//! `test_cloud_stt` 不迁移到 `EngineManager`——它是云端 STT 诊断路径，
 //! 与本地引擎生命周期无关。
 
 use super::*;
 
 use std::sync::Arc;
 
-use crate::app::local_engine::LocalEngineService;
+use crate::app::local_engine::EngineManager;
 use crate::domain::local_engine::AdapterConfig;
 use crate::infra::local_engine::runtime::EngineId;
 use tauri::Manager;
 
-// ── 兼容层：从 managed state 获取 LocalEngineService ──────────────────────────
+// ── 兼容层：从 managed state 获取 EngineManager ──────────────────────────
 
-/// 从 Tauri managed state 获取 `LocalEngineService` 引用。
+/// 从 Tauri managed state 获取 `EngineManager` 引用。
 ///
-/// service 在 `main.rs` setup 中构造并注册为 `Arc<LocalEngineService>`，
+/// service 在 `main.rs` setup 中构造并注册为 `Arc<EngineManager>`，
 /// 全进程唯一实例——禁止创建多个 service 实例。
 ///
 /// 如果获取失败（状态未注册），返回错误。
-fn get_service(app: &tauri::AppHandle) -> Result<Arc<LocalEngineService>, String> {
-    app.try_state::<Arc<LocalEngineService>>()
+fn get_service(app: &tauri::AppHandle) -> Result<Arc<EngineManager>, String> {
+    app.try_state::<Arc<EngineManager>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| "LocalEngineService 尚未注册".to_string())
+        .ok_or_else(|| "EngineManager 尚未注册".to_string())
 }
 
 /// 构建 funasr engine_id。
@@ -77,7 +77,7 @@ fn build_adapter_config() -> AdapterConfig {
 
 /// 获取 funasr-server 历史日志（带原始事件时间戳）。
 ///
-/// 兼容层：从 `LocalEngineService` 的 bounded history 查询，
+/// 兼容层：从 `EngineManager` 的 bounded history 查询，
 /// 应用 FunASR 特有日志噪声过滤。
 ///
 /// 设置页打开时调用此命令回补自启动期间产生的日志。
@@ -110,7 +110,7 @@ pub async fn get_funasr_log_history(app: tauri::AppHandle) -> Vec<String> {
 pub async fn get_funasr_env(app: tauri::AppHandle) -> crate::domain::stt::funasr::FunasrEnv {
     let config = crate::app::stt_config::get_stt_config();
 
-    // 从 LocalEngineService 查询 server 运行状态
+    // 从 EngineManager 查询 server 运行状态
     let svc = match get_service(&app) {
         Ok(s) => s,
         Err(_) => {
@@ -146,7 +146,7 @@ pub async fn get_funasr_env(app: tauri::AppHandle) -> crate::domain::stt::funasr
 
 /// 一键安装 Python 环境（uv + venv + funasr）。
 ///
-/// 0.22.3: 安装唯一走 `LocalEngineService.install(funasr)` → `InstallTransaction`。
+/// 0.22.3: 安装唯一走 `EngineManager.install(funasr)` → `InstallTransaction`。
 /// 不再直接调用 `platform::python::setup`。
 /// 进度通过 `blink://python-env-progress` 事件通知前端（由 service operation 状态投影）。
 #[tauri::command]
@@ -159,7 +159,7 @@ pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| format!("环境安装失败: {e}"))?;
 
-    tracing::info!("Python 环境安装完成（通过 LocalEngineService InstallTransaction）");
+    tracing::info!("Python 环境安装完成（通过 EngineManager InstallTransaction）");
     Ok(())
 }
 
@@ -196,7 +196,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
 
-    // 0.22.3: 环境检查 + 安装统一走 LocalEngineService.ensure_installed
+    // 0.22.3: 环境检查 + 安装统一走 EngineManager.ensure_installed
     // 不再直接调用 platform::python::check_status/setup
     //
     // Task F: ready/error/stage 事件由 service 通过 EventPort 投影——
@@ -227,11 +227,11 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
         serde_json::json!({ "stage": "starting", "model": model, "port": port, "device": device }),
     );
 
-    // 通过 LocalEngineService 启动
+    // 通过 EngineManager 启动
     // service 内部 health 验证通过后，EventPort 自动投影 ready 状态
     match svc.start(&engine_id, adapter_config).await {
         Ok(()) => {
-            tracing::info!(port, "funasr-server 已通过 LocalEngineService 启动");
+            tracing::info!(port, "funasr-server 已通过 EngineManager 启动");
             Ok(())
         }
         Err(e) => {
@@ -260,7 +260,7 @@ pub async fn stop_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
 /// STT 诊断：检查 FunASR 环境 + 服务状态 + 配置。
 ///
 /// 兼容层：聚合通用状态和 FunASR 专属配置/请求诊断，
-/// 但不复制 lifecycle 判定（lifecycle 由 LocalEngineService 管理）。
+/// 但不复制 lifecycle 判定（lifecycle 由 EngineManager 管理）。
 #[tauri::command]
 pub async fn diagnose_stt(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let mut report = serde_json::json!({
@@ -275,7 +275,7 @@ pub async fn diagnose_stt(app: tauri::AppHandle) -> Result<serde_json::Value, St
 
     tracing::info!("=== STT 诊断开始 ===");
 
-    // 从 LocalEngineService 查询状态
+    // 从 EngineManager 查询状态
     let svc = get_service(&app).map_err(|e| e)?;
     let engine_id = funasr_engine_id();
     let server_running = match svc.get_status(&engine_id).await {
@@ -297,7 +297,7 @@ pub async fn diagnose_stt(app: tauri::AppHandle) -> Result<serde_json::Value, St
     )
     .await;
 
-    // 0.22.6: 诊断命令使用 token-aware health 检查（从 LocalEngineService 获取连接）
+    // 0.22.6: 诊断命令使用 token-aware health 检查（从 EngineManager 获取连接）
     // 不再用 port-only check_model_loaded——Python /health 强制要求 token
     let conn = match svc.get_connection(&engine_id).await {
         Ok(Some(c)) => {
@@ -420,7 +420,7 @@ pub async fn diagnose_stt(app: tauri::AppHandle) -> Result<serde_json::Value, St
 
 /// 云端 STT 连接测试。
 ///
-/// **不迁移到 LocalEngineService**——云端 STT 诊断路径不受影响。
+/// **不迁移到 EngineManager**——云端 STT 诊断路径不受影响。
 #[tauri::command]
 pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
     let config = crate::app::stt_config::get_stt_config();
@@ -520,7 +520,7 @@ pub async fn get_stt_space_usage() -> serde_json::Value {
 
 /// 清理 STT Python 环境（删除 venv + 模型缓存）。
 ///
-/// 兼容层：通过 `LocalEngineService` 停止进程后，调用
+/// 兼容层：通过 `EngineManager` 停止进程后，调用
 /// `cleanup_funasr_engine()` 清理 FunASR 声明拥有的资产。
 ///
 /// **安全子集**：只清理 FunASR 引擎资产（venv + model cache），
@@ -528,7 +528,7 @@ pub async fn get_stt_space_usage() -> serde_json::Value {
 /// 单引擎清理不能连带删除其他引擎仍在使用的公共资产。
 #[tauri::command]
 pub async fn cleanup_stt_space(app: tauri::AppHandle) -> Result<(), String> {
-    // 先通过 LocalEngineService 停止 funasr-server
+    // 先通过 EngineManager 停止 funasr-server
     let svc = get_service(&app).map_err(|e| e)?;
     let engine_id = funasr_engine_id();
     let _ = svc.stop(&engine_id).await; // 忽略错误——即使停止失败也继续清理
@@ -577,22 +577,22 @@ fn emit_funasr_log(app: &tauri::AppHandle, line: &str) {
 
 /// Blink 退出时同步停止 funasr-server 子进程（避免孤儿进程）。
 ///
-/// 兼容层：通过 `LocalEngineService` 的 `shutdown_all_blocking` 回收。
+/// 兼容层：通过 `EngineManager` 的 `shutdown_all_blocking` 回收。
 /// `main.rs` 的 `RunEvent::Exit` handler 现直接调用 `service.shutdown_all_blocking()`。
 ///
 /// **注意**：此函数保留为兼容入口，实际退出路径不再经过此处。
 #[allow(dead_code)]
 pub fn shutdown_funasr_server_blocking(app: &tauri::AppHandle) {
     if let Some(svc) = app
-        .try_state::<Arc<LocalEngineService>>()
+        .try_state::<Arc<EngineManager>>()
         .map(|s| s.inner().clone())
     {
         svc.shutdown_all_blocking();
         tracing::info!(
-            "funasr-server 已在 Blink 退出时停止（LocalEngineService shutdown_all_blocking）"
+            "funasr-server 已在 Blink 退出时停止（EngineManager shutdown_all_blocking）"
         );
     } else {
-        tracing::warn!("LocalEngineService 未注册，跳过 shutdown_funasr_server_blocking");
+        tracing::warn!("EngineManager 未注册，跳过 shutdown_funasr_server_blocking");
     }
 }
 
@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn no_independent_status_polling() {
         // 验证没有独立 readiness/model polling task
-        // get_funasr_env 通过 LocalEngineService get_status 查询
+        // get_funasr_env 通过 EngineManager get_status 查询
     }
 
     // ── build_adapter_config 保留热词/ITN/VAD/model 透传 ──

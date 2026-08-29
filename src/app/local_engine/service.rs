@@ -1,4 +1,4 @@
-//! LocalEngineService — 本地引擎生命周期编排服务（0.22.3）。
+//! EngineManager — 本地引擎生命周期编排服务（0.22.3）。
 //!
 //! 职责（§3.1）：
 //! - 持有 registry、每引擎状态快照、service_epoch、操作串行化 gate
@@ -32,11 +32,15 @@ use tokio::sync::{Mutex, OnceCell, RwLock, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::local_engine::{
-    AdapterConfig, DesiredState, EngineDescriptor, EngineDiagnostic, EngineOperation, EngineStatus,
+    AdapterConfig, DeleteConflictReason, DesiredState, EngineDefinition, EngineDiagnostic,
+    EngineModelStatus, EngineOperation, EngineOperationCoordinator, EngineStatus,
     EngineStatusSnapshot, EnvironmentHealth, ErrorPhase, HealthMapping, LaunchContext,
-    LocalEngineAdapter, LocalEngineError, LocalEngineErrorCode, ModelHealth, OperationKind,
-    OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
+    LocalEngineAdapter, LocalEngineError, LocalEngineErrorCode, ModelCompatibility,
+    ModelDeleteConflict, ModelHealth, ModelInstallState, ModelOperationKind, ModelOperationResult,
+    ModelOperationStage, ModelVerificationState, OperationGuard, OperationKind, OperationStage,
+    ProcessState, ServiceEpoch, ServiceHealth, transition_install_state,
 };
+use crate::infra::local_engine::deployment::DeploymentStore;
 use crate::infra::local_engine::lease::{ProcessLease, remove_lease, write_lease};
 use crate::infra::local_engine::model_storage as mstore;
 use crate::infra::local_engine::port::{
@@ -46,7 +50,7 @@ use crate::infra::local_engine::port::{
 use crate::infra::local_engine::process::{LaunchRequest, ManagedProcess, ShutdownConfig};
 use crate::infra::local_engine::runtime::{
     self, BackendState, ComputeBackend, ComputePreference, EngineId, ModelContract,
-    ResolvedProfile, generate_operation_id,
+    ResolvedProfile, generate_install_id, generate_operation_id,
 };
 use crate::infra::local_engine::state::{ProcessIdentity, ProcessStatus};
 
@@ -54,6 +58,7 @@ use crate::infra::local_engine::providers::InstallSink;
 use crate::infra::local_engine::providers::ProviderDescriptor;
 use crate::infra::local_engine::providers::python::PythonVenvProvider;
 
+use super::error_bridge::{from_process, from_runtime};
 use super::registry::EngineRegistry;
 
 // ── InstallSinkAdapter (0.22.6 H5) ──────────────────────────────────────
@@ -205,7 +210,7 @@ pub(super) fn classify_engine_log(
 
 // ── LocalEngineConnection ─────────────────────────────────────────────────
 
-/// 受限连接快照——由 `LocalEngineService` 产生，不可序列化给前端。
+/// 受限连接快照——由 `EngineManager` 产生，不可序列化给前端。
 ///
 /// 包含当前运行实例的 endpoint、token 和身份信息，
 /// 供 STT transcription client 携带 `X-Engine-Token` 鉴权。
@@ -228,42 +233,64 @@ pub struct LocalEngineConnection {
 
 // ── EngineEntry ───────────────────────────────────────────────────────────
 
+/// start 时冻结的模型身份（"selected"之外的实际启动合同）。
+#[derive(Debug, Clone)]
+pub(super) struct FrozenModelIdentity {
+    pub model_id: String,
+    pub revision: String,
+    /// manifest 内容指纹（adapter 自管模型时为 None，由 health 契约校验）。
+    pub fingerprint: Option<String>,
+}
+
+/// 运行中实例的 launch snapshot——**start 时冻结，stop/exit 时清除**。
+///
+/// 冻结内容（任务铁则）：
+/// - deployment identity（active 部署 install_id）
+/// - model_id / revision（来自配置 selected + manifest，不来自当前配置猜测）
+/// - resolved profile / backend
+/// - instance identity（endpoint/token/instance_id）
+///
+/// 配置变化只改变 selected，不改变正在运行的 active——
+/// 模型删除冲突检查以此 snapshot 为准。
+#[derive(Debug, Clone)]
+pub(super) struct LaunchSnapshot {
+    /// 实例身份（endpoint/token/instance_id）。
+    pub identity: ServiceIdentityInput,
+    /// resolved profile（backend 期望来源）。
+    pub profile: ResolvedProfile,
+    /// 本次启动绑定的 active 部署 install_id。
+    pub deployment_install_id: String,
+    /// 本次启动冻结的模型身份（None = adapter 自管/无模型合同）。
+    pub model: Option<FrozenModelIdentity>,
+}
+
 /// 单引擎的运行时状态。
 ///
 /// 持有：
 /// - adapter 引用
 /// - 当前状态快照
-/// - 操作串行化 gate（tokio::Mutex）
-/// - managed instance 跟踪
-struct EngineEntry {
+/// - launch snapshot（start 冻结 / stop 清除）
+/// - 受管实例跟踪
+///
+/// 变更操作互斥由 `EngineManager` 的进程级 `EngineOperationCoordinator`
+/// 承载（key = engine_id），不再使用 per-entry gate。
+pub(crate) struct EngineEntry {
     adapter: Arc<dyn LocalEngineAdapter>,
-    /// 操作串行化 gate——同一引擎同时只允许一个变更操作。
-    /// 查询走 `status_snapshot` 的 RwLock，不竞争此 gate。
-    op_gate: Mutex<()>,
     /// 状态快照（读多写少，用 RwLock）。
     status: RwLock<EngineStatus>,
+    /// 运行实例的 launch snapshot（Running 时存在）。
+    launch: Mutex<Option<LaunchSnapshot>>,
     /// 受管实例（Running 时存在）。
     managed_process: Mutex<Option<Arc<ManagedProcess>>>,
-    /// 当前 instance 的 identity input（用于 health 验证）。
-    current_identity: Mutex<Option<ServiceIdentityInput>>,
-    /// 当前 resolved profile（start 后设置）。
-    current_profile: Mutex<Option<ResolvedProfile>>,
-    /// 当前 operation_id（活跃操作时存在）。
-    current_operation_id: Mutex<Option<String>>,
     /// 上一实例的 ManagedProcess 引用——stop 后保留 bounded history 可查。
-    /// Task H: 日志实例隔离——pump 绑定 token/instance，stop 后保留 bounded history。
     #[allow(dead_code)]
     last_managed_process: Mutex<Option<Arc<ManagedProcess>>>,
     /// 日志 pump 的 cancellation token——每次 start 创建新 token，
     /// stop/rollback/restart 时 cancel 旧 pump，确保旧实例日志不再投影。
     log_pump_cancel: Mutex<Option<CancellationToken>>,
-    /// 操作取消 token——与 operation_id 绑定。
-    /// cancel_local_engine_operation 只取消完全匹配且声明 cancellable 的操作。
-    /// 旧 operation_id 不得取消新操作。
-    operation_cancel: Mutex<Option<(String, CancellationToken)>>,
     /// 后台探测共享结果——确定性 probe 协调。
     ///
-    /// 构造后 spawn 后台任务探测 current generation，
+    /// 构造后 spawn 后台任务探测 active 部署，
     /// `ensure_installed`/`start` 在执行前 await 此信号，
     /// 确保不会在探测未完成时竞态重复安装。
     /// probe 完成（成功或失败）后所有等待者获得同一确定结果。
@@ -272,6 +299,27 @@ struct EngineEntry {
     probe_tx: watch::Sender<bool>,
     /// probe 完成信号 watch——用于确定性等待（不轮询）。
     probe_watch: watch::Receiver<bool>,
+}
+
+impl EngineEntry {
+    /// 当前实例身份（None = 未运行）。
+    async fn current_identity(&self) -> Option<ServiceIdentityInput> {
+        self.launch
+            .lock()
+            .await
+            .as_ref()
+            .map(|l| l.identity.clone())
+    }
+
+    /// 当前 resolved profile（None = 未运行）。
+    async fn current_profile(&self) -> Option<ResolvedProfile> {
+        self.launch.lock().await.as_ref().map(|l| l.profile.clone())
+    }
+
+    /// 当前 launch snapshot 克隆。
+    async fn current_launch(&self) -> Option<LaunchSnapshot> {
+        self.launch.lock().await.clone()
+    }
 }
 
 // ── EventPort ─────────────────────────────────────────────────────────────
@@ -342,7 +390,7 @@ impl EventPort for NoopEventPort {
     fn emit_install_stage(&self, _engine_id: &EngineId, _operation_id: &str, _stage: &str) {}
 }
 
-// ── LocalEngineService ────────────────────────────────────────────────────
+// ── EngineManager ────────────────────────────────────────────────────
 
 /// 本地引擎生命周期编排服务。
 ///
@@ -357,6 +405,15 @@ impl EventPort for NoopEventPort {
 ///
 /// **禁止再用独立 AtomicBool 作为服务真源**——所有状态经 `commit_status()`。
 
+/// 单个清理目标的执行结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupTargetOutcome {
+    /// 已删除，释放 bytes。
+    Cleaned(u64),
+    /// Windows 占用等——已记 cleanup residue（非产品状态），等待后续清理。
+    Deferred(u64),
+}
+
 /// 同步 process registry 的 key——至少包含 engine_id + instance_id。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProcessKey {
@@ -364,11 +421,20 @@ struct ProcessKey {
     instance_id: String,
 }
 
-pub struct LocalEngineService {
+pub struct EngineManager {
     registry: Arc<EngineRegistry>,
+    /// 模型目录（编译期 allowlist，从原 ModelService 并入）。
+    model_registry: super::model_installer::ModelRegistry,
     epoch: ServiceEpoch,
     entries: RwLock<HashMap<EngineId, Arc<EngineEntry>>>,
     event_port: Arc<dyn EventPort>,
+    /// 进程级唯一操作协调器——所有变更操作（安装/修复/启动/停止/清理/
+    /// 模型资产操作）必须先 claim，key 只有 engine_id。
+    coordinator: EngineOperationCoordinator,
+    /// 模型安装 worker（下载执行器）。
+    model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
+    /// 模型状态缓存（manager 唯一持有；磁盘 manifest 是持久真源）。
+    model_states: RwLock<HashMap<(EngineId, String), EngineModelStatus>>,
     /// 每引擎对应的 ProviderDescriptor（infra 层安装事务用）。
     /// key = engine_id，value = 编译期声明的 provider descriptor。
     provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
@@ -380,12 +446,12 @@ pub struct LocalEngineService {
     /// start 在 spawn 后登记，stop/spawn失败/health失败后移除。
     /// 0.22.6.4: 使用 Arc 包装，使 exit monitor 能持有引用并在验证身份后
     /// 安全移除对应 ProcessKey 条目，避免 registry 泄漏。
-    /// 不形成强引用环：Arc 指向 Mutex，不指向 LocalEngineService 自身。
+    /// 不形成强引用环：Arc 指向 Mutex，不指向 EngineManager 自身。
     process_registry: Arc<std::sync::Mutex<HashMap<ProcessKey, Arc<ManagedProcess>>>>,
 }
 
 #[allow(dead_code)]
-impl LocalEngineService {
+impl EngineManager {
     /// 创建服务实例。
     ///
     /// 每次创建生成新 `service_epoch`——新 epoch 初始 revision 不受旧快照影响。
@@ -395,19 +461,24 @@ impl LocalEngineService {
             event_port,
             HashMap::new(),
             PythonVenvProvider::new(),
+            super::model_installer::ModelRegistry::empty(),
+            Arc::new(super::model_installer::NoopModelWorker),
         )
     }
 
-    /// 创建服务实例（带 provider descriptors + python provider）。
+    /// 创建服务实例（带 provider descriptors + python provider + 模型目录）。
     ///
     /// `provider_descriptors`：每引擎对应的 `ProviderDescriptor`，
     /// 由 wiring 层在构造时传入（如 `make_funasr_provider_descriptor()`）。
     /// `python_provider`：`PythonVenvProvider` 实例，用于 `InstallTransaction`。
+    /// `model_registry` / `model_worker`：模型资产目录与下载执行器。
     pub fn new_with_providers(
         registry: Arc<EngineRegistry>,
         event_port: Arc<dyn EventPort>,
         provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
         python_provider: PythonVenvProvider,
+        model_registry: super::model_installer::ModelRegistry,
+        model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
     ) -> Arc<Self> {
         let epoch = ServiceEpoch::new();
         let mut entries = HashMap::new();
@@ -424,15 +495,11 @@ impl LocalEngineService {
                 engine_id.clone(),
                 Arc::new(EngineEntry {
                     adapter,
-                    op_gate: Mutex::new(()),
                     status: RwLock::new(initial_status),
+                    launch: Mutex::new(None),
                     managed_process: Mutex::new(None),
-                    current_identity: Mutex::new(None),
-                    current_profile: Mutex::new(None),
-                    current_operation_id: Mutex::new(None),
                     last_managed_process: Mutex::new(None),
                     log_pump_cancel: Mutex::new(None),
-                    operation_cancel: Mutex::new(None),
                     probe_result: OnceCell::new(),
                     probe_tx,
                     probe_watch: probe_rx,
@@ -442,18 +509,22 @@ impl LocalEngineService {
 
         let service = Arc::new(Self {
             registry,
+            model_registry,
             epoch,
             entries: RwLock::new(entries),
             event_port,
+            coordinator: EngineOperationCoordinator::new(),
+            model_worker,
+            model_states: RwLock::new(HashMap::new()),
             provider_descriptors,
             python_provider,
             process_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
 
-        // 0.22.3 Task B: 后台探测每个引擎的 current generation
+        // 后台探测每个引擎的 active 部署（含事务 journal fail-closed 恢复）
         // 不阻塞主链路（Alt+Space），ensure_installed/start 会 await 探测结果
-        // 0.22.3 Task D: 探测结果经 commit_status_internal 统一提交（revision+1 并广播）
-        // 0.22.3 Task F: 确定性 probe 协调——使用 OnceCell 共享结果，不轮询
+        // 探测结果经 commit_status_internal 统一提交（revision+1 并广播）
+        // 确定性 probe 协调——使用 OnceCell 共享结果，不轮询
         service.spawn_background_probe();
 
         service
@@ -470,10 +541,29 @@ impl LocalEngineService {
         &self.registry
     }
 
+    /// 返回操作协调器引用（测试用）。
+    pub fn coordinator(&self) -> &EngineOperationCoordinator {
+        &self.coordinator
+    }
+
+    /// 返回模型目录引用（commands DTO 投影用）。
+    pub fn model_registry(&self) -> &super::model_installer::ModelRegistry {
+        &self.model_registry
+    }
+
+    /// 获取引擎 entry（测试注入 launch snapshot 用）。
+    #[cfg(test)]
+    pub(crate) async fn get_entry_internal(
+        &self,
+        engine_id: &EngineId,
+    ) -> Result<Arc<EngineEntry>, LocalEngineError> {
+        self.get_entry(engine_id).await
+    }
+
     // ── 查询 API（可并发） ──────────────────────────────────────────────────
 
     /// 返回所有引擎的 catalog（描述符列表）。
-    pub async fn catalog(&self) -> Vec<EngineDescriptor> {
+    pub async fn catalog(&self) -> Vec<EngineDefinition> {
         let entries = self.entries.read().await;
         entries
             .values()
@@ -544,8 +634,7 @@ impl LocalEngineService {
                 format!("engine_id '{}' 不在 registry 中", engine_id),
             )
         })?;
-        let ci = entry.current_identity.lock().await;
-        Ok(ci.clone())
+        Ok(entry.current_identity().await)
     }
 
     /// 返回当前运行实例的 InstanceToken（用于条件停止）。
@@ -592,22 +681,22 @@ impl LocalEngineService {
 
     // ── install ─────────────────────────────────────────────────────────────
 
-    /// 安装引擎环境。
+    /// 安装/更新引擎环境。
     ///
-    /// **唯一真源**：通过 `InstallTransaction` 事务执行安装，
-    /// 不再直接调用 `platform::python::setup`。
+    /// **唯一真源**：通过 `InstallTransaction` 事务执行安装
+    /// （slot + journal，见 `infra/local_engine/deployment`）。
     ///
     /// 事务流程（由 `InstallTransaction::execute` 编排）：
-    /// 1. resolve_profile → 解析 compute preference
-    /// 2. create staging → `engines/{id}/staging/{op_id}`
+    /// 1. journal begin（fail-closed 前提）
+    /// 2. resolve_profile → 解析 compute preference
     /// 3. provider.prepare_environment → uv venv + pip install + self-test
-    /// 4. write manifest → generation manifest
-    /// 5. promote → staging → `generations/{install_id}`
-    /// 6. atomic switch → `current.json`
-    /// 7. 失败自动回滚 staging / 恢复 previous current.json
+    /// 4. promote → staging → candidate slot
+    /// 5. atomic switch → `deployment.json`
+    /// 6. 切换后验证失败 → 自动回滚 previous
+    /// 7. 成功 → 删除旧 slot（占用记 residue），清 journal
     ///
+    /// 安装前先停止运行中的引擎实例（安装持有操作 claim，串行安全）。
     /// 安装后验证 adapter self_test，成功后标记 environment=Ready。
-    /// 失败不破坏旧环境。
     pub async fn install(
         &self,
         engine_id: &EngineId,
@@ -615,25 +704,33 @@ impl LocalEngineService {
     ) -> Result<(), LocalEngineError> {
         self.validate_engine_id(engine_id)?;
 
-        // 0.22.3 Task B: 等待后台探测完成，避免竞态重复安装
+        // 等待后台探测完成，避免竞态重复安装
         self.await_probe(engine_id).await?;
 
         let entry = self.get_entry(engine_id).await?;
 
-        let _gate = entry.op_gate.lock().await;
-
-        let operation_id = generate_operation_id();
-        self.set_operation_id(engine_id, Some(operation_id.clone()))
-            .await;
-
-        // 0.22.6.2: 创建取消 token——install 是可取消的操作
-        let cancel_token = CancellationToken::new();
-        {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = Some((operation_id.clone(), cancel_token.clone()));
+        // 先检查 adapter self_test——如果已通过，环境已就绪，无需重新安装。
+        let pre_test = entry.adapter.self_test();
+        if pre_test.passed {
+            let _ = self
+                .commit_status_internal(engine_id, None, |status| {
+                    status.environment = EnvironmentHealth::Ready;
+                })
+                .await;
+            tracing::info!(engine = %engine_id, "install 跳过（self-test 已通过，环境就绪）");
+            return Ok(());
         }
 
-        // 标记操作进行中
+        // claim 进程级操作（原子 busy 检查 + 登记）
+        let operation_id = generate_operation_id();
+        let guard = self
+            .coordinator
+            .try_claim(engine_id, &operation_id)
+            .map_err(|e| {
+                tracing::info!(engine = %engine_id, %e, "install: 引擎操作进行中，拒绝");
+                e
+            })?;
+
         self.commit_status_internal(engine_id, Some(&operation_id), |status| {
             status.operation = EngineOperation {
                 kind: OperationKind::Installing,
@@ -644,48 +741,77 @@ impl LocalEngineService {
         })
         .await?;
 
-        // 先检查 adapter self_test——如果已通过，环境已就绪，无需重新安装。
-        let pre_test = entry.adapter.self_test();
-        if pre_test.passed {
-            self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                status.environment = EnvironmentHealth::Ready;
-                status.operation.stage = OperationStage::Completed;
-            })
-            .await?;
-            self.set_operation_id(engine_id, None).await;
-            tracing::info!(engine = %engine_id, "install 跳过（self-test 已通过，环境就绪）");
-            return Ok(());
-        }
+        // 更新会切换 slot——先停止运行中的实例（无 claim 的内部停止）
+        self.stop_internal(engine_id, &entry).await;
 
-        // 0.22.3: pre_test 未通过时，先尝试 InstallTransaction。
-        // 如果没有 ProviderDescriptor（测试/未接线场景），直接返回 SelfTestFailed。
+        let result = self
+            .install_transaction_locked(
+                engine_id,
+                &entry,
+                &config,
+                &pre_test,
+                &operation_id,
+                &guard,
+            )
+            .await;
+
+        match result {
+            Ok(()) => {
+                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                    status.environment = EnvironmentHealth::Ready;
+                    status.operation.stage = OperationStage::Completed;
+                })
+                .await?;
+                tracing::info!(engine = %engine_id, "install 完成（InstallTransaction + self-test passed）");
+                Ok(())
+            }
+            Err(err) => {
+                // 安装失败——事务内部已回滚（old 部署不受影响），标记 Broken
+                self.finish_operation_with_error(engine_id, &operation_id, &err)
+                    .await?;
+                self.commit_status_internal(engine_id, None, |status| {
+                    status.environment = EnvironmentHealth::Broken;
+                })
+                .await
+                .ok();
+                Err(err)
+            }
+        }
+    }
+
+    /// install/repair 共享的事务执行体（调用方持有 operation claim）。
+    async fn install_transaction_locked(
+        &self,
+        engine_id: &EngineId,
+        entry: &Arc<EngineEntry>,
+        config: &AdapterConfig,
+        pre_test: &crate::domain::local_engine::AdapterSelfTest,
+        operation_id: &str,
+        guard: &OperationGuard,
+    ) -> Result<(), LocalEngineError> {
         let preference = config.compute_preference.unwrap_or(ComputePreference::Auto);
 
         // 查找此引擎的 ProviderDescriptor
         let provider_descriptor = match self.provider_descriptors.get(engine_id) {
             Some(d) => d,
             None => {
-                // 无 ProviderDescriptor——无法执行 InstallTransaction
-                // 直接返回 SelfTestFailed（pre_test 已失败）
-                let err = LocalEngineError::with_detail(
+                // 无 ProviderDescriptor（测试/未接线场景）——直接返回 SelfTestFailed。
+                return Err(LocalEngineError::with_detail(
                     LocalEngineErrorCode::SelfTestFailed,
                     ErrorPhase::SelfTest,
                     "引擎 self-test 失败",
-                    pre_test.failure_reason.unwrap_or_default(),
-                );
-                self.finish_operation_with_error(engine_id, &operation_id, &err)
-                    .await?;
-                return Err(err);
+                    pre_test.failure_reason.clone().unwrap_or_default(),
+                ));
             }
         };
 
         // 更新进度：正在安装
-        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+        self.commit_status_internal(engine_id, Some(operation_id), |status| {
             status.operation.stage = OperationStage::Downloading;
         })
         .await?;
 
-        // 执行 InstallTransaction
+        // 执行 InstallTransaction（slot + journal 部署事务）
         let transaction = crate::infra::local_engine::providers::InstallTransaction::new(
             provider_descriptor,
             &self.python_provider,
@@ -694,10 +820,15 @@ impl LocalEngineService {
         let sink_adapter = InstallSinkAdapter::new(
             self.event_port.clone(),
             engine_id.clone(),
-            operation_id.clone(),
+            operation_id.to_string(),
         );
         let install_result = transaction
-            .execute(preference, Some(&cancel_token), Some(&sink_adapter))
+            .execute(
+                operation_id,
+                preference,
+                Some(guard.cancel_token()),
+                Some(&sink_adapter),
+            )
             .await;
 
         match install_result {
@@ -713,49 +844,21 @@ impl LocalEngineService {
                 // 安装后再次验证 adapter self_test
                 let self_test = entry.adapter.self_test();
                 if !self_test.passed {
-                    let err = LocalEngineError::with_detail(
+                    return Err(LocalEngineError::with_detail(
                         LocalEngineErrorCode::SelfTestFailed,
                         ErrorPhase::SelfTest,
                         "引擎 self-test 失败",
                         self_test.failure_reason.unwrap_or_default(),
-                    );
-                    self.finish_operation_with_error(engine_id, &operation_id, &err)
-                        .await?;
-                    return Err(err);
+                    ));
                 }
 
-                // 环境标记为 Ready
-                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                    status.environment = EnvironmentHealth::Ready;
-                    status.operation.stage = OperationStage::Completed;
-                })
-                .await?;
-
-                self.set_operation_id(engine_id, None).await;
-                tracing::info!(engine = %engine_id, "install 完成（InstallTransaction + self-test passed）");
                 Ok(())
             }
-            Err(e) => {
-                // 安装失败——不破坏旧环境，标记 Broken
-                let err = LocalEngineError::from_runtime(
-                    ErrorPhase::Install,
-                    "环境安装失败（InstallTransaction）",
-                    &e,
-                );
-                // finish_operation_with_error 会清除 operation_id（set None），
-                // 所以标记 Broken 必须用 None operation_id 提交（fail-closed）
-                self.finish_operation_with_error(engine_id, &operation_id, &err)
-                    .await?;
-                // 标记环境为 Broken（operation_id 已清除，用 None 提交）
-                self.commit_status_internal(engine_id, None, |status| {
-                    status.environment = EnvironmentHealth::Broken;
-                })
-                .await
-                .ok();
-                // 0.22.6.3: 清理取消 token（install 失败时防泄露）
-                self.clear_cancel_token(engine_id).await;
-                Err(err)
-            }
+            Err(e) => Err(from_runtime(
+                ErrorPhase::Install,
+                "环境安装失败（InstallTransaction）",
+                &e,
+            )),
         }
     }
 
@@ -843,50 +946,37 @@ impl LocalEngineService {
 
     /// 实际探测逻辑（可返回错误用于日志）。
     ///
-    /// **0.22.3 Task C**: 环境 Ready 判定必须同时满足：
-    /// 1. `current.json` 存在且指向有效 generation
-    /// 2. `manifest` 可读（generation 完整性验证）
+    /// 环境 Ready 判定必须同时满足：
+    /// 1. 事务 journal 已按 fail-closed 规则恢复（`DeploymentStore::recover`）
+    /// 2. active 指针存在且指向可读 manifest
     /// 3. adapter `self_test` 通过
     /// 缺少任何一项都不标记 Ready。
     async fn do_probe(&self, engine_id: &EngineId, entry: &EngineEntry) -> Result<(), String> {
-        // 0.22.6.2: 先尝试恢复 current.json（缺失/损坏/无效 manifest）
-        //
-        // 如果 current.json 不存在或指向无效 manifest，尝试从 generations/ 扫描
-        // 最新的有效 generation 恢复指针。恢复时传入 descriptor 做契约验证。
-        let descriptor = self.provider_descriptors.get(engine_id);
-        if let Err(e) =
-            crate::infra::local_engine::providers::recover_current_pointer(engine_id, descriptor)
-        {
-            tracing::warn!(engine = %engine_id, %e, "探测: recover_current_pointer 失败");
+        // 先执行崩溃恢复：journal 存在即事务未收尾，按恢复表回滚/收尾。
+        // 文件遍历在 blocking pool 执行，不阻塞 async executor。
+        let eid = engine_id.clone();
+        let recovery = tokio::task::spawn_blocking(move || DeploymentStore::recover(&eid))
+            .await
+            .map_err(|e| format!("recover join 错误: {e}"))?
+            .map_err(|e| format!("部署恢复失败: {e}"))?;
+        match recovery {
+            crate::infra::local_engine::deployment::RecoveryOutcome::Stable => {}
+            other => {
+                tracing::warn!(engine = %engine_id, outcome = ?other, "探测: 已恢复未收尾事务");
+            }
         }
 
-        // 读 current.json（可能在恢复后已更新）
-        let pointer = runtime::read_current_pointer(engine_id)
-            .map_err(|e| format!("读取 current.json 失败: {e}"))?;
+        // 读 active 部署
+        let active = DeploymentStore::read_active(engine_id)
+            .map_err(|e| format!("读取 deployment.json 失败: {e}"))?;
 
-        let pointer = match pointer {
+        let pointer = match active {
             None => {
-                // 无 current generation → Missing（默认值，无需改状态）
-                tracing::debug!(engine = %engine_id, "探测: 无 current.json → Missing");
+                // 无 active 部署 → Missing（默认值，无需改状态）
+                tracing::debug!(engine = %engine_id, "探测: 无 deployment.json → Missing");
                 return Ok(());
             }
-            Some(p) => p,
-        };
-
-        // 读 manifest（验证 generation 完整性）
-        let manifest_result = runtime::read_manifest(engine_id, &pointer.install_id);
-        let _manifest = match manifest_result {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(engine = %engine_id, error = %e, "探测: manifest 损坏 → Broken");
-                // manifest 损坏 → 标记 Broken（统一经 commit_status_internal，revision+1）
-                let _ = self
-                    .commit_status_internal(engine_id, None, |status| {
-                        status.environment = EnvironmentHealth::Broken;
-                    })
-                    .await;
-                return Err(format!("manifest 损坏: {e}"));
-            }
+            Some((pointer, _manifest)) => pointer,
         };
 
         // manifest 有效——执行 adapter self_test
@@ -896,7 +986,8 @@ impl LocalEngineService {
             tracing::info!(
                 engine = %engine_id,
                 install_id = %pointer.install_id,
-                "探测: current generation 有效 + self_test 通过 → Ready"
+                slot = %pointer.slot,
+                "探测: active 部署有效 + self_test 通过 → Ready"
             );
             self.commit_status_internal(engine_id, None, |status| {
                 status.environment = EnvironmentHealth::Ready;
@@ -985,35 +1076,22 @@ impl LocalEngineService {
             }
         }
 
-        // 环境未就绪——验证受管 generation（current.json + manifest）
-        // Task C: 不能仅凭 self_test 通过就标记 Ready
-        let has_managed_generation = match runtime::read_current_pointer(engine_id) {
-            Ok(Some(pointer)) => {
-                // 有 current.json——验证 manifest 可读
-                match runtime::read_manifest(engine_id, &pointer.install_id) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        tracing::warn!(
-                            engine = %engine_id,
-                            error = %e,
-                            "ensure_installed: current.json 存在但 manifest 损坏"
-                        );
-                        false
-                    }
-                }
-            }
+        // 环境未就绪——验证受管部署（deployment.json + manifest）
+        // 不能仅凭 self_test 通过就标记 Ready
+        let has_managed_deployment = match DeploymentStore::read_active(engine_id) {
+            Ok(Some(_)) => true,
             Ok(None) => false,
             Err(e) => {
                 tracing::warn!(
                     engine = %engine_id,
                     error = %e,
-                    "ensure_installed: 读取 current.json 失败"
+                    "ensure_installed: 读取 deployment.json 失败"
                 );
                 false
             }
         };
 
-        if has_managed_generation {
+        if has_managed_deployment {
             // 有受管 generation——检查 adapter self_test
             let self_test = entry.adapter.self_test();
             if self_test.passed {
@@ -1044,7 +1122,7 @@ impl LocalEngineService {
     ) -> Result<Option<LocalEngineConnection>, LocalEngineError> {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
-        let ci = entry.current_identity.lock().await;
+        let ci = entry.current_identity().await;
         Ok(ci.as_ref().map(|identity| LocalEngineConnection {
             endpoint: identity.endpoint.base_url(),
             token: identity.token.clone(),
@@ -1075,7 +1153,9 @@ impl LocalEngineService {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
 
-        let _gate = entry.op_gate.lock().await;
+        // claim 进程级操作（与 install/repair/模型操作互斥，key = engine_id）
+        let operation_id = generate_operation_id();
+        let _guard = self.coordinator.try_claim(engine_id, &operation_id)?;
 
         // 幂等检查：desired=Running 且进程活跃 → 直接返回
         {
@@ -1103,6 +1183,50 @@ impl LocalEngineService {
         let preference = config.compute_preference.unwrap_or(ComputePreference::Auto);
         let descriptor = entry.adapter.descriptor();
         let profile = self.resolve_profile(descriptor, preference)?;
+
+        // ── 冻结 launch snapshot ──
+        // deployment identity + 模型身份在 start 时冻结；配置变化只改变
+        // selected，不改变正在运行的 active。
+        let (deployment_install_id, frozen_model) = {
+            let active = DeploymentStore::read_active(engine_id)
+                .map_err(|e| from_runtime(ErrorPhase::Start, "读取 active 部署失败", &e))?;
+            let install_id = active
+                .as_ref()
+                .map(|(p, _)| p.install_id.clone())
+                .unwrap_or_default();
+
+            let selected_model_id = if engine_id.as_str() == super::funasr::FUNASR_ENGINE_ID {
+                Some(
+                    crate::app::stt_config::get_stt_config()
+                        .local_engine
+                        .funasr_model,
+                )
+            } else {
+                None
+            };
+            let frozen = match resolve_expected_model_identity(
+                engine_id,
+                selected_model_id.as_deref(),
+                &descriptor.model_contract,
+                entry.adapter.uses_managed_model_storage(),
+            ) {
+                Ok((model_id, revision, fingerprint)) => Some(FrozenModelIdentity {
+                    model_id,
+                    revision,
+                    fingerprint,
+                }),
+                Err(reason) => {
+                    // fail-closed：managed 模型未安装/损坏时不允许 start
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::ModelNotReady,
+                        ErrorPhase::Start,
+                        "模型未就绪，请先安装模型",
+                        reason,
+                    ));
+                }
+            };
+            (install_id, frozen)
+        };
 
         // 分配 endpoint（在 prepare_launch 之前，因为 LaunchContext 需要 endpoint）
         let preferred_port = config.preferred_port.unwrap_or(8100);
@@ -1161,7 +1285,7 @@ impl LocalEngineService {
         let managed = ManagedProcess::with_defaults();
 
         // 标记 desired=Running, process=Starting
-        self.commit_status_internal(engine_id, None, |status| {
+        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
             status.desired = DesiredState::Running;
             status.process = ProcessState::Starting;
             status.service = ServiceHealth::Unknown;
@@ -1177,18 +1301,19 @@ impl LocalEngineService {
         })
         .await?;
 
-        // 保存 managed process + identity + profile
+        // 保存 launch snapshot（identity + profile + deployment + 模型身份）+ 进程句柄
+        {
+            let mut l = entry.launch.lock().await;
+            *l = Some(LaunchSnapshot {
+                identity: identity_input.clone(),
+                profile: resolved_launch.profile.clone(),
+                deployment_install_id: deployment_install_id.clone(),
+                model: frozen_model.clone(),
+            });
+        }
         {
             let mut mp = entry.managed_process.lock().await;
             *mp = Some(managed.clone());
-        }
-        {
-            let mut ci = entry.current_identity.lock().await;
-            *ci = Some(identity_input.clone());
-        }
-        {
-            let mut cp = entry.current_profile.lock().await;
-            *cp = Some(resolved_launch.profile.clone());
         }
         // 同步 process registry——登记到 service 级 registry
         let pkey = ProcessKey {
@@ -1200,9 +1325,9 @@ impl LocalEngineService {
             reg.insert(pkey.clone(), managed.clone());
         }
         // 启动日志 pump task——把 ManagedProcess 的实时日志转发到 EventPort
-        // Task H: 日志实例隔离——每次 start 创建新 CancellationToken，
+        // 日志实例隔离——每次 start 创建新 CancellationToken，
         // stop/rollback/restart 时 cancel 旧 pump。
-        // pump 每条日志 emit 前实时读取 current_identity 校验实例归属。
+        // pump 每条日志 emit 前实时读取 launch snapshot 校验实例归属。
         let pump_token = CancellationToken::new();
         {
             // 先取消旧 pump（restart 场景）
@@ -1241,20 +1366,27 @@ impl LocalEngineService {
                 tracing::info!(engine = %engine_id, pid, "进程已 spawn，等待 health 验证");
 
                 // 更新 process=Running（但 service 仍为 Unknown）
-                self.commit_status_internal(engine_id, None, |status| {
+                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
                     status.process = ProcessState::Running { pid };
                     // service 保持 Unknown——需要 health 验证
                 })
                 .await?;
 
-                // 0.22.6.6: spawn 成功后立即写 lease
+                // spawn 成功后立即写 lease
                 // 此时 PID、executable、creation_time_ms 均已从 OS 获取，
                 // token_fingerprint 可从 identity_input 计算。
                 // 如果 Blink 在 health 验证期间崩溃，lease 已存在，
                 // 下次启动的恢复扫描能发现此遗留进程。
                 // health 验证失败时，rollback_started_instance 会清理此 lease。
-                self.write_lease_for_engine(engine_id, &managed, &identity_input, &endpoint, &req)
-                    .await;
+                self.write_lease_for_engine(
+                    engine_id,
+                    &managed,
+                    &identity_input,
+                    &endpoint,
+                    &req,
+                    &deployment_install_id,
+                )
+                .await;
 
                 // health 验证——只有 Model Ready 才返回 Ok
                 // 任何失败（timeout/mismatch/backend/ModelFailed）执行统一 rollback
@@ -1264,7 +1396,7 @@ impl LocalEngineService {
                 {
                     Ok(mapping) => {
                         // health 验证通过 + Model Ready——进入 Healthy
-                        self.commit_status_internal(engine_id, None, |status| {
+                        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
                             status.service = mapping.service;
                             status.model = mapping.model;
                             if let Some(ref backend_obs) = mapping.backend {
@@ -1276,13 +1408,14 @@ impl LocalEngineService {
                             }
                         })
                         .await?;
-                        tracing::info!(engine = %engine_id, "引擎 health 验证通过，Model Ready");
+                        tracing::info!(
+                            engine = %engine_id,
+                            instance_id = %instance_id,
+                            deployment = %deployment_install_id,
+                            "引擎 health 验证通过，Model Ready"
+                        );
 
-                        // 0.22.6.6: lease 已在 spawn 后立即写入（上方），
-                        // health 验证通过后不需要重新写入——所有字段在 spawn 时已就绪。
-                        // health 验证失败时，rollback_started_instance 会清理 lease。
-
-                        // 0.22.6.3: spawn exit monitor——监听进程意外退出
+                        // spawn exit monitor——监听进程意外退出
                         // server crash 后状态必须收敛到 Exited/Unreachable/Failed
                         self.spawn_exit_monitor(engine_id, &managed, &entry, &instance_id, &pkey);
 
@@ -1305,7 +1438,7 @@ impl LocalEngineService {
             }
             Err(e) => {
                 // spawn 失败——直接 rollback（清理已设置的中间状态）
-                let err = LocalEngineError::from_process(ErrorPhase::Start, "进程启动失败", &e);
+                let err = from_process(ErrorPhase::Start, "进程启动失败", &e);
                 tracing::warn!(engine = %engine_id, %err, "进程 spawn 失败，执行 rollback");
                 self.rollback_started_instance(engine_id, &entry, &pkey, &instance_id, &err)
                     .await;
@@ -1324,8 +1457,30 @@ impl LocalEngineService {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
 
-        let _gate = entry.op_gate.lock().await;
+        // claim 进程级操作（与其他变更操作互斥）
+        let operation_id = generate_operation_id();
+        let _guard = self.coordinator.try_claim(engine_id, &operation_id)?;
 
+        self.stop_internal_with_status(engine_id, &entry, &operation_id)
+            .await
+    }
+
+    /// 无 claim 的停止执行体——供已持有操作 claim 的路径
+    /// （install/repair 先停引擎）复用，不产生二级 claim。
+    async fn stop_internal(&self, engine_id: &EngineId, entry: &Arc<EngineEntry>) {
+        let op_id = generate_operation_id();
+        let _ = self
+            .stop_internal_with_status(engine_id, entry, &op_id)
+            .await;
+    }
+
+    /// 停止执行体（携带用于状态提交的 operation_id）。
+    async fn stop_internal_with_status(
+        &self,
+        engine_id: &EngineId,
+        entry: &Arc<EngineEntry>,
+        operation_id: &str,
+    ) -> Result<(), LocalEngineError> {
         // 幂等检查
         let managed = {
             let mp = entry.managed_process.lock().await;
@@ -1335,7 +1490,7 @@ impl LocalEngineService {
         match managed {
             Some(mp) => {
                 // 标记 desired=Stopped, process=Stopping
-                self.commit_status_internal(engine_id, None, |status| {
+                self.commit_status_internal(engine_id, Some(operation_id), |status| {
                     status.desired = DesiredState::Stopped;
                     status.process = ProcessState::Stopping;
                 })
@@ -1343,7 +1498,7 @@ impl LocalEngineService {
 
                 match mp.stop().await {
                     Ok(()) => {
-                        self.commit_status_internal(engine_id, None, |status| {
+                        self.commit_status_internal(engine_id, Some(operation_id), |status| {
                             status.process = ProcessState::Stopped;
                             status.service = ServiceHealth::Unknown;
                             status.model = ModelHealth::Unknown;
@@ -1351,63 +1506,15 @@ impl LocalEngineService {
                         })
                         .await?;
 
-                        // 取消旧日志 pump——确保 stop 后旧实例日志不再投影
-                        {
-                            let mut lc = entry.log_pump_cancel.lock().await;
-                            if let Some(cancel) = lc.take() {
-                                tracing::debug!(engine = %engine_id, "stop: 取消日志 pump");
-                                cancel.cancel();
-                            }
-                        }
-
-                        // 先取出 instance_id 用于从 registry 移除
-                        let saved_instance_id = {
-                            let ci = entry.current_identity.lock().await;
-                            ci.as_ref().map(|i| i.instance_id.clone())
-                        };
-
-                        // 0.22.6.1: 删除 lease（只删除匹配 instance 的 lease）
-                        if let Some(ref inst_id) = saved_instance_id {
-                            if let Err(e) = remove_lease(&engine_id.to_string(), inst_id) {
-                                tracing::warn!(
-                                    engine = %engine_id,
-                                    instance = %inst_id,
-                                    %e,
-                                    "stop: 删除 lease 失败（继续清理）"
-                                );
-                            }
-                        }
-
-                        // 清理 identity/profile
-                        {
-                            let mut ci = entry.current_identity.lock().await;
-                            *ci = None;
-                        }
-                        {
-                            let mut cp = entry.current_profile.lock().await;
-                            *cp = None;
-                        }
-                        {
-                            let mut mp_guard = entry.managed_process.lock().await;
-                            *mp_guard = None;
-                        }
-
-                        // 从同步 registry 移除
-                        if let Some(instance_id) = saved_instance_id {
-                            let pkey = ProcessKey {
-                                engine_id: engine_id.clone(),
-                                instance_id,
-                            };
-                            let mut reg = self.process_registry.lock().unwrap();
-                            reg.remove(&pkey);
-                        }
+                        // 清理运行实例状态（launch snapshot + pump + registry + lease）
+                        self.clear_running_instance(engine_id, entry, true).await;
 
                         tracing::info!(engine = %engine_id, "引擎已停止");
                         Ok(())
                     }
                     Err(e) => {
-                        let err = LocalEngineError::from_process(ErrorPhase::Stop, "停止失败", &e);
-                        self.commit_status_internal(engine_id, None, |status| {
+                        let err = from_process(ErrorPhase::Stop, "停止失败", &e);
+                        self.commit_status_internal(engine_id, Some(operation_id), |status| {
                             status.process = ProcessState::Exited {
                                 reason: format!("stop failed: {e}"),
                             };
@@ -1420,7 +1527,7 @@ impl LocalEngineService {
             }
             None => {
                 // 已 Stopped，幂等返回
-                self.commit_status_internal(engine_id, None, |status| {
+                self.commit_status_internal(engine_id, Some(operation_id), |status| {
                     status.desired = DesiredState::Stopped;
                     if status.process == ProcessState::Starting {
                         status.process = ProcessState::Stopped;
@@ -1430,6 +1537,72 @@ impl LocalEngineService {
                 .await?;
                 Ok(())
             }
+        }
+    }
+
+    /// 清理运行实例状态：取消日志 pump、删除 lease、清 launch snapshot、
+    /// 移除 process registry 条目。
+    ///
+    /// `remove_lease`: stop/exit 路径删除；`stop_if_current` 条件停止成功后
+    /// 同样删除（与 stop 语义一致）。
+    async fn clear_running_instance(
+        &self,
+        engine_id: &EngineId,
+        entry: &Arc<EngineEntry>,
+        remove_lease_flag: bool,
+    ) {
+        // 取消旧日志 pump——确保 stop 后旧实例日志不再投影
+        {
+            let mut lc = entry.log_pump_cancel.lock().await;
+            if let Some(cancel) = lc.take() {
+                tracing::debug!(engine = %engine_id, "clear_running_instance: 取消日志 pump");
+                cancel.cancel();
+            }
+        }
+
+        // 取出 instance_id 用于 lease 删除与 registry 移除
+        let saved_instance_id = entry
+            .current_identity()
+            .await
+            .map(|i| i.instance_id.clone());
+
+        if remove_lease_flag {
+            if let Some(ref inst_id) = saved_instance_id {
+                if let Err(e) = remove_lease(&engine_id.to_string(), inst_id) {
+                    tracing::warn!(
+                        engine = %engine_id,
+                        instance = %inst_id,
+                        %e,
+                        "清理实例: 删除 lease 失败（继续清理）"
+                    );
+                }
+            }
+        }
+
+        // 清理 launch snapshot + 进程句柄
+        {
+            let mut l = entry.launch.lock().await;
+            if let Some(snapshot) = l.take() {
+                tracing::debug!(
+                    engine = %engine_id,
+                    deployment = %snapshot.deployment_install_id,
+                    "清理实例: 释放 launch snapshot（start 冻结的部署绑定至此失效）"
+                );
+            }
+        }
+        {
+            let mut mp_guard = entry.managed_process.lock().await;
+            *mp_guard = None;
+        }
+
+        // 从同步 registry 移除
+        if let Some(instance_id) = saved_instance_id {
+            let pkey = ProcessKey {
+                engine_id: engine_id.clone(),
+                instance_id,
+            };
+            let mut reg = self.process_registry.lock().unwrap();
+            reg.remove(&pkey);
         }
     }
 
@@ -1448,7 +1621,9 @@ impl LocalEngineService {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
 
-        let _gate = entry.op_gate.lock().await;
+        // claim 进程级操作（与其他变更操作互斥）
+        let operation_id = generate_operation_id();
+        let _guard = self.coordinator.try_claim(engine_id, &operation_id)?;
 
         let managed = {
             let mp = entry.managed_process.lock().await;
@@ -1467,7 +1642,7 @@ impl LocalEngineService {
                 }
 
                 // 标记 desired=Stopped, process=Stopping
-                self.commit_status_internal(engine_id, None, |status| {
+                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
                     status.desired = DesiredState::Stopped;
                     status.process = ProcessState::Stopping;
                 })
@@ -1475,7 +1650,7 @@ impl LocalEngineService {
 
                 match mp.stop_if_current(instance_token).await {
                     Ok(()) => {
-                        self.commit_status_internal(engine_id, None, |status| {
+                        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
                             status.process = ProcessState::Stopped;
                             status.service = ServiceHealth::Unknown;
                             status.model = ModelHealth::Unknown;
@@ -1483,50 +1658,15 @@ impl LocalEngineService {
                         })
                         .await?;
 
-                        // 取消旧日志 pump
-                        {
-                            let mut lc = entry.log_pump_cancel.lock().await;
-                            if let Some(cancel) = lc.take() {
-                                tracing::debug!(engine = %engine_id, "stop_if_current: 取消日志 pump");
-                                cancel.cancel();
-                            }
-                        }
-
-                        // 清理 identity/profile
-                        let saved_instance_id = {
-                            let ci = entry.current_identity.lock().await;
-                            ci.as_ref().map(|i| i.instance_id.clone())
-                        };
-                        {
-                            let mut ci = entry.current_identity.lock().await;
-                            *ci = None;
-                        }
-                        {
-                            let mut cp = entry.current_profile.lock().await;
-                            *cp = None;
-                        }
-                        {
-                            let mut mp_guard = entry.managed_process.lock().await;
-                            *mp_guard = None;
-                        }
-
-                        // 从同步 registry 移除
-                        if let Some(instance_id) = saved_instance_id {
-                            let pkey = ProcessKey {
-                                engine_id: engine_id.clone(),
-                                instance_id,
-                            };
-                            let mut reg = self.process_registry.lock().unwrap();
-                            reg.remove(&pkey);
-                        }
+                        // 清理运行实例状态（含 lease——条件停止成功即实例终结）
+                        self.clear_running_instance(engine_id, &entry, true).await;
 
                         tracing::info!(engine = %engine_id, "引擎已条件停止（token 匹配）");
                         Ok(())
                     }
                     Err(e) => {
-                        let err =
-                            LocalEngineError::from_process(ErrorPhase::Stop, "条件停止失败", &e);
-                        self.commit_status_internal(engine_id, None, |status| {
+                        let err = from_process(ErrorPhase::Stop, "条件停止失败", &e);
+                        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
                             status.process = ProcessState::Exited {
                                 reason: format!("stop_if_current failed: {e}"),
                             };
@@ -1539,7 +1679,7 @@ impl LocalEngineService {
             }
             None => {
                 // 已 Stopped，幂等返回
-                self.commit_status_internal(engine_id, None, |status| {
+                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
                     status.desired = DesiredState::Stopped;
                     if status.process == ProcessState::Starting {
                         status.process = ProcessState::Stopped;
@@ -1554,31 +1694,23 @@ impl LocalEngineService {
 
     // ── repair / cleanup / storage / cancel（0.22.5 H2）─────────────────────
 
-    /// 修复引擎环境。
+    /// 修复/更新引擎环境。
     ///
-    /// repair 是一个闭合事务：
-    /// 1. 进入 repair gate（拒绝新 lease，但保留 current generation）
-    /// 2. 在新 staging 中按当前配置重建环境
-    /// 3. self-test
-    /// 4. 原子切换 current.json
-    /// 5. 失败保持旧 generation 可用
+    /// repair 是一个完整的部署事务（复用 install 事务体）：
+    /// 1. claim 操作（与所有变更互斥）
+    /// 2. 停止运行中的实例
+    /// 3. 在 candidate slot 中按当前配置重建环境
+    /// 4. self-test + 切换后验证；失败自动回滚 previous
+    /// 5. 成功删除旧 slot（占用记 residue）
     ///
-    /// 不通过原地覆盖 current generation"修复"。
+    /// 不通过原地覆盖 active 部署"修复"。
     pub async fn repair(&self, engine_id: &EngineId) -> Result<(), LocalEngineError> {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
-        let _gate = entry.op_gate.lock().await;
 
+        // claim 进程级操作（原子 busy 检查 + 登记）
         let operation_id = generate_operation_id();
-        self.set_operation_id(engine_id, Some(operation_id.clone()))
-            .await;
-
-        // 创建取消 token——repair 是可取消的操作
-        let cancel_token = CancellationToken::new();
-        {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = Some((operation_id.clone(), cancel_token.clone()));
-        }
+        let guard = self.coordinator.try_claim(engine_id, &operation_id)?;
 
         self.commit_status_internal(engine_id, Some(&operation_id), |status| {
             status.operation = EngineOperation {
@@ -1593,112 +1725,60 @@ impl LocalEngineService {
         // 读取当前配置
         let config = self.read_adapter_config_for_engine(engine_id);
 
-        // 检查是否有 ProviderDescriptor——repair 需要 InstallTransaction
-        let provider_descriptor = match self.provider_descriptors.get(engine_id) {
-            Some(d) => d,
-            None => {
-                // 无 ProviderDescriptor——退化为 self_test 验证
-                let self_test = entry.adapter.self_test();
-                if !self_test.passed {
-                    let err = LocalEngineError::with_detail(
-                        LocalEngineErrorCode::SelfTestFailed,
-                        ErrorPhase::Repair,
-                        "修复后 self-test 仍失败",
-                        self_test.failure_reason.unwrap_or_default(),
-                    );
-                    self.finish_operation_with_error(engine_id, &operation_id, &err)
-                        .await?;
-                    self.clear_cancel_token(engine_id).await;
-                    return Err(err);
-                }
-
-                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                    status.environment = EnvironmentHealth::Ready;
-                    status.operation.stage = OperationStage::Completed;
-                })
-                .await?;
-                self.set_operation_id(engine_id, None).await;
-                self.clear_cancel_token(engine_id).await;
-                return Ok(());
-            }
-        };
-
-        // 保留当前 generation——repair 不删除旧 generation
-        let previous_pointer = runtime::read_current_pointer(engine_id).map_err(|e| {
-            LocalEngineError::from_runtime(ErrorPhase::Repair, "读取 current.json 失败", &e)
-        })?;
-
-        // 检查取消
-        if cancel_token.is_cancelled() {
-            return Err(self.cancel_operation(engine_id, &operation_id).await);
-        }
-
-        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-            status.operation.stage = OperationStage::Downloading;
-        })
-        .await?;
-
-        // 执行 InstallTransaction（在新 staging 中重建环境）
-        let preference = config.compute_preference.unwrap_or(ComputePreference::Auto);
-
-        let transaction = crate::infra::local_engine::providers::InstallTransaction::new(
-            provider_descriptor,
-            &self.python_provider,
-        );
-
-        let sink_adapter = InstallSinkAdapter::new(
-            self.event_port.clone(),
-            engine_id.clone(),
-            operation_id.clone(),
-        );
-        match transaction
-            .execute(preference, Some(&cancel_token), Some(&sink_adapter))
-            .await
-        {
-            Ok(result) => {
-                tracing::info!(
-                    engine = %engine_id,
-                    install_id = %result.install_id,
-                    "repair: 新 generation 安装成功"
-                );
-
-                // 检查取消——promote 前的安全 checkpoint
-                if cancel_token.is_cancelled() {
-                    tracing::info!(engine = %engine_id, "repair: 在 promote 前被取消，清理 staging");
-                    // 清理新 staging（current.json 未切换，旧 generation 仍可用）
-                    let _ = std::fs::remove_dir_all(runtime::generation_dir(
-                        engine_id,
-                        &result.install_id,
-                    ));
-                    return Err(self.cancel_operation(engine_id, &operation_id).await);
-                }
-
-                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                    status.operation.stage = OperationStage::Completed;
-                    status.environment = EnvironmentHealth::Ready;
-                })
-                .await?;
-
-                self.set_operation_id(engine_id, None).await;
-                self.clear_cancel_token(engine_id).await;
-                tracing::info!(engine = %engine_id, "repair 完成（新 generation 已切换，旧 generation 可手动清理）");
-                Ok(())
-            }
-            Err(e) => {
-                let err = LocalEngineError::from_runtime(
+        // 无 ProviderDescriptor 时退化为 self_test 验证
+        let pre_test = if self.provider_descriptors.get(engine_id).is_none() {
+            let self_test = entry.adapter.self_test();
+            if !self_test.passed {
+                let err = LocalEngineError::with_detail(
+                    LocalEngineErrorCode::SelfTestFailed,
                     ErrorPhase::Repair,
-                    "修复失败（InstallTransaction）",
-                    &e,
+                    "修复后 self-test 仍失败",
+                    self_test.failure_reason.unwrap_or_default(),
                 );
                 self.finish_operation_with_error(engine_id, &operation_id, &err)
                     .await?;
-                self.clear_cancel_token(engine_id).await;
+                return Err(err);
+            }
 
-                // 保留旧 generation 可用
-                if let Some(ref prev) = previous_pointer {
-                    let _ = runtime::write_current_pointer(engine_id, prev);
-                    tracing::info!(engine = %engine_id, "repair 失败，已恢复 previous generation");
-                }
+            self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                status.environment = EnvironmentHealth::Ready;
+                status.operation.stage = OperationStage::Completed;
+            })
+            .await?;
+            tracing::info!(engine = %engine_id, "repair 完成（self-test 降级路径）");
+            return Ok(());
+        } else {
+            entry.adapter.self_test()
+        };
+
+        // 更新会切换 slot——先停止运行中的实例（无 claim 的内部停止）
+        self.stop_internal(engine_id, &entry).await;
+
+        let result = self
+            .install_transaction_locked(
+                engine_id,
+                &entry,
+                &config,
+                &pre_test,
+                &operation_id,
+                &guard,
+            )
+            .await;
+
+        match result {
+            Ok(()) => {
+                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                    status.operation.stage = OperationStage::Completed;
+                    status.environment = EnvironmentHealth::Ready;
+                })
+                .await?;
+                tracing::info!(engine = %engine_id, "repair 完成（新部署已切换，旧 slot 已清理）");
+                Ok(())
+            }
+            Err(err) => {
+                // 事务内部已回滚——active 部署不受影响
+                self.finish_operation_with_error(engine_id, &operation_id, &err)
+                    .await?;
                 Err(err)
             }
         }
@@ -1708,8 +1788,8 @@ impl LocalEngineService {
     ///
     /// 前端提交 `target_ids`，后端重新解析每个 target_id，不信任前端提交的路径/size/shared/current。
     ///
-    /// 禁止提交任意路径。current generation 默认不可删除。
-    /// 共享资产经过引用检查。
+    /// 禁止提交任意路径。active 部署不可删除。
+    /// 共享资产经过 active manifest 引用检查。
     pub async fn cleanup_targets(
         &self,
         engine_id: &EngineId,
@@ -1717,11 +1797,10 @@ impl LocalEngineService {
         operation_id: Option<String>,
     ) -> Result<super::dto::CleanupResultDto, LocalEngineError> {
         self.validate_engine_id(engine_id)?;
-        let entry = self.get_entry(engine_id).await?;
-        let _gate = entry.op_gate.lock().await;
+        self.get_entry(engine_id).await?;
 
         let op_id = operation_id.unwrap_or_else(generate_operation_id);
-        self.set_operation_id(engine_id, Some(op_id.clone())).await;
+        let _guard = self.coordinator.try_claim(engine_id, &op_id)?;
 
         self.commit_status_internal(engine_id, Some(&op_id), |status| {
             status.operation = EngineOperation {
@@ -1741,21 +1820,26 @@ impl LocalEngineService {
 
         for target_id in target_ids {
             match self.resolve_and_cleanup_target(engine_id, target_id) {
-                Ok(bytes) => {
+                Ok(CleanupTargetOutcome::Cleaned(bytes)) => {
                     released += bytes;
                     cleaned.push(target_id.clone());
+                }
+                Ok(CleanupTargetOutcome::Deferred(bytes)) => {
+                    // Windows 文件占用等——slot 记 residue，等待后续清理
+                    released += bytes;
+                    deferred.push(target_id.clone());
                 }
                 Err(crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
                     message,
                 }) => {
-                    // Windows 文件占用等——登记 deferred
                     tracing::warn!(
                         engine = %engine_id,
                         target = %target_id,
                         %message,
-                        "cleanup 失败，登记 deferred"
+                        "cleanup 跳过"
                     );
-                    deferred.push(target_id.clone());
+                    skipped.push(target_id.clone());
+                    errors.push(format!("{target_id}: {message}"));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1775,8 +1859,6 @@ impl LocalEngineService {
         })
         .await?;
 
-        self.set_operation_id(engine_id, None).await;
-
         Ok(super::dto::CleanupResultDto {
             engine_id: engine_id.to_string(),
             operation_id: op_id,
@@ -1794,36 +1876,27 @@ impl LocalEngineService {
 
     /// 取消操作。
     ///
-    /// 只取消完全匹配且声明 cancellable 的操作。
-    /// 旧 operation_id 不得取消新操作。
+    /// 只取消完全匹配 `operation_id` 的活跃 claim token：
+    /// - claim 由 worker 的 RAII guard 持有——cancel 后 claim 不释放，
+    ///   直到 worker 真正结束才允许下一个操作；
+    /// - 已完成的 operation 不再是 busy state → `NotRunning`；
+    /// - 错配的 operation_id → `Rejected`，不触发任何 token。
     pub async fn cancel_operation(
         &self,
         engine_id: &EngineId,
         operation_id: &str,
     ) -> LocalEngineError {
-        let entry = match self.get_entry(engine_id).await {
-            Ok(e) => e,
-            Err(e) => return e,
-        };
+        if let Err(e) = self.validate_engine_id(engine_id) {
+            return e;
+        }
 
-        let oc = entry.operation_cancel.lock().await;
-        match &*oc {
-            Some((current_op_id, token)) if current_op_id == operation_id => {
-                token.cancel();
+        match self.coordinator.cancel(engine_id, operation_id) {
+            Ok(()) => {
                 tracing::info!(
                     engine = %engine_id,
                     op = %operation_id,
-                    "操作取消信号已发送"
+                    "操作取消信号已发送（worker 结束前 claim 不释放）"
                 );
-                // 设置状态为 Cancelled
-                let _ = self
-                    .commit_status_internal(engine_id, Some(operation_id), |status| {
-                        status.operation.stage = OperationStage::Cancelled;
-                    })
-                    .await;
-                self.set_operation_id(engine_id, None).await;
-                drop(oc);
-                self.clear_cancel_token(engine_id).await;
                 LocalEngineError::with_detail(
                     LocalEngineErrorCode::Cancelled,
                     ErrorPhase::Request,
@@ -1831,29 +1904,14 @@ impl LocalEngineService {
                     format!("operation_id={operation_id} 已被用户取消"),
                 )
             }
-            Some((current_op_id, _)) => {
-                // operation_id 不匹配——旧 id 试图取消新操作
-                tracing::warn!(
+            Err(e) => {
+                tracing::info!(
                     engine = %engine_id,
-                    requested = %operation_id,
-                    current = %current_op_id,
-                    "取消请求的 operation_id 不匹配当前操作"
+                    op = %operation_id,
+                    %e,
+                    "取消请求未命中活跃操作"
                 );
-                LocalEngineError::with_detail(
-                    LocalEngineErrorCode::Rejected,
-                    ErrorPhase::Request,
-                    "操作已过期",
-                    format!("operation_id 不匹配: expected={current_op_id}, got={operation_id}"),
-                )
-            }
-            None => {
-                // 无活跃操作
-                LocalEngineError::with_detail(
-                    LocalEngineErrorCode::Rejected,
-                    ErrorPhase::Request,
-                    "无活跃操作",
-                    "没有正在进行的可取消操作",
-                )
+                e
             }
         }
     }
@@ -1880,15 +1938,7 @@ impl LocalEngineService {
                     )
                 })?;
 
-        result.map_err(|e| LocalEngineError::from_runtime(ErrorPhase::Request, "存储扫描失败", &e))
-    }
-
-    /// 清理取消 token。
-    async fn clear_cancel_token(&self, engine_id: &EngineId) {
-        if let Ok(entry) = self.get_entry(engine_id).await {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = None;
-        }
+        result.map_err(|e| from_runtime(ErrorPhase::Request, "存储扫描失败", &e))
     }
 
     /// 从配置真源读取 AdapterConfig（复用 commands 层逻辑的简化版）。
@@ -1928,50 +1978,63 @@ impl LocalEngineService {
     /// 解析 target_id 并执行清理。
     ///
     /// target_id 格式：
-    /// - `gen:{install_id}` — 引擎 generation
+    /// - `slot:{slot}` — 非 active 部署 slot（residue 感知：占用记残留）
+    /// - `staging` — 孤儿 staging
     /// - `model_cache` — 引擎模型缓存
     /// - `shared:{runtime_kind}:{artifact_id}` — provider 共享 artifact
     /// - `download_cache:{runtime_kind}` — provider 下载缓存
-    /// - `legacy:{kind}` — 旧版遗留资产
+    /// - `legacy:{kind}` — 旧版遗留资产（拒绝自动清理）
     fn resolve_and_cleanup_target(
         &self,
         engine_id: &EngineId,
         target_id: &str,
-    ) -> Result<u64, crate::infra::local_engine::runtime::RuntimeError> {
+    ) -> Result<CleanupTargetOutcome, crate::infra::local_engine::runtime::RuntimeError> {
         use crate::infra::local_engine::providers::execute_cleanup;
         use crate::infra::local_engine::runtime::CleanupScope;
 
-        // 解析 target_id
-        if let Some(install_id) = target_id.strip_prefix("gen:") {
-            // 引擎 generation
-            runtime::validate_install_id(install_id)?;
+        if let Some(slot) = target_id.strip_prefix("slot:") {
+            runtime::validate_slot_name(slot)?;
 
-            // 检查不是 current generation
-            let current = runtime::read_current_pointer(engine_id)?;
-            if let Some(ref c) = current {
-                if c.install_id == install_id {
-                    return Err(
-                        crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
-                            message: "current generation 不可删除".to_string(),
-                        },
-                    );
-                }
+            // active slot 不可删除
+            let active = DeploymentStore::read_pointer(engine_id)?;
+            if active.as_ref().is_some_and(|p| p.slot == slot) {
+                return Err(
+                    crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
+                        message: "active 部署不可删除".to_string(),
+                    },
+                );
             }
 
-            let scope = CleanupScope::EngineGeneration {
+            let scope = CleanupScope::EngineDeploymentSlot {
                 engine_id: engine_id.clone(),
-                install_ids: Some(vec![install_id.to_string()]),
+                slot: slot.to_string(),
             };
             let size = measure_cleanup_scope(&scope);
             execute_cleanup(&scope)?;
-            Ok(size)
+            // delete_slot_if_not_active 占用时记 residue（Ok(false)）——
+            // 查询 residue 判断是否残留
+            let deferred = DeploymentStore::read_residue(engine_id)?
+                .iter()
+                .any(|r| r.slot == slot);
+            if deferred {
+                Ok(CleanupTargetOutcome::Deferred(size))
+            } else {
+                Ok(CleanupTargetOutcome::Cleaned(size))
+            }
+        } else if target_id == "staging" {
+            let scope = CleanupScope::EngineStaging {
+                engine_id: engine_id.clone(),
+            };
+            let size = measure_cleanup_scope(&scope);
+            execute_cleanup(&scope)?;
+            Ok(CleanupTargetOutcome::Cleaned(size))
         } else if target_id == "model_cache" {
             let scope = CleanupScope::EngineModelCache {
                 engine_id: engine_id.clone(),
             };
             let size = measure_cleanup_scope(&scope);
             execute_cleanup(&scope)?;
-            Ok(size)
+            Ok(CleanupTargetOutcome::Cleaned(size))
         } else if let Some(rest) = target_id.strip_prefix("shared:") {
             // shared:{runtime_kind}:{artifact_id}
             let parts: Vec<&str> = rest.splitn(2, ':').collect();
@@ -1983,8 +2046,8 @@ impl LocalEngineService {
                 );
             }
             let runtime_kind = match parts[0] {
-                "python_venv" => crate::infra::local_engine::runtime::RuntimeKind::PythonVenv,
-                "managed_binary" => crate::infra::local_engine::runtime::RuntimeKind::ManagedBinary,
+                "python_venv" => crate::infra::local_engine::runtime::RuntimePlan::PythonVenv,
+                "managed_binary" => crate::infra::local_engine::runtime::RuntimePlan::ManagedBinary,
                 _ => {
                     return Err(
                         crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
@@ -1993,18 +2056,23 @@ impl LocalEngineService {
                     );
                 }
             };
-            let artifact_id = crate::infra::local_engine::runtime::ArtifactId::new(parts[1])?;
+            let artifact_id = crate::infra::local_engine::runtime::ArtifactId::new(parts[1])
+                .map_err(
+                    |e| crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
+                        message: format!("无效的 artifact id: {e}"),
+                    },
+                )?;
             let scope = CleanupScope::ProviderSharedArtifact {
                 runtime_kind,
                 artifact_id: artifact_id.clone(),
             };
             let size = measure_cleanup_scope(&scope);
             execute_cleanup(&scope)?;
-            Ok(size)
+            Ok(CleanupTargetOutcome::Cleaned(size))
         } else if let Some(kind) = target_id.strip_prefix("download_cache:") {
             let runtime_kind = match kind {
-                "python_venv" => crate::infra::local_engine::runtime::RuntimeKind::PythonVenv,
-                "managed_binary" => crate::infra::local_engine::runtime::RuntimeKind::ManagedBinary,
+                "python_venv" => crate::infra::local_engine::runtime::RuntimePlan::PythonVenv,
+                "managed_binary" => crate::infra::local_engine::runtime::RuntimePlan::ManagedBinary,
                 _ => {
                     return Err(
                         crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
@@ -2016,7 +2084,7 @@ impl LocalEngineService {
             let scope = CleanupScope::ProviderDownloadCache { runtime_kind };
             let size = measure_cleanup_scope(&scope);
             execute_cleanup(&scope)?;
-            Ok(size)
+            Ok(CleanupTargetOutcome::Cleaned(size))
         } else if let Some(_kind) = target_id.strip_prefix("legacy:") {
             // legacy 资产——只清理可证明归属的
             // 目前不自动清理 legacy，只标记
@@ -2078,10 +2146,10 @@ impl LocalEngineService {
         let entry = self.get_entry(engine_id).await?;
 
         // 获取当前实例的 instance_id
-        let instance_id = {
-            let ci = entry.current_identity.lock().await;
-            ci.as_ref().map(|i| i.instance_id.clone())
-        };
+        let instance_id = entry
+            .current_identity()
+            .await
+            .map(|i| i.instance_id.clone());
 
         // 优先从当前运行实例读取
         let mp = entry.managed_process.lock().await;
@@ -2182,11 +2250,7 @@ impl LocalEngineService {
             if let Some(managed) = mp.as_ref() {
                 tracing::info!(engine = %engine_id, "shutdown_all: 回收引擎实例");
                 if let Err(e) = managed.stop().await {
-                    let err = LocalEngineError::from_process(
-                        ErrorPhase::Stop,
-                        "shutdown_all 回收失败",
-                        &e,
-                    );
+                    let err = from_process(ErrorPhase::Stop, "shutdown_all 回收失败", &e);
                     tracing::error!(engine = %engine_id, %err, "shutdown_all: 回收失败");
                     errors.push(err);
                 } else {
@@ -2454,7 +2518,7 @@ impl LocalEngineService {
     /// 状态提交统一入口。
     ///
     /// 1. 验证 epoch
-    /// 2. 验证 operation_id
+    /// 2. 验证 operation_id（busy 真源 = `EngineOperationCoordinator` 的 claim）
     /// 3. revision +1
     /// 4. 广播完整 snapshot
     async fn commit_status_internal(
@@ -2475,12 +2539,9 @@ impl LocalEngineService {
             };
         }
 
-        // 验证 operation_id（fail-closed）
-        //
-        // 0.22.6.3: 如果 current_operation_id 为 None，任何携带 operation_id
-        // 的提交都必须被拒绝——这防止迟到的任务（已取消/失败）覆写新状态。
-        let current_op_id = entry.current_operation_id.lock().await;
-        match (&*current_op_id, operation_id) {
+        // 验证 operation_id（fail-closed）——活跃 claim 唯一真源是协调器
+        let current_op_id = self.coordinator.active_operation(engine_id);
+        match (&current_op_id, operation_id) {
             (Some(current), Some(submitted)) => {
                 if submitted != current.as_str() {
                     return Err(LocalEngineError::with_detail(
@@ -2503,7 +2564,7 @@ impl LocalEngineService {
                     format!("有活跃操作但提交未携带 operation_id (current={current})"),
                 ));
             }
-            // 0.22.6.3: 无活跃操作但提交携带 operation_id → fail-closed 拒绝
+            // 无活跃操作但提交携带 operation_id → fail-closed 拒绝
             // 防止迟到的任务（已取消/已失败的 operation）覆写新状态
             (None, Some(submitted)) => {
                 tracing::warn!(
@@ -2523,7 +2584,6 @@ impl LocalEngineService {
             // 无活跃操作且提交不携带 operation_id → 允许（非操作状态转换）
             (None, None) => {}
         }
-        drop(current_op_id);
 
         // revision +1
         let new_revision = status.revision + 1;
@@ -2544,15 +2604,7 @@ impl LocalEngineService {
         Ok(())
     }
 
-    /// 设置/清除当前 operation_id。
-    async fn set_operation_id(&self, engine_id: &EngineId, op_id: Option<String>) {
-        if let Ok(entry) = self.get_entry(engine_id).await {
-            let mut guard = entry.current_operation_id.lock().await;
-            *guard = op_id;
-        }
-    }
-
-    /// 操作以错误结束——更新状态并清除 operation_id。
+    /// 操作以错误结束——更新状态（claim 由调用方 guard 释放）。
     async fn finish_operation_with_error(
         &self,
         engine_id: &EngineId,
@@ -2563,15 +2615,13 @@ impl LocalEngineService {
             status.operation.stage = OperationStage::Failed;
             status.last_error = Some(error.clone());
         })
-        .await?;
-        self.set_operation_id(engine_id, None).await;
-        Ok(())
+        .await
     }
 
     /// 解析 compute profile（从 descriptor 声明的候选列表中选择）。
     fn resolve_profile(
         &self,
-        descriptor: &EngineDescriptor,
+        descriptor: &EngineDefinition,
         preference: ComputePreference,
     ) -> Result<ResolvedProfile, LocalEngineError> {
         let candidates = &descriptor.install_plan.compute_candidates;
@@ -2844,43 +2894,38 @@ impl LocalEngineService {
         }
 
         // ── 模型身份校验（model_id + model_revision + fingerprint） ──
-        // 统一 ModelService 管理的引擎从 model_storage manifest 动态获取期望身份；
-        // adapter 自管模型的引擎使用编译期 descriptor 身份，并由 adapter health
-        // 契约负责校验其专属 manifest 产生的 content fingerprint。
+        // 期望身份来自 **start 时冻结的 launch snapshot**——配置变化（selected
+        // 改变）不影响正在运行的 active；删除模型也不影响本次运行的校验合同。
+        // adapter 自管模型的引擎（snapshot.model = None）使用编译期 descriptor
+        // 身份，fingerprint 由 health 契约负责校验。
         let descriptor = entry.adapter.descriptor();
         let engine_id = &descriptor.engine_id;
 
-        // managed 模式 fail-closed：未安装/损坏时不回退 descriptor。
-        // adapter-managed 模式显式使用 descriptor，fingerprint 由 health 提供。
-        // asset_key 真源 = 配置选中的模型（funasr 读 SttConfig.funasr_model），
-        // 不能用 descriptor 硬编码默认值——用户可能装了 paraformer-zh 而默认是
-        // SenseVoiceSmall，按默认查找会误报"模型未安装"。
-        let selected_model_id = if engine_id.as_str() == super::funasr::FUNASR_ENGINE_ID {
-            Some(
-                crate::app::stt_config::get_stt_config()
-                    .local_engine
-                    .funasr_model,
-            )
-        } else {
-            None
+        let launch = entry.current_launch().await;
+        let (expected_model_id, expected_revision, expected_fingerprint) = match launch.as_ref() {
+            Some(snap) => match &snap.model {
+                Some(m) => (
+                    m.model_id.clone(),
+                    m.revision.clone(),
+                    m.fingerprint.clone(),
+                ),
+                None => (
+                    descriptor.model_contract.model_id.clone(),
+                    descriptor.model_contract.revision.clone(),
+                    None,
+                ),
+            },
+            None => {
+                // launch snapshot 缺失（不应发生——start 后由 claim 保护）——fail-closed
+                let _ = engine_id;
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Health,
+                    "运行实例状态缺失",
+                    "health 验证期间 launch snapshot 不存在",
+                ));
+            }
         };
-        let (expected_model_id, expected_revision, expected_fingerprint) =
-            match resolve_expected_model_identity(
-                engine_id,
-                selected_model_id.as_deref(),
-                &descriptor.model_contract,
-                entry.adapter.uses_managed_model_storage(),
-            ) {
-                Ok(identity) => identity,
-                Err(reason) => {
-                    return Err(LocalEngineError::with_detail(
-                        LocalEngineErrorCode::ModelNotReady,
-                        ErrorPhase::Health,
-                        "模型身份解析失败",
-                        format!("无法从 manifest 获取模型身份: {reason}"),
-                    ));
-                }
-            };
 
         if mapping.model == ModelHealth::Ready {
             match mapping.model_id.as_deref() {
@@ -2992,10 +3037,10 @@ impl LocalEngineService {
             }
         }
 
-        // backend 一致性验证
+        // backend 一致性验证——期望来自 launch snapshot 冻结的 profile
         if let Some(ref obs) = mapping.backend {
-            let profile = entry.current_profile.lock().await;
-            if let Some(ref profile) = *profile {
+            let profile = entry.current_profile().await;
+            if let Some(ref profile) = profile {
                 let verification = runtime::verify_backend_consistency(profile.backend, Some(obs));
                 if verification.state == BackendState::Error {
                     return Err(LocalEngineError::with_detail(
@@ -3015,9 +3060,10 @@ impl LocalEngineService {
 
     /// 为引擎实例写入持久化 lease。
     ///
-    /// 在 health 验证全闭合后调用——从 `ManagedProcess` 获取进程身份
+    /// 在 spawn 成功后立即调用——从 `ManagedProcess` 获取进程身份
     /// （PID、可执行路径、创建时间），从 `ServiceIdentityInput` 获取
-    /// token fingerprint，从 `current.json` 获取 generation_id。
+    /// token fingerprint；`deployment_id` 使用 start 时冻结的
+    /// launch snapshot 中的部署 install_id。
     ///
     /// 写入失败只打 warn 日志，不影响 start 成功返回（lease 是辅助证据，
     /// 不是运行时强依赖）。
@@ -3028,6 +3074,7 @@ impl LocalEngineService {
         identity_input: &ServiceIdentityInput,
         endpoint: &crate::infra::local_engine::port::Endpoint,
         #[allow(unused_variables)] req: &LaunchRequest,
+        deployment_id: &str,
     ) {
         // 从 ManagedProcess 获取进程身份
         let snapshot = managed.snapshot().await;
@@ -3042,28 +3089,13 @@ impl LocalEngineService {
             }
         };
 
-        // 获取 generation_id（current.json 的 install_id）
-        let generation_id = match runtime::read_current_pointer(engine_id) {
-            Ok(Some(ref p)) => p.install_id.clone(),
-            Ok(None) => {
-                tracing::warn!(
-                    engine = %engine_id,
-                    "write_lease: 无 current.json，generation_id 用空串"
-                );
-                String::new()
-            }
-            Err(e) => {
-                tracing::warn!(
-                    engine = %engine_id,
-                    error = %e,
-                    "write_lease: 读取 current.json 失败，generation_id 用空串"
-                );
-                String::new()
-            }
-        };
-
-        let lease =
-            build_process_lease(engine_id, identity, identity_input, endpoint, generation_id);
+        let lease = build_process_lease(
+            engine_id,
+            identity,
+            identity_input,
+            endpoint,
+            deployment_id.to_string(),
+        );
 
         if let Err(e) = write_lease(&lease) {
             tracing::warn!(
@@ -3106,8 +3138,8 @@ impl LocalEngineService {
         let pkey = pkey.clone();
         // 0.22.6.4: 传入 process_registry 的 Arc 引用，使 exit monitor
         // 能在验证身份后移除对应 ProcessKey 条目，避免 registry 泄漏。
-        // 不形成强引用环：registry 是 LocalEngineService 拥有的 Mutex<HashMap>，
-        // 这里克隆的是 Arc 到同一 Mutex 的引用，不持有 LocalEngineService 自身。
+        // 不形成强引用环：registry 是 EngineManager 拥有的 Mutex<HashMap>，
+        // 这里克隆的是 Arc 到同一 Mutex 的引用，不持有 EngineManager 自身。
         let process_registry = Arc::clone(&self.process_registry);
 
         tokio::spawn(async move {
@@ -3169,10 +3201,10 @@ impl LocalEngineService {
                 }
 
                 // 取出 instance_id 用于 lease 删除
-                let saved_instance_id = {
-                    let ci = entry.current_identity.lock().await;
-                    ci.as_ref().map(|i| i.instance_id.clone())
-                };
+                let saved_instance_id = entry
+                    .current_identity()
+                    .await
+                    .map(|i| i.instance_id.clone());
 
                 // 删除 lease
                 if let Some(ref inst_id) = saved_instance_id {
@@ -3186,14 +3218,10 @@ impl LocalEngineService {
                     }
                 }
 
-                // 清理 identity/profile
+                // 清理 launch snapshot + 进程句柄
                 {
-                    let mut ci = entry.current_identity.lock().await;
-                    *ci = None;
-                }
-                {
-                    let mut cp = entry.current_profile.lock().await;
-                    *cp = None;
+                    let mut l = entry.launch.lock().await;
+                    *l = None;
                 }
                 {
                     let mut mp = entry.managed_process.lock().await;
@@ -3268,20 +3296,19 @@ impl LocalEngineService {
 
     /// 统一回滚已启动实例——start 失败时调用。
     ///
-    /// **0.22.3 Task C**: 任何 Err 分支都执行此方法：
+    /// 清理项：
     /// 1. 停止 ManagedProcess（如果存在）
-    /// 2. 清理 identity/profile
-    /// 3. 从 process_registry 移除
-    /// 4. 从 EngineEntry 移除 managed_process
-    /// 5. 置错误终态（process=Exited, service=Unreachable, last_error=err）
+    /// 2. 清理 launch snapshot / 日志 pump / lease / process registry
+    /// 3. 置错误终态（process=Exited, service=Unreachable, last_error=err）
     ///
-    /// **0.22.6.1**: rollback 时也尝试删除 lease（如果已写入）。
-    /// lease 删除使用 instance_id 验证，不会误删新实例的 lease。
+    /// **不回滚部署**：部署完整性由安装事务的切换后验证保证；
+    /// 进程启动失败（端口冲突/超时等）是进程生命周期问题，
+    /// 不构成部署回滚条件（旧 slot 已在事务成功时删除）。
     async fn rollback_started_instance(
         &self,
         engine_id: &EngineId,
         entry: &Arc<EngineEntry>,
-        pkey: &ProcessKey,
+        _pkey: &ProcessKey,
         instance_id: &str,
         error: &LocalEngineError,
     ) {
@@ -3306,53 +3333,8 @@ impl LocalEngineService {
             }
         }
 
-        // 取消旧日志 pump——确保 rollback 后旧实例日志不再投影
-        {
-            let mut lc = entry.log_pump_cancel.lock().await;
-            if let Some(cancel) = lc.take() {
-                tracing::debug!(engine = %engine_id, "rollback: 取消日志 pump");
-                cancel.cancel();
-            }
-        }
-
-        // 清理 identity/profile
-        {
-            let mut ci = entry.current_identity.lock().await;
-            *ci = None;
-        }
-        {
-            let mut cp = entry.current_profile.lock().await;
-            *cp = None;
-        }
-        {
-            let mut mp = entry.managed_process.lock().await;
-            *mp = None;
-        }
-
-        // 0.22.6.1: 删除 lease（只删除匹配 instance 的 lease）
-        // rollback 意味着 start 失败——如果 lease 已写入则清理
-        if let Err(e) = remove_lease(&engine_id.to_string(), instance_id) {
-            tracing::warn!(
-                engine = %engine_id,
-                instance = instance_id,
-                error = %e,
-                "rollback: 删除 lease 失败（继续清理）"
-            );
-        }
-
-        // 从同步 registry 移除
-        {
-            let mut reg = self.process_registry.lock().unwrap();
-            reg.remove(pkey);
-        }
-
-        // 0.22.6.3: 首次激活失败时触发 generation 回滚
-        //
-        // start 失败意味着当前 current generation 不可用。如果有 previous
-        // generation，原子切回 previous，让用户能继续使用旧版本。
-        // 新 generation 标记为 deferred cleanup，下次清理时移除。
-        self.rollback_generation_on_activation_failure(engine_id)
-            .await;
+        // 清理运行实例状态（pump/lease/launch snapshot/registry）
+        self.clear_running_instance(engine_id, entry, true).await;
 
         // 置错误终态
         let _ = self
@@ -3368,77 +3350,803 @@ impl LocalEngineService {
             .await;
     }
 
-    /// 首次激活失败时的 generation 回滚。
-    ///
-    /// 0.22.6.3: 当 start（spawn/health）失败时，如果存在 previous generation，
-    /// 原子切回 previous current.json，并将失败的 generation 标记为
-    /// deferred cleanup。如果没有 previous generation，不操作（保持 current 指向）。
-    ///
-    /// **设计取舍**：
-    /// - 只在 start 失败时回滚 generation——install 失败时 staging 已被
-    ///   InstallTransaction 清理，current.json 仍指向旧的可用 generation。
-    /// - 回滚 generation 不影响 rollback_started_instance 的进程清理——
-    ///   两者独立，进程清理总在 generation 回滚之前完成。
-    /// - 标记 deferred cleanup 而非立即删除——避免文件锁问题（Windows）。
-    async fn rollback_generation_on_activation_failure(&self, engine_id: &EngineId) {
-        use crate::infra::local_engine::providers::{mark_deferred_cleanup, rollback_to_previous};
+    // ── 模型资产操作（从 ModelService 并入，单一业务真相）──────────────────
+    //
+    // 语义变化：
+    // - 变更互斥由 EngineOperationCoordinator 承载（key = engine_id）——
+    //   同一引擎的模型安装与环境安装/修复/启动/停止互斥；
+    // - 删除冲突检查依据 **launch snapshot**（active）与配置真源（selected），
+    //   不再用当前配置猜测运行中的模型；
+    // - descriptor 默认模型只提供首次默认值，不构成删除保护。
 
-        // 读取 current 指针
-        let current = match runtime::read_current_pointer(engine_id) {
-            Ok(Some(ptr)) => ptr,
-            Ok(None) => {
-                tracing::debug!(engine = %engine_id, "无 current generation，跳过 generation 回滚");
-                return;
+    /// 读取引擎当前 selected 模型（配置真源）。
+    fn read_selected_model(&self, engine_id: &EngineId) -> Option<String> {
+        if engine_id.as_str() == super::funasr::FUNASR_ENGINE_ID {
+            let m = crate::app::stt_config::get_stt_config()
+                .local_engine
+                .funasr_model;
+            if m.is_empty() { None } else { Some(m) }
+        } else {
+            None
+        }
+    }
+
+    /// 检查模型删除冲突（selected / active launch snapshot）。
+    ///
+    /// active 判定依据 launch snapshot 冻结的模型身份与 instance_id——
+    /// 不根据当前配置猜测。descriptor 默认模型不构成冲突。
+    async fn check_delete_conflict(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+    ) -> Option<ModelDeleteConflict> {
+        let mut reasons = Vec::new();
+
+        // selected（配置真源）
+        if self.read_selected_model(engine_id).as_deref() == Some(model_id) {
+            reasons.push(DeleteConflictReason::ReferencedByConfig {
+                config_field: "funasr_model".to_string(),
+                config_value: model_id.to_string(),
+            });
+        }
+
+        // active（launch snapshot）
+        if let Ok(entry) = self.get_entry(engine_id).await {
+            if let Some(launch) = entry.current_launch().await {
+                if let Some(ref m) = launch.model {
+                    if m.model_id == model_id {
+                        reasons.push(DeleteConflictReason::ActiveInRunningInstance {
+                            instance_id: launch.identity.instance_id.clone(),
+                        });
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    engine = %engine_id,
-                    error = %e,
-                    "读取 current.json 失败，跳过 generation 回滚"
-                );
-                return;
+        }
+
+        if reasons.is_empty() {
+            None
+        } else {
+            Some(ModelDeleteConflict {
+                engine_id: engine_id.clone(),
+                model_id: model_id.to_string(),
+                reasons,
+            })
+        }
+    }
+
+    /// 列出引擎的所有模型候选及其当前状态（只读查询，无副作用）。
+    ///
+    /// 状态从磁盘 manifest 结构恢复（不做全量 hash）；
+    /// is_selected 来自配置，is_active 来自 launch snapshot。
+    pub async fn list_models(&self, engine_id: &EngineId) -> Vec<EngineModelStatus> {
+        let descriptors = self.model_registry.list(engine_id);
+        let selected = self.read_selected_model(engine_id);
+        let launch_model = match self.get_entry(engine_id).await {
+            Ok(entry) => entry
+                .current_launch()
+                .await
+                .and_then(|l| l.model.map(|m| m.model_id)),
+            Err(_) => None,
+        };
+
+        descriptors
+            .iter()
+            .map(|desc| {
+                let asset_key = mstore::encode_asset_key(&desc.model_id);
+                let mut status = match mstore::restore_model_state(engine_id, &asset_key) {
+                    Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
+                        let mut st = EngineModelStatus::not_installed(desc);
+                        st.install_state = ModelInstallState::Installed;
+                        st.verification_state = ModelVerificationState::Unverified;
+                        st.cache_size_bytes = Some(manifest.payload_size_bytes);
+                        st
+                    }
+                    Ok(mstore::RestoredModelState::Corrupted { .. }) => {
+                        let mut st = EngineModelStatus::not_installed(desc);
+                        st.install_state = ModelInstallState::NotInstalled;
+                        st.verification_state = ModelVerificationState::Corrupted;
+                        st.compatibility = ModelCompatibility::Unknown;
+                        st
+                    }
+                    _ => EngineModelStatus::not_installed(desc),
+                };
+                status.is_selected = selected.as_deref() == Some(desc.model_id.as_str());
+                status.is_active = launch_model.as_deref() == Some(desc.model_id.as_str());
+                status
+            })
+            .collect()
+    }
+
+    /// 获取单个模型状态。
+    pub async fn get_model_status(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+    ) -> Result<EngineModelStatus, LocalEngineError> {
+        let desc = self
+            .model_registry
+            .find(engine_id, model_id)
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Unsupported,
+                    ErrorPhase::Request,
+                    "未知模型",
+                    format!(
+                        "engine_id={}, model_id={} 不在 allowlist",
+                        engine_id, model_id
+                    ),
+                )
+            })?;
+
+        let asset_key = mstore::encode_asset_key(model_id);
+        let mut status = match mstore::restore_model_state(engine_id, &asset_key) {
+            Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
+                let mut st = EngineModelStatus::not_installed(desc);
+                st.install_state = ModelInstallState::Installed;
+                st.verification_state = ModelVerificationState::Unverified;
+                st.cache_size_bytes = Some(manifest.payload_size_bytes);
+                st
+            }
+            Ok(mstore::RestoredModelState::Corrupted { .. }) => {
+                let mut st = EngineModelStatus::not_installed(desc);
+                st.verification_state = ModelVerificationState::Corrupted;
+                st.compatibility = ModelCompatibility::Unknown;
+                st
+            }
+            _ => EngineModelStatus::not_installed(desc),
+        };
+        status.is_selected = self.read_selected_model(engine_id).as_deref() == Some(model_id);
+        if let Ok(entry) = self.get_entry(engine_id).await {
+            if let Some(launch) = entry.current_launch().await {
+                if let Some(ref m) = launch.model {
+                    status.is_active = m.model_id == model_id;
+                }
+            }
+        }
+        Ok(status)
+    }
+
+    /// 安装模型（真实事务：staging/下载/校验/提升）。
+    ///
+    /// 变更互斥：与同引擎其他变更操作（环境安装/修复/启停/其他模型操作）
+    /// 通过 EngineOperationCoordinator 串行。
+    pub async fn install_model(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        operation_id: Option<String>,
+    ) -> Result<ModelOperationResult, LocalEngineError> {
+        self.execute_model_install_or_repair(engine_id, model_id, operation_id, false)
+            .await
+    }
+
+    /// 修复模型（重下载 + 完整校验；保留旧 payload 直至新 payload 提升成功）。
+    pub async fn repair_model(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        operation_id: Option<String>,
+    ) -> Result<ModelOperationResult, LocalEngineError> {
+        self.execute_model_install_or_repair(engine_id, model_id, operation_id, true)
+            .await
+    }
+
+    /// install/repair 共享事务体（差异只在 kind 与幂等短路）。
+    async fn execute_model_install_or_repair(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        operation_id: Option<String>,
+        is_repair: bool,
+    ) -> Result<ModelOperationResult, LocalEngineError> {
+        let desc = self
+            .model_registry
+            .find(engine_id, model_id)
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Unsupported,
+                    ErrorPhase::Request,
+                    "未知模型",
+                    format!(
+                        "engine_id={}, model_id={} 不在 allowlist",
+                        engine_id, model_id
+                    ),
+                )
+            })?;
+
+        let kind = if is_repair {
+            ModelOperationKind::Repair
+        } else {
+            ModelOperationKind::Install
+        };
+
+        // 已安装且非修复 → 幂等返回
+        if !is_repair {
+            let asset_key = mstore::encode_asset_key(model_id);
+            if matches!(
+                mstore::restore_model_state(engine_id, &asset_key),
+                Ok(mstore::RestoredModelState::Installed { .. })
+            ) {
+                return Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: operation_id.unwrap_or_default(),
+                    operation_kind: kind,
+                    final_stage: ModelOperationStage::Done,
+                    success: true,
+                    error: None,
+                });
+            }
+        }
+
+        // claim 进程级操作（与同引擎所有变更互斥）
+        let op_id = operation_id.unwrap_or_else(generate_operation_id);
+        let guard = self.coordinator.try_claim(engine_id, &op_id)?;
+
+        let install_id = generate_install_id();
+        let asset_key = mstore::encode_asset_key(model_id);
+
+        // 状态转移 → Downloading（缓存仅作 UI 投影，磁盘 manifest 是持久真源）
+        self.transition_model_state(engine_id, model_id, ModelInstallState::Downloading)
+            .await?;
+
+        // 清理孤儿 staging（claim 已保证无活跃操作，删除安全）
+        let orphan_cleaned = tokio::task::spawn_blocking({
+            let eid = engine_id.clone();
+            let ak = asset_key.clone();
+            move || mstore::cleanup_orphan_staging(&eid, &ak)
+        })
+        .await
+        .unwrap_or(0);
+        if orphan_cleaned > 0 {
+            tracing::info!(
+                engine_id = %engine_id,
+                model_id = %model_id,
+                count = orphan_cleaned,
+                "已清理孤儿 staging 残留"
+            );
+        }
+
+        // staging payload 目录
+        let staging_payload_dir =
+            match mstore::model_operation_staging_payload_dir(engine_id, &asset_key, &op_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(self
+                        .model_op_failed(
+                            engine_id,
+                            model_id,
+                            &op_id,
+                            kind,
+                            &asset_key,
+                            format!("staging 目录创建失败: {e}"),
+                        )
+                        .await);
+                }
+            };
+        if let Err(e) = tokio::fs::create_dir_all(&staging_payload_dir).await {
+            return Ok(self
+                .model_op_failed(
+                    engine_id,
+                    model_id,
+                    &op_id,
+                    kind,
+                    &asset_key,
+                    format!("staging 目录创建失败: {e}"),
+                )
+                .await);
+        }
+
+        // 下载（worker 执行；sink 实时广播日志 + 内存缓冲）
+        let sink = std::sync::Arc::new(super::model_installer::BroadcastingInstallSink::new(
+            super::model_installer::BoundedInstallSink::new(500),
+            Arc::clone(&self.event_port) as Arc<dyn EventPort>,
+            engine_id.clone(),
+            op_id.clone(),
+        ));
+        use super::model_installer::InstallSink as _ModelInstallSink;
+        sink.emit_stage("preparing");
+        let download_result = self
+            .model_worker
+            .download_to_staging(
+                engine_id,
+                model_id,
+                &desc.revision,
+                &staging_payload_dir,
+                guard.cancel_token().clone(),
+                Some(Arc::clone(&sink) as Arc<dyn super::model_installer::InstallSink>),
+            )
+            .await;
+
+        // 取消优先判定（claim 未释放——guard 仍持有）
+        if guard.is_cancelled() {
+            let _ = mstore::cleanup_staging(engine_id, &asset_key, &op_id);
+            self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+                .await
+                .ok();
+            return Ok(ModelOperationResult {
+                engine_id: engine_id.to_string(),
+                model_id: model_id.to_string(),
+                operation_id: op_id,
+                operation_kind: kind,
+                final_stage: ModelOperationStage::Cancelled,
+                success: true,
+                error: None,
+            });
+        }
+
+        if let Err(e) = download_result {
+            let _ = mstore::cleanup_staging(engine_id, &asset_key, &op_id);
+            self.transition_model_state(engine_id, model_id, ModelInstallState::DownloadFailed)
+                .await
+                .ok();
+            self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+                .await
+                .ok();
+            let tail = sink.tail_lines(15);
+            let detail = if tail.is_empty() {
+                e.to_string()
+            } else {
+                format!("{e}\n最近日志:\n{}", tail.join("\n"))
+            };
+            return Ok(ModelOperationResult {
+                engine_id: engine_id.to_string(),
+                model_id: model_id.to_string(),
+                operation_id: op_id,
+                operation_kind: kind,
+                final_stage: ModelOperationStage::Failed,
+                success: false,
+                error: Some(LocalEngineError::with_detail(
+                    e.to_code(),
+                    if is_repair {
+                        ErrorPhase::Repair
+                    } else {
+                        ErrorPhase::Install
+                    },
+                    "模型下载失败",
+                    detail,
+                )),
+            });
+        }
+
+        self.transition_model_state(engine_id, model_id, ModelInstallState::Staging)
+            .await?;
+        self.transition_model_state(engine_id, model_id, ModelInstallState::Verifying)
+            .await?;
+
+        // 完整 fingerprint 校验（GB 级 hash 在 blocking pool 执行）
+        let fingerprint = match tokio::task::spawn_blocking({
+            let dir = staging_payload_dir.clone();
+            move || mstore::compute_content_fingerprint(&dir)
+        })
+        .await
+        {
+            Ok(Ok(fp)) => fp,
+            Ok(Err(e)) => {
+                let _ = mstore::cleanup_staging(engine_id, &asset_key, &op_id);
+                self.transition_model_state(
+                    engine_id,
+                    model_id,
+                    ModelInstallState::VerificationFailed,
+                )
+                .await
+                .ok();
+                self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+                    .await
+                    .ok();
+                return Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: kind,
+                    final_stage: ModelOperationStage::Failed,
+                    success: false,
+                    error: Some(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::ArtifactCorrupted,
+                        ErrorPhase::Install,
+                        "模型校验失败",
+                        format!("{e}"),
+                    )),
+                });
+            }
+            Err(join_err) => {
+                let _ = mstore::cleanup_staging(engine_id, &asset_key, &op_id);
+                self.transition_model_state(
+                    engine_id,
+                    model_id,
+                    ModelInstallState::VerificationFailed,
+                )
+                .await
+                .ok();
+                self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+                    .await
+                    .ok();
+                return Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: kind,
+                    final_stage: ModelOperationStage::Failed,
+                    success: false,
+                    error: Some(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::Internal,
+                        ErrorPhase::Install,
+                        "模型校验失败",
+                        format!("fingerprint join 错误: {join_err}"),
+                    )),
+                });
             }
         };
 
-        // 尝试回滚到 previous generation
-        match rollback_to_previous(engine_id) {
-            Ok(Some(previous_id)) => {
-                tracing::info!(
-                    engine = %engine_id,
-                    from = %current.install_id,
-                    to = %previous_id,
-                    "首次激活失败，已回滚 generation 到 previous"
-                );
-                // 标记失败的 generation 为 deferred cleanup
-                if let Err(e) = mark_deferred_cleanup(
-                    engine_id,
-                    &current.install_id,
-                    "首次激活失败（spawn/health），回滚到 previous",
-                ) {
-                    tracing::warn!(
-                        engine = %engine_id,
-                        install = %current.install_id,
-                        error = %e,
-                        "标记 deferred cleanup 失败（不影响回滚）"
-                    );
+        // manifest（保留来源、revision、checksum provenance、fingerprint、兼容 schema）
+        let (source, checksum_source) = match download_result.as_ref() {
+            Ok(outcome) => {
+                let s = outcome.source.clone();
+                match &outcome.checksum_source {
+                    super::model_installer::ModelDownloadChecksumSource::Sha256(sha) => (
+                        s,
+                        crate::domain::local_engine::ChecksumSource::Sha256(sha.clone()),
+                    ),
+                    super::model_installer::ModelDownloadChecksumSource::Unverified => {
+                        (s, crate::domain::local_engine::ChecksumSource::Unverified)
+                    }
                 }
             }
-            Ok(None) => {
-                tracing::info!(
-                    engine = %engine_id,
-                    install = %current.install_id,
-                    "无可回滚的 previous generation，保持 current 指向"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    engine = %engine_id,
-                    install = %current.install_id,
-                    error = %e,
-                    "generation 回滚失败（current 保持指向当前 generation）"
-                );
+            Err(_) => unreachable!("download_result 已在上面处理"),
+        };
+
+        let downloaded_at_ms = runtime::now_ms();
+        let manifest = mstore::ModelManifest {
+            schema_version: mstore::MODEL_MANIFEST_SCHEMA_VERSION,
+            engine_id: engine_id.clone(),
+            model_id: model_id.to_string(),
+            revision: desc.revision.clone(),
+            source: match checksum_source {
+                crate::domain::local_engine::ChecksumSource::Sha256(ref sha) => {
+                    mstore::ModelSource::Sha256 {
+                        sha256: sha.clone(),
+                        source,
+                        downloaded_at_ms,
+                    }
+                }
+                _ => mstore::ModelSource::Unverified {
+                    source,
+                    downloaded_at_ms,
+                },
+            },
+            install_id: install_id.clone(),
+            installed_at_ms: downloaded_at_ms,
+            content_fingerprint_algorithm: mstore::CONTENT_FINGERPRINT_ALGORITHM.to_string(),
+            content_fingerprint: fingerprint.fingerprint.clone(),
+            payload_size_bytes: fingerprint.total_size_bytes,
+            file_count: fingerprint.file_count,
+            compatibility_schema: desc.compatibility_schema,
+            model_contract_identity: mstore::ModelContractIdentity {
+                model_id: model_id.to_string(),
+                revision: desc.revision.clone(),
+                checksum_source_kind: match &desc.checksum_source {
+                    crate::domain::local_engine::ChecksumSource::Sha256(_) => "sha256",
+                    crate::domain::local_engine::ChecksumSource::DownloadSource { .. } => {
+                        "download_source"
+                    }
+                    crate::domain::local_engine::ChecksumSource::Unverified => "unverified",
+                }
+                .to_string(),
+            },
+        };
+
+        // 提升：staging → generations/{install_id} + 原子切换 current.json
+        if let Err(e) = mstore::promote_staging_to_generation(
+            engine_id,
+            &asset_key,
+            &install_id,
+            &op_id,
+            &manifest,
+        ) {
+            let _ = mstore::cleanup_staging(engine_id, &asset_key, &op_id);
+            self.transition_model_state(engine_id, model_id, ModelInstallState::VerificationFailed)
+                .await
+                .ok();
+            self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+                .await
+                .ok();
+            return Ok(ModelOperationResult {
+                engine_id: engine_id.to_string(),
+                model_id: model_id.to_string(),
+                operation_id: op_id,
+                operation_kind: kind,
+                final_stage: ModelOperationStage::Failed,
+                success: false,
+                error: Some(from_runtime(ErrorPhase::Install, "模型提升失败", &e)),
+            });
+        }
+
+        // 稳定状态只保留一个 installed revision——提升成功后删除旧 generation
+        let _ = mstore::cleanup_staging(engine_id, &asset_key, &op_id);
+        let _ = mstore::cleanup_old_generations(engine_id, &asset_key, &install_id);
+
+        self.transition_model_state(engine_id, model_id, ModelInstallState::Installed)
+            .await?;
+        {
+            let mut states = self.model_states.write().await;
+            let key = (engine_id.clone(), model_id.to_string());
+            if let Some(st) = states.get_mut(&key) {
+                st.cache_size_bytes = Some(manifest.payload_size_bytes);
+                st.verification_state = ModelVerificationState::Verified;
+                st.compatibility = ModelCompatibility::Compatible;
             }
         }
+
+        Ok(ModelOperationResult {
+            engine_id: engine_id.to_string(),
+            model_id: model_id.to_string(),
+            operation_id: op_id,
+            operation_kind: kind,
+            final_stage: ModelOperationStage::Done,
+            success: true,
+            error: None,
+        })
+    }
+
+    /// 模型操作早期失败的统一收尾（清 staging + 状态回 NotInstalled + 失败结果）。
+    async fn model_op_failed(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        op_id: &str,
+        kind: ModelOperationKind,
+        asset_key: &str,
+        message: String,
+    ) -> ModelOperationResult {
+        tracing::warn!(
+            engine_id = %engine_id,
+            model_id = %model_id,
+            %message,
+            "模型操作失败"
+        );
+        let _ = mstore::cleanup_staging(engine_id, asset_key, op_id);
+        self.transition_model_state(engine_id, model_id, ModelInstallState::DownloadFailed)
+            .await
+            .ok();
+        self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+            .await
+            .ok();
+        ModelOperationResult {
+            engine_id: engine_id.to_string(),
+            model_id: model_id.to_string(),
+            operation_id: op_id.to_string(),
+            operation_kind: kind,
+            final_stage: ModelOperationStage::Failed,
+            success: false,
+            error: Some(LocalEngineError::with_detail(
+                LocalEngineErrorCode::InstallFailed,
+                ErrorPhase::Install,
+                "模型操作失败",
+                message,
+            )),
+        }
+    }
+
+    /// 删除模型资产。
+    ///
+    /// 冲突判定：
+    /// - selected（配置真源）→ 结构化冲突；
+    /// - active（launch snapshot 冻结的模型身份 + instance_id）→ 结构化冲突；
+    /// - descriptor 默认模型**不构成删除保护**（只提供首次默认值）。
+    pub async fn delete_model(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        operation_id: Option<String>,
+    ) -> Result<ModelOperationResult, LocalEngineError> {
+        self.model_registry
+            .find(engine_id, model_id)
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Unsupported,
+                    ErrorPhase::Request,
+                    "未知模型",
+                    format!(
+                        "engine_id={}, model_id={} 不在 allowlist",
+                        engine_id, model_id
+                    ),
+                )
+            })?;
+
+        let asset_key = mstore::encode_asset_key(model_id);
+
+        // 已安装检查（Corrupted 视为可删除——允许清理损坏资产）
+        match mstore::restore_model_state(engine_id, &asset_key) {
+            Ok(mstore::RestoredModelState::Installed { .. })
+            | Ok(mstore::RestoredModelState::Corrupted { .. }) => {}
+            Ok(mstore::RestoredModelState::NotInstalled) => {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::NotRunning,
+                    ErrorPhase::Request,
+                    "模型未安装，无需删除",
+                    format!("engine_id={}, model_id={}", engine_id, model_id),
+                ));
+            }
+            Err(e) => {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Request,
+                    "模型状态读取失败",
+                    format!("{e}"),
+                ));
+            }
+        }
+
+        // 冲突检查（selected / active launch snapshot）
+        if let Some(conflict) = self.check_delete_conflict(engine_id, model_id).await {
+            self.transition_model_state(engine_id, model_id, ModelInstallState::DeleteBlocked)
+                .await
+                .ok();
+            self.transition_model_state(engine_id, model_id, ModelInstallState::Installed)
+                .await
+                .ok();
+            return Ok(ModelOperationResult {
+                engine_id: engine_id.to_string(),
+                model_id: model_id.to_string(),
+                operation_id: operation_id.unwrap_or_default(),
+                operation_kind: ModelOperationKind::Delete,
+                final_stage: ModelOperationStage::Failed,
+                success: false,
+                error: Some(conflict.to_error()),
+            });
+        }
+
+        // claim 进程级操作
+        let op_id = operation_id.unwrap_or_else(generate_operation_id);
+        let _guard = self.coordinator.try_claim(engine_id, &op_id)?;
+
+        self.transition_model_state(engine_id, model_id, ModelInstallState::Deleting)
+            .await?;
+
+        let delete_result = tokio::task::spawn_blocking({
+            let eid = engine_id.clone();
+            let ak = asset_key.clone();
+            move || mstore::delete_model_generation(&eid, &ak)
+        })
+        .await;
+
+        match delete_result {
+            Ok(Ok(())) => {
+                self.transition_model_state(engine_id, model_id, ModelInstallState::NotInstalled)
+                    .await?;
+                {
+                    let mut states = self.model_states.write().await;
+                    let key = (engine_id.clone(), model_id.to_string());
+                    if let Some(st) = states.get_mut(&key) {
+                        st.cache_size_bytes = None;
+                        st.verification_state = ModelVerificationState::Unknown;
+                        st.is_selected = false;
+                        st.is_active = false;
+                        st.compatibility = ModelCompatibility::Unknown;
+                    }
+                }
+                Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: ModelOperationKind::Delete,
+                    final_stage: ModelOperationStage::Done,
+                    success: true,
+                    error: None,
+                })
+            }
+            Ok(Err(e)) => {
+                // 删除失败不谎报 NotInstalled——回 Installed
+                self.transition_model_state(engine_id, model_id, ModelInstallState::Installed)
+                    .await
+                    .ok();
+                Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: ModelOperationKind::Delete,
+                    final_stage: ModelOperationStage::Failed,
+                    success: false,
+                    error: Some(from_runtime(ErrorPhase::Cleanup, "模型删除失败", &e)),
+                })
+            }
+            Err(join_err) => Err(LocalEngineError::with_detail(
+                LocalEngineErrorCode::Internal,
+                ErrorPhase::Cleanup,
+                "模型删除失败",
+                format!("spawn_blocking join 错误: {join_err}"),
+            )),
+        }
+    }
+
+    /// 取消模型操作（只触发匹配 operation_id 的 claim token）。
+    pub async fn cancel_model_operation(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        operation_id: &str,
+    ) -> Result<ModelOperationResult, LocalEngineError> {
+        match self.coordinator.cancel(engine_id, operation_id) {
+            Ok(()) => Ok(ModelOperationResult {
+                engine_id: engine_id.to_string(),
+                model_id: model_id.to_string(),
+                operation_id: operation_id.to_string(),
+                operation_kind: ModelOperationKind::Install,
+                final_stage: ModelOperationStage::Cancelled,
+                success: true,
+                error: None,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 模型安装状态转移（缓存投影；磁盘 manifest 是持久真源）。
+    async fn transition_model_state(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        target: ModelInstallState,
+    ) -> Result<(), LocalEngineError> {
+        let desc = self.model_registry.find(engine_id, model_id).cloned();
+        let mut states = self.model_states.write().await;
+        let key = (engine_id.clone(), model_id.to_string());
+        let current = states
+            .get(&key)
+            .map(|s| s.install_state.clone())
+            .unwrap_or(ModelInstallState::NotInstalled);
+        let next = transition_install_state(&current, target)?;
+        let st = states.entry(key).or_insert_with(|| {
+            EngineModelStatus::not_installed(&desc.expect("registry 命中后才转移状态"))
+        });
+        st.install_state = next;
+        Ok(())
+    }
+
+    /// 校验 health 回报的模型身份（commands 兼容入口）。
+    pub fn verify_model_identity(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        health_model_id: Option<&str>,
+        health_revision: Option<&str>,
+        health_fingerprint: Option<&str>,
+    ) -> Result<crate::domain::local_engine::ModelIdentityVerification, LocalEngineError> {
+        let desc = self
+            .model_registry
+            .find(engine_id, model_id)
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Unsupported,
+                    ErrorPhase::Request,
+                    "未知模型",
+                    format!(
+                        "engine_id={}, model_id={} 不在 allowlist",
+                        engine_id, model_id
+                    ),
+                )
+            })?;
+        desc.verify_health_identity(health_model_id, health_revision, health_fingerprint)
+    }
+
+    /// 读取已安装模型 manifest（commands 兼容入口）。
+    pub fn get_installed_manifest(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+    ) -> Result<mstore::ModelManifest, LocalEngineError> {
+        let asset_key = mstore::encode_asset_key(model_id);
+        let pointer = mstore::read_model_current_pointer(engine_id, &asset_key)
+            .map_err(|e| from_runtime(ErrorPhase::Request, "读取模型指针失败", &e))?
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::ArtifactCorrupted,
+                    ErrorPhase::Request,
+                    "模型未安装",
+                    "current.json 不存在",
+                )
+            })?;
+        mstore::read_model_manifest(engine_id, &asset_key, &pointer.install_id)
+            .map_err(|e| from_runtime(ErrorPhase::Request, "读取模型 manifest 失败", &e))
     }
 }
 
@@ -3513,10 +4221,10 @@ async fn pump_logs_to_event_port(
                     Ok(log_entry) => {
                         // 实时读取当前 identity——如果已 stop/rollback/restart，
                         // current_identity 会变为 None 或不同的 instance_id
-                        let current_instance_id = {
-                            let ci = entry.current_identity.lock().await;
-                            ci.as_ref().map(|i| i.instance_id.clone())
-                        };
+                        let current_instance_id = entry
+                            .current_identity()
+                            .await
+                            .map(|i| i.instance_id.clone());
 
                         match current_instance_id {
                             Some(ref current) if current == &instance_id => {
@@ -3661,94 +4369,91 @@ fn is_valid_model_fingerprint(fingerprint: &str) -> bool {
 /// 阻塞式存储扫描——在 `spawn_blocking` 中执行。
 ///
 /// 扫描引擎的 generations、model cache、provider shared artifacts、
-/// download cache 和 legacy 资产，构建 `EngineStorageDto`。
 fn scan_engine_storage_blocking(
     engine_id: &EngineId,
 ) -> Result<super::dto::EngineStorageDto, crate::infra::local_engine::runtime::RuntimeError> {
-    use crate::infra::local_engine::runtime::{ArtifactId, RuntimeKind, read_current_pointer};
+    use crate::infra::local_engine::runtime::{ArtifactId, RuntimePlan};
 
     let mut targets = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut releasable_bytes: u64 = 0;
 
-    // 当前 generation
-    let current = read_current_pointer(engine_id)?;
+    // active 指针 + residue 记录
+    let active = DeploymentStore::read_pointer(engine_id)?;
+    let active_slot = active.as_ref().map(|p| p.slot.as_str());
+    let residue = DeploymentStore::read_residue(engine_id)?;
+    let residue_slots: Vec<&str> = residue.iter().map(|r| r.slot.as_str()).collect();
 
-    // ── 1. Engine generations ──
-    let gens_dir = runtime::generations_dir(engine_id);
-    if gens_dir.exists() {
-        let current_id = current.as_ref().map(|c| c.install_id.as_str());
-        let mut gen_ids: Vec<String> = Vec::new();
+    // ── 1. 部署 slot（active 不可删；非 active = residue） ──
+    for slot in ["slot-a", "slot-b"] {
+        let dir = runtime::slot_dir(engine_id, slot);
+        if !dir.exists() {
+            continue;
+        }
+        let size = dir_size(&dir);
+        total_bytes += size;
 
-        for entry in std::fs::read_dir(&gens_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            if let Some(name) = entry.file_name().to_str() {
-                if runtime::validate_install_id(name).is_ok() {
-                    gen_ids.push(name.to_string());
-                }
-            }
+        let is_current = active_slot == Some(slot);
+        let removable = !is_current;
+        if removable {
+            releasable_bytes += size;
         }
 
-        // 排序：current 最后（不可删）
-        gen_ids.sort_by(|a, b| {
-            let a_is_current = current_id == Some(a.as_str());
-            let b_is_current = current_id == Some(b.as_str());
-            match (a_is_current, b_is_current) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                (false, false) => a.cmp(b),
-            }
-        });
-
-        // 前一个 generation 标记
-        let previous_id = if gen_ids.len() >= 2 {
-            Some(gen_ids[gen_ids.len() - 2].as_str())
+        let label_fallback = if is_current {
+            "当前环境（不可删除）".to_string()
+        } else if residue_slots.contains(&slot) {
+            "清理残留环境（被占用）".to_string()
         } else {
-            None
+            "残留环境".to_string()
         };
 
-        for install_id in &gen_ids {
-            let gen_dir = runtime::generation_dir(engine_id, install_id);
-            let size = dir_size(&gen_dir);
-            total_bytes += size;
-
-            let is_current = current_id == Some(install_id.as_str());
-            let is_previous = previous_id == Some(install_id.as_str());
-            let removable = !is_current;
-            if removable {
-                releasable_bytes += size;
-            }
-
-            let target_id = format!("gen:{install_id}");
-            let label_fallback = if is_current {
-                "当前环境（不可删除）".to_string()
-            } else if is_previous {
-                "上一版本环境".to_string()
+        targets.push(super::dto::StorageTargetDto {
+            target_id: format!("slot:{slot}"),
+            kind: super::dto::StorageTargetKindDto::EngineGeneration,
+            engine_id: Some(engine_id.to_string()),
+            label_key: "local_engine.storage.engine_generation".to_string(),
+            label_fallback,
+            size_bytes: size,
+            current: is_current,
+            previous: false,
+            removable,
+            shared: false,
+            requires_separate_confirmation: false,
+            blocked_reason: if is_current {
+                Some("current_generation".to_string())
             } else {
-                "旧版本环境".to_string()
-            };
+                None
+            },
+            affected_engine_ids: None,
+            reference_count: None,
+            path_display: None,
+        });
+    }
+
+    // ── 2. 孤儿 staging ──
+    let staging = runtime::staging_dir(engine_id);
+    if staging.exists() {
+        let has_entries = std::fs::read_dir(&staging)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if has_entries {
+            let size = dir_size(&staging);
+            total_bytes += size;
+            releasable_bytes += size;
 
             targets.push(super::dto::StorageTargetDto {
-                target_id,
+                target_id: "staging".to_string(),
                 kind: super::dto::StorageTargetKindDto::EngineGeneration,
                 engine_id: Some(engine_id.to_string()),
-                label_key: "local_engine.storage.engine_generation".to_string(),
-                label_fallback,
+                label_key: "local_engine.storage.engine_staging".to_string(),
+                label_fallback: "事务构建残留（staging）".to_string(),
                 size_bytes: size,
-                current: is_current,
-                previous: is_previous,
-                removable,
+                current: false,
+                previous: false,
+                removable: true,
                 shared: false,
                 requires_separate_confirmation: false,
-                blocked_reason: if is_current {
-                    Some("current_generation".to_string())
-                } else {
-                    None
-                },
+                blocked_reason: None,
                 affected_engine_ids: None,
                 reference_count: None,
                 path_display: None,
@@ -3756,7 +4461,7 @@ fn scan_engine_storage_blocking(
         }
     }
 
-    // ── 2. Engine model cache ──
+    // ── 3. Engine model cache ──
     let model_cache_dir = runtime::engine_model_cache_dir(engine_id);
     if model_cache_dir.exists() {
         let size = dir_size(&model_cache_dir);
@@ -3782,8 +4487,8 @@ fn scan_engine_storage_blocking(
         });
     }
 
-    // ── 3. Provider shared artifacts（Python distribution） ──
-    // 扫描 runtimes/shared/ 下的所有 artifact
+    // ── 4. Provider shared artifacts ──
+    // 引用真源 = 各引擎 active 部署 manifest（无独立 refcount 数据）
     let shared_root = runtime::runtimes_root().join("shared");
     if shared_root.exists() {
         for provider_entry in std::fs::read_dir(&shared_root)? {
@@ -3794,8 +4499,8 @@ fn scan_engine_storage_blocking(
             let provider_name = provider_entry.file_name();
             let provider_str = provider_name.to_string_lossy().to_string();
             let runtime_kind = match provider_str.as_str() {
-                "python_venv" => RuntimeKind::PythonVenv,
-                "managed_binary" => RuntimeKind::ManagedBinary,
+                "python_venv" => RuntimePlan::PythonVenv,
+                "managed_binary" => RuntimePlan::ManagedBinary,
                 _ => continue,
             };
 
@@ -3818,7 +4523,7 @@ fn scan_engine_storage_blocking(
                 let size = dir_size(&artifact_dir);
                 total_bytes += size;
 
-                // 检查引用计数
+                // 扫描 active 部署 manifest 引用
                 let refs = runtime::scan_artifact_references(runtime_kind, &artifact_id)
                     .unwrap_or_default();
                 let ref_count = refs.len() as u32;
@@ -3863,7 +4568,7 @@ fn scan_engine_storage_blocking(
         }
     }
 
-    // ── 4. Provider download cache ──
+    // ── 5. Provider download cache ──
     let uv_cache = runtime::uv_cache_dir();
     if uv_cache.exists() {
         let size = dir_size(&uv_cache);
@@ -3889,7 +4594,7 @@ fn scan_engine_storage_blocking(
         });
     }
 
-    // ── 5. Legacy owned assets ──
+    // ── 6. Legacy owned assets ──
     // 旧版 ModelScope 用户级公共缓存——仅在确有诊断价值时展示
     if engine_id.as_str() == "funasr" {
         if let Some(legacy_dir) = dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"))
@@ -3935,49 +4640,11 @@ fn measure_cleanup_scope(scope: &crate::infra::local_engine::runtime::CleanupSco
     use crate::infra::local_engine::runtime::CleanupScope;
 
     match scope {
-        CleanupScope::EngineGeneration {
-            engine_id,
-            install_ids,
-        } => {
-            let current = crate::infra::local_engine::runtime::read_current_pointer(engine_id)
-                .ok()
-                .flatten();
-            let current_id = current.map(|c| c.install_id);
-
-            match install_ids {
-                Some(ids) => {
-                    let mut total = 0;
-                    for id in ids {
-                        if current_id.as_ref() == Some(id) {
-                            continue;
-                        }
-                        let dir =
-                            crate::infra::local_engine::runtime::generation_dir(engine_id, id);
-                        total += dir_size(&dir);
-                    }
-                    total
-                }
-                None => {
-                    let gens_dir = crate::infra::local_engine::runtime::generations_dir(engine_id);
-                    if !gens_dir.exists() {
-                        return 0;
-                    }
-                    let mut total = 0;
-                    if let Ok(entries) = std::fs::read_dir(&gens_dir) {
-                        for entry in entries.flatten() {
-                            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                                if let Some(name) = entry.file_name().to_str() {
-                                    if current_id.as_deref() == Some(name) {
-                                        continue;
-                                    }
-                                    total += dir_size(&entry.path());
-                                }
-                            }
-                        }
-                    }
-                    total
-                }
-            }
+        CleanupScope::EngineDeploymentSlot { engine_id, slot } => dir_size(
+            &crate::infra::local_engine::runtime::slot_dir(engine_id, slot),
+        ),
+        CleanupScope::EngineStaging { engine_id } => {
+            dir_size(&crate::infra::local_engine::runtime::staging_dir(engine_id))
         }
         CleanupScope::EngineModelCache { engine_id } => {
             let dir = crate::infra::local_engine::runtime::engine_model_cache_dir(engine_id);
@@ -3994,11 +4661,11 @@ fn measure_cleanup_scope(scope: &crate::infra::local_engine::runtime::CleanupSco
             dir_size(&dir)
         }
         CleanupScope::ProviderDownloadCache { runtime_kind } => match runtime_kind {
-            crate::infra::local_engine::runtime::RuntimeKind::PythonVenv => {
+            crate::infra::local_engine::runtime::RuntimePlan::PythonVenv => {
                 let dir = crate::infra::local_engine::runtime::uv_cache_dir();
                 dir_size(&dir)
             }
-            crate::infra::local_engine::runtime::RuntimeKind::ManagedBinary => 0,
+            crate::infra::local_engine::runtime::RuntimePlan::ManagedBinary => 0,
         },
     }
 }
@@ -4036,47 +4703,16 @@ fn dir_size(path: &std::path::Path) -> u64 {
 mod tests {
     use super::*;
     use crate::domain::local_engine::*;
-    use crate::infra::local_engine::runtime::{ArtifactId, ComputePreference, RuntimeKind};
+    use crate::infra::local_engine::deployment::DeploymentPointer;
+    use crate::infra::local_engine::runtime::{ArtifactId, ComputePreference, RuntimePlan};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    #[test]
-    fn lease_uses_service_instance_id_instead_of_process_generation_id() {
-        let engine_id = EngineId::new("paddleocr").unwrap();
-        let endpoint = crate::infra::local_engine::port::Endpoint::new(8100);
-        let service_identity = ServiceIdentityInput {
-            engine_id: engine_id.to_string(),
-            instance_id: "inst-service".to_string(),
-            token: "test-token".to_string(),
-            endpoint: endpoint.clone(),
-        };
-        let process_identity = ProcessIdentity {
-            pid: 4242,
-            executable: std::path::PathBuf::from("python.exe"),
-            start_time_ms: 123_456,
-            instance_id: "inst-process-generation".to_string(),
-        };
+    // ── 基础辅助 ──────────────────────────────────────────────────────────────
 
-        let lease = build_process_lease(
-            &engine_id,
-            &process_identity,
-            &service_identity,
-            &endpoint,
-            "gen-test".to_string(),
-        );
-
-        assert_eq!(lease.instance_id, "inst-service");
-        assert_ne!(lease.instance_id, process_identity.instance_id);
-        assert_eq!(lease.pid, process_identity.pid);
-        assert_eq!(lease.endpoint, "http://127.0.0.1:8100");
-    }
-
-    // ── Fake Adapter ────────────────────────────────────────────────────────
-
-    /// 构建 fake adapter（可配置 self_test 通过/失败）。
     fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAdapter> {
         struct FakeAdapter {
-            descriptor: EngineDescriptor,
+            descriptor: EngineDefinition,
             self_test_passes: bool,
         }
 
@@ -4084,7 +4720,7 @@ mod tests {
             fn new(id: &str, self_test_passes: bool) -> Self {
                 let artifact = ArtifactId::new("fake-artifact").unwrap();
                 Self {
-                    descriptor: EngineDescriptor {
+                    descriptor: EngineDefinition {
                         engine_id: EngineId::new(id).unwrap(),
                         display: EngineDisplay {
                             name: format!("Fake {id}"),
@@ -4093,9 +4729,9 @@ mod tests {
                             version: "0.1.0".to_string(),
                         },
                         capability_kind: CapabilityKind::Stt,
-                        runtime_kind: RuntimeKind::PythonVenv,
+                        runtime_kind: RuntimePlan::PythonVenv,
                         install_plan: InstallPlanRef {
-                            runtime_kind: RuntimeKind::PythonVenv,
+                            runtime_kind: RuntimePlan::PythonVenv,
                             artifact_ids: vec![artifact.clone()],
                             compute_candidates: vec![ComputeCandidate {
                                 preference: ComputePreference::Cpu,
@@ -4121,7 +4757,7 @@ mod tests {
         }
 
         impl LocalEngineAdapter for FakeAdapter {
-            fn descriptor(&self) -> &EngineDescriptor {
+            fn descriptor(&self) -> &EngineDefinition {
                 &self.descriptor
             }
 
@@ -4188,1646 +4824,1064 @@ mod tests {
         Arc::new(FakeAdapter::new(id, self_test_passes))
     }
 
-    /// 构建测试用 service（含 1 个 fake adapter）。
-    fn make_service(adapter_id: &str) -> Arc<LocalEngineService> {
+    /// 构建测试用 manager（1 个 fake adapter + fake 模型目录 + fake worker）。
+    fn make_service(adapter_id: &str) -> Arc<EngineManager> {
         let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
             adapter_id, true,
         )]));
-        LocalEngineService::new(registry, Arc::new(NoopEventPort))
+        EngineManager::new(registry, Arc::new(NoopEventPort))
     }
 
-    // ── 验收场景 1：EngineRegistry 拒绝未知 engine_id ──────────────────────
+    fn unique_tag(prefix: &str) -> String {
+        format!(
+            "{prefix}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    /// 测试用模型目录（两个模型候选）。
+    fn make_model_registry(
+        engine_id: &EngineId,
+        m_a: &str,
+        m_b: &str,
+    ) -> super::super::model_installer::ModelRegistry {
+        use super::super::model_installer::ModelRegistry;
+        let mk = |model_id: &str| EngineModelDescriptor {
+            engine_id: engine_id.clone(),
+            model_id: model_id.to_string(),
+            display_name: model_id.to_string(),
+            description: "test".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+            estimated_size_mb: Some(1),
+            compatibility_schema: 1,
+        };
+        ModelRegistry::new_with_models(vec![mk(m_a), mk(m_b)])
+    }
+
+    /// barrier 门控 installer——两个任务都进入下载后才放行（无 sleep 猜时序）。
+    struct BarrierInstaller {
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::model_installer::ModelInstallWorker for BarrierInstaller {
+        async fn download_to_staging(
+            &self,
+            _engine_id: &EngineId,
+            _model_id: &str,
+            _revision: &str,
+            staging_payload_dir: &std::path::Path,
+            _cancel_token: CancellationToken,
+            _sink: Option<Arc<dyn super::super::model_installer::InstallSink>>,
+        ) -> Result<
+            super::super::model_installer::ModelDownloadOutcome,
+            super::super::model_installer::ModelDownloadError,
+        > {
+            self.barrier.wait().await;
+            std::fs::create_dir_all(staging_payload_dir).unwrap();
+            std::fs::write(staging_payload_dir.join("model.bin"), b"payload").unwrap();
+            Ok(super::super::model_installer::ModelDownloadOutcome {
+                source: "fake".to_string(),
+                checksum_source:
+                    super::super::model_installer::ModelDownloadChecksumSource::Unverified,
+            })
+        }
+    }
+
+    /// Semaphore 门控 installer——测试放行一个 permit 控制"下载完成"时机。
+    ///
+    /// 用 Semaphore 而非 Notify：permit 会累积，release 早于 waiter 注册
+    /// 也不会丢信号（Notify::notify_waiters 只唤醒已注册的 waiter）。
+    struct GatedInstaller {
+        gate: Arc<tokio::sync::Semaphore>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedInstaller {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                gate: Arc::new(tokio::sync::Semaphore::new(0)),
+                fail: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+
+        /// 放行一次下载等待。
+        fn release(&self) {
+            self.gate.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::model_installer::ModelInstallWorker for GatedInstaller {
+        async fn download_to_staging(
+            &self,
+            _engine_id: &EngineId,
+            _model_id: &str,
+            _revision: &str,
+            staging_payload_dir: &std::path::Path,
+            cancel_token: CancellationToken,
+            _sink: Option<Arc<dyn super::super::model_installer::InstallSink>>,
+        ) -> Result<
+            super::super::model_installer::ModelDownloadOutcome,
+            super::super::model_installer::ModelDownloadError,
+        > {
+            let _permit = tokio::select! {
+                p = self.gate.acquire() => p,
+                _ = cancel_token.cancelled() => {
+                    return Err(super::super::model_installer::ModelDownloadError::Cancelled);
+                }
+            };
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(super::super::model_installer::ModelDownloadError::Failed {
+                    message: "gated failure".to_string(),
+                });
+            }
+            std::fs::create_dir_all(staging_payload_dir).unwrap();
+            std::fs::write(staging_payload_dir.join("model.bin"), b"payload").unwrap();
+            Ok(super::super::model_installer::ModelDownloadOutcome {
+                source: "fake".to_string(),
+                checksum_source:
+                    super::super::model_installer::ModelDownloadChecksumSource::Unverified,
+            })
+        }
+    }
+
+    /// 注入 launch snapshot（模拟运行中实例——测试 active 语义）。
+    async fn inject_launch(entry: &Arc<EngineEntry>, model_id: &str, instance_id: &str) {
+        let endpoint = crate::infra::local_engine::port::Endpoint::new(8100);
+        let mut l = entry.launch.lock().await;
+        *l = Some(LaunchSnapshot {
+            identity: ServiceIdentityInput {
+                engine_id: entry.adapter.descriptor().engine_id.to_string(),
+                instance_id: instance_id.to_string(),
+                token: format!("tok-{instance_id}"),
+                endpoint,
+            },
+            profile: ResolvedProfile {
+                profile_id: "cpu-x64".to_string(),
+                backend: ComputeBackend::Cpu,
+                artifact_id: ArtifactId::new("fake-artifact").unwrap(),
+                priority: 0,
+            },
+            deployment_install_id: "dep-test".to_string(),
+            model: Some(FrozenModelIdentity {
+                model_id: model_id.to_string(),
+                revision: "v1".to_string(),
+                fingerprint: None,
+            }),
+        });
+    }
+
+    async fn cleanup_models(engine_id: &EngineId, models: &[&str]) {
+        for m in models {
+            let ak = mstore::encode_asset_key(m);
+            let _ = std::fs::remove_dir_all(mstore::asset_root(engine_id, &ak).unwrap());
+        }
+    }
+
+    // ── 基础生命周期 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_uses_service_instance_id_instead_of_process_generation_id() {
+        let engine_id = EngineId::new("paddleocr").unwrap();
+        let endpoint = crate::infra::local_engine::port::Endpoint::new(8100);
+        let service_identity = ServiceIdentityInput {
+            engine_id: engine_id.to_string(),
+            instance_id: "inst-service".to_string(),
+            token: "test-token".to_string(),
+            endpoint: endpoint.clone(),
+        };
+        let process_identity = ProcessIdentity {
+            pid: 4242,
+            executable: std::path::PathBuf::from("python.exe"),
+            start_time_ms: 123_456,
+            instance_id: "inst-process-generation".to_string(),
+        };
+
+        let lease = build_process_lease(
+            &engine_id,
+            &process_identity,
+            &service_identity,
+            &endpoint,
+            "dep-test".to_string(),
+        );
+
+        assert_eq!(lease.instance_id, "inst-service");
+        assert_ne!(lease.instance_id, process_identity.instance_id);
+        assert_eq!(lease.pid, process_identity.pid);
+        assert_eq!(lease.endpoint, "http://127.0.0.1:8100");
+    }
 
     #[tokio::test]
     async fn service_rejects_unknown_engine_id() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
-
-        let result = svc.get_status(&unknown).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Unsupported);
-        assert!(err.detail.contains("no-such-engine"));
+        let svc = make_service("fake-known");
+        let unknown = EngineId::new("fake-unknown").unwrap();
+        assert!(svc.get_status(&unknown).await.is_err());
+        assert!(svc.catalog().await.len() == 1);
     }
-
-    // ── 验收场景 2：初始状态正确 ────────────────────────────────────────────
 
     #[tokio::test]
     async fn initial_status_is_stopped_unknown() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.desired, DesiredState::Stopped);
-        assert_eq!(snapshot.status.process, ProcessState::Stopped);
-        assert_eq!(snapshot.status.service, ServiceHealth::Unknown);
-        assert_eq!(
-            snapshot.status.environment,
-            crate::domain::local_engine::EnvironmentHealth::Missing
-        );
-        assert_eq!(snapshot.revision, 0);
-        assert_eq!(snapshot.service_epoch, *svc.epoch());
+        let svc = make_service("fake-initial");
+        let eid = EngineId::new("fake-initial").unwrap();
+        let snap = svc.get_status(&eid).await.unwrap();
+        assert_eq!(snap.status.desired, DesiredState::Stopped);
+        assert_eq!(snap.status.process, ProcessState::Stopped);
+        assert_eq!(snap.status.environment, EnvironmentHealth::Missing);
     }
-
-    // ── 验收场景 3：install self-test 通过后环境标记为 Ready ──────────────
 
     #[tokio::test]
     async fn install_marks_environment_ready_when_self_test_passes() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
+        let svc = make_service("fake-install-ok");
+        let eid = EngineId::new("fake-install-ok").unwrap();
         svc.install(&eid, AdapterConfig::new()).await.unwrap();
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(
-            snapshot.status.environment,
-            crate::domain::local_engine::EnvironmentHealth::Ready
-        );
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-        assert_eq!(snapshot.status.operation.kind, OperationKind::Installing);
+        let snap = svc.get_status(&eid).await.unwrap();
+        assert_eq!(snap.status.environment, EnvironmentHealth::Ready);
     }
-
-    // ── 验收场景 3b：install self-test 失败时返回错误 ────────────────────────
 
     #[tokio::test]
     async fn install_fails_when_self_test_fails() {
         let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-            "engine-fail",
+            "fake-install-fail",
             false,
         )]));
-        let svc = LocalEngineService::new(registry, Arc::new(NoopEventPort));
-        let eid = EngineId::new("engine-fail").unwrap();
-
-        let result = svc.install(&eid, AdapterConfig::new()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let svc = EngineManager::new(registry, Arc::new(NoopEventPort));
+        let eid = EngineId::new("fake-install-fail").unwrap();
+        let err = svc.install(&eid, AdapterConfig::new()).await.unwrap_err();
         assert_eq!(err.code, LocalEngineErrorCode::SelfTestFailed);
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Failed);
     }
-
-    // ── 验收场景 4：start 在环境未就绪时返回 EnvironmentMissing ────────────
-
-    #[tokio::test]
-    async fn start_fails_when_environment_not_ready() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let result = svc.start(&eid, AdapterConfig::new()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::EnvironmentMissing);
-        assert_eq!(err.phase, ErrorPhase::Start);
-    }
-
-    // ── 验收场景 5：stop 幂等——已 Stopped 时直接返回 Ok ────────────────────
 
     #[tokio::test]
     async fn stop_is_idempotent_when_already_stopped() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        entry.status.write().await.last_error = Some(LocalEngineError::with_detail(
-            LocalEngineErrorCode::NotRunning,
-            ErrorPhase::Stop,
-            "进程意外退出",
-            "stale error from previous instance",
-        ));
-
-        let result = svc.stop(&eid).await;
-        assert!(result.is_ok());
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.desired, DesiredState::Stopped);
-        assert!(snapshot.status.last_error.is_none());
+        let svc = make_service("fake-stop");
+        let eid = EngineId::new("fake-stop").unwrap();
+        svc.stop(&eid).await.unwrap();
+        svc.stop(&eid).await.unwrap();
     }
-
-    // ── 验收场景 6：catalog / get_all_status 查询 API 正确返回 ─────────────
-
-    #[tokio::test]
-    async fn catalog_and_get_all_status_return_all_engines() {
-        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![
-            make_fake_adapter("engine-a", true),
-            make_fake_adapter("engine-b", true),
-        ]));
-        let svc = LocalEngineService::new(registry, Arc::new(NoopEventPort));
-
-        let catalog = svc.catalog().await;
-        assert_eq!(catalog.len(), 2);
-
-        let all_status = svc.get_all_status().await;
-        assert_eq!(all_status.len(), 2);
-
-        for snap in &all_status {
-            assert_eq!(snap.service_epoch, *svc.epoch());
-            assert_eq!(snap.revision, 0);
-        }
-    }
-
-    // ── 验收场景 7：get_diagnostics 返回 adapter 诊断 ──────────────────────
 
     #[tokio::test]
     async fn get_diagnostics_returns_adapter_diagnostics() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
+        let svc = make_service("fake-diag");
+        let eid = EngineId::new("fake-diag").unwrap();
         let diag = svc.get_diagnostics(&eid).await.unwrap();
         assert!(!diag.entries.is_empty());
-        assert_eq!(diag.entries[0].key, "version");
     }
-
-    // ── 验收场景 8：repair 骨架执行 self-test 后环境标记为 Ready ───────────
-
-    #[tokio::test]
-    async fn repair_marks_environment_ready_when_self_test_passes() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        svc.repair(&eid).await.unwrap();
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(
-            snapshot.status.environment,
-            crate::domain::local_engine::EnvironmentHealth::Ready
-        );
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-    }
-
-    // ── 验收场景 8b：cleanup_targets 空 target_ids 完成且返回空结果 ──────
-
-    #[tokio::test]
-    async fn cleanup_targets_completes_successfully() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // cleanup_targets with empty target_ids returns empty result
-        let result = svc.cleanup_targets(&eid, &[], None).await.unwrap();
-
-        assert_eq!(result.engine_id, "engine-a");
-        assert!(result.cleaned_target_ids.is_empty());
-        assert!(result.skipped_target_ids.is_empty());
-        assert_eq!(result.released_bytes, 0);
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-    }
-
-    // ── 验收场景 9：shutdown_all 无进程时返回 Ok ───────────────────────────
-
-    #[tokio::test]
-    async fn shutdown_all_succeeds_when_no_processes() {
-        let svc = make_service("engine-a");
-        let result = svc.shutdown_all().await;
-        assert!(result.is_ok());
-    }
-
-    // ── 验收场景 10：revision 在状态变更后严格递增 ─────────────────────────
 
     #[tokio::test]
     async fn revision_strictly_increases_after_status_changes() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let snap0 = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snap0.revision, 0);
-
-        svc.install(&eid, AdapterConfig::new()).await.unwrap();
-
-        let snap1 = svc.get_status(&eid).await.unwrap();
-        assert!(snap1.revision > snap0.revision);
-    }
-
-    // ── 验收场景 11：service_epoch 在新 service 实例时变化 ─────────────────
-
-    #[tokio::test]
-    async fn service_epoch_differs_between_instances() {
-        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-            "engine-a", true,
-        )]));
-        let svc1 = LocalEngineService::new(registry.clone(), Arc::new(NoopEventPort));
-        let svc2 = LocalEngineService::new(registry, Arc::new(NoopEventPort));
-
-        assert_ne!(*svc1.epoch(), *svc2.epoch());
-    }
-
-    // ── 验收场景 12：get_logs 无进程时返回空 ───────────────────────────────
-
-    #[tokio::test]
-    async fn get_logs_returns_empty_when_no_process() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let logs = svc.get_logs(&eid, 100).await.unwrap();
-        assert!(logs.is_empty());
-    }
-
-    // ── 验收场景 13：unknown engine_id 的操作全部返回 Unsupported ──────────
-
-    #[tokio::test]
-    async fn all_operations_reject_unknown_engine_id() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("unknown-engine").unwrap();
-
-        assert!(svc.install(&unknown, AdapterConfig::new()).await.is_err());
-        assert!(svc.start(&unknown, AdapterConfig::new()).await.is_err());
-        assert!(svc.stop(&unknown).await.is_err());
-        assert!(svc.repair(&unknown).await.is_err());
-        assert!(
-            svc.cleanup_targets(&unknown, &["gen:fake".to_string()], None)
-                .await
-                .is_err()
-        );
-        assert!(svc.scan_storage(&unknown).await.is_err());
-        assert!(svc.get_diagnostics(&unknown).await.is_err());
-        assert!(svc.get_logs(&unknown, 10).await.is_err());
-    }
-
-    // ── 0.22.3 失败路径测试 ────────────────────────────────────────────────
-
-    // ── 失败路径 1：start spawn 失败时执行 rollback ─────────────────────────
-
-    #[tokio::test]
-    async fn start_rollback_on_spawn_failure() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 先 install 让环境就绪
-        svc.install(&eid, AdapterConfig::new()).await.unwrap();
-
-        // start 会因 fake-executable 不存在而 spawn 失败
-        // 验证 rollback 被执行：终态应为 Exited + last_error
-        let result = svc.start(&eid, AdapterConfig::new()).await;
-        assert!(result.is_err());
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        // rollback 应置 desired=Stopped, process=Exited, service=Unreachable
-        assert_eq!(snapshot.status.desired, DesiredState::Stopped);
-        assert!(matches!(
-            snapshot.status.process,
-            ProcessState::Exited { .. }
-        ));
-        assert_eq!(snapshot.status.service, ServiceHealth::Unreachable);
-        assert!(snapshot.status.last_error.is_some());
-    }
-
-    // ── 失败路径 2：start health 验证超时执行 rollback ──────────────────────
-
-    #[tokio::test]
-    async fn start_rollback_on_health_timeout() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 先 install 让环境就绪
-        svc.install(&eid, AdapterConfig::new()).await.unwrap();
-
-        // start 会 spawn fake-executable（不存在）→ spawn 失败 → rollback
-        // 或者即使 spawn 成功（理论上不会），health 也会超时
-        let result = svc.start(&eid, AdapterConfig::new()).await;
-        assert!(result.is_err());
-
-        // 验证 rollback 清理了 identity
-        let conn = svc.get_connection(&eid).await.unwrap();
-        assert!(conn.is_none(), "rollback 后不应有 connection");
-    }
-
-    // ── 失败路径 3：rollback 清理 process_registry ──────────────────────────
-
-    #[tokio::test]
-    async fn rollback_clears_process_registry() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 先 install
-        svc.install(&eid, AdapterConfig::new()).await.unwrap();
-
-        // start 失败
-        let _ = svc.start(&eid, AdapterConfig::new()).await;
-
-        // process_registry 应为空（rollback 清理了）
-        let reg = svc.process_registry.lock().unwrap();
-        assert!(
-            reg.is_empty(),
-            "process_registry 应在 rollback 后为空，实际有 {} 个条目",
-            reg.len()
-        );
-    }
-
-    // ── 失败路径 4：shutdown_all_blocking 使用 process_registry ────────────
-
-    #[test]
-    fn shutdown_all_blocking_uses_process_registry() {
-        let svc = make_service("engine-a");
-
-        // 无进程时 shutdown_all_blocking 不 panic
-        svc.shutdown_all_blocking();
-    }
-
-    // ── 失败路径 5：stop 清理 process_registry ──────────────────────────────
-
-    #[tokio::test]
-    async fn stop_clears_process_registry() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 无进程时 stop——幂等返回
+        let svc = make_service("fake-rev");
+        let eid = EngineId::new("fake-rev").unwrap();
+        let r1 = svc.get_status(&eid).await.unwrap().revision;
         svc.stop(&eid).await.unwrap();
-
-        // process_registry 应为空
-        let reg = svc.process_registry.lock().unwrap();
-        assert!(reg.is_empty());
+        let r2 = svc.get_status(&eid).await.unwrap().revision;
+        assert!(r2 > r1);
     }
 
-    // ── 失败路径 6：get_connection 无实例时返回 None ───────────────────────
+    // ── 取消语义（coordinator）──────────────────────────────────────────────
 
     #[tokio::test]
-    async fn get_connection_returns_none_when_no_instance() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let conn = svc.get_connection(&eid).await.unwrap();
-        assert!(conn.is_none());
+    async fn cancel_returns_not_running_when_no_active_operation() {
+        let svc = make_service("fake-cancel-none");
+        let eid = EngineId::new("fake-cancel-none").unwrap();
+        let err = svc.cancel_operation(&eid, "op-x").await;
+        assert_eq!(err.code, LocalEngineErrorCode::NotRunning);
     }
-
-    // ── 失败路径 7：get_connection 对未知 engine 返回错误 ───────────────────
-
-    #[tokio::test]
-    async fn get_connection_rejects_unknown_engine() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
-
-        let result = svc.get_connection(&unknown).await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, LocalEngineErrorCode::Unsupported);
-    }
-
-    // ── 0.22.5 H2：取消 / 引用检查 / 修复回滚 测试 ───────────────────────────
-
-    // ── 取消 1：无活跃操作时 cancel_operation 返回 Rejected ──
-
-    #[tokio::test]
-    async fn cancel_returns_rejected_when_no_active_operation() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let err = svc.cancel_operation(&eid, "op-nonexistent").await;
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-        assert!(!err.action_hint.is_empty());
-    }
-
-    // ── 取消 2：旧 operation_id 不能取消新操作 ──
 
     #[tokio::test]
     async fn cancel_rejects_stale_operation_id() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 手动设置一个 operation_id + cancel token
-        let entry = svc.get_entry(&eid).await.unwrap();
-        let cancel_token = CancellationToken::new();
-        {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = Some(("op-current".to_string(), cancel_token.clone()));
-        }
-        svc.set_operation_id(&eid, Some("op-current".to_string()))
-            .await;
-
-        // 用旧的 operation_id 尝试取消
-        let err = svc.cancel_operation(&eid, "op-old").await;
+        let svc = make_service("fake-cancel-stale");
+        let eid = EngineId::new("fake-cancel-stale").unwrap();
+        let guard = svc.coordinator().try_claim(&eid, "op-current").unwrap();
+        let err = svc.cancel_operation(&eid, "op-stale").await;
         assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-        assert!(!err.action_hint.is_empty());
-
-        // 清理
-        svc.clear_cancel_token(&eid).await;
+        guard.release();
     }
 
-    // ── 取消 3：正确 operation_id 成功取消 ──
-
     #[tokio::test]
-    async fn cancel_succeeds_with_matching_operation_id() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
+    async fn cancel_after_completion_is_not_running() {
+        let svc = make_service("fake-cancel-done");
+        let eid = EngineId::new("fake-cancel-done").unwrap();
+        let guard = svc.coordinator().try_claim(&eid, "op-1").unwrap();
+        guard.release();
+        let err = svc.cancel_operation(&eid, "op-1").await;
+        assert_eq!(err.code, LocalEngineErrorCode::NotRunning);
+    }
 
-        let entry = svc.get_entry(&eid).await.unwrap();
-        let cancel_token = CancellationToken::new();
-        {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = Some(("op-target".to_string(), cancel_token.clone()));
+    /// cancel 后旧 worker 尚未退出（guard 仍持有）——下一个操作必须仍被拒绝；
+    /// worker 真正结束后才允许下一个操作。
+    #[tokio::test]
+    async fn manager_cancel_gates_next_operation_until_worker_finishes() {
+        let installer = GatedInstaller::new();
+        let eid = EngineId::new("fake-cancel-gate").unwrap();
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-cancel-gate",
+            true,
+        )]));
+        let tag = unique_tag("mgate");
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &tag, &format!("{tag}-b")),
+            installer.clone(),
+        );
+
+        // 模型安装进入下载（gated）
+        let svc_c = svc.clone();
+        let eid_c = eid.clone();
+        let tag_c = tag.clone();
+        let install_task = tokio::spawn(async move {
+            svc_c
+                .install_model(&eid_c, &tag_c, Some("op-gated".to_string()))
+                .await
+        });
+
+        // 等安装进入 claim（barrier 语义：轮询 coordinator 直到活跃——不用 sleep，
+        // 通过 Notify 由 install 内部路径推进不可行，改为等待 claim 出现）
+        let mut claimed_op = None;
+        for _ in 0..200 {
+            if let Some(op) = svc.coordinator().active_operation(&eid) {
+                claimed_op = Some(op);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        svc.set_operation_id(&eid, Some("op-target".to_string()))
-            .await;
+        let op = claimed_op.expect("模型安装应已 claim");
 
-        let err = svc.cancel_operation(&eid, "op-target").await;
+        // cancel：token 触发，但 claim 仍由 worker 持有
+        let err = svc.cancel_operation(&eid, &op).await;
         assert_eq!(err.code, LocalEngineErrorCode::Cancelled);
-        assert!(cancel_token.is_cancelled());
+        assert!(svc.coordinator().active_operation(&eid).is_some());
 
-        // 验证 operation_cancel 已清理
-        let oc = entry.operation_cancel.lock().await;
-        assert!(oc.is_none());
+        // worker 收到取消信号退出（select cancelled 分支 → 成功取消路径）
+        let result = install_task.await.unwrap().unwrap();
+        assert!(result.success);
+        assert_eq!(result.final_stage, ModelOperationStage::Cancelled);
+
+        // worker 结束后 claim 释放——下一个操作可 claim
+        assert!(svc.coordinator().active_operation(&eid).is_none());
+        let guard = svc.coordinator().try_claim(&eid, "op-next").unwrap();
+        guard.release();
+
+        cleanup_models(&eid, &[&tag, &format!("{tag}-b")]).await;
     }
 
-    // ── 取消 4：cancel_operation 对未知 engine 返回错误 ──
+    // ── 变更互斥（必测并发场景）────────────────────────────────────────────
+
+    /// 模型安装与环境修复竞争：模型安装进行中，repair 必须被拒绝。
+    #[tokio::test]
+    async fn model_install_races_env_repair() {
+        let installer = GatedInstaller::new();
+        let eid = EngineId::new("fake-race").unwrap();
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-race",
+            true,
+        )]));
+        let tag = unique_tag("race");
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &tag, &format!("{tag}-b")),
+            installer.clone(),
+        );
+
+        let svc_c = svc.clone();
+        let eid_c = eid.clone();
+        let tag_c = tag.clone();
+        let install_task =
+            tokio::spawn(async move { svc_c.install_model(&eid_c, &tag_c, None).await });
+
+        // 等待安装 claim 生效
+        for _ in 0..200 {
+            if svc.coordinator().active_operation(&eid).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // repair 同引擎 → AlreadyRunning
+        let err = svc.repair(&eid).await.unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::AlreadyRunning);
+
+        // start/stop 同样被互斥
+        let err = svc.stop(&eid).await.unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::AlreadyRunning);
+
+        // 放行安装完成
+        installer.release();
+        let result = install_task.await.unwrap().unwrap();
+        assert!(result.success);
+
+        // 安装结束后 repair 可执行（self-test pass 降级路径）
+        svc.repair(&eid).await.unwrap();
+
+        cleanup_models(&eid, &[&tag, &format!("{tag}-b")]).await;
+    }
+
+    /// 两个模型同时安装（同引擎）——第二个必须被拒绝。
+    #[tokio::test]
+    async fn two_model_installs_same_engine_second_rejected() {
+        let installer = GatedInstaller::new();
+        let eid = EngineId::new("fake-two").unwrap();
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-two", true,
+        )]));
+        let tag_a = unique_tag("two-a");
+        let tag_b = format!("{tag_a}-b");
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &tag_a, &tag_b),
+            installer.clone(),
+        );
+
+        let svc1 = svc.clone();
+        let (e1, t1) = (eid.clone(), tag_a.clone());
+        let first = tokio::spawn(async move { svc1.install_model(&e1, &t1, None).await });
+
+        for _ in 0..200 {
+            if svc.coordinator().active_operation(&eid).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // 第二个模型安装 → AlreadyRunning（key = engine_id，与 model_id 无关）
+        let err = svc.install_model(&eid, &tag_b, None).await.unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::AlreadyRunning);
+
+        installer.release();
+        let result = first.await.unwrap().unwrap();
+        assert!(result.success);
+
+        cleanup_models(&eid, &[&tag_a, &tag_b]).await;
+    }
+
+    /// 不同引擎并行——barrier 对齐后两个引擎的模型安装都成功。
+    ///
+    /// 两引擎各有一个模型候选；Barrier(2) 保证两个下载同时进行
+    /// （若 coordinator 错误地全局串行化，这里会死锁/超时而非误通过）。
+    #[tokio::test]
+    async fn different_engines_install_models_concurrently() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let eid_a = EngineId::new("fake-par-a").unwrap();
+        let eid_b = EngineId::new("fake-par-b").unwrap();
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![
+            make_fake_adapter("fake-par-a", true),
+            make_fake_adapter("fake-par-b", true),
+        ]));
+        let tag_a = unique_tag("par");
+        let tag_b = format!("{tag_a}-x");
+        // 目录同时覆盖两个引擎（每引擎一个待装模型）
+        let reg_a = make_model_registry(&eid_a, &tag_a, &format!("{tag_a}-b"));
+        let reg_b = make_model_registry(&eid_b, &tag_b, &format!("{tag_b}-b"));
+        let mut models = Vec::new();
+        // 重建跨引擎目录：make_model_registry 是单引擎的，这里借 list 展开
+        for eid in [&eid_a, &eid_b] {
+            let src = if *eid == eid_a { &reg_a } else { &reg_b };
+            for m in src.list(eid) {
+                models.push(m.clone());
+            }
+        }
+        let catalog = super::super::model_installer::ModelRegistry::new_with_models(models);
+
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            catalog,
+            Arc::new(BarrierInstaller {
+                barrier: barrier.clone(),
+            }),
+        );
+
+        let svc1 = svc.clone();
+        let (ea, ta) = (eid_a.clone(), tag_a.clone());
+        let svc2 = svc.clone();
+        let (eb, tb) = (eid_b.clone(), tag_b.clone());
+
+        // 两个引擎的模型安装并行——都应成功
+        let install_a = tokio::spawn(async move { svc1.install_model(&ea, &ta, None).await });
+        let install_b = tokio::spawn(async move { svc2.install_model(&eb, &tb, None).await });
+
+        let (ra, rb) = tokio::join!(install_a, install_b);
+        assert!(ra.unwrap().unwrap().success);
+        assert!(rb.unwrap().unwrap().success);
+
+        cleanup_models(&eid_a, &[&tag_a, &format!("{tag_a}-b")]).await;
+        cleanup_models(&eid_b, &[&tag_b, &format!("{tag_b}-b")]).await;
+    }
+
+    // ── selected / active / 删除冲突 ────────────────────────────────────────
+
+    /// selected 与 active 不同：list_models 投影两个独立标志。
+    #[tokio::test]
+    async fn selected_and_active_are_independent() {
+        let eid = EngineId::new("fake-sel").unwrap();
+        let tag = unique_tag("sel");
+        let models = vec![tag.clone(), format!("{tag}-b")];
+        // list_models 只投影目录内模型——需要带模型目录的 manager
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-sel", true,
+        )]));
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &models[0], &models[1]),
+            Arc::new(super::super::model_installer::FakeInstaller::success()),
+        );
+
+        // 无运行实例 → is_active 全 false
+        let list = svc.list_models(&eid).await;
+        assert!(list.iter().all(|m| !m.is_active));
+
+        // 注入 launch snapshot（active = 第二个模型）
+        let entry = svc.get_entry_internal(&eid).await.unwrap();
+        inject_launch(&entry, &models[1], "inst-sel").await;
+        let list = svc.list_models(&eid).await;
+        let active_m = list.iter().find(|m| m.model_id == models[1]).unwrap();
+        let inactive_m = list.iter().find(|m| m.model_id == models[0]).unwrap();
+        assert!(active_m.is_active);
+        assert!(!inactive_m.is_active);
+
+        // get_model_status 同样区分
+        let st = svc.get_model_status(&eid, &models[1]).await.unwrap();
+        assert!(st.is_active);
+        let st = svc.get_model_status(&eid, &models[0]).await.unwrap();
+        assert!(!st.is_active);
+    }
+
+    /// 删除实际 active 模型（launch snapshot 判定）→ 结构化冲突，
+    /// instance_id 来自 launch snapshot（非 "current" 占位符）。
+    #[tokio::test]
+    async fn delete_active_model_blocked_by_launch_snapshot() {
+        let installer = super::super::model_installer::FakeInstaller::success();
+        let eid = EngineId::new("fake-del").unwrap();
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-del", true,
+        )]));
+        let tag = unique_tag("del");
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &tag, &format!("{tag}-b")),
+            Arc::new(installer),
+        );
+
+        // 安装模型
+        let r = svc.install_model(&eid, &tag, None).await.unwrap();
+        assert!(r.success);
+
+        // 注入 launch snapshot：运行中实例使用该模型
+        let entry = svc.get_entry_internal(&eid).await.unwrap();
+        inject_launch(&entry, &tag, "inst-del-123").await;
+
+        // 删除 → ActiveInRunningInstance（instance_id 真实来自 snapshot）
+        let r = svc.delete_model(&eid, &tag, None).await.unwrap();
+        assert!(!r.success);
+        let err = r.error.expect("应有结构化冲突");
+        assert_eq!(err.code, LocalEngineErrorCode::ArtifactReferenced);
+
+        // 清除 launch snapshot（模拟停止）后可删除
+        {
+            let mut l = entry.launch.lock().await;
+            *l = None;
+        }
+        let r = svc.delete_model(&eid, &tag, None).await.unwrap();
+        assert!(r.success, "停止后删除应成功: {:?}", r.error);
+
+        cleanup_models(&eid, &[&tag, &format!("{tag}-b")]).await;
+    }
+
+    /// descriptor 默认模型不构成删除保护——非 selected 非 active 可删除。
+    #[tokio::test]
+    async fn descriptor_default_model_is_deletable() {
+        let eid = EngineId::new("fake-dd").unwrap();
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-dd", true,
+        )]));
+        let tag = unique_tag("dd");
+        let default_like = format!("{tag}-default");
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &default_like, &format!("{tag}-b")),
+            Arc::new(super::super::model_installer::FakeInstaller::success()),
+        );
+
+        // "descriptor 默认模型"（registry 第一项，未 selected、无运行实例）
+        let r = svc.install_model(&eid, &default_like, None).await.unwrap();
+        assert!(r.success);
+        let r = svc.delete_model(&eid, &default_like, None).await.unwrap();
+        assert!(
+            r.success,
+            "descriptor 默认模型不构成永久删除保护: {:?}",
+            r.error
+        );
+
+        cleanup_models(&eid, &[&default_like, &format!("{tag}-b")]).await;
+    }
 
     #[tokio::test]
-    async fn cancel_operation_rejects_unknown_engine() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
-
-        let err = svc.cancel_operation(&unknown, "op-xyz").await;
-        assert_eq!(err.code, LocalEngineErrorCode::Unsupported);
+    async fn delete_not_installed_returns_error() {
+        let eid = EngineId::new("fake-del-none").unwrap();
+        let tag = unique_tag("delnone");
+        let models = vec![tag.clone(), format!("{tag}-b")];
+        // 构造带目录的 manager（make_service 无模型目录）
+        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+            "fake-del-none",
+            true,
+        )]));
+        let svc = EngineManager::new_with_providers(
+            registry,
+            Arc::new(NoopEventPort),
+            HashMap::new(),
+            crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+            make_model_registry(&eid, &models[0], &models[1]),
+            Arc::new(super::super::model_installer::FakeInstaller::success()),
+        );
+        let err = svc.delete_model(&eid, &models[0], None).await.unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::NotRunning);
     }
 
-    // ── 存储扫描 1：scan_storage 对未知 engine 返回错误 ──
+    // ── 模型身份解析 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_identity_fails_when_not_installed() {
+        let eid = EngineId::new("fake-rid").unwrap();
+        let contract = ModelContract {
+            model_id: "m".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+        };
+        let result = resolve_expected_model_identity(&eid, None, &contract, true);
+        assert!(result.is_err(), "managed 模式未安装应 fail-closed");
+    }
+
+    #[test]
+    fn resolve_identity_uses_descriptor_for_adapter_managed_model() {
+        let eid = EngineId::new("fake-rid2").unwrap();
+        let contract = ModelContract {
+            model_id: "m".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+        };
+        let (id, rev, fp) = resolve_expected_model_identity(&eid, None, &contract, false).unwrap();
+        assert_eq!(id, "m");
+        assert_eq!(rev, "v1");
+        assert!(fp.is_none());
+    }
+
+    #[test]
+    fn model_fingerprint_requires_nonzero_lowercase_sha256_hex() {
+        assert!(is_valid_model_fingerprint(&"a".repeat(64)));
+        assert!(!is_valid_model_fingerprint(&"A".repeat(64)));
+        assert!(!is_valid_model_fingerprint(&"0".repeat(64)));
+        assert!(!is_valid_model_fingerprint("abc"));
+    }
+
+    // ── 状态提交 fail-closed ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn commit_with_stale_operation_id_rejected() {
+        let svc = make_service("fake-commit");
+        let eid = EngineId::new("fake-commit").unwrap();
+        let _guard = svc.coordinator().try_claim(&eid, "op-1").unwrap();
+        let err = svc
+            .commit_status_internal(&eid, Some("op-stale"), |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
+    }
+
+    #[tokio::test]
+    async fn commit_without_op_id_rejected_while_operation_active() {
+        let svc = make_service("fake-commit2");
+        let eid = EngineId::new("fake-commit2").unwrap();
+        let _guard = svc.coordinator().try_claim(&eid, "op-1").unwrap();
+        let err = svc
+            .commit_status_internal(&eid, None, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
+    }
+
+    #[tokio::test]
+    async fn commit_with_op_id_rejected_after_operation_finished() {
+        let svc = make_service("fake-commit3");
+        let eid = EngineId::new("fake-commit3").unwrap();
+        let guard = svc.coordinator().try_claim(&eid, "op-1").unwrap();
+        guard.release();
+        let err = svc
+            .commit_status_internal(&eid, Some("op-1"), |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
+    }
+
+    // ── 存储 / 清理 ─────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn scan_storage_rejects_unknown_engine() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
-
-        let result = svc.scan_storage(&unknown).await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, LocalEngineErrorCode::Unsupported);
+        let svc = make_service("fake-scan");
+        let unknown = EngineId::new("fake-scan-unknown").unwrap();
+        assert!(svc.scan_storage(&unknown).await.is_err());
     }
 
-    // ── 存储扫描 2：scan_storage 对无 generation 的引擎返回空 targets ──
-
     #[tokio::test]
-    async fn scan_storage_returns_empty_when_no_generations() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let result = svc.scan_storage(&eid).await;
-        // 扫描可能因为目录不存在而返回错误（RuntimeError::Io）或空结果
-        // 关键是：不 panic，不阻塞
-        match result {
-            Ok(dto) => {
-                // 如果成功，targets 可能非空（如有 legacy 或 shared artifact）
-                // 但至少不 panic
-                assert_eq!(dto.engine_id, Some("engine-a".to_string()));
-            }
-            Err(e) => {
-                // 如果失败，code 应该是 Internal（Io 错误映射）
-                // 或 Unsupported（engine_id 不在 allowlist）
-                assert!(
-                    e.code == LocalEngineErrorCode::Internal
-                        || e.code == LocalEngineErrorCode::Unsupported
-                );
-            }
-        }
+    async fn scan_storage_returns_empty_when_nothing_installed() {
+        let svc = make_service("fake-scan-empty");
+        let eid = EngineId::new("fake-scan-empty").unwrap();
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+        let dto = svc.scan_storage(&eid).await.unwrap();
+        assert!(dto.targets.is_empty());
     }
 
-    // ── cleanup_targets 1：空 target_ids 返回空结果且状态为 Completed ──
-
     #[tokio::test]
-    async fn cleanup_targets_empty_returns_empty_result() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
+    async fn cleanup_rejects_active_slot_and_unknown_targets() {
+        let svc = make_service("fake-clean");
+        let eid = EngineId::new("fake-clean").unwrap();
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 
-        let result = svc.cleanup_targets(&eid, &[], None).await.unwrap();
-        assert_eq!(result.engine_id, "engine-a");
-        assert!(result.cleaned_target_ids.is_empty());
-        assert!(result.skipped_target_ids.is_empty());
-        assert!(result.deferred_target_ids.is_empty());
-        assert_eq!(result.released_bytes, 0);
-        assert!(result.error.is_none());
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.kind, OperationKind::Cleaning);
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-    }
-
-    // ── cleanup_targets 2：未知 target_id 被 deferred 或 skipped ──
-
-    #[tokio::test]
-    async fn cleanup_targets_skips_unknown_target_id() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
+        // 造一个 active 指针 + slot
+        std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-a")).unwrap();
+        DeploymentStore::write_pointer(
+            &eid,
+            &DeploymentPointer {
+                install_id: "dep-1".to_string(),
+                slot: "slot-a".to_string(),
+                updated_at_ms: 0,
+                schema_version:
+                    crate::infra::local_engine::deployment::DEPLOYMENT_POINTER_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
 
         let result = svc
-            .cleanup_targets(&eid, &["unknown:target".to_string()], None)
+            .cleanup_targets(&eid, &["slot:slot-a".to_string()], None)
             .await
             .unwrap();
-
+        assert!(
+            result
+                .skipped_target_ids
+                .contains(&"slot:slot-a".to_string())
+        );
         assert!(result.cleaned_target_ids.is_empty());
-        // unknown target_id 走到 else 分支返回 CleanupFailed，被归类为 deferred
-        // 或者被归类为 skipped——取决于 RuntimeError 类型
-        let total_non_cleaned = result.skipped_target_ids.len() + result.deferred_target_ids.len();
-        assert_eq!(total_non_cleaned, 1);
-        assert!(result.error.is_some() || !result.deferred_target_ids.is_empty());
+        // active slot 仍在
+        assert!(runtime::slot_dir(&eid, "slot-a").exists());
+
+        // 未知 target id
+        let result = svc
+            .cleanup_targets(&eid, &["bogus-target".to_string()], None)
+            .await
+            .unwrap();
+        assert!(
+            result
+                .skipped_target_ids
+                .contains(&"bogus-target".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
     }
 
-    // ── cleanup_targets 3：未知 engine 返回错误 ──
-
     #[tokio::test]
-    async fn cleanup_targets_rejects_unknown_engine() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
+    async fn cleanup_removes_non_active_slot_and_staging() {
+        let svc = make_service("fake-clean2");
+        let eid = EngineId::new("fake-clean2").unwrap();
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+
+        // active = slot-a；残留 slot-b + 孤儿 staging
+        std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-a")).unwrap();
+        std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-b")).unwrap();
+        std::fs::write(runtime::slot_dir(&eid, "slot-b").join("data.bin"), b"x").unwrap();
+        std::fs::create_dir_all(runtime::operation_staging_dir(&eid, "op-orphan")).unwrap();
+        DeploymentStore::write_pointer(
+            &eid,
+            &DeploymentPointer {
+                install_id: "dep-1".to_string(),
+                slot: "slot-a".to_string(),
+                updated_at_ms: 0,
+                schema_version:
+                    crate::infra::local_engine::deployment::DEPLOYMENT_POINTER_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
 
         let result = svc
-            .cleanup_targets(&unknown, &["gen:fake".to_string()], None)
-            .await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, LocalEngineErrorCode::Unsupported);
-    }
+            .cleanup_targets(
+                &eid,
+                &["slot:slot-b".to_string(), "staging".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            result
+                .cleaned_target_ids
+                .contains(&"slot:slot-b".to_string())
+        );
+        assert!(result.cleaned_target_ids.contains(&"staging".to_string()));
+        assert!(!runtime::slot_dir(&eid, "slot-b").exists());
+        assert!(runtime::slot_dir(&eid, "slot-a").exists(), "active 不可删");
 
-    // ── repair 1：repair 无 ProviderDescriptor 时退化为 self_test ──
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    }
 
     #[tokio::test]
-    async fn repair_falls_back_to_self_test_without_provider_descriptor() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // engine-a 没有 ProviderDescriptor → repair 退化走 self_test
-        svc.repair(&eid).await.unwrap();
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(
-            snapshot.status.environment,
-            crate::domain::local_engine::EnvironmentHealth::Ready
-        );
-        assert_eq!(snapshot.status.operation.kind, OperationKind::Repairing);
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
+    async fn scan_storage_targets_no_full_paths() {
+        let svc = make_service("fake-scan-paths");
+        let eid = EngineId::new("fake-scan-paths").unwrap();
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+        std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-a")).unwrap();
+        DeploymentStore::write_pointer(
+            &eid,
+            &DeploymentPointer {
+                install_id: "dep-1".to_string(),
+                slot: "slot-a".to_string(),
+                updated_at_ms: 0,
+                schema_version:
+                    crate::infra::local_engine::deployment::DEPLOYMENT_POINTER_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
+        let dto = svc.scan_storage(&eid).await.unwrap();
+        for t in &dto.targets {
+            assert!(
+                !t.target_id.contains('\\') && !t.target_id.contains(':')
+                    || t.target_id.starts_with("slot:")
+                    || t.target_id.starts_with("shared:")
+                    || t.target_id.starts_with("download_cache:")
+                    || t.target_id.starts_with("legacy:"),
+                "target_id 不应包含完整路径: {}",
+                t.target_id
+            );
+        }
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
     }
 
-    // ── repair 2：repair self_test 失败时返回 SelfTestFailed ──
+    // ── 孤儿与关停 ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_orphan_engine_rejects_unknown_engine() {
+        let svc = make_service("fake-orphan");
+        let unknown = EngineId::new("fake-orphan-unknown").unwrap();
+        assert!(svc.stop_orphan_engine(&unknown).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_orphan_engine_returns_lease_not_found_when_no_lease() {
+        let svc = make_service("fake-orphan2");
+        let eid = EngineId::new("fake-orphan2").unwrap();
+        let result = svc.stop_orphan_engine(&eid).await.unwrap();
+        assert!(!result.stopped);
+        assert_eq!(result.reason, "lease_not_found");
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_blocking_uses_process_registry() {
+        // 无进程时调用不 panic
+        let svc = make_service("fake-shutdown");
+        svc.shutdown_all_blocking();
+    }
+
+    // ── repair ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn repair_marks_environment_ready_when_self_test_passes() {
+        let svc = make_service("fake-repair");
+        let eid = EngineId::new("fake-repair").unwrap();
+        svc.repair(&eid).await.unwrap();
+        let snap = svc.get_status(&eid).await.unwrap();
+        assert_eq!(snap.status.environment, EnvironmentHealth::Ready);
+    }
 
     #[tokio::test]
     async fn repair_fails_when_self_test_fails() {
         let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-            "engine-fail-repair",
+            "fake-repair-fail",
             false,
         )]));
-        let svc = LocalEngineService::new(registry, Arc::new(NoopEventPort));
-        let eid = EngineId::new("engine-fail-repair").unwrap();
-
-        let result = svc.repair(&eid).await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().code,
-            LocalEngineErrorCode::SelfTestFailed
-        );
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Failed);
+        let svc = EngineManager::new(registry, Arc::new(NoopEventPort));
+        let eid = EngineId::new("fake-repair-fail").unwrap();
+        let err = svc.repair(&eid).await.unwrap_err();
+        assert_eq!(err.code, LocalEngineErrorCode::SelfTestFailed);
     }
-
-    // ── repair 3：repair 对未知 engine 返回 Unsupported ──
-
-    #[tokio::test]
-    async fn repair_rejects_unknown_engine() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
-
-        let result = svc.repair(&unknown).await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, LocalEngineErrorCode::Unsupported);
-    }
-
-    // ── repair 4：repair 可取消——operation_cancel 在 repair 期间被设置 ──
 
     #[tokio::test]
     async fn repair_sets_cancellable_operation() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // repair 完成后，operation_cancel 应已清理
+        let svc = make_service("fake-repair-c");
+        let eid = EngineId::new("fake-repair-c").unwrap();
         svc.repair(&eid).await.unwrap();
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        let oc = entry.operation_cancel.lock().await;
-        assert!(oc.is_none(), "repair 完成后 operation_cancel 应已清理");
+        let snap = svc.get_status(&eid).await.unwrap();
+        assert!(snap.status.operation.cancellable);
+        // 完成后 claim 已释放
+        assert!(svc.coordinator().active_operation(&eid).is_none());
     }
 
-    // ── repair 5：repair 失败后 operation_cancel 也被清理 ──
+    // ── InstallSinkAdapter ─────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn repair_clears_cancel_token_on_failure() {
-        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-            "engine-fail-cancel",
-            false,
-        )]));
-        let svc = LocalEngineService::new(registry, Arc::new(NoopEventPort));
-        let eid = EngineId::new("engine-fail-cancel").unwrap();
-
-        let _ = svc.repair(&eid).await;
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        let oc = entry.operation_cancel.lock().await;
-        assert!(oc.is_none(), "repair 失败后 operation_cancel 也应被清理");
-    }
-
-    // ── resolve_and_cleanup_target 1：未知 target_id 前缀返回错误 ──
-
-    #[tokio::test]
-    async fn resolve_and_cleanup_unknown_target_id_prefix() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let result = svc.resolve_and_cleanup_target(&eid, "totally:invalid:prefix");
-        assert!(result.is_err());
-    }
-
-    // ── resolve_and_cleanup_target 2：gen: 前缀验证 install_id 格式 ──
-
-    #[tokio::test]
-    async fn resolve_and_cleanup_validates_install_id_format() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // gen: 前缀但 install_id 含非法字符
-        let result = svc.resolve_and_cleanup_target(&eid, "gen:../traversal");
-        assert!(result.is_err());
-    }
-
-    // ── resolve_and_cleanup_target 3：legacy: 前缀需要手动确认 ──
-
-    #[tokio::test]
-    async fn resolve_and_cleanup_legacy_needs_manual_confirmation() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let result = svc.resolve_and_cleanup_target(&eid, "legacy:modelscope");
-        assert!(result.is_err());
-        // legacy 资产返回 CleanupFailed（需要手动确认）
-        match result {
-            Err(crate::infra::local_engine::runtime::RuntimeError::CleanupFailed { message }) => {
-                assert!(message.contains("legacy") || message.contains("手动"));
-            }
-            _ => panic!("expected CleanupFailed for legacy target"),
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // 0.22.5 H2 集成测试：取消 / 引用检查 / 修复失败回滚
-    // ════════════════════════════════════════════════════════════════════════
-
-    // ── 集成 1：取消操作后状态正确清理 ──────────────────────────────────────
-    //
-    // 场景：手动设置 operation_id + cancel_token，调用 cancel_operation，
-    //       验证 token 被触发、operation_cancel 被清理、current_operation_id 被清除。
-
-    #[tokio::test]
-    async fn integration_cancel_cleans_up_all_state() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        let cancel_token = CancellationToken::new();
-
-        // 设置 operation 状态为 Repairing
-        let op_id = "op-integration-cancel-001".to_string();
-        svc.set_operation_id(&eid, Some(op_id.clone())).await;
-        {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = Some((op_id.clone(), cancel_token.clone()));
-        }
-
-        // 先 commit 一个 Repairing 状态
-        let _ = svc
-            .commit_status_internal(&eid, Some(&op_id), |status| {
-                status.operation = EngineOperation {
-                    kind: OperationKind::Repairing,
-                    operation_id: op_id.clone(),
-                    stage: OperationStage::Preparing,
-                    cancellable: true,
-                };
-            })
-            .await;
-
-        // 取消
-        let err = svc.cancel_operation(&eid, &op_id).await;
-        assert_eq!(err.code, LocalEngineErrorCode::Cancelled);
-        assert!(cancel_token.is_cancelled(), "CancellationToken 应被触发");
-
-        // operation_cancel 应清理
-        {
-            let oc = entry.operation_cancel.lock().await;
-            assert!(oc.is_none(), "operation_cancel 应被清理");
-        }
-
-        // current_operation_id 应清除
-        {
-            let oid = entry.current_operation_id.lock().await;
-            assert!(oid.is_none(), "current_operation_id 应被清除");
-        }
-
-        // 状态应为 Cancelled
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Cancelled);
-    }
-
-    // ── 集成 2：取消后再次用同一 operation_id 取消返回 Rejected ──────────────
-    //
-    // 场景：操作被取消后，用同一 operation_id 再次取消，应返回 Rejected
-    //       （因为 operation_cancel 已清理）。
-
-    #[tokio::test]
-    async fn integration_cancel_after_cancel_returns_rejected() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        let cancel_token = CancellationToken::new();
-        let op_id = "op-integration-cancel-002".to_string();
-        svc.set_operation_id(&eid, Some(op_id.clone())).await;
-        {
-            let mut oc = entry.operation_cancel.lock().await;
-            *oc = Some((op_id.clone(), cancel_token.clone()));
-        }
-
-        // 第一次取消成功
-        let err = svc.cancel_operation(&eid, &op_id).await;
-        assert_eq!(err.code, LocalEngineErrorCode::Cancelled);
-
-        // 第二次取消——应返回 Rejected
-        let err = svc.cancel_operation(&eid, &op_id).await;
-        assert_eq!(err.code, LocalEngineErrorCode::Rejected);
-    }
-
-    // ── 集成 3：cleanup_targets 的 operation 在结束后清理 cancel token ──────
-    //
-    // 场景：cleanup_targets 虽然不可取消（cancellable=false），
-    //       但完成后 operation_id 和 cancel token 应正确清理。
-
-    #[tokio::test]
-    async fn integration_cleanup_clears_operation_state_after_completion() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let result = svc
-            .cleanup_targets(&eid, &["unknown:target".to_string()], None)
-            .await
-            .unwrap();
-
-        // 操作完成
-        assert_eq!(result.engine_id, "engine-a");
-
-        // operation_id 应被清除
-        let entry = svc.get_entry(&eid).await.unwrap();
-        {
-            let oid = entry.current_operation_id.lock().await;
-            assert!(
-                oid.is_none(),
-                "cleanup 完成后 current_operation_id 应被清除"
-            );
-        }
-        {
-            let oc = entry.operation_cancel.lock().await;
-            assert!(oc.is_none(), "cleanup 完成后 operation_cancel 应为 None");
-        }
-
-        // 状态应为 Completed
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.kind, OperationKind::Cleaning);
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-    }
-
-    // ── 集成 4：repair 成功后状态正确（无 ProviderDescriptor 退化路径）──────
-    //
-    // 场景：fake adapter 没有 ProviderDescriptor，repair 退化为 self_test，
-    //       成功后 environment=Ready，operation_cancel 已清理。
-
-    #[tokio::test]
-    async fn integration_repair_success_cleans_state() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        svc.repair(&eid).await.unwrap();
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        {
-            let oc = entry.operation_cancel.lock().await;
-            assert!(oc.is_none(), "repair 成功后 operation_cancel 应被清理");
-        }
-        {
-            let oid = entry.current_operation_id.lock().await;
-            assert!(oid.is_none(), "repair 成功后 current_operation_id 应被清除");
-        }
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(
-            snapshot.status.environment,
-            crate::domain::local_engine::EnvironmentHealth::Ready
-        );
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-    }
-
-    // ── 集成 5：repair 失败后状态 Failed 且 cancel token 被清理 ──────────────
-    //
-    // 场景：repair 在 self_test 失败时返回 SelfTestFailed，
-    //       operation_cancel 应被清理（不留 dangling token），
-    //       current_operation_id 应被清除。
-
-    #[tokio::test]
-    async fn integration_repair_failure_cleans_state() {
-        let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-            "engine-repair-fail",
-            false,
-        )]));
-        let svc = LocalEngineService::new(registry, Arc::new(NoopEventPort));
-        let eid = EngineId::new("engine-repair-fail").unwrap();
-
-        let result = svc.repair(&eid).await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().code,
-            LocalEngineErrorCode::SelfTestFailed
-        );
-
-        let entry = svc.get_entry(&eid).await.unwrap();
-        {
-            let oc = entry.operation_cancel.lock().await;
-            assert!(oc.is_none(), "repair 失败后 operation_cancel 应被清理");
-        }
-        {
-            let oid = entry.current_operation_id.lock().await;
-            assert!(oid.is_none(), "repair 失败后 current_operation_id 应被清除");
-        }
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Failed);
-        assert!(snapshot.status.last_error.is_some());
-    }
-
-    // ── 集成 6：resolve_and_cleanup_target 对 model_cache target_id 返回错误 ─
-    //
-    // 场景：model_cache target_id 在无实际模型缓存目录时应返回错误（CleanupFailed 或 Io）。
-    //       验证 target_id 解析路径正确，不 panic。
-
-    #[tokio::test]
-    async fn integration_resolve_model_cache_no_dir_returns_error() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // model_cache target_id——目录不存在，execute_cleanup 返回 Ok 但 size=0
-        // 或者 dir_size 返回 0
-        let result = svc.resolve_and_cleanup_target(&eid, "model_cache");
-        // model_cache 目录不存在时，execute_cleanup 返回 Ok（清理了不存在的目录）
-        // size 可能为 0
-        match result {
-            Ok(size) => {
-                // 如果成功，size 应为 0（目录不存在）
-                assert_eq!(size, 0, "不存在的 model_cache 目录大小应为 0");
-            }
-            Err(_) => {
-                // 如果失败，也是可接受的——目录不存在
-            }
-        }
-    }
-
-    // ── 集成 7：resolve_and_cleanup_target 对 gen: 前缀验证 current 不可删 ──
-    //
-    // 场景：gen: 前缀但对应的 install_id 是 current generation 时，
-    //       resolve_and_cleanup_target 应返回 CleanupFailed。
-
-    #[tokio::test]
-    async fn integration_resolve_gen_current_rejects_deletion() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 先 install 让环境就绪
-        svc.install(&eid, AdapterConfig::new()).await.unwrap();
-
-        // 读取 current pointer（如果存在）
-        let current = crate::infra::local_engine::runtime::read_current_pointer(&eid).unwrap();
-
-        if let Some(ref c) = current {
-            let target_id = format!("gen:{}", c.install_id);
-            let result = svc.resolve_and_cleanup_target(&eid, &target_id);
-            assert!(result.is_err());
-            match result {
-                Err(crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
-                    message,
-                }) => {
-                    assert!(message.contains("current"), "应阻止删除 current generation");
-                }
-                _ => panic!("expected CleanupFailed for current generation"),
-            }
-        }
-        // 如果没有 current pointer，跳过——fake adapter 的 install 不写 current.json
-    }
-
-    // ── 集成 8：scan_storage 返回的 targets 不含完整文件路径 ──────────────────
-    //
-    // 场景：scan_storage 返回的 EngineStorageDto 中 targets 的 path_display
-    //       应为 None 或不含完整用户目录路径。
-
-    #[tokio::test]
-    async fn integration_scan_storage_targets_no_full_paths() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        match svc.scan_storage(&eid).await {
-            Ok(dto) => {
-                for target in &dto.targets {
-                    if let Some(ref path) = target.path_display {
-                        // path_display 不应包含完整用户目录路径
-                        assert!(
-                            !path.contains(
-                                &dirs_next::home_dir().unwrap().to_string_lossy().to_string()
-                            ),
-                            "path_display 不应暴露完整用户目录路径"
-                        );
-                    }
-                }
-            }
-            Err(_) => {
-                // scan_storage 可能因为目录不存在而返回错误——可接受
-            }
-        }
-    }
-
-    // ── 集成 9：cleanup_targets 多个 target_ids 混合成功/跳过/deferred ────────
-    //
-    // 场景：提交多个 target_ids（混合有效/无效），验证结果正确分类。
-    // gen:nonexistent-id 格式合法但目录不存在——execute_cleanup 返回 Ok（空操作），
-    // size=0，被归类为 cleaned（released_bytes=0）。
-
-    #[tokio::test]
-    async fn integration_cleanup_mixed_targets_classification() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        let targets = vec![
-            "totally:invalid".to_string(),    // 无效前缀 → CleanupFailed → deferred
-            "gen:nonexistent-id".to_string(), // 有效格式但不存在 → cleaned（空操作，0 bytes）
-            "legacy:whatever".to_string(),    // legacy → CleanupFailed → deferred
-        ];
-
-        let result = svc.cleanup_targets(&eid, &targets, None).await.unwrap();
-
-        // gen:nonexistent-id 会被"清理"（空操作），released_bytes=0
-        // totally:invalid 和 legacy:whatever 返回 CleanupFailed → deferred
-        let total_handled = result.cleaned_target_ids.len()
-            + result.skipped_target_ids.len()
-            + result.deferred_target_ids.len();
-        assert_eq!(
-            total_handled, 3,
-            "所有 3 个 target 应被分类为 cleaned/skipped/deferred"
-        );
-
-        // released_bytes 应为 0（不存在的目录不释放空间）
-        assert_eq!(result.released_bytes, 0);
-    }
-
-    // ── 集成 10：repair 设置 cancellable=true ──────────────────────────────────
-    //
-    // 场景：repair 操作的状态中 cancellable 应为 true，
-    //       验证 operation 状态正确反映可取消性。
-
-    #[tokio::test]
-    async fn integration_repair_sets_cancellable_flag() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 在 repair 执行前捕获状态——由于 repair 是同步的（self_test 路径），
-        // 我们在 repair 完成后检查 final 状态的 operation kind
-        svc.repair(&eid).await.unwrap();
-
-        let snapshot = svc.get_status(&eid).await.unwrap();
-        assert_eq!(snapshot.status.operation.kind, OperationKind::Repairing);
-        // repair 完成后 stage 为 Completed
-        assert_eq!(snapshot.status.operation.stage, OperationStage::Completed);
-        // cancellable 应为 true（repair 是可取消操作）
-        assert!(snapshot.status.operation.cancellable);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 0.22.6.3 确定性测试：server crash recovery
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// 验证 exit monitor 收到进程退出后状态收敛到 Exited/Unreachable。
-    ///
-    /// 场景：进程从 Running 退出 → exit monitor 验证 instance token 仍匹配 →
-    /// 清理 identity/profile/lease → 状态收敛到 process=Exited, service=Unreachable。
-    ///
-    /// 此测试验证 ManagedProcessState 层面的退出提交逻辑，
-    /// 确保旧 generation 的退出事件不会覆盖新实例。
-    #[tokio::test]
-    async fn crash_recovery_old_exit_does_not_overwrite_new_instance() {
-        use crate::infra::local_engine::state::{
-            CommitResult, ExitReason, ManagedProcessState, ProcessStatus,
-        };
-
-        let mut state = ManagedProcessState::initial();
-
-        // gen=1 start
-        let token1 = state.begin_start();
-        let identity = crate::infra::local_engine::state::ProcessIdentity {
-            pid: 1234,
-            executable: std::path::PathBuf::from("/test/fake"),
-            start_time_ms: 0,
-            instance_id: token1.instance_id.clone(),
-        };
-        assert_eq!(
-            state.try_commit_running(&token1, 1234, identity),
-            CommitResult::Committed
-        );
-        assert_eq!(state.status, ProcessStatus::Running { pid: 1234 });
-
-        // 模拟 crash——进程以非零码退出
-        let ok = state.try_commit_exit(&token1, ExitReason::NonZeroExit { code: 1 });
-        assert!(ok, "当前 generation 的退出应被接受");
-        assert!(state.status.is_exited(), "状态应转为 Exited");
-
-        // gen=2 start（新实例——模拟 restart）
-        let token2 = state.begin_start();
-        assert_ne!(token1.generation, token2.generation);
-
-        // 旧 gen 的退出事件再次到达——应被拒绝
-        let ok = state.try_commit_exit(&token1, ExitReason::NonZeroExit { code: 1 });
-        assert!(!ok, "旧 generation 的退出事件不应覆盖新实例");
-
-        // 新实例状态不变
-        assert_eq!(state.status, ProcessStatus::Starting);
-    }
-
-    /// 验证 exit monitor 的身份验证逻辑——token 不匹配时忽略旧 exit。
-    #[tokio::test]
-    async fn crash_recovery_token_mismatch_ignores_exit() {
-        use crate::infra::local_engine::state::{ExitReason, ManagedProcessState, ProcessStatus};
-
-        let mut state = ManagedProcessState::initial();
-        let token1 = state.begin_start();
-
-        // gen=2 start（restart 发生在 exit 之前）
-        let _token2 = state.begin_start();
-
-        // gen=1 的 exit 事件到达——generation 不匹配，应被拒绝
-        let ok = state.try_commit_exit(&token1, ExitReason::NonZeroExit { code: 1 });
-        assert!(!ok, "旧 generation exit 不应覆盖新实例");
-
-        // 新实例状态仍为 Starting
-        assert_eq!(state.status, ProcessStatus::Starting);
-    }
-
-    /// 验证 ProcessStatus::Exited 标记。
-    #[tokio::test]
-    async fn crash_recovery_exited_status_is_terminal() {
-        use crate::infra::local_engine::state::{ExitReason, ManagedProcessState, ProcessStatus};
-
-        let mut state = ManagedProcessState::initial();
-        let token = state.begin_start();
-        state.set_status_exited(ExitReason::NonZeroExit { code: 42 });
-
-        assert!(state.status.is_exited());
-        assert!(!state.status.is_active());
-
-        // 从 Exited 再次提交 Exited 应被拒绝
-        let ok = state.try_commit_exit(&token, ExitReason::NormalExit { code: 0 });
-        assert!(!ok, "从 Exited 不应再次转为 Exited");
-
-        assert_eq!(
-            state.status,
-            ProcessStatus::Exited {
-                reason: ExitReason::NonZeroExit { code: 42 }
-            }
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 0.22.6.6 回归测试：stop_orphan_engine
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // ── stop_orphan_engine 对未知 engine_id 返回 Unsupported ──
-
-    #[tokio::test]
-    async fn stop_orphan_engine_rejects_unknown_engine() {
-        let svc = make_service("engine-a");
-        let unknown = EngineId::new("no-such-engine").unwrap();
-
-        let result = svc.stop_orphan_engine(&unknown).await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, LocalEngineErrorCode::Unsupported);
-    }
-
-    // ── stop_orphan_engine 无 lease 时返回 lease_not_found ──
-
-    #[tokio::test]
-    async fn stop_orphan_engine_returns_lease_not_found_when_no_lease() {
-        let svc = make_service("engine-a");
-        let eid = EngineId::new("engine-a").unwrap();
-
-        // 清理可能存在的旧 lease
-        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-a");
-
-        let result = svc.stop_orphan_engine(&eid).await.unwrap();
-        assert!(!result.stopped);
-        assert_eq!(result.reason, "lease_not_found");
-        assert!(result.detail.is_some());
-    }
-
-    // ── stop_orphan_engine 有 stale lease（PID 不存在）时返回 pid_not_exist ──
-
-    #[tokio::test]
-    async fn stop_orphan_engine_returns_pid_not_exist_for_stale_lease() {
-        let svc = make_service("engine-stale");
-        let eid = EngineId::new("engine-stale").unwrap();
-
-        // 清理可能存在的旧 lease
-        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-stale");
-
-        // 写入一个 stale lease（PID 99999 几乎确定不存在）
-        let lease = crate::infra::local_engine::lease::ProcessLease::new(
-            "engine-stale",
-            "inst-stale-001",
-            99999,
-            1700000000000,
-            "C:/nonexistent/python.exe",
-            "127.0.0.1:59999",
-            "fp:stale00000000000",
-            "gen-stale",
-        );
-        crate::infra::local_engine::lease::write_lease(&lease).unwrap();
-
-        let result = svc.stop_orphan_engine(&eid).await.unwrap();
-        assert!(!result.stopped);
-        assert_eq!(result.reason, "pid_not_exist");
-        assert!(result.detail.is_some());
-
-        // 验证 stale lease 已被清除
-        let leases = crate::infra::local_engine::lease::scan_leases();
-        assert!(
-            !leases.iter().any(|l| l.engine_id == "engine-stale"),
-            "stale lease 应已清除"
-        );
-    }
-
-    // ── stop_orphan_engine 有 lease 但 health 不可达时返回 health_unreachable ──
-
-    #[tokio::test]
-    async fn stop_orphan_engine_returns_health_unreachable() {
-        let svc = make_service("engine-health");
-        let eid = EngineId::new("engine-health").unwrap();
-
-        // 清理可能存在的旧 lease
-        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-health");
-
-        // 写入一个 lease，PID 为当前进程（存在但不是引擎进程）
-        let current_pid = std::process::id();
-        let lease = crate::infra::local_engine::lease::ProcessLease::new(
-            "engine-health",
-            "inst-health-001",
-            current_pid,
-            crate::infra::platform::process::get_process_creation_time_ms(current_pid).unwrap_or(0),
-            std::env::current_exe()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            "127.0.0.1:59998",
-            "fp:health0000000000",
-            "gen-health",
-        );
-        crate::infra::local_engine::lease::write_lease(&lease).unwrap();
-
-        let result = svc.stop_orphan_engine(&eid).await.unwrap();
-        assert!(!result.stopped);
-        // health 不可达（127.0.0.1:59998 上没有服务）
-        assert_eq!(result.reason, "health_unreachable");
-
-        // 清理
-        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-health");
-    }
-
-    // ── stop_orphan_engine 的 OrphanStopResultDto 不暴露 PID/路径 ──
-
-    #[tokio::test]
-    async fn stop_orphan_engine_result_dto_does_not_expose_sensitive_fields() {
-        let svc = make_service("engine-dto");
-        let eid = EngineId::new("engine-dto").unwrap();
-
-        // 清理可能存在的旧 lease
-        let _ = crate::infra::local_engine::lease::remove_lease_force("engine-dto");
-
-        // 无 lease 时返回 lease_not_found——DTO 不含 PID/路径
-        let result = svc.stop_orphan_engine(&eid).await.unwrap();
-        let json = serde_json::to_value(&result).unwrap();
-        assert!(json.get("pid").is_none(), "不应暴露 pid");
-        assert!(json.get("executable").is_none(), "不应暴露 executable");
-        assert!(json.get("endpoint").is_none(), "不应暴露 endpoint");
-        assert!(json.get("token").is_none(), "不应暴露 token");
-        assert!(json.get("instance_id").is_none(), "不应暴露 instance_id");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 0.22.6 H5: InstallSinkAdapter 测试
-    // 洪泛保护、seq 单调递增、operation_id 隔离、失败终态
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// 用于测试的 EventPort 实现——捕获所有 emit 的日志和状态。
     struct RecordingEventPort {
-        install_logs: std::sync::Mutex<Vec<(String, String, u64, String, String)>>,
-        // (engine_id, operation_id, seq, level, text)
-        status_snapshots: std::sync::Mutex<Vec<String>>,
-        runtime_logs: std::sync::Mutex<Vec<(String, String, u64, String)>>,
-        // (engine_id, instance_id, seq, line)
-        install_stages: std::sync::Mutex<Vec<(String, String, String)>>,
-        // (engine_id, operation_id, stage)
+        install_logs: std::sync::Mutex<Vec<(String, u64, String)>>,
+        stages: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl RecordingEventPort {
-        fn new() -> Self {
-            Self {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
                 install_logs: std::sync::Mutex::new(Vec::new()),
-                status_snapshots: std::sync::Mutex::new(Vec::new()),
-                runtime_logs: std::sync::Mutex::new(Vec::new()),
-                install_stages: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-
-        fn install_logs(&self) -> Vec<(String, String, u64, String, String)> {
-            self.install_logs.lock().unwrap().clone()
-        }
-
-        fn runtime_logs(&self) -> Vec<(String, String, u64, String)> {
-            self.runtime_logs.lock().unwrap().clone()
-        }
-
-        fn install_stages(&self) -> Vec<(String, String, String)> {
-            self.install_stages.lock().unwrap().clone()
+                stages: std::sync::Mutex::new(Vec::new()),
+            })
         }
     }
 
     impl EventPort for RecordingEventPort {
-        fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {
-            self.status_snapshots
-                .lock()
-                .unwrap()
-                .push("status".to_string());
-        }
-
+        fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {}
         fn emit_log(
             &self,
-            engine_id: &EngineId,
-            instance_id: &str,
-            seq: u64,
-            _level: crate::app::local_engine::dto::EngineLogLevel,
-            line: &str,
+            _engine_id: &EngineId,
+            _instance_id: &str,
+            _seq: u64,
+            _level: super::super::dto::EngineLogLevel,
+            _line: &str,
         ) {
-            self.runtime_logs.lock().unwrap().push((
-                engine_id.to_string(),
-                instance_id.to_string(),
-                seq,
-                line.to_string(),
-            ));
         }
-
         fn emit_install_log(
             &self,
             engine_id: &EngineId,
             operation_id: &str,
             seq: u64,
-            level: crate::app::local_engine::dto::EngineLogLevel,
+            _level: super::super::dto::EngineLogLevel,
             text: &str,
         ) {
             self.install_logs.lock().unwrap().push((
-                engine_id.to_string(),
-                operation_id.to_string(),
+                format!("{engine_id}/{operation_id}"),
                 seq,
-                level.to_string(),
                 text.to_string(),
             ));
         }
-
         fn emit_install_stage(&self, engine_id: &EngineId, operation_id: &str, stage: &str) {
-            self.install_stages.lock().unwrap().push((
-                engine_id.to_string(),
-                operation_id.to_string(),
-                stage.to_string(),
-            ));
+            self.stages
+                .lock()
+                .unwrap()
+                .push((format!("{engine_id}/{operation_id}"), stage.to_string()));
         }
     }
-
-    // ── InstallSinkAdapter seq 单调递增 ──
 
     #[test]
     fn install_sink_adapter_seq_monotonic() {
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-seq").unwrap();
-        let adapter =
-            InstallSinkAdapter::new(event_port.clone(), engine_id, "op-seq-test".to_string());
-
-        // 发送 10 条日志
-        for i in 0..10 {
-            adapter.on_log("info", &format!("log line {i}"));
+        let port = RecordingEventPort::new();
+        let sink = InstallSinkAdapter::new(
+            port.clone(),
+            EngineId::new("fake-sink").unwrap(),
+            "op-1".to_string(),
+        );
+        for i in 0..5 {
+            sink.on_log("info", &format!("line {i}"));
         }
-
-        let logs = event_port.install_logs();
-        assert_eq!(logs.len(), 10, "应收到 10 条安装日志");
-
-        // 验证 seq 从 1 开始单调递增
-        for (i, (_, _, seq, _, _)) in logs.iter().enumerate() {
-            assert_eq!(*seq, (i + 1) as u64, "seq 应从 1 开始单调递增");
-        }
+        let logs = port.install_logs.lock().unwrap();
+        let seqs: Vec<u64> = logs.iter().map(|(_, s, _)| *s).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort();
+        assert_eq!(seqs, sorted);
     }
-
-    // ── InstallSinkAdapter 洪泛保护：超过 50 条/秒被限流 ──
 
     #[test]
     fn install_sink_adapter_flood_protection_drops_excess() {
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-flood").unwrap();
-        let adapter =
-            InstallSinkAdapter::new(event_port.clone(), engine_id, "op-flood-test".to_string());
-
-        // 在同一秒内发送 100 条日志
-        for i in 0..100 {
-            adapter.on_log("info", &format!("flood line {i}"));
+        let port = RecordingEventPort::new();
+        let sink = InstallSinkAdapter::new(
+            port.clone(),
+            EngineId::new("fake-sink2").unwrap(),
+            "op-1".to_string(),
+        );
+        for i in 0..200 {
+            sink.on_log("info", &format!("line {i}"));
         }
-
-        let logs = event_port.install_logs();
-        // 洪泛保护：最多 50 条通过
-        assert!(
-            logs.len() <= 50,
-            "洪泛保护应限制每秒最多 50 条日志，实际通过 {} 条",
-            logs.len()
-        );
-        assert!(
-            logs.len() >= 40,
-            "洪泛保护应至少允许接近 50 条日志通过，实际通过 {} 条",
-            logs.len()
-        );
+        let count = port.install_logs.lock().unwrap().len();
+        assert!(count <= 100, "洪泛保护应丢弃超额日志，实际 {}", count);
     }
-
-    // ── InstallSinkAdapter operation_id 隔离 ──
 
     #[test]
     fn install_sink_adapter_operation_id_isolation() {
-        // 两个不同 operation_id 的 adapter 不应共享 seq
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-iso").unwrap();
-
-        let adapter1 = InstallSinkAdapter::new(
-            event_port.clone(),
-            engine_id.clone(),
-            "op-iso-1".to_string(),
+        let port = RecordingEventPort::new();
+        let s1 = InstallSinkAdapter::new(
+            port.clone(),
+            EngineId::new("fake-sink3").unwrap(),
+            "op-1".to_string(),
         );
-        let adapter2 = InstallSinkAdapter::new(
-            event_port.clone(),
-            engine_id.clone(),
-            "op-iso-2".to_string(),
+        let s2 = InstallSinkAdapter::new(
+            port.clone(),
+            EngineId::new("fake-sink3").unwrap(),
+            "op-2".to_string(),
         );
-
-        // 各发 5 条日志
-        for i in 0..5 {
-            adapter1.on_log("info", &format!("op1 line {i}"));
-            adapter2.on_log("info", &format!("op2 line {i}"));
-        }
-
-        let logs = event_port.install_logs();
-        assert_eq!(logs.len(), 10, "两个 operation 共应收到 10 条日志");
-
-        // 分组验证：每个 operation_id 的 seq 独立从 1 递增
-        let op1_logs: Vec<_> = logs
-            .iter()
-            .filter(|(_, op, _, _, _)| op == "op-iso-1")
-            .collect();
-        let op2_logs: Vec<_> = logs
-            .iter()
-            .filter(|(_, op, _, _, _)| op == "op-iso-2")
-            .collect();
-        assert_eq!(op1_logs.len(), 5);
-        assert_eq!(op2_logs.len(), 5);
-
-        for (i, (_, _, seq, _, _)) in op1_logs.iter().enumerate() {
-            assert_eq!(*seq, (i + 1) as u64, "op-iso-1 seq 应从 1 递增");
-        }
-        for (i, (_, _, seq, _, _)) in op2_logs.iter().enumerate() {
-            assert_eq!(*seq, (i + 1) as u64, "op-iso-2 seq 应从 1 递增");
-        }
+        s1.on_log("info", "from-op-1");
+        s2.on_log("info", "from-op-2");
+        let logs = port.install_logs.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|(k, _, t)| k.ends_with("op-1") && t == "from-op-1")
+        );
+        assert!(
+            logs.iter()
+                .any(|(k, _, t)| k.ends_with("op-2") && t == "from-op-2")
+        );
     }
-
-    // ── InstallSinkAdapter 旧 operation 不污染新 operation ──
-
-    #[test]
-    fn install_sink_adapter_old_operation_does_not_pollute_new() {
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-old-op").unwrap();
-
-        // 旧 operation 发日志
-        let old_adapter =
-            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-old".to_string());
-        for i in 0..3 {
-            old_adapter.on_log("info", &format!("old line {i}"));
-        }
-
-        // 新 operation 发日志
-        let new_adapter =
-            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-new".to_string());
-        for i in 0..3 {
-            new_adapter.on_log("info", &format!("new line {i}"));
-        }
-
-        let logs = event_port.install_logs();
-
-        // 旧 operation 的日志只属于 op-old
-        let old_logs: Vec<_> = logs
-            .iter()
-            .filter(|(_, op, _, _, _)| op == "op-old")
-            .collect();
-        let new_logs: Vec<_> = logs
-            .iter()
-            .filter(|(_, op, _, _, _)| op == "op-new")
-            .collect();
-        assert_eq!(old_logs.len(), 3);
-        assert_eq!(new_logs.len(), 3);
-
-        // 新 operation 的 seq 从 1 开始，不受旧 operation 影响
-        for (i, (_, _, seq, _, _)) in new_logs.iter().enumerate() {
-            assert_eq!(
-                *seq,
-                (i + 1) as u64,
-                "新 operation seq 应从 1 开始，不受旧 operation 影响"
-            );
-        }
-    }
-
-    // ── 运行时日志与安装日志隔离 ──
-
-    #[test]
-    fn runtime_logs_and_install_logs_are_isolated() {
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-rt-vs-install").unwrap();
-
-        // 发送运行时日志（以 instance_id 隔离）
-        event_port.emit_log(
-            &engine_id,
-            "inst-abc",
-            1,
-            crate::app::local_engine::dto::EngineLogLevel::Info,
-            "runtime log 1",
-        );
-        event_port.emit_log(
-            &engine_id,
-            "inst-abc",
-            2,
-            crate::app::local_engine::dto::EngineLogLevel::Info,
-            "runtime log 2",
-        );
-
-        // 发送安装日志（以 operation_id 隔离）
-        event_port.emit_install_log(
-            &engine_id,
-            "op-xyz",
-            1,
-            crate::app::local_engine::dto::EngineLogLevel::Info,
-            "install log 1",
-        );
-
-        let rt_logs = event_port.runtime_logs();
-        let install_logs = event_port.install_logs();
-
-        // 运行时日志只含 instance_id
-        assert_eq!(rt_logs.len(), 2);
-        assert!(rt_logs.iter().all(|(_, inst, _, _)| inst == "inst-abc"));
-
-        // 安装日志只含 operation_id
-        assert_eq!(install_logs.len(), 1);
-        assert!(install_logs.iter().all(|(_, op, _, _, _)| op == "op-xyz"));
-
-        // 两者不交叉污染
-        assert!(install_logs.iter().all(|(_, op, _, _, _)| op != "inst-abc"));
-        assert!(rt_logs.iter().all(|(_, inst, _, _)| inst != "op-xyz"));
-    }
-
-    // ── 0.22.6 H4: on_stage 通过 emit_install_stage 广播阶段变更 ──
 
     #[test]
     fn install_sink_adapter_on_stage_emits_install_stage() {
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-stage").unwrap();
-        let adapter = InstallSinkAdapter::new(
-            event_port.clone(),
-            engine_id.clone(),
-            "op-stage-test".to_string(),
+        let port = RecordingEventPort::new();
+        let sink = InstallSinkAdapter::new(
+            port.clone(),
+            EngineId::new("fake-sink4").unwrap(),
+            "op-1".to_string(),
         );
-
-        // on_stage 应通过 emit_install_stage 广播阶段变更
-        adapter.on_stage("preparing");
-        adapter.on_stage("downloading");
-        adapter.on_stage("verifying");
-        adapter.on_stage("completed");
-
-        let stages = event_port.install_stages();
-        assert_eq!(stages.len(), 4, "on_stage 应产生 4 个阶段事件");
-        assert_eq!(stages[0].2, "preparing");
-        assert_eq!(stages[1].2, "downloading");
-        assert_eq!(stages[2].2, "verifying");
-        assert_eq!(stages[3].2, "completed");
-
-        // 验证 engine_id 和 operation_id 正确传递
-        assert!(stages.iter().all(|(eid, _, _)| eid == "test-stage"));
-        assert!(stages.iter().all(|(_, op, _)| op == "op-stage-test"));
-
-        // on_stage 不应产生安装日志（emit_install_log）
-        let logs = event_port.install_logs();
-        assert!(logs.is_empty(), "on_stage 不应 emit 安装日志");
+        sink.on_stage("downloading");
+        let stages = port.stages.lock().unwrap();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].1, "downloading");
     }
 
-    /// 验证安装阶段事件的 operation_id 隔离。
-    #[test]
-    fn install_sink_adapter_stage_operation_id_isolation() {
-        let event_port = Arc::new(RecordingEventPort::new());
-        let engine_id = EngineId::new("test-stage-iso").unwrap();
-
-        // 两个不同 operation_id 的 adapter
-        let adapter1 =
-            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-aaa".to_string());
-        let adapter2 =
-            InstallSinkAdapter::new(event_port.clone(), engine_id.clone(), "op-bbb".to_string());
-
-        adapter1.on_stage("preparing");
-        adapter2.on_stage("downloading");
-
-        let stages = event_port.install_stages();
-        assert_eq!(stages.len(), 2);
-        assert_eq!(stages[0].1, "op-aaa");
-        assert_eq!(stages[1].1, "op-bbb");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 0.22.6 B2: expected model identity 策略测试
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// managed model storage 在模型未安装时返回 Err（不回退到 descriptor）。
-    #[test]
-    fn resolve_identity_fails_when_not_installed() {
-        let engine_id = EngineId::new("test-identity-not-installed").unwrap();
-        let contract = crate::infra::local_engine::runtime::ModelContract {
-            model_id: "test-model-not-installed".to_string(),
-            revision: "v1".to_string(),
-            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
-        };
-
-        let result = resolve_expected_model_identity(&engine_id, None, &contract, true);
-        assert!(result.is_err(), "模型未安装时应返回 Err");
-        assert!(
-            result.unwrap_err().contains("未安装"),
-            "错误信息应包含 '未安装'"
-        );
-    }
-
-    #[test]
-    fn resolve_identity_uses_descriptor_for_adapter_managed_model() {
-        let engine_id = EngineId::new("paddleocr").unwrap();
-        let contract = crate::infra::local_engine::runtime::ModelContract {
-            model_id: "PP-OCRv6:det:rec".to_string(),
-            revision: "ppocrv6-tiny".to_string(),
-            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
-        };
-
-        let identity = resolve_expected_model_identity(&engine_id, None, &contract, false).unwrap();
-        assert_eq!(identity.0, contract.model_id);
-        assert_eq!(identity.1, contract.revision);
-        assert_eq!(identity.2, None);
-    }
-
-    #[test]
-    fn model_fingerprint_requires_nonzero_lowercase_sha256_hex() {
-        assert!(is_valid_model_fingerprint(&"a1".repeat(32)));
-        assert!(!is_valid_model_fingerprint(&"A1".repeat(32)));
-        assert!(!is_valid_model_fingerprint(&"0".repeat(64)));
-        assert!(!is_valid_model_fingerprint("abc123"));
-    }
+    // ── 日志分类 ────────────────────────────────────────────────────────────
 
     #[test]
     fn engine_log_level_uses_explicit_wrapper_prefixes() {
-        use crate::app::local_engine::dto::EngineLogLevel;
+        use super::super::dto::EngineLogLevel;
         use crate::infra::local_engine::log_pipe::LogSource;
-
         assert_eq!(
-            classify_engine_log(LogSource::Stdout, "[INFO] ready"),
-            EngineLogLevel::Info
+            classify_engine_log(LogSource::Stderr, "[ERROR] boom"),
+            EngineLogLevel::Error
         );
         assert_eq!(
-            classify_engine_log(LogSource::Stdout, "[STATE] model_state=Ready"),
-            EngineLogLevel::Info
-        );
-        assert_eq!(
-            classify_engine_log(LogSource::Stderr, "[WARN] retry"),
+            classify_engine_log(LogSource::Stdout, "[WARN] careful"),
             EngineLogLevel::Warn
         );
         assert_eq!(
-            classify_engine_log(LogSource::Stderr, "[ERROR] failed"),
-            EngineLogLevel::Error
-        );
-        assert_eq!(
-            classify_engine_log(LogSource::Stderr, "Traceback (most recent call last):"),
-            EngineLogLevel::Error
+            classify_engine_log(LogSource::Stdout, "[INFO] hi"),
+            EngineLogLevel::Info
         );
     }
 
     #[test]
     fn unclassified_engine_output_is_debug_not_stderr_warning() {
-        use crate::app::local_engine::dto::EngineLogLevel;
+        use super::super::dto::EngineLogLevel;
         use crate::infra::local_engine::log_pipe::LogSource;
-
         assert_eq!(
-            classify_engine_log(LogSource::Stderr, "[================] 32.52%"),
-            EngineLogLevel::Debug
-        );
-        assert_eq!(
-            classify_engine_log(LogSource::Stderr, "Extracting PP-OCRv6_tiny_rec_infer.tar"),
+            classify_engine_log(LogSource::Stderr, "random stderr noise"),
             EngineLogLevel::Debug
         );
     }

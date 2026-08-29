@@ -20,7 +20,7 @@
 //!
 //! ## 留给 H3/H4 的消费约定
 //!
-//! - **H3（app/local_engine）**：`LocalEngineService` 在启动 adapter 前，
+//! - **H3（app/local_engine）**：`EngineManager` 在启动 adapter 前，
 //!   用 `EndpointAllocator` 从 `AdapterConfig::preferred_port` 解析出 `Endpoint`。
 //!   启动后用 `ServiceIdentityInput` 携带 token 发给子进程的健康检查端点，
 //!   并用 `ServiceIdentityResult` 核对 health 响应回显的 engine id / instance id / token fingerprint。
@@ -29,7 +29,7 @@
 //!   不接触明文 token；HTTP client 在请求头中携带明文 token，
 //!   但日志中只能记录 fingerprint。
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 
 // ── Endpoint ──────────────────────────────────────────────────────────────
 
@@ -37,46 +37,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 ///
 /// **铁则**：只允许 `127.0.0.1`（loopback）。
 /// 拒绝 `0.0.0.0`、外部 IP 或前端自定义 host。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Endpoint {
-    port: u16,
-}
-
-impl Endpoint {
-    /// 创建 loopback endpoint。
-    /// 端口号由 `EndpointAllocator` 分配，外部不应直接构造。
-    #[cfg(test)]
-    pub fn new(port: u16) -> Self {
-        Self { port }
-    }
-
-    /// 创建 loopback endpoint（非测试环境私有）。
-    #[cfg(not(test))]
-    fn new(port: u16) -> Self {
-        Self { port }
-    }
-
-    /// 返回端口号。
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    /// 返回 `127.0.0.1:port` 的 SocketAddr。
-    pub fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], self.port))
-    }
-
-    /// 返回 `http://127.0.0.1:port` base URL 字符串。
-    pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-}
-
-impl std::fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "127.0.0.1:{}", self.port)
-    }
-}
+/// loopback endpoint——唯一定义在 `domain/local_engine/identity`，
+/// 此处 re-export 保持既有 import 路径兼容。
+pub use crate::domain::local_engine::identity::Endpoint;
 
 // ── PortError ──────────────────────────────────────────────────────────────
 
@@ -484,6 +447,7 @@ impl ConflictRetryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     // ── Endpoint 只允许 127.0.0.1 ──────────────────────────────────────────
 

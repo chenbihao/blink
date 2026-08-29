@@ -386,12 +386,13 @@ pub fn write_model_manifest(
 /// 从磁盘恢复的模型状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoredModelState {
-    /// 已安装：current pointer + manifest + payload + fingerprint 全部有效。
+    /// 已安装：current pointer + manifest + payload 目录结构链有效。
+    /// （不含内容 hash——完整校验走 [`verify_model_payload`]。）
     Installed {
         install_id: String,
         manifest: ModelManifest,
     },
-    /// 损坏：pointer/manifest/payload/fingerprint 任一损坏或不一致。
+    /// 损坏：pointer/manifest/payload 目录结构链任一损坏或不一致。
     Corrupted {
         install_id: Option<String>,
         reason: String,
@@ -400,10 +401,14 @@ pub enum RestoredModelState {
     NotInstalled,
 }
 
-/// 从磁盘恢复模型状态。
+/// 从磁盘恢复模型状态（结构校验，**不做全量 hash**）。
 ///
-/// **铁则**：禁止仅凭目录存在或非空推断 Installed。
-/// 必须验证 current pointer → manifest → payload → fingerprint 全链。
+/// **铁则**：
+/// - 禁止仅凭目录存在或非空推断 Installed。
+/// - **启动时禁止对 GB 级模型做完整内容 hash**——restore 只验证
+///   current pointer → manifest → payload 目录存在的结构链；
+///   完整 fingerprint 校验走 `verify_model_payload`（安装事务在
+///   staging 上直接 hash；显式验证/修复预检按需调用）。
 pub fn restore_model_state(
     engine_id: &EngineId,
     asset_key: &str,
@@ -475,7 +480,7 @@ pub fn restore_model_state(
         });
     }
 
-    // 验证 payload 目录存在
+    // 验证 payload 目录存在（结构校验——不读内容、不 hash）
     let payload_dir = match model_payload_dir(engine_id, asset_key, &pointer.install_id) {
         Ok(p) => p,
         Err(e) => {
@@ -492,42 +497,53 @@ pub fn restore_model_state(
         });
     }
 
-    // 验证 fingerprint
-    let computed_fp = match compute_content_fingerprint(&payload_dir) {
-        Ok(fp) => fp,
-        Err(e) => {
-            return Ok(RestoredModelState::Corrupted {
-                install_id: Some(pointer.install_id.clone()),
-                reason: format!("fingerprint 计算失败: {e}"),
-            });
-        }
-    };
-
-    if computed_fp.fingerprint != manifest.content_fingerprint {
-        return Ok(RestoredModelState::Corrupted {
-            install_id: Some(pointer.install_id.clone()),
-            reason: format!(
-                "fingerprint 不匹配: manifest={}, actual={}",
-                manifest.content_fingerprint, computed_fp.fingerprint
-            ),
-        });
-    }
-
-    // 验证文件数
-    if computed_fp.file_count != manifest.file_count {
-        return Ok(RestoredModelState::Corrupted {
-            install_id: Some(pointer.install_id.clone()),
-            reason: format!(
-                "file_count 不匹配: manifest={}, actual={}",
-                manifest.file_count, computed_fp.file_count
-            ),
-        });
-    }
-
     Ok(RestoredModelState::Installed {
         install_id: pointer.install_id,
         manifest,
     })
+}
+
+/// 显式完整校验模型 payload（fingerprint + 文件数）。
+///
+/// 供用户显式验证/修复预检等按需路径调用（安装事务在 staging 上
+/// 直接用 `compute_content_fingerprint`）——**调用方必须通过
+/// `spawn_blocking` 挪出 async executor**（GB 级目录遍历 + hash）。
+/// 返回 Err 描述不匹配原因（供投影为 Corrupted 状态）。
+/// 当前生产调用方尚未接入，由本模块测试行使。
+#[allow(dead_code)]
+pub fn verify_model_payload(
+    engine_id: &EngineId,
+    asset_key: &str,
+    manifest: &ModelManifest,
+) -> Result<(), String> {
+    let payload_dir = match model_payload_dir(engine_id, asset_key, &manifest.install_id) {
+        Ok(p) => p,
+        Err(e) => return Err(format!("payload 路径计算失败: {e}")),
+    };
+    if !payload_dir.exists() {
+        return Err("payload 目录不存在".to_string());
+    }
+
+    let computed_fp = match compute_content_fingerprint(&payload_dir) {
+        Ok(fp) => fp,
+        Err(e) => return Err(format!("fingerprint 计算失败: {e}")),
+    };
+
+    if computed_fp.fingerprint != manifest.content_fingerprint {
+        return Err(format!(
+            "fingerprint 不匹配: manifest={}, actual={}",
+            manifest.content_fingerprint, computed_fp.fingerprint
+        ));
+    }
+
+    if computed_fp.file_count != manifest.file_count {
+        return Err(format!(
+            "file_count 不匹配: manifest={}, actual={}",
+            manifest.file_count, computed_fp.file_count
+        ));
+    }
+
+    Ok(())
 }
 
 // ── content fingerprint 算法 ───────────────────────────────────────────────
@@ -1342,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_corrupted_when_fingerprint_mismatch() {
+    fn restore_structural_ok_but_explicit_verify_catches_fingerprint_mismatch() {
         let engine = EngineId::new("funasr").unwrap();
         let asset_key = "test-restore-corrupted-fp";
 
@@ -1383,14 +1399,15 @@ mod tests {
         };
         write_model_current_pointer(&engine, asset_key, &pointer).unwrap();
 
-        // 恢复 → Corrupted
-        let state = restore_model_state(&engine, asset_key).unwrap();
-        match state {
-            RestoredModelState::Corrupted { reason, .. } => {
-                assert!(reason.contains("fingerprint"));
-            }
-            other => panic!("expected Corrupted, got {:?}", other),
+        // restore 只做结构校验 → Installed（不做 GB hash）
+        match restore_model_state(&engine, asset_key).unwrap() {
+            RestoredModelState::Installed { .. } => {}
+            other => panic!("expected Installed, got {:?}", other),
         }
+
+        // 显式完整校验 → fingerprint 不匹配被抓到
+        let err = verify_model_payload(&engine, asset_key, &manifest).unwrap_err();
+        assert!(err.contains("fingerprint 不匹配"), "unexpected: {err}");
 
         // 清理
         let root = asset_root(&engine, asset_key).unwrap();

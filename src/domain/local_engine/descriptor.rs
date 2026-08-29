@@ -7,9 +7,9 @@
 //! ## 设计铁则
 //!
 //! - **编译期内置 allowlist**：descriptor 由 Rust 编译期声明，不接受前端动态传入。
-//! - **闭合枚举**：`CapabilityKind`、`RuntimeKind` 均为闭合枚举，
+//! - **闭合枚举**：`CapabilityKind`、`RuntimePlan` 均为闭合枚举，
 //!   前端无法提交 runtime kind、URL、executable、argv 或环境变量。
-//! - **复用 infra 类型**：`RuntimeKind`、`EngineId`、`ArtifactId`、
+//! - **复用 infra 类型**：`RuntimePlan`、`EngineId`、`ArtifactId`、
 //!   `ResolvedProfile`、`ComputePreference`、`ModelContract` 均复用
 //!   `infra/local_engine/runtime` 中的已有类型，不复制第二套同义类型。
 //! - **安装计划受限引用**：descriptor 不直接持有可执行路径或 argv，
@@ -20,9 +20,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::local_engine::runtime::{
-    ArtifactId, ComputePreference, ModelContract, ResolvedProfile, RuntimeKind,
-};
+use super::identity::{ArtifactId, ComputePreference, ModelContract, ResolvedProfile, RuntimePlan};
 
 use super::error::LocalEngineError;
 
@@ -84,7 +82,7 @@ impl std::fmt::Display for LifecyclePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallPlanRef {
     /// 运行时种类（闭合枚举，决定使用哪个 provider）。
-    pub runtime_kind: RuntimeKind,
+    pub runtime_kind: RuntimePlan,
     /// 此引擎使用的 artifact id 列表（provider 管理的锁定标识）。
     /// 例如 Python 引擎引用 python distribution artifact id。
     pub artifact_ids: Vec<ArtifactId>,
@@ -186,7 +184,7 @@ impl Default for EngineTimeouts {
     }
 }
 
-// ── EngineDescriptor ──────────────────────────────────────────────────────
+// ── EngineDefinition ──────────────────────────────────────────────────────
 
 /// 引擎描述符（静态事实声明，编译期内置）。
 ///
@@ -196,15 +194,15 @@ impl Default for EngineTimeouts {
 /// **不接受前端动态传入**：descriptor 由 Rust 编译期声明，
 /// 前端只能传 `engine_id` 与有限动作。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EngineDescriptor {
+pub struct EngineDefinition {
     /// 稳定 engine id（编译期声明）。
-    pub engine_id: crate::infra::local_engine::runtime::EngineId,
+    pub engine_id: super::identity::EngineId,
     /// 显示元数据。
     pub display: EngineDisplay,
     /// 能力种类（STT/OCR，闭合枚举）。
     pub capability_kind: CapabilityKind,
     /// 运行时种类（PythonVenv/ManagedBinary，闭合枚举）。
-    pub runtime_kind: RuntimeKind,
+    pub runtime_kind: RuntimePlan,
     /// 安装计划受限引用。
     pub install_plan: InstallPlanRef,
     /// 模型契约（锁定模型身份，防止随安装时间漂移）。
@@ -236,7 +234,7 @@ pub struct EngineDisplay {
 
 // ── Descriptor validation ──────────────────────────────────────────────────
 
-impl EngineDescriptor {
+impl EngineDefinition {
     /// 校验 descriptor 内部一致性。
     ///
     /// 确保安装计划引用的 runtime_kind 与 descriptor 的 runtime_kind 一致，
@@ -308,15 +306,15 @@ impl EngineDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::local_engine::runtime::EngineId;
-    use crate::infra::local_engine::runtime::{
-        ArtifactId, ComputeBackend, ComputePreference, ResolvedProfile, RuntimeKind,
+    use crate::domain::local_engine::identity::{
+        ArtifactId, ComputeBackend, ComputePreference, EngineId, ModelContract, ResolvedProfile,
+        RuntimePlan,
     };
 
-    fn make_test_descriptor() -> EngineDescriptor {
+    fn make_test_descriptor() -> EngineDefinition {
         let artifact_id = ArtifactId::new("python-3.12.8").unwrap();
 
-        EngineDescriptor {
+        EngineDefinition {
             engine_id: EngineId::new("funasr").unwrap(),
             display: EngineDisplay {
                 name: "FunASR 语音识别".to_string(),
@@ -325,9 +323,9 @@ mod tests {
                 version: "0.1.0".to_string(),
             },
             capability_kind: CapabilityKind::Stt,
-            runtime_kind: RuntimeKind::PythonVenv,
+            runtime_kind: RuntimePlan::PythonVenv,
             install_plan: InstallPlanRef {
-                runtime_kind: RuntimeKind::PythonVenv,
+                runtime_kind: RuntimePlan::PythonVenv,
                 artifact_ids: vec![artifact_id.clone()],
                 compute_candidates: vec![ComputeCandidate {
                     preference: ComputePreference::Cpu,
@@ -339,7 +337,7 @@ mod tests {
             model_contract: ModelContract {
                 model_id: "funasr-model".to_string(),
                 revision: "v1.0".to_string(),
-                checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+                checksum_source: crate::domain::local_engine::identity::ChecksumSource::Unverified,
             },
             lifecycle: LifecyclePolicy::Manual,
             timeouts: EngineTimeouts::default(),
@@ -357,7 +355,7 @@ mod tests {
     #[test]
     fn descriptor_rejects_mismatched_runtime_kind() {
         let mut desc = make_test_descriptor();
-        desc.install_plan.runtime_kind = RuntimeKind::ManagedBinary;
+        desc.install_plan.runtime_kind = RuntimePlan::ManagedBinary;
         let err = desc.validate().unwrap_err();
         assert_eq!(
             err.code,
@@ -396,10 +394,10 @@ mod tests {
 
     #[test]
     fn descriptor_only_allows_closed_runtime_kind() {
-        let json = serde_json::to_string(&RuntimeKind::PythonVenv).unwrap();
+        let json = serde_json::to_string(&RuntimePlan::PythonVenv).unwrap();
         assert_eq!(json, "\"python_venv\"");
 
-        let result: Result<RuntimeKind, _> = serde_json::from_str("\"custom_runtime\"");
+        let result: Result<RuntimePlan, _> = serde_json::from_str("\"custom_runtime\"");
         assert!(result.is_err());
     }
 
@@ -435,10 +433,10 @@ mod tests {
     fn descriptor_serialization_roundtrip() {
         let desc = make_test_descriptor();
         let json = serde_json::to_string(&desc).unwrap();
-        let back: EngineDescriptor = serde_json::from_str(&json).unwrap();
+        let back: EngineDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(back.engine_id, desc.engine_id);
         assert_eq!(back.capability_kind, CapabilityKind::Stt);
-        assert_eq!(back.runtime_kind, RuntimeKind::PythonVenv);
+        assert_eq!(back.runtime_kind, RuntimePlan::PythonVenv);
         assert_eq!(back.lifecycle, LifecyclePolicy::Manual);
     }
 }

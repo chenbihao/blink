@@ -235,7 +235,7 @@ impl VoiceService {
     /// `set_voice_flag`：是否通知输入状态机进入 Recording（仅热键路径需要）。
     /// 返回 `true` = 录音已启动。
     ///
-    /// **0.22.6 批次 3**：本地模式下先从 `LocalEngineService` 获取连接快照
+    /// **0.22.6 批次 3**：本地模式下先从 `EngineManager` 获取连接快照
     /// （endpoint + token + engine_id + instance_id），再做 token-aware health 检查。
     /// 不再用配置中的 preferred port 做 port-only health——动态分配的 endpoint
     /// 可能与 preferred port 不一致，且 Python /health 强制要求 token 鉴权。
@@ -259,7 +259,7 @@ impl VoiceService {
         let connection = if config.mode == SttMode::Local {
             let svc = self
                 .app
-                .try_state::<std::sync::Arc<crate::app::local_engine::LocalEngineService>>();
+                .try_state::<std::sync::Arc<crate::app::local_engine::EngineManager>>();
             match svc {
                 Some(s) => {
                     let engine_id = crate::infra::local_engine::runtime::EngineId::new(
@@ -299,7 +299,7 @@ impl VoiceService {
                         }
                     }
                 }
-                None => None, // LocalEngineService 未注册
+                None => None, // EngineManager 未注册
             }
         } else {
             None

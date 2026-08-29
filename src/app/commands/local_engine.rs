@@ -48,8 +48,8 @@ use crate::app::local_engine::dto::{
     OrphanStopResultDto, environment_health_to_string, project_catalog_item, project_diagnostics,
     project_status, service_health_to_string,
 };
-use crate::app::local_engine::{LocalEngineService, funasr, paddleocr};
-use crate::domain::local_engine::EngineDescriptor;
+use crate::app::local_engine::{EngineManager, funasr, paddleocr};
+use crate::domain::local_engine::EngineDefinition;
 use crate::infra::local_engine::providers::RuntimeProvider;
 use crate::infra::local_engine::runtime::{ComputePreference, EngineId};
 
@@ -57,11 +57,11 @@ use tauri::{Emitter, Manager};
 
 // ── 内部辅助 ──────────────────────────────────────────────────────────────────
 
-/// 从 managed state 获取 `LocalEngineService` 引用。
-fn get_service(app: &tauri::AppHandle) -> Result<Arc<LocalEngineService>, CommandError> {
-    app.try_state::<Arc<LocalEngineService>>()
+/// 从 managed state 获取 `EngineManager` 引用。
+fn get_service(app: &tauri::AppHandle) -> Result<Arc<EngineManager>, CommandError> {
+    app.try_state::<Arc<EngineManager>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| CommandError::new("internal_error", "LocalEngineService 尚未注册", false))
+        .ok_or_else(|| CommandError::new("internal_error", "EngineManager 尚未注册", false))
 }
 
 /// 合并 instance 日志和 operation 日志，去重、排序、截断。
@@ -74,7 +74,7 @@ fn get_service(app: &tauri::AppHandle) -> Result<Arc<LocalEngineService>, Comman
 /// 最后统一执行 `max_lines` 截断。
 async fn get_merged_logs(
     app: &tauri::AppHandle,
-    svc: &LocalEngineService,
+    svc: &EngineManager,
     eid: &EngineId,
     max_lines: usize,
 ) -> Vec<EngineLogDto> {
@@ -251,8 +251,8 @@ fn build_adapter_config_for_engine(
 /// 从 `ProviderDescriptor` 的 `profiles` + `RuntimeProvider::check_compatibility`
 /// 真源获取，不由前端猜测。
 fn compute_compatibility_for_descriptor(
-    svc: &LocalEngineService,
-    descriptor: &EngineDescriptor,
+    svc: &EngineManager,
+    descriptor: &EngineDefinition,
 ) -> Vec<(ComputePreference, bool, Option<String>)> {
     // 从 ProviderDescriptor 获取 profile candidates
     let provider_desc = svc.provider_descriptor_for_engine(&descriptor.engine_id);
@@ -385,7 +385,7 @@ pub async fn get_local_engine_status(
 /// **只读查询，无副作用。**
 ///
 /// 合并两个日志来源：
-/// - **instance 日志**：来自 `ManagedProcess` ring buffer（`LocalEngineService::get_logs_structured`）
+/// - **instance 日志**：来自 `ManagedProcess` ring buffer（`EngineManager::get_logs_structured`）
 /// - **operation 日志**：来自 `OperationLogStore`（会话内回放，环境/模型安装日志）
 ///
 /// 去重身份：`(source_kind, source_id, seq)`
@@ -1072,7 +1072,7 @@ fn preference_to_string_local(p: ComputePreference) -> String {
 /// `compute_candidates` 中——显式偏好失败不回退，所以必须确保 descriptor 声明了
 /// 对应的 profile。
 async fn validate_preference_for_engine(
-    svc: &LocalEngineService,
+    svc: &EngineManager,
     engine_id: &EngineId,
     preference: ComputePreference,
 ) -> Result<(), CommandError> {
@@ -1158,7 +1158,7 @@ pub async fn get_runtime_foundation_status(
 /// 返回单个引擎的详细诊断：环境健康、进程状态、服务状态、最近日志。
 /// **只读查询，不安装、不启动。** 不下载音频、不执行实际转写。
 ///
-/// 调用 `LocalEngineService::get_status()` + `get_diagnostics()` + 双源日志查询 + orphan recovery，
+/// 调用 `EngineManager::get_status()` + `get_diagnostics()` + 双源日志查询 + orphan recovery，
 /// 返回闭合 `EngineDiagnosticsDto`，不再使用 `json!` 手拼。
 #[tauri::command]
 pub async fn get_engine_diagnostics(
@@ -1380,16 +1380,11 @@ pub async fn open_runtime_folder(_app: tauri::AppHandle) -> Result<(), CommandEr
     Ok(())
 }
 
-// ── 模型生命周期 commands（0.22.6 H5）─────────────────────────────────────────
-
-use crate::app::local_engine::ModelService;
-
-/// 从 managed state 获取 `ModelService` 引用。
-fn get_model_service(app: &tauri::AppHandle) -> Result<Arc<ModelService>, CommandError> {
-    app.try_state::<Arc<ModelService>>()
-        .map(|s| s.inner().clone())
-        .ok_or_else(|| CommandError::new("internal_error", "ModelService 尚未注册", false))
-}
+// ── 模型生命周期 commands ──────────────────────────────────────────────────
+//
+// 模型资产业务由 EngineManager 统一承载（单一业务真相）——
+// 删除冲突检查（selected/active）、事务与互斥都在 manager 内部完成，
+// commands 层只做参数校验与 DTO 投影。
 
 /// 列出引擎的所有模型候选及其当前状态。
 ///
@@ -1399,21 +1394,21 @@ fn get_model_service(app: &tauri::AppHandle) -> Result<Arc<ModelService>, Comman
 pub async fn list_engine_models(
     app: tauri::AppHandle,
     engine_id: String,
-) -> Result<Vec<crate::app::local_engine::model_service::ModelCatalogItemDto>, CommandError> {
-    let svc = get_model_service(&app)?;
+) -> Result<Vec<crate::app::local_engine::model_installer::ModelCatalogItemDto>, CommandError> {
+    let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
     let models = svc.list_models(&eid).await;
 
     // 投影为 DTO
-    let dtos: Vec<crate::app::local_engine::model_service::ModelCatalogItemDto> = models
+    let dtos: Vec<crate::app::local_engine::model_installer::ModelCatalogItemDto> = models
         .iter()
         .map(|status| {
             let desc = svc
-                .registry()
+                .model_registry()
                 .find(&eid, &status.model_id)
                 .expect("模型状态必须有对应 descriptor");
-            crate::app::local_engine::model_service::project_model_status(desc, status)
+            crate::app::local_engine::model_installer::project_model_status(desc, status)
         })
         .collect();
 
@@ -1424,16 +1419,12 @@ pub async fn list_engine_models(
 ///
 /// 前端只需提交 `engine_id`、`model_id`、`operation_id`（可选）。
 /// **禁止包含 URL、路径、脚本、外部命令。**
-///
-/// 状态转移：NotInstalled → Downloading → Staging → Verifying → Installed
-/// 失败路径：→ DownloadFailed/StagingFailed/VerificationFailed → NotInstalled
-/// 取消路径：→ NotInstalled（不影响已安装模型）
 #[tauri::command]
 pub async fn install_engine_model(
     app: tauri::AppHandle,
-    request: crate::app::local_engine::model_service::ModelOperationRequestDto,
-) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
-    let svc = get_model_service(&app)?;
+    request: crate::app::local_engine::model_installer::ModelOperationRequestDto,
+) -> Result<crate::app::local_engine::model_installer::ModelOperationResultDto, CommandError> {
+    let svc = get_service(&app)?;
     let eid = validate_engine_id(&request.engine_id)?;
 
     tracing::info!(
@@ -1456,21 +1447,22 @@ pub async fn install_engine_model(
         "模型安装操作完成"
     );
 
-    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+    Ok(crate::app::local_engine::model_installer::project_model_operation_result(&result))
 }
 
 /// 删除引擎模型（引用检查 + 删除）。
 ///
 /// **删除正在使用或被配置引用的模型必须返回结构化冲突**，
-/// 不能静默切换到其他模型。
-///
-/// 前端只需提交 `engine_id`、`model_id`、`operation_id`（可选）。
+/// 不能静默切换到其他模型。冲突判定：
+/// - selected（配置真源）；
+/// - active（launch snapshot 冻结的模型身份 + instance_id）；
+/// - descriptor 默认模型不构成删除保护。
 #[tauri::command]
 pub async fn delete_engine_model(
     app: tauri::AppHandle,
-    request: crate::app::local_engine::model_service::ModelOperationRequestDto,
-) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
-    let svc = get_model_service(&app)?;
+    request: crate::app::local_engine::model_installer::ModelOperationRequestDto,
+) -> Result<crate::app::local_engine::model_installer::ModelOperationResultDto, CommandError> {
+    let svc = get_service(&app)?;
     let eid = validate_engine_id(&request.engine_id)?;
 
     tracing::info!(
@@ -1480,16 +1472,8 @@ pub async fn delete_engine_model(
         "收到模型删除请求"
     );
 
-    // 构建冲突检查器
-    let conflict_checker = build_conflict_checker(&app, &request.engine_id).await?;
-
     let result = svc
-        .delete_model(
-            &eid,
-            &request.model_id,
-            request.operation_id,
-            conflict_checker.as_ref(),
-        )
+        .delete_model(&eid, &request.model_id, request.operation_id)
         .await
         .map_err(CommandError::from)?;
 
@@ -1501,18 +1485,16 @@ pub async fn delete_engine_model(
         "模型删除操作完成"
     );
 
-    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+    Ok(crate::app::local_engine::model_installer::project_model_operation_result(&result))
 }
 
 /// 修复引擎模型（重新下载/校验）。
-///
-/// 状态转移：Installed → Repairing → Installed (or RepairFailed)
 #[tauri::command]
 pub async fn repair_engine_model(
     app: tauri::AppHandle,
-    request: crate::app::local_engine::model_service::ModelOperationRequestDto,
-) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
-    let svc = get_model_service(&app)?;
+    request: crate::app::local_engine::model_installer::ModelOperationRequestDto,
+) -> Result<crate::app::local_engine::model_installer::ModelOperationResultDto, CommandError> {
+    let svc = get_service(&app)?;
     let eid = validate_engine_id(&request.engine_id)?;
 
     tracing::info!(
@@ -1535,21 +1517,19 @@ pub async fn repair_engine_model(
         "模型修复操作完成"
     );
 
-    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
+    Ok(crate::app::local_engine::model_installer::project_model_operation_result(&result))
 }
 
-/// 取消模型操作。
-///
-/// 取消进行中的安装/修复/删除操作。
-/// **下载失败或取消不破坏已安装模型，也不改变当前语音选择。**
+/// 取消模型操作（只触发匹配 operation_id 的 claim token；
+/// worker 结束前 claim 不释放）。
 #[tauri::command]
 pub async fn cancel_model_operation(
     app: tauri::AppHandle,
     engine_id: String,
     model_id: String,
     operation_id: String,
-) -> Result<crate::app::local_engine::model_service::ModelOperationResultDto, CommandError> {
-    let svc = get_model_service(&app)?;
+) -> Result<crate::app::local_engine::model_installer::ModelOperationResultDto, CommandError> {
+    let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
     tracing::info!(
@@ -1568,72 +1548,11 @@ pub async fn cancel_model_operation(
         engine = %eid,
         model = %result.model_id,
         op_id = %result.operation_id,
-        success = result.success,
+        success = %result.success,
         "取消模型操作完成"
     );
 
-    Ok(crate::app::local_engine::model_service::project_model_operation_result(&result))
-}
-
-/// 从配置真源构建模型删除冲突检查器。
-///
-/// 目前只支持 FunASR。PaddleOCR 暂不需要（模型不可删除）。
-async fn build_conflict_checker(
-    app: &tauri::AppHandle,
-    engine_id: &str,
-) -> Result<Box<dyn crate::app::local_engine::model_service::ModelConflictChecker>, CommandError> {
-    match engine_id {
-        funasr::FUNASR_ENGINE_ID => {
-            let config = crate::app::stt_config::get_stt_config();
-            let selected_model = config.local_engine.funasr_model.clone();
-
-            // 从 EngineDescriptor 获取默认 model_contract
-            let svc = get_service(app)?;
-            let catalog = svc.catalog().await;
-            let descriptor = catalog
-                .iter()
-                .find(|d| d.engine_id.as_str() == funasr::FUNASR_ENGINE_ID);
-            let descriptor_model_id = descriptor
-                .map(|d| d.model_contract.model_id.clone())
-                .unwrap_or_else(|| "iic/SenseVoiceSmall".to_string());
-
-            // 检查进程是否运行中——如果运行中则设置 active 引用
-            let snapshot = svc
-                .get_status(&EngineId::new(funasr::FUNASR_ENGINE_ID).unwrap())
-                .await
-                .ok();
-            let is_running = matches!(
-                snapshot.map(|s| s.status.process),
-                Some(crate::domain::local_engine::ProcessState::Running { .. })
-            );
-            // instance_id 暂不可从状态快照获取（在 LaunchContext 中，不对外暴露）
-            // 如果进程运行中且 selected_model 匹配，冲突检查器会返回 ActiveInRunningInstance
-            let active_model_id = if is_running {
-                Some(selected_model.clone())
-            } else {
-                None
-            };
-            let active_instance_id = if is_running {
-                Some("current".to_string())
-            } else {
-                None
-            };
-
-            Ok(Box::new(
-                crate::app::local_engine::model_service::FunasrModelConflictChecker {
-                    selected_model,
-                    descriptor_model_id,
-                    active_model_id,
-                    active_instance_id,
-                },
-            ))
-        }
-        other => Err(CommandError::new(
-            "unsupported_engine",
-            format!("引擎 {other} 不支持模型删除冲突检查"),
-            false,
-        )),
-    }
+    Ok(crate::app::local_engine::model_installer::project_model_operation_result(&result))
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────────
@@ -2469,7 +2388,7 @@ mod tests {
                     let _ = install_engine_model
                         as fn(
                             tauri::AppHandle,
-                            crate::app::local_engine::model_service::ModelOperationRequestDto,
+                            crate::app::local_engine::model_installer::ModelOperationRequestDto,
                         ) -> _;
                     true
                 }
@@ -2477,7 +2396,7 @@ mod tests {
                     let _ = delete_engine_model
                         as fn(
                             tauri::AppHandle,
-                            crate::app::local_engine::model_service::ModelOperationRequestDto,
+                            crate::app::local_engine::model_installer::ModelOperationRequestDto,
                         ) -> _;
                     true
                 }
@@ -2485,7 +2404,7 @@ mod tests {
                     let _ = repair_engine_model
                         as fn(
                             tauri::AppHandle,
-                            crate::app::local_engine::model_service::ModelOperationRequestDto,
+                            crate::app::local_engine::model_installer::ModelOperationRequestDto,
                         ) -> _;
                     true
                 }

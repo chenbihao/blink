@@ -2330,17 +2330,17 @@ fn parse_translate_batch_payload(
 
 use std::sync::Arc;
 
-use crate::app::local_engine::LocalEngineService;
+use crate::app::local_engine::EngineManager;
 use crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID;
 use crate::domain::local_engine::AdapterConfig;
 use crate::infra::local_engine::runtime::EngineId;
 use tauri::Manager;
 
-/// 从 Tauri managed state 获取 `LocalEngineService` 引用。
-fn get_engine_service(app: &tauri::AppHandle) -> Result<Arc<LocalEngineService>, String> {
-    app.try_state::<Arc<LocalEngineService>>()
+/// 从 Tauri managed state 获取 `EngineManager` 引用。
+fn get_engine_service(app: &tauri::AppHandle) -> Result<Arc<EngineManager>, String> {
+    app.try_state::<Arc<EngineManager>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| "LocalEngineService 尚未注册".to_string())
+        .ok_or_else(|| "EngineManager 尚未注册".to_string())
 }
 
 /// Task 16: 从 Tauri managed state 获取 `OcrCoordinator` 引用。
@@ -2387,7 +2387,7 @@ fn build_paddleocr_adapter_config() -> AdapterConfig {
 
 /// 安装 PaddleOCR 引擎环境（uv venv + paddlepaddle + paddleocr + fastapi）。
 ///
-/// 走现有 `LocalEngineService::install` → `InstallTransaction`，
+/// 走现有 `EngineManager::install` → `InstallTransaction`，
 /// 不新造安装器。安装过程通过 `blink://local-engine-status` 事件投影进度。
 #[tauri::command]
 pub async fn install_paddleocr(
@@ -2603,7 +2603,7 @@ pub async fn repair_paddleocr(
 
 /// 等待模型 Ready，轮询直到 Ready 或超时。
 async fn wait_for_model_ready(
-    svc: &crate::app::local_engine::service::LocalEngineService,
+    svc: &crate::app::local_engine::service::EngineManager,
     engine_id: &crate::infra::local_engine::runtime::EngineId,
     timeout: std::time::Duration,
 ) -> bool {

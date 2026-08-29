@@ -1,6 +1,6 @@
 //! Tauri EventPort 实现（0.22.3）。
 //!
-//! 把 `LocalEngineService` 的通用事件投影为 Tauri emit：
+//! 把 `EngineManager` 的通用事件投影为 Tauri emit：
 //! - `blink://local-engine-status` — 通用引擎状态快照
 //! - `blink://local-engine-log` — 通用引擎日志条目
 //!

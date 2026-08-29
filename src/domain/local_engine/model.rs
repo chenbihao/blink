@@ -8,7 +8,7 @@
 //!
 //! - **模型身份为 `engine_id + model_id`**：不再用单一 `local_model_id`
 //!   假设。所有模型管理操作都以联合身份寻址。
-//! - **descriptor 不得静态写死单一模型契约**：`EngineDescriptor` 的
+//! - **descriptor 不得静态写死单一模型契约**：`EngineDefinition` 的
 //!   `model_contract` 只作为默认/回退契约；实际期望模型来自本次
 //!   受限启动配置或模型 descriptor。
 //! - **前端不提交 URL、任意路径、脚本或外部命令**：模型安装是
@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::local_engine::runtime::{ChecksumSource, EngineId};
+use super::identity::{ChecksumSource, EngineId};
 
 use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 

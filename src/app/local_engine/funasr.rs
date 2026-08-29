@@ -1,7 +1,7 @@
 //! FunASR 本地引擎 adapter（0.22.3）。
 //!
 //! 把现有 Python/PyTorch FunASR 注册为 `LocalEngineAdapter`，使安装、启动、
-//! 模型轮询、日志、空间和清理通过 `LocalEngineService` 管理。
+//! 模型轮询、日志、空间和清理通过 `EngineManager` 管理。
 //!
 //! ## 设计铁则
 //!
@@ -26,14 +26,13 @@ use std::time::Duration;
 
 use crate::domain::local_engine::{
     AdapterConfig, AdapterSelfTest, CapabilityKind, CleanupPolicy, ComputeCandidate,
-    DiagnosticEntry, EngineDescriptor, EngineDiagnostic, EngineDisplay, EngineTimeouts, ErrorPhase,
+    DiagnosticEntry, EngineDefinition, EngineDiagnostic, EngineDisplay, EngineTimeouts, ErrorPhase,
     HealthMapping, InstallPlanRef, LaunchContext, LaunchDescriptor, LifecyclePolicy,
     LocalEngineAdapter, LocalEngineError, LocalEngineErrorCode, ModelHealth, ResolvedLaunch,
     ResourceBudget, ServiceHealth,
 };
 use crate::domain::stt::funasr;
 use crate::infra::local_engine::model_storage as mstore;
-use crate::infra::local_engine::providers::python::PythonVenvProvider;
 use crate::infra::local_engine::providers::{
     CompatibilityCheck, InstallPlan, PackageLock, PipExtraArg, ProfileCandidate,
     ProviderDescriptor, PythonInstallPlan,
@@ -41,7 +40,7 @@ use crate::infra::local_engine::providers::{
 use crate::infra::local_engine::runtime as engine_runtime;
 use crate::infra::local_engine::runtime::{
     ArtifactId, BackendObservation, ChecksumSource, ComputeBackend, ComputePreference, EngineId,
-    ModelContract, RuntimeKind,
+    ModelContract, RuntimePlan,
 };
 
 /// 嵌入的 blink_stt_server.py 脚本（随 Rust 二进制发布）。
@@ -97,7 +96,7 @@ fn default_package_checker(python: &std::path::Path, package: &str) -> (bool, Op
 }
 
 pub struct FunasrAdapter {
-    descriptor: EngineDescriptor,
+    descriptor: EngineDefinition,
     /// 包检查器（可注入，测试时替换为 mock 避免执行假 python.exe）
     package_checker: PackageChecker,
 }
@@ -130,7 +129,7 @@ impl Default for FunasrAdapter {
 }
 
 impl LocalEngineAdapter for FunasrAdapter {
-    fn descriptor(&self) -> &EngineDescriptor {
+    fn descriptor(&self) -> &EngineDefinition {
         &self.descriptor
     }
 
@@ -325,15 +324,7 @@ impl LocalEngineAdapter for FunasrAdapter {
             }
         }
 
-        // 旧全局 venv 仅作为迁移诊断来源标注
-        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
-        if legacy_venv.exists() {
-            entries.push(DiagnosticEntry {
-                key: "legacy_venv_exists".to_string(),
-                value: "true".to_string(),
-                label: "info".to_string(),
-            });
-        }
+        // （旧全局 venv 迁移诊断已随世代目录迁移删除）
 
         EngineDiagnostic { entries }
     }
@@ -345,11 +336,11 @@ impl LocalEngineAdapter for FunasrAdapter {
 ///
 /// descriptor 必须锁定现有 Python/package/profile/model contract。
 /// 使用 0.22.2 `PythonVenvProvider`；不新造第二套安装器。
-fn make_funasr_descriptor() -> EngineDescriptor {
+fn make_funasr_descriptor() -> EngineDefinition {
     // Python distribution artifact（引用 provider 管理的锁定标识）
     let python_artifact = ArtifactId::new("python-3.12.8").unwrap();
 
-    EngineDescriptor {
+    EngineDefinition {
         engine_id: EngineId::new(FUNASR_ENGINE_ID).unwrap(),
         display: EngineDisplay {
             name: "FunASR 语音识别".to_string(),
@@ -358,9 +349,9 @@ fn make_funasr_descriptor() -> EngineDescriptor {
             version: "0.10.4".to_string(),
         },
         capability_kind: CapabilityKind::Stt,
-        runtime_kind: RuntimeKind::PythonVenv,
+        runtime_kind: RuntimePlan::PythonVenv,
         install_plan: InstallPlanRef {
-            runtime_kind: RuntimeKind::PythonVenv,
+            runtime_kind: RuntimePlan::PythonVenv,
             artifact_ids: vec![python_artifact.clone()],
             // 0.22.6：只声明 CPU profile。锁文件仅包含 CPU-only PyTorch wheel hash，
             // 声明 CUDA profile 会导致安装时 hash mismatch。CUDA 支持需独立锁文件后
@@ -404,7 +395,7 @@ fn make_funasr_descriptor() -> EngineDescriptor {
 
 /// 构造 FunASR 的 `ProviderDescriptor`（infra 层安装事务用）。
 ///
-/// 与 `make_funasr_descriptor()`（domain 层 `EngineDescriptor`）互补。
+/// 与 `make_funasr_descriptor()`（domain 层 `EngineDefinition`）互补。
 ///
 /// **包列表来源**：`resources/stt/funasr/locked-requirements.txt`（唯一锁源）。
 /// 以 `include_str!` 嵌入，运行时解析生成 `PackageLock` 列表。
@@ -423,7 +414,7 @@ pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
 
     ProviderDescriptor {
         engine_id: EngineId::new(FUNASR_ENGINE_ID).unwrap(),
-        runtime_kind: RuntimeKind::PythonVenv,
+        runtime_kind: RuntimePlan::PythonVenv,
         display_name: "FunASR 语音识别".to_string(),
         // 0.22.6：只声明 CPU profile。CUDA profile 需独立 CUDA 锁文件后启用。
         profiles: vec![ProfileCandidate {
@@ -454,7 +445,6 @@ pub fn make_funasr_provider_descriptor() -> ProviderDescriptor {
             self_test_script: "import funasr; import torch; import fastapi; import uvicorn"
                 .to_string(),
         }),
-        min_generations: 2,
     }
 }
 
@@ -613,13 +603,6 @@ fn parse_locked_requirements(txt: &str) -> Vec<PackageLock> {
     }
 
     packages
-}
-
-/// 创建 FunASR 的 `PythonVenvProvider` 实例。
-///
-/// `LocalEngineService` 持有此实例，在 `install` 时传给 `InstallTransaction`。
-pub fn make_funasr_python_provider() -> PythonVenvProvider {
-    PythonVenvProvider::new()
 }
 
 // ── FunasrEngineConfig（从 SttConfig 投影） ────────────────────────────────
@@ -1058,36 +1041,25 @@ pub fn get_funasr_space_usage() -> FunasrSpaceUsage {
     let engine_root = engine_runtime::engine_root(&engine_id);
     let models_dir = engine_runtime::engine_model_cache_dir(&engine_id);
     let legacy_python_dir = engine_runtime::python_shared_root();
-    let legacy_venv_dir = engine_runtime::legacy_funasr_venv_dir();
     let uv_dir = legacy_python_dir.join("uv");
 
     let mut engine_generations = Vec::new();
     let mut provider_cache = Vec::new();
     let mut total_bytes: u64 = 0;
 
-    // generation 目录（engine generations）
-    let generations_dir = engine_runtime::generations_dir(&engine_id);
-    if generations_dir.exists() {
+    // 部署 slot 目录（active + residue）
+    for slot in ["slot-a", "slot-b"] {
+        let generations_dir = engine_runtime::slot_dir(&engine_id, slot);
+        if !generations_dir.exists() {
+            continue;
+        }
         let size = dir_size_bytes(&generations_dir);
         total_bytes += size;
         engine_generations.push(SpaceItem {
-            label: "FunASR generations (venv + torch + funasr)".to_string(),
+            label: format!("FunASR deployment {slot} (venv + torch + funasr)"),
             path: generations_dir.display().to_string(),
             size_mb: bytes_to_mb(size),
         });
-    }
-
-    // 旧版全局 venv（迁移残留，不计入 engine_generations）
-    if legacy_venv_dir.exists() {
-        let size = dir_size_bytes(&legacy_venv_dir);
-        if size > 0 {
-            total_bytes += size;
-            engine_generations.push(SpaceItem {
-                label: "旧版全局 venv (迁移残留)".to_string(),
-                path: legacy_venv_dir.display().to_string(),
-                size_mb: bytes_to_mb(size),
-            });
-        }
     }
 
     // uv（provider 公共缓存——不归属单引擎清理）
@@ -1169,13 +1141,25 @@ pub fn cleanup_funasr_engine() -> Result<FunasrCleanupResult, String> {
     let mut errors = Vec::new();
     let mut cleaned_items = Vec::new();
 
-    // generation 目录（engine generations——FunASR 拥有）
-    let generations_dir = engine_runtime::generations_dir(&engine_id);
-    if generations_dir.exists() {
-        tracing::info!(path = %generations_dir.display(), "清理 FunASR generations");
-        match std::fs::remove_dir_all(&generations_dir) {
-            Ok(()) => cleaned_items.push("generations".to_string()),
-            Err(e) => errors.push(format!("删除 generations 失败: {e}")),
+    // 部署 slot 目录（engine 拥有；active slot 拒删，非 active 尽力删除）
+    for slot in ["slot-a", "slot-b"] {
+        let slot_path = engine_runtime::slot_dir(&engine_id, slot);
+        if !slot_path.exists() {
+            continue;
+        }
+        let active =
+            crate::infra::local_engine::deployment::DeploymentStore::read_pointer(&engine_id)
+                .ok()
+                .flatten()
+                .is_some_and(|ptr| ptr.slot == slot);
+        if active {
+            errors.push(format!("slot {slot} 是 active 部署，跳过删除"));
+            continue;
+        }
+        tracing::info!(path = %slot_path.display(), "清理 FunASR 部署 slot");
+        match std::fs::remove_dir_all(&slot_path) {
+            Ok(()) => cleaned_items.push(format!("slot:{slot}")),
+            Err(e) => errors.push(format!("删除 slot {slot} 失败: {e}")),
         }
     }
 
@@ -1189,15 +1173,7 @@ pub fn cleanup_funasr_engine() -> Result<FunasrCleanupResult, String> {
         }
     }
 
-    // 旧版全局 venv（迁移残留清理）
-    let legacy_venv_dir = engine_runtime::legacy_funasr_venv_dir();
-    if legacy_venv_dir.exists() {
-        tracing::info!(path = %legacy_venv_dir.display(), "清理旧版 FunASR venv");
-        match std::fs::remove_dir_all(&legacy_venv_dir) {
-            Ok(()) => cleaned_items.push("legacy_venv".to_string()),
-            Err(e) => errors.push(format!("删除旧版 venv 失败: {e}")),
-        }
-    }
+    // （旧版全局 venv 迁移清理已随世代目录迁移删除）
 
     // 旧版 python/models 目录残留（使用 python_shared_root 确保测试隔离）
     let legacy_models_dir = engine_runtime::python_shared_root().join("models");
@@ -1251,12 +1227,11 @@ pub fn make_funasr_adapter() -> Arc<dyn LocalEngineAdapter> {
 ///
 /// **0.22.6 H1**: 只使用 generation-managed venv，不 fallback 到旧全局 venv。
 fn generation_venv_python(engine_id: &EngineId) -> Option<std::path::PathBuf> {
-    let pointer = engine_runtime::read_current_pointer(engine_id).ok()?;
-    let install_id = pointer?.install_id;
-    let python_exe = engine_runtime::generation_dir(engine_id, &install_id)
-        .join("venv")
-        .join("Scripts")
-        .join("python.exe");
+    let (_pointer, dir) =
+        crate::infra::local_engine::deployment::DeploymentStore::active_dir(engine_id)
+            .ok()
+            .flatten()?;
+    let python_exe = dir.join("venv").join("Scripts").join("python.exe");
     if python_exe.exists() {
         Some(python_exe)
     } else {
@@ -1387,7 +1362,7 @@ mod tests {
     #[test]
     fn descriptor_has_python_venv_runtime_kind() {
         let adapter = FunasrAdapter::new();
-        assert_eq!(adapter.descriptor().runtime_kind, RuntimeKind::PythonVenv);
+        assert_eq!(adapter.descriptor().runtime_kind, RuntimePlan::PythonVenv);
     }
 
     #[test]
@@ -1702,7 +1677,7 @@ mod tests {
 
     // ── health engine/instance/token 不匹配失败 ──
     // 这些测试验证 health 响应缺少身份字段时的行为。
-    // 完整的身份校验由 LocalEngineService 在调用 map_health 后，
+    // 完整的身份校验由 EngineManager 在调用 map_health 后，
     // 使用 ServiceIdentityInput::verify 核对 engine id、instance id 和 token。
 
     #[test]
@@ -1714,7 +1689,7 @@ mod tests {
         });
         let mapping = map_funasr_health(&raw);
         // service 标记为 Healthy（HTTP 可达）
-        // 但 LocalEngineService 会在后续身份校验中将其降级为 Unreachable
+        // 但 EngineManager 会在后续身份校验中将其降级为 Unreachable
         assert_eq!(mapping.service, ServiceHealth::Healthy);
         assert_eq!(mapping.model, ModelHealth::Ready);
     }
@@ -2009,21 +1984,29 @@ mod tests {
     /// 创建 `runtimes/engines/funasr/generations/{install_id}/venv/Scripts/python.exe`
     /// 和对应的 `current.json`。
     fn setup_test_generation_venv(install_id: &str) -> std::path::PathBuf {
+        use crate::infra::local_engine::deployment::{
+            DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentStore,
+        };
         let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
-        let gen_dir = engine_runtime::generation_dir(&engine_id, install_id);
+        let slot = if install_id.ends_with("001") {
+            "slot-a"
+        } else {
+            "slot-b"
+        };
+        let gen_dir = engine_runtime::slot_dir(&engine_id, slot);
         let venv_scripts = gen_dir.join("venv").join("Scripts");
         std::fs::create_dir_all(&venv_scripts).unwrap();
         let python_exe = venv_scripts.join("python.exe");
         std::fs::write(&python_exe, b"fake python").unwrap();
 
-        // 写入 current.json
-        let pointer = engine_runtime::CurrentPointer {
+        // 写入 deployment.json（active 指针）
+        let pointer = DeploymentPointer {
             install_id: install_id.to_string(),
-            manifest_path: format!("generations/{install_id}/manifest.json"),
+            slot: slot.to_string(),
             updated_at_ms: 0,
-            schema_version: 1,
+            schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
         };
-        engine_runtime::write_current_pointer(&engine_id, &pointer).unwrap();
+        DeploymentStore::write_pointer(&engine_id, &pointer).unwrap();
 
         python_exe
     }
@@ -2102,72 +2085,6 @@ mod tests {
         cleanup_test_generation();
     }
 
-    /// 0.22.6 H1: 旧全局 venv 存在但无 generation venv 时，
-    /// self_test 仍然失败（不 fallback 到旧 venv）。
-    #[test]
-    fn legacy_venv_does_not_satisfy_self_test() {
-        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-        cleanup_test_generation();
-
-        // 创建旧版 venv 目录（模拟迁移残留）
-        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
-        let legacy_scripts = legacy_venv.join("Scripts");
-        std::fs::create_dir_all(&legacy_scripts).unwrap();
-        std::fs::write(legacy_scripts.join("python.exe"), b"legacy python").unwrap();
-
-        let adapter = FunasrAdapter::new();
-        let result = adapter.self_test();
-        // 旧 venv 存在但 generation venv 不存在 → self_test 失败
-        assert!(
-            !result.passed,
-            "旧 venv 不应满足 self_test（不能冒充新 generation 环境）"
-        );
-
-        // 清理旧 venv
-        let _ = std::fs::remove_dir_all(engine_runtime::python_shared_root());
-        cleanup_test_generation();
-    }
-
-    /// 0.22.6 H1: diagnostics 在无 generation venv 时标注 generation_venv_exists=false，
-    /// 并在旧 venv 存在时标注 legacy_venv_exists=true。
-    #[test]
-    fn diagnostics_reports_legacy_venv_separately() {
-        let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-        cleanup_test_generation();
-
-        // 创建旧版 venv 目录
-        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
-        let legacy_scripts = legacy_venv.join("Scripts");
-        std::fs::create_dir_all(&legacy_scripts).unwrap();
-        std::fs::write(legacy_scripts.join("python.exe"), b"legacy").unwrap();
-
-        let adapter = FunasrAdapter::new();
-        let diag = adapter.diagnostics();
-
-        // generation_venv_exists = false
-        let gen_entry = diag
-            .entries
-            .iter()
-            .find(|e| e.key == "generation_venv_exists");
-        assert!(
-            gen_entry.is_some(),
-            "diagnostics 应包含 generation_venv_exists"
-        );
-        assert_eq!(gen_entry.unwrap().value, "false");
-
-        // legacy_venv_exists = true
-        let legacy_entry = diag.entries.iter().find(|e| e.key == "legacy_venv_exists");
-        assert!(
-            legacy_entry.is_some(),
-            "diagnostics 应包含 legacy_venv_exists"
-        );
-        assert_eq!(legacy_entry.unwrap().value, "true");
-
-        // 清理
-        let _ = std::fs::remove_dir_all(engine_runtime::python_shared_root());
-        cleanup_test_generation();
-    }
-
     /// 0.22.6 H1: prepare_launch 在无 generation venv 时返回
     /// EnvironmentMissing 错误，错误文案指向引擎页。
     #[test]
@@ -2225,14 +2142,7 @@ mod tests {
 
         // 创建 generation venv
         let install_id = "test-launch-001";
-        let gen_python = setup_test_generation_venv(install_id);
-
-        // 也创建旧 venv（确保不被使用）
-        let legacy_venv = engine_runtime::legacy_funasr_venv_dir();
-        let legacy_scripts = legacy_venv.join("Scripts");
-        std::fs::create_dir_all(&legacy_scripts).unwrap();
-        let legacy_python = legacy_scripts.join("python.exe");
-        std::fs::write(&legacy_python, b"legacy python").unwrap();
+        let _gen_python = setup_test_generation_venv(install_id);
 
         // 0.22.6 B2: 使用 mock 包检查器避免执行假 python.exe（挂死风险）。
         // mock 检查器总是返回 (false, None)，模拟 funasr 未安装。

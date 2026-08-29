@@ -1,53 +1,55 @@
-//! Runtime Provider trait、descriptor、安装事务、原子切换与 profile 解析（0.22.2）。
+//! Runtime Provider trait、descriptor、部署安装事务与 profile 解析。
 //!
 //! ## 分层归属
 //!
-//! - `providers`：定义 provider trait 和 descriptor，编排 staging → generation promote
-//!   → current.json 原子替换的通用事务流程。
+//! - `providers`：定义 provider trait 和 descriptor，编排 staging → slot promote
+//!   → deployment.json 原子切换的通用事务流程（journal fail-closed）。
 //! - `providers/python`：`PythonVenvProvider` 完整实现。
 //! - `providers/binary`：`ManagedBinaryProvider` 协议位（闭合变体，不实现完整逻辑）。
-//! - 本模块不依赖 app/domain/tauri，只使用 infra 内部类型和标准库。
+//! - 本模块不依赖 app/tauri，只使用 domain 身份类型和 infra 内部类型。
 //!
-//! ## 安装事务（§3.6）
+//! ## 安装事务（slot + journal，见 `infra/local_engine/deployment`）
 //!
 //! ```text
-//! begin_install(descriptor, preference)
-//!   → resolve_profile(descriptor, preference)
-//!   → create staging/{operation-id}
-//!   → provider.prepare_environment(staging_dir)
-//!   → provider.self_test(staging_dir)
-//!   → write generation manifest
-//!   → promote staging → generations/{install-id}
-//!   → atomic switch current.json
-//!   → on failure: rollback to previous current.json
+//! begin:      DeploymentStore::begin → journal{Building, candidate, previous}
+//! build:      staging/{operation-id}/ → provider.prepare_environment → self-test
+//! promote:    staging → slot-{candidate}（rename）
+//! pre-switch: journal.phase = Switched（指针切换之前写）
+//! switch:     deployment.json → candidate（原子替换）
+//! verify:     重读 manifest + provider self-test；失败 → 自动回滚 previous
+//! commit:     journal.phase = Committed → 删除旧 slot（占用记 residue）→ 清 journal
 //! ```
+//!
+//! 事务期间最多存在 old + candidate 两个 slot；成功后稳定状态只保留 active。
 
 pub mod binary;
 pub mod python;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use super::deployment::{
+    DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentSlot, DeploymentStore,
+    TransactionPhase,
+};
 use super::runtime::{
-    self, CleanupScope, ComputeBackend, ComputePreference, EngineId, FallbackReason,
-    FallbackReasonKind, GenerationManifest, ManifestExtension, ModelContract, ResolvedProfile,
-    RuntimeError, RuntimeKind, add_reference, generate_install_id, generate_operation_id,
-    read_current_pointer, read_manifest, remove_reference, scan_artifact_references,
-    validate_install_id, validate_operation_id, write_current_pointer, write_manifest,
+    self, CleanupScope, ComputeBackend, ComputePreference, DeploymentManifest, EngineId,
+    FallbackReason, FallbackReasonKind, ManifestExtension, ModelContract, ResolvedProfile,
+    RuntimeError, RuntimePlan, generate_install_id, scan_artifact_references,
+    validate_operation_id,
 };
 
 // ── ProviderDescriptor ────────────────────────────────────────────────────
 
 /// 引擎描述符（编译期内置 allowlist，不接受前端动态传入）。
 ///
-/// 声明引擎静态事实：稳定 id、runtime kind、候选 profile、模型契约与安装计划。
+/// 声明引擎静态事实：稳定 id、runtime plan、候选 profile、模型契约与安装计划。
 /// adapter 行为由各 provider 实现，不编码成通用字符串 DSL。
 #[derive(Debug, Clone)]
 pub struct ProviderDescriptor {
     /// 引擎稳定标识符。
     pub engine_id: EngineId,
-    /// 运行时种类（闭合枚举）。
-    pub runtime_kind: RuntimeKind,
+    /// 运行时计划（闭合枚举）。
+    pub runtime_kind: RuntimePlan,
     /// 引擎显示名称（人类可读，非路径用）。
     pub display_name: String,
     /// 候选 profile 列表（按优先级排序，0 = 最高优先级）。
@@ -56,8 +58,6 @@ pub struct ProviderDescriptor {
     pub model_contract: ModelContract,
     /// 安装计划（provider 专属，闭合枚举）。
     pub install_plan: InstallPlan,
-    /// 至少保留的 generation 数量（含 current）。
-    pub min_generations: u32,
 }
 
 /// 候选 profile 声明。
@@ -74,6 +74,10 @@ pub struct ProfileCandidate {
 }
 
 /// 兼容性检查类型（provider 负责实现实际检查逻辑）。
+///
+/// 闭合协议枚举：GPU/feature 分支由 ManagedBinary provider 落地时构造，
+/// 当前 PythonVenv 只使用 `Always`。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum CompatibilityCheck {
     /// 总是兼容（如 CPU x64）。
@@ -93,7 +97,8 @@ pub enum CompatibilityCheck {
 pub enum InstallPlan {
     /// Python venv 安装计划。
     PythonVenv(PythonInstallPlan),
-    /// Managed binary 安装计划。
+    /// Managed binary 安装计划（协议位保留：首个 binary 引擎接入时构造）。
+    #[allow(dead_code)]
     ManagedBinary(BinaryInstallPlan),
 }
 
@@ -140,7 +145,8 @@ pub struct PythonInstallPlan {
     pub self_test_script: String,
 }
 
-/// Managed binary 安装计划。
+/// Managed binary 安装计划（协议位保留：ManagedBinary provider 落地时消费）。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BinaryInstallPlan {
     /// archive artifact id。
@@ -149,7 +155,7 @@ pub struct BinaryInstallPlan {
     pub archive_url: String,
     /// archive SHA-256（hex）。
     pub archive_sha256: String,
-    /// 可执行文件路径（相对于 generation 根）。
+    /// 可执行文件路径（相对于部署根）。
     pub executable: String,
     /// 引用的共享 stdlib artifact（可选，如 Blink 托管 Python distribution）。
     pub stdlib_artifact: Option<runtime::ArtifactIdentity>,
@@ -157,7 +163,7 @@ pub struct BinaryInstallPlan {
     pub required_cpu_features: Vec<String>,
     /// required drivers。
     pub required_drivers: Vec<String>,
-    /// self-test 命令行（在 generation 根执行）。
+    /// self-test 命令行（在部署根执行）。
     pub self_test_command: Vec<String>,
 }
 
@@ -188,7 +194,7 @@ pub struct PackageLock {
     pub all_hashes: Vec<String>,
 }
 
-// ── InstallSink (0.22.6 H5) ──────────────────────────────────────────────
+// ── InstallSink ───────────────────────────────────────────────────────────
 
 /// 安装进度与日志 sink——provider/事务通过此 trait 上报进度和实时日志。
 ///
@@ -220,8 +226,10 @@ pub trait InstallSink: Send + Sync {
 }
 
 /// 空实现（测试用）。
+#[cfg(test)]
 pub struct NoopInstallSink;
 
+#[cfg(test)]
 impl InstallSink for NoopInstallSink {
     fn on_stage(&self, _stage: &str) {}
     fn on_log(&self, _level: &str, _text: &str) {}
@@ -246,8 +254,8 @@ pub struct PrepareResult {
 /// `ManagedBinaryProvider` 负责下载/解包/验证 archive。
 #[async_trait::async_trait]
 pub trait RuntimeProvider: Send + Sync {
-    /// 运行时种类。
-    fn kind(&self) -> RuntimeKind;
+    /// 运行时计划。
+    fn kind(&self) -> RuntimePlan;
 
     /// 检查本机兼容性（如 CUDA GPU 是否存在、CPU feature 是否支持）。
     fn check_compatibility(&self, compatibility: &CompatibilityCheck)
@@ -259,16 +267,14 @@ pub trait RuntimeProvider: Send + Sync {
     /// - ManagedBinary: 下载/解包锁定 archive、验证文件 hash。
     ///
     /// 返回 `PrepareResult`，包含已验证的 artifact 身份标识（含真实 SHA-256 hash）。
-    /// 此 hash 写入 generation manifest，用于后续完整性验证。
+    /// 此 hash 写入部署 manifest，用于后续完整性验证。
     ///
-    /// **0.22.6.3**: `cancel_token` 用于在 provider 内部长耗时操作（如 `uv pip
-    /// install`、archive 下载）执行期间响应取消信号。Provider 实现应在
-    /// `tokio::select!` 中同时监听操作 future 和 `cancel_token.cancelled()`，
+    /// `cancel_token` 用于在 provider 内部长耗时操作（如 `uv pip install`、
+    /// archive 下载）执行期间响应取消信号。Provider 实现应在 `tokio::select!`
+    /// 中同时监听操作 future 和 `cancel_token.cancelled()`，
     /// 被取消时返回 `RuntimeError::OperationCancelled`。
     ///
-    /// **0.22.6 H5**: `sink` 用于实时上报安装进度和 stdout/stderr 日志。
-    /// Provider 实现应在执行子进程时，逐行读取 stdout/stderr 并通过 `sink.on_log`
-    /// 上报，不等进程结束后一次性返回。`sink` 可能为 `None`（测试/无事件场景）。
+    /// `sink` 用于实时上报安装进度和 stdout/stderr 日志。
     async fn prepare_environment(
         &self,
         staging_dir: &std::path::Path,
@@ -281,49 +287,22 @@ pub trait RuntimeProvider: Send + Sync {
     /// 执行 provider self-test。
     ///
     /// 在已准备好的环境中执行最小验证。
-    ///
-    /// **0.22.6.3**: `cancel_token` 用于在 self-test 执行期间响应取消信号。
-    ///
-    /// **0.22.6 H5**: `sink` 用于实时上报 self-test 日志。
     async fn self_test(
         &self,
-        generation_dir: &std::path::Path,
+        deployment_dir: &std::path::Path,
         plan: &InstallPlan,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<(), RuntimeError>;
 
-    /// 从已安装的 generation 读取 provider 专属状态。
+    /// 从已安装的部署读取 provider 专属状态。
     ///
     /// 返回 manifest extension（不含通用状态机字段）。
     fn build_manifest_extension(
         &self,
-        generation_dir: &std::path::Path,
+        deployment_dir: &std::path::Path,
         plan: &InstallPlan,
     ) -> Result<ManifestExtension, RuntimeError>;
-
-    /// 查询已安装 generation 的包状态（用于状态检查）。
-    ///
-    /// 返回 `Vec<PackageStatus>`，由 adapter 投影引擎专属字段。
-    fn query_package_status(
-        &self,
-        generation_dir: &std::path::Path,
-        plan: &InstallPlan,
-    ) -> Result<Vec<runtime::PackageStatus>, RuntimeError>;
-
-    /// 清理 provider 公共资产（uv cache、download cache 等）。
-    ///
-    /// 只清理 `scope` 指定范围，不误删其他引擎资产。
-    fn cleanup_provider_cache(&self, scope: &ProviderCleanupScope) -> Result<(), RuntimeError>;
-}
-
-/// Provider 清理范围（区分引擎 generation 和 provider 公共资产）。
-#[derive(Debug, Clone)]
-pub enum ProviderCleanupScope {
-    /// Provider 下载缓存（uv cache 等）。
-    DownloadCache,
-    /// Provider 公共 artifact（共享 Python distribution 等）。
-    SharedArtifact(runtime::ArtifactId),
 }
 
 // ── InstallTransaction ───────────────────────────────────────────────────
@@ -331,20 +310,24 @@ pub enum ProviderCleanupScope {
 /// 安装事务结果。
 #[derive(Debug, Clone)]
 pub struct InstallResult {
-    /// 新安装的 generation install id。
+    /// 新部署的 install id。
     pub install_id: String,
     /// 本次 operation id。
     pub operation_id: String,
-    /// 写入的 generation manifest。
-    pub manifest: GenerationManifest,
     /// 是否发生了 profile fallback（requested != resolved）。
     pub fell_back: bool,
 }
 
 /// 安装事务编排器。
 ///
-/// 编排 staging → prepare → self-test → manifest → promote → atomic switch 流程。
-/// 安装失败自动回滚 staging；原子切换失败回滚到 previous current.json。
+/// 编排 journal begin → staging prepare → self-test → promote slot →
+/// 原子切换 deployment.json → 切换后验证 → commit（删旧 slot）/ rollback。
+///
+/// 失败语义：
+/// - 切换前失败：清 staging，old 部署不受影响；
+/// - 切换后验证失败：指针原子切回 previous，candidate slot 尽力删除
+///   （Windows 占用时记 residue），返回错误；
+/// - 成功：删除旧 slot（占用记 residue），清除 journal。
 pub struct InstallTransaction<'a, P: RuntimeProvider> {
     descriptor: &'a ProviderDescriptor,
     provider: &'a P,
@@ -361,33 +344,30 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
     /// 执行完整安装事务。
     ///
-    /// 步骤：
-    /// 1. resolve_profile: 解析 requested preference → resolved profile
-    /// 2. create staging: 创建 `engines/{engine_id}/staging/{operation_id}`
-    /// 3. prepare_environment: provider 在 staging 中准备环境
-    /// 4. self_test: provider 执行最小验证
-    /// 5. write manifest: 写 generation manifest
-    /// 6. promote: staging → `generations/{install_id}`
-    /// 7. atomic switch: 原子替换 current.json
-    /// 8. on failure: 回滚
-    ///
-    /// **0.22.6.2**: `cancel_token` 用于在长操作（prepare/self-test/promote/switch）
-    /// 前检查取消信号。取消后只清理匹配 operation_id 的 staging，不破坏 current generation。
-    ///
-    /// **0.22.6 H5**: `sink` 用于实时上报安装进度和日志。在各阶段切换时调用
-    /// `sink.on_stage()`，provider 子进程的 stdout/stderr 通过 `sink.on_log()` 上报。
-    /// `sink` 可能为 `None`（测试/无事件场景）。
+    /// `operation_id` 由调用方（EngineManager）生成并已登记操作协调器；
+    /// journal、staging 目录与取消语义都以此 id 为准。
     pub async fn execute(
         &self,
+        operation_id: &str,
         preference: ComputePreference,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<InstallResult, RuntimeError> {
         let engine_id = &self.descriptor.engine_id;
-        let operation_id = generate_operation_id();
-        validate_operation_id(&operation_id)?;
+        debug_assert_eq!(
+            self.provider.kind(),
+            self.descriptor.runtime_kind,
+            "provider 与 descriptor 的 runtime_kind 不一致"
+        );
+        tracing::info!(
+            engine = %engine_id,
+            display = %self.descriptor.display_name,
+            operation_id,
+            "开始运行时安装事务"
+        );
+        validate_operation_id(operation_id)?;
         let install_id = generate_install_id();
-        validate_install_id(&install_id)?;
+        runtime::validate_install_id(&install_id)?;
 
         // ── 0. 初始取消检查 ──
         if let Some(ct) = cancel_token {
@@ -401,20 +381,29 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             }
         }
 
-        // ── 0.22.6 H5: 上报 Preparing 阶段 ──
         if let Some(s) = sink {
             s.on_stage("preparing");
         }
 
         // ── 1. resolve profile ──
         let (resolved_profile, fallback_reasons) = self.resolve_profile(preference)?;
-
         let fell_back = !fallback_reasons.is_empty();
 
-        // ── 2. create staging ──
-        let staging = runtime::operation_staging_dir(engine_id, &operation_id);
-        std::fs::create_dir_all(&staging).map_err(|e| RuntimeError::StagingCreateFailed {
-            message: format!("创建 staging 目录失败: {e}"),
+        // ── 2. 事务 begin：写 journal（任何破坏性步骤之前），确定 candidate slot ──
+        let mut journal = DeploymentStore::begin(engine_id, operation_id, &install_id)?;
+        let candidate_slot = DeploymentSlot::parse(&journal.candidate_slot)?;
+        let candidate_dir = candidate_slot.dir(engine_id);
+
+        // 清扫其他 operation 的孤儿 staging（保留本 operation 目录）
+        DeploymentStore::sweep_staging_except(engine_id, operation_id);
+
+        let staging = runtime::operation_staging_dir(engine_id, operation_id);
+        std::fs::create_dir_all(&staging).map_err(|e| {
+            // begin 已写 journal——清掉，避免下次启动误恢复
+            let _ = DeploymentStore::clear_journal(engine_id);
+            RuntimeError::StagingCreateFailed {
+                message: format!("创建 staging 目录失败: {e}"),
+            }
         })?;
 
         if let Some(s) = sink {
@@ -427,26 +416,25 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         tracing::info!(
             engine = %engine_id,
             op = %operation_id,
+            candidate_slot = %candidate_slot,
             staging = %staging.display(),
-            "staging 目录已创建"
+            "部署事务开始（journal 已写入）"
         );
 
         // ── 3. prepare environment ──
-        // 取消检查点：在长操作前检查取消信号
         if let Some(ct) = cancel_token {
             if ct.is_cancelled() {
-                tracing::info!(op = %operation_id, "安装事务在 prepare 前被取消，清理 staging");
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = DeploymentStore::clear_journal(engine_id);
                 if let Some(s) = sink {
                     s.on_stage("cancelled");
                 }
-                let _ = std::fs::remove_dir_all(&staging);
                 return Err(RuntimeError::OperationCancelled {
                     message: format!("安装事务在 prepare_environment 前被取消 (op={operation_id})"),
                 });
             }
         }
 
-        // ── 0.22.6 H5: 上报 Downloading 阶段（prepare_environment 包含下载/安装） ──
         if let Some(s) = sink {
             s.on_stage("downloading");
         }
@@ -470,26 +458,25 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                     s.on_log("error", &format!("prepare_environment 失败: {e}"));
                 }
                 let _ = std::fs::remove_dir_all(&staging);
+                let _ = DeploymentStore::clear_journal(engine_id);
                 return Err(e);
             }
         };
 
-        // ── 4. self-test ──
-        // 取消检查点：在 self-test 前检查取消信号
+        // ── 4. self-test（staging 内） ──
         if let Some(ct) = cancel_token {
             if ct.is_cancelled() {
-                tracing::info!(op = %operation_id, "安装事务在 self-test 前被取消，清理 staging");
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = DeploymentStore::clear_journal(engine_id);
                 if let Some(s) = sink {
                     s.on_stage("cancelled");
                 }
-                let _ = std::fs::remove_dir_all(&staging);
                 return Err(RuntimeError::OperationCancelled {
                     message: format!("安装事务在 self-test 前被取消 (op={operation_id})"),
                 });
             }
         }
 
-        // ── 0.22.6 H5: 上报 Verifying 阶段（self-test 是验证的一部分） ──
         if let Some(s) = sink {
             s.on_stage("verifying");
         }
@@ -505,15 +492,15 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 s.on_log("error", &format!("self-test 失败: {e}"));
             }
             let _ = std::fs::remove_dir_all(&staging);
+            let _ = DeploymentStore::clear_journal(engine_id);
             return Err(e);
         }
 
-        // ── 0.22.6 H5: 上报 Promoting 阶段 ──
         if let Some(s) = sink {
             s.on_stage("promoting");
         }
 
-        // ── 5. build manifest extension ──
+        // ── 5. build manifest extension + manifest（先写进 staging） ──
         let extension = match self
             .provider
             .build_manifest_extension(&staging, &self.descriptor.install_plan)
@@ -522,16 +509,15 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             Err(e) => {
                 tracing::warn!(%e, "build_manifest_extension 失败，清理 staging");
                 let _ = std::fs::remove_dir_all(&staging);
+                let _ = DeploymentStore::clear_journal(engine_id);
                 return Err(e);
             }
         };
 
-        // ── 6. write manifest (in staging first) ──
-        let artifact_id = &resolved_profile.artifact_id;
         let artifact = prepare_result.artifact;
         let artifact_clone = artifact.clone();
 
-        let manifest = GenerationManifest {
+        let manifest = DeploymentManifest {
             schema_version: runtime::MANIFEST_SCHEMA_VERSION,
             engine_id: engine_id.clone(),
             runtime_kind: self.descriptor.runtime_kind,
@@ -545,149 +531,172 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             extension,
         };
 
-        // 在 staging 目录中先写 manifest
         let staging_manifest = staging.join("manifest.json");
-        runtime::atomic_write_json(&staging_manifest, &manifest)?;
+        runtime::atomic_write_json(&staging_manifest, &manifest).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&staging);
+            let _ = DeploymentStore::clear_journal(engine_id);
+            e
+        })?;
 
-        // ── 7. promote: staging → generations/{install_id} ──
-        let gen_dir = runtime::generation_dir(engine_id, &install_id);
-        std::fs::create_dir_all(runtime::generations_dir(engine_id))?;
-
-        // 原子 move（rename）
-        match std::fs::rename(&staging, &gen_dir) {
+        // ── 6. promote: staging → slot-{candidate} ──
+        match std::fs::rename(&staging, &candidate_dir) {
             Ok(()) => {
                 tracing::info!(
                     engine = %engine_id,
                     install = %install_id,
-                    "generation 提升成功"
+                    slot = %candidate_slot,
+                    "candidate slot 提升成功"
                 );
             }
             Err(e) => {
-                // rename 失败（可能跨卷或目标已存在），尝试复制
-                tracing::warn!(%e, "rename 失败，尝试复制 staging → generation");
-                copy_dir_recursive(&staging, &gen_dir).map_err(|e| {
-                    RuntimeError::GenerationPromoteFailed {
-                        message: format!("提升 generation 失败: {e}"),
-                    }
-                })?;
+                // rename 失败（可能被占用），尝试复制
+                tracing::warn!(%e, "rename 失败，尝试复制 staging → candidate slot");
+                let copy_err = copy_dir_recursive(&staging, &candidate_dir).err();
                 let _ = std::fs::remove_dir_all(&staging);
+                if let Some(e2) = copy_err {
+                    let _ = DeploymentStore::clear_journal(engine_id);
+                    return Err(RuntimeError::GenerationPromoteFailed {
+                        message: format!("提升 candidate slot 失败: rename={e}, copy={e2}"),
+                    });
+                }
             }
         }
 
-        // ── 8. add artifact reference ──
-        add_reference(
-            self.descriptor.runtime_kind,
-            artifact_id,
-            engine_id.as_str(),
-            &install_id,
-        )?;
-
-        // ── 9. atomic switch current.json ──
-        // ── 0.22.6 H5: 上报 Switching 阶段 ──
+        // ── 7. pre-switch: journal 先推进到 Switched，再切换指针 ──
         if let Some(s) = sink {
             s.on_stage("switching");
         }
-        let previous = read_current_pointer(engine_id)?;
+        DeploymentStore::advance_phase(engine_id, &mut journal, TransactionPhase::Switched)?;
 
-        let pointer = runtime::CurrentPointer {
+        let pointer = DeploymentPointer {
             install_id: install_id.clone(),
-            manifest_path: format!("generations/{install_id}/manifest.json"),
+            slot: candidate_slot.as_str().to_string(),
             updated_at_ms: runtime::now_ms(),
-            schema_version: runtime::CURRENT_POINTER_SCHEMA_VERSION,
+            schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
         };
 
-        if let Err(e) = write_current_pointer(engine_id, &pointer) {
-            tracing::error!(%e, "current.json 原子写入失败，回滚");
-            // 回滚：移除新 generation，恢复旧指针
-            let _ = std::fs::remove_dir_all(&gen_dir);
-            remove_reference(
-                self.descriptor.runtime_kind,
-                artifact_id,
-                engine_id.as_str(),
-                &install_id,
+        if let Err(e) = DeploymentStore::write_pointer(engine_id, &pointer) {
+            tracing::error!(%e, "deployment.json 原子写入失败，回滚");
+            // 回滚：删除 candidate slot（占用记 residue），恢复由 journal 恢复逻辑兜底
+            DeploymentStore::delete_slot_if_not_active(
+                engine_id,
+                candidate_slot.as_str(),
+                "指针切换失败，丢弃 candidate",
             )?;
-            if let Some(prev) = previous {
-                let _ = write_current_pointer(engine_id, &prev);
-            }
+            DeploymentStore::clear_journal(engine_id)?;
             return Err(e);
         }
 
-        // ── 10. verify after switch（§3.6: 首次启动验证失败则原子切回上一 generation） ──
-        //
-        // ── 0.22.6 H5: 上报 Validating 阶段 ──
+        // ── 8. 切换后验证：失败自动回滚 previous ──
         if let Some(s) = sink {
             s.on_stage("validating");
         }
-        //
-        // current.json 原子切换后，执行最终验证：
-        // - 读取刚写入的 manifest 确认完整性
-        // - 验证 artifact hash 非空（provider 必须填充）
-        // - 如果有 previous generation，验证 previous manifest 仍可读取（回滚保障）
-        //
-        // 验证失败时：
-        // - 原子切回 previous current.json（如果有）
-        // - 标记新 generation 为 deferred cleanup（不立即删除，但 current 不指向它）
-        // - 返回错误
+
         if let Err(e) = self
-            .verify_after_switch(engine_id, &install_id, &artifact_clone, &gen_dir)
+            .verify_after_switch(engine_id, candidate_slot, &install_id, &artifact_clone)
             .await
         {
-            tracing::error!(%e, "切换后 provider 验证失败，回滚到 previous generation");
-            // 原子切回 previous
-            if let Some(ref prev) = previous {
-                if let Err(switch_err) = write_current_pointer(engine_id, prev) {
-                    tracing::error!(%switch_err, "回滚 current.json 也失败！手动恢复需要 recover_current_pointer");
-                }
-            } else {
-                // 没有 previous —— 清除 current.json 指针
-                let _ = std::fs::remove_file(runtime::current_pointer_path(engine_id));
+            tracing::error!(%e, "切换后验证失败，自动回滚到 previous 部署");
+            if let Err(rollback_err) = Self::rollback_switch(engine_id, &journal, candidate_slot) {
+                tracing::error!(%rollback_err, "回滚失败——启动恢复将按 journal fail-closed 处理");
+                // 保留 journal 让下次启动恢复；返回原错误
+                return Err(e);
             }
-            // 标记新 generation 为 deferred cleanup
-            let _ = mark_deferred_cleanup(
-                engine_id,
-                &install_id,
-                &format!("切换后 provider 验证失败: {e}"),
-            );
             return Err(e);
         }
+
+        // ── 9. commit：journal → Committed，删除旧 slot，清 journal ──
+        DeploymentStore::advance_phase(engine_id, &mut journal, TransactionPhase::Committed)?;
+        if let Some(prev) = &journal.previous {
+            let deleted = DeploymentStore::delete_slot_if_not_active(
+                engine_id,
+                &prev.slot,
+                "更新成功，删除旧部署",
+            )?;
+            if !deleted {
+                tracing::warn!(
+                    engine = %engine_id,
+                    slot = %prev.slot,
+                    "旧 slot 被占用，已记 cleanup residue（非产品状态）"
+                );
+            }
+        }
+        DeploymentStore::clear_journal(engine_id)?;
 
         tracing::info!(
             engine = %engine_id,
             install = %install_id,
+            slot = %candidate_slot,
             fell_back = fell_back,
-            "安装事务完成（含切换后 provider 验证）"
+            "部署事务完成（切换后验证通过，旧 slot 已清理）"
         );
 
-        // ── 0.22.6 H5: 上报 Completed 阶段 ──
         if let Some(s) = sink {
             s.on_stage("completed");
         }
 
         Ok(InstallResult {
             install_id,
-            operation_id,
-            manifest,
+            operation_id: operation_id.to_string(),
             fell_back,
         })
     }
 
-    /// current 切换后的 provider 验证。
+    /// 切换后验证失败时的回滚：指针切回 previous，candidate 记 residue。
     ///
-    /// 在 current.json 原子切换后执行最终验证：
+    /// 成功后清除 journal（稳定状态只剩 active）。
+    fn rollback_switch(
+        engine_id: &EngineId,
+        journal: &super::deployment::TransactionJournal,
+        candidate_slot: DeploymentSlot,
+    ) -> Result<(), RuntimeError> {
+        match &journal.previous {
+            Some(prev) => {
+                let prev_pointer = DeploymentPointer {
+                    install_id: prev.install_id.clone(),
+                    slot: prev.slot.clone(),
+                    updated_at_ms: runtime::now_ms(),
+                    schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
+                };
+                DeploymentStore::write_pointer(engine_id, &prev_pointer)?;
+            }
+            None => {
+                DeploymentStore::remove_pointer(engine_id)?;
+            }
+        }
+        DeploymentStore::delete_slot_if_not_active(
+            engine_id,
+            candidate_slot.as_str(),
+            "切换后验证失败，丢弃 candidate",
+        )?;
+        DeploymentStore::clear_journal(engine_id)?;
+        Ok(())
+    }
+
+    /// 指针切换后的验证。
+    ///
     /// - 读取刚写入的 manifest 确认完整性（schema + artifact hash + self-test）
-    /// - 验证 artifact sha256 非空（provider 必须在 prepare_environment 中填充）
-    /// - 对已提升的不可变 generation 重新执行 provider self-test
+    /// - 验证 artifact identity 一致性
+    /// - 对 active slot 重新执行 provider self-test（不信任持久化布尔值）
     ///
-    /// 此函数是安装事务的最后一步，失败时调用方负责回滚 current.json。
+    /// 失败时调用方执行自动回滚。
     async fn verify_after_switch(
         &self,
         engine_id: &EngineId,
+        slot: DeploymentSlot,
         install_id: &str,
         expected_artifact: &runtime::ArtifactIdentity,
-        generation_dir: &std::path::Path,
     ) -> Result<(), RuntimeError> {
-        // 读取并验证 manifest
-        let manifest = read_manifest(engine_id, install_id)?;
+        let manifest = runtime::read_slot_manifest(engine_id, slot.as_str())?;
+
+        if manifest.install_id != install_id {
+            return Err(RuntimeError::SelfTestFailed {
+                message: format!(
+                    "manifest install_id 不匹配: expected={install_id}, actual={}",
+                    manifest.install_id
+                ),
+            });
+        }
 
         // 验证 artifact hash 非空
         if manifest.artifact.sha256.is_empty() {
@@ -717,14 +726,14 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             });
         }
 
-        // 不信任 manifest 中持久化的布尔值；对 promote 后、current 实际指向的
-        // generation 再运行 provider 验证。服务启动/health activation verification
-        // 由 0.22.3 LocalEngineService 接入。
-        //
-        // 0.22.6.3: 验证阶段不传入 cancel_token——此阶段不可取消。
-        // 0.22.6 H5: 验证阶段不传入 sink——此阶段的日志不对外上报。
+        // 验证阶段不可取消、不上报日志
         self.provider
-            .self_test(generation_dir, &self.descriptor.install_plan, None, None)
+            .self_test(
+                &slot.dir(engine_id),
+                &self.descriptor.install_plan,
+                None,
+                None,
+            )
             .await?;
 
         tracing::info!(
@@ -756,7 +765,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
         match preference {
             ComputePreference::Auto => {
-                // 按 descriptor 优先级逐个尝试，记录失败原因
                 for (i, candidate) in profiles.iter().enumerate() {
                     match self.provider.check_compatibility(&candidate.compatibility) {
                         Ok(true) => {
@@ -791,7 +799,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 })
             }
             ComputePreference::GpuAuto => {
-                // 只在 GPU backend 间选择
                 for (i, candidate) in profiles.iter().enumerate() {
                     if !candidate.backend.is_gpu() {
                         continue;
@@ -829,7 +836,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 })
             }
             ComputePreference::Cpu => {
-                // 显式 CPU，失败不回退
                 for (i, candidate) in profiles.iter().enumerate() {
                     if candidate.backend != ComputeBackend::Cpu {
                         continue;
@@ -915,268 +921,35 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
     }
 }
 
-// ── Recovery ──────────────────────────────────────────────────────────────
-
-/// 恢复 current.json 指针。
-///
-/// 如果 `current.json` 不存在或损坏，从 `generations/` 目录中扫描 manifest，
-/// 选择 schema 兼容且安装时间最新的 generation 作为 current。
-///
-/// 0.22.6.2: 增加契约验证——只选择 schema、engine id、artifact/model contract
-/// 都有效的 generation。如果提供了 descriptor，则额外验证 manifest 与 descriptor 契约一致。
-pub fn recover_current_pointer(
-    engine_id: &EngineId,
-    descriptor: Option<&ProviderDescriptor>,
-) -> Result<Option<String>, RuntimeError> {
-    // 先检查现有 current.json
-    if let Ok(Some(ptr)) = read_current_pointer(engine_id) {
-        // 验证指向的 generation 存在且 manifest 有效
-        if let Ok(manifest) = read_manifest(engine_id, &ptr.install_id) {
-            // 0.22.6.2: 如果有 descriptor，验证契约一致性
-            if let Some(desc) = descriptor {
-                if verify_manifest_contract(&manifest, desc) {
-                    return Ok(Some(ptr.install_id));
-                }
-                tracing::warn!(
-                    engine = %engine_id,
-                    install = %ptr.install_id,
-                    "current.json 指向的 generation manifest 与 descriptor 契约不符，尝试恢复"
-                );
-            } else {
-                // 无 descriptor——只验证 manifest 基本有效性
-                if verify_manifest_basic(&manifest, engine_id) {
-                    return Ok(Some(ptr.install_id));
-                }
-            }
-        } else {
-            tracing::warn!(
-                engine = %engine_id,
-                install = %ptr.install_id,
-                "current.json 指向的 generation manifest 无效，尝试恢复"
-            );
-        }
-    }
-
-    // 扫描所有 generation，找最新的有效 manifest
-    let gens_dir = runtime::generations_dir(engine_id);
-    if !gens_dir.exists() {
-        return Ok(None);
-    }
-
-    let mut best: Option<(u64, String)> = None;
-
-    for entry in std::fs::read_dir(&gens_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let install_id = match entry.file_name().to_str() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if validate_install_id(&install_id).is_err() {
-            continue;
-        }
-
-        match read_manifest(engine_id, &install_id) {
-            Ok(manifest) => {
-                // 0.22.6.2: 契约验证
-                let contract_ok = if let Some(desc) = descriptor {
-                    verify_manifest_contract(&manifest, desc)
-                } else {
-                    verify_manifest_basic(&manifest, engine_id)
-                };
-
-                if !contract_ok {
-                    tracing::warn!(
-                        engine = %engine_id,
-                        install = %install_id,
-                        "generation manifest 契约验证失败，跳过"
-                    );
-                    continue;
-                }
-
-                let ts = manifest.installed_at_ms;
-                if best.is_none() || best.as_ref().unwrap().0 < ts {
-                    best = Some((ts, install_id));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(%e, install = %install_id, "跳过无效 manifest");
-            }
-        }
-    }
-
-    if let Some((_, install_id)) = best {
-        tracing::info!(
-            engine = %engine_id,
-            install = %install_id,
-            "恢复 current.json 指针"
-        );
-        let pointer = runtime::CurrentPointer {
-            install_id: install_id.clone(),
-            manifest_path: format!("generations/{install_id}/manifest.json"),
-            updated_at_ms: runtime::now_ms(),
-            schema_version: runtime::CURRENT_POINTER_SCHEMA_VERSION,
-        };
-        write_current_pointer(engine_id, &pointer)?;
-        Ok(Some(install_id))
-    } else {
-        Ok(None)
-    }
-}
-
-/// 验证 manifest 基本有效性（schema + engine_id 匹配 + artifact sha256 非空）。
-fn verify_manifest_basic(manifest: &GenerationManifest, engine_id: &EngineId) -> bool {
-    if manifest.schema_version != runtime::MANIFEST_SCHEMA_VERSION {
-        return false;
-    }
-    if manifest.engine_id != *engine_id {
-        return false;
-    }
-    if manifest.artifact.sha256.is_empty() {
-        return false;
-    }
-    // 验证 self_test_passed
-    let self_test_ok = match &manifest.extension {
-        ManifestExtension::PythonVenv(ext) => ext.self_test_passed,
-        ManifestExtension::ManagedBinary(ext) => ext.self_test_passed,
-    };
-    if !self_test_ok {
-        return false;
-    }
-    true
-}
-
-/// 验证 manifest 与 descriptor 契约一致性。
-///
-/// 0.22.6.2: 只选择 schema、engine id、artifact/model contract 都有效的 generation。
-fn verify_manifest_contract(manifest: &GenerationManifest, desc: &ProviderDescriptor) -> bool {
-    if !verify_manifest_basic(manifest, &desc.engine_id) {
-        return false;
-    }
-    // 验证 runtime kind
-    if manifest.runtime_kind != desc.runtime_kind {
-        return false;
-    }
-    // 验证 model contract
-    if manifest.model_contract.model_id != desc.model_contract.model_id {
-        return false;
-    }
-    if manifest.model_contract.revision != desc.model_contract.revision {
-        return false;
-    }
-    true
-}
-
-// ── Rollback ──────────────────────────────────────────────────────────────
-
-/// 回滚到上一个 generation。
-///
-/// 读取 current.json，找到 previous generation（按安装时间排序的前一个），
-/// 原子切换 current.json 指向 previous generation。
-///
-/// **0.22.6.3**: 排除已标记为 deferred cleanup 的 generation——
-/// 这些是之前激活失败后被标记的，不应作为回滚目标。
-pub fn rollback_to_previous(engine_id: &EngineId) -> Result<Option<String>, RuntimeError> {
-    let current = read_current_pointer(engine_id)?;
-
-    let current_install_id = match current {
-        Some(ref ptr) => ptr.install_id.clone(),
-        None => return Ok(None),
-    };
-
-    // 读取 deferred cleanup 列表——这些 generation 已知失败，排除
-    let deferred = read_deferred_cleanups(engine_id);
-    let deferred_ids: std::collections::HashSet<&str> =
-        deferred.iter().map(|d| d.install_id.as_str()).collect();
-
-    // 扫描所有 generation，排除 current 和 deferred，找最新的
-    let gens_dir = runtime::generations_dir(engine_id);
-    if !gens_dir.exists() {
-        return Ok(None);
-    }
-
-    let mut candidates: Vec<(u64, String)> = Vec::new();
-
-    for entry in std::fs::read_dir(&gens_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let install_id = match entry.file_name().to_str() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if install_id == current_install_id {
-            continue;
-        }
-        if validate_install_id(&install_id).is_err() {
-            continue;
-        }
-        // 排除已标记为 deferred cleanup 的 generation
-        if deferred_ids.contains(install_id.as_str()) {
-            tracing::debug!(
-                engine = %engine_id,
-                install = %install_id,
-                "跳过 deferred cleanup generation（不作为回滚目标）"
-            );
-            continue;
-        }
-
-        match read_manifest(engine_id, &install_id) {
-            Ok(manifest) => {
-                candidates.push((manifest.installed_at_ms, install_id));
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if candidates.is_empty() {
-        tracing::warn!(engine = %engine_id, "无可回滚的 previous generation");
-        return Ok(None);
-    }
-
-    // 按安装时间降序，选最新
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    let (_, previous_id) = &candidates[0];
-
-    let pointer = runtime::CurrentPointer {
-        install_id: previous_id.clone(),
-        manifest_path: format!("generations/{previous_id}/manifest.json"),
-        updated_at_ms: runtime::now_ms(),
-        schema_version: runtime::CURRENT_POINTER_SCHEMA_VERSION,
-    };
-    write_current_pointer(engine_id, &pointer)?;
-
-    tracing::info!(
-        engine = %engine_id,
-        from = %current_install_id,
-        to = %previous_id,
-        "已回滚到 previous generation"
-    );
-
-    Ok(Some(previous_id.clone()))
-}
-
 // ── Cleanup ───────────────────────────────────────────────────────────────
 
 /// 执行清理操作。
 ///
 /// 根据 `scope` 清理不同范围：
-/// - `EngineGeneration`: 清理指定引擎的非 current generation 或指定 install_id。
+/// - `EngineDeploymentSlot`: 删除一个非 active slot（占用记 residue）。
+/// - `EngineStaging`: 清扫引擎孤儿 staging。
 /// - `EngineModelCache`: 清理指定引擎的模型缓存。
-/// - `ProviderSharedArtifact`: 清理共享 artifact（需引用检查）。
+/// - `ProviderSharedArtifact`: 清理共享 artifact（需 active manifest 引用检查）。
 /// - `ProviderDownloadCache`: 清理 provider 下载缓存。
 pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
     match scope {
-        CleanupScope::EngineGeneration {
-            engine_id,
-            install_ids,
-        } => cleanup_engine_generations(engine_id, install_ids.as_ref()),
+        CleanupScope::EngineDeploymentSlot { engine_id, slot } => {
+            runtime::validate_slot_name(slot)?;
+            let active = DeploymentStore::read_pointer(engine_id)?.map(|p| p.slot);
+            if active.as_deref() == Some(slot.as_str()) {
+                return Err(RuntimeError::CleanupFailed {
+                    message: "active 部署不可删除".to_string(),
+                });
+            }
+            DeploymentStore::delete_slot_if_not_active(engine_id, slot, "cleanup 请求")?;
+            Ok(())
+        }
+        CleanupScope::EngineStaging { engine_id } => {
+            DeploymentStore::sweep_orphan_staging(engine_id);
+            Ok(())
+        }
         CleanupScope::EngineModelCache { engine_id } => {
             let cache_dir = runtime::engine_model_cache_dir(engine_id);
-            // 0.22.6.2: 验证路径在 engine root 内
             let engine_root = runtime::engine_root(engine_id);
             runtime::ensure_path_within(&engine_root, &cache_dir)?;
             if cache_dir.exists() {
@@ -1192,9 +965,8 @@ pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
             artifact_id,
         } => cleanup_shared_artifact(*runtime_kind, artifact_id),
         CleanupScope::ProviderDownloadCache { runtime_kind } => match runtime_kind {
-            RuntimeKind::PythonVenv => {
+            RuntimePlan::PythonVenv => {
                 let cache = runtime::uv_cache_dir();
-                // 0.22.6.2: 验证路径在 runtimes root 内
                 let runtimes_root = runtime::runtimes_root();
                 runtime::ensure_path_within(&runtimes_root, &cache)?;
                 if cache.exists() {
@@ -1205,7 +977,7 @@ pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
                 }
                 Ok(())
             }
-            RuntimeKind::ManagedBinary => {
+            RuntimePlan::ManagedBinary => {
                 // ManagedBinary download cache (future)
                 Ok(())
             }
@@ -1213,159 +985,15 @@ pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
     }
 }
 
-/// 清理引擎的非 current generation。
+/// 清理共享 artifact。
 ///
-/// **0.22.6.2 硬化**：
-/// - 保留至少 current + previous 两代（`MIN_KEEP_GENERATIONS = 2`）
-/// - 清理路径验证 engine root，禁止路径逃逸
-/// - 不删除共享 uv/Python/artifact
-fn cleanup_engine_generations(
-    engine_id: &EngineId,
-    specific_install_ids: Option<&Vec<String>>,
-) -> Result<(), RuntimeError> {
-    let current = read_current_pointer(engine_id)?;
-    let current_id = current.map(|c| c.install_id);
-
-    let gens_dir = runtime::generations_dir(engine_id);
-    if !gens_dir.exists() {
-        return Ok(());
-    }
-
-    // 0.22.6.2: 验证 generations 目录在 engine root 内
-    let engine_root = runtime::engine_root(engine_id);
-    runtime::ensure_path_within(&engine_root, &gens_dir)?;
-
-    let deferred_cleanups = read_deferred_cleanups(engine_id);
-
-    // 收集所有合法的 generation install_ids（按名称排序）
-    let mut all_gens: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&gens_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        if let Some(name) = entry.file_name().to_str() {
-            if validate_install_id(name).is_ok() {
-                all_gens.push(name.to_string());
-            }
-        }
-    }
-    all_gens.sort();
-
-    let to_clean: Vec<String> = match specific_install_ids {
-        Some(ids) => ids.clone(),
-        None => {
-            // 清理所有非 current generation，但保留至少 current + previous 两代
-            // 0.22.6.2: 保留至少 MIN_KEEP_GENERATIONS 个 generation
-            const MIN_KEEP_GENERATIONS: usize = 2;
-
-            // 如果总 generation 数 <= MIN_KEEP_GENERATIONS，不清理任何 generation
-            if all_gens.len() <= MIN_KEEP_GENERATIONS {
-                tracing::info!(
-                    engine = %engine_id,
-                    total = all_gens.len(),
-                    min_keep = MIN_KEEP_GENERATIONS,
-                    "generation 数量 <= 保留下限，不清理"
-                );
-                return Ok(());
-            }
-
-            // 可清理的 generation = all - current - previous
-            // current 和 previous 不可删，其余可清理
-            let keep: Vec<&str> = if let Some(ref cid) = current_id {
-                // 找到 previous（current 的前一个 generation）
-                let current_idx = all_gens.iter().position(|g| g == cid);
-                let mut keep_set = vec![cid.as_str()];
-                if let Some(idx) = current_idx {
-                    if idx > 0 {
-                        keep_set.push(all_gens[idx - 1].as_str());
-                    }
-                    if idx + 1 < all_gens.len() {
-                        keep_set.push(all_gens[idx + 1].as_str());
-                    }
-                }
-                keep_set
-            } else {
-                // 无 current——保留最后两个
-                all_gens
-                    .iter()
-                    .rev()
-                    .take(MIN_KEEP_GENERATIONS)
-                    .map(|s| s.as_str())
-                    .collect()
-            };
-
-            all_gens
-                .iter()
-                .filter(|g| !keep.contains(&g.as_str()))
-                .cloned()
-                .collect()
-        }
-    };
-
-    for install_id in &to_clean {
-        // 不清理 current generation
-        if current_id.as_ref() == Some(install_id) {
-            continue;
-        }
-
-        // 检查是否在 deferred cleanup 列表中
-        if deferred_cleanups
-            .iter()
-            .any(|d| &d.install_id == install_id)
-        {
-            tracing::info!(
-                engine = %engine_id,
-                install = %install_id,
-                "generation 被进程占用，标记 deferred cleanup，跳过强删"
-            );
-            continue;
-        }
-
-        let gen_dir = runtime::generation_dir(engine_id, install_id);
-
-        // 0.22.6.2: 验证 generation 目录在 engine root 内
-        runtime::ensure_path_within(&engine_root, &gen_dir)?;
-
-        // 先移除 artifact 引用（不删除共享 artifact 本身）
-        if let Ok(manifest) = read_manifest(engine_id, install_id) {
-            let _ = remove_reference(
-                manifest.runtime_kind,
-                &manifest.resolved_profile.artifact_id,
-                engine_id.as_str(),
-                install_id,
-            );
-        }
-
-        if gen_dir.exists() {
-            std::fs::remove_dir_all(&gen_dir).map_err(|e| RuntimeError::CleanupFailed {
-                message: format!("删除 generation 失败: {e}"),
-            })?;
-            tracing::info!(install = %install_id, "generation 已清理");
-        }
-    }
-
-    Ok(())
-}
-
-/// 清理共享 artifact（需要引用检查）。
-///
-/// **0.22.6.2 硬化**：路径验证 engine root，禁止路径逃逸。
-/// 只删除共享 artifact 目录，不删除共享 uv/Python 安装。
+/// 引用真源是**当前有效 deployment manifest**（`scan_artifact_references`），
+/// 不维护独立 refcount 数据。任何引擎的 active 部署引用此 artifact 时拒绝删除。
 fn cleanup_shared_artifact(
-    runtime_kind: RuntimeKind,
+    runtime_kind: RuntimePlan,
     artifact_id: &runtime::ArtifactId,
 ) -> Result<(), RuntimeError> {
-    // 检查显式引用计数
-    let rc = runtime::ref_count(runtime_kind, artifact_id)?;
-    if rc > 0 {
-        return Err(RuntimeError::ArtifactStillReferenced {
-            artifact_id: artifact_id.to_string(),
-            ref_count: rc,
-        });
-    }
-
-    // 再扫描所有 manifest 确认无引用
+    // 扫描所有引擎的 active 部署 manifest 确认无引用
     let refs = scan_artifact_references(runtime_kind, artifact_id)?;
     if !refs.is_empty() {
         return Err(RuntimeError::ArtifactStillReferenced {
@@ -1376,7 +1004,6 @@ fn cleanup_shared_artifact(
 
     let dir = runtime::shared_artifact_dir(runtime_kind, artifact_id);
 
-    // 0.22.6.2: 验证路径在 runtimes root 内
     let runtimes_root = runtime::runtimes_root();
     runtime::ensure_path_within(&runtimes_root, &dir)?;
 
@@ -1389,72 +1016,6 @@ fn cleanup_shared_artifact(
             artifact = %artifact_id,
             "共享 artifact 已清理"
         );
-    }
-
-    Ok(())
-}
-
-// ── Deferred Cleanup ──────────────────────────────────────────────────────
-
-/// 读取 deferred cleanup 列表。
-///
-/// 从引擎的 deferred_cleanups.json 读取被进程占用的旧 generation 列表。
-fn read_deferred_cleanups(engine_id: &EngineId) -> Vec<runtime::DeferredCleanup> {
-    let path = runtime::engine_root(engine_id).join("deferred_cleanups.json");
-    if !path.exists() {
-        return Vec::new();
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str::<Vec<runtime::DeferredCleanup>>(&content) {
-            Ok(list) => list,
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    }
-}
-
-/// 标记 generation 为 deferred cleanup（被进程占用）。
-pub fn mark_deferred_cleanup(
-    engine_id: &EngineId,
-    install_id: &str,
-    reason: &str,
-) -> Result<(), RuntimeError> {
-    let mut list = read_deferred_cleanups(engine_id);
-
-    // 避免重复
-    if list.iter().any(|d| d.install_id == install_id) {
-        return Ok(());
-    }
-
-    list.push(runtime::DeferredCleanup {
-        install_id: install_id.to_string(),
-        marked_at_ms: runtime::now_ms(),
-        reason: reason.to_string(),
-    });
-
-    let path = runtime::engine_root(engine_id).join("deferred_cleanups.json");
-    runtime::atomic_write_json(&path, &list)?;
-
-    tracing::info!(
-        engine = %engine_id,
-        install = %install_id,
-        reason = reason,
-        "已标记 deferred cleanup"
-    );
-
-    Ok(())
-}
-
-/// 清除 deferred cleanup 标记。
-pub fn clear_deferred_cleanup(engine_id: &EngineId, install_id: &str) -> Result<(), RuntimeError> {
-    let mut list = read_deferred_cleanups(engine_id);
-    list.retain(|d| d.install_id != install_id);
-
-    let path = runtime::engine_root(engine_id).join("deferred_cleanups.json");
-    if list.is_empty() {
-        let _ = std::fs::remove_file(&path);
-    } else {
-        runtime::atomic_write_json(&path, &list)?;
     }
 
     Ok(())
@@ -1484,228 +1045,71 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
-// ── 旧 FunASR venv 迁移 ───────────────────────────────────────────────────
-
-/// 旧 FunASR venv 迁移结果。
-#[derive(Debug, Clone)]
-pub enum MigrationResult {
-    /// 迁移成功：旧 venv 已登记为 generation。
-    Migrated { install_id: String },
-    /// 旧 venv 不存在，无需迁移。
-    NotNeeded,
-    /// 旧 venv 存在但不兼容，需要重建。
-    NeedsRebuild { reason: String },
-}
-
-/// 检查并执行旧 FunASR venv 兼容迁移。
-///
-/// 旧路径：`%APPDATA%\blink\python\venv`
-/// 新路径：`runtimes/engines/funasr/generations/{install_id}/`
-///
-/// 迁移策略：
-/// 1. 旧 venv 不存在 → `NotNeeded`
-/// 2. 旧 venv 存在且可验证兼容 → 登记为 generation，写 manifest，原子切换 current.json
-/// 3. 旧 venv 存在但不兼容 → `NeedsRebuild`（不删除旧 venv 或模型缓存）
-pub fn migrate_legacy_funasr_venv() -> Result<MigrationResult, RuntimeError> {
-    let legacy_dir = runtime::legacy_funasr_venv_dir();
-
-    if !legacy_dir.exists() || !legacy_dir.join("Scripts").join("python.exe").exists() {
-        return Ok(MigrationResult::NotNeeded);
-    }
-
-    let engine_id = match EngineId::new("funasr") {
-        Ok(id) => id,
-        Err(_) => {
-            return Ok(MigrationResult::NeedsRebuild {
-                reason: "EngineId 校验失败".to_string(),
-            });
-        }
-    };
-
-    // 检查是否已有 current.json（已迁移过）
-    if let Ok(Some(_)) = read_current_pointer(&engine_id) {
-        // 已迁移过，旧 venv 可忽略
-        return Ok(MigrationResult::NotNeeded);
-    }
-
-    tracing::info!(
-        legacy = %legacy_dir.display(),
-        "检测到旧 FunASR venv，尝试兼容迁移"
-    );
-
-    // 移动前先验证旧环境。不能以“目录存在”或历史上曾运行过代替兼容性
-    // self-test，否则会把损坏环境登记成 current generation。
-    let legacy_python = legacy_dir.join("Scripts").join("python.exe");
-    let probe = crate::infra::platform::no_window(std::process::Command::new(&legacy_python))
-        .args([
-            "-I",
-            "-c",
-            "import sys; from importlib.metadata import version; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}'); print(version('torch')); print(version('funasr'))",
-        ])
-        .output();
-    let probe = match probe {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            return Ok(MigrationResult::NeedsRebuild {
-                reason: format!(
-                    "旧 venv 兼容验证失败 (exit={:?}): {}",
-                    output.status.code(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        Err(error) => {
-            return Ok(MigrationResult::NeedsRebuild {
-                reason: format!("无法执行旧 venv Python: {error}"),
-            });
-        }
-    };
-    let versions: Vec<&str> = std::str::from_utf8(&probe.stdout)
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    if versions.len() != 3 || !versions[0].starts_with("3.12.") {
-        return Ok(MigrationResult::NeedsRebuild {
-            reason: format!("旧 venv 版本探测结果不兼容: {versions:?}"),
-        });
-    }
-
-    // Python distribution 的可复核身份至少绑定实际解释器内容，禁止再写
-    // `legacy-migrated` 之类占位字符串。
-    let python_bytes = std::fs::read(&legacy_python)?;
-    let python_sha256 = format!("{:x}", Sha256::digest(&python_bytes));
-    let python_version = versions[0].to_string();
-    let torch_version = versions[1].to_string();
-    let funasr_version = versions[2].to_string();
-
-    // 生成 install_id
-    let install_id = generate_install_id();
-    let gen_dir = runtime::generation_dir(&engine_id, &install_id);
-    let gens_dir = runtime::generations_dir(&engine_id);
-    std::fs::create_dir_all(&gens_dir)?;
-
-    // 尝试 symlink 或移动旧 venv 到 generation 目录
-    // Windows 上 symlink 需要管理员权限，因此使用 junction 或直接移动
-    // 这里采用保守策略：创建一个指针文件指向旧目录，而不是物理移动
-    // 实际迁移由 0.22.3 的 LocalEngineService 决定是否物理移动
-
-    // 先尝试 rename（同卷原子移动）
-    match std::fs::rename(&legacy_dir, &gen_dir) {
-        Ok(()) => {
-            tracing::info!(install = %install_id, "旧 venv 已移动到 generation 目录");
-        }
-        Err(e) => {
-            tracing::warn!(%e, "rename 失败，尝试 junction 或标记为 NeedsRebuild");
-            // 回退：标记为需要重建，不删除旧 venv
-            return Ok(MigrationResult::NeedsRebuild {
-                reason: format!("无法移动旧 venv: {e}"),
-            });
-        }
-    }
-
-    // 构建 manifest（兼容版：使用旧 venv 的已知状态）
-    let artifact_id = runtime::ArtifactId::new(format!("python-{python_version}-legacy-x64"))?;
-    let manifest = GenerationManifest {
-        schema_version: runtime::MANIFEST_SCHEMA_VERSION,
-        engine_id: engine_id.clone(),
-        runtime_kind: RuntimeKind::PythonVenv,
-        install_id: install_id.clone(),
-        requested_preference: ComputePreference::Cpu,
-        resolved_profile: ResolvedProfile {
-            profile_id: "cpu-x64-legacy".to_string(),
-            backend: ComputeBackend::Cpu,
-            artifact_id: artifact_id.clone(),
-            priority: 0,
-        },
-        installed_at_ms: runtime::now_ms(),
-        artifact: runtime::ArtifactIdentity {
-            runtime_kind: RuntimeKind::PythonVenv,
-            artifact_id: artifact_id.clone(),
-            sha256: python_sha256,
-        },
-        model_contract: ModelContract {
-            model_id: "funasr-legacy".to_string(),
-            revision: "legacy".to_string(),
-            checksum_source: runtime::ChecksumSource::Unverified,
-        },
-        fallback_reasons: Vec::new(),
-        extension: ManifestExtension::PythonVenv(runtime::PythonManifestExt {
-            python_version,
-            python_artifact_id: artifact_id.clone(),
-            packages: vec![
-                runtime::PackageStatus {
-                    name: "torch".to_string(),
-                    installed_version: Some(torch_version.clone()),
-                    locked_version: torch_version,
-                    satisfies_lock: true,
-                },
-                runtime::PackageStatus {
-                    name: "funasr".to_string(),
-                    installed_version: Some(funasr_version.clone()),
-                    locked_version: funasr_version,
-                    satisfies_lock: true,
-                },
-            ],
-            uv_version: "unknown".to_string(),
-            index_url: None,
-            self_test_passed: true,
-        }),
-    };
-
-    // 写 manifest
-    write_manifest(&engine_id, &install_id, &manifest)?;
-
-    // 添加 artifact 引用
-    add_reference(
-        RuntimeKind::PythonVenv,
-        &artifact_id,
-        engine_id.as_str(),
-        &install_id,
-    )?;
-
-    // 原子切换 current.json
-    let pointer = runtime::CurrentPointer {
-        install_id: install_id.clone(),
-        manifest_path: format!("generations/{install_id}/manifest.json"),
-        updated_at_ms: runtime::now_ms(),
-        schema_version: runtime::CURRENT_POINTER_SCHEMA_VERSION,
-    };
-    write_current_pointer(&engine_id, &pointer)?;
-
-    tracing::info!(install = %install_id, "旧 FunASR venv 迁移完成");
-
-    Ok(MigrationResult::Migrated { install_id })
-}
-
 // ── 测试 ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::local_engine::deployment::TransactionJournal;
+    use crate::infra::local_engine::runtime::ArtifactId;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    // ── fake provider for testing ─────────────────────────────────────────
+    // ── 测试用 FakeProvider ────────────────────────────────────────────────
 
     struct FakeProvider {
         compatible: bool,
+        /// true = CPU 候选（Always/CpuFeature）兼容、GPU 候选不兼容
+        /// （表达 per-backend 差异；false = 所有候选统一返回 compatible）。
+        cpu_only: bool,
         prepare_ok: bool,
         self_test_ok: bool,
+        /// verify_after_switch 阶段的 self_test 是否失败（模拟切换后验证失败）。
+        post_switch_self_test_fails: bool,
+        /// self_test 调用计数（区分 staging 与切换后验证）。
+        self_test_calls: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
+    impl FakeProvider {
+        fn new(compatible: bool, prepare_ok: bool, self_test_ok: bool) -> Self {
+            Self {
+                compatible,
+                cpu_only: false,
+                prepare_ok,
+                self_test_ok,
+                post_switch_self_test_fails: false,
+                self_test_calls: AtomicUsize::new(0),
+            }
+        }
+
+        /// CPU 兼容、GPU 不兼容（profile 回退测试用）。
+        fn cpu_only(mut self) -> Self {
+            self.cpu_only = true;
+            self
+        }
+
+        fn with_post_switch_failure(mut self) -> Self {
+            self.post_switch_self_test_fails = true;
+            self
+        }
+    }
+
+    #[async_trait]
     impl RuntimeProvider for FakeProvider {
-        fn kind(&self) -> RuntimeKind {
-            RuntimeKind::PythonVenv
+        fn kind(&self) -> RuntimePlan {
+            RuntimePlan::PythonVenv
         }
 
         fn check_compatibility(
             &self,
             compatibility: &CompatibilityCheck,
         ) -> Result<bool, RuntimeError> {
-            // Always 兼容性始终通过（模拟 CPU x64 的真实行为）
-            if matches!(compatibility, CompatibilityCheck::Always) {
-                return Ok(true);
+            if self.cpu_only {
+                return Ok(matches!(
+                    compatibility,
+                    CompatibilityCheck::Always | CompatibilityCheck::RequiresCpuFeature { .. }
+                ));
             }
             Ok(self.compatible)
         }
@@ -1714,7 +1118,7 @@ mod tests {
             &self,
             staging_dir: &std::path::Path,
             _plan: &InstallPlan,
-            resolved_profile: &ResolvedProfile,
+            _resolved_profile: &ResolvedProfile,
             _cancel_token: Option<&tokio_util::sync::CancellationToken>,
             _sink: Option<&dyn InstallSink>,
         ) -> Result<PrepareResult, RuntimeError> {
@@ -1723,920 +1127,515 @@ mod tests {
                     message: "fake prepare failure".to_string(),
                 });
             }
-            std::fs::create_dir_all(staging_dir.join("venv"))?;
+            std::fs::create_dir_all(staging_dir.join("venv")).unwrap();
             Ok(PrepareResult {
                 artifact: runtime::ArtifactIdentity {
-                    runtime_kind: RuntimeKind::PythonVenv,
-                    artifact_id: resolved_profile.artifact_id.clone(),
-                    sha256: "fake-hash-0001".to_string(),
+                    runtime_kind: RuntimePlan::PythonVenv,
+                    artifact_id: fake_descriptor().profiles[0].artifact_id.clone(),
+                    sha256: "a".repeat(64),
                 },
             })
         }
 
         async fn self_test(
             &self,
-            _generation_dir: &std::path::Path,
+            _deployment_dir: &std::path::Path,
             _plan: &InstallPlan,
             _cancel_token: Option<&tokio_util::sync::CancellationToken>,
             _sink: Option<&dyn InstallSink>,
         ) -> Result<(), RuntimeError> {
-            if !self.self_test_ok {
-                return Err(RuntimeError::SelfTestFailed {
-                    message: "fake self-test failure".to_string(),
-                });
+            let n = self.self_test_calls.fetch_add(1, Ordering::SeqCst);
+            // 第 1 次 = staging 内 self-test；第 2 次 = 切换后验证
+            let ok = if n == 0 {
+                self.self_test_ok
+            } else {
+                !self.post_switch_self_test_fails
+            };
+            if ok {
+                Ok(())
+            } else {
+                Err(RuntimeError::SelfTestFailed {
+                    message: format!("fake self-test failure #{n}"),
+                })
             }
-            Ok(())
         }
 
         fn build_manifest_extension(
             &self,
-            _generation_dir: &std::path::Path,
+            _deployment_dir: &std::path::Path,
             _plan: &InstallPlan,
         ) -> Result<ManifestExtension, RuntimeError> {
             Ok(ManifestExtension::PythonVenv(runtime::PythonManifestExt {
                 python_version: "3.12.8".to_string(),
-                python_artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
+                python_artifact_id: fake_descriptor().profiles[0].artifact_id.clone(),
                 packages: Vec::new(),
                 uv_version: "0.6.10".to_string(),
                 index_url: None,
                 self_test_passed: true,
             }))
         }
-
-        fn query_package_status(
-            &self,
-            _generation_dir: &std::path::Path,
-            _plan: &InstallPlan,
-        ) -> Result<Vec<runtime::PackageStatus>, RuntimeError> {
-            Ok(Vec::new())
-        }
-
-        fn cleanup_provider_cache(
-            &self,
-            _scope: &ProviderCleanupScope,
-        ) -> Result<(), RuntimeError> {
-            Ok(())
-        }
     }
 
-    fn fake_descriptor(engine_id: &str, profiles: Vec<ProfileCandidate>) -> ProviderDescriptor {
+    fn fake_descriptor() -> ProviderDescriptor {
+        let artifact = ArtifactId::new("python-3.12.8-fake").unwrap();
         ProviderDescriptor {
-            engine_id: EngineId::new(engine_id).unwrap(),
-            runtime_kind: RuntimeKind::PythonVenv,
-            display_name: "Fake Engine".to_string(),
-            profiles,
+            engine_id: EngineId::new("fake-engine").unwrap(),
+            runtime_kind: RuntimePlan::PythonVenv,
+            display_name: "Fake".to_string(),
+            // GPU 优先（priority 0），CPU 兜底——与真实 descriptor 语义一致，
+            // 使 auto 回退路径可测。
+            profiles: vec![
+                ProfileCandidate {
+                    profile_id: "cuda-sm86".to_string(),
+                    backend: ComputeBackend::Cuda,
+                    artifact_id: artifact.clone(),
+                    compatibility: CompatibilityCheck::RequiresCuda { min_version: None },
+                },
+                ProfileCandidate {
+                    profile_id: "cpu-x64".to_string(),
+                    backend: ComputeBackend::Cpu,
+                    artifact_id: artifact,
+                    compatibility: CompatibilityCheck::Always,
+                },
+            ],
             model_contract: ModelContract {
                 model_id: "fake-model".to_string(),
-                revision: "v1.0".to_string(),
+                revision: "v1".to_string(),
                 checksum_source: runtime::ChecksumSource::Unverified,
             },
             install_plan: InstallPlan::PythonVenv(PythonInstallPlan {
                 python_version: "3.12.8".to_string(),
-                python_artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
+                python_artifact_id: ArtifactId::new("python-3.12.8-fake").unwrap(),
                 packages: Vec::new(),
                 uv_version: "0.6.10".to_string(),
                 index_url: None,
                 extra_pip_args: Vec::new(),
                 self_test_script: "pass".to_string(),
             }),
-            min_generations: 2,
         }
     }
 
-    fn cpu_profile() -> ProfileCandidate {
-        ProfileCandidate {
-            profile_id: "cpu-x64".to_string(),
-            backend: ComputeBackend::Cpu,
-            artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
-            compatibility: CompatibilityCheck::Always,
-        }
+    fn cleanup_engine(desc: &ProviderDescriptor) {
+        let _ = std::fs::remove_dir_all(runtime::engine_root(&desc.engine_id));
     }
 
-    fn cuda_profile() -> ProfileCandidate {
-        ProfileCandidate {
-            profile_id: "cuda12-sm86".to_string(),
-            backend: ComputeBackend::Cuda,
-            artifact_id: runtime::ArtifactId::new("python-3.12.8-cuda").unwrap(),
-            compatibility: CompatibilityCheck::RequiresCuda {
-                min_version: Some("12.0".to_string()),
-            },
-        }
+    fn unique_engine(tag: &str) -> ProviderDescriptor {
+        let mut desc = fake_descriptor();
+        desc.engine_id = EngineId::new(format!("fake-{tag}")).unwrap();
+        desc
     }
 
-    // ── profile 解析测试 ──────────────────────────────────────────────────
+    // ── profile 解析 ───────────────────────────────────────────────────────
 
-    #[test]
-    fn resolve_auto_falls_back_to_cpu() {
-        // CUDA 不兼容 → 回退到 CPU
-        let desc = fake_descriptor("test-auto-fallback", vec![cuda_profile(), cpu_profile()]);
-        let provider = FakeProvider {
-            compatible: false, // CUDA 不兼容
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+    #[tokio::test]
+    async fn resolve_auto_falls_back_to_cpu() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(true, true, true).cpu_only(); // GPU 不兼容
         let tx = InstallTransaction::new(&desc, &provider);
-
-        let (resolved, fallbacks) = tx.resolve_profile(ComputePreference::Auto).unwrap();
-        assert_eq!(resolved.backend, ComputeBackend::Cpu);
+        let (profile, fallbacks) = tx.resolve_profile(ComputePreference::Auto).unwrap();
+        assert_eq!(profile.backend, ComputeBackend::Cpu);
         assert_eq!(fallbacks.len(), 1);
-        assert_eq!(fallbacks[0].rejected_profile, "cuda12-sm86");
+        assert_eq!(fallbacks[0].rejected_profile, "cuda-sm86");
     }
 
-    #[test]
-    fn resolve_auto_picks_first_compatible() {
-        let desc = fake_descriptor("test-auto-first", vec![cpu_profile()]);
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+    #[tokio::test]
+    async fn resolve_explicit_cpu_no_fallback() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(true, true, true).cpu_only();
         let tx = InstallTransaction::new(&desc, &provider);
+        let (profile, _) = tx.resolve_profile(ComputePreference::Cpu).unwrap();
+        assert_eq!(profile.backend, ComputeBackend::Cpu);
+    }
 
-        let (resolved, fallbacks) = tx.resolve_profile(ComputePreference::Auto).unwrap();
-        assert_eq!(resolved.backend, ComputeBackend::Cpu);
+    #[tokio::test]
+    async fn resolve_explicit_cuda_no_fallback_on_incompatible() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(true, true, true).cpu_only();
+        let tx = InstallTransaction::new(&desc, &provider);
+        let err = tx.resolve_profile(ComputePreference::Cuda).unwrap_err();
+        assert!(matches!(err, RuntimeError::ExplicitBackendFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn resolve_gpu_auto_skips_cpu() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(true, true, true);
+        let tx = InstallTransaction::new(&desc, &provider);
+        let (profile, fallbacks) = tx.resolve_profile(ComputePreference::GpuAuto).unwrap();
+        assert_eq!(profile.backend, ComputeBackend::Cuda);
         assert!(fallbacks.is_empty());
     }
 
-    #[test]
-    fn resolve_explicit_cpu_no_fallback() {
-        // 显式 CPU，即使有 CUDA profile 也不回退
-        let desc = fake_descriptor("test-explicit-cpu", vec![cuda_profile(), cpu_profile()]);
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+    #[tokio::test]
+    async fn resolve_gpu_auto_fails_when_no_gpu_compatible() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(true, true, true).cpu_only();
         let tx = InstallTransaction::new(&desc, &provider);
-
-        let (resolved, _) = tx.resolve_profile(ComputePreference::Cpu).unwrap();
-        assert_eq!(resolved.backend, ComputeBackend::Cpu);
+        let err = tx.resolve_profile(ComputePreference::GpuAuto).unwrap_err();
+        assert!(matches!(err, RuntimeError::ProfileResolutionFailed { .. }));
     }
 
-    #[test]
-    fn resolve_explicit_cuda_no_fallback_on_incompatible() {
-        let desc = fake_descriptor(
-            "test-explicit-cuda-fail",
-            vec![cpu_profile(), cuda_profile()],
-        );
-        let provider = FakeProvider {
-            compatible: false, // CUDA 不兼容
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+    #[tokio::test]
+    async fn resolve_explicit_backend_not_in_descriptor() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(true, true, true);
         let tx = InstallTransaction::new(&desc, &provider);
-
-        let result = tx.resolve_profile(ComputePreference::Cuda);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::ExplicitBackendFailed { .. } => {}
-            other => panic!("期望 ExplicitBackendFailed, got {other:?}"),
-        }
+        let err = tx.resolve_profile(ComputePreference::Vulkan).unwrap_err();
+        assert!(matches!(err, RuntimeError::ExplicitBackendFailed { .. }));
     }
 
-    #[test]
-    fn resolve_gpu_auto_skips_cpu() {
-        let desc = fake_descriptor("test-gpu-auto", vec![cpu_profile(), cuda_profile()]);
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+    #[tokio::test]
+    async fn resolve_auto_all_incompatible_fails() {
+        let desc = fake_descriptor();
+        let provider = FakeProvider::new(false, true, true);
+        // auto 会回退到 CPU（Always 兼容不受 compatible flag 影响？）
+        // —— FakeProvider::check_compatibility 对所有候选返回同一 flag，
+        // CPU 候选也不兼容 → 全部失败
         let tx = InstallTransaction::new(&desc, &provider);
-
-        let (resolved, _) = tx.resolve_profile(ComputePreference::GpuAuto).unwrap();
-        assert_eq!(resolved.backend, ComputeBackend::Cuda);
-    }
-
-    #[test]
-    fn resolve_gpu_auto_fails_when_no_gpu_compatible() {
-        let desc = fake_descriptor("test-gpu-auto-fail", vec![cpu_profile(), cuda_profile()]);
-        let provider = FakeProvider {
-            compatible: false,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let tx = InstallTransaction::new(&desc, &provider);
-
-        let result = tx.resolve_profile(ComputePreference::GpuAuto);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn resolve_explicit_backend_not_in_descriptor() {
-        // descriptor 只声明 CPU，显式请求 Vulkan
-        let desc = fake_descriptor("test-vulkan-not-declared", vec![cpu_profile()]);
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let tx = InstallTransaction::new(&desc, &provider);
-
-        let result = tx.resolve_profile(ComputePreference::Vulkan);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::ExplicitBackendFailed { .. } => {}
-            other => panic!("期望 ExplicitBackendFailed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_auto_all_incompatible_fails() {
-        let desc = fake_descriptor("test-auto-all-incompat", vec![cuda_profile()]);
-        let provider = FakeProvider {
-            compatible: false,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let tx = InstallTransaction::new(&desc, &provider);
-
+        // CPU 是 Always 但 fake provider 仍返回 false
         let result = tx.resolve_profile(ComputePreference::Auto);
+        // Auto 在第一个兼容即返回；CPU 也 false → 报错
         assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::ProfileResolutionFailed { .. } => {}
-            other => panic!("期望 ProfileResolutionFailed, got {other:?}"),
-        }
     }
 
-    // ── cleanup 测试 ──────────────────────────────────────────────────────
-
-    #[test]
-    fn cleanup_shared_artifact_with_refs_rejected() {
-        let artifact_id = runtime::ArtifactId::new("test-cleanup-ref-0001").unwrap();
-        let kind = RuntimeKind::PythonVenv;
-
-        // 清理可能存在的测试数据
-        let dir = runtime::shared_artifact_dir(kind, &artifact_id);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // 添加引用
-        add_reference(kind, &artifact_id, "engine-a", "gen-001").unwrap();
-
-        // 尝试清理应被拒绝
-        let result = execute_cleanup(&CleanupScope::ProviderSharedArtifact {
-            runtime_kind: kind,
-            artifact_id: artifact_id.clone(),
-        });
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::ArtifactStillReferenced { ref_count, .. } => {
-                assert!(ref_count >= 1);
-            }
-            other => panic!("期望 ArtifactStillReferenced, got {other:?}"),
-        }
-
-        // 移除引用后清理应成功
-        remove_reference(kind, &artifact_id, "engine-a", "gen-001").unwrap();
-        let result = execute_cleanup(&CleanupScope::ProviderSharedArtifact {
-            runtime_kind: kind,
-            artifact_id,
-        });
-        assert!(result.is_ok());
-    }
-
-    // ── deferred cleanup 测试 ─────────────────────────────────────────────
-
-    #[test]
-    fn deferred_cleanup_mark_and_clear() {
-        let engine_id = EngineId::new("test-deferred-cleanup").unwrap();
-
-        // 清理可能存在的测试数据
-        let engine_root = runtime::engine_root(&engine_id);
-        let _ = std::fs::remove_dir_all(&engine_root);
-
-        mark_deferred_cleanup(&engine_id, "gen-001", "process still running").unwrap();
-
-        let list = read_deferred_cleanups(&engine_id);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].install_id, "gen-001");
-
-        // 重复标记不会增加
-        mark_deferred_cleanup(&engine_id, "gen-001", "duplicate").unwrap();
-        let list = read_deferred_cleanups(&engine_id);
-        assert_eq!(list.len(), 1);
-
-        // 清除
-        clear_deferred_cleanup(&engine_id, "gen-001").unwrap();
-        let list = read_deferred_cleanups(&engine_id);
-        assert!(list.is_empty());
-
-        // 清理测试数据
-        let _ = std::fs::remove_dir_all(&engine_root);
-    }
+    // ── 事务：成功 / 失败 / 回滚 ───────────────────────────────────────────
 
     #[tokio::test]
-    async fn two_python_engines_have_isolated_generations_and_shared_artifact() {
-        let shared_artifact = runtime::ArtifactId::new("python-3.12.8-isolation-test").unwrap();
-        let shared_profile = ProfileCandidate {
-            artifact_id: shared_artifact.clone(),
-            ..cpu_profile()
-        };
-        let funasr = fake_descriptor("test-funasr-isolated", vec![shared_profile.clone()]);
-        let paddleocr = fake_descriptor("test-paddleocr-isolated", vec![shared_profile]);
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&funasr.engine_id));
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&paddleocr.engine_id));
+    async fn install_success_switches_pointer_and_deletes_old_slot() {
+        let desc = unique_engine("ok");
+        let provider = FakeProvider::new(true, true, true);
 
-        let funasr_result = InstallTransaction::new(&funasr, &provider)
-            .execute(ComputePreference::Cpu, None, None)
+        // 第一次安装：slot-a active
+        let tx = InstallTransaction::new(&desc, &provider);
+        let r1 = tx
+            .execute("op-1", ComputePreference::Auto, None, None)
             .await
             .unwrap();
-        let paddle_result = InstallTransaction::new(&paddleocr, &provider)
-            .execute(ComputePreference::Cpu, None, None)
+        let (p1, m1) = DeploymentStore::read_active(&desc.engine_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p1.slot, "slot-a");
+        assert_eq!(m1.install_id, r1.install_id);
+
+        // 第二次安装（更新）：slot-b active，slot-a 删除
+        let tx = InstallTransaction::new(&desc, &provider);
+        let r2 = tx
+            .execute("op-2", ComputePreference::Auto, None, None)
             .await
             .unwrap();
-
-        let funasr_generation =
-            runtime::generation_dir(&funasr.engine_id, &funasr_result.install_id);
-        let paddle_generation =
-            runtime::generation_dir(&paddleocr.engine_id, &paddle_result.install_id);
-        assert_ne!(funasr_generation, paddle_generation);
-        assert!(funasr_generation.join("venv").is_dir());
-        assert!(paddle_generation.join("venv").is_dir());
-        assert_eq!(
-            runtime::ref_count(RuntimeKind::PythonVenv, &shared_artifact).unwrap(),
-            2
-        );
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&funasr.engine_id));
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&paddleocr.engine_id));
-        let _ = std::fs::remove_dir_all(runtime::shared_artifact_dir(
-            RuntimeKind::PythonVenv,
-            &shared_artifact,
-        ));
-    }
-
-    #[tokio::test]
-    async fn failed_reinstall_preserves_previous_current_generation() {
-        let rollback_artifact = runtime::ArtifactId::new("python-3.12.8-rollback-test").unwrap();
-        let descriptor = fake_descriptor(
-            "test-install-rollback",
-            vec![ProfileCandidate {
-                artifact_id: rollback_artifact.clone(),
-                ..cpu_profile()
-            }],
-        );
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let good_provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let first = InstallTransaction::new(&descriptor, &good_provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
+        let (p2, m2) = DeploymentStore::read_active(&desc.engine_id)
+            .unwrap()
             .unwrap();
-
-        let failing_provider = FakeProvider {
-            compatible: true,
-            prepare_ok: false,
-            self_test_ok: true,
-        };
+        assert_eq!(p2.slot, "slot-b");
+        assert_eq!(m2.install_id, r2.install_id);
+        // 稳定状态只保留 active slot
+        assert!(!DeploymentSlot::A.dir(&desc.engine_id).exists());
+        // journal 已清除
         assert!(
-            InstallTransaction::new(&descriptor, &failing_provider)
-                .execute(ComputePreference::Cpu, None, None)
-                .await
-                .is_err()
+            DeploymentStore::read_journal(&desc.engine_id)
+                .unwrap()
+                .is_none()
         );
-        let current = read_current_pointer(&descriptor.engine_id)
+        // staging 已清空
+        assert!(!runtime::operation_staging_dir(&desc.engine_id, "op-1").exists());
+        assert!(!runtime::operation_staging_dir(&desc.engine_id, "op-2").exists());
+
+        cleanup_engine(&desc);
+    }
+
+    #[tokio::test]
+    async fn update_failure_preserves_active_and_clears_journal() {
+        let desc = unique_engine("fail");
+        let ok_provider = FakeProvider::new(true, true, true);
+        let tx = InstallTransaction::new(&desc, &ok_provider);
+        let r1 = tx
+            .execute("op-1", ComputePreference::Auto, None, None)
+            .await
+            .unwrap();
+
+        // 更新失败（prepare 失败）
+        let fail_provider = FakeProvider::new(true, false, true);
+        let tx = InstallTransaction::new(&desc, &fail_provider);
+        let err = tx
+            .execute("op-2", ComputePreference::Auto, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::InstallFailed { .. }));
+
+        // old 仍是 active，journal/staging 清除
+        let (p, m) = DeploymentStore::read_active(&desc.engine_id)
             .unwrap()
             .unwrap();
-        assert_eq!(current.install_id, first.install_id);
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let _ = std::fs::remove_dir_all(runtime::shared_artifact_dir(
-            RuntimeKind::PythonVenv,
-            &rollback_artifact,
-        ));
-    }
-
-    // ── 0.22.6.2 硬化测试 ───────────────────────────────────────────────
-
-    // ── 取消 1：安装事务在 prepare 前被取消 ──
-
-    #[tokio::test]
-    async fn cancel_before_prepare_cleans_staging() {
-        let descriptor = fake_descriptor("test-cancel-prepare", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let ct = tokio_util::sync::CancellationToken::new();
-        ct.cancel();
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, Some(&ct), None)
-            .await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::OperationCancelled { .. } => {}
-            other => panic!("期望 OperationCancelled, got {other:?}"),
-        }
-        // staging 不应残留
-        let staging = runtime::operation_staging_dir(&descriptor.engine_id, "any-op");
-        // staging 目录在 execute 内部生成，op_id 是随机的，检查 generations 空即可
-        let gens_dir = runtime::generations_dir(&descriptor.engine_id);
-        assert!(!gens_dir.exists() || std::fs::read_dir(&gens_dir).unwrap().count() == 0);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 取消 2：安装事务在 self-test 前被取消 ──
-
-    #[tokio::test]
-    async fn cancel_before_self_test_cleans_staging() {
-        // 用一个 prepare 成功但 self-test 会通过的 provider，在 prepare 完成后取消
-        // 由于 execute 内部在 prepare 前有取消检查点，直接预取消即可
-        let descriptor = fake_descriptor("test-cancel-selftest", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let ct = tokio_util::sync::CancellationToken::new();
-        ct.cancel();
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, Some(&ct), None)
-            .await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::OperationCancelled { .. } => {}
-            other => panic!("期望 OperationCancelled, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 损坏 1：current.json 指向无效 manifest 时 recover_current_pointer 恢复 ──
-
-    #[tokio::test]
-    async fn recover_current_pointer_from_corrupt_manifest() {
-        let descriptor = fake_descriptor("test-recover-corrupt", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        // 第一次安装
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-        let install_id = result.install_id.clone();
-
-        // 损坏 manifest
-        let manifest_path =
-            runtime::generation_dir(&descriptor.engine_id, &install_id).join("manifest.json");
-        std::fs::write(&manifest_path, b"{ corrupted }").unwrap();
-
-        // recover 应扫描并恢复（只有这一个 generation，应仍然可恢复）
-        let recovered = recover_current_pointer(&descriptor.engine_id, Some(&descriptor)).unwrap();
-        // 损坏的 manifest 会被跳过，但只有这一个 generation，所以恢复为 None 或 Some
-        // 如果恢复为 None，current.json 会被清除
-        // 如果恢复为 Some，说明 manifest 被重新读取成功（不太可能因为已损坏）
-        // 实际行为：损坏的 manifest 会被跳过，无有效 generation → None
-        assert!(recovered.is_none() || recovered.is_some());
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 损坏 2：current.json 缺失时 recover_current_pointer 恢复 ──
-
-    #[tokio::test]
-    async fn recover_current_pointer_when_missing() {
-        let descriptor = fake_descriptor("test-recover-missing", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        // 安装一个 generation
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-        let install_id = result.install_id.clone();
-
-        // 删除 current.json
-        let pointer_path = runtime::current_pointer_path(&descriptor.engine_id);
-        let _ = std::fs::remove_file(&pointer_path);
-
-        // recover 应从 generations/ 扫描恢复
-        let recovered = recover_current_pointer(&descriptor.engine_id, Some(&descriptor)).unwrap();
-        assert_eq!(recovered, Some(install_id));
-
-        // current.json 应重新存在
-        assert!(pointer_path.exists());
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 契约 1：manifest 契约不符时 recover_current_pointer 跳过 ──
-
-    #[tokio::test]
-    async fn recover_current_pointer_skips_contract_mismatch() {
-        // 创建两个 descriptor，不同 model_id
-        let mut descriptor_a = fake_descriptor("test-contract-skip", vec![cpu_profile()]);
-        let mut descriptor_b = descriptor_a.clone();
-        descriptor_b.model_contract.model_id = "different-model".to_string();
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor_a.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        // 用 descriptor_a 安装
-        let _result = InstallTransaction::new(&descriptor_a, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-
-        // 删除 current.json，用 descriptor_b 恢复
-        let pointer_path = runtime::current_pointer_path(&descriptor_a.engine_id);
-        let _ = std::fs::remove_file(&pointer_path);
-
-        // 用 descriptor_b 恢复——契约不符，应返回 None
-        let recovered =
-            recover_current_pointer(&descriptor_a.engine_id, Some(&descriptor_b)).unwrap();
-        assert!(recovered.is_none(), "契约不符的 generation 应被跳过");
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor_a.engine_id));
-    }
-
-    // ── 回滚 1：安装失败后 current generation 未损坏 ──
-
-    #[tokio::test]
-    async fn install_failure_preserves_current_generation() {
-        let descriptor = fake_descriptor("test-preserve-current", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let good_provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        // 先成功安装
-        let first = InstallTransaction::new(&descriptor, &good_provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-
-        // 用失败的 provider 再安装
-        let bad_provider = FakeProvider {
-            compatible: true,
-            prepare_ok: false,
-            self_test_ok: true,
-        };
-        let _ = InstallTransaction::new(&descriptor, &bad_provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await;
-
-        // current 应仍指向 first
-        let current = read_current_pointer(&descriptor.engine_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(current.install_id, first.install_id);
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 回滚 2：self-test 失败后 staging 被清理 ──
-
-    #[tokio::test]
-    async fn self_test_failure_cleans_staging() {
-        let descriptor = fake_descriptor("test-selftest-fail", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: false, // self-test 会失败
-        };
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RuntimeError::SelfTestFailed { .. } => {}
-            other => panic!("期望 SelfTestFailed, got {other:?}"),
-        }
-        // staging 目录不应残留 generation
-        let gens_dir = runtime::generations_dir(&descriptor.engine_id);
-        if gens_dir.exists() {
-            let count = std::fs::read_dir(&gens_dir).unwrap().count();
-            assert_eq!(count, 0, "self-test 失败后不应有 generation 残留");
-        }
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 磁盘空间 1：RuntimeError::from_io_disk_space 正确分类 ──
-
-    #[test]
-    fn from_io_disk_space_detects_disk_full() {
-        // Windows disk full: raw_os_error 112
-        let err = std::io::Error::from_raw_os_error(112);
-        let runtime_err = RuntimeError::from_io_disk_space(err);
-        assert!(matches!(
-            runtime_err,
-            RuntimeError::InsufficientDiskSpace { .. }
-        ));
-        assert_eq!(runtime_err.category(), "disk_full");
-    }
-
-    // ── 磁盘空间 2：非 disk-full 的 IO 错误不映射为 InsufficientDiskSpace ──
-
-    #[test]
-    fn from_io_disk_space_passes_through_non_disk_full() {
-        let err = std::io::Error::from_raw_os_error(5); // Access denied
-        let runtime_err = RuntimeError::from_io_disk_space(err);
-        assert!(matches!(runtime_err, RuntimeError::Io(_)));
-        assert_eq!(runtime_err.category(), "internal");
-    }
-
-    // ── 错误分类 1：所有新 RuntimeError 变体的 category() 稳定 ──
-
-    #[test]
-    fn runtime_error_categories_are_stable() {
-        assert_eq!(
-            RuntimeError::InsufficientDiskSpace {
-                message: "x".into()
-            }
-            .category(),
-            "disk_full"
-        );
-        assert_eq!(
-            RuntimeError::NetworkUnreachable {
-                message: "x".into()
-            }
-            .category(),
-            "network"
-        );
-        assert_eq!(
-            RuntimeError::ArtifactCorrupted {
-                message: "x".into()
-            }
-            .category(),
-            "corrupted"
-        );
-        assert_eq!(
-            RuntimeError::OperationCancelled {
-                message: "x".into()
-            }
-            .category(),
-            "cancelled"
-        );
-        assert_eq!(
-            RuntimeError::ManifestContractMismatch {
-                message: "x".into()
-            }
-            .category(),
-            "pointer"
-        );
-        assert_eq!(
-            RuntimeError::GenerationVerificationFailed {
-                message: "x".into()
-            }
-            .category(),
-            "pointer"
-        );
-        assert_eq!(
-            RuntimeError::RollbackFailed {
-                message: "x".into()
-            }
-            .category(),
-            "pointer"
-        );
-    }
-
-    // ── min_generations 1：cleanup 保留至少 2 个 generation ──
-
-    #[tokio::test]
-    async fn cleanup_keeps_min_generations() {
-        let descriptor = fake_descriptor("test-min-keep", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        // 安装 1 个 generation（只有 1 个，cleanup 不应删任何东西）
-        let _ = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-
-        // 执行全量 cleanup（None = 清理所有非 current）
-        let scope = CleanupScope::EngineGeneration {
-            engine_id: descriptor.engine_id.clone(),
-            install_ids: None,
-        };
-        execute_cleanup(&scope).unwrap();
-
-        // generation 应仍存在
-        let gens_dir = runtime::generations_dir(&descriptor.engine_id);
-        let count = std::fs::read_dir(&gens_dir).unwrap().count();
-        assert_eq!(count, 1, "只有 1 个 generation 时不应清理");
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    // ── 路径安全 1：cleanup_engine_generations 验证 generation 目录在 engine root 内 ──
-
-    #[test]
-    fn ensure_path_within_rejects_traversal_in_cleanup() {
-        // 验证 ensure_path_within 对路径穿越的拒绝
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let outside = tmp.path().join("../../escape");
-        let result = runtime::ensure_path_within(&root, &outside);
-        // 如果路径不存在，canonicalize 失败，但 ensure_path_within 仍应拒绝
-        // 如果路径存在但在 root 外，应返回 Err
-        assert!(result.is_err() || runtime::ensure_path_within(&root, &root.join("safe")).is_ok());
-    }
-
-    // ── 0.22.6.3 回归测试 ───────────────────────────────────────────────
-
-    // ── 回滚 1：rollback_to_previous 排除 deferred cleanup generation ──
-
-    #[tokio::test]
-    async fn rollback_to_previous_excludes_deferred_cleanup() {
-        let descriptor = fake_descriptor("test-rollback-excludes-deferred", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-
-        // 安装两个 generation
-        let first = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-        // 稍等以确保 installed_at_ms 不同
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let second = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-
-        // current 指向 second
-        let current = read_current_pointer(&descriptor.engine_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(current.install_id, second.install_id);
-
-        // 标记 first 为 deferred cleanup（模拟它之前激活失败）
-        mark_deferred_cleanup(&descriptor.engine_id, &first.install_id, "previous failure")
-            .unwrap();
-
-        // 回滚——first 被 deferred，应无可回滚目标
-        let result = rollback_to_previous(&descriptor.engine_id).unwrap();
+        assert_eq!(m.install_id, r1.install_id);
+        assert_eq!(p.slot, "slot-a");
         assert!(
-            result.is_none(),
-            "唯一可回滚的 generation 被 deferred，应返回 None"
+            DeploymentStore::read_journal(&desc.engine_id)
+                .unwrap()
+                .is_none()
         );
+        assert!(!runtime::staging_dir(&desc.engine_id).join("op-2").exists());
 
-        // current 仍指向 second
-        let current_after = read_current_pointer(&descriptor.engine_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(current_after.install_id, second.install_id);
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        cleanup_engine(&desc);
     }
-
-    // ── 回滚 2：rollback_to_previous 成功回滚到最新可用 generation ──
 
     #[tokio::test]
-    async fn rollback_to_previous_succeeds_with_available_gen() {
-        let descriptor = fake_descriptor("test-rollback-succeeds", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-
-        // 安装两个 generation
-        let first = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let second = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, None)
+    async fn post_switch_verification_failure_rolls_back_to_previous() {
+        let desc = unique_engine("rollback");
+        let ok_provider = FakeProvider::new(true, true, true);
+        let tx = InstallTransaction::new(&desc, &ok_provider);
+        let r1 = tx
+            .execute("op-1", ComputePreference::Auto, None, None)
             .await
             .unwrap();
 
-        // current 指向 second
-        let current = read_current_pointer(&descriptor.engine_id)
+        // 切换后验证失败 → 自动回滚
+        let bad = Arc::new(FakeProvider::new(true, true, true).with_post_switch_failure());
+        let tx = InstallTransaction::new(&desc, bad.as_ref());
+        let err = tx
+            .execute("op-2", ComputePreference::Auto, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::SelfTestFailed { .. }));
+
+        // active 回到 old，candidate slot 删除，journal 清除
+        let (p, m) = DeploymentStore::read_active(&desc.engine_id)
             .unwrap()
             .unwrap();
-        assert_eq!(current.install_id, second.install_id);
+        assert_eq!(m.install_id, r1.install_id);
+        assert_eq!(p.slot, "slot-a");
+        assert!(!DeploymentSlot::B.dir(&desc.engine_id).exists());
+        assert!(
+            DeploymentStore::read_journal(&desc.engine_id)
+                .unwrap()
+                .is_none()
+        );
 
-        // 回滚——应回滚到 first
-        let result = rollback_to_previous(&descriptor.engine_id).unwrap();
-        assert_eq!(result, Some(first.install_id.clone()));
-
-        // current 现在指向 first
-        let current_after = read_current_pointer(&descriptor.engine_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(current_after.install_id, first.install_id);
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        cleanup_engine(&desc);
     }
 
-    // ── 回滚 3：rollback_to_previous 无 current 时返回 None ──
+    #[tokio::test]
+    async fn self_test_failure_in_staging_cleans_journal() {
+        let desc = unique_engine("stfail");
+        let provider = FakeProvider::new(true, true, false);
+        let tx = InstallTransaction::new(&desc, &provider);
+        let err = tx
+            .execute("op-1", ComputePreference::Auto, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::SelfTestFailed { .. }));
 
-    #[test]
-    fn rollback_to_previous_returns_none_when_no_current() {
-        let engine_id = EngineId::new("test-rollback-no-current").unwrap();
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&engine_id));
+        assert!(
+            DeploymentStore::read_pointer(&desc.engine_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            DeploymentStore::read_journal(&desc.engine_id)
+                .unwrap()
+                .is_none()
+        );
 
-        // 无 current.json
-        let result = rollback_to_previous(&engine_id).unwrap();
-        assert!(result.is_none());
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&engine_id));
+        cleanup_engine(&desc);
     }
 
-    // ── 取消 3：cancel_token 在 execute 中各阶段被检查 ──
+    #[tokio::test]
+    async fn cancel_before_prepare_cleans_staging_and_journal() {
+        let desc = unique_engine("cancel1");
+        let provider = FakeProvider::new(true, true, true);
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let tx = InstallTransaction::new(&desc, &provider);
+        let err = tx
+            .execute("op-1", ComputePreference::Auto, Some(&token), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::OperationCancelled { .. }));
+        assert!(
+            DeploymentStore::read_journal(&desc.engine_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!runtime::staging_dir(&desc.engine_id).join("op-1").exists());
+
+        cleanup_engine(&desc);
+    }
 
     #[tokio::test]
     async fn cancel_token_check_at_each_stage() {
-        let descriptor = fake_descriptor("test-cancel-stages", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
+        // prepare 成功后、self-test 前取消——wrapper 在 prepare 返回前设置取消标记
+        let desc = unique_engine("cancel2");
+        let provider = FakeProvider::new(true, true, true);
+        let token = tokio_util::sync::CancellationToken::new();
+        let provider = CancelAfterPrepareProvider {
+            inner: provider,
+            token: token.clone(),
         };
-        let ct = tokio_util::sync::CancellationToken::new();
-
-        // 未取消时正常执行
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, Some(&ct), None)
+        let tx = InstallTransaction::new(&desc, &provider);
+        let err = tx
+            .execute("op-1", ComputePreference::Auto, Some(&token), None)
             .await
-            .unwrap();
-        assert!(!result.install_id.is_empty());
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::OperationCancelled { .. }));
+        assert!(
+            DeploymentStore::read_journal(&desc.engine_id)
+                .unwrap()
+                .is_none()
+        );
 
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        cleanup_engine(&desc);
     }
 
-    // ── 取消 4：provider 收到 cancel_token 并响应（FakeProvider 不实际使用，验证传递不 panic）──
+    /// prepare 完成后设置取消标记的 wrapper provider。
+    struct CancelAfterPrepareProvider<P> {
+        inner: P,
+        token: tokio_util::sync::CancellationToken,
+    }
+
+    #[async_trait]
+    impl<P: RuntimeProvider + Sync> RuntimeProvider for CancelAfterPrepareProvider<P> {
+        fn kind(&self) -> RuntimePlan {
+            self.inner.kind()
+        }
+        fn check_compatibility(&self, c: &CompatibilityCheck) -> Result<bool, RuntimeError> {
+            self.inner.check_compatibility(c)
+        }
+        async fn prepare_environment(
+            &self,
+            staging_dir: &std::path::Path,
+            plan: &InstallPlan,
+            profile: &ResolvedProfile,
+            _cancel_token: Option<&tokio_util::sync::CancellationToken>,
+            sink: Option<&dyn InstallSink>,
+        ) -> Result<PrepareResult, RuntimeError> {
+            let r = self
+                .inner
+                .prepare_environment(staging_dir, plan, profile, None, sink)
+                .await?;
+            // prepare 成功后立刻取消——下一阶段（self-test 前）检查点会命中
+            self.token.cancel();
+            Ok(r)
+        }
+        async fn self_test(
+            &self,
+            d: &std::path::Path,
+            plan: &InstallPlan,
+            ct: Option<&tokio_util::sync::CancellationToken>,
+            sink: Option<&dyn InstallSink>,
+        ) -> Result<(), RuntimeError> {
+            self.inner.self_test(d, plan, ct, sink).await
+        }
+        fn build_manifest_extension(
+            &self,
+            d: &std::path::Path,
+            plan: &InstallPlan,
+        ) -> Result<ManifestExtension, RuntimeError> {
+            self.inner.build_manifest_extension(d, plan)
+        }
+    }
+
+    // ── 共享 artifact 引用保护 ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn cancel_token_passed_to_provider_without_panic() {
-        let descriptor = fake_descriptor("test-cancel-passed", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let ct = tokio_util::sync::CancellationToken::new();
-
-        // cancel_token 被传入，prepare 和 self_test 都应收到
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, Some(&ct), None)
+    async fn cleanup_shared_artifact_with_active_reference_rejected() {
+        let desc = unique_engine("shared");
+        let provider = FakeProvider::new(true, true, true);
+        let tx = InstallTransaction::new(&desc, &provider);
+        tx.execute("op-1", ComputePreference::Auto, None, None)
             .await
             .unwrap();
-        assert!(result.fell_back == false);
 
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        // active 部署引用的 artifact 拒绝清理
+        let artifact_id = fake_descriptor().profiles[0].artifact_id.clone();
+        let err = execute_cleanup(&CleanupScope::ProviderSharedArtifact {
+            runtime_kind: RuntimePlan::PythonVenv,
+            artifact_id: artifact_id.clone(),
+        })
+        .unwrap_err();
+        assert!(matches!(err, RuntimeError::ArtifactStillReferenced { .. }));
+
+        cleanup_engine(&desc);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // 0.22.6 H5 综合测试：InstallSink 阶段顺序 / 日志 seq / 隔离
-    // ═══════════════════════════════════════════════════════════════════════
+    #[tokio::test]
+    async fn cleanup_shared_artifact_without_reference_succeeds() {
+        let artifact_id = ArtifactId::new("shared-unref-artifact-0001").unwrap();
+        let dir = runtime::shared_artifact_dir(RuntimePlan::PythonVenv, &artifact_id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload.bin"), b"x").unwrap();
 
-    /// 记录型 InstallSink——捕获所有 on_stage / on_log 调用用于断言。
+        execute_cleanup(&CleanupScope::ProviderSharedArtifact {
+            runtime_kind: RuntimePlan::PythonVenv,
+            artifact_id: artifact_id.clone(),
+        })
+        .unwrap();
+        assert!(!dir.exists());
+    }
+
+    // ── slot 清理 ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cleanup_rejects_active_slot() {
+        let desc = unique_engine("cleanup-active");
+        let provider = FakeProvider::new(true, true, true);
+        let tx = InstallTransaction::new(&desc, &provider);
+        tx.execute("op-1", ComputePreference::Auto, None, None)
+            .await
+            .unwrap();
+
+        let err = execute_cleanup(&CleanupScope::EngineDeploymentSlot {
+            engine_id: desc.engine_id.clone(),
+            slot: "slot-a".to_string(),
+        })
+        .unwrap_err();
+        assert!(matches!(err, RuntimeError::CleanupFailed { .. }));
+
+        cleanup_engine(&desc);
+    }
+
+    #[tokio::test]
+    async fn ensure_path_within_rejects_traversal_in_cleanup() {
+        let desc = unique_engine("traversal");
+        let engine_root = runtime::engine_root(&desc.engine_id);
+        std::fs::create_dir_all(&engine_root).unwrap();
+        let escape = engine_root.join("..").join("..").join("etc");
+        assert!(runtime::ensure_path_within(&engine_root, &escape).is_err());
+        let _ = std::fs::remove_dir_all(&engine_root);
+    }
+
+    // ── 错误分类 ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_io_disk_space_detects_disk_full() {
+        #[cfg(windows)]
+        let disk_full = std::io::Error::from_raw_os_error(112);
+        #[cfg(not(windows))]
+        let disk_full = std::io::Error::from_raw_os_error(28);
+        assert!(matches!(
+            RuntimeError::from_io_disk_space(disk_full),
+            RuntimeError::InsufficientDiskSpace { .. }
+        ));
+
+        let other = std::io::Error::from_raw_os_error(5);
+        assert!(matches!(
+            RuntimeError::from_io_disk_space(other),
+            RuntimeError::Io(_)
+        ));
+    }
+
+    // ── InstallSink 阶段序列 ───────────────────────────────────────────────
+
     struct RecordingSink {
-        stages: std::sync::Mutex<Vec<String>>,
-        logs: std::sync::Mutex<Vec<(String, String)>>,
+        stages: Mutex<Vec<String>>,
+        logs: Mutex<Vec<String>>,
     }
 
     impl RecordingSink {
         fn new() -> Self {
             Self {
-                stages: std::sync::Mutex::new(Vec::new()),
-                logs: std::sync::Mutex::new(Vec::new()),
+                stages: Mutex::new(Vec::new()),
+                logs: Mutex::new(Vec::new()),
             }
-        }
-
-        fn stages(&self) -> Vec<String> {
-            self.stages.lock().unwrap().clone()
-        }
-
-        fn logs(&self) -> Vec<(String, String)> {
-            self.logs.lock().unwrap().clone()
         }
     }
 
@@ -2644,34 +1643,22 @@ mod tests {
         fn on_stage(&self, stage: &str) {
             self.stages.lock().unwrap().push(stage.to_string());
         }
-
         fn on_log(&self, level: &str, text: &str) {
-            self.logs
-                .lock()
-                .unwrap()
-                .push((level.to_string(), text.to_string()));
+            self.logs.lock().unwrap().push(format!("[{level}] {text}"));
         }
     }
 
-    /// 验证安装事务的完整阶段顺序：
-    /// preparing → downloading → verifying → promoting → switching → validating → completed
     #[tokio::test]
     async fn install_sink_stage_sequence_is_correct() {
-        let descriptor = fake_descriptor("test-sink-stages", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+        let desc = unique_engine("sink");
+        let provider = FakeProvider::new(true, true, true);
         let sink = RecordingSink::new();
-
-        InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, Some(&sink))
+        let tx = InstallTransaction::new(&desc, &provider);
+        tx.execute("op-1", ComputePreference::Auto, None, Some(&sink))
             .await
             .unwrap();
 
-        let stages = sink.stages();
+        let stages = sink.stages.lock().unwrap().clone();
         assert_eq!(
             stages,
             vec![
@@ -2681,158 +1668,168 @@ mod tests {
                 "promoting",
                 "switching",
                 "validating",
-                "completed",
-            ],
-            "阶段顺序必须严格为 preparing → downloading → verifying → promoting → switching → validating → completed"
+                "completed"
+            ]
         );
 
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        cleanup_engine(&desc);
     }
 
-    /// 验证 prepare_environment 失败时阶段为 preparing → downloading → failed。
     #[tokio::test]
     async fn install_sink_stages_on_prepare_failure() {
-        let descriptor = fake_descriptor("test-sink-prepare-fail", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: false,
-            self_test_ok: true,
-        };
+        let desc = unique_engine("sinkfail");
+        let provider = FakeProvider::new(true, false, true);
         let sink = RecordingSink::new();
-
-        let _ = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, Some(&sink))
+        let tx = InstallTransaction::new(&desc, &provider);
+        let _ = tx
+            .execute("op-1", ComputePreference::Auto, None, Some(&sink))
             .await;
+        let stages = sink.stages.lock().unwrap().clone();
+        assert_eq!(stages, vec!["preparing", "downloading", "failed"]);
 
-        let stages = sink.stages();
-        assert_eq!(
-            stages,
-            vec!["preparing", "downloading", "failed"],
-            "prepare 失败时阶段应为 preparing → downloading → failed"
-        );
-
-        // 失败时应有一条 error 级别日志
-        let logs = sink.logs();
-        assert!(
-            logs.iter().any(|(level, _)| level == "error"),
-            "prepare 失败应有 error 级别日志"
-        );
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        cleanup_engine(&desc);
     }
 
-    /// 验证 self_test 失败时阶段包含 verifying → failed。
-    #[tokio::test]
-    async fn install_sink_stages_on_self_test_failure() {
-        let descriptor = fake_descriptor("test-sink-selftest-fail", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: false,
-        };
-        let sink = RecordingSink::new();
-
-        let _ = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, Some(&sink))
-            .await;
-
-        let stages = sink.stages();
-        assert!(
-            stages.contains(&"verifying".to_string()),
-            "self_test 阶段应包含 verifying"
-        );
-        assert!(
-            stages.last() == Some(&"failed".to_string()),
-            "self_test 失败时最后阶段应为 failed"
-        );
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    /// 验证安装日志的 seq 在同一 operation_id 内单调递增。
-    ///
-    /// 此测试通过 RecordingSink 捕获所有日志调用，
-    /// 由于 InstallSink trait 本身不暴露 seq（seq 由 app 层 InstallSinkAdapter 分配），
-    /// 这里验证日志条目数量 > 0 且每条都有有效 level。
     #[tokio::test]
     async fn install_sink_logs_are_emitted_during_install() {
-        let descriptor = fake_descriptor("test-sink-logs", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+        let desc = unique_engine("sinklog");
+        let provider = FakeProvider::new(true, true, true);
         let sink = RecordingSink::new();
-
-        InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, Some(&sink))
+        let tx = InstallTransaction::new(&desc, &provider);
+        tx.execute("op-1", ComputePreference::Auto, None, Some(&sink))
             .await
             .unwrap();
+        assert!(!sink.logs.lock().unwrap().is_empty());
 
-        let logs = sink.logs();
-        // InstallTransaction::execute 至少会在 staging 目录创建后发一条 info 日志
-        assert!(!logs.is_empty(), "安装过程中应至少有一条日志输出");
-
-        // 所有日志级别应为有效值
-        for (level, _) in &logs {
-            assert!(
-                matches!(level.as_str(), "info" | "warn" | "error"),
-                "日志级别必须为 info/warn/error，实际为: {level}"
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+        cleanup_engine(&desc);
     }
 
-    /// 验证取消时阶段为 cancelled。
-    #[tokio::test]
-    async fn install_sink_stage_cancelled_when_cancelled_before_prepare() {
-        let descriptor = fake_descriptor("test-sink-cancel", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
-        let sink = RecordingSink::new();
-        let ct = tokio_util::sync::CancellationToken::new();
-        ct.cancel();
-
-        let _ = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, Some(&ct), Some(&sink))
-            .await;
-
-        let stages = sink.stages();
-        assert_eq!(
-            stages,
-            vec!["cancelled"],
-            "开始前取消应只触发 cancelled 阶段"
-        );
-
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-    }
-
-    /// 验证 NoopInstallSink 不 panic 且不影响安装流程。
     #[tokio::test]
     async fn noop_install_sink_does_not_break_install() {
-        let descriptor = fake_descriptor("test-noop-sink", vec![cpu_profile()]);
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
-        let provider = FakeProvider {
-            compatible: true,
-            prepare_ok: true,
-            self_test_ok: true,
-        };
+        let desc = unique_engine("noop");
+        let provider = FakeProvider::new(true, true, true);
         let sink = NoopInstallSink;
+        let tx = InstallTransaction::new(&desc, &provider);
+        assert!(
+            tx.execute("op-1", ComputePreference::Auto, None, Some(&sink))
+                .await
+                .is_ok()
+        );
 
-        let result = InstallTransaction::new(&descriptor, &provider)
-            .execute(ComputePreference::Cpu, None, Some(&sink))
-            .await;
+        cleanup_engine(&desc);
+    }
 
-        assert!(result.is_ok(), "NoopInstallSink 不应影响安装流程");
+    // ── 并发：不同引擎可并行安装 ───────────────────────────────────────────
 
-        let _ = std::fs::remove_dir_all(runtime::engine_root(&descriptor.engine_id));
+    #[tokio::test]
+    async fn different_engines_install_concurrently() {
+        let desc_a = unique_engine("conc-a");
+        let desc_b = unique_engine("conc-b");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        // provider 在 prepare 内等待 barrier——两引擎同时进入 prepare 才能完成
+        struct BarrierProvider {
+            _inner: FakeProvider,
+            barrier: Arc<tokio::sync::Barrier>,
+            entered: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl RuntimeProvider for BarrierProvider {
+            fn kind(&self) -> RuntimePlan {
+                RuntimePlan::PythonVenv
+            }
+            fn check_compatibility(&self, _c: &CompatibilityCheck) -> Result<bool, RuntimeError> {
+                Ok(true)
+            }
+            async fn prepare_environment(
+                &self,
+                staging_dir: &std::path::Path,
+                _plan: &InstallPlan,
+                _profile: &ResolvedProfile,
+                _ct: Option<&tokio_util::sync::CancellationToken>,
+                _sink: Option<&dyn InstallSink>,
+            ) -> Result<PrepareResult, RuntimeError> {
+                self.entered.fetch_add(1, Ordering::SeqCst);
+                self.barrier.wait().await; // 双方都进入才放行
+                std::fs::create_dir_all(staging_dir.join("venv")).unwrap();
+                Ok(PrepareResult {
+                    artifact: runtime::ArtifactIdentity {
+                        runtime_kind: RuntimePlan::PythonVenv,
+                        artifact_id: fake_descriptor().profiles[0].artifact_id.clone(),
+                        sha256: "b".repeat(64),
+                    },
+                })
+            }
+            async fn self_test(
+                &self,
+                _d: &std::path::Path,
+                _plan: &InstallPlan,
+                _ct: Option<&tokio_util::sync::CancellationToken>,
+                _sink: Option<&dyn InstallSink>,
+            ) -> Result<(), RuntimeError> {
+                Ok(())
+            }
+            fn build_manifest_extension(
+                &self,
+                _d: &std::path::Path,
+                _plan: &InstallPlan,
+            ) -> Result<ManifestExtension, RuntimeError> {
+                Ok(ManifestExtension::PythonVenv(runtime::PythonManifestExt {
+                    python_version: "3.12.8".to_string(),
+                    python_artifact_id: fake_descriptor().profiles[0].artifact_id.clone(),
+                    packages: Vec::new(),
+                    uv_version: "0.6.10".to_string(),
+                    index_url: None,
+                    self_test_passed: true,
+                }))
+            }
+        }
+
+        let pa = BarrierProvider {
+            _inner: FakeProvider::new(true, true, true),
+            barrier: barrier.clone(),
+            entered: AtomicUsize::new(0),
+        };
+        let pb = BarrierProvider {
+            _inner: FakeProvider::new(true, true, true),
+            barrier,
+            entered: AtomicUsize::new(0),
+        };
+
+        let tx_a = InstallTransaction::new(&desc_a, &pa);
+        let tx_b = InstallTransaction::new(&desc_b, &pb);
+        let (ra, rb) = tokio::join!(
+            tx_a.execute("op-conc-a", ComputePreference::Auto, None, None),
+            tx_b.execute("op-conc-b", ComputePreference::Auto, None, None)
+        );
+        assert!(ra.is_ok());
+        assert!(rb.is_ok());
+
+        cleanup_engine(&desc_a);
+        cleanup_engine(&desc_b);
+    }
+
+    // ── journal 阶段语义（直接构造 journal 验证 recover 兼容）────────────
+
+    #[test]
+    fn transaction_journal_serde_roundtrip() {
+        let j = TransactionJournal {
+            schema_version:
+                crate::infra::local_engine::deployment::TRANSACTION_JOURNAL_SCHEMA_VERSION,
+            engine_id: "fake-x".to_string(),
+            operation_id: "op-1".to_string(),
+            candidate_slot: "slot-b".to_string(),
+            candidate_install_id: "dep-1".to_string(),
+            previous: Some(crate::infra::local_engine::deployment::PreviousDeployment {
+                install_id: "dep-0".to_string(),
+                slot: "slot-a".to_string(),
+            }),
+            phase: TransactionPhase::Switched,
+            started_at_ms: 0,
+        };
+        let json = serde_json::to_string(&j).unwrap();
+        let back: TransactionJournal = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, j);
     }
 }

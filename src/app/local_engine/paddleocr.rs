@@ -1,7 +1,7 @@
 //! PaddleOCR 本地引擎 adapter（0.22.5）。
 //!
 //! 把 PP-OCRv6 Python 服务注册为 `LocalEngineAdapter`，使安装、启动、
-//! 模型轮询、日志、空间和清理通过 `LocalEngineService` 管理。
+//! 模型轮询、日志、空间和清理通过 `EngineManager` 管理。
 //!
 //! ## 设计铁则
 //!
@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use crate::domain::local_engine::{
     AdapterConfig, AdapterSelfTest, CapabilityKind, CleanupPolicy, ComputeCandidate,
-    DiagnosticEntry, EngineDescriptor, EngineDiagnostic, EngineDisplay, EngineTimeouts, ErrorPhase,
+    DiagnosticEntry, EngineDefinition, EngineDiagnostic, EngineDisplay, EngineTimeouts, ErrorPhase,
     HealthMapping, InstallPlanRef, LaunchContext, LaunchDescriptor, LifecyclePolicy,
     LocalEngineAdapter, LocalEngineError, LocalEngineErrorCode, ModelHealth, ResolvedLaunch,
     ResourceBudget, ServiceHealth,
@@ -49,7 +49,7 @@ use crate::infra::local_engine::providers::{
 use crate::infra::local_engine::runtime as engine_runtime;
 use crate::infra::local_engine::runtime::{
     ArtifactId, BackendObservation, ChecksumSource, ComputeBackend, ComputePreference, EngineId,
-    ModelContract, RuntimeKind,
+    ModelContract, RuntimePlan,
 };
 
 /// 嵌入的 blink_ocr_server.py 脚本（随 Rust 二进制发布）。
@@ -83,7 +83,7 @@ pub const PADDLEOCR_ENGINE_ID: &str = "paddleocr";
 /// - **不发送 Tauri 事件**：返回纯数据，由 app 层桥接。
 /// - **不持有 AppHandle**：adapter 是纯逻辑，不接触 Tauri。
 pub struct PaddleocrAdapter {
-    descriptor: EngineDescriptor,
+    descriptor: EngineDefinition,
 }
 
 impl PaddleocrAdapter {
@@ -104,7 +104,7 @@ impl Default for PaddleocrAdapter {
 }
 
 impl LocalEngineAdapter for PaddleocrAdapter {
-    fn descriptor(&self) -> &EngineDescriptor {
+    fn descriptor(&self) -> &EngineDefinition {
         &self.descriptor
     }
 
@@ -342,13 +342,13 @@ impl LocalEngineAdapter for PaddleocrAdapter {
 ///
 /// descriptor 必须锁定现有 Python/package/profile/model contract。
 /// 使用 0.22.2 `PythonVenvProvider`；不新造第二套安装器。
-fn make_paddleocr_descriptor() -> EngineDescriptor {
+fn make_paddleocr_descriptor() -> EngineDefinition {
     let python_artifact = ArtifactId::new("python-3.12.8").unwrap();
 
     let (det_model, rec_model) = PaddleModel::Tiny.official_model_names();
     let model_id = format!("PP-OCRv6:{}:{}", det_model, rec_model);
 
-    EngineDescriptor {
+    EngineDefinition {
         engine_id: EngineId::new(PADDLEOCR_ENGINE_ID).unwrap(),
         display: EngineDisplay {
             name: "PP-OCRv6 文字识别".to_string(),
@@ -357,9 +357,9 @@ fn make_paddleocr_descriptor() -> EngineDescriptor {
             version: "0.22.4".to_string(),
         },
         capability_kind: CapabilityKind::Ocr,
-        runtime_kind: RuntimeKind::PythonVenv,
+        runtime_kind: RuntimePlan::PythonVenv,
         install_plan: InstallPlanRef {
-            runtime_kind: RuntimeKind::PythonVenv,
+            runtime_kind: RuntimePlan::PythonVenv,
             artifact_ids: vec![python_artifact.clone()],
             compute_candidates: vec![ComputeCandidate {
                 preference: ComputePreference::Cpu,
@@ -552,7 +552,7 @@ fn locked_packages() -> Vec<PackageLock> {
 
 /// 构造 PaddleOCR 的 `ProviderDescriptor`（infra 层安装事务用）。
 ///
-/// 与 `make_paddleocr_descriptor()`（domain 层 `EngineDescriptor`）互补。
+/// 与 `make_paddleocr_descriptor()`（domain 层 `EngineDefinition`）互补。
 ///
 /// **包列表来源**：`resources/ocr/paddleocr/locked-requirements.txt`（唯一锁源）。
 /// 以 `include_str!` 嵌入，运行时解析生成 `PackageLock` 列表。
@@ -568,7 +568,7 @@ pub fn make_paddleocr_provider_descriptor() -> ProviderDescriptor {
 
     ProviderDescriptor {
         engine_id: EngineId::new(PADDLEOCR_ENGINE_ID).unwrap(),
-        runtime_kind: RuntimeKind::PythonVenv,
+        runtime_kind: RuntimePlan::PythonVenv,
         display_name: "PP-OCRv6 文字识别".to_string(),
         profiles: vec![ProfileCandidate {
             profile_id: "cpu-x64".to_string(),
@@ -593,13 +593,12 @@ pub fn make_paddleocr_provider_descriptor() -> ProviderDescriptor {
             self_test_script:
                 "import paddle; import paddleocr; import fastapi; import uvicorn; paddle.utils.run_check()".to_string(),
         }),
-        min_generations: 2,
     }
 }
 
 /// 创建 PaddleOCR 的 `PythonVenvProvider` 实例。
 ///
-/// `LocalEngineService` 持有此实例，在 `install` 时传给 `InstallTransaction`。
+/// `EngineManager` 持有此实例，在 `install` 时传给 `InstallTransaction`。
 pub fn make_paddleocr_python_provider() -> PythonVenvProvider {
     PythonVenvProvider::new()
 }
@@ -967,12 +966,11 @@ fn map_paddleocr_health(raw_health: &serde_json::Value) -> HealthMapping {
 ///
 /// 返回 `None` 表示尚未安装（current.json 不存在或 venv 目录缺失）。
 fn generation_venv_python(engine_id: &EngineId) -> Option<PathBuf> {
-    let pointer = engine_runtime::read_current_pointer(engine_id).ok()?;
-    let install_id = pointer?.install_id;
-    let python_exe = engine_runtime::generation_dir(engine_id, &install_id)
-        .join("venv")
-        .join("Scripts")
-        .join("python.exe");
+    let (_pointer, dir) =
+        crate::infra::local_engine::deployment::DeploymentStore::active_dir(engine_id)
+            .ok()
+            .flatten()?;
+    let python_exe = dir.join("venv").join("Scripts").join("python.exe");
     if python_exe.exists() {
         Some(python_exe)
     } else {
@@ -1435,7 +1433,7 @@ mod tests {
     /// Task 4: 验证 health 报告不一致的 model_id 时仍映射（由上层验证）
     ///
     /// map_paddleocr_health 是纯映射函数，不做身份验证——
-    /// 身份验证由 LocalEngineService.parse_and_verify_health 负责。
+    /// 身份验证由 EngineManager.parse_and_verify_health 负责。
     /// 这里验证映射函数忠实传递 health 报告的值，不做静默修正。
     #[test]
     fn map_health_mismatched_model_id_passes_through() {

@@ -5,7 +5,7 @@ pub mod command_error; // 0.14.7 W3：IPC 边界的结构化错误协议
 pub mod commands;
 pub mod config;
 pub mod domain_env; // 0.14.6 §2.2：TauriDomainEnv——DomainEnv trait 的 Tauri 实现
-pub mod local_engine; // 0.22.3：本地引擎生命周期编排服务（LocalEngineService + EngineRegistry）
+pub mod local_engine; // 0.22.3：本地引擎生命周期编排服务（EngineManager + EngineRegistry）
 pub mod mcp_server_runtime; // 0.19.13：主进程 Streamable HTTP MCP Server 生命周期管理
 pub mod service;
 pub mod setting_service;

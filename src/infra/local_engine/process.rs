@@ -1153,7 +1153,7 @@ impl ManagedProcess {
     /// - `rx.borrow().clone()` 获取当前状态快照
     /// - `rx.changed().await` 等待状态变更
     ///
-    /// `LocalEngineService` 使用此方法监听进程意外退出，
+    /// `EngineManager` 使用此方法监听进程意外退出，
     /// 在 server crash 后收敛 `EngineStatus` 到 Exited/Unreachable。
     pub fn subscribe_status(&self) -> watch::Receiver<ProcessStatus> {
         self.status_notify.subscribe()

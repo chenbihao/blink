@@ -54,7 +54,7 @@ pub enum SttError {
 /// 0.22.6 H4（批次 3）：替代此前对 `crate::app::local_engine::service::LocalEngineConnection`
 /// 的直接引用——domain 层不得依赖 app 层。
 ///
-/// app 层（`VoiceService`）负责把 `LocalEngineService::get_connection` 的结果
+/// app 层（`VoiceService`）负责把 `EngineManager::get_connection` 的结果
 /// 投影为此类型再传入 `create_engine`。
 ///
 /// **结构化 endpoint**——不再通过 `rsplit(':')` + `unwrap_or(8100)` 猜测端口。

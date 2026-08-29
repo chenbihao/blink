@@ -815,7 +815,7 @@ fn main() {
             // 后台预热次级窗口（1s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
 
-            // 0.22.3: 构造进程级 LocalEngineService（全进程唯一实例）
+            // 0.22.3: 构造进程级 EngineManager（全进程唯一实例）
             //
             // - 编译期注册 FunASR + PaddleOCR adapter
             // - TauriEventPort 负责通用事件投影 + 旧 FunASR 兼容投影
@@ -855,44 +855,25 @@ fn main() {
                 paddleocr_descriptor,
             );
 
+            // 单一 EngineManager：环境部署 + 模型资产 + 进程生命周期 + 事件。
+            // 模型目录与安装 worker 在构造时注入——不再有平级的 ModelService。
+            // 模型状态从磁盘 manifest 按需读取（结构校验，不做全量 hash）。
             let local_engine_service =
-                crate::app::local_engine::LocalEngineService::new_with_providers(
+                crate::app::local_engine::EngineManager::new_with_providers(
                     engine_registry,
-                    event_port.clone(),
+                    event_port,
                     provider_descriptors,
                     python_provider,
+                    crate::app::local_engine::model_installer::make_funasr_model_registry(),
+                    std::sync::Arc::new(
+                        crate::app::local_engine::model_installer::FunasrModelInstallWorker::new(),
+                    ),
                 );
             app.manage(local_engine_service.clone());
             tracing::info!(
                 epoch = local_engine_service.epoch().0,
-                "LocalEngineService 已构造（funasr + paddleocr adapter 已注册）"
+                "EngineManager 已构造（funasr + paddleocr adapter 与模型目录已注册）"
             );
-
-            // 0.22.6 H5: 构造 ModelService 并注册为 managed state
-            //
-            // ModelService 独立于 LocalEngineService，专注模型资产生命周期
-            // （下载/校验/删除/修复），与引擎进程管理正交。
-            // 目前只注册 FunASR 模型。
-            //
-            // B2: worker 使用真实 FunasrModelInstallWorker（ModelScope 下载）。
-            // 注入共享 event_port——模型安装日志/阶段实时广播到前端日志面板。
-            let model_service = std::sync::Arc::new(
-                crate::app::local_engine::model_service::ModelService::new(
-                    crate::app::local_engine::model_service::make_funasr_model_registry(),
-                    std::sync::Arc::new(
-                        crate::app::local_engine::model_service::FunasrModelInstallWorker::new(),
-                    ),
-                    event_port,
-                ),
-            );
-            // B2: 从磁盘恢复模型状态（manifest → Installed/Corrupted）
-            if let Err(e) =
-                tauri::async_runtime::block_on(model_service.restore_states_from_disk())
-            {
-                tracing::warn!(error = %e, "ModelService 磁盘状态恢复失败（不阻塞启动）");
-            }
-            app.manage(model_service);
-            tracing::info!("ModelService 已构造（funasr 模型已注册）");
 
             // 0.22.6.6: 后台扫描遗留 lease——基于证据的 fail-closed 恢复
             //
@@ -1044,7 +1025,7 @@ fn main() {
 
             // 0.22.4: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
             //
-            // - OcrCoordinator 持有 LocalEngineService 受限依赖
+            // - OcrCoordinator 持有 EngineManager 受限依赖
             // - 路由 windows/paddleocr/auto 三种模式
             // - in-flight tracker + singleflight + idle TTL
             // - ocr_image Capability 和截图 OCR 通过 router() 获取实例
@@ -1074,7 +1055,7 @@ fn main() {
 
             // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
             //
-            // 0.22.3: 改为调用 LocalEngineService.start("funasr")
+            // 0.22.3: 改为调用 EngineManager.start("funasr")
             // 0.22.6 H4: 自启语义——只有语音功能启用、本地模式、选择模型可用且
             // auto_start=true 时启动；读取/保存本身不隐式启动。
             // 是否立即启动由显式 start action 决定。
@@ -1111,7 +1092,7 @@ fn main() {
                         )
                         .expect("funasr engine id is valid");
 
-                        // 0.22.3: 环境检查 + 安装统一走 LocalEngineService
+                        // 0.22.3: 环境检查 + 安装统一走 EngineManager
                         // 不再直接调用 platform::python::setup_with_progress
                         if let Err(e) = svc.ensure_installed(&engine_id, adapter_config.clone()).await {
                             tracing::error!(%e, "自动启动: 环境安装失败");
@@ -1120,7 +1101,7 @@ fn main() {
 
                         match svc.start(&engine_id, adapter_config).await {
                             Ok(()) => {
-                                tracing::info!("funasr-server 已通过 LocalEngineService 自动启动");
+                                tracing::info!("funasr-server 已通过 EngineManager 自动启动");
                             }
                             Err(e) => {
                                 tracing::error!(%e, "funasr-server 自动启动失败");
@@ -1563,10 +1544,10 @@ app::commands::repair_local_engine,
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
 
-                // Blink 退出时通过 LocalEngineService 统一回收所有受管实例（0.22.3）
+                // Blink 退出时通过 EngineManager 统一回收所有受管实例（0.22.3）
                 // 单个引擎失败不能阻止其他实例或 MCP 等服务退出清理。
                 if let Some(svc) = _app
-                    .try_state::<std::sync::Arc<crate::app::local_engine::LocalEngineService>>()
+                    .try_state::<std::sync::Arc<crate::app::local_engine::EngineManager>>()
                 {
                     svc.shutdown_all_blocking();
                 }

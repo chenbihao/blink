@@ -135,7 +135,7 @@ impl PseudoStreamingSttEngine {
     /// 创建伪流式 STT 引擎。
     ///
     /// 0.22.6 批次 3: `port` 和 `token` 来自 `SttEngineConnection`（由 app 层从
-    /// `LocalEngineService::get_connection` 投影而来）。health 和 transcribe 使用同一连接快照。
+    /// `EngineManager::get_connection` 投影而来）。health 和 transcribe 使用同一连接快照。
     pub fn new(
         config: &crate::domain::config::stt_config::SttConfig,
         port: u16,

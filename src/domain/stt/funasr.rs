@@ -14,7 +14,7 @@
 //!
 //! ServerStartParams / build_launch_request / start_server / mark_server_stopped
 //! 已删除。启动逻辑完全由 `app/local_engine/funasr.rs` 的 `FunasrAdapter::prepare_launch`
-//! 通过 `LocalEngineService` 统一管理，使用 generation-based 隔离环境。
+//! 通过 `EngineManager` 统一管理，使用 generation-based 隔离环境。
 //!
 //! ## 兼容性
 //!
@@ -340,7 +340,7 @@ fn strip_ansi(s: &str) -> String {
 /// 也**不区分端口占用者是否为 Blink 管理的子进程**。
 ///
 /// 以下情况都会返回 `true`：
-/// - Blink 通过 LocalEngineService 启动的子进程正在监听
+/// - Blink 通过 EngineManager 启动的子进程正在监听
 /// - Blink 崩溃后遗留的孤儿进程仍在监听（child handle 已丢失）
 /// - 其他程序恰好占用了同一端口
 ///
@@ -599,11 +599,11 @@ pub async fn check_model_ready_or_error(port: u16) -> Result<(), String> {
 //
 // 0.22.6：ServerStartParams / build_launch_request / start_server / mark_server_stopped
 // 已删除。启动逻辑完全由 app/local_engine/funasr.rs 的 FunasrAdapter::prepare_launch
-// 通过 LocalEngineService 统一管理。此模块仅保留工具函数和 HTTP 健康检查。
+// 通过 EngineManager 统一管理。此模块仅保留工具函数和 HTTP 健康检查。
 
 /// 生成 server 的 base_url（供 HTTP 转录使用）。
 ///
-/// 0.22.3：使用 `127.0.0.1` 而非 `localhost`，与 LocalEngineService 的
+/// 0.22.3：使用 `127.0.0.1` 而非 `localhost`，与 EngineManager 的
 /// Endpoint 协议一致——Endpoint 只允许 loopback。
 pub fn server_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/v1")
@@ -1182,13 +1182,15 @@ mod tests {
     async fn hermetic_install_restore_selection_gate_health_and_transcribe() {
         use std::sync::Arc;
 
-        use crate::app::local_engine::model_service::{FakeInstaller, ModelRegistry, ModelService};
+        use crate::app::local_engine::model_installer::{FakeInstaller, ModelRegistry};
+        use crate::app::local_engine::registry::EngineRegistry;
+        use crate::app::local_engine::service::{EngineManager, NoopEventPort};
         use crate::domain::local_engine::EngineModelDescriptor;
         use crate::domain::stt::{SttEngine, local::LocalSttEngine};
         use crate::infra::local_engine::{model_storage, runtime};
 
-        let _storage_guard =
-            crate::app::local_engine::model_service::acquire_model_storage_test_lock().await;
+        static MODEL_STORAGE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _storage_guard = MODEL_STORAGE_TEST_LOCK.lock().await;
 
         let unique = format!(
             "e2e-{}",
@@ -1220,12 +1222,19 @@ mod tests {
         }
         let _cleanup = Cleanup(asset_root);
 
-        let installer = Arc::new(FakeInstaller::success());
-        let service = ModelService::new(
-            registry.clone(),
-            installer.clone(),
-            Arc::new(crate::app::local_engine::service::NoopEventPort),
-        );
+        let make_manager = || {
+            EngineManager::new_with_providers(
+                Arc::new(EngineRegistry::new_with_adapters(vec![
+                    crate::app::local_engine::funasr::make_funasr_adapter(),
+                ])),
+                Arc::new(NoopEventPort),
+                std::collections::HashMap::new(),
+                crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+                registry.clone(),
+                Arc::new(FakeInstaller::success()),
+            )
+        };
+        let service = make_manager();
         let installed = service
             .install_model(&engine_id, &unique, Some("e2e-install".to_string()))
             .await
@@ -1236,12 +1245,8 @@ mod tests {
             installed.error
         );
 
-        let restored_service = ModelService::new(
-            registry,
-            installer,
-            Arc::new(crate::app::local_engine::service::NoopEventPort),
-        );
-        restored_service.restore_states_from_disk().await.unwrap();
+        // "重启"= 新 EngineManager 实例——模型状态从磁盘 manifest 无状态读取
+        let restored_service = make_manager();
         let restored = restored_service
             .get_model_status(&engine_id, &unique)
             .await

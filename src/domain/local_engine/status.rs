@@ -5,7 +5,7 @@
 //!
 //! ## 状态版本语义
 //!
-//! - `service_epoch`：每次 `LocalEngineService` 实例随机生成。
+//! - `service_epoch`：每次 `EngineManager` 实例随机生成。
 //!   前端遇到新 epoch 必须重置旧快照，避免 Blink 重启后旧 revision 压住新状态。
 //! - `revision`：仅在同一 `service_epoch` 内严格单调递增。
 //!   新 epoch 与旧 epoch 不可直接按 revision 覆盖。
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::local_engine::runtime::{
+use crate::domain::local_engine::identity::{
     BackendVerificationResult, ComputePreference, ResolvedProfile,
 };
 
@@ -29,7 +29,7 @@ use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 
 // ── ServiceEpoch ──────────────────────────────────────────────────────────
 
-/// 服务 epoch——每次 `LocalEngineService` 实例随机生成。
+/// 服务 epoch——每次 `EngineManager` 实例随机生成。
 ///
 /// 前端遇到新 epoch 必须重置旧快照。
 /// 新 epoch 与旧 epoch 不可直接按 revision 比较。
@@ -392,8 +392,8 @@ impl Default for BackendInfo {
             requested_preference: ComputePreference::Auto,
             resolved_profile: None,
             backend_verification: BackendVerificationResult {
-                state: crate::infra::local_engine::runtime::BackendState::Pending,
-                expected_backend: crate::infra::local_engine::runtime::ComputeBackend::Cpu,
+                state: crate::domain::local_engine::identity::BackendState::Pending,
+                expected_backend: crate::domain::local_engine::identity::ComputeBackend::Cpu,
                 actual_backend: None,
                 device_name: None,
                 mismatch_reason: None,
@@ -424,7 +424,7 @@ pub struct FallbackEntry {
 /// - env ready 不推出 server/model ready；child 存活也不推出端口上的服务属于该 child。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStatus {
-    /// 本次 `LocalEngineService` 实例的随机 epoch。
+    /// 本次 `EngineManager` 实例的随机 epoch。
     pub service_epoch: ServiceEpoch,
     /// 用户期望状态（正交于 observed state）。
     pub desired: DesiredState,
@@ -657,7 +657,7 @@ impl std::fmt::Display for FallbackOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStatusSnapshot {
     /// 引擎 id。
-    pub engine_id: crate::infra::local_engine::runtime::EngineId,
+    pub engine_id: crate::domain::local_engine::identity::EngineId,
     /// 服务 epoch。
     pub service_epoch: ServiceEpoch,
     /// revision。
@@ -910,9 +910,11 @@ mod tests {
             }],
             resolved: ResolvedProfile {
                 profile_id: "cpu-x64".to_string(),
-                backend: crate::infra::local_engine::runtime::ComputeBackend::Cpu,
-                artifact_id: crate::infra::local_engine::runtime::ArtifactId::new("python-3.12.8")
-                    .unwrap(),
+                backend: crate::domain::local_engine::identity::ComputeBackend::Cpu,
+                artifact_id: crate::domain::local_engine::identity::ArtifactId::new(
+                    "python-3.12.8",
+                )
+                .unwrap(),
                 priority: 1,
             },
         };

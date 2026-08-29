@@ -1,6 +1,6 @@
 //! OCR Coordinator — 路由 + 生命周期 + 并发管理（0.22.5）。
 //!
-//! `OcrCoordinator` 是 `OcrBackendRouter` 的具体实现，持有 `LocalEngineService`
+//! `OcrCoordinator` 是 `OcrBackendRouter` 的具体实现，持有 `EngineManager`
 //! 受限依赖，负责：路由 / 生命周期 / HTTP 识别 / 诊断。
 //!
 //! ## 并发模型与竞态防护（0.22.5 重构）
@@ -216,7 +216,7 @@ impl LifecycleState {
 // ── OcrCoordinator ─────────────────────────────────────────────────────────
 
 pub struct OcrCoordinator {
-    engine_service: Arc<crate::app::local_engine::service::LocalEngineService>,
+    engine_service: Arc<crate::app::local_engine::service::EngineManager>,
     paddleocr_engine_id: EngineId,
     in_flight: Arc<AtomicU32>,
     lifecycle_tx: watch::Sender<LifecycleState>,
@@ -236,9 +236,7 @@ pub struct OcrCoordinator {
 }
 
 impl OcrCoordinator {
-    pub fn new(
-        engine_service: Arc<crate::app::local_engine::service::LocalEngineService>,
-    ) -> Arc<Self> {
+    pub fn new(engine_service: Arc<crate::app::local_engine::service::EngineManager>) -> Arc<Self> {
         let paddleocr_engine_id = EngineId::new(PADDLEOCR_ENGINE_ID_STR).unwrap();
         let (lifecycle_tx, lifecycle_rx) = watch::channel(LifecycleState::Idle { generation: 0 });
         Arc::new(Self {
@@ -1779,7 +1777,7 @@ impl OcrBackendRouter for OcrCoordinator {
 ///
 /// 由 shared startup task 调用。即使所有请求都取消了，模型等待也会继续。
 async fn wait_for_model_ready_static(
-    engine_service: &Arc<crate::app::local_engine::service::LocalEngineService>,
+    engine_service: &Arc<crate::app::local_engine::service::EngineManager>,
     engine_id: &EngineId,
     timeout: Duration,
 ) -> Result<u64, String> {

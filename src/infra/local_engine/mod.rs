@@ -22,6 +22,7 @@
 //! 耗时 spawn/wait 不长期持有全局锁。
 //! 旧 generation 的退出事件不能覆盖新 generation 状态。
 
+pub mod deployment;
 pub mod lease;
 pub mod lease_recovery;
 pub mod log_pipe;
@@ -50,7 +51,8 @@ pub use port::{
     PortError, ServiceIdentityInput, ServiceIdentityResult, generate_service_token,
     token_fingerprint,
 };
-pub use process::{LaunchRequest, ManagedProcess, ManagedProcessError, ShutdownConfig};
+#[allow(unused_imports)]
+pub use process::ManagedProcessError;
 #[allow(unused_imports)]
 pub use state::{
     CommitResult, ExitReason, InstanceToken, ManagedProcessState, ProcessIdentity, ProcessStatus,

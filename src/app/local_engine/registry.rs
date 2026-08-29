@@ -11,7 +11,7 @@
 //!   前端只能传 `engine_id` 与有限动作（install/start/stop/repair/cleanup）。
 //! - **无动态注册 API**：`EngineRegistry` 不暴露 `register()` 方法，
 //!   不接受运行时新增引擎。
-//! - **闭合枚举守卫**：`RuntimeKind`、`CapabilityKind` 均为闭合枚举，
+//! - **闭合枚举守卫**：`RuntimePlan`、`CapabilityKind` 均为闭合枚举，
 //!   前端无法提交 runtime kind、URL、executable、argv 或环境变量。
 //! - **adapter 无法注入未声明 profile/启动入口**：`prepare_launch` 在 adapter
 //!   内部验证 profile 是否在 descriptor 声明范围内。
@@ -136,18 +136,17 @@ impl EngineRegistry {
 mod tests {
     use super::*;
     use crate::domain::local_engine::*;
-    use crate::infra::local_engine::runtime::*;
 
     /// 最小 fake adapter（测试用）。
     fn fake_adapter(id: &str) -> Arc<dyn LocalEngineAdapter> {
         struct FakeAdapter {
-            descriptor: EngineDescriptor,
+            descriptor: EngineDefinition,
         }
         impl FakeAdapter {
             fn new(id: &str) -> Self {
                 let artifact = ArtifactId::new("fake-artifact").unwrap();
                 Self {
-                    descriptor: EngineDescriptor {
+                    descriptor: EngineDefinition {
                         engine_id: EngineId::new(id).unwrap(),
                         display: EngineDisplay {
                             name: format!("Fake {}", id),
@@ -156,9 +155,9 @@ mod tests {
                             version: "0.1.0".to_string(),
                         },
                         capability_kind: CapabilityKind::Stt,
-                        runtime_kind: RuntimeKind::PythonVenv,
+                        runtime_kind: RuntimePlan::PythonVenv,
                         install_plan: InstallPlanRef {
-                            runtime_kind: RuntimeKind::PythonVenv,
+                            runtime_kind: RuntimePlan::PythonVenv,
                             artifact_ids: vec![artifact.clone()],
                             compute_candidates: vec![ComputeCandidate {
                                 preference: ComputePreference::Cpu,
@@ -181,7 +180,7 @@ mod tests {
             }
         }
         impl LocalEngineAdapter for FakeAdapter {
-            fn descriptor(&self) -> &EngineDescriptor {
+            fn descriptor(&self) -> &EngineDefinition {
                 &self.descriptor
             }
             fn prepare_launch(

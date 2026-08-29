@@ -48,7 +48,7 @@ use super::{SttEngine, SttError};
 /// 本地 STT 引擎（FunASR server）。
 ///
 /// 通过本地 `funasr-server` 的 OpenAI 兼容 API 做语音转文字。
-/// server 进程的生命周期由 `LocalEngineService` 统一管理。
+/// server 进程的生命周期由 `EngineManager` 统一管理。
 ///
 /// 0.22.6 批次 3: 存储完整 `SttEngineConnection` 快照，确保 health 检查和
 /// 转录请求使用同一 endpoint/token——不再分别用 port 和 token 猜测。
@@ -73,7 +73,7 @@ impl LocalSttEngine {
     /// 创建本地 STT 引擎。
     ///
     /// 0.22.6 批次 3: `port` 和 `token` 来自 `SttEngineConnection`（由 app 层从
-    /// `LocalEngineService::get_connection` 投影而来），不再从 SttConfig 读取
+    /// `EngineManager::get_connection` 投影而来），不再从 SttConfig 读取
     /// preferred port。health 和 transcribe 使用同一连接快照。
     pub fn new(
         config: &crate::domain::config::stt_config::SttConfig,

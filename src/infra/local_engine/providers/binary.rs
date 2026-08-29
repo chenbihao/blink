@@ -14,7 +14,7 @@ use std::path::Path;
 
 use super::{
     CompatibilityCheck, InstallPlan, InstallSink, ManifestExtension, PrepareResult,
-    ProviderCleanupScope, ResolvedProfile, RuntimeError, RuntimeProvider,
+    ResolvedProfile, RuntimeError, RuntimeProvider,
 };
 use crate::infra::local_engine::runtime;
 
@@ -56,8 +56,8 @@ impl Default for ManagedBinaryProvider {
 
 #[async_trait::async_trait]
 impl RuntimeProvider for ManagedBinaryProvider {
-    fn kind(&self) -> runtime::RuntimeKind {
-        runtime::RuntimeKind::ManagedBinary
+    fn kind(&self) -> runtime::RuntimePlan {
+        runtime::RuntimePlan::ManagedBinary
     }
 
     fn check_compatibility(
@@ -146,7 +146,7 @@ impl RuntimeProvider for ManagedBinaryProvider {
         // 协议位阶段使用 descriptor 声明的 archive_sha256 作为 artifact hash
         Ok(PrepareResult {
             artifact: runtime::ArtifactIdentity {
-                runtime_kind: runtime::RuntimeKind::ManagedBinary,
+                runtime_kind: runtime::RuntimePlan::ManagedBinary,
                 artifact_id: binary_plan.archive_artifact_id.clone(),
                 sha256: binary_plan.archive_sha256.clone(),
             },
@@ -206,28 +206,6 @@ impl RuntimeProvider for ManagedBinaryProvider {
             },
         ))
     }
-
-    fn query_package_status(
-        &self,
-        _generation_dir: &Path,
-        _plan: &InstallPlan,
-    ) -> Result<Vec<runtime::PackageStatus>, RuntimeError> {
-        // ManagedBinary 没有 pip 包概念
-        Ok(Vec::new())
-    }
-
-    fn cleanup_provider_cache(&self, scope: &ProviderCleanupScope) -> Result<(), RuntimeError> {
-        match scope {
-            ProviderCleanupScope::DownloadCache => {
-                // ManagedBinary download cache（未来实现）
-                Ok(())
-            }
-            ProviderCleanupScope::SharedArtifact(_) => {
-                // 共享 artifact 清理由通用 execute_cleanup 处理
-                Ok(())
-            }
-        }
-    }
 }
 
 // ── CPU feature 检测（Windows）─────────────────────────────────────────────
@@ -265,7 +243,7 @@ mod tests {
     #[test]
     fn managed_binary_provider_kind() {
         let provider = ManagedBinaryProvider::new();
-        assert_eq!(provider.kind(), runtime::RuntimeKind::ManagedBinary);
+        assert_eq!(provider.kind(), runtime::RuntimePlan::ManagedBinary);
     }
 
     #[test]

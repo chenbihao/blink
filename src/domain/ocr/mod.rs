@@ -9,7 +9,7 @@
 //! - `domain/ocr`：OCR 领域类型、请求上下文、路由抽象、错误分类和配置枚举。
 //!   **不 use tauri / windows**，不发送 Tauri 事件。
 //! - `app/local_engine/ocr_backend.rs`：`PaddleOcrBackend` 和 `OcrBackendRouter` 的
-//!   具体实现（持有 `LocalEngineService` 受限依赖）。
+//!   具体实现（持有 `EngineManager` 受限依赖）。
 //! - `domain/capability/builtins/ocr_engine.rs`：保留 `OcrResult` / `OcrLine` /
 //!   `OcrWord` / `OcrRect` 定义和 `WindowsOcrBackendAdapter`，通过 re-export
 //!   与本模块共享类型，避免大范围改名。

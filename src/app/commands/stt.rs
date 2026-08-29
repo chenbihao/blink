@@ -203,23 +203,22 @@ pub async fn set_stt_config(
 pub async fn list_selectable_stt_models(
     app: tauri::AppHandle,
 ) -> Result<Vec<serde_json::Value>, CommandError> {
-    // 从 ModelService 获取已注册模型列表
-    let model_svc = app
-        .try_state::<std::sync::Arc<crate::app::local_engine::ModelService>>()
+    // 从 EngineManager 获取模型状态（单一业务真相）
+    let svc = app
+        .try_state::<std::sync::Arc<crate::app::local_engine::EngineManager>>()
         .map(|s| s.inner().clone());
 
     let config = crate::app::stt_config::get_stt_config();
     let selected = config.local_stt_selection.as_ref();
 
-    // 如果 ModelService 已注册，使用 H3 的状态数据
-    if let Some(svc) = model_svc {
+    if let Some(svc) = svc {
         let funasr_id =
             crate::infra::local_engine::runtime::EngineId::new("funasr").map_err(|e| {
                 CommandError::new("internal_error", format!("无效的 engine_id: {e}"), false)
             })?;
 
         let models = svc.list_models(&funasr_id).await;
-        let registry = svc.registry();
+        let registry = svc.model_registry();
 
         let result: Vec<serde_json::Value> = models
             .iter()
@@ -253,10 +252,9 @@ pub async fn list_selectable_stt_models(
         return Ok(result);
     }
 
-    // ModelService 未注册时 fail-closed——不回退到旧"目录非空即已安装"扫描逻辑。
-    // 旧扫描无法区分 Installed/Corrupted/Mismatched，且不参与正式链路。
-    // 返回空列表让前端知道没有可选模型（而非误报已安装）。
-    tracing::warn!("ModelService 未注册，selectable models 返回空列表（fail-closed）");
+    // EngineManager 未注册时 fail-closed——返回空列表，
+    // 让前端知道没有可选模型（而非误报已安装）。
+    tracing::warn!("EngineManager 未注册，selectable models 返回空列表（fail-closed）");
     Ok(Vec::new())
 }
 
@@ -281,13 +279,13 @@ pub async fn set_local_stt_selection(
         ));
     }
 
-    // 2. ModelService 是选择验证的唯一真源；缺失时禁止持久化任意模型。
+    // 2. EngineManager 是选择验证的唯一真源；缺失时禁止持久化任意模型。
     let svc = app
-        .try_state::<std::sync::Arc<crate::app::local_engine::ModelService>>()
+        .try_state::<std::sync::Arc<crate::app::local_engine::EngineManager>>()
         .ok_or_else(|| {
             CommandError::new(
-                "model_service_unavailable",
-                "模型服务尚未就绪，无法验证本地 STT 选择",
+                "engine_manager_unavailable",
+                "引擎管理服务尚未就绪，无法验证本地 STT 选择",
                 true,
             )
         })?;

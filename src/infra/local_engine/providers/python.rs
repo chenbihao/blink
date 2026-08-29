@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 
 use super::{
     CompatibilityCheck, InstallPlan, InstallSink, ManifestExtension, PackageLock, PipExtraArg,
-    PrepareResult, ProviderCleanupScope, ResolvedProfile, RuntimeError, RuntimeProvider,
+    PrepareResult, ResolvedProfile, RuntimeError, RuntimeProvider,
 };
 use crate::infra::local_engine::runtime;
 
@@ -1079,8 +1079,8 @@ async fn read_lines_to_end<R: tokio::io::AsyncRead + Unpin>(
 
 #[async_trait::async_trait]
 impl RuntimeProvider for PythonVenvProvider {
-    fn kind(&self) -> runtime::RuntimeKind {
-        runtime::RuntimeKind::PythonVenv
+    fn kind(&self) -> runtime::RuntimePlan {
+        runtime::RuntimePlan::PythonVenv
     }
 
     fn check_compatibility(
@@ -1197,7 +1197,7 @@ impl RuntimeProvider for PythonVenvProvider {
                 message: format!("读取托管 Python 解释器失败: {error}"),
             })?;
         let artifact = runtime::ArtifactIdentity {
-            runtime_kind: runtime::RuntimeKind::PythonVenv,
+            runtime_kind: runtime::RuntimePlan::PythonVenv,
             artifact_id: python_plan.python_artifact_id.clone(),
             sha256: format!("{:x}", Sha256::digest(&python_bytes)),
         };
@@ -1281,39 +1281,6 @@ impl RuntimeProvider for PythonVenvProvider {
             self_test_passed: true,
         }))
     }
-
-    fn query_package_status(
-        &self,
-        generation_dir: &Path,
-        plan: &InstallPlan,
-    ) -> Result<Vec<runtime::PackageStatus>, RuntimeError> {
-        let python_plan = match plan {
-            InstallPlan::PythonVenv(p) => p,
-            _ => return Ok(Vec::new()),
-        };
-
-        let venv_dir = generation_dir.join("venv");
-        Ok(Self::query_packages(&venv_dir, &python_plan.packages))
-    }
-
-    fn cleanup_provider_cache(&self, scope: &ProviderCleanupScope) -> Result<(), RuntimeError> {
-        match scope {
-            ProviderCleanupScope::DownloadCache => {
-                let cache = runtime::uv_cache_dir();
-                if cache.exists() {
-                    std::fs::remove_dir_all(&cache).map_err(|e| RuntimeError::CleanupFailed {
-                        message: format!("删除 uv cache 失败: {e}"),
-                    })?;
-                    tracing::info!("uv cache 已清理");
-                }
-                Ok(())
-            }
-            ProviderCleanupScope::SharedArtifact(_) => {
-                // 共享 artifact 清理由通用 execute_cleanup 处理
-                Ok(())
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1323,7 +1290,7 @@ mod tests {
     #[test]
     fn python_venv_provider_kind() {
         let provider = PythonVenvProvider::new();
-        assert_eq!(provider.kind(), runtime::RuntimeKind::PythonVenv);
+        assert_eq!(provider.kind(), runtime::RuntimePlan::PythonVenv);
     }
 
     #[test]

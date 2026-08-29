@@ -12,22 +12,22 @@
 //!
 //! ## 分层归属
 //!
-//! - 本模块在 `app` 层，从 domain `EngineDescriptor` / `EngineStatus` 投影为 UI 契约。
+//! - 本模块在 `app` 层，从 domain `EngineDefinition` / `EngineStatus` 投影为 UI 契约。
 //! - `domain`/`infra` 层不依赖本模块。
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::local_engine::{
-    CapabilityKind, CleanupPolicy, EngineDescriptor, EngineStatus, EngineStatusSnapshot,
+    CapabilityKind, CleanupPolicy, EngineDefinition, EngineStatus, EngineStatusSnapshot,
     LifecyclePolicy, ProcessState, ResourceBudget,
 };
-use crate::infra::local_engine::runtime::{ComputeBackend, ComputePreference, RuntimeKind};
+use crate::infra::local_engine::runtime::{ComputeBackend, ComputePreference, RuntimePlan};
 
 // ── Catalog DTO ──────────────────────────────────────────────────────────────
 
 /// 引擎目录项——前端 catalog 列表展示用。
 ///
-/// 从 `EngineDescriptor` 投影，只包含 UI 可见字段。
+/// 从 `EngineDefinition` 投影，只包含 UI 可见字段。
 /// **不暴露** artifact URL、executable、argv、env、内部文件路径。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineCatalogItem {
@@ -239,13 +239,13 @@ pub struct EngineLogDto {
 
 // ── 投影函数 ──────────────────────────────────────────────────────────────────
 
-/// 从 `EngineDescriptor` + 兼容性检查结果投影 catalog item。
+/// 从 `EngineDefinition` + 兼容性检查结果投影 catalog item。
 ///
 /// `compute_options` 的 `compatible` / `disabled_reason` 由传入的
 /// `compatibility_results` 决定——调用方须从 `ProviderDescriptor` 真源
 /// 执行 `check_compatibility`，不由前端猜测。
 pub fn project_catalog_item(
-    descriptor: &EngineDescriptor,
+    descriptor: &EngineDefinition,
     compatibility_results: &[(ComputePreference, bool, Option<String>)],
     current_preference: ComputePreference,
 ) -> EngineCatalogItem {
@@ -357,10 +357,10 @@ fn capability_kind_to_string(k: CapabilityKind) -> String {
     }
 }
 
-fn runtime_kind_to_string(k: RuntimeKind) -> String {
+fn runtime_kind_to_string(k: RuntimePlan) -> String {
     match k {
-        RuntimeKind::PythonVenv => "python_venv".to_string(),
-        RuntimeKind::ManagedBinary => "managed_binary".to_string(),
+        RuntimePlan::PythonVenv => "python_venv".to_string(),
+        RuntimePlan::ManagedBinary => "managed_binary".to_string(),
     }
 }
 
