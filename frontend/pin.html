@@ -57,6 +57,7 @@
         <button id="pin-ocr-translate">翻译</button>
         <button class="primary" id="pin-ocr-copy">复制</button>
     </div>
+    <div class="pin-ocr-resize-handle" title="拖拽缩放"></div>
 </div>
 
 <script type="module">
@@ -782,6 +783,10 @@
         pinOcrTranslated.value = '';
         pinOcrTabTranslated.removeAttribute('data-stale');
         pinOcrTranslated.removeAttribute('data-stale');
+        // 0.22.7：恢复默认尺寸，清除上次缩放的内联样式
+        pinOcrPanel.style.width = '';
+        pinOcrPanel.style.height = '';
+        pinOcrPanel.style.maxHeight = '';
         showPinOcrTab('source');
         pinOcrPanel.classList.remove('hidden');
     }
@@ -883,6 +888,54 @@
     pinOcrPanel.addEventListener('contextmenu', (e) => e.stopPropagation());
     pinOcrPanel.addEventListener('dblclick', (e) => e.stopPropagation());
     pinOcrPanel.addEventListener('wheel', (e) => e.stopPropagation());
+
+    // ── 0.22.7：面板缩放（右下角拖拽） ──────────────────────────
+    // 钉图窗口 resizable(false)，只缩放 DOM 面板。
+    // 钉图面板无 transform: scale（不像截图面板），uiScale=1。
+    const PIN_PANEL_MIN_W = 280;
+    const PIN_PANEL_MIN_H = 240;
+    const PIN_PANEL_MAX_W = 800;
+    const PIN_PANEL_MAX_H = 600;
+    const pinResizeHandle = pinOcrPanel.querySelector('.pin-ocr-resize-handle');
+    if (pinResizeHandle) {
+        let pinResizing = false;
+        let pinRsStartW = 0, pinRsStartH = 0;
+        let pinRsStartX = 0, pinRsStartY = 0;
+
+        pinResizeHandle.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            pinResizing = true;
+            pinRsStartW = pinOcrPanel.offsetWidth;
+            pinRsStartH = pinOcrPanel.offsetHeight;
+            pinRsStartX = e.clientX;
+            pinRsStartY = e.clientY;
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!pinResizing) return;
+            const deltaW = e.clientX - pinRsStartX;
+            const deltaH = e.clientY - pinRsStartY;
+            let newW = Math.max(PIN_PANEL_MIN_W, Math.min(PIN_PANEL_MAX_W, pinRsStartW + deltaW));
+            let newH = Math.max(PIN_PANEL_MIN_H, Math.min(PIN_PANEL_MAX_H, pinRsStartH + deltaH));
+            // 钳制到窗口可见区域（左上角固定，收束尺寸）
+            const panelLeft = pinOcrPanel.offsetLeft;
+            const panelTop = pinOcrPanel.offsetTop;
+            const maxW = window.innerWidth - panelLeft - 4;
+            const maxH = window.innerHeight - panelTop - 4;
+            newW = Math.min(newW, Math.max(PIN_PANEL_MIN_W, maxW));
+            newH = Math.min(newH, Math.max(PIN_PANEL_MIN_H, maxH));
+            pinOcrPanel.style.width = newW + 'px';
+            pinOcrPanel.style.height = newH + 'px';
+            pinOcrPanel.style.maxHeight = 'none';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!pinResizing) return;
+            pinResizing = false;
+        });
+    }
 
     // ── 翻译中指示器 ──────────────────────────────────────────
     function showTranslatingIndicator() {

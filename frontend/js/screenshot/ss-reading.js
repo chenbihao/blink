@@ -20,8 +20,55 @@ import {
 import {copyToClipboard} from '../shared/api.js';
 import {cssPointToBitmap, cssRectToBitmap, getRenderScale} from './ss-selection-geometry.js';
 
-/** 从 result 构造 charRanges —— 用与后端 join_words_smart 相同的规则复算字符偏移。 */
-function computeCharRanges(words) {
+/**
+ * 从后端 `char_ranges` 生成 UTF-16 offset 供 textarea selection API 使用。
+ *
+ * **0.22.7 单一真源**：后端 `rebuild_with_line_grouping_and_diag` 返回
+ * `char_ranges: Vec<(usize, usize)>`——每个 word 在全文 `text` 中的 Rust
+ * **字符**索引范围。前端不再自行复算空格/换行，而是直接消费后端结果，
+ * 仅做 Rust char index → UTF-16 code-unit offset 的转换。
+ *
+ * 转换原因：Rust `char` 是 Unicode scalar value（1 个 per codepoint），
+ * JS string 是 UTF-16（1-2 code units per codepoint）。textarea selection
+ * API 使用 UTF-16 offset。BMP 字符两者一致，补充面字符（如 emoji）
+ * Rust 算 1，UTF-16 算 2。
+ *
+ * 如果后端没有 `char_ranges`（旧后端 / FakeOcrBackend），退化为旧逻辑。
+ */
+export function computeCharRanges(words, fullText, backendCharRanges) {
+    // 优先走后端单一真源
+    if (backendCharRanges && backendCharRanges.length === words.length) {
+        return backendCharRanges.map(([start, end]) => ({
+            start: rustCharIndexToUtf16(fullText, start),
+            end: rustCharIndexToUtf16(fullText, end),
+        }));
+    }
+    // 退化路径：后端未提供 char_ranges，前端自行估算（旧逻辑）
+    return computeCharRangesFallback(words);
+}
+
+/**
+ * Rust char index → UTF-16 code-unit offset。
+ *
+ * 遍历 fullText 的 codepoint，每遇到一个补充面字符（> 0xFFFF），
+ * UTF-16 offset 比 char index 多 1（代理对占 2 个 code unit）。
+ */
+function rustCharIndexToUtf16(fullText, charIndex) {
+    let utf16Offset = 0;
+    let charCount = 0;
+    for (const ch of fullText) {
+        if (charCount >= charIndex) break;
+        charCount++;
+        utf16Offset += ch.length > 1 ? 2 : 1; // 补充面字符 .length === 2
+    }
+    return utf16Offset;
+}
+
+/**
+ * 退化路径：后端未提供 char_ranges 时，前端自行估算字符偏移。
+ * 用与后端 join_words_smart 相同的 CJK/Latin 规则复算。
+ */
+function computeCharRangesFallback(words) {
     const ranges = new Array(words.length);
     let cursor = 0;
     let prevLine = null;
@@ -166,17 +213,22 @@ export function enterReadingMode(result) {
     hitCanvas.height = Math.max(1, bmpRect.h);
     hitCanvas.setAttribute('data-reading', 'true');
 
+    const fullText = result.text || '';
     ss.reading = {
         words: words.map((w) => ({
             text: w.text,
             rect: w.rect,
             lineIndex: w.line_index,
         })),
-        charRanges: computeCharRanges(words.map((w) => ({
-            text: w.text,
-            lineIndex: w.line_index,
-        }))),
-        fullText: result.text || '',
+        charRanges: computeCharRanges(
+            words.map((w) => ({
+                text: w.text,
+                lineIndex: w.line_index,
+            })),
+            fullText,
+            result.char_ranges,
+        ),
+        fullText,
         selectionStart: null,
         selectionEnd: null,
         panelDirty: false,

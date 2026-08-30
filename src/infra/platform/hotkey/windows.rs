@@ -7,12 +7,14 @@
 //! - Hook 回调（`ll_proc`）不查 DB、不调 Tauri、不 await、不取可能阻塞的锁。
 //! - 原子操作和非阻塞 channel send 允许。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{ERROR_INVALID_HOOK_HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::RemoteDesktop::{
-    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+    ProcessIdToSessionId, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Input::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -20,6 +22,7 @@ use windows::core::PCWSTR;
 
 use super::diagnostics::{self, HookDiagnosticInfo, InputDiagnosticEvent};
 use super::recorder;
+use super::recorder_diag::{self, HookMsgKind};
 use super::{
     ControlMsg, HookKeyEvent, InputEffect, InputEvent, InputSource, InputState, ModifierKey,
     NormalizedRawModifier, Propagation, WindowTransitionReason, drain_control_messages,
@@ -68,6 +71,15 @@ const REINSTALL_RECHECK_DELAY_MS: u32 = 200;
 
 /// Hook 线程的 message-only window HWND（供控制消息唤醒）。
 static WND_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
+/// WH_KEYBOARD_LL generation：每次成功安装（Initial/重装）递增。
+/// 仅用于诊断关联（录制事件/汇总判断是否跨过重装），不参与业务判断。
+static HOOK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 当前 Hook generation（诊断用途）。
+pub(crate) fn hook_generation() -> u64 {
+    HOOK_GENERATION.load(Ordering::Acquire)
+}
 
 // Hook 线程的输入状态机 + 重装状态（thread-local）。
 thread_local! {
@@ -290,44 +302,7 @@ fn raw_keyboard_to_modifier(kb: &RAWKEYBOARD, device_id: usize) -> Option<Normal
     let e1 = (kb.Flags & RI_KEY_E1) != 0;
     let make_code = kb.MakeCode;
 
-    // 修饰键归一化：
-    // 1. 明确的左右侧 VK → 直接映射
-    // 2. 通用 VK_MENU/VK_CONTROL/VK_SHIFT → 用 E0 区分左右
-    // 3. E1 标志（Pause/Break 键）不是修饰键 → None
-    let key = if e1 {
-        // E1 仅用于 Pause 键，不是修饰键
-        return None;
-    } else if vk == VK_LCONTROL.0 && e0 {
-        ModifierKey::RCtrl
-    } else if vk == VK_LCONTROL.0 {
-        ModifierKey::LCtrl
-    } else if vk == VK_RCONTROL.0 || (vk == VK_CONTROL.0 && e0) {
-        ModifierKey::RCtrl
-    } else if vk == VK_CONTROL.0 {
-        ModifierKey::LCtrl
-    } else if vk == VK_LSHIFT.0 && e0 {
-        ModifierKey::RShift
-    } else if vk == VK_LSHIFT.0 {
-        ModifierKey::LShift
-    } else if vk == VK_RSHIFT.0 || (vk == VK_SHIFT.0 && e0) {
-        ModifierKey::RShift
-    } else if vk == VK_SHIFT.0 {
-        ModifierKey::LShift
-    } else if vk == VK_LMENU.0 && e0 {
-        ModifierKey::RAlt
-    } else if vk == VK_LMENU.0 {
-        ModifierKey::LAlt
-    } else if vk == VK_RMENU.0 || (vk == VK_MENU.0 && e0) {
-        ModifierKey::RAlt
-    } else if vk == VK_MENU.0 {
-        ModifierKey::LAlt
-    } else if vk == VK_LWIN.0 {
-        ModifierKey::LMeta
-    } else if vk == VK_RWIN.0 {
-        ModifierKey::RMeta
-    } else {
-        return None; // 非修饰键，Raw Input 不进 reducer
-    };
+    let key = raw_modifier_key(vk, make_code, kb.Flags)?;
 
     Some(NormalizedRawModifier {
         key,
@@ -338,6 +313,36 @@ fn raw_keyboard_to_modifier(kb: &RAWKEYBOARD, device_id: usize) -> Option<Normal
         e1,
         device_id,
     })
+}
+
+/// 仅依据 Raw Input 字段归一化左右修饰键，供输入 reducer 与快捷键录制共用。
+fn raw_modifier_key(vk: u16, make_code: u16, flags: u16) -> Option<ModifierKey> {
+    let e0 = (flags & RI_KEY_E0) != 0;
+    let e1 = (flags & RI_KEY_E1) != 0;
+    if e1 {
+        return None; // E1 用于 Pause/Break，不是修饰键
+    }
+
+    if vk == VK_RCONTROL.0 || ((vk == VK_CONTROL.0 || vk == VK_LCONTROL.0) && e0) {
+        Some(ModifierKey::RCtrl)
+    } else if vk == VK_CONTROL.0 || vk == VK_LCONTROL.0 {
+        Some(ModifierKey::LCtrl)
+    } else if vk == VK_RSHIFT.0 || ((vk == VK_SHIFT.0 || vk == VK_LSHIFT.0) && make_code == 0x36) {
+        // Shift 不使用 E0；标准扫描码 0x2A/0x36 区分左右。
+        Some(ModifierKey::RShift)
+    } else if vk == VK_SHIFT.0 || vk == VK_LSHIFT.0 {
+        Some(ModifierKey::LShift)
+    } else if vk == VK_RMENU.0 || ((vk == VK_MENU.0 || vk == VK_LMENU.0) && e0) {
+        Some(ModifierKey::RAlt)
+    } else if vk == VK_MENU.0 || vk == VK_LMENU.0 {
+        Some(ModifierKey::LAlt)
+    } else if vk == VK_LWIN.0 {
+        Some(ModifierKey::LMeta)
+    } else if vk == VK_RWIN.0 {
+        Some(ModifierKey::RMeta)
+    } else {
+        None
+    }
 }
 
 // ── 物理修饰键快照（GetAsyncKeyState）─────────────────────────────────────────
@@ -426,31 +431,72 @@ unsafe extern "system" fn hold_timer_callback(
 
 // ── 录制事件喂入（平台特定）──────────────────────────────────────────────────
 
-/// 录制期间把原始 VK 事件归一化为语义事件喂给 recorder.rs。
-fn feed_recorder(vk: u32, wparam: WPARAM) {
-    let msg = wparam.0 as u32;
-    let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-    let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-    if !is_down && !is_up {
-        return;
+#[derive(Debug, PartialEq, Eq)]
+enum RawRecorderInput {
+    ModifierDown(String),
+    ModifierUp(String),
+    KeyDown(String),
+    Ignore(recorder_diag::FeedIgnoreReason),
+}
+
+fn modifier_key_name(key: ModifierKey) -> &'static str {
+    match key {
+        ModifierKey::LCtrl => "lctrl",
+        ModifierKey::RCtrl => "rctrl",
+        ModifierKey::LShift => "lshift",
+        ModifierKey::RShift => "rshift",
+        ModifierKey::LAlt => "lalt",
+        ModifierKey::RAlt => "ralt",
+        ModifierKey::LMeta | ModifierKey::RMeta => "meta",
+    }
+}
+
+/// 将 Raw Input 键盘事件归一化为 recorder.rs 的平台无关语义事件。
+fn normalize_raw_recorder_input(vk: u16, make_code: u16, flags: u16) -> RawRecorderInput {
+    let is_down = (flags & RI_KEY_BREAK) == 0;
+    if let Some(modifier) = raw_modifier_key(vk, make_code, flags) {
+        let name = modifier_key_name(modifier).to_string();
+        return if is_down {
+            RawRecorderInput::ModifierDown(name)
+        } else {
+            RawRecorderInput::ModifierUp(name)
+        };
     }
 
-    if is_modifier_key(vk) {
-        let Some(name) = vk_to_key(vk) else { return };
-        if is_down {
+    if !is_down {
+        return RawRecorderInput::Ignore(recorder_diag::FeedIgnoreReason::NonModifierKeyup);
+    }
+
+    match vk_to_key(vk as u32) {
+        Some(name) => RawRecorderInput::KeyDown(name),
+        None => RawRecorderInput::Ignore(recorder_diag::FeedIgnoreReason::UnsupportedVk),
+    }
+}
+
+/// 录制期间把 Raw Input 事件喂给 recorder.rs。
+///
+/// 返回轻量诊断枚举 [`recorder_diag::FeedOutcome`]：该事件最终被接受还是忽略、
+/// 忽略原因。只做诊断记录，不改变录制行为。
+fn feed_raw_recorder(kb: &RAWKEYBOARD) -> recorder_diag::FeedOutcome {
+    match normalize_raw_recorder_input(kb.VKey, kb.MakeCode, kb.Flags) {
+        RawRecorderInput::ModifierDown(name) => {
             // AltGr 去模拟：右 Alt（VK_RMENU）按下会附带一个模拟的左 Ctrl，
             // 清掉它，避免状态机把右 Alt 误录成 LeftCtrl。
-            if vk == VK_RMENU.0 as u32 {
+            if name == "ralt" {
                 recorder::drop_modifier("lctrl");
             }
-            recorder::feed(recorder::RecordInput::ModifierDown(name));
-        } else {
-            recorder::feed(recorder::RecordInput::ModifierUp(name));
+            recorder::feed(recorder::RecordInput::ModifierDown(name.clone()))
+                .to_outcome(recorder_diag::FeedOutcomeKind::ModifierDown, name)
         }
-    } else if is_down {
-        // 非修饰键:按下即完成录制;松开不关心。
-        let Some(name) = vk_to_key(vk) else { return };
-        recorder::feed(recorder::RecordInput::KeyDown(name));
+        RawRecorderInput::ModifierUp(name) => {
+            recorder::feed(recorder::RecordInput::ModifierUp(name.clone()))
+                .to_outcome(recorder_diag::FeedOutcomeKind::ModifierUp, name)
+        }
+        RawRecorderInput::KeyDown(name) => {
+            recorder::feed(recorder::RecordInput::KeyDown(name.clone()))
+                .to_outcome(recorder_diag::FeedOutcomeKind::KeyDown, name)
+        }
+        RawRecorderInput::Ignore(reason) => recorder_diag::FeedOutcome::Ignored(reason),
     }
 }
 
@@ -652,14 +698,17 @@ fn try_reinstall_if_safe() {
 
 /// 执行卸载→安装。返回 true 表示成功。
 fn do_reinstall(reason: state::ReinstallReason) -> bool {
+    let old_generation = hook_generation();
     HHOOK_SLOT.with(|slot| {
         let mut slot = slot.borrow_mut();
+        let mut uninstalled = false;
 
         // 卸载现有 Hook
         if let Some(hhook) = *slot {
             match unsafe { UnhookWindowsHookEx(hhook) } {
                 Ok(()) => {
                     *slot = None;
+                    uninstalled = true;
                 }
                 Err(e) => {
                     if e.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_HOOK_HANDLE.0) {
@@ -667,8 +716,17 @@ fn do_reinstall(reason: state::ReinstallReason) -> bool {
                         // 清掉后继续安装才有机会真正恢复。
                         tracing::warn!(?e, ?reason, "discarding stale hook handle");
                         *slot = None;
+                        uninstalled = true;
                     } else {
                         tracing::error!(?e, ?reason, "UnhookWindowsHookEx failed");
+                        tracing::info!(
+                            ?reason,
+                            old_generation,
+                            new_generation = old_generation,
+                            uninstalled = false,
+                            installed = false,
+                            "hotkey_hook_generation_changed"
+                        );
                         // 其他错误下不能确认旧 Hook 是否仍有效，不叠装第二个 Hook。
                         return false;
                     }
@@ -680,8 +738,13 @@ fn do_reinstall(reason: state::ReinstallReason) -> bool {
         match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) } {
             Ok(new_hook) => {
                 *slot = Some(new_hook);
+                let new_generation = HOOK_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
                 tracing::info!(
                     ?reason,
+                    old_generation,
+                    new_generation,
+                    uninstalled,
+                    installed = true,
                     hook_ptr = new_hook.0 as usize,
                     "WH_KEYBOARD_LL hook re-installed successfully"
                 );
@@ -689,6 +752,14 @@ fn do_reinstall(reason: state::ReinstallReason) -> bool {
             }
             Err(e) => {
                 tracing::error!(?e, ?reason, "SetWindowsHookExW failed");
+                tracing::info!(
+                    ?reason,
+                    old_generation,
+                    new_generation = old_generation,
+                    uninstalled,
+                    installed = false,
+                    "hotkey_hook_generation_changed"
+                );
                 false
             }
         }
@@ -715,8 +786,94 @@ fn update_hook_diagnostics(reinstall: &ReinstallState) {
         reinstall_attempt: reinstall.attempt,
         wts_registered,
         raw_registered,
+        hook_generation: hook_generation(),
     };
     diagnostics::update_hook_info(&info);
+}
+
+// ── 录制诊断环境快照（spawn_blocking 线程调用，禁止在 Hook 回调内使用）────────
+
+/// 采集 recorder armed 瞬间的环境快照。
+///
+/// 全部为非阻塞 Win32 查询，运行在 `record_hotkey_blocking` 的 spawn_blocking
+/// 线程（**非** Hook 回调内）；仅在用户主动开始录制时调用一次。
+pub(crate) fn capture_recorder_env() -> recorder_diag::SessionEnv {
+    recorder_diag::SessionEnv {
+        foreground_is_blink: is_foreground_window_blink(),
+        windows_session_id: current_windows_session_id(),
+        remote_session: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
+        integrity_level: current_integrity_level(),
+        keys_down_at_arm: read_keys_down_snapshot(),
+    }
+}
+
+/// 枚举当前处于 Down 状态的 VK（0x08..=0xFE，跳过鼠标键区）。
+fn read_keys_down_snapshot() -> Vec<u32> {
+    let mut down = Vec::new();
+    for vk in 0x08..=0xFE_u32 {
+        if unsafe { GetAsyncKeyState(vk as i32) } < 0 {
+            down.push(vk);
+        }
+    }
+    down
+}
+
+/// 前台窗口是否属于 Blink 自身进程。
+fn is_foreground_window_blink() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
+    }
+}
+
+/// 当前进程的 Windows Session ID。
+fn current_windows_session_id() -> u32 {
+    let mut session_id = 0u32;
+    let ok = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id) };
+    if ok.is_ok() { session_id } else { 0 }
+}
+
+/// 当前进程完整性级别（如 `0x2000` 中等）；查询失败返回 `unknown`。
+fn current_integrity_level() -> String {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
+        TOKEN_QUERY, TokenIntegrityLevel,
+    };
+
+    unsafe {
+        let mut token = Default::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return "unknown".to_string();
+        }
+        let mut buffer = [0u8; 96];
+        let mut return_length = 0u32;
+        let result = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buffer.as_mut_ptr().cast()),
+            buffer.len() as u32,
+            &mut return_length,
+        );
+        let level = if result.is_err() {
+            None
+        } else {
+            let label = &*(buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
+            let sid = label.Label.Sid;
+            (!sid.0.is_null()).then(|| {
+                let count = *GetSidSubAuthorityCount(sid) as u32;
+                let rid = *GetSidSubAuthority(sid, count - 1);
+                format!("0x{rid:04X}")
+            })
+        };
+        let _ = CloseHandle(token);
+        level.unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 // ── LL Hook 回调 ───────────────────────────────────────────────────────────────
@@ -734,37 +891,25 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     // 录制短路（优先于所有其他逻辑）
     if recorder::is_recording() {
         let session_id = recorder::active_session_id();
-        tracing::trace!(
-            session_id,
-            vk,
-            scan_code = kb.scanCode,
-            message = msg,
-            flags = ?kb.flags,
-            "hotkey_recorder_hook_event"
-        );
-        feed_recorder(vk, wparam);
-        // 录制期间吞掉 Alt+Space（WebView2 无法拦截系统菜单）
-        if vk == VK_SPACE.0 as u32 && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0 {
-            tracing::trace!(session_id, "hotkey_recorder_alt_space_swallowed");
-            return LRESULT(1);
+        // 专项诊断：LL Hook 事件写入预分配缓冲（try_lock 不阻塞），录制结束统一
+        // flush。Hook 热路径禁止逐事件 tracing / IO。
+        if let Some(kind) = HookMsgKind::from_msg(msg) {
+            recorder_diag::record_hook_event(
+                session_id,
+                recorder_diag::HookEventInput {
+                    hook_generation: hook_generation(),
+                    vk,
+                    scan_code: kb.scanCode,
+                    msg: kind,
+                    flags: kb.flags.0,
+                    injected: kb.flags.contains(LLKHF_INJECTED),
+                },
+            );
         }
+        // 录制源是 Raw Input：这里必须始终放行。若 LL Hook 吞掉 Alt+Space，
+        // Windows 不会继续投递 Space 的 WM_INPUT，录制器最终只会得到 LeftAlt。
+        // 设置窗口的窗口过程会单独拦截 SC_KEYMENU，避免弹出系统菜单。
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    }
-
-    // 主热键专项诊断：只记录 Alt，以及物理 Alt 按下时的 Space。
-    // 不记录其他普通按键，避免把用户日常输入写入日志。
-    let physical_alt_down = unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0;
-    let is_alt_vk = vk == VK_MENU.0 as u32 || vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32;
-    let is_main_hotkey_probe = is_alt_vk || (vk == VK_SPACE.0 as u32 && physical_alt_down);
-    if is_main_hotkey_probe {
-        tracing::trace!(
-            vk,
-            scan_code = kb.scanCode,
-            message = msg,
-            flags = ?kb.flags,
-            physical_alt_down,
-            "main_hotkey_hook_event"
-        );
     }
 
     // 归一化 Hook 事件
@@ -798,15 +943,6 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
         reduce_and_apply(state, InputEvent::HookKey(event), now)
     });
-
-    if is_main_hotkey_probe {
-        tracing::trace!(
-            vk,
-            message = msg,
-            propagation = ?propagation,
-            "main_hotkey_hook_dispatched"
-        );
-    }
 
     if matches!(propagation, Propagation::Swallow) {
         LRESULT(1)
@@ -1003,6 +1139,15 @@ fn handle_wm_input(lparam: LPARAM) {
         let device_id = rawinput.header.hDevice.0 as usize;
         let time_ms = GetMessageTime() as u32;
 
+        // 专项诊断：录制期间 Raw Input 全量键盘事件入缓冲（含非修饰键），用于和
+        // LL Hook 事件对账（Raw 有 Down 而 Hook 没有即可判定 Hook 链被拦截）。
+        if recorder::is_recording() {
+            let session_id = recorder::active_session_id();
+            recorder_diag::record_raw_event(kb.VKey, kb.MakeCode, kb.Flags, device_id);
+            let outcome = feed_raw_recorder(kb);
+            recorder_diag::record_feed_event(session_id, kb.VKey as u32, outcome);
+        }
+
         let Some(normalized) = raw_keyboard_to_modifier(kb, device_id) else {
             return; // 非修饰键，不进 reducer
         };
@@ -1062,10 +1207,25 @@ fn hook_thread_main() {
                 HHOOK_SLOT.with(|slot| {
                     *slot.borrow_mut() = Some(hhook);
                 });
-                tracing::info!(hook_ptr = hhook.0 as usize, "WH_KEYBOARD_LL hook installed");
+                let generation = HOOK_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+                tracing::info!(
+                    reason = "Initial",
+                    old_generation = generation - 1,
+                    new_generation = generation,
+                    installed = true,
+                    hook_ptr = hhook.0 as usize,
+                    "WH_KEYBOARD_LL hook installed"
+                );
             }
             Err(e) => {
                 tracing::error!(?e, "SetWindowsHookExW failed for WH_KEYBOARD_LL");
+                tracing::info!(
+                    reason = "Initial",
+                    old_generation = 0,
+                    new_generation = 0,
+                    installed = false,
+                    "hotkey_hook_generation_changed"
+                );
                 REINSTALL_STATE.with(|s| {
                     let mut s = s.borrow_mut();
                     s.pending_reason = Some(state::ReinstallReason::SessionRecovery);
@@ -1227,5 +1387,53 @@ mod tests {
         assert!(is_modifier_key(VK_LCONTROL.0 as u32));
         assert!(is_modifier_key(VK_LMENU.0 as u32));
         assert!(!is_modifier_key(0x41));
+    }
+
+    #[test]
+    fn raw_recorder_normalizes_main_key_and_ignores_its_keyup() {
+        assert_eq!(
+            normalize_raw_recorder_input(0x41, 0x1E, 0),
+            RawRecorderInput::KeyDown("a".to_string())
+        );
+        assert_eq!(
+            normalize_raw_recorder_input(0x41, 0x1E, RI_KEY_BREAK),
+            RawRecorderInput::Ignore(recorder_diag::FeedIgnoreReason::NonModifierKeyup)
+        );
+    }
+
+    #[test]
+    fn raw_recorder_distinguishes_left_and_right_modifiers() {
+        assert_eq!(
+            normalize_raw_recorder_input(VK_CONTROL.0, 0x1D, 0),
+            RawRecorderInput::ModifierDown("lctrl".to_string())
+        );
+        assert_eq!(
+            normalize_raw_recorder_input(VK_CONTROL.0, 0x1D, RI_KEY_E0),
+            RawRecorderInput::ModifierDown("rctrl".to_string())
+        );
+        assert_eq!(
+            normalize_raw_recorder_input(VK_SHIFT.0, 0x2A, 0),
+            RawRecorderInput::ModifierDown("lshift".to_string())
+        );
+        assert_eq!(
+            normalize_raw_recorder_input(VK_SHIFT.0, 0x36, 0),
+            RawRecorderInput::ModifierDown("rshift".to_string())
+        );
+        assert_eq!(
+            normalize_raw_recorder_input(VK_MENU.0, 0x38, RI_KEY_E0),
+            RawRecorderInput::ModifierDown("ralt".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_recorder_maps_windows_keys_to_meta() {
+        assert_eq!(
+            normalize_raw_recorder_input(VK_LWIN.0, 0x5B, RI_KEY_E0),
+            RawRecorderInput::ModifierDown("meta".to_string())
+        );
+        assert_eq!(
+            normalize_raw_recorder_input(VK_RWIN.0, 0x5C, RI_KEY_E0 | RI_KEY_BREAK),
+            RawRecorderInput::ModifierUp("meta".to_string())
+        );
     }
 }

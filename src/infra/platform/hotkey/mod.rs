@@ -25,6 +25,34 @@ pub use recorder::record_hotkey_blocking;
 // 诊断快照 + 环形缓冲区
 pub mod diagnostics;
 
+// 快捷键录制专项诊断（仅主动录制期间采集，不参与业务判断）
+pub mod recorder_diag;
+
+// ── 录制诊断的环境采集（recorder_diag 用，非 Hook 回调内调用）────────────────
+
+/// 采集 recorder armed 环境快照（前台归属 / 会话 ID / 远程会话 / 完整性级别 /
+/// Down 键列表）。Windows 底层在 `windows.rs`，调用方运行在 spawn_blocking 线程。
+#[cfg(target_os = "windows")]
+pub(crate) fn capture_recorder_env() -> recorder_diag::SessionEnv {
+    windows::capture_recorder_env()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn capture_recorder_env() -> recorder_diag::SessionEnv {
+    recorder_diag::SessionEnv::default()
+}
+
+/// 当前 WH_KEYBOARD_LL generation（每次成功安装递增，仅诊断用途）。
+#[cfg(target_os = "windows")]
+pub(crate) fn current_hook_generation() -> u64 {
+    windows::hook_generation()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn current_hook_generation() -> u64 {
+    0
+}
+
 /// 取消热键录制（会话重置等场景调用）。
 ///
 /// 发送取消信号解除 `record_hotkey_blocking` 的阻塞，应用层随后应通过

@@ -18,15 +18,17 @@ export async function recordHotkey(onReady) {
     const readyPromise = new Promise((resolve) => {
         resolveReady = resolve;
     });
+    let readySessionId;
 
     const unlisten = await listen(EVENTS.HOTKEY_RECORDING_READY, (event) => {
         if (event.payload?.requestId === requestId) {
+            readySessionId = event.payload?.sessionId;
             console.info("[hotkey-recorder] ready", {
                 requestId,
-                sessionId: event.payload?.sessionId,
+                sessionId: readySessionId,
                 elapsedMs: Math.round(performance.now() - startedAt),
             });
-            resolveReady(event.payload?.sessionId);
+            resolveReady(readySessionId);
         }
     });
 
@@ -40,6 +42,7 @@ export async function recordHotkey(onReady) {
         ]);
         if (first.kind === "ready") {
             onReady?.();
+            ackReady(requestId, readySessionId);
             const value = await recordPromise;
             console.info("[hotkey-recorder] completed", {
                 requestId,
@@ -56,4 +59,17 @@ export async function recordHotkey(onReady) {
     } finally {
         unlisten();
     }
+}
+
+/**
+ * 一次性诊断：回传 ready ACK（前端已显示“正在录制”）。
+ * 失败只落 console，不影响录制流程。
+ */
+function ackReady(requestId, sessionId) {
+    if (!sessionId) {
+        return;
+    }
+    invoke("ack_hotkey_recording_ready", {requestId, sessionId}).catch((error) => {
+        console.warn("[hotkey-recorder] ready ack failed", {requestId, sessionId, error});
+    });
 }

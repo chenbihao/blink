@@ -163,38 +163,22 @@ impl Service for HotkeyService {
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    crate::infra::platform::hotkey::InputEffect::Tap { gesture_id, .. } => {
+                    crate::infra::platform::hotkey::InputEffect::Tap { .. } => {
                         // toggle:已可见则隐藏(仅快捷键;单实例重复运行仍走 invoke 总是显示)
                         let visible = crate::infra::platform::window::is_visible();
                         let ai_active = crate::infra::platform::window::is_main_ai_active();
-                        tracing::info!(gesture_id, visible, ai_active, "main_hotkey_tap_received");
                         if visible {
                             // AI 活跃时不隐藏，而是 set_focus + emit SHOWN
                             // 防止用户在 AI 生成过程中误按热键导致窗口消失
                             if ai_active {
-                                tracing::info!(
-                                    gesture_id,
-                                    action = "focus_ai_active",
-                                    "main_hotkey_toggle_decision"
-                                );
                                 if let Some(win) = app.get_webview_window("main") {
                                     let _ = win.set_focus();
                                 }
                                 let _ = app.emit(crate::domain::event_names::EventNames::SHOWN, ());
                             } else {
-                                tracing::info!(
-                                    gesture_id,
-                                    action = "hide",
-                                    "main_hotkey_toggle_decision"
-                                );
                                 crate::infra::platform::window::hide(&app, "toggle");
                             }
                         } else {
-                            tracing::info!(
-                                gesture_id,
-                                action = "show",
-                                "main_hotkey_toggle_decision"
-                            );
                             // 注意：Tap effect 不再包含 triggered_at，但 <50ms 性能目标仍需验证
                             // invoke() 含同步 Win32 调用（GetForegroundWindow / OpenClipboard /
                             // UIA capture），必须 spawn_blocking 避免阻塞 tokio worker 线程

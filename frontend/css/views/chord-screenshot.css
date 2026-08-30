@@ -632,6 +632,40 @@ body.image-editor-mode #canvas.long-image-editing {
     accent-color: var(--accent, #4a9eff);
 }
 
+/* ── 0.22.7：OCR 面板缩放手柄（右下角） ──────────────────────
+   面板用 transform: scale(uiScale) 做视觉缩放，手柄随面板一起缩放。
+   16×16 物理像素的热区，视觉上是一个右下斜角条。 */
+.ocr-panel-resize-handle {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    z-index: 60;
+    pointer-events: auto;
+    /* 用 CSS 画对角线条，视觉提示可拖拽 */
+    background-image: linear-gradient(
+        135deg,
+        transparent 0,
+        transparent 45%,
+        rgba(255, 255, 255, 0.35) 50%,
+        transparent 55%,
+        transparent 100%
+    );
+    background-size: 8px 8px;
+    background-position: bottom right;
+    background-repeat: no-repeat;
+}
+
+.ocr-panel-resize-handle:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.ocr-panel-resize-handle:active {
+    background-color: rgba(255, 255, 255, 0.14);
+}
+
 #btn-cancel:hover {
     background: rgba(248, 113, 113, 0.15);
     color: #fca5a5;

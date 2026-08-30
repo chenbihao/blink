@@ -11,6 +11,8 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::recorder_diag::FeedStatus;
+
 /// 录制结果。
 pub struct RecordResult {
     pub modifiers: Vec<String>,
@@ -18,7 +20,7 @@ pub struct RecordResult {
     pub display: String,
 }
 
-/// 平台无关的语义输入:由平台事件源(如 `ll_proc`)归一化后喂入。
+/// 平台无关的语义输入：由平台事件源（Windows 上为 Raw Input）归一化后喂入。
 pub enum RecordInput {
     /// 修饰键按下(具体名,如 `"ralt"`、`"lctrl"`、`"meta"`)。
     ModifierDown(String),
@@ -49,7 +51,7 @@ struct RecorderState {
     /// 完成通知通道(录制开始时创建,完成后发送)。
     sender: Mutex<Option<(u64, mpsc::Sender<RecordOutcome>)>>,
     /// 当前按下的修饰键集合(具体名,用于组合键快照与单独修饰键判定)。
-    /// 会话号与内容绑定，避免超时边界上的旧 Hook 回调污染下一次录制。
+    /// 会话号与内容绑定，避免超时边界上的旧输入回调污染下一次录制。
     pressed_modifiers: Mutex<(u64, Vec<String>)>,
 }
 
@@ -117,10 +119,22 @@ pub fn record_hotkey_blocking(on_ready: impl FnOnce(u64)) -> Option<RecordResult
 
     // 启动过程必须整体串行：旧实现先覆盖 sender、最后才 CAS recording，第二个并发
     // 调用会覆盖活动录制的 sender 后再 CAS 失败，导致两个调用一起超时。
-    let (rx, session_id) = begin_recording(state)?;
+    let Some((rx, session_id)) = begin_recording(state) else {
+        // 并发拒绝：记录一条 Rejected 汇总（未 armed，无事件），供 command 层输出。
+        super::recorder_diag::begin_rejected_summary(
+            state.active_session_id.load(Ordering::Acquire),
+        );
+        return None;
+    };
     super::InputController::update_recorder(super::RecorderMode::Recording {
         recorder_id: session_id,
     });
+    // 专项诊断会话开始：环境快照在 spawn_blocking 线程读取（非 Hook 回调内）。
+    super::recorder_diag::begin_session(
+        session_id,
+        super::current_hook_generation(),
+        super::capture_recorder_env(),
+    );
     tracing::info!(session_id, "hotkey_recorder_armed");
 
     // ready 回调发生在 armed 之后、阻塞等待之前。command 层据此通知前端，前端只有
@@ -128,7 +142,8 @@ pub fn record_hotkey_blocking(on_ready: impl FnOnce(u64)) -> Option<RecordResult
     on_ready(session_id);
 
     // 阻塞等待结果(超时 10s,与前端文案「10秒超时」一致)。
-    let result = match rx.recv_timeout(Duration::from_secs(10)) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (result, diag_result) = match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(RecordOutcome::Recorded(r)) => {
             tracing::info!(
                 session_id,
@@ -136,7 +151,7 @@ pub fn record_hotkey_blocking(on_ready: impl FnOnce(u64)) -> Option<RecordResult
                 display = %r.display,
                 "hotkey_recorder_completed"
             );
-            Some(r)
+            (Some(r), super::recorder_diag::SessionResult::Completed)
         }
         Ok(RecordOutcome::Cancelled) => {
             tracing::info!(
@@ -144,16 +159,24 @@ pub fn record_hotkey_blocking(on_ready: impl FnOnce(u64)) -> Option<RecordResult
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "hotkey_recorder_cancelled"
             );
-            None
+            (None, super::recorder_diag::SessionResult::Cancelled)
         }
-        Err(e) => {
+        Err(RecvTimeoutError::Timeout) => {
             tracing::warn!(
                 session_id,
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
-                error = ?e,
+                "hotkey_recorder_timeout"
+            );
+            (None, super::recorder_diag::SessionResult::Timeout)
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            tracing::warn!(
+                session_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error = "sender dropped",
                 "hotkey_recorder_wait_failed"
             );
-            None
+            (None, super::recorder_diag::SessionResult::Timeout)
         }
     };
 
@@ -161,6 +184,8 @@ pub fn record_hotkey_blocking(on_ready: impl FnOnce(u64)) -> Option<RecordResult
     // 可能在本会话清理 sender/modifiers 前启动并被旧清理误伤。
     cleanup_session(state, session_id);
     super::InputController::update_recorder(super::RecorderMode::Idle);
+    // cleanup 后 end_session：让清理边界前到达的尾随事件也进入本次汇总。
+    super::recorder_diag::end_session(session_id, diag_result);
 
     result
 }
@@ -189,21 +214,23 @@ pub fn cancel() {
 /// - 修饰键按下 → 记入 `pressed_modifiers`。
 /// - 修饰键松开 → 若该键确在集合中,移除并完成(单独修饰键快捷键);
 ///   否则忽略(如 AltGr 模拟 `lctrl` 的残留松开)。
-pub fn feed(input: RecordInput) {
+///
+/// 返回 [`FeedStatus`] 供平台层诊断映射，不改变录制行为。
+pub fn feed(input: RecordInput) -> FeedStatus {
     let state = get_recorder();
     if !state.recording.load(Ordering::Acquire) {
-        return;
+        return FeedStatus::RecorderInactive;
     }
     let session_id = state.active_session_id.load(Ordering::Acquire);
     if session_id == 0 {
-        return;
+        return FeedStatus::StaleSession;
     }
 
     match input {
         RecordInput::KeyDown(name) => {
             if name == "Escape" {
                 finish(state, session_id, RecordOutcome::Cancelled);
-                return;
+                return FeedStatus::Accepted;
             }
             // 主键按下即完成,快照当前修饰键
             let modifiers = state
@@ -212,7 +239,7 @@ pub fn feed(input: RecordInput) {
                 .ok()
                 .and_then(|mods| (mods.0 == session_id).then(|| mods.1.clone()));
             let Some(modifiers) = modifiers else {
-                return;
+                return FeedStatus::StaleSession;
             };
             let display = format_display(&modifiers, &name);
             finish(
@@ -224,19 +251,24 @@ pub fn feed(input: RecordInput) {
                     display,
                 }),
             );
+            FeedStatus::Accepted
         }
         RecordInput::ModifierDown(name) => {
-            if let Ok(mut mods) = state.pressed_modifiers.lock()
-                && mods.0 == session_id
-                && !mods.1.contains(&name)
-            {
-                mods.1.push(name);
+            match state.pressed_modifiers.lock() {
+                Ok(mut mods) if mods.0 == session_id => {
+                    if !mods.1.contains(&name) {
+                        mods.1.push(name);
+                    }
+                    FeedStatus::Accepted
+                }
+                // 版本不匹配/锁异常：本次修饰键 down 未被记录（诊断用）。
+                _ => FeedStatus::StaleSession,
             }
         }
         RecordInput::ModifierUp(name) => {
             // 仅当该键确实在 pressed_modifiers 中才处理:
             //   在 → 移除并完成(单独修饰键快捷键)
-            //   不在 → 忽略(AltGr 模拟 lctrl 的残留松开,见 feed_recorder 的 AltGr 清理)
+            //   不在 → 忽略（AltGr 模拟 lctrl 的残留松开，见 Windows Raw Input 的 AltGr 清理）
             let present = state
                 .pressed_modifiers
                 .lock()
@@ -261,6 +293,7 @@ pub fn feed(input: RecordInput) {
                     }),
                 );
             }
+            FeedStatus::Accepted
         }
     }
 }

@@ -1167,7 +1167,16 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
         // standalone 配置：修饰键本身是主键
         // 修饰键 down 可能 arm gesture
         if e.is_down {
-            try_arm(state, &e.key, e.source, e.time_ms, &mut result);
+            // standalone 修饰键按住后，Windows 会持续发送 autorepeat keydown。
+            // 与下方非修饰主键保持一致：同一主键已 armed 时保留原 gesture，
+            // 否则重复 down 会不断重置 gesture_id/hold_fired，最终 keyup 被误判为 tap。
+            let is_armed_main_key = matches!(
+                &state.gesture,
+                GestureState::Armed { key, .. } if key == &e.key
+            );
+            if !is_armed_main_key {
+                try_arm(state, &e.key, e.source, e.time_ms, &mut result);
+            }
         } else {
             // 修饰键 up 可能触发 tap/hold release
             try_release(state, &e.key, e.source, now, &mut result);
@@ -1320,14 +1329,6 @@ fn try_arm(
     let frozen_hotkey = config.hotkey.clone();
     let frozen_tap_threshold = config.tap_threshold;
     let gesture_id = state.alloc_gesture_id();
-    tracing::info!(
-        gesture_id,
-        key,
-        modifiers_mask = state.modifiers.pressed_mask(),
-        window_visible = state.window.visible,
-        source = ?source,
-        "main_hotkey_gesture_armed"
-    );
     state.gesture = GestureState::Armed {
         gesture_id,
         key: key.to_string(),
@@ -1389,11 +1390,6 @@ fn try_release(
                 // 双保险：timer 未 fire 但已超阈值 → HoldReleased
                 // 使用 frozen_tap_threshold
                 let _ = armed_at_ms; // armed_at_ms 在真实 adapter 中用于时间比较
-                tracing::info!(
-                    gesture_id,
-                    window_visible = state.window.visible,
-                    "main_hotkey_tap_emitted"
-                );
                 result.effects.push(InputEffect::Tap {
                     gesture_id,
                     triggered_at: now,
@@ -2959,6 +2955,64 @@ mod tests {
             Instant::now(),
         );
         assert!(has_tap(&r.effects));
+    }
+
+    #[test]
+    fn standalone_alt_autorepeat_preserves_hold_until_keyup() {
+        let mut s = InputState::default();
+        let cfg = InputConfigSnapshot {
+            revision: 1,
+            hotkey: NormalizedHotkey {
+                modifiers: vec![],
+                key: "lalt".to_string(),
+            },
+            tap_threshold: Duration::from_millis(300),
+            chord_enabled: false,
+            exclusive_tap_keys: HashSet::new(),
+            voice_hold_enabled: true,
+        };
+        s.config = cfg.clone();
+        reduce(&mut s, InputEvent::ConfigChanged(cfg), Instant::now());
+
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        let gid = s.gesture.gesture_id().unwrap();
+
+        // hold deadline 前后的 modifier autorepeat 都不能替换当前 gesture。
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 200)),
+            Instant::now(),
+        );
+        assert_eq!(s.gesture.gesture_id(), Some(gid));
+
+        let r = reduce(
+            &mut s,
+            InputEvent::HoldDeadline { gesture_id: gid },
+            Instant::now(),
+        );
+        assert!(has_hold_started(&r.effects));
+
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 500)),
+            Instant::now(),
+        );
+        assert_eq!(s.gesture.gesture_id(), Some(gid));
+        assert!(s.gesture.is_hold_fired());
+        assert_eq!(r.propagation, Propagation::Swallow);
+
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_up("lalt", 600)),
+            Instant::now(),
+        );
+        assert!(has_hold_released(&r.effects));
+        assert!(!has_tap(&r.effects));
+        assert!(matches!(s.gesture, GestureState::Idle));
     }
 
     // ── Ctrl+Space 配置匹配 ──

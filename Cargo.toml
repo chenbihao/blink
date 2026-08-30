@@ -140,6 +140,7 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_Security_Credentials",
+    "Win32_Security",
     "Globalization",
     "Media_Ocr",
     "Graphics_Imaging",

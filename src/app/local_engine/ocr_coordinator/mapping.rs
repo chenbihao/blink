@@ -245,14 +245,53 @@ pub(super) fn map_paddleocr_response(
         }
     }
 
-    let text = crate::domain::capability::builtins::ocr_engine::join_words_smart(&words, &lines);
+    // 同行聚合：PaddleOCR 的每个检测元素被视为独立"行"，
+    // 同一视觉行的多个检测框需要按几何关系重新合并。
+    // 严格校验通过后，把 words 展平走 `rebuild_with_line_grouping` 重新分组。
+    // 这保证 PaddleOCR 与 WinRT 走同一套领域层纯函数，输出语义一致。
+    let (result, diag) =
+        crate::domain::capability::builtins::ocr_engine::rebuild_with_line_grouping_and_diag(
+            words, None,
+        );
 
-    Ok(OcrResult {
-        text,
-        lines,
-        words,
-        text_angle: None,
-    })
+    // 消费 Python 返回的 native/fallback word box 计数，安全默认值
+    let native_word_boxes = resp
+        .get("native_word_boxes")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+    let fallback_word_boxes = resp
+        .get("fallback_word_boxes")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+
+    // 记录结构化 DEBUG 日志——不记录 OCR 原文或敏感坐标
+    tracing::debug!(
+        request_id = %expected_request_id,
+        backend = "paddleocr",
+        image_width = image_width,
+        image_height = image_height,
+        source_lines = lines.len(),
+        source_words = diag.source_words,
+        native_word_boxes = native_word_boxes,
+        fallback_word_boxes = fallback_word_boxes,
+        grouped_lines = diag.grouped_lines,
+        merged_line_count = diag.merged_line_count,
+        rejected_y_center = diag.rejected_y_center,
+        rejected_overlap = diag.rejected_overlap,
+        rejected_height_ratio = diag.rejected_height_ratio,
+        assigned_existing_line = diag.assigned_existing_line,
+        created_new_line = diag.created_new_line,
+        large_horizontal_gaps = diag.large_horizontal_gaps,
+        inserted_extra_spaces = diag.inserted_extra_spaces,
+        inserted_blank_lines = diag.inserted_blank_lines,
+        output_text_chars = diag.output_text_chars,
+        layout_elapsed_ms = diag.layout_elapsed_ms,
+        "OCR 几何归一化完成"
+    );
+
+    Ok(result)
 }
 
 fn parse_rect_strict(

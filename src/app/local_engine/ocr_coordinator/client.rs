@@ -66,6 +66,16 @@ impl OcrCoordinator {
         };
 
         let status_code = resp.status();
+
+        tracing::debug!(
+            request_id = %ctx.request_id,
+            backend = "paddleocr",
+            http_status = status_code.as_u16(),
+            png_width = request_png_size.0,
+            png_height = request_png_size.1,
+            "OCR HTTP 响应到达"
+        );
+
         let resp_json: serde_json::Value = tokio::select! {
             r = resp.json() => r.map_err(|e| StructuredOcrError::protocol_error(format!("响应解析失败: {e}")))?,
             _ = ctx.cancellation.cancelled() => return Err(StructuredOcrError::cancelled()),

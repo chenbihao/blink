@@ -15,6 +15,7 @@ import * as annot from './annotation-engine.js';
 import {copyToClipboard, ocrImage, cancelOcrRequest, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
 import {normalizeError} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
+import {computeResizedPanel, clampPanelToMonitor} from './ss-panel-resize.js';
 
 // ════════════════════════════════════════════════════════════
 //  OCR Request Cancellation (Task 6)
@@ -718,6 +719,7 @@ export function showOcrResult(result, options = {}) {
         <span id="ocr-font-scale-val">100%</span>
       </label>
     </div>
+    <div class="ocr-panel-resize-handle" title="拖拽缩放"></div>
   `;
     document.body.appendChild(panel);
 
@@ -823,6 +825,85 @@ export function showOcrResult(result, options = {}) {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
         });
+    }
+
+    // ── 0.22.7：面板缩放（右下角拖拽） ──────────────────────────
+    const resizeHandle = panel.querySelector('.ocr-panel-resize-handle');
+    if (resizeHandle) {
+        let resizing = false;
+        let rsStartW = 0, rsStartH = 0;
+        let rsStartX = 0, rsStartY = 0;
+        let rsUiScale = 1;
+
+        resizeHandle.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            resizing = true;
+            rsStartW = panel.offsetWidth;
+            rsStartH = panel.offsetHeight;
+            rsStartX = e.clientX;
+            rsStartY = e.clientY;
+            rsUiScale = uiScale;
+            document.body.style.cursor = 'nwse-resize';
+            // 标记 resize 进行中，让 ocr-hit-canvas 放行鼠标事件
+            const hitCanvas = document.getElementById('ocr-hit-canvas');
+            if (hitCanvas) hitCanvas.setAttribute('data-resizing', 'true');
+        });
+
+        const onResizeMove = (e) => {
+            if (!resizing) return;
+            if (!document.body.contains(panel)) {
+                resizing = false;
+                document.removeEventListener('mousemove', onResizeMove);
+                document.removeEventListener('mouseup', onResizeUp);
+                document.body.style.cursor = '';
+                const hc = document.getElementById('ocr-hit-canvas');
+                if (hc) hc.removeAttribute('data-resizing');
+                return;
+            }
+            const deltaW = e.clientX - rsStartX;
+            const deltaH = e.clientY - rsStartY;
+            let {w, h} = computeResizedPanel(rsStartW, rsStartH, deltaW, deltaH, rsUiScale);
+            // 钳制到显示器边界（左上角固定，收束尺寸）
+            const left = parseFloat(panel.style.left) || 0;
+            const top = parseFloat(panel.style.top) || 0;
+            const monR = findDisplayCssAt(left + w * rsUiScale / 2, top + h * rsUiScale / 2);
+            const clamped = clampPanelToMonitor(left, top, w, h, rsUiScale, monR);
+            w = clamped.w;
+            h = clamped.h;
+            panel.style.width = w + 'px';
+            panel.style.height = h + 'px';
+            // 覆盖 CSS 的 max-width/max-height 限制，允许面板放大超过默认值
+            panel.style.maxWidth = 'none';
+            panel.style.maxHeight = 'none';
+            // textarea flex 自适应，不需要手动改
+        };
+
+        const onResizeUp = () => {
+            if (!resizing) return;
+            resizing = false;
+            document.body.style.cursor = '';
+            const hc = document.getElementById('ocr-hit-canvas');
+            if (hc) hc.removeAttribute('data-resizing');
+        };
+
+        document.addEventListener('mousemove', onResizeMove);
+        document.addEventListener('mouseup', onResizeUp);
+        // 面板移除时清理
+        const resizeCleanup = () => {
+            document.removeEventListener('mousemove', onResizeMove);
+            document.removeEventListener('mouseup', onResizeUp);
+        };
+        // close 按钮已经在上面的 header 拖动逻辑里绑了 removeEventListener，
+        // 这里用 MutationObserver 兜底
+        const obs = new MutationObserver(() => {
+            if (!document.body.contains(panel)) {
+                resizeCleanup();
+                obs.disconnect();
+            }
+        });
+        obs.observe(document.body, {childList: true});
     }
 
     // Tab 切换

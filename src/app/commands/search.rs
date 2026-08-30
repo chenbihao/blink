@@ -924,6 +924,27 @@ pub async fn record_hotkey(
 
     let result = task.await.map_err(|e| e.to_string())?;
 
+    // 录制专项诊断汇总：一次录制（成功/取消/超时/拒绝）恰好一条。
+    if let Some(summary) = crate::infra::platform::hotkey::recorder_diag::take_last_summary() {
+        tracing::info!(
+            request_id = %request_id,
+            session_id = summary.session_id,
+            result = ?summary.result,
+            elapsed_ms = summary.elapsed_ms,
+            ui_ready_ms = ?summary.ui_ready_ack_ms,
+            hook_generation = summary.hook_generation,
+            raw_down = summary.raw_down,
+            raw_up = summary.raw_up,
+            hook_down = summary.hook_down,
+            hook_up = summary.hook_up,
+            feed_keydown = summary.feed_keydown,
+            dropped_events = summary.dropped_events,
+            remote_session = summary.env.remote_session,
+            foreground_is_blink = summary.env.foreground_is_blink,
+            "hotkey_diag_summary\n{}\n", summary.render(&request_id)
+        );
+    }
+
     match result {
         Some(record) => {
             let val = serde_json::json!({
@@ -948,6 +969,22 @@ pub async fn record_hotkey(
             Err("录制超时或取消".to_string())
         }
     }
+}
+
+/// 前端 ready ACK：确认已收到 ready 事件并显示“正在录制”。
+///
+/// 仅记录诊断（armed → UI ready 耗时）；迟到/旧会话的 ACK 只落日志，
+/// 不影响录制状态；失败不阻断录制。
+#[tauri::command]
+pub async fn ack_hotkey_recording_ready(
+    request_id: String,
+    session_id: u64,
+) -> Result<serde_json::Value, String> {
+    use crate::infra::platform::hotkey::recorder_diag;
+    let outcome = recorder_diag::ack_ready(session_id, &request_id);
+    Ok(serde_json::json!({
+        "acknowledged": matches!(outcome, recorder_diag::AckOutcome::Accepted(_)),
+    }))
 }
 
 /// 记录剪贴板命中（用户选择粘贴某条历史）。

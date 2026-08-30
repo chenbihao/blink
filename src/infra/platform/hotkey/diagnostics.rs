@@ -105,6 +105,8 @@ pub struct HookDiagnosticInfo {
     pub reinstall_attempt: u8,
     pub wts_registered: bool,
     pub raw_registered: bool,
+    /// WH_KEYBOARD_LL generation（每次成功安装递增，仅诊断用途）。
+    pub hook_generation: u64,
 }
 
 /// 完整的输入系统诊断快照。

@@ -262,6 +262,10 @@ fn format_diagnostic_info(
         "WTS: {}, Raw: {}",
         snapshot.hook.wts_registered, snapshot.hook.raw_registered
     ));
+    lines.push(format!(
+        "Hook generation: {}",
+        snapshot.hook.hook_generation
+    ));
     lines.push(String::new());
 
     // ── Recent Events ──

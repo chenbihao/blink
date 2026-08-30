@@ -352,6 +352,37 @@ html, body {
     cursor: not-allowed;
 }
 
+/* ── 0.22.7：OCR 面板缩放手柄（右下角） ────────────────────── */
+.pin-ocr-resize-handle {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    z-index: 210;
+    pointer-events: auto;
+    background-image: linear-gradient(
+        135deg,
+        transparent 0,
+        transparent 45%,
+        rgba(255, 255, 255, 0.35) 50%,
+        transparent 55%,
+        transparent 100%
+    );
+    background-size: 8px 8px;
+    background-position: bottom right;
+    background-repeat: no-repeat;
+}
+
+.pin-ocr-resize-handle:hover {
+    background-color: var(--pin-hover-faint);
+}
+
+.pin-ocr-resize-handle:active {
+    background-color: var(--pin-hover);
+}
+
 /* ── 缩小态（mini-mode）────────────────────────────────── */
 
 /* 缩小态：隐藏 zoom label（JS 也设 opacity:0，CSS 双保险）
