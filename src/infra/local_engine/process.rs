@@ -110,6 +110,33 @@ pub struct LaunchRequest {
     pub instance_id: String,
     pub label: String,
     pub shutdown: ShutdownConfig,
+    /// stdio 管道模式（0.22.7：NDJSON 常驻 worker 用）。
+    ///
+    /// 默认 `Default`（stdin=null、stdout 进 LogPipe）保持既有行为；
+    /// 双向协议 worker 需要 `stdin_piped + stdout_handoff`：
+    /// - stdin pipe 保留在 `ManagedProcess`，由调用方 `take_worker_stdio` 取走；
+    /// - stdout 不再泵入 LogPipe（协议通道），同样交给调用方；
+    /// - stderr 始终泵入 LogPipe（worker 诊断只写 stderr）。
+    pub stdio: StdioConfig,
+}
+
+/// 子进程 stdio 管道配置（默认全部关闭，维持既有行为）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StdioConfig {
+    /// stdin 使用 pipe 并保留供调用方写入（默认 null）。
+    pub stdin_piped: bool,
+    /// stdout 交给调用方接管（不进 LogPipe）。要求 `stdin_piped` 同开。
+    pub stdout_handoff: bool,
+}
+
+impl StdioConfig {
+    /// 双向 NDJSON worker 模式。
+    pub fn worker_protocol() -> Self {
+        Self {
+            stdin_piped: true,
+            stdout_handoff: true,
+        }
+    }
 }
 
 impl LaunchRequest {
@@ -123,6 +150,7 @@ impl LaunchRequest {
             instance_id: generate_instance_id_pub(),
             label: label.into(),
             shutdown: ShutdownConfig::default(),
+            stdio: StdioConfig::default(),
         }
     }
 }
@@ -349,6 +377,16 @@ struct ManagedProcessInner {
     start_op: Option<Arc<StartOperation>>,
     /// 当前 stop operation（Stopping 时存在，Exited 后保留直到下一 generation 替换）。
     stop_op: Option<Arc<StopOperation>>,
+    /// 双向协议 worker 的 stdio 句柄（start 后由调用方一次性取走）。
+    /// None = 未启用 worker 模式或已被取走。
+    /// 调用方持有 stdin 意味着：正常停止由调用方先 drop（EOF）触发 worker 自行退出。
+    worker_stdio: Option<WorkerStdio>,
+}
+
+/// 双向协议 worker 的 stdio 句柄（0.22.7 NDJSON worker）。
+pub struct WorkerStdio {
+    pub stdin: tokio::process::ChildStdin,
+    pub stdout: tokio::process::ChildStdout,
 }
 
 impl ManagedProcess {
@@ -364,6 +402,7 @@ impl ManagedProcess {
                 force_stop_timeout: Duration::from_secs(10),
                 start_op: None,
                 stop_op: None,
+                worker_stdio: None,
             }),
             log_pipe: Arc::new(LogPipe::new(log_config.clone())),
             log_config,
@@ -455,6 +494,9 @@ impl ManagedProcess {
                     // 清理上一代已完成的 operation
                     inner.start_op = None;
                     inner.stop_op = None;
+                    // 上一代遗留的 worker stdio（未被取走时）随新 start 一并丢弃——
+                    // drop ChildStdin 关闭管道，触发旧 worker（若仍存活）收到 EOF。
+                    inner.worker_stdio = None;
 
                     // 创建新 token
                     let token = inner.state.begin_start();
@@ -495,6 +537,7 @@ impl ManagedProcess {
             Ok(spawned) => {
                 let SpawnedChild {
                     mut child,
+                    stdin,
                     stdout,
                     stderr,
                     pid,
@@ -628,19 +671,44 @@ impl ManagedProcess {
                     return Ok(());
                 }
 
+                // 双向协议 worker：stdin/stdout 交由调用方接管（一次性取走）。
+                // stdout 不进 LogPipe（协议通道只承载 NDJSON）；stderr 照常泵入。
+                let mut worker_stdio_slot = None;
+                let mut stdout = stdout;
+                if req.stdio.stdin_piped && req.stdio.stdout_handoff {
+                    if let (Some(s_in), Some(s_out)) = (stdin, stdout.take()) {
+                        worker_stdio_slot = Some(WorkerStdio {
+                            stdin: s_in,
+                            stdout: s_out,
+                        });
+                    } else {
+                        tracing::warn!(pid, "worker stdio 管道缺失，跳过接管（协议不可用）");
+                    }
+                }
+
                 // 启动 pump（使用 ManagedProcess 的 log_config，唯一真源）
                 let max_bytes = self.log_config.max_line_bytes;
                 if let Some(stdout) = stdout {
-                    let lp = self.log_pipe.clone();
-                    tokio::spawn(async move {
-                        pump_lines(stdout, LogSource::Stdout, &lp, max_bytes).await;
-                    });
+                    if !req.stdio.stdout_handoff {
+                        let lp = self.log_pipe.clone();
+                        tokio::spawn(async move {
+                            pump_lines(stdout, LogSource::Stdout, &lp, max_bytes).await;
+                        });
+                    }
                 }
                 if let Some(stderr) = stderr {
                     let lp = self.log_pipe.clone();
                     tokio::spawn(async move {
                         pump_lines(stderr, LogSource::Stderr, &lp, max_bytes).await;
                     });
+                }
+
+                // 公开 worker stdio（Running 提交成功后）。未取走时随 stop/exit drop。
+                if let Some(ws) = worker_stdio_slot {
+                    let mut inner = self.inner.lock().await;
+                    if inner.state.is_current(&token) {
+                        inner.worker_stdio = Some(ws);
+                    }
                 }
 
                 // 启动 wait task
@@ -1136,6 +1204,19 @@ impl ManagedProcess {
         self.log_pipe.subscribe()
     }
 
+    /// 一次性取走双向协议 worker 的 stdio 句柄（0.22.7）。
+    ///
+    /// 仅当启动时声明 `StdioConfig::worker_protocol()` 且进程仍为当前实例时
+    /// 返回 `Some`；重复调用返回 `None`。
+    ///
+    /// **调用方职责**：取走 stdin 后，正常停止路径由调用方先 drop 该句柄
+    /// （管道 EOF）让 worker 自行退出，再走 `ManagedProcess::stop` 兜底回收；
+    /// 未取走时任何 stop/exit/重启路径都会 drop 残留句柄关闭管道。
+    pub async fn take_worker_stdio(&self) -> Option<WorkerStdio> {
+        let mut inner = self.inner.lock().await;
+        inner.worker_stdio.take()
+    }
+
     /// 获取截断行计数。
     #[allow(dead_code)] // 测试断言日志洪泛截断用
     pub fn log_truncated_count(&self) -> u64 {
@@ -1314,6 +1395,7 @@ impl ManagedProcess {
                 force_stop_timeout: Duration::from_secs(10),
                 start_op: None,
                 stop_op: None,
+                worker_stdio: None,
             }),
             log_pipe: Arc::new(LogPipe::new(LogPipeConfig::default())),
             log_config: LogPipeConfig::default(),
@@ -1344,6 +1426,7 @@ impl ManagedProcess {
                 force_stop_timeout: Duration::from_secs(10),
                 start_op: None,
                 stop_op: None,
+                worker_stdio: None,
             }),
             log_pipe: Arc::new(LogPipe::new(LogPipeConfig::default())),
             log_config: LogPipeConfig::default(),
@@ -1362,6 +1445,7 @@ impl ManagedProcess {
 
 struct SpawnedChild {
     child: Child,
+    stdin: Option<tokio::process::ChildStdin>,
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     pid: u32,
@@ -1383,17 +1467,28 @@ async fn spawn_child(req: &LaunchRequest) -> Result<SpawnedChild, String> {
 
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::null());
+    if req.stdio.stdin_piped {
+        cmd.stdin(std::process::Stdio::piped());
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn 失败: {e}"))?;
 
     let pid = child.id().unwrap_or(0);
 
+    let stdin = if req.stdio.stdin_piped {
+        child.stdin.take()
+    } else {
+        // 未启用 pipe 时 tokio 不会创建 stdin 句柄
+        None
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
     Ok(SpawnedChild {
         child,
+        stdin,
         stdout,
         stderr,
         pid,

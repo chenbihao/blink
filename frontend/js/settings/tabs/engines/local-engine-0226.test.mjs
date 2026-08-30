@@ -805,6 +805,16 @@ await test("pendingModelAction：无 entry 时返回 null", () => {
     assert.equal(getPendingModelAction(entry, "some-model"), null);
 });
 
+await test("setLogHistory：丢弃其他引擎的历史日志", () => {
+    let state = createInitialState();
+    state = setCatalog(state, [funasrCatalog]);
+    const own = makeInstLog("inst-1", 1, "funasr log");
+    const foreign = {...makeInstLog("inst-2", 2, "paddle log"), engine_id: "paddleocr"};
+    state = setLogHistory(state, "funasr", [own, foreign]);
+    const entry = getEntry(state, "funasr");
+    assert.deepEqual(entry.logs.map((log) => log.text), ["funasr log"]);
+});
+
 await test("pendingModelAction：安装请求立即覆盖陈旧模型状态", () => {
     let state = createInitialState();
     const model = makeModel({install_state: "not_installed"});

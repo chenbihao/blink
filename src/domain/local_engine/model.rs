@@ -61,38 +61,6 @@ pub struct EngineModelDescriptor {
 }
 
 impl EngineModelDescriptor {
-    /// 构造 SenseVoice Small 模型 descriptor（FunASR 专用）。
-    ///
-    /// 此函数仅供 `funasr.rs` adapter 内部调用，不暴露给前端。
-    pub fn sensevoice_small() -> Self {
-        Self {
-            engine_id: EngineId::new("funasr").expect("funasr is valid"),
-            model_id: "iic/SenseVoiceSmall".to_string(),
-            display_name: "SenseVoice Small".to_string(),
-            description: "五语种 ASR（中/英/日/韩/粤），CPU 首选".to_string(),
-            revision: "funasr-1.x".to_string(),
-            checksum_source: ChecksumSource::Unverified,
-            estimated_size_mb: Some(234),
-            compatibility_schema: 1,
-        }
-    }
-
-    /// 构造 Paraformer-zh 模型 descriptor（FunASR 专用）。
-    ///
-    /// 此函数仅供 `funasr.rs` adapter 内部调用，不暴露给前端。
-    pub fn paraformer_zh() -> Self {
-        Self {
-            engine_id: EngineId::new("funasr").expect("funasr is valid"),
-            model_id: "paraformer-zh".to_string(),
-            display_name: "Paraformer-zh".to_string(),
-            description: "SeacoParaformer 中文 ASR，原生支持热词".to_string(),
-            revision: "funasr-1.x".to_string(),
-            checksum_source: ChecksumSource::Unverified,
-            estimated_size_mb: Some(234),
-            compatibility_schema: 1,
-        }
-    }
-
     /// 校验 health 回报的模型身份是否与此 descriptor 匹配。
     ///
     /// 检查 `model_id`、`revision` 和（如果有）`content_fingerprint`。
@@ -542,26 +510,23 @@ mod tests {
 
     // ── EngineModelDescriptor ─────────────────────────────────────────────
 
-    #[test]
-    fn sensevoice_small_descriptor_has_correct_identity() {
-        let desc = EngineModelDescriptor::sensevoice_small();
-        assert_eq!(desc.engine_id.as_str(), "funasr");
-        assert_eq!(desc.model_id, "iic/SenseVoiceSmall");
-        assert_eq!(desc.revision, "funasr-1.x");
-        assert!(desc.estimated_size_mb.is_some());
-    }
-
-    #[test]
-    fn paraformer_zh_descriptor_has_correct_identity() {
-        let desc = EngineModelDescriptor::paraformer_zh();
-        assert_eq!(desc.engine_id.as_str(), "funasr");
-        assert_eq!(desc.model_id, "paraformer-zh");
-        assert_eq!(desc.revision, "funasr-1.x");
+    /// 测试用 descriptor 构造（模型 id/revision 仅作身份校验样本）。
+    fn test_descriptor(model_id: &str, revision: &str) -> EngineModelDescriptor {
+        EngineModelDescriptor {
+            engine_id: EngineId::new("funasr").expect("funasr is valid"),
+            model_id: model_id.to_string(),
+            display_name: "测试模型".to_string(),
+            description: "测试".to_string(),
+            revision: revision.to_string(),
+            checksum_source: ChecksumSource::Sha256("ab".repeat(32)),
+            estimated_size_mb: Some(243),
+            compatibility_schema: 1,
+        }
     }
 
     #[test]
     fn descriptor_serialization_roundtrip() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let json = serde_json::to_string(&desc).unwrap();
         let back: EngineModelDescriptor = serde_json::from_str(&json).unwrap();
         assert_eq!(back.model_id, desc.model_id);
@@ -572,10 +537,10 @@ mod tests {
 
     #[test]
     fn verify_health_identity_matches_when_all_fields_present() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let result = desc.verify_health_identity(
-            Some("iic/SenseVoiceSmall"),
-            Some("funasr-1.x"),
+            Some("gguf/sensevoice-small-q8"),
+            Some("gguf-v0.2.6"),
             Some("abc123fingerprint"),
         );
         assert!(result.unwrap().is_matched());
@@ -583,25 +548,30 @@ mod tests {
 
     #[test]
     fn verify_health_identity_mismatches_on_wrong_model_id() {
-        let desc = EngineModelDescriptor::sensevoice_small();
-        let result = desc.verify_health_identity(Some("paraformer-zh"), Some("funasr-1.x"), None);
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
+        let result =
+            desc.verify_health_identity(Some("gguf/paraformer-zh-q8"), Some("gguf-v0.2.6"), None);
         let v = result.unwrap();
         assert!(!v.is_matched());
     }
 
     #[test]
     fn verify_health_identity_mismatches_on_wrong_revision() {
-        let desc = EngineModelDescriptor::sensevoice_small();
-        let result = desc.verify_health_identity(Some("iic/SenseVoiceSmall"), Some("v2.0"), None);
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
+        let result = desc.verify_health_identity(
+            Some("gguf/sensevoice-small-q8"),
+            Some("gguf-v0.3.0"),
+            None,
+        );
         assert!(!result.unwrap().is_matched());
     }
 
     #[test]
     fn verify_health_identity_rejects_empty_fingerprint() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let result = desc.verify_health_identity(
-            Some("iic/SenseVoiceSmall"),
-            Some("funasr-1.x"),
+            Some("gguf/sensevoice-small-q8"),
+            Some("gguf-v0.2.6"),
             Some(""), // 空 fingerprint
         );
         assert!(!result.unwrap().is_matched());
@@ -609,10 +579,10 @@ mod tests {
 
     #[test]
     fn verify_health_identity_accepts_missing_fingerprint() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let result = desc.verify_health_identity(
-            Some("iic/SenseVoiceSmall"),
-            Some("funasr-1.x"),
+            Some("gguf/sensevoice-small-q8"),
+            Some("gguf-v0.2.6"),
             None, // fingerprint 缺失（非 Ready 状态）
         );
         assert!(result.unwrap().is_matched());
@@ -620,10 +590,10 @@ mod tests {
 
     #[test]
     fn paraformer_health_identity_verification() {
-        let desc = EngineModelDescriptor::paraformer_zh();
+        let desc = test_descriptor("gguf/paraformer-zh-q8", "gguf-v0.2.6");
         let result = desc.verify_health_identity(
-            Some("paraformer-zh"),
-            Some("funasr-1.x"),
+            Some("gguf/paraformer-zh-q8"),
+            Some("gguf-v0.2.6"),
             Some("para123fingerprint"),
         );
         assert!(result.unwrap().is_matched());
@@ -670,7 +640,7 @@ mod tests {
 
     #[test]
     fn model_status_not_installed_initial() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let status = EngineModelStatus::not_installed(&desc);
         assert_eq!(status.install_state, ModelInstallState::NotInstalled);
         assert!(!status.is_selected);
@@ -680,7 +650,7 @@ mod tests {
 
     #[test]
     fn model_status_is_usable_when_installed_and_verified() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Verified;
@@ -689,8 +659,8 @@ mod tests {
 
     #[test]
     fn model_status_is_usable_when_installed_and_unverified() {
-        // 上游不提供 checksum 的模型（如 FunASR），Unverified 也视为可用
-        let desc = EngineModelDescriptor::sensevoice_small();
+        // 未通过 hash 校验（Unverified）的模型也视为可用——校验状态与安装状态独立
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Unverified;
@@ -699,7 +669,7 @@ mod tests {
 
     #[test]
     fn model_status_not_usable_when_mismatched() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Mismatched;
@@ -708,7 +678,7 @@ mod tests {
 
     #[test]
     fn model_status_not_usable_when_corrupted() {
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_descriptor("gguf/sensevoice-small-q8", "gguf-v0.2.6");
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Corrupted;

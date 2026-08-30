@@ -45,6 +45,32 @@ impl std::fmt::Display for CapabilityKind {
     }
 }
 
+// ── ServiceTransport ───────────────────────────────────────────────────────
+
+/// 引擎服务业务面传输方式（0.22.7）。
+///
+/// 决定 `EngineManager` 如何做 health 验证、STT 请求走哪条通道：
+/// - `Http`：本地 HTTP endpoint + token（现有 Python server 路径）。
+/// - `StdioWorker`：常驻子进程 stdin/stdout NDJSON 协议（GGUF worker 路径）。
+///
+/// 闭合枚举——不提供前端自定义通道的能力。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTransport {
+    #[default]
+    Http,
+    StdioWorker,
+}
+
+impl std::fmt::Display for ServiceTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http => f.write_str("http"),
+            Self::StdioWorker => f.write_str("stdio_worker"),
+        }
+    }
+}
+
 // ── LifecyclePolicy ────────────────────────────────────────────────────────
 
 /// 引擎默认生命周期策略。
@@ -177,6 +203,9 @@ pub struct EngineDefinition {
     pub capability_kind: CapabilityKind,
     /// 运行时种类（PythonVenv/ManagedBinary，闭合枚举）。
     pub runtime_kind: RuntimePlan,
+    /// 服务业务面传输方式（0.22.7：HTTP 或 stdio worker）。
+    #[serde(default)]
+    pub service_transport: ServiceTransport,
     /// 安装计划受限引用。
     pub install_plan: InstallPlanRef,
     /// 模型契约（锁定模型身份，防止随安装时间漂移）。
@@ -287,6 +316,7 @@ mod tests {
             },
             capability_kind: CapabilityKind::Stt,
             runtime_kind: RuntimePlan::PythonVenv,
+            service_transport: ServiceTransport::Http,
             install_plan: InstallPlanRef {
                 runtime_kind: RuntimePlan::PythonVenv,
                 artifact_ids: vec![artifact_id.clone()],

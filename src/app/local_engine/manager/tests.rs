@@ -27,6 +27,7 @@ fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAda
                     },
                     capability_kind: CapabilityKind::Stt,
                     runtime_kind: RuntimePlan::PythonVenv,
+                    service_transport: ServiceTransport::Http,
                     install_plan: InstallPlanRef {
                         runtime_kind: RuntimePlan::PythonVenv,
                         artifact_ids: vec![artifact.clone()],
@@ -181,7 +182,9 @@ impl super::super::model_installer::ModelInstallWorker for BarrierInstaller {
         std::fs::write(staging_payload_dir.join("model.bin"), b"payload").unwrap();
         Ok(super::super::model_installer::ModelDownloadOutcome {
             source: "fake".to_string(),
-            checksum_source: super::super::model_installer::ModelDownloadChecksumSource::Unverified,
+            checksum_source: super::super::model_installer::ModelDownloadChecksumSource::Sha256(
+                "ab".repeat(32),
+            ),
         })
     }
 }
@@ -249,7 +252,9 @@ impl super::super::model_installer::ModelInstallWorker for GatedInstaller {
         std::fs::write(staging_payload_dir.join("model.bin"), b"payload").unwrap();
         Ok(super::super::model_installer::ModelDownloadOutcome {
             source: "fake".to_string(),
-            checksum_source: super::super::model_installer::ModelDownloadChecksumSource::Unverified,
+            checksum_source: super::super::model_installer::ModelDownloadChecksumSource::Sha256(
+                "ab".repeat(32),
+            ),
         })
     }
 }
@@ -1142,6 +1147,50 @@ impl EventPort for RecordingEventPort {
             .unwrap()
             .push((format!("{engine_id}/{operation_id}"), stage.to_string()));
     }
+}
+
+#[tokio::test]
+async fn model_staging_validation_failure_is_visible_in_operation_logs() {
+    let port = RecordingEventPort::new();
+    let eid = EngineId::new("fake-model-log").unwrap();
+    let model_id = format!("gguf/{}", unique_tag("path-model"));
+    let fallback_id = format!("{model_id}-fallback");
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        eid.as_str(),
+        true,
+    )]));
+    let svc = EngineManager::new_with_providers(
+        registry,
+        port.clone(),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        make_model_registry(&eid, &model_id, &fallback_id),
+        Arc::new(super::super::model_installer::FakeInstaller::success()),
+    );
+    let unsafe_operation_id = format!("install-model-{model_id}-123");
+
+    let result = svc
+        .install_model(&eid, &model_id, Some(unsafe_operation_id.clone()))
+        .await
+        .unwrap();
+
+    assert!(!result.success);
+    let logs = port.install_logs.lock().unwrap();
+    assert!(logs.iter().any(|(key, _, text)| {
+        key.ends_with(&unsafe_operation_id)
+            && text.contains("staging 目录创建失败")
+            && text.starts_with("[ERROR]")
+    }));
+    drop(logs);
+    let stages = port.stages.lock().unwrap();
+    assert!(
+        stages
+            .iter()
+            .any(|(key, stage)| key.ends_with(&unsafe_operation_id) && stage == "failed")
+    );
+    drop(stages);
+
+    cleanup_models(&eid, &[&model_id, &fallback_id]).await;
 }
 
 #[test]

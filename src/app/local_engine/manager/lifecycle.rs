@@ -73,12 +73,17 @@ impl EngineManager {
         let eid_for_freeze = engine_id.clone();
         let contract = descriptor.model_contract.clone();
         let uses_managed = adapter_for_freeze.uses_managed_model_storage();
+        // 0.22.7：选中模型从 AdapterConfig 投影读取（与 prepare_launch 同源），
+        // 不再直接读全局 SttConfig 缓存——配置门面已把 funasr_model 投影进
+        // engine_config，直接使用避免缓存未初始化时退化为旧默认模型。
         let selected_model_id = if engine_id.as_str() == super::super::funasr::FUNASR_ENGINE_ID {
-            Some(
-                crate::app::stt_config::get_stt_config()
-                    .local_engine
-                    .funasr_model,
-            )
+            serde_json::from_value::<serde_json::Value>(config.engine_config.clone())
+                .ok()
+                .and_then(|v| {
+                    v.get("funasr_model")
+                        .and_then(|m| m.as_str())
+                        .map(String::from)
+                })
         } else {
             None
         };
@@ -137,6 +142,11 @@ impl EngineManager {
         // `is_explicit_address_in_use`）时重新分配端口重试，次数由
         // `ConflictRetryPolicy` 封顶；其他任何失败不重试；
         // **永不终止占用端口的未知进程**。
+        //
+        // StdioWorker 引擎（0.22.7）不监听端口：无 bind race，单次尝试，
+        // endpoint 使用占位值。
+        let stdio_worker = descriptor.service_transport
+            == crate::domain::local_engine::ServiceTransport::StdioWorker;
         let retry_policy = ConflictRetryPolicy::default();
         let preferred_port = config.preferred_port.unwrap_or(8100);
         let allocator = EndpointAllocator::with_defaults(preferred_port);
@@ -146,14 +156,18 @@ impl EngineManager {
             attempt += 1;
 
             // 分配 endpoint（每次尝试重新探测——此前尝试可能留下新的占用者）
-            let endpoint = allocator.allocate().map_err(|e| {
-                LocalEngineError::with_detail(
-                    LocalEngineErrorCode::PortConflict,
-                    ErrorPhase::Start,
-                    "端口分配失败",
-                    format!("endpoint allocation failed: {e}"),
-                )
-            })?;
+            let endpoint = if stdio_worker {
+                crate::infra::local_engine::port::Endpoint::stdio_placeholder()
+            } else {
+                allocator.allocate().map_err(|e| {
+                    LocalEngineError::with_detail(
+                        LocalEngineErrorCode::PortConflict,
+                        ErrorPhase::Start,
+                        "端口分配失败",
+                        format!("endpoint allocation failed: {e}"),
+                    )
+                })?
+            };
 
             // 生成 token + identity
             let token = generate_service_token();
@@ -207,6 +221,11 @@ impl EngineManager {
                 instance_id: instance_id.clone(),
                 label: launch.label.clone(),
                 shutdown: ShutdownConfig::default(),
+                stdio: if stdio_worker {
+                    crate::infra::local_engine::process::StdioConfig::worker_protocol()
+                } else {
+                    crate::infra::local_engine::process::StdioConfig::default()
+                },
             };
 
             // 创建 ManagedProcess
@@ -318,10 +337,20 @@ impl EngineManager {
 
                     // health 验证——只有 Model Ready 才返回 Ok
                     // 任何失败（timeout/mismatch/backend/ModelFailed/早退）执行统一 rollback
-                    match self
-                        .verify_engine_health(engine_id, &entry, &identity_input, &managed)
+                    // StdioWorker 引擎走 NDJSON ready 握手（0.22.7），HTTP 引擎走轮询
+                    let verify_future = if stdio_worker {
+                        self.verify_stdio_worker_health(
+                            engine_id,
+                            &entry,
+                            &identity_input,
+                            &managed,
+                        )
                         .await
-                    {
+                    } else {
+                        self.verify_engine_health(engine_id, &entry, &identity_input, &managed)
+                            .await
+                    };
+                    match verify_future {
                         Ok(mapping) => {
                             // health 验证通过 + Model Ready——进入 Healthy
                             self.commit_status_internal(engine_id, Some(&operation_id), |status| {
@@ -495,6 +524,11 @@ impl EngineManager {
                 })
                 .await?;
 
+                // 0.22.7：StdioWorker 引擎先走优雅停止——发送 shutdown 请求并
+                // drop 客户端（stdin EOF），短暂等待 worker 自行退出；
+                // 超时再由 ManagedProcess 强制回收进程树。
+                self.graceful_stop_worker(engine_id, entry, &mp).await;
+
                 match mp.stop().await {
                     Ok(()) => {
                         self.commit_status_internal(engine_id, Some(operation_id), |status| {
@@ -539,11 +573,50 @@ impl EngineManager {
         }
     }
 
+    /// StdioWorker 引擎的优雅停止（0.22.7）。
+    ///
+    /// 协议约定：正常停止优先 shutdown 请求 + stdin EOF，worker 自行退出。
+    /// 此处发送请求、drop 客户端并等待最多 `GRACEFUL_WAIT_SECS`；
+    /// 无论结果如何，后续 `ManagedProcess::stop` 兜底回收（Job Object）。
+    async fn graceful_stop_worker(
+        &self,
+        engine_id: &EngineId,
+        entry: &Arc<EngineEntry>,
+        managed: &Arc<ManagedProcess>,
+    ) {
+        const GRACEFUL_WAIT_SECS: u64 = 5;
+
+        let client = entry.worker_client.lock().await.take();
+        let Some(client) = client else {
+            return; // 非 stdio 引擎或客户端已销毁
+        };
+        tracing::debug!(engine = %engine_id, "优雅停止 stdio worker：shutdown + EOF");
+        client.request_shutdown().await;
+        drop(client); // stdin EOF
+
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(GRACEFUL_WAIT_SECS);
+        loop {
+            let snapshot = managed.snapshot().await;
+            if snapshot.status.is_exited() || snapshot.status == ProcessStatus::Stopped {
+                tracing::info!(engine = %engine_id, "stdio worker 已在优雅窗口内退出");
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(engine = %engine_id, "stdio worker 优雅退出超时，转入强制回收");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// 清理运行实例状态：取消日志 pump、删除 lease、清 launch snapshot、
     /// 移除 process registry 条目。
     ///
     /// `remove_lease`: stop/exit 路径删除；`stop_if_current` 条件停止成功后
     /// 同样删除（与 stop 语义一致）。
+    ///
+    /// 0.22.7：同时销毁 stdio worker 客户端（关闭管道）并清空受管音频目录。
     async fn clear_running_instance(
         &self,
         engine_id: &EngineId,
@@ -558,6 +631,15 @@ impl EngineManager {
                 cancel.cancel();
             }
         }
+
+        // 0.22.7：销毁 worker 客户端（drop → stdin EOF）+ 清空音频临时目录
+        {
+            let client = entry.worker_client.lock().await.take();
+            if client.is_some() {
+                tracing::debug!(engine = %engine_id, "clear_running_instance: 销毁 worker 客户端");
+            }
+        }
+        super::super::funasr::worker::clean_audio_tmp_dir(engine_id);
 
         // 取出 instance_id 用于 lease 删除与 registry 移除
         let saved_instance_id = entry
@@ -647,6 +729,9 @@ impl EngineManager {
                 })
                 .await?;
 
+                // 0.22.7：StdioWorker 引擎先走优雅停止（条件停止路径同样适用）
+                self.graceful_stop_worker(engine_id, &entry, &mp).await;
+
                 match mp.stop_if_current(instance_token).await {
                     Ok(()) => {
                         self.commit_status_internal(engine_id, Some(&operation_id), |status| {
@@ -701,16 +786,16 @@ impl EngineManager {
         let mut errors = Vec::new();
 
         for (engine_id, entry) in entries.iter() {
-            let mp = entry.managed_process.lock().await;
-            if let Some(managed) = mp.as_ref() {
+            let managed_opt = entry.managed_process.lock().await.clone();
+            if let Some(managed) = managed_opt {
                 tracing::info!(engine = %engine_id, "shutdown_all: 回收引擎实例");
+                self.graceful_stop_worker(engine_id, entry, &managed).await;
                 if let Err(e) = managed.stop().await {
                     let err = from_process(ErrorPhase::Stop, "shutdown_all 回收失败", &e);
                     tracing::error!(engine = %engine_id, %err, "shutdown_all: 回收失败");
                     errors.push(err);
                 } else {
                     // 更新状态
-                    drop(mp);
                     let _ = self
                         .commit_status_internal(engine_id, None, |status| {
                             status.desired = DesiredState::Stopped;
@@ -895,6 +980,16 @@ impl EngineManager {
                         cancel.cancel();
                     }
                 }
+
+                // 0.22.7：销毁 stdio worker 客户端——崩溃后旧连接的写入
+                // 因管道关闭立即失败（迟到结果不污染新实例），并清理音频临时目录。
+                {
+                    let client = entry.worker_client.lock().await.take();
+                    if client.is_some() {
+                        tracing::debug!(engine = %engine_id, "exit monitor: 销毁 worker 客户端");
+                    }
+                }
+                super::super::funasr::worker::clean_audio_tmp_dir(&engine_id);
 
                 // 取出 instance_id 用于 lease 删除
                 let saved_instance_id = entry

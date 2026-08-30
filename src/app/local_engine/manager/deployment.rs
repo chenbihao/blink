@@ -156,24 +156,41 @@ impl EngineManager {
         .await?;
 
         // 执行 InstallTransaction（slot + journal 部署事务）
-        let transaction = crate::infra::local_engine::providers::InstallTransaction::new(
-            provider_descriptor,
-            &self.python_provider,
-        );
-
+        // 0.22.7：按 descriptor.runtime_kind 选择 provider
+        // （PythonVenv → python_provider；ManagedBinary → binary_provider）。
         let sink_adapter = InstallSinkAdapter::new(
             self.event_port.clone(),
             engine_id.clone(),
             operation_id.to_string(),
         );
-        let install_result = transaction
-            .execute(
-                operation_id,
-                preference,
-                Some(guard.cancel_token()),
-                Some(&sink_adapter),
-            )
-            .await;
+        let install_result = match provider_descriptor.runtime_kind {
+            crate::infra::local_engine::runtime::RuntimePlan::ManagedBinary => {
+                crate::infra::local_engine::providers::InstallTransaction::new(
+                    provider_descriptor,
+                    &self.binary_provider,
+                )
+                .execute(
+                    operation_id,
+                    preference,
+                    Some(guard.cancel_token()),
+                    Some(&sink_adapter),
+                )
+                .await
+            }
+            crate::infra::local_engine::runtime::RuntimePlan::PythonVenv => {
+                crate::infra::local_engine::providers::InstallTransaction::new(
+                    provider_descriptor,
+                    &self.python_provider,
+                )
+                .execute(
+                    operation_id,
+                    preference,
+                    Some(guard.cancel_token()),
+                    Some(&sink_adapter),
+                )
+                .await
+            }
+        };
 
         match install_result {
             Ok(result) => {

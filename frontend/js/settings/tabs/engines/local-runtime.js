@@ -79,6 +79,25 @@ const COMMANDS = Object.freeze({
     CANCEL_MODEL_OP: "cancel_model_operation",
 });
 
+/**
+ * 生成可安全用作后端 staging 单级目录名的模型操作 ID。
+ *
+ * 模型 ID 属于业务身份，允许包含 `/`（如 `gguf/paraformer-zh-q8`）；
+ * operation_id 同时用于事件关联和 staging 目录，只允许 `[a-z0-9-]`。
+ * @param {"install"|"repair"|"delete"} kind
+ * @param {string} modelId
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function createModelOperationId(kind, modelId, now = Date.now()) {
+    const modelSlug = String(modelId)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 64) || "model";
+    return `${kind}-model-${modelSlug}-${now}`;
+}
+
 // ── controller ─────────────────────────────────────────────────────────────────
 
 /**
@@ -677,7 +696,7 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async installModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
-            const operationId = `install-model-${modelId}-${Date.now()}`;
+            const operationId = createModelOperationId("install", modelId);
             // 发起前存入 state，供取消按钮使用
             state = setPendingModelAction(state, engineId, modelId, {
                 kind: "install",
@@ -714,7 +733,7 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async repairModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
-            const operationId = `repair-model-${modelId}-${Date.now()}`;
+            const operationId = createModelOperationId("repair", modelId);
             // 发起前存入 state，供取消按钮使用
             state = setPendingModelAction(state, engineId, modelId, {
                 kind: "repair",
@@ -749,7 +768,7 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async deleteModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
-            const operationId = `delete-model-${modelId}-${Date.now()}`;
+            const operationId = createModelOperationId("delete", modelId);
             state = setPendingModelAction(state, engineId, modelId, {
                 kind: "delete",
                 operationId,

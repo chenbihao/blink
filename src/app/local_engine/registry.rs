@@ -166,6 +166,7 @@ mod tests {
                             version: "0.1.0".to_string(),
                         },
                         capability_kind: CapabilityKind::Stt,
+                        service_transport: ServiceTransport::Http,
                         runtime_kind: RuntimePlan::PythonVenv,
                         install_plan: InstallPlanRef {
                             runtime_kind: RuntimePlan::PythonVenv,

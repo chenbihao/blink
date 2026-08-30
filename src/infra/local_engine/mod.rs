@@ -34,6 +34,7 @@ pub mod runtime;
 pub mod state;
 #[cfg(test)]
 mod tests;
+pub mod worker_proto;
 
 #[allow(unused_imports)]
 pub use lease::{

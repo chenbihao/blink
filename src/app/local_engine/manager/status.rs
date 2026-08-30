@@ -133,6 +133,9 @@ impl EngineManager {
     /// stop 或重启后旧 connection 的 token 不匹配新实例——
     /// Python server 会拒绝旧 token 的请求（401）。
     /// 无运行实例时返回 None。
+    ///
+    /// 0.22.7：StdioWorker 引擎额外附带 worker transport（来自 start 时
+    /// ready 握手建立的 NDJSON 客户端）；管道随实例生命周期销毁。
     pub async fn get_connection(
         &self,
         engine_id: &EngineId,
@@ -140,11 +143,17 @@ impl EngineManager {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
         let ci = entry.current_identity().await;
+        let worker = entry.worker_client.lock().await.clone().map(|client| {
+            let audio_dir = super::super::funasr::worker::engine_audio_tmp_dir(engine_id);
+            std::sync::Arc::new(super::super::funasr::worker::GgufSttTransport::new(
+                client, audio_dir,
+            )) as std::sync::Arc<dyn crate::domain::stt::SttTransport>
+        });
         Ok(ci.as_ref().map(|identity| LocalEngineConnection {
             endpoint: identity.endpoint.base_url(),
-            token: identity.token.clone(),
             engine_id: identity.engine_id.clone(),
             instance_id: identity.instance_id.clone(),
+            worker,
         }))
     }
 

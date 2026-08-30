@@ -15,6 +15,21 @@ fn unknown_engine_id_rejected() {
 }
 
 #[test]
+fn operation_logs_are_hidden_while_runtime_is_active() {
+    use crate::domain::local_engine::ProcessState;
+
+    assert!(!super::should_include_operation_logs(&ProcessState::Starting));
+    assert!(!super::should_include_operation_logs(&ProcessState::Running {
+        pid: 49988,
+    }));
+    assert!(!super::should_include_operation_logs(&ProcessState::Stopping));
+    assert!(super::should_include_operation_logs(&ProcessState::Stopped));
+    assert!(super::should_include_operation_logs(&ProcessState::Exited {
+        reason: "test".to_string(),
+    }));
+}
+
+#[test]
 fn invalid_engine_id_rejected() {
     let result = validate_engine_id("invalid/id/with/slashes");
     assert!(result.is_err());

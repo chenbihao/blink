@@ -63,6 +63,18 @@ function idleOperation() {
     return {kind: "idle", operation_id: "", stage: "pending", cancellable: false};
 }
 
+await test("unknown 环境探测中不得显示已就绪", () => {
+    const entry = makeEntry("funasr", {
+        status: {environment: "unknown", available: false},
+    });
+    const summary = computeEngineSummary(entry, null);
+    const feedback = computeFeedback(entry, null);
+    assert.match(summary.text, /检查环境/);
+    assert.doesNotMatch(summary.text, /已就绪/);
+    assert.match(feedback.text, /确认引擎安装状态/);
+    assert.doesNotMatch(feedback.text, /环境已就绪/);
+});
+
 /** 构造 entry：catalog + status overrides + models + preferences。 */
 function makeEntry(engineId = "funasr", overrides = {}) {
     let state = createInitialState();

@@ -207,22 +207,37 @@ pub struct StructuredLogEntry {
 /// 受限连接快照——由 `EngineManager` 产生，不可序列化给前端。
 ///
 /// 包含当前运行实例的 endpoint、token 和身份信息，
-/// 供 STT transcription client 携带 `X-Engine-Token` 鉴权。
+/// 供 STT transcription client 使用（worker 传输通道）。
 ///
 /// **stop 或重启后旧 connection 的请求不得影响新实例**——
-/// token 不匹配的请求会被 Python server 拒绝（401）。
-#[derive(Debug, Clone)]
+/// worker 销毁后旧连接的写入会因管道关闭而失败（天然隔离）。
+///
+/// **0.22.7**：`worker` 存在（StdioWorker 引擎）时 STT 请求走 NDJSON 通道，
+/// endpoint 退化为诊断字段；客户端句柄随 stop/exit 一起销毁，
+/// 旧连接的写入会因管道关闭而失败（天然隔离）。
+#[derive(Clone)]
 pub struct LocalEngineConnection {
-    /// 实际 endpoint base URL（`http://127.0.0.1:port`）。
+    /// 实际 endpoint base URL（`http://127.0.0.1:port`；worker 引擎为占位描述）。
     pub endpoint: String,
-    /// 服务 token（用于 `X-Engine-Token` header）。
-    pub token: String,
     /// engine id。
     #[allow(dead_code)]
     pub engine_id: String,
     /// instance id（每次启动随机生成，用于实例隔离）。
     #[allow(dead_code)]
     pub instance_id: String,
+    /// stdio worker 传输通道（StdioWorker 引擎）。
+    pub worker: Option<std::sync::Arc<dyn crate::domain::stt::SttTransport>>,
+}
+
+impl std::fmt::Debug for LocalEngineConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalEngineConnection")
+            .field("endpoint", &self.endpoint)
+            .field("engine_id", &self.engine_id)
+            .field("instance_id", &self.instance_id)
+            .field("worker", &self.worker.is_some())
+            .finish()
+    }
 }
 
 /// start 单次尝试的失败分类（0.22.6 phase B）。
@@ -294,6 +309,9 @@ pub(crate) struct EngineEntry {
     /// 日志 pump 的 cancellation token——每次 start 创建新 token，
     /// stop/rollback/restart 时 cancel 旧 pump，确保旧实例日志不再投影。
     log_pump_cancel: Mutex<Option<CancellationToken>>,
+    /// stdio worker 客户端（StdioWorker 引擎 Running 时存在）。
+    /// 持有 worker 的 stdin/stdout；drop 时关闭管道（stdin EOF → worker 退出）。
+    worker_client: Mutex<Option<Arc<crate::infra::local_engine::worker_proto::NdjsonWorkerClient>>>,
     /// 后台探测共享结果——确定性 probe 协调。
     ///
     /// 构造后 spawn 后台任务探测 active 部署，
@@ -435,6 +453,9 @@ pub struct EngineManager {
     /// Python venv provider 实例（安装事务用）。
     /// 目前只有 PythonVenv 引擎，单实例即可。
     python_provider: PythonVenvProvider,
+    /// Managed binary provider 实例（0.22.7 GGUF worker 安装事务用）。
+    /// 按 ProviderDescriptor.runtime_kind 与 python_provider 二选一。
+    binary_provider: crate::infra::local_engine::providers::binary::ManagedBinaryProvider,
     /// 同步 process registry——独立于 async entries 锁。
     /// `shutdown_all_blocking` 直接读取此字段，不访问 entries。
     /// start 在 spawn 后登记，stop/spawn失败/health失败后移除。
@@ -494,6 +515,7 @@ impl EngineManager {
                     managed_process: Mutex::new(None),
                     last_managed_process: Mutex::new(None),
                     log_pump_cancel: Mutex::new(None),
+                    worker_client: Mutex::new(None),
                     probe_result: OnceCell::new(),
                     probe_tx,
                     probe_watch: probe_rx,
@@ -511,6 +533,8 @@ impl EngineManager {
             model_worker,
             provider_descriptors,
             python_provider,
+            binary_provider:
+                crate::infra::local_engine::providers::binary::ManagedBinaryProvider::new(),
             process_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
 

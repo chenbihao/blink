@@ -21,23 +21,20 @@ import {formatLocalLogTimestamp} from "./local-engine-log-format.js";
  * @param {Object} controller
  * @param {Object} i18n
  * @param {HTMLElement} anchorBtn - 诊断按钮
- * @param {HTMLElement} label - 按钮文字 span
  * @param {HTMLElement} diagPanel - 诊断面板容器
  */
-export function showEngineDiagnostics(entry, controller, i18n, anchorBtn, label, diagPanel) {
+export function showEngineDiagnostics(entry, controller, i18n, anchorBtn, diagPanel) {
     const engineId = entry.catalog?.engine_id;
     if (!engineId || !controller?.getDiagnostics) return;
 
     if (!diagPanel.hidden) {
         diagPanel.hidden = true;
         anchorBtn.setAttribute("aria-expanded", "false");
-        label.textContent = tt(i18n, "local_engine.diagnostic.btn", "诊断");
         return;
     }
 
     diagPanel.hidden = false;
     anchorBtn.setAttribute("aria-expanded", "true");
-    label.textContent = tt(i18n, "local_engine.diagnostic.collapse", "收起诊断");
     refreshEngineDiagnostics(entry, controller, i18n, diagPanel);
 }
 
@@ -57,11 +54,15 @@ function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
 
     controller.getDiagnostics(engineId).then((diag) => {
         if (diagPanel.hidden || diagPanel.dataset.requestId !== requestId) return;
+        if (!diag || diag.engine_id !== engineId) {
+            throw new Error(tt(i18n, "local_engine.diagnostic.engine_mismatch", "诊断响应与当前引擎不匹配"));
+        }
         renderDiagnosticContent(diagPanel, diag, i18n, engineId, entry, () => {
             refreshEngineDiagnostics(entry, controller, i18n, diagPanel);
         });
     }).catch((e) => {
         if (diagPanel.hidden || diagPanel.dataset.requestId !== requestId) return;
+        diagPanel.textContent = "";
         const errEl = document.createElement("div");
         errEl.className = "le-diagnostic-error";
         errEl.textContent = e?.message || String(e);
@@ -75,24 +76,35 @@ function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
 function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefresh) {
     container.textContent = "";
 
-    // 头部：标题 + 重新诊断按钮（诊断是快照——状态变化后需手动重新拉取）
+    // 头部：标题 + 重新诊断 + 复制诊断（诊断是快照）
     const header = document.createElement("div");
     header.className = "le-diagnostic-header";
     const title = document.createElement("span");
     title.className = "le-diagnostic-title";
     title.textContent = tt(i18n, "local_engine.diagnostic.title", "引擎诊断");
     header.appendChild(title);
+    const headerActions = document.createElement("div");
+    headerActions.className = "le-diagnostic-actions";
     if (typeof onRefresh === "function") {
         const refreshBtn = document.createElement("button");
-        refreshBtn.className = "btn btn-small le-action-btn";
+        refreshBtn.className = "btn btn-small le-action-btn le-diagnostic-refresh";
         refreshBtn.type = "button";
         refreshBtn.appendChild(renderIcon("refresh-cw", {extraClass: "le-action-icon"}));
         const refreshLabel = document.createElement("span");
         refreshLabel.textContent = tt(i18n, "local_engine.diagnostic.refresh", "重新诊断");
         refreshBtn.appendChild(refreshLabel);
         refreshBtn.addEventListener("click", onRefresh);
-        header.appendChild(refreshBtn);
+        headerActions.appendChild(refreshBtn);
     }
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn btn-small le-diagnostic-copy";
+    copyBtn.textContent = tt(i18n, "local_engine.diagnostic.copy", "复制诊断");
+    copyBtn.addEventListener("click", () => {
+        const text = JSON.stringify(diag, null, 2);
+        copyTextWithFeedback(copyBtn, text, i18n);
+    });
+    headerActions.appendChild(copyBtn);
+    header.appendChild(headerActions);
     container.appendChild(header);
 
     // 基本信息
@@ -169,16 +181,6 @@ function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefre
         noLogs.textContent = tt(i18n, "local_engine.diagnostic.no_logs", "无日志");
         container.appendChild(noLogs);
     }
-
-    // 复制诊断按钮
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "btn btn-small le-diagnostic-copy";
-    copyBtn.textContent = tt(i18n, "local_engine.diagnostic.copy", "复制诊断");
-    copyBtn.addEventListener("click", () => {
-        const text = JSON.stringify(diag, null, 2);
-        copyTextWithFeedback(copyBtn, text, i18n);
-    });
-    container.appendChild(copyBtn);
 
     // ── 停止孤儿引擎按钮 ──────────────────────────────────────────
     // 后端提供闭合 DTO { present, actionable, reason }，

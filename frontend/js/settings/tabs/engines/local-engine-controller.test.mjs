@@ -117,7 +117,7 @@ async function test(name, fn) {
 // ── 测试主体 ────────────────────────────────────────────────────────────────
 
 async function runTests() {
-    const {createLocalEngineController} = await import("./local-runtime.js");
+    const {createLocalEngineController, createModelOperationId} = await import("./local-runtime.js");
     const {makeCatalog, makeStatus, makeLog, processState} = await import("./local-engine-fixtures.js");
 
     // ── 1. mount 期间事件进入缓冲，mount 完成后 flush ────────────────────────
@@ -411,6 +411,19 @@ async function runTests() {
 
         controller.dispose();
         env.cleanup();
+    });
+
+    // ── 9. 模型 ID 不得泄漏路径分隔符到 operation_id ─────────────────
+
+    await test("模型 operation_id 将带斜杠的 FunASR 模型 ID 安全 slug 化", () => {
+        const operationId = createModelOperationId(
+            "install",
+            "gguf/paraformer-zh-q8",
+            1788101493899,
+        );
+        assert.equal(operationId, "install-model-gguf-paraformer-zh-q8-1788101493899");
+        assert.match(operationId, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+        assert.ok(operationId.length <= 128, "operation_id 必须满足后端长度上限");
     });
 }
 

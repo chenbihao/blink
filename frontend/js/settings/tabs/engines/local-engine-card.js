@@ -262,7 +262,7 @@ function buildToolsRow(entry, controller, i18n) {
     modelsLabel.textContent = tt(i18n, "local_engine.action.manage_models", "管理模型");
     modelsBtn.appendChild(modelsLabel);
     modelsBtn.addEventListener("click", () => {
-        toggleCollapsible(modelsBtn, ".le-model-list");
+        toggleExclusivePanel(modelsBtn, ".le-model-list");
     });
     tools.appendChild(modelsBtn);
 
@@ -277,7 +277,7 @@ function buildToolsRow(entry, controller, i18n) {
     logLabel.textContent = tt(i18n, "local_engine.action.logs", "日志");
     logBtn.appendChild(logLabel);
     logBtn.addEventListener("click", () => {
-        toggleCollapsible(logBtn, ".le-card-log");
+        toggleExclusivePanel(logBtn, ".le-card-log");
     });
     tools.appendChild(logBtn);
 
@@ -294,11 +294,35 @@ function buildToolsRow(entry, controller, i18n) {
     diagBtn.addEventListener("click", () => {
         const card = diagBtn.closest(".le-card");
         const panel = card?.querySelector(".le-diagnostic-inline");
-        if (panel) showEngineDiagnostics(entry, controller, i18n, diagBtn, diagLabel, panel);
+        if (panel) {
+            if (panel.hidden) collapseSiblingPanels(card, ".le-diagnostic-inline");
+            showEngineDiagnostics(entry, controller, i18n, diagBtn, panel);
+        }
     });
     tools.appendChild(diagBtn);
 
-    // 打开目录
+    // 维护（与模型/日志/诊断组成互斥面板组）
+    const maintBtn = document.createElement("button");
+    maintBtn.className = "btn btn-small le-action-btn le-maintenance-toggle";
+    maintBtn.type = "button";
+    maintBtn.dataset.actionKind = "maintenance";
+    maintBtn.setAttribute("aria-expanded", "false");
+    maintBtn.appendChild(renderIcon("wrench", {extraClass: "le-action-icon"}));
+    const maintLabel = document.createElement("span");
+    maintLabel.textContent = tt(i18n, "local_engine.maintenance.btn", "维护");
+    maintBtn.appendChild(maintLabel);
+    maintBtn.appendChild(renderIcon("chevron-down", {extraClass: "le-action-icon le-disclosure-icon"}));
+    maintBtn.addEventListener("click", () => {
+        toggleExclusivePanel(maintBtn, ".le-maintenance");
+    });
+    tools.appendChild(maintBtn);
+
+    // 弹性间隔：前四个面板入口在左，打开目录固定在右
+    const spacer = document.createElement("span");
+    spacer.className = "le-tools-spacer";
+    tools.appendChild(spacer);
+
+    // 打开目录（独立动作，不参与面板切换）
     const openDirBtn = document.createElement("button");
     openDirBtn.className = "btn btn-small le-action-btn";
     openDirBtn.type = "button";
@@ -312,42 +336,43 @@ function buildToolsRow(entry, controller, i18n) {
     });
     tools.appendChild(openDirBtn);
 
-    // 弹性间隔（窄窗口时维护按钮换行右对齐）
-    const spacer = document.createElement("span");
-    spacer.className = "le-tools-spacer";
-    tools.appendChild(spacer);
-
-    // 维护（展开维护面板：修复环境 / 清理引擎缓存）
-    const maintBtn = document.createElement("button");
-    maintBtn.className = "btn btn-small le-action-btn le-maintenance-toggle";
-    maintBtn.type = "button";
-    maintBtn.dataset.actionKind = "maintenance";
-    maintBtn.setAttribute("aria-expanded", "false");
-    maintBtn.appendChild(renderIcon("wrench", {extraClass: "le-action-icon"}));
-    const maintLabel = document.createElement("span");
-    maintLabel.textContent = tt(i18n, "local_engine.maintenance.btn", "维护");
-    maintBtn.appendChild(maintLabel);
-    maintBtn.appendChild(renderIcon("chevron-down", {extraClass: "le-action-icon le-disclosure-icon"}));
-    maintBtn.addEventListener("click", () => {
-        toggleCollapsible(maintBtn, ".le-maintenance");
-    });
-    tools.appendChild(maintBtn);
-
     return tools;
 }
 
 /**
- * 折叠层开关：切换目标 hidden 并同步 aria-expanded。
+ * 面板开关：同一卡片内模型/日志/诊断/维护互斥，只允许一个展开。
  * @param {HTMLElement} btn - 触发按钮（含 aria-expanded）
  * @param {string} selector - 折叠层选择器（相对 btn.closest(".le-card")）
  */
-function toggleCollapsible(btn, selector) {
+function toggleExclusivePanel(btn, selector) {
     const card = btn.closest(".le-card");
     const panel = card?.querySelector(selector);
     if (!panel) return;
     const willExpand = panel.hidden;
-    panel.hidden = !willExpand;
-    btn.setAttribute("aria-expanded", String(willExpand));
+    collapseSiblingPanels(card, selector);
+    if (willExpand) {
+        panel.hidden = false;
+        btn.setAttribute("aria-expanded", "true");
+    } else {
+        panel.hidden = true;
+        btn.setAttribute("aria-expanded", "false");
+    }
+}
+
+function collapseSiblingPanels(card, exceptSelector = null) {
+    const bindings = [
+        [".le-models-toggle", ".le-model-list"],
+        [".le-log-toggle", ".le-card-log"],
+        [".le-diagnostic-toggle", ".le-diagnostic-inline"],
+        [".le-maintenance-toggle", ".le-maintenance"],
+    ];
+    for (const [buttonSelector, panelSelector] of bindings) {
+        if (panelSelector === exceptSelector) continue;
+        const button = card?.querySelector(buttonSelector);
+        const sibling = card?.querySelector(panelSelector);
+        if (sibling) sibling.hidden = true;
+        if (button) button.setAttribute("aria-expanded", "false");
+    }
 }
 
 /**

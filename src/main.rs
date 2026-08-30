@@ -820,9 +820,10 @@ fn main() {
             // - 编译期注册 FunASR + PaddleOCR adapter
             // - TauriEventPort 负责通用事件投影 + 旧 FunASR 兼容投影
             // - service_epoch 在构造时生成，Blink 实例生命周期内不变
-            // - 禁止创建多个 service 实例
             // - 0.22.3: 安装走 RuntimeProvider transaction（ProviderDescriptor + PythonVenvProvider）
             // - 0.22.4: 同时注册 paddleocr adapter + OcrCoordinator（OcrBackendRouter）
+            // - 0.22.7.4: funasr 为 GGUF 常驻 worker 实现（ManagedBinary +
+            //   StdioWorker），旧 Python/PyTorch 链路已删除
             let funasr_adapter = crate::app::local_engine::funasr::make_funasr_adapter();
             let paddleocr_adapter = crate::app::local_engine::paddleocr::make_paddleocr_adapter();
             let engine_registry = std::sync::Arc::new(
@@ -841,7 +842,8 @@ fn main() {
                 operation_log_store.clone(),
             );
 
-            // 构造 provider descriptors map + python provider（安装事务用）
+            // 构造 provider descriptors map + python provider（安装事务用）。
+            // funasr = ManagedBinary（GGUF worker）；paddleocr 仍走 PythonVenv。
             let funasr_descriptor =
                 crate::app::local_engine::funasr::make_funasr_provider_descriptor();
             let paddleocr_descriptor =
@@ -866,7 +868,7 @@ fn main() {
                     python_provider,
                     crate::app::local_engine::model_installer::make_funasr_model_registry(),
                     std::sync::Arc::new(
-                        crate::app::local_engine::model_installer::FunasrModelInstallWorker::new(),
+                        crate::app::local_engine::funasr::FunasrGgufModelInstallWorker::new(),
                     ),
                 );
             app.manage(local_engine_service.clone());

@@ -498,6 +498,14 @@ impl Endpoint {
         Self { port }
     }
 
+    /// stdio worker 占位 endpoint（0.22.7）。
+    ///
+    /// NDJSON worker 不监听端口；此值仅填充 `LaunchContext`/lease 的
+    /// endpoint 语义位，health 校验不核对（worker ready 不回显 endpoint）。
+    pub fn stdio_placeholder() -> Self {
+        Self { port: 0 }
+    }
+
     /// 创建 loopback endpoint（非测试环境仅 infra allocator 可达）。
     #[cfg(not(test))]
     pub(crate) fn new(port: u16) -> Self {

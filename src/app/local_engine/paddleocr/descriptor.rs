@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::domain::local_engine::{
     CapabilityKind, ComputeCandidate, EngineDefinition, EngineDisplay, EngineTimeouts,
-    InstallPlanRef, LifecyclePolicy, ResourceBudget,
+    InstallPlanRef, LifecyclePolicy, ResourceBudget, ServiceTransport,
 };
 use crate::domain::ocr::config::PaddleModel;
 use crate::infra::local_engine::providers::python::PythonVenvProvider;
@@ -42,6 +42,7 @@ pub(super) fn make_paddleocr_descriptor() -> EngineDefinition {
             version: "0.22.4".to_string(),
         },
         capability_kind: CapabilityKind::Ocr,
+        service_transport: ServiceTransport::Http,
         runtime_kind: RuntimePlan::PythonVenv,
         install_plan: InstallPlanRef {
             runtime_kind: RuntimePlan::PythonVenv,

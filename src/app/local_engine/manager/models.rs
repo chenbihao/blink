@@ -282,6 +282,18 @@ impl EngineManager {
         let slot_id = generate_install_id();
         let asset_key = mstore::encode_asset_key(model_id);
 
+        // sink 必须在任何 staging 操作之前建立：路径校验、目录创建等下载前失败
+        // 也要进入前端日志卡片，不能只留在后端 tracing。
+        let sink =
+            std::sync::Arc::new(super::super::model_installer::BroadcastingInstallSink::new(
+                super::super::model_installer::BoundedInstallSink::new(500),
+                Arc::clone(&self.event_port) as Arc<dyn EventPort>,
+                engine_id.clone(),
+                op_id.clone(),
+            ));
+        use super::super::model_installer::InstallSink as _ModelInstallSink;
+        sink.emit_stage("preparing");
+
         // 模型状态真源 = 磁盘 manifest（list_models / get_model_status /
         // resolve_expected_model_identity 均从磁盘恢复）；下载/校验等瞬态阶段
         // 不再有内存缓存投影——它从未被任何消费者读取，且与磁盘真源存在漂移风险。
@@ -316,6 +328,7 @@ impl EngineManager {
                             kind,
                             &asset_key,
                             format!("staging 目录创建失败: {e}"),
+                            &sink,
                         )
                         .await);
                 }
@@ -329,20 +342,12 @@ impl EngineManager {
                     kind,
                     &asset_key,
                     format!("staging 目录创建失败: {e}"),
+                    &sink,
                 )
                 .await);
         }
 
         // 下载（worker 执行；sink 实时广播日志 + 内存缓冲）
-        let sink =
-            std::sync::Arc::new(super::super::model_installer::BroadcastingInstallSink::new(
-                super::super::model_installer::BoundedInstallSink::new(500),
-                Arc::clone(&self.event_port) as Arc<dyn EventPort>,
-                engine_id.clone(),
-                op_id.clone(),
-            ));
-        use super::super::model_installer::InstallSink as _ModelInstallSink;
-        sink.emit_stage("preparing");
         let download_result = self
             .model_worker
             .download_to_staging(
@@ -450,9 +455,6 @@ impl EngineManager {
                         s,
                         crate::domain::local_engine::ChecksumSource::Sha256(sha.clone()),
                     ),
-                    super::super::model_installer::ModelDownloadChecksumSource::Unverified => {
-                        (s, crate::domain::local_engine::ChecksumSource::Unverified)
-                    }
                 }
             }
             Err(_) => unreachable!("download_result 已在上面处理"),
@@ -538,6 +540,7 @@ impl EngineManager {
         kind: ModelOperationKind,
         asset_key: &str,
         message: String,
+        sink: &super::super::model_installer::BroadcastingInstallSink,
     ) -> ModelOperationResult {
         tracing::warn!(
             engine_id = %engine_id,
@@ -545,6 +548,9 @@ impl EngineManager {
             %message,
             "模型操作失败"
         );
+        use super::super::model_installer::InstallSink as _;
+        sink.emit_log(&format!("[ERROR] {message}"));
+        sink.emit_stage("failed");
         let _ = mstore::cleanup_staging(engine_id, asset_key, op_id);
         ModelOperationResult {
             engine_id: engine_id.to_string(),

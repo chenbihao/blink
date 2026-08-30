@@ -85,6 +85,30 @@ fn migrate_local_model_id_to_funasr_model(local_model_id: &str) -> Option<&'stat
     }
 }
 
+/// GGUF 常驻 worker 的三个稳定模型 id（0.22.7.3+；与 app 层 GGUF 目录一致）。
+pub const GGUF_SENSEVOICE_MODEL_ID: &str = "gguf/sensevoice-small-q8";
+pub const GGUF_PARAFORMER_MODEL_ID: &str = "gguf/paraformer-zh-q8";
+pub const GGUF_NANO_MODEL_ID: &str = "gguf/fun-asr-nano-q4km";
+
+/// 旧模型 id（Python/PyTorch 时代的 ModelScope id 与短名）→ GGUF 模型 id 的
+/// 确定映射（0.22.7 切换用）。
+///
+/// 语义：**保持用户选择的模型种类不变**（SenseVoice→SenseVoice GGUF、
+/// Paraformer→Paraformer GGUF），只更换底层 runtime；不存在静默换模型。
+/// 旧 id 无对应 GGUF 实现（如真流式 online 变体）时返回 None。
+pub fn legacy_model_to_gguf_id(legacy: &str) -> Option<&'static str> {
+    match legacy {
+        "iic/SenseVoiceSmall" | "SenseVoice" | "sensevoice" | "sensevoice-small" => {
+            Some(GGUF_SENSEVOICE_MODEL_ID)
+        }
+        "paraformer-zh"
+        | "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" => {
+            Some(GGUF_PARAFORMER_MODEL_ID)
+        }
+        _ => None,
+    }
+}
+
 /// 流式模式选择。
 ///
 /// 伪流式（默认）：VAD 切句定稿 + 累积预览，在非自回归模型上实现"边说边出字"体感。
@@ -215,10 +239,9 @@ pub struct LocalEngineConfig {
     /// 监听端口（默认 8000）
     #[serde(default = "default_server_port")]
     pub server_port: u16,
-    /// 模型标识(传给 blink_stt_server --model 参数)
-    /// 如 "iic/SenseVoiceSmall"（五语种 ASR，CPU 首选）
-    /// 或 "paraformer-zh"（SeacoParaformer，原生支持热词）
-    /// 注意：使用完整 ModelScope ID（含 `iic/` 前缀），短名在 FunASR 1.3.14 中解析会失败
+    /// 模型标识（GGUF 常驻 worker，0.22.7.4 起唯一本地实现）
+    /// 如 "gguf/sensevoice-small-q8" / "gguf/paraformer-zh-q8" /
+    /// "gguf/fun-asr-nano-q4km"；旧 Python 时代 id 在反序列化时归一化。
     #[serde(
         default = "default_funasr_model",
         deserialize_with = "deserialize_funasr_model"
@@ -280,33 +303,35 @@ fn default_server_port() -> u16 {
 }
 
 fn default_funasr_model() -> String {
-    "iic/SenseVoiceSmall".to_string()
+    GGUF_SENSEVOICE_MODEL_ID.to_string()
 }
 
-/// 反序列化时归一化旧配置中的模型名。
+/// 反序列化时把旧 Python/PyTorch 时代的模型 id 归一化为 GGUF 模型 id。
 ///
-/// FunASR 1.3.14 的 AutoModel 短名解析在某些场景下会失效（ModelScope API
-/// 返回 404），因此统一使用完整 ModelScope ID（含 `iic/` 前缀）。
-/// 此函数将已知的旧名映射到正确的完整 ID。
+/// 0.22.7.4 起 `funasr` 引擎只有 GGUF 常驻 worker 一个实现，镜像字段
+/// `local_engine.funasr_model` 在加载时即归一到 GGUF id，保证无
+/// `local_stt_selection` 的旧配置也能直接启动。模型种类保持不变：
+/// SenseVoice→SenseVoice、Paraformer→Paraformer，不静默换模型。
 fn deserialize_funasr_model<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     use serde::Deserialize;
     let raw = String::deserialize(deserializer)?;
     Ok(match raw.as_str() {
-        // SenseVoice 短名需要显式映射，因为 FunASR name_maps_ms 中没有这些别名
-        "sensevoice" | "SenseVoice" | "SenseVoiceSmall" => "iic/SenseVoiceSmall".to_string(),
-        // paraformer-zh 短名不映射——FunASR 内部 name_maps_ms 会解析为
-        // iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch (SeacoParaformer)
-        // 如果在这里映射为完整 ID，反而会绕过 FunASR 的正确解析
-        // 兼容旧配置：曾经用过的错误完整 ID，归一化为短名让 FunASR 正确解析
-        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404" => {
-            "paraformer-zh".to_string()
+        // SenseVoice 旧短名与完整 ModelScope id
+        "sensevoice" | "SenseVoice" | "SenseVoiceSmall" | "iic/SenseVoiceSmall" => {
+            GGUF_SENSEVOICE_MODEL_ID.to_string()
         }
-        // 旧真流式模型，已废弃——归一化为默认非流式模型
+        // Paraformer 旧短名、完整 ModelScope id 与曾经的错误完整 id
+        "paraformer-zh"
+        | "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+        | "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404" => {
+            GGUF_PARAFORMER_MODEL_ID.to_string()
+        }
+        // 旧真流式模型，已废弃——归一化为默认 SenseVoice
         "paraformer-zh-streaming"
         | "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online" => {
-            "iic/SenseVoiceSmall".to_string()
+            GGUF_SENSEVOICE_MODEL_ID.to_string()
         }
         other => other.to_string(),
     })
@@ -417,13 +442,16 @@ impl SttConfig {
     /// 依次执行：
     /// 1. `migrate_local_stt_selection`：旧 `local_model_id` +
     ///    `local_engine.funasr_model` → `local_stt_selection` 联合引用
-    /// 2. 云端迁移：旧 0.12 `cloud` 字段 → `cloud_provider` 独立模式
+    /// 2. `migrate_selection_to_gguf`：旧 Python 时代模型 id → GGUF 模型 id
+    ///    （0.22.7.4 切换；模型种类不变）
+    /// 3. 云端迁移：旧 0.12 `cloud` 字段 → `cloud_provider` 独立模式
     ///
     /// 任一步骤产生变更时返回 `true`（调用方需持久化到 DB + 更新缓存）。
     pub fn apply_migration(&mut self, ai_config: &super::ai_config::AIConfig) -> bool {
         let local_migrated = self.migrate_local_stt_selection();
+        let gguf_migrated = self.migrate_selection_to_gguf();
         let cloud_migrated = self.migrate_cloud_config(ai_config);
-        local_migrated || cloud_migrated
+        local_migrated || gguf_migrated || cloud_migrated
     }
 
     /// 迁移本地 STT 选择：旧 `local_model_id` + `local_engine.funasr_model` → `local_stt_selection`。
@@ -471,8 +499,10 @@ impl SttConfig {
 
         // 从 local_engine.funasr_model 迁移
         // 只有非默认值才表示用户曾显式选择过模型
+        // 默认值比较用 GGUF 默认 id：旧默认 "iic/SenseVoiceSmall" 已在
+        // `deserialize_funasr_model` 中归一化为 GGUF 默认 id。
         let funasr_model = &self.local_engine.funasr_model;
-        if !funasr_model.is_empty() && funasr_model != "iic/SenseVoiceSmall" {
+        if !funasr_model.is_empty() && funasr_model != GGUF_SENSEVOICE_MODEL_ID {
             self.local_stt_selection = Some(LocalSttSelection::new(
                 LocalSttSelection::FUNASR_ENGINE_ID,
                 funasr_model.as_str(),
@@ -487,6 +517,43 @@ impl SttConfig {
 
         // 两者都为空/默认 → 不产生选择
         false
+    }
+
+    /// 把已存在的本地选择从旧 Python 时代模型 id 迁移到 GGUF 模型 id（0.22.7.4）。
+    ///
+    /// 在 GGUF 成为 `funasr` 引擎唯一实现时由启动迁移调用：
+    /// - `local_stt_selection.model_id` 是旧 id → 按 [`legacy_model_to_gguf_id`]
+    ///   确定映射（保持模型种类：SenseVoice→SenseVoice GGUF）；
+    /// - 同步 `local_engine.funasr_model`（兼容镜像字段）；
+    /// - 已是 GGUF id 或旧 id 无映射（返回 false，选择保持原样并记录 warn——
+    ///   不静默切换到其他模型）。
+    pub fn migrate_selection_to_gguf(&mut self) -> bool {
+        let Some(sel) = self.local_stt_selection.clone() else {
+            return false;
+        };
+        if sel.engine_id != LocalSttSelection::FUNASR_ENGINE_ID {
+            return false;
+        }
+        let Some(new_id) = legacy_model_to_gguf_id(&sel.model_id) else {
+            if !sel.model_id.starts_with("gguf/") {
+                tracing::warn!(
+                    model_id = %sel.model_id,
+                    "本地 STT 选择的旧模型无 GGUF 映射——保持原样（不静默切换）"
+                );
+            }
+            return false;
+        };
+        self.local_stt_selection = Some(LocalSttSelection::new(
+            LocalSttSelection::FUNASR_ENGINE_ID,
+            new_id,
+        ));
+        self.local_engine.funasr_model = new_id.to_string();
+        tracing::info!(
+            old_model_id = %sel.model_id,
+            new_model_id = new_id,
+            "本地 STT 选择已迁移到 GGUF 模型 id（模型种类不变）"
+        );
+        true
     }
 
     /// 迁移云端 STT 配置：旧 0.12 `cloud` 字段 → `cloud_provider` 独立模式。
@@ -621,7 +688,7 @@ mod tests {
         assert!(cfg.cloud_provider.is_none());
         assert_eq!(cfg.streaming_mode, StreamingMode::Pseudo);
         assert_eq!(cfg.local_engine.server_port, 8000);
-        assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
+        assert_eq!(cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID);
         assert_eq!(cfg.local_engine.device, "cpu");
         assert!(cfg.local_engine.hotwords.is_none());
         assert!(cfg.local_engine.use_itn);
@@ -643,7 +710,7 @@ mod tests {
             }),
             local_engine: LocalEngineConfig {
                 server_port: 9000,
-                funasr_model: "paraformer-zh".into(),
+                funasr_model: GGUF_PARAFORMER_MODEL_ID.into(),
                 device: "cuda".into(),
                 num_threads: Some(4),
                 auto_start_server: true,
@@ -656,7 +723,7 @@ mod tests {
                 },
                 streaming_model: None,
             },
-            local_stt_selection: Some(LocalSttSelection::new("funasr", "paraformer-zh")),
+            local_stt_selection: Some(LocalSttSelection::new("funasr", GGUF_PARAFORMER_MODEL_ID)),
             local_model_id: Some("sensevoice-small".into()),
             model_dir: None,
             audio_device_id: Some("麦克风 (Realtek Audio)".into()),
@@ -674,7 +741,7 @@ mod tests {
             "whisper-large-v3"
         );
         assert_eq!(restored.local_engine.server_port, 9000);
-        assert_eq!(restored.local_engine.funasr_model, "paraformer-zh");
+        assert_eq!(restored.local_engine.funasr_model, GGUF_PARAFORMER_MODEL_ID);
         assert_eq!(restored.local_engine.device, "cuda");
         assert_eq!(restored.local_engine.num_threads, Some(4));
         assert_eq!(
@@ -694,7 +761,7 @@ mod tests {
         );
         assert_eq!(
             restored.local_stt_selection.as_ref().unwrap().model_id,
-            "paraformer-zh"
+            GGUF_PARAFORMER_MODEL_ID
         );
     }
 
@@ -707,7 +774,7 @@ mod tests {
         assert_eq!(cfg.mode, SttMode::Cloud);
         assert_eq!(cfg.streaming_mode, StreamingMode::Pseudo);
         assert_eq!(cfg.local_engine.server_port, 8000);
-        assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
+        assert_eq!(cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID);
         assert!(cfg.local_engine.use_itn);
     }
 
@@ -755,47 +822,47 @@ mod tests {
         assert_eq!(cfg.streaming_mode, StreamingMode::Off);
     }
 
-    /// 验证旧配置中的 "sensevoice" 模型名被归一化为完整 ModelScope ID。
+    /// 验证旧配置中的 "sensevoice" 模型名被归一化为 SenseVoice GGUF id。
     #[test]
     fn deserialize_normalizes_old_sensevoice_model_name() {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"sensevoice","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
-            cfg.local_engine.funasr_model, "iic/SenseVoiceSmall",
-            "旧配置中的 'sensevoice' 应被归一化为 'iic/SenseVoiceSmall'"
+            cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID,
+            "旧配置中的 'sensevoice' 应被归一化为 SenseVoice GGUF id"
         );
     }
 
-    /// 验证 "paraformer-zh" 短名保持不变（FunASR 内部 name_maps_ms 解析为 SeacoParaformer）。
+    /// 验证 "paraformer-zh" 短名被归一化为 Paraformer GGUF id。
     #[test]
-    fn deserialize_keeps_paraformer_zh_short_name() {
+    fn deserialize_normalizes_paraformer_short_name() {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"paraformer-zh","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
-            cfg.local_engine.funasr_model, "paraformer-zh",
-            "短名 'paraformer-zh' 应保持不变，由 FunASR 内部 name_maps_ms 解析为 SeacoParaformer"
+            cfg.local_engine.funasr_model, GGUF_PARAFORMER_MODEL_ID,
+            "短名 'paraformer-zh' 应被归一化为 Paraformer GGUF id"
         );
     }
 
-    /// 验证旧的错误完整 ID 被归一化为短名。
+    /// 验证旧的错误完整 ID 被归一化为 Paraformer GGUF id。
     #[test]
     fn deserialize_normalizes_old_wrong_full_id() {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
-            cfg.local_engine.funasr_model, "paraformer-zh",
-            "错误的完整 ID 应归一化为短名 'paraformer-zh'"
+            cfg.local_engine.funasr_model, GGUF_PARAFORMER_MODEL_ID,
+            "错误的完整 ID 应归一化为 Paraformer GGUF id"
         );
     }
 
-    /// 验证旧真流式模型名被归一化为默认非流式模型。
+    /// 验证旧真流式模型名被归一化为默认 SenseVoice GGUF id。
     #[test]
     fn deserialize_normalizes_old_streaming_model_name() {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"paraformer-zh-streaming","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
-            cfg.local_engine.funasr_model, "iic/SenseVoiceSmall",
-            "旧真流式模型 'paraformer-zh-streaming' 应归一化为 'iic/SenseVoiceSmall'"
+            cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID,
+            "旧真流式模型 'paraformer-zh-streaming' 应归一化为 SenseVoice GGUF id"
         );
     }
 
@@ -1198,12 +1265,29 @@ mod tests {
 
     /// EngineModelStatus.is_usable() 的行为验证——set_local_stt_selection
     /// 的验证逻辑依赖此方法。这里测试各组合。
+    fn test_model_descriptor() -> crate::domain::local_engine::model::EngineModelDescriptor {
+        use crate::domain::local_engine::model::EngineModelDescriptor;
+        EngineModelDescriptor {
+            engine_id: crate::infra::local_engine::runtime::EngineId::new("funasr")
+                .expect("funasr is valid"),
+            model_id: "gguf/sensevoice-small-q8".to_string(),
+            display_name: "测试模型".to_string(),
+            description: "测试".to_string(),
+            revision: "gguf-v0.2.6".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Sha256(
+                "ab".repeat(32),
+            ),
+            estimated_size_mb: Some(243),
+            compatibility_schema: 1,
+        }
+    }
+
     #[test]
     fn model_usability_check_rejects_non_installed() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         // NotInstalled → 不可用
         status.install_state = ModelInstallState::NotInstalled;
@@ -1214,9 +1298,9 @@ mod tests {
     #[test]
     fn model_usability_check_rejects_downloading() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Downloading;
         status.verification_state = ModelVerificationState::Unknown;
@@ -1225,10 +1309,8 @@ mod tests {
 
     #[test]
     fn model_usability_check_rejects_download_failed() {
-        use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState,
-        };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        use crate::domain::local_engine::model::{EngineModelStatus, ModelInstallState};
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::DownloadFailed;
         assert!(!status.is_usable(), "DownloadFailed 应被拒绝");
@@ -1237,9 +1319,9 @@ mod tests {
     #[test]
     fn model_usability_check_accepts_installed_verified() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Verified;
@@ -1249,9 +1331,9 @@ mod tests {
     #[test]
     fn model_usability_check_accepts_installed_unverified() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Unverified;
@@ -1261,9 +1343,9 @@ mod tests {
     #[test]
     fn model_usability_check_rejects_installed_corrupted() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Corrupted;
@@ -1273,9 +1355,9 @@ mod tests {
     #[test]
     fn model_usability_check_rejects_installed_mismatched() {
         use crate::domain::local_engine::model::{
-            EngineModelDescriptor, EngineModelStatus, ModelInstallState, ModelVerificationState,
+            EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
-        let desc = EngineModelDescriptor::sensevoice_small();
+        let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::Installed;
         status.verification_state = ModelVerificationState::Mismatched;
@@ -1305,5 +1387,86 @@ mod tests {
     #[test]
     fn local_stt_selection_funasr_engine_id_constant() {
         assert_eq!(LocalSttSelection::FUNASR_ENGINE_ID, "funasr");
+    }
+
+    // ── 0.22.7 GGUF 模型迁移测试 ──────────────────────────────────────────
+
+    #[test]
+    fn legacy_to_gguf_mapping() {
+        assert_eq!(
+            legacy_model_to_gguf_id("iic/SenseVoiceSmall"),
+            Some(GGUF_SENSEVOICE_MODEL_ID)
+        );
+        assert_eq!(
+            legacy_model_to_gguf_id("paraformer-zh"),
+            Some(GGUF_PARAFORMER_MODEL_ID)
+        );
+        assert_eq!(
+            legacy_model_to_gguf_id(
+                "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+            ),
+            Some(GGUF_PARAFORMER_MODEL_ID)
+        );
+        assert_eq!(legacy_model_to_gguf_id("unknown"), None);
+    }
+
+    #[test]
+    fn migrate_selection_to_gguf_maps_sensevoice_and_syncs_mirror() {
+        let mut cfg = SttConfig {
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "iic/SenseVoiceSmall")),
+            local_engine: LocalEngineConfig {
+                funasr_model: "iic/SenseVoiceSmall".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(cfg.migrate_selection_to_gguf());
+        let sel = cfg.local_stt_selection.unwrap();
+        assert_eq!(sel.engine_id, "funasr");
+        assert_eq!(sel.model_id, GGUF_SENSEVOICE_MODEL_ID);
+        // 兼容镜像字段同步
+        assert_eq!(cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID);
+    }
+
+    #[test]
+    fn migrate_selection_to_gguf_maps_paraformer() {
+        let mut cfg = SttConfig {
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "paraformer-zh")),
+            ..Default::default()
+        };
+        assert!(cfg.migrate_selection_to_gguf());
+        assert_eq!(
+            cfg.local_stt_selection.unwrap().model_id,
+            GGUF_PARAFORMER_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn migrate_selection_to_gguf_noop_for_gguf_ids() {
+        let mut cfg = SttConfig {
+            local_stt_selection: Some(LocalSttSelection::new("funasr", GGUF_NANO_MODEL_ID)),
+            ..Default::default()
+        };
+        assert!(!cfg.migrate_selection_to_gguf(), "GGUF id 应保持不变");
+    }
+
+    #[test]
+    fn migrate_selection_to_gguf_noop_without_selection() {
+        let mut cfg = SttConfig::default();
+        assert!(!cfg.migrate_selection_to_gguf());
+    }
+
+    #[test]
+    fn migrate_selection_to_gguf_keeps_unmappable_selection() {
+        // 无映射的旧 id：不静默切换，保持原样
+        let mut cfg = SttConfig {
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "some-exotic-model")),
+            ..Default::default()
+        };
+        assert!(!cfg.migrate_selection_to_gguf());
+        assert_eq!(
+            cfg.local_stt_selection.unwrap().model_id,
+            "some-exotic-model"
+        );
     }
 }

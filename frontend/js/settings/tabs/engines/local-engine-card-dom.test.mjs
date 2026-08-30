@@ -276,6 +276,14 @@ const controllerStub = {
     stop: async () => {},
     repair: async () => {},
     cancel: async () => {},
+    getDiagnostics: async (engineId) => ({
+        engine_id: engineId,
+        environment: "ready",
+        process: {state: "stopped"},
+        service: "unknown",
+        recent_logs: [],
+        orphan_recovery: {present: false, actionable: false, reason: "no_lease"},
+    }),
 };
 
 const READY_STOPPED = {
@@ -397,6 +405,44 @@ await test("维护面板默认折叠，展开/收起同步 aria-expanded", () =>
     toggle.click();
     assert.equal(maint.hidden, true, "再次点击收起");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
+});
+
+await test("模型/日志/维护面板互斥，打开目录位于工具栏右侧", () => {
+    const container = makeContainer();
+    renderEngineCard(container, makeEntry("funasr", {status: READY_STOPPED}), controllerStub, undefined);
+    const card = container.querySelector(".le-card");
+    const modelsToggle = card.querySelector(".le-models-toggle");
+    const logToggle = card.querySelector(".le-log-toggle");
+    const maintToggle = card.querySelector(".le-maintenance-toggle");
+
+    modelsToggle.click();
+    assert.equal(card.querySelector(".le-model-list").hidden, false);
+    logToggle.click();
+    assert.equal(card.querySelector(".le-model-list").hidden, true, "打开日志会收起模型");
+    assert.equal(modelsToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(card.querySelector(".le-card-log").hidden, false);
+    maintToggle.click();
+    assert.equal(card.querySelector(".le-card-log").hidden, true, "打开维护会收起日志");
+    assert.equal(logToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(card.querySelector(".le-maintenance").hidden, false);
+
+    const actions = card.querySelector(".le-card-tools")._children
+        .map((child) => child.dataset.actionKind || "spacer");
+    assert.deepEqual(actions, ["models", "log", "diagnostics", "maintenance", "spacer", "open-dir"]);
+});
+
+await test("诊断头部中重新诊断位于复制诊断左侧", async () => {
+    const container = makeContainer();
+    renderEngineCard(container, makeEntry("funasr", {status: READY_STOPPED}), controllerStub, undefined);
+    const card = container.querySelector(".le-card");
+    card.querySelector(".le-diagnostic-toggle").click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const actions = card.querySelector(".le-diagnostic-actions");
+    assert.ok(actions, "诊断操作应位于头部操作组");
+    assert.ok(actions._children[0].className.includes("le-diagnostic-refresh"));
+    assert.ok(actions._children[1].className.includes("le-diagnostic-copy"));
 });
 
 // ── 4. 模型列表默认折叠 + 摘要不丢 ───────────────────────────────────────────

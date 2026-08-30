@@ -1,0 +1,51 @@
+{
+  "$schema": "blink://stt/funasr-gguf/worker-lock",
+  "schema": 1,
+  "protocol_version": 1,
+  "note": "GGUF 常驻 worker 的可复现来源锁定（0.22.7）。exe 不入 Git：由 `cargo xtask funasr-worker` 从以下锁定源码 + xtask/funasr-worker/patches 构建到 resources/bin/funasr-worker/（随 release 打包，hash 记录在同目录 manifest.json，安装期校验）。",
+  "funasr_release_tag": "runtime-llamacpp-v0.2.6",
+  "funasr_commit": "55b662ccf9ea77237ba9253b3bddd953d4184f84",
+  "funasr_source_zip_url": "https://codeload.github.com/modelscope/FunASR/zip/55b662ccf9ea77237ba9253b3bddd953d4184f84",
+  "funasr_source_zip_sha256": "e60ba3843f1a3153c11830e3092f767d983ff6ebf3e1e4dcec7d13f3b45e5bf3",
+  "llama_cpp_commit": "803b7fcae893e9caaee3921779628fef83ac0965",
+  "llama_cpp_note": "由 FunASR runtime/llama.cpp/CMakeLists.txt FetchContent 锁定，构建期拉取",
+  "patches": [
+    "xtask/funasr-worker/patches/0001-sensevoice-ndjson-stdin-server.patch",
+    "xtask/funasr-worker/patches/0002-paraformer-ndjson-stdin-server.patch",
+    "xtask/funasr-worker/patches/0003-funasr-cli-ndjson-stdin-server.patch"
+  ],
+  "shared_header": "xtask/funasr-worker/blink_worker_protocol.h",
+  "models": [
+    {
+      "model_id": "gguf/sensevoice-small-q8",
+      "repo": "FunAudioLLM/SenseVoiceSmall-GGUF",
+      "file": "sensevoice-small-q8.gguf",
+      "sha256": "4ae45c94422de949b387e2e0fb10d7e14e4c42c69db30c3444ecc7d4b844b7c5"
+    },
+    {
+      "model_id": "gguf/paraformer-zh-q8",
+      "repo": "FunAudioLLM/Paraformer-GGUF",
+      "file": "paraformer-q8.gguf",
+      "sha256": "42bf76ea1575a336aaca4c1b7c01a82b79113e6d04d0d6b799561bfcf07ee011"
+    },
+    {
+      "model_id": "gguf/fun-asr-nano-q4km",
+      "repo": "FunAudioLLM/Fun-ASR-Nano-GGUF",
+      "file": "funasr-encoder-f16.gguf",
+      "sha256": "f92f91d01a24fbed6c863495b2ee8c6a6788144a02858b75743f0946668de8a2"
+    },
+    {
+      "model_id": "gguf/fun-asr-nano-q4km",
+      "repo": "FunAudioLLM/Fun-ASR-Nano-GGUF",
+      "file": "qwen3-0.6b-q4km.gguf",
+      "sha256": "cc5057552aa9dddedcda73ea8889854e8a257eb07d0a561b7234465c1e856f22"
+    }
+  ],
+  "licenses": {
+    "funasr": "MIT (modelscope/FunASR)",
+    "llama_cpp": "MIT (ggml-org/llama.cpp)",
+    "models": "Apache-2.0 (FunAudioLLM GGUF 发布，见各仓库 LICENSE)",
+    "blink_worker_protocol": "MIT (blink 仓库)"
+  },
+  "vad_decision": "不安装 fsmn-vad.gguf：Blink 伪流式客户端侧能量 VAD 切句 + 裁剪快照，worker 单窗口推理覆盖（phase 0.22 §5.8.3）"
+}

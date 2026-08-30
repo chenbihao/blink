@@ -9,6 +9,7 @@
 //!   cargo xtask icons          拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
 //!   cargo xtask models         从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
 //!   cargo xtask lint           前端防新增检查（CSS 禁止新增带 hex fallback 的 var()）
+//!   cargo xtask funasr-worker  从锁定 FunASR 源码构建常驻 GGUF STT worker（0.22.7）
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
 //! 不可控）并用相对路径定位 ps1，在 CI 的 tauri-action 上下文里找不到脚本。
@@ -35,6 +36,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+mod funasr_worker;
 
 /// 自动发现所有 Rust 插件（扫描 plugins/examples/ 目录）。
 fn discover_rust_plugins() -> Vec<String> {
@@ -197,11 +200,6 @@ const EMBEDDED_RESOURCES: &[(&str, &str, EmbeddedKind)] = &[
         EmbeddedKind::PythonScript,
     ),
     (
-        "resources/stt/funasr/blink_stt_server.py",
-        "Blink FunASR STT Server",
-        EmbeddedKind::PythonScript,
-    ),
-    (
         "resources/ocr/paddleocr/locked-requirements.txt",
         "PaddleOCR locked requirements",
         EmbeddedKind::LockedRequirements,
@@ -266,7 +264,10 @@ fn check_release_resources() {
     // 2. 必要许可文件存在
     check_required_licenses(&mut failures);
 
-    // 3. 排除规则：resources/ 下无模型/staging/generation/venv/cache/__pycache__
+    // 3. GGUF worker 供应链：来源锁文件与构建常量一致 + 随发布 manifest 就位
+    check_gguf_worker_supply_chain(&mut failures);
+
+    // 4. 排除规则：resources/ 下无模型/staging/generation/venv/cache/__pycache__
     check_exclusion_rules(&mut failures);
 
     if !failures.is_empty() {
@@ -276,6 +277,92 @@ fn check_release_resources() {
         panic!("release 资源校验失败：{} 个错误", failures.len());
     }
     println!("✅ release 资源前置校验全部通过");
+}
+
+/// 校验 GGUF 常驻 worker 的可复现来源锁定与发布产物（0.22.7）。
+///
+/// - `resources/stt/funasr-gguf/worker-lock.json`：来源锁文件存在、可解析，
+///   且 funasr commit/release tag/zip sha256 与 `funasr_worker` 构建常量一致
+///   （两处声明漂移即失败）；
+/// - `resources/bin/funasr-worker/manifest.json`：`cargo xtask funasr-worker`
+///   的构建产物清单就位（exe 不入 Git，release 前必须先构建）。
+fn check_gguf_worker_supply_chain(failures: &mut Vec<String>) {
+    println!("🔒 校验 GGUF worker 供应链锁定...");
+    let root = workspace_root();
+
+    let lock_path = root.join("resources/stt/funasr-gguf/worker-lock.json");
+    let Ok(content) = std::fs::read_to_string(&lock_path) else {
+        failures.push(format!(
+            "GGUF worker 来源锁文件读取失败 ({})",
+            lock_path.display()
+        ));
+        return;
+    };
+    let Ok(lock) = serde_json::from_str::<serde_json::Value>(&content) else {
+        failures.push("GGUF worker 来源锁文件不是合法 JSON (worker-lock.json)".to_string());
+        return;
+    };
+
+    let expect = [
+        (
+            "funasr_commit",
+            funasr_worker::FUNASR_COMMIT,
+            "FunASR commit",
+        ),
+        (
+            "funasr_release_tag",
+            funasr_worker::FUNASR_RELEASE_TAG,
+            "FunASR release tag",
+        ),
+        (
+            "funasr_source_zip_url",
+            funasr_worker::FUNASR_ZIP_URL,
+            "FunASR source zip URL",
+        ),
+        (
+            "funasr_source_zip_sha256",
+            funasr_worker::FUNASR_ZIP_SHA256,
+            "FunASR source zip SHA-256",
+        ),
+        (
+            "llama_cpp_commit",
+            funasr_worker::LLAMA_CPP_COMMIT,
+            "llama.cpp commit",
+        ),
+    ];
+    for (key, expected, desc) in expect {
+        let actual = lock.get(key).and_then(|v| v.as_str());
+        if actual != Some(expected) {
+            failures.push(format!(
+                "GGUF worker 来源锁漂移: {desc} 期望 {expected}，锁文件为 {actual:?}"
+            ));
+        }
+    }
+
+    // 三个补丁与协议头文件必须在仓库内（构建输入）
+    if let Some(patches) = lock.get("patches").and_then(|v| v.as_array()) {
+        for p in patches {
+            let Some(rel) = p.as_str() else { continue };
+            if !root.join(rel).is_file() {
+                failures.push(format!("GGUF worker 补丁缺失: {rel}"));
+            }
+        }
+    }
+    let header = lock.get("shared_header").and_then(|v| v.as_str());
+    if let Some(rel) = header {
+        if !root.join(rel).is_file() {
+            failures.push(format!("GGUF worker 协议头缺失: {rel}"));
+        }
+    }
+
+    // 随发布 manifest（构建产物）就位——exe 不入 Git，release 前必须先构建
+    let manifest = root.join("resources/bin/funasr-worker/manifest.json");
+    if !manifest.is_file() {
+        failures.push(format!(
+            "GGUF worker 构建产物缺失（{}）。请先运行 `cargo xtask funasr-worker`",
+            manifest.display()
+        ));
+    }
 }
 
 /// 校验所有 `include_str!` 嵌入资源：存在性 + 类型相关的内容校验。
@@ -660,6 +747,7 @@ fn main() {
         "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
         "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
         "lint" => lint_frontend(),                    // 前端防新增检查（var hex fallback 冻结基线）
+        "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
         other => {
             panic!(
                 "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|icons|tiptap|models|lint> [--debug]"
@@ -775,6 +863,28 @@ fn lint_frontend() {
         panic!(
             "lint 失败：{} 个文件超出 hex fallback 基线",
             violations.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod supply_chain_tests {
+    /// worker-lock.json（来源锁）与 `funasr_worker` 构建常量必须一致——
+    /// 两处声明漂移即失败（release-check 同规则，此处固化为单测）。
+    ///
+    /// 构建产物检查（resources/bin/...，gitignore 产物）在单测中放宽：
+    /// 仅当本机已运行 `cargo xtask funasr-worker` 才存在。
+    #[test]
+    fn gguf_worker_lock_matches_build_constants() {
+        let mut failures = Vec::new();
+        super::check_gguf_worker_supply_chain(&mut failures);
+        let repo_failures: Vec<&String> = failures
+            .iter()
+            .filter(|f| !f.contains("构建产物缺失"))
+            .collect();
+        assert!(
+            repo_failures.is_empty(),
+            "GGUF 供应链锁校验失败: {repo_failures:?}"
         );
     }
 }

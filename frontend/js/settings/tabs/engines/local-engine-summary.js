@@ -238,6 +238,8 @@ export function computeEngineSummary(entry, t) {
 
     // 环境状态
     switch (s.environment) {
+        case "unknown":
+            return {text: tx(t, "local_engine.summary.checking", "正在检查环境"), tone: "muted"};
         case "missing":
             return {text: tx(t, "local_engine.summary.missing", "未安装 · 需要安装环境"), tone: "muted"};
         case "broken":
@@ -380,6 +382,9 @@ export function computeFeedback(entry, t) {
     // 6. 空闲说明
     if (!s || !entry?.catalog) {
         return {tone: "muted", text: tx(t, "local_engine.status.no_data", "暂无状态数据")};
+    }
+    if (s.environment === "unknown") {
+        return {tone: "muted", text: tx(t, "local_engine.feedback.checking", "正在确认引擎安装状态…")};
     }
     if (s.environment === "missing") {
         const budget = entry.catalog.resource_budget;

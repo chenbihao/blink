@@ -144,15 +144,21 @@ pub struct PythonInstallPlan {
     pub self_test_script: String,
 }
 
-/// Managed binary 安装计划（协议位保留：ManagedBinary provider 落地时消费）。
-#[allow(dead_code)]
+/// Managed binary 安装计划。
+///
+/// 两种来源（互斥）：
+/// - `bundled_dir = Some`：随 Blink 发布捆绑的 worker 资源目录
+///   （0.22.7 GGUF worker；安装时从资源目录校验 hash 后复制，无网络）；
+/// - 否则：锁定 URL 下载 archive（网络型 binary 引擎预留）。
 #[derive(Debug, Clone)]
 pub struct BinaryInstallPlan {
     /// archive artifact id。
     pub archive_artifact_id: runtime::ArtifactId,
     /// archive 下载 URL。
+    #[allow(dead_code)] // 网络型 binary 引擎（预留）消费；bundled 模式不使用
     pub archive_url: String,
     /// archive SHA-256（hex）。
+    #[allow(dead_code)] // 网络型 binary 引擎（预留）消费；bundled 模式以随发布 manifest 为准
     pub archive_sha256: String,
     /// 可执行文件路径（相对于部署根）。
     pub executable: String,
@@ -164,6 +170,9 @@ pub struct BinaryInstallPlan {
     pub required_drivers: Vec<String>,
     /// self-test 命令行（在部署根执行）。
     pub self_test_command: Vec<String>,
+    /// 捆绑资源目录（相对于发布资源根，如 "bin/funasr-worker"）。
+    /// `Some` 时安装走捆绑资源 + 随发布 manifest 校验，忽略网络字段。
+    pub bundled_dir: Option<String>,
 }
 
 /// 包锁定条目。

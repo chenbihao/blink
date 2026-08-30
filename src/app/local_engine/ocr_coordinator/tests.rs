@@ -9,7 +9,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::mapping::map_paddleocr_response;
-use super::singleflight::{InFlightGuard, Lease, LifecycleState, StartingGateGuard};
+use super::singleflight::{
+    InFlightGuard, Lease, LifecycleState, StartingGateGuard, reset_failed_for_new_request,
+};
 use crate::domain::ocr::error::{OcrErrorCategory, StructuredOcrError};
 use crate::infra::local_engine::port::ConflictRetryPolicy;
 use crate::infra::local_engine::state::InstanceToken;
@@ -1286,6 +1288,16 @@ async fn failed_state_allows_retry_after_gate_reset() {
         error: Arc::new(StructuredOcrError::start_failed("失败")),
     })
     .ok();
+
+    assert!(reset_failed_for_new_request(&tx, 1));
+    assert!(matches!(
+        &*tx.borrow(),
+        LifecycleState::Idle { generation: 2 }
+    ));
+    assert!(
+        !reset_failed_for_new_request(&tx, 1),
+        "同一 Failed generation 只能被推进一次"
+    );
 
     // 第二轮：新请求 CAS 应成功（Failed 后可重试）
     let second_winner = gate

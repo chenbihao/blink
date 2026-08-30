@@ -469,6 +469,15 @@
     font-style: normal;
 }
 
+#engines .le-models-toggle[aria-expanded="true"],
+#engines .le-log-toggle[aria-expanded="true"],
+#engines .le-diagnostic-toggle[aria-expanded="true"],
+#engines .le-maintenance-toggle[aria-expanded="true"] {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
 #engines .le-action-icon {
     width: 1rem;
     height: 1rem;
@@ -1092,6 +1101,12 @@
     font-style: normal;
 }
 
+#engines .le-diagnostic-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
 #engines .le-diagnostic-error {
     color: var(--red);
     font-size: var(--text-sm);
@@ -1099,7 +1114,6 @@
 }
 
 #engines .le-diagnostic-copy {
-    margin-top: 0.75rem;
     font-style: normal;
 }
 

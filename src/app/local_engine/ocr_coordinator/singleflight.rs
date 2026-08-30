@@ -131,6 +131,27 @@ impl LifecycleState {
     }
 }
 
+/// 仅允许失败之后到达的新请求把指定 Failed generation 推进到下一轮 Idle。
+/// `send_if_modified` 保证并发请求不会重复递增 generation。
+pub(super) fn reset_failed_for_new_request(
+    tx: &watch::Sender<LifecycleState>,
+    failed_generation: u64,
+) -> bool {
+    tx.send_if_modified(|state| {
+        if matches!(
+            state,
+            LifecycleState::Failed { generation, .. } if *generation == failed_generation
+        ) {
+            *state = LifecycleState::Idle {
+                generation: failed_generation + 1,
+            };
+            true
+        } else {
+            false
+        }
+    })
+}
+
 impl OcrCoordinator {
     /// 共享启动 singleflight（watch，不丢通知）。
     ///
@@ -142,6 +163,10 @@ impl OcrCoordinator {
         ctx: &OcrRequestContext,
     ) -> Result<u64, StructuredOcrError> {
         let mut rx = self.lifecycle_rx.clone();
+        // 记录本请求实际参与过的启动 generation。这样 shared startup 失败时，
+        // 同一轮的所有 waiter 都拿到一致错误；而失败后才到达的新请求可以把
+        // Failed 原子推进到下一轮 Idle，避免错误永久黏在 coordinator 内存中。
+        let mut participating_generation = None;
 
         loop {
             // repair 模式拒绝新 lease
@@ -174,7 +199,8 @@ impl OcrCoordinator {
                         continue;
                     }
                 }
-                LifecycleState::Starting { .. } => {
+                LifecycleState::Starting { generation } => {
+                    participating_generation = Some(*generation);
                     tracing::debug!("Starting，等待独立后台 task 完成");
                     // waiter 只等待状态变化，不执行启动
                     tokio::select! {
@@ -194,13 +220,27 @@ impl OcrCoordinator {
                     continue;
                 }
                 LifecycleState::Failed { generation, error } => {
-                    // Task 4: waiter 观察到 Failed 后返回相同错误，
-                    // 不在当前调用内部自动重启。
-                    // 只有失败之后到达的独立新请求才可开启下一 generation。
-                    tracing::debug!(generation, "Failed，返回错误给 waiter");
-                    return Err(error.as_ref().clone());
+                    if participating_generation == Some(*generation) {
+                        tracing::debug!(generation, "Failed，返回错误给当前 generation waiter");
+                        return Err(error.as_ref().clone());
+                    }
+
+                    // 当前请求在 Failed 之后才到达：原子推进到下一 generation。
+                    // 多个新请求并发到达时只有一个能完成转换，随后仍由
+                    // starting_gate 决定唯一 startup winner。
+                    let failed_generation = *generation;
+                    let reset = reset_failed_for_new_request(&self.lifecycle_tx, failed_generation);
+                    if reset {
+                        tracing::info!(
+                            failed_generation,
+                            next_generation = failed_generation + 1,
+                            "新 OCR 请求重置上一轮启动失败状态"
+                        );
+                    }
+                    continue;
                 }
                 LifecycleState::Idle { generation } => {
+                    participating_generation = Some(*generation);
                     // 原子 gate CAS：确保只有一个 winner（Handoff B.I.1）
                     // compare_exchange(false, true) 是原子的——
                     // 第一个成功者为 winner，其余为 loser

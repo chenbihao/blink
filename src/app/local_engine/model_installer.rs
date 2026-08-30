@@ -276,10 +276,7 @@ pub struct ModelDownloadOutcome {
 /// 下载来源 checksum 信息。
 #[derive(Debug, Clone)]
 pub enum ModelDownloadChecksumSource {
-    /// 上游不提供稳定 checksum。
-    Unverified,
-    /// 上游提供稳定 SHA-256（worker 契约保留：上游开始提供时无需改 trait）。
-    #[allow(dead_code)]
+    /// 上游提供稳定 SHA-256（GGUF 模型目录逐文件锁定）。
     Sha256(String),
 }
 
@@ -291,9 +288,6 @@ pub enum ModelDownloadError {
 
     #[error("下载被取消")]
     Cancelled,
-
-    #[error("下载超时")]
-    TimedOut,
 
     /// worker 契约保留：installer 可区分磁盘/网络失败时无需改 trait。
     #[error("磁盘空间不足: {message}")]
@@ -313,7 +307,6 @@ impl ModelDownloadError {
     pub fn to_code(&self) -> LocalEngineErrorCode {
         match self {
             Self::Cancelled => LocalEngineErrorCode::Cancelled,
-            Self::TimedOut => LocalEngineErrorCode::Timeout,
             Self::DiskFull { .. } => LocalEngineErrorCode::DiskFull,
             Self::Network { .. } => LocalEngineErrorCode::NetworkError,
             Self::Failed { .. } | Self::Internal { .. } => LocalEngineErrorCode::InstallFailed,
@@ -340,363 +333,20 @@ impl ModelInstallWorker for NoopModelWorker {
     }
 }
 
-// ── FunasrModelInstallWorker ───────────────────────────────────────────────
+// ── FunASR 注册（0.22.7.4：GGUF 模型目录为唯一实现）─────────────────────────
 
-/// 嵌入的 blink_model_installer.py 脚本（随 Rust 二进制发布）。
-const BLINK_MODEL_INSTALLER_PY: &str =
-    include_str!("../../../resources/stt/funasr/blink_model_installer.py");
-
-/// FunASR 专用模型安装 worker（B2）。
+/// FunASR 模型目录：SenseVoice Q8 / Paraformer-zh Q8 / Fun-ASR-Nano Q4_K_M。
 ///
-/// 使用 active deployment venv 中的 Python 运行 `blink_model_installer.py`，
-/// 通过 ModelScope 官方库下载模型到 staging payload 目录。
-///
-/// **铁则**：
-/// - 只使用 active deployment venv 中的 Python
-/// - 只接受编译期 allowlist 中的 model id/revision
-/// - Rust adapter 将 canonical model id 映射为固定 worker 参数
-/// - 前端和通用 command 不得提供 URL、Python 路径、脚本路径或环境变量
-/// - MODELSCOPE_CACHE 指向本次 staging payload 目录
-/// - staging 目录创建失败必须 fail closed
-/// - 禁止回落到用户 ~/.cache/modelscope
-/// - stdout/stderr 实时进入 operation 日志
-/// - worker 由受管进程运行，接入 Job Object、CancellationToken 和超时
-/// - 取消/超时后 worker 及其子进程全部退出
-/// - worker 成功只代表下载完成；最终 fingerprint、manifest 与 promote 由 Rust 执行
-pub struct FunasrModelInstallWorker {
-    /// 下载超时（秒），0 = 无超时。
-    timeout_secs: u64,
+/// 旧 Python 时代目录（iic/SenseVoiceSmall / paraformer-zh）已随 0.22.7.4
+/// 切换移除；旧配置选择由 `SttConfig::migrate_selection_to_gguf` 确定迁移。
+pub fn make_funasr_model_registry() -> ModelRegistry {
+    ModelRegistry::new_with_models(
+        crate::app::local_engine::funasr::gguf::gguf_model_specs()
+            .iter()
+            .map(crate::app::local_engine::funasr::gguf::gguf_model_descriptor)
+            .collect(),
+    )
 }
-
-impl FunasrModelInstallWorker {
-    /// 创建默认 worker（超时 600s = 10min，模型下载可能较慢）。
-    pub fn new() -> Self {
-        Self { timeout_secs: 600 }
-    }
-
-    /// 创建带自定义超时的 worker。
-    #[allow(dead_code)]
-    pub fn with_timeout(secs: u64) -> Self {
-        Self { timeout_secs: secs }
-    }
-
-    /// 释放 installer 脚本到 python_dir。
-    fn ensure_installer_script() -> Result<std::path::PathBuf, String> {
-        let dir = crate::infra::utils::paths::python_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建 python 目录失败: {e}"))?;
-        let script_path = dir.join("blink_model_installer.py");
-        let need_write = match std::fs::read_to_string(&script_path) {
-            Ok(existing) => existing != BLINK_MODEL_INSTALLER_PY,
-            Err(_) => true,
-        };
-        if need_write {
-            std::fs::write(&script_path, BLINK_MODEL_INSTALLER_PY)
-                .map_err(|e| format!("写入 blink_model_installer.py 失败: {e}"))?;
-        }
-        Ok(script_path)
-    }
-
-    /// 查找 active deployment venv 中的 python.exe。
-    fn find_active_deployment_python() -> Option<std::path::PathBuf> {
-        let engine_id = EngineId::new("funasr").ok()?;
-        // active 部署（slot + pointer）中的 venv python
-        let (_pointer, dir) =
-            crate::infra::local_engine::deployment::DeploymentStore::active_dir(&engine_id)
-                .ok()
-                .flatten()?;
-        let python_exe = dir.join("venv").join("Scripts").join("python.exe");
-        if python_exe.exists() {
-            Some(python_exe)
-        } else {
-            None
-        }
-    }
-}
-
-impl Default for FunasrModelInstallWorker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelInstallWorker for FunasrModelInstallWorker {
-    async fn download_to_staging(
-        &self,
-        engine_id: &EngineId,
-        model_id: &str,
-        revision: &str,
-        staging_payload_dir: &std::path::Path,
-        cancel_token: CancellationToken,
-        sink: Option<Arc<dyn InstallSink>>,
-    ) -> Result<ModelDownloadOutcome, ModelDownloadError> {
-        // 1. 查找 active deployment venv 中的 Python
-        let python =
-            Self::find_active_deployment_python().ok_or_else(|| ModelDownloadError::Internal {
-                message: "FunASR active deployment venv 未安装——请先安装环境".to_string(),
-            })?;
-
-        // 2. 释放 installer 脚本
-        let script_path =
-            Self::ensure_installer_script().map_err(|e| ModelDownloadError::Internal {
-                message: format!("释放 installer 脚本失败: {e}"),
-            })?;
-
-        // 3. 确保 staging payload 目录存在（fail closed）
-        std::fs::create_dir_all(staging_payload_dir).map_err(|e| ModelDownloadError::Internal {
-            message: format!("staging 目录创建失败: {e}"),
-        })?;
-
-        if let Some(s) = sink.as_deref() {
-            s.emit_stage("downloading");
-            s.emit_log(&format!(
-                "开始下载模型 {model_id} (revision={revision}) 到 {staging_payload_dir:?}"
-            ));
-        }
-
-        // 4. 构建启动命令
-        let mut cmd = tokio::process::Command::new(&python);
-        cmd.arg(&script_path)
-            .arg("--model")
-            .arg(model_id)
-            .arg("--revision")
-            .arg(revision)
-            .arg("--staging-dir")
-            .arg(staging_payload_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::null());
-
-        // 设置环境变量：禁止回落到用户默认缓存
-        cmd.env("MODELSCOPE_CACHE", staging_payload_dir.as_os_str());
-        // Python 无缓冲 + UTF-8
-        cmd.env("PYTHONUNBUFFERED", "1");
-        cmd.env("PYTHONUTF8", "1");
-        cmd.env("PYTHONIOENCODING", "utf-8");
-
-        // CREATE_NO_WINDOW
-        cmd = crate::infra::platform::no_window_tokio(cmd);
-
-        // 5. 启动子进程
-        let mut child = cmd.spawn().map_err(|e| ModelDownloadError::Internal {
-            message: format!("启动 installer 进程失败: {e}"),
-        })?;
-
-        let pid = child.id().unwrap_or(0);
-
-        // 5a. 分配 Job Object（Windows 进程树回收）
-        //
-        // **铁则**：installer 进程必须进入 Job Object，确保取消/超时/Blink 退出时
-        // 整个进程树（包括 pip 子进程）全部被回收。
-        // Job handle 在 wait 完成后 drop，触发 KILL_ON_JOB_CLOSE。
-        #[cfg(windows)]
-        let job_handle = match crate::infra::platform::process::assign_job_object(pid) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(%e, pid, "installer Job Object 分配失败，终止子进程");
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(ModelDownloadError::Internal {
-                    message: format!("Job Object 分配失败: {e}"),
-                });
-            }
-        };
-
-        tracing::info!(
-            engine_id = %engine_id,
-            model_id = %model_id,
-            pid,
-            "FunASR model installer 进程已启动"
-        );
-
-        if let Some(s) = sink.as_deref() {
-            s.emit_log(&format!("installer 进程已启动 (pid={pid})"));
-        }
-
-        // 6. 并发排空 stdout/stderr 管道（防止背压死锁）
-        //
-        // **铁则**：必须在 wait 之前启动管道排空 task。
-        // 如果 wait 先完成再读管道，子进程 stdout/stderr 缓冲区满后会阻塞，
-        // 导致 child.wait() 永不返回（死锁）。
-        //
-        // 排空 task 逐行将输出实时送入 sink，不等待进程退出。
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let stdout_task = if let Some(stdout) = stdout {
-            let sink_ref = sink.clone();
-            Some(tokio::spawn(async move {
-                pump_pipe_to_sink(stdout, sink_ref).await;
-            }))
-        } else {
-            None
-        };
-
-        let stderr_task = if let Some(stderr) = stderr {
-            let sink_ref = sink.clone();
-            Some(tokio::spawn(async move {
-                pump_pipe_to_sink(stderr, sink_ref).await;
-            }))
-        } else {
-            None
-        };
-
-        // 7. 等待进程完成，带超时和取消
-        let timeout = std::time::Duration::from_secs(self.timeout_secs);
-
-        let wait_result = tokio::select! {
-            result = child.wait() => {
-                result.map_err(|e| ModelDownloadError::Internal {
-                    message: format!("等待 installer 进程失败: {e}"),
-                })?
-            }
-            _ = tokio::time::sleep(timeout) => {
-                // 超时——kill 进程并等待退出
-                tracing::warn!(pid, "FunASR model installer 超时，终止进程");
-                let _ = child.start_kill();
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    child.wait(),
-                ).await;
-
-                // drop Job handle 触发 KILL_ON_JOB_CLOSE（进程树回收）
-                #[cfg(windows)]
-                drop(job_handle);
-
-                // 等待管道排空 task 完成
-                if let Some(t) = stdout_task { let _ = t.await; }
-                if let Some(t) = stderr_task { let _ = t.await; }
-
-                return Err(ModelDownloadError::TimedOut);
-            }
-            _ = cancel_token.cancelled() => {
-                // 取消——kill 进程并等待退出
-                tracing::info!(pid, "FunASR model installer 被取消，终止进程");
-                let _ = child.start_kill();
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    child.wait(),
-                ).await;
-
-                #[cfg(windows)]
-                drop(job_handle);
-
-                if let Some(t) = stdout_task { let _ = t.await; }
-                if let Some(t) = stderr_task { let _ = t.await; }
-
-                return Err(ModelDownloadError::Cancelled);
-            }
-        };
-
-        // 8. 等待管道排空 task 完成（进程已退出，管道即将 EOF）
-        if let Some(t) = stdout_task {
-            let _ = t.await;
-        }
-        if let Some(t) = stderr_task {
-            let _ = t.await;
-        }
-
-        // 9. drop Job handle（进程树最终回收保障）
-        #[cfg(windows)]
-        drop(job_handle);
-
-        // 10. 检查退出码
-        let output = wait_result;
-        let code = output.code().unwrap_or(-1);
-        if !output.success() {
-            if cancel_token.is_cancelled() {
-                return Err(ModelDownloadError::Cancelled);
-            }
-            return Err(ModelDownloadError::Failed {
-                message: format!("installer 进程退出码 {code}"),
-            });
-        }
-
-        if let Some(s) = sink.as_deref() {
-            s.emit_stage("downloaded");
-            s.emit_log(&format!("模型 {model_id} 下载完成 (exit_code={code})"));
-        }
-
-        // 11. 验证 staging 目录非空
-        if !staging_payload_dir.exists()
-            || std::fs::read_dir(staging_payload_dir)
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(true)
-        {
-            return Err(ModelDownloadError::Failed {
-                message: "下载完成但 staging 目录为空".to_string(),
-            });
-        }
-
-        Ok(ModelDownloadOutcome {
-            source: format!("modelscope:{model_id}"),
-            checksum_source: ModelDownloadChecksumSource::Unverified,
-        })
-    }
-}
-
-/// 并发排空子进程管道，逐行送入有界 sink。
-///
-/// **铁则**：
-/// - 必须在 child.wait() 之前启动，防止 stdout/stderr 缓冲区满后死锁。
-/// - 逐行读取（LineAccumulator），不使用 read_until（无界增长）。
-/// - 单行最大字节数 8KB，超出截断。
-/// - 实时送入 sink，不等待进程退出。
-async fn pump_pipe_to_sink<R: tokio::io::AsyncRead + Unpin>(
-    mut reader: R,
-    sink: Option<Arc<dyn InstallSink>>,
-) {
-    use crate::infra::local_engine::log_pipe::LineAccumulator;
-    use tokio::io::AsyncReadExt;
-
-    let mut acc = LineAccumulator::new(8192);
-    let mut read_buf = vec![0u8; 8192];
-
-    loop {
-        match reader.read(&mut read_buf).await {
-            Ok(0) => {
-                // EOF——flush 残留
-                if let Some((text, _truncated)) = acc.finish() {
-                    if !text.is_empty() {
-                        if let Some(s) = sink.as_deref() {
-                            s.emit_log(&text);
-                        }
-                    }
-                }
-                break;
-            }
-            Ok(n) => {
-                let lines = acc.push_data(&read_buf[..n]);
-                for (text, _truncated) in lines {
-                    if let Some(s) = sink.as_deref() {
-                        s.emit_log(&text);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(%e, "pump_pipe_to_sink: pipe read error");
-                if let Some((text, _truncated)) = acc.finish() {
-                    if !text.is_empty() {
-                        if let Some(s) = sink.as_deref() {
-                            s.emit_log(&text);
-                        }
-                    }
-                }
-                break;
-            }
-        }
-    }
-}
-
-// ── FakeInstaller ───────────────────────────────────────────────────────────
-
-/// 可注入的假模型安装 worker（测试用）。
-///
-/// **能力**：
-/// - 成功写入固定 payload（可自定义内容）
-/// - 可阻塞并响应取消
-/// - 可注入下载失败
-/// - 可注入校验失败（写入空文件或损坏内容模拟 fingerprint 不匹配）
 /// - 可生成不同 revision/content（用于 repair 测试）
 /// - 通过 sink 报告阶段日志
 #[cfg(test)]
@@ -790,7 +440,7 @@ impl ModelInstallWorker for FakeInstaller {
             checksum_source: self
                 .checksum_source
                 .clone()
-                .unwrap_or_else(|| ModelDownloadChecksumSource::Unverified),
+                .unwrap_or_else(|| ModelDownloadChecksumSource::Sha256("ab".repeat(32))),
         })
     }
 }
@@ -867,13 +517,4 @@ pub fn project_model_operation_result(result: &ModelOperationResult) -> ModelOpe
             .as_ref()
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null)),
     }
-}
-
-// ── FunASR 注册 ────────────────────────────────────────────────────────────
-
-pub fn make_funasr_model_registry() -> ModelRegistry {
-    ModelRegistry::new_with_models(vec![
-        EngineModelDescriptor::sensevoice_small(),
-        EngineModelDescriptor::paraformer_zh(),
-    ])
 }

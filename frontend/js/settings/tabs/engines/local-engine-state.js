@@ -131,6 +131,14 @@ function revisionGreaterThan(a, b) {
     }
 }
 
+function hasActiveRuntime(statusDto) {
+    return ["starting", "running", "stopping"].includes(statusDto?.status?.process?.state);
+}
+
+function withoutOperationLogs(logs) {
+    return logs.filter((log) => log.sourceKind !== "operation");
+}
+
 // ── Reducer actions ───────────────────────────────────────────────────────────
 
 /**
@@ -169,7 +177,11 @@ export function mergeStatus(state, statusDto) {
 
     // 首次状态
     if (!entry.status) {
-        return setEntry(state, engineId, {...entry, status: statusDto});
+        return setEntry(state, engineId, {
+            ...entry,
+            status: statusDto,
+            logs: hasActiveRuntime(statusDto) ? withoutOperationLogs(entry.logs) : entry.logs,
+        });
     }
 
     const oldStatus = entry.status;
@@ -181,7 +193,9 @@ export function mergeStatus(state, statusDto) {
             ...entry,
             status: statusDto,
             // 已绑定运行实例时清空旧日志，不能混入当前流
-            logs: entry.currentInstanceId != null ? [] : entry.logs,
+            logs: hasActiveRuntime(statusDto)
+                ? withoutOperationLogs(entry.logs)
+                : (entry.currentInstanceId != null ? [] : entry.logs),
         };
         return setEntry(state, engineId, newEntry);
     }
@@ -193,7 +207,11 @@ export function mergeStatus(state, statusDto) {
     }
 
     // 同 epoch + 更大 revision → 接受
-    return setEntry(state, engineId, {...entry, status: statusDto});
+    return setEntry(state, engineId, {
+        ...entry,
+        status: statusDto,
+        logs: hasActiveRuntime(statusDto) ? withoutOperationLogs(entry.logs) : entry.logs,
+    });
 }
 
 /**
@@ -305,17 +323,21 @@ export function appendLog(state, logDto) {
 export function setLogHistory(state, engineId, logDtos) {
     if (!engineId) return state;
     const entry = state.get(engineId) || createInitialEntry();
+    // IPC 已按 engine_id 查询；这里仍 fail closed，避免异常响应或迟到数据
+    // 被写入当前卡片，进而污染日志与诊断回退内容。
+    const scopedLogDtos = (Array.isArray(logDtos) ? logDtos : [])
+        .filter((dto) => dto?.engine_id === engineId);
 
     // 从历史日志中提取 instance_id（取最新一条的 instance）
     let latestInstance = entry.currentInstanceId;
-    for (let i = logDtos.length - 1; i >= 0; i--) {
-        if (logDtos[i].instance_id) {
-            latestInstance = logDtos[i].instance_id;
+    for (let i = scopedLogDtos.length - 1; i >= 0; i--) {
+        if (scopedLogDtos[i].instance_id) {
+            latestInstance = scopedLogDtos[i].instance_id;
             break;
         }
     }
 
-    const logs = logDtos.map((dto) => {
+    const logs = scopedLogDtos.map((dto) => {
         const isOp = dto.operation_id != null;
         return {
             source: isOp ? dto.operation_id : dto.instance_id,
@@ -330,10 +352,14 @@ export function setLogHistory(state, engineId, logDtos) {
     // 安装/修复等 operation 日志只存在于实时事件流（后端历史只存引擎
     // 进程日志）——pull 替换时必须保留，否则窗口 focus 触发的 refreshStatus
     // 会把正在下载的安装日志整个清空。
-    const existingOpLogs = entry.logs.filter((l) => l.sourceKind === "operation");
+    const runtimeActive = hasActiveRuntime(entry.status);
+    const historyLogs = runtimeActive ? withoutOperationLogs(logs) : logs;
+    const existingOpLogs = runtimeActive
+        ? []
+        : entry.logs.filter((l) => l.sourceKind === "operation");
     const mergedLogs = existingOpLogs.length > 0
-        ? [...logs, ...existingOpLogs]
-        : logs;
+        ? [...historyLogs, ...existingOpLogs]
+        : historyLogs;
 
     // bounded
     const boundedLogs = mergedLogs.length > MAX_LOG_LINES

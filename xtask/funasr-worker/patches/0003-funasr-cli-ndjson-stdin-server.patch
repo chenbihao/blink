@@ -1,0 +1,136 @@
+diff --git a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
+index 7d0929f..a988173 100644
+--- a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
++++ b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
+@@ -20,9 +20,12 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <map>
++#include <stdexcept>
+ #include <string>
+ #include <vector>
+ 
++#include "blink_worker_protocol.h"
++
+ // any audio (wav/mp3/flac, any rate/channels) -> 16 kHz mono f32, via miniaudio
+ #define FUNASR_AUDIO_IMPLEMENTATION
+ #include "funasr_audio.h"
+@@ -176,9 +179,12 @@ static void print_usage(const char*argv0){
+ }
+ 
+ int main(int argc,char**argv){
++    for(int i=0;i<argc;i++){ if(!strcmp(argv[i],"--blink-selftest")){
++        printf("{\"type\":\"selftest\",\"worker\":\"nano\",\"protocol_version\":1}\n");return 0;} }
+     std::string enc_path,llm_path,wav_path,vad_path; int npred=512; double chunk_sec=0; float rep=1.0f;
+     int vad_maxseg=30000;
+     bool srt_mode=false;
++    bool stdin_server=false;
+     for(int i=1;i<argc;i++){
+         if(!strcmp(argv[i],"--enc")&&i+1<argc)enc_path=argv[++i];
+         else if(!strcmp(argv[i],"-m")&&i+1<argc)llm_path=argv[++i];
+@@ -189,12 +195,17 @@ int main(int argc,char**argv){
+         else if(!strcmp(argv[i],"--vad-maxseg")&&i+1<argc)vad_maxseg=atoi(argv[++i]);
+         else if(!strcmp(argv[i],"--srt"))srt_mode=true;
+         else if(!strcmp(argv[i],"--rep")&&i+1<argc)rep=atof(argv[++i]);
++        else if(!strcmp(argv[i],"--stdin-server"))stdin_server=true;
+         else { print_usage(argv[0]); return 1; }
+     }
+-    if(enc_path.empty()||llm_path.empty()||wav_path.empty()){fprintf(stderr,"missing args\n");print_usage(argv[0]);return 1;}
++    if(enc_path.empty()||llm_path.empty()||(!stdin_server&&wav_path.empty())){fprintf(stderr,"missing args\n");print_usage(argv[0]);return 1;}
++    if(stdin_server&&(!wav_path.empty()||!vad_path.empty()||srt_mode||chunk_sec>0)){
++        fprintf(stderr,"--stdin-server only supports the persistent NDJSON loop without VAD/SRT/chunking\n");return 1;}
+ 
+     std::vector<float> wav;
+-    if(!funasr_load_audio_16k_mono(wav_path.c_str(),wav)){fprintf(stderr,"failed to read audio\n");return 1;}
++    if(!stdin_server){
++        if(!funasr_load_audio_16k_mono(wav_path.c_str(),wav)){fprintf(stderr,"failed to read audio\n");return 1;}
++    }
+     ggml_time_init(); // Required before ggml_time_us() on Windows.
+     int64_t t0=ggml_time_us();
+ 
+@@ -205,6 +216,7 @@ int main(int argc,char**argv){
+     const llama_vocab*vocab=llama_model_get_vocab(model);
+     llama_context_params cp=llama_context_default_params();
+     cp.n_ctx=2048; cp.n_batch=2048; cp.n_ubatch=2048;
++    { int t=blink_worker::env_threads(0); if(t>0) cp.n_threads=t; }
+     llama_context*ctx=llama_init_from_model(model,cp);
+     if(!ctx){fprintf(stderr,"failed to create llama context\n");llama_model_free(model);return 1;}
+     auto sp=llama_sampler_chain_default_params(); llama_sampler*smpl=llama_sampler_chain_init(sp);
+@@ -217,6 +229,46 @@ int main(int argc,char**argv){
+         std::vector<llama_token> v(n); llama_tokenize(vocab,s,strlen(s),v.data(),n,false,true); return v;};
+     auto pre=tokenize(prefix); auto suf=tokenize(suffix);
+ 
++    // Transcribe one wav window [samples] end-to-end: fbank -> encoder ->
++    // fresh llama context (KV cleared per window) -> greedy decode -> text.
++    auto run_window=[&](const std::vector<float>& seg) -> std::string {
++        int T=0; auto fbank=compute_fbank(seg,T);
++        int D=0; auto adp=run_encoder(em,fbank,T,560,D);
++        int ol=1+(T-3+2)/2; ol=1+(ol-3+2)/2; int n_aud=(ol-1)/2+1;
++
++        llama_memory_clear(llama_get_memory(ctx), true);
++        int n_past=0;
++        decode_batch(ctx,pre.size(),pre.data(),nullptr,0,n_past,false);
++        decode_batch(ctx,n_aud,nullptr,adp.data(),D,n_past,false);
++        decode_batch(ctx,suf.size(),suf.data(),nullptr,0,n_past,true);
++
++        std::string seg_text;
++        llama_token tk=llama_sampler_sample(smpl,ctx,-1);
++        for(int i=0;i<npred;i++){
++            if(llama_vocab_is_eog(vocab,tk))break;
++            char buf[256]; int k=llama_token_to_piece(vocab,tk,buf,sizeof(buf),0,true);
++            if(k>0){
++                seg_text.append(buf, k);
++            }
++            decode_batch(ctx,1,&tk,nullptr,0,n_past,true);
++            tk=llama_sampler_sample(smpl,ctx,-1);
++        }
++        return seg_text;
++    };
++
++    if(stdin_server){
++        // Blink persistent worker: encoder + LLM stay loaded in this PID;
++        // each request clears the KV cache before decoding (no cross-request
++        // state). Protocol: blink_worker_protocol.h.
++        return blink_worker::serve_stdin([&](const std::string& audio_path) -> std::string {
++            std::vector<float> req_wav;
++            if(!funasr_load_audio_16k_mono(audio_path.c_str(),req_wav))
++                throw std::runtime_error("read audio failed: "+audio_path);
++            if((int)req_wav.size()<WINLEN) return "";
++            return run_window(req_wav);
++        },std::string("cpu"),&ggml_time_us);
++    }
++
+     // Build the list of [offset,len] windows to transcribe (in samples).
+     //   --vad : FSMN-VAD speech segments (single-binary front end, replaces fixed chunking)
+     //   --chunk sec : fixed-size chunks ; otherwise the whole file in one window
+@@ -239,29 +291,7 @@ int main(int argc,char**argv){
+         int start_ms = (int)((int64_t)off * 1000 / 16000);
+         int end_ms   = (int)((int64_t)(off + len) * 1000 / 16000);
+         std::vector<float> seg(wav.begin()+off, wav.begin()+off+len);
+-        int T=0; auto fbank=compute_fbank(seg,T);
+-        int D=0; auto adp=run_encoder(em,fbank,T,560,D);
+-        int ol=1+(T-3+2)/2; ol=1+(ol-3+2)/2; int n_aud=(ol-1)/2+1;
+-
+-        llama_memory_clear(llama_get_memory(ctx), true);  // fresh context per chunk
+-        int n_past=0;
+-        decode_batch(ctx,pre.size(),pre.data(),nullptr,0,n_past,false);
+-        decode_batch(ctx,n_aud,nullptr,adp.data(),D,n_past,false);
+-        decode_batch(ctx,suf.size(),suf.data(),nullptr,0,n_past,true);
+-
+-        // In SRT mode, buffer tokens and print the whole entry via format_srt_line.
+-        // In normal mode, stream tokens directly (original behavior, no per-segment newline).
+-        std::string seg_text;
+-        llama_token tk=llama_sampler_sample(smpl,ctx,-1);
+-        for(int i=0;i<npred;i++){
+-            if(llama_vocab_is_eog(vocab,tk))break;
+-            char buf[256]; int k=llama_token_to_piece(vocab,tk,buf,sizeof(buf),0,true);
+-            if(k>0){
+-                seg_text.append(buf, k);
+-            }
+-            decode_batch(ctx,1,&tk,nullptr,0,n_past,true);
+-            tk=llama_sampler_sample(smpl,ctx,-1);
+-        }
++        std::string seg_text = run_window(seg);
+ 
+         if(srt_mode){
+             if (seg_text != "/sil") {

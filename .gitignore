@@ -65,3 +65,9 @@ xtask/spikes/funasr-runtime/.cache/
 xtask/spikes/funasr-runtime/results/
 xtask/spikes/funasr-runtime/tmp/
 testdata/stt/funasr-runtime/generated/
+
+# 0.22.7 GGUF worker 构建产物（由 cargo xtask funasr-worker 生成，不入 Git；
+# 来源锁定见 resources/stt/funasr-gguf/worker-lock.json）
+resources/bin/
+# 模型下载缓存（安装期校验用临时文件）
+target/gguf-models/

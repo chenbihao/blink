@@ -245,17 +245,11 @@ impl VoiceService {
         set_voice_flag: bool,
     ) -> bool {
         use crate::app::stt_config::SttMode;
-        use crate::domain::stt::funasr::ModelLoadStatus;
 
         let target = self.session.lock().unwrap().target;
 
-        // 0.22.6 批次 3: 本地模式下先获取连接，再做 token-aware health 检查
-        //
-        // 流程：get_connection → TCP 预检 → token-aware /health → create_engine
-        //
-        // 不再用 config.local_engine.server_port 做 port-only health：
-        // 1. preferred port 只是启动偏好，不一定是实际监听端口
-        // 2. Python /health 强制要求 X-Engine-Token，无 token 的请求返回 401
+        // 0.22.7 GGUF worker：本地模式下从 EngineManager 获取连接快照，
+        // 就绪检查走 worker transport 的 NDJSON hello（无 HTTP 端口）。
         let connection = if config.mode == SttMode::Local {
             let svc = self
                 .app
@@ -271,22 +265,20 @@ impl VoiceService {
                     match s.get_connection(&engine_id).await {
                         Ok(Some(conn)) => {
                             // 投影：LocalEngineConnection → SttEngineConnection
-                            // endpoint 格式为 "http://127.0.0.1:port"，解析出 host 和 port
-                            let parsed = parse_endpoint(&conn.endpoint);
-                            match parsed {
-                                Some((host, port)) => {
-                                    Some(crate::domain::stt::SttEngineConnection {
-                                        host,
-                                        port,
-                                        token: conn.token,
-                                        engine_id: conn.engine_id,
-                                        instance_id: conn.instance_id,
-                                    })
-                                }
+                            // 0.22.7.4：worker 传输是唯一本地实现，endpoint
+                            // 不承载地址语义（host/port 为诊断占位）。
+                            match conn.worker {
+                                Some(transport) => Some(crate::domain::stt::SttEngineConnection {
+                                    host: "127.0.0.1".to_string(),
+                                    port: 0,
+                                    engine_id: conn.engine_id,
+                                    instance_id: conn.instance_id,
+                                    transport: Some(transport),
+                                }),
                                 None => {
                                     tracing::warn!(
-                                        endpoint = %conn.endpoint,
-                                        "LocalEngineConnection endpoint 解析失败,跳过连接"
+                                        engine = %conn.engine_id,
+                                        "运行中的本地引擎连接缺少 worker 通道（应为 StdioWorker）"
                                     );
                                     None
                                 }
@@ -323,14 +315,17 @@ impl VoiceService {
             let (ready, msg) = match config.mode {
                 SttMode::Local => {
                     let conn = connection.as_ref().expect("connection 已在上方验证为 Some");
-                    // TCP 预检：用连接中的 host:port（非配置 preferred port）
-                    if !crate::domain::stt::funasr::is_server_ready_async(conn.port).await {
-                        (
+                    // 0.22.7 GGUF worker：就绪检查走 NDJSON 通道 hello——
+                    // 通道与实例绑定，模型就绪由 start 的 ready 握手保证。
+                    match conn.transport.as_ref() {
+                        Some(transport) => match transport.check_ready().await {
+                            Ok(()) => (true, String::new()),
+                            Err(e) => (false, format!("语音服务不可用：{e}。请在设置页重启服务。")),
+                        },
+                        None => (
                             false,
-                            "FunASR 服务未启动，请在设置页「语音输入」中启动服务".to_string(),
-                        )
-                    } else {
-                        (true, String::new())
+                            "语音服务连接缺少 worker 通道，请在设置页重启服务".to_string(),
+                        ),
                     }
                 }
                 SttMode::Cloud => (false, "云端 STT 未配置供应商，请在设置页中配置".to_string()),
@@ -342,36 +337,8 @@ impl VoiceService {
             }
 
             // ── 模型加载状态检查（本地模式）──
-            // 0.22.6: 使用 token-aware health 检查，不再用 port-only check_model_loaded
-            // TCP 端口可达不代表模型已就绪——uvicorn 先绑定端口，模型加载需 30-60s。
-            // 必须携带 X-Engine-Token，否则 /health 返回 401
-            if config.mode == SttMode::Local {
-                let conn = connection.as_ref().expect("connection 已在上方验证为 Some");
-                let status = crate::domain::stt::funasr::check_model_loaded_with_token(conn).await;
-                match status {
-                    ModelLoadStatus::Ready => {
-                        // 模型就绪，继续录音流程
-                    }
-                    ModelLoadStatus::Loading | ModelLoadStatus::Idle => {
-                        tracing::info!(target = ?target, "模型加载中,跳过本次录音");
-                        self.emit_voice_status(target, "模型加载中，请稍候再试");
-                        return false;
-                    }
-                    ModelLoadStatus::Error => {
-                        let msg = "模型加载失败，请检查设置页日志";
-                        tracing::warn!(target = ?target, %msg);
-                        self.emit_voice_error(target, msg);
-                        return false;
-                    }
-                    ModelLoadStatus::Unreachable => {
-                        // 0.22.6: Unreachable 包括 401（token 不匹配）和连接失败
-                        let msg = "服务连接失败或鉴权失败，请检查设置页中服务状态";
-                        tracing::warn!(target = ?target, %msg);
-                        self.emit_voice_error(target, msg);
-                        return false;
-                    }
-                }
-            }
+            // 0.22.7 GGUF worker：就绪已由上方通道 hello 验证（模型加载完成
+            // 才有 ready），无需二次模型状态轮询。
         };
 
         // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
@@ -517,8 +484,8 @@ impl VoiceService {
 
             if !session.recording {
                 tracing::warn!("stop_recording: 未在录音中,忽略");
-                // 服务未就绪 / 模型加载中等早退路径：overlay 已在 start_recording 中提前显示，
-                // emit_voice_error/emit_voice_status 已更新了内容（不再 spawn 延迟 hide task）。
+                // 服务未就绪等早退路径：overlay 已在 start_recording 中提前显示，
+                // emit_voice_error 已更新了内容（不再 spawn 延迟 hide task）。
                 // 松键即隐藏 overlay + 回 Idle + 清理前端状态。
                 crate::infra::platform::hotkey::InputController::update_voice_phase(
                     crate::infra::platform::hotkey::VoicePhase::Idle,
@@ -682,33 +649,6 @@ impl VoiceService {
         let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
     }
 
-    /// 向用户反馈语音状态（如"模型加载中"），非错误性质。
-    ///
-    /// G1: emit 事件让前端显示在语音指示器区域。
-    /// G2: 先显示 overlay 窗口再 emit（与 emit_voice_error 类似的时序处理）。
-    /// G3: 直接 emit（chat 窗口已可见）。
-    fn emit_voice_status(&self, target: VoiceTarget, message: &str) {
-        if target == VoiceTarget::ForegroundApp {
-            // G2: overlay 已在 start_recording 中提前显示，此处只 emit 状态消息更新内容。
-            let _ = self.app.emit(
-                EventNames::VOICE_STATUS,
-                serde_json::json!({
-                    "message": message,
-                    "target": target.as_str(),
-                }),
-            );
-        } else {
-            // G1/G3: 直接 emit
-            let _ = self.app.emit(
-                EventNames::VOICE_STATUS,
-                serde_json::json!({
-                    "message": message,
-                    "target": target.as_str(),
-                }),
-            );
-        }
-    }
-
     /// 向用户反馈语音错误（G1 直接 emit，G2 先显示 overlay 再延迟 emit，G3 直接 emit）。
     ///
     /// **绝不**用 Mock 引擎的假文本上屏——错误就是错误，告知用户而非静默吞掉。
@@ -765,39 +705,6 @@ async fn finalize_engine(engine: Option<Arc<dyn SttEngine>>) -> String {
     }
 }
 
-/// 从 endpoint URL 解析出 host 和 port。
-///
-/// endpoint 格式预期为 `http://127.0.0.1:port` 或 `http://host:port`。
-/// 解析失败返回 None（由调用方决定降级行为）。
-///
-/// 0.22.6 批次 3 H4: 替代此前 domain 层的 `rsplit(':')` 字符串猜测——
-/// app 层负责结构化解析，domain 层只接收纯数据。
-fn parse_endpoint(endpoint: &str) -> Option<(String, u16)> {
-    parse_endpoint_pub(endpoint)
-}
-
-/// `parse_endpoint` 的公共入口，供 maintenance 等诊断命令复用。
-///
-/// 0.22.6: diagnosis 命令需要从 `LocalEngineConnection.endpoint` 解析
-/// host/port 以做 token-aware health 检查。
-pub fn parse_endpoint_pub(endpoint: &str) -> Option<(String, u16)> {
-    // 去掉 scheme 前缀
-    let host_port = endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .unwrap_or(endpoint);
-
-    // 去掉末尾可能的 path
-    let host_port = host_port.split('/').next().unwrap_or(host_port);
-
-    // host:port 分割
-    let colon = host_port.rfind(':')?;
-    let host = &host_port[..colon];
-    let port_str = &host_port[colon + 1..];
-    let port: u16 = port_str.parse().ok()?;
-    Some((host.to_string(), port))
-}
-
 /// 计算 PCM 样本的音量级别（0.0 ~ 1.0），用于前端波形条可视化。
 ///
 /// 使用 RMS（均方根）+ 噪声门限 + 平方根曲线：
@@ -826,7 +733,7 @@ fn compute_rms(samples: &[f32]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_rms, parse_endpoint};
+    use super::compute_rms;
 
     #[test]
     fn rms_empty_returns_zero() {
@@ -879,46 +786,5 @@ mod tests {
         assert!(level > 0.0, "小信号应非零");
         // 线性值 ≈ 0.06，sqrt 后 ≈ 0.25，应明显大于线性值
         assert!(level > 0.06, "sqrt 曲线应增强小信号: got {level}");
-    }
-
-    // ── parse_endpoint 单测 ──
-
-    #[test]
-    fn parse_endpoint_localhost_with_port() {
-        let (host, port) = parse_endpoint("http://127.0.0.1:8100").unwrap();
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 8100);
-    }
-
-    #[test]
-    fn parse_endpoint_https_scheme() {
-        let (host, port) = parse_endpoint("https://127.0.0.1:443").unwrap();
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 443);
-    }
-
-    #[test]
-    fn parse_endpoint_with_trailing_path() {
-        let (host, port) = parse_endpoint("http://127.0.0.1:8100/health").unwrap();
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 8100);
-    }
-
-    #[test]
-    fn parse_endpoint_no_scheme() {
-        // 无 scheme 前缀也能解析
-        let (host, port) = parse_endpoint("127.0.0.1:8100").unwrap();
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 8100);
-    }
-
-    #[test]
-    fn parse_endpoint_no_port_returns_none() {
-        assert!(parse_endpoint("http://127.0.0.1").is_none());
-    }
-
-    #[test]
-    fn parse_endpoint_invalid_port_returns_none() {
-        assert!(parse_endpoint("http://127.0.0.1:abc").is_none());
     }
 }

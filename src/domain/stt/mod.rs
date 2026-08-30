@@ -47,6 +47,25 @@ pub enum SttError {
     FormatMismatch(String),
 }
 
+// ── SttTransport（0.22.7）─────────────────────────────────────────────────
+
+/// STT 传输通道（0.22.7）。
+///
+/// 把"一段 WAV 字节交给本地引擎并取回文本"的通道抽象出来：
+/// - 旧 Python server 路径：HTTP `/v1/audio/transcriptions`（0.22.7.4 删除）；
+/// - GGUF worker 路径：Rust 常驻 worker client → stdin/stdout NDJSON。
+///
+/// 实现由 app 层注入（`SttEngineConnection.transport`），domain 只依赖本 trait，
+/// 不接触 reqwest/进程/管道等 infra 细节。
+#[async_trait::async_trait]
+pub trait SttTransport: Send + Sync {
+    /// 通道与模型就绪检查（身份校验由实现承载）。
+    async fn check_ready(&self) -> Result<(), String>;
+
+    /// 转录一段 WAV 字节（16kHz mono PCM WAV），返回识别文本。
+    async fn transcribe(&self, wav_bytes: &[u8]) -> Result<String, String>;
+}
+
 // ── STT Engine Connection ────────────────────────────────────────────────
 
 /// STT 本地引擎连接快照（domain 层纯数据类型）。
@@ -65,14 +84,15 @@ pub struct SttEngineConnection {
     pub host: String,
     /// 实际监听端口。
     pub port: u16,
-    /// 服务 token（用于 `X-Engine-Token` header 鉴权）。
-    pub token: String,
     /// engine id（日志/诊断用）。
     #[allow(dead_code)]
     pub engine_id: String,
     /// instance id（每次启动随机生成，用于实例隔离）。
     #[allow(dead_code)]
     pub instance_id: String,
+    /// worker 传输通道（Some = GGUF 常驻 worker；None = 旧 HTTP server）。
+    /// 存在时 host/port 退化为诊断字段，请求走 worker NDJSON 通道。
+    pub transport: Option<std::sync::Arc<dyn SttTransport>>,
 }
 
 impl std::fmt::Debug for SttEngineConnection {
@@ -80,9 +100,16 @@ impl std::fmt::Debug for SttEngineConnection {
         f.debug_struct("SttEngineConnection")
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("token", &"<redacted>")
             .field("engine_id", &self.engine_id)
             .field("instance_id", &self.instance_id)
+            .field(
+                "transport",
+                if self.transport.is_some() {
+                    &"worker"
+                } else {
+                    &"http"
+                },
+            )
             .finish()
     }
 }
@@ -116,7 +143,8 @@ pub trait SttEngine: Send + Sync {
 // ── STT Engines ──────────────────────────────────────────────────────────
 
 pub(crate) mod cloud;
-pub mod funasr;
+
+pub mod gguf_postprocess;
 pub mod local;
 #[cfg(test)]
 mod mock;
@@ -180,10 +208,8 @@ pub fn create_engine(
                         .to_string());
                 }
             };
-            // 使用完整连接快照构造引擎——finalize/preview 的身份 fail-closed
-            // 校验需要 engine_id/instance_id 与服务器回显匹配，只传 port/token
-            // 的空身份快照会被真实服务器的 /health 拒绝。
-            let port = conn.port;
+            // 使用完整连接快照构造引擎——就绪与身份由 start 时的 NDJSON
+            // ready 握手保证（worker 与实例绑定）。
             match config.streaming_mode {
                 crate::domain::config::stt_config::StreamingMode::Pseudo => {
                     match pseudo_streaming::PseudoStreamingSttEngine::from_connection(
@@ -191,14 +217,14 @@ pub fn create_engine(
                         conn.clone(),
                     ) {
                         Ok(engine) => {
-                            tracing::info!(port, "STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
+                            tracing::info!("STT 引擎: pseudo-streaming (VAD + GGUF worker)");
                             Ok(Box::new(engine))
                         }
                         Err(e) => {
                             tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
                             match local::LocalSttEngine::from_connection(&config, conn) {
                                 Ok(engine) => {
-                                    tracing::info!(port, "STT 引擎: local (FunASR, 非流式回退)");
+                                    tracing::info!("STT 引擎: local (FunASR, 非流式回退)");
                                     Ok(Box::new(engine))
                                 }
                                 Err(e) => Err(format!("STT 引擎创建失败: {e}")),
@@ -209,7 +235,7 @@ pub fn create_engine(
                 crate::domain::config::stt_config::StreamingMode::Off => {
                     match local::LocalSttEngine::from_connection(&config, conn) {
                         Ok(engine) => {
-                            tracing::info!(port, "STT 引擎: local (FunASR)");
+                            tracing::info!("STT 引擎: local (FunASR)");
                             Ok(Box::new(engine))
                         }
                         Err(e) => Err(format!("STT 引擎创建失败: {e}")),
@@ -246,14 +272,13 @@ mod connection_tests {
         let conn = SttEngineConnection {
             host: "127.0.0.1".to_string(),
             port: 8100,
-            token: "test-token-abc".to_string(),
             engine_id: "funasr".to_string(),
             instance_id: "inst-123".to_string(),
+            transport: None,
         };
         let cloned = conn.clone();
         assert_eq!(cloned.host, conn.host);
         assert_eq!(cloned.port, conn.port);
-        assert_eq!(cloned.token, conn.token);
         assert_eq!(cloned.engine_id, conn.engine_id);
         assert_eq!(cloned.instance_id, conn.instance_id);
     }
@@ -263,15 +288,13 @@ mod connection_tests {
         let conn = SttEngineConnection {
             host: "127.0.0.1".to_string(),
             port: 8100,
-            token: "secret".to_string(),
             engine_id: "funasr".to_string(),
             instance_id: "inst-1".to_string(),
+            transport: None,
         };
         let debug_str = format!("{:?}", conn);
         assert!(debug_str.contains("127.0.0.1"));
         assert!(debug_str.contains("8100"));
-        assert!(!debug_str.contains("secret"));
-        assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains("funasr"));
     }
 

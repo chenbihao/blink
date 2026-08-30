@@ -19,13 +19,15 @@ use crate::infra::local_engine::runtime::{BackendObservation, ComputeBackend};
 pub(super) fn map_funasr_health(raw_health: &serde_json::Value) -> HealthMapping {
     // 尝试解析 health 响应
     let status = raw_health.get("status").and_then(|v| v.as_str());
+    let message_type = raw_health.get("type").and_then(|v| v.as_str());
     let model_status = raw_health.get("model_status").and_then(|v| v.as_str());
     let model_loaded = raw_health.get("model_loaded").and_then(|v| v.as_bool());
 
     // ── service health ──
-    // HTTP 可达 → service reachable（但 model 可能还在加载）
+    // HTTP status=ok 或 stdio worker ready 握手完成 → service reachable
+    // （但 model 仍按独立字段判断，不能由 service 状态反推）。
     // 进程存活、端口可达均不能单独代表 server/model ready。
-    let service = if status == Some("ok") {
+    let service = if status == Some("ok") || message_type == Some("ready") {
         // 检查身份字段：如果 health 回显了 engine_id/instance_id，则验证通过
         // 旧版 server 缺少这些字段，但仍可用于 model 状态映射
         ServiceHealth::Healthy

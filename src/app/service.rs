@@ -219,7 +219,7 @@ impl Service for HotkeyService {
                         if chord_cfg.chord_enabled && !voice_disabled {
                             // 仅在录音真正启动时才启动托盘呼吸动画。
                             // 服务未就绪 / 模型加载中时 begin_recording 返回 false，
-                            // emit_voice_error/emit_voice_status 已负责用户反馈，
+                            // emit_voice_error 已负责用户反馈，
                             // 不应再启动呼吸动画（否则 stop_breathing 与 emit_voice_error
                             // 的延迟 hide_overlay 会在主线程上竞争托盘 IPC + overlay 窗口）。
                             if voice_service.start_recording().await {

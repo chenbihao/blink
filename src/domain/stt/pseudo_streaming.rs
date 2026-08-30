@@ -52,19 +52,15 @@ const FINALIZE_WAIT_TIMEOUT_MS: u64 = 3000;
 /// 组合 VAD 切句 + 累积预览，在非自回归 SenseVoice 上实现"边说边出字"体感。
 ///
 /// 0.22.6 批次 3: 存储完整 `SttEngineConnection` 快照，确保 health 检查和
-/// 转录请求使用同一 endpoint/token——不再分别用 port 和 token 猜测。
+/// 转录请求复用同一 worker 通道快照（0.22.7.4 起 StdioWorker 是唯一本地实现）。
 pub struct PseudoStreamingSttEngine {
     /// 内部状态
     inner: Arc<Mutex<PseudoInner>>,
-    /// 复用 HTTP client（避免每次建连）
-    client: reqwest::Client,
-    /// 连接快照（host + port + token + engine_id + instance_id）
+    /// 连接快照（engine_id + instance_id + worker transport）
     ///
     /// 0.22.6: health 和 transcribe 共用此快照，保证同一连接。
-    /// 服务重启后旧连接的 token/instance_id 不匹配新实例，请求被拒绝。
+    /// 服务重启后旧连接的 instance_id 不匹配新实例，请求被拒绝。
     connection: Option<crate::domain::stt::SttEngineConnection>,
-    /// FunASR 模型标识
-    funasr_model: String,
     /// 采样率
     sample_rate: u32,
 }
@@ -132,37 +128,32 @@ impl SentenceBuffer {
 }
 
 impl PseudoStreamingSttEngine {
-    /// 从 `SttEngineConnection` 创建伪流式 STT 引擎（0.22.6 批次 3）。
+    /// 从 `SttEngineConnection` 创建伪流式 STT 引擎。
     ///
-    /// 推荐的生产构造方式——连接快照包含完整身份（host/port/token/IDs），
-    /// health 和 transcribe 共用同一快照。
+    /// 连接快照必须携带 worker transport（GGUF 常驻 worker 是唯一本地实现；
+    /// 无 transport 的连接是上游接线错误）。就绪由 start 时的 ready 握手
+    /// 保证——这里不做端口探测。
     pub fn from_connection(
         config: &crate::domain::config::stt_config::SttConfig,
         conn: crate::domain::stt::SttEngineConnection,
     ) -> Result<Self, String> {
         let model = config.local_engine.funasr_model.clone();
 
-        let ready = super::funasr::is_server_ready(conn.port);
-        if !ready {
-            return Err(format!(
-                "FunASR 服务未在端口 {} 上运行。\
-                 请在设置页「语音输入」→「本地模式」中点击「启动服务」按钮。",
-                conn.port
-            ));
+        if conn.transport.is_none() {
+            return Err(
+                "本地 STT 连接缺少 worker 通道（GGUF worker 是唯一本地实现）。\
+                 请确认语音服务已在设置页启动。"
+                    .to_string(),
+            );
         }
-
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
 
         let vad_cfg = &config.local_engine.vad;
         tracing::info!(
-            port = conn.port, model = %model,
+            model = %model,
             silence_threshold = vad_cfg.silence_threshold,
             min_silence_ms = vad_cfg.min_silence_ms,
             min_sentence_ms = vad_cfg.min_sentence_ms,
-            "伪流式 STT 引擎: VAD + HTTP 轮询 (就绪)"
+            "伪流式 STT 引擎: VAD + GGUF worker 通道 (就绪)"
         );
 
         Ok(Self {
@@ -182,9 +173,7 @@ impl PseudoStreamingSttEngine {
                 pending_confirmed: None,
                 preview_generation: 0,
             })),
-            client,
             connection: Some(conn),
-            funasr_model: model,
             sample_rate: 16000,
         })
     }
@@ -211,19 +200,10 @@ impl PseudoStreamingSttEngine {
         .to_string()
     }
 
-    /// HTTP 转录 URL（0.22.6: 使用连接快照中的 host:port）。
-    fn transcription_url(&self) -> String {
-        let conn = match &self.connection {
-            Some(c) => c,
-            None => return String::new(), // 诊断模式无连接
-        };
-        format!("http://{}:{}/v1/audio/transcriptions", conn.host, conn.port)
-    }
-
-    /// 异步 HTTP 转录（同步等待结果）。
+    /// 转录（等待结果）——走 worker transport 通道。
     ///
-    /// 0.22.6: 使用连接快照做 token-aware health 检查 + 转录请求，
-    /// 确保 health 和 transcribe 使用同一 endpoint/token。
+    /// 通道与模型就绪由 transport 的 check_ready 承载（NDJSON hello 握手）；
+    /// 请求在客户端串行化（单请求在途）。
     async fn transcribe_samples(&self, samples: &[f32]) -> Result<String, SttError> {
         if samples.is_empty() {
             return Ok(String::new());
@@ -233,34 +213,27 @@ impl PseudoStreamingSttEngine {
             .connection
             .as_ref()
             .ok_or_else(|| SttError::Engine("伪流式引擎无连接快照".to_string()))?;
+        let transport = conn
+            .transport
+            .as_ref()
+            .ok_or_else(|| SttError::Engine("伪流式引擎连接缺少 worker 通道".to_string()))?;
 
-        // 0.22.6: token-aware health 检查，确保模型就绪
-        super::funasr::check_model_ready_or_error_with_token(conn)
-            .await
-            .map_err(SttError::Engine)?;
+        transport.check_ready().await.map_err(SttError::Engine)?;
 
         // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
         let trimmed = trim_trailing_silence(samples, self.sample_rate);
         let wav_bytes = super::wav::pcm_to_wav(&trimmed, self.sample_rate, 1);
-        let url = self.transcription_url();
 
-        let text = super::wav::transcribe_with_token(
-            &self.client,
-            &url,
-            Some(&conn.token),
-            &self.funasr_model,
-            &wav_bytes,
-        )
-        .await?;
+        let text = transport
+            .transcribe(&wav_bytes)
+            .await
+            .map_err(SttError::Engine)?;
 
         // 剥离 SenseVoice 幻觉的英文语气词
-        let cleaned = strip_filler_words(&text);
-        Ok(cleaned)
+        Ok(strip_filler_words(&text))
     }
 
-    /// 后台 spawn 一个定稿识别 task。
-    ///
-    /// 0.22.6: 使用连接快照中的 token，确保与 health 检查使用同一连接。
+    /// 后台 spawn 一个定稿识别 task（worker transport 通道）。
     fn spawn_sentence_finalize(&self, sentence_samples: Vec<f32>) {
         if sentence_samples.is_empty() {
             return;
@@ -273,10 +246,11 @@ impl PseudoStreamingSttEngine {
         }
 
         let inner = Arc::clone(&self.inner);
-        let client = self.client.clone();
-        let url = self.transcription_url();
-        let model = self.funasr_model.clone();
-        let token = self.connection.as_ref().map(|c| c.token.clone());
+        let Some(transport) = self.connection.as_ref().and_then(|c| c.transport.clone()) else {
+            tracing::warn!("定稿识别缺少 worker 通道，跳过");
+            self.inner.lock().unwrap().finalize_in_flight = false;
+            return;
+        };
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
@@ -284,15 +258,9 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&sentence_samples, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            match super::wav::transcribe_with_token(
-                &client,
-                &url,
-                token.as_deref(),
-                &model,
-                &wav_bytes,
-            )
-            .await
-            {
+            let result = transport.transcribe(&wav_bytes).await;
+
+            match result {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
                     tracing::debug!(
@@ -314,9 +282,7 @@ impl PseudoStreamingSttEngine {
         });
     }
 
-    /// 后台 spawn 一个预览识别 task。
-    ///
-    /// 0.22.6: 使用连接快照中的 token，确保与 health 检查使用同一连接。
+    /// 后台 spawn 一个预览识别 task（worker transport 通道）。
     fn spawn_preview_recognition(&self, samples_snapshot: Vec<f32>) {
         if samples_snapshot.is_empty() {
             return;
@@ -330,10 +296,11 @@ impl PseudoStreamingSttEngine {
         };
 
         let inner = Arc::clone(&self.inner);
-        let client = self.client.clone();
-        let url = self.transcription_url();
-        let model = self.funasr_model.clone();
-        let token = self.connection.as_ref().map(|c| c.token.clone());
+        let Some(transport) = self.connection.as_ref().and_then(|c| c.transport.clone()) else {
+            tracing::warn!("预览识别缺少 worker 通道，跳过");
+            self.inner.lock().unwrap().preview_in_flight = false;
+            return;
+        };
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
@@ -341,15 +308,9 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            match super::wav::transcribe_with_token(
-                &client,
-                &url,
-                token.as_deref(),
-                &model,
-                &wav_bytes,
-            )
-            .await
-            {
+            let result = transport.transcribe(&wav_bytes).await;
+
+            match result {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
                     if !cleaned.is_empty() {
@@ -995,9 +956,7 @@ mod tests {
                 pending_confirmed: Some("pending".to_string()),
                 preview_generation: 0,
             })),
-            client: reqwest::Client::new(),
             connection: None,
-            funasr_model: "test".to_string(),
             sample_rate: 16000,
         };
 
@@ -1017,7 +976,7 @@ mod tests {
         assert_eq!(inner.sentences.confirmed_text(), "");
     }
 
-    // 验证带 token 字段的引擎能正常构造和 reset
+    // 验证带连接快照的引擎能正常构造和 reset
     #[test]
     fn engine_with_token_constructs_and_resets() {
         let engine = PseudoStreamingSttEngine {
@@ -1032,15 +991,13 @@ mod tests {
                 pending_confirmed: None,
                 preview_generation: 0,
             })),
-            client: reqwest::Client::new(),
             connection: Some(crate::domain::stt::SttEngineConnection {
                 host: "127.0.0.1".to_string(),
                 port: 8000,
-                token: "test-token-abcdef0123456789".to_string(),
                 engine_id: "funasr".to_string(),
                 instance_id: "inst-test".to_string(),
+                transport: None,
             }),
-            funasr_model: "test".to_string(),
             sample_rate: 16000,
         };
 

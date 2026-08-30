@@ -1,12 +1,11 @@
-//! FunASR adapter 回归测试（自原单文件 `#[cfg(test)] mod tests` 整体迁移，断言不变）。
+//! FunASR adapter 回归测试（0.22.7.4 起：GGUF 常驻 worker 唯一实现）。
+//!
+//! 旧 Python/PyTorch 链路的 venv、依赖锁、嵌入脚本、HTTP 端点与子模型
+//! 测试已随 0.22.7.4 切换删除；本文件只保留对新实现仍成立的契约。
 
-use super::launch::{build_funasr_args, funasr_device_for_backend, funasr_submodels_for};
-use super::locks::parse_locked_requirements;
 use super::*;
 use crate::domain::local_engine::{CapabilityKind, LifecyclePolicy, ModelHealth, ServiceHealth};
-use crate::domain::stt::funasr;
-use crate::infra::local_engine::providers::{InstallPlan, PackageLock, PipExtraArg};
-use crate::infra::local_engine::runtime as engine_runtime;
+use crate::infra::local_engine::providers::InstallPlan;
 use crate::infra::local_engine::runtime::{
     ArtifactId, ComputeBackend, ComputePreference, ResolvedProfile, RuntimePlan,
 };
@@ -26,12 +25,6 @@ fn descriptor_has_closed_capability_kind() {
 }
 
 #[test]
-fn descriptor_has_python_venv_runtime_kind() {
-    let adapter = FunasrAdapter::new();
-    assert_eq!(adapter.descriptor().runtime_kind, RuntimePlan::PythonVenv);
-}
-
-#[test]
 fn descriptor_has_manual_lifecycle() {
     let adapter = FunasrAdapter::new();
     assert_eq!(adapter.descriptor().lifecycle, LifecyclePolicy::Manual);
@@ -45,14 +38,13 @@ fn descriptor_validates_ok() {
 
 #[test]
 fn descriptor_declares_cpu_preference_only() {
-    // 0.22.6: 只声明 CPU profile（CUDA 需独立锁文件后启用）
+    // 首版 CPU 闭环（phase §5.8.5：GPU 未实测不开）
     let adapter = FunasrAdapter::new();
     let desc = adapter.descriptor();
     assert!(desc.has_preference(ComputePreference::Cpu));
-    // 确保 CUDA 不在声明列表中
     assert!(
         !desc.has_preference(ComputePreference::Cuda),
-        "0.22.6 不应声明 CUDA preference"
+        "未实测的 CUDA preference 不应声明"
     );
 }
 
@@ -62,7 +54,7 @@ fn descriptor_allows_cpu_profile() {
     let profile = ResolvedProfile {
         profile_id: "cpu-x64".to_string(),
         backend: ComputeBackend::Cpu,
-        artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     };
     assert!(adapter.descriptor().is_profile_allowed(&profile));
@@ -74,78 +66,92 @@ fn descriptor_rejects_undeclared_profile() {
     let profile = ResolvedProfile {
         profile_id: "vulkan-x64".to_string(),
         backend: ComputeBackend::Vulkan,
-        artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     };
     assert!(!adapter.descriptor().is_profile_allowed(&profile));
 }
 
-// ── 0.22.6.1 设备唯一真相 ─────────────────────────────────────────────
-
-/// 历史 config device=cuda + CPU profile → argv 必须包含 `--device cpu`，
-/// 历史 device 字段不得成为启动执行真相。
+/// descriptor 默认 model_contract 与 GGUF 目录对齐（SenseVoice Q8）。
 #[test]
-fn launch_args_use_cpu_for_historical_cuda_config() {
-    // 历史配置残留 device=cuda（wire 兼容保留，允许反序列化）
-    let local: crate::domain::config::stt_config::LocalEngineConfig = serde_json::from_str(
-        r#"{"server_port": 8000, "funasr_model": "iic/SenseVoiceSmall", "device": "cuda", "use_itn": false}"#,
-    )
-    .unwrap();
-    assert_eq!(local.device, "cuda");
-
-    let funasr_config = FunasrEngineConfig::from_stt_config(&local);
-    // 启动设备只从 resolved profile（cpu-x64 → Cpu）推导
-    let device = funasr_device_for_backend(ComputeBackend::Cpu).unwrap();
-    let args = build_funasr_args(
-        &funasr_config.funasr_model,
-        &device,
-        8000,
-        None,
-        funasr_config.use_itn,
-        std::path::Path::new("blink_stt_server.py"),
-    );
-
-    let device_pos = args
-        .iter()
-        .position(|a| a == "--device")
-        .expect("argv 必须包含 --device");
-    assert_eq!(
-        args[device_pos + 1],
-        "cpu",
-        "CPU profile 必须生成 --device cpu"
-    );
-    assert!(
-        !args.iter().any(|a| a == "cuda"),
-        "历史 config device=cuda 不得泄漏进启动 argv"
-    );
+fn descriptor_model_contract_matches_gguf_catalog() {
+    let adapter = FunasrAdapter::new();
+    let contract = &adapter.descriptor().model_contract;
+    assert_eq!(contract.model_id, gguf::GGUF_SENSEVOICE_ID);
+    assert_eq!(contract.revision, gguf::GGUF_MODEL_REVISION);
 }
 
-/// resolved profile 是当前不支持的 backend → 结构化 Unsupported，不回落。
+// ── 旧 SttConfig 反序列化收口：旧模型 id 归一化为 GGUF id ──
+
+/// 旧 SenseVoice 选择（完整 ModelScope id / 各短名）→ SenseVoice GGUF。
 #[test]
-fn funasr_device_for_backend_rejects_non_cpu() {
-    for backend in [
-        ComputeBackend::Cuda,
-        ComputeBackend::Vulkan,
-        ComputeBackend::Directml,
+fn old_sensevoice_config_deserializes_to_gguf_id() {
+    for legacy in [
+        "iic/SenseVoiceSmall",
+        "sensevoice",
+        "SenseVoice",
+        "SenseVoiceSmall",
     ] {
-        let err = funasr_device_for_backend(backend).unwrap_err();
-        assert_eq!(err.code, LocalEngineErrorCode::Unsupported);
+        let json = format!(r#"{{"funasr_model": "{legacy}"}}"#);
+        let local: crate::domain::config::stt_config::LocalEngineConfig =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            local.funasr_model,
+            crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID,
+            "旧 id {legacy} 应归一化为 SenseVoice GGUF"
+        );
     }
 }
 
-/// CPU profile 推导结果必须是字面量 "cpu"（Python --device 契约）。
+/// 旧 Paraformer 选择（短名 / 完整 ModelScope id / 历史错误 id）→ Paraformer GGUF。
 #[test]
-fn funasr_device_for_backend_cpu_literal() {
+fn old_paraformer_config_deserializes_to_gguf_id() {
+    for legacy in [
+        "paraformer-zh",
+        "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404",
+    ] {
+        let json = format!(r#"{{"funasr_model": "{legacy}"}}"#);
+        let local: crate::domain::config::stt_config::LocalEngineConfig =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            local.funasr_model,
+            crate::domain::config::stt_config::GGUF_PARAFORMER_MODEL_ID,
+            "旧 id {legacy} 应归一化为 Paraformer GGUF"
+        );
+    }
+}
+
+/// 旧真流式模型 id（已废弃）→ 默认 SenseVoice GGUF。
+#[test]
+fn old_streaming_model_id_normalizes_to_gguf_default() {
+    for legacy in [
+        "paraformer-zh-streaming",
+        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+    ] {
+        let json = format!(r#"{{"funasr_model": "{legacy}"}}"#);
+        let local: crate::domain::config::stt_config::LocalEngineConfig =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            local.funasr_model,
+            crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
+        );
+    }
+}
+
+/// 默认模型即 SenseVoice GGUF（0.22.7.4 起）。
+#[test]
+fn default_config_uses_gguf_sensevoice() {
+    let local = crate::domain::config::stt_config::LocalEngineConfig::default();
     assert_eq!(
-        funasr_device_for_backend(ComputeBackend::Cpu).unwrap(),
-        "cpu"
+        local.funasr_model,
+        crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
     );
 }
 
-// ── 旧 SttConfig 反序列化结果不变 ──
-
+/// 完整旧配置（含 VAD/设备字段）反序列化后其余字段保持不变。
 #[test]
-fn old_stt_config_deserialization_unchanged() {
+fn old_stt_config_fields_deserialization_unchanged() {
     let json = r#"{
         "server_port": 9000,
         "funasr_model": "iic/SenseVoiceSmall",
@@ -161,33 +167,16 @@ fn old_stt_config_deserialization_unchanged() {
     let local: crate::domain::config::stt_config::LocalEngineConfig =
         serde_json::from_str(json).unwrap();
     let funasr_config = FunasrEngineConfig::from_stt_config(&local);
-    assert_eq!(funasr_config.funasr_model, "iic/SenseVoiceSmall");
+    assert_eq!(
+        funasr_config.funasr_model,
+        crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
+    );
     assert_eq!(funasr_config.device, "cpu");
     assert!(funasr_config.use_itn);
     assert!(!funasr_config.auto_start_server);
     assert_eq!(funasr_config.vad.silence_threshold, 0.005);
     assert_eq!(funasr_config.vad.min_silence_ms, 300);
     assert_eq!(funasr_config.vad.min_sentence_ms, 800);
-}
-
-#[test]
-fn old_stt_config_with_hotwords_deserialization() {
-    let json = r#"{
-        "server_port": 8000,
-        "funasr_model": "paraformer-zh",
-        "device": "cuda",
-        "hotwords": "美团 100, 快手 80",
-        "use_itn": false,
-        "auto_start_server": true
-    }"#;
-    let local: crate::domain::config::stt_config::LocalEngineConfig =
-        serde_json::from_str(json).unwrap();
-    let funasr_config = FunasrEngineConfig::from_stt_config(&local);
-    assert_eq!(funasr_config.funasr_model, "paraformer-zh");
-    assert_eq!(funasr_config.device, "cuda");
-    assert_eq!(funasr_config.hotwords.as_deref(), Some("美团 100, 快手 80"));
-    assert!(!funasr_config.use_itn);
-    assert!(funasr_config.auto_start_server);
 }
 
 // ── hotwords/ITN/VAD/model 参数映射不变 ──
@@ -231,11 +220,14 @@ fn funasr_engine_config_preserves_vad() {
 #[test]
 fn funasr_engine_config_preserves_model() {
     let local = crate::domain::config::stt_config::LocalEngineConfig {
-        funasr_model: "paraformer-zh".to_string(),
+        funasr_model: crate::domain::config::stt_config::GGUF_PARAFORMER_MODEL_ID.to_string(),
         ..Default::default()
     };
     let funasr_config = FunasrEngineConfig::from_stt_config(&local);
-    assert_eq!(funasr_config.funasr_model, "paraformer-zh");
+    assert_eq!(
+        funasr_config.funasr_model,
+        crate::domain::config::stt_config::GGUF_PARAFORMER_MODEL_ID
+    );
 }
 
 #[test]
@@ -262,7 +254,7 @@ fn funasr_engine_config_preserves_auto_start() {
 fn funasr_engine_config_round_trip_json() {
     let local = crate::domain::config::stt_config::LocalEngineConfig {
         server_port: 9000,
-        funasr_model: "iic/SenseVoiceSmall".to_string(),
+        funasr_model: crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID.to_string(),
         device: "cuda".to_string(),
         num_threads: Some(4),
         auto_start_server: true,
@@ -273,7 +265,10 @@ fn funasr_engine_config_round_trip_json() {
     let config = FunasrEngineConfig::from_stt_config(&local);
     let json = serde_json::to_string(&config).unwrap();
     let back: FunasrEngineConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.funasr_model, "iic/SenseVoiceSmall");
+    assert_eq!(
+        back.funasr_model,
+        crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
+    );
     assert_eq!(back.device, "cuda");
     assert!(!back.use_itn);
     assert!(back.auto_start_server);
@@ -287,6 +282,22 @@ fn health_maps_model_ready() {
         "status": "ok",
         "model_status": "ready",
         "model_loaded": true,
+    });
+    let mapping = map_funasr_health(&raw);
+    assert_eq!(mapping.service, ServiceHealth::Healthy);
+    assert_eq!(mapping.model, ModelHealth::Ready);
+}
+
+#[test]
+fn health_maps_stdio_worker_ready_as_healthy() {
+    // GGUF worker 的 NDJSON ready 协议不携带 HTTP health 的 status=ok。
+    let raw = serde_json::json!({
+        "type": "ready",
+        "engine_id": "funasr",
+        "instance_id": "inst-test",
+        "model_status": "ready",
+        "model_id": "gguf/paraformer-zh-q8",
+        "model_revision": "gguf-v0.2.6",
     });
     let mapping = map_funasr_health(&raw);
     assert_eq!(mapping.service, ServiceHealth::Healthy);
@@ -344,7 +355,7 @@ fn health_maps_service_unreachable() {
 
 #[test]
 fn health_falls_back_to_model_loaded_bool() {
-    // 旧版 server 没有 model_status 字段
+    // 旧版 ready JSON 没有 model_status 字段
     let raw = serde_json::json!({
         "status": "ok",
         "model_loaded": true,
@@ -378,8 +389,7 @@ fn health_maps_backend_observation() {
     assert_eq!(backend.device_name, "Intel i7");
 }
 
-/// 0.22.6.1 requested/actual 语义：模型 Loading/Idle 时 Python 不回传
-/// `backend`（只有 `requested_backend`）——映射结果不得伪造 backend 观测。
+/// requested/actual 语义：模型 Loading/Idle 时不得把请求设备冒充 actual backend。
 #[test]
 fn health_loading_has_no_backend_observation() {
     let raw = serde_json::json!({
@@ -412,29 +422,30 @@ fn health_maps_model_id_and_revision() {
     let raw = serde_json::json!({
         "status": "ok",
         "model_status": "ready",
-        "model_id": "iic/SenseVoiceSmall",
-        "model_revision": "v1.0",
+        "model_id": gguf::GGUF_SENSEVOICE_ID,
+        "model_revision": gguf::GGUF_MODEL_REVISION,
     });
     let mapping = map_funasr_health(&raw);
-    assert_eq!(mapping.model_id, Some("iic/SenseVoiceSmall".to_string()));
-    assert_eq!(mapping.model_revision, Some("v1.0".to_string()));
+    assert_eq!(mapping.model_id, Some(gguf::GGUF_SENSEVOICE_ID.to_string()));
+    assert_eq!(
+        mapping.model_revision,
+        Some(gguf::GGUF_MODEL_REVISION.to_string())
+    );
 }
 
 // ── health engine/instance/token 不匹配失败 ──
-// 这些测试验证 health 响应缺少身份字段时的行为。
+// 这些测试验证 ready JSON 缺少身份字段时的行为。
 // 完整的身份校验由 EngineManager 在调用 map_health 后，
 // 使用 ServiceIdentityInput::verify 核对 engine id、instance id 和 token。
 
 #[test]
 fn health_without_identity_fields_still_maps_model_status() {
-    // 旧版 server 不回显身份字段，但 model_status 仍可用
     let raw = serde_json::json!({
         "status": "ok",
         "model_status": "ready",
     });
     let mapping = map_funasr_health(&raw);
-    // service 标记为 Healthy（HTTP 可达）
-    // 但 EngineManager 会在后续身份校验中将其降级为 Unreachable
+    // service 标记为 Healthy，但 EngineManager 会在后续身份校验中降级
     assert_eq!(mapping.service, ServiceHealth::Healthy);
     assert_eq!(mapping.model, ModelHealth::Ready);
 }
@@ -451,7 +462,7 @@ fn health_with_mismatched_engine_id_does_not_verify() {
         endpoint: Endpoint::new(8000),
     };
 
-    // health 回显了错误的 engine_id
+    // 回显了错误的 engine_id
     let observed = ServiceIdentityResult {
         engine_id: Some("wrong-engine".to_string()),
         instance_id: Some("inst-abc".to_string()),
@@ -551,7 +562,7 @@ fn health_with_no_identity_fields_does_not_verify() {
         endpoint: Endpoint::new(8000),
     };
 
-    // 旧版 server 完全不回显身份字段
+    // 完全不回显身份字段
     let observed = ServiceIdentityResult {
         engine_id: None,
         instance_id: None,
@@ -566,51 +577,19 @@ fn health_with_no_identity_fields_does_not_verify() {
     ));
 }
 
-// ── 未知端口占用不 kill ──
+// ── StdioWorker：无端口、无 kill 语义 ──
 
 #[test]
 fn unknown_port_occupation_does_not_kill() {
-    // 此测试验证 ManagedProcess 的行为：
-    // 端口被未知进程占用时只报错或换端口，不自动 kill。
-    // 完整的行为测试在 infra/local_engine/tests.rs 中。
-    // 这里验证 adapter 的 descriptor 不包含任何 kill 行为。
+    // StdioWorker 引擎没有端口概念；descriptor 不包含任何 kill/端口终止语义
     let adapter = FunasrAdapter::new();
     let desc = adapter.descriptor();
-    // descriptor 不包含任何 kill 或端口终止相关字段
     let json = serde_json::to_string(desc).unwrap();
     assert!(!json.contains("kill"));
     assert!(!json.contains("terminate"));
 }
 
-// ── transcription client 请求字段和 endpoint 兼容 ──
-
-#[test]
-fn transcription_endpoint_is_loopback() {
-    // FunASR transcription endpoint 只使用 127.0.0.1
-    let base_url = funasr::server_base_url(8000);
-    assert!(
-        base_url.contains("localhost") || base_url.contains("127.0.0.1"),
-        "base_url 应使用 loopback: {base_url}"
-    );
-}
-
-#[test]
-fn transcription_request_fields_compatible() {
-    // 验证 transcription 请求字段与现有 LocalSttEngine 兼容
-    // LocalSttEngine 调用 POST {base_url}/audio/transcriptions
-    // 使用 wav::transcribe_async(url, None, model, wav_bytes)
-    let base_url = funasr::server_base_url(8000);
-    let url = format!("{base_url}/audio/transcriptions");
-    assert!(url.contains("/v1/audio/transcriptions"));
-}
-
-#[test]
-fn embedded_script_is_valid() {
-    assert!(!BLINK_STT_SERVER_PY.is_empty());
-    assert!(BLINK_STT_SERVER_PY.contains("blink_stt_server"));
-    assert!(BLINK_STT_SERVER_PY.contains("/v1/audio/transcriptions"));
-    assert!(BLINK_STT_SERVER_PY.contains("/health"));
-}
+// ── adapter 契约 ──
 
 #[test]
 fn make_funasr_adapter_returns_valid_adapter() {
@@ -619,13 +598,19 @@ fn make_funasr_adapter_returns_valid_adapter() {
     assert_eq!(adapter.descriptor().capability_kind, CapabilityKind::Stt);
 }
 
+/// self_test：active deployment 结构检查。结果取决于机器状态（是否已安装），
+/// 只验证返回了结果且失败文案指向引擎页。
 #[test]
-fn adapter_self_test_checks_python_env() {
+fn adapter_self_test_returns_result() {
     let adapter = FunasrAdapter::new();
     let result = adapter.self_test();
-    // self_test 检查 venv 和 funasr——开发环境可能未安装
-    // 只验证返回了结果（passed 或 failed），不强制要求 passed
-    let _ = result.passed;
+    if !result.passed {
+        let reason = result.failure_reason.unwrap_or_default();
+        assert!(
+            !reason.contains("语音输入"),
+            "错误文案不应指向'语音输入页': {reason}"
+        );
+    }
 }
 
 #[test]
@@ -641,7 +626,7 @@ fn adapter_prepare_launch_rejects_undeclared_profile() {
     let undeclared_profile = ResolvedProfile {
         profile_id: "vulkan-x64".to_string(),
         backend: ComputeBackend::Vulkan,
-        artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     };
     let ctx = LaunchContext {
@@ -658,699 +643,527 @@ fn adapter_prepare_launch_rejects_undeclared_profile() {
     assert_eq!(err.code, LocalEngineErrorCode::Unsupported);
 }
 
-// ── 0.22.6 H1: generation venv 路径测试 ──────────────────────────────
+// ── 0.22.7 GGUF adapter 契约测试 ──────────────────────────────────────────
 
-/// 互斥锁：序列化 generation venv 相关测试，避免并行测试互相清理临时目录。
-static GEN_VENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// 辅助：在测试临时目录中模拟 generation venv 安装。
-///
-/// 创建 `runtimes/engines/funasr/generations/{install_id}/venv/Scripts/python.exe`
-/// 和对应的 `current.json`。
-fn setup_test_generation_venv(install_id: &str) -> std::path::PathBuf {
-    use crate::infra::local_engine::deployment::{
-        DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentStore,
-    };
-    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
-    let slot = if install_id.ends_with("001") {
-        "slot-a"
-    } else {
-        "slot-b"
-    };
-    let gen_dir = engine_runtime::slot_dir(&engine_id, slot);
-    let venv_scripts = gen_dir.join("venv").join("Scripts");
-    std::fs::create_dir_all(&venv_scripts).unwrap();
-    let python_exe = venv_scripts.join("python.exe");
-    std::fs::write(&python_exe, b"fake python").unwrap();
-
-    // 写入 deployment.json（active 指针）
-    let pointer = DeploymentPointer {
-        install_id: install_id.to_string(),
-        slot: slot.to_string(),
-        updated_at_ms: 0,
-        schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
-    };
-    DeploymentStore::write_pointer(&engine_id, &pointer).unwrap();
-
-    python_exe
-}
-
-/// 辅助：清理测试用的 generation 数据。
-fn cleanup_test_generation() {
-    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
-    let engine_root = engine_runtime::engine_root(&engine_id);
-    let _ = std::fs::remove_dir_all(&engine_root);
-}
-
-/// active deployment venv 存在时，返回正确路径。
+/// GGUF descriptor：ManagedBinary runtime + StdioWorker 传输 + CPU profile。
 #[test]
-fn generation_venv_python_returns_path_when_installed() {
-    let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-    cleanup_test_generation();
-    let install_id = "test-install-001";
-    let python_exe = setup_test_generation_venv(install_id);
-
-    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
-    let result = active_deployment_venv_python(&engine_id);
-    assert!(result.is_some(), "generation venv 已安装时应返回路径");
-    assert_eq!(result.unwrap(), python_exe);
-
-    cleanup_test_generation();
-}
-
-/// 0.22.6 H1: 无 generation venv 时返回 None。
-#[test]
-fn generation_venv_python_returns_none_when_not_installed() {
-    let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-    cleanup_test_generation();
-    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
-    let result = active_deployment_venv_python(&engine_id);
-    assert!(result.is_none(), "未安装时应返回 None");
-
-    cleanup_test_generation();
-}
-
-/// 0.22.6 H1: self_test 在无 generation venv 时报告失败。
-#[test]
-fn self_test_fails_when_no_generation_venv() {
-    let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-    cleanup_test_generation();
+fn gguf_descriptor_declares_stdio_worker_transport() {
     let adapter = FunasrAdapter::new();
-    let result = adapter.self_test();
-    assert!(!result.passed, "无 generation venv 时 self_test 应失败");
-    let reason = result.failure_reason.unwrap_or_default();
-    assert!(
-        reason.contains("引擎") || reason.contains("安装"),
-        "失败原因应引导到引擎页: {reason}"
+    let d = adapter.descriptor();
+    assert_eq!(d.runtime_kind, RuntimePlan::ManagedBinary);
+    assert_eq!(
+        d.service_transport,
+        crate::domain::local_engine::ServiceTransport::StdioWorker
     );
-
-    cleanup_test_generation();
-}
-
-/// 0.22.6 H1: self_test 错误文案指向引擎页，不指向语音输入页。
-#[test]
-fn self_test_error_message_points_to_engine_page() {
-    let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-    cleanup_test_generation();
-    let adapter = FunasrAdapter::new();
-    let result = adapter.self_test();
-    if !result.passed {
-        let reason = result.failure_reason.unwrap_or_default();
-        assert!(
-            !reason.contains("语音输入"),
-            "错误文案不应指向'语音输入页': {reason}"
-        );
-        assert!(
-            reason.contains("引擎") || reason.contains("本地模型运行时"),
-            "错误文案应指向引擎页: {reason}"
-        );
-    }
-
-    cleanup_test_generation();
-}
-
-/// 0.22.6 H1: prepare_launch 在无 generation venv 时返回
-/// EnvironmentMissing 错误，错误文案指向引擎页。
-#[test]
-fn prepare_launch_fails_without_generation_venv() {
-    let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-    cleanup_test_generation();
-    let adapter = FunasrAdapter::new();
-    let profile = ResolvedProfile {
+    assert!(d.is_profile_allowed(&ResolvedProfile {
         profile_id: "cpu-x64".to_string(),
         backend: ComputeBackend::Cpu,
-        artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
-    };
-    let ctx = LaunchContext {
-        endpoint: crate::infra::local_engine::port::Endpoint::new(8080),
-        engine_id: "funasr".to_string(),
-        instance_id: "inst-test".to_string(),
-        token: "test-token-abcdef0123456789".to_string(),
-        resolved_profile: profile,
-    };
-    // 提供有效的 engine_config，避免 InvalidConfig 错误
-    let funasr_config = FunasrEngineConfig {
-        funasr_model: "iic/SenseVoiceSmall".to_string(),
-        device: "cpu".to_string(),
-        num_threads: None,
-        hotwords: None,
-        use_itn: true,
-        vad: VadConfigProjection::default(),
-        auto_start_server: false,
-    };
-    let config = AdapterConfig {
-        preferred_port: None,
-        compute_preference: None,
-        engine_config: funasr_config.to_json(),
-    };
-    let result = adapter.prepare_launch(&ctx, &config);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        LocalEngineErrorCode::EnvironmentMissing,
-        "无 generation venv 时应返回 EnvironmentMissing"
-    );
-    // 错误文案应指向引擎页
-    assert!(
-        !err.action_hint.contains("语音输入"),
-        "错误文案不应指向语音输入页"
-    );
-
-    cleanup_test_generation();
+    }));
 }
 
-/// 0.22.6 H1: prepare_launch 的 LaunchDescriptor 使用 generation venv python，
-/// 不使用旧全局 venv。
+/// 唯一实现：adapter 只注册 `funasr` 一个 engine id（不注册第二个引擎）。
 #[test]
-fn launch_descriptor_uses_generation_python() {
-    let _guard = GEN_VENV_TEST_MUTEX.lock().unwrap();
-    cleanup_test_generation();
+fn gguf_adapter_uses_single_funasr_engine_id() {
+    let adapter = FunasrAdapter::new();
+    assert_eq!(adapter.descriptor().engine_id.as_str(), "funasr");
+}
 
-    // 创建 generation venv
-    let install_id = "test-launch-001";
-    let _gen_python = setup_test_generation_venv(install_id);
+/// GGUF 模型目录：三个模型、id 稳定、nano 双文件、hash 锁定非空。
+#[test]
+fn gguf_model_catalog_locked() {
+    let specs = gguf::gguf_model_specs();
+    assert_eq!(specs.len(), 3, "SenseVoice + Paraformer + Nano");
+    assert!(specs.iter().all(|s| {
+        s.files
+            .iter()
+            .all(|f| f.sha256.len() == 64 && f.url.starts_with("https://huggingface.co/"))
+    }));
+    let nano = gguf::find_gguf_spec(gguf::GGUF_NANO_ID).expect("nano spec");
+    assert_eq!(nano.files.len(), 2, "Nano 需要 encoder + LLM 双 GGUF");
+}
 
-    // 0.22.6 B2: 使用 mock 包检查器避免执行假 python.exe（挂死风险）。
-    // mock 检查器总是返回 (false, None)，模拟 funasr 未安装。
-    // 这验证了 prepare_launch 能正确解析 generation python 路径，
-    // 并在 funasr 检查失败时返回正确的错误类型。
-    fn mock_checker(_python: &std::path::Path, _pkg: &str) -> (bool, Option<String>) {
-        (false, None)
+/// 旧模型 id → GGUF id 的确定迁移映射（真源在 domain 配置层）。
+#[test]
+fn gguf_legacy_model_migration_mapping() {
+    assert_eq!(
+        gguf::migrate_legacy_model_id("iic/SenseVoiceSmall"),
+        Some(gguf::GGUF_SENSEVOICE_ID)
+    );
+    assert_eq!(
+        gguf::migrate_legacy_model_id("paraformer-zh"),
+        Some(gguf::GGUF_PARAFORMER_ID)
+    );
+    assert_eq!(gguf::migrate_legacy_model_id("unknown-model"), None);
+}
+
+/// GGUF provider descriptor：bundled 安装 + self-test 命令。
+#[test]
+fn gguf_provider_descriptor_bundled_plan() {
+    let pd = make_funasr_provider_descriptor();
+    match &pd.install_plan {
+        InstallPlan::ManagedBinary(plan) => {
+            assert_eq!(plan.bundled_dir.as_deref(), Some("bin/funasr-worker"));
+            assert!(
+                plan.self_test_command
+                    .contains(&"--blink-selftest".to_string())
+            );
+        }
+        other => panic!("GGUF 应为 ManagedBinary 计划: {other:?}"),
+    }
+}
+
+// ── 0.22.7.2 真实端到端（env 门控：BLINK_E2E_GGUF=1）──────────────────────
+//
+// 覆盖验收链路：安装环境（捆绑 worker hash 校验）→ 安装模型（真实下载 +
+// SHA-256 验证）→ start（NDJSON ready 握手 + 身份/指纹校验）→ get_connection
+// （worker transport）→ 转录固定音频（非空 UTF-8）→ stop（优雅退出 + PID 归零）。
+//
+// 前置：`cargo xtask funasr-worker` 已构建 worker；固定音频 fixture 存在。
+#[tokio::test(flavor = "multi_thread")]
+async fn gguf_real_end_to_end_sensevoice() {
+    if std::env::var("BLINK_E2E_GGUF").ok().as_deref() != Some("1") {
+        eprintln!("跳过：设置 BLINK_E2E_GGUF=1 运行真实 GGUF 端到端测试");
+        return;
+    }
+    let fixture = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
+    )
+    .join("testdata/stt/funasr-runtime/generated/blink-spike.wav");
+    if !fixture.is_file() {
+        eprintln!("跳过：固定音频 fixture 不存在（{}）", fixture.display());
+        return;
     }
 
-    // prepare_launch 使用 mock 包检查器，在 funasr 检查时返回 false，
-    // 错误应来自 funasr 检查，而非 python 环境缺失。
-    let adapter = FunasrAdapter::new_with_package_checker(mock_checker);
-    let profile = ResolvedProfile {
-        profile_id: "cpu-x64".to_string(),
-        backend: ComputeBackend::Cpu,
-        artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
-        priority: 0,
-    };
-    let ctx = LaunchContext {
-        endpoint: crate::infra::local_engine::port::Endpoint::new(8080),
-        engine_id: "funasr".to_string(),
-        instance_id: "inst-test".to_string(),
-        token: "test-token-abcdef0123456789".to_string(),
-        resolved_profile: profile,
-    };
-    // 提供有效的 engine_config
-    let funasr_config = FunasrEngineConfig {
-        funasr_model: "iic/SenseVoiceSmall".to_string(),
-        device: "cpu".to_string(),
-        num_threads: None,
-        hotwords: None,
-        use_itn: true,
-        vad: VadConfigProjection::default(),
-        auto_start_server: false,
-    };
-    let config = AdapterConfig {
-        preferred_port: None,
-        compute_preference: None,
-        engine_config: funasr_config.to_json(),
-    };
-    let result = adapter.prepare_launch(&ctx, &config);
+    use crate::app::local_engine::model_installer::ModelRegistry;
+    use crate::app::local_engine::registry::EngineRegistry;
+    use crate::app::local_engine::{EngineManager, NoopEventPort};
 
-    // mock 检查器返回 (false, None)，模拟 funasr 未安装
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    // 错误应该是 funasr 包未安装（不是 python 环境缺失）
-    assert_eq!(
-        err.code,
-        LocalEngineErrorCode::EnvironmentMissing,
-        "应因 funasr 未安装而失败"
-    );
-    // 不应出现 "Python 环境未就绪" 错误（那意味着 generation python 不存在）
-    assert!(
-        !err.action_hint.contains("Python 环境未就绪"),
-        "不应报 Python 环境未就绪（generation python 已存在）"
+    let registry = std::sync::Arc::new(EngineRegistry::new_with_adapters(vec![
+        super::make_funasr_adapter(),
+    ]));
+    let service = EngineManager::new_with_providers(
+        registry,
+        std::sync::Arc::new(NoopEventPort),
+        [(
+            EngineId::new(FUNASR_ENGINE_ID).unwrap(),
+            make_funasr_provider_descriptor(),
+        )]
+        .into_iter()
+        .collect(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        ModelRegistry::new_with_models(
+            gguf::gguf_model_specs()
+                .iter()
+                .map(gguf::gguf_model_descriptor)
+                .collect(),
+        ),
+        std::sync::Arc::new(super::FunasrGgufModelInstallWorker::new()),
     );
 
-    // 清理
-    let _ = std::fs::remove_dir_all(engine_runtime::python_shared_root());
-    cleanup_test_generation();
-}
-
-/// 0.22.6 H1: ModelScope 缓存路径与 engine_model_cache_dir 一致。
-#[test]
-fn model_cache_path_is_engine_model_cache_dir() {
     let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
-    let cache_dir = engine_runtime::engine_model_cache_dir(&engine_id);
-    let expected = engine_runtime::models_root().join(FUNASR_ENGINE_ID);
+
+    // 1. 安装环境（bundled worker + hash 校验 + self-test）
+    let cfg = crate::domain::local_engine::AdapterConfig {
+        engine_config: serde_json::to_value(FunasrEngineConfig {
+            funasr_model: gguf::GGUF_SENSEVOICE_ID.to_string(),
+            device: "cpu".to_string(),
+            num_threads: None,
+            hotwords: None,
+            use_itn: true,
+            vad: Default::default(),
+            auto_start_server: false,
+        })
+        .unwrap(),
+        preferred_port: None,
+        compute_preference: Some(ComputePreference::Cpu),
+    };
+    service
+        .install(&engine_id, cfg.clone())
+        .await
+        .expect("环境安装");
+
+    // 2. 安装模型（真实下载 254MB + SHA-256 校验 + 单 active 事务）
+    let installed = service
+        .install_model(
+            &engine_id,
+            gguf::GGUF_SENSEVOICE_ID,
+            Some("e2e-gguf".to_string()),
+        )
+        .await
+        .expect("模型安装");
+    assert!(installed.success, "模型安装事务失败: {:?}", installed.error);
+
+    // 3. start：ready 握手 + 身份校验（Model Ready 才返回 Ok）
+    service
+        .start(&engine_id, cfg.clone())
+        .await
+        .expect("GGUF worker 启动");
+
+    // 4. 连接快照携带 worker transport
+    let conn = service
+        .get_connection(&engine_id)
+        .await
+        .expect("get_connection")
+        .expect("运行中应有连接");
+    assert!(conn.worker.is_some(), "StdioWorker 引擎应附带 transport");
+    let transport = conn.worker.unwrap();
+
+    // 5. 转录固定音频（0.5s 前缀 + 完整 5.708s，覆盖伪流式快照语义）
+    let wav_bytes = std::fs::read(&fixture).expect("读取 fixture");
+    let full_text = transport.transcribe(&wav_bytes).await.expect("完整转录");
+    assert!(!full_text.trim().is_empty(), "完整音频转录不应为空");
+    assert!(
+        full_text.contains("blink") || full_text.contains("recognition"),
+        "识别内容应包含语音关键词: {full_text}"
+    );
+
+    // 0.5s 前缀快照（伪流式首个预览的音频量）
+    let samples = crate::domain::stt::wav::parse_wav_to_f32(&wav_bytes).expect("解析 WAV");
+    let prefix = &samples[..(16000 / 2).min(samples.len())];
+    let prefix_wav = crate::domain::stt::wav::pcm_to_wav(prefix, 16000, 1);
+    let prefix_text = transport.transcribe(&prefix_wav).await.expect("前缀转录");
+    eprintln!("0.5s 前缀识别: {prefix_text:?}; 完整识别: {full_text:?}");
+
+    // 连续请求：同一 PID 内多次推理（常驻验证）
+    for i in 0..3 {
+        let t = transport.transcribe(&wav_bytes).await.expect("连续转录");
+        assert_eq!(t, full_text, "同输入应得到稳定文本（第 {} 次）", i + 1);
+    }
+
+    // 6. 优雅停止：状态收敛 Stopped（managed 引用清除 → 旧 PID 归零）
+    service.stop(&engine_id).await.expect("停止");
+    let status = service.get_status(&engine_id).await.expect("get_status");
     assert_eq!(
-        cache_dir, expected,
-        "engine_model_cache_dir 应返回 models/{engine_id}"
+        status.status.process,
+        crate::domain::local_engine::ProcessState::Stopped,
+        "停止后进程状态应为 Stopped（旧 PID 归零）"
     );
-}
 
-/// 0.22.6 H1: 嵌入的 Python 脚本包含 model_content_fingerprint 逻辑。
-#[test]
-fn embedded_script_has_content_fingerprint() {
-    assert!(
-        BLINK_STT_SERVER_PY.contains("model_content_fingerprint"),
-        "Python 脚本应包含 model_content_fingerprint"
-    );
-    assert!(
-        BLINK_STT_SERVER_PY.contains("_compute_model_content_fingerprint"),
-        "Python 脚本应包含 _compute_model_content_fingerprint 函数"
-    );
-}
-
-/// 0.22.6 H1: health 映射在 Ready 时返回 model_content_fingerprint。
-#[test]
-fn health_maps_content_fingerprint_when_ready() {
-    let raw = serde_json::json!({
-        "status": "ok",
-        "model_status": "ready",
-        "model_id": "iic/SenseVoiceSmall",
-        "model_revision": "funasr-1.x",
-        "model_content_fingerprint": "abc123def456",
-    });
-    let mapping = map_funasr_health(&raw);
-    assert_eq!(mapping.model, ModelHealth::Ready);
-    assert_eq!(
-        mapping.model_content_fingerprint,
-        Some("abc123def456".to_string())
-    );
-}
-
-/// 0.22.6 H1: health 映射在非 Ready 时不返回 fingerprint。
-#[test]
-fn health_omits_fingerprint_when_not_ready() {
-    let raw = serde_json::json!({
-        "status": "ok",
-        "model_status": "loading",
-        "model_content_fingerprint": "abc123",
-    });
-    let mapping = map_funasr_health(&raw);
-    assert_eq!(mapping.model, ModelHealth::Loading);
-    assert!(
-        mapping.model_content_fingerprint.is_none(),
-        "非 Ready 状态不应返回 fingerprint"
-    );
-}
-
-/// 0.22.6 H1: health 映射在 Ready 但 fingerprint 为空时返回 None。
-#[test]
-fn health_omits_empty_fingerprint_when_ready() {
-    let raw = serde_json::json!({
-        "status": "ok",
-        "model_status": "ready",
-        "model_content_fingerprint": "",
-    });
-    let mapping = map_funasr_health(&raw);
-    assert_eq!(mapping.model, ModelHealth::Ready);
-    assert!(
-        mapping.model_content_fingerprint.is_none(),
-        "空 fingerprint 应映射为 None"
-    );
-}
-
-/// 0.22.6 H1: health 映射在 Ready 但 fingerprint 缺失时返回 None。
-#[test]
-fn health_omits_missing_fingerprint_when_ready() {
-    let raw = serde_json::json!({
-        "status": "ok",
-        "model_status": "ready",
-    });
-    let mapping = map_funasr_health(&raw);
-    assert_eq!(mapping.model, ModelHealth::Ready);
-    assert!(
-        mapping.model_content_fingerprint.is_none(),
-        "缺失 fingerprint 应映射为 None"
-    );
-}
-
-/// 0.22.6 H1: FunASR descriptor 的 model_id 与 Python server 返回的一致。
-#[test]
-fn descriptor_model_id_matches_python_server_response() {
-    let adapter = FunasrAdapter::new();
-    let descriptor_model_id = &adapter.descriptor().model_contract.model_id;
-    assert_eq!(
-        descriptor_model_id, "iic/SenseVoiceSmall",
-        "descriptor model_id 应为 iic/SenseVoiceSmall"
-    );
-    // Python server health 返回 model_id = args.model（默认 iic/SenseVoiceSmall）
-}
-
-/// 0.22.6 H1: FunASR descriptor 的 model_revision 与 Python server 返回的一致。
-#[test]
-fn descriptor_model_revision_matches_python_server_response() {
-    let adapter = FunasrAdapter::new();
-    let descriptor_revision = &adapter.descriptor().model_contract.revision;
-    assert_eq!(
-        descriptor_revision, "funasr-1.x",
-        "descriptor revision 应为 funasr-1.x"
-    );
-    // Python server health 返回 model_revision = "funasr-1.x"
-}
-
-// ── FunASR 依赖锁闭环测试 ──────────────────────────────────────────
-
-/// 验证 locked-requirements.txt 解析出的包列表包含全部传递依赖（>8 个直接包）。
-#[test]
-fn funasr_locked_packages_includes_transitive_deps() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        // 之前硬编码只有 8 个直接包；完整锁应有 76 个（含传递依赖）
-        assert!(
-            plan.packages.len() > 8,
-            "locked-requirements.txt 应解析出 >8 个包（含传递依赖），实际: {}",
-            plan.packages.len()
-        );
-        tracing::info!(
-            "FunASR locked-requirements.txt 解析出 {} 个包",
-            plan.packages.len()
-        );
+    // 7. 临时音频目录清空
+    let audio_dir = worker::engine_audio_tmp_dir(&engine_id);
+    if audio_dir.exists() {
+        let count = std::fs::read_dir(&audio_dir).unwrap().flatten().count();
+        assert_eq!(count, 0, "停止后 audio-tmp 应为空（残留 {count} 个）");
     }
 }
 
-/// 验证所有包的 all_hashes 非空（多平台 wheel hash）。
-#[test]
-fn funasr_locked_packages_all_hashes_non_empty() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        for pkg in &plan.packages {
-            assert!(
-                !pkg.all_hashes.is_empty(),
-                "PackageLock {} 的 all_hashes 为空，--require-hashes 需要至少一个 hash",
-                pkg.name
-            );
-            // 所有 hash 格式验证
-            for h in &pkg.all_hashes {
-                assert_eq!(
-                    h.len(),
-                    64,
-                    "PackageLock {} 的 all_hashes 中有长度不为 64 的 hash",
-                    pkg.name
-                );
-                assert!(
-                    h.bytes().all(|b| b.is_ascii_hexdigit()),
-                    "PackageLock {} 的 all_hashes 中有非 hex 字符",
-                    pkg.name
-                );
-            }
-        }
+// ── 0.22.7.2 真实崩溃重启（env 门控：BLINK_E2E_GGUF=1）─────────────────────
+//
+// 验收：worker 异常退出（外部 kill）→ exit monitor 收敛状态 + 销毁旧客户端 →
+// 旧 transport 请求失败（管道断开，不伪装健康）→ 重启产生新实例身份 →
+// 新 transport 恢复可用。
+#[tokio::test(flavor = "multi_thread")]
+async fn gguf_real_worker_crash_and_restart() {
+    if std::env::var("BLINK_E2E_GGUF").ok().as_deref() != Some("1") {
+        eprintln!("跳过：设置 BLINK_E2E_GGUF=1 运行真实 GGUF 崩溃重启测试");
+        return;
     }
-}
+    // 与 E2E 主测试共享磁盘根目录（同 cargo test 进程），但模型可能未装
+    // （单独运行本测试时）——用真实 installer 确保模型就位（已装则重新走
+    // 事务，staging 全新 → 会重新下载；跨进程独立根目录时这是必要成本）。
+    use crate::app::local_engine::model_installer::ModelRegistry;
+    use crate::app::local_engine::registry::EngineRegistry;
+    use crate::app::local_engine::{EngineManager, NoopEventPort};
 
-/// 验证所有 production 包使用精确版本（不存在 >= ~> < > 等非精确约束）。
-#[test]
-fn funasr_locked_packages_use_exact_versions() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        for pkg in &plan.packages {
-            assert!(
-                !pkg.version.starts_with('>')
-                    && !pkg.version.starts_with('<')
-                    && !pkg.version.starts_with('~')
-                    && !pkg.version.starts_with('!'),
-                "{} 使用了非精确版本约束: {}",
-                pkg.name,
-                pkg.version
-            );
-        }
-    }
-}
-
-/// 验证 hash 不存在空 hash、非法 hash 或全零占位。
-#[test]
-fn funasr_locked_packages_no_empty_or_zero_hashes() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        for pkg in &plan.packages {
-            // sha256 必须存在
-            assert!(pkg.sha256.is_some(), "{} 的 sha256 为 None", pkg.name);
-            let hash = pkg.sha256.as_ref().unwrap();
-            // 不能是全零占位
-            assert!(
-                !hash.chars().all(|c| c == '0'),
-                "{} 的 sha256 是全零占位",
-                pkg.name
-            );
-            // 不能是空字符串
-            assert!(!hash.is_empty(), "{} 的 sha256 为空字符串", pkg.name);
-        }
-    }
-}
-
-/// 验证嵌入的锁文件可解析（非空、格式正确）。
-#[test]
-fn funasr_embedded_lock_is_parseable() {
-    assert!(!LOCKED_REQUIREMENTS_TXT.is_empty());
-    let packages = parse_locked_requirements(LOCKED_REQUIREMENTS_TXT);
-    assert!(
-        !packages.is_empty(),
-        "locked-requirements.txt 解析结果不应为空"
-    );
-}
-
-/// 验证安装计划包含 --no-deps（禁止传递依赖自动解析）。
-#[test]
-fn funasr_provider_descriptor_has_no_deps() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        assert!(
-            plan.extra_pip_args
+    let registry = std::sync::Arc::new(EngineRegistry::new_with_adapters(vec![
+        super::make_funasr_adapter(),
+    ]));
+    let service = EngineManager::new_with_providers(
+        registry,
+        std::sync::Arc::new(NoopEventPort),
+        [(
+            EngineId::new(FUNASR_ENGINE_ID).unwrap(),
+            make_funasr_provider_descriptor(),
+        )]
+        .into_iter()
+        .collect(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        ModelRegistry::new_with_models(
+            gguf::gguf_model_specs()
                 .iter()
-                .any(|arg| matches!(arg, PipExtraArg::NoDeps)),
-            "安装计划必须包含 --no-deps，禁止传递依赖自动解析"
+                .map(gguf::gguf_model_descriptor)
+                .collect(),
+        ),
+        std::sync::Arc::new(super::FunasrGgufModelInstallWorker::new()),
+    );
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+    let cfg = crate::domain::local_engine::AdapterConfig {
+        engine_config: serde_json::json!({
+            "funasr_model": gguf::GGUF_SENSEVOICE_ID,
+            "device": "cpu",
+            "use_itn": true,
+        }),
+        preferred_port: None,
+        compute_preference: Some(ComputePreference::Cpu),
+    };
+
+    service
+        .install(&engine_id, cfg.clone())
+        .await
+        .expect("环境安装（已装则幂等）");
+
+    // 模型就位（单独运行本测试时需要真实安装；已装则 install_model 幂等修复）
+    let installed = service
+        .install_model(
+            &engine_id,
+            gguf::GGUF_SENSEVOICE_ID,
+            Some("e2e-crash".to_string()),
+        )
+        .await
+        .expect("模型安装");
+    assert!(installed.success, "模型安装失败: {:?}", installed.error);
+
+    // 首次启动
+    service
+        .start(&engine_id, cfg.clone())
+        .await
+        .expect("首次启动");
+    let conn1 = service
+        .get_connection(&engine_id)
+        .await
+        .expect("get_connection")
+        .expect("运行中");
+    let transport1 = conn1.worker.expect("worker transport");
+    let old_instance = conn1.instance_id.clone();
+
+    // 外部 kill worker（模拟崩溃）
+    let status = service.get_status(&engine_id).await.unwrap();
+    let pid = match status.status.process {
+        crate::domain::local_engine::ProcessState::Running { pid } => pid,
+        other => panic!("启动后应为 Running，实际 {other:?}"),
+    };
+    let kill = crate::infra::platform::no_window(std::process::Command::new("taskkill"))
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()
+        .expect("taskkill 执行");
+    assert!(
+        kill.status.success(),
+        "taskkill 失败: {}",
+        String::from_utf8_lossy(&kill.stderr)
+    );
+
+    // 等待 exit monitor 收敛（最多 15s）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let s = service.get_status(&engine_id).await.unwrap();
+        if matches!(
+            s.status.process,
+            crate::domain::local_engine::ProcessState::Exited { .. }
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exit monitor 未在 15s 内收敛崩溃状态"
         );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+
+    // 旧 transport 必须失败（管道断开——不伪装健康）
+    let wav = crate::domain::stt::wav::pcm_to_wav(&[0.0f32; 1600], 16000, 1);
+    let stale = transport1.transcribe(&wav).await;
+    assert!(stale.is_err(), "崩溃后旧 transport 请求必须失败");
+
+    // 重启：新实例身份
+    service
+        .start(&engine_id, cfg.clone())
+        .await
+        .expect("崩溃后重启");
+    let conn2 = service
+        .get_connection(&engine_id)
+        .await
+        .expect("get_connection")
+        .expect("运行中");
+    assert_ne!(
+        conn2.instance_id, old_instance,
+        "重启必须产生新的 instance identity"
+    );
+    let transport2 = conn2.worker.expect("新 worker transport");
+
+    // 新 transport 可用（1s 静音即可——验证通道而非识别质量）
+    let ok = transport2.transcribe(&wav).await;
+    assert!(ok.is_ok(), "新实例 transport 应恢复可用: {:?}", ok.err());
+
+    service.stop(&engine_id).await.expect("收尾停止");
 }
 
-/// 验证安装计划包含 PyTorch ExtraIndexUrl。
-#[test]
-fn funasr_provider_descriptor_has_pytorch_index() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        assert!(
-            plan.extra_pip_args.iter().any(|arg| matches!(
-                arg,
-                PipExtraArg::ExtraIndexUrl(url) if url.contains("pytorch.org")
-            )),
-            "安装计划必须包含 PyTorch ExtraIndexUrl"
-        );
+// ── 0.22.7.3 三模型矩阵 + 切换重启（env 门控：BLINK_E2E_GGUF=1）────────────
+//
+// 验收：
+// - 三模型各自：安装 → 启动 ready → 0.5/1/2s 预览快照 + 完整 final（非空
+//   UTF-8）→ 停止（PID 归零）；
+// - Nano 不做延迟断言（自回归，粗粒度伪流式语义）；
+// - 模型切换：A 运行 → 停止 → B 启动 = 新 PID/新实例；同一时刻全系统只有
+//   一个 funasr-*-worker.exe 进程（单常驻铁则）。
+#[tokio::test(flavor = "multi_thread")]
+async fn gguf_real_three_models_and_switch() {
+    if std::env::var("BLINK_E2E_GGUF").ok().as_deref() != Some("1") {
+        eprintln!("跳过：设置 BLINK_E2E_GGUF=1 运行三模型矩阵测试");
+        return;
     }
-}
+    use crate::app::local_engine::model_installer::ModelRegistry;
+    use crate::app::local_engine::registry::EngineRegistry;
+    use crate::app::local_engine::{EngineManager, NoopEventPort};
 
-/// FunASR 的完整锁横跨 PyPI 与 PyTorch CPU index，必须允许跨索引匹配锁定版本。
-#[test]
-fn funasr_provider_descriptor_has_cross_index_strategy() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        assert!(
-            plan.extra_pip_args
+    // 离线模型缓存（开发机预下载目录）——存在则免网络
+    let cache_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
+    )
+    .join("target/gguf-models");
+    if cache_dir.is_dir() {
+        // SAFETY: 仅门控 E2E 测试内设置；BLINK_GGUF_MODEL_CACHE 只被 GGUF
+        // 安装 worker 读取（同进程内其他测试不消费该变量），无并发读方。
+        unsafe { std::env::set_var("BLINK_GGUF_MODEL_CACHE", &cache_dir) };
+    }
+
+    let registry = std::sync::Arc::new(EngineRegistry::new_with_adapters(vec![
+        super::make_funasr_adapter(),
+    ]));
+    let service = EngineManager::new_with_providers(
+        registry,
+        std::sync::Arc::new(NoopEventPort),
+        [(
+            EngineId::new(FUNASR_ENGINE_ID).unwrap(),
+            make_funasr_provider_descriptor(),
+        )]
+        .into_iter()
+        .collect(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        ModelRegistry::new_with_models(
+            gguf::gguf_model_specs()
                 .iter()
-                .any(|arg| matches!(arg, PipExtraArg::IndexStrategyUnsafeBestMatch)),
-            "FunASR 多索引锁安装必须启用 unsafe-best-match"
-        );
+                .map(gguf::gguf_model_descriptor)
+                .collect(),
+        ),
+        std::sync::Arc::new(super::FunasrGgufModelInstallWorker::new()),
+    );
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+
+    let fixture = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
+    )
+    .join("testdata/stt/funasr-runtime/generated/blink-spike.wav");
+    if !fixture.is_file() {
+        eprintln!("跳过：固定音频 fixture 不存在（{}）", fixture.display());
+        return;
     }
-}
+    let wav_bytes = std::fs::read(&fixture).expect("读取 fixture");
+    let samples = crate::domain::stt::wav::parse_wav_to_f32(&wav_bytes).expect("解析 WAV");
 
-/// Windows CPU profile 必须锁到 PyTorch 官方 cp312 win_amd64 CPU wheel。
-#[test]
-fn funasr_pytorch_packages_lock_windows_cpu_wheels() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        let torch = plan
-            .packages
-            .iter()
-            .find(|pkg| pkg.name == "torch")
-            .unwrap();
-        assert_eq!(torch.version, "2.5.0+cpu");
-        assert_eq!(
-            torch.all_hashes,
-            ["3815a38bbe31d0c546a33a0c59a5426563e94aea6d32eb4cf07b6a99bfa7130f"]
-        );
+    let make_cfg = |model: &str| crate::domain::local_engine::AdapterConfig {
+        engine_config: serde_json::json!({
+            "funasr_model": model,
+            "device": "cpu",
+            "use_itn": true,
+        }),
+        preferred_port: None,
+        compute_preference: Some(ComputePreference::Cpu),
+    };
 
-        let torchaudio = plan
-            .packages
-            .iter()
-            .find(|pkg| pkg.name == "torchaudio")
-            .unwrap();
-        assert_eq!(torchaudio.version, "2.5.0+cpu");
-        assert_eq!(
-            torchaudio.all_hashes,
-            ["c972268b2711662d7e01479c38bb49b3da0a38b678f78451c545d4f36384f5ad"]
-        );
-    }
-}
+    // 环境一次安装
+    service
+        .install(&engine_id, make_cfg(gguf::GGUF_SENSEVOICE_ID))
+        .await
+        .expect("环境安装");
 
-/// 验证 locked-requirements.txt 中包含关键直接依赖。
-#[test]
-fn funasr_locked_packages_contains_key_deps() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        let names: Vec<&str> = plan.packages.iter().map(|p| p.name.as_str()).collect();
-        // 直接依赖
-        assert!(names.contains(&"torch"), "缺少 torch");
-        assert!(names.contains(&"torchaudio"), "缺少 torchaudio");
-        assert!(names.contains(&"funasr"), "缺少 funasr");
-        assert!(names.contains(&"fastapi"), "缺少 fastapi");
-        assert!(names.contains(&"uvicorn"), "缺少 uvicorn");
-        // 关键传递依赖
-        assert!(names.contains(&"numba"), "缺少传递依赖 numba");
-        assert!(names.contains(&"numpy"), "缺少传递依赖 numpy");
-        assert!(names.contains(&"scipy"), "缺少传递依赖 scipy");
-    }
-}
-
-/// 验证 numba 使用精确版本，不是 >=0.59。
-#[test]
-fn funasr_numba_uses_exact_version() {
-    let pd = make_funasr_provider_descriptor();
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        let numba = plan.packages.iter().find(|p| p.name == "numba");
-        assert!(numba.is_some(), "缺少 numba 包");
-        let numba = numba.unwrap();
-        assert_eq!(
-            numba.version, "0.59.0",
-            "numba 应使用精确版本 0.59.0，而不是 >=0.59"
-        );
-        // 不能以 >= 开头
-        assert!(!numba.version.starts_with(">="), "numba 不应使用 >= 约束");
-    }
-}
-
-/// 验证 render_hashed_requirements 能正确渲染多 hash 条目。
-#[test]
-fn funasr_render_hashed_requirements_supports_multiple_hashes() {
-    use crate::infra::local_engine::providers::python::render_hashed_requirements;
-    let packages = vec![
-        PackageLock {
-            name: "test-pkg".to_string(),
-            version: "1.0.0".to_string(),
-            sha256: Some("a".repeat(64)),
-            all_hashes: vec!["a".repeat(64), "b".repeat(64)],
-        },
-        PackageLock {
-            name: "another-pkg".to_string(),
-            version: "2.0.0".to_string(),
-            sha256: Some("c".repeat(64)),
-            all_hashes: vec!["c".repeat(64)],
-        },
+    // 三模型逐个：安装 → 启动 → 预览快照矩阵 + final → 停止
+    let models = [
+        gguf::GGUF_SENSEVOICE_ID,
+        gguf::GGUF_PARAFORMER_ID,
+        gguf::GGUF_NANO_ID,
     ];
-    let result = render_hashed_requirements(&packages).unwrap();
-    // 验证输出包含两个包
-    assert!(result.contains("test-pkg==1.0.0"));
-    assert!(result.contains("another-pkg==2.0.0"));
-    // 验证 test-pkg 有两个 hash
-    let test_pkg_line_count = result
-        .lines()
-        .find(|l| l.contains("test-pkg=="))
-        .map(|l| l.matches("--hash=sha256:").count())
-        .unwrap_or(0);
-    assert_eq!(
-        test_pkg_line_count, 2,
-        "test-pkg 应有 2 个 hash（多平台 wheel）"
-    );
-}
+    let mut last_pid: Option<u32> = None;
+    for model in models {
+        let installed = service
+            .install_model(&engine_id, model, Some("e2e-matrix".to_string()))
+            .await
+            .unwrap_or_else(|e| panic!("安装 {model} 失败: {e}"));
+        assert!(
+            installed.success,
+            "安装 {model} 失败: {:?}",
+            installed.error
+        );
 
-/// 验证 render_hashed_requirements 拒绝非精确版本。
-#[test]
-fn funasr_render_hashed_requirements_rejects_non_exact_version() {
-    use crate::infra::local_engine::providers::python::render_hashed_requirements;
-    let packages = vec![PackageLock {
-        name: "bad-pkg".to_string(),
-        version: ">=1.0.0".to_string(),
-        sha256: Some("a".repeat(64)),
-        all_hashes: vec!["a".repeat(64)],
-    }];
-    let result = render_hashed_requirements(&packages);
-    assert!(
-        result.is_err(),
-        "非精确版本约束应被 render_hashed_requirements 拒绝"
-    );
-}
+        service
+            .start(&engine_id, make_cfg(model))
+            .await
+            .unwrap_or_else(|e| panic!("启动 {model} 失败: {e}"));
 
-/// 验证 parse_locked_requirements 解析格式正确。
-#[test]
-fn funasr_parse_locked_requirements_correctness() {
-    let sample = "# comment\naiohttp==3.14.3 \\\n    --hash=sha256:03cd2bde3d7f085b64e549c985f4bb928cad7e8ecf5323bfca320db548d81b39 \\\n    --hash=sha256:041badb8f843963574d3ad26de6afd7a32b112f43d3c63045c0c8278cfd2043\nfastapi==0.115.6 \\\n    --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654\n";
-    let packages = parse_locked_requirements(sample);
-    assert_eq!(packages.len(), 2);
-    assert_eq!(packages[0].name, "aiohttp");
-    assert_eq!(packages[0].version, "3.14.3");
-    assert_eq!(packages[0].all_hashes.len(), 2);
-    assert_eq!(
-        packages[0].sha256.as_deref(),
-        Some("03cd2bde3d7f085b64e549c985f4bb928cad7e8ecf5323bfca320db548d81b39")
-    );
-    assert_eq!(packages[1].name, "fastapi");
-    assert_eq!(packages[1].version, "0.115.6");
-    assert_eq!(packages[1].all_hashes.len(), 1);
-}
+        let status = service.get_status(&engine_id).await.unwrap();
+        let pid = match status.status.process {
+            crate::domain::local_engine::ProcessState::Running { pid } => pid,
+            other => panic!("{model} 启动后应 Running: {other:?}"),
+        };
+        // 切换后必须是全新 PID（旧 worker 已停止）
+        if let Some(prev) = last_pid {
+            assert_ne!(pid, prev, "模型切换后 PID 必须不同（旧实例未回收？）");
+        }
+        // 单常驻：全系统 funasr-*-worker.exe 进程数 == 1
+        assert_eq!(
+            count_worker_processes(),
+            1,
+            "同一时刻只允许一个 worker 常驻（模型 {model} 运行中）"
+        );
 
-/// 验证所有声明的 profile 都有可执行的安装合同：
-/// 每个包都有 hash，且只声明了 CPU profile（与 CPU-only 锁文件匹配）。
-#[test]
-fn funasr_all_profiles_have_executable_install_contract() {
-    let pd = make_funasr_provider_descriptor();
+        let conn = service
+            .get_connection(&engine_id)
+            .await
+            .unwrap()
+            .expect("连接");
+        let transport = conn.worker.expect("transport");
 
-    // 所有 profile 必须有对应的 artifact 和 install_plan
-    assert!(!pd.profiles.is_empty(), "至少应声明一个 profile");
-    for p in &pd.profiles {
-        assert!(!p.profile_id.is_empty(), "profile_id 不能为空");
-    }
-
-    // 验证安装计划中所有包都有 hash（--require-hashes 可执行）
-    if let InstallPlan::PythonVenv(plan) = &pd.install_plan {
-        assert!(!plan.packages.is_empty(), "锁文件应包含至少一个包");
-        for pkg in &plan.packages {
+        // 预览快照矩阵：0.5s / 1s / 2s（每段独立请求）+ 完整 final
+        for dur_ms in [500u32, 1000, 2000] {
+            let n = (16000u32 * dur_ms / 1000) as usize;
+            let prefix = &samples[..n.min(samples.len())];
+            let pw = crate::domain::stt::wav::pcm_to_wav(prefix, 16000, 1);
+            let t = transport
+                .transcribe(&pw)
+                .await
+                .unwrap_or_else(|e| panic!("{model} {dur_ms}ms 预览失败: {e}"));
+            eprintln!("{model} {dur_ms}ms 预览: {t:?}");
             assert!(
-                pkg.sha256.is_some(),
-                "{} 缺少 hash —— --require-hashes 将失败",
-                pkg.name
+                t.chars().all(|c| !c.is_control()),
+                "预览必须是合法 UTF-8 文本"
             );
         }
+        let full = transport
+            .transcribe(&wav_bytes)
+            .await
+            .unwrap_or_else(|e| panic!("{model} final 失败: {e}"));
+        assert!(!full.trim().is_empty(), "{model} final 文本不应为空");
+        eprintln!("{model} final: {full:?}");
+
+        // 停止 → PID 归零
+        service.stop(&engine_id).await.expect("停止");
+        let st = service.get_status(&engine_id).await.unwrap();
+        assert_eq!(
+            st.status.process,
+            crate::domain::local_engine::ProcessState::Stopped,
+            "{model} 停止后进程应 Stopped"
+        );
+        assert_eq!(count_worker_processes(), 0, "停止后不应有 worker 进程");
+        last_pid = Some(pid);
     }
-
-    // 0.22.6：只声明 CPU profile，与 CPU-only 锁文件匹配
-    assert!(
-        pd.profiles
-            .iter()
-            .any(|p| p.profile_id == "cpu-x64" && p.backend == ComputeBackend::Cpu),
-        "缺少 CPU profile"
-    );
-    // 确保没有声明 CUDA profile（需独立 CUDA 锁文件后才能启用）
-    assert!(
-        !pd.profiles
-            .iter()
-            .any(|p| p.backend == ComputeBackend::Cuda),
-        "0.22.6 不应声明 CUDA profile（锁文件仅含 CPU wheel hash）"
-    );
+    eprintln!("三模型矩阵 + 切换全部通过");
 }
 
-// ── 0.22.6 B2: 子模型映射测试 ──
-
-/// SenseVoice 系列模型无需子模型。
-#[test]
-fn submodels_for_sensevoice_is_empty() {
-    assert!(funasr_submodels_for("iic/SenseVoiceSmall").is_empty());
-    assert!(funasr_submodels_for("SenseVoice").is_empty());
-}
-
-/// Paraformer 系列模型需要 VAD + punc 子模型。
-#[test]
-fn submodels_for_paraformer_has_vad_and_punc() {
-    let subs = funasr_submodels_for("paraformer-zh");
-    assert_eq!(subs, vec!["fsmn-vad", "ct-punc"]);
-}
-
-/// 未知模型返回空子模型列表（安全默认值）。
-#[test]
-fn submodels_for_unknown_model_is_empty() {
-    assert!(funasr_submodels_for("some-unknown-model").is_empty());
-}
-
-/// 大小写不敏感的子模型匹配。
-#[test]
-fn submodels_for_case_insensitive() {
-    let subs = funasr_submodels_for("Paraformer-ZH");
-    assert_eq!(subs, vec!["fsmn-vad", "ct-punc"]);
-
-    assert!(funasr_submodels_for("SENSEVOICESMALL").is_empty());
+/// 统计全系统 funasr-*-worker.exe 进程数（单常驻断言用）。
+fn count_worker_processes() -> usize {
+    let out = crate::infra::platform::no_window(std::process::Command::new("powershell"))
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-Process -Name 'funasr-*-worker' -ErrorAction SilentlyContinue | Measure-Object).Count",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
+        _ => 0,
+    }
 }

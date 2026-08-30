@@ -7,6 +7,101 @@ use super::*;
 impl EngineManager {
     // ── health 验证 ─────────────────────────────────────────────────────────
 
+    // ── stdio worker health 验证（0.22.7）────────────────────────────────────
+
+    /// StdioWorker 引擎的 health 验证：NDJSON ready 握手。
+    ///
+    /// 流程：
+    /// 1. 从 `ManagedProcess` 取走 stdin/stdout（worker 协议通道）；
+    /// 2. `wait_ready`：ready 只会在模型实际加载完成后输出——等待成功即
+    ///    "进程存活 + 模型 Ready"；EOF/违例归为 Fatal（无 bind race 语义）；
+    /// 3. `hello` 握手确认双向通道；
+    /// 4. ready JSON 复用 `parse_and_verify_health`（身份 + backend +
+    ///    model id/revision/fingerprint 校验与 HTTP 路径完全一致）；
+    /// 5. 成功后客户端存入 entry，供 `get_connection` 投影为 STT transport。
+    pub(super) async fn verify_stdio_worker_health(
+        &self,
+        engine_id: &EngineId,
+        entry: &Arc<EngineEntry>,
+        identity_input: &ServiceIdentityInput,
+        managed: &Arc<ManagedProcess>,
+    ) -> Result<HealthMapping, StartAttemptFailure> {
+        use crate::infra::local_engine::worker_proto::NdjsonWorkerClient;
+
+        let stdio = managed.take_worker_stdio().await.ok_or_else(|| {
+            StartAttemptFailure::Fatal(LocalEngineError::with_detail(
+                LocalEngineErrorCode::Internal,
+                ErrorPhase::Health,
+                "worker stdio 接管失败",
+                "ManagedProcess 未提供 worker stdio（stdio 配置缺失或已被取走）",
+            ))
+        })?;
+
+        let client = NdjsonWorkerClient::new(stdio.stdin, stdio.stdout);
+
+        // 超时复用 descriptor 配置：ready 总窗口 = start + model_load。
+        let timeouts = &entry.adapter.descriptor().timeouts;
+        let ready_timeout = timeouts.start_timeout + timeouts.model_load_timeout;
+
+        tracing::info!(
+            engine = %engine_id,
+            ready_timeout_secs = ready_timeout.as_secs(),
+            "stdio worker: 等待 ready（模型加载完成后输出）"
+        );
+
+        let ready = match client.wait_ready(ready_timeout).await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(StartAttemptFailure::Fatal(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Timeout,
+                    ErrorPhase::Health,
+                    "worker ready 握手失败",
+                    format!("{e}"),
+                )));
+            }
+        };
+
+        if let Err(e) = client
+            .hello(
+                timeouts
+                    .start_timeout
+                    .max(std::time::Duration::from_secs(5)),
+            )
+            .await
+        {
+            return Err(StartAttemptFailure::Fatal(LocalEngineError::with_detail(
+                LocalEngineErrorCode::ServiceUnreachable,
+                ErrorPhase::Health,
+                "worker hello 握手失败",
+                format!("{e}"),
+            )));
+        }
+
+        // 身份/backend/模型身份校验——与 HTTP 路径同一实现。
+        let mapping = self
+            .parse_and_verify_health(&ready, entry, identity_input)
+            .await
+            .map_err(StartAttemptFailure::Fatal)?;
+
+        // Model 必须 Ready（ready 消息语义即 model_status=ready；防御性复核）
+        if mapping.model != ModelHealth::Ready {
+            return Err(StartAttemptFailure::Fatal(LocalEngineError::with_detail(
+                LocalEngineErrorCode::ModelNotReady,
+                ErrorPhase::Health,
+                "worker ready 但模型未就绪",
+                format!("ready 映射 model={:?}", mapping.model),
+            )));
+        }
+
+        // 存入 entry——get_connection 据此投影 STT transport
+        {
+            let mut wc = entry.worker_client.lock().await;
+            *wc = Some(client);
+        }
+
+        Ok(mapping)
+    }
+
     /// 验证引擎 health——轮询直到 Model Ready 或 Err。
     ///
     /// **0.22.3 Task G**: 只有两个终态：

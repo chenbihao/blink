@@ -250,7 +250,7 @@ mod tests {
     use super::*;
     use crate::domain::local_engine::descriptor::{
         CapabilityKind, EngineDefinition, EngineDisplay, EngineTimeouts, InstallPlanRef,
-        LifecyclePolicy, ResourceBudget,
+        LifecyclePolicy, ResourceBudget, ServiceTransport,
     };
     use crate::domain::local_engine::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
     use crate::domain::local_engine::identity::{
@@ -275,6 +275,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                     },
                     capability_kind: CapabilityKind::Stt,
+                    service_transport: ServiceTransport::Http,
                     runtime_kind: RuntimePlan::PythonVenv,
                     install_plan: InstallPlanRef {
                         runtime_kind: RuntimePlan::PythonVenv,

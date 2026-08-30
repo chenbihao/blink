@@ -51,7 +51,6 @@ impl EventNames {
     pub const VOICE_RECORDING_END: &str = "blink://voice-recording-end";
     pub const VOICE_LEVEL: &str = "blink://voice-level";
     pub const VOICE_PARTIAL: &str = "blink://voice-partial";
-    pub const VOICE_STATUS: &str = "blink://voice-status";
     pub const VOICE_ERROR: &str = "blink://voice-error";
 
     // ── 配置 ──

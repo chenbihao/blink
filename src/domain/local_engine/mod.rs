@@ -46,7 +46,7 @@ pub use adapter::{
 #[allow(unused_imports)]
 pub use descriptor::{
     CapabilityKind, ComputeCandidate, EngineDefinition, EngineDisplay, EngineTimeouts,
-    InstallPlanRef, LifecyclePolicy, ResourceBudget,
+    InstallPlanRef, LifecyclePolicy, ResourceBudget, ServiceTransport,
 };
 #[allow(unused_imports)]
 pub use error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
@@ -122,6 +122,7 @@ mod domain_tests {
                 version: "0.1.0".to_string(),
             },
             capability_kind: CapabilityKind::Stt,
+            service_transport: ServiceTransport::Http,
             runtime_kind: RuntimePlan::PythonVenv,
             install_plan: InstallPlanRef {
                 runtime_kind: RuntimePlan::PythonVenv,

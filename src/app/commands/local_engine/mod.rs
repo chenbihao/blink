@@ -66,6 +66,7 @@ use std::sync::Arc;
 use crate::app::command_error::CommandError;
 use crate::app::local_engine::EngineManager;
 use crate::app::local_engine::dto::{EngineLogDto, EngineLogLevel};
+use crate::domain::local_engine::ProcessState;
 use crate::infra::local_engine::runtime::{ComputePreference, EngineId};
 
 use tauri::Manager;
@@ -93,6 +94,15 @@ async fn get_merged_logs(
     eid: &EngineId,
     max_lines: usize,
 ) -> Result<Vec<EngineLogDto>, CommandError> {
+    let status = svc.get_status(eid).await.map_err(|e| {
+        CommandError::new(
+            "engine_status_error",
+            format!("获取引擎状态失败: {e}"),
+            false,
+        )
+    })?;
+    let include_operation_logs = should_include_operation_logs(&status.status.process);
+
     // ── source 1: instance 日志 ──
     let instance_logs = svc
         .get_logs_structured(eid, max_lines)
@@ -119,8 +129,9 @@ async fn get_merged_logs(
         .collect();
 
     // ── source 2: operation 日志 ──
-    if let Some(store) =
-        app.try_state::<std::sync::Arc<crate::app::local_engine::OperationLogStore>>()
+    if include_operation_logs
+        && let Some(store) =
+            app.try_state::<std::sync::Arc<crate::app::local_engine::OperationLogStore>>()
     {
         let op_logs = store.query(eid);
         for log in op_logs {
@@ -166,6 +177,10 @@ async fn get_merged_logs(
     };
 
     Ok(merged[start..].iter().map(|(_, dto)| dto.clone()).collect())
+}
+
+fn should_include_operation_logs(process: &ProcessState) -> bool {
+    matches!(process, ProcessState::Stopped | ProcessState::Exited { .. })
 }
 
 /// 从 `ProcessState` 投影为 `ProcessStateDto`（复用 dto.rs 中的投影函数）。
