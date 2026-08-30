@@ -59,3 +59,9 @@ xtask/spikes/ppocrv6/uv-cache/
 xtask/spikes/ppocrv6/model-cache/
 xtask/spikes/ppocrv6/results/
 xtask/spikes/ppocrv6/*.png.bak
+
+# FunASR llama.cpp/GGUF spike runtime, models, generated fixtures and raw results
+xtask/spikes/funasr-runtime/.cache/
+xtask/spikes/funasr-runtime/results/
+xtask/spikes/funasr-runtime/tmp/
+testdata/stt/funasr-runtime/generated/
