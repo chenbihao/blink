@@ -450,101 +450,112 @@
                 </div>
             </div>
 
-            <!-- Blink 托管本地模型运行时 -->
-            <h3 class="section-heading" id="local-model-runtime" data-i18n="engines.section.local_runtime">Blink 托管本地模型运行时</h3>
-            <p class="section-desc" data-i18n="engines.section.local_runtime.desc">FunASR / PaddleOCR 等本地模型由 Blink 独立管理，使用隔离的 Python 运行时，不读取你的脚本解释器配置。</p>
+            <!-- Blink 托管本地模型运行时：置于引擎页底部，避免打断常规引擎配置流。 -->
 
-            <!-- 无 JS 降级：显示基础 loading / empty / error -->
-            <noscript>
-                <div class="le-nojs-fallback" role="alert">
-                    <p data-i18n="local_engine.nojs.message">需要启用 JavaScript 才能管理本地模型运行时。</p>
-                </div>
-            </noscript>
-
-            <!-- loading live region（JS 控制显隐） -->
-            <div class="le-loading-region" id="le-loading-region" role="status" aria-live="polite" hidden>
-                <svg aria-hidden="true" class="icon le-loading-icon">
-                    <use href="#icon-refresh-cw"/>
-                </svg>
-                <span data-i18n="local_engine.loading">正在加载引擎信息…</span>
-            </div>
-
-            <!-- error live region -->
-            <div class="le-error-region" id="le-error-region" role="alert" aria-live="assertive" hidden>
-                <svg aria-hidden="true" class="icon le-error-icon">
-                    <use href="#icon-triangle-alert"/>
-                </svg>
-                <span id="le-error-text" data-i18n="local_engine.load_failed">加载引擎信息失败</span>
-            </div>
-
-            <!-- empty live region -->
-            <div class="le-empty-region" id="le-empty-region" role="status" aria-live="polite" hidden>
-                <span data-i18n="local_engine.empty">没有可用的本地模型引擎。</span>
-            </div>
-
-            <!-- 运行时底座（默认折叠，只读）0.22.6 -->
-            <details class="le-foundation" id="le-foundation">
-                <summary class="le-foundation-summary" data-i18n="local_engine.foundation.title">运行时底座</summary>
-                <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">所有引擎共享的 Python 运行时与公共缓存，只读展示。</p>
-                <div class="le-foundation-body" id="le-foundation-body">
-                    <!-- JS 装配底座信息 -->
-                </div>
-                <div class="le-foundation-actions">
-                    <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh" type="button">
-                        <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
-                        <span data-i18n="local_engine.foundation.refresh">刷新</span>
-                    </button>
-                    <button class="btn btn-small le-foundation-open" id="le-foundation-open" type="button">
-                        <svg aria-hidden="true" class="icon"><use href="#icon-folder-open"/></svg>
-                        <span data-i18n="local_engine.foundation.open_dir">打开根目录</span>
+            <!-- ── 本地模型引擎（Blink 托管本地模型运行时）──────────────
+                 摘要一行 + 全宽引擎卡片上下排列；
+                 运行时底座/公共缓存折叠进「运行时与缓存」。 -->
+            <section class="le-runtime-section" id="local-model-runtime" aria-labelledby="le-runtime-heading">
+                <div class="le-runtime-header">
+                    <div class="le-runtime-head-info">
+                        <h3 class="section-heading" id="le-runtime-heading" data-i18n="engines.section.local_runtime">本地模型引擎</h3>
+                        <p class="le-runtime-summary" id="le-runtime-summary" role="status">正在加载引擎信息…</p>
+                    </div>
+                    <button aria-controls="le-runtime-details" aria-expanded="false"
+                            class="btn btn-small le-runtime-details-toggle" id="le-runtime-details-toggle" type="button">
+                        <svg aria-hidden="true" class="icon"><use href="#icon-database"/></svg>
+                        <span data-i18n="local_engine.runtime.details_btn">运行时与缓存</span>
+                        <svg aria-hidden="true" class="icon le-disclosure-icon"><use href="#icon-chevron-down"/></svg>
                     </button>
                 </div>
-            </details>
 
-            <!-- 通用诊断区（JS 装配）0.22.6 -->
-            <div class="le-diagnostic-region" id="le-diagnostic-region" hidden>
-                <!-- JS 装配诊断内容 -->
-            </div>
+                <!-- 无 JS 降级：显示基础 loading / empty / error -->
+                <noscript>
+                    <div class="le-nojs-fallback" role="alert">
+                        <p data-i18n="local_engine.nojs.message">需要启用 JavaScript 才能管理本地模型运行时。</p>
+                    </div>
+                </noscript>
 
-            <!-- engine card 容器（由 H3 renderer 装配） -->
-            <div class="le-cards-container" id="le-cards-container" aria-live="polite">
-                <!-- JS 装配卡片 -->
-            </div>
-
-            <!-- 全局/公共 storage 区域 -->
-            <div class="le-shared-storage" id="le-shared-storage" hidden>
-                <h4 class="le-shared-storage-title" data-i18n="local_engine.storage.shared_title">公共缓存</h4>
-                <p class="le-shared-storage-desc" data-i18n="local_engine.storage.shared_desc">多个引擎共享的缓存资产。清理公共缓存不影响引擎运行，但可能导致引擎下次启动时需要重新下载依赖。</p>
-                <div class="le-shared-storage-content" id="le-shared-storage-content"></div>
-                <button class="btn btn-small le-shared-cleanup-btn" id="le-shared-cleanup-btn" type="button" hidden>
-                    <svg aria-hidden="true" class="icon">
-                        <use href="#icon-trash-2"/>
+                <!-- loading live region（JS 控制显隐） -->
+                <div aria-live="polite" class="le-loading-region" hidden id="le-loading-region" role="status">
+                    <svg aria-hidden="true" class="icon le-loading-icon">
+                        <use href="#icon-refresh-cw"/>
                     </svg>
-                    <span data-i18n="local_engine.storage.shared_cleanup">清理公共缓存</span>
-                </button>
-            </div>
+                    <span data-i18n="local_engine.loading">正在加载引擎信息…</span>
+                </div>
 
-            <!-- cleanup modal -->
-            <div class="le-cleanup-modal" id="le-cleanup-modal" role="dialog" aria-modal="true" aria-labelledby="le-cleanup-title" hidden>
-                <div class="le-cleanup-overlay" data-le-cleanup-close></div>
-                <div class="le-cleanup-dialog">
-                    <div class="le-cleanup-header">
-                        <h3 class="le-cleanup-title" id="le-cleanup-title" data-i18n="local_engine.cleanup.title">清理确认</h3>
-                        <button class="le-cleanup-close" data-le-cleanup-close type="button" aria-label="关闭">
+                <!-- error live region -->
+                <div aria-live="assertive" class="le-error-region" hidden id="le-error-region" role="alert">
+                    <svg aria-hidden="true" class="icon le-error-icon">
+                        <use href="#icon-triangle-alert"/>
+                    </svg>
+                    <span data-i18n="local_engine.load_failed" id="le-error-text">加载引擎信息失败</span>
+                </div>
+
+                <!-- empty live region -->
+                <div aria-live="polite" class="le-empty-region" hidden id="le-empty-region" role="status">
+                    <span data-i18n="local_engine.empty">没有可用的本地模型引擎。</span>
+                </div>
+
+                <!-- 运行时底座 + 公共缓存（默认折叠；点击「运行时与缓存」展开） -->
+                <div class="le-runtime-details" hidden id="le-runtime-details">
+                    <details class="le-foundation" id="le-foundation">
+                        <summary class="le-foundation-summary" data-i18n="local_engine.foundation.title">运行时底座</summary>
+                        <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">所有引擎共享的 Python 运行时与公共缓存，只读展示。FunASR / PaddleOCR 等本地模型由 Blink 独立管理，使用隔离运行时，不读取你的脚本解释器配置。</p>
+                        <div class="le-foundation-body" id="le-foundation-body">
+                            <!-- JS 装配底座信息 -->
+                        </div>
+                        <div class="le-foundation-actions">
+                            <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh" type="button">
+                                <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
+                                <span data-i18n="local_engine.foundation.refresh">刷新</span>
+                            </button>
+                            <button class="btn btn-small le-foundation-open" id="le-foundation-open" type="button">
+                                <svg aria-hidden="true" class="icon"><use href="#icon-folder-open"/></svg>
+                                <span data-i18n="local_engine.foundation.open_dir">打开根目录</span>
+                            </button>
+                        </div>
+                    </details>
+
+                    <!-- 全局/公共 storage 区域 -->
+                    <div class="le-shared-storage" hidden id="le-shared-storage">
+                        <h4 class="le-shared-storage-title" data-i18n="local_engine.storage.shared_title">公共缓存</h4>
+                        <p class="le-shared-storage-desc" data-i18n="local_engine.storage.shared_desc">多个引擎共享的缓存资产。清理公共缓存不影响引擎运行，但可能导致引擎下次启动时需要重新下载依赖。</p>
+                        <div class="le-shared-storage-content" id="le-shared-storage-content"></div>
+                        <button class="btn btn-small le-shared-cleanup-btn" hidden id="le-shared-cleanup-btn" type="button">
                             <svg aria-hidden="true" class="icon">
-                                <use href="#icon-x"/>
+                                <use href="#icon-trash-2"/>
                             </svg>
+                            <span data-i18n="local_engine.storage.shared_cleanup">清理公共缓存</span>
                         </button>
                     </div>
-                    <div class="le-cleanup-body" id="le-cleanup-body"></div>
-                    <div class="le-cleanup-actions">
-                        <button class="btn btn-small" data-le-cleanup-close type="button" data-i18n="local_engine.cleanup.cancel">取消</button>
-                        <button class="btn btn-primary btn-small" id="le-cleanup-confirm" type="button" data-i18n="local_engine.cleanup.confirm">确认清理</button>
+                </div>
+
+                <!-- engine card 容器（共用 renderer 装配全宽卡片） -->
+                <div class="le-cards-container" id="le-cards-container">
+                    <!-- JS 装配卡片 -->
+                </div>
+
+                <!-- cleanup modal -->
+                <div aria-labelledby="le-cleanup-title" aria-modal="true" class="le-cleanup-modal" hidden id="le-cleanup-modal" role="dialog">
+                    <div class="le-cleanup-overlay" data-le-cleanup-close></div>
+                    <div class="le-cleanup-dialog">
+                        <div class="le-cleanup-header">
+                            <h3 class="le-cleanup-title" data-i18n="local_engine.cleanup.title" id="le-cleanup-title">清理确认</h3>
+                            <button aria-label="关闭" class="le-cleanup-close" data-le-cleanup-close type="button">
+                                <svg aria-hidden="true" class="icon">
+                                    <use href="#icon-x"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="le-cleanup-body" id="le-cleanup-body"></div>
+                        <div class="le-cleanup-actions">
+                            <button class="btn btn-small" data-i18n="local_engine.cleanup.cancel" data-le-cleanup-close type="button">取消</button>
+                            <button class="btn btn-primary btn-small" data-i18n="local_engine.cleanup.confirm" id="le-cleanup-confirm" type="button">确认清理</button>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- log modal 已移除：卡片内日志组件（le-card-log）是唯一日志入口，避免死 UI -->
+            </section>
         </div>
 
         <!-- 插件 -->

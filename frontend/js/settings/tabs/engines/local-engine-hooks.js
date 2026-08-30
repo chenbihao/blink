@@ -1,5 +1,5 @@
 /**
- * 受限 adapter hooks —— FunASR 与 PaddleOCR 的引擎专属配置入口（0.22.6）。
+ * 受限 adapter hooks —— FunASR 与 PaddleOCR 的引擎专属配置入口（0.22.6，中密度重设计）。
  *
  * 通用 renderer 只处理生命周期（install/start/stop/repair/cleanup/cancel）。
  * FunASR/PaddleOCR 的配置保存通过按 engine_id 注册的受限 hook 完成，
@@ -7,18 +7,18 @@
  *
  * ## 受限边界
  *
- * - FunASR compute preference 映射现有 SttConfig。
- * - PaddleOCR compute preference/lifecycle 映射 OcrConfig。
- * - PaddleOCR 只显示后端 catalog 声明的 auto/cpu。
+ * - FunASR compute preference / auto_start 映射现有受限 preferences command。
+ * - PaddleOCR compute preference / ocr_backend / lifecycle 映射同一 command。
+ * - 单一可用 compute profile 渲染静态文本，不显示虚假可选下拉。
+ * - 当前模型为只读展示（selected/active 三身份不混淆）——模型切换归
+ *   语音页/引擎页模型列表的受限选择路径，本区不复制第二套真源。
  * - renderer 绝不允许任意 engine id 动态注入 HTML、command 或字段路径。
  *
- * ## 0.22.6 改进
+ * ## 布局约定
  *
- * - 初始化必须读取 preferences（get_local_engine_preferences）
- * - 保存走闭合命令 set_local_engine_preferences
- * - 失败回滚（select 恢复原值）
- * - requires_rebuild 提示
- * - FunASR auto_start 开关
+ * 配置区由若干 `.le-config-group`（label + control）横向换行排列；
+ * renderer 在 preferences / selected / active 签名变化时整体重渲染，
+ * 控件值始终来自后端真源，失败时回滚显示。
  *
  * @module local-engine-hooks
  */
@@ -28,168 +28,176 @@ import {invoke} from "../../../shared/tauri.js";
 import {t} from "../../../i18n/index.js";
 import {computeOptionsDisplayMode} from "./local-engine-state.js";
 
+// ── 公共构造 ──────────────────────────────────────────────────────────────────
+
+/** 构造一个配置组（label + control 横排）。 */
+function makeGroup(labelText) {
+    const group = document.createElement("div");
+    group.className = "le-config-group";
+
+    const label = document.createElement("span");
+    label.className = "le-config-label";
+    label.textContent = labelText;
+    group.appendChild(label);
+    return group;
+}
+
+/** compute preference 显示名。 */
+function computeLabel(preference) {
+    return t(`local_engine.compute.${preference}`, preference);
+}
+
+/**
+ * 渲染"当前模型"只读组 + selected≠active 待重启提示。
+ * 当前模型的切换入口在模型列表/语音页，本区不复制选择命令。
+ */
+function appendCurrentModelGroup(container, entry) {
+    const models = entry.models;
+    const selected = Array.isArray(models) ? models.find((m) => m.is_selected) : null;
+    const active = Array.isArray(models) ? models.find((m) => m.is_active) : null;
+    const name = (selected && (selected.display_name || selected.model_id))
+        || entry.catalog?.model_id
+        || "—";
+
+    const group = makeGroup(t("local_engine.config.current_model"));
+    const value = document.createElement("span");
+    value.className = "le-config-static";
+    value.textContent = name;
+    group.appendChild(value);
+    container.appendChild(group);
+
+    // selected ≠ active → 待重启/未生效（不得静默声称切换完成）
+    if (selected && active && selected.model_id !== active.model_id) {
+        const hint = document.createElement("span");
+        hint.className = "le-config-mismatch";
+        hint.textContent = t("local_engine.model.mismatch_hint");
+        container.appendChild(hint);
+    }
+}
+
+/** 渲染 requires_rebuild 提示（保存 compute 偏好后环境待重建）。 */
+function appendRebuildHint(container, prefs) {
+    if (prefs?.requires_rebuild !== true) return;
+    const hint = document.createElement("span");
+    hint.className = "le-config-rebuild-hint";
+    hint.textContent = t("local_engine.config.requires_rebuild_hint");
+    container.appendChild(hint);
+}
+
+/**
+ * 渲染 compute preference 组：单一可用 profile → 静态文本；
+ * 两个及以上真实可用候选 → select（保存走受限 command，失败回滚）。
+ */
+function appendComputeGroup(container, entry, engineId, controller) {
+    const catalog = entry.catalog;
+    const prefs = entry.preferences;
+    const current = prefs?.compute_preference || catalog.current_compute_preference || "auto";
+    const mode = computeOptionsDisplayMode(catalog.compute_options);
+
+    const group = makeGroup(t("local_engine.config.compute_preference"));
+
+    if (mode === "static") {
+        // 单一可用选项：只读展示，避免制造"可以选择 CUDA"的错觉
+        const staticValue = document.createElement("span");
+        staticValue.className = "le-config-static";
+        staticValue.textContent = computeLabel(current);
+        group.appendChild(staticValue);
+        container.appendChild(group);
+        return;
+    }
+
+    const select = document.createElement("select");
+    select.className = "le-config-select";
+    for (const opt of catalog.compute_options) {
+        const option = document.createElement("option");
+        option.value = opt.preference;
+        option.textContent = computeLabel(opt.preference);
+        option.disabled = !opt.compatible;
+        if (opt.disabled_reason) option.title = opt.disabled_reason;
+        if (opt.preference === current) option.selected = true;
+        select.appendChild(option);
+    }
+    select.addEventListener("change", async (e) => {
+        const next = e.target.value;
+        const prev = current;
+        try {
+            await invoke("set_local_engine_preferences", {
+                engineId,
+                patch: {compute_preference: next},
+            });
+            if (controller?.isMounted()) {
+                controller.refreshStatus().catch(() => {});
+            }
+        } catch (err) {
+            console.error(`[${engineId}-hook] save compute preference failed:`, err);
+            select.value = prev;
+        }
+    });
+    group.appendChild(select);
+    container.appendChild(group);
+}
+
 // ── FunASR hook ───────────────────────────────────────────────────────────────
 
 /**
  * 注册 FunASR 受限 adapter hook。
  *
- * FunASR 的 compute preference 映射现有 SttConfig.local_engine.device。
- * 配置保存走闭合命令 `set_local_engine_preferences`，不通过泛型 `set_config`。
- * 失败时回滚 select 到 preferences 中的原值。
+ * 配置组：当前模型（只读）/ 计算设备 / 自动启动开关。
+ * 保存走闭合命令 `set_local_engine_preferences`，失败回滚。
  */
 function registerFunasrHook() {
     registerAdapterHook("funasr", {
-        /**
-         * 渲染 FunASR 专属配置区。
-         * 展示 compute preference 选择器 + auto_start 开关。
-         * 初始化读取 preferences（entry.preferences）。
-         */
         renderConfig(container, entry, controller) {
             if (!container) return;
             container.textContent = "";
-
             const catalog = entry.catalog;
             if (!catalog) return;
 
             const prefs = entry.preferences;
-            const currentCompute = prefs?.compute_preference || catalog.current_compute_preference || "cpu";
             const autoStart = prefs?.auto_start ?? false;
-            const requiresRebuild = prefs?.requires_rebuild === true;
 
-            appendConfigHeading(container, t("local_engine.config.runtime_policy"));
+            // 当前模型（只读）+ 待重启提示
+            appendCurrentModelGroup(container, entry);
 
-            // ── compute preference（0.22.6.1：单一可用选项时隐藏选择器）──
-            // FunASR descriptor 只声明 CPU profile——渲染只读展示而非 select，
-            // 避免制造"可以选择 CUDA"的错觉。
-            const computeRow = document.createElement("div");
-            computeRow.className = "le-config-row";
+            // 计算设备（FunASR descriptor 当前只声明 CPU → 静态文本）
+            appendComputeGroup(container, entry, "funasr", controller);
 
-            const computeLabel = document.createElement("label");
-            computeLabel.className = "le-config-label";
-            computeLabel.textContent = t("local_engine.config.compute_preference");
-            computeRow.appendChild(computeLabel);
-
-            const computeMode = computeOptionsDisplayMode(catalog.compute_options);
-            if (computeMode === "static") {
-                const staticValue = document.createElement("span");
-                staticValue.className = "le-config-static";
-                staticValue.textContent = t(
-                    `local_engine.compute.${currentCompute}`,
-                    currentCompute
-                );
-                computeRow.appendChild(staticValue);
-                container.appendChild(computeRow);
-            } else {
-                const select = document.createElement("select");
-                select.className = "le-config-select";
-
-                for (const opt of catalog.compute_options) {
-                    const option = document.createElement("option");
-                    option.value = opt.preference;
-                    option.textContent = t(`local_engine.compute.${opt.preference}`, opt.preference);
-                    option.disabled = !opt.compatible;
-                    if (opt.disabled_reason) {
-                        option.title = opt.disabled_reason;
-                    }
-                    if (opt.preference === currentCompute) {
-                        option.selected = true;
-                    }
-                    select.appendChild(option);
-                }
-
-                // 失败回滚：保存失败时恢复 select 原值
-                select.addEventListener("change", async (e) => {
-                    const newPref = e.target.value;
-                    const oldPref = currentCompute;
-                    try {
-                        const result = await invoke("set_local_engine_preferences", {
-                            engineId: "funasr",
-                            patch: {compute_preference: newPref},
-                        });
-                        // 如果需要重建，提示用户
-                        if (result?.requires_rebuild) {
-                            console.info("[funasr-hook] compute profile changed, needs rebuild");
-                        }
-                        // 刷新 status（environment 可能变为 needs_rebuild）
-                        if (controller?.isMounted()) {
-                            controller.refreshStatus().catch(() => {});
-                        }
-                    } catch (err) {
-                        console.error("[funasr-hook] save compute preference failed:", err);
-                        // 回滚 select
-                        select.value = oldPref;
-                    }
-                });
-
-                computeRow.appendChild(select);
-                container.appendChild(computeRow);
-            }
-
-            // ── auto_start 开关 ────────────────────────────────────────
-            const autoStartRow = document.createElement("div");
-            autoStartRow.className = "le-config-row";
-
-            const autoStartLabel = document.createElement("label");
-            autoStartLabel.className = "le-config-label";
-            autoStartLabel.textContent = t("local_engine.config.auto_start");
-            autoStartLabel.htmlFor = "le-funasr-auto-start";
-            autoStartRow.appendChild(autoStartLabel);
-
-            const autoStartControl = document.createElement("div");
-            autoStartControl.className = "le-config-control le-config-control-switch";
-
+            // 自动启动开关
+            const autoGroup = makeGroup(t("local_engine.config.auto_start"));
             const switchLabel = document.createElement("label");
             switchLabel.className = "le-switch";
+            switchLabel.title = t("local_engine.config.auto_start_hint");
 
-            const autoStartToggle = document.createElement("input");
-            autoStartToggle.type = "checkbox";
-            autoStartToggle.className = "le-switch-input";
-            autoStartToggle.checked = autoStart;
-            autoStartToggle.id = "le-funasr-auto-start";
+            const toggle = document.createElement("input");
+            toggle.type = "checkbox";
+            toggle.className = "le-switch-input";
+            toggle.checked = autoStart;
+            // checkbox 视觉隐藏（le-switch-input），用 aria-label 提供可访问名称
+            toggle.setAttribute("aria-label", t("local_engine.config.auto_start"));
 
-            const switchTrack = document.createElement("span");
-            switchTrack.className = "le-switch-track";
-            switchTrack.setAttribute("aria-hidden", "true");
-            switchLabel.appendChild(autoStartToggle);
-            switchLabel.appendChild(switchTrack);
+            const track = document.createElement("span");
+            track.className = "le-switch-track";
+            track.setAttribute("aria-hidden", "true");
 
-            autoStartToggle.addEventListener("change", async () => {
-                const newVal = autoStartToggle.checked;
+            switchLabel.appendChild(toggle);
+            switchLabel.appendChild(track);
+            autoGroup.appendChild(switchLabel);
+            container.appendChild(autoGroup);
+
+            toggle.addEventListener("change", async () => {
+                const next = toggle.checked;
                 try {
                     await invoke("set_local_engine_preferences", {
                         engineId: "funasr",
-                        patch: {auto_start: newVal},
+                        patch: {auto_start: next},
                     });
                 } catch (err) {
                     console.error("[funasr-hook] save auto_start failed:", err);
-                    // 回滚
-                    autoStartToggle.checked = !newVal;
+                    toggle.checked = !next;
                 }
             });
 
-            const autoStartHint = document.createElement("span");
-            autoStartHint.className = "le-config-hint";
-            autoStartHint.textContent = t("local_engine.config.auto_start_hint");
-
-            autoStartControl.appendChild(switchLabel);
-            autoStartControl.appendChild(autoStartHint);
-            autoStartRow.appendChild(autoStartControl);
-            container.appendChild(autoStartRow);
-
-            // ── requires_rebuild 提示 ──────────────────────────────────
-            if (requiresRebuild) {
-                const rebuildHint = document.createElement("div");
-                rebuildHint.className = "le-config-rebuild-hint";
-                rebuildHint.textContent = t("local_engine.config.requires_rebuild_hint");
-                container.appendChild(rebuildHint);
-            }
-
-            // ── 配置模型 vs 实际加载模型 ───────────────────────────────
-            renderModelConfigRow(container, entry, "funasr");
-        },
-
-        onComputePreferenceChange(engineId, preference) {
-            console.debug(`[funasr-hook] compute preference changed: ${engineId} → ${preference}`);
+            appendRebuildHint(container, prefs);
         },
     });
 }
@@ -199,42 +207,26 @@ function registerFunasrHook() {
 /**
  * 注册 PaddleOCR 受限 adapter hook。
  *
- * PaddleOCR 的 compute preference/lifecycle 映射 OcrConfig。
- * PaddleOCR 只显示后端 catalog 声明的 auto/cpu。
- * 配置保存走闭合命令 `set_local_engine_preferences`。
- * 失败回滚。
+ * 配置组：当前模型（只读）/ OCR 后端 / 计算设备 / 运行策略（生命周期）。
+ * 保存走闭合命令 `set_local_engine_preferences`，失败回滚。
  */
 function registerPaddleOcrHook() {
     registerAdapterHook("paddleocr", {
-        /**
-         * 渲染 PaddleOCR 专属配置区。
-         * 展示 catalog 声明的 compute options（auto/cpu）+ lifecycle 选择器。
-         * 初始化读取 preferences。
-         */
         renderConfig(container, entry, controller) {
             if (!container) return;
             container.textContent = "";
-
             const catalog = entry.catalog;
             if (!catalog) return;
 
             const prefs = entry.preferences;
-            const currentCompute = prefs?.compute_preference || catalog.current_compute_preference || "auto";
             const currentBackend = prefs?.ocr_backend || "windows";
             const currentLifecycle = prefs?.lifecycle || catalog.lifecycle || "on_demand";
-            const requiresRebuild = prefs?.requires_rebuild === true;
 
-            appendConfigHeading(container, t("local_engine.config.runtime_policy"));
+            // 当前模型（只读）+ 待重启提示
+            appendCurrentModelGroup(container, entry);
 
-            // ── OCR 路由后端 ───────────────────────────────────────────
-            const backendRow = document.createElement("div");
-            backendRow.className = "le-config-row";
-
-            const backendLabel = document.createElement("label");
-            backendLabel.className = "le-config-label";
-            backendLabel.textContent = t("local_engine.config.ocr_backend");
-            backendRow.appendChild(backendLabel);
-
+            // OCR 路由后端
+            const backendGroup = makeGroup(t("local_engine.config.ocr_backend"));
             const backendSelect = document.createElement("select");
             backendSelect.className = "le-config-select";
             for (const backend of ["windows", "paddleocr", "auto"]) {
@@ -256,184 +248,41 @@ function registerPaddleOcrHook() {
                     backendSelect.value = currentBackend;
                 }
             });
-            backendRow.appendChild(backendSelect);
-            container.appendChild(backendRow);
+            backendGroup.appendChild(backendSelect);
+            container.appendChild(backendGroup);
 
-            // ── compute preference 选择器 ──────────────────────────────
-            const computeRow = document.createElement("div");
-            computeRow.className = "le-config-row";
+            // 计算设备（catalog 声明 auto/cpu 双候选 → select）
+            appendComputeGroup(container, entry, "paddleocr", controller);
 
-            const computeLabel = document.createElement("label");
-            computeLabel.className = "le-config-label";
-            computeLabel.textContent = t("local_engine.config.compute_preference");
-            computeRow.appendChild(computeLabel);
-
-            const select = document.createElement("select");
-            select.className = "le-config-select";
-
-            for (const opt of catalog.compute_options) {
-                const option = document.createElement("option");
-                option.value = opt.preference;
-                option.textContent = t(`local_engine.compute.${opt.preference}`, opt.preference);
-                option.disabled = !opt.compatible;
-                if (opt.disabled_reason) {
-                    option.title = opt.disabled_reason;
-                }
-                if (opt.preference === currentCompute) {
-                    option.selected = true;
-                }
-                select.appendChild(option);
-            }
-
-            select.addEventListener("change", async (e) => {
-                const newPref = e.target.value;
-                const oldPref = currentCompute;
-                try {
-                    await invoke("set_local_engine_preferences", {
-                        engineId: "paddleocr",
-                        patch: {compute_preference: newPref},
-                    });
-                    if (controller?.isMounted()) {
-                        controller.refreshStatus().catch(() => {});
-                    }
-                } catch (err) {
-                    console.error("[paddleocr-hook] save compute preference failed:", err);
-                    select.value = oldPref;
-                }
-            });
-
-            computeRow.appendChild(select);
-            container.appendChild(computeRow);
-
-            // ── lifecycle 选择器 ───────────────────────────────────────
-            const lifecycleRow = document.createElement("div");
-            lifecycleRow.className = "le-config-row";
-
-            const lifecycleLabel = document.createElement("label");
-            lifecycleLabel.className = "le-config-label";
-            lifecycleLabel.textContent = t("local_engine.config.lifecycle");
-            lifecycleRow.appendChild(lifecycleLabel);
-
+            // 运行策略（生命周期）
+            const lifecycleGroup = makeGroup(t("local_engine.config.lifecycle"));
             const lifecycleSelect = document.createElement("select");
             lifecycleSelect.className = "le-config-select";
-
-            const lifecycleOptions = ["on_demand", "keep_running", "stop_after_use"];
-            for (const opt of lifecycleOptions) {
+            for (const opt of ["on_demand", "keep_running", "stop_after_use"]) {
                 const option = document.createElement("option");
                 option.value = opt;
                 option.textContent = t(`local_engine.lifecycle.${opt}`, opt);
-                if (currentLifecycle === opt) {
-                    option.selected = true;
-                }
+                if (currentLifecycle === opt) option.selected = true;
                 lifecycleSelect.appendChild(option);
             }
-
-            lifecycleSelect.addEventListener("change", async (e) => {
-                const newVal = e.target.value;
-                const oldVal = currentLifecycle;
+            lifecycleSelect.addEventListener("change", async (event) => {
+                const next = event.target.value;
                 try {
                     await invoke("set_local_engine_preferences", {
                         engineId: "paddleocr",
-                        patch: {lifecycle: newVal},
+                        patch: {lifecycle: next},
                     });
                 } catch (err) {
                     console.error("[paddleocr-hook] save lifecycle failed:", err);
-                    lifecycleSelect.value = oldVal;
+                    lifecycleSelect.value = currentLifecycle;
                 }
             });
+            lifecycleGroup.appendChild(lifecycleSelect);
+            container.appendChild(lifecycleGroup);
 
-            lifecycleRow.appendChild(lifecycleSelect);
-            container.appendChild(lifecycleRow);
-
-            // ── requires_rebuild 提示 ──────────────────────────────────
-            if (requiresRebuild) {
-                const rebuildHint = document.createElement("div");
-                rebuildHint.className = "le-config-rebuild-hint";
-                rebuildHint.textContent = t("local_engine.config.requires_rebuild_hint");
-                container.appendChild(rebuildHint);
-            }
-
-            // ── 配置模型 vs 实际加载模型 ───────────────────────────────
-            renderModelConfigRow(container, entry, "paddleocr");
-        },
-
-        onComputePreferenceChange(engineId, preference) {
-            console.debug(`[paddleocr-hook] compute preference changed: ${engineId} → ${preference}`);
+            appendRebuildHint(container, prefs);
         },
     });
-}
-
-// ── 配置模型 vs 实际加载模型 ──────────────────────────────────────────────────
-
-/**
- * 渲染"配置模型"与"实际加载模型"对比行。
- * 当 is_selected != is_active 时显示"待重启/未生效"提示。
- *
- * @param {HTMLElement} container
- * @param {Object} entry - EngineStateEntry
- * @param {string} engineId
- */
-function renderModelConfigRow(container, entry, engineId) {
-    const models = entry.models;
-    if (!models || models.length === 0) return;
-
-    // 找到 selected 和 active 模型
-    const selected = models.find((m) => m.is_selected);
-    const active = models.find((m) => m.is_active);
-
-    // 配置模型行
-    const configRow = document.createElement("div");
-    configRow.className = "le-model-config-row";
-
-    const configLabel = document.createElement("span");
-    configLabel.className = "le-info-label";
-    configLabel.textContent = t("local_engine.model.configured");
-    configRow.appendChild(configLabel);
-
-    const configValue = document.createElement("span");
-    configValue.className = "le-info-value";
-    configValue.textContent = selected?.display_name || selected?.model_id || "—";
-    configRow.appendChild(configValue);
-    container.appendChild(configRow);
-
-    // 实际加载模型行
-    const activeRow = document.createElement("div");
-    activeRow.className = "le-model-config-row";
-
-    const activeLabel = document.createElement("span");
-    activeLabel.className = "le-info-label";
-    activeLabel.textContent = t("local_engine.model.active");
-    activeRow.appendChild(activeLabel);
-
-    const activeValue = document.createElement("span");
-    activeValue.className = "le-info-value";
-    activeValue.textContent = active?.display_name || active?.model_id || "—";
-    activeRow.appendChild(activeValue);
-    container.appendChild(activeRow);
-
-    // 不一致提示
-    if (selected && active && selected.model_id !== active.model_id) {
-        const mismatch = document.createElement("div");
-        mismatch.className = "le-model-mismatch";
-        const icon = document.createElement("svg");
-        icon.setAttribute("class", "icon");
-        icon.setAttribute("aria-hidden", "true");
-        const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-        use.setAttribute("href", "#icon-triangle-alert");
-        icon.appendChild(use);
-        mismatch.appendChild(icon);
-        const text = document.createElement("span");
-        text.textContent = t("local_engine.model.mismatch_hint");
-        mismatch.appendChild(text);
-        container.appendChild(mismatch);
-    }
-}
-
-function appendConfigHeading(container, text) {
-    const heading = document.createElement("div");
-    heading.className = "le-config-heading";
-    heading.textContent = text;
-    container.appendChild(heading);
 }
 
 // ── 汇总注册入口 ──────────────────────────────────────────────────────────────

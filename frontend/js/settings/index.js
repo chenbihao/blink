@@ -27,7 +27,7 @@ import {initMcPTab} from "./tabs/mcp.js";
 import {initMcpServerSection} from "./tabs/mcp-server.js";
 import {createLocalEngineController} from "./tabs/engines/local-runtime.js";
 import {renderEngineCard} from "./tabs/engines/local-engine-card.js";
-import {getEngineIds} from "./tabs/engines/local-engine-state.js";
+import {computeRuntimeSummary} from "./tabs/engines/local-engine-summary.js";
 import {processDisplay, processClass} from "./tabs/engines/local-engine-process.js";
 import {statusClass} from "./tabs/engines/local-engine-card-utils.js";
 import {registerLocalEngineHooks, unregisterLocalEngineHooks} from "./tabs/engines/local-engine-hooks.js";
@@ -41,6 +41,10 @@ let _leController = null;
 let _leActive = false;
 let _cleanupModal = null;
 let _mountResolvers = []; // mount 完成 promise resolvers
+
+// 运行时底座拉取状态（loading / ok / error）——foundation 摘要加载失败
+// 必须反馈到顶部摘要行，不能只藏在折叠区里
+let _leFoundationStatus = "loading";
 
 /**
  * mount 本地引擎运行时 controller。
@@ -66,8 +70,9 @@ async function mountLocalRuntime() {
     _leController = createLocalEngineController({
         onStateChange: (state) => {
             renderLocalEngineCards(container, state);
-            // 同时刷新公共缓存区
+            // 同时刷新公共缓存区与顶部运行时摘要
             renderSharedStorage(state);
+            renderRuntimeSummary(state);
         },
         onError: (err) => {
             console.error("[local-engine] error:", err);
@@ -122,8 +127,12 @@ async function mountLocalRuntime() {
             if (emptyRegion) emptyRegion.hidden = false;
         }
 
-        // 0.22.6: 初始化运行时底座（只读）
-        initFoundation();
+    // 0.22.6: 初始化运行时底座（只读）与「运行时与缓存」折叠区
+    initFoundation();
+    initRuntimeDetailsToggle();
+
+    // 初始渲染顶部摘要（loading 态）
+    renderRuntimeSummary(_leController.getState());
 
         // resolve mount resolvers
         for (const resolve of _mountResolvers) resolve();
@@ -169,12 +178,49 @@ function disposeLocalRuntime() {
     if (errorRegion) errorRegion.hidden = true;
     if (emptyRegion) emptyRegion.hidden = true;
 
-    // 0.22.6: 清空底座
+    // 0.22.6: 清空底座与运行时摘要
     const foundationBody = document.getElementById("le-foundation-body");
     if (foundationBody) foundationBody.textContent = "";
+    _leFoundationStatus = "loading";
+    renderRuntimeSummary(null);
 }
 
-// ── 0.22.6: 运行时底座（只读）─────────────────────────────────────────────
+// ── 0.22.6: 运行时底座（只读）+ 运行时摘要（中密度重设计）────────────────
+
+/**
+ * 初始化「运行时与缓存」折叠区开关。
+ * 运行时底座与公共缓存默认折叠，不再占据引擎卡片之前的纵向空间。
+ */
+function initRuntimeDetailsToggle() {
+    const toggle = document.getElementById("le-runtime-details-toggle");
+    const details = document.getElementById("le-runtime-details");
+    if (!toggle || !details) return;
+    if (toggle.dataset.leWired) return;
+    toggle.dataset.leWired = "1";
+    toggle.addEventListener("click", () => {
+        const willExpand = details.hidden;
+        details.hidden = !willExpand;
+        toggle.setAttribute("aria-expanded", String(willExpand));
+    });
+}
+
+/**
+ * 渲染页面顶部运行时摘要行（运行正常度 · 引擎数 · 运行数 · 总占用）。
+ * foundation 拉取失败时显示明确反馈，不静默。
+ * @param {Map|null} state - engine_id → EngineStateEntry
+ */
+function renderRuntimeSummary(state) {
+    const el = document.getElementById("le-runtime-summary");
+    if (!el) return;
+    const summary = computeRuntimeSummary(state || new Map(), {
+        foundationError: _leFoundationStatus === "error",
+    }, t);
+    const cls = `le-runtime-summary le-tone-${summary.tone}`;
+    if (el.dataset.sig === summary.text) return;
+    el.dataset.sig = summary.text;
+    el.className = cls;
+    el.textContent = summary.text;
+}
 
 /**
  * 初始化运行时底座区域。
@@ -210,6 +256,7 @@ function initFoundation() {
 
 /**
  * 刷新运行时底座状态。
+ * 拉取结果（含失败）同步到顶部运行时摘要行。
  */
 async function refreshFoundation() {
     if (!_leController || _leController.isDisposed()) return;
@@ -226,14 +273,19 @@ async function refreshFoundation() {
 
     try {
         const foundation = await _leController.getFoundationStatus();
+        if (_leController.isDisposed()) return;
+        _leFoundationStatus = "ok";
         renderFoundationBody(body, foundation);
     } catch (e) {
+        if (_leController.isDisposed()) return;
+        _leFoundationStatus = "error";
         body.textContent = "";
         const errEl = document.createElement("div");
         errEl.className = "le-foundation-no-data";
         errEl.textContent = e?.message || String(e);
         body.appendChild(errEl);
     }
+    renderRuntimeSummary(_leController.getState());
 }
 
 /**
@@ -560,8 +612,9 @@ async function init() {
         // 语言切换时刷新已 mount 的卡片文案
         onLangChange(() => {
             if (_leController && _leController.isMounted()) {
-                // 刷新底座文案
+                // 刷新底座文案 + 顶部运行时摘要
                 refreshFoundation();
+                renderRuntimeSummary(_leController.getState());
 
                 const container = document.getElementById("le-cards-container");
                 if (container) {

@@ -63,19 +63,6 @@ export function modelRowSignature(model, effectiveState) {
 // ── 模型列表渲染 ─────────────────────────────────────────────────────────────
 
 /**
- * @param {Object} entry - EngineStateEntry
- * @param {Object} controller
- * @param {Object} i18n
- * @returns {HTMLElement}
- */
-export function renderModelList(entry, controller, i18n) {
-    const div = document.createElement("div");
-    div.className = "le-model-list";
-    updateModelList(div, entry, controller, i18n);
-    return div;
-}
-
-/**
  * @param {HTMLElement} container
  * @param {Object} entry
  * @param {Object} controller

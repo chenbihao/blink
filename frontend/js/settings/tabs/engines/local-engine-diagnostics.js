@@ -4,7 +4,7 @@
  * - 诊断是快照：面板内提供"重新诊断"按钮，异步回流校验 requestId。
  * - orphan 恢复：后端 DTO { present, actionable, reason }，前端只检查
  *   actionable 决定是否显示停止入口，不拼接 process/service 推断。
- * - 确认模态与通知只用 CSS class，不写 style.cssText、不硬编码颜色。
+ * - 确认模态与通知只用 CSS class，不写 inline style、不硬编码颜色。
  * - 不使用原生 confirm()/alert()。
  *
  * @module local-engine-diagnostics

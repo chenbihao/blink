@@ -46,7 +46,6 @@ export const MAX_LOG_LINES = 500;
  * @property {LogEntry[]} logs - bounded 实时日志数组
  * @property {string|null} currentInstanceId - 当前 instance id（用于隔离日志）
  * @property {PendingAction|null} pendingAction - 用户触发的待完成操作
- * @property {boolean} logAutoExpand - 一次性标志：要求 renderer 自动展开日志区
  */
 
 /**
@@ -89,8 +88,6 @@ export function createInitialEntry() {
         // 0.22.6: 模型级 pending action（按 model_id 索引）
         // Map<model_id, {kind, operationId, timestamp}>
         pendingModelActions: null,
-        // 0.22.6: 一次性标志——renderer 展开后由 DOM 侧记录 opId 防重复
-        logAutoExpand: false,
     };
 }
 
@@ -196,22 +193,7 @@ export function mergeStatus(state, statusDto) {
     }
 
     // 同 epoch + 更大 revision → 接受
-    // 检测后端推送的新 operation → 设置自动展开标志（DOM 侧按 opId 幂等）
-    let logAutoExpand = entry.logAutoExpand;
-    const newOp = statusDto.status?.operation;
-    if (newOp && newOp.operation_id
-        && newOp.kind !== "idle"
-        && !["completed", "cancelled", "failed"].includes(newOp.stage)) {
-        logAutoExpand = true;
-    }
-
-    const newEntry = {
-        ...entry,
-        status: statusDto,
-        logAutoExpand,
-    };
-
-    return setEntry(state, engineId, newEntry);
+    return setEntry(state, engineId, {...entry, status: statusDto});
 }
 
 /**
@@ -386,10 +368,6 @@ export function setStorage(state, storageDto) {
  * operation action/result 必须绑定 operation_id。
  * 迟到 completion（旧 operation_id）不覆盖新 operation。
  *
- * 当新的 operation 开始时（action 非 null 且 operationId 与之前不同），
- * 设置 `logAutoExpand` 标志——renderer 消费时自动展开日志区。
- * 只对预期产生有用日志的操作展开（install/repair/start/stop/cleanup）。
- *
  * @param {Map<string, EngineStateEntry>} state
  * @param {string} engineId
  * @param {{kind: string, operationId: string}|null} action
@@ -405,19 +383,7 @@ export function setPendingAction(state, engineId, action) {
         timestamp: Date.now(),
     } : null;
 
-    // 新 operation 出现 → 设置自动展开标志
-    // install/repair/start/stop/cleanup 预期产生有用日志
-    // cancel 和 null（清除）不展开
-    let logAutoExpand = entry.logAutoExpand;
-    if (action && action.operationId
-        && ["install", "repair", "start", "stop", "cleanup"].includes(action.kind)) {
-        logAutoExpand = true;
-    } else if (action === null) {
-        // 清除操作 → 重置标志（防止操作完成后仍保持展开状态）
-        logAutoExpand = false;
-    }
-
-    return setEntry(state, engineId, {...entry, pendingAction, logAutoExpand});
+    return setEntry(state, engineId, {...entry, pendingAction});
 }
 
 /**
@@ -464,8 +430,6 @@ export function setPreferences(state, engineId, preferences) {
 /**
  * 设置模型级 pending action（按 model_id 索引）。
  *
- * 模型安装/修复操作开始时设置 `logAutoExpand` 标志。
- *
  * @param {Map<string, EngineStateEntry>} state
  * @param {string} engineId
  * @param {string} modelId
@@ -477,8 +441,6 @@ export function setPendingModelAction(state, engineId, modelId, action) {
     const entry = state.get(engineId) || createInitialEntry();
     const actions = new Map(entry.pendingModelActions || []);
 
-    let logAutoExpand = entry.logAutoExpand;
-
     if (action === null) {
         actions.delete(modelId);
     } else {
@@ -487,14 +449,9 @@ export function setPendingModelAction(state, engineId, modelId, action) {
             operationId: action.operationId,
             timestamp: Date.now(),
         });
-        // 模型安装/修复操作开始时自动展开日志
-        if (action.operationId
-            && ["install", "repair"].includes(action.kind)) {
-            logAutoExpand = true;
-        }
     }
 
-    return setEntry(state, engineId, {...entry, pendingModelActions: actions, logAutoExpand});
+    return setEntry(state, engineId, {...entry, pendingModelActions: actions});
 }
 
 /**

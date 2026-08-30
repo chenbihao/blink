@@ -1,6 +1,8 @@
-/* ── 本地模型运行时 view（0.22.5 Phase 4）──────────────────────────────────
+/* ── 本地模型运行时 view（中密度纵向重设计）────────────────────────────────
    scope: #engines .le-*
-   与 settings-voice.css 互不依赖；可复用样式从 voice CSS 迁移但改为 le- scope。
+   信息架构：顶部运行时摘要 + 「运行时与缓存」折叠区 + 全宽引擎卡片上下排列。
+   卡片默认态约 200-240px：头部（身份/综合摘要/唯一主操作）+ 关键状态行 +
+   直接配置区 + 反馈槽 + 工具栏；日志/模型列表/维护/诊断全部按需展开。
    颜色全部使用主题 token；中文 font-style: normal。 ──────────────────────── */
 
 /* ── section heading / desc ────────────────────────────────────────────────── */
@@ -13,12 +15,6 @@
     padding-top: 0.75rem;
     border-top: 1px solid var(--surface);
     font-style: normal;
-}
-
-#engines .section-heading:first-of-type {
-    border-top: none;
-    margin-top: 0.5rem;
-    padding-top: 0;
 }
 
 #engines .section-desc {
@@ -89,202 +85,196 @@
     color: var(--text-dim);
 }
 
+/* ── 运行时头部（标题 + 摘要行 + 「运行时与缓存」入口） ───────────────────── */
+
+#engines .le-runtime-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+#engines .le-runtime-head-info {
+    min-width: 0;
+}
+
+#engines .le-runtime-summary {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    font-style: normal;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 1.5rem;
+    flex-wrap: wrap;
+}
+
+/* 顶部摘要语气色（正常克制，需要关注才用警示色） */
+#engines .le-runtime-summary.le-tone-error { color: var(--red); }
+#engines .le-runtime-summary.le-tone-warn { color: var(--warning); }
+#engines .le-runtime-summary.le-tone-muted,
+#engines .le-runtime-summary.le-tone-neutral { color: var(--text-dim); }
+#engines .le-runtime-summary.le-tone-ok { color: var(--text-sub); }
+
+#engines .le-runtime-details-toggle {
+    flex-shrink: 0;
+    font-style: normal;
+    white-space: nowrap;
+}
+
+#engines .le-runtime-details-toggle .le-disclosure-icon {
+    transition: transform var(--transition-fast, 0.1s);
+}
+
+#engines .le-runtime-details-toggle[aria-expanded="true"] .le-disclosure-icon {
+    transform: rotate(180deg);
+}
+
+/* 运行时底座 + 公共缓存折叠区（默认隐藏，不占首屏纵向空间） */
+#engines .le-runtime-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+#engines .le-runtime-details[hidden] {
+    display: none;
+}
+
 /* ── engine cards container ─────────────────────────────────────────────────── */
 
 #engines .le-cards-container {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 1rem;
     margin-bottom: 1rem;
 }
 
-/* ── engine card (le-card) ──────────────────────────────────────────────────── */
-/* 继承 extension-card 布局，补充 le- 专属样式 */
+/* ── engine card (le-card)：全宽，上下排列，共用 renderer ──────────────────── */
 
 #engines .le-card {
-    overflow: hidden;
+    margin-bottom: 0;
 }
 
-#engines .le-card-header {
-    /* extension-header 已提供 */
+/* ── 卡片头部：结构与视觉完全复用 extension-header / info / icon ─────────── */
+
+#engines .le-card-cap {
+    font-size: var(--text-xs);
+    font-weight: var(--weight-normal);
+    color: var(--text-dim);
+    font-style: normal;
 }
 
-#engines .le-card-badges {
+/* 综合摘要：状态点 + 文本（正常克制，异常/忙碌才上色） */
+#engines .le-card-summary {
+    min-width: 0;
+    margin: 0;
     display: flex;
-    gap: 0.375rem;
-    flex-shrink: 0;
+    align-items: center;
+    gap: 0.5rem;
+    font-style: normal;
     flex-wrap: wrap;
-    justify-content: flex-end;
 }
 
-#engines .le-badge {
+#engines .le-summary-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex-shrink: 0;
+}
+
+#engines .le-tone-ok .le-summary-dot { background: var(--green); }
+#engines .le-tone-busy .le-summary-dot { background: var(--accent); }
+#engines .le-tone-error .le-summary-dot { background: var(--red); }
+#engines .le-tone-warn .le-summary-dot { background: var(--warning); }
+
+#engines .le-card-summary.le-tone-error { color: var(--red); }
+#engines .le-card-summary.le-tone-warn { color: var(--warning); }
+#engines .le-card-summary.le-tone-muted,
+#engines .le-card-summary.le-tone-neutral { color: var(--text-sub); }
+
+#engines .le-card-primary {
+    flex-shrink: 0;
+    display: flex;
+}
+
+#engines .le-primary-btn {
+    white-space: nowrap;
+}
+
+/* ── 卡片主体 ─────────────────────────────────────────────────────────────── */
+
+/* ── 关键状态行：环境 / 模型 / 服务 / 策略 ─────────────────────────────────── */
+
+#engines .le-keyline {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.375rem 1.25rem;
+    margin-bottom: 0.625rem;
+}
+
+#engines .le-keyline-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-width: 0;
+}
+
+#engines .le-keyline-label {
     font-size: var(--text-xs);
-    padding: 0.125rem 0.5rem;
-    border-radius: var(--radius-sm, 4px);
+    color: var(--text-dim);
     font-style: normal;
 }
 
-#engines .le-badge-cap {
-    background: var(--accent-bg);
-    color: var(--accent);
+#engines .le-keyline-value {
+    font-size: var(--text-xs);
+    padding: 0.0625rem 0.5rem;
+    font-style: normal;
+    white-space: nowrap;
 }
 
-#engines .le-badge-lifecycle {
+/* 策略 chip：非状态徽章，用弱底色区分 */
+#engines .le-keyline-value.le-keyline-policy {
     background: var(--surface-2);
     color: var(--text-sub);
 }
 
-/* ── status grid ────────────────────────────────────────────────────────────── */
-
-#engines .le-status-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.625rem 1.25rem;
-    margin-bottom: 1rem;
-    padding: 0.75rem;
-    border-radius: var(--radius-md, 8px);
-    background: var(--surface-2);
-}
-
-#engines .le-status-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-#engines .le-status-label {
-    font-size: var(--text-sm);
-    color: var(--text-sub);
-    font-style: normal;
-}
-
-#engines .le-status-value {
-    font-size: var(--text-sm);
-    font-style: normal;
-}
-
-/* ── operation info ────────────────────────────────────────────────────────── */
-/* 稳定槽位：固定 min-height 防止状态变化造成卡片高度跳动 */
-
-#engines .le-operation-info {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0;
-    min-height: 2rem;
-    font-size: var(--text-sm);
-    color: var(--text-sub);
-    font-style: normal;
-}
-
-#engines .le-op-kind {
-    font-weight: 600;
-    color: var(--accent);
-}
-
-#engines .le-op-stage {
-    color: var(--text-dim);
-}
-
-#engines .le-op-id {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    margin-left: auto;
-}
-
-/* ── backend info ───────────────────────────────────────────────────────────── */
-
-#engines .le-backend-info {
-    padding: 0.5rem 0;
-    border-top: 1px solid var(--surface);
-}
-
-#engines .le-backend-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.25rem;
-    font-size: var(--text-sm);
-    font-style: normal;
-}
-
-#engines .le-backend-fallback {
+#engines .status-badge.status-warning {
+    background: var(--warning-bg);
     color: var(--warning);
-    font-size: var(--text-xs);
-    font-style: normal;
 }
 
-#engines .le-info-label {
-    color: var(--text-dim);
-    min-width: 5rem;
-    font-style: normal;
-}
-
-#engines .le-info-value {
-    color: var(--text-sub);
-    font-style: normal;
-}
-
-/* ── storage info ───────────────────────────────────────────────────────────── */
-
-#engines .le-storage-info {
-    padding: 0.5rem 0;
-}
-
-#engines .le-storage-estimated,
-#engines .le-storage-actual {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.25rem;
-    font-size: var(--text-sm);
-    font-style: normal;
-}
-
-#engines .le-storage-releasable {
-    color: var(--warning);
-    font-size: var(--text-xs);
-    font-style: normal;
-}
-
-/* ── engine config (adapter hook 区域) ──────────────────────────────────────── */
-/* 与 backend-info / storage-info 共用 label-value 视觉语言；
-   select 复用设置页统一下拉外观（surface 底 + 自定义箭头），不裸用浏览器默认。 */
+/* ── 直接配置区（adapter hook 受限渲染，横向换行的紧凑组） ─────────────────── */
 
 #engines .le-card-config {
-    margin: 0.75rem 0;
-    padding: 0.75rem;
-    border: 1px solid var(--surface);
-    border-radius: var(--radius-md, 8px);
-    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
     display: flex;
-    flex-direction: column;
-    gap: 0.625rem;
-}
-
-#engines .le-config-heading {
-    color: var(--text);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    padding-bottom: 0.5rem;
-    margin-bottom: 0.125rem;
-    border-bottom: 1px solid var(--surface);
-    font-style: normal;
-}
-
-#engines .le-config-row {
-    display: grid;
-    grid-template-columns: minmax(7rem, var(--settings-label-width)) minmax(0, 1fr);
     align-items: center;
-    gap: 0.75rem;
-    min-height: 2rem;
-    font-size: var(--text-sm);
-    font-style: normal;
+    flex-wrap: wrap;
+    gap: 0.375rem 1.5rem;
+    padding: 0.375rem 0;
+    margin-bottom: 0.375rem;
+}
+
+#engines .le-card-config[hidden] {
+    display: none;
+}
+
+#engines .le-config-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
 }
 
 #engines .le-config-label {
-    color: var(--text-sub);
-    font-size: var(--text-sm);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    white-space: nowrap;
     font-style: normal;
 }
 
@@ -293,11 +283,11 @@
     color: var(--text);
     border: 1px solid var(--surface-2);
     border-radius: var(--radius-sm, 4px);
-    padding: 0.25rem 1.5rem 0.25rem 0.5rem;
+    padding: 0.1875rem 1.5rem 0.1875rem 0.5rem;
     font-size: var(--text-sm);
-    height: 32px;
-    width: min(100%, 15rem);
-    min-width: 140px;
+    height: 28px;
+    max-width: 100%;
+    min-width: 110px;
     -webkit-appearance: none;
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236c7086'/%3E%3C/svg%3E");
@@ -323,25 +313,152 @@
     cursor: not-allowed;
 }
 
-/* 单一可用 compute 选项的只读展示（0.22.6.1：隐藏选择器，避免可选错觉） */
+/* 只读静态值（单一 compute profile / 当前模型名） */
 #engines .le-config-static {
     color: var(--text);
     font-size: var(--text-sm);
     font-style: normal;
-    height: 32px;
     display: inline-flex;
     align-items: center;
-    padding: 0 0.25rem;
+    min-height: 28px;
 }
 
-/* ── actions ────────────────────────────────────────────────────────────────── */
+/* selected ≠ active 待重启提示 */
+#engines .le-config-mismatch {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    color: var(--warning);
+    font-size: var(--text-xs);
+    font-style: normal;
+}
 
-#engines .le-card-actions {
+#engines .le-config-rebuild-hint {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: var(--text-xs);
+    font-style: normal;
+}
+
+/* ── 反馈槽：operation 阶段 / 错误摘要 / 待重启 / 空闲说明（固定槽位防跳动）── */
+
+#engines .le-feedback {
     display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+    min-height: 2.125rem;
+    padding: 0.375rem 0.625rem;
+    border-radius: var(--radius-sm, 4px);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    background: var(--surface-2);
+    font-style: normal;
+    margin-bottom: 0.625rem;
+}
+
+#engines .le-feedback-busy {
+    color: var(--text-sub);
+}
+
+#engines .le-feedback-busy::before {
+    content: "";
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    margin-right: 0.5rem;
+    border-radius: 50%;
+    background: var(--accent);
+    vertical-align: baseline;
+    animation: le-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes le-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+#engines .le-feedback-ok {
+    background: transparent;
+    color: var(--text-dim);
+}
+
+#engines .le-feedback-muted {
+    background: transparent;
+    color: var(--text-dim);
+}
+
+#engines .le-feedback-error {
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+    color: var(--red);
+}
+
+#engines .le-feedback-warn {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    color: var(--warning);
+}
+
+#engines .le-feedback-text {
+    word-break: break-word;
+}
+
+/* 原始错误详情折叠（textContent 渲染，可拖选复制） */
+#engines .le-feedback-detail {
+    font-size: var(--text-xs);
+    width: 100%;
+}
+
+#engines .le-feedback-detail summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-style: normal;
+    user-select: none;
+}
+
+#engines .le-feedback-detail pre {
+    margin-top: 0.25rem;
+    padding: 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--bg-deep);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-style: normal;
+    overflow-x: auto;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+#engines .le-error-copy {
+    margin-top: 0.25rem;
+}
+
+/* ── 底部工具栏：二级操作（管理模型/日志/诊断/打开目录）+ 维护 ─────────────── */
+
+#engines .le-card-tools {
+    display: flex;
+    align-items: center;
     flex-wrap: wrap;
     gap: 0.5rem;
-    padding: 0.75rem 16px 1rem;
-    min-height: 2.5rem;
+    padding-top: 0.625rem;
+    border-top: 1px solid var(--surface);
+}
+
+#engines .le-tools-spacer {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 #engines .le-action-btn {
@@ -358,67 +475,75 @@
     flex-shrink: 0;
 }
 
-/* ── error area ─────────────────────────────────────────────────────────────── */
-/* 稳定槽位：固定 min-height */
+#engines .le-disclosure-icon {
+    transition: transform var(--transition-fast, 0.1s);
+}
 
-#engines .le-card-error {
-    padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-sm, 4px);
-    background: var(--red-bg);
-    border: 1px solid var(--red-border);
-    min-height: 2rem;
+#engines .le-models-toggle[aria-expanded="true"] .le-disclosure-icon,
+#engines .le-maintenance-toggle[aria-expanded="true"] .le-disclosure-icon,
+#engines .le-diagnostic-toggle[aria-expanded="true"] .le-disclosure-icon {
+    transform: rotate(180deg);
+}
+
+/* ── 维护面板（默认折叠：修复环境 / 清理引擎缓存 / 占用统计） ─────────────── */
+
+#engines .le-maintenance {
+    padding: 0.75rem 16px 1rem;
+    border-top: 1px solid var(--surface);
+    background: var(--bg);
+}
+
+#engines .le-maintenance[hidden] {
+    display: none;
+}
+
+#engines .le-maintenance-hint {
+    margin: 0 0 0.5rem;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     font-style: normal;
 }
 
-#engines .le-error-main {
+#engines .le-maintenance-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+/* 破坏性/清理类操作与普通操作视觉区分 */
+#engines .le-btn-danger {
     color: var(--red);
-    font-size: var(--text-sm);
-    font-style: normal;
+    border-color: var(--red-border);
 }
 
-#engines .le-error-hint {
-    color: var(--text-sub);
+#engines .le-btn-danger:hover:not(:disabled) {
+    background: var(--red-bg);
+}
+
+#engines .le-maintenance-storage {
     font-size: var(--text-xs);
-    margin-top: 0.25rem;
-    font-style: normal;
-}
-
-#engines .le-error-detail {
-    margin-top: 0.5rem;
-    font-size: var(--text-xs);
-    font-style: normal;
-}
-
-#engines .le-error-detail summary {
-    cursor: pointer;
     color: var(--text-dim);
     font-style: normal;
+    user-select: text;
+    -webkit-user-select: text;
 }
 
-#engines .le-error-detail pre {
-    margin-top: 0.25rem;
-    padding: 0.5rem;
-    border-radius: var(--radius-sm, 4px);
-    background: var(--bg-deep);
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-    white-space: pre-wrap;
-    word-break: break-all;
-    font-style: normal;
-    overflow-x: auto;
-}
+/* ── 折叠层显隐兜底（flex/grid 布局会覆盖 [hidden] 默认行为） ───────────────── */
 
-#engines .le-error-copy {
-    margin-top: 0.25rem;
+#engines .le-model-list[hidden],
+#engines .le-card-log[hidden],
+#engines .le-diagnostic-inline[hidden] {
+    display: none;
 }
 
 /* ── log area ───────────────────────────────────────────────────────────────── */
 
 #engines .le-card-log {
-    margin-top: 0.5rem;
-    border-radius: var(--radius-sm, 4px);
+    margin: 0;
+    border-top: 1px solid var(--surface);
     background: var(--bg-deep);
-    border: 1px solid var(--surface);
     overflow: hidden;
 }
 
@@ -438,12 +563,6 @@
     font-style: normal;
 }
 
-#engines .le-log-instance {
-    color: var(--text-dim);
-    margin-right: auto;
-    font-style: normal;
-}
-
 #engines .le-log-list {
     max-height: 240px;
     overflow-y: auto;
@@ -451,109 +570,6 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     scroll-behavior: smooth;
-    user-select: text;
-    -webkit-user-select: text;
-}
-
-#engines .le-card-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.75rem 0 0;
-    margin-top: 0.5rem;
-    border-top: 1px solid var(--surface);
-}
-
-#engines .le-diagnostic-toggle .le-disclosure-icon {
-    margin-left: 0.125rem;
-    transition: transform var(--transition-fast, 0.1s);
-}
-
-#engines .le-diagnostic-toggle[aria-expanded="true"] .le-disclosure-icon {
-    transform: rotate(180deg);
-}
-
-#engines .le-config-control-switch {
-    display: flex;
-    align-items: center;
-    gap: 0.625rem;
-    min-width: 0;
-}
-
-#engines .le-config-hint {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-    line-height: 1.35;
-    font-style: normal;
-}
-
-#engines .le-switch {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-    cursor: pointer;
-}
-
-#engines .le-switch-input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
-}
-
-#engines .le-switch-track {
-    position: relative;
-    width: 2.25rem;
-    height: 1.25rem;
-    border-radius: 999px;
-    background: var(--surface);
-    border: 1px solid var(--text-faint);
-    transition: background var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
-}
-
-#engines .le-switch-track::after {
-    content: "";
-    position: absolute;
-    width: 0.875rem;
-    height: 0.875rem;
-    top: 0.125rem;
-    left: 0.125rem;
-    border-radius: 50%;
-    background: var(--text-sub);
-    transition: transform var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
-}
-
-#engines .le-switch-input:checked + .le-switch-track {
-    background: var(--accent-bg);
-    border-color: var(--accent);
-}
-
-#engines .le-switch-input:checked + .le-switch-track::after {
-    background: var(--accent);
-    transform: translateX(1rem);
-}
-
-#engines .le-switch-input:focus-visible + .le-switch-track {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-}
-
-#engines .le-config-rebuild-hint {
-    padding: 0.5rem 0.625rem;
-    border-radius: var(--radius-sm, 4px);
-    background: var(--accent-bg);
-    border: 1px solid var(--accent);
-    color: var(--accent);
-    font-size: var(--text-xs);
-    line-height: 1.4;
-    font-style: normal;
-}
-
-/* 诊断与错误详情属于排障文本，必须支持拖选复制。 */
-#engines .le-diagnostic-inline,
-#engines .le-diagnostic-inline .le-info-value,
-#engines .le-error-detail pre {
     user-select: text;
     -webkit-user-select: text;
 }
@@ -608,6 +624,75 @@
     font-style: normal;
 }
 
+/* ── config 区开关（自动启动） ─────────────────────────────────────────────── */
+
+#engines .le-switch {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+#engines .le-switch-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+#engines .le-switch-track {
+    position: relative;
+    width: 2rem;
+    height: 1.125rem;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--text-faint);
+    transition: background var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
+}
+
+#engines .le-switch-track::after {
+    content: "";
+    position: absolute;
+    width: 0.8125rem;
+    height: 0.8125rem;
+    top: 0.125rem;
+    left: 0.125rem;
+    border-radius: 50%;
+    background: var(--text-sub);
+    transition: transform var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
+}
+
+#engines .le-switch-input:checked + .le-switch-track {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+}
+
+#engines .le-switch-input:checked + .le-switch-track::after {
+    background: var(--accent);
+    transform: translateX(0.875rem);
+}
+
+#engines .le-switch-input:focus-visible + .le-switch-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+#engines .le-config-hint {
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.35;
+    font-style: normal;
+}
+
+/* 诊断与错误详情属于排障文本，必须支持拖选复制。 */
+#engines .le-diagnostic-inline,
+#engines .le-diagnostic-inline .le-info-value,
+#engines .le-feedback-detail pre {
+    user-select: text;
+    -webkit-user-select: text;
+}
+
 /* ── shared storage ─────────────────────────────────────────────────────────── */
 
 #engines .le-shared-storage {
@@ -615,7 +700,7 @@
     border-radius: var(--radius-md, 8px);
     background: var(--surface-2);
     border: 1px solid var(--surface);
-    margin-bottom: 1rem;
+    margin-bottom: 0;
 }
 
 #engines .le-shared-storage-title {
@@ -641,6 +726,16 @@
 }
 
 #engines .le-shared-cleanup-btn {
+    font-style: normal;
+}
+
+#engines .le-shared-target {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
     font-style: normal;
 }
 
@@ -829,20 +924,6 @@
     font-style: normal;
 }
 
-/* ── shared storage target row ──────────────────────────────────────────────── */
-
-#engines .le-shared-target {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    font-style: normal;
-}
-
-/* ── log modal 已移除（卡片内日志组件是唯一日志入口）── */
-
 /* ── voice page runtime link card ──────────────────────────────────────────── */
 
 #voice .voice-runtime-link-card {
@@ -891,11 +972,9 @@
     flex-shrink: 0;
 }
 
-/* ── runtime foundation (0.22.6) ────────────────────────────────────────────
-   默认折叠的只读面板，展示 uv/Python/缓存/根目录等底座信息。 */
+/* ── runtime foundation (0.22.6，折叠在「运行时与缓存」内) ──────────────────── */
 
 #engines .le-foundation {
-    margin-bottom: 1rem;
     border: 1px solid var(--surface);
     border-radius: var(--radius-md, 8px);
     background: var(--surface-2);
@@ -971,16 +1050,27 @@
     font-style: normal;
 }
 
-/* ── diagnostic region (0.22.6) ────────────────────────────────────────────── */
+#engines .le-foundation-engine-name {
+    min-width: 5em;
+    font-weight: 600;
+    color: var(--text);
+    font-style: normal;
+}
+
+#engines .le-foundation-engine-status {
+    display: inline-flex;
+    gap: 0.375rem;
+    font-style: normal;
+}
+
+/* ── diagnostic inline panel (0.22.6，诊断按钮展开) ────────────────────────── */
 
 #engines .le-diagnostic-inline {
     width: 100%;
     box-sizing: border-box;
-    margin-top: 0.75rem;
-    padding: 0.875rem;
-    border-radius: var(--radius-md, 8px);
+    padding: 0.875rem 16px 1rem;
     background: var(--bg-deep);
-    border: 1px solid var(--surface);
+    border-top: 1px solid var(--surface);
     font-style: normal;
 }
 
@@ -1013,36 +1103,6 @@
     font-style: normal;
 }
 
-#engines .le-diagnostic-region {
-    margin-bottom: 1rem;
-    border: 1px solid var(--surface);
-    border-radius: var(--radius-md, 8px);
-    background: var(--surface-2);
-    padding: 1rem 1.25rem;
-    font-style: normal;
-}
-
-#engines .le-diagnostic-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.75rem;
-}
-
-#engines .le-diagnostic-title {
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: var(--text);
-    margin: 0;
-    font-style: normal;
-}
-
-#engines .le-diagnostic-actions {
-    display: flex;
-    gap: 0.5rem;
-}
-
 #engines .le-diagnostic-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1055,6 +1115,17 @@
     align-items: center;
     gap: 0.5rem;
     font-size: var(--text-sm);
+    font-style: normal;
+}
+
+#engines .le-info-label {
+    color: var(--text-dim);
+    min-width: 5rem;
+    font-style: normal;
+}
+
+#engines .le-info-value {
+    color: var(--text-sub);
     font-style: normal;
 }
 
@@ -1096,10 +1167,10 @@
     font-style: normal;
 }
 
-/* ── per-engine model list (0.22.6) ────────────────────────────────────────── */
+/* ── per-engine model list (0.22.6，「管理模型」展开) ───────────────────────── */
 
 #engines .le-model-list {
-    padding: 0.5rem 0;
+    padding: 0.625rem 0 0.25rem;
     border-top: 1px solid var(--surface);
 }
 
@@ -1133,6 +1204,10 @@
     font-weight: 500;
 }
 
+#engines .le-model-name .le-model-badge {
+    margin-left: 0.375rem;
+}
+
 #engines .le-model-size {
     color: var(--text-dim);
     font-size: var(--text-xs);
@@ -1142,6 +1217,13 @@
 #engines .le-model-status {
     font-size: var(--text-xs);
     white-space: nowrap;
+}
+
+#engines .le-model-verification {
+    margin-left: 0.25rem;
+    font-size: var(--text-2xs, 0.6875rem);
+    color: var(--text-dim);
+    font-style: normal;
 }
 
 #engines .le-model-actions {
@@ -1194,7 +1276,24 @@
     font-style: normal;
 }
 
-/* ── model mismatch hint (configured vs active) (0.22.6) ───────────────────── */
+#engines .le-badge {
+    font-size: var(--text-xs);
+    padding: 0.0625rem 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    font-style: normal;
+}
+
+#engines .le-badge-cap {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+#engines .le-badge-lifecycle {
+    background: var(--surface-2);
+    color: var(--text-sub);
+}
+
+/* ── model mismatch hint / conflict (structured, no silent fallback) ───────── */
 
 #engines .le-model-mismatch {
     display: flex;
@@ -1209,39 +1308,6 @@
     margin: 0.375rem 0;
     font-style: normal;
 }
-
-#engines .le-model-config-row {
-    display: grid;
-    grid-template-columns: minmax(7rem, var(--settings-label-width)) minmax(0, 1fr);
-    align-items: center;
-    gap: 0.75rem;
-    font-size: var(--text-sm);
-    margin-bottom: 0.25rem;
-    font-style: normal;
-}
-
-@media (max-width: 720px) {
-    #engines .le-status-grid,
-    #engines .le-diagnostic-grid {
-        grid-template-columns: 1fr;
-    }
-
-    #engines .le-config-row,
-    #engines .le-model-config-row {
-        grid-template-columns: 1fr;
-        gap: 0.25rem;
-    }
-
-    #engines .le-config-select {
-        width: 100%;
-    }
-
-    #engines .le-config-control-switch {
-        align-items: flex-start;
-    }
-}
-
-/* ── delete conflict display (structured, no silent fallback) (0.22.6) ──────── */
 
 #engines .le-model-conflict {
     padding: 0.5rem 0.75rem;
@@ -1263,6 +1329,11 @@
 #engines .le-model-conflict-reason {
     color: var(--text-sub);
     font-size: var(--text-xs);
+    font-style: normal;
+}
+
+#engines .le-model-state-blocked {
+    color: var(--red);
     font-style: normal;
 }
 
@@ -1302,28 +1373,7 @@
     font-style: normal;
 }
 
-/* ── 模型列表徽章与附加态（0.22.6 收敛：inline style 迁入 CSS）──────────────── */
-
-/* 模型名后的 selected/active 徽章间距 */
-#engines .le-model-name .le-model-badge {
-    margin-left: 0.375rem;
-}
-
-/* 模型状态旁的校验附加文案 */
-#engines .le-model-verification {
-    margin-left: 0.25rem;
-    font-size: var(--text-2xs, 0.6875rem);
-    color: var(--text-dim);
-    font-style: normal;
-}
-
-/* delete_blocked 状态文字 */
-#engines .le-model-state-blocked {
-    color: var(--red);
-    font-style: normal;
-}
-
-/* ── orphan 恢复：确认模态 + 通知（0.22.6 收敛：style.cssText 迁入 CSS）────── */
+/* ── orphan 恢复：确认模态 + 通知 ──────────────────────────────────────────── */
 
 .le-orphan-modal-overlay {
     position: fixed;
@@ -1382,17 +1432,42 @@
     color: var(--red);
 }
 
-/* ── 运行时底座：引擎概览行（0.22.6 新 DTO）────────────────────────────────── */
+/* ── 响应式：窄窗口仍上下排列（禁双列），配置行/状态行纵向换行 ─────────────── */
 
-#engines .le-foundation-engine-name {
-    min-width: 5em;
-    font-weight: 600;
-    color: var(--text);
-    font-style: normal;
-}
+@media (max-width: 720px) {
+    #engines .le-runtime-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
 
-#engines .le-foundation-engine-status {
-    display: inline-flex;
-    gap: 0.375rem;
-    font-style: normal;
+    #engines .le-card-head {
+        flex-wrap: wrap;
+        row-gap: 0.5rem;
+    }
+
+    #engines .le-card-primary {
+        margin-left: auto;
+    }
+
+    #engines .le-keyline,
+    #engines .le-diagnostic-grid {
+        gap: 0.375rem 0.75rem;
+    }
+
+    #engines .le-card-config {
+        gap: 0.375rem 1rem;
+    }
+
+    #engines .le-config-group {
+        flex-wrap: wrap;
+    }
+
+    #engines .le-config-select {
+        min-width: 130px;
+    }
+
+    #engines .le-card-tools {
+        gap: 0.375rem;
+    }
 }
