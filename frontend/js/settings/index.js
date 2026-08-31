@@ -33,6 +33,7 @@ import {statusClass} from "./tabs/engines/local-engine-card-utils.js";
 import {registerLocalEngineHooks, unregisterLocalEngineHooks} from "./tabs/engines/local-engine-hooks.js";
 import {createCleanupModal, aggregateSharedTargets} from "./tabs/engines/local-engine-cleanup-modal.js";
 import {onLangChange} from "../i18n/index.js";
+import {markSettingsTabActivation, resetSettingsContentScroll} from "./navigation.js";
 
 // ── Tab 切换 + 生命周期管理 ─────────────────────────────────────────────────
 
@@ -76,6 +77,10 @@ async function mountLocalRuntime() {
         },
         onError: (err) => {
             console.error("[local-engine] error:", err);
+            if (err?.engine_id) {
+                // controller 已把错误写入对应 EngineStateEntry.transientError。
+                return;
+            }
             if (loadingRegion) loadingRegion.hidden = true;
             if (errorRegion) {
                 errorRegion.hidden = false;
@@ -459,11 +464,14 @@ async function openCleanupModal(engineId, entry, controller, mode) {
 // Tab 切换：增删 active class + 生命周期回调
 document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
+        markSettingsTabActivation();
         document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
         document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
         btn.classList.add("active");
         const targetPanel = document.getElementById(btn.dataset.tab);
         if (targetPanel) targetPanel.classList.add("active");
+        // 所有 panel 共用 .content，切换后不可继承上一页的滚动偏移。
+        resetSettingsContentScroll();
 
         // ── 生命周期回调 ──
         const tab = btn.dataset.tab;

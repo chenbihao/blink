@@ -25,22 +25,28 @@ git push origin v0.2.0
 | 项 | 说明 |
 |---|---|
 | 触发条件 | 推送 `v*` tag，或 Actions 页手动 Run workflow（输入 tag） |
-| 构建环境 | `windows-latest` |
+| 构建环境 | `windows-2022`（固定已验证的 VS 2022 / MSVC 工具链） |
 | Rust 工具链 | stable（`dtolnay/rust-toolchain`）+ `swatinem/rust-cache` 缓存 |
-| 插件编译 | 独立 step 调 `scripts/copy-plugins.ps1`，编译 echo/ip/weather 三个 Rust 插件到 `plugins/builtin/<id>/bin/`（这些 `*.exe` 不入 git，必须现场生成） |
-| 打包工具 | `tauri-apps/tauri-action@v0`（moving major tag，当前 v0.6.2；`cargo tauri build`） |
+| 发布入口 | `cargo xtask release`：构建 FunASR GGUF worker、编译并复制 ip/translate/weather 插件、执行资源门禁、调用 Tauri 打包 |
+| 打包工具 | 固定 `tauri-cli 2.11.4 --locked`，由 `cargo xtask release` 调用 `cargo tauri build` |
 | 构建产物 | MSI 安装包 + NSIS 安装包（`tauri.conf.json` 的 `bundle.targets: "all"`） |
 | 发布状态 | Draft（需手动编辑后发布） |
 
-### beforeBuildCommand 与插件编译
+### 本地与 CI 一致性
 
-`tauri.conf.json` 的 `beforeBuildCommand` 调用 `copy-plugins.ps1`，保证**本地** `cargo tauri build` 一键打包时插件也会编译。
+本地和 CI 都以 `cargo xtask release` 为唯一完整发布入口。该命令按固定顺序执行：
 
-CI 中插件由独立 step 预编译，编译完成后置 `BLINK_SKIP_PLUGIN_BUILD=1`，使 `tauri build` 触发的 `beforeBuildCommand` 自动短路跳过，避免重复编译。
+1. 从锁定源码构建 FunASR GGUF worker 到 `resources/bin/funasr-worker/`；
+2. 编译 Rust 插件并复制到 `plugins/builtin/<id>/bin/`；
+3. 执行 `release-check` 资源、版本、供应链和分层门禁；
+4. 执行 `cargo tauri build` 生成安装包。
+
+CI 只额外负责干净 tag checkout、从 tag 注入版本、安装固定 Tauri CLI、强制校验 MSI/NSIS 并上传 Draft Release。FunASR 的本地补丁源码缓存以源码 pin、patch 内容和协议头内容计算指纹；任一输入变化都会自动重新展开并应用补丁。
 
 ## 注意事项
 
 - **版本号一致**：`Cargo.toml` 与 `tauri.conf.json` 的 version 必须一致，否则产物版本与 tag 对不上
 - **tag 命名**：必须以 `v` 开头（如 `v0.1.0`、`v0.2.0-beta.1`）
 - **代码未签名**：当前未做代码签名，下载后首次运行 Windows SmartScreen 可能拦截，点「更多信息 → 仍要运行」即可（0.x 自用阶段，1.0 前视情况补签名）
-- **首次构建**：需下载 Rust 工具链与依赖，耗时约 10–20 分钟；有缓存后约 5–10 分钟
+- **本地发布**：运行 `cargo xtask release`，其构建主链路与 CI 一致
+- **首次构建**：需下载 Rust、FunASR/llama.cpp 源码与依赖，耗时会明显长于普通 Rust 增量构建

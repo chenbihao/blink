@@ -425,7 +425,7 @@ pub fn service_health_to_string(s: crate::domain::local_engine::ServiceHealth) -
     }
 }
 
-fn model_health_to_string(m: crate::domain::local_engine::ModelHealth) -> String {
+pub fn model_health_to_string(m: crate::domain::local_engine::ModelHealth) -> String {
     match m {
         crate::domain::local_engine::ModelHealth::Unknown => "unknown".to_string(),
         crate::domain::local_engine::ModelHealth::NotLoaded => "not_loaded".to_string(),
@@ -683,6 +683,8 @@ pub struct EngineDiagnosticsDto {
     pub process: ProcessStateDto,
     /// 服务健康观测（稳定 wire 值：`unknown` / `unreachable` / `healthy` / `degraded`）。
     pub service: String,
+    /// 当前运行时模型健康观测（`not_loaded` / `loading` / `ready` / `failed`）。
+    pub model: String,
     /// 引擎专属诊断条目列表（各 adapter 自行定义）。
     pub adapter_diagnostics: Vec<DiagnosticEntryDto>,
     /// 最近日志条目（双源合并后的截断列表）。

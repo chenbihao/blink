@@ -28,8 +28,8 @@
 //! 注意：某些虚拟声卡驱动（如 VR/远程桌面）可能劫持此 API，导致返回的默认设备
 //! 与 mmsys.cpl 面板显示的不一致。设置页设备列表会标注当前默认设备名称供用户参考。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::{AudioCapture, AudioChunk, AudioError, AudioFormat};
@@ -332,7 +332,7 @@ fn check_microphone_privacy() {
             }
         }
         if !denied_apps.is_empty() {
-            tracing::warn!(
+            tracing::trace!(
                 denied = ?denied_apps,
                 "部分桌面应用被禁止访问麦克风"
             );

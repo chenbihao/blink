@@ -14,6 +14,7 @@ import {invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {t} from "../../i18n/index.js";
 import {copyToClipboard} from "../../shared/api.js";
+import {navigateSettings} from "../navigation.js";
 
 /**
  * 初始化 MCP Server 配置区。
@@ -75,17 +76,17 @@ function initCapabilitiesLink() {
     document.addEventListener("click", (e) => {
         if (e.target && e.target.id === "mcp-view-capabilities") {
             // 跳转到能力管理页，过滤到 MCP 出口列并滚动到控制区
-            document.querySelector('[data-tab="capabilities"]')?.click();
-            setTimeout(() => {
-                const exitFilter = document.getElementById("filter-exit");
-                if (exitFilter) {
-                    exitFilter.value = "mcp";
-                    exitFilter.dispatchEvent(new Event("change"));
-                }
-                document
-                    .getElementById("capabilities-container")
-                    ?.scrollIntoView({behavior: "smooth", block: "start"});
-            }, 100);
+            navigateSettings({
+                tabId: "capabilities",
+                prepare: () => {
+                    const exitFilter = document.getElementById("filter-exit");
+                    if (exitFilter) {
+                        exitFilter.value = "mcp";
+                        exitFilter.dispatchEvent(new Event("change"));
+                    }
+                },
+                target: "#capabilities-container",
+            }).catch((err) => console.error("navigate to capabilities failed:", err));
         }
     });
 }

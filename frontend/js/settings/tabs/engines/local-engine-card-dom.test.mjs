@@ -281,6 +281,11 @@ const controllerStub = {
         environment: "ready",
         process: {state: "stopped"},
         service: "unknown",
+        model: "not_loaded",
+        adapter_diagnostics: [
+            {key: "gguf_deployment_ready", value: "true", label: "info"},
+            {key: "protocol_version", value: "1", label: "info"},
+        ],
         recent_logs: [],
         orphan_recovery: {present: false, actionable: false, reason: "no_lease"},
     }),
@@ -443,6 +448,9 @@ await test("诊断头部中重新诊断位于复制诊断左侧", async () => {
     assert.ok(actions, "诊断操作应位于头部操作组");
     assert.ok(actions._children[0].className.includes("le-diagnostic-refresh"));
     assert.ok(actions._children[1].className.includes("le-diagnostic-copy"));
+    assert.ok(card.textContent.includes("引擎部署"), "诊断应以检查清单展示部署状态");
+    assert.ok(card.textContent.includes("GGUF Worker"), "adapter 专属诊断不得被前端丢弃");
+    assert.ok(card.textContent.includes("模型文件"), "诊断应展示模型下载/校验状态");
 });
 
 // ── 4. 模型列表默认折叠 + 摘要不丢 ───────────────────────────────────────────

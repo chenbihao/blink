@@ -6,8 +6,8 @@
 use crate::app::command_error::CommandError;
 use crate::app::local_engine::dto::{
     DiagnosticEntryDto, EngineDiagnosticsDto, EngineLogDto, EngineStatusDto, OrphanRecoveryDto,
-    environment_health_to_string, project_diagnostics, project_process_state, project_status,
-    service_health_to_string,
+    environment_health_to_string, model_health_to_string, project_diagnostics,
+    project_process_state, project_status, service_health_to_string,
 };
 
 use super::{get_merged_logs, get_service, project_process_state_dto, validate_engine_id};
@@ -172,6 +172,7 @@ pub async fn get_engine_diagnostics(
         environment: environment_health_to_string(snapshot.status.environment),
         process: project_process_state_dto(&snapshot.status.process),
         service: service_health_to_string(snapshot.status.service),
+        model: model_health_to_string(snapshot.status.model.clone()),
         adapter_diagnostics,
         recent_logs,
         orphan_recovery,

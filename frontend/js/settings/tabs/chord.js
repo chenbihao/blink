@@ -212,6 +212,7 @@ function renderClipboardDetail(cfg) {
       </label>
       <input type="number" class="clip-field" data-field="retention_days" min="0" max="3650" value="${cfg.retention_days ?? 30}" />
     </div>
+    <!-- 允许搜索召回 / 黑名单关键词：用户无需调整，注释隐藏（保留默认值）
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.clipboard.search_enabled.label")}
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.search_enabled.hint"))}">ⓘ</span>
@@ -227,6 +228,7 @@ function renderClipboardDetail(cfg) {
       </label>
       <input type="text" class="clip-field" data-field="blacklist_keywords" placeholder="${escapeAttr(t("chord.clipboard.blacklist.placeholder"))}" value="${escapeAttr(blacklist)}" />
     </div>
+    -->
   </div>`;
 }
 
@@ -257,6 +259,7 @@ function renderScreenshotDetail(cfg) {
 <span class="slider"></span>
 </label>
 </div>
+<!-- 调试项已调优，用户无需自行调整，注释隐藏（保留默认值）
 <div class="chord-field">
 <label class="setting-label chord-field-label">${t("chord.screenshot.ocr_debug.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.ocr_debug.hint"))}">ⓘ</span>
@@ -275,6 +278,7 @@ function renderScreenshotDetail(cfg) {
 <span class="slider"></span>
 </label>
 </div>
+-->
 <div class="chord-field">
 <label class="setting-label chord-field-label">${t("chord.screenshot.control_snap.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap.hint"))}">ⓘ</span>
@@ -284,6 +288,7 @@ function renderScreenshotDetail(cfg) {
 <span class="slider"></span>
 </label>
 </div>
+<!-- 
 <div class="chord-field control-snap-params" style="${cfg.controlSnap === true ? "" : "display:none"}">
 <label class="setting-label chord-field-label">${t("chord.screenshot.control_snap_depth.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap_depth.hint"))}">ⓘ</span>
@@ -320,6 +325,7 @@ function renderScreenshotDetail(cfg) {
 <span class="range-value" data-for="window_edge_snap">${cfg.windowEdgeSnap ?? 10}px</span>
 </div>
 </div>
+-->
 </div>`;
 }
 

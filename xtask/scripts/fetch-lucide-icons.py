@@ -53,7 +53,6 @@ ICON_LIST = [
 
     # 插件（PLUGIN_ICONS 映射）
     "globe",            # builtin.ip / context 语言 🌐 / 🌍
-    "volume-2",         # builtin.echo 🔊
     "sparkles",         # builtin.ai 🤖 (亦可挪作 AI 通用符)
     "languages",        # builtin.translate 📝
     "cloud-sun",        # builtin.weather 🌤️

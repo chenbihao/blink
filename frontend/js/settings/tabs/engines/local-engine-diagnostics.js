@@ -70,6 +70,121 @@ function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
     });
 }
 
+function diagnosticTone(kind, value) {
+    if (kind === "environment") {
+        if (value === "ready") return "ok";
+        if (value === "missing" || value === "needs_rebuild") return "warn";
+        if (value === "broken") return "error";
+    }
+    if (kind === "process") {
+        if (value === "running") return "ok";
+        if (value === "starting" || value === "stopping") return "busy";
+        if (value === "exited") return "error";
+    }
+    if (kind === "service") {
+        if (value === "healthy") return "ok";
+        if (value === "unreachable") return "error";
+        if (value === "degraded") return "warn";
+    }
+    if (kind === "model") {
+        if (value === "ready") return "ok";
+        if (value === "loading" || value === "downloading") return "busy";
+        if (value === "failed") return "error";
+    }
+    return "neutral";
+}
+
+function diagnosticStatusText(i18n, kind, value) {
+    if (!value) return "—";
+    const prefix = kind === "environment" ? "env"
+        : kind === "model" ? "model_state"
+            : kind;
+    return tt(i18n, `local_engine.${prefix}.${value}`, value);
+}
+
+function adapterLabel(i18n, key) {
+    return tt(i18n, `local_engine.diagnostic.adapter.${key}`, key.replaceAll("_", " "));
+}
+
+function adapterValue(i18n, item) {
+    if (item.value === "true") return tt(i18n, "local_engine.diagnostic.check_passed", "通过");
+    if (item.value === "false") return tt(i18n, "local_engine.diagnostic.check_failed", "未通过");
+    return item.value || "—";
+}
+
+function adapterTone(item) {
+    if (item.value === "false") return item.label === "error" ? "error" : "warn";
+    if (item.label === "error") return "error";
+    if (item.label === "warning") return "warn";
+    if (item.value === "true") return "ok";
+    return "neutral";
+}
+
+function selectedModelChecks(entry, i18n) {
+    const models = Array.isArray(entry?.models) ? entry.models : [];
+    const selected = models.find((model) => model.is_selected);
+    if (!selected) {
+        const notSelected = tt(i18n, "local_engine.diagnostic.model_not_selected", "未选择");
+        return [
+            {
+                label: tt(i18n, "local_engine.diagnostic.selected_model", "当前模型"),
+                value: notSelected,
+                tone: "warn",
+            },
+            {
+                label: tt(i18n, "local_engine.diagnostic.model_artifact", "模型文件"),
+                value: notSelected,
+                tone: "warn",
+            },
+        ];
+    }
+
+    const displayName = selected.display_name || selected.model_id || "—";
+    const installed = selected.install_state === "installed";
+    const verified = selected.verification_state === "verified";
+    const verificationFailed = selected.verification_state === "corrupted"
+        || selected.verification_state === "mismatched";
+    const assetTone = verificationFailed ? "error" : installed && verified ? "ok" : "warn";
+    const assetValue = verificationFailed
+        ? tt(i18n, `local_engine.model.verification.${selected.verification_state}`, selected.verification_state)
+        : installed
+            ? tt(i18n, `local_engine.model.verification.${selected.verification_state}`, selected.verification_state || "installed")
+            : tt(i18n, "local_engine.model.install.not_installed", "未下载");
+
+    return [
+        {
+            label: tt(i18n, "local_engine.diagnostic.selected_model", "当前模型"),
+            value: displayName,
+            tone: "neutral",
+        },
+        {
+            label: tt(i18n, "local_engine.diagnostic.model_artifact", "模型文件"),
+            value: assetValue,
+            tone: assetTone,
+        },
+    ];
+}
+
+function renderCheck(container, check) {
+    const row = document.createElement("div");
+    row.className = `le-diagnostic-check le-diagnostic-check-${check.tone || "neutral"}`;
+    const iconName = check.tone === "ok" ? "check"
+        : check.tone === "error" ? "x"
+            : check.tone === "warn" ? "triangle-alert" : "circle";
+    row.appendChild(renderIcon(iconName, {extraClass: "le-diagnostic-check-icon"}));
+
+    const label = document.createElement("span");
+    label.className = "le-diagnostic-check-label";
+    label.textContent = check.label;
+    row.appendChild(label);
+
+    const value = document.createElement("span");
+    value.className = "le-diagnostic-check-value";
+    value.textContent = check.value;
+    row.appendChild(value);
+    container.appendChild(row);
+}
+
 /**
  * 渲染诊断内容。
  */
@@ -107,30 +222,41 @@ function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefre
     header.appendChild(headerActions);
     container.appendChild(header);
 
-    // 基本信息
-    const grid = document.createElement("div");
-    grid.className = "le-diagnostic-grid";
-
-    const items = [
-        {label: tt(i18n, "local_engine.diagnostic.env", "环境"), value: diag.environment || "—"},
-        {label: tt(i18n, "local_engine.diagnostic.process", "进程"), value: diag.process?.state || "—"},
-        {label: tt(i18n, "local_engine.diagnostic.service", "服务"), value: diag.service || "—"},
+    // 可行动检查清单：先展示用户关心的安装/模型/进程/服务，再展示 adapter
+    // 专属环境检查。日志只是后续证据，不再占据诊断主体。
+    const checklist = document.createElement("div");
+    checklist.className = "le-diagnostic-checklist";
+    const processState = diag.process?.state || "unknown";
+    const checks = [
+        {
+            label: tt(i18n, "local_engine.diagnostic.engine_deployment", "引擎部署"),
+            value: diagnosticStatusText(i18n, "environment", diag.environment),
+            tone: diagnosticTone("environment", diag.environment),
+        },
+        ...selectedModelChecks(entry, i18n),
+        {
+            label: tt(i18n, "local_engine.diagnostic.model_runtime", "模型加载"),
+            value: diagnosticStatusText(i18n, "model", diag.model),
+            tone: diagnosticTone("model", diag.model),
+        },
+        {
+            label: tt(i18n, "local_engine.diagnostic.process", "进程"),
+            value: diagnosticStatusText(i18n, "process", processState),
+            tone: diagnosticTone("process", processState),
+        },
+        {
+            label: tt(i18n, "local_engine.diagnostic.service", "服务"),
+            value: diagnosticStatusText(i18n, "service", diag.service),
+            tone: diagnosticTone("service", diag.service),
+        },
+        ...(diag.adapter_diagnostics || []).map((item) => ({
+            label: adapterLabel(i18n, item.key),
+            value: adapterValue(i18n, item),
+            tone: adapterTone(item),
+        })),
     ];
-
-    for (const item of items) {
-        const row = document.createElement("div");
-        row.className = "le-diagnostic-item";
-        const label = document.createElement("span");
-        label.className = "le-info-label";
-        label.textContent = item.label;
-        const value = document.createElement("span");
-        value.className = "le-info-value";
-        value.textContent = item.value;
-        row.appendChild(label);
-        row.appendChild(value);
-        grid.appendChild(row);
-    }
-    container.appendChild(grid);
+    for (const check of checks) renderCheck(checklist, check);
+    container.appendChild(checklist);
 
     // 最近日志：后端只保存引擎 server 进程日志——引擎从未运行（如安装模型/
     // 启动失败排查场景）时为空。此时回退到前端实时积累的日志（含安装/
@@ -145,14 +271,17 @@ function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefre
         }));
         logsSource = "session";
     }
+    const logsDetails = document.createElement("details");
+    logsDetails.className = "le-diagnostic-logs";
+    const logsTitle = document.createElement("summary");
+    logsTitle.className = "le-diagnostic-logs-title";
+    logsTitle.textContent = tt(i18n, "local_engine.diagnostic.recent_logs", "最近日志")
+        + `（${logs.length}）`
+        + (logsSource === "session"
+            ? tt(i18n, "local_engine.diagnostic.logs_from_session", "（本次会话）")
+            : "");
+    logsDetails.appendChild(logsTitle);
     if (logs.length > 0) {
-        const logsTitle = document.createElement("div");
-        logsTitle.className = "le-diagnostic-logs-title";
-        logsTitle.textContent = tt(i18n, "local_engine.diagnostic.recent_logs", "最近日志")
-            + (logsSource === "session"
-                ? tt(i18n, "local_engine.diagnostic.logs_from_session", "（本次会话）")
-                : "");
-        container.appendChild(logsTitle);
 
         const logsList = document.createElement("div");
         logsList.className = "le-diagnostic-logs-list";
@@ -174,13 +303,14 @@ function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefre
             line.appendChild(text);
             logsList.appendChild(line);
         }
-        container.appendChild(logsList);
+        logsDetails.appendChild(logsList);
     } else {
         const noLogs = document.createElement("div");
         noLogs.className = "le-diagnostic-logs-empty";
         noLogs.textContent = tt(i18n, "local_engine.diagnostic.no_logs", "无日志");
-        container.appendChild(noLogs);
+        logsDetails.appendChild(noLogs);
     }
+    container.appendChild(logsDetails);
 
     // ── 停止孤儿引擎按钮 ──────────────────────────────────────────
     // 后端提供闭合 DTO { present, actionable, reason }，

@@ -202,7 +202,8 @@ impl PseudoStreamingSttEngine {
 
     /// 转录（等待结果）——走 worker transport 通道。
     ///
-    /// 通道与模型就绪由 transport 的 check_ready 承载（NDJSON hello 握手）；
+    /// 通道就绪由 start 时的 ready 握手保证，finalize 调用时不再重复握手——
+    /// 额外的 hello 请求会与 worker 的推理线程竞争，可能触发访问违例。
     /// 请求在客户端串行化（单请求在途）。
     async fn transcribe_samples(&self, samples: &[f32]) -> Result<String, SttError> {
         if samples.is_empty() {
@@ -217,8 +218,6 @@ impl PseudoStreamingSttEngine {
             .transport
             .as_ref()
             .ok_or_else(|| SttError::Engine("伪流式引擎连接缺少 worker 通道".to_string()))?;
-
-        transport.check_ready().await.map_err(SttError::Engine)?;
 
         // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
         let trimmed = trim_trailing_silence(samples, self.sample_rate);
@@ -615,7 +614,38 @@ impl SttEngine for PseudoStreamingSttEngine {
     }
 
     async fn finalize(&self) -> Result<String, SttError> {
-        // 1. 定稿剩余音频（finalize 识别）
+        // 1. 先等待 in_flight 预览/定稿请求完成（最多 3s）
+        //
+        // **必须在发送新的 transcribe 请求之前等待**——否则 worker 在处理
+        // in-flight 请求时又收到新请求，可能导致内存访问竞争（0xC0000005）。
+        // NdjsonWorkerClient 虽有请求锁串行化，但 worker 进程侧的推理线程
+        // 可能在处理上一个请求的清理路径时被新请求打断，触发访问违例。
+        let deadline = Instant::now() + Duration::from_millis(FINALIZE_WAIT_TIMEOUT_MS);
+        loop {
+            let (preview_in_flight, finalize_in_flight) = {
+                let inner = self.inner.lock().unwrap();
+                (inner.preview_in_flight, inner.finalize_in_flight)
+            };
+
+            if !preview_in_flight && !finalize_in_flight {
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!("finalize: 等待 in_flight 请求超时，使用已有结果");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 2. 收取 pending 定稿结果（in-flight 定稿可能在等待期间完成）
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(text) = inner.pending_confirmed.take() {
+                inner.sentences.append_confirmed(&text);
+            }
+        }
+
+        // 3. 定稿剩余音频（此时 in-flight 请求已全部完成，安全发新请求）
         let remaining_samples: Vec<f32> = {
             let inner = self.inner.lock().unwrap();
             let start = inner.sentences.current_sentence_start;
@@ -637,32 +667,6 @@ impl SttEngine for PseudoStreamingSttEngine {
         } else {
             String::new()
         };
-
-        // 2. 等待 in_flight 预览/定稿请求完成（最多 3s）
-        let deadline = Instant::now() + Duration::from_millis(FINALIZE_WAIT_TIMEOUT_MS);
-        loop {
-            let (preview_in_flight, finalize_in_flight) = {
-                let inner = self.inner.lock().unwrap();
-                (inner.preview_in_flight, inner.finalize_in_flight)
-            };
-
-            if !preview_in_flight && !finalize_in_flight {
-                break;
-            }
-            if Instant::now() >= deadline {
-                tracing::warn!("finalize: 等待 in_flight 请求超时，使用已有结果");
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        // 3. 收取 pending 定稿结果
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if let Some(text) = inner.pending_confirmed.take() {
-                inner.sentences.append_confirmed(&text);
-            }
-        }
 
         // 4. 拼接 confirmed + finalize_text + 最后一段 preview
         let final_text = {

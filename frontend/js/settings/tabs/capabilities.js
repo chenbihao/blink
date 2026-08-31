@@ -24,6 +24,7 @@ import {confirmDialog, invoke, listen} from "../../shared/tauri.js";
 import {iconHTML} from "../../shared/icon.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {onLangChange, t} from "../../i18n/index.js";
+import {navigateSettings} from "../navigation.js";
 import {
     applyMcpChanges,
     buildBindingOps,
@@ -528,11 +529,11 @@ async function handleResetRecommended() {
 
 /** 跳转 Chord 设置页并定位到对应行（chord.js 渲染 data-chord-id） */
 function jumpToChordSettings(chordId) {
-    document.querySelector('[data-tab="chord"]')?.click();
-    setTimeout(() => {
-        const row = document.querySelector(`[data-chord-id="${CSS.escape(chordId || "")}"]`);
-        row?.scrollIntoView({behavior: "smooth", block: "center"});
-    }, 100);
+    navigateSettings({
+        tabId: "chord",
+        target: `[data-chord-id="${CSS.escape(chordId || "")}"]`,
+        block: "center",
+    }).catch((e) => console.error("jumpToChordSettings failed:", e));
 }
 
 // ── 搜索与过滤（组合式，数据驱动） ────────────────────────────────────────────

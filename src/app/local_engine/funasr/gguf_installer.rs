@@ -84,6 +84,14 @@ async fn download_file(
         });
     }
 
+    // Content-Length 用于进度百分比（可能缺失，如 chunked 传输）
+    let total_size: u64 = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let mut file = std::fs::File::create(&tmp_path).map_err(|e| ModelDownloadError::Internal {
         message: format!("创建临时文件失败: {e}"),
     })?;
@@ -116,10 +124,13 @@ async fn download_file(
         })?;
         downloaded += bytes.len() as u64;
         if downloaded >= next_progress {
-            on_log(&format!(
-                "{file_name}: 已下载 {} MB",
-                downloaded / (1024 * 1024)
-            ));
+            let mb = downloaded / (1024 * 1024);
+            let pct = if total_size > 0 {
+                format!(" ({})", downloaded * 100 / total_size)
+            } else {
+                String::new()
+            };
+            on_log(&format!("{file_name}: 已下载 {mb} MB{pct}"));
             next_progress += PROGRESS_LOG_STEP_BYTES;
         }
     }

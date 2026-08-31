@@ -81,6 +81,9 @@ export function createInitialEntry() {
         logs: [],
         currentInstanceId: null,
         pendingAction: null,
+        // 仅属于当前引擎的瞬时命令错误。后端 status.last_error 仍是权威终态；
+        // 本字段覆盖命令在写入终态前即失败的反馈窗口，禁止投影到页面级错误区。
+        transientError: null,
         // 0.22.6: 模型列表（ModelCatalogItemDto 数组）
         models: null,
         // 0.22.6: preferences DTO（EnginePreferencesDto）
@@ -352,14 +355,28 @@ export function setLogHistory(state, engineId, logDtos) {
     // 安装/修复等 operation 日志只存在于实时事件流（后端历史只存引擎
     // 进程日志）——pull 替换时必须保留，否则窗口 focus 触发的 refreshStatus
     // 会把正在下载的安装日志整个清空。
+    //
+    // **去重铁则**：IPC 返回的日志与 state 中已有的 operation 日志可能
+    // 存在交集（refreshStatus 拉取时，实时事件已积累的 operation 日志
+    // 也在后端 OperationLogStore 中）。直接拼接会导致同一条日志出现
+    // 多次。必须按 `source:seq` 去重——与 appendLog 使用同一去重逻辑。
     const runtimeActive = hasActiveRuntime(entry.status);
     const historyLogs = runtimeActive ? withoutOperationLogs(logs) : logs;
     const existingOpLogs = runtimeActive
         ? []
         : entry.logs.filter((l) => l.sourceKind === "operation");
-    const mergedLogs = existingOpLogs.length > 0
-        ? [...historyLogs, ...existingOpLogs]
-        : historyLogs;
+
+    let mergedLogs;
+    if (existingOpLogs.length > 0) {
+        // 去重：IPC 返回的日志中，已存在于 state 的条目不重复加入
+        const existingKeys = new Set(existingOpLogs.map((l) => `${l.source}:${l.seq}`));
+        const newHistoryLogs = historyLogs.filter((l) => {
+            return !existingKeys.has(`${l.source}:${l.seq}`);
+        });
+        mergedLogs = [...newHistoryLogs, ...existingOpLogs];
+    } else {
+        mergedLogs = historyLogs;
+    }
 
     // bounded
     const boundedLogs = mergedLogs.length > MAX_LOG_LINES
@@ -410,6 +427,19 @@ export function setPendingAction(state, engineId, action) {
     } : null;
 
     return setEntry(state, engineId, {...entry, pendingAction});
+}
+
+/**
+ * 设置单引擎瞬时错误。下一次同引擎操作开始或成功后清除。
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {string} engineId
+ * @param {Object|null} error
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function setTransientError(state, engineId, error) {
+    if (!engineId) return state;
+    const entry = state.get(engineId) || createInitialEntry();
+    return setEntry(state, engineId, {...entry, transientError: error || null});
 }
 
 /**

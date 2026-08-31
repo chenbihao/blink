@@ -60,6 +60,7 @@ function appendCurrentModelGroup(container, entry) {
         || "—";
 
     const group = makeGroup(t("local_engine.config.current_model"));
+    group.className += " le-config-group-model";
     const value = document.createElement("span");
     value.className = "le-config-static";
     value.textContent = name;

@@ -348,6 +348,9 @@ await test("start 失败：pendingAction 清除 + onError + 最终状态刷新�
         const entry = controller.getState().get("funasr");
         assert.equal(entry.pendingAction, null, "失败后 pendingAction 应清除");
         assert.equal(errors.length, 1, "onError 应收到错误");
+        assert.equal(errors[0].engine_id, "funasr", "错误回调必须携带引擎归属");
+        assert.equal(errors[0].error_scope, "start", "错误回调必须携带操作范围");
+        assert.equal(entry.transientError?.engine_id, "funasr", "瞬时错误只写入对应引擎卡片");
         assert.equal(entry.status?.status?.last_error?.code, "stop_failed", "失败后刷新应带回 rollback error");
         assert.equal(hasActiveOperation(entry), false, "失败后退出忙碌");
     } finally {

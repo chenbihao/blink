@@ -288,6 +288,17 @@
 - 放置、避让和边界判断必须使用缩放后的**视觉尺寸**，不得用未缩放的 `offsetWidth/offsetHeight` 直接钳制
 - 图片、长截图等内容层允许受控地超出屏幕；关键控制面、关闭入口及最小可拖拽区域必须留在可见工作区，保证用户始终能找回和操作
 
+### 5.7 设置页跨 Tab 深链（强制）
+
+**唯一入口**：设置窗口内部的跨 Tab 跳转统一使用 `frontend/js/settings/navigation.js` 的 `navigateSettings()`；业务 Tab 不得自行拼装“点击 `.tab` + `setTimeout` + `scrollIntoView`”。
+
+- 设置页所有 `.panel` 共用 `.content` 滚动容器。Tab 切换必须清除上一 panel 遗留的 `scrollTop`，避免新页面顶部被旧偏移裁切；手动点击、后端 `eval` 激活和内部深链都适用。
+- 异步渲染目标通过 `prepare` + `waitForSettingsTarget()` 等待真实就绪，禁止用固定 `setTimeout(100)` 猜测 DOM 已完成。
+- Tab 激活必须推进 navigation revision；异步准备或等待结束后校验 revision，过期深链不得滚动或聚焦用户已经切走的 panel。
+- 定位由 helper 统一执行 `scrollIntoView`；需要聚焦时传 `focusTarget`，并使用 `focus({preventScroll:true})`，禁止聚焦引发第二次滚动。
+- 深链目标应优先对齐语义 section 标题并配置 `scroll-margin-top`，不要默认把高卡片 `block:center` 后裁掉上下文；确需居中（如定位单行配置）才显式传 `block:"center"`。
+- 仅切换 Tab 也使用同一入口并省略 `target`，避免业务模块再次直接查询并点击 `.tab[data-tab]`。
+
 ---
 
 ## 第六层：工程债（收敛中）

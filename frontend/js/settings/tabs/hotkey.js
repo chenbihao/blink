@@ -9,6 +9,7 @@ import {renderCombo} from "../../shared/kbd.js";
 import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {getCurrentConfig} from "../shared/state.js";
+import {navigateSettings} from "../navigation.js";
 
 /**
  * 初始化快捷键设置 Tab
@@ -272,8 +273,8 @@ function renderCheatsheet(cfg) {
             modifyLink.addEventListener("click", (e) => {
                 e.preventDefault();
                 // 在 settings 窗口内切到 chord tab
-                const chordTab = document.querySelector('.tab[data-tab="chord"]');
-                if (chordTab) chordTab.click();
+                navigateSettings({tabId: "chord"})
+                    .catch((err) => console.error("navigate to chord failed:", err));
             });
             statusTd.appendChild(modifyLink);
         } else {

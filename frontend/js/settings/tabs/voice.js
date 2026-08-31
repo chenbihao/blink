@@ -15,6 +15,7 @@ import {invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, waitForEngineCard} from "../index.js";
+import {navigateSettings} from "../navigation.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
@@ -302,34 +303,29 @@ export async function initVoiceTab() {
     const gotoEnginesBtn = document.getElementById("voice-goto-engines-btn");
     if (gotoEnginesBtn) {
         gotoEnginesBtn.addEventListener("click", async () => {
-            const enginesTabBtn = document.querySelector('.tab[data-tab="engines"]');
-            if (enginesTabBtn) {
-                enginesTabBtn.click();
-            }
             try {
-                // 1. 激活 engines tab（上面 click 已做）
-                // 2. await runtime mount
-                await ensureLocalRuntimeMounted();
-                // 3. await funasr card 已渲染
-                const funasrCard = await waitForEngineCard("funasr");
-                if (funasrCard) {
-                    // 4. scrollIntoView
-                    funasrCard.scrollIntoView({behavior: "smooth", block: "center"});
-                    // 5. focus（card 有 tabindex="-1"）
-                    funasrCard.focus({preventScroll: true});
-                } else {
-                    // mount 失败或卡片未渲染——聚焦 error region
-                    const errorRegion = document.getElementById("le-error-region");
-                    if (errorRegion && !errorRegion.hidden) {
-                        errorRegion.scrollIntoView({behavior: "smooth", block: "center"});
+                let funasrCard = null;
+                await navigateSettings({
+                    tabId: "engines",
+                    prepare: async () => {
+                        await ensureLocalRuntimeMounted();
+                        funasrCard = await waitForEngineCard("funasr");
+                    },
+                    target: () => {
+                        if (funasrCard) {
+                            return document.getElementById("local-model-runtime") || funasrCard;
+                        }
+                        const errorRegion = document.getElementById("le-error-region");
+                        if (errorRegion && !errorRegion.hidden) return errorRegion;
+                        return document.getElementById("local-model-runtime");
+                    },
+                    focusTarget: () => {
+                        if (funasrCard) return funasrCard;
                         const textEl = document.getElementById("le-error-text");
-                        if (textEl) textEl.focus({preventScroll: true});
-                    } else {
-                        // 兑现 fallback：滚动到 section anchor
-                        const anchor = document.getElementById("local-model-runtime");
-                        if (anchor) anchor.scrollIntoView({behavior: "smooth"});
-                    }
-                }
+                        return textEl && !document.getElementById("le-error-region")?.hidden
+                            ? textEl : null;
+                    },
+                });
             } catch (e) {
                 console.error("[voice] goto engines failed:", e);
             }

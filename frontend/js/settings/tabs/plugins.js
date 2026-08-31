@@ -11,10 +11,9 @@ import {onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
 
-/** 插件图标映射（0.10.8：emoji → Lucide 图标名；builtin.echo 保留 volume-2 声波语义） */
+/** 插件图标映射（0.10.8：emoji → Lucide 图标名） */
 const PLUGIN_ICONS = {
     "builtin.ip": "globe",
-    "builtin.echo": "volume-2",
     "builtin.ai": "sparkles",
     "builtin.translate": "languages",
     "builtin.weather": "cloud-sun",

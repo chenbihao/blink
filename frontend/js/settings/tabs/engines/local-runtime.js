@@ -40,6 +40,7 @@ import {
     setLogHistory,
     setStorage,
     setPendingAction,
+    setTransientError,
     setPendingModelAction,
     getPendingModelAction,
     clearLogs,
@@ -117,6 +118,20 @@ export function createLocalEngineController(callbacks = {}) {
 
     // mount generation：每次 mount 递增，dispose 后旧 generation 的异步回调失效
     let mountGeneration = 0;
+
+    /** 把单引擎错误保留在其卡片内，同时给外部回调携带明确归属。 */
+    function reportEngineError(engineId, scope, rawError) {
+        const err = normalizeError(rawError);
+        const contextual = {...err, engine_id: engineId, error_scope: scope};
+        state = setTransientError(state, engineId, contextual);
+        notifyStateChange();
+        if (callbacks.onError) callbacks.onError(contextual);
+        return contextual;
+    }
+
+    function clearEngineError(engineId) {
+        state = setTransientError(state, engineId, null);
+    }
 
     /**
      * 通知状态变化。
@@ -572,8 +587,7 @@ export function createLocalEngineController(callbacks = {}) {
                 await this.refreshStatus();
                 return result;
             } catch (e) {
-                const err = normalizeError(e);
-                if (callbacks.onError) callbacks.onError(err);
+                const err = reportEngineError(engineId, "orphan_stop", e);
                 throw err;
             }
         },
@@ -616,11 +630,11 @@ export function createLocalEngineController(callbacks = {}) {
                 const result = await invoke(COMMANDS.CANCEL, {engineId, operationId});
                 // 取消后清除 pending action
                 state = setPendingAction(state, engineId, null);
+                clearEngineError(engineId);
                 notifyStateChange();
                 return result;
             } catch (e) {
-                const err = normalizeError(e);
-                if (callbacks.onError) callbacks.onError(err);
+                const err = reportEngineError(engineId, "cancel", e);
                 throw err;
             }
         },
@@ -698,6 +712,7 @@ export function createLocalEngineController(callbacks = {}) {
             if (disposed) throw new Error("controller 已 disposed");
             const operationId = createModelOperationId("install", modelId);
             // 发起前存入 state，供取消按钮使用
+            clearEngineError(engineId);
             state = setPendingModelAction(state, engineId, modelId, {
                 kind: "install",
                 operationId,
@@ -712,15 +727,14 @@ export function createLocalEngineController(callbacks = {}) {
             }).then((result) => {
                 // 清除 pending model action
                 state = setPendingModelAction(state, engineId, modelId, null);
+                clearEngineError(engineId);
                 notifyStateChange();
                 // 刷新模型列表
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
                 state = setPendingModelAction(state, engineId, modelId, null);
-                notifyStateChange();
-                const err = normalizeError(e);
-                if (callbacks.onError) callbacks.onError(err);
+                const err = reportEngineError(engineId, "model_install", e);
                 throw err;
             });
         },
@@ -735,6 +749,7 @@ export function createLocalEngineController(callbacks = {}) {
             if (disposed) throw new Error("controller 已 disposed");
             const operationId = createModelOperationId("repair", modelId);
             // 发起前存入 state，供取消按钮使用
+            clearEngineError(engineId);
             state = setPendingModelAction(state, engineId, modelId, {
                 kind: "repair",
                 operationId,
@@ -748,14 +763,13 @@ export function createLocalEngineController(callbacks = {}) {
                 },
             }).then((result) => {
                 state = setPendingModelAction(state, engineId, modelId, null);
+                clearEngineError(engineId);
                 notifyStateChange();
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
                 state = setPendingModelAction(state, engineId, modelId, null);
-                notifyStateChange();
-                const err = normalizeError(e);
-                if (callbacks.onError) callbacks.onError(err);
+                const err = reportEngineError(engineId, "model_repair", e);
                 throw err;
             });
         },
@@ -769,6 +783,7 @@ export function createLocalEngineController(callbacks = {}) {
         async deleteModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
             const operationId = createModelOperationId("delete", modelId);
+            clearEngineError(engineId);
             state = setPendingModelAction(state, engineId, modelId, {
                 kind: "delete",
                 operationId,
@@ -782,14 +797,14 @@ export function createLocalEngineController(callbacks = {}) {
                 },
             }).then((result) => {
                 state = setPendingModelAction(state, engineId, modelId, null);
+                clearEngineError(engineId);
                 notifyStateChange();
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
                 state = setPendingModelAction(state, engineId, modelId, null);
-                notifyStateChange();
                 // 不做静默 fallback——结构化冲突由调用方展示
-                const err = normalizeError(e);
+                const err = reportEngineError(engineId, "model_delete", e);
                 throw err;
             });
         },
@@ -822,11 +837,12 @@ export function createLocalEngineController(callbacks = {}) {
                 operationId,
             }).then((result) => {
                 state = setPendingModelAction(state, engineId, modelId, null);
+                clearEngineError(engineId);
+                notifyStateChange();
                 this._refreshModels(engineId);
                 return result;
             }).catch((e) => {
-                const err = normalizeError(e);
-                if (callbacks.onError) callbacks.onError(err);
+                const err = reportEngineError(engineId, "model_cancel", e);
                 throw err;
             });
         },
@@ -858,7 +874,11 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async openEngineFolder(engineId) {
             if (disposed) throw new Error("controller 已 disposed");
-            return invoke(COMMANDS.OPEN_ENGINE_FOLDER, {engineId});
+            try {
+                return await invoke(COMMANDS.OPEN_ENGINE_FOLDER, {engineId});
+            } catch (e) {
+                throw reportEngineError(engineId, "open_folder", e);
+            }
         },
 
         /**
@@ -932,6 +952,7 @@ export function createLocalEngineController(callbacks = {}) {
 
             // 设置 pending action（乐观 pending：立即显示 pending/starting）
             const operationId = `${actionKind}-${Date.now()}`;
+            clearEngineError(engineId);
             state = setPendingAction(state, engineId, {
                 kind: actionKind,
                 operationId,
@@ -943,18 +964,17 @@ export function createLocalEngineController(callbacks = {}) {
                 // 成功（含 end_state=cancelled）后清除 pending action——
                 // completed/cancelled 都必须退出忙碌状态
                 state = setPendingAction(state, engineId, null);
+                clearEngineError(engineId);
                 notifyStateChange();
                 // 完成后受 epoch/revision 防护的状态刷新（兜底丢失的终态事件）
                 this.refreshStatus().catch(() => {});
                 return result;
             } catch (e) {
-                const err = normalizeError(e);
                 // 失败也清除 pending action（错误通过状态事件反馈）
                 state = setPendingAction(state, engineId, null);
-                notifyStateChange();
+                const err = reportEngineError(engineId, actionKind, e);
                 // 失败后刷新最终状态，使 rollback error / last_error 可见
                 this.refreshStatus().catch(() => {});
-                if (callbacks.onError) callbacks.onError(err);
                 throw err;
             } finally {
                 activeActions.delete(key);

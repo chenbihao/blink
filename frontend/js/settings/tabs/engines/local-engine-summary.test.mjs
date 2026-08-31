@@ -264,7 +264,7 @@ await test("backend mismatch：默认卡片直接可见", () => {
 
 // ── 7. PaddleOCR 已安装、按需待机 ────────────────────────────────────────────
 
-await test("PaddleOCR 按需待机：策略与主操作（启动测试）", () => {
+await test("PaddleOCR 按需待机：策略与主操作（启动）", () => {
     const entry = makeEntry("paddleocr", {
         status: {
             environment: "ready",
@@ -286,7 +286,7 @@ await test("PaddleOCR 按需待机：策略与主操作（启动测试）", () =
 
     const action = primaryActionView(entry, t);
     assert.equal(action.kind, "start");
-    assert.equal(action.label, "启动测试");
+    assert.equal(action.label, "启动");
 
     // 空闲反馈：按需说明
     const feedback = computeFeedback(entry, t);

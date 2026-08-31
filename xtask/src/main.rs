@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //!   cargo xtask plugins        编译 Rust 插件（仅编译到 target/release，不复制到 bin）
-//!   cargo xtask release        编译插件 + 复制到 bin + release 资源校验 + cargo tauri build
+//!   cargo xtask release        构建 GGUF worker + 插件 + 资源校验 + cargo tauri build
 //!   cargo xtask release --debug 同上，但用 debug profile（DevTools 可用，F12 打开）
 //!   cargo xtask release-check   仅运行 release 资源前置校验（不打包）
 //!   cargo xtask tiptap         打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
@@ -868,6 +868,7 @@ fn main() {
         "release" => {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
+            funasr_worker::build_workers(); // release 唯一入口必须自行生成 gitignore 的 worker 产物
             build_plugins(true, debug); // 打包期：编译 + 复制到 bin
             check_release_resources(); // release 资源前置校验（含 Python 语法）
             let root = workspace_root();
@@ -887,7 +888,7 @@ fn main() {
         "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|icons|tiptap|models|lint> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]"
             )
         }
     }

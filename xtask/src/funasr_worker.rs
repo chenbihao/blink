@@ -41,11 +41,21 @@ const WORKERS: &[(&str, &str)] = &[
     ("llama-funasr-cli", "funasr-nano-worker.exe"),
 ];
 
-/// patch 相对 src 根的应用顺序（与仓库 xtask/funasr-worker/patches 对应）。
-const PATCHES: &[&str] = &[
-    "0001-sensevoice-ndjson-stdin-server.patch",
-    "0002-paraformer-ndjson-stdin-server.patch",
-    "0003-funasr-cli-ndjson-stdin-server.patch",
+/// patch 应用顺序及其上游源码目标（与 xtask/funasr-worker/patches 对应）。
+/// 目标路径用于定向暂存，避免 `git add -A` 扫描整个 FunASR 仓库。
+const PATCH_INPUTS: &[(&str, &str)] = &[
+    (
+        "0001-sensevoice-ndjson-stdin-server.patch",
+        "runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp",
+    ),
+    (
+        "0002-paraformer-ndjson-stdin-server.patch",
+        "runtime/llama.cpp/paraformer/funasr-paraformer/funasr-paraformer.cpp",
+    ),
+    (
+        "0003-funasr-cli-ndjson-stdin-server.patch",
+        "runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp",
+    ),
 ];
 
 fn workspace_root() -> PathBuf {
@@ -60,6 +70,48 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
     hasher.update(&data);
     let out = hasher.finalize();
     Ok(out.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 计算补丁化源码缓存指纹。
+///
+/// `.blink-applied` 不能只记录一个固定的 `ok`：否则 patch、协议头或源码 pin
+/// 变化后，本地 release 会继续复用旧源码，而干净 CI 会重新应用新输入，导致
+/// 两边构建内容分叉。指纹覆盖全部会改变补丁化源码的受控输入。
+fn patched_source_fingerprint(patches_dir: &Path, header: &Path) -> std::io::Result<String> {
+    fn update_framed(hasher: &mut Sha256, label: &str, value: &[u8]) {
+        hasher.update((label.len() as u64).to_le_bytes());
+        hasher.update(label.as_bytes());
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+
+    let mut hasher = Sha256::new();
+    update_framed(&mut hasher, "schema", b"blink-funasr-patched-source-v1");
+    update_framed(&mut hasher, "funasr_commit", FUNASR_COMMIT.as_bytes());
+    update_framed(
+        &mut hasher,
+        "funasr_source_zip_sha256",
+        FUNASR_ZIP_SHA256.as_bytes(),
+    );
+    update_framed(&mut hasher, "llama_cpp_commit", LLAMA_CPP_COMMIT.as_bytes());
+    for (patch, _) in PATCH_INPUTS {
+        update_framed(&mut hasher, "patch_name", patch.as_bytes());
+        update_framed(
+            &mut hasher,
+            "patch_content",
+            &std::fs::read(patches_dir.join(patch))?,
+        );
+    }
+    update_framed(&mut hasher, "protocol_header", &std::fs::read(header)?);
+
+    let digest = hasher.finalize();
+    Ok(format!(
+        "v1:{}\n",
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ))
 }
 
 /// 运行命令，失败 panic（带上下文）。
@@ -173,21 +225,22 @@ fn which_path(name: &str) -> Result<PathBuf, ()> {
 }
 
 /// 确保锁定的 FunASR 源码已下载、校验、解压并应用补丁。
-/// 幂等：`.blink-applied` 标记存在则跳过。
+/// 幂等：`.blink-applied` 指纹与当前源码 pin、patch、协议头一致时跳过。
 fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) -> PathBuf {
     let src_root = work_root.join("src");
     let llama_dir = src_root.join("runtime").join("llama.cpp");
     let marker = src_root.join(".blink-applied");
+    let expected_marker = patched_source_fingerprint(patches_dir, header)
+        .unwrap_or_else(|e| panic!("计算 FunASR 补丁源码指纹失败: {e}"));
 
-    if marker.exists() && llama_dir.join("CMakeLists.txt").exists() {
-        // 头文件始终刷新——协议头是活跃开发面，marker 只跳过"下载+解压+补丁"
-        // 这类重操作；不刷新会导致修改后的协议头静默不进构建。
-        let common = llama_dir.join("funasr-common");
-        if common.exists() {
-            let _ = std::fs::copy(header, common.join("blink_worker_protocol.h"));
-        }
+    let marker_matches =
+        std::fs::read_to_string(&marker).is_ok_and(|actual| actual == expected_marker);
+    if marker_matches && llama_dir.join("CMakeLists.txt").exists() {
         println!("📁 已存在补丁化的 FunASR 源码: {}", src_root.display());
         return llama_dir;
+    }
+    if marker.exists() {
+        println!("♻️  FunASR 构建输入已变化，重新展开并应用补丁");
     }
 
     // 1. 下载 + 校验 zip
@@ -260,12 +313,27 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
         .expect("复制 blink_worker_protocol.h 失败");
 
     // 4. 应用补丁。
-    //    在解压目录先 `git init + add`：`git apply` 在外层仓库（blink）内运行时，
-    //    target/ 被 .gitignore 忽略的路径会被静默 "Skipped patch"（exit 0），
-    //    独立仓库保证补丁真正落到文件上。
+    //    在解压目录建立独立仓库：`git apply` 在外层仓库（blink）内运行时，
+    //    target/ 被 .gitignore 忽略的路径会被静默 "Skipped patch"（exit 0）。
+    //    临时仓库固定使用 LF，避免 Windows 全局 core.autocrlf 污染补丁上下文；
+    //    只暂存三个补丁目标，避免扫描上游仓库中的无关文件和超长路径。
     run_ctx("git", &["init", "-q", "."], &src_root, "git init 解压目录");
-    run_ctx("git", &["add", "-A"], &src_root, "git add 解压目录");
-    for patch in PATCHES {
+    run_ctx(
+        "git",
+        &["config", "core.autocrlf", "false"],
+        &src_root,
+        "配置补丁仓库换行策略",
+    );
+    run_ctx(
+        "git",
+        &["config", "core.eol", "lf"],
+        &src_root,
+        "配置补丁仓库行尾",
+    );
+    let mut add_args = vec!["add", "--"];
+    add_args.extend(PATCH_INPUTS.iter().map(|(_, target)| *target));
+    run_ctx("git", &add_args, &src_root, "git add 补丁目标");
+    for (patch, _) in PATCH_INPUTS {
         let patch_path = patches_dir.join(patch);
         println!("🩹 应用补丁 {patch}...");
         let status = Command::new("git")
@@ -280,7 +348,7 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
         );
     }
 
-    std::fs::write(&marker, b"ok").unwrap();
+    std::fs::write(&marker, expected_marker).unwrap();
     println!("✅ 源码补丁化完成: {}", src_root.display());
     llama_dir
 }
@@ -419,4 +487,40 @@ fn run_cmd_line(line: &str, cwd: &Path, desc: &str) {
         .status()
         .unwrap_or_else(|e| panic!("{desc}: 启动 cmd 失败: {e}"));
     assert!(status.success(), "{desc} 失败 exit={status}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PATCH_INPUTS, patched_source_fingerprint};
+
+    #[test]
+    fn patched_source_fingerprint_tracks_patches_and_header() {
+        let unique = format!(
+            "blink-funasr-fingerprint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let patches = root.join("patches");
+        std::fs::create_dir_all(&patches).unwrap();
+        for (patch, _) in PATCH_INPUTS {
+            std::fs::write(patches.join(patch), format!("patch:{patch}\n")).unwrap();
+        }
+        let header = root.join("blink_worker_protocol.h");
+        std::fs::write(&header, b"header-v1\n").unwrap();
+
+        let original = patched_source_fingerprint(&patches, &header).unwrap();
+        std::fs::write(patches.join(PATCH_INPUTS[0].0), b"patch:changed\n").unwrap();
+        let patch_changed = patched_source_fingerprint(&patches, &header).unwrap();
+        assert_ne!(original, patch_changed, "patch 变化必须使缓存失效");
+
+        std::fs::write(&header, b"header-v2\n").unwrap();
+        let header_changed = patched_source_fingerprint(&patches, &header).unwrap();
+        assert_ne!(patch_changed, header_changed, "协议头变化必须使缓存失效");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

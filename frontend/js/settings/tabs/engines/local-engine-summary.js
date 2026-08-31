@@ -313,10 +313,11 @@ export function computeEngineSummary(entry, t) {
  * 优先级（高 → 低）：
  * 1. 引擎 operation（活跃）或乐观 pending
  * 2. 模型级进行中操作（下载/校验/修复/删除）
- * 3. last_error（错误摘要默认直接可见；detail 折叠展示）
- * 4. selected ≠ active（待重启/未生效）
- * 5. requires_rebuild / environment needs_rebuild
- * 6. 空闲说明（按环境 + 生命周期派生）
+ * 3. 当前引擎瞬时命令错误
+ * 4. last_error（错误摘要默认直接可见；detail 折叠展示）
+ * 5. selected ≠ active（待重启/未生效）
+ * 6. requires_rebuild / environment needs_rebuild
+ * 7. 空闲说明（按环境 + 生命周期派生）
  *
  * @param {Object} entry
  * @param {Function|null} t
@@ -351,7 +352,17 @@ export function computeFeedback(entry, t) {
         return {tone: "busy", text: modelOp.text};
     }
 
-    // 3. last_error
+    // 3. 当前引擎瞬时命令错误（页面级错误区不得承接单引擎错误）
+    if (entry?.transientError) {
+        const err = entry.transientError;
+        const main = err.action_hint || err.message
+            || tx(t, `local_engine.error.${err.code}`, err.code)
+            || tx(t, "local_engine.error.unknown_error", "未知错误");
+        const detail = err.detail || (err.phase ? `[${err.phase}]` : "");
+        return {tone: "error", text: main, detail: detail || undefined};
+    }
+
+    // 4. last_error
     if (s?.last_error) {
         const err = s.last_error;
         const main = err.action_hint || err.message
@@ -361,7 +372,7 @@ export function computeFeedback(entry, t) {
         return {tone: "error", text: main, detail: detail || undefined};
     }
 
-    // 4. selected ≠ active
+    // 5. selected ≠ active
     const modelSummary = computeModelSummary(entry);
     if (modelSummary.mismatch) {
         return {
@@ -370,7 +381,7 @@ export function computeFeedback(entry, t) {
         };
     }
 
-    // 5. 待重建
+    // 6. 待重建
     if (s?.environment === "needs_rebuild"
         || entry?.preferences?.requires_rebuild === true) {
         return {
@@ -588,7 +599,7 @@ function iconForKind(kind) {
  * - cancellable operation → 取消
  * - 忙碌（乐观 pending / 活跃 operation 且不可取消）→ 不可点的"{kind}中"
  * - missing → 安装环境；broken/needs_rebuild → 修复环境
- * - stopped/exited → 启动（on_demand 引擎显示"启动测试"）
+ * - stopped/exited → 启动
  * - starting/running/stopping → 停止服务
  *
  * kind 为 null 时按钮 disabled（等待态）。
@@ -652,19 +663,12 @@ export function primaryActionView(entry, t) {
                 disabled: false,
             };
         case "start":
-            return isOnDemand(entry)
-                ? {
-                    kind: "start",
-                    label: tx(t, "local_engine.action.start_test", "启动测试"),
-                    icon: "play",
-                    disabled: false,
-                }
-                : {
-                    kind: "start",
-                    label: tx(t, "local_engine.action.start", "启动"),
-                    icon: "play",
-                    disabled: false,
-                };
+            return {
+                kind: "start",
+                label: tx(t, "local_engine.action.start", "启动"),
+                icon: "play",
+                disabled: false,
+            };
         case "stop":
             return {
                 kind: "stop",

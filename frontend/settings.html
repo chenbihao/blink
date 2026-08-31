@@ -399,7 +399,10 @@
             <!-- 用户脚本解释器 -->
             <h3 class="section-heading" data-i18n="engines.section.script_interpreters">用户脚本解释器</h3>
             <p class="section-desc" data-i18n="engines.section.script_interpreters.desc">Python / Node.js 解释器用于运行脚本插件。这是你系统上的解释器，Blink 不会修改它。</p>
-            <p class="section-note" data-i18n="engines.section.script_interpreters.note">与下方 Blink 托管运行时不同：脚本解释器读取你的 PATH 或手动配置路径，不共享隔离环境。</p>
+            <div class="section-note">
+                <svg aria-hidden="true" class="icon section-note-icon"><use href="#icon-lightbulb"/></svg>
+                <span data-i18n="engines.section.script_interpreters.note">与下方 Blink 托管运行时不同：脚本解释器读取你的 PATH 或手动配置路径，不共享隔离环境。</span>
+            </div>
 
             <div class="extension-card">
                 <div class="extension-header">
@@ -2112,6 +2115,7 @@
                     </button>
                 </div>
             </div>
+            <!-- tap 阈值 / 看门狗 grace period：已调优，用户无需调整，注释隐藏（保留默认值）
             <div class="setting-row">
                 <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值<span class="field-hint-icon"
                                                                                         data-i18n-title="hotkey.tap.title">ⓘ</span></label>
@@ -2124,6 +2128,7 @@
                 <input id="grace-ms" max="1000" min="200" step="50" type="range" value="500"/>
                 <span id="grace-ms-value">500ms</span>
             </div>
+            -->
 
             <!-- 0.17.3：Chord 快捷键速查表 -->
             <div class="cheatsheet" id="chord-cheatsheet">

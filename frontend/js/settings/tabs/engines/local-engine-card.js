@@ -311,7 +311,6 @@ function buildToolsRow(entry, controller, i18n) {
     const maintLabel = document.createElement("span");
     maintLabel.textContent = tt(i18n, "local_engine.maintenance.btn", "维护");
     maintBtn.appendChild(maintLabel);
-    maintBtn.appendChild(renderIcon("chevron-down", {extraClass: "le-action-icon le-disclosure-icon"}));
     maintBtn.addEventListener("click", () => {
         toggleExclusivePanel(maintBtn, ".le-maintenance");
     });
