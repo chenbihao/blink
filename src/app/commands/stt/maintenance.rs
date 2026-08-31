@@ -61,7 +61,7 @@ pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
 
     match result {
         Ok(text) => {
-            tracing::info!(%text, "云端 STT 测试成功");
+            tracing::info!("云端 STT 测试成功");
             Ok(serde_json::json!({
                 "success": true,
                 "text": text,

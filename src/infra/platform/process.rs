@@ -245,11 +245,7 @@ pub fn kill_process_tree_verified(
     })?;
 
     // 允许 2 秒误差（OS 创建时间精度差异）
-    let diff = if actual_start > expected_start_time_ms {
-        actual_start - expected_start_time_ms
-    } else {
-        expected_start_time_ms - actual_start
-    };
+    let diff = actual_start.abs_diff(expected_start_time_ms);
     if diff > 2000 {
         tracing::warn!(
             pid,

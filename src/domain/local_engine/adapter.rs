@@ -238,6 +238,7 @@ pub struct AdapterConfig {
 
 impl AdapterConfig {
     /// 创建空配置。
+    #[allow(dead_code)] // Default trait 已满足构造需求；new() 为显式语义入口保留
     pub fn new() -> Self {
         Self::default()
     }

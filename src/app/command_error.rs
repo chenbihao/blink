@@ -325,4 +325,94 @@ mod tests {
         assert_eq!(e.detail, e2.detail);
         assert_eq!(e.retryable, e2.retryable);
     }
+
+    /// Capability → CommandError 投影：OCR 各错误分类保留
+    /// stable code / message / detail / retryable，诊断不再解析 "[[...]]" 字符串。
+    ///
+    /// 从 domain/capability/builtins/ocr_image.rs 迁移（0.22 D1）：
+    /// app 测试从公开领域错误 CapabilityError 构造输入，不依赖 domain private helper。
+    #[test]
+    fn capability_to_command_error_projection_preserves_structure() {
+        use crate::domain::capability::CapabilityError;
+
+        struct Case {
+            name: &'static str,
+            cap: CapabilityError,
+            expected_code: &'static str,
+            expected_retryable: bool,
+        }
+        let cases = vec![
+            Case {
+                name: "decode_error",
+                cap: CapabilityError::InvalidData {
+                    reason: "decode_error".to_string(),
+                    detail: "PNG header 非法".to_string(),
+                },
+                expected_code: "invalid_data",
+                expected_retryable: false,
+            },
+            Case {
+                name: "input_too_large",
+                cap: CapabilityError::InvalidData {
+                    reason: "input_too_large".to_string(),
+                    detail: "decoded 像素超出上限".to_string(),
+                },
+                expected_code: "invalid_data",
+                expected_retryable: false,
+            },
+            Case {
+                name: "protocol_error",
+                cap: CapabilityError::Backend {
+                    category: "protocol_error".to_string(),
+                    message: "响应缺少 request_id".to_string(),
+                    detail: None,
+                    retryable: false,
+                },
+                expected_code: "protocol_error",
+                expected_retryable: false,
+            },
+            Case {
+                name: "timeout",
+                cap: CapabilityError::Timeout {
+                    detail: "操作超时".to_string(),
+                },
+                expected_code: "timeout",
+                expected_retryable: true,
+            },
+            Case {
+                name: "cancelled",
+                cap: CapabilityError::Cancelled,
+                expected_code: "cancelled",
+                expected_retryable: false,
+            },
+        ];
+
+        for case in cases {
+            let ce: CommandError = case.cap.into();
+            assert_eq!(ce.code, case.expected_code, "case={}", case.name);
+            assert_eq!(ce.retryable, case.expected_retryable, "case={}", case.name);
+            assert!(
+                !ce.message.contains("[["),
+                "case={} message 不得再携带 [[category]] 括号伪协议",
+                case.name
+            );
+            // detail 保留结构化字段（timeout/cancelled 无载荷 detail）
+            let detail = ce.detail;
+            match case.name {
+                "decode_error" | "input_too_large" => {
+                    let detail = detail.expect("invalid_data 投影应保留 detail");
+                    assert!(
+                        detail.get("reason").is_some(),
+                        "case={} detail.reason 应保留",
+                        case.name
+                    );
+                }
+                "protocol_error" => {
+                    let detail = detail.expect("backend 投影应保留 detail");
+                    assert_eq!(detail["category"], "protocol_error");
+                }
+                _ => {}
+            }
+        }
+    }
 }

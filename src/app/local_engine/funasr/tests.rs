@@ -122,7 +122,7 @@ fn old_paraformer_config_deserializes_to_gguf_id() {
     }
 }
 
-/// 旧真流式模型 id（已废弃）→ 默认 SenseVoice GGUF。
+/// 旧真流式 Paraformer 模型 id（已废弃）→ Paraformer GGUF（同种类迁移，不静默换模型）。
 #[test]
 fn old_streaming_model_id_normalizes_to_gguf_default() {
     for legacy in [
@@ -134,7 +134,8 @@ fn old_streaming_model_id_normalizes_to_gguf_default() {
             serde_json::from_str(&json).unwrap();
         assert_eq!(
             local.funasr_model,
-            crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
+            crate::domain::config::stt_config::GGUF_PARAFORMER_MODEL_ID,
+            "旧真流式 id {legacy} 应归一化为 Paraformer GGUF（同种类迁移）"
         );
     }
 }

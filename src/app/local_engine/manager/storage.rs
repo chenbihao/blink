@@ -12,7 +12,6 @@ enum CleanupTargetOutcome {
     Deferred(u64),
 }
 
-#[allow(dead_code)]
 impl EngineManager {
     /// 清理引擎资产。
     ///
@@ -151,23 +150,6 @@ impl EngineManager {
         })?;
 
         result.map_err(|e| from_runtime(ErrorPhase::Request, "存储扫描失败", &e))
-    }
-
-    /// 解析 target_id 并执行清理（阻塞——须在 spawn_blocking 中调用）。
-    ///
-    /// target_id 格式：
-    /// - `slot:{slot}` — 非 active 部署 slot（residue 感知：占用记残留）
-    /// - `staging` — 孤儿 staging
-    /// - `model_cache` — 引擎模型缓存
-    /// - `shared:{runtime_kind}:{artifact_id}` — provider 共享 artifact
-    /// - `download_cache:{runtime_kind}` — provider 下载缓存
-    /// - `legacy:{kind}` — 旧版遗留资产（拒绝自动清理）
-    fn resolve_and_cleanup_target(
-        &self,
-        engine_id: &EngineId,
-        target_id: &str,
-    ) -> Result<CleanupTargetOutcome, crate::infra::local_engine::runtime::RuntimeError> {
-        resolve_and_cleanup_target_blocking(engine_id, target_id)
     }
 }
 
@@ -442,33 +424,31 @@ fn scan_engine_storage_blocking(
 
     // ── 7. 旧版遗留资产 ──
     // 旧版 ModelScope 用户级公共缓存——仅在确有诊断价值时展示
-    if engine_id.as_str() == "funasr" {
-        if let Some(legacy_dir) = dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"))
-        {
-            if legacy_dir.exists() {
-                let size = dir_size(&legacy_dir);
-                if size > 0 {
-                    total_bytes += size;
+    if engine_id.as_str() == "funasr"
+        && let Some(legacy_dir) = dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"))
+        && legacy_dir.exists()
+    {
+        let size = dir_size(&legacy_dir);
+        if size > 0 {
+            total_bytes += size;
 
-                    // legacy 资产不自动标记为 removable——需要单独确认
-                    targets.push(super::super::dto::StorageTargetDto {
-                        target_id: "legacy:modelscope".to_string(),
-                        kind: super::super::dto::StorageTargetKindDto::LegacyAsset,
-                        engine_id: Some(engine_id.to_string()),
-                        label_key: "local_engine.storage.legacy_modelscope".to_string(),
-                        label_fallback: "旧版 ModelScope 缓存残留".to_string(),
-                        size_bytes: size,
-                        current: false,
-                        removable: false,
-                        shared: true,
-                        requires_separate_confirmation: true,
-                        blocked_reason: Some("需单独确认和手动清理".to_string()),
-                        affected_engine_ids: None,
-                        reference_count: None,
-                        path_display: None,
-                    });
-                }
-            }
+            // legacy 资产不自动标记为 removable——需要单独确认
+            targets.push(super::super::dto::StorageTargetDto {
+                target_id: "legacy:modelscope".to_string(),
+                kind: super::super::dto::StorageTargetKindDto::LegacyAsset,
+                engine_id: Some(engine_id.to_string()),
+                label_key: "local_engine.storage.legacy_modelscope".to_string(),
+                label_fallback: "旧版 ModelScope 缓存残留".to_string(),
+                size_bytes: size,
+                current: false,
+                removable: false,
+                shared: true,
+                requires_separate_confirmation: true,
+                blocked_reason: Some("需单独确认和手动清理".to_string()),
+                affected_engine_ids: None,
+                reference_count: None,
+                path_display: None,
+            });
         }
     }
 
@@ -658,20 +638,17 @@ fn dir_size(path: &std::path::Path) -> u64 {
     let mut total: u64 = 0;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        match std::fs::read_dir(&dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    match entry.file_type() {
-                        Ok(t) if t.is_dir() => stack.push(path),
-                        Ok(t) if t.is_file() => {
-                            total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                        }
-                        _ => {}
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(path),
+                    Ok(t) if t.is_file() => {
+                        total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     }
+                    _ => {}
                 }
             }
-            Err(_) => {}
         }
     }
     total

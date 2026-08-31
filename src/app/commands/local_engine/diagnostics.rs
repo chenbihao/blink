@@ -105,7 +105,7 @@ pub async fn get_runtime_foundation_status(
         engines.push(serde_json::json!({
             "engine_id": engine_id_str,
             "display_name": descriptor.display,
-            "environment": environment_health_to_string(snapshot.status.environment.clone()),
+            "environment": environment_health_to_string(snapshot.status.environment),
             "process": project_process_state(&snapshot.status.process),
             "service": service_health_to_string(snapshot.status.service),
         }));
@@ -169,7 +169,7 @@ pub async fn get_engine_diagnostics(
     // ── 5. 投影为闭合 DTO ──
     Ok(EngineDiagnosticsDto {
         engine_id,
-        environment: environment_health_to_string(snapshot.status.environment.clone()),
+        environment: environment_health_to_string(snapshot.status.environment),
         process: project_process_state_dto(&snapshot.status.process),
         service: service_health_to_string(snapshot.status.service),
         adapter_diagnostics,

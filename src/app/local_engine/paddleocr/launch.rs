@@ -146,22 +146,23 @@ pub(super) fn build_paddleocr_launch_descriptor(
     );
 
     // 构建参数列表
-    let mut args: Vec<String> = Vec::new();
-    args.push(script_path.to_string_lossy().to_string());
-    args.push("--port".to_string());
-    args.push(port.to_string());
-    args.push("--model".to_string());
-    args.push(ocr_config.model.clone());
-    args.push("--token".to_string());
-    args.push(ctx.token.clone());
-    args.push("--engine-id".to_string());
-    args.push(ctx.engine_id.clone());
-    args.push("--instance-id".to_string());
-    args.push(ctx.instance_id.clone());
-    args.push("--model-cache".to_string());
-    args.push(model_cache_dir.to_string_lossy().to_string());
-    args.push("--cpu-threads".to_string());
-    args.push(ocr_config.cpu_threads.to_string());
+    let mut args: Vec<String> = vec![
+        script_path.to_string_lossy().to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--model".to_string(),
+        ocr_config.model.clone(),
+        "--token".to_string(),
+        ctx.token.clone(),
+        "--engine-id".to_string(),
+        ctx.engine_id.clone(),
+        "--instance-id".to_string(),
+        ctx.instance_id.clone(),
+        "--model-cache".to_string(),
+        model_cache_dir.to_string_lossy().to_string(),
+        "--cpu-threads".to_string(),
+        ocr_config.cpu_threads.to_string(),
+    ];
 
     if ocr_config.enable_mkldnn {
         args.push("--enable-mkldnn".to_string());

@@ -41,4 +41,6 @@
 @import '../views/settings/settings-ai.css';
 @import '../views/settings/settings-voice.css';
 @import '../views/settings/settings-local-runtime.css';
+@import '../views/settings/settings-local-runtime-panels.css';
+@import '../views/settings/settings-local-runtime-modals.css';
 @import '../views/settings/settings-mcp.css';

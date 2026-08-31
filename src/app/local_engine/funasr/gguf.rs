@@ -54,6 +54,8 @@ pub struct GgufModelSpec {
     pub worker_exe: &'static str,
     /// 该模型必需的 GGUF 文件。
     pub files: Vec<GgufFileSpec>,
+    /// per-model STT 能力声明（Handoff 02：稳定产品契约）。
+    pub stt_capabilities: crate::domain::local_engine::SttModelCapabilities,
 }
 
 /// SenseVoice Small Q8（五语种，CPU 首选，内置 ITN/标点）。
@@ -67,6 +69,25 @@ pub const GGUF_NANO_ID: &str = crate::domain::config::stt_config::GGUF_NANO_MODE
 
 /// 模型 revision：与 runtime release 绑定（模型文件由该 runtime 首次发布）。
 pub const GGUF_MODEL_REVISION: &str = "gguf-v0.2.6";
+
+/// 校验模型 URL 不使用浮动 ref（`/resolve/main/`）。
+///
+/// 浮动 ref 指向仓库默认分支的最新提交，上游更新文件后会导致：
+/// - SHA-256 不匹配 → 安装失败（但错误信息可能不明确）
+/// - 无法复现下载（同一 URL 在不同时间返回不同文件）
+///
+/// release-check 拒绝任何包含 `/resolve/main/` 的 URL。
+/// 正确做法是使用 `/resolve/<commit-sha>/` 固定到不可变 revision。
+#[allow(dead_code)] // 预留校验入口，release-check 同规则消费
+pub(crate) fn validate_model_url_stable(url: &str) -> Result<(), String> {
+    if url.contains("/resolve/main/") {
+        return Err(format!(
+            "模型 URL 使用浮动 ref（resolve/main）：{url}。\
+             请替换为 /resolve/<commit-sha>/ 固定到不可变 revision。"
+        ));
+    }
+    Ok(())
+}
 
 /// GGUF 模型目录（编译期锁定）。
 pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
@@ -82,10 +103,25 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                 worker_exe: "funasr-sensevoice-worker.exe",
                 files: vec![GgufFileSpec {
                     file_name: "sensevoice-small-q8.gguf",
-                    url: "https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/main/sensevoice-small-q8.gguf".to_string(),
+                    url: "https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/90c1c61912018b70ada0fcc024ea24aca62f2e63/sensevoice-small-q8.gguf".to_string(),
                     sha256: "4ae45c94422de949b387e2e0fb10d7e14e4c42c69db30c3444ecc7d4b844b7c5".to_string(),
                     size_bytes: 254_208_320,
                 }],
+                // SenseVoice 能力矩阵（证据来源：0.22.7.1 spike 实测 + FunASR 上游文档）
+                // - languages: 五语种内置（中/英/日/韩/粤），上游文档明确
+                // - hotwords: GGUF worker 无热词参数入口，不支持
+                // - itn: SenseVoice 模型内置 ITN，worker 输出已含后处理
+                // - pseudo_streaming: PseudoStreamingSttEngine 对所有模型可用
+                // - true_streaming: 非自回归模型，无增量 encoder
+                // - timestamps: worker NDJSON 协议 TranscribeOptions 未开放
+                stt_capabilities: crate::domain::local_engine::SttModelCapabilities {
+                    languages: vec!["zh".into(), "en".into(), "ja".into(), "ko".into(), "yue".into()],
+                    hotwords: crate::domain::local_engine::CapabilityFlag::no("stt.capability.hotwords.unsupported_gguf"),
+                    itn: crate::domain::local_engine::CapabilityFlag::yes(),
+                    pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
+                    true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.no_incremental_encoder"),
+                    timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
+                },
             },
             GgufModelSpec {
                 model_id: GGUF_PARAFORMER_ID,
@@ -95,10 +131,24 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                 worker_exe: "funasr-paraformer-worker.exe",
                 files: vec![GgufFileSpec {
                     file_name: "paraformer-q8.gguf",
-                    url: "https://huggingface.co/FunAudioLLM/Paraformer-GGUF/resolve/main/paraformer-q8.gguf".to_string(),
+                    url: "https://huggingface.co/FunAudioLLM/Paraformer-GGUF/resolve/1a5063b305a2b4e418ccffaf7be2c02a3cac6c89/paraformer-q8.gguf".to_string(),
                     sha256: "42bf76ea1575a336aaca4c1b7c01a82b79113e6d04d0d6b799561bfcf07ee011".to_string(),
                     size_bytes: 236_929_024,
                 }],
+                // Paraformer 能力矩阵（证据来源：0.22.7.3 spike 实测）
+                // - languages: 中文专用模型（实测英文单词无空格拼接）
+                // - hotwords: GGUF worker 无热词参数入口
+                // - itn: Paraformer GGUF 无内置 ITN/标点
+                // - pseudo_streaming: 可用（粗粒度，非自回归延迟低）
+                // - true_streaming: 非自回归，无增量 encoder
+                stt_capabilities: crate::domain::local_engine::SttModelCapabilities {
+                    languages: vec!["zh".into()],
+                    hotwords: crate::domain::local_engine::CapabilityFlag::no("stt.capability.hotwords.unsupported_gguf"),
+                    itn: crate::domain::local_engine::CapabilityFlag::no("stt.capability.itn.unsupported_paraformer_gguf"),
+                    pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
+                    true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.no_incremental_encoder"),
+                    timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
+                },
             },
             GgufModelSpec {
                 model_id: GGUF_NANO_ID,
@@ -109,17 +159,31 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                 files: vec![
                     GgufFileSpec {
                         file_name: "funasr-encoder-f16.gguf",
-                        url: "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/main/funasr-encoder-f16.gguf".to_string(),
+                        url: "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e849502a867080d66d351b8dfb1018b607e509/funasr-encoder-f16.gguf".to_string(),
                         sha256: "f92f91d01a24fbed6c863495b2ee8c6a6788144a02858b75743f0946668de8a2".to_string(),
                         size_bytes: 469_331_008,
                     },
                     GgufFileSpec {
                         file_name: "qwen3-0.6b-q4km.gguf",
-                        url: "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/main/qwen3-0.6b-q4km.gguf".to_string(),
+                        url: "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e849502a867080d66d351b8dfb1018b607e509/qwen3-0.6b-q4km.gguf".to_string(),
                         sha256: "cc5057552aa9dddedcda73ea8889854e8a257eb07d0a561b7234465c1e856f22".to_string(),
                         size_bytes: 484_219_776,
                     },
                 ],
+                // Nano 能力矩阵（证据来源：0.22.7.3 spike 实测）
+                // - languages: 中文为主（自回归 LLM，多语言能力未验证）
+                // - hotwords: GGUF worker 无热词参数入口
+                // - itn: 无内置 ITN
+                // - pseudo_streaming: 可用但粗粒度（自回归延迟显著高于 SenseVoice）
+                // - true_streaming: 自回归但 KV 每请求清空，非增量
+                stt_capabilities: crate::domain::local_engine::SttModelCapabilities {
+                    languages: vec!["zh".into()],
+                    hotwords: crate::domain::local_engine::CapabilityFlag::no("stt.capability.hotwords.unsupported_gguf"),
+                    itn: crate::domain::local_engine::CapabilityFlag::no("stt.capability.itn.unsupported_nano"),
+                    pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
+                    true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.kv_cleared_per_request"),
+                    timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
+                },
             },
         ]
     })
@@ -156,6 +220,7 @@ pub fn gguf_model_descriptor(
         ),
         estimated_size_mb: Some(total_bytes / (1024 * 1024)),
         compatibility_schema: crate::infra::local_engine::worker_proto::WORKER_PROTOCOL_VERSION,
+        stt_capabilities: spec.stt_capabilities.clone(),
     }
 }
 
@@ -372,4 +437,69 @@ pub fn build_funasr_gguf_launch_descriptor(
         env,
         label: FUNASR_ENGINE_ID.to_string(),
     })
+}
+
+// ── 测试 ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_model_url_rejects_resolve_main() {
+        let url = "https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/main/sensevoice-small-q8.gguf";
+        assert!(validate_model_url_stable(url).is_err());
+    }
+
+    #[test]
+    fn validate_model_url_accepts_fixed_revision() {
+        let url = "https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/abc123def/sensevoice-small-q8.gguf";
+        assert!(validate_model_url_stable(url).is_ok());
+    }
+
+    /// 所有模型 URL 已固定到上游 commit SHA——不使用 resolve/main 浮动 ref。
+    #[test]
+    fn current_model_urls_use_fixed_revision() {
+        for spec in gguf_model_specs() {
+            for file in &spec.files {
+                assert!(
+                    validate_model_url_stable(&file.url).is_ok(),
+                    "URL {url} 仍使用 resolve/main 浮动 ref",
+                    url = file.url
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_specs_have_consistent_revision() {
+        for spec in gguf_model_specs() {
+            assert_eq!(
+                spec.revision, GGUF_MODEL_REVISION,
+                "model {} revision 不一致",
+                spec.model_id
+            );
+        }
+    }
+
+    #[test]
+    fn model_specs_have_sha256() {
+        for spec in gguf_model_specs() {
+            for file in &spec.files {
+                assert!(
+                    !file.sha256.is_empty(),
+                    "model {} file {} 缺少 SHA-256",
+                    spec.model_id,
+                    file.file_name
+                );
+                assert_eq!(
+                    file.sha256.len(),
+                    64,
+                    "model {} file {} SHA-256 长度异常",
+                    spec.model_id,
+                    file.file_name
+                );
+            }
+        }
+    }
 }

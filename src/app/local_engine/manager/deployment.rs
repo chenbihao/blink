@@ -4,7 +4,6 @@
 
 use super::*;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── install ─────────────────────────────────────────────────────────────
 
@@ -256,17 +255,17 @@ impl EngineManager {
             Err(e) => {
                 tracing::warn!(engine = %engine_id, %e, "probe_environment: 获取 entry 失败");
                 // 即使失败也设置 probe_result + 发送 watch，让等待者获得确定结果
-                if let Ok(entries) = self.entries.try_read() {
-                    if let Some(entry) = entries.get(engine_id) {
-                        let err = LocalEngineError::with_detail(
-                            LocalEngineErrorCode::Internal,
-                            ErrorPhase::Request,
-                            "探测失败",
-                            format!("{e}"),
-                        );
-                        let _ = entry.probe_result.set(Err(err));
-                        let _ = entry.probe_tx.send(true);
-                    }
+                if let Ok(entries) = self.entries.try_read()
+                    && let Some(entry) = entries.get(engine_id)
+                {
+                    let err = LocalEngineError::with_detail(
+                        LocalEngineErrorCode::Internal,
+                        ErrorPhase::Request,
+                        "探测失败",
+                        format!("{e}"),
+                    );
+                    let _ = entry.probe_result.set(Err(err));
+                    let _ = entry.probe_tx.send(true);
                 }
                 return;
             }
@@ -275,7 +274,7 @@ impl EngineManager {
         let result = self.do_probe(engine_id, &entry).await;
 
         // 无论成功失败，都设置 probe_result + 发送 watch 信号——确定性协调
-        let probe_outcome = result.as_ref().map(|()| ()).map_err(|e| {
+        let probe_outcome = result.as_ref().copied().map_err(|e| {
             LocalEngineError::with_detail(
                 LocalEngineErrorCode::Internal,
                 ErrorPhase::Request,
@@ -302,11 +301,10 @@ impl EngineManager {
     /// 1. 事务 journal 已按 fail-closed 规则恢复（`DeploymentStore::recover`）
     /// 2. active 指针存在且指向可读 manifest
     /// 3. adapter `self_test` 通过
-    /// 缺少任何一项都不标记 Ready。
-    ///
-    /// **阻塞隔离**：recover（journal 扫描）、read_active（磁盘 IO）、
-    /// self_test（venv python 子进程等待）全部在 `spawn_blocking` 内执行，
-    /// async 上下文只做状态提交。
+    ///    缺少任何一项都不标记 Ready。
+    ///    **阻塞隔离**：recover（journal 扫描）、read_active（磁盘 IO）、
+    ///    self_test（venv python 子进程等待）全部在 `spawn_blocking` 内执行，
+    ///    async 上下文只做状态提交。
     async fn do_probe(&self, engine_id: &EngineId, entry: &EngineEntry) -> Result<(), String> {
         let adapter = Arc::clone(&entry.adapter);
         let eid = engine_id.clone();
@@ -502,7 +500,7 @@ impl EngineManager {
 
         // 无 ProviderDescriptor 时退化为 self_test 验证
         // （self_test 可能等待 venv python 子进程——阻塞隔离）
-        if self.provider_descriptors.get(engine_id).is_none() {
+        if !self.provider_descriptors.contains_key(engine_id) {
             let adapter = Arc::clone(&entry.adapter);
             let self_test = tokio::task::spawn_blocking(move || adapter.self_test())
                 .await
@@ -595,8 +593,7 @@ impl EngineManager {
     /// 真源在 [`super::super::config_source`]——commands/maintenance/wiring 与本服务
     /// 共用同一构造入口，避免归一化规则（如 funasr device=cuda→Cpu）漂移。
     fn read_adapter_config_for_engine(&self, engine_id: &EngineId) -> AdapterConfig {
-        super::super::config_source::adapter_config_for_engine(engine_id)
-            .unwrap_or_else(AdapterConfig::new)
+        super::super::config_source::adapter_config_for_engine(engine_id).unwrap_or_default()
     }
 }
 

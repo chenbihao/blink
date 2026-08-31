@@ -514,11 +514,7 @@ pub fn decide_recovery(
     };
 
     // 允许 2 秒误差（OS 创建时间精度差异）
-    let diff = if actual_creation > lease.creation_time_ms {
-        actual_creation - lease.creation_time_ms
-    } else {
-        lease.creation_time_ms - actual_creation
-    };
+    let diff = actual_creation.abs_diff(lease.creation_time_ms);
     if diff > 2000 {
         return RecoveryDecision::DoNotAdopt(RecoveryDiagnostics {
             engine_id: lease.engine_id.clone(),

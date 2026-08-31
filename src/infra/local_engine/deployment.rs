@@ -632,10 +632,10 @@ fn sweep_staging_except(engine_id: &EngineId, keep: Option<&str>) -> usize {
             if keep == Some(name.as_str()) {
                 continue;
             }
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if std::fs::remove_dir_all(entry.path()).is_ok() {
-                    cleaned += 1;
-                }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && std::fs::remove_dir_all(entry.path()).is_ok()
+            {
+                cleaned += 1;
             }
         }
     }

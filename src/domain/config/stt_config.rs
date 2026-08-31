@@ -95,14 +95,20 @@ pub const GGUF_NANO_MODEL_ID: &str = "gguf/fun-asr-nano-q4km";
 ///
 /// 语义：**保持用户选择的模型种类不变**（SenseVoice→SenseVoice GGUF、
 /// Paraformer→Paraformer GGUF），只更换底层 runtime；不存在静默换模型。
-/// 旧 id 无对应 GGUF 实现（如真流式 online 变体）时返回 None。
+/// 旧 id 无对应 GGUF 实现时返回 None——此时选择保持原样并记录 warn，
+/// 让用户知道该模型已不可用，需手动切换。
 pub fn legacy_model_to_gguf_id(legacy: &str) -> Option<&'static str> {
     match legacy {
+        // SenseVoice 家族
         "iic/SenseVoiceSmall" | "SenseVoice" | "sensevoice" | "sensevoice-small" => {
             Some(GGUF_SENSEVOICE_MODEL_ID)
         }
+        // Paraformer 家族（含旧真流式 online 变体——同种类迁移为 Paraformer GGUF）
         "paraformer-zh"
-        | "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" => {
+        | "paraformer-zh-streaming"
+        | "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+        | "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
+        | "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404" => {
             Some(GGUF_PARAFORMER_MODEL_ID)
         }
         _ => None,
@@ -328,10 +334,10 @@ fn deserialize_funasr_model<'de, D: serde::Deserializer<'de>>(
         | "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404" => {
             GGUF_PARAFORMER_MODEL_ID.to_string()
         }
-        // 旧真流式模型，已废弃——归一化为默认 SenseVoice
+        // 旧真流式 Paraformer 变体——同种类迁移为 Paraformer GGUF（不静默换模型）
         "paraformer-zh-streaming"
         | "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online" => {
-            GGUF_SENSEVOICE_MODEL_ID.to_string()
+            GGUF_PARAFORMER_MODEL_ID.to_string()
         }
         other => other.to_string(),
     })
@@ -855,14 +861,14 @@ mod tests {
         );
     }
 
-    /// 验证旧真流式模型名被归一化为默认 SenseVoice GGUF id。
+    /// 验证旧真流式 Paraformer 模型名被归一化为 Paraformer GGUF id（同种类迁移）。
     #[test]
     fn deserialize_normalizes_old_streaming_model_name() {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"paraformer-zh-streaming","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
-            cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID,
-            "旧真流式模型 'paraformer-zh-streaming' 应归一化为 SenseVoice GGUF id"
+            cfg.local_engine.funasr_model, GGUF_PARAFORMER_MODEL_ID,
+            "旧真流式模型 'paraformer-zh-streaming' 应归一化为 Paraformer GGUF id（同种类迁移，不静默换模型）"
         );
     }
 
@@ -1279,6 +1285,7 @@ mod tests {
             ),
             estimated_size_mb: Some(243),
             compatibility_schema: 1,
+            stt_capabilities: crate::domain::local_engine::SttModelCapabilities::default(),
         }
     }
 
@@ -1407,6 +1414,17 @@ mod tests {
             ),
             Some(GGUF_PARAFORMER_MODEL_ID)
         );
+        // 旧真流式 Paraformer 变体也映射为 Paraformer GGUF（同种类迁移）
+        assert_eq!(
+            legacy_model_to_gguf_id("paraformer-zh-streaming"),
+            Some(GGUF_PARAFORMER_MODEL_ID)
+        );
+        assert_eq!(
+            legacy_model_to_gguf_id(
+                "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
+            ),
+            Some(GGUF_PARAFORMER_MODEL_ID)
+        );
         assert_eq!(legacy_model_to_gguf_id("unknown"), None);
     }
 
@@ -1468,5 +1486,24 @@ mod tests {
             cfg.local_stt_selection.unwrap().model_id,
             "some-exotic-model"
         );
+    }
+
+    /// 旧真流式 Paraformer 选择迁移为 Paraformer GGUF（同种类迁移，不静默换模型）。
+    #[test]
+    fn migrate_selection_to_gguf_maps_streaming_paraformer() {
+        let mut cfg = SttConfig {
+            local_stt_selection: Some(LocalSttSelection::new("funasr", "paraformer-zh-streaming")),
+            local_engine: LocalEngineConfig {
+                funasr_model: "paraformer-zh-streaming".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(cfg.migrate_selection_to_gguf());
+        let sel = cfg.local_stt_selection.unwrap();
+        assert_eq!(sel.engine_id, "funasr");
+        assert_eq!(sel.model_id, GGUF_PARAFORMER_MODEL_ID);
+        // 兼容镜像字段同步
+        assert_eq!(cfg.local_engine.funasr_model, GGUF_PARAFORMER_MODEL_ID);
     }
 }

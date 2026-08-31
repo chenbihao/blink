@@ -2,7 +2,6 @@
 
 use super::*;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── stop_orphan_engine（0.22.6.6）─────────────────────────────────────
 
@@ -27,17 +26,16 @@ impl EngineManager {
         let engine_id_str = engine_id.to_string();
 
         // 1. 扫描 lease 文件，查找匹配的 lease
-        let leases =
-            tokio::task::spawn_blocking(|| crate::infra::local_engine::lease::scan_leases())
-                .await
-                .map_err(|e| {
-                    LocalEngineError::with_detail(
-                        LocalEngineErrorCode::Internal,
-                        ErrorPhase::Request,
-                        "扫描 lease 失败",
-                        format!("spawn_blocking join 错误: {e}"),
-                    )
-                })?;
+        let leases = tokio::task::spawn_blocking(crate::infra::local_engine::lease::scan_leases)
+            .await
+            .map_err(|e| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Request,
+                    "扫描 lease 失败",
+                    format!("spawn_blocking join 错误: {e}"),
+                )
+            })?;
 
         let lease = leases
             .iter()

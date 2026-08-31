@@ -94,10 +94,10 @@ impl EndpointAllocator {
         candidate_range: Option<(u16, u16)>,
         max_retries: usize,
     ) -> Result<Self, PortError> {
-        if let Some((start, end)) = candidate_range {
-            if start > end {
-                return Err(PortError::InvalidRange { start, end });
-            }
+        if let Some((start, end)) = candidate_range
+            && start > end
+        {
+            return Err(PortError::InvalidRange { start, end });
         }
         // max_retries 至少为 1（至少尝试 preferred port 一次）
         let max_retries = max_retries.max(1);
@@ -674,7 +674,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             instance_id: "inst-001".to_string(),
             token: token.clone(),
-            endpoint: ep.clone(),
+            endpoint: ep,
         };
 
         let result = ServiceIdentityResult {
@@ -695,7 +695,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             instance_id: "inst-001".to_string(),
             token: token.clone(),
-            endpoint: ep.clone(),
+            endpoint: ep,
         };
 
         let result = ServiceIdentityResult {
@@ -724,7 +724,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             instance_id: "inst-001".to_string(),
             token: token.clone(),
-            endpoint: ep.clone(),
+            endpoint: ep,
         };
 
         let result = ServiceIdentityResult {
@@ -753,7 +753,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             instance_id: "inst-001".to_string(),
             token: token.clone(),
-            endpoint: ep.clone(),
+            endpoint: ep,
         };
 
         let result = ServiceIdentityResult {
@@ -782,7 +782,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             instance_id: "inst-001".to_string(),
             token: token.clone(),
-            endpoint: ep.clone(),
+            endpoint: ep,
         };
 
         let result = ServiceIdentityResult {
@@ -810,7 +810,7 @@ mod tests {
             engine_id: "funasr".to_string(),
             instance_id: "inst-001".to_string(),
             token: token.clone(),
-            endpoint: ep.clone(),
+            endpoint: ep,
         };
 
         let result = ServiceIdentityResult {

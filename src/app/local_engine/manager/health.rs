@@ -3,7 +3,6 @@
 
 use super::*;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── health 验证 ─────────────────────────────────────────────────────────
 
@@ -444,30 +443,28 @@ impl EngineManager {
                 }
             }
         } else {
-            if let Some(ref health_model_id) = mapping.model_id {
-                if health_model_id != &expected_model_id {
-                    return Err(LocalEngineError::with_detail(
-                        LocalEngineErrorCode::IdentityVerification,
-                        ErrorPhase::Health,
-                        "model_id 不匹配",
-                        format!(
-                            "health 报告 model_id='{health_model_id}'，期望='{expected_model_id}'"
-                        ),
-                    ));
-                }
+            if let Some(ref health_model_id) = mapping.model_id
+                && health_model_id != &expected_model_id
+            {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::IdentityVerification,
+                    ErrorPhase::Health,
+                    "model_id 不匹配",
+                    format!("health 报告 model_id='{health_model_id}'，期望='{expected_model_id}'"),
+                ));
             }
 
-            if let Some(ref health_revision) = mapping.model_revision {
-                if health_revision != &expected_revision {
-                    return Err(LocalEngineError::with_detail(
-                        LocalEngineErrorCode::IdentityVerification,
-                        ErrorPhase::Health,
-                        "model_revision 不匹配",
-                        format!(
-                            "health 报告 model_revision='{health_revision}'，期望='{expected_revision}'"
-                        ),
-                    ));
-                }
+            if let Some(ref health_revision) = mapping.model_revision
+                && health_revision != &expected_revision
+            {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::IdentityVerification,
+                    ErrorPhase::Health,
+                    "model_revision 不匹配",
+                    format!(
+                        "health 报告 model_revision='{health_revision}'，期望='{expected_revision}'"
+                    ),
+                ));
             }
         }
 

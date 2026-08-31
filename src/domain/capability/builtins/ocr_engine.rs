@@ -288,14 +288,17 @@ enum LineRejectReason {
 /// 输出 Vec<usize> 与输入等长，`output[i]` 是 `words[i]` 的新 line_index。
 ///
 /// 独立可测——下方 `tests` 模块覆盖全部约定场景。
+#[allow(dead_code)] // 0.22.7 测试便捷入口（_with_diag 的简化版），生产用 rebuild 路径
 pub fn group_words_into_lines(words: &[OcrWord]) -> Vec<usize> {
     group_words_into_lines_with_diag(words).0
 }
 
 /// `group_words_into_lines` 的诊断版本——返回 line_index 和统计。
 pub fn group_words_into_lines_with_diag(words: &[OcrWord]) -> (Vec<usize>, LayoutDiagnostics) {
-    let mut diag = LayoutDiagnostics::default();
-    diag.source_words = words.len();
+    let mut diag = LayoutDiagnostics {
+        source_words: words.len(),
+        ..Default::default()
+    };
 
     if words.is_empty() {
         return (Vec::new(), diag);
@@ -524,8 +527,10 @@ pub fn rebuild_with_line_grouping_and_diag(
     text_angle: Option<f64>,
 ) -> (OcrResult, LayoutDiagnostics) {
     let start = std::time::Instant::now();
-    let mut diag = LayoutDiagnostics::default();
-    diag.source_words = words.len();
+    let mut diag = LayoutDiagnostics {
+        source_words: words.len(),
+        ..Default::default()
+    };
 
     if words.is_empty() {
         return (
@@ -799,6 +804,7 @@ fn tail_kind(s: &str) -> WordKind {
 /// (SDK 只给 line 没给 word——不太可能但兜底)，退化为 line.text 用 `\n` join。
 ///
 /// 独立可测（下方 `tests` 模块覆盖）。
+#[allow(dead_code)] // 0.22.7 预留公共 API（domain::ocr 重导出），生产用 rebuild 路径
 pub fn join_words_smart(words: &[OcrWord], lines: &[OcrLine]) -> String {
     // 兜底：words 为空 → 用 lines.text
     if words.is_empty() {
@@ -1092,6 +1098,8 @@ mod tests {
     // 不再从 words 自行拼接。测试改为走 rebuild_with_line_grouping
     // 来验证端到端的行内拼接 + 行间换行。
 
+    #[cfg(test)]
+    #[allow(dead_code)] // 0.22.7 遗留测试辅助；测试改走 rebuild_with_line_grouping 后保留供后续回归
     fn w(text: &str, line: usize) -> OcrWord {
         OcrWord {
             text: text.into(),
@@ -1652,7 +1660,7 @@ mod tests {
         // 应有多个空格（至少 2，上限 8）
         let space_count = result.text.chars().filter(|&c| c == ' ').count();
         assert!(
-            space_count >= 2 && space_count <= 8,
+            (2..=8).contains(&space_count),
             "expected 2-8 spaces, got {space_count}: text='{:?}'",
             result.text
         );

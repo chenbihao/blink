@@ -243,12 +243,12 @@ impl OcrRequestTracker {
     /// 返回 `true` 表示找到并取消了请求或已记录 tombstone。
     pub fn cancel(&self, request_id: &str) -> bool {
         // 先尝试取消已注册的请求
-        if let Ok(r) = self.requests.read() {
-            if let Some(token) = r.get(request_id) {
-                token.cancel();
-                tracing::info!(request_id = %request_id, "OCR 请求已被取消");
-                return true;
-            }
+        if let Ok(r) = self.requests.read()
+            && let Some(token) = r.get(request_id)
+        {
+            token.cancel();
+            tracing::info!(request_id = %request_id, "OCR 请求已被取消");
+            return true;
         }
         // Task 6: request 尚未注册——记录带时间戳的 pending cancel tombstone
         if let Ok(mut pc) = self.pending_cancels.write() {

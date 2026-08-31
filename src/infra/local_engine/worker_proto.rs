@@ -269,31 +269,25 @@ impl NdjsonWorkerClient {
     ) -> Result<serde_json::Value, WorkerProtoError> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut events = self.events.lock().await;
-        loop {
-            let event = tokio::time::timeout_at(deadline, events.recv())
-                .await
-                .map_err(|_| WorkerProtoError::Timeout {
-                    timeout_ms: timeout.as_millis() as u64,
-                })?
-                .ok_or(WorkerProtoError::Disconnected)?;
-            match event {
-                WorkerEvent::Line(WorkerLine::Ready(v)) => return Ok(v),
-                WorkerEvent::Line(WorkerLine::HelloOk(_)) => {
-                    return Err(self.poison("ready 前收到 hello_ok"));
-                }
-                WorkerEvent::Line(WorkerLine::TranscribeResult { .. }) => {
-                    return Err(self.poison("ready 前收到 transcribe_result"));
-                }
-                WorkerEvent::Line(WorkerLine::Error { error, .. }) => {
-                    return Err(WorkerProtoError::Worker(error));
-                }
-                WorkerEvent::Garbage(reason) => {
-                    return Err(self.poison(&format!("ready 前协议违例: {reason}")));
-                }
-                WorkerEvent::Eof => {
-                    return Err(self.poison("等待 ready 期间 stdout EOF"));
-                }
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .map_err(|_| WorkerProtoError::Timeout {
+                timeout_ms: timeout.as_millis() as u64,
+            })?
+            .ok_or(WorkerProtoError::Disconnected)?;
+        match event {
+            WorkerEvent::Line(WorkerLine::Ready(v)) => Ok(v),
+            WorkerEvent::Line(WorkerLine::HelloOk(_)) => Err(self.poison("ready 前收到 hello_ok")),
+            WorkerEvent::Line(WorkerLine::TranscribeResult { .. }) => {
+                Err(self.poison("ready 前收到 transcribe_result"))
             }
+            WorkerEvent::Line(WorkerLine::Error { error, .. }) => {
+                Err(WorkerProtoError::Worker(error))
+            }
+            WorkerEvent::Garbage(reason) => {
+                Err(self.poison(&format!("ready 前协议违例: {reason}")))
+            }
+            WorkerEvent::Eof => Err(self.poison("等待 ready 期间 stdout EOF")),
         }
     }
 
@@ -450,10 +444,10 @@ mod tests {
                 .arg("-c")
                 .arg("print('ok')")
                 .output()
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() == "ok"
             {
-                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "ok" {
-                    return Some(std::path::PathBuf::from(name));
-                }
+                return Some(std::path::PathBuf::from(name));
             }
         }
         // Blink 托管解释器回退
@@ -616,6 +610,8 @@ for line in sys.stdin:
                 use tokio::io::AsyncReadExt;
                 let mut err = String::new();
                 if let Some(mut p) = child.stderr.take() {
+                    // panic 路径：不 await stderr 读取，避免阻塞诊断
+                    #[allow(clippy::let_underscore_future)]
                     let _ = p.read_to_string(&mut err);
                 }
                 panic!("transcribe: {e}; child stderr: {err}")

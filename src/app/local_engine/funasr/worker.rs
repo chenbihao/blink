@@ -37,10 +37,10 @@ pub fn engine_audio_tmp_dir(engine_id: &crate::infra::local_engine::runtime::Eng
 /// 清空引擎音频目录（start 前 / stop 后调用；目录不存在时为 no-op）。
 pub fn clean_audio_tmp_dir(engine_id: &crate::infra::local_engine::runtime::EngineId) {
     let dir = engine_audio_tmp_dir(engine_id);
-    if dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            tracing::debug!(dir = %dir.display(), %e, "audio-tmp 清理失败（继续）");
-        }
+    if dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        tracing::debug!(%e, "audio-tmp 清理失败（继续）");
     }
 }
 
@@ -100,20 +100,64 @@ fn sweep_stale_wavs(audio_dir: &Path) {
 
 // ── SttTransport 实现 ────────────────────────────────────────────────────
 
+/// RAII 守卫：在 drop 时删除临时音频文件。
+///
+/// 覆盖 success / error / timeout / cancel / panic 所有路径——
+/// async future 被取消时，await 点 panic 或 future 被 drop，
+/// guard 的 drop 仍会执行（Rust 语义保证）。
+struct AudioFileGuard {
+    path: std::path::PathBuf,
+}
+
+impl AudioFileGuard {
+    fn new(path: &std::path::Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+impl Drop for AudioFileGuard {
+    fn drop(&mut self) {
+        if self.path.exists()
+            && let Err(e) = std::fs::remove_file(&self.path)
+        {
+            tracing::debug!(%e, "临时音频文件清理失败");
+        }
+    }
+}
+
 /// GGUF worker 的 `SttTransport` 实现（app 层注入 domain）。
 pub struct GgufSttTransport {
     client: Arc<NdjsonWorkerClient>,
     audio_dir: PathBuf,
-    /// 受限识别选项（当前协议能力位；语言提示等由 worker 按模型语义消费）。
+    /// 受限识别选项（从 SttConfig 投影；use_itn / language 沿配置 → worker 传播）。
     options: TranscribeOptions,
 }
 
 impl GgufSttTransport {
+    #[allow(dead_code)]
     pub fn new(client: Arc<NdjsonWorkerClient>, audio_dir: PathBuf) -> Self {
         Self {
             client,
             audio_dir,
             options: TranscribeOptions::default(),
+        }
+    }
+
+    /// 带 `TranscribeOptions` 构造（Handoff 02 §4：参数传播证据链）。
+    ///
+    /// `use_itn` 和 `language` 从 `SttConfig` → `FunasrEngineConfig` → 此处 →
+    /// `TranscribeOptions` → worker NDJSON 协议，形成完整传播链。
+    pub fn with_options(
+        client: Arc<NdjsonWorkerClient>,
+        audio_dir: PathBuf,
+        options: TranscribeOptions,
+    ) -> Self {
+        Self {
+            client,
+            audio_dir,
+            options,
         }
     }
 }
@@ -136,6 +180,9 @@ impl SttTransport for GgufSttTransport {
         let raw_path = write_wav_to_audio_dir(&self.audio_dir, wav_bytes)?;
         let canonical = ensure_within_audio_dir(&self.audio_dir, &raw_path)?;
 
+        // RAII 守卫：无论成功、错误、超时或取消，都确保删除临时音频文件
+        let _cleanup = AudioFileGuard::new(&canonical);
+
         let result = self
             .client
             .transcribe(
@@ -145,8 +192,7 @@ impl SttTransport for GgufSttTransport {
             )
             .await;
 
-        // 请求结束即删临时音频（成功失败都删）
-        let _ = std::fs::remove_file(&canonical);
+        // 兜底清扫残留（正常路径文件已被 guard 删除）
         sweep_stale_wavs(&self.audio_dir);
 
         let output = result.map_err(proto_err_to_string)?;
@@ -192,5 +238,59 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "wav"))
             .count();
         assert_eq!(count, MAX_STALE_WAV_FILES, "清扫后应保持有界");
+    }
+
+    // ── AudioFileGuard 测试：覆盖 success / error / cancel 路径清理 ──
+
+    #[test]
+    fn audio_file_guard_cleans_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test-guard.wav");
+        std::fs::write(&path, b"x").unwrap();
+        assert!(path.exists());
+        {
+            let _guard = AudioFileGuard::new(&path);
+        }
+        assert!(!path.exists(), "guard drop 后文件应被删除");
+    }
+
+    #[test]
+    fn audio_file_guard_cleans_on_error_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test-err.wav");
+        std::fs::write(&path, b"x").unwrap();
+        assert!(path.exists());
+
+        // 模拟错误路径：guard 在 ? 返回错误前创建，drop 仍执行
+        let result: Result<(), String> = {
+            let _guard = AudioFileGuard::new(&path);
+            Err("simulated error".to_string())
+        };
+        assert!(result.is_err());
+        assert!(!path.exists(), "错误路径下 guard drop 后文件应被删除");
+    }
+
+    #[test]
+    fn audio_file_guard_cleans_on_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test-panic.wav");
+        std::fs::write(&path, b"x").unwrap();
+        assert!(path.exists());
+
+        let result = std::panic::catch_unwind(|| {
+            let _guard = AudioFileGuard::new(&path);
+            panic!("simulated panic");
+        });
+        assert!(result.is_err());
+        assert!(!path.exists(), "panic 路径下 guard drop 后文件应被删除");
+    }
+
+    #[test]
+    fn audio_file_guard_noop_if_file_already_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.wav");
+        // 文件不存在时 guard drop 不应 panic
+        let _guard = AudioFileGuard::new(&path);
+        drop(_guard);
     }
 }

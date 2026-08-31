@@ -269,27 +269,6 @@ fn collect_control_messages(mut current: *mut ControlNode) -> Vec<ControlMsg> {
     result
 }
 
-#[cfg(test)]
-mod control_queue_tests {
-    use super::*;
-
-    #[test]
-    fn treiber_nodes_are_consumed_in_send_order() {
-        let first = Box::into_raw(Box::new(ControlNode {
-            msg: ControlMsg::Stop,
-            next: std::ptr::null_mut(),
-        }));
-        let second = Box::into_raw(Box::new(ControlNode {
-            msg: ControlMsg::ManualRecovery,
-            next: first,
-        }));
-
-        let drained = collect_control_messages(second);
-        assert!(matches!(drained[0], ControlMsg::Stop));
-        assert!(matches!(drained[1], ControlMsg::ManualRecovery));
-    }
-}
-
 // ── 物理修饰键快照（主线程诊断用）────────────────────────────────────────────
 
 /// 读取物理修饰键快照（主线程也可调用，用于 `blink_print_debug_info` 诊断）。
@@ -321,4 +300,25 @@ pub fn start() -> mpsc::UnboundedReceiver<InputEffect> {
     windows::start_hook_thread();
 
     rx
+}
+
+#[cfg(test)]
+mod control_queue_tests {
+    use super::*;
+
+    #[test]
+    fn treiber_nodes_are_consumed_in_send_order() {
+        let first = Box::into_raw(Box::new(ControlNode {
+            msg: ControlMsg::Stop,
+            next: std::ptr::null_mut(),
+        }));
+        let second = Box::into_raw(Box::new(ControlNode {
+            msg: ControlMsg::ManualRecovery,
+            next: first,
+        }));
+
+        let drained = collect_control_messages(second);
+        assert!(matches!(drained[0], ControlMsg::Stop));
+        assert!(matches!(drained[1], ControlMsg::ManualRecovery));
+    }
 }

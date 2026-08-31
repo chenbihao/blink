@@ -20,27 +20,40 @@
       "model_id": "gguf/sensevoice-small-q8",
       "repo": "FunAudioLLM/SenseVoiceSmall-GGUF",
       "file": "sensevoice-small-q8.gguf",
-      "sha256": "4ae45c94422de949b387e2e0fb10d7e14e4c42c69db30c3444ecc7d4b844b7c5"
+      "url": "https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/90c1c61912018b70ada0fcc024ea24aca62f2e63/sensevoice-small-q8.gguf",
+      "revision": "90c1c61912018b70ada0fcc024ea24aca62f2e63",
+      "sha256": "4ae45c94422de949b387e2e0fb10d7e14e4c42c69db30c3444ecc7d4b844b7c5",
+      "size_bytes": 254208320
     },
     {
       "model_id": "gguf/paraformer-zh-q8",
       "repo": "FunAudioLLM/Paraformer-GGUF",
       "file": "paraformer-q8.gguf",
-      "sha256": "42bf76ea1575a336aaca4c1b7c01a82b79113e6d04d0d6b799561bfcf07ee011"
+      "url": "https://huggingface.co/FunAudioLLM/Paraformer-GGUF/resolve/1a5063b305a2b4e418ccffaf7be2c02a3cac6c89/paraformer-q8.gguf",
+      "revision": "1a5063b305a2b4e418ccffaf7be2c02a3cac6c89",
+      "sha256": "42bf76ea1575a336aaca4c1b7c01a82b79113e6d04d0d6b799561bfcf07ee011",
+      "size_bytes": 236929024
     },
     {
       "model_id": "gguf/fun-asr-nano-q4km",
       "repo": "FunAudioLLM/Fun-ASR-Nano-GGUF",
       "file": "funasr-encoder-f16.gguf",
-      "sha256": "f92f91d01a24fbed6c863495b2ee8c6a6788144a02858b75743f0946668de8a2"
+      "url": "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e849502a867080d66d351b8dfb1018b607e509/funasr-encoder-f16.gguf",
+      "revision": "46e849502a867080d66d351b8dfb1018b607e509",
+      "sha256": "f92f91d01a24fbed6c863495b2ee8c6a6788144a02858b75743f0946668de8a2",
+      "size_bytes": 469331008
     },
     {
       "model_id": "gguf/fun-asr-nano-q4km",
       "repo": "FunAudioLLM/Fun-ASR-Nano-GGUF",
       "file": "qwen3-0.6b-q4km.gguf",
-      "sha256": "cc5057552aa9dddedcda73ea8889854e8a257eb07d0a561b7234465c1e856f22"
+      "url": "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e849502a867080d66d351b8dfb1018b607e509/qwen3-0.6b-q4km.gguf",
+      "revision": "46e849502a867080d66d351b8dfb1018b607e509",
+      "sha256": "cc5057552aa9dddedcda73ea8889854e8a257eb07d0a561b7234465c1e856f22",
+      "size_bytes": 484219776
     }
   ],
+  "model_url_note": "模型 URL 已固定到上游 commit SHA（非 resolve/main 浮动 ref）。SHA-256 锁定文件内容，URL 指向不可变 revision。",
   "licenses": {
     "funasr": "MIT (modelscope/FunASR)",
     "llama_cpp": "MIT (ggml-org/llama.cpp)",

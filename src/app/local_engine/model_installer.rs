@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::local_engine::{
     EngineModelDescriptor, EngineModelStatus, LocalEngineErrorCode, ModelOperationResult,
+    SttModelCapabilities,
 };
 use crate::infra::local_engine::runtime::EngineId;
 
@@ -51,6 +52,7 @@ impl ModelRegistry {
     }
 
     /// 创建空注册表（测试用）。
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             models: HashMap::new(),
@@ -314,8 +316,11 @@ impl ModelDownloadError {
     }
 }
 
+/// 空实现（B2 未完成时占位）。
+#[cfg(test)]
 pub struct NoopModelWorker;
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl ModelInstallWorker for NoopModelWorker {
     async fn download_to_staging(
@@ -461,6 +466,13 @@ pub struct ModelCatalogItemDto {
     pub is_selected: bool,
     pub is_active: bool,
     pub compatibility: String,
+    /// STT 模型的 per-model 能力声明（Handoff 02：DTO 驱动 UI）。
+    ///
+    /// 仅 STT 引擎填充；OCR 引擎为 default（全 unknown）。
+    /// 前端据此决定热词/ITN/流式等高级选项的可见性与可用性，
+    /// 不再硬编码模型 id → 能力的映射。
+    #[serde(default)]
+    pub stt_capabilities: SttModelCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,6 +513,7 @@ pub fn project_model_status(
         is_selected: status.is_selected,
         is_active: status.is_active,
         compatibility: status.compatibility.to_string(),
+        stt_capabilities: descriptor.stt_capabilities.clone(),
     }
 }
 
@@ -516,5 +529,245 @@ pub fn project_model_operation_result(result: &ModelOperationResult) -> ModelOpe
             .error
             .as_ref()
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null)),
+    }
+}
+
+// ── 测试 ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::local_engine::{
+        CapabilityFlag, EngineModelDescriptor, EngineModelStatus, ModelInstallState,
+        ModelVerificationState, SttModelCapabilities,
+    };
+    use crate::infra::local_engine::runtime::{ChecksumSource, EngineId};
+
+    fn test_descriptor_with_caps(
+        model_id: &str,
+        caps: SttModelCapabilities,
+    ) -> EngineModelDescriptor {
+        EngineModelDescriptor {
+            engine_id: EngineId::new("funasr").expect("funasr is valid"),
+            model_id: model_id.to_string(),
+            display_name: "Test Model".to_string(),
+            description: "test".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: ChecksumSource::Unverified,
+            estimated_size_mb: Some(100),
+            compatibility_schema: 1,
+            stt_capabilities: caps,
+        }
+    }
+
+    fn test_status(desc: &EngineModelDescriptor) -> EngineModelStatus {
+        let mut st = EngineModelStatus::not_installed(desc);
+        st.install_state = ModelInstallState::Installed;
+        st.verification_state = ModelVerificationState::Unverified;
+        st
+    }
+
+    #[test]
+    fn dto_includes_stt_capabilities_in_json() {
+        let caps = SttModelCapabilities {
+            languages: vec!["zh".into(), "en".into()],
+            hotwords: CapabilityFlag::no("test.reason"),
+            itn: CapabilityFlag::yes(),
+            pseudo_streaming: CapabilityFlag::yes(),
+            true_streaming: CapabilityFlag::no("test.reason"),
+            timestamps: CapabilityFlag::no("test.reason"),
+        };
+        let desc = test_descriptor_with_caps("test-model", caps);
+        let status = test_status(&desc);
+        let dto = project_model_status(&desc, &status);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        // stt_capabilities 必须存在于 JSON 中
+        assert!(json.get("stt_capabilities").is_some());
+        let caps_json = &json["stt_capabilities"];
+
+        // languages 数组
+        assert_eq!(caps_json["languages"][0], "zh");
+        assert_eq!(caps_json["languages"][1], "en");
+
+        // hotwords: { supported: "no", reason: "test.reason" }
+        assert_eq!(caps_json["hotwords"]["supported"], "no");
+        assert_eq!(caps_json["hotwords"]["reason"], "test.reason");
+
+        // itn: { supported: "yes" }
+        assert_eq!(caps_json["itn"]["supported"], "yes");
+        // Yes variant 不含 reason 字段
+        assert!(caps_json["itn"].get("reason").is_none());
+    }
+
+    #[test]
+    fn dto_serializes_default_caps_for_ocr_engine() {
+        // OCR 引擎的 descriptor 使用 default caps（全 unknown）
+        let desc = EngineModelDescriptor {
+            engine_id: EngineId::new("paddleocr").expect("paddleocr is valid"),
+            model_id: "ppocrv6".to_string(),
+            display_name: "PaddleOCR".to_string(),
+            description: "OCR".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: ChecksumSource::Unverified,
+            estimated_size_mb: Some(50),
+            compatibility_schema: 1,
+            stt_capabilities: SttModelCapabilities::default(),
+        };
+        let status = test_status(&desc);
+        let dto = project_model_status(&desc, &status);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        // default caps 仍然序列化（所有能力为 No { reason: "unknown" }）
+        assert!(json.get("stt_capabilities").is_some());
+        assert_eq!(json["stt_capabilities"]["hotwords"]["supported"], "no");
+        assert_eq!(json["stt_capabilities"]["hotwords"]["reason"], "unknown");
+    }
+
+    #[test]
+    fn dto_round_trip_preserves_capabilities() {
+        let caps = SttModelCapabilities {
+            languages: vec!["zh".into()],
+            hotwords: CapabilityFlag::no("round.trip.test"),
+            itn: CapabilityFlag::yes(),
+            pseudo_streaming: CapabilityFlag::yes(),
+            true_streaming: CapabilityFlag::no("round.trip.test"),
+            timestamps: CapabilityFlag::yes(),
+        };
+        let desc = test_descriptor_with_caps("round-trip", caps.clone());
+        let status = test_status(&desc);
+        let dto = project_model_status(&desc, &status);
+
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: ModelCatalogItemDto = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.stt_capabilities, caps);
+    }
+
+    #[test]
+    fn dto_backward_compatible_missing_caps_defaults() {
+        // 旧前端/旧 JSON 不含 stt_capabilities 时，反序列化使用 default
+        let json = serde_json::json!({
+            "engine_id": "funasr",
+            "model_id": "test",
+            "display_name": "Test",
+            "description": "test",
+            "revision": "v1",
+            "estimated_size_mb": 100,
+            "install_state": "installed",
+            "verification_state": "unverified",
+            "cache_size_bytes": null,
+            "is_selected": false,
+            "is_active": false,
+            "compatibility": "unknown",
+        });
+        let dto: ModelCatalogItemDto = serde_json::from_value(json).unwrap();
+        // default caps：所有能力为 No { reason: "unknown" }
+        assert!(!dto.stt_capabilities.hotwords.is_supported());
+        assert!(!dto.stt_capabilities.itn.is_supported());
+    }
+
+    #[test]
+    fn capability_flag_yes_serializes_as_supported_true() {
+        let flag = CapabilityFlag::yes();
+        let json = serde_json::to_value(&flag).unwrap();
+        assert_eq!(json["supported"], "yes");
+        // Yes variant 不含 reason
+        assert!(json.get("reason").is_none());
+    }
+
+    #[test]
+    fn capability_flag_no_serializes_with_reason() {
+        let flag = CapabilityFlag::no("some.reason");
+        let json = serde_json::to_value(&flag).unwrap();
+        assert_eq!(json["supported"], "no");
+        assert_eq!(json["reason"], "some.reason");
+    }
+
+    #[test]
+    fn sensevoice_caps_project_correctly() {
+        // 验证 SenseVoice 能力矩阵正确投影到 DTO
+        let specs = crate::app::local_engine::funasr::gguf::gguf_model_specs();
+        let sensevoice = specs
+            .iter()
+            .find(|s| s.model_id == crate::app::local_engine::funasr::gguf::GGUF_SENSEVOICE_ID)
+            .expect("SenseVoice spec must exist");
+
+        let desc = crate::app::local_engine::funasr::gguf::gguf_model_descriptor(sensevoice);
+        let status = EngineModelStatus::not_installed(&desc);
+        let dto = project_model_status(&desc, &status);
+
+        // SenseVoice 支持五语种
+        assert_eq!(dto.stt_capabilities.languages.len(), 5);
+        assert!(dto.stt_capabilities.languages.contains(&"zh".to_string()));
+        assert!(dto.stt_capabilities.languages.contains(&"en".to_string()));
+        assert!(dto.stt_capabilities.languages.contains(&"ja".to_string()));
+        assert!(dto.stt_capabilities.languages.contains(&"ko".to_string()));
+        assert!(dto.stt_capabilities.languages.contains(&"yue".to_string()));
+
+        // SenseVoice 不支持热词（GGUF worker 无入口）
+        assert!(!dto.stt_capabilities.hotwords.is_supported());
+
+        // SenseVoice 内置 ITN
+        assert!(dto.stt_capabilities.itn.is_supported());
+
+        // SenseVoice 支持伪流式
+        assert!(dto.stt_capabilities.pseudo_streaming.is_supported());
+
+        // SenseVoice 不支持真流式
+        assert!(!dto.stt_capabilities.true_streaming.is_supported());
+    }
+
+    #[test]
+    fn paraformer_caps_project_correctly() {
+        let specs = crate::app::local_engine::funasr::gguf::gguf_model_specs();
+        let paraformer = specs
+            .iter()
+            .find(|s| s.model_id == crate::app::local_engine::funasr::gguf::GGUF_PARAFORMER_ID)
+            .expect("Paraformer spec must exist");
+
+        let desc = crate::app::local_engine::funasr::gguf::gguf_model_descriptor(paraformer);
+        let status = EngineModelStatus::not_installed(&desc);
+        let dto = project_model_status(&desc, &status);
+
+        // Paraformer 仅中文
+        assert_eq!(dto.stt_capabilities.languages, vec!["zh"]);
+
+        // Paraformer 不支持热词
+        assert!(!dto.stt_capabilities.hotwords.is_supported());
+
+        // Paraformer 不支持 ITN
+        assert!(!dto.stt_capabilities.itn.is_supported());
+
+        // Paraformer 支持伪流式
+        assert!(dto.stt_capabilities.pseudo_streaming.is_supported());
+    }
+
+    #[test]
+    fn nano_caps_project_correctly() {
+        let specs = crate::app::local_engine::funasr::gguf::gguf_model_specs();
+        let nano = specs
+            .iter()
+            .find(|s| s.model_id == crate::app::local_engine::funasr::gguf::GGUF_NANO_ID)
+            .expect("Nano spec must exist");
+
+        let desc = crate::app::local_engine::funasr::gguf::gguf_model_descriptor(nano);
+        let status = EngineModelStatus::not_installed(&desc);
+        let dto = project_model_status(&desc, &status);
+
+        // Nano 仅中文
+        assert_eq!(dto.stt_capabilities.languages, vec!["zh"]);
+
+        // Nano 不支持热词
+        assert!(!dto.stt_capabilities.hotwords.is_supported());
+
+        // Nano 不支持 ITN
+        assert!(!dto.stt_capabilities.itn.is_supported());
+
+        // Nano 支持伪流式
+        assert!(dto.stt_capabilities.pseudo_streaming.is_supported());
+
+        // Nano 不支持真流式（KV 每请求清空）
+        assert!(!dto.stt_capabilities.true_streaming.is_supported());
     }
 }

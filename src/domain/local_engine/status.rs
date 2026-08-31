@@ -253,8 +253,10 @@ impl std::fmt::Display for EnvOperationEndState {
 /// **正交铁则**：process Running 不自动推出 service Healthy 或 model Ready。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ProcessState {
     /// 进程未启动或已完全退出。
+    #[default]
     Stopped,
     /// 正在启动。
     Starting,
@@ -264,12 +266,6 @@ pub enum ProcessState {
     Stopping,
     /// 进程已退出，附带退出原因描述。
     Exited { reason: String },
-}
-
-impl Default for ProcessState {
-    fn default() -> Self {
-        Self::Stopped
-    }
 }
 
 impl std::fmt::Display for ProcessState {
@@ -289,8 +285,10 @@ impl std::fmt::Display for ProcessState {
 /// 服务健康观测（独立于进程状态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ServiceHealth {
     /// 未知（尚未探测）。
+    #[default]
     Unknown,
     /// 服务不可达。
     Unreachable,
@@ -298,12 +296,6 @@ pub enum ServiceHealth {
     Healthy,
     /// 服务降级（部分功能受限）。
     Degraded,
-}
-
-impl Default for ServiceHealth {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for ServiceHealth {
@@ -320,8 +312,10 @@ impl std::fmt::Display for ServiceHealth {
 /// 模型健康观测（独立于进程和服务状态）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ModelHealth {
     /// 未知（尚未探测）。
+    #[default]
     Unknown,
     /// 模型未加载。
     NotLoaded,
@@ -333,12 +327,6 @@ pub enum ModelHealth {
     Ready,
     /// 模型加载/运行失败。
     Failed,
-}
-
-impl Default for ModelHealth {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for ModelHealth {
@@ -359,8 +347,10 @@ impl std::fmt::Display for ModelHealth {
 /// 环境观测状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EnvironmentHealth {
     /// 环境未安装。
+    #[default]
     Missing,
     /// 环境已就绪。
     Ready,
@@ -368,12 +358,6 @@ pub enum EnvironmentHealth {
     Broken,
     /// 需要重建。
     NeedsRebuild,
-}
-
-impl Default for EnvironmentHealth {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 impl std::fmt::Display for EnvironmentHealth {

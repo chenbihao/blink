@@ -58,19 +58,9 @@ fn service_epoch_is_string() {
 // stop_funasr_server / get_funasr_log_history 已随 maintenance 瘦身删除。
 // 若恢复引用请改走通用 local_engine 命令（get_local_engine_status 等）。
 
-// ── 旧事件常量仍存在（旧前端兼容投影仍在用）──
-
-#[test]
-fn old_funasr_event_constants_still_exist() {
-    assert_eq!(
-        crate::domain::event_names::EventNames::FUNASR_SERVER_STATUS,
-        "blink://funasr-server-status"
-    );
-    assert_eq!(
-        crate::domain::event_names::EventNames::FUNASR_SERVER_LOG,
-        "blink://funasr-server-log"
-    );
-}
+// ── 旧事件常量已删除（0.22 review：前端 0 消费者，兼容投影已移除）──
+// FUNASR_SERVER_STATUS / FUNASR_SERVER_LOG / PYTHON_ENV_PROGRESS 已从
+// infra/event_names.rs 和前端 event-names.js 中同步移除。
 
 // ── 新事件常量存在 ──
 

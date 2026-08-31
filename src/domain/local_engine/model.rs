@@ -31,6 +31,90 @@ use super::identity::{ChecksumSource, EngineId};
 
 use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 
+// ── SttModelCapabilities ──────────────────────────────────────────────────
+
+/// STT 模型的 per-model 能力声明（0.22 Handoff 02）。
+///
+/// **设计铁则**：
+/// - **capability 是稳定产品契约**：一旦声明，不随安装/运行状态变化。
+/// - **安装/运行状态是瞬时状态**：`installed` / `selected` / `active`
+///   由 `EngineModelStatus` 独立表达，不进入 capability。
+/// - **不得用表面参数伪装支持**：只有 native/upstream 有可靠能力的项
+///   才能声明 `supported = true`；不确定时声明 `false` 并附 reason。
+/// - **每个声明支持的能力必须有参数传播或行为证据**（Handoff 02 §4）。
+///
+/// 能力矩阵覆盖：
+///
+/// | 能力 | 语义 | 传播路径 |
+/// |---|---|---|
+/// | `languages` | 模型支持的语言列表 | UI 展示 + worker 按模型语义消费 |
+/// | `hotwords` | 热词增强 | config → launch env → worker（GGUF 版 Paraformer/Nano 不支持） |
+/// | `itn` | 逆文本归一化 | config → worker（GGUF SenseVoice 内置；Paraformer 无） |
+/// | `pseudo_streaming` | 伪流式（VAD 切句 + 累积预览） | PseudoStreamingSttEngine 对所有模型可用 |
+/// | `true_streaming` | 真流式（增量 encoder） | 当前无模型支持 |
+/// | `timestamps` | 词级时间戳 | worker 协议 TranscribeOptions |
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SttModelCapabilities {
+    /// 支持的语言列表（ISO 639-1 或模型特定标识）。
+    /// 空列表表示"未知/未声明"，不由前端解释为"支持所有语言"。
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// 热词增强是否支持。
+    pub hotwords: CapabilityFlag,
+    /// ITN（逆文本归一化）是否支持。
+    pub itn: CapabilityFlag,
+    /// 伪流式（VAD 切句 + 累积预览）是否支持。
+    pub pseudo_streaming: CapabilityFlag,
+    /// 真流式（增量 encoder）是否支持。
+    pub true_streaming: CapabilityFlag,
+    /// 词级时间戳是否支持。
+    pub timestamps: CapabilityFlag,
+}
+
+/// 能力声明标志：支持 / 不支持（附原因）。
+///
+/// 不支持时携带 `reason` 供 UI 展示可行动说明。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "supported", rename_all = "snake_case")]
+pub enum CapabilityFlag {
+    /// 支持此能力。
+    Yes,
+    /// 不支持此能力，附原因（i18n key 或人类可读文案）。
+    No { reason: String },
+}
+
+impl CapabilityFlag {
+    /// 构造支持标志。
+    pub fn yes() -> Self {
+        Self::Yes
+    }
+
+    /// 构造不支持标志。
+    pub fn no(reason: impl Into<String>) -> Self {
+        Self::No {
+            reason: reason.into(),
+        }
+    }
+
+    /// 是否支持。
+    pub fn is_supported(&self) -> bool {
+        matches!(self, Self::Yes)
+    }
+}
+
+impl Default for SttModelCapabilities {
+    fn default() -> Self {
+        Self {
+            languages: Vec::new(),
+            hotwords: CapabilityFlag::no("unknown"),
+            itn: CapabilityFlag::no("unknown"),
+            pseudo_streaming: CapabilityFlag::no("unknown"),
+            true_streaming: CapabilityFlag::no("unknown"),
+            timestamps: CapabilityFlag::no("unknown"),
+        }
+    }
+}
+
 // ── EngineModelDescriptor ──────────────────────────────────────────────────
 
 /// 通用模型描述符（编译期内置 allowlist，不接受前端动态传入）。
@@ -58,6 +142,9 @@ pub struct EngineModelDescriptor {
     pub estimated_size_mb: Option<u64>,
     /// 模型兼容性 schema 版本（用于校验服务 health 回报的模型身份）。
     pub compatibility_schema: u32,
+    /// STT 模型的 per-model 能力声明（仅 STT 引擎填充；OCR 引擎为 default）。
+    #[serde(default)]
+    pub stt_capabilities: SttModelCapabilities,
 }
 
 impl EngineModelDescriptor {
@@ -200,8 +287,10 @@ impl EngineModelStatus {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ModelInstallState {
     /// 未安装。
+    #[default]
     NotInstalled,
     /// 下载中。
     Downloading,
@@ -225,12 +314,6 @@ pub enum ModelInstallState {
     Deleting,
     /// 删除被阻止（被引用）。
     DeleteBlocked,
-}
-
-impl Default for ModelInstallState {
-    fn default() -> Self {
-        Self::NotInstalled
-    }
 }
 
 impl std::fmt::Display for ModelInstallState {
@@ -271,8 +354,10 @@ impl ModelInstallState {
 /// 模型校验状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ModelVerificationState {
     /// 未知（尚未校验）。
+    #[default]
     Unknown,
     /// 已校验通过（model_id + revision + fingerprint 匹配）。
     Verified,
@@ -282,12 +367,6 @@ pub enum ModelVerificationState {
     Unverified,
     /// 模型文件损坏。
     Corrupted,
-}
-
-impl Default for ModelVerificationState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for ModelVerificationState {
@@ -307,19 +386,15 @@ impl std::fmt::Display for ModelVerificationState {
 /// 模型与当前引擎环境的兼容性。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ModelCompatibility {
     /// 未知（尚未检查）。
+    #[default]
     Unknown,
     /// 兼容。
     Compatible,
     /// 不兼容（如模型需要 GPU 但环境只有 CPU）。
     Incompatible { reason: String },
-}
-
-impl Default for ModelCompatibility {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for ModelCompatibility {
@@ -521,6 +596,7 @@ mod tests {
             checksum_source: ChecksumSource::Sha256("ab".repeat(32)),
             estimated_size_mb: Some(243),
             compatibility_schema: 1,
+            stt_capabilities: SttModelCapabilities::default(),
         }
     }
 

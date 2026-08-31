@@ -4,7 +4,6 @@
 
 use super::*;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── 查询 API（可并发） ──────────────────────────────────────────────────
 
@@ -145,9 +144,21 @@ impl EngineManager {
         let ci = entry.current_identity().await;
         let worker = entry.worker_client.lock().await.clone().map(|client| {
             let audio_dir = super::super::funasr::worker::engine_audio_tmp_dir(engine_id);
-            std::sync::Arc::new(super::super::funasr::worker::GgufSttTransport::new(
-                client, audio_dir,
-            )) as std::sync::Arc<dyn crate::domain::stt::SttTransport>
+            // Handoff 02 §4：参数传播证据链——从 SttConfig 构建 TranscribeOptions
+            // 传播路径：SttConfig.local_engine → FunasrEngineConfig → TranscribeOptions → worker NDJSON
+            let stt_config = crate::app::stt_config::get_stt_config();
+            let options = crate::infra::local_engine::worker_proto::TranscribeOptions {
+                // language: 从模型能力声明推导（模型支持多语言时传入用户配置的 language hint；
+                // 当前协议只对 SenseVoice 语义有效，worker 按需消费）
+                language: None, // 语言提示暂不开放（模型自动检测），保留协议能力位
+                // use_itn: 从配置沿传播链到 worker（SenseVoice 内置 ITN；Paraformer 无效果但无害）
+                use_itn: Some(stt_config.local_engine.use_itn),
+            };
+            std::sync::Arc::new(
+                super::super::funasr::worker::GgufSttTransport::with_options(
+                    client, audio_dir, options,
+                ),
+            ) as std::sync::Arc<dyn crate::domain::stt::SttTransport>
         });
         Ok(ci.as_ref().map(|identity| LocalEngineConnection {
             endpoint: identity.endpoint.base_url(),

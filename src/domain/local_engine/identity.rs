@@ -560,7 +560,7 @@ mod tests {
         assert!(EngineId::new("funasr_gpu").is_err());
         assert!(EngineId::new("funasr/ocr").is_err());
         assert!(EngineId::new("..").is_err());
-        assert!(EngineId::new(&"a".repeat(65)).is_err());
+        assert!(EngineId::new("a".repeat(65)).is_err());
     }
 
     #[test]
@@ -571,7 +571,7 @@ mod tests {
         assert!(ModelId::new(" leading").is_err());
         assert!(ModelId::new("trailing ").is_err());
         assert!(ModelId::new("control\u{0}char").is_err());
-        assert!(ModelId::new(&"a".repeat(129)).is_err());
+        assert!(ModelId::new("a".repeat(129)).is_err());
     }
 
     #[test]

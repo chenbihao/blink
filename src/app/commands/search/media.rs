@@ -2498,17 +2498,17 @@ pub async fn repair_paddleocr(
 
     // 2d. 额外检查：目标路径的文件系统类型不应是 symlink（即使 canonicalize 已解析）
     //     如果 cache dir 本身是 symlink，metadata().file_type().is_symlink() 会为 true
-    if let Ok(meta) = std::fs::symlink_metadata(&model_cache_dir) {
-        if meta.file_type().is_symlink() {
-            return Err(CommandError::new(
-                "repair_safety_violation",
-                format!(
-                    "模型缓存路径是 symlink，拒绝清理：{}",
-                    model_cache_dir.display()
-                ),
-                false,
-            ));
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(&model_cache_dir)
+        && meta.file_type().is_symlink()
+    {
+        return Err(CommandError::new(
+            "repair_safety_violation",
+            format!(
+                "模型缓存路径是 symlink，拒绝清理：{}",
+                model_cache_dir.display()
+            ),
+            false,
+        ));
     }
 
     // 3. 只清理 paddleocr 模型缓存——删除失败时返回结构化错误

@@ -52,10 +52,7 @@ export const EVENTS = Object.freeze({
     AWARENESS_UPDATED: 'blink://awareness-updated',
     CONTEXT_MENU_ACTION: 'blink://context-menu-action',
 
-    // ── Python 环境 / FunASR / 音频测试 ──
-    PYTHON_ENV_PROGRESS: 'blink://python-env-progress',
-    FUNASR_SERVER_LOG: 'blink://funasr-server-log',
-    FUNASR_SERVER_STATUS: 'blink://funasr-server-status',
+    // ── 音频测试 ──
     AUDIO_TEST_LEVEL: 'blink://audio-test-level',
 
     // ── 本地引擎（0.22.3）──

@@ -17,6 +17,15 @@ import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, waitForEngineCard} from "../index.js";
 
 /**
+ * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
+ * 避免快速连续操作时旧请求覆盖新值（乐观并发控制）。
+ *
+ * 每次保存都会发送完整的 config 快照，如果两个请求并发发出，
+ * 后到的请求可能用不含前一次修改的旧快照覆盖——串行化后此问题消除。
+ */
+let sttSaveQueue = Promise.resolve();
+
+/**
  * 保存 STT 配置。
  * scope 决定后端控制台日志打印哪个区段，避免改本地配置时把云端字段也全部打印出来：
  * - "global": 总开关 / 模式 / 流式 / 音频设备
@@ -24,7 +33,12 @@ import {ensureLocalRuntimeMounted, waitForEngineCard} from "../index.js";
  * - "local":  本地引擎（热词 / ITN / VAD）
  */
 function saveSttConfig(cfg, scope) {
-    invoke("set_stt_config", {config: cfg, scope}).catch(console.error);
+    // 串行化：每个保存操作等前一个完成后才执行，保证后端按序持久化
+    sttSaveQueue = sttSaveQueue
+        .then(() => invoke("set_stt_config", {config: cfg, scope}))
+        .catch((e) => {
+            console.error("set_stt_config failed:", e);
+        });
 }
 
 /**
@@ -579,6 +593,9 @@ function initAudioTest(config) {
  * **只列出已安装（install_state==="installed"）的模型**，以"引擎 · 模型"格式显示。
  * 选择通过 `set_local_stt_selection` 保存——后端会验证模型已安装且可用，不触发下载。
  *
+ * 0.22 Handoff 02：模型选择变更后，根据所选模型的 `stt_capabilities`
+ * 动态调整高级选项（热词/ITN/流式）的可见性与可用性——不再硬编码模型 id → 能力映射。
+ *
  * 无已安装模型时显示空状态 + 前往引擎页安装 CTA。
  */
 async function initLocalModelSelect(config) {
@@ -640,6 +657,14 @@ async function initLocalModelSelect(config) {
         select.appendChild(opt);
     }
 
+    // 初始渲染：按当前选中模型的能力更新高级选项可见性
+    const selectedModel = installed.find((m) => m.is_selected)
+        || installed.find((m) => m.model_id === currentModelId)
+        || installed[0];
+    if (selectedModel) {
+        applyModelCapabilities(selectedModel.stt_capabilities);
+    }
+
     // 选择变更 → 通过 set_local_stt_selection 保存
     select.addEventListener("change", async () => {
         const modelId = select.value;
@@ -650,6 +675,12 @@ async function initLocalModelSelect(config) {
             config.local_stt_selection = {engine_id: engineId, model_id: modelId};
             config.local_model_id = modelId;
             config.local_engine.funasr_model = modelId;
+
+            // 根据新选中模型的能力更新高级选项可见性
+            const newModel = installed.find((m) => m.model_id === modelId);
+            if (newModel) {
+                applyModelCapabilities(newModel.stt_capabilities);
+            }
 
             // 检查是否有 active 模型（当前运行中）且与新选择不同 → 显示"待重启"提示
             const activeModel = installed.find((m) => m.is_active);
@@ -665,6 +696,68 @@ async function initLocalModelSelect(config) {
             if (prev) select.value = prev.model_id;
         }
     });
+}
+
+/**
+ * 根据模型能力声明更新高级选项的可见性与可用性（Handoff 02：DTO 驱动 UI）。
+ *
+ * 前端不再硬编码 model_id → 能力映射，而是直接消费后端 DTO 的 `stt_capabilities`：
+ * - `hotwords` 不支持 → 隐藏热词输入区，清空已存值
+ * - `itn` 不支持 → 隐藏 ITN 开关区，强制关闭 use_itn
+ * - `pseudo_streaming` 不支持 → 禁用流式开关，强制关闭
+ *
+ * `CapabilityFlag` wire shape: `{ supported: true }` 或 `{ supported: false, reason: "..." }`。
+ *
+ * @param {object} caps - `SttModelCapabilities` from DTO (may be undefined)
+ */
+function applyModelCapabilities(caps) {
+    if (!caps) return;
+
+    // ── 热词 ──
+    const hotwordsField = document.querySelector('.voice-adv-field--block');
+    const hotwordsTextarea = document.getElementById("voice-hotwords");
+    if (hotwordsField && hotwordsTextarea) {
+        const supported = caps.hotwords?.supported === "yes";
+        hotwordsField.style.display = supported ? '' : 'none';
+        if (!supported) {
+            // 不支持的模型清空热词配置，避免无效参数传给 worker
+            hotwordsTextarea.value = "";
+        }
+    }
+
+    // ── ITN ──
+    // ITN 开关所在的 voice-adv-field（第三个 .voice-adv-field，非 block 变体）
+    const itnToggle = document.getElementById("voice-use-itn-toggle");
+    if (itnToggle) {
+        const itnField = itnToggle.closest('.voice-adv-field');
+        const supported = caps.itn?.supported === "yes";
+        if (itnField) {
+            itnField.style.display = supported ? '' : 'none';
+        }
+        if (!supported) {
+            itnToggle.checked = false;
+        }
+    }
+
+    // ── 伪流式 ──
+    const streamingCheckbox = document.getElementById("voice-streaming");
+    const streamingField = document.getElementById("voice-streaming-field");
+    if (streamingCheckbox && streamingField) {
+        const supported = caps.pseudo_streaming?.supported === "yes";
+        streamingCheckbox.disabled = !supported;
+        if (!supported) {
+            streamingCheckbox.checked = false;
+        }
+        // 可选：在不支持时显示原因提示
+        const streamingHint = document.getElementById("voice-streaming-hint");
+        if (streamingHint) {
+            if (!supported && caps.pseudo_streaming?.reason) {
+                streamingHint.textContent = t("voice.local.streaming.unsupported_hint");
+            } else {
+                streamingHint.textContent = "";
+            }
+        }
+    }
 }
 
 /**

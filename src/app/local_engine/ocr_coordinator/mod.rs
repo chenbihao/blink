@@ -81,10 +81,10 @@ impl RepairGuard {
 
 impl Drop for RepairGuard {
     fn drop(&mut self) {
-        if self.armed.load(Ordering::SeqCst) {
-            if let Some(coord) = self.coordinator.upgrade() {
-                coord.end_repair();
-            }
+        if self.armed.load(Ordering::SeqCst)
+            && let Some(coord) = self.coordinator.upgrade()
+        {
+            coord.end_repair();
         }
     }
 }
@@ -588,12 +588,12 @@ impl OcrBackendRouter for OcrCoordinator {
                         if let Err(ref paddle_err) = res {
                             // 输入本身的问题（取消/解码失败/超预算）不回退——
                             // 换后端无济于事；后端基础设施问题才回退 WinRT
-                            let should_fallback = match paddle_err.category {
-                                crate::domain::ocr::error::OcrErrorCategory::Cancelled => false,
-                                crate::domain::ocr::error::OcrErrorCategory::DecodeError => false,
-                                crate::domain::ocr::error::OcrErrorCategory::InputTooLarge => false,
-                                _ => true,
-                            };
+                            let should_fallback = !matches!(
+                                paddle_err.category,
+                                crate::domain::ocr::error::OcrErrorCategory::Cancelled
+                                    | crate::domain::ocr::error::OcrErrorCategory::DecodeError
+                                    | crate::domain::ocr::error::OcrErrorCategory::InputTooLarge
+                            );
                             if should_fallback {
                                 tracing::info!(error = %paddle_err, "auto 模式 PaddleOCR 热态识别失败，fallback 到 WinRT");
                                 // deadline/cancel 后不得继续 WinRT fallback

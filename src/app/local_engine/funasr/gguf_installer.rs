@@ -10,6 +10,8 @@
 //! - hash 不匹配 → 清理临时文件并返回 Failed（损坏修复走模型事务重装）；
 //! - 取消/超时立即停止写入并清理；
 //! - 不伪造下载百分比——按文件粒度报告阶段，按字节报告进度日志（节流）。
+//! - 大文件 I/O（离线复制、hash 校验）通过 `spawn_blocking` 挪出 tokio executor，
+//!   HTTP chunk 写入为 KB 级同步写，阻塞可忽略。
 
 use std::path::Path;
 use std::time::Duration;
@@ -49,7 +51,8 @@ type LogFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 /// 流式下载单文件到 `dest`（临时名 `.tmp_<name>`），校验 SHA-256 后改名。
 ///
 /// 使用 `response.chunk()` 逐块拉取（无 futures Stream 依赖）；写盘为
-/// 本地小粒度同步写（每块 KB 级，阻塞可忽略），hash 在内存中流式累计。
+/// 同步写（每块 KB 级，阻塞可忽略），hash 在内存中流式累计。
+/// 取消/错误路径清理临时文件。
 async fn download_file(
     client: &reqwest::Client,
     url: &str,
@@ -182,9 +185,16 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
             s.emit_stage("downloading");
         }
 
-        std::fs::create_dir_all(staging_payload_dir).map_err(|e| ModelDownloadError::Internal {
-            message: format!("创建 staging 目录失败: {e}"),
-        })?;
+        // 创建 staging 目录——同步操作但快速完成（mkdir 仅创建路径组件）
+        let staging_dir = staging_payload_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&staging_dir))
+            .await
+            .map_err(|e| ModelDownloadError::Internal {
+                message: format!("spawn_blocking create_dir_all 失败: {e}"),
+            })?
+            .map_err(|e| ModelDownloadError::Internal {
+                message: format!("创建 staging 目录失败: {e}"),
+            })?;
 
         let client = reqwest::Client::builder()
             .timeout(DOWNLOAD_TIMEOUT)
@@ -195,12 +205,18 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
 
         let _ = engine_id; // 引擎绑定由模型事务保证；worker 只按 spec 下载
         for file in &spec.files {
+            // 取消检查：每个文件开始前
+            if cancel_token.is_cancelled() {
+                return Err(ModelDownloadError::Cancelled);
+            }
+
             // 已存在且 hash 正确的文件跳过（断网/重装复用）
             let final_path = staging_payload_dir.join(file.file_name);
             if final_path.is_file() {
                 let ok = tokio::task::spawn_blocking({
                     let p = final_path.clone();
                     let sha = file.sha256.clone();
+                    let ct = cancel_token.clone();
                     move || -> Option<bool> {
                         use sha2::{Digest, Sha256};
                         use std::io::Read;
@@ -208,6 +224,9 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
                         let mut h = Sha256::new();
                         let mut buf = vec![0u8; 1024 * 1024];
                         loop {
+                            if ct.is_cancelled() {
+                                return None;
+                            }
                             let n = f.read(&mut buf).ok()?;
                             if n == 0 {
                                 break;
@@ -244,9 +263,12 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
                         file.file_name,
                         cached.display()
                     ));
-                    match copy_and_verify(&cached, &final_path, &file.sha256) {
+                    match copy_and_verify(&cached, &final_path, &file.sha256, &cancel_token).await {
                         Ok(()) => continue,
                         Err(e) => {
+                            if matches!(e, ModelDownloadError::Cancelled) {
+                                return Err(e);
+                            }
                             log(&format!("缓存校验失败（{e}），回退网络下载"));
                             let _ = std::fs::remove_file(&final_path);
                         }
@@ -295,37 +317,74 @@ fn offline_cache_dir() -> Option<std::path::PathBuf> {
 }
 
 /// 复制文件并校验 SHA-256（离线缓存路径）。
-fn copy_and_verify(src: &Path, dest: &Path, expected_sha256: &str) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::{Read, Write};
-
-    let mut f = std::fs::File::open(src).map_err(|e| format!("打开缓存失败: {e}"))?;
+///
+/// GGUF 文件可达数百 MB，整个复制 + hash 过程在 `spawn_blocking` 中执行，
+/// 不阻塞 tokio executor。复制使用临时名，hash 通过后原子改名。
+/// 取消检查在每个 1MB 块边界执行。
+async fn copy_and_verify(
+    src: &Path,
+    dest: &Path,
+    expected_sha256: &str,
+    cancel_token: &CancellationToken,
+) -> Result<(), ModelDownloadError> {
+    let src = src.to_path_buf();
+    let dest = dest.to_path_buf();
     let tmp = dest.with_extension("tmp_copy");
-    let mut out = std::fs::File::create(&tmp).map_err(|e| format!("写临时文件失败: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("读缓存失败: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        out.write_all(&buf[..n])
-            .map_err(|e| format!("写临时文件失败: {e}"))?;
-    }
-    out.flush().map_err(|e| format!("flush 失败: {e}"))?;
-    drop(out);
+    let expected = expected_sha256.to_string();
+    let ct = cancel_token.clone();
 
-    let actual: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    if actual != expected_sha256 {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "SHA-256 不匹配（期望 {expected_sha256}，实际 {actual}）"
-        ));
-    }
-    std::fs::rename(&tmp, dest).map_err(|e| format!("落盘失败: {e}"))
+    tokio::task::spawn_blocking(move || -> Result<(), ModelDownloadError> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+
+        let mut f = std::fs::File::open(&src).map_err(|e| ModelDownloadError::Internal {
+            message: format!("打开缓存失败: {e}"),
+        })?;
+        let mut out = std::fs::File::create(&tmp).map_err(|e| ModelDownloadError::Internal {
+            message: format!("写临时文件失败: {e}"),
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1024 * 1024];
+        loop {
+            if ct.is_cancelled() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(ModelDownloadError::Cancelled);
+            }
+            let n = f.read(&mut buf).map_err(|e| ModelDownloadError::Internal {
+                message: format!("读缓存失败: {e}"),
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n])
+                .map_err(|e| ModelDownloadError::Internal {
+                    message: format!("写临时文件失败: {e}"),
+                })?;
+        }
+        out.flush().map_err(|e| ModelDownloadError::Internal {
+            message: format!("flush 失败: {e}"),
+        })?;
+        drop(out);
+
+        let actual: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if actual != expected {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ModelDownloadError::Failed {
+                message: format!("SHA-256 不匹配（期望 {expected}，实际 {actual}）"),
+            });
+        }
+        std::fs::rename(&tmp, dest).map_err(|e| ModelDownloadError::Internal {
+            message: format!("落盘失败: {e}"),
+        })?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ModelDownloadError::Internal {
+        message: format!("spawn_blocking copy_and_verify 失败: {e}"),
+    })?
 }

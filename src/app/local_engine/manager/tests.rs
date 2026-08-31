@@ -154,6 +154,7 @@ fn make_model_registry(
         checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
         estimated_size_mb: Some(1),
         compatibility_schema: 1,
+        stt_capabilities: crate::domain::local_engine::SttModelCapabilities::default(),
     };
     ModelRegistry::new_with_models(vec![mk(m_a), mk(m_b)])
 }
@@ -302,7 +303,7 @@ fn lease_uses_service_instance_id_instead_of_process_generation_id() {
         engine_id: engine_id.to_string(),
         instance_id: "inst-service".to_string(),
         token: "test-token".to_string(),
-        endpoint: endpoint.clone(),
+        endpoint,
     };
     let process_identity = ProcessIdentity {
         pid: 4242,
@@ -634,7 +635,7 @@ async fn different_engines_install_models_concurrently() {
 async fn selected_and_active_are_independent() {
     let eid = EngineId::new("fake-sel").unwrap();
     let tag = unique_tag("sel");
-    let models = vec![tag.clone(), format!("{tag}-b")];
+    let models = [tag.clone(), format!("{tag}-b")];
     // list_models 只投影目录内模型——需要带模型目录的 manager
     let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
         "fake-sel", true,
@@ -782,7 +783,7 @@ async fn repair_model_after_install_in_same_session_succeeds() {
 async fn delete_not_installed_returns_error() {
     let eid = EngineId::new("fake-del-none").unwrap();
     let tag = unique_tag("delnone");
-    let models = vec![tag.clone(), format!("{tag}-b")];
+    let models = [tag.clone(), format!("{tag}-b")];
     // 构造带目录的 manager（make_service 无模型目录）
     let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
         "fake-del-none",
@@ -1175,20 +1176,22 @@ async fn model_staging_validation_failure_is_visible_in_operation_logs() {
         .unwrap();
 
     assert!(!result.success);
-    let logs = port.install_logs.lock().unwrap();
-    assert!(logs.iter().any(|(key, _, text)| {
-        key.ends_with(&unsafe_operation_id)
-            && text.contains("staging 目录创建失败")
-            && text.starts_with("[ERROR]")
-    }));
-    drop(logs);
-    let stages = port.stages.lock().unwrap();
-    assert!(
-        stages
-            .iter()
-            .any(|(key, stage)| key.ends_with(&unsafe_operation_id) && stage == "failed")
-    );
-    drop(stages);
+    {
+        let logs = port.install_logs.lock().unwrap();
+        assert!(logs.iter().any(|(key, _, text)| {
+            key.ends_with(&unsafe_operation_id)
+                && text.contains("staging 目录创建失败")
+                && text.starts_with("[ERROR]")
+        }));
+    }
+    {
+        let stages = port.stages.lock().unwrap();
+        assert!(
+            stages
+                .iter()
+                .any(|(key, stage)| key.ends_with(&unsafe_operation_id) && stage == "failed")
+        );
+    }
 
     cleanup_models(&eid, &[&model_id, &fallback_id]).await;
 }

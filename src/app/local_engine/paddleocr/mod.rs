@@ -288,14 +288,14 @@ impl LocalEngineAdapter for PaddleocrAdapter {
         }
 
         // 检查 Python 版本
-        if let Some(ref py) = python_path {
-            if let Some(ref v) = check_python_version(py) {
-                entries.push(DiagnosticEntry {
-                    key: "python_version".to_string(),
-                    value: v.clone(),
-                    label: "info".to_string(),
-                });
-            }
+        if let Some(ref py) = python_path
+            && let Some(ref v) = check_python_version(py)
+        {
+            entries.push(DiagnosticEntry {
+                key: "python_version".to_string(),
+                value: v.clone(),
+                label: "info".to_string(),
+            });
         }
 
         // paddlepaddle 状态

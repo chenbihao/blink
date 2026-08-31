@@ -35,8 +35,10 @@ pub mod registry;
 
 #[allow(unused_imports)]
 pub use event_port::{TauriEventPort, make_event_port};
+#[cfg(test)]
+pub use manager::NoopEventPort;
 #[allow(unused_imports)]
-pub use manager::{EngineManager, EventPort, NoopEventPort, StructuredLogEntry};
+pub use manager::{EngineManager, EventPort, StructuredLogEntry};
 #[allow(unused_imports)]
 pub use operation_log_store::OperationLogStore;
 #[allow(unused_imports)]

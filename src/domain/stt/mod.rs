@@ -179,14 +179,14 @@ pub fn create_engine(
     }
 
     // 0.22.6 H4: Local 模式下记录联合引用
-    if config.mode == crate::domain::config::stt_config::SttMode::Local {
-        if let Some(ref sel) = config.local_stt_selection {
-            tracing::debug!(
-                engine_id = %sel.engine_id,
-                model_id = %sel.model_id,
-                "本地 STT 选择（联合引用）"
-            );
-        }
+    if config.mode == crate::domain::config::stt_config::SttMode::Local
+        && let Some(ref sel) = config.local_stt_selection
+    {
+        tracing::debug!(
+            engine_id = %sel.engine_id,
+            model_id = %sel.model_id,
+            "本地 STT 选择（联合引用）"
+        );
     }
 
     match config.mode {

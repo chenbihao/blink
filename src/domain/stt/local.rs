@@ -105,7 +105,7 @@ impl SttEngine for LocalSttEngine {
 
         tracing::info!(
             text_len = text.chars().count(),
-            %text,
+            duration_ms,
             "LocalSttEngine 识别完成",
         );
 

@@ -32,6 +32,7 @@ pub struct RawOcrWord {
 /// 平台原始 OCR 行（含该行的 word 列表）。
 #[derive(Debug, Clone)]
 pub struct RawOcrLine {
+    #[allow(dead_code)] // SDK 原始 text，当前管线走 word→group→smart join 路径
     pub text: String,
     pub words: Vec<RawOcrWord>,
 }

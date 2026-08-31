@@ -1,0 +1,247 @@
+/* ── local-runtime modals: cleanup modal + orphan recovery modal/notice ──
+   从 settings-local-runtime.css 拆分（0.22 B2）。scope: #engines .le-cleanup-* + .le-orphan-*
+   保持 selector 文本、specificity 和覆盖关系不变。─────────────────────────── */
+
+/* ── cleanup modal ──────────────────────────────────────────────────────────── */
+
+#engines .le-cleanup-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#engines .le-cleanup-modal[hidden] {
+    display: none;
+}
+
+#engines .le-cleanup-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--shadow);
+    cursor: pointer;
+}
+
+#engines .le-cleanup-dialog {
+    position: relative;
+    background: var(--surface);
+    border-radius: var(--radius-lg, 12px);
+    border: 1px solid var(--surface-2);
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#engines .le-cleanup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--surface);
+}
+
+#engines .le-cleanup-title {
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+    font-style: normal;
+}
+
+#engines .le-cleanup-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    align-items: center;
+}
+
+#engines .le-cleanup-close:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+#engines .le-cleanup-body {
+    padding: 1rem 1.25rem;
+    overflow-y: auto;
+    flex: 1;
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    font-style: normal;
+}
+
+#engines .le-cleanup-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid var(--surface);
+}
+
+/* ── cleanup modal targets list ─────────────────────────────────────────────── */
+
+#engines .le-cleanup-desc {
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    margin: 0 0 0.75rem;
+    font-style: normal;
+}
+
+#engines .le-cleanup-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+#engines .le-cleanup-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--surface-2);
+    border: 1px solid var(--surface);
+    font-style: normal;
+}
+
+#engines .le-cleanup-item-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    flex: 1;
+    cursor: pointer;
+}
+
+#engines .le-cleanup-checkbox {
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+}
+
+#engines .le-cleanup-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    flex: 1;
+}
+
+#engines .le-cleanup-item-title {
+    font-weight: 600;
+    color: var(--text);
+    font-style: normal;
+}
+
+#engines .le-cleanup-item-scope,
+#engines .le-cleanup-item-size,
+#engines .le-cleanup-item-flags,
+#engines .le-cleanup-item-affected {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-style: normal;
+}
+
+#engines .le-cleanup-item-blocked {
+    font-size: var(--text-xs);
+    color: var(--red);
+    font-style: normal;
+}
+
+#engines .le-cleanup-empty {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 1rem 0;
+    font-style: normal;
+}
+
+#engines .le-cleanup-error {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+    font-style: normal;
+}
+
+#engines .le-cleanup-error-main {
+    color: var(--red);
+    font-size: var(--text-sm);
+    font-style: normal;
+}
+
+#engines .le-cleanup-error-hint {
+    color: var(--text-sub);
+    font-size: var(--text-xs);
+    margin-top: 0.25rem;
+    font-style: normal;
+}
+
+/* ── orphan 恢复：确认模态 + 通知 ──────────────────────────────────────────── */
+
+.le-orphan-modal-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--shadow);
+    z-index: 10000;
+}
+
+.le-orphan-modal {
+    max-width: 400px;
+    padding: 1.5rem;
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    font-style: normal;
+    text-align: center;
+}
+
+.le-orphan-modal-msg {
+    margin: 0 0 1rem 0;
+    color: var(--text);
+    font-size: var(--text-sm);
+    font-style: normal;
+}
+
+.le-orphan-modal-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+}
+
+.le-orphan-notification {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-sm, 4px);
+    font-size: var(--text-sm);
+    font-style: normal;
+    z-index: 10000;
+    max-width: 360px;
+    word-break: break-word;
+    border: 1px solid var(--surface);
+}
+
+.le-orphan-notification-ok {
+    background: var(--green-bg);
+    color: var(--green);
+}
+
+.le-orphan-notification-err {
+    background: var(--red-bg);
+    color: var(--red);
+}

@@ -220,10 +220,8 @@ pub struct LocalEngineConnection {
     /// 实际 endpoint base URL（`http://127.0.0.1:port`；worker 引擎为占位描述）。
     pub endpoint: String,
     /// engine id。
-    #[allow(dead_code)]
     pub engine_id: String,
     /// instance id（每次启动随机生成，用于实例隔离）。
-    #[allow(dead_code)]
     pub instance_id: String,
     /// stdio worker 传输通道（StdioWorker 引擎）。
     pub worker: Option<std::sync::Arc<dyn crate::domain::stt::SttTransport>>,
@@ -304,7 +302,6 @@ pub(crate) struct EngineEntry {
     /// 受管实例（Running 时存在）。
     managed_process: Mutex<Option<Arc<ManagedProcess>>>,
     /// 上一实例的 ManagedProcess 引用——stop 后保留 bounded history 可查。
-    #[allow(dead_code)]
     last_managed_process: Mutex<Option<Arc<ManagedProcess>>>,
     /// 日志 pump 的 cancellation token——每次 start 创建新 token，
     /// stop/rollback/restart 时 cancel 旧 pump，确保旧实例日志不再投影。
@@ -388,9 +385,10 @@ pub trait EventPort: Send + Sync {
 }
 
 /// 空实现（测试/无事件场景用）。
-#[allow(dead_code)]
+#[cfg(test)]
 pub struct NoopEventPort;
 
+#[cfg(test)]
 impl EventPort for NoopEventPort {
     fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {}
     fn emit_log(
@@ -465,11 +463,9 @@ pub struct EngineManager {
     process_registry: Arc<std::sync::Mutex<HashMap<ProcessKey, Arc<ManagedProcess>>>>,
 }
 
-#[allow(dead_code)]
 impl EngineManager {
     /// 创建服务实例。
-    ///
-    /// 每次创建生成新 `service_epoch`——新 epoch 初始 revision 不受旧快照影响。
+    #[cfg(test)]
     pub fn new(registry: Arc<EngineRegistry>, event_port: Arc<dyn EventPort>) -> Arc<Self> {
         Self::new_with_providers(
             registry,
@@ -553,12 +549,13 @@ impl EngineManager {
     }
 
     /// 返回 registry 引用。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 预留 API：外部目前通过 EngineManager 方法间接访问，直接引用尚未接入
     pub fn registry(&self) -> &Arc<EngineRegistry> {
         &self.registry
     }
 
     /// 返回操作协调器引用（测试用）。
+    #[cfg(test)]
     pub fn coordinator(&self) -> &EngineOperationCoordinator {
         &self.coordinator
     }

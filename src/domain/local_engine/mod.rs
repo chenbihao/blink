@@ -59,9 +59,10 @@ pub use identity::{
 };
 #[allow(unused_imports)]
 pub use model::{
-    DeleteConflictReason, EngineModelDescriptor, EngineModelStatus, ModelCompatibility,
-    ModelDeleteConflict, ModelIdentityVerification, ModelInstallState, ModelOperationKind,
-    ModelOperationResult, ModelOperationStage, ModelVerificationState,
+    CapabilityFlag, DeleteConflictReason, EngineModelDescriptor, EngineModelStatus,
+    ModelCompatibility, ModelDeleteConflict, ModelIdentityVerification, ModelInstallState,
+    ModelOperationKind, ModelOperationResult, ModelOperationStage, ModelVerificationState,
+    SttModelCapabilities,
 };
 #[allow(unused_imports)]
 pub use operation::CancelOutcome;

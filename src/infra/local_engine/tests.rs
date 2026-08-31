@@ -13,8 +13,8 @@
 //! 使用 `cmd.exe`（Windows）或 `/bin/echo`/`/bin/sleep`（Unix）作为测试子进程，
 //! 不依赖 FunASR 或任何外部引擎。
 
-use crate::infra::local_engine::ManagedProcessError;
 use crate::infra::local_engine::log_pipe::{LineAccumulator, LogPipe, LogPipeConfig, LogSource};
+use crate::infra::local_engine::process::ManagedProcessError;
 use crate::infra::local_engine::process::{
     LaunchRequest, ManagedProcess, ShutdownConfig, generate_instance_id_pub,
 };
@@ -875,14 +875,13 @@ async fn stop_no_orphan_processes() {
         use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
         let result = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
-        if result.is_ok() {
-            let handle = result.unwrap();
+        if let Ok(handle) = result {
             let _ = unsafe { CloseHandle(handle) };
             tokio::time::sleep(Duration::from_secs(2)).await;
             // 再次检查
             let result2 = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
-            if result2.is_ok() {
-                let _ = unsafe { CloseHandle(result2.unwrap()) };
+            if let Ok(handle2) = result2 {
+                let _ = unsafe { CloseHandle(handle2) };
                 // 进程可能仍在退出中——Job Object 会最终回收
             }
         }

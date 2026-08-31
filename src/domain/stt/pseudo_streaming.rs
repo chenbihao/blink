@@ -264,7 +264,8 @@ impl PseudoStreamingSttEngine {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
                     tracing::debug!(
-                        %cleaned, samples = sentence_samples.len(),
+                        text_len = cleaned.chars().count(),
+                        samples = sentence_samples.len(),
                         "定稿识别"
                     );
                     // 写入 pending_confirmed，下次 transcribe_chunk 时收取
@@ -314,12 +315,11 @@ impl PseudoStreamingSttEngine {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
                     if !cleaned.is_empty() {
-                        // 精简日志：raw 仅在与 cleaned 不同时打印
-                        if cleaned != text {
-                            tracing::trace!(%cleaned, raw = %text, "预览识别");
-                        } else {
-                            tracing::trace!(%cleaned, "预览识别");
-                        }
+                        tracing::trace!(
+                            text_len = cleaned.chars().count(),
+                            modified = cleaned != text,
+                            "预览识别"
+                        );
                         // 写入 latest_preview（代际校验：句尾后丢弃过期预览）
                         let mut inner = inner.lock().unwrap();
                         if inner.preview_generation == generation {
@@ -678,11 +678,7 @@ impl SttEngine for PseudoStreamingSttEngine {
             result
         };
 
-        tracing::info!(
-            text_len = final_text.chars().count(),
-            %final_text,
-            "伪流式识别完成",
-        );
+        tracing::info!(text_len = final_text.chars().count(), "伪流式识别完成",);
 
         Ok(final_text)
     }

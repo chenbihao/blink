@@ -1,12 +1,7 @@
-//! EngineManager 进程生命周期用例：
-//! start / stop / 条件停止、回滚（rollback_started_instance）、exit monitor、
-//! lease 写入与退出回收（shutdown_all / shutdown_all_blocking）。
-
 use super::*;
 
-use super::logs::pump_logs_to_event_port;
+use super::super::logs::pump_logs_to_event_port;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── start ───────────────────────────────────────────────────────────────
 
@@ -76,17 +71,18 @@ impl EngineManager {
         // 0.22.7：选中模型从 AdapterConfig 投影读取（与 prepare_launch 同源），
         // 不再直接读全局 SttConfig 缓存——配置门面已把 funasr_model 投影进
         // engine_config，直接使用避免缓存未初始化时退化为旧默认模型。
-        let selected_model_id = if engine_id.as_str() == super::super::funasr::FUNASR_ENGINE_ID {
-            serde_json::from_value::<serde_json::Value>(config.engine_config.clone())
-                .ok()
-                .and_then(|v| {
-                    v.get("funasr_model")
-                        .and_then(|m| m.as_str())
-                        .map(String::from)
-                })
-        } else {
-            None
-        };
+        let selected_model_id =
+            if engine_id.as_str() == super::super::super::funasr::FUNASR_ENGINE_ID {
+                serde_json::from_value::<serde_json::Value>(config.engine_config.clone())
+                    .ok()
+                    .and_then(|v| {
+                        v.get("funasr_model")
+                            .and_then(|m| m.as_str())
+                            .map(String::from)
+                    })
+            } else {
+                None
+            };
         let (deployment_install_id, frozen_profile, frozen_model) = tokio::task::spawn_blocking(
             move || -> Result<(String, ResolvedProfile, Option<FrozenModelIdentity>), LocalEngineError> {
                 let (pointer, manifest) = DeploymentStore::read_active(&eid_for_freeze)
@@ -176,12 +172,12 @@ impl EngineManager {
                 engine_id: engine_id.to_string(),
                 instance_id: instance_id.clone(),
                 token: token.clone(),
-                endpoint: endpoint.clone(),
+                endpoint,
             };
 
             // 构建 LaunchContext（包含 endpoint、身份参数和 resolved profile）
             let ctx = LaunchContext {
-                endpoint: endpoint.clone(),
+                endpoint,
                 engine_id: engine_id.to_string(),
                 instance_id: instance_id.clone(),
                 token: token.clone(),
@@ -467,376 +463,6 @@ impl EngineManager {
         }
     }
 
-    // ── stop ────────────────────────────────────────────────────────────────
-
-    /// 停止引擎服务。
-    ///
-    /// 幂等：如果进程已 Stopped，直接返回 Ok。
-    /// 迟到的 health/task/exit 不能覆盖新实例。
-    pub async fn stop(&self, engine_id: &EngineId) -> Result<(), LocalEngineError> {
-        self.validate_engine_id(engine_id)?;
-        let entry = self.get_entry(engine_id).await?;
-
-        // claim 进程级操作（与其他变更操作互斥）
-        let operation_id = generate_operation_id();
-        let _guard = self.coordinator.try_claim(engine_id, &operation_id)?;
-
-        self.stop_internal_with_status(engine_id, &entry, &operation_id)
-            .await
-    }
-
-    /// 无 claim 的停止执行体——供已持有操作 claim 的路径
-    /// （install/repair 先停引擎）复用，不产生二级 claim。
-    ///
-    /// **必须传入 claim 持有者的 operation_id**：状态提交的 operation 门
-    /// 以协调器 claim 为真源，二级 id 会被判定为迟到操作而拒绝，
-    /// 导致运行中实例实际未被停止。
-    pub(super) async fn stop_internal(
-        &self,
-        engine_id: &EngineId,
-        entry: &Arc<EngineEntry>,
-        operation_id: &str,
-    ) {
-        let _ = self
-            .stop_internal_with_status(engine_id, entry, operation_id)
-            .await;
-    }
-
-    /// 停止执行体（携带用于状态提交的 operation_id）。
-    async fn stop_internal_with_status(
-        &self,
-        engine_id: &EngineId,
-        entry: &Arc<EngineEntry>,
-        operation_id: &str,
-    ) -> Result<(), LocalEngineError> {
-        // 幂等检查
-        let managed = {
-            let mp = entry.managed_process.lock().await;
-            mp.clone()
-        };
-
-        match managed {
-            Some(mp) => {
-                // 标记 desired=Stopped, process=Stopping
-                self.commit_status_internal(engine_id, Some(operation_id), |status| {
-                    status.desired = DesiredState::Stopped;
-                    status.process = ProcessState::Stopping;
-                })
-                .await?;
-
-                // 0.22.7：StdioWorker 引擎先走优雅停止——发送 shutdown 请求并
-                // drop 客户端（stdin EOF），短暂等待 worker 自行退出；
-                // 超时再由 ManagedProcess 强制回收进程树。
-                self.graceful_stop_worker(engine_id, entry, &mp).await;
-
-                match mp.stop().await {
-                    Ok(()) => {
-                        self.commit_status_internal(engine_id, Some(operation_id), |status| {
-                            status.process = ProcessState::Stopped;
-                            status.service = ServiceHealth::Unknown;
-                            status.model = ModelHealth::Unknown;
-                            status.last_error = None;
-                        })
-                        .await?;
-
-                        // 清理运行实例状态（launch snapshot + pump + registry + lease）
-                        self.clear_running_instance(engine_id, entry, true).await;
-
-                        tracing::info!(engine = %engine_id, "引擎已停止");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let err = from_process(ErrorPhase::Stop, "停止失败", &e);
-                        self.commit_status_internal(engine_id, Some(operation_id), |status| {
-                            status.process = ProcessState::Exited {
-                                reason: format!("stop failed: {e}"),
-                            };
-                            status.last_error = Some(err.clone());
-                        })
-                        .await?;
-                        Err(err)
-                    }
-                }
-            }
-            None => {
-                // 已 Stopped，幂等返回
-                self.commit_status_internal(engine_id, Some(operation_id), |status| {
-                    status.desired = DesiredState::Stopped;
-                    if status.process == ProcessState::Starting {
-                        status.process = ProcessState::Stopped;
-                    }
-                    status.last_error = None;
-                })
-                .await?;
-                Ok(())
-            }
-        }
-    }
-
-    /// StdioWorker 引擎的优雅停止（0.22.7）。
-    ///
-    /// 协议约定：正常停止优先 shutdown 请求 + stdin EOF，worker 自行退出。
-    /// 此处发送请求、drop 客户端并等待最多 `GRACEFUL_WAIT_SECS`；
-    /// 无论结果如何，后续 `ManagedProcess::stop` 兜底回收（Job Object）。
-    async fn graceful_stop_worker(
-        &self,
-        engine_id: &EngineId,
-        entry: &Arc<EngineEntry>,
-        managed: &Arc<ManagedProcess>,
-    ) {
-        const GRACEFUL_WAIT_SECS: u64 = 5;
-
-        let client = entry.worker_client.lock().await.take();
-        let Some(client) = client else {
-            return; // 非 stdio 引擎或客户端已销毁
-        };
-        tracing::debug!(engine = %engine_id, "优雅停止 stdio worker：shutdown + EOF");
-        client.request_shutdown().await;
-        drop(client); // stdin EOF
-
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(GRACEFUL_WAIT_SECS);
-        loop {
-            let snapshot = managed.snapshot().await;
-            if snapshot.status.is_exited() || snapshot.status == ProcessStatus::Stopped {
-                tracing::info!(engine = %engine_id, "stdio worker 已在优雅窗口内退出");
-                return;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(engine = %engine_id, "stdio worker 优雅退出超时，转入强制回收");
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    /// 清理运行实例状态：取消日志 pump、删除 lease、清 launch snapshot、
-    /// 移除 process registry 条目。
-    ///
-    /// `remove_lease`: stop/exit 路径删除；`stop_if_current` 条件停止成功后
-    /// 同样删除（与 stop 语义一致）。
-    ///
-    /// 0.22.7：同时销毁 stdio worker 客户端（关闭管道）并清空受管音频目录。
-    async fn clear_running_instance(
-        &self,
-        engine_id: &EngineId,
-        entry: &Arc<EngineEntry>,
-        remove_lease_flag: bool,
-    ) {
-        // 取消旧日志 pump——确保 stop 后旧实例日志不再投影
-        {
-            let mut lc = entry.log_pump_cancel.lock().await;
-            if let Some(cancel) = lc.take() {
-                tracing::debug!(engine = %engine_id, "clear_running_instance: 取消日志 pump");
-                cancel.cancel();
-            }
-        }
-
-        // 0.22.7：销毁 worker 客户端（drop → stdin EOF）+ 清空音频临时目录
-        {
-            let client = entry.worker_client.lock().await.take();
-            if client.is_some() {
-                tracing::debug!(engine = %engine_id, "clear_running_instance: 销毁 worker 客户端");
-            }
-        }
-        super::super::funasr::worker::clean_audio_tmp_dir(engine_id);
-
-        // 取出 instance_id 用于 lease 删除与 registry 移除
-        let saved_instance_id = entry
-            .current_identity()
-            .await
-            .map(|i| i.instance_id.clone());
-
-        if remove_lease_flag {
-            if let Some(ref inst_id) = saved_instance_id {
-                if let Err(e) = remove_lease(&engine_id.to_string(), inst_id) {
-                    tracing::warn!(
-                        engine = %engine_id,
-                        instance = %inst_id,
-                        %e,
-                        "清理实例: 删除 lease 失败（继续清理）"
-                    );
-                }
-            }
-        }
-
-        // 清理 launch snapshot + 进程句柄
-        {
-            let mut l = entry.launch.lock().await;
-            if let Some(snapshot) = l.take() {
-                tracing::debug!(
-                    engine = %engine_id,
-                    deployment = %snapshot.deployment_install_id,
-                    "清理实例: 释放 launch snapshot（start 冻结的部署绑定至此失效）"
-                );
-            }
-        }
-        {
-            let mut mp_guard = entry.managed_process.lock().await;
-            *mp_guard = None;
-        }
-
-        // 从同步 registry 移除
-        if let Some(instance_id) = saved_instance_id {
-            let pkey = ProcessKey {
-                engine_id: engine_id.clone(),
-                instance_id,
-            };
-            let mut reg = self.process_registry.lock().unwrap();
-            reg.remove(&pkey);
-        }
-    }
-
-    /// 条件停止：只停止指定 instance token 的实例。
-    ///
-    /// 如果当前实例的 token 与传入的 token 不匹配（已有新实例接管），
-    /// 直接返回 Ok(())，不停止新实例。
-    ///
-    /// 用于 OcrCoordinator 的 lease 管理：旧 timer 或旧 startup task
-    /// 不得停止/覆盖新实例。
-    pub async fn stop_if_current(
-        &self,
-        engine_id: &EngineId,
-        instance_token: &crate::infra::local_engine::state::InstanceToken,
-    ) -> Result<(), LocalEngineError> {
-        self.validate_engine_id(engine_id)?;
-        let entry = self.get_entry(engine_id).await?;
-
-        // claim 进程级操作（与其他变更操作互斥）
-        let operation_id = generate_operation_id();
-        let _guard = self.coordinator.try_claim(engine_id, &operation_id)?;
-
-        let managed = {
-            let mp = entry.managed_process.lock().await;
-            mp.clone()
-        };
-
-        match managed {
-            Some(mp) => {
-                // 条件检查：token 不匹配则跳过
-                if !mp.is_current_token(instance_token).await {
-                    tracing::info!(
-                        engine = %engine_id,
-                        "stop_if_current: token 不匹配，跳过停止（新实例已接管）"
-                    );
-                    return Ok(());
-                }
-
-                // 标记 desired=Stopped, process=Stopping
-                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                    status.desired = DesiredState::Stopped;
-                    status.process = ProcessState::Stopping;
-                })
-                .await?;
-
-                // 0.22.7：StdioWorker 引擎先走优雅停止（条件停止路径同样适用）
-                self.graceful_stop_worker(engine_id, &entry, &mp).await;
-
-                match mp.stop_if_current(instance_token).await {
-                    Ok(()) => {
-                        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                            status.process = ProcessState::Stopped;
-                            status.service = ServiceHealth::Unknown;
-                            status.model = ModelHealth::Unknown;
-                            status.last_error = None;
-                        })
-                        .await?;
-
-                        // 清理运行实例状态（含 lease——条件停止成功即实例终结）
-                        self.clear_running_instance(engine_id, &entry, true).await;
-
-                        tracing::info!(engine = %engine_id, "引擎已条件停止（token 匹配）");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let err = from_process(ErrorPhase::Stop, "条件停止失败", &e);
-                        self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                            status.process = ProcessState::Exited {
-                                reason: format!("stop_if_current failed: {e}"),
-                            };
-                            status.last_error = Some(err.clone());
-                        })
-                        .await?;
-                        Err(err)
-                    }
-                }
-            }
-            None => {
-                // 已 Stopped，幂等返回
-                self.commit_status_internal(engine_id, Some(&operation_id), |status| {
-                    status.desired = DesiredState::Stopped;
-                    if status.process == ProcessState::Starting {
-                        status.process = ProcessState::Stopped;
-                    }
-                    status.last_error = None;
-                })
-                .await?;
-                Ok(())
-            }
-        }
-    }
-
-    // ── shutdown_all ────────────────────────────────────────────────────────
-
-    /// 异步遍历所有受管实例并回收。
-    ///
-    /// 单个失败不能阻止其他实例回收；最终返回汇总错误并记录结构化日志。
-    pub async fn shutdown_all(&self) -> Result<(), Vec<LocalEngineError>> {
-        let entries = self.entries.read().await;
-        let mut errors = Vec::new();
-
-        for (engine_id, entry) in entries.iter() {
-            let managed_opt = entry.managed_process.lock().await.clone();
-            if let Some(managed) = managed_opt {
-                tracing::info!(engine = %engine_id, "shutdown_all: 回收引擎实例");
-                self.graceful_stop_worker(engine_id, entry, &managed).await;
-                if let Err(e) = managed.stop().await {
-                    let err = from_process(ErrorPhase::Stop, "shutdown_all 回收失败", &e);
-                    tracing::error!(engine = %engine_id, %err, "shutdown_all: 回收失败");
-                    errors.push(err);
-                } else {
-                    // 更新状态
-                    let _ = self
-                        .commit_status_internal(engine_id, None, |status| {
-                            status.desired = DesiredState::Stopped;
-                            status.process = ProcessState::Stopped;
-                            status.service = ServiceHealth::Unknown;
-                            status.model = ModelHealth::Unknown;
-                        })
-                        .await;
-                }
-            }
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
-    }
-
-    /// 同步阻塞版本的 shutdown_all（应用退出用）。
-    ///
-    /// 遍历 `process_registry`（同步 Mutex，不依赖 async lock），
-    /// 对每个 ManagedProcess 调用 `shutdown_blocking()`。
-    /// 单个失败不阻止其他回收。
-    ///
-    /// **0.22.3 Task E**: 不依赖 `entries` 的 async lock——
-    /// `process_registry` 是独立的同步 Mutex，shutdown 路径可靠。
-    #[allow(dead_code)]
-    pub fn shutdown_all_blocking(&self) {
-        // 同步遍历 process_registry——不依赖 async entries lock
-        let registry = self.process_registry.lock().unwrap();
-        for (key, managed) in registry.iter() {
-            tracing::info!(
-                engine = %key.engine_id,
-                instance = %key.instance_id,
-                "shutdown_all_blocking: 回收"
-            );
-            managed.shutdown_blocking();
-        }
-    }
-
     // ── lease 写入辅助（0.22.6.1） ─────────────────────────────────────────
 
     /// 为引擎实例写入持久化 lease。
@@ -989,7 +615,7 @@ impl EngineManager {
                         tracing::debug!(engine = %engine_id, "exit monitor: 销毁 worker 客户端");
                     }
                 }
-                super::super::funasr::worker::clean_audio_tmp_dir(&engine_id);
+                super::super::super::funasr::worker::clean_audio_tmp_dir(&engine_id);
 
                 // 取出 instance_id 用于 lease 删除
                 let saved_instance_id = entry
@@ -998,15 +624,15 @@ impl EngineManager {
                     .map(|i| i.instance_id.clone());
 
                 // 删除 lease
-                if let Some(ref inst_id) = saved_instance_id {
-                    if let Err(e) = remove_lease(&engine_id.to_string(), inst_id) {
-                        tracing::warn!(
-                            engine = %engine_id,
-                            instance = %inst_id,
-                            %e,
-                            "exit monitor: 删除 lease 失败（继续清理）"
-                        );
-                    }
+                if let Some(ref inst_id) = saved_instance_id
+                    && let Err(e) = remove_lease(&engine_id.to_string(), inst_id)
+                {
+                    tracing::warn!(
+                        engine = %engine_id,
+                        instance = %inst_id,
+                        %e,
+                        "exit monitor: 删除 lease 失败（继续清理）"
+                    );
                 }
 
                 // 清理 launch snapshot + 进程句柄
@@ -1081,164 +707,5 @@ impl EngineManager {
                 break;
             }
         });
-    }
-
-    // ── rollback ────────────────────────────────────────────────────────────
-
-    /// 统一回滚已启动实例——start 失败时调用。
-    ///
-    /// 清理项：
-    /// 1. 停止 ManagedProcess（如果存在）
-    /// 2. 清理 launch snapshot / 日志 pump / lease / process registry
-    /// 3. 置错误终态（process=Exited, service=Unreachable, last_error=err）
-    ///
-    /// **不回滚部署**：部署完整性由安装事务的切换后验证保证；
-    /// 进程启动失败（端口冲突/超时等）是进程生命周期问题，
-    /// 不构成部署回滚条件（旧 slot 已在事务成功时删除）。
-    async fn rollback_started_instance(
-        &self,
-        engine_id: &EngineId,
-        entry: &Arc<EngineEntry>,
-        _pkey: &ProcessKey,
-        instance_id: &str,
-        operation_id: &str,
-        error: &LocalEngineError,
-    ) {
-        tracing::warn!(
-            engine = %engine_id,
-            instance = instance_id,
-            error = %error,
-            "rollback_started_instance: 清理中间状态"
-        );
-
-        // 停止 ManagedProcess（如果仍在运行）
-        {
-            let mp = entry.managed_process.lock().await;
-            if let Some(managed) = mp.as_ref() {
-                if let Err(e) = managed.stop().await {
-                    tracing::warn!(
-                        engine = %engine_id,
-                        error = %e,
-                        "rollback: ManagedProcess.stop 失败（继续清理）"
-                    );
-                }
-            }
-        }
-
-        // 清理运行实例状态（pump/lease/launch snapshot/registry）
-        self.clear_running_instance(engine_id, entry, true).await;
-
-        // 置错误终态。
-        // 必须携带 start claim 的 operation_id 提交——start 的 claim 仍由
-        // _guard 持有，不带 id（或带错 id）的提交会被 operation 门拒绝，
-        // 导致 Exited/Unreachable 终态不落地、快照停留在 Running。
-        let _ = self
-            .commit_status_internal(engine_id, Some(operation_id), |status| {
-                status.desired = DesiredState::Stopped;
-                status.process = ProcessState::Exited {
-                    reason: format!("rollback: {:?}", error.code),
-                };
-                status.service = ServiceHealth::Unreachable;
-                status.model = ModelHealth::Unknown;
-                status.last_error = Some(error.clone());
-            })
-            .await;
-    }
-}
-
-/// 用服务身份与 OS 进程证据构造持久化 lease。
-///
-/// `ManagedProcess` 的 `ProcessIdentity::instance_id` 是 infra 状态机用于隔离
-/// generation 的内部 token；health、回滚与恢复协议使用的是
-/// `ServiceIdentityInput::instance_id`。lease 必须保存后者，否则 start 回滚时
-/// 无法通过 instance 校验删除本次写入的 lease。
-pub(super) fn build_process_lease(
-    engine_id: &EngineId,
-    process_identity: &ProcessIdentity,
-    service_identity: &ServiceIdentityInput,
-    endpoint: &crate::infra::local_engine::port::Endpoint,
-    generation_id: String,
-) -> ProcessLease {
-    ProcessLease::new(
-        engine_id.to_string(),
-        service_identity.instance_id.clone(),
-        process_identity.pid,
-        process_identity.start_time_ms,
-        process_identity.executable.to_string_lossy().to_string(),
-        endpoint.base_url(),
-        service_identity.token_fingerprint(),
-        generation_id,
-    )
-}
-
-// ── 动态模型身份解析（0.22.6 B2）─────────────────────────────────────────
-
-/// 从 model_storage manifest 动态解析当前安装的模型身份。
-///
-/// 返回 `(model_id, revision, fingerprint)` 三元组（如果模型已安装且有效）。
-///
-/// **asset_key 真源**：managed 模式下用 `selected_model_id`（配置选中的模型，
-/// 如 funasr 的 `funasr_model`）查找 manifest；`fallback_contract.model_id`
-/// 只是 descriptor 默认占位——用户可能安装/选择了其他模型（如装了
-/// paraformer-zh 而 descriptor 默认 SenseVoiceSmall），按硬编码查找会
-/// 误报"模型未安装"。
-///
-/// **0.22.6 B2 fail-closed 铁则**：模型未安装、损坏或恢复失败时返回 `Err`，
-/// 不再回退到 descriptor 静态值。调用方必须将此视为启动/健康检查失败。
-///
-/// 这确保 health Ready 校验只与实际安装的 manifest 比对，
-/// 而非与 descriptor 中编译期常量比对——防止
-/// "下载了模型 A 但 health 期望模型 B" 的静默通过。
-pub(super) fn resolve_expected_model_identity(
-    engine_id: &EngineId,
-    selected_model_id: Option<&str>,
-    fallback_contract: &ModelContract,
-    uses_managed_model_storage: bool,
-) -> Result<(String, String, Option<String>), String> {
-    if !uses_managed_model_storage {
-        return Ok((
-            fallback_contract.model_id.clone(),
-            fallback_contract.revision.clone(),
-            None,
-        ));
-    }
-
-    // 使用配置选中的 model_id 作为 asset_key 的来源
-    let model_id_for_key = selected_model_id
-        .filter(|m| !m.is_empty())
-        .unwrap_or(&fallback_contract.model_id);
-    let asset_key = mstore::encode_asset_key(model_id_for_key);
-    match mstore::restore_model_state(engine_id, &asset_key) {
-        Ok(mstore::RestoredModelState::Installed { manifest, .. }) => Ok((
-            manifest.model_id,
-            manifest.revision,
-            Some(manifest.content_fingerprint),
-        )),
-        Ok(mstore::RestoredModelState::Corrupted { reason, .. }) => {
-            tracing::warn!(
-                engine_id = %engine_id,
-                model_id = %model_id_for_key,
-                reason = %reason,
-                "模型状态 Corrupted——fail-closed，不回退到 descriptor 静态身份"
-            );
-            Err(format!("模型状态 Corrupted: {reason}"))
-        }
-        Ok(mstore::RestoredModelState::NotInstalled) => {
-            tracing::debug!(
-                engine_id = %engine_id,
-                model_id = %model_id_for_key,
-                "模型未安装——fail-closed，不回退到 descriptor 静态身份"
-            );
-            Err(format!("模型未安装: {model_id_for_key}"))
-        }
-        Err(e) => {
-            tracing::warn!(
-                engine_id = %engine_id,
-                model_id = %model_id_for_key,
-                error = %e,
-                "模型状态恢复失败——fail-closed，不回退到 descriptor 静态身份"
-            );
-            Err(format!("模型状态恢复失败: {e}"))
-        }
     }
 }

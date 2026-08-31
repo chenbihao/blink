@@ -138,7 +138,7 @@ pub struct ComputeCandidate {
 /// 引擎资源预算提示。
 ///
 /// 用于 UI 展示预计资源占用和清理影响，不做硬性限制。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResourceBudget {
     /// 预计环境磁盘占用（MB），None 表示未知。
     pub estimated_env_disk_mb: Option<u64>,
@@ -148,17 +148,6 @@ pub struct ResourceBudget {
     pub estimated_stable_ram_mb: Option<u64>,
     /// 预计峰值内存（MB），None 表示未知。
     pub estimated_peak_ram_mb: Option<u64>,
-}
-
-impl Default for ResourceBudget {
-    fn default() -> Self {
-        Self {
-            estimated_env_disk_mb: None,
-            estimated_model_disk_mb: None,
-            estimated_stable_ram_mb: None,
-            estimated_peak_ram_mb: None,
-        }
-    }
 }
 
 // ── EngineTimeouts ─────────────────────────────────────────────────────────

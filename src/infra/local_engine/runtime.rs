@@ -296,7 +296,7 @@ pub fn runtimes_root() -> PathBuf {
     {
         // 单测不得触碰真实 `%APPDATA%\blink`。进程级唯一根目录同时避免不同
         // cargo test 进程互相清理指针/引用测试数据。
-        return std::env::temp_dir().join(format!("blink-runtime-tests-{}", std::process::id()));
+        std::env::temp_dir().join(format!("blink-runtime-tests-{}", std::process::id()))
     }
     #[cfg(not(test))]
     crate::infra::utils::paths::app_data_dir().join("runtimes")
@@ -339,7 +339,7 @@ pub fn slot_manifest_path(engine_id: &EngineId, slot: &str) -> PathBuf {
 pub fn models_root() -> PathBuf {
     #[cfg(test)]
     {
-        return runtimes_root().join("models");
+        runtimes_root().join("models")
     }
     #[cfg(not(test))]
     crate::infra::utils::paths::app_data_dir().join("models")
@@ -354,7 +354,7 @@ pub fn engine_model_cache_dir(engine_id: &EngineId) -> PathBuf {
 pub fn python_shared_root() -> PathBuf {
     #[cfg(test)]
     {
-        return runtimes_root().join("python");
+        runtimes_root().join("python")
     }
     #[cfg(not(test))]
     crate::infra::utils::paths::python_dir()
@@ -668,15 +668,15 @@ pub fn scan_artifact_references(
         }
 
         // Binary manifest 中的 stdlib artifact 引用
-        if let ManifestExtension::ManagedBinary(ref ext) = manifest.extension {
-            if let Some(ref stdlib) = ext.stdlib_artifact {
-                if stdlib.runtime_kind == runtime_kind && stdlib.artifact_id == *artifact_id {
-                    refs.push(ArtifactReference {
-                        engine_id: engine_name.clone(),
-                        install_id: format!("{install_id}#stdlib"),
-                    });
-                }
-            }
+        if let ManifestExtension::ManagedBinary(ref ext) = manifest.extension
+            && let Some(ref stdlib) = ext.stdlib_artifact
+            && stdlib.runtime_kind == runtime_kind
+            && stdlib.artifact_id == *artifact_id
+        {
+            refs.push(ArtifactReference {
+                engine_id: engine_name.clone(),
+                install_id: format!("{install_id}#stdlib"),
+            });
         }
     }
 
@@ -801,6 +801,133 @@ mod tests {
 
         let escape = root.join("..").join("..").join("etc").join("passwd");
         assert!(ensure_path_within(&root, &escape).is_err());
+    }
+
+    // ── path-component-aware 边界测试 ──────────────────────────────────
+
+    #[test]
+    fn ensure_path_within_rejects_sibling_prefix() {
+        // 同名前缀兄弟目录：`engine` vs `engine-evil` 不应匹配
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let good_dir = root.join("engine");
+        let evil_dir = root.join("engine-evil");
+        std::fs::create_dir_all(&good_dir).unwrap();
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        let good_file = good_dir.join("model.gguf");
+        let evil_file = evil_dir.join("malware.gguf");
+        std::fs::write(&good_file, b"x").unwrap();
+        std::fs::write(&evil_file, b"x").unwrap();
+
+        // good_dir 内的文件在 root 下正常
+        assert!(ensure_path_within(&root, &good_file).is_ok());
+        // evil_dir 的文件也在 root 下（root 包含两者）
+        assert!(ensure_path_within(&root, &evil_file).is_ok());
+
+        // 但以 good_dir 为根时，evil_dir 的文件应被拒绝
+        assert!(ensure_path_within(&good_dir, &evil_file).is_err());
+        // good_dir 内的文件应通过
+        assert!(ensure_path_within(&good_dir, &good_file).is_ok());
+    }
+
+    #[test]
+    fn ensure_path_within_rejects_double_dot_in_middle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let subdir = root.join("models").join("funasr");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let file = subdir.join("model.gguf");
+        std::fs::write(&file, b"x").unwrap();
+
+        // 从子目录用 .. 逃逸到 root 上级
+        let escape = subdir.join("..").join("..").join("..").join("etc");
+        assert!(ensure_path_within(&root, &escape).is_err());
+
+        // 合法 .. 回到 root 内
+        let valid = subdir.join("..").join("funasr").join("model.gguf");
+        assert!(ensure_path_within(&root, &valid).is_ok());
+    }
+
+    #[test]
+    fn ensure_path_within_rejects_absolute_path_outside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        // 绝对路径在 root 外——如果文件存在则应被拒绝
+        let outside = std::env::temp_dir().join("blink-path-test-outside.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(ensure_path_within(&root, &outside).is_err());
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn ensure_path_within_accepts_nested_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let deep = root.join("a").join("b").join("c").join("d");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("file.bin");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(ensure_path_within(&root, &file).is_ok());
+    }
+
+    #[test]
+    fn ensure_path_within_handles_trailing_separator() {
+        // 带尾分隔符的根目录——Path::starts_with 按组件匹配应正确处理
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let subdir = root.join("slots");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let file = subdir.join("manifest.json");
+        std::fs::write(&file, b"{}").unwrap();
+
+        // 根目录带尾分隔符（Windows: 反斜杠）
+        let root_with_sep = {
+            let mut s = root.to_string_lossy().to_string();
+            if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                s.push(std::path::MAIN_SEPARATOR);
+            }
+            std::path::PathBuf::from(s)
+        };
+        // canonicalize 会去掉尾分隔符，所以带尾分隔符的路径在 canonicalize 后
+        // 与不带尾分隔符的路径相同
+        assert!(ensure_path_within(&root, &file).is_ok());
+        // 直接用 root_with_sep 也能通过（canonicalize 处理了尾分隔符）
+        if root_with_sep.exists() {
+            let canon_sep = root_with_sep.canonicalize().unwrap();
+            assert!(file.canonicalize().unwrap().starts_with(&canon_sep));
+        }
+    }
+
+    #[test]
+    fn ensure_path_within_rejects_symlink_escape() {
+        // 符号链接逃逸测试：在 root 内创建指向 root 外的 symlink
+        // canonicalize 会解析 symlink，指向 root 外的路径应被拒绝
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let outside = std::env::temp_dir().join("blink-symlink-test-outside.txt");
+        std::fs::write(&outside, b"x").unwrap();
+
+        let link_path = root.join("escape_link.txt");
+        #[cfg(windows)]
+        {
+            // Windows 上 symlink 需要管理员权限，用 junction 测试如果可用
+            // 如果 symlink 创建失败（非管理员），跳过此测试
+            if std::os::windows::fs::symlink_file(&outside, &link_path).is_err() {
+                eprintln!("跳过 symlink 测试（Windows 需要管理员权限创建 symlink）");
+                let _ = std::fs::remove_file(&outside);
+                return;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(&outside, &link_path).unwrap();
+        }
+
+        // canonicalize 会解析 symlink 到外部路径，应被拒绝
+        assert!(ensure_path_within(&root, &link_path).is_err());
+        let _ = std::fs::remove_file(&link_path);
+        let _ = std::fs::remove_file(&outside);
     }
 
     #[test]

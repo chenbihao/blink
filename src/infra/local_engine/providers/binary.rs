@@ -232,8 +232,14 @@ impl RuntimeProvider for ManagedBinaryProvider {
                 ),
             })?;
 
-        // 2. 校验随发布 manifest 的全部文件 hash
-        let source = tokio::task::block_in_place(|| verify_bundled_source(&source_dir))?;
+        // 2. 校验随发布 manifest 的全部文件 hash——CPU 密集（逐文件 SHA-256），用 spawn_blocking
+        let source_dir_for_verify = source_dir.clone();
+        let source =
+            tokio::task::spawn_blocking(move || verify_bundled_source(&source_dir_for_verify))
+                .await
+                .map_err(|e| RuntimeError::InstallFailed {
+                    message: format!("spawn_blocking verify_bundled_source 失败: {e}"),
+                })??;
         if let Some(s) = sink {
             s.on_log(
                 "info",
@@ -352,30 +358,85 @@ impl RuntimeProvider for ManagedBinaryProvider {
         #[cfg(windows)]
         let job_handle = crate::infra::platform::process::assign_job_object(pid).ok();
 
-        // wait_with_output 消耗 child——超时/取消分支需要独立 wait 句柄，
-        // 因此用 `child.wait()` + 手动取管道的形态：先取 stdout/stderr 再等。
+        // stdout/stderr 必须并发 drain，否则管道写满后进程阻塞写另一端导致死锁。
+        // 串行 read_to_end 会死锁：先读 stdout 时 stderr 管道写满 → 进程阻塞 →
+        // stdout 永远不会 EOF。改为并发 drain + 有界 capture。
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
 
-        let collect = async {
-            use tokio::io::AsyncReadExt;
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
-            if let Some(p) = stdout_pipe.as_mut() {
-                let _ = p.read_to_end(&mut stdout_buf).await;
-            }
-            if let Some(p) = stderr_pipe.as_mut() {
-                let _ = p.read_to_end(&mut stderr_buf).await;
-            }
-            (stdout_buf, stderr_buf)
-        };
-        tokio::pin!(collect);
+        // 超过 64KB capture 时截断，防止无界内存增长，但继续 drain 管道避免死锁。
+        const CAPTURE_LIMIT: usize = 64 * 1024;
 
+        #[allow(unused_assignments)]
+        let mut stdout_buf = Vec::new();
+        #[allow(unused_assignments)]
+        let mut stderr_buf = Vec::new();
+
+        let stdout_fut = async {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            if let Some(p) = stdout_pipe.as_mut() {
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match p.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if buf.len() + n <= CAPTURE_LIMIT {
+                                buf.extend_from_slice(&tmp[..n]);
+                            } else if buf.len() < CAPTURE_LIMIT {
+                                let remaining = CAPTURE_LIMIT - buf.len();
+                                buf.extend_from_slice(&tmp[..remaining]);
+                            }
+                            // 超过限制后继续 drain 但不保存——避免管道满
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            buf
+        };
+
+        let stderr_fut = async {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            if let Some(p) = stderr_pipe.as_mut() {
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match p.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if buf.len() + n <= CAPTURE_LIMIT {
+                                buf.extend_from_slice(&tmp[..n]);
+                            } else if buf.len() < CAPTURE_LIMIT {
+                                let remaining = CAPTURE_LIMIT - buf.len();
+                                buf.extend_from_slice(&tmp[..remaining]);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            buf
+        };
+
+        tokio::pin!(stdout_fut);
+        tokio::pin!(stderr_fut);
+
+        // 并发 drain + wait + 超时/取消
         let output = tokio::select! {
-            res = child.wait() => res,
+            res = child.wait() => {
+                // 进程退出后 drain 管道剩余数据
+                let (s, e) = tokio::join!(stdout_fut, stderr_fut);
+                stdout_buf = s;
+                stderr_buf = e;
+                res
+            }
             _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                // 超时：终止进程树并 reap
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                // drain 管道以避免资源泄漏
+                let _ = tokio::join!(stdout_fut, stderr_fut);
                 return Err(RuntimeError::SelfTestFailed {
                     message: "worker self-test 超时（30s）".to_string(),
                 });
@@ -386,19 +447,19 @@ impl RuntimeProvider for ManagedBinaryProvider {
                     None => std::future::pending().await,
                 }
             } => {
+                // 取消：终止进程树并 reap
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                let _ = tokio::join!(stdout_fut, stderr_fut);
                 return Err(RuntimeError::OperationCancelled {
                     message: "worker self-test 被取消".to_string(),
                 });
             }
         }?;
-        let (stdout_buf, stderr_buf) = collect.await;
 
         #[cfg(windows)]
         drop(job_handle);
 
-        let output = output;
         if !output.success() {
             return Err(RuntimeError::SelfTestFailed {
                 message: format!(

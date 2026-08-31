@@ -3,7 +3,6 @@
 
 use super::*;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── 模型资产操作（从 ModelService 并入，单一业务真相）──────────────────
     //
@@ -46,16 +45,14 @@ impl EngineManager {
         }
 
         // active（launch snapshot）
-        if let Ok(entry) = self.get_entry(engine_id).await {
-            if let Some(launch) = entry.current_launch().await {
-                if let Some(ref m) = launch.model {
-                    if m.model_id == model_id {
-                        reasons.push(DeleteConflictReason::ActiveInRunningInstance {
-                            instance_id: launch.identity.instance_id.clone(),
-                        });
-                    }
-                }
-            }
+        if let Ok(entry) = self.get_entry(engine_id).await
+            && let Some(launch) = entry.current_launch().await
+            && let Some(ref m) = launch.model
+            && m.model_id == model_id
+        {
+            reasons.push(DeleteConflictReason::ActiveInRunningInstance {
+                instance_id: launch.identity.instance_id.clone(),
+            });
         }
 
         if reasons.is_empty() {
@@ -192,12 +189,11 @@ impl EngineManager {
             _ => EngineModelStatus::not_installed(desc),
         };
         status.is_selected = self.read_selected_model(engine_id).as_deref() == Some(model_id);
-        if let Ok(entry) = self.get_entry(engine_id).await {
-            if let Some(launch) = entry.current_launch().await {
-                if let Some(ref m) = launch.model {
-                    status.is_active = m.model_id == model_id;
-                }
-            }
+        if let Ok(entry) = self.get_entry(engine_id).await
+            && let Some(launch) = entry.current_launch().await
+            && let Some(ref m) = launch.model
+        {
+            status.is_active = m.model_id == model_id;
         }
         Ok(status)
     }
@@ -532,6 +528,7 @@ impl EngineManager {
     }
 
     /// 模型操作早期失败的统一收尾（清 staging + 失败结果）。
+    #[allow(clippy::too_many_arguments)] // 模型操作收尾需要全部上下文
     async fn model_op_failed(
         &self,
         engine_id: &EngineId,
@@ -723,6 +720,7 @@ impl EngineManager {
     }
 
     /// 校验 health 回报的模型身份（commands 兼容入口）。
+    #[allow(dead_code)] // 预留 API：commands 目前通过 health 链路间接调用，直接入口待接入
     pub fn verify_model_identity(
         &self,
         engine_id: &EngineId,
@@ -749,6 +747,7 @@ impl EngineManager {
     }
 
     /// 读取已安装模型 manifest（commands 兼容入口）。
+    #[allow(dead_code)] // 预留 API：commands 目前未直接调用，待后续诊断面板接入
     pub fn get_installed_manifest(
         &self,
         engine_id: &EngineId,

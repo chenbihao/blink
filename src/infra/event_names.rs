@@ -60,12 +60,7 @@ impl EventNames {
     pub const AWARENESS_UPDATED: &str = "blink://awareness-updated";
     pub const CONTEXT_MENU_ACTION: &str = "blink://context-menu-action";
 
-    // ── Python 环境 / FunASR / 音频测试 ──
-    /// 预留：Python 环境安装进度事件，当前版本由 LOCAL_ENGINE_STATUS 统一投影。
-    #[allow(dead_code)]
-    pub const PYTHON_ENV_PROGRESS: &str = "blink://python-env-progress";
-    pub const FUNASR_SERVER_LOG: &str = "blink://funasr-server-log";
-    pub const FUNASR_SERVER_STATUS: &str = "blink://funasr-server-status";
+    // ── 音频测试 ──
     pub const AUDIO_TEST_LEVEL: &str = "blink://audio-test-level";
 
     // ── 本地引擎（0.22.3）──
@@ -98,8 +93,6 @@ impl EventNames {
     /// `operation.kind` wire 值见 `OperationKind`（idle/installing/.../cleaning）。
     /// `operation.stage` wire 值见 `OperationStage`（pending/preparing/.../failed）。
     /// i18n key：`local_engine.operation.{kind}` / `local_engine.operation.stage.{stage}`。
-    ///
-    /// 旧 FunASR 专属事件 `FUNASR_SERVER_STATUS` 由 app 层兼容投影从此事件派生。
     pub const LOCAL_ENGINE_STATUS: &str = "blink://local-engine-status";
 
     /// 通用引擎日志条目。payload: `EngineLogDto`。
@@ -133,8 +126,6 @@ impl EventNames {
     /// 前端去重：`engine_id + (instance_id 或 operation_id) + seq`。
     /// `seq` 为字符串（避免 JS u64 精度丢失）。
     /// 安装日志通过 `operation_id` 过滤；运行时日志通过 `instance_id` 过滤。
-    ///
-    /// 旧 FunASR 专属事件 `FUNASR_SERVER_LOG` 由 app 层兼容投影从此事件派生。
     pub const LOCAL_ENGINE_LOG: &str = "blink://local-engine-log";
 
     /// 安装阶段变更事件（0.22.6 H4）。

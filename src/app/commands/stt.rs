@@ -112,8 +112,13 @@ pub async fn get_stt_config(
 /// `scope` 用于按区段打印日志，避免改本地配置时把云端字段也全部打印出来：
 /// - `"global"`: 总开关 / 模式 / 流式 / 音频设备
 /// - `"cloud"`: 云端供应商
-/// - `"local"`: 本地引擎（模型 / 设备 / 热词 / ITN / VAD）
+/// - `"local"`: 本地引擎（设备 / 热词 / ITN / VAD）
 /// - `None`: 兼容旧调用，打印全量字段
+///
+/// **模型选择铁则**：本命令**不得修改** `local_stt_selection`、
+/// `local_model_id` 和 `local_engine.funasr_model` 字段——模型选择只能
+/// 通过 `set_local_stt_selection` 命令保存，后者会校验模型已安装且可用。
+/// 传入的配置中这些字段会被冻结为数据库当前值，防止绕过校验。
 #[tauri::command]
 pub async fn set_stt_config(
     app: tauri::AppHandle,
@@ -121,6 +126,24 @@ pub async fn set_stt_config(
     scope: Option<String>,
 ) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
+
+    // ── 冻结模型选择字段：通用配置写入不得修改模型选择 ──
+    // 从数据库读取当前配置，将传入配置中的模型选择字段回退为当前值。
+    let current =
+        crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(pool).await;
+    let mut config = config;
+    config.local_stt_selection = current.local_stt_selection.clone();
+    config.local_model_id = current.local_model_id.clone();
+    config.local_engine.funasr_model = current.local_engine.funasr_model.clone();
+
+    // ── 能力与配置冲突规范化（Handoff 02 §6）──
+    // 后端根据当前选中模型的 stt_capabilities 规范化本地引擎配置：
+    // - 模型不支持 hotwords → 清空 hotwords
+    // - 模型不支持 ITN → 强制 use_itn = false
+    // - 模型不支持 pseudo_streaming → 强制 streaming_mode = Off
+    // 规范化不返回错误（前端已隐藏 UI），只在日志中记录 warn。
+    normalize_config_against_model_capabilities(&mut config);
+
     crate::app::config::ConfigStore::set(pool, &config)
         .await
         .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
@@ -153,9 +176,6 @@ pub async fn set_stt_config(
         Some("local") => {
             tracing::info!(
                 scope = "local",
-                local_stt_selection = ?config.local_stt_selection,
-                local_model_id = ?config.local_model_id,
-                funasr_model = %config.local_engine.funasr_model,
                 device = %config.local_engine.device,
                 auto_start_server = config.local_engine.auto_start_server,
                 use_itn = config.local_engine.use_itn,
@@ -167,15 +187,13 @@ pub async fn set_stt_config(
             );
         }
         _ => {
-            // 兼容旧调用（无 scope）：打印全量
+            // 兼容旧调用（无 scope）：打印全量（不含模型选择正文）
             tracing::info!(
                 enabled = config.enabled,
                 mode = ?config.mode,
                 streaming_mode = ?config.streaming_mode,
                 cloud_provider = ?config.cloud_provider.as_ref().map(|p| (&p.kind, &p.model_id, &p.base_url)),
-                local_model_id = ?config.local_model_id,
                 audio_device_id = ?config.audio_device_id,
-                funasr_model = %config.local_engine.funasr_model,
                 device = %config.local_engine.device,
                 auto_start_server = config.local_engine.auto_start_server,
                 use_itn = config.local_engine.use_itn,
@@ -199,11 +217,11 @@ pub async fn set_stt_config(
 /// `EngineManager::list_selectable_models`（单一业务真相）——
 /// 本命令只做参数适配 + DTO 投影 + is_selected 标注。
 ///
-/// 返回的 DTO 包含 `engine_id`、`model_id`、`display_name`、`is_selected`。
+/// 返回 `ModelCatalogItemDto`，包含 `stt_capabilities` 供前端驱动高级选项可见性。
 #[tauri::command]
 pub async fn list_selectable_stt_models(
     app: tauri::AppHandle,
-) -> Result<Vec<serde_json::Value>, CommandError> {
+) -> Result<Vec<crate::app::local_engine::model_installer::ModelCatalogItemDto>, CommandError> {
     // 从 EngineManager 获取已过滤的可选模型（单一业务真相）
     let svc = app
         .try_state::<std::sync::Arc<crate::app::local_engine::EngineManager>>()
@@ -224,23 +242,11 @@ pub async fn list_selectable_stt_models(
         .list_selectable_models(&funasr_id)
         .await
         .map_err(CommandError::from)?;
-    let config = crate::app::stt_config::get_stt_config();
-    let selected = config.local_stt_selection.as_ref();
 
-    let result: Vec<serde_json::Value> = selectable
+    let result: Vec<crate::app::local_engine::model_installer::ModelCatalogItemDto> = selectable
         .iter()
         .map(|(desc, status)| {
-            let is_selected = selected
-                .map(|s| s.engine_id == "funasr" && s.model_id == status.model_id)
-                .unwrap_or(false);
-            serde_json::json!({
-                "engine_id": "funasr",
-                "model_id": status.model_id,
-                "display_name": desc.display_name,
-                "description": desc.description,
-                "is_selected": is_selected,
-                "install_state": status.install_state.to_string(),
-            })
+            crate::app::local_engine::model_installer::project_model_status(desc, status)
         })
         .collect();
     Ok(result)
@@ -475,8 +481,192 @@ pub(crate) fn copy_dir_recursive(
     Ok(())
 }
 
+/// 根据当前选中模型的 `stt_capabilities` 规范化本地引擎配置（Handoff 02 §6）。
+///
+/// **铁则**：
+/// - 不返回错误——前端已隐藏不支持能力的 UI，规范化是兜底防御。
+/// - 只在日志中记录 warn，让开发者知道发生了规范化。
+/// - 模型未选中或 capabilities 不可获取时，不做任何规范化（降级安全）。
+///
+/// 规范化规则：
+/// - `hotwords` 不支持 → 清空 `local_engine.hotwords`
+/// - `itn` 不支持 → 强制 `local_engine.use_itn = false`
+/// - `pseudo_streaming` 不支持 → 强制 `streaming_mode = Off`
+fn normalize_config_against_model_capabilities(config: &mut crate::app::stt_config::SttConfig) {
+    // 获取当前选中模型的能力
+    let model_id = match config.local_stt_selection.as_ref() {
+        Some(sel) if sel.engine_id == "funasr" => &sel.model_id,
+        _ => return, // 未选择或非 funasr 引擎，不做规范化
+    };
+
+    let caps = match crate::app::local_engine::funasr::gguf::find_gguf_spec(model_id) {
+        Some(spec) => &spec.stt_capabilities,
+        None => return, // 模型不在目录中，不做规范化（可能旧配置迁移未完成）
+    };
+
+    // ── 热词规范化 ──
+    if !caps.hotwords.is_supported()
+        && config
+            .local_engine
+            .hotwords
+            .as_ref()
+            .is_some_and(|h| !h.is_empty())
+    {
+        tracing::warn!(
+            model_id = %model_id,
+            hotwords_len = config.local_engine.hotwords.as_ref().map(|h| h.len()).unwrap_or(0),
+            "模型不支持热词，规范化：清空 hotwords 配置"
+        );
+        config.local_engine.hotwords = None;
+    }
+
+    // ── ITN 规范化 ──
+    if !caps.itn.is_supported() && config.local_engine.use_itn {
+        tracing::warn!(
+            model_id = %model_id,
+            "模型不支持 ITN，规范化：强制 use_itn = false"
+        );
+        config.local_engine.use_itn = false;
+    }
+
+    // ── 伪流式规范化 ──
+    if !caps.pseudo_streaming.is_supported()
+        && config.streaming_mode == crate::domain::config::stt_config::StreamingMode::Pseudo
+    {
+        tracing::warn!(
+            model_id = %model_id,
+            "模型不支持伪流式，规范化：强制 streaming_mode = Off"
+        );
+        config.streaming_mode = crate::domain::config::stt_config::StreamingMode::Off;
+    }
+}
+
 static AUDIO_TEST_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[allow(deprecated)]
 mod maintenance;
 pub use maintenance::*;
+
+// ── 测试 ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_config_against_model_capabilities;
+    use crate::app::stt_config::{LocalSttSelection, SttConfig};
+    use crate::domain::config::stt_config::{GGUF_PARAFORMER_MODEL_ID, StreamingMode};
+
+    fn base_config(model_id: &str) -> SttConfig {
+        let mut config = SttConfig::default();
+        config.mode = crate::domain::config::stt_config::SttMode::Local;
+        config.local_stt_selection = Some(LocalSttSelection::new("funasr", model_id));
+        config.local_engine.funasr_model = model_id.to_string();
+        config
+    }
+
+    #[test]
+    fn normalize_paraformer_clears_hotwords() {
+        // Paraformer 不支持热词 → 清空 hotwords
+        let mut config = base_config(GGUF_PARAFORMER_MODEL_ID);
+        config.local_engine.hotwords = Some("美团 100, 快手 80".to_string());
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert!(config.local_engine.hotwords.is_none());
+    }
+
+    #[test]
+    fn normalize_paraformer_disables_itn() {
+        // Paraformer 不支持 ITN → 强制 use_itn = false
+        let mut config = base_config(GGUF_PARAFORMER_MODEL_ID);
+        config.local_engine.use_itn = true;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert!(!config.local_engine.use_itn);
+    }
+
+    #[test]
+    fn normalize_keeps_pseudo_streaming_for_paraformer() {
+        // Paraformer 支持伪流式 → streaming_mode 保持 Pseudo
+        let mut config = base_config(GGUF_PARAFORMER_MODEL_ID);
+        config.streaming_mode = StreamingMode::Pseudo;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert_eq!(config.streaming_mode, StreamingMode::Pseudo);
+    }
+
+    #[test]
+    fn normalize_sensevoice_keeps_itn() {
+        // SenseVoice 支持 ITN → use_itn 保持 true
+        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
+        config.local_engine.use_itn = true;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert!(config.local_engine.use_itn);
+    }
+
+    #[test]
+    fn normalize_sensevoice_clears_hotwords() {
+        // SenseVoice 不支持热词（GGUF worker 无入口）→ 清空 hotwords
+        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
+        config.local_engine.hotwords = Some("test 100".to_string());
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert!(config.local_engine.hotwords.is_none());
+    }
+
+    #[test]
+    fn normalize_noop_when_no_selection() {
+        // 未选择模型 → 不做任何规范化
+        let mut config = SttConfig::default();
+        config.local_engine.hotwords = Some("test 100".to_string());
+        config.local_engine.use_itn = true;
+        config.streaming_mode = StreamingMode::Pseudo;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        // 全部保持原样
+        assert!(config.local_engine.hotwords.is_some());
+        assert!(config.local_engine.use_itn);
+        assert_eq!(config.streaming_mode, StreamingMode::Pseudo);
+    }
+
+    #[test]
+    fn normalize_noop_when_model_not_in_catalog() {
+        // 模型不在目录中 → 不做任何规范化（降级安全）
+        let mut config = base_config("unknown-model-id");
+        config.local_engine.hotwords = Some("test 100".to_string());
+        config.local_engine.use_itn = true;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        // 全部保持原样
+        assert!(config.local_engine.hotwords.is_some());
+        assert!(config.local_engine.use_itn);
+    }
+
+    #[test]
+    fn normalize_sensevoice_keeps_empty_hotwords_untouched() {
+        // 已为空的 hotwords 不触发 warn 日志
+        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
+        config.local_engine.hotwords = None;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert!(config.local_engine.hotwords.is_none());
+    }
+
+    #[test]
+    fn normalize_sensevoice_keeps_pseudo_streaming() {
+        // SenseVoice 支持伪流式 → streaming_mode 保持 Pseudo
+        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
+        config.streaming_mode = StreamingMode::Pseudo;
+
+        normalize_config_against_model_capabilities(&mut config);
+
+        assert_eq!(config.streaming_mode, StreamingMode::Pseudo);
+    }
+}

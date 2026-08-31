@@ -3,11 +3,11 @@
 
 use super::*;
 
-#[allow(dead_code)]
 impl EngineManager {
     // ── logs / history ──────────────────────────────────────────────────────
 
     /// 查询引擎日志（provider-neutral 入口）。
+    #[allow(dead_code)] // 旧接口：生产用 get_logs_structured，此方法保留为简化查询入口
     pub async fn get_logs(
         &self,
         engine_id: &EngineId,

@@ -35,26 +35,3 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 pub mod worker_proto;
-
-#[allow(unused_imports)]
-pub use lease::{
-    HealthEvidence, LEASE_SCHEMA_VERSION, LeaseError, ProcessEvidence, ProcessLease,
-    RecoveryDecision, RecoveryDiagnostics, RecoveryReason, decide_recovery, remove_lease,
-    remove_lease_force, scan_leases, write_lease,
-};
-#[allow(unused_imports)]
-pub use lease_recovery::{build_process_evidence, probe_health_evidence};
-#[allow(unused_imports)]
-pub use log_pipe::{LogEntry, LogPipeConfig, LogSource, LogSubscriber};
-#[allow(unused_imports)]
-pub use port::{
-    ConflictRetryPolicy, Endpoint, EndpointAllocator, IdentityMismatch, IdentityVerification,
-    PortError, ServiceIdentityInput, ServiceIdentityResult, generate_service_token,
-    is_explicit_address_in_use, token_fingerprint,
-};
-#[allow(unused_imports)]
-pub use process::ManagedProcessError;
-#[allow(unused_imports)]
-pub use state::{
-    CommitResult, ExitReason, InstanceToken, ManagedProcessState, ProcessIdentity, ProcessStatus,
-};

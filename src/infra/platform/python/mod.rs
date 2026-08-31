@@ -94,10 +94,10 @@ pub async fn install_uv_to_dir(
     std::fs::create_dir_all(target_dir).map_err(|e| format!("创建 uv 目录失败: {e}"))?;
 
     // ── 取消检查：在下载前 ──
-    if let Some(ct) = cancel_token {
-        if ct.is_cancelled() {
-            return Err("uv 下载在开始前被取消".to_string());
-        }
+    if let Some(ct) = cancel_token
+        && ct.is_cancelled()
+    {
+        return Err("uv 下载在开始前被取消".to_string());
     }
 
     // ── 下载 uv zip ──
