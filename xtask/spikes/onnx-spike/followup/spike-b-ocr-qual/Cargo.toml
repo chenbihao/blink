@@ -1,0 +1,30 @@
+[package]
+name = "onnx-spike-b"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+# ort: ONNX Runtime Rust binding (load-dynamic)
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "tracing"] }
+# oar-ocr: Rust PaddleOCR ONNX implementation
+oar-ocr = { version = "=0.9.2", default-features = false, features = ["simd"] }
+
+# Image and data
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# SHA-256 for asset inventory
+sha2 = "0.10"
+hex = "0.4"
+
+# Windows API for memory/thread metrics
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+# Standalone crate (not part of Blink workspace)
+[workspace]

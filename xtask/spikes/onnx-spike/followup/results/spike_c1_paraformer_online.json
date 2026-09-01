@@ -1,0 +1,150 @@
+{
+  "spike": "C1_paraformer_online_oracle",
+  "api_check": {
+    "version": "unknown",
+    "has_paraformer": true,
+    "has_paraformer_online": false,
+    "has_fsmn_vad_online": true,
+    "available_classes": [
+      "CT_Transformer",
+      "CT_Transformer_VadRealtime",
+      "ContextualParaformer",
+      "Fsmn_vad",
+      "Fsmn_vad_online",
+      "Paraformer",
+      "SeacoParaformer",
+      "SenseVoiceSmall",
+      "paraformer_bin",
+      "punc_bin",
+      "sensevoice_bin",
+      "utils",
+      "vad_bin"
+    ]
+  },
+  "model_inspection": {
+    "vad": {
+      "exists": true,
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\fsmn-vad-onnx-v2\\model_quant.onnx",
+      "inputs": [
+        {
+          "name": "speech",
+          "shape": "[1, 'feats_length', 400]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "in_cache0",
+          "shape": "[1, 128, 19, 1]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "in_cache1",
+          "shape": "[1, 128, 19, 1]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "in_cache2",
+          "shape": "[1, 128, 19, 1]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "in_cache3",
+          "shape": "[1, 128, 19, 1]",
+          "type": "tensor(float)"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "shape": "[1, 'Softmaxlogits_dim_1', 248]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "out_cache0",
+          "shape": "[1, 128, 'Sliceout_cache0_dim_2', 1]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "out_cache1",
+          "shape": "[1, 128, 'Sliceout_cache1_dim_2', 1]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "out_cache2",
+          "shape": "[1, 128, 'Sliceout_cache2_dim_2', 1]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "out_cache3",
+          "shape": "[1, 128, 'Sliceout_cache3_dim_2', 1]",
+          "type": "tensor(float)"
+        }
+      ]
+    },
+    "paraformer_offline": {
+      "exists": true,
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\paraformer-zh-onnx\\model_quant.onnx",
+      "inputs": [
+        {
+          "name": "speech",
+          "shape": "['batch_size', 'feats_length', 560]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "speech_lengths",
+          "shape": "['batch_size']",
+          "type": "tensor(int32)"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "shape": "['batch_size', 'logits_length', 8404]",
+          "type": "tensor(float)"
+        },
+        {
+          "name": "token_num",
+          "shape": "['Casttoken_num_dim_0']",
+          "type": "tensor(int32)"
+        }
+      ]
+    }
+  },
+  "blockers": [
+    {
+      "blocker": "funasr-onnx Python 包不支持 ParaformerOnline",
+      "detail": "funasr-onnx v0.4.2 只有 Paraformer (offline), 没有 Paraformer_online",
+      "impact": "无法用 Python 快速验证 oracle 流式推理",
+      "workaround": "需要直接用 onnxruntime Python API 手动实现 chunk-by-chunk + cache",
+      "estimated_work": "2-3 天 (参考上游 C++ paraformer-online.cpp)"
+    },
+    {
+      "blocker": "ParaformerOnline ONNX 模型未下载",
+      "detail": "需要从 ModelScope 下载 speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx",
+      "impact": "无法 inspect 模型 I/O 和 cache 结构",
+      "workaround": "下载模型后用 onnxruntime inspect",
+      "estimated_work": "下载 + inspect: 30 分钟"
+    },
+    {
+      "blocker": "Rust fbank/CMVN/LFR 前处理未实现",
+      "detail": "上游 C++ compute_fbank 需要移植到 Rust",
+      "impact": "无法在 Rust 端正确预处理音频",
+      "workaround": "参考 GGUF worker 的 C++ 源码或 kaldi-native-fbank",
+      "estimated_work": "2-3 天"
+    },
+    {
+      "blocker": "Rust CIF cache + decoder FSMN cache 未实现",
+      "detail": "ParaformerOnline 的核心是 CIF 跨 chunk 积分 + decoder cache",
+      "impact": "无法在 Rust 端正确传递和更新 cache",
+      "workaround": "参考上游 paraformer-online.cpp 的 CifSearch 和 ForwardChunk",
+      "estimated_work": "3-5 天"
+    }
+  ],
+  "conclusion": "NO-GO (当前状态) — 需要下载模型并手动实现 Python oracle",
+  "remaining_work": [
+    "1. 下载 ParaformerOnline ONNX 模型 (encoder + decoder + am.mvn + config + tokens)",
+    "2. 用 onnxruntime Python API 手动实现 chunk-by-chunk + cache 传递",
+    "3. 参考 upstream paraformer-online.cpp 的 CifSearch/ForwardChunk",
+    "4. 验证句尾前 partial transcript",
+    "5. Rust ort 加载模型 + fbank/CMVN/LFR + cache"
+  ]
+}

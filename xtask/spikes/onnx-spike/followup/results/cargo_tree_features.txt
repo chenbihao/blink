@@ -1,0 +1,1477 @@
+onnx-spike-a v0.1.0 (D:\Projects\Coding\blink\xtask\spikes\onnx-spike\followup\spike-a-crate)
+├── hex feature "default"
+│   ├── hex v0.4.3
+│   └── hex feature "std"
+│       ├── hex v0.4.3
+│       └── hex feature "alloc"
+│           └── hex v0.4.3
+├── image feature "png"
+│   └── image v0.25.10
+│       ├── exr v1.74.2
+│       │   ├── bit_field feature "default"
+│       │   │   └── bit_field v0.10.3
+│       │   ├── half feature "default"
+│       │   │   ├── half v2.7.1
+│       │   │   │   ├── cfg-if feature "default"
+│       │   │   │   │   └── cfg-if v1.0.4
+│       │   │   │   ├── zerocopy feature "derive"
+│       │   │   │   │   ├── zerocopy v0.8.56
+│       │   │   │   │   │   └── zerocopy-derive feature "default"
+│       │   │   │   │   │       └── zerocopy-derive v0.8.56 (proc-macro)
+│       │   │   │   │   │           ├── proc-macro2 feature "default"
+│       │   │   │   │   │           │   ├── proc-macro2 v1.0.107
+│       │   │   │   │   │           │   │   └── unicode-ident feature "default"
+│       │   │   │   │   │           │   │       └── unicode-ident v1.0.24
+│       │   │   │   │   │           │   └── proc-macro2 feature "proc-macro"
+│       │   │   │   │   │           │       └── proc-macro2 v1.0.107 (*)
+│       │   │   │   │   │           ├── quote feature "default"
+│       │   │   │   │   │           │   ├── quote v1.0.47
+│       │   │   │   │   │           │   │   └── proc-macro2 v1.0.107 (*)
+│       │   │   │   │   │           │   └── quote feature "proc-macro"
+│       │   │   │   │   │           │       ├── quote v1.0.47 (*)
+│       │   │   │   │   │           │       └── proc-macro2 feature "proc-macro" (*)
+│       │   │   │   │   │           ├── syn feature "default"
+│       │   │   │   │   │           │   ├── syn v2.0.119
+│       │   │   │   │   │           │   │   ├── proc-macro2 v1.0.107 (*)
+│       │   │   │   │   │           │   │   ├── quote v1.0.47 (*)
+│       │   │   │   │   │           │   │   └── unicode-ident feature "default" (*)
+│       │   │   │   │   │           │   ├── syn feature "clone-impls"
+│       │   │   │   │   │           │   │   └── syn v2.0.119 (*)
+│       │   │   │   │   │           │   ├── syn feature "derive"
+│       │   │   │   │   │           │   │   └── syn v2.0.119 (*)
+│       │   │   │   │   │           │   ├── syn feature "parsing"
+│       │   │   │   │   │           │   │   └── syn v2.0.119 (*)
+│       │   │   │   │   │           │   ├── syn feature "printing"
+│       │   │   │   │   │           │   │   └── syn v2.0.119 (*)
+│       │   │   │   │   │           │   └── syn feature "proc-macro"
+│       │   │   │   │   │           │       ├── syn v2.0.119 (*)
+│       │   │   │   │   │           │       ├── proc-macro2 feature "proc-macro" (*)
+│       │   │   │   │   │           │       └── quote feature "proc-macro" (*)
+│       │   │   │   │   │           └── syn feature "full"
+│       │   │   │   │   │               └── syn v2.0.119 (*)
+│       │   │   │   │   └── zerocopy feature "zerocopy-derive"
+│       │   │   │   │       └── zerocopy v0.8.56 (*)
+│       │   │   │   └── zerocopy feature "simd"
+│       │   │   │       └── zerocopy v0.8.56 (*)
+│       │   │   └── half feature "std"
+│       │   │       ├── half v2.7.1 (*)
+│       │   │       └── half feature "alloc"
+│       │   │           └── half v2.7.1 (*)
+│       │   ├── lebe feature "default"
+│       │   │   └── lebe v0.5.3
+│       │   ├── miniz_oxide feature "default"
+│       │   │   ├── miniz_oxide v0.8.9
+│       │   │   │   ├── adler2 v2.0.1
+│       │   │   │   └── simd-adler32 v0.3.10
+│       │   │   └── miniz_oxide feature "with-alloc"
+│       │   │       └── miniz_oxide v0.8.9 (*)
+│       │   ├── num-complex feature "default"
+│       │   │   ├── num-complex v0.4.6
+│       │   │   │   ├── bytemuck feature "default"
+│       │   │   │   │   └── bytemuck v1.25.2
+│       │   │   │   └── num-traits feature "i128"
+│       │   │   │       └── num-traits v0.2.19
+│       │   │   │           └── libm feature "default"
+│       │   │   │               ├── libm v0.2.16
+│       │   │   │               └── libm feature "arch"
+│       │   │   │                   └── libm v0.2.16
+│       │   │   │           [build-dependencies]
+│       │   │   │           └── autocfg feature "default"
+│       │   │   │               └── autocfg v1.5.1
+│       │   │   └── num-complex feature "std"
+│       │   │       ├── num-complex v0.4.6 (*)
+│       │   │       └── num-traits feature "std"
+│       │   │           └── num-traits v0.2.19 (*)
+│       │   ├── pulp feature "default"
+│       │   │   ├── pulp v0.22.3
+│       │   │   │   ├── libm v0.2.16
+│       │   │   │   ├── pulp-wasm-simd-flag v0.1.1
+│       │   │   │   ├── raw-cpuid v11.6.0
+│       │   │   │   │   └── bitflags feature "default"
+│       │   │   │   │       └── bitflags v2.13.1
+│       │   │   │   ├── bytemuck feature "aarch64_simd"
+│       │   │   │   │   └── bytemuck v1.25.2
+│       │   │   │   ├── bytemuck feature "default" (*)
+│       │   │   │   ├── bytemuck feature "wasm_simd"
+│       │   │   │   │   └── bytemuck v1.25.2
+│       │   │   │   ├── cfg-if feature "default" (*)
+│       │   │   │   ├── num-complex feature "bytemuck"
+│       │   │   │   │   └── num-complex v0.4.6 (*)
+│       │   │   │   ├── paste feature "default"
+│       │   │   │   │   └── paste v1.0.15 (proc-macro)
+│       │   │   │   └── reborrow feature "default"
+│       │   │   │       └── reborrow v0.5.5
+│       │   │   │   [build-dependencies]
+│       │   │   │   └── version_check feature "default"
+│       │   │   │       └── version_check v0.9.5
+│       │   │   ├── pulp feature "relaxed-simd"
+│       │   │   │   ├── pulp v0.22.3 (*)
+│       │   │   │   └── pulp-wasm-simd-flag feature "relaxed-simd"
+│       │   │   │       └── pulp-wasm-simd-flag v0.1.1
+│       │   │   ├── pulp feature "std"
+│       │   │   │   └── pulp v0.22.3 (*)
+│       │   │   └── pulp feature "x86-v3"
+│       │   │       └── pulp v0.22.3 (*)
+│       │   ├── rayon-core feature "default"
+│       │   │   └── rayon-core v1.13.0
+│       │   │       ├── crossbeam-deque feature "default"
+│       │   │       │   ├── crossbeam-deque v0.8.7
+│       │   │       │   │   ├── crossbeam-epoch v0.9.20
+│       │   │       │   │   │   └── crossbeam-utils v0.8.22
+│       │   │       │   │   └── crossbeam-utils v0.8.22
+│       │   │       │   └── crossbeam-deque feature "std"
+│       │   │       │       ├── crossbeam-deque v0.8.7 (*)
+│       │   │       │       ├── crossbeam-epoch feature "std"
+│       │   │       │       │   ├── crossbeam-epoch v0.9.20 (*)
+│       │   │       │       │   ├── crossbeam-epoch feature "alloc"
+│       │   │       │       │   │   └── crossbeam-epoch v0.9.20 (*)
+│       │   │       │       │   └── crossbeam-utils feature "std"
+│       │   │       │       │       └── crossbeam-utils v0.8.22
+│       │   │       │       └── crossbeam-utils feature "std" (*)
+│       │   │       └── crossbeam-utils feature "default"
+│       │   │           ├── crossbeam-utils v0.8.22
+│       │   │           └── crossbeam-utils feature "std" (*)
+│       │   ├── smallvec feature "default"
+│       │   │   └── smallvec v1.15.2
+│       │   └── zune-inflate feature "zlib"
+│       │       ├── zune-inflate v0.2.54
+│       │       │   └── simd-adler32 v0.3.10
+│       │       └── zune-inflate feature "simd-adler32"
+│       │           └── zune-inflate v0.2.54 (*)
+│       ├── ravif v0.13.0
+│       │   ├── rav1e v0.8.1
+│       │   │   ├── av-scenechange v0.14.1
+│       │   │   │   ├── num-rational v0.4.2
+│       │   │   │   │   ├── num-bigint v0.4.8
+│       │   │   │   │   │   ├── num-traits feature "i128" (*)
+│       │   │   │   │   │   └── num-integer feature "i128"
+│       │   │   │   │   │       └── num-integer v0.1.47
+│       │   │   │   │   │           └── num-traits feature "i128" (*)
+│       │   │   │   │   ├── num-traits feature "i128" (*)
+│       │   │   │   │   └── num-integer feature "i128" (*)
+│       │   │   │   ├── num-traits feature "default"
+│       │   │   │   │   ├── num-traits v0.2.19 (*)
+│       │   │   │   │   └── num-traits feature "std" (*)
+│       │   │   │   ├── arrayvec feature "default"
+│       │   │   │   │   ├── arrayvec v0.7.8
+│       │   │   │   │   └── arrayvec feature "std"
+│       │   │   │   │       └── arrayvec v0.7.8
+│       │   │   │   ├── arg_enum_proc_macro feature "default"
+│       │   │   │   │   └── arg_enum_proc_macro v0.3.4 (proc-macro)
+│       │   │   │   │       ├── proc-macro2 feature "default" (*)
+│       │   │   │   │       ├── quote feature "default" (*)
+│       │   │   │   │       ├── syn feature "default" (*)
+│       │   │   │   │       └── syn feature "extra-traits"
+│       │   │   │   │           └── syn v2.0.119 (*)
+│       │   │   │   ├── aligned feature "default"
+│       │   │   │   │   └── aligned v0.4.3
+│       │   │   │   │       └── as-slice feature "default"
+│       │   │   │   │           └── as-slice v0.2.1
+│       │   │   │   │               └── stable_deref_trait v1.2.1
+│       │   │   │   ├── anyhow feature "default"
+│       │   │   │   │   ├── anyhow v1.0.104
+│       │   │   │   │   └── anyhow feature "std"
+│       │   │   │   │       └── anyhow v1.0.104
+│       │   │   │   ├── log feature "default"
+│       │   │   │   │   └── log v0.4.34
+│       │   │   │   ├── pastey feature "default"
+│       │   │   │   │   └── pastey v0.1.1 (proc-macro)
+│       │   │   │   ├── rayon feature "default"
+│       │   │   │   │   └── rayon v1.12.0
+│       │   │   │   │       ├── either v1.18.0
+│       │   │   │   │       └── rayon-core feature "default" (*)
+│       │   │   │   ├── thiserror feature "default"
+│       │   │   │   │   ├── thiserror v2.0.20
+│       │   │   │   │   │   └── thiserror-impl feature "default"
+│       │   │   │   │   │       └── thiserror-impl v2.0.20 (proc-macro)
+│       │   │   │   │   │           ├── proc-macro2 feature "default" (*)
+│       │   │   │   │   │           ├── quote feature "default" (*)
+│       │   │   │   │   │           └── syn feature "default"
+│       │   │   │   │   │               ├── syn v3.0.4
+│       │   │   │   │   │               │   ├── proc-macro2 v1.0.107 (*)
+│       │   │   │   │   │               │   ├── quote v1.0.47 (*)
+│       │   │   │   │   │               │   └── unicode-ident feature "default" (*)
+│       │   │   │   │   │               ├── syn feature "clone-impls"
+│       │   │   │   │   │               │   └── syn v3.0.4 (*)
+│       │   │   │   │   │               ├── syn feature "derive"
+│       │   │   │   │   │               │   └── syn v3.0.4 (*)
+│       │   │   │   │   │               ├── syn feature "parsing"
+│       │   │   │   │   │               │   └── syn v3.0.4 (*)
+│       │   │   │   │   │               ├── syn feature "printing"
+│       │   │   │   │   │               │   └── syn v3.0.4 (*)
+│       │   │   │   │   │               └── syn feature "proc-macro"
+│       │   │   │   │   │                   ├── syn v3.0.4 (*)
+│       │   │   │   │   │                   ├── proc-macro2 feature "proc-macro" (*)
+│       │   │   │   │   │                   └── quote feature "proc-macro" (*)
+│       │   │   │   │   └── thiserror feature "std"
+│       │   │   │   │       └── thiserror v2.0.20 (*)
+│       │   │   │   ├── v_frame feature "default"
+│       │   │   │   │   └── v_frame v0.3.9
+│       │   │   │   │       ├── num-traits feature "default" (*)
+│       │   │   │   │       └── aligned-vec feature "default"
+│       │   │   │   │           ├── aligned-vec v0.6.4
+│       │   │   │   │           │   └── equator feature "default"
+│       │   │   │   │           │       └── equator v0.4.2
+│       │   │   │   │           │           └── equator-macro feature "default"
+│       │   │   │   │           │               └── equator-macro v0.4.2 (proc-macro)
+│       │   │   │   │           │                   ├── proc-macro2 feature "default" (*)
+│       │   │   │   │           │                   ├── quote feature "default" (*)
+│       │   │   │   │           │                   ├── syn feature "default" (*)
+│       │   │   │   │           │                   └── syn feature "full" (*)
+│       │   │   │   │           └── aligned-vec feature "std"
+│       │   │   │   │               └── aligned-vec v0.6.4 (*)
+│       │   │   │   └── y4m feature "default"
+│       │   │   │       └── y4m v0.8.0
+│       │   │   ├── maybe-rayon v0.1.1
+│       │   │   │   ├── cfg-if feature "default" (*)
+│       │   │   │   └── rayon feature "default" (*)
+│       │   │   ├── cfg-if feature "default" (*)
+│       │   │   ├── num-traits feature "default" (*)
+│       │   │   ├── paste feature "default" (*)
+│       │   │   ├── arrayvec feature "default" (*)
+│       │   │   ├── aligned-vec feature "default" (*)
+│       │   │   ├── arg_enum_proc_macro feature "default" (*)
+│       │   │   ├── log feature "default" (*)
+│       │   │   ├── thiserror feature "default" (*)
+│       │   │   ├── v_frame feature "default" (*)
+│       │   │   ├── av1-grain feature "default"
+│       │   │   │   ├── av1-grain v0.2.5
+│       │   │   │   │   ├── arrayvec feature "default" (*)
+│       │   │   │   │   ├── anyhow feature "default" (*)
+│       │   │   │   │   ├── log feature "default" (*)
+│       │   │   │   │   ├── num-rational feature "default"
+│       │   │   │   │   │   ├── num-rational v0.4.2 (*)
+│       │   │   │   │   │   ├── num-rational feature "num-bigint"
+│       │   │   │   │   │   │   └── num-rational v0.4.2 (*)
+│       │   │   │   │   │   └── num-rational feature "std"
+│       │   │   │   │   │       ├── num-rational v0.4.2 (*)
+│       │   │   │   │   │       ├── num-traits feature "std" (*)
+│       │   │   │   │   │       ├── num-bigint feature "std"
+│       │   │   │   │   │       │   ├── num-bigint v0.4.8 (*)
+│       │   │   │   │   │       │   ├── num-traits feature "std" (*)
+│       │   │   │   │   │       │   └── num-integer feature "std"
+│       │   │   │   │   │       │       ├── num-integer v0.1.47 (*)
+│       │   │   │   │   │       │       └── num-traits feature "std" (*)
+│       │   │   │   │   │       └── num-integer feature "std" (*)
+│       │   │   │   │   ├── v_frame feature "default" (*)
+│       │   │   │   │   └── nom feature "default"
+│       │   │   │   │       ├── nom v8.0.0
+│       │   │   │   │       │   └── memchr v2.8.3
+│       │   │   │   │       └── nom feature "std"
+│       │   │   │   │           ├── nom v8.0.0 (*)
+│       │   │   │   │           ├── nom feature "alloc"
+│       │   │   │   │           │   └── nom v8.0.0 (*)
+│       │   │   │   │           └── memchr feature "std"
+│       │   │   │   │               ├── memchr v2.8.3
+│       │   │   │   │               └── memchr feature "alloc"
+│       │   │   │   │                   └── memchr v2.8.3
+│       │   │   │   ├── av1-grain feature "create"
+│       │   │   │   │   └── av1-grain v0.2.5 (*)
+│       │   │   │   ├── av1-grain feature "diff"
+│       │   │   │   │   ├── av1-grain v0.2.5 (*)
+│       │   │   │   │   ├── av1-grain feature "num-rational"
+│       │   │   │   │   │   └── av1-grain v0.2.5 (*)
+│       │   │   │   │   └── av1-grain feature "v_frame"
+│       │   │   │   │       └── av1-grain v0.2.5 (*)
+│       │   │   │   ├── av1-grain feature "estimate"
+│       │   │   │   │   ├── av1-grain v0.2.5 (*)
+│       │   │   │   │   └── av1-grain feature "v_frame" (*)
+│       │   │   │   └── av1-grain feature "parse"
+│       │   │   │       ├── av1-grain v0.2.5 (*)
+│       │   │   │       └── av1-grain feature "nom"
+│       │   │   │           └── av1-grain v0.2.5 (*)
+│       │   │   ├── bitstream-io feature "default"
+│       │   │   │   ├── bitstream-io v4.10.0
+│       │   │   │   │   └── no_std_io2 feature "default"
+│       │   │   │   │       └── no_std_io2 v0.9.4
+│       │   │   │   │           └── memchr v2.8.3
+│       │   │   │   └── bitstream-io feature "std"
+│       │   │   │       ├── bitstream-io v4.10.0 (*)
+│       │   │   │       ├── bitstream-io feature "alloc"
+│       │   │   │       │   ├── bitstream-io v4.10.0 (*)
+│       │   │   │       │   └── no_std_io2 feature "alloc"
+│       │   │   │       │       └── no_std_io2 v0.9.4 (*)
+│       │   │   │       └── no_std_io2 feature "std"
+│       │   │   │           ├── no_std_io2 v0.9.4 (*)
+│       │   │   │           └── no_std_io2 feature "alloc" (*)
+│       │   │   ├── itertools feature "default"
+│       │   │   │   ├── itertools v0.14.0
+│       │   │   │   │   └── either v1.18.0
+│       │   │   │   └── itertools feature "use_std"
+│       │   │   │       ├── itertools v0.14.0 (*)
+│       │   │   │       ├── either feature "use_std"
+│       │   │   │       │   ├── either v1.18.0
+│       │   │   │       │   └── either feature "std"
+│       │   │   │       │       └── either v1.18.0
+│       │   │   │       └── itertools feature "use_alloc"
+│       │   │   │           └── itertools v0.14.0 (*)
+│       │   │   ├── libc feature "default"
+│       │   │   │   ├── libc v0.2.189
+│       │   │   │   └── libc feature "std"
+│       │   │   │       └── libc v0.2.189
+│       │   │   ├── new_debug_unreachable feature "default"
+│       │   │   │   └── new_debug_unreachable v1.0.6
+│       │   │   ├── noop_proc_macro feature "default"
+│       │   │   │   └── noop_proc_macro v0.3.0 (proc-macro)
+│       │   │   ├── num-derive feature "default"
+│       │   │   │   └── num-derive v0.4.2 (proc-macro)
+│       │   │   │       ├── proc-macro2 feature "default" (*)
+│       │   │   │       ├── quote feature "default" (*)
+│       │   │   │       └── syn feature "default" (*)
+│       │   │   ├── profiling feature "default"
+│       │   │   │   ├── profiling v1.0.18
+│       │   │   │   │   └── profiling-procmacros feature "default"
+│       │   │   │   │       └── profiling-procmacros v1.0.18 (proc-macro)
+│       │   │   │   │           ├── quote v1.0.47 (*)
+│       │   │   │   │           ├── syn feature "default" (*)
+│       │   │   │   │           └── syn feature "full" (*)
+│       │   │   │   └── profiling feature "procmacros"
+│       │   │   │       ├── profiling v1.0.18 (*)
+│       │   │   │       └── profiling feature "profiling-procmacros"
+│       │   │   │           └── profiling v1.0.18 (*)
+│       │   │   └── simd_helpers feature "default"
+│       │   │       └── simd_helpers v0.1.0 (proc-macro)
+│       │   │           └── quote feature "default" (*)
+│       │   │   [build-dependencies]
+│       │   │   └── built feature "default"
+│       │   │       └── built v0.8.1
+│       │   ├── rgb v0.8.53
+│       │   ├── quick-error feature "default"
+│       │   │   └── quick-error v2.0.1
+│       │   ├── avif-serialize feature "default"
+│       │   │   └── avif-serialize v0.8.9
+│       │   │       └── arrayvec feature "default" (*)
+│       │   ├── imgref feature "default"
+│       │   │   ├── imgref v1.12.3
+│       │   │   └── imgref feature "deprecated"
+│       │   │       └── imgref v1.12.3
+│       │   ├── loop9 feature "default"
+│       │   │   └── loop9 v0.1.5
+│       │   │       └── imgref feature "default" (*)
+│       │   └── rayon feature "default" (*)
+│       ├── rgb v0.8.53
+│       ├── zune-core v0.5.3
+│       ├── bytemuck feature "default" (*)
+│       ├── bytemuck feature "extern_crate_alloc"
+│       │   └── bytemuck v1.25.2
+│       ├── byteorder-lite feature "default"
+│       │   ├── byteorder-lite v0.1.0
+│       │   └── byteorder-lite feature "std"
+│       │       └── byteorder-lite v0.1.0
+│       ├── color_quant feature "default"
+│       │   └── color_quant v1.1.0
+│       ├── num-traits feature "default" (*)
+│       ├── gif feature "default"
+│       │   ├── gif v0.14.2
+│       │   │   ├── color_quant feature "default" (*)
+│       │   │   └── weezl feature "default"
+│       │   │       ├── weezl v0.1.12
+│       │   │       └── weezl feature "std"
+│       │   │           ├── weezl v0.1.12
+│       │   │           └── weezl feature "alloc"
+│       │   │               └── weezl v0.1.12
+│       │   ├── gif feature "color_quant"
+│       │   │   └── gif v0.14.2 (*)
+│       │   ├── gif feature "raii_no_panic"
+│       │   │   └── gif v0.14.2 (*)
+│       │   └── gif feature "std"
+│       │       └── gif v0.14.2 (*)
+│       ├── image-webp feature "default"
+│       │   └── image-webp v0.2.4
+│       │       ├── byteorder-lite feature "default" (*)
+│       │       └── quick-error feature "default" (*)
+│       ├── moxcms feature "default"
+│       │   ├── moxcms v0.8.1
+│       │   │   ├── num-traits feature "default" (*)
+│       │   │   └── pxfm feature "default"
+│       │   │       └── pxfm v0.1.30
+│       │   ├── moxcms feature "avx_luts"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   ├── moxcms feature "avx"
+│       │   │   │   └── moxcms v0.8.1 (*)
+│       │   │   └── moxcms feature "lut"
+│       │   │       └── moxcms v0.8.1 (*)
+│       │   ├── moxcms feature "avx_shaper_fixed_point_paths"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   └── moxcms feature "avx" (*)
+│       │   ├── moxcms feature "avx_shaper_paths"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   └── moxcms feature "avx" (*)
+│       │   ├── moxcms feature "lut" (*)
+│       │   ├── moxcms feature "neon_luts"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   ├── moxcms feature "lut" (*)
+│       │   │   └── moxcms feature "neon"
+│       │   │       └── moxcms v0.8.1 (*)
+│       │   ├── moxcms feature "neon_shaper_fixed_point_paths"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   └── moxcms feature "neon" (*)
+│       │   ├── moxcms feature "neon_shaper_paths"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   └── moxcms feature "neon" (*)
+│       │   ├── moxcms feature "sse_luts"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   ├── moxcms feature "lut" (*)
+│       │   │   └── moxcms feature "sse"
+│       │   │       └── moxcms v0.8.1 (*)
+│       │   ├── moxcms feature "sse_shaper_fixed_point_paths"
+│       │   │   ├── moxcms v0.8.1 (*)
+│       │   │   └── moxcms feature "sse" (*)
+│       │   └── moxcms feature "sse_shaper_paths"
+│       │       ├── moxcms v0.8.1 (*)
+│       │       └── moxcms feature "sse" (*)
+│       ├── png feature "default"
+│       │   └── png v0.18.1
+│       │       ├── miniz_oxide feature "default" (*)
+│       │       ├── miniz_oxide feature "simd"
+│       │       │   ├── miniz_oxide v0.8.9 (*)
+│       │       │   └── miniz_oxide feature "simd-adler32"
+│       │       │       └── miniz_oxide v0.8.9 (*)
+│       │       ├── bitflags feature "default" (*)
+│       │       ├── crc32fast feature "default"
+│       │       │   ├── crc32fast v1.5.1
+│       │       │   │   └── cfg-if feature "default" (*)
+│       │       │   └── crc32fast feature "std"
+│       │       │       └── crc32fast v1.5.1 (*)
+│       │       ├── fdeflate feature "default"
+│       │       │   └── fdeflate v0.3.7
+│       │       │       └── simd-adler32 feature "default"
+│       │       │           ├── simd-adler32 v0.3.10
+│       │       │           ├── simd-adler32 feature "const-generics"
+│       │       │           │   └── simd-adler32 v0.3.10
+│       │       │           └── simd-adler32 feature "std"
+│       │       │               └── simd-adler32 v0.3.10
+│       │       └── flate2 feature "default"
+│       │           ├── flate2 v1.1.10
+│       │           │   ├── crc32fast v1.5.1 (*)
+│       │           │   ├── miniz_oxide feature "default"
+│       │           │   │   ├── miniz_oxide v0.9.1
+│       │           │   │   │   ├── adler2 v2.0.1
+│       │           │   │   │   └── simd-adler32 v0.3.10
+│       │           │   │   └── miniz_oxide feature "with-alloc"
+│       │           │   │       └── miniz_oxide v0.9.1 (*)
+│       │           │   └── miniz_oxide feature "simd"
+│       │           │       ├── miniz_oxide v0.9.1 (*)
+│       │           │       └── miniz_oxide feature "simd-adler32"
+│       │           │           └── miniz_oxide v0.9.1 (*)
+│       │           ├── flate2 feature "runtime_detection"
+│       │           │   ├── flate2 v1.1.10 (*)
+│       │           │   └── crc32fast feature "std" (*)
+│       │           └── flate2 feature "rust_backend"
+│       │               ├── flate2 v1.1.10 (*)
+│       │               ├── flate2 feature "any_impl"
+│       │               │   └── flate2 v1.1.10 (*)
+│       │               └── flate2 feature "miniz_oxide"
+│       │                   ├── flate2 v1.1.10 (*)
+│       │                   └── flate2 feature "any_impl" (*)
+│       ├── qoi feature "default"
+│       │   ├── qoi v0.4.1
+│       │   │   └── bytemuck feature "default" (*)
+│       │   └── qoi feature "std"
+│       │       └── qoi v0.4.1 (*)
+│       ├── rayon feature "default" (*)
+│       ├── tiff feature "default"
+│       │   ├── tiff v0.11.3
+│       │   │   ├── half feature "default" (*)
+│       │   │   ├── weezl feature "default" (*)
+│       │   │   ├── quick-error feature "default" (*)
+│       │   │   ├── flate2 feature "default" (*)
+│       │   │   ├── fax feature "default"
+│       │   │   │   └── fax v0.2.7
+│       │   │   └── zune-jpeg feature "default"
+│       │   │       ├── zune-jpeg v0.5.15
+│       │   │       │   └── zune-core feature "default"
+│       │   │       │       └── zune-core v0.5.3
+│       │   │       ├── zune-jpeg feature "neon"
+│       │   │       │   └── zune-jpeg v0.5.15 (*)
+│       │   │       ├── zune-jpeg feature "std"
+│       │   │       │   ├── zune-jpeg v0.5.15 (*)
+│       │   │       │   └── zune-core feature "std"
+│       │   │       │       └── zune-core v0.5.3
+│       │   │       └── zune-jpeg feature "x86"
+│       │   │           └── zune-jpeg v0.5.15 (*)
+│       │   ├── tiff feature "deflate"
+│       │   │   └── tiff v0.11.3 (*)
+│       │   ├── tiff feature "fax"
+│       │   │   └── tiff v0.11.3 (*)
+│       │   ├── tiff feature "jpeg"
+│       │   │   └── tiff v0.11.3 (*)
+│       │   └── tiff feature "lzw"
+│       │       └── tiff v0.11.3 (*)
+│       └── zune-jpeg feature "default" (*)
+├── ndarray feature "default"
+│   ├── ndarray v0.17.2
+│   │   ├── num-complex v0.4.6 (*)
+│   │   ├── num-integer v0.1.47 (*)
+│   │   ├── num-traits v0.2.19 (*)
+│   │   ├── matrixmultiply feature "cgemm"
+│   │   │   └── matrixmultiply v0.3.11
+│   │   │       └── rawpointer feature "default"
+│   │   │           └── rawpointer v0.2.1
+│   │   │       [build-dependencies]
+│   │   │       └── autocfg feature "default" (*)
+│   │   └── rawpointer feature "default" (*)
+│   └── ndarray feature "std"
+│       ├── ndarray v0.17.2 (*)
+│       ├── num-traits feature "std" (*)
+│       └── matrixmultiply feature "std"
+│           └── matrixmultiply v0.3.11 (*)
+├── oar-ocr feature "simd"
+│   ├── oar-ocr v0.9.2
+│   │   ├── oar-ocr-core v0.9.2
+│   │   │   ├── oar-ocr-derive v0.9.2 (proc-macro)
+│   │   │   │   ├── proc-macro2 feature "default" (*)
+│   │   │   │   ├── quote feature "default" (*)
+│   │   │   │   ├── syn feature "default" (*)
+│   │   │   │   ├── syn feature "extra-traits"
+│   │   │   │   │   └── syn v3.0.4 (*)
+│   │   │   │   ├── syn feature "full"
+│   │   │   │   │   └── syn v3.0.4 (*)
+│   │   │   │   ├── syn feature "parsing" (*)
+│   │   │   │   └── darling feature "default"
+│   │   │   │       ├── darling v0.24.1
+│   │   │   │       │   ├── darling_core feature "default"
+│   │   │   │       │   │   └── darling_core v0.24.1
+│   │   │   │       │   │       ├── proc-macro2 feature "default" (*)
+│   │   │   │       │   │       ├── quote feature "default" (*)
+│   │   │   │       │   │       ├── syn feature "default" (*)
+│   │   │   │       │   │       ├── syn feature "extra-traits" (*)
+│   │   │   │       │   │       ├── syn feature "full" (*)
+│   │   │   │       │   │       ├── ident_case feature "default"
+│   │   │   │       │   │       │   └── ident_case v1.0.1
+│   │   │   │       │   │       └── strsim feature "default"
+│   │   │   │       │   │           └── strsim v0.11.1
+│   │   │   │       │   └── darling_macro feature "default"
+│   │   │   │       │       └── darling_macro v0.24.1 (proc-macro)
+│   │   │   │       │           ├── quote feature "default" (*)
+│   │   │   │       │           ├── syn feature "default" (*)
+│   │   │   │       │           └── darling_core feature "default" (*)
+│   │   │   │       └── darling feature "suggestions"
+│   │   │   │           ├── darling v0.24.1 (*)
+│   │   │   │           └── darling_core feature "suggestions"
+│   │   │   │               ├── darling_core v0.24.1 (*)
+│   │   │   │               └── darling_core feature "strsim"
+│   │   │   │                   └── darling_core v0.24.1 (*)
+│   │   │   ├── image feature "default"
+│   │   │   │   ├── image v0.25.10 (*)
+│   │   │   │   ├── image feature "default-formats"
+│   │   │   │   │   ├── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "avif"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "bmp"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "dds"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "exr"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "ff"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "gif"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "hdr"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "ico"
+│   │   │   │   │   │   ├── image v0.25.10 (*)
+│   │   │   │   │   │   ├── image feature "bmp" (*)
+│   │   │   │   │   │   └── image feature "png" (*)
+│   │   │   │   │   ├── image feature "jpeg"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "png" (*)
+│   │   │   │   │   ├── image feature "pnm"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "qoi"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "tga"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   ├── image feature "tiff"
+│   │   │   │   │   │   └── image v0.25.10 (*)
+│   │   │   │   │   └── image feature "webp"
+│   │   │   │   │       └── image v0.25.10 (*)
+│   │   │   │   └── image feature "rayon"
+│   │   │   │       ├── image v0.25.10 (*)
+│   │   │   │       ├── exr feature "rayon"
+│   │   │   │       │   └── exr v1.74.2 (*)
+│   │   │   │       └── ravif feature "threading"
+│   │   │   │           ├── ravif v0.13.0 (*)
+│   │   │   │           └── rav1e feature "threading"
+│   │   │   │               ├── rav1e v0.8.1 (*)
+│   │   │   │               └── maybe-rayon feature "threads"
+│   │   │   │                   ├── maybe-rayon v0.1.1 (*)
+│   │   │   │                   └── maybe-rayon feature "rayon"
+│   │   │   │                       └── maybe-rayon v0.1.1 (*)
+│   │   │   ├── rayon feature "default" (*)
+│   │   │   ├── thiserror feature "default" (*)
+│   │   │   ├── ndarray feature "default" (*)
+│   │   │   ├── imageproc feature "default"
+│   │   │   │   ├── imageproc v0.27.0
+│   │   │   │   │   ├── approx v0.5.1
+│   │   │   │   │   │   └── num-traits v0.2.19 (*)
+│   │   │   │   │   ├── image v0.25.10 (*)
+│   │   │   │   │   ├── num v0.4.3
+│   │   │   │   │   │   ├── num-complex v0.4.6 (*)
+│   │   │   │   │   │   ├── num-rational v0.4.2 (*)
+│   │   │   │   │   │   ├── num-traits feature "i128" (*)
+│   │   │   │   │   │   ├── num-integer feature "i128" (*)
+│   │   │   │   │   │   └── num-iter feature "i128"
+│   │   │   │   │   │       └── num-iter v0.1.46
+│   │   │   │   │   │           ├── num-traits feature "i128" (*)
+│   │   │   │   │   │           └── num-integer feature "i128" (*)
+│   │   │   │   │   ├── rand_distr v0.6.0
+│   │   │   │   │   │   ├── rand v0.10.2
+│   │   │   │   │   │   │   ├── rand_core v0.10.1
+│   │   │   │   │   │   │   ├── chacha20 feature "rng"
+│   │   │   │   │   │   │   │   └── chacha20 v0.10.2
+│   │   │   │   │   │   │   │       ├── rand_core v0.10.1
+│   │   │   │   │   │   │   │       ├── cfg-if feature "default" (*)
+│   │   │   │   │   │   │   │       └── cpufeatures feature "default"
+│   │   │   │   │   │   │   │           └── cpufeatures v0.3.1
+│   │   │   │   │   │   │   └── getrandom feature "default"
+│   │   │   │   │   │   │       └── getrandom v0.4.3
+│   │   │   │   │   │   │           ├── cfg-if feature "default" (*)
+│   │   │   │   │   │   │           └── rand_core feature "default"
+│   │   │   │   │   │   │               └── rand_core v0.10.1
+│   │   │   │   │   │   └── num-traits feature "libm"
+│   │   │   │   │   │       └── num-traits v0.2.19 (*)
+│   │   │   │   │   ├── rayon v1.12.0 (*)
+│   │   │   │   │   ├── itertools feature "use_std" (*)
+│   │   │   │   │   ├── ab_glyph feature "std"
+│   │   │   │   │   │   ├── ab_glyph v0.2.32
+│   │   │   │   │   │   │   ├── ab_glyph_rasterizer v0.1.10
+│   │   │   │   │   │   │   └── owned_ttf_parser v0.25.1
+│   │   │   │   │   │   │       └── ttf-parser v0.25.1
+│   │   │   │   │   │   ├── ab_glyph_rasterizer feature "default"
+│   │   │   │   │   │   │   ├── ab_glyph_rasterizer v0.1.10
+│   │   │   │   │   │   │   └── ab_glyph_rasterizer feature "std"
+│   │   │   │   │   │   │       └── ab_glyph_rasterizer v0.1.10
+│   │   │   │   │   │   └── owned_ttf_parser feature "default"
+│   │   │   │   │   │       ├── owned_ttf_parser v0.25.1 (*)
+│   │   │   │   │   │       ├── owned_ttf_parser feature "apple-layout"
+│   │   │   │   │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│   │   │   │   │   │       │   └── ttf-parser feature "apple-layout"
+│   │   │   │   │   │       │       └── ttf-parser v0.25.1
+│   │   │   │   │   │       ├── owned_ttf_parser feature "glyph-names"
+│   │   │   │   │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│   │   │   │   │   │       │   └── ttf-parser feature "glyph-names"
+│   │   │   │   │   │       │       └── ttf-parser v0.25.1
+│   │   │   │   │   │       ├── owned_ttf_parser feature "opentype-layout"
+│   │   │   │   │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│   │   │   │   │   │       │   └── ttf-parser feature "opentype-layout"
+│   │   │   │   │   │       │       └── ttf-parser v0.25.1
+│   │   │   │   │   │       ├── owned_ttf_parser feature "std"
+│   │   │   │   │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│   │   │   │   │   │       │   └── ttf-parser feature "std"
+│   │   │   │   │   │       │       └── ttf-parser v0.25.1
+│   │   │   │   │   │       └── owned_ttf_parser feature "variable-fonts"
+│   │   │   │   │   │           ├── owned_ttf_parser v0.25.1 (*)
+│   │   │   │   │   │           └── ttf-parser feature "variable-fonts"
+│   │   │   │   │   │               └── ttf-parser v0.25.1
+│   │   │   │   │   ├── nalgebra feature "std"
+│   │   │   │   │   │   ├── nalgebra v0.35.0
+│   │   │   │   │   │   │   ├── approx v0.5.1 (*)
+│   │   │   │   │   │   │   ├── num-complex v0.4.6 (*)
+│   │   │   │   │   │   │   ├── num-rational v0.4.2 (*)
+│   │   │   │   │   │   │   ├── num-traits v0.2.19 (*)
+│   │   │   │   │   │   │   ├── simba v0.10.2
+│   │   │   │   │   │   │   │   ├── approx v0.5.1 (*)
+│   │   │   │   │   │   │   │   ├── num-complex v0.4.6 (*)
+│   │   │   │   │   │   │   │   ├── num-traits v0.2.19 (*)
+│   │   │   │   │   │   │   │   └── wide v1.7.0
+│   │   │   │   │   │   │   │       ├── bytemuck feature "default" (*)
+│   │   │   │   │   │   │   │       ├── safe_arch feature "bytemuck"
+│   │   │   │   │   │   │   │       │   └── safe_arch v1.2.0
+│   │   │   │   │   │   │   │       │       └── bytemuck feature "default" (*)
+│   │   │   │   │   │   │   │       └── safe_arch feature "default"
+│   │   │   │   │   │   │   │           └── safe_arch v1.2.0 (*)
+│   │   │   │   │   │   │   ├── matrixmultiply feature "default"
+│   │   │   │   │   │   │   │   ├── matrixmultiply v0.3.11 (*)
+│   │   │   │   │   │   │   │   ├── matrixmultiply feature "avx512"
+│   │   │   │   │   │   │   │   │   └── matrixmultiply v0.3.11 (*)
+│   │   │   │   │   │   │   │   └── matrixmultiply feature "std" (*)
+│   │   │   │   │   │   │   ├── nalgebra-macros feature "default"
+│   │   │   │   │   │   │   │   └── nalgebra-macros v0.3.0 (proc-macro)
+│   │   │   │   │   │   │   │       ├── proc-macro2 feature "default" (*)
+│   │   │   │   │   │   │   │       ├── quote feature "default" (*)
+│   │   │   │   │   │   │   │       ├── syn feature "default" (*)
+│   │   │   │   │   │   │   │       └── syn feature "full" (*)
+│   │   │   │   │   │   │   └── typenum feature "default"
+│   │   │   │   │   │   │       └── typenum v1.20.1
+│   │   │   │   │   │   ├── num-complex feature "std" (*)
+│   │   │   │   │   │   ├── num-traits feature "std" (*)
+│   │   │   │   │   │   ├── num-rational feature "std" (*)
+│   │   │   │   │   │   ├── approx feature "std"
+│   │   │   │   │   │   │   └── approx v0.5.1 (*)
+│   │   │   │   │   │   ├── nalgebra feature "matrixmultiply"
+│   │   │   │   │   │   │   └── nalgebra v0.35.0 (*)
+│   │   │   │   │   │   └── simba feature "std"
+│   │   │   │   │   │       ├── simba v0.10.2 (*)
+│   │   │   │   │   │       ├── simba feature "wide"
+│   │   │   │   │   │       │   └── simba v0.10.2 (*)
+│   │   │   │   │   │       └── wide feature "std"
+│   │   │   │   │   │           └── wide v1.7.0 (*)
+│   │   │   │   │   ├── rand feature "thread_rng"
+│   │   │   │   │   │   ├── rand v0.10.2 (*)
+│   │   │   │   │   │   ├── rand feature "std"
+│   │   │   │   │   │   │   ├── rand v0.10.2 (*)
+│   │   │   │   │   │   │   ├── rand feature "alloc"
+│   │   │   │   │   │   │   │   └── rand v0.10.2 (*)
+│   │   │   │   │   │   │   └── getrandom feature "std"
+│   │   │   │   │   │   │       └── getrandom v0.4.3 (*)
+│   │   │   │   │   │   ├── rand feature "std_rng"
+│   │   │   │   │   │   │   └── rand v0.10.2 (*)
+│   │   │   │   │   │   └── rand feature "sys_rng"
+│   │   │   │   │   │       ├── rand v0.10.2 (*)
+│   │   │   │   │   │       ├── rand feature "getrandom"
+│   │   │   │   │   │       │   └── rand v0.10.2 (*)
+│   │   │   │   │   │       └── getrandom feature "sys_rng"
+│   │   │   │   │   │           └── getrandom v0.4.3 (*)
+│   │   │   │   │   └── rustdct feature "default"
+│   │   │   │   │       └── rustdct v0.7.1
+│   │   │   │   │           └── rustfft feature "default"
+│   │   │   │   │               ├── rustfft v6.4.1
+│   │   │   │   │               │   ├── num-complex feature "default" (*)
+│   │   │   │   │               │   ├── num-traits feature "default" (*)
+│   │   │   │   │               │   ├── num-integer feature "default"
+│   │   │   │   │               │   │   ├── num-integer v0.1.47 (*)
+│   │   │   │   │               │   │   └── num-integer feature "std" (*)
+│   │   │   │   │               │   ├── primal-check feature "default"
+│   │   │   │   │               │   │   └── primal-check v0.3.4
+│   │   │   │   │               │   │       └── num-integer feature "default" (*)
+│   │   │   │   │               │   ├── strength_reduce feature "default"
+│   │   │   │   │               │   │   └── strength_reduce v0.2.4
+│   │   │   │   │               │   └── transpose feature "default"
+│   │   │   │   │               │       └── transpose v0.2.3
+│   │   │   │   │               │           ├── num-integer v0.1.47 (*)
+│   │   │   │   │               │           └── strength_reduce feature "default" (*)
+│   │   │   │   │               ├── rustfft feature "avx"
+│   │   │   │   │               │   └── rustfft v6.4.1 (*)
+│   │   │   │   │               ├── rustfft feature "neon"
+│   │   │   │   │               │   └── rustfft v6.4.1 (*)
+│   │   │   │   │               └── rustfft feature "sse"
+│   │   │   │   │                   └── rustfft v6.4.1 (*)
+│   │   │   │   ├── image feature "default" (*)
+│   │   │   │   ├── imageproc feature "fft"
+│   │   │   │   │   └── imageproc v0.27.0 (*)
+│   │   │   │   ├── imageproc feature "rayon"
+│   │   │   │   │   ├── imageproc v0.27.0 (*)
+│   │   │   │   │   └── image feature "rayon" (*)
+│   │   │   │   └── imageproc feature "text"
+│   │   │   │       └── imageproc v0.27.0 (*)
+│   │   │   ├── nalgebra feature "default"
+│   │   │   │   ├── nalgebra v0.35.0 (*)
+│   │   │   │   ├── nalgebra feature "macros"
+│   │   │   │   │   ├── nalgebra v0.35.0 (*)
+│   │   │   │   │   └── nalgebra feature "nalgebra-macros"
+│   │   │   │   │       └── nalgebra v0.35.0 (*)
+│   │   │   │   └── nalgebra feature "std" (*)
+│   │   │   ├── wide feature "default"
+│   │   │   │   ├── wide v1.7.0 (*)
+│   │   │   │   └── wide feature "std" (*)
+│   │   │   ├── clipper2-rust feature "default"
+│   │   │   │   └── clipper2-rust v1.1.0
+│   │   │   │       └── num-traits feature "default" (*)
+│   │   │   ├── itertools feature "default"
+│   │   │   │   ├── itertools v0.15.0
+│   │   │   │   │   └── either v1.18.0
+│   │   │   │   └── itertools feature "use_std"
+│   │   │   │       ├── itertools v0.15.0 (*)
+│   │   │   │       ├── either feature "use_std" (*)
+│   │   │   │       └── itertools feature "use_alloc"
+│   │   │   │           └── itertools v0.15.0 (*)
+│   │   │   ├── multiversion feature "default"
+│   │   │   │   ├── multiversion v0.8.0
+│   │   │   │   │   ├── multiversion-macros v0.8.0 (proc-macro)
+│   │   │   │   │   │   ├── proc-macro2 feature "default" (*)
+│   │   │   │   │   │   ├── quote feature "default" (*)
+│   │   │   │   │   │   ├── syn feature "default" (*)
+│   │   │   │   │   │   ├── syn feature "extra-traits" (*)
+│   │   │   │   │   │   ├── syn feature "full" (*)
+│   │   │   │   │   │   ├── syn feature "printing" (*)
+│   │   │   │   │   │   ├── syn feature "visit"
+│   │   │   │   │   │   │   └── syn v2.0.119 (*)
+│   │   │   │   │   │   ├── syn feature "visit-mut"
+│   │   │   │   │   │   │   └── syn v2.0.119 (*)
+│   │   │   │   │   │   └── target-features feature "default"
+│   │   │   │   │   │       └── target-features v0.1.6
+│   │   │   │   │   └── target-features feature "default" (*)
+│   │   │   │   └── multiversion feature "std"
+│   │   │   │       ├── multiversion v0.8.0 (*)
+│   │   │   │       └── multiversion-macros feature "std"
+│   │   │   │           └── multiversion-macros v0.8.0 (proc-macro) (*)
+│   │   │   ├── ort feature "copy-dylibs"
+│   │   │   │   ├── ort v2.0.0-rc.13
+│   │   │   │   │   ├── ndarray v0.17.2 (*)
+│   │   │   │   │   ├── ort-sys v2.0.0-rc.13
+│   │   │   │   │   ├── tracing v0.1.44
+│   │   │   │   │   │   ├── tracing-core v0.1.36
+│   │   │   │   │   │   │   └── once_cell feature "default"
+│   │   │   │   │   │   │       ├── once_cell v1.21.4
+│   │   │   │   │   │   │       └── once_cell feature "std"
+│   │   │   │   │   │   │           ├── once_cell v1.21.4
+│   │   │   │   │   │   │           └── once_cell feature "alloc"
+│   │   │   │   │   │   │               ├── once_cell v1.21.4
+│   │   │   │   │   │   │               └── once_cell feature "race"
+│   │   │   │   │   │   │                   └── once_cell v1.21.4
+│   │   │   │   │   │   ├── pin-project-lite feature "default"
+│   │   │   │   │   │   │   └── pin-project-lite v0.2.17
+│   │   │   │   │   │   └── tracing-attributes feature "default"
+│   │   │   │   │   │       └── tracing-attributes v0.1.31 (proc-macro)
+│   │   │   │   │   │           ├── proc-macro2 feature "default" (*)
+│   │   │   │   │   │           ├── quote feature "default" (*)
+│   │   │   │   │   │           ├── syn feature "clone-impls" (*)
+│   │   │   │   │   │           ├── syn feature "extra-traits" (*)
+│   │   │   │   │   │           ├── syn feature "full" (*)
+│   │   │   │   │   │           ├── syn feature "parsing" (*)
+│   │   │   │   │   │           ├── syn feature "printing" (*)
+│   │   │   │   │   │           ├── syn feature "proc-macro" (*)
+│   │   │   │   │   │           └── syn feature "visit-mut" (*)
+│   │   │   │   │   ├── smallvec feature "const_generics"
+│   │   │   │   │   │   └── smallvec v1.15.2
+│   │   │   │   │   └── libloading feature "default"
+│   │   │   │   │       ├── libloading v0.9.0
+│   │   │   │   │       │   └── windows-link feature "default"
+│   │   │   │   │       │       └── windows-link v0.2.1
+│   │   │   │   │       └── libloading feature "std"
+│   │   │   │   │           └── libloading v0.9.0 (*)
+│   │   │   │   └── ort-sys feature "copy-dylibs"
+│   │   │   │       └── ort-sys v2.0.0-rc.13
+│   │   │   ├── ort feature "ndarray"
+│   │   │   │   └── ort v2.0.0-rc.13 (*)
+│   │   │   ├── ort feature "std"
+│   │   │   │   ├── ort v2.0.0-rc.13 (*)
+│   │   │   │   ├── ndarray feature "std" (*)
+│   │   │   │   ├── ort-sys feature "std"
+│   │   │   │   │   └── ort-sys v2.0.0-rc.13
+│   │   │   │   └── tracing feature "std"
+│   │   │   │       ├── tracing v0.1.44 (*)
+│   │   │   │       └── tracing-core feature "std"
+│   │   │   │           ├── tracing-core v0.1.36 (*)
+│   │   │   │           └── tracing-core feature "once_cell"
+│   │   │   │               └── tracing-core v0.1.36 (*)
+│   │   │   ├── ort feature "tracing"
+│   │   │   │   └── ort v2.0.0-rc.13 (*)
+│   │   │   ├── tracing feature "default"
+│   │   │   │   ├── tracing v0.1.44 (*)
+│   │   │   │   ├── tracing feature "attributes"
+│   │   │   │   │   ├── tracing v0.1.44 (*)
+│   │   │   │   │   └── tracing feature "tracing-attributes"
+│   │   │   │   │       └── tracing v0.1.44 (*)
+│   │   │   │   └── tracing feature "std" (*)
+│   │   │   ├── regex feature "default"
+│   │   │   │   ├── regex v1.13.1
+│   │   │   │   │   ├── aho-corasick v1.1.5
+│   │   │   │   │   │   └── memchr v2.8.3
+│   │   │   │   │   ├── memchr v2.8.3
+│   │   │   │   │   ├── regex-syntax v0.8.11
+│   │   │   │   │   ├── regex-automata feature "alloc"
+│   │   │   │   │   │   └── regex-automata v0.4.18
+│   │   │   │   │   │       ├── aho-corasick v1.1.5 (*)
+│   │   │   │   │   │       ├── memchr v2.8.3
+│   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   ├── regex-automata feature "meta"
+│   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   ├── regex-automata feature "nfa-pikevm"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-automata feature "nfa-thompson"
+│   │   │   │   │   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │       └── regex-automata feature "alloc" (*)
+│   │   │   │   │   │   └── regex-automata feature "syntax"
+│   │   │   │   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │       └── regex-automata feature "alloc" (*)
+│   │   │   │   │   ├── regex-automata feature "nfa-pikevm" (*)
+│   │   │   │   │   └── regex-automata feature "syntax" (*)
+│   │   │   │   ├── regex feature "perf"
+│   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   ├── regex feature "perf-backtrack"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   └── regex-automata feature "nfa-backtrack"
+│   │   │   │   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │       └── regex-automata feature "nfa-thompson" (*)
+│   │   │   │   │   ├── regex feature "perf-cache"
+│   │   │   │   │   │   └── regex v1.13.1 (*)
+│   │   │   │   │   ├── regex feature "perf-dfa"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   └── regex-automata feature "hybrid"
+│   │   │   │   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │       ├── regex-automata feature "alloc" (*)
+│   │   │   │   │   │       └── regex-automata feature "nfa-thompson" (*)
+│   │   │   │   │   ├── regex feature "perf-inline"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   └── regex-automata feature "perf-inline"
+│   │   │   │   │   │       └── regex-automata v0.4.18 (*)
+│   │   │   │   │   ├── regex feature "perf-literal"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   └── regex-automata feature "perf-literal"
+│   │   │   │   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │       ├── regex-automata feature "perf-literal-multisubstring"
+│   │   │   │   │   │       │   └── regex-automata v0.4.18 (*)
+│   │   │   │   │   │       └── regex-automata feature "perf-literal-substring"
+│   │   │   │   │   │           ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │           └── aho-corasick feature "perf-literal"
+│   │   │   │   │   │               └── aho-corasick v1.1.5 (*)
+│   │   │   │   │   └── regex feature "perf-onepass"
+│   │   │   │   │       ├── regex v1.13.1 (*)
+│   │   │   │   │       └── regex-automata feature "dfa-onepass"
+│   │   │   │   │           ├── regex-automata v0.4.18 (*)
+│   │   │   │   │           └── regex-automata feature "nfa-thompson" (*)
+│   │   │   │   ├── regex feature "std"
+│   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   ├── memchr feature "std" (*)
+│   │   │   │   │   ├── aho-corasick feature "std"
+│   │   │   │   │   │   ├── aho-corasick v1.1.5 (*)
+│   │   │   │   │   │   └── memchr feature "std" (*)
+│   │   │   │   │   ├── regex-automata feature "std"
+│   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   ├── memchr feature "std" (*)
+│   │   │   │   │   │   ├── aho-corasick feature "std" (*)
+│   │   │   │   │   │   ├── regex-automata feature "alloc" (*)
+│   │   │   │   │   │   └── regex-syntax feature "std"
+│   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   └── regex-syntax feature "std" (*)
+│   │   │   │   ├── regex feature "unicode"
+│   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   ├── regex feature "unicode-age"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-age"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-age"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   └── regex-syntax feature "unicode-age" (*)
+│   │   │   │   │   ├── regex feature "unicode-bool"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-bool"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-bool"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   └── regex-syntax feature "unicode-bool" (*)
+│   │   │   │   │   ├── regex feature "unicode-case"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-case"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-case"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   └── regex-syntax feature "unicode-case" (*)
+│   │   │   │   │   ├── regex feature "unicode-gencat"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-gencat"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-gencat"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   └── regex-syntax feature "unicode-gencat" (*)
+│   │   │   │   │   ├── regex feature "unicode-perl"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-perl"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-perl"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   ├── regex-automata feature "unicode-word-boundary"
+│   │   │   │   │   │   │   └── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   └── regex-syntax feature "unicode-perl" (*)
+│   │   │   │   │   ├── regex feature "unicode-script"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-script"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-script"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   └── regex-syntax feature "unicode-script" (*)
+│   │   │   │   │   ├── regex feature "unicode-segment"
+│   │   │   │   │   │   ├── regex v1.13.1 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-segment"
+│   │   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   │   └── regex-syntax feature "unicode-segment"
+│   │   │   │   │   │   │       └── regex-syntax v0.8.11
+│   │   │   │   │   │   └── regex-syntax feature "unicode-segment" (*)
+│   │   │   │   │   ├── regex-automata feature "unicode"
+│   │   │   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-age" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-bool" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-case" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-gencat" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-perl" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-script" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-segment" (*)
+│   │   │   │   │   │   ├── regex-automata feature "unicode-word-boundary" (*)
+│   │   │   │   │   │   └── regex-syntax feature "unicode"
+│   │   │   │   │   │       ├── regex-syntax v0.8.11
+│   │   │   │   │   │       ├── regex-syntax feature "unicode-age" (*)
+│   │   │   │   │   │       ├── regex-syntax feature "unicode-bool" (*)
+│   │   │   │   │   │       ├── regex-syntax feature "unicode-case" (*)
+│   │   │   │   │   │       ├── regex-syntax feature "unicode-gencat" (*)
+│   │   │   │   │   │       ├── regex-syntax feature "unicode-perl" (*)
+│   │   │   │   │   │       ├── regex-syntax feature "unicode-script" (*)
+│   │   │   │   │   │       └── regex-syntax feature "unicode-segment" (*)
+│   │   │   │   │   └── regex-syntax feature "unicode" (*)
+│   │   │   │   └── regex-syntax feature "default"
+│   │   │   │       ├── regex-syntax v0.8.11
+│   │   │   │       ├── regex-syntax feature "std" (*)
+│   │   │   │       └── regex-syntax feature "unicode" (*)
+│   │   │   ├── serde feature "default"
+│   │   │   │   ├── serde v1.0.229
+│   │   │   │   │   ├── serde_core feature "result"
+│   │   │   │   │   │   └── serde_core v1.0.229
+│   │   │   │   │   └── serde_derive feature "default"
+│   │   │   │   │       └── serde_derive v1.0.229 (proc-macro)
+│   │   │   │   │           ├── proc-macro2 feature "proc-macro" (*)
+│   │   │   │   │           ├── quote feature "proc-macro" (*)
+│   │   │   │   │           ├── syn feature "clone-impls" (*)
+│   │   │   │   │           ├── syn feature "derive" (*)
+│   │   │   │   │           ├── syn feature "parsing" (*)
+│   │   │   │   │           ├── syn feature "printing" (*)
+│   │   │   │   │           └── syn feature "proc-macro" (*)
+│   │   │   │   └── serde feature "std"
+│   │   │   │       ├── serde v1.0.229 (*)
+│   │   │   │       └── serde_core feature "std"
+│   │   │   │           └── serde_core v1.0.229
+│   │   │   ├── serde feature "derive"
+│   │   │   │   ├── serde v1.0.229 (*)
+│   │   │   │   └── serde feature "serde_derive"
+│   │   │   │       └── serde v1.0.229 (*)
+│   │   │   ├── serde feature "rc"
+│   │   │   │   ├── serde v1.0.229 (*)
+│   │   │   │   └── serde_core feature "rc"
+│   │   │   │       └── serde_core v1.0.229
+│   │   │   ├── serde_json feature "default"
+│   │   │   │   ├── serde_json v1.0.151
+│   │   │   │   │   ├── memchr v2.8.3
+│   │   │   │   │   ├── serde_core v1.0.229
+│   │   │   │   │   ├── itoa feature "default"
+│   │   │   │   │   │   └── itoa v1.0.18
+│   │   │   │   │   └── zmij feature "default"
+│   │   │   │   │       └── zmij v1.0.23
+│   │   │   │   └── serde_json feature "std"
+│   │   │   │       ├── serde_json v1.0.151 (*)
+│   │   │   │       ├── memchr feature "std" (*)
+│   │   │   │       └── serde_core feature "std" (*)
+│   │   │   ├── tokenizers feature "onig"
+│   │   │   │   └── tokenizers v0.23.1
+│   │   │   │       ├── esaxx-rs v0.1.10
+│   │   │   │       ├── onig v6.5.3
+│   │   │   │       │   ├── onig_sys v69.9.3
+│   │   │   │       │   │   [build-dependencies]
+│   │   │   │       │   │   ├── cc feature "default"
+│   │   │   │       │   │   │   └── cc v1.4.4
+│   │   │   │       │   │   │       ├── find-msvc-tools feature "default"
+│   │   │   │       │   │   │       │   └── find-msvc-tools v0.1.11
+│   │   │   │       │   │   │       └── shlex feature "default"
+│   │   │   │       │   │   │           ├── shlex v2.0.1
+│   │   │   │       │   │   │           └── shlex feature "std"
+│   │   │   │       │   │   │               └── shlex v2.0.1
+│   │   │   │       │   │   └── pkg-config feature "default"
+│   │   │   │       │   │       └── pkg-config v0.3.34
+│   │   │   │       │   ├── bitflags feature "default" (*)
+│   │   │   │       │   ├── libc feature "default" (*)
+│   │   │   │       │   └── once_cell feature "default" (*)
+│   │   │   │       ├── paste feature "default" (*)
+│   │   │   │       ├── log feature "default" (*)
+│   │   │   │       ├── rayon feature "default" (*)
+│   │   │   │       ├── thiserror feature "default" (*)
+│   │   │   │       ├── itertools feature "default" (*)
+│   │   │   │       ├── regex feature "default" (*)
+│   │   │   │       ├── regex-syntax feature "default" (*)
+│   │   │   │       ├── serde feature "default" (*)
+│   │   │   │       ├── serde feature "derive" (*)
+│   │   │   │       ├── serde_json feature "default" (*)
+│   │   │   │       ├── ahash feature "default"
+│   │   │   │       │   ├── ahash v0.8.12
+│   │   │   │       │   │   ├── cfg-if feature "default" (*)
+│   │   │   │       │   │   ├── zerocopy feature "simd" (*)
+│   │   │   │       │   │   ├── once_cell feature "alloc" (*)
+│   │   │   │       │   │   ├── serde feature "default" (*)
+│   │   │   │       │   │   └── getrandom feature "default"
+│   │   │   │       │   │       └── getrandom v0.3.4
+│   │   │   │       │   │           └── cfg-if feature "default" (*)
+│   │   │   │       │   │   [build-dependencies]
+│   │   │   │       │   │   └── version_check feature "default" (*)
+│   │   │   │       │   ├── ahash feature "runtime-rng"
+│   │   │   │       │   │   ├── ahash v0.8.12 (*)
+│   │   │   │       │   │   └── ahash feature "getrandom"
+│   │   │   │       │   │       └── ahash v0.8.12 (*)
+│   │   │   │       │   └── ahash feature "std"
+│   │   │   │       │       └── ahash v0.8.12 (*)
+│   │   │   │       ├── ahash feature "serde"
+│   │   │   │       │   └── ahash v0.8.12 (*)
+│   │   │   │       ├── getrandom feature "default" (*)
+│   │   │   │       ├── compact_str feature "default"
+│   │   │   │       │   ├── compact_str v0.9.1
+│   │   │   │       │   │   ├── cfg-if feature "default" (*)
+│   │   │   │       │   │   ├── serde feature "alloc"
+│   │   │   │       │   │   │   ├── serde v1.0.229 (*)
+│   │   │   │       │   │   │   └── serde_core feature "alloc"
+│   │   │   │       │   │   │       └── serde_core v1.0.229
+│   │   │   │       │   │   ├── serde feature "derive" (*)
+│   │   │   │       │   │   ├── itoa feature "default" (*)
+│   │   │   │       │   │   ├── castaway feature "alloc"
+│   │   │   │       │   │   │   └── castaway v0.2.4
+│   │   │   │       │   │   │       └── rustversion feature "default"
+│   │   │   │       │   │   │           └── rustversion v1.0.23 (proc-macro)
+│   │   │   │       │   │   ├── rustversion feature "default" (*)
+│   │   │   │       │   │   ├── ryu feature "default"
+│   │   │   │       │   │   │   └── ryu v1.0.23
+│   │   │   │       │   │   └── static_assertions feature "default"
+│   │   │   │       │   │       └── static_assertions v1.1.0
+│   │   │   │       │   └── compact_str feature "std"
+│   │   │   │       │       └── compact_str v0.9.1 (*)
+│   │   │   │       ├── compact_str feature "serde"
+│   │   │   │       │   └── compact_str v0.9.1 (*)
+│   │   │   │       ├── daachorse feature "default"
+│   │   │   │       │   ├── daachorse v1.0.1
+│   │   │   │       │   └── daachorse feature "alloc"
+│   │   │   │       │       └── daachorse v1.0.1
+│   │   │   │       ├── dary_heap feature "default"
+│   │   │   │       │   └── dary_heap v0.3.9
+│   │   │   │       │       └── serde feature "alloc" (*)
+│   │   │   │       ├── dary_heap feature "serde"
+│   │   │   │       │   └── dary_heap v0.3.9 (*)
+│   │   │   │       ├── derive_builder feature "default"
+│   │   │   │       │   ├── derive_builder v0.20.2
+│   │   │   │       │   │   └── derive_builder_macro feature "default"
+│   │   │   │       │   │       └── derive_builder_macro v0.20.2 (proc-macro)
+│   │   │   │       │   │           ├── syn feature "default" (*)
+│   │   │   │       │   │           ├── syn feature "extra-traits" (*)
+│   │   │   │       │   │           ├── syn feature "full" (*)
+│   │   │   │       │   │           └── derive_builder_core feature "default"
+│   │   │   │       │   │               └── derive_builder_core v0.20.2
+│   │   │   │       │   │                   ├── proc-macro2 feature "default" (*)
+│   │   │   │       │   │                   ├── quote feature "default" (*)
+│   │   │   │       │   │                   ├── syn feature "default" (*)
+│   │   │   │       │   │                   ├── syn feature "extra-traits" (*)
+│   │   │   │       │   │                   ├── syn feature "full" (*)
+│   │   │   │       │   │                   └── darling feature "default"
+│   │   │   │       │   │                       ├── darling v0.20.11
+│   │   │   │       │   │                       │   ├── darling_core feature "default"
+│   │   │   │       │   │                       │   │   └── darling_core v0.20.11
+│   │   │   │       │   │                       │   │       ├── proc-macro2 feature "default" (*)
+│   │   │   │       │   │                       │   │       ├── quote feature "default" (*)
+│   │   │   │       │   │                       │   │       ├── syn feature "default" (*)
+│   │   │   │       │   │                       │   │       ├── syn feature "extra-traits" (*)
+│   │   │   │       │   │                       │   │       ├── syn feature "full" (*)
+│   │   │   │       │   │                       │   │       ├── ident_case feature "default" (*)
+│   │   │   │       │   │                       │   │       ├── strsim feature "default" (*)
+│   │   │   │       │   │                       │   │       └── fnv feature "default"
+│   │   │   │       │   │                       │   │           ├── fnv v1.0.7
+│   │   │   │       │   │                       │   │           └── fnv feature "std"
+│   │   │   │       │   │                       │   │               └── fnv v1.0.7
+│   │   │   │       │   │                       │   └── darling_macro feature "default"
+│   │   │   │       │   │                       │       └── darling_macro v0.20.11 (proc-macro)
+│   │   │   │       │   │                       │           ├── quote feature "default" (*)
+│   │   │   │       │   │                       │           ├── syn feature "default" (*)
+│   │   │   │       │   │                       │           └── darling_core feature "default" (*)
+│   │   │   │       │   │                       └── darling feature "suggestions"
+│   │   │   │       │   │                           ├── darling v0.20.11 (*)
+│   │   │   │       │   │                           └── darling_core feature "suggestions"
+│   │   │   │       │   │                               ├── darling_core v0.20.11 (*)
+│   │   │   │       │   │                               └── darling_core feature "strsim"
+│   │   │   │       │   │                                   └── darling_core v0.20.11 (*)
+│   │   │   │       │   └── derive_builder feature "std"
+│   │   │   │       │       ├── derive_builder v0.20.2 (*)
+│   │   │   │       │       └── derive_builder_macro feature "lib_has_std"
+│   │   │   │       │           ├── derive_builder_macro v0.20.2 (proc-macro) (*)
+│   │   │   │       │           └── derive_builder_core feature "lib_has_std"
+│   │   │   │       │               └── derive_builder_core v0.20.2 (*)
+│   │   │   │       ├── indicatif feature "default"
+│   │   │   │       │   ├── indicatif v0.18.6
+│   │   │   │       │   │   ├── console feature "ansi-parsing"
+│   │   │   │       │   │   │   └── console v0.16.4
+│   │   │   │       │   │   │       ├── libc feature "default" (*)
+│   │   │   │       │   │   │       ├── encode_unicode feature "default"
+│   │   │   │       │   │   │       │   ├── encode_unicode v1.0.0
+│   │   │   │       │   │   │       │   └── encode_unicode feature "std"
+│   │   │   │       │   │   │       │       └── encode_unicode v1.0.0
+│   │   │   │       │   │   │       ├── unicode-width feature "default"
+│   │   │   │       │   │   │       │   ├── unicode-width v0.2.2
+│   │   │   │       │   │   │       │   └── unicode-width feature "cjk"
+│   │   │   │       │   │   │       │       └── unicode-width v0.2.2
+│   │   │   │       │   │   │       ├── windows-sys feature "Win32_Foundation"
+│   │   │   │       │   │   │       │   ├── windows-sys v0.61.2
+│   │   │   │       │   │   │       │   │   └── windows-link v0.2.1
+│   │   │   │       │   │   │       │   └── windows-sys feature "Win32"
+│   │   │   │       │   │   │       │       ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │       └── windows-sys feature "Win32_Foundation" (*)
+│   │   │   │       │   │   │       ├── windows-sys feature "Win32_Storage_FileSystem"
+│   │   │   │       │   │   │       │   ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │   └── windows-sys feature "Win32_Storage"
+│   │   │   │       │   │   │       │       ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │       └── windows-sys feature "Win32" (*)
+│   │   │   │       │   │   │       ├── windows-sys feature "Win32_System_Console"
+│   │   │   │       │   │   │       │   ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │   └── windows-sys feature "Win32_System"
+│   │   │   │       │   │   │       │       ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │       └── windows-sys feature "Win32" (*)
+│   │   │   │       │   │   │       ├── windows-sys feature "Win32_UI_Input_KeyboardAndMouse"
+│   │   │   │       │   │   │       │   ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │   └── windows-sys feature "Win32_UI_Input"
+│   │   │   │       │   │   │       │       ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │       └── windows-sys feature "Win32_UI"
+│   │   │   │       │   │   │       │           ├── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   │       │           └── windows-sys feature "Win32" (*)
+│   │   │   │       │   │   │       └── windows-sys feature "default"
+│   │   │   │       │   │   │           └── windows-sys v0.61.2 (*)
+│   │   │   │       │   │   ├── console feature "std"
+│   │   │   │       │   │   │   ├── console v0.16.4 (*)
+│   │   │   │       │   │   │   └── console feature "alloc"
+│   │   │   │       │   │   │       └── console v0.16.4 (*)
+│   │   │   │       │   │   ├── unicode-width feature "default" (*)
+│   │   │   │       │   │   ├── portable-atomic feature "default"
+│   │   │   │       │   │   │   ├── portable-atomic v1.15.0
+│   │   │   │       │   │   │   └── portable-atomic feature "fallback"
+│   │   │   │       │   │   │       └── portable-atomic v1.15.0
+│   │   │   │       │   │   └── unit-prefix feature "default"
+│   │   │   │       │   │       ├── unit-prefix v0.5.2
+│   │   │   │       │   │       └── unit-prefix feature "std"
+│   │   │   │       │   │           └── unit-prefix v0.5.2
+│   │   │   │       │   ├── indicatif feature "unicode-width"
+│   │   │   │       │   │   ├── indicatif v0.18.6 (*)
+│   │   │   │       │   │   └── console feature "unicode-width"
+│   │   │   │       │   │       └── console v0.16.4 (*)
+│   │   │   │       │   └── indicatif feature "wasmbind"
+│   │   │   │       │       └── indicatif v0.18.6 (*)
+│   │   │   │       ├── macro_rules_attribute feature "default"
+│   │   │   │       │   └── macro_rules_attribute v0.2.3
+│   │   │   │       │       ├── macro_rules_attribute-proc_macro feature "default"
+│   │   │   │       │       │   └── macro_rules_attribute-proc_macro v0.2.3 (proc-macro)
+│   │   │   │       │       └── pastey feature "default"
+│   │   │   │       │           └── pastey v0.2.3 (proc-macro)
+│   │   │   │       ├── monostate feature "default"
+│   │   │   │       │   └── monostate v0.1.18
+│   │   │   │       │       ├── serde_core v1.0.229
+│   │   │   │       │       └── monostate-impl feature "default"
+│   │   │   │       │           └── monostate-impl v0.1.18 (proc-macro)
+│   │   │   │       │               ├── proc-macro2 feature "default" (*)
+│   │   │   │       │               ├── quote feature "default" (*)
+│   │   │   │       │               ├── syn feature "parsing" (*)
+│   │   │   │       │               └── syn feature "proc-macro" (*)
+│   │   │   │       ├── rand feature "default"
+│   │   │   │       │   ├── rand v0.9.5
+│   │   │   │       │   │   ├── rand_chacha v0.9.0
+│   │   │   │       │   │   │   ├── ppv-lite86 feature "simd"
+│   │   │   │       │   │   │   │   └── ppv-lite86 v0.2.21
+│   │   │   │       │   │   │   │       ├── zerocopy feature "default"
+│   │   │   │       │   │   │   │       │   └── zerocopy v0.8.56 (*)
+│   │   │   │       │   │   │   │       └── zerocopy feature "simd" (*)
+│   │   │   │       │   │   │   └── rand_core feature "default"
+│   │   │   │       │   │   │       └── rand_core v0.9.5
+│   │   │   │       │   │   │           └── getrandom feature "default" (*)
+│   │   │   │       │   │   └── rand_core v0.9.5 (*)
+│   │   │   │       │   ├── rand feature "os_rng"
+│   │   │   │       │   │   ├── rand v0.9.5 (*)
+│   │   │   │       │   │   └── rand_core feature "os_rng"
+│   │   │   │       │   │       └── rand_core v0.9.5 (*)
+│   │   │   │       │   ├── rand feature "small_rng"
+│   │   │   │       │   │   └── rand v0.9.5 (*)
+│   │   │   │       │   ├── rand feature "std"
+│   │   │   │       │   │   ├── rand v0.9.5 (*)
+│   │   │   │       │   │   ├── rand feature "alloc"
+│   │   │   │       │   │   │   └── rand v0.9.5 (*)
+│   │   │   │       │   │   ├── rand_chacha feature "std"
+│   │   │   │       │   │   │   ├── rand_chacha v0.9.0 (*)
+│   │   │   │       │   │   │   ├── ppv-lite86 feature "std"
+│   │   │   │       │   │   │   │   └── ppv-lite86 v0.2.21 (*)
+│   │   │   │       │   │   │   └── rand_core feature "std"
+│   │   │   │       │   │   │       ├── rand_core v0.9.5 (*)
+│   │   │   │       │   │   │       └── getrandom feature "std"
+│   │   │   │       │   │   │           └── getrandom v0.3.4 (*)
+│   │   │   │       │   │   └── rand_core feature "std" (*)
+│   │   │   │       │   ├── rand feature "std_rng"
+│   │   │   │       │   │   └── rand v0.9.5 (*)
+│   │   │   │       │   └── rand feature "thread_rng"
+│   │   │   │       │       ├── rand v0.9.5 (*)
+│   │   │   │       │       ├── rand feature "os_rng" (*)
+│   │   │   │       │       ├── rand feature "std" (*)
+│   │   │   │       │       └── rand feature "std_rng" (*)
+│   │   │   │       ├── rayon-cond feature "default"
+│   │   │   │       │   └── rayon-cond v0.4.0
+│   │   │   │       │       ├── rayon feature "default" (*)
+│   │   │   │       │       ├── either feature "default"
+│   │   │   │       │       │   ├── either v1.18.0
+│   │   │   │       │       │   └── either feature "std" (*)
+│   │   │   │       │       └── itertools feature "default" (*)
+│   │   │   │       ├── spm_precompiled feature "default"
+│   │   │   │       │   └── spm_precompiled v0.1.4
+│   │   │   │       │       ├── serde feature "default" (*)
+│   │   │   │       │       ├── serde feature "derive" (*)
+│   │   │   │       │       ├── base64 feature "default"
+│   │   │   │       │       │   ├── base64 v0.13.1
+│   │   │   │       │       │   └── base64 feature "std"
+│   │   │   │       │       │       └── base64 v0.13.1
+│   │   │   │       │       ├── nom feature "default"
+│   │   │   │       │       │   ├── nom v7.1.3
+│   │   │   │       │       │   │   ├── memchr v2.8.3
+│   │   │   │       │       │   │   └── minimal-lexical v0.2.1
+│   │   │   │       │       │   └── nom feature "std"
+│   │   │   │       │       │       ├── nom v7.1.3 (*)
+│   │   │   │       │       │       ├── memchr feature "std" (*)
+│   │   │   │       │       │       ├── nom feature "alloc"
+│   │   │   │       │       │       │   └── nom v7.1.3 (*)
+│   │   │   │       │       │       └── minimal-lexical feature "std"
+│   │   │   │       │       │           └── minimal-lexical v0.2.1
+│   │   │   │       │       └── unicode-segmentation feature "default"
+│   │   │   │       │           └── unicode-segmentation v1.13.3
+│   │   │   │       ├── unicode-segmentation feature "default" (*)
+│   │   │   │       ├── unicode-normalization-alignments feature "default"
+│   │   │   │       │   └── unicode-normalization-alignments v0.1.12
+│   │   │   │       │       └── smallvec feature "default" (*)
+│   │   │   │       └── unicode_categories feature "default"
+│   │   │   │           └── unicode_categories v0.1.1
+│   │   │   └── tokenizers feature "progressbar"
+│   │   │       ├── tokenizers v0.23.1 (*)
+│   │   │       └── tokenizers feature "indicatif"
+│   │   │           └── tokenizers v0.23.1 (*)
+│   │   ├── oar-ocr-derive v0.9.2 (proc-macro) (*)
+│   │   ├── image feature "default" (*)
+│   │   ├── rayon feature "default" (*)
+│   │   ├── imageproc feature "default" (*)
+│   │   ├── tracing feature "default" (*)
+│   │   ├── serde feature "default" (*)
+│   │   ├── serde feature "derive" (*)
+│   │   ├── serde feature "rc" (*)
+│   │   └── serde_json feature "default" (*)
+│   └── oar-ocr-core feature "simd"
+│       └── oar-ocr-core v0.9.2 (*)
+├── ort feature "load-dynamic"
+│   ├── ort v2.0.0-rc.13 (*)
+│   ├── ort feature "preload-dylibs"
+│   │   └── ort v2.0.0-rc.13 (*)
+│   ├── ort feature "std" (*)
+│   └── ort-sys feature "disable-linking"
+│       └── ort-sys v2.0.0-rc.13
+├── ort feature "ndarray" (*)
+├── ort feature "std" (*)
+├── ort feature "tracing" (*)
+├── tracing feature "default" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── serde_json feature "default" (*)
+├── sha2 feature "default"
+│   ├── sha2 v0.10.9
+│   │   ├── cfg-if feature "default" (*)
+│   │   ├── cpufeatures feature "default"
+│   │   │   └── cpufeatures v0.2.17
+│   │   └── digest feature "default"
+│   │       ├── digest v0.10.7
+│   │       │   ├── block-buffer feature "default"
+│   │       │   │   └── block-buffer v0.10.4
+│   │       │   │       └── generic-array feature "default"
+│   │       │   │           └── generic-array v0.14.7
+│   │       │   │               └── typenum feature "default" (*)
+│   │       │   │               [build-dependencies]
+│   │       │   │               └── version_check feature "default" (*)
+│   │       │   └── crypto-common feature "default"
+│   │       │       └── crypto-common v0.1.7
+│   │       │           ├── typenum feature "default" (*)
+│   │       │           ├── generic-array feature "default" (*)
+│   │       │           └── generic-array feature "more_lengths"
+│   │       │               └── generic-array v0.14.7 (*)
+│   │       └── digest feature "core-api"
+│   │           ├── digest v0.10.7 (*)
+│   │           └── digest feature "block-buffer"
+│   │               └── digest v0.10.7 (*)
+│   └── sha2 feature "std"
+│       ├── sha2 v0.10.9 (*)
+│       └── digest feature "std"
+│           ├── digest v0.10.7 (*)
+│           ├── digest feature "alloc"
+│           │   └── digest v0.10.7 (*)
+│           └── crypto-common feature "std"
+│               └── crypto-common v0.1.7 (*)
+├── tracing-subscriber feature "default"
+│   ├── tracing-subscriber v0.3.23
+│   │   ├── tracing v0.1.44 (*)
+│   │   ├── tracing-core v0.1.36 (*)
+│   │   ├── smallvec feature "default" (*)
+│   │   ├── once_cell feature "default" (*)
+│   │   ├── regex-automata feature "std" (*)
+│   │   ├── matchers feature "default"
+│   │   │   └── matchers v0.2.0
+│   │   │       ├── regex-automata feature "dfa-build"
+│   │   │       │   ├── regex-automata v0.4.18 (*)
+│   │   │       │   ├── regex-automata feature "dfa-search"
+│   │   │       │   │   └── regex-automata v0.4.18 (*)
+│   │   │       │   └── regex-automata feature "nfa-thompson" (*)
+│   │   │       ├── regex-automata feature "dfa-search" (*)
+│   │   │       └── regex-automata feature "syntax" (*)
+│   │   ├── nu-ansi-term feature "default"
+│   │   │   ├── nu-ansi-term v0.50.3
+│   │   │   │   ├── windows-sys feature "Win32_Foundation" (*)
+│   │   │   │   ├── windows-sys feature "Win32_Security"
+│   │   │   │   │   ├── windows-sys v0.61.2 (*)
+│   │   │   │   │   └── windows-sys feature "Win32" (*)
+│   │   │   │   ├── windows-sys feature "Win32_Storage_FileSystem" (*)
+│   │   │   │   ├── windows-sys feature "Win32_System_Console" (*)
+│   │   │   │   └── windows-sys feature "default" (*)
+│   │   │   └── nu-ansi-term feature "std"
+│   │   │       └── nu-ansi-term v0.50.3 (*)
+│   │   ├── sharded-slab feature "default"
+│   │   │   └── sharded-slab v0.1.7
+│   │   │       └── lazy_static feature "default"
+│   │   │           └── lazy_static v1.5.0
+│   │   ├── thread_local feature "default"
+│   │   │   └── thread_local v1.1.10
+│   │   │       └── cfg-if feature "default" (*)
+│   │   ├── tracing-log feature "log-tracer"
+│   │   │   └── tracing-log v0.2.0
+│   │   │       ├── log feature "default" (*)
+│   │   │       ├── tracing-core feature "default"
+│   │   │       │   ├── tracing-core v0.1.36 (*)
+│   │   │       │   └── tracing-core feature "std" (*)
+│   │   │       └── once_cell feature "default" (*)
+│   │   └── tracing-log feature "std"
+│   │       ├── tracing-log v0.2.0 (*)
+│   │       └── log feature "std"
+│   │           ├── log v0.4.34
+│   │           └── log feature "alloc"
+│   │               └── log v0.4.34
+│   ├── tracing-subscriber feature "ansi"
+│   │   ├── tracing-subscriber v0.3.23 (*)
+│   │   ├── tracing-subscriber feature "fmt"
+│   │   │   ├── tracing-subscriber v0.3.23 (*)
+│   │   │   ├── tracing-subscriber feature "registry"
+│   │   │   │   ├── tracing-subscriber v0.3.23 (*)
+│   │   │   │   ├── tracing-subscriber feature "sharded-slab"
+│   │   │   │   │   └── tracing-subscriber v0.3.23 (*)
+│   │   │   │   ├── tracing-subscriber feature "std"
+│   │   │   │   │   ├── tracing-subscriber v0.3.23 (*)
+│   │   │   │   │   ├── tracing-core feature "std" (*)
+│   │   │   │   │   └── tracing-subscriber feature "alloc"
+│   │   │   │   │       └── tracing-subscriber v0.3.23 (*)
+│   │   │   │   └── tracing-subscriber feature "thread_local"
+│   │   │   │       └── tracing-subscriber v0.3.23 (*)
+│   │   │   └── tracing-subscriber feature "std" (*)
+│   │   └── tracing-subscriber feature "nu-ansi-term"
+│   │       └── tracing-subscriber v0.3.23 (*)
+│   ├── tracing-subscriber feature "fmt" (*)
+│   ├── tracing-subscriber feature "smallvec"
+│   │   └── tracing-subscriber v0.3.23 (*)
+│   ├── tracing-subscriber feature "std" (*)
+│   └── tracing-subscriber feature "tracing-log"
+│       └── tracing-subscriber v0.3.23 (*)
+├── tracing-subscriber feature "env-filter"
+│   ├── tracing-subscriber v0.3.23 (*)
+│   ├── tracing-subscriber feature "matchers"
+│   │   └── tracing-subscriber v0.3.23 (*)
+│   ├── tracing-subscriber feature "once_cell"
+│   │   └── tracing-subscriber v0.3.23 (*)
+│   ├── tracing-subscriber feature "std" (*)
+│   ├── tracing-subscriber feature "thread_local" (*)
+│   └── tracing-subscriber feature "tracing"
+│       └── tracing-subscriber v0.3.23 (*)
+├── windows-sys feature "Win32_Foundation"
+│   ├── windows-sys v0.59.0
+│   │   └── windows-targets feature "default"
+│   │       └── windows-targets v0.52.6
+│   │           └── windows_x86_64_msvc feature "default"
+│   │               └── windows_x86_64_msvc v0.52.6
+│   └── windows-sys feature "Win32"
+│       ├── windows-sys v0.59.0 (*)
+│       └── windows-sys feature "Win32_Foundation" (*)
+├── windows-sys feature "Win32_System_Diagnostics"
+│   ├── windows-sys v0.59.0 (*)
+│   └── windows-sys feature "Win32_System"
+│       ├── windows-sys v0.59.0 (*)
+│       └── windows-sys feature "Win32" (*)
+├── windows-sys feature "Win32_System_Diagnostics_ToolHelp"
+│   ├── windows-sys v0.59.0 (*)
+│   └── windows-sys feature "Win32_System_Diagnostics" (*)
+├── windows-sys feature "Win32_System_ProcessStatus"
+│   ├── windows-sys v0.59.0 (*)
+│   └── windows-sys feature "Win32_System" (*)
+└── windows-sys feature "default"
+    └── windows-sys v0.59.0 (*)

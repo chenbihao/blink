@@ -1,0 +1,371 @@
+{
+  "cancel_test": {
+    "cancelled_after_chunks": 5,
+    "matches_original": true,
+    "result_after_reset": "昨天是mon@@daytodayis零八二thedayaftertom@@or@@row是星期三"
+  },
+  "chunk_logs": [
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 0.0,
+      "chunk_index": 0,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 82.6488,
+      "is_final": false,
+      "list_frame_count": 0,
+      "num_frames": 20,
+      "partial_text": "",
+      "total_chunk_ms": 83.7045
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 0.6,
+      "chunk_index": 1,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 89.3958,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 20,
+      "partial_text": "昨",
+      "total_chunk_ms": 90.4351
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 1.2,
+      "chunk_index": 2,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 87.94019999999999,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 20,
+      "partial_text": "天",
+      "total_chunk_ms": 89.0006
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 1.8,
+      "chunk_index": 3,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 91.9007,
+      "is_final": false,
+      "list_frame_count": 2,
+      "num_frames": 20,
+      "partial_text": "是mon@@",
+      "total_chunk_ms": 92.9506
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        21
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 2.4,
+      "chunk_index": 4,
+      "enc_out_shape": [
+        1,
+        21,
+        512
+      ],
+      "inference_ms": 96.0476,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 21,
+      "partial_text": "day",
+      "total_chunk_ms": 97.2853
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 3.0,
+      "chunk_index": 5,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 79.5925,
+      "is_final": false,
+      "list_frame_count": 0,
+      "num_frames": 20,
+      "partial_text": "",
+      "total_chunk_ms": 80.65129999999999
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 3.6,
+      "chunk_index": 6,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 82.2399,
+      "is_final": false,
+      "list_frame_count": 0,
+      "num_frames": 20,
+      "partial_text": "",
+      "total_chunk_ms": 83.4021
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 4.2,
+      "chunk_index": 7,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 92.2765,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 20,
+      "partial_text": "today",
+      "total_chunk_ms": 93.388
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        21
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 4.8,
+      "chunk_index": 8,
+      "enc_out_shape": [
+        1,
+        21,
+        512
+      ],
+      "inference_ms": 100.1108,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 21,
+      "partial_text": "is",
+      "total_chunk_ms": 101.3457
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 5.4,
+      "chunk_index": 9,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 96.9649,
+      "is_final": false,
+      "list_frame_count": 2,
+      "num_frames": 20,
+      "partial_text": "零八",
+      "total_chunk_ms": 98.0226
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 6.0,
+      "chunk_index": 10,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 92.63839999999999,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 20,
+      "partial_text": "二",
+      "total_chunk_ms": 93.685
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 6.6,
+      "chunk_index": 11,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 88.11449999999999,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 20,
+      "partial_text": "the",
+      "total_chunk_ms": 89.59880000000001
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        21
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 7.2,
+      "chunk_index": 12,
+      "enc_out_shape": [
+        1,
+        21,
+        512
+      ],
+      "inference_ms": 107.746,
+      "is_final": false,
+      "list_frame_count": 2,
+      "num_frames": 21,
+      "partial_text": "dayafter",
+      "total_chunk_ms": 109.1879
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 7.8,
+      "chunk_index": 13,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 100.5204,
+      "is_final": false,
+      "list_frame_count": 2,
+      "num_frames": 20,
+      "partial_text": "tom@@or@@",
+      "total_chunk_ms": 101.63369999999999
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 8.4,
+      "chunk_index": 14,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 87.1209,
+      "is_final": false,
+      "list_frame_count": 1,
+      "num_frames": 20,
+      "partial_text": "row",
+      "total_chunk_ms": 88.5762
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.6,
+      "audio_timestamp_s": 9.0,
+      "chunk_index": 15,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 104.8342,
+      "is_final": false,
+      "list_frame_count": 2,
+      "num_frames": 20,
+      "partial_text": "是星",
+      "total_chunk_ms": 105.96709999999999
+    },
+    {
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "audio_duration_s": 0.453125,
+      "audio_timestamp_s": 9.6,
+      "chunk_index": 16,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "inference_ms": 116.9095,
+      "is_final": true,
+      "list_frame_count": 2,
+      "num_frames": 20,
+      "partial_text": "期三",
+      "total_chunk_ms": 118.3936
+    }
+  ],
+  "fbank_implementation": "kaldi-native-fbank",
+  "reset_test": {
+    "consistent": true,
+    "iterations": 20,
+    "sample_results": [
+      "昨天是mon@@daytodayis零八二thedayaftertom@@or@@row是星期三",
+      "昨天是mon@@daytodayis零八二thedayaftertom@@or@@row是星期三",
+      "昨天是mon@@daytodayis零八二thedayaftertom@@or@@row是星期三"
+    ]
+  },
+  "spike": "C2_rust_implementation_knf",
+  "status": "GO",
+  "streaming_results": {
+    "final_text": "昨天是mon@@daytodayis零八二thedayaftertom@@or@@row是星期三",
+    "first_nonempty_partial_latency_s": 0.174,
+    "model_load_mem_delta_mb": 513.0,
+    "model_load_time_s": 2.428,
+    "n_partial_texts": 14,
+    "peak_mem_mb": 522.3,
+    "rtf": 0.1609,
+    "total_streaming_s": 1.618
+  }
+}

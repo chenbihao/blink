@@ -1,0 +1,213 @@
+{
+  "analysis": {
+    "can_switch_runtime_path_in_process": "YES - different DLL loaded in separate child process, but CANNOT switch within same process (OnceLock in load_dynamic module)",
+    "commit_error_boundary": "commit() returns bool (true=first init, false=already initialized); init_from returns Result<EnvironmentBuilder, LoadDynamicError> with Dlopen/MissingApi/BadVersion variants",
+    "init_from_validates_path": "YES - init_from calls libloading::Library::new(absolute_path) immediately; returns LoadError::Dlopen if file not found or not loadable",
+    "init_timing": "init_from succeeded (DLL loaded) but no Session created (no model path)",
+    "pending_restart_necessary": "YES - Windows locks loaded DLLs; OnceLock in load_dynamic prevents re-init; cannot overwrite/delete onnxruntime.dll until process exits"
+  },
+  "cpu_dll_info": {
+    "directory_files": [
+      {
+        "name": "onnxruntime.dll",
+        "sha256": "14119125df2dcf9ff3e083afdba5fcc4b09b4186d8762404eb7b1fbccde3fcf2",
+        "size_bytes": 11234848
+      },
+      {
+        "name": "onnxruntime_providers_shared.dll",
+        "sha256": "7d11a2a851ad86095a7ad1f4d96927ff0a48fa86311699fbb6a7c21914bbb69f",
+        "size_bytes": 22048
+      }
+    ],
+    "exists": true,
+    "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll",
+    "sha256": "14119125df2dcf9ff3e083afdba5fcc4b09b4186d8762404eb7b1fbccde3fcf2"
+  },
+  "gpu_dll_info": {
+    "directory_files": [
+      {
+        "name": "onnxruntime.dll",
+        "sha256": "3e7c91297c5e9aba2d122c6848160825d53d8291e0afd28a279982b26ca7e61c",
+        "size_bytes": 17687904
+      },
+      {
+        "name": "onnxruntime_providers_cuda.dll",
+        "sha256": "3a7e8ae57b5a32db7502821a1addd22bc254860adb55d3400954806e737769d2",
+        "size_bytes": 171978040
+      },
+      {
+        "name": "onnxruntime_providers_shared.dll",
+        "sha256": "6f4a8734776da9995fe51457c01e384b9e36489c48c70e3f402e84c845e5dded",
+        "size_bytes": 21816
+      },
+      {
+        "name": "onnxruntime_providers_tensorrt.dll",
+        "sha256": "76524acac4410375a574d5b4228a8f602ca03df1b23594e19af2e4bade81ac2e",
+        "size_bytes": 876896
+      }
+    ],
+    "path": "D:/Projects/Coding/blink/.tmp-venv/Lib/site-packages/onnxruntime/capi/onnxruntime.dll"
+  },
+  "oar_ocr_license": "Apache-2.0",
+  "oar_ocr_version": "0.9.2",
+  "ort_crate_features": [
+    "std",
+    "ndarray",
+    "load-dynamic",
+    "tracing"
+  ],
+  "ort_crate_version": "2.0.0-rc.13",
+  "ort_version_from_cpu_dll": "ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED",
+  "scenarios": [
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 6.890625,
+        "thread_count": 5,
+        "working_set_mb": 6.890625
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": "ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED",
+      "panicked": false,
+      "scenario": "valid_cpu_dll",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll\",\"dll_exists\":true,\"dll_size\":11234848,\"init_from_succeeded\":true,\"init_from_error\":null,\"commit_succeeded\":true,\"ort_version\":\"ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED\",\"session_created\":false,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":6.890625,\"peak_working_set_mb\":6.890625,\"thread_count\":5}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": null,
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"../runtimes/nonexistent/onnxruntime.dll\"",
+      "error_message": "DLL file does not exist",
+      "exit_code": 0,
+      "ort_version": null,
+      "panicked": false,
+      "scenario": "dll_not_found",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"../runtimes/nonexistent/onnxruntime.dll\",\"dll_exists\":false,\"dll_size\":0,\"init_from_succeeded\":false,\"init_from_error\":null,\"commit_succeeded\":false,\"ort_version\":null,\"session_created\":false,\"session_error\":null,\"error\":\"DLL file does not exist\",\"metrics\":null}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 6.19921875,
+        "thread_count": 5,
+        "working_set_mb": 6.19921875
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/zero_byte.dll\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": null,
+      "panicked": false,
+      "scenario": "zero_byte_dll",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/zero_byte.dll\",\"dll_exists\":true,\"dll_size\":0,\"init_from_succeeded\":false,\"init_from_error\":\"failed to load from `D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/zero_byte.dll`: LoadLibraryExW failed\",\"commit_succeeded\":false,\"ort_version\":null,\"session_created\":false,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":6.19921875,\"peak_working_set_mb\":6.19921875,\"thread_count\":5}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 6.19921875,
+        "thread_count": 4,
+        "working_set_mb": 6.19921875
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/random_bytes.dll\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": null,
+      "panicked": false,
+      "scenario": "random_bytes_dll",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/random_bytes.dll\",\"dll_exists\":true,\"dll_size\":1024,\"init_from_succeeded\":false,\"init_from_error\":\"failed to load from `D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/random_bytes.dll`: LoadLibraryExW failed\",\"commit_succeeded\":false,\"ort_version\":null,\"session_created\":false,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":6.19921875,\"peak_working_set_mb\":6.19921875,\"thread_count\":4}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 6.19140625,
+        "thread_count": 5,
+        "working_set_mb": 6.19140625
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"C:/Windows/System32/kernel32.dll\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": null,
+      "panicked": false,
+      "scenario": "abi_incompatible_dll",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"C:/Windows/System32/kernel32.dll\",\"dll_exists\":true,\"dll_size\":836208,\"init_from_succeeded\":false,\"init_from_error\":\"C:/Windows/System32/kernel32.dll does not export `OrtGetApiBase`\",\"commit_succeeded\":false,\"ort_version\":null,\"session_created\":false,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":6.19140625,\"peak_working_set_mb\":6.19140625,\"thread_count\":5}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 6.9296875,
+        "thread_count": 5,
+        "working_set_mb": 6.9296875
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/ort-alone\\onnxruntime.dll\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": "ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED",
+      "panicked": false,
+      "scenario": "missing_companion_dll",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/ort-alone\\\\onnxruntime.dll\",\"dll_exists\":true,\"dll_size\":11234848,\"init_from_succeeded\":true,\"init_from_error\":null,\"commit_succeeded\":true,\"ort_version\":\"ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED\",\"session_created\":false,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":6.9296875,\"peak_working_set_mb\":6.9296875,\"thread_count\":5}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 21.0390625,
+        "thread_count": 5,
+        "working_set_mb": 20.00390625
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll\" --model \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/../models/fsmn-vad-onnx-v2/model_quant.onnx\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": "ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED",
+      "panicked": false,
+      "scenario": "valid_dll_valid_model",
+      "session_created": true,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll\",\"dll_exists\":true,\"dll_size\":11234848,\"init_from_succeeded\":true,\"init_from_error\":null,\"commit_succeeded\":true,\"ort_version\":\"ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED\",\"session_created\":true,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":20.00390625,\"peak_working_set_mb\":21.0390625,\"thread_count\":5}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 15.7734375,
+        "thread_count": 5,
+        "working_set_mb": 15.7734375
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll\" --model \"D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/corrupted_model.onnx\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": "ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED",
+      "panicked": false,
+      "scenario": "valid_dll_corrupted_model",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll\",\"dll_exists\":true,\"dll_size\":11234848,\"init_from_succeeded\":true,\"init_from_error\":null,\"commit_succeeded\":true,\"ort_version\":\"ORT Build Info: git-branch=HEAD, git-commit-id=ffceed9d44, build type=RelWithDebInfo, cmake cxx flags: /guard:cf /DWIN32 /D_WINDOWS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Qspectre /DONNXRUNTIME_ENABLE_INTEL_METEOR_LAKE_MOBILE_PLATFORM_PERF_PATCH /O2 /Ob1 /DNDEBUG /Zc:__cplusplus /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED\",\"session_created\":false,\"session_error\":\"commit_from_file failed: Load model from D:\\\\Projects\\\\Coding\\\\blink\\\\xtask\\\\spikes\\\\onnx-spike\\\\followup/runtimes/corrupted_model.onnx failed:Protobuf parsing failed.\",\"error\":null,\"metrics\":{\"working_set_mb\":15.7734375,\"peak_working_set_mb\":15.7734375,\"thread_count\":5}}\n"
+    },
+    {
+      "access_violation": false,
+      "child_metrics": {
+        "peak_working_set_mb": 9.59375,
+        "thread_count": 5,
+        "working_set_mb": 9.59375
+      },
+      "command": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\spike-a-crate\\target\\release\\onnx-spike-a.exe child --dll \"D:/Projects/Coding/blink/.tmp-venv/Lib/site-packages/onnxruntime/capi/onnxruntime.dll\"",
+      "error_message": null,
+      "exit_code": 0,
+      "ort_version": "ORT Build Info: git-branch=HEAD, git-commit-id=2e2543fbe9, fp8-kv-cache=1, build type=Release",
+      "panicked": false,
+      "scenario": "gpu_dll",
+      "session_created": false,
+      "stderr": "",
+      "stdout": "{\"dll_path\":\"D:/Projects/Coding/blink/.tmp-venv/Lib/site-packages/onnxruntime/capi/onnxruntime.dll\",\"dll_exists\":true,\"dll_size\":17687904,\"init_from_succeeded\":true,\"init_from_error\":null,\"commit_succeeded\":true,\"ort_version\":\"ORT Build Info: git-branch=HEAD, git-commit-id=2e2543fbe9, fp8-kv-cache=1, build type=Release\",\"session_created\":false,\"session_error\":null,\"error\":null,\"metrics\":{\"working_set_mb\":9.59375,\"peak_working_set_mb\":9.59375,\"thread_count\":5}}\n"
+    }
+  ],
+  "spike": "A_ort_negative_loading"
+}

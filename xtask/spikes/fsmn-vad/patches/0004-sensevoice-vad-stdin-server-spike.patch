@@ -1,0 +1,36 @@
+# Spike patch: SenseVoice worker with FSMN-VAD in stdin-server mode
+#
+# 基于 xtask/funasr-worker/patches/0001-sensevoice-ndjson-stdin-server.patch，
+# 移除 --stdin-server 对 --vad 的排斥，在常驻 worker 内同时加载 ASR 和 VAD 模型。
+#
+# 这是隔离 spike 专用 patch，不改变生产 0001 patch。
+# 修改后的 worker：
+#   - 启动时同时加载 SenseVoice GGUF 和 FSMN-VAD GGUF
+#   - --stdin-server 模式下，每个 transcribe 请求可选先跑 VAD 分段
+#   - 协议新增 vad_segments 字段（仅 spike 用）
+#
+# 用法（spike 构建）：
+#   exe -m sensevoice.gguf --vad fsmn-vad.gguf --stdin-server
+#
+# 与生产 0001 的区别：
+#   0001: --stdin_server && !vad_path.empty() → 报错退出
+#   本patch: --stdin_server + vad_path → 同时加载两个模型
+#
+# ⚠️ 关键发现：funasr_vad_segments() 每次调用都 gguf_init_from_file 重新加载 VAD 模型
+#    且对整段 wav 一次性做 fbank + 推理。没有增量/在线 cache。
+#    因此 spike worker 中 VAD 模型虽然可以常驻 ASR 侧，但 VAD 本身每次请求
+#    都重新加载 GGUF 文件并对整段音频重算——这是 O(n) per call，非 O(1) 增量。
+
+diff --git a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
+index 4bdabc2..0000000 100644
+--- a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
++++ b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
+@@ -270,7 +270,7 @@
+     else if(!strcmp(argv[i],"--stdin-server"))stdin_server=true;
+     else {fprintf(stderr,"usage: %s -m sensevoice.gguf ((-a audio.wav | -f fbank.bin) | --stdin-server) [--vad fsmn-vad.gguf [--vad-maxseg ms]] [--backend cpu|cuda|vulkan] [--srt] [--ids] [--keep-tags]\n",argv[0]);return 1;} }
+   if(gguf_path.empty()||(!stdin_server&&fbank_path.empty()&&wav_path.empty())){fprintf(stderr,"missing args\n");return 1;}
+-  if(stdin_server&&(!fbank_path.empty()||!wav_path.empty()||!vad_path.empty()||srt_mode)){
+-    fprintf(stderr,"--stdin-server only supports the persistent NDJSON loop without VAD/SRT/fbank\n");return 1;}
++  if(stdin_server&&(!fbank_path.empty()||!wav_path.empty()||srt_mode)){
++    fprintf(stderr,"--stdin-server spike supports VAD but not SRT/fbank\n");return 1;}
+   graph_backend graph_be=make_graph_backend(backend_name);

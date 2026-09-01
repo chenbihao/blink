@@ -125,11 +125,10 @@ async fn download_file(
         downloaded += bytes.len() as u64;
         if downloaded >= next_progress {
             let mb = downloaded / (1024 * 1024);
-            let pct = if total_size > 0 {
-                format!(" ({})", downloaded * 100 / total_size)
-            } else {
-                String::new()
-            };
+            let pct = (downloaded * 100)
+                .checked_div(total_size)
+                .map(|p| format!(" ({p})"))
+                .unwrap_or_default();
             on_log(&format!("{file_name}: 已下载 {mb} MB{pct}"));
             next_progress += PROGRESS_LOG_STEP_BYTES;
         }

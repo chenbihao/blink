@@ -1,0 +1,32 @@
+[package]
+name = "onnx-spike-c"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+# ort: ONNX Runtime Rust binding (load-dynamic)
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "tracing"] }
+
+# kaldi-native-fbank: Kaldi-compatible fbank extractor (pure Rust, no external deps)
+kaldi-native-fbank = "0.1"
+
+# Audio loading
+hound = "3"
+
+# Array operations
+ndarray = "0.17"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Windows API for memory metrics
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus"] }
+
+# Standalone crate (not part of Blink workspace)
+[workspace]

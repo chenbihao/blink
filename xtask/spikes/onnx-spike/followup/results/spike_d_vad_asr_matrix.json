@@ -1,0 +1,3790 @@
+{
+  "spike": "D_vad_asr_matrix",
+  "timestamp": "2026-09-02T00:01:52",
+  "combos_tested": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F"
+  ],
+  "combos_not_tested": {
+    "E": "SenseVoice ONNX not downloaded",
+    "GGUF": "C++ worker, not Python"
+  },
+  "corpus_size": 16,
+  "corpus_items": [
+    {
+      "name": "clean_near_field",
+      "conditions": [
+        "安静近讲"
+      ],
+      "audio_dur_s": 3.5,
+      "segments": [
+        [
+          0,
+          2
+        ],
+        [
+          2.5,
+          3.5
+        ]
+      ]
+    },
+    {
+      "name": "far_field",
+      "conditions": [
+        "远场"
+      ],
+      "audio_dur_s": 3.5,
+      "segments": [
+        [
+          0,
+          2
+        ],
+        [
+          2.5,
+          3.5
+        ]
+      ]
+    },
+    {
+      "name": "fan_ac_bg",
+      "conditions": [
+        "风扇/空调"
+      ],
+      "audio_dur_s": 3.5,
+      "segments": [
+        [
+          0,
+          2
+        ],
+        [
+          2.5,
+          3.5
+        ]
+      ]
+    },
+    {
+      "name": "keyboard",
+      "conditions": [
+        "键盘"
+      ],
+      "audio_dur_s": 3.5,
+      "segments": [
+        [
+          0,
+          2
+        ],
+        [
+          2.5,
+          3.5
+        ]
+      ]
+    },
+    {
+      "name": "music_bg",
+      "conditions": [
+        "音乐/视频"
+      ],
+      "audio_dur_s": 3.5,
+      "segments": [
+        [
+          0,
+          2
+        ],
+        [
+          2.5,
+          3.5
+        ]
+      ]
+    },
+    {
+      "name": "short_word",
+      "conditions": [
+        "短词"
+      ],
+      "audio_dur_s": 0.7,
+      "segments": [
+        [
+          0,
+          0.3
+        ]
+      ]
+    },
+    {
+      "name": "long_sentence",
+      "conditions": [
+        "长句"
+      ],
+      "audio_dur_s": 5.5,
+      "segments": [
+        [
+          0,
+          5
+        ]
+      ]
+    },
+    {
+      "name": "mid_pause",
+      "conditions": [
+        "句中停顿"
+      ],
+      "audio_dur_s": 2.7,
+      "segments": [
+        [
+          0,
+          2.2
+        ]
+      ]
+    },
+    {
+      "name": "multi_sentence",
+      "conditions": [
+        "连续多句"
+      ],
+      "audio_dur_s": 4.2,
+      "segments": [
+        [
+          0,
+          1
+        ],
+        [
+          1.4,
+          2.4
+        ],
+        [
+          2.8,
+          3.8
+        ]
+      ]
+    },
+    {
+      "name": "pure_noise",
+      "conditions": [
+        "纯噪声"
+      ],
+      "audio_dur_s": 3.0,
+      "segments": []
+    },
+    {
+      "name": "pure_silence",
+      "conditions": [
+        "纯静默"
+      ],
+      "audio_dur_s": 3.0,
+      "segments": []
+    },
+    {
+      "name": "real_0.wav",
+      "conditions": [
+        "真实音频"
+      ],
+      "audio_dur_s": 10.053,
+      "segments": [
+        [
+          0,
+          5
+        ]
+      ]
+    },
+    {
+      "name": "real_1.wav",
+      "conditions": [
+        "真实音频"
+      ],
+      "audio_dur_s": 5.1,
+      "segments": [
+        [
+          0,
+          5
+        ]
+      ]
+    },
+    {
+      "name": "real_2.wav",
+      "conditions": [
+        "真实音频"
+      ],
+      "audio_dur_s": 4.69,
+      "segments": [
+        [
+          0,
+          4.69
+        ]
+      ]
+    },
+    {
+      "name": "real_3.wav",
+      "conditions": [
+        "真实音频"
+      ],
+      "audio_dur_s": 8.83,
+      "segments": [
+        [
+          0,
+          5
+        ]
+      ]
+    },
+    {
+      "name": "real_asr_example.wav",
+      "conditions": [
+        "真实音频"
+      ],
+      "audio_dur_s": 10.053,
+      "segments": [
+        [
+          0,
+          5
+        ]
+      ]
+    }
+  ],
+  "per_combo": {
+    "A": {
+      "status": "MEASURED",
+      "results": [
+        {
+          "item": "clean_near_field",
+          "conditions": [
+            "安静近讲"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.29
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.145,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 2,
+            "n_gt": 2,
+            "n_det": 2
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "",
+          "asr_rtf": 0.9944,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.3,
+          "asr_note": ""
+        },
+        {
+          "item": "far_field",
+          "conditions": [
+            "远场"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.29
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.145,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 2,
+            "n_gt": 2,
+            "n_det": 2
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "",
+          "asr_rtf": 0.214,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "fan_ac_bg",
+          "conditions": [
+            "风扇/空调"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.5,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "",
+          "asr_rtf": 0.149,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "keyboard",
+          "conditions": [
+            "键盘"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.29
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.145,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 2,
+            "n_gt": 2,
+            "n_det": 2
+          },
+          "vad_time_s": 0.003,
+          "asr_text": "",
+          "asr_rtf": 0.1475,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "music_bg",
+          "conditions": [
+            "音乐/视频"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.5,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "",
+          "asr_rtf": 0.1427,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "short_word",
+          "conditions": [
+            "短词"
+          ],
+          "audio_dur_s": 0.7,
+          "gt_segments": [
+            [
+              0,
+              0.3
+            ]
+          ],
+          "det_segments": [],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 0,
+            "fr": 1,
+            "p": 0,
+            "r": 0.0,
+            "f1": 0,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 0,
+            "n_gt": 1,
+            "n_det": 0
+          },
+          "vad_time_s": 0.002,
+          "asr_text": "",
+          "asr_rtf": 0.2179,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "long_sentence",
+          "conditions": [
+            "长句"
+          ],
+          "audio_dur_s": 5.5,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              5.29
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.29,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.005,
+          "asr_text": "",
+          "asr_rtf": 0.1907,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "mid_pause",
+          "conditions": [
+            "句中停顿"
+          ],
+          "audio_dur_s": 2.7,
+          "gt_segments": [
+            [
+              0,
+              2.2
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.49
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.29,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.003,
+          "asr_text": "",
+          "asr_rtf": 0.1619,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "multi_sentence",
+          "conditions": [
+            "连续多句"
+          ],
+          "audio_dur_s": 4.2,
+          "gt_segments": [
+            [
+              0,
+              1
+            ],
+            [
+              1.4,
+              2.4
+            ],
+            [
+              2.8,
+              3.8
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              1.29
+            ],
+            [
+              1.4,
+              2.69
+            ],
+            [
+              2.8,
+              4.09
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.29,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 3,
+            "n_gt": 3,
+            "n_det": 3
+          },
+          "vad_time_s": 0.005,
+          "asr_text": "",
+          "asr_rtf": 0.1748,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_noise",
+          "conditions": [
+            "纯噪声"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0.0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.002,
+          "asr_text": "",
+          "asr_rtf": 0.1423,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_silence",
+          "conditions": [
+            "纯静默"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [],
+          "vad_eval": {
+            "onset_s": 0,
+            "endpoint_s": 0,
+            "fa": 0,
+            "fr": 0,
+            "p": 1,
+            "r": 1,
+            "f1": 1,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 0
+          },
+          "vad_time_s": 0.002,
+          "asr_text": "",
+          "asr_rtf": 0.1412,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 740.4,
+          "asr_note": ""
+        },
+        {
+          "item": "real_0.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.65,
+              2.55
+            ],
+            [
+              3.8,
+              5.18
+            ],
+            [
+              6.56,
+              8.56
+            ],
+            [
+              8.74,
+              10.053125
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.65,
+            "endpoint_s": 2.45,
+            "fa": 3,
+            "fr": 0,
+            "p": 0.25,
+            "r": 1.0,
+            "f1": 0.4,
+            "over": 1,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 4
+          },
+          "vad_time_s": 0.009,
+          "asr_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.1738,
+          "asr_first_partial_s": 0.181,
+          "asr_first_final_s": 1.747,
+          "mem_mb": 742.3,
+          "asr_note": ""
+        },
+        {
+          "item": "real_1.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 5.1,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.81,
+              5.1
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.81,
+            "endpoint_s": 0.1,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.005,
+          "asr_text": "这是第一种第二种叫嗯与alwaysalways什么意思啊",
+          "asr_rtf": 0.1835,
+          "asr_first_partial_s": 0.303,
+          "asr_first_final_s": 0.936,
+          "mem_mb": 742.9,
+          "asr_note": ""
+        },
+        {
+          "item": "real_2.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 4.69,
+          "gt_segments": [
+            [
+              0,
+              4.69
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              4.31
+            ],
+            [
+              4.45,
+              4.69
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.38,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.5,
+            "r": 1.0,
+            "f1": 0.667,
+            "over": 1,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 2
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "这个是平繁的啊仍然是接下来fre@@qu@@en@@tly频繁的",
+          "asr_rtf": 0.1636,
+          "asr_first_partial_s": 0.086,
+          "asr_first_final_s": 0.767,
+          "mem_mb": 742.9,
+          "asr_note": ""
+        },
+        {
+          "item": "real_3.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 8.83,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.64,
+              5.89
+            ],
+            [
+              8.59,
+              8.83
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.64,
+            "endpoint_s": 0.89,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.5,
+            "r": 1.0,
+            "f1": 0.667,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 2
+          },
+          "vad_time_s": 0.008,
+          "asr_text": "给一句是什么时代加了es是一般现在是对后面的是材一些商",
+          "asr_rtf": 0.172,
+          "asr_first_partial_s": 0.171,
+          "asr_first_final_s": 1.519,
+          "mem_mb": 743.1,
+          "asr_note": ""
+        },
+        {
+          "item": "real_asr_example.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.65,
+              2.55
+            ],
+            [
+              3.8,
+              5.18
+            ],
+            [
+              6.56,
+              8.56
+            ],
+            [
+              8.74,
+              10.053125
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.65,
+            "endpoint_s": 2.45,
+            "fa": 3,
+            "fr": 0,
+            "p": 0.25,
+            "r": 1.0,
+            "f1": 0.4,
+            "over": 1,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 4
+          },
+          "vad_time_s": 0.015,
+          "asr_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.1876,
+          "asr_first_partial_s": 0.195,
+          "asr_first_final_s": 1.886,
+          "mem_mb": 743.1,
+          "asr_note": ""
+        }
+      ]
+    },
+    "B": {
+      "status": "MEASURED",
+      "results": [
+        {
+          "item": "clean_near_field",
+          "conditions": [
+            "安静近讲"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.069,
+          "asr_text": "",
+          "asr_rtf": 0.1645,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.3,
+          "asr_note": ""
+        },
+        {
+          "item": "far_field",
+          "conditions": [
+            "远场"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.072,
+          "asr_text": "",
+          "asr_rtf": 0.148,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.4,
+          "asr_note": ""
+        },
+        {
+          "item": "fan_ac_bg",
+          "conditions": [
+            "风扇/空调"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.066,
+          "asr_text": "",
+          "asr_rtf": 0.1891,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.4,
+          "asr_note": ""
+        },
+        {
+          "item": "keyboard",
+          "conditions": [
+            "键盘"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.064,
+          "asr_text": "",
+          "asr_rtf": 0.1773,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.4,
+          "asr_note": ""
+        },
+        {
+          "item": "music_bg",
+          "conditions": [
+            "音乐/视频"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.067,
+          "asr_text": "",
+          "asr_rtf": 0.147,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "short_word",
+          "conditions": [
+            "短词"
+          ],
+          "audio_dur_s": 0.7,
+          "gt_segments": [
+            [
+              0,
+              0.3
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              0.695
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.395,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.011,
+          "asr_text": "",
+          "asr_rtf": 0.2181,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "long_sentence",
+          "conditions": [
+            "长句"
+          ],
+          "audio_dur_s": 5.5,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              5.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.495,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.09,
+          "asr_text": "",
+          "asr_rtf": 0.1509,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "mid_pause",
+          "conditions": [
+            "句中停顿"
+          ],
+          "audio_dur_s": 2.7,
+          "gt_segments": [
+            [
+              0,
+              2.2
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              2.695
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.495,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.043,
+          "asr_text": "",
+          "asr_rtf": 0.1465,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "multi_sentence",
+          "conditions": [
+            "连续多句"
+          ],
+          "audio_dur_s": 4.2,
+          "gt_segments": [
+            [
+              0,
+              1
+            ],
+            [
+              1.4,
+              2.4
+            ],
+            [
+              2.8,
+              3.8
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              4.2
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 3,
+            "p": 0.0,
+            "r": 0.0,
+            "f1": 0,
+            "over": 0,
+            "under": 3,
+            "miss": 3,
+            "correct": 0,
+            "n_gt": 3,
+            "n_det": 1
+          },
+          "vad_time_s": 0.066,
+          "asr_text": "",
+          "asr_rtf": 0.1341,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_noise",
+          "conditions": [
+            "纯噪声"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.05,
+          "asr_text": "",
+          "asr_rtf": 0.1336,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_silence",
+          "conditions": [
+            "纯静默"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.047,
+          "asr_text": "",
+          "asr_rtf": 0.1309,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "real_0.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              10.045
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 5.045,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.159,
+          "asr_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.1583,
+          "asr_first_partial_s": 0.164,
+          "asr_first_final_s": 1.591,
+          "mem_mb": 743.5,
+          "asr_note": ""
+        },
+        {
+          "item": "real_1.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 5.1,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              5.095
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.095,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.086,
+          "asr_text": "这是第一种第二种叫嗯与alwaysalways什么意思啊",
+          "asr_rtf": 0.1595,
+          "asr_first_partial_s": 0.248,
+          "asr_first_final_s": 0.813,
+          "mem_mb": 743.8,
+          "asr_note": ""
+        },
+        {
+          "item": "real_2.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 4.69,
+          "gt_segments": [
+            [
+              0,
+              4.69
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              4.685
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.005,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.085,
+          "asr_text": "这个是平繁的啊仍然是接下来fre@@qu@@en@@tly频繁的",
+          "asr_rtf": 0.1741,
+          "asr_first_partial_s": 0.085,
+          "asr_first_final_s": 0.816,
+          "mem_mb": 743.8,
+          "asr_note": ""
+        },
+        {
+          "item": "real_3.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 8.83,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              8.8
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 3.8,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.145,
+          "asr_text": "给一句是什么时代加了es是一般现在是对后面的是材一些商",
+          "asr_rtf": 0.1635,
+          "asr_first_partial_s": 0.172,
+          "asr_first_final_s": 1.444,
+          "mem_mb": 743.8,
+          "asr_note": ""
+        },
+        {
+          "item": "real_asr_example.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              10.045
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 5.045,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.154,
+          "asr_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.1677,
+          "asr_first_partial_s": 0.159,
+          "asr_first_final_s": 1.686,
+          "mem_mb": 743.8,
+          "asr_note": ""
+        }
+      ]
+    },
+    "C": {
+      "status": "MEASURED",
+      "results": [
+        {
+          "item": "clean_near_field",
+          "conditions": [
+            "安静近讲"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.29
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.145,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 2,
+            "n_gt": 2,
+            "n_det": 2
+          },
+          "vad_time_s": 0.002,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0643,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.225,
+          "mem_mb": 747.2,
+          "asr_note": ""
+        },
+        {
+          "item": "far_field",
+          "conditions": [
+            "远场"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.29
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.145,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 2,
+            "n_gt": 2,
+            "n_det": 2
+          },
+          "vad_time_s": 0.005,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0638,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.223,
+          "mem_mb": 747.9,
+          "asr_note": ""
+        },
+        {
+          "item": "fan_ac_bg",
+          "conditions": [
+            "风扇/空调"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.5,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.003,
+          "asr_text": "没有没有没有没有没有异议",
+          "asr_rtf": 0.0671,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.235,
+          "mem_mb": 748.5,
+          "asr_note": ""
+        },
+        {
+          "item": "keyboard",
+          "conditions": [
+            "键盘"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.29
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.145,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 2,
+            "n_gt": 2,
+            "n_det": 2
+          },
+          "vad_time_s": 0.003,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0671,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.235,
+          "mem_mb": 748.9,
+          "asr_note": ""
+        },
+        {
+          "item": "music_bg",
+          "conditions": [
+            "音乐/视频"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              3.5
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.5,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.003,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.065,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.227,
+          "mem_mb": 749.0,
+          "asr_note": ""
+        },
+        {
+          "item": "short_word",
+          "conditions": [
+            "短词"
+          ],
+          "audio_dur_s": 0.7,
+          "gt_segments": [
+            [
+              0,
+              0.3
+            ]
+          ],
+          "det_segments": [],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 0,
+            "fr": 1,
+            "p": 0,
+            "r": 0.0,
+            "f1": 0,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 0,
+            "n_gt": 1,
+            "n_det": 0
+          },
+          "vad_time_s": 0.001,
+          "asr_text": "",
+          "asr_rtf": 0.0838,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.059,
+          "mem_mb": 749.0,
+          "asr_note": ""
+        },
+        {
+          "item": "long_sentence",
+          "conditions": [
+            "长句"
+          ],
+          "audio_dur_s": 5.5,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              5.29
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.29,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.005,
+          "asr_text": "the",
+          "asr_rtf": 0.0621,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.342,
+          "mem_mb": 749.7,
+          "asr_note": ""
+        },
+        {
+          "item": "mid_pause",
+          "conditions": [
+            "句中停顿"
+          ],
+          "audio_dur_s": 2.7,
+          "gt_segments": [
+            [
+              0,
+              2.2
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              2.49
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.29,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0649,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.175,
+          "mem_mb": 749.7,
+          "asr_note": ""
+        },
+        {
+          "item": "multi_sentence",
+          "conditions": [
+            "连续多句"
+          ],
+          "audio_dur_s": 4.2,
+          "gt_segments": [
+            [
+              0,
+              1
+            ],
+            [
+              1.4,
+              2.4
+            ],
+            [
+              2.8,
+              3.8
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              1.29
+            ],
+            [
+              1.4,
+              2.69
+            ],
+            [
+              2.8,
+              4.09
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.29,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 3,
+            "n_gt": 3,
+            "n_det": 3
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "嗯嗯嗯",
+          "asr_rtf": 0.0633,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.266,
+          "mem_mb": 750.2,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_noise",
+          "conditions": [
+            "纯噪声"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0.0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "没有没有没有没有没有",
+          "asr_rtf": 0.0674,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.202,
+          "mem_mb": 750.2,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_silence",
+          "conditions": [
+            "纯静默"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [],
+          "vad_eval": {
+            "onset_s": 0,
+            "endpoint_s": 0,
+            "fa": 0,
+            "fr": 0,
+            "p": 1,
+            "r": 1,
+            "f1": 1,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 0
+          },
+          "vad_time_s": 0.002,
+          "asr_text": "没有没有没有没有异有",
+          "asr_rtf": 0.0659,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.198,
+          "mem_mb": 750.2,
+          "asr_note": ""
+        },
+        {
+          "item": "real_0.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.65,
+              2.55
+            ],
+            [
+              3.8,
+              5.18
+            ],
+            [
+              6.56,
+              8.56
+            ],
+            [
+              8.74,
+              10.053125
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.65,
+            "endpoint_s": 2.45,
+            "fa": 3,
+            "fr": 0,
+            "p": 0.25,
+            "r": 1.0,
+            "f1": 0.4,
+            "over": 1,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 4
+          },
+          "vad_time_s": 0.009,
+          "asr_text": "昨天是mon@@daytodayis礼拜二thedayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.063,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.633,
+          "mem_mb": 753.4,
+          "asr_note": ""
+        },
+        {
+          "item": "real_1.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 5.1,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.81,
+              5.1
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.81,
+            "endpoint_s": 0.1,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.004,
+          "asr_text": "好这是第一种第二种叫嗯与alwaysalways什么意思啊",
+          "asr_rtf": 0.0661,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.337,
+          "mem_mb": 754.4,
+          "asr_note": ""
+        },
+        {
+          "item": "real_2.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 4.69,
+          "gt_segments": [
+            [
+              0,
+              4.69
+            ]
+          ],
+          "det_segments": [
+            [
+              0.0,
+              4.31
+            ],
+            [
+              4.45,
+              4.69
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.38,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.5,
+            "r": 1.0,
+            "f1": 0.667,
+            "over": 1,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 2
+          },
+          "vad_time_s": 0.005,
+          "asr_text": "这个是频繁的啊当然是接下来fre@@qu@@ent里频繁的",
+          "asr_rtf": 0.0659,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.309,
+          "mem_mb": 754.4,
+          "asr_note": ""
+        },
+        {
+          "item": "real_3.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 8.83,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.64,
+              5.89
+            ],
+            [
+              8.59,
+              8.83
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.64,
+            "endpoint_s": 0.89,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.5,
+            "r": 1.0,
+            "f1": 0.667,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 2
+          },
+          "vad_time_s": 0.008,
+          "asr_text": "第一句是个什么时态加了yes是一般现代式对然后把它时态写商品",
+          "asr_rtf": 0.0657,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.58,
+          "mem_mb": 754.1,
+          "asr_note": ""
+        },
+        {
+          "item": "real_asr_example.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0.65,
+              2.55
+            ],
+            [
+              3.8,
+              5.18
+            ],
+            [
+              6.56,
+              8.56
+            ],
+            [
+              8.74,
+              10.053125
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.65,
+            "endpoint_s": 2.45,
+            "fa": 3,
+            "fr": 0,
+            "p": 0.25,
+            "r": 1.0,
+            "f1": 0.4,
+            "over": 1,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 4
+          },
+          "vad_time_s": 0.01,
+          "asr_text": "昨天是mon@@daytodayis礼拜二thedayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.0631,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.634,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        }
+      ]
+    },
+    "D": {
+      "status": "MEASURED",
+      "results": [
+        {
+          "item": "clean_near_field",
+          "conditions": [
+            "安静近讲"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.055,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0612,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.214,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "far_field",
+          "conditions": [
+            "远场"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.053,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0619,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.217,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "fan_ac_bg",
+          "conditions": [
+            "风扇/空调"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.051,
+          "asr_text": "没有没有没有没有没有异议",
+          "asr_rtf": 0.065,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.228,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "keyboard",
+          "conditions": [
+            "键盘"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.055,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.062,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.217,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "music_bg",
+          "conditions": [
+            "音乐/视频"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.053,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0617,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.216,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "short_word",
+          "conditions": [
+            "短词"
+          ],
+          "audio_dur_s": 0.7,
+          "gt_segments": [
+            [
+              0,
+              0.3
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              0.695
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.395,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.012,
+          "asr_text": "",
+          "asr_rtf": 0.08,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.056,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "long_sentence",
+          "conditions": [
+            "长句"
+          ],
+          "audio_dur_s": 5.5,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              5.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.495,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.088,
+          "asr_text": "the",
+          "asr_rtf": 0.0618,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.34,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "mid_pause",
+          "conditions": [
+            "句中停顿"
+          ],
+          "audio_dur_s": 2.7,
+          "gt_segments": [
+            [
+              0,
+              2.2
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              2.695
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.495,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.045,
+          "asr_text": "嗯嗯",
+          "asr_rtf": 0.0626,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.169,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "multi_sentence",
+          "conditions": [
+            "连续多句"
+          ],
+          "audio_dur_s": 4.2,
+          "gt_segments": [
+            [
+              0,
+              1
+            ],
+            [
+              1.4,
+              2.4
+            ],
+            [
+              2.8,
+              3.8
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              4.2
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 3,
+            "p": 0.0,
+            "r": 0.0,
+            "f1": 0,
+            "over": 0,
+            "under": 3,
+            "miss": 3,
+            "correct": 0,
+            "n_gt": 3,
+            "n_det": 1
+          },
+          "vad_time_s": 0.062,
+          "asr_text": "嗯嗯嗯",
+          "asr_rtf": 0.0608,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.255,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_noise",
+          "conditions": [
+            "纯噪声"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.049,
+          "asr_text": "没有没有没有没有没有",
+          "asr_rtf": 0.0677,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.203,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_silence",
+          "conditions": [
+            "纯静默"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.048,
+          "asr_text": "没有没有没有没有异有",
+          "asr_rtf": 0.0643,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.193,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "real_0.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              10.045
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 5.045,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.157,
+          "asr_text": "昨天是mon@@daytodayis礼拜二thedayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.0624,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.627,
+          "mem_mb": 756.2,
+          "asr_note": ""
+        },
+        {
+          "item": "real_1.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 5.1,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              5.095
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.095,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.081,
+          "asr_text": "好这是第一种第二种叫嗯与alwaysalways什么意思啊",
+          "asr_rtf": 0.0646,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.329,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_2.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 4.69,
+          "gt_segments": [
+            [
+              0,
+              4.69
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              4.685
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.005,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.077,
+          "asr_text": "这个是频繁的啊当然是接下来fre@@qu@@ent里频繁的",
+          "asr_rtf": 0.067,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.314,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_3.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 8.83,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              8.8
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 3.8,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.143,
+          "asr_text": "第一句是个什么时态加了yes是一般现代式对然后把它时态写商品",
+          "asr_rtf": 0.0655,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.579,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_asr_example.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              10.045
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 5.045,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.166,
+          "asr_text": "昨天是mon@@daytodayis礼拜二thedayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.0624,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": 0.628,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        }
+      ]
+    },
+    "E": {
+      "status": "NOT_AVAILABLE",
+      "reason": "SenseVoice ONNX model not downloaded"
+    },
+    "F": {
+      "status": "MEASURED",
+      "results": [
+        {
+          "item": "clean_near_field",
+          "conditions": [
+            "安静近讲"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.067,
+          "asr_text": "",
+          "asr_rtf": 0.1348,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "far_field",
+          "conditions": [
+            "远场"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.057,
+          "asr_text": "",
+          "asr_rtf": 0.1366,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "fan_ac_bg",
+          "conditions": [
+            "风扇/空调"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.056,
+          "asr_text": "",
+          "asr_rtf": 0.1345,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "keyboard",
+          "conditions": [
+            "键盘"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.065,
+          "asr_text": "",
+          "asr_rtf": 0.1361,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "music_bg",
+          "conditions": [
+            "音乐/视频"
+          ],
+          "audio_dur_s": 3.5,
+          "gt_segments": [
+            [
+              0,
+              2
+            ],
+            [
+              2.5,
+              3.5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              3.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 1.495,
+            "fa": 0,
+            "fr": 1,
+            "p": 1.0,
+            "r": 0.5,
+            "f1": 0.667,
+            "over": 0,
+            "under": 1,
+            "miss": 1,
+            "correct": 1,
+            "n_gt": 2,
+            "n_det": 1
+          },
+          "vad_time_s": 0.053,
+          "asr_text": "",
+          "asr_rtf": 0.133,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "short_word",
+          "conditions": [
+            "短词"
+          ],
+          "audio_dur_s": 0.7,
+          "gt_segments": [
+            [
+              0,
+              0.3
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              0.695
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.395,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.011,
+          "asr_text": "",
+          "asr_rtf": 0.2149,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "long_sentence",
+          "conditions": [
+            "长句"
+          ],
+          "audio_dur_s": 5.5,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              5.495
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.495,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.093,
+          "asr_text": "",
+          "asr_rtf": 0.1481,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "mid_pause",
+          "conditions": [
+            "句中停顿"
+          ],
+          "audio_dur_s": 2.7,
+          "gt_segments": [
+            [
+              0,
+              2.2
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              2.695
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.495,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.042,
+          "asr_text": "",
+          "asr_rtf": 0.1444,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "multi_sentence",
+          "conditions": [
+            "连续多句"
+          ],
+          "audio_dur_s": 4.2,
+          "gt_segments": [
+            [
+              0,
+              1
+            ],
+            [
+              1.4,
+              2.4
+            ],
+            [
+              2.8,
+              3.8
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              4.2
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 3,
+            "p": 0.0,
+            "r": 0.0,
+            "f1": 0,
+            "over": 0,
+            "under": 3,
+            "miss": 3,
+            "correct": 0,
+            "n_gt": 3,
+            "n_det": 1
+          },
+          "vad_time_s": 0.063,
+          "asr_text": "",
+          "asr_rtf": 0.1319,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_noise",
+          "conditions": [
+            "纯噪声"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.046,
+          "asr_text": "",
+          "asr_rtf": 0.1304,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "pure_silence",
+          "conditions": [
+            "纯静默"
+          ],
+          "audio_dur_s": 3.0,
+          "gt_segments": [],
+          "det_segments": [
+            [
+              0,
+              3.0
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": null,
+            "endpoint_s": null,
+            "fa": 1,
+            "fr": 0,
+            "p": 0.0,
+            "r": 0,
+            "f1": 0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 0,
+            "n_gt": 0,
+            "n_det": 1
+          },
+          "vad_time_s": 0.049,
+          "asr_text": "",
+          "asr_rtf": 0.1316,
+          "asr_first_partial_s": null,
+          "asr_first_final_s": null,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_0.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              10.045
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 5.045,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.152,
+          "asr_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.1555,
+          "asr_first_partial_s": 0.163,
+          "asr_first_final_s": 1.564,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_1.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 5.1,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              5.095
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.095,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.082,
+          "asr_text": "这是第一种第二种叫嗯与alwaysalways什么意思啊",
+          "asr_rtf": 0.1582,
+          "asr_first_partial_s": 0.244,
+          "asr_first_final_s": 0.807,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_2.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 4.69,
+          "gt_segments": [
+            [
+              0,
+              4.69
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              4.685
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 0.005,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.071,
+          "asr_text": "这个是平繁的啊仍然是接下来fre@@qu@@en@@tly频繁的",
+          "asr_rtf": 0.158,
+          "asr_first_partial_s": 0.082,
+          "asr_first_final_s": 0.741,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_3.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 8.83,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              8.8
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 3.8,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.149,
+          "asr_text": "给一句是什么时代加了es是一般现在是对后面的是材一些商",
+          "asr_rtf": 0.1627,
+          "asr_first_partial_s": 0.168,
+          "asr_first_final_s": 1.436,
+          "mem_mb": 756.7,
+          "asr_note": ""
+        },
+        {
+          "item": "real_asr_example.wav",
+          "conditions": [
+            "真实音频"
+          ],
+          "audio_dur_s": 10.053,
+          "gt_segments": [
+            [
+              0,
+              5
+            ]
+          ],
+          "det_segments": [
+            [
+              0,
+              10.045
+            ]
+          ],
+          "vad_eval": {
+            "onset_s": 0.0,
+            "endpoint_s": 5.045,
+            "fa": 0,
+            "fr": 0,
+            "p": 1.0,
+            "r": 1.0,
+            "f1": 1.0,
+            "over": 0,
+            "under": 0,
+            "miss": 0,
+            "correct": 1,
+            "n_gt": 1,
+            "n_det": 1
+          },
+          "vad_time_s": 0.165,
+          "asr_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+          "asr_rtf": 0.1675,
+          "asr_first_partial_s": 0.169,
+          "asr_first_final_s": 1.684,
+          "mem_mb": 756.6,
+          "asr_note": ""
+        }
+      ]
+    }
+  },
+  "aggregate": {
+    "A": {
+      "vad_precision": 0.719,
+      "vad_recall": 0.812,
+      "vad_f1": 0.717,
+      "vad_total_fa": 9,
+      "vad_total_fr": 3,
+      "asr_rtf_avg": 0.2223,
+      "asr_rtf_p95": 0.412,
+      "asr_first_partial_avg_s": 0.187,
+      "n_items": 16
+    },
+    "B": {
+      "vad_precision": 0.812,
+      "vad_recall": 0.656,
+      "vad_f1": 0.708,
+      "vad_total_fa": 3,
+      "vad_total_fr": 8,
+      "asr_rtf_avg": 0.1602,
+      "asr_rtf_p95": 0.1963,
+      "asr_first_partial_avg_s": 0.166,
+      "n_items": 16
+    },
+    "C": {
+      "vad_precision": 0.719,
+      "vad_recall": 0.812,
+      "vad_f1": 0.717,
+      "vad_total_fa": 9,
+      "vad_total_fr": 3,
+      "asr_rtf_avg": 0.0662,
+      "asr_rtf_p95": 0.0715,
+      "asr_first_partial_avg_s": null,
+      "n_items": 16
+    },
+    "D": {
+      "vad_precision": 0.812,
+      "vad_recall": 0.656,
+      "vad_f1": 0.708,
+      "vad_total_fa": 3,
+      "vad_total_fr": 8,
+      "asr_rtf_avg": 0.0644,
+      "asr_rtf_p95": 0.0708,
+      "asr_first_partial_avg_s": null,
+      "n_items": 16
+    },
+    "E": {
+      "status": "NOT_AVAILABLE"
+    },
+    "F": {
+      "vad_precision": 0.812,
+      "vad_recall": 0.656,
+      "vad_f1": 0.708,
+      "vad_total_fa": 3,
+      "vad_total_fr": 8,
+      "asr_rtf_avg": 0.1486,
+      "asr_rtf_p95": 0.1794,
+      "asr_first_partial_avg_s": 0.165,
+      "n_items": 16
+    }
+  }
+}

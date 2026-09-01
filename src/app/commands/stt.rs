@@ -595,8 +595,10 @@ mod tests {
     #[test]
     fn normalize_noop_when_no_selection() {
         // 未选择模型 → 不做任何规范化
-        let mut config = SttConfig::default();
-        config.streaming_mode = StreamingMode::Pseudo;
+        let mut config = SttConfig {
+            streaming_mode: StreamingMode::Pseudo,
+            ..Default::default()
+        };
 
         normalize_config_against_model_capabilities(&mut config);
 

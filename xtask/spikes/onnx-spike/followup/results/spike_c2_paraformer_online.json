@@ -1,0 +1,2030 @@
+{
+  "spike": "C2_paraformer_online_oracle",
+  "status": "GO",
+  "model": {
+    "encoder": "d:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\paraformer-online-onnx\\encoder.onnx",
+    "decoder": "d:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\paraformer-online-onnx\\decoder.onnx",
+    "am_mvn": "d:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\paraformer-online-onnx\\am.mvn",
+    "config": "d:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\paraformer-online-onnx\\config.yaml",
+    "tokens": "d:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\..\\models\\paraformer-online-onnx\\tokens.json"
+  },
+  "audio": {
+    "duration_s": 10.053125,
+    "sample_rate": 16000,
+    "samples": 160850
+  },
+  "chunk_params": {
+    "chunk_size": [
+      5,
+      10,
+      5
+    ],
+    "chunk_stride_samples": 9600,
+    "chunk_stride_ms": 600.0,
+    "n_chunks": 17,
+    "lfr_m": 7,
+    "lfr_n": 6,
+    "encoder_size": 512,
+    "fsmn_layers": 16,
+    "cif_threshold": 1.0
+  },
+  "streaming_results": {
+    "total_streaming_s": 4.096,
+    "rtf": 0.4074,
+    "first_nonempty_partial_latency_s": 2.575,
+    "final_text": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+    "n_partial_texts": 12,
+    "peak_mem_mb": 471.9,
+    "model_load_time_s": 2.395,
+    "model_load_mem_delta_mb": 279.7
+  },
+  "chunk_logs": [
+    {
+      "inference_ms": 71.1,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          19,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          19
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          0,
+          512
+        ]
+      },
+      "num_frames": 19,
+      "enc_out_shape": [
+        1,
+        19,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        19
+      ],
+      "list_frame_count": 0,
+      "chunk_index": 0,
+      "audio_timestamp_s": 0.0,
+      "audio_duration_s": 0.6,
+      "partial_text": "",
+      "is_final": false,
+      "total_chunk_ms": 2486.64
+    },
+    {
+      "inference_ms": 86.32,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          1,
+          512
+        ],
+        "logits_shape": [
+          1,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 1,
+      "chunk_index": 1,
+      "audio_timestamp_s": 0.6,
+      "audio_duration_s": 0.6,
+      "partial_text": "昨",
+      "is_final": false,
+      "total_chunk_ms": 88.83
+    },
+    {
+      "inference_ms": 81.9,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          1,
+          512
+        ],
+        "logits_shape": [
+          1,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 1,
+      "chunk_index": 2,
+      "audio_timestamp_s": 1.2,
+      "audio_duration_s": 0.6,
+      "partial_text": "天",
+      "is_final": false,
+      "total_chunk_ms": 84.05
+    },
+    {
+      "inference_ms": 88.11,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          2,
+          512
+        ],
+        "logits_shape": [
+          2,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 2,
+      "chunk_index": 3,
+      "audio_timestamp_s": 1.8,
+      "audio_duration_s": 0.6,
+      "partial_text": "是mon@@",
+      "is_final": false,
+      "total_chunk_ms": 90.11
+    },
+    {
+      "inference_ms": 85.81,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          1,
+          512
+        ],
+        "logits_shape": [
+          1,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 1,
+      "chunk_index": 4,
+      "audio_timestamp_s": 2.4,
+      "audio_duration_s": 0.6,
+      "partial_text": "day",
+      "is_final": false,
+      "total_chunk_ms": 87.32
+    },
+    {
+      "inference_ms": 77.05,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          0,
+          512
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 0,
+      "chunk_index": 5,
+      "audio_timestamp_s": 3.0,
+      "audio_duration_s": 0.6,
+      "partial_text": "",
+      "is_final": false,
+      "total_chunk_ms": 79.15
+    },
+    {
+      "inference_ms": 76.6,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          19,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          19
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          0,
+          512
+        ]
+      },
+      "num_frames": 19,
+      "enc_out_shape": [
+        1,
+        19,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        19
+      ],
+      "list_frame_count": 0,
+      "chunk_index": 6,
+      "audio_timestamp_s": 3.6,
+      "audio_duration_s": 0.6,
+      "partial_text": "",
+      "is_final": false,
+      "total_chunk_ms": 79.1
+    },
+    {
+      "inference_ms": 124.42,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          1,
+          512
+        ],
+        "logits_shape": [
+          1,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 1,
+      "chunk_index": 7,
+      "audio_timestamp_s": 4.2,
+      "audio_duration_s": 0.6,
+      "partial_text": "today",
+      "is_final": false,
+      "total_chunk_ms": 126.93
+    },
+    {
+      "inference_ms": 142.32,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          1,
+          512
+        ],
+        "logits_shape": [
+          1,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 1,
+      "chunk_index": 8,
+      "audio_timestamp_s": 4.8,
+      "audio_duration_s": 0.6,
+      "partial_text": "day",
+      "is_final": false,
+      "total_chunk_ms": 145.9
+    },
+    {
+      "inference_ms": 121.22,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          3,
+          512
+        ],
+        "logits_shape": [
+          3,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 3,
+      "chunk_index": 9,
+      "audio_timestamp_s": 5.4,
+      "audio_duration_s": 0.6,
+      "partial_text": "is礼拜",
+      "is_final": false,
+      "total_chunk_ms": 124.75
+    },
+    {
+      "inference_ms": 91.85,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          0,
+          512
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 0,
+      "chunk_index": 10,
+      "audio_timestamp_s": 6.0,
+      "audio_duration_s": 0.6,
+      "partial_text": "",
+      "is_final": false,
+      "total_chunk_ms": 94.05
+    },
+    {
+      "inference_ms": 91.07,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          0,
+          512
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 0,
+      "chunk_index": 11,
+      "audio_timestamp_s": 6.6,
+      "audio_duration_s": 0.6,
+      "partial_text": "",
+      "is_final": false,
+      "total_chunk_ms": 93.22
+    },
+    {
+      "inference_ms": 98.19,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          19,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          19
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          2,
+          512
+        ],
+        "logits_shape": [
+          2,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 19,
+      "enc_out_shape": [
+        1,
+        19,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        19
+      ],
+      "list_frame_count": 2,
+      "chunk_index": 12,
+      "audio_timestamp_s": 7.2,
+      "audio_duration_s": 0.6,
+      "partial_text": "dayafter",
+      "is_final": false,
+      "total_chunk_ms": 100.96
+    },
+    {
+      "inference_ms": 101.3,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          2,
+          512
+        ],
+        "logits_shape": [
+          2,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 2,
+      "chunk_index": 13,
+      "audio_timestamp_s": 7.8,
+      "audio_duration_s": 0.6,
+      "partial_text": "tom@@or@@",
+      "is_final": false,
+      "total_chunk_ms": 103.37
+    },
+    {
+      "inference_ms": 97.67,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          1,
+          512
+        ],
+        "logits_shape": [
+          1,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 1,
+      "chunk_index": 14,
+      "audio_timestamp_s": 8.4,
+      "audio_duration_s": 0.6,
+      "partial_text": "row",
+      "is_final": false,
+      "total_chunk_ms": 99.78
+    },
+    {
+      "inference_ms": 100.66,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          2,
+          512
+        ],
+        "logits_shape": [
+          2,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 2,
+      "chunk_index": 15,
+      "audio_timestamp_s": 9.0,
+      "audio_duration_s": 0.6,
+      "partial_text": "是星",
+      "is_final": false,
+      "total_chunk_ms": 103.33
+    },
+    {
+      "inference_ms": 106.33,
+      "cache_shapes": {
+        "enc_shape": [
+          1,
+          20,
+          512
+        ],
+        "alphas_shape": [
+          1,
+          20
+        ],
+        "hidden_cache_shape": [
+          1,
+          512
+        ],
+        "alphas_cache_shape": [
+          1
+        ],
+        "list_frame_shape": [
+          2,
+          512
+        ],
+        "logits_shape": [
+          2,
+          8404
+        ],
+        "decoder_cache_shapes": [
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ],
+          [
+            1,
+            512,
+            10
+          ]
+        ]
+      },
+      "num_frames": 20,
+      "enc_out_shape": [
+        1,
+        20,
+        512
+      ],
+      "alphas_out_shape": [
+        1,
+        20
+      ],
+      "list_frame_count": 2,
+      "chunk_index": 16,
+      "audio_timestamp_s": 9.6,
+      "audio_duration_s": 0.453,
+      "partial_text": "期三",
+      "is_final": true,
+      "total_chunk_ms": 108.48
+    }
+  ],
+  "reset_test": {
+    "iterations": 20,
+    "consistent": true,
+    "sample_results": [
+      "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+      "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+      "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三"
+    ]
+  },
+  "cancel_test": {
+    "cancelled_after_chunks": 5,
+    "result_after_reset": "昨天是mon@@daytodaydayis礼拜dayaftertom@@or@@row是星期三",
+    "matches_original": true
+  },
+  "encoder_io": {
+    "inputs": [
+      {
+        "name": "speech",
+        "shape": "['batch_size', 'feats_length', 560]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "speech_lengths",
+        "shape": "['batch_size']",
+        "type": "tensor(int32)"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "enc",
+        "shape": "['batch_size', 'feats_length', 512]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "enc_len",
+        "shape": "['batch_size']",
+        "type": "tensor(int32)"
+      },
+      {
+        "name": "alphas",
+        "shape": "['batch_size', 'feats_length']",
+        "type": "tensor(float)"
+      }
+    ]
+  },
+  "decoder_io": {
+    "inputs": [
+      {
+        "name": "enc",
+        "shape": "['batch_size', 'enc_length', 512]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "enc_len",
+        "shape": "['batch_size']",
+        "type": "tensor(int32)"
+      },
+      {
+        "name": "acoustic_embeds",
+        "shape": "['batch_size', 'token_length', 512]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "acoustic_embeds_len",
+        "shape": "['batch_size']",
+        "type": "tensor(int32)"
+      },
+      {
+        "name": "in_cache_0",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_1",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_2",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_3",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_4",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_5",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_6",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_7",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_8",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_9",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_10",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_11",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_12",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_13",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_14",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "in_cache_15",
+        "shape": "['batch_size', 512, 10]",
+        "type": "tensor(float)"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "logits",
+        "shape": "['Addlogits_dim_0', 'Addlogits_dim_1', 8404]",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "sample_ids",
+        "shape": "['ArgMaxsample_ids_dim_0', 'ArgMaxsample_ids_dim_1']",
+        "type": "tensor(int64)"
+      },
+      {
+        "name": "out_cache_0",
+        "shape": "['batch_size', 512, 'Sliceout_cache_0_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_1",
+        "shape": "['batch_size', 512, 'Sliceout_cache_1_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_2",
+        "shape": "['batch_size', 512, 'Sliceout_cache_2_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_3",
+        "shape": "['batch_size', 512, 'Sliceout_cache_3_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_4",
+        "shape": "['batch_size', 512, 'Sliceout_cache_4_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_5",
+        "shape": "['batch_size', 512, 'Sliceout_cache_5_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_6",
+        "shape": "['batch_size', 512, 'Sliceout_cache_6_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_7",
+        "shape": "['batch_size', 512, 'Sliceout_cache_7_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_8",
+        "shape": "['batch_size', 512, 'Sliceout_cache_8_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_9",
+        "shape": "['batch_size', 512, 'Sliceout_cache_9_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_10",
+        "shape": "['batch_size', 512, 'Sliceout_cache_10_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_11",
+        "shape": "['batch_size', 512, 'Sliceout_cache_11_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_12",
+        "shape": "['batch_size', 512, 'Sliceout_cache_12_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_13",
+        "shape": "['batch_size', 512, 'Sliceout_cache_13_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_14",
+        "shape": "['batch_size', 512, 'Sliceout_cache_14_dim_2']",
+        "type": "tensor(float)"
+      },
+      {
+        "name": "out_cache_15",
+        "shape": "['batch_size', 512, 'Sliceout_cache_15_dim_2']",
+        "type": "tensor(float)"
+      }
+    ]
+  }
+}

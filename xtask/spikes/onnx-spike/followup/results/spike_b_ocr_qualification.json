@@ -1,0 +1,793 @@
+{
+  "spike": "B_ocr_qualification",
+  "timestamp": "unix:1788270748",
+  "corpus_items": 22,
+  "ocr_engine": "oar-ocr 0.9.2 + PP-OCRv6 Tiny ONNX",
+  "ocr_results": [
+    {
+      "image": "chinese/basic-1.png",
+      "subset": "chinese",
+      "language": "zh",
+      "orientation": "horizontal",
+      "expected": "你好世界\n这是测试文本",
+      "actual": "你好世界\n这是测试文本",
+      "cer": 0.0,
+      "regions_count": 2,
+      "word_boxes_count": 10,
+      "bbox_valid": true,
+      "bbox_x_min": 12.0,
+      "bbox_y_min": 20.0,
+      "bbox_x_max": 193.0,
+      "bbox_y_max": 101.0,
+      "image_width": 400,
+      "image_height": 120,
+      "recognition_time_ms": 36.3611,
+      "error": null
+    },
+    {
+      "image": "chinese/basic-2.png",
+      "subset": "chinese",
+      "language": "zh",
+      "orientation": "horizontal",
+      "expected": "欢迎使用Blink启动器",
+      "actual": "欢迎使用Blink启动器",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 12,
+      "bbox_valid": true,
+      "bbox_x_min": 16.0,
+      "bbox_y_min": 18.0,
+      "bbox_x_max": 245.0,
+      "bbox_y_max": 48.0,
+      "image_width": 400,
+      "image_height": 60,
+      "recognition_time_ms": 19.8743,
+      "error": null
+    },
+    {
+      "image": "chinese/basic-3.png",
+      "subset": "chinese",
+      "language": "zh",
+      "orientation": "horizontal",
+      "expected": "设置\n系统\n关于\n帮助",
+      "actual": "设置\n系统\n关于\n帮助",
+      "cer": 0.0,
+      "regions_count": 4,
+      "word_boxes_count": 8,
+      "bbox_valid": true,
+      "bbox_x_min": 11.0,
+      "bbox_y_min": 12.0,
+      "bbox_x_max": 71.0,
+      "bbox_y_max": 153.0,
+      "image_width": 200,
+      "image_height": 160,
+      "recognition_time_ms": 43.6479,
+      "error": null
+    },
+    {
+      "image": "english/basic-1.png",
+      "subset": "english",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "Hello World\nThis is a test",
+      "actual": "Hello World\nThis is a test",
+      "cer": 0.0,
+      "regions_count": 2,
+      "word_boxes_count": 25,
+      "bbox_valid": true,
+      "bbox_x_min": 14.0,
+      "bbox_y_min": 15.0,
+      "bbox_x_max": 234.0,
+      "bbox_y_max": 87.0,
+      "image_width": 400,
+      "image_height": 120,
+      "recognition_time_ms": 32.9222,
+      "error": null
+    },
+    {
+      "image": "english/basic-2.png",
+      "subset": "english",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "Settings System About Help",
+      "actual": "Settings System About Help",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 26,
+      "bbox_valid": true,
+      "bbox_x_min": 13.0,
+      "bbox_y_min": 8.0,
+      "bbox_x_max": 362.0,
+      "bbox_y_max": 44.0,
+      "image_width": 400,
+      "image_height": 60,
+      "recognition_time_ms": 20.783900000000003,
+      "error": null
+    },
+    {
+      "image": "english/basic-3.png",
+      "subset": "english",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "The quick brown fox jumps over the lazy dog",
+      "actual": "The quick brown fox jumps over the lazy dog",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 43,
+      "bbox_valid": true,
+      "bbox_x_min": 2.0,
+      "bbox_y_min": 5.0,
+      "bbox_x_max": 491.0,
+      "bbox_y_max": 37.0,
+      "image_width": 500,
+      "image_height": 50,
+      "recognition_time_ms": 30.1504,
+      "error": null
+    },
+    {
+      "image": "japanese/basic-1.png",
+      "subset": "japanese",
+      "language": "ja",
+      "orientation": "horizontal",
+      "expected": "こんにちは世界\nこれはテストです",
+      "actual": "二hl仁方仗世界\n二九仗于又卜飞寸",
+      "cer": 0.875,
+      "regions_count": 2,
+      "word_boxes_count": 16,
+      "bbox_valid": true,
+      "bbox_x_min": 15.0,
+      "bbox_y_min": 21.0,
+      "bbox_x_max": 248.0,
+      "bbox_y_max": 101.0,
+      "image_width": 400,
+      "image_height": 120,
+      "recognition_time_ms": 29.233999999999998,
+      "error": null
+    },
+    {
+      "image": "japanese/basic-2.png",
+      "subset": "japanese",
+      "language": "ja",
+      "orientation": "horizontal",
+      "expected": "設定\nシステム\nバージョン",
+      "actual": "設定\n入于人\n八-沙∃之",
+      "cer": 0.6923076923076923,
+      "regions_count": 3,
+      "word_boxes_count": 10,
+      "bbox_valid": true,
+      "bbox_x_min": 10.0,
+      "bbox_y_min": 10.0,
+      "bbox_x_max": 135.0,
+      "bbox_y_max": 118.0,
+      "image_width": 200,
+      "image_height": 160,
+      "recognition_time_ms": 33.67959999999999,
+      "error": null
+    },
+    {
+      "image": "mixed/cjk-en-1.png",
+      "subset": "mixed",
+      "language": "zh+en",
+      "orientation": "horizontal",
+      "expected": "温度25度\n湿度60%",
+      "actual": "温度25度\n湿度60%",
+      "cer": 0.0,
+      "regions_count": 2,
+      "word_boxes_count": 10,
+      "bbox_valid": true,
+      "bbox_x_min": 12.0,
+      "bbox_y_min": 19.0,
+      "bbox_x_max": 127.0,
+      "bbox_y_max": 96.0,
+      "image_width": 300,
+      "image_height": 120,
+      "recognition_time_ms": 31.0066,
+      "error": null
+    },
+    {
+      "image": "mixed/cjk-en-2.png",
+      "subset": "mixed",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "API key: abc123",
+      "actual": "API key: abc123",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 15,
+      "bbox_valid": true,
+      "bbox_x_min": 13.0,
+      "bbox_y_min": 10.0,
+      "bbox_x_max": 204.0,
+      "bbox_y_max": 40.0,
+      "image_width": 400,
+      "image_height": 60,
+      "recognition_time_ms": 16.4876,
+      "error": null
+    },
+    {
+      "image": "vertical/vert-1.png",
+      "subset": "vertical",
+      "language": "ja",
+      "orientation": "vertical",
+      "expected": "縦書き\nテスト\n日本語",
+      "actual": "日于維\n本又書\n語卜老",
+      "cer": 0.8181818181818182,
+      "regions_count": 3,
+      "word_boxes_count": 9,
+      "bbox_valid": true,
+      "bbox_x_min": 21.0,
+      "bbox_y_min": 5.0,
+      "bbox_x_max": 120.0,
+      "bbox_y_max": 123.0,
+      "image_width": 120,
+      "image_height": 200,
+      "recognition_time_ms": 29.485999999999997,
+      "error": null
+    },
+    {
+      "image": "vertical/vert-2.png",
+      "subset": "vertical",
+      "language": "zh",
+      "orientation": "vertical",
+      "expected": "垂直排列\n中文测试",
+      "actual": "中垂\n文直\n测排\n试列",
+      "cer": 0.8888888888888888,
+      "regions_count": 4,
+      "word_boxes_count": 8,
+      "bbox_valid": true,
+      "bbox_x_min": 50.0,
+      "bbox_y_min": 6.0,
+      "bbox_x_max": 120.0,
+      "bbox_y_max": 160.0,
+      "image_width": 120,
+      "image_height": 200,
+      "recognition_time_ms": 36.8408,
+      "error": null
+    },
+    {
+      "image": "small-font/small-1.png",
+      "subset": "small-font",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "Small font text 12px",
+      "actual": "Smal1 font text 12px",
+      "cer": 0.05,
+      "regions_count": 1,
+      "word_boxes_count": 20,
+      "bbox_valid": true,
+      "bbox_x_min": 5.0,
+      "bbox_y_min": 14.0,
+      "bbox_x_max": 152.0,
+      "bbox_y_max": 28.0,
+      "image_width": 300,
+      "image_height": 50,
+      "recognition_time_ms": 18.824199999999998,
+      "error": null
+    },
+    {
+      "image": "small-font/small-2.png",
+      "subset": "small-font",
+      "language": "zh",
+      "orientation": "horizontal",
+      "expected": "小字号文字测试",
+      "actual": "小字号文字测试",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 7,
+      "bbox_valid": true,
+      "bbox_x_min": 7.0,
+      "bbox_y_min": 10.0,
+      "bbox_x_max": 96.0,
+      "bbox_y_max": 30.0,
+      "image_width": 200,
+      "image_height": 40,
+      "recognition_time_ms": 10.357399999999998,
+      "error": null
+    },
+    {
+      "image": "light-ui/light-1.png",
+      "subset": "light-ui",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "Settings\nPreferences\nAbout",
+      "actual": "Settings\nPreferences\nAbout",
+      "cer": 0.0,
+      "regions_count": 3,
+      "word_boxes_count": 24,
+      "bbox_valid": true,
+      "bbox_x_min": 14.0,
+      "bbox_y_min": 9.0,
+      "bbox_x_max": 145.0,
+      "bbox_y_max": 97.0,
+      "image_width": 200,
+      "image_height": 120,
+      "recognition_time_ms": 28.7294,
+      "error": null
+    },
+    {
+      "image": "light-ui/light-2.png",
+      "subset": "light-ui",
+      "language": "zh",
+      "orientation": "horizontal",
+      "expected": "设置\n偏好设置\n关于",
+      "actual": "设置\n偏好设置\n关于",
+      "cer": 0.0,
+      "regions_count": 3,
+      "word_boxes_count": 8,
+      "bbox_valid": true,
+      "bbox_x_min": 13.0,
+      "bbox_y_min": 17.0,
+      "bbox_x_max": 104.0,
+      "bbox_y_max": 106.0,
+      "image_width": 200,
+      "image_height": 120,
+      "recognition_time_ms": 28.9826,
+      "error": null
+    },
+    {
+      "image": "dark-ui/dark-1.png",
+      "subset": "dark-ui",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "Settings\nPreferences\nAbout",
+      "actual": "Settings\nPreferences\nAbout",
+      "cer": 0.0,
+      "regions_count": 3,
+      "word_boxes_count": 24,
+      "bbox_valid": true,
+      "bbox_x_min": 13.0,
+      "bbox_y_min": 9.0,
+      "bbox_x_max": 146.0,
+      "bbox_y_max": 97.0,
+      "image_width": 200,
+      "image_height": 120,
+      "recognition_time_ms": 28.52,
+      "error": null
+    },
+    {
+      "image": "dark-ui/dark-2.png",
+      "subset": "dark-ui",
+      "language": "zh",
+      "orientation": "horizontal",
+      "expected": "设置\n偏好设置\n关于",
+      "actual": "设置\n偏好设置\n关于",
+      "cer": 0.0,
+      "regions_count": 3,
+      "word_boxes_count": 8,
+      "bbox_valid": true,
+      "bbox_x_min": 12.0,
+      "bbox_y_min": 17.0,
+      "bbox_x_max": 105.0,
+      "bbox_y_max": 108.0,
+      "image_width": 200,
+      "image_height": 120,
+      "recognition_time_ms": 28.2669,
+      "error": null
+    },
+    {
+      "image": "medium/medium-1.png",
+      "subset": "medium",
+      "language": "en+zh+ja",
+      "orientation": "horizontal",
+      "expected": "This is a 1440p screenshot replacement for benchmark.\nIt contains multiple lines of text\nat various sizes and positions.\nThe goal is to test OCR performance\non realistic screen content.\n中文测试：你好世界\n日本語テスト：こんにちは\nMixed: API key abc123 Temperature 25C",
+      "actual": "This is a 1440p screenshot replacement for benchmark.\nIt contains multiple lines of text\nat various sizes and positions.\nThe goal is to test OCR performance\non realistic screen content.\n中文测试：你好世界\n日本語于又卜：二hl二方仗\nMixed: API key abc123 Temperature 25c",
+      "cer": 0.04065040650406504,
+      "regions_count": 8,
+      "word_boxes_count": 240,
+      "bbox_valid": true,
+      "bbox_x_min": 88.0,
+      "bbox_y_min": 88.0,
+      "bbox_x_max": 789.0,
+      "bbox_y_max": 479.0,
+      "image_width": 2560,
+      "image_height": 1440,
+      "recognition_time_ms": 394.931,
+      "error": null
+    },
+    {
+      "image": "dpi/dpi-100-1.png",
+      "subset": "dpi",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "100% DPI test",
+      "actual": "100% DPI test",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 13,
+      "bbox_valid": true,
+      "bbox_x_min": 5.0,
+      "bbox_y_min": 13.0,
+      "bbox_x_max": 131.0,
+      "bbox_y_max": 31.0,
+      "image_width": 300,
+      "image_height": 50,
+      "recognition_time_ms": 17.0625,
+      "error": null
+    },
+    {
+      "image": "dpi/dpi-150-1.png",
+      "subset": "dpi",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "150% DPI test",
+      "actual": "150% DPI test",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 13,
+      "bbox_valid": true,
+      "bbox_x_min": 12.0,
+      "bbox_y_min": 19.0,
+      "bbox_x_max": 186.0,
+      "bbox_y_max": 46.0,
+      "image_width": 450,
+      "image_height": 75,
+      "recognition_time_ms": 18.8919,
+      "error": null
+    },
+    {
+      "image": "dpi/dpi-200-1.png",
+      "subset": "dpi",
+      "language": "en",
+      "orientation": "horizontal",
+      "expected": "200% DPI test",
+      "actual": "200% DPI test",
+      "cer": 0.0,
+      "regions_count": 1,
+      "word_boxes_count": 13,
+      "bbox_valid": true,
+      "bbox_x_min": 15.0,
+      "bbox_y_min": 24.0,
+      "bbox_x_max": 257.0,
+      "bbox_y_max": 63.0,
+      "image_width": 600,
+      "image_height": 100,
+      "recognition_time_ms": 26.3978,
+      "error": null
+    }
+  ],
+  "cer_summary": {
+    "overall_cer": 0.15295585481283927,
+    "zh_cer": 0.12698412698412698,
+    "en_cer": 0.005,
+    "ja_cer": 0.7951631701631702,
+    "mixed_cer": 0.02032520325203252,
+    "subset_cers": {
+      "chinese": 0.0,
+      "small-font": 0.025,
+      "light-ui": 0.0,
+      "mixed": 0.0,
+      "dpi": 0.0,
+      "medium": 0.04065040650406504,
+      "english": 0.0,
+      "vertical": 0.8535353535353536,
+      "japanese": 0.7836538461538461,
+      "dark-ui": 0.0
+    },
+    "worst_samples": [
+      {
+        "image": "vertical/vert-2.png",
+        "cer": 0.8888888888888888,
+        "expected": "垂直排列\n中文测试",
+        "actual": "中垂\n文直\n测排\n试列"
+      },
+      {
+        "image": "japanese/basic-1.png",
+        "cer": 0.875,
+        "expected": "こんにちは世界\nこれはテストです",
+        "actual": "二hl仁方仗世界\n二九仗于又卜飞寸"
+      },
+      {
+        "image": "vertical/vert-1.png",
+        "cer": 0.8181818181818182,
+        "expected": "縦書き\nテスト\n日本語",
+        "actual": "日于維\n本又書\n語卜老"
+      },
+      {
+        "image": "japanese/basic-2.png",
+        "cer": 0.6923076923076923,
+        "expected": "設定\nシステム\nバージョン",
+        "actual": "設定\n入于人\n八-沙∃之"
+      },
+      {
+        "image": "small-font/small-1.png",
+        "cer": 0.05,
+        "expected": "Small font text 12px",
+        "actual": "Smal1 font text 12px"
+      }
+    ],
+    "punctuation_errors": 3,
+    "space_errors": 0,
+    "digit_errors": 0
+  },
+  "geometry_summary": {
+    "total_regions": 51,
+    "total_word_boxes": 562,
+    "valid_bbox_count": 22,
+    "invalid_bbox_count": 0,
+    "bbox_valid_ratio": 1.0,
+    "dpi_results": [
+      {
+        "image": "dpi/dpi-100-1.png",
+        "dpi_scale": 100,
+        "regions_detected": 1,
+        "bbox_valid": true,
+        "cer": 0.0
+      },
+      {
+        "image": "dpi/dpi-150-1.png",
+        "dpi_scale": 150,
+        "regions_detected": 1,
+        "bbox_valid": true,
+        "cer": 0.0
+      },
+      {
+        "image": "dpi/dpi-200-1.png",
+        "dpi_scale": 200,
+        "regions_detected": 1,
+        "bbox_valid": true,
+        "cer": 0.0
+      }
+    ],
+    "vertical_results": [
+      {
+        "image": "vertical/vert-1.png",
+        "language": "ja",
+        "regions_detected": 3,
+        "cer": 0.8181818181818182
+      },
+      {
+        "image": "vertical/vert-2.png",
+        "language": "zh",
+        "regions_detected": 4,
+        "cer": 0.8888888888888888
+      }
+    ]
+  },
+  "cold_load_results": [
+    {
+      "load_num": 1,
+      "cold_load_ms": 36.9319,
+      "memory_after_mb": 42.58203125
+    },
+    {
+      "load_num": 2,
+      "cold_load_ms": 38.0568,
+      "memory_after_mb": 42.69140625
+    },
+    {
+      "load_num": 3,
+      "cold_load_ms": 36.4863,
+      "memory_after_mb": 42.9140625
+    },
+    {
+      "load_num": 4,
+      "cold_load_ms": 42.4736,
+      "memory_after_mb": 42.80859375
+    },
+    {
+      "load_num": 5,
+      "cold_load_ms": 35.7369,
+      "memory_after_mb": 42.76171875
+    }
+  ],
+  "hot_inference_results": [
+    {
+      "round": 1,
+      "image": "medium/medium-1.png",
+      "inference_ms": 372.71169999999995,
+      "memory_peak_mb": 44.39453125
+    },
+    {
+      "round": 2,
+      "image": "medium/medium-1.png",
+      "inference_ms": 378.5609,
+      "memory_peak_mb": 44.65625
+    },
+    {
+      "round": 3,
+      "image": "medium/medium-1.png",
+      "inference_ms": 364.85089999999997,
+      "memory_peak_mb": 44.640625
+    },
+    {
+      "round": 4,
+      "image": "medium/medium-1.png",
+      "inference_ms": 368.56260000000003,
+      "memory_peak_mb": 44.58984375
+    },
+    {
+      "round": 5,
+      "image": "medium/medium-1.png",
+      "inference_ms": 381.54359999999997,
+      "memory_peak_mb": 44.46875
+    },
+    {
+      "round": 6,
+      "image": "medium/medium-1.png",
+      "inference_ms": 379.3902,
+      "memory_peak_mb": 44.56640625
+    },
+    {
+      "round": 7,
+      "image": "medium/medium-1.png",
+      "inference_ms": 362.1856,
+      "memory_peak_mb": 44.375
+    },
+    {
+      "round": 8,
+      "image": "medium/medium-1.png",
+      "inference_ms": 362.05559999999997,
+      "memory_peak_mb": 44.5078125
+    },
+    {
+      "round": 9,
+      "image": "medium/medium-1.png",
+      "inference_ms": 362.3711,
+      "memory_peak_mb": 44.515625
+    },
+    {
+      "round": 10,
+      "image": "medium/medium-1.png",
+      "inference_ms": 358.4313,
+      "memory_peak_mb": 44.40625
+    },
+    {
+      "round": 11,
+      "image": "medium/medium-1.png",
+      "inference_ms": 363.66720000000004,
+      "memory_peak_mb": 44.42578125
+    },
+    {
+      "round": 12,
+      "image": "medium/medium-1.png",
+      "inference_ms": 367.0917,
+      "memory_peak_mb": 44.546875
+    },
+    {
+      "round": 13,
+      "image": "medium/medium-1.png",
+      "inference_ms": 369.7436,
+      "memory_peak_mb": 44.3125
+    },
+    {
+      "round": 14,
+      "image": "medium/medium-1.png",
+      "inference_ms": 380.21700000000004,
+      "memory_peak_mb": 44.3671875
+    },
+    {
+      "round": 15,
+      "image": "medium/medium-1.png",
+      "inference_ms": 369.07079999999996,
+      "memory_peak_mb": 44.66015625
+    },
+    {
+      "round": 16,
+      "image": "medium/medium-1.png",
+      "inference_ms": 361.6713,
+      "memory_peak_mb": 44.4609375
+    },
+    {
+      "round": 17,
+      "image": "medium/medium-1.png",
+      "inference_ms": 382.7856,
+      "memory_peak_mb": 44.58984375
+    },
+    {
+      "round": 18,
+      "image": "medium/medium-1.png",
+      "inference_ms": 363.6748,
+      "memory_peak_mb": 44.67578125
+    },
+    {
+      "round": 19,
+      "image": "medium/medium-1.png",
+      "inference_ms": 381.466,
+      "memory_peak_mb": 44.69140625
+    },
+    {
+      "round": 20,
+      "image": "medium/medium-1.png",
+      "inference_ms": 362.6542,
+      "memory_peak_mb": 44.734375
+    }
+  ],
+  "performance_summary": {
+    "cold_load_p50_ms": 36.9319,
+    "cold_load_p95_ms": 42.4736,
+    "hot_inference_p50_ms": 368.56260000000003,
+    "hot_inference_p95_ms": 381.54359999999997,
+    "peak_rss_mb": 44.734375,
+    "memory_after_drop_mb": 44.734375,
+    "thread_count": 21
+  },
+  "concurrency_tests": [
+    {
+      "concurrency": 1,
+      "total_images": 2,
+      "total_ms": 45.7756,
+      "avg_ms_per_image": 22.8878,
+      "success": true,
+      "error": null
+    },
+    {
+      "concurrency": 2,
+      "total_images": 4,
+      "total_ms": 116.3859,
+      "avg_ms_per_image": 29.096475,
+      "success": true,
+      "error": null
+    },
+    {
+      "concurrency": 4,
+      "total_images": 8,
+      "total_ms": 210.97750000000002,
+      "avg_ms_per_image": 26.372187500000003,
+      "success": true,
+      "error": null
+    }
+  ],
+  "cancel_tests": [
+    {
+      "description": "Sequential inference consistency",
+      "cancelled": false,
+      "old_result_overwritten": false,
+      "success": true
+    },
+    {
+      "description": "Inference timeout (10s limit, actual=29.8ms)",
+      "cancelled": false,
+      "old_result_overwritten": false,
+      "success": true
+    }
+  ],
+  "asset_inventory": [
+    {
+      "name": "pp-ocrv6_tiny_det.onnx",
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\../models\\ppocrv6-onnx/pp-ocrv6_tiny_det.onnx",
+      "size_bytes": 1780590,
+      "sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+      "source": "HuggingFace: PaddlePaddle/PP-OCRv6_tiny_det_onnx",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "pp-ocrv6_tiny_rec.onnx",
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\../models\\ppocrv6-onnx/pp-ocrv6_tiny_rec.onnx",
+      "size_bytes": 4462639,
+      "sha256": "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
+      "source": "HuggingFace: PaddlePaddle/PP-OCRv6_tiny_rec_onnx",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "ppocrv6_tiny_dict.txt",
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup\\../models\\ppocrv6-onnx/ppocrv6_tiny_dict.txt",
+      "size_bytes": 27156,
+      "sha256": "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
+      "source": "PaddleOCR",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "onnxruntime.dll",
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll",
+      "size_bytes": 11234848,
+      "sha256": "14119125df2dcf9ff3e083afdba5fcc4b09b4186d8762404eb7b1fbccde3fcf2",
+      "source": "Microsoft GitHub Release onnxruntime-win-x64-1.19.2",
+      "license": "MIT"
+    },
+    {
+      "name": "onnxruntime_providers_shared.dll",
+      "path": "D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu\\onnxruntime_providers_shared.dll",
+      "size_bytes": 22048,
+      "sha256": "7d11a2a851ad86095a7ad1f4d96927ff0a48fa86311699fbb6a7c21914bbb69f",
+      "source": "Microsoft GitHub Release onnxruntime-win-x64-1.19.2",
+      "license": "MIT"
+    }
+  ],
+  "total_disk_usage_mb": 16.715317726135254,
+  "decision": "GO",
+  "notes": [
+    "ORT DLL: D:\\Projects\\Coding\\blink\\xtask\\spikes\\onnx-spike\\followup/runtimes/onnxruntime-cpu/onnxruntime.dll",
+    "Idle memory: 7.1MB, 5 threads",
+    "OAROCR built with return_word_box=true"
+  ]
+}

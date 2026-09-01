@@ -66,6 +66,19 @@ xtask/spikes/funasr-runtime/results/
 xtask/spikes/funasr-runtime/tmp/
 testdata/stt/funasr-runtime/generated/
 
+# ONNX spike — standalone Cargo outputs, downloaded runtimes/models and transient worker state
+xtask/spikes/**/target/
+xtask/spikes/onnx-spike/followup/runtimes/
+xtask/spikes/onnx-spike/followup/spike-*/results/
+xtask/spikes/onnx-spike/followup/worker_started.marker
+xtask/spikes/onnx-spike/models/.lock/
+xtask/spikes/onnx-spike/models/models/
+xtask/spikes/onnx-spike/models/paraformer-online-onnx/
+xtask/spikes/onnx-spike/models/ppocrv6-onnx/
+xtask/spikes/onnx-spike/models/sherpa-paraformer-online/
+xtask/spikes/onnx-spike/models/sherpa-paraformer-online.tar.bz2
+xtask/spikes/onnx-spike/models/asr_example.wav
+
 # 0.22.7 GGUF worker 构建产物（由 cargo xtask funasr-worker 生成，不入 Git；
 # 来源锁定见 resources/stt/funasr-gguf/worker-lock.json）
 resources/bin/

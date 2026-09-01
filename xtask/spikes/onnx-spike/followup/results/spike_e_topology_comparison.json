@@ -1,0 +1,36 @@
+{
+  "spike": "E_minimal_hybrid_topology",
+  "scope": "feasibility_only",
+  "ocr_in_process": {
+    "evidence": "results/spike_b_ocr_qualification.json",
+    "feasible": true
+  },
+  "onnx_stt_worker": {
+    "release_build": true,
+    "real_ort_loaded": true,
+    "real_models_loaded": true,
+    "ready_received": true,
+    "nonempty_partial_received": true,
+    "final_chunk_response_received": true,
+    "graceful_quit_succeeded": true
+  },
+  "recovery": {
+    "forced_kill_detected": true,
+    "host_survived": true,
+    "child_waited": true,
+    "restart_ready_received": true,
+    "no_orphan_process": true
+  },
+  "not_measured": [
+    "memory comparison",
+    "latency comparison",
+    "RTF",
+    "CPU usage",
+    "p50/p95",
+    "stress",
+    "OOM",
+    "native crash"
+  ],
+  "decision": "HYBRID_FEASIBILITY_GO",
+  "blockers": []
+}

@@ -1,0 +1,78 @@
+{
+  "analysis_date": "2026-09-01",
+  "source_files": [
+    {
+      "path": "FunASR/runtime/llama.cpp/funasr-common/funasr_vad.h",
+      "commit": "55b662ccf9ea77237ba9253b3bddd953d4184f84",
+      "key_function": "funasr_vad_segments(gguf_path, wav, max_seg_ms, segs, nthreads=8)"
+    },
+    {
+      "path": "FunASR/runtime/llama.cpp/funasr-vad/funasr-vad.cpp",
+      "description": "Standalone CLI: WAV -> speech segments [start_ms, end_ms]"
+    }
+  ],
+  "findings": {
+    "model_loading": {
+      "verdict": "offline_per_call_reload",
+      "evidence": "gguf_init_from_file() called inside funasr_vad_segments() every invocation",
+      "line": 67,
+      "implication": "每次调用都重新读取 GGUF 文件、分配张量、初始化 ggml_context。模型不常驻。"
+    },
+    "inference_mode": {
+      "verdict": "offline_whole_file",
+      "evidence": "fbank80(wav) processes entire waveform at once; ggml_new_tensor_2d(c, idim, T) where T is total frames",
+      "line": 84,
+      "implication": "整段音频一次性做 fbank + FSMN encoder 推理。没有分块/增量推理机制。"
+    },
+    "cache_mechanism": {
+      "verdict": "none",
+      "evidence": "Function signature: funasr_vad_segments(gguf_path, wav, max_seg_ms, segs). No state struct, no incremental input, no cache/reset parameters.",
+      "implication": "无在线 cache、无 reset、无增量推理。每次都是从零开始的完整推理。"
+    },
+    "state_machine": {
+      "verdict": "offline_postprocessing",
+      "evidence": "E2EVadModel state machine operates on complete inference output sc[T*od]. Processes all T frames in a single for-loop.",
+      "line": 136,
+      "implication": "状态机是在完整推理结果上做后处理，不是流式处理。无法增量更新。"
+    },
+    "incremental_capability": {
+      "verdict": "not_available",
+      "evidence": "No API for feeding audio incrementally. No state preserved between calls. No partial result return.",
+      "implication": "必须等到完整音频可用后才能运行 VAD。无法用于实时切句。"
+    },
+    "cumulative_cost": {
+      "verdict": "O_n_per_call",
+      "evidence": "fbank80 is O(n) in audio length; FSMN encoder graph is O(T) in frames; state machine is O(T).",
+      "implication": "每次调用对整段音频重算。如果 Blink 伪流式每 500ms 对累积音频调用一次，总成本 = sum(O(i)) for i=1..n = O(n²)。"
+    }
+  },
+  "stdin_server_patch_analysis": {
+    "production_patch_0001": {
+      "file": "xtask/funasr-worker/patches/0001-sensevoice-ndjson-stdin-server.patch",
+      "vad_rejection": "explicit",
+      "rejection_code": "if(stdin_server&&(!fbank_path.empty()||!wav_path.empty()||!vad_path.empty()||srt_mode)){fprintf(stderr,\"--stdin-server only supports the persistent NDJSON loop without VAD/SRT/fbank\\n\");return 1;}",
+      "reason": "stdin-server 模式下 VAD 是离线整段推理，不适合实时切句。生产 patch 明确排斥 --vad。"
+    },
+    "production_patch_0002": {
+      "file": "xtask/funasr-worker/patches/0002-paraformer-ndjson-stdin-server.patch",
+      "vad_rejection": "explicit",
+      "rejection_code": "if(stdin_server&&(!wav_path.empty()||!vad_path.empty()||srt_mode)){fprintf(stderr,\"--stdin-server only supports the persistent NDJSON loop without VAD/SRT\\n\");return 1;}"
+    },
+    "production_patch_0003": {
+      "file": "xtask/funasr-worker/patches/0003-funasr-cli-ndjson-stdin-server.patch",
+      "vad_rejection": "explicit",
+      "rejection_code": "if(stdin_server&&(!wav_path.empty()||!vad_path.empty()||srt_mode||chunk_sec>0)){fprintf(stderr,\"--stdin-server only supports the persistent NDJSON loop without VAD/SRT/chunking\\n\");return 1;}"
+    },
+    "spike_patch_0004": {
+      "file": "xtask/spikes/fsmn-vad/patches/0004-sensevoice-vad-stdin-server-spike.patch",
+      "description": "移除 --stdin-server 对 --vad 的排斥，允许同时加载 ASR + VAD 模型。VAD 仍然每次调用重新加载 GGUF 并整段推理。"
+    }
+  },
+  "conclusion": {
+    "form": "offline_whole_file_per_call_reload",
+    "suitable_for_realtime_endpointing": false,
+    "suitable_for_hybrid_endpointing": "conditional",
+    "suitable_for_final_gate": "conditional",
+    "reasoning": "FSMN-VAD GGUF 当前实现是纯离线整段推理：每次调用重新加载模型、对整段音频做 fbank + FSMN encoder 推理、在完整结果上跑 E2EVadModel 状态机。没有增量/在线 cache/reset 机制。如果用于 Blink 伪流式的累积快照识别，每 500ms 对已累积音频跑一次 VAD 将导致 O(n²) 累计重算，且每次都重新加载 VAD GGUF 文件。"
+  }
+}
