@@ -20,6 +20,8 @@ use super::LOCKED_REQUIREMENTS_TXT;
 ///
 /// 返回 `Vec<PackageLock>`，每个包的 `sha256` 为第一个 hash（用于摘要/标识），
 /// `all_hashes` 包含所有平台 wheel 的 hash，用于 `--require-hashes` 安装。
+/// 0.22.8: 不再使用，保留用于 legacy Python 测试。
+#[allow(dead_code)]
 pub(super) fn parse_locked_requirements(txt: &str) -> Vec<PackageLock> {
     let mut packages = Vec::new();
     let mut current_name: Option<String> = None;
@@ -105,6 +107,8 @@ pub(super) fn parse_locked_requirements(txt: &str) -> Vec<PackageLock> {
 /// 从嵌入的 `locked-requirements.txt` 解析包列表。
 ///
 /// 这是安装时使用的唯一锁源——不再手写第二份包清单。
+/// 0.22.8: 不再使用，保留用于 legacy Python 测试。
+#[allow(dead_code)]
 pub(super) fn locked_packages() -> Vec<PackageLock> {
     let packages = parse_locked_requirements(LOCKED_REQUIREMENTS_TXT);
     // 验证：所有包必须有 hash

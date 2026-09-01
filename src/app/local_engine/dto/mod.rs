@@ -324,6 +324,7 @@ fn runtime_kind_to_string(k: RuntimePlan) -> String {
     match k {
         RuntimePlan::PythonVenv => "python_venv".to_string(),
         RuntimePlan::ManagedBinary => "managed_binary".to_string(),
+        RuntimePlan::OnnxRuntime => "onnx_runtime".to_string(),
     }
 }
 

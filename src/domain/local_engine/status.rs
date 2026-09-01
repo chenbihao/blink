@@ -389,6 +389,12 @@ pub struct BackendInfo {
     pub backend_verification: BackendVerificationResult,
     /// fallback 原因列表（auto 回退时记录每次失败）。
     pub fallback_reasons: Vec<FallbackEntry>,
+    /// 运行时 deployment 状态（0.22.8）。
+    ///
+    /// 前端通过 `backend.desired_deployment` / `backend.loaded_deployment`
+    /// / `backend.pending_restart` / `backend.legacy_deployment` 消费。
+    #[serde(flatten)]
+    pub deployment_status: RuntimeDeploymentStatus,
 }
 
 impl Default for BackendInfo {
@@ -404,6 +410,7 @@ impl Default for BackendInfo {
                 mismatch_reason: None,
             },
             fallback_reasons: Vec::new(),
+            deployment_status: RuntimeDeploymentStatus::default(),
         }
     }
 }
@@ -529,6 +536,111 @@ pub struct EngineStatusSnapshot {
     pub revision: u64,
     /// 完整状态快照。
     pub status: EngineStatus,
+}
+
+// ── RuntimeDeploymentStatus（0.22.8）──────────────────────────────────────
+
+/// 运行时 deployment 状态（desired / loaded / pending_restart）。
+///
+/// 0.22.8 引入：用于 OnnxRuntime 的 desired/loaded deployment 语义。
+///
+/// ## 状态铁则
+///
+/// - **主进程未初始化 ORT 时可立即启用 desired**：首次安装成功后
+///   `desired == loaded == None` → 新 deployment 成为 `desired`，
+///   可立即加载（无 DLL identity 冲突）。
+/// - **已加载不同 DLL identity 时保持 loaded 不变并等待重启**：
+///   更新/回滚只修改 `desired`，当前 `loaded` 不说谎，
+///   `pending_restart = true`。
+/// - **只切模型 generation 不要求重启**：DLL identity 不变时，
+///   模型 generation 切换不需要 `pending_restart`。
+/// - **legacy Python 不参与 fallback**：旧 PythonVenv deployment
+///   可安全读取并标记 `legacy`，但不进入 OnnxRuntime 的 fallback 链路。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RuntimeDeploymentStatus {
+    /// 期望 deployment（用户/安装事务最后提交的 desired）。
+    ///
+    /// `None` 表示无安装（fresh state）。
+    #[serde(rename = "desired_deployment")]
+    pub desired: Option<DeploymentRef>,
+
+    /// 当前已加载 deployment（主进程实际持有的）。
+    ///
+    /// `None` 表示主进程尚未初始化 ORT。
+    /// 与 `desired` 不同意味着有未应用的更新。
+    #[serde(rename = "loaded_deployment")]
+    pub loaded: Option<DeploymentRef>,
+
+    /// 是否需要重启才能应用 desired deployment。
+    ///
+    /// - `true`：`desired` 与 `loaded` 的 DLL identity 不同，
+    ///   需要重启主进程才能加载新 DLL。
+    /// - `false`：要么 `desired == loaded`，要么只切模型 generation
+    ///   （DLL identity 不变），要么主进程尚未初始化 ORT。
+    pub pending_restart: bool,
+
+    /// 是否为 legacy deployment（旧 PythonVenv，0.22.8）。
+    ///
+    /// 旧 Python deployment 可安全读取，但标记 `legacy = true`，
+    /// 不参与 OnnxRuntime fallback。
+    #[serde(rename = "legacy_deployment")]
+    pub legacy: bool,
+}
+
+/// Deployment 引用（用于 desired/loaded 状态）。
+///
+/// 闭合标识——不暴露文件路径或 DLL 细节，只保留 identity 级别。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeploymentRef {
+    /// 安装 id（部署内容身份标识）。
+    pub install_id: String,
+    /// DLL artifact id（版本化 DLL identity，用于 pending_restart 判定）。
+    pub dll_artifact_id: super::identity::ArtifactId,
+    /// DLL SHA-256（hex），用于 identity 比较。
+    pub dll_sha256: String,
+    /// 模型 generation id（只切 generation 不要求重启）。
+    pub model_generation_id: String,
+    /// 运行时种类（闭合枚举）。
+    pub runtime_kind: super::identity::RuntimePlan,
+}
+
+impl RuntimeDeploymentStatus {
+    /// 判断是否需要重启。
+    ///
+    /// 当 `desired` 和 `loaded` 的 DLL identity（artifact_id + sha256）不同时
+    /// 需要重启。只切模型 generation 不需要重启。
+    #[allow(dead_code)] // 0.22.8 A 包协议位——B/C/E 包消费
+    pub fn needs_restart(&self) -> bool {
+        match (&self.desired, &self.loaded) {
+            (Some(d), Some(l)) => {
+                d.dll_artifact_id != l.dll_artifact_id || d.dll_sha256 != l.dll_sha256
+            }
+            // desired == None 或 loaded == None 时不需重启
+            _ => false,
+        }
+    }
+
+    /// 从 desired 和 loaded 计算 pending_restart。
+    ///
+    /// 调用方在提交 desired 后调用此方法更新 `pending_restart`。
+    #[allow(dead_code)] // 0.22.8 A 包协议位——B/C/E 包消费
+    pub fn recompute_pending_restart(&mut self) {
+        self.pending_restart = self.needs_restart();
+    }
+
+    /// 判断主进程是否已初始化 ORT。
+    #[allow(dead_code)] // 0.22.8 A 包协议位——B/C/E 包消费
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.is_some()
+    }
+
+    /// 判断 desired 是否可立即启用（无需重启）。
+    ///
+    /// 条件：主进程尚未初始化 ORT（loaded == None）且 desired != None。
+    #[allow(dead_code)] // 0.22.8 A 包协议位——B/C/E 包消费
+    pub fn can_activate_immediately(&self) -> bool {
+        self.loaded.is_none() && self.desired.is_some()
+    }
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -899,5 +1011,97 @@ mod tests {
         .unwrap();
         assert_eq!(mismatched["outcome"], "mismatched");
         assert_eq!(mismatched["current_operation_id"], "op-current");
+    }
+
+    // ── 0.22.8 RuntimeDeploymentStatus 状态转换测试 ─────────────────────────
+
+    fn make_deployment_ref(artifact_id: &str, sha: &str, generation: &str) -> DeploymentRef {
+        DeploymentRef {
+            install_id: format!("dep-{artifact_id}"),
+            dll_artifact_id: super::super::identity::ArtifactId::new(artifact_id).unwrap(),
+            dll_sha256: sha.to_string(),
+            model_generation_id: generation.to_string(),
+            runtime_kind: super::super::identity::RuntimePlan::OnnxRuntime,
+        }
+    }
+
+    #[test]
+    fn fresh_state_can_activate_immediately() {
+        // 主进程未初始化 ORT：desired != None, loaded == None → 可立即启用
+        let status = RuntimeDeploymentStatus {
+            desired: Some(make_deployment_ref("ort-1.20.0", "abc", "gen-v1")),
+            loaded: None,
+            ..Default::default()
+        };
+        assert!(status.can_activate_immediately());
+        assert!(!status.pending_restart);
+        assert!(!status.is_loaded());
+    }
+
+    #[test]
+    fn different_dll_identity_requires_restart() {
+        // 已加载不同 DLL identity：保持 loaded 不变，pending_restart = true
+        let mut status = RuntimeDeploymentStatus {
+            desired: Some(make_deployment_ref("ort-1.21.0", "new-sha", "gen-v1")),
+            loaded: Some(make_deployment_ref("ort-1.20.0", "old-sha", "gen-v1")),
+            ..Default::default()
+        };
+        status.recompute_pending_restart();
+        assert!(status.pending_restart);
+        assert!(!status.can_activate_immediately());
+        assert!(status.needs_restart());
+    }
+
+    #[test]
+    fn model_generation_switch_no_restart() {
+        // 只切模型 generation，DLL identity 不变 → 不需要重启
+        let mut status = RuntimeDeploymentStatus {
+            desired: Some(make_deployment_ref("ort-1.20.0", "same-sha", "gen-v2")),
+            loaded: Some(make_deployment_ref("ort-1.20.0", "same-sha", "gen-v1")),
+            ..Default::default()
+        };
+        status.recompute_pending_restart();
+        assert!(!status.pending_restart);
+        assert!(!status.needs_restart());
+    }
+
+    #[test]
+    fn loaded_equals_desired_no_restart() {
+        // desired == loaded → 不需要重启
+        let mut status = RuntimeDeploymentStatus {
+            desired: Some(make_deployment_ref("ort-1.20.0", "abc", "gen-v1")),
+            loaded: Some(make_deployment_ref("ort-1.20.0", "abc", "gen-v1")),
+            ..Default::default()
+        };
+        status.recompute_pending_restart();
+        assert!(!status.pending_restart);
+        assert!(!status.needs_restart());
+    }
+
+    #[test]
+    fn legacy_flag_marks_python_venv_not_onnx_fallback() {
+        // legacy PythonVenv deployment 可安全读取，标记 legacy = true
+        let status = RuntimeDeploymentStatus {
+            desired: None,
+            loaded: None,
+            pending_restart: false,
+            legacy: true,
+        };
+        assert!(status.legacy);
+        assert!(!status.is_loaded());
+        assert!(!status.can_activate_immediately());
+    }
+
+    #[test]
+    fn runtime_deployment_status_serde_roundtrip() {
+        let status = RuntimeDeploymentStatus {
+            desired: Some(make_deployment_ref("ort-1.20.0", "abc", "gen-v1")),
+            loaded: Some(make_deployment_ref("ort-1.20.0", "abc", "gen-v1")),
+            pending_restart: false,
+            legacy: false,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let back: RuntimeDeploymentStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, status);
     }
 }

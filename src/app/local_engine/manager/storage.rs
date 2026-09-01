@@ -626,6 +626,7 @@ fn measure_cleanup_scope(scope: &crate::infra::local_engine::runtime::CleanupSco
                 dir_size(&dir)
             }
             crate::infra::local_engine::runtime::RuntimePlan::ManagedBinary => 0,
+            crate::infra::local_engine::runtime::RuntimePlan::OnnxRuntime => 0,
         },
     }
 }

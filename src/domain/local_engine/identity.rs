@@ -24,7 +24,8 @@ use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 ///
 /// 描述引擎的可执行环境形态：
 /// - `PythonVenv`：uv 管理 Python distribution + venv + pip packages；
-/// - `ManagedBinary`：锁定 archive/可执行文件/DLL + hash + self-test。
+/// - `ManagedBinary`：锁定 archive/可执行文件/DLL + hash + self-test；
+/// - `OnnxRuntime`：ONNX Runtime DLL + 版本化 artifact（0.22.8 新增）。
 ///
 /// **禁止**用 String runtime plan 或前端提交字段绕过此枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -34,6 +35,12 @@ pub enum RuntimePlan {
     PythonVenv,
     /// 受管原生二进制（锁定 archive/可执行文件/DLL + hash + self-test）。
     ManagedBinary,
+    /// ONNX Runtime（版本化 DLL + 模型 generation，0.22.8）。
+    ///
+    /// 与 `ManagedBinary` 的区别：OnnxRuntime 是**共享动态运行时**，
+    /// 不伪装成 `ManagedBinary`（不启动子进程），DLL 由 in-process
+    /// lazy Session 持有；Provider 负责版本化下载、hash 校验和 promote。
+    OnnxRuntime,
 }
 
 impl RuntimePlan {
@@ -42,6 +49,7 @@ impl RuntimePlan {
         match self {
             Self::PythonVenv => "python_venv",
             Self::ManagedBinary => "managed_binary",
+            Self::OnnxRuntime => "onnx_runtime",
         }
     }
 }
@@ -594,6 +602,12 @@ mod tests {
         let plan = RuntimePlan::ManagedBinary;
         let json = serde_json::to_string(&plan).unwrap();
         assert_eq!(json, "\"managed_binary\"");
+        let back: RuntimePlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, plan);
+
+        let plan = RuntimePlan::OnnxRuntime;
+        let json = serde_json::to_string(&plan).unwrap();
+        assert_eq!(json, "\"onnx_runtime\"");
         let back: RuntimePlan = serde_json::from_str(&json).unwrap();
         assert_eq!(back, plan);
 

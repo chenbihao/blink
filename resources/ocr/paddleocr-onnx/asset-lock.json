@@ -1,0 +1,59 @@
+{
+  "$schema": "https://blink.local/asset-lock.schema.json",
+  "schema_version": 1,
+  "created_at": "2026-09-02T00:00:00Z",
+  "description": "ONNX OCR 供应链锁定——ORT DLL + PP-OCRv6 det/rec/dictionary",
+  "ort": {
+    "version": "1.19.2",
+    "commit": "ffceed9d44",
+    "build_type": "RelWithDebInfo",
+    "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip",
+    "license": "MIT",
+    "files": [
+      {
+        "path": "onnxruntime-win-x64-1.19.2/lib/onnxruntime.dll",
+        "sha256": "14119125df2dcf9ff3e083afdba5fcc4b09b4186d8762404eb7b1fbccde3fcf2",
+        "size_bytes": 11234848,
+        "is_dll": true
+      },
+      {
+        "path": "onnxruntime-win-x64-1.19.2/lib/onnxruntime_providers_shared.dll",
+        "sha256": "7d11a2a851ad86095a7ad1f4d96927ff0a48fa86311699fbb6a7c21914bbb69f",
+        "size_bytes": 22048,
+        "is_dll": true
+      }
+    ]
+  },
+  "models": [
+    {
+      "kind": "det",
+      "name": "PP-OCRv6 Tiny Detection",
+      "filename": "pp-ocrv6_tiny_det.onnx",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/main/inference.onnx",
+      "revision": "ppocrv6-tiny-onnx",
+      "sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+      "size_bytes": 1780590,
+      "license": "Apache-2.0"
+    },
+    {
+      "kind": "rec",
+      "name": "PP-OCRv6 Tiny Recognition",
+      "filename": "pp-ocrv6_tiny_rec.onnx",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec_onnx/resolve/main/inference.onnx",
+      "revision": "ppocrv6-tiny-onnx",
+      "sha256": "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
+      "size_bytes": 4462639,
+      "license": "Apache-2.0"
+    },
+    {
+      "kind": "dictionary",
+      "name": "PP-OCRv6 Tiny Dictionary",
+      "filename": "ppocrv6_tiny_dict.txt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/ppocrv6_tiny_dict.txt",
+      "revision": "ppocrv6-tiny",
+      "sha256": "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
+      "size_bytes": 27156,
+      "license": "Apache-2.0"
+    }
+  ]
+}

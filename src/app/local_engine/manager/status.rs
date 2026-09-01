@@ -67,6 +67,7 @@ impl EngineManager {
     /// 来发送 HTTP /recognize 请求。
     ///
     /// 如果引擎未运行或身份未设置，返回 `None`。
+    #[allow(dead_code)] // D 包迁移后 ONNX in-process 模式不再查询 HTTP endpoint
     pub async fn get_current_identity(
         &self,
         engine_id: &EngineId,
@@ -88,6 +89,7 @@ impl EngineManager {
     /// 返回当前运行实例的 InstanceToken（用于条件停止）。
     ///
     /// 如果引擎未运行，返回 `None`。
+    #[allow(dead_code)] // D 包迁移后 ONNX in-process 模式不再查询进程 token
     pub async fn get_current_instance_token(
         &self,
         engine_id: &EngineId,

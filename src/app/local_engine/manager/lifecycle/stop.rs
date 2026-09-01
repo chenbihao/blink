@@ -295,6 +295,7 @@ impl EngineManager {
     ///
     /// 用于 OcrCoordinator 的 lease 管理：旧 timer 或旧 startup task
     /// 不得停止/覆盖新实例。
+    #[allow(dead_code)] // D 包迁移后 ONNX in-process 模式不再调用进程级停止
     pub async fn stop_if_current(
         &self,
         engine_id: &EngineId,

@@ -155,8 +155,9 @@ impl EngineManager {
         .await?;
 
         // 执行 InstallTransaction（slot + journal 部署事务）
-        // 0.22.7：按 descriptor.runtime_kind 选择 provider
-        // （PythonVenv → python_provider；ManagedBinary → binary_provider）。
+        // 按 descriptor.runtime_kind 选择 provider
+        // （PythonVenv → python_provider；ManagedBinary → binary_provider；
+        //  OnnxRuntime → onnx_provider（0.22.8 协议位，B 包落地真实安装））。
         let sink_adapter = InstallSinkAdapter::new(
             self.event_port.clone(),
             engine_id.clone(),
@@ -180,6 +181,20 @@ impl EngineManager {
                 crate::infra::local_engine::providers::InstallTransaction::new(
                     provider_descriptor,
                     &self.python_provider,
+                )
+                .execute(
+                    operation_id,
+                    preference,
+                    Some(guard.cancel_token()),
+                    Some(&sink_adapter),
+                )
+                .await
+            }
+            crate::infra::local_engine::runtime::RuntimePlan::OnnxRuntime => {
+                // 0.22.8 A 包协议 seam——B 包用生产 asset lock 替换占位实现
+                crate::infra::local_engine::providers::InstallTransaction::new(
+                    provider_descriptor,
+                    &self.onnx_provider,
                 )
                 .execute(
                     operation_id,

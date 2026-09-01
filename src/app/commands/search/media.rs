@@ -2403,8 +2403,16 @@ pub async fn install_paddleocr(
         CommandError::new("install_failed", format!("PaddleOCR 安装失败: {e}"), true)
     })?;
 
-    // Task 16: 通知 OcrCoordinator 外部状态变更——清理缓存
-    notify_coordinator_state_change(&app).await;
+    // 0.22.8-F: 安装后构建并注入 ONNX executor
+    if let Some(coordinator) = get_ocr_coordinator(&app) {
+        let new_executor =
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+        if let Some(executor) = new_executor {
+            coordinator.inject_executor(executor).await;
+        } else {
+            coordinator.notify_external_state_change().await;
+        }
+    }
 
     tracing::info!("PaddleOCR 引擎安装完成");
     Ok(())
@@ -2439,7 +2447,10 @@ pub async fn repair_paddleocr(
         None
     };
     // 也直接调 svc.stop 确保进程退出（begin_repair 已包含，但双重保障）
-    let _ = svc.stop(&engine_id).await;
+    // 0.22.8: ONNX in-process——begin_repair 已调用 executor.shutdown()，
+    // 不再需要 svc.stop()（无子进程）。
+    // svc.stop 已删除——保留空日志占位。
+    tracing::debug!("repair: begin_repair 已停止 ONNX executor");
 
     // 2. 安全清理 PaddleOCR 模型缓存——路径防御
     let model_cache_dir = crate::infra::local_engine::runtime::engine_model_cache_dir(&engine_id);
@@ -2555,39 +2566,16 @@ pub async fn repair_paddleocr(
         ));
     }
 
-    // 5c. start 并等待模型 Ready（Handoff B.V.6）
-    let adapter_config = build_paddleocr_adapter_config();
-    svc.start(&engine_id, adapter_config).await.map_err(|e| {
-        CommandError::new("repair_start_failed", format!("修复后启动失败: {e}"), true)
-    })?;
-
-    // 等待 model Ready（最多 120s）
-    let model_ready =
-        wait_for_model_ready(&svc, &engine_id, std::time::Duration::from_secs(120)).await;
-    if !model_ready {
-        // RepairGuard RAII 会自动调用 end_repair()
-        return Err(CommandError::new(
-            "repair_model_timeout",
-            "修复后模型加载超时（120s）",
-            true,
-        ));
-    }
-
-    // 5d. 验证 health model contract/fingerprint（Handoff B.V.7）
-    let status = svc.get_status(&engine_id).await.map_err(|e| {
-        CommandError::new(
-            "repair_verification_failed",
-            format!("修复后状态查询失败: {e}"),
-            false,
-        )
-    })?;
-    if status.status.model != crate::domain::local_engine::status::ModelHealth::Ready {
-        // RepairGuard RAII 会自动调用 end_repair()
-        return Err(CommandError::new(
-            "repair_model_not_ready",
-            format!("修复后模型状态非 Ready: {:?}", status.status.model),
-            true,
-        ));
+    // 5c. 0.22.8-F: 重新安装后构建并注入新 ONNX executor
+    //     begin_repair 已 shutdown 旧 executor，这里注入新的
+    if let Some(coordinator) = get_ocr_coordinator(&app) {
+        let new_executor =
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+        if let Some(executor) = new_executor {
+            coordinator.inject_executor(executor).await;
+        } else {
+            coordinator.notify_external_state_change().await;
+        }
     }
 
     // 6. 退出 repair 模式，恢复正常生命周期
@@ -2602,6 +2590,8 @@ pub async fn repair_paddleocr(
 }
 
 /// 等待模型 Ready，轮询直到 Ready 或超时。
+/// 0.22.8: 不再使用（ONNX lazy load 不走 svc.start），保留用于 legacy 兼容。
+#[allow(dead_code)]
 async fn wait_for_model_ready(
     svc: &crate::app::local_engine::EngineManager,
     engine_id: &crate::infra::local_engine::runtime::EngineId,
@@ -2632,7 +2622,8 @@ async fn wait_for_model_ready(
 
 /// 启动 PaddleOCR 引擎。
 ///
-/// 如果环境未安装，先自动安装。
+/// 0.22.8: ONNX in-process——不 spawn 子进程。
+/// 安装后通知 OcrCoordinator 清理缓存，下次 OCR 请求自动 lazy load。
 #[tauri::command]
 pub async fn start_paddleocr(
     app: tauri::AppHandle,
@@ -2643,7 +2634,7 @@ pub async fn start_paddleocr(
     let engine_id = paddleocr_engine_id();
     let adapter_config = build_paddleocr_adapter_config();
 
-    // 确保环境已安装
+    // 确保环境已安装（ONNX: ORT DLL + 模型下载 → staging → self-test → promote）
     svc.ensure_installed(&engine_id, adapter_config.clone())
         .await
         .map_err(|e| {
@@ -2654,36 +2645,37 @@ pub async fn start_paddleocr(
             )
         })?;
 
-    // 启动引擎
-    svc.start(&engine_id, adapter_config)
-        .await
-        .map_err(|e| CommandError::new("start_failed", format!("PaddleOCR 启动失败: {e}"), true))?;
+    // 0.22.8-F: 构建并注入 ONNX executor
+    if let Some(coordinator) = get_ocr_coordinator(&app) {
+        let new_executor =
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+        if let Some(executor) = new_executor {
+            coordinator.inject_executor(executor).await;
+        } else {
+            coordinator.notify_external_state_change().await;
+        }
+    }
 
-    // Task 16: 通知 OcrCoordinator 外部状态变更——清理缓存
-    notify_coordinator_state_change(&app).await;
-
-    tracing::info!("PaddleOCR 引擎已启动");
+    tracing::info!("PaddleOCR 引擎已就绪（ONNX in-process lazy load）");
     Ok(())
 }
 
 /// 停止 PaddleOCR 引擎。
+///
+/// 0.22.8: ONNX in-process——停止 OnnxOcrExecutor 的 Session（drop worker thread）。
 #[tauri::command]
 pub async fn stop_paddleocr(
     app: tauri::AppHandle,
 ) -> Result<(), crate::app::command_error::CommandError> {
-    use crate::app::command_error::CommandError;
-    let svc =
-        get_engine_service(&app).map_err(|e| CommandError::new("internal_error", e, false))?;
-    let engine_id = paddleocr_engine_id();
-
-    svc.stop(&engine_id).await.map_err(|e| {
-        CommandError::new("stop_failed", format!("停止 PaddleOCR 失败: {e}"), false)
-    })?;
+    // 0.22.8: ONNX in-process——通过 OcrCoordinator 停止 executor
+    if let Some(coordinator) = get_ocr_coordinator(&app) {
+        coordinator.shutdown().await;
+    }
 
     // Task 16: 通知 OcrCoordinator 外部状态变更——清理缓存
     notify_coordinator_state_change(&app).await;
 
-    tracing::info!("PaddleOCR 引擎已停止");
+    tracing::info!("PaddleOCR 引擎已停止（ONNX executor shutdown）");
     Ok(())
 }
 

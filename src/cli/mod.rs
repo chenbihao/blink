@@ -18,6 +18,7 @@
 //! - `blink help` / `blink --help` — 显示帮助（clap 自动生成）
 
 pub mod commands;
+pub mod onnx_validate;
 
 use clap::{Parser, Subcommand};
 
@@ -77,6 +78,33 @@ pub enum Commands {
         #[arg(long)]
         conversation: Option<String>,
     },
+
+    /// ONNX 隔离验证（0.22.8-B 隐藏入口，不在 help 中显示）。
+    ///
+    /// 由 OnnxRuntimeProvider 的 self_test 通过子进程调用，
+    /// 加载 staging DLL + 创建 ORT Session + 执行最小推理。
+    /// 不得出现在普通用户 CLI/help 中，也不得成为常驻 OCR worker。
+    #[command(hide = true)]
+    OnnxValidate {
+        /// ORT DLL 路径
+        #[arg(long)]
+        dll: String,
+        /// det 模型路径
+        #[arg(long)]
+        det: String,
+        /// rec 模型路径
+        #[arg(long)]
+        rec: String,
+        /// dictionary 路径
+        #[arg(long)]
+        dict: String,
+        /// ORT intra_op 线程数
+        #[arg(long)]
+        intra_op: u32,
+        /// ORT inter_op 线程数
+        #[arg(long)]
+        inter_op: u32,
+    },
 }
 
 /// 配置子命令。
@@ -132,6 +160,14 @@ pub fn try_run_cli() -> Option<i32> {
             }
         }
     }
+    // onnx-validate 是隐藏入口，不在 known_commands 中列出，
+    // 但需要被正确分派到 CLI 路径
+    if first == "onnx-validate" {
+        // 直接解析并执行，不走 clap 的完整子命令分派
+        // （因为 onnx-validate 是隐藏的，不在 help 中显示）
+        return Some(onnx_validate::run_from_args(&args[2..]));
+    }
+
     if !known_commands.contains(&first.as_str()) {
         return None;
     }

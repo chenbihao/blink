@@ -11,6 +11,7 @@ impl ManagedProcess {
     }
 
     /// 条件停止：只停止指定 token 的实例。
+    #[allow(dead_code)] // D 包迁移后 ONNX in-process 模式不再调用进程级条件停止
     pub async fn stop_if_current(&self, token: &InstanceToken) -> Result<(), ManagedProcessError> {
         self.stop_impl(Some(token)).await
     }

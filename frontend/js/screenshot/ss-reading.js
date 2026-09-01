@@ -48,6 +48,23 @@ export function computeCharRanges(words, fullText, backendCharRanges) {
 }
 
 /**
+ * 从后端 `char_boxes` 生成 UTF-16 offset 供 textarea selection API 使用。
+ *
+ * **0.22.8 三层契约**：当后端返回 `char_boxes`（逐字符框）时，
+ * 每个 `char_box` 含 `char_start` / `char_end`（Rust char index），
+ * 前端转换为 UTF-16 offset 用于 textarea selection。
+ *
+ * 返回 `{start, end}` 数组，与 `char_boxes` 等长。
+ */
+export function computeCharBoxRanges(charBoxes, fullText) {
+    if (!charBoxes || charBoxes.length === 0) return [];
+    return charBoxes.map((cb) => ({
+        start: rustCharIndexToUtf16(fullText, cb.char_start),
+        end: rustCharIndexToUtf16(fullText, cb.char_end),
+    }));
+}
+
+/**
  * Rust char index → UTF-16 code-unit offset。
  *
  * 遍历 fullText 的 codepoint，每遇到一个补充面字符（> 0xFFFF），
@@ -117,7 +134,7 @@ function charKind(ch) {
     return 'other';
 }
 
-/** 命中测试：把点击的 CSS 坐标(相对 hitCanvas)映射到物理像素 + 找命中 word */
+/** 命中测试：把点击的 CSS 坐标(相对 hitCanvas)映射到物理像素 + 找命中 word/char */
 function hitTestWord(cssX, cssY) {
     if (!ss.reading) return -1;
     // hit canvas backing store = 物理像素，CSS→bitmap 使用实测 renderScale
@@ -125,6 +142,19 @@ function hitTestWord(cssX, cssY) {
     const bmp = cssPointToBitmap(cssX, cssY, meta);
     const px = bmp.x;
     const py = bmp.y;
+
+    // 优先走 char_boxes（逐字符 hit-test）
+    if (ss.reading.charBoxes && ss.reading.charBoxes.length > 0) {
+        for (let i = 0; i < ss.reading.charBoxes.length; i++) {
+            const r = ss.reading.charBoxes[i].rect;
+            if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+                // 返回 char_box 所在的 word index（通过 line_index 关联）
+                return ss.reading.charBoxToWord[i];
+            }
+        }
+    }
+
+    // 降级：走 word 级 hit-test
     for (let i = 0; i < ss.reading.words.length; i++) {
         const r = ss.reading.words[i].rect;
         if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
@@ -139,6 +169,36 @@ function nearestWordByLine(cssX, cssY) {
     const bmp = cssPointToBitmap(cssX, cssY, meta);
     const px = bmp.x;
     const py = bmp.y;
+
+    // 优先用 char_boxes 找最近行
+    if (ss.reading.charBoxes && ss.reading.charBoxes.length > 0) {
+        let bestLine = ss.reading.charBoxes[0].lineIndex;
+        let bestDy = Infinity;
+        for (const cb of ss.reading.charBoxes) {
+            const cy = cb.rect.y + cb.rect.h / 2;
+            const dy = Math.abs(cy - py);
+            if (dy < bestDy) {
+                bestDy = dy;
+                bestLine = cb.lineIndex;
+            }
+        }
+        // 找该行最近的 char_box → 映射到 word
+        let bestCharIdx = -1;
+        let bestDx = Infinity;
+        for (let i = 0; i < ss.reading.charBoxes.length; i++) {
+            const cb = ss.reading.charBoxes[i];
+            if (cb.lineIndex !== bestLine) continue;
+            const cx = cb.rect.x + cb.rect.w / 2;
+            const dx = Math.abs(cx - px);
+            if (dx < bestDx) {
+                bestDx = dx;
+                bestCharIdx = i;
+            }
+        }
+        if (bestCharIdx >= 0) return ss.reading.charBoxToWord[bestCharIdx];
+    }
+
+    // 降级：走 word 级
     let bestLine = ss.reading.words[0].lineIndex;
     let bestDy = Infinity;
     for (const w of ss.reading.words) {
@@ -169,33 +229,75 @@ function redrawHitLayer() {
     if (!ss.reading) return;
     const {hitCtx, hitCanvas} = ss;
     hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
+
+    // 当有 char_boxes 时，高亮选中 word 对应的 char_boxes
+    const useCharBoxes = ss.reading.charBoxes && ss.reading.charBoxes.length > 0;
+
     if (ss.reading.selectionStart !== null && ss.reading.selectionEnd !== null) {
         const lo = Math.min(ss.reading.selectionStart, ss.reading.selectionEnd);
         const hi = Math.max(ss.reading.selectionStart, ss.reading.selectionEnd);
         hitCtx.fillStyle = 'rgba(74, 158, 255, 0.35)';
-        for (let i = lo; i <= hi; i++) {
-            const r = ss.reading.words[i].rect;
-            hitCtx.fillRect(r.x, r.y, r.w, r.h);
+
+        if (useCharBoxes) {
+            // 高亮选中 word 范围内的所有 char_boxes
+            for (let i = lo; i <= hi; i++) {
+                for (const cbIdx of ss.reading.wordToCharBoxes[i] || []) {
+                    const r = ss.reading.charBoxes[cbIdx].rect;
+                    hitCtx.fillRect(r.x, r.y, r.w, r.h);
+                }
+            }
+        } else {
+            for (let i = lo; i <= hi; i++) {
+                const r = ss.reading.words[i].rect;
+                hitCtx.fillRect(r.x, r.y, r.w, r.h);
+            }
         }
+
         hitCtx.strokeStyle = 'rgba(74, 158, 255, 0.85)';
         // hitCanvas backing store 使用 renderScale，线宽也需匹配
         const _meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
         const {scaleX: _rsx} = getRenderScale(_meta);
         hitCtx.lineWidth = Math.max(1, Math.round(_rsx));
-        for (let i = lo; i <= hi; i++) {
-            const r = ss.reading.words[i].rect;
-            hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+
+        if (useCharBoxes) {
+            for (let i = lo; i <= hi; i++) {
+                for (const cbIdx of ss.reading.wordToCharBoxes[i] || []) {
+                    const r = ss.reading.charBoxes[cbIdx].rect;
+                    hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+                }
+            }
+        } else {
+            for (let i = lo; i <= hi; i++) {
+                const r = ss.reading.words[i].rect;
+                hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+            }
         }
     }
     if (ss.reading.hoverWord !== null && ss.reading.hoverWord >= 0) {
-        const r = ss.reading.words[ss.reading.hoverWord].rect;
-        hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-        hitCtx.lineWidth = 1;
-        hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+        if (useCharBoxes) {
+            // hover 时高亮该 word 的所有 char_boxes
+            for (const cbIdx of ss.reading.wordToCharBoxes[ss.reading.hoverWord] || []) {
+                const r = ss.reading.charBoxes[cbIdx].rect;
+                hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                hitCtx.lineWidth = 1;
+                hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+            }
+        } else {
+            const r = ss.reading.words[ss.reading.hoverWord].rect;
+            hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            hitCtx.lineWidth = 1;
+            hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+        }
     }
 }
 
-/** 进入阅读模式：定位 hit-canvas + 装事件 + 首次全选 */
+/**
+ * 进入阅读模式：定位 hit-canvas + 装事件 + 首次全选。
+ *
+ * **0.22.8 三层契约**：当 `result.char_boxes` 非空时，构建 char_box → word
+ * 映射表，hit-test 优先走 char_boxes（逐字符精确定位），高亮也画 char_boxes。
+ * 无 `char_boxes` 时降级为 word 级 hit-test（与旧逻辑一致）。
+ */
 export function enterReadingMode(result) {
     if (!ss.selCss) return;
     const words = (result && Array.isArray(result.words)) ? result.words : [];
@@ -214,6 +316,44 @@ export function enterReadingMode(result) {
     hitCanvas.setAttribute('data-reading', 'true');
 
     const fullText = result.text || '';
+
+    // ── 0.22.8 三层契约：char_boxes 优先 hit-test ──
+    const rawCharBoxes = (result && Array.isArray(result.char_boxes)) ? result.char_boxes : [];
+    let charBoxes = [];
+    let charBoxToWord = [];     // char_box index → word index
+    let wordToCharBoxes = [];   // word index → char_box indices[]
+
+    if (rawCharBoxes.length > 0) {
+        // 构建 char_box → word 映射（通过 line_index 关联）
+        // 每个 char_box 的 line_index 对应一个 word 的 line_index
+        // word 是 region 级，char_box 是字符级，通过 line_index 关联
+        const wordByLine = new Map();
+        words.forEach((w, i) => wordByLine.set(w.line_index, i));
+
+        charBoxes = rawCharBoxes.map((cb) => ({
+            text: cb.text,
+            rect: cb.rect,
+            lineIndex: cb.line_index,
+        }));
+
+        charBoxToWord = rawCharBoxes.map((cb) => {
+            // 找到与该 char_box 同 line_index 的 word
+            // ONNX pipeline 中每个 region = 一个 word + 多个 char_boxes
+            // 所以 line_index 相同的 char_box 属于同一个 word
+            const wordIdx = wordByLine.get(cb.line_index);
+            return wordIdx !== undefined ? wordIdx : -1;
+        });
+
+        // 反向映射：word → char_boxes[]
+        wordToCharBoxes = words.map(() => []);
+        for (let i = 0; i < charBoxToWord.length; i++) {
+            const wi = charBoxToWord[i];
+            if (wi >= 0 && wi < wordToCharBoxes.length) {
+                wordToCharBoxes[wi].push(i);
+            }
+        }
+    }
+
     ss.reading = {
         words: words.map((w) => ({
             text: w.text,
@@ -229,6 +369,10 @@ export function enterReadingMode(result) {
             result.char_ranges,
         ),
         fullText,
+        // 0.22.8 三层契约：char_boxes 数据
+        charBoxes,
+        charBoxToWord,
+        wordToCharBoxes,
         selectionStart: null,
         selectionEnd: null,
         panelDirty: false,

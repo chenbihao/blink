@@ -23,6 +23,7 @@
 //! 事务期间最多存在 old + candidate 两个 slot；成功后稳定状态只保留 active。
 
 pub mod binary;
+pub mod onnx;
 pub mod python;
 
 use serde::{Deserialize, Serialize};
@@ -95,10 +96,19 @@ pub enum CompatibilityCheck {
 #[derive(Debug, Clone)]
 pub enum InstallPlan {
     /// Python venv 安装计划。
+    /// 0.22.8: PaddleOCR 已切换到 OnnxRuntime，保留用于 legacy 兼容读取。
+    #[allow(dead_code)]
     PythonVenv(PythonInstallPlan),
     /// Managed binary 安装计划（协议位保留：首个 binary 引擎接入时构造）。
     #[allow(dead_code)]
     ManagedBinary(BinaryInstallPlan),
+    /// ONNX Runtime 安装计划（0.22.8）。
+    ///
+    /// ORT DLL 使用版本化、不可变 artifact；模型 det/rec/dictionary 使用
+    /// `model_storage` generation。Provider 负责 staging、hash 校验和 promote，
+    /// 不伪装成 `ManagedBinary`（不启动子进程）。
+    #[allow(dead_code)]
+    OnnxRuntime(OnnxInstallPlan),
 }
 
 /// 额外 pip 安装参数（闭合枚举，不接受任意字符串）。
@@ -173,6 +183,33 @@ pub struct BinaryInstallPlan {
     /// 捆绑资源目录（相对于发布资源根，如 "bin/funasr-worker"）。
     /// `Some` 时安装走捆绑资源 + 随发布 manifest 校验，忽略网络字段。
     pub bundled_dir: Option<String>,
+}
+
+/// ONNX Runtime 安装计划（0.22.8）。
+///
+/// 描述 ORT DLL 和模型的联合 staging/promote 事务。
+/// DLL 和模型分别 staging、校验和 promote，未被 deployment 引用的
+/// 中间产物只作为可清扫 residue；只有两者联合 self-test 通过后
+/// 才提交 engine deployment pointer。
+#[allow(dead_code)] // 0.22.8 A 包协议位——B 包消费
+#[derive(Debug, Clone)]
+pub struct OnnxInstallPlan {
+    /// ORT DLL artifact id（版本化、不可变）。
+    pub dll_artifact_id: runtime::ArtifactId,
+    /// ORT 版本（如 `1.20.0`）。
+    pub ort_version: String,
+    /// ORT DLL 下载 URL。
+    #[allow(dead_code)]
+    pub dll_url: String,
+    /// ORT DLL SHA-256（hex）。
+    #[allow(dead_code)]
+    pub dll_sha256: String,
+    /// ORT `inter_op` 线程数（默认 1）。
+    pub inter_op: u32,
+    /// ORT `intra_op` 线程数上限（不超过 4，避免抢占 Alt+Space 主链路）。
+    pub intra_op: u32,
+    /// 执行 provider 模式（如 `cpu` / `dml`）。
+    pub execution_provider: String,
 }
 
 /// 包锁定条目。
@@ -754,6 +791,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         let self_test_ok = match &manifest.extension {
             ManifestExtension::PythonVenv(ext) => ext.self_test_passed,
             ManifestExtension::ManagedBinary(ext) => ext.self_test_passed,
+            ManifestExtension::OnnxRuntime(ext) => ext.self_test_passed,
         };
         if !self_test_ok {
             return Err(RuntimeError::SelfTestFailed {
@@ -1004,6 +1042,11 @@ pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
             }
             RuntimePlan::ManagedBinary => {
                 // ManagedBinary download cache (future)
+                Ok(())
+            }
+            RuntimePlan::OnnxRuntime => {
+                // OnnxRuntime download cache (0.22.8 protocol seam)
+                // ORT DLL 和模型按需下载，缓存清理由 B 包实现
                 Ok(())
             }
         },

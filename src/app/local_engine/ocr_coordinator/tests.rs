@@ -1,4 +1,7 @@
-//! OCR Coordinator 单元测试（自原 ocr_coordinator.rs 尾部整体迁移，断言不变）。
+//! OCR Coordinator 单元测试（0.22.8-D 适配）。
+//!
+//! 旧 `map_paddleocr_response` 测试已迁移为 `map_executor_result` 测试。
+//! 并发原语测试（LifecycleState / InFlightGuard / starting_gate）保持不变。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -8,10 +11,11 @@ use bytes::Bytes;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::mapping::map_paddleocr_response;
+use super::mapping::map_executor_result;
 use super::singleflight::{
     InFlightGuard, Lease, LifecycleState, StartingGateGuard, reset_failed_for_new_request,
 };
+use crate::domain::capability::builtins::ocr_engine::{OcrLine, OcrRect, OcrResult, OcrWord};
 use crate::domain::ocr::error::{OcrErrorCategory, StructuredOcrError};
 use crate::infra::local_engine::port::ConflictRetryPolicy;
 use crate::infra::local_engine::state::InstanceToken;
@@ -19,227 +23,167 @@ use crate::infra::local_engine::state::{
     CommitResult, ExitReason, ManagedProcessState, ProcessIdentity, ProcessStatus,
 };
 
-fn make_valid_resp() -> serde_json::Value {
-    serde_json::json!({
-        "request_id": "test-req",
-        "engine": "paddleocr",
-        "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
-        "model_revision": "ppocrv6-tiny",
-        "image_width": 200,
-        "image_height": 100,
-        "lines": [{"text": "hello", "rect": {"x": 0, "y": 0, "w": 100, "h": 30}, "word_indices": [0], "confidence": 0.95}],
-        "words": [{"text": "hello", "rect": {"x": 0, "y": 0, "w": 100, "h": 30}, "line_index": 0}]
-    })
-}
-
-const TEST_MODEL_ID: &str = "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec";
-const TEST_MODEL_REV: &str = "ppocrv6-tiny";
-
-#[test]
-fn map_paddleocr_response_basic() {
-    let resp = make_valid_resp();
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100))
-            .unwrap();
-    assert_eq!(result.text, "hello");
-    assert_eq!(result.lines.len(), 1);
-    assert_eq!(result.words.len(), 1);
-}
-
-#[test]
-fn map_paddleocr_response_cjk_smart_join() {
-    let resp = serde_json::json!({
-        "request_id": "test-req",
-        "engine": "paddleocr",
-        "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
-        "model_revision": "ppocrv6-tiny",
-        "image_width": 100,
-        "image_height": 50,
-        "lines": [{"text": "你好", "rect": {"x": 0, "y": 0, "w": 50, "h": 30}, "word_indices": [0, 1]}],
-        "words": [
-            {"text": "你", "rect": {"x": 0, "y": 0, "w": 25, "h": 30}, "line_index": 0},
-            {"text": "好", "rect": {"x": 25, "y": 0, "w": 25, "h": 30}, "line_index": 0}
-        ]
-    });
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (100, 50))
-            .unwrap();
-    assert_eq!(result.text, "你好");
+fn make_valid_result() -> OcrResult {
+    OcrResult {
+        text: "hello".to_string(),
+        lines: vec![OcrLine {
+            text: "hello".to_string(),
+            bounding_rect: OcrRect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 30,
+            },
+            word_indices: vec![0],
+        }],
+        words: vec![OcrWord {
+            text: "hello".to_string(),
+            bounding_rect: OcrRect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 30,
+            },
+            line_index: 0,
+        }],
+        text_angle: None,
+        char_ranges: vec![],
+        char_boxes: vec![],
+    }
 }
 
 #[test]
-fn map_paddleocr_response_empty_lines() {
-    let resp = serde_json::json!({
-        "request_id": "test-req",
-        "engine": "paddleocr",
-        "model_id": "PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec",
-        "model_revision": "ppocrv6-tiny",
-        "image_width": 100,
-        "image_height": 50,
-        "lines": [],
-        "words": []
-    });
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (100, 50))
-            .unwrap();
-    assert!(result.text.is_empty());
-    assert!(result.lines.is_empty());
+fn map_executor_result_basic() {
+    let result = make_valid_result();
+    let mapped = map_executor_result(result, (200, 100)).unwrap();
+    assert_eq!(mapped.text, "hello");
+    assert!(!mapped.lines.is_empty());
+    assert!(!mapped.words.is_empty());
 }
 
 #[test]
-fn missing_request_id_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["request_id"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err().category,
-        OcrErrorCategory::ProtocolError
-    );
+fn map_executor_result_empty() {
+    let result = OcrResult {
+        text: String::new(),
+        lines: vec![],
+        words: vec![],
+        text_angle: None,
+        char_ranges: vec![],
+        char_boxes: vec![],
+    };
+    let mapped = map_executor_result(result, (200, 100)).unwrap();
+    assert!(mapped.text.is_empty());
+    assert!(mapped.lines.is_empty());
+    assert!(mapped.words.is_empty());
 }
 
 #[test]
-fn mismatched_request_id_returns_error() {
-    let resp = make_valid_resp();
-    let result = map_paddleocr_response(
-        &resp,
-        "wrong-req",
-        TEST_MODEL_ID,
-        TEST_MODEL_REV,
-        (200, 100),
-    );
-    assert!(result.is_err());
+fn map_executor_result_negative_coords_rejected() {
+    let mut result = make_valid_result();
+    result.words[0].bounding_rect.x = -1;
+    assert!(map_executor_result(result, (200, 100)).is_err());
 }
 
 #[test]
-fn missing_engine_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["engine"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
+fn map_executor_result_zero_w_rejected() {
+    let mut result = make_valid_result();
+    result.words[0].bounding_rect.w = 0;
+    assert!(map_executor_result(result, (200, 100)).is_err());
 }
 
 #[test]
-fn wrong_engine_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["engine"] = serde_json::json!("winrt");
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
+fn map_executor_result_overflow_x_plus_w_rejected() {
+    let mut result = make_valid_result();
+    result.words[0].bounding_rect.x = 199;
+    result.words[0].bounding_rect.w = 2;
+    assert!(map_executor_result(result, (200, 100)).is_err());
 }
 
 #[test]
-fn missing_model_id_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["model_id"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
+fn map_executor_result_zero_h_rejected() {
+    let mut result = make_valid_result();
+    result.words[0].bounding_rect.h = 0;
+    assert!(map_executor_result(result, (200, 100)).is_err());
 }
 
 #[test]
-fn wrong_model_id_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["model_id"] = serde_json::json!("WRONG");
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
+fn map_executor_result_overflow_y_plus_h_rejected() {
+    let mut result = make_valid_result();
+    result.words[0].bounding_rect.y = 99;
+    result.words[0].bounding_rect.h = 2;
+    assert!(map_executor_result(result, (200, 100)).is_err());
 }
 
 #[test]
-fn missing_model_revision_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["model_revision"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
+fn map_executor_result_empty_text_word_filtered() {
+    let result = OcrResult {
+        text: String::new(),
+        lines: vec![],
+        words: vec![
+            OcrWord {
+                text: String::new(),
+                bounding_rect: OcrRect {
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 30,
+                },
+                line_index: 0,
+            },
+            OcrWord {
+                text: "ok".to_string(),
+                bounding_rect: OcrRect {
+                    x: 0,
+                    y: 30,
+                    w: 100,
+                    h: 30,
+                },
+                line_index: 0,
+            },
+        ],
+        text_angle: None,
+        char_ranges: vec![],
+        char_boxes: vec![],
+    };
+    let mapped = map_executor_result(result, (200, 100)).unwrap();
+    assert_eq!(mapped.words.len(), 1);
+    assert_eq!(mapped.words[0].text, "ok");
 }
 
 #[test]
-fn wrong_model_revision_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["model_revision"] = serde_json::json!("wrong");
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn missing_lines_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn missing_words_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["words"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn empty_line_text_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["text"] = serde_json::json!("");
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn rect_zero_w_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["rect"]["w"] = serde_json::json!(0);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn rect_overflow_x_plus_w_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["rect"]["x"] = serde_json::json!(199);
-    resp["lines"][0]["rect"]["w"] = serde_json::json!(2);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn word_indices_out_of_bounds_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["word_indices"] = serde_json::json!([1]);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn bidirectional_inconsistency_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["words"][0]["line_index"] = serde_json::json!(1);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-#[test]
-fn unreferenced_word_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["words"] = serde_json::json!([
-        {"text": "hello", "rect": {"x": 0, "y": 0, "w": 100, "h": 30}, "line_index": 0},
-        {"text": "world", "rect": {"x": 0, "y": 30, "w": 100, "h": 30}, "line_index": 0}
-    ]);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
+fn map_executor_result_cjk_line_grouping() {
+    let result = OcrResult {
+        text: "你好".to_string(),
+        lines: vec![],
+        words: vec![
+            OcrWord {
+                text: "你".to_string(),
+                bounding_rect: OcrRect {
+                    x: 0,
+                    y: 0,
+                    w: 25,
+                    h: 30,
+                },
+                line_index: 0,
+            },
+            OcrWord {
+                text: "好".to_string(),
+                bounding_rect: OcrRect {
+                    x: 25,
+                    y: 0,
+                    w: 25,
+                    h: 30,
+                },
+                line_index: 0,
+            },
+        ],
+        text_angle: None,
+        char_ranges: vec![],
+        char_boxes: vec![],
+    };
+    let mapped = map_executor_result(result, (100, 50)).unwrap();
+    assert_eq!(mapped.text, "你好");
+    assert_eq!(mapped.lines.len(), 1);
 }
 
 // ── 生命周期状态测试 ──────────────────────────────────────────────────
@@ -410,17 +354,13 @@ fn failed_state_transitions_to_idle_with_incremented_generation() {
     assert_eq!(idle.generation(), 6);
 }
 
-/// 验证 Lease model_contract 返回正确的模型标识。
+/// 验证 Lease 结构可以正确构造（0.22.8-D: 无 endpoint_url/token）。
 #[test]
-fn lease_model_contract_is_consistent() {
-    let lease = Lease {
-        endpoint_url: "http://127.0.0.1:9100".to_string(),
-        token: "test-token".to_string(),
-        _guard: None,
-    };
-    let (model_id, model_revision) = lease.model_contract();
-    assert!(model_id.contains("PP-OCRv6"), "model_id 应包含 PP-OCRv6");
-    assert!(!model_revision.is_empty(), "model_revision 不应为空");
+fn lease_construction_without_endpoint() {
+    let lease = Lease { _guard: None };
+    // 0.22.8-D: Lease 不再携带 endpoint_url/token
+    // 只需验证它可以被构造
+    drop(lease);
 }
 
 /// 验证 repair_mode 拒绝 lease 的逻辑——LeaseError::NotReady。
@@ -606,101 +546,7 @@ async fn concurrent_cold_requests_single_spawn() {
     );
 }
 
-/// 验证 response mapping 拒绝 image_width=0 或 image_height=0。
-#[test]
-fn zero_image_dimensions_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["image_width"] = serde_json::json!(0);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-/// 验证 response mapping 拒绝 image_width/height 缺失。
-#[test]
-fn missing_image_dimensions_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["image_width"] = serde_json::Value::Null;
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-/// 验证 rect 坐标负值返回错误。
-#[test]
-fn rect_negative_coords_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["rect"]["x"] = serde_json::json!(-1);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-/// 验证 rect h=0 返回错误。
-#[test]
-fn rect_zero_h_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["rect"]["h"] = serde_json::json!(0);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-/// 验证 rect y+h 超出 image_height 返回错误。
-#[test]
-fn rect_overflow_y_plus_h_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["rect"]["y"] = serde_json::json!(99);
-    resp["lines"][0]["rect"]["h"] = serde_json::json!(2);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-/// 验证重复 word_indices 返回错误。
-#[test]
-fn duplicate_word_indices_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["lines"][0]["word_indices"] = serde_json::json!([0, 0]);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-/// 验证响应尺寸与请求 PNG 尺寸不一致时返回错误。
-#[test]
-fn response_size_mismatch_with_request_png_returns_error() {
-    let resp = make_valid_resp(); // image_width=200, image_height=100
-    // 传入不一致的请求尺寸 (200, 99)
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 99));
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.category, OcrErrorCategory::ProtocolError);
-    assert!(err.message.contains("不一致"));
-}
-
-/// 验证响应尺寸与请求 PNG 尺寸一致时通过。
-#[test]
-fn response_size_match_with_request_png_passes() {
-    let resp = make_valid_resp(); // image_width=200, image_height=100
-    // 传入一致的请求尺寸 (200, 100)
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_ok());
-}
-
-/// 验证 image_height=0 返回错误。
-#[test]
-fn zero_image_height_returns_error() {
-    let mut resp = make_valid_resp();
-    resp["image_height"] = serde_json::json!(0);
-    let result =
-        map_paddleocr_response(&resp, "test-req", TEST_MODEL_ID, TEST_MODEL_REV, (200, 100));
-    assert!(result.is_err());
-}
-
-// ── starting_gate 原子 CAS 测试 ──────────────────────────────────────
+// ── starting_gate 原子 CAS 测试 ───────────────────────────────────
 
 /// 验证 starting_gate 的原子 CAS——只有一个 winner。
 #[tokio::test]
@@ -864,217 +710,6 @@ async fn leader_cancel_does_not_reset_gate() {
     let guard = StartingGateGuard::new(gate.clone());
     drop(guard);
     assert!(!gate.load(Ordering::SeqCst));
-}
-
-// ── 真实 PaddleOCR 响应 fixture 契约测试（Handoff A.IV.6）──────────────
-
-/// 加载 fixture JSON 文件。
-fn load_fixture(name: &str) -> serde_json::Value {
-    let path = std::path::Path::new("testdata/ocr/ppocrv6/fixtures").join(format!("{name}.json"));
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("无法读取 fixture {name}: {e} (path: {})", path.display()));
-    serde_json::from_str(&content).expect("fixture JSON 解析失败")
-}
-
-/// 验证英文 fixture 能通过严格 mapper。
-#[test]
-fn fixture_basic_en_passes_strict_mapper() {
-    let resp = load_fixture("recognize_basic_en_1");
-    let result = map_paddleocr_response(
-        &resp,
-        "fixture-en-1",
-        TEST_MODEL_ID,
-        TEST_MODEL_REV,
-        (400, 80),
-    );
-    assert!(
-        result.is_ok(),
-        "英文 fixture 应通过严格 mapper: {:?}",
-        result.err()
-    );
-    let ocr = result.unwrap();
-    assert_eq!(ocr.lines.len(), 1);
-    assert_eq!(ocr.words.len(), 2);
-    assert_eq!(ocr.lines[0].text, "Hello World");
-    // 验证 word_indices 双向一致
-    for (i, &word_idx) in ocr.lines[0].word_indices.iter().enumerate() {
-        assert_eq!(
-            ocr.words[word_idx].line_index, 0,
-            "word[{word_idx}].line_index 应为 0（被 line[0] 引用，位置 {i}）"
-        );
-    }
-    // 验证所有 rect 在图片边界内
-    for line in &ocr.lines {
-        assert!(line.bounding_rect.x + line.bounding_rect.w as i32 <= 400);
-        assert!(line.bounding_rect.y + line.bounding_rect.h as i32 <= 80);
-    }
-    for word in &ocr.words {
-        assert!(word.bounding_rect.x + word.bounding_rect.w as i32 <= 400);
-        assert!(word.bounding_rect.y + word.bounding_rect.h as i32 <= 80);
-    }
-}
-
-/// 验证中英文混合 fixture 能通过严格 mapper。
-#[test]
-fn fixture_basic_cjk_passes_strict_mapper() {
-    let resp = load_fixture("recognize_basic_cjk_1");
-    let result = map_paddleocr_response(
-        &resp,
-        "fixture-cjk-1",
-        TEST_MODEL_ID,
-        TEST_MODEL_REV,
-        (500, 120),
-    );
-    assert!(
-        result.is_ok(),
-        "中英文 fixture 应通过严格 mapper: {:?}",
-        result.err()
-    );
-    let ocr = result.unwrap();
-    assert_eq!(ocr.lines.len(), 2);
-    assert_eq!(ocr.words.len(), 9);
-    // 验证 line 0 的 word_indices
-    assert_eq!(ocr.lines[0].word_indices.len(), 4);
-    // 验证 line 1 的 word_indices
-    assert_eq!(ocr.lines[1].word_indices.len(), 5);
-    // 验证双向一致
-    for (line_idx, line) in ocr.lines.iter().enumerate() {
-        for &word_idx in &line.word_indices {
-            assert_eq!(
-                ocr.words[word_idx].line_index, line_idx,
-                "word[{word_idx}].line_index 应为 {line_idx}"
-            );
-        }
-    }
-    // 验证所有 rect 在边界内
-    for line in &ocr.lines {
-        assert!(line.bounding_rect.x + line.bounding_rect.w as i32 <= 500);
-        assert!(line.bounding_rect.y + line.bounding_rect.h as i32 <= 120);
-    }
-    for word in &ocr.words {
-        assert!(word.bounding_rect.x + word.bounding_rect.w as i32 <= 500);
-        assert!(word.bounding_rect.y + word.bounding_rect.h as i32 <= 120);
-    }
-}
-
-/// 验证 fixture 中的尺寸与请求 PNG 尺寸不一致时返回错误。
-#[test]
-fn fixture_size_mismatch_returns_error() {
-    let resp = load_fixture("recognize_basic_en_1");
-    // fixture 是 400x80，传入不一致尺寸
-    let result = map_paddleocr_response(
-        &resp,
-        "fixture-en-1",
-        TEST_MODEL_ID,
-        TEST_MODEL_REV,
-        (400, 79),
-    );
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.category, OcrErrorCategory::ProtocolError);
-    assert!(err.message.contains("不一致"));
-}
-
-/// 验证 fixture 的 model_id 不匹配时返回错误。
-#[test]
-fn fixture_wrong_model_id_returns_error() {
-    let resp = load_fixture("recognize_basic_en_1");
-    let result = map_paddleocr_response(
-        &resp,
-        "fixture-en-1",
-        "WRONG_MODEL_ID",
-        TEST_MODEL_REV,
-        (400, 80),
-    );
-    assert!(result.is_err());
-}
-
-// ── 0.22.6.1 越界 rect 修复契约测试 ─────────────────────────────────────
-
-/// Python 生产映射（ocr_rect.extract_results）的产物 fixture 必须通过
-/// Rust `map_paddleocr_response` 严格校验。
-///
-/// fixture 链路：`rect_raw_out_of_bounds.json`（原始 PaddleOCR 形状输出，
-/// 含越界/负坐标/取整漂移/完全出界数据）→ Python 生产映射归一化 →
-/// `rect_normalized_out_of_bounds.json`（由
-/// `resources/ocr/paddleocr/test_ocr_rect.py` 逐字段锁定，禁止手改）→
-/// 本测试走真实严格 mapper。两侧任一漂移都会使契约失败。
-#[test]
-fn python_normalized_out_of_bounds_fixture_passes_strict_mapper() {
-    let resp = load_fixture("rect_normalized_out_of_bounds");
-    let (req_w, req_h) = (
-        resp["image_width"].as_u64().unwrap() as u32,
-        resp["image_height"].as_u64().unwrap() as u32,
-    );
-    let result = map_paddleocr_response(
-        &resp,
-        "fixture-rect-oob-1",
-        TEST_MODEL_ID,
-        TEST_MODEL_REV,
-        (req_w, req_h),
-    );
-    assert!(
-        result.is_ok(),
-        "Python 生产映射的越界 fixture 必须通过严格 mapper: {:?}",
-        result.err()
-    );
-    let ocr = result.unwrap();
-    // 1188px 宽图片：3 条有效 line（1 条完全出界跳过、1 条空 text 跳过）、7 个 word
-    assert_eq!(ocr.lines.len(), 3);
-    assert_eq!(ocr.words.len(), 7);
-    // 全部 rect 严格在图片边界内（Rust 侧独立复核，不信任 fixture）
-    for (i, line) in ocr.lines.iter().enumerate() {
-        assert!(line.bounding_rect.x >= 0);
-        assert!(line.bounding_rect.y >= 0);
-        assert!(
-            line.bounding_rect.x + line.bounding_rect.w as i32 <= req_w as i32,
-            "line[{i}] x+w 越界"
-        );
-        assert!(
-            line.bounding_rect.y + line.bounding_rect.h as i32 <= req_h as i32,
-            "line[{i}] y+h 越界"
-        );
-    }
-    for (i, word) in ocr.words.iter().enumerate() {
-        assert!(word.bounding_rect.x >= 0);
-        assert!(word.bounding_rect.y >= 0);
-        assert!(
-            word.bounding_rect.x + word.bounding_rect.w as i32 <= req_w as i32,
-            "word[{i}] x+w 越界"
-        );
-        assert!(
-            word.bounding_rect.y + word.bounding_rect.h as i32 <= req_h as i32,
-            "word[{i}] y+h 越界"
-        );
-    }
-    // line.word_indices 与 word.line_index 双向一致
-    for (line_idx, line) in ocr.lines.iter().enumerate() {
-        for &word_idx in &line.word_indices {
-            assert_eq!(ocr.words[word_idx].line_index, line_idx);
-        }
-    }
-}
-
-/// 越界输入（原始数据直接构造）必须被严格 mapper 拒绝——mapper 未被放宽。
-#[test]
-fn strict_mapper_still_rejects_out_of_bounds_rect() {
-    let mut resp = make_valid_resp();
-    // 1188px 现象复现：x+w=1259 超出 image_width=1188
-    resp["image_width"] = serde_json::json!(1188);
-    resp["image_height"] = serde_json::json!(800);
-    resp["lines"][0]["rect"] = serde_json::json!({"x": 40, "y": 30, "w": 1219, "h": 50});
-    resp["words"][0]["rect"] = serde_json::json!({"x": 40, "y": 30, "w": 1219, "h": 50});
-    let result = map_paddleocr_response(
-        &resp,
-        "test-req",
-        TEST_MODEL_ID,
-        TEST_MODEL_REV,
-        (1188, 800),
-    );
-    assert!(result.is_err(), "越界 rect 必须被严格 mapper 拒绝");
-    let err = result.unwrap_err();
-    assert_eq!(err.category, OcrErrorCategory::ProtocolError);
-    assert!(err.message.contains("超出 image_width"));
 }
 
 // ── 输入资源预算（0.22.6.1）────────────────────────────────────────────

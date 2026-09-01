@@ -26,6 +26,12 @@
 import {registerAdapterHook, unregisterAdapterHook} from "./local-engine-card.js";
 import {t} from "../../../i18n/index.js";
 import {computeOptionsDisplayMode} from "./local-engine-state.js";
+import {
+    isPendingRestart,
+    getDesiredDeployment,
+    getLoadedDeployment,
+    getLegacyDeployment,
+} from "./local-engine-state.js";
 
 // ── 公共构造 ──────────────────────────────────────────────────────────────────
 
@@ -251,9 +257,162 @@ function registerFunasrHook() {
 // ── PaddleOCR hook ────────────────────────────────────────────────────────────
 
 /**
- * 注册 PaddleOCR 受限 adapter hook。
+ * 渲染 ONNX 资产状态组（ORT DLL / det / rec / dictionary 大小）。
  *
- * 配置组：当前模型（只读）/ OCR 后端 / 计算设备 / 运行策略（生命周期）。
+ * 0.22.8-E: 原位展示 CPU ONNX runtime 和资产真实大小。
+ * 资产大小从 storage DTO 的 targets 中提取，
+ * catalog.resource_budget 提供预算估计值。
+ */
+function appendOnnxAssetStatusGroup(container, entry) {
+    const catalog = entry?.catalog;
+    const storage = entry?.storage;
+    if (!catalog || catalog.runtime_kind !== "onnx_runtime") return;
+
+    const group = makeGroup(t("local_engine.config.onnx_assets", "ONNX 资产"));
+    group.className += " le-config-group-onnx-assets";
+
+    // 从 storage targets 提取各资产大小
+    const targets = storage?.targets || [];
+    const parts = [];
+
+    // ORT DLL
+    const ortTarget = targets.find((s) => s.kind === "engine_environment" && s.current);
+    if (ortTarget && ortTarget.size_bytes > 0) {
+        parts.push(`${t("local_engine.config.ort_runtime", "ORT")}: ${formatBytes(ortTarget.size_bytes)}`);
+    } else {
+        const envBudget = catalog.resource_budget?.estimated_env_disk_mb;
+        if (envBudget != null) {
+            parts.push(`${t("local_engine.config.ort_runtime", "ORT")}: ~${formatMB(envBudget)}`);
+        }
+    }
+
+    // det / rec / dictionary 模型资产
+    const modelTargets = targets.filter((s) => s.kind === "installed_model");
+    if (modelTargets.length > 0) {
+        for (const mt of modelTargets) {
+            const label = mt.label_fallback || mt.target_id || "model";
+            parts.push(`${label}: ${formatBytes(mt.size_bytes)}`);
+        }
+    } else {
+        const modelBudget = catalog.resource_budget?.estimated_model_disk_mb;
+        if (modelBudget != null) {
+            parts.push(`${t("local_engine.config.models", "模型")}: ~${formatMB(modelBudget)}`);
+        }
+    }
+
+    if (parts.length === 0) return;
+
+    const value = document.createElement("span");
+    value.className = "le-config-static le-onnx-assets";
+    value.textContent = parts.join(" · ");
+    group.appendChild(value);
+    container.appendChild(group);
+}
+
+/** 格式化字节数（B/KB/MB/GB）。 */
+function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return "0 B";
+    const mb = bytes / (1024 * 1024);
+    if (mb < 1) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    if (mb < 1024) return `${Math.round(mb)} MB`;
+    return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+/** 格式化 MB 数值。 */
+function formatMB(mb) {
+    if (mb == null) return "—";
+    if (mb < 1024) return `${Math.round(mb)} MB`;
+    return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+/**
+ * 渲染 ONNX deployment identity 组（desired / loaded / pending_restart）。
+ *
+ * 0.22.8-E: 展示真实 deployment 状态，不乐观显示 Ready。
+ * - desired: 用户最近安装/更新提交的目标
+ * - loaded: 当前主进程实际加载的（null=未初始化 ORT）
+ * - pending_restart: DLL identity 变化，重启后生效
+ *
+ * 只切模型 generation 不触发 pending_restart——不能错误提示重启。
+ */
+function appendDeploymentIdentityGroup(container, entry) {
+    const desired = getDesiredDeployment(entry);
+    const loaded = getLoadedDeployment(entry);
+    const pending = isPendingRestart(entry);
+
+    if (!desired && !loaded) return; // 无 deployment 信息时不渲染
+
+    const group = makeGroup(t("local_engine.config.deployment", "部署状态"));
+    group.className += " le-config-group-deployment";
+
+    const parts = [];
+    if (desired) {
+        parts.push(`${t("local_engine.config.desired_deployment", "已提交")}: ${desired.model_revision || "—"}`);
+    }
+    if (loaded) {
+        parts.push(`${t("local_engine.config.loaded_deployment", "已加载")}: ${loaded.model_revision || "—"}`);
+    } else if (desired) {
+        parts.push(t("local_engine.config.not_loaded", "未加载"));
+    }
+    if (pending) {
+        parts.push(t("local_engine.config.pending_restart", "待重启"));
+    }
+
+    const value = document.createElement("span");
+    value.className = "le-config-static le-deployment-status";
+    if (pending) {
+        value.className += " le-deployment-pending";
+    }
+    value.textContent = parts.join(" · ");
+    group.appendChild(value);
+    container.appendChild(group);
+}
+
+/**
+ * 渲染 legacy Python deployment 警告组。
+ *
+ * **铁则**：legacy 清理必须明确警告——删除后旧版 Blink 无法复用该 OCR 环境。
+ * legacy 不参与运行时 fallback，只在维护中提供主动清理入口。
+ */
+function appendLegacyWarningGroup(container, entry) {
+    const legacy = getLegacyDeployment(entry);
+    if (!legacy) return;
+
+    const group = makeGroup(t("local_engine.config.legacy_deployment", "旧版 Python 环境"));
+    group.className += " le-config-group-legacy";
+
+    const value = document.createElement("span");
+    value.className = "le-config-static le-legacy-warning";
+    value.textContent = t("local_engine.config.legacy_warning",
+        "检测到旧版 Python OCR 环境。清理后旧版 Blink 无法复用此环境。");
+    group.appendChild(value);
+
+    // 展示 legacy 大小（如果有）
+    if (legacy.size_bytes != null) {
+        const sizeEl = document.createElement("span");
+        sizeEl.className = "le-config-static le-legacy-size";
+        const mb = legacy.size_bytes / (1024 * 1024);
+        const sizeText = mb < 1024
+            ? `${Math.round(mb)} MB`
+            : `${(mb / 1024).toFixed(1)} GB`;
+        sizeEl.textContent = `· ${t("local_engine.storage.actual", "实际占用")} ${sizeText}`;
+        group.appendChild(sizeEl);
+    }
+
+    container.appendChild(group);
+}
+
+/**
+ * 注册 PaddleOCR 受限 adapter hook（0.22.8-E ONNX 原位适配）。
+ *
+ * 0.22.8 变更：
+ * - 不新增 ONNX OCR 卡片，仍使用一张 PaddleOCR 卡片
+ * - 不提供 GGUF/ONNX/runtime 技术底座选择器
+ * - 展示 ONNX runtime / ORT 与 det/rec/dictionary 资产状态
+ * - 展示 desired/loaded deployment + pending restart
+ * - 展示 legacy Python 空间 + 明确清理警告
+ * - 安装/更新/回滚/重启提示/修复/清理复用既有受限 IPC
+ *
  * 保存走闭合命令 `set_local_engine_preferences`，失败回滚。
  */
 function registerPaddleOcrHook() {
@@ -270,6 +429,15 @@ function registerPaddleOcrHook() {
 
             // 当前模型（只读）+ 待重启提示
             appendCurrentModelGroup(container, entry);
+
+            // 0.22.8-E: ONNX 资产状态（ORT / det / rec / dict 大小）
+            appendOnnxAssetStatusGroup(container, entry);
+
+            // 0.22.8-E: deployment identity（desired / loaded / pending_restart）
+            appendDeploymentIdentityGroup(container, entry);
+
+            // 0.22.8-E: legacy Python 空间 + 清理警告
+            appendLegacyWarningGroup(container, entry);
 
             // OCR 路由后端
             const backendGroup = makeGroup(t("local_engine.config.ocr_backend"));
@@ -302,7 +470,7 @@ function registerPaddleOcrHook() {
             backendGroup.appendChild(backendSelect);
             container.appendChild(backendGroup);
 
-            // 计算设备（catalog 声明 auto/cpu 双候选 → select）
+            // 计算设备（catalog 声明 cpu 单选项 → 静态文本）
             appendComputeGroup(container, entry, "paddleocr", controller);
 
             // 运行策略（生命周期）
@@ -340,6 +508,77 @@ function registerPaddleOcrHook() {
         },
         syncConfig(container, entry) {
             syncCommonConfig(container, entry);
+
+            // 0.22.8-E: ONNX 资产状态原位同步
+            const assetsEl = container.querySelector(".le-onnx-assets");
+            if (assetsEl) {
+                const catalog = entry?.catalog;
+                const storage = entry?.storage;
+                const targets = storage?.targets || [];
+                const parts = [];
+                const ortTarget = targets.find((s) => s.kind === "engine_environment" && s.current);
+                if (ortTarget && ortTarget.size_bytes > 0) {
+                    parts.push(`${t("local_engine.config.ort_runtime", "ORT")}: ${formatBytes(ortTarget.size_bytes)}`);
+                } else {
+                    const envBudget = catalog?.resource_budget?.estimated_env_disk_mb;
+                    if (envBudget != null) {
+                        parts.push(`${t("local_engine.config.ort_runtime", "ORT")}: ~${formatMB(envBudget)}`);
+                    }
+                }
+                const modelTargets = targets.filter((s) => s.kind === "installed_model");
+                if (modelTargets.length > 0) {
+                    for (const mt of modelTargets) {
+                        const label = mt.label_fallback || mt.target_id || "model";
+                        parts.push(`${label}: ${formatBytes(mt.size_bytes)}`);
+                    }
+                } else {
+                    const modelBudget = catalog?.resource_budget?.estimated_model_disk_mb;
+                    if (modelBudget != null) {
+                        parts.push(`${t("local_engine.config.models", "模型")}: ~${formatMB(modelBudget)}`);
+                    }
+                }
+                const newText = parts.join(" · ");
+                if (assetsEl.textContent !== newText) {
+                    assetsEl.textContent = newText;
+                }
+            }
+
+            // 0.22.8-E: deployment identity 原位同步
+            const depStatus = container.querySelector(".le-deployment-status");
+            if (depStatus) {
+                const desired = getDesiredDeployment(entry);
+                const loaded = getLoadedDeployment(entry);
+                const pending = isPendingRestart(entry);
+                const parts = [];
+                if (desired) {
+                    parts.push(`${t("local_engine.config.desired_deployment", "已提交")}: ${desired.model_revision || "—"}`);
+                }
+                if (loaded) {
+                    parts.push(`${t("local_engine.config.loaded_deployment", "已加载")}: ${loaded.model_revision || "—"}`);
+                } else if (desired) {
+                    parts.push(t("local_engine.config.not_loaded", "未加载"));
+                }
+                if (pending) {
+                    parts.push(t("local_engine.config.pending_restart", "待重启"));
+                }
+                const newText = parts.join(" · ");
+                if (depStatus.textContent !== newText) {
+                    depStatus.textContent = newText;
+                }
+                if (pending) {
+                    depStatus.classList.add("le-deployment-pending");
+                } else {
+                    depStatus.classList.remove("le-deployment-pending");
+                }
+            }
+
+            // 0.22.8-E: legacy 警告原位同步
+            const legacyWarn = container.querySelector(".le-legacy-warning");
+            if (legacyWarn) {
+                const legacy = getLegacyDeployment(entry);
+                legacyWarn.parentElement.hidden = !legacy;
+            }
+
             const backend = container.querySelector(".le-ocr-backend-select");
             const nextBackend = entry.preferences?.ocr_backend || "windows";
             if (backend) {

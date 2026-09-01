@@ -43,6 +43,19 @@ pub struct OcrResult {
     /// `char_ranges[i]` 对应 `words[i]`，长度与 `words` 等长。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub char_ranges: Vec<(usize, usize)>,
+    /// 字符级选取框（0.22.8 新增）。
+    ///
+    /// `char_boxes` 与 `words` 语义分离：
+    /// - `words` 是语义级选择单元（词/region），用于行级 grouping 和 char_ranges。
+    /// - `char_boxes` 是字符级定位框，用于图片上的 hit-test、拖选和高亮。
+    ///
+    /// `char_start/char_end` 是相对于 `OcrResult.text` 的 Rust char index，
+    /// 前端转换为 UTF-16 offset 后供 textarea selection API 使用。
+    ///
+    /// 兼容性：空数组（`Vec::new()`）表示无字符级选取框，前端回退到 `words`。
+    /// WinRT / FakeOcrBackend 等不产生 char_boxes，序列化时省略（`skip_serializing_if`）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub char_boxes: Vec<OcrCharBox>,
 }
 
 /// OCR 单行结果
@@ -63,6 +76,30 @@ pub struct OcrWord {
     #[serde(rename = "rect")]
     pub bounding_rect: OcrRect,
     pub line_index: usize,
+}
+
+/// 字符级选取框（0.22.8 新增）。
+///
+/// 用于图片上的 hit-test、拖选和高亮。`char_start/char_end` 是相对于
+/// `OcrResult.text` 的 Rust char index 范围。
+///
+/// 与 `OcrWord` 的区别：
+/// - `OcrWord` 是语义级 token（词/region），参与行级 grouping 和 `char_ranges`。
+/// - `OcrCharBox` 是字符级定位框，不参与文本拼接，仅用于前端图片选取。
+///
+/// 来源：oar-ocr 的 `word_boxes` 实际是逐字符框，在 ONNX pipeline 中
+/// 被映射为 `OcrCharBox` 而非伪装成 `OcrWord`。
+#[derive(Debug, Clone, Serialize)]
+pub struct OcrCharBox {
+    pub text: String,
+    #[serde(rename = "rect")]
+    pub bounding_rect: OcrRect,
+    pub line_index: usize,
+    /// 该字符在 `OcrResult.text` 中的 Rust char 起始索引（含）。
+    pub char_start: usize,
+    /// 该字符在 `OcrResult.text` 中的 Rust char 结束索引（不含）。
+    /// `char_end - char_start` 始终等于 `text.chars().count()`。
+    pub char_end: usize,
 }
 
 /// 矩形坐标（物理像素）
@@ -540,6 +577,7 @@ pub fn rebuild_with_line_grouping_and_diag(
                 words: Vec::new(),
                 text_angle,
                 char_ranges: Vec::new(),
+                char_boxes: Vec::new(),
             },
             diag,
         );
@@ -651,6 +689,7 @@ pub fn rebuild_with_line_grouping_and_diag(
             words,
             text_angle,
             char_ranges: full_char_ranges,
+            char_boxes: Vec::new(),
         },
         diag,
     )
@@ -1051,6 +1090,7 @@ impl OcrBackend for FakeOcrBackend {
             words: self.words.clone(),
             text_angle: None,
             char_ranges: Vec::new(),
+            char_boxes: Vec::new(),
         })
     }
 

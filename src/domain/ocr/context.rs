@@ -110,6 +110,7 @@ impl OcrRequestContext {
     ///
     /// 如果 deadline 已过返回 `Duration::ZERO`。
     /// 如果无 deadline 返回 `None`。
+    #[allow(dead_code)] // 保留供未来超时预算检查使用
     pub fn remaining_timeout(&self) -> Option<Duration> {
         self.deadline.map(|d| {
             let now = Instant::now();

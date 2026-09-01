@@ -1,9 +1,16 @@
-//! OCR Coordinator — 路由 + 生命周期 + 并发管理（0.22.5）。
+//! OCR Coordinator — 路由 + 生命周期 + 并发管理（0.22.8-D）。
 //!
-//! `OcrCoordinator` 是 `OcrBackendRouter` 的具体实现，持有 `EngineManager`
-//! 受限依赖，负责：路由 / 生命周期 / HTTP 识别 / 诊断。
+//! `OcrCoordinator` 是 `OcrBackendRouter` 的具体实现，持有 `OnnxOcrExecutor`
+//! 替代 Python HTTP 子进程，负责：路由 / 生命周期 / ONNX in-process 识别 / 诊断。
 //!
-//! ## 并发模型与竞态防护（0.22.5 重构）
+//! ## 0.22.8-D 变更：Python HTTP → ONNX in-process
+//!
+//! - 启动路径：`engine_service.start()` → `executor.ensure_ready()`
+//! - 识别路径：HTTP `/recognize` → `executor.recognize()`
+//! - Lease 不再携带 endpoint/token，只保留 InFlightGuard
+//! - idle TTL / shutdown / repair 统一调用 `executor.shutdown()`
+//!
+//! ## 并发模型与竞态防护（0.22.5 重构，0.22.8-D 适配）
 //!
 //! - **shared startup singleflight**：启动请求通过 `watch::Sender<LifecycleState>` 合并。
 //!   状态包括 `generation`，支持 Idle/Starting/Ready/Stopping/Failed。
@@ -25,12 +32,10 @@
 //! ## 子模块（0.22 结构拆分）
 //!
 //! - [`singleflight`]：lease / in-flight / LifecycleState / shared startup 并发原语
-//! - [`client`]：PaddleOCR HTTP 请求（/recognize、/health）与 endpoint/token 获取
-//! - [`mapping`]：Paddle 响应 → OcrResult 契约映射（纯函数）
+//! - [`mapping`]：ONNX executor → OcrResult 契约映射（纯函数，含 line grouping）
 //! - [`lifecycle`]：idle TTL / StopAfterUse 回收
-//! - [`diagnostics`]：service/model 状态投影与诊断辅助
+//! - [`diagnostics`]：executor 状态投影与诊断辅助
 //! - [`tests`]：单元测试
-mod client;
 mod diagnostics;
 mod lifecycle;
 mod mapping;
@@ -42,11 +47,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
+use crate::infra::local_engine::onnx_ocr::{OcrExecutor, OnnxOcrExecutor, RecognizeRequest};
 use bytes::Bytes;
 use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
-
-use crate::infra::local_engine::state::InstanceToken;
 
 use crate::domain::capability::builtins::ocr_engine::{OcrResult, backend as get_global_backend};
 use crate::domain::config::ocr_config::{OcrRuntimeSnapshot, get_ocr_config};
@@ -89,21 +93,17 @@ impl Drop for RepairGuard {
     }
 }
 
-/// Task 2: 条件停止结果——可区分 token 不匹配、已停止和成功停止。
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConditionalStopOutcome {
-    /// 成功停止了目标实例
-    Stopped,
-    /// token 不匹配——当前实例已经不是目标实例，不停止新实例
-    TokenMismatch,
-    /// 条件停止内部错误——禁止兜底无条件 stop
-    Error(String),
-}
-
 // ── OcrCoordinator ─────────────────────────────────────────────────────────
 
 pub struct OcrCoordinator {
-    engine_service: Arc<crate::app::local_engine::EngineManager>,
+    /// ONNX in-process executor（0.22.8-D 替代 engine_service 做识别）。
+    /// `None` 表示 executor 未注入（测试 / 未安装时）。
+    ///
+    /// 0.22.8-F: 使用 `RwLock` 包装，支持运行时热注入——
+    /// 启动时 deployment 可能不存在（返回 None），用户安装后
+    /// 通过 `inject_executor()` 替换。
+    executor: std::sync::RwLock<Option<Arc<OnnxOcrExecutor>>>,
+    #[allow(dead_code)]
     paddleocr_engine_id: EngineId,
     in_flight: Arc<AtomicU32>,
     lifecycle_tx: watch::Sender<LifecycleState>,
@@ -123,11 +123,14 @@ pub struct OcrCoordinator {
 }
 
 impl OcrCoordinator {
-    pub fn new(engine_service: Arc<crate::app::local_engine::EngineManager>) -> Arc<Self> {
+    /// 创建 OcrCoordinator（0.22.8-D：不再需要 EngineManager）。
+    ///
+    /// executor 传 `None` 时，PaddleOCR 路径将不可用（auto 回退 WinRT）。
+    pub fn new(executor: Option<Arc<OnnxOcrExecutor>>) -> Arc<Self> {
         let paddleocr_engine_id = EngineId::new(PADDLEOCR_ENGINE_ID_STR).unwrap();
         let (lifecycle_tx, lifecycle_rx) = watch::channel(LifecycleState::Idle { generation: 0 });
         Arc::new(Self {
-            engine_service,
+            executor: std::sync::RwLock::new(executor),
             paddleocr_engine_id,
             in_flight: Arc::new(AtomicU32::new(0)),
             lifecycle_tx,
@@ -153,10 +156,12 @@ impl OcrCoordinator {
         self.repair_mode.load(Ordering::SeqCst)
     }
 
-    /// 进入 repair 模式——拒绝新 lease，等待 in-flight 完成，条件停止当前实例。
+    /// 进入 repair 模式——拒绝新 lease，等待 in-flight 完成，停止 executor。
     ///
     /// 调用方（`repair_paddleocr` command）在执行清理/重装前调用此方法，
     /// 确保不会有新请求引用旧实例。
+    ///
+    /// 0.22.8-D: 停止路径从 `engine_service.stop()` 改为 `executor.shutdown()`。
     ///
     /// Task 6: 返回 `RepairGuard` RAII，确保无论 repair 路径如何结束，
     /// `end_repair()` 都会被调用。
@@ -167,19 +172,15 @@ impl OcrCoordinator {
         // 取消所有 pending idle TTL 定时器
         self.idle_cancel.notify_waiters();
 
-        // 如果当前是 Ready，进入 Stopping 并停止实例
+        // 如果当前是 Ready，进入 Stopping 并停止 executor
         let current_state = self.lifecycle_state();
-        let target_token = if let LifecycleState::Ready {
-            generation,
-            instance_token,
-        } = &current_state
-        {
+        let target_gen = if let LifecycleState::Ready { generation, .. } = &current_state {
             self.lifecycle_tx
                 .send(LifecycleState::Stopping {
                     generation: *generation,
                 })
                 .ok();
-            Some((instance_token.clone(), *generation))
+            Some(*generation)
         } else {
             None
         };
@@ -197,59 +198,21 @@ impl OcrCoordinator {
             );
         }
 
-        // 停止 PaddleOCR 服务
-        if let Some((token, target_gen)) = target_token {
-            // Task 2: 使用 conditional_stop——区分 Stopped/TokenMismatch/Error
-            let outcome = self.conditional_stop(target_gen, &token).await;
-            match &outcome {
-                ConditionalStopOutcome::Stopped => {
-                    tracing::info!(generation = target_gen, "repair: 条件停止成功");
-                    // 重置状态机
-                    *self.start_elapsed_ms.lock().unwrap() = None;
-                    self.lifecycle_tx
-                        .send(LifecycleState::Idle {
-                            generation: target_gen + 1,
-                        })
-                        .ok();
-                }
-                ConditionalStopOutcome::TokenMismatch => {
-                    tracing::warn!(
-                        generation = target_gen,
-                        "repair: token 不匹配，新实例已接管"
-                    );
-                    // 不提交 Idle——新 generation 已经在运行
-                }
-                ConditionalStopOutcome::Error(msg) => {
-                    // Task 2: 条件停止内部错误——禁止兜底无条件 stop
-                    // Task 6: 不重置为 Idle——repair 仍需要通过 stop() 确保进程退出
-                    tracing::error!(
-                        generation = target_gen,
-                        error = %msg,
-                        "repair: conditional_stop 失败，尝试无条件 stop 确保进程退出"
-                    );
-                    // repair 路径需要确保进程退出——使用无条件 stop
-                    let _ = self.engine_service.stop(&self.paddleocr_engine_id).await;
-                    *self.start_elapsed_ms.lock().unwrap() = None;
-                    self.lifecycle_tx
-                        .send(LifecycleState::Idle {
-                            generation: target_gen + 1,
-                        })
-                        .ok();
-                }
-            }
-        } else {
-            // 无 token（非 Ready 状态）——直接无条件停止
-            let _ = self.engine_service.stop(&self.paddleocr_engine_id).await;
-            let current_gen = self.lifecycle_state().generation();
-            *self.start_elapsed_ms.lock().unwrap() = None;
-            self.lifecycle_tx
-                .send(LifecycleState::Idle {
-                    generation: current_gen + 1,
-                })
-                .ok();
+        // 0.22.8-D: 停止 executor（无条件——repair 需要确保 Session drop）
+        let executor_for_shutdown = self.executor.read().unwrap().clone();
+        if let Some(ref executor) = executor_for_shutdown {
+            executor.shutdown().await;
         }
 
-        tracing::info!("OcrCoordinator: repair 前置完成，实例已停止");
+        let reset_gen = target_gen.unwrap_or_else(|| self.lifecycle_state().generation());
+        *self.start_elapsed_ms.lock().unwrap() = None;
+        self.lifecycle_tx
+            .send(LifecycleState::Idle {
+                generation: reset_gen + 1,
+            })
+            .ok();
+
+        tracing::info!("OcrCoordinator: repair 前置完成，executor 已停止");
 
         // Task 6: 返回 RAII guard
         RepairGuard::new(self)
@@ -271,54 +234,6 @@ impl OcrCoordinator {
             .ok();
     }
 
-    /// Task 2: 条件停止包装方法——调用 service.stop_if_current 并结合
-    /// lifecycle 二次核对，返回可区分的 ConditionalStopOutcome。
-    ///
-    /// 调用前必须已经把 lifecycle 设置为 Stopping { generation }。
-    ///
-    /// - `Stopped`：service 层成功停止了目标实例，且 lifecycle 仍为该 generation 的 Stopping。
-    /// - `TokenMismatch`：service 层 token 不匹配（返回 Ok(()) 但未停止），
-    ///   或 lifecycle 在此期间已变化（新 generation 接管）。
-    /// - `Error`：service 层返回内部错误，禁止兜底无条件 stop。
-    async fn conditional_stop(
-        &self,
-        target_gen: u64,
-        target_token: &InstanceToken,
-    ) -> ConditionalStopOutcome {
-        match self
-            .engine_service
-            .stop_if_current(&self.paddleocr_engine_id, target_token)
-            .await
-        {
-            Ok(()) => {
-                // 二次核对 lifecycle——如果状态已变化（新 generation 接管），不提交 Idle
-                let current = self.lifecycle_state();
-                match &current {
-                    LifecycleState::Stopping { generation } if *generation == target_gen => {
-                        ConditionalStopOutcome::Stopped
-                    }
-                    _ => {
-                        tracing::debug!(
-                            target_gen,
-                            current = ?current,
-                            "conditional_stop: lifecycle 已变化，视为 TokenMismatch"
-                        );
-                        ConditionalStopOutcome::TokenMismatch
-                    }
-                }
-            }
-            Err(e) => {
-                // Task 2: 条件停止内部错误——禁止兜底无条件 stop
-                tracing::error!(
-                    %e,
-                    target_gen,
-                    "conditional_stop: stop_if_current 返回错误，不回退到无条件 stop"
-                );
-                ConditionalStopOutcome::Error(e.to_string())
-            }
-        }
-    }
-
     /// 等待 deadline 到来（如果有的话），用于 select! 分支。
     async fn sleep_until_deadline(&self, ctx: &OcrRequestContext) {
         if let Some(deadline) = ctx.deadline {
@@ -328,6 +243,9 @@ impl OcrCoordinator {
         }
     }
 
+    /// 0.22.8-D: ONNX in-process 识别。通过 executor.recognize() 执行推理。
+    ///
+    /// **取消覆盖**：通过 select! 同时监听 ctx.cancellation.cancelled() 和 deadline。
     async fn do_paddleocr_recognize(
         &self,
         png_data: Bytes,
@@ -351,17 +269,42 @@ impl OcrCoordinator {
         };
         let start_wait_ms = total_start.elapsed().as_millis() as u64;
         let recognize_start = Instant::now();
-        let result = self
-            .paddleocr_recognize(
-                png_data,
-                ctx,
-                &lease.endpoint_url,
-                &lease.token,
-                &lease,
-                request_png_size,
-            )
-            .await;
+
+        let executor = self.executor.read().unwrap().clone();
+        let executor = match &executor {
+            Some(e) => e.clone(),
+            None => {
+                return (
+                    Err(StructuredOcrError::backend_unavailable(
+                        "ONNX executor 未注入",
+                    )),
+                    start_wait_ms,
+                    0,
+                );
+            }
+        };
+
+        // 0.22.8-D: 构造 RecognizeRequest，通过 executor.recognize() 执行推理
+        let request = RecognizeRequest {
+            png_data: png_data.clone(),
+            cancellation: ctx.cancellation.clone(),
+            deadline: ctx.deadline.map(tokio::time::Instant::from_std),
+        };
+
+        // 执行识别——取消覆盖在 executor 内部通过 CancellationToken 处理
+        let result = executor
+            .recognize(request)
+            .await
+            .map_err(StructuredOcrError::from)
+            .and_then(|ocr_result| {
+                // 0.22.8-D: 映射 OcrResult —— executor 返回的已经是 OcrResult，
+                // 通过 mapping 模块做 line grouping 和尺寸校验
+                mapping::map_executor_result(ocr_result, request_png_size)
+            });
+
         let recognize_ms = recognize_start.elapsed().as_millis() as u64;
+        // lease 在此 drop——释放 InFlightGuard
+        drop(lease);
         (result, start_wait_ms, recognize_ms)
     }
 
@@ -387,32 +330,15 @@ impl OcrCoordinator {
         (result, elapsed_ms)
     }
 
-    /// 关闭 OCR Coordinator。
+    /// 关闭 OCR Coordinator（0.22.8-D: 停止 executor）。
     pub async fn shutdown(&self) {
-        tracing::info!("OcrCoordinator shutdown: 取消 idle 定时器并停止 PaddleOCR");
+        tracing::info!("OcrCoordinator shutdown: 取消 idle 定时器并停止 ONNX executor");
         // 拒绝新 lease
         let current_state = self.lifecycle_state();
-        let target_token = match &current_state {
-            LifecycleState::Ready {
-                generation,
-                instance_token,
-            } => {
-                self.lifecycle_tx
-                    .send(LifecycleState::Stopping {
-                        generation: *generation,
-                    })
-                    .ok();
-                Some(instance_token.clone())
-            }
-            _ => {
-                self.lifecycle_tx
-                    .send(LifecycleState::Stopping {
-                        generation: current_state.generation(),
-                    })
-                    .ok();
-                None
-            }
-        };
+        let generation = current_state.generation();
+        self.lifecycle_tx
+            .send(LifecycleState::Stopping { generation })
+            .ok();
         // 取消所有 pending idle TTL 定时器
         self.idle_cancel.notify_waiters();
         // 等待 in-flight 请求完成（最多等 1s）
@@ -421,29 +347,10 @@ impl OcrCoordinator {
             tokio::time::sleep(Duration::from_millis(10)).await;
             waited += 10;
         }
-        // 停止 PaddleOCR 服务
-        // Task 2: shutdown 是最终清理路径，使用明确的 stop() 停止当前任意实例
-        // 不使用 stop_if_current 的兜底——shutdown 需要确保进程退出
-        if let Some(token) = target_token {
-            // 先尝试条件停止——如果 token 匹配则优雅停止
-            match self
-                .engine_service
-                .stop_if_current(&self.paddleocr_engine_id, &token)
-                .await
-            {
-                Ok(()) => tracing::info!(
-                    generation = token.generation,
-                    "shutdown: stop_if_current 成功"
-                ),
-                Err(e) => {
-                    // 条件停止失败——shutdown 路径使用无条件 stop 确保进程退出
-                    tracing::warn!(%e, "shutdown: stop_if_current 失败，使用无条件 stop 确保进程退出");
-                    let _ = self.engine_service.stop(&self.paddleocr_engine_id).await;
-                }
-            }
-        } else {
-            // 无 token——直接无条件停止
-            let _ = self.engine_service.stop(&self.paddleocr_engine_id).await;
+        // 0.22.8-D: 停止 executor
+        let executor_for_shutdown = self.executor.read().unwrap().clone();
+        if let Some(ref executor) = executor_for_shutdown {
+            executor.shutdown().await;
         }
         // 重置状态机
         let final_gen = self.lifecycle_state().generation();
@@ -470,6 +377,33 @@ impl OcrCoordinator {
                 generation: current_gen + 1,
             })
             .ok();
+    }
+
+    /// 运行时注入/替换 ONNX executor。
+    ///
+    /// 0.22.8-F: 启动时 deployment 可能不存在（executor=None），用户安装后
+    /// 通过此方法注入新构建的 executor。如果已有旧 executor，先 shutdown 再替换。
+    pub async fn inject_executor(&self, new_executor: Arc<OnnxOcrExecutor>) {
+        // 如果已有旧 executor，先停止
+        let old = {
+            let mut w = self.executor.write().unwrap();
+            let old = w.take();
+            *w = Some(new_executor);
+            old
+        };
+        if let Some(old) = old {
+            tracing::info!("inject_executor: 停止旧 executor");
+            old.shutdown().await;
+        }
+        // 重置状态机——下次 OCR 请求会触发 lazy load
+        let current_gen = self.lifecycle_state().generation();
+        *self.start_elapsed_ms.lock().unwrap() = None;
+        self.lifecycle_tx
+            .send(LifecycleState::Idle {
+                generation: current_gen + 1,
+            })
+            .ok();
+        tracing::info!("OcrCoordinator: executor 已注入，状态机已重置");
     }
 }
 
@@ -696,13 +630,14 @@ impl OcrBackendRouter for OcrCoordinator {
             configured_backend: snapshot.backend,
             last_selected_backend: Some(route_result.decision.selected_backend),
             last_fallback_reason: route_result.decision.fallback_reason.clone(),
-            paddleocr_installed: false,
-            paddleocr_service_state: "Unknown".to_string(),
-            paddleocr_model_state: "Unknown".to_string(),
-            paddleocr_model_id: None,
-            paddleocr_model_revision: None,
+            // 0.22.8-D: 诊断字段从 engine_service 改为 executor 状态投影
+            paddleocr_installed: self.is_paddleocr_installed().await,
+            paddleocr_service_state: self.paddleocr_service_state().await,
+            paddleocr_model_state: self.paddleocr_model_state().await,
+            paddleocr_model_id: Some("PP-OCRv6".to_string()),
+            paddleocr_model_revision: Some("ppocrv6-tiny".to_string()),
             paddleocr_instance_id: None,
-            paddleocr_actual_backend: None,
+            paddleocr_actual_backend: Some("onnx-ocr".to_string()),
             in_flight_count: self.in_flight.load(Ordering::SeqCst) as usize,
             lifecycle: format!("{:?}", snapshot.lifecycle),
             idle_ttl_seconds: snapshot.idle_ttl_seconds,
@@ -744,25 +679,20 @@ impl OcrBackendRouter for OcrCoordinator {
             }
         };
         let (winrt_langs, winrt_engine_lang) = self.winrt_diagnostics().await;
+        // 0.22.8-D: 诊断从 executor 状态获取
         let paddleocr_installed = self.is_paddleocr_installed().await;
         let paddleocr_service_state = self.paddleocr_service_state().await;
         let paddleocr_model_state = self.paddleocr_model_state().await;
-        let (
-            paddleocr_model_id,
-            paddleocr_model_revision,
-            paddleocr_instance_id,
-            paddleocr_actual_backend,
-        ) = self.paddleocr_health_info().await;
         let in_flight_count = self.in_flight.load(Ordering::SeqCst) as usize;
 
         if let Some(mut d) = cached {
             d.paddleocr_installed = paddleocr_installed;
             d.paddleocr_service_state = paddleocr_service_state;
             d.paddleocr_model_state = paddleocr_model_state;
-            d.paddleocr_model_id = paddleocr_model_id;
-            d.paddleocr_model_revision = paddleocr_model_revision;
-            d.paddleocr_instance_id = paddleocr_instance_id;
-            d.paddleocr_actual_backend = paddleocr_actual_backend;
+            d.paddleocr_model_id = Some("PP-OCRv6".to_string());
+            d.paddleocr_model_revision = Some("ppocrv6-tiny".to_string());
+            d.paddleocr_instance_id = None;
+            d.paddleocr_actual_backend = Some("onnx-ocr".to_string());
             d.in_flight_count = in_flight_count;
             d.winrt_available_languages = winrt_langs;
             d.winrt_engine_language = winrt_engine_lang;
@@ -777,10 +707,10 @@ impl OcrBackendRouter for OcrCoordinator {
             paddleocr_installed,
             paddleocr_service_state,
             paddleocr_model_state,
-            paddleocr_model_id,
-            paddleocr_model_revision,
-            paddleocr_instance_id,
-            paddleocr_actual_backend,
+            paddleocr_model_id: Some("PP-OCRv6".to_string()),
+            paddleocr_model_revision: Some("ppocrv6-tiny".to_string()),
+            paddleocr_instance_id: None,
+            paddleocr_actual_backend: Some("onnx-ocr".to_string()),
             in_flight_count,
             lifecycle: cfg.lifecycle.to_string(),
             idle_ttl_seconds: cfg.idle_ttl_seconds,
@@ -793,4 +723,60 @@ impl OcrBackendRouter for OcrCoordinator {
             last_fallback_ms: None,
         }
     }
+}
+
+// ── ONNX executor 构建 helper（0.22.8-D）──────────────────────────────────
+
+/// 从 active deployment 构建 OnnxOcrExecutor。
+///
+/// 读取 paddleocr engine 的 active deployment 目录，
+/// 解析 det/rec/dict/dll 路径，构造 `OnnxOcrExecutor`。
+/// 如果 deployment 不存在或路径缺失，返回 `None`。
+pub fn build_onnx_executor_from_deployment(
+    _engine_service: &Arc<crate::app::local_engine::EngineManager>,
+) -> Option<Arc<OnnxOcrExecutor>> {
+    use crate::infra::local_engine::deployment::DeploymentStore;
+    use crate::infra::local_engine::onnx_ocr::pipeline::PipelineConfig;
+    use crate::infra::local_engine::onnx_ocr::{OcrExecutorConfig, OnnxOcrExecutor};
+    use crate::infra::local_engine::runtime::EngineId;
+
+    let engine_id = EngineId::new(PADDLEOCR_ENGINE_ID_STR).ok()?;
+
+    // 从 active deployment pointer 获取部署目录
+    let (_pointer, dir) = DeploymentStore::active_dir(&engine_id).ok().flatten()?;
+
+    // ONNX 模型文件名（与 asset-lock.json 一致）
+    let det_model = dir.join("pp-ocrv6_tiny_det.onnx");
+    let rec_model = dir.join("pp-ocrv6_tiny_rec.onnx");
+    let dict_path = dir.join("ppocrv6_tiny_dict.txt");
+    let dll_path = dir.join("onnxruntime.dll");
+
+    // 检查所有文件是否存在
+    if !det_model.exists() || !rec_model.exists() || !dict_path.exists() || !dll_path.exists() {
+        tracing::warn!(
+            dir = %dir.display(),
+            det = det_model.exists(),
+            rec = rec_model.exists(),
+            dict = dict_path.exists(),
+            dll = dll_path.exists(),
+            "ONNX executor 路径不完整，executor 未注入"
+        );
+        return None;
+    }
+
+    let config = OcrExecutorConfig {
+        pipeline: PipelineConfig {
+            det_model,
+            rec_model,
+            dict_path,
+            dll_path,
+            intra_op: 1,
+            inter_op: 1,
+        },
+        idle_ttl_secs: 300,
+    };
+
+    let executor = OnnxOcrExecutor::new(config);
+    tracing::info!("OnnxOcrExecutor 已从 deployment 构建");
+    Some(Arc::new(executor))
 }

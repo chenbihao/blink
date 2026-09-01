@@ -83,7 +83,7 @@
 | 0.19.x | 能力闭环（基础感知执行 + 便签/文本闭环 + 行为收敛 + 图片编辑解耦 + 自然语言设置 + AI 设置与纯对话 + MCP 生命周期） | 🚧 0.19.1~0.19.4 完成；0.19.5~0.19.11 已规划 |
 | 0.20.x | 高频内容与视觉工作流（便签 / 剪贴板 / 颜色 / 图片编辑 / 截图性能与精调） | 📋 规划中 |
 | 0.21.x | Capability 唯一原子执行入口、Action 全量分流删除、功能目录与 AI/MCP 授权、AI 对话预算、摘要与记忆链路 | ✅ 0.21.0~0.21.23 完成 |
-| 0.22.x | 本地模型运行时、FunASR 生命周期与模型资产迁移、PP-OCRv6/WinRT、Nano GGUF 与 ONNX 候选实现 | 🚧 0.22.7 契约收口待最终 gate；A～D feasibility 已解除 0.22.8 OCR ONNX 与 0.22.9 STT 双 runtime/VAD/真流式的开工阻塞；Spike E 已将 executor 定案为 Hybrid（OCR in-process、ParaformerOnline ONNX worker、Nano GGUF worker）；0.22.10 Python/uv 清理与运行时收敛待实施 |
+| 0.22.x | 本地模型运行时、FunASR 生命周期与模型资产迁移、PP-OCRv6/WinRT、Nano GGUF 与 ONNX 候选实现 | 🚧 0.22.0～0.22.8 完成（GGUF FunASR、契约收口、OCR 已切换到 ONNX in-process executor，Python PaddleOCR 仅作 legacy 降级资产）；剩余 0.22.9 STT 双 runtime/VAD/真流式与 0.22.10 Python/uv 清理 |
 | 未立项 | 见 roadmap：subagent / proactivity / 同步 / 远期向量与 RAG 观察 | 🔮 候选池 |
 
 ---

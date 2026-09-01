@@ -430,17 +430,17 @@ fn descriptor_model_identity_matches() {
     let (det_model, rec_model) = PaddleModel::Tiny.official_model_names();
     let expected_model_id = format!("PP-OCRv6:{}:{}", det_model, rec_model);
     assert_eq!(descriptor.model_contract.model_id, expected_model_id);
-    assert_eq!(descriptor.model_contract.revision, "ppocrv6-tiny");
+    assert_eq!(descriptor.model_contract.revision, "ppocrv6-tiny-onnx");
 }
 
-/// Task 4: 验证 provider descriptor 的 model identity 也一致
+/// Task 4: 验证 ONNX provider descriptor 的 model identity 也一致
 #[test]
 fn provider_descriptor_model_identity_matches() {
-    let pd = make_paddleocr_provider_descriptor();
+    let pd = make_paddleocr_onnx_provider_descriptor();
     let (det_model, rec_model) = PaddleModel::Tiny.official_model_names();
     let expected_model_id = format!("PP-OCRv6:{}:{}", det_model, rec_model);
     assert_eq!(pd.model_contract.model_id, expected_model_id);
-    assert_eq!(pd.model_contract.revision, "ppocrv6-tiny");
+    assert_eq!(pd.model_contract.revision, "ppocrv6-tiny-onnx");
 }
 
 /// Task 4: model_revision 不应使用 cache_files:N 格式
@@ -453,7 +453,7 @@ fn model_revision_not_cache_files_format() {
         "model_revision 不应使用 cache_files:N 格式，实际: {}",
         revision
     );
-    assert_eq!(revision, "ppocrv6-tiny");
+    assert_eq!(revision, "ppocrv6-tiny-onnx");
 }
 
 #[test]

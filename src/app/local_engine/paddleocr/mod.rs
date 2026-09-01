@@ -43,7 +43,11 @@ mod locks;
 #[cfg(test)]
 mod tests;
 
-pub use self::descriptor::{make_paddleocr_provider_descriptor, make_paddleocr_python_provider};
+#[cfg(test)]
+pub use self::descriptor::make_paddleocr_provider_descriptor;
+pub use self::descriptor::{
+    make_paddleocr_onnx_provider_descriptor, make_paddleocr_python_provider,
+};
 // ensure_ocr_server_script* 保持原单文件的模块路径（launch 内部与测试消费），
 // bin crate 下需 allow。
 #[allow(unused_imports)]
@@ -221,136 +225,100 @@ impl LocalEngineAdapter for PaddleocrAdapter {
 
     /// adapter self-test。
     ///
-    /// 验证 PaddleOCR Python 环境是否就绪（active deployment venv + paddlepaddle + paddleocr 已安装）。
-    ///
-    /// 只检查 deployment-managed venv（由 `PythonVenvProvider` 创建的隔离 venv）。
+    /// 0.22.8: ONNX in-process——检查 active deployment 中的 ORT DLL 和模型文件。
     fn self_test(&self) -> AdapterSelfTest {
-        // 只使用 deployment-managed venv，不 fallback 到 legacy 全局 venv
-        let python_path = active_deployment_venv_python(&self.descriptor.engine_id);
-        let python_path = match python_path {
-            None => {
+        use crate::infra::local_engine::deployment::DeploymentStore;
+
+        let engine_id = &self.descriptor.engine_id;
+        let (_pointer, dir) = match DeploymentStore::active_dir(engine_id) {
+            Ok(Some(p)) => p,
+            _ => {
                 return AdapterSelfTest::failed(
-                    "Python 环境未就绪。请在设置页点击「安装环境」按钮。\
-                     （Blink 会自动下载 uv + Python 3.12 + paddlepaddle + paddleocr）",
+                    "ONNX OCR 环境未就绪。请在设置页点击「安装环境」按钮。\
+                     （Blink 会自动下载 ONNX Runtime + PP-OCRv6 模型）",
                 );
             }
-            Some(ref p) => p.as_path(),
         };
 
-        // 检查 paddlepaddle 是否已安装
-        let (paddle_ok, _) = check_paddlepaddle_with(python_path);
-        if !paddle_ok {
-            return AdapterSelfTest::failed(
-                "paddlepaddle 包未安装。请在设置页点击「安装环境」按钮，Blink 会自动完成安装。",
-            );
+        let dll = dir.join("onnxruntime.dll");
+        let det = dir.join("pp-ocrv6_tiny_det.onnx");
+        let rec = dir.join("pp-ocrv6_tiny_rec.onnx");
+        let dict = dir.join("ppocrv6_tiny_dict.txt");
+
+        let mut missing = Vec::new();
+        if !dll.exists() {
+            missing.push("onnxruntime.dll");
+        }
+        if !det.exists() {
+            missing.push("pp-ocrv6_tiny_det.onnx");
+        }
+        if !rec.exists() {
+            missing.push("pp-ocrv6_tiny_rec.onnx");
+        }
+        if !dict.exists() {
+            missing.push("ppocrv6_tiny_dict.txt");
         }
 
-        // 检查 paddleocr 是否已安装
-        let (paddleocr_ok, _) = check_paddleocr_with(python_path);
-        if !paddleocr_ok {
-            return AdapterSelfTest::failed(
-                "paddleocr 包未安装。请在设置页点击「安装环境」按钮，Blink 会自动完成安装。",
-            );
+        if missing.is_empty() {
+            AdapterSelfTest::passed()
+        } else {
+            AdapterSelfTest::failed(format!(
+                "ONNX OCR 文件缺失: {}。请重新安装环境。",
+                missing.join(", ")
+            ))
         }
-
-        AdapterSelfTest::passed()
     }
 
-    /// 引擎专属诊断投影。
-    ///
-    /// 返回 PaddleOCR 特有的诊断信息（Python 环境、paddlepaddle、paddleocr 版本等）。
+    /// 0.22.8: ONNX 诊断——检查 deployment 中的 ORT DLL 和模型文件。
     fn diagnostics(&self) -> EngineDiagnostic {
+        use crate::infra::local_engine::deployment::DeploymentStore;
+
         let mut entries = Vec::new();
 
-        // 只使用 deployment-managed venv
-        let python_path = active_deployment_venv_python(&self.descriptor.engine_id);
+        let engine_id = &self.descriptor.engine_id;
+        let (_pointer, dir) = match DeploymentStore::active_dir(engine_id) {
+            Ok(Some(p)) => p,
+            _ => {
+                entries.push(DiagnosticEntry {
+                    key: "onnx_deployment".to_string(),
+                    value: "false".to_string(),
+                    label: "warning".to_string(),
+                });
+                return EngineDiagnostic { entries };
+            }
+        };
 
-        // venv 状态
-        let venv_exists = python_path.is_some();
         entries.push(DiagnosticEntry {
-            key: "venv_exists".to_string(),
-            value: if venv_exists {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
+            key: "onnx_deployment".to_string(),
+            value: "true".to_string(),
             label: "info".to_string(),
         });
 
-        // 如果有 active deployment venv，报告其路径
-        // 只报告 active deployment venv 状态
-        if python_path.is_some() {
-            entries.push(DiagnosticEntry {
-                key: "venv_source".to_string(),
-                value: "generation".to_string(),
-                label: "info".to_string(),
-            });
-        }
+        let dll = dir.join("onnxruntime.dll");
+        let det = dir.join("pp-ocrv6_tiny_det.onnx");
+        let rec = dir.join("pp-ocrv6_tiny_rec.onnx");
+        let dict = dir.join("ppocrv6_tiny_dict.txt");
 
-        // 检查 Python 版本
-        if let Some(ref py) = python_path
-            && let Some(ref v) = check_python_version(py)
-        {
-            entries.push(DiagnosticEntry {
-                key: "python_version".to_string(),
-                value: v.clone(),
-                label: "info".to_string(),
-            });
-        }
-
-        // paddlepaddle 状态
-        let (paddle_ok, paddle_ver) = if let Some(ref py) = python_path {
-            check_paddlepaddle_with(py)
-        } else {
-            (false, None)
-        };
         entries.push(DiagnosticEntry {
-            key: "paddlepaddle_installed".to_string(),
-            value: if paddle_ok {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
-            label: if paddle_ok {
-                "info".to_string()
-            } else {
-                "warning".to_string()
-            },
+            key: "ort_dll".to_string(),
+            value: if dll.exists() { "true" } else { "false" }.to_string(),
+            label: if dll.exists() { "info" } else { "warning" }.to_string(),
         });
-        if let Some(ref v) = paddle_ver {
-            entries.push(DiagnosticEntry {
-                key: "paddlepaddle_version".to_string(),
-                value: v.clone(),
-                label: "info".to_string(),
-            });
-        }
-
-        // paddleocr 状态
-        let (paddleocr_ok, paddleocr_ver) = if let Some(ref py) = python_path {
-            check_paddleocr_with(py)
-        } else {
-            (false, None)
-        };
         entries.push(DiagnosticEntry {
-            key: "paddleocr_installed".to_string(),
-            value: if paddleocr_ok {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
-            label: if paddleocr_ok {
-                "info".to_string()
-            } else {
-                "warning".to_string()
-            },
+            key: "det_model".to_string(),
+            value: if det.exists() { "true" } else { "false" }.to_string(),
+            label: if det.exists() { "info" } else { "warning" }.to_string(),
         });
-        if let Some(ref v) = paddleocr_ver {
-            entries.push(DiagnosticEntry {
-                key: "paddleocr_version".to_string(),
-                value: v.clone(),
-                label: "info".to_string(),
-            });
-        }
+        entries.push(DiagnosticEntry {
+            key: "rec_model".to_string(),
+            value: if rec.exists() { "true" } else { "false" }.to_string(),
+            label: if rec.exists() { "info" } else { "warning" }.to_string(),
+        });
+        entries.push(DiagnosticEntry {
+            key: "dict_file".to_string(),
+            value: if dict.exists() { "true" } else { "false" }.to_string(),
+            label: if dict.exists() { "info" } else { "warning" }.to_string(),
+        });
 
         EngineDiagnostic { entries }
     }
@@ -363,6 +331,8 @@ impl LocalEngineAdapter for PaddleocrAdapter {
 /// 路径：`runtimes/engines/{engine_id}/slots/{slot}/venv/Scripts/python.exe`
 ///
 /// 返回 `None` 表示尚未安装（deployment.json 不存在或 venv 目录缺失）。
+/// 0.22.8: 不再使用，保留用于 legacy Python 测试。
+#[allow(dead_code)]
 fn active_deployment_venv_python(engine_id: &EngineId) -> Option<PathBuf> {
     let (_pointer, dir) =
         crate::infra::local_engine::deployment::DeploymentStore::active_dir(engine_id)
@@ -383,6 +353,8 @@ fn active_deployment_venv_python(engine_id: &EngineId) -> Option<PathBuf> {
 /// PaddlePaddle 的 distribution 名是 `paddlepaddle`，但 Python import 名是 `paddle`。
 /// 禁止使用 `import paddlepaddle`。
 /// 返回 (installed, version)。
+/// 0.22.8: 不再使用，保留用于 legacy Python 测试。
+#[allow(dead_code)]
 pub fn check_paddlepaddle_with(python: &Path) -> (bool, Option<String>) {
     let output = crate::infra::platform::no_window(std::process::Command::new(python))
         .args([
@@ -418,6 +390,8 @@ pub fn check_paddlepaddle_with(python: &Path) -> (bool, Option<String>) {
 /// 检查 paddleocr 是否已安装（使用指定 python 路径）。
 ///
 /// 返回 (installed, version)。
+/// 0.22.8: 不再使用，保留用于 legacy Python 测试。
+#[allow(dead_code)]
 pub fn check_paddleocr_with(python: &Path) -> (bool, Option<String>) {
     let output = crate::infra::platform::no_window(std::process::Command::new(python))
         .args([
@@ -442,6 +416,8 @@ pub fn check_paddleocr_with(python: &Path) -> (bool, Option<String>) {
 }
 
 /// 查询指定 python 的版本字符串（如 "Python 3.12.8"）。
+/// 0.22.8: 不再使用，保留用于 legacy Python 测试。
+#[allow(dead_code)]
 fn check_python_version(python: &Path) -> Option<String> {
     let output = crate::infra::platform::no_window(std::process::Command::new(python))
         .args(["--version"])

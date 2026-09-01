@@ -1,8 +1,10 @@
 //! 生命周期回收：idle TTL 定时停止与 StopAfterUse 立即停止。
-//! 全部走条件停止（stop_if_current）+ 二次验证 generation/instance token。
+//! 0.22.8-D: 全部改为调用 `executor.shutdown()` 替代 `engine_service.stop_if_current()`。
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+use crate::infra::local_engine::onnx_ocr::OcrExecutor;
 
 use crate::domain::config::ocr_config::OcrRuntimeSnapshot;
 
@@ -35,54 +37,40 @@ impl OcrCoordinator {
                             self.lifecycle_tx
                                 .send(LifecycleState::Stopping { generation })
                                 .ok();
-                            tracing::info!("lifecycle=StopAfterUse，立即停止 PaddleOCR");
-                            let engine_service = self.engine_service.clone();
-                            let engine_id = self.paddleocr_engine_id.clone();
+                            tracing::info!("lifecycle=StopAfterUse，立即停止 ONNX executor");
+                            let executor = self.executor.read().unwrap().clone();
                             let lifecycle_tx = self.lifecycle_tx.clone();
                             let start_elapsed_ms = self.start_elapsed_ms.clone();
                             let target_gen = generation;
                             let target_token = instance_token;
                             tokio::spawn(async move {
-                                // Task 2: 条件停止——TokenMismatch 时不调用无条件 stop
-                                let stop_result = engine_service
-                                    .stop_if_current(&engine_id, &target_token)
-                                    .await;
-                                match stop_result {
-                                    Ok(()) => {
-                                        // 成功停止——检查 lifecycle 是否仍为当前 generation
-                                        let current = lifecycle_tx.borrow().clone();
-                                        match &current {
-                                            LifecycleState::Stopping { generation }
-                                                if *generation == target_gen =>
-                                            {
-                                                *start_elapsed_ms.lock().unwrap() = None;
-                                                lifecycle_tx
-                                                    .send(LifecycleState::Idle {
-                                                        generation: target_gen + 1,
-                                                    })
-                                                    .ok();
-                                                tracing::debug!(
-                                                    "start_state 已重置为 Idle（StopAfterUse 后）"
-                                                );
-                                            }
-                                            _ => {
-                                                tracing::debug!(
-                                                    current = ?current,
-                                                    "StopAfterUse: lifecycle 已变化，不提交 Idle"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Task 2: 条件停止内部错误——禁止兜底无条件 stop
-                                        tracing::error!(
-                                            %e,
-                                            generation = target_gen,
-                                            "StopAfterUse stop_if_current 失败，不回退到无条件 stop"
+                                // 0.22.8-D: 调用 executor.shutdown()
+                                if let Some(ref executor) = executor {
+                                    executor.shutdown().await;
+                                }
+                                let current = lifecycle_tx.borrow().clone();
+                                match &current {
+                                    LifecycleState::Stopping { generation }
+                                        if *generation == target_gen =>
+                                    {
+                                        *start_elapsed_ms.lock().unwrap() = None;
+                                        lifecycle_tx
+                                            .send(LifecycleState::Idle {
+                                                generation: target_gen + 1,
+                                            })
+                                            .ok();
+                                        tracing::debug!(
+                                            "start_state 已重置为 Idle（StopAfterUse 后）"
                                         );
-                                        // 不提交 Idle——lifecycle 保持 Stopping
+                                    }
+                                    _ => {
+                                        tracing::debug!(
+                                            current = ?current,
+                                            "StopAfterUse: lifecycle 已变化，不提交 Idle"
+                                        );
                                     }
                                 }
+                                let _ = target_token;
                             });
                             return;
                         }
@@ -110,8 +98,7 @@ impl OcrCoordinator {
         };
 
         let in_flight = self.in_flight.clone();
-        let engine_service = self.engine_service.clone();
-        let engine_id = self.paddleocr_engine_id.clone();
+        let executor = self.executor.read().unwrap().clone();
         let idle_cancel = self.idle_cancel.clone();
         let lifecycle_tx = self.lifecycle_tx.clone();
         let start_elapsed_ms = self.start_elapsed_ms.clone();
@@ -144,35 +131,23 @@ impl OcrCoordinator {
                         return;
                     }
                     lifecycle_tx.send(LifecycleState::Stopping { generation: target_gen }).ok();
-                    tracing::info!(engine = %engine_id, ttl_s = ttl.as_secs(), generation = target_gen, "idle TTL 到期，停止 PaddleOCR");
-                    // Task 2: 条件停止——不回退到无条件 stop
-                    let stop_result = engine_service.stop_if_current(&engine_id, &target_token).await;
-                    match stop_result {
-                        Ok(()) => {
-                            // 成功停止——检查 lifecycle 是否仍为当前 generation
-                            let current = lifecycle_tx.borrow().clone();
-                            match &current {
-                                LifecycleState::Stopping { generation } if *generation == target_gen => {
-                                    *start_elapsed_ms.lock().unwrap() = None;
-                                    lifecycle_tx.send(LifecycleState::Idle { generation: target_gen + 1 }).ok();
-                                    tracing::debug!("start_state 已重置为 Idle（idle stop 后）");
-                                }
-                                _ => {
-                                    tracing::debug!(
-                                        current = ?current,
-                                        "idle TTL: lifecycle 已变化，不提交 Idle"
-                                    );
-                                }
-                            }
+                    tracing::info!(ttl_s = ttl.as_secs(), generation = target_gen, "idle TTL 到期，停止 ONNX executor");
+                    // 0.22.8-D: 调用 executor.shutdown()
+                    if let Some(ref executor) = executor {
+                        executor.shutdown().await;
+                    }
+                    let current = lifecycle_tx.borrow().clone();
+                    match &current {
+                        LifecycleState::Stopping { generation } if *generation == target_gen => {
+                            *start_elapsed_ms.lock().unwrap() = None;
+                            lifecycle_tx.send(LifecycleState::Idle { generation: target_gen + 1 }).ok();
+                            tracing::debug!("start_state 已重置为 Idle（idle stop 后）");
                         }
-                        Err(e) => {
-                            // Task 2: 条件停止内部错误——禁止兜底无条件 stop
-                            tracing::error!(
-                                %e,
-                                generation = target_gen,
-                                "idle TTL stop_if_current 失败，不回退到无条件 stop"
+                        _ => {
+                            tracing::debug!(
+                                current = ?current,
+                                "idle TTL: lifecycle 已变化，不提交 Idle"
                             );
-                            // 不提交 Idle——lifecycle 保持 Stopping
                         }
                     }
                 }

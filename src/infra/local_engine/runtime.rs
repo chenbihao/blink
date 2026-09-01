@@ -113,6 +113,8 @@ pub enum ManifestExtension {
     PythonVenv(PythonManifestExt),
     /// Managed binary 扩展（archive、executable、DLL 及 hash）。
     ManagedBinary(BinaryManifestExt),
+    /// ONNX Runtime 扩展（版本化 DLL + 模型 generation，0.22.8）。
+    OnnxRuntime(OnnxRuntimeManifestExt),
 }
 
 /// Python venv manifest 扩展。
@@ -151,6 +153,38 @@ pub struct BinaryManifestExt {
     /// driver 前置条件（如 `cuda >= 12.0`）。
     pub required_drivers: Vec<String>,
     /// self-test 结果。
+    pub self_test_passed: bool,
+}
+
+/// ONNX Runtime manifest 扩展（0.22.8）。
+///
+/// 与 `BinaryManifestExt` 的关键区别：
+/// - OnnxRuntime 是**共享动态运行时**，DLL 不启动子进程，由 in-process
+///   lazy Session 持有；
+/// - manifest 同时冻结 ORT DLL identity 和模型 generation identity；
+/// - `dll_identity` 用于 `pending_restart` 判定（已加载不同 DLL identity 时
+///   保持 loaded 不变并投影 `pending_restart`）。
+#[allow(dead_code)] // 0.22.8 A 包协议位——B/C/D/E 包消费
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnnxRuntimeManifestExt {
+    /// ORT DLL artifact id（版本化、不可变）。
+    pub dll_artifact_id: ArtifactId,
+    /// ORT DLL SHA-256（hex）。
+    pub dll_sha256: String,
+    /// ORT 版本（如 `1.20.0`）。
+    pub ort_version: String,
+    /// DLL 文件清单与 hash。
+    pub dll_files: Vec<FileEntry>,
+    /// 引用的模型 generation（由 `model_storage` 管理）。
+    /// 联合提交时与 DLL identity 一起冻结。
+    pub model_generation_id: String,
+    /// ORT 执行 provider 模式（如 `cpu` / `dml`），闭合枚举的字符串投影。
+    pub execution_provider: String,
+    /// ORT `inter_op` 线程数。
+    pub inter_op: u32,
+    /// ORT `intra_op` 线程数上限。
+    pub intra_op: u32,
+    /// self-test 结果（隔离验证进程执行，非主进程 staging）。
     pub self_test_passed: bool,
 }
 
@@ -678,6 +712,17 @@ pub fn scan_artifact_references(
                 install_id: format!("{install_id}#stdlib"),
             });
         }
+
+        // OnnxRuntime manifest 中的 DLL artifact 引用（0.22.8）
+        if let ManifestExtension::OnnxRuntime(ref ext) = manifest.extension
+            && manifest.artifact.runtime_kind == runtime_kind
+            && ext.dll_artifact_id == *artifact_id
+        {
+            refs.push(ArtifactReference {
+                engine_id: engine_name.clone(),
+                install_id: format!("{install_id}#ort-dll"),
+            });
+        }
     }
 
     Ok(refs)
@@ -985,6 +1030,7 @@ mod tests {
                 assert!(ext.self_test_passed);
             }
             ManifestExtension::ManagedBinary(_) => panic!("应为 PythonVenv"),
+            ManifestExtension::OnnxRuntime(_) => panic!("应为 PythonVenv"),
         }
     }
 
@@ -1047,6 +1093,121 @@ mod tests {
                 assert_eq!(ext.required_cpu_features, vec!["avx2"]);
             }
             ManifestExtension::PythonVenv(_) => panic!("应为 ManagedBinary"),
+            ManifestExtension::OnnxRuntime(_) => panic!("应为 ManagedBinary"),
+        }
+    }
+
+    #[test]
+    fn onnx_runtime_manifest_roundtrip() {
+        let manifest = DeploymentManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            engine_id: EngineId::new("paddleocr").unwrap(),
+            runtime_kind: RuntimePlan::OnnxRuntime,
+            install_id: "dep-onnx0001".to_string(),
+            requested_preference: ComputePreference::Cpu,
+            resolved_profile: ResolvedProfile {
+                profile_id: "cpu-x64".to_string(),
+                backend: ComputeBackend::Cpu,
+                artifact_id: ArtifactId::new("ort-1.20.0").unwrap(),
+                priority: 0,
+            },
+            installed_at_ms: 1700000000000,
+            artifact: ArtifactIdentity {
+                runtime_kind: RuntimePlan::OnnxRuntime,
+                artifact_id: ArtifactId::new("ort-1.20.0").unwrap(),
+                sha256: "abc123".to_string(),
+            },
+            model_contract: ModelContract {
+                model_id: "PP-OCRv6".to_string(),
+                revision: "ppocrv6-tiny".to_string(),
+                checksum_source: ChecksumSource::Unverified,
+            },
+            fallback_reasons: Vec::new(),
+            extension: ManifestExtension::OnnxRuntime(OnnxRuntimeManifestExt {
+                dll_artifact_id: ArtifactId::new("ort-1.20.0").unwrap(),
+                dll_sha256: "abc123".to_string(),
+                ort_version: "1.20.0".to_string(),
+                dll_files: vec![FileEntry {
+                    path: "onnxruntime.dll".to_string(),
+                    sha256: "def456".to_string(),
+                    size: 20000000,
+                    is_dll: true,
+                }],
+                model_generation_id: "gen-ppocrv6-v1".to_string(),
+                execution_provider: "cpu".to_string(),
+                inter_op: 1,
+                intra_op: 4,
+                self_test_passed: true,
+            }),
+        };
+
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let back: DeploymentManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runtime_kind, RuntimePlan::OnnxRuntime);
+
+        match back.extension {
+            ManifestExtension::OnnxRuntime(ext) => {
+                assert_eq!(ext.ort_version, "1.20.0");
+                assert_eq!(ext.execution_provider, "cpu");
+                assert_eq!(ext.inter_op, 1);
+                assert_eq!(ext.intra_op, 4);
+                assert!(ext.self_test_passed);
+                assert_eq!(ext.model_generation_id, "gen-ppocrv6-v1");
+                assert_eq!(ext.dll_files.len(), 1);
+                assert!(ext.dll_files[0].is_dll);
+            }
+            ManifestExtension::PythonVenv(_) => panic!("应为 OnnxRuntime"),
+            ManifestExtension::ManagedBinary(_) => panic!("应为 OnnxRuntime"),
+        }
+    }
+
+    #[test]
+    fn legacy_python_venv_manifest_still_deserializes() {
+        // 旧 PythonVenv manifest 必须能继续反序列化——升级用户的 deployment 不丢失。
+        // JSON 是手写的，模拟 0.22.7 及之前版本写入的 manifest 结构。
+        let legacy_json = r#"{
+            "schema_version": 2,
+            "engine_id": "paddleocr",
+            "runtime_kind": "python_venv",
+            "install_id": "dep-legacy001",
+            "requested_preference": "cpu",
+            "resolved_profile": {
+                "profile_id": "cpu-x64",
+                "backend": "cpu",
+                "artifact_id": "python-3.12.8",
+                "priority": 0
+            },
+            "installed_at_ms": 1700000000000,
+            "artifact": {
+                "runtime_kind": "python_venv",
+                "artifact_id": "python-3.12.8",
+                "sha256": "abc123"
+            },
+            "model_contract": {
+                "model_id": "PP-OCRv6",
+                "revision": "ppocrv6-tiny",
+                "checksum_source": "Unverified"
+            },
+            "fallback_reasons": [],
+            "extension": {
+                "type": "python_venv",
+                "python_version": "3.12.8",
+                "python_artifact_id": "python-3.12.8",
+                "packages": [],
+                "uv_version": "0.6.10",
+                "index_url": null,
+                "self_test_passed": true
+            }
+        }"#;
+        let manifest: DeploymentManifest = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(manifest.runtime_kind, RuntimePlan::PythonVenv);
+        assert_eq!(manifest.engine_id.as_str(), "paddleocr");
+        match manifest.extension {
+            ManifestExtension::PythonVenv(ext) => {
+                assert_eq!(ext.python_version, "3.12.8");
+                assert!(ext.self_test_passed);
+            }
+            _ => panic!("应为 PythonVenv（legacy）"),
         }
     }
 

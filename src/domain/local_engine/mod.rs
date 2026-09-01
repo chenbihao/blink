@@ -68,9 +68,9 @@ pub use model::{
 pub use operation::CancelOutcome;
 #[allow(unused_imports)]
 pub use status::{
-    BackendInfo, DesiredState, EngineOperation, EngineStatus, EngineStatusSnapshot,
+    BackendInfo, DeploymentRef, DesiredState, EngineOperation, EngineStatus, EngineStatusSnapshot,
     EnvOperationEndState, EnvironmentHealth, FallbackEntry, ModelHealth, OperationKind,
-    OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
+    OperationStage, ProcessState, RuntimeDeploymentStatus, ServiceEpoch, ServiceHealth,
 };
 
 // ── 领域层纯逻辑测试 ──────────────────────────────────────────────────────

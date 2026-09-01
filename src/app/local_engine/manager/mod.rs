@@ -454,6 +454,9 @@ pub struct EngineManager {
     /// Managed binary provider 实例（0.22.7 GGUF worker 安装事务用）。
     /// 按 ProviderDescriptor.runtime_kind 与 python_provider 二选一。
     binary_provider: crate::infra::local_engine::providers::binary::ManagedBinaryProvider,
+    /// ONNX Runtime provider 实例（0.22.8 协议位，B 包落地真实安装）。
+    /// 按 ProviderDescriptor.runtime_kind 与 python/binary_provider 三选一。
+    onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider,
     /// 同步 process registry——独立于 async entries 锁。
     /// `shutdown_all_blocking` 直接读取此字段，不访问 entries。
     /// start 在 spawn 后登记，stop/spawn失败/health失败后移除。
@@ -531,6 +534,7 @@ impl EngineManager {
             python_provider,
             binary_provider:
                 crate::infra::local_engine::providers::binary::ManagedBinaryProvider::new(),
+            onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider::new(),
             process_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
 

@@ -555,6 +555,82 @@ export function getEngineIds(state) {
     return Array.from(state.keys());
 }
 
+// ── 0.22.8-E: ONNX deployment identity 查询 ──────────────────────────────────
+
+/**
+ * 获取 PaddleOCR 的 desired deployment identity。
+ *
+ * desired deployment 表示用户最近一次安装/更新/回滚提交的部署目标。
+ * 它与 loaded deployment 不同时，说明需要重启才能生效（DLL identity 变化）
+ * 或模型 generation 切换尚未加载。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {{runtime_kind: string, dll_identity: string, model_revision: string}|null}
+ */
+export function getDesiredDeployment(entry) {
+    return entry?.status?.status?.backend?.desired_deployment ?? null;
+}
+
+/**
+ * 获取 PaddleOCR 的 loaded deployment identity。
+ *
+ * loaded deployment 表示当前主进程实际加载的 ORT DLL + 模型 generation。
+ * `null` 表示尚未初始化 ORT（首次安装后可立即加载）。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {{runtime_kind: string, dll_identity: string, model_revision: string}|null}
+ */
+export function getLoadedDeployment(entry) {
+    return entry?.status?.status?.backend?.loaded_deployment ?? null;
+}
+
+/**
+ * 判断是否有待重启的 deployment 变更。
+ *
+ * **铁则**：只有 DLL identity 变化才显示"重启后生效"；
+ * 只更新模型 generation 不要求重启，不能错误提示重启。
+ *
+ * pending_restart 由后端推导（DLL identity 变化时为 true），
+ * 前端只消费，不自行比较 desired/loaded。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {boolean}
+ */
+export function isPendingRestart(entry) {
+    return entry?.status?.status?.backend?.pending_restart === true;
+}
+
+/**
+ * 获取 legacy Python deployment 信息。
+ *
+ * 升级用户的旧 Python venv deployment 在 0.22.8 中作为独立 legacy 保留。
+ * 用户可在明确警告后主动清理；legacy 不参与运行时 fallback。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {{runtime_kind: string, path_display?: string, size_bytes?: number}|null}
+ */
+export function getLegacyDeployment(entry) {
+    return entry?.status?.status?.backend?.legacy_deployment ?? null;
+}
+
+/**
+ * 判断 desired 与 loaded deployment 是否不一致（需重启或需首次加载）。
+ *
+ * 用于反馈槽展示"待重启"提示——但只对 DLL identity 不一致才显示，
+ * 模型 generation 变化不算 mismatch。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {boolean}
+ */
+export function hasDeploymentMismatch(entry) {
+    const desired = getDesiredDeployment(entry);
+    const loaded = getLoadedDeployment(entry);
+    if (!desired) return false;
+    if (!loaded) return false; // 首次安装未加载不算 mismatch
+    // 只有 DLL identity 不一致才算 mismatch（需要重启）
+    return desired.dll_identity !== loaded.dll_identity;
+}
+
 /**
  * 判断引擎是否"就绪可用"。
  *

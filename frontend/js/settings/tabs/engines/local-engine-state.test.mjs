@@ -373,10 +373,10 @@ test("PaddleOCR 没有 descriptor 声明的 GPU 选项", () => {
     const catalog = makeCatalog();
     const paddleocr = catalog.find((c) => c.engine_id === "paddleocr");
 
-    // 只应声明 auto 和 cpu
+    // 0.22.8: PaddleOCR 只声明 CPU（ONNX Runtime 不支持 GPU auto）
     const prefs = paddleocr.compute_options.map((o) => o.preference);
-    assert.ok(prefs.includes("auto"));
-    assert.ok(prefs.includes("cpu"));
+    assert.ok(prefs.includes("cpu"), "应声明 cpu");
+    assert.ok(!prefs.includes("auto"), "0.22.8 后不再声明 auto（ONNX Runtime CPU-only）");
     assert.ok(!prefs.includes("cuda"), "PaddleOCR 不应声明 CUDA");
     assert.ok(!prefs.includes("vulkan"), "PaddleOCR 不应声明 Vulkan");
     assert.ok(!prefs.includes("directml"), "PaddleOCR 不应声明 DirectML");

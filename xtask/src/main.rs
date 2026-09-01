@@ -235,7 +235,9 @@ const REQUIRED_LICENSES: &[(&str, &str)] = &[
 ];
 
 /// 不应出现在 resources/ 目录下的模型文件扩展名。
-const FORBIDDEN_MODEL_EXTS: &[&str] = &[".pt", ".pth", ".onnx", ".gguf", ".params", ".bin"];
+/// 不应出现在 resources/ 目录下的模型文件扩展名。
+/// 0.22.8-B 新增 .dll（禁止 ORT DLL 进入制品）。
+const FORBIDDEN_MODEL_EXTS: &[&str] = &[".pt", ".pth", ".onnx", ".gguf", ".params", ".bin", ".dll"];
 
 /// 不应出现在 resources/ 目录下的子目录名。
 const FORBIDDEN_DIRS: &[&str] = &[
@@ -365,7 +367,13 @@ fn check_release_resources() {
     // 4. 排除规则：resources/ 下无模型/staging/generation/venv/cache/__pycache__
     check_exclusion_rules(&mut failures);
 
-    // 5. 分层守卫：domain 禁止引用 crate::app 和 tauri；infra 禁止引用 crate::app
+    // 5. ONNX OCR 供应链锁定校验（0.22.8-B）
+    check_onnx_asset_lock(&mut failures);
+
+    // 6. Cargo.toml ORT/oar-ocr features 校验（0.22.8-B）
+    check_onnx_cargo_features(&mut failures);
+
+    // 7. 分层守卫：domain 禁止引用 crate::app 和 tauri；infra 禁止引用 crate::app
     check_layer_guards(&mut failures);
 
     if !failures.is_empty() {
@@ -711,6 +719,161 @@ fn check_exclusion_rules(failures: &mut Vec<String>) {
         for item in &found_forbidden {
             failures.push(format!("排除规则违反: {item}"));
         }
+    }
+}
+
+/// 校验 ONNX OCR 供应链 asset-lock.json（0.22.8-B）。
+///
+/// - asset-lock.json 存在且可解析
+/// - ORT DLL SHA-256 非空
+/// - 每个模型 SHA-256 非空、size_bytes > 0
+/// - 模型 SHA-256 强校验（允许 resolve/main/ URL，hash 锁定确保不可变性）
+fn check_onnx_asset_lock(failures: &mut Vec<String>) {
+    println!("🔒 校验 ONNX OCR asset-lock.json...");
+    let root = workspace_root();
+    let lock_path = root.join("resources/ocr/paddleocr-onnx/asset-lock.json");
+
+    let Ok(content) = std::fs::read_to_string(&lock_path) else {
+        failures.push(format!(
+            "ONNX asset-lock.json 读取失败 ({})",
+            lock_path.display()
+        ));
+        return;
+    };
+
+    let Ok(lock) = serde_json::from_str::<serde_json::Value>(&content) else {
+        failures.push("ONNX asset-lock.json 不是合法 JSON".to_string());
+        return;
+    };
+
+    // ORT version 非空
+    let ort_version = lock
+        .get("ort")
+        .and_then(|v| v.get("version"))
+        .and_then(|v| v.as_str());
+    if ort_version.is_none() {
+        failures.push("asset-lock.json: ort.version 缺失".to_string());
+    }
+
+    // ORT files 非空，每个有 sha256 和 size_bytes
+    if let Some(files) = lock
+        .get("ort")
+        .and_then(|v| v.get("files"))
+        .and_then(|v| v.as_array())
+    {
+        for file in files {
+            let path = file
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            if file.get("sha256").and_then(|v| v.as_str()).is_none() {
+                failures.push(format!("asset-lock.json: ORT file {path} 缺少 sha256"));
+            }
+            if file.get("size_bytes").and_then(|v| v.as_u64()).is_none() {
+                failures.push(format!("asset-lock.json: ORT file {path} 缺少 size_bytes"));
+            }
+        }
+    } else {
+        failures.push("asset-lock.json: ort.files 缺失或为空".to_string());
+    }
+
+    // models 非空，每个有 sha256、size_bytes、url
+    if let Some(models) = lock.get("models").and_then(|v| v.as_array()) {
+        if models.is_empty() {
+            failures.push("asset-lock.json: models 为空".to_string());
+        }
+        for model in models {
+            let filename = model
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            if model.get("sha256").and_then(|v| v.as_str()).is_none() {
+                failures.push(format!("asset-lock.json: model {filename} 缺少 sha256"));
+            }
+            if model.get("size_bytes").and_then(|v| v.as_u64()).is_none() {
+                failures.push(format!("asset-lock.json: model {filename} 缺少 size_bytes"));
+            }
+            if let Some(_url) = model.get("url").and_then(|v| v.as_str()) {
+                // URL 允许 resolve/main/（HuggingFace 稳定 release 分支），
+                // SHA-256 强校验确保不可变性，URL 格式不作为阻塞条件。
+            } else {
+                failures.push(format!("asset-lock.json: model {filename} 缺少 url"));
+            }
+        }
+    } else {
+        failures.push("asset-lock.json: models 缺失".to_string());
+    }
+
+    if failures.is_empty() {
+        println!("  ✓ ONNX asset-lock.json 校验通过");
+    }
+}
+
+/// 校验 Cargo.toml 中 ort 和 oar-ocr 的 features（0.22.8-B）。
+///
+/// - ort 必须 `default-features = false`，禁止 `download-binaries`
+/// - oar-ocr 必须 `default-features = false`
+/// - ort features 必须包含 `load-dynamic`
+fn check_onnx_cargo_features(failures: &mut Vec<String>) {
+    println!("🔒 校验 Cargo.toml ORT/oar-ocr features...");
+    let root = workspace_root();
+    let cargo_path = root.join("Cargo.toml");
+
+    let Ok(content) = std::fs::read_to_string(&cargo_path) else {
+        failures.push("Cargo.toml 读取失败".to_string());
+        return;
+    };
+
+    // 检查 ort 依赖行
+    let ort_line = content
+        .lines()
+        .find(|l| l.trim_start().starts_with("ort ="));
+    match ort_line {
+        Some(line) => {
+            if !line.contains("default-features = false") {
+                failures.push("Cargo.toml: ort 未设置 default-features = false".to_string());
+            }
+            if line.contains("download-binaries") {
+                failures
+                    .push("Cargo.toml: ort 启用了 download-binaries feature（禁止）".to_string());
+            }
+            if !line.contains("load-dynamic") {
+                failures.push("Cargo.toml: ort 未启用 load-dynamic feature".to_string());
+            }
+            if !line.contains("\"=2.0.0-rc.13\"") {
+                failures.push("Cargo.toml: ort 版本未锁定为 =2.0.0-rc.13".to_string());
+            }
+        }
+        None => {
+            failures.push("Cargo.toml: 缺少 ort 依赖".to_string());
+        }
+    }
+
+    // 检查 oar-ocr 依赖行
+    let oar_line = content
+        .lines()
+        .find(|l| l.trim_start().starts_with("oar-ocr ="));
+    match oar_line {
+        Some(line) => {
+            if !line.contains("default-features = false") {
+                failures.push("Cargo.toml: oar-ocr 未设置 default-features = false".to_string());
+            }
+            if line.contains("download-binaries") {
+                failures.push(
+                    "Cargo.toml: oar-ocr 启用了 download-binaries feature（禁止）".to_string(),
+                );
+            }
+            if !line.contains("\"=0.9.2\"") {
+                failures.push("Cargo.toml: oar-ocr 版本未锁定为 =0.9.2".to_string());
+            }
+        }
+        None => {
+            failures.push("Cargo.toml: 缺少 oar-ocr 依赖".to_string());
+        }
+    }
+
+    if failures.is_empty() {
+        println!("  ✓ Cargo.toml ORT/oar-ocr features 校验通过");
     }
 }
 

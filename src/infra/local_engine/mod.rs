@@ -22,11 +22,13 @@
 //! 耗时 spawn/wait 不长期持有全局锁。
 //! 旧 generation 的退出事件不能覆盖新 generation 状态。
 
+pub mod asset_lock;
 pub mod deployment;
 pub mod lease;
 pub mod lease_recovery;
 pub mod log_pipe;
 pub mod model_storage;
+pub mod onnx_ocr;
 pub mod port;
 pub mod process;
 pub mod providers;

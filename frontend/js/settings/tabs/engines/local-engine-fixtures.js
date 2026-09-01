@@ -34,25 +34,26 @@ export const funasrCatalog = {
 export const paddleocrCatalog = {
     engine_id: "paddleocr",
     display_name: "PP-OCRv6",
-    description: "本地文字识别",
+    description: "本地文字识别 (ONNX Runtime)",
     icon: "scan-text",
-    version: "0.1.0",
+    version: "0.22.8",
     capability_kind: "ocr",
-    runtime_kind: "python_venv",
+    // 0.22.8: 从 python_venv 改为 onnx_runtime
+    runtime_kind: "onnx_runtime",
     lifecycle: "on_demand",
     model_id: "PP-OCRv6",
-    model_revision: "v1",
+    model_revision: "ppocrv6-tiny",
     resource_budget: {
-        estimated_env_disk_mb: 2000,
-        estimated_model_disk_mb: 300,
-        estimated_stable_ram_mb: 600,
-        estimated_peak_ram_mb: 1136,
+        // ORT DLL ~8MB + det/rec/dict ~10MB
+        estimated_env_disk_mb: 10,
+        estimated_model_disk_mb: 10,
+        estimated_stable_ram_mb: 410,
+        estimated_peak_ram_mb: 1140,
     },
     compute_options: [
-        {preference: "auto", profile_id: "cpu-auto", backend: "cpu", compatible: true, disabled_reason: null},
         {preference: "cpu", profile_id: "cpu-x64", backend: "cpu", compatible: true, disabled_reason: null},
     ],
-    current_compute_preference: "auto",
+    current_compute_preference: "cpu",
 };
 
 export function makeCatalog() {
@@ -163,6 +164,86 @@ export function makeStorage(engineId, overrides = {}) {
         ],
         total_size_bytes: 5900 * 1024 * 1024,
         releasable_size_bytes: 2900 * 1024 * 1024,
+    }, overrides);
+}
+
+// ── ONNX OCR 诊断字段 fixture (0.22.8-E) ─────────────────────────────────────
+
+/**
+ * 构造 PaddleOCR ONNX 诊断 DTO mock。
+ *
+ * 诊断 DTO 来自 get_engine_diagnostics command，在 0.22.8-D 后 paddleocr
+ * 引擎的 adapter_diagnostics 包含 ONNX executor 投影的状态字段。
+ *
+ * 关键字段（来自 D 包回报）：
+ * - paddleocr_installed: executor 存在即已安装
+ * - paddleocr_service_state: executor 状态字符串（Idle/Starting/Ready/Stopping/Failed/NotInstalled）
+ * - paddleocr_model_state: 模型状态（Ready/Loading/Failed/Idle/NotInstalled）
+ * - paddleocr_model_id: "PP-OCRv6"
+ * - paddleocr_model_revision: "ppocrv6-tiny"
+ * - paddleocr_instance_id: None（in-process，无 PID）
+ * - paddleocr_actual_backend: "onnx-ocr"
+ */
+export function makeOnnxDiagnostics(overrides = {}) {
+    return deepMerge({
+        engine_id: "paddleocr",
+        environment: "ready",
+        process: {state: "stopped"},
+        service: "healthy",
+        model: "not_loaded",
+        adapter_diagnostics: [
+            {key: "paddleocr_installed", value: "true", label: "info"},
+            {key: "paddleocr_service_state", value: "Idle", label: "info"},
+            {key: "paddleocr_model_state", value: "NotInstalled", label: "info"},
+            {key: "paddleocr_model_id", value: "PP-OCRv6", label: "info"},
+            {key: "paddleocr_model_revision", value: "ppocrv6-tiny", label: "info"},
+            {key: "paddleocr_instance_id", value: "—", label: "info"},
+            {key: "paddleocr_actual_backend", value: "onnx-ocr", label: "info"},
+        ],
+        recent_logs: [],
+        orphan_recovery: {present: false, actionable: false, reason: ""},
+    }, overrides);
+}
+
+// ── ONNX deployment identity fixture (0.22.8-E) ───────────────────────────────
+
+/**
+ * 构造 ONNX deployment identity mock（附加在 status.backend 中）。
+ *
+ * 0.22.8-D desired/loaded deployment identity 通过 status.backend 字段传递：
+ * - desired_deployment: { runtime_kind, dll_identity, model_revision }
+ * - loaded_deployment: { runtime_kind, dll_identity, model_revision } | null
+ * - pending_restart: boolean（DLL identity 变化时为 true）
+ * - legacy_deployment: { runtime_kind: "python_venv", path_display?, size_bytes? } | null
+ *
+ * 只切模型 generation 不触发 pending_restart（DLL 不变）。
+ */
+export function makeOnnxDeploymentBackend(overrides = {}) {
+    return deepMerge({
+        requested_preference: "cpu",
+        resolved_profile: {
+            profile_id: "cpu-x64",
+            backend: "cpu",
+            artifact_id: "onnxruntime-1.20.0",
+            priority: 0,
+        },
+        backend_verification: {
+            state: "pending",
+            expected_backend: "cpu",
+            actual_backend: null,
+            device_name: null,
+            mismatch_reason: null,
+        },
+        fallback_reasons: [],
+        // 0.22.8-E: deployment identity（desired/loaded/pending_restart/legacy）
+        desired_deployment: {
+            runtime_kind: "onnx_runtime",
+            dll_identity: "onnxruntime-1.20.0-sha256",
+            model_revision: "ppocrv6-tiny",
+        },
+        loaded_deployment: null,
+        pending_restart: false,
+        legacy_deployment: null,
     }, overrides);
 }
 

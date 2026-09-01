@@ -109,6 +109,22 @@ walkdir = "2.5"
 cpal = "0.18"
 # zip: 纯 Rust zip 解压（uv 二进制安装，替代 PowerShell Expand-Archive）
 zip = "2.2"
+# ort: ONNX Runtime Rust binding（0.22.8 OCR ONNX 迁移）
+# - default-features = false + load-dynamic: 运行时通过 ort::init_from(path) 加载 onnxruntime.dll，
+#   不在编译期链接 DLL，不下载预编译 binary（禁止 download-binaries feature）
+# - std + ndarray: Session I/O 使用 ndarray 类型
+# - tracing: ORT 内部日志桥接到 tracing
+# 锁定版本 2.0.0-rc.13（spike onnx-spike/followup/decision.md §2.1 验证通过）
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "tracing"] }
+# ndarray: ort Session I/O 直接使用（0.22.8 onnx_validate CLI 隔离验证）
+ndarray = "0.17"
+# oar-ocr: PP-OCRv6 pipeline（det → crop → rec）Rust 实现（0.22.8 OCR ONNX 迁移）
+# - default-features = false: 禁用 download-binaries，不构建期下载 ORT
+# - simd: 启用 SIMD 优化（spike 验证的 feature 组合）
+# 锁定版本 0.9.2（spike onnx-spike/followup/decision.md §2.1 验证通过）
+oar-ocr = { version = "=0.9.2", default-features = false, features = ["simd"] }
+# image: PNG 解码（0.22.8 ONNX OCR executor 需要将 PNG bytes 解码为 RgbImage 传给 oar-ocr）
+image = { version = "0.25", default-features = false, features = ["png"] }
 # sherpa-onnx 引擎通过 Windows 自带 tar.exe 解压 .tar.bz2，无需额外 Rust 依赖
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

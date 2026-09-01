@@ -21,6 +21,9 @@ import {
     hasActiveOperation,
     isOperationCancellable,
     getPrimaryAction,
+    isPendingRestart,
+    hasDeploymentMismatch,
+    getLegacyDeployment,
 } from "./local-engine-state.js";
 
 // ── 内部常量 ─────────────────────────────────────────────────────────────────
@@ -289,6 +292,15 @@ export function computeEngineSummary(entry, t) {
     }
 
     // 可用 → 运行中 · 模型 · 设备
+    // 0.22.8-E: 如果 pending_restart（DLL identity 变化），不说\"运行中\"，
+    // 而是\"待重启\"——文案必须说真话
+    if (isPendingRestart(entry)) {
+        const parts = [tx(t, "local_engine.summary.pending_restart", "待重启")];
+        const model = currentModelName(entry);
+        if (model) parts.push(model);
+        return {text: parts.join(" · "), tone: "warn"};
+    }
+
     if (s.available) {
         const parts = [tx(t, "local_engine.summary.running", "运行中")];
         const model = currentModelName(entry);
@@ -372,9 +384,30 @@ export function computeFeedback(entry, t) {
         return {tone: "error", text: main, detail: detail || undefined};
     }
 
+    // 4.5. pending_restart（DLL identity 变化——只有 DLL 变才提示重启）
+    // **铁则**：只更新模型不能错误提示重启
+    if (isPendingRestart(entry)) {
+        return {
+            tone: "warn",
+            text: tx(t, "local_engine.feedback.pending_restart", "运行时已更新，重启后生效"),
+        };
+    }
+
+    // 4.6. legacy Python deployment 存在时提示可清理
+    const legacy = getLegacyDeployment(entry);
+    if (legacy && s?.environment === "ready") {
+        return {
+            tone: "muted",
+            text: tx(t, "local_engine.feedback.legacy_present", "检测到旧版 Python OCR 环境，可在维护中清理"),
+        };
+    }
+
     // 5. selected ≠ active
+    // 0.22.8-E: 只有 DLL identity 不一致才算 mismatch（需重启）；
+    // 模型 generation 变化不算 mismatch
+    const deploymentMismatch = hasDeploymentMismatch(entry);
     const modelSummary = computeModelSummary(entry);
-    if (modelSummary.mismatch) {
+    if (modelSummary.mismatch && !deploymentMismatch) {
         return {
             tone: "warn",
             text: tx(t, "local_engine.model.mismatch_hint", "配置与实际加载不一致，待重启后生效"),
@@ -487,6 +520,9 @@ function modelDisplayName(entry, modelId) {
  * 关键状态行（环境 / 模型 / 服务 / 生命周期策略）。
  * 进程状态不再同权重常驻——瞬态进综合摘要，PID 进诊断。
  *
+ * 0.22.8-E: PaddleOCR (ONNX) 引擎增加 runtime 行，
+ * 展示 ONNX Runtime 资产状态。
+ *
  * @param {Object} entry
  * @param {Function|null} t
  * @returns {{label: string, value: string, cls: string}[]}
@@ -497,7 +533,7 @@ export function computeKeyline(entry, t) {
         return [{label: tx(t, "local_engine.status.no_data", "暂无状态数据"), value: "", cls: "status-unknown"}];
     }
 
-    return [
+    const items = [
         {
             label: tx(t, "local_engine.status.environment", "环境"),
             value: envLabel(t, s.environment),
@@ -519,6 +555,22 @@ export function computeKeyline(entry, t) {
             cls: "le-keyline-policy",
         },
     ];
+
+    // 0.22.8-E: PaddleOCR 增加 runtime 行
+    const engineId = entry?.catalog?.engine_id;
+    if (engineId === "paddleocr") {
+        const runtimeKind = entry?.catalog?.runtime_kind || "onnx_runtime";
+        const runtimeLabel = runtimeKind === "onnx_runtime"
+            ? tx(t, "local_engine.runtime.onnx", "ONNX Runtime")
+            : runtimeKind;
+        items.push({
+            label: tx(t, "local_engine.keyline.runtime", "运行时"),
+            value: runtimeLabel,
+            cls: "le-keyline-runtime",
+        });
+    }
+
+    return items;
 }
 
 /** 环境 wire value → status class。 */

@@ -842,12 +842,12 @@ fn main() {
                 operation_log_store.clone(),
             );
 
-            // 构造 provider descriptors map + python provider（安装事务用）。
-            // funasr = ManagedBinary（GGUF worker）；paddleocr 仍走 PythonVenv。
+            // 构造 provider descriptors map + providers（安装事务用）。
+            // funasr = ManagedBinary（GGUF worker）；paddleocr = OnnxRuntime（0.22.8）。
             let funasr_descriptor =
                 crate::app::local_engine::funasr::make_funasr_provider_descriptor();
             let paddleocr_descriptor =
-                crate::app::local_engine::paddleocr::make_paddleocr_provider_descriptor();
+                crate::app::local_engine::paddleocr::make_paddleocr_onnx_provider_descriptor();
             let python_provider =
                 crate::app::local_engine::paddleocr::make_paddleocr_python_provider();
             let mut provider_descriptors = std::collections::HashMap::new();
@@ -1025,15 +1025,19 @@ fn main() {
                 });
             }
 
-            // 0.22.4: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
+            // 0.22.8-D: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
             //
-            // - OcrCoordinator 持有 EngineManager 受限依赖
+            // - OcrCoordinator 持有 OnnxOcrExecutor（in-process ONNX 识别）
             // - 路由 windows/paddleocr/auto 三种模式
             // - in-flight tracker + singleflight + idle TTL
             // - ocr_image Capability 和截图 OCR 通过 router() 获取实例
             // Task 18: 保存 Arc 用于 app 退出时 shutdown
+            let onnx_executor =
+                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(
+                    &local_engine_service,
+                );
             let ocr_coordinator = crate::app::local_engine::ocr_coordinator::OcrCoordinator::new(
-                local_engine_service.clone(),
+                onnx_executor,
             );
             // Task 18: 注册为 managed state，供 shutdown 时使用
             app.manage(ocr_coordinator.clone());

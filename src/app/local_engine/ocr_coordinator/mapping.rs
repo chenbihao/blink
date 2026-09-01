@@ -1,281 +1,84 @@
-//! PaddleOCR 响应 → OcrResult/line/word 契约映射（纯函数，无副作用）。
-//! 严格校验 request_id / engine / model 契约、尺寸一致性与 rect 边界。
+//! ONNX executor → OcrResult 契约映射（0.22.8-D）。
+//!
+//! executor 从 `OnnxOcrExecutor::recognize()` 返回的 `OcrResult` 已经由
+//! pipeline 层（`onnx_ocr/pipeline.rs`）完成了 `oar_ocr` → `OcrResult` 的映射。
+//!
+//! 本模块负责**后处理**：
+//! - 校验 rect 边界（坐标非负、宽高正面积、不越出图片尺寸）
+//! - 过滤零面积/空文本 word/line
+//! - **0.22.8 三层契约**：当 ONNX 结果携带 `char_boxes` 时，文本已由
+//!   pipeline 以 `region.text` 为真源正确构建，**不再走词级 grouping 重建**，
+//!   避免逐字符框被 `join_words_intra_line_with_gaps` 误判为词级 token。
+//! - 无 `char_boxes` 的旧结果仍走 `rebuild_with_line_grouping`（WinRT 兼容）。
 
-use crate::domain::capability::builtins::ocr_engine::{OcrLine, OcrRect, OcrResult, OcrWord};
+use crate::domain::capability::builtins::ocr_engine::{
+    OcrRect, OcrResult, OcrWord, rebuild_with_line_grouping_and_diag,
+};
 use crate::domain::ocr::error::StructuredOcrError;
 
-// ── 响应映射 ────────────────────────────────────────────────────────────────
-
-pub(super) fn map_paddleocr_response(
-    resp: &serde_json::Value,
-    expected_request_id: &str,
-    expected_model_id: &str,
-    expected_model_revision: &str,
+/// 映射 executor 返回的 OcrResult → 最终 OcrResult（含校验 + line grouping）。
+///
+/// **0.22.8 三层契约**：
+/// - 当 `result.char_boxes` 非空时，文本由 pipeline 以 `region.text` 为真源构建，
+///   此处仅做 rect 校验和 char_boxes 偏移修正，**不走词级 grouping**。
+/// - 当 `result.char_boxes` 为空时（无逐字符框），走 `rebuild_with_line_grouping`
+///   做行级聚合（与 WinRT/PaddleOCR 走同一套纯函数）。
+pub(super) fn map_executor_result(
+    result: OcrResult,
     request_png_size: (u32, u32),
 ) -> Result<OcrResult, StructuredOcrError> {
-    // ── 1. request_id 必须存在且与当前请求完全一致 ──
-    let resp_rid = resp
-        .get("request_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 request_id 字段或类型错误"))?;
-    if resp_rid != expected_request_id {
-        return Err(StructuredOcrError::protocol_error(format!(
-            "响应 request_id 不匹配：expected={expected_request_id}, got={resp_rid}"
-        )));
-    }
+    let (image_width, image_height) = request_png_size;
 
-    // ── 2. engine 必须存在且为 "paddleocr" ──
-    let engine = resp
-        .get("engine")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 engine 字段或类型错误"))?;
-    if engine != "paddleocr" {
-        return Err(StructuredOcrError::protocol_error(format!(
-            "响应 engine 字段非预期值：expected=paddleocr, got={engine}"
-        )));
-    }
-
-    // ── 3. model_id 必须存在且与当前实例契约一致 ──
-    let model_id = resp
-        .get("model_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 model_id 字段或类型错误"))?;
-    if model_id != expected_model_id {
-        return Err(StructuredOcrError::protocol_error(format!(
-            "响应 model_id 不匹配：expected={expected_model_id}, got={model_id}"
-        )));
-    }
-
-    // ── 4. model_revision 必须存在且与当前实例契约一致 ──
-    let model_revision = resp
-        .get("model_revision")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            StructuredOcrError::protocol_error("响应缺少 model_revision 字段或类型错误")
-        })?;
-    if model_revision != expected_model_revision {
-        return Err(StructuredOcrError::protocol_error(format!(
-            "响应 model_revision 不匹配：expected={expected_model_revision}, got={model_revision}"
-        )));
-    }
-
-    // ── 5. lines 必须存在且为数组 ──
-    let lines_arr = resp
-        .get("lines")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 lines 字段或非数组"))?;
-
-    // ── 6. words 必须存在且为数组（可以为空但不能缺失）──
-    let words_arr = resp
-        .get("words")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 words 字段或非数组"))?;
-    let words_count = words_arr.len();
-
-    // ── 7. 获取响应中的 PNG width/height，用于 rect 边界校验 ──
-    // 缺失或类型错误时必须报错，不能用 MAX 兜底，否则跳过边界校验
-    // Task 7: 使用 checked conversion（u32::try_from），拒绝 0、负数、非整数、超 u32::MAX
-    let image_width = resp
-        .get("image_width")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 image_width 字段或类型错误"))
-        .and_then(|w| {
-            u32::try_from(w).map_err(|_| {
-                StructuredOcrError::protocol_error(format!("image_width 超过 u32::MAX: {w}"))
-            })
-        })?;
-    let image_height = resp
-        .get("image_height")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| StructuredOcrError::protocol_error("响应缺少 image_height 字段或类型错误"))
-        .and_then(|h| {
-            u32::try_from(h).map_err(|_| {
-                StructuredOcrError::protocol_error(format!("image_height 超过 u32::MAX: {h}"))
-            })
-        })?;
-    // 非零检查：image_width/image_height 必须大于 0
-    if image_width == 0 {
-        return Err(StructuredOcrError::protocol_error(
-            "响应 image_width 为 0，不允许零尺寸",
-        ));
-    }
-    if image_height == 0 {
-        return Err(StructuredOcrError::protocol_error(
-            "响应 image_height 为 0，不允许零尺寸",
-        ));
-    }
-    // 与请求 PNG 尺寸一致性比对（Task 7: 生产路径必须校验，不允许 None 绕过）
-    let (req_w, req_h) = request_png_size;
-    if image_width != req_w || image_height != req_h {
-        return Err(StructuredOcrError::protocol_error(format!(
-            "响应尺寸 ({image_width}x{image_height}) 与请求 PNG 尺寸 ({req_w}x{req_h}) 不一致"
-        )));
-    }
-
-    let mut lines: Vec<OcrLine> = Vec::new();
-    let mut words: Vec<OcrWord> = Vec::new();
-
-    // ── 8. 解析 lines ──
-    for (line_idx, line_val) in lines_arr.iter().enumerate() {
-        let text = line_val
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                StructuredOcrError::protocol_error(format!(
-                    "line[{line_idx}] 缺少 text 字段或类型错误"
-                ))
-            })?
-            .to_string();
-        if text.is_empty() {
-            return Err(StructuredOcrError::protocol_error(format!(
-                "line[{line_idx}] text 为空字符串"
-            )));
-        }
-
-        let rect = parse_rect_strict(line_val, line_idx, image_width, image_height)?;
-
-        let word_indices: Vec<usize> = line_val
-            .get("word_indices")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                StructuredOcrError::protocol_error(format!(
-                    "line[{line_idx}] 缺少 word_indices 字段或非数组"
-                ))
-            })?
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                let n = v.as_u64().ok_or_else(|| {
-                    StructuredOcrError::protocol_error(format!(
-                        "line[{line_idx}].word_indices[{i}] 不是非负整数"
-                    ))
-                })?;
-                Ok::<usize, StructuredOcrError>(n as usize)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        for (i, &idx) in word_indices.iter().enumerate() {
-            if idx >= words_count {
-                return Err(StructuredOcrError::protocol_error(format!(
-                    "line[{line_idx}].word_indices[{i}] 越界：{idx} >= words.len()={words_count}"
-                )));
-            }
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        for (i, &idx) in word_indices.iter().enumerate() {
-            if !seen.insert(idx) {
-                return Err(StructuredOcrError::protocol_error(format!(
-                    "line[{line_idx}].word_indices[{i}] 重复引用 word[{idx}]"
-                )));
-            }
-        }
-
-        lines.push(OcrLine {
-            text,
-            bounding_rect: rect,
-            word_indices,
+    // 如果 executor 没有返回任何内容，直接返回空结果
+    if result.lines.is_empty() && result.words.is_empty() && result.char_boxes.is_empty() {
+        return Ok(OcrResult {
+            text: String::new(),
+            lines: Vec::new(),
+            words: Vec::new(),
+            text_angle: result.text_angle,
+            char_ranges: Vec::new(),
+            char_boxes: Vec::new(),
         });
     }
 
-    // ── 9. 解析 words ──
-    let mut word_ref_count = vec![0u32; words_count];
-
-    for (word_idx, word_val) in words_arr.iter().enumerate() {
-        let text = word_val
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                StructuredOcrError::protocol_error(format!(
-                    "word[{word_idx}] 缺少 text 字段或类型错误"
-                ))
-            })?
-            .to_string();
-        if text.is_empty() {
-            return Err(StructuredOcrError::protocol_error(format!(
-                "word[{word_idx}] text 为空字符串"
-            )));
-        }
-
-        let rect = parse_rect_strict(word_val, word_idx, image_width, image_height)?;
-
-        let line_index_val = word_val.get("line_index").ok_or_else(|| {
-            StructuredOcrError::protocol_error(format!("word[{word_idx}] 缺少 line_index 字段"))
-        })?;
-        let line_index = line_index_val.as_u64().ok_or_else(|| {
-            StructuredOcrError::protocol_error(format!("word[{word_idx}].line_index 不是非负整数"))
-        })? as usize;
-        if line_index >= lines.len() {
-            return Err(StructuredOcrError::protocol_error(format!(
-                "word[{word_idx}].line_index 越界：{line_index} >= lines.len()={}",
-                lines.len()
-            )));
-        }
-
-        words.push(OcrWord {
-            text,
-            bounding_rect: rect,
-            line_index,
-        });
+    // ── 有 char_boxes：ONNX 三层契约路径 ──
+    // pipeline 已经以 region.text 为真源构建了完整文本和行结构，
+    // 此处仅校验 rect 边界，不重新拼接文本。
+    if !result.char_boxes.is_empty() {
+        return map_executor_result_with_char_boxes(result, image_width, image_height);
     }
 
-    // ── 10. line.word_indices 与 word.line_index 双向一致 ──
-    for (line_idx, line) in lines.iter().enumerate() {
-        for &word_idx in &line.word_indices {
-            if words[word_idx].line_index != line_idx {
-                return Err(StructuredOcrError::protocol_error(format!(
-                    "双向一致校验失败：word[{word_idx}].line_index={} 但被 line[{line_idx}] 引用",
-                    words[word_idx].line_index
-                )));
-            }
-            word_ref_count[word_idx] += 1;
+    // ── 无 char_boxes：旧路径（词级 grouping 重建）──
+    // 用于 WinRT 兼容和无逐字符框的场景。
+
+    // 1. 校验并过滤 words
+    let mut valid_words: Vec<OcrWord> = Vec::new();
+    for (word_idx, word) in result.words.iter().enumerate() {
+        if word.text.is_empty() {
+            continue;
         }
+        validate_rect(&word.bounding_rect, word_idx, image_width, image_height)?;
+        valid_words.push(word.clone());
     }
 
-    for (word_idx, &count) in word_ref_count.iter().enumerate() {
-        if count == 0 {
-            return Err(StructuredOcrError::protocol_error(format!(
-                "word[{word_idx}] 未被任何 line 引用"
-            )));
+    // 2. 校验 lines（如果有）
+    for (line_idx, line) in result.lines.iter().enumerate() {
+        if line.text.is_empty() {
+            continue;
         }
-        if count > 1 {
-            return Err(StructuredOcrError::protocol_error(format!(
-                "word[{word_idx}] 被多个 line 引用（count={count}）"
-            )));
-        }
+        validate_rect(&line.bounding_rect, line_idx, image_width, image_height)?;
     }
 
-    // 同行聚合：PaddleOCR 的每个检测元素被视为独立"行"，
-    // 同一视觉行的多个检测框需要按几何关系重新合并。
-    // 严格校验通过后，把 words 展平走 `rebuild_with_line_grouping` 重新分组。
-    // 这保证 PaddleOCR 与 WinRT 走同一套领域层纯函数，输出语义一致。
-    let (result, diag) =
-        crate::domain::capability::builtins::ocr_engine::rebuild_with_line_grouping_and_diag(
-            words, None,
-        );
+    // 3. 走 rebuild_with_line_grouping 做 line grouping
+    let (grouped_result, diag) = rebuild_with_line_grouping_and_diag(valid_words, result.text_angle);
 
-    // 消费 Python 返回的 native/fallback word box 计数，安全默认值
-    let native_word_boxes = resp
-        .get("native_word_boxes")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(0);
-    let fallback_word_boxes = resp
-        .get("fallback_word_boxes")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(0);
-
-    // 记录结构化 DEBUG 日志——不记录 OCR 原文或敏感坐标
     tracing::debug!(
-        request_id = %expected_request_id,
-        backend = "paddleocr",
+        backend = "onnx-ocr",
+        path = "word-grouping",
         image_width = image_width,
         image_height = image_height,
-        source_lines = lines.len(),
-        source_words = diag.source_words,
-        native_word_boxes = native_word_boxes,
-        fallback_word_boxes = fallback_word_boxes,
+        source_lines = result.lines.len(),
+        source_words = result.words.len(),
         grouped_lines = diag.grouped_lines,
         merged_line_count = diag.merged_line_count,
         rejected_y_center = diag.rejected_y_center,
@@ -291,79 +94,370 @@ pub(super) fn map_paddleocr_response(
         "OCR 几何归一化完成"
     );
 
+    Ok(grouped_result)
+}
+
+/// ONNX 三层契约路径：char_boxes 已由 pipeline 正确构建，仅做校验。
+///
+/// pipeline 已经：
+/// 1. 以 `region.text` 为唯一真源构建 `OcrResult.text`
+/// 2. 按阅读顺序排列 regions/lines
+/// 3. 为每个非空白字符生成 `OcrCharBox`（含全局 char range）
+/// 4. 为每个 region 生成语义级 `OcrWord`（含 char_ranges）
+///
+/// 此函数仅校验 rect 边界，不重新拼接文本。
+fn map_executor_result_with_char_boxes(
+    result: OcrResult,
+    image_width: u32,
+    image_height: u32,
+) -> Result<OcrResult, StructuredOcrError> {
+    // 校验 char_boxes rect 边界
+    for (idx, cb) in result.char_boxes.iter().enumerate() {
+        validate_rect(&cb.bounding_rect, idx, image_width, image_height)?;
+    }
+
+    // 校验 words rect 边界
+    for (idx, word) in result.words.iter().enumerate() {
+        if word.text.is_empty() {
+            continue;
+        }
+        validate_rect(&word.bounding_rect, idx, image_width, image_height)?;
+    }
+
+    // 校验 lines rect 边界
+    for (idx, line) in result.lines.iter().enumerate() {
+        if line.text.is_empty() {
+            continue;
+        }
+        validate_rect(&line.bounding_rect, idx, image_width, image_height)?;
+    }
+
+    tracing::debug!(
+        backend = "onnx-ocr",
+        path = "char-boxes",
+        image_width = image_width,
+        image_height = image_height,
+        source_lines = result.lines.len(),
+        source_words = result.words.len(),
+        char_boxes = result.char_boxes.len(),
+        output_text_chars = result.text.chars().count(),
+        "OCR 三层契约映射完成（不走红级 grouping）"
+    );
+
     Ok(result)
 }
 
-fn parse_rect_strict(
-    val: &serde_json::Value,
+/// 校验 rect 边界——坐标非负、宽高正面积、不越出图片尺寸。
+fn validate_rect(
+    rect: &OcrRect,
     context_idx: usize,
     image_width: u32,
     image_height: u32,
-) -> Result<OcrRect, StructuredOcrError> {
-    let rect = val.get("rect").unwrap_or(val);
-    let x = rect.get("x").and_then(|v| v.as_i64()).ok_or_else(|| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.x 缺失或类型错误"))
-    })?;
-    let y = rect.get("y").and_then(|v| v.as_i64()).ok_or_else(|| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.y 缺失或类型错误"))
-    })?;
-    let w = rect.get("w").and_then(|v| v.as_u64()).ok_or_else(|| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.w 缺失或类型错误"))
-    })?;
-    let h = rect.get("h").and_then(|v| v.as_u64()).ok_or_else(|| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.h 缺失或类型错误"))
-    })?;
-
-    if x < 0 || y < 0 {
+) -> Result<(), StructuredOcrError> {
+    if rect.x < 0 || rect.y < 0 {
         return Err(StructuredOcrError::protocol_error(format!(
-            "item[{context_idx}] rect 坐标不能为负：x={x}, y={y}"
+            "item[{context_idx}] rect 坐标不能为负：x={}, y={}",
+            rect.x, rect.y
         )));
     }
-    if w == 0 || h == 0 {
+    if rect.w == 0 || rect.h == 0 {
         return Err(StructuredOcrError::protocol_error(format!(
-            "item[{context_idx}] rect 宽高必须 > 0：w={w}, h={h}"
+            "item[{context_idx}] rect 宽高必须 > 0：w={}, h={}",
+            rect.w, rect.h
         )));
     }
-
-    let x_u32 = u32::try_from(x).map_err(|_| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.x 溢出 u32：{x}"))
-    })?;
-    let y_u32 = u32::try_from(y).map_err(|_| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.y 溢出 u32：{y}"))
-    })?;
-    let w_u32 = u32::try_from(w).map_err(|_| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.w 溢出 u32：{w}"))
-    })?;
-    let h_u32 = u32::try_from(h).map_err(|_| {
-        StructuredOcrError::protocol_error(format!("item[{context_idx}] rect.h 溢出 u32：{h}"))
-    })?;
-
-    let x_plus_w = x_u32.checked_add(w_u32).ok_or_else(|| {
-        StructuredOcrError::protocol_error(format!(
-            "item[{context_idx}] rect x+w 溢出：x={x_u32}, w={w_u32}"
-        ))
-    })?;
-    let y_plus_h = y_u32.checked_add(h_u32).ok_or_else(|| {
-        StructuredOcrError::protocol_error(format!(
-            "item[{context_idx}] rect y+h 溢出：y={y_u32}, h={h_u32}"
-        ))
-    })?;
-
-    if x_plus_w > image_width {
+    let x_plus_w = rect.x.saturating_add(rect.w as i32);
+    let y_plus_h = rect.y.saturating_add(rect.h as i32);
+    if x_plus_w as u32 > image_width {
         return Err(StructuredOcrError::protocol_error(format!(
             "item[{context_idx}] rect x+w={x_plus_w} 超出 image_width={image_width}"
         )));
     }
-    if y_plus_h > image_height {
+    if y_plus_h as u32 > image_height {
         return Err(StructuredOcrError::protocol_error(format!(
             "item[{context_idx}] rect y+h={y_plus_h} 超出 image_height={image_height}"
         )));
     }
+    Ok(())
+}
 
-    Ok(OcrRect {
-        x: x as i32,
-        y: y as i32,
-        w: w_u32,
-        h: h_u32,
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::capability::builtins::ocr_engine::{
+        OcrCharBox, OcrLine, OcrRect, OcrResult, OcrWord,
+    };
+
+    fn make_word(text: &str, x: i32, y: i32, w: u32, h: u32, line_index: usize) -> OcrWord {
+        OcrWord {
+            text: text.to_string(),
+            bounding_rect: OcrRect { x, y, w, h },
+            line_index,
+        }
+    }
+
+    fn make_rect(x: i32, y: i32, w: u32, h: u32) -> OcrRect {
+        OcrRect { x, y, w, h }
+    }
+
+    #[test]
+    fn map_executor_result_basic() {
+        let result = OcrResult {
+            text: "hello".to_string(),
+            lines: vec![OcrLine {
+                text: "hello".to_string(),
+                bounding_rect: make_rect(0, 0, 100, 30),
+                word_indices: vec![0],
+            }],
+            words: vec![make_word("hello", 0, 0, 100, 30, 0)],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        assert!(mapped.text.contains("hello"));
+        assert!(!mapped.words.is_empty());
+    }
+
+    #[test]
+    fn map_executor_result_empty() {
+        let result = OcrResult {
+            text: String::new(),
+            lines: vec![],
+            words: vec![],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        assert!(mapped.text.is_empty());
+        assert!(mapped.lines.is_empty());
+        assert!(mapped.words.is_empty());
+    }
+
+    #[test]
+    fn map_executor_result_negative_coords_rejected() {
+        let result = OcrResult {
+            text: "bad".to_string(),
+            lines: vec![],
+            words: vec![make_word("bad", -1, 0, 100, 30, 0)],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        assert!(map_executor_result(result, (200, 100)).is_err());
+    }
+
+    #[test]
+    fn map_executor_result_zero_area_rejected() {
+        let result = OcrResult {
+            text: "bad".to_string(),
+            lines: vec![],
+            words: vec![make_word("bad", 0, 0, 0, 30, 0)],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        assert!(map_executor_result(result, (200, 100)).is_err());
+    }
+
+    #[test]
+    fn map_executor_result_overflow_rejected() {
+        let result = OcrResult {
+            text: "bad".to_string(),
+            lines: vec![],
+            words: vec![make_word("bad", 199, 0, 2, 30, 0)],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        assert!(map_executor_result(result, (200, 100)).is_err());
+    }
+
+    #[test]
+    fn map_executor_result_empty_text_word_filtered() {
+        let result = OcrResult {
+            text: String::new(),
+            lines: vec![],
+            words: vec![
+                make_word("", 0, 0, 100, 30, 0),
+                make_word("ok", 0, 30, 100, 30, 0),
+            ],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        assert_eq!(mapped.words.len(), 1);
+        assert_eq!(mapped.words[0].text, "ok");
+    }
+
+    #[test]
+    fn map_executor_result_cjk_line_grouping() {
+        let result = OcrResult {
+            text: "你好".to_string(),
+            lines: vec![],
+            words: vec![
+                make_word("你", 0, 0, 25, 30, 0),
+                make_word("好", 25, 0, 25, 30, 0),
+            ],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        let mapped = map_executor_result(result, (100, 50)).unwrap();
+        assert_eq!(mapped.text, "你好");
+        assert_eq!(mapped.lines.len(), 1);
+    }
+
+    // ── 三层契约路径测试 ──────────────────────────────────────────
+
+    #[test]
+    fn map_executor_result_with_char_boxes_preserves_text() {
+        // 有 char_boxes 时，文本原样保留，不走词级 grouping
+        let result = OcrResult {
+            text: "PP-OCRv6".to_string(),
+            lines: vec![OcrLine {
+                text: "PP-OCRv6".to_string(),
+                bounding_rect: make_rect(0, 0, 80, 20),
+                word_indices: vec![0],
+            }],
+            words: vec![OcrWord {
+                text: "PP-OCRv6".to_string(),
+                bounding_rect: make_rect(0, 0, 80, 20),
+                line_index: 0,
+            }],
+            text_angle: None,
+            char_ranges: vec![(0, 8)],
+            char_boxes: vec![
+                OcrCharBox {
+                    text: "P".into(),
+                    bounding_rect: make_rect(0, 0, 10, 20),
+                    line_index: 0,
+                    char_start: 0,
+                    char_end: 1,
+                },
+                OcrCharBox {
+                    text: "P".into(),
+                    bounding_rect: make_rect(10, 0, 10, 20),
+                    line_index: 0,
+                    char_start: 1,
+                    char_end: 2,
+                },
+                OcrCharBox {
+                    text: "-".into(),
+                    bounding_rect: make_rect(20, 0, 5, 20),
+                    line_index: 0,
+                    char_start: 2,
+                    char_end: 3,
+                },
+                OcrCharBox {
+                    text: "O".into(),
+                    bounding_rect: make_rect(25, 0, 10, 20),
+                    line_index: 0,
+                    char_start: 3,
+                    char_end: 4,
+                },
+            ],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        // 文本必须原样保留，不得插入空格
+        assert_eq!(mapped.text, "PP-OCRv6");
+        // char_boxes 必须保留
+        assert_eq!(mapped.char_boxes.len(), 4);
+        // char_ranges 必须保留
+        assert_eq!(mapped.char_ranges.len(), 1);
+    }
+
+    #[test]
+    fn map_executor_result_with_char_boxes_cjk_preserves_text() {
+        let result = OcrResult {
+            text: "文字识别".to_string(),
+            lines: vec![OcrLine {
+                text: "文字识别".to_string(),
+                bounding_rect: make_rect(0, 0, 80, 20),
+                word_indices: vec![0],
+            }],
+            words: vec![OcrWord {
+                text: "文字识别".to_string(),
+                bounding_rect: make_rect(0, 0, 80, 20),
+                line_index: 0,
+            }],
+            text_angle: None,
+            char_ranges: vec![(0, 4)],
+            char_boxes: vec![
+                OcrCharBox {
+                    text: "文".into(),
+                    bounding_rect: make_rect(0, 0, 20, 20),
+                    line_index: 0,
+                    char_start: 0,
+                    char_end: 1,
+                },
+                OcrCharBox {
+                    text: "字".into(),
+                    bounding_rect: make_rect(20, 0, 20, 20),
+                    line_index: 0,
+                    char_start: 1,
+                    char_end: 2,
+                },
+                OcrCharBox {
+                    text: "识".into(),
+                    bounding_rect: make_rect(40, 0, 20, 20),
+                    line_index: 0,
+                    char_start: 2,
+                    char_end: 3,
+                },
+                OcrCharBox {
+                    text: "别".into(),
+                    bounding_rect: make_rect(60, 0, 20, 20),
+                    line_index: 0,
+                    char_start: 3,
+                    char_end: 4,
+                },
+            ],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        // CJK 文本不得被拆开或插入空格
+        assert_eq!(mapped.text, "文字识别");
+        assert_eq!(mapped.char_boxes.len(), 4);
+    }
+
+    #[test]
+    fn map_executor_result_with_char_boxes_rejects_bad_rect() {
+        let result = OcrResult {
+            text: "bad".to_string(),
+            lines: vec![],
+            words: vec![],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![OcrCharBox {
+                text: "b".into(),
+                bounding_rect: make_rect(-1, 0, 10, 20),
+                line_index: 0,
+                char_start: 0,
+                char_end: 1,
+            }],
+        };
+        assert!(map_executor_result(result, (200, 100)).is_err());
+    }
+
+    #[test]
+    fn map_executor_result_without_char_boxes_still_groups() {
+        // 无 char_boxes 时走旧路径（词级 grouping）
+        let result = OcrResult {
+            text: "hello world".to_string(),
+            lines: vec![],
+            words: vec![
+                make_word("hello", 0, 0, 50, 30, 0),
+                make_word("world", 60, 0, 50, 30, 0),
+            ],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        // 走了 grouping → 文本由 join_words_intra_line_with_gaps 重建
+        assert_eq!(mapped.text, "hello world");
+        assert!(mapped.char_boxes.is_empty());
+    }
 }

@@ -1,4 +1,4 @@
-//! Task B.3: 前端 char_ranges → UTF-16 offset 测试
+//! Task B.3: 前端 char_ranges / char_boxes → UTF-16 offset 测试
 //!
 //! 覆盖：
 //! 1. 后端 char_ranges 单一真源 → UTF-16 offset 正确转换
@@ -6,6 +6,7 @@
 //! 3. 补充面字符（emoji）UTF-16 offset 差异
 //! 4. 后端无 char_ranges 时退化路径
 //! 5. 编辑后 panelDirty 标记失效（行为验证）
+//! 6. **0.22.8 三层契约**：`computeCharBoxRanges` 逐字符框 UTF-16 转换
 
 import {test, describe} from 'node:test';
 import assert from 'node:assert';
@@ -13,7 +14,7 @@ import assert from 'node:assert';
 // Mock window before importing ss-reading.js (which imports api.js → tauri.js)
 globalThis.window = globalThis;
 
-const {computeCharRanges} = await import('./ss-reading.js');
+const {computeCharRanges, computeCharBoxRanges} = await import('./ss-reading.js');
 
 describe('computeCharRanges — 后端 char_ranges 单一真源', () => {
     test('BMP 文本：Rust char index 与 UTF-16 offset 一致', () => {
@@ -204,5 +205,115 @@ describe('computeCharRanges — 编辑后失效', () => {
         // 注意：如果编辑插入字符在 word 边界之外，旧的 charRanges 可能仍然有效
         // 但如果编辑改变了 word 的位置，charRanges 就会错位
         // 这就是 panelDirty 机制存在的理由
+    });
+});
+
+// ── 0.22.8 三层契约：computeCharBoxRanges 测试 ──────────────────
+
+describe('computeCharBoxRanges — 逐字符框 UTF-16 转换', () => {
+    test('BMP 文本：Rust char index 与 UTF-16 offset 一致', () => {
+        // text = "PP-OCRv6", char_boxes 逐字符
+        const fullText = 'PP-OCRv6';
+        const charBoxes = [
+            {text: 'P', char_start: 0, char_end: 1},
+            {text: 'P', char_start: 1, char_end: 2},
+            {text: '-', char_start: 2, char_end: 3},
+            {text: 'O', char_start: 3, char_end: 4},
+            {text: 'C', char_start: 4, char_end: 5},
+            {text: 'R', char_start: 5, char_end: 6},
+            {text: 'v', char_start: 6, char_end: 7},
+            {text: '6', char_start: 7, char_end: 8},
+        ];
+
+        const result = computeCharBoxRanges(charBoxes, fullText);
+
+        assert.strictEqual(result.length, 8);
+        assert.deepStrictEqual(result[0], {start: 0, end: 1});
+        assert.deepStrictEqual(result[7], {start: 7, end: 8});
+
+        // 验证 slice 正确
+        for (let i = 0; i < charBoxes.length; i++) {
+            assert.strictEqual(
+                fullText.slice(result[i].start, result[i].end),
+                charBoxes[i].text,
+                `char_box[${i}] slice mismatch`
+            );
+        }
+    });
+
+    test('CJK 文本：Rust char index 与 UTF-16 offset 一致', () => {
+        const fullText = '你好世界';
+        const charBoxes = [
+            {text: '你', char_start: 0, char_end: 1},
+            {text: '好', char_start: 1, char_end: 2},
+            {text: '世', char_start: 2, char_end: 3},
+            {text: '界', char_start: 3, char_end: 4},
+        ];
+
+        const result = computeCharBoxRanges(charBoxes, fullText);
+
+        assert.strictEqual(result.length, 4);
+        for (let i = 0; i < charBoxes.length; i++) {
+            assert.strictEqual(
+                fullText.slice(result[i].start, result[i].end),
+                charBoxes[i].text
+            );
+        }
+    });
+
+    test('多行：换行符偏移正确', () => {
+        // text = "你好\n世界"
+        const fullText = '你好\n世界';
+        const charBoxes = [
+            {text: '你', char_start: 0, char_end: 1},
+            {text: '好', char_start: 1, char_end: 2},
+            {text: '世', char_start: 3, char_end: 4},  // \n at index 2
+            {text: '界', char_start: 4, char_end: 5},
+        ];
+
+        const result = computeCharBoxRanges(charBoxes, fullText);
+
+        assert.strictEqual(result.length, 4);
+        for (let i = 0; i < charBoxes.length; i++) {
+            assert.strictEqual(
+                fullText.slice(result[i].start, result[i].end),
+                charBoxes[i].text
+            );
+        }
+    });
+
+    test('emoji：UTF-16 offset 比 Rust char index 多 1', () => {
+        // text = "a😀b"
+        // Rust chars: a(0), 😀(1), b(2)
+        // UTF-16: a(0), [surrogate pair](1,2), b(3)
+        const fullText = 'a😀b';
+        const charBoxes = [
+            {text: 'a', char_start: 0, char_end: 1},
+            {text: '😀', char_start: 1, char_end: 2},
+            {text: 'b', char_start: 2, char_end: 3},
+        ];
+
+        const result = computeCharBoxRanges(charBoxes, fullText);
+
+        assert.strictEqual(result.length, 3);
+        // a: Rust 0..1 → UTF-16 0..1
+        assert.deepStrictEqual(result[0], {start: 0, end: 1});
+        // 😀: Rust 1..2 → UTF-16 1..3 (surrogate pair)
+        assert.deepStrictEqual(result[1], {start: 1, end: 3});
+        // b: Rust 2..3 → UTF-16 3..4
+        assert.deepStrictEqual(result[2], {start: 3, end: 4});
+
+        for (let i = 0; i < charBoxes.length; i++) {
+            assert.strictEqual(
+                fullText.slice(result[i].start, result[i].end),
+                charBoxes[i].text
+            );
+        }
+    });
+
+    test('空数组：返回空', () => {
+        assert.deepStrictEqual(computeCharBoxRanges([], 'hello'), []);
+        assert.deepStrictEqual(computeCharBoxRanges(null, 'hello'), []);
+        assert.deepStrictEqual(computeCharBoxRanges(undefined, 'hello'), []);
     });
 });

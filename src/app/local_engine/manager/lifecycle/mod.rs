@@ -91,6 +91,87 @@ pub(super) fn resolve_expected_model_identity(
     }
 }
 
+// ── ONNX in-process 启动/停止（0.22.8）────────────────────────────────────
+
+impl EngineManager {
+    /// 启动 in-process 引擎（ONNX）。
+    ///
+    /// 0.22.8: PaddleOCR 切换到 ONNX Runtime 后不再 spawn 子进程——
+    /// OCR 由 `OcrCoordinator` 的 `OnnxOcrExecutor` 在主进程内 lazy load。
+    /// 此方法只更新引擎状态为 available，不启动任何子进程。
+    ///
+    /// 状态终态：desired=Running, process=Running(pid=0), service=Healthy,
+    /// model=Ready → `available=true`。
+    pub async fn start_inprocess(&self, engine_id: &EngineId) -> Result<(), LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let entry = self.get_entry(engine_id).await?;
+
+        // 环境检查
+        {
+            let status = entry.status.read().await;
+            if status.environment != EnvironmentHealth::Ready {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::EnvironmentMissing,
+                    ErrorPhase::Start,
+                    "环境未就绪，请先安装",
+                    format!("environment={:?}", status.environment),
+                ));
+            }
+        }
+
+        // 幂等检查
+        {
+            let status = entry.status.read().await;
+            if status.desired == DesiredState::Running && status.is_available_for_requests() {
+                tracing::debug!(engine = %engine_id, "start_inprocess 幂等：已 available");
+                return Ok(());
+            }
+        }
+
+        // 标记 available
+        self.commit_status_internal(engine_id, None, |status| {
+            status.desired = DesiredState::Running;
+            status.process = ProcessState::Running { pid: 0 };
+            status.service = ServiceHealth::Healthy;
+            status.model = ModelHealth::Ready;
+            status.last_error = None;
+        })
+        .await?;
+
+        tracing::info!(engine = %engine_id, "in-process 引擎已启动（ONNX lazy load）");
+        Ok(())
+    }
+
+    /// 停止 in-process 引擎（ONNX）。
+    ///
+    /// 0.22.8: 不停止子进程（没有子进程），只更新引擎状态。
+    /// OcrCoordinator 的 executor shutdown 由调用方（commands 层）处理。
+    pub async fn stop_inprocess(&self, engine_id: &EngineId) -> Result<(), LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let entry = self.get_entry(engine_id).await?;
+
+        // 幂等检查
+        {
+            let status = entry.status.read().await;
+            if status.desired == DesiredState::Stopped {
+                return Ok(());
+            }
+        }
+
+        self.commit_status_internal(engine_id, None, |status| {
+            status.desired = DesiredState::Stopped;
+            status.process = ProcessState::Stopped;
+            status.service = ServiceHealth::Unknown;
+            status.model = ModelHealth::Unknown;
+            status.last_error = None;
+        })
+        .await?;
+
+        tracing::info!(engine = %engine_id, "in-process 引擎已停止");
+        Ok(())
+    }
+}
+
 /// 用服务身份与 OS 进程证据构造持久化 lease。
 ///
 /// `ManagedProcess` 的 `ProcessIdentity::instance_id` 是 infra 状态机用于隔离

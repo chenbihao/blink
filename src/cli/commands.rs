@@ -87,6 +87,12 @@ pub fn dispatch(cli: Cli) -> i32 {
             model,
             conversation,
         } => run_chat(&handle, model, conversation),
+        // onnx-validate 在 try_run_cli 中被直接拦截，不走 clap 标准分派。
+        // 此分支不可达——OnnxValidate 命令不会进入 dispatch。
+        Commands::OnnxValidate { .. } => {
+            eprintln!("onnx-validate 应通过 try_run_cli 直接分派，不应到达 dispatch");
+            1
+        }
     }
 }
 

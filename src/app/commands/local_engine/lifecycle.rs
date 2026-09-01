@@ -5,11 +5,16 @@
 //! compute preference 解析与 descriptor 声明项验证也收敛在此
 //! （`preferences` 域复用）。
 
+use std::sync::Arc;
+
+use tauri::Manager;
+
 use crate::app::command_error::CommandError;
 use crate::app::local_engine::EngineManager;
 use crate::app::local_engine::dto::{
     CancelResultDto, EngineOperationFinishedDto, OrphanStopResultDto,
 };
+use crate::domain::local_engine::EnvOperationEndState;
 use crate::infra::local_engine::runtime::{ComputePreference, EngineId};
 
 use super::{build_adapter_config_for_engine, get_service, validate_engine_id};
@@ -125,6 +130,20 @@ pub async fn install_local_engine(
         .await
         .map_err(CommandError::from)?;
 
+    // 0.22.8: PaddleOCR 安装后注入 ONNX executor
+    if end_state == EnvOperationEndState::Completed
+        && engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID
+        && let Some(coordinator) = app
+            .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
+            .map(|s| s.inner().clone())
+    {
+        let new_executor =
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+        if let Some(executor) = new_executor {
+            coordinator.inject_executor(executor).await;
+        }
+    }
+
     tracing::info!(engine = %eid, ?end_state, "引擎安装结束");
     Ok(EngineOperationFinishedDto {
         engine_id,
@@ -136,6 +155,9 @@ pub async fn install_local_engine(
 /// 启动本地引擎服务。
 ///
 /// 前端只需提交 `engine_id`，不提交 executable/argv/env/脚本路径。
+///
+/// 0.22.8: PaddleOCR (ONNX) 引擎走 in-process 路径——不 spawn 子进程，
+/// 只标记状态为 available，OcrCoordinator 在首次 OCR 请求时 lazy load。
 #[tauri::command]
 pub async fn start_local_engine(
     app: tauri::AppHandle,
@@ -157,9 +179,35 @@ pub async fn start_local_engine(
         .await
         .map_err(CommandError::from)?;
 
-    svc.start(&eid, adapter_config)
-        .await
-        .map_err(CommandError::from)?;
+    // 0.22.8: PaddleOCR ONNX in-process——不走 svc.start()（不 spawn 子进程）
+    if engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID {
+        svc.start_inprocess(&eid)
+            .await
+            .map_err(CommandError::from)?;
+
+        // 构建并注入 ONNX executor 到 OcrCoordinator
+        // 启动时 deployment 可能不存在导致 executor=None，安装后需要补注入
+        if let Some(coordinator) = app
+            .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
+            .map(|s| s.inner().clone())
+        {
+            // 从 deployment 构建 executor
+            let new_executor =
+                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(
+                    &svc,
+                );
+            if let Some(executor) = new_executor {
+                coordinator.inject_executor(executor).await;
+            } else {
+                // executor 构建失败——只通知状态变更
+                coordinator.notify_external_state_change().await;
+            }
+        }
+    } else {
+        svc.start(&eid, adapter_config)
+            .await
+            .map_err(CommandError::from)?;
+    }
 
     tracing::info!(engine = %eid, "引擎启动完成");
     Ok(())
@@ -168,6 +216,9 @@ pub async fn start_local_engine(
 /// 停止本地引擎服务。
 ///
 /// 前端只需提交 `engine_id`。
+///
+/// 0.22.8: PaddleOCR (ONNX) in-process——不走 svc.stop()（没有子进程），
+/// 只标记状态为 stopped，并通知 OcrCoordinator shutdown executor。
 #[tauri::command]
 pub async fn stop_local_engine(
     app: tauri::AppHandle,
@@ -176,7 +227,19 @@ pub async fn stop_local_engine(
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
-    svc.stop(&eid).await.map_err(CommandError::from)?;
+    // 0.22.8: PaddleOCR ONNX in-process——走专用路径
+    if engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID {
+        // 通知 OcrCoordinator shutdown executor
+        if let Some(coordinator) = app
+            .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
+            .map(|s| s.inner().clone())
+        {
+            coordinator.shutdown().await;
+        }
+        svc.stop_inprocess(&eid).await.map_err(CommandError::from)?;
+    } else {
+        svc.stop(&eid).await.map_err(CommandError::from)?;
+    }
 
     tracing::info!(engine = %eid, "引擎停止完成");
     Ok(())
@@ -231,6 +294,22 @@ pub async fn repair_local_engine(
     let eid = validate_engine_id(&engine_id)?;
 
     let (operation_id, end_state) = svc.repair(&eid).await.map_err(CommandError::from)?;
+
+    // 0.22.8: PaddleOCR 修复后注入 ONNX executor
+    if end_state == EnvOperationEndState::Completed
+        && engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID
+        && let Some(coordinator) = app
+            .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
+            .map(|s| s.inner().clone())
+    {
+        let new_executor =
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+        if let Some(executor) = new_executor {
+            coordinator.inject_executor(executor).await;
+        } else {
+            coordinator.notify_external_state_change().await;
+        }
+    }
 
     tracing::info!(engine = %eid, ?end_state, "引擎修复结束");
     Ok(EngineOperationFinishedDto {

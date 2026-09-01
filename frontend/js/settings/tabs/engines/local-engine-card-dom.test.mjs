@@ -628,14 +628,14 @@ await test("FunASR 偏好刷新原位同步开关，不替换当前控件节点"
     assert.equal(toggleAfter.checked, true, "checkbox 原位同步后端真值");
 });
 
-await test("PaddleOCR 多候选：OCR 后端/计算设备/运行策略 select，保存走受限 command", async () => {
+await test("PaddleOCR 配置：OCR 后端/运行策略 select + 计算设备静态文本，保存走受限 command", async () => {
     const container = makeContainer();
     const entry = makeEntry("paddleocr", {
         status: READY_STOPPED,
         models: [makeModel({engine_id: "paddleocr", model_id: "PP-OCRv6", display_name: "PP-OCRv6", is_selected: true})],
         preferences: makePreferences({
             engine_id: "paddleocr",
-            compute_preference: "auto",
+            compute_preference: "cpu",
             ocr_backend: "windows",
             lifecycle: "on_demand",
         }),
@@ -643,7 +643,12 @@ await test("PaddleOCR 多候选：OCR 后端/计算设备/运行策略 select，
     renderEngineCard(container, entry, controllerStub, undefined);
     const config = container.querySelector(".le-card-config");
     const selects = queryAll(config, "select");
-    assert.equal(selects.length, 3, "OCR 后端 + 计算设备 + 运行策略");
+    // 0.22.8: PaddleOCR 只有 CPU 一个 compute option → 静态文本
+    // 所以只有 OCR 后端 + 运行策略 两个 select
+    assert.equal(selects.length, 2, "OCR 后端 + 运行策略（计算设备为静态文本）");
+    // 验证计算设备为静态文本
+    const computeStatic = config.querySelector(".le-compute-static");
+    assert.ok(computeStatic, "单一 compute option 应渲染静态文本");
 
     // 修改 OCR 后端 → 走 set_local_engine_preferences（受限命令）
     preferenceCalls.length = 0;
