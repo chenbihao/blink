@@ -1820,22 +1820,30 @@
                     </button>
                 </div>
 
-                <!-- FunASR 本地模型选择（业务设置，非生命周期管理） -->
-                <div class="setting-row voice-model-select-row">
-                    <div class="setting-row-info">
-                        <span class="setting-row-label" data-i18n="voice.local.model.label">模型</span>
-                    </div>
-                    <div class="setting-row-control">
-                        <select class="voice-model-select" id="voice-local-model-select"></select>
-                    </div>
-                </div>
+<!-- FunASR 本地模型选择（0.22.7：只读展示 + 跳转引擎页管理） -->
+<div class="setting-row voice-model-select-row">
+    <div class="setting-row-info">
+        <span class="setting-row-label" data-i18n="voice.local.model.label">模型</span>
+    </div>
+    <div class="setting-row-control">
+        <div class="voice-model-readonly" id="voice-local-model-readonly">
+            <span class="voice-model-readonly-name" id="voice-local-model-name">—</span>
+            <button class="btn btn-small voice-model-goto-btn" id="voice-local-model-goto-btn" type="button">
+                <svg aria-hidden="true" class="icon">
+                    <use href="#icon-external-link"/>
+                </svg>
+                <span data-i18n="voice.local.model.goto_engines">前往引擎页管理</span>
+            </button>
+        </div>
+    </div>
+</div>
 
                 <!-- 高级选项（独立卡片，不嵌套在 FunASR 内） -->
                 <details class="voice-advanced-card">
                     <summary class="voice-advanced-header">
                         <span class="voice-advanced-chevron"></span>
                         <span class="voice-advanced-title" data-i18n="voice.local.advanced.title">高级选项</span>
-                        <span class="voice-advanced-desc" data-i18n="voice.local.advanced.desc">流式识别 · 热词 · ITN · VAD 切句参数</span>
+                        <span class="voice-advanced-desc" data-i18n="voice.local.advanced.desc">流式识别 · VAD 切句参数</span>
                     </summary>
                     <div class="voice-advanced-body">
                         <!-- 流式识别（仅本地模式生效） -->
@@ -1851,37 +1859,6 @@
                                     <span class="slider"></span>
                                 </label>
                                 <span class="voice-adv-field-hint" id="voice-streaming-hint"></span>
-                            </div>
-                        </div>
-
-                        <!-- 热词 -->
-                        <div class="voice-adv-field voice-adv-field--block">
-                            <div class="voice-adv-field-label">
-                                <span data-i18n="voice.local.hotwords.label">热词</span><span class="field-hint-icon"
-                                                                                              data-i18n-title="voice.local.hotwords.hint"
-                                                                                              title="英文逗号分隔，每项格式「词 权重」（权重 1-100，默认 100）。热词可提升专有名词、品牌名、缩写的识别准确率。">ⓘ</span>
-                            </div>
-                            <div class="voice-adv-field-control">
-                                <textarea class="voice-hotwords-input" data-i18n-ph="voice.local.hotwords.ph"
-                                          id="voice-hotwords"
-                                          placeholder="逗号分隔，如：美团 100, 快手 80, Blink 100"
-                                          rows="2"></textarea>
-                            </div>
-                        </div>
-
-                        <!-- ITN -->
-                        <div class="voice-adv-field">
-                            <div class="voice-adv-field-label">
-                                <span data-i18n="voice.local.itn.label">ITN 逆文本归一化</span><span
-                                    class="field-hint-icon" data-i18n-title="voice.local.itn.hint"
-                                    title="将「二零二四年」转换为「2024年」，数字/日期/时间等自动归一化。推荐开启。">ⓘ</span>
-                            </div>
-                            <div class="voice-adv-field-control">
-                                <label class="switch switch-sm">
-                                    <input checked id="voice-use-itn-toggle" type="checkbox"/>
-                                    <span class="slider"></span>
-                                </label>
-                                <span class="voice-adv-field-hint" data-i18n="voice.local.itn.preview">将「二零二四年」转换为「2024年」</span>
                             </div>
                         </div>
 

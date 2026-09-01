@@ -17,14 +17,13 @@
  * ## 布局约定
  *
  * 配置区由若干 `.le-config-group`（label + control）横向换行排列；
- * renderer 在 preferences / selected / active 签名变化时整体重渲染，
- * 控件值始终来自后端真源，失败时回滚显示。
+ * renderer 只在控件结构变化时整体渲染；preferences / selected / active
+ * 通过 syncConfig 原位同步，避免替换当前焦点控件。
  *
  * @module local-engine-hooks
  */
 
 import {registerAdapterHook, unregisterAdapterHook} from "./local-engine-card.js";
-import {invoke} from "../../../shared/tauri.js";
 import {t} from "../../../i18n/index.js";
 import {computeOptionsDisplayMode} from "./local-engine-state.js";
 
@@ -62,27 +61,55 @@ function appendCurrentModelGroup(container, entry) {
     const group = makeGroup(t("local_engine.config.current_model"));
     group.className += " le-config-group-model";
     const value = document.createElement("span");
-    value.className = "le-config-static";
+    value.className = "le-config-static le-current-model-value";
     value.textContent = name;
     group.appendChild(value);
     container.appendChild(group);
 
-    // selected ≠ active → 待重启/未生效（不得静默声称切换完成）
-    if (selected && active && selected.model_id !== active.model_id) {
-        const hint = document.createElement("span");
-        hint.className = "le-config-mismatch";
-        hint.textContent = t("local_engine.model.mismatch_hint");
-        container.appendChild(hint);
-    }
+    // 节点始终保留，状态变化只切 hidden，避免重建整个配置区。
+    const hint = document.createElement("span");
+    hint.className = "le-config-mismatch";
+    hint.textContent = t("local_engine.model.mismatch_hint");
+    hint.hidden = !(selected && active && selected.model_id !== active.model_id);
+    container.appendChild(hint);
 }
 
 /** 渲染 requires_rebuild 提示（保存 compute 偏好后环境待重建）。 */
 function appendRebuildHint(container, prefs) {
-    if (prefs?.requires_rebuild !== true) return;
     const hint = document.createElement("span");
     hint.className = "le-config-rebuild-hint";
     hint.textContent = t("local_engine.config.requires_rebuild_hint");
+    hint.hidden = prefs?.requires_rebuild !== true;
     container.appendChild(hint);
+}
+
+/** 原位同步所有引擎共用的模型、compute 与待重建状态。 */
+function syncCommonConfig(container, entry) {
+    const models = entry.models;
+    const selected = Array.isArray(models) ? models.find((m) => m.is_selected) : null;
+    const active = Array.isArray(models) ? models.find((m) => m.is_active) : null;
+    const modelValue = container.querySelector(".le-current-model-value");
+    if (modelValue) {
+        modelValue.textContent = (selected && (selected.display_name || selected.model_id))
+            || entry.catalog?.model_id
+            || "—";
+    }
+    const mismatch = container.querySelector(".le-config-mismatch");
+    if (mismatch) mismatch.hidden = !(selected && active && selected.model_id !== active.model_id);
+
+    const preference = entry.preferences?.compute_preference
+        || entry.catalog?.current_compute_preference
+        || "auto";
+    const computeSelect = container.querySelector(".le-compute-select");
+    if (computeSelect) {
+        if (computeSelect.value !== preference) computeSelect.value = preference;
+        computeSelect.dataset.savedValue = preference;
+    }
+    const computeStatic = container.querySelector(".le-compute-static");
+    if (computeStatic) computeStatic.textContent = computeLabel(preference);
+
+    const rebuildHint = container.querySelector(".le-config-rebuild-hint");
+    if (rebuildHint) rebuildHint.hidden = entry.preferences?.requires_rebuild !== true;
 }
 
 /**
@@ -100,7 +127,7 @@ function appendComputeGroup(container, entry, engineId, controller) {
     if (mode === "static") {
         // 单一可用选项：只读展示，避免制造"可以选择 CUDA"的错觉
         const staticValue = document.createElement("span");
-        staticValue.className = "le-config-static";
+        staticValue.className = "le-config-static le-compute-static";
         staticValue.textContent = computeLabel(current);
         group.appendChild(staticValue);
         container.appendChild(group);
@@ -108,7 +135,8 @@ function appendComputeGroup(container, entry, engineId, controller) {
     }
 
     const select = document.createElement("select");
-    select.className = "le-config-select";
+    select.className = "le-config-select le-compute-select";
+    select.dataset.savedValue = current;
     for (const opt of catalog.compute_options) {
         const option = document.createElement("option");
         option.value = opt.preference;
@@ -120,18 +148,21 @@ function appendComputeGroup(container, entry, engineId, controller) {
     }
     select.addEventListener("change", async (e) => {
         const next = e.target.value;
-        const prev = current;
+        const prev = select.dataset.savedValue || current;
+        select.disabled = true;
         try {
-            await invoke("set_local_engine_preferences", {
-                engineId,
-                patch: {compute_preference: next},
-            });
+            const saved = await controller.savePreferences(engineId, {compute_preference: next});
+            const accepted = saved?.compute_preference || next;
+            select.dataset.savedValue = accepted;
+            select.value = accepted;
             if (controller?.isMounted()) {
                 controller.refreshStatus().catch(() => {});
             }
         } catch (err) {
             console.error(`[${engineId}-hook] save compute preference failed:`, err);
             select.value = prev;
+        } finally {
+            select.disabled = false;
         }
     });
     group.appendChild(select);
@@ -173,6 +204,7 @@ function registerFunasrHook() {
             toggle.type = "checkbox";
             toggle.className = "le-switch-input";
             toggle.checked = autoStart;
+            toggle.dataset.savedValue = String(autoStart);
             // checkbox 视觉隐藏（le-switch-input），用 aria-label 提供可访问名称
             toggle.setAttribute("aria-label", t("local_engine.config.auto_start"));
 
@@ -187,18 +219,31 @@ function registerFunasrHook() {
 
             toggle.addEventListener("change", async () => {
                 const next = toggle.checked;
+                const prev = toggle.dataset.savedValue === "true";
+                toggle.disabled = true;
                 try {
-                    await invoke("set_local_engine_preferences", {
-                        engineId: "funasr",
-                        patch: {auto_start: next},
-                    });
+                    const saved = await controller.savePreferences("funasr", {auto_start: next});
+                    const accepted = saved?.auto_start ?? next;
+                    toggle.dataset.savedValue = String(accepted);
+                    toggle.checked = accepted;
                 } catch (err) {
                     console.error("[funasr-hook] save auto_start failed:", err);
-                    toggle.checked = !next;
+                    toggle.checked = prev;
+                } finally {
+                    toggle.disabled = false;
                 }
             });
 
             appendRebuildHint(container, prefs);
+        },
+        syncConfig(container, entry) {
+            syncCommonConfig(container, entry);
+            const toggle = container.querySelector(".le-switch-input");
+            const next = entry.preferences?.auto_start ?? false;
+            if (toggle) {
+                if (toggle.checked !== next) toggle.checked = next;
+                toggle.dataset.savedValue = String(next);
+            }
         },
     });
 }
@@ -229,7 +274,8 @@ function registerPaddleOcrHook() {
             // OCR 路由后端
             const backendGroup = makeGroup(t("local_engine.config.ocr_backend"));
             const backendSelect = document.createElement("select");
-            backendSelect.className = "le-config-select";
+            backendSelect.className = "le-config-select le-ocr-backend-select";
+            backendSelect.dataset.savedValue = currentBackend;
             for (const backend of ["windows", "paddleocr", "auto"]) {
                 const option = document.createElement("option");
                 option.value = backend;
@@ -239,14 +285,18 @@ function registerPaddleOcrHook() {
             }
             backendSelect.addEventListener("change", async (event) => {
                 const next = event.target.value;
+                const prev = backendSelect.dataset.savedValue || currentBackend;
+                backendSelect.disabled = true;
                 try {
-                    await invoke("set_local_engine_preferences", {
-                        engineId: "paddleocr",
-                        patch: {ocr_backend: next},
-                    });
+                    const saved = await controller.savePreferences("paddleocr", {ocr_backend: next});
+                    const accepted = saved?.ocr_backend || next;
+                    backendSelect.dataset.savedValue = accepted;
+                    backendSelect.value = accepted;
                 } catch (err) {
                     console.error("[paddleocr-hook] save OCR backend failed:", err);
-                    backendSelect.value = currentBackend;
+                    backendSelect.value = prev;
+                } finally {
+                    backendSelect.disabled = false;
                 }
             });
             backendGroup.appendChild(backendSelect);
@@ -258,7 +308,8 @@ function registerPaddleOcrHook() {
             // 运行策略（生命周期）
             const lifecycleGroup = makeGroup(t("local_engine.config.lifecycle"));
             const lifecycleSelect = document.createElement("select");
-            lifecycleSelect.className = "le-config-select";
+            lifecycleSelect.className = "le-config-select le-lifecycle-select";
+            lifecycleSelect.dataset.savedValue = currentLifecycle;
             for (const opt of ["on_demand", "keep_running", "stop_after_use"]) {
                 const option = document.createElement("option");
                 option.value = opt;
@@ -268,20 +319,41 @@ function registerPaddleOcrHook() {
             }
             lifecycleSelect.addEventListener("change", async (event) => {
                 const next = event.target.value;
+                const prev = lifecycleSelect.dataset.savedValue || currentLifecycle;
+                lifecycleSelect.disabled = true;
                 try {
-                    await invoke("set_local_engine_preferences", {
-                        engineId: "paddleocr",
-                        patch: {lifecycle: next},
-                    });
+                    const saved = await controller.savePreferences("paddleocr", {lifecycle: next});
+                    const accepted = saved?.lifecycle || next;
+                    lifecycleSelect.dataset.savedValue = accepted;
+                    lifecycleSelect.value = accepted;
                 } catch (err) {
                     console.error("[paddleocr-hook] save lifecycle failed:", err);
-                    lifecycleSelect.value = currentLifecycle;
+                    lifecycleSelect.value = prev;
+                } finally {
+                    lifecycleSelect.disabled = false;
                 }
             });
             lifecycleGroup.appendChild(lifecycleSelect);
             container.appendChild(lifecycleGroup);
 
             appendRebuildHint(container, prefs);
+        },
+        syncConfig(container, entry) {
+            syncCommonConfig(container, entry);
+            const backend = container.querySelector(".le-ocr-backend-select");
+            const nextBackend = entry.preferences?.ocr_backend || "windows";
+            if (backend) {
+                if (backend.value !== nextBackend) backend.value = nextBackend;
+                backend.dataset.savedValue = nextBackend;
+            }
+            const lifecycle = container.querySelector(".le-lifecycle-select");
+            const nextLifecycle = entry.preferences?.lifecycle
+                || entry.catalog?.lifecycle
+                || "on_demand";
+            if (lifecycle) {
+                if (lifecycle.value !== nextLifecycle) lifecycle.value = nextLifecycle;
+                lifecycle.dataset.savedValue = nextLifecycle;
+            }
         },
     });
 }

@@ -78,6 +78,8 @@ const COMMANDS = Object.freeze({
     DELETE_MODEL: "delete_engine_model",
     REPAIR_MODEL: "repair_engine_model",
     CANCEL_MODEL_OP: "cancel_model_operation",
+    // H6: 模型选择（0.22.7：引擎卡片为唯一写入口）
+    SET_SELECTION: "set_local_stt_selection",
 });
 
 /**
@@ -845,6 +847,30 @@ export function createLocalEngineController(callbacks = {}) {
                 const err = reportEngineError(engineId, "model_cancel", e);
                 throw err;
             });
+        },
+
+        /**
+         * 选择引擎的当前模型（0.22.7：引擎卡片为唯一写入口）。
+         *
+         * 调用后端 `set_local_stt_selection`，后端验证模型已安装且可用。
+         * 选择成功后刷新模型列表以更新 is_selected/is_active 标记。
+         *
+         * @param {string} engineId
+         * @param {string} modelId
+         * @returns {Promise<void>}
+         */
+        async selectModel(engineId, modelId) {
+            if (disposed) throw new Error("controller 已 disposed");
+            clearEngineError(engineId);
+            try {
+                await invoke(COMMANDS.SET_SELECTION, {engineId, modelId});
+                // 刷新模型列表——更新 is_selected 标记
+                await this._refreshModels(engineId);
+                notifyStateChange();
+            } catch (e) {
+                const err = reportEngineError(engineId, "model_select", e);
+                throw err;
+            }
         },
 
         // ── 0.22.6: 底座与诊断 ──────────────────────────────────────────────

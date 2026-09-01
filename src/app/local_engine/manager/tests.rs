@@ -335,6 +335,31 @@ async fn service_rejects_unknown_engine_id() {
 }
 
 #[tokio::test]
+async fn catalog_and_status_lists_have_stable_engine_order() {
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![
+        make_fake_adapter("engine-z", true),
+        make_fake_adapter("engine-a", true),
+    ]));
+    let svc = EngineManager::new(registry, Arc::new(NoopEventPort));
+
+    let catalog_ids: Vec<_> = svc
+        .catalog()
+        .await
+        .into_iter()
+        .map(|item| item.engine_id.to_string())
+        .collect();
+    assert_eq!(catalog_ids, vec!["engine-a", "engine-z"]);
+
+    let status_ids: Vec<_> = svc
+        .get_all_status()
+        .await
+        .into_iter()
+        .map(|item| item.engine_id.to_string())
+        .collect();
+    assert_eq!(status_ids, vec!["engine-a", "engine-z"]);
+}
+
+#[tokio::test]
 async fn initial_status_is_stopped_unknown() {
     let svc = make_service("fake-initial");
     let eid = EngineId::new("fake-initial").unwrap();

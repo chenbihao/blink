@@ -65,7 +65,24 @@ pub enum ExitReason {
     WaitError { message: String },
 }
 
-impl ExitReason {}
+impl ExitReason {
+    /// 是否为主动停止导致的退出（非崩溃）。
+    ///
+    /// 用户 stop、切模重启、OCR idle TTL、应用退出均属于 deliberate stop，
+    /// 不得被上层投影成"进程意外退出"。
+    /// `Stopped`（stop 路径 force kill 后回收）、`StartCancelled`（Starting 阶段被取消）
+    /// 和 `ForceKilled`（stop 超时后强制回收）都是主动停止的子路径。
+    /// `NormalExit`（exit code == 0）也视为 deliberate——worker 正常自行退出。
+    pub fn is_deliberate_stop(&self) -> bool {
+        matches!(
+            self,
+            ExitReason::Stopped { .. }
+                | ExitReason::StartCancelled
+                | ExitReason::ForceKilled { .. }
+                | ExitReason::NormalExit { .. }
+        )
+    }
+}
 
 /// 每次启动的唯一身份令牌。
 ///

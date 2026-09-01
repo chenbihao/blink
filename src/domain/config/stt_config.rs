@@ -18,8 +18,8 @@
 //! - `server_port`: 监听端口（默认 8000）
 //! - `funasr_model`: 模型标识（如 "iic/SenseVoiceSmall" / "paraformer-zh"）
 //! - `device`: 推理设备（"cpu" 或 "cuda"）
-//! - `hotwords`: 热词列表（每行 "词 权重"）
-//! - `use_itn`: ITN 逆文本归一化
+//! - ~~`hotwords`~~: 已删除（GGUF worker 不支持热词）
+//! - ~~`use_itn`~~: 已删除（GGUF worker 不消费 ITN 开关；SenseVoice 内置 ITN 不可控）
 
 use serde::{Deserialize, Serialize};
 
@@ -262,13 +262,17 @@ pub struct LocalEngineConfig {
     /// Blink 启动后自动启动服务（懒加载，延迟 3s）
     #[serde(default)]
     pub auto_start_server: bool,
-    /// 热词列表（英文逗号分隔，每项格式「词 权重」），存为 hotwords.txt 传给 FunASR
-    /// 提升专有名词识别率
+    // ── 已废弃字段（反序列化时忽略，不报错）──
+    /// 旧 `hotwords` 字段（GGUF worker 不支持热词，0.22.7 契约收口删除）。
+    /// 保留仅为反序列化兼容，不实际使用，下次正常保存时自然消失。
     #[serde(default)]
+    #[allow(dead_code)]
     pub hotwords: Option<String>,
-    /// ITN 逆文本归一化（"二零二四年" → "2024年"），默认 true
-    #[serde(default = "default_use_itn")]
-    pub use_itn: bool,
+    /// 旧 `use_itn` 字段（GGUF worker 不消费 ITN 开关，0.22.7 契约收口删除）。
+    /// 保留仅为反序列化兼容，不实际使用，下次正常保存时自然消失。
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub use_itn: Option<bool>,
     /// VAD 切句参数（伪流式模式生效）
     #[serde(default)]
     pub vad: VadConfig,
@@ -347,10 +351,6 @@ fn default_device() -> String {
     "cpu".to_string()
 }
 
-fn default_use_itn() -> bool {
-    true
-}
-
 fn default_vad_silence_threshold() -> f64 {
     0.005
 }
@@ -402,7 +402,7 @@ impl Default for LocalEngineConfig {
             num_threads: None,
             auto_start_server: false,
             hotwords: None,
-            use_itn: default_use_itn(),
+            use_itn: None,
             vad: VadConfig::default(),
             streaming_model: None,
         }
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID);
         assert_eq!(cfg.local_engine.device, "cpu");
         assert!(cfg.local_engine.hotwords.is_none());
-        assert!(cfg.local_engine.use_itn);
+        assert!(cfg.local_engine.use_itn.is_none());
         assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
         assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
         assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
@@ -721,7 +721,7 @@ mod tests {
                 num_threads: Some(4),
                 auto_start_server: true,
                 hotwords: Some("美团 100, 快手 80".into()),
-                use_itn: false,
+                use_itn: Some(false),
                 vad: VadConfig {
                     silence_threshold: 0.003,
                     min_silence_ms: 200,
@@ -754,7 +754,7 @@ mod tests {
             restored.local_engine.hotwords.as_deref(),
             Some("美团 100, 快手 80")
         );
-        assert!(!restored.local_engine.use_itn);
+        assert_eq!(restored.local_engine.use_itn, Some(false));
         assert_eq!(restored.local_engine.vad.silence_threshold, 0.003);
         assert_eq!(restored.local_engine.vad.min_silence_ms, 200);
         assert_eq!(restored.local_engine.vad.min_sentence_ms, 600);
@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(cfg.streaming_mode, StreamingMode::Pseudo);
         assert_eq!(cfg.local_engine.server_port, 8000);
         assert_eq!(cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID);
-        assert!(cfg.local_engine.use_itn);
+        assert!(cfg.local_engine.use_itn.is_none());
     }
 
     #[test]
@@ -1505,5 +1505,80 @@ mod tests {
         assert_eq!(sel.model_id, GGUF_PARAFORMER_MODEL_ID);
         // 兼容镜像字段同步
         assert_eq!(cfg.local_engine.funasr_model, GGUF_PARAFORMER_MODEL_ID);
+    }
+
+    // ── 0.22.7 契约收口：旧字段兼容测试 ──────────────────────────────────
+
+    /// 旧 stt_config.json 中仍带 `hotwords` 和 `use_itn` 时必须能正常反序列化。
+    /// 旧字段作为废弃字段被忽略，不导致启动失败或重置整个 STT 配置。
+    #[test]
+    fn old_config_with_hotwords_and_use_itn_deserializes_safely() {
+        let json = r#"{
+            "enabled": true,
+            "mode": "local",
+            "local_engine": {
+                "server_port": 8000,
+                "funasr_model": "gguf/sensevoice-small-q8",
+                "device": "cpu",
+                "hotwords": "美团 100, 快手 80",
+                "use_itn": false,
+                "vad": {
+                    "silence_threshold": 0.005,
+                    "min_silence_ms": 300,
+                    "min_sentence_ms": 800
+                }
+            }
+        }"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.mode, SttMode::Local);
+        // 废弃字段仍可读取（但不再参与运行时逻辑）
+        assert_eq!(
+            cfg.local_engine.hotwords.as_deref(),
+            Some("美团 100, 快手 80")
+        );
+        // use_itn 旧为 bool，现为 Option<bool>，serde 兼容读取
+        assert_eq!(cfg.local_engine.use_itn, Some(false));
+        // VAD 参数不受影响
+        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
+        assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
+        assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
+    }
+
+    /// 旧配置只有 `use_itn: true`（bool）时也能安全反序列化。
+    #[test]
+    fn old_config_with_use_itn_bool_deserializes_safely() {
+        let json = r#"{"enabled":true,"local_engine":{"use_itn":true}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.local_engine.use_itn, Some(true));
+    }
+
+    /// 新配置不带 hotwords/use_itn 时，字段为 None（不影响新用户）。
+    #[test]
+    fn new_config_without_hotwords_and_use_itn_has_none() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"gguf/sensevoice-small-q8","device":"cpu"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.local_engine.hotwords.is_none());
+        assert!(cfg.local_engine.use_itn.is_none());
+    }
+
+    /// 序列化后反序列化：废弃字段在 round-trip 中保留（兼容）。
+    #[test]
+    fn round_trip_preserves_deprecated_fields() {
+        let cfg = SttConfig {
+            enabled: true,
+            mode: SttMode::Local,
+            local_engine: LocalEngineConfig {
+                hotwords: Some("test 100".into()),
+                use_itn: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: SttConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.local_engine.hotwords.as_deref(), Some("test 100"));
+        assert_eq!(restored.local_engine.use_itn, Some(false));
     }
 }

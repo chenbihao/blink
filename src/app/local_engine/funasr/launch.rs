@@ -20,12 +20,6 @@ pub struct FunasrEngineConfig {
     /// CPU 推理线程数（None = 自动；映射 worker 的 BLINK_WORKER_THREADS）
     #[serde(default)]
     pub num_threads: Option<u32>,
-    /// 热词列表（**GGUF 实现不支持热词**——字段保留为配置兼容占位，
-    /// 不参与启动；能力差异已在模型目录 description 声明）
-    #[serde(default)]
-    pub hotwords: Option<String>,
-    /// ITN 逆文本归一化（SenseVoice 内置 ITN；字段随请求传递保留）
-    pub use_itn: bool,
     /// VAD 切句参数（伪流式模式生效）
     #[serde(default)]
     pub vad: VadConfigProjection,
@@ -57,8 +51,6 @@ impl FunasrEngineConfig {
             funasr_model: local.funasr_model.clone(),
             device: local.device.clone(),
             num_threads: local.num_threads,
-            hotwords: local.hotwords.clone(),
-            use_itn: local.use_itn,
             vad: VadConfigProjection {
                 silence_threshold: local.vad.silence_threshold,
                 min_silence_ms: local.vad.min_silence_ms,

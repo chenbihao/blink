@@ -1,6 +1,6 @@
 /**
  * 语音输入 Tab 模块（0.22.5 重构）
- * STT 配置：总开关 / 模式切换 / 云端供应商 / 音频设备选择 + 调试 / 高级选项（热词 / ITN / VAD）
+ * STT 配置：总开关 / 模式切换 / 云端供应商 / 音频设备选择 + 调试 / 高级选项（VAD）
  *
  * FunASR 生命周期管理（环境安装 / 服务启停 / 设备切换 / 日志 / 空间管理）
  * 已迁移至引擎页「本地模型运行时」区域（engines/local-runtime）。
@@ -31,7 +31,7 @@ let sttSaveQueue = Promise.resolve();
  * scope 决定后端控制台日志打印哪个区段，避免改本地配置时把云端字段也全部打印出来：
  * - "global": 总开关 / 模式 / 流式 / 音频设备
  * - "cloud":  云端供应商
- * - "local":  本地引擎（热词 / ITN / VAD）
+ * - "local":  本地引擎（VAD）
  */
 function saveSttConfig(cfg, scope) {
     // 串行化：每个保存操作等前一个完成后才执行，保证后端按序持久化
@@ -358,7 +358,7 @@ export async function initVoiceTab() {
     // loadLocalModels 已迁移至引擎页 local-runtime controller
 }
 
-// ── 0.10.3 高级选项（热词 / ITN / VAD）──────────────────
+// ── 0.10.3 高级选项（VAD）──────────────────
 
 // VAD 参数默认值（与 Rust 侧 default_vad_* 一致）
 const VAD_DEFAULTS = {
@@ -375,37 +375,6 @@ async function initAdvancedOptions(config) {
         streamingCheckbox.addEventListener("change", () => {
             config.streaming_mode = streamingCheckbox.checked ? "pseudo" : "off";
             saveSttConfig(config, "global");
-        });
-    }
-
-    // 热词
-    const hotwordsTextarea = document.getElementById("voice-hotwords");
-    if (hotwordsTextarea) {
-        hotwordsTextarea.value = config.local_engine.hotwords || "";
-        // 失焦时保存（避免每次按键都触发保存）
-        hotwordsTextarea.addEventListener("blur", () => {
-            config.local_engine.hotwords = hotwordsTextarea.value || null;
-            saveSttConfig(config, "local");
-        });
-
-        // 自动收扁：无内容时高度收扁为单行，有内容时按内容自适应
-        function autoResizeHotwords() {
-            hotwordsTextarea.style.height = "auto";
-            const h = Math.min(Math.max(hotwordsTextarea.scrollHeight, 56), 200);
-            hotwordsTextarea.style.height = h + "px";
-        }
-
-        hotwordsTextarea.addEventListener("input", autoResizeHotwords);
-        autoResizeHotwords();
-    }
-
-    // ITN 开关
-    const itnToggle = document.getElementById("voice-use-itn-toggle");
-    if (itnToggle) {
-        itnToggle.checked = config.local_engine.use_itn !== false;
-        itnToggle.addEventListener("change", () => {
-            config.local_engine.use_itn = itnToggle.checked;
-            saveSttConfig(config, "local");
         });
     }
 
@@ -580,27 +549,28 @@ function initAudioTest(config) {
     });
 }
 
-// ── FunASR 本地模型选择（业务设置） ──────────────────────────────────────────
+// ── FunASR 本地模型展示（0.22.7：只读展示 + 跳转引擎页管理） ────────────────
 
 /**
- * 初始化本地模型选择器（0.22.6 重构）。
+ * 初始化本地模型只读展示（0.22.7 契约收口）。
  *
- * 模型列表来自后端 `list_engine_models`（engine_id="funasr"），
- * **只列出已安装（install_state==="installed"）的模型**，以"引擎 · 模型"格式显示。
- * 选择通过 `set_local_stt_selection` 保存——后端会验证模型已安装且可用，不触发下载。
+ * 模型选择的**唯一写入口**在引擎页 FunASR 卡片的模型行"使用"按钮。
+ * 语音页只读展示当前选中模型名称，并提供跳转引擎页的入口。
  *
- * 0.22 Handoff 02：模型选择变更后，根据所选模型的 `stt_capabilities`
- * 动态调整高级选项（热词/ITN/流式）的可见性与可用性——不再硬编码模型 id → 能力映射。
+ * 展示逻辑：
+ * - 有选中模型 → 显示"引擎 · 模型名"
+ * - 选中模型与运行中模型不一致 → 追加"等待重启"标记
+ * - 无已安装模型 → 显示空状态 + 前往引擎页安装 CTA
  *
- * 无已安装模型时显示空状态 + 前往引擎页安装 CTA。
+ * 模型能力联动（流式开关可见性）仍在此处消费 DTO 的 `stt_capabilities`。
  */
 async function initLocalModelSelect(config) {
-    const select = document.getElementById("voice-local-model-select");
-    if (!select) return;
+    const nameEl = document.getElementById("voice-local-model-name");
+    const gotoBtn = document.getElementById("voice-local-model-goto-btn");
+    if (!nameEl) return;
 
-    // 读取当前选择的 engine_id + model_id
-    const currentEngineId = config.local_stt_selection?.engine_id || "funasr";
-    const currentModelId = config.local_stt_selection?.model_id || config.local_engine?.funasr_model || "";
+    const currentModelId = config.local_stt_selection?.model_id
+        || config.local_engine?.funasr_model || "";
 
     // 拉取引擎模型列表
     let models;
@@ -608,17 +578,11 @@ async function initLocalModelSelect(config) {
         models = await invoke("list_engine_models", {engineId: "funasr"});
     } catch (e) {
         console.error("list_engine_models failed:", e);
-        // 降级：显示错误占位
-        select.textContent = "";
-        const errOpt = document.createElement("option");
-        errOpt.textContent = t("voice.local.model.save_failed");
-        errOpt.disabled = true;
-        errOpt.selected = true;
-        select.appendChild(errOpt);
+        nameEl.textContent = t("voice.local.model.load_failed");
         return;
     }
 
-    // 只保留已安装且校验通过的模型（排除 Corrupted/Mismatched 等不可用状态）
+    // 只保留已安装且校验通过的模型
     const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
     const installed = (models || []).filter(
         (m) => m.install_state === "installed"
@@ -627,113 +591,84 @@ async function initLocalModelSelect(config) {
 
     if (installed.length === 0) {
         // 无已安装模型 → 空状态 + CTA
-        select.textContent = "";
-        const empty = document.createElement("option");
-        empty.textContent = t("voice.local.model.empty");
-        empty.disabled = true;
-        empty.selected = true;
-        select.appendChild(empty);
-
-        // 显示 CTA 区域
+        nameEl.textContent = t("voice.local.model.empty");
         showEmptyModelCta();
         return;
     }
 
-    // 填充选项：以"引擎 · 模型"格式显示
-    for (const m of installed) {
-        const opt = document.createElement("option");
-        opt.value = m.model_id;
-        // 显示格式：FunASR · SenseVoiceSmall
-        const engineName = "FunASR";
-        const modelName = m.display_name || m.model_id;
-        opt.textContent = `${engineName} · ${modelName}`;
-        if (m.is_selected || m.model_id === currentModelId) {
-            opt.selected = true;
-        }
-        select.appendChild(opt);
-    }
-
-    // 初始渲染：按当前选中模型的能力更新高级选项可见性
+    // 找到选中的模型
     const selectedModel = installed.find((m) => m.is_selected)
-        || installed.find((m) => m.model_id === currentModelId)
-        || installed[0];
+        || installed.find((m) => m.model_id === currentModelId);
+
     if (selectedModel) {
+        const engineName = "FunASR";
+        const modelName = selectedModel.display_name || selectedModel.model_id;
+        nameEl.textContent = `${engineName} · ${modelName}`;
+
+        // 检查选中模型与运行中模型是否一致
+        const activeModel = installed.find((m) => m.is_active);
+        if (activeModel && activeModel.model_id !== selectedModel.model_id) {
+            // 选中但运行实例不一致 → 显示"等待重启"提示
+            showRestartHint();
+        } else {
+            hideRestartHint();
+        }
+
+        // 根据选中模型的能力更新高级选项可见性
         applyModelCapabilities(selectedModel.stt_capabilities);
+    } else {
+        // 有已安装模型但无选中 → 提示前往引擎页选择
+        nameEl.textContent = t("voice.local.model.not_selected");
     }
 
-    // 选择变更 → 通过 set_local_stt_selection 保存
-    select.addEventListener("change", async () => {
-        const modelId = select.value;
-        const engineId = "funasr"; // 当前只支持 funasr
-        try {
-            await invoke("set_local_stt_selection", {engineId, modelId});
-            // 更新 config
-            config.local_stt_selection = {engine_id: engineId, model_id: modelId};
-            config.local_model_id = modelId;
-            config.local_engine.funasr_model = modelId;
-
-            // 根据新选中模型的能力更新高级选项可见性
-            const newModel = installed.find((m) => m.model_id === modelId);
-            if (newModel) {
-                applyModelCapabilities(newModel.stt_capabilities);
+    // 跳转按钮
+    if (gotoBtn) {
+        gotoBtn.addEventListener("click", async () => {
+            try {
+                let funasrCard = null;
+                await navigateSettings({
+                    tabId: "engines",
+                    prepare: async () => {
+                        await ensureLocalRuntimeMounted();
+                        funasrCard = await waitForEngineCard("funasr");
+                    },
+                    target: () => {
+                        if (funasrCard) {
+                            return document.getElementById("local-model-runtime") || funasrCard;
+                        }
+                        const errorRegion = document.getElementById("le-error-region");
+                        if (errorRegion && !errorRegion.hidden) return errorRegion;
+                        return document.getElementById("local-model-runtime");
+                    },
+                    focusTarget: () => {
+                        if (funasrCard) return funasrCard;
+                        const textEl = document.getElementById("le-error-text");
+                        return textEl && !document.getElementById("le-error-region")?.hidden
+                            ? textEl : null;
+                    },
+                });
+            } catch (e) {
+                console.error("[voice] goto engines from model display failed:", e);
             }
-
-            // 检查是否有 active 模型（当前运行中）且与新选择不同 → 显示"待重启"提示
-            const activeModel = installed.find((m) => m.is_active);
-            if (activeModel && activeModel.model_id !== modelId) {
-                showRestartHint();
-            } else {
-                hideRestartHint();
-            }
-        } catch (e) {
-            console.error("set_local_stt_selection failed:", e);
-            // 回滚 select 到之前选中的值
-            const prev = installed.find((m) => m.is_selected);
-            if (prev) select.value = prev.model_id;
-        }
-    });
+        });
+    }
 }
 
 /**
  * 根据模型能力声明更新高级选项的可见性与可用性（Handoff 02：DTO 驱动 UI）。
  *
  * 前端不再硬编码 model_id → 能力映射，而是直接消费后端 DTO 的 `stt_capabilities`：
- * - `hotwords` 不支持 → 隐藏热词输入区，清空已存值
- * - `itn` 不支持 → 隐藏 ITN 开关区，强制关闭 use_itn
  * - `pseudo_streaming` 不支持 → 禁用流式开关，强制关闭
  *
  * `CapabilityFlag` wire shape: `{ supported: true }` 或 `{ supported: false, reason: "..." }`。
+ *
+ * 0.22.7 契约收口：hotwords/itn 能力声明已删除（GGUF worker 不消费），
+ * 前端不再有热词/ITN 控件。
  *
  * @param {object} caps - `SttModelCapabilities` from DTO (may be undefined)
  */
 function applyModelCapabilities(caps) {
     if (!caps) return;
-
-    // ── 热词 ──
-    const hotwordsField = document.querySelector('.voice-adv-field--block');
-    const hotwordsTextarea = document.getElementById("voice-hotwords");
-    if (hotwordsField && hotwordsTextarea) {
-        const supported = caps.hotwords?.supported === "yes";
-        hotwordsField.style.display = supported ? '' : 'none';
-        if (!supported) {
-            // 不支持的模型清空热词配置，避免无效参数传给 worker
-            hotwordsTextarea.value = "";
-        }
-    }
-
-    // ── ITN ──
-    // ITN 开关所在的 voice-adv-field（第三个 .voice-adv-field，非 block 变体）
-    const itnToggle = document.getElementById("voice-use-itn-toggle");
-    if (itnToggle) {
-        const itnField = itnToggle.closest('.voice-adv-field');
-        const supported = caps.itn?.supported === "yes";
-        if (itnField) {
-            itnField.style.display = supported ? '' : 'none';
-        }
-        if (!supported) {
-            itnToggle.checked = false;
-        }
-    }
 
     // ── 伪流式 ──
     const streamingCheckbox = document.getElementById("voice-streaming");

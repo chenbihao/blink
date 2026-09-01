@@ -10,10 +10,12 @@ impl EngineManager {
     /// 返回所有引擎的 catalog（描述符列表）。
     pub async fn catalog(&self) -> Vec<EngineDefinition> {
         let entries = self.entries.read().await;
-        entries
+        let mut catalog: Vec<_> = entries
             .values()
             .map(|e| e.adapter.descriptor().clone())
-            .collect()
+            .collect();
+        catalog.sort_by(|a, b| a.engine_id.as_str().cmp(b.engine_id.as_str()));
+        catalog
     }
 
     /// 返回指定引擎的状态快照。
@@ -55,6 +57,7 @@ impl EngineManager {
                 status: status.clone(),
             });
         }
+        result.sort_by(|a, b| a.engine_id.as_str().cmp(b.engine_id.as_str()));
         result
     }
 
@@ -106,6 +109,29 @@ impl EngineManager {
         }
     }
 
+    /// 返回当前运行实例冻结的模型 id（0.22.7）。
+    ///
+    /// 模型身份在 start 时从 active 部署 manifest 冻结到 `LaunchSnapshot`。
+    /// 此方法供模型切换事务判断"运行中模型是否与新选择一致"。
+    /// 引擎未运行或无模型合同时返回 `None`。
+    pub async fn get_current_model_id(
+        &self,
+        engine_id: &EngineId,
+    ) -> Result<Option<String>, LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let entries = self.entries.read().await;
+        let entry = entries.get(engine_id).ok_or_else(|| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Unsupported,
+                ErrorPhase::Request,
+                "引擎未注册",
+                format!("engine_id={engine_id}"),
+            )
+        })?;
+        let launch = entry.current_launch().await;
+        Ok(launch.and_then(|l| l.model.map(|m| m.model_id)))
+    }
+
     /// 返回引擎诊断信息。
     pub async fn get_diagnostics(
         &self,
@@ -146,13 +172,11 @@ impl EngineManager {
             let audio_dir = super::super::funasr::worker::engine_audio_tmp_dir(engine_id);
             // Handoff 02 §4：参数传播证据链——从 SttConfig 构建 TranscribeOptions
             // 传播路径：SttConfig.local_engine → FunasrEngineConfig → TranscribeOptions → worker NDJSON
-            let stt_config = crate::app::stt_config::get_stt_config();
+            // 0.22.7 契约收口：use_itn 已删除（GGUF worker 不消费；SenseVoice 内置 ITN 不可控）
             let options = crate::infra::local_engine::worker_proto::TranscribeOptions {
                 // language: 从模型能力声明推导（模型支持多语言时传入用户配置的 language hint；
                 // 当前协议只对 SenseVoice 语义有效，worker 按需消费）
                 language: None, // 语言提示暂不开放（模型自动检测），保留协议能力位
-                // use_itn: 从配置沿传播链到 worker（SenseVoice 内置 ITN；Paraformer 无效果但无害）
-                use_itn: Some(stt_config.local_engine.use_itn),
             };
             std::sync::Arc::new(
                 super::super::funasr::worker::GgufSttTransport::with_options(

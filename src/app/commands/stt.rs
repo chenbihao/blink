@@ -138,8 +138,6 @@ pub async fn set_stt_config(
 
     // ── 能力与配置冲突规范化（Handoff 02 §6）──
     // 后端根据当前选中模型的 stt_capabilities 规范化本地引擎配置：
-    // - 模型不支持 hotwords → 清空 hotwords
-    // - 模型不支持 ITN → 强制 use_itn = false
     // - 模型不支持 pseudo_streaming → 强制 streaming_mode = Off
     // 规范化不返回错误（前端已隐藏 UI），只在日志中记录 warn。
     normalize_config_against_model_capabilities(&mut config);
@@ -178,8 +176,6 @@ pub async fn set_stt_config(
                 scope = "local",
                 device = %config.local_engine.device,
                 auto_start_server = config.local_engine.auto_start_server,
-                use_itn = config.local_engine.use_itn,
-                hotwords_len = config.local_engine.hotwords.as_ref().map(|h| h.len()).unwrap_or(0),
                 vad_silence_threshold = config.local_engine.vad.silence_threshold,
                 vad_min_silence_ms = config.local_engine.vad.min_silence_ms,
                 vad_min_sentence_ms = config.local_engine.vad.min_sentence_ms,
@@ -196,8 +192,6 @@ pub async fn set_stt_config(
                 audio_device_id = ?config.audio_device_id,
                 device = %config.local_engine.device,
                 auto_start_server = config.local_engine.auto_start_server,
-                use_itn = config.local_engine.use_itn,
-                hotwords_len = config.local_engine.hotwords.as_ref().map(|h| h.len()).unwrap_or(0),
                 vad_silence_threshold = config.local_engine.vad.silence_threshold,
                 vad_min_silence_ms = config.local_engine.vad.min_silence_ms,
                 vad_min_sentence_ms = config.local_engine.vad.min_sentence_ms,
@@ -339,6 +333,54 @@ pub async fn set_local_stt_selection(
         model_id = %model_id,
         "本地 STT 选择已保存"
     );
+
+    // 7. 0.22.7 模型切换事务：如果引擎正在运行且 active 模型与新选择不一致，
+    // 执行 stop → start 事务切换，使新模型立即生效。
+    // 失败时配置已持久化（第 3-5 步），用户可在引擎页手动重启。
+    let status_snapshot = svc
+        .get_status(&funasr_eid)
+        .await
+        .map_err(CommandError::from)?;
+    if status_snapshot.status.is_process_active() {
+        // 引擎正在运行——检查 active model 是否与新选择一致
+        let active_model = svc.get_current_model_id(&funasr_eid).await.unwrap_or(None);
+        let needs_restart = active_model.as_deref() != Some(model_id.as_str());
+
+        if needs_restart {
+            tracing::info!(
+                engine_id = %engine_id,
+                old_model = ?active_model,
+                new_model = %model_id,
+                "模型切换事务：引擎运行中且模型不一致，执行 stop → start"
+            );
+
+            // stop（不回滚配置——配置已持久化，失败时用户可手动重启）
+            if let Err(e) = svc.stop(&funasr_eid).await {
+                tracing::warn!(
+                    engine_id = %engine_id,
+                    error = %e,
+                    "模型切换事务：stop 失败（配置已保存，用户可手动重启）"
+                );
+                // 不返回错误——配置已成功保存，stop 失败不构成选择失败
+                return Ok(());
+            }
+
+            // start（使用新配置——config_source 从 SttConfig 投影读取 funasr_model）
+            let adapter_config =
+                crate::app::local_engine::config_source::adapter_config_for_engine(&funasr_eid)
+                    .ok_or_else(|| {
+                        CommandError::new("internal_error", "无法为引擎构建配置", false)
+                    })?;
+            if let Err(e) = svc.start(&funasr_eid, adapter_config).await {
+                tracing::warn!(
+                    engine_id = %engine_id,
+                    error = %e,
+                    "模型切换事务：start 失败（配置已保存，用户可手动重启）"
+                );
+                // 不返回错误——配置已成功保存，start 失败不构成选择失败
+            }
+        }
+    }
 
     Ok(())
 }
@@ -489,9 +531,10 @@ pub(crate) fn copy_dir_recursive(
 /// - 模型未选中或 capabilities 不可获取时，不做任何规范化（降级安全）。
 ///
 /// 规范化规则：
-/// - `hotwords` 不支持 → 清空 `local_engine.hotwords`
-/// - `itn` 不支持 → 强制 `local_engine.use_itn = false`
 /// - `pseudo_streaming` 不支持 → 强制 `streaming_mode = Off`
+///
+/// 注：`hotwords` 和 `itn` 能力已在 0.22.7 移除（GGUF FunASR 链路不再支持），
+/// 相关配置字段保留为向后兼容占位但不参与规范化。
 fn normalize_config_against_model_capabilities(config: &mut crate::app::stt_config::SttConfig) {
     // 获取当前选中模型的能力
     let model_id = match config.local_stt_selection.as_ref() {
@@ -503,31 +546,6 @@ fn normalize_config_against_model_capabilities(config: &mut crate::app::stt_conf
         Some(spec) => &spec.stt_capabilities,
         None => return, // 模型不在目录中，不做规范化（可能旧配置迁移未完成）
     };
-
-    // ── 热词规范化 ──
-    if !caps.hotwords.is_supported()
-        && config
-            .local_engine
-            .hotwords
-            .as_ref()
-            .is_some_and(|h| !h.is_empty())
-    {
-        tracing::warn!(
-            model_id = %model_id,
-            hotwords_len = config.local_engine.hotwords.as_ref().map(|h| h.len()).unwrap_or(0),
-            "模型不支持热词，规范化：清空 hotwords 配置"
-        );
-        config.local_engine.hotwords = None;
-    }
-
-    // ── ITN 规范化 ──
-    if !caps.itn.is_supported() && config.local_engine.use_itn {
-        tracing::warn!(
-            model_id = %model_id,
-            "模型不支持 ITN，规范化：强制 use_itn = false"
-        );
-        config.local_engine.use_itn = false;
-    }
 
     // ── 伪流式规范化 ──
     if !caps.pseudo_streaming.is_supported()
@@ -564,28 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_paraformer_clears_hotwords() {
-        // Paraformer 不支持热词 → 清空 hotwords
-        let mut config = base_config(GGUF_PARAFORMER_MODEL_ID);
-        config.local_engine.hotwords = Some("美团 100, 快手 80".to_string());
-
-        normalize_config_against_model_capabilities(&mut config);
-
-        assert!(config.local_engine.hotwords.is_none());
-    }
-
-    #[test]
-    fn normalize_paraformer_disables_itn() {
-        // Paraformer 不支持 ITN → 强制 use_itn = false
-        let mut config = base_config(GGUF_PARAFORMER_MODEL_ID);
-        config.local_engine.use_itn = true;
-
-        normalize_config_against_model_capabilities(&mut config);
-
-        assert!(!config.local_engine.use_itn);
-    }
-
-    #[test]
     fn normalize_keeps_pseudo_streaming_for_paraformer() {
         // Paraformer 支持伪流式 → streaming_mode 保持 Pseudo
         let mut config = base_config(GGUF_PARAFORMER_MODEL_ID);
@@ -597,40 +593,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_sensevoice_keeps_itn() {
-        // SenseVoice 支持 ITN → use_itn 保持 true
-        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
-        config.local_engine.use_itn = true;
-
-        normalize_config_against_model_capabilities(&mut config);
-
-        assert!(config.local_engine.use_itn);
-    }
-
-    #[test]
-    fn normalize_sensevoice_clears_hotwords() {
-        // SenseVoice 不支持热词（GGUF worker 无入口）→ 清空 hotwords
-        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
-        config.local_engine.hotwords = Some("test 100".to_string());
-
-        normalize_config_against_model_capabilities(&mut config);
-
-        assert!(config.local_engine.hotwords.is_none());
-    }
-
-    #[test]
     fn normalize_noop_when_no_selection() {
         // 未选择模型 → 不做任何规范化
         let mut config = SttConfig::default();
-        config.local_engine.hotwords = Some("test 100".to_string());
-        config.local_engine.use_itn = true;
         config.streaming_mode = StreamingMode::Pseudo;
 
         normalize_config_against_model_capabilities(&mut config);
 
         // 全部保持原样
-        assert!(config.local_engine.hotwords.is_some());
-        assert!(config.local_engine.use_itn);
         assert_eq!(config.streaming_mode, StreamingMode::Pseudo);
     }
 
@@ -638,25 +608,12 @@ mod tests {
     fn normalize_noop_when_model_not_in_catalog() {
         // 模型不在目录中 → 不做任何规范化（降级安全）
         let mut config = base_config("unknown-model-id");
-        config.local_engine.hotwords = Some("test 100".to_string());
-        config.local_engine.use_itn = true;
+        config.streaming_mode = StreamingMode::Pseudo;
 
         normalize_config_against_model_capabilities(&mut config);
 
         // 全部保持原样
-        assert!(config.local_engine.hotwords.is_some());
-        assert!(config.local_engine.use_itn);
-    }
-
-    #[test]
-    fn normalize_sensevoice_keeps_empty_hotwords_untouched() {
-        // 已为空的 hotwords 不触发 warn 日志
-        let mut config = base_config(crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID);
-        config.local_engine.hotwords = None;
-
-        normalize_config_against_model_capabilities(&mut config);
-
-        assert!(config.local_engine.hotwords.is_none());
+        assert_eq!(config.streaming_mode, StreamingMode::Pseudo);
     }
 
     #[test]

@@ -594,9 +594,16 @@ impl EngineManager {
 
                 // 收到 exit 事件且验证为当前实例——执行状态收敛
                 let exit_reason = match &status {
-                    ProcessStatus::Exited { reason } => format!("{reason:?}"),
+                    ProcessStatus::Exited { reason } => reason.clone(),
                     _ => unreachable!(),
                 };
+
+                // 0.22.7：区分 deliberate stop（主动停止）与 unexpected exit（真实崩溃）。
+                // 用户 stop、切模重启、OCR idle TTL、应用退出均属于 deliberate stop，
+                // 不能被上层投影成"进程意外退出"。Stopped { code: Some(1) } 可以保留
+                // 为诊断数据，但不进入错误态。真正无 stop intent 的崩溃（NonZeroExit/
+                // WaitError）仍必须报告意外退出。
+                let is_deliberate = exit_reason.is_deliberate_stop();
 
                 // 取消旧日志 pump——确保退出后旧实例日志不再投影
                 {
@@ -658,7 +665,10 @@ impl EngineManager {
                     );
                 }
 
-                // 置错误终态：process=Exited, service=Unreachable, model=Unknown
+                // 置终态：process=Exited
+                // 0.22.7：deliberate stop（主动停止）不进入错误态——
+                // 不设置 last_error，不报告"进程意外退出"。
+                // 真实崩溃（NonZeroExit/WaitError）仍报告意外退出。
                 {
                     let mut status_guard = entry.status.write().await;
 
@@ -671,20 +681,41 @@ impl EngineManager {
                     }
 
                     let new_revision = status_guard.revision + 1;
-                    let exit_err = LocalEngineError::with_detail(
-                        LocalEngineErrorCode::NotRunning,
-                        ErrorPhase::Stop,
-                        "进程意外退出",
-                        exit_reason.clone(),
-                    );
 
                     status_guard.desired = DesiredState::Stopped;
                     status_guard.process = ProcessState::Exited {
-                        reason: exit_reason,
+                        reason: format!("{exit_reason:?}"),
                     };
-                    status_guard.service = ServiceHealth::Unreachable;
+                    status_guard.service = ServiceHealth::Unknown;
                     status_guard.model = ModelHealth::Unknown;
-                    status_guard.last_error = Some(exit_err);
+
+                    if is_deliberate {
+                        // 主动停止：清除旧错误，不设置新错误
+                        status_guard.last_error = None;
+                        tracing::info!(
+                            engine = %engine_id,
+                            instance = %instance_id,
+                            reason = ?exit_reason,
+                            "exit monitor: deliberate stop，不进入错误态"
+                        );
+                    } else {
+                        // 真实崩溃：报告意外退出
+                        let exit_err = LocalEngineError::with_detail(
+                            LocalEngineErrorCode::NotRunning,
+                            ErrorPhase::Stop,
+                            "进程意外退出",
+                            format!("{exit_reason:?}"),
+                        );
+                        status_guard.service = ServiceHealth::Unreachable;
+                        status_guard.last_error = Some(exit_err);
+                        tracing::warn!(
+                            engine = %engine_id,
+                            instance = %instance_id,
+                            reason = ?exit_reason,
+                            "exit monitor: unexpected exit，进入错误态"
+                        );
+                    }
+
                     status_guard.revision = new_revision;
 
                     // 广播状态变更
@@ -697,10 +728,11 @@ impl EngineManager {
                     event_port.emit_status(&snapshot);
                 }
 
-                tracing::warn!(
+                tracing::info!(
                     engine = %engine_id,
                     instance = %instance_id,
-                    "exit monitor: 状态已收敛到 Exited/Unreachable，current identity 已清理"
+                    deliberate = is_deliberate,
+                    "exit monitor: 状态已收敛，current identity 已清理"
                 );
 
                 // exit 事件只处理一次

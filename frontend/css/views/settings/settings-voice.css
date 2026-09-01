@@ -320,34 +320,6 @@
     min-width: 0;
 }
 
-/* ── 热词输入框（高级选项卡片内）────────────────────────────────── */
-
-#voice .voice-hotwords-input {
-    width: 100%;
-    min-height: 56px;
-    max-height: 200px;
-    overflow-y: auto;
-    background: var(--bg-sidebar);
-    color: var(--text);
-    border: 1px solid var(--surface);
-    border-radius: var(--radius-md, 6px);
-    padding: var(--space-sm, 8px) var(--space-md, 10px);
-    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-    font-size: var(--text-sm, 12px);
-    line-height: var(--leading-relaxed, 1.6);
-    resize: vertical;
-    outline: none;
-    transition: border-color var(--transition-base, 0.15s);
-}
-
-#voice .voice-hotwords-input:focus {
-    border-color: var(--accent);
-}
-
-#voice .voice-hotwords-input::placeholder {
-    color: var(--text-faint);
-}
-
 /* ── 高级选项可折叠卡片（嵌套在 FunASR 卡片内，再凹陷一层）──────── */
 
 #voice .voice-advanced-card {

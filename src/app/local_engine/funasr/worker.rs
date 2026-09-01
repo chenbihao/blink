@@ -131,7 +131,7 @@ impl Drop for AudioFileGuard {
 pub struct GgufSttTransport {
     client: Arc<NdjsonWorkerClient>,
     audio_dir: PathBuf,
-    /// 受限识别选项（从 SttConfig 投影；use_itn / language 沿配置 → worker 传播）。
+    /// 受限识别选项（从 SttConfig 投影；language 沿配置 → worker 传播）。
     options: TranscribeOptions,
 }
 
@@ -147,7 +147,7 @@ impl GgufSttTransport {
 
     /// 带 `TranscribeOptions` 构造（Handoff 02 §4：参数传播证据链）。
     ///
-    /// `use_itn` 和 `language` 从 `SttConfig` → `FunasrEngineConfig` → 此处 →
+    /// `language` 从 `SttConfig` → `FunasrEngineConfig` → 此处 →
     /// `TranscribeOptions` → worker NDJSON 协议，形成完整传播链。
     pub fn with_options(
         client: Arc<NdjsonWorkerClient>,

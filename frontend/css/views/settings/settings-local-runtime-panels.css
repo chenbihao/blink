@@ -664,6 +664,18 @@
     color: var(--accent);
 }
 
+/* 0.22.7：模型选择状态标记（非按钮） */
+#engines .le-model-btn-current {
+    color: var(--accent);
+    border-color: var(--accent-border, var(--accent));
+    font-weight: 500;
+}
+
+#engines .le-model-btn-pending-restart {
+    color: var(--warning, #e6a700);
+    border-color: var(--warning-border, var(--warning, #e6a700));
+}
+
 #engines .le-model-empty {
     color: var(--text-dim);
     font-size: var(--text-sm);
@@ -765,5 +777,22 @@
     border: 1px solid var(--warning-border);
     color: var(--warning);
     font-size: var(--text-sm);
+    font-style: normal;
+}
+
+/* 0.22.7：语音页只读模型展示 */
+#voice .voice-model-readonly {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+#voice .voice-model-readonly-name {
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+    font-style: normal;
+}
+
+#voice .voice-model-goto-btn {
     font-style: normal;
 }

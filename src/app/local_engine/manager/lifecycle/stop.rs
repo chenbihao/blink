@@ -58,8 +58,8 @@ impl EngineManager {
                 })
                 .await?;
 
-                // 0.22.7：StdioWorker 引擎先走优雅停止——发送 shutdown 请求并
-                // drop 客户端（stdin EOF），短暂等待 worker 自行退出；
+                // 0.22.7：先走优雅停止（StdioWorker: shutdown + stdin EOF；
+                // HTTP: POST /shutdown），短暂等待进程自行退出；
                 // 超时再由 ManagedProcess 强制回收进程树。
                 self.graceful_stop_worker(engine_id, entry, &mp).await;
 
@@ -107,10 +107,16 @@ impl EngineManager {
         }
     }
 
-    /// StdioWorker 引擎的优雅停止（0.22.7）。
+    /// 引擎优雅停止（0.22.7）。
     ///
-    /// 协议约定：正常停止优先 shutdown 请求 + stdin EOF，worker 自行退出。
-    /// 此处发送请求、drop 客户端并等待最多 `GRACEFUL_WAIT_SECS`；
+    /// 根据引擎的 `service_transport` 分派两条路径：
+    ///
+    /// - **StdioWorker**（FunASR）：发送 NDJSON `shutdown` + drop 客户端（stdin EOF），
+    ///   worker 自行退出。
+    /// - **HTTP**（PaddleOCR）：POST `/shutdown`（带 `X-Engine-Token` 鉴权），
+    ///   Python server 收到后设置 `should_exit = True` 自行退出。
+    ///
+    /// 两条路径都在 `GRACEFUL_WAIT_SECS` 窗口内轮询进程状态；
     /// 无论结果如何，后续 `ManagedProcess::stop` 兜底回收（Job Object）。
     pub(in super::super) async fn graceful_stop_worker(
         &self,
@@ -120,27 +126,89 @@ impl EngineManager {
     ) {
         const GRACEFUL_WAIT_SECS: u64 = 5;
 
-        let client = entry.worker_client.lock().await.take();
-        let Some(client) = client else {
-            return; // 非 stdio 引擎或客户端已销毁
-        };
-        tracing::debug!(engine = %engine_id, "优雅停止 stdio worker：shutdown + EOF");
-        client.request_shutdown().await;
-        drop(client); // stdin EOF
+        let transport = entry.adapter.descriptor().service_transport;
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(GRACEFUL_WAIT_SECS);
-        loop {
-            let snapshot = managed.snapshot().await;
-            if snapshot.status.is_exited() || snapshot.status == ProcessStatus::Stopped {
-                tracing::info!(engine = %engine_id, "stdio worker 已在优雅窗口内退出");
-                return;
+        match transport {
+            crate::domain::local_engine::ServiceTransport::StdioWorker => {
+                // StdioWorker 路径：shutdown 请求 + stdin EOF
+                let client = entry.worker_client.lock().await.take();
+                let Some(client) = client else {
+                    return; // 客户端已销毁
+                };
+                tracing::debug!(engine = %engine_id, "优雅停止 stdio worker：shutdown + EOF");
+                client.request_shutdown().await;
+                drop(client); // stdin EOF
+
+                wait_graceful_exit(engine_id, managed, GRACEFUL_WAIT_SECS, "stdio worker").await;
             }
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(engine = %engine_id, "stdio worker 优雅退出超时，转入强制回收");
-                return;
+            crate::domain::local_engine::ServiceTransport::Http => {
+                // HTTP 路径：POST /shutdown（带 X-Engine-Token 鉴权）
+                let identity = entry.current_identity().await;
+                let Some(identity) = identity else {
+                    tracing::debug!(
+                        engine = %engine_id,
+                        "优雅停止 HTTP 引擎：无 launch snapshot（已停止？），跳过"
+                    );
+                    return;
+                };
+
+                let base_url = identity.endpoint.base_url();
+                let token = identity.token.clone();
+                let shutdown_url = format!("{base_url}/shutdown");
+
+                tracing::debug!(
+                    engine = %engine_id,
+                    url = %shutdown_url,
+                    "优雅停止 HTTP 引擎：POST /shutdown"
+                );
+
+                // 构建短超时 HTTP client——shutdown 请求不应长时间阻塞
+                let client = match reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            engine = %engine_id,
+                            error = %e,
+                            "构建 HTTP client 失败，跳过优雅停止"
+                        );
+                        return;
+                    }
+                };
+
+                match client
+                    .post(&shutdown_url)
+                    .header("X-Engine-Token", &token)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        tracing::info!(
+                            engine = %engine_id,
+                            status = %resp.status(),
+                            "HTTP /shutdown 请求成功，等待进程退出"
+                        );
+                    }
+                    Ok(resp) => {
+                        tracing::warn!(
+                            engine = %engine_id,
+                            status = %resp.status(),
+                            "HTTP /shutdown 返回非成功状态，转入强制回收"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            engine = %engine_id,
+                            error = %e,
+                            "HTTP /shutdown 请求失败，转入强制回收"
+                        );
+                    }
+                }
+
+                wait_graceful_exit(engine_id, managed, GRACEFUL_WAIT_SECS, "HTTP 引擎").await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 
@@ -262,7 +330,7 @@ impl EngineManager {
                 })
                 .await?;
 
-                // 0.22.7：StdioWorker 引擎先走优雅停止（条件停止路径同样适用）
+                // 0.22.7：先走优雅停止（条件停止路径同样适用）
                 self.graceful_stop_worker(engine_id, &entry, &mp).await;
 
                 match mp.stop_if_current(instance_token).await {
@@ -369,5 +437,29 @@ impl EngineManager {
                 status.last_error = Some(error.clone());
             })
             .await;
+    }
+}
+
+/// 在优雅停止窗口内轮询进程是否已自行退出。
+///
+/// 进程在窗口内退出则记 info；超时则记 warn，由调用方后续 `ManagedProcess::stop` 兜底回收。
+async fn wait_graceful_exit(
+    engine_id: &EngineId,
+    managed: &Arc<ManagedProcess>,
+    graceful_wait_secs: u64,
+    label: &str,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(graceful_wait_secs);
+    loop {
+        let snapshot = managed.snapshot().await;
+        if snapshot.status.is_exited() || snapshot.status == ProcessStatus::Stopped {
+            tracing::info!(engine = %engine_id, "{label} 已在优雅窗口内退出");
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(engine = %engine_id, "{label} 优雅退出超时，转入强制回收");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }

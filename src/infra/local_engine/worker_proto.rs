@@ -10,7 +10,7 @@
 //!    "model_status":"ready","model_content_fingerprint":"<64hex>",
 //!    "backend":"cpu","requested_backend":"cpu"}
 //! 请求: {"type":"hello","protocol_version":1}
-//!       {"type":"transcribe","request_id":"..","audio_path":"..","language":?,"use_itn":?}
+//!       {"type":"transcribe","request_id":"..","audio_path":"..","language":?}
 //!       {"type":"shutdown"}
 //! 响应: {"type":"hello_ok",...}
 //!       {"type":"transcribe_result","request_id":"..","ok":bool,"text":?,"error":?,"elapsed_ms":?}
@@ -167,8 +167,6 @@ pub fn parse_worker_line(line: &str) -> Result<Option<WorkerLine>, String> {
 pub struct TranscribeOptions {
     /// 语言提示（如 "zh"）——仅 SenseVoice 语义有效，worker 按需消费。
     pub language: Option<String>,
-    /// ITN 开关。当前 GGUF 路径 SenseVoice 内置 ITN，字段保留为协议能力位。
-    pub use_itn: Option<bool>,
 }
 
 /// NDJSON worker 客户端。
@@ -348,9 +346,6 @@ impl NdjsonWorkerClient {
         });
         if let Some(lang) = &options.language {
             req["language"] = serde_json::Value::String(lang.clone());
-        }
-        if let Some(itn) = options.use_itn {
-            req["use_itn"] = serde_json::Value::Bool(itn);
         }
 
         // 串行化不变量：events 锁持有覆盖"写入→匹配响应"全程（见 hello 注释）

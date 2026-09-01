@@ -3390,9 +3390,11 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 .position(0.0, 0.0)
                 .visible(false)
                 .decorations(false)
-                .transparent(true)
+                // 设置页会频繁局部重绘；透明 WebView2 合成表面在部分 GPU/DPI
+                // 组合下会整窗丢帧，只剩 native 底色。次级内容窗口必须不透明。
+                .transparent(false)
                 .shadow(false)
-                .background_color(tauri::window::Color(0, 0, 0, 0))
+                .background_color(tauri::window::Color(30, 30, 46, 255))
                 .build()
         }) {
             Ok((win, created)) => {
@@ -3608,9 +3610,10 @@ pub fn open_settings(app: &AppHandle) {
         .position(0.0, 0.0)
         .visible(false)
         .decorations(false)
-        .transparent(true)
+        // 与预热路径保持一致：设置页使用不透明合成表面，避免局部重绘后白屏/底色页。
+        .transparent(false)
         .shadow(false)
-        .background_color(tauri::window::Color(0, 0, 0, 0))
+        .background_color(tauri::window::Color(30, 30, 46, 255))
         .build()
         .expect("创建设置窗口失败");
     let scale = crate::infra::platform::dpi::scale_factor(target_dpi);

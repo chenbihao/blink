@@ -19,9 +19,9 @@
 //!   profile + GGUF 模型目录**（见 [`descriptor`] 与 [`gguf`]）。
 //! - **transport 为 stdio**：无 HTTP 端口、无 venv、无 torch；启动身份经
 //!   环境变量注入，ready 握手复用 `parse_and_verify_health` 身份/指纹校验。
-//! - **保持已有配置 key 和 serde 形状**：`funasr_model`/`device`/`hotwords`
-//!   （GGUF 无热词能力，字段保留为兼容占位）/`use_itn`/`vad`/
-//!   `auto_start_server` 语义；模型 id 由 0.22.7 迁移确定映射。
+//! - **保持已有配置 key 和 serde 形状**：`funasr_model`/`device`/`vad`/
+//!   `auto_start_server` 语义（`hotwords`/`use_itn` 已于 0.22.7 契约收口删除）；
+//!   模型 id 由 0.22.7 迁移确定映射。
 //! - **日志使用 ManagedProcess 的 bounded history/broadcast**（worker 只写
 //!   stderr；stdout 是 NDJSON 协议通道，不进日志）。
 //! - **空间统计和清理区分 engine deployment / 模型 payload / provider

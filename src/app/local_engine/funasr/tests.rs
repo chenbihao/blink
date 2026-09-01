@@ -173,34 +173,13 @@ fn old_stt_config_fields_deserialization_unchanged() {
         crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
     );
     assert_eq!(funasr_config.device, "cpu");
-    assert!(funasr_config.use_itn);
     assert!(!funasr_config.auto_start_server);
     assert_eq!(funasr_config.vad.silence_threshold, 0.005);
     assert_eq!(funasr_config.vad.min_silence_ms, 300);
     assert_eq!(funasr_config.vad.min_sentence_ms, 800);
 }
 
-// ── hotwords/ITN/VAD/model 参数映射不变 ──
-
-#[test]
-fn funasr_engine_config_preserves_hotwords() {
-    let local = crate::domain::config::stt_config::LocalEngineConfig {
-        hotwords: Some("美团 100, 快手 80".to_string()),
-        ..Default::default()
-    };
-    let funasr_config = FunasrEngineConfig::from_stt_config(&local);
-    assert_eq!(funasr_config.hotwords.as_deref(), Some("美团 100, 快手 80"));
-}
-
-#[test]
-fn funasr_engine_config_preserves_itn() {
-    let local = crate::domain::config::stt_config::LocalEngineConfig {
-        use_itn: false,
-        ..Default::default()
-    };
-    let funasr_config = FunasrEngineConfig::from_stt_config(&local);
-    assert!(!funasr_config.use_itn);
-}
+// ── VAD/model 参数映射不变 ──
 
 #[test]
 fn funasr_engine_config_preserves_vad() {
@@ -259,8 +238,6 @@ fn funasr_engine_config_round_trip_json() {
         device: "cuda".to_string(),
         num_threads: Some(4),
         auto_start_server: true,
-        hotwords: Some("美团 100".to_string()),
-        use_itn: false,
         ..Default::default()
     };
     let config = FunasrEngineConfig::from_stt_config(&local);
@@ -271,7 +248,6 @@ fn funasr_engine_config_round_trip_json() {
         crate::domain::config::stt_config::GGUF_SENSEVOICE_MODEL_ID
     );
     assert_eq!(back.device, "cuda");
-    assert!(!back.use_itn);
     assert!(back.auto_start_server);
 }
 
@@ -771,8 +747,6 @@ async fn gguf_real_end_to_end_sensevoice() {
             funasr_model: gguf::GGUF_SENSEVOICE_ID.to_string(),
             device: "cpu".to_string(),
             num_threads: None,
-            hotwords: None,
-            use_itn: true,
             vad: Default::default(),
             auto_start_server: false,
         })
@@ -894,7 +868,6 @@ async fn gguf_real_worker_crash_and_restart() {
         engine_config: serde_json::json!({
             "funasr_model": gguf::GGUF_SENSEVOICE_ID,
             "device": "cpu",
-            "use_itn": true,
         }),
         preferred_port: None,
         compute_preference: Some(ComputePreference::Cpu),
@@ -1057,7 +1030,6 @@ async fn gguf_real_three_models_and_switch() {
         engine_config: serde_json::json!({
             "funasr_model": model,
             "device": "cpu",
-            "use_itn": true,
         }),
         preferred_port: None,
         compute_preference: Some(ComputePreference::Cpu),

@@ -572,18 +572,10 @@ export const en = {
     "voice.local.diagnose.log_api_fail": "[Diag] API test: ❌ failed: {err}",
     // Advanced options
     "voice.local.advanced.title": "Advanced",
-    "voice.local.advanced.desc": "Streaming · hotwords · ITN · VAD params",
+    "voice.local.advanced.desc": "Streaming · VAD params",
     // Streaming
     "voice.local.streaming.label": "Streaming recognition",
     "voice.local.streaming.hint": "When on: VAD sentence-splitting + a preview every 500ms lets you see text as you speak. When off: a single recognition pass after release.",
-    // Hotwords
-    "voice.local.hotwords.label": "Hotwords",
-    "voice.local.hotwords.hint": "Comma-separated; each entry is \"word weight\" (weight 1-100, default 100). Hotwords improve recognition of proper nouns, brand names, and abbreviations.",
-    "voice.local.hotwords.ph": "Comma-separated, e.g.: Meituan 100, Kuaishou 80, Blink 100",
-    // ITN
-    "voice.local.itn.label": "ITN (inverse text normalization)",
-    "voice.local.itn.hint": "Converts \"twenty twenty-four\" to \"2024\"; auto-normalizes numbers, dates, times. Recommended.",
-    "voice.local.itn.preview": "Converts \"twenty twenty-four\" to \"2024\"",
     // VAD
     "voice.local.vad.title": "VAD sentence-splitting params",
     "voice.local.vad.hint": "Controls when the pseudo-streaming engine decides the user paused and finalizes a sentence. Lower the silence threshold if you're far from the mic; lower the silence duration if you speak fluently to finalize faster.",

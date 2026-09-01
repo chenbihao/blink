@@ -70,8 +70,8 @@ import {
  * 注册的受限 hook 完成，但不能复制 card lifecycle。
  *
  * hook 结构：
- * - `renderConfig(container, entry, controller)`: 渲染引擎专属配置区（受限）。
- *   renderer 在配置签名变化时重新调用（select/开关从 preferences 真源重建）。
+ * - `renderConfig(container, entry, controller)`: 首次渲染引擎专属配置区（受限）。
+ * - `syncConfig(container, entry)`: 原位同步受控值，不替换正在交互的表单控件。
  *
  * renderer 绝不允许任意 engine id 动态注入 HTML、command 或字段路径。
  */
@@ -94,12 +94,17 @@ export function unregisterAdapterHook(engineId) {
     adapterHooks.delete(engineId);
 }
 
-/** 配置区签名：preferences + selected/active 身份（不含高频 install_state）。 */
+/**
+ * 配置区结构签名：只包含会改变控件种类/候选项的 catalog 数据。
+ * 运行时值由 hook.syncConfig 原位同步，不能因 checkbox/select 值变化删除
+ * 当前焦点节点（WebView2 下可能导致整页绘制失效）。
+ */
 function configAreaSignature(entry) {
-    const summary = computeModelSummary(entry);
-    return JSON.stringify(entry.preferences || null)
-        + `|${summary.selectedName || ""}|${summary.activeName || ""}`
-        + `|${entry.preferences?.requires_rebuild === true ? 1 : 0}`;
+    const catalog = entry.catalog || {};
+    return JSON.stringify({
+        engine_id: catalog.engine_id || "",
+        compute_options: catalog.compute_options || [],
+    });
 }
 
 /**
@@ -150,7 +155,7 @@ export function renderEngineCard(container, entry, controller, i18n) {
     const card = document.createElement("div");
     card.className = "le-card extension-card";
     card.dataset.engineId = engineId;
-    // tabindex=-1 使卡片可聚焦（语音页跳转 scrollIntoView 后 focus）
+    // tabindex=-1 使卡片可聚焦（语音页深链定位后 focus）
     card.setAttribute("tabindex", "-1");
 
     // ── head：身份 + 综合摘要 + 唯一主操作 ────────────────────────────────
@@ -629,14 +634,21 @@ function updateConfigArea(container, entry, controller, i18n) {
     if (!hook || typeof hook.renderConfig !== "function") return;
 
     const sig = configAreaSignature(entry);
-    if (container.dataset.renderSig === sig) return;
-    container.dataset.renderSig = sig;
+    if (container.dataset.renderSig !== sig) {
+        container.dataset.renderSig = sig;
+        container.textContent = "";
+        try {
+            hook.renderConfig(container, entry, controller);
+        } catch (e) {
+            console.error(`[le-card] adapter hook renderConfig failed for ${engineId}:`, e);
+            return;
+        }
+    }
 
-    container.textContent = "";
     try {
-        hook.renderConfig(container, entry, controller);
+        hook.syncConfig?.(container, entry);
     } catch (e) {
-        console.error(`[le-card] adapter hook renderConfig failed for ${engineId}:`, e);
+        console.error(`[le-card] adapter hook syncConfig failed for ${engineId}:`, e);
     }
 }
 

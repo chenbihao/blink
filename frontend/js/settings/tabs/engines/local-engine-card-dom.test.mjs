@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 
 // ── Tauri mock（须在 import 前设置）─────────────────────────────────────────
 const invokeCalls = [];
+const preferenceCalls = [];
 globalThis.window = {
     __TAURI__: {
         core: {
@@ -270,6 +271,10 @@ function makeEntry(engineId, overrides = {}) {
 
 const controllerStub = {
     isMounted: () => false,
+    savePreferences: async (engineId, patch) => {
+        preferenceCalls.push({engineId, patch});
+        return {engine_id: engineId, ...patch};
+    },
     openEngineFolder: async () => {},
     install: async () => {},
     start: async () => {},
@@ -600,6 +605,29 @@ await test("FunASR 单 compute profile：静态文本，无下拉", () => {
     assert.ok(config.textContent.includes("自动运行"), "自动启动开关组");
 });
 
+await test("FunASR 偏好刷新原位同步开关，不替换当前控件节点", () => {
+    const container = makeContainer();
+    const base = {
+        status: READY_STOPPED,
+        models: [makeModel({is_selected: true})],
+    };
+    renderEngineCard(container, makeEntry("funasr", {
+        ...base,
+        preferences: makePreferences({auto_start: false}),
+    }), controllerStub, undefined);
+    const config = container.querySelector(".le-card-config");
+    const toggleBefore = config.querySelector(".le-switch-input");
+
+    renderEngineCard(container, makeEntry("funasr", {
+        ...base,
+        preferences: makePreferences({auto_start: true}),
+    }), controllerStub, undefined);
+
+    const toggleAfter = config.querySelector(".le-switch-input");
+    assert.equal(toggleAfter, toggleBefore, "偏好变化不得替换 checkbox 节点");
+    assert.equal(toggleAfter.checked, true, "checkbox 原位同步后端真值");
+});
+
 await test("PaddleOCR 多候选：OCR 后端/计算设备/运行策略 select，保存走受限 command", async () => {
     const container = makeContainer();
     const entry = makeEntry("paddleocr", {
@@ -618,16 +646,15 @@ await test("PaddleOCR 多候选：OCR 后端/计算设备/运行策略 select，
     assert.equal(selects.length, 3, "OCR 后端 + 计算设备 + 运行策略");
 
     // 修改 OCR 后端 → 走 set_local_engine_preferences（受限命令）
-    invokeCalls.length = 0;
+    preferenceCalls.length = 0;
     const backendSelect = selects[0];
     backendSelect.value = "paddleocr";
     backendSelect._fire("change", {target: backendSelect});
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(invokeCalls.length, 1, "恰好一次 invoke");
-    assert.equal(invokeCalls[0].cmd, "set_local_engine_preferences");
-    assert.equal(invokeCalls[0].args.engineId, "paddleocr");
-    assert.deepEqual(invokeCalls[0].args.patch, {ocr_backend: "paddleocr"});
+    assert.equal(preferenceCalls.length, 1, "恰好保存一次");
+    assert.equal(preferenceCalls[0].engineId, "paddleocr");
+    assert.deepEqual(preferenceCalls[0].patch, {ocr_backend: "paddleocr"});
 });
 
 // ── 8. 状态更新幂等：同 entry 重复渲染不炸 ─────────────────────────────────

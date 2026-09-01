@@ -109,15 +109,12 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                 }],
                 // SenseVoice 能力矩阵（证据来源：0.22.7.1 spike 实测 + FunASR 上游文档）
                 // - languages: 五语种内置（中/英/日/韩/粤），上游文档明确
-                // - hotwords: GGUF worker 无热词参数入口，不支持
-                // - itn: SenseVoice 模型内置 ITN，worker 输出已含后处理
                 // - pseudo_streaming: PseudoStreamingSttEngine 对所有模型可用
                 // - true_streaming: 非自回归模型，无增量 encoder
                 // - timestamps: worker NDJSON 协议 TranscribeOptions 未开放
+                // 0.22.7 契约收口：hotwords/itn 已删除（GGUF worker 不消费）
                 stt_capabilities: crate::domain::local_engine::SttModelCapabilities {
                     languages: vec!["zh".into(), "en".into(), "ja".into(), "ko".into(), "yue".into()],
-                    hotwords: crate::domain::local_engine::CapabilityFlag::no("stt.capability.hotwords.unsupported_gguf"),
-                    itn: crate::domain::local_engine::CapabilityFlag::yes(),
                     pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
                     true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.no_incremental_encoder"),
                     timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
@@ -137,14 +134,11 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                 }],
                 // Paraformer 能力矩阵（证据来源：0.22.7.3 spike 实测）
                 // - languages: 中文专用模型（实测英文单词无空格拼接）
-                // - hotwords: GGUF worker 无热词参数入口
-                // - itn: Paraformer GGUF 无内置 ITN/标点
                 // - pseudo_streaming: 可用（粗粒度，非自回归延迟低）
                 // - true_streaming: 非自回归，无增量 encoder
+                // 0.22.7 契约收口：hotwords/itn 已删除（GGUF worker 不消费）
                 stt_capabilities: crate::domain::local_engine::SttModelCapabilities {
                     languages: vec!["zh".into()],
-                    hotwords: crate::domain::local_engine::CapabilityFlag::no("stt.capability.hotwords.unsupported_gguf"),
-                    itn: crate::domain::local_engine::CapabilityFlag::no("stt.capability.itn.unsupported_paraformer_gguf"),
                     pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
                     true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.no_incremental_encoder"),
                     timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
@@ -172,14 +166,11 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                 ],
                 // Nano 能力矩阵（证据来源：0.22.7.3 spike 实测）
                 // - languages: 中文为主（自回归 LLM，多语言能力未验证）
-                // - hotwords: GGUF worker 无热词参数入口
-                // - itn: 无内置 ITN
                 // - pseudo_streaming: 可用但粗粒度（自回归延迟显著高于 SenseVoice）
                 // - true_streaming: 自回归但 KV 每请求清空，非增量
+                // 0.22.7 契约收口：hotwords/itn 已删除（GGUF worker 不消费）
                 stt_capabilities: crate::domain::local_engine::SttModelCapabilities {
                     languages: vec!["zh".into()],
-                    hotwords: crate::domain::local_engine::CapabilityFlag::no("stt.capability.hotwords.unsupported_gguf"),
-                    itn: crate::domain::local_engine::CapabilityFlag::no("stt.capability.itn.unsupported_nano"),
                     pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
                     true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.kv_cleared_per_request"),
                     timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),

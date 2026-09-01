@@ -131,7 +131,6 @@ mod tests {
             server_port: 8000,
             funasr_model: "paraformer-zh".to_string(),
             device: "cuda".to_string(),
-            use_itn: true,
             ..Default::default()
         };
         let config = funasr_adapter_config_from(&local);
@@ -139,7 +138,6 @@ mod tests {
             serde_json::from_value(config.engine_config).unwrap();
         assert_eq!(back.device, "cpu");
         assert_eq!(back.funasr_model, "paraformer-zh");
-        assert!(back.use_itn);
     }
 
     #[test]

@@ -469,7 +469,7 @@ pub struct ModelCatalogItemDto {
     /// STT 模型的 per-model 能力声明（Handoff 02：DTO 驱动 UI）。
     ///
     /// 仅 STT 引擎填充；OCR 引擎为 default（全 unknown）。
-    /// 前端据此决定热词/ITN/流式等高级选项的可见性与可用性，
+    /// 前端据此决定流式等高级选项的可见性与可用性，
     /// 不再硬编码模型 id → 能力的映射。
     #[serde(default)]
     pub stt_capabilities: SttModelCapabilities,
@@ -571,8 +571,6 @@ mod tests {
     fn dto_includes_stt_capabilities_in_json() {
         let caps = SttModelCapabilities {
             languages: vec!["zh".into(), "en".into()],
-            hotwords: CapabilityFlag::no("test.reason"),
-            itn: CapabilityFlag::yes(),
             pseudo_streaming: CapabilityFlag::yes(),
             true_streaming: CapabilityFlag::no("test.reason"),
             timestamps: CapabilityFlag::no("test.reason"),
@@ -590,14 +588,9 @@ mod tests {
         assert_eq!(caps_json["languages"][0], "zh");
         assert_eq!(caps_json["languages"][1], "en");
 
-        // hotwords: { supported: "no", reason: "test.reason" }
-        assert_eq!(caps_json["hotwords"]["supported"], "no");
-        assert_eq!(caps_json["hotwords"]["reason"], "test.reason");
-
-        // itn: { supported: "yes" }
-        assert_eq!(caps_json["itn"]["supported"], "yes");
-        // Yes variant 不含 reason 字段
-        assert!(caps_json["itn"].get("reason").is_none());
+        // pseudo_streaming: { supported: "yes" }
+        assert_eq!(caps_json["pseudo_streaming"]["supported"], "yes");
+        assert!(caps_json["pseudo_streaming"].get("reason").is_none());
     }
 
     #[test]
@@ -620,16 +613,20 @@ mod tests {
 
         // default caps 仍然序列化（所有能力为 No { reason: "unknown" }）
         assert!(json.get("stt_capabilities").is_some());
-        assert_eq!(json["stt_capabilities"]["hotwords"]["supported"], "no");
-        assert_eq!(json["stt_capabilities"]["hotwords"]["reason"], "unknown");
+        assert_eq!(
+            json["stt_capabilities"]["pseudo_streaming"]["supported"],
+            "no"
+        );
+        assert_eq!(
+            json["stt_capabilities"]["pseudo_streaming"]["reason"],
+            "unknown"
+        );
     }
 
     #[test]
     fn dto_round_trip_preserves_capabilities() {
         let caps = SttModelCapabilities {
             languages: vec!["zh".into()],
-            hotwords: CapabilityFlag::no("round.trip.test"),
-            itn: CapabilityFlag::yes(),
             pseudo_streaming: CapabilityFlag::yes(),
             true_streaming: CapabilityFlag::no("round.trip.test"),
             timestamps: CapabilityFlag::yes(),
@@ -663,8 +660,8 @@ mod tests {
         });
         let dto: ModelCatalogItemDto = serde_json::from_value(json).unwrap();
         // default caps：所有能力为 No { reason: "unknown" }
-        assert!(!dto.stt_capabilities.hotwords.is_supported());
-        assert!(!dto.stt_capabilities.itn.is_supported());
+        assert!(!dto.stt_capabilities.pseudo_streaming.is_supported());
+        assert!(!dto.stt_capabilities.true_streaming.is_supported());
     }
 
     #[test]
@@ -705,12 +702,6 @@ mod tests {
         assert!(dto.stt_capabilities.languages.contains(&"ko".to_string()));
         assert!(dto.stt_capabilities.languages.contains(&"yue".to_string()));
 
-        // SenseVoice 不支持热词（GGUF worker 无入口）
-        assert!(!dto.stt_capabilities.hotwords.is_supported());
-
-        // SenseVoice 内置 ITN
-        assert!(dto.stt_capabilities.itn.is_supported());
-
         // SenseVoice 支持伪流式
         assert!(dto.stt_capabilities.pseudo_streaming.is_supported());
 
@@ -733,12 +724,6 @@ mod tests {
         // Paraformer 仅中文
         assert_eq!(dto.stt_capabilities.languages, vec!["zh"]);
 
-        // Paraformer 不支持热词
-        assert!(!dto.stt_capabilities.hotwords.is_supported());
-
-        // Paraformer 不支持 ITN
-        assert!(!dto.stt_capabilities.itn.is_supported());
-
         // Paraformer 支持伪流式
         assert!(dto.stt_capabilities.pseudo_streaming.is_supported());
     }
@@ -757,12 +742,6 @@ mod tests {
 
         // Nano 仅中文
         assert_eq!(dto.stt_capabilities.languages, vec!["zh"]);
-
-        // Nano 不支持热词
-        assert!(!dto.stt_capabilities.hotwords.is_supported());
-
-        // Nano 不支持 ITN
-        assert!(!dto.stt_capabilities.itn.is_supported());
 
         // Nano 支持伪流式
         assert!(dto.stt_capabilities.pseudo_streaming.is_supported());

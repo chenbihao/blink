@@ -573,18 +573,10 @@ export const zh = {
     "voice.local.diagnose.log_api_fail": "[诊断] API 测试: ❌ 失败: {err}",
     // 高级选项
     "voice.local.advanced.title": "高级选项",
-    "voice.local.advanced.desc": "流式识别 · 热词 · ITN · VAD 切句参数",
+    "voice.local.advanced.desc": "流式识别 · VAD 切句参数",
     // 流式识别
     "voice.local.streaming.label": "流式识别",
     "voice.local.streaming.hint": "开启后 VAD 切句 + 每 500ms 预览识别，实现边说边出字。关闭后松开一次性识别。",
-    // 热词
-    "voice.local.hotwords.label": "热词",
-    "voice.local.hotwords.hint": "英文逗号分隔，每项格式「词 权重」（权重 1-100，默认 100）。热词可提升专有名词、品牌名、缩写的识别准确率。",
-    "voice.local.hotwords.ph": "逗号分隔，如：美团 100, 快手 80, Blink 100",
-    // ITN
-    "voice.local.itn.label": "ITN 逆文本归一化",
-    "voice.local.itn.hint": "将「二零二四年」转换为「2024年」，数字/日期/时间等自动归一化。推荐开启。",
-    "voice.local.itn.preview": "将「二零二四年」转换为「2024年」",
     // VAD
     "voice.local.vad.title": "VAD 切句参数",
     "voice.local.vad.hint": "控制伪流式引擎何时判定用户停顿从而触发句尾定稿。离麦克风远时声音能量低，可调低静默阈值；说话连贯时可调低静默时长加快定稿。",

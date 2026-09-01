@@ -224,6 +224,39 @@ function renderModelActions(model, entry, controller, i18n) {
 
     // Installed → 修复 + 删除
     if (state === "installed") {
+        // 0.22.7：模型选择唯一写入口——已安装模型行显示"使用"按钮或状态标记
+        // is_selected + is_active 一致 → "当前"标签（选中且运行中一致）
+        // is_selected + !is_active → "等待重启"标签（选中但运行实例仍用旧模型）
+        // !is_selected → "使用"按钮（点击后选为此引擎的当前模型）
+        if (model.is_selected) {
+            if (model.is_active) {
+                // 选中且运行中一致 → "当前"标记
+                const badge = document.createElement("span");
+                badge.className = "le-model-btn le-model-btn-current";
+                badge.textContent = tt(i18n, "local_engine.model.action.current", "当前");
+                frag.appendChild(badge);
+            } else {
+                // 选中但运行实例不一致 → "等待重启"标记
+                const badge = document.createElement("span");
+                badge.className = "le-model-btn le-model-btn-pending-restart";
+                badge.textContent = tt(i18n, "local_engine.model.action.pending_restart", "等待重启");
+                frag.appendChild(badge);
+            }
+        } else {
+            // 未选中 → "使用"按钮
+            const useBtn = document.createElement("button");
+            useBtn.className = "le-model-btn le-model-btn-primary";
+            useBtn.type = "button";
+            useBtn.appendChild(renderIcon("check", {extraClass: "le-action-icon"}));
+            const useLabel = document.createElement("span");
+            useLabel.textContent = tt(i18n, "local_engine.model.action.use", "使用");
+            useBtn.appendChild(useLabel);
+            useBtn.addEventListener("click", () => {
+                controller?.selectModel?.(engineId, modelId).catch(() => {});
+            });
+            frag.appendChild(useBtn);
+        }
+
         const repairBtn = document.createElement("button");
         repairBtn.className = "le-model-btn";
         repairBtn.type = "button";

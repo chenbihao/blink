@@ -48,21 +48,19 @@ use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 /// | 能力 | 语义 | 传播路径 |
 /// |---|---|---|
 /// | `languages` | 模型支持的语言列表 | UI 展示 + worker 按模型语义消费 |
-/// | `hotwords` | 热词增强 | config → launch env → worker（GGUF 版 Paraformer/Nano 不支持） |
-/// | `itn` | 逆文本归一化 | config → worker（GGUF SenseVoice 内置；Paraformer 无） |
 /// | `pseudo_streaming` | 伪流式（VAD 切句 + 累积预览） | PseudoStreamingSttEngine 对所有模型可用 |
 /// | `true_streaming` | 真流式（增量 encoder） | 当前无模型支持 |
 /// | `timestamps` | 词级时间戳 | worker 协议 TranscribeOptions |
+///
+/// **0.22.7 契约收口**：`hotwords` 和 `itn` 字段已删除——当前 GGUF worker
+/// 既不消费热词参数，也不消费可控 ITN 开关（SenseVoice 内置 ITN 不可
+/// 用户控制，Paraformer/Nano 无 ITN）。继续保留无效能力声明会误导前端。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttModelCapabilities {
     /// 支持的语言列表（ISO 639-1 或模型特定标识）。
     /// 空列表表示"未知/未声明"，不由前端解释为"支持所有语言"。
     #[serde(default)]
     pub languages: Vec<String>,
-    /// 热词增强是否支持。
-    pub hotwords: CapabilityFlag,
-    /// ITN（逆文本归一化）是否支持。
-    pub itn: CapabilityFlag,
     /// 伪流式（VAD 切句 + 累积预览）是否支持。
     pub pseudo_streaming: CapabilityFlag,
     /// 真流式（增量 encoder）是否支持。
@@ -106,8 +104,6 @@ impl Default for SttModelCapabilities {
     fn default() -> Self {
         Self {
             languages: Vec::new(),
-            hotwords: CapabilityFlag::no("unknown"),
-            itn: CapabilityFlag::no("unknown"),
             pseudo_streaming: CapabilityFlag::no("unknown"),
             true_streaming: CapabilityFlag::no("unknown"),
             timestamps: CapabilityFlag::no("unknown"),
