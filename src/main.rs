@@ -5,6 +5,10 @@ mod cli;
 mod domain;
 mod infra;
 
+// 分层守卫（0.22 D2）：仅测试编译，随 `cargo test --bin blink` 运行。
+#[cfg(test)]
+mod arch_guard;
+
 use domain::capability::Capability;
 use domain::event_names::EventNames;
 use tauri::{

@@ -70,7 +70,8 @@ pub(super) fn map_executor_result(
     }
 
     // 3. 走 rebuild_with_line_grouping 做 line grouping
-    let (grouped_result, diag) = rebuild_with_line_grouping_and_diag(valid_words, result.text_angle);
+    let (grouped_result, diag) =
+        rebuild_with_line_grouping_and_diag(valid_words, result.text_angle);
 
     tracing::debug!(
         backend = "onnx-ocr",

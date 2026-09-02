@@ -478,10 +478,7 @@ fn text_is_mixed_cjk_latin_verbatim() {
 
 #[test]
 fn text_multi_line_uses_newline_separator() {
-    let result = make_multi_line_result(&[
-        ("你好", 0.0, 40.0),
-        ("世界", 30.0, 40.0),
-    ]);
+    let result = make_multi_line_result(&[("你好", 0.0, 40.0), ("世界", 30.0, 40.0)]);
     let mapped = super::pipeline::map_oarocr_to_ocr_result(result).expect("映射成功");
 
     assert_eq!(mapped.text, "你好\n世界");
@@ -498,7 +495,11 @@ fn words_one_per_region_not_per_char() {
     let mapped = super::pipeline::map_oarocr_to_ocr_result(result).expect("映射成功");
 
     // 一个 region → 一个 word
-    assert_eq!(mapped.words.len(), 1, "应只有 1 个 word（region 级），不是 8 个");
+    assert_eq!(
+        mapped.words.len(),
+        1,
+        "应只有 1 个 word（region 级），不是 8 个"
+    );
     // word 的 text 是整行原文
     assert_eq!(mapped.words[0].text, "PP-OCRv6");
 }
@@ -516,10 +517,7 @@ fn words_cjk_one_per_region() {
 #[test]
 fn char_ranges_match_text_slice() {
     // 每个 word 的 char_range 切片应等于该 word 的 text
-    let result = make_multi_line_result(&[
-        ("hello", 0.0, 100.0),
-        ("你好", 30.0, 40.0),
-    ]);
+    let result = make_multi_line_result(&[("hello", 0.0, 100.0), ("你好", 30.0, 40.0)]);
     let mapped = super::pipeline::map_oarocr_to_ocr_result(result).expect("映射成功");
 
     let text_chars: Vec<char> = mapped.text.chars().collect();
@@ -533,10 +531,7 @@ fn char_ranges_match_text_slice() {
 #[test]
 fn char_ranges_multi_line_offset_correct() {
     // 多行时 char_ranges 的全局偏移必须正确
-    let result = make_multi_line_result(&[
-        ("hello", 0.0, 100.0),
-        ("world", 30.0, 100.0),
-    ]);
+    let result = make_multi_line_result(&[("hello", 0.0, 100.0), ("world", 30.0, 100.0)]);
     let mapped = super::pipeline::map_oarocr_to_ocr_result(result).expect("映射成功");
 
     // hello: chars 0..5
@@ -614,10 +609,7 @@ fn char_boxes_char_ranges_correct() {
 #[test]
 fn char_boxes_multi_line_global_offset() {
     // 多行时 char_boxes 的全局 char_start 必须考虑换行符
-    let result = make_multi_line_result(&[
-        ("你好", 0.0, 40.0),
-        ("世界", 30.0, 40.0),
-    ]);
+    let result = make_multi_line_result(&[("你好", 0.0, 40.0), ("世界", 30.0, 40.0)]);
     let mapped = super::pipeline::map_oarocr_to_ocr_result(result).expect("映射成功");
 
     assert_eq!(mapped.text, "你好\n世界");
