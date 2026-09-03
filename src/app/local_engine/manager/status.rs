@@ -134,6 +134,34 @@ impl EngineManager {
         Ok(launch.and_then(|l| l.model.map(|m| m.model_id)))
     }
 
+    /// 返回当前运行实例冻结的 implementation（0.22.9，只读投影）。
+    ///
+    /// 读取 start 时冻结的 launch snapshot（进程型引擎）。in-process 引擎
+    /// （OCR）没有 launch snapshot——其 active implementation 只投影在
+    /// `EngineStatus.active_implementation`（start_inprocess 提交）。
+    /// `None` = 引擎未运行、in-process 引擎，或引擎无 implementation 声明。
+    /// selected 变化不影响此值。
+    // 当前由测试消费；per-implementation deployment（0.22.9 后续 handoff）
+    // 将以 launch snapshot 冻结的 implementation 为主键。
+    #[allow(dead_code)]
+    pub async fn get_current_implementation(
+        &self,
+        engine_id: &EngineId,
+    ) -> Result<Option<ImplementationId>, LocalEngineError> {
+        self.validate_engine_id(engine_id)?;
+        let entries = self.entries.read().await;
+        let entry = entries.get(engine_id).ok_or_else(|| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Unsupported,
+                ErrorPhase::Request,
+                "引擎未注册",
+                format!("engine_id={engine_id}"),
+            )
+        })?;
+        let launch = entry.current_launch().await;
+        Ok(launch.and_then(|l| l.implementation))
+    }
+
     /// 返回引擎诊断信息。
     pub async fn get_diagnostics(
         &self,

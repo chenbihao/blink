@@ -158,6 +158,11 @@ fn cleanup_engine(desc: &ProviderDescriptor) {
     let _ = std::fs::remove_dir_all(runtime::engine_root(&desc.engine_id));
 }
 
+/// engine 级部署空间便捷构造（既有测试的 deployment 都在 engine 级空间）。
+fn engine_space(desc: &ProviderDescriptor) -> super::super::deployment::DeploymentSpace {
+    super::super::deployment::DeploymentSpace::engine(&desc.engine_id)
+}
+
 fn unique_engine(tag: &str) -> ProviderDescriptor {
     let mut desc = fake_descriptor();
     desc.engine_id = EngineId::new(format!("fake-{tag}")).unwrap();
@@ -170,7 +175,7 @@ fn unique_engine(tag: &str) -> ProviderDescriptor {
 async fn resolve_auto_falls_back_to_cpu() {
     let desc = fake_descriptor();
     let provider = FakeProvider::new(true, true, true).cpu_only(); // GPU 不兼容
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let (profile, fallbacks) = tx.resolve_profile(ComputePreference::Auto).unwrap();
     assert_eq!(profile.backend, ComputeBackend::Cpu);
     assert_eq!(fallbacks.len(), 1);
@@ -181,7 +186,7 @@ async fn resolve_auto_falls_back_to_cpu() {
 async fn resolve_explicit_cpu_no_fallback() {
     let desc = fake_descriptor();
     let provider = FakeProvider::new(true, true, true).cpu_only();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let (profile, _) = tx.resolve_profile(ComputePreference::Cpu).unwrap();
     assert_eq!(profile.backend, ComputeBackend::Cpu);
 }
@@ -190,7 +195,7 @@ async fn resolve_explicit_cpu_no_fallback() {
 async fn resolve_explicit_cuda_no_fallback_on_incompatible() {
     let desc = fake_descriptor();
     let provider = FakeProvider::new(true, true, true).cpu_only();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx.resolve_profile(ComputePreference::Cuda).unwrap_err();
     assert!(matches!(err, RuntimeError::ExplicitBackendFailed { .. }));
 }
@@ -199,7 +204,7 @@ async fn resolve_explicit_cuda_no_fallback_on_incompatible() {
 async fn resolve_gpu_auto_skips_cpu() {
     let desc = fake_descriptor();
     let provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let (profile, fallbacks) = tx.resolve_profile(ComputePreference::GpuAuto).unwrap();
     assert_eq!(profile.backend, ComputeBackend::Cuda);
     assert!(fallbacks.is_empty());
@@ -209,7 +214,7 @@ async fn resolve_gpu_auto_skips_cpu() {
 async fn resolve_gpu_auto_fails_when_no_gpu_compatible() {
     let desc = fake_descriptor();
     let provider = FakeProvider::new(true, true, true).cpu_only();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx.resolve_profile(ComputePreference::GpuAuto).unwrap_err();
     assert!(matches!(err, RuntimeError::ProfileResolutionFailed { .. }));
 }
@@ -218,7 +223,7 @@ async fn resolve_gpu_auto_fails_when_no_gpu_compatible() {
 async fn resolve_explicit_backend_not_in_descriptor() {
     let desc = fake_descriptor();
     let provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx.resolve_profile(ComputePreference::Vulkan).unwrap_err();
     assert!(matches!(err, RuntimeError::ExplicitBackendFailed { .. }));
 }
@@ -230,7 +235,7 @@ async fn resolve_auto_all_incompatible_fails() {
     // auto 会回退到 CPU（Always 兼容不受 compatible flag 影响？）
     // —— FakeProvider::check_compatibility 对所有候选返回同一 flag，
     // CPU 候选也不兼容 → 全部失败
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     // CPU 是 Always 但 fake provider 仍返回 false
     let result = tx.resolve_profile(ComputePreference::Auto);
     // Auto 在第一个兼容即返回；CPU 也 false → 报错
@@ -245,39 +250,39 @@ async fn install_success_switches_pointer_and_deletes_old_slot() {
     let provider = FakeProvider::new(true, true, true);
 
     // 第一次安装：slot-a active
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let r1 = tx
         .execute("op-1", ComputePreference::Auto, None, None)
         .await
         .unwrap();
-    let (p1, m1) = DeploymentStore::read_active(&desc.engine_id)
+    let (p1, m1) = DeploymentStore::read_active(&engine_space(&desc))
         .unwrap()
         .unwrap();
     assert_eq!(p1.slot, "slot-a");
     assert_eq!(m1.install_id, r1.install_id);
 
     // 第二次安装（更新）：slot-b active，slot-a 删除
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let r2 = tx
         .execute("op-2", ComputePreference::Auto, None, None)
         .await
         .unwrap();
-    let (p2, m2) = DeploymentStore::read_active(&desc.engine_id)
+    let (p2, m2) = DeploymentStore::read_active(&engine_space(&desc))
         .unwrap()
         .unwrap();
     assert_eq!(p2.slot, "slot-b");
     assert_eq!(m2.install_id, r2.install_id);
     // 稳定状态只保留 active slot
-    assert!(!DeploymentSlot::A.dir(&desc.engine_id).exists());
+    assert!(!DeploymentSlot::A.dir_in(&engine_space(&desc)).exists());
     // journal 已清除
     assert!(
-        DeploymentStore::read_journal(&desc.engine_id)
+        DeploymentStore::read_journal(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
     // staging 已清空
-    assert!(!runtime::operation_staging_dir(&desc.engine_id, "op-1").exists());
-    assert!(!runtime::operation_staging_dir(&desc.engine_id, "op-2").exists());
+    assert!(!engine_space(&desc).operation_staging_dir("op-1").exists());
+    assert!(!engine_space(&desc).operation_staging_dir("op-2").exists());
 
     cleanup_engine(&desc);
 }
@@ -286,7 +291,7 @@ async fn install_success_switches_pointer_and_deletes_old_slot() {
 async fn update_failure_preserves_active_and_clears_journal() {
     let desc = unique_engine("fail");
     let ok_provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &ok_provider);
+    let tx = InstallTransaction::new(&desc, &ok_provider, engine_space(&desc));
     let r1 = tx
         .execute("op-1", ComputePreference::Auto, None, None)
         .await
@@ -294,7 +299,7 @@ async fn update_failure_preserves_active_and_clears_journal() {
 
     // 更新失败（prepare 失败）
     let fail_provider = FakeProvider::new(true, false, true);
-    let tx = InstallTransaction::new(&desc, &fail_provider);
+    let tx = InstallTransaction::new(&desc, &fail_provider, engine_space(&desc));
     let err = tx
         .execute("op-2", ComputePreference::Auto, None, None)
         .await
@@ -302,17 +307,17 @@ async fn update_failure_preserves_active_and_clears_journal() {
     assert!(matches!(err, RuntimeError::InstallFailed { .. }));
 
     // old 仍是 active，journal/staging 清除
-    let (p, m) = DeploymentStore::read_active(&desc.engine_id)
+    let (p, m) = DeploymentStore::read_active(&engine_space(&desc))
         .unwrap()
         .unwrap();
     assert_eq!(m.install_id, r1.install_id);
     assert_eq!(p.slot, "slot-a");
     assert!(
-        DeploymentStore::read_journal(&desc.engine_id)
+        DeploymentStore::read_journal(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
-    assert!(!runtime::staging_dir(&desc.engine_id).join("op-2").exists());
+    assert!(!engine_space(&desc).staging_dir().join("op-2").exists());
 
     cleanup_engine(&desc);
 }
@@ -321,7 +326,7 @@ async fn update_failure_preserves_active_and_clears_journal() {
 async fn post_switch_verification_failure_rolls_back_to_previous() {
     let desc = unique_engine("rollback");
     let ok_provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &ok_provider);
+    let tx = InstallTransaction::new(&desc, &ok_provider, engine_space(&desc));
     let r1 = tx
         .execute("op-1", ComputePreference::Auto, None, None)
         .await
@@ -329,7 +334,7 @@ async fn post_switch_verification_failure_rolls_back_to_previous() {
 
     // 切换后验证失败 → 自动回滚
     let bad = Arc::new(FakeProvider::new(true, true, true).with_post_switch_failure());
-    let tx = InstallTransaction::new(&desc, bad.as_ref());
+    let tx = InstallTransaction::new(&desc, bad.as_ref(), engine_space(&desc));
     let err = tx
         .execute("op-2", ComputePreference::Auto, None, None)
         .await
@@ -337,14 +342,14 @@ async fn post_switch_verification_failure_rolls_back_to_previous() {
     assert!(matches!(err, RuntimeError::SelfTestFailed { .. }));
 
     // active 回到 old，candidate slot 删除，journal 清除
-    let (p, m) = DeploymentStore::read_active(&desc.engine_id)
+    let (p, m) = DeploymentStore::read_active(&engine_space(&desc))
         .unwrap()
         .unwrap();
     assert_eq!(m.install_id, r1.install_id);
     assert_eq!(p.slot, "slot-a");
-    assert!(!DeploymentSlot::B.dir(&desc.engine_id).exists());
+    assert!(!DeploymentSlot::B.dir_in(&engine_space(&desc)).exists());
     assert!(
-        DeploymentStore::read_journal(&desc.engine_id)
+        DeploymentStore::read_journal(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
@@ -356,7 +361,7 @@ async fn post_switch_verification_failure_rolls_back_to_previous() {
 async fn self_test_failure_in_staging_cleans_journal() {
     let desc = unique_engine("stfail");
     let provider = FakeProvider::new(true, true, false);
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx
         .execute("op-1", ComputePreference::Auto, None, None)
         .await
@@ -364,12 +369,12 @@ async fn self_test_failure_in_staging_cleans_journal() {
     assert!(matches!(err, RuntimeError::SelfTestFailed { .. }));
 
     assert!(
-        DeploymentStore::read_pointer(&desc.engine_id)
+        DeploymentStore::read_pointer(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
     assert!(
-        DeploymentStore::read_journal(&desc.engine_id)
+        DeploymentStore::read_journal(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
@@ -383,18 +388,18 @@ async fn cancel_before_prepare_cleans_staging_and_journal() {
     let provider = FakeProvider::new(true, true, true);
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx
         .execute("op-1", ComputePreference::Auto, Some(&token), None)
         .await
         .unwrap_err();
     assert!(matches!(err, RuntimeError::OperationCancelled { .. }));
     assert!(
-        DeploymentStore::read_journal(&desc.engine_id)
+        DeploymentStore::read_journal(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
-    assert!(!runtime::staging_dir(&desc.engine_id).join("op-1").exists());
+    assert!(!engine_space(&desc).staging_dir().join("op-1").exists());
 
     cleanup_engine(&desc);
 }
@@ -409,14 +414,14 @@ async fn cancel_token_check_at_each_stage() {
         inner: provider,
         token: token.clone(),
     };
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx
         .execute("op-1", ComputePreference::Auto, Some(&token), None)
         .await
         .unwrap_err();
     assert!(matches!(err, RuntimeError::OperationCancelled { .. }));
     assert!(
-        DeploymentStore::read_journal(&desc.engine_id)
+        DeploymentStore::read_journal(&engine_space(&desc))
             .unwrap()
             .is_none()
     );
@@ -478,7 +483,7 @@ impl<P: RuntimeProvider + Sync> RuntimeProvider for CancelAfterPrepareProvider<P
 async fn cleanup_shared_artifact_with_active_reference_rejected() {
     let desc = unique_engine("shared");
     let provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     tx.execute("op-1", ComputePreference::Auto, None, None)
         .await
         .unwrap();
@@ -517,13 +522,13 @@ async fn cleanup_shared_artifact_without_reference_succeeds() {
 async fn cleanup_rejects_active_slot() {
     let desc = unique_engine("cleanup-active");
     let provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     tx.execute("op-1", ComputePreference::Auto, None, None)
         .await
         .unwrap();
 
     let err = execute_cleanup(&CleanupScope::EngineDeploymentSlot {
-        engine_id: desc.engine_id.clone(),
+        space: engine_space(&desc),
         slot: "slot-a".to_string(),
     })
     .unwrap_err();
@@ -592,7 +597,7 @@ async fn install_sink_stage_sequence_is_correct() {
     let desc = unique_engine("sink");
     let provider = FakeProvider::new(true, true, true);
     let sink = RecordingSink::new();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     tx.execute("op-1", ComputePreference::Auto, None, Some(&sink))
         .await
         .unwrap();
@@ -619,7 +624,7 @@ async fn install_sink_stages_on_prepare_failure() {
     let desc = unique_engine("sinkfail");
     let provider = FakeProvider::new(true, false, true);
     let sink = RecordingSink::new();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let _ = tx
         .execute("op-1", ComputePreference::Auto, None, Some(&sink))
         .await;
@@ -634,7 +639,7 @@ async fn install_sink_logs_are_emitted_during_install() {
     let desc = unique_engine("sinklog");
     let provider = FakeProvider::new(true, true, true);
     let sink = RecordingSink::new();
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     tx.execute("op-1", ComputePreference::Auto, None, Some(&sink))
         .await
         .unwrap();
@@ -648,7 +653,7 @@ async fn noop_install_sink_does_not_break_install() {
     let desc = unique_engine("noop");
     let provider = FakeProvider::new(true, true, true);
     let sink = NoopInstallSink;
-    let tx = InstallTransaction::new(&desc, &provider);
+    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     assert!(
         tx.execute("op-1", ComputePreference::Auto, None, Some(&sink))
             .await
@@ -736,8 +741,8 @@ async fn different_engines_install_concurrently() {
         entered: AtomicUsize::new(0),
     };
 
-    let tx_a = InstallTransaction::new(&desc_a, &pa);
-    let tx_b = InstallTransaction::new(&desc_b, &pb);
+    let tx_a = InstallTransaction::new(&desc_a, &pa, engine_space(&desc_a));
+    let tx_b = InstallTransaction::new(&desc_b, &pb, engine_space(&desc_b));
     let (ra, rb) = tokio::join!(
         tx_a.execute("op-conc-a", ComputePreference::Auto, None, None),
         tx_b.execute("op-conc-b", ComputePreference::Auto, None, None)
@@ -756,6 +761,7 @@ fn transaction_journal_serde_roundtrip() {
     let j = TransactionJournal {
         schema_version: crate::infra::local_engine::deployment::TRANSACTION_JOURNAL_SCHEMA_VERSION,
         engine_id: "fake-x".to_string(),
+        implementation: None,
         operation_id: "op-1".to_string(),
         candidate_slot: "slot-b".to_string(),
         candidate_install_id: "dep-1".to_string(),
@@ -769,4 +775,130 @@ fn transaction_journal_serde_roundtrip() {
     let json = serde_json::to_string(&j).unwrap();
     let back: TransactionJournal = serde_json::from_str(&json).unwrap();
     assert_eq!(back, j);
+}
+
+// ── implementation 级空间事务（0.22.9 Handoff 02）────────────────────────
+
+use super::super::deployment::DeploymentSpace;
+
+/// 第二 implementation 可独立 install/promote：事务只写 implementation
+/// 空间的 pointer/slot/journal，engine 级（0.22.7/0.22.8 兼容真源）的
+/// deployment 原样不动。
+#[tokio::test]
+async fn install_into_implementation_space_is_isolated_from_engine_space() {
+    let desc = unique_engine("impl-space-tx");
+    let engine_space = DeploymentSpace::engine(&desc.engine_id);
+    let impl_space = super::super::deployment::DeploymentSpace::resolve(
+        &desc.engine_id,
+        crate::domain::local_engine::ImplementationId::ParaformerOnnxWorker,
+    );
+    let provider = FakeProvider::new(true, true, true);
+
+    // engine 级先有一个 active deployment（模拟 GGUF 兼容真源）
+    let tx = InstallTransaction::new(&desc, &provider, engine_space.clone());
+    let engine_result = tx
+        .execute("op-engine-1", ComputePreference::Auto, None, None)
+        .await
+        .unwrap();
+
+    // implementation 空间第一次安装：独立从 slot-a 开始
+    let tx = InstallTransaction::new(&desc, &provider, impl_space.clone());
+    let r1 = tx
+        .execute("op-impl-1", ComputePreference::Auto, None, None)
+        .await
+        .unwrap();
+
+    // impl 空间指针落在 impl 子目录；engine 级指针不变
+    let (p_impl, m_impl) = DeploymentStore::read_active(&impl_space).unwrap().unwrap();
+    assert_eq!(p_impl.slot, "slot-a");
+    assert_eq!(m_impl.install_id, r1.install_id);
+    assert!(impl_space.pointer_path().exists());
+    let (p_engine, m_engine) = DeploymentStore::read_active(&engine_space)
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_engine.install_id, engine_result.install_id);
+    assert_eq!(m_engine.install_id, engine_result.install_id);
+
+    // implementation 空间更新：轮换自己的 slot-b，engine 级 slot-a 不受影响
+    let tx = InstallTransaction::new(&desc, &provider, impl_space.clone());
+    let r2 = tx
+        .execute("op-impl-2", ComputePreference::Auto, None, None)
+        .await
+        .unwrap();
+    let (p_impl2, m_impl2) = DeploymentStore::read_active(&impl_space).unwrap().unwrap();
+    assert_eq!(p_impl2.slot, "slot-b");
+    assert_eq!(m_impl2.install_id, r2.install_id);
+    // impl 旧 slot 已删；engine 级 deployment 完整保留
+    assert!(!impl_space.slot_dir("slot-a").exists());
+    assert!(engine_space.slot_dir("slot-a").exists());
+    assert_eq!(
+        DeploymentStore::read_pointer(&engine_space)
+            .unwrap()
+            .unwrap()
+            .install_id,
+        engine_result.install_id
+    );
+
+    cleanup_engine(&desc);
+}
+
+/// implementation 空间内的切换后验证失败回滚只作用于本空间：
+/// impl 指针回滚到自己的 previous，engine 级 deployment 不被触碰。
+#[tokio::test]
+async fn rollback_in_implementation_space_preserves_engine_deployment() {
+    let desc = unique_engine("impl-rollback");
+    let engine_space = DeploymentSpace::engine(&desc.engine_id);
+    let impl_space = super::super::deployment::DeploymentSpace::resolve(
+        &desc.engine_id,
+        crate::domain::local_engine::ImplementationId::ParaformerOnnxWorker,
+    );
+    let ok_provider = FakeProvider::new(true, true, true);
+
+    // engine 级 active（兼容真源）
+    let tx = InstallTransaction::new(&desc, &ok_provider, engine_space.clone());
+    let engine_result = tx
+        .execute("op-engine-1", ComputePreference::Auto, None, None)
+        .await
+        .unwrap();
+
+    // impl 空间先成功安装（slot-a active）
+    let tx = InstallTransaction::new(&desc, &ok_provider, impl_space.clone());
+    let r1 = tx
+        .execute("op-impl-1", ComputePreference::Auto, None, None)
+        .await
+        .unwrap();
+
+    // impl 空间更新：切换后验证失败 → 自动回滚到 r1
+    let bad_provider = FakeProvider::new(true, true, true).with_post_switch_failure();
+    let tx = InstallTransaction::new(&desc, &bad_provider, impl_space.clone());
+    let err = tx
+        .execute("op-impl-2", ComputePreference::Auto, None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RuntimeError::SelfTestFailed { .. }));
+
+    // impl 指针回滚到 r1（slot-a），candidate 已清理，journal 清除
+    let (p_impl, m_impl) = DeploymentStore::read_active(&impl_space).unwrap().unwrap();
+    assert_eq!(p_impl.install_id, r1.install_id);
+    assert_eq!(p_impl.slot, "slot-a");
+    assert_eq!(m_impl.install_id, r1.install_id);
+    assert!(!impl_space.slot_dir("slot-b").exists());
+    assert!(
+        DeploymentStore::read_journal(&impl_space)
+            .unwrap()
+            .is_none(),
+        "回滚后 impl 空间 journal 应清除"
+    );
+
+    // engine 级 deployment 原样
+    assert_eq!(
+        DeploymentStore::read_pointer(&engine_space)
+            .unwrap()
+            .unwrap()
+            .install_id,
+        engine_result.install_id
+    );
+    assert!(engine_space.slot_dir("slot-a").exists());
+
+    cleanup_engine(&desc);
 }

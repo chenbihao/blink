@@ -29,11 +29,17 @@ pub mod lease_recovery;
 pub mod log_pipe;
 pub mod model_storage;
 pub mod onnx_ocr;
+pub mod paraformer_runner;
+pub mod paraformer_worker;
 pub mod port;
 pub mod process;
 pub mod providers;
 pub mod runtime;
 pub mod state;
+pub mod stream_worker_lifecycle;
+pub mod stream_worker_proto;
+pub mod streaming_stt_adapter;
+pub mod stt_asset_lock;
 #[cfg(test)]
 mod tests;
 pub mod worker_proto;

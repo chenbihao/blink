@@ -230,15 +230,28 @@ pub fn migrate_legacy_model_id(legacy: &str) -> Option<&'static str> {
 // adapter 侧 self-test 只做 active deployment 的结构检查（部署存在 + exe 在），
 // 完整 hash 校验发生在安装事务（candidate 内一次性执行）。
 
+/// GGUF implementation 的部署空间（0.22.9 兼容真源映射）。
+///
+/// 0.22.7 GGUF deployment 位于 engine 级空间；读取层经此入口把旧 pointer
+/// 明确映射到 GGUF implementation——不复制、不改写、不搬迁用户资产。
+pub(crate) fn gguf_deployment_space() -> crate::infra::local_engine::deployment::DeploymentSpace {
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).expect("funasr is valid");
+    crate::infra::local_engine::deployment::DeploymentSpace::resolve(
+        &engine_id,
+        crate::domain::local_engine::ImplementationId::FunasrGgufWorker,
+    )
+}
+
 /// GGUF 环境 self-test：active deployment 存在且 worker exe 就位。
 ///
 /// 返回 Err(reason) 时附带给用户的可行动指引。
 pub fn gguf_environment_self_test() -> Result<(), String> {
-    let engine_id = EngineId::new(FUNASR_ENGINE_ID).expect("funasr is valid");
     let Some((_pointer, dir)) =
-        crate::infra::local_engine::deployment::DeploymentStore::active_dir(&engine_id)
-            .ok()
-            .flatten()
+        crate::infra::local_engine::deployment::DeploymentStore::active_dir(
+            &gguf_deployment_space(),
+        )
+        .ok()
+        .flatten()
     else {
         return Err(
             "FunASR GGUF runtime 未安装。请在设置页「引擎」→「本地模型运行时」中点击「安装环境」。"
@@ -275,12 +288,14 @@ pub fn build_funasr_gguf_launch_descriptor(
         )
     })?;
 
-    // 1. active deployment 中的 worker exe
+    // 1. active deployment 中的 worker exe（GGUF implementation 空间 = engine 级兼容真源）
     let (_pointer, deployment_dir) =
-        crate::infra::local_engine::deployment::DeploymentStore::active_dir(&engine_id)
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
+        crate::infra::local_engine::deployment::DeploymentStore::active_dir(
+            &gguf_deployment_space(),
+        )
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
                 LocalEngineError::with_detail(
                     LocalEngineErrorCode::EnvironmentMissing,
                     ErrorPhase::Start,

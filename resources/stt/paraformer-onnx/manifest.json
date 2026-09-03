@@ -1,0 +1,17 @@
+{
+  "asset_lock_sha256": "81c2ade3fc60c5b2de5f3e2bbc1879d430b79c1b76ea3fd9fddcbdbac613ebcc",
+  "description": "ParaformerOnline STT worker 供应链摘要",
+  "has_placeholder_hashes": false,
+  "models_count": 4,
+  "notes": [
+    "worker 不是独立二进制——blink.exe 自身是 worker 宿主",
+    "正式安装包不携带 ORT DLL 或 ONNX 模型；按需下载",
+    "资产完整性由 asset-lock.json 的 SHA-256 强校验保障",
+    "隔离 self-test 通过 blink.exe paraformer-selftest 执行"
+  ],
+  "ort_files_count": 2,
+  "ort_version": "1.19.2",
+  "schema": 1,
+  "worker_entry": "blink.exe paraformer-worker",
+  "worker_protocol_version": 2
+}

@@ -52,6 +52,8 @@ impl std::fmt::Display for CapabilityKind {
 /// 决定 `EngineManager` 如何做 health 验证、STT 请求走哪条通道：
 /// - `Http`：本地 HTTP endpoint + token（现有 Python server 路径）。
 /// - `StdioWorker`：常驻子进程 stdin/stdout NDJSON 协议（GGUF worker 路径）。
+/// - `InProcess`：进程内执行，无外部服务通道（0.22.9 implementation 层：
+///   OCR ONNX in-process；不参与 EngineManager 的进程/health 探活路径）。
 ///
 /// 闭合枚举——不提供前端自定义通道的能力。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -60,6 +62,7 @@ pub enum ServiceTransport {
     #[default]
     Http,
     StdioWorker,
+    InProcess,
 }
 
 impl std::fmt::Display for ServiceTransport {
@@ -67,6 +70,7 @@ impl std::fmt::Display for ServiceTransport {
         match self {
             Self::Http => f.write_str("http"),
             Self::StdioWorker => f.write_str("stdio_worker"),
+            Self::InProcess => f.write_str("in_process"),
         }
     }
 }

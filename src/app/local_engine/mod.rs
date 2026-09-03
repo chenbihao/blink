@@ -25,6 +25,7 @@ pub mod dto;
 pub mod error_bridge;
 pub mod event_port;
 pub mod funasr;
+pub mod implementation_registry; // builtin implementation descriptor/绑定装配（0.22.9）
 pub mod manager; // EngineManager（生命周期/状态/模型/存储用例拆分为子模块）
 pub mod model_installer; // 模型安装执行器 + 目录 + DTO（无状态；编排归 EngineManager）
 pub mod ocr_coordinator; // OCR Coordinator（路由 + 生命周期 + 并发）

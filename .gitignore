@@ -84,3 +84,11 @@ xtask/spikes/onnx-spike/models/asr_example.wav
 resources/bin/
 # 模型下载缓存（安装期校验用临时文件）
 target/gguf-models/
+
+# STT Gate Corpus — 真实用户录音，隐私铁则禁止提交
+# 录音只保存在用户明确指定的本地目录，不上传、不进 Git、不复制到发布资源
+corpus/
+testdata/stt/corpus/
+*.corpus.wav
+# manifest.json 可提交（只含标注，不含音频），但 corpus 根目录整体排除
+# 如需提交 manifest，显式 git add -f corpus/manifest.json

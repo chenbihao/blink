@@ -82,6 +82,8 @@ semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 # sha2: SHA-256 哈希（0.16.4 剪贴板图片去重——按内容哈希删旧留新）
 sha2 = "0.10"
+# unicode-normalization: CER 归一化用 Unicode NFKC（0.22.9 Handoff 07E-R）
+unicode-normalization = "0.1"
 serde_json = "1.0.150"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
@@ -118,6 +120,9 @@ zip = "2.2"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "tracing"] }
 # ndarray: ort Session I/O 直接使用（0.22.8 onnx_validate CLI 隔离验证）
 ndarray = "0.17"
+# kaldi-native-fbank: Kaldi-compatible fbank extractor (pure Rust, no external deps)
+# 用于 ParaformerOnline runner 的前端特征提取（fbank → LFR → CMVN）
+kaldi-native-fbank = "0.1"
 # oar-ocr: PP-OCRv6 pipeline（det → crop → rec）Rust 实现（0.22.8 OCR ONNX 迁移）
 # - default-features = false: 禁用 download-binaries，不构建期下载 ORT
 # - simd: 启用 SIMD 优化（spike 验证的 feature 组合）

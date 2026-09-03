@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod funasr_worker;
+mod paraformer_worker;
 
 /// 自动发现所有 Rust 插件（扫描 plugins/examples/ 目录）。
 fn discover_rust_plugins() -> Vec<String> {
@@ -367,6 +368,9 @@ fn check_release_resources() {
 
     // 5. ONNX OCR 供应链锁定校验（0.22.8-B）
     check_onnx_asset_lock(&mut failures);
+
+    // 6. STT ParaformerOnline 供应链锁定校验（0.22.9）
+    check_stt_asset_lock(&mut failures);
 
     if !failures.is_empty() {
         for f in &failures {
@@ -801,6 +805,127 @@ fn check_onnx_asset_lock(failures: &mut Vec<String>) {
     }
 }
 
+/// 校验 STT ParaformerOnline 供应链 asset-lock.json（0.22.9）。
+///
+/// - asset-lock.json 存在且可解析
+/// - ORT DLL SHA-256 和 size_bytes 非空
+/// - 四个模型（encoder/decoder/cmvn/tokenizer）均存在且字段完整
+/// - placeholder hash 只产生警告（不阻塞 release-check）
+fn check_stt_asset_lock(failures: &mut Vec<String>) {
+    println!("🔒 校验 STT asset-lock.json...");
+    let root = workspace_root();
+    let lock_path = root.join("resources/stt/paraformer-onnx/asset-lock.json");
+
+    let Ok(content) = std::fs::read_to_string(&lock_path) else {
+        failures.push(format!(
+            "STT asset-lock.json 读取失败 ({})",
+            lock_path.display()
+        ));
+        return;
+    };
+
+    let Ok(lock) = serde_json::from_str::<serde_json::Value>(&content) else {
+        failures.push("STT asset-lock.json 不是合法 JSON".to_string());
+        return;
+    };
+
+    // schema_version
+    if lock.get("schema_version").and_then(|v| v.as_u64()) != Some(1) {
+        failures.push("STT asset-lock.json: schema_version 缺失或不为 1".to_string());
+    }
+
+    // ORT version 非空
+    let ort_version = lock
+        .get("ort")
+        .and_then(|v| v.get("version"))
+        .and_then(|v| v.as_str());
+    if ort_version.is_none() {
+        failures.push("STT asset-lock.json: ort.version 缺失".to_string());
+    }
+
+    // ORT files 非空，每个有 sha256 和 size_bytes
+    if let Some(files) = lock
+        .get("ort")
+        .and_then(|v| v.get("files"))
+        .and_then(|v| v.as_array())
+    {
+        for file in files {
+            let path = file
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            if file.get("sha256").and_then(|v| v.as_str()).is_none() {
+                failures.push(format!("STT asset-lock.json: ORT file {path} 缺少 sha256"));
+            }
+            if file.get("size_bytes").and_then(|v| v.as_u64()).is_none() {
+                failures.push(format!(
+                    "STT asset-lock.json: ORT file {path} 缺少 size_bytes"
+                ));
+            }
+        }
+    } else {
+        failures.push("STT asset-lock.json: ort.files 缺失或为空".to_string());
+    }
+
+    // models 非空，检查必需 kind 存在
+    if let Some(models) = lock.get("models").and_then(|v| v.as_array()) {
+        if models.is_empty() {
+            failures.push("STT asset-lock.json: models 为空".to_string());
+        }
+
+        let kinds: Vec<&str> = models
+            .iter()
+            .filter_map(|m| m.get("kind").and_then(|v| v.as_str()))
+            .collect();
+
+        for required in ["encoder", "decoder", "cmvn", "tokenizer"] {
+            if !kinds.contains(&required) {
+                failures.push(format!(
+                    "STT asset-lock.json: 缺少必需的模型 kind: {required}"
+                ));
+            }
+        }
+
+        for model in models {
+            let kind = model
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            let filename = model
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+
+            if model.get("sha256").and_then(|v| v.as_str()).is_none() {
+                failures.push(format!(
+                    "STT asset-lock.json: model {kind} ({filename}) 缺少 sha256"
+                ));
+            }
+            if model.get("size_bytes").and_then(|v| v.as_u64()).is_none() {
+                failures.push(format!(
+                    "STT asset-lock.json: model {kind} ({filename}) 缺少 size_bytes"
+                ));
+            }
+            if model.get("url").and_then(|v| v.as_str()).is_none() {
+                failures.push(format!(
+                    "STT asset-lock.json: model {kind} ({filename}) 缺少 url"
+                ));
+            }
+            if model.get("license").and_then(|v| v.as_str()).is_none() {
+                failures.push(format!(
+                    "STT asset-lock.json: model {kind} ({filename}) 缺少 license"
+                ));
+            }
+        }
+    } else {
+        failures.push("STT asset-lock.json: models 缺失".to_string());
+    }
+
+    if failures.is_empty() {
+        println!("  ✓ STT asset-lock.json 校验通过");
+    }
+}
+
 /// 递归扫描目录，查找禁止的文件扩展名和子目录名。
 fn scan_forbidden_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -973,9 +1098,10 @@ fn main() {
         "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
         "lint" => lint_frontend(),                    // 前端防新增检查（var hex fallback 冻结基线）
         "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
+        "paraformer-worker" => paraformer_worker::build_paraformer_worker(), // 校验 ParaformerOnline 供应链（0.22.9）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|paraformer-worker|icons|tiptap|models|lint> [--debug]"
             )
         }
     }

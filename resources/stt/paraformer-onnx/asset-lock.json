@@ -1,0 +1,69 @@
+{
+  "$schema": "https://blink.local/asset-lock.schema.json",
+  "schema_version": 1,
+  "created_at": "2026-09-03T00:00:00Z",
+  "description": "ParaformerOnline ONNX STT 供应链锁定——ORT DLL + encoder/decoder/CMVN/tokenizer",
+  "ort": {
+    "version": "1.19.2",
+    "commit": "ffceed9d44",
+    "build_type": "RelWithDebInfo",
+    "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip",
+    "license": "MIT",
+    "files": [
+      {
+        "path": "onnxruntime-win-x64-1.19.2/lib/onnxruntime.dll",
+        "sha256": "14119125df2dcf9ff3e083afdba5fcc4b09b4186d8762404eb7b1fbccde3fcf2",
+        "size_bytes": 11234848,
+        "is_dll": true
+      },
+      {
+        "path": "onnxruntime-win-x64-1.19.2/lib/onnxruntime_providers_shared.dll",
+        "sha256": "7d11a2a851ad86095a7ad1f4d96927ff0a48fa86311699fbb6a7c21914bbb69f",
+        "size_bytes": 22048,
+        "is_dll": true
+      }
+    ]
+  },
+  "models": [
+    {
+      "kind": "encoder",
+      "name": "Paraformer Online Encoder",
+      "filename": "encoder.onnx",
+      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/encoder.onnx",
+      "revision": "paraformer-online-onnx",
+      "sha256": "dd4121cf45102018c26f9256f0b862df416edfcd06b0863ef4ce378a63c7d5e2",
+      "size_bytes": 166350528,
+      "license": "Apache-2.0"
+    },
+    {
+      "kind": "decoder",
+      "name": "Paraformer Online Decoder",
+      "filename": "decoder.onnx",
+      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/decoder.onnx",
+      "revision": "paraformer-online-onnx",
+      "sha256": "873d21ee80c7345bfc27944b843699fe16bba021fd020747d38aef2dfc103681",
+      "size_bytes": 71867274,
+      "license": "Apache-2.0"
+    },
+    {
+      "kind": "cmvn",
+      "name": "Paraformer Online CMVN",
+      "filename": "am.mvn",
+      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/am.mvn",
+      "revision": "paraformer-online-onnx",
+      "sha256": "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5",
+      "size_bytes": 11203,
+      "license": "Apache-2.0"
+    },
+    {
+      "kind": "tokenizer",
+      "name": "Paraformer Online Tokenizer",
+      "filename": "tokenizer.json",
+      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/tokenizer.json",
+      "revision": "paraformer-online-onnx",
+      "sha256": "2b20c2b12572d682afff84ce1c8d560f67b8b32a4c1f21567411d141ed352127",
+      "size_bytes": 93676,
+      "license": "Apache-2.0"
+    }
+  ]
+}

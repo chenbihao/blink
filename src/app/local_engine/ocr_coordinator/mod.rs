@@ -742,8 +742,14 @@ pub fn build_onnx_executor_from_deployment(
 
     let engine_id = EngineId::new(PADDLEOCR_ENGINE_ID_STR).ok()?;
 
-    // 从 active deployment pointer 获取部署目录
-    let (_pointer, dir) = DeploymentStore::active_dir(&engine_id).ok().flatten()?;
+    // 从 active deployment pointer 获取部署目录（ONNX in-process implementation
+    // 空间 = engine 级兼容真源，0.22.9 映射不搬迁）
+    let _ = engine_id;
+    let (_pointer, dir) = DeploymentStore::active_dir(
+        &crate::app::local_engine::paddleocr::onnx_inprocess_deployment_space(),
+    )
+    .ok()
+    .flatten()?;
 
     // ONNX 模型文件名（与 asset-lock.json 一致）
     let det_model = dir.join("pp-ocrv6_tiny_det.onnx");

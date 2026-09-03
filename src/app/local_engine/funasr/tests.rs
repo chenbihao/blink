@@ -7,7 +7,7 @@ use super::*;
 use crate::domain::local_engine::{CapabilityKind, LifecyclePolicy, ModelHealth, ServiceHealth};
 use crate::infra::local_engine::providers::InstallPlan;
 use crate::infra::local_engine::runtime::{
-    ArtifactId, ComputeBackend, ComputePreference, ResolvedProfile, RuntimePlan,
+    ArtifactId, ComputeBackend, ComputePreference, EngineId, ResolvedProfile, RuntimePlan,
 };
 
 // ── descriptor 稳定 id 和闭合 profile ──

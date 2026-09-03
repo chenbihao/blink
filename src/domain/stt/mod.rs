@@ -114,14 +114,156 @@ impl std::fmt::Debug for SttEngineConnection {
     }
 }
 
-// ── STT Engine trait ─────────────────────────────────────────────────────
+// ── 结构化 STT 事件（0.22.9 Handoff 05）─────────────────────────────────
 
-/// STT 引擎 trait。
+/// 结构化 STT 事件。
 ///
-/// 生命周期: `reset` → 多次 `transcribe_chunk` → `finalize` → (下次) `reset`。
+/// 所有 STT 引擎实现统一产出此事件流，`VoiceService` 只消费 `SttEvent`，
+/// 不关心底层是 GGUF 伪流式、ONNX 真流式还是云端非流式。
 ///
-/// `transcribe_chunk` 和 `finalize` 为 async——非流式引擎在 chunk 中累积音频,
-/// finalize 时一次性 HTTP 请求返回;伪流式引擎在 chunk 中实时返回 partial。
+/// **generation 语义**：每次 `begin_session` 时递增 generation；
+/// 旧 generation 的 `Partial`/`Final` 事件必须被消费方丢弃——
+/// 这防止 cancel/reset 后迟到结果污染 UI 或文本注入。
+///
+/// **事件顺序保证**：
+/// - `Partial` 只在 `Final` 前出现（同一 generation 内）
+/// - `Busy` 表示推理积压，消费方可选择暂停音频推送或降低频率
+/// - `Error` 表示不可恢复的引擎错误，session 终止
+/// - `Final` 是 session 的最后一个正常事件
+#[derive(Debug, Clone, PartialEq)]
+pub enum SttEvent {
+    /// 部分识别结果（实时预览）。
+    ///
+    /// 真流式引擎（ParaformerOnline）每次推理产生 native partial；
+    /// 伪流式引擎（PseudoStreaming）通过 VAD 切句 + 定时预览产生 partial；
+    /// 非流式引擎不产生 Partial。
+    Partial {
+        /// 当前 generation（session 标识）。
+        generation: u64,
+        /// 已确认文本（不再变化的部分）。
+        confirmed: String,
+        /// 预览文本（可能继续变化的部分）。
+        preview: String,
+    },
+
+    /// 最终识别结果（session 的正常终态）。
+    ///
+    /// `finish_session` 调用后产生此事件。之后此 generation 不应再产出事件。
+    Final {
+        /// 当前 generation。
+        generation: u64,
+        /// 最终识别文本。
+        text: String,
+    },
+
+    /// 引擎忙（队列满 / 推理积压）。
+    ///
+    /// 消费方可选择暂停音频推送或降低频率。
+    /// 不是致命错误——引擎仍在处理，只是来不及消化新音频。
+    #[allow(dead_code)] // Handoff 05: produced by ParaformerOnline worker, not yet wired
+    Busy {
+        /// 当前 generation。
+        generation: u64,
+        /// 人类可读的背压原因。
+        reason: String,
+    },
+
+    /// 不可恢复的引擎错误。
+    ///
+    /// session 终止，消费方应停止音频推送并清理状态。
+    Error {
+        /// 当前 generation。
+        generation: u64,
+        /// 人类可读的错误信息。
+        message: String,
+    },
+}
+
+/// 结构化 STT 流式 port——框架无关的统一 STT 生命周期抽象。
+///
+/// 所有 STT 实现（GGUF 伪流式 / ONNX 真流式 / 云端非流式）
+/// 通过此 trait 对外提供统一的 begin/push/finish/cancel/reset 生命周期。
+///
+/// **domain 不依赖 ORT、worker framing、Tauri 或 concrete runtime**——
+/// 此 trait 只依赖 `SttEvent` 和基本 Rust 类型。
+///
+/// ## 生命周期
+///
+/// ```text
+/// begin_session() → generation=N
+///   ├─ push_audio(samples)  → 可产出 SttEvent::Partial / Busy
+///   ├─ finish_session()     → 产出 SttEvent::Final（等所有在途结果）
+///   ├─ cancel_session()     → 丢弃在途结果，不产出 Final
+///   └─ reset()              → 幂等清理，回到 begin 前状态
+/// ```
+///
+/// ## 事件消费
+///
+/// `events()` 返回一个 `tokio::sync::mpsc::UnboundedReceiver<SttEvent>`。
+/// 消费方（VoiceService）在独立 task 中循环 `recv()`，按 generation 过滤旧事件。
+///
+/// ## 并发约束
+///
+/// - 一次只允许一个 active session（begin → finish/cancel）
+/// - `push_audio` 不得阻塞 P0 主链路——内部通过 channel 转发
+/// - `cancel`/`reset` 幂等
+/// - 旧 generation 的迟到结果丢弃
+#[async_trait::async_trait]
+#[allow(dead_code)] // Handoff 05: implementations exist, production wiring pending gate
+pub trait StreamingSttPort: Send + Sync {
+    /// 开始一个新的识别 session。
+    ///
+    /// 返回新的 generation（单调递增）。消费方应记录此 generation，
+    /// 用于过滤旧 session 的迟到事件。
+    ///
+    /// **一次只允许一个 active session**——调用方需保证在 begin 前没有活跃 session。
+    async fn begin_session(&self) -> Result<u64, SttError>;
+
+    /// 推送一段 PCM 音频（f32, 16kHz, mono）。
+    ///
+    /// 不阻塞——内部通过 channel 转发给推理 task。
+    /// 推理结果通过 `events()` 的 receiver 异步返回。
+    ///
+    /// generation 必须与 `begin_session` 返回值匹配。
+    async fn push_audio(&self, generation: u64, samples: &[f32]) -> Result<(), SttError>;
+
+    /// 结束当前 session 并等待最终结果。
+    ///
+    /// 通知引擎音频流已结束，引擎完成剩余推理后产出 `SttEvent::Final`。
+    /// 此方法本身不等待 Final——消费方通过 `events()` 接收。
+    async fn finish_session(&self, generation: u64) -> Result<(), SttError>;
+
+    /// 取消当前 session（幂等）。
+    ///
+    /// 丢弃所有在途结果，不产出 `Final`。
+    /// 旧 generation 的迟到 `Partial`/`Final` 事件将被消费方丢弃。
+    async fn cancel_session(&self, generation: u64) -> Result<(), SttError>;
+
+    /// 重置引擎状态（幂等）。
+    ///
+    /// 清理内部缓冲和状态，回到 `begin_session` 前的干净状态。
+    /// 可在任何时候调用，包括 session 进行中（等价于 cancel + 清理）。
+    async fn reset(&self) -> Result<(), SttError>;
+
+    /// 是否支持 native partial（真流式）。
+    ///
+    /// `true` = ParaformerOnline 等真流式引擎，在 `push_audio` 期间产生 native partial。
+    /// `false` = GGUF 伪流式 / 非流式引擎，partial 通过伪流式 VAD + 定时预览产生。
+    ///
+    /// VoiceService 据此决定是否开启实时预览。
+    fn supports_native_partial(&self) -> bool;
+
+    /// 获取事件 receiver。
+    ///
+    /// 返回的 receiver 用于接收 `SttEvent`。消费方应在独立 task 中循环 `recv()`。
+    /// 多次调用返回同一 channel 的新 receiver（旧 receiver 失效）。
+    fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<SttEvent>;
+}
+
+// ── STT Engine trait（旧接口，保留兼容）──────────────────────────────────
+///
+/// 0.22.9 之前使用的 trait。新代码应使用 `StreamingSttPort`。
+/// 保留此 trait 以兼容 GGUF 伪流式和非流式引擎的现有实现。
 #[async_trait::async_trait]
 pub trait SttEngine: Send + Sync {
     /// 接收一段音频 chunk,返回当前累积识别的 partial text。
@@ -149,7 +291,9 @@ pub mod local;
 #[cfg(test)]
 mod mock;
 pub mod pseudo_streaming;
+pub mod streaming_port;
 pub mod vad;
+pub mod vad_port;
 pub(crate) mod wav;
 
 /// 创建 STT 引擎实例(工厂函数)。

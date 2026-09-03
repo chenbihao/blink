@@ -60,7 +60,6 @@ use crate::domain::local_engine::{
     ErrorPhase, HealthMapping, LaunchContext, LocalEngineAdapter, LocalEngineError,
     LocalEngineErrorCode, ResolvedLaunch,
 };
-use crate::infra::local_engine::runtime::EngineId;
 
 /// FunASR 稳定 engine id。
 pub const FUNASR_ENGINE_ID: &str = "funasr";
@@ -169,13 +168,13 @@ impl LocalEngineAdapter for FunasrAdapter {
     /// 引擎专属诊断投影（GGUF runtime 可观测性）。
     fn diagnostics(&self) -> EngineDiagnostic {
         let mut entries = Vec::new();
-        let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
 
-        let deployed =
-            crate::infra::local_engine::deployment::DeploymentStore::active_dir(&engine_id)
-                .ok()
-                .flatten()
-                .map(|(_, dir)| dir);
+        let deployed = crate::infra::local_engine::deployment::DeploymentStore::active_dir(
+            &gguf::gguf_deployment_space(),
+        )
+        .ok()
+        .flatten()
+        .map(|(_, dir)| dir);
         let deploy_ok = deployed
             .as_ref()
             .is_some_and(|d| d.join("funasr-sensevoice-worker.exe").is_file());

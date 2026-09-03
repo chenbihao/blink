@@ -277,6 +277,14 @@ pub struct LocalEngineConfig {
     #[serde(default)]
     pub vad: VadConfig,
 
+    /// VAD 前端种类（内部解析用，不暴露给普通用户）。
+    ///
+    /// 0.22.9 Handoff 06：`auto` 在 production gate 前解析到 `energy`。
+    /// 显式修改过 EnergyVad 参数的旧配置继续走 `energy`。
+    /// 此字段缺失时默认为 `auto`——缺失字段安全迁移，不误判为用户定制。
+    #[serde(default = "default_vad_kind")]
+    pub vad_kind: String,
+
     // ── 已废弃字段（反序列化时忽略，不报错）──
     /// 旧 `streaming_model` 字段，真流式已移除，保留仅为反序列化兼容。
     #[serde(default)]
@@ -351,6 +359,10 @@ fn default_device() -> String {
     "cpu".to_string()
 }
 
+fn default_vad_kind() -> String {
+    "auto".to_string()
+}
+
 fn default_vad_silence_threshold() -> f64 {
     0.005
 }
@@ -404,6 +416,7 @@ impl Default for LocalEngineConfig {
             hotwords: None,
             use_itn: None,
             vad: VadConfig::default(),
+            vad_kind: default_vad_kind(),
             streaming_model: None,
         }
     }
@@ -701,6 +714,7 @@ mod tests {
         assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
         assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
         assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
+        assert_eq!(cfg.local_engine.vad_kind, "auto");
     }
 
     #[test]
@@ -727,6 +741,7 @@ mod tests {
                     min_silence_ms: 200,
                     min_sentence_ms: 600,
                 },
+                vad_kind: "energy".into(),
                 streaming_model: None,
             },
             local_stt_selection: Some(LocalSttSelection::new("funasr", GGUF_PARAFORMER_MODEL_ID)),
@@ -758,6 +773,7 @@ mod tests {
         assert_eq!(restored.local_engine.vad.silence_threshold, 0.003);
         assert_eq!(restored.local_engine.vad.min_silence_ms, 200);
         assert_eq!(restored.local_engine.vad.min_sentence_ms, 600);
+        assert_eq!(restored.local_engine.vad_kind, "energy");
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
         // 0.22.6 H4: local_stt_selection round-trip
@@ -1580,5 +1596,155 @@ mod tests {
         let restored: SttConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.local_engine.hotwords.as_deref(), Some("test 100"));
         assert_eq!(restored.local_engine.use_itn, Some(false));
+    }
+
+    // ── 0.22.9 Handoff 06: VAD kind + 旧配置迁移测试 ──────────────────────
+
+    /// 新配置默认 `vad_kind = "auto"`。
+    #[test]
+    fn default_vad_kind_is_auto() {
+        let cfg = LocalEngineConfig::default();
+        assert_eq!(cfg.vad_kind, "auto");
+    }
+
+    /// 旧配置缺失 `vad_kind` 字段时安全迁移为 `"auto"`——不误判为用户定制。
+    #[test]
+    fn old_config_missing_vad_kind_defaults_to_auto() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"gguf/sensevoice-small-q8","device":"cpu","vad":{"silence_threshold":0.005,"min_silence_ms":300,"min_sentence_ms":800}}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.local_engine.vad_kind, "auto",
+            "缺失 vad_kind 时应安全迁移为 auto"
+        );
+    }
+
+    /// 显式设置 `vad_kind = "energy"` 的配置应保留该值。
+    #[test]
+    fn explicit_vad_kind_energy_preserved() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"vad_kind":"energy"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.local_engine.vad_kind, "energy");
+    }
+
+    /// 显式设置 `vad_kind = "fsmn"` 的配置应保留该值。
+    #[test]
+    fn explicit_vad_kind_fsmn_preserved() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"vad_kind":"fsmn"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.local_engine.vad_kind, "fsmn");
+    }
+
+    /// VAD 参数为默认值时，`vad_kind = "auto"` 可安全进入 auto 解析。
+    #[test]
+    fn auto_vad_kind_with_default_params_not_customized() {
+        use crate::domain::stt::vad_port::{VadKind, is_energy_vad_customized, resolve_vad_kind};
+
+        let cfg = LocalEngineConfig::default();
+        assert_eq!(cfg.vad_kind, "auto");
+
+        let result = resolve_vad_kind(VadKind::Auto, &cfg.vad);
+        assert_eq!(result.kind, VadKind::Energy);
+        assert!(!result.user_customized);
+
+        assert!(!is_energy_vad_customized(
+            cfg.vad.silence_threshold,
+            cfg.vad.min_silence_ms,
+            cfg.vad.min_sentence_ms,
+        ));
+    }
+
+    /// VAD 参数被显式定制时，即使 `vad_kind = "auto"` 也固定走 Energy。
+    ///
+    /// 旧配置规则（§3.12）：
+    /// - 三个 EnergyVad 参数与默认值不同 → 视为用户显式定制
+    /// - 继续固定使用 EnergyVad
+    #[test]
+    fn auto_vad_kind_with_customized_params_locked_to_energy() {
+        use crate::domain::stt::vad_port::{VadKind, resolve_vad_kind};
+
+        let cfg = LocalEngineConfig {
+            vad: VadConfig {
+                silence_threshold: 0.003, // != 0.005
+                ..Default::default()
+            },
+            vad_kind: "auto".to_string(),
+            ..Default::default()
+        };
+
+        let result = resolve_vad_kind(VadKind::Auto, &cfg.vad);
+        assert_eq!(
+            result.kind,
+            VadKind::Energy,
+            "定制参数时 auto 应固定到 Energy"
+        );
+        assert!(result.user_customized);
+    }
+
+    /// 旧配置只改了 `min_silence_ms` 一个参数，也算定制。
+    #[test]
+    fn customized_only_min_silence_detected() {
+        use crate::domain::stt::vad_port::{VadKind, is_energy_vad_customized, resolve_vad_kind};
+
+        let cfg = LocalEngineConfig {
+            vad: VadConfig {
+                min_silence_ms: 500, // != 300
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(is_energy_vad_customized(
+            cfg.vad.silence_threshold,
+            cfg.vad.min_silence_ms,
+            cfg.vad.min_sentence_ms,
+        ));
+
+        let result = resolve_vad_kind(VadKind::Auto, &cfg.vad);
+        assert_eq!(result.kind, VadKind::Energy);
+        assert!(result.user_customized);
+    }
+
+    /// 旧配置缺失整个 `vad` 对象时安全迁移为默认值，不算定制。
+    #[test]
+    fn missing_vad_object_migrates_safely() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"gguf/sensevoice-small-q8","device":"cpu"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        // vad 缺失 → 默认值
+        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
+        assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
+        assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
+        // vad_kind 也缺失 → auto
+        assert_eq!(cfg.local_engine.vad_kind, "auto");
+
+        use crate::domain::stt::vad_port::{VadKind, is_energy_vad_customized, resolve_vad_kind};
+
+        // 不算定制
+        assert!(!is_energy_vad_customized(
+            cfg.local_engine.vad.silence_threshold,
+            cfg.local_engine.vad.min_silence_ms,
+            cfg.local_engine.vad.min_sentence_ms,
+        ));
+
+        // auto → Energy（gate 前）
+        let result = resolve_vad_kind(VadKind::Auto, &cfg.local_engine.vad);
+        assert_eq!(result.kind, VadKind::Energy);
+        assert!(!result.user_customized);
+    }
+
+    /// round-trip 保持 `vad_kind` 字段。
+    #[test]
+    fn round_trip_preserves_vad_kind() {
+        let cfg = SttConfig {
+            enabled: true,
+            mode: SttMode::Local,
+            local_engine: LocalEngineConfig {
+                vad_kind: "fsmn".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: SttConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.local_engine.vad_kind, "fsmn");
     }
 }

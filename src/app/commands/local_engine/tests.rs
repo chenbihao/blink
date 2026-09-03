@@ -98,6 +98,7 @@ fn status_dto_service_epoch_is_string() {
             model: "unknown".to_string(),
             available: false,
             backend: serde_json::Value::Null,
+            active_implementation: None,
             last_error: None,
         },
     };
@@ -109,6 +110,8 @@ fn status_dto_service_epoch_is_string() {
     assert!(json["status"]["process"].is_object());
     assert_eq!(json["status"]["process"]["state"], "stopped");
     assert!(json["status"]["process"].get("pid").is_none());
+    // active_implementation = None 时字段缺省（旧 wire 形状不变）
+    assert!(json["status"].get("active_implementation").is_none());
 }
 
 // ── 新 commands 签名可编译 ──

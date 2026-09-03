@@ -21,18 +21,24 @@
 //!
 //! ## 目录拓扑
 //!
+//! deployment key = engine id + implementation（见 `deployment.rs` 的
+//! `DeploymentSpace`）；0.22.7/0.22.8 的兼容真源位于 engine 级空间：
+//!
 //! ```text
 //! %APPDATA%\blink\runtimes\
 //! ├─ shared\{provider}\{artifact-id}\        # 只读、内容寻址共享资产
 //! └─ engines\{engine-id}\
-//!    ├─ slot-a\  slot-b\                     # 不可变部署 slot（最多 old+candidate）
-//!    ├─ staging\{operation-id}\              # 事务期间临时构建目录
-//!    ├─ deployment.json                      # active 指针（见 deployment.rs）
-//!    ├─ transaction.json                     # 事务 journal（见 deployment.rs）
-//!    └─ residue.json                         # 清理残留记录（见 deployment.rs）
+//!    ├─ slot-a\  slot-b\                     # engine 级不可变部署 slot
+//!    ├─ staging\{operation-id}\              # engine 级事务临时构建目录
+//!    ├─ deployment.json                      # engine 级 active 指针
+//!    ├─ transaction.json / residue.json
+//!    └─ impl-{implementation}\               # implementation 级空间（0.22.9）
+//!       └─ （同构的 slot/staging/指针/journal/residue）
 //! ```
 //!
-//! 部署事务（slot 切换、journal、fail-closed 恢复）由 `deployment.rs` 承载。
+//! 部署事务（slot 切换、journal、fail-closed 恢复）与全部空间内路径
+//! 派生由 `deployment.rs` 承载；本模块只保留引擎级根目录、模型资产、
+//! 共享 artifact 与原子 IO 原语。
 
 use std::path::{Path, PathBuf};
 
@@ -207,13 +213,15 @@ pub struct FileEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum CleanupScope {
-    /// 删除一个非 active 部署 slot（residue 感知：被占用时登记残留）。
+    /// 删除一个部署空间（engine 级或 implementation 级）内非 active slot
+    /// （residue 感知：被占用时登记残留）。active 判定按空间独立生效。
     EngineDeploymentSlot {
-        engine_id: EngineId,
+        /// 目标部署空间（engine id + implementation）。
+        space: super::deployment::DeploymentSpace,
         /// slot 目录名（`slot-a` / `slot-b`）。
         slot: String,
     },
-    /// 清扫引擎孤儿 staging。
+    /// 清扫引擎全部空间的孤儿 staging。
     EngineStaging { engine_id: EngineId },
     /// 单引擎的模型缓存。
     EngineModelCache { engine_id: EngineId },
@@ -345,28 +353,12 @@ pub fn shared_artifact_dir(runtime_kind: RuntimePlan, artifact_id: &ArtifactId) 
 }
 
 /// 引擎根目录：`runtimes/engines/{engine_id}`
+///
+/// engine 根是 deployment 空间的父目录（engine 级空间本身 + 各
+/// `impl-{implementation}` 子空间）；deployment 内部路径一律经
+/// `DeploymentSpace` 派生，不经本函数拼接。
 pub fn engine_root(engine_id: &EngineId) -> PathBuf {
     runtimes_root().join("engines").join(engine_id.as_str())
-}
-
-/// 引擎 staging 目录：`engines/{engine_id}/staging`
-pub fn staging_dir(engine_id: &EngineId) -> PathBuf {
-    engine_root(engine_id).join("staging")
-}
-
-/// 单个 operation 的 staging 目录：`engines/{engine_id}/staging/{operation_id}`
-pub fn operation_staging_dir(engine_id: &EngineId, operation_id: &str) -> PathBuf {
-    staging_dir(engine_id).join(operation_id)
-}
-
-/// 部署 slot 目录：`engines/{engine_id}/{slot}`
-pub fn slot_dir(engine_id: &EngineId, slot: &str) -> PathBuf {
-    engine_root(engine_id).join(slot)
-}
-
-/// slot 内 manifest 路径：`engines/{engine_id}/{slot}/manifest.json`
-pub fn slot_manifest_path(engine_id: &EngineId, slot: &str) -> PathBuf {
-    slot_dir(engine_id, slot).join("manifest.json")
 }
 
 /// 模型缓存根目录：`%APPDATA%\blink\models`
@@ -583,33 +575,7 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Run
     atomic_write_file(path, &json)
 }
 
-// ── slot manifest 读写 ─────────────────────────────────────────────────────
-
-/// 读取部署 slot 的 manifest。
-pub fn read_slot_manifest(
-    engine_id: &EngineId,
-    slot: &str,
-) -> Result<DeploymentManifest, RuntimeError> {
-    validate_slot_name(slot)?;
-    let path = slot_manifest_path(engine_id, slot);
-    if !path.exists() {
-        return Err(RuntimeError::GenerationNotFound {
-            install_id: slot.to_string(),
-        });
-    }
-    let content = std::fs::read_to_string(&path)?;
-    let manifest: DeploymentManifest =
-        serde_json::from_str(&content).map_err(|e| RuntimeError::ManifestParseFailed {
-            message: format!("{e}"),
-        })?;
-    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
-        return Err(RuntimeError::ManifestSchemaIncompatible {
-            expected: MANIFEST_SCHEMA_VERSION,
-            actual: manifest.schema_version,
-        });
-    }
-    Ok(manifest)
-}
+// ── slot manifest 校验 ─────────────────────────────────────────────────────
 
 /// 校验 slot 名（固定闭合集合：slot-a / slot-b）。
 pub fn validate_slot_name(slot: &str) -> Result<(), RuntimeError> {
@@ -622,9 +588,9 @@ pub fn validate_slot_name(slot: &str) -> Result<(), RuntimeError> {
     }
 }
 
-// ── 共享 artifact 引用扫描（真源：active 部署 manifest）──────────────────
+// ── 共享 artifact 引用扫描（真源：各空间 active 部署 manifest）────────────
 
-/// 共享 artifact 引用记录（来自某引擎的 active 部署 manifest）。
+/// 共享 artifact 引用记录（来自某引擎某空间的 active 部署 manifest）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactReference {
     pub engine_id: String,
@@ -636,6 +602,10 @@ pub struct ArtifactReference {
 /// 这是共享 artifact 删除前引用检查的唯一真源——不维护独立的
 /// refcount.json（可漂移）；只统计当前有效 deployment manifest 的引用，
 /// 事务残留与已删除部署不构成引用。
+///
+/// 扫描覆盖 engine 级空间与全部 implementation 级空间（`impl-*`）；无法
+/// 映射到闭合枚举的 `impl-*` 目录（高版本降级残留）也参与引用统计——
+/// 保守方向 fail-closed：未知部署的引用不让共享资产被删除。
 pub fn scan_artifact_references(
     runtime_kind: RuntimePlan,
     artifact_id: &ArtifactId,
@@ -656,72 +626,89 @@ pub fn scan_artifact_references(
             Some(n) => n.to_string(),
             None => continue,
         };
-        // 只读 active 指针指向的 slot manifest——非 active slot 不构成引用
-        let pointer_path = engines_root.join(&engine_name).join("deployment.json");
-        if !pointer_path.exists() {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&pointer_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let pointer: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let slot = match pointer.get("slot").and_then(|s| s.as_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let install_id = pointer
-            .get("install_id")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
+        let engine_dir = engines_root.join(&engine_name);
 
-        let manifest_file = engines_root
-            .join(&engine_name)
-            .join(&slot)
-            .join("manifest.json");
-        let manifest: DeploymentManifest = match std::fs::read_to_string(&manifest_file)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-        {
-            Some(m) => m,
-            None => continue,
-        };
-
-        // 主 artifact 引用
-        if manifest.artifact.runtime_kind == runtime_kind
-            && manifest.artifact.artifact_id == *artifact_id
-        {
-            refs.push(ArtifactReference {
-                engine_id: engine_name.clone(),
-                install_id: install_id.clone(),
-            });
+        // 候选指针位置：engine 级 + 各 implementation 级空间
+        let mut pointer_locations = vec![engine_dir.join("deployment.json")];
+        if let Ok(entries) = std::fs::read_dir(&engine_dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name();
+                if name.to_str().is_some_and(|n| n.starts_with("impl-")) {
+                    pointer_locations.push(entry.path().join("deployment.json"));
+                }
+            }
         }
 
-        // Binary manifest 中的 stdlib artifact 引用
-        if let ManifestExtension::ManagedBinary(ref ext) = manifest.extension
-            && let Some(ref stdlib) = ext.stdlib_artifact
-            && stdlib.runtime_kind == runtime_kind
-            && stdlib.artifact_id == *artifact_id
-        {
-            refs.push(ArtifactReference {
-                engine_id: engine_name.clone(),
-                install_id: format!("{install_id}#stdlib"),
-            });
-        }
+        for pointer_path in pointer_locations {
+            if !pointer_path.exists() {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&pointer_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let pointer: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let slot = match pointer.get("slot").and_then(|s| s.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let install_id = pointer
+                .get("install_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
 
-        // OnnxRuntime manifest 中的 DLL artifact 引用（0.22.8）
-        if let ManifestExtension::OnnxRuntime(ref ext) = manifest.extension
-            && manifest.artifact.runtime_kind == runtime_kind
-            && ext.dll_artifact_id == *artifact_id
-        {
-            refs.push(ArtifactReference {
-                engine_id: engine_name.clone(),
-                install_id: format!("{install_id}#ort-dll"),
-            });
+            let manifest_file = pointer_path
+                .parent()
+                .unwrap_or(&engine_dir)
+                .join(&slot)
+                .join("manifest.json");
+            let manifest: DeploymentManifest = match std::fs::read_to_string(&manifest_file)
+                .ok()
+                .and_then(|c| serde_json::from_str(&c).ok())
+            {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // 主 artifact 引用
+            if manifest.artifact.runtime_kind == runtime_kind
+                && manifest.artifact.artifact_id == *artifact_id
+            {
+                refs.push(ArtifactReference {
+                    engine_id: engine_name.clone(),
+                    install_id: install_id.clone(),
+                });
+            }
+
+            // Binary manifest 中的 stdlib artifact 引用
+            if let ManifestExtension::ManagedBinary(ref ext) = manifest.extension
+                && let Some(ref stdlib) = ext.stdlib_artifact
+                && stdlib.runtime_kind == runtime_kind
+                && stdlib.artifact_id == *artifact_id
+            {
+                refs.push(ArtifactReference {
+                    engine_id: engine_name.clone(),
+                    install_id: format!("{install_id}#stdlib"),
+                });
+            }
+
+            // OnnxRuntime manifest 中的 DLL artifact 引用（0.22.8）
+            if let ManifestExtension::OnnxRuntime(ref ext) = manifest.extension
+                && manifest.artifact.runtime_kind == runtime_kind
+                && ext.dll_artifact_id == *artifact_id
+            {
+                refs.push(ArtifactReference {
+                    engine_id: engine_name.clone(),
+                    install_id: format!("{install_id}#ort-dll"),
+                });
+            }
         }
     }
 

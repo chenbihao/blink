@@ -33,6 +33,7 @@ pub mod adapter;
 pub mod descriptor;
 pub mod error;
 pub mod identity;
+pub mod implementation;
 pub mod model;
 pub mod operation;
 pub mod status;
@@ -56,6 +57,11 @@ pub use identity::{
     ChecksumSource, ComputeBackend, ComputePreference, Endpoint, EngineId, FallbackReason,
     FallbackReasonKind, ModelContract, ModelId, ResolvedProfile, RuntimePlan,
     verify_backend_consistency,
+};
+#[allow(unused_imports)]
+pub use implementation::{
+    ExecutorTopology, ImplementationBinding, ImplementationDescriptor, ImplementationId,
+    ImplementationRegistry,
 };
 #[allow(unused_imports)]
 pub use model::{

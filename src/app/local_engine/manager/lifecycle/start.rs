@@ -51,74 +51,84 @@ impl EngineManager {
             }
         }
 
-        // 解析 compute profile 的唯一真源是 **active 部署 manifest**——
-        // 安装事务（InstallTransaction::resolve_profile）已按 descriptor 候选顺序
-        // 做过兼容性检查并解析为具体 profile；start 不从 descriptor 候选列表
-        // 二次推导（那会绕过兼容性检查：GPU-first descriptor 在 CPU 主机上
-        // 会得到与实际安装不一致的期望 backend，导致 health 校验误报）。
+        // 解析 compute profile 的唯一真源是 **resolved implementation 空间的
+        // active 部署 manifest**——安装事务（InstallTransaction::resolve_profile）
+        // 已按 descriptor 候选顺序做过兼容性检查并解析为具体 profile；start 不从
+        // descriptor 候选列表二次推导（那会绕过兼容性检查：GPU-first descriptor
+        // 在 CPU 主机上会得到与实际安装不一致的期望 backend，导致 health 校验误报）。
         let descriptor = entry.adapter.descriptor();
 
-        // ── 冻结 launch snapshot ──
-        // deployment identity、resolved profile 与模型身份在 start 时冻结；
+        // ── 冻结 launch snapshot（0.22.9：模型 → implementation → deployment）──
+        //
+        // 冻结顺序 fail-closed：
+        // 1. 模型身份（selected 的 model_storage manifest 回读）
+        // 2. implementation（编译期绑定表按冻结模型解析，未知模型不换模）
+        // 3. deployment identity（**resolved implementation 的部署空间**内
+        //    读 active 指针——GGUF 映射到 engine 级兼容真源，新实现读自己的
+        //    implementation 空间；空间内无部署 → 拒绝启动）
+        //
         // 配置变化只改变 selected，不改变正在运行的 active。
-        // read_active（磁盘 IO）+ resolve_expected_model_identity（manifest 读取）
-        // 是阻塞操作——在 spawn_blocking 内执行。
-        // **fail-closed**：无 active 部署 / 模型未安装 / 损坏 → 拒绝启动。
-        let adapter_for_freeze = Arc::clone(&entry.adapter);
+        // 磁盘 IO（manifest 读取、指针读取）在 spawn_blocking 内执行。
+        let selected_model_id = super::selected_model_id_from_config(engine_id, &config);
         let eid_for_freeze = engine_id.clone();
         let contract = descriptor.model_contract.clone();
-        let uses_managed = adapter_for_freeze.uses_managed_model_storage();
-        // 0.22.7：选中模型从 AdapterConfig 投影读取（与 prepare_launch 同源），
-        // 不再直接读全局 SttConfig 缓存——配置门面已把 funasr_model 投影进
-        // engine_config，直接使用避免缓存未初始化时退化为旧默认模型。
-        let selected_model_id =
-            if engine_id.as_str() == super::super::super::funasr::FUNASR_ENGINE_ID {
-                serde_json::from_value::<serde_json::Value>(config.engine_config.clone())
-                    .ok()
-                    .and_then(|v| {
-                        v.get("funasr_model")
-                            .and_then(|m| m.as_str())
-                            .map(String::from)
-                    })
-            } else {
-                None
-            };
-        let (deployment_install_id, frozen_profile, frozen_model) = tokio::task::spawn_blocking(
-            move || -> Result<(String, ResolvedProfile, Option<FrozenModelIdentity>), LocalEngineError> {
-                let (pointer, manifest) = DeploymentStore::read_active(&eid_for_freeze)
-                    .map_err(|e| from_runtime(ErrorPhase::Start, "读取 active 部署失败", &e))?
-                    .ok_or_else(|| {
-                        LocalEngineError::with_detail(
-                            LocalEngineErrorCode::EnvironmentMissing,
-                            ErrorPhase::Start,
-                            "环境未安装，请先安装",
-                            "无 active deployment.json 指针（fail-closed）".to_string(),
-                        )
-                    })?;
-                let install_id = pointer.install_id;
-
+        let uses_managed = entry.adapter.uses_managed_model_storage();
+        let frozen_model = tokio::task::spawn_blocking(
+            move || -> Result<FrozenModelIdentity, LocalEngineError> {
                 // fail-closed：managed 模型未安装/损坏时不允许 start
-                let frozen = match resolve_expected_model_identity(
+                match resolve_expected_model_identity(
                     &eid_for_freeze,
                     selected_model_id.as_deref(),
                     &contract,
                     uses_managed,
                 ) {
-                    Ok((model_id, revision, fingerprint)) => Some(FrozenModelIdentity {
+                    Ok((model_id, revision, fingerprint)) => Ok(FrozenModelIdentity {
                         model_id,
                         revision,
                         fingerprint,
                     }),
-                    Err(reason) => {
-                        return Err(LocalEngineError::with_detail(
-                            LocalEngineErrorCode::ModelNotReady,
+                    Err(reason) => Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::ModelNotReady,
+                        ErrorPhase::Start,
+                        "模型未就绪，请先安装模型",
+                        reason,
+                    )),
+                }
+            },
+        )
+        .await
+        .map_err(|e| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Internal,
+                ErrorPhase::Start,
+                "冻结启动快照失败",
+                format!("spawn_blocking join 错误: {e}"),
+            )
+        })??;
+
+        // ── 解析并冻结 implementation（0.22.9，fail-closed，纯内存）──
+        let frozen_implementation =
+            self.resolve_implementation_for_model(engine_id, Some(frozen_model.model_id.as_str()))?;
+
+        // ── 从 resolved implementation 的部署空间读取 active 部署（fail-closed）──
+        let deployment_space = deployment_space_for(engine_id, frozen_implementation);
+        let (deployment_install_id, frozen_profile) = tokio::task::spawn_blocking(
+            move || -> Result<(String, ResolvedProfile), LocalEngineError> {
+                let (pointer, manifest) = DeploymentStore::read_active(&deployment_space)
+                    .map_err(|e| from_runtime(ErrorPhase::Start, "读取 active 部署失败", &e))?
+                    .ok_or_else(|| {
+                        let space_label = deployment_space
+                            .implementation()
+                            .map(|i| format!("implementation '{i}' 的部署空间"))
+                            .unwrap_or_else(|| "engine 级部署空间".to_string());
+                        LocalEngineError::with_detail(
+                            LocalEngineErrorCode::EnvironmentMissing,
                             ErrorPhase::Start,
-                            "模型未就绪，请先安装模型",
-                            reason,
-                        ));
-                    }
-                };
-                Ok((install_id, manifest.resolved_profile, frozen))
+                            "环境未安装，请先安装",
+                            format!("{space_label}内无 active deployment.json 指针（fail-closed）"),
+                        )
+                    })?;
+                Ok((pointer.install_id, manifest.resolved_profile))
             },
         )
         .await
@@ -232,6 +242,8 @@ impl EngineManager {
                 status.desired = DesiredState::Running;
                 status.process = ProcessState::Starting;
                 status.service = ServiceHealth::Unknown;
+                // 冻结 active implementation（selected 变化不影响）
+                status.active_implementation = frozen_implementation;
                 // 新一轮显式启动已经接管状态，旧实例的错误不应继续挂在界面上。
                 // 本轮若失败，rollback 会写入新的 last_error。
                 status.last_error = None;
@@ -244,14 +256,16 @@ impl EngineManager {
             })
             .await?;
 
-            // 保存 launch snapshot（identity + profile + deployment + 模型身份）+ 进程句柄
+            // 保存 launch snapshot（identity + profile + deployment + 模型身份 +
+            // implementation）+ 进程句柄
             {
                 let mut l = entry.launch.lock().await;
                 *l = Some(LaunchSnapshot {
                     identity: identity_input.clone(),
                     profile: resolved_launch.profile.clone(),
                     deployment_install_id: deployment_install_id.clone(),
-                    model: frozen_model.clone(),
+                    model: Some(frozen_model.clone()),
+                    implementation: frozen_implementation,
                 });
             }
             {
@@ -688,6 +702,8 @@ impl EngineManager {
                     };
                     status_guard.service = ServiceHealth::Unknown;
                     status_guard.model = ModelHealth::Unknown;
+                    // 实例终结——active implementation 随 launch snapshot 清除
+                    status_guard.active_implementation = None;
 
                     if is_deliberate {
                         // 主动停止：清除旧错误，不设置新错误

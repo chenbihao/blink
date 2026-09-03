@@ -264,7 +264,7 @@ mod tests {
         let mut failures = Vec::new();
         check_layer_for_dir(&dir, &["crate::app"], "test_domain", &mut failures);
         assert!(
-            failures.len() >= 1,
+            !failures.is_empty(),
             "aliased import 应被检测到: {failures:?}"
         );
 

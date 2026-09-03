@@ -236,18 +236,19 @@ pub(super) fn map_oarocr_to_ocr_result(
 
                 if line_chars.len() == word_boxes.len() {
                     // 逐字符对齐
-                    let mut local_offset = global_offset;
-                    for (ch, wb) in line_chars.iter().zip(word_boxes.iter()) {
+                    for (char_index, (ch, wb)) in
+                        line_chars.iter().zip(word_boxes.iter()).enumerate()
+                    {
                         let char_len = ch.len_utf8();
                         let _ = char_len; // UTF-8 byte len not needed; we use char count
+                        let char_start = global_offset + char_index;
                         char_boxes.push(OcrCharBox {
                             text: ch.to_string(),
                             bounding_rect: bbox_to_ocr_rect(wb),
                             line_index: line_idx,
-                            char_start: local_offset,
-                            char_end: local_offset + 1,
+                            char_start,
+                            char_end: char_start + 1,
                         });
-                        local_offset += 1;
                     }
                 } else {
                     // 数量不一致——记日志，不生成 char_boxes

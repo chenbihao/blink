@@ -24,13 +24,14 @@
 
 pub mod binary;
 pub mod onnx;
+pub mod paraformer_onnx;
 pub mod python;
 
 use serde::{Deserialize, Serialize};
 
 use super::deployment::{
-    DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentSlot, DeploymentStore,
-    TransactionPhase,
+    DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentSlot, DeploymentSpace,
+    DeploymentStore, TransactionPhase,
 };
 use super::runtime::{
     self, CleanupScope, ComputeBackend, ComputePreference, DeploymentManifest, EngineId,
@@ -368,6 +369,10 @@ pub struct InstallResult {
 /// 编排 journal begin → staging prepare → self-test → promote slot →
 /// 原子切换 deployment.json → 切换后验证 → commit（删旧 slot）/ rollback。
 ///
+/// 事务写入**构造时指定的 `DeploymentSpace`**（engine id + implementation）——
+/// 一个 implementation 的安装事务只作用于自己的 pointer/slot/journal，
+/// 与同引擎其他 implementation 的部署互不可见。
+///
 /// 失败语义：
 /// - 切换前失败：清 staging，old 部署不受影响；
 /// - 切换后验证失败：指针原子切回 previous，candidate slot 尽力删除
@@ -376,14 +381,28 @@ pub struct InstallResult {
 pub struct InstallTransaction<'a, P: RuntimeProvider> {
     descriptor: &'a ProviderDescriptor,
     provider: &'a P,
+    space: DeploymentSpace,
 }
 
 impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
     /// 创建安装事务。
-    pub fn new(descriptor: &'a ProviderDescriptor, provider: &'a P) -> Self {
+    ///
+    /// `space` 决定事务的部署空间（pointer/slot/journal/staging 位置）；
+    /// 其 engine 归属必须与 descriptor 一致（不一致 fail-closed 拒绝）。
+    pub fn new(
+        descriptor: &'a ProviderDescriptor,
+        provider: &'a P,
+        space: DeploymentSpace,
+    ) -> Self {
+        debug_assert_eq!(
+            space.engine_id(),
+            &descriptor.engine_id,
+            "DeploymentSpace 的 engine 与 ProviderDescriptor 不一致"
+        );
         Self {
             descriptor,
             provider,
+            space,
         }
     }
 
@@ -398,7 +417,16 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<InstallResult, RuntimeError> {
-        let engine_id = &self.descriptor.engine_id;
+        let space = &self.space;
+        let engine_id = space.engine_id();
+        if engine_id != &self.descriptor.engine_id {
+            return Err(RuntimeError::InstallFailed {
+                message: format!(
+                    "部署空间 engine ({}) 与 descriptor engine ({}) 不一致",
+                    engine_id, self.descriptor.engine_id
+                ),
+            });
+        }
         debug_assert_eq!(
             self.provider.kind(),
             self.descriptor.runtime_kind,
@@ -406,6 +434,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         );
         tracing::info!(
             engine = %engine_id,
+            implementation = ?space.implementation(),
             display = %self.descriptor.display_name,
             operation_id,
             "开始运行时安装事务"
@@ -436,17 +465,17 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         let fell_back = !fallback_reasons.is_empty();
 
         // ── 2. 事务 begin：写 journal（任何破坏性步骤之前），确定 candidate slot ──
-        let mut journal = DeploymentStore::begin(engine_id, operation_id, &install_id)?;
+        let mut journal = DeploymentStore::begin(space, operation_id, &install_id)?;
         let candidate_slot = DeploymentSlot::parse(&journal.candidate_slot)?;
-        let candidate_dir = candidate_slot.dir(engine_id);
+        let candidate_dir = candidate_slot.dir_in(space);
 
         // 清扫其他 operation 的孤儿 staging（保留本 operation 目录）
-        DeploymentStore::sweep_staging_except(engine_id, operation_id);
+        DeploymentStore::sweep_staging_except(space, operation_id);
 
-        let staging = runtime::operation_staging_dir(engine_id, operation_id);
+        let staging = space.operation_staging_dir(operation_id);
         std::fs::create_dir_all(&staging).map_err(|e| {
             // begin 已写 journal——清掉，避免下次启动误恢复
-            let _ = DeploymentStore::clear_journal(engine_id);
+            let _ = DeploymentStore::clear_journal(space);
             RuntimeError::StagingCreateFailed {
                 message: format!("创建 staging 目录失败: {e}"),
             }
@@ -472,7 +501,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             && ct.is_cancelled()
         {
             let _ = std::fs::remove_dir_all(&staging);
-            let _ = DeploymentStore::clear_journal(engine_id);
+            let _ = DeploymentStore::clear_journal(space);
             if let Some(s) = sink {
                 s.on_stage("cancelled");
             }
@@ -504,7 +533,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                     s.on_log("error", &format!("prepare_environment 失败: {e}"));
                 }
                 let _ = std::fs::remove_dir_all(&staging);
-                let _ = DeploymentStore::clear_journal(engine_id);
+                let _ = DeploymentStore::clear_journal(space);
                 return Err(e);
             }
         };
@@ -514,7 +543,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             && ct.is_cancelled()
         {
             let _ = std::fs::remove_dir_all(&staging);
-            let _ = DeploymentStore::clear_journal(engine_id);
+            let _ = DeploymentStore::clear_journal(space);
             if let Some(s) = sink {
                 s.on_stage("cancelled");
             }
@@ -539,7 +568,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 s.on_log("error", &format!("候选环境验证失败: {e}"));
             }
             let _ = std::fs::remove_dir_all(&staging);
-            let _ = DeploymentStore::clear_journal(engine_id);
+            let _ = DeploymentStore::clear_journal(space);
             return Err(e);
         }
 
@@ -557,7 +586,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             Err(e) => {
                 tracing::warn!(%e, "build_manifest_extension 失败，清理 staging");
                 let _ = std::fs::remove_dir_all(&staging);
-                let _ = DeploymentStore::clear_journal(engine_id);
+                let _ = DeploymentStore::clear_journal(space);
                 return Err(e);
             }
         };
@@ -582,7 +611,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         let staging_manifest = staging.join("manifest.json");
         runtime::atomic_write_json(&staging_manifest, &manifest).inspect_err(|_e| {
             let _ = std::fs::remove_dir_all(&staging);
-            let _ = DeploymentStore::clear_journal(engine_id);
+            let _ = DeploymentStore::clear_journal(space);
         })?;
 
         // ── 6. promote: staging → slot-{candidate} ──
@@ -608,13 +637,13 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 match copy_result {
                     Ok(Ok(())) => {}
                     Ok(Err(e2)) => {
-                        let _ = DeploymentStore::clear_journal(engine_id);
+                        let _ = DeploymentStore::clear_journal(space);
                         return Err(RuntimeError::GenerationPromoteFailed {
                             message: format!("提升 candidate slot 失败: rename={e}, copy={e2}"),
                         });
                     }
                     Err(e2) => {
-                        let _ = DeploymentStore::clear_journal(engine_id);
+                        let _ = DeploymentStore::clear_journal(space);
                         return Err(RuntimeError::GenerationPromoteFailed {
                             message: format!(
                                 "提升 candidate slot 失败: rename={e}, spawn_blocking={e2}"
@@ -630,7 +659,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             s.on_stage("switching");
             s.on_log("info", "正在切换到新环境...");
         }
-        DeploymentStore::advance_phase(engine_id, &mut journal, TransactionPhase::Switched)?;
+        DeploymentStore::advance_phase(space, &mut journal, TransactionPhase::Switched)?;
 
         let pointer = DeploymentPointer {
             install_id: install_id.clone(),
@@ -639,15 +668,15 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
         };
 
-        if let Err(e) = DeploymentStore::write_pointer(engine_id, &pointer) {
+        if let Err(e) = DeploymentStore::write_pointer(space, &pointer) {
             tracing::error!(%e, "deployment.json 原子写入失败，回滚");
             // 回滚：删除 candidate slot（占用记 residue），恢复由 journal 恢复逻辑兜底
             DeploymentStore::delete_slot_if_not_active(
-                engine_id,
+                space,
                 candidate_slot.as_str(),
                 "指针切换失败，丢弃 candidate",
             )?;
-            DeploymentStore::clear_journal(engine_id)?;
+            DeploymentStore::clear_journal(space)?;
             return Err(e);
         }
 
@@ -658,14 +687,14 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         }
 
         if let Err(e) = self
-            .verify_after_switch(engine_id, candidate_slot, &install_id, &artifact_clone)
+            .verify_after_switch(space, candidate_slot, &install_id, &artifact_clone)
             .await
         {
             tracing::error!(%e, "切换后验证失败，自动回滚到 previous 部署");
             if let Some(s) = sink {
                 s.on_log("error", &format!("切换后验证失败，正在回滚: {e}"));
             }
-            if let Err(rollback_err) = Self::rollback_switch(engine_id, &journal, candidate_slot) {
+            if let Err(rollback_err) = Self::rollback_switch(space, &journal, candidate_slot) {
                 tracing::error!(%rollback_err, "回滚失败——启动恢复将按 journal fail-closed 处理");
                 // 保留 journal 让下次启动恢复；返回原错误
                 return Err(e);
@@ -674,10 +703,10 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         }
 
         // ── 9. commit：journal → Committed，删除旧 slot，清 journal ──
-        DeploymentStore::advance_phase(engine_id, &mut journal, TransactionPhase::Committed)?;
+        DeploymentStore::advance_phase(space, &mut journal, TransactionPhase::Committed)?;
         if let Some(prev) = &journal.previous {
             let deleted = DeploymentStore::delete_slot_if_not_active(
-                engine_id,
+                space,
                 &prev.slot,
                 "更新成功，删除旧部署",
             )?;
@@ -689,7 +718,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 );
             }
         }
-        DeploymentStore::clear_journal(engine_id)?;
+        DeploymentStore::clear_journal(space)?;
 
         tracing::info!(
             engine = %engine_id,
@@ -713,9 +742,9 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
     /// 切换后验证失败时的回滚：指针切回 previous，candidate 记 residue。
     ///
-    /// 成功后清除 journal（稳定状态只剩 active）。
+    /// 成功后清除 journal（稳定状态只剩 active）。只作用于事务空间。
     fn rollback_switch(
-        engine_id: &EngineId,
+        space: &DeploymentSpace,
         journal: &super::deployment::TransactionJournal,
         candidate_slot: DeploymentSlot,
     ) -> Result<(), RuntimeError> {
@@ -727,18 +756,18 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                     updated_at_ms: runtime::now_ms(),
                     schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
                 };
-                DeploymentStore::write_pointer(engine_id, &prev_pointer)?;
+                DeploymentStore::write_pointer(space, &prev_pointer)?;
             }
             None => {
-                DeploymentStore::remove_pointer(engine_id)?;
+                DeploymentStore::remove_pointer(space)?;
             }
         }
         DeploymentStore::delete_slot_if_not_active(
-            engine_id,
+            space,
             candidate_slot.as_str(),
             "切换后验证失败，丢弃 candidate",
         )?;
-        DeploymentStore::clear_journal(engine_id)?;
+        DeploymentStore::clear_journal(space)?;
         Ok(())
     }
 
@@ -754,12 +783,12 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
     /// 失败时调用方执行自动回滚。
     async fn verify_after_switch(
         &self,
-        engine_id: &EngineId,
+        space: &DeploymentSpace,
         slot: DeploymentSlot,
         install_id: &str,
         expected_artifact: &runtime::ArtifactIdentity,
     ) -> Result<(), RuntimeError> {
-        let manifest = runtime::read_slot_manifest(engine_id, slot.as_str())?;
+        let manifest = DeploymentStore::read_slot_manifest(space, slot.as_str())?;
 
         if manifest.install_id != install_id {
             return Err(RuntimeError::SelfTestFailed {
@@ -800,7 +829,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         }
 
         tracing::info!(
-            engine = %engine_id,
+            engine = %space.engine_id(),
             install = %install_id,
             sha256 = %manifest.artifact.sha256,
             "切换后 manifest 与 artifact identity 验证通过"
@@ -989,26 +1018,32 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 /// 执行清理操作。
 ///
 /// 根据 `scope` 清理不同范围：
-/// - `EngineDeploymentSlot`: 删除一个非 active slot（占用记 residue）。
-/// - `EngineStaging`: 清扫引擎孤儿 staging。
-/// - `EngineModelCache`: 清理指定引擎的模型缓存。
-/// - `ProviderSharedArtifact`: 清理共享 artifact（需 active manifest 引用检查）。
+/// - `EngineDeploymentSlot`: 删除一个部署空间内非 active slot（占用记 residue）。
+///   active 判定只看该空间自己的指针——删除保护按 implementation 生效。
+/// - `EngineStaging`: 清扫引擎全部空间（engine 级 + implementation 级）的
+///   孤儿 staging。
+/// - `EngineModelCache`: 清理指定引擎的模型缓存（engine + model 管理，与
+///   deployment 空间正交）。
+/// - `ProviderSharedArtifact`: 清理共享 artifact（需各空间 active manifest 引用检查）。
 /// - `ProviderDownloadCache`: 清理 provider 下载缓存。
 pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
     match scope {
-        CleanupScope::EngineDeploymentSlot { engine_id, slot } => {
+        CleanupScope::EngineDeploymentSlot { space, slot } => {
             runtime::validate_slot_name(slot)?;
-            let active = DeploymentStore::read_pointer(engine_id)?.map(|p| p.slot);
+            let active = DeploymentStore::read_pointer(space)?.map(|p| p.slot);
             if active.as_deref() == Some(slot.as_str()) {
                 return Err(RuntimeError::CleanupFailed {
                     message: "active 部署不可删除".to_string(),
                 });
             }
-            DeploymentStore::delete_slot_if_not_active(engine_id, slot, "cleanup 请求")?;
+            DeploymentStore::delete_slot_if_not_active(space, slot, "cleanup 请求")?;
             Ok(())
         }
         CleanupScope::EngineStaging { engine_id } => {
-            DeploymentStore::sweep_orphan_staging(engine_id);
+            // 引擎全部空间的孤儿 staging（事务按 engine 串行，无并发事务）
+            for space in DeploymentStore::spaces_for_engine(engine_id)? {
+                DeploymentStore::sweep_orphan_staging(&space);
+            }
             Ok(())
         }
         CleanupScope::EngineModelCache { engine_id } => {

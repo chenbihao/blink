@@ -194,25 +194,33 @@ impl NdjsonWorkerClient {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
+            let mut total_lines = 0u32;
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
+                        tracing::info!(total_lines, "worker stdout reader: EOF");
                         let _ = tx.send(WorkerEvent::Eof).await;
                         break;
                     }
                     Ok(_) => {
+                        total_lines += 1;
                         let event = match parse_worker_line(&line) {
                             Ok(Some(parsed)) => WorkerEvent::Line(parsed),
                             Ok(None) => continue,
                             Err(reason) => WorkerEvent::Garbage(reason),
                         };
+                        tracing::info!(
+                            total_lines,
+                            preview = %line.trim().chars().take(80).collect::<String>(),
+                            "worker stdout reader: line received"
+                        );
                         if tx.send(event).await.is_err() {
                             break;
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(%e, "worker stdout read error");
+                        tracing::info!(%e, total_lines, "worker stdout read error");
                         let _ = tx.send(WorkerEvent::Eof).await;
                         break;
                     }

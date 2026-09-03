@@ -94,6 +94,19 @@ const LOCKED_REQUIREMENTS_TXT: &str =
 /// PaddleOCR 稳定 engine id。
 pub const PADDLEOCR_ENGINE_ID: &str = "paddleocr";
 
+/// PaddleOCR ONNX in-process implementation 的部署空间（0.22.9 兼容真源映射）。
+///
+/// 0.22.8 ONNX deployment 位于 engine 级空间；读取层经此入口把旧 pointer
+/// 明确映射到 in-process implementation——不复制、不改写、不搬迁用户资产。
+pub(crate) fn onnx_inprocess_deployment_space()
+-> crate::infra::local_engine::deployment::DeploymentSpace {
+    let engine_id = EngineId::new(PADDLEOCR_ENGINE_ID).expect("paddleocr is valid");
+    crate::infra::local_engine::deployment::DeploymentSpace::resolve(
+        &engine_id,
+        crate::domain::local_engine::ImplementationId::PaddleOcrOnnxInProcess,
+    )
+}
+
 // ── PaddleocrAdapter ───────────────────────────────────────────────────────
 
 /// PaddleOCR 本地引擎 adapter。
@@ -229,8 +242,8 @@ impl LocalEngineAdapter for PaddleocrAdapter {
     fn self_test(&self) -> AdapterSelfTest {
         use crate::infra::local_engine::deployment::DeploymentStore;
 
-        let engine_id = &self.descriptor.engine_id;
-        let (_pointer, dir) = match DeploymentStore::active_dir(engine_id) {
+        let (_pointer, dir) = match DeploymentStore::active_dir(&onnx_inprocess_deployment_space())
+        {
             Ok(Some(p)) => p,
             _ => {
                 return AdapterSelfTest::failed(
@@ -275,8 +288,8 @@ impl LocalEngineAdapter for PaddleocrAdapter {
 
         let mut entries = Vec::new();
 
-        let engine_id = &self.descriptor.engine_id;
-        let (_pointer, dir) = match DeploymentStore::active_dir(engine_id) {
+        let (_pointer, dir) = match DeploymentStore::active_dir(&onnx_inprocess_deployment_space())
+        {
             Ok(Some(p)) => p,
             _ => {
                 entries.push(DiagnosticEntry {
@@ -334,10 +347,12 @@ impl LocalEngineAdapter for PaddleocrAdapter {
 /// 0.22.8: 不再使用，保留用于 legacy Python 测试。
 #[allow(dead_code)]
 fn active_deployment_venv_python(engine_id: &EngineId) -> Option<PathBuf> {
-    let (_pointer, dir) =
-        crate::infra::local_engine::deployment::DeploymentStore::active_dir(engine_id)
-            .ok()
-            .flatten()?;
+    let _ = engine_id; // 空间由 implementation 映射决定（engine 级兼容真源）
+    let (_pointer, dir) = crate::infra::local_engine::deployment::DeploymentStore::active_dir(
+        &onnx_inprocess_deployment_space(),
+    )
+    .ok()
+    .flatten()?;
     let python_exe = dir.join("venv").join("Scripts").join("python.exe");
     if python_exe.exists() {
         Some(python_exe)

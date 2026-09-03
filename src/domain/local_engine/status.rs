@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::local_engine::identity::{
     BackendVerificationResult, ComputePreference, ResolvedProfile,
 };
+use crate::domain::local_engine::implementation::ImplementationId;
 
 use super::error::LocalEngineError;
 
@@ -454,6 +455,15 @@ pub struct EngineStatus {
     pub revision: u64,
     /// 计算设备三层信息。
     pub backend: BackendInfo,
+    /// 当前活跃 implementation（0.22.9，只读投影）。
+    ///
+    /// 来自 start 冻结的 launch snapshot（进程型引擎）或 in-process 启动
+    /// 提交（OCR）。**selected 变化不影响此字段**——配置在运行期间变化
+    /// 只改变 selected，不篡改 active。stop/rollback/exit 清除。
+    /// 旧快照缺失此字段时反序列化为 None（安全默认，不掩盖未知数据——
+    /// 未知 implementation wire 值会直接反序列化失败）。
+    #[serde(default)]
+    pub active_implementation: Option<ImplementationId>,
     /// 最近一次错误（如果有）。
     pub last_error: Option<LocalEngineError>,
 }
@@ -470,6 +480,7 @@ impl Default for EngineStatus {
             model: ModelHealth::Unknown,
             revision: 0,
             backend: BackendInfo::default(),
+            active_implementation: None,
             last_error: None,
         }
     }
@@ -791,6 +802,7 @@ mod tests {
             model: ModelHealth::Ready,
             revision: 42,
             backend: BackendInfo::default(),
+            active_implementation: None,
             last_error: None,
         };
 
@@ -850,6 +862,74 @@ mod tests {
             ..Default::default()
         };
         assert!(s4.is_available_for_requests());
+    }
+
+    // ── 0.22.9 active_implementation 只读投影 ──────────────────────────────
+
+    /// 旧快照（无 active_implementation 字段）反序列化为 None——serde 兼容。
+    #[test]
+    fn status_without_active_implementation_deserializes_to_none() {
+        let legacy = r#"{
+            "service_epoch": 42,
+            "desired": "running",
+            "operation": {"kind": "idle", "operation_id": "", "stage": "pending", "cancellable": false},
+            "environment": "ready",
+            "process": "stopped",
+            "service": "healthy",
+            "model": "ready",
+            "revision": 7,
+            "backend": {
+                "requested_preference": "auto",
+                "resolved_profile": null,
+                "backend_verification": {
+                    "state": "pending",
+                    "expected_backend": "cpu",
+                    "actual_backend": null,
+                    "device_name": null,
+                    "mismatch_reason": null
+                },
+                "fallback_reasons": [],
+                "desired_deployment": null,
+                "loaded_deployment": null,
+                "pending_restart": false,
+                "legacy_deployment": false
+            },
+            "last_error": null
+        }"#;
+        let status: EngineStatus = serde_json::from_str(legacy).expect("旧快照必须兼容");
+        assert_eq!(status.revision, 7);
+        assert!(status.active_implementation.is_none());
+    }
+
+    /// 未知 implementation wire 值反序列化失败——fail-closed，不用默认掩盖。
+    #[test]
+    fn status_rejects_unknown_implementation_value() {
+        // 先序列化一份合法快照，再替换 implementation 值为未知字符串——
+        // 保证失败只来自 implementation 字段，而非其他必填字段缺失
+        let mut valid = status_active_impl();
+        valid.service_epoch = ServiceEpoch(42);
+        let json = serde_json::to_string(&valid).unwrap();
+        let bad = json.replace(
+            "\"active_implementation\":\"funasr_gguf_worker\"",
+            "\"active_implementation\":\"not-a-real-implementation\"",
+        );
+        assert_ne!(json, bad, "替换必须生效");
+        assert!(serde_json::from_str::<EngineStatus>(&bad).is_err());
+        // 合法 wire 值可往返
+        let back: EngineStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.active_implementation,
+            Some(crate::domain::local_engine::implementation::ImplementationId::FunasrGgufWorker)
+        );
+    }
+
+    fn status_active_impl() -> EngineStatus {
+        EngineStatus {
+            active_implementation: Some(
+                crate::domain::local_engine::implementation::ImplementationId::FunasrGgufWorker,
+            ),
+            ..Default::default()
+        }
     }
 
     // ── Wire 格式稳定性测试（0.22.6 H5）──────────────────────────────────

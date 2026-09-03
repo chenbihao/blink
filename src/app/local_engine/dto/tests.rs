@@ -178,6 +178,7 @@ fn engine_status_dto_service_epoch_revision_are_strings() {
             model: "unknown".to_string(),
             available: false,
             backend: json!(null),
+            active_implementation: None,
             last_error: None,
         },
     };

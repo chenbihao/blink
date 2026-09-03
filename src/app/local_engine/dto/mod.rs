@@ -134,6 +134,14 @@ pub struct EngineStatusWire {
     pub available: bool,
     /// 计算设备三层信息（含 resolved profile / backend 校验 / fallback 记录）。
     pub backend: serde_json::Value,
+    /// 当前活跃 implementation（0.22.9，只读诊断）。
+    ///
+    /// 只来自 start 冻结的 launch snapshot / in-process 启动提交，
+    /// 前端**不得**回传或选择 implementation（后端不提供任何该类 command）。
+    /// `None` = 未运行或引擎无 implementation 声明；序列化时字段缺省，
+    /// 旧前端完全兼容。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_implementation: Option<String>,
     /// 最近一次错误（如果有）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<serde_json::Value>,
@@ -304,6 +312,7 @@ fn project_status_wire(status: &EngineStatus) -> EngineStatusWire {
         model: model_health_to_string(status.model.clone()),
         available: status.is_available_for_requests(),
         backend: serde_json::to_value(&status.backend).unwrap_or(serde_json::Value::Null),
+        active_implementation: status.active_implementation.map(|i| i.to_string()),
         last_error: status
             .last_error
             .as_ref()

@@ -19,6 +19,87 @@ mod shutdown;
 mod start;
 mod stop;
 
+// ── implementation → 部署空间（0.22.9 Handoff 02）────────────────────────
+
+/// deployment key（engine + implementation）→ 部署空间的统一解析入口。
+///
+/// - implementation 为 `Some`：经 infra 闭合映射解析（0.22.7 GGUF /
+///   0.22.8 OCR in-process 映射到 engine 级兼容真源；0.22.9 起新实现
+///   落在 implementation 级空间）；
+/// - `None`（引擎无 implementation 声明，仅测试 fake 场景）：engine 级空间。
+pub(super) fn deployment_space_for(
+    engine_id: &EngineId,
+    implementation: Option<ImplementationId>,
+) -> crate::infra::local_engine::deployment::DeploymentSpace {
+    use crate::infra::local_engine::deployment::DeploymentSpace;
+    match implementation {
+        Some(id) => DeploymentSpace::resolve(engine_id, id),
+        None => DeploymentSpace::engine(engine_id),
+    }
+}
+
+/// 在注册表中解析模型 → implementation（fail-closed，供阻塞段复用）。
+///
+/// 与 `EngineManager::resolve_implementation_for_model` 同语义；
+/// 拆为自由函数让 start 的冻结段与 Manager 方法共享同一实现。
+pub(super) fn resolve_implementation_in_registry(
+    registry: &ImplementationRegistry,
+    engine_id: &EngineId,
+    model_id: Option<&str>,
+) -> Result<Option<ImplementationId>, LocalEngineError> {
+    let Some(model_id) = model_id.filter(|m| !m.is_empty()) else {
+        // 引擎声明了 implementation 但无实际模型——fail-closed
+        let declared = !registry.implementations_for_engine(engine_id).is_empty();
+        if declared {
+            return Err(LocalEngineError::with_detail(
+                LocalEngineErrorCode::InvalidConfig,
+                ErrorPhase::Start,
+                "无法解析 implementation",
+                format!("engine '{engine_id}' 声明了 implementation 但本次启动无冻结模型身份"),
+            ));
+        }
+        return Ok(None);
+    };
+    let resolved = registry.resolve_for_model(engine_id, model_id)?;
+    if let Some(impl_id) = resolved {
+        let (runtime, transport) = registry
+            .descriptor(impl_id)
+            .map(|d| (d.runtime_kind.to_string(), d.service_transport.to_string()))
+            .unwrap_or_default();
+        tracing::info!(
+            engine = %engine_id,
+            model = %model_id,
+            implementation = %impl_id,
+            runtime = %runtime,
+            transport = %transport,
+            "冻结 implementation"
+        );
+    }
+    Ok(resolved)
+}
+
+/// 从 AdapterConfig 提取 selected model id（与 prepare_launch 同源的投影）。
+///
+/// 0.22.7 起 funasr 的 `funasr_model` 由配置门面投影进 engine_config；
+/// 其他引擎（如 paddleocr）无用户级模型选择，返回 `None`。
+/// 空字符串视同未选择（返回 None）。
+pub(super) fn selected_model_id_from_config(
+    engine_id: &EngineId,
+    config: &AdapterConfig,
+) -> Option<String> {
+    if engine_id.as_str() != crate::app::local_engine::funasr::FUNASR_ENGINE_ID {
+        return None;
+    }
+    serde_json::from_value::<serde_json::Value>(config.engine_config.clone())
+        .ok()
+        .and_then(|v| {
+            v.get("funasr_model")
+                .and_then(|m| m.as_str())
+                .map(String::from)
+        })
+        .filter(|m| !m.is_empty())
+}
+
 // ── 动态模型身份解析（0.22.6 B2）─────────────────────────────────────────
 
 /// 从 model_storage manifest 动态解析当前安装的模型身份。
@@ -94,11 +175,37 @@ pub(super) fn resolve_expected_model_identity(
 // ── ONNX in-process 启动/停止（0.22.8）────────────────────────────────────
 
 impl EngineManager {
+    // ── implementation 解析（0.22.9）──────────────────────────────────────
+
+    /// 从实际启动的模型解析 implementation（fail-closed）。
+    ///
+    /// `model_id` 是 start 时冻结的实际模型身份（manifest 回读），
+    /// 不是当前配置的 selected——配置在运行期间变化只改变 selected，
+    /// 不影响本解析。解析结果在 start 时冻结进 launch snapshot 并
+    /// 投影为只读 `active_implementation`。
+    ///
+    /// - 引擎在编译期绑定表中有声明时：模型必须显式绑定，未知模型返回
+    ///   `Err`（不回退默认 implementation，不静默换模）；
+    /// - 引擎无 implementation 声明时：返回 `Ok(None)`
+    ///   （implementation 层不适用——仅测试 fake 场景）。
+    pub(super) fn resolve_implementation_for_model(
+        &self,
+        engine_id: &EngineId,
+        model_id: Option<&str>,
+    ) -> Result<Option<ImplementationId>, LocalEngineError> {
+        resolve_implementation_in_registry(&self.implementation_registry, engine_id, model_id)
+    }
+
+    // ── ONNX in-process 启动/停止（0.22.8）────────────────────────────────────
+
     /// 启动 in-process 引擎（ONNX）。
     ///
     /// 0.22.8: PaddleOCR 切换到 ONNX Runtime 后不再 spawn 子进程——
     /// OCR 由 `OcrCoordinator` 的 `OnnxOcrExecutor` 在主进程内 lazy load。
     /// 此方法只更新引擎状态为 available，不启动任何子进程。
+    ///
+    /// 0.22.9: 同时从 descriptor 模型契约解析并冻结 implementation
+    /// （in-process 引擎无 launch snapshot，状态提交即 executor 状态投影）。
     ///
     /// 状态终态：desired=Running, process=Running(pid=0), service=Healthy,
     /// model=Ready → `available=true`。
@@ -128,12 +235,19 @@ impl EngineManager {
             }
         }
 
+        // 解析 implementation（fail-closed）：in-process 引擎模型选择来自
+        // descriptor 模型契约（OCR 无用户级模型选择入口）
+        let contract_model_id = entry.adapter.descriptor().model_contract.model_id.clone();
+        let implementation =
+            self.resolve_implementation_for_model(engine_id, Some(&contract_model_id))?;
+
         // 标记 available
         self.commit_status_internal(engine_id, None, |status| {
             status.desired = DesiredState::Running;
             status.process = ProcessState::Running { pid: 0 };
             status.service = ServiceHealth::Healthy;
             status.model = ModelHealth::Ready;
+            status.active_implementation = implementation;
             status.last_error = None;
         })
         .await?;
@@ -163,6 +277,7 @@ impl EngineManager {
             status.process = ProcessState::Stopped;
             status.service = ServiceHealth::Unknown;
             status.model = ModelHealth::Unknown;
+            status.active_implementation = None;
             status.last_error = None;
         })
         .await?;

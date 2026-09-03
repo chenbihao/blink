@@ -8,13 +8,24 @@ use std::sync::Arc;
 // ── 基础辅助 ──────────────────────────────────────────────────────────────
 
 fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAdapter> {
+    make_fake_adapter_with_options(id, self_test_passes, true)
+}
+
+/// 可选关闭 managed model storage 的 fake adapter（start 冻结段测试用：
+/// 跳过 model_storage manifest 读取，直接以 descriptor 契约为冻结模型）。
+fn make_fake_adapter_with_options(
+    id: &str,
+    self_test_passes: bool,
+    managed_model_storage: bool,
+) -> Arc<dyn LocalEngineAdapter> {
     struct FakeAdapter {
         descriptor: EngineDefinition,
         self_test_passes: bool,
+        managed_model_storage: bool,
     }
 
     impl FakeAdapter {
-        fn new(id: &str, self_test_passes: bool) -> Self {
+        fn new(id: &str, self_test_passes: bool, managed_model_storage: bool) -> Self {
             let artifact = ArtifactId::new("fake-artifact").unwrap();
             Self {
                 descriptor: EngineDefinition {
@@ -49,6 +60,7 @@ fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAda
                     resource_budget: ResourceBudget::default(),
                 },
                 self_test_passes,
+                managed_model_storage,
             }
         }
     }
@@ -98,6 +110,10 @@ fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAda
             }
         }
 
+        fn uses_managed_model_storage(&self) -> bool {
+            self.managed_model_storage
+        }
+
         fn self_test(&self) -> AdapterSelfTest {
             if self.self_test_passes {
                 AdapterSelfTest::passed()
@@ -117,7 +133,11 @@ fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAda
         }
     }
 
-    Arc::new(FakeAdapter::new(id, self_test_passes))
+    Arc::new(FakeAdapter::new(
+        id,
+        self_test_passes,
+        managed_model_storage,
+    ))
 }
 
 /// 构建测试用 manager（1 个 fake adapter + fake 模型目录 + fake worker）。
@@ -283,6 +303,7 @@ async fn inject_launch(entry: &Arc<EngineEntry>, model_id: &str, instance_id: &s
             revision: "v1".to_string(),
             fingerprint: None,
         }),
+        implementation: None,
     });
 }
 
@@ -924,11 +945,12 @@ async fn cleanup_rejects_active_slot_and_unknown_targets() {
     let svc = make_service("fake-clean");
     let eid = EngineId::new("fake-clean").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let space = crate::infra::local_engine::deployment::DeploymentSpace::engine(&eid);
 
     // 造一个 active 指针 + slot
-    std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-a")).unwrap();
+    std::fs::create_dir_all(space.slot_dir("slot-a")).unwrap();
     DeploymentStore::write_pointer(
-        &eid,
+        &space,
         &DeploymentPointer {
             install_id: "dep-1".to_string(),
             slot: "slot-a".to_string(),
@@ -950,7 +972,7 @@ async fn cleanup_rejects_active_slot_and_unknown_targets() {
     );
     assert!(result.cleaned_target_ids.is_empty());
     // active slot 仍在
-    assert!(runtime::slot_dir(&eid, "slot-a").exists());
+    assert!(space.slot_dir("slot-a").exists());
 
     // 未知 target id
     let result = svc
@@ -971,14 +993,15 @@ async fn cleanup_removes_non_active_slot_and_staging() {
     let svc = make_service("fake-clean2");
     let eid = EngineId::new("fake-clean2").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let space = crate::infra::local_engine::deployment::DeploymentSpace::engine(&eid);
 
     // active = slot-a；残留 slot-b + 孤儿 staging
-    std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-a")).unwrap();
-    std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-b")).unwrap();
-    std::fs::write(runtime::slot_dir(&eid, "slot-b").join("data.bin"), b"x").unwrap();
-    std::fs::create_dir_all(runtime::operation_staging_dir(&eid, "op-orphan")).unwrap();
+    std::fs::create_dir_all(space.slot_dir("slot-a")).unwrap();
+    std::fs::create_dir_all(space.slot_dir("slot-b")).unwrap();
+    std::fs::write(space.slot_dir("slot-b").join("data.bin"), b"x").unwrap();
+    std::fs::create_dir_all(space.operation_staging_dir("op-orphan")).unwrap();
     DeploymentStore::write_pointer(
-        &eid,
+        &space,
         &DeploymentPointer {
             install_id: "dep-1".to_string(),
             slot: "slot-a".to_string(),
@@ -1010,8 +1033,8 @@ async fn cleanup_removes_non_active_slot_and_staging() {
             .cleaned_target_ids
             .contains(&"cache:staging".to_string())
     );
-    assert!(!runtime::slot_dir(&eid, "slot-b").exists());
-    assert!(runtime::slot_dir(&eid, "slot-a").exists(), "active 不可删");
+    assert!(!space.slot_dir("slot-b").exists());
+    assert!(space.slot_dir("slot-a").exists(), "active 不可删");
 
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 }
@@ -1021,9 +1044,10 @@ async fn scan_storage_targets_no_full_paths() {
     let svc = make_service("fake-scan-paths");
     let eid = EngineId::new("fake-scan-paths").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    std::fs::create_dir_all(runtime::slot_dir(&eid, "slot-a")).unwrap();
+    let space = crate::infra::local_engine::deployment::DeploymentSpace::engine(&eid);
+    std::fs::create_dir_all(space.slot_dir("slot-a")).unwrap();
     DeploymentStore::write_pointer(
-        &eid,
+        &space,
         &DeploymentPointer {
             install_id: "dep-1".to_string(),
             slot: "slot-a".to_string(),
@@ -1394,4 +1418,493 @@ fn backend_ready_without_observation_rejected() {
     };
     let err = require_backend_when_ready(&mapping).unwrap_err();
     assert_eq!(err.code, LocalEngineErrorCode::BackendMismatch);
+}
+
+// ── 0.22.9 implementation 冻结与只读投影 ─────────────────────────────────
+
+/// 构造为 engine "paddleocr" 声明 in-process implementation 的注册表
+/// （fake adapter 的 model_contract = "fake-model"）。
+fn make_inprocess_impl_registry(engine_id: &EngineId) -> ImplementationRegistry {
+    ImplementationRegistry::new_validated(
+        vec![ImplementationDescriptor {
+            id: ImplementationId::PaddleOcrOnnxInProcess,
+            engine_id: engine_id.clone(),
+            runtime_kind: RuntimePlan::OnnxRuntime,
+            service_transport: ServiceTransport::InProcess,
+            executor_topology: ExecutorTopology::InProcess,
+            install_plan: InstallPlanRef {
+                runtime_kind: RuntimePlan::OnnxRuntime,
+                artifact_ids: vec![ArtifactId::new("ort-test").unwrap()],
+                compute_candidates: Vec::new(),
+                schema_version: 1,
+            },
+            carried_models: vec!["fake-model".to_string()],
+            resource_budget: ResourceBudget::default(),
+            timeouts: None,
+        }],
+        vec![ImplementationBinding {
+            engine_id: engine_id.clone(),
+            model_id: "fake-model".to_string(),
+            implementation: ImplementationId::PaddleOcrOnnxInProcess,
+        }],
+    )
+    .expect("测试 implementation 声明必须合法")
+}
+
+/// start_inprocess 冻结 implementation 并投影到状态；stop_inprocess 清除。
+#[tokio::test]
+async fn inprocess_start_freezes_implementation_and_stop_clears() {
+    let eid = EngineId::new("paddleocr").unwrap();
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        "paddleocr",
+        true,
+    )]));
+    let svc = EngineManager::new_with_providers_and_implementations(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        super::super::model_installer::ModelRegistry::empty(),
+        Arc::new(super::super::model_installer::NoopModelWorker),
+        make_inprocess_impl_registry(&eid),
+    );
+
+    // 环境就绪（fake 部署无真实环境，直接提交 Ready）
+    svc.commit_status_internal(&eid, None, |s| {
+        s.environment = EnvironmentHealth::Ready;
+    })
+    .await
+    .unwrap();
+
+    svc.start_inprocess(&eid).await.unwrap();
+
+    // 状态投影：active_implementation 来自 start 冻结
+    let snap = svc.get_status(&eid).await.unwrap();
+    assert_eq!(
+        snap.status.active_implementation,
+        Some(ImplementationId::PaddleOcrOnnxInProcess)
+    );
+    // in-process 引擎无 launch snapshot——snapshot 读取返回 None，
+    // 投影真源是 EngineStatus.active_implementation
+    assert_eq!(svc.get_current_implementation(&eid).await.unwrap(), None);
+
+    // stop 清除 active implementation
+    svc.stop_inprocess(&eid).await.unwrap();
+    let snap = svc.get_status(&eid).await.unwrap();
+    assert_eq!(snap.status.active_implementation, None);
+}
+
+/// 解析 fail-closed：绑定表内模型成功、未知模型拒绝、无声明引擎返回 None。
+#[tokio::test]
+async fn implementation_resolution_is_fail_closed() {
+    let eid = EngineId::new("funasr").unwrap();
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        "funasr", true,
+    )]));
+    // new_with_providers 默认装配 builtin implementation 注册表
+    let svc = EngineManager::new_with_providers(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        super::super::model_installer::ModelRegistry::empty(),
+        Arc::new(super::super::model_installer::NoopModelWorker),
+    );
+
+    // fake adapter 的 contract model "fake-model" 不在 funasr 绑定表 → 拒绝
+    //（生产路径中 start 会在冻结后失败，不静默换模）
+    assert!(
+        svc.resolve_implementation_for_model(&eid, Some("fake-model"))
+            .is_err()
+    );
+    // 未知旧模型（Python 时代 id）同样拒绝
+    assert!(
+        svc.resolve_implementation_for_model(&eid, Some("iic/SenseVoiceSmall"))
+            .is_err()
+    );
+
+    // 绑定表中的模型解析到 GGUF implementation
+    assert_eq!(
+        svc.resolve_implementation_for_model(
+            &eid,
+            Some(crate::app::local_engine::funasr::gguf::GGUF_SENSEVOICE_ID)
+        )
+        .unwrap(),
+        Some(ImplementationId::FunasrGgufWorker)
+    );
+    assert_eq!(
+        svc.resolve_implementation_for_model(
+            &eid,
+            Some(crate::app::local_engine::funasr::gguf::GGUF_NANO_ID)
+        )
+        .unwrap(),
+        Some(ImplementationId::FunasrGgufWorker)
+    );
+
+    // 无 implementation 声明的引擎（测试 fake 场景）→ Ok(None)
+    let other = EngineId::new("engine-without-impls").unwrap();
+    assert_eq!(
+        svc.resolve_implementation_for_model(&other, Some("anything"))
+            .unwrap(),
+        None
+    );
+}
+
+/// launch snapshot 冻结的 implementation 与 selected 无关：
+/// snapshot 注入后 get_current_implementation 只读 snapshot。
+#[tokio::test]
+async fn frozen_implementation_is_independent_of_selected() {
+    let eid = EngineId::new("funasr").unwrap();
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        "funasr", true,
+    )]));
+    let svc = EngineManager::new_with_providers(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        super::super::model_installer::ModelRegistry::empty(),
+        Arc::new(super::super::model_installer::NoopModelWorker),
+    );
+
+    // 未运行 → None
+    assert_eq!(svc.get_current_implementation(&eid).await.unwrap(), None);
+
+    // 注入运行中实例（start 冻结的模拟）：模型与 implementation 均已冻结
+    let entry = svc.get_entry_internal(&eid).await.unwrap();
+    inject_launch(&entry, "frozen-model-a", "inst-frozen").await;
+    // 手工置实现——模拟 start 冻结路径写入的 snapshot
+    {
+        let mut l = entry.launch.lock().await;
+        if let Some(snapshot) = l.as_mut() {
+            snapshot.implementation = Some(ImplementationId::FunasrGgufWorker);
+        }
+    }
+
+    // 冻结值只读快照——配置 selected 变化不影响（selected 不经过 snapshot）
+    assert_eq!(
+        svc.get_current_implementation(&eid).await.unwrap(),
+        Some(ImplementationId::FunasrGgufWorker)
+    );
+    assert_eq!(
+        svc.get_current_model_id(&eid).await.unwrap(),
+        Some("frozen-model-a".to_string())
+    );
+}
+
+// ── per-implementation deployment（0.22.9 Handoff 02）─────────────────────
+
+use crate::infra::local_engine::deployment::{DeploymentSpace, DeploymentStore};
+
+/// fake 引擎绑定 ParaformerOnnxWorker（implementation 级空间）的注册表。
+///
+/// 与 in-process 变体相对：该 implementation 经闭合映射落在
+/// `impl-paraformer_onnx_worker/` 空间，用于验证双 deployment 隔离。
+fn make_onnx_worker_impl_registry(engine_id: &EngineId) -> ImplementationRegistry {
+    ImplementationRegistry::new_validated(
+        vec![ImplementationDescriptor {
+            id: ImplementationId::ParaformerOnnxWorker,
+            engine_id: engine_id.clone(),
+            runtime_kind: RuntimePlan::ManagedBinary,
+            service_transport: ServiceTransport::Http,
+            executor_topology: ExecutorTopology::ManagedWorker,
+            install_plan: InstallPlanRef {
+                runtime_kind: RuntimePlan::ManagedBinary,
+                artifact_ids: vec![ArtifactId::new("onnx-worker-test").unwrap()],
+                compute_candidates: Vec::new(),
+                schema_version: 1,
+            },
+            carried_models: vec!["fake-model".to_string()],
+            resource_budget: ResourceBudget::default(),
+            timeouts: None,
+        }],
+        vec![ImplementationBinding {
+            engine_id: engine_id.clone(),
+            model_id: "fake-model".to_string(),
+            implementation: ImplementationId::ParaformerOnnxWorker,
+        }],
+    )
+    .expect("测试 implementation 声明必须合法")
+}
+
+/// 在指定部署空间写入完整 active 部署（manifest + 指针）。
+fn write_full_deployment(space: &DeploymentSpace, install_id: &str) {
+    use crate::infra::local_engine::deployment::DEPLOYMENT_POINTER_SCHEMA_VERSION;
+    use crate::infra::local_engine::runtime::MANIFEST_SCHEMA_VERSION;
+
+    let slot = "slot-a";
+    std::fs::create_dir_all(space.slot_dir(slot)).unwrap();
+    let manifest = crate::infra::local_engine::runtime::DeploymentManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        engine_id: space.engine_id().clone(),
+        runtime_kind: RuntimePlan::PythonVenv,
+        install_id: install_id.to_string(),
+        requested_preference: ComputePreference::Cpu,
+        resolved_profile: crate::infra::local_engine::runtime::ResolvedProfile {
+            profile_id: "cpu-x64".to_string(),
+            backend: crate::infra::local_engine::runtime::ComputeBackend::Cpu,
+            artifact_id: ArtifactId::new("fake-artifact").unwrap(),
+            priority: 0,
+        },
+        installed_at_ms: 0,
+        artifact: crate::infra::local_engine::runtime::ArtifactIdentity {
+            runtime_kind: RuntimePlan::PythonVenv,
+            artifact_id: ArtifactId::new("fake-artifact").unwrap(),
+            sha256: "ab".repeat(32),
+        },
+        model_contract: crate::infra::local_engine::runtime::ModelContract {
+            model_id: "fake-model".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+        },
+        fallback_reasons: Vec::new(),
+        extension: crate::infra::local_engine::runtime::ManifestExtension::PythonVenv(
+            crate::infra::local_engine::runtime::PythonManifestExt {
+                python_version: "3.12.8".to_string(),
+                python_artifact_id: ArtifactId::new("fake-artifact").unwrap(),
+                packages: Vec::new(),
+                uv_version: "0.6.10".to_string(),
+                index_url: None,
+                self_test_passed: true,
+            },
+        ),
+    };
+    std::fs::write(
+        space.slot_manifest_path(slot),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    DeploymentStore::write_pointer(
+        space,
+        &DeploymentPointer {
+            install_id: install_id.to_string(),
+            slot: slot.to_string(),
+            updated_at_ms: 0,
+            schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
+        },
+    )
+    .unwrap();
+}
+
+/// start 从 **resolved implementation 的部署空间**读取 deployment：
+/// engine 级旧 deployment 存在、impl 空间未安装时 fail-closed 拒绝启动；
+/// impl 空间安装后才允许越过 deployment 读取（fake exe spawn 失败）。
+#[tokio::test]
+async fn start_reads_deployment_from_implementation_space_not_engine_root() {
+    let eid = EngineId::new("fake-impl-space").unwrap();
+    let engine_space = DeploymentSpace::engine(&eid);
+    let impl_space = DeploymentSpace::resolve(&eid, ImplementationId::ParaformerOnnxWorker);
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![
+        make_fake_adapter_with_options(eid.as_str(), true, false),
+    ]));
+    let svc = EngineManager::new_with_providers_and_implementations(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        super::super::model_installer::ModelRegistry::empty(),
+        Arc::new(super::super::model_installer::NoopModelWorker),
+        make_onnx_worker_impl_registry(&eid),
+    );
+
+    // 环境状态置 Ready（probe 对 fake 部署的粗粒度投影；per-implementation
+    // 就绪由 start 冻结段按空间 fail-closed 复核）
+    svc.commit_status_internal(&eid, None, |s| {
+        s.environment = EnvironmentHealth::Ready;
+    })
+    .await
+    .unwrap();
+
+    // engine 级旧 deployment 存在（模拟 0.22.7/0.22.8 engine-level 资产）
+    write_full_deployment(&engine_space, "dep-engine-level");
+
+    // impl 空间未安装 → start 必须 fail-closed（EnvironmentMissing），
+    // 不能错误认领 engine 级 deployment
+    let err = svc.start(&eid, AdapterConfig::new()).await.unwrap_err();
+    assert_eq!(
+        err.code,
+        LocalEngineErrorCode::EnvironmentMissing,
+        "impl 空间未安装时 start 应拒绝，实际: {err:?}"
+    );
+
+    // impl 空间安装后 → start 越过 deployment 读取
+    //（fake exe 不存在，spawn 失败 SpawnFailed——证明冻结段已通过）
+    write_full_deployment(&impl_space, "dep-impl-level");
+    let err = svc.start(&eid, AdapterConfig::new()).await.unwrap_err();
+    assert_eq!(
+        err.code,
+        LocalEngineErrorCode::SpawnFailed,
+        "impl 空间部署就绪后应越过 deployment 检查，实际: {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+}
+
+/// GGUF 语义的兼容读取：engine 级 deployment 经 GGUF implementation 映射
+/// 原样可读（无 implementation 声明的 fake 引擎也走 engine 级空间）。
+#[tokio::test]
+async fn legacy_engine_level_deployment_readable_without_migration() {
+    let eid = EngineId::new("fake-legacy-read").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+
+    // 无 implementation 声明的引擎（builtin 注册表对 fake 引擎无声明）
+    // → deployment_space_for 返回 engine 级空间
+    let space = super::lifecycle::deployment_space_for(&eid, None);
+    assert_eq!(space.root(), runtime::engine_root(&eid));
+
+    write_full_deployment(&space, "dep-legacy");
+    let active = DeploymentStore::read_active(&space).unwrap().unwrap();
+    assert_eq!(active.0.install_id, "dep-legacy");
+
+    // 0.22.9 的 GGUF 映射解析到同一空间（路径字节一致——不搬迁）
+    let gguf_space = DeploymentSpace::resolve(
+        &EngineId::new("fake-legacy-read").unwrap(),
+        ImplementationId::FunasrGgufWorker,
+    );
+    assert_eq!(gguf_space.pointer_path(), space.pointer_path());
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+}
+
+/// 存储扫描 + 清理按 implementation 独立：两条空间的 slot 各自列出，
+/// active 删除保护按空间生效，未知 implementation 空间 fail-closed 拒绝。
+#[tokio::test]
+async fn storage_scan_and_cleanup_are_implementation_scoped() {
+    let svc = make_service("fake-impl-clean");
+    let eid = EngineId::new("fake-impl-clean").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let engine_space = DeploymentSpace::engine(&eid);
+    let impl_space = DeploymentSpace::resolve(&eid, ImplementationId::ParaformerOnnxWorker);
+
+    // engine 级 active slot-a；impl 空间 active slot-a + 残留 slot-b
+    write_full_deployment(&engine_space, "dep-engine");
+    write_full_deployment(&impl_space, "dep-impl");
+    std::fs::create_dir_all(impl_space.slot_dir("slot-b")).unwrap();
+
+    // 扫描：两条空间的环境各自成目标，current 按空间标注
+    let dto = svc.scan_storage(&eid).await.unwrap();
+    let find = |id: &str| dto.targets.iter().find(|t| t.target_id == id);
+    let engine_target = find("environment:slot-a").expect("engine 级 slot-a 应列出");
+    assert!(engine_target.current, "engine 级 active 应标记 current");
+    let impl_target =
+        find("environment:impl-paraformer_onnx_worker:slot-a").expect("impl slot-a 应列出");
+    assert!(
+        impl_target.current,
+        "impl active 应按 impl 空间标记 current"
+    );
+    assert!(
+        find("environment:impl-paraformer_onnx_worker:slot-b").is_some(),
+        "impl slot-b 应列出且可清理"
+    );
+
+    // engine 级 active 拒绝删除
+    let result = svc
+        .cleanup_targets(&eid, &["environment:slot-a".to_string()], None)
+        .await
+        .unwrap();
+    assert!(
+        result
+            .skipped_target_ids
+            .contains(&"environment:slot-a".into())
+    );
+    // impl 空间 active 同样拒绝（按 impl 空间指针判定）
+    let result = svc
+        .cleanup_targets(
+            &eid,
+            &["environment:impl-paraformer_onnx_worker:slot-a".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result
+            .skipped_target_ids
+            .contains(&"environment:impl-paraformer_onnx_worker:slot-a".into())
+    );
+    assert!(impl_space.slot_dir("slot-a").exists(), "impl active 不可删");
+    assert!(
+        engine_space.slot_dir("slot-a").exists(),
+        "engine active 不可删"
+    );
+
+    // impl 空间非 active slot-b 正常删除，engine 级 slot 不受影响
+    let result = svc
+        .cleanup_targets(
+            &eid,
+            &["environment:impl-paraformer_onnx_worker:slot-b".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result
+            .cleaned_target_ids
+            .contains(&"environment:impl-paraformer_onnx_worker:slot-b".into())
+    );
+    assert!(!impl_space.slot_dir("slot-b").exists());
+    assert!(engine_space.slot_dir("slot-a").exists());
+
+    // 未知 implementation 空间 fail-closed 拒绝（不映射默认空间）
+    let result = svc
+        .cleanup_targets(
+            &eid,
+            &["environment:impl-unknown_impl:slot-a".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result
+            .skipped_target_ids
+            .contains(&"environment:impl-unknown_impl:slot-a".into())
+    );
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+}
+
+/// install 的部署空间解析 fail-closed：引擎声明了 implementation 但契约
+/// 模型未绑定 → install 拒绝（不猜测安装目标）。
+#[tokio::test]
+async fn install_fails_closed_when_contract_model_unbound() {
+    let eid = EngineId::new("fake-unbound").unwrap();
+    // 注册表声明了 implementation，但绑定表为空（fake-model 未绑定）
+    let impl_registry = ImplementationRegistry::new_validated(
+        vec![ImplementationDescriptor {
+            id: ImplementationId::ParaformerOnnxWorker,
+            engine_id: eid.clone(),
+            runtime_kind: RuntimePlan::ManagedBinary,
+            service_transport: ServiceTransport::Http,
+            executor_topology: ExecutorTopology::ManagedWorker,
+            install_plan: InstallPlanRef {
+                runtime_kind: RuntimePlan::ManagedBinary,
+                artifact_ids: vec![ArtifactId::new("onnx-worker-test").unwrap()],
+                compute_candidates: Vec::new(),
+                schema_version: 1,
+            },
+            carried_models: vec!["other-model".to_string()],
+            resource_budget: ResourceBudget::default(),
+            timeouts: None,
+        }],
+        vec![],
+    )
+    .expect("测试 implementation 声明必须合法");
+
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        "fake-unbound",
+        true,
+    )]));
+    let svc = EngineManager::new_with_providers_and_implementations(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        super::super::model_installer::ModelRegistry::empty(),
+        Arc::new(super::super::model_installer::NoopModelWorker),
+        impl_registry,
+    );
+
+    let err = svc.install(&eid, AdapterConfig::new()).await.unwrap_err();
+    assert_eq!(err.code, LocalEngineErrorCode::InvalidConfig);
 }

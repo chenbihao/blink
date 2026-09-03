@@ -5,6 +5,35 @@
 use super::*;
 
 impl EngineManager {
+    // ── 部署空间解析（0.22.9 per-implementation deployment）────────────────
+
+    /// 解析引擎主 implementation 的部署空间（install / repair / ensure_installed 用）。
+    ///
+    /// 主 implementation = `descriptor.model_contract.model_id` 在编译期绑定表
+    /// 中解析出的 implementation——引擎卡片「安装环境」安装的就是该实现的
+    /// 运行时（funasr → GGUF，位于 engine 级兼容真源；0.22.9 起新实现经
+    /// 闭合映射落到自己的 implementation 空间）。引擎无 implementation 声明
+    /// 时（仅测试 fake 场景）返回 engine 级空间。
+    ///
+    /// fail-closed：引擎声明了 implementation 但契约模型未绑定 → `Err`，
+    /// 不猜测、不回退默认实现。
+    fn primary_deployment_space(
+        &self,
+        engine_id: &EngineId,
+        entry: &EngineEntry,
+    ) -> Result<crate::infra::local_engine::deployment::DeploymentSpace, LocalEngineError> {
+        let contract_model = entry.adapter.descriptor().model_contract.model_id.clone();
+        let implementation = super::lifecycle::resolve_implementation_in_registry(
+            &self.implementation_registry,
+            engine_id,
+            Some(&contract_model),
+        )?;
+        Ok(super::lifecycle::deployment_space_for(
+            engine_id,
+            implementation,
+        ))
+    }
+
     // ── install ─────────────────────────────────────────────────────────────
 
     /// 安装/更新引擎环境。
@@ -40,6 +69,11 @@ impl EngineManager {
         self.await_probe(engine_id).await?;
 
         let entry = self.get_entry(engine_id).await?;
+
+        // 0.22.9：解析本次安装的目标 implementation 及其部署空间（fail-closed，
+        // 在停止引擎之前先行校验）。一个 implementation 的安装事务只写自己的
+        // pointer/slot/journal，不影响其他 implementation 的部署。
+        let install_space = self.primary_deployment_space(engine_id, &entry)?;
 
         // 先检查 adapter self_test——如果已通过，环境已就绪，无需重新安装。
         // self_test 可能等待 venv python 子进程——阻塞隔离到 spawn_blocking。
@@ -87,7 +121,14 @@ impl EngineManager {
         self.stop_internal(engine_id, &entry, &operation_id).await;
 
         let result = self
-            .install_transaction_locked(engine_id, &config, &pre_test, &operation_id, &guard)
+            .install_transaction_locked(
+                engine_id,
+                &config,
+                &pre_test,
+                &operation_id,
+                &guard,
+                &install_space,
+            )
             .await;
 
         match result {
@@ -98,7 +139,7 @@ impl EngineManager {
                     status.clear_operation();
                 })
                 .await?;
-                tracing::info!(engine = %engine_id, "install 完成（InstallTransaction + self-test passed）");
+                tracing::info!(engine = %engine_id, install_space = ?install_space.implementation(), "install 完成（InstallTransaction + self-test passed）");
                 Ok((Some(operation_id), EnvOperationEndState::Completed))
             }
             Err(err) => {
@@ -124,6 +165,9 @@ impl EngineManager {
     }
 
     /// install/repair 共享的事务执行体（调用方持有 operation claim）。
+    ///
+    /// `install_space` 是本次事务的部署空间（engine id + implementation）——
+    /// 事务的 pointer/slot/journal/staging 全部落在该空间内。
     async fn install_transaction_locked(
         &self,
         engine_id: &EngineId,
@@ -131,6 +175,7 @@ impl EngineManager {
         pre_test: &crate::domain::local_engine::AdapterSelfTest,
         operation_id: &str,
         guard: &OperationGuard,
+        install_space: &crate::infra::local_engine::deployment::DeploymentSpace,
     ) -> Result<(), LocalEngineError> {
         let preference = config.compute_preference.unwrap_or(ComputePreference::Auto);
 
@@ -168,6 +213,7 @@ impl EngineManager {
                 crate::infra::local_engine::providers::InstallTransaction::new(
                     provider_descriptor,
                     &self.binary_provider,
+                    install_space.clone(),
                 )
                 .execute(
                     operation_id,
@@ -181,6 +227,7 @@ impl EngineManager {
                 crate::infra::local_engine::providers::InstallTransaction::new(
                     provider_descriptor,
                     &self.python_provider,
+                    install_space.clone(),
                 )
                 .execute(
                     operation_id,
@@ -195,6 +242,7 @@ impl EngineManager {
                 crate::infra::local_engine::providers::InstallTransaction::new(
                     provider_descriptor,
                     &self.onnx_provider,
+                    install_space.clone(),
                 )
                 .execute(
                     operation_id,
@@ -430,12 +478,14 @@ impl EngineManager {
             }
         }
 
-        // 环境未就绪——验证受管部署（deployment.json + manifest）+ self_test。
+        // 环境未就绪——验证受管部署（主 implementation 部署空间内的
+        // deployment.json + manifest）+ self_test。
         // 不能仅凭 self_test 通过就标记 Ready。磁盘 IO 与子进程等待在 blocking 线程。
+        let install_space = self.primary_deployment_space(engine_id, &entry)?;
         let adapter = Arc::clone(&entry.adapter);
         let eid = engine_id.clone();
         let verification = tokio::task::spawn_blocking(move || {
-            let has_managed_deployment = match DeploymentStore::read_active(&eid) {
+            let has_managed_deployment = match DeploymentStore::read_active(&install_space) {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
                 Err(e) => {
@@ -495,6 +545,10 @@ impl EngineManager {
     ) -> Result<(Option<String>, EnvOperationEndState), LocalEngineError> {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
+
+        // 0.22.9：解析主 implementation 部署空间（fail-closed——在 claim 与
+        // 状态提交之前校验，失败不留 busy 状态）
+        let install_space = self.primary_deployment_space(engine_id, &entry)?;
 
         // claim 进程级操作（原子 busy 检查 + 登记）
         let operation_id = generate_operation_id();
@@ -569,7 +623,14 @@ impl EngineManager {
         self.stop_internal(engine_id, &entry, &operation_id).await;
 
         let result = self
-            .install_transaction_locked(engine_id, &config, &pre_test, &operation_id, &guard)
+            .install_transaction_locked(
+                engine_id,
+                &config,
+                &pre_test,
+                &operation_id,
+                &guard,
+                &install_space,
+            )
             .await;
 
         match result {
@@ -628,25 +689,44 @@ enum ProbeBlockingOutcome {
     Broken { reason: String },
 }
 
-/// probe 的全部阻塞工作：fail-closed 事务恢复 + active 部署读取 + self_test。
+/// probe 的全部阻塞工作：fail-closed 事务恢复（全部部署空间）+ active 部署
+/// 读取 + self_test。
 ///
 /// 必须在 `spawn_blocking` 中调用——journal 遍历、JSON 读取和
 /// self_test 的 venv python 子进程等待都是阻塞操作。
+///
+/// **恢复范围（0.22.9）**：engine 级空间 + 磁盘上发现的全部 implementation
+/// 级空间逐个独立恢复——一个空间的事务恢复绝不触碰另一个空间的指针与
+/// slot（recovery 不认领另一 implementation 的资产）。就绪判定读取
+/// engine 级兼容真源（0.22.7 GGUF / 0.22.8 OCR in-process 的 production
+/// implementation 都映射到该空间）；per-implementation 就绪在 start 时按
+/// resolved implementation 的空间 fail-closed 复核。
 fn probe_blocking(
     engine_id: &EngineId,
     adapter: &Arc<dyn LocalEngineAdapter>,
 ) -> Result<ProbeBlockingOutcome, String> {
-    // 1. 崩溃恢复：journal 存在即事务未收尾，按恢复表回滚/收尾（fail-closed）。
-    let recovery = DeploymentStore::recover(engine_id).map_err(|e| format!("部署恢复失败: {e}"))?;
-    match recovery {
-        crate::infra::local_engine::deployment::RecoveryOutcome::Stable => {}
-        other => {
-            tracing::warn!(engine = %engine_id, outcome = ?other, "探测: 已恢复未收尾事务");
+    // 1. 崩溃恢复：逐空间处理未收尾事务（fail-closed）。
+    for space in DeploymentStore::spaces_for_engine(engine_id)
+        .map_err(|e| format!("枚举部署空间失败: {e}"))?
+    {
+        let recovery = DeploymentStore::recover(&space)
+            .map_err(|e| format!("部署恢复失败（space={:?}）: {e}", space.implementation()))?;
+        match recovery {
+            crate::infra::local_engine::deployment::RecoveryOutcome::Stable => {}
+            other => {
+                tracing::warn!(
+                    engine = %engine_id,
+                    implementation = ?space.implementation(),
+                    outcome = ?other,
+                    "探测: 已恢复未收尾事务"
+                );
+            }
         }
     }
 
-    // 2. 读 active 部署（结构校验，不做全量 hash）。
-    let active = DeploymentStore::read_active(engine_id)
+    // 2. 读 engine 级兼容真源的 active 部署（结构校验，不做全量 hash）。
+    let engine_space = crate::infra::local_engine::deployment::DeploymentSpace::engine(engine_id);
+    let active = DeploymentStore::read_active(&engine_space)
         .map_err(|e| format!("读取 deployment.json 失败: {e}"))?;
     let Some((pointer, _manifest)) = active else {
         return Ok(ProbeBlockingOutcome::NoDeployment);

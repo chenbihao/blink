@@ -35,10 +35,10 @@ use crate::domain::local_engine::{
     AdapterConfig, CancelOutcome, DeleteConflictReason, DesiredState, EngineDefinition,
     EngineDiagnostic, EngineModelDescriptor, EngineModelStatus, EngineOperation, EngineStatus,
     EngineStatusSnapshot, EnvOperationEndState, EnvironmentHealth, ErrorPhase, HealthMapping,
-    LaunchContext, LocalEngineAdapter, LocalEngineError, LocalEngineErrorCode, ModelCompatibility,
-    ModelDeleteConflict, ModelHealth, ModelInstallState, ModelOperationKind, ModelOperationResult,
-    ModelOperationStage, ModelVerificationState, OperationKind, OperationStage, ProcessState,
-    ServiceEpoch, ServiceHealth,
+    ImplementationId, ImplementationRegistry, LaunchContext, LocalEngineAdapter, LocalEngineError,
+    LocalEngineErrorCode, ModelCompatibility, ModelDeleteConflict, ModelHealth, ModelInstallState,
+    ModelOperationKind, ModelOperationResult, ModelOperationStage, ModelVerificationState,
+    OperationKind, OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
 };
 use crate::infra::local_engine::deployment::DeploymentStore;
 use crate::infra::local_engine::lease::{ProcessLease, remove_lease, write_lease};
@@ -266,6 +266,8 @@ pub(super) struct FrozenModelIdentity {
 /// 冻结内容（任务铁则）：
 /// - deployment identity（active 部署 install_id）
 /// - model_id / revision（来自配置 selected + manifest，不来自当前配置猜测）
+/// - implementation（0.22.9：从编译期绑定表解析，start 时冻结；
+///   `None` 仅表示引擎无 implementation 声明——只出现在测试 fake 场景）
 /// - resolved profile / backend
 /// - instance identity（endpoint/token/instance_id）
 ///
@@ -281,6 +283,8 @@ pub(super) struct LaunchSnapshot {
     pub deployment_install_id: String,
     /// 本次启动冻结的模型身份（None = adapter 自管/无模型合同）。
     pub model: Option<FrozenModelIdentity>,
+    /// 本次启动冻结的 implementation（0.22.9；None = 引擎无 implementation 声明）。
+    pub implementation: Option<ImplementationId>,
 }
 
 /// 单引擎的运行时状态。
@@ -437,6 +441,10 @@ pub struct EngineManager {
     registry: Arc<EngineRegistry>,
     /// 模型目录（编译期 allowlist，从原 ModelService 并入）。
     model_registry: super::model_installer::ModelRegistry,
+    /// 内部 implementation 注册表（0.22.9 编译期 allowlist）。
+    /// start 时从 selected/实际模型解析 implementation 并冻结；
+    /// 不接受前端提交 implementation。
+    implementation_registry: ImplementationRegistry,
     epoch: ServiceEpoch,
     entries: RwLock<HashMap<EngineId, Arc<EngineEntry>>>,
     event_port: Arc<dyn EventPort>,
@@ -480,12 +488,42 @@ impl EngineManager {
         )
     }
 
+    /// 创建带 builtin implementation 注册表 + 注入自定义注册表的服务实例（测试用）。
+    ///
+    /// 生产路径经 `new_with_providers` 自动装配 builtin 注册表；
+    /// 本构造器允许测试注入面向 fake 引擎的 implementation 声明。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_providers_and_implementations(
+        registry: Arc<EngineRegistry>,
+        event_port: Arc<dyn EventPort>,
+        provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
+        python_provider: PythonVenvProvider,
+        model_registry: super::model_installer::ModelRegistry,
+        model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
+        implementation_registry: ImplementationRegistry,
+    ) -> Arc<Self> {
+        Self::build(
+            registry,
+            event_port,
+            provider_descriptors,
+            python_provider,
+            model_registry,
+            model_worker,
+            implementation_registry,
+        )
+    }
+
     /// 创建服务实例（带 provider descriptors + python provider + 模型目录）。
     ///
     /// `provider_descriptors`：每引擎对应的 `ProviderDescriptor`，
     /// 由 wiring 层在构造时传入（如 `make_funasr_provider_descriptor()`）。
     /// `python_provider`：`PythonVenvProvider` 实例，用于 `InstallTransaction`。
     /// `model_registry` / `model_worker`：模型资产目录与下载执行器。
+    ///
+    /// implementation 注册表默认装配 **builtin**（0.22.9 编译期声明，
+    /// 构造期 fail-closed 校验）；测试可经
+    /// `new_with_providers_and_implementations` 注入。
     pub fn new_with_providers(
         registry: Arc<EngineRegistry>,
         event_port: Arc<dyn EventPort>,
@@ -493,6 +531,28 @@ impl EngineManager {
         python_provider: PythonVenvProvider,
         model_registry: super::model_installer::ModelRegistry,
         model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
+    ) -> Arc<Self> {
+        Self::build(
+            registry,
+            event_port,
+            provider_descriptors,
+            python_provider,
+            model_registry,
+            model_worker,
+            super::implementation_registry::make_builtin_implementation_registry(),
+        )
+    }
+
+    /// 构造器共享实现（构造期校验 + 后台探测）。
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        registry: Arc<EngineRegistry>,
+        event_port: Arc<dyn EventPort>,
+        provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
+        python_provider: PythonVenvProvider,
+        model_registry: super::model_installer::ModelRegistry,
+        model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
+        implementation_registry: ImplementationRegistry,
     ) -> Arc<Self> {
         let epoch = ServiceEpoch::new();
         let mut entries = HashMap::new();
@@ -525,6 +585,7 @@ impl EngineManager {
         let service = Arc::new(Self {
             registry,
             model_registry,
+            implementation_registry,
             epoch,
             entries: RwLock::new(entries),
             event_port,

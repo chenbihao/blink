@@ -69,6 +69,7 @@ impl EngineManager {
                             status.process = ProcessState::Stopped;
                             status.service = ServiceHealth::Unknown;
                             status.model = ModelHealth::Unknown;
+                            status.active_implementation = None;
                             status.last_error = None;
                         })
                         .await?;
@@ -99,6 +100,7 @@ impl EngineManager {
                     if status.process == ProcessState::Starting {
                         status.process = ProcessState::Stopped;
                     }
+                    status.active_implementation = None;
                     status.last_error = None;
                 })
                 .await?;
@@ -109,14 +111,16 @@ impl EngineManager {
 
     /// 引擎优雅停止（0.22.7）。
     ///
-    /// 根据引擎的 `service_transport` 分派两条路径：
+    /// 根据引擎的 `service_transport` 分派路径：
     ///
     /// - **StdioWorker**（FunASR）：发送 NDJSON `shutdown` + drop 客户端（stdin EOF），
     ///   worker 自行退出。
-    /// - **HTTP**（PaddleOCR）：POST `/shutdown`（带 `X-Engine-Token` 鉴权），
+    /// - **HTTP**（PaddleOCR legacy）：POST `/shutdown`（带 `X-Engine-Token` 鉴权），
     ///   Python server 收到后设置 `should_exit = True` 自行退出。
+    /// - **InProcess**（0.22.9 implementation 层，OCR ONNX）：无子进程，
+    ///   优雅停止不适用——直接返回（进程级兜底不存在）。
     ///
-    /// 两条路径都在 `GRACEFUL_WAIT_SECS` 窗口内轮询进程状态；
+    /// 前两条路径都在 `GRACEFUL_WAIT_SECS` 窗口内轮询进程状态；
     /// 无论结果如何，后续 `ManagedProcess::stop` 兜底回收（Job Object）。
     pub(in super::super) async fn graceful_stop_worker(
         &self,
@@ -208,6 +212,14 @@ impl EngineManager {
                 }
 
                 wait_graceful_exit(engine_id, managed, GRACEFUL_WAIT_SECS, "HTTP 引擎").await;
+            }
+            crate::domain::local_engine::ServiceTransport::InProcess => {
+                // in-process 引擎没有子进程，优雅停止不适用；
+                // 正常路径不会到达此处（无 managed process），到达即防御性记录
+                tracing::debug!(
+                    engine = %engine_id,
+                    "优雅停止 InProcess 引擎：无子进程，跳过"
+                );
             }
         }
     }
@@ -340,6 +352,7 @@ impl EngineManager {
                             status.process = ProcessState::Stopped;
                             status.service = ServiceHealth::Unknown;
                             status.model = ModelHealth::Unknown;
+                            status.active_implementation = None;
                             status.last_error = None;
                         })
                         .await?;
@@ -370,6 +383,7 @@ impl EngineManager {
                     if status.process == ProcessState::Starting {
                         status.process = ProcessState::Stopped;
                     }
+                    status.active_implementation = None;
                     status.last_error = None;
                 })
                 .await?;
@@ -435,6 +449,8 @@ impl EngineManager {
                 };
                 status.service = ServiceHealth::Unreachable;
                 status.model = ModelHealth::Unknown;
+                // start 失败回滚——冻结的 implementation 一并清除
+                status.active_implementation = None;
                 status.last_error = Some(error.clone());
             })
             .await;

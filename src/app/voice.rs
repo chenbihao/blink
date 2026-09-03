@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
 use crate::domain::event_names::EventNames;
-use crate::domain::stt::SttEngine;
+use crate::domain::stt::{StreamingSttPort, SttEngine, SttEvent};
 use crate::infra::platform;
 use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 
@@ -58,8 +58,17 @@ impl VoiceTarget {
 
 /// 语音会话状态。
 struct VoiceSession {
-    /// STT 引擎
+    /// STT 引擎（旧接口，用于 GGUF 伪流式/非流式兼容）
     engine: Option<Arc<dyn SttEngine>>,
+    /// 结构化 STT port（0.22.9：统一事件流）
+    ///
+    /// 存在时优先使用，替代旧的 transcribe_chunk/finalize 管线。
+    /// 不存在时回退到旧管线（GGUF 伪流式适配器创建失败时）。
+    stt_port: Option<Arc<dyn StreamingSttPort>>,
+    /// 当前 session 的 generation（用于事件过滤）
+    generation: Option<u64>,
+    /// 事件消费 task 的 JoinHandle
+    event_task: Option<tokio::task::JoinHandle<()>>,
     /// 音频采集器
     capture: Option<Box<dyn AudioCapture>>,
     /// 音频采集 task 的 JoinHandle（stop/cancel 时 abort，避免与 finalize 锁竞争）
@@ -76,6 +85,9 @@ impl Default for VoiceSession {
     fn default() -> Self {
         Self {
             engine: None,
+            stt_port: None,
+            generation: None,
+            event_task: None,
             capture: None,
             audio_task: None,
             target: VoiceTarget::ForegroundApp,
@@ -342,132 +354,147 @@ impl VoiceService {
         };
 
         // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
-        let mut session = self.session.lock().unwrap();
+        // 注意：std::sync::MutexGuard 不是 Send，所有锁操作必须在不含 await 的 block 内完成。
+        let (stt_port, engine_arc, mut rx, target, _target_str, prev_fg_hwnd) = {
+            let mut session = self.session.lock().unwrap();
 
-        // 二次检查：模型加载等待期间可能已被 cancel
-        if session.recording {
-            tracing::warn!("begin_recording: 模型加载期间已被其他路径占用");
-            return false;
-        }
+            // 二次检查：模型加载等待期间可能已被 cancel
+            if session.recording {
+                tracing::warn!("begin_recording: 模型加载期间已被其他路径占用");
+                return false;
+            }
 
-        let engine = match crate::domain::stt::create_engine(connection) {
-            Ok(e) => e,
+            let engine = match crate::domain::stt::create_engine(connection) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
+                    self.emit_voice_error(session.target, &e);
+                    return false;
+                }
+            };
+            let mut capture = if let Some(dev_id) = &config.audio_device_id {
+                platform::audio::create_capture_with_device(dev_id.clone())
+            } else {
+                platform::audio::create_capture()
+            };
+            engine.reset();
+
+            // 0.22.9 Handoff 05：将旧 SttEngine 包装为 StreamingSttPort
+            let engine_arc: Arc<dyn SttEngine> = Arc::from(engine);
+            let stt_port: Arc<dyn StreamingSttPort> = Arc::new(
+                crate::domain::stt::streaming_port::GgufStreamingAdapter::new(engine_arc.clone()),
+            );
+
+            let format = AudioFormat::default();
+            match capture.start(format) {
+                Ok(rx) => {
+                    session.recording = true;
+
+                    // 通知输入状态机进入 Recording（仅热键路径，使 ESC 能产生 VoiceCancel）
+                    if set_voice_flag {
+                        crate::infra::platform::hotkey::InputController::update_voice_phase(
+                            crate::infra::platform::hotkey::VoicePhase::Recording { gesture_id: 0 },
+                        );
+                    }
+
+                    tracing::info!(
+                        target = ?session.target,
+                        "语音录音开始"
+                    );
+
+                    // G2: overlay 已在 start_recording 中提前显示，此处只需保存前台窗口 HWND
+                    if session.target == VoiceTarget::ForegroundApp {
+                        session.prev_fg_hwnd = platform::window::get_foreground_hwnd();
+                    }
+
+                    let target = session.target;
+                    let target_str = session.target.as_str();
+                    let prev_fg_hwnd = session.prev_fg_hwnd;
+
+                    // 通知前端录音已开始
+                    let _ = self.app.emit(
+                        EventNames::VOICE_RECORDING_START,
+                        serde_json::json!({ "target": target_str }),
+                    );
+
+                    (stt_port, engine_arc, rx, target, target_str, prev_fg_hwnd)
+                }
+                Err(e) => {
+                    tracing::error!(%e, "音频采集启动失败");
+                    return false;
+                }
+            }
+        }; // MutexGuard 在此释放，后续 await 安全
+
+        // 0.22.9：begin session 获取 generation（在锁外 await）
+        let port = stt_port.clone();
+        let session_gen = match port.begin_session().await {
+            Ok(g) => g,
             Err(e) => {
-                tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
-                self.emit_voice_error(session.target, &e);
+                tracing::error!(%e, "begin_session 失败");
+                self.emit_voice_error(target, &e.to_string());
+                self.session.lock().unwrap().recording = false;
                 return false;
             }
         };
-        let mut capture = if let Some(dev_id) = &config.audio_device_id {
-            platform::audio::create_capture_with_device(dev_id.clone())
-        } else {
-            platform::audio::create_capture()
-        };
-        engine.reset();
 
-        let format = AudioFormat::default();
-        match capture.start(format) {
-            Ok(mut rx) => {
-                session.recording = true;
+        // 获取事件 receiver（在 begin_session 之后）
+        let event_rx = port.events();
 
-                // 通知输入状态机进入 Recording（仅热键路径，使 ESC 能产生 VoiceCancel）
-                if set_voice_flag {
-                    crate::infra::platform::hotkey::InputController::update_voice_phase(
-                        crate::infra::platform::hotkey::VoicePhase::Recording { gesture_id: 0 },
-                    );
-                }
+        // spawn 事件消费 task：按 generation 过滤，emit 到前端
+        let app_for_events = self.app.clone();
+        let target_for_events = target;
+        let prev_hwnd_for_events = prev_fg_hwnd;
+        let event_task = tokio::spawn(async move {
+            consume_stt_events(
+                event_rx,
+                session_gen,
+                target_for_events,
+                prev_hwnd_for_events,
+                app_for_events,
+            )
+            .await;
+        });
 
-                tracing::info!(
-                    target = ?session.target,
-                    "语音录音开始"
+        // spawn 采集 task: audio chunk → push_audio（非阻塞）
+        let app = self.app.clone();
+        let port_for_audio = stt_port.clone();
+        let target_for_audio = target;
+
+        let task_handle = tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                // 计算 RMS 音量（0.0 ~ 1.0）
+                let level = compute_rms(&chunk.samples);
+                let target_str = target_for_audio.as_str();
+                let _ = app.emit(
+                    EventNames::VOICE_LEVEL,
+                    serde_json::json!({
+                        "level": level,
+                        "target": target_str,
+                    }),
                 );
 
-                // G2: overlay 已在 start_recording 中提前显示，此处只需保存前台窗口 HWND
-                if session.target == VoiceTarget::ForegroundApp {
-                    // 保存前台窗口 HWND（注入前恢复焦点，提升 Ctrl+V 成功率）
-                    session.prev_fg_hwnd = platform::window::get_foreground_hwnd();
+                // 0.22.9：通过统一 port 推送音频
+                // push_audio 不阻塞——内部通过 channel 转发
+                if let Err(e) = port_for_audio.push_audio(session_gen, &chunk.samples).await {
+                    tracing::warn!(%e, "push_audio 失败");
+                    break;
                 }
-
-                // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示 / G3 chat 麦克风按钮切换态）
-                let target_str = session.target.as_str();
-                let _ = self.app.emit(
-                    EventNames::VOICE_RECORDING_START,
-                    serde_json::json!({ "target": target_str }),
-                );
-
-                // spawn 采集 task: audio chunk → STT → emit partial
-                let app = self.app.clone();
-                let target = session.target;
-                let engine: Arc<dyn SttEngine> = Arc::from(engine);
-                let engine_for_task = engine.clone();
-
-                let task_handle = tokio::spawn(async move {
-                    while let Some(chunk) = rx.recv().await {
-                        // 计算 RMS 音量（0.0 ~ 1.0）
-                        let level = compute_rms(&chunk.samples);
-                        let target_str = target.as_str();
-                        let _ = app.emit(
-                            EventNames::VOICE_LEVEL,
-                            serde_json::json!({
-                                "level": level,
-                                "target": target_str,
-                            }),
-                        );
-
-                        match engine_for_task.transcribe_chunk(&chunk.samples).await {
-                            Ok(text) => {
-                                if !text.is_empty() {
-                                    // 尝试解析 JSON（伪流式引擎返回 confirmed + preview）
-                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
-                                    {
-                                        let confirmed = v
-                                            .get("confirmed")
-                                            .and_then(|t| t.as_str())
-                                            .unwrap_or("");
-                                        let preview =
-                                            v.get("preview").and_then(|t| t.as_str()).unwrap_or("");
-                                        // 只在有内容时 emit
-                                        if !confirmed.is_empty() || !preview.is_empty() {
-                                            let _ = app.emit(
-                                                EventNames::VOICE_PARTIAL,
-                                                serde_json::json!({
-                                                    "confirmed": confirmed,
-                                                    "preview": preview,
-                                                    "target": target_str,
-                                                }),
-                                            );
-                                        }
-                                    } else {
-                                        // 纯文本（真流式 / 非流式引擎的兼容路径）
-                                        let _ = app.emit(
-                                            EventNames::VOICE_PARTIAL,
-                                            serde_json::json!({
-                                                "text": text,
-                                                "target": target_str,
-                                            }),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(%e, "STT transcribe_chunk 失败");
-                            }
-                        }
-                    }
-                    tracing::debug!("音频采集 channel 已关闭");
-                });
-
-                session.engine = Some(engine);
-                session.capture = Some(capture);
-                session.audio_task = Some(task_handle);
-
-                true
             }
-            Err(e) => {
-                tracing::error!(%e, "音频采集启动失败");
-                false
-            }
+            tracing::debug!("音频采集 channel 已关闭");
+        });
+
+        // 重新获取锁写入剩余字段
+        {
+            let mut session = self.session.lock().unwrap();
+            session.generation = Some(session_gen);
+            session.engine = Some(engine_arc);
+            session.stt_port = Some(stt_port);
+            session.audio_task = Some(task_handle);
+            session.event_task = Some(event_task);
         }
+
+        true
     }
 
     /// HoldRelease 事件:停止录音 → STT 最终识别 → 注入/填充。
@@ -478,8 +505,8 @@ impl VoiceService {
     /// 0.12.2 §4.3：ChatWindow 路径由 `stop_chat_recording` 调用此方法，
     /// 最终文本通过 `voice-partial(target="chat")` emit 到 chat 窗口。
     pub async fn stop_recording(&self) {
-        // 取出 engine + 停止采集 + abort 音频 task，然后立即释放锁
-        let (engine, target) = {
+        // 取出 engine + port + generation + 停止采集 + abort 音频 task，然后立即释放锁
+        let (engine, stt_port, generation, target) = {
             let mut session = self.session.lock().unwrap();
 
             if !session.recording {
@@ -511,6 +538,8 @@ impl VoiceService {
 
             let target = session.target;
             let engine = session.engine.take();
+            let stt_port = session.stt_port.take();
+            let generation = session.generation.take();
             session.recording = false;
 
             // 通知输入状态机回 Idle
@@ -518,91 +547,40 @@ impl VoiceService {
                 crate::infra::platform::hotkey::VoicePhase::Idle,
             );
 
-            (engine, target)
+            (engine, stt_port, generation, target)
         }; // 锁在此释放，await 不持锁
 
-        // 最终识别（async）
-        // 加 10s 超时保护：即使 abort 后仍有异常情况（如 WS 半连接），不会永久卡住
-        //
-        // **G2 路径优化**：finalize + inject 整体放到 spawn 里脱离 effect 串行循环，
-        // 避免识别期间阻塞后续 effect（Tap/HoldStarted）。松键后 overlay 立即隐藏，
-        // 识别完成后在 spawn_blocking 中恢复焦点 + 注入文本。
-        match target {
-            VoiceTarget::MainWindow => {
-                // G1: finalize 在 effect 循环内（G1 无 overlay，不阻塞 UI 反馈）
-                let final_text = finalize_engine(engine).await;
-                tracing::debug!(
-                    target = ?target,
-                    text_len = final_text.chars().count(),
-                    "语音识别完成"
-                );
-                if final_text.is_empty() {
-                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-                } else {
-                    let _ = self.app.emit(
-                        EventNames::CHORD_FILL_QUERY,
-                        serde_json::Value::String(final_text.clone()),
-                    );
-                    tracing::debug!("G1: 文字已 emit chord-fill-query");
-                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-                }
-            }
-            VoiceTarget::ForegroundApp => {
-                // G2: finalize + restore_foreground + inject 脱离 effect 循环
-                let prev_hwnd = {
-                    let session = self.session.lock().unwrap();
-                    session.prev_fg_hwnd
-                };
-                // 松键立即隐藏 overlay（识别 + 注入在后台进行）
-                platform::window::hide_voice_overlay(&self.app);
-                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-                tokio::spawn(async move {
-                    let final_text = finalize_engine(engine).await;
-                    tracing::debug!(
-                        target = "ForegroundApp",
-                        text_len = final_text.chars().count(),
-                        "语音识别完成"
-                    );
-                    if final_text.is_empty() {
-                        tracing::debug!("识别结果为空,跳过注入");
-                        return;
-                    }
-                    // 注入在 spawn_blocking 中执行(SendInput 需要同线程)
-                    tokio::task::spawn_blocking(move || {
-                        // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
-                        if let Some(hwnd) = prev_hwnd {
-                            platform::window::restore_foreground(hwnd);
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        if let Err(e) = platform::inject::inject_text(&final_text) {
-                            tracing::error!(%e, "G2: 文本注入失败");
-                        }
-                    });
-                });
-            }
-            VoiceTarget::ChatWindow => {
-                // G3: finalize 在 effect 循环内（G3 无 overlay，chat 窗口自己管理 UI）
-                let final_text = finalize_engine(engine).await;
-                tracing::debug!(
-                    target = ?target,
-                    text_len = final_text.chars().count(),
-                    "语音识别完成"
-                );
-                if final_text.is_empty() {
-                    tracing::debug!("识别结果为空,跳过注入");
-                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-                } else {
-                    let _ = self.app.emit(
-                        EventNames::VOICE_PARTIAL,
-                        serde_json::json!({
-                            "text": final_text,
-                            "target": "chat",
-                        }),
-                    );
-                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-                }
-            }
+        // 0.22.9：通过 StreamingSttPort::finish_session 通知引擎音频流结束
+        // Final 结果将通过事件消费 task 异步产出
+
+        // G2: 松键立即隐藏 overlay（识别 + 注入在后台进行）
+        if target == VoiceTarget::ForegroundApp {
+            platform::window::hide_voice_overlay(&self.app);
+            let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
         }
+
+        if let (Some(port), Some(session_gen)) = (&stt_port, generation) {
+            if let Err(e) = port.finish_session(session_gen).await {
+                tracing::warn!(%e, "finish_session 失败，回退旧 finalize 路径");
+                // 回退：直接调 finalize_engine
+                let final_text = finalize_engine(engine).await;
+                self.deliver_final_text(target, final_text).await;
+            } else {
+                // finish_session 已产出 Final 事件，事件消费 task 会处理
+                // 但需要给事件消费 task 时间处理 Final——等待它完成
+                // 0.22.9：等待 event_task 完成或超时
+                let event_task = self.session.lock().unwrap().event_task.take();
+                if let Some(handle) = event_task {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(12), handle).await;
+                }
+                // 事件消费 task 已完成（或超时），清理
+            }
+            return;
+        }
+
+        // 回退：旧 finalize 路径（stt_port 不存在时）
+        let final_text = finalize_engine(engine).await;
+        self.deliver_final_text(target, final_text).await;
     }
 
     /// Chat 窗口 IPC 驱动:停止录音（0.12.2 §4.3）。
@@ -616,31 +594,54 @@ impl VoiceService {
     }
 
     pub fn cancel_recording(&self) {
-        let mut session = self.session.lock().unwrap();
+        // 取出 stt_port + generation + 停止采集 + abort tasks，然后释放锁
+        let (stt_port, generation, _target) = {
+            let mut session = self.session.lock().unwrap();
 
-        if !session.recording {
-            return;
+            if !session.recording {
+                return;
+            }
+
+            if let Some(mut capture) = session.capture.take() {
+                capture.stop();
+            }
+
+            // abort 音频采集 task（与 stop_recording 一致）
+            if let Some(handle) = session.audio_task.take() {
+                handle.abort();
+            }
+
+            // abort 事件消费 task
+            if let Some(handle) = session.event_task.take() {
+                handle.abort();
+            }
+
+            let target = session.target;
+            let stt_port = session.stt_port.take();
+            let generation = session.generation.take();
+            session.recording = false;
+            session.engine = None;
+
+            // 通知输入状态机回 Idle
+            crate::infra::platform::hotkey::InputController::update_voice_phase(
+                crate::infra::platform::hotkey::VoicePhase::Idle,
+            );
+
+            (stt_port, generation, target)
+        }; // 锁在此释放
+
+        // 0.22.9：通过 StreamingSttPort::cancel_session 通知引擎丢弃在途结果。
+        // cancel_session 是 async，但 cancel 不应阻塞 P0 主链路（ESC 后用户已离开），
+        // 用 spawn 脱离调用方 effect 循环。cancel 幂等——即使 spawn 未执行也不影响正确性。
+        if let (Some(port), Some(session_gen)) = (stt_port, generation) {
+            tokio::spawn(async move {
+                if let Err(e) = port.cancel_session(session_gen).await {
+                    tracing::warn!(%e, "cancel_session 失败（可忽略——cancel 幂等）");
+                }
+            });
         }
-
-        if let Some(mut capture) = session.capture.take() {
-            capture.stop();
-        }
-
-        // abort 音频采集 task（与 stop_recording 一致）
-        if let Some(handle) = session.audio_task.take() {
-            handle.abort();
-        }
-
-        session.recording = false;
-        session.engine = None;
-
-        // 通知输入状态机回 Idle
-        crate::infra::platform::hotkey::InputController::update_voice_phase(
-            crate::infra::platform::hotkey::VoicePhase::Idle,
-        );
 
         tracing::info!("语音录音已取消");
-        drop(session);
 
         // 隐藏 mini overlay(G2)
         platform::window::hide_voice_overlay(&self.app);
@@ -679,6 +680,208 @@ impl VoiceService {
     /// 是否正在录音。
     pub fn is_recording(&self) -> bool {
         self.session.lock().unwrap().recording
+    }
+
+    /// 交付最终识别文本到目标（G1/G2/G3）。
+    ///
+    /// 0.22.9：从旧 `stop_recording` 的内联交付逻辑提取为独立方法，
+    /// 供 `stop_recording` 回退路径和 `consume_stt_events` 共用。
+    ///
+    /// - G1: emit `CHORD_FILL_QUERY` + `VOICE_RECORDING_END`
+    /// - G2: spawn 后台 inject_text（脱离 effect 循环，恢复焦点 + 注入）
+    /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
+    async fn deliver_final_text(&self, target: VoiceTarget, final_text: String) {
+        tracing::debug!(
+            target = ?target,
+            text_len = final_text.chars().count(),
+            "语音识别完成"
+        );
+
+        if final_text.is_empty() {
+            tracing::debug!("识别结果为空,跳过交付");
+            let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+            return;
+        }
+
+        match target {
+            VoiceTarget::MainWindow => {
+                // G1: 文字填 #query
+                let _ = self.app.emit(
+                    EventNames::CHORD_FILL_QUERY,
+                    serde_json::Value::String(final_text.clone()),
+                );
+                tracing::debug!("G1: 文字已 emit chord-fill-query");
+                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+            }
+            VoiceTarget::ForegroundApp => {
+                // G2: 文字注入前台应用光标处
+                let prev_hwnd = self.session.lock().unwrap().prev_fg_hwnd;
+                tokio::spawn(async move {
+                    // 注入在 spawn_blocking 中执行（SendInput 需要同线程）
+                    tokio::task::spawn_blocking(move || {
+                        // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
+                        if let Some(hwnd) = prev_hwnd {
+                            platform::window::restore_foreground(hwnd);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        if let Err(e) = platform::inject::inject_text(&final_text) {
+                            tracing::error!(%e, "G2: 文本注入失败");
+                        }
+                    });
+                });
+                // G2 overlay 已在 stop_recording 中隐藏
+            }
+            VoiceTarget::ChatWindow => {
+                // G3: 文字填 chat composer textarea
+                let _ = self.app.emit(
+                    EventNames::VOICE_PARTIAL,
+                    serde_json::json!({
+                        "text": final_text,
+                        "target": "chat",
+                    }),
+                );
+                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+            }
+        }
+    }
+}
+
+/// STT 事件消费 task：循环接收 `SttEvent`，按 generation 过滤旧事件，
+/// 将有效事件 emit 到前端或调用 `deliver_final_text` 交付最终文本。
+///
+/// 0.22.9 Handoff 05：此 task 在 `begin_recording` 时 spawn，
+/// 在 `stop_recording`（等待完成或超时）或 `cancel_recording`（abort）时终止。
+///
+/// **事件处理**：
+/// - `Partial` → emit `VOICE_PARTIAL`（confirmed + preview）
+/// - `Final` → 调用 `deliver_final_text` 交付最终文本
+/// - `Busy` → 打 debug 日志（可选降频，当前不处理）
+/// - `Error` → emit `VOICE_ERROR`
+///
+/// **generation 过滤**：generation 不匹配的事件直接丢弃，
+/// 防止 cancel/reset 后迟到的旧结果污染 UI。
+async fn consume_stt_events(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<SttEvent>,
+    expected_gen: u64,
+    target: VoiceTarget,
+    prev_fg_hwnd: Option<isize>,
+    app: tauri::AppHandle,
+) {
+    // 将 AppHandle 包装为 VoiceService-like 的 deliver 闭包——
+    // consume_stt_events 不能直接调 VoiceService::deliver_final_text（无 &self），
+    // 但 deliver 逻辑只依赖 app.emit + inject，可在此内联。
+    let target_str = target.as_str();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            SttEvent::Partial {
+                generation,
+                confirmed,
+                preview,
+            } => {
+                if generation != expected_gen {
+                    tracing::debug!(
+                        gen = generation,
+                        expected = expected_gen,
+                        "丢弃旧 generation 的 Partial 事件"
+                    );
+                    continue;
+                }
+                // emit partial 到前端
+                let _ = app.emit(
+                    EventNames::VOICE_PARTIAL,
+                    serde_json::json!({
+                        "confirmed": confirmed,
+                        "preview": preview,
+                        "target": target_str,
+                    }),
+                );
+            }
+            SttEvent::Final { generation, text } => {
+                if generation != expected_gen {
+                    tracing::debug!(
+                        gen = generation,
+                        expected = expected_gen,
+                        "丢弃旧 generation 的 Final 事件"
+                    );
+                    continue;
+                }
+                tracing::debug!(
+                    target = ?target,
+                    text_len = text.chars().count(),
+                    "收到 Final 事件"
+                );
+
+                // 交付最终文本——内联 deliver 逻辑（无法访问 &self）
+                if text.is_empty() {
+                    tracing::debug!("识别结果为空,跳过交付");
+                    let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+                } else {
+                    match target {
+                        VoiceTarget::MainWindow => {
+                            let _ = app.emit(
+                                EventNames::CHORD_FILL_QUERY,
+                                serde_json::Value::String(text.clone()),
+                            );
+                            tracing::debug!("G1: 文字已 emit chord-fill-query");
+                            let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+                        }
+                        VoiceTarget::ForegroundApp => {
+                            // G2: 注入前台应用光标处
+                            tokio::spawn(async move {
+                                tokio::task::spawn_blocking(move || {
+                                    // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
+                                    if let Some(hwnd) = prev_fg_hwnd {
+                                        platform::window::restore_foreground(hwnd);
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                    }
+                                    if let Err(e) = platform::inject::inject_text(&text) {
+                                        tracing::error!(%e, "G2: 文本注入失败（事件路径）");
+                                    }
+                                });
+                            });
+                        }
+                        VoiceTarget::ChatWindow => {
+                            let _ = app.emit(
+                                EventNames::VOICE_PARTIAL,
+                                serde_json::json!({
+                                    "text": text,
+                                    "target": "chat",
+                                }),
+                            );
+                            let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+                        }
+                    }
+                }
+                // Final 是 session 的最后一个事件，退出循环
+                break;
+            }
+            SttEvent::Busy { generation, reason } => {
+                if generation != expected_gen {
+                    continue;
+                }
+                tracing::debug!(%reason, "STT 引擎忙（背压）");
+            }
+            SttEvent::Error {
+                generation,
+                message,
+            } => {
+                if generation != expected_gen {
+                    continue;
+                }
+                tracing::error!(%message, "STT 引擎错误事件");
+                let _ = app.emit(
+                    EventNames::VOICE_ERROR,
+                    serde_json::json!({
+                        "message": message,
+                        "target": target_str,
+                    }),
+                );
+                let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+                // Error 是终止事件，退出循环
+                break;
+            }
+        }
     }
 }
 

@@ -157,9 +157,15 @@ impl EngineManager {
 
 /// 阻塞式存储扫描——在 `spawn_blocking` 中执行。
 ///
-/// 扫描引擎环境、已安装模型、引擎私有缓存、共享托管运行时/下载缓存与
-/// 旧版遗留。目标类别只表达用户可理解的对象（见 `StorageTargetKindDto`），
-/// 不暴露 slot/journal/residue/generation 或 provider 内部类型名。
+/// 扫描引擎环境（engine 级 + 各 implementation 级部署空间）、已安装模型、
+/// 引擎私有缓存、共享托管运行时/下载缓存与旧版遗留。目标类别只表达用户
+/// 可理解的对象（见 `StorageTargetKindDto`），不暴露 slot/journal/residue
+/// 或 provider 内部类型名。
+///
+/// **空间隔离（0.22.9）**：每个部署空间的 active 指针与 residue 独立读取，
+/// target_id 以 `environment:` / `environment:impl-{implementation}:` 前缀
+/// 区分；无法映射到闭合枚举的 `impl-*` 目录不产生任何清理目标（fail-closed，
+/// 不可删）。模型 payload 仍按 engine + model 管理，与部署空间正交。
 fn scan_engine_storage_blocking(
     model_ids: &[String],
     engine_id: &EngineId,
@@ -171,85 +177,105 @@ fn scan_engine_storage_blocking(
     let mut total_bytes: u64 = 0;
     let mut releasable_bytes: u64 = 0;
 
-    // active 指针 + residue 记录
-    let active = DeploymentStore::read_pointer(engine_id)?;
-    let active_slot = active.as_ref().map(|p| p.slot.as_str());
-    let residue = DeploymentStore::read_residue(engine_id)?;
-    let residue_slots: Vec<&str> = residue.iter().map(|r| r.slot.as_str()).collect();
+    // 引擎的全部部署空间（engine 级 + 已知 implementation 级）
+    let spaces = DeploymentStore::spaces_for_engine(engine_id)?;
 
-    // ── 1. 引擎环境（active 不可删；非 active = 清理残留） ──
-    for slot in ["slot-a", "slot-b"] {
-        let dir = runtime::slot_dir(engine_id, slot);
-        if !dir.exists() {
-            continue;
-        }
-        let size = dir_size(&dir);
-        total_bytes += size;
-
-        let is_current = active_slot == Some(slot);
-        let removable = !is_current;
-        if removable {
-            releasable_bytes += size;
-        }
-
-        let label_fallback = if is_current {
-            "当前环境（不可删除）".to_string()
-        } else if residue_slots.contains(&slot) {
-            "环境清理残留（被占用）".to_string()
-        } else {
-            "残留环境".to_string()
+    // ── 1. 引擎环境（各空间的 active 不可删；非 active = 清理残留）──
+    for space in &spaces {
+        let active_slot = DeploymentStore::read_pointer(space)?.map(|p| p.slot);
+        let residue_slots: Vec<String> = DeploymentStore::read_residue(space)?
+            .into_iter()
+            .map(|r| r.slot)
+            .collect();
+        // target_id 前缀：engine 级 = `environment:`；
+        // implementation 级 = `environment:impl-{wire}:`（按实现独立删除保护）
+        let scope_prefix = match space.implementation() {
+            None => String::new(),
+            Some(implementation) => format!(
+                "{}:",
+                crate::infra::local_engine::deployment::DeploymentSpace::impl_dir_name(
+                    implementation
+                )
+            ),
         };
 
-        targets.push(super::super::dto::StorageTargetDto {
-            target_id: format!("environment:{slot}"),
-            kind: super::super::dto::StorageTargetKindDto::EngineEnvironment,
-            engine_id: Some(engine_id.to_string()),
-            label_key: "local_engine.storage.engine_environment".to_string(),
-            label_fallback,
-            size_bytes: size,
-            current: is_current,
-            removable,
-            shared: false,
-            requires_separate_confirmation: false,
-            blocked_reason: if is_current {
-                Some("current_environment".to_string())
-            } else {
-                None
-            },
-            affected_engine_ids: None,
-            reference_count: None,
-            path_display: None,
-        });
-    }
-
-    // ── 2. 事务构建残留（staging）——引擎私有缓存 ──
-    let staging = runtime::staging_dir(engine_id);
-    if staging.exists() {
-        let has_entries = std::fs::read_dir(&staging)
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false);
-        if has_entries {
-            let size = dir_size(&staging);
+        for slot in ["slot-a", "slot-b"] {
+            let dir = space.slot_dir(slot);
+            if !dir.exists() {
+                continue;
+            }
+            let size = dir_size(&dir);
             total_bytes += size;
-            releasable_bytes += size;
+
+            let is_current = active_slot.as_deref() == Some(slot);
+            let removable = !is_current;
+            if removable {
+                releasable_bytes += size;
+            }
+
+            let space_label = match space.implementation() {
+                None => String::new(),
+                Some(implementation) => format!("（{}）", implementation.as_str()),
+            };
+            let label_fallback = if is_current {
+                format!("当前环境{space_label}（不可删除）")
+            } else if residue_slots.iter().any(|s| s == slot) {
+                format!("环境清理残留{space_label}（被占用）")
+            } else {
+                format!("残留环境{space_label}")
+            };
 
             targets.push(super::super::dto::StorageTargetDto {
-                target_id: "cache:staging".to_string(),
-                kind: super::super::dto::StorageTargetKindDto::EngineCache,
+                target_id: format!("environment:{scope_prefix}{slot}"),
+                kind: super::super::dto::StorageTargetKindDto::EngineEnvironment,
                 engine_id: Some(engine_id.to_string()),
-                label_key: "local_engine.storage.engine_staging".to_string(),
-                label_fallback: "事务构建残留".to_string(),
+                label_key: "local_engine.storage.engine_environment".to_string(),
+                label_fallback,
                 size_bytes: size,
-                current: false,
-                removable: true,
+                current: is_current,
+                removable,
                 shared: false,
                 requires_separate_confirmation: false,
-                blocked_reason: None,
+                blocked_reason: if is_current {
+                    Some("current_environment".to_string())
+                } else {
+                    None
+                },
                 affected_engine_ids: None,
                 reference_count: None,
                 path_display: None,
             });
         }
+    }
+
+    // ── 2. 事务构建残留（staging）——引擎全部空间的私有缓存 ──
+    let mut staging_size: u64 = 0;
+    for space in &spaces {
+        let staging = space.staging_dir();
+        if staging.exists() {
+            staging_size += dir_size(&staging);
+        }
+    }
+    if staging_size > 0 {
+        total_bytes += staging_size;
+        releasable_bytes += staging_size;
+
+        targets.push(super::super::dto::StorageTargetDto {
+            target_id: "cache:staging".to_string(),
+            kind: super::super::dto::StorageTargetKindDto::EngineCache,
+            engine_id: Some(engine_id.to_string()),
+            label_key: "local_engine.storage.engine_staging".to_string(),
+            label_fallback: "事务构建残留".to_string(),
+            size_bytes: staging_size,
+            current: false,
+            removable: true,
+            shared: false,
+            requires_separate_confirmation: false,
+            blocked_reason: None,
+            affected_engine_ids: None,
+            reference_count: None,
+            path_display: None,
+        });
     }
 
     // ── 3. 引擎自有模型缓存目录——引擎私有缓存 ──
@@ -464,8 +490,10 @@ fn scan_engine_storage_blocking(
 /// 解析 target_id 并执行清理（**阻塞**——磁盘删除，须在 spawn_blocking 中调用）。
 ///
 /// target_id 格式：
-/// - `environment:{slot}` — 非 active 引擎环境（residue 感知：占用记残留）
-/// - `cache:staging` — 事务构建残留
+/// - `environment:{slot}` — engine 级空间的非 active 引擎环境
+/// - `environment:impl-{implementation}:{slot}` — implementation 级空间的
+///   非 active 引擎环境（active 删除保护按 implementation 独立生效）
+/// - `cache:staging` — 事务构建残留（引擎全部空间）
 /// - `cache:model_cache` — 引擎自有模型缓存
 /// - `shared_runtime:{runtime_kind}:{artifact_id}` — 共享托管运行时
 /// - `shared_download_cache:{runtime_kind}` — 共享下载缓存
@@ -475,14 +503,37 @@ fn resolve_and_cleanup_target_blocking(
     engine_id: &EngineId,
     target_id: &str,
 ) -> Result<CleanupTargetOutcome, crate::infra::local_engine::runtime::RuntimeError> {
+    use crate::infra::local_engine::deployment::DeploymentSpace;
     use crate::infra::local_engine::providers::execute_cleanup;
     use crate::infra::local_engine::runtime::CleanupScope;
 
-    if let Some(slot) = target_id.strip_prefix("environment:") {
-        runtime::validate_slot_name(slot)?;
+    // `environment:` 目标解析：engine 级 / implementation 级空间
+    // （`environment:impl-{wire}:{slot}`；未知 implementation fail-closed 拒绝）
+    if let Some(rest) = target_id.strip_prefix("environment:") {
+        let (space, slot) = if let Some(impl_rest) = rest.strip_prefix("impl-") {
+            let (impl_wire, slot) = impl_rest.split_once(':').ok_or_else(|| {
+                crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
+                    message: format!("无效的 environment target_id: {target_id}"),
+                }
+            })?;
+            let implementation = DeploymentSpace::parse_impl_dir_name(&format!("impl-{impl_wire}"))
+                .ok_or_else(|| {
+                    crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
+                        message: format!("未知的 implementation 部署空间: impl-{impl_wire}"),
+                    }
+                })?;
+            (
+                DeploymentSpace::resolve(engine_id, implementation),
+                slot.to_string(),
+            )
+        } else {
+            (DeploymentSpace::engine(engine_id), rest.to_string())
+        };
 
-        // active slot 不可删除
-        let active = DeploymentStore::read_pointer(engine_id)?;
+        runtime::validate_slot_name(&slot)?;
+
+        // active slot 不可删除（只看目标空间自己的指针——删除保护按 implementation 生效）
+        let active = DeploymentStore::read_pointer(&space)?;
         if active.as_ref().is_some_and(|p| p.slot == slot) {
             return Err(
                 crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
@@ -491,17 +542,19 @@ fn resolve_and_cleanup_target_blocking(
             );
         }
 
-        let scope = CleanupScope::EngineDeploymentSlot {
-            engine_id: engine_id.clone(),
-            slot: slot.to_string(),
-        };
+        let scope = CleanupScope::EngineDeploymentSlot { space, slot };
         let size = measure_cleanup_scope(&scope);
         execute_cleanup(&scope)?;
         // delete_slot_if_not_active 占用时记 residue（Ok(false)）——
-        // 查询 residue 判断是否残留
-        let deferred = DeploymentStore::read_residue(engine_id)?
-            .iter()
-            .any(|r| r.slot == slot);
+        // 查询目标空间 residue 判断是否残留
+        let deferred = match &scope {
+            CleanupScope::EngineDeploymentSlot { space, slot } => {
+                DeploymentStore::read_residue(space)?
+                    .iter()
+                    .any(|r| &r.slot == slot)
+            }
+            _ => false,
+        };
         if deferred {
             Ok(CleanupTargetOutcome::Deferred(size))
         } else {
@@ -600,11 +653,17 @@ fn measure_cleanup_scope(scope: &crate::infra::local_engine::runtime::CleanupSco
     use crate::infra::local_engine::runtime::CleanupScope;
 
     match scope {
-        CleanupScope::EngineDeploymentSlot { engine_id, slot } => dir_size(
-            &crate::infra::local_engine::runtime::slot_dir(engine_id, slot),
-        ),
+        CleanupScope::EngineDeploymentSlot { space, slot } => dir_size(&space.slot_dir(slot)),
         CleanupScope::EngineStaging { engine_id } => {
-            dir_size(&crate::infra::local_engine::runtime::staging_dir(engine_id))
+            // 引擎全部空间的 staging（engine 级 + implementation 级）
+            DeploymentStore::spaces_for_engine(engine_id)
+                .map(|spaces| {
+                    spaces
+                        .iter()
+                        .map(|s| dir_size(&s.staging_dir()))
+                        .sum::<u64>()
+                })
+                .unwrap_or(0)
         }
         CleanupScope::EngineModelCache { engine_id } => {
             let dir = crate::infra::local_engine::runtime::engine_model_cache_dir(engine_id);
