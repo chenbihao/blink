@@ -565,7 +565,10 @@ async fn model_install_does_not_block_stop_and_env_repair() {
     started.await;
 
     // 同槽（另一个模型安装）→ 仍互斥
-    let err = svc.install_model(&eid, &format!("{tag}-b"), None).await.unwrap_err();
+    let err = svc
+        .install_model(&eid, &format!("{tag}-b"), None)
+        .await
+        .unwrap_err();
     assert_eq!(err.code, LocalEngineErrorCode::AlreadyRunning);
 
     // stop 不再被模型下载阻塞（mutating 槽空闲即可执行）
@@ -716,6 +719,46 @@ async fn selected_and_active_are_independent() {
     assert!(st.is_active);
     let st = svc.get_model_status(&eid, &models[0]).await.unwrap();
     assert!(!st.is_active);
+}
+
+/// 回归：SHA-256 来源的已安装模型从磁盘恢复后应投影 `Verified`——
+/// 曾经硬编码 `Unverified`，导致设置页/诊断在安装校验通过后
+/// 仍然永远显示"未校验"。
+#[tokio::test]
+async fn installed_model_verification_follows_manifest_source() {
+    let eid = EngineId::new("fake-verif").unwrap();
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        "fake-verif", true,
+    )]));
+    let tag = unique_tag("verif");
+    let svc = EngineManager::new_with_providers(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::new(),
+        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
+        make_model_registry(&eid, &tag, &format!("{tag}-b")),
+        Arc::new(super::super::model_installer::FakeInstaller::success()),
+    );
+
+    // FakeInstaller 成功路径默认携带 SHA-256 checksum source
+    let r = svc.install_model(&eid, &tag, None).await.unwrap();
+    assert!(r.success);
+
+    let list = svc.list_models(&eid).await;
+    let m = list.iter().find(|m| m.model_id == tag).unwrap();
+    assert_eq!(
+        m.verification_state,
+        crate::domain::local_engine::ModelVerificationState::Verified,
+        "manifest 记录 SHA-256 来源 → 恢复后不得谎报未校验"
+    );
+
+    let st = svc.get_model_status(&eid, &tag).await.unwrap();
+    assert_eq!(
+        st.verification_state,
+        crate::domain::local_engine::ModelVerificationState::Verified
+    );
+
+    cleanup_models(&eid, &[&tag, &format!("{tag}-b")]).await;
 }
 
 /// 删除实际 active 模型（launch snapshot 判定）→ 结构化冲突，
@@ -2107,8 +2150,7 @@ async fn ensure_seed_implementation_falls_back_to_contract_for_paddleocr() {
         crate::app::local_engine::paddleocr::make_paddleocr_adapter(),
     ]));
     let svc = EngineManager::new(registry, Arc::new(NoopEventPort));
-    let eid =
-        EngineId::new(crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID).unwrap();
+    let eid = EngineId::new(crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID).unwrap();
 
     let resolved = svc
         .resolve_seed_implementation(&eid, &AdapterConfig::default())

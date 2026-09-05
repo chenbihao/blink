@@ -65,6 +65,8 @@ function modelVerificationLabel(verificationState) {
  *
  * 0.22.9：签名包含 selection phase 与业务特征——切换在途时行按钮必须
  * 重渲染为禁用；业务特征（流式/资源画像）变化（如新候选进入目录）同样触发。
+ * 0.22.10：资源/质量画像收敛到引擎级说明行后，行内仅剩「推荐」徽章
+ * 消费 business——recommended 单独参与签名。
  *
  * @param {Object} model - ModelCatalogItemDto
  * @param {string} effectiveState - getEffectiveModelInstallState 结果
@@ -76,6 +78,7 @@ export function modelRowSignature(model, effectiveState, selectionPhase = "") {
         + `:${model.verification_state}:${model.is_selected ? 1 : 0}`
         + `:${model.is_active ? 1 : 0}`
         + `:${modelTraitSignature(model)}`
+        + `:${model.business?.recommended ? 1 : 0}`
         + `:${selectionPhase}`;
 }
 
@@ -93,10 +96,9 @@ function modelTraitSignature(model) {
  * 数据真源全部来自后端 wire 值，前端**不硬编码 model_id → 能力映射**：
  * - 多语言：`stt_capabilities.languages`
  * - 真/伪流式：`stt_capabilities.true_streaming`（真流式优先展示）
- * - 资源占用：`business.resource_footprint`（shared_gguf_worker /
-*   shared_gguf_worker）
- * - 中文质量：`business.chinese_quality`（corpus_baseline）
- * - 下载大小：`estimated_size_mb`（独立单元格展示，不进特征行）
+ * - 标点：`stt_capabilities.punctuation`（"无标点"是下载前值得知道的坑）
+ * - 资源占用 / 中文质量：所有候选一致时属于引擎级信息，
+ *   收敛到 [`engineBusinessNote`] 一行只说一次，不逐行重复（0.22.10）
  *
  * @param {Object} model - ModelCatalogItemDto
  * @returns {{kind: string, text: string}[]}
@@ -132,19 +134,37 @@ export function modelTraitChips(model) {
         chips.push({kind: "punctuation", text: tf("local_engine.business.punctuation.no", "无标点")});
     }
 
-    // 资源占用定位（后端声明，i18n 未命中显示原 wire 值）
-    const footprint = model?.business?.resource_footprint;
-    if (footprint) {
-        chips.push({kind: "resource", text: tf(`local_engine.business.${footprint}`, footprint)});
-    }
-
-    // 中文质量定位
-    const quality = model?.business?.chinese_quality;
-    if (quality) {
-        chips.push({kind: "quality", text: tf(`local_engine.business.${quality}`, quality)});
-    }
-
     return chips;
+}
+
+/**
+ * 引擎级业务说明行：resource_footprint / chinese_quality 在候选间**一致**时，
+ * 逐行重复只是噪音——在列表标题下一行只说一次。
+ * 候选间不一致（未来多 runtime 并存）时返回 null，退回逐行特征展示。
+ *
+ * @param {Object[]} models - ModelCatalogItemDto 列表
+ * @returns {string|null}
+ */
+export function engineBusinessNote(models) {
+    const combos = new Set();
+    let any = false;
+    for (const model of models || []) {
+        const business = model?.business;
+        if (!business) continue;
+        any = true;
+        combos.add(`${business.resource_footprint || ""}|${business.chinese_quality || ""}`);
+    }
+    if (!any || combos.size !== 1) return null;
+
+    const [footprint, quality] = [...combos][0].split("|");
+    const parts = [];
+    if (footprint) {
+        parts.push(tf(`local_engine.business.${footprint}`, footprint));
+    }
+    if (quality) {
+        parts.push(tf(`local_engine.business.${quality}`, quality));
+    }
+    return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 // ── 模型列表渲染 ─────────────────────────────────────────────────────────────
@@ -165,6 +185,9 @@ export function updateModelList(container, entry, controller, i18n) {
     for (const model of models || []) {
         sigParts.push(modelRowSignature(model, getEffectiveModelInstallState(entry, model), selectionPhase));
     }
+    // 引擎级说明行文案参与签名：画像值在候选间一致地变化时（行 chips 不变）
+    // 说明行也要重渲染
+    sigParts.push(`note:${engineBusinessNote(models) || ""}`);
     const sig = sigParts.join("|");
     if (container.dataset.renderSig === sig) return;
     container.dataset.renderSig = sig;
@@ -183,6 +206,15 @@ export function updateModelList(container, entry, controller, i18n) {
     title.className = "le-model-list-title";
     title.textContent = tt(i18n, "local_engine.model.list.title", "模型");
     container.appendChild(title);
+
+    // 引擎级共享说明（共享 worker / 中文质量定位）——只说一次不逐行重复
+    const note = engineBusinessNote(models);
+    if (note) {
+        const noteEl = document.createElement("p");
+        noteEl.className = "le-model-business-note";
+        noteEl.textContent = note;
+        container.appendChild(noteEl);
+    }
 
     const table = document.createElement("div");
     table.className = "le-model-table";
@@ -236,8 +268,9 @@ function renderModelRow(model, entry, controller, i18n, selectionPhase = "") {
         nameCell.appendChild(badge);
     }
 
-    // 业务特征行（多语言/真伪流式/资源占用/中文质量——DTO 驱动，无硬编码映射）。
-    // 放在名称单元格内作为子行，不增加模型表格的网格列。
+    // 业务特征行（多语言/真伪流式/标点——DTO 驱动，无硬编码映射）。
+    // 放在名称单元格内作为子行，不增加模型表格的网格列；
+    // footprint/quality 等候选间一致的维度在列表顶部说明行统一展示。
     const traits = modelTraitChips(model);
     if (traits.length > 0) {
         const traitsLine = document.createElement("div");

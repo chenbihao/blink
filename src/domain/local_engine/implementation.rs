@@ -738,7 +738,11 @@ mod tests {
             ],
             vec![
                 binding(ENGINE_A, "model-sv", ImplementationId::FunasrGgufWorker),
-                binding(ENGINE_A, "model-sv", ImplementationId::PaddleOcrOnnxInProcess),
+                binding(
+                    ENGINE_A,
+                    "model-sv",
+                    ImplementationId::PaddleOcrOnnxInProcess,
+                ),
             ],
         )
         .expect_err("同一模型绑定多个 implementation 必须拒绝");

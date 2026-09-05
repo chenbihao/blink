@@ -57,7 +57,7 @@ function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
         if (!diag || diag.engine_id !== engineId) {
             throw new Error(tt(i18n, "local_engine.diagnostic.engine_mismatch", "诊断响应与当前引擎不匹配"));
         }
-        renderDiagnosticContent(diagPanel, diag, i18n, engineId, entry, () => {
+        renderDiagnosticContent(diagPanel, diag, i18n, engineId, entry, controller, () => {
             refreshEngineDiagnostics(entry, controller, i18n, diagPanel);
         });
     }).catch((e) => {
@@ -175,10 +175,22 @@ function selectedModelChecks(entry, i18n) {
 function renderCheck(container, check) {
     const row = document.createElement("div");
     row.className = `le-diagnostic-check le-diagnostic-check-${check.tone || "neutral"}`;
-    const iconName = check.tone === "ok" ? "check"
-        : check.tone === "error" ? "x"
-            : check.tone === "warn" ? "triangle-alert" : "circle";
-    row.appendChild(renderIcon(iconName, {extraClass: "le-diagnostic-check-icon"}));
+    // 图标语义（两引擎同一套）：✓ 通过 / ✗ 异常 / ⚠ 需要注意 / ○ 进行中。
+    // neutral 是纯信息行（如"当前模型：SenseVoice Small"）——没有好坏，
+    // 不渲染图标（空占位保持三列网格对齐），不再让读者猜圆圈含义。
+    const tone = check.tone || "neutral";
+    const iconName = tone === "ok" ? "check"
+        : tone === "error" ? "x"
+            : tone === "warn" ? "triangle-alert"
+                : tone === "busy" ? "circle" : null;
+    if (iconName) {
+        row.appendChild(renderIcon(iconName, {extraClass: "le-diagnostic-check-icon"}));
+    } else {
+        const placeholder = document.createElement("span");
+        placeholder.className = "le-diagnostic-check-icon";
+        placeholder.setAttribute("aria-hidden", "true");
+        row.appendChild(placeholder);
+    }
 
     const label = document.createElement("span");
     label.className = "le-diagnostic-check-label";
@@ -195,7 +207,7 @@ function renderCheck(container, check) {
 /**
  * 渲染诊断内容。
  */
-function renderDiagnosticContent(container, diag, i18n, engineId, entry, onRefresh) {
+function renderDiagnosticContent(container, diag, i18n, engineId, entry, controller, onRefresh) {
     container.textContent = "";
 
     // 头部：标题 + 重新诊断 + 复制诊断（诊断是快照）

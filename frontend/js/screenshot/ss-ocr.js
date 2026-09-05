@@ -72,12 +72,13 @@ export function hideSelLoading() {
     if (el) el.hidden = true;
 }
 
-/** 简易临时提示(选区附近,2 秒后自动消失)。0.19.16：DPI 适配。 */
-export function showTransientHint(msg) {
+/** 简易临时提示(选区附近,2 秒后自动消失)。0.19.16：DPI 适配。
+ *  0.22.10：视觉走 #error-hint toast 基类，错误态切 .ss-toast-error class，不再 inline 硬色。 */
+export function showTransientHint(msg, {isError = false} = {}) {
     const {errorHint, selCss} = ss;
     errorHint.textContent = msg;
     errorHint.classList.remove('hidden');
-    errorHint.style.background = 'rgba(50,50,50,0.85)';
+    errorHint.classList.toggle('ss-toast-error', isError);
     errorHint.style.left = '-9999px';
     errorHint.style.top = '-9999px';
     errorHint.style.transform = 'none';
@@ -112,7 +113,7 @@ export function showTransientHint(msg) {
 
     setTimeout(() => {
         errorHint.classList.add('hidden');
-        errorHint.style.background = '';
+        errorHint.classList.remove('ss-toast-error');
         errorHint.style.transform = '';
     }, 2000);
 }
@@ -226,7 +227,7 @@ export function doIdentifySelection() {
             ss.ocrBusy = false;
             updateOutputButtonsDisabled();
             hideSelLoading();
-            showTransientHint('识别失败');
+            showTransientHint('识别失败', {isError: true});
         });
         return;
     }
@@ -287,7 +288,7 @@ export function doOverlayTranslate() {
             ss.ocrBusy = false;
             updateOutputButtonsDisabled();
             hideSelLoading();
-            showTransientHint('识别失败');
+            showTransientHint('识别失败', {isError: true});
         });
         return;
     }
@@ -343,7 +344,7 @@ export async function doTranslateAndPin() {
         if (savedMode) annot.setOverlayMode(savedMode);
 
         if (!rawPng) {
-            showTransientHint('合成截图失败');
+            showTransientHint('合成截图失败', {isError: true});
             return;
         }
 
@@ -559,7 +560,7 @@ function _runOcrFresh(opts = {}) {
             .catch((rawErr) => {
                 const err = normalizeError(rawErr);
                 if (revision === ss.selectionRevision) {
-                    showTransientHint(err.retryable ? '识别失败，可重试' : '识别失败');
+                    showTransientHint(err.retryable ? '识别失败，可重试' : '识别失败', {isError: true});
                 }
                 hideSelLoading();
                 console.error(`[screenshot] ocr 失败 [${err.code}] ${err.message}`);
@@ -619,7 +620,7 @@ function requestOverlayTranslation(targetLang) {
     translateOverlayLines(targetLang, revision)
         .catch((e) => {
             if (revision !== ss.translationRevision) return;
-            showTransientHint('翻译失败');
+            showTransientHint('翻译失败', {isError: true});
             console.error('[screenshot] overlay translate 失败', e);
         })
         .finally(() => {
@@ -696,6 +697,7 @@ export function showOcrResult(result, options = {}) {
         <button class="ocr-tab ${initialTab === 'source' ? 'active' : ''}" data-tab="source">原文</button>
         <button class="ocr-tab ${initialTab === 'translated' ? 'active' : ''}" data-tab="translated">译文 <span class="stale-dot" aria-hidden="true"></span></button>
       </div>
+      <span class="ocr-engine-badge" hidden></span>
       <div class="ocr-panel-actions">
         <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制</button>
         <button id="ocr-translate" class="tool-btn" ${text ? '' : 'disabled'} title="翻译当前文本">${translateLabel}</button>
@@ -722,6 +724,22 @@ export function showOcrResult(result, options = {}) {
     <div class="ocr-panel-resize-handle" title="拖拽缩放"></div>
   `;
     document.body.appendChild(panel);
+
+    // 0.22.10: 实际引擎标注（后端 OcrResult.backend_used 可选字段；缺省不渲染）
+    const engineBadge = panel.querySelector('.ocr-engine-badge');
+    if (engineBadge) {
+        const used = result && result.backend_used;
+        if (used === 'paddleocr') {
+            engineBadge.textContent = 'PaddleOCR（本地）';
+            engineBadge.hidden = false;
+        } else if (used === 'windows') {
+            engineBadge.textContent = 'Windows OCR';
+            engineBadge.hidden = false;
+        }
+        if (!engineBadge.hidden && result.backend_fallback_reason) {
+            engineBadge.title = `已回退：${result.backend_fallback_reason}`;
+        }
+    }
 
     if (initialTab !== 'translated') {
         const advSection = panel.querySelector('.ocr-panel-adv');

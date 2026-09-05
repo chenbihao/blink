@@ -139,6 +139,7 @@ const {
 const {
     modelRowSignature,
     modelTraitChips,
+    engineBusinessNote,
     updateModelList,
 } = await import("./local-engine-models.js");
 const {
@@ -480,7 +481,7 @@ await test("selected≠active（selection 清除后）：mismatch 提示不受 s
 
 // ── 3. GGUF↔ONNX 业务特征矩阵 ───────────────────────────────────────────────
 
-await test("业务特征：GGUF 模型 = 伪流式 + 共享 worker（真流式 chip 不渲染）", () => {
+await test("业务特征：GGUF 模型 = 伪流式（真流式 chip 不渲染；资源/质量收敛到引擎级说明）", () => {
     const models = makeFunasrModels();
     const gguf = models[0];
     const zhOnly = models[2];
@@ -488,8 +489,9 @@ await test("业务特征：GGUF 模型 = 伪流式 + 共享 worker（真流式 c
     const ggufChips = modelTraitChips(gguf);
     assert.ok(ggufChips.some((c) => c.kind === "pseudo_streaming"), "GGUF 应展示伪流式");
     assert.ok(!ggufChips.some((c) => c.kind === "true_streaming"), "GGUF 不应展示真流式");
-    assert.ok(ggufChips.some((c) => c.kind === "resource" && c.text.includes("共享")), "GGUF 资源画像");
-    assert.ok(ggufChips.some((c) => c.kind === "quality"), "GGUF 中文质量");
+    // 0.22.10：resource/quality 在候选间一致 → 引擎级说明行，不逐行重复
+    assert.ok(!ggufChips.some((c) => c.kind === "resource"), "资源画像不再逐行展示");
+    assert.ok(!ggufChips.some((c) => c.kind === "quality"), "中文质量不再逐行展示");
     // 五语种
     const langChip = ggufChips.find((c) => c.kind === "languages");
     assert.ok(langChip.text.includes("zh/en/ja/ko/yue"), langChip.text);
@@ -498,10 +500,25 @@ await test("业务特征：GGUF 模型 = 伪流式 + 共享 worker（真流式 c
     const zhChips = modelTraitChips(zhOnly);
     assert.ok(zhChips.some((c) => c.kind === "pseudo_streaming"), "单语种 GGUF 仍伪流式");
     assert.ok(!zhChips.some((c) => c.kind === "true_streaming"), "无真流式 chip");
-    assert.ok(zhChips.some((c) => c.kind === "resource" && c.text.includes("共享")), "共享 worker 画像");
     // 单语种
     const zhLang = zhChips.find((c) => c.kind === "languages");
     assert.equal(zhLang.text, "中文", "单 zh 应显示'中文'");
+});
+
+await test("engineBusinessNote：候选间一致 → 一行说明；不一致/缺省 → null", () => {
+    const models = makeFunasrModels();
+    const note = engineBusinessNote(models);
+    assert.ok(note, "三候选 business 一致应产出说明行");
+    assert.ok(note.includes("共享 GGUF worker"), note);
+    assert.ok(note.includes("中文质量"), note);
+
+    // 候选间不一致（未来多 runtime 并存）→ 退回逐行特征展示
+    const mixed = models.map((m, i) =>
+        i === 0 ? {...m, business: {...m.business, resource_footprint: "dedicated_onnx_worker"}} : m);
+    assert.equal(engineBusinessNote(mixed), null, "不一致不得合并成一行");
+
+    // 全部缺省 → 无说明
+    assert.equal(engineBusinessNote(models.map((m) => ({...m, business: null}))), null);
 });
 
 await test("业务特征：能力未声明（languages 空 / business 缺省）→ 不展示该维度，不猜", () => {
@@ -519,9 +536,12 @@ await test("签名：selection phase 变化触发模型行重渲染（按钮禁�
     const failed = modelRowSignature(model, "installed", "rollback_failed");
     assert.notEqual(idle, switching);
     assert.notEqual(switching, failed);
-    // 业务特征变化也参与签名（新候选进入目录）
-    const withBiz = {...model, business: null};
-    assert.notEqual(idle, modelRowSignature(withBiz, "installed", ""));
+    // 0.22.10：行内消费 business 的只剩「推荐」徽章——recommended 变化参与签名
+    const withRecommended = {...model, business: {...model.business, recommended: true}};
+    assert.notEqual(idle, modelRowSignature(withRecommended, "installed", ""));
+    // 资源/质量画像收敛到引擎级说明行——business 其他字段不再影响行签名
+    const withoutBiz = {...model, business: null};
+    assert.equal(idle, modelRowSignature(withoutBiz, "installed", ""));
 });
 
 // ── 4. active implementation 只读诊断 ────────────────────────────────────────
@@ -566,7 +586,7 @@ function nameCellOf(container, modelId) {
     return row?._cls("le-model-name")[0] || null;
 }
 
-await test("DOM：三个候选渲染业务特征行（GGUF 伪流式/共享，无真流式 chip）", () => {
+await test("DOM：候选行渲染差异特征行，共享画像收敛到引擎级说明行", () => {
     const container = renderList(makeFunasrModels());
     const traitsLines = container._cls("le-model-traits");
     assert.equal(traitsLines.length, 3, "三个已声明特征的模型各一行特征行");
@@ -575,14 +595,19 @@ await test("DOM：三个候选渲染业务特征行（GGUF 伪流式/共享，�
         ?._cls("le-model-traits")[0].textContent;
     assert.ok(ggufTraits.includes("多语种"), ggufTraits);
     assert.ok(ggufTraits.includes("伪流式"), ggufTraits);
-    assert.ok(ggufTraits.includes("共享 GGUF worker"), ggufTraits);
-    assert.ok(ggufTraits.includes("中文质量"), ggufTraits);
+    // 0.22.10：共享 worker / 中文质量在候选间一致 → 列表顶部说明行只说一次
+    assert.ok(!ggufTraits.includes("共享 GGUF worker"), ggufTraits);
+    assert.ok(!ggufTraits.includes("中文质量"), ggufTraits);
+
+    const notes = container._cls("le-model-business-note");
+    assert.equal(notes.length, 1, "引擎级说明行只渲染一次");
+    assert.ok(notes[0].textContent.includes("共享 GGUF worker"), notes[0].textContent);
+    assert.ok(notes[0].textContent.includes("中文质量"), notes[0].textContent);
 
     // handoff-11：真流式 ONNX 退役——所有 GGUF 行都不渲染真流式/独立 worker
     const zhTraits = nameCellOf(container, "gguf/paraformer-zh-q8")
         ?._cls("le-model-traits")[0].textContent;
     assert.ok(zhTraits.includes("伪流式"), zhTraits);
-    assert.ok(zhTraits.includes("共享 GGUF worker"), zhTraits);
     assert.ok(!zhTraits.includes("真流式"), zhTraits);
     assert.ok(!zhTraits.includes("独立 ONNX worker"), zhTraits);
 });

@@ -233,6 +233,7 @@ export const zh = {
     "storage.db.cache": "缓存库",
     "storage.history.label": "历史记录",
     "storage.audit.label": "AI 调用记录",
+    "storage.clear_short": "清空",
     "storage.clear": "清空历史记录",
     "storage.clear.confirm": "确定清空所有历史记录？",
     "storage.clipboard.label": "剪贴板记录",
@@ -1264,6 +1265,7 @@ export const zh = {
     "local_engine.summary.service_unreachable": "服务异常 · 进程仍在运行",
     "local_engine.summary.service_degraded": "服务降级 · 可用性受限",
     "local_engine.summary.model_failed": "模型加载失败",
+    "local_engine.summary.model_busy": "模型{state}",
     "local_engine.summary.running": "运行中",
     "local_engine.summary.ready": "已就绪",
 

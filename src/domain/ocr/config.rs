@@ -6,7 +6,8 @@
 //!
 //! ## 设计
 //!
-//! - `OcrBackendKind::default()` = `Windows`：升级与全新安装均默认 Windows。
+//! - `OcrBackendKind::default()` = `Auto`：升级与全新安装均默认 Auto——
+//!   已安装 PaddleOCR（环境+模型）即优先并允许 on-demand 冷启动，失败仍 fallback WinRT。
 //! - `PaddleModel::default()` = `Tiny`：spike 资格门唯一通过候选。
 //! - `OcrLifecycle::default()` = `OnDemand`：默认空闲 5 分钟后停止。
 
@@ -14,19 +15,19 @@ use serde::{Deserialize, Serialize};
 
 /// OCR 后端种类（用户可配置）。
 ///
-/// - `Windows`：始终使用 WinRT backend（默认）。
+/// - `Auto`：默认。已安装 PaddleOCR 即优先使用（允许冷启动）；失败回退 WinRT。
 /// - `PaddleOcr`：明确选择 PaddleOCR；未安装/启动失败时返回可行动错误，不静默回退。
-/// - `Auto`：仅在 PaddleOCR 已热态 Ready 时使用它；否则立即走 WinRT。
+/// - `Windows`：始终使用 WinRT backend。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OcrBackendKind {
-    /// 始终使用 WinRT backend。
+    /// 自动选择：已安装 PaddleOCR 优先（允许冷启动），否则/失败时 WinRT。
     #[default]
-    Windows,
+    Auto,
     /// 明确选择 PaddleOCR（PP-OCRv6）。
     PaddleOcr,
-    /// 自动选择：热态 Ready 用 PaddleOCR，否则 WinRT。
-    Auto,
+    /// 始终使用 WinRT backend。
+    Windows,
 }
 
 impl std::fmt::Display for OcrBackendKind {
@@ -172,16 +173,16 @@ mod tests {
     }
 
     #[test]
-    fn serde_unknown_backend_kind_falls_back_to_windows() {
-        // serde 默认值保证：缺字段或未知字符串回落到 Windows
+    fn serde_unknown_backend_kind_falls_back_to_default() {
+        // serde 默认值保证：缺字段或未知字符串回落到 Default（0.22.10 起为 Auto）
         let json = "\"unknown_backend\"";
         let kind: OcrBackendKind = serde_json::from_str(json).unwrap_or_default();
-        assert_eq!(kind, OcrBackendKind::Windows);
+        assert_eq!(kind, OcrBackendKind::Auto);
     }
 
     #[test]
-    fn serde_missing_field_falls_back_to_windows() {
-        // 空对象反序列化 → default
+    fn serde_missing_field_falls_back_to_default() {
+        // 空对象反序列化 → default（0.22.10 起为 Auto）
         let json = "{}";
         #[derive(Deserialize)]
         struct Wrapper {
@@ -189,7 +190,12 @@ mod tests {
             backend: OcrBackendKind,
         }
         let w: Wrapper = serde_json::from_str(json).unwrap();
-        assert_eq!(w.backend, OcrBackendKind::Windows);
+        assert_eq!(w.backend, OcrBackendKind::Auto);
+    }
+
+    #[test]
+    fn default_backend_kind_is_auto() {
+        assert_eq!(OcrBackendKind::default(), OcrBackendKind::Auto);
     }
 
     #[test]

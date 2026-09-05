@@ -146,7 +146,7 @@ async fn download_file(
             Err(e) => {
                 return Err(ModelDownloadError::Internal {
                     message: format!("创建临时文件失败: {e}"),
-                })
+                });
             }
         };
         let mut hasher = Sha256::new();
@@ -487,9 +487,10 @@ async fn copy_and_verify(
 
 #[cfg(test)]
 mod tests {
-    use super::{hf_download_candidates_with_endpoint, HF_HOST, HF_MIRROR_HOST};
+    use super::{HF_MIRROR_HOST, hf_download_candidates_with_endpoint};
 
-    const NANO_LLM: &str = "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf";
+    const NANO_LLM: &str =
+        "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf";
 
     #[test]
     fn candidates_default_primary_then_mirror() {

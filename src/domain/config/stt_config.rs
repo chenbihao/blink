@@ -1635,9 +1635,6 @@ mod tests {
         assert_eq!(cfg.local_engine.vad_kind, "fsmn");
     }
 
-
-
-
     /// 旧配置缺失整个 `vad` 对象时安全迁移为默认值，不算定制。
     #[test]
     fn missing_vad_object_migrates_safely() {

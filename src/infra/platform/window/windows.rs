@@ -153,8 +153,9 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow,
     GetWindowLongPtrW, GetWindowThreadProcessId, HWND_TOP, IsIconic, SET_WINDOW_POS_FLAGS,
-    SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    SW_HIDE, SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_SHOWNOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, WNDPROC, WS_CAPTION,
+    WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -3506,11 +3507,22 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // ⚠️ 不能在各预热窗创建链里同步 show+hide：它走 Tauri 主线程通道且首次合成
         // 耗时长，撞上用户操作（如右键弹菜单的 show）会排队卡顿。所以等全部预热窗
         // 建完、再延后到启动更安静的时刻，放独立线程执行，不占主线程外的运行时 worker。
+        // 0.22.10：原先裸 show+hide 会真实显示一瞬间——用户看到"启动后闪过一个终端"
+        //（overlay 深色背景，SW_SHOW 还会激活窗口抢焦点）。改为 DWM Cloak 包裹整个
+        // 暖渲染：Win32 层照常 show（WebView2 合成表面照常预热），DWM 层把窗口"雾化"
+        // 剔除出合成——零视觉闪现、不进 Alt-Tab；SW_SHOWNOACTIVATE 不抢焦点。
+        // show/hide 保持背靠背（不插入等待），不放大与用户真实 show 的竞态窗口。
         tokio::time::sleep(Duration::from_millis(2000)).await;
         if let Some(win) = app.get_webview_window("chord-screenshot") {
             std::thread::spawn(move || {
-                let _ = win.show();
-                let _ = win.hide();
+                let Ok(hwnd) = win.hwnd() else { return };
+                let hwnd = HWND(hwnd.0 as _);
+                apply_cloak(hwnd, true);
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+                apply_cloak(hwnd, false);
             });
             tracing::debug!("preheat: chord-screenshot 暖渲染已调度");
         }

@@ -112,14 +112,34 @@ body.image-editor-mode #canvas.long-image-editing {
     pointer-events: none;
 }
 
+/* ── overlay toast 基类（0.22.10）：所有提示共用不透明深底 + 同族圆角/边框。
+      overlay chrome 允许 rgba 硬色（与 toolbar/panel 同语言，不跟主题 token）── */
+.ss-toast {
+    background: rgba(24, 24, 32, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-md);
+    color: #fff;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: var(--text-sm);
+    padding: 6px 14px;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+/* 错误态：只变边框，底色保持深色以优先可读性 */
+.ss-toast-error {
+    border-color: rgba(220, 80, 80, 0.8);
+}
+
 #size-hint {
     position: fixed;
-    background: rgba(0, 0, 0, 0.55);
+    background: rgba(24, 24, 32, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-md);
     color: #fff;
     font-size: var(--text-base);
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     padding: 2px 8px;
-    border-radius: var(--radius-xs);
     pointer-events: none;
     display: block; /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
     z-index: var(--z-dropdown);
@@ -131,14 +151,20 @@ body.image-editor-mode #canvas.long-image-editing {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
+    background: rgba(24, 24, 32, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-md);
     color: #fff;
-    background: rgba(200, 40, 40, 0.85);
     padding: 12px 20px;
-    border-radius: var(--radius-sm);
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     font-size: var(--text-lg);
     pointer-events: none; /* 不能拦截 canvas mousedown（否则拖选失效） */
     display: block; /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
+}
+
+/* 错误语义由 .ss-toast-error 修饰类承载（初始化失败/翻译失败等路径切换） */
+#error-hint.ss-toast-error {
+    border-color: rgba(220, 80, 80, 0.8);
 }
 
 /* 0.20.6：精调状态提示 */
@@ -147,20 +173,31 @@ body.image-editor-mode #canvas.long-image-editing {
     top: 16px;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(0, 0, 0, 0.65);
+    background: rgba(24, 24, 32, 0.96);
     color: #fff;
     font-size: var(--text-sm);
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     padding: 4px 12px;
-    border-radius: var(--radius-sm);
-    border: 1px solid rgba(74, 158, 255, 0.4);
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(255, 255, 255, 0.15);
     pointer-events: none;
     display: block;
     z-index: var(--z-dropdown);
     white-space: nowrap;
 }
 
-/* ── 选区中央加载转圈（OCR/翻译进行中） ────────────────────────── */
+/* ── OCR 面板实际引擎标注（0.22.10）：header 暗色 chrome 同族弱化 badge ── */
+.ocr-engine-badge {
+    margin-left: 8px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: var(--text-xs);
+    color: rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.08);
+    white-space: nowrap;
+}
+
+/* ── 选区中央加载转圈（OCR/翻译进行中）：spinner+文字同一 toast 底图内 ── */
 .sel-loading {
     position: fixed;
     z-index: var(--z-dropdown);
@@ -170,6 +207,11 @@ body.image-editor-mode #canvas.long-image-editing {
     gap: 8px;
     pointer-events: none;
     transform: translate(-50%, -50%);
+    background: rgba(24, 24, 32, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-md);
+    padding: 14px 22px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
 }
 
 .sel-loading-spinner {
@@ -191,10 +233,32 @@ body.image-editor-mode #canvas.long-image-editing {
     color: #fff;
     font-size: var(--text-sm);
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-    background: rgba(0, 0, 0, 0.6);
-    padding: 2px 10px;
-    border-radius: var(--radius-xs);
     white-space: nowrap;
+}
+
+/* ── 阅读模式右键菜单（0.22.10：inline style 迁入 CSS，与 toast 同族）── */
+.reading-ctx-menu {
+    position: fixed;
+    z-index: 9999;
+    background: rgba(30, 30, 30, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 4px;
+    min-width: 120px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+}
+
+.reading-ctx-menu-item {
+    padding: 6px 12px;
+    color: #ddd;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.reading-ctx-menu-item:hover {
+    background: rgba(255, 255, 255, 0.08);
 }
 
 /* ── 工具栏（0.11.7-a；0.11.8 尺寸放大 1.5×；0.11.8-a 分组重组 + 圆润化；

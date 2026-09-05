@@ -136,7 +136,11 @@ impl Capability for OcrImage {
                 return Err(map_structured_error_to_capability(err));
             }
 
-            let result = route_result.result.unwrap();
+            // 0.22.10: 注入实际引擎与回退原因（capability 层专属，不污染底层 backend 结果；
+            // 直连 backend() 的 fallback 路径不注入，保持 None）
+            let mut result = route_result.result.unwrap();
+            result.backend_used = Some(route_result.decision.selected_backend);
+            result.backend_fallback_reason = route_result.decision.fallback_reason.clone();
             return Ok(CapabilityResult::Text {
                 content: serde_json::to_string(&result as &OcrResult)
                     .unwrap_or_else(|_| result.text.clone()),

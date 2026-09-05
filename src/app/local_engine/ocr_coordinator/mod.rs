@@ -156,7 +156,6 @@ impl OcrCoordinator {
         let _ = self.engine_service.set(std::sync::Arc::downgrade(service));
     }
 
-
     fn config_snapshot(&self) -> OcrRuntimeSnapshot {
         get_ocr_config().to_snapshot()
     }
@@ -516,67 +515,95 @@ impl OcrBackendRouter for OcrCoordinator {
                     };
                     (decision, Err(err), 0u64, 0u64, 0u64)
                 } else {
-                    // auto 路径——hot-only，不触发冷启动
-                    let (res, start_wait, recog_ms) = {
-                        self.idle_cancel.notify_waiters();
-                        self.do_paddleocr_recognize(png_data.clone(), ctx, true, request_png_size)
+                    // 0.22.10: auto 语义升级——已安装 PaddleOCR 即优先使用
+                    //（允许 on-demand 冷启动）；未安装则直接 WinRT，无数秒等待
+                    let installed = self.is_paddleocr_installed().await;
+                    if !installed {
+                        let (res, ms) = self.do_winrt_recognize(&png_data, ctx).await;
+                        let decision = RouteDecision {
+                            configured_backend: OcrBackendKind::Auto,
+                            selected_backend: OcrBackendKind::Windows,
+                            fallback_reason: Some("未安装 PaddleOCR".to_string()),
+                        };
+                        (decision, res, 0u64, ms, 0u64)
+                    } else {
+                        let (res, start_wait, recog_ms) = {
+                            self.idle_cancel.notify_waiters();
+                            self.do_paddleocr_recognize(
+                                png_data.clone(),
+                                ctx,
+                                false,
+                                request_png_size,
+                            )
                             .await
-                    };
+                        };
 
-                    let used_paddleocr = match &res {
-                        Ok(_) => true,
-                        Err(e) => {
-                            e.category != crate::domain::ocr::error::OcrErrorCategory::ModelNotReady
-                                || !e.message.contains("not_ready_hot_only")
-                        }
-                    };
+                        let used_paddleocr =
+                            match &res {
+                                Ok(_) => true,
+                                Err(e) => e.category
+                                    != crate::domain::ocr::error::OcrErrorCategory::ModelNotReady
+                                    || !e.message.contains("not_ready_hot_only"),
+                            };
 
-                    if used_paddleocr {
-                        self.schedule_idle_stop(snapshot);
-                        if let Err(ref paddle_err) = res {
-                            // 输入本身的问题（取消/解码失败/超预算）不回退——
-                            // 换后端无济于事；后端基础设施问题才回退 WinRT
-                            let should_fallback = !matches!(
+                        if used_paddleocr {
+                            self.schedule_idle_stop(snapshot);
+                            if let Err(ref paddle_err) = res {
+                                // 输入本身的问题（取消/解码失败/超预算）不回退——
+                                // 换后端无济于事；后端基础设施问题才回退 WinRT
+                                let should_fallback = !matches!(
                                 paddle_err.category,
                                 crate::domain::ocr::error::OcrErrorCategory::Cancelled
                                     | crate::domain::ocr::error::OcrErrorCategory::DecodeError
                                     | crate::domain::ocr::error::OcrErrorCategory::InputTooLarge
                             );
-                            if should_fallback {
-                                tracing::info!(error = %paddle_err, "auto 模式 PaddleOCR 热态识别失败，fallback 到 WinRT");
-                                // deadline/cancel 后不得继续 WinRT fallback
-                                if ctx.should_stop() {
-                                    let err = if ctx.is_cancelled() {
-                                        StructuredOcrError::cancelled()
+                                if should_fallback {
+                                    tracing::info!(error = %paddle_err, "auto 模式 PaddleOCR 识别失败，fallback 到 WinRT");
+                                    // deadline/cancel 后不得继续 WinRT fallback
+                                    if ctx.should_stop() {
+                                        let err = if ctx.is_cancelled() {
+                                            StructuredOcrError::cancelled()
+                                        } else {
+                                            StructuredOcrError::timeout()
+                                        };
+                                        let decision = RouteDecision {
+                                            configured_backend: OcrBackendKind::Auto,
+                                            selected_backend: OcrBackendKind::Windows,
+                                            fallback_reason: Some(format!(
+                                                "PaddleOCR 失败后取消: {err}"
+                                            )),
+                                        };
+                                        (decision, Err(err), start_wait, recog_ms, 0u64)
                                     } else {
-                                        StructuredOcrError::timeout()
-                                    };
-                                    let decision = RouteDecision {
-                                        configured_backend: OcrBackendKind::Auto,
-                                        selected_backend: OcrBackendKind::Windows,
-                                        fallback_reason: Some(format!(
-                                            "PaddleOCR 失败后取消: {err}"
-                                        )),
-                                    };
-                                    (decision, Err(err), start_wait, recog_ms, 0u64)
-                                } else {
-                                    let (fb_res, fb_ms) =
-                                        self.do_winrt_recognize(&png_data, ctx).await;
-                                    let decision = RouteDecision {
-                                        configured_backend: OcrBackendKind::Auto,
-                                        selected_backend: OcrBackendKind::Windows,
-                                        fallback_reason: Some(format!(
-                                            "PaddleOCR 失败 fallback: {paddle_err}"
-                                        )),
-                                    };
-                                    match fb_res {
-                                        Ok(ocr_result) => {
-                                            (decision, Ok(ocr_result), start_wait, recog_ms, fb_ms)
-                                        }
-                                        Err(fb_err) => {
-                                            (decision, Err(fb_err), start_wait, recog_ms, fb_ms)
+                                        let (fb_res, fb_ms) =
+                                            self.do_winrt_recognize(&png_data, ctx).await;
+                                        let decision = RouteDecision {
+                                            configured_backend: OcrBackendKind::Auto,
+                                            selected_backend: OcrBackendKind::Windows,
+                                            fallback_reason: Some(format!(
+                                                "PaddleOCR 失败 fallback: {paddle_err}"
+                                            )),
+                                        };
+                                        match fb_res {
+                                            Ok(ocr_result) => (
+                                                decision,
+                                                Ok(ocr_result),
+                                                start_wait,
+                                                recog_ms,
+                                                fb_ms,
+                                            ),
+                                            Err(fb_err) => {
+                                                (decision, Err(fb_err), start_wait, recog_ms, fb_ms)
+                                            }
                                         }
                                     }
+                                } else {
+                                    let decision = RouteDecision {
+                                        configured_backend: OcrBackendKind::Auto,
+                                        selected_backend: OcrBackendKind::PaddleOcr,
+                                        fallback_reason: None,
+                                    };
+                                    (decision, res, start_wait, recog_ms, 0u64)
                                 }
                             } else {
                                 let decision = RouteDecision {
@@ -587,22 +614,15 @@ impl OcrBackendRouter for OcrCoordinator {
                                 (decision, res, start_wait, recog_ms, 0u64)
                             }
                         } else {
+                            // 未使用 PaddleOCR（lease 未就绪）——走 WinRT
+                            let (res2, ms) = self.do_winrt_recognize(&png_data, ctx).await;
                             let decision = RouteDecision {
                                 configured_backend: OcrBackendKind::Auto,
-                                selected_backend: OcrBackendKind::PaddleOcr,
-                                fallback_reason: None,
+                                selected_backend: OcrBackendKind::Windows,
+                                fallback_reason: Some("PaddleOCR 未就绪".to_string()),
                             };
-                            (decision, res, start_wait, recog_ms, 0u64)
+                            (decision, res2, 0u64, ms, 0u64)
                         }
-                    } else {
-                        // 未使用 PaddleOCR——立即走 WinRT
-                        let (res2, ms) = self.do_winrt_recognize(&png_data, ctx).await;
-                        let decision = RouteDecision {
-                            configured_backend: OcrBackendKind::Auto,
-                            selected_backend: OcrBackendKind::Windows,
-                            fallback_reason: Some("PaddleOCR 未热态 Ready".to_string()),
-                        };
-                        (decision, res2, 0u64, ms, 0u64)
                     }
                 }
             }

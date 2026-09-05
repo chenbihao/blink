@@ -221,8 +221,9 @@ pub fn gguf_model_descriptor(
             chinese_quality: "corpus_baseline".to_string(),
             resource_footprint: "shared_gguf_worker".to_string(),
             // 0.22.9：Nano（LLM 解码）为推荐模型——质量领先 + 内置标点；
+            // 其余候选不标推荐（推荐徽章只属于单一最优选，全员推荐=没有推荐）。
             // display-only，仅影响设置页「推荐」徽章
-            recommended: true,
+            recommended: spec.model_id == GGUF_NANO_ID,
         }),
     }
 }
@@ -498,6 +499,22 @@ mod tests {
                 spec.model_id
             );
         }
+    }
+
+    /// 推荐徽章只属于单一最优选（Nano）——全员推荐等于没有推荐。
+    #[test]
+    fn recommended_flag_only_on_nano() {
+        let recommended: Vec<&str> = gguf_model_specs()
+            .iter()
+            .filter(|spec| {
+                gguf_model_descriptor(spec)
+                    .business
+                    .as_ref()
+                    .is_some_and(|b| b.recommended)
+            })
+            .map(|spec| spec.model_id)
+            .collect();
+        assert_eq!(recommended, vec![GGUF_NANO_ID]);
     }
 
     #[test]

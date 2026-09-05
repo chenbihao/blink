@@ -232,6 +232,7 @@ export const en = {
     "storage.db.cache": "Cache DB",
     "storage.history.label": "History",
     "storage.audit.label": "AI audit log",
+    "storage.clear_short": "Clear",
     "storage.clear": "Clear history",
     "storage.clear.confirm": "Clear all history?",
     "storage.clipboard.label": "Clipboard",
@@ -1263,6 +1264,7 @@ export const en = {
     "local_engine.summary.service_unreachable": "Service unreachable · process still running",
     "local_engine.summary.service_degraded": "Service degraded · limited availability",
     "local_engine.summary.model_failed": "Model failed to load",
+    "local_engine.summary.model_busy": "Model {state}",
     "local_engine.summary.running": "Running",
     "local_engine.summary.ready": "Ready",
 

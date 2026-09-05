@@ -190,7 +190,10 @@ pub(super) fn is_third_party_internal_noise(text: &str) -> bool {
 }
 
 /// 噪声行是否应从 UI 投影中剔除（warn/error 始终保留）。
-pub(super) fn should_suppress_from_ui(text: &str, level: super::super::dto::EngineLogLevel) -> bool {
+pub(super) fn should_suppress_from_ui(
+    text: &str,
+    level: super::super::dto::EngineLogLevel,
+) -> bool {
     use super::super::dto::EngineLogLevel;
     is_third_party_internal_noise(text)
         && !matches!(level, EngineLogLevel::Error | EngineLogLevel::Warn)
@@ -256,14 +259,14 @@ pub(super) async fn pump_logs_to_event_port(
                                 // 降为 trace 且不投影前端——warn/error 仍按原级透传
                                 let suppress_ui = should_suppress_from_ui(&log_entry.text, level);
                                 if suppress_ui {
-                                    tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出（第三方内部噪声，已抑制 UI 投影）");
+                                    tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出（已抑制）");
                                 } else {
                                     match level {
                                         super::super::dto::EngineLogLevel::Error => tracing::error!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
                                         super::super::dto::EngineLogLevel::Warn => tracing::warn!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
                                         super::super::dto::EngineLogLevel::Info => tracing::info!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
                                         super::super::dto::EngineLogLevel::Trace => tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
-                                        _ => tracing::debug!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                        _ => tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
                                     }
                                     event_port.emit_log(
                                         &engine_id,

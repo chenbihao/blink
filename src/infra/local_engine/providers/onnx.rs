@@ -358,7 +358,9 @@ fn run_isolated_self_test(
         });
     }
 
-    let mut cmd = std::process::Command::new(&exe);
+    // validator 是控制台子系统 exe——GUI 主进程直呼会闪黑窗，
+    // 每次 OCR 环境 install/repair 的隔离自检都必须压窗口
+    let mut cmd = crate::infra::platform::no_window(std::process::Command::new(&exe));
     cmd.arg("onnx-validate")
         .arg("--dll")
         .arg(&dll_path)

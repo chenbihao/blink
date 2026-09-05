@@ -147,18 +147,6 @@ function deviceLabel(t, entry) {
     return tx(t, `local_engine.compute.${value}`, value);
 }
 
-/** 模型展示名：active > selected > catalog 默认。 */
-function currentModelName(entry) {
-    const models = entry?.models;
-    if (Array.isArray(models)) {
-        const active = models.find((m) => m.is_active);
-        if (active) return active.display_name || active.model_id;
-        const selected = models.find((m) => m.is_selected);
-        if (selected) return selected.display_name || selected.model_id;
-    }
-    return entry?.catalog?.model_id || null;
-}
-
 /** selection.targetModelId → 展示名（models 列表优先，退化 model_id）。 */
 function selectionTargetName(entry) {
     const selection = getSelection(entry);
@@ -334,42 +322,39 @@ export function computeEngineSummary(entry, t) {
         // 服务 healthy 但模型未就绪（下载/加载中）
         if (s.model === "downloading" || s.model === "loading") {
             return {
-                text: `${modelLabel(t, s.model)} · ${currentModelName(entry) || ""}`.replace(/ · $/, ""),
+                text: tx(t, "local_engine.summary.model_busy", "模型{state}", {state: modelLabel(t, s.model)}),
                 tone: "busy",
             };
         }
         if (s.model === "failed") {
             return {
-                text: `${tx(t, "local_engine.summary.model_failed", "模型加载失败")} · ${currentModelName(entry) || ""}`.replace(/ · $/, ""),
+                text: tx(t, "local_engine.summary.model_failed", "模型加载失败"),
                 tone: "error",
             };
         }
     }
 
-    // 可用 → 运行中 · 模型 · 设备
-    // 0.22.8-E: 如果 pending_restart（DLL identity 变化），不说\"运行中\"，
-    // 而是\"待重启\"——文案必须说真话
+    // 可用 → 运行中 · 设备
+    // 0.22.8-E: 如果 pending_restart（DLL identity 变化），不说"运行中"，
+    // 而是"待重启"——文案必须说真话
+    // 0.22.10: 摘要不再带模型名——下方 config 区「当前模型」是唯一展示位，
+    // OCR 固定契约引擎在这里拼出 det:rec 串更不可读
     if (isPendingRestart(entry)) {
-        const parts = [tx(t, "local_engine.summary.pending_restart", "待重启")];
-        const model = currentModelName(entry);
-        if (model) parts.push(model);
-        return {text: parts.join(" · "), tone: "warn"};
+        return {text: tx(t, "local_engine.summary.pending_restart", "待重启"), tone: "warn"};
     }
 
     if (s.available) {
-        const parts = [tx(t, "local_engine.summary.running", "运行中")];
-        const model = currentModelName(entry);
-        if (model) parts.push(model);
-        parts.push(deviceLabel(t, entry));
-        return {text: parts.join(" · "), tone: "ok"};
+        return {
+            text: [tx(t, "local_engine.summary.running", "运行中"), deviceLabel(t, entry)].join(" · "),
+            tone: "ok",
+        };
     }
 
-    // 已安装未运行 → 已就绪 · 模型 · 策略
-    const parts = [tx(t, "local_engine.summary.ready", "已就绪")];
-    const model = currentModelName(entry);
-    if (model) parts.push(model);
-    parts.push(policyLabel(t, entry));
-    return {text: parts.join(" · "), tone: "neutral"};
+    // 已安装未运行 → 已就绪 · 策略
+    return {
+        text: [tx(t, "local_engine.summary.ready", "已就绪"), policyLabel(t, entry)].join(" · "),
+        tone: "neutral",
+    };
 }
 
 // ── 反馈槽 ────────────────────────────────────────────────────────────────────
@@ -513,9 +498,11 @@ export function computeFeedback(entry, t) {
         };
     }
     if (s.available) {
-        return isOnDemand(entry)
-            ? {tone: "ok", text: tx(t, "local_engine.feedback.idle.available_ondemand", "服务运行中 · 空闲后自动回收")}
-            : {tone: "ok", text: tx(t, "local_engine.feedback.idle.available_manual", "服务运行中，可处理识别请求")};
+        // 0.22.10: 运行成功的空闲态不再重复提示——卡片头部摘要已表达
+        // 「运行中 · 设备」（le-summary-dot 绿点 + 文本），反馈槽只留给
+        // 需要关注的内容（错误/警告/忙碌/待重启）。text 为空时 updateFeedback
+        // 整个隐藏槽位，不占纵向空间。
+        return {tone: "ok", text: ""};
     }
     // ready + stopped
     return isOnDemand(entry)

@@ -500,25 +500,27 @@
                     <span data-i18n="local_engine.empty">没有可用的本地模型引擎。</span>
                 </div>
 
-                <!-- 运行时底座 + 公共缓存（默认折叠；点击「运行时与缓存」展开） -->
+                <!-- 运行时底座 + 公共缓存（默认折叠；点击「运行时与缓存」一次展开全部，无二级折叠） -->
                 <div class="le-runtime-details" hidden id="le-runtime-details">
-                    <details class="le-foundation" id="le-foundation">
-                        <summary class="le-foundation-summary" data-i18n="local_engine.foundation.title">运行时底座</summary>
-                        <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">所有引擎共享的 Python 运行时与公共缓存，只读展示。FunASR / PaddleOCR 等本地模型由 Blink 独立管理，使用隔离运行时，不读取你的脚本解释器配置。</p>
+                    <div class="le-foundation" id="le-foundation">
+                        <div class="le-foundation-head">
+                            <h4 class="le-foundation-title" data-i18n="local_engine.foundation.title">运行时底座</h4>
+                            <div class="le-foundation-actions">
+                                <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh" type="button">
+                                    <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
+                                    <span data-i18n="local_engine.foundation.refresh">刷新</span>
+                                </button>
+                                <button class="btn btn-small le-foundation-open" id="le-foundation-open" type="button">
+                                    <svg aria-hidden="true" class="icon"><use href="#icon-folder-open"/></svg>
+                                    <span data-i18n="local_engine.foundation.open_dir">打开根目录</span>
+                                </button>
+                            </div>
+                        </div>
+                        <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">各本地引擎的运行环境与模型缓存总览，只读展示。</p>
                         <div class="le-foundation-body" id="le-foundation-body">
                             <!-- JS 装配底座信息 -->
                         </div>
-                        <div class="le-foundation-actions">
-                            <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh" type="button">
-                                <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
-                                <span data-i18n="local_engine.foundation.refresh">刷新</span>
-                            </button>
-                            <button class="btn btn-small le-foundation-open" id="le-foundation-open" type="button">
-                                <svg aria-hidden="true" class="icon"><use href="#icon-folder-open"/></svg>
-                                <span data-i18n="local_engine.foundation.open_dir">打开根目录</span>
-                            </button>
-                        </div>
-                    </details>
+                    </div>
 
                     <!-- 全局/公共 storage 区域 -->
                     <div class="le-shared-storage" hidden id="le-shared-storage">
@@ -554,7 +556,7 @@
                         <div class="le-cleanup-body" id="le-cleanup-body"></div>
                         <div class="le-cleanup-actions">
                             <button class="btn btn-small" data-i18n="local_engine.cleanup.cancel" data-le-cleanup-close type="button">取消</button>
-                            <button class="btn btn-primary btn-small" data-i18n="local_engine.cleanup.confirm" id="le-cleanup-confirm" type="button">确认清理</button>
+                            <button class="btn btn-small le-btn-danger" data-i18n="local_engine.cleanup.confirm" id="le-cleanup-confirm" type="button">确认清理</button>
                         </div>
                     </div>
                 </div>
@@ -2155,9 +2157,9 @@
                 <button class="btn-small" data-i18n="storage.retry_migration" id="retry-migration">重试迁移</button>
             </div>
 
-            <!-- 四库统计卡片（统计 + 清理一体） -->
+            <!-- 四库统计卡片（统计与清理操作行内配对，默认态零红色按钮） -->
             <div class="db-stats-grid" id="db-stats-grid">
-                <!-- 配置库（可重置一次性标记） -->
+                <!-- 配置库（可重置一次性标记：弱化文字级操作，非数据清理） -->
                 <div class="db-card">
                     <div class="db-card-header">
                         <span class="db-card-name" data-i18n="storage.db.config">配置库</span>
@@ -2165,15 +2167,16 @@
                         <span class="db-card-file">blink_config.db</span>
                     </div>
                     <div class="db-card-body">
-                        <div class="db-card-stats"><!-- 配置库无条目统计，留空保持等高 --></div>
-                    </div>
-                    <div class="db-card-footer">
-                        <button class="btn-small btn-danger" data-i18n="storage.reset_first_run" id="reset-first-run">
-                            重置欢迎提示
-                        </button>
-                        <button class="btn-small btn-danger" data-i18n="storage.clear_debug_flags"
-                                id="clear-debug-flags">清理调试标记
-                        </button>
+                        <div class="db-stat-row">
+                            <button class="btn-small db-btn-dim" data-i18n="storage.reset_first_run" id="reset-first-run">
+                                重置欢迎提示
+                            </button>
+                        </div>
+                        <div class="db-stat-row">
+                            <button class="btn-small db-btn-dim" data-i18n="storage.clear_debug_flags"
+                                    id="clear-debug-flags">清理调试标记
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -2185,17 +2188,14 @@
                         <span class="db-card-file">blink_history.db</span>
                     </div>
                     <div class="db-card-body">
-                        <div class="db-card-stats">
+                        <div class="db-stat-row">
                             <span class="db-stat" id="db-history-count">-</span>
-                            <span class="db-stat" id="db-clipboard-count">-</span>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-history">清空</button>
                         </div>
-                    </div>
-                    <div class="db-card-footer">
-                        <button class="btn-small btn-danger" data-i18n="storage.clear" id="clear-history">清空历史记录
-                        </button>
-                        <button class="btn-small btn-danger" data-i18n="storage.clear_clipboard" id="clear-clipboard">
-                            清空剪贴板
-                        </button>
+                        <div class="db-stat-row">
+                            <span class="db-stat" id="db-clipboard-count">-</span>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-clipboard">清空</button>
+                        </div>
                     </div>
                 </div>
 
@@ -2207,19 +2207,16 @@
                         <span class="db-card-file">blink_ai.db</span>
                     </div>
                     <div class="db-card-body">
-                        <div class="db-card-stats">
+                        <div class="db-stat-row">
                             <span class="db-stat" id="db-audit-count">-</span>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-ai-audit">清空</button>
+                        </div>
+                        <!-- 清空对话 = 删除全部对话+消息，两个统计共享同一按钮 -->
+                        <div class="db-stat-row">
                             <span class="db-stat" id="db-conversation-count">-</span>
                             <span class="db-stat" id="db-message-count">-</span>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-all-conversations">清空</button>
                         </div>
-                    </div>
-                    <div class="db-card-footer">
-                        <button class="btn-small btn-danger" data-i18n="storage.clear_audit" id="clear-ai-audit">
-                            清空调用记录
-                        </button>
-                        <button class="btn-small btn-danger" data-i18n="storage.clear_conversations"
-                                id="clear-all-conversations">清空对话
-                        </button>
                     </div>
                 </div>
 
@@ -2231,19 +2228,16 @@
                         <span class="db-card-file">blink_cache.db</span>
                     </div>
                     <div class="db-card-body">
-                        <div class="db-card-stats">
+                        <!-- 清空缓存库 = 清空性能指标+图标缓存，两个统计共享同一按钮 -->
+                        <div class="db-stat-row">
                             <span class="db-stat" id="db-perf-count">-</span>
                             <span class="db-stat" id="db-icon-cache-count">-</span>
-                            <span class="db-stat" id="db-clipboard-image-count">-</span>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-cache-db">清空</button>
                         </div>
-                    </div>
-                    <div class="db-card-footer">
-                        <button class="btn-small btn-danger" data-i18n="storage.clear_cache" id="clear-cache-db">
-                            清空缓存
-                        </button>
-                        <button class="btn-small btn-danger" data-i18n="storage.clear_clipboard_images"
-                                id="clear-clipboard-images">清空图片
-                        </button>
+                        <div class="db-stat-row">
+                            <span class="db-stat" id="db-clipboard-image-count">-</span>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-clipboard-images">清空</button>
+                        </div>
                     </div>
                 </div>
             </div>

@@ -218,11 +218,12 @@ export function renderEngineCard(container, entry, controller, i18n) {
 
     card.appendChild(body);
 
-    // ── 折叠层：模型列表（默认折叠） ──────────────────────────────────────
+    // ── 折叠层：模型列表（默认折叠；与日志/维护/诊断同为卡片级全宽面板，
+    //    互斥展开——不嵌在 body 内造成双重 border-top 与缩进错位） ────────
     const modelList = document.createElement("div");
     modelList.className = "le-model-list";
     modelList.hidden = true;
-    body.appendChild(modelList);
+    card.appendChild(modelList);
 
     // ── 折叠层：完整日志（默认折叠） ──────────────────────────────────────
     const logArea = document.createElement("div");
@@ -559,6 +560,13 @@ function updateFeedback(el, entry, i18n) {
     el.dataset.sig = sig;
 
     el.className = `le-feedback le-feedback-${feedback.tone}`;
+
+    // 空闲成功态（text 为空）整个隐藏槽位，不留空白占位——
+    // 运行中状态由头部摘要表达，反馈槽只在有内容（错误/警告/忙碌/提示）时出现。
+    // 注意 .le-feedback 是 flex 布局，[hidden] 需 CSS 显式兜底 display:none。
+    el.hidden = !feedback.text && !feedback.detail;
+    if (el.hidden) return;
+
     el.textContent = "";
 
     const main = document.createElement("span");

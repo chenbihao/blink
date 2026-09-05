@@ -32,9 +32,9 @@
 
 #engines .le-cleanup-dialog {
     position: relative;
-    background: var(--surface);
-    border-radius: var(--radius-lg, 12px);
-    border: 1px solid var(--surface-2);
+    background: var(--bg-sidebar);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--surface);
     max-width: 500px;
     width: 90%;
     max-height: 80vh;
@@ -140,6 +140,24 @@
 #engines .le-cleanup-item-title {
     font-weight: 600;
     color: var(--text);
+    font-style: normal;
+}
+
+/* scope/size/flags/affected 一行弱底 badge（与引擎卡 keyline-policy 同族） */
+#engines .le-cleanup-item-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.375rem;
+}
+
+#engines .le-cleanup-item-meta > span {
+    font-size: var(--text-xs);
+    padding: 0.0625rem 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--surface-2);
+    color: var(--text-sub);
+    white-space: nowrap;
     font-style: normal;
 }
 

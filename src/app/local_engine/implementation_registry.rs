@@ -183,7 +183,12 @@ mod tests {
         let registry = make_builtin_implementation_registry();
         // 未知旧模型（如 0.22.7 前的 Python 时代模型 id、handoff-11 退役的
         // onnx/paraformer-online）不静默换模
-        for legacy in ["iic/SenseVoiceSmall", "paraformer-zh", "whisper-tiny", "onnx/paraformer-online"] {
+        for legacy in [
+            "iic/SenseVoiceSmall",
+            "paraformer-zh",
+            "whisper-tiny",
+            "onnx/paraformer-online",
+        ] {
             assert!(
                 registry
                     .resolve_for_model(&EngineId::new(FUNASR_ENGINE_ID).unwrap(), legacy)

@@ -32,6 +32,8 @@ pub(super) fn map_executor_result(
     // 如果 executor 没有返回任何内容，直接返回空结果
     if result.lines.is_empty() && result.words.is_empty() && result.char_boxes.is_empty() {
         return Ok(OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: String::new(),
             lines: Vec::new(),
             words: Vec::new(),
@@ -204,6 +206,8 @@ mod tests {
     #[test]
     fn map_executor_result_basic() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "hello".to_string(),
             lines: vec![OcrLine {
                 text: "hello".to_string(),
@@ -223,6 +227,8 @@ mod tests {
     #[test]
     fn map_executor_result_empty() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: String::new(),
             lines: vec![],
             words: vec![],
@@ -239,6 +245,8 @@ mod tests {
     #[test]
     fn map_executor_result_negative_coords_rejected() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![make_word("bad", -1, 0, 100, 30, 0)],
@@ -252,6 +260,8 @@ mod tests {
     #[test]
     fn map_executor_result_zero_area_rejected() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![make_word("bad", 0, 0, 0, 30, 0)],
@@ -265,6 +275,8 @@ mod tests {
     #[test]
     fn map_executor_result_overflow_rejected() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![make_word("bad", 199, 0, 2, 30, 0)],
@@ -278,6 +290,8 @@ mod tests {
     #[test]
     fn map_executor_result_empty_text_word_filtered() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: String::new(),
             lines: vec![],
             words: vec![
@@ -296,6 +310,8 @@ mod tests {
     #[test]
     fn map_executor_result_cjk_line_grouping() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "你好".to_string(),
             lines: vec![],
             words: vec![
@@ -317,6 +333,8 @@ mod tests {
     fn map_executor_result_with_char_boxes_preserves_text() {
         // 有 char_boxes 时，文本原样保留，不走词级 grouping
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "PP-OCRv6".to_string(),
             lines: vec![OcrLine {
                 text: "PP-OCRv6".to_string(),
@@ -373,6 +391,8 @@ mod tests {
     #[test]
     fn map_executor_result_with_char_boxes_cjk_preserves_text() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "文字识别".to_string(),
             lines: vec![OcrLine {
                 text: "文字识别".to_string(),
@@ -426,6 +446,8 @@ mod tests {
     #[test]
     fn map_executor_result_with_char_boxes_rejects_bad_rect() {
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![],
@@ -446,6 +468,8 @@ mod tests {
     fn map_executor_result_without_char_boxes_still_groups() {
         // 无 char_boxes 时走旧路径（词级 grouping）
         let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: "hello world".to_string(),
             lines: vec![],
             words: vec![

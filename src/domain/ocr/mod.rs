@@ -59,8 +59,9 @@ mod domain_tests {
     use super::*;
 
     #[test]
-    fn ocr_backend_kind_default_is_windows() {
-        assert_eq!(OcrBackendKind::default(), OcrBackendKind::Windows);
+    fn ocr_backend_kind_default_is_auto() {
+        // 0.22.10：默认 Auto——已安装 PaddleOCR 优先，否则 WinRT
+        assert_eq!(OcrBackendKind::default(), OcrBackendKind::Auto);
     }
 
     #[test]

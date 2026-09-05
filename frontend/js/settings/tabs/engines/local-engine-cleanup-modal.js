@@ -260,17 +260,21 @@ export function createCleanupModal(opts) {
             info.appendChild(path);
         }
 
+        // scope/size/flags/affected 一行 badge（样式 .le-cleanup-item-meta）
+        const meta = document.createElement("div");
+        meta.className = "le-cleanup-item-meta";
+
         // scope/kind
         const scope = document.createElement("span");
         scope.className = "le-cleanup-item-scope";
         scope.textContent = tt(`local_engine.cleanup.scope.${target.kind}`, target.kind);
-        info.appendChild(scope);
+        meta.appendChild(scope);
 
         // size
         const size = document.createElement("span");
         size.className = "le-cleanup-item-size";
         size.textContent = formatBytes(target.size_bytes);
-        info.appendChild(size);
+        meta.appendChild(size);
 
         // flags: current/shared/removable
         const flags = document.createElement("span");
@@ -280,23 +284,25 @@ export function createCleanupModal(opts) {
         if (target.shared) flagParts.push(tt("local_engine.cleanup.flag.shared", "共享"));
         if (target.removable) flagParts.push(tt("local_engine.cleanup.flag.removable", "可清理"));
         flags.textContent = flagParts.join(" · ");
-        info.appendChild(flags);
+        meta.appendChild(flags);
 
         // 受影响引擎
         if (target.affected_engine_ids && target.affected_engine_ids.length > 0) {
             const affected = document.createElement("span");
             affected.className = "le-cleanup-item-affected";
             affected.textContent = `${tt("local_engine.cleanup.affected_engines", "影响引擎")}: ${target.affected_engine_ids.join(", ")}`;
-            info.appendChild(affected);
+            meta.appendChild(affected);
         }
 
-        // blocked_reason
+        // blocked_reason（警示色独立于 badge 行）
         if (target.blocked_reason) {
             const reason = document.createElement("span");
             reason.className = "le-cleanup-item-blocked";
             reason.textContent = `${tt("local_engine.cleanup.blocked", "不可清理")}: ${target.blocked_reason}`;
-            info.appendChild(reason);
+            meta.appendChild(reason);
         }
+
+        info.appendChild(meta);
 
         label.appendChild(info);
         item.appendChild(label);

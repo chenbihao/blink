@@ -504,7 +504,7 @@ impl DeploymentStore {
     /// 空间内有未收尾事务时先按 fail-closed 规则收尾（避免删掉 half-state）；
     /// 调用方负责操作串行（manager 层 engine 级操作互斥已保证）。
     // handoff-11：ONNX 模型删除路径退役后生产暂无调用方；通用机制保留
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn remove_impl_space(space: &DeploymentSpace) -> Result<(), RuntimeError> {
         if space.implementation().is_none() {
             return Err(RuntimeError::CleanupFailed {

@@ -98,7 +98,8 @@ impl Capability for Shutdown {
     ) -> Result<CapabilityResult, CapabilityError> {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("shutdown.exe")
+            // shutdown.exe 是控制台子系统——GUI 进程直呼会闪黑窗，必须压窗口
+            let _ = crate::infra::platform::no_window(std::process::Command::new("shutdown.exe"))
                 .args(["/s", "/t", "0"])
                 .spawn();
         }
@@ -146,7 +147,7 @@ impl Capability for Restart {
     ) -> Result<CapabilityResult, CapabilityError> {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("shutdown.exe")
+            let _ = crate::infra::platform::no_window(std::process::Command::new("shutdown.exe"))
                 .args(["/r", "/t", "0"])
                 .spawn();
         }
@@ -194,7 +195,7 @@ impl Capability for Sleep {
     ) -> Result<CapabilityResult, CapabilityError> {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("rundll32.exe")
+            let _ = crate::infra::platform::no_window(std::process::Command::new("rundll32.exe"))
                 .args(["powrprof.dll,SetSuspendState", "0,1,0"])
                 .spawn();
         }

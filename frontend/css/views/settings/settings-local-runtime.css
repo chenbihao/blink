@@ -5,6 +5,23 @@
    直接配置区 + 反馈槽 + 工具栏；日志/模型列表/维护/诊断全部按需展开。
    颜色全部使用主题 token；中文 font-style: normal。 ──────────────────────── */
 
+/* 引擎卡水平内距唯一来源：折叠层（维护/诊断/日志）反向对齐 extension-body 用 */
+#engines {
+    --le-card-pad-x: 16px;
+}
+
+/* ── 卡片主体节奏：单一 gap，各段不再自带纵向 margin ─────────────────────── */
+
+#engines .le-card-body {
+    display: flex;
+    flex-direction: column;
+    /* 呼吸感：extension-body 基线 8px 16px 对插件卡够用，对承载
+       状态行+配置+反馈+工具栏的引擎卡太挤（keyline 贴 header）；
+       纵向放宽一档，横向对齐 --le-card-pad-x。 */
+    padding: var(--space-md, 12px) var(--le-card-pad-x, 16px) var(--space-md, 12px);
+    gap: var(--space-md, 12px);
+}
+
 /* ── section heading / desc ────────────────────────────────────────────────── */
 
 #engines .le-runtime-section {
@@ -177,16 +194,14 @@
     transform: rotate(180deg);
 }
 
-/* 运行时底座 + 公共缓存折叠区（默认隐藏，不占首屏纵向空间） */
+/* 运行时底座 + 公共缓存折叠区（默认隐藏，不占首屏纵向空间）。
+   0.22.10：容器只是布局壳（纵向排列 + 间距），不再包边框/背景——
+   底座与公共缓存各自成卡，视觉上只有一层层级。 */
 #engines .le-runtime-details {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
     margin-bottom: 1rem;
-    padding: 0.75rem;
-    border: 1px solid var(--surface);
-    border-radius: var(--radius-lg);
-    background: var(--bg-deep);
 }
 
 #engines .le-runtime-details[hidden] {
@@ -264,7 +279,6 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 0.375rem 1.25rem;
-    margin-bottom: 0.625rem;
 }
 
 #engines .le-keyline-item {
@@ -274,9 +288,12 @@
     min-width: 0;
 }
 
-#engines .le-keyline-label {
+/* keyline 与 config 的标签统一声明：同字号同色同起点，观感为同一张表的行 */
+#engines .le-keyline-label,
+#engines .le-config-label {
     font-size: var(--text-xs);
     color: var(--text-dim);
+    white-space: nowrap;
     font-style: normal;
 }
 
@@ -305,8 +322,6 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 0.375rem 1.5rem;
-    padding: 0.375rem 0;
-    margin-bottom: 0.375rem;
 }
 
 #engines .le-card-config[hidden] {
@@ -320,10 +335,16 @@
     min-width: 0;
 }
 
-/* 模型标识可能很长，固定独占一行，避免把计算设备/运行策略挤碎。 */
+/* 模型标识可能很长，默认固定独占一行，避免把计算设备/运行策略挤碎。 */
 #engines .le-config-group-model {
     flex: 1 0 100%;
     align-items: baseline;
+}
+
+/* inline 变体（OCR 卡）：ONNX 资产组跟在当前模型同一行，
+   空间不足时后组整体换行，不把模型名挤碎 */
+#engines .le-config-group-model-inline {
+    flex: 1 1 auto;
 }
 
 #engines .le-config-group-model .le-config-static {
@@ -332,13 +353,6 @@
     min-height: 0;
     overflow-wrap: anywhere;
     line-height: 1.45;
-}
-
-#engines .le-config-label {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-    white-space: nowrap;
-    font-style: normal;
 }
 
 #engines .le-config-select {
@@ -485,7 +499,7 @@
     -webkit-user-select: text;
 }
 
-/* ── runtime foundation (0.22.6，折叠在「运行时与缓存」内) ──────────────────── */
+/* ── runtime foundation (0.22.6，折叠在「运行时与缓存」内；0.22.10 扁平化) ──── */
 
 #engines .le-foundation {
     border: 1px solid var(--surface);
@@ -494,49 +508,38 @@
     overflow: hidden;
 }
 
-#engines .le-foundation > summary {
-    list-style: none;
-    cursor: pointer;
-    padding: 0.75rem 1rem;
+/* 头部行：标题左、操作右——底座区一次展开全部可见，不再嵌套二级折叠 */
+#engines .le-foundation-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.75rem 1rem 0.5rem;
+}
+
+#engines .le-foundation-title {
+    margin: 0;
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--text);
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
     font-style: normal;
-    user-select: none;
 }
 
-#engines .le-foundation > summary::-webkit-details-marker {
-    display: none;
-}
-
-#engines .le-foundation > summary::before {
-    content: "";
-    display: inline-block;
-    width: 0.75rem;
-    height: 0.75rem;
-    background: var(--text-dim);
-    flex-shrink: 0;
-    clip-path: polygon(0 0, 100% 50%, 0 100%);
-    transition: transform var(--transition-fast, 0.1s);
-    transform: rotate(0deg);
-}
-
-#engines .le-foundation[open] > summary::before {
-    transform: rotate(90deg);
+#engines .le-foundation-actions {
+    display: flex;
+    gap: 0.5rem;
 }
 
 #engines .le-foundation-desc {
     font-size: var(--text-sm);
     color: var(--text-sub);
-    margin: 0 1rem 0.5rem;
+    margin: 0 1rem 0.75rem;
     font-style: normal;
 }
 
 #engines .le-foundation-body {
-    padding: 0 1rem 0.5rem;
+    padding: 0 1rem 0.75rem;
     display: flex;
     flex-direction: column;
     gap: 0.375rem;
@@ -550,16 +553,10 @@
     font-style: normal;
 }
 
-#engines .le-foundation-actions {
-    display: flex;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem 0.75rem;
-}
-
 #engines .le-foundation-no-data {
     color: var(--text-dim);
     font-size: var(--text-sm);
-    padding: 0.5rem 1rem;
+    padding: 0.5rem 1rem 0.75rem;
     font-style: normal;
 }
 
@@ -594,8 +591,7 @@
         margin-left: auto;
     }
 
-    #engines .le-keyline,
-    #engines .le-diagnostic-grid {
+    #engines .le-keyline {
         gap: 0.375rem 0.75rem;
     }
 

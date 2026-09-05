@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// 从磁盘恢复的已安装模型 → 校验状态投影。
+///
+/// manifest 只在安装事务完成 SHA-256 + content fingerprint 双重校验后
+/// 写入，本身就是"校验通过"的凭证；restore 不做全量 hash（铁则），
+/// 但不能因此把已校验模型谎报为 `Unverified`——那会让设置页/诊断
+/// 永远显示"未校验"。`Unverified` 仅保留给安装时就无稳定 checksum
+/// 的来源（`ModelSource::Unverified`）。
+fn restored_verification_state(source: &mstore::ModelSource) -> ModelVerificationState {
+    match source {
+        mstore::ModelSource::Sha256 { .. } => ModelVerificationState::Verified,
+        mstore::ModelSource::Unverified { .. } => ModelVerificationState::Unverified,
+    }
+}
+
 impl EngineManager {
     // ── 模型资产操作（从 ModelService 并入，单一业务真相）──────────────────
     //
@@ -89,7 +103,7 @@ impl EngineManager {
                     Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
                         let mut st = EngineModelStatus::not_installed(desc);
                         st.install_state = ModelInstallState::Installed;
-                        st.verification_state = ModelVerificationState::Unverified;
+                        st.verification_state = restored_verification_state(&manifest.source);
                         st.cache_size_bytes = Some(manifest.payload_size_bytes);
                         st
                     }
@@ -176,7 +190,7 @@ impl EngineManager {
             Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
                 let mut st = EngineModelStatus::not_installed(desc);
                 st.install_state = ModelInstallState::Installed;
-                st.verification_state = ModelVerificationState::Unverified;
+                st.verification_state = restored_verification_state(&manifest.source);
                 st.cache_size_bytes = Some(manifest.payload_size_bytes);
                 st
             }
@@ -274,7 +288,9 @@ impl EngineManager {
         // claim 模型资产槽（0.22.9 双槽协调：只与同槽模型操作互斥，
         // 不阻塞 stop/start——模型下载与进程状态正交）
         let op_id = operation_id.unwrap_or_else(generate_operation_id);
-        let guard = self.coordinator.try_claim_model_storage(engine_id, &op_id)?;
+        let guard = self
+            .coordinator
+            .try_claim_model_storage(engine_id, &op_id)?;
 
         let slot_id = generate_install_id();
         let asset_key = mstore::encode_asset_key(model_id);
@@ -633,7 +649,9 @@ impl EngineManager {
         // claim 模型资产槽（GGUF 模型删除只写 model_storage，与进程级操作正交；
         // active/selected 冲突已在上方 check_delete_conflict 拦截）
         let op_id = operation_id.unwrap_or_else(generate_operation_id);
-        let _guard = self.coordinator.try_claim_model_storage(engine_id, &op_id)?;
+        let _guard = self
+            .coordinator
+            .try_claim_model_storage(engine_id, &op_id)?;
 
         let delete_result = tokio::task::spawn_blocking({
             let eid = engine_id.clone();

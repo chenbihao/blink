@@ -202,9 +202,7 @@ impl EngineOperationCoordinator {
     ) -> std::sync::MutexGuard<'_, HashMap<EngineId, ActiveClaim>> {
         match slot {
             ClaimSlot::Mutating => self.mutating.lock().unwrap_or_else(|p| p.into_inner()),
-            ClaimSlot::ModelStorage => {
-                self.model_storage.lock().unwrap_or_else(|p| p.into_inner())
-            }
+            ClaimSlot::ModelStorage => self.model_storage.lock().unwrap_or_else(|p| p.into_inner()),
         }
     }
 
@@ -328,7 +326,9 @@ mod tests {
     fn stop_is_admitted_while_model_storage_claim_active() {
         let coordinator = EngineOperationCoordinator::new();
         let engine = eid("funasr");
-        let _download = coordinator.try_claim_model_storage(&engine, "dl-nano").unwrap();
+        let _download = coordinator
+            .try_claim_model_storage(&engine, "dl-nano")
+            .unwrap();
         // 进程级操作照常申请——模型下载不阻塞 stop/start
         let stop = coordinator.try_claim(&engine, "stop-1").unwrap();
         assert_eq!(coordinator.active_operation(&engine), Some("stop-1".into()));
@@ -359,10 +359,7 @@ mod tests {
         let engine = eid("funasr");
         let _stop = coordinator.try_claim(&engine, "stop-1").unwrap();
         assert_eq!(
-            coordinator
-                .try_claim(&engine, "stop-2")
-                .unwrap_err()
-                .code,
+            coordinator.try_claim(&engine, "stop-2").unwrap_err().code,
             LocalEngineErrorCode::AlreadyRunning,
         );
         assert_eq!(

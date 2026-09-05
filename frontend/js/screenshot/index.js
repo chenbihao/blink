@@ -296,6 +296,7 @@ window.__blinkReloadScreenshot = function () {
         console.error('[screenshot] loadScreenshot threw', e);
         ss.errorHint.textContent = '截图初始化失败，按 ESC 重试';
         ss.errorHint.classList.remove('hidden');
+        ss.errorHint.classList.add('ss-toast-error');
     }
 };
 
@@ -308,6 +309,7 @@ window.__blinkOpenImageEditor = function () {
         console.error('[image-editor] 初始化失败', e);
         ss.errorHint.textContent = '图片编辑初始化失败，按 ESC 关闭';
         ss.errorHint.classList.remove('hidden');
+        ss.errorHint.classList.add('ss-toast-error');
     }
 };
 
@@ -372,6 +374,7 @@ function resetState() {
     toolbar.classList.add('hidden');
     annotCanvas.classList.add('hidden');
     errorHint.classList.add('hidden');
+    ss.errorHint.classList.remove('ss-toast-error');
     errorHint.textContent = '';
     if (canvas.width > 0) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -518,6 +521,7 @@ async function loadScreenshot() {
     const _t0 = performance.now();
     console.debug('[screenshot] loadScreenshot start');
     ss.errorHint.classList.add('hidden');
+    ss.errorHint.classList.remove('ss-toast-error');
 
     // 配置读取与图像加载并行；失败时保留默认值。
     loadEditorConfig(true);
@@ -532,6 +536,7 @@ async function loadScreenshot() {
         console.error('[screenshot] 加载超时（5s），协议请求可能失败', {gen});
         ss.errorHint.textContent = '截图加载超时，按 ESC 重试';
         ss.errorHint.classList.remove('hidden');
+        ss.errorHint.classList.add('ss-toast-error');
     }, 5000);
 
     try {
@@ -710,6 +715,7 @@ async function loadScreenshot() {
         console.error('[screenshot] loadScreenshot failed', e, {gen});
         ss.errorHint.textContent = '截图加载失败，按 ESC 重试';
         ss.errorHint.classList.remove('hidden');
+        ss.errorHint.classList.add('ss-toast-error');
     }
 }
 
@@ -759,6 +765,7 @@ function loadEditorImage(source) {
     document.body.classList.add('image-editor-mode');
     loadEditorConfig(false);
     ss.errorHint.classList.add('hidden');
+    ss.errorHint.classList.remove('ss-toast-error');
     const gen = ++ss._loadGen;
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -766,6 +773,7 @@ function loadEditorImage(source) {
         if (gen !== ss._loadGen || ss.editorSession.active) return;
         ss.errorHint.textContent = '图片加载超时，按 ESC 关闭';
         ss.errorHint.classList.remove('hidden');
+        ss.errorHint.classList.add('ss-toast-error');
     }, 5000);
     img.onload = () => {
         clearTimeout(timeoutId);
@@ -784,6 +792,7 @@ function loadEditorImage(source) {
             console.error('[image-editor] image onload 处理失败', e);
             ss.errorHint.textContent = '图片渲染失败，按 ESC 关闭';
             ss.errorHint.classList.remove('hidden');
+            ss.errorHint.classList.add('ss-toast-error');
         }
     };
     img.onerror = (error) => {
@@ -792,6 +801,7 @@ function loadEditorImage(source) {
         console.error('[image-editor] image load failed', {source, error});
         ss.errorHint.textContent = '图片加载失败，按 ESC 关闭';
         ss.errorHint.classList.remove('hidden');
+        ss.errorHint.classList.add('ss-toast-error');
     };
     img.src = `http://blink-screenshot.localhost/editor?t=${Date.now()}`;
 }

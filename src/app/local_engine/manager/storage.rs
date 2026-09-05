@@ -415,10 +415,10 @@ fn scan_engine_storage_blocking(
                     shared: true,
                     requires_separate_confirmation: true,
                     blocked_reason: blocked,
-                affected_engine_ids: Some(affected),
-                reference_count: Some(ref_count),
-                path_display: Some(artifact_dir.display().to_string()),
-            });
+                    affected_engine_ids: Some(affected),
+                    reference_count: Some(ref_count),
+                    path_display: Some(artifact_dir.display().to_string()),
+                });
             }
         }
     }

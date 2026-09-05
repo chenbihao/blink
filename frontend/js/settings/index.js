@@ -225,6 +225,8 @@ function initRuntimeDetailsToggle() {
         const willExpand = details.hidden;
         details.hidden = !willExpand;
         toggle.setAttribute("aria-expanded", String(willExpand));
+        // 展开时自动刷新一次底座——折叠态数据可能已过期（如窗口放了很久）
+        if (willExpand) refreshFoundation();
     });
 }
 
@@ -361,6 +363,11 @@ function renderFoundationBody(body, foundation) {
 
 /**
  * 渲染引擎卡片列表。
+ *
+ * 排序兜底：后端 catalog 虽已按 engine_id 排序（manager/status.rs），
+ * 但渲染顺序依赖前端 Map 的插入顺序——任何早于 catalog 的状态写入
+ * 都会改变首渲染次序。这里显式按 engine_id 排序（funasr < paddleocr，
+ * 恰好也是 STT 在前 OCR 在后的展示序），保证每次打开位置一致。
  * @param {HTMLElement} container
  * @param {Map} state - engine_id → EngineStateEntry
  */
@@ -377,7 +384,9 @@ function renderLocalEngineCards(container, state) {
     }
     if (emptyRegion) emptyRegion.hidden = true;
 
-    for (const [engineId, entry] of state) {
+    const sortedEntries = [...state.entries()]
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    for (const [, entry] of sortedEntries) {
         if (!_leController) break;
         renderEngineCard(container, entry, _leController, {
             t: undefined, // 使用默认 t()

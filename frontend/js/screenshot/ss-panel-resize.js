@@ -10,16 +10,16 @@
 //!   offsetWidth/Height 是未缩放值，视觉尺寸 = offset × uiScale）
 
 /**
- * 面板缩放的最小/最大尺寸约束（CSS 像素，未缩放值）。
+ * 面板缩放的最小尺寸约束（CSS 像素，未缩放值）。
  * 视觉尺寸 = 这些值 × uiScale。
+ * 0.22.10：去掉固定最大上限——放大空间由调用侧 clampPanelToMonitor 的
+ * 显示器边界钳制承担（面板右下角不越屏即天然上限）。
  */
 export const PANEL_MIN_W = 280;
 export const PANEL_MIN_H = 240;
-export const PANEL_MAX_W = 800;
-export const PANEL_MAX_H = 720;
 
 /**
- * 钳制面板新尺寸到最小/最大范围。
+ * 钳制面板新尺寸到最小范围。
  *
  * @param {number} rawW - 拖动产生的原始宽度（CSS px，未缩放）
  * @param {number} rawH - 拖动产生的原始高度（CSS px，未缩放）
@@ -27,8 +27,8 @@ export const PANEL_MAX_H = 720;
  */
 export function clampPanelSize(rawW, rawH) {
     return {
-        w: Math.max(PANEL_MIN_W, Math.min(PANEL_MAX_W, rawW)),
-        h: Math.max(PANEL_MIN_H, Math.min(PANEL_MAX_H, rawH)),
+        w: Math.max(PANEL_MIN_W, rawW),
+        h: Math.max(PANEL_MIN_H, rawH),
     };
 }
 
@@ -64,10 +64,9 @@ export function clampPanelToMonitor(left, top, w, h, uiScale, mon, margin = 8) {
     const allowedVisH = Math.max(PANEL_MIN_H * uiScale, maxVisH);
     const clampedVisW = Math.min(visW, allowedVisW);
     const clampedVisH = Math.min(visH, allowedVisH);
-    // 转回未缩放值
-    let newW = clampedVisW / uiScale;
-    let newH = clampedVisH / uiScale;
-    // 再走一次 min/max 钳制
+    // 转回未缩放值，再走一次最小钳制
+    const newW = clampedVisW / uiScale;
+    const newH = clampedVisH / uiScale;
     return clampPanelSize(newW, newH);
 }
 

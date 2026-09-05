@@ -1,12 +1,12 @@
 //! OCR 配置分片——第 9 个 KV，key = `"ocr:config"`（0.22.4）。
 //!
 //! 独立于 AppConfig 门面，独立 opt-in。
-//! 老用户首次读拿到 `OcrConfig::default()`，`backend = "windows"`，零副作用。
+//! 老用户首次读拿到 `OcrConfig::default()`，`backend = "auto"`（0.22.10 起），零副作用。
 //!
 //! ## serde 缺字段回落
 //!
 //! 所有字段使用 `#[serde(default)]`，旧配置或缺失字段回落到默认值。
-//! `backend` 字段使用自定义 deserializer，未知字符串回落到 `Windows`。
+//! `backend` 字段使用自定义 deserializer，未知字符串回落到 `Auto`（0.22.10 起默认）。
 //!
 //! ## 运行时快照
 //!
@@ -25,9 +25,10 @@ use crate::domain::ocr::config::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrConfig {
-    /// OCR 后端选择：`"windows"` | `"paddleocr"` | `"auto"`。
+    /// OCR 后端选择：`"auto"` | `"paddleocr"` | `"windows"`。
     ///
-    /// 默认 `"windows"`（WinRT）。未知值回落到 `"windows"`。
+    /// 默认 `"auto"`（0.22.10 起：已安装 PaddleOCR 优先并允许冷启动）。
+    /// 未知值回落到 `"auto"`。
     #[serde(default = "default_backend", deserialize_with = "deserialize_backend")]
     pub backend: OcrBackendKind,
 
@@ -56,7 +57,7 @@ pub struct OcrConfig {
 }
 
 fn default_backend() -> OcrBackendKind {
-    OcrBackendKind::Windows
+    OcrBackendKind::Auto
 }
 
 fn default_idle_ttl() -> u32 {
@@ -67,7 +68,7 @@ fn default_compute_preference() -> ComputePreference {
     ComputePreference::Auto
 }
 
-/// 自定义 deserializer：未知字符串回落到 `Windows`。
+/// 自定义 deserializer：未知字符串回落到 `Auto`（0.22.10 起默认）。
 fn deserialize_backend<'de, D>(deserializer: D) -> Result<OcrBackendKind, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -80,9 +81,9 @@ where
         _ => {
             tracing::warn!(
                 value = %s,
-                "OcrConfig.backend 未知值，回落到 windows"
+                "OcrConfig.backend 未知值，回落到 auto"
             );
-            Ok(OcrBackendKind::Windows)
+            Ok(OcrBackendKind::Auto)
         }
     }
 }
@@ -240,7 +241,7 @@ pub fn update_cache(config: &OcrConfig) {
 /// 同步读取配置缓存。
 ///
 /// **Task 15**: LazyLock 保证缓存始终存在，不会返回 "未初始化" 的 default。
-/// 默认值仍为 `backend = windows`。
+/// 默认值仍为 `backend = auto`（0.22.10 起）。
 pub fn get_ocr_config() -> OcrConfig {
     CONFIG_CACHE.read().map(|g| g.clone()).unwrap_or_default()
 }
@@ -268,9 +269,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_windows_backend() {
+    fn default_is_auto_backend() {
         let cfg = OcrConfig::default();
-        assert_eq!(cfg.backend, OcrBackendKind::Windows);
+        assert_eq!(cfg.backend, OcrBackendKind::Auto);
         assert_eq!(cfg.paddle_model, PaddleModel::Tiny);
         assert_eq!(cfg.lifecycle, OcrLifecycle::OnDemand);
         assert_eq!(cfg.idle_ttl_seconds, 300);
@@ -295,17 +296,17 @@ mod tests {
     }
 
     #[test]
-    fn serde_unknown_backend_falls_back_to_windows() {
+    fn serde_unknown_backend_falls_back_to_auto() {
         let json = r#"{"backend":"unknown_value"}"#;
         let cfg: OcrConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.backend, OcrBackendKind::Windows);
+        assert_eq!(cfg.backend, OcrBackendKind::Auto);
     }
 
     #[test]
     fn serde_missing_all_fields_uses_defaults() {
         let json = r#"{}"#;
         let cfg: OcrConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.backend, OcrBackendKind::Windows);
+        assert_eq!(cfg.backend, OcrBackendKind::Auto);
         assert_eq!(cfg.paddle_model, PaddleModel::Tiny);
         assert_eq!(cfg.idle_ttl_seconds, 300);
     }
@@ -536,14 +537,14 @@ mod tests {
             ..Default::default()
         });
 
-        // SQLite 无配置——load_and_init_cache 返回 default
+        // SQLite 无配置——load_and_init_cache 返回 default（0.22.10 起为 Auto）
         let loaded = load_and_init_cache(&pool).await;
-        assert_eq!(loaded.backend, OcrBackendKind::Windows);
+        assert_eq!(loaded.backend, OcrBackendKind::Auto);
         assert_eq!(loaded.compute_preference, ComputePreference::Auto);
 
         // 缓存也应为 default
         let cached = get_ocr_config();
-        assert_eq!(cached.backend, OcrBackendKind::Windows);
+        assert_eq!(cached.backend, OcrBackendKind::Auto);
 
         // 清理
         reset_cache_for_test();

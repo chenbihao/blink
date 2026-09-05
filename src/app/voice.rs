@@ -281,15 +281,13 @@ impl VoiceService {
                             // 0.22.7.4：worker 传输是唯一本地实现，endpoint
                             // 不承载地址语义（host/port 为诊断占位）。
                             match conn.worker {
-                                Some(transport) => {
-                                    Some(crate::domain::stt::SttEngineConnection {
-                                        host: "127.0.0.1".to_string(),
-                                        port: 0,
-                                        engine_id: conn.engine_id,
-                                        instance_id: conn.instance_id,
-                                        transport: Some(transport),
-                                    })
-                                }
+                                Some(transport) => Some(crate::domain::stt::SttEngineConnection {
+                                    host: "127.0.0.1".to_string(),
+                                    port: 0,
+                                    engine_id: conn.engine_id,
+                                    instance_id: conn.instance_id,
+                                    transport: Some(transport),
+                                }),
                                 None => {
                                     tracing::warn!(
                                         engine = %conn.engine_id,
@@ -335,9 +333,7 @@ impl VoiceService {
                     match conn.transport.as_ref() {
                         Some(transport) => match transport.check_ready().await {
                             Ok(()) => (true, String::new()),
-                            Err(e) => {
-                                (false, format!("语音服务不可用：{e}。请在设置页重启服务。"))
-                            }
+                            Err(e) => (false, format!("语音服务不可用：{e}。请在设置页重启服务。")),
                         },
                         None => (
                             false,

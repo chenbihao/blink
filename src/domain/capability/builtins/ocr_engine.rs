@@ -56,6 +56,17 @@ pub struct OcrResult {
     /// WinRT / FakeOcrBackend 等不产生 char_boxes，序列化时省略（`skip_serializing_if`）。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub char_boxes: Vec<OcrCharBox>,
+    /// 本次实际使用的引擎（0.22.10 新增）。
+    ///
+    /// 由 capability 层从 RouteDecision 注入；直连 `backend()` 的路径为 `None`。
+    /// 序列化缺省以保持旧消费者兼容。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_used: Option<crate::domain::ocr::config::OcrBackendKind>,
+    /// auto 模式下回退 WinRT 的原因（0.22.10 新增）。
+    ///
+    /// 复用 `RouteDecision.fallback_reason`；未发生回退为 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_fallback_reason: Option<String>,
 }
 
 /// OCR 单行结果
@@ -572,6 +583,8 @@ pub fn rebuild_with_line_grouping_and_diag(
     if words.is_empty() {
         return (
             OcrResult {
+                backend_used: None,
+                backend_fallback_reason: None,
                 text: String::new(),
                 lines: Vec::new(),
                 words: Vec::new(),
@@ -684,6 +697,8 @@ pub fn rebuild_with_line_grouping_and_diag(
 
     (
         OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text,
             lines,
             words,
@@ -1085,6 +1100,8 @@ impl OcrBackend for FakeOcrBackend {
             return Err(OcrError::Engine(msg.clone()));
         }
         Ok(OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: self.text.clone(),
             lines: self.lines.clone(),
             words: self.words.clone(),

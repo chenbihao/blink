@@ -151,7 +151,7 @@ await test("安装中：摘要与反馈默认可见 operation 阶段", () => {
 
 // ── 3. 已安装但停止 ──────────────────────────────────────────────────────────
 
-await test("已安装但停止：已就绪 · 模型 · 策略；主操作=启动", () => {
+await test("已安装但停止：已就绪 · 策略（模型名只在 config 区展示）；主操作=启动", () => {
     const entry = makeEntry("funasr", {
         status: READY_STOPPED,
         models: [makeModel({is_selected: true})],
@@ -160,7 +160,8 @@ await test("已安装但停止：已就绪 · 模型 · 策略；主操作=启�
     const summary = computeEngineSummary(entry, t);
     assert.equal(summary.tone, "neutral");
     assert.ok(summary.text.startsWith("已就绪"), summary.text);
-    assert.ok(summary.text.includes("SenseVoiceSmall"), summary.text);
+    // 0.22.10：摘要不再带模型名（config 区「当前模型」是唯一展示位）
+    assert.ok(!summary.text.includes("SenseVoiceSmall"), summary.text);
     assert.ok(summary.text.includes("手动启动"), summary.text);
 
     const action = primaryActionView(entry, t);
@@ -206,7 +207,7 @@ await test("正在启动：主操作为禁用的「启动中」", () => {
 
 // ── 5. 运行且模型 ready ──────────────────────────────────────────────────────
 
-await test("运行且模型 ready：运行中 · 模型 · 实际设备；主操作=停止服务", () => {
+await test("运行且模型 ready：运行中 · 实际设备（不带模型名）；主操作=停止服务", () => {
     const entry = makeEntry("funasr", {
         status: {
             ...RUNNING_READY,
@@ -228,17 +229,18 @@ await test("运行且模型 ready：运行中 · 模型 · 实际设备；主操
     const summary = computeEngineSummary(entry, t);
     assert.equal(summary.tone, "ok");
     assert.ok(summary.text.startsWith("运行中"), summary.text);
-    assert.ok(summary.text.includes("SenseVoiceSmall"), summary.text);
     assert.ok(summary.text.includes("CPU"), summary.text);
+    // 0.22.10：模型名不在摘要重复——config 区「当前模型」展示
+    assert.ok(!summary.text.includes("SenseVoiceSmall"), summary.text);
 
     const action = primaryActionView(entry, t);
     assert.equal(action.kind, "stop");
     assert.equal(action.label, "停止服务");
 
-    // 空闲反馈：手动引擎
+    // 空闲成功反馈：不再重复文案（摘要已表达），槽留空占位
     const feedback = computeFeedback(entry, t);
     assert.equal(feedback.tone, "ok");
-    assert.ok(feedback.text.includes("服务运行中"), feedback.text);
+    assert.equal(feedback.text, "");
 });
 
 // ── 6. backend mismatch ──────────────────────────────────────────────────────
@@ -283,13 +285,14 @@ await test("PaddleOCR 按需待机：策略与主操作（启动）", () => {
     });
     const summary = computeEngineSummary(entry, t);
     assert.ok(summary.text.includes("按需启动"), summary.text);
-    assert.ok(summary.text.includes("PP-OCRv6 Server"), summary.text);
+    // 0.22.10：模型名不在摘要重复——config 区「当前模型」展示
+    assert.ok(!summary.text.includes("PP-OCRv6 Server"), summary.text);
 
     const action = primaryActionView(entry, t);
     assert.equal(action.kind, "start");
     assert.equal(action.label, "启动");
 
-    // 空闲反馈：按需说明
+    // 空闲反馈：按需说明（未运行态保留行动指引）
     const feedback = computeFeedback(entry, t);
     assert.ok(feedback.text.includes("按需启动"), feedback.text);
 });

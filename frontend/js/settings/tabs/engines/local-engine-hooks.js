@@ -106,8 +106,11 @@ function syncFunasrRuntimeGroup(container, entry) {
 /**
  * 渲染"当前模型"只读组 + selected≠active 待重启提示。
  * 当前模型的切换入口在模型列表/语音页，本区不复制选择命令。
+ *
+ * @param {boolean} [inline=false] - true 时不独占整行（`le-config-group-model-inline`），
+ *   允许后续组（如 OCR 的 ONNX 资产）排在同一行；空间不足时后组整体换行。
  */
-function appendCurrentModelGroup(container, entry) {
+function appendCurrentModelGroup(container, entry, inline = false) {
     const models = entry.models;
     const selected = Array.isArray(models) ? models.find((m) => m.is_selected) : null;
     const active = Array.isArray(models) ? models.find((m) => m.is_active) : null;
@@ -116,7 +119,9 @@ function appendCurrentModelGroup(container, entry) {
         || "—";
 
     const group = makeGroup(t("local_engine.config.current_model"));
-    group.className += " le-config-group-model";
+    group.className += inline
+        ? " le-config-group-model-inline"
+        : " le-config-group-model";
     const value = document.createElement("span");
     value.className = "le-config-static le-current-model-value";
     value.textContent = name;
@@ -479,11 +484,12 @@ function registerPaddleOcrHook() {
             if (!catalog) return;
 
             const prefs = entry.preferences;
-            const currentBackend = prefs?.ocr_backend || "windows";
+            // 0.22.10: 默认 auto（与后端 OcrBackendKind::default() 一致）
+            const currentBackend = prefs?.ocr_backend || "auto";
             const currentLifecycle = prefs?.lifecycle || catalog.lifecycle || "on_demand";
 
-            // 当前模型（只读）+ 待重启提示
-            appendCurrentModelGroup(container, entry);
+            // 当前模型（只读）+ 待重启提示；inline 让 ONNX 资产组跟在同一行
+            appendCurrentModelGroup(container, entry, true);
 
             // 0.22.8-E: ONNX 资产状态（ORT / det / rec / dict 大小）
             appendOnnxAssetStatusGroup(container, entry);
@@ -499,7 +505,7 @@ function registerPaddleOcrHook() {
             const backendSelect = document.createElement("select");
             backendSelect.className = "le-config-select le-ocr-backend-select";
             backendSelect.dataset.savedValue = currentBackend;
-            for (const backend of ["windows", "paddleocr", "auto"]) {
+            for (const backend of ["auto", "paddleocr", "windows"]) {
                 const option = document.createElement("option");
                 option.value = backend;
                 option.textContent = t(`local_engine.ocr_backend.${backend}`, backend);
@@ -635,7 +641,7 @@ function registerPaddleOcrHook() {
             }
 
             const backend = container.querySelector(".le-ocr-backend-select");
-            const nextBackend = entry.preferences?.ocr_backend || "windows";
+            const nextBackend = entry.preferences?.ocr_backend || "auto";
             if (backend) {
                 if (backend.value !== nextBackend) backend.value = nextBackend;
                 backend.dataset.savedValue = nextBackend;

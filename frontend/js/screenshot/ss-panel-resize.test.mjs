@@ -11,8 +11,6 @@ import {
     clampPanelToMonitor,
     PANEL_MIN_W,
     PANEL_MIN_H,
-    PANEL_MAX_W,
-    PANEL_MAX_H,
 } from './ss-panel-resize.js';
 
 // ── 断言辅助 ──────────────────────────────────────────────────────────────
@@ -59,11 +57,6 @@ test('clampPanelSize: 过小值钳制到最小', () => {
     assertEqual(r, {w: PANEL_MIN_W, h: PANEL_MIN_H}, '过小值应钳制到最小');
 });
 
-test('clampPanelSize: 过大值钳制到最大', () => {
-    const r = clampPanelSize(9999, 9999);
-    assertEqual(r, {w: PANEL_MAX_W, h: PANEL_MAX_H}, '过大值应钳制到最大');
-});
-
 test('clampPanelSize: 宽度过小但高度正常', () => {
     const r = clampPanelSize(100, 300);
     assertEqual(r, {w: PANEL_MIN_W, h: 300}, '只钳制宽度');
@@ -74,9 +67,9 @@ test('clampPanelSize: 等于最小值时不钳制', () => {
     assertEqual(r, {w: PANEL_MIN_W, h: PANEL_MIN_H}, '等于最小值应原样返回');
 });
 
-test('clampPanelSize: 等于最大值时不钳制', () => {
-    const r = clampPanelSize(PANEL_MAX_W, PANEL_MAX_H);
-    assertEqual(r, {w: PANEL_MAX_W, h: PANEL_MAX_H}, '等于最大值应原样返回');
+test('clampPanelSize: 0.22.10 起无固定最大上限', () => {
+    const r = clampPanelSize(9999, 9999);
+    assertEqual(r, {w: 9999, h: 9999}, '超大值不再被固定上限截断');
 });
 
 // ── computeResizedPanel ─────────────────────────────────────────────────────
@@ -102,9 +95,9 @@ test('computeResizedPanel: 缩到低于最小值时钳制', () => {
     assertEqual(r, {w: PANEL_MIN_W, h: PANEL_MIN_H}, '过度缩小应钳制到最小');
 });
 
-test('computeResizedPanel: 放到超过最大值时钳制', () => {
-    const r = computeResizedPanel(700, 600, 500, 500, 1);
-    assertEqual(r, {w: PANEL_MAX_W, h: PANEL_MAX_H}, '过度放大应钳制到最大');
+test('computeResizedPanel: 超大拖拽值不被固定值截断（上限由显示器边界承担）', () => {
+    const r = computeResizedPanel(700, 600, 4300, 3400, 1);
+    assertEqual(r, {w: 5000, h: 4000}, '超大拖拽应原样放大');
 });
 
 test('computeResizedPanel: uiScale=1.5 时的混合补偿', () => {
@@ -147,6 +140,15 @@ test('clampPanelToMonitor: uiScale=2 越界时收束', () => {
     // PANEL_MIN_W * 2 = 560 > 412 → allowedVisW = 560
     // clampedVisW = min(800, 560) = 560 → newW = 560/2 = 280
     assertEqual(r.w, PANEL_MIN_W, 'uiScale=2 越界应收束到最小值');
+});
+
+test('clampPanelToMonitor: 超大面板收束到显示器边界内', () => {
+    const mon = {x: 0, y: 0, w: 1920, h: 1080};
+    // left=100, top=100, w=5000, h=4000 → 右边界=5100, 下边界=4100，远超 1920×1080
+    const r = clampPanelToMonitor(100, 100, 5000, 4000, 1, mon);
+    // maxVisW = 1920-8-100 = 1812, maxVisH = 1080-8-100 = 972
+    assertEqual(r.w, 1812, '宽度收束到显示器右边界');
+    assertEqual(r.h, 972, '高度收束到显示器下边界');
 });
 
 test('clampPanelToMonitor: 自定义 margin 且面板小于最小值时仍钳制到最小', () => {

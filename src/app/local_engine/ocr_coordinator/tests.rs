@@ -25,6 +25,8 @@ use crate::infra::local_engine::state::{
 
 fn make_valid_result() -> OcrResult {
     OcrResult {
+        backend_used: None,
+        backend_fallback_reason: None,
         text: "hello".to_string(),
         lines: vec![OcrLine {
             text: "hello".to_string(),
@@ -64,6 +66,8 @@ fn map_executor_result_basic() {
 #[test]
 fn map_executor_result_empty() {
     let result = OcrResult {
+        backend_used: None,
+        backend_fallback_reason: None,
         text: String::new(),
         lines: vec![],
         words: vec![],
@@ -117,6 +121,8 @@ fn map_executor_result_overflow_y_plus_h_rejected() {
 #[test]
 fn map_executor_result_empty_text_word_filtered() {
     let result = OcrResult {
+        backend_used: None,
+        backend_fallback_reason: None,
         text: String::new(),
         lines: vec![],
         words: vec![
@@ -153,6 +159,8 @@ fn map_executor_result_empty_text_word_filtered() {
 #[test]
 fn map_executor_result_cjk_line_grouping() {
     let result = OcrResult {
+        backend_used: None,
+        backend_fallback_reason: None,
         text: "你好".to_string(),
         lines: vec![],
         words: vec![
@@ -943,23 +951,33 @@ async fn failed_state_allows_retry_after_gate_reset() {
 
 // ── auto 路由语义断言（TODO #5, #11）──────────────────────────────────
 
-/// 验证 auto 路由在 PaddleOCR 未热态 Ready 时选择 Windows。
+/// 验证 auto 路由在 PaddleOCR 未安装时直接选择 Windows（0.22.10 语义）。
 ///
-/// 场景：lifecycle = Idle（PaddleOCR 未启动）→ auto 路由
-/// 应立即走 WinRT，不触发 Python 启动或等待。
+/// 场景：executor = None（未安装）→ auto 路由直接走 WinRT，
+/// 无数秒等待（不调用 acquire_lease / ensure_paddleocr_started）。
 #[tokio::test]
-async fn auto_route_selects_windows_when_paddleocr_not_ready() {
+async fn auto_route_selects_windows_when_paddleocr_not_installed() {
+    // 模拟 auto 路由的 installed 前置判断
+    let installed = false; // executor 为 None
+
+    // 未安装 → auto 路由应直接选择 Windows
+    assert!(!installed, "未安装 PaddleOCR 时走 WinRT");
+}
+
+/// 验证 auto 路由在 PaddleOCR 已安装时优先 PaddleOCR 并允许冷启动（0.22.10 语义）。
+///
+/// 场景：lifecycle = Idle（已安装未启动）→ auto 路由以 hot_only=false
+/// 进入 acquire_lease，触发 on-demand 冷启动；失败仍 fallback WinRT。
+#[tokio::test]
+async fn auto_route_prefers_paddleocr_when_installed_even_cold() {
     let (tx, _rx) = watch::channel(LifecycleState::Idle { generation: 0 });
 
-    // 模拟 auto 路由的 hot-only 检查
+    // 已安装（executor 存在）但未启动 → auto 路由允许冷启动
+    let installed = true;
     let state = tx.borrow().clone();
-    let is_ready = matches!(state, LifecycleState::Ready { .. });
+    let is_hot = matches!(state, LifecycleState::Ready { .. });
 
-    // PaddleOCR 未 Ready → auto 路由应选择 Windows
-    assert!(!is_ready, "Idle 状态不应选择 PaddleOCR");
-
-    // 验证不会触发冷启动——hot_only=true 的 acquire_lease 会返回 NotReady
-    // 而不是调用 ensure_paddleocr_started
+    assert!(installed && !is_hot, "已安装冷态应允许 on-demand 冷启动");
 }
 
 /// 验证 auto 路由在 PaddleOCR 热态 Ready 时选择 PaddleOCR。

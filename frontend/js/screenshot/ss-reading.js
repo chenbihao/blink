@@ -143,15 +143,15 @@ function hitTestWord(cssX, cssY) {
     const px = bmp.x;
     const py = bmp.y;
 
-    // 优先走 char_boxes（逐字符 hit-test）
-    if (ss.reading.charBoxes && ss.reading.charBoxes.length > 0) {
+    // 0.22.10: char 轨下直接返回 char_box index（字符级选择，不再映射回整行 word）
+    if (useCharTrack()) {
         for (let i = 0; i < ss.reading.charBoxes.length; i++) {
             const r = ss.reading.charBoxes[i].rect;
             if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
-                // 返回 char_box 所在的 word index（通过 line_index 关联）
-                return ss.reading.charBoxToWord[i];
+                return i;
             }
         }
+        return -1;
     }
 
     // 降级：走 word 级 hit-test
@@ -162,6 +162,11 @@ function hitTestWord(cssX, cssY) {
     return -1;
 }
 
+/** 当前是否使用 char_box 选择轨（0.22.10：有 char_boxes 即字符级选择） */
+function useCharTrack() {
+    return !!(ss.reading && ss.reading.charBoxes && ss.reading.charBoxes.length > 0);
+}
+
 /** 找出接近点击点(垂直方向)的最近 word——空白处点击时靠近哪 word 就选哪 */
 function nearestWordByLine(cssX, cssY) {
     if (!ss.reading || ss.reading.words.length === 0) return -1;
@@ -170,8 +175,8 @@ function nearestWordByLine(cssX, cssY) {
     const px = bmp.x;
     const py = bmp.y;
 
-    // 优先用 char_boxes 找最近行
-    if (ss.reading.charBoxes && ss.reading.charBoxes.length > 0) {
+    // 0.22.10: char 轨——先找最近行，再找该行最近 char_box（返回 char_box index）
+    if (useCharTrack()) {
         let bestLine = ss.reading.charBoxes[0].lineIndex;
         let bestDy = Infinity;
         for (const cb of ss.reading.charBoxes) {
@@ -182,8 +187,7 @@ function nearestWordByLine(cssX, cssY) {
                 bestLine = cb.lineIndex;
             }
         }
-        // 找该行最近的 char_box → 映射到 word
-        let bestCharIdx = -1;
+        let bestIdx = -1;
         let bestDx = Infinity;
         for (let i = 0; i < ss.reading.charBoxes.length; i++) {
             const cb = ss.reading.charBoxes[i];
@@ -192,10 +196,10 @@ function nearestWordByLine(cssX, cssY) {
             const dx = Math.abs(cx - px);
             if (dx < bestDx) {
                 bestDx = dx;
-                bestCharIdx = i;
+                bestIdx = i;
             }
         }
-        if (bestCharIdx >= 0) return ss.reading.charBoxToWord[bestCharIdx];
+        return bestIdx;
     }
 
     // 降级：走 word 级
@@ -230,8 +234,8 @@ function redrawHitLayer() {
     const {hitCtx, hitCanvas} = ss;
     hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
 
-    // 当有 char_boxes 时，高亮选中 word 对应的 char_boxes
-    const useCharBoxes = ss.reading.charBoxes && ss.reading.charBoxes.length > 0;
+    // 0.22.10: char 轨下选择索引即 char_box index，[lo,hi] 就是连续字符段
+    const useCharBoxes = useCharTrack();
 
     if (ss.reading.selectionStart !== null && ss.reading.selectionEnd !== null) {
         const lo = Math.min(ss.reading.selectionStart, ss.reading.selectionEnd);
@@ -239,12 +243,9 @@ function redrawHitLayer() {
         hitCtx.fillStyle = 'rgba(74, 158, 255, 0.35)';
 
         if (useCharBoxes) {
-            // 高亮选中 word 范围内的所有 char_boxes
             for (let i = lo; i <= hi; i++) {
-                for (const cbIdx of ss.reading.wordToCharBoxes[i] || []) {
-                    const r = ss.reading.charBoxes[cbIdx].rect;
-                    hitCtx.fillRect(r.x, r.y, r.w, r.h);
-                }
+                const r = ss.reading.charBoxes[i].rect;
+                hitCtx.fillRect(r.x, r.y, r.w, r.h);
             }
         } else {
             for (let i = lo; i <= hi; i++) {
@@ -261,10 +262,8 @@ function redrawHitLayer() {
 
         if (useCharBoxes) {
             for (let i = lo; i <= hi; i++) {
-                for (const cbIdx of ss.reading.wordToCharBoxes[i] || []) {
-                    const r = ss.reading.charBoxes[cbIdx].rect;
-                    hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
-                }
+                const r = ss.reading.charBoxes[i].rect;
+                hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
             }
         } else {
             for (let i = lo; i <= hi; i++) {
@@ -275,13 +274,11 @@ function redrawHitLayer() {
     }
     if (ss.reading.hoverWord !== null && ss.reading.hoverWord >= 0) {
         if (useCharBoxes) {
-            // hover 时高亮该 word 的所有 char_boxes
-            for (const cbIdx of ss.reading.wordToCharBoxes[ss.reading.hoverWord] || []) {
-                const r = ss.reading.charBoxes[cbIdx].rect;
-                hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-                hitCtx.lineWidth = 1;
-                hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
-            }
+            // hover 时高亮该 char_box
+            const r = ss.reading.charBoxes[ss.reading.hoverWord].rect;
+            hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            hitCtx.lineWidth = 1;
+            hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
         } else {
             const r = ss.reading.words[ss.reading.hoverWord].rect;
             hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
@@ -373,6 +370,8 @@ export function enterReadingMode(result) {
         charBoxes,
         charBoxToWord,
         wordToCharBoxes,
+        // 0.22.10: char_box index → 全文 UTF-16 offset（字符级选择轨）
+        charBoxRanges: computeCharBoxRanges(rawCharBoxes, fullText),
         selectionStart: null,
         selectionEnd: null,
         panelDirty: false,
@@ -483,6 +482,21 @@ function bindHitCanvasEvents() {
         let idx = hitTestWord(e.offsetX, e.offsetY);
         if (idx < 0) idx = nearestWordByLine(e.offsetX, e.offsetY);
         if (idx < 0) return;
+        // 0.22.10: char 轨下双击 = 该行的连续 char_box 段
+        if (useCharTrack()) {
+            const charLine = ss.reading.charBoxes[idx].lineIndex;
+            let clo = idx, chi = idx;
+            while (clo > 0 && ss.reading.charBoxes[clo - 1].lineIndex === charLine) clo--;
+            while (chi < ss.reading.charBoxes.length - 1 && ss.reading.charBoxes[chi + 1].lineIndex === charLine) chi++;
+            ss.reading.selectionStart = clo;
+            ss.reading.selectionEnd = chi;
+            redrawHitLayer();
+            if (!document.getElementById('ocr-panel') && ss.ocrResultCache) {
+                if (typeof ss._showOcrResult === 'function') ss._showOcrResult(ss.ocrResultCache);
+            }
+            syncSelectionToPanel();
+            return;
+        }
         const line = ss.reading.words[idx].lineIndex;
         let lo = idx, hi = idx;
         while (lo > 0 && ss.reading.words[lo - 1].lineIndex === line) lo--;
@@ -514,8 +528,9 @@ function syncSelectionToPanel() {
     if (ss.reading.panelDirty) return;
     const lo = Math.min(ss.reading.selectionStart, ss.reading.selectionEnd);
     const hi = Math.max(ss.reading.selectionStart, ss.reading.selectionEnd);
-    const cs = ss.reading.charRanges[lo].start;
-    const ce = ss.reading.charRanges[hi].end;
+    const ranges = useCharTrack() ? ss.reading.charBoxRanges : ss.reading.charRanges;
+    const cs = ranges[lo].start;
+    const ce = ranges[hi].end;
     ta.focus();
     ta.setSelectionRange(cs, ce);
 }
@@ -532,9 +547,10 @@ export function syncSelectionFromPanel(ta) {
         redrawHitLayer();
         return;
     }
+    const ranges = useCharTrack() ? ss.reading.charBoxRanges : ss.reading.charRanges;
     let lo = -1, hi = -1;
-    for (let i = 0; i < ss.reading.charRanges.length; i++) {
-        const r = ss.reading.charRanges[i];
+    for (let i = 0; i < ranges.length; i++) {
+        const r = ranges[i];
         if (r.end > cs && lo === -1) lo = i;
         if (r.start < ce) hi = i;
         if (r.start >= ce) break;
@@ -550,8 +566,9 @@ export function getReadingSelectionText() {
     if (!ss.reading || ss.reading.selectionStart === null || ss.reading.selectionEnd === null) return '';
     const lo = Math.min(ss.reading.selectionStart, ss.reading.selectionEnd);
     const hi = Math.max(ss.reading.selectionStart, ss.reading.selectionEnd);
-    const cs = ss.reading.charRanges[lo]?.start;
-    const ce = ss.reading.charRanges[hi]?.end;
+    const ranges = useCharTrack() ? ss.reading.charBoxRanges : ss.reading.charRanges;
+    const cs = ranges[lo]?.start;
+    const ce = ranges[hi]?.end;
     if (!Number.isInteger(cs) || !Number.isInteger(ce)) return '';
     return ss.reading.fullText.slice(cs, ce);
 }
@@ -584,21 +601,14 @@ export function showReadingContextMenu(text, mouseEvent) {
 
     const menu = document.createElement('div');
     menu.id = 'reading-ctx-menu';
-    menu.style.cssText = `
-    position: fixed; left: ${x}px; top: ${y}px; z-index: 9999;
-    background: rgba(30,30,30,0.96); border: 1px solid rgba(255,255,255,0.15);
-    border-radius: 8px; padding: 4px; min-width: 120px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-    font-family: "Segoe UI","Microsoft YaHei",sans-serif; font-size: 13px;
-  `;
+    menu.className = 'reading-ctx-menu';
+    // 定位随鼠标动态计算，仅 left/top 走 inline（0.22.10：视觉样式迁入 CSS）
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
     const makeItem = (label, fn) => {
         const btn = document.createElement('div');
+        btn.className = 'reading-ctx-menu-item';
         btn.textContent = label;
-        btn.style.cssText = `
-      padding: 6px 12px; color: #ddd; cursor: pointer; border-radius: 6px;
-    `;
-        btn.addEventListener('mouseenter', () => btn.style.background = 'rgba(255,255,255,0.08)');
-        btn.addEventListener('mouseleave', () => btn.style.background = '');
         btn.addEventListener('click', () => {
             fn();
             menu.remove();

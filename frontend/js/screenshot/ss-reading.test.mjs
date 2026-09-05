@@ -317,3 +317,95 @@ describe('computeCharBoxRanges — 逐字符框 UTF-16 转换', () => {
         assert.deepStrictEqual(computeCharBoxRanges(undefined, 'hello'), []);
     });
 });
+
+
+// ═══════════════════════════════════════════════════════════
+//  0.22.10: 字符级选择轨（char_box index 段）行为测试
+// ═══════════════════════════════════════════════════════════
+
+const {ss} = await import('./ss-state.js');
+const {getReadingSelectionText, syncSelectionFromPanel} = await import('./ss-reading.js');
+
+/** 构造 char 轨 reading 状态 fixture：两行，每行 3 个 char_box */
+function makeCharTrackReading() {
+    const fullText = 'abc\nghi';
+    // 行1 abc（0-3），换行，行2 ghi（4-7）
+    const charBoxes = [
+        {text: 'a', rect: {x: 0, y: 0, w: 10, h: 10}, lineIndex: 0},
+        {text: 'b', rect: {x: 10, y: 0, w: 10, h: 10}, lineIndex: 0},
+        {text: 'c', rect: {x: 20, y: 0, w: 10, h: 10}, lineIndex: 0},
+        {text: 'g', rect: {x: 0, y: 20, w: 10, h: 10}, lineIndex: 1},
+        {text: 'h', rect: {x: 10, y: 20, w: 10, h: 10}, lineIndex: 1},
+        {text: 'i', rect: {x: 20, y: 20, w: 10, h: 10}, lineIndex: 1},
+    ];
+    // 后端 char_boxes：a(0,1) b(1,2) c(2,3) g(4,5) h(5,6) i(6,7)（Rust char index）
+    const charBoxRanges = [
+        {start: 0, end: 1}, {start: 1, end: 2}, {start: 2, end: 3},
+        {start: 4, end: 5}, {start: 5, end: 6}, {start: 6, end: 7},
+    ];
+    const words = [
+        {text: 'abc', rect: {x: 0, y: 0, w: 30, h: 10}, lineIndex: 0},
+        {text: 'ghi', rect: {x: 0, y: 20, w: 30, h: 10}, lineIndex: 1},
+    ];
+    const charRanges = [{start: 0, end: 3}, {start: 4, end: 7}];
+    ss.reading = {
+        words,
+        charRanges,
+        fullText,
+        charBoxes,
+        charBoxToWord: [0, 0, 0, 1, 1, 1],
+        wordToCharBoxes: [[0, 1, 2], [3, 4, 5]],
+        charBoxRanges,
+        selectionStart: null,
+        selectionEnd: null,
+        panelDirty: false,
+        dragStart: null,
+        hoverWord: null,
+    };
+    ss.hitCtx = {clearRect() {}, fillRect() {}, strokeRect() {}};
+    ss.hitCanvas = {width: 100, height: 100, removeAttribute() {}, style: {}};
+}
+
+describe('0.22.10 字符级选择轨', () => {
+    test('点击行中某字符 → 选中文本为单 char_box 而非整行', () => {
+        makeCharTrackReading();
+        ss.reading.selectionStart = 1;
+        ss.reading.selectionEnd = 1;
+        // 选中 char_box[1] = 'b'，而不是整个 word 'abcdef'
+        assert.strictEqual(getReadingSelectionText(), 'b');
+    });
+
+    test('跨行拖选 → 面板 selection 对应连续文本', () => {
+        makeCharTrackReading();
+        // 从行1 'c'（idx 2）拖到行2 'h'（idx 4）
+        ss.reading.selectionStart = 2;
+        ss.reading.selectionEnd = 4;
+        assert.strictEqual(getReadingSelectionText(), 'c\ngh');
+    });
+
+    test('反向拖选（从右下到左上）lo/hi 正确', () => {
+        makeCharTrackReading();
+        ss.reading.selectionStart = 4;
+        ss.reading.selectionEnd = 1;
+        // [1,4] = b c \n g h
+        assert.strictEqual(getReadingSelectionText(), 'bc\ngh');
+    });
+
+    test('面板 selection 反向映射到 char_box index 段', () => {
+        makeCharTrackReading();
+        const ta = {selectionStart: 5, selectionEnd: 7}; // 'hi'
+        syncSelectionFromPanel(ta);
+        assert.strictEqual(ss.reading.selectionStart, 4);
+        assert.strictEqual(ss.reading.selectionEnd, 5);
+    });
+
+    test('无 char_boxes 时回退 word 轨（WinRT 旧路径不回归）', () => {
+        makeCharTrackReading();
+        ss.reading.charBoxes = [];
+        ss.reading.charBoxRanges = [];
+        ss.reading.selectionStart = 0;
+        ss.reading.selectionEnd = 1;
+        // word 轨：[0,1] = 'abc\nghi'
+        assert.strictEqual(getReadingSelectionText(), 'abc\nghi');
+    });
+});

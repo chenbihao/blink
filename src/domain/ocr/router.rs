@@ -276,6 +276,8 @@ mod tests {
             RouteResult::success(
                 self.decision.clone(),
                 OcrResult {
+                    backend_used: None,
+                    backend_fallback_reason: None,
                     text: self.result_text.clone(),
                     lines: vec![],
                     words: vec![],
@@ -314,6 +316,8 @@ mod tests {
         let result = RouteResult::success(
             decision,
             OcrResult {
+                backend_used: None,
+                backend_fallback_reason: None,
                 text: "hello".into(),
                 lines: vec![],
                 words: vec![],

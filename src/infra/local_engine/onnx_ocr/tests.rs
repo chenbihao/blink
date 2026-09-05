@@ -55,6 +55,8 @@ impl OcrPipeline for FakePipeline {
             std::thread::sleep(Duration::from_millis(self.delay_ms));
         }
         Ok(OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
             text: self.text.clone(),
             lines: vec![OcrLine {
                 text: self.text.clone(),

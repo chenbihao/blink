@@ -1765,7 +1765,8 @@ input.has-secret-hint::placeholder {
 /* ── 存储页：四库统计卡片（统计 + 清理一体） ── */
 .db-stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    /* 320px 起：容纳「性能指标 + 图标缓存 + 清空」这类双统计共享按钮的行 */
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 12px;
     margin: 16px 0;
     align-items: stretch; /* 多卡等高，footer 对齐 */
@@ -1821,13 +1822,6 @@ input.has-secret-hint::placeholder {
     gap: 4px;
 }
 
-.db-card-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    min-height: 22px; /* 无 stats 的库（配置库）留空也保持等高 */
-}
-
 .db-stat {
     font-size: var(--text-sm);
     color: var(--text-sub);
@@ -1836,13 +1830,30 @@ input.has-secret-hint::placeholder {
     border-radius: var(--radius-xs);
 }
 
-.db-card-footer {
+/* 统计-清理行内配对（0.22.10）：统计 chip 靠左成组，操作按钮统一推到行尾——
+   多个统计共享一个清理按钮时（性能指标+图标缓存 / 对话+消息）与按钮同排相邻，
+   归属关系一目了然；行宽不足时整体换行，按钮换行后仍靠右。 */
+.db-stat-row {
     display: flex;
+    align-items: center;
     flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid var(--surface);
+    gap: var(--space-sm, 8px);
+    min-height: 24px; /* 无按钮行保持行高一致 */
+}
+
+.db-stat-row .btn-small {
+    margin-left: auto;
+}
+
+/* 非清理类弱化操作（配置库的重置欢迎提示/清理调试标记） */
+.db-btn-dim {
+    color: var(--text-dim);
+    background: transparent;
+    border-color: var(--surface-2);
+}
+
+.db-btn-dim:hover {
+    color: var(--text-sub);
 }
 
 /* ── 0.16.6 完整清理 ───────────────────────────────────────────────────────── */
