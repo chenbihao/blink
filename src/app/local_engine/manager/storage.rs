@@ -243,7 +243,7 @@ fn scan_engine_storage_blocking(
                 },
                 affected_engine_ids: None,
                 reference_count: None,
-                path_display: None,
+                path_display: Some(dir.display().to_string()),
             });
         }
     }
@@ -274,7 +274,7 @@ fn scan_engine_storage_blocking(
             blocked_reason: None,
             affected_engine_ids: None,
             reference_count: None,
-            path_display: None,
+            path_display: Some(runtime::engine_root(engine_id).display().to_string()),
         });
     }
 
@@ -299,7 +299,7 @@ fn scan_engine_storage_blocking(
             blocked_reason: None,
             affected_engine_ids: None,
             reference_count: None,
-            path_display: None,
+            path_display: Some(model_cache_dir.display().to_string()),
         });
     }
 
@@ -335,7 +335,7 @@ fn scan_engine_storage_blocking(
             blocked_reason: Some("model_managed".to_string()),
             affected_engine_ids: None,
             reference_count: None,
-            path_display: None,
+            path_display: Some(asset_dir.display().to_string()),
         });
     }
 
@@ -415,10 +415,10 @@ fn scan_engine_storage_blocking(
                     shared: true,
                     requires_separate_confirmation: true,
                     blocked_reason: blocked,
-                    affected_engine_ids: Some(affected),
-                    reference_count: Some(ref_count),
-                    path_display: None,
-                });
+                affected_engine_ids: Some(affected),
+                reference_count: Some(ref_count),
+                path_display: Some(artifact_dir.display().to_string()),
+            });
             }
         }
     }
@@ -444,7 +444,7 @@ fn scan_engine_storage_blocking(
             blocked_reason: None,
             affected_engine_ids: None,
             reference_count: None,
-            path_display: None,
+            path_display: Some(uv_cache.display().to_string()),
         });
     }
 
@@ -473,7 +473,7 @@ fn scan_engine_storage_blocking(
                 blocked_reason: Some("需单独确认和手动清理".to_string()),
                 affected_engine_ids: None,
                 reference_count: None,
-                path_display: None,
+                path_display: Some(legacy_dir.display().to_string()),
             });
         }
     }

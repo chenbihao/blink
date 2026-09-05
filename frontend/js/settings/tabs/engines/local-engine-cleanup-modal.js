@@ -245,12 +245,20 @@ export function createCleanupModal(opts) {
         const info = document.createElement("div");
         info.className = "le-cleanup-item-info";
 
-        // 标签（textContent，不渲染 path）
+        // 标签（textContent）
         const labelText = target.label_fallback || target.target_id;
         const labelSpan = document.createElement("span");
         labelSpan.className = "le-cleanup-item-title";
         labelSpan.textContent = labelText;
         info.appendChild(labelSpan);
+
+        // 安装路径（0.22.9：后端填充 path_display——回答"这些东西装在哪"）
+        if (target.path_display) {
+            const path = document.createElement("div");
+            path.className = "le-cleanup-item-path";
+            path.textContent = target.path_display;
+            info.appendChild(path);
+        }
 
         // scope/kind
         const scope = document.createElement("span");

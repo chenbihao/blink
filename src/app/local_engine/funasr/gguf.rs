@@ -118,6 +118,7 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                     pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
                     true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.no_incremental_encoder"),
                     timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
+                    punctuation: crate::domain::local_engine::CapabilityFlag::yes(),
                 },
             },
             GgufModelSpec {
@@ -142,6 +143,7 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                     pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
                     true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.no_incremental_encoder"),
                     timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
+                    punctuation: crate::domain::local_engine::CapabilityFlag::no("stt.capability.punctuation.not_in_model"),
                 },
             },
             GgufModelSpec {
@@ -174,6 +176,7 @@ pub fn gguf_model_specs() -> &'static [GgufModelSpec] {
                     pseudo_streaming: crate::domain::local_engine::CapabilityFlag::yes(),
                     true_streaming: crate::domain::local_engine::CapabilityFlag::no("stt.capability.streaming.kv_cleared_per_request"),
                     timestamps: crate::domain::local_engine::CapabilityFlag::no("stt.capability.timestamps.not_exposed"),
+                    punctuation: crate::domain::local_engine::CapabilityFlag::yes(),
                 },
             },
         ]
@@ -212,6 +215,15 @@ pub fn gguf_model_descriptor(
         estimated_size_mb: Some(total_bytes / (1024 * 1024)),
         compatibility_schema: crate::infra::local_engine::worker_proto::WORKER_PROTOCOL_VERSION,
         stt_capabilities: spec.stt_capabilities.clone(),
+        // GGUF 三模型共享同一常驻 worker；中文质量证据：0.22.9 同语料矩阵
+        //（handoff-07F，SenseVoice/Paraformer-zh/Nano CER 均达基线水平）。
+        business: Some(crate::domain::local_engine::ModelBusinessProfile {
+            chinese_quality: "corpus_baseline".to_string(),
+            resource_footprint: "shared_gguf_worker".to_string(),
+            // 0.22.9：Nano（LLM 解码）为推荐模型——质量领先 + 内置标点；
+            // display-only，仅影响设置页「推荐」徽章
+            recommended: true,
+        }),
     }
 }
 

@@ -80,8 +80,11 @@ pub async fn get_local_engine_logs(
 
 /// 获取运行时基础状态（只读）。
 ///
-/// 返回 Python/uv 基础环境状态、所有引擎的汇总概览。
+/// 返回所有本地引擎的汇总概览（环境/进程/服务）。
 /// **只读查询，不安装、不启动、不修改任何状态。**
+///
+/// 0.22.9：移除 `python_provider` 字段——0.22.8 起 OCR 切 ONNX in-process、
+/// FunASR 切 GGUF 常驻 worker，本地引擎已无共享 Python 运行时。
 #[tauri::command]
 pub async fn get_runtime_foundation_status(
     app: tauri::AppHandle,
@@ -104,7 +107,9 @@ pub async fn get_runtime_foundation_status(
         // 状态投影复用 dto 真源函数——不在 command 层复制状态推断规则
         engines.push(serde_json::json!({
             "engine_id": engine_id_str,
-            "display_name": descriptor.display,
+            // 必须取 name 字符串——整个 display 结构体序列化成对象后，
+            // 前端 textContent 渲染为 "[object Object]"
+            "display_name": descriptor.display.name.clone(),
             "environment": environment_health_to_string(snapshot.status.environment),
             "process": project_process_state(&snapshot.status.process),
             "service": service_health_to_string(snapshot.status.service),
@@ -113,7 +118,6 @@ pub async fn get_runtime_foundation_status(
 
     Ok(serde_json::json!({
         "engines": engines,
-        "python_provider": "python_venv",
     }))
 }
 

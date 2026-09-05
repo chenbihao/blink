@@ -42,6 +42,7 @@ pub(crate) mod gguf;
 pub(crate) mod gguf_installer;
 mod health;
 mod launch;
+pub(crate) mod paraformer_online;
 #[cfg(test)]
 mod tests;
 pub(crate) mod worker;
@@ -138,7 +139,16 @@ impl LocalEngineAdapter for FunasrAdapter {
                 )
             })?;
 
-        let launch = gguf::build_funasr_gguf_launch_descriptor(&funasr_config, config, ctx)?;
+        // 0.22.9 Handoff 08：按 start 冻结的 implementation 分派实现内启动构造
+        // （ctx.implementation 由 manager 从编译期绑定表解析后注入，不接受前端提交）。
+        // GGUF 模型走现有 GGUF 构造；ParaformerOnline 走 ONNX worker 构造。
+        let launch = if ctx.implementation
+            == Some(crate::domain::local_engine::ImplementationId::ParaformerOnnxWorker)
+        {
+            paraformer_online::build_paraformer_online_launch_descriptor()?
+        } else {
+            gguf::build_funasr_gguf_launch_descriptor(&funasr_config, config, ctx)?
+        };
 
         Ok(ResolvedLaunch {
             profile: ctx.resolved_profile.clone(),

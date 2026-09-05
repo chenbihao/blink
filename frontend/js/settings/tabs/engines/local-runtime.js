@@ -49,6 +49,14 @@ import {
     setPreferences,
     bindRealOperationId,
 } from "./local-engine-state.js";
+import {
+    beginModelSwitch,
+    resolveModelSwitch,
+    reconcileSelection,
+    clearSelection,
+    createSelectionRequestId,
+    isSwitching,
+} from "./local-engine-selection.js";
 
 // ── 命令清单（与后端 commands/local_engine.rs 逐一核对）─────────────────────────
 
@@ -171,6 +179,9 @@ export function createLocalEngineController(callbacks = {}) {
         if (entry?.status) {
             state = bindRealOperationId(state, engineId, entry.status);
         }
+        // 0.22.9: 兜底收敛——命令结果丢失时，一致快照（selected===active===target）
+        // 允许把 switching 收敛为 idle（单一方向，失败态不由 reconcile 清除）
+        state = reconcileSelection(state, engineId);
     }
 
     /**
@@ -852,8 +863,10 @@ export function createLocalEngineController(callbacks = {}) {
         /**
          * 选择引擎的当前模型（0.22.7：引擎卡片为唯一写入口）。
          *
-         * 调用后端 `set_local_stt_selection`，后端验证模型已安装且可用。
-         * 选择成功后刷新模型列表以更新 is_selected/is_active 标记。
+         * 0.22.9 Handoff 08：后端 `set_local_stt_selection` 是跨 runtime
+         * 切换事务（stop old → commit selected → start target → 失败回滚）。
+         * 前端以 selection 状态机表达事务生命周期（switching → idle /
+         * rolled_back / rollback_failed），requestId 防旧结果覆盖新状态。
          *
          * @param {string} engineId
          * @param {string} modelId
@@ -861,14 +874,38 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async selectModel(engineId, modelId) {
             if (disposed) throw new Error("controller 已 disposed");
+            // single-flight：切换事务在途时拒绝新选择（UI 按钮已禁用，此处兜底）
+            if (isSwitching(state.get(engineId))) {
+                return;
+            }
+            const requestId = createSelectionRequestId();
+            state = clearSelection(state, engineId);
             clearEngineError(engineId);
+            state = beginModelSwitch(state, engineId, {modelId, requestId});
+            notifyStateChange();
             try {
                 await invoke(COMMANDS.SET_SELECTION, {engineId, modelId});
-                // 刷新模型列表——更新 is_selected 标记
+                state = resolveModelSwitch(state, engineId, requestId, {ok: true});
+                state = setTransientError(state, engineId, null);
+                notifyStateChange();
+                // 刷新模型列表——更新 is_selected/is_active 标记
                 await this._refreshModels(engineId);
                 notifyStateChange();
             } catch (e) {
-                const err = reportEngineError(engineId, "model_select", e);
+                const err = normalizeError(e);
+                // 事务结果分类：
+                // - switch_rolled_back：目标失败但已恢复旧模型（selected 未变）
+                // - switch_rollback_failed：双失败（selected=旧模型、active=None）
+                // - 其他：Target 验证/提交失败（零状态变更或未达回滚）
+                state = resolveModelSwitch(state, engineId, requestId, {
+                    ok: false,
+                    errorCode: err.code,
+                    error: err,
+                    detail: err.detail,
+                });
+                reportEngineError(engineId, "model_select", e);
+                // 失败后刷新最终状态，使 last_error / active 投影可见
+                this.refreshStatus().catch(() => {});
                 throw err;
             }
         },
@@ -942,6 +979,8 @@ export function createLocalEngineController(callbacks = {}) {
             try {
                 const models = await invoke(COMMANDS.LIST_MODELS, {engineId});
                 state = setModels(state, engineId, models);
+                // 列表刷新可能携带事务落定后的一致快照——兜底收敛 switching
+                state = reconcileSelection(state, engineId);
                 notifyStateChange();
             } catch (e) {
                 console.warn(`[local-engine] refresh models for ${engineId} failed:`, e);

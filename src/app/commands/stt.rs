@@ -304,81 +304,86 @@ pub async fn set_local_stt_selection(
         ));
     }
 
-    // 3. 更新配置
-    let mut config = crate::app::stt_config::get_stt_config();
-    config.local_stt_selection = Some(LocalSttSelection::new(&engine_id, &model_id));
-    // 同步旧字段（向后兼容）
-    config.local_model_id = Some(model_id.clone());
-    config.local_engine.funasr_model = model_id.clone();
+    // 3. 0.22.9 Handoff 08：跨 runtime 切换事务（单一入口完成 selected 提交、
+    // 停旧、启新、Ready 校验与失败回滚）——配置提交/回写经 manager 注入的
+    // SelectedModelStore 端口（DB + 缓存 + 事件广播），命令层不再自行持久化。
+    let outcome = svc.switch_model(&funasr_eid, &model_id).await;
 
-    // 4. 持久化到数据库
-    let pool = app
-        .try_state::<crate::infra::data::DbPools>()
-        .ok_or_else(|| CommandError::new("internal_error", "DbPools 尚未注册", false))?;
-    crate::domain::config::store::ConfigStore::set(&pool.config, &config)
-        .await
-        .map_err(|e| CommandError::new("save_failed", format!("保存 STT 配置失败: {e}"), false))?;
-
-    // 5. 更新内存缓存
-    crate::app::stt_config::update_cache(&config);
-
-    // 6. 广播配置变更
-    let _ = app.emit(
-        EventNames::CONFIG_CHANGED,
-        serde_json::json!({ "key": "stt:config", "scope": "local_stt_selection" }),
-    );
-
-    tracing::info!(
-        engine_id = %engine_id,
-        model_id = %model_id,
-        "本地 STT 选择已保存"
-    );
-
-    // 7. 0.22.7 模型切换事务：如果引擎正在运行且 active 模型与新选择不一致，
-    // 执行 stop → start 事务切换，使新模型立即生效。
-    // 失败时配置已持久化（第 3-5 步），用户可在引擎页手动重启。
-    let status_snapshot = svc
-        .get_status(&funasr_eid)
-        .await
-        .map_err(CommandError::from)?;
-    if status_snapshot.status.is_process_active() {
-        // 引擎正在运行——检查 active model 是否与新选择一致
-        let active_model = svc.get_current_model_id(&funasr_eid).await.unwrap_or(None);
-        let needs_restart = active_model.as_deref() != Some(model_id.as_str());
-
-        if needs_restart {
+    match outcome {
+        Ok(crate::app::local_engine::manager::SwitchModelOutcome::Completed { implementation }) => {
             tracing::info!(
                 engine_id = %engine_id,
-                old_model = ?active_model,
-                new_model = %model_id,
-                "模型切换事务：引擎运行中且模型不一致，执行 stop → start"
+                model_id = %model_id,
+                implementation = %implementation,
+                "本地 STT 选择已保存并生效（目标模型 Ready）"
             );
-
-            // stop（不回滚配置——配置已持久化，失败时用户可手动重启）
-            if let Err(e) = svc.stop(&funasr_eid).await {
-                tracing::warn!(
-                    engine_id = %engine_id,
-                    error = %e,
-                    "模型切换事务：stop 失败（配置已保存，用户可手动重启）"
-                );
-                // 不返回错误——配置已成功保存，stop 失败不构成选择失败
-                return Ok(());
-            }
-
-            // start（使用新配置——config_source 从 SttConfig 投影读取 funasr_model）
-            let adapter_config =
-                crate::app::local_engine::config_source::adapter_config_for_engine(&funasr_eid)
-                    .ok_or_else(|| {
-                        CommandError::new("internal_error", "无法为引擎构建配置", false)
-                    })?;
-            if let Err(e) = svc.start(&funasr_eid, adapter_config).await {
-                tracing::warn!(
-                    engine_id = %engine_id,
-                    error = %e,
-                    "模型切换事务：start 失败（配置已保存，用户可手动重启）"
-                );
-                // 不返回错误——配置已成功保存，start 失败不构成选择失败
-            }
+        }
+        Ok(crate::app::local_engine::manager::SwitchModelOutcome::CommittedSelectedOnly {
+            implementation,
+        }) => {
+            tracing::info!(
+                engine_id = %engine_id,
+                model_id = %model_id,
+                implementation = %implementation,
+                "本地 STT 选择已保存（引擎未运行，下次启动生效）"
+            );
+        }
+        Ok(crate::app::local_engine::manager::SwitchModelOutcome::RolledBack {
+            target_error,
+            restored_model,
+        }) => {
+            // 目标启动失败但已恢复旧模型——选择未生效，如实告知用户
+            tracing::warn!(
+                engine_id = %engine_id,
+                target = %model_id,
+                restored = ?restored_model,
+                error = %target_error,
+                "模型切换失败，已回滚到旧模型"
+            );
+            return Err(CommandError::with_detail(
+                "switch_rolled_back",
+                format!(
+                    "模型 {model_id} 启动失败，已恢复原模型。原因: {}",
+                    target_error.action_hint
+                ),
+                true,
+                serde_json::json!({
+                    "engine_id": engine_id,
+                    "target_model_id": model_id,
+                    "restored_model": restored_model,
+                }),
+            ));
+        }
+        Err(crate::app::local_engine::manager::SwitchModelFailure::Target(err)) => {
+            tracing::warn!(engine_id = %engine_id, model_id = %model_id, %err, "模型切换事务失败");
+            return Err(CommandError::from(err));
+        }
+        Err(crate::app::local_engine::manager::SwitchModelFailure::RollbackFailed {
+            target_error,
+            rollback_error,
+        }) => {
+            // 恢复也失败：selected=旧模型、active=None（事务内已收敛）；
+            // 双错误如实上抛，不抹成成功
+            tracing::error!(
+                engine_id = %engine_id,
+                target = %model_id,
+                target_error = %target_error,
+                rollback_error = %rollback_error,
+                "模型切换失败且回滚失败（selected 已恢复旧值，引擎已停止）"
+            );
+            return Err(CommandError::with_detail(
+                "switch_rollback_failed",
+                format!(
+                    "模型 {model_id} 启动失败，且恢复原模型也失败（服务已停止，请在引擎页手动启动）。\
+                     目标失败: {}; 恢复失败: {}",
+                    target_error.action_hint, rollback_error.action_hint
+                ),
+                true,
+                serde_json::json!({
+                    "engine_id": engine_id,
+                    "target_model_id": model_id,
+                }),
+            ));
         }
     }
 

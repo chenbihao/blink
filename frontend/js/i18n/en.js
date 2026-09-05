@@ -546,6 +546,8 @@ export const en = {
     "voice.local.model.option": "{name} · {params} · ~{size}",
     "voice.local.model.switched_log": "[Blink] Model selected: {name}",
     "voice.local.model.switched_running_log": "[Blink] Model switched — stop and restart the service to load the new model",
+    // 0.22.9 Handoff 09: read-only model display follows engine-card switch transaction
+    "voice.local.model.switching": "Switching · {model}",
     // Log
     "voice.local.log.title": "Service log",
     "voice.local.log.diagnose_btn": "Diagnose STT",
@@ -1433,7 +1435,7 @@ export const en = {
 
     // ── Runtime foundation (0.22.6) ──
     "local_engine.foundation.title": "Runtime Foundation",
-    "local_engine.foundation.desc": "Shared Python runtime and public cache for all engines. Read-only.",
+    "local_engine.foundation.desc": "Local engine environments and shared model caches, read-only.",
     "local_engine.foundation.refresh": "Refresh",
     "local_engine.foundation.open_dir": "Open root directory",
     "local_engine.foundation.open_engine_dir": "Open engine directory",
@@ -1453,6 +1455,44 @@ export const en = {
     "local_engine.model.pending_restart": "Pending restart",
     "local_engine.model.not_effective": "Not effective",
 
+    // ── Model switch transaction (0.22.9 Handoff 09: cross-runtime) ──
+    "local_engine.selection.switching": "Switching to {model} · stopping old model → starting new model",
+    "local_engine.selection.switching_busy": "Switching",
+    "local_engine.selection.rolled_back": "Target model {model} failed to start, original model restored",
+    "local_engine.selection.rollback_failed": "Target model {model} failed to start, and restoring the original model also failed (service stopped — start it manually from this card)",
+    "local_engine.selection.badge": "Switching",
+
+    // ── Active implementation read-only diagnostics (0.22.9) ──
+    "local_engine.config.runtime_diag": "Runtime",
+    "local_engine.implementation.none": "Not running",
+    "local_engine.implementation.funasr_gguf_worker": "GGUF worker (resident)",
+    "local_engine.implementation.paraformer_onnx_worker": "ONNX worker (dedicated process)",
+    "local_engine.implementation.paddleocr_onnx_in_process": "ONNX in-process",
+
+    // ── Engine card config groups (missing keys since 0.22.8, fixed in Handoff 10) ──
+    "local_engine.config.onnx_assets": "ONNX assets",
+    "local_engine.config.ort_runtime": "ORT",
+    "local_engine.config.models": "Models",
+    "local_engine.config.deployment": "Deployment",
+    "local_engine.config.desired_deployment": "Desired",
+    "local_engine.config.loaded_deployment": "Loaded",
+    "local_engine.config.not_loaded": "Not loaded",
+    "local_engine.config.pending_restart": "Pending restart",
+    "local_engine.config.legacy_deployment": "Legacy Python environment",
+    "local_engine.config.legacy_warning": "Legacy Python OCR environment detected. Legacy Blink builds cannot reuse it after cleanup.",
+
+    // ── Model business traits (0.22.9, display-only; source: descriptor.business) ──
+    "local_engine.business.lang.multi": "Multi-language ({codes})",
+    "local_engine.business.lang.zh": "Chinese",
+    "local_engine.business.streaming.true": "True streaming · live partials",
+    "local_engine.business.streaming.pseudo": "Pseudo streaming · finalized per sentence",
+    "local_engine.business.shared_gguf_worker": "Shared GGUF worker",
+    "local_engine.business.dedicated_onnx_worker": "Dedicated ONNX worker",
+    "local_engine.business.corpus_baseline": "Chinese quality · corpus baseline",
+    "local_engine.business.punctuation.yes": "Punctuation",
+    "local_engine.business.punctuation.no": "No punctuation",
+    "local_engine.model.badge.recommended": "Recommended",
+
     // ── Model list (0.22.6) ──
     "local_engine.model.list.title": "Models",
     "local_engine.model.list.empty": "No model candidates",
@@ -1466,6 +1506,7 @@ export const en = {
     "local_engine.model.action.delete": "Delete",
     "local_engine.model.action.download_confirm_title": "Download model",
     "local_engine.model.action.download_confirm_desc": "Estimated size {size}. You can cancel during download. Start downloading?",
+    "local_engine.model.action.switch_confirm_desc": "Switching while the service is running will stop the current model and start the new one, rolling back automatically on failure. Switch now?",
     "local_engine.model.action.download_confirm_btn": "Download",
     "local_engine.model.action.delete_confirm_title": "Delete model",
     "local_engine.model.action.delete_confirm_desc": "Deleting will free cache space. This cannot be undone.",
@@ -1560,6 +1601,7 @@ export const en = {
     // ── Voice tab local model selector (0.22.6 H4) ──
     "voice.local.model.select_label": "Local STT model",
     "voice.local.model.empty": "No installed models available",
+    "voice.local.model.goto_engines": "Manage on Engines tab",
     "voice.local.model.goto_engines_install": "Go to Engines to install",
     "voice.local.model.goto_engines_hint": "Download a FunASR model from the Engines tab first",
     "voice.local.model.option": "{engine} · {model}",

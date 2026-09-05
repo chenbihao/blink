@@ -14,7 +14,7 @@
 import {invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {onLangChange, t} from "../../i18n/index.js";
-import {ensureLocalRuntimeMounted, waitForEngineCard} from "../index.js";
+import {ensureLocalRuntimeMounted, waitForEngineCard, getLocalEngineEntry} from "../index.js";
 import {navigateSettings} from "../navigation.js";
 
 /**
@@ -549,18 +549,37 @@ function initAudioTest(config) {
     });
 }
 
-// ── FunASR 本地模型展示（0.22.7：只读展示 + 跳转引擎页管理） ────────────────
+// ── FunASR 本地模型展示（0.22.7：只读展示 + 跳转引擎页管理；0.22.9 Handoff 09）──
 
 /**
- * 初始化本地模型只读展示（0.22.7 契约收口）。
+ * revision 比较（字符串化 u64，BigInt 数值比较，禁字典序）。
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean} a > b
+ */
+function revisionGreaterThan(a, b) {
+    try {
+        return BigInt(a) > BigInt(b);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 初始化本地模型只读展示（0.22.7 契约收口；0.22.9 升级状态跟随）。
  *
  * 模型选择的**唯一写入口**在引擎页 FunASR 卡片的模型行"使用"按钮。
  * 语音页只读展示当前选中模型名称，并提供跳转引擎页的入口。
  *
  * 展示逻辑：
- * - 有选中模型 → 显示"引擎 · 模型名"
+ * - 有选中模型 → 显示"FunASR · 模型名"
  * - 选中模型与运行中模型不一致 → 追加"等待重启"标记
+ * - 切换事务在途（引擎页 selection 状态机）→ 显示"切换中"
  * - 无已安装模型 → 显示空状态 + 前往引擎页安装 CTA
+ *
+ * 竞态防护：LOCAL_ENGINE_STATUS 事件按 epoch/revision 防护——同 epoch
+ * 只接受更大 revision，旧快照不得覆盖新显示；事件到达后防抖重拉模型列表
+ * （切换事务 stop/commit/start 期间会推送多条 status）。
  *
  * 模型能力联动（流式开关可见性）仍在此处消费 DTO 的 `stt_capabilities`。
  */
@@ -572,54 +591,71 @@ async function initLocalModelSelect(config) {
     const currentModelId = config.local_stt_selection?.model_id
         || config.local_engine?.funasr_model || "";
 
-    // 拉取引擎模型列表
-    let models;
-    try {
-        models = await invoke("list_engine_models", {engineId: "funasr"});
-    } catch (e) {
-        console.error("list_engine_models failed:", e);
-        nameEl.textContent = t("voice.local.model.load_failed");
-        return;
-    }
-
-    // 只保留已安装且校验通过的模型
-    const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
-    const installed = (models || []).filter(
-        (m) => m.install_state === "installed"
-            && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
-    );
-
-    if (installed.length === 0) {
-        // 无已安装模型 → 空状态 + CTA
-        nameEl.textContent = t("voice.local.model.empty");
-        showEmptyModelCta();
-        return;
-    }
-
-    // 找到选中的模型
-    const selectedModel = installed.find((m) => m.is_selected)
-        || installed.find((m) => m.model_id === currentModelId);
-
-    if (selectedModel) {
-        const engineName = "FunASR";
-        const modelName = selectedModel.display_name || selectedModel.model_id;
-        nameEl.textContent = `${engineName} · ${modelName}`;
-
-        // 检查选中模型与运行中模型是否一致
-        const activeModel = installed.find((m) => m.is_active);
-        if (activeModel && activeModel.model_id !== selectedModel.model_id) {
-            // 选中但运行实例不一致 → 显示"等待重启"提示
-            showRestartHint();
-        } else {
-            hideRestartHint();
+    // ── 渲染（以一次模型列表拉取 + 引擎页 selection 快照为输入）────────
+    async function refreshDisplay() {
+        let models;
+        try {
+            models = await invoke("list_engine_models", {engineId: "funasr"});
+        } catch (e) {
+            console.error("list_engine_models failed:", e);
+            nameEl.textContent = t("voice.local.model.load_failed");
+            return;
         }
 
-        // 根据选中模型的能力更新高级选项可见性
-        applyModelCapabilities(selectedModel.stt_capabilities);
-    } else {
-        // 有已安装模型但无选中 → 提示前往引擎页选择
-        nameEl.textContent = t("voice.local.model.not_selected");
+        // 切换事务在途：显示"切换中"（selection 真源在引擎页状态机，
+        // 语音页只消费不复制规则）
+        const entry = getLocalEngineEntry("funasr");
+        const selection = entry?.selection;
+        if (selection?.phase === "switching") {
+            const target = (models || []).find((m) => m.model_id === selection.targetModelId);
+            nameEl.textContent = t("voice.local.model.switching", {
+                model: target?.display_name || selection.targetModelId,
+            });
+            hideRestartHint();
+            return;
+        }
+
+        // 只保留已安装且校验通过的模型
+        const USABLE_VERIFICATION = ["verified", "unverified", "unknown"];
+        const installed = (models || []).filter(
+            (m) => m.install_state === "installed"
+                && USABLE_VERIFICATION.includes((m.verification_state || "").toLowerCase())
+        );
+
+        if (installed.length === 0) {
+            // 无已安装模型 → 空状态 + CTA
+            nameEl.textContent = t("voice.local.model.empty");
+            showEmptyModelCta();
+            return;
+        }
+
+        // 找到选中的模型
+        const selectedModel = installed.find((m) => m.is_selected)
+            || installed.find((m) => m.model_id === currentModelId);
+
+        if (selectedModel) {
+            const engineName = "FunASR";
+            const modelName = selectedModel.display_name || selectedModel.model_id;
+            nameEl.textContent = `${engineName} · ${modelName}`;
+
+            // 检查选中模型与运行中模型是否一致
+            const activeModel = installed.find((m) => m.is_active);
+            if (activeModel && activeModel.model_id !== selectedModel.model_id) {
+                // 选中但运行实例不一致 → 显示"等待重启"提示
+                showRestartHint();
+            } else {
+                hideRestartHint();
+            }
+
+            // 根据选中模型的能力更新高级选项可见性
+            applyModelCapabilities(selectedModel.stt_capabilities);
+        } else {
+            // 有已安装模型但无选中 → 提示前往引擎页选择
+            nameEl.textContent = t("voice.local.model.not_selected");
+        }
     }
+
+    await refreshDisplay();
 
     // 跳转按钮
     if (gotoBtn) {
@@ -651,6 +687,39 @@ async function initLocalModelSelect(config) {
                 console.error("[voice] goto engines from model display failed:", e);
             }
         });
+    }
+
+    // ── 状态跟随：LOCAL_ENGINE_STATUS 驱动只读显示刷新 ─────────────────
+    // epoch/revision 防护（spec-frontend §5.1）：同 epoch 只接受更大
+    // revision；epoch 变化（服务重启）直接接受。旧快照不得覆盖新显示。
+    let lastEpoch = null;
+    let lastRevision = null;
+    let refreshTimer = null;
+
+    function onFunasrStatus(payload) {
+        if (!payload || payload.engine_id !== "funasr") return;
+        const epoch = payload.service_epoch;
+        const revision = payload.revision;
+        if (lastEpoch !== null && epoch === lastEpoch
+            && lastRevision !== null && !revisionGreaterThan(revision, lastRevision)) {
+            return; // 旧/相同 revision → 丢弃
+        }
+        lastEpoch = epoch;
+        lastRevision = revision;
+
+        // 防抖：切换事务 stop/commit/start 期间推送多条 status，
+        // 只需按最终状态重拉一次模型列表
+        if (refreshTimer != null) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => {
+            refreshTimer = null;
+            refreshDisplay().catch((e) => console.warn("[voice] refresh model display failed:", e));
+        }, 300);
+    }
+
+    try {
+        await listen(EVENTS.LOCAL_ENGINE_STATUS, (event) => onFunasrStatus(event.payload));
+    } catch (e) {
+        console.warn("[voice] LOCAL_ENGINE_STATUS listen failed:", e);
     }
 }
 

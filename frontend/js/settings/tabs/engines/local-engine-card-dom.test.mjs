@@ -458,6 +458,22 @@ await test("诊断头部中重新诊断位于复制诊断左侧", async () => {
     assert.ok(card.textContent.includes("模型文件"), "诊断应展示模型下载/校验状态");
 });
 
+await test("诊断：固定模型契约引擎（paddleocr）不显示「当前模型： 未选择」", async () => {
+    const container = makeContainer();
+    renderEngineCard(container, makeEntry("paddleocr", {status: READY_STOPPED}), controllerStub, undefined);
+    const card = container.querySelector(".le-card");
+    card.querySelector(".le-diagnostic-toggle").click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 断言收窄到诊断清单——卡片配置区（adapter hook）本身有"当前模型"标签
+    const checklist = card.querySelector(".le-diagnostic-checklist");
+    assert.ok(checklist, "诊断检查清单应存在");
+    assert.ok(!checklist.textContent.includes("当前模型"), "无模型目录引擎不应渲染模型检查项");
+    assert.ok(!checklist.textContent.includes("未选择"), "固定契约不应报未选择警告");
+    assert.ok(checklist.textContent.includes("引擎部署"), "其余检查清单保留");
+});
+
 // ── 4. 模型列表默认折叠 + 摘要不丢 ───────────────────────────────────────────
 
 await test("模型列表默认折叠，selected/active 摘要仍在默认卡片可见", () => {

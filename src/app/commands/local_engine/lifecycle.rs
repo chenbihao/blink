@@ -138,7 +138,7 @@ pub async fn install_local_engine(
             .map(|s| s.inner().clone())
     {
         let new_executor =
-            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
         if let Some(executor) = new_executor {
             coordinator.inject_executor(executor).await;
         }
@@ -193,9 +193,7 @@ pub async fn start_local_engine(
         {
             // 从 deployment 构建 executor
             let new_executor =
-                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(
-                    &svc,
-                );
+                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
             if let Some(executor) = new_executor {
                 coordinator.inject_executor(executor).await;
             } else {
@@ -303,7 +301,7 @@ pub async fn repair_local_engine(
             .map(|s| s.inner().clone())
     {
         let new_executor =
-            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
         if let Some(executor) = new_executor {
             coordinator.inject_executor(executor).await;
         } else {

@@ -147,6 +147,10 @@ pub struct LaunchContext {
     pub token: String,
     /// resolved profile（从 descriptor 声明的候选列表中选择）。
     pub resolved_profile: ResolvedProfile,
+    /// start 时冻结的 implementation（0.22.9 Handoff 08，只读注入——
+    /// adapter 据此分派实现内的启动构造；不接受前端提交）。
+    /// `None` = 引擎无 implementation 声明（仅测试 fake 场景）。
+    pub implementation: Option<super::implementation::ImplementationId>,
 }
 
 // ── ResolvedLaunch ─────────────────────────────────────────────────────────
@@ -392,6 +396,7 @@ mod tests {
             instance_id: "inst-test".to_string(),
             token: "test-token-abcdef0123456789".to_string(),
             resolved_profile: profile.clone(),
+            implementation: None,
         }
     }
 

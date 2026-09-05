@@ -45,16 +45,21 @@ use crate::infra::local_engine::stream_worker_proto::{AudioFrame, ProtoError, St
 ///
 /// 包装 `StreamWorkerClient`，将二进制协议 v2 的事件转换为 `SttEvent`。
 ///
+/// ## 生产接线（Handoff 08）
+///
+/// EngineManager start 负责进程 spawn 与 hello/ready 握手，随后经
+/// [`Self::with_process`] 构造适配器并存入 EngineEntry；`get_connection`
+/// 把它投影为 VoiceService 消费的 `StreamingSttPort`。
+///
 /// ## Host Launcher
 ///
-/// `launch()` 是生产入口——从冻结的 deployment snapshot 解析 worker 所需资产，
-/// 创建 `ManagedProcess` 和 `StreamWorkerClient`，等待真实 Ready 后返回适配器。
+/// `launch()` 是独立入口——从冻结的 deployment snapshot 解析 worker 所需
+/// 资产，创建 `ManagedProcess` 和 `StreamWorkerClient`，等待真实 Ready 后
+/// 返回适配器（gate harness / 诊断工具使用）。
 ///
 /// - **Ready 必须在 ORT 和模型真实加载成功后发送**——worker 端在创建
 ///   `ParaformerRunner` 成功后才发 Ready，host 收到后才视为实现就绪。
-/// - **不注册为用户可见模型**——`launch` 只由内部 gate/self-test 调用。
 /// - **不修改已有用户 selected model**——适配器独立于用户模型选择。
-#[allow(dead_code)] // Handoff 05/07A: production wiring pending gate
 pub struct ParaformerOnlineAdapter {
     /// worker client（由 app 层注入或 `launch` 创建）
     client: Arc<StreamWorkerClient>,
@@ -66,6 +71,13 @@ pub struct ParaformerOnlineAdapter {
     generation: AtomicU64,
     /// 当前 active generation
     active_gen: Mutex<Option<u64>>,
+    /// 本 session 已收到的 Partial fragment 累积（0.22.9）。
+    ///
+    /// worker 的 Partial 是当前 chunk 的增量 fragment（CIF 在线解码逐 chunk
+    /// 出新 token，不重复）；适配器在此累积——之前所有 fragment 固化为
+    /// confirmed、最新 fragment 作为 preview，与伪流式的"固化 + 候选"
+    /// 分层显示对齐。begin/cancel/reset/finish 时清空。
+    partial_accumulated: std::sync::Mutex<String>,
     /// reader task JoinHandle
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// ManagedProcess 句柄——保持进程存活，drop 时触发回收
@@ -86,9 +98,29 @@ impl ParaformerOnlineAdapter {
             event_rx: TokioMutex::new(Some(event_rx)),
             generation: AtomicU64::new(0),
             active_gen: Mutex::new(None),
+            partial_accumulated: std::sync::Mutex::new(String::new()),
             reader_task: Mutex::new(None),
             process: None,
         }
+    }
+
+    /// 创建适配器并绑定受管进程句柄（EngineManager start 生产路径）。
+    ///
+    /// `client` 必须已完成 `send_hello` + `wait_ready` 握手；
+    /// `process` 由调用方（EngineManager）持有并纳入生命周期管理，
+    /// 适配器侧持有引用以保证 drop 语义完整（最后释放者触发 Job 回收）。
+    pub fn with_process(client: Arc<StreamWorkerClient>, process: Arc<ManagedProcess>) -> Self {
+        let mut adapter = Self::new(client);
+        adapter.process = Some(process);
+        adapter
+    }
+
+    /// worker 是否仍然健康（管道未断、未 poison）。
+    ///
+    /// VoiceService 在开始录音前以此做轻量就绪检查；
+    /// ready 语义由 start 时的 hello/ready 握手保证——此处只检测断连。
+    pub fn is_ready(&self) -> bool {
+        !self.client.is_poisoned()
     }
 
     /// Host Launcher——启动真实 ParaformerOnline worker 子进程。
@@ -248,7 +280,6 @@ impl ParaformerOnlineAdapter {
     /// 主动优雅退出——发送 Quit，等待进程退出。
     ///
     /// 超时后 ManagedProcess 的 Job Object 强制回收。
-    #[allow(dead_code)]
     pub async fn stop(&self) -> Result<(), SttError> {
         // 先发 Quit（优雅退出信号）
         let _ = self.client.send_quit().await;
@@ -322,6 +353,8 @@ impl StreamingSttPort for ParaformerOnlineAdapter {
         let session_gen = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         debug_assert_eq!(stream_gen as u64, session_gen);
 
+        // 新 session 清空 Partial fragment 累积
+        self.partial_accumulated.lock().unwrap().clear();
         *active = Some(session_gen);
 
         tracing::info!(generation = session_gen, "ParaformerOnline session begin");
@@ -358,10 +391,20 @@ impl StreamingSttPort for ParaformerOnlineAdapter {
                             crate::infra::local_engine::stream_worker_proto::MessageType::Partial => {
                                 let text = String::from_utf8_lossy(&payload).to_string();
                                 if !text.is_empty() {
+                                    // 之前所有 fragment 固化为 confirmed，最新
+                                    // fragment 作为 preview（分层显示），本条
+                                    // fragment 并入累积、下一条 Partial 时固化
+                                    let confirmed = {
+                                        let mut acc =
+                                            self.partial_accumulated.lock().unwrap();
+                                        let confirmed = acc.clone();
+                                        acc.push_str(&text);
+                                        confirmed
+                                    };
                                     self.emit(SttEvent::Partial {
                                         generation,
-                                        confirmed: text.clone(),
-                                        preview: String::new(),
+                                        confirmed,
+                                        preview: text,
                                     });
                                 }
                             }
@@ -443,7 +486,9 @@ impl StreamingSttPort for ParaformerOnlineAdapter {
             }
         }
 
+        // session 结束——Final 已整体替换显示，清空 Partial 累积
         *active = None;
+        self.partial_accumulated.lock().unwrap().clear();
         Ok(())
     }
 
@@ -455,6 +500,7 @@ impl StreamingSttPort for ParaformerOnlineAdapter {
             // reset worker
             let _ = self.client.reset().await;
             *active = None;
+            self.partial_accumulated.lock().unwrap().clear();
             tracing::info!(generation, "ParaformerOnline session cancelled");
         }
         Ok(())
@@ -463,6 +509,7 @@ impl StreamingSttPort for ParaformerOnlineAdapter {
     async fn reset(&self) -> Result<(), SttError> {
         let _ = self.client.reset().await;
         *self.active_gen.lock().await = None;
+        self.partial_accumulated.lock().unwrap().clear();
         // 不递增 generation——generation 只在 begin_session 中由 begin_stream
         // 配对递增。reset 只清空状态，不分配新 generation。
         Ok(())
@@ -848,24 +895,26 @@ mod tests {
 
     // ── §A2: 文本契约定向测试 ──────────────────────────────────────────
 
-    /// §A2: Partial 的 confirmed 字段携带当次推理文本——
-    /// adapter 不做额外累积，累积在 worker 层完成。
+    /// §A2: Partial fragment 累积语义（0.22.9）——worker 的 Partial 是当前
+    /// chunk 的增量 fragment；适配器把之前所有 fragment 固化为 confirmed、
+    /// 最新 fragment 作为 preview，与伪流式的"固化 + 候选"分层显示对齐。
     ///
-    /// 验证：push_audio 期间收到的 Partial 被转发到 event channel，
-    /// finish_session 产出的 Final 包含完整文本。
+    /// 验证：worker 连发两条 Partial，事件序列应为
+    /// `Partial{confirmed:"", preview:"frag one"}` →
+    /// `Partial{confirmed:"frag one", preview:"frag two"}`，
+    /// 且 confirmed == 之前所有 preview 的拼接。Final 用全会话文本整体替换。
     ///
-    /// **注意**：`end_stream` 内部会消费 End 之后 worker 发的 Partial，
-    /// 所以 Partial 必须在 Audio 阶段发送（由 `push_audio` 的 `try_recv_partial` 捕获）。
-    /// FakeWorker 默认不在 Audio 阶段发 Partial（只在 End 时发），
-    /// 所以这里用自定义 worker 在 Audio 阶段发 Partial。
+    /// **时序说明**：两条 Partial 在 worker 收到 Audio#1 后背靠背写入并一次
+    /// flush；host 第二次 push_audio（200ms 后）的 `try_recv_partial` 批量
+    /// 取出——无论第一条 Partial 被哪次 push 捕获，事件顺序与累积不变量一致。
     #[tokio::test(flavor = "multi_thread")]
-    async fn para_partial_confirmed_is_incremental() {
+    async fn para_partial_fragments_accumulate_into_confirmed_preview() {
         let (host_write, worker_read) = duplex(256 * 1024);
         let (worker_write, host_read) = duplex(256 * 1024);
 
         let client = StreamWorkerClient::new(Box::new(host_write), Box::new(host_read));
 
-        // 自定义 worker：收到 Audio 时发 Partial，收到 End 时发 Final
+        // 自定义 worker：收到 Audio#1 后连发两条 Partial，End 时发 Final
         let worker_task = tokio::spawn(async move {
             let mut reader = worker_read;
             let mut writer = worker_write;
@@ -873,25 +922,23 @@ mod tests {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
             let mut header_buf = [0u8; 20];
-            // 读 Hello
+            // 读 Hello → 回 Ready (msg_type = 16)
             let _ = reader.read_exact(&mut header_buf).await;
-            // 回 Ready (msg_type = 16 = Ready)
             let ready = [
                 b'B', b'L', b'N', b'K', 2, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ];
             let _ = writer.write_all(&ready).await;
             let _ = writer.flush().await;
 
-            // 读 Begin
+            // 读 Begin → 回 Ack (msg_type = 19, generation = 1)
             let _ = reader.read_exact(&mut header_buf).await;
-            // 回 Ack (msg_type = 19 = Ack)
             let ack = [
                 b'B', b'L', b'N', b'K', 2, 19, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
             ];
             let _ = writer.write_all(&ack).await;
             let _ = writer.flush().await;
 
-            // 读 Audio #1（header + payload）
+            // 读 Audio#1（header + payload）
             let _ = reader.read_exact(&mut header_buf).await;
             let payload_len = u32::from_le_bytes([
                 header_buf[16],
@@ -904,50 +951,53 @@ mod tests {
                 let _ = reader.read_exact(&mut payload).await;
             }
 
-            // 回 Partial（msg_type = 17 = Partial）
-            let partial_text = b"partial text";
-            let partial_frame = [
-                b'B',
-                b'L',
-                b'N',
-                b'K',
-                2,
-                17,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                0,
-                0,
-                partial_text.len() as u8,
-                0,
-                0,
-                0,
-            ];
-            let _ = writer.write_all(&partial_frame).await;
-            let _ = writer.write_all(partial_text).await;
+            // 背靠背发两条 Partial（msg_type = 17）后一次 flush——
+            // 保证两条同时到达 host，避免被 end_stream 消费
+            for frag in [b"frag one".as_slice(), b"frag two".as_slice()] {
+                let partial_frame = [
+                    b'B',
+                    b'L',
+                    b'N',
+                    b'K',
+                    2,
+                    17,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    frag.len() as u8,
+                    0,
+                    0,
+                    0,
+                ];
+                let _ = writer.write_all(&partial_frame).await;
+                let _ = writer.write_all(frag).await;
+            }
             let _ = writer.flush().await;
 
-            // 读 Audio #2（header + payload）—— 测试会发第二帧来触发 try_recv_partial
-            let _ = reader.read_exact(&mut header_buf).await;
-            let payload_len2 = u32::from_le_bytes([
-                header_buf[16],
-                header_buf[17],
-                header_buf[18],
-                header_buf[19],
-            ]) as usize;
-            if payload_len2 > 0 {
-                let mut payload = vec![0u8; payload_len2];
-                let _ = reader.read_exact(&mut payload).await;
+            // 读 Audio#2、Audio#3（header + payload）
+            for _ in 0..2 {
+                let _ = reader.read_exact(&mut header_buf).await;
+                let payload_len = u32::from_le_bytes([
+                    header_buf[16],
+                    header_buf[17],
+                    header_buf[18],
+                    header_buf[19],
+                ]) as usize;
+                if payload_len > 0 {
+                    let mut payload = vec![0u8; payload_len];
+                    let _ = reader.read_exact(&mut payload).await;
+                }
             }
 
-            // 读 End
+            // 读 End → 回 Final（msg_type = 18）
             let _ = reader.read_exact(&mut header_buf).await;
-            // 回 Final（msg_type = 18 = Final）
             let final_text = b"final text";
             let final_frame = [
                 b'B',
@@ -989,45 +1039,48 @@ mod tests {
         let session_gen = adapter.begin_session().await.unwrap();
         let mut rx = adapter.events();
 
-        // 推送音频——自定义 worker 收到 Audio 后发 Partial
+        // push#1 触发 worker 发两条 Partial；间隔后的 push#2/#3 批量取出
         adapter.push_audio(session_gen, &[0.1; 320]).await.unwrap();
-
-        // 给 worker 时间处理 Audio 并发回 Partial，然后再推送一帧触发 try_recv_partial
-        // push_audio 的 try_recv_partial 是非阻塞的，第一次调用时 Partial 可能还在管道中；
-        // 第二次 push_audio 时 Partial 已在 channel 中，try_recv_partial 能捕获到。
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        adapter.push_audio(session_gen, &[0.0; 320]).await.ok(); // 第二帧可能因 worker 已发完 Partial 而不需要处理
+        adapter.push_audio(session_gen, &[0.0; 320]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        adapter.push_audio(session_gen, &[0.0; 320]).await.unwrap();
 
-        // 等待 Partial 事件，收到后 finish_session 触发 Final
-        let mut got_partial = false;
-        let mut got_final = false;
-        let mut finish_called = false;
+        adapter.finish_session(session_gen).await.unwrap();
+
+        let mut partials = Vec::new();
+        let mut final_text = String::new();
         while let Ok(Some(event)) =
             tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await
         {
             match event {
-                SttEvent::Partial { confirmed, .. } => {
-                    assert!(
-                        confirmed.contains("partial"),
-                        "Partial confirmed 应包含 'partial': {confirmed}"
-                    );
-                    got_partial = true;
-                    // 收到 Partial 后调用 finish_session 触发 Final
-                    if !finish_called {
-                        finish_called = true;
-                        adapter.finish_session(session_gen).await.unwrap();
-                    }
-                }
+                SttEvent::Partial {
+                    confirmed, preview, ..
+                } => partials.push((confirmed, preview)),
                 SttEvent::Final { text, .. } => {
-                    assert!(text.contains("final"), "Final text 应包含 'final': {text}");
-                    got_final = true;
+                    final_text = text;
                     break;
                 }
                 _ => {}
             }
         }
-        assert!(got_partial, "应收到至少一个 Partial");
-        assert!(got_final, "应收到 Final");
+
+        assert_eq!(
+            partials.len(),
+            2,
+            "应收到两条 Partial 事件: {partials:?}"
+        );
+        assert_eq!(
+            partials[0],
+            (String::new(), "frag one".to_string()),
+            "首条 Partial：confirmed 为空，preview 为第一个 fragment"
+        );
+        assert_eq!(
+            partials[1],
+            ("frag one".to_string(), "frag two".to_string()),
+            "次条 Partial：上一 fragment 固化为 confirmed"
+        );
+        assert!(final_text.contains("final"), "Final 应为全会话文本: {final_text}");
 
         client.send_quit().await.unwrap();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), worker_task).await;

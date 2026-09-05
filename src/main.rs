@@ -876,6 +876,13 @@ fn main() {
                     ),
                 );
             app.manage(local_engine_service.clone());
+            // 0.22.9 Handoff 08：注入 selected 模型存储（跨 runtime 切换事务的
+            // 配置提交端口——DB 持久化 + 缓存 + 事件广播）
+            local_engine_service.set_selected_store(std::sync::Arc::new(
+                crate::app::local_engine::selected_store::SttSelectedModelStore::new(
+                    app.handle().clone(),
+                ),
+            ));
             tracing::info!(
                 epoch = local_engine_service.epoch().0,
                 "EngineManager 已构造（funasr + paddleocr adapter 与模型目录已注册）"
@@ -1037,12 +1044,13 @@ fn main() {
             // - ocr_image Capability 和截图 OCR 通过 router() 获取实例
             // Task 18: 保存 Arc 用于 app 退出时 shutdown
             let onnx_executor =
-                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(
-                    &local_engine_service,
-                );
+                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
             let ocr_coordinator = crate::app::local_engine::ocr_coordinator::OcrCoordinator::new(
                 onnx_executor,
             );
+            // 0.22.9：接线 EngineManager 弱引用——OCR 懒启动成功 / idle 回收时
+            // 把引擎卡片状态同步为 Running / Stopped（best effort）
+            ocr_coordinator.attach_engine_service(&local_engine_service);
             // Task 18: 注册为 managed state，供 shutdown 时使用
             app.manage(ocr_coordinator.clone());
             crate::domain::ocr::router::install_router(ocr_coordinator);

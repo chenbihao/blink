@@ -488,6 +488,26 @@ impl DeploymentStore {
         }
     }
 
+    /// 删除 implementation 级部署空间整体（模型资产卸载，0.22.9 Handoff 08）。
+    ///
+    /// **仅限 implementation 级空间**——engine 级空间是 0.22.7 GGUF /
+    /// 0.22.8 OCR 的兼容真源，整体删除被拒绝。空间不存在时幂等成功。
+    /// 空间内有未收尾事务时先按 fail-closed 规则收尾（避免删掉 half-state）；
+    /// 调用方负责操作串行（manager 层 engine 级操作互斥已保证）。
+    pub fn remove_impl_space(space: &DeploymentSpace) -> Result<(), RuntimeError> {
+        if space.implementation().is_none() {
+            return Err(RuntimeError::CleanupFailed {
+                message: "engine 级部署空间不可整体删除（多模型共享 runtime 兼容真源）".to_string(),
+            });
+        }
+        Self::recover(space)?;
+        let root = space.root();
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        Ok(())
+    }
+
     // ── slot manifest ─────────────────────────────────────────────────────
 
     /// 读取空间内部署 slot 的 manifest（schema 校验）。

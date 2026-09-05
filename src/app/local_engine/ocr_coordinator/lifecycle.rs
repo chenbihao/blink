@@ -41,6 +41,9 @@ impl OcrCoordinator {
                             let executor = self.executor.read().unwrap().clone();
                             let lifecycle_tx = self.lifecycle_tx.clone();
                             let start_elapsed_ms = self.start_elapsed_ms.clone();
+                            let engine_service =
+                                self.engine_service.get().and_then(|w| w.upgrade());
+                            let engine_id = self.paddleocr_engine_id.clone();
                             let target_gen = generation;
                             let target_token = instance_token;
                             tokio::spawn(async move {
@@ -48,6 +51,8 @@ impl OcrCoordinator {
                                 if let Some(ref executor) = executor {
                                     executor.shutdown().await;
                                 }
+                                // 0.22.9：executor 回收 → 引擎卡片同步为 Stopped
+                                super::sync_engine_card(engine_service, engine_id, false);
                                 let current = lifecycle_tx.borrow().clone();
                                 match &current {
                                     LifecycleState::Stopping { generation }
@@ -102,6 +107,8 @@ impl OcrCoordinator {
         let idle_cancel = self.idle_cancel.clone();
         let lifecycle_tx = self.lifecycle_tx.clone();
         let start_elapsed_ms = self.start_elapsed_ms.clone();
+        let engine_service = self.engine_service.get().and_then(|w| w.upgrade());
+        let engine_id = self.paddleocr_engine_id.clone();
         let ttl = Duration::from_secs(snapshot.idle_ttl_seconds as u64);
 
         tokio::spawn(async move {
@@ -136,6 +143,8 @@ impl OcrCoordinator {
                     if let Some(ref executor) = executor {
                         executor.shutdown().await;
                     }
+                    // 0.22.9：executor 回收 → 引擎卡片同步为 Stopped
+                    super::sync_engine_card(engine_service, engine_id, false);
                     let current = lifecycle_tx.borrow().clone();
                     match &current {
                         LifecycleState::Stopping { generation } if *generation == target_gen => {

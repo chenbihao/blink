@@ -24,6 +24,7 @@ pub mod paraformer_worker;
 pub mod stt_corpus;
 pub mod stt_corpus_gate;
 pub mod stt_gate_harness;
+pub mod stt_switch_e2e;
 
 use clap::{Parser, Subcommand};
 
@@ -201,6 +202,12 @@ pub fn try_run_cli() -> Option<i32> {
     // 由开发者在本地使用，不在 help 中显示
     if first == "stt-corpus-gate" {
         return Some(stt_corpus_gate::run_from_args(&args[2..]));
+    }
+
+    // stt-switch-e2e 是隐藏入口，用于运行 GGUF↔ONNX 真实双向切模 E2E
+    // （0.22.9 Handoff 08）。由开发者在本地使用，不在 help 中显示。
+    if first == "stt-switch-e2e" {
+        return Some(stt_switch_e2e::run_from_args(&args[2..]));
     }
 
     if !known_commands.contains(&first.as_str()) {

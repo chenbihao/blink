@@ -48,14 +48,54 @@ impl Default for FunasrGgufModelInstallWorker {
 /// 日志回调类型（Send+Sync——download future 必须跨线程）。
 type LogFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
-/// 流式下载单文件到 `dest`（临时名 `.tmp_<name>`），校验 SHA-256 后改名。
+// ── 下载源候选（0.22.9 国内可达性）───────────────────────────────────────
+
+/// HuggingFace 主站 host 前缀（模型 URL 锁定格式，见 `gguf::validate_model_url_stable`）。
+const HF_HOST: &str = "https://huggingface.co/";
+/// HF 整站镜像，URL 路径同构（仅换 host）。SHA-256 编译期锁定，
+/// 换源不破坏供应链校验——hash 不匹配的镜像内容会被拒绝。
+const HF_MIRROR_HOST: &str = "https://hf-mirror.com/";
+/// 用户自定义 HF 端点（如自建镜像），置顶优先。
+const HF_ENDPOINT_ENV: &str = "BLINK_HF_ENDPOINT";
+
+/// 构建下载候选源列表（环境变量版入口）。
+fn hf_download_candidates(primary_url: &str) -> Vec<String> {
+    let endpoint = std::env::var(HF_ENDPOINT_ENV)
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    hf_download_candidates_with_endpoint(primary_url, endpoint.as_deref())
+}
+
+/// 构建下载候选源列表（纯函数）。
 ///
-/// 使用 `response.chunk()` 逐块拉取（无 futures Stream 依赖）；写盘为
-/// 同步写（每块 KB 级，阻塞可忽略），hash 在内存中流式累计。
-/// 取消/错误路径清理临时文件。
+/// 顺序：`BLINK_HF_ENDPOINT` 覆盖 → 主站原链 → hf-mirror 镜像。
+/// 非 HF 主站 URL（未来接入其他源）不加镜像候选。
+fn hf_download_candidates_with_endpoint(primary_url: &str, endpoint: Option<&str>) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(ep) = endpoint
+        .map(|s| s.trim().trim_end_matches('/'))
+        .filter(|s| !s.is_empty())
+        && let Some(path) = primary_url.strip_prefix(HF_HOST)
+    {
+        candidates.push(format!("{ep}/{path}"));
+    }
+    candidates.push(primary_url.to_string());
+    if let Some(path) = primary_url.strip_prefix(HF_HOST) {
+        candidates.push(format!("{HF_MIRROR_HOST}{path}"));
+    }
+    candidates
+}
+
+/// 流式下载单文件（按候选源换源重试）。
+///
+/// - 网络级失败（连接/中断/HTTP 非 2xx）：按序换下一候选源重试；
+/// - SHA-256 不匹配：**主站**（锁定 URL）不匹配属上游供应链变更，直接失败
+///   不换源——镜像内容不一致则换下一候选（可能回退主站）；
+/// - 取消立即传播，不换源。
 async fn download_file(
     client: &reqwest::Client,
-    url: &str,
+    primary_url: &str,
     expected_sha256: &str,
     dest_dir: &Path,
     file_name: &str,
@@ -65,98 +105,144 @@ async fn download_file(
     use sha2::{Digest, Sha256};
     use std::io::Write;
 
-    let tmp_path = dest_dir.join(format!(".tmp_{file_name}"));
-    let final_path = dest_dir.join(file_name);
+    let candidates = hf_download_candidates(primary_url);
+    let mut last_err: Option<ModelDownloadError> = None;
 
-    on_log(&format!("下载 {file_name}（{url}）"));
+    for (idx, url) in candidates.iter().enumerate() {
+        on_log(&format!("下载 {file_name}（{url}）"));
 
-    let mut response = tokio::select! {
-        r = client.get(url).send() => r,
-        _ = cancel_token.cancelled() => return Err(ModelDownloadError::Cancelled),
-    }
-    .map_err(|e| ModelDownloadError::Network {
-        message: format!("请求失败: {e}"),
-    })?;
+        let mut response = tokio::select! {
+            r = client.get(url).send() => r,
+            _ = cancel_token.cancelled() => return Err(ModelDownloadError::Cancelled),
+        }
+        .map_err(|e| ModelDownloadError::Network {
+            message: format!("请求失败: {e}"),
+        })?;
 
-    if !response.status().is_success() {
-        return Err(ModelDownloadError::Network {
-            message: format!("HTTP {} 下载 {file_name} 失败", response.status()),
-        });
-    }
+        if !response.status().is_success() {
+            last_err = Some(ModelDownloadError::Network {
+                message: format!("HTTP {} 下载 {file_name} 失败", response.status()),
+            });
+            if idx + 1 < candidates.len() {
+                on_log(&format!("{file_name} 从该源下载失败，切换下载源重试"));
+                continue;
+            }
+            return Err(last_err.unwrap());
+        }
 
-    // Content-Length 用于进度百分比（可能缺失，如 chunked 传输）
-    let total_size: u64 = response
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        // Content-Length 用于进度百分比（可能缺失，如 chunked 传输）
+        let total_size: u64 = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
-    let mut file = std::fs::File::create(&tmp_path).map_err(|e| ModelDownloadError::Internal {
-        message: format!("创建临时文件失败: {e}"),
-    })?;
-    let mut hasher = Sha256::new();
-    let mut downloaded: u64 = 0;
-    let mut next_progress = PROGRESS_LOG_STEP_BYTES;
+        let tmp_path = dest_dir.join(format!(".tmp_{file_name}"));
+        let final_path = dest_dir.join(file_name);
 
-    loop {
-        let chunk = tokio::select! {
-            c = response.chunk() => c,
-            _ = cancel_token.cancelled() => {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(ModelDownloadError::Cancelled);
+        let mut file = match std::fs::File::create(&tmp_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(ModelDownloadError::Internal {
+                    message: format!("创建临时文件失败: {e}"),
+                })
             }
         };
-        let chunk = chunk.map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            ModelDownloadError::Network {
-                message: format!("下载中断: {e}"),
-            }
-        })?;
-        let Some(bytes) = chunk else { break };
+        let mut hasher = Sha256::new();
+        let mut downloaded: u64 = 0;
+        let mut next_progress = PROGRESS_LOG_STEP_BYTES;
+        let mut download_interrupted: Option<ModelDownloadError> = None;
 
-        hasher.update(&bytes);
-        file.write_all(&bytes).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            ModelDownloadError::Internal {
-                message: format!("写入 {file_name} 失败: {e}"),
+        loop {
+            let chunk = tokio::select! {
+                c = response.chunk() => c,
+                _ = cancel_token.cancelled() => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(ModelDownloadError::Cancelled);
+                }
+            };
+            match chunk {
+                Ok(Some(bytes)) => {
+                    hasher.update(&bytes);
+                    if let Err(e) = file.write_all(&bytes) {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        return Err(ModelDownloadError::Internal {
+                            message: format!("写入 {file_name} 失败: {e}"),
+                        });
+                    }
+                    downloaded += bytes.len() as u64;
+                    if downloaded >= next_progress {
+                        let mb = downloaded / (1024 * 1024);
+                        let pct = (downloaded * 100)
+                            .checked_div(total_size)
+                            .map(|p| format!(" ({p})"))
+                            .unwrap_or_default();
+                        on_log(&format!("{file_name}: 已下载 {mb} MB{pct}"));
+                        next_progress += PROGRESS_LOG_STEP_BYTES;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    download_interrupted = Some(ModelDownloadError::Network {
+                        message: format!("下载中断: {e}"),
+                    });
+                    break;
+                }
             }
-        })?;
-        downloaded += bytes.len() as u64;
-        if downloaded >= next_progress {
-            let mb = downloaded / (1024 * 1024);
-            let pct = (downloaded * 100)
-                .checked_div(total_size)
-                .map(|p| format!(" ({p})"))
-                .unwrap_or_default();
-            on_log(&format!("{file_name}: 已下载 {mb} MB{pct}"));
-            next_progress += PROGRESS_LOG_STEP_BYTES;
         }
-    }
-    file.flush().map_err(|e| ModelDownloadError::Internal {
-        message: format!("flush {file_name} 失败: {e}"),
-    })?;
-    drop(file);
 
-    let actual: String = {
-        let digest = hasher.finalize();
-        digest.iter().map(|b| format!("{b:02x}")).collect()
-    };
-    if actual != expected_sha256 {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(ModelDownloadError::Failed {
-            message: format!(
-                "{file_name} SHA-256 不匹配（期望 {expected_sha256}，实际 {actual}）——下载损坏或上游文件变更"
-            ),
-        });
+        // 流中断：换源重试（不校验 hash——文件不完整）
+        if let Some(e) = download_interrupted {
+            last_err = Some(e);
+            if idx + 1 < candidates.len() {
+                on_log(&format!("{file_name} 从该源下载中断，切换下载源重试"));
+                continue;
+            }
+            return Err(last_err.unwrap());
+        }
+
+        file.flush().map_err(|e| ModelDownloadError::Internal {
+            message: format!("flush {file_name} 失败: {e}"),
+        })?;
+        drop(file);
+
+        // SHA-256 是供应链锚点：与锁定值不一致时，镜像源换下一候选，
+        // 主站（锁定 URL）直接失败——上游文件变更必须显式暴露
+        let actual: String = {
+            let digest = hasher.finalize();
+            digest.iter().map(|b| format!("{b:02x}")).collect()
+        };
+        if actual != expected_sha256 {
+            let _ = std::fs::remove_file(&tmp_path);
+            let err = ModelDownloadError::Failed {
+                message: format!(
+                    "{file_name} SHA-256 不匹配（期望 {expected_sha256}，实际 {actual}）——下载损坏或上游文件变更"
+                ),
+            };
+            if url == primary_url || idx + 1 >= candidates.len() {
+                return Err(err);
+            }
+            on_log(&format!("{file_name} 该源校验失败，切换下载源重试"));
+            last_err = Some(err);
+            continue;
+        }
+
+        // 原子改名到最终文件名
+        std::fs::rename(&tmp_path, &final_path).map_err(|e| ModelDownloadError::Internal {
+            message: format!("落盘 {file_name} 失败: {e}"),
+        })?;
+        if url != primary_url {
+            on_log(&format!("{file_name} 已从镜像源下载并校验通过"));
+        }
+        on_log(&format!("{file_name} 校验通过（{downloaded} 字节）"));
+        return Ok(());
     }
 
-    // 原子改名到最终文件名
-    std::fs::rename(&tmp_path, &final_path).map_err(|e| ModelDownloadError::Internal {
-        message: format!("落盘 {file_name} 失败: {e}"),
-    })?;
-    on_log(&format!("{file_name} 校验通过（{downloaded} 字节）"));
-    Ok(())
+    Err(last_err.unwrap_or_else(|| ModelDownloadError::Network {
+        message: "无可用下载源".to_string(),
+    }))
 }
 
 #[async_trait::async_trait]
@@ -397,4 +483,44 @@ async fn copy_and_verify(
     .map_err(|e| ModelDownloadError::Internal {
         message: format!("spawn_blocking copy_and_verify 失败: {e}"),
     })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hf_download_candidates_with_endpoint, HF_HOST, HF_MIRROR_HOST};
+
+    const NANO_LLM: &str = "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf";
+
+    #[test]
+    fn candidates_default_primary_then_mirror() {
+        let candidates = hf_download_candidates_with_endpoint(NANO_LLM, None);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], NANO_LLM);
+        assert!(
+            candidates[1].starts_with(HF_MIRROR_HOST),
+            "镜像候选必须换 host：{}",
+            candidates[1]
+        );
+        assert!(candidates[1].ends_with("/resolve/46e8495/qwen3-0.6b-q4km.gguf"));
+    }
+
+    #[test]
+    fn candidates_env_endpoint_takes_priority() {
+        let candidates =
+            hf_download_candidates_with_endpoint(NANO_LLM, Some("https://hf.example.com/"));
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(
+            candidates[0],
+            "https://hf.example.com/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf"
+        );
+        assert_eq!(candidates[1], NANO_LLM);
+        assert!(candidates[2].starts_with(HF_MIRROR_HOST));
+    }
+
+    #[test]
+    fn candidates_non_hf_url_stays_unmodified() {
+        let custom = "https://modelscope.example.com/org/model/file.gguf";
+        let candidates = hf_download_candidates_with_endpoint(custom, None);
+        assert_eq!(candidates, vec![custom.to_string()]);
+    }
 }

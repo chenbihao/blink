@@ -116,6 +116,7 @@ impl EngineManager {
     /// 模型身份在 start 时从 active 部署 manifest 冻结到 `LaunchSnapshot`。
     /// 此方法供模型切换事务判断"运行中模型是否与新选择一致"。
     /// 引擎未运行或无模型合同时返回 `None`。
+    #[allow(dead_code)] // 切换事务内联读取 launch snapshot；保留为诊断/测试入口
     pub async fn get_current_model_id(
         &self,
         engine_id: &EngineId,
@@ -198,6 +199,7 @@ impl EngineManager {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
         let ci = entry.current_identity().await;
+        let implementation = entry.current_launch().await.and_then(|l| l.implementation);
         let worker = entry.worker_client.lock().await.clone().map(|client| {
             let audio_dir = super::super::funasr::worker::engine_audio_tmp_dir(engine_id);
             // Handoff 02 §4：参数传播证据链——从 SttConfig 构建 TranscribeOptions
@@ -214,11 +216,16 @@ impl EngineManager {
                 ),
             ) as std::sync::Arc<dyn crate::domain::stt::SttTransport>
         });
+        // ParaformerOnline 真流式 port（Handoff 08）——start 握手后建立，
+        // 携带 start 冻结的 implementation；VoiceService 据此选择 port。
+        let streaming = entry.streaming_port.lock().await.clone();
         Ok(ci.as_ref().map(|identity| LocalEngineConnection {
             endpoint: identity.endpoint.base_url(),
             engine_id: identity.engine_id.clone(),
             instance_id: identity.instance_id.clone(),
             worker,
+            streaming,
+            implementation,
         }))
     }
 

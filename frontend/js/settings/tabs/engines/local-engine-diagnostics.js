@@ -122,6 +122,13 @@ function adapterTone(item) {
 
 function selectedModelChecks(entry, i18n) {
     const models = Array.isArray(entry?.models) ? entry.models : [];
+    // 只有 STT 引擎有用户级可选模型目录（0.22.9 起唯一产品引擎 funasr）；
+    // paddleocr 等固定模型契约的引擎不渲染"当前模型"检查——
+    // 显示"未选择"警告反而是误导
+    const hasModelCatalog = entry?.catalog?.capability_kind === "stt";
+    if (!hasModelCatalog) {
+        return [];
+    }
     const selected = models.find((model) => model.is_selected);
     if (!selected) {
         const notSelected = tt(i18n, "local_engine.diagnostic.model_not_selected", "未选择");

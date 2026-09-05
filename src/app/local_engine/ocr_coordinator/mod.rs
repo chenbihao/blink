@@ -120,6 +120,10 @@ pub struct OcrCoordinator {
     /// - 其他请求看到 true，知道已有 winner，等待 watch changed
     /// - 状态离开 Starting（Ready/Failed）时重置为 false
     starting_gate: Arc<AtomicBool>,
+    /// EngineManager 弱引用（0.22.9 接线）——懒启动成功/闲置回收时
+    /// 同步引擎卡片状态（start_inprocess / stop_inprocess）。
+    /// Weak 避免与 AppHandle 状态树形成强引用环。
+    engine_service: std::sync::OnceLock<std::sync::Weak<crate::app::local_engine::EngineManager>>,
 }
 
 impl OcrCoordinator {
@@ -140,8 +144,18 @@ impl OcrCoordinator {
             last_diagnosis: Arc::new(std::sync::RwLock::new(None)),
             repair_mode: Arc::new(AtomicBool::new(false)),
             starting_gate: Arc::new(AtomicBool::new(false)),
+            engine_service: std::sync::OnceLock::new(),
         })
     }
+
+    /// 接线 EngineManager 弱引用（main.rs 构造后调用，非必需）。
+    ///
+    /// 接线后：OCR 懒启动成功会把引擎卡片同步为 Running，
+    /// idle TTL / StopAfterUse 回收后同步为 Stopped。
+    pub fn attach_engine_service(&self, service: &Arc<crate::app::local_engine::EngineManager>) {
+        let _ = self.engine_service.set(std::sync::Arc::downgrade(service));
+    }
+
 
     fn config_snapshot(&self) -> OcrRuntimeSnapshot {
         get_ocr_config().to_snapshot()
@@ -732,9 +746,35 @@ impl OcrBackendRouter for OcrCoordinator {
 /// 读取 paddleocr engine 的 active deployment 目录，
 /// 解析 det/rec/dict/dll 路径，构造 `OnnxOcrExecutor`。
 /// 如果 deployment 不存在或路径缺失，返回 `None`。
-pub fn build_onnx_executor_from_deployment(
-    _engine_service: &Arc<crate::app::local_engine::EngineManager>,
-) -> Option<Arc<OnnxOcrExecutor>> {
+///
+/// 0.22.9：去掉未使用的 EngineManager 参数——executor 只读 active 部署，
+/// OCR 请求路径（懒启动）也要调用本函数，不依赖调用方持有 manager。
+/// 引擎卡片状态同步（fire-and-forget）。
+///
+/// OCR executor 的懒启动 / idle 回收与 EngineManager 的卡片状态是两套
+/// 状态机——此函数把 executor 生命周期变化投影到引擎卡片（Running/Stopped），
+/// 失败只记 debug 日志（best effort，不影响 OCR 请求）。
+fn sync_engine_card(
+    service: Option<std::sync::Arc<crate::app::local_engine::EngineManager>>,
+    engine_id: EngineId,
+    running: bool,
+) {
+    let Some(service) = service else {
+        return;
+    };
+    tokio::spawn(async move {
+        let result = if running {
+            service.start_inprocess(&engine_id).await
+        } else {
+            service.stop_inprocess(&engine_id).await
+        };
+        if let Err(e) = result {
+            tracing::debug!(engine = %engine_id, running, %e, "OCR 卡片状态同步失败（best effort）");
+        }
+    });
+}
+
+pub fn build_onnx_executor_from_deployment() -> Option<Arc<OnnxOcrExecutor>> {
     use crate::infra::local_engine::deployment::DeploymentStore;
     use crate::infra::local_engine::onnx_ocr::pipeline::PipelineConfig;
     use crate::infra::local_engine::onnx_ocr::{OcrExecutorConfig, OnnxOcrExecutor};

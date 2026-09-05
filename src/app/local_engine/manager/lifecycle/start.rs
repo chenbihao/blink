@@ -29,6 +29,22 @@ impl EngineManager {
         let operation_id = generate_operation_id();
         let _guard = self.coordinator.try_claim(engine_id, &operation_id)?;
 
+        self.start_internal(engine_id, &entry, config, &operation_id)
+            .await
+    }
+
+    /// start 执行体（供已持有操作 claim 的路径复用：切换事务 stop→start→回滚）。
+    ///
+    /// **调用方必须已持有 engine 的操作 claim 并传入其 operation_id**——
+    /// 状态提交的 operation 门以协调器 claim 为真源。guard 生命周期由调用方
+    /// 承担（事务期间不允许其他变更操作插入）。
+    pub(in super::super) async fn start_internal(
+        &self,
+        engine_id: &EngineId,
+        entry: &Arc<EngineEntry>,
+        config: AdapterConfig,
+        operation_id: &str,
+    ) -> Result<(), LocalEngineError> {
         // 幂等检查：desired=Running 且进程活跃 → 直接返回
         {
             let status = entry.status.read().await;
@@ -38,8 +54,31 @@ impl EngineManager {
             }
         }
 
-        // 环境检查
-        {
+        // 解析 compute profile 的唯一真源是 **resolved implementation 空间的
+        // active 部署 manifest**——安装事务（InstallTransaction::resolve_profile）
+        // 已按 descriptor 候选顺序做过兼容性检查并解析为具体 profile；start 不从
+        // descriptor 候选列表二次推导（那会绕过兼容性检查：GPU-first descriptor
+        // 在 CPU 主机上会得到与实际安装不一致的期望 backend，导致 health 校验误报）。
+        let descriptor = entry.adapter.descriptor();
+
+        // ── 预解析 implementation（Handoff 08：从"配置 selected（无则退化
+        // descriptor 模型契约）"的模型 id 解析，决定后续冻结策略与环境门；
+        // 绑定表 fail-closed——未知模型拒绝启动）──
+        let selected_model_id = super::selected_model_id_from_config(engine_id, &config);
+        let impl_seed_model = super::seed_model_id_for_implementation(
+            engine_id,
+            &config,
+            &descriptor.model_contract.model_id,
+        );
+        let resolved_implementation =
+            self.resolve_implementation_for_model(engine_id, impl_seed_model.as_deref())?;
+        let is_paraformer_onnx =
+            resolved_implementation == Some(ImplementationId::ParaformerOnnxWorker);
+
+        // 环境检查（engine 级环境 = GGUF 主 implementation 的部署真源）。
+        // ParaformerOnline 走 per-implementation deployment——其部署就绪由
+        // 下方冻结段 fail-closed 校验，不要求 GGUF 环境已安装。
+        if !is_paraformer_onnx {
             let status = entry.status.read().await;
             if status.environment != crate::domain::local_engine::EnvironmentHealth::Ready {
                 return Err(LocalEngineError::with_detail(
@@ -51,17 +90,12 @@ impl EngineManager {
             }
         }
 
-        // 解析 compute profile 的唯一真源是 **resolved implementation 空间的
-        // active 部署 manifest**——安装事务（InstallTransaction::resolve_profile）
-        // 已按 descriptor 候选顺序做过兼容性检查并解析为具体 profile；start 不从
-        // descriptor 候选列表二次推导（那会绕过兼容性检查：GPU-first descriptor
-        // 在 CPU 主机上会得到与实际安装不一致的期望 backend，导致 health 校验误报）。
-        let descriptor = entry.adapter.descriptor();
-
         // ── 冻结 launch snapshot（0.22.9：模型 → implementation → deployment）──
         //
         // 冻结顺序 fail-closed：
-        // 1. 模型身份（selected 的 model_storage manifest 回读）
+        // 1. 模型身份（GGUF：selected 的 model_storage manifest 回读；
+        //    ParaformerOnline 等 per-implementation 实现：对应部署空间的
+        //    active manifest 回读）
         // 2. implementation（编译期绑定表按冻结模型解析，未知模型不换模）
         // 3. deployment identity（**resolved implementation 的部署空间**内
         //    读 active 指针——GGUF 映射到 engine 级兼容真源，新实现读自己的
@@ -69,12 +103,64 @@ impl EngineManager {
         //
         // 配置变化只改变 selected，不改变正在运行的 active。
         // 磁盘 IO（manifest 读取、指针读取）在 spawn_blocking 内执行。
-        let selected_model_id = super::selected_model_id_from_config(engine_id, &config);
         let eid_for_freeze = engine_id.clone();
         let contract = descriptor.model_contract.clone();
         let uses_managed = entry.adapter.uses_managed_model_storage();
+        let impl_for_freeze = resolved_implementation;
+        let eid_for_space = engine_id.clone();
+        // "模型未安装"错误文案带显示名——用户配置了（或默认选中）某个模型
+        // 但未下载时，报错必须说清是哪个模型（0.22.9 实测反馈：只说
+        // "未下载模型"无法对应到模型列表里的具体条目）。
+        let identity_seed_model = selected_model_id
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| contract.model_id.clone());
+        let model_display_name = self
+            .model_registry
+            .find(engine_id, &identity_seed_model)
+            .map(|d| d.display_name.clone());
         let frozen_model = tokio::task::spawn_blocking(
             move || -> Result<FrozenModelIdentity, LocalEngineError> {
+                if impl_for_freeze == Some(ImplementationId::ParaformerOnnxWorker) {
+                    // per-implementation deployment（ParaformerOnline 等）：
+                    // 模型身份从该 implementation 部署空间的 active manifest 冻结。
+                    // 闭合映射决定空间归属（GGUF/OCR → engine 级；新实现 → impl 级）。
+                    let space = deployment_space_for(&eid_for_space, impl_for_freeze);
+                    let (pointer, manifest) = DeploymentStore::read_active(&space)
+                        .map_err(|e| from_runtime(ErrorPhase::Start, "读取 active 部署失败", &e))?
+                        .ok_or_else(|| {
+                            let space_label = space
+                                .implementation()
+                                .map(|i| format!("implementation '{i}' 的部署空间"))
+                                .unwrap_or_else(|| "engine 级部署空间".to_string());
+                            LocalEngineError::with_detail(
+                                LocalEngineErrorCode::EnvironmentMissing,
+                                ErrorPhase::Start,
+                                "环境未安装，请先安装",
+                                format!("{space_label}内无 active deployment（fail-closed）"),
+                            )
+                        })?;
+                    // 指针的模型契约即冻结身份；fingerprint 取 ONNX 扩展的
+                    // DLL SHA-256（64-hex，安装事务已校验；非 ONNX 扩展 = 无）
+                    let fingerprint = match &manifest.extension {
+                        crate::infra::local_engine::runtime::ManifestExtension::OnnxRuntime(
+                            ext,
+                        ) => Some(ext.dll_sha256.clone()),
+                        _ => None,
+                    };
+                    // active slot 目录（launch 构造直接使用，避免二次读指针漂移）
+                    let slot_dir = crate::infra::local_engine::deployment::DeploymentSlot::parse(
+                        &pointer.slot,
+                    )
+                    .map_err(|e| from_runtime(ErrorPhase::Start, "解析部署 slot 失败", &e))?
+                    .dir_in(&space);
+                    let _ = slot_dir; // slot 目录由 adapter 侧按部署空间解析
+                    return Ok(FrozenModelIdentity {
+                        model_id: manifest.model_contract.model_id,
+                        revision: manifest.model_contract.revision,
+                        fingerprint,
+                    });
+                }
                 // fail-closed：managed 模型未安装/损坏时不允许 start
                 match resolve_expected_model_identity(
                     &eid_for_freeze,
@@ -87,12 +173,24 @@ impl EngineManager {
                         revision,
                         fingerprint,
                     }),
-                    Err(reason) => Err(LocalEngineError::with_detail(
-                        LocalEngineErrorCode::ModelNotReady,
-                        ErrorPhase::Start,
-                        "模型未就绪，请先安装模型",
-                        reason,
-                    )),
+                    Err(reason) => {
+                        let action_hint = if reason.starts_with("模型未安装") {
+                            match &model_display_name {
+                                Some(display) => format!(
+                                    "模型 '{display}' 尚未下载，请先在「引擎」页的模型列表中下载"
+                                ),
+                                None => "模型未下载，请先在「引擎」页的模型列表中下载".to_string(),
+                            }
+                        } else {
+                            "模型未就绪，请先安装模型".to_string()
+                        };
+                        Err(LocalEngineError::with_detail(
+                            LocalEngineErrorCode::ModelNotReady,
+                            ErrorPhase::Start,
+                            action_hint,
+                            reason,
+                        ))
+                    }
                 }
             },
         )
@@ -106,9 +204,21 @@ impl EngineManager {
             )
         })??;
 
-        // ── 解析并冻结 implementation（0.22.9，fail-closed，纯内存）──
+        // ── 冻结 implementation（0.22.9，fail-closed，纯内存）──
+        // 按冻结模型身份复核（GGUF manifest 回读的 model_id 与 selected 一致；
+        // 不一致以 manifest 为准并要求仍在绑定表中——未知模型不换模）。
         let frozen_implementation =
             self.resolve_implementation_for_model(engine_id, Some(frozen_model.model_id.as_str()))?;
+        if frozen_implementation != resolved_implementation {
+            return Err(LocalEngineError::with_detail(
+                LocalEngineErrorCode::InvalidConfig,
+                ErrorPhase::Start,
+                "implementation 解析不一致",
+                format!(
+                    "selected 预解析={resolved_implementation:?}，manifest 复核={frozen_implementation:?}（模型/绑定漂移，fail-closed）"
+                ),
+            ));
+        }
 
         // ── 从 resolved implementation 的部署空间读取 active 部署（fail-closed）──
         let deployment_space = deployment_space_for(engine_id, frozen_implementation);
@@ -185,20 +295,25 @@ impl EngineManager {
                 endpoint,
             };
 
-            // 构建 LaunchContext（包含 endpoint、身份参数和 resolved profile）
+            // 构建 LaunchContext（endpoint、身份参数、resolved profile、
+            // 冻结的 implementation——adapter 据此分派启动构造，Handoff 08）
             let ctx = LaunchContext {
                 endpoint,
                 engine_id: engine_id.to_string(),
                 instance_id: instance_id.clone(),
                 token: token.clone(),
                 resolved_profile: frozen_profile.clone(),
+                implementation: frozen_implementation,
             };
 
-            // adapter prepare_launch（可能等待 venv python 子进程检查包——阻塞隔离）
+            // adapter prepare_launch（可能等待 venv python 子进程检查包——阻塞隔离）。
+            // 冻结的 implementation 经 ctx 注入，FunASR adapter 据此分派实现内
+            // 启动构造（GGUF → NDJSON worker；ParaformerOnline → ONNX worker）。
             let adapter_for_launch = Arc::clone(&entry.adapter);
             let config_for_launch = config.clone();
+            let ctx_for_launch = ctx.clone();
             let resolved_launch = tokio::task::spawn_blocking(move || {
-                adapter_for_launch.prepare_launch(&ctx, &config_for_launch)
+                adapter_for_launch.prepare_launch(&ctx_for_launch, &config_for_launch)
             })
             .await
             .map_err(|e| {
@@ -238,7 +353,7 @@ impl EngineManager {
             let managed = ManagedProcess::with_defaults();
 
             // 标记 desired=Running, process=Starting
-            self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+            self.commit_status_internal(engine_id, Some(operation_id), |status| {
                 status.desired = DesiredState::Running;
                 status.process = ProcessState::Starting;
                 status.service = ServiceHealth::Unknown;
@@ -300,7 +415,7 @@ impl EngineManager {
                 let engine_id_clone = engine_id.clone();
                 let instance_id_clone = instance_id.clone();
                 let subscriber = managed.subscribe_logs();
-                let entry_clone = Arc::clone(&entry);
+                let entry_clone = Arc::clone(entry);
                 let pump_token_clone = pump_token.clone();
                 tokio::spawn(async move {
                     pump_logs_to_event_port(
@@ -323,7 +438,7 @@ impl EngineManager {
                     tracing::info!(engine = %engine_id, pid, attempt, "进程已 spawn，等待 health 验证");
 
                     // 更新 process=Running（但 service 仍为 Unknown）
-                    self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                    self.commit_status_internal(engine_id, Some(operation_id), |status| {
                         status.process = ProcessState::Running { pid };
                         // service 保持 Unknown——需要 health 验证
                     })
@@ -347,23 +462,28 @@ impl EngineManager {
 
                     // health 验证——只有 Model Ready 才返回 Ok
                     // 任何失败（timeout/mismatch/backend/ModelFailed/早退）执行统一 rollback
-                    // StdioWorker 引擎走 NDJSON ready 握手（0.22.7），HTTP 引擎走轮询
-                    let verify_future = if stdio_worker {
-                        self.verify_stdio_worker_health(
+                    // StdioWorker 引擎走 NDJSON ready 握手（0.22.7），HTTP 引擎走轮询；
+                    // ParaformerOnline 走二进制协议 v2 握手（Handoff 08）
+                    let verify_future = if is_paraformer_onnx {
+                        self.verify_paraformer_worker_health(
                             engine_id,
-                            &entry,
+                            entry,
                             &identity_input,
                             &managed,
+                            frozen_model.clone(),
                         )
                         .await
+                    } else if stdio_worker {
+                        self.verify_stdio_worker_health(engine_id, entry, &identity_input, &managed)
+                            .await
                     } else {
-                        self.verify_engine_health(engine_id, &entry, &identity_input, &managed)
+                        self.verify_engine_health(engine_id, entry, &identity_input, &managed)
                             .await
                     };
                     match verify_future {
                         Ok(mapping) => {
                             // health 验证通过 + Model Ready——进入 Healthy
-                            self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                            self.commit_status_internal(engine_id, Some(operation_id), |status| {
                                 status.service = mapping.service;
                                 status.model = mapping.model;
                                 if let Some(ref backend_obs) = mapping.backend {
@@ -387,7 +507,7 @@ impl EngineManager {
                             self.spawn_exit_monitor(
                                 engine_id,
                                 &managed,
-                                &entry,
+                                entry,
                                 &instance_id,
                                 &pkey,
                             );
@@ -413,10 +533,10 @@ impl EngineManager {
                             );
                             self.rollback_started_instance(
                                 engine_id,
-                                &entry,
+                                entry,
                                 &pkey,
                                 &instance_id,
-                                &operation_id,
+                                operation_id,
                                 &err,
                             )
                             .await;
@@ -433,10 +553,10 @@ impl EngineManager {
                             tracing::error!(engine = %engine_id, attempt, %err, "bind race 重试耗尽");
                             self.rollback_started_instance(
                                 engine_id,
-                                &entry,
+                                entry,
                                 &pkey,
                                 &instance_id,
-                                &operation_id,
+                                operation_id,
                                 &err,
                             )
                             .await;
@@ -447,10 +567,10 @@ impl EngineManager {
                             tracing::warn!(engine = %engine_id, %err, "health 验证失败，执行 rollback");
                             self.rollback_started_instance(
                                 engine_id,
-                                &entry,
+                                entry,
                                 &pkey,
                                 &instance_id,
-                                &operation_id,
+                                operation_id,
                                 &err,
                             )
                             .await;
@@ -464,10 +584,10 @@ impl EngineManager {
                     tracing::warn!(engine = %engine_id, %err, "进程 spawn 失败，执行 rollback");
                     self.rollback_started_instance(
                         engine_id,
-                        &entry,
+                        entry,
                         &pkey,
                         &instance_id,
-                        &operation_id,
+                        operation_id,
                         &err,
                     )
                     .await;
@@ -634,6 +754,14 @@ impl EngineManager {
                     let client = entry.worker_client.lock().await.take();
                     if client.is_some() {
                         tracing::debug!(engine = %engine_id, "exit monitor: 销毁 worker 客户端");
+                    }
+                }
+                // 0.22.9 Handoff 08：销毁 ParaformerOnline 适配器（崩溃后旧
+                // streaming port 的操作立即失败，迟到结果不污染新实例）。
+                {
+                    let port = entry.streaming_port.lock().await.take();
+                    if port.is_some() {
+                        tracing::debug!(engine = %engine_id, "exit monitor: 销毁 paraformer 适配器");
                     }
                 }
                 super::super::super::funasr::worker::clean_audio_tmp_dir(&engine_id);

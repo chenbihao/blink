@@ -67,6 +67,12 @@ pub struct SttModelCapabilities {
     pub true_streaming: CapabilityFlag,
     /// 词级时间戳是否支持。
     pub timestamps: CapabilityFlag,
+    /// 是否输出标点符号（0.22.9，display-only）。
+    ///
+    /// SenseVoice / Nano（LLM 解码）内置标点；Paraformer 系（GGUF 与
+    /// ONNX 在线）解码器不输出标点。仅用于设置页模型选择前的能力
+    /// 展示，不参与任何业务判定。
+    pub punctuation: CapabilityFlag,
 }
 
 /// 能力声明标志：支持 / 不支持（附原因）。
@@ -107,8 +113,39 @@ impl Default for SttModelCapabilities {
             pseudo_streaming: CapabilityFlag::no("unknown"),
             true_streaming: CapabilityFlag::no("unknown"),
             timestamps: CapabilityFlag::no("unknown"),
+            punctuation: CapabilityFlag::no("unknown"),
         }
     }
+}
+
+// ── ModelBusinessProfile ──────────────────────────────────────────────────
+
+/// 模型业务画像（0.22.9 设置页展示用，display-only）。
+///
+/// **设计铁则**：
+/// - **display-only**：不参与任何业务判定（安装/选择/切换/回滚均不消费本字段）。
+/// - **稳定 wire 值**：`chinese_quality` / `resource_footprint` 均为闭合字符串，
+///   前端经 i18n key `local_engine.business.*` 渲染，不解析语义。
+/// - **None = 未声明**：前端不展示该维度，不猜默认值。
+/// - 证据来源：0.22.9 同语料矩阵（handoff-07F）——四个 STT 候选的中文 CER
+///   均达基线水平（ParaformerOnline p50 相对 Nano 基线恶化 ≤1pp，门 PASS）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelBusinessProfile {
+    /// 中文质量定位（稳定 wire 值）。
+    ///
+    /// `corpus_baseline` = 同语料 CER 达基线水平（0.22.9 矩阵证据）。
+    pub chinese_quality: String,
+    /// 资源占用定位（稳定 wire 值）。
+    ///
+    /// `shared_gguf_worker` = 与引擎其他 GGUF 模型共享常驻 worker 进程；
+    /// `dedicated_onnx_worker` = 独立 ONNX worker 进程（含 ORT 运行时）。
+    pub resource_footprint: String,
+    /// 是否为推荐模型（0.22.9，display-only）。
+    ///
+    /// 仅影响设置页模型行的「推荐」徽章，不参与任何业务判定。
+    /// `#[serde(default)]` 兼容旧 JSON（缺省 = false）。
+    #[serde(default)]
+    pub recommended: bool,
 }
 
 // ── EngineModelDescriptor ──────────────────────────────────────────────────
@@ -141,6 +178,9 @@ pub struct EngineModelDescriptor {
     /// STT 模型的 per-model 能力声明（仅 STT 引擎填充；OCR 引擎为 default）。
     #[serde(default)]
     pub stt_capabilities: SttModelCapabilities,
+    /// 模型业务画像（display-only，0.22.9）；None = 未声明，前端不展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business: Option<ModelBusinessProfile>,
 }
 
 impl EngineModelDescriptor {
@@ -593,6 +633,7 @@ mod tests {
             estimated_size_mb: Some(243),
             compatibility_schema: 1,
             stt_capabilities: SttModelCapabilities::default(),
+            business: None,
         }
     }
 

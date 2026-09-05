@@ -213,86 +213,136 @@ fn run_selftest(args: &SelfTestArgs) -> Result<(), String> {
     }
     println!("tokenizer 读取成功: {} bytes", tokenizer_content.len());
 
-    // ── 8. 执行 encoder 最小推理 ─────────────────────────────────────
+    // ── 8. 执行 encoder 最小推理（ParaformerOnline 真实输入契约）─────
+    //
+    // encoder 输入：speech [-1,-1,560]（fbank LFR 特征）+ speech_lengths [-1]。
+    // 动态维取 T=64、batch=1 构造全零输入——只验证 Session 可执行，
+    // 不评估识别质量。
+    const ENC_FEATS: i64 = 64;
+    const ENC_DIM: i64 = 560;
+
     let enc_inputs = encoder_session.inputs();
     if enc_inputs.is_empty() {
         return Err("encoder 模型没有输入".to_string());
     }
-
-    // 从 Outlet 的 dtype 中提取 shape
     let enc_shape: Vec<i64> = match enc_inputs[0].dtype() {
         ValueType::Tensor { shape, .. } => shape.iter().copied().collect(),
-        _ => {
-            return Err("encoder 输入非 tensor 类型".to_string());
-        }
+        _ => return Err("encoder 输入非 tensor 类型".to_string()),
     };
     println!("encoder input shape: {enc_shape:?}");
+    let speech = ort::value::Value::from_array(ndarray::Array3::<f32>::zeros((
+        1,
+        ENC_FEATS as usize,
+        ENC_DIM as usize,
+    )))
+    .map_err(|e| format!("encoder speech 输入构造失败: {e}"))?;
+    let speech_lengths = ort::value::Value::from_array(ndarray::Array1::<i32>::from_elem(
+        ENC_FEATS as usize,
+        ENC_FEATS as i32,
+    ))
+    .map_err(|e| format!("encoder speech_lengths 输入构造失败: {e}"))?;
 
-    // 动态维度使用 64
-    let enc_resolved: Vec<usize> = enc_shape
-        .iter()
-        .map(|d| if *d <= 0 { 64_usize } else { *d as usize })
-        .collect();
-    let enc_size: usize = enc_resolved.iter().product();
-
-    if enc_size <= 1_000_000 && enc_size > 0 {
-        use ndarray::Array;
-        let enc_input = Array::<f32, _>::zeros(ndarray::IxDyn(&enc_resolved)).into_dyn();
-        let enc_value = ort::value::Value::from_array(enc_input)
-            .map_err(|e| format!("encoder 输入 Value 构造失败: {e}"))?;
-
-        match encoder_session.run(ort::inputs![enc_value]) {
-            Ok(outputs) => {
-                println!("encoder 最小推理成功，输出数量: {}", outputs.len());
-            }
-            Err(e) => {
-                return Err(format!("encoder 最小推理失败（模型/DLL 契约异常）: {e}"));
-            }
+    match encoder_session.run(ort::inputs![
+        "speech" => speech,
+        "speech_lengths" => speech_lengths,
+    ]) {
+        Ok(outputs) => {
+            println!("encoder 最小推理成功，输出数量: {}", outputs.len());
         }
-    } else {
-        return Err(format!(
-            "encoder 输入维度过大或为零，无法执行最小推理: {enc_size}"
-        ));
+        Err(e) => {
+            return Err(format!("encoder 最小推理失败（模型/DLL 契约异常）: {e}"));
+        }
     }
 
-    // ── 9. 执行 decoder 最小推理 ─────────────────────────────────────
+    // ── 9. 执行 decoder 最小推理（完整输入契约：enc + 16 层 cache）────
+    //
+    // decoder 输入：enc [-1,-1,512]、enc_len [-1]、acoustic_embeds [-1,-1,512]、
+    // acoustic_embeds_len [-1]、in_cache_0..15 [-1,512,10]。token 数取 8。
+    const DEC_ENC_T: usize = 64;
+    const DEC_DIM: usize = 512;
+    const DEC_TOKENS: usize = 8;
+    const DEC_CACHE_T: usize = 10;
+    const DEC_LAYERS: usize = 16;
+
     let dec_inputs = decoder_session.inputs();
     if dec_inputs.is_empty() {
         return Err("decoder 模型没有输入".to_string());
     }
+    println!(
+        "decoder input count: {}（期望 {}）",
+        dec_inputs.len(),
+        4 + DEC_LAYERS
+    );
 
-    let dec_shape: Vec<i64> = match dec_inputs[0].dtype() {
-        ValueType::Tensor { shape, .. } => shape.iter().copied().collect(),
-        _ => {
-            return Err("decoder 输入非 tensor 类型".to_string());
+    let dec_enc =
+        ort::value::Value::from_array(ndarray::Array3::<f32>::zeros((1, DEC_ENC_T, DEC_DIM)))
+            .map_err(|e| format!("decoder enc 输入构造失败: {e}"))?;
+    // enc_len 形状 [-1] 是 batch 维——batch=1 时为 [T]
+    let dec_enc_len =
+        ort::value::Value::from_array(ndarray::Array1::<i32>::from_elem(1, DEC_ENC_T as i32))
+            .map_err(|e| format!("decoder enc_len 输入构造失败: {e}"))?;
+    let dec_embeds =
+        ort::value::Value::from_array(ndarray::Array3::<f32>::zeros((1, DEC_TOKENS, DEC_DIM)))
+            .map_err(|e| format!("decoder acoustic_embeds 输入构造失败: {e}"))?;
+    let dec_embeds_len =
+        ort::value::Value::from_array(ndarray::Array1::<i32>::from_elem(1, DEC_TOKENS as i32))
+            .map_err(|e| format!("decoder acoustic_embeds_len 输入构造失败: {e}"))?;
+
+    // ort::inputs! 宏要求静态元组——16 层 cache 逐层展开
+    let c0 =
+        ort::value::Value::from_array(ndarray::Array3::<f32>::zeros((1, DEC_DIM, DEC_CACHE_T)))
+            .map_err(|e| format!("decoder cache 输入构造失败: {e}"))?;
+    // 构造 16 层 cache（每层独立 Value，不能复用）
+    macro_rules! mk_cache {
+        ($idx:literal) => {
+            ort::value::Value::from_array(ndarray::Array3::<f32>::zeros((1, DEC_DIM, DEC_CACHE_T)))
+                .map_err(|e| format!("decoder in_cache_{} 构造失败: {e}", $idx))?
+        };
+    }
+    let c1 = mk_cache!(1);
+    let c2 = mk_cache!(2);
+    let c3 = mk_cache!(3);
+    let c4 = mk_cache!(4);
+    let c5 = mk_cache!(5);
+    let c6 = mk_cache!(6);
+    let c7 = mk_cache!(7);
+    let c8 = mk_cache!(8);
+    let c9 = mk_cache!(9);
+    let c10 = mk_cache!(10);
+    let c11 = mk_cache!(11);
+    let c12 = mk_cache!(12);
+    let c13 = mk_cache!(13);
+    let c14 = mk_cache!(14);
+    let c15 = mk_cache!(15);
+
+    match decoder_session.run(ort::inputs![
+        "enc" => dec_enc,
+        "enc_len" => dec_enc_len,
+        "acoustic_embeds" => dec_embeds,
+        "acoustic_embeds_len" => dec_embeds_len,
+        "in_cache_0" => c0,
+        "in_cache_1" => c1,
+        "in_cache_2" => c2,
+        "in_cache_3" => c3,
+        "in_cache_4" => c4,
+        "in_cache_5" => c5,
+        "in_cache_6" => c6,
+        "in_cache_7" => c7,
+        "in_cache_8" => c8,
+        "in_cache_9" => c9,
+        "in_cache_10" => c10,
+        "in_cache_11" => c11,
+        "in_cache_12" => c12,
+        "in_cache_13" => c13,
+        "in_cache_14" => c14,
+        "in_cache_15" => c15,
+    ]) {
+        Ok(outputs) => {
+            println!("decoder 最小推理成功，输出数量: {}", outputs.len());
         }
-    };
-    println!("decoder input shape: {dec_shape:?}");
-
-    let dec_resolved: Vec<usize> = dec_shape
-        .iter()
-        .map(|d| if *d <= 0 { 64_usize } else { *d as usize })
-        .collect();
-    let dec_size: usize = dec_resolved.iter().product();
-
-    if dec_size <= 1_000_000 && dec_size > 0 {
-        use ndarray::Array;
-        let dec_input = Array::<f32, _>::zeros(ndarray::IxDyn(&dec_resolved)).into_dyn();
-        let dec_value = ort::value::Value::from_array(dec_input)
-            .map_err(|e| format!("decoder 输入 Value 构造失败: {e}"))?;
-
-        match decoder_session.run(ort::inputs![dec_value]) {
-            Ok(outputs) => {
-                println!("decoder 最小推理成功，输出数量: {}", outputs.len());
-            }
-            Err(e) => {
-                return Err(format!("decoder 最小推理失败（模型/DLL 契约异常）: {e}"));
-            }
+        Err(e) => {
+            return Err(format!("decoder 最小推理失败（模型/DLL 契约异常）: {e}"));
         }
-    } else {
-        return Err(format!(
-            "decoder 输入维度过大或为零，无法执行最小推理: {dec_size}"
-        ));
     }
 
     // 清理

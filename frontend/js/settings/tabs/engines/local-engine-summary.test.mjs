@@ -33,6 +33,7 @@ import {
     computeModelSummary,
     primaryActionView,
     computeRuntimeSummary,
+    errorDetailText,
 } from "./local-engine-summary.js";
 
 // i18n/index.js 的 import 链经过 shared/tauri.js（模块级访问 window）——
@@ -489,6 +490,45 @@ await test("last_error：反馈槽直接显示错误 + detail 折叠源", () => 
     assert.equal(feedback.tone, "error");
     assert.ok(feedback.text.includes("expected=cpu"), feedback.text);
     assert.equal(feedback.detail, "traceback...");
+});
+
+// ── 错误详情 shape 兼容（0.22.9 回归：[object Object]）────────────────────────
+
+await test("errorDetailText：CommandError 包装对象取内层 detail 并带 phase 前缀", () => {
+    const err = {
+        code: "invalid_config",
+        message: "无法解析 implementation",
+        detail: {
+            phase: "start",
+            detail: "engine 'paddleocr' 声明了 implementation 但本次启动无冻结模型身份",
+        },
+    };
+    assert.equal(
+        errorDetailText(err),
+        "[start] engine 'paddleocr' 声明了 implementation 但本次启动无冻结模型身份",
+    );
+});
+
+await test("errorDetailText：字符串 detail 原样透传，任意对象退化为 JSON", () => {
+    assert.equal(errorDetailText({detail: "traceback..."}), "traceback...");
+    const obj = errorDetailText({detail: {foo: "bar"}});
+    assert.ok(obj.includes("\"foo\": \"bar\""), obj);
+    assert.equal(errorDetailText({}), "");
+});
+
+await test("computeFeedback：transientError 对象 detail 不渲染 [object Object]", () => {
+    const entry = makeEntry("paddleocr", {});
+    entry.transientError = {
+        code: "invalid_config",
+        message: "无法解析 implementation",
+        detail: {phase: "start", detail: "engine 'paddleocr' 声明了 implementation 但本次启动无冻结模型身份"},
+        retryable: false,
+    };
+    const feedback = computeFeedback(entry, t);
+    assert.equal(feedback.tone, "error");
+    assert.equal(feedback.text, "无法解析 implementation");
+    assert.ok(!feedback.detail?.includes("[object Object]"), feedback.detail);
+    assert.ok(feedback.detail?.includes("无冻结模型身份"), feedback.detail);
 });
 
 // ── 补充：keyline ────────────────────────────────────────────────────────────

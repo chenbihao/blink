@@ -100,6 +100,29 @@ pub(super) fn selected_model_id_from_config(
         .filter(|m| !m.is_empty())
 }
 
+/// implementation 种子模型解析（start 与 ensure_installed 共用）。
+///
+/// 配置 selected（funasr 的 `funasr_model`）优先；为空或引擎无用户级
+/// 模型选择（paddleocr）时退化用 descriptor 模型契约。两者都空返回
+/// `None`，由 `resolve_implementation_in_registry` 按"声明了 implementation
+/// 但无冻结模型身份"fail-closed。
+///
+/// **0.22.9 回归修复**：ensure_installed 曾直接用 selected 解析
+/// implementation——paddleocr 恒为 `None`，fail-closed 报"无法解析
+/// implementation"。此处补齐 start 主路径已有的 contract 兜底。
+pub(super) fn seed_model_id_for_implementation(
+    engine_id: &EngineId,
+    config: &AdapterConfig,
+    descriptor_model_id: &str,
+) -> Option<String> {
+    if let Some(selected) =
+        selected_model_id_from_config(engine_id, config).filter(|m| !m.is_empty())
+    {
+        return Some(selected);
+    }
+    (!descriptor_model_id.is_empty()).then(|| descriptor_model_id.to_string())
+}
+
 // ── 动态模型身份解析（0.22.6 B2）─────────────────────────────────────────
 
 /// 从 model_storage manifest 动态解析当前安装的模型身份。

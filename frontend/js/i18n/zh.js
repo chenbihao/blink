@@ -547,6 +547,8 @@ export const zh = {
     "voice.local.model.option": "{name} · {params} · 约 {size}",
     "voice.local.model.switched_log": "[Blink] 已选择模型: {name}",
     "voice.local.model.switched_running_log": "[Blink] 模型已切换，请先停止再重新启动服务以加载新模型",
+    // 0.22.9 Handoff 09：模型只读展示跟随引擎页切换事务
+    "voice.local.model.switching": "切换中 · {model}",
     // 日志
     "voice.local.log.title": "服务日志",
     "voice.local.log.diagnose_btn": "诊断 STT",
@@ -1434,7 +1436,7 @@ export const zh = {
 
     // ── 运行时底座（0.22.6）──
     "local_engine.foundation.title": "运行时底座",
-    "local_engine.foundation.desc": "所有引擎共享的 Python 运行时与公共缓存，只读展示。",
+    "local_engine.foundation.desc": "各本地引擎的运行环境与模型缓存总览，只读展示。",
     "local_engine.foundation.refresh": "刷新",
     "local_engine.foundation.open_dir": "打开根目录",
     "local_engine.foundation.open_engine_dir": "打开引擎目录",
@@ -1454,6 +1456,44 @@ export const zh = {
     "local_engine.model.pending_restart": "待重启",
     "local_engine.model.not_effective": "未生效",
 
+    // ── 模型选择事务（0.22.9 Handoff 09：跨 runtime 切换）──
+    "local_engine.selection.switching": "正在切换到 {model} · 停止旧模型 → 启动新模型",
+    "local_engine.selection.switching_busy": "切换中",
+    "local_engine.selection.rolled_back": "目标模型 {model} 启动失败，已恢复原模型",
+    "local_engine.selection.rollback_failed": "目标模型 {model} 启动失败，且恢复原模型也失败（服务已停止，可在本卡片手动启动）",
+    "local_engine.selection.badge": "切换中",
+
+    // ── active implementation 只读诊断（0.22.9）──
+    "local_engine.config.runtime_diag": "运行时",
+    "local_engine.implementation.none": "未运行",
+    "local_engine.implementation.funasr_gguf_worker": "GGUF worker（常驻）",
+    "local_engine.implementation.paraformer_onnx_worker": "ONNX worker（独立进程）",
+    "local_engine.implementation.paddleocr_onnx_in_process": "ONNX in-process",
+
+    // ── 引擎卡片配置组文案（0.22.8 遗留 key 缺失，Handoff 10 补齐）──
+    "local_engine.config.onnx_assets": "ONNX 资产",
+    "local_engine.config.ort_runtime": "ORT",
+    "local_engine.config.models": "模型",
+    "local_engine.config.deployment": "部署状态",
+    "local_engine.config.desired_deployment": "已提交",
+    "local_engine.config.loaded_deployment": "已加载",
+    "local_engine.config.not_loaded": "未加载",
+    "local_engine.config.pending_restart": "待重启",
+    "local_engine.config.legacy_deployment": "旧版 Python 环境",
+    "local_engine.config.legacy_warning": "检测到旧版 Python OCR 环境。清理后旧版 Blink 无法复用此环境。",
+
+    // ── 模型业务特征（0.22.9，display-only，真源为 descriptor.business）──
+    "local_engine.business.lang.multi": "多语种（{codes}）",
+    "local_engine.business.lang.zh": "中文",
+    "local_engine.business.streaming.true": "真流式 · 边说边出字",
+    "local_engine.business.streaming.pseudo": "伪流式 · 句尾定稿",
+    "local_engine.business.shared_gguf_worker": "共享 GGUF worker",
+    "local_engine.business.dedicated_onnx_worker": "独立 ONNX worker",
+    "local_engine.business.corpus_baseline": "中文质量 · 同语料基准",
+    "local_engine.business.punctuation.yes": "含标点",
+    "local_engine.business.punctuation.no": "无标点",
+    "local_engine.model.badge.recommended": "推荐",
+
     // ── 模型列表（0.22.6）──
     "local_engine.model.list.title": "模型",
     "local_engine.model.list.empty": "暂无模型候选",
@@ -1467,6 +1507,7 @@ export const zh = {
     "local_engine.model.action.delete": "删除",
     "local_engine.model.action.download_confirm_title": "下载模型",
     "local_engine.model.action.download_confirm_desc": "预计体积 {size}，下载过程中可取消。是否开始下载？",
+    "local_engine.model.action.switch_confirm_desc": "服务运行中切换模型：将停止当前模型并启动新模型，失败时自动回滚。确认切换？",
     "local_engine.model.action.download_confirm_btn": "下载",
     "local_engine.model.action.delete_confirm_title": "删除模型",
     "local_engine.model.action.delete_confirm_desc": "删除后将释放缓存空间，无法撤销。",
@@ -1561,6 +1602,7 @@ export const zh = {
     // ── 语音页本地模型选择器（0.22.6 H4）──
     "voice.local.model.select_label": "本地 STT 模型",
     "voice.local.model.empty": "没有可用的已安装模型",
+    "voice.local.model.goto_engines": "前往引擎页管理",
     "voice.local.model.goto_engines_install": "前往引擎页安装",
     "voice.local.model.goto_engines_hint": "需要先在引擎页下载 FunASR 模型",
     "voice.local.model.option": "{engine} · {model}",

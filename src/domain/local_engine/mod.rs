@@ -66,9 +66,9 @@ pub use implementation::{
 #[allow(unused_imports)]
 pub use model::{
     CapabilityFlag, DeleteConflictReason, EngineModelDescriptor, EngineModelStatus,
-    ModelCompatibility, ModelDeleteConflict, ModelIdentityVerification, ModelInstallState,
-    ModelOperationKind, ModelOperationResult, ModelOperationStage, ModelVerificationState,
-    SttModelCapabilities,
+    ModelBusinessProfile, ModelCompatibility, ModelDeleteConflict, ModelIdentityVerification,
+    ModelInstallState, ModelOperationKind, ModelOperationResult, ModelOperationStage,
+    ModelVerificationState, SttModelCapabilities,
 };
 #[allow(unused_imports)]
 pub use operation::CancelOutcome;

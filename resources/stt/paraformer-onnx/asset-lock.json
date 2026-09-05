@@ -29,8 +29,8 @@
       "kind": "encoder",
       "name": "Paraformer Online Encoder",
       "filename": "encoder.onnx",
-      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/encoder.onnx",
-      "revision": "paraformer-online-onnx",
+      "url": "https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx/resolve/master/model_quant.onnx",
+      "revision": "modelscope-iic@master-2026-09-verified",
       "sha256": "dd4121cf45102018c26f9256f0b862df416edfcd06b0863ef4ce378a63c7d5e2",
       "size_bytes": 166350528,
       "license": "Apache-2.0"
@@ -39,8 +39,8 @@
       "kind": "decoder",
       "name": "Paraformer Online Decoder",
       "filename": "decoder.onnx",
-      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/decoder.onnx",
-      "revision": "paraformer-online-onnx",
+      "url": "https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx/resolve/master/decoder_quant.onnx",
+      "revision": "modelscope-iic@master-2026-09-verified",
       "sha256": "873d21ee80c7345bfc27944b843699fe16bba021fd020747d38aef2dfc103681",
       "size_bytes": 71867274,
       "license": "Apache-2.0"
@@ -49,8 +49,8 @@
       "kind": "cmvn",
       "name": "Paraformer Online CMVN",
       "filename": "am.mvn",
-      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/am.mvn",
-      "revision": "paraformer-online-onnx",
+      "url": "https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx/resolve/master/am.mvn",
+      "revision": "modelscope-iic@master-2026-09-verified",
       "sha256": "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5",
       "size_bytes": 11203,
       "license": "Apache-2.0"
@@ -59,8 +59,8 @@
       "kind": "tokenizer",
       "name": "Paraformer Online Tokenizer",
       "filename": "tokenizer.json",
-      "url": "https://huggingface.co/modelscope/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/main/tokenizer.json",
-      "revision": "paraformer-online-onnx",
+      "url": "https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx/resolve/master/tokens.json",
+      "revision": "modelscope-iic@master-2026-09-verified",
       "sha256": "2b20c2b12572d682afff84ce1c8d560f67b8b32a4c1f21567411d141ed352127",
       "size_bytes": 93676,
       "license": "Apache-2.0"

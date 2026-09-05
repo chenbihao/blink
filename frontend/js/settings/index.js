@@ -190,6 +190,25 @@ function disposeLocalRuntime() {
     renderRuntimeSummary(null);
 }
 
+/**
+ * 只读访问本地引擎状态条目（0.22.9 Handoff 09）。
+ *
+ * 供语音页等 Tab 消费 selection 状态机（switching/rolled_back/
+ * rollback_failed）与模型列表，避免第二套真源。controller 未挂载
+ * 或引擎不存在时返回 null——调用方按"无数据"处理，不猜状态。
+ *
+ * @param {string} engineId
+ * @returns {Object|null} EngineStateEntry（含 selection / models / status）
+ */
+export function getLocalEngineEntry(engineId) {
+    if (!_leController || !_leController.isMounted()) return null;
+    try {
+        return _leController.getState().get(engineId) || null;
+    } catch {
+        return null;
+    }
+}
+
 // ── 0.22.6: 运行时底座（只读）+ 运行时摘要（中密度重设计）────────────────
 
 /**
@@ -295,9 +314,9 @@ async function refreshFoundation() {
 
 /**
  * 渲染底座内容。
- * DTO shape（0.22.6）：{ engines: [{engine_id, display_name, environment,
- * process(对象), service}], python_provider }——python_provider 是内部提供方
- * 概念，不展示；每个引擎渲染 环境/进程/服务 概览行。
+ * DTO shape（0.22.9）：{ engines: [{engine_id, display_name, environment,
+ * process(对象), service}]}——每个引擎渲染 环境/进程/服务 概览行。
+ * 0.22.8 起本地引擎为 ONNX in-process / GGUF worker，无共享 Python 运行时。
  * @param {HTMLElement} body
  * @param {Object} foundation - RuntimeFoundationDto
  */

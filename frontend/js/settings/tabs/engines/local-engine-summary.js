@@ -25,6 +25,7 @@ import {
     hasDeploymentMismatch,
     getLegacyDeployment,
 } from "./local-engine-state.js";
+import {getSelection} from "./local-engine-selection.js";
 
 // ── 内部常量 ─────────────────────────────────────────────────────────────────
 
@@ -158,6 +159,53 @@ function currentModelName(entry) {
     return entry?.catalog?.model_id || null;
 }
 
+/** selection.targetModelId → 展示名（models 列表优先，退化 model_id）。 */
+function selectionTargetName(entry) {
+    const selection = getSelection(entry);
+    if (!selection) return null;
+    const models = Array.isArray(entry?.models) ? entry.models : [];
+    const target = models.find((m) => m.model_id === selection.targetModelId);
+    return target ? (target.display_name || target.model_id) : selection.targetModelId;
+}
+
+/**
+ * selection 状态 → 反馈投影（0.22.9 Handoff 09）。
+ *
+ * switching 优先于一切（事务持有 engine claim，stop/commit/start 中间态
+ * 不得被"已就绪/运行中"等快照文案掩盖）；失败态优先于既有 last_error /
+ * transientError 分支——错误必须可解释到"目标失败 / 回滚成功 / 双失败"。
+ *
+ * @param {Object} entry
+ * @param {Function|null} t
+ * @returns {{tone: string, text: string, detail?: string}|null}
+ */
+export function computeSelectionFeedback(entry, t) {
+    const selection = getSelection(entry);
+    if (!selection) return null;
+    const name = selectionTargetName(entry) || "";
+
+    if (selection.phase === "switching") {
+        return {
+            tone: "busy",
+            text: tx(t, "local_engine.selection.switching", "正在切换到 {model} · 停止旧模型 → 启动新模型", {model: name}),
+        };
+    }
+    if (selection.phase === "rolled_back") {
+        return {
+            tone: "error",
+            text: tx(t, "local_engine.selection.rolled_back", "目标模型 {model} 启动失败，已恢复原模型", {model: name}),
+            detail: selection.error?.message || undefined,
+        };
+    }
+    // rollback_failed：目标失败且回滚也失败——双错误如实呈现，不说谎
+    return {
+        tone: "error",
+        text: tx(t, "local_engine.selection.rollback_failed",
+            "目标模型 {model} 启动失败，且恢复原模型也失败（服务已停止，可在本卡片手动启动）", {model: name}),
+        detail: selection.error?.message || undefined,
+    };
+}
+
 /** 生命周期策略展示（FunASR 用 auto_start，其余用 catalog lifecycle）。 */
 function policyLabel(t, entry) {
     const lifecycle = entry?.catalog?.lifecycle || "manual";
@@ -196,6 +244,13 @@ export function computeEngineSummary(entry, t) {
     const s = entry?.status?.status;
     if (!s) {
         return {text: tx(t, "local_engine.summary.loading", "状态加载中"), tone: "muted"};
+    }
+
+    // 0.22.9: selection 事务优先——switching 覆盖一切快照文案（stop/commit/start
+    // 中间态不得显示"已就绪"）；失败态仅在事务结束后可见
+    const selection = computeSelectionFeedback(entry, t);
+    if (selection) {
+        return {text: selection.text, tone: selection.tone};
     }
 
     // 活跃 operation / 乐观 pending → "正在{kind} · {stage}"
@@ -338,6 +393,12 @@ export function computeEngineSummary(entry, t) {
 export function computeFeedback(entry, t) {
     const s = entry?.status?.status;
 
+    // 0.5. selection 事务（switching 优先于一切；失败态优先于 last_error）
+    const selection = computeSelectionFeedback(entry, t);
+    if (selection) {
+        return {tone: selection.tone, text: selection.text, detail: selection.detail};
+    }
+
     // 1. 引擎 operation
     const op = activeOp(entry);
     if (op) {
@@ -370,7 +431,7 @@ export function computeFeedback(entry, t) {
         const main = err.action_hint || err.message
             || tx(t, `local_engine.error.${err.code}`, err.code)
             || tx(t, "local_engine.error.unknown_error", "未知错误");
-        const detail = err.detail || (err.phase ? `[${err.phase}]` : "");
+        const detail = errorDetailText(err);
         return {tone: "error", text: main, detail: detail || undefined};
     }
 
@@ -380,7 +441,7 @@ export function computeFeedback(entry, t) {
         const main = err.action_hint || err.message
             || tx(t, `local_engine.error.${err.code}`, err.code)
             || tx(t, "local_engine.error.unknown_error", "未知错误");
-        const detail = err.detail || (err.phase ? `[${err.phase}]` : "");
+        const detail = errorDetailText(err);
         return {tone: "error", text: main, detail: detail || undefined};
     }
 
@@ -460,6 +521,35 @@ export function computeFeedback(entry, t) {
     return isOnDemand(entry)
         ? {tone: "muted", text: tx(t, "local_engine.feedback.idle.ready_ondemand", "按需启动 · 首次使用时自动运行")}
         : {tone: "muted", text: tx(t, "local_engine.feedback.idle.ready_manual", "环境已就绪 · 点击「启动」运行服务")};
+}
+
+/**
+ * 错误详情 → 可展示字符串（shape 兼容）。
+ *
+ * 后端 `CommandError.detail` 是可选结构化字段：LocalEngineError 经 IPC
+ * 映射后为 `{phase, detail}` 对象——直接 textContent 会渲染成
+ * "[object Object]"。此处优先取内层 detail 字符串并携带 phase 前缀，
+ * 其他对象退化为 JSON 展开；旧字符串 detail 原样透传。
+ *
+ * @param {Object|null} err - normalizeError 产物或 status.last_error
+ * @returns {string}
+ */
+export function errorDetailText(err) {
+    const d = err?.detail;
+    if (typeof d === "string") return d;
+    if (d && typeof d === "object") {
+        if (typeof d.detail === "string" && d.detail) {
+            return typeof d.phase === "string" && d.phase
+                ? `[${d.phase}] ${d.detail}`
+                : d.detail;
+        }
+        try {
+            return JSON.stringify(d, null, 2);
+        } catch {
+            return String(d);
+        }
+    }
+    return err?.phase ? `[${err.phase}]` : "";
 }
 
 /**
@@ -666,6 +756,17 @@ export function primaryActionView(entry, t) {
             kind: null,
             label: tx(t, "local_engine.summary.loading", "状态加载中"),
             icon: "circle",
+            disabled: true,
+        };
+    }
+
+    // 0.22.9: 切换事务在途——引擎被事务 claim 占用，start/stop 均为禁用等待态
+    const selection = getSelection(entry);
+    if (selection?.phase === "switching") {
+        return {
+            kind: null,
+            label: tx(t, "local_engine.selection.switching_busy", "切换中"),
+            icon: "refresh-cw",
             disabled: true,
         };
     }

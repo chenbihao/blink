@@ -3,6 +3,63 @@
 
 use super::*;
 
+/// 该模型是否为 ParaformerOnline（per-implementation deployment 承载，
+/// 状态真源是 impl 空间部署 manifest 而非 model_storage）。
+fn is_paraformer_online_model(model_id: &str) -> bool {
+    model_id == super::super::funasr::paraformer_online::PARAFORMER_ONLINE_ID
+}
+
+/// ParaformerOnline 的模型状态（状态真源 = **该引擎**的 impl 部署空间；
+/// 结构校验不做全量 hash，generation 与当前 asset lock 比对）。
+fn paraformer_online_model_status(
+    engine_id: &EngineId,
+    desc: &EngineModelDescriptor,
+) -> EngineModelStatus {
+    use crate::infra::local_engine::deployment::{DeploymentSpace, DeploymentStore};
+    use crate::infra::local_engine::runtime::ManifestExtension;
+
+    let corrupted = || {
+        let mut st = EngineModelStatus::not_installed(desc);
+        st.install_state = ModelInstallState::NotInstalled;
+        st.verification_state = ModelVerificationState::Corrupted;
+        st.compatibility = ModelCompatibility::Unknown;
+        st
+    };
+
+    let space = DeploymentSpace::resolve(engine_id, ImplementationId::ParaformerOnnxWorker);
+    let active = DeploymentStore::read_active(&space);
+    let Some((_pointer, manifest)) = (match active {
+        Ok(v) => v,
+        Err(_) => return corrupted(),
+    }) else {
+        // 无部署 → 未安装
+        return EngineModelStatus::not_installed(desc);
+    };
+
+    // 部署契约或扩展类型异常 → 损坏（fail-closed，不静默当作可用）
+    if manifest.model_contract.model_id != desc.model_id {
+        return corrupted();
+    }
+    let generation = match &manifest.extension {
+        ManifestExtension::OnnxRuntime(ext) => ext.model_generation_id.clone(),
+        _ => return corrupted(),
+    };
+
+    let expected =
+        super::super::funasr::paraformer_online::expected_model_generation_id().unwrap_or_default();
+    let mut st = EngineModelStatus::not_installed(desc);
+    if generation == expected {
+        st.install_state = ModelInstallState::Installed;
+        st.verification_state = ModelVerificationState::Unverified;
+    } else {
+        // 部署内容与当前 asset lock 不一致（上游更新）——按损坏处理，
+        // 由用户显式 repair 重建（不静默当作可用）
+        st.verification_state = ModelVerificationState::Corrupted;
+        st.compatibility = ModelCompatibility::Unknown;
+    }
+    st
+}
+
 impl EngineManager {
     // ── 模型资产操作（从 ModelService 并入，单一业务真相）──────────────────
     //
@@ -84,23 +141,28 @@ impl EngineManager {
         descriptors
             .iter()
             .map(|desc| {
-                let asset_key = mstore::encode_asset_key(&desc.model_id);
-                let mut status = match mstore::restore_model_state(engine_id, &asset_key) {
-                    Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
-                        let mut st = EngineModelStatus::not_installed(desc);
-                        st.install_state = ModelInstallState::Installed;
-                        st.verification_state = ModelVerificationState::Unverified;
-                        st.cache_size_bytes = Some(manifest.payload_size_bytes);
-                        st
+                let mut status = if is_paraformer_online_model(&desc.model_id) {
+                    // Handoff 08：ParaformerOnline 状态真源 = impl 部署空间
+                    paraformer_online_model_status(engine_id, desc)
+                } else {
+                    let asset_key = mstore::encode_asset_key(&desc.model_id);
+                    match mstore::restore_model_state(engine_id, &asset_key) {
+                        Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
+                            let mut st = EngineModelStatus::not_installed(desc);
+                            st.install_state = ModelInstallState::Installed;
+                            st.verification_state = ModelVerificationState::Unverified;
+                            st.cache_size_bytes = Some(manifest.payload_size_bytes);
+                            st
+                        }
+                        Ok(mstore::RestoredModelState::Corrupted { .. }) => {
+                            let mut st = EngineModelStatus::not_installed(desc);
+                            st.install_state = ModelInstallState::NotInstalled;
+                            st.verification_state = ModelVerificationState::Corrupted;
+                            st.compatibility = ModelCompatibility::Unknown;
+                            st
+                        }
+                        _ => EngineModelStatus::not_installed(desc),
                     }
-                    Ok(mstore::RestoredModelState::Corrupted { .. }) => {
-                        let mut st = EngineModelStatus::not_installed(desc);
-                        st.install_state = ModelInstallState::NotInstalled;
-                        st.verification_state = ModelVerificationState::Corrupted;
-                        st.compatibility = ModelCompatibility::Unknown;
-                        st
-                    }
-                    _ => EngineModelStatus::not_installed(desc),
                 };
                 status.is_selected = selected.as_deref() == Some(desc.model_id.as_str());
                 status.is_active = launch_model.as_deref() == Some(desc.model_id.as_str());
@@ -172,21 +234,26 @@ impl EngineManager {
             })?;
 
         let asset_key = mstore::encode_asset_key(model_id);
-        let mut status = match mstore::restore_model_state(engine_id, &asset_key) {
-            Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
-                let mut st = EngineModelStatus::not_installed(desc);
-                st.install_state = ModelInstallState::Installed;
-                st.verification_state = ModelVerificationState::Unverified;
-                st.cache_size_bytes = Some(manifest.payload_size_bytes);
-                st
+        let mut status = if is_paraformer_online_model(model_id) {
+            // Handoff 08：ParaformerOnline 状态真源 = impl 部署空间
+            paraformer_online_model_status(engine_id, desc)
+        } else {
+            match mstore::restore_model_state(engine_id, &asset_key) {
+                Ok(mstore::RestoredModelState::Installed { manifest, .. }) => {
+                    let mut st = EngineModelStatus::not_installed(desc);
+                    st.install_state = ModelInstallState::Installed;
+                    st.verification_state = ModelVerificationState::Unverified;
+                    st.cache_size_bytes = Some(manifest.payload_size_bytes);
+                    st
+                }
+                Ok(mstore::RestoredModelState::Corrupted { .. }) => {
+                    let mut st = EngineModelStatus::not_installed(desc);
+                    st.verification_state = ModelVerificationState::Corrupted;
+                    st.compatibility = ModelCompatibility::Unknown;
+                    st
+                }
+                _ => EngineModelStatus::not_installed(desc),
             }
-            Ok(mstore::RestoredModelState::Corrupted { .. }) => {
-                let mut st = EngineModelStatus::not_installed(desc);
-                st.verification_state = ModelVerificationState::Corrupted;
-                st.compatibility = ModelCompatibility::Unknown;
-                st
-            }
-            _ => EngineModelStatus::not_installed(desc),
         };
         status.is_selected = self.read_selected_model(engine_id).as_deref() == Some(model_id);
         if let Ok(entry) = self.get_entry(engine_id).await
@@ -252,6 +319,15 @@ impl EngineManager {
             ModelOperationKind::Install
         };
 
+        // Handoff 08：ParaformerOnline 走 per-implementation deployment 安装事务
+        // （Paraformer provider + `impl-paraformer_onnx_worker` 空间），
+        // ORT + 模型资产一体安装，不进 model_storage。
+        if is_paraformer_online_model(model_id) {
+            return self
+                .install_paraformer_online_model(engine_id, model_id, operation_id, kind, is_repair)
+                .await;
+        }
+
         // 已安装且非修复 → 幂等返回
         if !is_repair {
             let asset_key = mstore::encode_asset_key(model_id);
@@ -271,9 +347,10 @@ impl EngineManager {
             }
         }
 
-        // claim 进程级操作（与同引擎所有变更互斥）
+        // claim 模型资产槽（0.22.9 双槽协调：只与同槽模型操作互斥，
+        // 不阻塞 stop/start——模型下载与进程状态正交）
         let op_id = operation_id.unwrap_or_else(generate_operation_id);
-        let guard = self.coordinator.try_claim(engine_id, &op_id)?;
+        let guard = self.coordinator.try_claim_model_storage(engine_id, &op_id)?;
 
         let slot_id = generate_install_id();
         let asset_key = mstore::encode_asset_key(model_id);
@@ -527,6 +604,149 @@ impl EngineManager {
         })
     }
 
+    /// ParaformerOnline 模型安装事务（Handoff 08）。
+    ///
+    /// 走 `InstallTransaction` + Paraformer provider，写入
+    /// `impl-paraformer_onnx_worker` 部署空间（ORT DLL + 4 个模型文件，
+    /// 全量 SHA-256 校验 + 隔离 self-test）。幂等：active 部署的
+    /// model_generation_id 与当前 asset lock 一致时直接返回 Done。
+    /// 若 ONNX worker 正在运行，先停止（DLL/slot 文件被占用会破坏事务）。
+    async fn install_paraformer_online_model(
+        &self,
+        engine_id: &EngineId,
+        model_id: &str,
+        operation_id: Option<String>,
+        kind: ModelOperationKind,
+        is_repair: bool,
+    ) -> Result<ModelOperationResult, LocalEngineError> {
+        let desc = self
+            .model_registry
+            .find(engine_id, model_id)
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Unsupported,
+                    ErrorPhase::Request,
+                    "未知模型",
+                    format!("engine_id={engine_id}, model_id={model_id} 不在 allowlist"),
+                )
+            })?;
+
+        // 幂等：非 repair 且部署完整（generation 与 asset lock 一致）→ Done
+        if !is_repair {
+            let status = paraformer_online_model_status(engine_id, desc);
+            if status.install_state == ModelInstallState::Installed {
+                return Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: operation_id.unwrap_or_default(),
+                    operation_kind: kind,
+                    final_stage: ModelOperationStage::Done,
+                    success: true,
+                    error: None,
+                });
+            }
+        }
+
+        // claim 进程级操作（与同引擎所有变更互斥）
+        let op_id = operation_id.unwrap_or_else(generate_operation_id);
+        let guard = self.coordinator.try_claim(engine_id, &op_id)?;
+
+        // ONNX worker 运行中 → 先停（占用 DLL/slot 会破坏切换）
+        let entry = self.get_entry(engine_id).await?;
+        {
+            let status = entry.status.read().await;
+            let onnx_running = status.is_process_active()
+                && status.active_implementation == Some(ImplementationId::ParaformerOnnxWorker);
+            drop(status);
+            if onnx_running {
+                tracing::info!(engine = %engine_id, "ParaformerOnline 安装：先停止运行中的 ONNX worker");
+                self.stop_internal(engine_id, &entry, &op_id).await;
+            }
+        }
+
+        // 安装事务（per-implementation 部署空间 + Paraformer provider）
+        let descriptor = self
+            .implementation_provider_descriptors
+            .get(&ImplementationId::ParaformerOnnxWorker)
+            .ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Install,
+                    "ParaformerOnline provider descriptor 缺失",
+                    "implementation_provider_descriptors 未声明 paraformer_onnx_worker（wiring 错误）",
+                )
+            })?;
+        let space = super::super::funasr::paraformer_online::paraformer_online_deployment_space();
+        let sink = InstallSinkAdapter::new(
+            Arc::clone(&self.event_port),
+            engine_id.clone(),
+            op_id.clone(),
+        );
+        let install_result = crate::infra::local_engine::providers::InstallTransaction::new(
+            descriptor,
+            &self.paraformer_provider,
+            space,
+        )
+        .execute(
+            &op_id,
+            ComputePreference::Cpu,
+            Some(guard.cancel_token()),
+            Some(&sink),
+        )
+        .await;
+
+        match install_result {
+            Ok(result) => {
+                tracing::info!(
+                    engine = %engine_id,
+                    model = %model_id,
+                    install_id = %result.install_id,
+                    op = %op_id,
+                    "ParaformerOnline 安装事务完成（per-implementation deployment）"
+                );
+                Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: kind,
+                    final_stage: ModelOperationStage::Done,
+                    success: true,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                // 取消是正常终态
+                if guard.is_cancelled()
+                    || matches!(
+                        e,
+                        crate::infra::local_engine::runtime::RuntimeError::OperationCancelled { .. }
+                    )
+                {
+                    tracing::info!(engine = %engine_id, op = %op_id, "ParaformerOnline 安装已取消");
+                    return Ok(ModelOperationResult {
+                        engine_id: engine_id.to_string(),
+                        model_id: model_id.to_string(),
+                        operation_id: op_id,
+                        operation_kind: kind,
+                        final_stage: ModelOperationStage::Cancelled,
+                        success: true,
+                        error: None,
+                    });
+                }
+                let err = from_runtime(ErrorPhase::Install, "ParaformerOnline 安装失败", &e);
+                Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: kind,
+                    final_stage: ModelOperationStage::Failed,
+                    success: false,
+                    error: Some(err),
+                })
+            }
+        }
+    }
+
     /// 模型操作早期失败的统一收尾（清 staging + 失败结果）。
     #[allow(clippy::too_many_arguments)] // 模型操作收尾需要全部上下文
     async fn model_op_failed(
@@ -593,6 +813,73 @@ impl EngineManager {
 
         let asset_key = mstore::encode_asset_key(model_id);
 
+        // Handoff 08：ParaformerOnline 的资产 = per-implementation 部署空间，
+        // 删除 = 移除 `impl-paraformer_onnx_worker` 空间（不触 model_storage，
+        // 不影响 engine 级 GGUF 兼容真源）。
+        if is_paraformer_online_model(model_id) {
+            // 冲突检查（selected / active launch snapshot）
+            if let Some(conflict) = self.check_delete_conflict(engine_id, model_id).await {
+                return Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: operation_id.unwrap_or_default(),
+                    operation_kind: ModelOperationKind::Delete,
+                    final_stage: ModelOperationStage::Failed,
+                    success: false,
+                    error: Some(conflict.to_error()),
+                });
+            }
+
+            let op_id = operation_id.unwrap_or_else(generate_operation_id);
+            let _guard = self.coordinator.try_claim(engine_id, &op_id)?;
+
+            // ONNX worker 运行中 → 先停（占用 DLL 会删不掉）
+            let entry = self.get_entry(engine_id).await?;
+            {
+                let status = entry.status.read().await;
+                let onnx_running = status.is_process_active()
+                    && status.active_implementation == Some(ImplementationId::ParaformerOnnxWorker);
+                drop(status);
+                if onnx_running {
+                    tracing::info!(engine = %engine_id, "ParaformerOnline 删除：先停止运行中的 ONNX worker");
+                    self.stop_internal(engine_id, &entry, &op_id).await;
+                }
+            }
+
+            let space =
+                super::super::funasr::paraformer_online::paraformer_online_deployment_space();
+            let delete_result =
+                tokio::task::spawn_blocking(move || DeploymentStore::remove_impl_space(&space))
+                    .await;
+
+            return match delete_result {
+                Ok(Ok(())) => Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: ModelOperationKind::Delete,
+                    final_stage: ModelOperationStage::Done,
+                    success: true,
+                    error: None,
+                }),
+                Ok(Err(e)) => Ok(ModelOperationResult {
+                    engine_id: engine_id.to_string(),
+                    model_id: model_id.to_string(),
+                    operation_id: op_id,
+                    operation_kind: ModelOperationKind::Delete,
+                    final_stage: ModelOperationStage::Failed,
+                    success: false,
+                    error: Some(from_runtime(ErrorPhase::Cleanup, "模型删除失败", &e)),
+                }),
+                Err(join_err) => Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Cleanup,
+                    "模型删除失败",
+                    format!("spawn_blocking join 错误: {join_err}"),
+                )),
+            };
+        }
+
         // 已安装检查（Corrupted 视为可删除——允许清理损坏资产）
         match mstore::restore_model_state(engine_id, &asset_key) {
             Ok(mstore::RestoredModelState::Installed { .. })
@@ -629,9 +916,10 @@ impl EngineManager {
             });
         }
 
-        // claim 进程级操作
+        // claim 模型资产槽（GGUF 模型删除只写 model_storage，与进程级操作正交；
+        // active/selected 冲突已在上方 check_delete_conflict 拦截）
         let op_id = operation_id.unwrap_or_else(generate_operation_id);
-        let _guard = self.coordinator.try_claim(engine_id, &op_id)?;
+        let _guard = self.coordinator.try_claim_model_storage(engine_id, &op_id)?;
 
         let delete_result = tokio::task::spawn_blocking({
             let eid = engine_id.clone();

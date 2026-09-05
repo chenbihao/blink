@@ -1,5 +1,5 @@
 {
-  "asset_lock_sha256": "81c2ade3fc60c5b2de5f3e2bbc1879d430b79c1b76ea3fd9fddcbdbac613ebcc",
+  "asset_lock_sha256": "3de25f71e42b338acb0a4fd12f03d6f2a595ac676f23e3eb95ac9253309c2453",
   "description": "ParaformerOnline STT worker 供应链摘要",
   "has_placeholder_hashes": false,
   "models_count": 4,
@@ -12,6 +12,6 @@
   "ort_files_count": 2,
   "ort_version": "1.19.2",
   "schema": 1,
-  "worker_entry": "blink.exe paraformer-worker",
+  "worker_entry": "blink.exe paraformer-selftest",
   "worker_protocol_version": 2
 }

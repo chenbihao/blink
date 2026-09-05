@@ -325,23 +325,36 @@ impl OcrCoordinator {
     /// task 持有自己的 120s 上限，即使所有请求都取消了，启动也会继续完成。
     /// 成功后设置 Ready 状态，失败后设置 Failed 状态。
     fn spawn_shared_startup_task(&self, generation: u64) {
+        // 0.22.9：'static spawn 不能捕获 &self——提前取 owned 的 manager 升级与引擎 id
+        let engine_service = self.engine_service.get().and_then(|w| w.upgrade());
+        let engine_id = self.paddleocr_engine_id.clone();
         let executor = self.executor.read().unwrap().clone();
-        let executor = match &executor {
-            Some(e) => e.clone(),
-            None => {
-                // executor 未注入——直接提交 Failed
-                // 必须重置 starting_gate，否则后续请求永远拿不到 winner
-                self.starting_gate.store(false, Ordering::SeqCst);
-                Self::commit_start_failed_if_current(
-                    &self.lifecycle_tx,
-                    generation,
-                    Arc::new(StructuredOcrError::backend_unavailable(
-                        "ONNX executor 未注入",
-                    )),
-                    &self.start_elapsed_ms,
-                );
-                return;
-            }
+        let executor = match executor {
+            Some(e) => e,
+            // executor 未注入（用户未手动点「启动」）——0.22.9 起懒构建：
+            // 从 active deployment 直接构建 executor（与启动命令同源），
+            // 使首次 OCR 请求即可用，无需手动预热。
+            // 部署缺失时提交 Failed 并给可行动提示。
+            None => match super::build_onnx_executor_from_deployment() {
+                Some(built) => {
+                    tracing::info!("OCR 懒启动：executor 未注入，已从 active deployment 构建");
+                    *self.executor.write().unwrap() = Some(Arc::clone(&built));
+                    built
+                }
+                None => {
+                    // 必须重置 starting_gate，否则后续请求永远拿不到 winner
+                    self.starting_gate.store(false, Ordering::SeqCst);
+                    Self::commit_start_failed_if_current(
+                        &self.lifecycle_tx,
+                        generation,
+                        Arc::new(StructuredOcrError::backend_unavailable(
+                            "OCR ONNX 环境未安装，请在设置页「引擎」中安装 PaddleOCR 环境",
+                        )),
+                        &self.start_elapsed_ms,
+                    );
+                    return;
+                }
+            },
         };
         let lifecycle_tx = self.lifecycle_tx.clone();
         let start_elapsed_ms = self.start_elapsed_ms.clone();
@@ -412,6 +425,15 @@ impl OcrCoordinator {
                         &start_elapsed_ms,
                         elapsed_ms,
                     );
+                    // 0.22.9：懒启动成功 → 引擎卡片同步为 Running（best effort）
+                    if let Some(service) = engine_service {
+                        let eid = engine_id.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = service.start_inprocess(&eid).await {
+                                tracing::debug!(engine = %eid, %e, "OCR 卡片状态同步失败（best effort）");
+                            }
+                        });
+                    }
                 }
             }
         });

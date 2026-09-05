@@ -105,8 +105,11 @@ async fn download_and_verify(
         });
     }
 
+    // User-Agent 必须显式标识——ModelScope 等源的 LFS 重定向会拒绝
+    // 空默认 UA（HTTP 403）；产品 UA 已实测可过（Handoff 08 E2E）。
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .user_agent("Blink/0.22 (stt-asset-download)")
         .build()
         .map_err(|e| RuntimeError::InstallFailed {
             message: format!("HTTP client 构造失败: {e}"),

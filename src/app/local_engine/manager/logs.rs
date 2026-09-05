@@ -62,6 +62,13 @@ impl EngineManager {
                 .into_iter()
                 .rev()
                 .take(max_lines)
+                // 与实时 pump 同一噪声抑制——历史回放不重演 llama.cpp/ORT 洪流
+                .filter(|entry| {
+                    !should_suppress_from_ui(
+                        &entry.text,
+                        classify_engine_log(entry.source, &entry.text),
+                    )
+                })
                 .map(|entry| StructuredLogEntry {
                     engine_id: engine_id.to_string(),
                     instance_id: instance_id.clone().unwrap_or_default(),
@@ -85,6 +92,12 @@ impl EngineManager {
                 .into_iter()
                 .rev()
                 .take(max_lines)
+                .filter(|entry| {
+                    !should_suppress_from_ui(
+                        &entry.text,
+                        classify_engine_log(entry.source, &entry.text),
+                    )
+                })
                 .map(|entry| StructuredLogEntry {
                     engine_id: engine_id.to_string(),
                     instance_id: instance_id.clone().unwrap_or_default(),
@@ -105,8 +118,11 @@ impl EngineManager {
 /// 从子进程输出内容推断展示/tracing 级别。
 ///
 /// stdout/stderr 只是传输通道，不等于日志级别：Paddle/PaddleX 会把下载进度写到
-/// stderr，若直接映射为 warn 会产生大量伪告警。受信任 wrapper 的显式前缀优先，
-/// 未分类输出降为 debug。
+/// stderr，若直接映射为 warn 会产生大量伪告警。判定顺序：
+/// 1. 受信任 wrapper 的显式前缀（`[ERROR]` / `WARNING:` 等）；
+/// 2. tracing 格式的级别 token（worker 子进程 stderr 的 tracing 输出，
+///    形如 `…Z  INFO blink::…: message`；ANSI 已在 LogPipe 入口剥离）；
+/// 3. 未分类输出降为 debug。
 pub(super) fn classify_engine_log(
     _source: crate::infra::local_engine::log_pipe::LogSource,
     text: &str,
@@ -117,16 +133,67 @@ pub(super) fn classify_engine_log(
         || trimmed.starts_with("ERROR:")
         || trimmed.starts_with("Traceback ")
     {
-        EngineLogLevel::Error
-    } else if trimmed.starts_with("[WARN]") || trimmed.starts_with("WARNING:") {
-        EngineLogLevel::Warn
-    } else if trimmed.starts_with("[INFO]") || trimmed.starts_with("[STATE]") {
-        EngineLogLevel::Info
-    } else if trimmed.starts_with("[TRACE]") {
-        EngineLogLevel::Trace
-    } else {
-        EngineLogLevel::Debug
+        return EngineLogLevel::Error;
     }
+    if trimmed.starts_with("[WARN]") || trimmed.starts_with("WARNING:") {
+        return EngineLogLevel::Warn;
+    }
+    if trimmed.starts_with("[INFO]") || trimmed.starts_with("[STATE]") {
+        return EngineLogLevel::Info;
+    }
+    if trimmed.starts_with("[TRACE]") {
+        return EngineLogLevel::Trace;
+    }
+    // tracing 对齐格式：级别 token 两侧至少一个空格（" INFO " / " WARN "）
+    for (token, level) in [
+        (" ERROR ", EngineLogLevel::Error),
+        (" WARN ", EngineLogLevel::Warn),
+        (" INFO ", EngineLogLevel::Info),
+        (" DEBUG ", EngineLogLevel::Debug),
+        (" TRACE ", EngineLogLevel::Trace),
+    ] {
+        if text.contains(token) {
+            return level;
+        }
+    }
+    EngineLogLevel::Debug
+}
+
+/// 第三方推理栈内部噪声（llama.cpp / ORT / SenseVoice worker 计算细节）判定。
+///
+/// 这些行对用户不可读也不可行动，逐条透传会把前端日志面板刷成
+/// `llama_kv_cache` / `GraphTransformer` 洪流。命中且级别低于 warn 的行
+/// 只进 Blink tracing（trace 级），不投影 UI；warn/error 级别的第三方
+/// 输出不受影响。前缀精确匹配——未列出的 `[sensevoice]` 行（如错误）
+/// 仍然透传。
+pub(super) fn is_third_party_internal_noise(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("llama_")
+        || trimmed.starts_with("llm_load_")
+        || trimmed.starts_with("sched_reserve:")
+        || trimmed.starts_with("graph_reserve:")
+        || trimmed.starts_with("resolve_fused_ops:")
+        || trimmed.starts_with("print_info:")
+        // SenseVoice GGUF worker 每次推理固定刷 6 行计算过程（实测样本），
+        // 伪流式预览 500ms 一次即每秒 ~60 行
+        || trimmed.starts_with("[sensevoice] building graph:")
+        || trimmed.starts_with("[sensevoice] graph built")
+        || trimmed.starts_with("[sensevoice] allocating graph")
+        || trimmed.starts_with("[sensevoice] graph allocated")
+        || trimmed.starts_with("[sensevoice] compute starting")
+        || trimmed.starts_with("[sensevoice] compute complete:")
+    {
+        return true;
+    }
+    // ORT C++ 日志经 ort tracing 桥接：`…  INFO ort::logging: …`
+    text.contains(" ort::logging:")
+}
+
+/// 噪声行是否应从 UI 投影中剔除（warn/error 始终保留）。
+pub(super) fn should_suppress_from_ui(text: &str, level: super::super::dto::EngineLogLevel) -> bool {
+    use super::super::dto::EngineLogLevel;
+    is_third_party_internal_noise(text)
+        && !matches!(level, EngineLogLevel::Error | EngineLogLevel::Warn)
 }
 
 // ── 日志投影辅助 ──────────────────────────────────────────────────────────
@@ -185,20 +252,27 @@ pub(super) async fn pump_logs_to_event_port(
                                 // 身份匹配——同时进入 Blink tracing 与 UI 日志流。
                                 // 未分类的第三方输出降为 debug，避免下载进度污染默认日志。
                                 let level = classify_engine_log(log_entry.source, &log_entry.text);
-                                match level {
-                                    super::super::dto::EngineLogLevel::Error => tracing::error!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
-                                    super::super::dto::EngineLogLevel::Warn => tracing::warn!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
-                                    super::super::dto::EngineLogLevel::Info => tracing::info!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
-                                    super::super::dto::EngineLogLevel::Trace => tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
-                                    _ => tracing::debug!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                // 第三方内部噪声（llama.cpp/ORT 细节）：Blink tracing
+                                // 降为 trace 且不投影前端——warn/error 仍按原级透传
+                                let suppress_ui = should_suppress_from_ui(&log_entry.text, level);
+                                if suppress_ui {
+                                    tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出（第三方内部噪声，已抑制 UI 投影）");
+                                } else {
+                                    match level {
+                                        super::super::dto::EngineLogLevel::Error => tracing::error!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                        super::super::dto::EngineLogLevel::Warn => tracing::warn!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                        super::super::dto::EngineLogLevel::Info => tracing::info!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                        super::super::dto::EngineLogLevel::Trace => tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                        _ => tracing::debug!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
+                                    }
+                                    event_port.emit_log(
+                                        &engine_id,
+                                        &instance_id,
+                                        log_entry.seq,
+                                        level,
+                                        &log_entry.text,
+                                    );
                                 }
-                                event_port.emit_log(
-                                    &engine_id,
-                                    &instance_id,
-                                    log_entry.seq,
-                                    level,
-                                    &log_entry.text,
-                                );
                             }
                             Some(ref current) => {
                                 // 身份不匹配——说明已 restart，旧 pump 退出
@@ -235,5 +309,99 @@ pub(super) async fn pump_logs_to_event_port(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_engine_log, should_suppress_from_ui};
+    use crate::app::local_engine::dto::EngineLogLevel;
+    use crate::infra::local_engine::log_pipe::LogSource;
+
+    #[test]
+    fn classify_explicit_prefixes_unchanged() {
+        assert!(matches!(
+            classify_engine_log(LogSource::Stderr, "[ERROR] boom"),
+            EngineLogLevel::Error
+        ));
+        assert!(matches!(
+            classify_engine_log(LogSource::Stdout, "WARNING: low disk"),
+            EngineLogLevel::Warn
+        ));
+        assert!(matches!(
+            classify_engine_log(LogSource::Stdout, "[STATE] model loaded"),
+            EngineLogLevel::Info
+        ));
+    }
+
+    #[test]
+    fn classify_parses_tracing_format_level_tokens() {
+        // ANSI 已在 LogPipe 入口剥离；此处为剥离后的文本
+        let info = "2026-09-05T07:22:13.452382Z  INFO blink::infra::local_engine::paraformer_worker: worker: Begin -> Ack gen=1";
+        assert!(matches!(
+            classify_engine_log(LogSource::Stderr, info),
+            EngineLogLevel::Info
+        ));
+        let warn = "2026-09-05T07:22:13.452382Z  WARN blink::infra::local_engine::x: slow";
+        assert!(matches!(
+            classify_engine_log(LogSource::Stderr, warn),
+            EngineLogLevel::Warn
+        ));
+        let error = "2026-09-05T07:22:13.452382Z ERROR blink::x: failed";
+        assert!(matches!(
+            classify_engine_log(LogSource::Stderr, error),
+            EngineLogLevel::Error
+        ));
+        // 无级别 token 的输出降为 debug（下载进度等）
+        assert!(matches!(
+            classify_engine_log(LogSource::Stdout, "sensevoice.bin: 已下载 32 MB (13%)"),
+            EngineLogLevel::Debug
+        ));
+    }
+
+    #[test]
+    fn third_party_noise_detection() {
+        // llama.cpp 内部日志（GGUF worker 实测洪流样本）
+        assert!(should_suppress_from_ui(
+            "llama_kv_cache: size = 224.00 MiB ( 2048 cells, 28 layers, 1/1 seqs)",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "sched_reserve: CPU compute buffer size = 1203.01 MiB",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "resolve_fused_ops: Flash Attention enabled",
+            EngineLogLevel::Info
+        ));
+        // ORT 图优化日志（ort::logging 桥接，剥离 ANSI 后）
+        assert!(should_suppress_from_ui(
+            "2026-09-05T07:22:06.343287Z  INFO ort::logging: GraphTransformer Level1_RuleBasedTransformer modified: 1 with status: OK",
+            EngineLogLevel::Info
+        ));
+        // SenseVoice GGUF worker 每次推理的计算过程行（实测样本）
+        assert!(should_suppress_from_ui(
+            "[sensevoice] building graph: 88 frames",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "[sensevoice] compute complete: status=0",
+            EngineLogLevel::Debug
+        ));
+        // 未列入清单的 [sensevoice] 行（如错误）不受影响
+        assert!(!should_suppress_from_ui(
+            "[sensevoice] unexpected failure",
+            EngineLogLevel::Debug
+        ));
+        // Blink 自己的 worker 行不受影响
+        assert!(!should_suppress_from_ui(
+            "2026-09-05T07:22:13.452Z  INFO blink::infra::local_engine::paraformer_worker: worker: Begin -> Ack gen=1",
+            EngineLogLevel::Info
+        ));
+        // 噪声但 warn/error 级别 → 仍然透传 UI
+        assert!(!should_suppress_from_ui(
+            "llama_context: failed to load model",
+            EngineLogLevel::Error
+        ));
     }
 }

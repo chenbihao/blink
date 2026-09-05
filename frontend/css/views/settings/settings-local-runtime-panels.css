@@ -700,6 +700,37 @@
     color: var(--text-sub);
 }
 
+/* 推荐徽章（0.22.9）：模型目录推荐标记——accent 描边与「配置」区分 */
+#engines .le-model-badge-recommended {
+    background: var(--accent-bg);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+}
+
+/* 清理项安装路径（0.22.9）：path_display 弱化展示 */
+#engines .le-cleanup-item-path {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    word-break: break-all;
+    font-style: normal;
+}
+
+/* 切换中徽章（0.22.9）：selection 事务在途时的目标模型标注 */
+#engines .le-model-badge-switching {
+    background: var(--surface-2);
+    color: var(--text-dim);
+}
+
+/* 业务特征行（0.22.9）：名称子行，多语言/流式/资源/质量，弱信号不撑布局 */
+#engines .le-model-traits {
+    margin-top: 0.125rem;
+    font-size: var(--text-xs);
+    font-weight: 400;
+    color: var(--text-dim);
+    font-style: normal;
+    overflow-wrap: anywhere;
+}
+
 /* ── model mismatch hint / conflict (structured, no silent fallback) ───────── */
 
 #engines .le-model-mismatch {

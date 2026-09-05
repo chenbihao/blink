@@ -340,17 +340,22 @@ impl ModelInstallWorker for NoopModelWorker {
 
 // ── FunASR 注册（0.22.7.4：GGUF 模型目录为唯一实现）─────────────────────────
 
-/// FunASR 模型目录：SenseVoice Q8 / Paraformer-zh Q8 / Fun-ASR-Nano Q4_K_M。
+/// FunASR 模型目录：SenseVoice Q8 / Paraformer-zh Q8 / Fun-ASR-Nano Q4_K_M
+/// / ParaformerOnline ONNX（0.22.9 Handoff 08 注册）。
 ///
 /// 旧 Python 时代目录（iic/SenseVoiceSmall / paraformer-zh）已随 0.22.7.4
 /// 切换移除；旧配置选择由 `SttConfig::migrate_selection_to_gguf` 确定迁移。
+/// ParaformerOnline 走 per-implementation deployment，不进 model_storage。
 pub fn make_funasr_model_registry() -> ModelRegistry {
-    ModelRegistry::new_with_models(
+    let mut models: Vec<EngineModelDescriptor> =
         crate::app::local_engine::funasr::gguf::gguf_model_specs()
             .iter()
             .map(crate::app::local_engine::funasr::gguf::gguf_model_descriptor)
-            .collect(),
-    )
+            .collect();
+    models.push(
+        crate::app::local_engine::funasr::paraformer_online::paraformer_online_model_descriptor(),
+    );
+    ModelRegistry::new_with_models(models)
 }
 /// - 可生成不同 revision/content（用于 repair 测试）
 /// - 通过 sink 报告阶段日志
@@ -473,6 +478,10 @@ pub struct ModelCatalogItemDto {
     /// 不再硬编码模型 id → 能力的映射。
     #[serde(default)]
     pub stt_capabilities: SttModelCapabilities,
+    /// 模型业务画像（0.22.9 display-only）：中文质量 / 资源占用定位。
+    /// None = 未声明（前端不展示该维度，不猜默认值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business: Option<crate::domain::local_engine::ModelBusinessProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,6 +523,7 @@ pub fn project_model_status(
         is_active: status.is_active,
         compatibility: status.compatibility.to_string(),
         stt_capabilities: descriptor.stt_capabilities.clone(),
+        business: descriptor.business.clone(),
     }
 }
 
@@ -557,6 +567,7 @@ mod tests {
             estimated_size_mb: Some(100),
             compatibility_schema: 1,
             stt_capabilities: caps,
+            business: None,
         }
     }
 
@@ -574,6 +585,7 @@ mod tests {
             pseudo_streaming: CapabilityFlag::yes(),
             true_streaming: CapabilityFlag::no("test.reason"),
             timestamps: CapabilityFlag::no("test.reason"),
+            punctuation: CapabilityFlag::no("test.reason"),
         };
         let desc = test_descriptor_with_caps("test-model", caps);
         let status = test_status(&desc);
@@ -606,6 +618,7 @@ mod tests {
             estimated_size_mb: Some(50),
             compatibility_schema: 1,
             stt_capabilities: SttModelCapabilities::default(),
+            business: None,
         };
         let status = test_status(&desc);
         let dto = project_model_status(&desc, &status);
@@ -630,6 +643,7 @@ mod tests {
             pseudo_streaming: CapabilityFlag::yes(),
             true_streaming: CapabilityFlag::no("round.trip.test"),
             timestamps: CapabilityFlag::yes(),
+            punctuation: CapabilityFlag::yes(),
         };
         let desc = test_descriptor_with_caps("round-trip", caps.clone());
         let status = test_status(&desc);
@@ -748,5 +762,59 @@ mod tests {
 
         // Nano 不支持真流式（KV 每请求清空）
         assert!(!dto.stt_capabilities.true_streaming.is_supported());
+    }
+
+    #[test]
+    fn business_profile_projects_and_omits_when_none() {
+        // 有 business → DTO 携带；None → 字段整体缺省（旧前端兼容）
+        let with_biz = {
+            let mut desc = test_descriptor_with_caps("with-biz", SttModelCapabilities::default());
+            desc.business = Some(crate::domain::local_engine::ModelBusinessProfile {
+                chinese_quality: "corpus_baseline".to_string(),
+                resource_footprint: "shared_gguf_worker".to_string(),
+                recommended: false,
+            });
+            desc
+        };
+        let json =
+            serde_json::to_value(project_model_status(&with_biz, &test_status(&with_biz))).unwrap();
+        assert_eq!(json["business"]["chinese_quality"], "corpus_baseline");
+        assert_eq!(json["business"]["resource_footprint"], "shared_gguf_worker");
+
+        let without_biz = test_descriptor_with_caps("without-biz", SttModelCapabilities::default());
+        let json = serde_json::to_value(project_model_status(
+            &without_biz,
+            &test_status(&without_biz),
+        ))
+        .unwrap();
+        assert!(json.get("business").is_none());
+
+        // 反序列化：缺 business 字段的旧 JSON 仍然可解析（wire 向后兼容）
+        let dto: ModelCatalogItemDto = serde_json::from_value(json).unwrap();
+        assert!(dto.business.is_none());
+    }
+
+    #[test]
+    fn funasr_model_registry_declares_business_profiles() {
+        // 四个 STT 候选（3 GGUF + 1 ONNX）都必须声明业务画像——
+        // 设置页 FunASR 卡片展示业务差异的数据真源。
+        let registry = make_funasr_model_registry();
+        let funasr =
+            crate::infra::local_engine::runtime::EngineId::new("funasr").expect("funasr is valid");
+        let models = registry.list(&funasr);
+        assert_eq!(models.len(), 4, "3 GGUF + 1 ParaformerOnline");
+
+        for desc in models {
+            let business = desc
+                .business
+                .as_ref()
+                .unwrap_or_else(|| panic!("模型 {} 必须声明 business profile", desc.model_id));
+            assert_eq!(business.chinese_quality, "corpus_baseline");
+            if desc.model_id == crate::domain::config::stt_config::PARAFORMER_ONLINE_MODEL_ID {
+                assert_eq!(business.resource_footprint, "dedicated_onnx_worker");
+            } else {
+                assert_eq!(business.resource_footprint, "shared_gguf_worker");
+            }
+        }
     }
 }

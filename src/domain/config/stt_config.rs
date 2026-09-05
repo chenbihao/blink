@@ -90,6 +90,13 @@ pub const GGUF_SENSEVOICE_MODEL_ID: &str = "gguf/sensevoice-small-q8";
 pub const GGUF_PARAFORMER_MODEL_ID: &str = "gguf/paraformer-zh-q8";
 pub const GGUF_NANO_MODEL_ID: &str = "gguf/fun-asr-nano-q4km";
 
+/// ParaformerOnline ONNX worker 的稳定模型 id（0.22.9 Handoff 08 注册）。
+///
+/// 绑定 `ParaformerOnnxWorker` implementation（真流式，per-implementation
+/// deployment 承载 ORT + 模型资产）。注册不改变默认模型——默认选择
+/// 仍为 `GGUF_SENSEVOICE_MODEL_ID`。
+pub const PARAFORMER_ONLINE_MODEL_ID: &str = "onnx/paraformer-online";
+
 /// 旧模型 id（Python/PyTorch 时代的 ModelScope id 与短名）→ GGUF 模型 id 的
 /// 确定映射（0.22.7 切换用）。
 ///
@@ -1302,6 +1309,7 @@ mod tests {
             estimated_size_mb: Some(243),
             compatibility_schema: 1,
             stt_capabilities: crate::domain::local_engine::SttModelCapabilities::default(),
+            business: None,
         }
     }
 

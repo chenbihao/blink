@@ -262,6 +262,15 @@ impl VoiceService {
 
         // 0.22.7 GGUF worker：本地模式下从 EngineManager 获取连接快照，
         // 就绪检查走 worker transport 的 NDJSON hello（无 HTTP 端口）。
+        // 0.22.9 Handoff 08：连接携带 start 冻结的 implementation——
+        // ParaformerOnline 返回真实 streaming port（真流式），GGUF 返回
+        // 现有 transport（伪流式适配）；VoiceService 按实现选择 port，
+        // 不接受任何前端提交的 implementation/runtime。
+        let mut streaming_port: Option<
+            std::sync::Arc<
+                crate::infra::local_engine::streaming_stt_adapter::ParaformerOnlineAdapter,
+            >,
+        > = None;
         let connection = if config.mode == SttMode::Local {
             let svc = self
                 .app
@@ -276,23 +285,51 @@ impl VoiceService {
                     });
                     match s.get_connection(&engine_id).await {
                         Ok(Some(conn)) => {
-                            // 投影：LocalEngineConnection → SttEngineConnection
-                            // 0.22.7.4：worker 传输是唯一本地实现，endpoint
-                            // 不承载地址语义（host/port 为诊断占位）。
-                            match conn.worker {
-                                Some(transport) => Some(crate::domain::stt::SttEngineConnection {
-                                    host: "127.0.0.1".to_string(),
-                                    port: 0,
-                                    engine_id: conn.engine_id,
-                                    instance_id: conn.instance_id,
-                                    transport: Some(transport),
-                                }),
-                                None => {
-                                    tracing::warn!(
-                                        engine = %conn.engine_id,
-                                        "运行中的本地引擎连接缺少 worker 通道（应为 StdioWorker）"
-                                    );
-                                    None
+                            // 按冻结 implementation 分派 port（Handoff 08）
+                            if conn.implementation
+                                == Some(crate::domain::local_engine::ImplementationId::ParaformerOnnxWorker)
+                            {
+                                match conn.streaming {
+                                    Some(port) if port.is_ready() => {
+                                        streaming_port = Some(port);
+                                        None
+                                    }
+                                    Some(_) => {
+                                        tracing::warn!(
+                                            engine = %conn.engine_id,
+                                            "ONNX streaming 通道已断开（worker 可能已退出）"
+                                        );
+                                        None
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            engine = %conn.engine_id,
+                                            "运行中的 ONNX 实例缺少 streaming 通道"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                // GGUF：投影 LocalEngineConnection → SttEngineConnection
+                                // 0.22.7.4：worker 传输是唯一本地实现，endpoint
+                                // 不承载地址语义（host/port 为诊断占位）。
+                                match conn.worker {
+                                    Some(transport) => {
+                                        Some(crate::domain::stt::SttEngineConnection {
+                                            host: "127.0.0.1".to_string(),
+                                            port: 0,
+                                            engine_id: conn.engine_id,
+                                            instance_id: conn.instance_id,
+                                            transport: Some(transport),
+                                        })
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            engine = %conn.engine_id,
+                                            "运行中的本地引擎连接缺少 worker 通道（应为 StdioWorker）"
+                                        );
+                                        None
+                                    }
                                 }
                             }
                         }
@@ -316,8 +353,8 @@ impl VoiceService {
         };
         if need_check {
             // 0.22.6: 本地模式下必须先获取连接，再检查服务状态
-            // 无连接 = 服务未运行，直接中止
-            if config.mode == SttMode::Local && connection.is_none() {
+            // 无连接/port = 服务未运行，直接中止
+            if config.mode == SttMode::Local && connection.is_none() && streaming_port.is_none() {
                 let msg = "FunASR 服务未运行，请在设置页「语音输入」中启动服务";
                 tracing::warn!(target = ?target, %msg, "语音录音中止：无连接");
                 self.emit_voice_error(target, msg);
@@ -326,18 +363,27 @@ impl VoiceService {
 
             let (ready, msg) = match config.mode {
                 SttMode::Local => {
-                    let conn = connection.as_ref().expect("connection 已在上方验证为 Some");
-                    // 0.22.7 GGUF worker：就绪检查走 NDJSON 通道 hello——
-                    // 通道与实例绑定，模型就绪由 start 的 ready 握手保证。
-                    match conn.transport.as_ref() {
-                        Some(transport) => match transport.check_ready().await {
-                            Ok(()) => (true, String::new()),
-                            Err(e) => (false, format!("语音服务不可用：{e}。请在设置页重启服务。")),
-                        },
-                        None => (
-                            false,
-                            "语音服务连接缺少 worker 通道，请在设置页重启服务".to_string(),
-                        ),
+                    if streaming_port.is_some() {
+                        // Handoff 08：ONNX ready 由 start 时的 hello/ready 握手
+                        // 保证（ORT + 模型加载完成后才 Ready）；断连已在上方
+                        // is_ready 检查中识别。
+                        (true, String::new())
+                    } else {
+                        let conn = connection.as_ref().expect("connection 已在上方验证为 Some");
+                        // 0.22.7 GGUF worker：就绪检查走 NDJSON 通道 hello——
+                        // 通道与实例绑定，模型就绪由 start 的 ready 握手保证。
+                        match conn.transport.as_ref() {
+                            Some(transport) => match transport.check_ready().await {
+                                Ok(()) => (true, String::new()),
+                                Err(e) => {
+                                    (false, format!("语音服务不可用：{e}。请在设置页重启服务。"))
+                                }
+                            },
+                            None => (
+                                false,
+                                "语音服务连接缺少 worker 通道，请在设置页重启服务".to_string(),
+                            ),
+                        }
                     }
                 }
                 SttMode::Cloud => (false, "云端 STT 未配置供应商，请在设置页中配置".to_string()),
@@ -351,6 +397,7 @@ impl VoiceService {
             // ── 模型加载状态检查（本地模式）──
             // 0.22.7 GGUF worker：就绪已由上方通道 hello 验证（模型加载完成
             // 才有 ready），无需二次模型状态轮询。
+            // 0.22.9 ONNX：ready 已由 start 握手验证（同语义）。
         };
 
         // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
@@ -364,30 +411,48 @@ impl VoiceService {
                 return false;
             }
 
-            let engine = match crate::domain::stt::create_engine(connection) {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
-                    self.emit_voice_error(session.target, &e);
-                    return false;
-                }
-            };
+            // Handoff 08：ONNX 真流式 port 直接使用（native partial）；
+            // GGUF 走现有引擎创建 + 伪流式适配器包装。
+            let (engine_arc, stt_port): (Option<Arc<dyn SttEngine>>, Arc<dyn StreamingSttPort>) =
+                if let Some(port) = streaming_port.take() {
+                    tracing::info!(
+                        implementation = "paraformer_onnx_worker",
+                        "STT port: ParaformerOnline 真流式（按冻结 implementation 选择）"
+                    );
+                    (None, port)
+                } else {
+                    let engine = match crate::domain::stt::create_engine(connection.clone()) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
+                            let msg = e;
+                            self.emit_voice_error(session.target, &msg);
+                            return false;
+                        }
+                    };
+                    engine.reset();
+                    let engine_arc: Arc<dyn SttEngine> = Arc::from(engine);
+                    let port: Arc<dyn StreamingSttPort> = Arc::new(
+                        crate::domain::stt::streaming_port::GgufStreamingAdapter::new(
+                            engine_arc.clone(),
+                        ),
+                    );
+                    (Some(engine_arc), port)
+                };
+
             let mut capture = if let Some(dev_id) = &config.audio_device_id {
                 platform::audio::create_capture_with_device(dev_id.clone())
             } else {
                 platform::audio::create_capture()
             };
-            engine.reset();
-
-            // 0.22.9 Handoff 05：将旧 SttEngine 包装为 StreamingSttPort
-            let engine_arc: Arc<dyn SttEngine> = Arc::from(engine);
-            let stt_port: Arc<dyn StreamingSttPort> = Arc::new(
-                crate::domain::stt::streaming_port::GgufStreamingAdapter::new(engine_arc.clone()),
-            );
 
             let format = AudioFormat::default();
             match capture.start(format) {
                 Ok(rx) => {
+                    // capture 必须存入 session——它是块内局部变量，块结束时
+                    // drop 会触发 CpalCapture::drop 停掉采集线程，音频通道
+                    // 随即关闭，识别全程收不到任何样本（0.22.9 回归）。
+                    session.capture = Some(capture);
                     session.recording = true;
 
                     // 通知输入状态机进入 Recording（仅热键路径，使 ESC 能产生 VoiceCancel）
@@ -433,7 +498,12 @@ impl VoiceService {
             Err(e) => {
                 tracing::error!(%e, "begin_session 失败");
                 self.emit_voice_error(target, &e.to_string());
-                self.session.lock().unwrap().recording = false;
+                {
+                    let mut session = self.session.lock().unwrap();
+                    session.recording = false;
+                    // 立即 drop capture（停采集 + 关通道），不留残留实例
+                    session.capture.take();
+                }
                 return false;
             }
         };
@@ -488,7 +558,9 @@ impl VoiceService {
         {
             let mut session = self.session.lock().unwrap();
             session.generation = Some(session_gen);
-            session.engine = Some(engine_arc);
+            // ONNX 真流式路径 engine 为 None（finalize 回退路径不适用，
+            // port 的 finish/cancel 语义完整覆盖）
+            session.engine = engine_arc;
             session.stt_port = Some(stt_port);
             session.audio_task = Some(task_handle);
             session.event_task = Some(event_task);

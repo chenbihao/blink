@@ -147,19 +147,25 @@ fn parse_level(level: &str) -> String {
     // get password），启动时 AI factory 构造 N 个 provider = 4N 行，淹没 blink 自身
     // 日志。blink 自己的 `密钥已从 keyring 读回`（store.rs，结构化、无明文）已覆盖
     // 诊断需求，keyring 内部 CM 调用细节无价值。
+    //
+    // **ort 压到 warn**（0.22.9 修复）:ort 的 tracing 桥接在创建 ORT Env 时硬编码
+    // VERBOSE 级别（rc.13 environment.rs），OCR in-process Session 构建期会喷
+    // GraphTransformer/BFCArena 等内部细节 INFO（数百行）。用户调高级别是想看
+    // blink 自身逻辑；ORT 内部细节由引擎日志面板（worker 管道）单独承载。
     let transport_noise =
         "hyper=warn,reqwest=warn,hyper_util=warn,h2=warn,rustls=warn,tower=warn,hpack=warn";
     let ai_noise = "rig=warn,rig_core=warn,rig_agent=warn";
     let keyring_noise = "keyring=warn,keyring_core=warn";
+    let ort_noise = "ort=warn";
     match level {
         "trace" => format!(
-            "trace,sqlx=warn,tauri=warn,tao=warn,rmcp=warn,{transport_noise},{ai_noise},{keyring_noise}"
+            "trace,sqlx=warn,tauri=warn,tao=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         "debug" => format!(
-            "debug,sqlx=warn,tauri=warn,rmcp=warn,{transport_noise},{ai_noise},{keyring_noise}"
+            "debug,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         "info" => format!(
-            "info,sqlx=warn,tauri=warn,rmcp=warn,{transport_noise},{ai_noise},{keyring_noise}"
+            "info,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         _ => "error".to_string(),
     }
@@ -185,5 +191,23 @@ fn clean_old_logs(dir: &PathBuf) {
         {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_level;
+
+    #[test]
+    fn parse_level_caps_third_party_noise() {
+        for lvl in ["trace", "debug", "info"] {
+            let f = parse_level(lvl);
+            assert!(f.starts_with(lvl), "{f}");
+            // 0.22.9：ort 内部细节恒压 warn（Env 硬编码 VERBOSE 的兜底）
+            assert!(f.contains("ort=warn"), "{f}");
+            assert!(f.contains("sqlx=warn"), "{f}");
+        }
+        assert_eq!(parse_level("error"), "error");
+        assert_eq!(parse_level("bogus"), "error");
     }
 }

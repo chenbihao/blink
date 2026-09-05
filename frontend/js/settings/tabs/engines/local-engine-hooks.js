@@ -32,6 +32,7 @@ import {
     getLoadedDeployment,
     getLegacyDeployment,
 } from "./local-engine-state.js";
+import {getSelection} from "./local-engine-selection.js";
 
 // ── 公共构造 ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,57 @@ function makeGroup(labelText) {
 /** compute preference 显示名。 */
 function computeLabel(preference) {
     return t(`local_engine.compute.${preference}`, preference);
+}
+
+/**
+ * active implementation wire 值 → 只读诊断文案。
+ *
+ * 真源是 `status.status.active_implementation`（0.22.9 只读字段，
+ * start 冻结快照提交）。null/缺省 = 未运行。前端只做展示映射，
+ * 不提供任何选择/提交入口。
+ */
+export function activeImplementationLabel(entry) {
+    const impl = entry?.status?.status?.active_implementation;
+    if (!impl) {
+        const label = t("local_engine.implementation.none");
+        return label !== "local_engine.implementation.none" ? label : "未运行";
+    }
+    const key = `local_engine.implementation.${impl}`;
+    const label = t(key);
+    if (label !== key) return label;
+    const map = {
+        funasr_gguf_worker: "GGUF worker（常驻）",
+        paraformer_onnx_worker: "ONNX worker（独立进程）",
+        paddleocr_onnx_in_process: "ONNX in-process",
+    };
+    return map[impl] || impl;
+}
+
+/**
+ * FunASR 运行时诊断只读组（0.22.9 Handoff 09）。
+ *
+ * 展示 runtime 种类（引擎 descriptor 声明）与 active implementation
+ * （start 冻结）。均只读——用户不选择技术底座，卡片不提供
+ * GGUF/ONNX 或 True/Pseudo 技术开关。
+ */
+function appendFunasrRuntimeGroup(container, entry) {
+    const runtimeLabel = t("local_engine.config.runtime_diag");
+    const group = makeGroup(runtimeLabel !== "local_engine.config.runtime_diag"
+        ? runtimeLabel : "运行时");
+    group.className += " le-config-group-runtime";
+
+    const value = document.createElement("span");
+    value.className = "le-config-static le-runtime-diag";
+    value.textContent = activeImplementationLabel(entry);
+    group.appendChild(value);
+    container.appendChild(group);
+}
+
+/** 原位同步 FunASR 运行时诊断组。 */
+function syncFunasrRuntimeGroup(container, entry) {
+    const el = container.querySelector(".le-runtime-diag");
+    const next = activeImplementationLabel(entry);
+    if (el && el.textContent !== next) el.textContent = next;
 }
 
 /**
@@ -197,6 +249,9 @@ function registerFunasrHook() {
             // 当前模型（只读）+ 待重启提示
             appendCurrentModelGroup(container, entry);
 
+            // 运行时诊断（只读：runtime 种类 + active implementation）
+            appendFunasrRuntimeGroup(container, entry);
+
             // 计算设备（FunASR descriptor 当前只声明 CPU → 静态文本）
             appendComputeGroup(container, entry, "funasr", controller);
 
@@ -244,6 +299,7 @@ function registerFunasrHook() {
         },
         syncConfig(container, entry) {
             syncCommonConfig(container, entry);
+            syncFunasrRuntimeGroup(container, entry);
             const toggle = container.querySelector(".le-switch-input");
             const next = entry.preferences?.auto_start ?? false;
             if (toggle) {

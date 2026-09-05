@@ -254,8 +254,13 @@ pub struct DeploymentAssets {
 /// 退出条件：读到 Quit、EOF 或 panic-like 错误。
 pub fn run_worker_loop(deployment_dir: &Path) -> i32 {
     // 初始化 stderr tracing
+    // - with_ansi(false)：stderr 经 LogPipe 转发到前端日志面板，颜色码会
+    //   渲染成 `[2m…[0m` 乱码（管道入口虽已剥离，源头关闭更干净）；
+    // - ort=warn：ORT 加载/图优化的 INFO 细节（GraphTransformer/BFCArena）
+    //   对诊断无行动价值，逐条透传会淹没 Begin/End 关键行。
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
+        .with_env_filter("info,ort=warn")
+        .with_ansi(false)
         .with_writer(std::io::stderr)
         .try_init();
 

@@ -199,7 +199,7 @@ impl NdjsonWorkerClient {
                 line.clear();
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
-                        tracing::info!(total_lines, "worker stdout reader: EOF");
+                        tracing::debug!(total_lines, "worker stdout reader: EOF");
                         let _ = tx.send(WorkerEvent::Eof).await;
                         break;
                     }
@@ -210,17 +210,16 @@ impl NdjsonWorkerClient {
                             Ok(None) => continue,
                             Err(reason) => WorkerEvent::Garbage(reason),
                         };
-                        tracing::info!(
-                            total_lines,
-                            preview = %line.trim().chars().take(80).collect::<String>(),
-                            "worker stdout reader: line received"
-                        );
+                        // 0.22.9：不再记行内容预览——NDJSON 载荷含识别原文
+                        //（用户语音属隐私，日志铁则敏感信息不记），且请求完成
+                        // 已由 app 层「GGUF worker 转录完成」承载，此处降为 debug
+                        tracing::debug!(total_lines, "worker stdout reader: line received");
                         if tx.send(event).await.is_err() {
                             break;
                         }
                     }
                     Err(e) => {
-                        tracing::info!(%e, total_lines, "worker stdout read error");
+                        tracing::warn!(%e, total_lines, "worker stdout read error");
                         let _ = tx.send(WorkerEvent::Eof).await;
                         break;
                     }

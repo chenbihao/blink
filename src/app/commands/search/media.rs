@@ -2406,7 +2406,7 @@ pub async fn install_paddleocr(
     // 0.22.8-F: 安装后构建并注入 ONNX executor
     if let Some(coordinator) = get_ocr_coordinator(&app) {
         let new_executor =
-            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
         if let Some(executor) = new_executor {
             coordinator.inject_executor(executor).await;
         } else {
@@ -2570,7 +2570,7 @@ pub async fn repair_paddleocr(
     //     begin_repair 已 shutdown 旧 executor，这里注入新的
     if let Some(coordinator) = get_ocr_coordinator(&app) {
         let new_executor =
-            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
         if let Some(executor) = new_executor {
             coordinator.inject_executor(executor).await;
         } else {
@@ -2648,7 +2648,7 @@ pub async fn start_paddleocr(
     // 0.22.8-F: 构建并注入 ONNX executor
     if let Some(coordinator) = get_ocr_coordinator(&app) {
         let new_executor =
-            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment(&svc);
+            crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
         if let Some(executor) = new_executor {
             coordinator.inject_executor(executor).await;
         } else {

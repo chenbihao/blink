@@ -447,6 +447,27 @@ impl EngineManager {
         })
     }
 
+    /// ensure_installed 的 implementation 预解析（种子模型带 contract 兜底）。
+    ///
+    /// 种子模型 = 配置 selected（funasr 的 `funasr_model`），为空或引擎无
+    /// 用户级模型选择（paddleocr）时退化 descriptor 模型契约。
+    /// 独立成方法让回归测试能直接复现 ensure_installed 的解析链——
+    /// 0.22.9 回归：曾直接用 selected 解析，paddleocr 恒 `None`，
+    /// fail-closed 误报"无法解析 implementation"，OCR 无法启动。
+    pub(super) async fn resolve_seed_implementation(
+        &self,
+        engine_id: &EngineId,
+        config: &AdapterConfig,
+    ) -> Result<Option<ImplementationId>, LocalEngineError> {
+        let entry = self.get_entry(engine_id).await?;
+        let seed_model = super::lifecycle::seed_model_id_for_implementation(
+            engine_id,
+            config,
+            &entry.adapter.descriptor().model_contract.model_id,
+        );
+        self.resolve_implementation_for_model(engine_id, seed_model.as_deref())
+    }
+
     /// 确保 Python 环境已安装（如果未安装则安装，已安装则标记 Ready）。
     ///
     /// 用于 auto-start 和 start command 的前置检查。
@@ -469,6 +490,37 @@ impl EngineManager {
         self.await_probe(engine_id).await?;
 
         let entry = self.get_entry(engine_id).await?;
+
+        // Handoff 08：ParaformerOnline 走 per-implementation deployment——
+        // 就绪判定读取 impl 空间的 active 部署（结构 + asset-lock 校验），
+        // 不要求 engine 级（GGUF）环境。未安装时返回可行动错误——
+        // **不自动安装**（~250MB 模型资产必须由用户显式触发安装命令）。
+        let selected_impl = self.resolve_seed_implementation(engine_id, &config).await?;
+        if selected_impl == Some(ImplementationId::ParaformerOnnxWorker) {
+            let probe = tokio::task::spawn_blocking(move || {
+                super::super::funasr::paraformer_online::paraformer_online_environment_self_test()
+            })
+            .await
+            .map_err(|e| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Request,
+                    "环境检查失败",
+                    format!("spawn_blocking join 错误: {e}"),
+                )
+            })?;
+            match probe {
+                Ok(()) => return Ok(()),
+                Err(reason) => {
+                    return Err(LocalEngineError::with_detail(
+                        LocalEngineErrorCode::EnvironmentMissing,
+                        ErrorPhase::Start,
+                        "ParaformerOnline 未安装或部署不完整",
+                        reason,
+                    ));
+                }
+            }
+        }
 
         // 检查当前环境状态
         {

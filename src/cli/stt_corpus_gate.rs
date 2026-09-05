@@ -238,23 +238,19 @@ fn vad_segment_audio(
 /// - 先跑一遍完整音频收集 `(start_s, end_s)` segment 列表
 /// - 然后按时间戳切分原始 PCM samples
 /// - 若无 segment 产生，返回整段（等价于 asr_only）
-fn fsmn_vad_load_runner(fsmn_vad_dir: &Path) -> Result<crate::infra::stt::fsmn_vad_runner::FsmnVadRunner, String> {
+fn fsmn_vad_load_runner(
+    fsmn_vad_dir: &Path,
+) -> Result<crate::infra::stt::fsmn_vad_runner::FsmnVadRunner, String> {
     use crate::infra::stt::fsmn_vad_runner::FsmnVadRunner;
 
     let model_path = fsmn_vad_dir.join("model_quant.onnx");
     let mvn_path = fsmn_vad_dir.join("am.mvn");
 
     if !model_path.exists() {
-        return Err(format!(
-            "FSMN-VAD 模型不存在: {}",
-            model_path.display()
-        ));
+        return Err(format!("FSMN-VAD 模型不存在: {}", model_path.display()));
     }
     if !mvn_path.exists() {
-        return Err(format!(
-            "FSMN-VAD am.mvn 不存在: {}",
-            mvn_path.display()
-        ));
+        return Err(format!("FSMN-VAD am.mvn 不存在: {}", mvn_path.display()));
     }
 
     // 初始化 ORT（如果尚未初始化）
@@ -941,7 +937,10 @@ async fn run_gate(args: &GateArgs) -> i32 {
     // 与 EnergyVad × ASR 的区别：用 FSMN 神经网络 VAD 切分 WAV 再投喂 ASR。
     // 资产隔离：FSMN-VAD 模型在 deployment_dir/fsmn-vad/ 子目录。
     if !args.skip_fsmn {
-        let fsmn_model = args.deployment_dir.join("fsmn-vad").join("model_quant.onnx");
+        let fsmn_model = args
+            .deployment_dir
+            .join("fsmn-vad")
+            .join("model_quant.onnx");
         if fsmn_model.exists() {
             // 必测 I: FSMN-VAD + ParaformerOnline ONNX
             let combo_i = "fsmn_vad + paraformer_onnx";
@@ -1165,6 +1164,7 @@ fn error_combination(name: &str, vad: &str, stt_engine: &str, _e: &str) -> Combi
 }
 
 /// 运行单个 VAD+STT 组合。
+#[allow(clippy::too_many_arguments)] // gate runner 矩阵展开参数（诊断工具）
 async fn run_combination(
     samples: &[crate::cli::stt_corpus::CorpusSample],
     corpus_dir: &Path,
@@ -1236,7 +1236,7 @@ async fn run_combination(
                             reference_normalized: normalize_for_cer(&sample.reference_text),
                             hypothesis_normalized: String::new(),
                             cer: 1.0,
-            accuracy: 0.0,
+                            accuracy: 0.0,
                             first_partial_ms: None,
                             final_after_release_ms: None,
                             audio_duration_ms: 0,
@@ -1253,7 +1253,15 @@ async fn run_combination(
                 let runner = fsmn_runner
                     .as_mut()
                     .expect("fsmn_vad 组合已确保 runner 存在");
-                match process_sample_fsmn_vad(&adapter, &wav_path, &sample.reference_text, round, runner).await {
+                match process_sample_fsmn_vad(
+                    &adapter,
+                    &wav_path,
+                    &sample.reference_text,
+                    round,
+                    runner,
+                )
+                .await
+                {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(idx, round, %e, "FSMN-VAD 样本处理失败");
@@ -1264,7 +1272,7 @@ async fn run_combination(
                             reference_normalized: normalize_for_cer(&sample.reference_text),
                             hypothesis_normalized: String::new(),
                             cer: 1.0,
-            accuracy: 0.0,
+                            accuracy: 0.0,
                             first_partial_ms: None,
                             final_after_release_ms: None,
                             audio_duration_ms: 0,
@@ -1289,7 +1297,7 @@ async fn run_combination(
                             reference_normalized: normalize_for_cer(&sample.reference_text),
                             hypothesis_normalized: String::new(),
                             cer: 1.0,
-            accuracy: 0.0,
+                            accuracy: 0.0,
                             first_partial_ms: None,
                             final_after_release_ms: None,
                             audio_duration_ms: 0,
@@ -1423,6 +1431,7 @@ fn gguf_config(model: &str) -> Result<GgufModelConfig, String> {
 /// 1. spawn worker exe → wait_ready → hello
 /// 2. 对每个样本：写 WAV 到临时目录 → transcribe → 记录 CER/延迟/RTF
 /// 3. shutdown
+#[allow(clippy::too_many_arguments)] // gate runner 矩阵展开参数（诊断工具）
 async fn run_gguf_combination(
     samples: &[crate::cli::stt_corpus::CorpusSample],
     corpus_dir: &Path,
@@ -1648,7 +1657,7 @@ async fn run_gguf_combination(
                         reference_normalized: normalize_for_cer(&sample.reference_text),
                         hypothesis_normalized: String::new(),
                         cer: 1.0,
-            accuracy: 0.0,
+                        accuracy: 0.0,
                         first_partial_ms: None,
                         final_after_release_ms: None,
                         audio_duration_ms: 0,
@@ -1762,7 +1771,11 @@ async fn process_gguf_sample(
     } else if vad == "fsmn_vad" {
         let runner = fsmn_runner.ok_or("fsmn_vad 组合缺少 runner（内部错误）")?;
         let (segs, _speech) = fsmn_vad_segment_audio(runner, &samples)?;
-        tracing::info!(round, segments = segs.len(), "FSMN-VAD 切分完成 (GGUF 路径)");
+        tracing::info!(
+            round,
+            segments = segs.len(),
+            "FSMN-VAD 切分完成 (GGUF 路径)"
+        );
         segs
     } else {
         vec![samples.clone()]
@@ -1982,7 +1995,7 @@ async fn process_sample(
                         reference_normalized: normalize_for_cer(reference_text),
                         hypothesis_normalized: String::new(),
                         cer: 1.0,
-            accuracy: 0.0,
+                        accuracy: 0.0,
                         first_partial_ms: first_partial_time
                             .zip(feed_start)
                             .map(|(fp, fs)| fp.duration_since(fs).as_millis() as u64),
@@ -3233,7 +3246,7 @@ mod tests {
                 reference_normalized: "测试文本".into(),
                 hypothesis_normalized: "测试文本".into(),
                 cer: 0.0,
-        accuracy: 1.0,
+                accuracy: 1.0,
                 first_partial_ms: Some(100),
                 final_after_release_ms: Some(200),
                 audio_duration_ms: 5000,
@@ -3251,6 +3264,14 @@ mod tests {
                 mean: 0.0,
                 p50: 0.0,
                 p95: 0.0,
+            }),
+            accuracy_stats: Some(PercentileStats {
+                count: 1,
+                min: 1.0,
+                max: 1.0,
+                mean: 1.0,
+                p50: 1.0,
+                p95: 1.0,
             }),
             first_partial_stats: Some(PercentileStats {
                 count: 1,

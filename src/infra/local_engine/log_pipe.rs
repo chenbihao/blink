@@ -301,6 +301,10 @@ impl LineAccumulator {
             text.push_str("...[truncated]");
         }
 
+        // ANSI 转义在管道入口剥离——worker tracing 的颜色码若透传，
+        // 前端日志面板会显示 `[2m…[0m` 乱码，且污染级别分类
+        text = strip_ansi_escapes(&text);
+
         text = text.trim().to_string();
 
         // 重置
@@ -309,6 +313,49 @@ impl LineAccumulator {
 
         (text, was_overflowing)
     }
+}
+
+/// 剥离 ANSI 转义序列（CSI `ESC[…X` 与 OSC `ESC]…(BEL|ESC\)`）。
+///
+/// worker 子进程的 tracing 输出默认带颜色码；此处做一次纯文本化，
+/// ring buffer 历史、实时事件与级别分类共用同一结果。
+fn strip_ansi_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                // CSI：参数字节后遇到终止字节（0x40–0x7E）即结束
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC：终止于 BEL 或 ESC \
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if n == '\u{07}' {
+                        break;
+                    }
+                    if n == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {} // 其他单字节转义直接丢弃
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -419,6 +466,35 @@ mod tests {
         let lines = acc.push_data(b"world\n");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].0, "hello world");
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        // worker tracing 实测格式：灰色时间戳 + 绿色 INFO + 灰色 target
+        let raw = "\u{1b}[2m2026-09-05T07:22:06.343287Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \u{1b}[2mort::logging\u{1b}[0m\u{1b}[2m:\u{1b}[0m GraphTransformer";
+        let clean = strip_ansi_escapes(raw);
+        assert_eq!(
+            clean,
+            "2026-09-05T07:22:06.343287Z  INFO ort::logging: GraphTransformer"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_handles_osc_and_plain_text() {
+        assert_eq!(strip_ansi_escapes("\u{1b}]0;title\u{07}hello"), "hello");
+        assert_eq!(strip_ansi_escapes("\u{1b}]0;title\u{1b}\\world"), "world");
+        assert_eq!(strip_ansi_escapes("plain text"), "plain text");
+        // 悬空 ESC 不 panic、不吞后续内容
+        assert_eq!(strip_ansi_escapes("tail\u{1b}"), "tail");
+    }
+
+    #[test]
+    fn line_accumulator_strips_ansi_from_lines() {
+        let mut acc = LineAccumulator::new(8192);
+        let lines = acc.push_data(b"\x1b[32m INFO\x1b[0m ready\n");
+        assert_eq!(lines.len(), 1);
+        // 剥离后 trim——前导空格（tracing 对齐补位）一并去除
+        assert_eq!(lines[0].0, "INFO ready");
     }
 
     #[tokio::test]

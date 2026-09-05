@@ -33,6 +33,7 @@ pub mod operation_coordinator; // 应用运行时 mutation claim + cancellation
 pub mod operation_log_store; // 会话内 operation 日志回放
 pub mod paddleocr; // PaddleOCR adapter
 pub mod registry;
+pub mod selected_store; // selected 模型存储生产实现（切换事务端口，Handoff 08）
 
 #[allow(unused_imports)]
 pub use event_port::{TauriEventPort, make_event_port};
