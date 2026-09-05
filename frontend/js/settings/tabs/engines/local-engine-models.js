@@ -94,7 +94,7 @@ function modelTraitSignature(model) {
  * - 多语言：`stt_capabilities.languages`
  * - 真/伪流式：`stt_capabilities.true_streaming`（真流式优先展示）
  * - 资源占用：`business.resource_footprint`（shared_gguf_worker /
- *   dedicated_onnx_worker）
+*   shared_gguf_worker）
  * - 中文质量：`business.chinese_quality`（corpus_baseline）
  * - 下载大小：`estimated_size_mb`（独立单元格展示，不进特征行）
  *

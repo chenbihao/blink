@@ -72,13 +72,9 @@ impl EngineManager {
         );
         let resolved_implementation =
             self.resolve_implementation_for_model(engine_id, impl_seed_model.as_deref())?;
-        let is_paraformer_onnx =
-            resolved_implementation == Some(ImplementationId::ParaformerOnnxWorker);
 
-        // 环境检查（engine 级环境 = GGUF 主 implementation 的部署真源）。
-        // ParaformerOnline 走 per-implementation deployment——其部署就绪由
-        // 下方冻结段 fail-closed 校验，不要求 GGUF 环境已安装。
-        if !is_paraformer_onnx {
+        // 环境检查（engine 级环境 = GGUF implementation 的部署真源）
+        {
             let status = entry.status.read().await;
             if status.environment != crate::domain::local_engine::EnvironmentHealth::Ready {
                 return Err(LocalEngineError::with_detail(
@@ -93,21 +89,16 @@ impl EngineManager {
         // ── 冻结 launch snapshot（0.22.9：模型 → implementation → deployment）──
         //
         // 冻结顺序 fail-closed：
-        // 1. 模型身份（GGUF：selected 的 model_storage manifest 回读；
-        //    ParaformerOnline 等 per-implementation 实现：对应部署空间的
-        //    active manifest 回读）
+        // 1. 模型身份（selected 的 model_storage manifest 回读）
         // 2. implementation（编译期绑定表按冻结模型解析，未知模型不换模）
-        // 3. deployment identity（**resolved implementation 的部署空间**内
-        //    读 active 指针——GGUF 映射到 engine 级兼容真源，新实现读自己的
-        //    implementation 空间；空间内无部署 → 拒绝启动）
+        // 3. deployment identity（engine 级部署空间内读 active 指针；
+        //    空间内无部署 → 拒绝启动）
         //
         // 配置变化只改变 selected，不改变正在运行的 active。
         // 磁盘 IO（manifest 读取、指针读取）在 spawn_blocking 内执行。
         let eid_for_freeze = engine_id.clone();
         let contract = descriptor.model_contract.clone();
         let uses_managed = entry.adapter.uses_managed_model_storage();
-        let impl_for_freeze = resolved_implementation;
-        let eid_for_space = engine_id.clone();
         // "模型未安装"错误文案带显示名——用户配置了（或默认选中）某个模型
         // 但未下载时，报错必须说清是哪个模型（0.22.9 实测反馈：只说
         // "未下载模型"无法对应到模型列表里的具体条目）。
@@ -121,46 +112,6 @@ impl EngineManager {
             .map(|d| d.display_name.clone());
         let frozen_model = tokio::task::spawn_blocking(
             move || -> Result<FrozenModelIdentity, LocalEngineError> {
-                if impl_for_freeze == Some(ImplementationId::ParaformerOnnxWorker) {
-                    // per-implementation deployment（ParaformerOnline 等）：
-                    // 模型身份从该 implementation 部署空间的 active manifest 冻结。
-                    // 闭合映射决定空间归属（GGUF/OCR → engine 级；新实现 → impl 级）。
-                    let space = deployment_space_for(&eid_for_space, impl_for_freeze);
-                    let (pointer, manifest) = DeploymentStore::read_active(&space)
-                        .map_err(|e| from_runtime(ErrorPhase::Start, "读取 active 部署失败", &e))?
-                        .ok_or_else(|| {
-                            let space_label = space
-                                .implementation()
-                                .map(|i| format!("implementation '{i}' 的部署空间"))
-                                .unwrap_or_else(|| "engine 级部署空间".to_string());
-                            LocalEngineError::with_detail(
-                                LocalEngineErrorCode::EnvironmentMissing,
-                                ErrorPhase::Start,
-                                "环境未安装，请先安装",
-                                format!("{space_label}内无 active deployment（fail-closed）"),
-                            )
-                        })?;
-                    // 指针的模型契约即冻结身份；fingerprint 取 ONNX 扩展的
-                    // DLL SHA-256（64-hex，安装事务已校验；非 ONNX 扩展 = 无）
-                    let fingerprint = match &manifest.extension {
-                        crate::infra::local_engine::runtime::ManifestExtension::OnnxRuntime(
-                            ext,
-                        ) => Some(ext.dll_sha256.clone()),
-                        _ => None,
-                    };
-                    // active slot 目录（launch 构造直接使用，避免二次读指针漂移）
-                    let slot_dir = crate::infra::local_engine::deployment::DeploymentSlot::parse(
-                        &pointer.slot,
-                    )
-                    .map_err(|e| from_runtime(ErrorPhase::Start, "解析部署 slot 失败", &e))?
-                    .dir_in(&space);
-                    let _ = slot_dir; // slot 目录由 adapter 侧按部署空间解析
-                    return Ok(FrozenModelIdentity {
-                        model_id: manifest.model_contract.model_id,
-                        revision: manifest.model_contract.revision,
-                        fingerprint,
-                    });
-                }
                 // fail-closed：managed 模型未安装/损坏时不允许 start
                 match resolve_expected_model_identity(
                     &eid_for_freeze,
@@ -295,20 +246,18 @@ impl EngineManager {
                 endpoint,
             };
 
-            // 构建 LaunchContext（endpoint、身份参数、resolved profile、
-            // 冻结的 implementation——adapter 据此分派启动构造，Handoff 08）
+            // 构建 LaunchContext（endpoint、身份参数、resolved profile）
             let ctx = LaunchContext {
                 endpoint,
                 engine_id: engine_id.to_string(),
                 instance_id: instance_id.clone(),
                 token: token.clone(),
                 resolved_profile: frozen_profile.clone(),
-                implementation: frozen_implementation,
             };
 
             // adapter prepare_launch（可能等待 venv python 子进程检查包——阻塞隔离）。
             // 冻结的 implementation 经 ctx 注入，FunASR adapter 据此分派实现内
-            // 启动构造（GGUF → NDJSON worker；ParaformerOnline → ONNX worker）。
+            // 启动构造（GGUF → NDJSON worker）。
             let adapter_for_launch = Arc::clone(&entry.adapter);
             let config_for_launch = config.clone();
             let ctx_for_launch = ctx.clone();
@@ -462,18 +411,8 @@ impl EngineManager {
 
                     // health 验证——只有 Model Ready 才返回 Ok
                     // 任何失败（timeout/mismatch/backend/ModelFailed/早退）执行统一 rollback
-                    // StdioWorker 引擎走 NDJSON ready 握手（0.22.7），HTTP 引擎走轮询；
-                    // ParaformerOnline 走二进制协议 v2 握手（Handoff 08）
-                    let verify_future = if is_paraformer_onnx {
-                        self.verify_paraformer_worker_health(
-                            engine_id,
-                            entry,
-                            &identity_input,
-                            &managed,
-                            frozen_model.clone(),
-                        )
-                        .await
-                    } else if stdio_worker {
+                    // StdioWorker 引擎走 NDJSON ready 握手（0.22.7），HTTP 引擎走轮询
+                    let verify_future = if stdio_worker {
                         self.verify_stdio_worker_health(engine_id, entry, &identity_input, &managed)
                             .await
                     } else {
@@ -754,14 +693,6 @@ impl EngineManager {
                     let client = entry.worker_client.lock().await.take();
                     if client.is_some() {
                         tracing::debug!(engine = %engine_id, "exit monitor: 销毁 worker 客户端");
-                    }
-                }
-                // 0.22.9 Handoff 08：销毁 ParaformerOnline 适配器（崩溃后旧
-                // streaming port 的操作立即失败，迟到结果不污染新实例）。
-                {
-                    let port = entry.streaming_port.lock().await.take();
-                    if port.is_some() {
-                        tracing::debug!(engine = %engine_id, "exit monitor: 销毁 paraformer 适配器");
                     }
                 }
                 super::super::super::funasr::worker::clean_audio_tmp_dir(&engine_id);

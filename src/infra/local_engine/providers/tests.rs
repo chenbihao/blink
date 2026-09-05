@@ -788,10 +788,7 @@ use super::super::deployment::DeploymentSpace;
 async fn install_into_implementation_space_is_isolated_from_engine_space() {
     let desc = unique_engine("impl-space-tx");
     let engine_space = DeploymentSpace::engine(&desc.engine_id);
-    let impl_space = super::super::deployment::DeploymentSpace::resolve(
-        &desc.engine_id,
-        crate::domain::local_engine::ImplementationId::ParaformerOnnxWorker,
-    );
+    let impl_space = super::super::deployment::DeploymentSpace::impl_space_for_test(&desc.engine_id);
     let provider = FakeProvider::new(true, true, true);
 
     // engine 级先有一个 active deployment（模拟 GGUF 兼容真源）
@@ -848,10 +845,7 @@ async fn install_into_implementation_space_is_isolated_from_engine_space() {
 async fn rollback_in_implementation_space_preserves_engine_deployment() {
     let desc = unique_engine("impl-rollback");
     let engine_space = DeploymentSpace::engine(&desc.engine_id);
-    let impl_space = super::super::deployment::DeploymentSpace::resolve(
-        &desc.engine_id,
-        crate::domain::local_engine::ImplementationId::ParaformerOnnxWorker,
-    );
+    let impl_space = super::super::deployment::DeploymentSpace::impl_space_for_test(&desc.engine_id);
     let ok_provider = FakeProvider::new(true, true, true);
 
     // engine 级 active（兼容真源）

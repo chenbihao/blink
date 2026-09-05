@@ -139,6 +139,8 @@ enum SpaceScope {
     /// 路径与历史版本字节一致。
     Engine,
     /// implementation 级空间——`engines/{engine}/impl-{implementation}/`。
+    // handoff-11 后闭合映射内无使用者；机制保留，测试经直接构造覆盖
+    #[cfg_attr(not(test), allow(dead_code))]
     Implementation(ImplementationId),
 }
 
@@ -166,11 +168,6 @@ impl DeploymentSpace {
             ImplementationId::FunasrGgufWorker => Self::engine(engine_id),
             // 0.22.8：PaddleOCR ONNX in-process deployment 保持 engine 级
             ImplementationId::PaddleOcrOnnxInProcess => Self::engine(engine_id),
-            // 0.22.9：新 implementation 使用 implementation 级空间
-            ImplementationId::ParaformerOnnxWorker => Self {
-                engine_id: engine_id.clone(),
-                scope: SpaceScope::Implementation(implementation),
-            },
         }
     }
 
@@ -195,6 +192,18 @@ impl DeploymentSpace {
             SpaceScope::Implementation(id) => {
                 runtime::engine_root(&self.engine_id).join(Self::impl_dir_name(*id))
             }
+        }
+    }
+
+    /// 测试专用：直接构造 implementation 级空间。
+    ///
+    /// handoff-11 后闭合映射内已无 implementation 级实现——crate 内测试
+    /// （providers/manager 双空间隔离等）经此构造覆盖通用机制。
+    #[cfg(test)]
+    pub(crate) fn impl_space_for_test(engine_id: &EngineId) -> Self {
+        Self {
+            engine_id: engine_id.clone(),
+            scope: SpaceScope::Implementation(ImplementationId::FunasrGgufWorker),
         }
     }
 
@@ -494,6 +503,8 @@ impl DeploymentStore {
     /// 0.22.8 OCR 的兼容真源，整体删除被拒绝。空间不存在时幂等成功。
     /// 空间内有未收尾事务时先按 fail-closed 规则收尾（避免删掉 half-state）；
     /// 调用方负责操作串行（manager 层 engine 级操作互斥已保证）。
+    // handoff-11：ONNX 模型删除路径退役后生产暂无调用方；通用机制保留
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn remove_impl_space(space: &DeploymentSpace) -> Result<(), RuntimeError> {
         if space.implementation().is_none() {
             return Err(RuntimeError::CleanupFailed {
@@ -790,7 +801,12 @@ impl DeploymentStore {
             }
             match DeploymentSpace::parse_impl_dir_name(&name) {
                 Some(implementation) => {
-                    spaces.push(DeploymentSpace::resolve(engine_id, implementation));
+                    let space = DeploymentSpace::resolve(engine_id, implementation);
+                    // 闭合映射落在 engine 级的 implementation（GGUF/OCR）已在
+                    // 列表首位——不重复 push，避免同名空间双计
+                    if space.implementation().is_some() {
+                        spaces.push(space);
+                    }
                 }
                 None => {
                     tracing::warn!(
@@ -1013,9 +1029,16 @@ mod tests {
         DeploymentSpace::engine(&eid(name))
     }
 
-    /// ParaformerOnnxWorker 的 implementation 级空间（funasr 引擎）。
+    /// implementation 级空间测试构造。
+    ///
+    /// handoff-11 后闭合映射内已无 implementation 级实现——直接构造
+    /// `SpaceScope::Implementation` 以保持通用机制（双空间隔离/journal/
+    /// residue）的测试覆盖，不经过 `resolve`。
     fn onnx_space(engine: &str) -> DeploymentSpace {
-        DeploymentSpace::resolve(&eid(engine), ImplementationId::ParaformerOnnxWorker)
+        DeploymentSpace {
+            engine_id: eid(engine),
+            scope: SpaceScope::Implementation(ImplementationId::FunasrGgufWorker),
+        }
     }
 
     /// 写一个最小合法 manifest 到空间 slot。
@@ -1081,12 +1104,12 @@ mod tests {
     }
 
     #[test]
-    fn space_resolution_scopes_new_implementations() {
+    fn implementation_scope_paths_live_in_impl_subdir() {
         let fun = eid("funasr");
-        let onnx = DeploymentSpace::resolve(&fun, ImplementationId::ParaformerOnnxWorker);
+        let onnx = onnx_space("funasr");
         assert_eq!(
             onnx.root(),
-            runtime::engine_root(&fun).join("impl-paraformer_onnx_worker")
+            runtime::engine_root(&fun).join("impl-funasr_gguf_worker")
         );
         // 空间内 pointer/journal/residue/slot 全部落在 impl 子目录
         assert_eq!(onnx.pointer_path(), onnx.root().join("deployment.json"));
@@ -1107,17 +1130,21 @@ mod tests {
     #[test]
     fn impl_dir_name_roundtrip_is_fail_closed() {
         assert_eq!(
-            DeploymentSpace::parse_impl_dir_name("impl-paraformer_onnx_worker"),
-            Some(ImplementationId::ParaformerOnnxWorker)
+            DeploymentSpace::parse_impl_dir_name("impl-funasr_gguf_worker"),
+            Some(ImplementationId::FunasrGgufWorker)
         );
-        // 未知 implementation 目录名不映射任何枚举（fail-closed）
+        // 未知 implementation 目录名不映射任何枚举（fail-closed）——
+        // 包括 handoff-11 退役的 paraformer_onnx_worker
+        assert_eq!(
+            DeploymentSpace::parse_impl_dir_name("impl-paraformer_onnx_worker"),
+            None
+        );
         assert_eq!(
             DeploymentSpace::parse_impl_dir_name("impl-custom-worker"),
             None
         );
         assert_eq!(DeploymentSpace::parse_impl_dir_name("impl-"), None);
         assert_eq!(DeploymentSpace::parse_impl_dir_name("slot-a"), None);
-        assert!(validate_impl_dir_name("impl-paraformer_onnx_worker").is_ok());
         assert!(validate_impl_dir_name("impl-../escape").is_err());
         assert!(validate_impl_dir_name("impl-").is_err());
     }
@@ -1134,14 +1161,14 @@ mod tests {
             1
         );
 
-        // 已知 implementation 目录被枚举
-        std::fs::create_dir_all(onnx_space("space-enum").root()).unwrap();
-        // 未知 implementation 目录被跳过（fail-closed，不映射默认）
+        // 已知 implementation 目录（闭合映射落 engine 级）不重复枚举
+        std::fs::create_dir_all(root.join("impl-funasr_gguf_worker")).unwrap();
+        // 未知/退役 implementation 目录被跳过（fail-closed，不映射默认）
+        std::fs::create_dir_all(root.join("impl-paraformer_onnx_worker")).unwrap();
         std::fs::create_dir_all(root.join("impl-future_impl")).unwrap();
         let spaces = DeploymentStore::spaces_for_engine(&engine).unwrap();
-        assert_eq!(spaces.len(), 2);
+        assert_eq!(spaces.len(), 1);
         assert!(spaces.contains(&DeploymentSpace::engine(&engine)));
-        assert!(spaces.contains(&onnx_space("space-enum")));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1178,7 +1205,7 @@ mod tests {
         cleanup_space(&space);
 
         let j = DeploymentStore::begin(&space, "op-1", "dep-1").unwrap();
-        assert_eq!(j.implementation.as_deref(), Some("paraformer_onnx_worker"));
+        assert_eq!(j.implementation.as_deref(), Some("funasr_gguf_worker"));
         assert_eq!(j.engine_id, "dep-impl-begin");
         // journal 物理位置在 impl 子目录
         assert!(space.journal_path().exists());

@@ -204,10 +204,10 @@ function makeFunasrModels(overrides = {}) {
             timestamps: {supported: "no", reason: "stt.capability.timestamps.not_exposed"},
         },
     };
-    const paraformerOnline = {
+    const paraformerZh = {
         ...sensevoice,
-        model_id: "onnx/paraformer-online",
-        display_name: "Paraformer-Online (ONNX 真流式)",
+        model_id: "gguf/paraformer-zh-q8",
+        display_name: "Paraformer-zh (GGUF Q8)",
         install_state: "not_installed",
         is_selected: false,
         is_active: false,
@@ -215,12 +215,12 @@ function makeFunasrModels(overrides = {}) {
         stt_capabilities: {
             languages: ["zh"],
             pseudo_streaming: {supported: "yes"},
-            true_streaming: {supported: "yes"},
+            true_streaming: {supported: "no", reason: "stt.capability.streaming.kv_cleared_per_request"},
             timestamps: {supported: "no", reason: "stt.capability.timestamps.not_exposed"},
         },
-        business: {chinese_quality: "corpus_baseline", resource_footprint: "dedicated_onnx_worker"},
+        business: {chinese_quality: "corpus_baseline", resource_footprint: "shared_gguf_worker"},
     };
-    const models = [sensevoice, nano, paraformerOnline];
+    const models = [sensevoice, nano, paraformerZh];
     if (overrides.models) return overrides.models;
     return models;
 }
@@ -238,11 +238,11 @@ function makeState({models = null, status = null} = {}) {
 
 await test("beginModelSwitch：进入 switching，记录 target 与 requestId", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     const selection = getSelection(state.get("funasr"));
     assert.ok(selection, "应有 selection");
     assert.equal(selection.phase, "switching");
-    assert.equal(selection.targetModelId, "onnx/paraformer-online");
+    assert.equal(selection.targetModelId, "gguf/fun-asr-nano-q4km");
     assert.equal(selection.requestId, "switch-1");
     assert.ok(isSwitching(state.get("funasr")));
     assert.ok(!hasSelectionFailure(state.get("funasr")));
@@ -250,7 +250,7 @@ await test("beginModelSwitch：进入 switching，记录 target 与 requestId", 
 
 await test("resolveModelSwitch：匹配 requestId + ok → selection 清除", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1", {ok: true});
     assert.equal(getSelection(state.get("funasr")), null, "成功后 selection 应清除");
     assert.ok(!isSwitching(state.get("funasr")));
@@ -258,7 +258,7 @@ await test("resolveModelSwitch：匹配 requestId + ok → selection 清除", ()
 
 await test("竞态：旧 requestId 的迟到结果被丢弃，不覆盖新状态", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-2"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-2"});
     // 旧请求 switch-1 的迟到 resolve（ok）
     state = resolveModelSwitch(state, "funasr", "switch-1", {ok: true});
     assert.equal(getSelection(state.get("funasr"))?.phase, "switching",
@@ -271,7 +271,7 @@ await test("竞态：旧 requestId 的迟到结果被丢弃，不覆盖新状态
 
 await test("竞态：新 begin 覆盖旧失败态（用户重试）", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1",
         {ok: false, errorCode: "switch_rolled_back", error: {message: "旧失败"}});
     assert.ok(hasSelectionFailure(state.get("funasr")));
@@ -284,22 +284,22 @@ await test("竞态：新 begin 覆盖旧失败态（用户重试）", () => {
 
 await test("rollback：switch_rolled_back → rolled_back（恢复成功，错误保留）", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1", {
         ok: false,
         errorCode: "switch_rolled_back",
-        error: {code: "switch_rolled_back", message: "模型 onnx/paraformer-online 启动失败，已恢复原模型"},
+        error: {code: "switch_rolled_back", message: "模型 gguf/fun-asr-nano-q4km 启动失败，已恢复原模型"},
     });
     const selection = getSelection(state.get("funasr"));
     assert.equal(selection.phase, "rolled_back");
-    assert.equal(selection.error.message, "模型 onnx/paraformer-online 启动失败，已恢复原模型");
+    assert.equal(selection.error.message, "模型 gguf/fun-asr-nano-q4km 启动失败，已恢复原模型");
     assert.ok(hasSelectionFailure(state.get("funasr")));
     assert.ok(!isSwitching(state.get("funasr")));
 });
 
 await test("rollback 双重失败：switch_rollback_failed → rollback_failed", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1", {
         ok: false,
         errorCode: "switch_rollback_failed",
@@ -307,7 +307,7 @@ await test("rollback 双重失败：switch_rollback_failed → rollback_failed",
             code: "switch_rollback_failed",
             message: "目标失败 AND 恢复失败（服务已停止）",
         },
-        detail: {engine_id: "funasr", target_model_id: "onnx/paraformer-online"},
+        detail: {engine_id: "funasr", target_model_id: "gguf/fun-asr-nano-q4km"},
     });
     const selection = getSelection(state.get("funasr"));
     assert.equal(selection.phase, "rollback_failed");
@@ -316,7 +316,7 @@ await test("rollback 双重失败：switch_rollback_failed → rollback_failed",
 
 await test("target failure（未达回滚）：其他错误码 → selection 清除，走 transientError", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1", {
         ok: false,
         errorCode: "model_not_ready",
@@ -328,11 +328,11 @@ await test("target failure（未达回滚）：其他错误码 → selection 清
 
 await test("reconcile：selected===active===target 一致快照收敛 switching（单一方向）", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
 
     // 中间态：仅 selected 已提交（active 未变）→ 不收敛
     const midModels = makeFunasrModels().map((m) =>
-        m.model_id === "onnx/paraformer-online" ? {...m, install_state: "installed", is_selected: true} : {...m, is_selected: false});
+        m.model_id === "gguf/fun-asr-nano-q4km" ? {...m, install_state: "installed", is_selected: true} : {...m, is_selected: false});
     state = setModels(state, "funasr", midModels);
     state = reconcileSelection(state, "funasr");
     assert.equal(getSelection(state.get("funasr"))?.phase, "switching",
@@ -340,7 +340,7 @@ await test("reconcile：selected===active===target 一致快照收敛 switching�
 
     // 一致快照：selected+active 都指向 target → 收敛
     const doneModels = midModels.map((m) =>
-        m.model_id === "onnx/paraformer-online" ? {...m, is_active: true} : {...m, is_active: false});
+        m.model_id === "gguf/fun-asr-nano-q4km" ? {...m, is_active: true} : {...m, is_active: false});
     state = setModels(state, "funasr", doneModels);
     state = reconcileSelection(state, "funasr");
     assert.equal(getSelection(state.get("funasr")), null, "一致快照应收敛 switching");
@@ -348,7 +348,7 @@ await test("reconcile：selected===active===target 一致快照收敛 switching�
 
 await test("reconcile：失败态不由 reconcile 清除（不能猜测回滚是否完成）", () => {
     let state = makeState();
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1",
         {ok: false, errorCode: "switch_rollback_failed", error: {message: "双失败"}});
     // 即使 models 给出一致快照（双失败后 selected 恢复旧值、active=None，不会出现；
@@ -371,12 +371,12 @@ await test("requestId 严格单调（快速连点不撞号）", () => {
 
 await test("computeSelectionFeedback：switching 显示目标模型名（busy）", () => {
     let state = makeState({models: makeFunasrModels()});
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     const entry = state.get("funasr");
     const feedback = computeSelectionFeedback(entry, null);
     assert.ok(feedback);
     assert.equal(feedback.tone, "busy");
-    assert.ok(feedback.text.includes("Paraformer-Online"), feedback.text);
+    assert.ok(feedback.text.includes("Fun-ASR-Nano"), feedback.text);
 });
 
 await test("computeFeedback：switching 优先于事务中间态快照（不说谎）", () => {
@@ -393,7 +393,7 @@ await test("computeFeedback：switching 优先于事务中间态快照（不说�
             available: false,
         },
     }));
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     const entry = state.get("funasr");
     const feedback = computeFeedback(entry, null);
     assert.equal(feedback.tone, "busy", "中间态快照不得显示'已就绪'");
@@ -402,7 +402,7 @@ await test("computeFeedback：switching 优先于事务中间态快照（不说�
 
 await test("computeFeedback：rolled_back / rollback_failed 文案（错误可见）", () => {
     let state = makeState({models: makeFunasrModels()});
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     state = resolveModelSwitch(state, "funasr", "switch-1", {
         ok: false, errorCode: "switch_rolled_back",
         error: {code: "switch_rolled_back", message: "目标启动失败，已恢复原模型。原因: timeout"},
@@ -412,7 +412,7 @@ await test("computeFeedback：rolled_back / rollback_failed 文案（错误可�
     assert.ok(feedback.text.includes("已恢复原模型"), feedback.text);
     assert.ok(feedback.detail.includes("timeout"));
 
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-2"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-2"});
     state = resolveModelSwitch(state, "funasr", "switch-2", {
         ok: false, errorCode: "switch_rollback_failed",
         error: {code: "switch_rollback_failed", message: "目标失败: x; 恢复失败: y"},
@@ -435,7 +435,7 @@ await test("computeEngineSummary：switching 覆盖可用快照", () => {
             available: true,
         },
     }));
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     const summary = computeEngineSummary(state.get("funasr"), null);
     assert.equal(summary.tone, "busy", "切换中不得显示'运行中'");
     assert.ok(summary.text.includes("切换"), summary.text);
@@ -454,7 +454,7 @@ await test("primaryActionView：switching → 禁用等待态（不提供 start/
             available: true,
         },
     }));
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-1"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-1"});
     const view = primaryActionView(state.get("funasr"), null);
     assert.equal(view.kind, null);
     assert.equal(view.disabled, true);
@@ -471,7 +471,7 @@ await test("selected≠active（selection 清除后）：mismatch 提示不受 s
     });
     state = setModels(state, "funasr", models);
     // 走一次空切换再成功清除，确认无残留
-    state = beginModelSwitch(state, "funasr", {modelId: "onnx/paraformer-online", requestId: "switch-x"});
+    state = beginModelSwitch(state, "funasr", {modelId: "gguf/fun-asr-nano-q4km", requestId: "switch-x"});
     state = resolveModelSwitch(state, "funasr", "switch-x", {ok: true});
     const feedback = computeFeedback(state.get("funasr"), null);
     assert.equal(feedback.tone, "warn");
@@ -480,10 +480,10 @@ await test("selected≠active（selection 清除后）：mismatch 提示不受 s
 
 // ── 3. GGUF↔ONNX 业务特征矩阵 ───────────────────────────────────────────────
 
-await test("业务特征：GGUF 模型 = 伪流式 + 共享 worker；ONNX = 真流式 + 独立 worker", () => {
+await test("业务特征：GGUF 模型 = 伪流式 + 共享 worker（真流式 chip 不渲染）", () => {
     const models = makeFunasrModels();
     const gguf = models[0];
-    const onnx = models[2];
+    const zhOnly = models[2];
 
     const ggufChips = modelTraitChips(gguf);
     assert.ok(ggufChips.some((c) => c.kind === "pseudo_streaming"), "GGUF 应展示伪流式");
@@ -494,13 +494,14 @@ await test("业务特征：GGUF 模型 = 伪流式 + 共享 worker；ONNX = 真�
     const langChip = ggufChips.find((c) => c.kind === "languages");
     assert.ok(langChip.text.includes("zh/en/ja/ko/yue"), langChip.text);
 
-    const onnxChips = modelTraitChips(onnx);
-    assert.ok(onnxChips.some((c) => c.kind === "true_streaming"), "ONNX 应展示真流式");
-    assert.ok(!onnxChips.some((c) => c.kind === "pseudo_streaming"), "真流式优先展示，不并列伪流式");
-    assert.ok(onnxChips.some((c) => c.kind === "resource" && c.text.includes("独立")), "ONNX 资源画像");
+    // handoff-11：真流式 ONNX 线路退役——描述符驱动下无模型命中 true_streaming
+    const zhChips = modelTraitChips(zhOnly);
+    assert.ok(zhChips.some((c) => c.kind === "pseudo_streaming"), "单语种 GGUF 仍伪流式");
+    assert.ok(!zhChips.some((c) => c.kind === "true_streaming"), "无真流式 chip");
+    assert.ok(zhChips.some((c) => c.kind === "resource" && c.text.includes("共享")), "共享 worker 画像");
     // 单语种
-    const onnxLang = onnxChips.find((c) => c.kind === "languages");
-    assert.equal(onnxLang.text, "中文", "单 zh 应显示'中文'");
+    const zhLang = zhChips.find((c) => c.kind === "languages");
+    assert.equal(zhLang.text, "中文", "单 zh 应显示'中文'");
 });
 
 await test("业务特征：能力未声明（languages 空 / business 缺省）→ 不展示该维度，不猜", () => {
@@ -530,7 +531,7 @@ await test("activeImplementationLabel：GGUF / ONNX / 未运行 映射（只读�
         status: {status: impl ? {active_implementation: impl} : {}},
     });
     assert.ok(activeImplementationLabel(mkEntry("funasr_gguf_worker")).includes("GGUF"));
-    assert.ok(activeImplementationLabel(mkEntry("paraformer_onnx_worker")).includes("ONNX"));
+    assert.ok(activeImplementationLabel(mkEntry("paddleocr_onnx_in_process")).includes("ONNX"));
     assert.ok(activeImplementationLabel(mkEntry(null)).includes("未运行"));
     assert.ok(activeImplementationLabel(mkEntry(undefined)).includes("未运行"),
         "active=None（字段缺省）= 未运行");
@@ -565,7 +566,7 @@ function nameCellOf(container, modelId) {
     return row?._cls("le-model-name")[0] || null;
 }
 
-await test("DOM：四个候选渲染业务特征行（GGUF 伪流式/共享、ONNX 真流式/独立）", () => {
+await test("DOM：三个候选渲染业务特征行（GGUF 伪流式/共享，无真流式 chip）", () => {
     const container = renderList(makeFunasrModels());
     const traitsLines = container._cls("le-model-traits");
     assert.equal(traitsLines.length, 3, "三个已声明特征的模型各一行特征行");
@@ -577,18 +578,20 @@ await test("DOM：四个候选渲染业务特征行（GGUF 伪流式/共享、ON
     assert.ok(ggufTraits.includes("共享 GGUF worker"), ggufTraits);
     assert.ok(ggufTraits.includes("中文质量"), ggufTraits);
 
-    const onnxTraits = nameCellOf(container, "onnx/paraformer-online")
+    // handoff-11：真流式 ONNX 退役——所有 GGUF 行都不渲染真流式/独立 worker
+    const zhTraits = nameCellOf(container, "gguf/paraformer-zh-q8")
         ?._cls("le-model-traits")[0].textContent;
-    assert.ok(onnxTraits.includes("真流式"), onnxTraits);
-    assert.ok(onnxTraits.includes("独立 ONNX worker"), onnxTraits);
-    assert.ok(!onnxTraits.includes("伪流式"), onnxTraits);
+    assert.ok(zhTraits.includes("伪流式"), zhTraits);
+    assert.ok(zhTraits.includes("共享 GGUF worker"), zhTraits);
+    assert.ok(!zhTraits.includes("真流式"), zhTraits);
+    assert.ok(!zhTraits.includes("独立 ONNX worker"), zhTraits);
 });
 
 await test("DOM：switching 在途 → 使用按钮禁用 + 目标行'切换中'徽章", () => {
     const container = renderList(makeFunasrModels(), {
         selection: {
             phase: "switching",
-            targetModelId: "onnx/paraformer-online",
+            targetModelId: "gguf/fun-asr-nano-q4km",
             requestId: "switch-1",
         },
     });
@@ -599,12 +602,12 @@ await test("DOM：switching 在途 → 使用按钮禁用 + 目标行'切换中'
         assert.equal(btn.disabled, true, "切换在途时写操作按钮必须禁用");
     }
     // 目标行有切换中徽章
-    const badges = nameCellOf(container, "onnx/paraformer-online")
+    const badges = nameCellOf(container, "gguf/fun-asr-nano-q4km")
         ?._cls("le-model-badge-switching") || [];
     assert.equal(badges.length, 1, "目标行应有切换中徽章");
     assert.equal(badges[0].textContent, "切换中");
     // 非目标行不得有切换中徽章（否则会被误读为多模型并发切换）
-    for (const otherId of ["gguf/sensevoice-small-q8", "gguf/paraformer-zh-q8", "gguf/fun-asr-nano-q4km"]) {
+    for (const otherId of ["gguf/sensevoice-small-q8", "gguf/paraformer-zh-q8"]) {
         const otherBadges = nameCellOf(container, otherId)?._cls("le-model-badge-switching") || [];
         assert.equal(otherBadges.length, 0, `非目标行 ${otherId} 不应有切换中徽章`);
     }
@@ -645,7 +648,7 @@ await test("DOM：脏检查——相同输入不重建，phase 变化才重建",
     // selection 变化 → 签名变化 → 重建
     const switchingEntry = {
         ...entry,
-        selection: {phase: "switching", targetModelId: "onnx/paraformer-online", requestId: "s"},
+        selection: {phase: "switching", targetModelId: "gguf/fun-asr-nano-q4km", requestId: "s"},
     };
     updateModelList(container, switchingEntry, null, null);
     const useButtons = container._cls("le-model-btn-primary");

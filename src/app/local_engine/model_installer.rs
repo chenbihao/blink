@@ -341,20 +341,17 @@ impl ModelInstallWorker for NoopModelWorker {
 // ── FunASR 注册（0.22.7.4：GGUF 模型目录为唯一实现）─────────────────────────
 
 /// FunASR 模型目录：SenseVoice Q8 / Paraformer-zh Q8 / Fun-ASR-Nano Q4_K_M
-/// / ParaformerOnline ONNX（0.22.9 Handoff 08 注册）。
+/// （handoff-11：ParaformerOnline ONNX 已退役移除）。
 ///
 /// 旧 Python 时代目录（iic/SenseVoiceSmall / paraformer-zh）已随 0.22.7.4
 /// 切换移除；旧配置选择由 `SttConfig::migrate_selection_to_gguf` 确定迁移。
-/// ParaformerOnline 走 per-implementation deployment，不进 model_storage。
+/// 退役 id（如 onnx/paraformer-online）不迁移——保持「未知模型不可用」语义。
 pub fn make_funasr_model_registry() -> ModelRegistry {
-    let mut models: Vec<EngineModelDescriptor> =
+    let models: Vec<EngineModelDescriptor> =
         crate::app::local_engine::funasr::gguf::gguf_model_specs()
             .iter()
             .map(crate::app::local_engine::funasr::gguf::gguf_model_descriptor)
             .collect();
-    models.push(
-        crate::app::local_engine::funasr::paraformer_online::paraformer_online_model_descriptor(),
-    );
     ModelRegistry::new_with_models(models)
 }
 /// - 可生成不同 revision/content（用于 repair 测试）
@@ -796,13 +793,13 @@ mod tests {
 
     #[test]
     fn funasr_model_registry_declares_business_profiles() {
-        // 四个 STT 候选（3 GGUF + 1 ONNX）都必须声明业务画像——
+        // 三个 STT 候选（3 GGUF）都必须声明业务画像——
         // 设置页 FunASR 卡片展示业务差异的数据真源。
         let registry = make_funasr_model_registry();
         let funasr =
             crate::infra::local_engine::runtime::EngineId::new("funasr").expect("funasr is valid");
         let models = registry.list(&funasr);
-        assert_eq!(models.len(), 4, "3 GGUF + 1 ParaformerOnline");
+        assert_eq!(models.len(), 3, "3 GGUF");
 
         for desc in models {
             let business = desc
@@ -810,11 +807,10 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("模型 {} 必须声明 business profile", desc.model_id));
             assert_eq!(business.chinese_quality, "corpus_baseline");
-            if desc.model_id == crate::domain::config::stt_config::PARAFORMER_ONLINE_MODEL_ID {
-                assert_eq!(business.resource_footprint, "dedicated_onnx_worker");
-            } else {
-                assert_eq!(business.resource_footprint, "shared_gguf_worker");
-            }
+            assert_eq!(business.resource_footprint, "shared_gguf_worker");
         }
+
+        // 退役的 ONNX 模型 id 不在目录中（未知旧 id 保持不可用，不静默换模）
+        assert!(registry.find(&funasr, "onnx/paraformer-online").is_none());
     }
 }

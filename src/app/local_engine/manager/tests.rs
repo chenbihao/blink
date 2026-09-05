@@ -1599,14 +1599,11 @@ async fn frozen_implementation_is_independent_of_selected() {
 
 use crate::infra::local_engine::deployment::{DeploymentSpace, DeploymentStore};
 
-/// fake 引擎绑定 ParaformerOnnxWorker（implementation 级空间）的注册表。
-///
-/// 与 in-process 变体相对：该 implementation 经闭合映射落在
-/// `impl-paraformer_onnx_worker/` 空间，用于验证双 deployment 隔离。
-fn make_onnx_worker_impl_registry(engine_id: &EngineId) -> ImplementationRegistry {
+/// fake 引擎绑定 FunasrGgufWorker（ManagedWorker 形态）的注册表。
+fn make_gguf_impl_registry(engine_id: &EngineId) -> ImplementationRegistry {
     ImplementationRegistry::new_validated(
         vec![ImplementationDescriptor {
-            id: ImplementationId::ParaformerOnnxWorker,
+            id: ImplementationId::FunasrGgufWorker,
             engine_id: engine_id.clone(),
             runtime_kind: RuntimePlan::ManagedBinary,
             service_transport: ServiceTransport::Http,
@@ -1624,7 +1621,7 @@ fn make_onnx_worker_impl_registry(engine_id: &EngineId) -> ImplementationRegistr
         vec![ImplementationBinding {
             engine_id: engine_id.clone(),
             model_id: "fake-model".to_string(),
-            implementation: ImplementationId::ParaformerOnnxWorker,
+            implementation: ImplementationId::FunasrGgufWorker,
         }],
     )
     .expect("测试 implementation 声明必须合法")
@@ -1689,62 +1686,6 @@ fn write_full_deployment(space: &DeploymentSpace, install_id: &str) {
     .unwrap();
 }
 
-/// start 从 **resolved implementation 的部署空间**读取 deployment：
-/// engine 级旧 deployment 存在、impl 空间未安装时 fail-closed 拒绝启动；
-/// impl 空间安装后才允许越过 deployment 读取（fake exe spawn 失败）。
-#[tokio::test]
-async fn start_reads_deployment_from_implementation_space_not_engine_root() {
-    let eid = EngineId::new("fake-impl-space").unwrap();
-    let engine_space = DeploymentSpace::engine(&eid);
-    let impl_space = DeploymentSpace::resolve(&eid, ImplementationId::ParaformerOnnxWorker);
-    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-
-    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![
-        make_fake_adapter_with_options(eid.as_str(), true, false),
-    ]));
-    let svc = EngineManager::new_with_providers_and_implementations(
-        registry,
-        Arc::new(NoopEventPort),
-        HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
-        super::super::model_installer::ModelRegistry::empty(),
-        Arc::new(super::super::model_installer::NoopModelWorker),
-        make_onnx_worker_impl_registry(&eid),
-    );
-
-    // 环境状态置 Ready（probe 对 fake 部署的粗粒度投影；per-implementation
-    // 就绪由 start 冻结段按空间 fail-closed 复核）
-    svc.commit_status_internal(&eid, None, |s| {
-        s.environment = EnvironmentHealth::Ready;
-    })
-    .await
-    .unwrap();
-
-    // engine 级旧 deployment 存在（模拟 0.22.7/0.22.8 engine-level 资产）
-    write_full_deployment(&engine_space, "dep-engine-level");
-
-    // impl 空间未安装 → start 必须 fail-closed（EnvironmentMissing），
-    // 不能错误认领 engine 级 deployment
-    let err = svc.start(&eid, AdapterConfig::new()).await.unwrap_err();
-    assert_eq!(
-        err.code,
-        LocalEngineErrorCode::EnvironmentMissing,
-        "impl 空间未安装时 start 应拒绝，实际: {err:?}"
-    );
-
-    // impl 空间安装后 → start 越过 deployment 读取
-    //（fake exe 不存在，spawn 失败 SpawnFailed——证明冻结段已通过）
-    write_full_deployment(&impl_space, "dep-impl-level");
-    let err = svc.start(&eid, AdapterConfig::new()).await.unwrap_err();
-    assert_eq!(
-        err.code,
-        LocalEngineErrorCode::SpawnFailed,
-        "impl 空间部署就绪后应越过 deployment 检查，实际: {err:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-}
-
 /// GGUF 语义的兼容读取：engine 级 deployment 经 GGUF implementation 映射
 /// 原样可读（无 implementation 声明的 fake 引擎也走 engine 级空间）。
 #[tokio::test]
@@ -1771,85 +1712,15 @@ async fn legacy_engine_level_deployment_readable_without_migration() {
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 }
 
-/// 存储扫描 + 清理按 implementation 独立：两条空间的 slot 各自列出，
-/// active 删除保护按空间生效，未知 implementation 空间 fail-closed 拒绝。
+/// 存储清理对未知 implementation 空间 fail-closed（不映射默认空间）；
+/// handoff-11 后闭合映射内已无 implementation 级实现——退役空间由
+/// legacy target（`legacy:retired-paraformer-onnx`）暴露清理。
 #[tokio::test]
-async fn storage_scan_and_cleanup_are_implementation_scoped() {
+async fn storage_cleanup_rejects_unknown_implementation_space() {
     let svc = make_service("fake-impl-clean");
     let eid = EngineId::new("fake-impl-clean").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let engine_space = DeploymentSpace::engine(&eid);
-    let impl_space = DeploymentSpace::resolve(&eid, ImplementationId::ParaformerOnnxWorker);
 
-    // engine 级 active slot-a；impl 空间 active slot-a + 残留 slot-b
-    write_full_deployment(&engine_space, "dep-engine");
-    write_full_deployment(&impl_space, "dep-impl");
-    std::fs::create_dir_all(impl_space.slot_dir("slot-b")).unwrap();
-
-    // 扫描：两条空间的环境各自成目标，current 按空间标注
-    let dto = svc.scan_storage(&eid).await.unwrap();
-    let find = |id: &str| dto.targets.iter().find(|t| t.target_id == id);
-    let engine_target = find("environment:slot-a").expect("engine 级 slot-a 应列出");
-    assert!(engine_target.current, "engine 级 active 应标记 current");
-    let impl_target =
-        find("environment:impl-paraformer_onnx_worker:slot-a").expect("impl slot-a 应列出");
-    assert!(
-        impl_target.current,
-        "impl active 应按 impl 空间标记 current"
-    );
-    assert!(
-        find("environment:impl-paraformer_onnx_worker:slot-b").is_some(),
-        "impl slot-b 应列出且可清理"
-    );
-
-    // engine 级 active 拒绝删除
-    let result = svc
-        .cleanup_targets(&eid, &["environment:slot-a".to_string()], None)
-        .await
-        .unwrap();
-    assert!(
-        result
-            .skipped_target_ids
-            .contains(&"environment:slot-a".into())
-    );
-    // impl 空间 active 同样拒绝（按 impl 空间指针判定）
-    let result = svc
-        .cleanup_targets(
-            &eid,
-            &["environment:impl-paraformer_onnx_worker:slot-a".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result
-            .skipped_target_ids
-            .contains(&"environment:impl-paraformer_onnx_worker:slot-a".into())
-    );
-    assert!(impl_space.slot_dir("slot-a").exists(), "impl active 不可删");
-    assert!(
-        engine_space.slot_dir("slot-a").exists(),
-        "engine active 不可删"
-    );
-
-    // impl 空间非 active slot-b 正常删除，engine 级 slot 不受影响
-    let result = svc
-        .cleanup_targets(
-            &eid,
-            &["environment:impl-paraformer_onnx_worker:slot-b".to_string()],
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        result
-            .cleaned_target_ids
-            .contains(&"environment:impl-paraformer_onnx_worker:slot-b".into())
-    );
-    assert!(!impl_space.slot_dir("slot-b").exists());
-    assert!(engine_space.slot_dir("slot-a").exists());
-
-    // 未知 implementation 空间 fail-closed 拒绝（不映射默认空间）
     let result = svc
         .cleanup_targets(
             &eid,
@@ -1875,7 +1746,7 @@ async fn install_fails_closed_when_contract_model_unbound() {
     // 注册表声明了 implementation，但绑定表为空（fake-model 未绑定）
     let impl_registry = ImplementationRegistry::new_validated(
         vec![ImplementationDescriptor {
-            id: ImplementationId::ParaformerOnnxWorker,
+            id: ImplementationId::FunasrGgufWorker,
             engine_id: eid.clone(),
             runtime_kind: RuntimePlan::ManagedBinary,
             service_transport: ServiceTransport::Http,
@@ -1912,7 +1783,7 @@ async fn install_fails_closed_when_contract_model_unbound() {
     assert_eq!(err.code, LocalEngineErrorCode::InvalidConfig);
 }
 
-// ── 跨 runtime 模型切换事务与失败矩阵（Handoff 08）──────────────────────────
+// ── 模型切换事务与失败矩阵（0.22.9 引入；handoff-11 后单实现路径）──────────
 
 /// 内存 fake selected 存储（事务配置提交/回写端口）。
 struct FakeSelectedStore {
@@ -1942,11 +1813,11 @@ impl super::switch::SelectedModelStore for FakeSelectedStore {
     }
 }
 
-/// 可承载两个模型的 fake ONNX worker implementation 注册表。
-fn make_onnx_worker_impl_registry_two_models(engine_id: &EngineId) -> ImplementationRegistry {
+/// 可承载两个模型的 fake GGUF worker implementation 注册表。
+fn make_gguf_impl_registry_two_models(engine_id: &EngineId) -> ImplementationRegistry {
     ImplementationRegistry::new_validated(
         vec![ImplementationDescriptor {
-            id: ImplementationId::ParaformerOnnxWorker,
+            id: ImplementationId::FunasrGgufWorker,
             engine_id: engine_id.clone(),
             runtime_kind: RuntimePlan::ManagedBinary,
             service_transport: ServiceTransport::Http,
@@ -1965,84 +1836,64 @@ fn make_onnx_worker_impl_registry_two_models(engine_id: &EngineId) -> Implementa
             ImplementationBinding {
                 engine_id: engine_id.clone(),
                 model_id: "fake-model".to_string(),
-                implementation: ImplementationId::ParaformerOnnxWorker,
+                implementation: ImplementationId::FunasrGgufWorker,
             },
             ImplementationBinding {
                 engine_id: engine_id.clone(),
                 model_id: "fake-model-2".to_string(),
-                implementation: ImplementationId::ParaformerOnnxWorker,
+                implementation: ImplementationId::FunasrGgufWorker,
             },
         ],
     )
     .expect("测试 implementation 声明必须合法")
 }
 
-/// 在指定部署空间写入带指定模型契约的完整 active 部署
-/// （ONNX 扩展 + generation id，模拟 ParaformerOnline 安装产物）。
-fn write_onnx_deployment(
-    space: &DeploymentSpace,
-    install_id: &str,
-    model_id: &str,
-    generation: &str,
-) {
-    use crate::infra::local_engine::deployment::DEPLOYMENT_POINTER_SCHEMA_VERSION;
-    use crate::infra::local_engine::runtime::MANIFEST_SCHEMA_VERSION;
+/// 在 model_storage 写入最小合法「已安装」模型（payload + manifest + pointer）。
+///
+/// handoff-11：切换目标资产校验走 model_storage（impl 部署空间已退役）。
+fn write_installed_model(eid: &EngineId, model_id: &str) {
+    use crate::infra::local_engine::model_storage as mstore;
 
-    let slot = "slot-a";
-    std::fs::create_dir_all(space.slot_dir(slot)).unwrap();
-    let manifest = crate::infra::local_engine::runtime::DeploymentManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        engine_id: space.engine_id().clone(),
-        runtime_kind: RuntimePlan::OnnxRuntime,
-        install_id: install_id.to_string(),
-        requested_preference: ComputePreference::Cpu,
-        resolved_profile: ResolvedProfile {
-            profile_id: "cpu-x64".to_string(),
-            backend: ComputeBackend::Cpu,
-            artifact_id: ArtifactId::new("fake-artifact").unwrap(),
-            priority: 0,
+    let asset_key = mstore::encode_asset_key(model_id);
+    let slot_id = "slot-a";
+    let payload_dir = mstore::model_payload_dir(eid, &asset_key, slot_id).unwrap();
+    std::fs::create_dir_all(&payload_dir).unwrap();
+    std::fs::write(payload_dir.join("model.bin"), b"model").unwrap();
+    let fp = mstore::compute_content_fingerprint(&payload_dir).unwrap();
+
+    let manifest = mstore::ModelManifest {
+        schema_version: mstore::MODEL_MANIFEST_SCHEMA_VERSION,
+        engine_id: eid.clone(),
+        model_id: model_id.to_string(),
+        revision: "v1".to_string(),
+        source: mstore::ModelSource::Unverified {
+            source: "test".to_string(),
+            downloaded_at_ms: runtime::now_ms(),
         },
-        installed_at_ms: 0,
-        artifact: crate::infra::local_engine::runtime::ArtifactIdentity {
-            runtime_kind: RuntimePlan::OnnxRuntime,
-            artifact_id: ArtifactId::new("fake-artifact").unwrap(),
-            sha256: "cd".repeat(32),
-        },
-        model_contract: crate::infra::local_engine::runtime::ModelContract {
+        slot_id: slot_id.to_string(),
+        installed_at_ms: runtime::now_ms(),
+        content_fingerprint_algorithm: mstore::CONTENT_FINGERPRINT_ALGORITHM.to_string(),
+        content_fingerprint: fp.fingerprint,
+        payload_size_bytes: fp.total_size_bytes,
+        file_count: fp.file_count,
+        compatibility_schema: 1,
+        model_contract_identity: mstore::ModelContractIdentity {
             model_id: model_id.to_string(),
-            revision: "onnx-test".to_string(),
-            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
+            revision: "v1".to_string(),
+            checksum_source_kind: "unverified".to_string(),
         },
-        fallback_reasons: Vec::new(),
-        extension: crate::infra::local_engine::runtime::ManifestExtension::OnnxRuntime(
-            crate::infra::local_engine::runtime::OnnxRuntimeManifestExt {
-                dll_artifact_id: ArtifactId::new("fake-artifact").unwrap(),
-                dll_sha256: "cd".repeat(32),
-                ort_version: "1.19.2".to_string(),
-                dll_files: vec![],
-                model_generation_id: generation.to_string(),
-                execution_provider: "cpu".to_string(),
-                inter_op: 1,
-                intra_op: 4,
-                self_test_passed: true,
-            },
-        ),
     };
-    runtime::atomic_write_json(&space.slot_manifest_path(slot), &manifest).unwrap();
-    DeploymentStore::write_pointer(
-        space,
-        &DeploymentPointer {
-            install_id: install_id.to_string(),
-            slot: slot.to_string(),
-            updated_at_ms: 0,
-            schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
+    mstore::write_model_manifest(eid, &asset_key, slot_id, &manifest).unwrap();
+    mstore::write_model_active_pointer(
+        eid,
+        &asset_key,
+        &mstore::ModelActivePointer {
+            slot_id: slot_id.to_string(),
+            updated_at_ms: runtime::now_ms(),
+            schema_version: mstore::MODEL_ACTIVE_POINTER_SCHEMA_VERSION,
         },
     )
     .unwrap();
-}
-
-fn onnx_impl_space(eid: &EngineId) -> DeploymentSpace {
-    DeploymentSpace::resolve(eid, ImplementationId::ParaformerOnnxWorker)
 }
 
 /// 构造带注入 implementation 注册表 + 模型目录的测试 manager。
@@ -2064,26 +1915,19 @@ fn make_switch_manager(
     )
 }
 
-/// 注入 ONNX 实例 launch snapshot（active = model_id）。
-async fn inject_onnx_launch(entry: &Arc<EngineEntry>, model_id: &str, instance_id: &str) {
-    inject_launch(entry, model_id, instance_id).await;
-    let mut l = entry.launch.lock().await;
-    l.as_mut().unwrap().implementation = Some(ImplementationId::ParaformerOnnxWorker);
-}
-
 /// 未安装目标 → 事务在验证步失败（Target(ModelNotReady)），
 /// 不停止实例、不提交 selected（事务第 2 步 fail-closed）。
 #[tokio::test]
 async fn switch_target_not_installed_fails_before_any_mutation() {
     let eid = EngineId::new("fake-switch-a").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry_two_models(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry_two_models(&eid));
     let store = FakeSelectedStore::with_initial("fake-model");
     svc.set_selected_store(store.clone());
 
-    // 运行中（注入 ONNX launch snapshot）
+    // 运行中（注入 launch snapshot）
     let entry = svc.get_entry_internal(&eid).await.unwrap();
-    inject_onnx_launch(&entry, "fake-model", "inst-sw-a").await;
+    inject_launch(&entry, "fake-model", "inst-sw-a").await;
 
     // 目标 fake-model-2 未安装（impl 空间无部署）→ Target 失败
     let err = svc.switch_model(&eid, "fake-model-2").await.unwrap_err();
@@ -2108,12 +1952,12 @@ async fn switch_target_not_installed_fails_before_any_mutation() {
 async fn switch_when_engine_stopped_commits_selected_only() {
     let eid = EngineId::new("fake-switch-b").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry_two_models(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry_two_models(&eid));
     let store = FakeSelectedStore::with_initial("fake-model");
     svc.set_selected_store(store.clone());
 
-    // 目标已安装（impl 空间写入契约 fake-model-2 的部署）
-    write_onnx_deployment(&onnx_impl_space(&eid), "dep-t2", "fake-model-2", "gen-2");
+    // 目标已安装（model_storage 写入 fake-model-2）
+    write_installed_model(&eid, "fake-model-2");
 
     let outcome = svc.switch_model(&eid, "fake-model-2").await.unwrap();
     assert!(
@@ -2135,13 +1979,13 @@ async fn switch_when_engine_stopped_commits_selected_only() {
 async fn switch_same_target_is_idempotent() {
     let eid = EngineId::new("fake-switch-c").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry_two_models(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry_two_models(&eid));
     let store = FakeSelectedStore::with_initial("fake-model");
     svc.set_selected_store(store.clone());
 
     let entry = svc.get_entry_internal(&eid).await.unwrap();
-    inject_onnx_launch(&entry, "fake-model", "inst-sw-c").await;
-    write_onnx_deployment(&onnx_impl_space(&eid), "dep-t3", "fake-model", "gen-3");
+    inject_launch(&entry, "fake-model", "inst-sw-c").await;
+    write_installed_model(&eid, "fake-model");
 
     let outcome = svc.switch_model(&eid, "fake-model").await.unwrap();
     assert!(
@@ -2165,16 +2009,24 @@ async fn switch_same_target_is_idempotent() {
 async fn switch_start_failure_with_failed_rollback_reports_both_errors() {
     let eid = EngineId::new("fake-switch-d").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry_two_models(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry_two_models(&eid));
     let store = FakeSelectedStore::with_initial("fake-model");
     svc.set_selected_store(store.clone());
 
-    // 运行中：active = fake-model（ONNX impl）
+    // 运行中：active = fake-model
     let entry = svc.get_entry_internal(&eid).await.unwrap();
-    inject_onnx_launch(&entry, "fake-model", "inst-sw-d").await;
+    inject_launch(&entry, "fake-model", "inst-sw-d").await;
+    // 环境已就绪（handoff-11 后 start 不再跳过 engine 级环境检查）
+    svc.commit_status_internal(&eid, None, |s| {
+        s.environment = EnvironmentHealth::Ready;
+    })
+    .await
+    .unwrap();
 
-    // 目标已安装：契约 fake-model-2
-    write_onnx_deployment(&onnx_impl_space(&eid), "dep-t4", "fake-model-2", "gen-4");
+    // 目标已安装：model_storage 中的 fake-model-2
+    write_installed_model(&eid, "fake-model-2");
+    // engine 级 deployment 存在（GGUF 兼容真源——start 冻结段 fail-closed 前置）
+    write_full_deployment(&DeploymentSpace::engine(&eid), "dep-switch-d");
 
     // 事务：验证 ✓ → stop（幂等）→ commit B → start 失败 → 回滚重启也失败
     let err = svc.switch_model(&eid, "fake-model-2").await.unwrap_err();
@@ -2210,7 +2062,7 @@ async fn switch_start_failure_with_failed_rollback_reports_both_errors() {
 async fn switch_without_selected_store_fails_closed() {
     let eid = EngineId::new("fake-switch-e").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry_two_models(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry_two_models(&eid));
 
     let err = svc.switch_model(&eid, "fake-model").await.unwrap_err();
     match err {
@@ -2229,7 +2081,7 @@ async fn switch_unbound_model_fails_closed() {
     let eid = EngineId::new("fake-switch-f").unwrap();
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
     // 注册表只绑定 fake-model；fake-model-2 在目录但未绑定
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry(&eid));
     let store = FakeSelectedStore::with_initial("fake-model");
     svc.set_selected_store(store);
 
@@ -2240,118 +2092,6 @@ async fn switch_unbound_model_fails_closed() {
         }
         other => panic!("应为绑定缺失失败，实际: {other:?}"),
     }
-    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-}
-
-/// get_connection 投影：ONNX 实例返回 streaming port + 冻结 implementation，
-/// worker 通道为 None（与 GGUF 实例互斥）。
-#[tokio::test]
-async fn get_connection_projects_streaming_port_for_onnx_instance() {
-    use crate::infra::local_engine::stream_worker_proto::StreamWorkerClient;
-    use crate::infra::local_engine::streaming_stt_adapter::ParaformerOnlineAdapter;
-
-    let eid = EngineId::new("fake-switch-g").unwrap();
-    let svc = make_switch_manager(&eid, make_onnx_worker_impl_registry(&eid));
-
-    let entry = svc.get_entry_internal(&eid).await.unwrap();
-    inject_onnx_launch(&entry, "fake-model", "inst-sw-g").await;
-    // 构造真实 StreamWorkerClient（tokio duplex 管道）+ 适配器
-    let (client_side, _worker_side_in) = tokio::io::duplex(1024);
-    let (_worker_side_out, host_side) = tokio::io::duplex(1024);
-    let client = StreamWorkerClient::new(Box::new(client_side), Box::new(host_side));
-    {
-        let mut sp = entry.streaming_port.lock().await;
-        *sp = Some(Arc::new(ParaformerOnlineAdapter::with_process(
-            client,
-            crate::infra::local_engine::process::ManagedProcess::with_defaults(),
-        )));
-    }
-
-    let conn = svc
-        .get_connection(&eid)
-        .await
-        .unwrap()
-        .expect("运行中应有连接");
-    assert_eq!(
-        conn.implementation,
-        Some(ImplementationId::ParaformerOnnxWorker)
-    );
-    assert!(conn.streaming.is_some(), "ONNX 实例应投影 streaming port");
-    assert!(conn.worker.is_none(), "ONNX 实例无 GGUF worker 通道");
-    assert!(
-        conn.streaming.as_ref().unwrap().is_ready(),
-        "duplex 管道未断开时应 ready"
-    );
-
-    // 销毁适配器后连接投影同步消失（stop/exit 路径的清理语义）
-    {
-        let mut sp = entry.streaming_port.lock().await;
-        *sp = None;
-    }
-    let conn2 = svc.get_connection(&eid).await.unwrap().unwrap();
-    assert!(conn2.streaming.is_none());
-}
-
-/// ParaformerOnline 模型状态投影：状态真源 = impl 部署空间
-/// （generation 与 asset lock 一致 → Installed；不一致 → 不可选；
-/// 无部署 → NotInstalled）。
-#[tokio::test]
-async fn paraformer_online_model_status_reflects_impl_deployment() {
-    use crate::app::local_engine::funasr::paraformer_online;
-    use crate::domain::local_engine::{ModelInstallState, ModelVerificationState};
-
-    // 模型 descriptor 绑定 funasr 引擎——测试根目录已重定向到临时目录，
-    // 使用真实 engine id 不会触碰用户资产
-    let eid = EngineId::new("funasr").unwrap();
-    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
-    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-        eid.as_str(),
-        true,
-    )]));
-    let svc = EngineManager::new_with_providers(
-        registry,
-        Arc::new(NoopEventPort),
-        HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
-        super::super::model_installer::ModelRegistry::new_with_models(vec![
-            paraformer_online::paraformer_online_model_descriptor(),
-        ]),
-        Arc::new(super::super::model_installer::NoopModelWorker),
-    );
-
-    // 未安装
-    let models = svc.list_models(&eid).await;
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].install_state, ModelInstallState::NotInstalled);
-
-    // 安装（generation 与 asset lock 一致）
-    let generation = paraformer_online::expected_model_generation_id().unwrap();
-    write_onnx_deployment(
-        &onnx_impl_space(&eid),
-        "dep-h",
-        paraformer_online::PARAFORMER_ONLINE_ID,
-        &generation,
-    );
-    let models = svc.list_models(&eid).await;
-    assert_eq!(models[0].install_state, ModelInstallState::Installed);
-    assert_eq!(
-        models[0].verification_state,
-        ModelVerificationState::Unverified
-    );
-
-    // generation 与 asset lock 不一致（上游更新）→ 不可用
-    write_onnx_deployment(
-        &onnx_impl_space(&eid),
-        "dep-h2",
-        paraformer_online::PARAFORMER_ONLINE_ID,
-        "stale-generation",
-    );
-    let models = svc.list_models(&eid).await;
-    assert_eq!(models[0].install_state, ModelInstallState::NotInstalled);
-    assert_eq!(
-        models[0].verification_state,
-        ModelVerificationState::Corrupted
-    );
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 }
 

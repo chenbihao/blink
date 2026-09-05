@@ -1467,8 +1467,8 @@ export const zh = {
     "local_engine.config.runtime_diag": "运行时",
     "local_engine.implementation.none": "未运行",
     "local_engine.implementation.funasr_gguf_worker": "GGUF worker（常驻）",
-    "local_engine.implementation.paraformer_onnx_worker": "ONNX worker（独立进程）",
     "local_engine.implementation.paddleocr_onnx_in_process": "ONNX in-process",
+    "local_engine.storage.retired_paraformer_onnx": "已退役的 Paraformer-Online ONNX 资产",
 
     // ── 引擎卡片配置组文案（0.22.8 遗留 key 缺失，Handoff 10 补齐）──
     "local_engine.config.onnx_assets": "ONNX 资产",
@@ -1488,7 +1488,6 @@ export const zh = {
     "local_engine.business.streaming.true": "真流式 · 边说边出字",
     "local_engine.business.streaming.pseudo": "伪流式 · 句尾定稿",
     "local_engine.business.shared_gguf_worker": "共享 GGUF worker",
-    "local_engine.business.dedicated_onnx_worker": "独立 ONNX worker",
     "local_engine.business.corpus_baseline": "中文质量 · 同语料基准",
     "local_engine.business.punctuation.yes": "含标点",
     "local_engine.business.punctuation.no": "无标点",

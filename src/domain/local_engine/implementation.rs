@@ -48,11 +48,6 @@ pub enum ImplementationId {
     ///
     /// 承载 SenseVoice / Paraformer-zh / Fun-ASR-Nano 三条既有模型路径。
     FunasrGgufWorker,
-    /// ParaformerOnline ONNX worker（内部计划项）。
-    ///
-    /// 0.22.9 声明 identity 但**不注册生产模型、不创建 worker**；
-    /// 通过 §3.12 注册门前不得加入用户可见模型列表。
-    ParaformerOnnxWorker,
     /// PaddleOCR ONNX in-process（blink.exe 直持 ORT lazy Session）。
     // 显式 rename：`rename_all` 会把 `PaddleOcr` 拆成 `paddle_ocr`，
     // wire 值必须与产品 engine id 前缀（paddleocr）一致。
@@ -65,7 +60,6 @@ impl ImplementationId {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::FunasrGgufWorker => "funasr_gguf_worker",
-            Self::ParaformerOnnxWorker => "paraformer_onnx_worker",
             Self::PaddleOcrOnnxInProcess => "paddleocr_onnx_in_process",
         }
     }
@@ -95,8 +89,7 @@ impl std::fmt::Display for ImplementationId {
 pub enum ExecutorTopology {
     /// 进程内执行：blink.exe 直接持有 runtime/Session（OCR ONNX）。
     InProcess,
-    /// 独立受管子进程：worker 持有 runtime，经受限 IPC 调用
-    /// （GGUF worker、未来 ParaformerOnline ONNX worker）。
+    /// 独立受管子进程：worker 持有 runtime，经受限 IPC 调用（GGUF worker）。
     ManagedWorker,
 }
 
@@ -481,10 +474,6 @@ mod tests {
             "\"funasr_gguf_worker\""
         );
         assert_eq!(
-            serde_json::to_string(&ImplementationId::ParaformerOnnxWorker).unwrap(),
-            "\"paraformer_onnx_worker\""
-        );
-        assert_eq!(
             serde_json::to_string(&ImplementationId::PaddleOcrOnnxInProcess).unwrap(),
             "\"paddleocr_onnx_in_process\""
         );
@@ -508,7 +497,6 @@ mod tests {
         // wire 值 ↔ 枚举 双向一致（磁盘目录名反解的真源）
         for id in [
             ImplementationId::FunasrGgufWorker,
-            ImplementationId::ParaformerOnnxWorker,
             ImplementationId::PaddleOcrOnnxInProcess,
         ] {
             assert_eq!(ImplementationId::parse_wire(id.as_str()), Some(id));
@@ -744,13 +732,13 @@ mod tests {
                 ),
                 inprocess_impl(
                     &engine(ENGINE_A),
-                    ImplementationId::ParaformerOnnxWorker,
+                    ImplementationId::PaddleOcrOnnxInProcess,
                     &["model-sv"],
                 ),
             ],
             vec![
                 binding(ENGINE_A, "model-sv", ImplementationId::FunasrGgufWorker),
-                binding(ENGINE_A, "model-sv", ImplementationId::ParaformerOnnxWorker),
+                binding(ENGINE_A, "model-sv", ImplementationId::PaddleOcrOnnxInProcess),
             ],
         )
         .expect_err("同一模型绑定多个 implementation 必须拒绝");
@@ -845,7 +833,7 @@ mod tests {
         // 内部计划项：不承载模型、无 install artifact —— 允许声明，
         // 但不得被任何模型绑定（绑定校验会拦截）
         let planned = ImplementationDescriptor {
-            id: ImplementationId::ParaformerOnnxWorker,
+            id: ImplementationId::PaddleOcrOnnxInProcess,
             engine_id: engine(ENGINE_A),
             runtime_kind: RuntimePlan::OnnxRuntime,
             service_transport: ServiceTransport::StdioWorker,
@@ -866,7 +854,7 @@ mod tests {
         // 计划项不承载任何模型 → 该引擎解析任何模型都 fail-closed
         assert!(
             registry
-                .resolve_for_model(&engine(ENGINE_A), "paraformer-online")
+                .resolve_for_model(&engine(ENGINE_A), "planned-unbound-model")
                 .is_err()
         );
     }

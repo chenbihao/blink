@@ -24,7 +24,6 @@
 
 pub mod binary;
 pub mod onnx;
-pub mod paraformer_onnx;
 pub mod python;
 
 use serde::{Deserialize, Serialize};

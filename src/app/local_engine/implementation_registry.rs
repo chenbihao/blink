@@ -12,12 +12,10 @@
 //! | `gguf/sensevoice-small-q8` | `funasr_gguf_worker` |
 //! | `gguf/paraformer-zh-q8` | `funasr_gguf_worker` |
 //! | `gguf/fun-asr-nano-q4km` | `funasr_gguf_worker` |
-//! | `onnx/paraformer-online` | `paraformer_onnx_worker`（0.22.9 Handoff 08 注册） |
 //! | `PP-OCRv6:PP-OCRv6_tiny_det:PP-OCRv6_tiny_rec` | `paddleocr_onnx_in_process` |
-//!
-//! `paraformer_onnx_worker` 自 Handoff 08 起承载 ParaformerOnline 模型：
-//! per-implementation deployment（`impl-paraformer_onnx_worker` 空间）、
-//! Paraformer provider 安装事务、start 时产出真实 StreamingSttPort。
+
+//! 0.22.10（handoff-11）：ASR 侧 ONNX 线路（`onnx/paraformer-online` /
+//! `paraformer_onnx_worker`）已随产品决策退役，从注册表中整体移除。
 //!
 //! ## 边界
 //!
@@ -34,7 +32,6 @@ use crate::infra::local_engine::runtime::{ArtifactId, EngineId, RuntimePlan};
 use super::funasr::FUNASR_ENGINE_ID;
 use super::funasr::descriptor::FUNASR_GGUF_ARTIFACT_ID;
 use super::funasr::gguf::{GGUF_NANO_ID, GGUF_PARAFORMER_ID, GGUF_SENSEVOICE_ID};
-use super::funasr::paraformer_online::PARAFORMER_ONLINE_ID;
 use super::paddleocr::PADDLEOCR_ENGINE_ID;
 
 // ── 可承载模型 id 常量（绑定表与测试共用）────────────────────────────────────
@@ -46,11 +43,6 @@ pub fn funasr_gguf_carried_models() -> Vec<String> {
         GGUF_PARAFORMER_ID.to_string(),
         GGUF_NANO_ID.to_string(),
     ]
-}
-
-/// ParaformerOnline ONNX implementation 可承载的模型（Handoff 08 注册）。
-pub fn paraformer_onnx_carried_models() -> Vec<String> {
-    vec![PARAFORMER_ONLINE_ID.to_string()]
 }
 
 /// PaddleOCR in-process implementation 唯一可承载的模型 id
@@ -81,48 +73,6 @@ fn make_funasr_gguf_implementation() -> ImplementationDescriptor {
         carried_models: funasr_gguf_carried_models(),
         resource_budget: ResourceBudget::default(),
         timeouts: None, // 使用 funasr engine descriptor 默认超时
-    }
-}
-
-/// ParaformerOnline ONNX worker implementation（Handoff 08 正式注册）。
-///
-/// 承载 `onnx/paraformer-online`：真流式 ONNX worker（二进制协议 v2），
-/// per-implementation deployment 承载 ORT DLL + 模型资产，安装事务由
-/// Paraformer provider 执行（下载 + SHA-256 校验 + 隔离 self-test）。
-fn make_paraformer_onnx_implementation() -> ImplementationDescriptor {
-    use crate::domain::local_engine::EngineTimeouts;
-    use std::time::Duration;
-
-    // ORT artifact id 从 STT asset lock 派生（与 OCR 的 ORT 各自锁定）
-    let ort_artifact = crate::infra::local_engine::stt_asset_lock::ort_dll_artifact_id()
-        .expect("STT asset-lock.json 必须可解析且 ORT artifact id 构造成功");
-
-    ImplementationDescriptor {
-        id: ImplementationId::ParaformerOnnxWorker,
-        engine_id: EngineId::new(FUNASR_ENGINE_ID).expect("funasr is valid"),
-        runtime_kind: RuntimePlan::OnnxRuntime,
-        // ONNX worker：二进制协议 v2（stdin/stdout），受管子进程
-        service_transport: crate::domain::local_engine::ServiceTransport::StdioWorker,
-        executor_topology: crate::domain::local_engine::ExecutorTopology::ManagedWorker,
-        install_plan: InstallPlanRef {
-            runtime_kind: RuntimePlan::OnnxRuntime,
-            artifact_ids: vec![ort_artifact],
-            compute_candidates: Vec::new(),
-            schema_version: 1,
-        },
-        carried_models: paraformer_onnx_carried_models(),
-        resource_budget: ResourceBudget {
-            estimated_env_disk_mb: Some(12),    // ORT DLL ~11MB
-            estimated_model_disk_mb: Some(237), // encoder+decoder+cmvn+tokenizer
-            estimated_stable_ram_mb: Some(300), // 07F 实测 worker 常驻 ~280MB
-            estimated_peak_ram_mb: Some(600),
-        },
-        // 模型加载：ORT 初始化 + encoder(166MB)/decoder(72MB) Session 构建
-        timeouts: Some(EngineTimeouts {
-            start_timeout: Duration::from_secs(30),
-            model_load_timeout: Duration::from_secs(120),
-            idle_ttl: Duration::from_secs(300),
-        }),
     }
 }
 
@@ -166,14 +116,6 @@ pub fn builtin_model_bindings() -> Vec<ImplementationBinding> {
             implementation: ImplementationId::FunasrGgufWorker,
         });
     }
-    // ParaformerOnline → Paraformer ONNX worker implementation（Handoff 08）
-    for model in paraformer_onnx_carried_models() {
-        bindings.push(ImplementationBinding {
-            engine_id: funasr.clone(),
-            model_id: model,
-            implementation: ImplementationId::ParaformerOnnxWorker,
-        });
-    }
     // PP-OCRv6 → PaddleOCR ONNX in-process implementation
     bindings.push(ImplementationBinding {
         engine_id: paddleocr,
@@ -193,7 +135,6 @@ pub fn make_builtin_implementation_registry() -> ImplementationRegistry {
     ImplementationRegistry::new_validated(
         vec![
             make_funasr_gguf_implementation(),
-            make_paraformer_onnx_implementation(),
             make_paddleocr_inprocess_implementation(),
         ],
         builtin_model_bindings(),
@@ -238,44 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn paraformer_online_is_registered_to_onnx_worker() {
-        // Handoff 08：ParaformerOnline 正式注册，绑定 ParaformerOnnxWorker
-        let registry = make_builtin_implementation_registry();
-
-        let desc = registry
-            .descriptor(ImplementationId::ParaformerOnnxWorker)
-            .expect("implementation 已声明");
-        assert_eq!(desc.carried_models, vec![PARAFORMER_ONLINE_ID.to_string()]);
-        assert_eq!(
-            desc.executor_topology,
-            crate::domain::local_engine::ExecutorTopology::ManagedWorker
-        );
-        assert_eq!(
-            desc.runtime_kind,
-            RuntimePlan::OnnxRuntime,
-            "ParaformerOnline 走 ONNX runtime"
-        );
-
-        // 模型解析到 ONNX worker implementation（fail-closed 绑定表）
-        assert_eq!(
-            registry
-                .resolve_for_model(
-                    &EngineId::new(FUNASR_ENGINE_ID).unwrap(),
-                    PARAFORMER_ONLINE_ID
-                )
-                .expect("已注册模型应解析成功"),
-            Some(ImplementationId::ParaformerOnnxWorker)
-        );
-
-        // 超时覆盖存在（ONNX 模型加载窗口独立于 GGUF 默认值）
-        assert!(desc.timeouts.is_some());
-    }
-
-    #[test]
     fn unknown_legacy_model_stays_unavailable() {
         let registry = make_builtin_implementation_registry();
-        // 未知旧模型（如 0.22.7 前的 Python 时代模型 id）不静默换模
-        for legacy in ["iic/SenseVoiceSmall", "paraformer-zh", "whisper-tiny"] {
+        // 未知旧模型（如 0.22.7 前的 Python 时代模型 id、handoff-11 退役的
+        // onnx/paraformer-online）不静默换模
+        for legacy in ["iic/SenseVoiceSmall", "paraformer-zh", "whisper-tiny", "onnx/paraformer-online"] {
             assert!(
                 registry
                     .resolve_for_model(&EngineId::new(FUNASR_ENGINE_ID).unwrap(), legacy)
@@ -286,16 +194,16 @@ mod tests {
 
     #[test]
     fn bindings_match_model_catalog_exactly() {
-        // 绑定表覆盖的模型 = funasr 模型目录（3 GGUF + 1 ONNX）+ paddleocr 模型
+        // 绑定表覆盖的模型 = funasr 模型目录（3 GGUF）+ paddleocr 模型
         let registry = make_builtin_implementation_registry();
         let bindings = builtin_model_bindings();
-        assert_eq!(bindings.len(), 5, "3 GGUF + 1 ONNX + 1 OCR 模型");
+        assert_eq!(bindings.len(), 4, "3 GGUF + 1 OCR 模型");
 
         let funasr = EngineId::new(FUNASR_ENGINE_ID).unwrap();
         let model_registry =
             crate::app::local_engine::model_installer::make_funasr_model_registry();
         let catalog = model_registry.list(&funasr);
-        assert_eq!(catalog.len(), 4, "3 GGUF + 1 ONNX 模型");
+        assert_eq!(catalog.len(), 3, "3 GGUF 模型");
         for spec in catalog {
             assert!(bindings.iter().any(|b| b.model_id == spec.model_id));
         }

@@ -228,14 +228,8 @@ pub struct LocalEngineConnection {
     pub instance_id: String,
     /// stdio worker 传输通道（StdioWorker 引擎）。
     pub worker: Option<std::sync::Arc<dyn crate::domain::stt::SttTransport>>,
-    /// ParaformerOnline 真流式 port（Handoff 08；start 时经 hello/ready 握手
-    /// 建立，随实例生命周期销毁）。与 `worker` 按实例互斥——
-    /// GGUF 实例只有 `worker`，ONNX 实例只有 `streaming`。
-    pub streaming: Option<
-        std::sync::Arc<crate::infra::local_engine::streaming_stt_adapter::ParaformerOnlineAdapter>,
-    >,
-    /// start 时冻结的 implementation（Handoff 08）——VoiceService 据此选择
-    /// port，不接受前端提交。
+    /// start 时冻结的 implementation（Handoff 08）——诊断/状态投影用，
+    /// 不接受前端提交。
     pub implementation: Option<ImplementationId>,
 }
 
@@ -246,7 +240,6 @@ impl std::fmt::Debug for LocalEngineConnection {
             .field("engine_id", &self.engine_id)
             .field("instance_id", &self.instance_id)
             .field("worker", &self.worker.is_some())
-            .field("streaming", &self.streaming.is_some())
             .field("implementation", &self.implementation)
             .finish()
     }
@@ -327,11 +320,6 @@ pub(crate) struct EngineEntry {
     /// stdio worker 客户端（StdioWorker 引擎 Running 时存在）。
     /// 持有 worker 的 stdin/stdout；drop 时关闭管道（stdin EOF → worker 退出）。
     worker_client: Mutex<Option<Arc<crate::infra::local_engine::worker_proto::NdjsonWorkerClient>>>,
-    /// ParaformerOnline 真流式适配器（Handoff 08；ONNX worker 实例 Running
-    /// 时存在）。stop/exit 时销毁——drop 关闭协议通道并释放进程引用。
-    streaming_port: Mutex<
-        Option<Arc<crate::infra::local_engine::streaming_stt_adapter::ParaformerOnlineAdapter>>,
-    >,
     /// 后台探测共享结果——确定性 probe 协调。
     ///
     /// 构造后 spawn 后台任务探测 active 部署，
@@ -484,13 +472,6 @@ pub struct EngineManager {
     /// ONNX Runtime provider 实例（0.22.8 协议位，B 包落地真实安装）。
     /// 按 ProviderDescriptor.runtime_kind 与 python/binary_provider 三选一。
     onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider,
-    /// ParaformerOnnx provider 实例（0.22.9 Handoff 08：ParaformerOnline
-    /// per-implementation 安装事务专用，与 OCR 的 onnx_provider 独立）。
-    paraformer_provider:
-        crate::infra::local_engine::providers::paraformer_onnx::ParaformerOnnxProvider,
-    /// implementation → ProviderDescriptor（per-implementation 安装事务用）。
-    /// key 不限于单 engine——同一 engine 的不同 implementation 各有 descriptor。
-    implementation_provider_descriptors: HashMap<ImplementationId, ProviderDescriptor>,
     /// 本地 STT selected 模型存储（切换事务的配置提交/回写端口）。
     /// wiring 层在构造后注入生产实现（DB 持久化 + 缓存 + 事件广播）；
     /// 未注入时 switch_model 返回结构化错误（fail-closed）。
@@ -605,22 +586,12 @@ impl EngineManager {
                     last_managed_process: Mutex::new(None),
                     log_pump_cancel: Mutex::new(None),
                     worker_client: Mutex::new(None),
-                    streaming_port: Mutex::new(None),
                     probe_result: OnceCell::new(),
                     probe_tx,
                     probe_watch: probe_rx,
                 }),
             );
         }
-        // Per-implementation provider descriptors（Handoff 08）：
-        // ParaformerOnline 安装事务专用 descriptor（per-implementation deployment）。
-        let mut implementation_provider_descriptors: HashMap<ImplementationId, ProviderDescriptor> =
-            HashMap::new();
-        implementation_provider_descriptors.insert(
-            ImplementationId::ParaformerOnnxWorker,
-            super::funasr::paraformer_online::make_paraformer_online_provider_descriptor(),
-        );
-
         let service = Arc::new(Self {
             registry,
             model_registry,
@@ -635,10 +606,6 @@ impl EngineManager {
             binary_provider:
                 crate::infra::local_engine::providers::binary::ManagedBinaryProvider::new(),
             onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider::new(),
-            paraformer_provider:
-                crate::infra::local_engine::providers::paraformer_onnx::ParaformerOnnxProvider::new(
-                ),
-            implementation_provider_descriptors,
             selected_store: std::sync::OnceLock::new(),
             process_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });

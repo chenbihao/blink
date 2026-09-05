@@ -478,6 +478,37 @@ fn scan_engine_storage_blocking(
         }
     }
 
+    // ── 8. 已退役实现的部署空间（handoff-11：ParaformerOnline ONNX 退役）──
+    // 不自动删除；在残留清理列表中暴露，由用户显式一键清理。
+    if engine_id.as_str() == "funasr" {
+        let retired_dir = crate::infra::local_engine::runtime::engine_root(engine_id)
+            .join("impl-paraformer_onnx_worker");
+        if retired_dir.exists() {
+            let size = dir_size(&retired_dir);
+            if size > 0 {
+                total_bytes += size;
+                releasable_bytes += size;
+
+                targets.push(super::super::dto::StorageTargetDto {
+                    target_id: "legacy:retired-paraformer-onnx".to_string(),
+                    kind: super::super::dto::StorageTargetKindDto::LegacyAsset,
+                    engine_id: Some(engine_id.to_string()),
+                    label_key: "local_engine.storage.retired_paraformer_onnx".to_string(),
+                    label_fallback: "已退役的 Paraformer-Online ONNX 资产".to_string(),
+                    size_bytes: size,
+                    current: false,
+                    removable: true,
+                    shared: false,
+                    requires_separate_confirmation: true,
+                    blocked_reason: None,
+                    affected_engine_ids: None,
+                    reference_count: None,
+                    path_display: Some(retired_dir.display().to_string()),
+                });
+            }
+        }
+    }
+
     Ok(super::super::dto::EngineStorageDto {
         engine_id: Some(engine_id.to_string()),
         targets,
@@ -499,6 +530,7 @@ fn scan_engine_storage_blocking(
 /// - `shared_download_cache:{runtime_kind}` — 共享下载缓存
 /// - `model:{model_id}` — 已安装模型（拒绝：删除走模型管理）
 /// - `legacy:{kind}` — 旧版遗留资产（拒绝自动清理）
+/// - `legacy:retired-paraformer-onnx` — 已退役 ONNX 部署空间（目录级整删）
 fn resolve_and_cleanup_target_blocking(
     engine_id: &EngineId,
     target_id: &str,
@@ -632,6 +664,27 @@ fn resolve_and_cleanup_target_blocking(
                 message: "模型删除请使用模型管理（含引用检查）".to_string(),
             },
         )
+    } else if target_id == "legacy:retired-paraformer-onnx" {
+        // handoff-11：已退役 ParaformerOnline ONNX 部署空间——目录级整删
+        //（实现已退役，不存在 active 引用；内容为 ORT DLL + 模型资产）
+        let dir = crate::infra::local_engine::runtime::engine_root(engine_id)
+            .join("impl-paraformer_onnx_worker");
+        if !dir.exists() {
+            return Ok(CleanupTargetOutcome::Cleaned(0));
+        }
+        let size = dir_size(&dir);
+        std::fs::remove_dir_all(&dir).map_err(|e| {
+            crate::infra::local_engine::runtime::RuntimeError::CleanupFailed {
+                message: format!("删除已退役 ONNX 部署空间失败: {e}"),
+            }
+        })?;
+        tracing::info!(
+            engine_id = %engine_id,
+            path = %dir.display(),
+            size_bytes = size,
+            "已清理退役 Paraformer-Online ONNX 部署空间"
+        );
+        Ok(CleanupTargetOutcome::Cleaned(size))
     } else if target_id.starts_with("legacy:") {
         // legacy 资产——只清理可证明归属的
         // 目前不自动清理 legacy，只标记

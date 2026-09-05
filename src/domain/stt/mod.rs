@@ -293,7 +293,6 @@ mod mock;
 pub mod pseudo_streaming;
 pub mod streaming_port;
 pub mod vad;
-pub mod vad_port;
 pub(crate) mod wav;
 
 /// 创建 STT 引擎实例(工厂函数)。

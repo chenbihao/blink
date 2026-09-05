@@ -132,27 +132,6 @@ impl EngineManager {
 
         let transport = entry.adapter.descriptor().service_transport;
 
-        // ParaformerOnline ONNX worker（Handoff 08）：发送二进制协议 Quit +
-        // drop 适配器（关闭管道），worker 自行退出。
-        // 引擎 transport 虽为 StdioWorker，但 GGUF 分支取的是 NDJSON 客户端
-        // （ONNX 实例中恒为 None）——必须先按 streaming port 分派。
-        {
-            let port = entry.streaming_port.lock().await.take();
-            if let Some(port) = port {
-                tracing::debug!(engine = %engine_id, "优雅停止 paraformer worker：Quit + EOF");
-                if let Err(e) = port.stop().await {
-                    tracing::warn!(
-                        engine = %engine_id,
-                        error = %e,
-                        "paraformer worker Quit 发送失败（转入强制回收）"
-                    );
-                }
-                wait_graceful_exit(engine_id, managed, GRACEFUL_WAIT_SECS, "paraformer worker")
-                    .await;
-                return;
-            }
-        }
-
         match transport {
             crate::domain::local_engine::ServiceTransport::StdioWorker => {
                 // StdioWorker 路径：shutdown 请求 + stdin EOF
@@ -272,14 +251,6 @@ impl EngineManager {
             let client = entry.worker_client.lock().await.take();
             if client.is_some() {
                 tracing::debug!(engine = %engine_id, "clear_running_instance: 销毁 worker 客户端");
-            }
-        }
-        // 0.22.9 Handoff 08：销毁 ParaformerOnline 适配器（drop → 关闭协议
-        // 通道 + 释放进程引用；ManagedProcess 兜底 Job 回收）。
-        {
-            let port = entry.streaming_port.lock().await.take();
-            if port.is_some() {
-                tracing::debug!(engine = %engine_id, "clear_running_instance: 销毁 paraformer 适配器");
             }
         }
         super::super::super::funasr::worker::clean_audio_tmp_dir(engine_id);

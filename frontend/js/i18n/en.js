@@ -1466,8 +1466,8 @@ export const en = {
     "local_engine.config.runtime_diag": "Runtime",
     "local_engine.implementation.none": "Not running",
     "local_engine.implementation.funasr_gguf_worker": "GGUF worker (resident)",
-    "local_engine.implementation.paraformer_onnx_worker": "ONNX worker (dedicated process)",
     "local_engine.implementation.paddleocr_onnx_in_process": "ONNX in-process",
+    "local_engine.storage.retired_paraformer_onnx": "Retired Paraformer-Online ONNX assets",
 
     // ── Engine card config groups (missing keys since 0.22.8, fixed in Handoff 10) ──
     "local_engine.config.onnx_assets": "ONNX assets",
@@ -1487,7 +1487,6 @@ export const en = {
     "local_engine.business.streaming.true": "True streaming · live partials",
     "local_engine.business.streaming.pseudo": "Pseudo streaming · finalized per sentence",
     "local_engine.business.shared_gguf_worker": "Shared GGUF worker",
-    "local_engine.business.dedicated_onnx_worker": "Dedicated ONNX worker",
     "local_engine.business.corpus_baseline": "Chinese quality · corpus baseline",
     "local_engine.business.punctuation.yes": "Punctuation",
     "local_engine.business.punctuation.no": "No punctuation",

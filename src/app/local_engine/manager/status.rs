@@ -216,15 +216,11 @@ impl EngineManager {
                 ),
             ) as std::sync::Arc<dyn crate::domain::stt::SttTransport>
         });
-        // ParaformerOnline 真流式 port（Handoff 08）——start 握手后建立，
-        // 携带 start 冻结的 implementation；VoiceService 据此选择 port。
-        let streaming = entry.streaming_port.lock().await.clone();
         Ok(ci.as_ref().map(|identity| LocalEngineConnection {
             endpoint: identity.endpoint.base_url(),
             engine_id: identity.engine_id.clone(),
             instance_id: identity.instance_id.clone(),
             worker,
-            streaming,
             implementation,
         }))
     }

@@ -90,13 +90,6 @@ pub const GGUF_SENSEVOICE_MODEL_ID: &str = "gguf/sensevoice-small-q8";
 pub const GGUF_PARAFORMER_MODEL_ID: &str = "gguf/paraformer-zh-q8";
 pub const GGUF_NANO_MODEL_ID: &str = "gguf/fun-asr-nano-q4km";
 
-/// ParaformerOnline ONNX worker 的稳定模型 id（0.22.9 Handoff 08 注册）。
-///
-/// 绑定 `ParaformerOnnxWorker` implementation（真流式，per-implementation
-/// deployment 承载 ORT + 模型资产）。注册不改变默认模型——默认选择
-/// 仍为 `GGUF_SENSEVOICE_MODEL_ID`。
-pub const PARAFORMER_ONLINE_MODEL_ID: &str = "onnx/paraformer-online";
-
 /// 旧模型 id（Python/PyTorch 时代的 ModelScope id 与短名）→ GGUF 模型 id 的
 /// 确定映射（0.22.7 切换用）。
 ///
@@ -1642,75 +1635,8 @@ mod tests {
         assert_eq!(cfg.local_engine.vad_kind, "fsmn");
     }
 
-    /// VAD 参数为默认值时，`vad_kind = "auto"` 可安全进入 auto 解析。
-    #[test]
-    fn auto_vad_kind_with_default_params_not_customized() {
-        use crate::domain::stt::vad_port::{VadKind, is_energy_vad_customized, resolve_vad_kind};
 
-        let cfg = LocalEngineConfig::default();
-        assert_eq!(cfg.vad_kind, "auto");
 
-        let result = resolve_vad_kind(VadKind::Auto, &cfg.vad);
-        assert_eq!(result.kind, VadKind::Energy);
-        assert!(!result.user_customized);
-
-        assert!(!is_energy_vad_customized(
-            cfg.vad.silence_threshold,
-            cfg.vad.min_silence_ms,
-            cfg.vad.min_sentence_ms,
-        ));
-    }
-
-    /// VAD 参数被显式定制时，即使 `vad_kind = "auto"` 也固定走 Energy。
-    ///
-    /// 旧配置规则（§3.12）：
-    /// - 三个 EnergyVad 参数与默认值不同 → 视为用户显式定制
-    /// - 继续固定使用 EnergyVad
-    #[test]
-    fn auto_vad_kind_with_customized_params_locked_to_energy() {
-        use crate::domain::stt::vad_port::{VadKind, resolve_vad_kind};
-
-        let cfg = LocalEngineConfig {
-            vad: VadConfig {
-                silence_threshold: 0.003, // != 0.005
-                ..Default::default()
-            },
-            vad_kind: "auto".to_string(),
-            ..Default::default()
-        };
-
-        let result = resolve_vad_kind(VadKind::Auto, &cfg.vad);
-        assert_eq!(
-            result.kind,
-            VadKind::Energy,
-            "定制参数时 auto 应固定到 Energy"
-        );
-        assert!(result.user_customized);
-    }
-
-    /// 旧配置只改了 `min_silence_ms` 一个参数，也算定制。
-    #[test]
-    fn customized_only_min_silence_detected() {
-        use crate::domain::stt::vad_port::{VadKind, is_energy_vad_customized, resolve_vad_kind};
-
-        let cfg = LocalEngineConfig {
-            vad: VadConfig {
-                min_silence_ms: 500, // != 300
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        assert!(is_energy_vad_customized(
-            cfg.vad.silence_threshold,
-            cfg.vad.min_silence_ms,
-            cfg.vad.min_sentence_ms,
-        ));
-
-        let result = resolve_vad_kind(VadKind::Auto, &cfg.vad);
-        assert_eq!(result.kind, VadKind::Energy);
-        assert!(result.user_customized);
-    }
 
     /// 旧配置缺失整个 `vad` 对象时安全迁移为默认值，不算定制。
     #[test]
@@ -1723,20 +1649,6 @@ mod tests {
         assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
         // vad_kind 也缺失 → auto
         assert_eq!(cfg.local_engine.vad_kind, "auto");
-
-        use crate::domain::stt::vad_port::{VadKind, is_energy_vad_customized, resolve_vad_kind};
-
-        // 不算定制
-        assert!(!is_energy_vad_customized(
-            cfg.local_engine.vad.silence_threshold,
-            cfg.local_engine.vad.min_silence_ms,
-            cfg.local_engine.vad.min_sentence_ms,
-        ));
-
-        // auto → Energy（gate 前）
-        let result = resolve_vad_kind(VadKind::Auto, &cfg.local_engine.vad);
-        assert_eq!(result.kind, VadKind::Energy);
-        assert!(!result.user_customized);
     }
 
     /// round-trip 保持 `vad_kind` 字段。

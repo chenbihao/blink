@@ -285,31 +285,11 @@ impl EngineManager {
                 )
             })?;
 
-        // 资产已安装（磁盘真源）：
-        // - per-implementation 实现（ParaformerOnline 等）→ 该 implementation
-        //   部署空间的 active manifest（闭合映射决定空间归属）；
-        // - 其余（GGUF）→ model_storage。
+        // 资产已安装（磁盘真源 = model_storage）。
+
         let eid = engine_id.clone();
         let mid = model_id.to_string();
-        let impl_for_check = implementation;
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            if impl_for_check == ImplementationId::ParaformerOnnxWorker {
-                let space = super::lifecycle::deployment_space_for(&eid, Some(impl_for_check));
-                let Some((_pointer, manifest)) = DeploymentStore::read_active(&space)
-                    .map_err(|e| format!("读取部署失败: {e}"))?
-                else {
-                    return Err(format!(
-                        "模型未安装: {mid}（部署空间内无 active deployment）"
-                    ));
-                };
-                if manifest.model_contract.model_id != mid {
-                    return Err(format!(
-                        "部署 manifest 模型不一致: manifest='{}', 期望='{mid}'",
-                        manifest.model_contract.model_id
-                    ));
-                }
-                return Ok(());
-            }
             let asset_key = mstore::encode_asset_key(&mid);
             match mstore::restore_model_state(&eid, &asset_key) {
                 Ok(mstore::RestoredModelState::Installed { .. }) => Ok(()),

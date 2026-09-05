@@ -612,7 +612,6 @@ fn adapter_prepare_launch_rejects_undeclared_profile() {
         instance_id: "inst-test".to_string(),
         token: "test-token-abcdef0123456789".to_string(),
         resolved_profile: undeclared_profile,
-        implementation: None,
     };
     let config = AdapterConfig::new();
     let result = adapter.prepare_launch(&ctx, &config);

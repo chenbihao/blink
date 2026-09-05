@@ -19,12 +19,6 @@
 
 pub mod commands;
 pub mod onnx_validate;
-pub mod paraformer_selftest;
-pub mod paraformer_worker;
-pub mod stt_corpus;
-pub mod stt_corpus_gate;
-pub mod stt_gate_harness;
-pub mod stt_switch_e2e;
 
 use clap::{Parser, Subcommand};
 
@@ -172,42 +166,6 @@ pub fn try_run_cli() -> Option<i32> {
         // 直接解析并执行，不走 clap 的完整子命令分派
         // （因为 onnx-validate 是隐藏的，不在 help 中显示）
         return Some(onnx_validate::run_from_args(&args[2..]));
-    }
-
-    // paraformer-selftest 是隐藏入口，不在 known_commands 中列出
-    // 由 ParaformerOnnxProvider 的 self_test 通过子进程调用
-    if first == "paraformer-selftest" {
-        return Some(paraformer_selftest::run_from_args(&args[2..]));
-    }
-
-    // paraformer-worker 是隐藏入口，不在 known_commands 中列出
-    // 由 host launcher 通过子进程调用，使用 binary protocol v2
-    if first == "paraformer-worker" {
-        return Some(paraformer_worker::run_from_args(&args[2..]));
-    }
-
-    // stt-gate-harness 是隐藏入口，不在 known_commands 中列出
-    // 由内部 gate harness 使用真实生产路径验证 ParaformerOnline
-    if first == "stt-gate-harness" {
-        return Some(stt_gate_harness::run_from_args(&args[2..]));
-    }
-
-    // stt-corpus 是隐藏入口，用于建立/校验 STT gate corpus
-    // 由开发者在本地使用，不在 help 中显示
-    if first == "stt-corpus" {
-        return Some(stt_corpus::run_from_args(&args[2..]));
-    }
-
-    // stt-corpus-gate 是隐藏入口，用于运行 VAD+STT 矩阵的 production gate 测试
-    // 由开发者在本地使用，不在 help 中显示
-    if first == "stt-corpus-gate" {
-        return Some(stt_corpus_gate::run_from_args(&args[2..]));
-    }
-
-    // stt-switch-e2e 是隐藏入口，用于运行 GGUF↔ONNX 真实双向切模 E2E
-    // （0.22.9 Handoff 08）。由开发者在本地使用，不在 help 中显示。
-    if first == "stt-switch-e2e" {
-        return Some(stt_switch_e2e::run_from_args(&args[2..]));
     }
 
     if !known_commands.contains(&first.as_str()) {

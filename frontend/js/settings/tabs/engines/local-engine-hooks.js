@@ -71,7 +71,6 @@ export function activeImplementationLabel(entry) {
     if (label !== key) return label;
     const map = {
         funasr_gguf_worker: "GGUF worker（常驻）",
-        paraformer_onnx_worker: "ONNX worker（独立进程）",
         paddleocr_onnx_in_process: "ONNX in-process",
     };
     return map[impl] || impl;
