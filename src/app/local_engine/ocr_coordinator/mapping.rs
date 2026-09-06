@@ -34,6 +34,7 @@ pub(super) fn map_executor_result(
         return Ok(OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: String::new(),
             lines: Vec::new(),
             words: Vec::new(),
@@ -208,6 +209,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "hello".to_string(),
             lines: vec![OcrLine {
                 text: "hello".to_string(),
@@ -229,6 +231,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: String::new(),
             lines: vec![],
             words: vec![],
@@ -247,6 +250,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![make_word("bad", -1, 0, 100, 30, 0)],
@@ -262,6 +266,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![make_word("bad", 0, 0, 0, 30, 0)],
@@ -277,6 +282,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![make_word("bad", 199, 0, 2, 30, 0)],
@@ -292,6 +298,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: String::new(),
             lines: vec![],
             words: vec![
@@ -312,6 +319,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "你好".to_string(),
             lines: vec![],
             words: vec![
@@ -335,6 +343,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "PP-OCRv6".to_string(),
             lines: vec![OcrLine {
                 text: "PP-OCRv6".to_string(),
@@ -393,6 +402,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "文字识别".to_string(),
             lines: vec![OcrLine {
                 text: "文字识别".to_string(),
@@ -448,6 +458,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "bad".to_string(),
             lines: vec![],
             words: vec![],
@@ -470,6 +481,7 @@ mod tests {
         let result = OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: "hello world".to_string(),
             lines: vec![],
             words: vec![

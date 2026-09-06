@@ -160,6 +160,7 @@ body.image-editor-mode #canvas.long-image-editing {
     font-size: var(--text-lg);
     pointer-events: none; /* 不能拦截 canvas mousedown（否则拖选失效） */
     display: block; /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
+    z-index: var(--z-dropdown); /* 遮罩画在 #interaction-canvas（z=1）上，toast 必须盖过遮罩 */
 }
 
 /* 错误语义由 .ss-toast-error 修饰类承载（初始化失败/翻译失败等路径切换） */

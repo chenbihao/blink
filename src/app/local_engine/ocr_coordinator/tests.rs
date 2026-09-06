@@ -27,6 +27,7 @@ fn make_valid_result() -> OcrResult {
     OcrResult {
         backend_used: None,
         backend_fallback_reason: None,
+        backend_degrade_hint: None,
         text: "hello".to_string(),
         lines: vec![OcrLine {
             text: "hello".to_string(),
@@ -68,6 +69,7 @@ fn map_executor_result_empty() {
     let result = OcrResult {
         backend_used: None,
         backend_fallback_reason: None,
+        backend_degrade_hint: None,
         text: String::new(),
         lines: vec![],
         words: vec![],
@@ -123,6 +125,7 @@ fn map_executor_result_empty_text_word_filtered() {
     let result = OcrResult {
         backend_used: None,
         backend_fallback_reason: None,
+        backend_degrade_hint: None,
         text: String::new(),
         lines: vec![],
         words: vec![
@@ -161,6 +164,7 @@ fn map_executor_result_cjk_line_grouping() {
     let result = OcrResult {
         backend_used: None,
         backend_fallback_reason: None,
+        backend_degrade_hint: None,
         text: "你好".to_string(),
         lines: vec![],
         words: vec![

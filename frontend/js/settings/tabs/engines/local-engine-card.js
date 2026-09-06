@@ -56,6 +56,7 @@ import {isActionBlocked} from "./local-engine-state.js";
 import {
     computeEngineSummary,
     computeFeedback,
+    computeInstallProgressView,
     computeKeyline,
     computeModelSummary,
     primaryActionView,
@@ -212,6 +213,21 @@ export function renderEngineCard(container, entry, controller, i18n) {
     feedback.setAttribute("role", "status");
     feedback.setAttribute("aria-live", "polite");
     body.appendChild(feedback);
+
+    // 下载进度条（0.22.14）：环境安装/模型下载共用，仅下载阶段可见
+    const progress = document.createElement("div");
+    progress.className = "download-progress le-card-progress";
+    progress.hidden = true;
+    const progressFill = document.createElement("div");
+    progressFill.className = "download-progress__fill";
+    const progressBar = document.createElement("div");
+    progressBar.className = "download-progress__bar";
+    progressBar.appendChild(progressFill);
+    const progressText = document.createElement("span");
+    progressText.className = "download-progress__text";
+    progress.appendChild(progressBar);
+    progress.appendChild(progressText);
+    body.appendChild(progress);
 
     // 底部工具栏：二级操作 + 维护（展开式）
     body.appendChild(buildToolsRow(entry, controller, i18n));
@@ -484,6 +500,12 @@ function updateCardContent(card, entry, controller, i18n) {
         updateFeedback(feedback, entry, i18n);
     }
 
+    // 下载进度条（0.22.14）
+    const progress = card.querySelector(".le-card-progress");
+    if (progress) {
+        updateCardProgress(progress, entry, i18n);
+    }
+
     // 工具栏：管理模型数量（只改文案，不重建按钮）
     const modelsLabel = card.querySelector(".le-models-toggle-label");
     if (modelsLabel) {
@@ -600,6 +622,32 @@ function updateFeedback(el, entry, i18n) {
         copyBtn.addEventListener("click", () => copyTextWithFeedback(copyBtn, feedback.detail, i18n));
         details.appendChild(copyBtn);
         el.appendChild(details);
+    }
+}
+
+/**
+ * 下载进度条更新（0.22.14）。
+ *
+ * 结构在 createEngineCard 一次性建好；高频进度事件（后端 ≥200ms 节流）
+ * 只更新 width/text/hidden/修饰类，不重建 DOM。进度文本本身带 dirty-check
+ * 语义（相同内容不重写 textContent），width 直接赋值。
+ */
+function updateCardProgress(el, entry, i18n) {
+    const fill = el.querySelector(".download-progress__fill");
+    const text = el.querySelector(".download-progress__text");
+    if (!fill || !text) return;
+
+    const view = computeInstallProgressView(entry, makeTAdapter(i18n));
+    el.hidden = view === null;
+    if (view === null) return;
+
+    fill.classList.toggle("download-progress__fill--indeterminate", view.indeterminate);
+    const width = view.indeterminate ? "" : `${view.percent}%`;
+    if (fill.style.width !== width) {
+        fill.style.width = width;
+    }
+    if (text.textContent !== view.text) {
+        text.textContent = view.text;
     }
 }
 

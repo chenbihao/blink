@@ -14,6 +14,8 @@
  * 10. process running + model loading 不显示 ready
  * 11. PaddleOCR 没有 descriptor 声明的 GPU 选项
  * 12. 日志文本不通过 innerHTML 注入
+ * 13. 下载进度事件：双路接受规则（引擎级 op 匹配 / 模型操作上下文）、
+ *     陈旧事件拒绝、字节回退重置、终态清理（0.22.14）
  */
 
 import assert from "node:assert/strict";
@@ -21,10 +23,13 @@ import {
     createInitialState,
     setCatalog,
     mergeStatus,
+    applyInstallStage,
+    applyInstallProgress,
     appendLog,
     setLogHistory,
     setStorage,
     setPendingAction,
+    setPendingModelAction,
     clearLogs,
     getEntry,
     isEngineReady,
@@ -671,6 +676,122 @@ test("setStorage 设置存储概览", () => {
     assert.equal(entry.storage.engine_id, "funasr");
     assert.equal(entry.storage.targets.length, 2);
     assert.equal(entry.storage.total_size_bytes, 5900 * 1024 * 1024);
+});
+
+// ── 0.22.14：下载进度事件（applyInstallProgress）──────────────────────────────
+
+/** 活跃安装 operation 的状态工厂。 */
+function makeInstallingStatus(engineId, opId, stage = "downloading") {
+    return makeStatus({
+        engine_id: engineId,
+        status: {
+            operation: {kind: "install", operation_id: opId, stage, cancellable: true},
+            environment: "missing",
+        },
+    });
+}
+
+test("applyInstallProgress：引擎级 operation 活跃且 operation_id 匹配 → 接受", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
+
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 1024, total: 4096}, 1000);
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 2048, total: 4096}, 1300);
+
+    const entry = getEntry(state, "funasr");
+    assert.equal(entry.installProgress.downloaded, 2048);
+    assert.equal(entry.installProgress.total, 4096);
+    assert.equal(entry.installProgress.samples.length, 2);
+});
+
+test("applyInstallProgress：operation_id 不匹配的迟到事件拒绝", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
+
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-old", downloaded: 9999, total: 9999}, 1000);
+    assert.equal(getEntry(state, "funasr").installProgress, null);
+});
+
+test("applyInstallProgress：无引擎级 op 且无模型操作上下文 → 拒绝", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-x", downloaded: 100, total: 200}, 1000);
+    assert.equal(getEntry(state, "funasr").installProgress, null);
+});
+
+test("applyInstallProgress：模型下载链路（pendingModelActions）→ 接受", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+    state = setPendingModelAction(state, "funasr", "sensevoice", {kind: "install", operationId: "op-model-1"});
+
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-1", downloaded: 500, total: null}, 1000);
+
+    const entry = getEntry(state, "funasr");
+    assert.equal(entry.installProgress.downloaded, 500);
+    assert.equal(entry.installProgress.total, null, "total 非法值收敛为 null");
+});
+
+test("applyInstallProgress：字节回退（多文件切换）重置样本窗口", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
+
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 8000, total: 10000}, 0);
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 100, total: 500}, 200);
+
+    const entry = getEntry(state, "funasr");
+    assert.deepEqual(entry.installProgress.samples, [{t: 200, bytes: 100}], "回退时窗口重置");
+    assert.equal(entry.installProgress.total, 500);
+});
+
+test("终态清理：operation completed 后 installProgress 清空", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 4096, total: 4096}, 1000);
+    assert.ok(getEntry(state, "funasr").installProgress);
+
+    // 终态阶段事件 → 清空
+    state = applyInstallStage(state, {engine_id: "funasr", operation_id: "op-env-1", stage: "completed"});
+    assert.equal(getEntry(state, "funasr").installProgress, null);
+
+    // 再次推进度（陈旧事件）→ 拒绝（op 已终态且无模型上下文）
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 4096, total: 4096}, 2000);
+    assert.equal(getEntry(state, "funasr").installProgress, null);
+});
+
+test("终态清理：mergeStatus 投影 idle op 且无模型上下文时清空", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 100, total: 200}, 1000);
+
+    // 新 revision 快照：operation 已结束（idle）
+    state = mergeStatus(state, makeStatus({
+        engine_id: "funasr",
+        revision: "2",
+        status: {environment: "ready"},
+    }));
+    assert.equal(getEntry(state, "funasr").installProgress, null);
+});
+
+test("mergeStatus：operation 活跃期间保留 installProgress", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 100, total: 200}, 1000);
+
+    // 更大 revision 的快照：operation 仍活跃 → 进度保留
+    const newer = makeInstallingStatus("funasr", "op-env-1");
+    newer.revision = "2";
+    state = mergeStatus(state, newer);
+
+    assert.ok(getEntry(state, "funasr").installProgress, "活跃期间进度保留");
 });
 
 // ── 汇总 ──────────────────────────────────────────────────────────────────────

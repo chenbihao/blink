@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // ── 0.18.3：便签 N+1 预热机制 ──────────────────────────
@@ -138,7 +138,7 @@ use crate::infra::event_names::EventNames;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
 use windows::Win32::Foundation::{
-    GetLastError, HWND, LPARAM, LRESULT, POINT, SetLastError, WIN32_ERROR, WPARAM,
+    GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SetLastError, WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmFlush,
@@ -150,11 +150,13 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow,
-    GetWindowLongPtrW, GetWindowThreadProcessId, HWND_TOP, IsIconic, SET_WINDOW_POS_FLAGS, SW_HIDE,
-    SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic,
+    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -2224,6 +2226,15 @@ pub fn show_screenshot_overlay(
         if let Ok(hwnd) = win.hwnd() {
             // 0.19.14：撤销 hide_screenshot_overlay 设的 cloak，否则 show 后窗口不可见
             apply_cloak(HWND(hwnd.0 as _), false);
+            // 钉扎本会话虚拟桌面矩形 + 拦截 WM_DPICHANGED（必须先于 place，见函数注释）
+            pin_screenshot_overlay_geometry(
+                app,
+                hwnd.0 as isize,
+                meta.virtual_x,
+                meta.virtual_y,
+                meta.width,
+                meta.height,
+            );
             // 2. place
             place_at_physical(
                 HWND(hwnd.0 as _),
@@ -2232,6 +2243,7 @@ pub fn show_screenshot_overlay(
                 meta.width,
                 meta.height,
             );
+            assert_screenshot_overlay_rect(app, hwnd.0 as isize);
             // 0.20.4-fix：图片编辑器可能用 cancel_topmost 取消了置顶，
             // 截图 overlay 必须恢复 topmost 以覆盖全屏。
             force_topmost(HWND(hwnd.0 as _));
@@ -2296,6 +2308,16 @@ pub fn show_screenshot_overlay(
     let t_build = t0.elapsed();
 
     if let Ok(hwnd) = win.hwnd() {
+        // 钉扎虚拟桌面矩形 + 拦截 WM_DPICHANGED——首建路径 DPI 关联翻转概率最高，
+        // 必须先于 place 安装（tao 的按 scale 重算会把跨屏矩形改小，见钉扎模块注释）
+        pin_screenshot_overlay_geometry(
+            app,
+            hwnd.0 as isize,
+            meta.virtual_x,
+            meta.virtual_y,
+            meta.width,
+            meta.height,
+        );
         place_at_physical(
             HWND(hwnd.0 as _),
             meta.virtual_x,
@@ -2303,6 +2325,7 @@ pub fn show_screenshot_overlay(
             meta.width,
             meta.height,
         );
+        assert_screenshot_overlay_rect(app, hwnd.0 as isize);
     }
     let t_place = t0.elapsed();
     // place 后读窗口实际 DPI（仅诊断用）
@@ -2364,6 +2387,10 @@ pub fn show_image_editor_window(
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
     let t0 = std::time::Instant::now();
+
+    // 编辑器借用截图 overlay HWND 且只摆单屏矩形——先解除截图会话的 DPI 钉扎，
+    // 此后窗口 DPI 变化走 tao 默认行为
+    unpin_screenshot_overlay_geometry();
 
     let displays = crate::infra::platform::screenshot::list_displays();
     let display = displays
@@ -2546,8 +2573,179 @@ pub fn place_at_physical(hwnd: HWND, x: i32, y: i32, w: u32, h: u32) {
     }
 }
 
+// ── 截图 overlay 几何钉扎（多屏混合 DPI 防底图错屏）────────────────────────
+//
+// 截图 overlay 是单一 HWND 跨整个虚拟桌面的无边框窗口，矩形铁则 = 虚拟桌面物理矩形。
+// tao 在 WM_DPICHANGED 里会按「旧物理尺寸 ÷ 旧 scale × 新 scale」SetWindowPos 重算
+// 窗口矩形（tao 0.35 event_loop.rs，allow_resize 对非 fullscreen/maximized 窗口恒真）：
+// place_at_physical 铺好跨屏矩形后，若窗口 DPI 关联屏翻转，tao 的重算会把矩形改小/改大，
+// 前端把整幅桌面底图画进错误尺寸的 viewport——多屏混合 DPI 下"首次截图底图被压铺到
+// 单块屏"即此竞态（首次建窗路径才会翻转 DPI 关联，复用路径矩形稳定所以不复现）。
+//
+// 处置：截图会话期间给 HWND 装 comctl32 子类拦截 WM_DPICHANGED——顶回钉扎矩形并吞掉
+// 消息（不进 DefSubclassProc，tao 不再重算）；place 后再排一次主线程矩形校验兜底
+// 拦截未覆盖的竞态窗口。图片编辑器复用同一 HWND 但只摆单屏矩形，编辑会话先解除
+// 钉扎，DPI 变化走 tao 默认行为。
+//
+// 线程模型：子类回调在主线程（窗口属主线程）触发；钉扎矩形走原子量，命令线程
+// place 前写、主线程回调读。comctl32 子类必须装在窗口属主线程上，故经
+// run_on_main_thread 安装。
+
+/// 子类 ID（同 HWND 同 proc 需唯一，任意非零值）
+const SCREENSHOT_OVERLAY_SUBCLASS_ID: usize = 0xB11A_5C01;
+
+/// 钉扎矩形 + 激活标志。先写矩形再置 active，保证回调读到的总是完整矩形。
+static OVERLAY_PIN_X: AtomicI32 = AtomicI32::new(0);
+static OVERLAY_PIN_Y: AtomicI32 = AtomicI32::new(0);
+static OVERLAY_PIN_W: AtomicI32 = AtomicI32::new(0);
+static OVERLAY_PIN_H: AtomicI32 = AtomicI32::new(0);
+static OVERLAY_PIN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 已装子类的 HWND（isize）。窗口销毁重建后按 HWND 变化重装。
+static OVERLAY_SUBCLASSED_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// 截图 overlay 的 WM_DPICHANGED 子类回调：会话激活时顶回虚拟桌面矩形并吞掉消息。
+unsafe extern "system" fn screenshot_overlay_dpichanged_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    _dwrefdata: usize,
+) -> LRESULT {
+    if msg == WM_DPICHANGED && OVERLAY_PIN_ACTIVE.load(Ordering::SeqCst) {
+        let pin = (
+            OVERLAY_PIN_X.load(Ordering::SeqCst),
+            OVERLAY_PIN_Y.load(Ordering::SeqCst),
+            OVERLAY_PIN_W.load(Ordering::SeqCst),
+            OVERLAY_PIN_H.load(Ordering::SeqCst),
+        );
+        let mut cur = RECT::default();
+        let cur_ok = unsafe { GetWindowRect(hwnd, &mut cur) }.is_ok();
+        let cur_tuple = (cur.left, cur.top, cur.right - cur.left, cur.bottom - cur.top);
+        tracing::info!(
+            new_dpi = (wparam.0 & 0xFFFF) as u32,
+            pin = ?pin,
+            current = ?cur_tuple,
+            drifted = cur_ok && cur_tuple != pin,
+            "screenshot overlay: WM_DPICHANGED intercepted, restore virtual-desktop rect"
+        );
+        let _ = unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                pin.0,
+                pin.1,
+                pin.2,
+                pin.3,
+                SET_WINDOW_POS_FLAGS(SWP_NOZORDER.0 | SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0),
+            )
+        };
+        return LRESULT(0);
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// 主线程上给截图 overlay HWND 安装 DPICHANGED 拦截子类（幂等，HWND 变化后重装）。
+fn ensure_screenshot_overlay_subclass(app: &AppHandle, hwnd_raw: isize) {
+    if OVERLAY_SUBCLASSED_HWND.load(Ordering::SeqCst) == hwnd_raw {
+        return;
+    }
+    let result = app.run_on_main_thread(move || {
+        if OVERLAY_SUBCLASSED_HWND.load(Ordering::SeqCst) == hwnd_raw {
+            return;
+        }
+        let hwnd = HWND(hwnd_raw as _);
+        let ok = unsafe {
+            SetWindowSubclass(
+                hwnd,
+                Some(screenshot_overlay_dpichanged_proc),
+                SCREENSHOT_OVERLAY_SUBCLASS_ID,
+                0,
+            )
+        };
+        if ok.as_bool() {
+            OVERLAY_SUBCLASSED_HWND.store(hwnd_raw, Ordering::SeqCst);
+            tracing::debug!(hwnd = hwnd_raw, "screenshot overlay DPICHANGED subclass installed");
+        } else {
+            let err = unsafe { GetLastError() };
+            tracing::warn!(hwnd = hwnd_raw, ?err, "screenshot overlay DPICHANGED subclass install failed");
+        }
+    });
+    if let Err(e) = result {
+        tracing::warn!(%e, "screenshot overlay subclass dispatch to main thread failed");
+    }
+}
+
+/// 截图会话开始：记录钉扎矩形（本会话虚拟桌面物理矩形）+ 安装拦截子类。
+/// 必须在 place_at_physical 之前调用——子类安装排在主线程队列里先于 place 触发的
+/// WM_DPICHANGED，拦截才能覆盖首帧。
+fn pin_screenshot_overlay_geometry(
+    app: &AppHandle,
+    hwnd_raw: isize,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) {
+    OVERLAY_PIN_X.store(x, Ordering::SeqCst);
+    OVERLAY_PIN_Y.store(y, Ordering::SeqCst);
+    OVERLAY_PIN_W.store(w as i32, Ordering::SeqCst);
+    OVERLAY_PIN_H.store(h as i32, Ordering::SeqCst);
+    OVERLAY_PIN_ACTIVE.store(true, Ordering::SeqCst);
+    ensure_screenshot_overlay_subclass(app, hwnd_raw);
+}
+
+/// place 之后的主线程兜底：矩形若漂移（如子类安装前的竞态窗口里被 tao 重算）则顶回。
+fn assert_screenshot_overlay_rect(app: &AppHandle, hwnd_raw: isize) {
+    let result = app.run_on_main_thread(move || {
+        if !OVERLAY_PIN_ACTIVE.load(Ordering::SeqCst) {
+            return;
+        }
+        let hwnd = HWND(hwnd_raw as _);
+        let mut cur = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut cur) }.is_err() {
+            return;
+        }
+        let pin = (
+            OVERLAY_PIN_X.load(Ordering::SeqCst),
+            OVERLAY_PIN_Y.load(Ordering::SeqCst),
+            OVERLAY_PIN_W.load(Ordering::SeqCst),
+            OVERLAY_PIN_H.load(Ordering::SeqCst),
+        );
+        let cur_tuple = (cur.left, cur.top, cur.right - cur.left, cur.bottom - cur.top);
+        if cur_tuple != pin {
+            tracing::info!(
+                pin = ?pin,
+                drifted = ?cur_tuple,
+                "screenshot overlay rect drifted, restore virtual-desktop rect"
+            );
+            let _ = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    pin.0,
+                    pin.1,
+                    pin.2,
+                    pin.3,
+                    SET_WINDOW_POS_FLAGS(SWP_NOZORDER.0 | SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0),
+                )
+            };
+        }
+    });
+    if let Err(e) = result {
+        tracing::warn!(%e, "screenshot overlay rect assert dispatch failed");
+    }
+}
+
+/// 截图会话结束 / 图片编辑器借用 overlay 前：解除钉扎，窗口几何交还 tao 默认处理。
+fn unpin_screenshot_overlay_geometry() {
+    OVERLAY_PIN_ACTIVE.store(false, Ordering::SeqCst);
+}
+
 /// 隐藏截图覆盖窗 + 清空 SESSION（释放位图内存）。
 pub fn hide_screenshot_overlay(app: &AppHandle) {
+    // 会话结束：解除 WM_DPICHANGED 钉扎（窗口 hide 后几何交还 tao 默认处理）
+    unpin_screenshot_overlay_geometry();
     if let Some(win) = app.get_webview_window("chord-screenshot") {
         if let Ok(hwnd) = win.hwnd() {
             // 0.19.14：cloak 先于 hide——DWM 瞬时从合成中剔除 overlay，

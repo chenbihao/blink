@@ -15,13 +15,17 @@ import {applyI18nFromConfig, onLangChange, t} from "./i18n/index.js";
 import {renderCombo} from "./shared/kbd.js";
 import {EVENTS} from "./shared/event-names.js";
 import {
+    estimateEtaMs,
+    etaTextKeyAndParams,
+    formatBytes,
+    progressPercent,
+    pushProgressSample,
+} from "./shared/download-progress.js";
+import {
     canGoBack,
     canGoNext,
     classifyInstallStage,
     clampStep,
-    estimateEtaMs,
-    etaTextKeyAndParams,
-    formatBytes,
     installStageTextKey,
     isLastStep,
     isOcrReady,
@@ -29,8 +33,6 @@ import {
     OCR_ENGINE_ID,
     pickEngineStatus,
     prevStep,
-    progressPercent,
-    pushProgressSample,
 } from "./welcome/wizard.js";
 
 // ── 快捷键数据（第 1 步）──────────────────────────────────────────────────────
@@ -260,18 +262,18 @@ function renderOcrProgress() {
     const {downloaded, total, samples} = ocrProgress;
     const percent = progressPercent(downloaded, total);
 
-    fill.classList.toggle("welcome-progress-bar-fill--indeterminate", percent === null);
+    fill.classList.toggle("download-progress__fill--indeterminate", percent === null);
     fill.style.width = percent === null ? "" : `${percent}%`;
 
     const parts = [];
     if (percent !== null) {
-        parts.push(t("welcome.step3.ocr.progress_bytes", {
+        parts.push(t("local_engine.progress.bytes", {
             downloaded: formatBytes(downloaded),
             total: formatBytes(total),
             percent,
         }));
     } else {
-        parts.push(t("welcome.step3.ocr.progress_unknown", {downloaded: formatBytes(downloaded)}));
+        parts.push(t("local_engine.progress.unknown_total", {downloaded: formatBytes(downloaded)}));
     }
     const eta = etaTextKeyAndParams(estimateEtaMs(samples, total));
     if (eta) parts.push(t(eta.key, eta.params));

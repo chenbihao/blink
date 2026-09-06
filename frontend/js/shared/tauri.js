@@ -59,6 +59,25 @@ export function normalizeError(err) {
     return {code: "unknown_error", message, retryable: false};
 }
 
+/**
+ * 把 normalizeError 的结果转成 toast 可直接展示的用户文案。
+ *
+ * 后端 CommandError 的 message 本身是可行动说明（如「OCR ONNX 环境未安装，
+ * 请在设置页「引擎」中安装 PaddleOCR 环境」），但 IPC 投影会加「状态错误: /
+ * 数据无效: 」等类别前缀——展示时剥掉前缀只留行动指引；无有效 message 时
+ * 退回调用方给的 generic 文案。
+ *
+ * @param {*} err - invoke rejection 原值或 normalizeError 结果（均可）
+ * @param {string} [fallback='操作失败'] - 无可行动 message 时的兜底文案
+ * @returns {string} `${fallback}：${message}` 或 fallback
+ */
+export function commandErrorText(err, fallback = '操作失败') {
+    const raw = typeof err === "string" ? err : (typeof err?.message === "string" ? err.message : "");
+    const actionable = raw.replace(/^(状态错误|数据无效|参数错误|内部错误|权限不足): /, "").trim();
+    if (!actionable || actionable === String(fallback)) return String(fallback);
+    return `${fallback}：${actionable}`;
+}
+
 /** 监听后端事件（返回 unlisten promise）。事件系统不可用时返回 no-op。 */
 export function listen(event, handler) {
     const TAU = getTAU();

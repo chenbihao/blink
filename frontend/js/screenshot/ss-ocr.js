@@ -13,7 +13,7 @@ import {cssPointToScreen, cssRectToBitmap, uiScaleAtCss} from './ss-selection-ge
 import {enterReadingMode} from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {copyToClipboard, ocrImage, cancelOcrRequest, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
-import {normalizeError} from '../shared/tauri.js';
+import {normalizeError, commandErrorText} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
 import {computeResizedPanel, clampPanelToMonitor} from './ss-panel-resize.js';
 
@@ -72,9 +72,10 @@ export function hideSelLoading() {
     if (el) el.hidden = true;
 }
 
-/** 简易临时提示(选区附近,2 秒后自动消失)。0.19.16：DPI 适配。
- *  0.22.10：视觉走 #error-hint toast 基类，错误态切 .ss-toast-error class，不再 inline 硬色。 */
-export function showTransientHint(msg, {isError = false} = {}) {
+/** 简易临时提示(选区附近,自动消失)。0.19.16：DPI 适配。
+ *  0.22.10：视觉走 #error-hint toast 基类，错误态切 .ss-toast-error class，不再 inline 硬色。
+ *  duration 可自定义（长文案的降级提示等需要更长停留时间）。 */
+export function showTransientHint(msg, {isError = false, duration = 2000} = {}) {
     const {errorHint, selCss} = ss;
     errorHint.textContent = msg;
     errorHint.classList.remove('hidden');
@@ -115,7 +116,7 @@ export function showTransientHint(msg, {isError = false} = {}) {
         errorHint.classList.add('hidden');
         errorHint.classList.remove('ss-toast-error');
         errorHint.style.transform = '';
-    }, 2000);
+    }, duration);
 }
 
 export function updateOutputButtonsDisabled() {
@@ -227,7 +228,7 @@ export function doIdentifySelection() {
             ss.ocrBusy = false;
             updateOutputButtonsDisabled();
             hideSelLoading();
-            showTransientHint('识别失败', {isError: true});
+            showTransientHint(commandErrorText(err, '识别失败'), {isError: true});
         });
         return;
     }
@@ -288,7 +289,7 @@ export function doOverlayTranslate() {
             ss.ocrBusy = false;
             updateOutputButtonsDisabled();
             hideSelLoading();
-            showTransientHint('识别失败', {isError: true});
+            showTransientHint(commandErrorText(err, '识别失败'), {isError: true});
         });
         return;
     }
@@ -560,7 +561,10 @@ function _runOcrFresh(opts = {}) {
             .catch((rawErr) => {
                 const err = normalizeError(rawErr);
                 if (revision === ss.selectionRevision) {
-                    showTransientHint(err.retryable ? '识别失败，可重试' : '识别失败', {isError: true});
+                    showTransientHint(
+                        err.retryable ? commandErrorText(err, '识别失败，可重试') : commandErrorText(err, '识别失败'),
+                        {isError: true},
+                    );
                 }
                 hideSelLoading();
                 console.error(`[screenshot] ocr 失败 [${err.code}] ${err.message}`);
@@ -606,6 +610,11 @@ function activateOverlay(result, opts = {}) {
     if (opts.autoTranslate) {
         requestOverlayTranslation();
     }
+    // 显式 PaddleOCR 环境未安装降级 WinRT 的用户提示（后端随成功结果注入）。
+    // 非错误态 + 长文案给更长停留时间；auto 模式降级不注入提示、不打扰。
+    if (result?.backend_degrade_hint) {
+        showTransientHint(result.backend_degrade_hint, {duration: 4500});
+    }
     return true;
 }
 
@@ -620,7 +629,7 @@ function requestOverlayTranslation(targetLang) {
     translateOverlayLines(targetLang, revision)
         .catch((e) => {
             if (revision !== ss.translationRevision) return;
-            showTransientHint('翻译失败', {isError: true});
+            showTransientHint(commandErrorText(e, '翻译失败'), {isError: true});
             console.error('[screenshot] overlay translate 失败', e);
         })
         .finally(() => {

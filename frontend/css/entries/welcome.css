@@ -21,5 +21,8 @@
 /* 键帽 */
 @import '../components/kbd.css';
 
+/* 下载进度条（0.22.14，与设置页引擎页共用） */
+@import '../components/download-progress.css';
+
 /* 视图级 */
 @import '../views/welcome.css';

@@ -10,7 +10,7 @@
 //!        hit-canvas 内部像素 = 物理像素，CSS 尺寸 = 选区 CSS 尺寸
 
 import {ss} from './ss-state.js';
-import {findDisplayCssAt} from './ss-display.js';
+import {applyFloatingUiScaleAt, findDisplayCssAt} from './ss-display.js';
 import {
     beginSelectionInteraction,
     finishSelectionInteraction,
@@ -228,6 +228,39 @@ function nearestWordByLine(cssX, cssY) {
     return bestIdx;
 }
 
+/**
+ * 把 [lo, hi] 范围内的选中框按行合并为连续块矩形（bitmap 坐标）。
+ *
+ * 选区是连续索引段，同一行合并成一个包围块（文本编辑器选区观感），块内不会
+ * 盖到未选内容；跨行选区每行各一个块。合并后只在行块轮廓描一次边，不再逐
+ * char/word 描框——相邻小框描边叠加会形成密集蓝网格。
+ *
+ * @param {{rect:{x,y,w,h}, lineIndex:number}[]} items - charBoxes 或 words
+ * @param {number} lo - 起始索引（含）
+ * @param {number} hi - 结束索引（含）
+ * @returns {{x:number,y:number,w:number,h:number}[]} 合并后的行块列表
+ */
+export function mergeRunsByLine(items, lo, hi) {
+    const byLine = new Map();
+    for (let i = lo; i <= hi; i++) {
+        const it = items[i];
+        if (!it) continue;
+        const r = it.rect;
+        const cur = byLine.get(it.lineIndex);
+        if (!cur) {
+            byLine.set(it.lineIndex, {x: r.x, y: r.y, w: r.w, h: r.h});
+        } else {
+            const right = Math.max(cur.x + cur.w, r.x + r.w);
+            const bottom = Math.max(cur.y + cur.h, r.y + r.h);
+            cur.x = Math.min(cur.x, r.x);
+            cur.y = Math.min(cur.y, r.y);
+            cur.w = right - cur.x;
+            cur.h = bottom - cur.y;
+        }
+    }
+    return [...byLine.values()];
+}
+
 /** 重绘 hit-canvas：高亮当前选中 words + hover word */
 function redrawHitLayer() {
     if (!ss.reading) return;
@@ -240,36 +273,24 @@ function redrawHitLayer() {
     if (ss.reading.selectionStart !== null && ss.reading.selectionEnd !== null) {
         const lo = Math.min(ss.reading.selectionStart, ss.reading.selectionEnd);
         const hi = Math.max(ss.reading.selectionStart, ss.reading.selectionEnd);
-        hitCtx.fillStyle = 'rgba(74, 158, 255, 0.35)';
-
-        if (useCharBoxes) {
-            for (let i = lo; i <= hi; i++) {
-                const r = ss.reading.charBoxes[i].rect;
-                hitCtx.fillRect(r.x, r.y, r.w, r.h);
-            }
-        } else {
-            for (let i = lo; i <= hi; i++) {
-                const r = ss.reading.words[i].rect;
-                hitCtx.fillRect(r.x, r.y, r.w, r.h);
-            }
+        // 选区高亮按行合并为连续块，只在块轮廓描细边；逐框填充+描边视觉过重
+        const items = useCharBoxes ? ss.reading.charBoxes : ss.reading.words;
+        const runs = mergeRunsByLine(items, lo, hi);
+        hitCtx.fillStyle = 'rgba(74, 158, 255, 0.32)';
+        for (const r of runs) {
+            hitCtx.fillRect(r.x, r.y, r.w, r.h);
         }
 
-        hitCtx.strokeStyle = 'rgba(74, 158, 255, 0.85)';
+        hitCtx.strokeStyle = 'rgba(74, 158, 255, 0.6)';
         // hitCanvas backing store 使用 renderScale，线宽也需匹配
         const _meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
         const {scaleX: _rsx} = getRenderScale(_meta);
-        hitCtx.lineWidth = Math.max(1, Math.round(_rsx));
-
-        if (useCharBoxes) {
-            for (let i = lo; i <= hi; i++) {
-                const r = ss.reading.charBoxes[i].rect;
-                hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
-            }
-        } else {
-            for (let i = lo; i <= hi; i++) {
-                const r = ss.reading.words[i].rect;
-                hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
-            }
+        const lineWidth = Math.max(1, Math.round(_rsx));
+        hitCtx.lineWidth = lineWidth;
+        // 奇数线宽偏移半像素，让线条落在像素网格上不发虚
+        const half = lineWidth % 2 === 1 ? 0.5 : 0;
+        for (const r of runs) {
+            hitCtx.strokeRect(r.x + half, r.y + half, r.w, r.h);
         }
     }
     if (ss.reading.hoverWord !== null && ss.reading.hoverWord >= 0) {
@@ -592,19 +613,10 @@ export function showReadingContextMenu(text, mouseEvent) {
     const MARGIN = 8;
     let x = mouseEvent.clientX;
     let y = mouseEvent.clientY;
-    const menuW = 140, menuH = 80;
-    const mon = findDisplayCssAt(x, y);
-    if (x + menuW > mon.x + mon.w - MARGIN) x = mon.x + mon.w - menuW - MARGIN;
-    if (y + menuH > mon.y + mon.h - MARGIN) y = mon.y + mon.h - menuH - MARGIN;
-    x = Math.max(mon.x + MARGIN, x);
-    y = Math.max(mon.y + MARGIN, y);
 
     const menu = document.createElement('div');
     menu.id = 'reading-ctx-menu';
     menu.className = 'reading-ctx-menu';
-    // 定位随鼠标动态计算，仅 left/top 走 inline（0.22.10：视觉样式迁入 CSS）
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
     const makeItem = (label, fn) => {
         const btn = document.createElement('div');
         btn.className = 'reading-ctx-menu-item';
@@ -633,7 +645,24 @@ export function showReadingContextMenu(text, mouseEvent) {
         if (typeof ss._doCancel === 'function') ss._doCancel();
     }));
 
+    // 先挂载再定位——clamp 需要实测元素尺寸，不能用写死估算值
+    menu.style.left = '-9999px';
+    menu.style.top = '-9999px';
     document.body.appendChild(menu);
+
+    // 跨 DPI 补偿与防越界（spec-frontend §5.6，与工具栏/toast 同模式）：
+    // uiScale = 鼠标所在屏原生 DPR / overlay renderScale，clamp 用缩放后的视觉尺寸
+    const uiScale = applyFloatingUiScaleAt(menu, x, y);
+    const menuW = menu.offsetWidth * uiScale;
+    const menuH = menu.offsetHeight * uiScale;
+    const mon = findDisplayCssAt(x, y);
+    if (x + menuW > mon.x + mon.w - MARGIN) x = mon.x + mon.w - menuW - MARGIN;
+    if (y + menuH > mon.y + mon.h - MARGIN) y = mon.y + mon.h - menuH - MARGIN;
+    x = Math.max(mon.x + MARGIN, x);
+    y = Math.max(mon.y + MARGIN, y);
+    // 定位随鼠标动态计算，仅 left/top 走 inline（视觉样式迁入 CSS）
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
 
     const close = (ev) => {
         if (!menu.contains(ev.target)) {

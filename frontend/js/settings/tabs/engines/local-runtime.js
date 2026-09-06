@@ -36,6 +36,7 @@ import {
     setCatalog,
     mergeStatus,
     applyInstallStage,
+    applyInstallProgress,
     appendLog,
     setLogHistory,
     setStorage,
@@ -256,6 +257,31 @@ export function createLocalEngineController(callbacks = {}) {
     }
 
     /**
+     * 处理下载字节进度事件（0.22.14）。
+     *
+     * payload: { engine_id, operation_id, downloaded, total }
+     *
+     * 接受规则由 reducer 决定（applyInstallProgress）：引擎级 operation
+     * 匹配 operation_id，或存在进行中的模型操作上下文。频率已由后端
+     * 节流（≥200ms），直接透传 reducer。
+     *
+     * @param {Object} payload - { engine_id, operation_id, downloaded, total }
+     */
+    function handleInstallProgressEvent(payload) {
+        if (disposed) return;
+
+        if (buffering) {
+            eventBuffer.push({type: "install_progress", payload});
+            return;
+        }
+
+        if (!mounted) return;
+
+        state = applyInstallProgress(state, payload, Date.now());
+        notifyStateChange();
+    }
+
+    /**
      * 注册事件监听器。
      * 如果部分注册成功后失败，回滚已注册的 listener。
      */
@@ -278,6 +304,12 @@ export function createLocalEngineController(callbacks = {}) {
                 handleInstallStageEvent(event.payload);
             });
             registered.push(unlistenInstallStage);
+
+            // 0.22.14: 下载字节进度事件
+            const unlistenInstallProgress = await listen(EVENTS.LOCAL_ENGINE_INSTALL_PROGRESS, (event) => {
+                handleInstallProgressEvent(event.payload);
+            });
+            registered.push(unlistenInstallProgress);
 
             unlisteners = registered;
         } catch (e) {
@@ -310,6 +342,9 @@ export function createLocalEngineController(callbacks = {}) {
             } else if (buffered.type === "install_stage") {
                 // 0.22.6 H4: 安装阶段变更（迟到事件由 reducer 拒绝）
                 state = applyInstallStage(state, buffered.payload);
+            } else if (buffered.type === "install_progress") {
+                // 0.22.14: 下载字节进度（迟到事件由 reducer 拒绝）
+                state = applyInstallProgress(state, buffered.payload, Date.now());
             }
         }
         eventBuffer = [];

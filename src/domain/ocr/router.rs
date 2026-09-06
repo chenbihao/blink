@@ -12,8 +12,8 @@
 //! | backend | 行为 |
 //! |---|---|
 //! | `windows` | 始终使用 WinRT backend |
-//! | `paddleocr` | 明确选择 PaddleOCR；未安装/启动失败返回可行动错误，不静默回退 |
-//! | `auto` | 仅 PaddleOCR 热态 Ready 时使用它；否则立即 WinRT |
+//! | `paddleocr` | 明确选择 PaddleOCR；**环境未安装时降级 WinRT 并在结果附用户提示**（`backend_degrade_hint`）；已安装但启动/识别失败返回可行动错误，不静默回退 |
+//! | `auto` | 已安装 PaddleOCR 即优先使用（允许 on-demand 冷启动）；未安装则立即 WinRT；识别失败回退 WinRT——降级属预期行为，不附用户提示 |
 
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ pub struct RouteDecision {
     pub configured_backend: OcrBackendKind,
     /// 本次实际选择的 backend。
     pub selected_backend: OcrBackendKind,
-    /// 如果发生了 fallback（auto 模式 PaddleOCR 不可用 → WinRT），
+    /// 如果发生了 fallback（显式/auto 模式 PaddleOCR 不可用 → WinRT），
     /// 记录 fallback 原因。
     pub fallback_reason: Option<String>,
 }
@@ -278,6 +278,7 @@ mod tests {
                 OcrResult {
                     backend_used: None,
                     backend_fallback_reason: None,
+                    backend_degrade_hint: None,
                     text: self.result_text.clone(),
                     lines: vec![],
                     words: vec![],
@@ -318,6 +319,7 @@ mod tests {
             OcrResult {
                 backend_used: None,
                 backend_fallback_reason: None,
+                backend_degrade_hint: None,
                 text: "hello".into(),
                 lines: vec![],
                 words: vec![],

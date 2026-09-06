@@ -9,7 +9,8 @@
 //! - 下载写入 `.tmp_<name>` 临时名，hash 通过后原子改名；
 //! - hash 不匹配 → 清理临时文件并返回 Failed（损坏修复走模型事务重装）；
 //! - 取消/超时立即停止写入并清理；
-//! - 不伪造下载百分比——按文件粒度报告阶段，按字节报告进度日志（节流）。
+//! - 不伪造下载百分比——按文件粒度报告阶段；字节级进度经 `emit_progress`
+//!   上报（真实统计值，节流在 sink 侧），粗粒度进度日志保留兜底。
 //! - 大文件 I/O（离线复制、hash 校验）通过 `spawn_blocking` 挪出 tokio executor，
 //!   HTTP chunk 写入为 KB 级同步写，阻塞可忽略。
 
@@ -61,6 +62,10 @@ impl Default for FunasrGgufModelInstallWorker {
 /// 日志回调类型（Send+Sync——download future 必须跨线程）。
 type LogFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+/// 下载字节进度回调（0.22.14）：`(downloaded, total)`——total 为 None
+/// 表示 Content-Length 缺失。每 chunk 调用，节流由 sink 实现方负责。
+type ProgressFn = std::sync::Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
 // ── 下载源候选（0.22.9 国内可达性）───────────────────────────────────────
 
 /// HuggingFace 主站 host 前缀（模型 URL 锁定格式，见 `gguf::validate_model_url_stable`）。
@@ -100,6 +105,12 @@ fn hf_download_candidates_with_endpoint(primary_url: &str, endpoint: Option<&str
     candidates
 }
 
+/// 下载回调集：日志行 + 字节进度（0.22.14）。
+struct DownloadCallbacks {
+    on_log: LogFn,
+    on_progress: ProgressFn,
+}
+
 /// 流式下载单文件（按候选源换源重试）。
 ///
 /// - 网络级失败（连接/中断/HTTP 非 2xx）：按序换下一候选源重试；
@@ -113,7 +124,7 @@ async fn download_file(
     dest_dir: &Path,
     file_name: &str,
     cancel_token: &CancellationToken,
-    on_log: &LogFn,
+    cb: &DownloadCallbacks,
 ) -> Result<(), ModelDownloadError> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
@@ -122,7 +133,7 @@ async fn download_file(
     let mut last_err: Option<ModelDownloadError> = None;
 
     for (idx, url) in candidates.iter().enumerate() {
-        on_log(&format!("下载 {file_name}（{url}）"));
+        (cb.on_log)(&format!("下载 {file_name}（{url}）"));
 
         let mut response = tokio::select! {
             r = client.get(url).send() => r,
@@ -137,7 +148,7 @@ async fn download_file(
                 message: format!("HTTP {} 下载 {file_name} 失败", response.status()),
             });
             if idx + 1 < candidates.len() {
-                on_log(&format!("{file_name} 从该源下载失败，切换下载源重试"));
+                (cb.on_log)(&format!("{file_name} 从该源下载失败，切换下载源重试"));
                 continue;
             }
             return Err(last_err.unwrap());
@@ -185,8 +196,13 @@ async fn download_file(
                         });
                     }
                     downloaded += bytes.len() as u64;
+                    // 字节进度事件（sink 侧节流）+ 既有粗粒度进度日志
+                    (cb.on_progress)(
+                        downloaded,
+                        if total_size > 0 { Some(total_size) } else { None },
+                    );
                     if downloaded >= next_progress {
-                        on_log(&format_progress_log(file_name, downloaded, total_size));
+                        (cb.on_log)(&format_progress_log(file_name, downloaded, total_size));
                         next_progress += PROGRESS_LOG_STEP_BYTES;
                     }
                 }
@@ -205,7 +221,7 @@ async fn download_file(
         if let Some(e) = download_interrupted {
             last_err = Some(e);
             if idx + 1 < candidates.len() {
-                on_log(&format!("{file_name} 从该源下载中断，切换下载源重试"));
+                (cb.on_log)(&format!("{file_name} 从该源下载中断，切换下载源重试"));
                 continue;
             }
             return Err(last_err.unwrap());
@@ -232,7 +248,7 @@ async fn download_file(
             if url == primary_url || idx + 1 >= candidates.len() {
                 return Err(err);
             }
-            on_log(&format!("{file_name} 该源校验失败，切换下载源重试"));
+            (cb.on_log)(&format!("{file_name} 该源校验失败，切换下载源重试"));
             last_err = Some(err);
             continue;
         }
@@ -242,9 +258,9 @@ async fn download_file(
             message: format!("落盘 {file_name} 失败: {e}"),
         })?;
         if url != primary_url {
-            on_log(&format!("{file_name} 已从镜像源下载并校验通过"));
+            (cb.on_log)(&format!("{file_name} 已从镜像源下载并校验通过"));
         }
-        on_log(&format!("{file_name} 校验通过（{downloaded} 字节）"));
+        (cb.on_log)(&format!("{file_name} 校验通过（{downloaded} 字节）"));
         return Ok(());
     }
 
@@ -272,6 +288,18 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
             None => std::sync::Arc::new(|_line: &str| {}),
         };
 
+        // 字节进度回调（0.22.14）：透传给 sink，节流在 sink 实现内
+        let on_progress: ProgressFn = match &sink {
+            Some(s) => {
+                let s = s.clone();
+                std::sync::Arc::new(move |downloaded: u64, total: Option<u64>| {
+                    s.emit_progress(downloaded, total)
+                })
+            }
+            None => std::sync::Arc::new(|_downloaded: u64, _total: Option<u64>| {}),
+        };
+        let cb = DownloadCallbacks { on_log: log, on_progress };
+
         let spec = find_gguf_spec(model_id).ok_or_else(|| ModelDownloadError::Internal {
             message: format!("model_id '{model_id}' 不在 GGUF 模型目录中"),
         })?;
@@ -281,7 +309,7 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
             });
         }
 
-        log(&format!(
+        (cb.on_log)(&format!(
             "开始安装 GGUF 模型 {model_id}（{} 个文件）",
             spec.files.len()
         ));
@@ -347,7 +375,7 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
                 .flatten()
                 .unwrap_or(false);
                 if ok {
-                    log(&format!(
+                    (cb.on_log)(&format!(
                         "{} 已存在且校验通过，跳过下载（离线复用）",
                         file.file_name
                     ));
@@ -362,7 +390,7 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
             if let Some(cache_dir) = offline_cache_dir() {
                 let cached = cache_dir.join(file.file_name);
                 if cached.is_file() {
-                    log(&format!(
+                    (cb.on_log)(&format!(
                         "{} 命中离线缓存（{}），本地复制并校验",
                         file.file_name,
                         cached.display()
@@ -373,7 +401,7 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
                             if matches!(e, ModelDownloadError::Cancelled) {
                                 return Err(e);
                             }
-                            log(&format!("缓存校验失败（{e}），回退网络下载"));
+                            (cb.on_log)(&format!("缓存校验失败（{e}），回退网络下载"));
                             let _ = std::fs::remove_file(&final_path);
                         }
                     }
@@ -387,7 +415,7 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
                 staging_payload_dir,
                 file.file_name,
                 &cancel_token,
-                &log,
+                &cb,
             )
             .await?;
         }

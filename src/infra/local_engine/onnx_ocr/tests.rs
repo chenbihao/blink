@@ -57,6 +57,7 @@ impl OcrPipeline for FakePipeline {
         Ok(OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: self.text.clone(),
             lines: vec![OcrLine {
                 text: self.text.clone(),

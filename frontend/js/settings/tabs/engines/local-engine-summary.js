@@ -18,6 +18,7 @@
  */
 
 import {
+    MODEL_ACTIVE_STATES,
     hasActiveOperation,
     isOperationCancellable,
     getPrimaryAction,
@@ -27,14 +28,17 @@ import {
     selectedModelDownloadState,
 } from "./local-engine-state.js";
 import {getSelection} from "./local-engine-selection.js";
+import {
+    estimateEtaMs,
+    etaTextKeyAndParams,
+    formatBytes,
+    progressPercent,
+} from "../../../shared/download-progress.js";
 
 // ── 内部常量 ─────────────────────────────────────────────────────────────────
 
 /** operation 终态（与 state.js hasActiveOperation 保持一致）。 */
 const OP_TERMINAL_STAGES = ["completed", "cancelled", "failed"];
-
-/** 模型安装态中的"进行中"集合（用于反馈槽与摘要）。 */
-const MODEL_ACTIVE_STATES = ["downloading", "staging", "verifying", "repairing", "deleting"];
 
 // ── i18n 取词辅助 ─────────────────────────────────────────────────────────────
 
@@ -590,6 +594,74 @@ function modelOpText(t, kind, modelName) {
 function modelDisplayName(entry, modelId) {
     const model = (entry?.models || []).find((m) => m.model_id === modelId);
     return model?.display_name || null;
+}
+
+// ── 下载进度视图（0.22.14）────────────────────────────────────────────────────
+
+/** 模型操作中"含下载"的状态集合（repairing 会重新下载；deleting 无下载）。 */
+const PROGRESS_MODEL_STATES = ["downloading", "staging", "repairing"];
+
+/** ETA i18n key → fallback 文案（zh，与 zh.js 同步）。 */
+function etaFallback(key) {
+    const map = {
+        "local_engine.progress.eta.sec": "约 {sec} 秒",
+        "local_engine.progress.eta.min": "约 {min} 分钟",
+        "local_engine.progress.eta.hour": "约 {hour} 小时",
+    };
+    return map[key] ?? key;
+}
+
+/**
+ * 下载进度条视图投影（0.22.14）。
+ *
+ * 可见性：有 installProgress 数据，且当前处于下载阶段——
+ * - 引擎级 operation stage=downloading（环境安装/修复，PP-OCR 链路）；
+ * - 或模型资产下载进行中（FunASR 模型链路——模型操作不产生引擎级
+ *   operation）。
+ * 其余阶段（verifying/promoting 等）进度条隐藏，与欢迎页行为一致。
+ *
+ * @param {EngineStateEntry} entry
+ * @param {Function|null} t
+ * @returns {{text: string, percent: number|null, indeterminate: boolean}|null}
+ *   null = 隐藏进度条
+ */
+export function computeInstallProgressView(entry, t) {
+    const prog = entry?.installProgress;
+    if (!prog) return null;
+
+    const op = activeOp(entry);
+    const engineDownloading = Boolean(op) && op.stage === "downloading";
+    let modelDownloading = false;
+    if (!engineDownloading) {
+        const pendings = entry?.pendingModelActions;
+        if (pendings && pendings.size > 0) {
+            modelDownloading = true;
+        } else {
+            const models = Array.isArray(entry?.models) ? entry.models : [];
+            modelDownloading = models.some((m) => PROGRESS_MODEL_STATES.includes(m?.install_state));
+        }
+    }
+    if (!engineDownloading && !modelDownloading) return null;
+
+    const {downloaded, total, samples} = prog;
+    const percent = progressPercent(downloaded, total);
+
+    const parts = [];
+    if (percent !== null) {
+        parts.push(tx(t, "local_engine.progress.bytes", "{downloaded} / {total} · {percent}%", {
+            downloaded: formatBytes(downloaded),
+            total: formatBytes(total),
+            percent,
+        }));
+    } else {
+        parts.push(tx(t, "local_engine.progress.unknown_total", "已下载 {downloaded}", {
+            downloaded: formatBytes(downloaded),
+        }));
+    }
+    const eta = etaTextKeyAndParams(estimateEtaMs(samples, total));
+    if (eta) parts.push(tx(t, eta.key, etaFallback(eta.key), eta.params));
+
+    return {text: parts.join(" · "), percent, indeterminate: percent === null};
 }
 
 // ── 关键状态行 ────────────────────────────────────────────────────────────────

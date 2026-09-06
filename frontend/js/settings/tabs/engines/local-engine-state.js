@@ -8,6 +8,7 @@
  * - logs（结构化日志，bounded）
  * - pending UI action（用户触发的操作 kind + operation_id）
  * - models / preferences / pending model actions（0.22.6）
+ * - installProgress（下载字节进度，0.22.14）
  *
  * ## 合并规则（铁则）
  *
@@ -30,10 +31,18 @@
  * @module local-engine-state
  */
 
+import {pushProgressSample} from "../../../shared/download-progress.js";
+
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
 /** 实时日志最大行数（bounded，防 DOM 洪泛）。 */
 export const MAX_LOG_LINES = 500;
+
+/** 模型安装态中的"进行中"集合（wire 值，模型目录 install_state 使用）。 */
+export const MODEL_ACTIVE_STATES = ["downloading", "staging", "verifying", "repairing", "deleting"];
+
+/** operation 终态（与 summary.js/hasActiveOperation 保持一致）。 */
+const OP_TERMINAL_STAGES = ["completed", "cancelled", "failed"];
 
 // ── 类型 ──────────────────────────────────────────────────────────────────────
 
@@ -91,6 +100,9 @@ export function createInitialEntry() {
         // 0.22.6: 模型级 pending action（按 model_id 索引）
         // Map<model_id, {kind, operationId, timestamp}>
         pendingModelActions: null,
+        // 0.22.14: 下载字节进度（最近一次 install-progress 事件）
+        // {downloaded, total, samples, operationId}
+        installProgress: null,
     };
 }
 
@@ -180,11 +192,11 @@ export function mergeStatus(state, statusDto) {
 
     // 首次状态
     if (!entry.status) {
-        return setEntry(state, engineId, {
+        return setEntry(state, engineId, withProgressCleanup({
             ...entry,
             status: statusDto,
             logs: hasActiveRuntime(statusDto) ? withoutOperationLogs(entry.logs) : entry.logs,
-        });
+        }));
     }
 
     const oldStatus = entry.status;
@@ -192,14 +204,14 @@ export function mergeStatus(state, statusDto) {
     // epoch 不同 → 接受新 epoch，清空旧 revision 门和旧 epoch 日志。
     // 不能比较 service_epoch 大小，只比较是否相同。
     if (oldStatus.service_epoch !== statusDto.service_epoch) {
-        const newEntry = {
+        const newEntry = withProgressCleanup({
             ...entry,
             status: statusDto,
             // 已绑定运行实例时清空旧日志，不能混入当前流
             logs: hasActiveRuntime(statusDto)
                 ? withoutOperationLogs(entry.logs)
                 : (entry.currentInstanceId != null ? [] : entry.logs),
-        };
+        });
         return setEntry(state, engineId, newEntry);
     }
 
@@ -210,11 +222,11 @@ export function mergeStatus(state, statusDto) {
     }
 
     // 同 epoch + 更大 revision → 接受
-    return setEntry(state, engineId, {
+    return setEntry(state, engineId, withProgressCleanup({
         ...entry,
         status: statusDto,
         logs: hasActiveRuntime(statusDto) ? withoutOperationLogs(entry.logs) : entry.logs,
-    });
+    }));
 }
 
 /**
@@ -248,7 +260,91 @@ export function applyInstallStage(state, payload) {
             operation: {...currentOp, stage},
         },
     };
+
+    // 终态同时清掉下载进度（0.22.14）——进度条随后由渲染层隐藏
+    if (OP_TERMINAL_STAGES.includes(stage)) {
+        return setEntry(state, engineId, {...entry, status: newStatus, installProgress: null});
+    }
     return setEntry(state, engineId, {...entry, status: newStatus});
+}
+
+/**
+ * 引擎是否有进行中的模型资产操作（0.22.14 进度事件接受判定用）。
+ *
+ * 两路来源：UI 已发起未完成的乐观 pending（pendingModelActions），
+ * 或后端模型目录观测到的进行中状态（models[].install_state）。
+ * 注意模型操作不产生引擎级 operation——不能用 hasActiveOperation 判定。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {boolean}
+ */
+function hasActiveModelOperation(entry) {
+    if (entry.pendingModelActions && entry.pendingModelActions.size > 0) return true;
+    const models = Array.isArray(entry.models) ? entry.models : [];
+    return models.some((m) => MODEL_ACTIVE_STATES.includes(m?.install_state));
+}
+
+/**
+ * 残留下载进度清理（0.22.14）：引擎级 operation 已到终态/idle，
+ * 且无进行中的模型操作时，进度数据不再有意义——清掉防止陈旧样本
+ * 混入下一次下载的 ETA 窗口。
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {EngineStateEntry}
+ */
+function withProgressCleanup(entry) {
+    if (!entry.installProgress) return entry;
+    const op = entry.status?.status?.operation;
+    const opActive = Boolean(op) && op.kind !== "idle" && !OP_TERMINAL_STAGES.includes(op.stage);
+    if (opActive || hasActiveModelOperation(entry)) return entry;
+    return {...entry, installProgress: null};
+}
+
+/**
+ * 应用下载字节进度事件（blink://local-engine-install-progress，0.22.14）。
+ *
+ * 接受规则（防陈旧事件复活进度条）：
+ * - 引擎级 operation 活跃（环境安装/修复链路）：operation_id 必须匹配，
+ *   与 applyInstallStage 同规则；
+ * - 无引擎级 operation（FunASR 模型下载链路——模型操作不产生引擎级
+ *   operation）：要求存在进行中的模型操作上下文才接受。
+ *
+ * @param {Map<string, EngineStateEntry>} state
+ * @param {Object} payload - { engine_id, operation_id, downloaded, total }
+ * @param {number} nowMs 事件到达时间（Date.now()，供 ETA 样本窗口）
+ * @returns {Map<string, EngineStateEntry>}
+ */
+export function applyInstallProgress(state, payload, nowMs) {
+    const engineId = payload?.engine_id;
+    if (!engineId) return state;
+    const downloaded = Number(payload.downloaded);
+    if (!Number.isFinite(downloaded) || downloaded < 0) return state;
+    const totalRaw = Number(payload.total);
+    const total = Number.isFinite(totalRaw) && totalRaw > 0 ? totalRaw : null;
+
+    const entry = state.get(engineId);
+    if (!entry) return state;
+
+    const op = entry.status?.status?.operation;
+    const engineOpActive = Boolean(op) && op.kind !== "idle" && !OP_TERMINAL_STAGES.includes(op.stage);
+    if (engineOpActive) {
+        if (op.operation_id && payload.operation_id !== op.operation_id) {
+            return state;
+        }
+    } else if (!hasActiveModelOperation(entry)) {
+        return state;
+    }
+
+    const samples = pushProgressSample(entry.installProgress?.samples ?? [], nowMs, downloaded);
+    return setEntry(state, engineId, {
+        ...entry,
+        installProgress: {
+            downloaded,
+            total,
+            samples,
+            operationId: payload.operation_id ?? null,
+        },
+    });
 }
 
 /**

@@ -487,19 +487,35 @@ impl OcrBackendRouter for OcrCoordinator {
                 }
             }
             OcrBackendKind::PaddleOcr => {
-                // Task 3: InFlightGuard 现在绑定到 Lease，不在调用端独立创建
-                let (res, start_wait, recog_ms) = {
-                    self.idle_cancel.notify_waiters();
-                    self.do_paddleocr_recognize(png_data.clone(), ctx, false, request_png_size)
-                        .await
-                };
-                self.schedule_idle_stop(snapshot);
-                let decision = RouteDecision {
-                    configured_backend: OcrBackendKind::PaddleOcr,
-                    selected_backend: OcrBackendKind::PaddleOcr,
-                    fallback_reason: None,
-                };
-                (decision, res, start_wait, recog_ms, 0u64)
+                // 显式 PaddleOCR 但环境未安装 → 降级 WinRT 并附用户提示
+                //（capability 层据此注入 backend_degrade_hint）。
+                // 已安装但启动/识别失败仍返回可行动错误——基础设施问题保留诊断信号，
+                // 且此时 toast 已展示后端的具体错误文案。
+                let installed = self.is_paddleocr_installed().await;
+                if !installed {
+                    tracing::info!("paddleocr 显式模式环境未安装，降级 WinRT");
+                    let (res, ms) = self.do_winrt_recognize(&png_data, ctx).await;
+                    let decision = RouteDecision {
+                        configured_backend: OcrBackendKind::PaddleOcr,
+                        selected_backend: OcrBackendKind::Windows,
+                        fallback_reason: Some("PaddleOCR 环境未安装，已降级 Windows OCR".to_string()),
+                    };
+                    (decision, res, 0u64, ms, 0u64)
+                } else {
+                    // Task 3: InFlightGuard 现在绑定到 Lease，不在调用端独立创建
+                    let (res, start_wait, recog_ms) = {
+                        self.idle_cancel.notify_waiters();
+                        self.do_paddleocr_recognize(png_data.clone(), ctx, false, request_png_size)
+                            .await
+                    };
+                    self.schedule_idle_stop(snapshot);
+                    let decision = RouteDecision {
+                        configured_backend: OcrBackendKind::PaddleOcr,
+                        selected_backend: OcrBackendKind::PaddleOcr,
+                        fallback_reason: None,
+                    };
+                    (decision, res, start_wait, recog_ms, 0u64)
+                }
             }
             OcrBackendKind::Auto => {
                 if ctx.should_stop() {

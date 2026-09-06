@@ -1,0 +1,63 @@
+/**
+ * 下载进度条组件（0.22.14）——欢迎页引导与设置页引擎页共用。
+ *
+ * 结构：
+ * <div class="download-progress [hidden]">
+ *   <div class="download-progress__bar">
+ *     <div class="download-progress__fill [--indeterminate]"></div>
+ *   </div>
+ *   <span class="download-progress__text">12.3 MB / 17.5 MB · 70% · 约 3 分钟</span>
+ * </div>
+ *
+ * 确定态由 JS 设 width 百分比；总量未知时挂 `--indeterminate` 修饰类，
+ * fill 做脉动滑动动画（不显示百分比）。显隐走 `.hidden`（reset 层）。
+ */
+
+.download-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 2px 0;
+}
+
+/* 显隐兜底：display:flex 会压过 UA 的 [hidden]（同 le-feedback 的坑） */
+.download-progress[hidden] {
+    display: none;
+}
+
+.download-progress__bar {
+    height: 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+    overflow: hidden;
+}
+
+.download-progress__fill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    background: var(--accent, #89b4fa);
+    transition: width var(--transition-base, 0.15s) ease-out;
+}
+
+/* 总量未知（无 Content-Length 且未锁大小）：脉动动画占位，不显示百分比 */
+.download-progress__fill--indeterminate {
+    width: 30%;
+    animation: download-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes download-progress-indeterminate {
+    0% {
+        margin-left: -30%;
+    }
+    100% {
+        margin-left: 100%;
+    }
+}
+
+.download-progress__text {
+    font-size: 11px;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.75;
+    font-style: normal;
+}

@@ -284,6 +284,7 @@ pub(super) fn map_oarocr_to_ocr_result(
     Ok(OcrResult {
         backend_used: None,
         backend_fallback_reason: None,
+        backend_degrade_hint: None,
         text: full_text,
         lines,
         words,

@@ -14,7 +14,7 @@ import assert from 'node:assert';
 // Mock window before importing ss-reading.js (which imports api.js → tauri.js)
 globalThis.window = globalThis;
 
-const {computeCharRanges, computeCharBoxRanges} = await import('./ss-reading.js');
+const {computeCharRanges, computeCharBoxRanges, mergeRunsByLine} = await import('./ss-reading.js');
 
 describe('computeCharRanges — 后端 char_ranges 单一真源', () => {
     test('BMP 文本：Rust char index 与 UTF-16 offset 一致', () => {
@@ -407,5 +407,54 @@ describe('0.22.10 字符级选择轨', () => {
         ss.reading.selectionEnd = 1;
         // word 轨：[0,1] = 'abc\nghi'
         assert.strictEqual(getReadingSelectionText(), 'abc\nghi');
+    });
+});
+
+// ── 选区高亮按行合并块（选区样式优化：连续块 + 细描边，替代逐 char/word 描框）──
+
+describe('mergeRunsByLine — 选区高亮按行合并为连续块', () => {
+    test('单行多个 char box → 合并为一个包围块', () => {
+        const items = [
+            {rect: {x: 0, y: 10, w: 20, h: 30}, lineIndex: 0},
+            {rect: {x: 20, y: 12, w: 18, h: 28}, lineIndex: 0},
+            {rect: {x: 38, y: 11, w: 22, h: 29}, lineIndex: 0},
+        ];
+        const runs = mergeRunsByLine(items, 0, 2);
+        assert.strictEqual(runs.length, 1);
+        assert.deepStrictEqual(runs[0], {x: 0, y: 10, w: 60, h: 30});
+    });
+
+    test('跨行选区 → 每行一个块，行高取该行实际范围', () => {
+        const items = [
+            {rect: {x: 0, y: 10, w: 20, h: 30}, lineIndex: 0},
+            {rect: {x: 0, y: 50, w: 15, h: 28}, lineIndex: 1},
+            {rect: {x: 15, y: 52, w: 25, h: 26}, lineIndex: 1},
+        ];
+        const runs = mergeRunsByLine(items, 0, 2);
+        assert.strictEqual(runs.length, 2);
+        assert.deepStrictEqual(runs[0], {x: 0, y: 10, w: 20, h: 30});
+        assert.deepStrictEqual(runs[1], {x: 0, y: 50, w: 40, h: 28});
+    });
+
+    test('行内 box 乱序（OCR 阅读序 ≠ 视觉序）→ 包围块仍正确', () => {
+        const items = [
+            {rect: {x: 100, y: 10, w: 20, h: 30}, lineIndex: 0},
+            {rect: {x: 0, y: 12, w: 30, h: 28}, lineIndex: 0},
+        ];
+        const runs = mergeRunsByLine(items, 0, 1);
+        assert.strictEqual(runs.length, 1);
+        assert.deepStrictEqual(runs[0], {x: 0, y: 10, w: 120, h: 30});
+    });
+
+    test('反向选区（lo > hi 时调用方先归一，这里验证空范围返回空）', () => {
+        const items = [{rect: {x: 0, y: 0, w: 10, h: 10}, lineIndex: 0}];
+        assert.deepStrictEqual(mergeRunsByLine(items, 1, 0), []);
+        assert.deepStrictEqual(mergeRunsByLine(items, 0, -1), []);
+    });
+
+    test('lo/hi 越界只合并有效项，不抛错', () => {
+        const items = [{rect: {x: 0, y: 0, w: 10, h: 10}, lineIndex: 0}];
+        const runs = mergeRunsByLine(items, 0, 99);
+        assert.strictEqual(runs.length, 1);
     });
 });

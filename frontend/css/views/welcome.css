@@ -363,52 +363,6 @@
     color: var(--accent, #89b4fa);
 }
 
-/* ── 第 3 步：OCR 下载进度（0.22.14）───────────────────────────────────────── */
-
-.welcome-engine-progress {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 2px 0;
-}
-
-.welcome-progress-bar {
-    height: 4px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text) 10%, transparent);
-    overflow: hidden;
-}
-
-.welcome-progress-bar-fill {
-    height: 100%;
-    width: 0%;
-    border-radius: inherit;
-    background: var(--accent, #89b4fa);
-    transition: width var(--transition-base, 0.15s) ease-out;
-}
-
-/* 总量未知（无 Content-Length 且未锁大小）：脉动动画占位，不显示百分比 */
-.welcome-progress-bar-fill--indeterminate {
-    width: 30%;
-    animation: welcome-progress-indeterminate 1.2s ease-in-out infinite;
-}
-
-@keyframes welcome-progress-indeterminate {
-    0% {
-        margin-left: -30%;
-    }
-    100% {
-        margin-left: 100%;
-    }
-}
-
-.welcome-progress-text {
-    font-size: 11px;
-    color: var(--text-sub, var(--subtext0, #a6adc8));
-    opacity: 0.75;
-    font-style: normal;
-}
-
 /* ── 第 4 步：完成 ──────────────────────────────────────────────────────────── */
 
 .welcome-done {

@@ -67,6 +67,12 @@ pub struct OcrResult {
     /// 复用 `RouteDecision.fallback_reason`；未发生回退为 `None`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_fallback_reason: Option<String>,
+    /// 显式 PaddleOCR 模式因环境未安装而降级 WinRT 时的用户提示。
+    ///
+    /// 由 capability 层注入（configured=PaddleOcr 且 selected=Windows 且成功），
+    /// 前端 toast 直接展示；auto 模式降级属预期行为，不注入提示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_degrade_hint: Option<String>,
 }
 
 /// OCR 单行结果
@@ -585,6 +591,7 @@ pub fn rebuild_with_line_grouping_and_diag(
             OcrResult {
                 backend_used: None,
                 backend_fallback_reason: None,
+                backend_degrade_hint: None,
                 text: String::new(),
                 lines: Vec::new(),
                 words: Vec::new(),
@@ -699,6 +706,7 @@ pub fn rebuild_with_line_grouping_and_diag(
         OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text,
             lines,
             words,
@@ -1102,6 +1110,7 @@ impl OcrBackend for FakeOcrBackend {
         Ok(OcrResult {
             backend_used: None,
             backend_fallback_reason: None,
+            backend_degrade_hint: None,
             text: self.text.clone(),
             lines: self.lines.clone(),
             words: self.words.clone(),

@@ -84,6 +84,8 @@ impl ModelRegistry {
 /// - 有界：实现必须维护有界缓冲，禁止无限制累积日志。
 /// - 阶段性：`emit_stage` 报告安装阶段（如 downloading/verifying），
 ///   但**不伪造下载百分比**——无法取得字节级进度时只报阶段。
+/// - 字节级进度走 `emit_progress`（0.22.14）：仅当下载方真实统计了
+///   字节数时上报，禁止估算填充。实现方负责节流。
 /// - 不接收 URL、executable、argv、环境变量或脚本路径。
 pub trait InstallSink: Send + Sync {
     /// 发射一条日志行。
@@ -91,6 +93,13 @@ pub trait InstallSink: Send + Sync {
 
     /// 发射阶段变更。
     fn emit_stage(&self, stage: &str);
+
+    /// 发射下载字节进度（默认空实现——不关心进度的实现免改）。
+    ///
+    /// `downloaded` 是当前下载文件内累计字节数；`total` 是该文件总大小
+    /// （Content-Length 等，未知为 `None`）。下载循环每 chunk 调用，
+    /// 实现方必须自行节流（如 ≥200ms 一条）。
+    fn emit_progress(&self, _downloaded: u64, _total: Option<u64>) {}
 }
 
 /// 有界内存日志 sink（用于测试和轻量诊断）。
@@ -146,6 +155,8 @@ pub struct BroadcastingInstallSink {
     engine_id: EngineId,
     operation_id: String,
     log_seq: std::sync::atomic::AtomicU64,
+    /// 上次进度事件发出时间（None = 尚未发过）——emit_progress 节流用。
+    progress_last: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl BroadcastingInstallSink {
@@ -161,6 +172,7 @@ impl BroadcastingInstallSink {
             engine_id,
             operation_id,
             log_seq: std::sync::atomic::AtomicU64::new(0),
+            progress_last: std::sync::Mutex::new(None),
         }
     }
 
@@ -229,6 +241,31 @@ impl InstallSink for BroadcastingInstallSink {
         );
         self.event_port
             .emit_install_stage(&self.engine_id, &self.operation_id, stage);
+    }
+
+    /// 下载字节进度——200ms 最小间隔节流后广播（0.22.14）。
+    ///
+    /// 与引擎环境安装的 `InstallSinkAdapter::on_progress` 同规则：
+    /// 首条不节流，下载一有数据前端立即出进度条。
+    fn emit_progress(&self, downloaded: u64, total: Option<u64>) {
+        const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+        {
+            let mut last = self.progress_last.lock().unwrap();
+            if let Some(t) = *last
+                && t.elapsed() < PROGRESS_MIN_INTERVAL
+            {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+
+        self.event_port.emit_install_progress(
+            &self.engine_id,
+            &self.operation_id,
+            downloaded,
+            total,
+        );
     }
 }
 

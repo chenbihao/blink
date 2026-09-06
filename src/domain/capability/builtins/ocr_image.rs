@@ -141,6 +141,8 @@ impl Capability for OcrImage {
             let mut result = route_result.result.unwrap();
             result.backend_used = Some(route_result.decision.selected_backend);
             result.backend_fallback_reason = route_result.decision.fallback_reason.clone();
+            // 显式 PaddleOCR 未安装降级 WinRT 时附用户提示，前端 toast 展示
+            result.backend_degrade_hint = paddleocr_degrade_hint(&route_result.decision);
             return Ok(CapabilityResult::Text {
                 content: serde_json::to_string(&result as &OcrResult)
                     .unwrap_or_else(|_| result.text.clone()),
@@ -170,6 +172,27 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
 });
 
 // ── StructuredOcrError → CapabilityError 映射（0.22.4，0.22.6.1 结构化收敛） ──
+
+/// 显式 PaddleOCR 模式降级 WinRT 时的用户提示文案（随成功结果注入）。
+///
+/// 仅 configured=PaddleOcr 且 selected=Windows 时提示——显式选择因环境缺失
+/// 被降级是用户需要知道的意外；auto 模式降级属预期行为，不打扰。
+fn paddleocr_degrade_hint(
+    decision: &crate::domain::ocr::router::RouteDecision,
+) -> Option<String> {
+    use crate::domain::ocr::config::OcrBackendKind;
+    if matches!(decision.configured_backend, OcrBackendKind::PaddleOcr)
+        && matches!(decision.selected_backend, OcrBackendKind::Windows)
+    {
+        Some(
+            "已显式启用 PaddleOCR 但环境未安装，本次已降级为 Windows OCR 识别（准确率可能下降）。\
+             可在设置页「引擎」中安装 PaddleOCR 环境"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
 
 /// 将 `StructuredOcrError` 映射到 `CapabilityError`。
 ///
@@ -215,10 +238,50 @@ fn map_structured_error_to_capability(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::super::ocr_engine::{FakeOcrBackend, install_backend};
-    use super::*;
+    #[cfg(test)]
+    mod tests {
+        use super::super::ocr_engine::{FakeOcrBackend, install_backend};
+        use super::*;
+
+        // ── 显式 PaddleOCR 降级提示注入（paddleocr_degrade_hint）────────
+
+        /// 显式 PaddleOCR 环境未安装降级 WinRT → 附用户提示。
+        #[test]
+        fn degrade_hint_injected_for_explicit_paddle_fallback() {
+            use crate::domain::ocr::config::OcrBackendKind;
+            let decision = crate::domain::ocr::router::RouteDecision {
+                configured_backend: OcrBackendKind::PaddleOcr,
+                selected_backend: OcrBackendKind::Windows,
+                fallback_reason: Some("PaddleOCR 环境未安装，已降级 Windows OCR".to_string()),
+            };
+            let hint = paddleocr_degrade_hint(&decision).expect("显式 paddle 降级应注入提示");
+            assert!(hint.contains("已降级为 Windows OCR"), "提示应说明降级事实");
+            assert!(hint.contains("设置页"), "提示应带安装指引");
+        }
+
+        /// 显式 PaddleOCR 正常走通 → 无提示。
+        #[test]
+        fn no_degrade_hint_for_explicit_paddle_success() {
+            use crate::domain::ocr::config::OcrBackendKind;
+            let decision = crate::domain::ocr::router::RouteDecision {
+                configured_backend: OcrBackendKind::PaddleOcr,
+                selected_backend: OcrBackendKind::PaddleOcr,
+                fallback_reason: None,
+            };
+            assert!(paddleocr_degrade_hint(&decision).is_none());
+        }
+
+        /// auto 模式降级属预期行为 → 不提示（避免每次截图都弹提示）。
+        #[test]
+        fn no_degrade_hint_for_auto_fallback() {
+            use crate::domain::ocr::config::OcrBackendKind;
+            let decision = crate::domain::ocr::router::RouteDecision {
+                configured_backend: OcrBackendKind::Auto,
+                selected_backend: OcrBackendKind::Windows,
+                fallback_reason: Some("未安装 PaddleOCR".to_string()),
+            };
+            assert!(paddleocr_degrade_hint(&decision).is_none());
+        }
 
     #[test]
     fn id_is_ocr_image() {
