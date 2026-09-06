@@ -299,7 +299,7 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 
 | # | 取舍 | 为什么妥协 |
 |---|---|---|
-| 1 | 热键 hook 杀软敏感 | Alt+Space 体验优于 `RegisterHotKey`；杀软问题分发期签名解决 |
+| 1 | 热键 hook 杀软敏感 | Alt+Space 体验优于 `RegisterHotKey`；杀软问题分发期签名解决。**范围修订（0.22.12）**：次级可提升 chord 快捷键走 `RegisterHotKey`（注册即冲突探测），主热键决策不变，见 [0.22 §3.10](./phases/0.22-local-model-runtime-ppocrv6.md) |
 | 2 | 图标提取用 COM + 自定义协议 | 不进搜索热路径；换来常驻内存不膨胀 |
 | 3 | 插件进程有冷启动延迟 | 独立进程安全隔离的代价；懒启动 + 常驻复用缓解 |
 | 4 | Takeover 首批为空（async 增量） | 渐进式设计的代价；带参场景插件应够快，加占位项缓解 |

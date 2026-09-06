@@ -103,6 +103,23 @@ export const EVENTS = Object.freeze({
      */
     LOCAL_ENGINE_INSTALL_STAGE: 'blink://local-engine-install-stage',
 
+    /**
+     * 安装下载字节进度事件（0.22.14）。
+     *
+     * 引擎安装下载期间实时广播字节进度（后端节流 ≥200ms/条），供前端
+     * 显示百分比与剩余时间估计。与 LOCAL_ENGINE_INSTALL_STAGE 分开：
+     * 进度高频、阶段低频，语义不同不混用事件；前端用 stage 事件维护
+     * 阶段文案，用本事件只更新进度数值。
+     *
+     * payload:
+     * { engine_id, operation_id, downloaded, total }
+     *
+     * downloaded/total 均为当前下载文件（单文件）内计数——多文件安装
+     * （如 PP-OCR 的 ORT zip + 3 个模型）逐文件重置。total 为 null 表示
+     * 总大小未知，前端退化为已下载字节数展示。
+     */
+    LOCAL_ENGINE_INSTALL_PROGRESS: 'blink://local-engine-install-progress',
+
     // ── 便签（0.16.7）──
     STICKY_CREATED: 'blink://sticky-created',
     STICKY_DELETED: 'blink://sticky-deleted',

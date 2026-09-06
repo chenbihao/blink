@@ -89,10 +89,13 @@ fn validator_exe_path() -> Result<PathBuf, RuntimeError> {
 ///
 /// 使用 reqwest 下载，stream 到临时文件。若 `expected_sha256` 为 `Some`，
 /// 下载完成后校验 hash；为 `None` 时跳过校验（调用方自行负责后续校验）。
+/// `expected_size` 用于进度总量（Content-Length 缺失时的 fallback），
+/// 不做下载后的大小断言——大小校验由调用方按 asset-lock 执行。
 /// 支持 cancel_token 取消。
 async fn download_and_verify(
     url: &str,
     expected_sha256: Option<&str>,
+    expected_size: Option<u64>,
     dest: &Path,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
     sink: Option<&dyn InstallSink>,
@@ -144,6 +147,9 @@ async fn download_and_verify(
         });
     }
 
+    // bytes_stream 会消费 response，先取出 Content-Length 供进度展示
+    let content_length = response.content_length();
+
     // 创建临时文件（同目录，下载完成后 rename）
     let tmp_name = format!(
         ".tmp_download_{}",
@@ -162,6 +168,8 @@ async fn download_and_verify(
     let mut stream = response.bytes_stream();
     use futures::StreamExt;
     let mut total_written: u64 = 0;
+    // 进度总量：Content-Length 优先，缺失时 fallback 到调用方给的已知大小
+    let progress_total = content_length.or(expected_size);
 
     loop {
         tokio::select! {
@@ -171,6 +179,9 @@ async fn download_and_verify(
                         hasher.update(&bytes);
                         file.write_all(&bytes).await.map_err(RuntimeError::Io)?;
                         total_written += bytes.len() as u64;
+                        if let Some(s) = sink {
+                            s.on_progress(total_written, progress_total);
+                        }
                     }
                     Some(Err(e)) => {
                         let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -302,7 +313,15 @@ async fn download_model(
     sink: Option<&dyn InstallSink>,
 ) -> Result<(), RuntimeError> {
     let dest = staging_dir.join(&model.filename);
-    download_and_verify(&model.url, Some(&model.sha256), &dest, cancel_token, sink).await?;
+    download_and_verify(
+        &model.url,
+        Some(&model.sha256),
+        Some(model.size_bytes),
+        &dest,
+        cancel_token,
+        sink,
+    )
+    .await?;
 
     // 校验文件大小
     let metadata = std::fs::metadata(&dest)?;
@@ -515,6 +534,7 @@ impl RuntimeProvider for OnnxRuntimeProvider {
         download_and_verify(
             &lock.ort.url,
             None, // zip-level hash 跳过；解压后逐文件校验
+            None, // zip 总大小未锁——进度总量依赖 Content-Length
             &archive_path,
             cancel_token,
             sink,

@@ -131,6 +131,28 @@ impl EventPort for TauriEventPort {
             .app
             .emit(EventNames::LOCAL_ENGINE_INSTALL_STAGE, payload);
     }
+
+    /// 广播下载字节进度（0.22.14）。
+    ///
+    /// 前端通过 `blink://local-engine-install-progress` 事件显示下载
+    /// 百分比与剩余时间估计。调用方（`InstallSinkAdapter`）已节流。
+    fn emit_install_progress(
+        &self,
+        engine_id: &EngineId,
+        operation_id: &str,
+        downloaded: u64,
+        total: Option<u64>,
+    ) {
+        let payload = serde_json::json!({
+            "engine_id": engine_id.as_str(),
+            "operation_id": operation_id,
+            "downloaded": downloaded,
+            "total": total,
+        });
+        let _ = self
+            .app
+            .emit(EventNames::LOCAL_ENGINE_INSTALL_PROGRESS, payload);
+    }
 }
 
 /// 工厂函数——创建 `Arc<dyn EventPort>`。

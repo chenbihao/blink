@@ -362,8 +362,10 @@ fn main() {
                 });
             }
 
-            // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）
-            if app_config.first_run {
+            // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）。
+            // 0.22.13 版本号化：新引导发布时 ONBOARDING_VERSION 自增，
+            // 未看过最新版的老用户补看一次。
+            if app_config.onboarding_version < crate::domain::config::ONBOARDING_VERSION {
                 infra::platform::window::show_welcome_window(app.handle());
             }
 
@@ -1152,13 +1154,14 @@ fn main() {
                     cs.abort_active();
                 }
             })));
-            // welcome 窗口 CloseRequested → first_run = false
+            // welcome 窗口 CloseRequested → 标记完成当前版引导（0.22.13 版本号化）
             app.manage(app::WelcomeCloseCallback(std::sync::Arc::new(|app: &tauri::AppHandle| {
                 use tauri::Manager;
                 let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = app::config::update_first_run(&pools.config, false).await;
-                    tracing::info!("welcome window: CloseRequested -> first_run = false");
+                    let version = crate::domain::config::ONBOARDING_VERSION;
+                    let _ = app::config::update_onboarding_version(&pools.config, version).await;
+                    tracing::info!(version, "welcome window: CloseRequested -> onboarding_version");
                 });
             })));
             // sticky spare close → trash_note + emit STICKY_TRASHED
@@ -1336,6 +1339,7 @@ app::commands::generate_palette_schemes,
             app::commands::get_config,
             app::commands::set_config,
             app::commands::reset_config,
+            app::commands::complete_onboarding,
             app::commands::record_hotkey,
             app::commands::ack_hotkey_recording_ready,
             app::commands::get_global_hotkey_statuses,

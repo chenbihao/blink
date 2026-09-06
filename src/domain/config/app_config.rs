@@ -65,8 +65,10 @@ pub struct AppConfig {
     /// AI HTTP 请求/响应体日志开关（0.21.16，默认关）。
     #[serde(default = "default_false")]
     pub ai_http_body_log: bool,
-    #[serde(default = "default_true")]
-    pub first_run: bool,
+    /// 0.22.13：已完成/看过的最新引导版本（0 = 从未看过）。启动时
+    /// `< ONBOARDING_VERSION` 即弹引导窗口。
+    #[serde(default)]
+    pub onboarding_version: u32,
 }
 
 impl Default for AppConfig {
@@ -98,7 +100,7 @@ impl Default for AppConfig {
             disabled_chord_actions: Vec::new(),
             window_opacity: default_window_opacity(),
             ai_http_body_log: false,
-            first_run: true,
+            onboarding_version: 0,
         }
     }
 }
@@ -258,7 +260,21 @@ pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
 /// 获取完整配置（门面 view,内部组合 6 分片 + clipboard 独立 KV）。
 pub async fn get_config(pool: &SqlitePool) -> AppConfig {
     let hotkey = ConfigStore::get::<HotkeyConfig>(pool).await;
-    let appearance = ConfigStore::get::<AppearanceConfig>(pool).await;
+    let mut appearance = ConfigStore::get::<AppearanceConfig>(pool).await;
+
+    // 0.22.13：onboarding_version(u32) 一次性迁移。None = 0.22.13 前的存量记录，
+    // 一律迁为 0（未完成当前版引导）——老用户升级后补看一次新版向导，
+    // 完成/跳过后写回 ONBOARDING_VERSION。迁移即持久化。
+    if appearance.onboarding_version.is_none() {
+        appearance.onboarding_version = Some(0);
+        ConfigStore::set(pool, &appearance).await
+            .unwrap_or_else(|e| tracing::warn!(error = %e, "onboarding_version 迁移写回失败（内存中已生效，下次读取重试）"));
+        tracing::info!(
+            version = appearance.onboarding_version,
+            "appearance 分片一次性迁移：存量记录 → onboarding_version=0"
+        );
+    }
+
     let search = ConfigStore::get::<SearchConfig>(pool).await;
     let suggestion = ConfigStore::get::<SuggestionConfig>(pool).await;
     let chord = ConfigStore::get::<ChordConfig>(pool).await;
@@ -388,7 +404,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         log_level: appearance.log_level,
         window_opacity: appearance.window_opacity,
         ai_http_body_log: appearance.ai_http_body_log,
-        first_run: appearance.first_run,
+        onboarding_version: appearance.onboarding_version.unwrap_or(0),
         surface_takeover_enabled: search.surface_takeover_enabled,
         search_history_enabled: search.search_history_enabled,
         search_history_days: search.search_history_days,
@@ -429,7 +445,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
             log_level: config.log_level.clone(),
             window_opacity: config.window_opacity,
             ai_http_body_log: config.ai_http_body_log,
-            first_run: config.first_run,
+            onboarding_version: Some(config.onboarding_version),
         },
     )
     .await?;
@@ -511,10 +527,11 @@ pub async fn update_auto_start(pool: &SqlitePool, auto_start: bool) -> Result<()
     save_config(pool, &config).await
 }
 
-/// 0.17.3：更新首次启动标记。镜像 update_auto_start 模式。
-pub async fn update_first_run(pool: &SqlitePool, first_run: bool) -> Result<(), String> {
+/// 0.22.13：更新引导向导已完成版本（完成/跳过向导写 `ONBOARDING_VERSION`，
+/// storage 页「重新显示引导」写 0）。镜像 update_auto_start 模式。
+pub async fn update_onboarding_version(pool: &SqlitePool, version: u32) -> Result<(), String> {
     let mut config = get_config(pool).await;
-    config.first_run = first_run;
+    config.onboarding_version = version;
     save_config(pool, &config).await
 }
 

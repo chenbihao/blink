@@ -569,7 +569,8 @@ function revisionGreaterThan(a, b) {
  * 初始化本地模型只读展示（0.22.7 契约收口；0.22.9 升级状态跟随）。
  *
  * 模型选择的**唯一写入口**在引擎页 FunASR 卡片的模型行"使用"按钮。
- * 语音页只读展示当前选中模型名称，并提供跳转引擎页的入口。
+ * 语音页只读展示当前选中模型名称；跳转引擎页的入口收敛至上方
+ * FunASR 本地引擎卡片的"前往本地模型运行时"按钮。
  *
  * 展示逻辑：
  * - 有选中模型 → 显示"FunASR · 模型名"
@@ -585,7 +586,6 @@ function revisionGreaterThan(a, b) {
  */
 async function initLocalModelSelect(config) {
     const nameEl = document.getElementById("voice-local-model-name");
-    const gotoBtn = document.getElementById("voice-local-model-goto-btn");
     if (!nameEl) return;
 
     const currentModelId = config.local_stt_selection?.model_id
@@ -656,38 +656,6 @@ async function initLocalModelSelect(config) {
     }
 
     await refreshDisplay();
-
-    // 跳转按钮
-    if (gotoBtn) {
-        gotoBtn.addEventListener("click", async () => {
-            try {
-                let funasrCard = null;
-                await navigateSettings({
-                    tabId: "engines",
-                    prepare: async () => {
-                        await ensureLocalRuntimeMounted();
-                        funasrCard = await waitForEngineCard("funasr");
-                    },
-                    target: () => {
-                        if (funasrCard) {
-                            return document.getElementById("local-model-runtime") || funasrCard;
-                        }
-                        const errorRegion = document.getElementById("le-error-region");
-                        if (errorRegion && !errorRegion.hidden) return errorRegion;
-                        return document.getElementById("local-model-runtime");
-                    },
-                    focusTarget: () => {
-                        if (funasrCard) return funasrCard;
-                        const textEl = document.getElementById("le-error-text");
-                        return textEl && !document.getElementById("le-error-region")?.hidden
-                            ? textEl : null;
-                    },
-                });
-            } catch (e) {
-                console.error("[voice] goto engines from model display failed:", e);
-            }
-        });
-    }
 
     // ── 状态跟随：LOCAL_ENGINE_STATUS 驱动只读显示刷新 ─────────────────
     // epoch/revision 防护（spec-frontend §5.1）：同 epoch 只接受更大

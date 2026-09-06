@@ -1420,13 +1420,13 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
 
 /// 0.17.3：显示首次启动引导窗口。
 ///
-/// 独立窗口（label "welcome"），480×500 居中，有标题栏（decorations: true），
-/// 不可调整大小。关闭时自动标记 `first_run = false`（防止用户点 X 不点"开始使用"）。
+/// 独立窗口（label "welcome"），0.22.13 分步向导改 560×560 居中，有标题栏（decorations: true），
+/// 不可调整大小。关闭时自动标记已完成当前版引导（防止用户点 X 不点"开始使用"）。
 /// 与主窗口独立——watchdog 只 hide "main" 窗口，不影响引导窗口。
 pub fn show_welcome_window(app: &AppHandle) {
     const LABEL: &str = "welcome";
 
-    // 已存在则直接 show + focus（安全兜底，正常不会走到——first_run=false 后不再弹）
+    // 已存在则直接 show + focus（安全兜底，正常不会走到——完成引导后不再弹）
     if let Some(win) = app.get_webview_window(LABEL) {
         let _ = win.show();
         let _ = win.set_focus();
@@ -1437,7 +1437,7 @@ pub fn show_welcome_window(app: &AppHandle) {
 
     let win = match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("welcome.html".into()))
         .title("Blink")
-        .inner_size(480.0, 500.0)
+        .inner_size(560.0, 560.0)
         .resizable(false)
         .decorations(true)
         .transparent(false)
@@ -1456,7 +1456,7 @@ pub fn show_welcome_window(app: &AppHandle) {
         }
     };
 
-    // 关闭时触发回调（0.21.14：app 层回调负责 first_run=false，infra 不反向依赖 app）
+    // 关闭时触发回调（app 层回调负责置 onboarding_version，infra 不反向依赖 app）
     let app_clone = app.clone();
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { .. } = event

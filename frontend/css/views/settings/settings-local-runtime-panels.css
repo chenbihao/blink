@@ -844,7 +844,3 @@
     color: var(--text-sub);
     font-style: normal;
 }
-
-#voice .voice-model-goto-btn {
-    font-style: normal;
-}

@@ -1973,15 +1973,11 @@ input.has-secret-hint::placeholder {
     margin-left: auto;
 }
 
-/* 非清理类弱化操作（配置库的重置欢迎提示/清理调试标记） */
-.db-btn-dim {
-    color: var(--text-dim);
-    background: transparent;
-    border-color: var(--surface-2);
-}
-
-.db-btn-dim:hover {
-    color: var(--text-sub);
+/* 优化存储行（维护区）：默认 48px 行高下按钮距底部分割线仅 ~7px，显局促；
+   加垂直内边距让分割线与内容之间留出呼吸感，分割线以下仍由 section-label 的
+   28px margin-top 承接节奏。 */
+.setting-row:has(#optimize-storage) {
+    padding: 12px 0;
 }
 
 /* ── 0.16.6 完整清理 ───────────────────────────────────────────────────────── */

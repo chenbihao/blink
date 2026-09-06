@@ -17,7 +17,7 @@ pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig 
 ///
 /// # 支持的 key
 ///
-/// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `first_run` / `hotkey` /
+/// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `onboarding_version` / `hotkey` /
 /// `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
 /// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
@@ -82,11 +82,12 @@ pub async fn set_config(
             }
             tracing::info!(auto_start, "开机自启配置已更新");
         }
-        // 0.17.3：首次启动标记（引导窗口"开始使用"或关闭时设为 false）
-        "first_run" => {
-            let first_run: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_first_run(pool, first_run).await?;
-            tracing::info!(first_run, "首次启动标记已更新");
+        // 0.22.13：引导向导版本标记。storage 页「重新显示引导」置 0；
+        // 完成/跳过向导走 complete_onboarding 命令（版本常量唯一真源在后端）。
+        "onboarding_version" => {
+            let version: u32 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_onboarding_version(pool, version).await?;
+            tracing::info!(version, "引导向导版本标记已更新");
         }
         "tap_threshold" => {
             let threshold: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -181,10 +182,7 @@ pub async fn set_config(
                 crate::app::config::ConfigStore::get::<crate::app::config::HotkeyConfig>(pool)
                     .await;
             if let Some(conflict) = registry
-                .global_binding_conflicts(
-                    &bindings,
-                    Some((&hotkey_cfg.modifiers, &hotkey_cfg.key)),
-                )
+                .global_binding_conflicts(&bindings, Some((&hotkey_cfg.modifiers, &hotkey_cfg.key)))
                 .first()
             {
                 return Err(conflict.describe());
@@ -482,6 +480,19 @@ pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config = crate::app::config::AppConfig::default();
     crate::app::config::save_config(pool, &config).await
+}
+
+/// 完成（或跳过）当前引导向导（0.22.13）。
+///
+/// 写入后端持有的当前引导版本号 `ONBOARDING_VERSION`——版本常量唯一真源在
+/// domain，前端不传版本号，避免两处硬编码漂移（漂移会导致向导每次启动重复弹出）。
+#[tauri::command]
+pub async fn complete_onboarding(app: tauri::AppHandle) -> Result<(), String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let version = crate::domain::config::ONBOARDING_VERSION;
+    crate::app::config::update_onboarding_version(pool, version).await?;
+    tracing::info!(version, "引导向导已完成/跳过");
+    Ok(())
 }
 
 /// 泛型配置读取（0.8.6 §8.1.3）。

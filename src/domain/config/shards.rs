@@ -49,7 +49,14 @@ fn default_grace_period() -> u64 {
 
 // ── AppearanceConfig ──────────────────────────────────────────────────────────
 
-/// 外观配置分片。theme / language / auto_start + log_level + ai_http_body_log + window_opacity + first_run。
+/// 0.22.13：引导向导当前版本。
+///
+/// welcome 引导页随二进制发布、始终渲染最新内容；发布新引导时本值 +1，
+/// 启动时 `onboarding_version < ONBOARDING_VERSION` 即弹出引导，完成/跳过后写回本值。
+/// 存量老用户（0.22.13 前的记录）一次性迁移为 0（未完成当前版），升级后补看一次新版向导。
+pub const ONBOARDING_VERSION: u32 = 1;
+
+/// 外观配置分片。theme / language / auto_start + log_level + ai_http_body_log + window_opacity + onboarding_version。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
     #[serde(default = "default_theme")]
@@ -66,10 +73,10 @@ pub struct AppearanceConfig {
     pub ai_http_body_log: bool,
     #[serde(default = "default_window_opacity")]
     pub window_opacity: f64,
-    /// 0.17.3：首次启动标记，default true。老用户升级时 serde 取 default true，
-    /// 会看到一次引导窗口——可接受（看一次快捷键速查也有价值）。
-    #[serde(default = "default_true")]
-    pub first_run: bool,
+    /// 0.22.13：已完成/看过的最新引导版本。None = 0.22.13 前的存量记录
+    /// （见 `app_config::get_config` 一次性迁移）；Some(n) = 已完成至第 n 版。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_version: Option<u32>,
 }
 
 impl Default for AppearanceConfig {
@@ -81,7 +88,7 @@ impl Default for AppearanceConfig {
             log_level: default_log_level(),
             ai_http_body_log: false,
             window_opacity: default_window_opacity(),
-            first_run: true,
+            onboarding_version: None,
         }
     }
 }

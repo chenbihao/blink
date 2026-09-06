@@ -1830,23 +1830,17 @@
                     </button>
                 </div>
 
-<!-- FunASR 本地模型选择（0.22.7：只读展示 + 跳转引擎页管理） -->
-<div class="setting-row voice-model-select-row">
-    <div class="setting-row-info">
-        <span class="setting-row-label" data-i18n="voice.local.model.label">模型</span>
-    </div>
-    <div class="setting-row-control">
-        <div class="voice-model-readonly" id="voice-local-model-readonly">
-            <span class="voice-model-readonly-name" id="voice-local-model-name">—</span>
-            <button class="btn btn-small voice-model-goto-btn" id="voice-local-model-goto-btn" type="button">
-                <svg aria-hidden="true" class="icon">
-                    <use href="#icon-external-link"/>
-                </svg>
-                <span data-i18n="voice.local.model.goto_engines">前往引擎页管理</span>
-            </button>
-        </div>
-    </div>
-</div>
+                <!-- FunASR 本地模型选择（0.22.7：只读展示；跳转引擎页入口收敛至上方 FunASR 本地引擎卡片） -->
+                <div class="setting-row voice-model-select-row">
+                    <div class="setting-row-info">
+                        <span class="setting-row-label" data-i18n="voice.local.model.label">模型</span>
+                    </div>
+                    <div class="setting-row-control">
+                        <div class="voice-model-readonly" id="voice-local-model-readonly">
+                            <span class="voice-model-readonly-name" id="voice-local-model-name">—</span>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- 高级选项（独立卡片，不嵌套在 FunASR 内） -->
                 <details class="voice-advanced-card">
@@ -2167,7 +2161,7 @@
 
             <!-- 四库统计卡片（统计与清理操作行内配对，默认态零红色按钮） -->
             <div class="db-stats-grid" id="db-stats-grid">
-                <!-- 配置库（可重置一次性标记：弱化文字级操作，非数据清理） -->
+                <!-- 配置库（重置引导向导：非数据清理，但样式与各库清空按钮保持一致） -->
                 <div class="db-card">
                     <div class="db-card-header">
                         <span class="db-card-name" data-i18n="storage.db.config">配置库</span>
@@ -2176,15 +2170,18 @@
                     </div>
                     <div class="db-card-body">
                         <div class="db-stat-row">
-                            <button class="btn-small db-btn-dim" data-i18n="storage.reset_first_run" id="reset-first-run">
-                                重置欢迎提示
+                            <button class="btn-small" data-i18n="storage.reset_first_run" id="reset-first-run">
+                                重置引导向导
                             </button>
                         </div>
+                        <!-- 清理调试标记已下线：ocr_debug/scroll_debug 开关已在 chord.js 截图详情中
+                             注释隐藏（调试项已调优，UI 无入口可置 true），恢复开关时一并恢复此按钮
                         <div class="db-stat-row">
-                            <button class="btn-small db-btn-dim" data-i18n="storage.clear_debug_flags"
+                            <button class="btn-small" data-i18n="storage.clear_debug_flags"
                                     id="clear-debug-flags">清理调试标记
                             </button>
                         </div>
+                        -->
                     </div>
                 </div>
 

@@ -151,6 +151,29 @@ impl EventNames {
     /// `stage` 值与 `OperationStage` 的 wire 格式一致（snake_case）。
     pub const LOCAL_ENGINE_INSTALL_STAGE: &str = "blink://local-engine-install-stage";
 
+    /// 安装下载字节进度事件（0.22.14）。
+    ///
+    /// 引擎安装下载期间（stage=downloading）实时广播字节进度，供前端显示
+    /// 百分比与剩余时间估计。与 `LOCAL_ENGINE_INSTALL_STAGE` 分开——
+    /// 进度高频（后端已节流至 ≥200ms/条），阶段低频，语义不同不混用事件；
+    /// 前端用 stage 事件维护阶段文案，用本事件只更新进度数值。
+    ///
+    /// payload:
+    /// ```json
+    /// {
+    ///   "engine_id": "paddleocr",
+    ///   "operation_id": "op-abc123",
+    ///   "downloaded": 1048576,
+    ///   "total": 1780590
+    /// }
+    /// ```
+    ///
+    /// `downloaded`/`total` 均为当前下载文件（单文件）内计数——多文件
+    /// 安装（如 PP-OCR 的 ORT zip + 3 个模型）逐文件重置，前端按文件
+    /// 显示各自进度。`total` 为 `null` 表示总大小未知（无 Content-Length
+    /// 且 asset-lock 未锁大小），前端退化为已下载字节数展示。
+    pub const LOCAL_ENGINE_INSTALL_PROGRESS: &str = "blink://local-engine-install-progress";
+
     // ── 便签（0.16.7-0.16.10）──
     /// 便签被创建。payload: `{ stickyId }`
     pub const STICKY_CREATED: &str = "blink://sticky-created";

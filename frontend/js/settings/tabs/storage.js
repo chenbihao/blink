@@ -139,7 +139,8 @@ export function initStorageTab() {
         });
         if (!ok) return;
         try {
-            await invoke("set_config", {key: "first_run", value: true});
+            // 0.22.13：first_run 版本号化为 onboarding_version，置 0 = 重新显示引导
+            await invoke("set_config", {key: "onboarding_version", value: 0});
             await messageDialog(t("storage.reset_first_run.done"), {kind: "info"});
         } catch (e) {
             console.error("reset_first_run failed:", e);
@@ -147,6 +148,9 @@ export function initStorageTab() {
         }
     });
 
+    // 清理调试标记已下线：ocr_debug/scroll_debug 开关已在 chord.js 截图详情中注释隐藏，
+    // UI 无入口可置 true，本处理函数随之注释（恢复开关时一并恢复）
+    /*
     document.getElementById("clear-debug-flags")?.addEventListener("click", async () => {
         const ok = await confirmDialog(t("storage.clear_debug_flags.confirm"), {
             title: t("common.confirm"),
@@ -170,6 +174,7 @@ export function initStorageTab() {
             await messageDialog(t("storage.clear_debug_flags.failed", {err: String(e)}), {kind: "error"});
         }
     });
+    */
 
     // 0.16.6: 一键清理全部数据（运行时禁用，仅卸载前手动启用）
     // 按钮已从 HTML 中移除，如需恢复请见 git history 的 cleanup-all-data 实现。

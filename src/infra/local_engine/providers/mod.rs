@@ -174,6 +174,8 @@ pub struct OnnxInstallPlan {
 /// - Provider 实现应在执行子进程或长耗时下载（模型/archive）期间，
 ///   实时把 stdout/stderr 行通过 `on_log` 上报，不等进程结束。
 /// - `on_stage` 用于提交阶段变更（Preparing/Downloading/...）。
+/// - `on_progress` 用于上报下载字节进度（下载循环内每 chunk 调用，
+///   实现方负责节流）。
 /// - 所有方法接受 `&self`，实现需内部可变（如 `Mutex`/`Arc`）。
 /// - 日志洪泛保护：实现应内部做速率限制或有界缓冲。
 ///
@@ -193,6 +195,14 @@ pub trait InstallSink: Send + Sync {
     /// `text` 是已做 UTF-8 lossy + 长度截断的日志行。
     /// 实现应内部做洪泛保护（如单位时间内最多 N 条）。
     fn on_log(&self, level: &str, text: &str);
+
+    /// 上报下载字节进度。
+    ///
+    /// `downloaded` 是当前下载目标（单文件）内累计已写字节数；
+    /// `total` 是该文件总大小——Content-Length 优先，缺省时可用
+    /// asset-lock 已知大小——未知为 `None`。下载循环内每 chunk 调用，
+    /// 实现方必须自行节流（如 ≥200ms 一条），禁止逐 chunk 透传到事件层。
+    fn on_progress(&self, _downloaded: u64, _total: Option<u64>) {}
 }
 
 /// 空实现（测试用）。

@@ -91,8 +91,10 @@ use logs::classify_engine_log;
 /// 持有 `EventPort` 引用、`engine_id`、`operation_id` 和日志序号计数器。
 /// `on_stage` 通过 `emit_install_stage` 广播阶段变更给前端。
 /// `on_log` 把安装日志行通过 `emit_install_log` 广播，以 `operation_id` 隔离。
+/// `on_progress` 节流后通过 `emit_install_progress` 广播下载字节进度。
 ///
-/// **洪泛保护**：使用简单的速率限制——每秒最多 50 条日志。
+/// **洪泛保护**：日志使用简单的速率限制——每秒最多 50 条；进度按
+/// 最小间隔 200ms 节流（provider 下载循环每 chunk 调用一次）。
 /// **线程安全**：所有字段通过 `Mutex` 保护。
 struct InstallSinkAdapter {
     event_port: Arc<dyn EventPort>,
@@ -101,6 +103,8 @@ struct InstallSinkAdapter {
     log_seq: std::sync::Mutex<u64>,
     /// 上次速率限制窗口重置时间（毫秒）
     rate_window: std::sync::Mutex<(std::time::Instant, u32)>,
+    /// 上次进度事件发出时间（None = 该 operation 尚未发过进度）
+    progress_last: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl InstallSinkAdapter {
@@ -111,6 +115,7 @@ impl InstallSinkAdapter {
             operation_id,
             log_seq: std::sync::Mutex::new(0),
             rate_window: std::sync::Mutex::new((std::time::Instant::now(), 0)),
+            progress_last: std::sync::Mutex::new(None),
         }
     }
 
@@ -145,6 +150,30 @@ impl InstallSink for InstallSinkAdapter {
         // 0.22.6 H4: 通过 emit_install_stage 广播阶段变更给前端
         self.event_port
             .emit_install_stage(&self.engine_id, &self.operation_id, stage);
+    }
+
+    /// 下载字节进度——200ms 最小间隔节流后广播。
+    ///
+    /// 首条进度不节流（下载一有数据前端立即出进度条）。
+    fn on_progress(&self, downloaded: u64, total: Option<u64>) {
+        const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+        {
+            let mut last = self.progress_last.lock().unwrap();
+            if let Some(t) = *last
+                && t.elapsed() < PROGRESS_MIN_INTERVAL
+            {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+
+        self.event_port.emit_install_progress(
+            &self.engine_id,
+            &self.operation_id,
+            downloaded,
+            total,
+        );
     }
 
     fn on_log(&self, level: &str, text: &str) {
@@ -392,6 +421,20 @@ pub trait EventPort: Send + Sync {
     /// 前端通过此事件实时显示安装进度（preparing/downloading/verifying/...）。
     /// `stage` 是稳定的 wire 字符串（对应 `OperationStage` 的 Display 值）。
     fn emit_install_stage(&self, engine_id: &EngineId, operation_id: &str, stage: &str);
+
+    /// 广播下载字节进度（默认空实现——不关心进度的实现免改）。
+    ///
+    /// 前端通过此事件显示下载百分比/ETA（`blink://local-engine-install-progress`）。
+    /// `downloaded` 是当前下载文件内累计字节数；`total` 是文件总大小（未知为 `None`）。
+    /// 调用方（`InstallSinkAdapter`）已做节流，此处可直接透传。
+    fn emit_install_progress(
+        &self,
+        _engine_id: &EngineId,
+        _operation_id: &str,
+        _downloaded: u64,
+        _total: Option<u64>,
+    ) {
+    }
 }
 
 /// 空实现（测试/无事件场景用）。

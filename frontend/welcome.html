@@ -20,14 +20,83 @@
         <p class="welcome-subtitle" data-i18n="welcome.subtitle">你的桌面效率中枢</p>
     </div>
 
-    <!-- 快捷键列表 -->
-    <div class="welcome-shortcuts" id="shortcut-list">
-        <!-- 由 JS 动态渲染 -->
+    <!-- 步骤指示器 -->
+    <div class="welcome-steps" id="step-indicator" aria-hidden="true"></div>
+
+    <!-- 分步内容 -->
+    <div class="welcome-body">
+        <!-- 第 1 步：核心快捷键（沿用原引导内容） -->
+        <section class="welcome-step" id="step-0">
+            <div class="welcome-shortcuts" id="shortcut-list">
+                <!-- 由 JS 动态渲染 -->
+            </div>
+        </section>
+
+        <!-- 第 2 步：常用开关 -->
+        <section class="welcome-step hidden" id="step-1">
+            <h2 class="welcome-step-title" data-i18n="welcome.step2.title">常用开关</h2>
+            <p class="welcome-step-desc" data-i18n="welcome.step2.desc">按需开启，随时可在设置中修改。</p>
+            <div class="welcome-toggles" id="toggle-list">
+                <!-- 由 JS 动态渲染 -->
+            </div>
+            <p class="welcome-toggle-note" data-i18n="welcome.step2.ai_stt_hint">AI 对话和语音输入需要进设置页手动配置并开启后，快捷键才生效。</p>
+        </section>
+
+        <!-- 第 3 步：引擎增强 -->
+        <section class="welcome-step hidden" id="step-2">
+            <h2 class="welcome-step-title" data-i18n="welcome.step3.title">引擎增强</h2>
+            <p class="welcome-step-desc" data-i18n="welcome.step3.desc">可选增强，随时可跳过，稍后也能在设置中安装。</p>
+
+            <div class="welcome-engine-card">
+                <div class="welcome-engine-head">
+                    <span class="welcome-engine-name" data-i18n="welcome.step3.ocr.title">OCR 文字识别增强</span>
+                    <span class="welcome-engine-badge" data-i18n="welcome.step3.ocr.size">约 17 MB</span>
+                </div>
+                <p class="welcome-engine-desc" data-i18n="welcome.step3.ocr.desc">系统自带 OCR 对中文识别较弱；下载本地 PP-OCR 引擎后截图识别显著提升，装完自动生效，无需改配置。</p>
+                <div class="welcome-engine-progress hidden" id="ocr-progress">
+                    <div class="welcome-progress-bar">
+                        <div class="welcome-progress-bar-fill" id="ocr-progress-fill"></div>
+                    </div>
+                    <span class="welcome-progress-text" id="ocr-progress-text"></span>
+                </div>
+                <div class="welcome-engine-foot">
+                    <span class="welcome-engine-status" id="ocr-status"></span>
+                    <button class="welcome-btn welcome-btn--primary" data-i18n="welcome.step3.ocr.action" id="ocr-install-btn" type="button">一键下载</button>
+                </div>
+            </div>
+
+            <div class="welcome-engine-card">
+                <div class="welcome-engine-head">
+                    <span class="welcome-engine-name" data-i18n="welcome.step3.voice.title">语音识别（FunASR）</span>
+                </div>
+                <p class="welcome-engine-desc" data-i18n="welcome.step3.voice.desc">本地语音转文字，模型较大（237 MB 起），建议按需到引擎页下载。</p>
+                <div class="welcome-engine-foot">
+                    <span class="welcome-engine-status"></span>
+                    <button class="welcome-btn" data-i18n="welcome.step3.voice.action" id="voice-engines-btn" type="button">去引擎页下载</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第 4 步：完成 -->
+        <section class="welcome-step hidden" id="step-3">
+            <div class="welcome-done">
+                <svg class="welcome-done-icon" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                     stroke-width="2.5" viewBox="0 0 24 24">
+                    <path d="M20 6L9 17l-5-5z"/>
+                </svg>
+                <h2 class="welcome-step-title" data-i18n="welcome.step4.title">一切就绪！</h2>
+                <p class="welcome-step-desc" data-i18n="welcome.step4.desc">按 Alt+Space 唤出 Blink 开始使用；所有选项都可在设置中调整。</p>
+            </div>
+        </section>
     </div>
 
-    <!-- 开始使用按钮 -->
+    <!-- 底部导航 -->
     <div class="welcome-footer">
-        <button class="welcome-start-btn" data-i18n="welcome.start" id="start-btn">开始使用</button>
+        <button class="welcome-btn welcome-btn--ghost" data-i18n="welcome.nav.skip" id="skip-btn" type="button">跳过引导</button>
+        <div class="welcome-nav">
+            <button class="welcome-btn" data-i18n="welcome.nav.back" disabled id="back-btn" type="button">上一步</button>
+            <button class="welcome-btn welcome-btn--primary" data-i18n="welcome.nav.next" id="next-btn" type="button">下一步</button>
+        </div>
     </div>
 </div>
 

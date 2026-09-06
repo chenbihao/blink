@@ -1,13 +1,14 @@
 /* ── 引导窗口视图样式 ──────────────────────────────────────────────────────────
-   0.17.3：首次启动引导窗口。480×500 居中，圆角，与 app 主题一致。
-   优化：主快捷键与 Chord 快捷键分两组展示，避免误解为全局快捷键。 */
+   0.17.3：首次启动引导窗口。与 app 主题一致。
+   0.22.13：分步向导（4 步，步步可跳过/后退），窗口 560×560。
+   步骤指示器 / 开关行 / 引擎卡片 / 底部导航；文本一律 font-style: normal。 */
 
 .welcome-root {
     display: flex;
     flex-direction: column;
     align-items: center;
     height: 100vh;
-    padding: 24px 20px 16px;
+    padding: 20px 24px 16px;
     background: var(--bg);
     color: var(--text);
     font-family: var(--font-sans, "Segoe UI", system-ui, sans-serif);
@@ -22,23 +23,23 @@
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
 }
 
 .welcome-logo {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
     border-radius: var(--radius-lg, 8px);
     background: var(--accent, #89b4fa);
     margin-bottom: 2px;
 }
 
 .welcome-logo-icon {
-    width: 26px;
-    height: 26px;
+    width: 24px;
+    height: 24px;
     stroke: var(--bg, #1e1e2e);
     stroke-width: 2.5;
     fill: none;
@@ -60,26 +61,71 @@
     font-style: normal;
 }
 
-/* ── 快捷键列表 ─────────────────────────────────────────────────────────────── */
+/* ── 步骤指示器 ─────────────────────────────────────────────────────────────── */
+
+.welcome-steps {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.welcome-step-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--surface-hover, var(--surface1, #45475a));
+    transition: background var(--transition-fast, 0.1s), width var(--transition-fast, 0.1s);
+}
+
+.welcome-step-dot--active {
+    width: 18px;
+    border-radius: 3px;
+    background: var(--accent, #89b4fa);
+}
+
+/* ── 分步内容区 ─────────────────────────────────────────────────────────────── */
+
+.welcome-body {
+    flex: 1;
+    width: 100%;
+    max-width: 480px;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.welcome-step-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    color: var(--text);
+    font-style: normal;
+}
+
+.welcome-step-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0 0 12px;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.8;
+    font-style: normal;
+}
+
+/* ── 第 1 步：快捷键 ────────────────────────────────────────────────────────── */
 
 .welcome-shortcuts {
-    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 8px;
     width: 100%;
-    max-width: 320px;
+    max-width: 360px;
+    margin: 0 auto;
 }
-
-/* ── 分组容器 ───────────────────────────────────────────────────────────────── */
 
 .welcome-section {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
-
-/* ── 主快捷键分组 ── */
 
 .welcome-section--main {
     gap: 6px;
@@ -103,8 +149,6 @@
     opacity: 0.7;
     font-style: normal;
 }
-
-/* ── Chord 快捷键分组 ── */
 
 .welcome-section--chord {
     gap: 6px;
@@ -135,8 +179,6 @@
     gap: 4px;
 }
 
-/* ── 快捷键行（通用） ─────────────────────────────────────────────────────── */
-
 .welcome-shortcut-row {
     display: flex;
     align-items: center;
@@ -163,34 +205,296 @@
     gap: 2px;
 }
 
-/* ── Footer：开始使用按钮 ───────────────────────────────────────────────────── */
+/* ── 第 2 步：开关行 ────────────────────────────────────────────────────────── */
 
-.welcome-footer {
+.welcome-toggles {
     display: flex;
-    justify-content: center;
-    margin-top: 12px;
+    flex-direction: column;
+    gap: 8px;
 }
 
-.welcome-start-btn {
+.welcome-toggle-row {
     display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 8px 32px;
-    font-size: 14px;
-    font-weight: 600;
-    border: none;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 14px;
     border-radius: var(--radius-md, 6px);
-    background: var(--accent, #89b4fa);
-    color: var(--bg, #1e1e2e);
-    cursor: pointer;
-    transition: opacity var(--transition-fast, 0.1s), transform var(--transition-fast, 0.1s);
+    background: var(--surface, var(--surface0, #313244));
+}
+
+.welcome-toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.welcome-toggle-label {
+    font-size: 13px;
+    color: var(--text);
     font-style: normal;
 }
 
-.welcome-start-btn:hover {
-    opacity: 0.85;
+.welcome-toggle-desc {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.7;
+    font-style: normal;
 }
 
-.welcome-start-btn:active {
+/* 开关列表下方的补充提示（AI/语音输入需进设置页手动配置才生效） */
+.welcome-toggle-note {
+    margin: 12px 0 0;
+    padding: 0 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.7;
+    font-style: normal;
+}
+
+/* 迷你开关（自包含，不依赖设置页 switch 样式） */
+
+.welcome-switch {
+    position: relative;
+    display: inline-block;
+    flex-shrink: 0;
+    width: 36px;
+    height: 20px;
+}
+
+.welcome-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.welcome-switch-slider {
+    position: absolute;
+    inset: 0;
+    border-radius: 10px;
+    background: var(--surface-hover, var(--surface1, #45475a));
+    transition: background var(--transition-fast, 0.1s);
+}
+
+.welcome-switch-slider::before {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-sub, var(--subtext0, #a6adc8));
+    transition: transform var(--transition-fast, 0.1s), background var(--transition-fast, 0.1s);
+}
+
+.welcome-switch input:checked + .welcome-switch-slider {
+    background: var(--accent, #89b4fa);
+}
+
+.welcome-switch input:checked + .welcome-switch-slider::before {
+    transform: translateX(16px);
+    background: var(--bg, #1e1e2e);
+}
+
+/* ── 第 3 步：引擎卡片 ──────────────────────────────────────────────────────── */
+
+.welcome-engine-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    border-radius: var(--radius-md, 6px);
+    border: 1px solid color-mix(in srgb, var(--accent, #89b4fa) 16%, transparent);
+    background: var(--surface, var(--surface0, #313244));
+}
+
+.welcome-engine-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.welcome-engine-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    font-style: normal;
+}
+
+.welcome-engine-badge {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    background: var(--surface-hover, var(--surface1, #45475a));
+    font-style: normal;
+}
+
+.welcome-engine-desc {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.8;
+    font-style: normal;
+}
+
+.welcome-engine-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 28px;
+}
+
+.welcome-engine-status {
+    font-size: 12px;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    font-style: normal;
+}
+
+.welcome-engine-status--ok {
+    color: var(--accent, #89b4fa);
+}
+
+/* ── 第 3 步：OCR 下载进度（0.22.14）───────────────────────────────────────── */
+
+.welcome-engine-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 2px 0;
+}
+
+.welcome-progress-bar {
+    height: 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+    overflow: hidden;
+}
+
+.welcome-progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    background: var(--accent, #89b4fa);
+    transition: width var(--transition-base, 0.15s) ease-out;
+}
+
+/* 总量未知（无 Content-Length 且未锁大小）：脉动动画占位，不显示百分比 */
+.welcome-progress-bar-fill--indeterminate {
+    width: 30%;
+    animation: welcome-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes welcome-progress-indeterminate {
+    0% {
+        margin-left: -30%;
+    }
+    100% {
+        margin-left: 100%;
+    }
+}
+
+.welcome-progress-text {
+    font-size: 11px;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+    opacity: 0.75;
+    font-style: normal;
+}
+
+/* ── 第 4 步：完成 ──────────────────────────────────────────────────────────── */
+
+.welcome-done {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: 96px;
+    text-align: center;
+}
+
+.welcome-done-icon {
+    width: 40px;
+    height: 40px;
+    padding: 8px;
+    box-sizing: content-box;
+    border-radius: 50%;
+    stroke: var(--bg, #1e1e2e);
+    background: var(--accent, #89b4fa);
+}
+
+/* ── Footer：导航 ───────────────────────────────────────────────────────────── */
+
+.welcome-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 480px;
+    margin-top: 12px;
+}
+
+/* nav 始终贴右（margin-left:auto）——末页隐藏「跳过引导」后不向左漂移 */
+.welcome-nav {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+}
+
+/* ── 通用按钮（自包含，不依赖设置页按钮体系） ───────────────────────────────── */
+
+.welcome-btn {
+    padding: 7px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid var(--surface-hover, var(--surface1, #45475a));
+    border-radius: var(--radius-md, 6px);
+    background: var(--surface, var(--surface0, #313244));
+    color: var(--text);
+    cursor: pointer;
+    font-style: normal;
+    transition: background var(--transition-fast, 0.1s), opacity var(--transition-fast, 0.1s),
+        transform var(--transition-fast, 0.1s);
+}
+
+.welcome-btn:hover:not(:disabled) {
+    background: var(--surface-hover, var(--surface1, #45475a));
+}
+
+.welcome-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.welcome-btn--primary {
+    border-color: transparent;
+    background: var(--accent, #89b4fa);
+    color: var(--bg, #1e1e2e);
+    font-weight: 600;
+}
+
+.welcome-btn--primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent, #89b4fa) 85%, var(--bg, #1e1e2e));
+}
+
+.welcome-btn--primary:active:not(:disabled),
+.welcome-btn:active:not(:disabled) {
     transform: scale(0.97);
+}
+
+.welcome-btn--ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-sub, var(--subtext0, #a6adc8));
+}
+
+.welcome-btn--ghost:hover:not(:disabled) {
+    background: var(--surface, var(--surface0, #313244));
 }
