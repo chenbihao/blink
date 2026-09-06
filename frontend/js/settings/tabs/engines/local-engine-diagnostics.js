@@ -13,6 +13,7 @@
 import {renderIcon} from "../../../shared/icon.js";
 import {tt, copyTextWithFeedback} from "./local-engine-card-utils.js";
 import {formatLocalLogTimestamp} from "./local-engine-log-format.js";
+import {getEntry} from "./local-engine-state.js";
 
 /**
  * 展示引擎诊断信息（展开/收起切换）。
@@ -40,9 +41,18 @@ export function showEngineDiagnostics(entry, controller, i18n, anchorBtn, diagPa
 
 /**
  * 拉取并渲染诊断内容（可重复调用——"重新诊断"按钮复用）。
+ *
+ * entry 现场性：工具栏按钮闭包持有的 entry 是卡片首渲染快照，模型安装/
+ * 删除后的 models 状态不随之更新——「当前模型/模型文件」两行会拿安装前
+ * 的旧数据，与后端实时诊断（模型加载/进程）自相矛盾。每次刷新前经
+ * controller.getState() 现场解析最新 entry；controller 未提供 getState
+ * （测试 shim）时退回传入 entry。
  */
 function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
     const engineId = entry.catalog?.engine_id;
+    const freshEntry = (typeof controller?.getState === "function"
+        ? getEntry(controller.getState(), engineId)
+        : null) || entry;
     diagPanel.textContent = "";
     const requestId = String((Number(diagPanel.dataset.requestId) || 0) + 1);
     diagPanel.dataset.requestId = requestId;
@@ -57,8 +67,8 @@ function refreshEngineDiagnostics(entry, controller, i18n, diagPanel) {
         if (!diag || diag.engine_id !== engineId) {
             throw new Error(tt(i18n, "local_engine.diagnostic.engine_mismatch", "诊断响应与当前引擎不匹配"));
         }
-        renderDiagnosticContent(diagPanel, diag, i18n, engineId, entry, controller, () => {
-            refreshEngineDiagnostics(entry, controller, i18n, diagPanel);
+        renderDiagnosticContent(diagPanel, diag, i18n, engineId, freshEntry, controller, () => {
+            refreshEngineDiagnostics(freshEntry, controller, i18n, diagPanel);
         });
     }).catch((e) => {
         if (diagPanel.hidden || diagPanel.dataset.requestId !== requestId) return;
@@ -156,7 +166,7 @@ function selectedModelChecks(entry, i18n) {
         ? tt(i18n, `local_engine.model.verification.${selected.verification_state}`, selected.verification_state)
         : installed
             ? tt(i18n, `local_engine.model.verification.${selected.verification_state}`, selected.verification_state || "installed")
-            : tt(i18n, "local_engine.model.install.not_installed", "未下载");
+            : tt(i18n, "local_engine.model.install.not_installed", "未安装");
 
     return [
         {

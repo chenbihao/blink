@@ -100,7 +100,8 @@ async function mountLocalRuntime() {
             bodyEl: cleanupBody,
             confirmBtn: cleanupConfirmBtn,
             onConfirm: async (targetIds, mode) => {
-                if (!_leController) return;
+                if (!_leController) return null;
+                let result;
                 if (mode === "shared") {
                     // 公共缓存——不限定单引擎，用第一个 affected engine 的 cleanup
                     // 后端重新解析 target_id
@@ -108,16 +109,18 @@ async function mountLocalRuntime() {
                     const shared = aggregateSharedTargets(state);
                     const target = shared.find((t) => t.target_id === targetIds[0]);
                     const engineId = target?.affected_engine_ids?.[0] || target?.engine_id || "funasr";
-                    await _leController.cleanup(engineId, targetIds);
+                    result = await _leController.cleanup(engineId, targetIds);
                 } else {
                     // 单引擎清理——targetIds 已来自该引擎 storage
                     // engineId 由 open 调用时传入（见 onCleanupOpen）
                     const engineId = cleanupModalEl.dataset.leCleanupEngineId || "";
-                    await _leController.cleanup(engineId, targetIds);
+                    result = await _leController.cleanup(engineId, targetIds);
                 }
                 // 成功后刷新 status/storage
                 await _leController.refreshStatus();
                 await _leController.refreshAllStorage();
+                // 返回给 modal 渲染结果面板（全部成功时 modal 直接关闭）
+                return result || null;
             },
         });
     }
@@ -430,7 +433,10 @@ function renderSharedStorage(state) {
 
     const cleanupBtn = document.getElementById("le-shared-cleanup-btn");
     if (cleanupBtn) {
-        cleanupBtn.hidden = false;
+        // 条件化入口：只有存在可清理（removable 且未被 blocked）的共享资产时出现
+        cleanupBtn.hidden = !shared.some(
+            (t) => t.removable && !t.blocked_reason && !t.current,
+        );
         // 只注册一次
         if (!cleanupBtn.dataset.leWired) {
             cleanupBtn.dataset.leWired = "1";

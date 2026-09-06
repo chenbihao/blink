@@ -150,7 +150,8 @@
 #engines .le-maintenance {
     padding: 0.75rem var(--le-card-pad-x, 16px) 1rem;
     border-top: 1px solid var(--surface);
-    background: var(--bg);
+    /* 四个卡片级折叠面板（模型/日志/维护/诊断）同壳同底色 */
+    background: var(--bg-deep);
 }
 
 #engines .le-maintenance[hidden] {
@@ -573,7 +574,8 @@
 #engines .le-model-list {
     padding: 0.875rem var(--le-card-pad-x, 16px) 1rem;
     border-top: 1px solid var(--surface);
-    background: var(--bg);
+    /* 四个卡片级折叠面板（模型/日志/维护/诊断）同壳同底色 */
+    background: var(--bg-deep);
 }
 
 #engines .le-model-list-title {

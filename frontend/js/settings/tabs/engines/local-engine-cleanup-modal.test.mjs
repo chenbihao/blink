@@ -5,7 +5,7 @@
  * 1. aggregateSharedTargets：跨引擎聚合、去重、合并 affected_engine_ids
  * 2. createCleanupModal：open/close/dispose 生命周期
  * 3. createCleanupModal：空 targets / current / blocked / shared 选择逻辑
- * 4. createCleanupModal：confirm 成功关闭、失败保留、重复提交防护
+ * 4. createCleanupModal：confirm 成功关闭、失败保留、重复提交防护、结果面板（部分成功/跳过）
  * 5. createCleanupModal：mode 传递正确
  *
  * 通过 mock window.__TAURI__ + 最小 document mock 后动态导入模块，
@@ -376,6 +376,93 @@ await asyncTest("createCleanupModal：shared 模式传入 mode=shared", async ()
     confirmBtn.click();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(receivedMode, "shared");
+});
+
+// ── 5. 清理结果反馈（onConfirm 返回 CleanupResultDto）────────────────────
+
+await asyncTest("createCleanupModal：全部成功（无 skipped）→ 关闭 modal", async () => {
+    const {modal, modalEl, confirmBtn} = makeModal({
+        onConfirm: async () => ({
+            engine_id: "funasr",
+            operation_id: "op-1",
+            cleaned_target_ids: ["cache:staging"],
+            skipped_target_ids: [],
+            deferred_target_ids: [],
+            released_bytes: 300 * 1024 * 1024,
+            error: null,
+        }),
+    });
+    modal.open({targets: [makeTarget({target_id: "cache:staging", kind: "engine_cache"})], mode: "engine"});
+    confirmBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(modalEl.hidden, true, "全部成功应关闭 modal");
+});
+
+await asyncTest("createCleanupModal：全部跳过 → 保留 modal 并展示跳过原因", async () => {
+    const {modal, modalEl, bodyEl, confirmBtn} = makeModal({
+        onConfirm: async () => ({
+            engine_id: "funasr",
+            operation_id: "op-2",
+            cleaned_target_ids: [],
+            skipped_target_ids: ["cache:model_cache"],
+            deferred_target_ids: [],
+            released_bytes: 0,
+            error: "cache:model_cache: 路径逃逸: C:\\Users\\t\\blink\\models\\funasr",
+        }),
+    });
+    modal.open({
+        targets: [makeTarget({target_id: "cache:model_cache", kind: "engine_cache", label_fallback: "模型缓存残留"})],
+        mode: "engine",
+    });
+    confirmBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(modalEl.hidden, false, "有 skipped 时 modal 应保持打开");
+    const resultDiv = bodyEl._children.find((c) => (c.className || "").includes("le-cleanup-result"));
+    assert.ok(resultDiv, "应渲染结果面板");
+    const texts = resultDiv._children.map((c) => c._textContent).join("\n");
+    assert.ok(texts.includes("cache:model_cache"), "应包含跳过 target 的原因");
+    assert.ok(!texts.includes("已清理"), "无清理项时不应显示释放量");
+});
+
+await asyncTest("createCleanupModal：部分成功 + 部分跳过 → 展示释放量与原因", async () => {
+    const {modal, modalEl, bodyEl, confirmBtn} = makeModal({
+        onConfirm: async () => ({
+            engine_id: "funasr",
+            operation_id: "op-3",
+            cleaned_target_ids: ["cache:staging", "environment:slot-b"],
+            skipped_target_ids: ["shared_runtime:python_venv:py312"],
+            deferred_target_ids: [],
+            released_bytes: 250 * 1024 * 1024,
+            error: "shared_runtime:python_venv:py312: 仍被引用, refs=1",
+        }),
+    });
+    modal.open({
+        targets: [
+            makeTarget({target_id: "cache:staging", kind: "engine_cache"}),
+            makeTarget({target_id: "environment:slot-b"}),
+            makeTarget({target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true}),
+        ],
+        mode: "engine",
+    });
+    confirmBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(modalEl.hidden, false, "部分跳过时 modal 应保持打开");
+    const resultDiv = bodyEl._children.find((c) => (c.className || "").includes("le-cleanup-result"));
+    assert.ok(resultDiv, "应渲染结果面板");
+    const texts = resultDiv._children.map((c) => c._textContent).join("\n");
+    assert.ok(texts.includes("已清理 2 项"), "应显示清理项数");
+    assert.ok(texts.includes("250 MB"), "应显示释放量");
+    assert.ok(texts.includes("仍被引用"), "应显示跳过原因");
+});
+
+await asyncTest("createCleanupModal：onConfirm 返回 null（旧调用方）→ 视为成功关闭", async () => {
+    const {modal, modalEl, confirmBtn} = makeModal({
+        onConfirm: async () => {},
+    });
+    modal.open({targets: [makeTarget()], mode: "engine"});
+    confirmBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(modalEl.hidden, true, "无结果对象时保持原行为（关闭）");
 });
 
 // ── 汇总 ──────────────────────────────────────────────────────────────────

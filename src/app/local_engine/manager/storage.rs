@@ -278,29 +278,33 @@ fn scan_engine_storage_blocking(
         });
     }
 
-    // ── 3. 引擎自有模型缓存目录——引擎私有缓存 ──
+    // ── 3. 引擎自有模型目录——已安装模型资产之外的孤儿残留 ──
+    // `models/{engine}` 同时是已安装模型的资产根：统计与清理都必须排除
+    // 托管资产目录，否则已安装模型会被重复计入"可清理"（虚标 1.1 GB 的根因）。
     let model_cache_dir = runtime::engine_model_cache_dir(engine_id);
     if model_cache_dir.exists() {
-        let size = dir_size(&model_cache_dir);
-        total_bytes += size;
-        releasable_bytes += size;
+        let orphan_bytes = model_cache_orphan_bytes(&model_cache_dir);
+        if orphan_bytes > 0 {
+            total_bytes += orphan_bytes;
+            releasable_bytes += orphan_bytes;
 
-        targets.push(super::super::dto::StorageTargetDto {
-            target_id: "cache:model_cache".to_string(),
-            kind: super::super::dto::StorageTargetKindDto::EngineCache,
-            engine_id: Some(engine_id.to_string()),
-            label_key: "local_engine.storage.engine_model_cache".to_string(),
-            label_fallback: "模型缓存".to_string(),
-            size_bytes: size,
-            current: false,
-            removable: true,
-            shared: false,
-            requires_separate_confirmation: false,
-            blocked_reason: None,
-            affected_engine_ids: None,
-            reference_count: None,
-            path_display: Some(model_cache_dir.display().to_string()),
-        });
+            targets.push(super::super::dto::StorageTargetDto {
+                target_id: "cache:model_cache".to_string(),
+                kind: super::super::dto::StorageTargetKindDto::EngineCache,
+                engine_id: Some(engine_id.to_string()),
+                label_key: "local_engine.storage.engine_model_cache".to_string(),
+                label_fallback: "模型缓存残留".to_string(),
+                size_bytes: orphan_bytes,
+                current: false,
+                removable: true,
+                shared: false,
+                requires_separate_confirmation: false,
+                blocked_reason: None,
+                affected_engine_ids: None,
+                reference_count: None,
+                path_display: Some(model_cache_dir.display().to_string()),
+            });
+        }
     }
 
     // ── 4. 已安装模型（删除走模型管理的引用检查，不在存储清理中删除） ──
@@ -525,7 +529,7 @@ fn scan_engine_storage_blocking(
 /// - `environment:impl-{implementation}:{slot}` — implementation 级空间的
 ///   非 active 引擎环境（active 删除保护按 implementation 独立生效）
 /// - `cache:staging` — 事务构建残留（引擎全部空间）
-/// - `cache:model_cache` — 引擎自有模型缓存
+/// - `cache:model_cache` — 引擎模型目录中的孤儿残留（已安装模型资产受保护）
 /// - `shared_runtime:{runtime_kind}:{artifact_id}` — 共享托管运行时
 /// - `shared_download_cache:{runtime_kind}` — 共享下载缓存
 /// - `model:{model_id}` — 已安装模型（拒绝：删除走模型管理）
@@ -720,7 +724,7 @@ fn measure_cleanup_scope(scope: &crate::infra::local_engine::runtime::CleanupSco
         }
         CleanupScope::EngineModelCache { engine_id } => {
             let dir = crate::infra::local_engine::runtime::engine_model_cache_dir(engine_id);
-            dir_size(&dir)
+            model_cache_orphan_bytes(&dir)
         }
         CleanupScope::ProviderSharedArtifact {
             runtime_kind,
@@ -743,10 +747,32 @@ fn measure_cleanup_scope(scope: &crate::infra::local_engine::runtime::CleanupSco
     }
 }
 
-/// 递归计算目录大小（字节数）。
+/// `models/{engine}` 中非托管子项的总字节数（孤儿目录 / 安装残留）。
+///
+/// 托管判定用 `mstore::is_managed_asset_dir`——与 `execute_cleanup` 的
+/// 删除保护同一条规则，保证"扫描显示可清理的字节"与"清理实际删除的字节"一致。
+fn model_cache_orphan_bytes(model_cache_dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(model_cache_dir) else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && mstore::is_managed_asset_dir(&path) {
+            continue;
+        }
+        total += dir_size(&path);
+    }
+    total
+}
+
+/// 递归计算目录/文件大小（字节数）。
 fn dir_size(path: &std::path::Path) -> u64 {
     if !path.exists() {
         return 0;
+    }
+    if path.is_file() {
+        return std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     }
     let mut total: u64 = 0;
     let mut stack = vec![path.to_path_buf()];

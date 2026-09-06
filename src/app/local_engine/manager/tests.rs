@@ -488,7 +488,6 @@ async fn manager_cancel_gates_next_operation_until_worker_finishes() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &tag, &format!("{tag}-b")),
         installer.clone(),
     );
@@ -549,7 +548,6 @@ async fn model_install_does_not_block_stop_and_env_repair() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &tag, &format!("{tag}-b")),
         installer.clone(),
     );
@@ -599,7 +597,6 @@ async fn two_model_installs_same_engine_second_rejected() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &tag_a, &tag_b),
         installer.clone(),
     );
@@ -656,7 +653,6 @@ async fn different_engines_install_models_concurrently() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         catalog,
         Arc::new(BarrierInstaller {
             barrier: barrier.clone(),
@@ -696,7 +692,6 @@ async fn selected_and_active_are_independent() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &models[0], &models[1]),
         Arc::new(super::super::model_installer::FakeInstaller::success()),
     );
@@ -728,14 +723,14 @@ async fn selected_and_active_are_independent() {
 async fn installed_model_verification_follows_manifest_source() {
     let eid = EngineId::new("fake-verif").unwrap();
     let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
-        "fake-verif", true,
+        "fake-verif",
+        true,
     )]));
     let tag = unique_tag("verif");
     let svc = EngineManager::new_with_providers(
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &tag, &format!("{tag}-b")),
         Arc::new(super::super::model_installer::FakeInstaller::success()),
     );
@@ -775,7 +770,6 @@ async fn delete_active_model_blocked_by_launch_snapshot() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &tag, &format!("{tag}-b")),
         Arc::new(installer),
     );
@@ -818,7 +812,6 @@ async fn descriptor_default_model_is_deletable() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &default_like, &format!("{tag}-b")),
         Arc::new(super::super::model_installer::FakeInstaller::success()),
     );
@@ -852,7 +845,6 @@ async fn repair_model_after_install_in_same_session_succeeds() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &tag, &format!("{tag}-b")),
         Arc::new(super::super::model_installer::FakeInstaller::success()),
     );
@@ -885,7 +877,6 @@ async fn delete_not_installed_returns_error() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &models[0], &models[1]),
         Arc::new(super::super::model_installer::FakeInstaller::success()),
     );
@@ -1120,6 +1111,73 @@ async fn scan_storage_targets_no_full_paths() {
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 }
 
+/// 扫描去重：`models/{engine}` 里的托管模型资产不计入 `cache:model_cache`，
+/// 只有孤儿残留产出清理 target——否则已安装模型被重复标为"可清理"。
+#[tokio::test]
+async fn scan_storage_model_cache_excludes_installed_assets() {
+    let svc = make_service("fake-scan-mc");
+    let eid = EngineId::new("fake-scan-mc").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let _ = std::fs::remove_dir_all(mstore::engine_model_root(&eid));
+
+    // 托管模型资产（slots + active.json 标记）+ 一个孤儿残留目录
+    let asset_key = mstore::encode_asset_key("gguf/test-model");
+    let asset_dir = mstore::asset_root(&eid, &asset_key).unwrap();
+    std::fs::create_dir_all(asset_dir.join("slots").join("rev-1")).unwrap();
+    std::fs::write(asset_dir.join("active.json"), b"{}").unwrap();
+    let orphan = mstore::engine_model_root(&eid).join("tmp-download-stale");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("part.bin"), vec![0u8; 4096]).unwrap();
+
+    let dto = svc.scan_storage(&eid).await.unwrap();
+    let cache = dto
+        .targets
+        .iter()
+        .find(|t| t.target_id == "cache:model_cache")
+        .expect("有孤儿残留时应产出 cache:model_cache target");
+    assert_eq!(cache.size_bytes, 4096, "只统计孤儿，不含托管模型资产");
+    assert!(cache.removable);
+
+    // 孤儿清空后不再产出 cache target
+    std::fs::remove_dir_all(&orphan).unwrap();
+    let dto = svc.scan_storage(&eid).await.unwrap();
+    assert!(!dto
+        .targets
+        .iter()
+        .any(|t| t.target_id == "cache:model_cache"));
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let _ = std::fs::remove_dir_all(mstore::engine_model_root(&eid));
+}
+
+/// 清理保护：`cache:model_cache` 只删孤儿残留，已安装模型资产必须保留。
+#[tokio::test]
+async fn cleanup_model_cache_keeps_managed_assets() {
+    let svc = make_service("fake-clean-mc");
+    let eid = EngineId::new("fake-clean-mc").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let _ = std::fs::remove_dir_all(mstore::engine_model_root(&eid));
+
+    let asset_key = mstore::encode_asset_key("gguf/keep-model");
+    let asset_dir = mstore::asset_root(&eid, &asset_key).unwrap();
+    std::fs::create_dir_all(asset_dir.join("slots").join("rev-1")).unwrap();
+    std::fs::write(asset_dir.join("active.json"), b"{}").unwrap();
+    let orphan = mstore::engine_model_root(&eid).join("stale-tmp");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("junk.bin"), b"x").unwrap();
+
+    let result = svc
+        .cleanup_targets(&eid, &["cache:model_cache".to_string()], None)
+        .await
+        .unwrap();
+    assert!(result.cleaned_target_ids.contains(&"cache:model_cache".to_string()));
+    assert!(asset_dir.exists(), "托管模型资产不可删");
+    assert!(!orphan.exists(), "孤儿残留应被清理");
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let _ = std::fs::remove_dir_all(mstore::engine_model_root(&eid));
+}
+
 // ── 孤儿与关停 ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1259,7 +1317,6 @@ async fn model_staging_validation_failure_is_visible_in_operation_logs() {
         registry,
         port.clone(),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(&eid, &model_id, &fallback_id),
         Arc::new(super::super::model_installer::FakeInstaller::success()),
     );
@@ -1509,7 +1566,6 @@ async fn inprocess_start_freezes_implementation_and_stop_clears() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         super::super::model_installer::ModelRegistry::empty(),
         Arc::new(super::super::model_installer::NoopModelWorker),
         make_inprocess_impl_registry(&eid),
@@ -1552,7 +1608,6 @@ async fn implementation_resolution_is_fail_closed() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         super::super::model_installer::ModelRegistry::empty(),
         Arc::new(super::super::model_installer::NoopModelWorker),
     );
@@ -1608,7 +1663,6 @@ async fn frozen_implementation_is_independent_of_selected() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         super::super::model_installer::ModelRegistry::empty(),
         Arc::new(super::super::model_installer::NoopModelWorker),
     );
@@ -1816,7 +1870,6 @@ async fn install_fails_closed_when_contract_model_unbound() {
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         super::super::model_installer::ModelRegistry::empty(),
         Arc::new(super::super::model_installer::NoopModelWorker),
         impl_registry,
@@ -1951,7 +2004,6 @@ fn make_switch_manager(
         registry,
         Arc::new(NoopEventPort),
         HashMap::new(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         make_model_registry(eid, "fake-model", "fake-model-2"),
         Arc::new(super::super::model_installer::NoopModelWorker),
         impl_registry,

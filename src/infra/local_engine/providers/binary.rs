@@ -60,31 +60,49 @@ struct BundledSource {
 
 /// 定位捆绑 worker 目录。
 ///
-/// 委托 app 层注入的解析器？——不：infra 不依赖 app。这里按固定候选布局
-/// 解析（exe 同级 / 上溯仓库根 / resources 子目录），与 app 层
-/// `resolve_bundled_worker_dir` 保持一致布局常量。
+/// infra 不依赖 app，这里按固定候选布局解析（exe 同级 / 上溯仓库根 /
+/// resources 子目录）。候选构造与命中判定拆开，便于对安装布局做单元测试。
 fn resolve_bundled_dir(relative: &str) -> Option<std::path::PathBuf> {
+    let exe_dir = current_exe_dir()?;
+    find_bundled_dir(&exe_dir, relative)
+}
+
+/// 当前进程 exe 所在目录。
+fn current_exe_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    let rel = std::path::Path::new(relative);
-    // dev 布局上溯：target/debug[/deps] → 仓库根。release 布局：安装目录同级。
-    let candidates = [
-        exe_dir.join(rel),
-        exe_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|root| root.join("resources").join(rel))?,
-        // 测试二进制位于 target/debug/deps/ —— 需再上溯一级
-        exe_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .map(|root| root.join("resources").join(rel))?,
-        exe_dir.join("resources").join(rel),
-    ];
-    candidates
+    exe.parent().map(|p| p.to_path_buf())
+}
+
+/// 在候选布局中命中第一个含 manifest.json 的捆绑目录。
+fn find_bundled_dir(exe_dir: &Path, relative: &str) -> Option<std::path::PathBuf> {
+    bundled_dir_candidates(exe_dir, relative)
         .into_iter()
         .find(|d| d.join("manifest.json").is_file())
+}
+
+/// 构造捆绑目录候选列表（顺序即优先级）。
+///
+/// 每个候选独立判断：某级父目录不存在（如安装目录浅至盘根下一级，
+/// 上溯链提前耗尽）只跳过该候选，绝不影响后续候选——安装版布局
+/// （exe 同级 `resources/`）必须永远参与命中判定。
+fn bundled_dir_candidates(exe_dir: &Path, relative: &str) -> Vec<std::path::PathBuf> {
+    let rel = std::path::Path::new(relative);
+    let mut candidates = vec![exe_dir.join(rel)];
+    // dev 布局上溯：target/debug → 仓库根（上溯 2 级）
+    if let Some(root) = exe_dir.parent().and_then(|p| p.parent()) {
+        candidates.push(root.join("resources").join(rel));
+    }
+    // 测试二进制位于 target/debug/deps/ —— 需再上溯一级
+    if let Some(root) = exe_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+    {
+        candidates.push(root.join("resources").join(rel));
+    }
+    // release 安装布局：exe 同级 resources/
+    candidates.push(exe_dir.join("resources").join(rel));
+    candidates
 }
 
 fn sha256_file(path: &Path) -> Result<String, RuntimeError> {
@@ -170,7 +188,7 @@ impl RuntimeProvider for ManagedBinaryProvider {
                     return Ok(false);
                 }
                 // 检查 nvidia-smi
-                Ok(crate::infra::platform::python::detect_cuda().is_some())
+                Ok(crate::infra::platform::gpu::detect_cuda().is_some())
             }
             CompatibilityCheck::RequiresVulkan => {
                 if !self.allow_gpu {
@@ -227,8 +245,15 @@ impl RuntimeProvider for ManagedBinaryProvider {
         let source_dir =
             resolve_bundled_dir(bundled_relative).ok_or_else(|| RuntimeError::InstallFailed {
                 message: format!(
-                    "未找到随发布捆绑的 worker 目录（{bundled_relative}）。\
-                     开发环境请先运行 `cargo xtask funasr-worker` 构建 worker。"
+                    "未找到随发布捆绑的 worker 目录（{bundled_relative}），已按序搜索: {}。\
+                     开发环境请先运行 `cargo xtask funasr-worker` 构建 worker。",
+                    current_exe_dir()
+                        .map(|dir| bundled_dir_candidates(&dir, bundled_relative))
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("；")
                 ),
             })?;
 
@@ -616,5 +641,61 @@ mod tests {
                 })
                 .unwrap()
         );
+    }
+
+    /// 浅安装布局（距盘根仅两级，如 `D:\DevTools\Blink`）：上溯链在盘根
+    /// 提前耗尽，但安装版候选（exe 同级 resources/）必须仍在列表中。
+    /// 回归：0.22.7-0.22.10 候选数组内 `?` 短路导致安装版永远解析失败。
+    #[test]
+    fn bundled_dir_candidates_shallow_install_layout() {
+        let exe_dir = Path::new("D:\\DevTools\\Blink");
+        assert_eq!(exe_dir.parent().and_then(|p| p.parent()), Some(Path::new("D:\\")));
+        assert_eq!(exe_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()), None);
+
+        let candidates = bundled_dir_candidates(exe_dir, "bin/funasr-worker");
+        let last = candidates.last().expect("候选列表不得为空");
+        assert_eq!(
+            last.as_path(),
+            exe_dir.join("resources").join("bin/funasr-worker").as_path(),
+            "安装版布局候选必须始终参与命中判定"
+        );
+    }
+
+    /// 命中判定：浅安装布局下 exe 同级 resources/ 可被解析到。
+    #[test]
+    fn find_bundled_dir_resolves_shallow_install_layout() {
+        let root = test_temp_root("shallow-install");
+        let exe_dir = root.join("Blink");
+        let bundled = exe_dir.join("resources").join("bin").join("funasr-worker");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("manifest.json"), "{\"schema\":1}").unwrap();
+
+        let found = find_bundled_dir(&exe_dir, "bin/funasr-worker");
+        assert_eq!(found.as_deref(), Some(bundled.as_path()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 命中判定：dev 布局（target/debug → 仓库根 resources/）仍然有效。
+    #[test]
+    fn find_bundled_dir_resolves_dev_layout() {
+        let root = test_temp_root("dev-layout");
+        let exe_dir = root.join("target").join("debug");
+        let bundled = root.join("resources").join("bin").join("funasr-worker");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("manifest.json"), "{\"schema\":1}").unwrap();
+
+        let found = find_bundled_dir(&exe_dir, "bin/funasr-worker");
+        assert_eq!(found.as_deref(), Some(bundled.as_path()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn test_temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("blink-binary-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
     }
 }

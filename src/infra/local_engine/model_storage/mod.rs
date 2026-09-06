@@ -121,6 +121,31 @@ pub fn asset_root(engine_id: &EngineId, asset_key: &str) -> Result<PathBuf, Runt
     Ok(engine_model_root(engine_id).join(asset_key))
 }
 
+/// 判断目录是否为托管模型资产（已安装/事务中的模型目录）。
+///
+/// 判定 = 合法 asset_key 名 + 任一资产布局标记（active.json / slots /
+/// staging / transaction.json / cleanup-residue.json）。
+///
+/// `models/{engine}` 同时是模型资产根与模型缓存清理范围——缓存清理
+/// 只删非托管子项，已安装模型的保护全靠本判定（与存储扫描的"孤儿
+/// 残留"统计共用同一规则，两侧口径必须一致）。
+pub fn is_managed_asset_dir(dir: &std::path::Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if validate_asset_key(name).is_err() {
+        return false;
+    }
+    const ASSET_MARKERS: [&str; 5] = [
+        "active.json",
+        "slots",
+        "staging",
+        "transaction.json",
+        "cleanup-residue.json",
+    ];
+    ASSET_MARKERS.iter().any(|marker| dir.join(marker).exists())
+}
+
 /// active.json 路径：`models/{engine_id}/{asset_key}/active.json`
 pub fn model_active_pointer_path(
     engine_id: &EngineId,

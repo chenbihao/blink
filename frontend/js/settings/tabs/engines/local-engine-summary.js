@@ -24,6 +24,7 @@ import {
     isPendingRestart,
     hasDeploymentMismatch,
     getLegacyDeployment,
+    selectedModelDownloadState,
 } from "./local-engine-state.js";
 import {getSelection} from "./local-engine-selection.js";
 
@@ -728,7 +729,8 @@ function iconForKind(kind) {
  * - cancellable operation → 取消
  * - 忙碌（乐观 pending / 活跃 operation 且不可取消）→ 不可点的"{kind}中"
  * - missing → 安装环境；broken/needs_rebuild → 修复环境
- * - stopped/exited → 启动
+ * - stopped/exited → 启动；选中模型未下载 → 下载模型（0.22.10），
+ *   模型资产操作进行中 → 禁用的"模型下载中"
  * - starting/running/stopping → 停止服务
  *
  * kind 为 null 时按钮 disabled（等待态）。
@@ -787,6 +789,28 @@ export function primaryActionView(entry, t) {
     }
 
     const primary = getPrimaryAction(entry);
+    // 0.22.10: 选中模型未下载 → 主操作引导为「下载模型」而不是发起注定
+    // 失败的启动（后端会以 ModelNotReady 拒绝）；模型资产操作进行中 →
+    // 禁用的等待态（取消入口在模型行，主按钮只如实呈现忙碌）
+    if (primary === "start") {
+        const downloadState = selectedModelDownloadState(entry);
+        if (downloadState === "need_download") {
+            return {
+                kind: "download_model",
+                label: tx(t, "local_engine.action.download_model", "下载模型"),
+                icon: "download",
+                disabled: false,
+            };
+        }
+        if (downloadState === "busy") {
+            return {
+                kind: null,
+                label: tx(t, "local_engine.action.downloading_model", "模型下载中"),
+                icon: "download",
+                disabled: true,
+            };
+        }
+    }
     switch (primary) {
         case "install":
             return {

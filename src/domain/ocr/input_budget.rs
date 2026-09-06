@@ -1,7 +1,7 @@
 //! OCR 输入资源预算（0.22.6.1）。
 //!
-//! 与 Python 侧 `resources/ocr/paddleocr/blink_ocr_server.py` 的信任边界
-//! **两侧一致**（后者在 PIL → numpy 解码前重复执行同一检查）：
+//! （0.22.6.1 时期与已退役的 Python OCR server 两侧一致；0.22.10 起
+//! Python 侧已删除，Rust 侧作为唯一信任边界继续强制执行。）
 //!
 //! - compressed/input bytes ≤ 32 MiB（与 ImageStash 单项上限一致）
 //! - 单边尺寸 ≤ 16384 px
@@ -192,29 +192,8 @@ mod tests {
         assert!(validate_ocr_input(&png).is_ok());
     }
 
-    // ── Rust/Python 契约锁定（防两侧常量静默漂移） ─────────────────────────
-
-    const PYTHON_SERVER_SRC: &str =
-        include_str!("../../../resources/ocr/paddleocr/blink_ocr_server.py");
-
-    #[test]
-    fn python_budget_constants_match_rust_contract() {
-        for expected in [
-            "MAX_BODY_BYTES = 32 * 1024 * 1024",
-            "MAX_DIMENSION = 16384",
-            "MAX_DECODED_BYTES = 256 * 1024 * 1024",
-        ] {
-            assert!(
-                PYTHON_SERVER_SRC.contains(expected),
-                "Python OCR 服务预算常量漂移：缺少 `{expected}`（Rust 侧 32MiB/16384/256MiB）"
-            );
-        }
-        // 413 必须用于超预算响应（投影为 input_too_large，而非 ProtocolError/Internal）
-        assert!(
-            PYTHON_SERVER_SRC.contains("status_code=413"),
-            "Python OCR 服务超预算必须返回 HTTP 413"
-        );
-    }
+    // 0.22.10：原「Rust/Python 契约锁定」测试随 Python OCR server 退役删除；
+    // Rust 侧常量契约由下方测试继续锁定。
 
     #[test]
     fn rust_constants_match_contract_values() {

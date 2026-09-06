@@ -116,6 +116,10 @@ class ShimElement {
         this._attrs[name] = String(value);
     }
 
+    removeAttribute(name) {
+        delete this._attrs[name];
+    }
+
     getAttribute(name) {
         return name in this._attrs ? this._attrs[name] : null;
     }
@@ -415,6 +419,54 @@ await test("维护面板默认折叠，展开/收起同步 aria-expanded", () =>
     toggle.click();
     assert.equal(maint.hidden, true, "再次点击收起");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
+});
+
+// ── 清理入口双态（清理 / 查看占用）────────────────────────────────────────
+
+const VIEW_MODE_TARGETS = {
+    total_size_bytes: 1153 * 1024 * 1024,
+    releasable_size_bytes: 0,
+};
+
+await test("清理入口双态：无可清理 → 「查看占用」", () => {
+    const container = makeContainer();
+    const entry = makeEntry("funasr", {status: READY_STOPPED});
+    entry.storage = {
+        ...VIEW_MODE_TARGETS,
+        targets: [
+            {target_id: "environment:slot-a", kind: "engine_environment", removable: false, blocked_reason: "current_environment", current: true},
+            {target_id: "model:gguf/a", kind: "installed_model", removable: false, blocked_reason: "model_managed", current: false},
+        ],
+    };
+    renderEngineCard(container, entry, controllerStub, undefined);
+    const card = container.querySelector(".le-card");
+    assert.ok(card.textContent.includes("查看占用"), "无可清理时入口变为查看占用");
+    assert.ok(!card.textContent.includes("清理引擎缓存"), "不再显示清理入口");
+    assert.ok(card.textContent.includes("无残留"), "占用行提示无残留");
+    // SVG 无 hidden IDL 属性，隐显必须走 attribute（回归锁定）
+    const icons = card.querySelector(".le-maintenance-cleanup").querySelectorAll("svg");
+    assert.equal(icons[0].getAttribute("hidden"), "", "trash 图标应带 hidden attribute");
+    assert.equal(icons[1].getAttribute("hidden"), null, "database 图标应可见");
+});
+
+await test("清理入口双态：有可清理 → 「清理引擎缓存」", () => {
+    const container = makeContainer();
+    const entry = makeEntry("funasr", {status: READY_STOPPED});
+    entry.storage = {
+        total_size_bytes: 1160 * 1024 * 1024,
+        releasable_size_bytes: 7 * 1024 * 1024,
+        targets: [
+            {target_id: "environment:slot-a", kind: "engine_environment", removable: false, blocked_reason: "current_environment", current: true},
+            {target_id: "cache:model_cache", kind: "engine_cache", removable: true, blocked_reason: null, current: false},
+        ],
+    };
+    renderEngineCard(container, entry, controllerStub, undefined);
+    const card = container.querySelector(".le-card");
+    assert.ok(card.textContent.includes("清理引擎缓存"), "有可清理项时入口为清理");
+    assert.ok(card.textContent.includes("可释放"), "占用行显示可释放量");
+    const icons = card.querySelector(".le-maintenance-cleanup").querySelectorAll("svg");
+    assert.equal(icons[0].getAttribute("hidden"), null, "trash 图标应可见");
+    assert.equal(icons[1].getAttribute("hidden"), "", "database 图标应带 hidden attribute");
 });
 
 await test("模型/日志/维护面板互斥，打开目录位于工具栏右侧", () => {

@@ -31,6 +31,19 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 /// 进度日志间隔（按已下载字节）。
 const PROGRESS_LOG_STEP_BYTES: u64 = 32 * 1024 * 1024;
 
+/// 进度日志文案：`{file}: 已下载 {mb}/{total_mb} MB ({pct}%)`。
+/// Content-Length 缺失（total_size=0，chunked 传输）时退化为只报已下载量。
+fn format_progress_log(file_name: &str, downloaded: u64, total_size: u64) -> String {
+    let mb = downloaded / (1024 * 1024);
+    if total_size > 0 {
+        let total_mb = total_size / (1024 * 1024);
+        let pct = (downloaded * 100) / total_size;
+        format!("{file_name}: 已下载 {mb}/{total_mb} MB ({pct}%)")
+    } else {
+        format!("{file_name}: 已下载 {mb} MB")
+    }
+}
+
 pub struct FunasrGgufModelInstallWorker;
 
 impl FunasrGgufModelInstallWorker {
@@ -173,12 +186,7 @@ async fn download_file(
                     }
                     downloaded += bytes.len() as u64;
                     if downloaded >= next_progress {
-                        let mb = downloaded / (1024 * 1024);
-                        let pct = (downloaded * 100)
-                            .checked_div(total_size)
-                            .map(|p| format!(" ({p})"))
-                            .unwrap_or_default();
-                        on_log(&format!("{file_name}: 已下载 {mb} MB{pct}"));
+                        on_log(&format_progress_log(file_name, downloaded, total_size));
                         next_progress += PROGRESS_LOG_STEP_BYTES;
                     }
                 }
@@ -487,7 +495,7 @@ async fn copy_and_verify(
 
 #[cfg(test)]
 mod tests {
-    use super::{HF_MIRROR_HOST, hf_download_candidates_with_endpoint};
+    use super::{format_progress_log, hf_download_candidates_with_endpoint, HF_MIRROR_HOST};
 
     const NANO_LLM: &str =
         "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf";
@@ -523,5 +531,26 @@ mod tests {
         let custom = "https://modelscope.example.com/org/model/file.gguf";
         let candidates = hf_download_candidates_with_endpoint(custom, None);
         assert_eq!(candidates, vec![custom.to_string()]);
+    }
+
+    #[test]
+    fn progress_log_shows_downloaded_total_and_percent() {
+        // SenseVoice Q8 实际体积 254,208,320 B ≈ 242 MB
+        let line = format_progress_log("sensevoice-small-q8.gguf", 32 * 1024 * 1024, 254_208_320);
+        assert_eq!(line, "sensevoice-small-q8.gguf: 已下载 32/242 MB (13%)");
+    }
+
+    #[test]
+    fn progress_log_without_content_length_reports_downloaded_only() {
+        let line = format_progress_log("a.gguf", 32 * 1024 * 1024, 0);
+        assert_eq!(line, "a.gguf: 已下载 32 MB");
+    }
+
+    #[test]
+    fn progress_log_percent_truncates_and_never_prematurely_hits_100() {
+        // 接近完成（99.9%）仍显示 99，不提前到 100
+        let total: u64 = 1000 * 1024 * 1024;
+        let line = format_progress_log("a.gguf", 999 * 1024 * 1024, total);
+        assert_eq!(line, "a.gguf: 已下载 999/1000 MB (99%)");
     }
 }

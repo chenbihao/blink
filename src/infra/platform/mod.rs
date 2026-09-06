@@ -1,4 +1,4 @@
-//! 平台抽象层：热键、窗口、本地化、上下文采集、选区抓取、剪贴板监听、截图、密钥、音频采集、文本注入、Python 环境
+//! 平台抽象层：热键、窗口、本地化、上下文采集、选区抓取、剪贴板监听、截图、密钥、音频采集、文本注入、GPU 检测
 //!
 //! 0.14.6 §2.3：收纳从 domain 泄漏的 Win32 调用——icon 提取 / shell 枚举 / lock。
 
@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod context;
 #[cfg(windows)]
 pub mod dpi;
+pub mod gpu; // 0.22.10：原 platform::python 随 PythonVenv Provider 退役，仅保留 CUDA 检测
 pub mod hotkey;
 #[cfg(windows)]
 pub mod icon; // 0.14.6 §2.3：从 domain/search/icon.rs 迁入
@@ -16,7 +17,6 @@ pub mod locale;
 pub mod lock; // 0.14.6 §2.3：从 domain/execution/builtin.rs 迁入
 pub mod ocr; // 0.14.7 W2：从 domain/capability/builtins/ocr_engine.rs 迁入
 pub mod process;
-pub mod python;
 pub mod screenshot;
 pub mod secret;
 pub mod selection;

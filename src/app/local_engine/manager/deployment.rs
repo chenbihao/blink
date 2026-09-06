@@ -44,7 +44,7 @@ impl EngineManager {
     /// 事务流程（由 `InstallTransaction::execute` 编排）：
     /// 1. journal begin（fail-closed 前提）
     /// 2. resolve_profile → 解析 compute preference
-    /// 3. provider.prepare_environment → uv venv + pip install + self-test
+    /// 3. provider.prepare_environment → 准备环境 + self-test
     /// 4. promote → staging → candidate slot
     /// 5. atomic switch → `deployment.json`
     /// 6. 切换后验证失败 → 自动回滚 previous
@@ -201,8 +201,9 @@ impl EngineManager {
 
         // 执行 InstallTransaction（slot + journal 部署事务）
         // 按 descriptor.runtime_kind 选择 provider
-        // （PythonVenv → python_provider；ManagedBinary → binary_provider；
-        //  OnnxRuntime → onnx_provider（0.22.8 协议位，B 包落地真实安装））。
+        // （ManagedBinary → binary_provider；OnnxRuntime → onnx_provider。
+        //  0.22.10 起 PythonVenv provider 已退役：runtime_kind 来自编译期
+        //  descriptor，正常不可达；保留 fail-closed 结构化错误防御旧 descriptor。）
         let sink_adapter = InstallSinkAdapter::new(
             self.event_port.clone(),
             engine_id.clone(),
@@ -223,20 +224,12 @@ impl EngineManager {
                 )
                 .await
             }
-            crate::infra::local_engine::runtime::RuntimePlan::PythonVenv => {
-                crate::infra::local_engine::providers::InstallTransaction::new(
-                    provider_descriptor,
-                    &self.python_provider,
-                    install_space.clone(),
-                )
-                .execute(
-                    operation_id,
-                    preference,
-                    Some(guard.cancel_token()),
-                    Some(&sink_adapter),
-                )
-                .await
-            }
+            crate::infra::local_engine::runtime::RuntimePlan::PythonVenv => Err(
+                crate::infra::local_engine::runtime::RuntimeError::InstallFailed {
+                    message: "旧版 Python OCR 运行时已退役（0.22.10），请安装新版 ONNX 引擎"
+                        .to_string(),
+                },
+            ),
             crate::infra::local_engine::runtime::RuntimePlan::OnnxRuntime => {
                 // 0.22.8 A 包协议 seam——B 包用生产 asset lock 替换占位实现
                 crate::infra::local_engine::providers::InstallTransaction::new(

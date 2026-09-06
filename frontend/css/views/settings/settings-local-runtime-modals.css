@@ -112,7 +112,7 @@
     gap: 0.5rem;
     padding: 0.5rem;
     border-radius: var(--radius-sm, 4px);
-    background: var(--surface-2);
+    background: var(--bg-deep);
     border: 1px solid var(--surface);
     font-style: normal;
 }
@@ -125,9 +125,46 @@
     cursor: pointer;
 }
 
+/* 自定义复选框：appearance:none 去除原生样式，勾选态 = accent 底 + on-accent 对勾 */
 #engines .le-cleanup-checkbox {
+    appearance: none;
     flex-shrink: 0;
-    margin-top: 0.125rem;
+    margin: 0.125rem 0 0;
+    width: 0.9375rem;
+    height: 0.9375rem;
+    padding: 0;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    background: transparent;
+    cursor: pointer;
+    display: inline-grid;
+    place-content: center;
+    transition:
+        background var(--transition-fast),
+        border-color var(--transition-fast);
+}
+
+#engines .le-cleanup-checkbox:hover:not(:disabled) {
+    border-color: var(--text-dim);
+}
+
+#engines .le-cleanup-checkbox:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+#engines .le-cleanup-checkbox:checked::before {
+    content: "";
+    width: 0.3125rem;
+    height: 0.5625rem;
+    border: solid var(--on-accent);
+    border-width: 0 0.125rem 0.125rem 0;
+    transform: rotate(45deg);
+}
+
+#engines .le-cleanup-checkbox:disabled {
+    opacity: 0.4;
+    cursor: default;
 }
 
 #engines .le-cleanup-item-info {
@@ -180,6 +217,43 @@
     color: var(--text-dim);
     text-align: center;
     padding: 1rem 0;
+    font-style: normal;
+}
+
+/* 清理结果面板：部分成功/跳过场景（全部成功时 modal 直接关闭） */
+#engines .le-cleanup-result {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--bg-deep);
+    border: 1px solid var(--surface);
+    font-style: normal;
+}
+
+#engines .le-cleanup-result-ok {
+    color: var(--green);
+    font-size: var(--text-sm);
+    margin: 0;
+    font-style: normal;
+}
+
+#engines .le-cleanup-result-skip {
+    color: var(--red);
+    font-size: var(--text-sm);
+    margin: 0;
+    font-style: normal;
+}
+
+#engines .le-cleanup-result-skip + .le-cleanup-result-reason,
+#engines .le-cleanup-result-reason + .le-cleanup-result-reason {
+    margin-top: 0.25rem;
+}
+
+#engines .le-cleanup-result-reason {
+    color: var(--text-sub);
+    font-size: var(--text-xs);
+    margin: 0;
+    word-break: break-all;
     font-style: normal;
 }
 

@@ -138,6 +138,10 @@ pub struct DiagnosticEntry {
 #[derive(Debug, Clone)]
 pub struct LaunchContext {
     /// service 分配的 endpoint（child 必须绑定此端口）。
+    /// 0.22.10：当前两个引擎均为非 HTTP 子进程或 in-process（funasr 走
+    /// NDJSON stdio，paddleocr 走 ONNX in-process），生产暂无消费者；
+    /// 作为受限启动上下文的协议位保留，未来 HTTP transport 引擎复用。
+    #[allow(dead_code)]
     pub endpoint: super::identity::Endpoint,
     /// engine id（用于身份验证）。
     pub engine_id: String,

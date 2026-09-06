@@ -413,12 +413,21 @@ function buildMaintenancePanel(entry, controller, i18n) {
     });
     actions.appendChild(repairBtn);
 
-    // 清理引擎缓存（modal 确认，绝不直接 invoke）
+    // 清理入口（自适应双态，点击都走 modal，绝不直接 invoke）：
+    // - 有可清理项 → 危险色「清理引擎缓存」
+    // - storage 已加载且无可清理 → 次要色「查看占用」（打开同一弹窗只读
+    //   浏览明细，确认按钮因无可选项自然禁用）
     const cleanupBtn = document.createElement("button");
     cleanupBtn.className = "btn btn-small le-action-btn le-maintenance-cleanup le-btn-danger";
     cleanupBtn.type = "button";
     cleanupBtn.dataset.actionKind = "cleanup";
-    cleanupBtn.appendChild(renderIcon("trash-2", {extraClass: "le-action-icon"}));
+    cleanupBtn.dataset.viewMode = "clean";
+    const cleanupTrashIcon = renderIcon("trash-2", {extraClass: "le-action-icon"});
+    cleanupBtn.appendChild(cleanupTrashIcon);
+    const cleanupViewIcon = renderIcon("database", {extraClass: "le-action-icon"});
+    // SVG 元素没有 hidden IDL 属性（HTMLElement 专属），必须显式设 attribute
+    cleanupViewIcon.setAttribute("hidden", "");
+    cleanupBtn.appendChild(cleanupViewIcon);
     const cleanupLabel = document.createElement("span");
     cleanupLabel.textContent = tt(i18n, "local_engine.maintenance.cleanup", "清理引擎缓存");
     cleanupBtn.appendChild(cleanupLabel);
@@ -534,8 +543,9 @@ function updatePrimary(el, entry, controller, i18n) {
 
     const btn = document.createElement("button");
     btn.type = "button";
-    // 安装/启动/修复是推进型主操作，用 primary 强调；停止/取消为常规按钮
-    const emphatic = view.kind === "install" || view.kind === "start" || view.kind === "repair";
+    // 安装/启动/修复/下载模型是推进型主操作，用 primary 强调；停止/取消为常规按钮
+    const emphatic = view.kind === "install" || view.kind === "start"
+        || view.kind === "repair" || view.kind === "download_model";
     btn.className = emphatic
         ? "btn btn-primary btn-small le-action-btn le-primary-btn"
         : "btn btn-small le-action-btn le-primary-btn";
@@ -547,7 +557,7 @@ function updatePrimary(el, entry, controller, i18n) {
     btn.appendChild(label);
     btn.addEventListener("click", () => {
         if (!view.kind) return;
-        handleActionClick(view.kind, entry, controller, i18n);
+        handleActionClick(view.kind, entry, controller, i18n, btn);
     });
     el.appendChild(btn);
 }
@@ -611,14 +621,50 @@ function updateMaintenance(panel, entry, i18n) {
     const storage = entry.storage;
     const total = storage?.total_size_bytes;
     const releasable = storage?.releasable_size_bytes;
+
+    // 清理入口双态切换（可清理判定与 modal 的 isSelectable 同规则：
+    // 后端 removable/blocked 真源）。按钮常驻——无可清理时作为「查看占用」
+    // 明细入口，弹窗内不可选项自然禁用确认。
+    const hasCleanable = (storage?.targets ?? []).some(
+        (t) => t.removable && !t.blocked_reason && !t.current,
+    );
+    if (cleanupBtn) {
+        const mode = storage != null && !hasCleanable ? "view" : "clean";
+        if (cleanupBtn.dataset.viewMode !== mode) {
+            cleanupBtn.dataset.viewMode = mode;
+            const baseClass = "btn btn-small le-action-btn le-maintenance-cleanup";
+            cleanupBtn.className = mode === "clean" ? `${baseClass} le-btn-danger` : baseClass;
+            const icons = cleanupBtn.querySelectorAll("svg") || [];
+            // SVG 元素没有 hidden IDL 属性——用 attribute 显隐（全局 [hidden] 规则兜底）
+            if (icons[0]) {
+                if (mode === "clean") icons[0].removeAttribute("hidden");
+                else icons[0].setAttribute("hidden", "");
+            }
+            if (icons[1]) {
+                if (mode === "view") icons[1].removeAttribute("hidden");
+                else icons[1].setAttribute("hidden", "");
+            }
+            const labelSpan = cleanupBtn.querySelector("span");
+            if (labelSpan) {
+                labelSpan.textContent = mode === "clean"
+                    ? tt(i18n, "local_engine.maintenance.cleanup", "清理引擎缓存")
+                    : tt(i18n, "local_engine.maintenance.view_storage", "查看占用");
+            }
+        }
+    }
+
     let text;
     if (total == null) {
         text = tt(i18n, "local_engine.storage.no_data", "占用统计加载中…");
     } else {
         const totalText = formatBytesLocal(total);
-        text = releasable > 0
-            ? `${tt(i18n, "local_engine.storage.actual", "实际占用")} ${totalText} · ${tt(i18n, "local_engine.storage.releasable", "可释放")} ${formatBytesLocal(releasable)}`
-            : `${tt(i18n, "local_engine.storage.actual", "实际占用")} ${totalText}`;
+        if (releasable > 0) {
+            text = `${tt(i18n, "local_engine.storage.actual", "实际占用")} ${totalText} · ${tt(i18n, "local_engine.storage.releasable", "可释放")} ${formatBytesLocal(releasable)}`;
+        } else if (!hasCleanable) {
+            text = `${tt(i18n, "local_engine.storage.actual", "实际占用")} ${totalText} · ${tt(i18n, "local_engine.storage.no_residual", "无残留")}`;
+        } else {
+            text = `${tt(i18n, "local_engine.storage.actual", "实际占用")} ${totalText}`;
+        }
     }
     if (storageEl.dataset.sig !== text) {
         storageEl.dataset.sig = text;
@@ -664,8 +710,11 @@ function updateConfigArea(container, entry, controller, i18n) {
 
 /**
  * 主操作点击处理（生命周期动作）。cleanup 只打开 modal，绝不直接 invoke。
+ *
+ * download_model 是纯 UI 引导（0.22.10）：选中模型未下载时展开「管理模型」
+ * 面板，不发起注定失败的启动——下载的体积确认与操作入口都在模型行内。
  */
-function handleActionClick(kind, entry, controller, i18n) {
+function handleActionClick(kind, entry, controller, i18n, anchorBtn) {
     const engineId = entry.catalog.engine_id;
 
     switch (kind) {
@@ -683,6 +732,14 @@ function handleActionClick(kind, entry, controller, i18n) {
         case "repair":
             controller.repair(engineId).catch(() => {});
             break;
+        case "download_model": {
+            const card = anchorBtn?.closest(".le-card");
+            const modelsBtn = card?.querySelector(".le-models-toggle");
+            if (modelsBtn && modelsBtn.getAttribute("aria-expanded") !== "true") {
+                toggleExclusivePanel(modelsBtn, ".le-model-list");
+            }
+            break;
+        }
         case "cancel":
             if (entry.status?.status?.operation?.operation_id) {
                 controller.cancel(engineId, entry.status.status.operation.operation_id).catch(() => {});

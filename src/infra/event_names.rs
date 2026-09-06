@@ -119,7 +119,7 @@ impl EventNames {
     ///   "seq": "5",
     ///   "timestamp": "2026-01-15T10:31:00+00:00",
     ///   "level": "info",
-    ///   "text": "uv pip install --require-hashes torch==2.5.0"
+    ///   "text": "downloading onnxruntime 1.19.2 (sha256 ok)"
     /// }
     /// ```
     ///

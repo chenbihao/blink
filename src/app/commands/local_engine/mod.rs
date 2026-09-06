@@ -35,8 +35,8 @@
 //!
 //! ## 兼容性
 //!
-//! 不破坏旧 `get_funasr_env` / `setup_python_env` / `start_funasr_server` 等兼容命令
-//! 和旧事件投影。
+//! 0.22.6 起旧 `get_funasr_env` / `setup_python_env` / `start_funasr_server`
+//! 等命令与事件已删除；0.22.10 起 PythonVenv provider 退役，无 Python 兼容面。
 //!
 //! ## 子模块结构（0.22）
 //!

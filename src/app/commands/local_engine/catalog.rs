@@ -8,7 +8,6 @@ use crate::app::command_error::CommandError;
 use crate::app::local_engine::EngineManager;
 use crate::app::local_engine::dto::{EngineCatalogItem, project_catalog_item};
 use crate::domain::local_engine::EngineDefinition;
-use crate::infra::local_engine::providers::RuntimeProvider;
 use crate::infra::local_engine::runtime::ComputePreference;
 
 use super::{current_compute_preference, get_service};
@@ -28,7 +27,10 @@ fn compute_compatibility_for_descriptor(
 
     // 如果有 ProviderDescriptor，使用其 profiles + provider check_compatibility
     if let Some(pd) = provider_desc {
-        let python_provider = svc.python_provider();
+        // 0.22.10：按 descriptor 声明的 runtime kind 分派到对应 provider 真源
+        // （PythonVenv provider 已退役；runtime_kind 来自编译期 descriptor，
+        // 与实际执行安装事务的 provider 一致）。
+        let provider = svc.provider_for_runtime(pd.runtime_kind);
         descriptor
             .install_plan
             .compute_candidates
@@ -41,10 +43,18 @@ fn compute_compatibility_for_descriptor(
                 });
 
                 let (compatible, disabled_reason) = if let Some(pc) = profile_candidate {
-                    match python_provider.check_compatibility(&pc.compatibility) {
-                        Ok(true) => (true, None),
-                        Ok(false) => (false, Some(format!("本机不兼容: {:?}", pc.compatibility))),
-                        Err(e) => (false, Some(format!("兼容性检查失败: {e}"))),
+                    match provider {
+                        Some(p) => match p.check_compatibility(&pc.compatibility) {
+                            Ok(true) => (true, None),
+                            Ok(false) => {
+                                (false, Some(format!("本机不兼容: {:?}", pc.compatibility)))
+                            }
+                            Err(e) => (false, Some(format!("兼容性检查失败: {e}"))),
+                        },
+                        None => (
+                            false,
+                            Some("该运行时类型已退役，请重新安装引擎".to_string()),
+                        ),
                     }
                 } else {
                     // 没有匹配的 ProfileCandidate——descriptor 声明但 provider 未提供
@@ -257,11 +267,11 @@ mod tests {
         );
     }
 
-    /// PaddleOCR ProviderDescriptor 只声明 CPU profile（`Always` 兼容）。
+    /// PaddleOCR ONNX ProviderDescriptor 只声明 CPU profile（`Always` 兼容）。
     /// 验证 Auto 策略可以通过 resolve_profile 解析为 CPU backend。
     #[test]
     fn contract_paddleocr_provider_descriptor_only_cpu() {
-        let descriptor = paddleocr::make_paddleocr_provider_descriptor();
+        let descriptor = paddleocr::make_paddleocr_onnx_provider_descriptor();
 
         // 只有一个 CPU profile
         assert_eq!(descriptor.profiles.len(), 1);

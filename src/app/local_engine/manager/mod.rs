@@ -56,7 +56,6 @@ use crate::infra::local_engine::state::{ProcessIdentity, ProcessStatus};
 
 use crate::infra::local_engine::providers::InstallSink;
 use crate::infra::local_engine::providers::ProviderDescriptor;
-use crate::infra::local_engine::providers::python::PythonVenvProvider;
 
 use super::error_bridge::{from_process, from_runtime};
 use super::operation_coordinator::{EngineOperationCoordinator, OperationGuard};
@@ -463,14 +462,11 @@ pub struct EngineManager {
     /// 每引擎对应的 ProviderDescriptor（infra 层安装事务用）。
     /// key = engine_id，value = 编译期声明的 provider descriptor。
     provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
-    /// Python venv provider 实例（安装事务用）。
-    /// 目前只有 PythonVenv 引擎，单实例即可。
-    python_provider: PythonVenvProvider,
     /// Managed binary provider 实例（0.22.7 GGUF worker 安装事务用）。
-    /// 按 ProviderDescriptor.runtime_kind 与 python_provider 二选一。
+    /// 按 ProviderDescriptor.runtime_kind 与 onnx_provider 二选一。
     binary_provider: crate::infra::local_engine::providers::binary::ManagedBinaryProvider,
     /// ONNX Runtime provider 实例（0.22.8 协议位，B 包落地真实安装）。
-    /// 按 ProviderDescriptor.runtime_kind 与 python/binary_provider 三选一。
+    /// 按 ProviderDescriptor.runtime_kind 与 binary_provider 二选一。
     onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider,
     /// 本地 STT selected 模型存储（切换事务的配置提交/回写端口）。
     /// wiring 层在构造后注入生产实现（DB 持久化 + 缓存 + 事件广播）；
@@ -493,7 +489,6 @@ impl EngineManager {
             registry,
             event_port,
             HashMap::new(),
-            PythonVenvProvider::new(),
             super::model_installer::ModelRegistry::empty(),
             Arc::new(super::model_installer::NoopModelWorker),
         )
@@ -509,7 +504,6 @@ impl EngineManager {
         registry: Arc<EngineRegistry>,
         event_port: Arc<dyn EventPort>,
         provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
-        python_provider: PythonVenvProvider,
         model_registry: super::model_installer::ModelRegistry,
         model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
         implementation_registry: ImplementationRegistry,
@@ -518,18 +512,16 @@ impl EngineManager {
             registry,
             event_port,
             provider_descriptors,
-            python_provider,
             model_registry,
             model_worker,
             implementation_registry,
         )
     }
 
-    /// 创建服务实例（带 provider descriptors + python provider + 模型目录）。
+    /// 创建服务实例（带 provider descriptors + 模型目录）。
     ///
     /// `provider_descriptors`：每引擎对应的 `ProviderDescriptor`，
     /// 由 wiring 层在构造时传入（如 `make_funasr_provider_descriptor()`）。
-    /// `python_provider`：`PythonVenvProvider` 实例，用于 `InstallTransaction`。
     /// `model_registry` / `model_worker`：模型资产目录与下载执行器。
     ///
     /// implementation 注册表默认装配 **builtin**（0.22.9 编译期声明，
@@ -539,7 +531,6 @@ impl EngineManager {
         registry: Arc<EngineRegistry>,
         event_port: Arc<dyn EventPort>,
         provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
-        python_provider: PythonVenvProvider,
         model_registry: super::model_installer::ModelRegistry,
         model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
     ) -> Arc<Self> {
@@ -547,7 +538,6 @@ impl EngineManager {
             registry,
             event_port,
             provider_descriptors,
-            python_provider,
             model_registry,
             model_worker,
             super::implementation_registry::make_builtin_implementation_registry(),
@@ -560,7 +550,6 @@ impl EngineManager {
         registry: Arc<EngineRegistry>,
         event_port: Arc<dyn EventPort>,
         provider_descriptors: HashMap<EngineId, ProviderDescriptor>,
-        python_provider: PythonVenvProvider,
         model_registry: super::model_installer::ModelRegistry,
         model_worker: Arc<dyn super::model_installer::ModelInstallWorker>,
         implementation_registry: ImplementationRegistry,
@@ -602,7 +591,6 @@ impl EngineManager {
             coordinator: EngineOperationCoordinator::new(),
             model_worker,
             provider_descriptors,
-            python_provider,
             binary_provider:
                 crate::infra::local_engine::providers::binary::ManagedBinaryProvider::new(),
             onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider::new(),

@@ -729,7 +729,6 @@ async fn gguf_real_end_to_end_sensevoice() {
         )]
         .into_iter()
         .collect(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         ModelRegistry::new_with_models(
             gguf::gguf_model_specs()
                 .iter()
@@ -854,7 +853,6 @@ async fn gguf_real_worker_crash_and_restart() {
         )]
         .into_iter()
         .collect(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         ModelRegistry::new_with_models(
             gguf::gguf_model_specs()
                 .iter()
@@ -1004,7 +1002,6 @@ async fn gguf_real_three_models_and_switch() {
         )]
         .into_iter()
         .collect(),
-        crate::infra::local_engine::providers::python::PythonVenvProvider::new(),
         ModelRegistry::new_with_models(
             gguf::gguf_model_specs()
                 .iter()

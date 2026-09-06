@@ -142,14 +142,16 @@ fn fake_descriptor() -> ProviderDescriptor {
             revision: "v1".to_string(),
             checksum_source: runtime::ChecksumSource::Unverified,
         },
-        install_plan: InstallPlan::PythonVenv(PythonInstallPlan {
-            python_version: "3.12.8".to_string(),
-            python_artifact_id: ArtifactId::new("python-3.12.8-fake").unwrap(),
-            packages: Vec::new(),
-            uv_version: "0.6.10".to_string(),
-            index_url: None,
-            extra_pip_args: Vec::new(),
-            self_test_script: "pass".to_string(),
+        install_plan: InstallPlan::ManagedBinary(BinaryInstallPlan {
+            archive_artifact_id: ArtifactId::new("fake-worker-archive").unwrap(),
+            archive_url: "https://example.invalid/fake-worker.zip".to_string(),
+            archive_sha256: "0".repeat(64),
+            executable: "worker.exe".to_string(),
+            stdlib_artifact: None,
+            required_cpu_features: Vec::new(),
+            required_drivers: Vec::new(),
+            self_test_command: vec!["worker.exe".to_string(), "--self-test".to_string()],
+            bundled_dir: None,
         }),
     }
 }

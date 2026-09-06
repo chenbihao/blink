@@ -377,6 +377,10 @@ pub fn engine_model_cache_dir(engine_id: &EngineId) -> PathBuf {
 }
 
 /// Python 公共资产根目录：`%APPDATA%\blink\python`
+///
+/// 0.22.10 起 PythonVenv provider 已退役；此目录只承载 legacy 用户资产
+/// （旧 uv 安装、uv cache、uv 下载的 Python distributions），
+/// 供设置页存储管理扫描与清理。
 pub fn python_shared_root() -> PathBuf {
     #[cfg(test)]
     {
@@ -386,24 +390,9 @@ pub fn python_shared_root() -> PathBuf {
     crate::infra::utils::paths::python_dir()
 }
 
-/// uv 本地安装目录：`python\uv`
-pub fn uv_install_dir() -> PathBuf {
-    python_shared_root().join("uv")
-}
-
-/// uv 本地安装的 `uv.exe` 路径。
-pub fn local_uv_exe() -> PathBuf {
-    uv_install_dir().join("uv.exe")
-}
-
-/// uv cache 目录：`python\cache\uv`
+/// uv cache 目录：`python\cache\uv`（legacy 清理目标）。
 pub fn uv_cache_dir() -> PathBuf {
     python_shared_root().join("cache").join("uv")
-}
-
-/// uv 管理的 Python distributions 目录：`python\pythons`
-pub fn uv_python_dir() -> PathBuf {
-    python_shared_root().join("pythons")
 }
 
 // ── 路径安全校验 ───────────────────────────────────────────────────────────

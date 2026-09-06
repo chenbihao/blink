@@ -1175,6 +1175,85 @@ mod tests {
 
     // ── 指针 / begin ─────────────────────────────────────────────────────
 
+    /// 0.22.10：PythonVenv provider 已退役，但升级用户磁盘上的 legacy
+    /// Python manifest + pointer 必须经生产探针路径（`read_active`）继续可读，
+    /// 不得因 provider 删除而反序列化失败或丢空间。
+    #[test]
+    fn read_active_still_reads_legacy_python_venv_deployment() {
+        use crate::infra::local_engine::runtime::{ManifestExtension, RuntimePlan};
+
+        let space = eng("dep-legacy-ocr");
+        cleanup_space(&space);
+
+        // 0.22.7 PythonVenv 形状的 manifest（字段与真实写入一致）
+        let slot_dir = space.slot_dir("slot-a");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("manifest.json"),
+            r#"{
+                "schema_version": 2,
+                "engine_id": "dep-legacy-ocr",
+                "runtime_kind": "python_venv",
+                "install_id": "dep-legacy001",
+                "requested_preference": "cpu",
+                "resolved_profile": {
+                    "profile_id": "cpu-x64",
+                    "backend": "cpu",
+                    "artifact_id": "python-3.12.8",
+                    "priority": 0
+                },
+                "installed_at_ms": 1700000000000,
+                "artifact": {
+                    "runtime_kind": "python_venv",
+                    "artifact_id": "python-3.12.8",
+                    "sha256": "abc123"
+                },
+                "model_contract": {
+                    "model_id": "PP-OCRv6",
+                    "revision": "ppocrv6-tiny",
+                    "checksum_source": "Unverified"
+                },
+                "fallback_reasons": [],
+                "extension": {
+                    "type": "python_venv",
+                    "python_version": "3.12.8",
+                    "python_artifact_id": "python-3.12.8",
+                    "packages": [],
+                    "uv_version": "0.6.10",
+                    "index_url": null,
+                    "self_test_passed": true
+                }
+            }"#,
+        )
+        .unwrap();
+        DeploymentStore::write_pointer(&space, &pointer(&space, "dep-legacy001", "slot-a"))
+            .unwrap();
+
+        // 生产探针路径：read_active 读 pointer + manifest 全链路
+        let (p, manifest) = DeploymentStore::read_active(&space).unwrap().unwrap();
+        assert_eq!(p.install_id, "dep-legacy001");
+        assert_eq!(manifest.runtime_kind, RuntimePlan::PythonVenv);
+        match manifest.extension {
+            ManifestExtension::PythonVenv(ext) => {
+                assert_eq!(ext.python_version, "3.12.8");
+                assert!(ext.self_test_passed);
+            }
+            _ => panic!("应为 PythonVenv（legacy）"),
+        }
+
+        // artifact 引用扫描（清理/引用保护）也必须宽容处理 legacy manifest
+        let refs = crate::infra::local_engine::runtime::scan_artifact_references(
+            RuntimePlan::PythonVenv,
+            &crate::infra::local_engine::runtime::ArtifactId::new("python-3.12.8").unwrap(),
+        );
+        assert!(
+            refs.is_ok(),
+            "引用扫描不得因 legacy manifest 失败: {refs:?}"
+        );
+
+        cleanup_space(&space);
+    }
+
     #[test]
     fn begin_picks_non_active_slot_and_writes_journal() {
         let engine = eng("dep-begin");

@@ -568,6 +568,72 @@ await test("keyline：无 status 时显示暂无数据", () => {
     assert.ok(items[0].label.includes("暂无状态数据"));
 });
 
+// ── 主操作：选中模型未下载 → 下载模型（0.22.10）──────────────────────────────
+
+await test("已停止 + 选中模型未下载：主操作=下载模型", () => {
+    const entry = makeEntry("funasr", {
+        status: READY_STOPPED,
+        models: [makeModel({
+            is_selected: true,
+            install_state: "not_installed",
+            verification_state: "unknown",
+        })],
+    });
+    const action = primaryActionView(entry, t);
+    assert.equal(action.kind, "download_model");
+    assert.equal(action.label, "下载模型");
+    assert.equal(action.icon, "download");
+    assert.equal(action.disabled, false);
+});
+
+await test("已停止 + 选中模型下载中：主操作为禁用的「模型下载中」", () => {
+    const entry = makeEntry("funasr", {
+        status: READY_STOPPED,
+        models: [makeModel({
+            is_selected: true,
+            install_state: "downloading",
+            verification_state: "unknown",
+        })],
+    });
+    const action = primaryActionView(entry, t);
+    assert.equal(action.kind, null);
+    assert.equal(action.label, "模型下载中");
+    assert.equal(action.disabled, true);
+});
+
+await test("已停止 + 模型目录未拉到：fail-open 保持主操作=启动", () => {
+    const entry = makeEntry("funasr", {status: READY_STOPPED});
+    const action = primaryActionView(entry, t);
+    assert.equal(action.kind, "start");
+    assert.equal(action.label, "启动");
+});
+
+await test("非 STT 引擎不受下载引导影响", () => {
+    const entry = makeEntry("paddleocr", {
+        status: READY_STOPPED,
+        models: [makeModel({
+            engine_id: "paddleocr",
+            is_selected: true,
+            install_state: "not_installed",
+        })],
+    });
+    const action = primaryActionView(entry, t);
+    assert.equal(action.kind, "start");
+});
+
+await test("引擎运行中时下载引导不生效（主操作仍=停止服务）", () => {
+    const entry = makeEntry("funasr", {
+        status: RUNNING_READY,
+        models: [makeModel({
+            is_selected: true,
+            is_active: true,
+            install_state: "not_installed",
+        })],
+    });
+    const action = primaryActionView(entry, t);
+    assert.equal(action.kind, "stop");
+});
+
 // ── 汇总 ──────────────────────────────────────────────────────────────────────
 
 console.log(`\n${passCount}/${testCount} tests passed`);

@@ -168,7 +168,24 @@ pub async fn get_engine_diagnostics(
     };
 
     // ── 4. orphan recovery ──
-    let orphan_recovery = scan_orphan_recovery(&eid).await;
+    // 引擎正被当前 manager 托管启动/运行时，lease 是本实例自己的提交记录，
+    // 不是孤儿。此前健康实例也会被误报 present=true/health_unreachable——
+    // 恢复路径的 health 探测不带 token，探自身实例必失败；复制诊断时这条
+    // 自相矛盾的记录会误导排障。
+    let managed_running = matches!(
+        snapshot.status.process,
+        crate::domain::local_engine::ProcessState::Running { .. }
+            | crate::domain::local_engine::ProcessState::Starting
+    );
+    let orphan_recovery = if managed_running {
+        OrphanRecoveryDto {
+            present: false,
+            actionable: false,
+            reason: "managed_running".to_string(),
+        }
+    } else {
+        scan_orphan_recovery(&eid).await
+    };
 
     // ── 5. 投影为闭合 DTO ──
     Ok(EngineDiagnosticsDto {

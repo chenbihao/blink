@@ -710,7 +710,23 @@ fn scan_dll_files(dir: &Path) -> Result<Vec<runtime::FileEntry>, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::local_engine::providers::PythonInstallPlan;
+    use crate::infra::local_engine::providers::BinaryInstallPlan;
+
+    /// 非 ONNX 安装计划 fixture（0.22.10 起以 ManagedBinary 充当，
+    /// 原 PythonVenv 计划已随 Python/uv 栈退役删除）。
+    fn non_onnx_plan() -> InstallPlan {
+        InstallPlan::ManagedBinary(BinaryInstallPlan {
+            archive_artifact_id: runtime::ArtifactId::new("fake-worker-archive").unwrap(),
+            archive_url: "https://example.invalid/fake-worker.zip".to_string(),
+            archive_sha256: "0".repeat(64),
+            executable: "worker.exe".to_string(),
+            stdlib_artifact: None,
+            required_cpu_features: Vec::new(),
+            required_drivers: Vec::new(),
+            self_test_command: vec!["worker.exe".to_string(), "--self-test".to_string()],
+            bundled_dir: None,
+        })
+    }
 
     #[test]
     fn onnx_runtime_provider_kind() {
@@ -731,15 +747,7 @@ mod tests {
     #[test]
     fn onnx_runtime_rejects_non_onnx_plan() {
         let provider = OnnxRuntimeProvider::new();
-        let python_plan = InstallPlan::PythonVenv(PythonInstallPlan {
-            python_version: "3.12.8".to_string(),
-            python_artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
-            packages: Vec::new(),
-            uv_version: "0.6.10".to_string(),
-            index_url: None,
-            extra_pip_args: Vec::new(),
-            self_test_script: "pass".to_string(),
-        });
+        let python_plan = non_onnx_plan();
         // build_manifest_extension 应拒绝非 OnnxRuntime plan
         assert!(
             provider
@@ -759,15 +767,7 @@ mod tests {
     #[test]
     fn prepare_environment_rejects_non_onnx_plan() {
         let provider = OnnxRuntimeProvider::new();
-        let python_plan = InstallPlan::PythonVenv(PythonInstallPlan {
-            python_version: "3.12.8".to_string(),
-            python_artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
-            packages: Vec::new(),
-            uv_version: "0.6.10".to_string(),
-            index_url: None,
-            extra_pip_args: Vec::new(),
-            self_test_script: "pass".to_string(),
-        });
+        let python_plan = non_onnx_plan();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(provider.prepare_environment(
@@ -788,15 +788,7 @@ mod tests {
     #[test]
     fn self_test_rejects_non_onnx_plan() {
         let provider = OnnxRuntimeProvider::new();
-        let python_plan = InstallPlan::PythonVenv(PythonInstallPlan {
-            python_version: "3.12.8".to_string(),
-            python_artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
-            packages: Vec::new(),
-            uv_version: "0.6.10".to_string(),
-            index_url: None,
-            extra_pip_args: Vec::new(),
-            self_test_script: "pass".to_string(),
-        });
+        let python_plan = non_onnx_plan();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(provider.self_test(
@@ -811,15 +803,7 @@ mod tests {
     #[test]
     fn build_manifest_extension_rejects_non_onnx_plan() {
         let provider = OnnxRuntimeProvider::new();
-        let python_plan = InstallPlan::PythonVenv(PythonInstallPlan {
-            python_version: "3.12.8".to_string(),
-            python_artifact_id: runtime::ArtifactId::new("python-3.12.8").unwrap(),
-            packages: Vec::new(),
-            uv_version: "0.6.10".to_string(),
-            index_url: None,
-            extra_pip_args: Vec::new(),
-            self_test_script: "pass".to_string(),
-        });
+        let python_plan = non_onnx_plan();
         assert!(
             provider
                 .build_manifest_extension(std::path::Path::new("."), &python_plan)

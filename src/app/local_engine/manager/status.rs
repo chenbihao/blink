@@ -4,6 +4,9 @@
 
 use super::*;
 
+use crate::infra::local_engine::providers::RuntimeProvider;
+use crate::infra::local_engine::runtime::RuntimePlan;
+
 impl EngineManager {
     // ── 查询 API（可并发） ──────────────────────────────────────────────────
 
@@ -274,12 +277,18 @@ impl EngineManager {
         self.provider_descriptors.get(engine_id)
     }
 
-    /// 返回 `PythonVenvProvider` 引用。
+    /// 按 runtime kind 返回对应的 `RuntimeProvider` 实例。
     ///
     /// 用于 catalog 兼容性检查——commands 调用
     /// `RuntimeProvider::check_compatibility` 判定本机兼容性。
-    pub fn python_provider(&self) -> &PythonVenvProvider {
-        &self.python_provider
+    /// 0.22.10 起 PythonVenv provider 已退役；`PythonVenv` 只存在于
+    /// legacy 磁盘 manifest 读取，不再有可分派的 provider 实例。
+    pub fn provider_for_runtime(&self, kind: RuntimePlan) -> Option<&dyn RuntimeProvider> {
+        match kind {
+            RuntimePlan::ManagedBinary => Some(&self.binary_provider),
+            RuntimePlan::OnnxRuntime => Some(&self.onnx_provider),
+            RuntimePlan::PythonVenv => None,
+        }
     }
 
     // ── mark_needs_rebuild（0.22.5 H2）──────────────────────────────────────

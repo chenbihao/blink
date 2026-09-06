@@ -19,20 +19,19 @@
 //! 重要：只有 release 打包才复制到 plugins/builtin/<id>/bin/
 //!      开发期 bin 目录不存在，避免 Tauri resources 递归扫描爆炸。
 //!
-//! ## release 资源校验（0.22.6.4）
+//! ## release 资源校验（0.22.6.4 引入，0.22.10 收敛）
 //!
 //! `check_release_resources()` 是 release 前置门禁，可由 `cargo xtask release-check`
 //! 单独运行，也在 `cargo xtask release` 流程中自动执行。校验内容：
 //!
-//! 1. **嵌入脚本存在且语法正确**：所有 `include_str!` 引用的 .py 脚本必须存在且
-//!    Python `compile()` 通过。
-//! 2. **锁文件可解析**：`locked-requirements.txt` 每个包条目必须含 `==版本` 和
-//!    至少一个 `--hash=sha256:`。
-//! 3. **manifest/schema 一致**：`lock.json` 的 `$schema` 字段存在，且包含代码引用
-//!    的 model id 字段。
-//! 4. **必要许可存在**：项目根 `LICENSE` 和 Lucide `LICENSE.lucide.txt` 必须存在。
-//! 5. **排除规则**：`resources/` 目录下不包含模型文件（.pt/.pth/.onnx/.gguf/
-//!    .params）、staging/generation 子目录、venv、下载缓存或 `__pycache__`。
+//! 1. **嵌入数据存在且有效**：所有 `include_str!` 引用的资源必须存在且格式正确。
+//!    （0.22.10：Python 脚本语法与 pip 锁文件校验已随 Python/uv 栈退役删除。）
+//! 2. **必要许可存在**：项目根 `LICENSE` 和 Lucide `LICENSE.lucide.txt` 必须存在。
+//! 3. **GGUF 供应链校验**：worker-lock.json 的 hash/来源锁定（0.22.7）。
+//! 4. **排除规则**：`resources/` 目录下不包含模型文件（.pt/.pth/.onnx/.gguf/
+//!    .params/.dll）、staging/generation 子目录、venv、下载缓存或 `__pycache__`。
+//!    0.22.10 起此规则同时承担「禁止 Python/uv 栈回流」的守卫职责。
+//! 5. **ONNX asset-lock 校验**：ORT DLL/模型 hash 锁定（0.22.8）。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -181,47 +180,29 @@ fn fetch_models() {
     println!("✅ 模型目录生成完成");
 }
 
-// ── release 资源前置校验（0.22.6.4）────────────────────────────────────────
+// ── release 资源前置校验（0.22.6.4，0.22.10 收敛）─────────────────────────
 //
-// 背景：0.22 引入本地模型运行时，resources/ 下新增了嵌入的 Python server 脚本、
-// 依赖锁文件和模型元数据。release 构建必须证明这些资源入包且可验证，
-// 同时证明模型文件、staging/generation/venv/cache 不入包。
+// 背景：0.22 引入本地模型运行时，resources/ 下的嵌入资源以 `include_str!`
+// 登记校验。0.22.10 起 Python server 脚本/依赖锁文件已随 Python/uv 栈退役
+// 删除，仅保留 JSON 数据资源；排除规则继续守卫模型文件、
+// staging/generation/venv/cache 不入包，并防止 Python 栈回流。
 //
-// 资源策略：所有运行时需要的脚本/锁/元数据通过 `include_str!` 嵌入 Rust 二进制
+// 资源策略：运行时需要的资源通过 `include_str!` 嵌入 Rust 二进制
 // （编译期保证存在），tauri.conf.json 的 bundle resources 只包含 plugins/builtin/**/*。
 // 本检查在 release 前验证这些 `include_str!` 引用的文件确实存在且有效。
 
 /// 所有通过 `include_str!` 嵌入 Rust 二进制的资源文件清单。
 /// 新增嵌入资源时必须在此登记，否则 release-check 不会覆盖它。
-const EMBEDDED_RESOURCES: &[(&str, &str, EmbeddedKind)] = &[
-    (
-        "resources/ocr/paddleocr/blink_ocr_server.py",
-        "Blink PP-OCRv6 OCR Server",
-        EmbeddedKind::PythonScript,
-    ),
-    (
-        "resources/ocr/paddleocr/locked-requirements.txt",
-        "PaddleOCR locked requirements",
-        EmbeddedKind::LockedRequirements,
-    ),
-    (
-        "resources/ocr/paddleocr/lock.json",
-        "PaddleOCR model metadata",
-        EmbeddedKind::ModelMetadata,
-    ),
-    (
-        "resources/model_context_windows.json",
-        "AI model context windows catalog",
-        EmbeddedKind::JsonData,
-    ),
-];
+/// 0.22.10：Python OCR server/锁文件条目已随 Python/uv 栈退役删除。
+const EMBEDDED_RESOURCES: &[(&str, &str, EmbeddedKind)] = &[(
+    "resources/model_context_windows.json",
+    "AI model context windows catalog",
+    EmbeddedKind::JsonData,
+)];
 
 /// 嵌入资源类型——决定校验策略。
 #[derive(Clone, Copy)]
 enum EmbeddedKind {
-    PythonScript,
-    LockedRequirements,
-    ModelMetadata,
     JsonData,
 }
 
@@ -341,7 +322,7 @@ fn extract_json_version(content: &str) -> Option<String> {
 
 /// release 资源前置校验总入口。
 ///
-/// 校验：版本一致性（Cargo.toml ↔ tauri.conf.json）、嵌入资源（脚本语法/锁文件/manifest/schema）、
+/// 校验：版本一致性（Cargo.toml ↔ tauri.conf.json）、嵌入资源（JSON 数据校验）、
 /// 许可文件存在、GGUF worker 供应链、排除规则（无模型/staging/generation/venv/cache/__pycache__）、
 /// ONNX OCR 供应链锁定。
 /// 分层守卫不在发布预检（它守的是代码结构而非打包产物），已迁至 blink bin crate 的
@@ -353,7 +334,7 @@ fn check_release_resources() {
     // 0. 版本一致性：Cargo.toml ↔ tauri.conf.json（真源是 Git tag，CI 构建时同步写入）
     check_version_consistency(&mut failures);
 
-    // 1. 嵌入脚本存在且语法正确 + 锁文件可解析 + manifest/schema 一致
+    // 1. 嵌入资源存在且格式有效（0.22.10 起仅 JSON 数据）
     check_embedded_resources(&mut failures);
 
     // 2. 必要许可文件存在
@@ -503,9 +484,10 @@ fn check_gguf_worker_supply_chain(failures: &mut Vec<String>) {
 }
 
 /// 校验所有 `include_str!` 嵌入资源：存在性 + 类型相关的内容校验。
+/// 0.22.10：Python 脚本语法 / pip 锁文件 / 模型 metadata 校验已随
+/// Python/uv 栈退役删除，仅保留 JSON 数据校验。
 fn check_embedded_resources(failures: &mut Vec<String>) {
     let root = workspace_root();
-    let py = which_python();
 
     println!("📋 校验嵌入资源（{} 项）...", EMBEDDED_RESOURCES.len());
     for (rel_path, desc, kind) in EMBEDDED_RESOURCES {
@@ -526,138 +508,9 @@ fn check_embedded_resources(failures: &mut Vec<String>) {
         }
 
         match kind {
-            EmbeddedKind::PythonScript => {
-                check_python_syntax(&full, rel_path, desc, &py, failures);
-            }
-            EmbeddedKind::LockedRequirements => {
-                check_locked_requirements(&content, desc, failures);
-            }
-            EmbeddedKind::ModelMetadata => {
-                check_model_metadata(&content, desc, failures);
-            }
             EmbeddedKind::JsonData => {
                 check_json_valid(&content, desc, failures);
             }
-        }
-    }
-}
-
-/// Python 脚本语法校验（使用 Python `compile()`）。
-fn check_python_syntax(
-    full: &Path,
-    _rel_path: &str,
-    desc: &str,
-    py: &(String, Vec<String>),
-    failures: &mut Vec<String>,
-) {
-    let compile_cmd = format!(
-        "from pathlib import Path; compile(Path(r'{}').read_text(encoding='utf-8'), '{}', 'exec')",
-        full.display(),
-        full.file_name().unwrap_or_default().to_string_lossy()
-    );
-
-    let (py_cmd, py_args) = py;
-    let mut cmd = Command::new(py_cmd);
-    cmd.args(py_args)
-        .arg("-c")
-        .arg(&compile_cmd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(workspace_root());
-    let result = cmd.output();
-
-    match result {
-        Ok(out) if out.status.success() => {
-            println!("  ✓ {desc} 语法正确");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            failures.push(format!("{desc}: Python 语法错误\n{stderr}"));
-        }
-        Err(e) => {
-            failures.push(format!("{desc}: Python 执行失败: {e}"));
-        }
-    }
-}
-
-/// 锁文件校验：每行包定义必须含 `==` 版本约束和至少一个 `--hash=sha256:`。
-/// 空行和注释行跳过。
-fn check_locked_requirements(content: &str, desc: &str, failures: &mut Vec<String>) {
-    let mut package_count = 0u32;
-    let mut hash_count = 0u32;
-    let mut missing_hash: Vec<String> = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        // 续行（以 --hash 开头）属于上一个包
-        if trimmed.starts_with("--hash") {
-            hash_count += 1;
-            continue;
-        }
-        // 包行：name==version
-        if trimmed.contains("==") {
-            package_count += 1;
-            // 检查同行的 hash（可能在续行）
-            if !trimmed.contains("--hash=sha256:") {
-                // 可能 hash 在续行，先记录包名
-                let pkg_name = trimmed.split("==").next().unwrap_or(trimmed);
-                missing_hash.push(pkg_name.to_string());
-            }
-        }
-    }
-
-    // 重新扫描：对每个包行，检查后续续行是否有 --hash
-    let lines: Vec<&str> = content.lines().collect();
-    let mut idx = 0;
-    while idx < lines.len() {
-        let line = lines[idx].trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with("--hash") {
-            idx += 1;
-            continue;
-        }
-        if line.contains("==") {
-            // 检查同行和后续续行是否有 --hash
-            let mut has_hash = line.contains("--hash=sha256:");
-            let mut j = idx + 1;
-            while j < lines.len() && lines[j].trim().starts_with("--hash") {
-                if lines[j].contains("sha256") {
-                    has_hash = true;
-                }
-                j += 1;
-            }
-            if !has_hash {
-                let pkg = line.split("==").next().unwrap_or(line);
-                failures.push(format!("{desc}: 包 {pkg} 缺少 --hash=sha256: 校验"));
-            }
-        }
-        idx += 1;
-    }
-
-    if package_count == 0 {
-        failures.push(format!("{desc}: 锁文件未包含任何包定义"));
-    } else {
-        println!("  ✓ {desc}: {package_count} 个包, {hash_count} 个 hash 条目");
-    }
-}
-
-/// 模型元数据 JSON 校验：$schema 字段存在，且包含 models 字段。
-fn check_model_metadata(content: &str, desc: &str, failures: &mut Vec<String>) {
-    match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(json) => {
-            if json.get("$schema").is_none() {
-                failures.push(format!("{desc}: 缺少 $schema 字段"));
-            }
-            if json.get("models").is_none() {
-                failures.push(format!("{desc}: 缺少 models 字段"));
-            }
-            println!("  ✓ {desc}: JSON 结构有效");
-        }
-        Err(e) => {
-            failures.push(format!("{desc}: JSON 解析失败: {e}"));
         }
     }
 }

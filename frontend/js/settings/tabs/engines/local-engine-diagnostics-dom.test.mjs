@@ -208,5 +208,61 @@ await test("orphan 非 actionable：不渲染停止按钮", async () => {
     assert.equal(diagPanel.querySelector(".le-orphan-stop"), null, "非 actionable 不渲染停止按钮");
 });
 
+// ── entry 现场解析（0.22.10：修复诊断读首渲染旧快照）─────────────────────────
+
+function modelSnap(installState, verificationState) {
+    return {
+        engine_id: "funasr",
+        model_id: "gguf/fun-asr-nano-q4km",
+        display_name: "Fun-ASR-Nano (Q4_K_M)",
+        install_state: installState,
+        verification_state: verificationState,
+        is_selected: true,
+        is_active: true,
+    };
+}
+
+function funasrEntry(models) {
+    return {
+        catalog: {engine_id: "funasr", capability_kind: "stt"},
+        models,
+    };
+}
+
+await test("entry 现场解析：models 取 controller.getState 最新值，不用闭包旧快照", async () => {
+    // 卡片首渲染时的 entry（模型尚未安装）——工具栏按钮闭包持有的是它
+    const staleEntry = funasrEntry([modelSnap("not_installed", "unknown")]);
+    // 模型安装后的最新 entry
+    const freshEntry = funasrEntry([modelSnap("installed", "verified")]);
+    const controller = {
+        getDiagnostics: async () => makeDiag(),
+        getState: () => new Map([["funasr", freshEntry]]),
+    };
+    const diagPanel = documentShim.createElement("div");
+    diagPanel.hidden = true;
+    const anchorBtn = documentShim.createElement("button");
+
+    showEngineDiagnostics(staleEntry, controller, undefined, anchorBtn, diagPanel);
+    await flushMicrotasks();
+
+    const text = diagPanel.textContent;
+    assert.ok(text.includes("Fun-ASR-Nano (Q4_K_M)"), "当前模型行正常渲染");
+    assert.ok(text.includes("已校验"), "模型文件行用最新安装态（已校验）");
+    assert.ok(!text.includes("未安装"), "不再显示安装前的旧快照「未安装」");
+});
+
+await test("controller 无 getState（测试 shim）：退回传入 entry", async () => {
+    const entry = funasrEntry([modelSnap("not_installed", "unknown")]);
+    const controller = {getDiagnostics: async () => makeDiag()};
+    const diagPanel = documentShim.createElement("div");
+    diagPanel.hidden = true;
+    const anchorBtn = documentShim.createElement("button");
+
+    showEngineDiagnostics(entry, controller, undefined, anchorBtn, diagPanel);
+    await flushMicrotasks();
+
+    assert.ok(diagPanel.textContent.includes("未安装"), "fallback 读传入 entry 的安装态");
+});
+
 console.log(`\n${passCount}/${testCount} passed`);
 if (passCount !== testCount) process.exit(1);

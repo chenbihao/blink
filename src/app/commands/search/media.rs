@@ -2385,7 +2385,7 @@ fn build_paddleocr_adapter_config() -> AdapterConfig {
     }
 }
 
-/// 安装 PaddleOCR 引擎环境（uv venv + paddlepaddle + paddleocr + fastapi）。
+/// 安装 PaddleOCR 引擎环境（ONNX Runtime + PP-OCRv6 模型联合安装）。
 ///
 /// 走现有 `EngineManager::install` → `InstallTransaction`，
 /// 不新造安装器。安装过程通过 `blink://local-engine-status` 事件投影进度。

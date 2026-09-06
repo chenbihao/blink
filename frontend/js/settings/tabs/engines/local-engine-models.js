@@ -239,9 +239,10 @@ function renderModelRow(model, entry, controller, i18n, selectionPhase = "") {
     nameCell.className = "le-model-cell le-model-name";
     nameCell.textContent = model.display_name || model.model_id;
     // 0.22.9：目录推荐标记（display-only，来自 descriptor.business.recommended）
+    // le-model-badge 承载 .le-model-name 内的统一间距规则，推荐徽章也要带上
     if (model.business?.recommended) {
         const badge = document.createElement("span");
-        badge.className = "le-badge le-model-badge-recommended";
+        badge.className = "le-badge le-model-badge le-model-badge-recommended";
         badge.textContent = tt(i18n, "local_engine.model.badge.recommended", "推荐");
         nameCell.appendChild(badge);
     }
@@ -289,16 +290,20 @@ function renderModelRow(model, entry, controller, i18n, selectionPhase = "") {
     row.appendChild(sizeCell);
 
     // 状态
+    const state = getEffectiveModelInstallState(entry, model);
     const statusCell = document.createElement("div");
     statusCell.className = "le-model-cell le-model-status";
-    statusCell.textContent = modelStateLabel(getEffectiveModelInstallState(entry, model));
-    // 校验状态附加
-    const verText = modelVerificationLabel(model.verification_state);
-    if (verText && verText !== model.verification_state) {
-        const verSpan = document.createElement("span");
-        verSpan.className = "le-model-verification";
-        verSpan.textContent = `(${verText})`;
-        statusCell.appendChild(verSpan);
+    statusCell.textContent = modelStateLabel(state);
+    // 校验状态附加：只对「安装已成立或已失败」的状态有意义——
+    // 未下载/下载中的模型校验态恒为 unknown，追加「(未知)」是噪音
+    if (state === "installed" || state === "delete_blocked" || state.endsWith("_failed")) {
+        const verText = modelVerificationLabel(model.verification_state);
+        if (verText && verText !== model.verification_state) {
+            const verSpan = document.createElement("span");
+            verSpan.className = "le-model-verification";
+            verSpan.textContent = `(${verText})`;
+            statusCell.appendChild(verSpan);
+        }
     }
     row.appendChild(statusCell);
 
@@ -383,10 +388,15 @@ function renderModelActions(model, entry, controller, i18n, selectionPhase = "")
         // !is_selected → "使用"按钮（点击后选为此引擎的当前模型）
         if (model.is_selected) {
             if (model.is_active) {
-                // 选中且运行中一致 → "当前"标记
+                // 选中且运行中一致 → "当前"标记。
+                // 勾属于「正在使用的模型」——使用按钮（切换动作）不带勾，
+                // 否则会出现"没在用的模型反而有勾"的误导（0.22.10 反馈）
                 const badge = document.createElement("span");
                 badge.className = "le-model-btn le-model-btn-current";
-                badge.textContent = tt(i18n, "local_engine.model.action.current", "当前");
+                badge.appendChild(renderIcon("check", {extraClass: "le-action-icon"}));
+                const label = document.createElement("span");
+                label.textContent = tt(i18n, "local_engine.model.action.current", "当前");
+                badge.appendChild(label);
                 frag.appendChild(badge);
             } else {
                 // 选中但运行实例不一致 → "等待重启"标记
@@ -396,12 +406,12 @@ function renderModelActions(model, entry, controller, i18n, selectionPhase = "")
                 frag.appendChild(badge);
             }
         } else {
-            // 未选中 → "使用"按钮（切换在途时禁用）
+            // 未选中 → "使用"按钮（切换在途时禁用）。
+            // 不带勾图标——勾只标记当前使用中的模型，切换动作是纯动作
             const useBtn = document.createElement("button");
             useBtn.className = "le-model-btn le-model-btn-primary";
             useBtn.type = "button";
             useBtn.disabled = switchInProgress;
-            useBtn.appendChild(renderIcon("check", {extraClass: "le-action-icon"}));
             const useLabel = document.createElement("span");
             useLabel.textContent = tt(i18n, "local_engine.model.action.use", "使用");
             useBtn.appendChild(useLabel);

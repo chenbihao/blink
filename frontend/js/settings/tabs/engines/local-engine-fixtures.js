@@ -14,7 +14,8 @@ export const funasrCatalog = {
     icon: "mic",
     version: "0.1.0",
     capability_kind: "stt",
-    runtime_kind: "python_venv",
+    // 0.22.7 起 funasr 为 ManagedBinary（GGUF worker）；旧值 python_venv 已废弃
+    runtime_kind: "managed_binary",
     lifecycle: "manual",
     model_id: "iic/SenseVoiceSmall",
     model_revision: "v1",

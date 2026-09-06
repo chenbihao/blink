@@ -10,7 +10,8 @@
  * - 默认不全选高风险项（非 shared 且 removable 才默认选）。
  * - confirm 只提交用户勾选的 target_id；后端重新解析 target_id。
  * - confirm 期间禁用重复提交。
- * - 成功后关闭 modal 并刷新 status/storage。
+ * - 全部成功后关闭 modal 并刷新 status/storage。
+ * - 部分/全部跳过：保留 modal 与勾选，展示结果面板（释放量 + 跳过原因）。
  * - 失败保留 modal 与选择，展示结构化错误。
  * - cancel/overlay/Escape 关闭不执行操作。
  * - 关闭后恢复触发按钮焦点。
@@ -83,7 +84,7 @@ function formatBytes(bytes) {
  * @param {HTMLElement} opts.modalEl - modal 根元素
  * @param {HTMLElement} opts.bodyEl - modal body（targets 列表容器）
  * @param {HTMLElement} opts.confirmBtn - 确认按钮
- * @param {Function} opts.onConfirm - 确认回调 `(targetIds, mode) => Promise<void>`
+ * @param {Function} opts.onConfirm - 确认回调 `(targetIds, mode) => Promise<CleanupResultDto|null>`
  * @param {Function} [opts.onClose] - 关闭回调
  * @returns {Object} modal controller
  */
@@ -423,6 +424,10 @@ export function createCleanupModal(opts) {
 
     /**
      * 处理确认。
+     *
+     * onConfirm 返回后端的 CleanupResultDto：
+     * - 全部成功 → 关闭 modal（释放量由刷新后的占用统计即时表达）
+     * - 有 skipped/error → 保留 modal，渲染结果面板（跳过原因可读，可重试）
      */
     async function handleConfirm() {
         if (submitting) return;
@@ -437,11 +442,17 @@ export function createCleanupModal(opts) {
 
         try {
             const targetIds = Array.from(selectedIds);
+            let result;
             if (opts.onConfirm) {
-                await opts.onConfirm(targetIds, mode);
+                result = await opts.onConfirm(targetIds, mode);
             }
-            // 成功 → 关闭 modal（不恢复触发按钮焦点，因为通常卡片会重渲染）
-            close(false);
+            const skipped = result?.skipped_target_ids ?? [];
+            if (skipped.length > 0 || result?.error) {
+                renderResult(result);
+            } else {
+                // 全部成功 → 关闭 modal（不恢复触发按钮焦点，卡片会重渲染）
+                close(false);
+            }
         } catch (e) {
             // 失败 → 保留 modal 与选择，展示结构化错误
             renderError(e);
@@ -451,6 +462,67 @@ export function createCleanupModal(opts) {
             confirmBtn.textContent = originalText;
             updateConfirmState();
         }
+    }
+
+    /**
+     * 渲染清理结果面板（部分成功/跳过场景）。
+     * 全部成功时不会走到这里——直接关闭 modal。
+     *
+     * @param {Object} result - 后端 CleanupResultDto
+     */
+    function renderResult(result) {
+        // 移除旧结果
+        const old = bodyEl.querySelector(".le-cleanup-result");
+        if (old) old.remove();
+
+        const div = document.createElement("div");
+        div.className = "le-cleanup-result";
+
+        const released = result?.released_bytes ?? 0;
+        const cleanedCount = result?.cleaned_target_ids?.length ?? 0;
+        const skipped = result?.skipped_target_ids ?? [];
+
+        if (cleanedCount > 0) {
+            const ok = document.createElement("p");
+            ok.className = "le-cleanup-result-ok";
+            ok.textContent = tt(
+                "local_engine.cleanup.result_ok",
+                "已清理 {count} 项，释放 {size}",
+            )
+                .replace("{count}", String(cleanedCount))
+                .replace("{size}", formatBytes(released));
+            div.appendChild(ok);
+        }
+
+        if (skipped.length > 0) {
+            const skip = document.createElement("p");
+            skip.className = "le-cleanup-result-skip";
+            skip.textContent = tt(
+                "local_engine.cleanup.result_skipped",
+                "以下目标未能清理，已保留勾选可重试：",
+            );
+            div.appendChild(skip);
+
+            // 后端把每个 target 的原因拼在 error 字段（"target_id: 原因; ..."）
+            const reasons = (result.error || "")
+                .split("; ")
+                .map((s) => s.trim())
+                .filter(Boolean);
+            for (const reason of reasons) {
+                const line = document.createElement("p");
+                line.className = "le-cleanup-result-reason";
+                line.textContent = reason;
+                div.appendChild(line);
+            }
+            if (reasons.length === 0) {
+                const line = document.createElement("p");
+                line.className = "le-cleanup-result-reason";
+                line.textContent = skipped.join("、");
+                div.appendChild(line);
+            }
+        }
+
+        bodyEl.appendChild(div);
     }
 
     /**

@@ -846,14 +846,13 @@ fn main() {
                 operation_log_store.clone(),
             );
 
-            // 构造 provider descriptors map + providers（安装事务用）。
+            // 构造 provider descriptors map（安装事务用）。
             // funasr = ManagedBinary（GGUF worker）；paddleocr = OnnxRuntime（0.22.8）。
+            // 0.22.10：PythonVenv provider 已退役，legacy manifest 只读不写。
             let funasr_descriptor =
                 crate::app::local_engine::funasr::make_funasr_provider_descriptor();
             let paddleocr_descriptor =
                 crate::app::local_engine::paddleocr::make_paddleocr_onnx_provider_descriptor();
-            let python_provider =
-                crate::app::local_engine::paddleocr::make_paddleocr_python_provider();
             let mut provider_descriptors = std::collections::HashMap::new();
             provider_descriptors.insert(funasr_descriptor.engine_id.clone(), funasr_descriptor);
             provider_descriptors.insert(
@@ -869,7 +868,6 @@ fn main() {
                     engine_registry,
                     event_port,
                     provider_descriptors,
-                    python_provider,
                     crate::app::local_engine::model_installer::make_funasr_model_registry(),
                     std::sync::Arc::new(
                         crate::app::local_engine::funasr::FunasrGgufModelInstallWorker::new(),
@@ -1107,7 +1105,6 @@ fn main() {
                         };
 
                         // 0.22.3: 环境检查 + 安装统一走 EngineManager
-                        // 不再直接调用 platform::python::setup_with_progress
                         match svc.ensure_installed(&engine_id, adapter_config.clone()).await {
                             Ok(_) => {}
                             Err(e) => {

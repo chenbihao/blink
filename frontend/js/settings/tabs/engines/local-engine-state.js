@@ -672,6 +672,33 @@ export function isOperationCancellable(entry) {
 }
 
 /**
+ * 选中模型的下载状态（0.22.10 主操作引导用）。
+ *
+ * - "need_download"：选中模型未安装或处于失败终态——此时点「启动」只会
+ *   得到后端 ModelNotReady 错误，主操作应引导为「下载模型」
+ * - "busy"：模型资产操作进行中（下载/暂存/校验/修复/删除）
+ * - null：已安装（delete_blocked 视同已安装），或无模型目录数据
+ *   （目录尚未拉到/非 STT 引擎）——fail-open 走既有启动路径，
+ *   后端启动校验（ModelNotReady）仍可兜底
+ *
+ * @param {EngineStateEntry} entry
+ * @returns {"need_download"|"busy"|null}
+ */
+export function selectedModelDownloadState(entry) {
+    const catalog = entry?.catalog;
+    if (!catalog || catalog.capability_kind !== "stt") return null;
+    const models = Array.isArray(entry.models) ? entry.models : [];
+    const selected = models.find((m) => m.is_selected);
+    if (!selected) return null;
+    const state = getEffectiveModelInstallState(entry, selected);
+    if (state === "installed" || state === "delete_blocked") return null;
+    if (["downloading", "staging", "verifying", "repairing", "deleting"].includes(state)) {
+        return "busy";
+    }
+    return "need_download";
+}
+
+/**
  * 获取环境的可行动作。
  *
  * 按钮启用逻辑：

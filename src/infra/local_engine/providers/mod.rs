@@ -4,8 +4,10 @@
 //!
 //! - `providers`：定义 provider trait 和 descriptor，编排 staging → slot promote
 //!   → deployment.json 原子切换的通用事务流程（journal fail-closed）。
-//! - `providers/python`：`PythonVenvProvider` 完整实现。
 //! - `providers/binary`：`ManagedBinaryProvider` 协议位（闭合变体，不实现完整逻辑）。
+//! - `providers/onnx`：`OnnxRuntimeProvider`（0.22.8，ORT + 模型联合安装）。
+//! - 0.22.10：`providers/python`（PythonVenvProvider）已随 Python/uv 栈退役删除；
+//!   磁盘上的 legacy PythonVenv manifest 仍可安全读取（serde 变体保留）。
 //! - 本模块不依赖 app/tauri，只使用 domain 身份类型和 infra 内部类型。
 //!
 //! ## 安装事务（slot + journal，见 `infra/local_engine/deployment`）
@@ -24,9 +26,6 @@
 
 pub mod binary;
 pub mod onnx;
-pub mod python;
-
-use serde::{Deserialize, Serialize};
 
 use super::deployment::{
     DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentSlot, DeploymentSpace,
@@ -78,7 +77,7 @@ pub struct ProfileCandidate {
 ///
 /// 闭合协议枚举，只保留 0.22.7 GGUF 链路明确需要的最小集合
 /// （cuda / vulkan / cpu feature）；GPU/feature 分支由 ManagedBinary
-/// provider 落地时构造，当前 PythonVenv 只使用 `Always`。
+/// provider 落地时构造，当前只使用 `Always` 与 `RequiresCuda`。
 #[allow(dead_code)] // 0.22.7 ManagedBinary 协议位——变体由 binary descriptor 构造
 #[derive(Debug, Clone)]
 pub enum CompatibilityCheck {
@@ -95,10 +94,6 @@ pub enum CompatibilityCheck {
 /// 安装计划（provider 专属，闭合枚举）。
 #[derive(Debug, Clone)]
 pub enum InstallPlan {
-    /// Python venv 安装计划。
-    /// 0.22.8: PaddleOCR 已切换到 OnnxRuntime，保留用于 legacy 兼容读取。
-    #[allow(dead_code)]
-    PythonVenv(PythonInstallPlan),
     /// Managed binary 安装计划（协议位保留：首个 binary 引擎接入时构造）。
     #[allow(dead_code)]
     ManagedBinary(BinaryInstallPlan),
@@ -109,49 +104,6 @@ pub enum InstallPlan {
     /// 不伪装成 `ManagedBinary`（不启动子进程）。
     #[allow(dead_code)]
     OnnxRuntime(OnnxInstallPlan),
-}
-
-/// 额外 pip 安装参数（闭合枚举，不接受任意字符串）。
-///
-/// 替代之前的 `Vec<String>`，避免命令注入风险。
-/// 只允许编译期已知的、语义明确的安装选项。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PipExtraArg {
-    /// 指定额外的 package index URL（如 PyTorch CUDA index）。
-    /// 对应 `--extra-index-url <url>`。
-    ExtraIndexUrl(String),
-    /// 允许 uv 跨全部 package index 选择与锁定版本匹配的候选。
-    /// 对应 `--index-strategy unsafe-best-match`。
-    ///
-    /// 仅用于同时依赖 PyPI 与框架专用 wheel index 的完整 hash 锁安装；
-    /// 不应作为普通安装的默认策略。
-    IndexStrategyUnsafeBestMatch,
-    /// 指定 `--no-deps`（不安装依赖，仅安装指定包）。
-    /// 用于避免传递依赖版本漂移。
-    NoDeps,
-    /// 指定 `--no-build-isolation`（不使用构建隔离）。
-    /// 用于预安装构建依赖的场景。
-    NoBuildIsolation,
-}
-
-/// Python venv 安装计划。
-#[derive(Debug, Clone)]
-pub struct PythonInstallPlan {
-    /// Python 版本（如 `3.12.8`）。
-    pub python_version: String,
-    /// Python distribution artifact id。
-    pub python_artifact_id: runtime::ArtifactId,
-    /// 锁定的包列表（含 SHA-256 hash，用于 `--require-hashes` 强校验）。
-    pub packages: Vec<PackageLock>,
-    /// uv 版本要求。
-    pub uv_version: String,
-    /// package index URL（如果非默认 PyPI）。
-    pub index_url: Option<String>,
-    /// 额外 pip 安装参数（闭合枚举，不接受任意字符串）。
-    pub extra_pip_args: Vec<PipExtraArg>,
-    /// self-test 脚本（Python 代码片段，在 venv 中执行）。
-    pub self_test_script: String,
 }
 
 /// Managed binary 安装计划。
@@ -172,7 +124,7 @@ pub struct BinaryInstallPlan {
     pub archive_sha256: String,
     /// 可执行文件路径（相对于部署根）。
     pub executable: String,
-    /// 引用的共享 stdlib artifact（可选，如 Blink 托管 Python distribution）。
+    /// 引用的共享 stdlib artifact（可选，预留协议位，当前无引擎使用）。
     pub stdlib_artifact: Option<runtime::ArtifactIdentity>,
     /// required CPU features。
     pub required_cpu_features: Vec<String>,
@@ -212,33 +164,6 @@ pub struct OnnxInstallPlan {
     pub execution_provider: String,
 }
 
-/// 包锁定条目。
-///
-/// 包含 SHA-256 hash 时，安装使用 `--require-hashes` 强校验，
-/// 确保安装的 wheel 与 descriptor 声明的 hash 完全一致。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PackageLock {
-    /// 包名（如 `torch`、`funasr`）。
-    pub name: String,
-    /// 锁定版本（如 `2.5.0` 或 `>=0.59`）。
-    pub version: String,
-    /// wheel SHA-256 hash（hex）。
-    ///
-    /// 如果提供，安装时使用 `--require-hashes` 强校验。
-    /// 如果为 `None`，表示上游不提供稳定 checksum（如 PaddlePaddle），
-    /// 此时安装不使用 `--require-hashes`，但 manifest 记录 `ChecksumSource::DownloadSource`。
-    ///
-    /// 对于多平台 wheel，这是第一个 hash（用于摘要/标识）。
-    /// `all_hashes` 包含所有平台 wheel 的 hash，用于 `--require-hashes` 安装。
-    pub sha256: Option<String>,
-    /// 所有平台 wheel 的 SHA-256 hash 列表。
-    ///
-    /// `--require-hashes` 需要列出所有 hash 让 pip 匹配正确平台的 wheel。
-    /// 如果为空，则使用 `sha256`（向后兼容）。
-    #[serde(default)]
-    pub all_hashes: Vec<String>,
-}
-
 // ── InstallSink ───────────────────────────────────────────────────────────
 
 /// 安装进度与日志 sink——provider/事务通过此 trait 上报进度和实时日志。
@@ -246,7 +171,7 @@ pub struct PackageLock {
 /// **设计铁则**：
 /// - 不依赖 Tauri/`AppHandle`/`windows` crate——infra 层 trait。
 /// - 调用方（app 层）提供实现，把 sink 调用桥接为 Tauri 事件。
-/// - Provider 实现应在执行子进程（uv/pip/model 下载）期间，
+/// - Provider 实现应在执行子进程或长耗时下载（模型/archive）期间，
 ///   实时把 stdout/stderr 行通过 `on_log` 上报，不等进程结束。
 /// - `on_stage` 用于提交阶段变更（Preparing/Downloading/...）。
 /// - 所有方法接受 `&self`，实现需内部可变（如 `Mutex`/`Arc`）。
@@ -295,8 +220,8 @@ pub struct PrepareResult {
 /// Runtime Provider trait（provider-neutral 接口）。
 ///
 /// 每个 provider 实现此 trait，把"如何取得并验证可执行环境"封装在受限 provider 中。
-/// `PythonVenvProvider` 负责 uv/Python/venv/pip；
-/// `ManagedBinaryProvider` 负责下载/解包/验证 archive。
+/// `ManagedBinaryProvider` 负责捆绑/下载/解包/验证 archive；
+/// `OnnxRuntimeProvider` 负责 ORT DLL 与模型的联合 staging/校验。
 #[async_trait::async_trait]
 pub trait RuntimeProvider: Send + Sync {
     /// 运行时计划。
@@ -308,13 +233,13 @@ pub trait RuntimeProvider: Send + Sync {
 
     /// 在 staging 目录中准备环境。
     ///
-    /// - PythonVenv: 确保 uv/Python、创建 venv、同步锁定依赖。
     /// - ManagedBinary: 下载/解包锁定 archive、验证文件 hash。
+    /// - OnnxRuntime: ORT DLL 与模型联合 staging、校验。
     ///
     /// 返回 `PrepareResult`，包含已验证的 artifact 身份标识（含真实 SHA-256 hash）。
     /// 此 hash 写入部署 manifest，用于后续完整性验证。
     ///
-    /// `cancel_token` 用于在 provider 内部长耗时操作（如 `uv pip install`、
+    /// `cancel_token` 用于在 provider 内部长耗时操作（如模型下载、
     /// archive 下载）执行期间响应取消信号。Provider 实现应在 `tokio::select!`
     /// 中同时监听操作 future 和 `cancel_token.cancelled()`，
     /// 被取消时返回 `RuntimeError::OperationCancelled`。
@@ -1021,8 +946,8 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 ///   active 判定只看该空间自己的指针——删除保护按 implementation 生效。
 /// - `EngineStaging`: 清扫引擎全部空间（engine 级 + implementation 级）的
 ///   孤儿 staging。
-/// - `EngineModelCache`: 清理指定引擎的模型缓存（engine + model 管理，与
-///   deployment 空间正交）。
+/// - `EngineModelCache`: 清理指定引擎模型目录中的孤儿残留（已安装模型
+///   资产受保护，只删非托管子项；与 deployment 空间正交）。
 /// - `ProviderSharedArtifact`: 清理共享 artifact（需各空间 active manifest 引用检查）。
 /// - `ProviderDownloadCache`: 清理 provider 下载缓存。
 pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
@@ -1047,13 +972,35 @@ pub fn execute_cleanup(scope: &CleanupScope) -> Result<(), RuntimeError> {
         }
         CleanupScope::EngineModelCache { engine_id } => {
             let cache_dir = runtime::engine_model_cache_dir(engine_id);
-            let engine_root = runtime::engine_root(engine_id);
-            runtime::ensure_path_within(&engine_root, &cache_dir)?;
+            // 校验基准是模型根——`models/` 与 `runtimes/engines/` 平级，
+            // 对 engine_root 校验永远失败（0.22.x 该清理从未生效的原因）
+            let models_root = runtime::models_root();
+            runtime::ensure_path_within(&models_root, &cache_dir)?;
             if cache_dir.exists() {
-                std::fs::remove_dir_all(&cache_dir).map_err(|e| RuntimeError::CleanupFailed {
-                    message: format!("删除模型缓存失败: {e}"),
-                })?;
-                tracing::info!(engine = %engine_id, "模型缓存已清理");
+                // `models/{engine}` 同时是已安装模型的资产根——只清理非托管
+                // 子项（孤儿/安装残留），整删会把已安装模型一起删掉
+                for entry in std::fs::read_dir(&cache_dir)? {
+                    let path = entry?.path();
+                    if path.is_dir()
+                        && crate::infra::local_engine::model_storage::is_managed_asset_dir(&path)
+                    {
+                        continue;
+                    }
+                    runtime::ensure_path_within(&models_root, &path)?;
+                    let result = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    result.map_err(|e| RuntimeError::CleanupFailed {
+                        message: format!("删除模型缓存残留失败: {e}"),
+                    })?;
+                    tracing::info!(
+                        engine = %engine_id,
+                        path = %path.display(),
+                        "模型缓存残留已清理"
+                    );
+                }
             }
             Ok(())
         }
