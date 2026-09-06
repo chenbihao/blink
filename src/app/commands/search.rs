@@ -987,6 +987,16 @@ pub async fn ack_hotkey_recording_ready(
     }))
 }
 
+/// chord 全局快捷键注册状态（0.22.12 设置页查询）。
+///
+/// 返回最近一次注册结果：每键 `registered` + 未生效原因（`occupied` /
+/// `invalid` / `error`）。配置未设置任何全局键时返回空数组。
+#[tauri::command]
+pub async fn get_global_hotkey_statuses(
+) -> Vec<crate::infra::platform::hotkey::GlobalHotkeyStatus> {
+    crate::infra::platform::hotkey::global_hotkey_statuses()
+}
+
 /// 记录剪贴板命中（用户选择粘贴某条历史）。
 #[tauri::command]
 pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(), String> {

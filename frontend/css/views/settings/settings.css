@@ -1151,7 +1151,7 @@ input[type="number"]::-webkit-outer-spin-button {
     padding: 8px 0 10px 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
 }
 
 /* ⚠️ 关键：display:flex 会覆盖 [hidden] 的 display:none，必须显式声明 */
@@ -1214,10 +1214,104 @@ input[type="number"]::-webkit-outer-spin-button {
     padding: 4px 0 4px 32px;
 }
 
-/* ── 剪贴板详细配置 ── */
+/* ── 全局快捷键块（0.22.12）──
+   语义分区：触发键位 + 全局快捷键同属「快捷键区」，二者之间不画分隔线；
+   虚分隔线只用于「快捷键区 → 功能配置区」（剪贴板/截图 detail）的边界。 */
+.chord-global-block {
+    margin-top: 0;
+}
+
+/* 行距对齐：detail 区内部行距 = gap 4 + 字段 padding 4+4 = 12px；
+   本块与「触发键位」之间只有 row-body gap 8 + 本字段上 padding，故抵消上 padding
+   凑足同一 12px 视觉行距。 */
+.chord-global-block > .chord-field {
+    padding-top: 0;
+}
+
+/* 开启后的配置区：嵌套浅底圆角盒，表达「随开关聚合成组」 */
+.chord-global-config {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 6px 0 2px 32px;
+    padding: 10px 12px;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+}
+
+.chord-global-config[hidden] {
+    display: none;
+}
+
+.chord-global-modes {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chord-global-radio {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--text-base);
+    color: var(--text);
+    cursor: pointer;
+}
+
+.chord-global-radio input[type="radio"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+/* 自定义组合键录制按钮复用 .hotkey-btn，紧凑化 */
+.chord-global-record.hotkey-btn {
+    min-width: 0;
+    padding: 4px 12px;
+    font-size: var(--text-sm);
+}
+
+.chord-global-combo {
+    white-space: nowrap;
+}
+
+/* 注册状态行：已生效 / 未生效（红框条，与引擎页冲突条同语义） */
+.chord-global-status {
+    min-height: 18px;
+}
+
+.chord-global-status-line {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+}
+
+.chord-global-status-line.is-ok {
+    color: var(--green);
+    background: var(--green-bg);
+}
+
+.chord-global-status-line.is-warn {
+    color: var(--red);
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+}
+
+/* ── 功能配置区（快捷键区之下，虚分隔线统一画在这里）── */
 .chord-clipboard-detail {
-    margin-top: 6px;
-    padding-top: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+/* 截图详细配置与剪贴板同构：同一条虚线边界（此前无分隔样式，与剪贴板不一致） */
+.chord-screenshot-detail {
+    margin-top: 10px;
+    padding-top: 10px;
     border-top: 1px dashed var(--surface);
     display: flex;
     flex-direction: column;

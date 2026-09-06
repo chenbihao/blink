@@ -41,6 +41,27 @@ pub enum ChordSemantic {
     Hold,
 }
 
+/// 单个 chord 动作的可选全局快捷键形态（0.22.12）。
+///
+/// - `FollowChord`：跟随动作的 chord 触发键（组合键 = `binding.modifiers` + 生效键）。
+///   chord 键变更时自动跟随。运行时由 app 层「主窗可见时全局路径让位」规则保证
+///   与 chord 吞键路径按按键互斥（LL hook 先于 RegisterHotKey 派发）。
+/// - `Custom`：独立组合键，与 chord 键位无关，始终生效。
+///
+/// voice_input（Hold 语义 / `ChordTarget::VoiceInteraction`）不参与全局键，
+/// 解析与校验层显式跳过。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum GlobalBinding {
+    FollowChord,
+    Custom {
+        #[serde(default)]
+        modifiers: Vec<String>,
+        #[serde(default)]
+        key: String,
+    },
+}
+
 /// 单个 chord 动作的键位绑定（0.10.7）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChordBinding {
@@ -60,6 +81,10 @@ pub struct ChordBinding {
     /// 缺失字段为 `None`（走 default）。
     #[serde(default)]
     pub semantic: Option<ChordSemantic>,
+    /// 可选全局快捷键（0.22.12）。`None` = 未提升全局入口。
+    /// `skip_serializing_if` 保持未提升动作的存量 JSON 不新增字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global: Option<GlobalBinding>,
 }
 
 impl Default for ChordBinding {
@@ -68,6 +93,7 @@ impl Default for ChordBinding {
             key: String::new(),
             modifiers: default_alt_modifiers(),
             semantic: None,
+            global: None,
         }
     }
 }
@@ -163,6 +189,324 @@ impl ChordBindings {
             Some(b) => b.semantic.unwrap_or(default_semantic),
             None => default_semantic,
         }
+    }
+}
+
+// ── 0.22.12：全局快捷键组合键与冲突检查 ──────────────────────────────────────
+
+/// 规范化组合键（域内比较用）：修饰键集合 + 主键。
+///
+/// 修饰键按别名折叠（`lalt`/`ralt` → `alt`、`win`/`super` → `meta` 等）——
+/// `RegisterHotKey` 的 `MOD_*` 也不区分左右，比较语义保持一致。主键统一小写。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HotkeyCombo {
+    modifiers: std::collections::BTreeSet<String>,
+    key: String,
+}
+
+impl HotkeyCombo {
+    pub fn new(modifiers: &[String], key: &str) -> Self {
+        Self {
+            modifiers: modifiers
+                .iter()
+                .map(|m| normalize_modifier_name(m))
+                .filter(|m| !m.is_empty())
+                .collect(),
+            // 注意：不做 trim——" " 是空格键，trim 会把它误判为空
+            key: key.to_lowercase(),
+        }
+    }
+
+    /// 规范显示名（`ctrl+alt+s` 顺序），供冲突文案与状态查询。
+    pub fn display(&self) -> String {
+        const ORDER: [&str; 4] = ["ctrl", "alt", "shift", "meta"];
+        let mut parts: Vec<String> = Vec::new();
+        for canonical in ORDER {
+            if self.modifiers.contains(canonical) {
+                parts.push(canonical.to_string());
+            }
+        }
+        for m in &self.modifiers {
+            if !ORDER.contains(&m.as_str()) {
+                parts.push(m.clone());
+            }
+        }
+        parts.push(if self.key == " " {
+            "space".to_string()
+        } else {
+            self.key.clone()
+        });
+        parts.join("+")
+    }
+
+    /// 规范化修饰键列表（canonical 顺序），供注册层映射 `MOD_*`。
+    pub fn modifiers(&self) -> Vec<String> {
+        const ORDER: [&str; 4] = ["ctrl", "alt", "shift", "meta"];
+        let mut parts: Vec<String> = Vec::new();
+        for canonical in ORDER {
+            if self.modifiers.contains(canonical) {
+                parts.push(canonical.to_string());
+            }
+        }
+        for m in &self.modifiers {
+            if !ORDER.contains(&m.as_str()) {
+                parts.push(m.clone());
+            }
+        }
+        parts
+    }
+
+    /// 主键（小写；`" "` 表示空格）。
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+/// 修饰键名归一化：左右折叠 + 常见别名折叠。未知名原样小写返回。
+fn normalize_modifier_name(m: &str) -> String {
+    match m.trim().to_lowercase().as_str() {
+        "lctrl" | "rctrl" | "control" => "ctrl".to_string(),
+        "lalt" | "ralt" => "alt".to_string(),
+        "lshift" | "rshift" => "shift".to_string(),
+        "meta" | "win" | "super" => "meta".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// chord 绑定冲突类型（0.22.12 扩展）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingConflictKind {
+    /// 多个动作映射到同一生效键（既有检查）。
+    ChordKeyDuplicate,
+    /// 两个全局快捷键组合相同。
+    GlobalDuplicate,
+    /// 全局快捷键与主热键相同。
+    GlobalVsMainHotkey,
+    /// 自定义全局快捷键与某 chord 生效键相同（跟随模式天然等于自身 chord 键，豁免）。
+    GlobalVsChordKey,
+    /// chord Tap 键与主热键相同（0.22.12 补齐既有缺口；Hold 语义豁免——
+    /// voice_input 的 Alt+Space 长按与主热键 tap 共存是设计行为）。
+    ChordKeyVsMainHotkey,
+}
+
+/// 一条绑定冲突：类型 + 组合键显示名 + 涉及动作 id。
+#[derive(Debug, Clone)]
+pub struct BindingConflict {
+    pub kind: BindingConflictKind,
+    pub combo: String,
+    pub actions: Vec<String>,
+}
+
+impl BindingConflict {
+    /// 面向用户的中文冲突描述（与 command 层既有错误文案风格一致）。
+    pub fn describe(&self) -> String {
+        match self.kind {
+            BindingConflictKind::ChordKeyDuplicate => format!(
+                "Chord 键 {} 已被多个动作占用：{}",
+                self.combo,
+                self.actions.join(", ")
+            ),
+            BindingConflictKind::GlobalDuplicate => format!(
+                "全局快捷键 {} 已被多个动作占用：{}",
+                self.combo,
+                self.actions.join(", ")
+            ),
+            BindingConflictKind::GlobalVsMainHotkey => {
+                format!("全局快捷键 {} 与主热键冲突，请更换组合", self.combo)
+            }
+            BindingConflictKind::GlobalVsChordKey => format!(
+                "全局快捷键 {} 与动作（{}）的 Chord 键相同，请改用「跟随触发键」或更换组合",
+                self.combo,
+                self.actions.join(", ")
+            ),
+            BindingConflictKind::ChordKeyVsMainHotkey => format!(
+                "Chord 键 {}（{}）与主热键相同，触发会被主热键抢占，请更换",
+                self.combo,
+                self.actions.join(", ")
+            ),
+        }
+    }
+}
+
+/// 已解析的全局快捷键绑定（0.22.12）。
+///
+/// 由 `ChordRegistry::global_hotkey_bindings` 从 bindings 派生：修饰键已规范化
+/// （canonical 名），主键小写。供 app 层构建 `InputConfigSnapshot` 与 infra
+/// 注册层映射 `MOD_*` / VK。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GlobalHotkeyBinding {
+    pub action_id: String,
+    /// `true` = 跟随 chord 触发键（服务层据此执行「主窗可见时让位」规则）。
+    pub follow_chord: bool,
+    pub modifiers: Vec<String>,
+    pub key: String,
+}
+
+impl ChordBindings {
+    /// 某动作的生效修饰键列表（binding 缺失时按 `["alt"]` 兜底）。
+    fn effective_modifiers(&self, id: &str) -> Vec<String> {
+        self.get(id)
+            .map(|b| b.modifiers.clone())
+            .unwrap_or_else(default_alt_modifiers)
+    }
+
+    /// 某动作的生效全局组合键（未设置 / voice_input / 空主键 → None）。
+    fn effective_global_combo(
+        &self,
+        id: &str,
+        default_key: char,
+    ) -> Option<HotkeyCombo> {
+        let binding = self.get(id)?;
+        match &binding.global {
+            Some(GlobalBinding::FollowChord) => Some(HotkeyCombo::new(
+                &binding.modifiers,
+                &self.effective_key(id, default_key),
+            )),
+            Some(GlobalBinding::Custom { modifiers, key }) if !key.is_empty() => {
+                Some(HotkeyCombo::new(modifiers, key))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl ChordRegistry {
+    /// 解析各动作的生效全局组合键（0.22.12）。
+    ///
+    /// voice_input（`ChordTarget::VoiceInteraction`，Hold 语义）不参与；
+    /// 空 key 的 Custom 视为未设置。返回 (action_id, combo)。
+    pub fn global_hotkey_combos(&self, bindings: &ChordBindings) -> Vec<(String, HotkeyCombo)> {
+        self.actions
+            .iter()
+            .filter(|a| !matches!(a.target(), ChordTarget::VoiceInteraction))
+            .filter_map(|a| {
+                bindings
+                    .effective_global_combo(a.id(), a.default_key())
+                    .map(|combo| (a.id().to_string(), combo))
+            })
+            .collect()
+    }
+
+    /// 解析各动作的全局快捷键绑定（0.22.12，供快照/注册层消费）。
+    ///
+    /// 过滤 disabled 动作与 voice_input（Hold 语义不参与全局键）；
+    /// 修饰键已按 canonical 名规范化（`lctrl`→`ctrl` 等）。
+    pub fn global_hotkey_bindings(
+        &self,
+        bindings: &ChordBindings,
+        disabled: &[String],
+    ) -> Vec<GlobalHotkeyBinding> {
+        self.actions
+            .iter()
+            .filter(|a| !disabled.iter().any(|d| d == a.id()))
+            .filter(|a| !matches!(a.target(), ChordTarget::VoiceInteraction))
+            .filter_map(|a| {
+                let follow_chord = matches!(
+                    bindings.get(a.id()).and_then(|b| b.global.as_ref()),
+                    Some(GlobalBinding::FollowChord)
+                );
+                let combo = bindings.effective_global_combo(a.id(), a.default_key())?;
+                Some(GlobalHotkeyBinding {
+                    action_id: a.id().to_string(),
+                    follow_chord,
+                    modifiers: combo.modifiers(),
+                    key: combo.key().to_string(),
+                })
+            })
+            .collect()
+    }
+
+    /// 全局快捷键冲突 + 主热键跨检查（0.22.12）。
+    ///
+    /// 覆盖四类：全局键互相、全局键 vs 主热键、自定义全局键 vs chord 生效键、
+    /// chord Tap 键 vs 主热键（补齐既有缺口）。`main_hotkey` 传 `None` 时跳过
+    /// 主热键相关两类（域内单测/调用方无主热键上下文的场景）。
+    ///
+    /// 与既有 `binding_conflicts()`（chord 键互相重复）互补，不替代——
+    /// 调用方（`set_config` 的 `chord_bindings` 分支）两者都跑。
+    pub fn global_binding_conflicts(
+        &self,
+        bindings: &ChordBindings,
+        main_hotkey: Option<(&[String], &str)>,
+    ) -> Vec<BindingConflict> {
+        let mut conflicts = Vec::new();
+        let globals = self.global_hotkey_combos(bindings);
+
+        // 1. 全局键互相冲突
+        for (idx, (id_a, combo_a)) in globals.iter().enumerate() {
+            for (id_b, combo_b) in globals.iter().skip(idx + 1) {
+                if combo_a == combo_b {
+                    conflicts.push(BindingConflict {
+                        kind: BindingConflictKind::GlobalDuplicate,
+                        combo: combo_a.display(),
+                        actions: vec![id_a.clone(), id_b.clone()],
+                    });
+                }
+            }
+        }
+
+        let main_combo = main_hotkey.map(|(mods, key)| HotkeyCombo::new(mods, key));
+
+        // 2. 全局键 vs 主热键
+        if let Some(main) = &main_combo {
+            for (id, combo) in &globals {
+                if combo == main {
+                    conflicts.push(BindingConflict {
+                        kind: BindingConflictKind::GlobalVsMainHotkey,
+                        combo: combo.display(),
+                        actions: vec![id.clone()],
+                    });
+                }
+            }
+        }
+
+        // 3. 自定义全局键 vs chord 生效键（含自身；跟随模式豁免）
+        for (id, combo) in &globals {
+            let is_custom = matches!(
+                bindings.get(id).and_then(|b| b.global.as_ref()),
+                Some(GlobalBinding::Custom { .. })
+            );
+            if !is_custom {
+                continue;
+            }
+            for action in &self.actions {
+                let chord_combo = HotkeyCombo::new(
+                    &bindings.effective_modifiers(action.id()),
+                    &bindings.effective_key(action.id(), action.default_key()),
+                );
+                if &chord_combo == combo {
+                    conflicts.push(BindingConflict {
+                        kind: BindingConflictKind::GlobalVsChordKey,
+                        combo: combo.display(),
+                        actions: vec![id.clone(), action.id().to_string()],
+                    });
+                }
+            }
+        }
+
+        // 4. chord Tap 键 vs 主热键（0.22.12 补缺口；Hold 语义豁免）
+        if let Some(main) = &main_combo {
+            for action in &self.actions {
+                if bindings.effective_semantic(action.id(), action.default_semantic())
+                    != ChordSemantic::Tap
+                {
+                    continue;
+                }
+                let chord_combo = HotkeyCombo::new(
+                    &bindings.effective_modifiers(action.id()),
+                    &bindings.effective_key(action.id(), action.default_key()),
+                );
+                if &chord_combo == main {
+                    conflicts.push(BindingConflict {
+                        kind: BindingConflictKind::ChordKeyVsMainHotkey,
+                        combo: chord_combo.display(),
+                        actions: vec![action.id().to_string()],
+                    });
+                }
+            }
+        }
+
+        conflicts
     }
 }
 
@@ -569,20 +913,28 @@ impl ChordRegistry {
             .map(|a| a.id())
     }
 
-    /// 返回生效键冲突。一个键映射到多个动作时 `.find()` 会让后续动作永远不可达，
+    /// 返回生效键冲突（0.22.12 起统一返回 `BindingConflict`）。
+    ///
+    /// 一个键映射到多个动作时 `.find()` 会让后续动作永远不可达，
     /// 因此配置写入前必须拒绝这类绑定。
-    pub fn binding_conflicts(&self, bindings: &ChordBindings) -> Vec<(String, Vec<String>)> {
-        let mut by_key: std::collections::BTreeMap<String, Vec<String>> =
+    pub fn binding_conflicts(&self, bindings: &ChordBindings) -> Vec<BindingConflict> {
+        let mut by_key: std::collections::BTreeMap<HotkeyCombo, Vec<String>> =
             std::collections::BTreeMap::new();
         for action in &self.actions {
-            let key = bindings
-                .effective_key(action.id(), action.default_key())
-                .to_lowercase();
-            by_key.entry(key).or_default().push(action.id().to_string());
+            let combo = HotkeyCombo::new(
+                &bindings.effective_modifiers(action.id()),
+                &bindings.effective_key(action.id(), action.default_key()),
+            );
+            by_key.entry(combo).or_default().push(action.id().to_string());
         }
         by_key
             .into_iter()
             .filter(|(_, action_ids)| action_ids.len() > 1)
+            .map(|(combo, actions)| BindingConflict {
+                kind: BindingConflictKind::ChordKeyDuplicate,
+                combo: combo.display(),
+                actions,
+            })
             .collect()
     }
 
@@ -620,11 +972,9 @@ impl ChordRegistry {
     /// 按字母键触发对应动作，返回动作的 surface（供 command 层决定显示哪个窗口）。
     /// 键未注册 → Err（前端会 log，不弹窗）。
     ///
-    /// **0.21.2 重构**：不再调 `Action::execute`，改为按 `ChordTarget` 分派：
-    /// - `Capability { capability_id, input_param, extra_args }` → 经 `CapabilityRegistry::invoke`
-    /// - `VoiceInteraction` → Nop（真实录音由 hotkey 层已在 hold 时启动）
-    ///
-    /// `input_text` 和 `origin_ref` 按 `input_param` / extra_args 映射为 Capability 参数。
+    /// **0.21.2 重构**：不再调 `Action::execute`，改为按 `ChordTarget` 分派。
+    /// **0.22.12 重构**：分派体收敛进 `dispatch`，`trigger`（按键解析）与
+    /// `trigger_by_id`（全局快捷键直达，与 chord 键位解耦）共用同一执行语义。
     #[allow(clippy::too_many_arguments)]
     pub async fn trigger(
         &self,
@@ -642,8 +992,50 @@ impl ChordRegistry {
             .iter()
             .find(|a| bindings.effective_key(a.id(), a.default_key()) == lower)
             .ok_or_else(|| format!("未注册的 chord 键: {lower}"))?;
+        tracing::info!(id = action.id(), key = %lower, "chord trigger（按生效键解析）");
+        self.dispatch(action.as_ref(), cap_registry, env, surface_port, input_text, origin_ref)
+            .await
+    }
+
+    /// 按动作 id 直接触发（0.22.12 全局快捷键路径）。
+    ///
+    /// 与 chord 键位完全解耦——全局入口的触发不经过 `effective_key` 解析。
+    /// `input_text` / `origin_ref` 由调用方传 `None`（全局按键无输入文本上下文）。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn trigger_by_id(
+        &self,
+        action_id: &str,
+        cap_registry: &crate::domain::capability::CapabilityRegistry,
+        env: &dyn crate::domain::event::CapabilityEnv,
+        surface_port: Option<&dyn crate::domain::capability::policy::SurfacePort>,
+        input_text: Option<&str>,
+        origin_ref: Option<&str>,
+    ) -> Result<ChordSurface, String> {
+        let action = self
+            .actions
+            .iter()
+            .find(|a| a.id() == action_id)
+            .ok_or_else(|| format!("未注册的 chord 动作: {action_id}"))?;
+        tracing::info!(id = %action_id, "chord trigger（全局快捷键直达）");
+        self.dispatch(action.as_ref(), cap_registry, env, surface_port, input_text, origin_ref)
+            .await
+    }
+
+    /// 按 `ChordTarget` 分派到 Capability 或领域 Interaction。
+    ///
+    /// - `Capability { capability_id, input_param, extra_args }` → 经 `CapabilityRegistry::invoke`
+    /// - `VoiceInteraction` → Nop（真实录音由 hotkey 层已在 hold 时启动）
+    async fn dispatch(
+        &self,
+        action: &dyn ChordAction,
+        cap_registry: &crate::domain::capability::CapabilityRegistry,
+        env: &dyn crate::domain::event::CapabilityEnv,
+        surface_port: Option<&dyn crate::domain::capability::policy::SurfacePort>,
+        input_text: Option<&str>,
+        origin_ref: Option<&str>,
+    ) -> Result<ChordSurface, String> {
         let surface = action.surface();
-        tracing::info!(id = action.id(), key = %lower, surface = ?surface, has_input = input_text.is_some(), "chord trigger");
+        tracing::info!(id = action.id(), surface = ?surface, has_input = input_text.is_some(), "chord trigger");
 
         match action.target() {
             ChordTarget::VoiceInteraction => {
@@ -793,9 +1185,10 @@ mod tests {
 
         let conflicts = registry.binding_conflicts(&bindings);
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].0, "q");
+        assert_eq!(conflicts[0].kind, BindingConflictKind::ChordKeyDuplicate);
+        assert_eq!(conflicts[0].combo, "alt+q");
         assert_eq!(
-            conflicts[0].1,
+            conflicts[0].actions,
             vec!["chat".to_string(), "screenshot".to_string()]
         );
     }
@@ -1034,5 +1427,151 @@ mod tests {
             Some("screenshot")
         );
         assert_eq!(registry.action_id_for_key("a", &bindings2), None);
+    }
+
+    // ── 0.22.12：全局快捷键 ─────────────────────────────────────────────────
+
+    /// 主热键默认修饰键（测试用共享构造）。
+    fn alt_mods() -> Vec<String> {
+        vec!["alt".to_string()]
+    }
+
+    #[test]
+    fn global_binding_serde_backward_compatible() {
+        // 老配置无 global 字段 → None
+        let legacy: ChordBindings =
+            serde_json::from_value(serde_json::json!({ "screenshot": {} })).unwrap();
+        assert!(legacy.screenshot.global.is_none());
+
+        // follow_chord roundtrip
+        let b: ChordBindings = serde_json::from_value(serde_json::json!({
+            "screenshot": { "global": { "mode": "follow_chord" } }
+        }))
+        .unwrap();
+        assert_eq!(b.screenshot.global, Some(GlobalBinding::FollowChord));
+
+        // custom roundtrip
+        let b: ChordBindings = serde_json::from_value(serde_json::json!({
+            "sticky": { "global": { "mode": "custom", "modifiers": ["ctrl", "alt"], "key": "x" } }
+        }))
+        .unwrap();
+        assert_eq!(
+            b.sticky.global,
+            Some(GlobalBinding::Custom {
+                modifiers: vec!["ctrl".into(), "alt".into()],
+                key: "x".into(),
+            })
+        );
+
+        // 未提升时不序列化 global 字段（存量 JSON 不新增键）
+        let out = serde_json::to_value(ChordBindings::default()).unwrap();
+        assert!(out["screenshot"].get("global").is_none());
+    }
+
+    #[test]
+    fn hotkey_combo_normalization_and_display() {
+        // 左右/别名折叠 + 显示顺序
+        let combo = HotkeyCombo::new(&["lalt".to_string()], " ");
+        assert_eq!(combo.display(), "alt+space");
+
+        let combo = HotkeyCombo::new(&["alt".to_string(), "ctrl".to_string()], "S");
+        assert_eq!(combo.display(), "ctrl+alt+s");
+
+        let combo = HotkeyCombo::new(&["super".to_string()], "f5");
+        assert_eq!(combo.display(), "meta+f5");
+
+        // 同组合不同写法相等
+        assert_eq!(
+            HotkeyCombo::new(&["lctrl".to_string()], "a"),
+            HotkeyCombo::new(&["ctrl".to_string()], "A")
+        );
+    }
+
+    #[test]
+    fn global_hotkey_combos_resolve_follow_and_custom() {
+        let registry = build_default_registry();
+        let mut bindings = ChordBindings::default();
+        bindings.screenshot.global = Some(GlobalBinding::FollowChord);
+        bindings.sticky.global = Some(GlobalBinding::Custom {
+            modifiers: vec!["ctrl".into(), "alt".into()],
+            key: "s".into(),
+        });
+
+        let combos = registry.global_hotkey_combos(&bindings);
+        assert_eq!(combos.len(), 2, "voice_input（VoiceInteraction）不参与");
+        assert!(combos.iter().all(|(id, _)| id != "voice_input"));
+        let screenshot = combos.iter().find(|(id, _)| id == "screenshot").unwrap();
+        assert_eq!(screenshot.1.display(), "alt+a", "跟随模式解析为生效键组合");
+        let sticky = combos.iter().find(|(id, _)| id == "sticky").unwrap();
+        assert_eq!(sticky.1.display(), "ctrl+alt+s");
+    }
+
+    #[test]
+    fn global_conflict_duplicate_and_main_hotkey() {
+        let registry = build_default_registry();
+        let mut bindings = ChordBindings::default();
+        // 截图跟随（alt+a）+ edit 自定义（alt+a）→ 全局键互相冲突
+        bindings.screenshot.global = Some(GlobalBinding::FollowChord);
+        bindings.edit.global = Some(GlobalBinding::Custom {
+            modifiers: vec!["alt".into()],
+            key: "a".into(),
+        });
+        let conflicts = registry.global_binding_conflicts(&bindings, Some((&alt_mods()[..], " ")));
+        assert!(conflicts
+            .iter()
+            .any(|c| c.kind == BindingConflictKind::GlobalDuplicate && c.combo == "alt+a"));
+
+        // chat 自定义（alt+space）撞主热键（alt+space）
+        let mut bindings = ChordBindings::default();
+        bindings.chat.global = Some(GlobalBinding::Custom {
+            modifiers: vec!["alt".into()],
+            key: " ".into(),
+        });
+        let conflicts = registry.global_binding_conflicts(&bindings, Some((&alt_mods()[..], " ")));
+        assert!(conflicts
+            .iter()
+            .any(|c| c.kind == BindingConflictKind::GlobalVsMainHotkey && c.combo == "alt+space"));
+    }
+
+    #[test]
+    fn global_conflict_custom_vs_chord_key() {
+        let registry = build_default_registry();
+        // 自定义全局键与自身 chord 键相同 → 冲突（跟随模式才允许同键）
+        let mut bindings = ChordBindings::default();
+        bindings.sticky.global = Some(GlobalBinding::Custom {
+            modifiers: vec!["alt".into()],
+            key: "s".into(),
+        });
+        let conflicts = registry.global_binding_conflicts(&bindings, None);
+        assert!(conflicts
+            .iter()
+            .any(|c| c.kind == BindingConflictKind::GlobalVsChordKey && c.combo == "alt+s"));
+
+        // 跟随模式天然等于自身 chord 键 → 不算冲突
+        let mut bindings = ChordBindings::default();
+        bindings.sticky.global = Some(GlobalBinding::FollowChord);
+        assert!(registry.global_binding_conflicts(&bindings, None).is_empty());
+    }
+
+    #[test]
+    fn chord_tap_key_vs_main_hotkey_gap_check() {
+        let registry = build_default_registry();
+        let main_hotkey = (&alt_mods()[..], " ");
+
+        // 默认配置：voice_input 是 Hold 语义（Alt+Space 长按与主热键共存是设计），
+        // 其余默认键（q/a/c/e/s）与 Alt+Space 不同 → 无冲突
+        assert!(registry
+            .global_binding_conflicts(&ChordBindings::default(), Some(main_hotkey))
+            .is_empty());
+
+        // 把 chat（Tap）改绑到空格 → 与主热键冲突（补齐既有缺口）
+        let mut bindings = ChordBindings::default();
+        bindings.chat.key = " ".into();
+        let conflicts = registry.global_binding_conflicts(&bindings, Some(main_hotkey));
+        assert!(conflicts.iter().any(|c| c.kind == BindingConflictKind::ChordKeyVsMainHotkey
+            && c.actions == vec!["chat".to_string()]));
+
+        // 主热键 None → 跳过主热键相关检查
+        assert!(registry.global_binding_conflicts(&bindings, None).is_empty());
     }
 }

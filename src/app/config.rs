@@ -56,6 +56,20 @@ pub async fn refresh_input_config_with_registry(
             })
     };
 
+    // 0.22.12：chord 全局快捷键（disabled / voice_input 已在 registry 侧过滤）
+    let global_hotkeys = if let Some(reg) = registry {
+        reg.global_hotkey_bindings(&chord_cfg.bindings, &disabled)
+    } else {
+        app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+            .map(|reg| reg.global_hotkey_bindings(&chord_cfg.bindings, &disabled))
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "refresh_input_config: ChordRegistry 未就绪，global_hotkeys 为空"
+                );
+                Default::default()
+            })
+    };
+
     let snapshot = crate::infra::platform::hotkey::InputConfigSnapshot {
         revision: INPUT_CONFIG_REVISION.fetch_add(1, Ordering::Relaxed),
         hotkey: crate::infra::platform::hotkey::NormalizedHotkey {
@@ -66,6 +80,15 @@ pub async fn refresh_input_config_with_registry(
         chord_enabled: chord_cfg.chord_enabled,
         exclusive_tap_keys,
         voice_hold_enabled: true,
+        global_hotkeys: global_hotkeys
+            .into_iter()
+            .map(|g| crate::infra::platform::hotkey::ResolvedGlobalHotkey {
+                action_id: g.action_id,
+                follow_chord: g.follow_chord,
+                modifiers: g.modifiers,
+                key: g.key,
+            })
+            .collect(),
     };
 
     crate::infra::platform::hotkey::InputController::update_config(snapshot);

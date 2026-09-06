@@ -34,6 +34,10 @@ impl EventNames {
     /// Chord 触发后要求前端进入独占模式。payload: `{ mode: "clipboard" }`。
     /// 前端据此切换模式状态机，不走 search pipeline。
     pub const CHORD_ENTER_MODE: &str = "blink://chord-enter-mode";
+    /// 0.22.12：chord 全局快捷键注册状态（重注册完成后去重广播）。
+    /// payload: `[{ actionId, followChord, modifiers, key, registered, reason? }]`。
+    /// `reason`: `occupied`（被其他程序占用）/ `invalid`（组合键不受支持）/ `error`。
+    pub const GLOBAL_HOTKEY_STATUS: &str = "blink://global-hotkey-status";
 
     // ── Chat ──
     pub const CHAT_STREAM: &str = "blink://chat-stream";

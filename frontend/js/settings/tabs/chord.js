@@ -13,6 +13,10 @@
  *   因为 chord 独占模式 hook 会吞掉 Alt+字母 keydown，前端永远收不到事件。
  *   后端录制期间 `is_recording()` 短路在 chord 吞键之前，能正常录到 Alt+字母。
  * - tooltip 直接用 t() 渲染 title 属性（动态生成 HTML 不走 applyI18n）。
+ *
+ * **0.22.12 全局快捷键**：非 voice_input 动作的展开区新增「全局快捷键」块——
+ * 开关 + 跟随触发键 / 自定义组合键（RegisterHotKey 系统级注册）。注册结果经
+ * `blink://global-hotkey-status` 事件回显（occupied = 被其他程序占用）。
  */
 import {invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
@@ -21,6 +25,9 @@ import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
 
 let actionsLoadRevision = 0;
+
+/** 最近一次全局快捷键注册状态（actionId → status，0.22.12）。 */
+let globalStatuses = new Map();
 
 /**
  * 初始化 Chord 动作 Tab
@@ -48,6 +55,13 @@ export function initChordTab() {
             loadChordActions();
         }
     }).catch((e) => console.error("listen config-changed for chord failed:", e));
+
+    // 0.22.12：全局快捷键注册状态回显（保存配置 → hook 线程重注册 → 事件）
+    listen(EVENTS.GLOBAL_HOTKEY_STATUS, (event) => {
+        const list = Array.isArray(event.payload) ? event.payload : [];
+        globalStatuses = new Map(list.map((s) => [s.actionId, s]));
+        updateGlobalStatusDom();
+    }).catch((e) => console.error("listen global-hotkey-status for chord failed:", e));
 }
 
 /**
@@ -75,12 +89,25 @@ async function loadChordActions() {
 
     // 剪贴板详细配置（仅 clipboard_history 动作展开时用）
     let clipboardCfg = null;
+    // 0.22.12：chord bindings（含 global 字段）+ 全局快捷键注册状态
+    let chordBindings = {};
     try {
         const fullCfg = await invoke("get_config");
         if (revision !== actionsLoadRevision) return;
         if (fullCfg?.clipboard) clipboardCfg = fullCfg.clipboard;
+        if (fullCfg?.chord_bindings) chordBindings = fullCfg.chord_bindings;
     } catch (e) {
         console.warn("load clipboard config failed:", e);
+    }
+
+    try {
+        const statuses = await invoke("get_global_hotkey_statuses");
+        if (revision !== actionsLoadRevision) return;
+        globalStatuses = new Map(
+            (Array.isArray(statuses) ? statuses : []).map((s) => [s.actionId, s]),
+        );
+    } catch (e) {
+        console.warn("load global hotkey statuses failed:", e);
     }
 
     // 截图详细配置（0.11.10-b：预热 OCR 开关）——仅 screenshot 动作展开时用
@@ -114,7 +141,9 @@ async function loadChordActions() {
     };
 
     container.innerHTML = actions
-        .map((a) => renderActionRow(a, CHORD_SUBTITLE[a.id], clipboardCfg, screenshotCfg))
+        .map((a) =>
+            renderActionRow(a, CHORD_SUBTITLE[a.id], clipboardCfg, screenshotCfg, chordBindings[a.id]),
+        )
         .join("");
 
     bindRowEvents(container);
@@ -122,15 +151,18 @@ async function loadChordActions() {
 
 /**
  * 渲染单个 chord 动作行（可展开 accordion）。
+ *
+ * 0.22.12：非 voice_input 动作的展开体追加「全局快捷键」块（binding.global + 注册状态）。
  */
-function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
+function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
     subtitle = subtitle || "";
+    binding = binding || {};
     // key=' '（语音输入）→ 显示 "Space"
     const keyLabel = a.key === " " ? "Space" : a.key.toUpperCase();
     const combo = `Alt + ${keyLabel}`;
     const rowClass = a.enabled ? "" : "is-disabled";
 
-    // voice_input 锁定（键位由 hotkey 配置决定）
+    // voice_input 锁定（键位由 hotkey 配置决定；Hold 语义亦不参与全局键）
     const keyLocked = a.id === "voice_input";
     const lockedMsg = t("chord.binding.voice_input.locked");
 
@@ -145,10 +177,15 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
     // 截图详细配置（仅 screenshot 展开;0.11.10-b 起承载 prewarm_ocr）
     const screenshotDetailHtml =
         a.id === "screenshot" ? renderScreenshotDetail(screenshotCfg) : "";
+    // 0.22.12：全局快捷键块（voice_input 除外——Hold 语义不走 RegisterHotKey）
+    const globalBlockHtml = keyLocked
+        ? `<div class="chord-locked-note">${t("chord.global.voice_input.locked")}</div>`
+        : renderGlobalBlock(a, binding, combo);
 
     // 展开体内容（用 .chord-field 紧凑布局，label 用 --settings-label-width 对齐）
     const bodyInnerHtml = keyLocked
-        ? `<div class="chord-locked-note">${lockedMsg}</div>`
+        ? `<div class="chord-locked-note">${lockedMsg}</div>
+       ${globalBlockHtml}`
         : `<div class="chord-field">
          <label class="setting-label chord-field-label">${t("chord.binding.key.label")}
            <span class="field-hint-icon" title="${escapeAttr(t("chord.binding.key.hint"))}">ⓘ</span>
@@ -160,6 +197,7 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
            <button class="btn-small chord-binding-reset" data-id="${escapeAttr(a.id)}">${t("chord.binding.reset")}</button>
          </div>
        </div>
+       ${globalBlockHtml}
        ${clipboardDetailHtml}
        ${screenshotDetailHtml}`;
 
@@ -180,6 +218,226 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
       ${bodyInnerHtml}
     </div>
   </div>`;
+}
+
+/**
+ * 渲染「全局快捷键」块（0.22.12）。
+ *
+ * 结构：开关 + （打开后）跟随触发键 / 自定义组合键二选一 + 注册状态行。
+ * 组合键经 RegisterHotKey 系统级注册，主窗隐藏时也可触发；占用结果异步回显。
+ */
+function renderGlobalBlock(a, binding, chordCombo) {
+    const global = binding.global || null;
+    const enabled = !!global;
+    const isCustom = global?.mode === "custom";
+
+    // 自定义组合键显示：未录制时给出 Ctrl+Alt+<触发键> 的建议值
+    const customCombo = isCustom
+        ? formatCombo(global.modifiers, global.key)
+        : formatCombo(["ctrl", "alt"], a.key);
+
+    const statusHtml = globalStatusBlockHtml(a.id, enabled);
+
+    return `<div class="chord-global-block">
+      <div class="chord-field">
+        <label class="setting-label chord-field-label">${t("chord.global.title")}
+          <span class="field-hint-icon" title="${escapeAttr(t("chord.global.hint"))}">ⓘ</span>
+        </label>
+        <label class="switch switch-sm">
+          <input type="checkbox" class="chord-global-toggle" data-id="${escapeAttr(a.id)}" ${enabled ? "checked" : ""} />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="chord-global-config" data-id="${escapeAttr(a.id)}" data-default-modifiers="ctrl,alt" data-default-key="${escapeAttr(a.key)}" ${enabled ? "" : "hidden"}>
+        <div class="chord-global-modes">
+          <label class="chord-global-radio">
+            <input type="radio" name="chord-global-mode-${escapeAttr(a.id)}" class="chord-global-mode" data-id="${escapeAttr(a.id)}" value="follow" ${!isCustom ? "checked" : ""} />
+            <span>${t("chord.global.mode.follow")}</span>
+            <span class="action-kbd chord-global-follow-kbd">${escapeHtml(chordCombo)}</span>
+          </label>
+          <label class="chord-global-radio">
+            <input type="radio" name="chord-global-mode-${escapeAttr(a.id)}" class="chord-global-mode" data-id="${escapeAttr(a.id)}" value="custom" ${isCustom ? "checked" : ""} />
+            <span>${t("chord.global.mode.custom")}</span>
+            <button class="hotkey-btn chord-global-record" data-id="${escapeAttr(a.id)}" title="${escapeAttr(t("chord.global.record"))}">
+              <span class="chord-global-combo" data-id="${escapeAttr(a.id)}">${escapeHtml(customCombo)}</span>
+            </button>
+            <button class="btn-small chord-global-clear" data-id="${escapeAttr(a.id)}">${t("chord.global.clear")}</button>
+          </label>
+        </div>
+        <div class="chord-global-status" data-id="${escapeAttr(a.id)}">${statusHtml}</div>
+      </div>
+    </div>`;
+}
+
+/**
+ * 单个动作的全局快捷键注册状态 HTML（空串 = 不显示）。
+ */
+function globalStatusBlockHtml(id, enabled) {
+    if (!enabled) return "";
+    const status = globalStatuses.get(id);
+    if (!status) {
+        // 动作被禁用等场景：后端不注册，无状态条目
+        return "";
+    }
+    if (status.registered) {
+        return `<span class="chord-global-status-line is-ok">${t("chord.global.status.active")}</span>`;
+    }
+    const key = status.reason === "occupied"
+        ? "chord.global.status.occupied"
+        : status.reason === "invalid"
+            ? "chord.global.status.invalid"
+            : "chord.global.status.error";
+    return `<span class="chord-global-status-line is-warn">${t(key)}</span>`;
+}
+
+/**
+ * 注册状态事件到达后原位刷新状态行（不整行重渲染，避免展开态闪烁）。
+ */
+function updateGlobalStatusDom() {
+    document.querySelectorAll(".chord-global-status[data-id]").forEach((el) => {
+        const enabled = !!el.closest(".chord-global-block")
+            ?.querySelector(".chord-global-toggle")?.checked;
+        el.innerHTML = globalStatusBlockHtml(el.dataset.id, enabled);
+    });
+}
+
+/**
+ * 组合键显示名：修饰键按 Ctrl/Alt/Shift/Win 排序，主键 " " → Space。
+ */
+function formatCombo(modifiers, key) {
+    const MOD_ORDER = ["ctrl", "alt", "shift", "meta"];
+    const MOD_LABEL = {ctrl: "Ctrl", alt: "Alt", shift: "Shift", meta: "Win"};
+    const norm = (m) => {
+        const alias = {
+            lctrl: "ctrl", rctrl: "ctrl", control: "ctrl",
+            lalt: "alt", ralt: "alt",
+            lshift: "shift", rshift: "shift",
+            meta: "meta", win: "meta", super: "meta",
+        };
+        return alias[m] || m;
+    };
+    const mods = (Array.isArray(modifiers) ? modifiers : []).map(norm);
+    const ordered = MOD_ORDER.filter((m) => mods.includes(m));
+    const rest = mods.filter((m) => !MOD_ORDER.includes(m));
+    const keyLabel = key === " " ? "Space" : String(key || "").toUpperCase();
+    return [...ordered, ...rest].map((m) => MOD_LABEL[m] || m).concat(keyLabel).join(" + ");
+}
+
+/**
+ * 保存某动作的全局快捷键设置（binding.global 字段级更新）。
+ *
+ * @param {string} id 动作 id
+ * @param {object|null} global `{mode:"follow_chord"}` 或 `{mode:"custom",modifiers,key}`；null = 清除
+ * @returns {Promise<boolean>} 是否保存成功（false = 后端冲突拒绝）
+ */
+async function saveGlobalBinding(id, global) {
+    const fullCfg = await invoke("get_config");
+    const bindings = fullCfg?.chord_bindings || {};
+    if (!bindings[id]) {
+        bindings[id] = {key: "", modifiers: ["alt"]};
+    }
+    if (global) {
+        bindings[id].global = global;
+    } else {
+        delete bindings[id].global;
+    }
+    try {
+        await saveConfig("chord_bindings", bindings);
+        return true;
+    } catch (err) {
+        // 后端冲突检查拒绝（组合键撞主热键 / 撞其他全局键 / 撞 chord 键）
+        console.warn("save chord global binding rejected:", err);
+        showGlobalStatusMessage(id, String(err?.message || err || ""));
+        return false;
+    }
+}
+
+/**
+ * 在状态行显示一条临时消息（保存被拒等场景），8 秒后或下次状态事件刷新时消失。
+ */
+function showGlobalStatusMessage(id, msg) {
+    const el = document.querySelector(`.chord-global-status[data-id="${CSS.escape(id)}"]`);
+    if (!el || !msg) return;
+    el.innerHTML = `<span class="chord-global-status-line is-warn">${escapeHtml(msg)}</span>`;
+}
+
+/**
+ * 0.22.12：全局快捷键自定义组合键录制（校验放宽）。
+ *
+ * 校验规则：修饰键 ≥1 且含 Ctrl/Alt/Win 任一（Shift 单独不算，防劫持打字），
+ * 主键限字母 / 数字 / F1-F12 / 空格。不符合则提示无效并保持原组合。
+ */
+async function startGlobalRecording(btn) {
+    const id = btn.dataset.id;
+    const comboEl = btn.querySelector(".chord-global-combo");
+    if (!comboEl) return;
+
+    const origCombo = comboEl.textContent;
+    btn.disabled = true;
+    const suppress = (e) => e.preventDefault();
+    document.addEventListener("keydown", suppress, true);
+
+    try {
+        const result = await recordHotkey(() => {
+            btn.classList.add("recording");
+            comboEl.textContent = t("chord.global.recording");
+        });
+
+        const ALIAS = {
+            lctrl: "ctrl", rctrl: "ctrl", control: "ctrl",
+            lalt: "alt", ralt: "alt",
+            lshift: "shift", rshift: "shift",
+            meta: "meta", win: "meta", super: "meta",
+        };
+        const mods = (Array.isArray(result.modifiers) ? result.modifiers : [])
+            .map((m) => ALIAS[m] || m);
+        const hasUsableMod = mods.some((m) => m === "ctrl" || m === "alt" || m === "meta");
+        const key = typeof result.key === "string" ? result.key.toLowerCase() : "";
+        const keyOk = /^[a-z0-9]$/.test(key)
+            || /^f([1-9]|1[0-2])$/.test(key)
+            || key === " ";
+
+        if (!hasUsableMod || !keyOk) {
+            flashCombo(comboEl, origCombo, t("chord.global.invalid"));
+            return;
+        }
+
+        // 修饰键按 canonical 名去重（后端 HotkeyCombo 会再归一化，这里保持干净）
+        const canonical = [];
+        for (const m of ["ctrl", "alt", "shift", "meta"]) {
+            if (mods.includes(m)) canonical.push(m);
+        }
+        const ok = await saveGlobalBinding(id, {
+            mode: "custom",
+            modifiers: canonical,
+            key,
+        });
+        if (!ok) {
+            comboEl.textContent = origCombo;
+            return;
+        }
+        // 保存成功：切到 custom 单选并显示新组合，等状态事件回显生效结果
+        comboEl.textContent = formatCombo(canonical, key);
+        setGlobalModeRadio(id, "custom");
+    } catch (err) {
+        console.warn("record global hotkey failed:", err);
+        comboEl.textContent = origCombo;
+    } finally {
+        document.removeEventListener("keydown", suppress, true);
+        btn.disabled = false;
+        btn.classList.remove("recording");
+    }
+}
+
+/**
+ * 切换某动作的跟随/自定义单选（录制成功后同步 UI，不触发 change 保存）。
+ */
+function setGlobalModeRadio(id, value) {
+    document
+        .querySelectorAll(`.chord-global-mode[data-id="${CSS.escape(id)}"]`)
+        .forEach((radio) => {
+            radio.checked = radio.value === value;
+        });
 }
 
 /**
@@ -431,6 +689,82 @@ function bindRowEvents(container) {
             } catch (err) {
                 console.error("reset chord binding failed:", err);
             }
+        });
+    });
+
+    // ── 全局快捷键（0.22.12）──
+    // 开关：打开默认「跟随触发键」（零配置生效），关闭清除 global 字段
+    container.querySelectorAll(".chord-global-toggle").forEach((el) => {
+        el.addEventListener("click", (e) => e.stopPropagation());
+        el.addEventListener("change", async (e) => {
+            const id = e.target.dataset.id;
+            const configEl = container.querySelector(
+                `.chord-global-config[data-id="${CSS.escape(id)}"]`,
+            );
+            if (e.target.checked) {
+                configEl?.removeAttribute("hidden");
+                await saveGlobalBinding(id, {mode: "follow_chord"});
+            } else {
+                configEl?.setAttribute("hidden", "");
+                await saveGlobalBinding(id, null);
+            }
+        });
+    });
+
+    // 模式单选：跟随触发键 / 自定义组合键
+    container.querySelectorAll(".chord-global-mode").forEach((radio) => {
+        radio.addEventListener("click", (e) => e.stopPropagation());
+        radio.addEventListener("change", async (e) => {
+            if (!e.target.checked) return;
+            const id = e.target.dataset.id;
+            if (e.target.value === "follow") {
+                const ok = await saveGlobalBinding(id, {mode: "follow_chord"});
+                if (!ok) setGlobalModeRadio(id, "custom");
+                return;
+            }
+            // 切自定义：已有自定义组合则原样保存，否则写入建议值 Ctrl+Alt+<触发键>
+            let existing = null;
+            try {
+                const fullCfg = await invoke("get_config");
+                existing = fullCfg?.chord_bindings?.[id]?.global;
+            } catch (err) {
+                console.warn("load chord binding for global default failed:", err);
+            }
+            if (existing?.mode === "custom") {
+                const ok = await saveGlobalBinding(id, existing);
+                if (!ok) setGlobalModeRadio(id, "follow");
+                return;
+            }
+            const configEl = e.target.closest(".chord-global-config");
+            const modifiers = (configEl?.dataset.defaultModifiers || "ctrl,alt").split(",");
+            const key = configEl?.dataset.defaultKey || "";
+            const ok = await saveGlobalBinding(id, {mode: "custom", modifiers, key});
+            if (!ok) {
+                setGlobalModeRadio(id, "follow");
+                return;
+            }
+            const comboEl = container.querySelector(
+                `.chord-global-combo[data-id="${CSS.escape(id)}"]`,
+            );
+            if (comboEl) comboEl.textContent = formatCombo(modifiers, key);
+        });
+    });
+
+    // 自定义组合键录制（校验放宽：≥1 个 Ctrl/Alt/Win + 字母/数字/F1-F12/空格）
+    container.querySelectorAll(".chord-global-record").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await startGlobalRecording(btn);
+        });
+    });
+
+    // 清除自定义组合 → 回退到跟随触发键
+    container.querySelectorAll(".chord-global-clear").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.id;
+            const ok = await saveGlobalBinding(id, {mode: "follow_chord"});
+            if (ok) setGlobalModeRadio(id, "follow");
         });
     });
 

@@ -115,6 +115,26 @@ pub async fn set_config(
         "hotkey" => {
             let hotkey: crate::app::config::HotkeyConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
+            // 0.22.12：新主热键 vs chord Tap 键 / 已设全局键 跨检查（缺口补齐）
+            let chord_cfg = crate::app::config::get_chord_config(pool).await;
+            let main_hotkey_conflicts: Vec<_> = app
+                .state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                .global_binding_conflicts(
+                    &chord_cfg.bindings,
+                    Some((&hotkey.modifiers, &hotkey.key)),
+                )
+                .into_iter()
+                .filter(|c| {
+                    matches!(
+                        c.kind,
+                        crate::domain::chord::BindingConflictKind::GlobalVsMainHotkey
+                            | crate::domain::chord::BindingConflictKind::ChordKeyVsMainHotkey
+                    )
+                })
+                .collect();
+            if let Some(conflict) = main_hotkey_conflicts.first() {
+                return Err(conflict.describe());
+            }
             crate::app::config::update_hotkey(pool, hotkey.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;
             tracing::info!(display = %hotkey.display, "全局热键已更新");
@@ -151,15 +171,23 @@ pub async fn set_config(
             // chord 键位绑定（设置页改键用）
             let bindings: crate::domain::chord::ChordBindings =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let conflicts = app
-                .state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
-                .binding_conflicts(&bindings);
-            if let Some((conflict_key, action_ids)) = conflicts.first() {
-                return Err(format!(
-                    "Chord 键 Alt+{} 已被多个动作占用：{}",
-                    conflict_key.to_uppercase(),
-                    action_ids.join(", ")
-                ));
+            let registry = app.state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>();
+            // 既有检查：chord 生效键互相重复
+            if let Some(conflict) = registry.binding_conflicts(&bindings).first() {
+                return Err(conflict.describe());
+            }
+            // 0.22.12：全局快捷键冲突 + 主热键跨检查
+            let hotkey_cfg =
+                crate::app::config::ConfigStore::get::<crate::app::config::HotkeyConfig>(pool)
+                    .await;
+            if let Some(conflict) = registry
+                .global_binding_conflicts(
+                    &bindings,
+                    Some((&hotkey_cfg.modifiers, &hotkey_cfg.key)),
+                )
+                .first()
+            {
+                return Err(conflict.describe());
             }
             crate::app::config::update_chord_bindings(pool, bindings.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;

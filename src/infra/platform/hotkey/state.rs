@@ -478,6 +478,19 @@ impl NormalizedHotkey {
 
 // ── 配置快照 ────────────────────────────────────────────────────────────────
 
+/// 已解析的 chord 全局快捷键（0.22.12，从 `ChordRegistry` 派生的 primitive 形状）。
+///
+/// 修饰键已按 canonical 名规范化（ctrl/alt/shift/meta），主键小写（`" "` = 空格）。
+/// hook 线程据此在 `BlinkInputWindow` 上做 `RegisterHotKey` 注册。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ResolvedGlobalHotkey {
+    pub action_id: String,
+    /// `true` = 跟随 chord 触发键（服务层据此执行「主窗可见时让位」）。
+    pub follow_chord: bool,
+    pub modifiers: Vec<String>,
+    pub key: String,
+}
+
 /// 输入配置快照（Hook 线程持有的不可变原始值）。
 ///
 /// 由 app 层从 `HotkeyConfig`、`ChordConfig.bindings`、disabled chord actions
@@ -491,6 +504,8 @@ pub struct InputConfigSnapshot {
     /// 当前 enabled、tap semantic、空 query 可 native 触发的键集合。
     pub exclusive_tap_keys: HashSet<String>,
     pub voice_hold_enabled: bool,
+    /// 已启用的 chord 全局快捷键（0.22.12；disabled / voice_input 已过滤）。
+    pub global_hotkeys: Vec<ResolvedGlobalHotkey>,
 }
 
 impl Default for InputConfigSnapshot {
@@ -505,6 +520,7 @@ impl Default for InputConfigSnapshot {
             chord_enabled: false,
             exclusive_tap_keys: HashSet::new(),
             voice_hold_enabled: true,
+            global_hotkeys: Vec::new(),
         }
     }
 }
@@ -986,6 +1002,22 @@ pub enum InputEvent {
     },
 }
 
+/// 单个 chord 全局快捷键的注册状态（0.22.12，投影给设置页）。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalHotkeyStatus {
+    pub action_id: String,
+    /// `true` = 跟随 chord 触发键模式。
+    pub follow_chord: bool,
+    pub modifiers: Vec<String>,
+    pub key: String,
+    /// 是否已成功注册（`false` = 配置保留但未生效）。
+    pub registered: bool,
+    /// 未生效原因代号：`occupied`（被其他程序占用）/ `invalid`（组合键不受支持）/ `error`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// 输入 effect（reducer 的输出，由 HotkeyService 消费执行业务副作用）。
 #[derive(Clone, Debug)]
 pub enum InputEffect {
@@ -1012,6 +1044,14 @@ pub enum InputEffect {
         chord_session_id: u64,
         key: String,
     },
+    /// chord 全局快捷键被按下（0.22.12，`WM_HOTKEY` → wnd_proc 直发，不经 reducer）。
+    GlobalHotkeyTriggered {
+        action_id: String,
+        /// 跟随触发键模式（服务层据此执行「主窗可见时让位」）。
+        follow_chord: bool,
+    },
+    /// 全局快捷键注册状态批量更新（注册/重注册完成后，去重广播）。
+    GlobalHotkeysChanged(Vec<GlobalHotkeyStatus>),
     UiStateChanged(InputUiState),
     /// 会话重置时取消热键录制（应用层调 recorder::cancel 并回写 Idle）。
     RecorderCancel,
@@ -1885,6 +1925,7 @@ mod tests {
             chord_enabled: true,
             exclusive_tap_keys: ["a", "c", "q"].iter().map(|s| s.to_string()).collect(),
             voice_hold_enabled: true,
+            global_hotkeys: Vec::new(),
         }
     }
 
@@ -2936,6 +2977,7 @@ mod tests {
             chord_enabled: false,
             exclusive_tap_keys: HashSet::new(),
             voice_hold_enabled: true,
+            global_hotkeys: Vec::new(),
         };
         s.config = cfg.clone();
         reduce(&mut s, InputEvent::ConfigChanged(cfg), Instant::now());
@@ -2970,6 +3012,7 @@ mod tests {
             chord_enabled: false,
             exclusive_tap_keys: HashSet::new(),
             voice_hold_enabled: true,
+            global_hotkeys: Vec::new(),
         };
         s.config = cfg.clone();
         reduce(&mut s, InputEvent::ConfigChanged(cfg), Instant::now());
@@ -3030,6 +3073,7 @@ mod tests {
             chord_enabled: false,
             exclusive_tap_keys: HashSet::new(),
             voice_hold_enabled: true,
+            global_hotkeys: Vec::new(),
         };
         s.config = cfg.clone();
         reduce(&mut s, InputEvent::ConfigChanged(cfg), Instant::now());
@@ -3071,6 +3115,7 @@ mod tests {
             chord_enabled: false,
             exclusive_tap_keys: HashSet::new(),
             voice_hold_enabled: true,
+            global_hotkeys: Vec::new(),
         };
         s.config = cfg.clone();
         reduce(&mut s, InputEvent::ConfigChanged(cfg), Instant::now());

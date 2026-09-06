@@ -22,6 +22,11 @@ mod windows;
 mod recorder;
 pub use recorder::record_hotkey_blocking;
 
+// chord 全局快捷键注册（0.22.12，RegisterHotKey）
+mod global;
+pub use global::global_hotkey_statuses;
+pub use state::GlobalHotkeyStatus;
+
 // 诊断快照 + 环形缓冲区
 pub mod diagnostics;
 
@@ -68,7 +73,7 @@ pub use state::{
     HookKeyEvent, InputConfigSnapshot, InputEffect, InputEvent, InputSource, InputState,
     InputUiState, MainViewContext, ModifierKey, ModifierLevel, NormalizedHotkey,
     NormalizedRawModifier, PhysicalModifierSnapshot, PhysicalObservationReason, Propagation,
-    RecorderMode, VoicePhase, WindowTransitionReason,
+    RecorderMode, ResolvedGlobalHotkey, VoicePhase, WindowTransitionReason,
 };
 
 // ── Effect channel（hook 线程 → 主线程）──────────────────────────────────────

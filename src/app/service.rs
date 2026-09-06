@@ -274,6 +274,70 @@ impl Service for HotkeyService {
                             tracing::warn!(%key, %e, "chord trigger 失败");
                         }
                     }
+                    crate::infra::platform::hotkey::InputEffect::GlobalHotkeyTriggered {
+                        action_id,
+                        follow_chord,
+                    } => {
+                        // 0.22.12：chord 全局快捷键（RegisterHotKey 路径，主窗隐藏也可触发）
+                        let Some(registry) = app
+                            .try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                        else {
+                            tracing::warn!("chord registry 未就绪，跳过全局快捷键事件");
+                            continue;
+                        };
+                        let pool = &app.state::<crate::infra::data::DbPools>().config;
+                        let disabled =
+                            crate::app::config::get_disabled_chord_actions(pool).await;
+                        // 门禁 1：disabled 列表命中即跳过（注册侧已过滤，此处防御
+                        // 配置写入与重注册完成之间的窗口期）
+                        if disabled.iter().any(|d| d == &action_id) {
+                            tracing::debug!(%action_id, "全局快捷键对应动作已禁用，跳过触发");
+                            continue;
+                        }
+                        // 门禁 2：chat 受 AI 总开关约束（与 trigger_chord 前端语义对齐）
+                        if action_id == "chat"
+                            && !crate::app::ai_config::get_ai_config().enabled
+                        {
+                            tracing::debug!("AI 未启用，跳过 chat 全局快捷键");
+                            continue;
+                        }
+                        // 门禁 3：跟随触发键模式在主窗可见时让位——该组合键此刻由
+                        // chord 吞键机制拥有，全局路径不重复触发
+                        if follow_chord && crate::infra::platform::window::is_visible() {
+                            tracing::debug!(%action_id, "主窗可见，跟随键让位给 chord 机制");
+                            continue;
+                        }
+                        let env_arc = app
+                            .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+                            .inner()
+                            .clone();
+                        let cap_registry = app
+                            .state::<std::sync::Arc<
+                                crate::domain::capability::CapabilityRegistry,
+                            >>()
+                            .inner()
+                            .clone();
+                        if let Err(e) = registry
+                            .trigger_by_id(
+                                &action_id,
+                                cap_registry.as_ref(),
+                                env_arc.as_ref(),
+                                Some(env_arc.as_ref()),
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%action_id, %e, "全局快捷键触发失败");
+                        }
+                    }
+                    crate::infra::platform::hotkey::InputEffect::GlobalHotkeysChanged(statuses) => {
+                        // 注册状态投影给设置页（重注册完成后去重广播）
+                        let _ = app.emit(
+                            crate::domain::event_names::EventNames::GLOBAL_HOTKEY_STATUS,
+                            statuses,
+                        );
+                    }
                     crate::infra::platform::hotkey::InputEffect::UiStateChanged(ui) => {
                         // 向前端推送输入 UI 状态变化事件。
                         // 前端以 revision 去重/拒绝旧状态，投影 alt-active / chord-visible。

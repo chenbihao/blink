@@ -21,6 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
 use super::diagnostics::{self, HookDiagnosticInfo, InputDiagnosticEvent};
+use super::global;
 use super::recorder;
 use super::recorder_diag::{self, HookMsgKind};
 use super::{
@@ -69,8 +70,8 @@ const REINSTALL_RECHECK_DELAY_MS: u32 = 200;
 
 // ── Hook 线程状态 ─────────────────────────────────────────────────────────────
 
-/// Hook 线程的 message-only window HWND（供控制消息唤醒）。
-static WND_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+/// Hook 线程的 message-only window HWND（供控制消息唤醒 / 全局快捷键注册）。
+pub(crate) static WND_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
 
 /// WH_KEYBOARD_LL generation：每次成功安装（Initial/重装）递增。
 /// 仅用于诊断关联（录制事件/汇总判断是否跨过重装），不参与业务判断。
@@ -964,6 +965,18 @@ unsafe extern "system" fn wnd_proc(
             handle_wm_input(lparam);
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
+        WM_HOTKEY => {
+            // 0.22.12：chord 全局快捷键（RegisterHotKey）。
+            // wparam = hotkey id，lparam = (modifiers, vk)（此处不需要）。
+            // 同线程消息循环 → 直接发 effect（无锁 channel send，符合热路径铁则）。
+            if let Some((action_id, follow_chord)) = global::lookup_hotkey_target(wparam.0) {
+                send_effect(InputEffect::GlobalHotkeyTriggered {
+                    action_id,
+                    follow_chord,
+                });
+            }
+            LRESULT(0)
+        }
         WM_INPUT_DEVICE_CHANGE => {
             // wparam: GIDC_ARRIVAL(1) 或 GIDC_REMOVAL(2)
             if wparam.0 as u32 == GIDC_REMOVAL {
@@ -1108,7 +1121,13 @@ fn process_control_message(state: &mut InputState, msg: ControlMsg) {
         }
     };
 
+    let is_config_change = matches!(event, InputEvent::ConfigChanged(_));
     reduce_and_apply(state, event, now);
+    // 0.22.12：配置变更后全量重注册全局快捷键（从 state.config 取已接受的新快照，
+    // revision 被拒时天然幂等；注册必须在本线程——窗口归属线程）
+    if is_config_change {
+        global::apply_global_hotkeys(&state.config.global_hotkeys);
+    }
 }
 
 // ── Raw Input 处理 ───────────────────────────────────────────────────────────
@@ -1200,6 +1219,13 @@ fn hook_thread_main() {
 
         // 初始化 message-only window + Raw Input
         init_window();
+
+        // 0.22.12：初始注册 chord 全局快捷键（初始配置快照已在上方 reduce 进状态机）
+        INPUT_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                global::apply_global_hotkeys(&state.config.global_hotkeys);
+            }
+        });
 
         // 安装 Hook。首次安装失败时保留消息泵，由同一退避机制持续恢复。
         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
@@ -1346,6 +1372,8 @@ fn init_window() {
 
 /// 销毁 window。
 fn destroy_window() {
+    // 0.22.12：先注销全部全局快捷键（应用退出释放组合键）
+    global::unregister_all();
     if let Some(&hwnd) = WND_HWND.get() {
         unsafe {
             let hwnd = HWND(hwnd as *mut _);
