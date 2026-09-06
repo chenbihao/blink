@@ -8,6 +8,14 @@
 </head>
 <body>
 <div class="container">
+    <!-- 右上角关闭按钮（0.22.11）：窗口 decorations:false 且无标题栏，此前唯一关闭路径是 ESC。
+         绝对定位叠在 .panel > h2 拖拽区右上，自身 no-drag；点击走既有 hideSettingsWindow()（与 ESC 同语义 hide）。 -->
+    <button aria-label="关闭" class="settings-close" data-i18n-aria-label="common.close" id="close-btn"
+            type="button">
+        <svg aria-hidden="true" class="icon">
+            <use href="#icon-x"/>
+        </svg>
+    </button>
     <!-- 侧边 Tab 导航 -->
     <nav class="sidebar">
         <div class="logo">Blink</div>

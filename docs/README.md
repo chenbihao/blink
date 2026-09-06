@@ -57,6 +57,7 @@
 | **0.20** | [0.20-content-visual-workflow.md](./phases/0.20-content-visual-workflow.md) | 高频内容与视觉工作流（便签可靠性 / 剪贴板多选 / 颜色 / 图片编辑 / 截图性能与精调） | ✅ |
 | **0.21** | [0.21-capability-unification-feature-catalog.md](./phases/0.21-capability-unification-feature-catalog.md) | Capability 唯一执行入口、Action 全量分流、功能目录及 AI/MCP 出口策略 | ✅ |
 | **0.22** | [0.22-local-model-runtime-ppocrv6.md](./phases/0.22-local-model-runtime-ppocrv6.md) | 本地模型运行时、PP-OCRv6、OCR ONNX、Nano GGUF、implementation 拓扑与 ASR ONNX 退役 | ✅ |
+| **0.22.11+** | [0.22.11-ux-global-hotkey-onboarding.md](./phases/0.22.11-ux-global-hotkey-onboarding.md) | 交互修复（设置页关闭按钮/编辑器三态确认）、chord 全局快捷键提升、首次引导向导 | 📋 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
 
@@ -84,6 +85,7 @@
 | 0.20.x | 高频内容与视觉工作流（便签 / 剪贴板 / 颜色 / 图片编辑 / 截图性能与精调） | 📋 规划中 |
 | 0.21.x | Capability 唯一原子执行入口、Action 全量分流删除、功能目录与 AI/MCP 授权、AI 对话预算、摘要与记忆链路 | ✅ 0.21.0~0.21.23 完成 |
 | 0.22.x | 本地模型运行时、FunASR 生命周期与模型资产迁移、PP-OCRv6/WinRT、OCR ONNX、Nano GGUF 与 ASR ONNX 退役 | ✅ 0.22.0~0.22.10 完成 |
+| 0.22.11 ~ 0.22.13 | 交互修复（设置页关闭按钮 / 编辑器三态确认）、chord 全局快捷键（RegisterHotKey + 双层冲突探测）、首次引导向导（开关配置 + 引擎下载引导） | 📋 规划中 |
 | 未立项 | 见 roadmap：subagent / proactivity / 同步 / 远期向量与 RAG 观察 | 🔮 候选池 |
 
 ---

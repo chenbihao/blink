@@ -11,7 +11,7 @@
 import {applyThemeFromConfig} from "../shared/theme.js";
 import {applyI18nFromConfig, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
-import {confirmDialog, getCurrentWindow, listen} from "../shared/tauri.js";
+import {choiceDialog, getCurrentWindow, listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
 import {getContentEditorPayload, getStickyNote, saveContentEditor} from "../shared/api.js";
 import {bindMdToolbar, createMdToolbar, updateToolbarStates} from "../shared/md-toolbar.js";
@@ -359,14 +359,25 @@ async function handleSave() {
 
 // ── 关闭 / 取消 ───────────────────────────────────────
 
+/**
+ * 0.22.11: 关闭确认三态化——保存并关闭（主按钮/Enter）/ 放弃更改 / 继续编辑（Esc）。
+ * 标题栏 X、Esc、Alt+F4 三个关闭入口都收敛到这里。
+ */
 async function handleCancel() {
     if (hasUnsavedChanges() && !allowClose) {
-        const confirmed = await confirmDialog(t("editor.unsavedWarning"), {
+        const choice = await choiceDialog(t("editor.unsavedWarning"), {
             kind: "warning",
             okLabel: t("editor.discard"),
             cancelLabel: t("editor.continueEdit"),
+            thirdAction: {label: t("editor.saveAndClose")},
         });
-        if (!confirmed) return;
+        if (choice === "cancel") return; // 继续编辑
+        if (choice === "third") {
+            // 保存并关闭——handleSave 自带「隐藏 → 后台保存 → 失败回显」闭环，失败时内容不丢
+            await handleSave();
+            return;
+        }
+        // "ok" → 放弃更改，走下方关闭路径
     }
     allowClose = true;
     closeWindow();
@@ -443,6 +454,11 @@ function bindWindowControls() {
 
 function bindKeyboard() {
     document.addEventListener("keydown", (e) => {
+        // 0.22.11: 自绘弹窗（关闭确认三态框等）打开时交给弹窗内部键盘逻辑——
+        // 否则 Ctrl+S 会绕过模态对话框直接隐藏窗口，留下悬挂的遮罩层。
+        // 与 settings/index.js 的 ESC 让路模式一致。
+        if (document.querySelector(".modal-overlay")) return;
+
         // Ctrl+S：保存
         if ((e.ctrlKey || e.metaKey) && e.key === "s") {
             e.preventDefault();

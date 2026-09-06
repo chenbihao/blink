@@ -107,8 +107,10 @@ const DIALOG_ICONS = {
 /**
  * 创建并显示自定义弹框。
  * @param {{ title?: string, kind?: "info"|"warning"|"error", message: string,
- *           okLabel?: string, cancelLabel?: string|null, dismissable?: boolean }} opts
- * @returns {Promise<boolean>} 用户点击 OK → true，取消 → false
+ *           okLabel?: string, cancelLabel?: string|null, dismissable?: boolean,
+ *           thirdAction?: { label: string, value?: string }|null }} opts
+ * @returns {Promise<boolean|string>} 点击 OK → true；取消/Esc/点遮罩空白 → false；
+ *           点击第三动作 → 其 value（缺省 "third"）。不传 thirdAction 时恒为 boolean。
  */
 function showCustomDialog(opts) {
     return new Promise((resolve) => {
@@ -119,6 +121,7 @@ function showCustomDialog(opts) {
         const hasCancel = opts.cancelLabel !== null;
         const cancelLabel = opts.cancelLabel || "取消";
         const dismissable = opts.dismissable !== false; // 默认可取消
+        const thirdAction = opts.thirdAction || null;
 
         const overlay = document.createElement("div");
         overlay.className = "modal-overlay confirm-dialog-overlay";
@@ -167,10 +170,23 @@ function showCustomDialog(opts) {
         }
 
         const okBtn = document.createElement("button");
-        okBtn.className = kind === "error" || kind === "warning" ? "btn btn-danger" : "btn-primary";
+        // 有第三动作时第三按钮成为视觉主出口（Enter 同步走它），ok 退居普通样式；
+        // error/warning 下 ok 仍用 danger 配色标出破坏性（如编辑器的「放弃更改」）。
+        okBtn.className = kind === "error" || kind === "warning" ? "btn btn-danger" : (thirdAction ? "btn" : "btn-primary");
         okBtn.textContent = okLabel;
         okBtn.addEventListener("click", () => finish(true));
         actionsEl.appendChild(okBtn);
+
+        let primaryBtn = okBtn;
+        if (thirdAction) {
+            const thirdBtn = document.createElement("button");
+            thirdBtn.className = "btn-primary";
+            thirdBtn.textContent = thirdAction.label;
+            const thirdValue = thirdAction.value || "third";
+            thirdBtn.addEventListener("click", () => finish(thirdValue));
+            actionsEl.appendChild(thirdBtn);
+            primaryBtn = thirdBtn;
+        }
 
         card.appendChild(headerEl);
         card.appendChild(actionsEl);
@@ -183,7 +199,7 @@ function showCustomDialog(opts) {
             });
         }
 
-        // Escape 取消
+        // Escape 取消；Enter 走主出口（有第三动作时为第三动作，否则为 ok）
         const onKey = (e) => {
             if (e.key === "Escape") {
                 e.preventDefault();
@@ -193,15 +209,15 @@ function showCustomDialog(opts) {
             } else if (e.key === "Enter") {
                 e.preventDefault();
                 e.stopPropagation();
-                finish(true);
+                finish(primaryBtn === okBtn ? true : thirdAction.value || "third");
                 document.removeEventListener("keydown", onKey, true);
             }
         };
         document.addEventListener("keydown", onKey, true);
 
         document.body.appendChild(overlay);
-        // 聚焦 OK 按钮，方便 Enter 确认
-        requestAnimationFrame(() => okBtn.focus());
+        // 聚焦主按钮，方便 Enter 确认
+        requestAnimationFrame(() => primaryBtn.focus());
     });
 }
 
@@ -228,6 +244,39 @@ export async function confirmDialog(message, options = {}) {
     } catch (e) {
         console.error("[tauri] confirmDialog threw:", e);
         return false;
+    }
+}
+
+/**
+ * 三选一对话框（confirmDialog 的三态扩展，0.22.11）。
+ *
+ * 用于关闭确认等需要第三个出口的决策场景（如内容编辑器的「保存并关闭」）。
+ * 第三动作渲染为视觉主按钮并接管 Enter；Esc / 点遮罩空白仍走 cancel。
+ * 不需要第三出口时用 confirmDialog，布尔契约不变。
+ *
+ * **签名**：`choiceDialog(message, options?) → Promise<"ok"|"cancel"|"third">`
+ * - `options.thirdAction`：**必传** `{ label: string }`，第三动作按钮文案；
+ * - 其余 options 同 confirmDialog。
+ *
+ * **兜底**：异常时返回 `"cancel"`——关闭确认场景下默认不销毁、不丢内容是正确 fallback。
+ */
+export async function choiceDialog(message, options = {}) {
+    try {
+        const result = await showCustomDialog({
+            title: options.title,
+            kind: options.kind,
+            message,
+            okLabel: options.okLabel,
+            cancelLabel: options.cancelLabel,
+            dismissable: options.dismissable,
+            thirdAction: options.thirdAction,
+        });
+        if (result === true) return "ok";
+        if (result === false) return "cancel";
+        return "third";
+    } catch (e) {
+        console.error("[tauri] choiceDialog threw:", e);
+        return "cancel";
     }
 }
 

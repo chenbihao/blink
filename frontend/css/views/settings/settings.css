@@ -29,6 +29,7 @@ body {
 }
 
 .container {
+    position: relative; /* 0.22.11: 右上角关闭按钮的定位基准 */
     display: flex;
     height: 100vh;
     background: var(--bg);
@@ -36,6 +37,39 @@ body {
     overflow: hidden;
     box-shadow: 0 8px 32px var(--shadow), 0 0 0 1px var(--border-glow);
     -webkit-app-region: no-drag;
+}
+
+/* ── 右上角关闭按钮（0.22.11）───────────────────────────────────────────────
+   窗口 decorations:false 且无自定义标题栏，补一个显式关闭入口（点击 = hide，与 ESC 同语义）。
+   绝对定位叠在 .panel > h2 拖拽区右上角之上；自身显式 no-drag，点击/按压都不会触发窗口拖动。 */
+.settings-close {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    z-index: var(--z-dropdown); /* 高于面板内容与拖拽区，低于 --z-modal 弹窗 */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--text-dim);
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-close:hover {
+    background: var(--surface);
+    color: var(--text);
+}
+
+.settings-close .icon {
+    width: 16px;
+    height: 16px;
 }
 
 /* ── 侧边栏 ───────────────────────────────────────────────────────────────── */
