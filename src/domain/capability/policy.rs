@@ -323,7 +323,83 @@ pub trait SurfacePort: Send + Sync {
 
     /// 退出应用进程。
     fn exit_app(&self);
+
+    /// 0.22.14：校验 window_ref，返回有效 HWND 或错误。
+    ///
+    /// Domain 层通过此方法校验 AI/MCP 传入的 window_ref，
+    /// 不直接接触 `crate::infra::platform::window`。
+    fn validate_window_ref(&self, ref_id: &str) -> Result<isize, SurfaceError>;
+
+    /// 0.22.14：判断 HWND 是否属于 Blink 当前进程。
+    fn is_blink_hwnd(&self, hwnd: isize) -> bool;
+
+    /// 0.22.14：净化截图——cloak Blink 窗口 → DwmFlush → 回调截图 → 恢复。
+    ///
+    /// `plan` 决定净化策略（Noop / CloakAllBlink / CloakOthersExceptTarget）。
+    /// `target_hwnd` 为外部窗口目标（全屏截图传 None）。
+    /// 回调在净化完成后、恢复前执行，返回 BGRA 像素和尺寸。
+    async fn capture_with_cleanse(
+        &self,
+        plan: CaptureCleansePlan,
+        target_hwnd: Option<isize>,
+        capture_fn: CaptureFn,
+    ) -> Result<CaptureResult, SurfaceError>;
 }
+
+/// 0.22.14：净化策略——domain 层只看到语义，不接触 Win32。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureCleansePlan {
+    /// 不操作 Blink 窗口。
+    Noop,
+    /// cloak 全部 Blink 窗口。
+    CloakAllBlink,
+    /// cloak 除目标外的 Blink 窗口。
+    CloakOthersExceptTarget,
+}
+
+/// 0.22.14：净化截图回调返回的结果。
+///
+/// 使用明确类型区分 BGRA 像素和 PNG 字节，不再用 width=0/height=0 作隐式格式标志。
+pub struct CaptureResult {
+    /// 捕获的图像数据——BGRA 像素或 PNG 字节，由 `image` 字段区分。
+    pub image: CapturedImage,
+}
+
+/// 0.22.14：截图数据类型——穷尽匹配，不允许 BGRA 字段装 PNG。
+#[derive(Debug, Clone)]
+pub enum CapturedImage {
+    /// BGRA 像素数据 + 尺寸。
+    Bgra {
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    /// 已编码的 PNG 字节。
+    Png {
+        bytes: Vec<u8>,
+    },
+}
+
+impl CapturedImage {
+    /// 获取 BGRA 数据（如果是 PNG 则返回 None）。
+    pub fn as_bgra(&self) -> Option<(&[u8], u32, u32)> {
+        match self {
+            CapturedImage::Bgra { bytes, width, height } => Some((bytes, *width, *height)),
+            CapturedImage::Png { .. } => None,
+        }
+    }
+
+    /// 获取 PNG 字节（如果是 BGRA 则返回 None）。
+    pub fn as_png(&self) -> Option<&[u8]> {
+        match self {
+            CapturedImage::Png { bytes } => Some(bytes),
+            CapturedImage::Bgra { .. } => None,
+        }
+    }
+}
+
+/// 0.22.14：截图回调——app 层在净化完成后调用此回调执行实际截图。
+pub type CaptureFn = std::sync::Arc<dyn Fn() -> Result<CapturedImage, String> + Send + Sync>;
 
 /// SurfacePort 错误——不暴露内部窗口创建失败细节，只给语义化分类。
 #[derive(Debug, Clone, thiserror::Error)]
@@ -332,6 +408,12 @@ pub enum SurfaceError {
     CreateFailed { detail: String },
     #[error("窗口不可用: {detail}")]
     Unavailable { detail: String },
+    /// 0.22.14：目标窗口激活失败——不返回可能被遮挡的伪成功截图。
+    #[error("窗口激活失败: {detail}")]
+    ActivationFailed { detail: String },
+    /// 0.22.14：截图事务恢复异常——cloak/前台窗口恢复失败。
+    #[error("恢复异常: {detail}")]
+    RestoreFailed { detail: String },
 }
 
 // ── EditorSourceRef / ContentEditorRequest ───────────────────────────────────
@@ -701,6 +783,23 @@ mod tests {
                 Ok(())
             }
             fn exit_app(&self) {}
+            fn validate_window_ref(&self, _ref_id: &str) -> Result<isize, SurfaceError> {
+                Err(SurfaceError::Unavailable {
+                    detail: "DummySurface 不支持 window_ref 校验".into(),
+                })
+            }
+            fn is_blink_hwnd(&self, _hwnd: isize) -> bool {
+                false
+            }
+            async fn capture_with_cleanse(
+                &self,
+                _plan: CaptureCleansePlan,
+                _target_hwnd: Option<isize>,
+                capture_fn: CaptureFn,
+            ) -> Result<CaptureResult, SurfaceError> {
+                let image = capture_fn().map_err(|e| SurfaceError::CreateFailed { detail: e })?;
+                Ok(CaptureResult { image })
+            }
         }
         let caps = RuntimeCapabilities {
             surface: Some(&DummySurface),

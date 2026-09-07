@@ -14,7 +14,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::policy::{
-    ContentEditorRequest, EditorSourceRef, SurfaceError, SurfacePort,
+    CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage, ContentEditorRequest,
+    EditorSourceRef, SurfaceError, SurfacePort,
 };
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::event::{CapabilityEnv, EventPort};
@@ -475,34 +476,36 @@ impl SurfacePort for TauriDomainEnv {
     }
 
     async fn start_region_capture(&self) -> Result<(), SurfaceError> {
-        // 0.21.2：Chord screenshot binding 的 GUI starter target。
-        // 旧 ScreenshotAction 的截图时序：
-        // 1. record_fgHwnd  2. hide_for_screenshot  3. wait_frame_after_hide
-        // 4. begin_session  5. unhide_after_screenshot  6. show_screenshot_overlay
+        // 0.22.14：复用 capture_orchestrator 的净化截图事务 guard。
+        // 替换旧 ScreenshotAction 只隐藏 main/context-menu 的分叉逻辑。
+        // 默认按 auto 行为：cloak 全部 Blink 窗口，截图后恢复。
         crate::infra::platform::screenshot::record_fg_hwnd();
-        crate::infra::platform::window::hide_for_screenshot(&self.app);
-        // 等 DWM 合成——用 spawn_blocking 包装同步等待
+
         let app = self.app.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::infra::platform::window::wait_frame_after_hide(&app);
-        })
+        let meta = tokio::task::spawn_blocking(
+            move || -> Result<crate::infra::platform::screenshot::ScreenCaptureMeta, String> {
+                // 使用 CaptureGuard 净化 Blink 窗口（CloakAllBlink，无特定目标）
+                let _guard = crate::app::capture_orchestrator::CaptureGuard::new(
+                    &app,
+                    crate::app::capture_orchestrator::CleansePlan::CloakAllBlink,
+                    None,
+                )
+                .map_err(|e| match e {
+                    crate::app::capture_orchestrator::GuardError::ActivationFailed(d)
+                    | crate::app::capture_orchestrator::GuardError::Other(d) => d,
+                })?;
+
+                // guard 已完成 cloak + DwmFlush，此时截图不含 Blink 窗口
+                crate::infra::platform::screenshot::begin_session()
+                // _guard Drop 时自动恢复 cloak
+            },
+        )
         .await
         .map_err(|e| SurfaceError::CreateFailed {
-            detail: format!("等待 DWM 合成失败: {e}"),
-        })?;
+            detail: format!("截屏任务崩溃: {e}"),
+        })?
+        .map_err(|e| SurfaceError::CreateFailed { detail: e })?;
 
-        let meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
-            .await
-            .map_err(|e| SurfaceError::CreateFailed {
-                detail: format!("截屏任务崩溃: {e}"),
-            })?
-            .map_err(|e| {
-                // 截屏失败也要撤销 cloak
-                crate::infra::platform::window::unhide_after_screenshot(&self.app);
-                SurfaceError::CreateFailed { detail: e }
-            })?;
-
-        crate::infra::platform::window::unhide_after_screenshot(&self.app);
         crate::infra::platform::window::show_screenshot_overlay(&self.app, meta).map_err(|e| {
             crate::infra::platform::screenshot::end_session();
             SurfaceError::CreateFailed { detail: e }
@@ -562,6 +565,94 @@ impl SurfacePort for TauriDomainEnv {
 
     fn exit_app(&self) {
         self.app.exit(0);
+    }
+
+    fn validate_window_ref(&self, ref_id: &str) -> Result<isize, SurfaceError> {
+        let validation = crate::infra::platform::window::validate_window_ref_detailed(ref_id);
+        match validation {
+            crate::infra::platform::window::RefValidation::Valid(record) => Ok(record.hwnd),
+            crate::infra::platform::window::RefValidation::NotFound => Err(SurfaceError::Unavailable {
+                detail: "window_ref 不存在，请重新调用 list_windows".into(),
+            }),
+            crate::infra::platform::window::RefValidation::ExpiredGeneration => {
+                Err(SurfaceError::Unavailable {
+                    detail: "window_ref 已过期".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::ExpiredTtl => {
+                Err(SurfaceError::Unavailable {
+                    detail: "window_ref 已超时".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::InvalidHwnd => Err(SurfaceError::Unavailable {
+                detail: "窗口句柄已失效".into(),
+            }),
+            crate::infra::platform::window::RefValidation::PidMismatch => {
+                Err(SurfaceError::Unavailable {
+                    detail: "窗口 PID 已变化".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::TitleMismatch => {
+                Err(SurfaceError::Unavailable {
+                    detail: "窗口标题已变化".into(),
+                })
+            }
+        }
+    }
+
+    fn is_blink_hwnd(&self, hwnd: isize) -> bool {
+        let hwnd_raw = windows::Win32::Foundation::HWND(hwnd as *mut _);
+        let pid = crate::infra::platform::window::get_window_pid(hwnd_raw);
+        let current_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        pid == current_pid
+    }
+
+    async fn capture_with_cleanse(
+        &self,
+        plan: CaptureCleansePlan,
+        target_hwnd: Option<isize>,
+        capture_fn: CaptureFn,
+    ) -> Result<CaptureResult, SurfaceError> {
+        let app_plan = match plan {
+            CaptureCleansePlan::Noop => crate::app::capture_orchestrator::CleansePlan::Noop,
+            CaptureCleansePlan::CloakAllBlink => {
+                crate::app::capture_orchestrator::CleansePlan::CloakAllBlink
+            }
+            CaptureCleansePlan::CloakOthersExceptTarget => {
+                crate::app::capture_orchestrator::CleansePlan::CloakOthersExceptTarget
+            }
+        };
+
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || -> Result<CapturedImage, SurfaceError> {
+            let guard = crate::app::capture_orchestrator::CaptureGuard::new(
+                &app,
+                app_plan,
+                target_hwnd,
+            )
+            .map_err(|e| match e {
+                crate::app::capture_orchestrator::GuardError::ActivationFailed(detail) => {
+                    SurfaceError::ActivationFailed { detail }
+                }
+                crate::app::capture_orchestrator::GuardError::Other(detail) => {
+                    SurfaceError::CreateFailed { detail }
+                }
+            })?;
+
+            // guard 已完成 cloak + DwmFlush + 目标激活
+            let result = capture_fn().map_err(|e| SurfaceError::CreateFailed { detail: e })?;
+
+            // 显式 finalize：恢复状态并检查恢复结果
+            // Drop 仍作为最后保险，但正常路径通过显式 finalize 传播恢复错误
+            guard.finalize().map_err(|detail| SurfaceError::RestoreFailed { detail })?;
+
+            Ok(result)
+        })
+        .await
+        .map_err(|e| SurfaceError::CreateFailed {
+            detail: format!("capture_with_cleanse task 崩溃: {e}"),
+        })?
+        .map(|image| CaptureResult { image })
     }
 }
 

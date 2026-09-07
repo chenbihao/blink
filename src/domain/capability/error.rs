@@ -70,6 +70,25 @@ pub enum CapabilityError {
     /// 内部错误（Win32 失败/IO 错误）。
     #[error("内部错误: {detail}")]
     Internal { detail: String },
+    /// 窗口引用已过期或失效（0.22.14）——`window_ref` 不存在、generation 过期、
+    /// HWND/PID/身份变化。AI 应重新调用 `list_windows` 获取新引用。
+    #[error("窗口引用已失效: {detail}")]
+    StaleRef { detail: String },
+    /// 拒绝操作 Blink 自身窗口（0.22.14）——`manage_window` 不控制 Blink 窗口，
+    /// Blink 自隐藏只走截图事务。在执行任何窗口动作前返回此错误，零副作用。
+    #[error("禁止操作 Blink 自身窗口: {detail}")]
+    SelfWindowForbidden { detail: String },
+    /// 窗口激活失败（0.22.14）——目标窗口无法被激活到前台（系统前台锁定限制），
+    /// 不返回可能被遮挡的截图。
+    #[error("窗口激活失败: {detail}")]
+    ActivationFailed { detail: String },
+    /// 截图捕获失败（0.22.14）——Win32 截图 API 调用失败或返回空数据。
+    #[error("捕获失败: {detail}")]
+    CaptureFailed { detail: String },
+    /// 状态恢复异常（0.22.14）——截图事务完成后恢复 cloak/前台窗口时出错。
+    /// 截图可能已成功但状态未完全恢复，需要用户注意。
+    #[error("恢复异常: {detail}")]
+    RestoreFailed { detail: String },
 }
 
 impl CapabilityError {
@@ -170,6 +189,26 @@ mod tests {
             (CapabilityError::Cancelled, "cancelled"),
             (CapabilityError::NotFound { id: "x".into() }, "not_found"),
             (CapabilityError::Internal { detail: "x".into() }, "internal"),
+            (
+                CapabilityError::StaleRef { detail: "x".into() },
+                "stale_ref",
+            ),
+            (
+                CapabilityError::SelfWindowForbidden { detail: "x".into() },
+                "self_window_forbidden",
+            ),
+            (
+                CapabilityError::ActivationFailed { detail: "x".into() },
+                "activation_failed",
+            ),
+            (
+                CapabilityError::CaptureFailed { detail: "x".into() },
+                "capture_failed",
+            ),
+            (
+                CapabilityError::RestoreFailed { detail: "x".into() },
+                "restore_failed",
+            ),
         ];
         for (err, expected_kind) in &cases {
             let v = serde_json::to_value(err).unwrap();
@@ -249,6 +288,11 @@ mod tests {
             CapabilityError::Timeout { detail: "x".into() },
             CapabilityError::NotFound { id: "x".into() },
             CapabilityError::Internal { detail: "x".into() },
+            CapabilityError::StaleRef { detail: "x".into() },
+            CapabilityError::SelfWindowForbidden { detail: "x".into() },
+            CapabilityError::ActivationFailed { detail: "x".into() },
+            CapabilityError::CaptureFailed { detail: "x".into() },
+            CapabilityError::RestoreFailed { detail: "x".into() },
         ];
         for e in &cases {
             assert!(e.to_rig_tool_result_text().is_some(), "{e:?} 应投影成 Some");

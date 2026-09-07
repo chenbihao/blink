@@ -96,7 +96,7 @@ static SESSION: RwLock<Option<Session>> = RwLock::new(None);
 static ANNOTATION_MODE: AtomicBool = AtomicBool::new(false);
 
 /// 0.15.7：截图会话开始时的前台窗口 HWND（供长截图 PostMessage 滚轮用）。
-/// 在 `record_fg_hwnd()` 时记录（`hide_for_screenshot` 之前），`show_screenshot_overlay` 时注入 `__blinkScreenMeta.fgHwnd`。
+/// 在 `record_fg_hwnd()` 时记录（截图净化之前），`show_screenshot_overlay` 时注入 `__blinkScreenMeta.fgHwnd`。
 static FG_HWND: std::sync::RwLock<Option<isize>> = std::sync::RwLock::new(None);
 
 /// 0.15.7：记录当前前台窗口 HWND（截图会话开始前调用）。
@@ -379,6 +379,7 @@ pub fn set_annotation_mode(active: bool) {
 }
 
 /// 查询标注模式是否活跃（0.11.7）。
+#[allow(dead_code)]
 pub fn is_annotation_active() -> bool {
     ANNOTATION_MODE.load(Ordering::SeqCst)
 }

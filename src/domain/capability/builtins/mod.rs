@@ -34,6 +34,7 @@ pub mod image_input;
 pub mod list_clipboard_images;
 pub mod list_sticky;
 pub mod list_windows;
+pub mod manage_window;
 pub mod ocr_engine;
 pub mod ocr_image;
 pub mod open_chat;
@@ -130,5 +131,14 @@ mod tests {
         ] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
+    }
+
+    #[test]
+    fn phase_0_22_14_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        assert!(
+            registry.get("manage_window").is_some(),
+            "manage_window 应通过 inventory 注册"
+        );
     }
 }

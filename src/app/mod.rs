@@ -1,6 +1,7 @@
 //! 应用层：命令编排、配置管理、服务生命周期
 
 pub mod ai_config;
+pub mod capture_orchestrator; // 0.22.14：AI 净化截图原子事务 guard
 pub mod command_error; // 0.14.7 W3：IPC 边界的结构化错误协议
 pub mod commands;
 pub mod config;

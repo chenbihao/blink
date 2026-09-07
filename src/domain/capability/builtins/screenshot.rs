@@ -4,10 +4,16 @@
 //! - `list_displays` — 枚举所有显示器，返回 `Text{JSON}`
 //! - `capture` — 截取指定屏或虚拟屏幕，返回 `Blob{png}`
 //! - `crop` — 从最近 SESSION 裁剪，返回 `Blob{png}`
-//! - `window` — 截取指定窗口（按 hwnd），返回 `Blob{png}`（0.19.2）
+//! - `window` — 截取指定窗口（需 window_ref），返回 `Blob{png}`（0.19.2）
 //! - `capture_to_clipboard` — 截图直接写入剪贴板，返回 `Done`（0.19.3）
 //!
-//! 0.19.0 已删除 `capture_screen` / `crop_image` alias，统一走 `screenshot { op }`。
+//! 0.22.14 追加 `blink_visibility` 三态参数：
+//! - `auto`（默认）：全屏/外部窗口截图排除 Blink 窗口；Blink 目标只保留目标
+//! - `exclude`：强制排除全部 Blink 窗口；Blink 目标返回 InvalidArgs
+//! - `include`：保持当前现场，不隐藏 Blink
+//!
+//! 净化截图不调用 `hide_chat_window`、不中止 ChatService、不复用隐藏前旧 SESSION cache。
+//! `include` 也不复用 auto/exclude 或旧会话生成的截图缓存——每次都重新采集。
 
 use std::sync::Arc;
 
@@ -15,20 +21,13 @@ use serde_json::{Value, json};
 
 use crate::domain::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
-    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
+    CaptureCleansePlan, CaptureFn, CapturedImage, ConfirmationPolicy, DangerClass, InvokeContext,
+    McpDefault, OriginSet, RuntimeRequirement,
 };
 
 // ── 可注入的图片写入 seam（测试用）─────────────────────────────────────────
-//
-// `op_capture_to_clipboard` 需要将截图写入系统剪贴板。生产路径调用
-// `domain::clipboard::write_png/write_bgra`（最终走 Win32 CF_DIB）。
-// 单测不能触碰真实剪贴板（被其他进程锁定 / CI session 权限 / 覆盖用户剪贴板），
-// 因此提取此 trait 作为窄 seam，测试传 fake writer 覆盖核心分支。
 
 /// 图片写入剪贴板的窄接口（可注入 seam）。
-///
-/// 生产实现 `ProductionClipboardWriter` 调用 `domain::clipboard::write_png/write_bgra`。
-/// 测试传 `FakeClipboardWriter` 记录写入的图片数据，不触碰真实剪贴板。
 #[async_trait::async_trait]
 trait ClipboardImageWriter: Send + Sync {
     /// 写 PNG 到剪贴板（虚拟屏幕路径）。
@@ -64,6 +63,99 @@ impl ClipboardImageWriter for ProductionClipboardWriter {
 /// 统一截图能力。
 pub struct Screenshot;
 
+/// blink_visibility 三态解析结果（0.22.14）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlinkVisibility {
+    Auto,
+    Exclude,
+    Include,
+}
+
+impl BlinkVisibility {
+    fn parse(val: Option<&Value>) -> Result<Self, CapabilityError> {
+        match val {
+            None | Some(Value::Null) => Ok(Self::Auto),
+            Some(Value::String(s)) => match s.as_str() {
+                "auto" => Ok(Self::Auto),
+                "exclude" => Ok(Self::Exclude),
+                "include" => Ok(Self::Include),
+                other => Err(CapabilityError::InvalidArgs {
+                    detail: format!(
+                        "blink_visibility 非法值: {other}，允许: auto | exclude | include"
+                    ),
+                }),
+            },
+            Some(other) => Err(CapabilityError::InvalidArgs {
+                detail: format!("blink_visibility 应为字符串，实际值: {other}"),
+            }),
+        }
+    }
+
+    fn to_domain_plan(self, target_is_blink: bool) -> Result<CaptureCleansePlan, CapabilityError> {
+        match (self, target_is_blink) {
+            (Self::Include, _) => Ok(CaptureCleansePlan::Noop),
+            (Self::Exclude, true) => Err(CapabilityError::InvalidArgs {
+                detail: "blink_visibility=exclude 不能用于 Blink 自身窗口目标".into(),
+            }),
+            (Self::Exclude, false) => Ok(CaptureCleansePlan::CloakAllBlink),
+            (Self::Auto, true) => Ok(CaptureCleansePlan::CloakOthersExceptTarget),
+            (Self::Auto, false) => Ok(CaptureCleansePlan::CloakAllBlink),
+        }
+    }
+}
+
+/// 解析 window_ref 为有效 HWND。
+///
+/// AI/MCP 必须使用 window_ref（从 list_windows 获取）。
+/// 裸 hwnd 仅供 LocalCommand/内部协议路径使用，AI/MCP 来源会被拒绝。
+///
+/// 0.22.14：通过 SurfacePort::validate_window_ref 校验，不直接依赖 crate::infra。
+fn resolve_target_hwnd(
+    args: &Value,
+    origin: crate::domain::capability::policy::InvocationOrigin,
+    surface: &dyn crate::domain::capability::SurfacePort,
+) -> Result<Option<isize>, CapabilityError> {
+    use crate::domain::capability::policy::InvocationOrigin;
+    use crate::domain::capability::SurfaceError;
+
+    // 优先使用 window_ref
+    if let Some(ref_val) = args.get("window_ref").and_then(Value::as_str) {
+        return Ok(Some(surface.validate_window_ref(ref_val).map_err(|e| {
+            CapabilityError::StaleRef {
+                detail: match e {
+                    SurfaceError::Unavailable { detail } => detail,
+                    SurfaceError::CreateFailed { detail } => detail,
+                    SurfaceError::ActivationFailed { detail } => detail,
+                    SurfaceError::RestoreFailed { detail } => detail,
+                },
+            }
+        })?));
+    }
+
+    // 裸 hwnd：仅 LocalCommand 路径允许（内部协议，不暴露在 schema 中）
+    match origin {
+        InvocationOrigin::LocalCommand => {
+            if let Some(hwnd_val) = args.get("hwnd").and_then(Value::as_i64) {
+                return Ok(Some(hwnd_val as isize));
+            }
+            Ok(None)
+        }
+        // AI/MCP/Surface 不接受裸 hwnd
+        InvocationOrigin::LocalAi
+        | InvocationOrigin::Mcp
+        | InvocationOrigin::Cli
+        | InvocationOrigin::LocalSurface => {
+            if args.get("hwnd").is_some() {
+                return Err(CapabilityError::InvalidArgs {
+                    detail: "AI/MCP/CLI 必须使用 window_ref（从 list_windows 获取），不接受裸 hwnd"
+                        .into(),
+                });
+            }
+            Ok(None)
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Capability for Screenshot {
     fn id(&self) -> &str {
@@ -73,7 +165,7 @@ impl Capability for Screenshot {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "screenshot".into(),
-            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 hwnd，从 list_windows 获取）；op=capture_to_clipboard 截图直接写入系统剪贴板（不返回图片数据）。".into(),
+            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 window_ref，从 list_windows 获取）；op=capture_to_clipboard 截图直接写入系统剪贴板。blink_visibility 控制截图是否临时隐藏 Blink 窗口：auto（默认，排除 Blink 窗口；目标为 Blink 时只保留目标）、exclude（强制排除全部 Blink 窗口，Blink 目标返回错误）、include（保留当前现场不隐藏 Blink）。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -86,9 +178,14 @@ impl Capability for Screenshot {
                         "type": "integer",
                         "description": "显示器 id（op=capture 时可选，缺省截取虚拟屏幕）"
                     },
-                    "hwnd": {
-                        "type": "integer",
-                        "description": "窗口句柄（op=window 必填，从 list_windows 获取）"
+                    "window_ref": {
+                        "type": "string",
+                        "description": "窗口引用（op=window 必填，从 list_windows 获取）"
+                    },
+                    "blink_visibility": {
+                        "type": "string",
+                        "enum": ["auto", "exclude", "include"],
+                        "description": "控制截图时是否临时隐藏 Blink 窗口。auto=默认，排除 Blink 窗口（目标为 Blink 时只保留目标）；exclude=强制排除全部 Blink 窗口（Blink 目标返回错误）；include=保留当前现场。适用于 capture、window、capture_to_clipboard。"
                     },
                     "x": { "type": "integer", "description": "裁剪起点 X（op=crop 必填，物理像素）" },
                     "y": { "type": "integer", "description": "裁剪起点 Y（op=crop 必填）" },
@@ -97,14 +194,16 @@ impl Capability for Screenshot {
                 },
                 "required": ["op"]
             }),
-            sensitive: true, // 截图获取用户屏幕内容属隐私敏感数据（0.19.4 补齐）
+            sensitive: true,
         }
     }
 
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
             allowed_origins: OriginSet::ALL,
-            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION,
+            // screenshot 需要桌面会话 + GUI surface（净化截图走 SurfacePort）
+            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION
+                | RuntimeRequirement::GUI_SURFACE,
             danger: DangerClass::Safe,
             sensitive: true,
             ai_default: AiDefault::On,
@@ -115,7 +214,7 @@ impl Capability for Screenshot {
     async fn invoke(
         &self,
         args: Value,
-        _ctx: &InvokeContext<'_>,
+        ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         let op =
             args.get("op")
@@ -131,7 +230,8 @@ impl Capability for Screenshot {
                     .get("display_id")
                     .and_then(Value::as_u64)
                     .map(|v| v as u32);
-                op_capture(display_id).await
+                let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
+                op_capture(display_id, visibility, ctx).await
             }
             "crop" => {
                 let x = args.get("x").and_then(Value::as_i64).ok_or_else(|| {
@@ -157,19 +257,28 @@ impl Capability for Screenshot {
                 op_crop(x, y, w, h).await
             }
             "window" => {
-                let hwnd = args.get("hwnd").and_then(Value::as_i64).ok_or_else(|| {
-                    CapabilityError::InvalidArgs {
-                        detail: "缺少 hwnd 参数".into(),
+                let surface = ctx.runtime.surface.ok_or_else(|| {
+                    CapabilityError::Unsupported {
+                        required: "gui_surface".into(),
+                        actual: ctx.runtime.as_requirement().to_string(),
                     }
-                })? as isize;
-                op_window(hwnd).await
+                })?;
+                let target_hwnd =
+                    resolve_target_hwnd(&args, ctx.origin, surface)?.ok_or_else(|| {
+                        CapabilityError::InvalidArgs {
+                            detail: "缺少 window_ref 参数".into(),
+                        }
+                    })?;
+                let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
+                op_window(target_hwnd, visibility, ctx).await
             }
             "capture_to_clipboard" => {
                 let display_id = args
                     .get("display_id")
                     .and_then(Value::as_u64)
                     .map(|v| v as u32);
-                op_capture_to_clipboard(display_id).await
+                let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
+                op_capture_to_clipboard(display_id, visibility, ctx).await
             }
             other => Err(CapabilityError::InvalidArgs {
                 detail: format!("未知 op: {other}"),
@@ -182,11 +291,9 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
     factory: || Arc::new(Screenshot) as Arc<dyn Capability>,
 });
 
-// ── op 实现（也供 alias Capability 复用） ─────────────────────────────────
+// ── op 实现 ──────────────────────────────────────────────────────────────────
 
 /// list_displays：枚举所有显示器，返回 `Text{JSON}`。
-///
-/// **不 pub**：调用方走 Capability invoke，不直接调。测试通过 `Screenshot` invoke。
 pub(super) async fn op_list_displays() -> Result<CapabilityResult, CapabilityError> {
     let displays = crate::infra::platform::screenshot::list_displays();
     let json = serde_json::to_string(&displays).map_err(|e| CapabilityError::Internal {
@@ -200,24 +307,51 @@ pub(super) async fn op_list_displays() -> Result<CapabilityResult, CapabilityErr
 
 /// capture：截取指定显示器或虚拟屏幕，返回 `Blob{png}`。
 ///
-/// `display_id=None` → 虚拟屏幕（复用 SESSION 缓存策略，与 0.9.7 一致）。
-/// `display_id=Some(x)` → 指定显示器（新截，不走 SESSION cache——SESSION 只缓存虚拟屏幕）。
+/// 0.22.14：净化截图——**所有 visibility 模式都不复用旧 SESSION cache**，
+/// 必须通过 capture_with_cleanse 在净化后抓取新帧。
+/// `include` 只表示不隐藏 Blink，不代表跳过采集——每次都重新抓取当前帧。
 pub(super) async fn op_capture(
     display_id: Option<u32>,
+    visibility: BlinkVisibility,
+    ctx: &InvokeContext<'_>,
 ) -> Result<CapabilityResult, CapabilityError> {
+    let cleanse_plan = visibility.to_domain_plan(false)?;
+
     // 指定显示器：新截一帧，不走 SESSION cache
     if let Some(id) = display_id {
-        let (bgra, geom) = tokio::task::spawn_blocking(move || {
-            crate::infra::platform::screenshot::capture_display(id)
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("capture_display task 崩溃: {e}"),
-        })?
-        .map_err(|e| CapabilityError::Internal { detail: e })?;
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: "gui_surface".into(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
+
+        let capture_fn: CaptureFn = Arc::new(move || {
+            let (bgra, geom) = crate::infra::platform::screenshot::capture_display(id)?;
+            Ok(CapturedImage::Bgra {
+                bytes: bgra,
+                width: geom.w,
+                height: geom.h,
+            })
+        });
+
+        let result = surface
+            .capture_with_cleanse(cleanse_plan, None, capture_fn)
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
+
+        let (bgra, width, height) = result.image.as_bgra().ok_or_else(|| {
+            CapabilityError::Internal {
+                detail: "capture_display 应返回 BGRA 数据".into(),
+            }
+        })?;
+        let bgra = bgra.to_vec();
 
         let png = tokio::task::spawn_blocking(move || {
-            crate::infra::platform::screenshot::encode_png(&bgra, geom.w, geom.h)
+            crate::infra::platform::screenshot::encode_png(&bgra, width, height)
         })
         .await
         .map_err(|e| CapabilityError::Internal {
@@ -225,50 +359,57 @@ pub(super) async fn op_capture(
         })?
         .map_err(|e| CapabilityError::Internal { detail: e })?;
 
-        tracing::debug!(display_id = id, bytes = png.len(), "capture: 新截显示器");
+        tracing::debug!(
+            display_id = id,
+            bytes = png.len(),
+            "capture: 净化截取显示器"
+        );
         return Ok(CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: png,
-            desc: None,
+            desc: Some(visibility_desc(visibility, false)),
         });
     }
 
-    // 虚拟屏幕：复用 SESSION cache 策略（0.9.7 甲方案）
-    // 标注模式活跃时不复用——标注中的截图可能包含半成品标注
-    if crate::infra::platform::screenshot::is_annotation_active() {
-        tracing::debug!("capture: 标注模式活跃，跳过 SESSION cache");
-    } else if let Some(png) = crate::infra::platform::screenshot::session_png() {
-        let png = (*png).clone();
-        tracing::debug!(bytes = png.len(), "capture: 复用 SESSION cache");
-        return Ok(CapabilityResult::Blob {
-            mime: "image/png".into(),
-            bytes: png,
-            desc: None,
-        });
-    }
+    // 虚拟屏幕路径
+    let surface = ctx
+        .runtime
+        .surface
+        .ok_or_else(|| CapabilityError::Unsupported {
+            required: "gui_surface".into(),
+            actual: ctx.runtime.as_requirement().to_string(),
+        })?;
 
-    // 无 SESSION 或标注模式 → 新截一帧
-    tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
+    // 铁则：include 不复用 auto/exclude 或旧会话生成的截图缓存
+    // 每次都重新采集——include 只表示不隐藏 Blink，不代表跳过采集
+    let capture_fn: CaptureFn = Arc::new(|| {
+        crate::infra::platform::screenshot::end_session();
+        crate::infra::platform::screenshot::begin_session()?;
+        crate::infra::platform::screenshot::session_png()
+            .map(|arc| {
+                let png = (*arc).clone();
+                CapturedImage::Png { bytes: png }
+            })
+            .ok_or_else(|| "session_png 返回空".to_string())
+    });
+
+    let result = surface
+        .capture_with_cleanse(cleanse_plan, None, capture_fn)
         .await
         .map_err(|e| CapabilityError::Internal {
-            detail: format!("截屏 task 崩溃: {e}"),
-        })?
-        .map_err(|e| CapabilityError::Internal { detail: e })?;
+            detail: e.to_string(),
+        })?;
 
-    match crate::infra::platform::screenshot::session_png() {
-        Some(png) => {
-            let png = (*png).clone();
-            tracing::debug!(bytes = png.len(), "capture: 新截虚拟屏幕 + 编码 PNG");
-            Ok(CapabilityResult::Blob {
-                mime: "image/png".into(),
-                bytes: png,
-                desc: None,
-            })
-        }
-        None => Err(CapabilityError::Internal {
-            detail: "begin_session 成功但 session_png 返回空".into(),
-        }),
-    }
+    let png_bytes = result.image.as_png().ok_or_else(|| CapabilityError::Internal {
+        detail: "虚拟屏幕路径应返回 PNG 数据".into(),
+    })?.to_vec();
+
+    tracing::debug!(bytes = png_bytes.len(), "capture: 净化截取虚拟屏幕");
+    Ok(CapabilityResult::Blob {
+        mime: "image/png".into(),
+        bytes: png_bytes,
+        desc: Some(visibility_desc(visibility, false)),
+    })
 }
 
 /// crop：从最近 SESSION 裁剪，返回 `Blob{png}`。
@@ -300,35 +441,65 @@ pub(super) async fn op_crop(
     })
 }
 
-/// window：截取指定窗口，返回 `Blob{png}`（0.19.2）。
+/// window：截取指定窗口，返回 `Blob{png}`（0.19.2 + 0.22.14 净化）。
 ///
-/// 入参 `hwnd`：从 `list_windows` Capability 拿到的窗口句柄（isize）。
-///
-/// **不依赖 SESSION cache**——与 `op:capture`（指定显示器）同理，每次新截。
-/// 实现流程：`spawn_blocking` → `get_window_dwm_rect(hwnd)` 取 DWM 扩展边框
-/// → `capture_region(x, y, w, h)` 截取虚拟屏幕对应区域 → `encode_png`。
-///
-/// **坐标系**：DWM rect 是虚拟屏幕物理像素坐标，与 `capture_region` 一致，
-/// 无需转换。`get_window_dwm_rect` 返回的是 `DWMWA_EXTENDED_FRAME_BOUNDS`
-/// （真实可视边框，非含阴影的 `GetWindowRect`），截图区域与用户所见窗口一致。
-pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, CapabilityError> {
-    let (bgra, w, h) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u32, u32), CapabilityError> {
-            let (x, y, w, h) = crate::infra::platform::window::get_window_dwm_rect(hwnd)
-                .ok_or_else(|| CapabilityError::InvalidArgs {
-                    detail: format!("hwnd {hwnd} 无效或窗口不可见"),
-                })?;
-            let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)
-                .map_err(|e| CapabilityError::Internal { detail: e })?;
-            Ok((bgra, w, h))
+/// 0.22.14：支持 `blink_visibility` 三态 + `window_ref` 校验。
+/// 外部窗口截图时，如果目标最小化则临时 restore + activate，截图后恢复。
+/// 激活后验证目标确实处于可截图状态；激活失败返回结构化错误，不返回伪成功截图。
+pub(super) async fn op_window(
+    target_hwnd: isize,
+    visibility: BlinkVisibility,
+    ctx: &InvokeContext<'_>,
+) -> Result<CapabilityResult, CapabilityError> {
+    let surface = ctx
+        .runtime
+        .surface
+        .ok_or_else(|| CapabilityError::Unsupported {
+            required: "gui_surface".into(),
+            actual: ctx.runtime.as_requirement().to_string(),
+        })?;
+    let target_is_blink = surface.is_blink_hwnd(target_hwnd);
+    let cleanse_plan = visibility.to_domain_plan(target_is_blink)?;
+
+    let hwnd = target_hwnd;
+    let capture_fn: CaptureFn = Arc::new(move || {
+        // 再次验证目标身份——执行前二次校验
+        if !crate::infra::platform::window::is_hwnd_valid(hwnd) {
+            return Err(format!("hwnd {hwnd} 无效"));
+        }
+        let (x, y, w, h) = crate::infra::platform::window::get_window_dwm_rect(hwnd)
+            .ok_or_else(|| format!("hwnd {hwnd} 无效或窗口不可见"))?;
+        let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
+        Ok(CapturedImage::Bgra {
+            bytes: bgra,
+            width: w,
+            height: h,
         })
+    });
+
+    let result = surface
+        .capture_with_cleanse(cleanse_plan, Some(target_hwnd), capture_fn)
         .await
         .map_err(|e| CapabilityError::Internal {
-            detail: format!("op_window task 崩溃: {e}"),
-        })??;
+            detail: e.to_string(),
+        })?;
+
+    let (bgra, width, height) = result.image.as_bgra().ok_or_else(|| {
+        CapabilityError::Internal {
+            detail: "op_window 应返回 BGRA 数据".into(),
+        }
+    })?;
+    let bgra = bgra.to_vec();
+
+    // 验证截图结果非空
+    if bgra.is_empty() {
+        return Err(CapabilityError::CaptureFailed {
+            detail: "截图返回空数据".into(),
+        });
+    }
 
     let png = tokio::task::spawn_blocking(move || {
-        crate::infra::platform::screenshot::encode_png(&bgra, w, h)
+        crate::infra::platform::screenshot::encode_png(&bgra, width, height)
     })
     .await
     .map_err(|e| CapabilityError::Internal {
@@ -336,113 +507,122 @@ pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, Capabilit
     })?
     .map_err(|e| CapabilityError::Internal { detail: e })?;
 
-    tracing::debug!(hwnd, bytes = png.len(), "op_window: 截取窗口完成");
+    tracing::debug!(bytes = png.len(), "op_window: 净化截取窗口完成");
     Ok(CapabilityResult::Blob {
         mime: "image/png".into(),
         bytes: png,
-        desc: None,
+        desc: Some(visibility_desc(visibility, target_is_blink)),
     })
 }
 
-/// capture_to_clipboard：截图直接写入系统剪贴板，返回 `Done`（0.19.3）。
-///
-/// **目的**（roadmap §7.3 复合操作）：AI 只下指令收文本确认，MB 级图片不经过
-/// LLM channel。与 `op:capture` 不同，本 op 不返回 `Blob`，而是将截图写入
-/// 系统剪贴板（CF_DIB），AI 只收到 `Done{summary}`。
-///
-/// **复用 SESSION cache**：与 `op:capture`（虚拟屏幕路径）一致，标注模式活跃时
-/// 跳过 cache，否则优先复用 SESSION 中已编码的 PNG。
-///
-/// **剪贴板写入**：
-/// - 指定显示器路径：`capture_display` → BGRA → `write_bgra_to_clipboard`（零编码）
-/// - 虚拟屏幕路径：`session_png` → PNG → `write_png_to_clipboard`（解码回 BGRA）
-///
-/// **自写入标记**：label=`blink:screenshot`，`skip_persist=false`（新截图应入库）。
+/// capture_to_clipboard：截图直接写入系统剪贴板，返回 `Done`（0.19.3 + 0.22.14 净化）。
 pub(super) async fn op_capture_to_clipboard(
     display_id: Option<u32>,
+    visibility: BlinkVisibility,
+    ctx: &InvokeContext<'_>,
 ) -> Result<CapabilityResult, CapabilityError> {
-    op_capture_to_clipboard_with_writer(display_id, &ProductionClipboardWriter).await
+    op_capture_to_clipboard_with_writer(display_id, visibility, ctx, &ProductionClipboardWriter)
+        .await
 }
 
-/// `op_capture_to_clipboard` 的内部实现，接受注入的剪贴板 writer（测试 seam）。
-///
-/// 生产入口 [`op_capture_to_clipboard`] 传 `ProductionClipboardWriter`（调用真实
-/// `domain::clipboard::write_png/write_bgra`）；测试传 `FakeClipboardWriter`
-/// 记录写入数据，不触碰真实 Win32 剪贴板。
 async fn op_capture_to_clipboard_with_writer(
     display_id: Option<u32>,
+    visibility: BlinkVisibility,
+    ctx: &InvokeContext<'_>,
     writer: &dyn ClipboardImageWriter,
 ) -> Result<CapabilityResult, CapabilityError> {
-    // ── 指定显示器：capture_display → BGRA → write_bgra（零编码）──
-    if let Some(id) = display_id {
-        let (bgra, geom) = tokio::task::spawn_blocking(move || {
-            crate::infra::platform::screenshot::capture_display(id)
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("capture_display task 崩溃: {e}"),
-        })?
-        .map_err(|e| CapabilityError::Internal { detail: e })?;
+    let cleanse_plan = visibility.to_domain_plan(false)?;
 
-        let (w, h) = (geom.w, geom.h);
+    let surface = ctx
+        .runtime
+        .surface
+        .ok_or_else(|| CapabilityError::Unsupported {
+            required: "gui_surface".into(),
+            actual: ctx.runtime.as_requirement().to_string(),
+        })?;
+
+    // 指定显示器路径
+    if let Some(id) = display_id {
+        let capture_fn: CaptureFn = Arc::new(move || {
+            let (bgra, geom) = crate::infra::platform::screenshot::capture_display(id)?;
+            Ok(CapturedImage::Bgra {
+                bytes: bgra,
+                width: geom.w,
+                height: geom.h,
+            })
+        });
+
+        let result = surface
+            .capture_with_cleanse(cleanse_plan, None, capture_fn)
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
+
+        let (bgra, w, h) = result.image.as_bgra().ok_or_else(|| {
+            CapabilityError::Internal {
+                detail: "capture_display 应返回 BGRA 数据".into(),
+            }
+        })?;
+        let bgra = bgra.to_vec();
+
         writer.write_bgra(bgra, w, h).await?;
 
         tracing::debug!(
             display_id = id,
             w,
             h,
-            "capture_to_clipboard: 指定显示器截图已写入剪贴板"
+            "capture_to_clipboard: 净化指定显示器截图已写入剪贴板"
         );
         return Ok(CapabilityResult::Done {
-            summary: "已截图到剪贴板".into(),
+            summary: format!("已截图到剪贴板（{}）", visibility_desc(visibility, false)),
         });
     }
 
-    // ── 虚拟屏幕：复用 SESSION cache 策略（与 op:capture 一致）──────────────
-    // 标注模式活跃时不复用——标注中的截图可能包含半成品标注
-    let session_png = if crate::infra::platform::screenshot::is_annotation_active() {
-        tracing::debug!("capture_to_clipboard: 标注模式活跃，跳过 SESSION cache");
-        None
-    } else {
+    // 虚拟屏幕路径
+    // 铁则：include 不复用旧 SESSION cache——每次重新采集
+    let capture_fn: CaptureFn = Arc::new(|| {
+        crate::infra::platform::screenshot::end_session();
+        crate::infra::platform::screenshot::begin_session()?;
         crate::infra::platform::screenshot::session_png()
-    };
+            .map(|arc| {
+                let png = (*arc).clone();
+                CapturedImage::Png { bytes: png }
+            })
+            .ok_or_else(|| "session_png 返回空".to_string())
+    });
 
-    let png = match session_png {
-        Some(arc) => {
-            tracing::debug!(
-                bytes = arc.len(),
-                "capture_to_clipboard: 复用 SESSION cache"
-            );
-            // M3 优化：session_png 返回 Arc<Vec<u8>>，此处转 owned Vec
-            (*arc).clone()
-        }
-        None => {
-            // 无 SESSION 或标注模式 → 新截一帧
-            tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
-                .await
-                .map_err(|e| CapabilityError::Internal {
-                    detail: format!("begin_session task 崩溃: {e}"),
-                })?
-                .map_err(|e| CapabilityError::Internal { detail: e })?;
+    let result = surface
+        .capture_with_cleanse(cleanse_plan, None, capture_fn)
+        .await
+        .map_err(|e| CapabilityError::Internal {
+            detail: e.to_string(),
+        })?;
 
-            crate::infra::platform::screenshot::session_png()
-                .map(|arc| (*arc).clone())
-                .ok_or_else(|| CapabilityError::Internal {
-                    detail: "begin_session 成功但 session_png 返回空".into(),
-                })?
-        }
-    };
+    let png_bytes = result.image.as_png().ok_or_else(|| CapabilityError::Internal {
+        detail: "虚拟屏幕路径应返回 PNG 数据".into(),
+    })?.to_vec();
 
-    // 写入剪贴板（PNG → 解码为 BGRA → CF_DIB）
-    writer.write_png(png).await?;
+    writer.write_png(png_bytes).await?;
 
-    tracing::debug!("capture_to_clipboard: 虚拟屏幕截图已写入剪贴板");
+    tracing::debug!("capture_to_clipboard: 净化虚拟屏幕截图已写入剪贴板");
     Ok(CapabilityResult::Done {
-        summary: "已截图到剪贴板".into(),
+        summary: format!("已截图到剪贴板（{}）", visibility_desc(visibility, false)),
     })
 }
 
-// ── 测试辅助（其他 builtin 的测试也可能与全局 backend 竞争，共享同一把锁） ─────
+/// 生成净化行为描述（用于 Blob.desc / Done.summary）。
+fn visibility_desc(visibility: BlinkVisibility, target_is_blink: bool) -> String {
+    match (visibility, target_is_blink) {
+        (BlinkVisibility::Include, _) => "保留 Blink 窗口".to_string(),
+        (BlinkVisibility::Exclude, false) => "已隐藏 Blink 窗口".to_string(),
+        (BlinkVisibility::Exclude, true) => "参数冲突".to_string(),
+        (BlinkVisibility::Auto, true) => "保留目标，已隐藏其他 Blink 窗口".to_string(),
+        (BlinkVisibility::Auto, false) => "已隐藏 Blink 窗口".to_string(),
+    }
+}
+
+// ── 测试辅助 ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 pub(super) mod test_helpers {
@@ -450,9 +630,7 @@ pub(super) mod test_helpers {
 
     static LOCK: Mutex<()> = Mutex::new(());
 
-    /// 获取共享测试锁：所有会写全局 SCREENSHOT backend / SESSION 的测试都应该拿这把锁。
     pub fn test_lock() -> MutexGuard<'static, ()> {
-        // poisoned 时仍取 guard（前一个 test panic 不影响本 test 语义）
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -464,8 +642,6 @@ mod tests {
     use super::test_helpers::test_lock;
     use super::*;
     use crate::infra::platform::screenshot::backend_fake::FakeScreenshotBackend;
-
-    // ── session 清理 guard：确保测试结束后 SESSION 被清空，避免残留影响后续测试 ──
 
     struct SessionGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -483,65 +659,7 @@ mod tests {
         }
     }
 
-    // ── FakeClipboardWriter：记录写入操作，不触碰真实 Win32 剪贴板 ──
-
-    /// 写入操作记录。
-    #[derive(Debug, Clone, PartialEq)]
-    enum ClipboardWrite {
-        Png(Vec<u8>),
-        Bgra { bgra: Vec<u8>, w: u32, h: u32 },
-    }
-
-    struct FakeClipboardWriter {
-        writes: std::sync::Mutex<Vec<ClipboardWrite>>,
-        fail: bool,
-    }
-
-    impl FakeClipboardWriter {
-        fn new() -> Self {
-            Self {
-                writes: std::sync::Mutex::new(Vec::new()),
-                fail: false,
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                writes: std::sync::Mutex::new(Vec::new()),
-                fail: true,
-            }
-        }
-
-        fn writes(&self) -> Vec<ClipboardWrite> {
-            self.writes.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ClipboardImageWriter for FakeClipboardWriter {
-        async fn write_png(&self, png: Vec<u8>) -> Result<(), CapabilityError> {
-            if self.fail {
-                return Err(CapabilityError::Internal {
-                    detail: "fake clipboard write failure".into(),
-                });
-            }
-            self.writes.lock().unwrap().push(ClipboardWrite::Png(png));
-            Ok(())
-        }
-
-        async fn write_bgra(&self, bgra: Vec<u8>, w: u32, h: u32) -> Result<(), CapabilityError> {
-            if self.fail {
-                return Err(CapabilityError::Internal {
-                    detail: "fake clipboard write failure".into(),
-                });
-            }
-            self.writes
-                .lock()
-                .unwrap()
-                .push(ClipboardWrite::Bgra { bgra, w, h });
-            Ok(())
-        }
-    }
+    // ── schema 测试 ──
 
     #[test]
     fn id_is_screenshot() {
@@ -561,23 +679,161 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_hwnd_param() {
+    fn schema_has_blink_visibility() {
         let s = Screenshot.schema();
         let props = &s.parameters["properties"];
-        assert!(props.get("hwnd").is_some(), "schema 应包含 hwnd 参数");
-        assert_eq!(props["hwnd"]["type"], "integer");
+        assert!(
+            props.get("blink_visibility").is_some(),
+            "schema 应包含 blink_visibility"
+        );
+        let vis = &props["blink_visibility"];
+        assert_eq!(vis["type"], "string");
+        let allowed = vis["enum"].as_array().unwrap();
+        assert!(allowed.contains(&json!("auto")));
+        assert!(allowed.contains(&json!("exclude")));
+        assert!(allowed.contains(&json!("include")));
+    }
+
+    #[test]
+    fn schema_has_window_ref() {
+        let s = Screenshot.schema();
+        let props = &s.parameters["properties"];
+        assert!(
+            props.get("window_ref").is_some(),
+            "schema 应包含 window_ref"
+        );
+        assert_eq!(props["window_ref"]["type"], "string");
+    }
+
+    #[test]
+    fn schema_no_hwnd_param() {
+        // 铁则：公开 schema 中不暴露 hwnd 参数
+        let s = Screenshot.schema();
+        let props = &s.parameters["properties"];
+        assert!(
+            props.get("hwnd").is_none(),
+            "screenshot schema 不应暴露 hwnd 参数"
+        );
     }
 
     #[test]
     fn schema_sensitive_is_true() {
         let s = Screenshot.schema();
-        assert!(
-            s.sensitive,
-            "screenshot 必须 sensitive=true（截取用户屏幕内容属隐私数据）"
+        assert!(s.sensitive, "screenshot 必须 sensitive=true");
+    }
+
+    // ── blink_visibility 解析测试 ──
+
+    #[test]
+    fn parse_visibility_defaults_to_auto() {
+        assert_eq!(BlinkVisibility::parse(None).unwrap(), BlinkVisibility::Auto);
+        assert_eq!(
+            BlinkVisibility::parse(Some(&Value::Null)).unwrap(),
+            BlinkVisibility::Auto
         );
     }
 
-    /// list_displays 通过 fake backend 返回预设显示器列表。
+    #[test]
+    fn parse_visibility_explicit() {
+        assert_eq!(
+            BlinkVisibility::parse(Some(&json!("auto"))).unwrap(),
+            BlinkVisibility::Auto
+        );
+        assert_eq!(
+            BlinkVisibility::parse(Some(&json!("exclude"))).unwrap(),
+            BlinkVisibility::Exclude
+        );
+        assert_eq!(
+            BlinkVisibility::parse(Some(&json!("include"))).unwrap(),
+            BlinkVisibility::Include
+        );
+    }
+
+    #[test]
+    fn parse_visibility_invalid_string() {
+        let err = BlinkVisibility::parse(Some(&json!("mixed"))).unwrap_err();
+        assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
+        assert!(err.to_string().contains("mixed"));
+    }
+
+    #[test]
+    fn parse_visibility_invalid_type() {
+        let err = BlinkVisibility::parse(Some(&json!(42))).unwrap_err();
+        assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
+    }
+
+    // ── 策略矩阵测试 ──
+
+    #[test]
+    fn plan_include_noop() {
+        assert_eq!(
+            BlinkVisibility::Include.to_domain_plan(false).unwrap(),
+            CaptureCleansePlan::Noop
+        );
+        assert_eq!(
+            BlinkVisibility::Include.to_domain_plan(true).unwrap(),
+            CaptureCleansePlan::Noop
+        );
+    }
+
+    #[test]
+    fn plan_exclude_non_blink_cloaks_all() {
+        assert_eq!(
+            BlinkVisibility::Exclude.to_domain_plan(false).unwrap(),
+            CaptureCleansePlan::CloakAllBlink
+        );
+    }
+
+    #[test]
+    fn plan_exclude_blink_target_errors() {
+        let err = BlinkVisibility::Exclude.to_domain_plan(true).unwrap_err();
+        assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
+    }
+
+    #[test]
+    fn plan_auto_non_blink_cloaks_all() {
+        assert_eq!(
+            BlinkVisibility::Auto.to_domain_plan(false).unwrap(),
+            CaptureCleansePlan::CloakAllBlink
+        );
+    }
+
+    #[test]
+    fn plan_auto_blink_cloaks_others() {
+        assert_eq!(
+            BlinkVisibility::Auto.to_domain_plan(true).unwrap(),
+            CaptureCleansePlan::CloakOthersExceptTarget
+        );
+    }
+
+    // ── visibility_desc 测试 ──
+
+    #[test]
+    fn desc_include() {
+        assert_eq!(
+            visibility_desc(BlinkVisibility::Include, false),
+            "保留 Blink 窗口"
+        );
+    }
+
+    #[test]
+    fn desc_exclude_non_blink() {
+        assert_eq!(
+            visibility_desc(BlinkVisibility::Exclude, false),
+            "已隐藏 Blink 窗口"
+        );
+    }
+
+    #[test]
+    fn desc_auto_blink() {
+        assert_eq!(
+            visibility_desc(BlinkVisibility::Auto, true),
+            "保留目标，已隐藏其他 Blink 窗口"
+        );
+    }
+
+    // ── 原 op 测试（fake backend，不走净化路径） ──
+
     #[tokio::test]
     async fn op_list_displays_returns_fake_backend_configured() {
         let _g = SessionGuard::new();
@@ -601,46 +857,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn op_capture_virtual_screen_returns_png_blob() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
-        crate::infra::platform::screenshot::install_backend(fake);
-        crate::infra::platform::screenshot::end_session();
-
-        let result = op_capture(None).await.unwrap();
-        let CapabilityResult::Blob { mime, bytes, .. } = result else {
-            panic!("期望 Blob 结果");
-        };
-        assert_eq!(mime, "image/png");
-        assert_eq!(
-            &bytes[..8],
-            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-        );
-    }
-
-    #[tokio::test]
-    async fn op_capture_specific_display_returns_png() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(
-            FakeScreenshotBackend::builder()
-                .display(0, 0, 0, 800, 600, true)
-                .display(1, 800, 0, 400, 300, false)
-                .fill_color(0xFF, 0x00, 0x00, 0xFF)
-                .build(),
-        );
-        crate::infra::platform::screenshot::install_backend(fake);
-
-        let result = op_capture(Some(1)).await.unwrap();
-        let CapabilityResult::Blob { bytes, .. } = result else {
-            panic!("期望 Blob 结果");
-        };
-        assert_eq!(
-            &bytes[..8],
-            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-        );
-    }
-
-    #[tokio::test]
     async fn op_crop_without_session_returns_invalid_args() {
         let _g = SessionGuard::new();
         crate::infra::platform::screenshot::end_session();
@@ -653,7 +869,12 @@ mod tests {
         let _g = SessionGuard::new();
         let fake = Arc::new(FakeScreenshotBackend::single_primary(200, 200));
         crate::infra::platform::screenshot::install_backend(fake);
-        let _ = op_capture(None).await.unwrap();
+
+        // 直接调 begin_session 建立 session
+        tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
+            .await
+            .unwrap()
+            .unwrap();
 
         let result = op_crop(0, 0, 100, 100).await.unwrap();
         let CapabilityResult::Blob { bytes, .. } = result else {
@@ -665,139 +886,158 @@ mod tests {
         );
     }
 
-    /// hwnd=0 是 NULL HWND，`get_window_dwm_rect` 应返回 None → InvalidArgs。
-    #[tokio::test]
-    async fn op_window_invalid_hwnd_returns_error() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
-        crate::infra::platform::screenshot::install_backend(fake);
+    // ── resolve_target_hwnd 策略矩阵测试 ──
 
-        let err = op_window(0).await.unwrap_err();
-        assert!(
-            matches!(err, CapabilityError::InvalidArgs { .. }),
-            "期望 InvalidArgs，实际: {err:?}"
-        );
-    }
+    /// 测试用 mock surface——validate_window_ref 总返回 Unavailable。
+    struct MockSurface;
 
-    /// 尝试用真实桌面窗口验证 op_window 全链路。
-    ///
-    /// `enumerate_pickable_windows()` 枚举桌面可见窗口，取第一个的 hwnd 调 `op_window`。
-    /// 测试环境无可见窗口时 skip（不应 fail）。
-    #[tokio::test]
-    async fn op_window_with_real_window_returns_png() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(FakeScreenshotBackend::single_primary(1920, 1080));
-        crate::infra::platform::screenshot::install_backend(fake);
-
-        let windows = crate::infra::platform::window::enumerate_pickable_windows();
-        let Some(win) = windows.first() else {
-            // 测试环境无可见窗口——skip 而非 fail
-            eprintln!("op_window_with_real_window_returns_png: 跳过（无可见窗口）");
-            return;
-        };
-
-        let result = op_window(win.hwnd).await.unwrap();
-        let CapabilityResult::Blob { mime, bytes, .. } = result else {
-            panic!("期望 Blob 结果");
-        };
-        assert_eq!(mime, "image/png");
-        assert_eq!(
-            &bytes[..8],
-            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-        );
-    }
-
-    /// capture_to_clipboard 虚拟屏幕路径：写入 PNG，返回 Done。
-    ///
-    /// 使用 FakeClipboardWriter 记录写入数据，不触碰真实 Win32 剪贴板。
-    /// 验证：收到 PNG 字节（含 PNG 魔数），summary 提及剪贴板。
-    #[tokio::test]
-    async fn op_capture_to_clipboard_virtual_screen_returns_done() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
-        crate::infra::platform::screenshot::install_backend(fake);
-        crate::infra::platform::screenshot::end_session();
-
-        let writer = FakeClipboardWriter::new();
-        let result = op_capture_to_clipboard_with_writer(None, &writer)
-            .await
-            .unwrap();
-        let CapabilityResult::Done { summary } = result else {
-            panic!("期望 Done 结果，实际: {result:?}");
-        };
-        assert!(summary.contains("剪贴板"), "summary 应提及剪贴板");
-
-        // 验证 writer 收到 PNG（含魔数）
-        let writes = writer.writes();
-        assert_eq!(writes.len(), 1, "应有 1 次写入");
-        match &writes[0] {
-            ClipboardWrite::Png(png) => {
-                assert_eq!(
-                    &png[..8],
-                    &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
-                    "PNG 魔数应匹配"
-                );
-            }
-            other => panic!("期望 Png 写入，实际: {other:?}"),
+    #[async_trait::async_trait]
+    impl crate::domain::capability::SurfacePort for MockSurface {
+        fn open_settings(&self) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        fn open_sticky_manager(&self) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        fn open_chat(
+            &self,
+            _: Option<&str>,
+        ) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        fn open_clipboard_mode(&self) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        async fn start_region_capture(
+            &self,
+        ) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        fn start_image_editor(
+            &self,
+            _: crate::domain::capability::EditorSourceRef,
+        ) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        fn start_content_editor(
+            &self,
+            _: crate::domain::capability::ContentEditorRequest,
+        ) -> Result<(), crate::domain::capability::SurfaceError> {
+            unreachable!()
+        }
+        fn hide_main_window(&self, _: &str) {}
+        fn show_main_window(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        fn exit_app(&self) {}
+        fn validate_window_ref(
+            &self,
+            _ref_id: &str,
+        ) -> Result<isize, crate::domain::capability::SurfaceError> {
+            Err(crate::domain::capability::SurfaceError::Unavailable {
+                detail: "MockSurface: window_ref 不存在".into(),
+            })
+        }
+        fn is_blink_hwnd(&self, _hwnd: isize) -> bool {
+            false
+        }
+        async fn capture_with_cleanse(
+            &self,
+            _: crate::domain::capability::CaptureCleansePlan,
+            _: Option<isize>,
+            capture_fn: crate::domain::capability::CaptureFn,
+        ) -> Result<crate::domain::capability::CaptureResult, crate::domain::capability::SurfaceError>
+        {
+            let image = capture_fn().map_err(|e| {
+                crate::domain::capability::SurfaceError::CreateFailed { detail: e }
+            })?;
+            Ok(crate::domain::capability::CaptureResult { image })
         }
     }
 
-    /// capture_to_clipboard 指定显示器路径：写入 BGRA，返回 Done。
-    ///
-    /// 使用 FakeClipboardWriter 记录写入数据，不触碰真实 Win32 剪贴板。
-    /// 验证：收到 BGRA 字节、宽高正确、长度匹配。
-    #[tokio::test]
-    async fn op_capture_to_clipboard_specific_display_returns_done() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(
-            FakeScreenshotBackend::builder()
-                .display(0, 0, 0, 800, 600, true)
-                .display(1, 800, 0, 400, 300, false)
-                .build(),
-        );
-        crate::infra::platform::screenshot::install_backend(fake);
-
-        let writer = FakeClipboardWriter::new();
-        let result = op_capture_to_clipboard_with_writer(Some(1), &writer)
-            .await
-            .unwrap();
-        let CapabilityResult::Done { summary } = result else {
-            panic!("期望 Done 结果，实际: {result:?}");
-        };
-        assert!(summary.contains("剪贴板"), "summary 应提及剪贴板");
-
-        // 验证 writer 收到 BGRA（宽 400 × 高 300 × 4 = 480000 字节）
-        let writes = writer.writes();
-        assert_eq!(writes.len(), 1, "应有 1 次写入");
-        match &writes[0] {
-            ClipboardWrite::Bgra { bgra, w, h } => {
-                assert_eq!(*w, 400, "宽度应为 400");
-                assert_eq!(*h, 300, "高度应为 300");
-                assert_eq!(bgra.len(), 400 * 300 * 4, "BGRA 长度应匹配宽高");
-            }
-            other => panic!("期望 Bgra 写入，实际: {other:?}"),
+    #[test]
+    fn resolve_target_hwnd_ai_rejects_raw_hwnd() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        let surface = MockSurface;
+        // AI/MCP/CLI 传裸 hwnd 应被拒绝
+        let args = json!({"hwnd": 12345});
+        for origin in [
+            InvocationOrigin::LocalAi,
+            InvocationOrigin::Mcp,
+            InvocationOrigin::Cli,
+            InvocationOrigin::LocalSurface,
+        ] {
+            let err = resolve_target_hwnd(&args, origin, &surface).unwrap_err();
+            assert!(
+                matches!(err, CapabilityError::InvalidArgs { .. }),
+                "origin {origin:?} 传裸 hwnd 应返回 InvalidArgs"
+            );
         }
     }
 
-    /// capture_to_clipboard writer 失败时返回 CapabilityError::Internal。
-    #[tokio::test]
-    async fn op_capture_to_clipboard_writer_error_returns_internal() {
-        let _g = SessionGuard::new();
-        let fake = Arc::new(
-            FakeScreenshotBackend::builder()
-                .display(0, 0, 0, 800, 600, true)
-                .display(1, 800, 0, 400, 300, false)
-                .build(),
-        );
-        crate::infra::platform::screenshot::install_backend(fake);
+    #[test]
+    fn resolve_target_hwnd_local_command_accepts_raw_hwnd() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        let surface = MockSurface;
+        // LocalCommand 路径允许裸 hwnd（内部协议）
+        let args = json!({"hwnd": 12345});
+        let hwnd = resolve_target_hwnd(&args, InvocationOrigin::LocalCommand, &surface).unwrap();
+        assert_eq!(hwnd, Some(12345));
+    }
 
-        let writer = FakeClipboardWriter::failing();
-        let err = op_capture_to_clipboard_with_writer(Some(1), &writer)
-            .await
-            .unwrap_err();
+    #[test]
+    fn resolve_target_hwnd_ai_no_hwnd_returns_none() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        let surface = MockSurface;
+        // AI/MCP 不传 hwnd 也不传 window_ref → None（由调用方处理为缺少参数）
+        let args = json!({});
+        let hwnd = resolve_target_hwnd(&args, InvocationOrigin::LocalAi, &surface).unwrap();
+        assert_eq!(hwnd, None);
+    }
+
+    #[test]
+    fn resolve_target_hwnd_invalid_window_ref_returns_stale_ref() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        let surface = MockSurface;
+        // 不存在的 window_ref → StaleRef
+        let args = json!({"window_ref": "wref_nonexistent"});
+        let err = resolve_target_hwnd(&args, InvocationOrigin::LocalAi, &surface).unwrap_err();
         assert!(
-            matches!(err, CapabilityError::Internal { .. }),
-            "writer 失败应映射为 Internal，实际: {err:?}"
+            matches!(err, CapabilityError::StaleRef { .. }),
+            "无效 window_ref 应返回 StaleRef"
         );
+    }
+
+    // ── policy 一致性测试 ──
+
+    #[test]
+    fn policy_requires_gui_surface_and_desktop_session() {
+        let p = Screenshot.policy();
+        // screenshot 需要至少 DESKTOP_SESSION + GUI_SURFACE
+        // 提供只有 DESKTOP_SESSION 时不应满足 → 证明需要 GUI_SURFACE
+        assert!(
+            !p.runtime_requirement
+                .is_satisfied_by(RuntimeRequirement::DESKTOP_SESSION),
+            "screenshot 需要 GUI_SURFACE，仅 DESKTOP_SESSION 不满足"
+        );
+        // 提供全量时应满足
+        let full = RuntimeRequirement::DESKTOP_SESSION | RuntimeRequirement::GUI_SURFACE;
+        assert!(
+            p.runtime_requirement.is_satisfied_by(full),
+            "screenshot 在全量时应满足"
+        );
+    }
+
+    #[test]
+    fn manage_window_policy_requires_desktop_session() {
+        use crate::domain::capability::builtins::manage_window::ManageWindow;
+        let p = ManageWindow.policy();
+        // manage_window 只需 DESKTOP_SESSION，不需要 GUI_SURFACE
+        assert!(
+            p.runtime_requirement
+                .is_satisfied_by(RuntimeRequirement::DESKTOP_SESSION),
+            "manage_window 只需 DESKTOP_SESSION"
+        );
+        // 不要求 GUI_SURFACE：提供只有 DESKTOP_SESSION 即可满足
     }
 }

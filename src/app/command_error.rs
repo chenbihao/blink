@@ -122,6 +122,25 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
             Internal { detail } => {
                 Self::new("internal_error", format!("内部错误: {detail}"), false)
             }
+            StaleRef { detail } => {
+                Self::new("stale_ref", format!("窗口引用已失效: {detail}"), false)
+            }
+            SelfWindowForbidden { detail } => Self::new(
+                "self_window_forbidden",
+                format!("禁止操作 Blink 自身窗口: {detail}"),
+                false,
+            ),
+            ActivationFailed { detail } => Self::new(
+                "activation_failed",
+                format!("窗口激活失败: {detail}"),
+                false,
+            ),
+            CaptureFailed { detail } => {
+                Self::new("capture_failed", format!("捕获失败: {detail}"), false)
+            }
+            RestoreFailed { detail } => {
+                Self::new("restore_failed", format!("恢复异常: {detail}"), false)
+            }
         }
     }
 }

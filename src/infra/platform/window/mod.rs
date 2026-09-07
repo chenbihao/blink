@@ -10,6 +10,10 @@ mod windows;
 #[cfg(target_os = "windows")]
 mod list;
 
+// 0.22.14：窗口控制原语 + opaque window_ref 注册表
+#[cfg(target_os = "windows")]
+mod control;
+
 #[cfg(target_os = "windows")]
 pub use windows::{
     ChatCloseCallback, PinImage, StickySpareCloseCallback, WelcomeCloseCallback, ack_chat_prefill,
@@ -17,22 +21,31 @@ pub use windows::{
     compute_cursor_titlebar_position, destroy_sticky_window, enable_rounded_corners,
     flush_all_sticky_windows, force_topmost, get_foreground_hwnd,
     get_or_create_context_menu_window, get_pin_image, get_pin_image_by_label, get_pin_window_rect,
-    get_primary_monitor_center, hide, hide_chat_window_primitive, hide_for_screenshot,
-    hide_image_editor_window, hide_screenshot_overlay, hide_sticky_window, hide_voice_overlay,
-    install_sysmenu_blocker, is_main_ai_active, is_visible, last_external_foreground_hwnd,
-    mark_pin_spare_ready, mark_spare_ready, on_focused, open_settings, place_at_physical,
-    preheat_secondary_windows, refresh_pin_image, refresh_pin_image_by_label, restore_foreground,
-    set_app_exiting, set_context_menu_payload, set_last_external_hwnd, set_main_ai_active,
+    get_primary_monitor_center, hide, hide_chat_window_primitive, hide_image_editor_window,
+    hide_screenshot_overlay, hide_sticky_window, hide_voice_overlay, install_sysmenu_blocker,
+    is_main_ai_active, is_visible, last_external_foreground_hwnd, mark_pin_spare_ready,
+    mark_spare_ready, on_focused, open_settings, place_at_physical, preheat_secondary_windows,
+    refresh_pin_image, refresh_pin_image_by_label, restore_foreground, set_app_exiting,
+    set_context_menu_payload, set_last_external_hwnd, set_main_ai_active,
     set_sticky_close_fallback, show_chat_window, show_content_editor_window,
     show_image_editor_window, show_main_window, show_pin_window, show_screenshot_overlay,
     show_sticky_manager_window, show_sticky_window, show_voice_overlay, show_welcome_window,
     signal_sticky_close_ack, start_watchdog, take_chat_prefill, take_context_menu_payload,
-    unhide_after_screenshot, update_grace_period, update_sticky_taskbar, wait_frame_after_hide,
+    update_grace_period, update_sticky_taskbar,
 };
 
 // 0.15.8：智能窗口吸附——枚举可吸附窗口
 #[cfg(target_os = "windows")]
 pub use list::{PickableWindow, enumerate_pickable_windows, get_window_dwm_rect};
+
+// 0.22.14：窗口控制原语 + opaque window_ref
+#[cfg(target_os = "windows")]
+pub use control::{
+    RefValidation, activate_window, cleanup_old_refs, collect_blink_hwnds, dwm_flush,
+    get_foreground, get_window_pid, is_cloaked, is_hwnd_valid, is_minimized, maximize_window,
+    minimize_window, next_generation, register_window_ref, restore_window, set_foreground,
+    validate_window_ref_detailed,
+};
 
 // 0.18.2：控件级智能吸附——UIA 控件提示
 #[cfg(target_os = "windows")]

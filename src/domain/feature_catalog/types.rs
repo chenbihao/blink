@@ -76,7 +76,9 @@ impl FeatureGroup {
             "open_chat" | "open_clipboard_mode" => Self::ChordEntry,
 
             // 窗口与系统
-            "list_windows" | "lock" | "shutdown" | "restart" | "sleep" => Self::WindowSystem,
+            "list_windows" | "manage_window" | "lock" | "shutdown" | "restart" | "sleep" => {
+                Self::WindowSystem
+            }
 
             // Blink 管理与诊断
             "open_settings"

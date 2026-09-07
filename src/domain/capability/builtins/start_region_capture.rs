@@ -8,7 +8,7 @@
 //! AI 推荐 allowlist 默认开启；MCP 代码级禁止（GUI 副作用 + DESKTOP_SESSION）。
 //!
 //! **与旧 ChordAction 的关系**：旧 `ScreenshotAction` 实现 `Action::execute()`，
-//! 内部调一系列 `DomainEnv` 截图方法（`hide_for_screenshot`、`wait_frame_after_hide`、
+//! 内部调一系列 `DomainEnv` 截图方法（`CaptureGuard`、
 //! `begin_session`、`show_screenshot_overlay`）。
 //! 本 Capability 通过 `SurfacePort::start_region_capture` 启动截图流程，
 //! 返回"已启动截图选区，等待用户"。

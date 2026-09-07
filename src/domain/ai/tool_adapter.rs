@@ -635,6 +635,13 @@ fn capability_error_to_string(e: CapabilityError) -> String {
         CapabilityError::NotFound { id } => format!("未找到: {id}"),
         CapabilityError::Backend { message, .. } => message.clone(),
         CapabilityError::Internal { detail } => format!("内部错误: {detail}"),
+        CapabilityError::StaleRef { detail } => format!("窗口引用已失效: {detail}"),
+        CapabilityError::SelfWindowForbidden { detail } => {
+            format!("禁止操作 Blink 自身窗口: {detail}")
+        }
+        CapabilityError::ActivationFailed { detail } => format!("窗口激活失败: {detail}"),
+        CapabilityError::CaptureFailed { detail } => format!("捕获失败: {detail}"),
+        CapabilityError::RestoreFailed { detail } => format!("恢复异常: {detail}"),
     }
 }
 
