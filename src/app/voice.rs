@@ -21,7 +21,10 @@
 //! - hold 时 chat 窗口可见 → G3: 文字填 chat composer textarea
 //! - hold 时主窗口 + chat 均不可见 → G2: 文字注入前台应用
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use tauri::{Emitter, Manager};
 
@@ -101,6 +104,12 @@ impl Default for VoiceSession {
 pub struct VoiceService {
     session: Mutex<VoiceSession>,
     app: tauri::AppHandle,
+    /// 0.22.15: VoiceService 级单调 recording epoch。
+    ///
+    /// 不依赖 adapter generation（每次 begin_session 从 1 开始），
+    /// 而是在 VoiceService 层维护单调递增的 epoch，
+    /// 确保 new epoch 后旧 epoch 的任何 final/end 都不能影响 UI。
+    recording_epoch: Arc<AtomicU64>,
 }
 
 impl VoiceService {
@@ -108,7 +117,14 @@ impl VoiceService {
         Self {
             session: Mutex::new(VoiceSession::default()),
             app,
+            recording_epoch: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// 0.22.15: 获取当前 recording epoch。
+    #[allow(dead_code)]
+    pub fn current_epoch(&self) -> u64 {
+        self.recording_epoch.load(Ordering::Acquire)
     }
 
     /// Hold 事件:开始录音。
@@ -423,9 +439,10 @@ impl VoiceService {
                     let prev_fg_hwnd = session.prev_fg_hwnd;
 
                     // 通知前端录音已开始
+                    let epoch_val = self.recording_epoch.fetch_add(1, Ordering::Release) + 1;
                     let _ = self.app.emit(
                         EventNames::VOICE_RECORDING_START,
-                        serde_json::json!({ "target": target_str }),
+                        serde_json::json!({ "target": target_str, "epoch": epoch_val }),
                     );
 
                     (stt_port, engine_arc, rx, target, target_str, prev_fg_hwnd)
@@ -454,6 +471,13 @@ impl VoiceService {
             }
         };
 
+        // 0.22.15：recording epoch 已在 VOICE_RECORDING_START emit 时递增（epoch_val）
+        let recording_epoch = {
+            let e = self.recording_epoch.load(Ordering::Acquire);
+            tracing::debug!(recording_epoch = e, session_gen, "录音 epoch");
+            e
+        };
+
         // 获取事件 receiver（在 begin_session 之后）
         let event_rx = port.events();
 
@@ -461,10 +485,14 @@ impl VoiceService {
         let app_for_events = self.app.clone();
         let target_for_events = target;
         let prev_hwnd_for_events = prev_fg_hwnd;
+        let epoch_for_events = recording_epoch;
+        let epoch_arc = self.recording_epoch.clone();
         let event_task = tokio::spawn(async move {
             consume_stt_events(
                 event_rx,
                 session_gen,
+                epoch_for_events,
+                epoch_arc,
                 target_for_events,
                 prev_hwnd_for_events,
                 app_for_events,
@@ -702,95 +730,121 @@ impl VoiceService {
 
     /// 交付最终识别文本到目标（G1/G2/G3）。
     ///
-    /// 0.22.9：从旧 `stop_recording` 的内联交付逻辑提取为独立方法，
-    /// 供 `stop_recording` 回退路径和 `consume_stt_events` 共用。
+    /// 0.22.9：从旧 `stop_recording` 的内联交付逻辑提取为独立方法。
+    /// 0.22.15：改为调用统一的 `deliver_final` 函数，消除两份近似分支。
     ///
     /// - G1: emit `CHORD_FILL_QUERY` + `VOICE_RECORDING_END`
     /// - G2: spawn 后台 inject_text（脱离 effect 循环，恢复焦点 + 注入）
     /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
     async fn deliver_final_text(&self, target: VoiceTarget, final_text: String) {
-        tracing::debug!(
-            target = ?target,
-            text_len = final_text.chars().count(),
-            "语音识别完成"
-        );
+        let prev_hwnd = self.session.lock().unwrap().prev_fg_hwnd;
+        deliver_final(&self.app, target, &final_text, prev_hwnd);
+    }
+}
 
-        if final_text.is_empty() {
-            tracing::debug!("识别结果为空,跳过交付");
-            let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-            return;
+/// 0.22.15：统一交付最终文本——供 `deliver_final_text`（stop 路径）
+/// 和 `consume_stt_events`（事件路径）共用，避免两份近似分支。
+///
+/// - G1: emit `CHORD_FILL_QUERY` + `VOICE_RECORDING_END`
+/// - G2: spawn 后台 inject_text
+/// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
+fn deliver_final(
+    app: &tauri::AppHandle,
+    target: VoiceTarget,
+    text: &str,
+    prev_fg_hwnd: Option<isize>,
+) {
+    if text.is_empty() {
+        tracing::debug!("识别结果为空,跳过交付");
+        let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+        return;
+    }
+
+    tracing::debug!(
+        target = ?target,
+        text_len = text.chars().count(),
+        "交付最终文本"
+    );
+
+    match target {
+        VoiceTarget::MainWindow => {
+            let _ = app.emit(
+                EventNames::CHORD_FILL_QUERY,
+                serde_json::Value::String(text.to_string()),
+            );
+            tracing::debug!("G1: 文字已 emit chord-fill-query");
+            let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
         }
-
-        match target {
-            VoiceTarget::MainWindow => {
-                // G1: 文字填 #query
-                let _ = self.app.emit(
-                    EventNames::CHORD_FILL_QUERY,
-                    serde_json::Value::String(final_text.clone()),
-                );
-                tracing::debug!("G1: 文字已 emit chord-fill-query");
-                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-            }
-            VoiceTarget::ForegroundApp => {
-                // G2: 文字注入前台应用光标处
-                let prev_hwnd = self.session.lock().unwrap().prev_fg_hwnd;
-                tokio::spawn(async move {
-                    // 注入在 spawn_blocking 中执行（SendInput 需要同线程）
-                    tokio::task::spawn_blocking(move || {
-                        // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
-                        if let Some(hwnd) = prev_hwnd {
-                            platform::window::restore_foreground(hwnd);
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        if let Err(e) = platform::inject::inject_text(&final_text) {
-                            tracing::error!(%e, "G2: 文本注入失败");
-                        }
-                    });
+        VoiceTarget::ForegroundApp => {
+            let text_owned = text.to_string();
+            tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    if let Some(hwnd) = prev_fg_hwnd {
+                        platform::window::restore_foreground(hwnd);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    if let Err(e) = platform::inject::inject_text(&text_owned) {
+                        tracing::error!(%e, "G2: 文本注入失败");
+                    }
                 });
-                // G2 overlay 已在 stop_recording 中隐藏
-            }
-            VoiceTarget::ChatWindow => {
-                // G3: 文字填 chat composer textarea
-                let _ = self.app.emit(
-                    EventNames::VOICE_PARTIAL,
-                    serde_json::json!({
-                        "text": final_text,
-                        "target": "chat",
-                    }),
-                );
-                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-            }
+            });
+        }
+        VoiceTarget::ChatWindow => {
+            let _ = app.emit(
+                EventNames::VOICE_PARTIAL,
+                serde_json::json!({
+                    "text": text,
+                    "target": "chat",
+                }),
+            );
+            let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
         }
     }
 }
 
-/// STT 事件消费 task：循环接收 `SttEvent`，按 generation 过滤旧事件，
-/// 将有效事件 emit 到前端或调用 `deliver_final_text` 交付最终文本。
+/// STT 事件消费 task：循环接收 `SttEvent`，按 generation + epoch 双层过滤旧事件，
+/// 将有效事件 emit 到前端或调用 `deliver_final` 交付最终文本。
 ///
 /// 0.22.9 Handoff 05：此 task 在 `begin_recording` 时 spawn，
 /// 在 `stop_recording`（等待完成或超时）或 `cancel_recording`（abort）时终止。
 ///
 /// **事件处理**：
-/// - `Partial` → emit `VOICE_PARTIAL`（confirmed + preview）
-/// - `Final` → 调用 `deliver_final_text` 交付最终文本
-/// - `Busy` → 打 debug 日志（可选降频，当前不处理）
+/// - `Partial` → emit `VOICE_PARTIAL`（confirmed + preview 都空时跳过）
+/// - `Final` → 调用 `deliver_final` 交付最终文本
+/// - `Busy` → 打 debug 日志
 /// - `Error` → emit `VOICE_ERROR`
 ///
-/// **generation 过滤**：generation 不匹配的事件直接丢弃，
-/// 防止 cancel/reset 后迟到的旧结果污染 UI。
+/// **双层过滤**：
+/// - adapter generation：每次 begin_session 从 1 开始
+/// - recording epoch（0.22.15）：VoiceService 级单调递增
+///
+/// 两者是不同边界的校验，缺一不可。
 async fn consume_stt_events(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SttEvent>,
     expected_gen: u64,
+    recording_epoch: u64,
+    current_epoch: Arc<AtomicU64>,
     target: VoiceTarget,
     prev_fg_hwnd: Option<isize>,
     app: tauri::AppHandle,
 ) {
-    // 将 AppHandle 包装为 VoiceService-like 的 deliver 闭包——
-    // consume_stt_events 不能直接调 VoiceService::deliver_final_text（无 &self），
-    // 但 deliver 逻辑只依赖 app.emit + inject，可在此内联。
     let target_str = target.as_str();
 
     while let Some(event) = rx.recv().await {
+        // 0.22.15：epoch 墙——实时对比当前 VoiceService epoch，
+        // 旧 epoch 的事件（Partial/Final/Error）全部丢弃。
+        // 这与 generation 校验是两层不同边界：generation 过滤同一 adapter 内的旧 session，
+        // epoch 过滤跨录音的迟到事件（新录音已开始，旧 finish/final 才到达）。
+        let now_epoch = current_epoch.load(Ordering::Acquire);
+        if now_epoch != recording_epoch {
+            tracing::debug!(
+                event_epoch = recording_epoch,
+                current_epoch = now_epoch,
+                "丢弃旧 epoch 事件（新录音已开始）"
+            );
+            continue;
+        }
+
         match event {
             SttEvent::Partial {
                 generation,
@@ -805,13 +859,17 @@ async fn consume_stt_events(
                     );
                     continue;
                 }
-                // emit partial 到前端
+                // 0.22.15：confirmed 和 preview 都为空时不发 VOICE_PARTIAL
+                if confirmed.is_empty() && preview.is_empty() {
+                    continue;
+                }
                 let _ = app.emit(
                     EventNames::VOICE_PARTIAL,
                     serde_json::json!({
                         "confirmed": confirmed,
                         "preview": preview,
                         "target": target_str,
+                        "epoch": recording_epoch,
                     }),
                 );
             }
@@ -830,47 +888,9 @@ async fn consume_stt_events(
                     "收到 Final 事件"
                 );
 
-                // 交付最终文本——内联 deliver 逻辑（无法访问 &self）
-                if text.is_empty() {
-                    tracing::debug!("识别结果为空,跳过交付");
-                    let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
-                } else {
-                    match target {
-                        VoiceTarget::MainWindow => {
-                            let _ = app.emit(
-                                EventNames::CHORD_FILL_QUERY,
-                                serde_json::Value::String(text.clone()),
-                            );
-                            tracing::debug!("G1: 文字已 emit chord-fill-query");
-                            let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
-                        }
-                        VoiceTarget::ForegroundApp => {
-                            // G2: 注入前台应用光标处
-                            tokio::spawn(async move {
-                                tokio::task::spawn_blocking(move || {
-                                    // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
-                                    if let Some(hwnd) = prev_fg_hwnd {
-                                        platform::window::restore_foreground(hwnd);
-                                        std::thread::sleep(std::time::Duration::from_millis(50));
-                                    }
-                                    if let Err(e) = platform::inject::inject_text(&text) {
-                                        tracing::error!(%e, "G2: 文本注入失败（事件路径）");
-                                    }
-                                });
-                            });
-                        }
-                        VoiceTarget::ChatWindow => {
-                            let _ = app.emit(
-                                EventNames::VOICE_PARTIAL,
-                                serde_json::json!({
-                                    "text": text,
-                                    "target": "chat",
-                                }),
-                            );
-                            let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
-                        }
-                    }
-                }
+                // 0.22.15：统一调用 deliver_final
+                deliver_final(&app, target, &text, prev_fg_hwnd);
+
                 // Final 是 session 的最后一个事件，退出循环
                 break;
             }

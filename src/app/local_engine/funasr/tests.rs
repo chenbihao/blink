@@ -251,6 +251,21 @@ fn funasr_engine_config_round_trip_json() {
     assert!(back.auto_start_server);
 }
 
+#[test]
+fn worker_threads_safe_auto_caps_background_cpu_load() {
+    assert_eq!(gguf::resolve_worker_threads(None, 1), 1);
+    assert_eq!(gguf::resolve_worker_threads(None, 4), 2);
+    assert_eq!(gguf::resolve_worker_threads(None, 16), 4);
+    assert_eq!(gguf::resolve_worker_threads(None, 64), 4);
+}
+
+#[test]
+fn worker_threads_respects_explicit_valid_setting() {
+    assert_eq!(gguf::resolve_worker_threads(Some(2), 16), 2);
+    assert_eq!(gguf::resolve_worker_threads(Some(8), 16), 8);
+    assert_eq!(gguf::resolve_worker_threads(Some(0), 16), 4);
+}
+
 // ── health model Loading/Ready/Error 映射 ──
 
 #[test]

@@ -27,6 +27,17 @@ use crate::infra::local_engine::runtime::EngineId;
 
 use super::FUNASR_ENGINE_ID;
 
+/// 未显式配置时的保守 CPU 线程数。
+///
+/// GGUF worker 的上游默认值会随机器核心数变化。桌面常驻语音输入不应默认
+/// 吃满整颗 CPU，因此自动模式使用一半逻辑核心，并封顶为 4。用户显式设置
+/// `num_threads` 时仍尊重其选择。
+pub(super) fn resolve_worker_threads(configured: Option<u32>, logical_cpus: usize) -> u32 {
+    configured
+        .filter(|threads| *threads > 0)
+        .unwrap_or_else(|| (logical_cpus.max(1) / 2).clamp(1, 4) as u32)
+}
+
 // ── 模型目录（编译期 allowlist）──────────────────────────────────────────
 
 /// 单个 GGUF 发布文件的锁定下载描述。
@@ -427,9 +438,14 @@ pub fn build_funasr_gguf_launch_descriptor(
             .display()
             .to_string(),
     );
-    if let Some(threads) = config.num_threads {
-        env.insert("BLINK_WORKER_THREADS".to_string(), threads.to_string());
-    }
+    let logical_cpus = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let worker_threads = resolve_worker_threads(config.num_threads, logical_cpus);
+    env.insert(
+        "BLINK_WORKER_THREADS".to_string(),
+        worker_threads.to_string(),
+    );
 
     // 音频目录就绪（worker 侧路径校验以前缀匹配，目录必须存在）
     if let Err(e) = std::fs::create_dir_all(super::worker::engine_audio_tmp_dir(&engine_id)) {
@@ -446,6 +462,8 @@ pub fn build_funasr_gguf_launch_descriptor(
         model = %manifest.model_id,
         revision = %manifest.revision,
         transport = "stdio",
+        worker_threads,
+        thread_mode = if config.num_threads.is_some() { "configured" } else { "safe_auto" },
         "构建 FunASR GGUF LaunchDescriptor"
     );
 
