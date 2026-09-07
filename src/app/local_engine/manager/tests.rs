@@ -1141,10 +1141,11 @@ async fn scan_storage_model_cache_excludes_installed_assets() {
     // 孤儿清空后不再产出 cache target
     std::fs::remove_dir_all(&orphan).unwrap();
     let dto = svc.scan_storage(&eid).await.unwrap();
-    assert!(!dto
-        .targets
-        .iter()
-        .any(|t| t.target_id == "cache:model_cache"));
+    assert!(
+        !dto.targets
+            .iter()
+            .any(|t| t.target_id == "cache:model_cache")
+    );
 
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
     let _ = std::fs::remove_dir_all(mstore::engine_model_root(&eid));
@@ -1170,7 +1171,11 @@ async fn cleanup_model_cache_keeps_managed_assets() {
         .cleanup_targets(&eid, &["cache:model_cache".to_string()], None)
         .await
         .unwrap();
-    assert!(result.cleaned_target_ids.contains(&"cache:model_cache".to_string()));
+    assert!(
+        result
+            .cleaned_target_ids
+            .contains(&"cache:model_cache".to_string())
+    );
     assert!(asset_dir.exists(), "托管模型资产不可删");
     assert!(!orphan.exists(), "孤儿残留应被清理");
 

@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::policy::{
     CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage, ContentEditorRequest,
-    EditorSourceRef, SurfaceError, SurfacePort,
+    EditorSourceRef, SurfaceError, SurfacePort, WindowActionResult,
 };
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::event::{CapabilityEnv, EventPort};
@@ -571,9 +571,11 @@ impl SurfacePort for TauriDomainEnv {
         let validation = crate::infra::platform::window::validate_window_ref_detailed(ref_id);
         match validation {
             crate::infra::platform::window::RefValidation::Valid(record) => Ok(record.hwnd),
-            crate::infra::platform::window::RefValidation::NotFound => Err(SurfaceError::Unavailable {
-                detail: "window_ref 不存在，请重新调用 list_windows".into(),
-            }),
+            crate::infra::platform::window::RefValidation::NotFound => {
+                Err(SurfaceError::Unavailable {
+                    detail: "window_ref 不存在，请重新调用 list_windows".into(),
+                })
+            }
             crate::infra::platform::window::RefValidation::ExpiredGeneration => {
                 Err(SurfaceError::Unavailable {
                     detail: "window_ref 已过期".into(),
@@ -584,9 +586,11 @@ impl SurfacePort for TauriDomainEnv {
                     detail: "window_ref 已超时".into(),
                 })
             }
-            crate::infra::platform::window::RefValidation::InvalidHwnd => Err(SurfaceError::Unavailable {
-                detail: "窗口句柄已失效".into(),
-            }),
+            crate::infra::platform::window::RefValidation::InvalidHwnd => {
+                Err(SurfaceError::Unavailable {
+                    detail: "窗口句柄已失效".into(),
+                })
+            }
             crate::infra::platform::window::RefValidation::PidMismatch => {
                 Err(SurfaceError::Unavailable {
                     detail: "窗口 PID 已变化".into(),
@@ -595,6 +599,43 @@ impl SurfacePort for TauriDomainEnv {
             crate::infra::platform::window::RefValidation::TitleMismatch => {
                 Err(SurfaceError::Unavailable {
                     detail: "窗口标题已变化".into(),
+                })
+            }
+        }
+    }
+
+    fn verify_window_identity(&self, ref_id: &str) -> Result<(), SurfaceError> {
+        // 截图前二次核验：重新走完整的 ref 校验（generation、TTL、HWND、PID、标题）
+        match crate::infra::platform::window::validate_window_ref_detailed(ref_id) {
+            crate::infra::platform::window::RefValidation::Valid(_) => Ok(()),
+            crate::infra::platform::window::RefValidation::NotFound => {
+                Err(SurfaceError::Unavailable {
+                    detail: "window_ref 不存在（二次核验）".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::ExpiredGeneration => {
+                Err(SurfaceError::Unavailable {
+                    detail: "window_ref 已过期（二次核验）".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::ExpiredTtl => {
+                Err(SurfaceError::Unavailable {
+                    detail: "window_ref 已超时（二次核验）".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::InvalidHwnd => {
+                Err(SurfaceError::Unavailable {
+                    detail: "窗口句柄已失效（二次核验）".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::PidMismatch => {
+                Err(SurfaceError::Unavailable {
+                    detail: "窗口 PID 已变化（HWND 可能被复用）".into(),
+                })
+            }
+            crate::infra::platform::window::RefValidation::TitleMismatch => {
+                Err(SurfaceError::Unavailable {
+                    detail: "窗口标题已变化（身份变化）".into(),
                 })
             }
         }
@@ -625,26 +666,25 @@ impl SurfacePort for TauriDomainEnv {
 
         let app = self.app.clone();
         tokio::task::spawn_blocking(move || -> Result<CapturedImage, SurfaceError> {
-            let guard = crate::app::capture_orchestrator::CaptureGuard::new(
-                &app,
-                app_plan,
-                target_hwnd,
-            )
-            .map_err(|e| match e {
-                crate::app::capture_orchestrator::GuardError::ActivationFailed(detail) => {
-                    SurfaceError::ActivationFailed { detail }
-                }
-                crate::app::capture_orchestrator::GuardError::Other(detail) => {
-                    SurfaceError::CreateFailed { detail }
-                }
-            })?;
+            let guard =
+                crate::app::capture_orchestrator::CaptureGuard::new(&app, app_plan, target_hwnd)
+                    .map_err(|e| match e {
+                        crate::app::capture_orchestrator::GuardError::ActivationFailed(detail) => {
+                            SurfaceError::ActivationFailed { detail }
+                        }
+                        crate::app::capture_orchestrator::GuardError::Other(detail) => {
+                            SurfaceError::CreateFailed { detail }
+                        }
+                    })?;
 
             // guard 已完成 cloak + DwmFlush + 目标激活
             let result = capture_fn().map_err(|e| SurfaceError::CreateFailed { detail: e })?;
 
             // 显式 finalize：恢复状态并检查恢复结果
             // Drop 仍作为最后保险，但正常路径通过显式 finalize 传播恢复错误
-            guard.finalize().map_err(|detail| SurfaceError::RestoreFailed { detail })?;
+            guard
+                .finalize()
+                .map_err(|detail| SurfaceError::RestoreFailed { detail })?;
 
             Ok(result)
         })
@@ -653,6 +693,125 @@ impl SurfacePort for TauriDomainEnv {
             detail: format!("capture_with_cleanse task 崩溃: {e}"),
         })?
         .map(|image| CaptureResult { image })
+    }
+
+    async fn manage_window_action(
+        &self,
+        ref_id: &str,
+        action: &str,
+    ) -> Result<WindowActionResult, SurfaceError> {
+        use crate::infra::platform::window;
+
+        let ref_id_owned = ref_id.to_string();
+        let action_owned = action.to_string();
+
+        // spawn_blocking：Win32 ShowWindow / SetForegroundWindow / IsIconic / IsZoomed
+        // 都是同步 API，按 spec-backend §一"阻塞操作隔离"铁则。
+        tokio::task::spawn_blocking(move || -> Result<WindowActionResult, SurfaceError> {
+            // 校验 window_ref（详细版本，区分失效原因）
+            let validation = window::validate_window_ref_detailed(&ref_id_owned);
+            let record = match validation {
+                window::RefValidation::Valid(record) => record,
+                window::RefValidation::NotFound => {
+                    return Err(SurfaceError::Unavailable {
+                        detail: "window_ref 不存在，请重新调用 list_windows".into(),
+                    });
+                }
+                window::RefValidation::ExpiredGeneration => {
+                    return Err(SurfaceError::Unavailable {
+                        detail: "window_ref 已过期（generation 不匹配）".into(),
+                    });
+                }
+                window::RefValidation::ExpiredTtl => {
+                    return Err(SurfaceError::Unavailable {
+                        detail: "window_ref 已超时".into(),
+                    });
+                }
+                window::RefValidation::InvalidHwnd => {
+                    return Err(SurfaceError::Unavailable {
+                        detail: "窗口句柄已失效".into(),
+                    });
+                }
+                window::RefValidation::PidMismatch => {
+                    return Err(SurfaceError::Unavailable {
+                        detail: "窗口 PID 已变化（句柄可能被复用）".into(),
+                    });
+                }
+                window::RefValidation::TitleMismatch => {
+                    return Err(SurfaceError::Unavailable {
+                        detail: "窗口标题已变化（身份变化）".into(),
+                    });
+                }
+            };
+
+            let hwnd = record.hwnd;
+            let hwnd_raw = windows::Win32::Foundation::HWND(hwnd as *mut _);
+
+            match action_owned.as_str() {
+                "activate" => {
+                    let success = window::activate_window(hwnd);
+                    Ok(WindowActionResult {
+                        success,
+                        process_name: record.process_name.clone(),
+                    })
+                }
+                "minimize" => {
+                    window::minimize_window(hwnd);
+                    // 核验：窗口应处于 iconic 状态
+                    if !window::is_minimized(hwnd_raw) {
+                        return Err(SurfaceError::WindowStateMismatch {
+                            expected: "minimized".into(),
+                            actual: "not minimized".into(),
+                        });
+                    }
+                    Ok(WindowActionResult {
+                        success: true,
+                        process_name: record.process_name.clone(),
+                    })
+                }
+                "maximize" => {
+                    window::maximize_window(hwnd);
+                    // 核验：窗口应处于 zoomed 状态
+                    if !window::is_maximized(hwnd_raw) {
+                        return Err(SurfaceError::WindowStateMismatch {
+                            expected: "maximized".into(),
+                            actual: "not maximized".into(),
+                        });
+                    }
+                    Ok(WindowActionResult {
+                        success: true,
+                        process_name: record.process_name.clone(),
+                    })
+                }
+                "restore" => {
+                    window::restore_window(hwnd);
+                    // 核验：窗口不应处于 iconic 或 zoomed 状态
+                    let minimized = window::is_minimized(hwnd_raw);
+                    let maximized = window::is_maximized(hwnd_raw);
+                    if minimized || maximized {
+                        return Err(SurfaceError::WindowStateMismatch {
+                            expected: "normal".into(),
+                            actual: if minimized {
+                                "minimized".into()
+                            } else {
+                                "maximized".into()
+                            },
+                        });
+                    }
+                    Ok(WindowActionResult {
+                        success: true,
+                        process_name: record.process_name.clone(),
+                    })
+                }
+                other => Err(SurfaceError::Unavailable {
+                    detail: format!("未知窗口操作: {other}"),
+                }),
+            }
+        })
+        .await
+        .map_err(|e| SurfaceError::CreateFailed {
+            detail: format!("manage_window_action task 崩溃: {e}"),
+        })?
     }
 }
 

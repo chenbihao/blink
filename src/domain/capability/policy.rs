@@ -330,6 +330,13 @@ pub trait SurfacePort: Send + Sync {
     /// 不直接接触 `crate::infra::platform::window`。
     fn validate_window_ref(&self, ref_id: &str) -> Result<isize, SurfaceError>;
 
+    /// 0.22.14 review：截图执行前二次核验窗口身份。
+    ///
+    /// 在 `validate_window_ref` 返回 HWND 后，截图回调执行前，
+    /// 调用此方法重新核验 generation、TTL、PID 和标题。
+    /// HWND 被复用时此方法会检测到 PID/标题变化并返回错误。
+    fn verify_window_identity(&self, ref_id: &str) -> Result<(), SurfaceError>;
+
     /// 0.22.14：判断 HWND 是否属于 Blink 当前进程。
     fn is_blink_hwnd(&self, hwnd: isize) -> bool;
 
@@ -344,6 +351,20 @@ pub trait SurfacePort: Send + Sync {
         target_hwnd: Option<isize>,
         capture_fn: CaptureFn,
     ) -> Result<CaptureResult, SurfaceError>;
+
+    /// 0.22.14 review：执行窗口操作并核验结果状态。
+    ///
+    /// Domain 层通过此方法执行 activate/minimize/maximize/restore，
+    /// 不直接接触 `infra::platform::window`。执行后核验 `IsIconic`/`IsZoomed`
+    /// 状态，未生效时返回 `WindowStateMismatch`。
+    ///
+    /// 返回值：activate 返回是否成功（可能因前台锁定失败）；
+    /// minimize/maximize/restore 始终返回 true（核验通过）或错误。
+    async fn manage_window_action(
+        &self,
+        ref_id: &str,
+        action: &str,
+    ) -> Result<WindowActionResult, SurfaceError>;
 }
 
 /// 0.22.14：净化策略——domain 层只看到语义，不接触 Win32。
@@ -365,6 +386,17 @@ pub struct CaptureResult {
     pub image: CapturedImage,
 }
 
+/// 0.22.14 review：窗口操作结果。
+///
+/// `activate` 的 `success` 可能为 false（Windows 前台锁定限制）；
+/// `minimize`/`maximize`/`restore` 的 `success` 始终为 true（核验通过）。
+pub struct WindowActionResult {
+    /// 操作是否成功。
+    pub success: bool,
+    /// 窗口所属进程名（用于日志和用户反馈，不含隐私标题）。
+    pub process_name: String,
+}
+
 /// 0.22.14：截图数据类型——穷尽匹配，不允许 BGRA 字段装 PNG。
 #[derive(Debug, Clone)]
 pub enum CapturedImage {
@@ -375,16 +407,18 @@ pub enum CapturedImage {
         height: u32,
     },
     /// 已编码的 PNG 字节。
-    Png {
-        bytes: Vec<u8>,
-    },
+    Png { bytes: Vec<u8> },
 }
 
 impl CapturedImage {
     /// 获取 BGRA 数据（如果是 PNG 则返回 None）。
     pub fn as_bgra(&self) -> Option<(&[u8], u32, u32)> {
         match self {
-            CapturedImage::Bgra { bytes, width, height } => Some((bytes, *width, *height)),
+            CapturedImage::Bgra {
+                bytes,
+                width,
+                height,
+            } => Some((bytes, *width, *height)),
             CapturedImage::Png { .. } => None,
         }
     }
@@ -414,6 +448,9 @@ pub enum SurfaceError {
     /// 0.22.14：截图事务恢复异常——cloak/前台窗口恢复失败。
     #[error("恢复异常: {detail}")]
     RestoreFailed { detail: String },
+    /// 0.22.14 review：窗口操作后状态核验失败——操作未生效。
+    #[error("窗口状态核验失败: 期望{expected}, 实际{actual}")]
+    WindowStateMismatch { expected: String, actual: String },
 }
 
 // ── EditorSourceRef / ContentEditorRequest ───────────────────────────────────
@@ -788,6 +825,9 @@ mod tests {
                     detail: "DummySurface 不支持 window_ref 校验".into(),
                 })
             }
+            fn verify_window_identity(&self, _ref_id: &str) -> Result<(), SurfaceError> {
+                Ok(())
+            }
             fn is_blink_hwnd(&self, _hwnd: isize) -> bool {
                 false
             }
@@ -799,6 +839,16 @@ mod tests {
             ) -> Result<CaptureResult, SurfaceError> {
                 let image = capture_fn().map_err(|e| SurfaceError::CreateFailed { detail: e })?;
                 Ok(CaptureResult { image })
+            }
+            async fn manage_window_action(
+                &self,
+                _ref_id: &str,
+                _action: &str,
+            ) -> Result<crate::domain::capability::policy::WindowActionResult, SurfaceError>
+            {
+                Err(SurfaceError::Unavailable {
+                    detail: "DummySurface 不支持窗口操作".into(),
+                })
             }
         }
         let caps = RuntimeCapabilities {

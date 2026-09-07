@@ -307,7 +307,10 @@ function withProgressCleanup(entry) {
  * - 引擎级 operation 活跃（环境安装/修复链路）：operation_id 必须匹配，
  *   与 applyInstallStage 同规则；
  * - 无引擎级 operation（FunASR 模型下载链路——模型操作不产生引擎级
- *   operation）：要求存在进行中的模型操作上下文才接受。
+ *   operation）：payload 的 operation_id 必须命中当前某个 pending model
+ *   action 的 operationId。若无 pending model action（仅后端 install_state
+ *   活跃但前端未发起操作），退化为检查 hasActiveModelOperation——但
+ *   payload.operation_id 必须非空才接受，防止无 id 的广播事件错误写入。
  *
  * @param {Map<string, EngineStateEntry>} state
  * @param {Object} payload - { engine_id, operation_id, downloaded, total }
@@ -331,8 +334,26 @@ export function applyInstallProgress(state, payload, nowMs) {
         if (op.operation_id && payload.operation_id !== op.operation_id) {
             return state;
         }
-    } else if (!hasActiveModelOperation(entry)) {
-        return state;
+    } else {
+        // 模型操作链路：校验 operation_id 命中当前 pending model action。
+        const payloadOpId = payload.operation_id;
+        const pendingActions = entry.pendingModelActions;
+        const hasPending = pendingActions && pendingActions.size > 0;
+
+        if (hasPending) {
+            // 有 pending model action → operation_id 必须精确命中其中之一。
+            // 防止旧操作的迟到进度事件错误写入或跨模型串扰。
+            if (!payloadOpId || !Array.from(pendingActions.values())
+                .some((a) => a.operationId === payloadOpId)) {
+                return state;
+            }
+        } else if (hasActiveModelOperation(entry) && payloadOpId) {
+            // 无 pending 但后端 install_state 活跃——可能是 pending 已清除
+            // 但后端还在推送最后几条进度。要求 payload.operation_id 非空
+            // 作为最低安全门槛，防止无 id 事件错误复活进度条。
+        } else {
+            return state;
+        }
     }
 
     const samples = pushProgressSample(entry.installProgress?.samples ?? [], nowMs, downloaded);

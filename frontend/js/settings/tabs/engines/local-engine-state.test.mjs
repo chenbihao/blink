@@ -30,6 +30,7 @@ import {
     setStorage,
     setPendingAction,
     setPendingModelAction,
+    setModels,
     clearLogs,
     getEntry,
     isEngineReady,
@@ -792,6 +793,79 @@ test("mergeStatus：operation 活跃期间保留 installProgress", () => {
     state = mergeStatus(state, newer);
 
     assert.ok(getEntry(state, "funasr").installProgress, "活跃期间进度保留");
+});
+
+// ── 0.22.14 review：模型下载进度 operation_id 校验 ──────────────────────────
+
+test("applyInstallProgress：模型操作 operation_id 不匹配 pending → 拒绝", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+    state = setPendingModelAction(state, "funasr", "sensevoice", {kind: "install", operationId: "op-model-correct"});
+
+    // operation_id 不匹配当前 pending model action → 拒绝
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-stale", downloaded: 500, total: 1000}, 1000);
+    assert.equal(getEntry(state, "funasr").installProgress, null, "不匹配 operation_id 的进度事件应被拒绝");
+});
+
+test("applyInstallProgress：多模型并行下载时 operation_id 精确匹配", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+    // 两个模型同时下载
+    state = setPendingModelAction(state, "funasr", "paraformer", {kind: "install", operationId: "op-model-a"});
+    state = setPendingModelAction(state, "funasr", "sensevoice", {kind: "install", operationId: "op-model-b"});
+
+    // op-model-a 的进度 → 接受
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-a", downloaded: 100, total: 200}, 1000);
+    let entry = getEntry(state, "funasr");
+    assert.equal(entry.installProgress.downloaded, 100);
+    assert.equal(entry.installProgress.operationId, "op-model-a");
+
+    // op-model-b 的进度 → 接受（覆盖前一条，同一进度条槽位）
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-b", downloaded: 300, total: 600}, 1100);
+    entry = getEntry(state, "funasr");
+    assert.equal(entry.installProgress.downloaded, 300);
+    assert.equal(entry.installProgress.operationId, "op-model-b");
+
+    // 未知的 operation_id → 拒绝
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-unknown", downloaded: 999, total: 999}, 1200);
+    entry = getEntry(state, "funasr");
+    assert.equal(entry.installProgress.downloaded, 300, "未知 operation_id 不应覆盖进度");
+});
+
+test("applyInstallProgress：pending 已清除但后端仍活跃——有 operation_id 接受", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+    // pending 已清除，但后端 install_state 仍为 downloading
+    state = setModels(state, "funasr", [{model_id: "sensevoice", install_state: "downloading"}]);
+
+    // 有 operation_id 的迟到进度 → 接受（pending 已清但后端还在推）
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-tail-1", downloaded: 100, total: 200}, 1000);
+    assert.ok(getEntry(state, "funasr").installProgress, "pending 清除但后端活跃+有 op_id → 接受");
+});
+
+test("applyInstallProgress：无 pending 无后端活跃——无 operation_id 拒绝", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+
+    // 无任何活跃上下文 → 拒绝
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-x", downloaded: 100, total: 200}, 1000);
+    assert.equal(getEntry(state, "funasr").installProgress, null, "无活跃上下文 → 拒绝");
+});
+
+test("applyInstallProgress：后端活跃但无 operation_id 的广播事件拒绝", () => {
+    let state = createInitialState();
+    state = setCatalog(state, makeCatalog());
+    state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
+    // 后端 install_state 活跃但无 pending
+    state = setModels(state, "funasr", [{model_id: "sensevoice", install_state: "downloading"}]);
+
+    // operation_id 缺失 → 拒绝（防无 id 广播事件错误写入）
+    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: null, downloaded: 100, total: 200}, 1000);
+    assert.equal(getEntry(state, "funasr").installProgress, null, "无 operation_id 的进度事件应被拒绝");
 });
 
 // ── 汇总 ──────────────────────────────────────────────────────────────────────

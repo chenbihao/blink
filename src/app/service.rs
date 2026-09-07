@@ -279,15 +279,14 @@ impl Service for HotkeyService {
                         follow_chord,
                     } => {
                         // 0.22.12：chord 全局快捷键（RegisterHotKey 路径，主窗隐藏也可触发）
-                        let Some(registry) = app
-                            .try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                        let Some(registry) =
+                            app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
                         else {
                             tracing::warn!("chord registry 未就绪，跳过全局快捷键事件");
                             continue;
                         };
                         let pool = &app.state::<crate::infra::data::DbPools>().config;
-                        let disabled =
-                            crate::app::config::get_disabled_chord_actions(pool).await;
+                        let disabled = crate::app::config::get_disabled_chord_actions(pool).await;
                         // 门禁 1：disabled 列表命中即跳过（注册侧已过滤，此处防御
                         // 配置写入与重注册完成之间的窗口期）
                         if disabled.iter().any(|d| d == &action_id) {
@@ -295,9 +294,7 @@ impl Service for HotkeyService {
                             continue;
                         }
                         // 门禁 2：chat 受 AI 总开关约束（与 trigger_chord 前端语义对齐）
-                        if action_id == "chat"
-                            && !crate::app::ai_config::get_ai_config().enabled
-                        {
+                        if action_id == "chat" && !crate::app::ai_config::get_ai_config().enabled {
                             tracing::debug!("AI 未启用，跳过 chat 全局快捷键");
                             continue;
                         }
@@ -312,9 +309,8 @@ impl Service for HotkeyService {
                             .inner()
                             .clone();
                         let cap_registry = app
-                            .state::<std::sync::Arc<
-                                crate::domain::capability::CapabilityRegistry,
-                            >>()
+                            .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>(
+                            )
                             .inner()
                             .clone();
                         if let Err(e) = registry

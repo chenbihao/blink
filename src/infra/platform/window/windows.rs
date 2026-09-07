@@ -154,9 +154,9 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic,
-    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -2621,7 +2621,12 @@ unsafe extern "system" fn screenshot_overlay_dpichanged_proc(
         );
         let mut cur = RECT::default();
         let cur_ok = unsafe { GetWindowRect(hwnd, &mut cur) }.is_ok();
-        let cur_tuple = (cur.left, cur.top, cur.right - cur.left, cur.bottom - cur.top);
+        let cur_tuple = (
+            cur.left,
+            cur.top,
+            cur.right - cur.left,
+            cur.bottom - cur.top,
+        );
         tracing::info!(
             new_dpi = (wparam.0 & 0xFFFF) as u32,
             pin = ?pin,
@@ -2665,10 +2670,17 @@ fn ensure_screenshot_overlay_subclass(app: &AppHandle, hwnd_raw: isize) {
         };
         if ok.as_bool() {
             OVERLAY_SUBCLASSED_HWND.store(hwnd_raw, Ordering::SeqCst);
-            tracing::debug!(hwnd = hwnd_raw, "screenshot overlay DPICHANGED subclass installed");
+            tracing::debug!(
+                hwnd = hwnd_raw,
+                "screenshot overlay DPICHANGED subclass installed"
+            );
         } else {
             let err = unsafe { GetLastError() };
-            tracing::warn!(hwnd = hwnd_raw, ?err, "screenshot overlay DPICHANGED subclass install failed");
+            tracing::warn!(
+                hwnd = hwnd_raw,
+                ?err,
+                "screenshot overlay DPICHANGED subclass install failed"
+            );
         }
     });
     if let Err(e) = result {
@@ -2712,7 +2724,12 @@ fn assert_screenshot_overlay_rect(app: &AppHandle, hwnd_raw: isize) {
             OVERLAY_PIN_W.load(Ordering::SeqCst),
             OVERLAY_PIN_H.load(Ordering::SeqCst),
         );
-        let cur_tuple = (cur.left, cur.top, cur.right - cur.left, cur.bottom - cur.top);
+        let cur_tuple = (
+            cur.left,
+            cur.top,
+            cur.right - cur.left,
+            cur.bottom - cur.top,
+        );
         if cur_tuple != pin {
             tracing::info!(
                 pin = ?pin,

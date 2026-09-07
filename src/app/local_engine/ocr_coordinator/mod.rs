@@ -498,7 +498,9 @@ impl OcrBackendRouter for OcrCoordinator {
                     let decision = RouteDecision {
                         configured_backend: OcrBackendKind::PaddleOcr,
                         selected_backend: OcrBackendKind::Windows,
-                        fallback_reason: Some("PaddleOCR 环境未安装，已降级 Windows OCR".to_string()),
+                        fallback_reason: Some(
+                            "PaddleOCR 环境未安装，已降级 Windows OCR".to_string(),
+                        ),
                     };
                     (decision, res, 0u64, ms, 0u64)
                 } else {

@@ -63,9 +63,7 @@ pub async fn refresh_input_config_with_registry(
         app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
             .map(|reg| reg.global_hotkey_bindings(&chord_cfg.bindings, &disabled))
             .unwrap_or_else(|| {
-                tracing::warn!(
-                    "refresh_input_config: ChordRegistry 未就绪，global_hotkeys 为空"
-                );
+                tracing::warn!("refresh_input_config: ChordRegistry 未就绪，global_hotkeys 为空");
                 Default::default()
             })
     };

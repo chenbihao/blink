@@ -17,12 +17,12 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{ERROR_HOTKEY_ALREADY_REGISTERED, HWND};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    MOD_SHIFT, MOD_WIN, VK_F1, VK_SPACE,
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    UnregisterHotKey, VK_F1, VK_SPACE,
 };
 
-use super::state::{GlobalHotkeyStatus, ResolvedGlobalHotkey};
 use super::send_effect;
+use super::state::{GlobalHotkeyStatus, ResolvedGlobalHotkey};
 // BlinkInputWindow 句柄（windows.rs 同级共享）
 use super::windows::WND_HWND;
 

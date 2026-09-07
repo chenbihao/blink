@@ -351,11 +351,7 @@ impl ChordBindings {
     }
 
     /// 某动作的生效全局组合键（未设置 / voice_input / 空主键 → None）。
-    fn effective_global_combo(
-        &self,
-        id: &str,
-        default_key: char,
-    ) -> Option<HotkeyCombo> {
+    fn effective_global_combo(&self, id: &str, default_key: char) -> Option<HotkeyCombo> {
         let binding = self.get(id)?;
         match &binding.global {
             Some(GlobalBinding::FollowChord) => Some(HotkeyCombo::new(
@@ -925,7 +921,10 @@ impl ChordRegistry {
                 &bindings.effective_modifiers(action.id()),
                 &bindings.effective_key(action.id(), action.default_key()),
             );
-            by_key.entry(combo).or_default().push(action.id().to_string());
+            by_key
+                .entry(combo)
+                .or_default()
+                .push(action.id().to_string());
         }
         by_key
             .into_iter()
@@ -993,8 +992,15 @@ impl ChordRegistry {
             .find(|a| bindings.effective_key(a.id(), a.default_key()) == lower)
             .ok_or_else(|| format!("未注册的 chord 键: {lower}"))?;
         tracing::info!(id = action.id(), key = %lower, "chord trigger（按生效键解析）");
-        self.dispatch(action.as_ref(), cap_registry, env, surface_port, input_text, origin_ref)
-            .await
+        self.dispatch(
+            action.as_ref(),
+            cap_registry,
+            env,
+            surface_port,
+            input_text,
+            origin_ref,
+        )
+        .await
     }
 
     /// 按动作 id 直接触发（0.22.12 全局快捷键路径）。
@@ -1017,8 +1023,15 @@ impl ChordRegistry {
             .find(|a| a.id() == action_id)
             .ok_or_else(|| format!("未注册的 chord 动作: {action_id}"))?;
         tracing::info!(id = %action_id, "chord trigger（全局快捷键直达）");
-        self.dispatch(action.as_ref(), cap_registry, env, surface_port, input_text, origin_ref)
-            .await
+        self.dispatch(
+            action.as_ref(),
+            cap_registry,
+            env,
+            surface_port,
+            input_text,
+            origin_ref,
+        )
+        .await
     }
 
     /// 按 `ChordTarget` 分派到 Capability 或领域 Interaction。
@@ -1517,9 +1530,11 @@ mod tests {
             key: "a".into(),
         });
         let conflicts = registry.global_binding_conflicts(&bindings, Some((&alt_mods()[..], " ")));
-        assert!(conflicts
-            .iter()
-            .any(|c| c.kind == BindingConflictKind::GlobalDuplicate && c.combo == "alt+a"));
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.kind == BindingConflictKind::GlobalDuplicate && c.combo == "alt+a")
+        );
 
         // chat 自定义（alt+space）撞主热键（alt+space）
         let mut bindings = ChordBindings::default();
@@ -1528,9 +1543,11 @@ mod tests {
             key: " ".into(),
         });
         let conflicts = registry.global_binding_conflicts(&bindings, Some((&alt_mods()[..], " ")));
-        assert!(conflicts
-            .iter()
-            .any(|c| c.kind == BindingConflictKind::GlobalVsMainHotkey && c.combo == "alt+space"));
+        assert!(
+            conflicts.iter().any(
+                |c| c.kind == BindingConflictKind::GlobalVsMainHotkey && c.combo == "alt+space"
+            )
+        );
     }
 
     #[test]
@@ -1543,14 +1560,20 @@ mod tests {
             key: "s".into(),
         });
         let conflicts = registry.global_binding_conflicts(&bindings, None);
-        assert!(conflicts
-            .iter()
-            .any(|c| c.kind == BindingConflictKind::GlobalVsChordKey && c.combo == "alt+s"));
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.kind == BindingConflictKind::GlobalVsChordKey && c.combo == "alt+s")
+        );
 
         // 跟随模式天然等于自身 chord 键 → 不算冲突
         let mut bindings = ChordBindings::default();
         bindings.sticky.global = Some(GlobalBinding::FollowChord);
-        assert!(registry.global_binding_conflicts(&bindings, None).is_empty());
+        assert!(
+            registry
+                .global_binding_conflicts(&bindings, None)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1560,18 +1583,28 @@ mod tests {
 
         // 默认配置：voice_input 是 Hold 语义（Alt+Space 长按与主热键共存是设计），
         // 其余默认键（q/a/c/e/s）与 Alt+Space 不同 → 无冲突
-        assert!(registry
-            .global_binding_conflicts(&ChordBindings::default(), Some(main_hotkey))
-            .is_empty());
+        assert!(
+            registry
+                .global_binding_conflicts(&ChordBindings::default(), Some(main_hotkey))
+                .is_empty()
+        );
 
         // 把 chat（Tap）改绑到空格 → 与主热键冲突（补齐既有缺口）
         let mut bindings = ChordBindings::default();
         bindings.chat.key = " ".into();
         let conflicts = registry.global_binding_conflicts(&bindings, Some(main_hotkey));
-        assert!(conflicts.iter().any(|c| c.kind == BindingConflictKind::ChordKeyVsMainHotkey
-            && c.actions == vec!["chat".to_string()]));
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.kind == BindingConflictKind::ChordKeyVsMainHotkey
+                    && c.actions == vec!["chat".to_string()])
+        );
 
         // 主热键 None → 跳过主热键相关检查
-        assert!(registry.global_binding_conflicts(&bindings, None).is_empty());
+        assert!(
+            registry
+                .global_binding_conflicts(&bindings, None)
+                .is_empty()
+        );
     }
 }

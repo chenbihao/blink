@@ -199,7 +199,11 @@ async fn download_file(
                     // 字节进度事件（sink 侧节流）+ 既有粗粒度进度日志
                     (cb.on_progress)(
                         downloaded,
-                        if total_size > 0 { Some(total_size) } else { None },
+                        if total_size > 0 {
+                            Some(total_size)
+                        } else {
+                            None
+                        },
                     );
                     if downloaded >= next_progress {
                         (cb.on_log)(&format_progress_log(file_name, downloaded, total_size));
@@ -298,7 +302,10 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
             }
             None => std::sync::Arc::new(|_downloaded: u64, _total: Option<u64>| {}),
         };
-        let cb = DownloadCallbacks { on_log: log, on_progress };
+        let cb = DownloadCallbacks {
+            on_log: log,
+            on_progress,
+        };
 
         let spec = find_gguf_spec(model_id).ok_or_else(|| ModelDownloadError::Internal {
             message: format!("model_id '{model_id}' 不在 GGUF 模型目录中"),
@@ -523,7 +530,7 @@ async fn copy_and_verify(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_progress_log, hf_download_candidates_with_endpoint, HF_MIRROR_HOST};
+    use super::{HF_MIRROR_HOST, format_progress_log, hf_download_candidates_with_endpoint};
 
     const NANO_LLM: &str =
         "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf";

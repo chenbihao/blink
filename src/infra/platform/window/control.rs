@@ -84,6 +84,12 @@ pub fn is_minimized(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd).as_bool() }
 }
 
+/// 查询窗口当前是否最大化。
+pub fn is_maximized(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::IsZoomed;
+    unsafe { IsZoomed(hwnd).as_bool() }
+}
+
 /// HWND 是否仍然有效。
 pub fn is_hwnd_valid(hwnd: isize) -> bool {
     let hwnd = HWND(hwnd as *mut _);
@@ -235,6 +241,7 @@ pub struct WindowRefRecord {
     /// 进程 PID
     pub pid: u32,
     /// 是否属于 Blink 当前进程
+    #[allow(dead_code)]
     pub is_blink: bool,
     /// 窗口标题（用于身份校验，**不记录在日志中**）
     #[allow(dead_code)]

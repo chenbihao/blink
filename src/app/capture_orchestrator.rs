@@ -21,7 +21,41 @@
 //! **分层**：app 编排层，消费 `infra/platform/window` Win32 原语。
 //! 不把编排逻辑堆进 domain capability。
 
+use std::sync::Mutex;
+
 use crate::infra::platform::window as win;
+
+// ── 进程级截图事务互斥锁（0.22.14 review P1）──────────────────────────────
+//
+// **问题**：并发截图时，一个事务可能提前解除另一个事务依赖的 cloak，
+// 导致 Blink 窗口被截入。`cloak → capture → restore` 必须进程级串行化。
+//
+// **设计**：
+// - 全局 `Mutex<()>` 作为 single-flight 锁——持有期间阻止并发截图事务
+// - `CaptureGuard::new` 持有锁，`finalize`/`Drop` 释放锁
+// - 锁内完成：cloak → DwmFlush → 目标准备 → 截图回调 → finalize 恢复
+// - 覆盖所有调用入口（`capture_with_cleanse` 和 `start_region_capture`）
+
+/// 进程级截图事务互斥锁——串行化所有净化截图事务。
+static CAPTURE_TX_LOCK: Mutex<()> = Mutex::new(());
+
+/// RAII 锁守卫——持有期间阻止并发截图事务。
+struct CaptureTxLock<'a>(Option<std::sync::MutexGuard<'a, ()>>);
+
+impl<'a> CaptureTxLock<'a> {
+    fn acquire() -> Self {
+        // try_lock 失败说明已有并发截图事务进行中——等待它完成
+        let guard = CAPTURE_TX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Self(Some(guard))
+    }
+}
+
+impl<'a> Drop for CaptureTxLock<'a> {
+    fn drop(&mut self) {
+        // 释放锁
+        self.0.take();
+    }
+}
 
 // ── CleansePlan（与 domain policy.rs 的 CaptureCleansePlan 对应）─────────────
 
@@ -133,10 +167,10 @@ impl ChangedState {
 impl Drop for ChangedState {
     fn drop(&mut self) {
         // Drop 作为最后保险——如果未通过 finalize 显式恢复，则在此恢复
-        if !self.finalized {
-            if let Err(e) = self.do_restore() {
-                tracing::warn!(error = %e, "CaptureGuard Drop 恢复失败（最后保险路径）");
-            }
+        if !self.finalized
+            && let Err(e) = self.do_restore()
+        {
+            tracing::warn!(error = %e, "CaptureGuard Drop 恢复失败（最后保险路径）");
         }
     }
 }
@@ -153,6 +187,8 @@ impl Drop for ChangedState {
 /// ```
 pub struct CaptureGuard {
     state: ChangedState,
+    /// 进程级截图事务锁——guard 存活期间阻止并发截图事务
+    _tx_lock: CaptureTxLock<'static>,
 }
 
 impl CaptureGuard {
@@ -171,6 +207,9 @@ impl CaptureGuard {
         plan: CleansePlan,
         target_hwnd: Option<isize>,
     ) -> Result<Self, GuardError> {
+        // 进程级互斥：串行化所有净化截图事务，防止并发事务互相解除 cloak
+        let tx_lock = CaptureTxLock::acquire();
+
         let mut state = ChangedState::new();
         state.original_foreground = win::get_foreground();
 
@@ -253,7 +292,10 @@ impl CaptureGuard {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         let _ = app;
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            _tx_lock: tx_lock,
+        })
     }
 
     /// 显式恢复——正常路径通过此方法返回恢复结果。

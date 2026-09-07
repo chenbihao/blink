@@ -42,9 +42,9 @@ pub use list::{PickableWindow, enumerate_pickable_windows, get_window_dwm_rect};
 #[cfg(target_os = "windows")]
 pub use control::{
     RefValidation, activate_window, cleanup_old_refs, collect_blink_hwnds, dwm_flush,
-    get_foreground, get_window_pid, is_cloaked, is_hwnd_valid, is_minimized, maximize_window,
-    minimize_window, next_generation, register_window_ref, restore_window, set_foreground,
-    validate_window_ref_detailed,
+    get_foreground, get_window_pid, is_cloaked, is_hwnd_valid, is_maximized, is_minimized,
+    maximize_window, minimize_window, next_generation, register_window_ref, restore_window,
+    set_foreground, validate_window_ref_detailed,
 };
 
 // 0.18.2：控件级智能吸附——UIA 控件提示

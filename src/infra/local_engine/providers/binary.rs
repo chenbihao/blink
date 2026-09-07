@@ -649,14 +649,26 @@ mod tests {
     #[test]
     fn bundled_dir_candidates_shallow_install_layout() {
         let exe_dir = Path::new("D:\\DevTools\\Blink");
-        assert_eq!(exe_dir.parent().and_then(|p| p.parent()), Some(Path::new("D:\\")));
-        assert_eq!(exe_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()), None);
+        assert_eq!(
+            exe_dir.parent().and_then(|p| p.parent()),
+            Some(Path::new("D:\\"))
+        );
+        assert_eq!(
+            exe_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent()),
+            None
+        );
 
         let candidates = bundled_dir_candidates(exe_dir, "bin/funasr-worker");
         let last = candidates.last().expect("候选列表不得为空");
         assert_eq!(
             last.as_path(),
-            exe_dir.join("resources").join("bin/funasr-worker").as_path(),
+            exe_dir
+                .join("resources")
+                .join("bin/funasr-worker")
+                .as_path(),
             "安装版布局候选必须始终参与命中判定"
         );
     }
@@ -693,8 +705,8 @@ mod tests {
     }
 
     fn test_temp_root(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("blink-binary-test-{}-{}", tag, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("blink-binary-test-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

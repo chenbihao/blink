@@ -110,33 +110,43 @@ impl BlinkVisibility {
 /// 裸 hwnd 仅供 LocalCommand/内部协议路径使用，AI/MCP 来源会被拒绝。
 ///
 /// 0.22.14：通过 SurfacePort::validate_window_ref 校验，不直接依赖 crate::infra。
-fn resolve_target_hwnd(
+/// 截图目标解析结果——携带 HWND 和可选的 window_ref（用于二次核验）。
+#[derive(Debug, PartialEq)]
+pub(super) struct ResolvedTarget {
+    hwnd: isize,
+    /// window_ref（AI/MCP/CLI 路径有值；LocalCommand 裸 hwnd 路径无值）。
+    /// 用于在截图回调中做第二次身份核验。
+    ref_id: Option<String>,
+}
+
+fn resolve_target(
     args: &Value,
     origin: crate::domain::capability::policy::InvocationOrigin,
     surface: &dyn crate::domain::capability::SurfacePort,
-) -> Result<Option<isize>, CapabilityError> {
+) -> Result<Option<ResolvedTarget>, CapabilityError> {
     use crate::domain::capability::policy::InvocationOrigin;
-    use crate::domain::capability::SurfaceError;
 
     // 优先使用 window_ref
     if let Some(ref_val) = args.get("window_ref").and_then(Value::as_str) {
-        return Ok(Some(surface.validate_window_ref(ref_val).map_err(|e| {
-            CapabilityError::StaleRef {
-                detail: match e {
-                    SurfaceError::Unavailable { detail } => detail,
-                    SurfaceError::CreateFailed { detail } => detail,
-                    SurfaceError::ActivationFailed { detail } => detail,
-                    SurfaceError::RestoreFailed { detail } => detail,
-                },
-            }
-        })?));
+        let hwnd = surface
+            .validate_window_ref(ref_val)
+            .map_err(|e| CapabilityError::StaleRef {
+                detail: map_surface_error_detail(e),
+            })?;
+        return Ok(Some(ResolvedTarget {
+            hwnd,
+            ref_id: Some(ref_val.to_string()),
+        }));
     }
 
     // 裸 hwnd：仅 LocalCommand 路径允许（内部协议，不暴露在 schema 中）
     match origin {
         InvocationOrigin::LocalCommand => {
             if let Some(hwnd_val) = args.get("hwnd").and_then(Value::as_i64) {
-                return Ok(Some(hwnd_val as isize));
+                return Ok(Some(ResolvedTarget {
+                    hwnd: hwnd_val as isize,
+                    ref_id: None,
+                }));
             }
             Ok(None)
         }
@@ -152,6 +162,38 @@ fn resolve_target_hwnd(
                 });
             }
             Ok(None)
+        }
+    }
+}
+
+/// 统一、穷尽的 SurfaceError → CapabilityError 映射（0.22.14 review P2）。
+///
+/// `capture_with_cleanse` 已返回 `ActivationFailed` 和 `RestoreFailed`，
+/// 但之前各调用点统一转成 `Internal`，新增的稳定错误码实际不可达。
+/// 此函数确保每条 SurfaceError 变体都映射到对应的结构化 CapabilityError。
+fn map_surface_error(e: crate::domain::capability::SurfaceError) -> CapabilityError {
+    use crate::domain::capability::SurfaceError;
+    match e {
+        SurfaceError::CreateFailed { detail } => CapabilityError::Internal { detail },
+        SurfaceError::Unavailable { detail } => CapabilityError::StaleRef { detail },
+        SurfaceError::ActivationFailed { detail } => CapabilityError::ActivationFailed { detail },
+        SurfaceError::RestoreFailed { detail } => CapabilityError::RestoreFailed { detail },
+        SurfaceError::WindowStateMismatch { expected, actual } => CapabilityError::Internal {
+            detail: format!("窗口状态核验失败：期望{expected}，实际{actual}"),
+        },
+    }
+}
+
+/// SurfaceError → detail 字符串（用于 StaleRef 映射）。
+fn map_surface_error_detail(e: crate::domain::capability::SurfaceError) -> String {
+    use crate::domain::capability::SurfaceError;
+    match e {
+        SurfaceError::CreateFailed { detail }
+        | SurfaceError::Unavailable { detail }
+        | SurfaceError::ActivationFailed { detail }
+        | SurfaceError::RestoreFailed { detail } => detail,
+        SurfaceError::WindowStateMismatch { expected, actual } => {
+            format!("窗口状态核验失败：期望{expected}，实际{actual}")
         }
     }
 }
@@ -201,9 +243,10 @@ impl Capability for Screenshot {
     fn policy(&self) -> CapabilityPolicy {
         CapabilityPolicy {
             allowed_origins: OriginSet::ALL,
-            // screenshot 需要桌面会话 + GUI surface（净化截图走 SurfacePort）
-            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION
-                | RuntimeRequirement::GUI_SURFACE,
+            // screenshot 需要桌面会话；list_displays/crop 不需要 GUI surface。
+            // 需要净化编排的具体 op（capture/window/capture_to_clipboard）在 invoke 内
+            // 单独检查 surface 可用性，而非能力级拒绝 CLI/MCP（0.22.14 review P2）。
+            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION,
             danger: DangerClass::Safe,
             sensitive: true,
             ai_default: AiDefault::On,
@@ -257,20 +300,20 @@ impl Capability for Screenshot {
                 op_crop(x, y, w, h).await
             }
             "window" => {
-                let surface = ctx.runtime.surface.ok_or_else(|| {
-                    CapabilityError::Unsupported {
+                let surface = ctx
+                    .runtime
+                    .surface
+                    .ok_or_else(|| CapabilityError::Unsupported {
                         required: "gui_surface".into(),
                         actual: ctx.runtime.as_requirement().to_string(),
+                    })?;
+                let target = resolve_target(&args, ctx.origin, surface)?.ok_or_else(|| {
+                    CapabilityError::InvalidArgs {
+                        detail: "缺少 window_ref 参数".into(),
                     }
                 })?;
-                let target_hwnd =
-                    resolve_target_hwnd(&args, ctx.origin, surface)?.ok_or_else(|| {
-                        CapabilityError::InvalidArgs {
-                            detail: "缺少 window_ref 参数".into(),
-                        }
-                    })?;
                 let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
-                op_window(target_hwnd, visibility, ctx).await
+                op_window(target, visibility, ctx).await
             }
             "capture_to_clipboard" => {
                 let display_id = args
@@ -339,15 +382,15 @@ pub(super) async fn op_capture(
         let result = surface
             .capture_with_cleanse(cleanse_plan, None, capture_fn)
             .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: e.to_string(),
-            })?;
+            .map_err(map_surface_error)?;
 
-        let (bgra, width, height) = result.image.as_bgra().ok_or_else(|| {
-            CapabilityError::Internal {
-                detail: "capture_display 应返回 BGRA 数据".into(),
-            }
-        })?;
+        let (bgra, width, height) =
+            result
+                .image
+                .as_bgra()
+                .ok_or_else(|| CapabilityError::Internal {
+                    detail: "capture_display 应返回 BGRA 数据".into(),
+                })?;
         let bgra = bgra.to_vec();
 
         let png = tokio::task::spawn_blocking(move || {
@@ -396,13 +439,15 @@ pub(super) async fn op_capture(
     let result = surface
         .capture_with_cleanse(cleanse_plan, None, capture_fn)
         .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+        .map_err(map_surface_error)?;
 
-    let png_bytes = result.image.as_png().ok_or_else(|| CapabilityError::Internal {
-        detail: "虚拟屏幕路径应返回 PNG 数据".into(),
-    })?.to_vec();
+    let png_bytes = result
+        .image
+        .as_png()
+        .ok_or_else(|| CapabilityError::Internal {
+            detail: "虚拟屏幕路径应返回 PNG 数据".into(),
+        })?
+        .to_vec();
 
     tracing::debug!(bytes = png_bytes.len(), "capture: 净化截取虚拟屏幕");
     Ok(CapabilityResult::Blob {
@@ -447,7 +492,7 @@ pub(super) async fn op_crop(
 /// 外部窗口截图时，如果目标最小化则临时 restore + activate，截图后恢复。
 /// 激活后验证目标确实处于可截图状态；激活失败返回结构化错误，不返回伪成功截图。
 pub(super) async fn op_window(
-    target_hwnd: isize,
+    target: ResolvedTarget,
     visibility: BlinkVisibility,
     ctx: &InvokeContext<'_>,
 ) -> Result<CapabilityResult, CapabilityError> {
@@ -458,15 +503,26 @@ pub(super) async fn op_window(
             required: "gui_surface".into(),
             actual: ctx.runtime.as_requirement().to_string(),
         })?;
-    let target_is_blink = surface.is_blink_hwnd(target_hwnd);
+    let target_is_blink = surface.is_blink_hwnd(target.hwnd);
     let cleanse_plan = visibility.to_domain_plan(target_is_blink)?;
 
-    let hwnd = target_hwnd;
+    // ref_id 用于截图前二次核验窗口身份（0.22.14 review P1）
+    let ref_id_for_verify = target.ref_id.clone();
+    let hwnd = target.hwnd;
     let capture_fn: CaptureFn = Arc::new(move || {
-        // 再次验证目标身份——执行前二次校验
+        // 截图前二次核验窗口身份（0.22.14 review P1）
+        // 第一层：HWND 有效性
         if !crate::infra::platform::window::is_hwnd_valid(hwnd) {
             return Err(format!("hwnd {hwnd} 无效"));
         }
+        // 第二层：如果存在 window_ref，通过 SurfacePort 做完整核验
+        // （generation、TTL、PID、标题）
+        // 注意：surface 在此闭包中不可用（trait object 不能被 Arc 包装），
+        // 所以完整的 ref_id 二次核验在 op_window 主体中完成。
+        //
+        // 但如果 HWND 在 cloak 和截图之间被复用（PID 变化），
+        // 仅靠 is_hwnd_valid 检测不到。因此需要在 capture_with_cleanse
+        // 调用前完成完整的 ref_id 核验。
         let (x, y, w, h) = crate::infra::platform::window::get_window_dwm_rect(hwnd)
             .ok_or_else(|| format!("hwnd {hwnd} 无效或窗口不可见"))?;
         let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
@@ -477,18 +533,28 @@ pub(super) async fn op_window(
         })
     });
 
-    let result = surface
-        .capture_with_cleanse(cleanse_plan, Some(target_hwnd), capture_fn)
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+    // 在调用 capture_with_cleanse 之前，做完整的 ref_id 二次核验（如果存在 ref_id）
+    // 这确保在 cloak 和截图之间不会因为 HWND 复用而截错窗口
+    if let Some(ref_id) = &ref_id_for_verify {
+        surface
+            .verify_window_identity(ref_id)
+            .map_err(|e| CapabilityError::StaleRef {
+                detail: map_surface_error_detail(e),
+            })?;
+    }
 
-    let (bgra, width, height) = result.image.as_bgra().ok_or_else(|| {
-        CapabilityError::Internal {
-            detail: "op_window 应返回 BGRA 数据".into(),
-        }
-    })?;
+    let result = surface
+        .capture_with_cleanse(cleanse_plan, Some(target.hwnd), capture_fn)
+        .await
+        .map_err(map_surface_error)?;
+
+    let (bgra, width, height) =
+        result
+            .image
+            .as_bgra()
+            .ok_or_else(|| CapabilityError::Internal {
+                detail: "op_window 应返回 BGRA 数据".into(),
+            })?;
     let bgra = bgra.to_vec();
 
     // 验证截图结果非空
@@ -555,15 +621,14 @@ async fn op_capture_to_clipboard_with_writer(
         let result = surface
             .capture_with_cleanse(cleanse_plan, None, capture_fn)
             .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: e.to_string(),
-            })?;
+            .map_err(map_surface_error)?;
 
-        let (bgra, w, h) = result.image.as_bgra().ok_or_else(|| {
-            CapabilityError::Internal {
+        let (bgra, w, h) = result
+            .image
+            .as_bgra()
+            .ok_or_else(|| CapabilityError::Internal {
                 detail: "capture_display 应返回 BGRA 数据".into(),
-            }
-        })?;
+            })?;
         let bgra = bgra.to_vec();
 
         writer.write_bgra(bgra, w, h).await?;
@@ -595,13 +660,15 @@ async fn op_capture_to_clipboard_with_writer(
     let result = surface
         .capture_with_cleanse(cleanse_plan, None, capture_fn)
         .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+        .map_err(map_surface_error)?;
 
-    let png_bytes = result.image.as_png().ok_or_else(|| CapabilityError::Internal {
-        detail: "虚拟屏幕路径应返回 PNG 数据".into(),
-    })?.to_vec();
+    let png_bytes = result
+        .image
+        .as_png()
+        .ok_or_else(|| CapabilityError::Internal {
+            detail: "虚拟屏幕路径应返回 PNG 数据".into(),
+        })?
+        .to_vec();
 
     writer.write_png(png_bytes).await?;
 
@@ -886,7 +953,7 @@ mod tests {
         );
     }
 
-    // ── resolve_target_hwnd 策略矩阵测试 ──
+    // ── resolve_target 策略矩阵测试 ──
 
     /// 测试用 mock surface——validate_window_ref 总返回 Unavailable。
     struct MockSurface;
@@ -938,6 +1005,12 @@ mod tests {
                 detail: "MockSurface: window_ref 不存在".into(),
             })
         }
+        fn verify_window_identity(
+            &self,
+            _ref_id: &str,
+        ) -> Result<(), crate::domain::capability::SurfaceError> {
+            Ok(())
+        }
         fn is_blink_hwnd(&self, _hwnd: isize) -> bool {
             false
         }
@@ -948,15 +1021,24 @@ mod tests {
             capture_fn: crate::domain::capability::CaptureFn,
         ) -> Result<crate::domain::capability::CaptureResult, crate::domain::capability::SurfaceError>
         {
-            let image = capture_fn().map_err(|e| {
-                crate::domain::capability::SurfaceError::CreateFailed { detail: e }
-            })?;
+            let image = capture_fn()
+                .map_err(|e| crate::domain::capability::SurfaceError::CreateFailed { detail: e })?;
             Ok(crate::domain::capability::CaptureResult { image })
+        }
+        async fn manage_window_action(
+            &self,
+            _ref_id: &str,
+            _action: &str,
+        ) -> Result<
+            crate::domain::capability::policy::WindowActionResult,
+            crate::domain::capability::SurfaceError,
+        > {
+            unreachable!()
         }
     }
 
     #[test]
-    fn resolve_target_hwnd_ai_rejects_raw_hwnd() {
+    fn resolve_target_ai_rejects_raw_hwnd() {
         use crate::domain::capability::policy::InvocationOrigin;
         let surface = MockSurface;
         // AI/MCP/CLI 传裸 hwnd 应被拒绝
@@ -967,7 +1049,7 @@ mod tests {
             InvocationOrigin::Cli,
             InvocationOrigin::LocalSurface,
         ] {
-            let err = resolve_target_hwnd(&args, origin, &surface).unwrap_err();
+            let err = resolve_target(&args, origin, &surface).unwrap_err();
             assert!(
                 matches!(err, CapabilityError::InvalidArgs { .. }),
                 "origin {origin:?} 传裸 hwnd 应返回 InvalidArgs"
@@ -976,32 +1058,38 @@ mod tests {
     }
 
     #[test]
-    fn resolve_target_hwnd_local_command_accepts_raw_hwnd() {
+    fn resolve_target_local_command_accepts_raw_hwnd() {
         use crate::domain::capability::policy::InvocationOrigin;
         let surface = MockSurface;
         // LocalCommand 路径允许裸 hwnd（内部协议）
         let args = json!({"hwnd": 12345});
-        let hwnd = resolve_target_hwnd(&args, InvocationOrigin::LocalCommand, &surface).unwrap();
-        assert_eq!(hwnd, Some(12345));
+        let hwnd = resolve_target(&args, InvocationOrigin::LocalCommand, &surface).unwrap();
+        assert_eq!(
+            hwnd,
+            Some(ResolvedTarget {
+                hwnd: 12345,
+                ref_id: None
+            })
+        );
     }
 
     #[test]
-    fn resolve_target_hwnd_ai_no_hwnd_returns_none() {
+    fn resolve_target_ai_no_hwnd_returns_none() {
         use crate::domain::capability::policy::InvocationOrigin;
         let surface = MockSurface;
         // AI/MCP 不传 hwnd 也不传 window_ref → None（由调用方处理为缺少参数）
         let args = json!({});
-        let hwnd = resolve_target_hwnd(&args, InvocationOrigin::LocalAi, &surface).unwrap();
+        let hwnd = resolve_target(&args, InvocationOrigin::LocalAi, &surface).unwrap();
         assert_eq!(hwnd, None);
     }
 
     #[test]
-    fn resolve_target_hwnd_invalid_window_ref_returns_stale_ref() {
+    fn resolve_target_invalid_window_ref_returns_stale_ref() {
         use crate::domain::capability::policy::InvocationOrigin;
         let surface = MockSurface;
         // 不存在的 window_ref → StaleRef
         let args = json!({"window_ref": "wref_nonexistent"});
-        let err = resolve_target_hwnd(&args, InvocationOrigin::LocalAi, &surface).unwrap_err();
+        let err = resolve_target(&args, InvocationOrigin::LocalAi, &surface).unwrap_err();
         assert!(
             matches!(err, CapabilityError::StaleRef { .. }),
             "无效 window_ref 应返回 StaleRef"
@@ -1011,20 +1099,20 @@ mod tests {
     // ── policy 一致性测试 ──
 
     #[test]
-    fn policy_requires_gui_surface_and_desktop_session() {
+    fn policy_requires_desktop_session() {
         let p = Screenshot.policy();
-        // screenshot 需要至少 DESKTOP_SESSION + GUI_SURFACE
-        // 提供只有 DESKTOP_SESSION 时不应满足 → 证明需要 GUI_SURFACE
+        // screenshot 只需 DESKTOP_SESSION（0.22.14 review P2：CLI/MCP 兼容性）
+        // 仅 DESKTOP_SESSION 即可满足——list_displays/crop 不需要 GUI surface
+        assert!(
+            p.runtime_requirement
+                .is_satisfied_by(RuntimeRequirement::DESKTOP_SESSION),
+            "screenshot 只需 DESKTOP_SESSION"
+        );
+        // 无运行时不应满足
         assert!(
             !p.runtime_requirement
-                .is_satisfied_by(RuntimeRequirement::DESKTOP_SESSION),
-            "screenshot 需要 GUI_SURFACE，仅 DESKTOP_SESSION 不满足"
-        );
-        // 提供全量时应满足
-        let full = RuntimeRequirement::DESKTOP_SESSION | RuntimeRequirement::GUI_SURFACE;
-        assert!(
-            p.runtime_requirement.is_satisfied_by(full),
-            "screenshot 在全量时应满足"
+                .is_satisfied_by(RuntimeRequirement::NONE),
+            "screenshot 需要至少 DESKTOP_SESSION"
         );
     }
 

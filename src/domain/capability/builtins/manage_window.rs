@@ -10,7 +10,7 @@
 //!
 //! **安全模型**：
 //! - 必须使用 `list_windows` 返回的 `window_ref`，**禁止使用裸 HWND**
-//! - `window_ref` 在 `validate_window_ref_detailed` 中校验 HWND 有效性、PID 一致性、
+//! - `window_ref` 在 `SurfacePort::manage_window_action` 中校验 HWND 有效性、PID 一致性、
 //!   标题一致性、TTL 和 generation，过期或失效时返回 `StaleRef`，AI 应重新调用
 //!   `list_windows`
 //! - **禁止操作 Blink 自身窗口**——在执行任何窗口动作前检查 `is_blink`，
@@ -25,6 +25,10 @@
 //! 按 spec-backend §一"阻塞操作隔离"铁则，必须 `spawn_blocking`。
 //!
 //! **隐私**：日志中不记录完整窗口标题，只记录 action 和 process_name。
+//!
+//! **0.22.14 review**：重构为通过 `SurfacePort::manage_window_action` 调用，
+//! 不再直接依赖 `infra::platform::window`。窗口操作后由 `SurfacePort` 实现
+//! 核验 `IsIconic`/`IsZoomed` 状态。
 
 use std::sync::Arc;
 
@@ -33,6 +37,7 @@ use serde_json::{Value, json};
 use crate::domain::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
     ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
+    SurfaceError,
 };
 
 /// `manage_window` — 通过 window_ref 管理窗口状态。
@@ -81,33 +86,29 @@ impl WindowAction {
             Self::Restore => "恢复",
         }
     }
+
+    fn as_action_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
+            Self::Restore => "restore",
+        }
+    }
 }
 
-/// 将 `RefValidation` 转换为对应的 `CapabilityError`。
-fn ref_validation_to_error(
-    validation: &crate::infra::platform::window::RefValidation,
-) -> CapabilityError {
-    use crate::infra::platform::window::RefValidation;
-    match validation {
-        RefValidation::NotFound => CapabilityError::StaleRef {
-            detail: "window_ref 不存在，请重新调用 list_windows 获取最新窗口列表".into(),
+/// 将 `SurfaceError` 映射到结构化 `CapabilityError`。
+///
+/// 穷尽匹配，确保 domain 层不泄漏 SurfaceError 内部细节。
+fn map_surface_error(err: SurfaceError) -> CapabilityError {
+    match err {
+        SurfaceError::CreateFailed { detail } => CapabilityError::Internal { detail },
+        SurfaceError::Unavailable { detail } => CapabilityError::StaleRef { detail },
+        SurfaceError::ActivationFailed { detail } => CapabilityError::Internal { detail },
+        SurfaceError::RestoreFailed { detail } => CapabilityError::Internal { detail },
+        SurfaceError::WindowStateMismatch { expected, actual } => CapabilityError::Internal {
+            detail: format!("窗口操作未生效：期望{expected}，实际{actual}"),
         },
-        RefValidation::ExpiredGeneration => CapabilityError::StaleRef {
-            detail: "window_ref 已过期（generation 不匹配），请重新调用 list_windows".into(),
-        },
-        RefValidation::ExpiredTtl => CapabilityError::StaleRef {
-            detail: "window_ref 已超时，请重新调用 list_windows 获取新引用".into(),
-        },
-        RefValidation::InvalidHwnd => CapabilityError::StaleRef {
-            detail: "窗口句柄已失效（窗口可能被关闭），请重新调用 list_windows".into(),
-        },
-        RefValidation::PidMismatch => CapabilityError::StaleRef {
-            detail: "窗口 PID 已变化（句柄可能被复用），请重新调用 list_windows".into(),
-        },
-        RefValidation::TitleMismatch => CapabilityError::StaleRef {
-            detail: "窗口标题已变化（身份变化），请重新调用 list_windows".into(),
-        },
-        RefValidation::Valid(_) => unreachable!("Valid 应在调用方处理"),
     }
 }
 
@@ -174,75 +175,50 @@ impl Capability for ManageWindow {
 
         let action = WindowAction::parse(args.get("action"))?;
 
-        // spawn_blocking：validate_window_ref 内部调用 Win32 API（IsWindow、GetWindowThreadProcessId、
-        // GetWindowTextW），窗口操作也调用同步 Win32 API（ShowWindow、SetForegroundWindow）
-        let ref_id_owned = ref_id.to_string();
-        let result = tokio::task::spawn_blocking(move || {
-            use crate::infra::platform::window::RefValidation;
+        // 通过 SurfacePort 执行——domain 层不直接接触 infra
+        let surface = ctx
+            .runtime
+            .surface
+            .ok_or_else(|| CapabilityError::Unsupported {
+                required: "surface (GUI runtime)".into(),
+                actual: ctx.runtime.as_requirement().to_string(),
+            })?;
 
-            // 校验 window_ref（详细版本，区分失效原因）
-            let validation =
-                crate::infra::platform::window::validate_window_ref_detailed(&ref_id_owned);
-            let record = match validation {
-                RefValidation::Valid(record) => record,
-                ref err_reason => return Err(ref_validation_to_error(err_reason)),
-            };
+        // 先校验 window_ref 是否属于 Blink 自身窗口（零副作用检查）
+        let hwnd = surface
+            .validate_window_ref(ref_id)
+            .map_err(map_surface_error)?;
 
-            // 铁则：禁止操作 Blink 自身窗口
-            // 在执行任何窗口动作前检查 is_blink，返回 SelfWindowForbidden 并零副作用
-            if record.is_blink {
-                return Err(CapabilityError::SelfWindowForbidden {
-                    detail: "manage_window 不允许操作 Blink 自身窗口，Blink 自隐藏只走截图事务"
-                        .into(),
-                });
-            }
+        if surface.is_blink_hwnd(hwnd) {
+            return Err(CapabilityError::SelfWindowForbidden {
+                detail: "manage_window 不允许操作 Blink 自身窗口，Blink 自隐藏只走截图事务".into(),
+            });
+        }
 
-            // 执行窗口操作
-            let hwnd = record.hwnd;
-            let success = match action {
-                WindowAction::Activate => crate::infra::platform::window::activate_window(hwnd),
-                WindowAction::Minimize => {
-                    crate::infra::platform::window::minimize_window(hwnd);
-                    true
-                }
-                WindowAction::Maximize => {
-                    crate::infra::platform::window::maximize_window(hwnd);
-                    true
-                }
-                WindowAction::Restore => {
-                    crate::infra::platform::window::restore_window(hwnd);
-                    true
-                }
-            };
-
-            // 不在日志中记录完整窗口标题（隐私）
-            Ok::<(bool, String), CapabilityError>((success, record.process_name.clone()))
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("manage_window task 崩溃: {e}"),
-        })??;
-
-        let (success, process_name) = result;
+        // 执行窗口操作（SurfacePort 实现内部包含 spawn_blocking + 状态核验）
+        let result = surface
+            .manage_window_action(ref_id, action.as_action_str())
+            .await
+            .map_err(map_surface_error)?;
 
         // activate 失败（SetForegroundWindow 返回 false，Windows 前台锁定限制）
-        if action == WindowAction::Activate && !success {
+        if action == WindowAction::Activate && !result.success {
             tracing::warn!(
                 action = action.as_str(),
-                process_name = %process_name,
+                process_name = %result.process_name,
                 "manage_window: activate 失败（Windows 前台锁定限制）"
             );
             return Ok(CapabilityResult::Done {
                 summary: format!(
                     "窗口 ({}) 激活请求已发送，但可能因系统前台锁定限制未生效",
-                    process_name
+                    result.process_name
                 ),
             });
         }
 
         tracing::debug!(
             action = action.as_str(),
-            process_name = %process_name,
+            process_name = %result.process_name,
             "manage_window: 操作完成"
         );
 
@@ -254,7 +230,7 @@ impl Capability for ManageWindow {
         };
 
         Ok(CapabilityResult::Done {
-            summary: format!("{}窗口 ({})", action_desc, process_name),
+            summary: format!("{}窗口 ({})", action_desc, result.process_name),
         })
     }
 }
@@ -392,83 +368,24 @@ mod tests {
         assert_eq!(WindowAction::Restore.as_str(), "恢复");
     }
 
-    // ── ref_validation_to_error 测试 ──
+    // ── map_surface_error 测试 ──
 
     #[test]
-    fn ref_validation_not_found_maps_to_stale_ref() {
-        let err = ref_validation_to_error(&crate::infra::platform::window::RefValidation::NotFound);
+    fn map_surface_error_unavailable_maps_to_stale_ref() {
+        let err = map_surface_error(SurfaceError::Unavailable {
+            detail: "test".into(),
+        });
         assert!(matches!(err, CapabilityError::StaleRef { .. }));
     }
 
     #[test]
-    fn ref_validation_expired_ttl_maps_to_stale_ref() {
-        let err =
-            ref_validation_to_error(&crate::infra::platform::window::RefValidation::ExpiredTtl);
-        assert!(matches!(err, CapabilityError::StaleRef { .. }));
-        assert!(err.to_string().contains("超时"));
-    }
-
-    #[test]
-    fn ref_validation_pid_mismatch_maps_to_stale_ref() {
-        let err =
-            ref_validation_to_error(&crate::infra::platform::window::RefValidation::PidMismatch);
-        assert!(matches!(err, CapabilityError::StaleRef { .. }));
-        assert!(err.to_string().contains("PID"));
-    }
-
-    #[test]
-    fn ref_validation_title_mismatch_maps_to_stale_ref() {
-        let err =
-            ref_validation_to_error(&crate::infra::platform::window::RefValidation::TitleMismatch);
-        assert!(matches!(err, CapabilityError::StaleRef { .. }));
-        assert!(err.to_string().contains("标题"));
-    }
-
-    #[test]
-    fn ref_validation_expired_generation_maps_to_stale_ref() {
-        let err = ref_validation_to_error(
-            &crate::infra::platform::window::RefValidation::ExpiredGeneration,
-        );
-        assert!(matches!(err, CapabilityError::StaleRef { .. }));
-        assert!(err.to_string().contains("过期"));
-    }
-
-    #[test]
-    fn ref_validation_invalid_hwnd_maps_to_stale_ref() {
-        let err =
-            ref_validation_to_error(&crate::infra::platform::window::RefValidation::InvalidHwnd);
-        assert!(matches!(err, CapabilityError::StaleRef { .. }));
-        assert!(err.to_string().contains("句柄"));
-    }
-
-    // ── is_blink 拒绝策略矩阵测试 ──
-
-    /// 注册一个 is_blink=true 的 window_ref，验证 ref_validation_to_error
-    /// 在 Valid + is_blink=true 时仍返回 SelfWindowForbidden（管理能力铁则）。
-    ///
-    /// 注意：这测试验证的是 ref 校验通过但 is_blink=true 的场景。
-    /// 实际的 SelfWindowForbidden 检查在 invoke() 中，
-    /// 这里只验证 ref_validation_to_error 对 Valid 不返回错误。
-    #[test]
-    fn ref_validation_valid_does_not_map_to_error() {
-        // ref_validation_to_error 对 Valid 返回 unreachable，
-        // 但我们不在测试中构造 Valid（因为 WindowRefRecord 含 Instant）。
-        // 只验证所有非 Valid 变体都映射到 StaleRef。
-        let variants = [
-            crate::infra::platform::window::RefValidation::NotFound,
-            crate::infra::platform::window::RefValidation::ExpiredGeneration,
-            crate::infra::platform::window::RefValidation::ExpiredTtl,
-            crate::infra::platform::window::RefValidation::InvalidHwnd,
-            crate::infra::platform::window::RefValidation::PidMismatch,
-            crate::infra::platform::window::RefValidation::TitleMismatch,
-        ];
-        for v in &variants {
-            let err = ref_validation_to_error(v);
-            assert!(
-                matches!(err, CapabilityError::StaleRef { .. }),
-                "所有非 Valid 变体应映射到 StaleRef"
-            );
-        }
+    fn map_surface_error_state_mismatch_maps_to_internal() {
+        let err = map_surface_error(SurfaceError::WindowStateMismatch {
+            expected: "minimized".into(),
+            actual: "not minimized".into(),
+        });
+        assert!(matches!(err, CapabilityError::Internal { .. }));
+        assert!(err.to_string().contains("minimized"));
     }
 
     // ── policy 一致性测试 ──
