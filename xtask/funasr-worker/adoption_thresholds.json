@@ -1,0 +1,25 @@
+{
+  "$schema": "blink://xtask/funasr-worker/adoption-thresholds",
+  "schema": 1,
+  "description": "Frozen before any GPU adoption run; changing this file requires a new evidence run.",
+  "correctness": {
+    "text_normalized_edit_distance_ratio_max": 0.02,
+    "timestamp_abs_error_ms_max": 20
+  },
+  "stability": {
+    "minimum_sequential_requests": 100,
+    "maximum_unexpected_process_exits": 0,
+    "maximum_stdout_protocol_violations": 0,
+    "maximum_orphan_workers": 0
+  },
+  "performance": {
+    "minimum_gpu_speedup_ratio": 1.1,
+    "maximum_gpu_cpu_regression_ratio": 0.9,
+    "maximum_vram_mb_without_measured_speedup": 2048
+  },
+  "notes": [
+    "Text is compared against the CPU result from the same audio batch.",
+    "An absent timestamp is not silently treated as a pass; timestamp comparison is blocked unless both sides provide timestamps.",
+    "Performance thresholds are adoption gates, not reasons to hide a slower GPU result."
+  ]
+}

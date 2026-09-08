@@ -1,0 +1,12 @@
+diff --git a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
+--- a/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
++++ b/runtime/llama.cpp/fun-asr-nano/funasr-cli/funasr-cli.cpp
+@@ -315,7 +315,7 @@ int main(int argc,char**argv){
+         int end_ms   = (int)((int64_t)(off + len) * 1000 / 16000);
+         std::vector<float> seg(wav.begin()+off, wav.begin()+off+len);
+         int T=0; auto fbank=compute_fbank(seg,T);
+-        int D=0; auto adp=run_encoder(em,fbank,T,560,D);
++        int D=0; auto adp=run_encoder(backend,em,fbank,T,560,D);
+         int ol=1+(T-3+2)/2; ol=1+(ol-3+2)/2; int n_aud=(ol-1)/2+1;
+ 
+         llama_memory_clear(llama_get_memory(ctx), true);  // fresh context per chunk

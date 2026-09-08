@@ -135,7 +135,9 @@ mod domain_tests {
                 runtime_kind: RuntimePlan::PythonVenv,
                 artifact_ids: vec![artifact.clone()],
                 compute_candidates: vec![ComputeCandidate {
+                    model_id: "test".to_string(),
                     preference: ComputePreference::Cpu,
+                    backend: ComputeBackend::Cpu,
                     profile_id: "cpu-x64".to_string(),
                     artifact_id: artifact,
                 }],
@@ -153,6 +155,7 @@ mod domain_tests {
 
         // 声明的 profile 允许
         let allowed = ResolvedProfile {
+            model_id: "test".to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
@@ -162,6 +165,7 @@ mod domain_tests {
 
         // 未声明的 profile 拒绝
         let disallowed = ResolvedProfile {
+            model_id: "test".to_string(),
             profile_id: "cuda-sm99".to_string(),
             backend: ComputeBackend::Cuda,
             artifact_id: ArtifactId::new("python-3.12.8").unwrap(),

@@ -53,22 +53,40 @@ pub(super) fn map_funasr_health(raw_health: &serde_json::Value) -> HealthMapping
         }
     };
 
-    // ── backend 观测（可选）──
-    // FunASR health 可以回报 actual_backend 和 device_name
-    let backend = raw_health.get("backend").and_then(|v| v.as_str());
-    let device_name = raw_health.get("device_name").and_then(|v| v.as_str());
-    let backend_obs = backend.map(|b| {
-        let actual_backend = match b {
-            "cuda" => ComputeBackend::Cuda,
-            "vulkan" => ComputeBackend::Vulkan,
-            "directml" => ComputeBackend::Directml,
-            _ => ComputeBackend::Cpu,
-        };
-        BackendObservation {
-            actual_backend,
-            device_name: device_name.unwrap_or("CPU").to_string(),
-            consistent: true, // 由 service 层根据 resolved profile 填充
-        }
+    // ── requested / actual backend 观测（可选，Ready 时必须有 actual）──
+    // 未知 backend 不再静默当作 CPU；交给 manager 的 fail-closed 校验处理。
+    let requested_field_present = raw_health.get("requested_backend").is_some();
+    let requested_backend = raw_health
+        .get("requested_backend")
+        .and_then(|v| v.as_str())
+        .and_then(ComputeBackend::parse);
+    let backend = raw_health
+        .get("actual_backend")
+        .or_else(|| raw_health.get("backend"))
+        .and_then(|v| v.as_str())
+        .and_then(ComputeBackend::parse);
+    let device_name = raw_health
+        .get("device_name")
+        .or_else(|| raw_health.get("device"))
+        .and_then(|v| v.as_str());
+    let device_is_valid =
+        actual_backend_is_cpu(backend) || device_name.is_some_and(|v| !v.trim().is_empty());
+    let device_id = raw_health
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let backend_obs = backend.map(|actual_backend| BackendObservation {
+        requested_backend,
+        actual_backend,
+        device_name: device_name
+            .unwrap_or(if actual_backend == ComputeBackend::Cpu {
+                "CPU"
+            } else {
+                "unknown"
+            })
+            .to_string(),
+        device_id,
+        consistent: (!requested_field_present || requested_backend.is_some()) && device_is_valid,
     });
 
     // ── 模型 id / revision（可选）──
@@ -104,4 +122,8 @@ pub(super) fn map_funasr_health(raw_health: &serde_json::Value) -> HealthMapping
         model_revision,
         model_content_fingerprint,
     }
+}
+
+fn actual_backend_is_cpu(backend: Option<ComputeBackend>) -> bool {
+    backend == Some(ComputeBackend::Cpu)
 }

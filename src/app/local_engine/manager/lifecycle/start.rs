@@ -173,8 +173,14 @@ impl EngineManager {
 
         // ── 从 resolved implementation 的部署空间读取 active 部署（fail-closed）──
         let deployment_space = deployment_space_for(engine_id, frozen_implementation);
-        let (deployment_install_id, frozen_profile) = tokio::task::spawn_blocking(
-            move || -> Result<(String, ResolvedProfile), LocalEngineError> {
+        let (deployment_install_id, frozen_profile, requested_preference, fallback_reasons) =
+            tokio::task::spawn_blocking(
+            move || -> Result<(
+                String,
+                ResolvedProfile,
+                crate::infra::local_engine::runtime::ComputePreference,
+                Vec<crate::infra::local_engine::runtime::FallbackReason>,
+            ), LocalEngineError> {
                 let (pointer, manifest) = DeploymentStore::read_active(&deployment_space)
                     .map_err(|e| from_runtime(ErrorPhase::Start, "读取 active 部署失败", &e))?
                     .ok_or_else(|| {
@@ -189,7 +195,12 @@ impl EngineManager {
                             format!("{space_label}内无 active deployment.json 指针（fail-closed）"),
                         )
                     })?;
-                Ok((pointer.install_id, manifest.resolved_profile))
+                Ok((
+                    pointer.install_id,
+                    manifest.resolved_profile,
+                    manifest.requested_preference,
+                    manifest.fallback_reasons,
+                ))
             },
         )
         .await
@@ -201,6 +212,24 @@ impl EngineManager {
                 format!("spawn_blocking join 错误: {e}"),
             )
         })??;
+
+        if frozen_profile.model_id != frozen_model.model_id
+            || !descriptor.is_profile_allowed(&frozen_profile)
+        {
+            return Err(LocalEngineError::with_detail(
+                LocalEngineErrorCode::InvalidConfig,
+                ErrorPhase::Start,
+                "active deployment profile 与模型不一致",
+                format!(
+                    "deployment model='{}' profile='{}' backend='{}' artifact='{}', frozen model='{}'",
+                    frozen_profile.model_id,
+                    frozen_profile.profile_id,
+                    frozen_profile.backend,
+                    frozen_profile.artifact_id,
+                    frozen_model.model_id
+                ),
+            ));
+        }
 
         // ── 启动尝试循环（bind race 有限重试）──
         //
@@ -311,6 +340,16 @@ impl EngineManager {
                 // 新一轮显式启动已经接管状态，旧实例的错误不应继续挂在界面上。
                 // 本轮若失败，rollback 会写入新的 last_error。
                 status.last_error = None;
+                status.backend.requested_preference = requested_preference;
+                status.backend.resolved_profile = Some(resolved_launch.profile.clone());
+                status.backend.fallback_reasons = fallback_reasons
+                    .iter()
+                    .map(|reason| FallbackEntry {
+                        rejected_profile: reason.rejected_profile.clone(),
+                        reason: reason.reason.as_str().to_string(),
+                        detail: reason.detail.clone(),
+                    })
+                    .collect();
                 status.operation = EngineOperation {
                     kind: OperationKind::Idle,
                     operation_id: String::new(),

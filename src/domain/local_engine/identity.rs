@@ -237,7 +237,7 @@ pub fn validate_artifact_id(id: &str) -> Result<(), LocalEngineError> {
 /// - `auto`：按 descriptor 声明的优先级回退，记录每次失败原因。
 /// - `gpu_auto`：只在 GPU backend 间选择。
 /// - 显式 `cpu/cuda/vulkan/directml`：失败返回可行动错误，不回退。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputePreference {
     Auto,
@@ -252,6 +252,32 @@ impl ComputePreference {
     /// 是否为显式后端（失败不回退）。
     pub fn is_explicit(&self) -> bool {
         matches!(self, Self::Cpu | Self::Cuda | Self::Vulkan | Self::Directml)
+    }
+
+    /// 返回显式偏好对应的实际 backend。
+    ///
+    /// `Auto` / `GpuAuto` 是解析策略，不是实际 backend，因而返回 `None`。
+    pub fn backend(&self) -> Option<ComputeBackend> {
+        match self {
+            Self::Cpu => Some(ComputeBackend::Cpu),
+            Self::Cuda => Some(ComputeBackend::Cuda),
+            Self::Vulkan => Some(ComputeBackend::Vulkan),
+            Self::Directml => Some(ComputeBackend::Directml),
+            Self::Auto | Self::GpuAuto => None,
+        }
+    }
+
+    /// 解析配置/IPC 中的闭合 wire 值；未知值返回 `None`，由调用方决定安全默认值。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "cpu" => Some(Self::Cpu),
+            "gpu_auto" => Some(Self::GpuAuto),
+            "cuda" => Some(Self::Cuda),
+            "vulkan" => Some(Self::Vulkan),
+            "directml" => Some(Self::Directml),
+            _ => None,
+        }
     }
 }
 
@@ -269,7 +295,7 @@ impl std::fmt::Display for ComputePreference {
 }
 
 /// 计算后端种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeBackend {
     Cpu,
@@ -282,6 +308,17 @@ impl ComputeBackend {
     /// 是否为 GPU backend。
     pub fn is_gpu(&self) -> bool {
         matches!(self, Self::Cuda | Self::Vulkan | Self::Directml)
+    }
+
+    /// 解析 worker health/probe 的闭合 backend wire 值。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Some(Self::Cpu),
+            "cuda" => Some(Self::Cuda),
+            "vulkan" => Some(Self::Vulkan),
+            "directml" => Some(Self::Directml),
+            _ => None,
+        }
     }
 }
 
@@ -302,6 +339,9 @@ impl std::fmt::Display for ComputeBackend {
 /// 全部通过后解析为具体 profile。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedProfile {
+    /// 本次解析绑定的模型身份。
+    #[serde(default)]
+    pub model_id: String,
     /// profile 标识（如 `cpu-x64`、`cpu-avx2`、`cuda12-sm86`、`vulkan-x64`、`directml-x64`）。
     pub profile_id: String,
     /// 对应的 compute backend 种类。
@@ -318,10 +358,16 @@ pub struct ResolvedProfile {
 /// 伪造 health 返回不同 backend 时进入 degraded/error，不显示成功。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendObservation {
+    /// worker 解析到的 requested backend（缺失只允许在非 Ready 过渡态）。
+    #[serde(default)]
+    pub requested_backend: Option<ComputeBackend>,
     /// health 回报的实际 backend。
     pub actual_backend: ComputeBackend,
     /// health 回报的设备名（如 "NVIDIA GeForce RTX 4060" / "CPU"）。
     pub device_name: String,
+    /// 可选的稳定设备标识（若 worker 能提供）。
+    #[serde(default)]
+    pub device_id: Option<String>,
     /// 观测是否与 resolved profile 一致。
     pub consistent: bool,
 }
@@ -351,6 +397,18 @@ pub enum FallbackReasonKind {
     SelfTestFailed,
     /// health 回报的 actual backend 与 resolved 不一致。
     HealthMismatch,
+}
+
+impl FallbackReasonKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotDeclared => "not_declared",
+            Self::HostIncompatible => "host_incompatible",
+            Self::ArtifactIncompatible => "artifact_incompatible",
+            Self::SelfTestFailed => "self_test_failed",
+            Self::HealthMismatch => "health_mismatch",
+        }
+    }
 }
 
 // ── ArtifactIdentity ──────────────────────────────────────────────────────
@@ -453,6 +511,16 @@ pub fn verify_backend_consistency(
         },
         Some(obs) => {
             let actual = obs.actual_backend;
+            if !obs.consistent {
+                let reason = "health 回报的 requested/actual/device 字段不可信".to_string();
+                return BackendVerificationResult {
+                    state: BackendState::Error,
+                    expected_backend: resolved_backend,
+                    actual_backend: Some(actual),
+                    device_name: Some(obs.device_name.clone()),
+                    mismatch_reason: Some(reason),
+                };
+            }
             if actual == resolved_backend {
                 BackendVerificationResult {
                     state: BackendState::Healthy,

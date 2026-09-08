@@ -20,7 +20,7 @@ on:
 jobs:
   publish:
     name: Build & Release
-    # FunASR/llama.cpp worker 的已验证工具链；避免 windows-latest 漂移到新 VS。
+    # 应用 release 不编译 FunASR/llama.cpp；仅下载 runtime-lock.json 指定的 immutable asset。
     runs-on: windows-2022
 
     steps:
@@ -66,7 +66,7 @@ jobs:
           echo "--- Cargo.toml ---"
           grep '^version' Cargo.toml | head -1
 
-      # 本地与 CI 共用唯一发布入口：worker → 插件 → 校验 → Tauri 打包。
+      # 本地与 CI 共用唯一发布入口：固定 runtime 下载/校验 → 插件 → 资源校验 → Tauri 打包。
       - name: Build release
         run: cargo xtask release
 

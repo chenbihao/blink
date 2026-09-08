@@ -894,16 +894,17 @@ export function isActionBlocked(entry, actionKind) {
 /**
  * 计算设备选择器的展示模式（0.22.6.1）。
  *
- * 引擎只有一个可用 compute 选项时返回 "static"——renderer 渲染只读展示
- * 而非 select，避免制造"可以选择 CUDA"的错觉（FunASR 0.22.6 只有 CPU）。
+ * 引擎只有一个已声明 compute 选项时返回 "static"——renderer 渲染只读展示
+ * 而非 select。这里必须按声明候选计数，不能按本机兼容项计数：多个候选
+ * 中的不可兼容项仍要在下拉框中以 disabled + reason 展示。
  *
  * @param {Array<{preference: string, compatible?: boolean}>|null} computeOptions
  * @returns {"select"|"static"}
  */
 export function computeOptionsDisplayMode(computeOptions) {
-    if (!Array.isArray(computeOptions)) return "select";
-    const selectable = computeOptions.filter((opt) => opt.compatible !== false);
-    return selectable.length <= 1 ? "static" : "select";
+    if (!Array.isArray(computeOptions)) return "static";
+    const declared = computeOptions.filter((opt) => opt && typeof opt.preference === "string");
+    return declared.length <= 1 ? "static" : "select";
 }
 
 /**

@@ -1,8 +1,506 @@
+diff --git a/runtime/llama.cpp/funasr-common/blink_backend_adapter.h b/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
+new file mode 100644
+index 0000000..1292125
+--- /dev/null
++++ b/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
+@@ -0,0 +1,367 @@
++#ifndef BLINK_BACKEND_ADAPTER_H
++#define BLINK_BACKEND_ADAPTER_H
++
++// Shared, deliberately narrow ggml backend adapter for all Blink FunASR
++// workers.  This header never invokes the registry-wide backend discovery
++// helpers, because they may consume process-global search paths.  Dynamic
++// backends are loaded only by the exact path supplied through --backend-dir.
++
++#include "ggml-alloc.h"
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++#include "ggml.h"
++#include "blink_worker_protocol.h"
++
++#include <algorithm>
++#include <cctype>
++#include <filesystem>
++#include <memory>
++#include <stdexcept>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace blink_backend {
++
++struct Error : std::runtime_error {
++    std::string code;
++
++    Error(std::string code_, std::string message)
++        : std::runtime_error(std::move(message)), code(std::move(code_)) {}
++};
++
++struct CliOptions {
++    std::string requested_backend = "cpu";
++    std::string backend_dir;
++    bool probe = false;
++};
++
++inline std::string lower(std::string value) {
++    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
++        return static_cast<char>(std::tolower(c));
++    });
++    return value;
++}
++
++inline bool parse_cli(int argc, char ** argv, CliOptions & out, std::string & error) {
++    for (int i = 1; i < argc; ++i) {
++        const std::string arg = argv[i];
++        if (arg == "--backend") {
++            if (i + 1 >= argc) {
++                error = "--backend requires cpu, vulkan, or cuda";
++                return false;
++            }
++            out.requested_backend = lower(argv[++i]);
++            if (out.requested_backend != "cpu" && out.requested_backend != "vulkan" &&
++                out.requested_backend != "cuda") {
++                error = "unsupported backend '" + out.requested_backend + "' (expected cpu|vulkan|cuda)";
++                return false;
++            }
++        } else if (arg == "--backend-dir") {
++            if (i + 1 >= argc) {
++                error = "--backend-dir requires a deployment directory";
++                return false;
++            }
++            out.backend_dir = argv[++i];
++            if (out.backend_dir.empty()) {
++                error = "--backend-dir must not be empty";
++                return false;
++            }
++        } else if (arg == "--blink-backend-probe") {
++            out.probe = true;
++        }
++    }
++    return true;
++}
++
++inline std::string backend_filename(const std::string & backend) {
++    // 0.22.16.3 publishes these exact names in --backend-dir.  The base
++    // artifact contains ggml-cpu; Vulkan and CUDA are optional additions.
++#if defined(_WIN32)
++    return "ggml-" + backend + ".dll";
++#else
++    return "libggml-" + backend + ".so";
++#endif
++}
++
++inline ggml_backend_reg_t find_registry_backend(const std::string & name) {
++    return ggml_backend_reg_by_name(name.c_str());
++}
++
++inline ggml_backend_dev_t find_device(const std::string & requested) {
++    if (requested == "cpu") {
++        return ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
++    }
++
++    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
++        ggml_backend_dev_t device = ggml_backend_dev_get(i);
++        const ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
++        const std::string reg_name = reg ? lower(ggml_backend_reg_name(reg)) : std::string();
++        const std::string device_name = lower(ggml_backend_dev_name(device));
++        const std::string description = lower(ggml_backend_dev_description(device));
++        if (reg_name == requested || device_name.find(requested) != std::string::npos ||
++            description.find(requested) != std::string::npos) {
++            return device;
++        }
++    }
++    return nullptr;
++}
++
++inline void load_dynamic_backend(const std::string & requested, const std::string & backend_dir) {
++    if (backend_dir.empty()) {
++        throw Error("backend_dir_required",
++                    "backend '" + requested + "' requires --backend-dir");
++    }
++
++    std::error_code ec;
++    const std::filesystem::path root = std::filesystem::weakly_canonical(
++        std::filesystem::path(backend_dir), ec);
++    if (ec || !std::filesystem::is_directory(root, ec) || ec) {
++        throw Error("backend_dir_invalid", "backend deployment directory is not usable");
++    }
++
++    const std::filesystem::path library = root / backend_filename(requested);
++    if (!std::filesystem::is_regular_file(library, ec) || ec) {
++        throw Error("backend_library_missing",
++                    "missing backend library '" + backend_filename(requested) + "'");
++    }
++
++    // Do not replace this with the registry-wide directory loader: the pinned
++    // ggml commit also consults process-global search paths there.
++    if (!find_registry_backend(requested)) {
++        if (!ggml_backend_load(library.u8string().c_str())) {
++            throw Error("backend_load_failed",
++                        "failed to load backend library '" + backend_filename(requested) + "'");
++        }
++    }
++}
++
++class Session {
++public:
++    explicit Session(const CliOptions & options) {
++        metadata_.requested_backend = options.requested_backend;
++
++        if (options.requested_backend == "cpu") {
++#if defined(GGML_BACKEND_DL)
++            load_dynamic_backend("cpu", options.backend_dir);
++#endif
++            device_ = find_device("cpu");
++            if (!device_) {
++                throw Error("backend_device_missing", "CPU backend did not register a device");
++            }
++            backend_ = ggml_backend_dev_init(device_, nullptr);
++            buffer_type_ = ggml_backend_dev_buffer_type(device_);
++        } else {
++#if defined(GGML_BACKEND_DL)
++            load_dynamic_backend(options.requested_backend, options.backend_dir);
++#else
++            const ggml_backend_reg_t reg = find_registry_backend(options.requested_backend);
++            if (!reg) {
++                throw Error("backend_not_built",
++                            "backend '" + options.requested_backend + "' is not built");
++            }
++#endif
++            device_ = find_device(options.requested_backend);
++            if (!device_) {
++                throw Error("backend_device_missing",
++                            "backend '" + options.requested_backend + "' has no compatible device");
++            }
++            backend_ = ggml_backend_dev_init(device_, nullptr);
++            buffer_type_ = ggml_backend_dev_buffer_type(device_);
++        }
++
++        if (!backend_) {
++            throw Error("backend_init_failed",
++                        "failed to initialize backend '" + options.requested_backend + "'");
++        }
++        if (!buffer_type_) {
++            ggml_backend_free(backend_);
++            backend_ = nullptr;
++            throw Error("backend_buffer_type_missing",
++                        "backend '" + options.requested_backend + "' has no buffer type");
++        }
++
++        metadata_.actual_backend = options.requested_backend;
++        if (device_) {
++            const ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device_);
++            const std::string actual = reg ? lower(ggml_backend_reg_name(reg)) : std::string();
++            if (!actual.empty() && actual != options.requested_backend) {
++                ggml_backend_free(backend_);
++                backend_ = nullptr;
++                throw Error("backend_device_mismatch",
++                            "requested backend '" + options.requested_backend +
++                                "' selected device from backend '" + actual + "'");
++            }
++            metadata_.actual_backend = actual.empty() ? options.requested_backend : actual;
++        }
++        const char * buffer_name = ggml_backend_buft_name(buffer_type_);
++        metadata_.buffer_type = buffer_name ? buffer_name : "unknown";
++        if (device_) {
++            ggml_backend_dev_props props{};
++            ggml_backend_dev_get_props(device_, &props);
++            metadata_.device_name = props.name && *props.name ? props.name : ggml_backend_dev_name(device_);
++            metadata_.device_id = props.device_id && *props.device_id ? props.device_id : "unknown";
++        } else {
++            metadata_.device_name = "CPU";
++            metadata_.device_id = "cpu";
++        }
++        if (metadata_.device_name.empty()) metadata_.device_name = "unknown";
++        if (metadata_.device_id.empty()) metadata_.device_id = "unknown";
++    }
++
++    Session(const Session &) = delete;
++    Session & operator=(const Session &) = delete;
++
++    ~Session() {
++        if (backend_) ggml_backend_free(backend_);
++    }
++
++    const blink_worker::BackendMetadata & metadata() const { return metadata_; }
++    ggml_backend_t backend() const { return backend_; }
++    ggml_backend_dev_t device() const { return device_; }
++    ggml_backend_buffer_type_t buffer_type() const { return buffer_type_; }
++
++    void set_input(ggml_tensor * tensor, const void * data, size_t size) const {
++        ggml_backend_tensor_set(tensor, data, 0, size);
++    }
++
++    void get_output(const ggml_tensor * tensor, void * data, size_t size) const {
++        ggml_backend_tensor_get(tensor, data, 0, size);
++    }
++
++    ggml_gallocr_t allocate_graph(ggml_cgraph * graph) const {
++        ggml_gallocr_t allocator = ggml_gallocr_new(buffer_type_);
++        if (!allocator || !ggml_gallocr_alloc_graph(allocator, graph)) {
++            if (allocator) ggml_gallocr_free(allocator);
++            throw Error("backend_graph_alloc_failed",
++                        "backend could not allocate the graph on '" + metadata_.actual_backend + "'");
++        }
++        return allocator;
++    }
++
++    void validate_graph(const ggml_cgraph * graph) const {
++        for (int i = 0; i < graph->n_nodes; ++i) {
++            const ggml_tensor * node = graph->nodes[i];
++            if (!ggml_backend_dev_supports_op(device_, node)) {
++                throw Error("backend_unsupported_op",
++                            "backend '" + metadata_.actual_backend + "' does not support graph op '" +
++                                std::string(ggml_op_name(node->op)) + "'");
++            }
++        }
++    }
++
++    void compute(ggml_cgraph * graph) const {
++        const enum ggml_status status = ggml_backend_graph_compute(backend_, graph);
++        if (status != GGML_STATUS_SUCCESS) {
++            throw Error("backend_graph_compute_failed",
++                        "backend graph compute failed with status " + std::to_string(static_cast<int>(status)));
++        }
++        ggml_backend_synchronize(backend_);
++    }
++
++    void set_cpu_threads(int n_threads) const {
++#if defined(GGML_USE_CPU) && !defined(GGML_BACKEND_DL)
++        if (metadata_.actual_backend == "cpu") ggml_backend_cpu_set_n_threads(backend_, n_threads);
++#else
++        (void)n_threads;
++#endif
++    }
++
++private:
++    ggml_backend_dev_t device_ = nullptr;
++    ggml_backend_t backend_ = nullptr;
++    ggml_backend_buffer_type_t buffer_type_ = nullptr;
++    blink_worker::BackendMetadata metadata_;
++};
++
++inline void run_probe(Session & session) {
++    ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(session.buffer_type(), 256);
++    if (!buffer) {
++        throw Error("backend_buffer_alloc_failed", "backend could not allocate a 256-byte probe buffer");
++    }
++    ggml_backend_buffer_free(buffer);
++
++    ggml_init_params params{ 16 * 1024, nullptr, true };
++    ggml_context * context = ggml_init(params);
++    if (!context) throw Error("backend_probe_context_failed", "failed to create probe graph context");
++    ggml_tensor * lhs = ggml_new_tensor_1d(context, GGML_TYPE_F32, 4);
++    ggml_tensor * rhs = ggml_new_tensor_1d(context, GGML_TYPE_F32, 4);
++    ggml_tensor * sum = ggml_add(context, lhs, rhs);
++    ggml_set_input(lhs);
++    ggml_set_input(rhs);
++    ggml_set_output(sum);
++    ggml_cgraph * graph = ggml_new_graph_custom(context, 32, false);
++    ggml_build_forward_expand(graph, sum);
++    ggml_gallocr_t allocator = nullptr;
++    try {
++        session.validate_graph(graph);
++        allocator = session.allocate_graph(graph);
++        const float a[4] = { 1, 2, 3, 4 };
++        const float b[4] = { 2, 3, 4, 5 };
++        session.set_input(lhs, a, sizeof(a));
++        session.set_input(rhs, b, sizeof(b));
++        session.compute(graph);
++        float result[4]{};
++        session.get_output(sum, result, sizeof(result));
++        for (int i = 0; i < 4; ++i) {
++            if (result[i] != a[i] + b[i]) {
++                throw Error("backend_probe_result_failed", "minimum graph returned an unexpected result");
++            }
++        }
++    } catch (...) {
++        if (allocator) ggml_gallocr_free(allocator);
++        ggml_free(context);
++        throw;
++    }
++    ggml_gallocr_free(allocator);
++    ggml_free(context);
++}
++
++inline int emit_probe_result(const CliOptions & options) {
++    try {
++        Session session(options);
++        run_probe(session);
++        const auto & info = session.metadata();
++        std::string line = "{\"type\":\"backend_probe\",\"protocol_version\":1,\"ok\":true";
++        line += ",\"requested_backend\":\"" + blink_worker::json_escape(info.requested_backend) + "\"";
++        line += ",\"actual_backend\":\"" + blink_worker::json_escape(info.actual_backend) + "\"";
++        line += ",\"device_name\":\"" + blink_worker::json_escape(info.device_name) + "\"";
++        line += ",\"device_id\":\"" + blink_worker::json_escape(info.device_id) + "\"";
++        line += ",\"buffer_type\":\"" + blink_worker::json_escape(info.buffer_type) + "\"";
++        line += ",\"graph\":{\"op\":\"add_f32\",\"status\":\"success\"}}\n";
++        fwrite(line.data(), 1, line.size(), stdout);
++        fflush(stdout);
++        return 0;
++    } catch (const Error & error) {
++        std::string line = "{\"type\":\"backend_probe\",\"protocol_version\":1,\"ok\":false";
++        line += ",\"requested_backend\":\"" + blink_worker::json_escape(options.requested_backend) + "\"";
++        line += ",\"error\":{\"code\":\"" + blink_worker::json_escape(error.code) + "\",\"message\":\"" +
++                blink_worker::json_escape(error.what()) + "\"}}\n";
++        fwrite(line.data(), 1, line.size(), stdout);
++        fflush(stdout);
++        return 2;
++    } catch (const std::exception & error) {
++        std::string line = "{\"type\":\"backend_probe\",\"protocol_version\":1,\"ok\":false";
++        line += ",\"requested_backend\":\"" + blink_worker::json_escape(options.requested_backend) + "\"";
++        line += ",\"error\":{\"code\":\"backend_probe_failed\",\"message\":\"" +
++                blink_worker::json_escape(error.what()) + "\"}}\n";
++        fwrite(line.data(), 1, line.size(), stdout);
++        fflush(stdout);
++        return 2;
++    }
++}
++
++inline int emit_startup_error(const CliOptions & options, const std::string & code,
++                              const std::string & message) {
++    std::string line = "{\"type\":\"error\",\"protocol_version\":1,\"request_id\":null";
++    line += ",\"requested_backend\":\"" + blink_worker::json_escape(options.requested_backend) + "\"";
++    line += ",\"error\":{\"code\":\"" + blink_worker::json_escape(code) + "\",\"message\":\"" +
++            blink_worker::json_escape(message) + "\"}}\n";
++    fwrite(line.data(), 1, line.size(), stdout);
++    fflush(stdout);
++    return 2;
++}
++
++}  // namespace blink_backend
++
++#endif  // BLINK_BACKEND_ADAPTER_H
+diff --git a/runtime/llama.cpp/funasr-common/blink_worker_protocol.h b/runtime/llama.cpp/funasr-common/blink_worker_protocol.h
+index 8ed7015..b27bb57 100644
+--- a/runtime/llama.cpp/funasr-common/blink_worker_protocol.h
++++ b/runtime/llama.cpp/funasr-common/blink_worker_protocol.h
+@@ -3,7 +3,7 @@
+ // 由 xtask 构建时复制到 FunASR runtime/llama.cpp/funasr-common/ 下，
+ // 供 llama-funasr-sensevoice / llama-funasr-paraformer / llama-funasr-cli 三个
+ // 入口的 --stdin-server 补丁共同引用。模型加载、fbank、计算图与解码保持上游原样；
+-// 本头文件只承担进程协议（ready 握手、请求循环、身份与指纹回报）。
++// 本头文件只承担进程协议（ready/health 握手、请求循环、身份与指纹回报）。
+ //
+ // ## 协议（frozen v1）
+ //
+@@ -19,7 +19,8 @@
+ //   {"type":"ready","protocol_version":1,"engine_id":...,"instance_id":...,
+ //    "token_fingerprint":"fp:xxxxxxxxxxxxxxxx","model_id":...,"model_revision":...,
+ //    "model_status":"ready","model_content_fingerprint":"<64 hex>",
+-//    "backend":"cpu","requested_backend":"cpu"}
++//    "backend":"cpu","requested_backend":"cpu","actual_backend":"cpu",
++//    "device_name":"CPU","device_id":"cpu","buffer_type":"..."}
+ // ready 中的 model_content_fingerprint 是 worker 亲自对 payload 目录计算的
+ // directory_aggregate_sha256_v1（与 Blink 安装侧算法一致，见下）。
+ //
+@@ -30,6 +31,7 @@
+ //
+ // 响应（stdout）：
+ //   {"type":"hello_ok","protocol_version":1,...ready 字段...}
++//   {"type":"health","protocol_version":1,"ok":true,...backend 字段...}
+ //   {"type":"transcribe_result","request_id":"...","ok":true,"text":"...","elapsed_ms":123}
+ //   {"type":"transcribe_result","request_id":"...","ok":false,
+ //    "error":{"code":"...","message":"..."},"elapsed_ms":123}
+@@ -41,6 +43,22 @@
+ //
+ // 停止：stdin EOF 或 shutdown 请求 → 正常退出（exit 0）。
+ //
++// CLI（三个 worker 共用）：
++//   --backend cpu|vulkan|cuda
++//   --backend-dir <受管 deployment 目录>
++//   --blink-backend-probe
++// 动态构建要求 --backend-dir 指向 Blink 已校验的制品目录；静态 CPU 构建可省略。
++//
++// probe 不需要模型，且 stdout 只输出一行：
++//   {"type":"backend_probe","protocol_version":1,"ok":true,
++//    "requested_backend":"vulkan","actual_backend":"vulkan",
++//    "device_name":"...","device_id":"...","buffer_type":"...",
++//    "graph":{"op":"add_f32","status":"success"}}
++// 失败时 ok=false，带 error.code/message，并以非零状态退出。probe 必须真实
++// 加载精确 backend DLL、枚举并初始化设备、分配小 buffer、执行 add_f32 graph。
++// 普通 worker 在 backend 初始化失败时也输出一行 type=error（request_id=null，
++// requested_backend 与可行动 error.code/message），然后以非零状态退出。
++//
+ // ## directory_aggregate_sha256_v1（与 src/infra/local_engine/model_storage.rs 一致）
+ //
+ // 1. 递归枚举 payload 下普通文件（排除 manifest.json / active.json / .tmp_* /
+@@ -68,6 +86,17 @@
+ 
+ namespace blink_worker {
+ 
++// Backend identity is deliberately a protocol DTO.  The ggml adapter owns
++// discovery and initialization; this struct is the only backend data the
++// worker exposes to Blink.
++struct BackendMetadata {
++    std::string requested_backend;
++    std::string actual_backend;
++    std::string device_name;
++    std::string device_id;
++    std::string buffer_type;
++};
++
+ // ── SHA-256（紧凑公有域式实现）──────────────────────────────────────────
+ 
+ class Sha256 {
+@@ -475,10 +504,21 @@ inline int env_threads(int fallback) {
+ //   本循环把异常归为 inference_failed，把空文本视为正常空结果（ok=true）。
+ //
+ // model_ready: 模型与 backend 已在调用前加载完毕（ready 只能在此之后输出）。
+-// backend_name: 实际执行后端（当前为 "cpu"）。
++// backend_metadata: requested/actual backend and the selected device.
++
++inline std::string backend_json_fields(const BackendMetadata & backend) {
++    std::string fields;
++    fields += ",\"backend\":\"" + json_escape(backend.actual_backend) + "\"";
++    fields += ",\"requested_backend\":\"" + json_escape(backend.requested_backend) + "\"";
++    fields += ",\"actual_backend\":\"" + json_escape(backend.actual_backend) + "\"";
++    fields += ",\"device_name\":\"" + json_escape(backend.device_name) + "\"";
++    fields += ",\"device_id\":\"" + json_escape(backend.device_id) + "\"";
++    fields += ",\"buffer_type\":\"" + json_escape(backend.buffer_type) + "\"";
++    return fields;
++}
+ 
+ template <typename RunSegment>
+-int serve_stdin(RunSegment run_segment, const std::string& backend_name,
++int serve_stdin(RunSegment run_segment, const BackendMetadata & backend,
+                 int64_t (*time_us)()) {
+     const std::string engine_id = env_str("BLINK_ENGINE_ID");
+     const std::string instance_id = env_str("BLINK_INSTANCE_ID");
+@@ -501,8 +541,7 @@ int serve_stdin(RunSegment run_segment, const std::string& backend_name,
+         line += ",\"model_revision\":\"" + json_escape(model_revision) + "\"";
+         line += ",\"model_status\":\"ready\"";
+         line += ",\"model_content_fingerprint\":\"" + json_escape(fp) + "\"";
+-        line += ",\"backend\":\"" + json_escape(backend_name) + "\"";
+-        line += ",\"requested_backend\":\"" + json_escape(backend_name) + "\"";
++        line += backend_json_fields(backend);
+         line += "}\n";
+         fwrite(line.data(), 1, line.size(), stdout);
+         fflush(stdout);
+@@ -580,7 +619,17 @@ int serve_stdin(RunSegment run_segment, const std::string& backend_name,
+             line += ",\"engine_id\":\"" + json_escape(engine_id) + "\"";
+             line += ",\"instance_id\":\"" + json_escape(instance_id) + "\"";
+             line += ",\"model_id\":\"" + json_escape(model_id) + "\"";
+-            line += ",\"backend\":\"" + json_escape(backend_name) + "\"}\n";
++            line += backend_json_fields(backend) + "}\n";
++            fwrite(line.data(), 1, line.size(), stdout);
++            fflush(stdout);
++            continue;
++        }
++        if (type == "health") {
++            std::string line = "{\"type\":\"health\",\"protocol_version\":1,\"ok\":true";
++            line += ",\"request_id\":" +
++                    (has_id ? ("\"" + json_escape(request_id) + "\"") : std::string("null"));
++            line += ",\"model_status\":\"ready\"";
++            line += backend_json_fields(backend) + "}\n";
+             fwrite(line.data(), 1, line.size(), stdout);
+             fflush(stdout);
+             continue;
 diff --git a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
-index 1e69bfd..4bdabc2 100644
+index 1e69bfd..4fe2f5d 100644
 --- a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
 +++ b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
-@@ -18,9 +18,12 @@
+@@ -18,9 +18,13 @@
  #include <cstring>
  #include <fstream>
  #include <map>
@@ -11,37 +509,191 @@ index 1e69bfd..4bdabc2 100644
  #include <vector>
  
 +#include "blink_worker_protocol.h"
++#include "blink_backend_adapter.h"
 +
  static const float LN_EPS = 1e-5f;
  
  static void trace_stage(const char *format, ...) {
-@@ -254,7 +257,10 @@ static std::string detok_sv(const std::vector<int>&ids,const std::vector<std::st
+@@ -74,97 +78,6 @@ struct model { cfg c; gguf_context*gguf=nullptr; ggml_context*ctx_meta=nullptr;
+   ggml_backend_buffer_t weights_buffer=nullptr; std::map<std::string,ggml_tensor*> t;
+   ggml_tensor* g(const std::string&n){auto it=t.find(n);if(it==t.end()){fprintf(stderr,"missing %s\n",n.c_str());exit(1);}return it->second;} };
+ 
+-struct graph_backend {
+-  ggml_backend_t backend=nullptr;
+-  ggml_backend_buffer_type_t buffer_type=nullptr;
+-  bool is_cpu=true;
+-};
+-
+-static std::string lower_copy(const char*s){
+-  std::string out=s?s:"";
+-  for(char&c:out)c=(char)std::tolower((unsigned char)c);
+-  return out;
+-}
+-
+-static ggml_backend_dev_t find_gpu_backend_device(const std::string&backend_name){
+-  ggml_backend_load_all();
+-  ggml_backend_dev_t integrated_fallback=nullptr;
+-  for(size_t i=0;i<ggml_backend_dev_count();i++){
+-    ggml_backend_dev_t dev=ggml_backend_dev_get(i);
+-    enum ggml_backend_dev_type type=ggml_backend_dev_type(dev);
+-    if(type!=GGML_BACKEND_DEVICE_TYPE_GPU&&type!=GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+-    std::string reg=lower_copy(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)));
+-    std::string dev_name=lower_copy(ggml_backend_dev_name(dev));
+-    std::string dev_desc=lower_copy(ggml_backend_dev_description(dev));
+-    if(reg.find(backend_name)!=std::string::npos||
+-       dev_name.find(backend_name)!=std::string::npos||
+-       dev_desc.find(backend_name)!=std::string::npos){
+-      if(type==GGML_BACKEND_DEVICE_TYPE_GPU) return dev;
+-      if(!integrated_fallback) integrated_fallback=dev;
+-    }
+-  }
+-  return integrated_fallback;
+-}
+-
+-static graph_backend initialize_device_backend(const std::string&name,ggml_backend_dev_t dev){
+-  graph_backend out;
+-  const char*dev_name=ggml_backend_dev_name(dev);
+-  const char*dev_desc=ggml_backend_dev_description(dev);
+-  fprintf(stderr,"initializing %s backend on %s (%s)\n",name.c_str(),dev_name,dev_desc);
+-  fflush(stderr);
+-  out.backend=ggml_backend_dev_init(dev,nullptr);
+-  if(!out.backend){
+-    fprintf(stderr,"failed to initialize %s backend on %s\n",name.c_str(),dev_name);
+-    exit(1);
+-  }
+-  fprintf(stderr,"initialized %s backend on %s; resolving buffer type\n",name.c_str(),dev_name);
+-  fflush(stderr);
+-  out.buffer_type=ggml_backend_get_default_buffer_type(out.backend);
+-  if(!out.buffer_type){
+-    fprintf(stderr,"%s backend on %s has no default buffer type\n",name.c_str(),dev_name);
+-    exit(1);
+-  }
+-  fprintf(stderr,"%s backend ready on %s\n",name.c_str(),dev_name);
+-  fflush(stderr);
+-  out.is_cpu=false;
+-  return out;
+-}
+-
+-static graph_backend make_graph_backend(const std::string&name){
+-  graph_backend out;
+-  if(name=="cpu"){
+-    out.backend=ggml_backend_cpu_init();
+-    if(!out.backend){
+-      fprintf(stderr,"failed to initialize cpu backend\n");
+-      exit(1);
+-    }
+-    out.buffer_type=ggml_backend_get_default_buffer_type(out.backend);
+-    out.is_cpu=true;
+-  } else if(name=="cuda"){
+-    ggml_backend_dev_t dev=find_gpu_backend_device("cuda");
+-    if(!dev){
+-      fprintf(stderr,"CUDA backend requested, but no GPU backend is available; build with -DGGML_CUDA=ON\n");
+-      exit(1);
+-    }
+-    return initialize_device_backend(name,dev);
+-  } else if(name=="vulkan"){
+-    ggml_backend_dev_t dev=find_gpu_backend_device("vulkan");
+-    if(!dev){
+-      fprintf(stderr,"Vulkan backend requested, but no Vulkan GPU backend is available; build with -DGGML_VULKAN=ON and install a Vulkan driver/ICD\n");
+-      exit(1);
+-    }
+-    return initialize_device_backend(name,dev);
+-  } else {
+-    fprintf(stderr,"unsupported backend '%s' (expected cpu|cuda|vulkan)\n",name.c_str());
+-    exit(1);
+-  }
+-  if(!out.backend||!out.buffer_type){
+-    fprintf(stderr,"failed to initialize %s backend\n",name.c_str());
+-    exit(1);
+-  }
+-  return out;
+-}
+-
+ static void free_model(model&m){
+   if(m.gguf){gguf_free(m.gguf);m.gguf=nullptr;}
+   if(m.ctx_meta){ggml_free(m.ctx_meta);m.ctx_meta=nullptr;}
+@@ -254,24 +167,38 @@ static std::string detok_sv(const std::vector<int>&ids,const std::vector<std::st
  }
  
  int main(int argc,char**argv){
 +  for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"--blink-selftest")){
 +    printf("{\"type\":\"selftest\",\"worker\":\"sensevoice\",\"protocol_version\":1}\n");return 0;} }
++  blink_backend::CliOptions backend_options; std::string backend_error;
++  if(!blink_backend::parse_cli(argc,argv,backend_options,backend_error)){
++    return blink_backend::emit_startup_error(backend_options,"backend_cli_invalid",backend_error);
++  }
++  if(backend_options.probe) return blink_backend::emit_probe_result(backend_options);
    std::string gguf_path,fbank_path,wav_path,vad_path; int vad_maxseg=30000; bool ids_mode=false,keep_tags=false,srt_mode=false;
+-  std::string backend_name="cpu";
 +  bool stdin_server=false;
-   std::string backend_name="cpu";
    for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"-m")&&i+1<argc)gguf_path=argv[++i];
      else if(!strcmp(argv[i],"-f")&&i+1<argc)fbank_path=argv[++i];
-@@ -265,8 +271,11 @@ int main(int argc,char**argv){
+     else if(!strcmp(argv[i],"-a")&&i+1<argc)wav_path=argv[++i];
+     else if(!strcmp(argv[i],"--vad")&&i+1<argc)vad_path=argv[++i];
+     else if(!strcmp(argv[i],"--vad-maxseg")&&i+1<argc)vad_maxseg=atoi(argv[++i]);
+-    else if(!strcmp(argv[i],"--backend")&&i+1<argc)backend_name=argv[++i];
      else if(!strcmp(argv[i],"--ids"))ids_mode=true;
      else if(!strcmp(argv[i],"--keep-tags"))keep_tags=true;
      else if(!strcmp(argv[i],"--srt"))srt_mode=true;
 -    else {fprintf(stderr,"usage: %s -m sensevoice.gguf (-a audio.wav | -f fbank.bin) [--vad fsmn-vad.gguf [--vad-maxseg ms]] [--backend cpu|cuda|vulkan] [--srt] [--ids] [--keep-tags]\n",argv[0]);return 1;} }
 -  if(gguf_path.empty()||(fbank_path.empty()&&wav_path.empty())){fprintf(stderr,"missing args\n");return 1;}
+-  graph_backend graph_be=make_graph_backend(backend_name);
++    else if(!strcmp(argv[i],"--backend")||!strcmp(argv[i],"--backend-dir"))i++;
 +    else if(!strcmp(argv[i],"--stdin-server"))stdin_server=true;
 +    else {fprintf(stderr,"usage: %s -m sensevoice.gguf ((-a audio.wav | -f fbank.bin) | --stdin-server) [--vad fsmn-vad.gguf [--vad-maxseg ms]] [--backend cpu|cuda|vulkan] [--srt] [--ids] [--keep-tags]\n",argv[0]);return 1;} }
 +  if(gguf_path.empty()||(!stdin_server&&fbank_path.empty()&&wav_path.empty())){fprintf(stderr,"missing args\n");return 1;}
 +  if(stdin_server&&(!fbank_path.empty()||!wav_path.empty()||!vad_path.empty()||srt_mode)){
 +    fprintf(stderr,"--stdin-server only supports the persistent NDJSON loop without VAD/SRT/fbank\n");return 1;}
-   graph_backend graph_be=make_graph_backend(backend_name);
++  std::unique_ptr<blink_backend::Session> backend_ptr;
++  try { backend_ptr=std::make_unique<blink_backend::Session>(backend_options); }
++  catch(const blink_backend::Error&e){ return blink_backend::emit_startup_error(backend_options,e.code,e.what()); }
++  catch(const std::exception&e){ return blink_backend::emit_startup_error(backend_options,"backend_startup_failed",e.what()); }
++  auto& backend=*backend_ptr;
  
    // load model
-@@ -338,6 +347,19 @@ int main(int argc,char**argv){
+   trace_stage("[sensevoice] loading model metadata");
+-  model m; if(!load_model_weights(gguf_path,graph_be.buffer_type,m))return 1; gguf_context*gg=m.gguf;
++  model m; if(!load_model_weights(gguf_path,backend,m))return 1; gguf_context*gg=m.gguf;
+   auto rd=[&](const char*k,int d){int i=gguf_find_key(gg,k);return i<0?d:(int)gguf_get_val_u32(gg,i);};
+   m.c.d_model=rd("sv.output_size",512); m.c.n_head=rd("sv.attention_heads",4);
+   m.c.num_blocks=rd("sv.num_blocks",50); m.c.tp_blocks=rd("sv.tp_blocks",20);
+@@ -319,14 +246,16 @@ int main(int argc,char**argv){
+     ggml_cgraph*gf=ggml_new_graph_custom(c,32768,false); ggml_build_forward_expand(gf,logits);
+     trace_stage("[sensevoice] graph built");
+     trace_stage("[sensevoice] allocating graph");
+-    ggml_gallocr_t ga=ggml_gallocr_new(graph_be.buffer_type); ggml_gallocr_alloc_graph(ga,gf);
+-    trace_stage("[sensevoice] graph allocated");
+-    ggml_backend_tensor_set(x,inp.data(),0,ggml_nbytes(x)); if(graph_be.is_cpu) ggml_backend_cpu_set_n_threads(graph_be.backend,8);
+-    trace_stage("[sensevoice] compute starting");
+-    enum ggml_status compute_status=ggml_backend_graph_compute(graph_be.backend,gf);
+-    trace_stage("[sensevoice] compute complete: status=%d",(int)compute_status);
+-    if(compute_status!=GGML_STATUS_SUCCESS){fprintf(stderr,"compute failed\n");}
+-    std::vector<float> lg((size_t)V*N); ggml_backend_tensor_get(logits,lg.data(),0,ggml_nbytes(logits));
++    ggml_gallocr_t ga=nullptr;
++    try {
++      backend.validate_graph(gf);
++      ga=backend.allocate_graph(gf);
++      trace_stage("[sensevoice] graph allocated");
++      backend.set_input(x,inp.data(),ggml_nbytes(x)); backend.set_cpu_threads(8);
++      trace_stage("[sensevoice] compute starting");
++      backend.compute(gf);
++      trace_stage("[sensevoice] compute complete");
++      std::vector<float> lg((size_t)V*N); backend.get_output(logits,lg.data(),ggml_nbytes(logits));
+     std::vector<int> seg_ids; int prev=-1;   // greedy CTC: argmax per frame -> collapse -> drop blank
+     for(int n=0;n<N;n++){ const float*col=&lg[(size_t)n*V]; int am=0; float best=col[0];
+       for(int v=1;v<V;v++) if(col[v]>best){best=col[v];am=v;}
+@@ -334,10 +263,28 @@ int main(int argc,char**argv){
+     std::string result;
+     if(emit_ids){ for(int id:seg_ids){ result+=std::to_string(id); result+=" "; } }
+     else { result=detok_sv(seg_ids,vocab,keep_tags); }
+-    ggml_gallocr_free(ga); ggml_free(c);
++      ggml_gallocr_free(ga); ggml_free(c);
      return result;
++    } catch (...) {
++      if(ga) ggml_gallocr_free(ga);
++      ggml_free(c);
++      throw;
++    }
    };
  
 +  if(stdin_server){
@@ -54,9 +706,50 @@ index 1e69bfd..4bdabc2 100644
 +      int t=0;
 +      auto fb=compute_fbank(wav,t);
 +      return run_seg(fb,t);
-+    },backend_name,&ggml_time_us);
++    },backend.metadata(),&ggml_time_us);
 +  }
 +
    int64_t t0=ggml_time_us();
    int srt_idx=0;
    if(!vad_path.empty()){
+@@ -380,6 +327,5 @@ int main(int argc,char**argv){
+   if(!srt_mode) printf("\n");
+   fprintf(stderr,"[sensevoice] done %.2fs\n",(ggml_time_us()-t0)/1e6);
+   free_model(m);
+-  ggml_backend_free(graph_be.backend);
+   return 0;
+ }
+
+
+diff --git a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
+--- a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
++++ b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
+@@ -88,3 +88,3 @@
+ 
+-static bool load_model_weights(const std::string&path,ggml_backend_buffer_type_t buffer_type,model&m){
++static bool load_model_weights(const std::string&path,blink_backend::Session &backend,model&m){
+   gguf_init_params gp={true,&m.ctx_meta};
+@@ -104,3 +104,3 @@
+   }
+-  m.weights_buffer=ggml_backend_alloc_ctx_tensors_from_buft(m.ctx_w,buffer_type);
++  m.weights_buffer=ggml_backend_alloc_ctx_tensors_from_buft(m.ctx_w,backend.buffer_type());
+   if(!m.weights_buffer){fprintf(stderr,"failed to allocate model weights buffer\n");free_model(m);return false;}
+@@ -121,3 +121,3 @@
+     if(!fin){fprintf(stderr,"failed to read model tensor: %s\n",name);free_model(m);return false;}
+-    ggml_backend_tensor_set(weight,read_buffer.data(),0,size);
++    backend.set_input(weight,read_buffer.data(),size);
+   }
+
+diff --git a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
+--- a/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
++++ b/runtime/llama.cpp/sensevoice/funasr-sensevoice/funasr-sensevoice.cpp
+@@ -220,7 +220,7 @@
+   std::vector<float> embed_f32((size_t)ggml_nelements(embed));
+   if(embed->type==GGML_TYPE_F32){
+-    ggml_backend_tensor_get(embed,embed_f32.data(),0,ggml_nbytes(embed));
++    backend.get_output(embed,embed_f32.data(),ggml_nbytes(embed));
+   } else if(embed->type==GGML_TYPE_F16){
+     std::vector<ggml_fp16_t> embed_f16(embed_f32.size());
+-    ggml_backend_tensor_get(embed,embed_f16.data(),0,ggml_nbytes(embed));
++    backend.get_output(embed,embed_f16.data(),ggml_nbytes(embed));
+     for(size_t i=0;i<embed_f32.size();i++)embed_f32[i]=ggml_fp16_to_fp32(embed_f16[i]);

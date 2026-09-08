@@ -75,8 +75,40 @@ impl EngineManager {
         // pointer/slot/journal，不影响其他 implementation 的部署。
         let install_space = self.primary_deployment_space(engine_id, &entry)?;
 
-        // 先检查 adapter self_test——如果已通过，环境已就绪，无需重新安装。
-        // self_test 可能等待 venv python 子进程——阻塞隔离到 spawn_blocking。
+        // 先检查 adapter self_test 和 active deployment 是否仍满足当前请求。
+        // 仅有结构 self_test 通过不能跳过事务：切换模型或 compute preference
+        // 时，active manifest 仍可能是旧 profile，必须重新走 staging → probe →
+        // commit；旧 deployment 由事务保持可回滚。
+        let requested_model_id = config
+            .model_id
+            .as_deref()
+            .filter(|model_id| !model_id.is_empty())
+            .unwrap_or_else(|| entry.adapter.descriptor().model_contract.model_id.as_str())
+            .to_string();
+        let requested_preference = config.compute_preference.unwrap_or(ComputePreference::Auto);
+        let descriptor = entry.adapter.descriptor().clone();
+        let active_space = install_space.clone();
+        let provider_managed = self.provider_descriptors.contains_key(engine_id);
+        let active_matches = tokio::task::spawn_blocking(move || {
+            !provider_managed
+                || active_deployment_matches_request(
+                    &active_space,
+                    &descriptor,
+                    &requested_model_id,
+                    requested_preference,
+                )
+        })
+        .await
+        .map_err(|e| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::Internal,
+                ErrorPhase::Install,
+                "安装前部署检查失败",
+                format!("spawn_blocking join 错误: {e}"),
+            )
+        })?;
+
+        // self_test 可能等待 worker 子进程——阻塞隔离到 spawn_blocking。
         let adapter = Arc::clone(&entry.adapter);
         let pre_test = tokio::task::spawn_blocking(move || adapter.self_test())
             .await
@@ -88,12 +120,12 @@ impl EngineManager {
                     format!("spawn_blocking join 错误: {e}"),
                 )
             })?;
-        if pre_test.passed {
+        if pre_test.passed && active_matches {
             self.commit_status_internal(engine_id, None, |status| {
                 status.environment = EnvironmentHealth::Ready;
             })
             .await?;
-            tracing::info!(engine = %engine_id, "install 跳过（self-test 已通过，环境就绪）");
+            tracing::info!(engine = %engine_id, "install 跳过（active deployment 与当前请求一致且 self-test 通过）");
             return Ok((None, EnvOperationEndState::Completed));
         }
 
@@ -192,6 +224,11 @@ impl EngineManager {
                 ));
             }
         };
+        let model_id = config
+            .model_id
+            .as_deref()
+            .filter(|model_id| !model_id.is_empty())
+            .unwrap_or(provider_descriptor.model_contract.model_id.as_str());
 
         // 更新进度：正在安装
         self.commit_status_internal(engine_id, Some(operation_id), |status| {
@@ -216,8 +253,9 @@ impl EngineManager {
                     &self.binary_provider,
                     install_space.clone(),
                 )
-                .execute(
+                .execute_for_model(
                     operation_id,
+                    model_id,
                     preference,
                     Some(guard.cancel_token()),
                     Some(&sink_adapter),
@@ -237,8 +275,9 @@ impl EngineManager {
                     &self.onnx_provider,
                     install_space.clone(),
                 )
-                .execute(
+                .execute_for_model(
                     operation_id,
+                    model_id,
                     preference,
                     Some(guard.cancel_token()),
                     Some(&sink_adapter),
@@ -487,33 +526,29 @@ impl EngineManager {
 
         let entry = self.get_entry(engine_id).await?;
 
-        // 检查当前环境状态
-        {
-            let status = entry.status.read().await;
-            if status.environment == EnvironmentHealth::Ready {
-                return Ok(());
-            }
-        }
-
-        // 环境未就绪——验证受管部署（主 implementation 部署空间内的
-        // deployment.json + manifest）+ self_test。
-        // 不能仅凭 self_test 通过就标记 Ready。磁盘 IO 与子进程等待在 blocking 线程。
+        // 环境未就绪或请求已变化——验证受管部署（主 implementation 部署
+        // 空间内的 deployment.json + manifest）+ self_test。
+        // 不能仅凭 status.environment 或 adapter self_test 就标记 Ready：
+        // 模型/profile/preference 必须与 active manifest 完全一致。
         let install_space = self.primary_deployment_space(engine_id, &entry)?;
+        let requested_model_id = config
+            .model_id
+            .as_deref()
+            .filter(|model_id| !model_id.is_empty())
+            .unwrap_or_else(|| entry.adapter.descriptor().model_contract.model_id.as_str())
+            .to_string();
+        let requested_preference = config.compute_preference.unwrap_or(ComputePreference::Auto);
+        let descriptor = entry.adapter.descriptor().clone();
+        let provider_managed = self.provider_descriptors.contains_key(engine_id);
         let adapter = Arc::clone(&entry.adapter);
-        let eid = engine_id.clone();
         let verification = tokio::task::spawn_blocking(move || {
-            let has_managed_deployment = match DeploymentStore::read_active(&install_space) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(e) => {
-                    tracing::warn!(
-                        engine = %eid,
-                        error = %e,
-                        "ensure_installed: 读取 deployment.json 失败"
-                    );
-                    false
-                }
-            };
+            let has_managed_deployment = !provider_managed
+                || active_deployment_matches_request(
+                    &install_space,
+                    &descriptor,
+                    &requested_model_id,
+                    requested_preference,
+                );
             let self_test = adapter.self_test();
             (has_managed_deployment, self_test)
         })
@@ -529,7 +564,7 @@ impl EngineManager {
 
         let (has_managed_deployment, self_test) = verification;
         if has_managed_deployment && self_test.passed {
-            // self_test 通过 + 受管 generation 存在 → 标记 Ready
+            // self_test 通过 + active deployment 满足当前请求 → Ready
             self.commit_status_internal(engine_id, None, |status| {
                 status.environment = EnvironmentHealth::Ready;
             })
@@ -687,6 +722,43 @@ impl EngineManager {
     /// 共用同一构造入口，避免归一化规则（如 funasr device=cuda→Cpu）漂移。
     fn read_adapter_config_for_engine(&self, engine_id: &EngineId) -> AdapterConfig {
         super::super::config_source::adapter_config_for_engine(engine_id).unwrap_or_default()
+    }
+}
+
+/// 判断 active deployment 是否仍然满足本次受信配置请求。
+///
+/// adapter 的结构 self-test 只证明“当前某个 worker 能启动”，不能证明它
+/// 对应当前模型或用户请求的 compute preference。模型/profile/preference
+/// 都冻结在 deployment manifest 中；任何一项不匹配都必须重新进入安装事务。
+fn active_deployment_matches_request(
+    space: &crate::infra::local_engine::deployment::DeploymentSpace,
+    descriptor: &crate::domain::local_engine::descriptor::EngineDefinition,
+    requested_model_id: &str,
+    requested_preference: ComputePreference,
+) -> bool {
+    let Ok(Some((_pointer, manifest))) = DeploymentStore::read_active(space) else {
+        return false;
+    };
+
+    if manifest.runtime_kind != descriptor.runtime_kind
+        || manifest.requested_preference != requested_preference
+        || manifest.resolved_profile.model_id != requested_model_id
+        || manifest.model_contract.model_id != requested_model_id
+        || !descriptor.is_profile_allowed(&manifest.resolved_profile)
+    {
+        return false;
+    }
+
+    match &manifest.extension {
+        crate::infra::local_engine::runtime::ManifestExtension::PythonVenv(extension) => {
+            extension.self_test_passed
+        }
+        crate::infra::local_engine::runtime::ManifestExtension::ManagedBinary(extension) => {
+            extension.self_test_passed
+        }
+        crate::infra::local_engine::runtime::ManifestExtension::OnnxRuntime(extension) => {
+            extension.self_test_passed
+        }
     }
 }
 

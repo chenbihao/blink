@@ -53,17 +53,33 @@ pub(super) async fn validate_preference_for_engine(
     preference: ComputePreference,
 ) -> Result<(), CommandError> {
     let catalog = svc.catalog().await;
-    validate_preference_in_catalog(&catalog, engine_id, preference)
+    let model_id = crate::app::local_engine::config_source::current_model_id(engine_id);
+    validate_preference_in_catalog_for_model(&catalog, engine_id, model_id.as_deref(), preference)
 }
 
 /// `validate_preference_for_engine` 的纯函数核心（可测）。
 ///
 /// 策略性偏好（Auto/GpuAuto）直接通过；显式偏好必须在 descriptor
-/// `compute_candidates` 中声明——FunASR descriptor 只声明 CPU，
-/// 因此前端提交 `cuda` 会被拒绝，无法持久化。
+/// `compute_candidates` 中按当前模型声明；未通过采用门的组合会被拒绝，
+/// 无法持久化。
+#[allow(dead_code)]
 fn validate_preference_in_catalog(
     catalog: &[crate::domain::local_engine::EngineDefinition],
     engine_id: &EngineId,
+    preference: ComputePreference,
+) -> Result<(), CommandError> {
+    let model_id = catalog
+        .iter()
+        .find(|descriptor| descriptor.engine_id == *engine_id)
+        .map(|descriptor| descriptor.model_contract.model_id.as_str());
+    validate_preference_in_catalog_for_model(catalog, engine_id, model_id, preference)
+}
+
+/// `validate_preference_in_catalog` 的模型感知纯函数核心。
+fn validate_preference_in_catalog_for_model(
+    catalog: &[crate::domain::local_engine::EngineDefinition],
+    engine_id: &EngineId,
+    model_id: Option<&str>,
     preference: ComputePreference,
 ) -> Result<(), CommandError> {
     // 策略性偏好总是允许——由 resolver 解析为具体 profile
@@ -82,12 +98,13 @@ fn validate_preference_in_catalog(
             )
         })?;
 
-    if !descriptor.has_preference(preference) {
+    let model_id = model_id.unwrap_or(&descriptor.model_contract.model_id);
+    if !descriptor.has_preference_for_model(model_id, preference) {
         return Err(CommandError::new(
             "unsupported_compute_preference",
             format!(
-                "compute preference {:?} 不在引擎 {:} descriptor 声明项中",
-                preference, engine_id
+                "compute preference {:?} 不在引擎 {} 的模型 '{}' descriptor 声明项中",
+                preference, engine_id, model_id
             ),
             false,
         ));
@@ -408,18 +425,16 @@ mod tests {
         assert!(parse_compute_preference("quantum").is_err());
     }
 
-    // ── 0.22.6.1 前端不能持久化 FunASR cuda/auto ──
+    // ── model-scoped compute preference validation ──
 
-    /// 前端提交 cuda → validate_preference_in_catalog 拒绝（不在 descriptor 声明项）。
+    /// SenseVoice 已声明 CUDA profile，模型感知校验允许持久化。
     #[test]
-    fn funasr_cuda_preference_persist_rejected() {
+    fn funasr_sensevoice_cuda_preference_persist_allowed() {
         let adapter = crate::app::local_engine::funasr::make_funasr_adapter();
         let catalog = vec![adapter.descriptor().clone()];
         let eid = EngineId::new(crate::app::local_engine::funasr::FUNASR_ENGINE_ID).unwrap();
 
-        let err = validate_preference_in_catalog(&catalog, &eid, ComputePreference::Cuda)
-            .expect_err("cuda 不在 FunASR descriptor 声明项，必须拒绝持久化");
-        assert_eq!(err.code, "unsupported_compute_preference");
+        assert!(validate_preference_in_catalog(&catalog, &eid, ComputePreference::Cuda).is_ok());
     }
 
     /// 显式 cpu 在 FunASR descriptor 声明项内 → 允许。
@@ -430,7 +445,7 @@ mod tests {
         let eid = EngineId::new(crate::app::local_engine::funasr::FUNASR_ENGINE_ID).unwrap();
         assert!(
             validate_preference_in_catalog(&catalog, &eid, ComputePreference::Cpu).is_ok(),
-            "cpu 是 FunASR 唯一显式可选项"
+            "cpu 是 FunASR 所有模型的保底显式选项"
         );
     }
 

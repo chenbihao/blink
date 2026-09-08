@@ -1,0 +1,11 @@
+diff --git a/runtime/llama.cpp/funasr-common/blink_backend_adapter.h b/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
+--- a/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
++++ b/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
+@@ -242,4 +242,4 @@ public:
+-    void validate_graph(const ggml_cgraph * graph) const {
+-        for (int i = 0; i < graph->n_nodes; ++i) {
+-            const ggml_tensor * node = graph->nodes[i];
++    void validate_graph(ggml_cgraph * graph) const {
++        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++            const ggml_tensor * node = ggml_graph_node(graph, i);
+             if (!ggml_backend_dev_supports_op(device_, node)) {

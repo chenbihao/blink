@@ -104,7 +104,11 @@ function configAreaSignature(entry) {
     const catalog = entry.catalog || {};
     return JSON.stringify({
         engine_id: catalog.engine_id || "",
+        // model-aware catalog：候选相同的 CPU-only 模型切换也要让 hook
+        // 重新投影归一化提示，不能只靠 compute_options 的结构变化。
+        model_id: catalog.model_id || "",
         compute_options: catalog.compute_options || [],
+        undeclared_compute_preferences: catalog.undeclared_compute_preferences || [],
     });
 }
 

@@ -1,0 +1,135 @@
+diff --git a/runtime/llama.cpp/paraformer/funasr-paraformer/funasr-paraformer.cpp b/runtime/llama.cpp/paraformer/funasr-paraformer/funasr-paraformer.cpp
+--- a/runtime/llama.cpp/paraformer/funasr-paraformer/funasr-paraformer.cpp
++++ b/runtime/llama.cpp/paraformer/funasr-paraformer/funasr-paraformer.cpp
+@@ -11,6 +11,7 @@
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstring>
++#include <fstream>
+ #include <map>
+ #include <stdexcept>
+ #include <string>
+@@ -53,10 +54,59 @@ static std::vector<float> compute_fbank(std::vector<float> wav,int&T_out){
+ 
+ // ===== model =====
+ struct cfg{int d_model=512,enc_head=4,enc_blocks=50,enc_kernel=11,dec_blocks=16,dec_att=16,dec3=1,dec_head=4,dec_kernel=11,vocab=8404;float tail=0.45f,thresh=1.0f;};
+-struct model{cfg c;ggml_context*ctx_w=nullptr;std::map<std::string,ggml_tensor*>t;
++struct model{cfg c;gguf_context*gguf=nullptr;ggml_context*ctx_meta=nullptr;ggml_context*ctx_w=nullptr;
++  ggml_backend_buffer_t weights_buffer=nullptr;std::map<std::string,ggml_tensor*>t;
++  std::vector<float>cmvn_shift,cmvn_scale,cif_conv_weight,cif_conv_bias,cif_output_weight,cif_output_bias;
+   ggml_tensor*g(const std::string&n){auto it=t.find(n);if(it==t.end()){fprintf(stderr,"missing %s\n",n.c_str());exit(1);}return it->second;}
+   bool has(const std::string&n){return t.count(n);} };
+ 
++static void free_model(model&m){
++  if(m.gguf){gguf_free(m.gguf);m.gguf=nullptr;}
++  if(m.ctx_meta){ggml_free(m.ctx_meta);m.ctx_meta=nullptr;}
++  if(m.weights_buffer){ggml_backend_buffer_free(m.weights_buffer);m.weights_buffer=nullptr;}
++  if(m.ctx_w){ggml_free(m.ctx_w);m.ctx_w=nullptr;}
++  m.t.clear();
++}
++
++static bool copy_host_f32(const char*name,const std::vector<uint8_t>&bytes,std::vector<float>&dst){
++  if(bytes.size()%sizeof(float)!=0){fprintf(stderr,"host tensor is not f32: %s\n",name);return false;}
++  dst.resize(bytes.size()/sizeof(float));memcpy(dst.data(),bytes.data(),bytes.size());return true;
++}
++
++static bool load_model_weights(const std::string&path,blink_backend::Session&backend,model&m){
++  gguf_init_params gp={true,&m.ctx_meta};m.gguf=gguf_init_from_file(path.c_str(),gp);
++  if(!m.gguf){fprintf(stderr,"load gguf failed\n");return false;}
++  const int64_t n_tensors=gguf_get_n_tensors(m.gguf);
++  ggml_init_params wp={(size_t)(n_tensors+1)*ggml_tensor_overhead(),nullptr,true};m.ctx_w=ggml_init(wp);
++  if(!m.ctx_w){fprintf(stderr,"failed to initialize model tensor context\n");free_model(m);return false;}
++  for(int64_t i=0;i<n_tensors;i++){
++    const char*name=gguf_get_tensor_name(m.gguf,i);ggml_tensor*meta=ggml_get_tensor(m.ctx_meta,name);
++    if(!meta){fprintf(stderr,"missing model tensor metadata: %s\n",name);free_model(m);return false;}
++    ggml_tensor*weight=ggml_dup_tensor(m.ctx_w,meta);ggml_set_name(weight,name);m.t[name]=weight;
++  }
++  m.weights_buffer=ggml_backend_alloc_ctx_tensors_from_buft(m.ctx_w,backend.buffer_type());
++  if(!m.weights_buffer){fprintf(stderr,"failed to allocate model weights buffer\n");free_model(m);return false;}
++  ggml_backend_buffer_set_usage(m.weights_buffer,GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
++  std::ifstream fin(path,std::ios::binary);
++  if(!fin){fprintf(stderr,"failed to reopen model weights: %s\n",path.c_str());free_model(m);return false;}
++  std::vector<uint8_t>read_buffer;const size_t data_offset=gguf_get_data_offset(m.gguf);
++  for(int64_t i=0;i<n_tensors;i++){
++    const char*name=gguf_get_tensor_name(m.gguf,i);ggml_tensor*weight=m.t[name];const size_t size=ggml_nbytes(weight);
++    read_buffer.resize(size);fin.seekg((std::streamoff)(data_offset+gguf_get_tensor_offset(m.gguf,i)),std::ios::beg);
++    fin.read((char*)read_buffer.data(),(std::streamsize)size);
++    if(!fin){fprintf(stderr,"failed to read model tensor: %s\n",name);free_model(m);return false;}
++    backend.set_input(weight,read_buffer.data(),size);
++    std::vector<float>*host=nullptr;
++    if(!strcmp(name,"cmvn.shift"))host=&m.cmvn_shift;else if(!strcmp(name,"cmvn.scale"))host=&m.cmvn_scale;
++    else if(!strcmp(name,"predictor.cif_conv1d.weight"))host=&m.cif_conv_weight;
++    else if(!strcmp(name,"predictor.cif_conv1d.bias"))host=&m.cif_conv_bias;
++    else if(!strcmp(name,"predictor.cif_output.weight"))host=&m.cif_output_weight;
++    else if(!strcmp(name,"predictor.cif_output.bias"))host=&m.cif_output_bias;
++    if(host&&!copy_host_f32(name,read_buffer,*host)){free_model(m);return false;}
++  }
++  return true;
++}
++
+ static ggml_tensor* lin(ggml_context*c,ggml_tensor*w,ggml_tensor*b,ggml_tensor*x){auto y=ggml_mul_mat(c,w,x);return b?ggml_add(c,y,b):y;}
+ static ggml_tensor* lnorm(ggml_context*c,ggml_tensor*x,ggml_tensor*g,ggml_tensor*b){return ggml_add(c,ggml_mul(c,ggml_norm(c,x,LN_EPS),g),b);}
+ // FSMN depthwise (kernel stored [K,D]): out = sum_j w[:,j]*pad(v)[:, t+j]  (+ residual v)
+@@ -115,7 +165,7 @@ static ggml_tensor* dec3_layer(ggml_context*c,model&m,const std::string&p,ggml_t
+ static void add_posenc(std::vector<float>&x,int T,int depth){double inc=log(10000.0)/(depth/2.0-1.0);
+   for(int t=0;t<T;t++){double pos=t+1;for(int i=0;i<depth/2;i++){double its=exp(i*-inc),st=pos*its;x[(size_t)t*depth+i]+=(float)sin(st);x[(size_t)t*depth+depth/2+i]+=(float)cos(st);}}}
+ 
+-// run a ggml graph on CPU, return output [ne0 x ne1] row-major (ne1 rows)
++// Run a ggml graph on the selected backend; return output [ne0 x ne1] row-major.
+ static std::vector<float> run_graph(blink_backend::Session &backend,ggml_context*c,ggml_tensor*out,ggml_tensor*in1,const float*d1,ggml_tensor*in2,const float*d2){
+   ggml_cgraph*gf=ggml_new_graph_custom(c,32768,false);ggml_build_forward_expand(gf,out);
+   ggml_gallocr_t ga=nullptr;
+@@ -147,9 +197,9 @@ int main(int argc,char**argv){
+     return blink_backend::emit_startup_error(backend_options,"backend_cli_invalid",backend_error);
+   }
+   if(backend_options.probe) return blink_backend::emit_probe_result(backend_options);
+-  if(backend_options.requested_backend!="cpu"){
++  if(backend_options.requested_backend!="cpu"&&backend_options.requested_backend!="vulkan"){
+     return blink_backend::emit_startup_error(backend_options,"model_backend_unsupported",
+-      "paraformer is CPU-only until its graph passes the GPU adoption gate");
++      "paraformer supports cpu and vulkan; other backends have not passed the adoption gate");
+   }
+   std::string gguf_path,wav_path,vad_path; int vad_maxseg=30000; bool ids_mode=false,srt_mode=false;
+   bool stdin_server=false;
+@@ -169,21 +219,24 @@ int main(int argc,char**argv){
+   catch(const blink_backend::Error&e){ return blink_backend::emit_startup_error(backend_options,e.code,e.what()); }
+   catch(const std::exception&e){ return blink_backend::emit_startup_error(backend_options,"backend_startup_failed",e.what()); }
+   auto& backend=*backend_ptr;
+-  model m;gguf_init_params gp={false,&m.ctx_w};gguf_context*gg=gguf_init_from_file(gguf_path.c_str(),gp);if(!gg){fprintf(stderr,"gguf load failed\n");return 1;}
+-  auto rdi=[&](const char*k,int d){int i=gguf_find_key(gg,k);return i<0?d:(int)gguf_get_val_u32(gg,i);};
+-  auto rdf=[&](const char*k,float d){int i=gguf_find_key(gg,k);return i<0?d:gguf_get_val_f32(gg,i);};
++  model m;try{if(!load_model_weights(gguf_path,backend,m))return blink_backend::emit_startup_error(backend_options,"model_load_failed","failed to load paraformer weights into the selected backend");}catch(const std::exception&e){free_model(m);return blink_backend::emit_startup_error(backend_options,"model_load_failed",e.what());}
++  auto rdi=[&](const char*k,int d){int i=gguf_find_key(m.gguf,k);return i<0?d:(int)gguf_get_val_u32(m.gguf,i);};
++  auto rdf=[&](const char*k,float d){int i=gguf_find_key(m.gguf,k);return i<0?d:gguf_get_val_f32(m.gguf,i);};
+   m.c.enc_blocks=rdi("pf.enc.num_blocks",50);m.c.dec_blocks=rdi("pf.dec.num_blocks",16);m.c.dec_att=rdi("pf.dec.att_layer_num",16);
+   m.c.dec3=rdi("pf.dec.decoders3",1);m.c.vocab=rdi("pf.vocab_size",8404);m.c.tail=rdf("pf.predictor.tail_threshold",0.45f);m.c.thresh=rdf("pf.predictor.threshold",1.0f);
+-  std::vector<std::string> vocab; {int ki=gguf_find_key(gg,"pf.vocab"); if(ki>=0){int nv=gguf_get_arr_n(gg,ki); vocab.resize(nv); for(int i=0;i<nv;i++){const char*s=gguf_get_arr_str(gg,ki,i); vocab[i]=s?s:"";}}}
+-  for(int i=0;i<gguf_get_n_tensors(gg);i++){const char*nm=gguf_get_tensor_name(gg,i);m.t[nm]=ggml_get_tensor(m.ctx_w,nm);}gguf_free(gg);
++  std::vector<std::string> vocab; {int ki=gguf_find_key(m.gguf,"pf.vocab"); if(ki>=0){int nv=gguf_get_arr_n(m.gguf,ki); vocab.resize(nv); for(int i=0;i<nv;i++){const char*s=gguf_get_arr_str(m.gguf,ki,i); vocab[i]=s?s:"";}}}
+   const int D=m.c.d_model,F=560,V=m.c.vocab;
+   bool emit_ids = ids_mode || vocab.empty();   // fall back to ids if the gguf has no vocab
+ 
+-  float*shift=(float*)m.g("cmvn.shift")->data,*scale=(float*)m.g("cmvn.scale")->data;
+-  float*cw=(float*)m.g("predictor.cif_conv1d.weight")->data; // [512,512,3] = [o][i][j]
+-  float*cb=(float*)m.g("predictor.cif_conv1d.bias")->data;   // [512]
+-  float*ow=(float*)m.g("predictor.cif_output.weight")->data; // [1,512]
+-  float ob=((float*)m.g("predictor.cif_output.bias")->data)[0];
++  if(m.cmvn_shift.size()!=F||m.cmvn_scale.size()!=F||m.cif_conv_weight.size()!=(size_t)D*D*3||
++     m.cif_conv_bias.size()!=D||m.cif_output_weight.size()!=D||m.cif_output_bias.size()!=1){
++    free_model(m);return blink_backend::emit_startup_error(backend_options,"model_host_tensor_invalid","paraformer host-side tensors have unexpected shapes");
++  }
++  const float*shift=m.cmvn_shift.data(),*scale=m.cmvn_scale.data();
++  const float*cw=m.cif_conv_weight.data(); // [512,512,3] = [o][i][j]
++  const float*cb=m.cif_conv_bias.data();   // [512]
++  const float*ow=m.cif_output_weight.data(); // [1,512]
++  const float ob=m.cif_output_bias[0];
+ 
+   // Full pipeline (fbank -> CMVN -> encoder -> CIF -> decoder) on one wav window; returns text.
+   auto run_seg=[&](const std::vector<float>& wav) -> std::string {
+@@ -274,5 +327,5 @@ int main(int argc,char**argv){
+   if(!srt_mode) printf("\n");
+   fprintf(stderr,"[paraformer] done %.2fs\n",(ggml_time_us()-t0)/1e6);
+-  if(m.ctx_w) ggml_free(m.ctx_w);
++  free_model(m);
+   return 0;
+ }

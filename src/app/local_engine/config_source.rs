@@ -5,8 +5,7 @@
 //!
 //! ## 去重背景
 //!
-//! 此前 config→AdapterConfig 的构造逻辑（含 0.22.6 的
-//! `device=cuda → Cpu` 归一化业务规则）在 commands、maintenance 兼容层、
+//! 此前 config→AdapterConfig 的构造逻辑（含旧 `device` 值的安全归一化）在 commands、maintenance 兼容层、
 //! `EngineManager::read_adapter_config_for_engine` 和 main.rs 自启链路
 //! 各有一份副本。规则漂移会导致 repair 用 A 配置装、start 用 B 配置跑。
 //! 现在所有调用方都经过本模块。
@@ -25,34 +24,58 @@ pub fn funasr_adapter_config() -> AdapterConfig {
     funasr_adapter_config_from(&config.local_engine)
 }
 
+/// 将历史 FunASR 模型别名收敛到当前 GGUF 模型 id。
+///
+/// 该映射只处理已知旧值；未知模型保留原值并由 descriptor/registry 后续 fail closed，
+/// 不把未知身份静默伪装成另一个模型。
+pub fn normalize_funasr_model_id(model_id: &str) -> String {
+    crate::domain::config::stt_config::legacy_model_to_gguf_id(model_id)
+        .unwrap_or(model_id)
+        .to_string()
+}
+
 /// 从 `SttConfig.local_engine` 构造 FunASR `AdapterConfig`（纯函数，可测）。
 ///
-/// 0.22.6 归一化：descriptor 只声明 CPU profile，历史配置残留的
-/// `device=cuda` 一律归一化为 `Cpu`——显式 `Cuda` 会在 `resolve_profile`
-/// 中因无 CUDA profile 直接报错。
-///
-/// 0.22.6.1 设备唯一真相：`engine_config.device` 同步归一化为 `"cpu"`，
-/// 使 compute_preference 与 engine_config.device 不再输出矛盾值——
-/// 防止诊断和其他消费者看到 `Cpu` + `cuda` 双真相。历史 STT device
-/// 字段仅保留 wire/config 兼容，不是启动执行真相。
+/// `device` 是旧配置兼容字段。它先按闭合 preference 解析，再依据当前
+/// 模型的 descriptor 候选归一化；因此未来模型声明 Vulkan/CUDA 时可以保留
+/// 合法显式值，而只声明 CPU 的模型会安全收敛到 CPU。未知值不会穿透到
+/// 启动层，也不会凭空制造 profile。
 pub fn funasr_adapter_config_from(
     local: &crate::domain::config::stt_config::LocalEngineConfig,
 ) -> AdapterConfig {
-    if local.device != "cpu" {
+    let model_id = normalize_funasr_model_id(&local.funasr_model);
+    let descriptor = crate::app::local_engine::funasr::make_funasr_adapter();
+    let requested = ComputePreference::parse(&local.device);
+    let preference = descriptor
+        .descriptor()
+        .normalize_preference_for_model(&model_id, requested);
+
+    if requested.is_none() {
         tracing::warn!(
             device = %local.device,
-            "FunASR 历史配置 device 非 cpu，归一化为 Cpu（0.22.6 仅支持 CPU profile）"
+            model = %model_id,
+            "FunASR 配置 device 未知，按当前模型候选安全归一化"
+        );
+    } else if Some(preference) != requested {
+        tracing::warn!(
+            device = %local.device,
+            model = %model_id,
+            normalized = %preference,
+            "FunASR 配置 backend 不属于当前模型，按 descriptor 候选归一化"
         );
     }
 
     let mut funasr_config =
         crate::app::local_engine::funasr::FunasrEngineConfig::from_stt_config(local);
-    // engine_config.device 归一化——与 compute_preference=Cpu 保持一致
-    funasr_config.device = "cpu".to_string();
+    funasr_config.funasr_model = model_id.clone();
+    // engine_config.device 与 compute_preference 保持同一真相，供后续 worker
+    // 消费；最终实际 backend 仍由 ResolvedProfile 决定。
+    funasr_config.device = preference.to_string();
 
     AdapterConfig {
         preferred_port: Some(local.server_port),
-        compute_preference: Some(ComputePreference::Cpu),
+        model_id: Some(model_id),
+        compute_preference: Some(preference),
         engine_config: funasr_config.to_json(),
     }
 }
@@ -65,6 +88,7 @@ pub fn paddleocr_adapter_config() -> AdapterConfig {
 
     AdapterConfig {
         preferred_port: None,
+        model_id: None,
         compute_preference: Some(ocr_config.compute_preference),
         engine_config: engine_config.to_json(),
     }
@@ -86,11 +110,32 @@ pub fn adapter_config_for_engine(engine_id: &EngineId) -> Option<AdapterConfig> 
 /// 读取当前引擎的 compute preference（catalog/current 投影用）。
 pub fn current_compute_preference(engine_id: &EngineId) -> ComputePreference {
     match engine_id.as_str() {
-        crate::app::local_engine::funasr::FUNASR_ENGINE_ID => ComputePreference::Cpu,
+        crate::app::local_engine::funasr::FUNASR_ENGINE_ID => {
+            let config = crate::app::stt_config::get_stt_config();
+            funasr_adapter_config_from(&config.local_engine)
+                .compute_preference
+                .unwrap_or(ComputePreference::Auto)
+        }
         crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID => {
             crate::domain::config::ocr_config::get_ocr_config().compute_preference
         }
         _ => ComputePreference::Auto,
+    }
+}
+
+/// 读取当前引擎选择的模型 id，供 catalog/安装解析共用。
+pub fn current_model_id(engine_id: &EngineId) -> Option<String> {
+    match engine_id.as_str() {
+        crate::app::local_engine::funasr::FUNASR_ENGINE_ID => {
+            let model_id = crate::app::stt_config::get_stt_config()
+                .local_engine
+                .funasr_model;
+            Some(normalize_funasr_model_id(&model_id))
+        }
+        crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID => {
+            Some(crate::app::local_engine::implementation_registry::paddleocr_inprocess_model_id())
+        }
+        _ => None,
     }
 }
 
@@ -106,8 +151,7 @@ mod tests {
         assert!(!config.engine_config.is_null());
     }
 
-    /// 0.22.6.1：历史 device=cuda 配置在 config_source 输出的
-    /// compute_preference 与 engine_config.device 必须一致（都是 CPU）。
+    /// SenseVoice 已声明 CUDA profile，历史 device=cuda 配置应保持一致。
     #[test]
     fn funasr_config_source_computes_and_device_consistent() {
         let local = crate::domain::config::stt_config::LocalEngineConfig {
@@ -118,10 +162,46 @@ mod tests {
         };
         let config = funasr_adapter_config_from(&local);
 
-        // compute_preference 归一化为 Cpu
+        assert_eq!(config.compute_preference, Some(ComputePreference::Cuda));
+        assert_eq!(config.engine_config["device"], "cuda");
+    }
+
+    #[test]
+    fn paraformer_vulkan_preference_is_preserved() {
+        let local = crate::domain::config::stt_config::LocalEngineConfig {
+            funasr_model: crate::app::local_engine::funasr::gguf::GGUF_PARAFORMER_ID.to_string(),
+            device: "vulkan".to_string(),
+            ..Default::default()
+        };
+        let config = funasr_adapter_config_from(&local);
+
+        assert_eq!(config.compute_preference, Some(ComputePreference::Vulkan));
+        assert_eq!(config.engine_config["device"], "vulkan");
+    }
+
+    #[test]
+    fn unknown_funasr_device_is_normalized_to_current_model_cpu() {
+        let local = crate::domain::config::stt_config::LocalEngineConfig {
+            funasr_model: crate::app::local_engine::funasr::gguf::GGUF_SENSEVOICE_ID.to_string(),
+            device: "quantum".to_string(),
+            ..Default::default()
+        };
+        let config = funasr_adapter_config_from(&local);
+        assert_eq!(
+            config.model_id.as_deref(),
+            Some(local.funasr_model.as_str())
+        );
         assert_eq!(config.compute_preference, Some(ComputePreference::Cpu));
-        // engine_config.device 同步归一化——不再输出矛盾值
         assert_eq!(config.engine_config["device"], "cpu");
+    }
+
+    #[test]
+    fn legacy_funasr_model_ids_normalize_once_at_config_boundary() {
+        assert_eq!(
+            normalize_funasr_model_id("iic/SenseVoiceSmall"),
+            crate::app::local_engine::funasr::gguf::GGUF_SENSEVOICE_ID
+        );
+        assert_eq!(normalize_funasr_model_id("unknown-model"), "unknown-model");
     }
 
     /// engine_config 归一化后仍可被 `FunasrEngineConfig` 反序列化（wire 兼容）。
@@ -137,7 +217,10 @@ mod tests {
         let back: crate::app::local_engine::funasr::FunasrEngineConfig =
             serde_json::from_value(config.engine_config).unwrap();
         assert_eq!(back.device, "cpu");
-        assert_eq!(back.funasr_model, "paraformer-zh");
+        assert_eq!(
+            back.funasr_model,
+            crate::app::local_engine::funasr::gguf::GGUF_PARAFORMER_ID
+        );
     }
 
     #[test]

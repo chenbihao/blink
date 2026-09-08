@@ -34,11 +34,12 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::local_engine::{
     AdapterConfig, CancelOutcome, DeleteConflictReason, DesiredState, EngineDefinition,
     EngineDiagnostic, EngineModelDescriptor, EngineModelStatus, EngineOperation, EngineStatus,
-    EngineStatusSnapshot, EnvOperationEndState, EnvironmentHealth, ErrorPhase, HealthMapping,
-    ImplementationId, ImplementationRegistry, LaunchContext, LocalEngineAdapter, LocalEngineError,
-    LocalEngineErrorCode, ModelCompatibility, ModelDeleteConflict, ModelHealth, ModelInstallState,
-    ModelOperationKind, ModelOperationResult, ModelOperationStage, ModelVerificationState,
-    OperationKind, OperationStage, ProcessState, ServiceEpoch, ServiceHealth,
+    EngineStatusSnapshot, EnvOperationEndState, EnvironmentHealth, ErrorPhase, FallbackEntry,
+    HealthMapping, ImplementationId, ImplementationRegistry, LaunchContext, LocalEngineAdapter,
+    LocalEngineError, LocalEngineErrorCode, ModelCompatibility, ModelDeleteConflict, ModelHealth,
+    ModelInstallState, ModelOperationKind, ModelOperationResult, ModelOperationStage,
+    ModelVerificationState, OperationKind, OperationStage, ProcessState, ServiceEpoch,
+    ServiceHealth,
 };
 use crate::infra::local_engine::deployment::DeploymentStore;
 use crate::infra::local_engine::lease::{ProcessLease, remove_lease, write_lease};

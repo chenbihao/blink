@@ -506,19 +506,63 @@ impl EngineManager {
             }
         }
 
-        // backend 一致性验证——期望来自 launch snapshot 冻结的 profile
-        if let Some(ref obs) = mapping.backend {
-            let profile = entry.current_profile().await;
-            if let Some(ref profile) = profile {
-                let verification = runtime::verify_backend_consistency(profile.backend, Some(obs));
-                if verification.state == BackendState::Error {
-                    return Err(LocalEngineError::with_detail(
-                        LocalEngineErrorCode::BackendMismatch,
-                        ErrorPhase::Health,
-                        "backend 不匹配",
-                        verification.mismatch_reason.unwrap_or_default(),
-                    ));
-                }
+        // backend 一致性验证——期望来自 launch snapshot 冻结的 profile。
+        // Ready 只接受 requested == resolved == actual；同为 GPU 但跨 CUDA /
+        // Vulkan 也不能以 degraded 冒充已按请求运行。
+        if mapping.model == ModelHealth::Ready {
+            let profile = entry.current_profile().await.ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Health,
+                    "运行 profile 缺失",
+                    "Model Ready 时找不到 start 冻结的 ResolvedProfile",
+                )
+            })?;
+            let obs = mapping.backend.as_ref().ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::BackendMismatch,
+                    ErrorPhase::Health,
+                    "模型 Ready 但缺少 actual backend 观测",
+                    "health 未回报 actual backend",
+                )
+            })?;
+            if !obs.consistent {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::BackendMismatch,
+                    ErrorPhase::Health,
+                    "backend health 字段无效",
+                    "health 的 requested/actual/device 字段无法形成可信观测",
+                ));
+            }
+            let requested_backend = obs.requested_backend.ok_or_else(|| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::BackendMismatch,
+                    ErrorPhase::Health,
+                    "模型 Ready 但缺少 requested backend 观测",
+                    "health 未回报 requested backend，无法证明实际执行后端满足冻结 profile",
+                )
+            })?;
+            if requested_backend != profile.backend {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::BackendMismatch,
+                    ErrorPhase::Health,
+                    "requested backend 不匹配",
+                    format!(
+                        "health requested={}，ResolvedProfile backend={}",
+                        requested_backend, profile.backend
+                    ),
+                ));
+            }
+            let verification = runtime::verify_backend_consistency(profile.backend, Some(obs));
+            if verification.state != BackendState::Healthy {
+                return Err(LocalEngineError::with_detail(
+                    LocalEngineErrorCode::BackendMismatch,
+                    ErrorPhase::Health,
+                    "backend 不匹配",
+                    verification
+                        .mismatch_reason
+                        .unwrap_or_else(|| "requested/actual backend 未严格一致".to_string()),
+                ));
             }
         }
 

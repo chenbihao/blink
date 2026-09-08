@@ -17,6 +17,7 @@
 //!   因此 fsmn-vad.gguf 不进入模型资产（phase §5.8.3 决策）。
 
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 use crate::domain::local_engine::{
     AdapterConfig, ErrorPhase, LaunchContext, LaunchDescriptor, LocalEngineError,
@@ -266,6 +267,55 @@ pub(crate) fn gguf_deployment_space() -> crate::infra::local_engine::deployment:
     )
 }
 
+/// 解析 deployment manifest 中的相对路径，并拒绝路径穿越/绝对路径。
+fn canonical_deployment_path(
+    deployment_dir: &Path,
+    relative: &str,
+) -> Result<PathBuf, LocalEngineError> {
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "deployment manifest 路径非法",
+            "worker 路径必须是 deployment 根目录内的受限相对路径",
+        ));
+    }
+    let canonical_root = deployment_dir.canonicalize().map_err(|e| {
+        LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "GGUF deployment 路径无法校验",
+            format!("{e}"),
+        )
+    })?;
+    let canonical_path = deployment_dir.join(path).canonicalize().map_err(|e| {
+        LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "deployment manifest 路径无法校验",
+            format!("{e}"),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "deployment manifest 路径越界",
+            "worker 路径必须留在已校验 deployment 根目录内",
+        ));
+    }
+    Ok(canonical_path)
+}
+
 /// GGUF 环境 self-test：active deployment 存在且 worker exe 就位。
 ///
 /// 返回 Err(reason) 时附带给用户的可行动指引。
@@ -313,7 +363,7 @@ pub fn build_funasr_gguf_launch_descriptor(
     })?;
 
     // 1. active deployment 中的 worker exe（GGUF implementation 空间 = engine 级兼容真源）
-    let (_pointer, deployment_dir) =
+    let (deployment_pointer, deployment_dir) =
         crate::infra::local_engine::deployment::DeploymentStore::active_dir(
             &gguf_deployment_space(),
         )
@@ -327,6 +377,35 @@ pub fn build_funasr_gguf_launch_descriptor(
                     "FunASR GGUF runtime 未安装。请在设置页「引擎」→「本地模型运行时」中点击「安装环境」。",
                 )
             })?;
+    let deployment_manifest =
+        crate::infra::local_engine::deployment::DeploymentStore::read_slot_manifest(
+            &gguf_deployment_space(),
+            &deployment_pointer.slot,
+        )
+        .map_err(|e| {
+            LocalEngineError::with_detail(
+                LocalEngineErrorCode::EnvironmentMissing,
+                ErrorPhase::Start,
+                "GGUF deployment manifest 无法读取",
+                format!("{e}"),
+            )
+        })?;
+    if deployment_manifest.resolved_profile != ctx.resolved_profile {
+        return Err(LocalEngineError::with_detail(
+            LocalEngineErrorCode::InvalidConfig,
+            ErrorPhase::Start,
+            "运行中的 profile 与 active deployment 不一致",
+            format!(
+                "active profile='{}' backend='{}' artifact='{}'，requested profile='{}' backend='{}' artifact='{}'",
+                deployment_manifest.resolved_profile.profile_id,
+                deployment_manifest.resolved_profile.backend,
+                deployment_manifest.resolved_profile.artifact_id,
+                ctx.resolved_profile.profile_id,
+                ctx.resolved_profile.backend,
+                ctx.resolved_profile.artifact_id
+            ),
+        ));
+    }
 
     // 2. 选中模型 → spec → payload 目录
     let model_id = &config.funasr_model;
@@ -379,7 +458,31 @@ pub fn build_funasr_gguf_launch_descriptor(
     }
 
     // 4. 组装 argv（模型特定：sensevoice/paraformer 单 -m；nano 双文件）
-    let exe = deployment_dir.join(spec.worker_exe);
+    let executable = match &deployment_manifest.extension {
+        crate::infra::local_engine::runtime::ManifestExtension::ManagedBinary(ext) => {
+            ext.executable.clone()
+        }
+        _ => {
+            return Err(LocalEngineError::with_detail(
+                LocalEngineErrorCode::EnvironmentMissing,
+                ErrorPhase::Start,
+                "active deployment 不是 ManagedBinary",
+                "FunASR GGUF worker 需要 ManagedBinary manifest extension",
+            ));
+        }
+    };
+    if executable != spec.worker_exe {
+        return Err(LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "worker executable 与模型不匹配",
+            format!(
+                "manifest executable='{executable}'，模型需要='{}'",
+                spec.worker_exe
+            ),
+        ));
+    }
+    let exe = canonical_deployment_path(&deployment_dir, &executable)?;
     if !exe.is_file() {
         return Err(LocalEngineError::with_detail(
             LocalEngineErrorCode::EnvironmentMissing,
@@ -416,6 +519,44 @@ pub fn build_funasr_gguf_launch_descriptor(
             );
         }
     }
+    let canonical_deployment = deployment_dir.canonicalize().map_err(|e| {
+        LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "GGUF deployment 路径无法校验",
+            format!("{e}"),
+        )
+    })?;
+    let backend_dir = match &deployment_manifest.extension {
+        crate::infra::local_engine::runtime::ManifestExtension::ManagedBinary(ext) => ext
+            .backend_dir
+            .as_deref()
+            .map(|relative| canonical_deployment_path(&deployment_dir, relative))
+            .transpose()?
+            .unwrap_or_else(|| canonical_deployment.clone()),
+        _ => canonical_deployment.clone(),
+    };
+    let canonical_backend_dir = backend_dir.canonicalize().map_err(|e| {
+        LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "backend 目录缺失",
+            format!("{e}"),
+        )
+    })?;
+    if !canonical_backend_dir.starts_with(&canonical_deployment) || !canonical_backend_dir.is_dir()
+    {
+        return Err(LocalEngineError::with_detail(
+            LocalEngineErrorCode::EnvironmentMissing,
+            ErrorPhase::Start,
+            "backend 目录越界",
+            "backend DLL 只能从已校验 deployment 目录加载",
+        ));
+    }
+    args.push("--backend".to_string());
+    args.push(ctx.resolved_profile.backend.to_string());
+    args.push("--backend-dir".to_string());
+    args.push(canonical_backend_dir.display().to_string());
     args.push("--stdin-server".to_string());
 
     // 5. 受限环境变量（身份注入约定与旧 Python server 一致；worker 回显校验）
@@ -461,6 +602,9 @@ pub fn build_funasr_gguf_launch_descriptor(
         worker = %spec.worker_exe,
         model = %manifest.model_id,
         revision = %manifest.revision,
+        backend = %ctx.resolved_profile.backend,
+        profile = %ctx.resolved_profile.profile_id,
+        artifact = %ctx.resolved_profile.artifact_id,
         transport = "stdio",
         worker_threads,
         thread_mode = if config.num_threads.is_some() { "configured" } else { "safe_auto" },

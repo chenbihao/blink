@@ -172,7 +172,9 @@ mod tests {
                             runtime_kind: RuntimePlan::PythonVenv,
                             artifact_ids: vec![artifact.clone()],
                             compute_candidates: vec![ComputeCandidate {
+                                model_id: "fake-model".to_string(),
                                 preference: ComputePreference::Cpu,
+                                backend: ComputeBackend::Cpu,
                                 profile_id: "cpu-x64".to_string(),
                                 artifact_id: artifact,
                             }],

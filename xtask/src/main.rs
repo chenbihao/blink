@@ -2,14 +2,14 @@
 //!
 //! 用法：
 //!   cargo xtask plugins        编译 Rust 插件（仅编译到 target/release，不复制到 bin）
-//!   cargo xtask release        构建 GGUF worker + 插件 + 资源校验 + cargo tauri build
+//!   cargo xtask release        下载固定 FunASR runtime + 插件 + 资源校验 + cargo tauri build
 //!   cargo xtask release --debug 同上，但用 debug profile（DevTools 可用，F12 打开）
 //!   cargo xtask release-check   仅运行 release 资源前置校验（不打包）
 //!   cargo xtask tiptap         打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
 //!   cargo xtask icons          拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
 //!   cargo xtask models         从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
 //!   cargo xtask lint           前端防新增检查（CSS 禁止新增带 hex fallback 的 var()）
-//!   cargo xtask funasr-worker  从锁定 FunASR 源码构建常驻 GGUF STT worker（0.22.7）
+//!   cargo xtask funasr-worker  构建带动态 backend 的 FunASR runtime artifact（0.22.16.3）
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
 //! 不可控）并用相对路径定位 ps1，在 CI 的 tauri-action 上下文里找不到脚本。
@@ -27,9 +27,10 @@
 //! 1. **嵌入数据存在且有效**：所有 `include_str!` 引用的资源必须存在且格式正确。
 //!    （0.22.10：Python 脚本语法与 pip 锁文件校验已随 Python/uv 栈退役删除。）
 //! 2. **必要许可存在**：项目根 `LICENSE` 和 Lucide `LICENSE.lucide.txt` 必须存在。
-//! 3. **GGUF 供应链校验**：worker-lock.json 的 hash/来源锁定（0.22.7）。
+//! 3. **GGUF 供应链校验**：worker-lock.json 与 runtime artifact manifest 的 hash/来源锁定。
 //! 4. **排除规则**：`resources/` 目录下不包含模型文件（.pt/.pth/.onnx/.gguf/
-//!    .params/.dll）、staging/generation 子目录、venv、下载缓存或 `__pycache__`。
+//!    .params/.bin）或未被 FunASR artifact manifest 声明的 DLL、staging/generation
+//!    子目录、venv、下载缓存或 `__pycache__`。
 //!    0.22.10 起此规则同时承担「禁止 Python/uv 栈回流」的守卫职责。
 //! 5. **ONNX asset-lock 校验**：ORT DLL/模型 hash 锁定（0.22.8）。
 
@@ -216,9 +217,8 @@ const REQUIRED_LICENSES: &[(&str, &str)] = &[
 ];
 
 /// 不应出现在 resources/ 目录下的模型文件扩展名。
-/// 不应出现在 resources/ 目录下的模型文件扩展名。
-/// 0.22.8-B 新增 .dll（禁止 ORT DLL 进入制品）。
-const FORBIDDEN_MODEL_EXTS: &[&str] = &[".pt", ".pth", ".onnx", ".gguf", ".params", ".bin", ".dll"];
+/// FunASR runtime 的 DLL 由独立 artifact manifest 管理；其余 resources/ 仍禁止 DLL。
+const FORBIDDEN_MODEL_EXTS: &[&str] = &[".pt", ".pth", ".onnx", ".gguf", ".params", ".bin"];
 
 /// 不应出现在 resources/ 目录下的子目录名。
 const FORBIDDEN_DIRS: &[&str] = &[
@@ -340,8 +340,11 @@ fn check_release_resources() {
     // 2. 必要许可文件存在
     check_required_licenses(&mut failures);
 
-    // 3. GGUF worker 供应链：来源锁文件与构建常量一致 + 随发布 manifest 就位
+    // 3. GGUF worker/runtime 供应链：来源锁、artifact manifest 与完整文件闭包
     check_gguf_worker_supply_chain(&mut failures);
+    // runtime-lock 同时服务 bundled base 和 GPU 增量安装；只允许真实
+    // release asset 的 SHA-256 进入应用 release。
+    funasr_worker::validate_runtime_lock(&mut failures);
 
     // 4. 排除规则：resources/ 下无模型/staging/generation/venv/cache/__pycache__
     check_exclusion_rules(&mut failures);
@@ -434,14 +437,9 @@ fn check_gguf_worker_supply_chain(failures: &mut Vec<String>) {
         }
     }
 
-    // 随发布 manifest（构建产物）就位——exe 不入 Git，release 前必须先构建
-    let manifest = root.join("resources/bin/funasr-worker/manifest.json");
-    if !manifest.is_file() {
-        failures.push(format!(
-            "GGUF worker 构建产物缺失（{}）。请先运行 `cargo xtask funasr-worker`",
-            manifest.display()
-        ));
-    }
+    // 随发布 manifest（构建产物）就位——exe/DLL 不入 Git，release 前由固定
+    // runtime release 下载并校验；本地开发可先运行 `cargo xtask funasr-worker`。
+    funasr_worker::validate_bundled_runtime(failures);
 
     // 模型 URL 浮动 ref 校验——拒绝 resolve/main，要求固定 commit SHA
     if let Some(models) = lock.get("models").and_then(|v| v.as_array()) {
@@ -688,6 +686,13 @@ fn scan_forbidden_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>) {
                 {
                     found.push(format!("禁止模型文件: resources/{rel}"));
                 }
+                if ext_lower == ".dll"
+                    && !rel.starts_with("bin/funasr-worker/")
+                    && !rel.starts_with("bin/funasr-worker-vulkan/")
+                    && !rel.starts_with("bin/funasr-worker-cuda/")
+                {
+                    found.push(format!("禁止未声明 runtime DLL: resources/{rel}"));
+                }
             }
             // 检查 __pycache__ 残留
             if let Some(parent) = path.parent()
@@ -802,7 +807,7 @@ fn which_node() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let task = args.get(1).unwrap_or_else(|| {
-        panic!("用法: cargo xtask <plugins|copy|release|icons|tiptap|models|lint> [--debug]")
+        panic!("用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [参数]")
     });
 
     match task.as_str() {
@@ -811,7 +816,9 @@ fn main() {
         "release" => {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
-            funasr_worker::build_workers(); // release 唯一入口必须自行生成 gitignore 的 worker 产物
+            // 普通应用 release 不编译 FunASR/llama.cpp，只消费 runtime-lock.json
+            // 指定的不可变 artifact；本地重建仍由 `funasr-worker` 子命令提供。
+            funasr_worker::fetch_fixed_runtime();
             build_plugins(true, debug); // 打包期：编译 + 复制到 bin
             check_release_resources(); // release 资源前置校验（含 Python 语法）
             let root = workspace_root();
@@ -828,10 +835,10 @@ fn main() {
         "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
         "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
         "lint" => lint_frontend(),                    // 前端防新增检查（var hex fallback 冻结基线）
-        "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
+        "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT runtime artifact（0.22.16.3）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [参数]"
             )
         }
     }

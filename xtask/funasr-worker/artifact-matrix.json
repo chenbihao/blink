@@ -1,0 +1,32 @@
+{
+  "$schema": "blink://xtask/funasr-worker/artifact-matrix",
+  "schema": 1,
+  "runtime_version": "0.22.16.3",
+  "platform": "windows",
+  "architecture": "x86_64",
+  "artifacts": [
+    {
+      "id": "funasr-runtime-windows-x64-base",
+      "flavor": "base",
+      "depends_on": [],
+      "packaging": "base"
+    },
+    {
+      "id": "funasr-runtime-windows-x64-vulkan",
+      "flavor": "vulkan",
+      "depends_on": ["funasr-runtime-windows-x64-base"],
+      "packaging": "incremental-backend"
+    },
+    {
+      "id": "funasr-runtime-windows-x64-cuda",
+      "flavor": "cuda",
+      "depends_on": ["funasr-runtime-windows-x64-base"],
+      "packaging": "incremental-backend"
+    }
+  ],
+  "notes": {
+    "cpu": "CPU is always dynamically loaded from the base artifact.",
+    "vulkan": "The Windows Vulkan loader is a driver-provided dependency and is not bundled.",
+    "cuda": "CUDA architecture list is an explicit build input; no build-machine GPU is consulted."
+  }
+}

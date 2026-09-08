@@ -1,0 +1,10 @@
+diff --git a/runtime/llama.cpp/funasr-common/blink_backend_adapter.h b/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
+--- a/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
++++ b/runtime/llama.cpp/funasr-common/blink_backend_adapter.h
+@@ -80,4 +80,5 @@
+ #if defined(_WIN32)
+-    return "ggml-" + backend + ".dll";
++    if (backend == "cpu") return "ggml-cpu-x64.dll";
++    return "ggml-" + backend + ".dll";
+ #else
+     return "libggml-" + backend + ".so";

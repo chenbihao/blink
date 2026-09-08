@@ -43,7 +43,9 @@ fn make_fake_adapter_with_options(
                         runtime_kind: RuntimePlan::PythonVenv,
                         artifact_ids: vec![artifact.clone()],
                         compute_candidates: vec![ComputeCandidate {
+                            model_id: "fake-model".to_string(),
                             preference: ComputePreference::Cpu,
+                            backend: ComputeBackend::Cpu,
                             profile_id: "cpu-x64".to_string(),
                             artifact_id: artifact,
                         }],
@@ -293,6 +295,7 @@ async fn inject_launch(entry: &Arc<EngineEntry>, model_id: &str, instance_id: &s
             endpoint,
         },
         profile: ResolvedProfile {
+            model_id: model_id.to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("fake-artifact").unwrap(),
@@ -1466,8 +1469,10 @@ fn backend_ready_with_cpu_observation_passes() {
         model: ModelHealth::Ready,
         environment: None,
         backend: Some(crate::domain::local_engine::BackendObservation {
+            requested_backend: Some(crate::domain::local_engine::ComputeBackend::Cpu),
             actual_backend: crate::domain::local_engine::ComputeBackend::Cpu,
             device_name: "CPU".to_string(),
+            device_id: None,
             consistent: true,
         }),
         model_id: Some("iic/SenseVoiceSmall".to_string()),
@@ -1482,8 +1487,10 @@ fn backend_ready_with_cpu_observation_passes() {
 fn backend_cpu_profile_rejects_cuda_observation() {
     let profile_backend = crate::domain::local_engine::ComputeBackend::Cpu;
     let obs = crate::domain::local_engine::BackendObservation {
+        requested_backend: Some(crate::domain::local_engine::ComputeBackend::Cuda),
         actual_backend: crate::domain::local_engine::ComputeBackend::Cuda,
         device_name: "RTX 4060".to_string(),
+        device_id: None,
         consistent: true,
     };
     let verification = crate::infra::local_engine::runtime::verify_backend_consistency(
@@ -1743,6 +1750,7 @@ fn write_full_deployment(space: &DeploymentSpace, install_id: &str) {
         install_id: install_id.to_string(),
         requested_preference: ComputePreference::Cpu,
         resolved_profile: crate::infra::local_engine::runtime::ResolvedProfile {
+            model_id: "fake-model".to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: crate::infra::local_engine::runtime::ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("fake-artifact").unwrap(),
