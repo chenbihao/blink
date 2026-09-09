@@ -141,7 +141,7 @@ use windows::Win32::Foundation::{
     GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SetLastError, WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea,
+    DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmFlush,
     DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
@@ -3223,7 +3223,14 @@ pub fn get_pin_window_rect(app: &AppHandle, label: &str) -> Option<(i32, i32, u3
     Some((x, y, w, h, dpr))
 }
 
-/// Apply or remove DWM Cloak on a window.
+/// 物理鼠标左键瞬时按下状态（`GetAsyncKeyState` 高位，全局键态、任意线程可查）。
+///
+/// Pin 前端模态拖动中收不到 pointerup，`onMoved` 安全网以此判定拖动是否真正
+/// 结束——150ms 无移动可能只是拖动暂停，不能直接清拖动标志。
+pub fn is_left_button_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 }
+}
 ///
 /// Cloak = true: DWM 层瞬间"雾化"窗口（无 fade 动画），WS_VISIBLE 仍为 on。
 /// Cloak = false: 恢复正常可见性。
@@ -3240,6 +3247,103 @@ pub fn apply_cloak(hwnd: HWND, on: bool) {
             std::mem::size_of::<i32>() as u32,
         );
     }
+}
+
+/// 选区截图专用：隐藏主窗（DWM Cloak + hide）+ 右键菜单，零 fade 动画。
+///
+/// 0.22.14 起本函数只服务**手动选区截图**（chord/本地入口，用户决策）：
+/// 选区截图不再全量 cloak 所有 Blink 窗口，只把主窗与右键菜单请出桌面；
+/// 设置页/对话窗/贴图等保持可见（所见即所得）。AI headless 截图的净化
+/// 走 `capture_orchestrator::CaptureGuard`，不经此函数。
+///
+/// **和 `hide()` 的区别**：
+/// - `hide()` 走 `ShowWindow(SW_HIDE)`，触发 Windows 11 系统级 fade-out（~200ms 视觉延迟）
+/// - `hide_for_screenshot()` 先 `DwmSetWindowAttribute(DWMWA_CLOAK, TRUE)` 让 DWM
+///   **立即**从合成里剔除窗口（无动画），再调 `ShowWindow(SW_HIDE)` 落 Win32 状态
+///
+/// 调用侧应在 `begin_session` 后调 `unhide_after_screenshot` 撤销 cloak，
+/// 否则下次 `show()` 出来的窗口是不可见的。
+pub fn hide_for_screenshot(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        if let Ok(hwnd) = win.hwnd() {
+            apply_cloak(HWND(hwnd.0 as _), true);
+        }
+        match win.hide() {
+            Ok(()) => {
+                transition_visibility(false);
+                let _ = app.emit(EventNames::HIDDEN, ());
+            }
+            Err(error) => {
+                if let Ok(hwnd) = win.hwnd() {
+                    apply_cloak(HWND(hwnd.0 as _), false);
+                }
+                tracing::warn!(%error, "hide_for_screenshot: 主窗口隐藏失败，已撤销 cloak");
+            }
+        }
+    }
+    // 联动隐藏右键菜单（保留窗口供下次复用）
+    if let Some(menu_win) = app.get_webview_window("context-menu") {
+        let _ = menu_win.hide();
+    }
+}
+
+/// 撤销 `hide_for_screenshot` 的 cloak 标志。
+///
+/// 只清 cloak，不 `show`——主窗此时仍应保持 hidden 状态（选区截图完成后主窗不该出来）。
+/// 下次 `invoke()` 时 `show()` 会正常工作。
+pub fn unhide_after_screenshot(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main")
+        && let Ok(hwnd) = win.hwnd()
+    {
+        apply_cloak(HWND(hwnd.0 as _), false);
+    }
+}
+
+/// 等主窗真正从桌面上消失（截图前调用，防"BitBlt 拍到主窗"）。
+///
+/// 配 `hide_for_screenshot()` 使用时无需等 fade 动画——cloak 是瞬时的，只需要一次
+/// DwmFlush 保证 DWM 完成一帧新合成（不含主窗）即可。
+///
+/// 调用侧应保证跑在 blocking 线程（tokio `spawn_blocking`），DwmFlush 是同步阻塞。
+pub fn wait_frame_after_hide(app: &AppHandle) {
+    use std::time::Instant;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+
+    let t0 = Instant::now();
+
+    // DwmFlush x 1：cloak 后瞬时生效，一次 flush 保证 DWM 完成不含主窗的新合成。
+    // 0.8.8 优化：从 2 次减到 1 次，实测截图无残影，省 ~10ms。
+    unsafe {
+        let _ = DwmFlush();
+    }
+    let t_flush = t0.elapsed();
+
+    // 轮询 IsWindowVisible —— cloak + hide 后立刻就是 false，这里主要作日志用
+    let hwnd = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| HWND(h.0 as _));
+    let mut polled_ms = 0u64;
+    let mut visible_final = None;
+    if let Some(hwnd) = hwnd {
+        loop {
+            let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+            visible_final = Some(visible);
+            if !visible || polled_ms >= 100 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(8));
+            polled_ms += 8;
+        }
+    }
+
+    tracing::debug!(
+        flush_ms = t_flush.as_millis() as u64,
+        poll_ms = polled_ms,
+        total_ms = t0.elapsed().as_millis() as u64,
+        visible_final = ?visible_final,
+        "wait_frame_after_hide 完成"
+    );
 }
 
 /// 0.18.3：创建便签预热窗口。

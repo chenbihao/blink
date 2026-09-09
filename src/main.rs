@@ -1334,6 +1334,7 @@ app::commands::screenshot_copy_rgba,
             app::commands::screenshot_pin_move,
             app::commands::screenshot_pin_refresh,
             app::commands::screenshot_pin_get_rect,
+            app::commands::win32_left_button_down,
             // 多 Pin N+1 + pin 保存
             app::commands::pin_spare_ready,
             app::commands::pin_save_clipboard,

@@ -819,6 +819,15 @@ pub fn screenshot_pin_get_rect(app: tauri::AppHandle, label: String) -> Option<s
         .map(|(x, y, w, h, dpr)| serde_json::json!({ "x": x, "y": y, "w": w, "h": h, "dpr": dpr }))
 }
 
+/// 查询物理鼠标左键是否按下（`GetAsyncKeyState` 全局瞬时态）。
+///
+/// Pin 前端模态拖动中收不到 pointerup，`onMoved` 安全网用本查询判定拖动是否
+/// 真正结束；150ms 无移动可能只是拖动暂停，不能直接清拖动标志。
+#[tauri::command]
+pub fn win32_left_button_down() -> bool {
+    crate::infra::platform::window::is_left_button_down()
+}
+
 /// 将 pin 窗口图片复制到剪贴板。
 #[tauri::command]
 pub async fn pin_save_clipboard(request: tauri::ipc::Request<'_>) -> Result<(), String> {

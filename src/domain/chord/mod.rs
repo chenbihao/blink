@@ -694,7 +694,7 @@ impl ChordAction for ScreenshotAction {
             capability_id: "start_region_capture",
             input_param: None,
             extra_args: vec![],
-            hide_main_before: false, // start_region_capture SurfacePort 实现内部调 hide_for_screenshot
+            hide_main_before: false, // start_region_capture capability 按 LocalSurface origin 自行隐藏主窗（0.22.17）
         }
     }
 }

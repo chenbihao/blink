@@ -962,13 +962,7 @@ async fn private_corpus_standalone_worker_end_to_end() {
 
     let mut command = tokio::process::Command::new(&worker_exe);
     command
-        .args([
-            "-m",
-            model.to_str().unwrap(),
-            "--stdin-server",
-            "--backend-dir",
-            worker_dir.to_str().unwrap(),
-        ])
+        .args(["-m", model.to_str().unwrap(), "--stdin-server"])
         .current_dir(&worker_dir)
         .env("BLINK_ENGINE_ID", FUNASR_ENGINE_ID)
         .env("BLINK_INSTANCE_ID", "private-corpus")

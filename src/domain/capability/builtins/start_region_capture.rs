@@ -74,8 +74,13 @@ impl Capability for StartRegionCapture {
             });
         }
 
+        // 0.22.17 修订（用户决策）：手动入口（chord/launcher 等 LocalCommand/LocalSurface）
+        // 隐藏主窗 + 右键菜单（0.22.14 前的既有行为）；AI 等其他来源一律不动 Blink 窗口。
+        // 0.22.14 曾在此入口全量 cloak 所有 Blink 窗口，导致手动截图时设置页等被隐藏。
+        let hide_blink_main = hide_blink_main_for_origin(ctx.origin);
+
         surface
-            .start_region_capture()
+            .start_region_capture(hide_blink_main)
             .await
             .map_err(|e| CapabilityError::Internal {
                 detail: e.to_string(),
@@ -85,6 +90,18 @@ impl Capability for StartRegionCapture {
             summary: "已启动截图选区，等待用户拖选".into(),
         })
     }
+}
+
+/// 按调用来源决定选区截图是否隐藏 Blink 主窗 + 右键菜单。
+///
+/// - `LocalCommand` / `LocalSurface`（chord、launcher 等本地手动入口）→ true
+/// - `LocalAi` / `Mcp` / `Cli` → false（AI 发起的选区截图所见即所得，不隐藏）
+fn hide_blink_main_for_origin(origin: crate::domain::capability::policy::InvocationOrigin) -> bool {
+    use crate::domain::capability::policy::InvocationOrigin;
+    matches!(
+        origin,
+        InvocationOrigin::LocalCommand | InvocationOrigin::LocalSurface
+    )
 }
 
 inventory::submit!(crate::domain::capability::CapabilityEntry {
@@ -117,5 +134,17 @@ mod tests {
     fn schema_description_non_empty() {
         let s = StartRegionCapture.schema();
         assert!(!s.description.is_empty());
+    }
+
+    #[test]
+    fn hide_blink_main_only_for_local_manual_origins() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        // 手动入口：隐藏主窗 + 右键菜单
+        assert!(hide_blink_main_for_origin(InvocationOrigin::LocalCommand));
+        assert!(hide_blink_main_for_origin(InvocationOrigin::LocalSurface));
+        // AI/MCP/CLI：一律不隐藏（0.22.17 用户决策）
+        assert!(!hide_blink_main_for_origin(InvocationOrigin::LocalAi));
+        assert!(!hide_blink_main_for_origin(InvocationOrigin::Mcp));
+        assert!(!hide_blink_main_for_origin(InvocationOrigin::Cli));
     }
 }

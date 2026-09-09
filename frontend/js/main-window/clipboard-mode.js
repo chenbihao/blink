@@ -18,7 +18,7 @@
 //! **UX**：
 //! - 进入：输入框清空 + placeholder 变为 "搜索剪贴板历史…" + 模式徽章
 //! - 输入：每个字符直接调 searchClipboard（40ms 防抖）
-//! - ESC：退出剪贴板模式 → 回到正常搜索（不隐藏窗口）
+//! - ESC：有多选时先清空选择；无多选直接隐藏窗口（模式由 HIDDEN reset 兜底复位）
 //! - 选中外壳隐藏 / SHOWN / HIDDEN：自动复位
 
 import {queryEl, resultsEl} from "./dom.js";

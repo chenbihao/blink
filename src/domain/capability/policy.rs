@@ -311,7 +311,12 @@ pub trait SurfacePort: Send + Sync {
     fn open_chat(&self, prefill: Option<&str>) -> Result<(), SurfaceError>;
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError>;
     /// 启动区域截图选区。async 因截图时序需等待 DWM 合成。
-    async fn start_region_capture(&self) -> Result<(), SurfaceError>;
+    ///
+    /// `hide_blink_main`：是否隐藏 Blink 主窗 + 右键菜单（0.22.17 修订，用户决策）。
+    /// 手动入口（chord/launcher 等 LocalCommand/LocalSurface 来源）为 true——
+    /// 底图不含主窗；AI 等其他来源为 false——选区截图一律不动 Blink 窗口
+    /// （所见即所得）。全量 cloak 净化只属于 headless `screenshot` capability。
+    async fn start_region_capture(&self, hide_blink_main: bool) -> Result<(), SurfaceError>;
     fn start_image_editor(&self, source: EditorSourceRef) -> Result<(), SurfaceError>;
     fn start_content_editor(&self, request: ContentEditorRequest) -> Result<(), SurfaceError>;
 
@@ -806,7 +811,7 @@ mod tests {
             fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
                 Ok(())
             }
-            async fn start_region_capture(&self) -> Result<(), SurfaceError> {
+            async fn start_region_capture(&self, _: bool) -> Result<(), SurfaceError> {
                 Ok(())
             }
             fn start_image_editor(&self, _: EditorSourceRef) -> Result<(), SurfaceError> {

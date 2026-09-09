@@ -34,6 +34,20 @@ impl EngineManager {
         ))
     }
 
+    /// 当前构建对 ManagedBinary 引擎期望的 artifact id（其余引擎 `None`）。
+    ///
+    /// 部署制品漂移检测的"期望侧"真源：`ProviderDescriptor` 由编译期 wiring
+    /// 构造（funasr → `FUNASR_GGUF_ARTIFACT_ID`），随源码演进/回退而更新。
+    fn expected_managed_artifact_id(&self, engine_id: &EngineId) -> Option<String> {
+        let descriptor = self.provider_descriptors.get(engine_id)?;
+        match &descriptor.install_plan {
+            crate::infra::local_engine::providers::InstallPlan::ManagedBinary(plan) => {
+                Some(plan.archive_artifact_id.as_str().to_string())
+            }
+            _ => None,
+        }
+    }
+
     // ── install ─────────────────────────────────────────────────────────────
 
     /// 安装/更新引擎环境。
@@ -89,12 +103,36 @@ impl EngineManager {
                 )
             })?;
         if pre_test.passed {
-            self.commit_status_internal(engine_id, None, |status| {
-                status.environment = EnvironmentHealth::Ready;
+            // 制品漂移门禁：self-test 通过但部署来自旧一代构建时不得跳过重装
+            // （0.22.16 事故：源码回退后残留的动态 runtime self-test 仍通过，
+            //  推理慢 ~10 倍却无任何报错）。磁盘读取在 blocking 线程。
+            let space = install_space.clone();
+            let expected = self.expected_managed_artifact_id(engine_id);
+            let drifted = tokio::task::spawn_blocking(move || {
+                matches!(
+                    DeploymentStore::read_active(&space),
+                    Ok(Some((_pointer, manifest)))
+                        if deployment_artifact_drift(&manifest, expected.as_deref()).is_some()
+                )
             })
-            .await?;
-            tracing::info!(engine = %engine_id, "install 跳过（self-test 已通过，环境就绪）");
-            return Ok((None, EnvOperationEndState::Completed));
+            .await
+            .map_err(|e| {
+                LocalEngineError::with_detail(
+                    LocalEngineErrorCode::Internal,
+                    ErrorPhase::Install,
+                    "安装前检查失败",
+                    format!("spawn_blocking join 错误: {e}"),
+                )
+            })?;
+            if !drifted {
+                self.commit_status_internal(engine_id, None, |status| {
+                    status.environment = EnvironmentHealth::Ready;
+                })
+                .await?;
+                tracing::info!(engine = %engine_id, "install 跳过（self-test 已通过，环境就绪）");
+                return Ok((None, EnvOperationEndState::Completed));
+            }
+            tracing::info!(engine = %engine_id, "install: 部署制品漂移，执行重装");
         }
 
         // claim 进程级操作（原子 busy 检查 + 登记）
@@ -364,10 +402,13 @@ impl EngineManager {
     async fn do_probe(&self, engine_id: &EngineId, entry: &EngineEntry) -> Result<(), String> {
         let adapter = Arc::clone(&entry.adapter);
         let eid = engine_id.clone();
+        let expected_artifact = self.expected_managed_artifact_id(engine_id);
 
-        let outcome = tokio::task::spawn_blocking(move || probe_blocking(&eid, &adapter))
-            .await
-            .map_err(|e| format!("probe spawn_blocking join 错误: {e}"))??;
+        let outcome = tokio::task::spawn_blocking(move || {
+            probe_blocking(&eid, &adapter, expected_artifact.as_deref())
+        })
+        .await
+        .map_err(|e| format!("probe spawn_blocking join 错误: {e}"))??;
 
         match outcome {
             ProbeBlockingOutcome::NoDeployment => {
@@ -501,21 +542,26 @@ impl EngineManager {
         let install_space = self.primary_deployment_space(engine_id, &entry)?;
         let adapter = Arc::clone(&entry.adapter);
         let eid = engine_id.clone();
+        let expected_artifact = self.expected_managed_artifact_id(engine_id);
         let verification = tokio::task::spawn_blocking(move || {
-            let has_managed_deployment = match DeploymentStore::read_active(&install_space) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
+            let (has_managed_deployment, drift) = match DeploymentStore::read_active(&install_space)
+            {
+                Ok(Some((_pointer, manifest))) => (
+                    true,
+                    deployment_artifact_drift(&manifest, expected_artifact.as_deref()),
+                ),
+                Ok(None) => (false, None),
                 Err(e) => {
                     tracing::warn!(
                         engine = %eid,
                         error = %e,
                         "ensure_installed: 读取 deployment.json 失败"
                     );
-                    false
+                    (false, None)
                 }
             };
             let self_test = adapter.self_test();
-            (has_managed_deployment, self_test)
+            (has_managed_deployment, drift, self_test)
         })
         .await
         .map_err(|e| {
@@ -527,8 +573,16 @@ impl EngineManager {
             )
         })?;
 
-        let (has_managed_deployment, self_test) = verification;
-        if has_managed_deployment && self_test.passed {
+        let (has_managed_deployment, drift, self_test) = verification;
+        if let Some((installed, expected)) = &drift {
+            tracing::warn!(
+                engine = %engine_id,
+                installed = %installed,
+                expected = %expected,
+                "ensure_installed: 部署制品漂移（旧一代构建残留），忽略现有部署执行重装"
+            );
+        }
+        if has_managed_deployment && drift.is_none() && self_test.passed {
             // self_test 通过 + 受管 generation 存在 → 标记 Ready
             self.commit_status_internal(engine_id, None, |status| {
                 status.environment = EnvironmentHealth::Ready;
@@ -697,13 +751,38 @@ impl EngineManager {
 /// 铁则：探测是**只读恢复**——只做 fail-closed 事务收尾和结构校验，
 /// 不同步 hash GB 模型、不启动 Python/OCR 服务进程、不进入主链路。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ProbeBlockingOutcome {
+pub(super) enum ProbeBlockingOutcome {
     /// 无 active 部署——保持默认 Missing。
     NoDeployment,
     /// active 部署有效 + self_test 通过 → Ready。
     Ready { install_id: String, slot: String },
     /// active 部署存在但 self_test 失败 → Broken。
     Broken { reason: String },
+}
+
+/// 部署制品漂移检测（纯函数，无 IO）。
+///
+/// 背景（0.22.16 复盘）：源码回退/实验分支切换后，磁盘上可能残留旧一代
+/// 构建安装的 deployment——self-test 仍通过，但 runtime 行为/性能已与当前
+/// 源码脱节（曾导致 STT 推理慢 ~10 倍且无任何报错）。比对 deployment
+/// manifest 的 `artifact.artifact_id` 与当前构建期望：
+/// - `expected = None`（非 ManagedBinary 引擎）→ 不校验
+/// - 部署侧 artifact_id 为空（legacy 代际反序列化产物）→ 信任存量，不触发重装
+/// - 只比 id 不比 sha：dev 重建与 release 制品哈希天然不同，比 sha 会在
+///   dev/安装版交替使用时反复触发无谓重装
+///
+/// 返回 `Some((installed, expected))` 表示漂移，调用方应忽略现有部署并重装。
+pub(super) fn deployment_artifact_drift(
+    manifest: &crate::infra::local_engine::runtime::DeploymentManifest,
+    expected: Option<&str>,
+) -> Option<(String, String)> {
+    let expected = expected?;
+    let installed = manifest.artifact.artifact_id.as_str();
+    if installed.is_empty() || installed == expected {
+        None
+    } else {
+        Some((installed.to_string(), expected.to_string()))
+    }
 }
 
 /// probe 的全部阻塞工作：fail-closed 事务恢复（全部部署空间）+ active 部署
@@ -718,9 +797,10 @@ enum ProbeBlockingOutcome {
 /// engine 级兼容真源（0.22.7 GGUF / 0.22.8 OCR in-process 的 production
 /// implementation 都映射到该空间）；per-implementation 就绪在 start 时按
 /// resolved implementation 的空间 fail-closed 复核。
-fn probe_blocking(
+pub(super) fn probe_blocking(
     engine_id: &EngineId,
     adapter: &Arc<dyn LocalEngineAdapter>,
+    expected_artifact: Option<&str>,
 ) -> Result<ProbeBlockingOutcome, String> {
     // 1. 崩溃恢复：逐空间处理未收尾事务（fail-closed）。
     for space in DeploymentStore::spaces_for_engine(engine_id)
@@ -745,9 +825,23 @@ fn probe_blocking(
     let engine_space = crate::infra::local_engine::deployment::DeploymentSpace::engine(engine_id);
     let active = DeploymentStore::read_active(&engine_space)
         .map_err(|e| format!("读取 deployment.json 失败: {e}"))?;
-    let Some((pointer, _manifest)) = active else {
+    let Some((pointer, manifest)) = active else {
         return Ok(ProbeBlockingOutcome::NoDeployment);
     };
+
+    // 2.5 制品漂移检测：active 部署是旧一代构建残留时按 Broken 上报，
+    //     交由 ensure_installed/install 重装（探测本身保持只读铁则）。
+    if let Some((installed, expected)) = deployment_artifact_drift(&manifest, expected_artifact) {
+        tracing::warn!(
+            engine = %engine_id,
+            installed = %installed,
+            expected = %expected,
+            "探测: 部署制品漂移（旧一代构建残留）→ Broken，待重装"
+        );
+        return Ok(ProbeBlockingOutcome::Broken {
+            reason: format!("部署制品漂移 installed={installed} expected={expected}"),
+        });
+    }
 
     // 3. self_test（venv python 子进程等待——阻塞，必须在 blocking 线程）。
     let self_test = adapter.self_test();

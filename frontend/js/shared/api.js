@@ -314,6 +314,12 @@ export function screenshotPinGetRect(label) {
     return invoke("screenshot_pin_get_rect", {label});
 }
 
+/** 物理鼠标左键是否按下（Win32 GetAsyncKeyState 全局瞬时态）。
+ *  Pin 模态拖动中收不到 pointerup，安全网以此判定拖动是否真正结束。 */
+export function win32LeftButtonDown() {
+    return invoke("win32_left_button_down");
+}
+
 /** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。
  *  0.19.14 raw IPC：PNG 直接传 Uint8Array，path 走 headers。 */
 export function screenshotSave(pngData, path) {

@@ -499,29 +499,43 @@ impl SurfacePort for TauriDomainEnv {
         Ok(())
     }
 
-    async fn start_region_capture(&self) -> Result<(), SurfaceError> {
-        // 0.22.14：复用 capture_orchestrator 的净化截图事务 guard。
-        // 替换旧 ScreenshotAction 只隐藏 main/context-menu 的分叉逻辑。
-        // 默认按 auto 行为：cloak 全部 Blink 窗口，截图后恢复。
+    async fn start_region_capture(&self, hide_blink_main: bool) -> Result<(), SurfaceError> {
+        // 0.22.17 修订（用户决策）：选区截图不再全量 cloak 所有 Blink 窗口
+        //（0.22.14 曾导致手动触发时设置页/对话窗等一并被临时隐藏）。
+        // - hide_blink_main=true（chord/launcher 等手动入口）：仅隐藏主窗 + 右键菜单
+        //   （0.22.14 前行为），底图不含主窗，其余 Blink 窗口所见即所得。
+        // - false（AI 等其他来源）：不动任何 Blink 窗口。
+        // 两条路径都持进程级截图事务锁，与 AI 净化截图（capture_with_cleanse）互斥。
+        // hide 分支时序：record_fg_hwnd → hide_for_screenshot → wait_frame_after_hide
+        // → begin_session → unhide_after_screenshot → show_screenshot_overlay
         crate::infra::platform::screenshot::record_fg_hwnd();
 
         let app = self.app.clone();
         let meta = tokio::task::spawn_blocking(
             move || -> Result<crate::infra::platform::screenshot::ScreenCaptureMeta, String> {
-                // 使用 CaptureGuard 净化 Blink 窗口（CloakAllBlink，无特定目标）
-                let _guard = crate::app::capture_orchestrator::CaptureGuard::new(
-                    &app,
-                    crate::app::capture_orchestrator::CleansePlan::CloakAllBlink,
-                    None,
-                )
-                .map_err(|e| match e {
-                    crate::app::capture_orchestrator::GuardError::ActivationFailed(d)
-                    | crate::app::capture_orchestrator::GuardError::Other(d) => d,
-                })?;
+                let _tx_lock = crate::app::capture_orchestrator::acquire_capture_tx_lock();
 
-                // guard 已完成 cloak + DwmFlush，此时截图不含 Blink 窗口
-                crate::infra::platform::screenshot::begin_session()
-                // _guard Drop 时自动恢复 cloak
+                if hide_blink_main {
+                    crate::infra::platform::window::hide_for_screenshot(&app);
+                    crate::infra::platform::window::wait_frame_after_hide(&app);
+                }
+
+                match crate::infra::platform::screenshot::begin_session() {
+                    Ok(meta) => {
+                        if hide_blink_main {
+                            // 只解除 cloak；主窗保持 hidden（选区截图完成后主窗不弹出）
+                            crate::infra::platform::window::unhide_after_screenshot(&app);
+                        }
+                        Ok(meta)
+                    }
+                    Err(e) => {
+                        // 截屏失败也要撤销 cloak
+                        if hide_blink_main {
+                            crate::infra::platform::window::unhide_after_screenshot(&app);
+                        }
+                        Err(e)
+                    }
+                }
             },
         )
         .await

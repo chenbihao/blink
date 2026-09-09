@@ -18,6 +18,12 @@ let onEditMessage = null;
 /** 用户是否手动上滚（不在底部）——为 true 时暂停自动滚到底部 */
 let userScrolledUp = false;
 
+/** thinking 内容是否贴底跟随——流式期间自动滚到最新思考文本，用户在内部上滚即交还滚动权 */
+let thinkingStickBottom = true;
+
+/** thinking 内容贴底判定阈值（px），距底小于该值视为仍在底部 */
+const THINKING_STICK_THRESHOLD = 24;
+
 /** @type {HTMLElement|null} "回到底部" 浮动按钮 */
 let scrollBottomBtn = null;
 
@@ -93,6 +99,7 @@ export function clearMessages() {
     if (messagesEl) messagesEl.innerHTML = "";
     // 重置滚动状态
     userScrolledUp = false;
+    thinkingStickBottom = true;
     if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
 }
 
@@ -127,6 +134,8 @@ export function renderUserMessage(text) {
  */
 export function createAssistantMessage() {
     if (!messagesEl) return null;
+    // 新一条流式消息：思考内容恢复贴底跟随
+    thinkingStickBottom = true;
     const el = document.createElement("div");
     el.className = "chat-msg chat-msg-assistant streaming waiting";
     // 等待响应：显示 typing 指示器（三点跳动），首条内容到达时由 update/finalize 替换
@@ -146,8 +155,12 @@ function renderTypingIndicator() {
 }
 
 /**
- * 更新 assistant 消息内容（流式渲染）。
+ * 更新 assistant 消息内容（流式渲染，rAF 节流每帧调用）。
  * 0.12.3：思考过程独立气泡（不再嵌在 assistant 气泡内部），渲染为独立卡片。
+ *
+ * 不整体重建 innerHTML：thinking 块与正文各自增量同步。整体重建会让
+ * .thinking-content 每帧归零 scrollTop——输出期间用户滚不动思考内容、
+ * 滚动条恒在顶部，且 details 展开态会被强制弹回。
  * @param {HTMLElement} el 消息元素
  * @param {string} text 累积 Markdown 文本
  * @param {string} [thinkingText] 累积 thinking 文本（可选）
@@ -156,10 +169,83 @@ function renderTypingIndicator() {
 export function updateAssistantMessage(el, text, thinkingText, thinkingDone) {
     if (!el) return;
     el.classList.remove("waiting");
-    // 思考过程作为独立气泡，渲染在 assistant 气泡之前
-    const thinkingHtml = renderThinkingBlock(thinkingText, thinkingDone);
-    el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
+    el.querySelector(".chat-typing")?.remove();
+    syncThinkingBlock(el, thinkingText, thinkingDone);
+    syncAssistantContent(el, text);
     scrollToBottom();
+}
+
+/**
+ * 增量同步流式消息内的 thinking 折叠块（节点复用）。
+ *
+ * 已存在则只更新 .thinking-content 内容——details 展开态与内部滚动位置
+ * 天然保留；贴底跟随时滚到最新思考文本，用户上滚后停在原位。
+ * 首条正文到达（thinkingDone 翻转）时折叠一次，此后展开/收起交给用户。
+ * @param {HTMLElement} el 消息元素
+ * @param {string} thinkingText 累积 thinking 文本
+ * @param {boolean} thinkingDone thinking 是否已结束
+ */
+function syncThinkingBlock(el, thinkingText, thinkingDone) {
+    const block = el.querySelector(".thinking-block");
+    if (!thinkingText) {
+        block?.remove();
+        return;
+    }
+    if (!block) {
+        const fresh = buildThinkingBlock(thinkingText, thinkingDone);
+        const content = fresh.querySelector(".thinking-content");
+        bindThinkingScroll(content);
+        el.prepend(fresh);
+        if (thinkingStickBottom && content) content.scrollTop = content.scrollHeight;
+        return;
+    }
+    if (!thinkingDone) {
+        // thinking 重启（正文后又有 thinking）：回到流式跟随态
+        delete block.dataset.thinkingDone;
+    } else if (!block.dataset.thinkingDone) {
+        // 首条正文到达：折叠一次；收起后不再自动跟随，展开回看时停在用户位置
+        block.dataset.thinkingDone = "1";
+        block.open = false;
+        thinkingStickBottom = false;
+    }
+    const content = block.querySelector(".thinking-content");
+    if (content) {
+        // 流式中每帧重渲染；结束后 buffer 引用不再变化——按引用相等跳过重复渲染
+        if (!thinkingDone || block._lastThinkingText !== thinkingText) {
+            block._lastThinkingText = thinkingText;
+            content.innerHTML = renderMarkdown(thinkingText);
+            if (thinkingStickBottom) content.scrollTop = content.scrollHeight;
+        }
+    }
+}
+
+/**
+ * 监听思考内容内部滚动：贴底保持跟随，上滚即停止（滚回底部自动恢复）。
+ * scroll 事件只在用户滚动/程序赋值 scrollTop 时触发，内容增长不触发——
+ * 跟随动作由 syncThinkingBlock 每帧驱动，这里只维护贴底标记。
+ * @param {HTMLElement|null} contentEl .thinking-content 元素
+ */
+function bindThinkingScroll(contentEl) {
+    if (!contentEl) return;
+    contentEl.addEventListener("scroll", () => {
+        thinkingStickBottom =
+            contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight < THINKING_STICK_THRESHOLD;
+    });
+}
+
+/**
+ * 增量同步流式正文容器（不存在则创建，追加在 thinking 块之后）。
+ * @param {HTMLElement} el 消息元素
+ * @param {string} text 累积 Markdown 文本
+ */
+function syncAssistantContent(el, text) {
+    let content = el.querySelector(".chat-assistant-content");
+    if (!content) {
+        content = document.createElement("div");
+        content.className = "chat-assistant-content";
+        el.appendChild(content);
+    }
+    content.innerHTML = renderMarkdown(text);
 }
 
 /**
@@ -417,18 +503,34 @@ function startEditMessage(el, originalText) {
     });
 }
 
+/** Lucide brain 图标（chat 窗口未引入 sprite，与 chat.html 现有内联 SVG 风格一致） */
+const THINKING_ICON = `<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg>`;
+
 /**
- * 渲染 thinking 折叠块（0.12.2 样式优化：卡片风格，与 tool card 统一）。
+ * 构造 thinking 折叠块元素（0.12.2 样式：卡片风格，与 tool card 统一）。
+ * 流式渲染经 syncThinkingBlock 复用同一节点；finalize 走 renderThinkingBlock 字符串路径全量重建。
+ * @param {string} text thinking 文本
+ * @param {boolean} collapsed 是否收起（默认展开）
+ * @returns {HTMLDetailsElement}
+ */
+function buildThinkingBlock(text, collapsed) {
+    const block = document.createElement("details");
+    block.className = "chat-card thinking-block";
+    if (!collapsed) block.open = true;
+    block.innerHTML = `<summary>${THINKING_ICON}<span class="thinking-label">思考过程</span></summary>`
+        + `<div class="thinking-content">${renderMarkdown(text)}</div>`;
+    return block;
+}
+
+/**
+ * 渲染 thinking 折叠块 HTML 字符串（finalize / 历史恢复的全量重建路径用）。
  * @param {string} text thinking 文本
  * @param {boolean} collapsed 是否收起（默认展开）
  * @returns {string} HTML 字符串
  */
 function renderThinkingBlock(text, collapsed) {
     if (!text) return "";
-    const openAttr = collapsed ? "" : " open";
-    // Lucide brain 图标内联（chat 窗口未引入 sprite，与 chat.html 现有内联 SVG 风格一致）
-    const icon = `<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg>`;
-    return `<details class="chat-card thinking-block"${openAttr}><summary>${icon}<span class="thinking-label">思考过程</span></summary><div class="thinking-content">${renderMarkdown(text)}</div></details>`;
+    return buildThinkingBlock(text, collapsed).outerHTML;
 }
 
 /**

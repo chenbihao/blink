@@ -1738,14 +1738,49 @@ fn make_gguf_impl_registry(engine_id: &EngineId) -> ImplementationRegistry {
 
 /// 在指定部署空间写入完整 active 部署（manifest + 指针）。
 fn write_full_deployment(space: &DeploymentSpace, install_id: &str) {
+    write_full_deployment_with_artifact(space, install_id, "fake-artifact");
+}
+
+/// 同 [`write_full_deployment`]，但可指定部署制品 id（漂移检测测试用）。
+fn write_full_deployment_with_artifact(
+    space: &DeploymentSpace,
+    install_id: &str,
+    artifact_id: &str,
+) {
     use crate::infra::local_engine::deployment::DEPLOYMENT_POINTER_SCHEMA_VERSION;
-    use crate::infra::local_engine::runtime::MANIFEST_SCHEMA_VERSION;
 
     let slot = "slot-a";
     std::fs::create_dir_all(space.slot_dir(slot)).unwrap();
+    let manifest = manifest_with_artifact(space.engine_id(), install_id, artifact_id);
+    std::fs::write(
+        space.slot_manifest_path(slot),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    DeploymentStore::write_pointer(
+        space,
+        &DeploymentPointer {
+            install_id: install_id.to_string(),
+            slot: slot.to_string(),
+            updated_at_ms: 0,
+            schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
+        },
+    )
+    .unwrap();
+}
+
+/// 构造指定制品 id 的完整 `DeploymentManifest`（不落盘）。
+///
+/// 制品 id 经 JSON 注入——绕过 `ArtifactId::new` 的非空校验，
+/// 覆盖 legacy 部署反序列化出空 id 的信任场景。
+fn manifest_with_artifact(
+    engine_id: &EngineId,
+    install_id: &str,
+    artifact_id: &str,
+) -> crate::infra::local_engine::runtime::DeploymentManifest {
     let manifest = crate::infra::local_engine::runtime::DeploymentManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        engine_id: space.engine_id().clone(),
+        schema_version: crate::infra::local_engine::runtime::MANIFEST_SCHEMA_VERSION,
+        engine_id: engine_id.clone(),
         runtime_kind: RuntimePlan::PythonVenv,
         install_id: install_id.to_string(),
         requested_preference: ComputePreference::Cpu,
@@ -1778,21 +1813,140 @@ fn write_full_deployment(space: &DeploymentSpace, install_id: &str) {
             },
         ),
     };
-    std::fs::write(
-        space.slot_manifest_path(slot),
-        serde_json::to_vec_pretty(&manifest).unwrap(),
+    let mut v = serde_json::to_value(&manifest).unwrap();
+    v["artifact"]["artifact_id"] = serde_json::json!(artifact_id);
+    serde_json::from_value(v).unwrap()
+}
+
+// ── 部署制品漂移检测（0.22.16 复盘回归）────────────────────────────────────
+
+/// 漂移矩阵：非 ManagedBinary 不校验 / 一致信任 / 不一致检出 / legacy 空 id 信任。
+#[test]
+fn artifact_drift_matrix() {
+    use super::deployment::deployment_artifact_drift;
+
+    let expected = "funasr-gguf-worker-v0.2.6";
+    let eid = EngineId::new("fake-drift-matrix").unwrap();
+
+    // 0.22.16 事故形态：GPU 实验分支的动态 runtime 残留
+    let (installed, got_expected) = deployment_artifact_drift(
+        &manifest_with_artifact(&eid, "dep-1", "funasr-runtime-windows-x64-base"),
+        Some(expected),
     )
-    .unwrap();
-    DeploymentStore::write_pointer(
-        space,
-        &DeploymentPointer {
-            install_id: install_id.to_string(),
-            slot: slot.to_string(),
-            updated_at_ms: 0,
-            schema_version: DEPLOYMENT_POINTER_SCHEMA_VERSION,
+    .expect("漂移必须被检出");
+    assert_eq!(installed, "funasr-runtime-windows-x64-base");
+    assert_eq!(got_expected, expected);
+
+    // 一致 → 信任
+    assert!(deployment_artifact_drift(
+        &manifest_with_artifact(&eid, "dep-1", expected),
+        Some(expected)
+    )
+    .is_none());
+    // 非 ManagedBinary 引擎（无期望）→ 不校验
+    assert!(deployment_artifact_drift(
+        &manifest_with_artifact(&eid, "dep-1", "anything"),
+        None
+    )
+    .is_none());
+    // legacy 空 id（存量部署）→ 信任，不强制重装
+    assert!(deployment_artifact_drift(&manifest_with_artifact(&eid, "dep-1", ""), Some(expected))
+        .is_none());
+}
+
+/// probe：漂移部署上报 Broken（而非 Ready），一致部署照常 Ready。
+#[test]
+fn probe_blocking_marks_drifted_deployment_broken() {
+    let eid = EngineId::new("fake-drift-probe").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let space = DeploymentSpace::engine(&eid);
+    write_full_deployment(&space, "dep-drift"); // artifact_id = fake-artifact
+
+    let adapter = make_fake_adapter("fake-drift-probe", true);
+    let drifted =
+        super::deployment::probe_blocking(&eid, &adapter, Some("expected-other")).unwrap();
+    assert!(matches!(
+        drifted,
+        super::deployment::ProbeBlockingOutcome::Broken { .. }
+    ));
+
+    // 期望一致 → 照常 Ready
+    let matched = super::deployment::probe_blocking(&eid, &adapter, Some("fake-artifact")).unwrap();
+    assert!(matches!(
+        matched,
+        super::deployment::ProbeBlockingOutcome::Ready { .. }
+    ));
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+}
+
+/// install：self-test 通过但制品漂移时不得走"已就绪跳过"，必须执行重装事务。
+///
+/// 漂移 → 不跳过 → 事务因 bundled 目录不存在而失败（可观测 Err）；
+/// 期望一致 → 跳过 → Ok。两者对比即漂移门禁的回归断言。
+#[tokio::test]
+async fn install_reinstalls_when_deployment_artifact_drifted() {
+    use crate::infra::local_engine::providers::{
+        BinaryInstallPlan, CompatibilityCheck, InstallPlan, ProfileCandidate, ProviderDescriptor,
+    };
+
+    let eid = EngineId::new("fake-drift-install").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+
+    let expected_artifact = ArtifactId::new("expected-artifact").unwrap();
+    let descriptor = ProviderDescriptor {
+        engine_id: eid.clone(),
+        runtime_kind: RuntimePlan::ManagedBinary,
+        display_name: "fake-drift".to_string(),
+        profiles: vec![ProfileCandidate {
+            profile_id: "cpu-x64".to_string(),
+            backend: crate::infra::local_engine::runtime::ComputeBackend::Cpu,
+            artifact_id: expected_artifact.clone(),
+            compatibility: CompatibilityCheck::Always,
+        }],
+        model_contract: crate::infra::local_engine::runtime::ModelContract {
+            model_id: "fake-model".to_string(),
+            revision: "v1".to_string(),
+            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Unverified,
         },
-    )
-    .unwrap();
+        install_plan: InstallPlan::ManagedBinary(BinaryInstallPlan {
+            archive_artifact_id: expected_artifact,
+            archive_url: "bundled:bin/not-exists".to_string(),
+            archive_sha256: String::new(),
+            executable: "no-such.exe".to_string(),
+            stdlib_artifact: None,
+            required_cpu_features: Vec::new(),
+            required_drivers: Vec::new(),
+            self_test_command: vec!["no-such.exe".to_string()],
+            // 不存在的捆绑目录：事务必然快速失败，测试不触真实安装
+            bundled_dir: Some("bin/not-exists".to_string()),
+        }),
+    };
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![make_fake_adapter(
+        "fake-drift-install",
+        true,
+    )]));
+    let tag = unique_tag("drift");
+    let svc = EngineManager::new_with_providers(
+        registry,
+        Arc::new(NoopEventPort),
+        HashMap::from([(eid.clone(), descriptor)]),
+        make_model_registry(&eid, &tag, &format!("{tag}-b")),
+        GatedInstaller::new(),
+    );
+
+    let space = DeploymentSpace::engine(&eid);
+
+    // 期望一致 → 跳过重装（Ok）
+    write_full_deployment_with_artifact(&space, "dep-match", "expected-artifact");
+    svc.install(&eid, AdapterConfig::new()).await.unwrap();
+
+    // 制品漂移 → 不跳过 → 事务失败（Err），且不是因为 self-test
+    write_full_deployment_with_artifact(&space, "dep-drift", "funasr-runtime-windows-x64-base");
+    let err = svc.install(&eid, AdapterConfig::new()).await.unwrap_err();
+    assert_ne!(err.code, LocalEngineErrorCode::SelfTestFailed);
+
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 }
 
 /// GGUF 语义的兼容读取：engine 级 deployment 经 GGUF implementation 映射

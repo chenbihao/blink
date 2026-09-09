@@ -65,6 +65,7 @@
         invoke,
         screenshotPinTransform,
         screenshotPinGetRect,
+        win32LeftButtonDown,
         ocrImage,
         translateText,
         pinSpareReady,
@@ -176,11 +177,34 @@
             {baseCssW, baseCssH, zoom: z, imageScreenX, imageScreenY},
             monitorDpr,
         );
+        lastCommitAt = performance.now();
         return screenshotPinTransform(myLabel, rect.winX, rect.winY, rect.winW, rect.winH).catch((e) => {
             const err = normalizeError(e);
             console.error(`screenshotPinTransform 失败 [${err.code}] ${err.message}`);
             throw e;
         });
+    }
+
+    // ── 滚轮缩放提交合流 ─────────────────────────────────────
+    // 窗口 resize 是重操作（WebView2 重建合成表面），逐 wheel tick SetWindowPos
+    // 会卡顿。CSS transform 仍即时生效（视觉零延迟），窗口提交合流到最快
+    // COMMIT_MIN_INTERVAL 一次，拖尾保证最终 zoom 一定落盘。
+    const COMMIT_MIN_INTERVAL = 60;
+    let commitTimer = 0;
+    let lastCommitAt = 0;
+
+    function scheduleCommitWindowRect() {
+        if (commitTimer) return;
+        const delay = Math.max(0, COMMIT_MIN_INTERVAL - (performance.now() - lastCommitAt));
+        commitTimer = setTimeout(() => {
+            commitTimer = 0;
+            commitWindowRect();
+        }, delay);
+    }
+
+    function cancelPendingCommit() {
+        clearTimeout(commitTimer);
+        commitTimer = 0;
     }
 
     function isMiniAnimating() {
@@ -212,9 +236,14 @@
             imageScreenX = result.imageScreenX;
             imageScreenY = result.imageScreenY;
 
-            // 用新矩形重设窗口（Windows 可能已改了位置但尺寸可能不对）
-            screenshotPinTransform(myLabel, result.winX, result.winY, result.winW, result.winH).catch(() => {
-            });
+            // 用新矩形重设窗口（Windows 可能已改了位置或尺寸不对）；
+            // 与回读矩形一致时跳过——纯状态同步不需要多余的 SetWindowPos
+            const rectUnchanged = result.winX === rect.x && result.winY === rect.y
+                && result.winW === rect.w && result.winH === rect.h;
+            if (!rectUnchanged) {
+                screenshotPinTransform(myLabel, result.winX, result.winY, result.winW, result.winH).catch(() => {
+                });
+            }
 
             // 刷新 CSS（baseCss 不变，只刷 transform 和 indicator）
             applyTransformOnly();
@@ -259,6 +288,7 @@
         miniState = 'entering';
         savedZoom = zoom;
         const miniZoom = computeMiniZoom();
+        cancelPendingCommit();
 
         // 左上角固定：imageScreenX/Y 不变，只改 zoom 和窗口尺寸
 
@@ -309,6 +339,7 @@
         if (miniState !== 'mini') return;
         const gen = ++miniAnimGen;
         miniState = 'exiting';
+        cancelPendingCommit();
 
         const targetZoom = savedZoom;
 
@@ -391,6 +422,7 @@
         pendingReconcileDpr = null;
         reconcileGen = 0;
         commitGen = 0;
+        cancelPendingCommit();
         img.style.transition = '';
         document.body.classList.remove('mini-mode');
         imageScreenX = screenX || 0;
@@ -457,6 +489,7 @@
         miniAnimGen++;
         pendingReconcileDpr = null;
         monitorDpr = 1;
+        cancelPendingCommit();
         document.body.classList.remove('mini-mode');
         img.style.transition = '';
         img.style.transform = 'scale(1)';
@@ -493,6 +526,7 @@
     const DRAG_THRESHOLD = 5; // CSS px — 低于此位移视为点击
     let dragCandidate = null;   // { pointerId, x, y } 或 null
     let nativeDragActive = false;
+    let dragSession = 0;        // 每次 pointerdown 递增，作废在途 watchdog 的过期结果
     let suppressClick = false;  // 拖动后吞掉一次残余 click
 
     document.addEventListener('pointerdown', (e) => {
@@ -511,6 +545,7 @@
         }
         dragCandidate = {pointerId: e.pointerId, x: e.clientX, y: e.clientY};
         nativeDragActive = false;
+        dragSession++;
     });
 
     document.addEventListener('pointermove', (e) => {
@@ -567,19 +602,39 @@
 
     // onMoved: 窗口移动后 debounce reconcile（备份机制，确保拖动后状态正确）
     let movedDebounce = 0;
+    // 模态拖动中 pointerup 收不到，安全网只能靠「物理左键是否还按着」判定拖动
+    // 是否真正结束。停顿 150ms 可能只是拖动中的暂停——此时清 nativeDragActive
+    // 会让滚轮拦截失效（用过期坐标提交窗口，定位闪回归），且中途回读+回设矩形
+    // 会跟系统 move loop 打架。所以查到左键仍按住时：继续等，不做 reconcile。
+    async function dragEndWatchdog() {
+        const session = dragSession;
+        if (!nativeDragActive) {
+            reconcileFromBackend();
+            return;
+        }
+        let leftDown = true;
+        try {
+            leftDown = await win32LeftButtonDown();
+        } catch (e) {
+            const err = normalizeError(e);
+            console.error(`win32_left_button_down 失败 [${err.code}] ${err.message}`);
+        }
+        if (session !== dragSession) return; // 期间开始了新的按下会话，本次结果作废
+        if (leftDown) {
+            // 先清再挂：await IPC 期间 onMoved 可能又挂了新 timer，不清会产生并行探测链
+            clearTimeout(movedDebounce);
+            movedDebounce = setTimeout(dragEndWatchdog, 150);
+            return;
+        }
+        nativeDragActive = false;
+        suppressClick = true;
+        dragEndTime = Date.now();
+        reconcileFromBackend();
+    }
     if (tauriWin?.onMoved) {
         tauriWin.onMoved(() => {
             clearTimeout(movedDebounce);
-            movedDebounce = setTimeout(() => {
-                // 安全网：若 pointerup 未被系统触发（startDragging 接管鼠标），
-                // 在此清理拖动状态并标记 dragEndTime 供 contextmenu 判断。
-                if (nativeDragActive) {
-                    nativeDragActive = false;
-                    suppressClick = true;
-                    dragEndTime = Date.now();
-                }
-                reconcileFromBackend();
-            }, 150);
+            movedDebounce = setTimeout(dragEndWatchdog, 150);
         }).catch(() => {
         });
     }
@@ -590,6 +645,12 @@
         if (e.target.closest('#pin-ocr-panel')) return;
         if (isMiniAnimating()) return;
         e.preventDefault();
+        // 原生拖动（startDragging 模态循环）进行中忽略滚轮：窗口位置由系统控制，
+        // JS 的 imageScreenX/Y 已过期，此时 commitWindowRect 会用拖动前旧坐标把
+        // 窗口拽回去再被 move loop 拽回，表现为定位闪。WM_MOUSEWHEEL 跟键盘焦点
+        // 走、不进鼠标捕获，拖动中仍会派发到页面，必须在此显式忽略。
+        // nativeDragActive 由 dragEndWatchdog 用物理左键态维护，拖动中停顿不会误清。
+        if (nativeDragActive) return;
         // 缩小态下滚轮：先恢复正常态，本次不叠加缩放
         if (isMinimized) {
             exitMiniMode();
@@ -603,7 +664,7 @@
         // 左上角固定：imageScreenX/Y 不变，只改 zoom
         zoom = newZoom;
         applyTransformOnly();
-        commitWindowRect();
+        scheduleCommitWindowRect();
         showZoomLabel();
     }, {passive: false});
 
@@ -709,6 +770,7 @@
         } else {
             // 左上角固定：imageScreenX/Y 不变
             zoom = 1;
+            cancelPendingCommit();
             applyTransformOnly();
             commitWindowRect();
             showZoomLabel();

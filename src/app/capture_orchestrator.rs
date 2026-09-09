@@ -57,6 +57,15 @@ impl<'a> Drop for CaptureTxLock<'a> {
     }
 }
 
+/// 显式获取进程级截图事务锁（0.22.17 修订）。
+///
+/// 选区截图 overlay 流程（`start_region_capture`）不再构造 `CaptureGuard`
+/// （手动入口只隐藏主窗，不做全量 cloak），但仍需与 AI 净化截图
+/// （`capture_with_cleanse`）互斥——防止并发事务交错 cloak 状态。
+pub(crate) fn acquire_capture_tx_lock() -> impl Drop {
+    CaptureTxLock::acquire()
+}
+
 // ── CleansePlan（与 domain policy.rs 的 CaptureCleansePlan 对应）─────────────
 
 /// 截图净化策略——解析 `blink_visibility` + 目标是否 Blink 后的最终执行计划。

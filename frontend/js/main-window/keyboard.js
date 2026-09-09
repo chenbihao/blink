@@ -155,15 +155,17 @@ function onEscape(e) {
             aiMode.exitAiMode();
             return;
         }
-        // 0.20.2: 剪贴板模式下 ESC 顺序：清空多选 → 退出剪贴板模式 → 隐藏窗口
+        // 0.22.17: 剪贴板模式下 ESC：清空多选 → 直接隐藏窗口。
+        // 快捷键唤起即聚焦任务面，ESC 应一步退出；模式复位由 HIDDEN 事件的
+        // clipboardMode.reset() 兜底（与看门狗失焦隐藏同路径），hide 失败时
+        // 窗口留在剪贴板模式，再按 ESC 可重试。
         if (clipboardMode.isActive()) {
-            // 有多选时先清空选择，不退出模式
+            // 有多选时先清空选择，不隐藏窗口
             if (clipboardMode.hasSelection()) {
                 clipboardMode.clearSelection();
                 return;
             }
-            // 无多选时退出剪贴板模式
-            clipboardMode.exit();
+            hideWindow();
             return;
         }
         ghost.clear();

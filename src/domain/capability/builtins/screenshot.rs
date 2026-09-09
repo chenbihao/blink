@@ -8,9 +8,13 @@
 //! - `capture_to_clipboard` — 截图直接写入剪贴板，返回 `Done`（0.19.3）
 //!
 //! 0.22.14 追加 `blink_visibility` 三态参数：
-//! - `auto`（默认）：全屏/外部窗口截图排除 Blink 窗口；Blink 目标只保留目标
+//! - `auto`（AI/MCP/CLI 调用缺省）：全屏/外部窗口截图排除 Blink 窗口；Blink 目标只保留目标
 //! - `exclude`：强制排除全部 Blink 窗口；Blink 目标返回 InvalidArgs
-//! - `include`：保持当前现场，不隐藏 Blink
+//! - `include`（本地手动入口缺省，0.22.17 修订）：保持当前现场，不隐藏 Blink
+//!
+//! 0.22.17（用户决策）：未显式传参时缺省值按调用来源分流——AI 侧（LocalAi/Mcp/Cli）
+//! 缺省 `auto` 主动隐藏净化截图；本地手动入口（LocalCommand/LocalSurface）缺省
+//! `include` 不再隐藏 Blink 窗口（修复手动触发选区/截图时设置页等被一并隐藏的回归）。
 //!
 //! 净化截图不调用 `hide_chat_window`、不中止 ChatService、不复用隐藏前旧 SESSION cache。
 //! `include` 也不复用 auto/exclude 或旧会话生成的截图缓存——每次都重新采集。
@@ -72,9 +76,13 @@ pub(super) enum BlinkVisibility {
 }
 
 impl BlinkVisibility {
-    fn parse(val: Option<&Value>) -> Result<Self, CapabilityError> {
+    /// 解析 `blink_visibility` 参数；未传时缺省值按调用来源分流（0.22.17）。
+    fn parse(
+        val: Option<&Value>,
+        origin: crate::domain::capability::policy::InvocationOrigin,
+    ) -> Result<Self, CapabilityError> {
         match val {
-            None | Some(Value::Null) => Ok(Self::Auto),
+            None | Some(Value::Null) => Ok(Self::default_for_origin(origin)),
             Some(Value::String(s)) => match s.as_str() {
                 "auto" => Ok(Self::Auto),
                 "exclude" => Ok(Self::Exclude),
@@ -88,6 +96,17 @@ impl BlinkVisibility {
             Some(other) => Err(CapabilityError::InvalidArgs {
                 detail: format!("blink_visibility 应为字符串，实际值: {other}"),
             }),
+        }
+    }
+
+    /// 缺省值按调用来源分流（0.22.17 修订，用户决策）：
+    /// - `LocalAi`/`Mcp`/`Cli` → `Auto`：AI 侧主动隐藏 Blink，净化截图
+    /// - `LocalCommand`/`LocalSurface`（chord、launcher 等本地手动入口）→ `Include`：不隐藏
+    fn default_for_origin(origin: crate::domain::capability::policy::InvocationOrigin) -> Self {
+        use crate::domain::capability::policy::InvocationOrigin;
+        match origin {
+            InvocationOrigin::LocalCommand | InvocationOrigin::LocalSurface => Self::Include,
+            InvocationOrigin::LocalAi | InvocationOrigin::Mcp | InvocationOrigin::Cli => Self::Auto,
         }
     }
 
@@ -207,7 +226,7 @@ impl Capability for Screenshot {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "screenshot".into(),
-            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 window_ref，从 list_windows 获取）；op=capture_to_clipboard 截图直接写入系统剪贴板。blink_visibility 控制截图是否临时隐藏 Blink 窗口：auto（默认，排除 Blink 窗口；目标为 Blink 时只保留目标）、exclude（强制排除全部 Blink 窗口，Blink 目标返回错误）、include（保留当前现场不隐藏 Blink）。".into(),
+            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 window_ref，从 list_windows 获取）；op=capture_to_clipboard 截图直接写入系统剪贴板。blink_visibility 控制截图是否临时隐藏 Blink 窗口：auto（AI/MCP/CLI 调用缺省，排除 Blink 窗口；目标为 Blink 时只保留目标）、exclude（强制排除全部 Blink 窗口，Blink 目标返回错误）、include（本地手动调用缺省，保留当前现场不隐藏 Blink）。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -227,7 +246,7 @@ impl Capability for Screenshot {
                     "blink_visibility": {
                         "type": "string",
                         "enum": ["auto", "exclude", "include"],
-                        "description": "控制截图时是否临时隐藏 Blink 窗口。auto=默认，排除 Blink 窗口（目标为 Blink 时只保留目标）；exclude=强制排除全部 Blink 窗口（Blink 目标返回错误）；include=保留当前现场。适用于 capture、window、capture_to_clipboard。"
+                        "description": "控制截图时是否临时隐藏 Blink 窗口。auto=排除 Blink 窗口（目标为 Blink 时只保留目标），AI/MCP/CLI 调用缺省；exclude=强制排除全部 Blink 窗口（Blink 目标返回错误）；include=保留当前现场，本地手动调用缺省。适用于 capture、window、capture_to_clipboard。"
                     },
                     "x": { "type": "integer", "description": "裁剪起点 X（op=crop 必填，物理像素）" },
                     "y": { "type": "integer", "description": "裁剪起点 Y（op=crop 必填）" },
@@ -273,7 +292,7 @@ impl Capability for Screenshot {
                     .get("display_id")
                     .and_then(Value::as_u64)
                     .map(|v| v as u32);
-                let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
+                let visibility = BlinkVisibility::parse(args.get("blink_visibility"), ctx.origin)?;
                 op_capture(display_id, visibility, ctx).await
             }
             "crop" => {
@@ -312,7 +331,7 @@ impl Capability for Screenshot {
                         detail: "缺少 window_ref 参数".into(),
                     }
                 })?;
-                let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
+                let visibility = BlinkVisibility::parse(args.get("blink_visibility"), ctx.origin)?;
                 op_window(target, visibility, ctx).await
             }
             "capture_to_clipboard" => {
@@ -320,7 +339,7 @@ impl Capability for Screenshot {
                     .get("display_id")
                     .and_then(Value::as_u64)
                     .map(|v| v as u32);
-                let visibility = BlinkVisibility::parse(args.get("blink_visibility"))?;
+                let visibility = BlinkVisibility::parse(args.get("blink_visibility"), ctx.origin)?;
                 op_capture_to_clipboard(display_id, visibility, ctx).await
             }
             other => Err(CapabilityError::InvalidArgs {
@@ -792,40 +811,76 @@ mod tests {
     // ── blink_visibility 解析测试 ──
 
     #[test]
-    fn parse_visibility_defaults_to_auto() {
-        assert_eq!(BlinkVisibility::parse(None).unwrap(), BlinkVisibility::Auto);
+    fn parse_visibility_default_by_origin() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        // 未传参：AI/MCP/CLI 缺省 Auto（主动隐藏）
+        for origin in [
+            InvocationOrigin::LocalAi,
+            InvocationOrigin::Mcp,
+            InvocationOrigin::Cli,
+        ] {
+            assert_eq!(
+                BlinkVisibility::parse(None, origin).unwrap(),
+                BlinkVisibility::Auto,
+                "origin {origin:?} 缺省应为 Auto"
+            );
+        }
+        // 未传参：本地手动入口缺省 Include（不隐藏，0.22.17 用户决策）
+        for origin in [
+            InvocationOrigin::LocalCommand,
+            InvocationOrigin::LocalSurface,
+        ] {
+            assert_eq!(
+                BlinkVisibility::parse(None, origin).unwrap(),
+                BlinkVisibility::Include,
+                "origin {origin:?} 缺省应为 Include"
+            );
+        }
+        // 显式 Null 与 None 同义
         assert_eq!(
-            BlinkVisibility::parse(Some(&Value::Null)).unwrap(),
+            BlinkVisibility::parse(Some(&Value::Null), InvocationOrigin::LocalAi).unwrap(),
             BlinkVisibility::Auto
         );
     }
 
     #[test]
-    fn parse_visibility_explicit() {
-        assert_eq!(
-            BlinkVisibility::parse(Some(&json!("auto"))).unwrap(),
-            BlinkVisibility::Auto
-        );
-        assert_eq!(
-            BlinkVisibility::parse(Some(&json!("exclude"))).unwrap(),
-            BlinkVisibility::Exclude
-        );
-        assert_eq!(
-            BlinkVisibility::parse(Some(&json!("include"))).unwrap(),
-            BlinkVisibility::Include
-        );
+    fn parse_visibility_explicit_overrides_origin_default() {
+        use crate::domain::capability::policy::InvocationOrigin;
+        for origin in [
+            InvocationOrigin::LocalCommand,
+            InvocationOrigin::LocalSurface,
+            InvocationOrigin::LocalAi,
+            InvocationOrigin::Mcp,
+            InvocationOrigin::Cli,
+        ] {
+            assert_eq!(
+                BlinkVisibility::parse(Some(&json!("auto")), origin).unwrap(),
+                BlinkVisibility::Auto
+            );
+            assert_eq!(
+                BlinkVisibility::parse(Some(&json!("exclude")), origin).unwrap(),
+                BlinkVisibility::Exclude
+            );
+            assert_eq!(
+                BlinkVisibility::parse(Some(&json!("include")), origin).unwrap(),
+                BlinkVisibility::Include
+            );
+        }
     }
 
     #[test]
     fn parse_visibility_invalid_string() {
-        let err = BlinkVisibility::parse(Some(&json!("mixed"))).unwrap_err();
+        use crate::domain::capability::policy::InvocationOrigin;
+        let err =
+            BlinkVisibility::parse(Some(&json!("mixed")), InvocationOrigin::LocalAi).unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
         assert!(err.to_string().contains("mixed"));
     }
 
     #[test]
     fn parse_visibility_invalid_type() {
-        let err = BlinkVisibility::parse(Some(&json!(42))).unwrap_err();
+        use crate::domain::capability::policy::InvocationOrigin;
+        let err = BlinkVisibility::parse(Some(&json!(42)), InvocationOrigin::LocalAi).unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
     }
 
@@ -977,6 +1032,7 @@ mod tests {
         }
         async fn start_region_capture(
             &self,
+            _: bool,
         ) -> Result<(), crate::domain::capability::SurfaceError> {
             unreachable!()
         }

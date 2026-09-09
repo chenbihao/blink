@@ -342,9 +342,10 @@
 }
 
 /* inline 变体（OCR 卡）：ONNX 资产组跟在当前模型同一行，
-   空间不足时后组整体换行，不把模型名挤碎 */
+   空间不足时后组整体换行，不把模型名挤碎。
+   不设 grow——剩余空间被模型组吸收会把后续组推到卡片右缘。 */
 #engines .le-config-group-model-inline {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
 }
 
 #engines .le-config-group-model .le-config-static {
