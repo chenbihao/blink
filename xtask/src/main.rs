@@ -606,17 +606,16 @@ fn validate_worker_manifest_dir(worker_dir: &Path, failures: &mut Vec<String>) {
         failures.push("GGUF worker manifest.json 不是合法 JSON".to_string());
         return;
     };
-    let Some(files) = manifest.get("files").and_then(|value| value.as_array()) else {
-        failures.push("GGUF worker manifest.json 缺少 files 数组".to_string());
+    // `funasr_worker::build()` 与运行期 `ManagedBinaryProvider` 共用的 v1
+    // 契约是 `{ "files": { "name.exe": { ... } } }`。这里必须校验同一
+    // 结构，避免 release 门禁与刚生成的产物互相不兼容。
+    let Some(files) = manifest.get("files").and_then(|value| value.as_object()) else {
+        failures.push("GGUF worker manifest.json 缺少 files 对象".to_string());
         return;
     };
 
     let mut declared = HashSet::new();
-    for file in files {
-        let Some(rel) = file.get("path").and_then(|value| value.as_str()) else {
-            failures.push("GGUF worker manifest 存在缺少 path 的文件项".to_string());
-            continue;
-        };
+    for (rel, file) in files {
         let rel_path = Path::new(rel);
         if rel_path.is_absolute()
             || rel_path.components().any(|component| {
@@ -637,20 +636,13 @@ fn validate_worker_manifest_dir(worker_dir: &Path, failures: &mut Vec<String>) {
             continue;
         }
 
-        let kind = file.get("kind").and_then(|value| value.as_str());
         let ext = rel_path
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| value.to_ascii_lowercase());
-        let kind_extension_valid = matches!(
-            (kind, ext.as_deref()),
-            (Some("runtime"), Some("dll"))
-                | (Some("worker"), Some("exe"))
-                | (Some("license"), Some("txt"))
-        );
-        if !kind_extension_valid {
+        if !matches!(ext.as_deref(), Some("dll" | "exe" | "txt")) {
             failures.push(format!(
-                "GGUF worker manifest 文件类型不在 allowlist: path={normalized_rel} kind={kind:?}"
+                "GGUF worker manifest 文件类型不在 allowlist: path={normalized_rel}"
             ));
         }
 
@@ -1239,13 +1231,11 @@ mod supply_chain_tests {
         .unwrap();
     }
 
-    fn declared_file(path: &str, kind: &str, bytes: &[u8]) -> serde_json::Value {
+    fn declared_file(bytes: &[u8]) -> serde_json::Value {
         let temp = TempWorkerDir::new("hash");
         let file = temp.path().join("payload");
         std::fs::write(&file, bytes).unwrap();
         serde_json::json!({
-            "path": path,
-            "kind": kind,
             "size_bytes": bytes.len(),
             "sha256": super::sha256_file(&file).unwrap(),
         })
@@ -1276,7 +1266,7 @@ mod supply_chain_tests {
         std::fs::write(dir.path().join("worker.exe"), b"worker").unwrap();
         write_manifest(
             dir.path(),
-            serde_json::json!([declared_file("worker.exe", "worker", b"worker")]),
+            serde_json::json!({ "worker.exe": declared_file(b"worker") }),
         );
 
         let mut failures = Vec::new();
@@ -1291,7 +1281,7 @@ mod supply_chain_tests {
         std::fs::write(dir.path().join("rogue.gguf"), b"model").unwrap();
         write_manifest(
             dir.path(),
-            serde_json::json!([declared_file("worker.exe", "worker", b"worker")]),
+            serde_json::json!({ "worker.exe": declared_file(b"worker") }),
         );
 
         let mut failures = Vec::new();
@@ -1310,7 +1300,7 @@ mod supply_chain_tests {
         std::fs::write(dir.path().join("rogue.dll"), b"runtime").unwrap();
         write_manifest(
             dir.path(),
-            serde_json::json!([declared_file("worker.exe", "worker", b"worker")]),
+            serde_json::json!({ "worker.exe": declared_file(b"worker") }),
         );
 
         let mut failures = Vec::new();
@@ -1328,7 +1318,7 @@ mod supply_chain_tests {
         std::fs::write(dir.path().join("worker.exe"), b"changed").unwrap();
         write_manifest(
             dir.path(),
-            serde_json::json!([declared_file("worker.exe", "worker", b"original")]),
+            serde_json::json!({ "worker.exe": declared_file(b"original") }),
         );
 
         let mut failures = Vec::new();

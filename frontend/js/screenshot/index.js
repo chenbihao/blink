@@ -243,8 +243,87 @@ window.addEventListener('resize', () => {
     }
 });
 
+const SCREENSHOT_RAW_TIMEOUT_MS = 1500;
+const SCREENSHOT_RAW_MAX_ATTEMPTS = 2;
+let activeScreenshotFetchController = null;
+let screenshotFetchEpoch = 0;
+
+function cancelActiveScreenshotFetch() {
+    screenshotFetchEpoch++;
+    if (activeScreenshotFetchController) {
+        activeScreenshotFetchController.abort();
+        activeScreenshotFetchController = null;
+    }
+}
+
+/**
+ * 拉取活动显示器 raw BGRA。每次请求有硬超时并允许一次重试，防止 WebView2
+ * 自定义协议偶发不返回时 loadScreenshot 永久 await、遮罩永久不可拖选。
+ */
+async function fetchScreenshotRaw(monitor, reason) {
+    const epoch = screenshotFetchEpoch;
+    let lastError = null;
+    for (let attempt = 1; attempt <= SCREENSHOT_RAW_MAX_ATTEMPTS; attempt++) {
+        if (epoch !== screenshotFetchEpoch) {
+            throw new Error('stale raw screenshot fetch');
+        }
+        const controller = new AbortController();
+        activeScreenshotFetchController = controller;
+        const startedAt = performance.now();
+        let timeoutId = 0;
+        const timeout = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+                controller.abort();
+                const error = new Error(`raw screenshot fetch timed out after ${SCREENSHOT_RAW_TIMEOUT_MS}ms`);
+                error.name = 'TimeoutError';
+                reject(error);
+            }, SCREENSHOT_RAW_TIMEOUT_MS);
+        });
+        try {
+            const response = await Promise.race([
+                fetch(
+                    `http://blink-screenshot.localhost/raw?monitor=${monitor}&t=${Date.now()}`,
+                    {signal: controller.signal},
+                ),
+                timeout,
+            ]);
+            if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+            const buffer = await Promise.race([
+                response.arrayBuffer(),
+                timeout,
+            ]);
+            console.debug('[screenshot] raw bgra fetched', {
+                reason,
+                attempt,
+                monitor,
+                ms: Math.round(performance.now() - startedAt),
+                bytes: buffer.byteLength,
+            });
+            return buffer;
+        } catch (error) {
+            if (epoch !== screenshotFetchEpoch) {
+                throw error;
+            }
+            lastError = error;
+            console.warn('[screenshot] raw bgra fetch failed', {
+                reason,
+                attempt,
+                monitor,
+                timeout: error?.name === 'AbortError' || error?.name === 'TimeoutError',
+                error,
+            });
+        } finally {
+            clearTimeout(timeoutId);
+            if (activeScreenshotFetchController === controller) {
+                activeScreenshotFetchController = null;
+            }
+        }
+    }
+    throw lastError || new Error('raw screenshot fetch failed');
+}
+
 // P0 优化：clearVisual 不再 clearRect 暗罩（保留 resetState 画的 P5 暗罩），
-// 并立即启动 fetch 预取——与 show+focus+double rAF 并行，省 ~80ms。
+// 并立即启动有界 fetch 预取——与 double rAF 并行。
 window.__blinkClearScreenshotVisual = function () {
     console.debug('[screenshot] __blinkClearScreenshotVisual called');
     try {
@@ -258,13 +337,7 @@ window.__blinkClearScreenshotVisual = function () {
     // SESSION 在 begin_session 完成后就准备好了，此时可以安全读取。
     const _tPreload = performance.now();
     const _activeMonitor = window.__blinkActiveDisplay ?? 0;
-    window.__blinkScreenshotPreload = fetch(`http://blink-screenshot.localhost/raw?monitor=${_activeMonitor}&t=${Date.now()}`)
-        .then(r => {
-            if (!r.ok) throw new Error(`preload fetch failed: ${r.status}`);
-            // Tauri 自定义协议不暴露自定义 headers 给前端 fetch API，
-            // 尺寸/偏移由 loadScreenshot 从 __blinkScreenMeta.physicalDisplays 计算。
-            return r.arrayBuffer();
-        })
+    window.__blinkScreenshotPreload = fetchScreenshotRaw(_activeMonitor, 'preload')
         .then(buf => {
             console.debug('[screenshot] preload fetch done', {
                 ms: Math.round(performance.now() - _tPreload),
@@ -277,6 +350,20 @@ window.__blinkClearScreenshotVisual = function () {
             console.error('[screenshot] preload fetch error', e);
             return null;
         });
+};
+
+/**
+ * 后端复用 overlay 时的单一会话入口。
+ * meta、active display、reset 与 reload 在同一次 eval 中提交，避免快速 hide→show
+ * 时多个 fire-and-forget eval 只执行了一部分，留下“只有暗罩、无法拖选”的半会话。
+ */
+window.__blinkStartScreenshotSession = function (meta, activeDisplay) {
+    window.__blinkScreenMeta = meta;
+    window.__blinkActiveDisplay = activeDisplay ?? meta?.activeDisplay ?? 0;
+    window.__blinkClearScreenshotVisual();
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => window.__blinkReloadScreenshot());
+    });
 };
 
 window.__blinkReloadScreenshot = function () {
@@ -321,6 +408,7 @@ window.__blinkOpenImageEditor = function () {
 function resetState() {
     const _t0 = performance.now();
     console.debug('[screenshot] resetState start');
+    cancelActiveScreenshotFetch();
     // Task 6: 取消在途 OCR 请求
     cancelActiveOcr();
     resetScrollCaptureSession();
@@ -557,9 +645,7 @@ async function loadScreenshot() {
             console.debug('[screenshot] requesting raw bgra (no preload)', {gen});
             const _tFetchStart = performance.now();
             const _activeMonitor = window.__blinkActiveDisplay ?? 0;
-            const response = await fetch(`http://blink-screenshot.localhost/raw?monitor=${_activeMonitor}&t=${Date.now()}`);
-            if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
-            rawBuffer = await response.arrayBuffer();
+            rawBuffer = await fetchScreenshotRaw(_activeMonitor, 'direct');
             console.debug('[screenshot] raw bgra fetched', {
                 gen,
                 ms: Math.round(performance.now() - _tFetchStart),

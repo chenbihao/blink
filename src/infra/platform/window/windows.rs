@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 // - SPARE_BORROW：已借出 spare 的 label → sticky_id 映射
 
 static SPARE_SEQ: AtomicU64 = AtomicU64::new(0);
+static STICKY_SPARE_BUILDING: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn sticky_spare_building() -> &'static Mutex<Option<String>> {
+    STICKY_SPARE_BUILDING.get_or_init(|| Mutex::new(None))
+}
 
 static AVAILABLE_SPARE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
@@ -41,6 +46,11 @@ fn spare_borrow() -> &'static Mutex<std::collections::HashMap<String, String>> {
 // - LAST_PIN_LABEL：最近一次 pin 的窗口 label，供 refresh_pin_image 定位目标
 
 static PIN_SEQ: AtomicU64 = AtomicU64::new(0);
+static PIN_SPARE_BUILDING: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn pin_spare_building() -> &'static Mutex<Option<String>> {
+    PIN_SPARE_BUILDING.get_or_init(|| Mutex::new(None))
+}
 
 static AVAILABLE_PIN_SPARE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
@@ -115,6 +125,8 @@ pub fn store_pin_image(image: PinImage) -> u64 {
     while reg.len() > 8 {
         let oldest = *reg.keys().min().unwrap();
         reg.remove(&oldest);
+        // PNG 编码缓存与 registry 淘汰同步
+        pin_png_cache().lock().unwrap().remove(&oldest);
     }
     seq
 }
@@ -122,6 +134,99 @@ pub fn store_pin_image(image: PinImage) -> u64 {
 /// 按 seq 取 pin 图片（供 `blink-pin://` 协议 handler 调用）。
 pub fn get_pin_image(seq: u64) -> Option<PinImage> {
     pin_image_registry().lock().unwrap().get(&seq).cloned()
+}
+
+/// 已编码 PNG 缓存（seq → bytes）。
+///
+/// P6 快路径存 raw BGRA，首次编码后按 seq 缓存，之后零编码成本。
+/// 淘汰与 `pin_image_registry` 同步（见 `store_pin_image`）。
+static PIN_PNG_CACHE: OnceLock<Mutex<std::collections::HashMap<u64, Arc<Vec<u8>>>>> =
+    OnceLock::new();
+
+fn pin_png_cache() -> &'static Mutex<std::collections::HashMap<u64, Arc<Vec<u8>>>> {
+    PIN_PNG_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 全局编码锁：并发协议请求命中未编码图片时只编码一次（单飞）。
+static PIN_PNG_ENCODE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// 按 seq 取 PNG bytes（Bgra 条目懒编码并缓存）。
+///
+/// 供 `blink-pin` 协议 handler 使用——调用方须放在阻塞线程池，编码大图可达
+/// 上百毫秒。命中缓存零成本；未命中加全局锁双检，同一 seq 只编码一次。
+pub fn get_pin_image_png(seq: u64) -> Option<Arc<Vec<u8>>> {
+    if let Some(png) = pin_png_cache().lock().unwrap().get(&seq) {
+        return Some(Arc::clone(png));
+    }
+    let _guard = PIN_PNG_ENCODE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    // 双检：等锁期间可能已被并发方编码
+    if let Some(png) = pin_png_cache().lock().unwrap().get(&seq) {
+        return Some(Arc::clone(png));
+    }
+    match get_pin_image(seq)? {
+        PinImage::Png(arc) => {
+            pin_png_cache()
+                .lock()
+                .unwrap()
+                .insert(seq, Arc::clone(&arc));
+            Some(arc)
+        }
+        PinImage::Bgra(arc, w, h) => {
+            match crate::infra::platform::screenshot::encode_png(&arc, w, h) {
+                Ok(png) => {
+                    tracing::debug!(seq, w, h, "blink-pin: PNG 编码完成并缓存");
+                    let png = Arc::new(png);
+                    pin_png_cache()
+                        .lock()
+                        .unwrap()
+                        .insert(seq, Arc::clone(&png));
+                    Some(png)
+                }
+                Err(e) => {
+                    tracing::error!(seq, error = %e, "blink-pin: PNG 编码失败");
+                    None
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_pin_png_cache {
+    use super::*;
+
+    /// Bgra 条目懒编码并缓存：两次取回命中同一 Arc（零重复编码），PNG 尺寸与原图一致。
+    #[test]
+    fn bgra_lazy_encode_cached() {
+        let bgra = vec![255u8, 0, 0, 255]; // 1×1 不透明 BGRA
+        let seq = store_pin_image(PinImage::Bgra(Arc::new(bgra), 1, 1));
+
+        let png1 = get_pin_image_png(seq).expect("编码应成功");
+        let png2 = get_pin_image_png(seq).expect("二次取回应命中缓存");
+        assert!(Arc::ptr_eq(&png1, &png2), "两次取回应命中同一缓存条目");
+        let (w, h) = crate::infra::platform::screenshot::parse_png_size(&png1).unwrap();
+        assert_eq!((w, h), (1, 1));
+
+        // 测试进程共享全局 registry/cache，清理避免干扰其他测试
+        pin_image_registry().lock().unwrap().remove(&seq);
+        pin_png_cache().lock().unwrap().remove(&seq);
+    }
+
+    /// Png 条目直接缓存原图 Arc，不重复编码。
+    #[test]
+    fn png_entry_cached_directly() {
+        let png = vec![1u8, 2, 3]; // P6: Png 条目不再校验内容，原样透传
+        let seq = store_pin_image(PinImage::Png(Arc::new(png)));
+
+        let got = get_pin_image_png(seq).expect("Png 条目应直接返回");
+        assert_eq!(&*got, &[1u8, 2, 3]);
+
+        pin_image_registry().lock().unwrap().remove(&seq);
+        pin_png_cache().lock().unwrap().remove(&seq);
+    }
 }
 
 /// 0.20.4：按 pin 窗口 label 取对应的图片。
@@ -322,6 +427,196 @@ static WINDOW_CREATE_LOCKS: OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, WindowCreateLock>>,
 > = OnceLock::new();
 
+/// 固定 label WebView 的页面加载状态与待激活动作。
+///
+/// Tauri 在 `build()` 返回后便能通过 `get_webview_window()` 取到窗口壳，但页面模块
+/// 可能仍未执行完成。依赖前端函数的窗口必须把初始化动作交给此门禁：页面 Ready 前
+/// 只保留最新动作，Ready 后再执行，避免向半初始化 WebView `eval`。
+type WindowReadyAction = Box<dyn FnOnce(WebviewWindow) -> Result<(), String> + Send + 'static>;
+
+struct PendingWindowReadyAction {
+    revision: u64,
+    action: WindowReadyAction,
+}
+
+#[derive(Default)]
+struct WindowReadyState {
+    page_ready: bool,
+    activation_revision: u64,
+    pending: Option<PendingWindowReadyAction>,
+}
+
+const WINDOW_READY_TIMEOUT_MS: u64 = 5_000;
+
+static WINDOW_READY_STATES: OnceLock<Mutex<std::collections::HashMap<String, WindowReadyState>>> =
+    OnceLock::new();
+
+fn window_ready_states() -> &'static Mutex<std::collections::HashMap<String, WindowReadyState>> {
+    WINDOW_READY_STATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 全局 page-load Started / 建窗前调用：窗口壳存在不再等同于页面 Ready。
+pub fn mark_window_page_loading(label: &str) {
+    let mut states = window_ready_states()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    states.entry(label.to_string()).or_default().page_ready = false;
+    tracing::trace!(label, "window lifecycle: Building");
+}
+
+/// 全局 page-load Finished 调用：发布 Ready，并执行预热期间积压的最新激活动作。
+pub fn mark_window_page_ready(app: &AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        mark_window_build_failed(label);
+        tracing::warn!(label, "window lifecycle: page load Finished 时窗口已不存在");
+        return;
+    };
+    let label = label.to_string();
+    let pending = {
+        let mut states = window_ready_states()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = states.entry(label.clone()).or_default();
+        state.page_ready = true;
+        state.pending.take()
+    };
+
+    tracing::debug!(
+        label,
+        pending = pending.is_some(),
+        "window lifecycle: Ready"
+    );
+    if let Some(pending) = pending {
+        // hide/cancel 或更新的唤起可能在 Finished 回调期间使旧动作过期。
+        let still_current = window_ready_states()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&label)
+            .is_some_and(|state| state.page_ready && state.activation_revision == pending.revision);
+        if !still_current {
+            tracing::debug!(
+                label,
+                revision = pending.revision,
+                "window lifecycle: 丢弃过期激活动作"
+            );
+            return;
+        }
+        if let Err(error) = (pending.action)(window) {
+            tracing::error!(label, %error, "window lifecycle: Ready 后激活失败");
+        }
+    }
+}
+
+fn mark_window_build_failed(label: &str) {
+    let mut states = window_ready_states()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let cancelled = states
+        .remove(label)
+        .is_some_and(|state| state.pending.is_some());
+    if cancelled {
+        tracing::warn!(label, "window lifecycle: 建窗失败，已取消待激活动作");
+    }
+}
+
+fn is_window_page_ready(label: &str) -> bool {
+    window_ready_states()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(label)
+        .is_some_and(|state| state.page_ready)
+}
+
+/// 页面 Ready 后执行依赖前端 JS 的初始化；Building 期间只保留最新一次动作。
+///
+/// 返回 `true` 表示本次同步完成，`false` 表示已排队并将在 page-load Finished 后执行。
+fn activate_window_when_ready<F>(app: &AppHandle, label: &str, action: F) -> Result<bool, String>
+where
+    F: FnOnce(WebviewWindow) -> Result<(), String> + Send + 'static,
+{
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("窗口 {label} 不存在"))?;
+    let mut action: Option<WindowReadyAction> = Some(Box::new(action));
+    let (run_now, revision) = {
+        let mut states = window_ready_states()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = states.entry(label.to_string()).or_default();
+        state.activation_revision = state.activation_revision.wrapping_add(1);
+        let revision = state.activation_revision;
+        if state.page_ready {
+            (true, revision)
+        } else {
+            let replaced = state
+                .pending
+                .replace(PendingWindowReadyAction {
+                    revision,
+                    action: action.take().unwrap(),
+                })
+                .is_some();
+            tracing::debug!(
+                label,
+                revision,
+                replaced,
+                "window lifecycle: Building，激活动作等待 Ready"
+            );
+            (false, revision)
+        }
+    };
+
+    if run_now {
+        action.take().unwrap()(window)?;
+    } else {
+        let label = label.to_string();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(WINDOW_READY_TIMEOUT_MS)).await;
+            let timed_out = {
+                let mut states = window_ready_states()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let Some(state) = states.get_mut(&label) else {
+                    return;
+                };
+                if state.page_ready
+                    || state.pending.as_ref().map(|pending| pending.revision) != Some(revision)
+                {
+                    false
+                } else {
+                    state.pending.take();
+                    state.activation_revision = state.activation_revision.wrapping_add(1);
+                    true
+                }
+            };
+            if timed_out {
+                tracing::error!(
+                    label,
+                    revision,
+                    timeout_ms = WINDOW_READY_TIMEOUT_MS,
+                    "window lifecycle: 等待页面 Ready 超时，已取消激活"
+                );
+            }
+        });
+    }
+    Ok(run_now)
+}
+
+fn cancel_pending_window_activation(label: &str) {
+    let cancelled = {
+        let mut states = window_ready_states()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = states.get_mut(label) else {
+            return;
+        };
+        state.activation_revision = state.activation_revision.wrapping_add(1);
+        state.pending.take().is_some()
+    };
+    if cancelled {
+        tracing::debug!(label, "window lifecycle: 已取消等待 Ready 的激活动作");
+    }
+}
+
 static PENDING_CONTEXT_MENU: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 
 fn creation_lock(label: &str) -> WindowCreateLock {
@@ -384,18 +679,19 @@ where
             label,
             waited_ms,
             created = false,
-            "window get_or_create: ready (race)"
+            "window get_or_create: resolved (race)"
         );
         return Ok((win, false));
     }
 
+    mark_window_page_loading(label);
     match build() {
         Ok(win) => {
             tracing::debug!(
                 label,
                 waited_ms,
                 created = true,
-                "window get_or_create: ready"
+                "window get_or_create: built"
             );
             Ok((win, true))
         }
@@ -410,6 +706,7 @@ where
                 );
                 Ok((win, false))
             } else {
+                mark_window_build_failed(label);
                 Err(format!("创建窗口 {label} 失败: {error}"))
             }
         }
@@ -1287,16 +1584,14 @@ pub fn hide_chat_window_primitive(app: &AppHandle) {
 
 /// 显示内容编辑器窗口（0.16.3）。
 ///
-/// 独立 Tauri 窗口，按需创建（不预热）。窗口关闭即销毁，不 prevent_close。
+/// 独立 Tauri 窗口，启动后预热并复用；用户唤起与预热共用 single-flight 创建入口。
 /// 看门狗按 PID 判定，前台切到编辑器时主窗不会被误隐藏。
 /// payload 经 PendingEditorPayload State 中转，前端 init 时调 get_content_editor_payload 拉取。
 pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
 
     const LABEL: &str = "content-editor";
-    let is_new = app.get_webview_window(LABEL).is_none();
-
-    let win = if is_new {
+    let (win, is_new) = get_or_create_window(app, LABEL, || {
         // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
         // 之前的 .visible(false) + 前端 init 调 win.show() 方案在首次点击时
         // 因 WebView2 冷启动加载 JS 模块耗时，窗口长时间不可见，用户感知为「没反应」。
@@ -1315,16 +1610,15 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
             .background_color(Color(30, 30, 46, 255))
             .center()
             .build()
-            .map_err(|e| {
-                tracing::warn!(error = %e, "content-editor window: 创建失败");
-                format!("创建编辑器窗口失败: {e}")
-            })?
-    } else {
+    })
+    .map_err(|e| {
+        tracing::warn!(error = %e, "content-editor window: 创建失败");
+        e
+    })?;
+    if !is_new {
         // 复用已有窗口——前端需重新拉取 payload
-        let win = app.get_webview_window(LABEL).unwrap();
         let _ = win.eval("window.__contentEditorReload && window.__contentEditorReload()");
-        win
-    };
+    }
 
     // 系统菜单拦截 + 圆角（与 chat 窗口一致）
     if let Ok(hwnd) = win.hwnd() {
@@ -1347,42 +1641,40 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
 
 /// 显示便签管理窗口（0.16.10）。
 ///
-/// 独立 Tauri 窗口，label 为 `sticky-manager`。按需创建（不预热）。
-/// 窗口关闭即销毁，不 prevent_close。
+/// 独立 Tauri 窗口，label 为 `sticky-manager`。启动后预热并复用；
+/// 用户唤起与预热共用 single-flight 创建入口，关闭时隐藏而不销毁。
 /// 看门狗按 PID 判定，前台切到管理窗口时主窗不会被误隐藏。
 pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
 
     const LABEL: &str = "sticky-manager";
-    let is_new = app.get_webview_window(LABEL).is_none();
-
-    let win = if is_new {
+    let (win, is_new) = get_or_create_window(app, LABEL, || {
         // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
         // 0.17.7：background_color 从硬编码 #1e1e2e（dark only）改为中性灰 #333333，
         // 在 light / dark 主题下都不会产生突兀的色差（CSS 加载后由 .manager-root 覆盖）。
-        let w =
-            WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
-                .title("便签管理")
-                .inner_size(MANAGER_W, MANAGER_H)
-                .min_inner_size(MANAGER_MIN_W, MANAGER_MIN_H)
-                .decorations(false)
-                .transparent(false)
-                .always_on_top(false)
-                .skip_taskbar(false)
-                .resizable(true)
-                .focused(true)
-                .visible(true)
-                .background_color(Color(51, 51, 51, 255))
-                .center()
-                .build()
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "sticky-manager window: 创建失败");
-                    format!("创建便签管理窗口失败: {e}")
-                })?;
-
+        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
+            .title("便签管理")
+            .inner_size(MANAGER_W, MANAGER_H)
+            .min_inner_size(MANAGER_MIN_W, MANAGER_MIN_H)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(true)
+            .visible(true)
+            .background_color(Color(51, 51, 51, 255))
+            .center()
+            .build()
+    })
+    .map_err(|e| {
+        tracing::warn!(error = %e, "sticky-manager window: 创建失败");
+        e
+    })?;
+    if is_new {
         // prevent_close + hide——与 chat/content-editor 一致的复用模式
         let app_clone = app.clone();
-        w.on_window_event(move |event| {
+        win.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if IS_APP_EXITING.load(Ordering::SeqCst) {
                     return; // 应用退出：不 prevent_close
@@ -1394,12 +1686,9 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
                 tracing::debug!("sticky-manager window: CloseRequested → prevent_close + hide");
             }
         });
-        w
     } else {
-        let win = app.get_webview_window(LABEL).unwrap();
         let _ = win.eval("window.__stickyManagerReload && window.__stickyManagerReload()");
-        win
-    };
+    }
 
     if let Ok(hwnd) = win.hwnd() {
         let hwnd = HWND(hwnd.0 as _);
@@ -2152,33 +2441,41 @@ pub fn show_voice_overlay(app: &AppHandle) {
         (pt.x, pt.y)
     };
 
-    if let Some(win) = app.get_webview_window(LABEL) {
-        // 0.10.6: 复用时重置尺寸为默认值（上次可能被 autoResize 撑高）
-        let _ = win.set_size(tauri::LogicalSize::new(260.0, 140.0));
-        let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
-        let _ = win.show();
-        return;
-    }
-
     use tauri::{WebviewUrl, WebviewWindowBuilder};
-    match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("voice-overlay.html".into()))
-        .title("")
-        .inner_size(VOICE_W, VOICE_H)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(false)
-        .visible(true)
-        .build()
-    {
-        Ok(win) => {
-            let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
-            if let Ok(hwnd) = win.hwnd() {
-                apply_no_activate(HWND(hwnd.0 as _));
+    let result = get_or_create_window(app, LABEL, || {
+        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("voice-overlay.html".into()))
+            .title("")
+            .inner_size(VOICE_W, VOICE_H)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .visible(false)
+            .build()
+    });
+    match result {
+        Ok((_win, created)) => {
+            let ready = activate_window_when_ready(app, LABEL, move |win| {
+                // 复用时重置尺寸为默认值（上次可能被 autoResize 撑高）
+                let _ = win.set_size(tauri::LogicalSize::new(VOICE_W, VOICE_H));
+                let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
+                if let Ok(hwnd) = win.hwnd() {
+                    apply_no_activate(HWND(hwnd.0 as _));
+                }
+                win.show()
+                    .map_err(|error| format!("显示 voice-overlay 失败: {error}"))?;
+                Ok(())
+            });
+            match ready {
+                Ok(ready) => {
+                    tracing::debug!(created, deferred = !ready, "voice-overlay: 显示已调度");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "voice-overlay: 激活失败");
+                }
             }
-            tracing::debug!("voice-overlay: 已显示");
         }
         Err(e) => tracing::warn!(error = %e, "voice-overlay: 创建失败"),
     }
@@ -2186,6 +2483,7 @@ pub fn show_voice_overlay(app: &AppHandle) {
 
 /// 隐藏语音录音 mini overlay。
 pub fn hide_voice_overlay(app: &AppHandle) {
+    cancel_pending_window_activation("voice-overlay");
     if let Some(win) = app.get_webview_window("voice-overlay") {
         let _ = win.hide();
     }
@@ -2211,17 +2509,11 @@ pub fn show_screenshot_overlay(
 
     // 注入原始物理显示器矩形（physicalDisplays），前端用 canvas 实测 renderScale 转换 CSS。
     // overlayDpi 仅诊断用，不参与坐标变换。
-    // **复用窗口时序**：clear → place → inject meta → show → focus → 双 rAF 后 reload
-    // 先清屏防止旧选区闪现，place 后注入物理 meta，show+focus 后等布局稳定再 reload。
+    // **复用窗口时序**：place → inject meta → show → focus → 单次原子 session init。
+    // hidden/cloaked WebView2 在快速 hide→show 时可能尚未恢复；因此不再在 show 前拆成
+    // 多次 eval。窗口可见后一次性提交 meta + reset + reload，避免只显示暗罩却未进入新会话。
     if let Some(win) = app.get_webview_window(LABEL) {
-        // 0. 注入光标所在显示器索引——必须在 clearScreenshotVisual 之前，
-        //    因为 clearScreenshotVisual 会启动 per-monitor 预取 fetch
         let active_display = crate::infra::platform::screenshot::active_display_index();
-        let _ = win.eval(format!("window.__blinkActiveDisplay = {};", active_display));
-        // 1. 清屏——只清旧画面，不触发截图加载
-        let _ = win
-            .eval("window.__blinkClearScreenshotVisual && window.__blinkClearScreenshotVisual()");
-        let t_clear = t0.elapsed();
         let mut overlay_dpi = 96u32;
         if let Ok(hwnd) = win.hwnd() {
             // 0.19.14：撤销 hide_screenshot_overlay 设的 cloak，否则 show 后窗口不可见
@@ -2257,9 +2549,8 @@ pub fn show_screenshot_overlay(
             "show_screenshot_overlay (reuse): physical displays injected"
         );
         let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
-        // 3. 注入物理 meta
-        let meta_js = format!(
-            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }};",
+        let session_js = format!(
+            "window.__blinkStartScreenshotSession && window.__blinkStartScreenshotSession({{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }}, {});",
             meta.virtual_x,
             meta.virtual_y,
             meta.width,
@@ -2267,23 +2558,26 @@ pub fn show_screenshot_overlay(
             overlay_dpi,
             fg_hwnd,
             active_display,
-            displays_json
+            displays_json,
+            active_display,
         );
-        let _ = win.eval(&meta_js);
-        // 4. show + 5. focus
-        let _ = win.show();
-        let _ = win.set_focus();
+        let ready = activate_window_when_ready(app, LABEL, move |win| {
+            win.show()
+                .map_err(|e| format!("显示截图 overlay 失败: {e}"))?;
+            if let Err(e) = win.set_focus() {
+                tracing::warn!(error = %e, "截图 overlay 聚焦失败");
+            }
+            win.eval(&session_js)
+                .map_err(|e| format!("启动截图前端会话失败: {e}"))?;
+            Ok(())
+        })?;
         let t_show = t0.elapsed();
-        // 6. 双 rAF 后 reload——等布局稳定再加载截图，确保 canvas 已有正确尺寸
-        let _ = win.eval(
-            "requestAnimationFrame(()=>{requestAnimationFrame(()=>{window.__blinkReloadScreenshot&&window.__blinkReloadScreenshot()})})"
-        );
         tracing::info!(
             total_ms = t0.elapsed().as_millis() as u64,
-            clear_ms = t_clear.as_millis() as u64,
-            place_ms = (t_place - t_clear).as_millis() as u64,
+            place_ms = t_place.as_millis() as u64,
             show_focus_ms = (t_show - t_place).as_millis() as u64,
             path = "reuse",
+            deferred = !ready,
             "show_screenshot_overlay 完成"
         );
         return Ok(());
@@ -2291,23 +2585,31 @@ pub fn show_screenshot_overlay(
 
     // 首次构建：inner_size / position 会被后续 SetWindowPos 覆盖，这里只是让 Tauri 别报参数错。
     let t_build_start = t0.elapsed();
-    let win =
-        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-screenshot.html".into()))
-            .title("")
-            .inner_size(meta.width as f64, meta.height as f64)
-            .position(meta.virtual_x as f64, meta.virtual_y as f64)
-            .decorations(false)
-            .resizable(false) // 禁用原生 resize 边框，防止屏幕边缘出现 resize 双箭头并误触 blur
-            .transparent(true) // 透明背景，让 canvas 上的桌面截图独占视觉
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .focused(true)
-            .build()
-            .map_err(|e| e.to_string())?;
+    let (win, created) = get_or_create_window(app, LABEL, || {
+        WebviewWindowBuilder::new(
+            app,
+            LABEL,
+            WebviewUrl::App("chord-screenshot.html?preheat=1".into()),
+        )
+        .title("")
+        .inner_size(meta.width as f64, meta.height as f64)
+        .position(meta.virtual_x as f64, meta.virtual_y as f64)
+        .decorations(false)
+        .resizable(false) // 禁用原生 resize 边框，防止屏幕边缘出现 resize 双箭头并误触 blur
+        .transparent(true) // 透明背景，让 canvas 上的桌面截图独占视觉
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .visible(false)
+        .build()
+    })?;
     let t_build = t0.elapsed();
 
     if let Ok(hwnd) = win.hwnd() {
+        if !created {
+            apply_cloak(HWND(hwnd.0 as _), false);
+        }
         // 钉扎虚拟桌面矩形 + 拦截 WM_DPICHANGED——首建路径 DPI 关联翻转概率最高，
         // 必须先于 place 安装（tao 的按 scale 重算会把跨屏矩形改小，见钉扎模块注释）
         pin_screenshot_overlay_geometry(
@@ -2326,6 +2628,7 @@ pub fn show_screenshot_overlay(
             meta.height,
         );
         assert_screenshot_overlay_rect(app, hwnd.0 as isize);
+        force_topmost(HWND(hwnd.0 as _));
     }
     let t_place = t0.elapsed();
     // place 后读窗口实际 DPI（仅诊断用）
@@ -2342,8 +2645,8 @@ pub fn show_screenshot_overlay(
     );
     let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
     let active_display = crate::infra::platform::screenshot::active_display_index();
-    let meta_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }};",
+    let session_js = format!(
+        "window.__blinkStartScreenshotSession({{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }}, {});",
         meta.virtual_x,
         meta.virtual_y,
         meta.width,
@@ -2351,10 +2654,19 @@ pub fn show_screenshot_overlay(
         overlay_dpi,
         fg_hwnd,
         active_display,
-        displays_json
+        displays_json,
+        active_display,
     );
-    let _ = win.eval(&meta_js);
-    let _ = win.set_focus();
+    let ready = activate_window_when_ready(app, LABEL, move |win| {
+        win.show()
+            .map_err(|e| format!("显示截图 overlay 失败: {e}"))?;
+        if let Err(e) = win.set_focus() {
+            tracing::warn!(error = %e, "截图 overlay 聚焦失败");
+        }
+        win.eval(&session_js)
+            .map_err(|e| format!("启动截图前端会话失败: {e}"))?;
+        Ok(())
+    })?;
 
     tracing::info!(
         total_ms = t0.elapsed().as_millis() as u64,
@@ -2362,6 +2674,8 @@ pub fn show_screenshot_overlay(
         build_ms = (t_build - t_build_start).as_millis() as u64,
         place_ms = (t_place - t_build).as_millis() as u64,
         path = "first_build",
+        created,
+        deferred = !ready,
         "show_screenshot_overlay 完成"
     );
 
@@ -2417,7 +2731,7 @@ pub fn show_image_editor_window(
         WebviewWindowBuilder::new(
             app,
             LABEL,
-            WebviewUrl::App("chord-screenshot.html?source=clipboard".into()),
+            WebviewUrl::App("chord-screenshot.html?preheat=1".into()),
         )
         .title("")
         .inner_size(meta.width as f64, meta.height as f64)
@@ -2428,7 +2742,8 @@ pub fn show_image_editor_window(
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
-        .focused(true)
+        .focused(false)
+        .visible(false)
         .build()
     })?;
 
@@ -2465,33 +2780,39 @@ pub fn show_image_editor_window(
         kind = source_kind,
         label_js = label_js,
     );
-    win.eval(&init_js).map_err(|e| e.to_string())?;
-    // 0.20.x：pin 来源编辑——先降级原 pin 窗口（取消置顶），再 show 编辑器。
-    // 顺序很关键：编辑器 show 时是 topmost，随后 cancel_topmost 落到非置顶带顶部，
-    // 仍压在已降级的 pin 之上；若先 show 再降级 pin，降级后的 pin（HWND_NOTOPMOST 放
-    // 到非置顶带顶部）会插到编辑器上方。编辑会话结束（hide_image_editor_window）恢复置顶。
-    if let Some(label) = source_label {
-        demote_pin_for_editor(app, label);
+    let app_for_activation = app.clone();
+    let source_label_owned = source_label.map(str::to_string);
+    let image_width = image.width;
+    let image_height = image.height;
+    let ready = activate_window_when_ready(app, LABEL, move |win| {
+        win.eval(&init_js).map_err(|e| e.to_string())?;
+        // 0.20.x：pin 来源编辑——先降级原 pin 窗口（取消置顶），再 show 编辑器。
+        // 顺序很关键：编辑器 show 时是 topmost，随后 cancel_topmost 落到非置顶带顶部，
+        // 仍压在已降级的 pin 之上。
+        if let Some(label) = source_label_owned.as_deref() {
+            demote_pin_for_editor(&app_for_activation, label);
+        }
+        win.show().map_err(|e| e.to_string())?;
+        if let Ok(hwnd) = win.hwnd() {
+            // 图片编辑器不强制置顶，允许用户参考其他窗口内容。
+            cancel_topmost(HWND(hwnd.0 as _));
+        }
+        if let Err(error) = win.set_focus() {
+            tracing::warn!(%error, "图片编辑窗口 focus 失败");
+        }
+        set_image_editor_active(true);
+        tracing::info!(
+            created,
+            width = image_width,
+            height = image_height,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "用户图片编辑窗口已显示"
+        );
+        Ok(())
+    })?;
+    if !ready {
+        tracing::debug!(created, "图片编辑窗口等待前端 Ready");
     }
-    win.show().map_err(|e| e.to_string())?;
-    if let Ok(hwnd) = win.hwnd() {
-        // 0.20.4-fix：图片编辑器不强制置顶——用户可能需要参考其他窗口内容。
-        // 窗口创建时设了 always_on_top(true)（与截图 overlay 共用窗口），
-        // 这里用 HWND_NOTOPMOST 取消置顶，允许其他窗口覆盖编辑器。
-        cancel_topmost(HWND(hwnd.0 as _));
-    }
-    if let Err(error) = win.set_focus() {
-        tracing::warn!(%error, "图片编辑窗口 focus 失败");
-    }
-    // 0.20.4：标记编辑器活跃，watchdog 据此跳过 overlay 失焦隐藏
-    set_image_editor_active(true);
-    tracing::info!(
-        created,
-        width = image.width,
-        height = image.height,
-        elapsed_ms = t0.elapsed().as_millis() as u64,
-        "用户图片编辑窗口已显示"
-    );
     Ok(())
 }
 
@@ -2761,6 +3082,7 @@ fn unpin_screenshot_overlay_geometry() {
 
 /// 隐藏截图覆盖窗 + 清空 SESSION（释放位图内存）。
 pub fn hide_screenshot_overlay(app: &AppHandle) {
+    cancel_pending_window_activation("chord-screenshot");
     // 会话结束：解除 WM_DPICHANGED 钉扎（窗口 hide 后几何交还 tao 默认处理）
     unpin_screenshot_overlay_geometry();
     if let Some(win) = app.get_webview_window("chord-screenshot") {
@@ -2780,6 +3102,7 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
 
 /// 隐藏通用图片编辑窗口并释放用户图片载荷；不触碰截图 SESSION。
 pub fn hide_image_editor_window(app: &AppHandle) {
+    cancel_pending_window_activation("chord-screenshot");
     if let Some(win) = app.get_webview_window("chord-screenshot") {
         let _ = win.hide();
     }
@@ -2857,7 +3180,7 @@ pub fn show_pin_window(
 
     // 构造注入 JS（复用窗口与首次创建共用）。sourceDpr 传给前端作为视觉尺寸基准。
     let js = format!(
-        "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}, {sdpr}); else document.getElementById('pin-img').src = '{url}';",
+        "window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}, {sdpr});",
         url = img_url,
         w = png_w,
         h = png_h,
@@ -2906,10 +3229,28 @@ pub fn show_pin_window(
             "钉图窗口已借用预热 spare"
         );
 
-        // N+1：spare 被借用后，后台延迟创建新的备用窗口
+        // N+1：spare 被借用后，后台延迟创建新的备用窗口。
+        // 至少等待 0.8s；若截图会话活跃或物理左键仍按住，则继续避让交互，
+        // 两者都结束后再静默 200ms 并复查，避免刚松手便抢占拖动收尾的合成帧。
         let app_clone = app.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(800)).await;
+
+            loop {
+                while crate::infra::platform::screenshot::session_meta().is_some()
+                    || is_left_button_down()
+                {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if crate::infra::platform::screenshot::session_meta().is_none()
+                    && !is_left_button_down()
+                {
+                    break;
+                }
+            }
+
             create_pin_spare(&app_clone);
             tracing::debug!("pin-spare: N+1 补充完成");
         });
@@ -2920,6 +3261,11 @@ pub fn show_pin_window(
     // 无可用 spare，创建新窗口
     let seq = PIN_SEQ.fetch_add(1, Ordering::SeqCst);
     let label = format!("pin-{seq}");
+    let init_js = js.clone();
+    let init_label = label.clone();
+    let init_once = Arc::new(AtomicBool::new(false));
+    let init_once_on_load = Arc::clone(&init_once);
+    let create_started = Instant::now();
 
     match WebviewWindowBuilder::new(app, &label, WebviewUrl::App("pin.html".into()))
         .title("")
@@ -2929,8 +3275,46 @@ pub fn show_pin_window(
         .skip_taskbar(true)
         .shadow(false)
         .resizable(false)
+        .focused(false)
+        .visible(false)
         .inner_size(win_w as f64, win_h as f64)
         .position(win_x as f64, win_y as f64)
+        .on_page_load(move |win, payload| {
+            if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                || init_once_on_load.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
+
+            if let Err(e) = win.eval(&init_js) {
+                tracing::error!(
+                    pin_label = %init_label,
+                    error = %e,
+                    "pin window: 前端加载完成，但初始化状态注入失败"
+                );
+                return;
+            }
+            if let Err(e) = win.show() {
+                tracing::error!(
+                    pin_label = %init_label,
+                    error = %e,
+                    "pin window: 初始化完成，但显示窗口失败"
+                );
+                return;
+            }
+            if let Err(e) = win.set_focus() {
+                tracing::warn!(
+                    pin_label = %init_label,
+                    error = %e,
+                    "pin window: 显示后聚焦失败"
+                );
+            }
+            tracing::info!(
+                pin_label = %init_label,
+                ready_ms = create_started.elapsed().as_millis() as u64,
+                "pin window: 前端已就绪并完成初始化"
+            );
+        })
         .build()
     {
         Ok(win) => {
@@ -2938,10 +3322,6 @@ pub fn show_pin_window(
             if let Ok(hwnd) = win.hwnd() {
                 place_at_physical(HWND(hwnd.0 as _), win_x, win_y, win_w, win_h);
             }
-            win.eval(&js)
-                .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
-            let _ = win.show();
-
             // 注册关闭处理：prevent_close + hide + 回收/销毁
             let label_owned = label.clone();
             let app_clone = app.clone();
@@ -2963,14 +3343,15 @@ pub fn show_pin_window(
                 .unwrap()
                 .insert(label.clone(), pin_seq);
 
-            tracing::info!(
+            tracing::debug!(
+                pin_label = %label,
                 png_w,
                 png_h,
                 screen_x,
                 screen_y,
                 show_translating,
                 png_bytes = png_len,
-                "钉图窗口已创建"
+                "pin window: 窗口壳已创建，等待前端 page load"
             );
             Ok(label)
         }
@@ -3111,8 +3492,11 @@ fn handle_pin_close(app: &AppHandle, label: &str) {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // 回收或销毁
+        let building = pin_spare_building().lock().unwrap();
         let available = available_pin_spare().lock().unwrap();
-        if available.is_none() {
+        let can_recycle = available.is_none() && building.is_none();
+        drop(building);
+        if can_recycle {
             // 回收：清空图片状态，标记为可用 spare
             drop(available);
             if let Some(w) = app_clone.get_webview_window(&label_owned) {
@@ -3120,7 +3504,7 @@ fn handle_pin_close(app: &AppHandle, label: &str) {
             }
             tracing::debug!(spare_label = %label_owned, "pin-spare: 回收中，等待前端 __blinkClearPin 完成");
         } else {
-            // 已有可用 spare，销毁此窗口
+            // 已有可用 spare，或新的 spare 正在初始化：销毁此窗口，避免 Ready 时形成双 spare
             drop(available);
             if let Some(w) = app_clone.get_webview_window(&label_owned) {
                 let _ = w.destroy();
@@ -3138,13 +3522,21 @@ fn handle_pin_close(app: &AppHandle, label: &str) {
 fn create_pin_spare(app: &AppHandle) {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    // 已有可用 spare 则不重复创建
-    if available_pin_spare().lock().unwrap().is_some() {
-        return;
-    }
-
-    let seq = PIN_SEQ.fetch_add(1, Ordering::SeqCst);
-    let label = format!("pin-spare-{seq}");
+    // AVAILABLE 只在前端 ready 后才有值；另用 BUILDING 覆盖 build→ready 的空窗，
+    // 防止多个 N+1 补建任务同时通过检查并各建一个 WebView2。
+    let label = {
+        if available_pin_spare().lock().unwrap().is_some() {
+            return;
+        }
+        let mut building = pin_spare_building().lock().unwrap();
+        if building.is_some() {
+            return;
+        }
+        let seq = PIN_SEQ.fetch_add(1, Ordering::SeqCst);
+        let label = format!("pin-spare-{seq}");
+        *building = Some(label.clone());
+        label
+    };
 
     match WebviewWindowBuilder::new(app, &label, WebviewUrl::App("pin.html?preheat=1".into()))
         .title("")
@@ -3173,7 +3565,13 @@ fn create_pin_spare(app: &AppHandle) {
             });
             tracing::debug!(spare_label = %label, "pin-spare: 窗口已创建，等待前端 init 就绪");
         }
-        Err(e) => tracing::warn!(error = %e, "pin-spare: 创建失败"),
+        Err(e) => {
+            let mut building = pin_spare_building().lock().unwrap();
+            if building.as_deref() == Some(label.as_str()) {
+                *building = None;
+            }
+            tracing::warn!(error = %e, "pin-spare: 创建失败");
+        }
     }
 }
 
@@ -3183,6 +3581,11 @@ fn create_pin_spare(app: &AppHandle) {
 /// 因为 WebView2 的 HTML/JS 加载是异步的，在 init 完成前 eval 会静默失败。
 /// 前端 preheat init 完成后通过 IPC 命令调用此函数，标记 spare 就绪。
 pub fn mark_pin_spare_ready(label: &str) {
+    let mut building = pin_spare_building().lock().unwrap();
+    if building.as_deref() == Some(label) {
+        *building = None;
+    }
+    drop(building);
     let mut available = available_pin_spare().lock().unwrap();
     if available.is_none() {
         *available = Some(label.to_string());
@@ -3354,13 +3757,20 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
 fn create_sticky_spare(app: &AppHandle) {
     use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
 
-    // 已有可用 spare 则不重复创建
-    if available_spare().lock().unwrap().is_some() {
-        return;
-    }
-
-    let seq = SPARE_SEQ.fetch_add(1, Ordering::SeqCst);
-    let label = format!("sticky-spare-{seq}");
+    // AVAILABLE 只在前端 ready 后才有值；BUILDING 覆盖 build→ready 空窗，保证单飞。
+    let label = {
+        if available_spare().lock().unwrap().is_some() {
+            return;
+        }
+        let mut building = sticky_spare_building().lock().unwrap();
+        if building.is_some() {
+            return;
+        }
+        let seq = SPARE_SEQ.fetch_add(1, Ordering::SeqCst);
+        let label = format!("sticky-spare-{seq}");
+        *building = Some(label.clone());
+        label
+    };
 
     match WebviewWindowBuilder::new(app, &label, WebviewUrl::App("sticky.html?preheat=1".into()))
         .title("便签")
@@ -3415,8 +3825,11 @@ fn create_sticky_spare(app: &AppHandle) {
                             }
 
                             // 回收或销毁
+                            let building = sticky_spare_building().lock().unwrap();
                             let available = available_spare().lock().unwrap();
-                            if available.is_none() {
+                            let can_recycle = available.is_none() && building.is_none();
+                            drop(building);
+                            if can_recycle {
                                 // 回收：eval __stickyReset，前端完成后会 invoke sticky_spare_ready
                                 // 不在此处直接设 AVAILABLE_SPARE——避免 __stickyReset 未执行完就被借用
                                 drop(available);
@@ -3425,7 +3838,7 @@ fn create_sticky_spare(app: &AppHandle) {
                                 }
                                 tracing::debug!(spare_label = %lbl, "sticky-spare: 回收中，等待前端 __stickyReset 完成后注册");
                             } else {
-                                // 已有可用 spare，销毁此窗口
+                                // 已有可用 spare，或替代 spare 正在初始化：销毁旧窗口，避免双 spare
                                 drop(available);
                                 if let Some(w) = app_c.get_webview_window(&lbl) {
                                     let _ = w.destroy();
@@ -3447,7 +3860,13 @@ fn create_sticky_spare(app: &AppHandle) {
             // 否则 spare 可能在 JS 未加载完时被借用，eval __stickyReload 静默失败
             tracing::debug!(spare_label = %label, "sticky-spare: 窗口已创建，等待前端 init 就绪");
         }
-        Err(e) => tracing::warn!(error = %e, "sticky-spare: 创建失败"),
+        Err(e) => {
+            let mut building = sticky_spare_building().lock().unwrap();
+            if building.as_deref() == Some(label.as_str()) {
+                *building = None;
+            }
+            tracing::warn!(error = %e, "sticky-spare: 创建失败");
+        }
     }
 }
 
@@ -3457,6 +3876,11 @@ fn create_sticky_spare(app: &AppHandle) {
 /// 因为 WebView2 的 HTML/JS 加载是异步的，在 init 完成前 eval 会静默失败。
 /// 前端 preheat init 完成后通过 IPC 命令调用此函数，标记 spare 就绪。
 pub fn mark_spare_ready(label: &str) {
+    let mut building = sticky_spare_building().lock().unwrap();
+    if building.as_deref() == Some(label) {
+        *building = None;
+    }
+    drop(building);
     // 仅当该 label 对应的窗口存在且当前无可用 spare 时才注册
     let mut available = available_spare().lock().unwrap();
     if available.is_none() {
@@ -3612,6 +4036,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 .inner_size(SETTINGS_W, SETTINGS_H)
                 .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
                 .position(0.0, 0.0)
+                .focused(false)
                 .visible(false)
                 .decorations(false)
                 // 设置页会频繁局部重绘；透明 WebView2 合成表面在部分 GPU/DPI
@@ -3736,7 +4161,9 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // 剔除出合成——零视觉闪现、不进 Alt-Tab；SW_SHOWNOACTIVATE 不抢焦点。
         // show/hide 保持背靠背（不插入等待），不放大与用户真实 show 的竞态窗口。
         tokio::time::sleep(Duration::from_millis(2000)).await;
-        if let Some(win) = app.get_webview_window("chord-screenshot") {
+        if is_window_page_ready("chord-screenshot")
+            && let Some(win) = app.get_webview_window("chord-screenshot")
+        {
             std::thread::spawn(move || {
                 let Ok(hwnd) = win.hwnd() else { return };
                 let hwnd = HWND(hwnd.0 as _);
@@ -3748,6 +4175,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 apply_cloak(hwnd, false);
             });
             tracing::debug!("preheat: chord-screenshot 暖渲染已调度");
+        } else {
+            tracing::debug!("preheat: chord-screenshot 尚未 Ready，跳过暖渲染");
         }
 
         tracing::debug!("preheat: 预热完成");
@@ -3787,90 +4216,76 @@ pub fn open_settings(app: &AppHandle) {
     let work_w = work.right - work.left;
     let work_h = work.bottom - work.top;
 
-    if let Some(w) = app.get_webview_window("settings") {
-        // 从最小化恢复
-        let hwnd_raw = w.hwnd().ok();
-        if let Some(h) = hwnd_raw {
-            let hwnd = HWND(h.0 as _);
-            unsafe {
-                if IsIconic(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
-                }
-            }
-        }
-        // 保留 **CSS 尺寸**（不是物理）——跨 DPI 屏保留物理尺寸会越挪越离谱：
-        //   主屏 150% 首次 1440 phys(=960 CSS)
-        //   → 挪副屏 100%,tao 处理 WM_DPICHANGED 按 100/150 缩到 960 phys
-        //   → 回主屏读 outer_size=960 phys,若直接用作物理 → 主屏 150% 视觉 640 CSS,变小 1/3
-        // 用当前 scale_factor 折算 CSS,再按目标屏 DPI 换回物理。scale_factor 和 outer_size
-        // 都反映"窗口当前所在屏",配对读一致快照,比值稳定 = CSS 尺寸恒定。
-        let cur_scale = w.scale_factor().unwrap_or(1.0).max(1.0);
-        let cur_phys = w.outer_size().unwrap_or_else(|_| {
-            tauri::PhysicalSize::new(
-                (960.0 * cur_scale).round() as u32,
-                (720.0 * cur_scale).round() as u32,
-            )
-        });
-        let css_w = (cur_phys.width as f64) / cur_scale;
-        let css_h = (cur_phys.height as f64) / cur_scale;
-        let target_scale = crate::infra::platform::dpi::scale_factor(target_dpi);
-        let phys_w = (css_w * target_scale).round() as i32;
-        let phys_h = (css_h * target_scale).round() as i32;
-        // clamp 到目标屏工作区
-        let win_w = phys_w.min(work_w).max(1);
-        let win_h = phys_h.min(work_h).max(1);
-        let fx = work.left + (work_w - win_w) / 2;
-        let fy = work.top + (work_h - win_h) / 2;
-        if let Some(h) = hwnd_raw {
-            let hwnd = HWND(h.0 as _);
-            place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
-            let _ = w.show();
-            // 跨 DPI 屏时 WM_DPICHANGED 会抢跑改尺寸,补一次覆盖回来
-            place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
-        } else {
-            let _ = w.set_position(PhysicalPosition::new(fx, fy));
-            let _ = w.show();
-        }
-        let _ = w.set_focus();
-        return;
-    }
     use tauri::{WebviewUrl, WebviewWindowBuilder};
-    // 首次创建：先 hidden build（避免主屏闪一下），然后按目标屏 DPI 把默认
-    // CSS 尺寸 折算成物理尺寸，place_at_physical 挪到光标屏中心。
-    // 位置给 (0,0) 占位，builder 的 .center() 只会居中主屏——用不上。
-    let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Blink Settings")
-        .inner_size(SETTINGS_W, SETTINGS_H)
-        .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
-        .position(0.0, 0.0)
-        .visible(false)
-        .decorations(false)
-        // 与预热路径保持一致：设置页使用不透明合成表面，避免局部重绘后白屏/底色页。
-        .transparent(false)
-        .shadow(false)
-        .background_color(tauri::window::Color(30, 30, 46, 255))
-        .build()
-        .expect("创建设置窗口失败");
-    let scale = crate::infra::platform::dpi::scale_factor(target_dpi);
-    let phys_w = (SETTINGS_W * scale).round() as i32;
-    let phys_h = (SETTINGS_H * scale).round() as i32;
-    let win_w = phys_w.min(work_w);
-    let win_h = phys_h.min(work_h);
-    let fx = work.left + (work_w - win_w) / 2;
-    let fy = work.top + (work_h - win_h) / 2;
-    if let Ok(h) = win.hwnd() {
+    // 用户唤起与后台预热共用同一个 per-label single-flight，杜绝 duplicate label。
+    let (win, created) = match get_or_create_window(app, "settings", || {
+        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+            .title("Blink Settings")
+            .inner_size(SETTINGS_W, SETTINGS_H)
+            .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
+            .position(0.0, 0.0)
+            .focused(false)
+            .visible(false)
+            .decorations(false)
+            .transparent(false)
+            .shadow(false)
+            .background_color(tauri::window::Color(30, 30, 46, 255))
+            .build()
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(%error, "settings window: 创建失败");
+            return;
+        }
+    };
+
+    let hwnd_raw = win.hwnd().ok();
+    if let Some(h) = hwnd_raw {
         let hwnd = HWND(h.0 as _);
         strip_window_border(hwnd);
         install_sysmenu_blocker(hwnd);
         enable_rounded_corners(hwnd);
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+        }
+    }
+
+    // 已存在时保留用户调整后的 CSS 尺寸；首次创建使用默认 CSS 尺寸。
+    let (css_w, css_h) = if created {
+        (SETTINGS_W, SETTINGS_H)
+    } else {
+        let cur_scale = win.scale_factor().unwrap_or(1.0).max(1.0);
+        let cur_phys = win.outer_size().unwrap_or_else(|_| {
+            tauri::PhysicalSize::new(
+                (SETTINGS_W * cur_scale).round() as u32,
+                (SETTINGS_H * cur_scale).round() as u32,
+            )
+        });
+        (
+            (cur_phys.width as f64) / cur_scale,
+            (cur_phys.height as f64) / cur_scale,
+        )
+    };
+    let scale = crate::infra::platform::dpi::scale_factor(target_dpi);
+    let phys_w = (css_w * scale).round() as i32;
+    let phys_h = (css_h * scale).round() as i32;
+    let win_w = phys_w.min(work_w);
+    let win_h = phys_h.min(work_h);
+    let fx = work.left + (work_w - win_w) / 2;
+    let fy = work.top + (work_h - win_h) / 2;
+    if let Some(h) = hwnd_raw {
+        let hwnd = HWND(h.0 as _);
         place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
         let _ = win.show();
         // 补一次：show 触发 WM_DPICHANGED 时 tao 会改尺寸，覆盖回来
         place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
-        let _ = win.set_focus();
     } else {
+        let _ = win.set_position(PhysicalPosition::new(fx, fy));
         let _ = win.show();
     }
+    let _ = win.set_focus();
 }
 
 // ── 0.19 单元测试：chat prefill revision 机制 ──────────────────────────────

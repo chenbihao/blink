@@ -38,6 +38,14 @@ fn main() {
     infra::utils::logging::init("error");
 
     tauri::Builder::default()
+        .on_page_load(|window, payload| match payload.event() {
+            tauri::webview::PageLoadEvent::Started => {
+                infra::platform::window::mark_window_page_loading(window.label());
+            }
+            tauri::webview::PageLoadEvent::Finished => {
+                infra::platform::window::mark_window_page_ready(window.app_handle(), window.label());
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             app::window_orchestrator::invoke(app);
         }))
@@ -132,6 +140,8 @@ fn main() {
                         .find(|p| p.starts_with("monitor="))
                         .and_then(|p| p.strip_prefix("monitor="))
                         .and_then(|v| v.parse::<usize>().ok());
+                    let raw_started_at = std::time::Instant::now();
+                    tracing::debug!(monitor_idx, "blink-screenshot raw 请求开始");
 
                     let result = tauri::async_runtime::spawn_blocking(move || {
                         use crate::infra::platform::screenshot;
@@ -157,6 +167,14 @@ fn main() {
                     .await
                     .ok()
                     .flatten();
+
+                    tracing::debug!(
+                        monitor_idx,
+                        bytes = result.as_ref().map(|(bgra, ..)| bgra.len()).unwrap_or(0),
+                        success = result.is_some(),
+                        elapsed_ms = raw_started_at.elapsed().as_millis() as u64,
+                        "blink-screenshot raw 请求完成"
+                    );
 
                     let response = match result {
                         Some((bgra, w, h, ox, oy)) => tauri::http::Response::builder()
@@ -234,33 +252,16 @@ fn main() {
                 }
             };
             tauri::async_runtime::spawn(async move {
-                let result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::infra::platform::window::get_pin_image(seq)
+                // P6+：取图/编码收敛到 get_pin_image_png——跑在阻塞线程池（不占
+                // async worker），编码结果按 seq 缓存。保持按需编码，避免 pin 后
+                // 立即额外抢占下一次拖动/截图的 CPU 与内存带宽。
+                let bytes = tauri::async_runtime::spawn_blocking(move || {
+                    crate::infra::platform::window::get_pin_image_png(seq)
                 })
                 .await
                 .ok()
-                .flatten();
-
-                // P6: PinImage::Png 直接返回；PinImage::Bgra lazy 编码 PNG
-                let bytes = match result {
-                    Some(crate::infra::platform::window::PinImage::Png(arc)) => {
-                        Some((*arc).clone())
-                    }
-                    Some(crate::infra::platform::window::PinImage::Bgra(arc, w, h)) => {
-                        let bgra = (*arc).clone();
-                        match crate::infra::platform::screenshot::encode_png(&bgra, w, h) {
-                            Ok(png) => {
-                                tracing::debug!(seq, w, h, "blink-pin: lazy PNG 编码完成");
-                                Some(png)
-                            }
-                            Err(e) => {
-                                tracing::error!(seq, error = %e, "blink-pin: lazy PNG 编码失败");
-                                None
-                            }
-                        }
-                    }
-                    None => None,
-                };
+                .flatten()
+                .map(|arc| (*arc).clone());
 
                 let response = match bytes {
                     Some(bytes) => tauri::http::Response::builder()
