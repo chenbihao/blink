@@ -9,7 +9,7 @@ use tauri::{Emitter, Manager};
 ///
 /// 解耦热键驱动——由 chat composer 麦克风按钮 IPC 调用，不走 `HotkeyEvent::Hold`。
 /// 与 G1/G2 三方互斥（`VoiceService` 内部 `session.recording` 保证同一时刻只有一个 target）。
-/// 识别结果通过 `blink://voice-partial(target="chat")` 定向 emit 到 chat 窗口。
+/// 识别结果通过 `blink://voice-partial(target="chat")` 定向 emit 至 chat 窗口。
 #[tauri::command]
 pub async fn start_chat_stt(app: tauri::AppHandle) -> Result<(), String> {
     let voice = app
@@ -569,6 +569,10 @@ static AUDIO_TEST_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 #[allow(deprecated)]
 mod maintenance;
 pub use maintenance::*;
+
+// 0.22.16 Handoff 06：本地 UI 音频转写命令
+mod audio_transcribe;
+pub use audio_transcribe::*;
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
 

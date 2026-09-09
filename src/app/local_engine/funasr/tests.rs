@@ -809,7 +809,8 @@ async fn gguf_real_end_to_end_sensevoice() {
     );
 
     // 0.5s 前缀快照（伪流式首个预览的音频量）
-    let samples = crate::domain::stt::wav::parse_wav_to_f32(&wav_bytes).expect("解析 WAV");
+    let decoded = crate::domain::stt::wav::decode_wav(&wav_bytes).expect("解析 WAV");
+    let samples = decoded.samples;
     let prefix = &samples[..(16000 / 2).min(samples.len())];
     let prefix_wav = crate::domain::stt::wav::pcm_to_wav(prefix, 16000, 1);
     let prefix_text = transport.transcribe(&prefix_wav).await.expect("前缀转录");
@@ -836,6 +837,198 @@ async fn gguf_real_end_to_end_sensevoice() {
         let count = std::fs::read_dir(&audio_dir).unwrap().flatten().count();
         assert_eq!(count, 0, "停止后 audio-tmp 应为空（残留 {count} 个）");
     }
+}
+
+/// 私有 corpus 实机验收：仅在 `BLINK_STT_CORPUS_DIR` 指向有效目录时运行。
+///
+/// 不安装环境、不下载模型；本机没有已安装模型时安全跳过。失败信息只包含
+/// opaque case id 与计时，不包含文件名、路径或识别正文。
+#[tokio::test(flavor = "multi_thread")]
+async fn private_corpus_manifest_end_to_end() {
+    let Some(corpus_dir) = super::corpus_runner::should_run() else {
+        return;
+    };
+
+    use crate::app::local_engine::model_installer::ModelRegistry;
+    use crate::app::local_engine::registry::EngineRegistry;
+    use crate::app::local_engine::{EngineManager, NoopEventPort};
+    use crate::domain::local_engine::{EngineId, ModelInstallState, ProcessState};
+
+    let registry = std::sync::Arc::new(EngineRegistry::new_with_adapters(vec![
+        super::make_funasr_adapter(),
+    ]));
+    let service = EngineManager::new_with_providers(
+        registry,
+        std::sync::Arc::new(NoopEventPort),
+        [(
+            EngineId::new(FUNASR_ENGINE_ID).unwrap(),
+            make_funasr_provider_descriptor(),
+        )]
+        .into_iter()
+        .collect(),
+        ModelRegistry::new_with_models(
+            gguf::gguf_model_specs()
+                .iter()
+                .map(gguf::gguf_model_descriptor)
+                .collect(),
+        ),
+        std::sync::Arc::new(super::FunasrGgufModelInstallWorker::new()),
+    );
+    let engine_id = EngineId::new(FUNASR_ENGINE_ID).unwrap();
+    let Some(installed_model) = service
+        .list_models(&engine_id)
+        .await
+        .into_iter()
+        .find(|model| model.install_state == ModelInstallState::Installed)
+    else {
+        return;
+    };
+
+    let mut config = crate::app::local_engine::config_source::funasr_adapter_config();
+    config.engine_config["funasr_model"] =
+        serde_json::Value::String(installed_model.model_id.clone());
+    if service.start(&engine_id, config).await.is_err() {
+        return;
+    }
+
+    let connection = service
+        .get_connection(&engine_id)
+        .await
+        .expect("get_connection")
+        .expect("running worker connection");
+    assert_eq!(
+        connection.model_id.as_deref(),
+        Some(installed_model.model_id.as_str())
+    );
+    let transport = connection.worker.expect("running worker transport");
+    let status = service.get_status(&engine_id).await.expect("get_status");
+    let worker_pid = match status.status.process {
+        ProcessState::Running { pid } => Some(pid),
+        _ => None,
+    };
+
+    let run = super::corpus_runner::run_corpus(super::corpus_runner::CorpusRunnerConfig {
+        corpus_dir,
+        transport: Some(transport),
+        worker_pid,
+    })
+    .await;
+    service.stop(&engine_id).await.expect("stop corpus worker");
+
+    let results = run.expect("private corpus runner");
+    assert_eq!(
+        results.len(),
+        11,
+        "private corpus manifest case count drifted"
+    );
+    assert!(
+        results.iter().all(|result| result.matched),
+        "{}",
+        super::corpus_runner::format_anonymous_summary(&results)
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.peak_memory_bytes.is_some()),
+        "worker peak memory metric missing"
+    );
+}
+
+/// 开发工作区实机闭环：使用已构建且经 manifest 锁定的 worker 与本地模型缓存，
+/// 不写用户 AppData，也不触发下载。仅显式设置
+/// `BLINK_STT_CORPUS_STANDALONE=1` 时启用。
+#[tokio::test(flavor = "multi_thread")]
+async fn private_corpus_standalone_worker_end_to_end() {
+    if std::env::var("BLINK_STT_CORPUS_STANDALONE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let Some(corpus_dir) = super::corpus_runner::should_run() else {
+        return;
+    };
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let worker_dir = root.join("resources/bin/funasr-worker");
+    let worker_exe = worker_dir.join("funasr-sensevoice-worker.exe");
+    let model = root.join("target/gguf-models/sensevoice-small-q8.gguf");
+    if !worker_exe.is_file() || !model.is_file() {
+        return;
+    }
+
+    let audio_dir_guard = tempfile::Builder::new()
+        .prefix("private-corpus-audio-")
+        .tempdir_in(root.join("target"))
+        .expect("create private corpus audio tempdir");
+    let audio_dir = audio_dir_guard.path().to_path_buf();
+
+    let mut command = tokio::process::Command::new(&worker_exe);
+    command
+        .args([
+            "-m",
+            model.to_str().unwrap(),
+            "--stdin-server",
+            "--backend-dir",
+            worker_dir.to_str().unwrap(),
+        ])
+        .current_dir(&worker_dir)
+        .env("BLINK_ENGINE_ID", FUNASR_ENGINE_ID)
+        .env("BLINK_INSTANCE_ID", "private-corpus")
+        .env("BLINK_ENGINE_TOKEN", "private-corpus-token")
+        .env("BLINK_MODEL_ID", gguf::GGUF_SENSEVOICE_ID)
+        .env("BLINK_MODEL_REVISION", "private-corpus")
+        .env("BLINK_MODEL_PAYLOAD_DIR", model.parent().unwrap())
+        .env("BLINK_AUDIO_DIR", &audio_dir)
+        .env("BLINK_WORKER_THREADS", "4")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = crate::infra::platform::no_window_tokio(command)
+        .spawn()
+        .expect("spawn standalone corpus worker");
+    let pid = child.id();
+    let stdin = child.stdin.take().expect("worker stdin");
+    let stdout = child.stdout.take().expect("worker stdout");
+    let client = crate::infra::local_engine::worker_proto::NdjsonWorkerClient::new(stdin, stdout);
+    client
+        .hello(std::time::Duration::from_secs(30))
+        .await
+        .expect("standalone worker ready");
+    let transport: std::sync::Arc<dyn crate::domain::stt::SttTransport> = std::sync::Arc::new(
+        worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
+    );
+
+    let results = super::corpus_runner::run_corpus(super::corpus_runner::CorpusRunnerConfig {
+        corpus_dir,
+        transport: Some(transport),
+        worker_pid: pid,
+    })
+    .await
+    .expect("standalone private corpus runner");
+
+    client.request_shutdown().await;
+    drop(client);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+    }
+    assert_eq!(
+        results.len(),
+        11,
+        "private corpus manifest case count drifted"
+    );
+    assert!(
+        results.iter().all(|result| result.matched),
+        "{}",
+        super::corpus_runner::format_anonymous_summary(&results)
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.peak_memory_bytes.is_some()),
+        "worker peak memory metric missing"
+    );
 }
 
 // ── 0.22.7.2 真实崩溃重启（env 门控：BLINK_E2E_GGUF=1）─────────────────────
@@ -1036,7 +1229,8 @@ async fn gguf_real_three_models_and_switch() {
         return;
     }
     let wav_bytes = std::fs::read(&fixture).expect("读取 fixture");
-    let samples = crate::domain::stt::wav::parse_wav_to_f32(&wav_bytes).expect("解析 WAV");
+    let decoded = crate::domain::stt::wav::decode_wav(&wav_bytes).expect("解析 WAV");
+    let samples = decoded.samples;
 
     let make_cfg = |model: &str| crate::domain::local_engine::AdapterConfig {
         engine_config: serde_json::json!({

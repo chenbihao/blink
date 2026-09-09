@@ -60,6 +60,7 @@ pub mod start_region_capture;
 pub mod sticky_common;
 pub mod sticky_manager;
 pub mod system_ops;
+pub mod transcribe_audio;
 pub mod trash_sticky;
 pub mod update_setting;
 pub mod update_sticky;
@@ -139,6 +140,15 @@ mod tests {
         assert!(
             registry.get("manage_window").is_some(),
             "manage_window 应通过 inventory 注册"
+        );
+    }
+
+    #[test]
+    fn phase_0_22_16_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        assert!(
+            registry.get("transcribe_audio").is_some(),
+            "transcribe_audio 应通过 inventory 注册"
         );
     }
 }

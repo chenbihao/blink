@@ -1528,4 +1528,13 @@ export const zh = {
     "voice.local.model.goto_engines_install": "前往引擎页安装",
     "voice.local.model.goto_engines_hint": "需要先在引擎页下载 FunASR 模型",
     "voice.local.model.restart_hint": "模型已切换，请在引擎页重启服务以加载新模型",
+    "voice.local.file.title": "转写 WAV 文件",
+    "voice.local.file.desc": "选择本地 WAV，使用当前运行中的模型一次性转写。文件路径不会交给前端。",
+    "voice.local.file.choose": "选择并转写",
+    "voice.local.file.picking": "请选择 WAV 文件…",
+    "voice.local.file.cancelled": "已取消选择",
+    "voice.local.file.running": "正在转写…",
+    "voice.local.file.done": "转写完成",
+    "voice.local.file.failed": "转写失败",
+    "voice.local.file.no_speech": "未检测到语音内容",
 };

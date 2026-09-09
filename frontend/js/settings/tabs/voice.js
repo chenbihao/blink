@@ -11,11 +11,15 @@
  * - API Key 用 stt:cloud 前缀存在 Credential Manager 里，不与 AI 供应商共用
  * - 支持预设快捷填充（OpenAI / Groq / MiMo）
  */
-import {invoke, listen} from "../../shared/tauri.js";
+import {commandErrorText, invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, waitForEngineCard, getLocalEngineEntry} from "../index.js";
 import {navigateSettings} from "../navigation.js";
+import {
+    formatAudioTranscriptionIdentity,
+    parseAudioTranscriptionCapability,
+} from "./voice-file-transcribe.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
@@ -298,6 +302,7 @@ export async function initVoiceTab() {
 
     // FunASR 本地模型选择（业务设置）
     initLocalModelSelect(config);
+    initFileTranscription();
 
     // ── 跳转入口：点击切换到引擎页并定位 FunASR 卡片 ──
     const gotoEnginesBtn = document.getElementById("voice-goto-engines-btn");
@@ -356,6 +361,46 @@ export async function initVoiceTab() {
     }
 
     // loadLocalModels 已迁移至引擎页 local-runtime controller
+}
+
+function initFileTranscription() {
+    const button = document.getElementById("voice-file-transcribe-btn");
+    const status = document.getElementById("voice-file-transcribe-status");
+    const output = document.getElementById("voice-file-transcribe-output");
+    const meta = document.getElementById("voice-file-transcribe-meta");
+    if (!button || !status || !output || !meta || button.dataset.bound === "true") return;
+    button.dataset.bound = "true";
+
+    button.addEventListener("click", async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        status.textContent = t("voice.local.file.picking");
+        status.className = "voice-file-transcribe-status";
+        output.hidden = true;
+        output.textContent = "";
+        meta.textContent = "";
+
+        try {
+            const audioRef = await invoke("pick_audio_file");
+            if (!audioRef) {
+                status.textContent = t("voice.local.file.cancelled");
+                return;
+            }
+            status.textContent = t("voice.local.file.running");
+            const result = await invoke("transcribe_audio_file", {audioRef});
+            const data = parseAudioTranscriptionCapability(result);
+            output.textContent = data.noSpeech ? t("voice.local.file.no_speech") : data.text;
+            output.hidden = false;
+            meta.textContent = formatAudioTranscriptionIdentity(data);
+            status.textContent = t("voice.local.file.done");
+            status.className = "voice-file-transcribe-status success";
+        } catch (error) {
+            status.textContent = commandErrorText(error, t("voice.local.file.failed"));
+            status.className = "voice-file-transcribe-status error";
+        } finally {
+            button.disabled = false;
+        }
+    });
 }
 
 // ── 0.10.3 高级选项（VAD）──────────────────

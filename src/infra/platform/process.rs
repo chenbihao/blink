@@ -25,6 +25,34 @@
 
 use std::path::Path;
 
+/// 查询进程生命周期内的峰值工作集，供本地模型实机验收记录。
+#[cfg(windows)]
+pub fn peak_working_set_bytes(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let result = GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+        let _ = CloseHandle(process);
+        result.ok()?;
+        Some(counters.PeakWorkingSetSize as u64)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn peak_working_set_bytes(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// 通过 TCP 监听端口查找占用该端口的进程 PID。
 ///
 /// 仅查找 LISTENING 状态的 TCP 连接。如果多个进程监听同一端口

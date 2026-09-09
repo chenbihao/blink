@@ -22,6 +22,7 @@ use crate::domain::sticky::{
     StickyChangeSource, StickyCloseOutcome, StickyColor, StickyNote, StickyService,
     StickyWorkflowError,
 };
+use crate::domain::stt::transcribe::AudioTranscriptionPort;
 use crate::infra::data::pools::DbPools;
 
 // ── EventPort ──────────────────────────────────────────────────────────────
@@ -174,4 +175,14 @@ pub trait CapabilityEnv: Send + Sync {
         x: Option<i32>,
         y: Option<i32>,
     ) -> Result<(i32, i32), String>;
+
+    // ── 一次性文件转写（0.22.16 Handoff 05）──────────────────────────
+
+    /// 获取已注入的 `AudioTranscriptionPort`。
+    ///
+    /// 返回 `None`——CLI/MCP 最小运行时或主进程未注入时 Capability 得到
+    /// 可恢复 `Unsupported` 错误，不 panic。
+    fn audio_transcription(&self) -> Option<&Arc<dyn AudioTranscriptionPort>> {
+        None
+    }
 }

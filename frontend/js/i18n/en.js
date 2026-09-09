@@ -1535,4 +1535,13 @@ export const en = {
     "voice.local.model.goto_engines_install": "Go to Engines to install",
     "voice.local.model.goto_engines_hint": "Download a FunASR model from the Engines tab first",
     "voice.local.model.restart_hint": "Model switched — restart the service in Engines to load the new model",
+    "voice.local.file.title": "Transcribe a WAV file",
+    "voice.local.file.desc": "Choose a local WAV and transcribe it with the currently running model. The file path is never exposed to the page.",
+    "voice.local.file.choose": "Choose and transcribe",
+    "voice.local.file.picking": "Choose a WAV file…",
+    "voice.local.file.cancelled": "Selection cancelled",
+    "voice.local.file.running": "Transcribing…",
+    "voice.local.file.done": "Transcription complete",
+    "voice.local.file.failed": "Transcription failed",
+    "voice.local.file.no_speech": "No speech detected",
 };

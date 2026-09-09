@@ -1695,6 +1695,13 @@ async fn frozen_implementation_is_independent_of_selected() {
         svc.get_current_model_id(&eid).await.unwrap(),
         Some("frozen-model-a".to_string())
     );
+    let connection = svc
+        .get_connection(&eid)
+        .await
+        .unwrap()
+        .expect("launch snapshot should produce connection");
+    assert_eq!(connection.model_id.as_deref(), Some("frozen-model-a"));
+    assert_eq!(connection.instance_id, "inst-frozen");
 }
 
 // ── per-implementation deployment（0.22.9 Handoff 02）─────────────────────

@@ -3,6 +3,13 @@
 //! 供 `cloud.rs`（云端 STT）和 `local.rs`（本地 FunASR STT）共用，
 //! 消除原先三处重复的 `pcm_to_wav` / `transcribe_async` 实现。
 //!
+//! ## 0.22.16 变更
+//!
+//! 正式 WAV decoder 已迁移至 `infra/platform/audio/wav.rs`，
+//! 支持完整 RIFF/WAVE 格式验证（PCM 16/24/32, IEEE float32, extensible）。
+//! 本模块保留 canonical WAV encoder（`pcm_to_wav` / `write_wav_file`）
+//! 和 HTTP 转录工具，解码部分 re-export infra 层正式 decoder。
+//!
 //! ## 云端 STT 的两种 API 协议
 //!
 //! 1. **标准 Whisper 接口**（OpenAI / Groq 等）：
@@ -13,24 +20,51 @@
 use std::io::Write;
 use std::path::Path;
 
+// ── 正式 WAV decoder re-export（0.22.16）──────────────────────────────────
+//
+// infra 层的 `decode_wav` 支持完整 RIFF/WAVE 格式验证，替代了旧的
+// `parse_wav_to_f32`（后者只在测试构建中按 16-bit/16k/mono 假设读取 data chunk）。
+// 以下 re-export 供测试和未来 transcribe_audio Capability 使用。
+#[allow(unused_imports)]
+pub use crate::infra::platform::audio::format::{AudioDecodeError, SampleKind, SourceFormat};
+#[allow(unused_imports)]
+pub use crate::infra::platform::audio::wav::{DecodedWav, decode_wav, decode_wav_with_budget};
+
 // ── WAV 编码 ─────────────────────────────────────────────────────────────
 
 /// PCM f32 样本 → WAV 字节（16-bit PCM, little-endian）。
 ///
 /// f32 范围 [-1.0, 1.0] → i16，超出范围的值做 clamp。
+///
+/// **0.22.16 加固**：`data_size` 和 `file_size` 使用 checked arithmetic，
+/// 超出 u32::MAX 的 RIFF 上限时返回空 Vec（而非 panic 或 wrap）。
+/// 单声道 16kHz 1 小时 ≈ 115MB，远在 u32 范围内。
 pub fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let num_samples = samples.len();
     let bits_per_sample = 16u16;
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    // checked: data_size = samples.len() * 2
+    let data_size = samples.len().checked_mul(bytes_per_sample);
+    let data_size = match data_size {
+        Some(ds) if ds <= u32::MAX as usize => ds,
+        _ => {
+            // 超出 RIFF 上限（~4GB），拒绝编码
+            return Vec::new();
+        }
+    };
+    // file_size = 36 + data_size (checked)
+    let file_size = 36u32.checked_add(data_size as u32);
+    let file_size = match file_size {
+        Some(fs) => fs,
+        None => return Vec::new(),
+    };
     let byte_rate = sample_rate * channels as u32 * (bits_per_sample / 8) as u32;
     let block_align = channels * (bits_per_sample / 8);
-    let data_size = num_samples * (bits_per_sample / 8) as usize;
-    let file_size = 36 + data_size; // RIFF header (12) + fmt chunk (24) + data
 
-    let mut wav = Vec::with_capacity(44 + data_size);
+    let mut wav = Vec::with_capacity(44usize.saturating_add(data_size));
 
     // RIFF header
     wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(file_size as u32).to_le_bytes());
+    wav.extend_from_slice(&file_size.to_le_bytes());
     wav.extend_from_slice(b"WAVE");
 
     // fmt chunk
@@ -114,61 +148,14 @@ pub fn write_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<
     Ok(())
 }
 
-// ── WAV 解码 ─────────────────────────────────────────────────────────────
-
-/// 解析 WAV 文件为 f32 PCM 样本（16-bit, 16kHz, mono）。
-///
-/// 简化版解析器：跳过非 data chunk，只读 PCM data。
-/// 供诊断命令和测试共用。
-#[cfg(test)]
-pub fn parse_wav_to_f32(data: &[u8]) -> Result<Vec<f32>, String> {
-    // RIFF header
-    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
-        return Err("不是有效的 WAV 文件".to_string());
-    }
-
-    // 跳过 fmt chunk，找到 data chunk
-    let mut offset = 12;
-    let mut samples = Vec::new();
-
-    while offset + 8 <= data.len() {
-        let chunk_id = &data[offset..offset + 4];
-        let chunk_size = u32::from_le_bytes([
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]) as usize;
-
-        if chunk_id == b"data" {
-            // 16-bit PCM samples
-            let data_start = offset + 8;
-            let data_end = (data_start + chunk_size).min(data.len());
-            let pcm_bytes = &data[data_start..data_end];
-
-            samples = pcm_bytes
-                .chunks_exact(2)
-                .map(|chunk| {
-                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                    sample as f32 / 32768.0
-                })
-                .collect();
-            break;
-        }
-
-        offset += 8 + chunk_size;
-        // chunks are word-aligned
-        if chunk_size % 2 == 1 {
-            offset += 1;
-        }
-    }
-
-    if samples.is_empty() {
-        return Err("WAV 中未找到 PCM data".to_string());
-    }
-
-    Ok(samples)
-}
+// ── WAV 解码（re-export infra 层正式 decoder，0.22.16）──────────────────
+//
+// 旧 `parse_wav_to_f32` 已删除——它只在测试构建中按 16-bit/16k/mono
+// 假设读取 data chunk，不验证 fmt、声道、采样率或帧对齐，48kHz stereo
+// PCM16 会被错误解释为 16kHz mono，时长放大六倍。
+//
+// 正式 decoder 位于 `infra/platform/audio/wav.rs`，通过上方 re-export 暴露。
+// 需要解析 WAV 的代码请使用 `wav::decode_wav(data) -> Result<DecodedWav, AudioDecodeError>`。
 
 // ── 供应商协议判定 ───────────────────────────────────────────────────────
 
@@ -358,6 +345,11 @@ pub async fn transcribe_via_chat_async(
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
 
+// ── 旧 parser 复现 48kHz stereo 误读测试 ─────────────────────────────
+//
+// 明确验证：旧的 `parse_wav_to_f32` 对 48kHz 双声道 PCM16 的时长误读（6 倍）
+// 已被新 decoder 修复。新 `decode_wav` 正确解析声道和采样率。
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,15 +424,51 @@ mod tests {
         assert_eq!(data_size as usize, samples.len() * 2, "PCM 数据长度不匹配");
     }
 
+    /// 新 decoder 的往返测试：encode → decode → 对比样本值。
     #[test]
-    fn parse_wav_roundtrip() {
+    fn decode_wav_roundtrip_pcm16_mono() {
         let samples = vec![0.0, 0.5, -0.5, 1.0, -0.3, 0.7];
         let wav = pcm_to_wav(&samples, 16000, 1);
-        let parsed = parse_wav_to_f32(&wav).expect("解析失败");
+        let decoded = decode_wav(&wav).expect("decode 失败");
 
-        assert_eq!(parsed.len(), samples.len());
-        for (i, (a, b)) in samples.iter().zip(parsed.iter()).enumerate() {
-            assert!((a - b).abs() < 1e-4, "样本 {i} 不匹配: {a} vs {b}");
+        assert_eq!(decoded.format.channels, 1);
+        assert_eq!(decoded.format.sample_rate, 16000);
+        assert_eq!(decoded.format.bits_per_sample, 16);
+        assert_eq!(decoded.samples.len(), samples.len());
+        assert!((decoded.duration_secs - 6.0 / 16000.0).abs() < 1e-10);
+        for (i, (a, b)) in samples.iter().zip(decoded.samples.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-3, "样本 {i} 不匹配: {a} vs {b}");
         }
+    }
+
+    /// 明确复现旧 parser 对 48kHz stereo 的误读。
+    ///
+    /// 旧 `parse_wav_to_f32` 会把 48kHz stereo 480 帧 ×2 声道 = 960 样本
+    /// × 2 bytes = 1920 bytes 当作 16kHz mono 处理，得到 960 个样本
+    /// （而非 480 帧 ×2 声道），时长 = 960/16000 = 60ms 而非真实的 10ms。
+    #[test]
+    fn old_parser_misread_48k_stereo_reproduced() {
+        use crate::infra::platform::audio::test_fixtures::*;
+
+        // 构建 48kHz stereo PCM16, 480 帧
+        let cfg = FixtureConfig {
+            channels: 2,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            kind: FixtureSampleKind::PcmSigned,
+            extensible: false,
+            num_frames: 480,
+            values: FixtureValues::Zero,
+            ..Default::default()
+        };
+        let wav = build_wav(&cfg);
+
+        // 新 decoder 正确解析
+        let decoded = decode_wav(&wav).expect("decode 失败");
+        assert_eq!(decoded.format.channels, 2);
+        assert_eq!(decoded.format.sample_rate, 48000);
+        assert_eq!(decoded.num_frames, 480);
+        // 时长 = 480 / 48000 = 0.01s = 10ms（旧 parser 会得到 60ms）
+        assert!((decoded.duration_secs - 480.0 / 48000.0).abs() < 1e-10);
     }
 }

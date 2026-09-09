@@ -201,8 +201,9 @@ impl EngineManager {
     ) -> Result<Option<LocalEngineConnection>, LocalEngineError> {
         self.validate_engine_id(engine_id)?;
         let entry = self.get_entry(engine_id).await?;
-        let ci = entry.current_identity().await;
-        let implementation = entry.current_launch().await.and_then(|l| l.implementation);
+        // identity / model / implementation 必须来自同一个 start-time launch snapshot，
+        // 避免 stop/restart 或 selected 配置切换期间拼出跨实例身份。
+        let launch = entry.current_launch().await;
         let worker = entry.worker_client.lock().await.clone().map(|client| {
             let audio_dir = super::super::funasr::worker::engine_audio_tmp_dir(engine_id);
             // Handoff 02 §4：参数传播证据链——从 SttConfig 构建 TranscribeOptions
@@ -219,12 +220,13 @@ impl EngineManager {
                 ),
             ) as std::sync::Arc<dyn crate::domain::stt::SttTransport>
         });
-        Ok(ci.as_ref().map(|identity| LocalEngineConnection {
-            endpoint: identity.endpoint.base_url(),
-            engine_id: identity.engine_id.clone(),
-            instance_id: identity.instance_id.clone(),
+        Ok(launch.as_ref().map(|snapshot| LocalEngineConnection {
+            endpoint: snapshot.identity.endpoint.base_url(),
+            engine_id: snapshot.identity.engine_id.clone(),
+            instance_id: snapshot.identity.instance_id.clone(),
+            model_id: snapshot.model.as_ref().map(|model| model.model_id.clone()),
             worker,
-            implementation,
+            implementation: snapshot.implementation,
         }))
     }
 

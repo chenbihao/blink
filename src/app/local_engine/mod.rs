@@ -37,7 +37,6 @@ pub mod selected_store; // selected 模型存储生产实现（切换事务端�
 
 #[allow(unused_imports)]
 pub use event_port::{TauriEventPort, make_event_port};
-#[cfg(test)]
 pub use manager::NoopEventPort;
 #[allow(unused_imports)]
 pub use manager::{EngineManager, EventPort, StructuredLogEntry};

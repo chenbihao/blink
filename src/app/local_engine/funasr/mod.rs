@@ -37,6 +37,9 @@
 //! - [`worker`]：`GgufSttTransport`（受管音频目录 + 路径约束 + 后处理）
 //! - [`tests`]：契约测试 + 真实端到端（`BLINK_E2E_GGUF=1` 门控）
 
+#[cfg(test)]
+mod acceptance_tests;
+pub mod corpus_runner;
 pub(crate) mod descriptor;
 pub(crate) mod gguf;
 pub(crate) mod gguf_installer;

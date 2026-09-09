@@ -148,6 +148,14 @@ pub fn create_capture_with_device(device_name: String) -> Box<dyn AudioCapture> 
     Box::new(windows::CpalCapture::new(Some(device_name)))
 }
 
+// 正式 WAV decoder + 格式描述 + 测试 fixtures（0.22.16 H01）
+pub mod format;
+pub mod test_fixtures;
+pub mod wav;
+
+// 共享 downmix + stateful resample 规范化链路（0.22.16 H02）
+pub mod normalize;
+
 // 平台特定实现
 #[cfg(target_os = "windows")]
 mod windows;

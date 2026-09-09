@@ -498,6 +498,7 @@ const CAPABILITY_TITLES: &[(&str, &str, &str)] = &[
         "Set Sticky Visibility",
     ),
     ("trash_sticky", "回收便签", "Trash Sticky Note"),
+    ("transcribe_audio", "音频转文字", "Transcribe Audio"),
     ("update_setting", "更新设置", "Update Setting"),
     ("update_sticky", "更新便签", "Update Sticky Note"),
     ("write_clipboard", "写入剪贴板", "Write Clipboard"),
@@ -1795,5 +1796,295 @@ mod tests {
             chord_item.capability_id.as_deref(),
             Some("non_descriptor_cap")
         );
+    }
+
+    // ── 0.22.16: transcribe_audio Capability 投影测试 ──────────────────────
+
+    #[test]
+    fn transcribe_audio_is_in_catalog() {
+        // transcribe_audio 经 inventory 自动注册，应在目录中独立成项
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        assert_eq!(item.source, FeatureSource::BuiltinCapability);
+        assert_eq!(item.feature_id, "blink.transcribe_audio");
+        assert_eq!(item.group, FeatureGroup::ClipboardText);
+        assert_eq!(item.local_availability, LocalAvailability::Available);
+    }
+
+    #[test]
+    fn transcribe_audio_bilingual_title() {
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items_zh = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+        let zh = items_zh
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+        assert_eq!(zh.title, "音频转文字");
+
+        let items_en = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "en",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+        let en = items_en
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+        assert_eq!(en.title, "Transcribe Audio");
+    }
+
+    #[test]
+    fn transcribe_audio_ai_default_off() {
+        // ai_default=Off → 无 allowlist 时投影 Disabled
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None, // 无 allowlist → 退回 ai_default 投影
+            &HashSet::new(),
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        assert_eq!(proj.ai_status, CatalogExitStatus::Disabled);
+    }
+
+    #[test]
+    fn transcribe_audio_mcp_default_off() {
+        // mcp_default=DefaultOff → 未在 exposed 集合中时投影 Disabled
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(), // 空暴露集
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        // allowed_origins=ALL 允许 MCP，danger=Safe，mcp_default=DefaultOff
+        // → 未在 exposed 中 → Disabled（不是 CodeForbidden）
+        assert_eq!(proj.mcp_status, CatalogExitStatus::Disabled);
+    }
+
+    #[test]
+    fn transcribe_audio_mcp_can_be_exposed() {
+        // 显式暴露后 MCP 应 Enabled
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+        let exposed: HashSet<String> = ["transcribe_audio".to_string()].into_iter().collect();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &exposed,
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        assert_eq!(proj.mcp_status, CatalogExitStatus::Enabled);
+    }
+
+    #[test]
+    fn transcribe_audio_ai_can_be_enabled_via_allowlist() {
+        // 显式授权后 AI 应 Enabled
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+        let allowlist: HashSet<String> = ["transcribe_audio".to_string()].into_iter().collect();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            Some(&allowlist),
+            &HashSet::new(),
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        assert_eq!(proj.ai_status, CatalogExitStatus::Enabled);
+    }
+
+    #[test]
+    fn transcribe_audio_sensitive_and_confirmation() {
+        // sensitive=true → requires_confirmation=true
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        assert!(proj.sensitive);
+        assert!(proj.requires_confirmation);
+        assert_eq!(proj.danger, "safe");
+    }
+
+    #[test]
+    fn transcribe_audio_runtime_requirement() {
+        // runtime_requirement=MAIN_PROCESS
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        assert_eq!(proj.runtime_requirement, "main_process");
+    }
+
+    #[test]
+    fn transcribe_audio_all_origins_allowed() {
+        // allowed_origins=ALL → LocalAi/Mcp/Cli 都不是 CodeForbidden
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+            None,
+            &HashSet::new(),
+        );
+
+        let item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("transcribe_audio"))
+            .expect("应找到 transcribe_audio 目录项");
+
+        let proj = item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+        // AI: allowed_origins 含 LocalAi → 非 CodeForbidden
+        assert_ne!(proj.ai_status, CatalogExitStatus::CodeForbidden);
+        // MCP: allowed_origins 含 Mcp, danger=Safe, mcp_default=DefaultOff → 非 CodeForbidden
+        assert_ne!(proj.mcp_status, CatalogExitStatus::CodeForbidden);
     }
 }

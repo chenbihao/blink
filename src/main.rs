@@ -888,6 +888,58 @@ fn main() {
                 "EngineManager 已构造（funasr + paddleocr adapter 与模型目录已注册）"
             );
 
+            // 0.22.16 Handoff 04：构造一次性文件转写编排服务
+            //
+            // AudioTranscriptionService 是唯一 app 层转写编排器：
+            // 消费 audio_ref → 解析资源 → 冻结 STT 身份 → 阻塞池解码规范化 →
+            // 调用现有 transport → 返回稳定结构化结果。
+            //
+            // 依赖：AudioResourceRegistry（进程级）、EngineConnectionAdapter（桥接 EngineManager）、
+            // SttCloudEgressAuthorizer（云端外发授权）。
+            // 注入到 domain_env 供 command 层 / capability 层取用。
+            //
+            // 0.22.16 Handoff 06：AudioResourceRegistry 同时注册为 managed state，
+            // 供 CLI transcribe-audio 和本地 UI pick_audio_file 签发 audio_ref。
+            {
+                let audio_registry = std::sync::Arc::new(
+                    crate::app::audio_resource::AudioResourceRegistry::default(),
+                );
+                let engine_conn = std::sync::Arc::new(
+                    crate::app::audio_transcription_service::EngineConnectionAdapter::new(
+                        local_engine_service.clone(),
+                    ),
+                );
+                let cloud_auth = std::sync::Arc::new(
+                    crate::app::audio_transcription_service::SttCloudEgressAuthorizer::new(),
+                );
+                let transcription_service =
+                    std::sync::Arc::new(
+                        crate::app::audio_transcription_service::AudioTranscriptionService::new(
+                            audio_registry.clone(),
+                            engine_conn,
+                            cloud_auth,
+                            crate::app::audio_transcription_service::TranscriptionConfig::default(),
+                        ),
+                    );
+                // 注册为 managed state（command 层通过 app.state 取用）
+                app.manage(transcription_service.clone());
+                // AudioResourceRegistry 也注册为 managed state——
+                // CLI / UI 可信入口通过它签发 audio_ref，不暴露给前端
+                app.manage(audio_registry);
+                // 注入到 domain_env（capability 层通过 port 取用）
+                // domain_env 已在 app.manage 中，通过 state 取用
+                let env = app
+                    .state::<std::sync::Arc<app::domain_env::TauriDomainEnv>>()
+                    .inner()
+                    .clone();
+                env.set_audio_transcription(
+                    transcription_service as std::sync::Arc<
+                        dyn crate::domain::stt::transcribe::AudioTranscriptionPort,
+                    >,
+                );
+                tracing::info!("AudioTranscriptionService 已构造并注入 domain_env");
+            }
+
             // 0.22.6.6: 后台扫描遗留 lease——基于证据的 fail-closed 恢复
             //
             // 不阻塞 Alt+Space 主链路——在 spawn 的 async task 中执行。
@@ -1434,6 +1486,9 @@ app::commands::toggle_default_trigger,
             app::commands::has_stt_secret,
             app::commands::get_stt_secret_hint,
             app::commands::resize_voice_overlay,
+            // 0.22.16 Handoff 06：本地 UI 音频转写（picker + invoke 同一 Capability）
+            app::commands::pick_audio_file,
+            app::commands::transcribe_audio_file,
             app::commands::get_default_hotkey,
             // 0.13.0 MCP client
             app::commands::list_mcp_servers,

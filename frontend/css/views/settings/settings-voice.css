@@ -273,6 +273,58 @@
     border-color: var(--accent);
 }
 
+#voice .voice-file-transcribe-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-sm) var(--space-md);
+    align-items: center;
+    margin-top: var(--space-md);
+    padding: var(--space-md);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    background: var(--bg-sidebar);
+}
+
+#voice .voice-file-transcribe-title {
+    color: var(--text);
+    font-weight: 600;
+}
+
+#voice .voice-file-transcribe-desc,
+#voice .voice-file-transcribe-meta,
+#voice .voice-file-transcribe-status {
+    margin-top: var(--space-xs);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-file-transcribe-status,
+#voice .voice-file-transcribe-output,
+#voice .voice-file-transcribe-meta {
+    grid-column: 1 / -1;
+}
+
+#voice .voice-file-transcribe-status.success {
+    color: var(--green);
+}
+
+#voice .voice-file-transcribe-status.error {
+    color: var(--red);
+}
+
+#voice .voice-file-transcribe-output {
+    max-height: 12rem;
+    margin: 0;
+    padding: var(--space-sm);
+    overflow: auto;
+    white-space: pre-wrap;
+    color: var(--text);
+    font-family: inherit;
+    line-height: 1.6;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+}
+
 .audio-test-container {
     display: flex;
     align-items: center;

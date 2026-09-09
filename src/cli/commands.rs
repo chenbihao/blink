@@ -65,9 +65,48 @@ pub fn dispatch(cli: Cli) -> i32 {
     let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
     let domain_env = Arc::new(crate::app::domain_env::TauriDomainEnv::new(
         app.handle().clone(),
-        pools,
+        pools.clone(),
     ));
     domain_env.set_cap_registry(cap_registry.clone());
+
+    // 文件转写 CLI 构造最小 FunASR EngineManager：只使用已安装环境/模型，
+    // 不安装、不下载，也不创建 GUI。其他 CLI 命令不承担本地引擎启动成本。
+    let cli_engine_service = if matches!(&cli.command, Commands::TranscribeAudio { .. }) {
+        let stt_config = tauri::async_runtime::block_on(crate::app::config::ConfigStore::get::<
+            crate::app::stt_config::SttConfig,
+        >(&pools.config));
+        crate::app::stt_config::init_cache(stt_config);
+        Some(build_cli_engine_manager())
+    } else {
+        None
+    };
+
+    if let Some(engine_service) = cli_engine_service.as_ref() {
+        let audio_registry = Arc::new(crate::app::audio_resource::AudioResourceRegistry::default());
+        let engine_conn: Arc<dyn crate::app::audio_transcription_service::EngineConnectionPort> =
+            Arc::new(
+                crate::app::audio_transcription_service::EngineConnectionAdapter::new(
+                    engine_service.clone(),
+                ),
+            );
+        let cloud_auth: Arc<dyn crate::app::audio_transcription_service::CloudEgressAuthorizer> =
+            Arc::new(crate::app::audio_transcription_service::SttCloudEgressAuthorizer::new());
+        let transcription_service = Arc::new(
+            crate::app::audio_transcription_service::AudioTranscriptionService::new(
+                audio_registry.clone(),
+                engine_conn,
+                cloud_auth,
+                crate::app::audio_transcription_service::TranscriptionConfig::default(),
+            ),
+        );
+        app.manage(audio_registry);
+        domain_env.set_audio_transcription(
+            transcription_service
+                as Arc<dyn crate::domain::stt::transcribe::AudioTranscriptionPort>,
+        );
+        app.manage(engine_service.clone());
+    }
+
     app.manage(domain_env);
 
     app.manage(cap_registry.clone());
@@ -87,6 +126,13 @@ pub fn dispatch(cli: Cli) -> i32 {
             model,
             conversation,
         } => run_chat(&handle, model, conversation),
+        Commands::TranscribeAudio { path, json } => run_transcribe_audio(
+            &handle,
+            &cap_registry,
+            &path,
+            json,
+            cli_engine_service.expect("transcribe CLI engine manager initialized"),
+        ),
         // onnx-validate 在 try_run_cli 中被直接拦截，不走 clap 标准分派。
         // 此分支不可达——OnnxValidate 命令不会进入 dispatch。
         Commands::OnnxValidate { .. } => {
@@ -94,6 +140,25 @@ pub fn dispatch(cli: Cli) -> i32 {
             1
         }
     }
+}
+
+fn build_cli_engine_manager() -> Arc<crate::app::local_engine::EngineManager> {
+    use crate::app::local_engine::model_installer::make_funasr_model_registry;
+    use crate::app::local_engine::{EngineManager, EngineRegistry, NoopEventPort};
+
+    let registry = Arc::new(EngineRegistry::new_with_adapters(vec![
+        crate::app::local_engine::funasr::make_funasr_adapter(),
+    ]));
+    let descriptor = crate::app::local_engine::funasr::make_funasr_provider_descriptor();
+    EngineManager::new_with_providers(
+        registry,
+        Arc::new(NoopEventPort),
+        [(descriptor.engine_id.clone(), descriptor)]
+            .into_iter()
+            .collect(),
+        make_funasr_model_registry(),
+        Arc::new(crate::app::local_engine::funasr::FunasrGgufModelInstallWorker::new()),
+    )
 }
 
 /// `blink mcp-server` — 已迁移到主进程 Streamable HTTP（0.19.13）。
@@ -323,6 +388,190 @@ fn run_config(handle: &tauri::AppHandle, action: ConfigAction) -> i32 {
             }
         }
     }
+}
+
+/// `blink transcribe-audio <path> [--json]` — 转写本地音频文件（0.22.16 Handoff 06）。
+///
+/// **信任边界**：
+/// - 在 CLI 信任边界验证用户显式 path（必须是绝对本地路径 + regular file）
+/// - 拒绝 URL、file://、相对路径和不存在的文件
+/// - 签发短期 audio_ref（scope = "stt_transcribe"）
+/// - 构造 `InvocationOrigin::Cli`
+/// - 调用 `CapabilityRegistry::invoke("transcribe_audio", { audio_ref })` —— 走同一原子执行语义
+/// - 输出正文和简短 engine/model identity
+/// - JSON 模式保留完整 canonical data
+///
+/// 不在 generic `run_capability()` 中按 capability id 加隐藏 path 特例。
+fn run_transcribe_audio(
+    handle: &tauri::AppHandle,
+    cap_registry: &Arc<crate::domain::capability::CapabilityRegistry>,
+    path: &str,
+    json: bool,
+    engine_service: Arc<crate::app::local_engine::EngineManager>,
+) -> i32 {
+    use tauri::Manager;
+
+    // 1. 信任边界：拒绝 URL 和非本地路径
+    if path.starts_with("http://")
+        || path.starts_with("https://")
+        || path.starts_with("file://")
+        || path.starts_with("ftp://")
+    {
+        eprintln!("错误：不接受 URL 或远程路径");
+        return 1;
+    }
+
+    let file_path = std::path::Path::new(path);
+
+    // 2. 验证绝对路径
+    if !file_path.is_absolute() {
+        eprintln!("错误：路径必须是绝对本地路径");
+        return 1;
+    }
+
+    // 3. 验证文件存在且是 regular file
+    if !file_path.exists() {
+        eprintln!("错误：文件不存在");
+        return 1;
+    }
+
+    let metadata = match std::fs::metadata(file_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("错误：无法读取文件元数据: {e}");
+            return 1;
+        }
+    };
+
+    if !metadata.is_file() {
+        eprintln!("错误：路径不是常规文件");
+        return 1;
+    }
+
+    // 已有 GUI/其他 CLI worker 时不启动第二个实例。stdio pipe 不能跨进程接管，
+    // 因此给出明确错误，保护“同一时刻单 worker”铁则。
+    if crate::app::local_engine::funasr::corpus_runner::count_orphan_workers() > 0 {
+        eprintln!(
+            "错误：检测到另一个 FunASR worker 正在运行，请先结束当前语音任务或退出 Blink 后重试"
+        );
+        return 1;
+    }
+
+    let engine_id = match crate::infra::local_engine::runtime::EngineId::new(
+        crate::app::local_engine::funasr::FUNASR_ENGINE_ID,
+    ) {
+        Ok(id) => id,
+        Err(error) => {
+            eprintln!("错误：本地 STT 引擎配置无效: {error}");
+            return 1;
+        }
+    };
+    let stt_config = crate::app::stt_config::get_stt_config();
+    if stt_config.mode != crate::app::stt_config::SttMode::Local {
+        eprintln!("错误：CLI 文件转写要求语音设置为本地 STT 模式；云端音频外发必须走交互式授权");
+        return 1;
+    }
+    let Some(selection) = stt_config.local_stt_selection.as_ref() else {
+        eprintln!("错误：尚未配置本地 STT 模型，请先在设置页选择已安装模型");
+        return 1;
+    };
+    if selection.engine_id != engine_id.as_str() {
+        eprintln!("错误：CLI 文件转写当前仅支持已安装的 FunASR 本地模型");
+        return 1;
+    }
+
+    // 4. 获取 AudioResourceRegistry 并签发 audio_ref
+    let audio_registry = handle
+        .state::<std::sync::Arc<crate::app::audio_resource::AudioResourceRegistry>>()
+        .inner()
+        .clone();
+
+    let audio_ref = match audio_registry.issue(file_path, "stt_transcribe") {
+        Ok(ref_) => ref_,
+        Err(e) => {
+            eprintln!("错误：无法签发音频引用: {e}");
+            return 1;
+        }
+    };
+
+    let start_result = tauri::async_runtime::block_on(async {
+        use crate::domain::local_engine::ModelInstallState;
+
+        let installed = engine_service
+            .list_models(&engine_id)
+            .await
+            .into_iter()
+            .any(|model| {
+                model.model_id == selection.model_id
+                    && model.install_state == ModelInstallState::Installed
+            });
+        if !installed {
+            return Err("所选 STT 模型尚未安装；CLI 不会自动下载模型".to_string());
+        }
+        let mut config = crate::app::local_engine::config_source::funasr_adapter_config();
+        config.engine_config["funasr_model"] =
+            serde_json::Value::String(selection.model_id.clone());
+        engine_service
+            .start(&engine_id, config)
+            .await
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = start_result {
+        eprintln!("错误：无法启动本地 STT 引擎: {error}");
+        return 1;
+    }
+
+    // 5. 构造 InvokeContext（origin = Cli）
+    let env_arc = handle
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::Cli,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: None,
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: None,
+    };
+
+    // 6. 调用 transcribe_audio Capability —— 走 Registry 唯一原子执行入口
+    let args = serde_json::json!({ "audio_ref": audio_ref });
+    let result =
+        tauri::async_runtime::block_on(cap_registry.invoke("transcribe_audio", args, &ctx));
+
+    // 7. 获取 projection（transcribe_audio 无 manifest projection，返回 None）
+    let projection = cap_registry
+        .get("transcribe_audio")
+        .and_then(|cap| cap.projection());
+
+    let exit_code = match result {
+        Ok(cap_result) => {
+            if json {
+                // JSON 模式：输出完整 canonical data
+                let json_str = serde_json::to_string_pretty(&cap_result)
+                    .unwrap_or_else(|e| format!("序列化失败: {e}"));
+                println!("{json_str}");
+            } else {
+                // 文本模式：输出正文和简短 identity
+                let display = cap_result.to_display_text(projection.as_ref());
+                println!("{display}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("转写失败: {e}");
+            1
+        }
+    };
+
+    if let Err(error) = tauri::async_runtime::block_on(engine_service.stop(&engine_id)) {
+        eprintln!("错误：转写完成后停止本地 STT 引擎失败: {error}");
+        return 1;
+    }
+    exit_code
 }
 
 /// `blink chat [--model <id>] [--conversation <id>]` — 终端对话模式。

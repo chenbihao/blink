@@ -254,6 +254,8 @@ pub struct LocalEngineConnection {
     pub engine_id: String,
     /// instance id（每次启动随机生成，用于实例隔离）。
     pub instance_id: String,
+    /// start 时冻结的真实模型 id；不得从当前 selected 配置推测。
+    pub model_id: Option<String>,
     /// stdio worker 传输通道（StdioWorker 引擎）。
     pub worker: Option<std::sync::Arc<dyn crate::domain::stt::SttTransport>>,
     /// start 时冻结的 implementation（Handoff 08）——诊断/状态投影用，
@@ -267,6 +269,7 @@ impl std::fmt::Debug for LocalEngineConnection {
             .field("endpoint", &self.endpoint)
             .field("engine_id", &self.engine_id)
             .field("instance_id", &self.instance_id)
+            .field("model_id", &self.model_id)
             .field("worker", &self.worker.is_some())
             .field("implementation", &self.implementation)
             .finish()
@@ -437,11 +440,9 @@ pub trait EventPort: Send + Sync {
     }
 }
 
-/// 空实现（测试/无事件场景用）。
-#[cfg(test)]
+/// 空实现（CLI、测试及其他无事件场景用）。
 pub struct NoopEventPort;
 
-#[cfg(test)]
 impl EventPort for NoopEventPort {
     fn emit_status(&self, _snapshot: &EngineStatusSnapshot) {}
     fn emit_log(

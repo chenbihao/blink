@@ -33,7 +33,9 @@
 //!    0.22.10 起此规则同时承担「禁止 Python/uv 栈回流」的守卫职责。
 //! 5. **ONNX asset-lock 校验**：ORT DLL/模型 hash 锁定（0.22.8）。
 
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod funasr_worker;
@@ -324,7 +326,7 @@ fn extract_json_version(content: &str) -> Option<String> {
 ///
 /// 校验：版本一致性（Cargo.toml ↔ tauri.conf.json）、嵌入资源（JSON 数据校验）、
 /// 许可文件存在、GGUF worker 供应链、排除规则（无模型/staging/generation/venv/cache/__pycache__）、
-/// ONNX OCR 供应链锁定。
+/// ONNX OCR 供应链锁定、STT corpus 隐私守卫（testdata/stt/corpus 不入发布产物）。
 /// 分层守卫不在发布预检（它守的是代码结构而非打包产物），已迁至 blink bin crate 的
 /// `src/arch_guard.rs`，随 `cargo test --bin blink` 每次运行。
 fn check_release_resources() {
@@ -348,6 +350,9 @@ fn check_release_resources() {
 
     // 5. ONNX OCR 供应链锁定校验（0.22.8-B）
     check_onnx_asset_lock(&mut failures);
+
+    // 6. STT corpus 隐私守卫（0.22.16 Handoff 07）：testdata/stt/corpus 不入发布产物
+    check_corpus_privacy(&mut failures);
 
     if !failures.is_empty() {
         for f in &failures {
@@ -434,14 +439,8 @@ fn check_gguf_worker_supply_chain(failures: &mut Vec<String>) {
         }
     }
 
-    // 随发布 manifest（构建产物）就位——exe 不入 Git，release 前必须先构建
-    let manifest = root.join("resources/bin/funasr-worker/manifest.json");
-    if !manifest.is_file() {
-        failures.push(format!(
-            "GGUF worker 构建产物缺失（{}）。请先运行 `cargo xtask funasr-worker`",
-            manifest.display()
-        ));
-    }
+    // 随发布 manifest（构建产物）必须与实际目录逐文件一致。
+    validate_worker_manifest_dir(&root.join("resources/bin/funasr-worker"), failures);
 
     // 模型 URL 浮动 ref 校验——拒绝 resolve/main，要求固定 commit SHA
     if let Some(models) = lock.get("models").and_then(|v| v.as_array()) {
@@ -556,13 +555,185 @@ fn check_exclusion_rules(failures: &mut Vec<String>) {
     println!("🚫 校验排除规则（resources/ 下无模型/staging/venv/cache/__pycache__）...");
 
     let mut found_forbidden: Vec<String> = Vec::new();
-    scan_forbidden_in_dir(&resources_dir, &resources_dir, &mut found_forbidden);
+    // 只跳过已由 manifest 逐文件校验的 funasr-worker 目录；resources/bin 下
+    // 任何其他子树仍受通用模型/运行时排除规则约束。
+    scan_forbidden_in_dir(
+        &resources_dir,
+        &resources_dir,
+        &mut found_forbidden,
+        &["funasr-worker"],
+    );
 
     if found_forbidden.is_empty() {
         println!("  ✓ resources/ 目录干净（无禁止文件/目录）");
     } else {
         for item in &found_forbidden {
             failures.push(format!("排除规则违反: {item}"));
+        }
+    }
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(path)?);
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// 校验 worker 发布目录与 manifest 的闭合集合、大小和哈希。
+///
+/// manifest 自身不进入 files 哈希集合；除此以外不允许未声明文件，也不允许
+/// manifest 通过声明模型扩展名来绕过 resources 排除规则。
+fn validate_worker_manifest_dir(worker_dir: &Path, failures: &mut Vec<String>) {
+    let manifest_path = worker_dir.join("manifest.json");
+    if std::fs::symlink_metadata(&manifest_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        failures.push("GGUF worker manifest.json 不得为符号链接".to_string());
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+        failures.push(format!(
+            "GGUF worker 构建产物缺失（{}）。请先运行 `cargo xtask funasr-worker`",
+            manifest_path.display()
+        ));
+        return;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) else {
+        failures.push("GGUF worker manifest.json 不是合法 JSON".to_string());
+        return;
+    };
+    let Some(files) = manifest.get("files").and_then(|value| value.as_array()) else {
+        failures.push("GGUF worker manifest.json 缺少 files 数组".to_string());
+        return;
+    };
+
+    let mut declared = HashSet::new();
+    for file in files {
+        let Some(rel) = file.get("path").and_then(|value| value.as_str()) else {
+            failures.push("GGUF worker manifest 存在缺少 path 的文件项".to_string());
+            continue;
+        };
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            failures.push(format!("GGUF worker manifest 包含越界路径: {rel}"));
+            continue;
+        }
+        let normalized_rel = rel.replace('\\', "/");
+        if !declared.insert(normalized_rel.clone()) {
+            failures.push(format!(
+                "GGUF worker manifest 重复声明文件: {normalized_rel}"
+            ));
+            continue;
+        }
+
+        let kind = file.get("kind").and_then(|value| value.as_str());
+        let ext = rel_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+        let kind_extension_valid = matches!(
+            (kind, ext.as_deref()),
+            (Some("runtime"), Some("dll"))
+                | (Some("worker"), Some("exe"))
+                | (Some("license"), Some("txt"))
+        );
+        if !kind_extension_valid {
+            failures.push(format!(
+                "GGUF worker manifest 文件类型不在 allowlist: path={normalized_rel} kind={kind:?}"
+            ));
+        }
+
+        let actual_path = worker_dir.join(rel_path);
+        let Ok(link_metadata) = std::fs::symlink_metadata(&actual_path) else {
+            failures.push(format!(
+                "GGUF worker manifest 声明文件缺失: {normalized_rel}"
+            ));
+            continue;
+        };
+        if link_metadata.file_type().is_symlink() {
+            failures.push(format!(
+                "GGUF worker manifest 声明项不得为符号链接: {normalized_rel}"
+            ));
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&actual_path) else {
+            failures.push(format!(
+                "GGUF worker manifest 声明文件无法读取: {normalized_rel}"
+            ));
+            continue;
+        };
+        if !metadata.is_file() {
+            failures.push(format!(
+                "GGUF worker manifest 声明项不是文件: {normalized_rel}"
+            ));
+            continue;
+        }
+
+        let expected_size = file.get("size_bytes").and_then(|value| value.as_u64());
+        if expected_size != Some(metadata.len()) {
+            failures.push(format!(
+                "GGUF worker 文件大小漂移: {normalized_rel} expected={expected_size:?} actual={}",
+                metadata.len()
+            ));
+        }
+        let expected_hash = file.get("sha256").and_then(|value| value.as_str());
+        match sha256_file(&actual_path) {
+            Ok(actual_hash) if expected_hash == Some(actual_hash.as_str()) => {}
+            Ok(actual_hash) => failures.push(format!(
+                "GGUF worker 文件 SHA-256 漂移: {normalized_rel} expected={expected_hash:?} actual={actual_hash}"
+            )),
+            Err(error) => failures.push(format!(
+                "GGUF worker 文件哈希读取失败: {normalized_rel}: {error}"
+            )),
+        }
+    }
+
+    let mut actual = HashSet::new();
+    collect_relative_files(worker_dir, worker_dir, &mut actual, failures);
+    actual.remove("manifest.json");
+    for extra in actual.difference(&declared) {
+        failures.push(format!("GGUF worker 存在 manifest 未声明文件: {extra}"));
+    }
+}
+
+fn collect_relative_files(
+    base: &Path,
+    dir: &Path,
+    files: &mut HashSet<String>,
+    failures: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        failures.push(format!("GGUF worker 目录无法读取: {}", dir.display()));
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            failures.push(format!("GGUF worker 文件类型无法读取: {}", path.display()));
+            continue;
+        };
+        if file_type.is_symlink() {
+            failures.push(format!(
+                "GGUF worker 目录不得包含符号链接: {}",
+                path.display()
+            ));
+        } else if file_type.is_dir() {
+            collect_relative_files(base, &path, files, failures);
+        } else if file_type.is_file()
+            && let Ok(rel) = path.strip_prefix(base)
+        {
+            files.insert(rel.to_string_lossy().replace('\\', "/"));
         }
     }
 }
@@ -654,11 +825,48 @@ fn check_onnx_asset_lock(failures: &mut Vec<String>) {
     }
 }
 
-/// 校验 STT ParaformerOnline 供应链 asset-lock.json（0.22.9）。
+/// 校验 STT corpus 隐私守卫（0.22.16 Handoff 07）。
 ///
-/// - asset-lock.json 存在且可解析
-/// 递归扫描目录，查找禁止的文件扩展名和子目录名。
-fn scan_forbidden_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>) {
+/// 确保私有语料不进入发布产物：
+/// - `testdata/stt/corpus/` 被 .gitignore 排除
+/// - `resources/` 下不含 corpus 目录或 WAV/manifest 文件
+/// - 打包产物不包含真实录音或私密 manifest
+fn check_corpus_privacy(failures: &mut Vec<String>) {
+    println!("🔒 校验 STT corpus 隐私守卫...");
+    let root = workspace_root();
+
+    // 1. .gitignore 必须包含 testdata/stt/corpus/ 排除规则
+    let gitignore_path = root.join(".gitignore");
+    let Ok(gitignore) = std::fs::read_to_string(&gitignore_path) else {
+        failures.push(format!(
+            "corpus 隐私: .gitignore 读取失败 ({})",
+            gitignore_path.display()
+        ));
+        return;
+    };
+    if !gitignore.contains("testdata/stt/corpus/") {
+        failures.push("corpus 隐私: .gitignore 未包含 testdata/stt/corpus/ 排除规则".to_string());
+    }
+
+    // 2. resources/ 下不应有 corpus 目录或 WAV 文件
+    let resources_dir = root.join("resources");
+    let mut found_privacy_violations: Vec<String> = Vec::new();
+    scan_corpus_leak_in_dir(
+        &resources_dir,
+        &resources_dir,
+        &mut found_privacy_violations,
+    );
+    for v in &found_privacy_violations {
+        failures.push(format!("corpus 隐私: {v}"));
+    }
+
+    if found_privacy_violations.is_empty() {
+        println!("  ✓ corpus 隐私守卫通过");
+    }
+}
+
+/// 递归扫描 resources/ 目录，查找可能泄露 corpus 的文件（WAV、manifest.toml）。
+fn scan_corpus_leak_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -672,13 +880,57 @@ fn scan_forbidden_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>) {
 
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name == "corpus" {
+                    found.push(format!("禁止 corpus 目录: resources/{rel}/"));
+                    continue;
+                }
+            }
+            scan_corpus_leak_in_dir(base, &path, found);
+        } else if path.is_file() {
+            // 检查 WAV 文件
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("wav") {
+                    found.push(format!("禁止 WAV 文件: resources/{rel}"));
+                }
+            }
+            // 检查 manifest.toml（corpus manifest）
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name == "manifest.toml" {
+                    found.push(format!("禁止 manifest.toml: resources/{rel}"));
+                }
+            }
+        }
+    }
+}
+
+/// 校验 STT ParaformerOnline 供应链 asset-lock.json（0.22.9）。
+///
+/// - asset-lock.json 存在且可解析
+/// 递归扫描目录，查找禁止的文件扩展名和子目录名。
+fn scan_forbidden_in_dir(base: &Path, dir: &Path, found: &mut Vec<String>, skip_dirs: &[&str]) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if skip_dirs.iter().any(|d| *d == name) {
+                    continue;
+                }
                 if FORBIDDEN_DIRS.iter().any(|d| *d == name) {
                     found.push(format!("禁止目录: resources/{rel}/"));
                     // 不递归进入禁止目录
                     continue;
                 }
             }
-            scan_forbidden_in_dir(base, &path, found);
+            scan_forbidden_in_dir(base, &path, found, skip_dirs);
         } else if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 let ext_lower = format!(".{ext}").to_lowercase();
@@ -950,6 +1202,55 @@ fn lint_frontend() {
 
 #[cfg(test)]
 mod supply_chain_tests {
+    use std::path::{Path, PathBuf};
+
+    struct TempWorkerDir(PathBuf);
+
+    impl TempWorkerDir {
+        fn new(label: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "blink-xtask-worker-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempWorkerDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_manifest(dir: &Path, files: serde_json::Value) {
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({ "files": files })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn declared_file(path: &str, kind: &str, bytes: &[u8]) -> serde_json::Value {
+        let temp = TempWorkerDir::new("hash");
+        let file = temp.path().join("payload");
+        std::fs::write(&file, bytes).unwrap();
+        serde_json::json!({
+            "path": path,
+            "kind": kind,
+            "size_bytes": bytes.len(),
+            "sha256": super::sha256_file(&file).unwrap(),
+        })
+    }
+
     /// worker-lock.json（来源锁）与 `funasr_worker` 构建常量必须一致——
     /// 两处声明漂移即失败（release-check 同规则，此处固化为单测）。
     ///
@@ -966,6 +1267,76 @@ mod supply_chain_tests {
         assert!(
             repo_failures.is_empty(),
             "GGUF 供应链锁校验失败: {repo_failures:?}"
+        );
+    }
+
+    #[test]
+    fn worker_manifest_accepts_declared_hashed_runtime() {
+        let dir = TempWorkerDir::new("valid");
+        std::fs::write(dir.path().join("worker.exe"), b"worker").unwrap();
+        write_manifest(
+            dir.path(),
+            serde_json::json!([declared_file("worker.exe", "worker", b"worker")]),
+        );
+
+        let mut failures = Vec::new();
+        super::validate_worker_manifest_dir(dir.path(), &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn worker_manifest_rejects_undeclared_model_file() {
+        let dir = TempWorkerDir::new("rogue-model");
+        std::fs::write(dir.path().join("worker.exe"), b"worker").unwrap();
+        std::fs::write(dir.path().join("rogue.gguf"), b"model").unwrap();
+        write_manifest(
+            dir.path(),
+            serde_json::json!([declared_file("worker.exe", "worker", b"worker")]),
+        );
+
+        let mut failures = Vec::new();
+        super::validate_worker_manifest_dir(dir.path(), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("未声明文件"))
+        );
+    }
+
+    #[test]
+    fn worker_manifest_rejects_undeclared_dll() {
+        let dir = TempWorkerDir::new("rogue-dll");
+        std::fs::write(dir.path().join("worker.exe"), b"worker").unwrap();
+        std::fs::write(dir.path().join("rogue.dll"), b"runtime").unwrap();
+        write_manifest(
+            dir.path(),
+            serde_json::json!([declared_file("worker.exe", "worker", b"worker")]),
+        );
+
+        let mut failures = Vec::new();
+        super::validate_worker_manifest_dir(dir.path(), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("未声明文件"))
+        );
+    }
+
+    #[test]
+    fn worker_manifest_rejects_hash_drift() {
+        let dir = TempWorkerDir::new("hash-drift");
+        std::fs::write(dir.path().join("worker.exe"), b"changed").unwrap();
+        write_manifest(
+            dir.path(),
+            serde_json::json!([declared_file("worker.exe", "worker", b"original")]),
+        );
+
+        let mut failures = Vec::new();
+        super::validate_worker_manifest_dir(dir.path(), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("SHA-256 漂移"))
         );
     }
 }

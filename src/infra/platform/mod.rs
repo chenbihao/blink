@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod context;
 #[cfg(windows)]
 pub mod dpi;
+pub mod file_identity; // 0.22.16 H03：平台文件身份原语（AudioResourceRegistry 消费）
 pub mod gpu; // 0.22.10：原 platform::python 随 PythonVenv Provider 退役，仅保留 CUDA 检测
 pub mod hotkey;
 #[cfg(windows)]

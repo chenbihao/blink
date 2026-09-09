@@ -24,6 +24,7 @@ use crate::domain::search::SearchService;
 use crate::domain::sticky::{
     StickyChangeSource, StickyCloseOutcome, StickyService, StickyWorkflowError,
 };
+use crate::domain::stt::transcribe::AudioTranscriptionPort;
 use crate::infra::data::pools::DbPools;
 /// Tauri 运行时环境实现（0.21.14 最小 port 拆分）。
 ///
@@ -36,6 +37,9 @@ pub struct TauriDomainEnv {
     plugin_engine: OnceLock<Arc<PluginEngine>>,
     search_service: OnceLock<Arc<SearchService>>,
     chat_service: OnceLock<Arc<ChatService>>,
+    /// 一次性文件转写服务（0.22.16 Handoff 04）。
+    /// 由 main.rs 在 EngineManager + AudioResourceRegistry 就绪后注入。
+    audio_transcription: OnceLock<Arc<dyn AudioTranscriptionPort>>,
     /// 进程级图片暂存（0.19.4）——构造时创建，生命周期与 app 相同。
     image_stash: Arc<ImageStash>,
 }
@@ -70,6 +74,7 @@ impl TauriDomainEnv {
             plugin_engine: OnceLock::new(),
             search_service: OnceLock::new(),
             chat_service: OnceLock::new(),
+            audio_transcription: OnceLock::new(),
             image_stash: Arc::new(ImageStash::new()),
         }
     }
@@ -118,6 +123,19 @@ impl TauriDomainEnv {
             tracing::warn!(
                 slot = "chat_service",
                 "重复注入 ChatService，已忽略（首次注入优先）"
+            );
+        }
+    }
+
+    /// 注入 AudioTranscriptionPort（0.22.16 Handoff 04）。
+    ///
+    /// 在 EngineManager + AudioResourceRegistry 就绪后由 main.rs 调用。
+    /// 重复注入不会覆盖首次值，仅记录 `warn`。
+    pub fn set_audio_transcription(&self, svc: Arc<dyn AudioTranscriptionPort>) {
+        if self.audio_transcription.set(svc).is_err() {
+            tracing::warn!(
+                slot = "audio_transcription",
+                "重复注入 AudioTranscriptionPort，已忽略（首次注入优先）"
             );
         }
     }
@@ -423,6 +441,12 @@ impl CapabilityEnv for TauriDomainEnv {
             false,
         )?;
         Ok(position)
+    }
+
+    // ── 一次性文件转写（0.22.16 Handoff 05）──────────────────────────
+
+    fn audio_transcription(&self) -> Option<&Arc<dyn AudioTranscriptionPort>> {
+        self.audio_transcription.get()
     }
 }
 

@@ -1842,6 +1842,20 @@
                     </div>
                 </div>
 
+                <div class="voice-file-transcribe-card">
+                    <div class="voice-file-transcribe-copy">
+                        <div class="voice-file-transcribe-title" data-i18n="voice.local.file.title">转写 WAV 文件</div>
+                        <div class="voice-file-transcribe-desc" data-i18n="voice.local.file.desc">选择本地 WAV，使用当前运行中的模型一次性转写。文件路径不会交给前端。</div>
+                    </div>
+                    <button class="btn btn-small" id="voice-file-transcribe-btn" type="button">
+                        <svg aria-hidden="true" class="icon"><use href="#icon-audio-lines"/></svg>
+                        <span data-i18n="voice.local.file.choose">选择并转写</span>
+                    </button>
+                    <div aria-live="polite" class="voice-file-transcribe-status" id="voice-file-transcribe-status"></div>
+                    <pre class="voice-file-transcribe-output" hidden id="voice-file-transcribe-output"></pre>
+                    <div class="voice-file-transcribe-meta" id="voice-file-transcribe-meta"></div>
+                </div>
+
                 <!-- 高级选项（独立卡片，不嵌套在 FunASR 内） -->
                 <details class="voice-advanced-card">
                     <summary class="voice-advanced-header">

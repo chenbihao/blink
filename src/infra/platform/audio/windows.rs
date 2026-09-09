@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use super::normalize::AudioNormalizer;
 use super::{AudioCapture, AudioChunk, AudioError, AudioFormat};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -152,8 +153,7 @@ fn capture_thread(
     );
 
     let stream_config: StreamConfig = supported_config.into();
-    let target_rate = target_format.sample_rate;
-    let target_channels = target_format.channels;
+    // target_rate 和 target_channels 由 AudioNormalizer 内部管理（0.22.16 H02）
 
     // ── 检查 Windows 麦克风隐私权限 ──
     // 即使 WASAPI 打开设备成功，如果隐私设置禁止了麦克风访问，
@@ -166,6 +166,10 @@ fn capture_thread(
     let cb_capturing = capturing.clone();
     let cb_tx = tx.clone();
 
+    // 每条 capture stream 持有独立 normalizer 状态（0.22.16 H02）
+    // 用 RefCell 在回调中获取 mutable access（cpal 回调在采集线程上同步执行）
+    let normalizer = std::cell::RefCell::new(AudioNormalizer::new(in_channels, in_sample_rate));
+
     let stream = match device.build_input_stream_raw(
         stream_config,
         sample_format,
@@ -174,15 +178,20 @@ fn capture_thread(
                 return;
             }
             let f32_data = convert_to_f32(data, sample_format);
-            process_and_send(
-                &f32_data,
-                in_channels,
-                in_sample_rate,
-                target_channels,
-                target_rate,
-                target_format,
-                &cb_tx,
-            );
+            // 使用公共规范化链路：downmix → stateful resample → 16kHz mono
+            let normalized = normalizer.borrow_mut().process(&f32_data);
+            if normalized.is_empty() {
+                return;
+            }
+            let chunk = AudioChunk {
+                samples: normalized,
+                format: target_format,
+            };
+            if cb_tx.send(chunk).is_err() {
+                // channel 关闭，安全终止当前流
+                tracing::warn!("audio: capture channel closed, terminating stream");
+                cb_capturing.store(false, Ordering::Relaxed);
+            }
         },
         on_stream_error,
         None,
@@ -368,66 +377,8 @@ fn find_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     }
 }
 
-/// 处理音频数据：downmix → 重采样 → 发送。
-fn process_and_send(
-    data: &[f32],
-    in_channels: u16,
-    in_rate: u32,
-    out_channels: u16,
-    out_rate: u32,
-    format: AudioFormat,
-    tx: &tokio::sync::mpsc::UnboundedSender<AudioChunk>,
-) {
-    let mono = downmix(data, in_channels, out_channels);
-    let resampled = resample(&mono, in_rate, out_rate);
-    let chunk = AudioChunk {
-        samples: resampled,
-        format,
-    };
-    let _ = tx.send(chunk);
-}
-
-/// 多声道 → 目标声道数（取平均）。
-///
-/// STT 模型期望单声道。若设备原生多声道（如立体声），按帧取平均降混。
-fn downmix(input: &[f32], in_channels: u16, out_channels: u16) -> Vec<f32> {
-    if in_channels == out_channels {
-        return input.to_vec();
-    }
-    if out_channels == 1 && in_channels > 1 {
-        let ch = in_channels as usize;
-        input
-            .chunks_exact(ch)
-            .map(|frame| frame.iter().sum::<f32>() / ch as f32)
-            .collect()
-    } else {
-        input.to_vec()
-    }
-}
-
-/// 线性插值重采样。
-///
-/// 设备原生采样率（如 48kHz）→ STT 目标采样率（如 16kHz）。
-/// 线性插值对语音足够，无需引入重采样库依赖。
-fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate || input.is_empty() {
-        return input.to_vec();
-    }
-    let ratio = to_rate as f64 / from_rate as f64;
-    let output_len = ((input.len() as f64) * ratio) as usize;
-    if output_len == 0 {
-        return Vec::new();
-    }
-    let mut output = Vec::with_capacity(output_len);
-    for i in 0..output_len {
-        let src_pos = i as f64 / ratio;
-        let idx0 = src_pos.floor() as usize;
-        let idx1 = (idx0 + 1).min(input.len() - 1);
-        let frac = (src_pos - idx0 as f64) as f32;
-        output.push(input[idx0] * (1.0 - frac) + input[idx1] * frac);
-    }
-    output
-}
+// process_and_send / downmix / resample 已迁移到公共 normalize 模块（0.22.16 H02）。
+// Windows callback 现在直接使用 AudioNormalizer，不再持有私有 downmix/resample 原语。
 
 // ── 设备枚举 ────────────────────────────────────────────────────────────────
 
@@ -467,62 +418,7 @@ pub fn list_input_devices() -> Vec<super::AudioDevice> {
 mod tests {
     use super::*;
 
-    // ── 纯逻辑测试 ──
-
-    #[test]
-    fn resample_identity() {
-        let input = vec![0.5, 0.3, -0.2, 0.8];
-        let output = resample(&input, 16000, 16000);
-        assert_eq!(output, input);
-    }
-
-    #[test]
-    fn resample_downsample() {
-        // 48000 → 16000, ratio = 1/3
-        let input = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5];
-        let output = resample(&input, 48000, 16000);
-        assert_eq!(output.len(), 2); // 6 * (16000/48000) = 2
-    }
-
-    #[test]
-    fn resample_upsample() {
-        // 16000 → 48000, ratio = 3
-        let input = vec![0.0, 0.5];
-        let output = resample(&input, 16000, 48000);
-        assert_eq!(output.len(), 6); // 2 * 3 = 6
-    }
-
-    #[test]
-    fn resample_preserves_extremes() {
-        // 重采样后端点应保持
-        let input = vec![1.0, 0.5, -1.0];
-        let output = resample(&input, 48000, 16000);
-        assert!(!output.is_empty());
-        assert!((output[0] - 1.0).abs() < 0.01, "首个样本应接近 1.0");
-    }
-
-    #[test]
-    fn downmix_stereo_to_mono() {
-        let input = vec![0.2, 0.4, 0.6, 0.8]; // 2 frames stereo
-        let output = downmix(&input, 2, 1);
-        // f32 除法有精度误差，用近似比较
-        assert_eq!(output.len(), 2);
-        assert!((output[0] - 0.3).abs() < 1e-6, "got {}", output[0]);
-        assert!((output[1] - 0.7).abs() < 1e-6, "got {}", output[1]);
-    }
-
-    #[test]
-    fn downmix_mono_passthrough() {
-        let input = vec![0.5, 0.3];
-        let output = downmix(&input, 1, 1);
-        assert_eq!(output, input);
-    }
-
-    #[test]
-    fn downmix_empty() {
-        let output = downmix(&[], 2, 1);
-        assert!(output.is_empty());
-    }
+    // downmix/resample 纯逻辑测试已迁移到 normalize 模块（0.22.16 H02）。
 
     // ── 集成测试（依赖系统音频设备，可跳过）──
 

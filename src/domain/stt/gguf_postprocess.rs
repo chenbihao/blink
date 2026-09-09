@@ -72,6 +72,15 @@ fn is_cjk_char(c: char) -> bool {
         | '\u{ac00}'..='\u{d7af}')
 }
 
+fn is_textless_punctuation(c: char) -> bool {
+    let cp = c as u32;
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || (0x3000..=0x303F).contains(&cp)
+        || (0xFF01..=0xFF5F).contains(&cp)
+        || matches!(c, '·' | '～')
+}
+
 /// GGUF worker 文本后处理：去 emoji → 去事件描述 → 去 CJK 间空格 → trim。
 ///
 /// 纯函数，可独立测试。
@@ -121,7 +130,12 @@ pub fn gguf_postprocess(raw: &str) -> String {
         cleaned.push(c);
     }
 
-    cleaned.trim().to_string()
+    let cleaned = cleaned.trim();
+    if cleaned.chars().all(is_textless_punctuation) {
+        String::new()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -175,6 +189,7 @@ mod tests {
     fn empty_and_pure_emoji() {
         assert_eq!(gguf_postprocess(""), "");
         assert_eq!(gguf_postprocess("😄😂"), "");
+        assert_eq!(gguf_postprocess(".。！？"), "");
     }
 
     #[test]

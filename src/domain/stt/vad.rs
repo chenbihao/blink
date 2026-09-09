@@ -337,9 +337,10 @@ impl EnergyVad {
         let p25 = sorted[p25_idx];
 
         if !self.noise_initialized {
-            // 首帧初始化：使用较低值，避免首帧就是高能量语音时底噪被设过高。
-            // 取 P25 与 silence_threshold 中的较小值作为初始底噪。
-            self.noise_floor = p25.min(self.silence_threshold);
+            // 首帧可能就是人声，不能把整帧能量直接吸收到 noise floor；否则中低音量
+            // 语音会把 on threshold 抬到自身之上，此后整段都无法进入 speaking。
+            // 先以阈值下界作保守种子，后续只在安全的低能量帧上自适应收敛。
+            self.noise_floor = p25.min(THRESHOLD_MIN);
             self.noise_initialized = true;
             return;
         }
@@ -480,6 +481,17 @@ mod tests {
             }
         }
         assert_eq!(events, 0, "纯静默不应触发句尾");
+    }
+
+    #[test]
+    fn speech_at_stream_start_is_not_absorbed_into_noise_floor() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        // RMS ≈ 0.014：高于默认启动阈值；旧逻辑会用首帧把阈值抬到 ≈0.02 而漏掉。
+        let speech = generate_tone(100, 0.02);
+        for chunk in speech.chunks(160) {
+            let _ = vad.process_chunk(chunk);
+        }
+        assert!(vad.is_speaking(), "流首中低音量语音应通过 attack debounce");
     }
 
     #[test]

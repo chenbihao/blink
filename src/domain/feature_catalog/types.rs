@@ -45,13 +45,15 @@ impl FeatureGroup {
                 Self::AppsFilesLinks
             }
 
-            // 剪贴板与文本（编辑窗口编辑的是剪贴板/输入文本内容，归此组）
+            // 剪贴板与文本（编辑窗口编辑的是剪贴板/输入文本内容，归此组；
+            // transcribe_audio 产出文本，同属文本提取域）
             "read_clipboard"
             | "write_clipboard"
             | "search_clipboard_history"
             | "read_clipboard_history_image"
             | "list_clipboard_images"
-            | "start_content_editor" => Self::ClipboardText,
+            | "start_content_editor"
+            | "transcribe_audio" => Self::ClipboardText,
 
             // 图片与颜色（贴图钉的是图片，归此组）
             "screenshot"

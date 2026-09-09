@@ -79,6 +79,19 @@ pub enum Commands {
         conversation: Option<String>,
     },
 
+    /// 转写本地音频文件（0.22.16 Handoff 06）。
+    ///
+    /// 接受用户显式路径，签发短期 audio_ref，
+    /// 调用 transcribe_audio Capability 返回识别文本和引擎身份。
+    /// 输出 JSON 模式保留完整 canonical data。
+    TranscribeAudio {
+        /// 音频文件路径（仅接受本地绝对路径）
+        path: String,
+        /// 输出 JSON 格式（完整 canonical data）
+        #[arg(long)]
+        json: bool,
+    },
+
     /// ONNX 隔离验证（0.22.8-B 隐藏入口，不在 help 中显示）。
     ///
     /// 由 OnnxRuntimeProvider 的 self_test 通过子进程调用，
@@ -145,6 +158,7 @@ pub fn try_run_cli() -> Option<i32> {
         "capabilities",
         "config",
         "chat",
+        "transcribe-audio",
         "help", // 0.13.7: 支持 blink help / blink --help
     ];
     // --help / -h 也走 CLI 路径（clap 自动处理）

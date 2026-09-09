@@ -57,6 +57,13 @@ pub enum SttError {
 ///
 /// 实现由 app 层注入（`SttEngineConnection.transport`），domain 只依赖本 trait，
 /// 不接触 reqwest/进程/管道等 infra 细节。
+#[derive(Debug, Clone)]
+pub struct SttTransportResult {
+    pub text: String,
+    /// worker 自报的纯推理耗时；不支持诊断的 transport 返回 None。
+    pub inference_ms: Option<f64>,
+}
+
 #[async_trait::async_trait]
 pub trait SttTransport: Send + Sync {
     /// 通道与模型就绪检查（身份校验由实现承载）。
@@ -64,6 +71,20 @@ pub trait SttTransport: Send + Sync {
 
     /// 转录一段 WAV 字节（16kHz mono PCM WAV），返回识别文本。
     async fn transcribe(&self, wav_bytes: &[u8]) -> Result<String, String>;
+
+    /// 带可选 worker 推理耗时的诊断入口。生产业务仍调用 `transcribe`；
+    /// corpus/benchmark 可用此方法拆分 IPC 排队与模型推理时间。
+    async fn transcribe_with_metrics(
+        &self,
+        wav_bytes: &[u8],
+    ) -> Result<SttTransportResult, String> {
+        self.transcribe(wav_bytes)
+            .await
+            .map(|text| SttTransportResult {
+                text,
+                inference_ms: None,
+            })
+    }
 }
 
 // ── STT Engine Connection ────────────────────────────────────────────────
@@ -292,6 +313,7 @@ pub mod local;
 mod mock;
 pub mod pseudo_streaming;
 pub mod streaming_port;
+pub mod transcribe; // 0.22.16 Handoff 04：一次性文件转写领域契约
 pub mod vad;
 pub(crate) mod wav;
 
@@ -445,6 +467,7 @@ mod connection_tests {
     /// Local 模式但无 connection 时也返回明确错误。
     ///
     /// 注意：init_cache 用 OnceLock，只能设置一次，所以两个场景合并到一个测试中。
+    /// 使用 init_cache + update_cache 双重设置，确保在并行测试中也能覆盖已有值。
     #[test]
     fn create_engine_returns_err_for_disabled_and_no_connection() {
         // 临时设置 config 为 disabled + Local 模式
@@ -453,7 +476,8 @@ mod connection_tests {
             mode: crate::domain::config::stt_config::SttMode::Local,
             ..Default::default()
         };
-        crate::domain::config::stt_config::init_cache(config);
+        crate::domain::config::stt_config::init_cache(config.clone());
+        crate::domain::config::stt_config::update_cache(&config);
 
         // STT 未启用 → 返回错误
         let result = create_engine(None);

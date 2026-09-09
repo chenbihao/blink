@@ -177,6 +177,15 @@ impl SttTransport for GgufSttTransport {
     }
 
     async fn transcribe(&self, wav_bytes: &[u8]) -> Result<String, String> {
+        self.transcribe_with_metrics(wav_bytes)
+            .await
+            .map(|result| result.text)
+    }
+
+    async fn transcribe_with_metrics(
+        &self,
+        wav_bytes: &[u8],
+    ) -> Result<crate::domain::stt::SttTransportResult, String> {
         let raw_path = write_wav_to_audio_dir(&self.audio_dir, wav_bytes)?;
         let canonical = ensure_within_audio_dir(&self.audio_dir, &raw_path)?;
 
@@ -199,7 +208,10 @@ impl SttTransport for GgufSttTransport {
         if let Some(ms) = output.elapsed_ms {
             tracing::debug!(elapsed_ms = ms, "GGUF worker 转录完成");
         }
-        Ok(gguf_postprocess(&output.text))
+        Ok(crate::domain::stt::SttTransportResult {
+            text: gguf_postprocess(&output.text),
+            inference_ms: output.elapsed_ms,
+        })
     }
 }
 
