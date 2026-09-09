@@ -234,12 +234,6 @@ pub trait LocalEngineAdapter: Send + Sync {
 pub struct AdapterConfig {
     /// 首选端口（None = 自动分配）。
     pub preferred_port: Option<u16>,
-    /// 当前选择的模型身份。
-    ///
-    /// 与 `engine_config` 中的引擎专属字段保持同源，但单独提升为
-    /// provider/安装事务可消费的受限字段，避免 infra 解析 app JSON。
-    #[serde(default)]
-    pub model_id: Option<String>,
     /// 用户请求的 compute preference。
     pub compute_preference: Option<super::identity::ComputePreference>,
     /// 引擎专属配置（闭合 JSON，各 adapter 自行解析）。
@@ -292,9 +286,7 @@ mod tests {
                         runtime_kind: RuntimePlan::PythonVenv,
                         artifact_ids: vec![artifact_id.clone()],
                         compute_candidates: vec![super::super::descriptor::ComputeCandidate {
-                            model_id: "test-model".to_string(),
                             preference: ComputePreference::Cpu,
-                            backend: ComputeBackend::Cpu,
                             profile_id: "cpu-x64".to_string(),
                             artifact_id: artifact_id.clone(),
                         }],
@@ -411,7 +403,6 @@ mod tests {
     fn adapter_prepare_launch_rejects_undeclared_profile() {
         let adapter = TestAdapter::new();
         let undeclared_profile = ResolvedProfile {
-            model_id: "test-model".to_string(),
             profile_id: "cuda-sm99".to_string(),
             backend: ComputeBackend::Cuda,
             artifact_id: ArtifactId::new("undeclared").unwrap(),
@@ -429,7 +420,6 @@ mod tests {
     fn adapter_prepare_launch_succeeds_for_declared_profile() {
         let adapter = TestAdapter::new();
         let profile = ResolvedProfile {
-            model_id: "test-model".to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("test-artifact").unwrap(),
@@ -501,7 +491,6 @@ mod tests {
     fn launch_descriptor_is_generated_by_adapter() {
         let adapter = TestAdapter::new();
         let profile = ResolvedProfile {
-            model_id: "test-model".to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("test-artifact").unwrap(),

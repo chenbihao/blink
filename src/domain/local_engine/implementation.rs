@@ -389,9 +389,7 @@ fn validate_implementation(desc: &ImplementationDescriptor) -> Result<(), LocalE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::local_engine::identity::{
-        ArtifactId, ComputeBackend, ComputePreference, RuntimePlan,
-    };
+    use crate::domain::local_engine::identity::{ArtifactId, ComputePreference, RuntimePlan};
 
     const ENGINE_A: &str = "funasr";
     const ENGINE_B: &str = "paddleocr";
@@ -787,9 +785,7 @@ mod tests {
             &["model-sv"],
         );
         desc.install_plan.compute_candidates.push(ComputeCandidate {
-            model_id: "fake-model".to_string(),
             preference: ComputePreference::Cpu,
-            backend: ComputeBackend::Cpu,
             profile_id: "cpu-x64".to_string(),
             artifact_id: artifact("undeclared-artifact"),
         });

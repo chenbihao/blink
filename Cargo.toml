@@ -75,7 +75,6 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
 # tokio-util: CancellationToken（0.19.13 MCP Streamable HTTP server 优雅关闭）
 tokio-util = "0.7"
-tempfile = "3"
 # clap: 命令行参数解析（0.13.5 CLI 化——blink chat/search/screenshot/mcp-server）
 clap = { version = "4.5", features = ["derive"] }
 # semver: 语义化版本比较（检查更新用），支持 pre-release / build metadata
@@ -177,6 +176,8 @@ default = []
 [dev-dependencies]
 # keyring-core: 供 store.rs 单测访问 mock store + set_default_store（0.17.11 单测隔离核心）
 keyring-core = "1"
+# tempfile: 单测独占临时目录（FunASR hotwords/server script 落盘测试，不写真实 %APPDATA%）
+tempfile = "3"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

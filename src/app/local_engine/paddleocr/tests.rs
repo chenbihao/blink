@@ -93,7 +93,6 @@ fn prepare_launch_is_fail_closed_for_inprocess_engine() {
         instance_id: "test-instance".to_string(),
         token: "test-token".to_string(),
         resolved_profile: ResolvedProfile {
-            model_id: "PP-OCRv6:ch_PP-OCRv6_det:ch_PP-OCRv6_rec".to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("test").unwrap(),

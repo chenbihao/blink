@@ -126,9 +126,6 @@ export function createLocalEngineController(callbacks = {}) {
     let eventBuffer = []; // 初始化期间缓冲事件
     let buffering = false;
     let activeActions = new Map(); // engine_id → Set<operation_id>（single-flight）
-    let preferenceRequestSequence = 0;
-    const preferenceRequests = new Map(); // engine_id → latest save request
-    let catalogRequestSequence = 0;
 
     // mount generation：每次 mount 递增，dispose 后旧 generation 的异步回调失效
     let mountGeneration = 0;
@@ -356,14 +353,8 @@ export function createLocalEngineController(callbacks = {}) {
     /**
      * 拉取 catalog。
      */
-    async function pullCatalog(expectedGeneration = null) {
-        const requestId = ++catalogRequestSequence;
+    async function pullCatalog() {
         const catalog = await invoke(COMMANDS.GET_CATALOG);
-        if (disposed
-            || requestId !== catalogRequestSequence
-            || (expectedGeneration != null && expectedGeneration !== mountGeneration)) {
-            return;
-        }
         state = setCatalog(state, catalog);
     }
 
@@ -487,7 +478,7 @@ export function createLocalEngineController(callbacks = {}) {
 
             // 2. pull catalog → status → logs → models + preferences
             try {
-                await pullCatalog(gen);
+                await pullCatalog();
                 await pullStatus();
                 await pullLogs();
                 await pullModelsAndPreferences();
@@ -534,10 +525,8 @@ export function createLocalEngineController(callbacks = {}) {
             mounted = false;
             buffering = false;
             mountGeneration++; // 使进行中的 mount 失效
-            catalogRequestSequence++;
             eventBuffer = [];
             activeActions.clear();
-            preferenceRequests.clear();
             if (notifyTimer != null) {
                 clearTimeout(notifyTimer);
                 notifyTimer = null;
@@ -740,10 +729,6 @@ export function createLocalEngineController(callbacks = {}) {
             buffering = true;
             try {
                 await pullStatus();
-                // catalog 也必须和 status/preferences 一起刷新：切模后后端
-                // 可能已归一化 compute_preference，不能用旧 catalog 回写 UI。
-                // 先拉 status 保持操作终态尽快可见，再消费 model-aware catalog。
-                await pullCatalog(gen);
                 await pullLogs();
                 await pullModelsAndPreferences();
             } catch (e) {
@@ -940,9 +925,6 @@ export function createLocalEngineController(callbacks = {}) {
                 notifyStateChange();
                 // 刷新模型列表——更新 is_selected/is_active 标记
                 await this._refreshModels(engineId);
-                // 当前模型变化会改变 model-aware compute_options；使用同一代
-                // catalog 快照让配置区及时移除非法旧值。
-                await pullCatalog(mountGeneration);
                 notifyStateChange();
             } catch (e) {
                 const err = normalizeError(e);
@@ -1015,15 +997,10 @@ export function createLocalEngineController(callbacks = {}) {
          */
         async savePreferences(engineId, patch) {
             if (disposed) throw new Error("controller 已 disposed");
-            const requestId = ++preferenceRequestSequence;
-            preferenceRequests.set(engineId, requestId);
             const result = await invoke(COMMANDS.SET_PREFERENCES, {engineId, patch});
-            // 只让该引擎最后一次保存响应更新状态；旧响应仍可返回给
-            // 调用方，但不得覆盖较新的 catalog/preferences 快照。
-            if (!disposed && preferenceRequests.get(engineId) === requestId) {
-                state = setPreferences(state, engineId, result);
-                notifyStateChange();
-            }
+            // 更新状态中的 preferences
+            state = setPreferences(state, engineId, result);
+            notifyStateChange();
             return result;
         },
 

@@ -3,7 +3,7 @@
 // 由 xtask 构建时复制到 FunASR runtime/llama.cpp/funasr-common/ 下，
 // 供 llama-funasr-sensevoice / llama-funasr-paraformer / llama-funasr-cli 三个
 // 入口的 --stdin-server 补丁共同引用。模型加载、fbank、计算图与解码保持上游原样；
-// 本头文件只承担进程协议（ready/health 握手、请求循环、身份与指纹回报）。
+// 本头文件只承担进程协议（ready 握手、请求循环、身份与指纹回报）。
 //
 // ## 协议（frozen v1）
 //
@@ -19,8 +19,7 @@
 //   {"type":"ready","protocol_version":1,"engine_id":...,"instance_id":...,
 //    "token_fingerprint":"fp:xxxxxxxxxxxxxxxx","model_id":...,"model_revision":...,
 //    "model_status":"ready","model_content_fingerprint":"<64 hex>",
-//    "backend":"cpu","requested_backend":"cpu","actual_backend":"cpu",
-//    "device_name":"CPU","device_id":"cpu","buffer_type":"..."}
+//    "backend":"cpu","requested_backend":"cpu"}
 // ready 中的 model_content_fingerprint 是 worker 亲自对 payload 目录计算的
 // directory_aggregate_sha256_v1（与 Blink 安装侧算法一致，见下）。
 //
@@ -31,7 +30,6 @@
 //
 // 响应（stdout）：
 //   {"type":"hello_ok","protocol_version":1,...ready 字段...}
-//   {"type":"health","protocol_version":1,"ok":true,...backend 字段...}
 //   {"type":"transcribe_result","request_id":"...","ok":true,"text":"...","elapsed_ms":123}
 //   {"type":"transcribe_result","request_id":"...","ok":false,
 //    "error":{"code":"...","message":"..."},"elapsed_ms":123}
@@ -42,22 +40,6 @@
 // 畸形 JSON、未知 type、版本不匹配必须返回结构化 error，进程不退出。
 //
 // 停止：stdin EOF 或 shutdown 请求 → 正常退出（exit 0）。
-//
-// CLI（三个 worker 共用）：
-//   --backend cpu|vulkan|cuda
-//   --backend-dir <受管 deployment 目录>
-//   --blink-backend-probe
-// 动态构建要求 --backend-dir 指向 Blink 已校验的制品目录；静态 CPU 构建可省略。
-//
-// probe 不需要模型，且 stdout 只输出一行：
-//   {"type":"backend_probe","protocol_version":1,"ok":true,
-//    "requested_backend":"vulkan","actual_backend":"vulkan",
-//    "device_name":"...","device_id":"...","buffer_type":"...",
-//    "graph":{"op":"add_f32","status":"success"}}
-// 失败时 ok=false，带 error.code/message，并以非零状态退出。probe 必须真实
-// 加载精确 backend DLL、枚举并初始化设备、分配小 buffer、执行 add_f32 graph。
-// 普通 worker 在 backend 初始化失败时也输出一行 type=error（request_id=null，
-// requested_backend 与可行动 error.code/message），然后以非零状态退出。
 //
 // ## directory_aggregate_sha256_v1（与 src/infra/local_engine/model_storage.rs 一致）
 //
@@ -85,17 +67,6 @@
 #include <vector>
 
 namespace blink_worker {
-
-// Backend identity is deliberately a protocol DTO.  The ggml adapter owns
-// discovery and initialization; this struct is the only backend data the
-// worker exposes to Blink.
-struct BackendMetadata {
-    std::string requested_backend;
-    std::string actual_backend;
-    std::string device_name;
-    std::string device_id;
-    std::string buffer_type;
-};
 
 // ── SHA-256（紧凑公有域式实现）──────────────────────────────────────────
 
@@ -504,21 +475,10 @@ inline int env_threads(int fallback) {
 //   本循环把异常归为 inference_failed，把空文本视为正常空结果（ok=true）。
 //
 // model_ready: 模型与 backend 已在调用前加载完毕（ready 只能在此之后输出）。
-// backend_metadata: requested/actual backend and the selected device.
-
-inline std::string backend_json_fields(const BackendMetadata & backend) {
-    std::string fields;
-    fields += ",\"backend\":\"" + json_escape(backend.actual_backend) + "\"";
-    fields += ",\"requested_backend\":\"" + json_escape(backend.requested_backend) + "\"";
-    fields += ",\"actual_backend\":\"" + json_escape(backend.actual_backend) + "\"";
-    fields += ",\"device_name\":\"" + json_escape(backend.device_name) + "\"";
-    fields += ",\"device_id\":\"" + json_escape(backend.device_id) + "\"";
-    fields += ",\"buffer_type\":\"" + json_escape(backend.buffer_type) + "\"";
-    return fields;
-}
+// backend_name: 实际执行后端（当前为 "cpu"）。
 
 template <typename RunSegment>
-int serve_stdin(RunSegment run_segment, const BackendMetadata & backend,
+int serve_stdin(RunSegment run_segment, const std::string& backend_name,
                 int64_t (*time_us)()) {
     const std::string engine_id = env_str("BLINK_ENGINE_ID");
     const std::string instance_id = env_str("BLINK_INSTANCE_ID");
@@ -541,7 +501,8 @@ int serve_stdin(RunSegment run_segment, const BackendMetadata & backend,
         line += ",\"model_revision\":\"" + json_escape(model_revision) + "\"";
         line += ",\"model_status\":\"ready\"";
         line += ",\"model_content_fingerprint\":\"" + json_escape(fp) + "\"";
-        line += backend_json_fields(backend);
+        line += ",\"backend\":\"" + json_escape(backend_name) + "\"";
+        line += ",\"requested_backend\":\"" + json_escape(backend_name) + "\"";
         line += "}\n";
         fwrite(line.data(), 1, line.size(), stdout);
         fflush(stdout);
@@ -619,17 +580,7 @@ int serve_stdin(RunSegment run_segment, const BackendMetadata & backend,
             line += ",\"engine_id\":\"" + json_escape(engine_id) + "\"";
             line += ",\"instance_id\":\"" + json_escape(instance_id) + "\"";
             line += ",\"model_id\":\"" + json_escape(model_id) + "\"";
-            line += backend_json_fields(backend) + "}\n";
-            fwrite(line.data(), 1, line.size(), stdout);
-            fflush(stdout);
-            continue;
-        }
-        if (type == "health") {
-            std::string line = "{\"type\":\"health\",\"protocol_version\":1,\"ok\":true";
-            line += ",\"request_id\":" +
-                    (has_id ? ("\"" + json_escape(request_id) + "\"") : std::string("null"));
-            line += ",\"model_status\":\"ready\"";
-            line += backend_json_fields(backend) + "}\n";
+            line += ",\"backend\":\"" + json_escape(backend_name) + "\"}\n";
             fwrite(line.data(), 1, line.size(), stdout);
             fflush(stdout);
             continue;

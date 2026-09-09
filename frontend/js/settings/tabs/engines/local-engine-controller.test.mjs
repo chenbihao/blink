@@ -413,53 +413,7 @@ async function runTests() {
         env.cleanup();
     });
 
-    // ── 9. preferences 保存的旧响应不得覆盖新请求 ─────────────────────────────
-
-    await test("compute preference 保存只接受同一引擎的最新响应", async () => {
-        const env = createMockEnvironment();
-        const pending = [];
-        env.setInvoke(async (cmd, args) => {
-            if (cmd === "get_local_engine_catalog") return makeCatalog();
-            if (cmd === "get_local_engine_status") return [];
-            if (cmd === "get_local_engine_logs") return [];
-            if (cmd === "list_engine_models") return [];
-            if (cmd === "get_local_engine_preferences") {
-                return {engine_id: args?.engineId || "funasr", compute_preference: "cpu"};
-            }
-            if (cmd === "set_local_engine_preferences") {
-                return new Promise((resolve, reject) => {
-                    pending.push({patch: args.patch, resolve, reject});
-                });
-            }
-            return [];
-        });
-
-        const controller = createLocalEngineController({});
-        try {
-            await controller.mount();
-            const first = controller.savePreferences("funasr", {compute_preference: "vulkan"});
-            const second = controller.savePreferences("funasr", {compute_preference: "cuda"});
-            assert.deepEqual(pending.map((request) => request.patch), [
-                {compute_preference: "vulkan"},
-                {compute_preference: "cuda"},
-            ]);
-
-            pending[1].resolve({engine_id: "funasr", compute_preference: "cuda"});
-            await second;
-            pending[0].resolve({engine_id: "funasr", compute_preference: "vulkan"});
-            await first;
-            assert.equal(
-                controller.getState().get("funasr").preferences.compute_preference,
-                "cuda",
-                "旧响应不得覆盖最后一次接受值",
-            );
-        } finally {
-            controller.dispose();
-            env.cleanup();
-        }
-    });
-
-    // ── 10. 模型 ID 不得泄漏路径分隔符到 operation_id ─────────────────
+    // ── 9. 模型 ID 不得泄漏路径分隔符到 operation_id ─────────────────
 
     await test("模型 operation_id 将带斜杠的 FunASR 模型 ID 安全 slug 化", () => {
         const operationId = createModelOperationId(

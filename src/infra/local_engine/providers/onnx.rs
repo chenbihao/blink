@@ -620,7 +620,6 @@ impl RuntimeProvider for OnnxRuntimeProvider {
         &self,
         staging_dir: &Path,
         plan: &InstallPlan,
-        _resolved_profile: &ResolvedProfile,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<(), RuntimeError> {
@@ -641,7 +640,6 @@ impl RuntimeProvider for OnnxRuntimeProvider {
         &self,
         staging_dir: &Path,
         plan: &InstallPlan,
-        _resolved_profile: &ResolvedProfile,
     ) -> Result<ManifestExtension, RuntimeError> {
         let onnx_plan = match plan {
             InstallPlan::OnnxRuntime(p) => p,
@@ -742,13 +740,11 @@ mod tests {
             archive_url: "https://example.invalid/fake-worker.zip".to_string(),
             archive_sha256: "0".repeat(64),
             executable: "worker.exe".to_string(),
-            model_executables: Vec::new(),
             stdlib_artifact: None,
             required_cpu_features: Vec::new(),
             required_drivers: Vec::new(),
             self_test_command: vec!["worker.exe".to_string(), "--self-test".to_string()],
             bundled_dir: None,
-            artifact_plans: Vec::new(),
         })
     }
 
@@ -775,17 +771,7 @@ mod tests {
         // build_manifest_extension 应拒绝非 OnnxRuntime plan
         assert!(
             provider
-                .build_manifest_extension(
-                    std::path::Path::new("."),
-                    &python_plan,
-                    &ResolvedProfile {
-                        model_id: "test-model".to_string(),
-                        profile_id: "test".to_string(),
-                        backend: runtime::ComputeBackend::Cpu,
-                        artifact_id: runtime::ArtifactId::new("test").unwrap(),
-                        priority: 0,
-                    },
-                )
+                .build_manifest_extension(std::path::Path::new("."), &python_plan)
                 .is_err()
         );
     }
@@ -808,7 +794,6 @@ mod tests {
             std::path::Path::new("/tmp/test-staging"),
             &python_plan,
             &ResolvedProfile {
-                model_id: "test-model".to_string(),
                 profile_id: "test".to_string(),
                 backend: runtime::ComputeBackend::Cpu,
                 artifact_id: runtime::ArtifactId::new("test").unwrap(),
@@ -829,13 +814,6 @@ mod tests {
         let result = rt.block_on(provider.self_test(
             std::path::Path::new("/tmp/test-staging"),
             &python_plan,
-            &ResolvedProfile {
-                model_id: "test-model".to_string(),
-                profile_id: "test".to_string(),
-                backend: runtime::ComputeBackend::Cpu,
-                artifact_id: runtime::ArtifactId::new("test").unwrap(),
-                priority: 0,
-            },
             None,
             None,
         ));
@@ -848,17 +826,7 @@ mod tests {
         let python_plan = non_onnx_plan();
         assert!(
             provider
-                .build_manifest_extension(
-                    std::path::Path::new("."),
-                    &python_plan,
-                    &ResolvedProfile {
-                        model_id: "test-model".to_string(),
-                        profile_id: "test".to_string(),
-                        backend: runtime::ComputeBackend::Cpu,
-                        artifact_id: runtime::ArtifactId::new("test").unwrap(),
-                        priority: 0,
-                    },
-                )
+                .build_manifest_extension(std::path::Path::new("."), &python_plan)
                 .is_err()
         );
     }

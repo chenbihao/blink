@@ -149,9 +149,6 @@ pub struct BinaryManifestExt {
     pub archive_sha256: String,
     /// 可执行文件路径（相对于部署根）。
     pub executable: String,
-    /// backend 动态库受限目录（相对于 deployment 根）。
-    #[serde(default)]
-    pub backend_dir: Option<String>,
     /// 文件清单与 hash。
     pub files: Vec<FileEntry>,
     /// 引用的共享 stdlib artifact（如 Blink 托管 Python distribution）。
@@ -963,7 +960,6 @@ mod tests {
             install_id: "dep-test0001".to_string(),
             requested_preference: ComputePreference::Cpu,
             resolved_profile: ResolvedProfile {
-                model_id: "funasr-model".to_string(),
                 profile_id: "cpu-x64".to_string(),
                 backend: ComputeBackend::Cpu,
                 artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
@@ -1023,7 +1019,6 @@ mod tests {
             install_id: "dep-bin0001".to_string(),
             requested_preference: ComputePreference::Cpu,
             resolved_profile: ResolvedProfile {
-                model_id: "sensevoice-q8".to_string(),
                 profile_id: "cpu-avx2".to_string(),
                 backend: ComputeBackend::Cpu,
                 artifact_id: ArtifactId::new("llama-funasr-v0.2.0").unwrap(),
@@ -1045,7 +1040,6 @@ mod tests {
                 archive_artifact_id: ArtifactId::new("llama-funasr-v0.2.0").unwrap(),
                 archive_sha256: "def456".to_string(),
                 executable: "llama-funasr-server.exe".to_string(),
-                backend_dir: None,
                 files: vec![FileEntry {
                     path: "llama-funasr-server.exe".to_string(),
                     sha256: "aaa111".to_string(),
@@ -1088,7 +1082,6 @@ mod tests {
             install_id: "dep-onnx0001".to_string(),
             requested_preference: ComputePreference::Cpu,
             resolved_profile: ResolvedProfile {
-                model_id: "PP-OCRv6".to_string(),
                 profile_id: "cpu-x64".to_string(),
                 backend: ComputeBackend::Cpu,
                 artifact_id: ArtifactId::new("ort-1.20.0").unwrap(),

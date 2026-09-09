@@ -18,8 +18,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::local_engine::{
-    CapabilityKind, EngineDefinition, EngineModelDescriptor, EngineStatus, EngineStatusSnapshot,
-    LifecyclePolicy, ProcessState, ResourceBudget,
+    CapabilityKind, EngineDefinition, EngineStatus, EngineStatusSnapshot, LifecyclePolicy,
+    ProcessState, ResourceBudget,
 };
 use crate::infra::local_engine::runtime::{ComputeBackend, ComputePreference, RuntimePlan};
 
@@ -55,10 +55,6 @@ pub struct EngineCatalogItem {
     pub resource_budget: ResourceBudgetDto,
     /// 允许展示的 compute options 列表（含兼容性判定）。
     pub compute_options: Vec<ComputeOptionDto>,
-    /// 当前模型未声明的显式 backend。未出现在 `compute_options` 的候选
-    /// 不会被前端当作“本机不兼容”展示，避免把模型契约误读成驱动问题。
-    #[serde(default)]
-    pub undeclared_compute_preferences: Vec<String>,
     /// 当前保存的 compute preference（字符串）。
     pub current_compute_preference: String,
 }
@@ -78,16 +74,12 @@ pub struct ResourceBudgetDto {
 /// 真源决定，不由前端自行猜测。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeOptionDto {
-    /// 候选所属模型 id（与 catalog 当前模型一致）。
-    pub model_id: String,
     /// 用户偏好（"auto" / "cpu" / "gpu_auto" / "cuda" / "vulkan" / "directml"）。
     pub preference: String,
     /// 对应的 profile 标识。
     pub profile_id: String,
     /// 对应的 compute backend。
     pub backend: String,
-    /// 由该候选声明的 artifact id。只暴露稳定 opaque id，不暴露 URL/路径。
-    pub artifact_id: String,
     /// 本机是否兼容。
     pub compatible: bool,
     /// 不兼容时的稳定原因（i18n key 或人类可读文案）。
@@ -252,45 +244,9 @@ pub struct EngineLogDto {
 /// `compute_options` 的 `compatible` / `disabled_reason` 由传入的
 /// `compatibility_results` 决定——调用方须从 `ProviderDescriptor` 真源
 /// 执行 `check_compatibility`，不由前端猜测。
-#[allow(dead_code)]
 pub fn project_catalog_item(
     descriptor: &EngineDefinition,
     compatibility_results: &[(ComputePreference, bool, Option<String>)],
-    current_preference: ComputePreference,
-) -> EngineCatalogItem {
-    let model_id = descriptor.model_contract.model_id.clone();
-    project_catalog_item_for_model(
-        descriptor,
-        None,
-        &model_id,
-        &compatibility_results
-            .iter()
-            .map(|(preference, compatible, reason)| {
-                (
-                    descriptor
-                        .candidates_for_model(&model_id)
-                        .into_iter()
-                        .find(|candidate| candidate.preference == *preference)
-                        .map(|candidate| candidate.profile_id.clone())
-                        .unwrap_or_default(),
-                    *compatible,
-                    reason.clone(),
-                )
-            })
-            .collect::<Vec<_>>(),
-        current_preference,
-    )
-}
-
-/// 从指定模型的候选投影 catalog item。
-///
-/// `compatibility_results` 按 `(profile_id, compatible, reason)` 对齐当前
-/// 模型候选；只有当前模型声明的候选进入 `compute_options`。
-pub fn project_catalog_item_for_model(
-    descriptor: &EngineDefinition,
-    model_descriptor: Option<&EngineModelDescriptor>,
-    model_id: &str,
-    compatibility_results: &[(String, bool, Option<String>)],
     current_preference: ComputePreference,
 ) -> EngineCatalogItem {
     // 构建 compute options
@@ -298,21 +254,18 @@ pub fn project_catalog_item_for_model(
         .install_plan
         .compute_candidates
         .iter()
-        .filter(|c| c.model_id == model_id)
         .map(|c| {
             // 查找兼容性结果
             let (compatible, disabled_reason) = compatibility_results
                 .iter()
-                .find(|(profile_id, _, _)| profile_id == &c.profile_id)
+                .find(|(pref, _, _)| *pref == c.preference)
                 .map(|(_, compat, reason)| (*compat, reason.clone()))
                 .unwrap_or((false, Some("未找到兼容性检查结果".to_string())));
 
             ComputeOptionDto {
-                model_id: model_id.to_string(),
                 preference: preference_to_string(c.preference),
                 profile_id: c.profile_id.clone(),
-                backend: backend_to_string(c.backend),
-                artifact_id: c.artifact_id.to_string(),
+                backend: backend_to_string(map_preference_to_backend(c.preference)),
                 compatible,
                 disabled_reason,
             }
@@ -328,32 +281,12 @@ pub fn project_catalog_item_for_model(
         capability_kind: capability_kind_to_string(descriptor.capability_kind),
         runtime_kind: runtime_kind_to_string(descriptor.runtime_kind),
         lifecycle: lifecycle_to_string(descriptor.lifecycle),
-        model_id: model_id.to_string(),
-        model_revision: model_descriptor
-            .map(|model| model.revision.clone())
-            .unwrap_or_else(|| descriptor.model_contract.revision.clone()),
+        model_id: descriptor.model_contract.model_id.clone(),
+        model_revision: descriptor.model_contract.revision.clone(),
         resource_budget: project_resource_budget(&descriptor.resource_budget),
         compute_options,
-        undeclared_compute_preferences: undeclared_compute_preferences(descriptor, model_id),
         current_compute_preference: preference_to_string(current_preference),
     }
-}
-
-/// 返回当前模型未声明的显式 preference。
-///
-/// 这些值不会生成虚假的 profile option；单独投影出来是为了让前端和
-/// 诊断层能区分“模型没有声明”与“模型声明了但本机不兼容”。
-fn undeclared_compute_preferences(descriptor: &EngineDefinition, model_id: &str) -> Vec<String> {
-    [
-        ComputePreference::Cpu,
-        ComputePreference::Vulkan,
-        ComputePreference::Cuda,
-        ComputePreference::Directml,
-    ]
-    .into_iter()
-    .filter(|preference| !descriptor.has_preference_for_model(model_id, *preference))
-    .map(preference_to_string)
-    .collect()
 }
 
 /// 从 `EngineStatusSnapshot` 投影 status DTO。
@@ -430,6 +363,16 @@ fn backend_to_string(b: ComputeBackend) -> String {
         ComputeBackend::Cuda => "cuda".to_string(),
         ComputeBackend::Vulkan => "vulkan".to_string(),
         ComputeBackend::Directml => "directml".to_string(),
+    }
+}
+
+fn map_preference_to_backend(p: ComputePreference) -> ComputeBackend {
+    match p {
+        ComputePreference::Cpu => ComputeBackend::Cpu,
+        ComputePreference::Cuda => ComputeBackend::Cuda,
+        ComputePreference::Vulkan => ComputeBackend::Vulkan,
+        ComputePreference::Directml => ComputeBackend::Directml,
+        _ => ComputeBackend::Cpu,
     }
 }
 

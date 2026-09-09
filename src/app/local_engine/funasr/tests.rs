@@ -3,7 +3,6 @@
 //! 旧 Python/PyTorch 链路的 venv、依赖锁、嵌入脚本、HTTP 端点与子模型
 //! 测试已随 0.22.7.4 切换删除；本文件只保留对新实现仍成立的契约。
 
-use super::descriptor::{FUNASR_GGUF_ARTIFACT_ID, FUNASR_GGUF_VULKAN_ARTIFACT_ID};
 use super::*;
 use crate::domain::local_engine::{CapabilityKind, LifecyclePolicy, ModelHealth, ServiceHealth};
 use crate::infra::local_engine::providers::InstallPlan;
@@ -38,39 +37,24 @@ fn descriptor_validates_ok() {
 }
 
 #[test]
-fn descriptor_declares_adopted_gpu_profiles_per_model() {
+fn descriptor_declares_cpu_preference_only() {
+    // 首版 CPU 闭环（phase §5.8.5：GPU 未实测不开）
     let adapter = FunasrAdapter::new();
     let desc = adapter.descriptor();
     assert!(desc.has_preference(ComputePreference::Cpu));
-    assert!(desc.has_preference(ComputePreference::Cuda));
-    assert!(desc.has_preference(ComputePreference::Vulkan));
-    assert!(desc.has_preference_for_model(gguf::GGUF_PARAFORMER_ID, ComputePreference::Vulkan));
-    assert!(!desc.has_preference_for_model(gguf::GGUF_PARAFORMER_ID, ComputePreference::Cuda));
-    assert!(!desc.has_preference_for_model(gguf::GGUF_NANO_ID, ComputePreference::Cuda));
-    assert!(!desc.has_preference_for_model(gguf::GGUF_NANO_ID, ComputePreference::Vulkan));
+    assert!(
+        !desc.has_preference(ComputePreference::Cuda),
+        "未实测的 CUDA preference 不应声明"
+    );
 }
 
 #[test]
 fn descriptor_allows_cpu_profile() {
     let adapter = FunasrAdapter::new();
     let profile = ResolvedProfile {
-        model_id: gguf::GGUF_SENSEVOICE_ID.to_string(),
         profile_id: "cpu-x64".to_string(),
         backend: ComputeBackend::Cpu,
-        artifact_id: ArtifactId::new(FUNASR_GGUF_ARTIFACT_ID).unwrap(),
-        priority: 0,
-    };
-    assert!(adapter.descriptor().is_profile_allowed(&profile));
-}
-
-#[test]
-fn descriptor_allows_paraformer_vulkan_profile() {
-    let adapter = FunasrAdapter::new();
-    let profile = ResolvedProfile {
-        model_id: gguf::GGUF_PARAFORMER_ID.to_string(),
-        profile_id: "vulkan-x64".to_string(),
-        backend: ComputeBackend::Vulkan,
-        artifact_id: ArtifactId::new(FUNASR_GGUF_VULKAN_ARTIFACT_ID).unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     };
     assert!(adapter.descriptor().is_profile_allowed(&profile));
@@ -80,10 +64,9 @@ fn descriptor_allows_paraformer_vulkan_profile() {
 fn descriptor_rejects_undeclared_profile() {
     let adapter = FunasrAdapter::new();
     let profile = ResolvedProfile {
-        model_id: gguf::GGUF_SENSEVOICE_ID.to_string(),
         profile_id: "vulkan-x64".to_string(),
         backend: ComputeBackend::Vulkan,
-        artifact_id: ArtifactId::new(FUNASR_GGUF_ARTIFACT_ID).unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     };
     assert!(!adapter.descriptor().is_profile_allowed(&profile));
@@ -427,21 +410,6 @@ fn health_maps_cuda_backend() {
 }
 
 #[test]
-fn health_unknown_requested_backend_is_not_trusted() {
-    let raw = serde_json::json!({
-        "status": "ok",
-        "model_status": "ready",
-        "requested_backend": "quantum",
-        "actual_backend": "cpu",
-    });
-    let mapping = map_funasr_health(&raw);
-    let backend = mapping
-        .backend
-        .expect("actual backend 应保留用于 fail-closed 校验");
-    assert!(!backend.consistent);
-}
-
-#[test]
 fn health_maps_model_id_and_revision() {
     let raw = serde_json::json!({
         "status": "ok",
@@ -648,10 +616,9 @@ fn adapter_diagnostics_returns_entries() {
 fn adapter_prepare_launch_rejects_undeclared_profile() {
     let adapter = FunasrAdapter::new();
     let undeclared_profile = ResolvedProfile {
-        model_id: gguf::GGUF_SENSEVOICE_ID.to_string(),
         profile_id: "vulkan-x64".to_string(),
         backend: ComputeBackend::Vulkan,
-        artifact_id: ArtifactId::new(FUNASR_GGUF_ARTIFACT_ID).unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     };
     let ctx = LaunchContext {
@@ -681,10 +648,9 @@ fn gguf_descriptor_declares_stdio_worker_transport() {
         crate::domain::local_engine::ServiceTransport::StdioWorker
     );
     assert!(d.is_profile_allowed(&ResolvedProfile {
-        model_id: gguf::GGUF_SENSEVOICE_ID.to_string(),
         profile_id: "cpu-x64".to_string(),
         backend: ComputeBackend::Cpu,
-        artifact_id: ArtifactId::new(FUNASR_GGUF_ARTIFACT_ID).unwrap(),
+        artifact_id: ArtifactId::new("funasr-gguf-worker-v0.2.6").unwrap(),
         priority: 0,
     }));
 }
@@ -724,20 +690,16 @@ fn gguf_legacy_model_migration_mapping() {
     assert_eq!(gguf::migrate_legacy_model_id("unknown-model"), None);
 }
 
-/// GGUF provider descriptor：bundled 安装 + backend probe 命令。
+/// GGUF provider descriptor：bundled 安装 + self-test 命令。
 #[test]
 fn gguf_provider_descriptor_bundled_plan() {
     let pd = make_funasr_provider_descriptor();
     match &pd.install_plan {
         InstallPlan::ManagedBinary(plan) => {
-            let expected = crate::infra::local_engine::providers::debug_local_artifact_dir(
-                super::descriptor::FUNASR_GGUF_ARTIFACT_ID,
-            )
-            .unwrap_or_else(|| "bin/funasr-worker".to_string());
-            assert_eq!(plan.bundled_dir.as_deref(), Some(expected.as_str()));
+            assert_eq!(plan.bundled_dir.as_deref(), Some("bin/funasr-worker"));
             assert!(
                 plan.self_test_command
-                    .contains(&"--blink-backend-probe".to_string())
+                    .contains(&"--blink-selftest".to_string())
             );
         }
         other => panic!("GGUF 应为 ManagedBinary 计划: {other:?}"),
@@ -804,7 +766,6 @@ async fn gguf_real_end_to_end_sensevoice() {
         })
         .unwrap(),
         preferred_port: None,
-        model_id: Some(gguf::GGUF_SENSEVOICE_ID.to_string()),
         compute_preference: Some(ComputePreference::Cpu),
     };
     service
@@ -922,7 +883,6 @@ async fn gguf_real_worker_crash_and_restart() {
             "device": "cpu",
         }),
         preferred_port: None,
-        model_id: Some(gguf::GGUF_SENSEVOICE_ID.to_string()),
         compute_preference: Some(ComputePreference::Cpu),
     };
 
@@ -1084,7 +1044,6 @@ async fn gguf_real_three_models_and_switch() {
             "device": "cpu",
         }),
         preferred_port: None,
-        model_id: Some(model.to_string()),
         compute_preference: Some(ComputePreference::Cpu),
     };
 

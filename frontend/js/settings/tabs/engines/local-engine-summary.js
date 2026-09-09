@@ -141,19 +141,15 @@ function activeOp(entry) {
     return op;
 }
 
-/** 计算设备展示值：actual backend > requested preference > DTO catalog 快照。 */
+/** 计算设备展示值：实际后端 > 请求偏好 > catalog 快照。 */
 function deviceLabel(t, entry) {
     const backend = entry?.status?.status?.backend;
     const actual = backend?.backend_verification?.actual_backend;
     const requested = backend?.requested_preference
-        || entry?.preferences?.compute_preference
         || entry?.catalog?.current_compute_preference
-        || entry?.catalog?.compute_options?.[0]?.preference
-        || null;
+        || "auto";
     const value = actual || requested;
-    return value
-        ? tx(t, `local_engine.compute.${value}`, value)
-        : tx(t, "local_engine.compute.unavailable", "不可用");
+    return tx(t, `local_engine.compute.${value}`, value);
 }
 
 /** selection.targetModelId → 展示名（models 列表优先，退化 model_id）。 */

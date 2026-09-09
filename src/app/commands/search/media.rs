@@ -2380,7 +2380,6 @@ fn build_paddleocr_adapter_config() -> AdapterConfig {
         crate::app::local_engine::paddleocr::PaddleOcrEngineConfig::from_ocr_config();
     AdapterConfig {
         preferred_port: None,
-        model_id: None,
         compute_preference: Some(ocr_config.compute_preference),
         engine_config: engine_config.to_json(),
     }

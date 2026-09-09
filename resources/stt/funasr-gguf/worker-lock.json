@@ -12,11 +12,7 @@
   "patches": [
     "xtask/funasr-worker/patches/0001-sensevoice-ndjson-stdin-server.patch",
     "xtask/funasr-worker/patches/0002-paraformer-ndjson-stdin-server.patch",
-    "xtask/funasr-worker/patches/0003-funasr-cli-ndjson-stdin-server.patch",
-    "xtask/funasr-worker/patches/0004-runtime-dynamic-backend-cmake.patch",
-    "xtask/funasr-worker/patches/0005-backend-adapter-public-graph-api.patch",
-    "xtask/funasr-worker/patches/0006-vad-uses-dynamic-cpu-backend-api.patch",
-    "xtask/funasr-worker/patches/0007-cpu-backend-library-name.patch"
+    "xtask/funasr-worker/patches/0003-funasr-cli-ndjson-stdin-server.patch"
   ],
   "shared_header": "xtask/funasr-worker/blink_worker_protocol.h",
   "models": [

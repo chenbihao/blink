@@ -87,7 +87,6 @@ impl RuntimeProvider for FakeProvider {
         &self,
         _deployment_dir: &std::path::Path,
         _plan: &InstallPlan,
-        _profile: &ResolvedProfile,
         _cancel_token: Option<&tokio_util::sync::CancellationToken>,
         _sink: Option<&dyn InstallSink>,
     ) -> Result<(), RuntimeError> {
@@ -104,7 +103,6 @@ impl RuntimeProvider for FakeProvider {
         &self,
         _deployment_dir: &std::path::Path,
         _plan: &InstallPlan,
-        _profile: &ResolvedProfile,
     ) -> Result<ManifestExtension, RuntimeError> {
         Ok(ManifestExtension::PythonVenv(runtime::PythonManifestExt {
             python_version: "3.12.8".to_string(),
@@ -127,14 +125,12 @@ fn fake_descriptor() -> ProviderDescriptor {
         // 使 auto 回退路径可测。
         profiles: vec![
             ProfileCandidate {
-                model_id: "fake-model".to_string(),
                 profile_id: "cuda-sm86".to_string(),
                 backend: ComputeBackend::Cuda,
                 artifact_id: artifact.clone(),
                 compatibility: CompatibilityCheck::RequiresCuda { min_version: None },
             },
             ProfileCandidate {
-                model_id: "fake-model".to_string(),
                 profile_id: "cpu-x64".to_string(),
                 backend: ComputeBackend::Cpu,
                 artifact_id: artifact,
@@ -151,13 +147,11 @@ fn fake_descriptor() -> ProviderDescriptor {
             archive_url: "https://example.invalid/fake-worker.zip".to_string(),
             archive_sha256: "0".repeat(64),
             executable: "worker.exe".to_string(),
-            model_executables: Vec::new(),
             stdlib_artifact: None,
             required_cpu_features: Vec::new(),
             required_drivers: Vec::new(),
             self_test_command: vec!["worker.exe".to_string(), "--self-test".to_string()],
             bundled_dir: None,
-            artifact_plans: Vec::new(),
         }),
     }
 }
@@ -234,92 +228,6 @@ async fn resolve_explicit_backend_not_in_descriptor() {
     let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
     let err = tx.resolve_profile(ComputePreference::Vulkan).unwrap_err();
     assert!(matches!(err, RuntimeError::ExplicitBackendFailed { .. }));
-}
-
-#[tokio::test]
-async fn resolve_profiles_are_scoped_to_model_and_keep_artifact_identity() {
-    let mut desc = fake_descriptor();
-    let sensevoice = "gguf/sensevoice-small-q8";
-    let paraformer = "gguf/paraformer-zh-q8";
-
-    for profile in &mut desc.profiles {
-        profile.model_id = sensevoice.to_string();
-    }
-    desc.model_contract.model_id = sensevoice.to_string();
-    desc.profiles[0].artifact_id = ArtifactId::new("sensevoice-cuda-artifact").unwrap();
-    desc.profiles.push(ProfileCandidate {
-        model_id: sensevoice.to_string(),
-        profile_id: "vulkan-x64".to_string(),
-        backend: ComputeBackend::Vulkan,
-        artifact_id: ArtifactId::new("sensevoice-vulkan-artifact").unwrap(),
-        compatibility: CompatibilityCheck::RequiresVulkan,
-    });
-    desc.profiles.push(ProfileCandidate {
-        model_id: paraformer.to_string(),
-        profile_id: "paraformer-cpu-x64".to_string(),
-        backend: ComputeBackend::Cpu,
-        artifact_id: ArtifactId::new("paraformer-cpu-artifact").unwrap(),
-        compatibility: CompatibilityCheck::Always,
-    });
-
-    let provider = FakeProvider::new(true, true, true);
-    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
-
-    let (cuda, _) = tx
-        .resolve_profile_for_model(sensevoice, ComputePreference::Cuda)
-        .unwrap();
-    assert_eq!(cuda.model_id, sensevoice);
-    assert_eq!(cuda.profile_id, "cuda-sm86");
-    assert_eq!(cuda.artifact_id.to_string(), "sensevoice-cuda-artifact");
-
-    let (vulkan, _) = tx
-        .resolve_profile_for_model(sensevoice, ComputePreference::Vulkan)
-        .unwrap();
-    assert_eq!(vulkan.model_id, sensevoice);
-    assert_eq!(vulkan.profile_id, "vulkan-x64");
-    assert_eq!(vulkan.artifact_id.to_string(), "sensevoice-vulkan-artifact");
-
-    let err = tx
-        .resolve_profile_for_model(paraformer, ComputePreference::Vulkan)
-        .unwrap_err();
-    assert!(matches!(err, RuntimeError::ExplicitBackendFailed { .. }));
-}
-
-#[tokio::test]
-async fn resolve_auto_records_model_scoped_gpu_fallbacks() {
-    let mut desc = fake_descriptor();
-    let model_id = "gguf/sensevoice-small-q8";
-    for profile in &mut desc.profiles {
-        profile.model_id = model_id.to_string();
-    }
-    desc.model_contract.model_id = model_id.to_string();
-    desc.profiles.insert(
-        1,
-        ProfileCandidate {
-            model_id: model_id.to_string(),
-            profile_id: "vulkan-x64".to_string(),
-            backend: ComputeBackend::Vulkan,
-            artifact_id: ArtifactId::new("sensevoice-vulkan-artifact").unwrap(),
-            compatibility: CompatibilityCheck::RequiresVulkan,
-        },
-    );
-
-    let provider = FakeProvider::new(true, true, true).cpu_only();
-    let tx = InstallTransaction::new(&desc, &provider, engine_space(&desc));
-    let (profile, fallbacks) = tx
-        .resolve_profile_for_model(model_id, ComputePreference::Auto)
-        .unwrap();
-
-    assert_eq!(profile.model_id, model_id);
-    assert_eq!(profile.backend, ComputeBackend::Cpu);
-    assert_eq!(fallbacks.len(), 2);
-    assert_eq!(fallbacks[0].rejected_profile, "cuda-sm86");
-    assert_eq!(fallbacks[1].rejected_profile, "vulkan-x64");
-    assert!(
-        fallbacks
-            .iter()
-            .all(|reason| matches!(reason.reason, FallbackReasonKind::HostIncompatible))
-    );
 }
 
 #[tokio::test]
@@ -557,19 +465,17 @@ impl<P: RuntimeProvider + Sync> RuntimeProvider for CancelAfterPrepareProvider<P
         &self,
         d: &std::path::Path,
         plan: &InstallPlan,
-        profile: &ResolvedProfile,
         ct: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<(), RuntimeError> {
-        self.inner.self_test(d, plan, profile, ct, sink).await
+        self.inner.self_test(d, plan, ct, sink).await
     }
     fn build_manifest_extension(
         &self,
         d: &std::path::Path,
         plan: &InstallPlan,
-        profile: &ResolvedProfile,
     ) -> Result<ManifestExtension, RuntimeError> {
-        self.inner.build_manifest_extension(d, plan, profile)
+        self.inner.build_manifest_extension(d, plan)
     }
 }
 
@@ -725,17 +631,7 @@ async fn install_sink_stages_on_prepare_failure() {
         .execute("op-1", ComputePreference::Auto, None, Some(&sink))
         .await;
     let stages = sink.stages.lock().unwrap().clone();
-    assert_eq!(
-        stages,
-        vec![
-            "preparing",
-            "downloading",
-            "failed",
-            "preparing",
-            "downloading",
-            "failed"
-        ]
-    );
+    assert_eq!(stages, vec!["preparing", "downloading", "failed"]);
 
     cleanup_engine(&desc);
 }
@@ -815,7 +711,6 @@ async fn different_engines_install_concurrently() {
             &self,
             _d: &std::path::Path,
             _plan: &InstallPlan,
-            _profile: &ResolvedProfile,
             _ct: Option<&tokio_util::sync::CancellationToken>,
             _sink: Option<&dyn InstallSink>,
         ) -> Result<(), RuntimeError> {
@@ -825,7 +720,6 @@ async fn different_engines_install_concurrently() {
             &self,
             _d: &std::path::Path,
             _plan: &InstallPlan,
-            _profile: &ResolvedProfile,
         ) -> Result<ManifestExtension, RuntimeError> {
             Ok(ManifestExtension::PythonVenv(runtime::PythonManifestExt {
                 python_version: "3.12.8".to_string(),

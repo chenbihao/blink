@@ -6,8 +6,9 @@
 
 use crate::app::command_error::CommandError;
 use crate::app::local_engine::EngineManager;
-use crate::app::local_engine::dto::{EngineCatalogItem, project_catalog_item_for_model};
+use crate::app::local_engine::dto::{EngineCatalogItem, project_catalog_item};
 use crate::domain::local_engine::EngineDefinition;
+use crate::infra::local_engine::runtime::ComputePreference;
 
 use super::{current_compute_preference, get_service};
 
@@ -20,8 +21,7 @@ use super::{current_compute_preference, get_service};
 fn compute_compatibility_for_descriptor(
     svc: &EngineManager,
     descriptor: &EngineDefinition,
-    model_id: &str,
-) -> Vec<(String, bool, Option<String>)> {
+) -> Vec<(ComputePreference, bool, Option<String>)> {
     // 从 ProviderDescriptor 获取 profile candidates
     let provider_desc = svc.provider_descriptor_for_engine(&descriptor.engine_id);
 
@@ -32,15 +32,14 @@ fn compute_compatibility_for_descriptor(
         // 与实际执行安装事务的 provider 一致）。
         let provider = svc.provider_for_runtime(pd.runtime_kind);
         descriptor
-            .candidates_for_model(model_id)
-            .into_iter()
+            .install_plan
+            .compute_candidates
+            .iter()
             .map(|c| {
                 // 从 ProviderDescriptor 的 profiles 中找匹配的 ProfileCandidate
                 let profile_candidate = pd.profiles.iter().find(|pc| {
-                    pc.model_id == c.model_id
-                        && pc.profile_id == c.profile_id
-                        && pc.backend == c.backend
-                        && pc.artifact_id == c.artifact_id
+                    pc.profile_id == c.profile_id
+                        || pc.backend == map_preference_to_backend(c.preference)
                 });
 
                 let (compatible, disabled_reason) = if let Some(pc) = profile_candidate {
@@ -62,22 +61,38 @@ fn compute_compatibility_for_descriptor(
                     (false, Some("provider 未声明此 profile".to_string()))
                 };
 
-                (c.profile_id.clone(), compatible, disabled_reason)
+                (c.preference, compatible, disabled_reason)
             })
             .collect()
     } else {
         // 没有 ProviderDescriptor——无法做兼容性检查，标记为 unknown
         descriptor
-            .candidates_for_model(model_id)
-            .into_iter()
+            .install_plan
+            .compute_candidates
+            .iter()
             .map(|c| {
                 (
-                    c.profile_id.clone(),
+                    c.preference,
                     false,
                     Some("无 ProviderDescriptor".to_string()),
                 )
             })
             .collect()
+    }
+}
+
+/// 从 ComputePreference 映射到 ComputeBackend（复用 service 层逻辑）。
+fn map_preference_to_backend(
+    p: ComputePreference,
+) -> crate::infra::local_engine::runtime::ComputeBackend {
+    match p {
+        ComputePreference::Cpu => crate::infra::local_engine::runtime::ComputeBackend::Cpu,
+        ComputePreference::Cuda => crate::infra::local_engine::runtime::ComputeBackend::Cuda,
+        ComputePreference::Vulkan => crate::infra::local_engine::runtime::ComputeBackend::Vulkan,
+        ComputePreference::Directml => {
+            crate::infra::local_engine::runtime::ComputeBackend::Directml
+        }
+        _ => crate::infra::local_engine::runtime::ComputeBackend::Cpu,
     }
 }
 
@@ -100,21 +115,9 @@ pub async fn get_local_engine_catalog(
 
     for descriptor in catalog {
         let engine_id_str = descriptor.engine_id.to_string();
-        let eid = crate::infra::local_engine::runtime::EngineId::new(&engine_id_str)
-            .map_err(|e| CommandError::new("invalid_engine_id", e.to_string(), false))?;
-        let selected_model_id = crate::app::local_engine::config_source::current_model_id(&eid)
-            .unwrap_or_else(|| descriptor.model_contract.model_id.clone());
         let current_pref = current_compute_preference(&engine_id_str);
-        let compatibility_results =
-            compute_compatibility_for_descriptor(&svc, &descriptor, &selected_model_id);
-        let model_descriptor = svc.model_registry().find(&eid, &selected_model_id);
-        let item = project_catalog_item_for_model(
-            &descriptor,
-            model_descriptor,
-            &selected_model_id,
-            &compatibility_results,
-            current_pref,
-        );
+        let compatibility_results = compute_compatibility_for_descriptor(&svc, &descriptor);
+        let item = project_catalog_item(&descriptor, &compatibility_results, current_pref);
         items.push(item);
     }
 
@@ -129,21 +132,18 @@ mod tests {
 
     use crate::app::commands::local_engine::build_adapter_config_for_engine;
     use crate::app::local_engine::{funasr, paddleocr};
-    use crate::infra::local_engine::runtime::{ComputeBackend, ComputePreference};
 
-    /// FunASR catalog 只投影当前模型声明的 profile；SenseVoice 开放 Vulkan/CUDA，
-    /// Paraformer 开放 Vulkan，Nano 仍保持 CPU-only。
+    // ── 0.22.6.1 前端不能持久化 FunASR cuda/auto ──
+
+    /// FunASR catalog 不暴露 cuda/auto 可选项——descriptor 只声明 CPU profile，
+    /// compute_options 投影只含 cpu，前端选择器无从产生其他选项。
     #[test]
-    fn funasr_catalog_compute_options_are_model_scoped() {
+    fn funasr_catalog_compute_options_only_cpu() {
         let adapter = crate::app::local_engine::funasr::make_funasr_adapter();
         let descriptor = adapter.descriptor();
         let item = crate::app::local_engine::dto::project_catalog_item(
             descriptor,
-            &[
-                (ComputePreference::Vulkan, true, None),
-                (ComputePreference::Cuda, true, None),
-                (ComputePreference::Cpu, true, None),
-            ],
+            &[(ComputePreference::Cpu, true, None)],
             ComputePreference::Cpu,
         );
         let prefs: Vec<&str> = item
@@ -151,51 +151,7 @@ mod tests {
             .iter()
             .map(|o| o.preference.as_str())
             .collect();
-        assert_eq!(prefs, vec!["vulkan", "cuda", "cpu"]);
-        assert_eq!(item.compute_options[0].model_id, "gguf/sensevoice-small-q8");
-        assert_eq!(
-            item.undeclared_compute_preferences,
-            vec!["directml".to_string()]
-        );
-
-        let incompatible = crate::app::local_engine::dto::project_catalog_item_for_model(
-            descriptor,
-            None,
-            "gguf/sensevoice-small-q8",
-            &[("cpu-x64".to_string(), false, Some("本机不兼容".to_string()))],
-            ComputePreference::Cpu,
-        );
-        let incompatible_cpu = incompatible
-            .compute_options
-            .iter()
-            .find(|option| option.preference == "cpu")
-            .expect("catalog 应包含 SenseVoice CPU candidate");
-        assert!(!incompatible_cpu.compatible);
-        assert_eq!(
-            incompatible_cpu.disabled_reason.as_deref(),
-            Some("本机不兼容")
-        );
-
-        let paraformer = crate::app::local_engine::dto::project_catalog_item_for_model(
-            descriptor,
-            None,
-            "gguf/paraformer-zh-q8",
-            &[
-                ("vulkan-x64".to_string(), true, None),
-                ("cpu-x64".to_string(), true, None),
-            ],
-            ComputePreference::Vulkan,
-        );
-        let paraformer_prefs: Vec<&str> = paraformer
-            .compute_options
-            .iter()
-            .map(|option| option.preference.as_str())
-            .collect();
-        assert_eq!(paraformer_prefs, vec!["vulkan", "cpu"]);
-        assert_eq!(
-            paraformer.undeclared_compute_preferences,
-            vec!["cuda".to_string(), "directml".to_string()]
-        );
+        assert_eq!(prefs, vec!["cpu"], "FunASR catalog 只能暴露 cpu 可选项");
     }
 
     // ── catalog 只包含 registry allowlist ──
@@ -235,7 +191,6 @@ mod tests {
                 estimated_peak_ram_mb: Some(1500),
             },
             compute_options: vec![],
-            undeclared_compute_preferences: vec![],
             current_compute_preference: "cpu".to_string(),
         };
         let json = serde_json::to_value(&dto).unwrap();
@@ -280,8 +235,7 @@ mod tests {
         );
     }
 
-    /// FunASR 的策略偏好不在 candidates 中；SenseVoice 的 Vulkan/CUDA 与
-    /// Paraformer 的 Vulkan 已声明，Nano 仍由 model-scoped descriptor 保持 CPU-only。
+    /// FunASR descriptor 只声明 CPU profile——与 PaddleOCR 同理。
     #[test]
     fn contract_funasr_auto_not_in_candidates_but_allowed() {
         use crate::domain::local_engine::adapter::LocalEngineAdapter;
@@ -296,27 +250,20 @@ mod tests {
             descriptor.has_preference(ComputePreference::Cpu),
             "FunASR descriptor 应声明 Cpu 候选"
         );
-        assert!(descriptor.has_preference(ComputePreference::Cuda));
         assert!(
-            descriptor
-                .has_preference_for_model("gguf/sensevoice-small-q8", ComputePreference::Cuda)
-        );
-        assert!(
-            !descriptor.has_preference_for_model("gguf/paraformer-zh-q8", ComputePreference::Cuda)
-        );
-        assert!(
-            descriptor.has_preference_for_model("gguf/paraformer-zh-q8", ComputePreference::Vulkan)
+            !descriptor.has_preference(ComputePreference::Cuda),
+            "FunASR 0.22.6 不应声明 Cuda 候选"
         );
     }
 
-    /// 默认测试配置的 `current_compute_preference` 仍为 Cpu。
+    /// `current_compute_preference` 为 FunASR 始终返回 Cpu。
     #[test]
     fn contract_funasr_current_compute_preference_always_cpu() {
         let pref = current_compute_preference("funasr");
         assert_eq!(
             pref,
             ComputePreference::Cpu,
-            "默认测试配置的 FunASR current_compute_preference 必须为 Cpu"
+            "FunASR current_compute_preference 必须为 Cpu"
         );
     }
 
@@ -328,12 +275,6 @@ mod tests {
 
         // 只有一个 CPU profile
         assert_eq!(descriptor.profiles.len(), 1);
-        assert!(
-            descriptor
-                .profiles
-                .iter()
-                .all(|profile| profile.backend == ComputeBackend::Cpu)
-        );
         assert_eq!(
             descriptor.profiles[0].backend,
             crate::infra::local_engine::runtime::ComputeBackend::Cpu
@@ -345,34 +286,19 @@ mod tests {
         ));
     }
 
-    /// FunASR ProviderDescriptor 为 SenseVoice 声明 CPU/Vulkan/CUDA，
-    /// 为 Paraformer 声明 CPU/Vulkan，Nano 仍只声明 CPU。
+    /// FunASR ProviderDescriptor 只声明 CPU profile（`Always` 兼容）。
     #[test]
-    fn contract_funasr_provider_descriptor_model_scoped_profiles() {
+    fn contract_funasr_provider_descriptor_only_cpu() {
         let descriptor = funasr::make_funasr_provider_descriptor();
 
-        let profiles: Vec<(&str, ComputeBackend)> = descriptor
-            .profiles
-            .iter()
-            .map(|profile| (profile.model_id.as_str(), profile.backend))
-            .collect();
+        assert_eq!(descriptor.profiles.len(), 1);
         assert_eq!(
-            profiles,
-            vec![
-                ("gguf/sensevoice-small-q8", ComputeBackend::Vulkan),
-                ("gguf/sensevoice-small-q8", ComputeBackend::Cuda),
-                ("gguf/paraformer-zh-q8", ComputeBackend::Vulkan),
-                ("gguf/sensevoice-small-q8", ComputeBackend::Cpu),
-                ("gguf/paraformer-zh-q8", ComputeBackend::Cpu),
-                ("gguf/fun-asr-nano-q4km", ComputeBackend::Cpu),
-            ]
+            descriptor.profiles[0].backend,
+            crate::infra::local_engine::runtime::ComputeBackend::Cpu
         );
         assert!(matches!(
             descriptor.profiles[0].compatibility,
-            crate::infra::local_engine::providers::CompatibilityCheck::RequiresVulkan
+            crate::infra::local_engine::providers::CompatibilityCheck::Always
         ));
-        assert_eq!(descriptor.profiles[0].backend, ComputeBackend::Vulkan);
-        assert_eq!(descriptor.profiles[1].backend, ComputeBackend::Cuda);
-        assert_eq!(descriptor.profiles[2].backend, ComputeBackend::Vulkan);
     }
 }

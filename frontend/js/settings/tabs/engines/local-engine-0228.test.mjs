@@ -359,9 +359,9 @@ await test("start 失败：pendingAction 清除 + onError + 最终状态刷新�
     }
 });
 
-// ── 9. 单一已声明 compute 选项 → 静态展示 ────────────────────────────────────
+// ── 9. 单一可用 compute 选项 → 静态展示 ──────────────────────────────────────
 
-await test("computeOptionsDisplayMode：单一已声明选项 → static，多选项 → select", () => {
+await test("computeOptionsDisplayMode：单一可用选项 → static，多选项 → select", () => {
     // FunASR 实际 catalog：只有 cpu
     assert.equal(
         computeOptionsDisplayMode([
@@ -383,9 +383,9 @@ await test("computeOptionsDisplayMode：单一已声明选项 → static，多�
         ]),
         "select",
     );
-    // 空/缺失 → static（无多个已声明候选，渲染 select 无意义）
+    // 空 → static（无可选项，渲染 select 无意义）；非数组 → select（fail-open）
     assert.equal(computeOptionsDisplayMode([]), "static");
-    assert.equal(computeOptionsDisplayMode(null), "static");
+    assert.equal(computeOptionsDisplayMode(null), "select");
 });
 
 // ── 汇总 ─────────────────────────────────────────────────────────────────────

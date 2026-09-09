@@ -30,12 +30,9 @@ pub async fn get_local_engine_preferences(
     let dto = match engine_id.as_str() {
         funasr::FUNASR_ENGINE_ID => {
             let config = crate::app::stt_config::get_stt_config();
-            let compute_pref = crate::app::local_engine::config_source::funasr_adapter_config_from(
-                &config.local_engine,
-            )
-            .compute_preference
-            .unwrap_or(ComputePreference::Auto)
-            .to_string();
+            // 0.22.6 归一化：历史 device=cuda 投影为 cpu
+            // descriptor 只声明 CPU profile，前端不应看到 cuda 选项
+            let compute_pref = "cpu".to_string();
             EnginePreferencesDto {
                 engine_id: engine_id.clone(),
                 compute_preference: Some(compute_pref),
@@ -124,9 +121,9 @@ pub async fn set_local_engine_preferences(
                 // 验证属于该引擎 descriptor 声明项
                 validate_preference_for_engine(&svc, &eid, pref).await?;
 
-                // 显式值已按当前模型的 descriptor 校验；Auto/GpuAuto
-                // 作为解析策略原样保存，由 resolver 在安装/启动前落到真实 profile。
-                let new_device = pref.to_string();
+                // 0.22.6 归一化：FunASR descriptor 只声明 CPU profile
+                // 无论用户提交 cpu 还是 auto 还是 cuda，最终都归一化为 cpu
+                let new_device = "cpu".to_string();
                 if config.local_engine.device != new_device {
                     profile_changed = true;
                     config.local_engine.device = new_device;
@@ -255,15 +252,10 @@ pub async fn set_local_engine_preferences(
     let dto = match engine_id.as_str() {
         funasr::FUNASR_ENGINE_ID => {
             let config = crate::app::stt_config::get_stt_config();
-            let compute_pref = crate::app::local_engine::config_source::funasr_adapter_config_from(
-                &config.local_engine,
-            )
-            .compute_preference
-            .unwrap_or(ComputePreference::Auto)
-            .to_string();
+            // 0.22.6 归一化：无论配置中 device 值是什么，前端总是看到 cpu
             EnginePreferencesDto {
                 engine_id: engine_id.clone(),
-                compute_preference: Some(compute_pref),
+                compute_preference: Some("cpu".to_string()),
                 auto_start: Some(config.local_engine.auto_start_server),
                 ocr_backend: None,
                 lifecycle: None,

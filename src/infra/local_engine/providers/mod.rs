@@ -27,33 +27,6 @@
 pub mod binary;
 pub mod onnx;
 
-/// 开发构建可从本地产物根目录完成完整安装验证，避免尚未发布 Release 时
-/// 被网络 artifact lock 阻塞。release 构建不会读取这个入口。
-pub const DEBUG_LOCAL_ARTIFACT_ROOT_ENV: &str = "BLINK_LOCAL_ENGINE_ARTIFACT_ROOT";
-
-/// 若 debug 构建配置了合法的绝对本地产物根目录，则让 descriptor 把该
-/// artifact 作为 bundled source 交给安装事务；仍由 provider 校验 manifest
-/// 和逐文件 SHA-256，不绕过 artifact 身份与文件闭包。
-pub fn debug_local_artifact_dir(artifact_id: &str) -> Option<String> {
-    debug_local_artifact_root().map(|_| artifact_id.to_string())
-}
-
-fn debug_local_artifact_root() -> Option<std::path::PathBuf> {
-    #[cfg(debug_assertions)]
-    {
-        let value = std::env::var_os(DEBUG_LOCAL_ARTIFACT_ROOT_ENV)?;
-        if value.is_empty() {
-            return None;
-        }
-        let root = std::path::PathBuf::from(value);
-        root.is_absolute().then_some(root)
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        None
-    }
-}
-
 use super::deployment::{
     DEPLOYMENT_POINTER_SCHEMA_VERSION, DeploymentPointer, DeploymentSlot, DeploymentSpace,
     DeploymentStore, TransactionPhase,
@@ -87,29 +60,9 @@ pub struct ProviderDescriptor {
     pub install_plan: InstallPlan,
 }
 
-impl ProviderDescriptor {
-    /// 返回当前模型声明的 profile，保持 descriptor 声明顺序。
-    pub fn profiles_for_model(&self, model_id: &str) -> Vec<&ProfileCandidate> {
-        self.profiles
-            .iter()
-            .filter(|profile| profile.model_id == model_id)
-            .collect()
-    }
-
-    /// 当前模型是否存在至少一个声明的 profile。
-    #[allow(dead_code)]
-    pub fn declares_model(&self, model_id: &str) -> bool {
-        self.profiles
-            .iter()
-            .any(|profile| profile.model_id == model_id)
-    }
-}
-
 /// 候选 profile 声明。
 #[derive(Debug, Clone)]
 pub struct ProfileCandidate {
-    /// 候选所属的模型 id。profile 不得跨模型复用。
-    pub model_id: String,
     /// profile 标识（如 `cpu-x64`、`cuda12-sm86`）。
     pub profile_id: String,
     /// 此 profile 对应的 compute backend。
@@ -123,7 +76,8 @@ pub struct ProfileCandidate {
 /// 兼容性检查类型（provider 负责实现实际检查逻辑）。
 ///
 /// 闭合协议枚举，只保留 0.22.7 GGUF 链路明确需要的最小集合
-/// （cuda / vulkan / cpu feature）。
+/// （cuda / vulkan / cpu feature）；GPU/feature 分支由 ManagedBinary
+/// provider 落地时构造，当前只使用 `Always` 与 `RequiresCuda`。
 #[allow(dead_code)] // 0.22.7 ManagedBinary 协议位——变体由 binary descriptor 构造
 #[derive(Debug, Clone)]
 pub enum CompatibilityCheck {
@@ -170,8 +124,6 @@ pub struct BinaryInstallPlan {
     pub archive_sha256: String,
     /// 可执行文件路径（相对于部署根）。
     pub executable: String,
-    /// 按模型选择 worker executable；为空时回退到 `executable`。
-    pub model_executables: Vec<(String, String)>,
     /// 引用的共享 stdlib artifact（可选，预留协议位，当前无引擎使用）。
     pub stdlib_artifact: Option<runtime::ArtifactIdentity>,
     /// required CPU features。
@@ -182,36 +134,6 @@ pub struct BinaryInstallPlan {
     pub self_test_command: Vec<String>,
     /// 捆绑资源目录（相对于发布资源根，如 "bin/funasr-worker"）。
     /// `Some` 时安装走捆绑资源 + 随发布 manifest 校验，忽略网络字段。
-    pub bundled_dir: Option<String>,
-    /// 按 artifact 覆盖来源与文件闭包。
-    ///
-    /// `ResolvedProfile.artifact_id` 是安装时唯一选择依据。旧的顶层字段
-    /// 保留作为兼容的单 artifact 计划；真实多 backend 制品应在此列出每个
-    /// artifact，避免 provider 猜测 DLL 或把所有 backend 文件复制进部署。
-    pub artifact_plans: Vec<BinaryArtifactPlan>,
-}
-
-/// 单个 ManagedBinary artifact 的受信安装描述。
-#[derive(Debug, Clone)]
-pub struct BinaryArtifactPlan {
-    /// 内容寻址 artifact id。
-    pub artifact_id: runtime::ArtifactId,
-    /// 固定 archive URL（bundled 模式可为空）。
-    pub archive_url: String,
-    /// 固定 archive SHA-256（bundled 模式可为空）。
-    pub archive_sha256: String,
-    /// artifact 内允许启动的 worker executable。
-    pub executable: String,
-    /// 固定 backend DLL 子目录；为空表示 deployment 根。
-    pub backend_dir: Option<String>,
-    /// 此 artifact 的显式依赖，按依赖先于当前 artifact 合并进 staging。
-    ///
-    /// 0.22.16.3 的 Vulkan/CUDA 包是 base runtime 的增量包；安装事务
-    /// 必须按 manifest/descriptor 明确依赖闭包组装，不能从目录内容猜测。
-    pub dependencies: Vec<runtime::ArtifactId>,
-    /// 额外的 manifest 文件白名单。为空时以 artifact manifest 为准。
-    pub file_allowlist: Vec<String>,
-    /// 捆绑资源目录（相对于发布资源根）。
     pub bundled_dir: Option<String>,
 }
 
@@ -349,7 +271,6 @@ pub trait RuntimeProvider: Send + Sync {
         &self,
         deployment_dir: &std::path::Path,
         plan: &InstallPlan,
-        resolved_profile: &ResolvedProfile,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<(), RuntimeError>;
@@ -361,7 +282,6 @@ pub trait RuntimeProvider: Send + Sync {
         &self,
         deployment_dir: &std::path::Path,
         plan: &InstallPlan,
-        resolved_profile: &ResolvedProfile,
     ) -> Result<ManifestExtension, RuntimeError>;
 }
 
@@ -424,105 +344,10 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
     ///
     /// `operation_id` 由调用方（EngineManager）生成并已登记操作协调器；
     /// journal、staging 目录与取消语义都以此 id 为准。
-    #[allow(dead_code)]
     pub async fn execute(
         &self,
         operation_id: &str,
         preference: ComputePreference,
-        cancel_token: Option<&tokio_util::sync::CancellationToken>,
-        sink: Option<&dyn InstallSink>,
-    ) -> Result<InstallResult, RuntimeError> {
-        let model_id = self.descriptor.model_contract.model_id.clone();
-        self.execute_for_model(operation_id, &model_id, preference, cancel_token, sink)
-            .await
-    }
-
-    /// 按当前模型执行安装事务。
-    ///
-    /// `model_id` 由 app 层从受信配置真源传入；provider 不从引擎专属 JSON
-    /// 猜模型，也不接受前端提供的 artifact/path。保留 `execute` 作为旧测试
-    /// 与无多模型 provider 的兼容门面，新的调用方应使用本方法。
-    pub async fn execute_for_model(
-        &self,
-        operation_id: &str,
-        model_id: &str,
-        preference: ComputePreference,
-        cancel_token: Option<&tokio_util::sync::CancellationToken>,
-        sink: Option<&dyn InstallSink>,
-    ) -> Result<InstallResult, RuntimeError> {
-        // auto 的 host 预筛不是最终结论：每个候选在自己的 staging 中
-        // 运行一次 worker probe。probe 失败只在提交前回到下一个候选；
-        // 显式 preference 永不进入此回退路径。
-        let mut rejected_profiles = Vec::new();
-        let mut accumulated_fallbacks = Vec::new();
-        let mut last_probe_error = None;
-        loop {
-            let (resolved_profile, mut fallback_reasons) = match self
-                .resolve_profile_for_model_excluding(model_id, preference, &rejected_profiles)
-            {
-                Ok(value) => value,
-                Err(error) if preference == ComputePreference::Auto => {
-                    return Err(last_probe_error.unwrap_or(error));
-                }
-                Err(error) => return Err(error),
-            };
-            fallback_reasons.splice(0..0, accumulated_fallbacks.drain(..));
-            let failed_profile = resolved_profile.profile_id.clone();
-            match self
-                .execute_resolved_profile(
-                    operation_id,
-                    preference,
-                    resolved_profile,
-                    fallback_reasons,
-                    cancel_token,
-                    sink,
-                )
-                .await
-            {
-                Ok(result) => return Ok(result),
-                Err(error)
-                    if preference == ComputePreference::Auto
-                        && matches!(
-                            error,
-                            RuntimeError::InstallFailed { .. }
-                                | RuntimeError::SelfTestFailed { .. }
-                        ) =>
-                {
-                    tracing::warn!(
-                        profile = %failed_profile,
-                        error = %error,
-                        "auto profile probe/install 失败，提交前尝试下一个候选"
-                    );
-                    let (reason, detail) = match &error {
-                        RuntimeError::SelfTestFailed { .. } => (
-                            FallbackReasonKind::SelfTestFailed,
-                            "worker backend probe 失败".to_string(),
-                        ),
-                        RuntimeError::InstallFailed { .. } => (
-                            FallbackReasonKind::ArtifactIncompatible,
-                            "artifact 安装或完整性校验失败".to_string(),
-                        ),
-                        _ => unreachable!("guard 只允许 install/self-test 错误"),
-                    };
-                    rejected_profiles.push(failed_profile.clone());
-                    accumulated_fallbacks.push(FallbackReason {
-                        rejected_profile: failed_profile,
-                        reason,
-                        detail,
-                    });
-                    last_probe_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    async fn execute_resolved_profile(
-        &self,
-        operation_id: &str,
-        preference: ComputePreference,
-        resolved_profile: ResolvedProfile,
-        fallback_reasons: Vec<FallbackReason>,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         sink: Option<&dyn InstallSink>,
     ) -> Result<InstallResult, RuntimeError> {
@@ -569,6 +394,8 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             s.on_log("info", "正在准备安装环境...");
         }
 
+        // ── 1. resolve profile ──
+        let (resolved_profile, fallback_reasons) = self.resolve_profile(preference)?;
         let fell_back = !fallback_reasons.is_empty();
 
         // ── 2. 事务 begin：写 journal（任何破坏性步骤之前），确定 candidate slot ──
@@ -666,13 +493,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
 
         if let Err(e) = self
             .provider
-            .self_test(
-                &staging,
-                &self.descriptor.install_plan,
-                &resolved_profile,
-                cancel_token,
-                sink,
-            )
+            .self_test(&staging, &self.descriptor.install_plan, cancel_token, sink)
             .await
         {
             tracing::warn!(%e, "候选环境 self-test 失败，清理 staging");
@@ -691,11 +512,10 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         }
 
         // ── 5. build manifest extension + manifest（先写进 staging） ──
-        let extension = match self.provider.build_manifest_extension(
-            &staging,
-            &self.descriptor.install_plan,
-            &resolved_profile,
-        ) {
+        let extension = match self
+            .provider
+            .build_manifest_extension(&staging, &self.descriptor.install_plan)
+        {
             Ok(ext) => ext,
             Err(e) => {
                 tracing::warn!(%e, "build_manifest_extension 失败，清理 staging");
@@ -717,11 +537,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             resolved_profile: resolved_profile.clone(),
             installed_at_ms: runtime::now_ms(),
             artifact,
-            model_contract: {
-                let mut contract = self.descriptor.model_contract.clone();
-                contract.model_id = resolved_profile.model_id.clone();
-                contract
-            },
+            model_contract: self.descriptor.model_contract.clone(),
             fallback_reasons,
             extension,
         };
@@ -960,37 +776,14 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
     /// - `auto`：按 descriptor 声明的优先级回退，记录每次失败原因。
     /// - `gpu_auto`：只在 GPU backend 间选择。
     /// - 显式 `cpu/cuda/vulkan/directml`：失败返回可行动错误，不回退。
-    #[allow(dead_code)]
     fn resolve_profile(
         &self,
         preference: ComputePreference,
     ) -> Result<(ResolvedProfile, Vec<FallbackReason>), RuntimeError> {
-        let model_id = self.descriptor.model_contract.model_id.clone();
-        self.resolve_profile_for_model(&model_id, preference)
-    }
-
-    /// 按模型解析 compute preference → resolved profile。
-    ///
-    /// 解析的候选集合先按 `model_id` 投影，再执行 backend 兼容性检查；
-    /// 因而同一 engine 内其他模型的 profile、artifact 永远不会串入本次安装。
-    fn resolve_profile_for_model(
-        &self,
-        model_id: &str,
-        preference: ComputePreference,
-    ) -> Result<(ResolvedProfile, Vec<FallbackReason>), RuntimeError> {
-        self.resolve_profile_for_model_excluding(model_id, preference, &[])
-    }
-
-    fn resolve_profile_for_model_excluding(
-        &self,
-        model_id: &str,
-        preference: ComputePreference,
-        rejected_profiles: &[String],
-    ) -> Result<(ResolvedProfile, Vec<FallbackReason>), RuntimeError> {
-        let profiles = self.descriptor.profiles_for_model(model_id);
+        let profiles = &self.descriptor.profiles;
         if profiles.is_empty() {
             return Err(RuntimeError::ProfileResolutionFailed {
-                message: format!("模型 '{model_id}' 未声明任何候选 profile"),
+                message: "descriptor 未声明任何候选 profile".to_string(),
             });
         }
 
@@ -999,17 +792,10 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
         match preference {
             ComputePreference::Auto => {
                 for (i, candidate) in profiles.iter().enumerate() {
-                    if rejected_profiles
-                        .iter()
-                        .any(|profile_id| profile_id == &candidate.profile_id)
-                    {
-                        continue;
-                    }
                     match self.provider.check_compatibility(&candidate.compatibility) {
                         Ok(true) => {
                             return Ok((
                                 ResolvedProfile {
-                                    model_id: model_id.to_string(),
                                     profile_id: candidate.profile_id.clone(),
                                     backend: candidate.backend,
                                     artifact_id: candidate.artifact_id.clone(),
@@ -1040,12 +826,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             }
             ComputePreference::GpuAuto => {
                 for (i, candidate) in profiles.iter().enumerate() {
-                    if rejected_profiles
-                        .iter()
-                        .any(|profile_id| profile_id == &candidate.profile_id)
-                    {
-                        continue;
-                    }
                     if !candidate.backend.is_gpu() {
                         continue;
                     }
@@ -1053,7 +833,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                         Ok(true) => {
                             return Ok((
                                 ResolvedProfile {
-                                    model_id: model_id.to_string(),
                                     profile_id: candidate.profile_id.clone(),
                                     backend: candidate.backend,
                                     artifact_id: candidate.artifact_id.clone(),
@@ -1084,12 +863,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             }
             ComputePreference::Cpu => {
                 for (i, candidate) in profiles.iter().enumerate() {
-                    if rejected_profiles
-                        .iter()
-                        .any(|profile_id| profile_id == &candidate.profile_id)
-                    {
-                        continue;
-                    }
                     if candidate.backend != ComputeBackend::Cpu {
                         continue;
                     }
@@ -1097,7 +870,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                         Ok(true) => {
                             return Ok((
                                 ResolvedProfile {
-                                    model_id: model_id.to_string(),
                                     profile_id: candidate.profile_id.clone(),
                                     backend: candidate.backend,
                                     artifact_id: candidate.artifact_id.clone(),
@@ -1122,46 +894,26 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                     message: "cpu: descriptor 未声明 CPU profile".to_string(),
                 })
             }
-            ComputePreference::Cuda => self.resolve_explicit_gpu(
-                model_id,
-                preference,
-                ComputeBackend::Cuda,
-                &profiles,
-                rejected_profiles,
-            ),
-            ComputePreference::Vulkan => self.resolve_explicit_gpu(
-                model_id,
-                preference,
-                ComputeBackend::Vulkan,
-                &profiles,
-                rejected_profiles,
-            ),
-            ComputePreference::Directml => self.resolve_explicit_gpu(
-                model_id,
-                preference,
-                ComputeBackend::Directml,
-                &profiles,
-                rejected_profiles,
-            ),
+            ComputePreference::Cuda => {
+                self.resolve_explicit_gpu(preference, ComputeBackend::Cuda, profiles)
+            }
+            ComputePreference::Vulkan => {
+                self.resolve_explicit_gpu(preference, ComputeBackend::Vulkan, profiles)
+            }
+            ComputePreference::Directml => {
+                self.resolve_explicit_gpu(preference, ComputeBackend::Directml, profiles)
+            }
         }
     }
 
     /// 解析显式 GPU backend（失败不回退）。
     fn resolve_explicit_gpu(
         &self,
-        model_id: &str,
         preference: ComputePreference,
         target: ComputeBackend,
-        profiles: &[&ProfileCandidate],
-        rejected_profiles: &[String],
+        profiles: &[ProfileCandidate],
     ) -> Result<(ResolvedProfile, Vec<FallbackReason>), RuntimeError> {
         for (i, candidate) in profiles.iter().enumerate() {
-            if rejected_profiles
-                .iter()
-                .any(|profile_id| profile_id == &candidate.profile_id)
-            {
-                continue;
-            }
             if candidate.backend != target {
                 continue;
             }
@@ -1169,7 +921,6 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
                 Ok(true) => {
                     return Ok((
                         ResolvedProfile {
-                            model_id: model_id.to_string(),
                             profile_id: candidate.profile_id.clone(),
                             backend: candidate.backend,
                             artifact_id: candidate.artifact_id.clone(),
@@ -1191,7 +942,7 @@ impl<'a, P: RuntimeProvider> InstallTransaction<'a, P> {
             }
         }
         Err(RuntimeError::ExplicitBackendFailed {
-            message: format!("{preference}: 模型 '{model_id}' 未声明此 backend 的 profile"),
+            message: format!("{preference}: descriptor 未声明此 backend 的 profile"),
         })
     }
 }

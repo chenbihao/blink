@@ -129,12 +129,8 @@ pub struct InstallPlanRef {
 /// adapter 从中选出本机兼容且 self-test 通过的 profile。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputeCandidate {
-    /// 候选所属的模型 id。候选不可跨模型复用。
-    pub model_id: String,
     /// 用户偏好（auto/cpu/gpu_auto/cuda/vulkan/directml）。
     pub preference: ComputePreference,
-    /// 候选实际使用的 backend。`Auto` / `GpuAuto` 只负责选择，不会成为该字段的值。
-    pub backend: super::identity::ComputeBackend,
     /// 对应的 profile 标识。
     pub profile_id: String,
     /// 对应的 artifact id（provider 管理的锁定标识）。
@@ -252,27 +248,7 @@ impl EngineDefinition {
         }
 
         // 候选 profile 的 artifact 必须在 install_plan.artifact_ids 中
-        let mut seen_profiles = std::collections::HashSet::new();
         for candidate in &self.install_plan.compute_candidates {
-            if super::identity::validate_model_id(&candidate.model_id).is_err() {
-                return Err(LocalEngineError::with_detail(
-                    super::error::LocalEngineErrorCode::InvalidConfig,
-                    super::error::ErrorPhase::Config,
-                    "引擎配置不一致",
-                    format!(
-                        "compute candidate '{}' 的 model_id 非法",
-                        candidate.profile_id
-                    ),
-                ));
-            }
-            if candidate.profile_id.is_empty() {
-                return Err(LocalEngineError::with_detail(
-                    super::error::LocalEngineErrorCode::InvalidConfig,
-                    super::error::ErrorPhase::Config,
-                    "引擎配置不一致",
-                    "compute candidate 的 profile_id 不能为空",
-                ));
-            }
             if !self
                 .install_plan
                 .artifact_ids
@@ -288,44 +264,12 @@ impl EngineDefinition {
                     ),
                 ));
             }
-
-            if let Some(expected_backend) = candidate.preference.backend()
-                && expected_backend != candidate.backend
-            {
-                return Err(LocalEngineError::with_detail(
-                    super::error::LocalEngineErrorCode::InvalidConfig,
-                    super::error::ErrorPhase::Config,
-                    "引擎配置不一致",
-                    format!(
-                        "compute candidate '{}' 的 preference={} 与 backend={} 不一致",
-                        candidate.profile_id, candidate.preference, candidate.backend
-                    ),
-                ));
-            }
-
-            let key = (
-                candidate.model_id.clone(),
-                candidate.profile_id.clone(),
-                candidate.backend,
-            );
-            if !seen_profiles.insert(key) {
-                return Err(LocalEngineError::with_detail(
-                    super::error::LocalEngineErrorCode::InvalidConfig,
-                    super::error::ErrorPhase::Config,
-                    "引擎配置不一致",
-                    format!(
-                        "model_id='{}' 重复声明 profile '{}'",
-                        candidate.model_id, candidate.profile_id
-                    ),
-                ));
-            }
         }
 
         Ok(())
     }
 
     /// 检查此 descriptor 是否声明了给定的 compute preference。
-    #[allow(dead_code)]
     pub fn has_preference(&self, pref: ComputePreference) -> bool {
         self.install_plan
             .compute_candidates
@@ -333,68 +277,12 @@ impl EngineDefinition {
             .any(|c| c.preference == pref)
     }
 
-    /// 返回当前模型声明的候选，保持 descriptor 声明顺序。
-    pub fn candidates_for_model(&self, model_id: &str) -> Vec<&ComputeCandidate> {
+    /// 检查 resolved profile 是否在此 descriptor 声明的候选范围内。
+    pub fn is_profile_allowed(&self, resolved: &ResolvedProfile) -> bool {
         self.install_plan
             .compute_candidates
             .iter()
-            .filter(|candidate| candidate.model_id == model_id)
-            .collect()
-    }
-
-    /// 检查当前模型是否声明了给定显式偏好。
-    pub fn has_preference_for_model(&self, model_id: &str, pref: ComputePreference) -> bool {
-        self.candidates_for_model(model_id).iter().any(|candidate| {
-            candidate.preference == pref
-                || pref
-                    .backend()
-                    .is_some_and(|backend| candidate.backend == backend)
-        })
-    }
-
-    /// 将用户偏好归一化到当前模型声明的候选范围。
-    ///
-    /// 这是纯规则：不探测主机，不读取配置/文件系统。显式 backend 或
-    /// `gpu_auto` 对当前模型不可用时优先收敛到该模型声明的 CPU；模型没有
-    /// CPU 候选时才保留 `auto`，由后续解析器返回可行动错误，不凭空制造 profile。
-    pub fn normalize_preference_for_model(
-        &self,
-        model_id: &str,
-        requested: Option<ComputePreference>,
-    ) -> ComputePreference {
-        let candidates = self.candidates_for_model(model_id);
-        let has_cpu = candidates
-            .iter()
-            .any(|candidate| candidate.backend == super::identity::ComputeBackend::Cpu);
-
-        match requested {
-            Some(ComputePreference::Auto) => ComputePreference::Auto,
-            Some(
-                pref @ (ComputePreference::Cpu
-                | ComputePreference::Cuda
-                | ComputePreference::Vulkan
-                | ComputePreference::Directml),
-            ) if self.has_preference_for_model(model_id, pref) => pref,
-            Some(ComputePreference::GpuAuto)
-                if candidates
-                    .iter()
-                    .any(|candidate| candidate.backend.is_gpu()) =>
-            {
-                ComputePreference::GpuAuto
-            }
-            _ if has_cpu => ComputePreference::Cpu,
-            _ => ComputePreference::Auto,
-        }
-    }
-
-    /// 检查 resolved profile 是否在此 descriptor 声明的候选范围内。
-    pub fn is_profile_allowed(&self, resolved: &ResolvedProfile) -> bool {
-        self.install_plan.compute_candidates.iter().any(|c| {
-            c.model_id == resolved.model_id
-                && c.profile_id == resolved.profile_id
-                && c.backend == resolved.backend
-                && c.artifact_id == resolved.artifact_id
-        })
+            .any(|c| c.profile_id == resolved.profile_id)
     }
 }
 
@@ -426,9 +314,7 @@ mod tests {
                 runtime_kind: RuntimePlan::PythonVenv,
                 artifact_ids: vec![artifact_id.clone()],
                 compute_candidates: vec![ComputeCandidate {
-                    model_id: "funasr-model".to_string(),
                     preference: ComputePreference::Cpu,
-                    backend: ComputeBackend::Cpu,
                     profile_id: "cpu-x64".to_string(),
                     artifact_id: artifact_id.clone(),
                 }],
@@ -467,9 +353,7 @@ mod tests {
         let mut desc = make_test_descriptor();
         let undeclared = ArtifactId::new("undeclared-artifact").unwrap();
         desc.install_plan.compute_candidates.push(ComputeCandidate {
-            model_id: "funasr-model".to_string(),
             preference: ComputePreference::Cuda,
-            backend: ComputeBackend::Cuda,
             profile_id: "cuda-sm86".to_string(),
             artifact_id: undeclared,
         });
@@ -514,7 +398,6 @@ mod tests {
         let desc = make_test_descriptor();
 
         let allowed = ResolvedProfile {
-            model_id: "funasr-model".to_string(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
@@ -523,45 +406,12 @@ mod tests {
         assert!(desc.is_profile_allowed(&allowed));
 
         let not_allowed = ResolvedProfile {
-            model_id: "funasr-model".to_string(),
             profile_id: "cuda-sm86".to_string(),
             backend: ComputeBackend::Cuda,
             artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
             priority: 0,
         };
         assert!(!desc.is_profile_allowed(&not_allowed));
-    }
-
-    #[test]
-    fn descriptor_normalizes_preference_per_model() {
-        let mut desc = make_test_descriptor();
-        desc.install_plan.compute_candidates.push(ComputeCandidate {
-            model_id: "gpu-model".to_string(),
-            preference: ComputePreference::Cuda,
-            backend: ComputeBackend::Cuda,
-            profile_id: "cuda-sm86".to_string(),
-            artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
-        });
-        desc.install_plan.compute_candidates.push(ComputeCandidate {
-            model_id: "gpu-model".to_string(),
-            preference: ComputePreference::Cpu,
-            backend: ComputeBackend::Cpu,
-            profile_id: "cpu-x64".to_string(),
-            artifact_id: ArtifactId::new("python-3.12.8").unwrap(),
-        });
-
-        assert_eq!(
-            desc.normalize_preference_for_model("funasr-model", Some(ComputePreference::Cuda)),
-            ComputePreference::Cpu
-        );
-        assert_eq!(
-            desc.normalize_preference_for_model("gpu-model", Some(ComputePreference::Cuda)),
-            ComputePreference::Cuda
-        );
-        assert_eq!(
-            desc.normalize_preference_for_model("gpu-model", Some(ComputePreference::Auto)),
-            ComputePreference::Auto
-        );
     }
 
     #[test]

@@ -307,9 +307,7 @@ mod tests {
                 runtime_kind: RuntimePlan::ManagedBinary,
                 artifact_ids: vec![artifact.clone()],
                 compute_candidates: vec![ComputeCandidate {
-                    model_id: GGUF_SENSEVOICE_ID.to_string(),
                     preference: ComputePreference::Cpu,
-                    backend: ComputeBackend::Cpu,
                     profile_id: "cpu-x64".to_string(),
                     artifact_id: artifact,
                 }],

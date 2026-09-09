@@ -9,7 +9,7 @@
  *
  * - FunASR compute preference / auto_start 映射现有受限 preferences command。
  * - PaddleOCR compute preference / ocr_backend / lifecycle 映射同一 command。
- * - 单一已声明 compute profile 渲染静态文本；多个已声明候选才显示下拉。
+ * - 单一可用 compute profile 渲染静态文本，不显示虚假可选下拉。
  * - 当前模型为只读展示（selected/active 三身份不混淆）——模型切换归
  *   语音页/引擎页模型列表的受限选择路径，本区不复制第二套真源。
  * - renderer 绝不允许任意 engine id 动态注入 HTML、command 或字段路径。
@@ -50,383 +50,7 @@ function makeGroup(labelText) {
 
 /** compute preference 显示名。 */
 function computeLabel(preference) {
-    if (!preference) return t("local_engine.compute.unavailable", "Unavailable");
     return t(`local_engine.compute.${preference}`, preference);
-}
-
-/**
- * 读取 catalog 中服务端声明的候选。这里有意不补造候选，也不按 model_id
- * 推断支持矩阵；缺失/畸形项只在渲染层忽略，保留服务端给出的相对顺序。
- */
-function computeOptions(catalog) {
-    return Array.isArray(catalog?.compute_options)
-        ? catalog.compute_options.filter((option) => (
-            option && typeof option.preference === "string"
-        ))
-        : [];
-}
-
-function isCompatibleComputeOption(option) {
-    return option?.compatible !== false;
-}
-
-/** 当前偏好优先；若模型刚切换且旧偏好已不合法，使用服务端归一化值。 */
-function computePreferenceProjection(catalog, requestedPreference) {
-    const options = computeOptions(catalog);
-    const catalogPreference = catalog?.current_compute_preference;
-    const requested = typeof requestedPreference === "string"
-        ? requestedPreference
-        : (typeof catalogPreference === "string" ? catalogPreference : null);
-    const requestedOption = options.find((option) => option.preference === requested);
-    if (requestedOption && isCompatibleComputeOption(requestedOption)) {
-        return {preference: requested, normalizedFrom: null, reason: null};
-    }
-
-    const catalogOption = options.find((option) => option.preference === catalogPreference);
-    if (catalogOption && isCompatibleComputeOption(catalogOption)) {
-        return {
-            preference: catalogPreference,
-            normalizedFrom: requested && requested !== catalogPreference ? requested : null,
-            reason: requestedOption?.disabled_reason || null,
-        };
-    }
-
-    return {
-        // 没有服务端归一化值时不猜测首个候选；空值比提交一个前端
-        // 自造的 preference 更安全，也不会让不可选的幽灵值进入控件。
-        preference: null,
-        normalizedFrom: null,
-        reason: requestedOption?.disabled_reason || null,
-    };
-}
-
-function interpolate(text, params) {
-    return String(text).replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? ""));
-}
-
-function computeText(key, fallback, params) {
-    const value = t(key, params);
-    return value === key ? interpolate(fallback, params) : value;
-}
-
-/** disabled_reason 既可能是 i18n key，也可能已经是后端人类可读详情。 */
-function computeReasonLabel(reason) {
-    if (!reason) return "";
-    const raw = String(reason);
-    const candidates = [
-        raw,
-        `local_engine.compute.reason.${raw}`,
-        `local_engine.compute.disabled_reason.${raw}`,
-    ];
-    for (const key of candidates) {
-        const value = t(key);
-        if (value !== key) return value;
-    }
-    return raw;
-}
-
-function readBackendInfo(entry) {
-    const raw = entry?.status?.status?.backend;
-    const backend = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    const verification = backend.backend_verification
-        && typeof backend.backend_verification === "object"
-        ? backend.backend_verification
-        : {};
-    const actual = verification.actual_backend
-        ?? backend.actual_backend
-        ?? backend.actualBackend
-        ?? null;
-    return {
-        backend,
-        verification,
-        runtimeRequested: backend.requested_preference ?? backend.requested ?? null,
-        resolvedProfile: backend.resolved_profile ?? backend.resolvedProfile ?? null,
-        desiredProfile: backend.desired_profile
-            ?? backend.desiredProfile
-            ?? backend.desired_deployment
-            ?? null,
-        activeProfile: backend.active_profile
-            ?? backend.activeProfile
-            ?? backend.loaded_profile
-            ?? backend.loadedProfile
-            ?? backend.loaded_deployment
-            ?? null,
-        actualBackend: actual && typeof actual === "object" ? actual.backend ?? null : actual,
-        pendingRestart: backend.pending_restart === true,
-    };
-}
-
-function profileLabel(profile) {
-    if (!profile) return "";
-    if (typeof profile === "string") return profile;
-    const id = profile.profile_id
-        || profile.profileId
-        || profile.artifact_id
-        || profile.artifactId
-        || profile.install_id
-        || profile.dll_artifact_id
-        || profile.model_generation_id;
-    if (!id) return "";
-    const backend = profile.backend;
-    return backend ? `${id} (${computeLabel(backend)})` : id;
-}
-
-function profileIdentity(profile) {
-    if (!profile) return null;
-    if (typeof profile === "string") return profile;
-    return profile.profile_id
-        || profile.profileId
-        || profile.artifact_id
-        || profile.artifactId
-        || profile.install_id
-        || profile.dll_artifact_id
-        || profile.model_generation_id
-        || null;
-}
-
-function readControllerPreference(controller, engineId) {
-    try {
-        const liveEntry = controller?.getState?.().get(engineId);
-        return liveEntry?.preferences?.compute_preference
-            ?? liveEntry?.catalog?.current_compute_preference
-            ?? null;
-    } catch {
-        return null;
-    }
-}
-
-function readControllerCatalog(controller, engineId, fallback) {
-    try {
-        return controller?.getState?.().get(engineId)?.catalog || fallback;
-    } catch {
-        return fallback;
-    }
-}
-
-function isControlLive(control, container) {
-    if (!control || control.isConnected === false) return false;
-    if (typeof container?.contains === "function") return container.contains(control);
-
-    // 最小 DOM shim 没有 contains；沿 parent 链做同样的生命周期核验。
-    if ("_parent" in control) {
-        let node = control;
-        while (node) {
-            if (node === container) {
-                return !(node._parent && Array.isArray(node._parent._children)
-                    && !node._parent._children.includes(node));
-            }
-            // The test DOM shim keeps a removed node's old _parent pointer;
-            // verify the parent still owns the child before treating it live.
-            if (node._parent && Array.isArray(node._parent._children)
-                && !node._parent._children.includes(node)) {
-                return false;
-            }
-            node = node._parent;
-        }
-        return false;
-    }
-    return true;
-}
-
-function renderComputeStatus(statusEl, entry, catalog) {
-    if (!statusEl) return;
-    const requestedPreference = entry?.preferences?.compute_preference
-        ?? catalog?.current_compute_preference
-        ?? null;
-    const projection = computePreferenceProjection(catalog, requestedPreference);
-    const backendInfo = readBackendInfo(entry);
-    const parts = [computeText(
-        "local_engine.compute.requested",
-        "Preference: {value}",
-        {value: computeLabel(requestedPreference)},
-    )];
-
-    if (backendInfo.runtimeRequested && backendInfo.runtimeRequested !== requestedPreference) {
-        parts.push(computeText(
-            "local_engine.compute.running_requested",
-            "Running request: {value}",
-            {value: computeLabel(backendInfo.runtimeRequested)},
-        ));
-    }
-
-    const resolved = profileLabel(backendInfo.resolvedProfile);
-    if (resolved) {
-        parts.push(computeText(
-            "local_engine.compute.resolved_profile",
-            "Resolved profile: {value}",
-            {value: resolved},
-        ));
-    }
-    const active = profileLabel(backendInfo.activeProfile);
-    if (active) {
-        parts.push(computeText(
-            "local_engine.compute.active_profile",
-            "Active profile: {value}",
-            {value: active},
-        ));
-    }
-    if (backendInfo.actualBackend) {
-        parts.push(computeText(
-            "local_engine.compute.actual",
-            "Actual backend: {value}",
-            {value: computeLabel(backendInfo.actualBackend)},
-        ));
-    }
-    const fallbackReasons = Array.isArray(backendInfo.backend.fallback_reasons)
-        ? backendInfo.backend.fallback_reasons
-        : [];
-    const fallbackDetails = fallbackReasons.map((reason) => {
-        if (typeof reason === "string") return reason;
-        return reason?.detail || reason?.reason || reason?.rejected_profile || "";
-    }).filter(Boolean);
-    if (fallbackDetails.length > 0) {
-        parts.push(computeText(
-            "local_engine.compute.fallback",
-            "Auto fallback: {reasons}",
-            {reasons: fallbackDetails.join("；")},
-        ));
-    }
-
-    statusEl.textContent = "";
-    const line = document.createElement("span");
-    line.className = "le-compute-status-line";
-    line.textContent = parts.join(" · ");
-    statusEl.appendChild(line);
-
-    const disabled = computeOptions(catalog).filter((option) => (
-        option.compatible === false && option.disabled_reason
-    ));
-    if (disabled.length > 0) {
-        const reason = document.createElement("span");
-        reason.className = "le-compute-disabled-reasons";
-        reason.textContent = computeText(
-            "local_engine.compute.disabled_options",
-            "Unavailable: {options}",
-            {
-                options: disabled.map((option) => (
-                    `${computeLabel(option.preference)} — ${computeReasonLabel(option.disabled_reason)}`
-                )).join("；"),
-            },
-        );
-        statusEl.appendChild(reason);
-    }
-
-    const desired = profileIdentity(backendInfo.desiredProfile);
-    const activeIdentity = profileIdentity(backendInfo.activeProfile);
-    // auto 是策略而不是实际 backend；是否不一致由服务端 verification
-    // 状态表达，前端不自行维护 preference/backend 矩阵。
-    const expectedBackend = backendInfo.verification.expected_backend;
-    const observedMismatch = backendInfo.actualBackend
-        && expectedBackend
-        && backendInfo.actualBackend !== expectedBackend;
-    const verificationMismatch = observedMismatch
-        || ["degraded", "error", "mismatched", "failed"].includes(backendInfo.verification.state);
-    if (verificationMismatch && backendInfo.verification.mismatch_reason) {
-        const reason = document.createElement("span");
-        reason.className = "le-compute-disabled-reasons";
-        reason.textContent = computeText(
-            "local_engine.compute.verification_reason",
-            "Verification: {reason}",
-            {reason: computeReasonLabel(backendInfo.verification.mismatch_reason)},
-        );
-        statusEl.appendChild(reason);
-    }
-    const profileMismatch = desired && activeIdentity && desired !== activeIdentity;
-    const processState = entry?.status?.status?.process?.state;
-    const runtimeIsActive = ["running", "starting", "stopping"].includes(processState);
-    const requestMismatch = runtimeIsActive
-        && backendInfo.runtimeRequested
-        && requestedPreference
-        && backendInfo.runtimeRequested !== requestedPreference;
-    const needsApply = backendInfo.pendingRestart
-        || profileMismatch
-        || verificationMismatch
-        || requestMismatch;
-    if (needsApply) {
-        const apply = document.createElement("span");
-        apply.className = "le-compute-apply-hint";
-        apply.textContent = computeText(
-            "local_engine.compute.active_mismatch",
-            "The running service still uses {active}; restart or rebuild to apply the preference.",
-            {active: active || computeLabel(backendInfo.actualBackend || "")},
-        );
-        statusEl.appendChild(apply);
-    } else if (projection.normalizedFrom) {
-        const normalized = document.createElement("span");
-        normalized.className = "le-compute-normalized-hint";
-        const reason = Array.isArray(catalog?.undeclared_compute_preferences)
-            && catalog.undeclared_compute_preferences.includes(projection.normalizedFrom)
-            ? computeText(
-                "local_engine.compute.normalized_undeclared",
-                "Previous preference {from} is not declared for this model; using {to}.",
-                {from: computeLabel(projection.normalizedFrom), to: computeLabel(projection.preference)},
-            )
-            : computeText(
-                "local_engine.compute.normalized",
-                "Preference {from} was normalized to {to} for this model.",
-                {from: computeLabel(projection.normalizedFrom), to: computeLabel(projection.preference)},
-            );
-        normalized.textContent = reason;
-        statusEl.appendChild(normalized);
-    }
-
-    if (entry?.status?.status?.environment === "missing") {
-        const install = document.createElement("span");
-        install.className = "le-compute-apply-hint";
-        install.textContent = computeText(
-            "local_engine.compute.install_hint",
-            "Install the environment to apply this profile.",
-        );
-        statusEl.appendChild(install);
-    } else if (entry?.preferences?.requires_rebuild === true
-        || entry?.status?.status?.environment === "needs_rebuild") {
-        const rebuild = document.createElement("span");
-        rebuild.className = "le-compute-apply-hint";
-        rebuild.textContent = computeText(
-            "local_engine.compute.rebuild_hint",
-            "Rebuild the environment to apply this preference.",
-        );
-        statusEl.appendChild(rebuild);
-    }
-
-    const warning = Boolean(
-        projection.normalizedFrom
-        || needsApply
-        || entry?.preferences?.requires_rebuild === true
-        || entry?.status?.status?.environment === "needs_rebuild"
-        || entry?.status?.status?.environment === "missing",
-    );
-    statusEl.className = `le-compute-status${warning ? " le-compute-status-warn" : ""}`;
-}
-
-function appendComputeSaveError(container) {
-    const select = container.querySelector(".le-compute-select");
-    const status = container.querySelector(".le-compute-status");
-    if (!select?.dataset.computeError || !status) return;
-    const error = document.createElement("span");
-    error.className = "le-compute-save-error";
-    error.textContent = t("local_engine.compute.save_failed");
-    status.appendChild(error);
-}
-
-function syncComputeControl(container, entry) {
-    const catalog = entry?.catalog;
-    const requestedPreference = entry?.preferences?.compute_preference
-        ?? catalog?.current_compute_preference
-        ?? null;
-    const projection = computePreferenceProjection(catalog, requestedPreference);
-    const select = container.querySelector(".le-compute-select");
-    if (select && !select.dataset.computePending) {
-        if (select.value !== (projection.preference || "")) select.value = projection.preference || "";
-        select.dataset.savedValue = projection.preference || "";
-    }
-    const staticValue = container.querySelector(".le-compute-static");
-    if (staticValue) {
-        const option = computeOptions(catalog)[0];
-        staticValue.textContent = computeLabel(option?.preference || projection.preference);
-    }
-    renderComputeStatus(container.querySelector(".le-compute-status"), entry, catalog);
-    appendComputeSaveError(container);
 }
 
 /**
@@ -512,22 +136,13 @@ function appendCurrentModelGroup(container, entry, inline = false) {
     container.appendChild(hint);
 }
 
-/** 渲染偏好保存后的重建/重启提示；状态完全来自服务端 DTO。 */
-function appendRebuildHint(container, entry) {
+/** 渲染 requires_rebuild 提示（保存 compute 偏好后环境待重建）。 */
+function appendRebuildHint(container, prefs) {
     const hint = document.createElement("span");
     hint.className = "le-config-rebuild-hint";
     hint.textContent = t("local_engine.config.requires_rebuild_hint");
-    hint.hidden = !(
-        entry?.preferences?.requires_rebuild === true
-        || entry?.status?.status?.environment === "needs_rebuild"
-    );
+    hint.hidden = prefs?.requires_rebuild !== true;
     container.appendChild(hint);
-
-    const restartHint = document.createElement("span");
-    restartHint.className = "le-config-restart-hint";
-    restartHint.textContent = t("local_engine.config.requires_restart_hint");
-    restartHint.hidden = entry?.status?.status?.backend?.pending_restart !== true;
-    container.appendChild(restartHint);
 }
 
 /** 原位同步所有引擎共用的模型、compute 与待重建状态。 */
@@ -544,129 +159,76 @@ function syncCommonConfig(container, entry) {
     const mismatch = container.querySelector(".le-config-mismatch");
     if (mismatch) mismatch.hidden = !(selected && active && selected.model_id !== active.model_id);
 
-    syncComputeControl(container, entry);
+    const preference = entry.preferences?.compute_preference
+        || entry.catalog?.current_compute_preference
+        || "auto";
+    const computeSelect = container.querySelector(".le-compute-select");
+    if (computeSelect) {
+        if (computeSelect.value !== preference) computeSelect.value = preference;
+        computeSelect.dataset.savedValue = preference;
+    }
+    const computeStatic = container.querySelector(".le-compute-static");
+    if (computeStatic) computeStatic.textContent = computeLabel(preference);
 
     const rebuildHint = container.querySelector(".le-config-rebuild-hint");
-    if (rebuildHint) {
-        rebuildHint.hidden = !(
-            entry?.preferences?.requires_rebuild === true
-            || entry?.status?.status?.environment === "needs_rebuild"
-        );
-    }
-    const restartHint = container.querySelector(".le-config-restart-hint");
-    if (restartHint) {
-        restartHint.hidden = entry?.status?.status?.backend?.pending_restart !== true;
-    }
+    if (rebuildHint) rebuildHint.hidden = entry.preferences?.requires_rebuild !== true;
 }
 
 /**
  * 渲染 compute preference 组：单一可用 profile → 静态文本；
- * 两个及以上已声明候选 → select（保存走受限 command，失败回滚）。
+ * 两个及以上真实可用候选 → select（保存走受限 command，失败回滚）。
  */
 function appendComputeGroup(container, entry, engineId, controller) {
     const catalog = entry.catalog;
-    const options = computeOptions(catalog);
-    const current = entry.preferences?.compute_preference
-        ?? catalog.current_compute_preference
-        ?? null;
-    const projection = computePreferenceProjection(catalog, current);
+    const prefs = entry.preferences;
+    const current = prefs?.compute_preference || catalog.current_compute_preference || "auto";
     const mode = computeOptionsDisplayMode(catalog.compute_options);
 
     const group = makeGroup(t("local_engine.config.compute_preference"));
-    group.className += " le-compute-group";
 
     if (mode === "static") {
-        // 单一已声明候选：只读展示。显示候选本身，不把 auto 误作实际设备。
+        // 单一可用选项：只读展示，避免制造"可以选择 CUDA"的错觉
         const staticValue = document.createElement("span");
         staticValue.className = "le-config-static le-compute-static";
-        staticValue.textContent = computeLabel(options[0]?.preference || projection.preference);
+        staticValue.textContent = computeLabel(current);
         group.appendChild(staticValue);
         container.appendChild(group);
-        const status = document.createElement("div");
-        status.className = "le-compute-status";
-        status.setAttribute("role", "status");
-        renderComputeStatus(status, entry, catalog);
-        container.appendChild(status);
         return;
     }
 
     const select = document.createElement("select");
     select.className = "le-config-select le-compute-select";
-    select.dataset.savedValue = projection.preference || "";
-    select.setAttribute("aria-label", t("local_engine.config.compute_preference"));
-    for (const opt of options) {
+    select.dataset.savedValue = current;
+    for (const opt of catalog.compute_options) {
         const option = document.createElement("option");
         option.value = opt.preference;
         option.textContent = computeLabel(opt.preference);
         option.disabled = !opt.compatible;
-        const reason = computeReasonLabel(opt.disabled_reason);
-        if (reason) {
-            option.title = reason;
-            option.setAttribute("title", reason);
-        }
-        if (opt.preference === projection.preference) option.selected = true;
+        if (opt.disabled_reason) option.title = opt.disabled_reason;
+        if (opt.preference === current) option.selected = true;
         select.appendChild(option);
     }
-    select.value = projection.preference || "";
-    let saveSequence = 0;
     select.addEventListener("change", async (e) => {
         const next = e.target.value;
-        const requestSequence = ++saveSequence;
-        const prev = select.dataset.savedValue || projection.preference;
-        const isCurrentRequest = () => (
-            requestSequence === saveSequence
-            && isControlLive(select, container)
-            && !controller?.isDisposed?.()
-        );
+        const prev = select.dataset.savedValue || current;
         select.disabled = true;
-        delete select.dataset.computeError;
-        select.dataset.computePending = String(requestSequence);
         try {
             const saved = await controller.savePreferences(engineId, {compute_preference: next});
-            if (!isCurrentRequest()) return;
-            const acceptedPreference = saved?.compute_preference
-                ?? readControllerPreference(controller, engineId)
-                ?? next;
-            const liveCatalog = readControllerCatalog(controller, engineId, catalog);
-            const accepted = computePreferenceProjection(liveCatalog, acceptedPreference).preference;
+            const accepted = saved?.compute_preference || next;
             select.dataset.savedValue = accepted;
-            select.value = accepted || "";
-            delete select.dataset.computePending;
-            if (controller?.isMounted?.()) {
+            select.value = accepted;
+            if (controller?.isMounted()) {
                 controller.refreshStatus().catch(() => {});
             }
         } catch (err) {
             console.error(`[${engineId}-hook] save compute preference failed:`, err);
-            // 失败后优先拉取服务端最后接受值，再回退到当前 catalog 的合法值；
-            // 不能用 render 时闭包中的 current 覆盖已更新的状态。
-            if (!isCurrentRequest()) return;
-            if (controller?.isMounted?.() && typeof controller.refreshStatus === "function") {
-                await controller.refreshStatus().catch(() => {});
-            }
-            if (!isCurrentRequest()) return;
-            const liveCatalog = readControllerCatalog(controller, engineId, catalog);
-            const serverPreference = readControllerPreference(controller, engineId) || prev;
-            const rollback = computePreferenceProjection(liveCatalog, serverPreference).preference;
-            select.value = rollback || "";
-            select.dataset.savedValue = rollback || "";
-            select.dataset.computeError = "true";
-            delete select.dataset.computePending;
-            appendComputeSaveError(container);
+            select.value = prev;
         } finally {
-            if (isCurrentRequest()) {
-                delete select.dataset.computePending;
-                select.disabled = false;
-            }
+            select.disabled = false;
         }
     });
     group.appendChild(select);
     container.appendChild(group);
-
-    const status = document.createElement("div");
-    status.className = "le-compute-status";
-    status.setAttribute("role", "status");
-    renderComputeStatus(status, entry, catalog);
-    container.appendChild(status);
 }
 
 // ── FunASR hook ───────────────────────────────────────────────────────────────
@@ -694,7 +256,7 @@ function registerFunasrHook() {
             // 运行时诊断（只读：runtime 种类 + active implementation）
             appendFunasrRuntimeGroup(container, entry);
 
-            // 计算设备（候选、兼容性与归一化全部来自 model-aware catalog）
+            // 计算设备（FunASR descriptor 当前只声明 CPU → 静态文本）
             appendComputeGroup(container, entry, "funasr", controller);
 
             // 自动启动开关
@@ -737,7 +299,7 @@ function registerFunasrHook() {
                 }
             });
 
-            appendRebuildHint(container, entry);
+            appendRebuildHint(container, prefs);
         },
         syncConfig(container, entry) {
             syncCommonConfig(container, entry);
@@ -969,7 +531,7 @@ function registerPaddleOcrHook() {
             backendGroup.appendChild(backendSelect);
             container.appendChild(backendGroup);
 
-            // 计算设备（候选、兼容性与归一化全部来自 catalog）
+            // 计算设备（catalog 声明 cpu 单选项 → 静态文本）
             appendComputeGroup(container, entry, "paddleocr", controller);
 
             // 运行策略（生命周期）
@@ -1003,7 +565,7 @@ function registerPaddleOcrHook() {
             lifecycleGroup.appendChild(lifecycleSelect);
             container.appendChild(lifecycleGroup);
 
-            appendRebuildHint(container, entry);
+            appendRebuildHint(container, prefs);
         },
         syncConfig(container, entry) {
             syncCommonConfig(container, entry);

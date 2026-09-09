@@ -52,9 +52,7 @@ pub(super) fn make_paddleocr_descriptor() -> EngineDefinition {
             runtime_kind: RuntimePlan::OnnxRuntime,
             artifact_ids: vec![dll_artifact_id.clone()],
             compute_candidates: vec![ComputeCandidate {
-                model_id: model_id.clone(),
                 preference: ComputePreference::Cpu,
-                backend: ComputeBackend::Cpu,
                 profile_id: "cpu-x64".to_string(),
                 artifact_id: dll_artifact_id.clone(),
             }],
@@ -111,7 +109,6 @@ pub fn make_paddleocr_onnx_provider_descriptor() -> ProviderDescriptor {
         runtime_kind: RuntimePlan::OnnxRuntime,
         display_name: "PP-OCRv6 文字识别 (ONNX)".to_string(),
         profiles: vec![ProfileCandidate {
-            model_id: model_id.clone(),
             profile_id: "cpu-x64".to_string(),
             backend: ComputeBackend::Cpu,
             artifact_id: dll_artifact_id.clone(),
