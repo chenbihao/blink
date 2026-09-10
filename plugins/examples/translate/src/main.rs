@@ -348,7 +348,7 @@ fn handle_query<W: Write>(
     let engine = settings
         .get("default_engine")
         .and_then(Value::as_str)
-        .unwrap_or("youdao")
+        .unwrap_or("ali")
         .to_string();
     let target_lang = settings
         .get("target_lang")
@@ -525,9 +525,9 @@ fn handle_tool_call<W: Write>(
 fn parse_fallback_order(settings: &Value) -> Vec<String> {
     let default = || {
         vec![
-            "tencent".into(),
             "ali".into(),
             "baidu".into(),
+            "tencent".into(),
             "youdao".into(),
             "deepl".into(),
         ]
@@ -624,10 +624,10 @@ fn try_translate_batch<W: Write>(
 ///
 /// 1. 引擎支持原生批量 → `build_batch_request`(API 原生保序,无 tag 风险)
 /// 2. 引擎不支持原生 + tag 未被破坏 → tag 拼接单次请求
-/// 3. tag 已被破坏(`tag_poisoned=true`)→ 单行并发兜底(N 次 translate)
+/// 3. tag 已被破坏(`tag_poisoned=true`)→ 交给 core 做单行顺序兜底(N 次 translate)
 ///
 /// 设计动机:tag 拼接在不同引擎间不可靠(一家破坏,换一家大概率也破坏),
-/// 一旦失败立即切单行并发,避免在 tag 上反复浪费请求。
+/// 一旦失败立即切单行兜底,避免在 tag 上反复浪费请求。
 fn dispatch_batch_by_engine<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
@@ -680,7 +680,7 @@ fn dispatch_batch_by_engine<W: Write>(
     dispatch_single_line_fallback(writer, pending, ctx);
 }
 
-/// tag 彻底失败后的单行并发兜底。
+/// tag 彻底失败后的单行兜底。
 /// 把 N 行 originals 拆成 N 个独立的 translate tool 调用,通过 RawResult 返回保序数组。
 /// 这条路径**不依赖任何 tag**,对所有引擎都可靠(代价是 N 次 API 往返)。
 fn dispatch_single_line_fallback<W: Write>(
@@ -697,7 +697,7 @@ fn dispatch_single_line_fallback<W: Write>(
         ctx.engine_id,
         originals.len()
     );
-    // 单行并发在 core 端的 translate_lines command 已实装(每行 spawn 一个 task)。
+    // 单行顺序兜底在 core 端的 translate_lines command 实装，避免触发供应商 QPS 限制。
     // 插件层这里直接返回 BATCH_TAG_POISONED 错误,让 core 触发它的单行降级路径。
     // 0.14.3: tool-call 走轨道 A，返回 RawResult（纯 data + error）
     let resp = PluginToCore::RawResult(RawToolResult {
@@ -1206,7 +1206,7 @@ mod tests {
     fn fallback_order_default() {
         let settings = serde_json::json!({});
         let order = parse_fallback_order(&settings);
-        assert_eq!(order, vec!["tencent", "ali", "baidu", "youdao", "deepl"]);
+        assert_eq!(order, vec!["ali", "baidu", "tencent", "youdao", "deepl"]);
     }
 
     #[test]
@@ -1234,7 +1234,7 @@ mod tests {
     fn fallback_order_empty_array_uses_default() {
         let settings = serde_json::json!({"fallback_order": []});
         let order = parse_fallback_order(&settings);
-        assert_eq!(order, vec!["tencent", "ali", "baidu", "youdao", "deepl"]);
+        assert_eq!(order, vec!["ali", "baidu", "tencent", "youdao", "deepl"]);
     }
 
     // ── engine_display_name ──────────────────────────────────────────────────

@@ -2461,11 +2461,19 @@ pub fn show_voice_overlay(app: &AppHandle) {
                 // 复用时重置尺寸为默认值（上次可能被 autoResize 撑高）
                 let _ = win.set_size(tauri::LogicalSize::new(VOICE_W, VOICE_H));
                 let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
-                if let Ok(hwnd) = win.hwnd() {
-                    apply_no_activate(HWND(hwnd.0 as _));
+                let hwnd = win.hwnd().ok().map(|hwnd| HWND(hwnd.0 as _));
+                if let Some(hwnd) = hwnd {
+                    apply_no_activate(hwnd);
                 }
                 win.show()
                     .map_err(|error| format!("显示 voice-overlay 失败: {error}"))?;
+                // hidden WebView2 复用后，Tauri 的 always_on_top 标记不一定会
+                // 重新把 HWND 提到 topmost 带顶部。任务栏本身也是 topmost，
+                // 所以必须在 show 之后用 Win32 重申，同时保留 NOACTIVATE。
+                if let Some(hwnd) = hwnd {
+                    force_topmost(hwnd);
+                }
+                clamp_to_work_area(&win);
                 Ok(())
             });
             match ready {

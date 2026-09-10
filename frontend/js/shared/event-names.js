@@ -25,8 +25,10 @@ export const EVENTS = Object.freeze({
 
     // ── Chord ──
     CHORD_FILL_QUERY: 'blink://chord-fill-query',
-    /** Chord 触发后要求前端进入独占模式。payload: { mode: "clipboard" }。 */
+    /** Chord 触发后要求前端进入独占模式。payload: { mode: "clipboard", preserveQuery?: boolean }。 */
     CHORD_ENTER_MODE: 'blink://chord-enter-mode',
+    /** 跟随 Chord 的全局快捷键在主窗可见时命中。payload: { actionId, key }。 */
+    CHORD_FOLLOW_TRIGGERED: 'blink://chord-follow-triggered',
     /** 0.22.12：chord 全局快捷键注册状态。payload: [{ actionId, followChord, modifiers, key, registered, reason? }]。 */
     GLOBAL_HOTKEY_STATUS: 'blink://global-hotkey-status',
 

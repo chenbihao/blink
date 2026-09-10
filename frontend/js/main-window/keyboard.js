@@ -3,6 +3,8 @@
 //! Alt 状态由后端事件驱动，不再轮询。chord 触发门禁用 `inputState.isAltDown() || e.altKey`。
 
 import {getAwarenessText, hideWindow, triggerChord} from "../shared/api.js";
+import {listen} from "../shared/tauri.js";
+import {EVENTS} from "../shared/event-names.js";
 import {activateItem} from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
@@ -13,6 +15,7 @@ import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
 import {aiQueryEl, appEl, queryEl} from "./dom.js";
+import {isClipboardModeSwitch} from "./chord-availability.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
@@ -22,6 +25,7 @@ export function init() {
     document.addEventListener("keydown", onNavigation);
     document.addEventListener("keydown", onEscape);
     document.addEventListener("keydown", onBlockModifiers, true);
+    listen(EVENTS.CHORD_FOLLOW_TRIGGERED, onFollowChordTriggered);
     // 滚轮翻页：向上滚 = PageUp，向下滚 = PageDown（整页翻，用鼠标就不用手移到方向键了）
     // 监听 appEl 而非 resultsEl：window-size.js 的 maxHeight 机制会让窗口在末页
     // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
@@ -195,10 +199,8 @@ function onBlockModifiers(e) {
 // 时序自洽（§6.2）：Alt+Q 的 Q 是 hook 状态机的「异键」→ aborted → Alt keyup 判 hold
 // → 不发 Tap → 不 toggle hide；前端 preventDefault 保 Q 不进输入框。
 //
-// **门禁**（§6.4 修正）：Chord 只在「用户还没开始交互」时触发——
-//   query 为空 **且** 结果列表为空。任一非空说明用户已在打字/浏览结果，
-//   此时 Alt+字母应正常进搜索框，别被 Chord 吞掉。
-//   典型场景：用户输入"剪贴板"后按 Alt+C 想输入 C——不该触发 Chord，字母正常入框。
+// **门禁**：普通入口只在空 query 下触发；上下文动作与模式切换可声明
+// `available_with_query`，例如 Alt+C 把当前 query 直接带入剪贴板历史过滤。
 
 // 触发后端 trigger_chord（Alt+A 截图 / Alt+C 剪贴板等 tap 语义动作）。
 // 注意：Alt+Space 语音输入（hold 语义）不走此路径——由 native hotkey hold 状态机直接处理。
@@ -206,7 +208,8 @@ function onBlockModifiers(e) {
 // E/S 键做 contextual 解析——active item 文本 payload > 非空 query > Awareness 选区 > 空白。
 // 用 `inputState.isAltDown() || e.altKey` 代替纯 `e.altKey`，
 // 后端快照抵抗 WebView synthetic keyup，事件自带 altKey 覆盖状态事件尚未到达的即时边沿。
-async function fireChord(key) {
+async function fireChord(action, keyOverride = null) {
+    const key = String(keyOverride ?? action.key).toLowerCase();
     console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
     let inputText = queryEl.value;
     let originRef = null;
@@ -214,13 +217,41 @@ async function fireChord(key) {
     // E 需要 contextual 解析（active item 文本 > query > selection > 空白）
     // S 直接取输入框文本——用户显式输入的内容带过去，但不读 SelectionCache。
     //   空输入框时 Alt+S 创建空白便签。
-    if (key === "e") {
+    if (action.id === "edit") {
         const ctx = await resolveContextualContent();
         inputText = ctx.text;
         originRef = ctx.hitId;
     }
 
     triggerChord(key, inputText, originRef).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+}
+
+/**
+ * 在主窗上下文内执行 tap action。
+ * 剪贴板是主窗内部模式切换，必须原地进入；若再调用后端 open_clipboard_mode，
+ * window invoke 会发 SHOWN 并先清空 query，导致过滤词丢失。
+ */
+function activateChordAction(action, keyOverride = null) {
+    if (isClipboardModeSwitch(action)) {
+        clipboardMode.enter({preserveQuery: true});
+        return;
+    }
+    fireChord(action, keyOverride);
+}
+
+/** RegisterHotKey 在主窗可见时的兜底：复用前端上下文解析，不直接走无入参后端路径。 */
+function onFollowChordTriggered(event) {
+    const {actionId, key} = event.payload ?? {};
+    const action = chord.getTapActionById(actionId);
+    if (!action || typeof key !== "string") return;
+
+    // 与 WebView keydown 路径保持同一模式门禁。
+    if (clipboardMode.isActive() || cmdMode.isActive()) return;
+    if (aiMode.isActive()) {
+        if (action.id === "chat") aiMode.promoteToChat();
+        return;
+    }
+    activateChordAction(action, key);
 }
 
 /**
@@ -277,22 +308,23 @@ function onChordTrigger(e) {
     if (!(inputState.isAltDown() || e.altKey)) return;
     if (e.isComposing || e.keyCode === 229) return; // IME 组字放行
     const key = e.key.toLowerCase();
-    // 用动态 tap 键集合（从 chord 配置派生）
-    if (!chord.getTapKeys().has(key)) return;
+    // 用动态 tap action（从 chord 配置 + 当前 query availability 派生）
+    const action = chord.getTapActionByKey(key);
+    if (!action) return;
 
     // 0.20.8: 独占模式内抑制 chord 触发——chord 待命提示已隐藏（input-state.js projectUi），
     // 触发也应一致屏蔽；Alt+字母放行给模式自身快捷键（剪贴板 Alt+E/Alt+D）。
     // 不 preventDefault/stopPropagation，键事件继续冒泡给 clipboardMode.handleKeydown。
     if (clipboardMode.isActive() || cmdMode.isActive()) return;
     // AI 模式仅保留 Alt+Q 提升对话（模式内设计交互），其余键抑制
-    if (aiMode.isActive() && key !== "q") return;
+    if (aiMode.isActive() && action.id !== "chat") return;
 
     e.preventDefault(); // 不进输入框
     e.stopPropagation();
     // AiMode 下 Alt+Q 触发临时对话提升，不走常规 chord 路径
-    if (aiMode.isActive() && key === "q") {
+    if (aiMode.isActive() && action.id === "chat") {
         aiMode.promoteToChat();
         return;
     }
-    fireChord(key);
+    activateChordAction(action);
 }

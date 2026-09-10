@@ -145,6 +145,12 @@ impl Service for WindowService {
 /// 热键服务:注册全局热键 + 启动事件循环(tap → toggle 窗口显隐)。
 pub struct HotkeyService;
 
+/// 全局 Chord 动作是否应交回已显示的主窗处理。
+/// 跟随键需要前端上下文；剪贴板模式切换还必须避免二次 invoke 清空 query。
+fn should_delegate_global_chord(main_visible: bool, follow_chord: bool, action_id: &str) -> bool {
+    main_visible && (follow_chord || action_id == "clipboard_history")
+}
+
 #[async_trait::async_trait]
 impl Service for HotkeyService {
     fn name(&self) -> &'static str {
@@ -277,6 +283,7 @@ impl Service for HotkeyService {
                     crate::infra::platform::hotkey::InputEffect::GlobalHotkeyTriggered {
                         action_id,
                         follow_chord,
+                        key,
                     } => {
                         // 0.22.12：chord 全局快捷键（RegisterHotKey 路径，主窗隐藏也可触发）
                         let Some(registry) =
@@ -298,10 +305,28 @@ impl Service for HotkeyService {
                             tracing::debug!("AI 未启用，跳过 chat 全局快捷键");
                             continue;
                         }
-                        // 门禁 3：跟随触发键模式在主窗可见时让位——该组合键此刻由
-                        // chord 吞键机制拥有，全局路径不重复触发
-                        if follow_chord && crate::infra::platform::window::is_visible() {
-                            tracing::debug!(%action_id, "主窗可见，跟随键让位给 chord 机制");
+                        // 门禁 3：需要主窗上下文的全局动作在主窗可见时交回前端 Chord 路径。
+                        // 正常情况下 LL hook 已吞键，不会产生 WM_HOTKEY；若仍收到，说明
+                        // native exclusive 未覆盖该边沿。前端保有 query/item/mode 上下文，
+                        // 由它复用 trigger_chord 才不会形成“可见窗口黑洞”或丢失输入。
+                        // clipboard_history 即使是 Custom 全局键也必须交回前端原地切模式；
+                        // 若后端再次 invoke 主窗，SHOWN 生命周期会先清空当前 query。
+                        if should_delegate_global_chord(
+                            crate::infra::platform::window::is_visible(),
+                            follow_chord,
+                            &action_id,
+                        ) {
+                            if let Err(error) = app.emit(
+                                crate::domain::event_names::EventNames::CHORD_FOLLOW_TRIGGERED,
+                                serde_json::json!({
+                                    "actionId": &action_id,
+                                    "key": &key,
+                                }),
+                            ) {
+                                tracing::warn!(%action_id, %error, "全局 Chord 动作交回主窗失败");
+                            } else {
+                                tracing::debug!(%action_id, %key, "全局 Chord 动作已交回主窗上下文路径");
+                            }
                             continue;
                         }
                         let env_arc = app
@@ -519,4 +544,25 @@ pub fn all_services() -> Vec<Box<dyn Service>> {
         Box::new(ClipboardService),
         Box::new(StickyRecoveryService),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_delegate_global_chord;
+
+    #[test]
+    fn visible_follow_chord_is_delegated_to_frontend() {
+        assert!(should_delegate_global_chord(true, true, "chat"));
+        assert!(!should_delegate_global_chord(false, true, "chat"));
+    }
+
+    #[test]
+    fn visible_clipboard_custom_hotkey_is_also_delegated() {
+        assert!(should_delegate_global_chord(
+            true,
+            false,
+            "clipboard_history"
+        ));
+        assert!(!should_delegate_global_chord(true, false, "screenshot"));
+    }
 }

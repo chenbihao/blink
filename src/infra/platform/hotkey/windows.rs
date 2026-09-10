@@ -1023,10 +1023,11 @@ unsafe extern "system" fn wnd_proc(
             // 0.22.12：chord 全局快捷键（RegisterHotKey）。
             // wparam = hotkey id，lparam = (modifiers, vk)（此处不需要）。
             // 同线程消息循环 → 直接发 effect（无锁 channel send，符合热路径铁则）。
-            if let Some((action_id, follow_chord)) = global::lookup_hotkey_target(wparam.0) {
+            if let Some((action_id, follow_chord, key)) = global::lookup_hotkey_target(wparam.0) {
                 send_effect(InputEffect::GlobalHotkeyTriggered {
                     action_id,
                     follow_chord,
+                    key,
                 });
             }
             LRESULT(0)

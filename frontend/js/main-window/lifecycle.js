@@ -122,9 +122,9 @@ export function init() {
 // 0.19.14：改用 search.fillQuery 跳过 40ms 防抖（程序化输入无需合并）。
 // 0.19.15：改为 CHORD_ENTER_MODE，前端进入剪贴板独占模式，bypass SearchService pipeline。
     listen(EVENTS.CHORD_ENTER_MODE, (event) => {
-        const {mode} = event.payload ?? {};
+        const {mode, preserveQuery = false} = event.payload ?? {};
         if (mode === "clipboard") {
-            clipboardMode.enter();
+            clipboardMode.enter({preserveQuery});
         }
     });
 

@@ -5,9 +5,9 @@
 //! 消息循环。挂点：`hook_thread_main`（初始）、`process_control_message`
 //! 的 `ConfigChanged` 应用后（重注册）、`destroy_window`（注销）。
 //!
-//! **与 hook 吞键的互斥**：LL hook 先于系统热键派发，主窗可见且 chord 可触发时
-//! 吞键路径先命中（`WM_HOTKEY` 不产生）；注册层无需感知 chord 会话。
-//! 「跟随触发键」模式的主窗让位规则由 app 层（HotkeyService）执行。
+//! **与 hook 吞键的关系**：主窗可见且 chord 可触发时通常由 LL hook 吞键，
+//! `WM_HOTKEY` 不产生；若系统仍派发 `WM_HOTKEY`，app 层会把跟随模式事件交回
+//! 主窗复用 Chord 上下文路径，作为不丢键兜底。
 //!
 //! **注册即冲突探测**：`ERROR_HOTKEY_ALREADY_REGISTERED` → 状态 `occupied`。
 //! 只能探测同样走系统注册的软件；Snipaste 等LL hook 实现探测不到（尽力而为）。
@@ -34,6 +34,7 @@ struct RegisteredEntry {
     hotkey_id: i32,
     action_id: String,
     follow_chord: bool,
+    key: String,
 }
 
 thread_local! {
@@ -60,12 +61,12 @@ pub fn global_hotkey_statuses() -> Vec<GlobalHotkeyStatus> {
 }
 
 /// 按 hotkey id 反查触发目标（wnd_proc 的 WM_HOTKEY 分支调用，hook 线程）。
-pub fn lookup_hotkey_target(hotkey_id: usize) -> Option<(String, bool)> {
+pub fn lookup_hotkey_target(hotkey_id: usize) -> Option<(String, bool, String)> {
     REGISTERED.with(|cell| {
         cell.borrow()
             .iter()
             .find(|e| e.hotkey_id as usize == hotkey_id)
-            .map(|e| (e.action_id.clone(), e.follow_chord))
+            .map(|e| (e.action_id.clone(), e.follow_chord, e.key.clone()))
     })
 }
 
@@ -103,6 +104,7 @@ pub fn apply_global_hotkeys(desired: &[ResolvedGlobalHotkey]) {
                         hotkey_id,
                         action_id: entry.action_id.clone(),
                         follow_chord: entry.follow_chord,
+                        key: entry.key.clone(),
                     });
                     statuses.push(GlobalHotkeyStatus {
                         action_id: entry.action_id.clone(),

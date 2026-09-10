@@ -1508,7 +1508,7 @@ pub async fn translate_text(
 /// 0.11.10-g:批量翻译多行文本。
 ///
 /// 首选一次调用插件 `translate_batch` tool，由插件加 tag 后单次请求翻译引擎并保序拆回。
-/// 插件版本不匹配、tag 被引擎破坏或结构化结果异常时，降级为并发单行 `translate_text`，
+/// 插件版本不匹配、tag 被引擎破坏或结构化结果异常时，降级为顺序单行 `translate_text`，
 /// 保证截图翻译功能不因批量优化失败而不可用。
 ///
 /// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
@@ -1525,23 +1525,48 @@ pub async fn translate_lines(
     tracing::debug!(count = n, ?target_lang, "translate_lines: 批量翻译开始");
     let started = std::time::Instant::now();
 
-    // 空行不送插件，保留原索引；插件契约只接收非空文本。
-    let non_empty: Vec<(usize, String)> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, text)| !text.trim().is_empty())
-        .map(|(idx, text)| (idx, text.clone()))
-        .collect();
-    if non_empty.is_empty() {
+    // OCR 常混入页码、符号和一两个字母的碎片；这些内容翻译价值低，还会浪费额度。
+    // 同文案只请求一次，再扇出到原索引，避免重复 OCR 行放大请求量。
+    let mut unique_texts = Vec::new();
+    let mut positions: Vec<Vec<usize>> = Vec::new();
+    let mut unique_by_text: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut skipped = 0usize;
+    for (idx, text) in lines.iter().enumerate() {
+        let trimmed = text.trim();
+        if !is_batch_translation_candidate(trimmed) {
+            skipped += 1;
+            continue;
+        }
+        if let Some(unique_idx) = unique_by_text.get(trimmed).copied() {
+            positions[unique_idx].push(idx);
+        } else {
+            let unique_idx = unique_texts.len();
+            unique_by_text.insert(trimmed.to_string(), unique_idx);
+            unique_texts.push(trimmed.to_string());
+            positions.push(vec![idx]);
+        }
+    }
+    if unique_texts.is_empty() {
+        tracing::debug!(
+            count = n,
+            skipped,
+            "translate_lines: 无有效文本，跳过翻译请求"
+        );
         return Ok(lines);
     }
+    tracing::debug!(
+        count = n,
+        unique_count = unique_texts.len(),
+        skipped,
+        "translate_lines: 已过滤碎片并合并重复文本"
+    );
 
     const TRANSLATE_BATCH_CAPABILITY_ID: &str = "builtin_translate_translate_batch";
     let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     if registry.get(TRANSLATE_BATCH_CAPABILITY_ID).is_some() {
-        let texts: Vec<String> = non_empty.iter().map(|(_, text)| text.clone()).collect();
         let mut args = serde_json::Map::new();
-        args.insert("texts".into(), serde_json::json!(texts));
+        args.insert("texts".into(), serde_json::json!(unique_texts));
         if let Some(lang) = target_lang
             .as_ref()
             .map(|s| s.trim())
@@ -1575,11 +1600,15 @@ pub async fn translate_lines(
             .await
         {
             Ok(result) => {
-                if let Some(batch_results) = parse_translate_batch_payload(&result, non_empty.len())
+                if let Some(batch_results) =
+                    parse_translate_batch_payload(&result, unique_texts.len())
                 {
                     let mut results = lines.clone();
-                    for ((idx, _), translated) in non_empty.iter().zip(batch_results) {
-                        results[*idx] = translated;
+                    for (translated, source_positions) in batch_results.into_iter().zip(&positions)
+                    {
+                        for idx in source_positions {
+                            results[*idx] = translated.clone();
+                        }
                     }
                     tracing::info!(
                         count = n,
@@ -1588,44 +1617,34 @@ pub async fn translate_lines(
                     );
                     return Ok(results);
                 }
-                tracing::warn!("translate_lines: 批量 tool 返回结构异常，降级为单行并发");
+                tracing::warn!("translate_lines: 批量 tool 返回结构异常，降级为单行顺序调用");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "translate_lines: 批量 tool 失败，降级为单行并发");
+                tracing::warn!(error = %e, "translate_lines: 批量 tool 失败，降级为单行顺序调用");
             }
         }
     } else {
-        tracing::warn!("translate_lines: translate_batch 未注册，降级为单行并发");
-    }
-
-    let mut handles = Vec::with_capacity(non_empty.len());
-    for (idx, text) in non_empty {
-        let app_clone = app.clone();
-        let tl = target_lang.clone();
-        let src_for_fallback = text.clone();
-        handles.push(tokio::spawn(async move {
-            let result = translate_text(app_clone, text, tl).await;
-            match result {
-                Ok(dst) => (idx, dst),
-                Err(e) => {
-                    tracing::warn!(line = idx, error = %e, "translate_lines: 单行翻译失败，降级到原文");
-                    (idx, src_for_fallback)
-                }
-            }
-        }));
+        tracing::warn!("translate_lines: translate_batch 未注册，降级为单行顺序调用");
     }
 
     let mut results = lines;
-    for handle in handles {
-        match handle.await {
-            Ok((idx, dst)) => results[idx] = dst,
-            Err(e) => tracing::warn!(error = %e, "translate_lines: 任务 join 失败"),
+    for (unique_idx, text) in unique_texts.into_iter().enumerate() {
+        let translated = match translate_text(app.clone(), text.clone(), target_lang.clone()).await
+        {
+            Ok(dst) => dst,
+            Err(e) => {
+                tracing::warn!(line = positions[unique_idx][0], error = %e, "translate_lines: 单行翻译失败，降级到原文");
+                text
+            }
+        };
+        for idx in &positions[unique_idx] {
+            results[*idx] = translated.clone();
         }
     }
     tracing::info!(
         count = n,
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "translate_lines 完成（单行并发降级）"
+        "translate_lines 完成（单行顺序降级）"
     );
     Ok(results)
 }
@@ -2310,7 +2329,28 @@ mod hwnd_validation_tests {
     }
 }
 
-/// 从 translate_batch 的首项 payload 读取保序结果。
+/// 判断 OCR 批量翻译中的一行是否值得送入远端引擎。
+///
+/// 空白、纯数字/符号、单个字符、1~2 个 ASCII 字母组成的孤立 token 通常是 OCR 噪声。
+/// 这只作用于截图批量链路；用户显式调用单文本翻译仍可翻译 `I` / `go` 等短词。
+fn is_batch_translation_candidate(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let alphabetic: Vec<char> = trimmed.chars().filter(|c| c.is_alphabetic()).collect();
+    if alphabetic.len() < 2 {
+        return false;
+    }
+    !(alphabetic.len() <= 2
+        && alphabetic.iter().all(char::is_ascii_alphabetic)
+        && trimmed.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+/// 从 translate_batch 的规范化 Items 读取保序结果。
+///
+/// 当前 projection 会把插件返回的字符串数组规范化为 N 个 ItemResult；同时兼容旧版
+/// `{results: [...]}` 单项 payload，避免插件/core 版本交错升级时误触发逐行降级。
 fn parse_translate_batch_payload(
     result: &crate::domain::capability::CapabilityResult,
     expected: usize,
@@ -2318,14 +2358,78 @@ fn parse_translate_batch_payload(
     let crate::domain::capability::CapabilityResult::Items { items } = result else {
         return None;
     };
-    let results = items.first()?.data.get("results")?.as_array()?;
-    if results.len() != expected {
+    if items.len() == expected {
+        let direct: Option<Vec<String>> = items
+            .iter()
+            .map(|item| item.data.as_str().map(str::to_string))
+            .collect();
+        if direct.is_some() {
+            return direct;
+        }
+    }
+    let legacy = items.first()?.data.get("results")?.as_array()?;
+    if legacy.len() != expected {
         return None;
     }
-    results
+    legacy
         .iter()
         .map(|value| value.as_str().map(str::to_string))
         .collect()
+}
+
+#[cfg(test)]
+mod translate_batch_tests {
+    use super::*;
+    use crate::domain::capability::{CapabilityResult, ItemResult};
+    use serde_json::json;
+
+    fn item(data: serde_json::Value) -> ItemResult {
+        ItemResult {
+            data,
+            desc: None,
+            actions: vec![],
+        }
+    }
+
+    #[test]
+    fn fragment_filter_rejects_ocr_noise_but_keeps_words() {
+        for noise in ["", " ", "0", "88", "@", "g", "yK", "凶"] {
+            assert!(!is_batch_translation_candidate(noise), "应过滤: {noise:?}");
+        }
+        for text in ["config", "Changes", "你好", "hello world", "版本2"] {
+            assert!(is_batch_translation_candidate(text), "应保留: {text:?}");
+        }
+    }
+
+    #[test]
+    fn parses_normalized_string_items() {
+        let result = CapabilityResult::Items {
+            items: vec![item(json!("更改")), item(json!("配置"))],
+        };
+        assert_eq!(
+            parse_translate_batch_payload(&result, 2),
+            Some(vec!["更改".into(), "配置".into()])
+        );
+    }
+
+    #[test]
+    fn parses_legacy_results_payload() {
+        let result = CapabilityResult::Items {
+            items: vec![item(json!({"results": ["更改", "配置"]}))],
+        };
+        assert_eq!(
+            parse_translate_batch_payload(&result, 2),
+            Some(vec!["更改".into(), "配置".into()])
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_batch_length() {
+        let result = CapabilityResult::Items {
+            items: vec![item(json!("仅一项"))],
+        };
+        assert!(parse_translate_batch_payload(&result, 2).is_none());
+    }
 }
 
 // ── 0.22.4 PaddleOCR 管理命令 ──────────────────────────────────────────────

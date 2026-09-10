@@ -591,6 +591,14 @@ pub trait ChordAction: Send + Sync {
     fn requires_input(&self) -> bool {
         false
     }
+    /// 当前 query 非空时是否仍可触发。
+    ///
+    /// 默认与 `requires_input` 一致：需要输入参数的上下文动作可在非空 query 下触发；
+    /// 普通入口只在空 query 下触发。模式切换动作可单独覆盖此属性，而不必把 query
+    /// 错误地声明为 Capability 入参。
+    fn available_with_query(&self) -> bool {
+        self.requires_input()
+    }
     /// 空文本时是否在提示条隐藏此动作（0.16.11）。
     fn hint_hidden_when_empty(&self) -> bool {
         false
@@ -710,6 +718,9 @@ impl ChordAction for ClipboardHistoryAction {
     }
     fn default_key(&self) -> char {
         'c'
+    }
+    fn available_with_query(&self) -> bool {
+        true
     }
     fn label(&self) -> &crate::domain::plugin::LocalizableText {
         &self.label
@@ -862,6 +873,7 @@ impl ChordRegistry {
                     "label": a.label().resolve(language),
                     "surface": a.surface().as_str(),
                     "requires_input": a.requires_input(),
+                    "available_with_query": a.available_with_query(),
                     "hint_hidden_when_empty": a.hint_hidden_when_empty(),
                 })
             })
@@ -1244,7 +1256,20 @@ mod tests {
         let edit = listed.iter().find(|item| item["id"] == "edit").unwrap();
         assert_eq!(edit["key"], "e");
         assert_eq!(edit["requires_input"], true);
+        assert_eq!(edit["available_with_query"], true);
         assert_eq!(edit["label"], "编辑窗口");
+    }
+
+    #[test]
+    fn clipboard_action_is_available_with_query_without_capability_input() {
+        let registry = build_default_registry();
+        let listed = registry.list(&[], &ChordBindings::default(), "zh");
+        let clipboard = listed
+            .iter()
+            .find(|item| item["id"] == "clipboard_history")
+            .unwrap();
+        assert_eq!(clipboard["requires_input"], false);
+        assert_eq!(clipboard["available_with_query"], true);
     }
 
     #[test]

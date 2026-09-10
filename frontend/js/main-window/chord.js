@@ -25,6 +25,11 @@
 import {invoke} from "../shared/tauri.js";
 import {listChordActions} from "../shared/api.js";
 import {queryEl} from "./dom.js";
+import {
+    findTapActionById,
+    findTapActionByKey,
+    isAvailableWithQuery,
+} from "./chord-availability.js";
 
 let chordActions = [];
 let ghostChordEl = null;
@@ -56,15 +61,28 @@ export function isEnabled() {
 /**
  * 当前 Chord 动作列表（statusbar 降级渲染用）。
  *
- * 0.16.2：输入框有文本时只返回 requires_input=true 的动作（chord 副行只显示
- * 这些）；无文本时返回全部（overlay 显示全部 chord 提示）。
+ * 输入框有文本时只返回 `available_with_query=true` 的动作；无文本时返回全部。
+ * 该字段通常与 requires_input 一致，但剪贴板属于“以 query 过滤的模式切换”，
+ * query 由前端模式消费，不是 Capability 入参。
  */
 export function getActions() {
     if (!chordEnabled || !hintVisible) return [];
     const hasText = !!queryEl.value.trim();
     return hasText
-        ? chordActions.filter((a) => a.requires_input)
+        ? chordActions.filter(isAvailableWithQuery)
         : chordActions;
+}
+
+/** 按动作 id 取当前可触发的 tap action（全局跟随键回落路径使用）。 */
+export function getTapActionById(actionId) {
+    if (!chordEnabled) return null;
+    return findTapActionById(chordActions, actionId, !!queryEl.value.trim());
+}
+
+/** 按生效键取当前可触发的 tap action（WebView keydown 兜底路径使用）。 */
+export function getTapActionByKey(key) {
+    if (!chordEnabled) return null;
+    return findTapActionByKey(chordActions, key, !!queryEl.value.trim());
 }
 
 /**
@@ -76,9 +94,8 @@ export function getActions() {
  *
  * 键已 toLowerCase，与 `e.key.toLowerCase()` 直接比对。
  *
- * 0.16.2：输入框有文本时只返回 requires_input=true 的键（如 chat 的 Q）；
- * 无文本时返回全部 tap 键。这样非空 query 时 Alt+A（screenshot）不会触发，
- * Alt+Q（chat）仍可触发并把文本带入对话窗口。
+ * 非空 query 时保留 available_with_query=true 的键（如 chat、clipboard）；
+ * 截图等普通入口仍只在空 query 下触发。
  */
 export function getTapKeys() {
     const set = new Set();
@@ -86,7 +103,7 @@ export function getTapKeys() {
     const hasText = !!queryEl.value.trim();
     for (const a of chordActions) {
         if (a.semantic !== "tap") continue;
-        if (hasText && !a.requires_input) continue;
+        if (hasText && !isAvailableWithQuery(a)) continue;
         set.add(String(a.key).toLowerCase());
     }
     return set;

@@ -30,6 +30,7 @@
 - ⚠️ **依赖系统资源的测试要可跳过**：用 `Path::exists` 守卫，缺失则跳过（不依赖 CI 桌面环境）
 - ✅ **验证产物正确性**：例如断言 PNG 魔数，而不只是 `!is_empty()`
 - 🚫 **单测绝不修改真实系统状态**：Credential Manager / 注册表 / 用户文件系统等共享系统资源，单测必须用 mock store 或 `Path::exists` 守卫，**禁止直接打真实 CM**。0.17.11 教训——`cargo test` 的 `enumerate_and_delete_all_blink_secrets` 曾直接清空用户真实密钥，改用 `keyring` mock store 后才根治。secret 相关单测优先 `#[ignore]` + 独立 store，绝不依赖"开发者机器上没数据"这种假设
+- ⚠️ **DeadCode 清理以双构建通过为验收**：删 `#[allow(dead_code)]` / 模块 re-export 前，必须 `cargo check --bin blink --no-default-features`（对齐 `cargo tauri dev` 配置）+ `cargo test --bin blink` **双双通过**才算清理完成。IDE 死代码检查对 bin crate 的 `pub use` re-export 常误判为"未使用"——re-export 是模块公共 API，删除前先 grep 全仓引用。0.22.18 教训——按 IDE 提示清理 `capability` 模块根 5 个仍被引用的 re-export，dev 与 test 双双编译失败
 
 ```bash
 cargo test --bin blink   # 跑单测（bin crate，无 lib target）

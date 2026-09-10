@@ -131,10 +131,12 @@ export function reset() {
 
 /**
  * 进入剪贴板模式。
- * 清空输入框 + 切换 placeholder + 显示徽章 + 立即拉取最近剪贴板历史。
+ * 可选择保留当前输入作为剪贴板过滤词；否则显示最近历史。
+ * @param {{preserveQuery?: boolean}} options
  */
-export function enter() {
+export function enter({preserveQuery = false} = {}) {
     if (active) return;
+    const initialQuery = preserveQuery ? queryEl.value : "";
     active = true;
     // 0.20.2: 进入剪贴板模式时递增 epoch，清空旧选择
     selection.onEnterMode();
@@ -147,8 +149,8 @@ export function enter() {
     savedPlaceholder = queryEl.placeholder;
     queryEl.placeholder = t("clipboard.mode_placeholder");
 
-    // 清空输入框
-    queryEl.value = "";
+    // 模式切换可把普通搜索词直接转换为剪贴板过滤词
+    queryEl.value = initialQuery;
     queryEl.focus();
 
     // 显示徽章
@@ -163,8 +165,8 @@ export function enter() {
     // 标记 body——CSS 据此隐藏 chord 提示（独占模式下不显示 Alt+字母 待命列表）
     document.body.classList.add("clipboard-mode-active");
 
-    // 立即拉取最近剪贴板历史（空 query）
-    doSearch("");
+    // 空 query 显示最近历史；非空 query 直接过滤剪贴板历史
+    doSearch(initialQuery.trim());
 
     syncWindowSize();
 }

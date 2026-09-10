@@ -31,9 +31,13 @@ impl EventNames {
 
     // ── Chord ──
     pub const CHORD_FILL_QUERY: &str = "blink://chord-fill-query";
-    /// Chord 触发后要求前端进入独占模式。payload: `{ mode: "clipboard" }`。
+    /// Chord 触发后要求前端进入独占模式。
+    /// payload: `{ mode: "clipboard", preserveQuery?: boolean }`。
     /// 前端据此切换模式状态机，不走 search pipeline。
     pub const CHORD_ENTER_MODE: &str = "blink://chord-enter-mode";
+    /// 跟随 Chord 的 RegisterHotKey 在主窗可见时命中。payload:
+    /// `{ actionId, key }`。主窗据此复用前端 Chord 上下文解析，避免丢失 query/item。
+    pub const CHORD_FOLLOW_TRIGGERED: &str = "blink://chord-follow-triggered";
     /// 0.22.12：chord 全局快捷键注册状态（重注册完成后去重广播）。
     /// payload: `[{ actionId, followChord, modifiers, key, registered, reason? }]`。
     /// `reason`: `occupied`（被其他程序占用）/ `invalid`（组合键不受支持）/ `error`。

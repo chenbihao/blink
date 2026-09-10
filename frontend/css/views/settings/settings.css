@@ -1639,17 +1639,28 @@ details.plugin-group .plugin-group-body {
 }
 
 .sortable-item.dragging {
-    opacity: var(--opacity-dim);
+    opacity: 0.35;
     background: var(--accent-bg);
     border-color: var(--accent);
+    border-style: dashed;
 }
 
-.sortable-item.drag-over {
+.sortable-list.is-dragging .sortable-item:not(.dragging) {
+    transition: transform var(--transition-base), background var(--transition-base), border-color var(--transition-base);
+}
+
+.sortable-drag-preview {
+    position: fixed;
+    pointer-events: none;
+    z-index: 99999;
+    opacity: 0.9;
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-bg);
+    box-shadow: var(--shadow-modal);
+    cursor: grabbing;
 }
 
 .sortable-handle {
+    display: inline-flex;
     color: var(--text-faint);
     font-size: var(--text-lg);
     line-height: var(--leading-none);

@@ -218,8 +218,8 @@ function renderSortableList(key, items, optionsMap) {
     const listId = `sortable-${key}`;
     const itemsHtml = items.map((val) => {
         const label = optionsMap[val] || val;
-        return `<div class="sortable-item" data-value="${escapeAttr(val)}" draggable="true">
-      <span class="sortable-handle">⠿</span>
+        return `<div class="sortable-item" data-value="${escapeAttr(val)}">
+      <span class="sortable-handle" aria-hidden="true">⠿</span>
       <span class="sortable-label">${escapeHtml(label)}</span>
     </div>`;
     }).join("");
@@ -233,137 +233,91 @@ function renderSortableList(key, items, optionsMap) {
 }
 
 /**
- * 初始化可拖动列表事件（事件委托，同时支持 HTML5 drag 和鼠标 fallback；_bound 守卫只绑一次）
+ * 初始化可拖动列表事件。
+ *
+ * WebView2 的原生 HTML5 drag 在无边框窗口中不稳定，因此统一走鼠标拖拽：
+ * 整行均可抓取，越过相邻项中线时立即重排 DOM，直接展示最终落点预览。
  */
 function initSortableLists() {
     if (initSortableLists._bound) return;
     initSortableLists._bound = true;
 
-    let _dragItem = null;
-
-    document.addEventListener("dragstart", (e) => {
-        const item = e.target.closest(".sortable-item");
-        if (!item) return;
-        _dragItem = item;
-        item.classList.add("dragging");
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", item.dataset.value);
-    });
-
-    document.addEventListener("dragend", (e) => {
-        const item = e.target.closest(".sortable-item");
-        if (!item) return;
-        item.classList.remove("dragging");
-        document.querySelectorAll(".sortable-item.drag-over").forEach((i) => i.classList.remove("drag-over"));
-        const list = item.closest(".sortable-list");
-        if (list) updateSortableValue(list);
-        _dragItem = null;
-    });
-
-    document.addEventListener("dragover", (e) => {
-        const item = e.target.closest(".sortable-item");
-        if (!item || !_dragItem || item === _dragItem) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        item.classList.add("drag-over");
-    });
-
-    document.addEventListener("dragleave", (e) => {
-        const item = e.target.closest(".sortable-item");
-        if (item) item.classList.remove("drag-over");
-    });
-
-    document.addEventListener("drop", (e) => {
-        const item = e.target.closest(".sortable-item");
-        if (!item || !_dragItem || item === _dragItem) return;
-        e.preventDefault();
-        item.classList.remove("drag-over");
-        const list = item.closest(".sortable-list");
-        if (!list) return;
-        const allItems = [...list.querySelectorAll(".sortable-item")];
-        const dragIdx = allItems.indexOf(_dragItem);
-        const dropIdx = allItems.indexOf(item);
-        if (dragIdx < dropIdx) item.after(_dragItem);
-        else item.before(_dragItem);
-    });
-
-    // 鼠标 fallback（WebView2 drag API 有时不触发）
     let _mouseDrag = null;
     let _mouseClone = null;
+    let _mouseStartX = 0;
     let _mouseStartY = 0;
+    let _pointerOffsetY = 0;
+    let _dragActive = false;
+
+    function startDragPreview(item) {
+        const rect = item.getBoundingClientRect();
+        _dragActive = true;
+        item.classList.add("dragging");
+        item.closest(".sortable-list")?.classList.add("is-dragging");
+
+        _mouseClone = item.cloneNode(true);
+        _mouseClone.classList.remove("dragging");
+        _mouseClone.classList.add("sortable-drag-preview");
+        _mouseClone.style.width = rect.width + "px";
+        _mouseClone.style.left = rect.left + "px";
+        _mouseClone.style.top = rect.top + "px";
+        document.body.appendChild(_mouseClone);
+    }
+
+    function previewDropPosition(list, clientY) {
+        const siblings = [...list.querySelectorAll(".sortable-item:not(.dragging)")];
+        const before = siblings.find((item) => {
+            const rect = item.getBoundingClientRect();
+            return clientY < rect.top + rect.height / 2;
+        });
+        if (before) list.insertBefore(_mouseDrag, before);
+        else list.appendChild(_mouseDrag);
+    }
 
     document.addEventListener("mousedown", (e) => {
-        const handle = e.target.closest(".sortable-handle");
-        if (!handle) return;
-        const item = handle.closest(".sortable-item");
+        if (e.button !== 0 || e.target.closest("button, input, select, textarea, a")) return;
+        const item = e.target.closest(".sortable-item");
         if (!item) return;
         e.preventDefault();
 
         _mouseDrag = item;
+        _mouseStartX = e.clientX;
         _mouseStartY = e.clientY;
-        item.classList.add("dragging");
-
-        _mouseClone = item.cloneNode(true);
-        _mouseClone.style.position = "fixed";
-        _mouseClone.style.pointerEvents = "none";
-        _mouseClone.style.zIndex = "99999";
-        _mouseClone.style.width = item.offsetWidth + "px";
-        _mouseClone.style.opacity = "0.8";
-        _mouseClone.style.boxShadow = "0 4px 12px rgba(0,0,0,0.3)";
         const rect = item.getBoundingClientRect();
-        _mouseClone.style.left = rect.left + "px";
-        _mouseClone.style.top = rect.top + "px";
-        document.body.appendChild(_mouseClone);
+        _pointerOffsetY = e.clientY - rect.top;
     });
 
     document.addEventListener("mousemove", (e) => {
-        if (!_mouseDrag || !_mouseClone) return;
+        if (!_mouseDrag) return;
+        if (!_dragActive) {
+            const moved = Math.hypot(e.clientX - _mouseStartX, e.clientY - _mouseStartY);
+            if (moved < 4) return;
+            startDragPreview(_mouseDrag);
+        }
         e.preventDefault();
-        const rect = _mouseDrag.getBoundingClientRect();
-        _mouseClone.style.top = (rect.top + (e.clientY - _mouseStartY)) + "px";
+        _mouseClone.style.top = (e.clientY - _pointerOffsetY) + "px";
 
         const list = _mouseDrag.closest(".sortable-list");
         if (!list) return;
-        const items = [...list.querySelectorAll(".sortable-item")];
-        items.forEach((i) => i.classList.remove("drag-over"));
-        for (const item of items) {
-            if (item === _mouseDrag) continue;
-            const r = item.getBoundingClientRect();
-            if (e.clientY >= r.top && e.clientY <= r.bottom) {
-                item.classList.add("drag-over");
-                break;
-            }
-        }
+        previewDropPosition(list, e.clientY);
     });
 
     document.addEventListener("mouseup", (e) => {
         if (!_mouseDrag) return;
         const list = _mouseDrag.closest(".sortable-list");
 
-        if (list) {
-            const items = [...list.querySelectorAll(".sortable-item")];
-            for (const item of items) {
-                if (item === _mouseDrag) continue;
-                const r = item.getBoundingClientRect();
-                if (e.clientY >= r.top && e.clientY <= r.bottom) {
-                    const allItems = [...list.querySelectorAll(".sortable-item")];
-                    const dragIdx = allItems.indexOf(_mouseDrag);
-                    const dropIdx = allItems.indexOf(item);
-                    if (dragIdx < dropIdx) item.after(_mouseDrag);
-                    else item.before(_mouseDrag);
-                    break;
-                }
-            }
-            items.forEach((i) => i.classList.remove("drag-over"));
+        if (list && _dragActive) {
             updateSortableValue(list);
         }
 
         _mouseDrag.classList.remove("dragging");
+        list?.classList.remove("is-dragging");
         if (_mouseClone) {
             _mouseClone.remove();
             _mouseClone = null;
         }
         _mouseDrag = null;
+        _dragActive = false;
     });
 }
 

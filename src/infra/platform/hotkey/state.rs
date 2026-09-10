@@ -1050,8 +1050,10 @@ pub enum InputEffect {
     /// chord 全局快捷键被按下（0.22.12，`WM_HOTKEY` → wnd_proc 直发，不经 reducer）。
     GlobalHotkeyTriggered {
         action_id: String,
-        /// 跟随触发键模式（服务层据此执行「主窗可见时让位」）。
+        /// 跟随触发键模式（主窗可见时交回前端 Chord 上下文路径）。
         follow_chord: bool,
+        /// 注册时解析出的主键；跟随模式交回前端时用于触发同一 Chord binding。
+        key: String,
     },
     /// 全局快捷键注册状态批量更新（注册/重注册完成后，去重广播）。
     GlobalHotkeysChanged(Vec<GlobalHotkeyStatus>),

@@ -106,13 +106,13 @@
       "type": "enum",
       "title": { "zh": "默认翻译引擎", "en": "Default engine" },
       "options": [
-        { "value": "tencent", "label": { "zh": "腾讯翻译", "en": "Tencent" } },
         { "value": "ali", "label": { "zh": "阿里翻译", "en": "Alibaba" } },
         { "value": "baidu", "label": { "zh": "百度翻译", "en": "Baidu" } },
+        { "value": "tencent", "label": { "zh": "腾讯翻译", "en": "Tencent" } },
         { "value": "youdao", "label": { "zh": "有道智云", "en": "Youdao" } },
         { "value": "deepl", "label": "DeepL" }
       ],
-      "default": "tencent"
+      "default": "ali"
     },
     {
       "key": "fallback_order",
@@ -126,23 +126,7 @@
         { "value": "youdao", "label": { "zh": "有道智云", "en": "Youdao" } },
         { "value": "deepl", "label": "DeepL" }
       ],
-      "default": ["tencent", "ali", "baidu", "youdao", "deepl"]
-    },
-    {
-      "key": "tencent_secret_id",
-      "type": "string",
-      "title": "SecretId",
-      "group": {
-        "title": "腾讯云机器翻译",
-        "description": "申请地址（每月免费额度）: https://cloud.tencent.com/product/tmt"
-      }
-    },
-    {
-      "key": "tencent_secret_key",
-      "type": "string",
-      "title": "SecretKey",
-      "group": "腾讯云机器翻译",
-      "secret": true
+      "default": ["ali", "baidu", "tencent", "youdao", "deepl"]
     },
     {
       "key": "ali_access_key_id",
@@ -174,6 +158,22 @@
       "type": "string",
       "title": "密钥 (APP Key)",
       "group": "百度翻译",
+      "secret": true
+    },
+    {
+      "key": "tencent_secret_id",
+      "type": "string",
+      "title": "SecretId",
+      "group": {
+        "title": "腾讯云机器翻译",
+        "description": "申请地址: https://cloud.tencent.com/product/tmt"
+      }
+    },
+    {
+      "key": "tencent_secret_key",
+      "type": "string",
+      "title": "SecretKey",
+      "group": "腾讯云机器翻译",
       "secret": true
     },
     {
