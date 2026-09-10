@@ -110,11 +110,6 @@ impl EnergyHistory {
         v
     }
 
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        self.count
-    }
-
     fn clear(&mut self) {
         self.head = 0;
         self.count = 0;
@@ -187,7 +182,6 @@ impl EnergyVad {
     ///
     /// 参数：
     /// - `sample_rate`：音频采样率（通常 16000）
-    #[allow(dead_code)]
     pub fn new(sample_rate: u32) -> Self {
         Self {
             silence_threshold: 0.005,
@@ -381,13 +375,12 @@ impl EnergyVad {
     }
 
     /// 是否正在说话（有声阶段）。
-    #[allow(dead_code)]
     pub fn is_speaking(&self) -> bool {
         self.speaking
     }
 
     /// 当前句子的样本数（用于最小句子长度判断）。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn sentence_samples(&self) -> usize {
         self.sentence_samples
     }
@@ -399,12 +392,6 @@ impl EnergyVad {
     pub fn current_off_threshold(&self) -> f64 {
         let (_, off) = self.compute_thresholds();
         off
-    }
-
-    /// 0.22.15：当前 `noise_floor`——供裁剪等逻辑消费。
-    #[allow(dead_code)]
-    pub fn current_noise_floor(&self) -> f64 {
-        self.noise_floor
     }
 
     /// 完全重置状态（新录音会话）。

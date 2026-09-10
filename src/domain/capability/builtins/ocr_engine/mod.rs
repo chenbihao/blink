@@ -22,20 +22,24 @@
 //! **0.22 收尾**：从单文件 `ocr_engine.rs` 拆为子模块，按职责分离类型、布局、后端与测试。
 
 pub mod backend;
-pub mod fake;
+#[cfg(test)]
+mod fake;
 pub mod layout;
-pub mod types;
-
 #[cfg(test)]
 mod tests;
+pub mod types;
 
 // ── 公共 re-export（保持旧路径 `ocr_engine::*` 可用） ──────────────────────
-
-pub use backend::{OcrBackend, WindowsOcrBackendAdapter, backend, install_backend};
+#[allow(unused_imports)]
+pub use backend::{backend, OcrBackend, WindowsOcrBackendAdapter};
+#[cfg(test)] // ocr_image 测试经旧路径 `ocr_engine::install_backend` 注入 fake
+pub use backend::install_backend;
+#[cfg(test)] // ocr_image 测试经旧路径 `ocr_engine::FakeOcrBackend` 构造 fake
 pub use fake::FakeOcrBackend;
 #[allow(unused_imports)]
 pub use layout::{
-    LayoutDiagnostics, group_words_into_lines, group_words_into_lines_with_diag, join_words_smart,
-    rebuild_with_line_grouping, rebuild_with_line_grouping_and_diag,
+    group_words_into_lines_with_diag, rebuild_with_line_grouping, rebuild_with_line_grouping_and_diag,
+    LayoutDiagnostics,
 };
 pub use types::{OcrCharBox, OcrError, OcrLine, OcrRect, OcrResult, OcrWord};
+

@@ -14,7 +14,6 @@ use serde::Serialize;
 /// 能力调用错误——覆盖参数、状态、并发、权限、时限与内部失败。
 #[derive(Debug, Clone, Serialize, PartialEq, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum CapabilityError {
     /// 参数缺失/类型错（args 不符 schema）。
     #[error("参数错误: {detail}")]
@@ -101,7 +100,7 @@ impl CapabilityError {
     /// 调用方负责在 Cancelled 时不调此方法。
     ///
     /// **0.9.7 仅定义**，当前单轮流程走前端 `emit_ai_clear` 展示错误。
-    #[allow(dead_code)] // 0.10 multi-turn 消费
+    #[cfg(test)] // 0.10 multi-turn 消费
     pub fn to_rig_tool_result_text(
         &self,
     ) -> Option<rig_core::completion::message::ToolResultContent> {

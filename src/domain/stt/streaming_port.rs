@@ -19,10 +19,10 @@
 //! 内部通过 `tokio::sync::Mutex` 串行化所有引擎调用，确保同一时刻只有一个操作。
 //! `push_audio` 不阻塞调用方——音频采样在独立 task 中通过 channel 转发。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use super::{StreamingSttPort, SttEngine, SttError, SttEvent};
 
@@ -215,9 +215,6 @@ mod tests {
         fn reset(&self) {
             self.reset_count.fetch_add(1, Ordering::Relaxed);
         }
-        fn name(&self) -> &str {
-            "mock"
-        }
     }
 
     fn mock_engine(partial: &str, final_text: &str) -> Arc<MockEngine> {
@@ -356,9 +353,6 @@ mod tests {
                 Err(SttError::Engine("finalize 失败".to_string()))
             }
             fn reset(&self) {}
-            fn name(&self) -> &str {
-                "failing"
-            }
         }
 
         let adapter = GgufStreamingAdapter::new(Arc::new(FailingEngine));

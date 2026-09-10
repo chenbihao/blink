@@ -90,10 +90,6 @@ impl SttEngine for CloudSttEngine {
     fn reset(&self) {
         self.samples.lock().unwrap().clear();
     }
-
-    fn name(&self) -> &str {
-        "cloud-stt"
-    }
 }
 
 /// 解析后的云端 STT endpoint--`finalize` 与 `test_cloud_stt` 共用，

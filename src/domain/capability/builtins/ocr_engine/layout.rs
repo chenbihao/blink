@@ -167,7 +167,7 @@ fn is_word_in_line(word_rect: OcrRect, line_rects: &[OcrRect]) -> (bool, LineRej
 /// 输出 Vec<usize> 与输入等长，`output[i]` 是 `words[i]` 的新 line_index。
 ///
 /// 独立可测——下方 `tests` 模块覆盖全部约定场景。
-#[allow(dead_code)] // 0.22.7 测试便捷入口（_with_diag 的简化版），生产用 rebuild 路径
+#[cfg(test)]
 pub fn group_words_into_lines(words: &[OcrWord]) -> Vec<usize> {
     group_words_into_lines_with_diag(words).0
 }
@@ -681,7 +681,7 @@ fn join_lines_into_text(
 /// (SDK 只给 line 没给 word——不太可能但兜底)，退化为 line.text 用 `\n` join。
 ///
 /// 独立可测（下方 `tests` 模块覆盖）。
-#[allow(dead_code)] // 0.22.7 预留公共 API（domain::ocr 重导出），生产用 rebuild 路径
+#[cfg(test)]
 pub fn join_words_smart(words: &[OcrWord], lines: &[OcrLine]) -> String {
     // 兜底：words 为空 → 用 lines.text
     if words.is_empty() {

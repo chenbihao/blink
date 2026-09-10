@@ -111,7 +111,6 @@ pub struct OcrRect {
 
 impl OcrRect {
     /// 求两 rect 的包围盒。任一 zero-sized rect 视作缺席不参与。
-    #[allow(dead_code)] // 现只在 rect_union 里用
     pub(crate) fn is_zero(self) -> bool {
         self.w == 0 && self.h == 0
     }
@@ -144,7 +143,6 @@ impl OcrRect {
 
 /// OCR 引擎错误
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum OcrError {
     Engine(String),
     Decode(String),

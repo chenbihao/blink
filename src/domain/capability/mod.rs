@@ -41,7 +41,7 @@ pub use policy::{
     WindowActionResult,
 };
 #[allow(unused_imports)]
-pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, normalize};
+pub use projection::{normalize, ActionDef, ActionKindDef, ProjectionRule, ResultShape};
 #[allow(unused_imports)]
 pub use registry::{CapabilityRegistry, RegistryError};
 pub use result::{CapabilityResult, ItemAction, ItemResult, rig_tool_result_to_text};
@@ -95,7 +95,7 @@ pub trait Capability: Send + Sync {
     ///
     /// **0.21.0**：改为从 `policy().danger` 读取。兼容期保留此方法供
     /// `requires_ai_confirmation()` 和旧调用方使用。
-    #[allow(dead_code)] // 0.21 兼容期方法：从 policy().danger 投影
+    #[allow(dead_code)] // 0.21 兼容期方法：仅测试调用
     fn danger_class(&self) -> DangerClass {
         self.policy().danger
     }
@@ -192,7 +192,7 @@ impl<'a> InvokeContext<'a> {
 
     /// 当前运行时是否满足指定要求（0.21.0）。
     /// 供 Capability 实现方在 invoke 内做运行时自检（如果需要）。
-    #[allow(dead_code)] // 前瞻性 API：0.21.0 铺路，待 Capability 实现方消费
+    #[allow(dead_code)] // 前瞻性 API：0.21.0 铺垫，待 Capability 实现方消费
     pub fn runtime_satisfies(&self, req: RuntimeRequirement) -> bool {
         req.is_satisfied_by(self.runtime.as_requirement())
     }

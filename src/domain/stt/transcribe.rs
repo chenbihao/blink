@@ -134,7 +134,7 @@ impl AudioTranscriptionError {
     }
 
     /// 是否可重试。
-    #[allow(dead_code)] // 0.22.16: 保留稳定 API 供未来消费方使用
+    #[cfg(test)]
     pub fn retryable(&self) -> bool {
         match self {
             Self::UnsupportedAudioFormat { .. } => false,

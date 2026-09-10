@@ -59,10 +59,6 @@ impl SttEngine for MockSttEngine {
         *self.started_at.lock().unwrap() = Instant::now();
         tracing::debug!("MockSttEngine::reset");
     }
-
-    fn name(&self) -> &str {
-        "mock"
-    }
 }
 
 #[cfg(test)]

@@ -28,13 +28,11 @@ pub mod error;
 pub mod input_budget;
 pub mod router;
 
-// ── re-export 共享类型（定义仍在 ocr_engine.rs，避免大范围改名）──────────────
-// 这些 re-export 构成 domain 公共 API；bin crate 内部不直接引用，
-// 但设计意图是让未来外部消费者通过 `domain::ocr::` 路径访问类型。
+// ── re-export 共享类型（定义在 capability/builtins/ocr_engine/，避免大范围改名）──
+// 条目随 0.22.18 DeadCode 清理收敛到仍被引用的类型；新增类型按需追加。
 #[allow(unused_imports)]
 pub use crate::domain::capability::builtins::ocr_engine::{
-    FakeOcrBackend, OcrBackend, OcrLine, OcrRect, OcrResult, OcrWord, WindowsOcrBackendAdapter,
-    install_backend, join_words_smart,
+    OcrBackend, OcrLine, OcrRect, OcrResult, OcrWord,
 };
 
 // ── 领域层公共类型重导出 ────────────────────────────────────────────────────
@@ -42,8 +40,8 @@ pub use crate::domain::capability::builtins::ocr_engine::{
 pub use config::{ComputePreference, OcrBackendKind, OcrLifecycle, PaddleModel};
 #[allow(unused_imports)]
 pub use context::{
-    OcrRequestContext, OcrRequestGuard, OcrRequestOrigin, OcrRequestTracker, ScreenshotOrigin,
-    ocr_request_tracker,
+    ocr_request_tracker, OcrRequestContext, OcrRequestGuard, OcrRequestOrigin, OcrRequestTracker,
+    ScreenshotOrigin,
 };
 #[allow(unused_imports)]
 pub use error::{OcrErrorCategory, StructuredOcrError};

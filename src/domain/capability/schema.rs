@@ -8,7 +8,7 @@
 //! 三字段（name / description / parameters）保持扁平——所有构造点和字段访问零改动。
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::domain::schema::ToolSchema;
 
@@ -50,7 +50,7 @@ impl Default for CapabilitySchema {
 
 impl CapabilitySchema {
     /// 构造无参 schema（无参能力的 default）。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn empty(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -64,7 +64,7 @@ impl CapabilitySchema {
     ///
     /// **0.14.6 §3.1**：委托 `ToolSchema::to_rig_tool()`，不再自己实现。
     /// rig 触点全项目唯一在 `ToolSchema::to_rig_tool()`。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 被 build_agent_tools → to_dynamic_tool 间接消费，编译器分析不够精确
     pub fn to_rig_tool(&self) -> rig_core::completion::ToolDefinition {
         ToolSchema {
             name: self.name.clone(),

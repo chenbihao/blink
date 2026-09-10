@@ -45,17 +45,17 @@ mod singleflight;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::infra::local_engine::onnx_ocr::{OcrExecutor, OnnxOcrExecutor, RecognizeRequest};
 use bytes::Bytes;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
-use crate::domain::capability::builtins::ocr_engine::{OcrResult, backend as get_global_backend};
-use crate::domain::config::ocr_config::{OcrRuntimeSnapshot, get_ocr_config};
+use crate::domain::capability::builtins::ocr_engine::{backend as get_global_backend, OcrResult};
+use crate::domain::config::ocr_config::{get_ocr_config, OcrRuntimeSnapshot};
 use crate::domain::ocr::context::OcrRequestContext;
 use crate::domain::ocr::error::StructuredOcrError;
 use crate::domain::ocr::router::{OcrBackendRouter, OcrRouteDiagnosis, RouteResult};
@@ -102,7 +102,6 @@ pub struct OcrCoordinator {
     /// 启动时 deployment 可能不存在（返回 None），用户安装后
     /// 通过 `inject_executor()` 替换。
     executor: std::sync::RwLock<Option<Arc<OnnxOcrExecutor>>>,
-    #[allow(dead_code)]
     paddleocr_engine_id: EngineId,
     in_flight: Arc<AtomicU32>,
     lifecycle_tx: watch::Sender<LifecycleState>,

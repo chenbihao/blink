@@ -17,7 +17,9 @@
 //! 2. **Chat-Completion ASR**（Mimo 等）：
 //!    `POST /v1/chat/completions`，JSON body 中以 base64 data-URI 嵌入音频。
 
+#[cfg(test)]
 use std::io::Write;
+#[cfg(test)]
 use std::path::Path;
 
 // ── 正式 WAV decoder re-export（0.22.16）──────────────────────────────────
@@ -28,7 +30,7 @@ use std::path::Path;
 #[allow(unused_imports)]
 pub use crate::infra::platform::audio::format::{AudioDecodeError, SampleKind, SourceFormat};
 #[allow(unused_imports)]
-pub use crate::infra::platform::audio::wav::{DecodedWav, decode_wav, decode_wav_with_budget};
+pub use crate::infra::platform::audio::wav::{decode_wav, decode_wav_with_budget, DecodedWav};
 
 // ── WAV 编码 ─────────────────────────────────────────────────────────────
 
@@ -95,7 +97,7 @@ pub fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
 ///
 /// 与 [`pcm_to_wav`] 使用相同的编码逻辑，但直接写入文件而非返回字节。
 /// 供诊断命令写测试音频文件使用。
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn write_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     let data_len = samples.len() * 2; // 16-bit = 2 bytes/sample
     let file_size = 36 + data_len as u32;

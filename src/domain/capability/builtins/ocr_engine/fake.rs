@@ -9,7 +9,7 @@ use super::types::{OcrError, OcrLine, OcrResult, OcrWord};
 /// 0.11.9-b：支持配置 `words` 让 Capability 层测试 word 级链路。
 /// 0.17.5：支持配置 `available_langs` / `engine_lang` 测试诊断面板。
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // builder 方法仅在测试中消费
 pub struct FakeOcrBackend {
     text: String,
     lines: Vec<OcrLine>,
@@ -19,7 +19,7 @@ pub struct FakeOcrBackend {
     engine_lang: Option<String>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // builder 方法仅在测试中消费
 impl FakeOcrBackend {
     pub fn returning(text: impl Into<String>) -> Self {
         Self {

@@ -121,10 +121,6 @@ impl SttEngine for LocalSttEngine {
         self.samples.lock().unwrap().clear();
         tracing::debug!("LocalSttEngine::reset");
     }
-
-    fn name(&self) -> &str {
-        "local-funasr-gguf"
-    }
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────

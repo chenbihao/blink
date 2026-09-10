@@ -32,10 +32,11 @@ pub trait OcrBackend: Send + Sync {
 
 static BACKEND: OnceLock<RwLock<Arc<dyn OcrBackend>>> = OnceLock::new();
 
-/// 安装/替换 OCR backend（0.11.7-f）。
+/// 安装/替换 OCR backend（0.11.7-f）。测试专用——注入 `FakeOcrBackend` 用，
+/// 可重复调用替换。
 ///
-/// **调用时机**：`main.rs::setup` 里最早期。可重复调用替换 backend（测试用）。
-#[allow(dead_code)] // 测试通过 install_backend 注入 Fake
+/// 生产链路不调用：`backend()` 首次调用兜底安装 `WindowsOcrBackendAdapter`。
+#[cfg(test)]
 pub fn install_backend(backend: Arc<dyn OcrBackend>) {
     match BACKEND.get() {
         Some(lock) => {

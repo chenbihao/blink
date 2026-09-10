@@ -37,21 +37,6 @@ async fn install_backend_replaces_global() {
 // 不再从 words 自行拼接。测试改为走 rebuild_with_line_grouping
 // 来验证端到端的行内拼接 + 行间换行。
 
-#[cfg(test)]
-#[allow(dead_code)] // 0.22.7 遗留测试辅助；测试改走 rebuild_with_line_grouping 后保留供后续回归
-fn w(text: &str, line: usize) -> OcrWord {
-    OcrWord {
-        text: text.into(),
-        bounding_rect: OcrRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        },
-        line_index: line,
-    }
-}
-
 #[test]
 fn join_pure_cjk_no_spaces() {
     // "你好" "世界" 在同一行 → "你好世界"

@@ -22,8 +22,8 @@
 //! - hold 时主窗口 + chat 均不可见 → G2: 文字注入前台应用
 
 use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering}, Arc,
+    Mutex,
 };
 
 use tauri::{Emitter, Manager};
@@ -893,12 +893,6 @@ async fn consume_stt_events(
 
                 // Final 是 session 的最后一个事件，退出循环
                 break;
-            }
-            SttEvent::Busy { generation, reason } => {
-                if generation != expected_gen {
-                    continue;
-                }
-                tracing::debug!(%reason, "STT 引擎忙（背压）");
             }
             SttEvent::Error {
                 generation,

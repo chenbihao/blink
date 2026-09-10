@@ -164,7 +164,7 @@ pub fn jsonpath_query(data: &serde_json::Value, path: &str) -> Option<serde_json
 ///
 /// 当前规范化引擎用 `jsonpath_query`（取首个匹配）处理 items_pointer，
 /// 本函数保留供未来投影场景（如 `$[*]` 展平）和测试使用。
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn jsonpath_query_all(data: &serde_json::Value, path: &str) -> Vec<serde_json::Value> {
     use jsonpath_rust::JsonPath;
 

@@ -34,7 +34,6 @@
 
 /// STT 识别错误。
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum SttError {
     /// 引擎未初始化
     #[error("STT engine not initialized")]
@@ -42,9 +41,6 @@ pub enum SttError {
     /// 识别过程中出错
     #[error("STT engine error: {0}")]
     Engine(String),
-    /// 音频格式不匹配
-    #[error("audio format mismatch: {0}")]
-    FormatMismatch(String),
 }
 
 // ── SttTransport（0.22.7）─────────────────────────────────────────────────
@@ -133,10 +129,8 @@ pub struct SttEngineConnection {
     /// 实际监听端口。
     pub port: u16,
     /// engine id（日志/诊断用）。
-    #[allow(dead_code)]
     pub engine_id: String,
     /// instance id（每次启动随机生成，用于实例隔离）。
-    #[allow(dead_code)]
     pub instance_id: String,
     /// worker 传输通道（Some = GGUF 常驻 worker；None = 旧 HTTP server）。
     /// 存在时 host/port 退化为诊断字段，请求走 worker NDJSON 通道。
@@ -204,18 +198,6 @@ pub enum SttEvent {
         text: String,
     },
 
-    /// 引擎忙（队列满 / 推理积压）。
-    ///
-    /// 消费方可选择暂停音频推送或降低频率。
-    /// 不是致命错误——引擎仍在处理，只是来不及消化新音频。
-    #[allow(dead_code)] // Handoff 05: produced by ParaformerOnline worker, not yet wired
-    Busy {
-        /// 当前 generation。
-        generation: u64,
-        /// 人类可读的背压原因。
-        reason: String,
-    },
-
     /// 不可恢复的引擎错误。
     ///
     /// session 终止，消费方应停止音频推送并清理状态。
@@ -239,7 +221,7 @@ pub enum SttEvent {
 ///
 /// ```text
 /// begin_session() → generation=N
-///   ├─ push_audio(samples)  → 可产出 SttEvent::Partial / Busy
+///   ├─ push_audio(samples)  → 可产出 SttEvent::Partial
 ///   ├─ finish_session()     → 产出 SttEvent::Final（等所有在途结果）
 ///   ├─ cancel_session()     → 丢弃在途结果，不产出 Final
 ///   └─ reset()              → 幂等清理，回到 begin 前状态
@@ -257,7 +239,6 @@ pub enum SttEvent {
 /// - `cancel`/`reset` 幂等
 /// - 旧 generation 的迟到结果丢弃
 #[async_trait::async_trait]
-#[allow(dead_code)] // Handoff 05: implementations exist, production wiring pending gate
 pub trait StreamingSttPort: Send + Sync {
     /// 开始一个新的识别 session。
     ///
@@ -291,6 +272,10 @@ pub trait StreamingSttPort: Send + Sync {
     ///
     /// 清理内部缓冲和状态，回到 `begin_session` 前的干净状态。
     /// 可在任何时候调用，包括 session 进行中（等价于 cancel + 清理）。
+    ///
+    /// **当前仅被 streaming_port 测试调用**；生产路径使用 cancel_session。
+    /// 保留以支持未来 native 流式引擎的重置需求。
+    #[allow(dead_code)]
     async fn reset(&self) -> Result<(), SttError>;
 
     /// 是否支持 native partial（真流式）。
@@ -299,6 +284,10 @@ pub trait StreamingSttPort: Send + Sync {
     /// `false` = GGUF 伪流式 / 非流式引擎，partial 通过伪流式 VAD + 定时预览产生。
     ///
     /// VoiceService 据此决定是否开启实时预览。
+    ///
+    /// **当前仅被 streaming_port 测试调用**；VoiceService 暂未读取此标记。
+    /// 保留以支持未来 native 流式引擎切换实时预览策略。
+    #[allow(dead_code)]
     fn supports_native_partial(&self) -> bool;
 
     /// 获取事件 receiver。
@@ -325,10 +314,6 @@ pub trait SttEngine: Send + Sync {
 
     /// 重置引擎状态(新录音会话前调用)。
     fn reset(&self);
-
-    /// 引擎显示名称(日志/调试用)。
-    #[allow(dead_code)]
-    fn name(&self) -> &str;
 }
 // ── STT Engines ──────────────────────────────────────────────────────────
 

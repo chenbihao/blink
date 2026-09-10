@@ -905,10 +905,6 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.session_failed = false;
         tracing::debug!("伪流式引擎 reset");
     }
-
-    fn name(&self) -> &str {
-        "pseudo-streaming"
-    }
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
