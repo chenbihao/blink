@@ -130,9 +130,10 @@ pub async fn install_local_engine(
         .await
         .map_err(CommandError::from)?;
 
-    // 0.22.8: PaddleOCR 安装后注入 ONNX executor
+    // 0.22.11: 从闭合 implementation topology 派生路由（替代 engine_id 字符串比较）
     if end_state == EnvOperationEndState::Completed
-        && engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID
+        && crate::app::local_engine::implementation_registry::topology_for_engine(&eid)
+            == Some(crate::domain::local_engine::ExecutorTopology::InProcess)
         && let Some(coordinator) = app
             .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
             .map(|s| s.inner().clone())
@@ -179,8 +180,10 @@ pub async fn start_local_engine(
         .await
         .map_err(CommandError::from)?;
 
-    // 0.22.8: PaddleOCR ONNX in-process——不走 svc.start()（不 spawn 子进程）
-    if engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID {
+    // 0.22.11: 从 implementation topology 派生执行路径
+    if crate::app::local_engine::implementation_registry::topology_for_engine(&eid)
+        == Some(crate::domain::local_engine::ExecutorTopology::InProcess)
+    {
         svc.start_inprocess(&eid)
             .await
             .map_err(CommandError::from)?;
@@ -225,8 +228,10 @@ pub async fn stop_local_engine(
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
 
-    // 0.22.8: PaddleOCR ONNX in-process——走专用路径
-    if engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID {
+    // 0.22.11: 从 implementation topology 派生停止路径
+    if crate::app::local_engine::implementation_registry::topology_for_engine(&eid)
+        == Some(crate::domain::local_engine::ExecutorTopology::InProcess)
+    {
         // 通知 OcrCoordinator shutdown executor
         if let Some(coordinator) = app
             .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
@@ -293,9 +298,10 @@ pub async fn repair_local_engine(
 
     let (operation_id, end_state) = svc.repair(&eid).await.map_err(CommandError::from)?;
 
-    // 0.22.8: PaddleOCR 修复后注入 ONNX executor
+    // 0.22.11: 从 implementation topology 派生修复后注入路径
     if end_state == EnvOperationEndState::Completed
-        && engine_id == crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID
+        && crate::app::local_engine::implementation_registry::topology_for_engine(&eid)
+            == Some(crate::domain::local_engine::ExecutorTopology::InProcess)
         && let Some(coordinator) = app
             .try_state::<Arc<crate::app::local_engine::ocr_coordinator::OcrCoordinator>>()
             .map(|s| s.inner().clone())

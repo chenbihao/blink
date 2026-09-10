@@ -5,7 +5,7 @@
 
 import {applyTheme} from "../../shared/theme.js";
 import {applyI18n, setLang} from "../../i18n/index.js";
-import {saveConfig} from "../../shared/config-keys.js";
+import {saveConfig, buildChordTogglesPayload} from "../../shared/config-keys.js";
 import {getCurrentConfig} from "../shared/state.js";
 
 /**
@@ -226,13 +226,19 @@ function initChordToggles() {
         const chordEnabled = document.getElementById("chord-enabled")?.checked === true;
         const chordHintVisible = document.getElementById("chord-hint-visible")?.checked === true;
         try {
-            await saveConfig("chord_toggles", {chordEnabled, chordHintVisible});
+            await saveConfig("chord_toggles", buildChordTogglesPayload(chordEnabled, chordHintVisible));
             const currentConfig = getCurrentConfig();
             if (currentConfig) {
                 currentConfig.chord_enabled = chordEnabled;
                 currentConfig.chord_hint_visible = chordHintVisible;
             }
         } catch (err) {
+            // 回滚 checkbox 到最后一次后端已确认状态
+            const currentConfig = getCurrentConfig();
+            const ce = document.getElementById("chord-enabled");
+            const ch = document.getElementById("chord-hint-visible");
+            if (ce) ce.checked = currentConfig?.chord_enabled === true;
+            if (ch) ch.checked = currentConfig?.chord_hint_visible !== false;
             console.error("update_chord_toggles failed:", err);
         }
     }

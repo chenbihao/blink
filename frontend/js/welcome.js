@@ -10,10 +10,11 @@
  * 纯逻辑（步骤状态机/OCR 编排纯函数）在 ./welcome/wizard.js，本模块只做 DOM 与 invoke。
  */
 
-import {getCurrentWindow, invoke, listen} from "./shared/tauri.js";
+import {getCurrentWindow, invoke, listen, commandErrorText} from "./shared/tauri.js";
 import {applyI18nFromConfig, onLangChange, t} from "./i18n/index.js";
 import {renderCombo} from "./shared/kbd.js";
 import {EVENTS} from "./shared/event-names.js";
+import {buildChordTogglesPayload} from "./shared/config-keys.js";
 import {
     estimateEtaMs,
     etaTextKeyAndParams,
@@ -22,6 +23,7 @@ import {
     pushProgressSample,
 } from "./shared/download-progress.js";
 import {
+    activeOperationId,
     canGoBack,
     canGoNext,
     classifyInstallStage,
@@ -33,6 +35,7 @@ import {
     OCR_ENGINE_ID,
     pickEngineStatus,
     prevStep,
+    shouldAcceptInstallEvent,
 } from "./welcome/wizard.js";
 
 // ── 快捷键数据（第 1 步）──────────────────────────────────────────────────────
@@ -73,6 +76,17 @@ const TOGGLES = [
 let currentStep = 0;
 /** 第 2 步开关当前值（get_config 一次性读入，改动即时 set_config 生效）。 */
 let toggleValues = {auto_start: false, chord_enabled: true, chord_hint_visible: true};
+/** Chord toggles 保存的 revision token：防止快速连续切换时旧请求覆盖新状态。 */
+let chordToggleRevision = 0;
+/** Chord toggles 最后一次后端已确认的值（用于失败回滚）。 */
+let chordToggleConfirmed = {chord_enabled: false, chord_hint_visible: true};
+/** chord_toggles shard 写入串行化链（promise chain）。
+ *
+ *  chord_toggles 是结构体分片（chordEnabled + chordHintVisible），
+ *  并发 set_config 会导致 last-writer-wins 覆盖另一个字段的值。
+ *  通过 promise chain 串行化所有 chord_toggles 写入，确保每次写入
+ *  都基于最新的 toggleValues 构造 payload，不会丢失字段。 */
+let chordTogglesWriteChain = Promise.resolve();
 /** OCR 引导 UI 状态：idle | checking | not-installed | installing | ready | failed | unavailable。 */
 let ocrState = "idle";
 /** 最近一次 install-stage 的 stage wire 值（installing 态展示对应文案；渲染时翻译）。 */
@@ -81,6 +95,10 @@ let ocrStage = "";
 let ocrProgress = null;
 /** OCR 竞态防护代际：进入新检查/安装时自增，旧异步回调按代际失效。 */
 let ocrGeneration = 0;
+/** 当前安装操作的 operation_id（从后端状态真源获取，不允许首事件绑定）。
+ *  install_local_engine 的终态返回值仅作完成时兜底。
+ *  用于隔离不同安装操作的事件——旧操作的迟到事件不能覆盖新操作 UI。 */
+let ocrOperationId = null;
 
 // ── 第 1 步：快捷键渲染 ──────────────────────────────────────────────────────
 
@@ -219,24 +237,62 @@ function renderToggles() {
     }
 }
 
-/** 开关写入即生效（与设置页同一 set_config 通道）。 */
+/** 开关写入即生效（与设置页同一 set_config 通道）。
+ *
+ *  chord_toggles 写入通过 chordTogglesWriteChain 串行化，
+ *  确保并发切换不会导致后端覆盖（last-writer-wins 数据丢失）。 */
 async function applyToggle(id, enabled) {
+    const prevValue = toggleValues[id];
     toggleValues[id] = enabled;
     try {
         if (id === "auto_start") {
             await invoke("set_config", {key: "auto_start", value: enabled});
         } else if (id === "chord_enabled") {
-            // chord_toggles 是结构体分片：保留 chord_hint_visible 不被覆盖
-            await invoke("set_config", {
-                key: "chord_toggles",
-                value: {
-                    chord_enabled: enabled,
-                    chord_hint_visible: toggleValues.chord_hint_visible === true,
-                },
+            // chord_toggles 是结构体分片：通过串行化链写入，
+            // 每次都从最新 toggleValues 构造 payload，避免并发覆盖 chord_hint_visible
+            const rev = ++chordToggleRevision;
+            const payload = buildChordTogglesPayload(
+                toggleValues.chord_enabled === true,
+                toggleValues.chord_hint_visible === true,
+            );
+            await new Promise((resolve, reject) => {
+                chordTogglesWriteChain = chordTogglesWriteChain.then(async () => {
+                    try {
+                        await invoke("set_config", {key: "chord_toggles", value: payload});
+                        resolve();
+                    } catch (err) {
+                        reject(err);
+                    }
+                });
             });
+            // 串行写入一旦成功，payload 就是此刻真实的后端已确认状态。
+            // 即使 UI 已有更新 revision，也必须推进 confirmed 快照，供后一笔失败回滚。
+            chordToggleConfirmed = {
+                chord_enabled: payload.chordEnabled,
+                chord_hint_visible: payload.chordHintVisible,
+            };
+            // 旧请求的迟到响应不再更新 UI。
+            if (rev !== chordToggleRevision) return;
         }
     } catch (e) {
         console.error(`welcome: set_config ${id} failed:`, e);
+        // 回滚 checkbox 和内存中的 toggleValues
+        toggleValues[id] = prevValue;
+        if (id === "chord_enabled") {
+            chordToggleRevision++; // 使任何在途请求失效
+            toggleValues.chord_enabled = chordToggleConfirmed.chord_enabled;
+            toggleValues.chord_hint_visible = chordToggleConfirmed.chord_hint_visible;
+        }
+        renderToggles();
+        // 向用户显示可理解的错误
+        const msgEl = document.getElementById("welcome-error");
+        if (msgEl) {
+            msgEl.textContent = commandErrorText(e, t("welcome.step2.chord.save_failed"));
+            msgEl.classList.remove("hidden");
+            setTimeout(() => {
+                if (msgEl) msgEl.classList.add("hidden");
+            }, 4000);
+        }
     }
 }
 
@@ -328,6 +384,7 @@ function setOcrState(state) {
     if (state !== "installing") {
         ocrStage = "";
         ocrProgress = null;
+        ocrOperationId = null;
     }
     renderOcrStatus();
 }
@@ -345,7 +402,14 @@ async function checkOcr() {
         // 模型目录 list_engine_models 只注册了 FunASR，OCR 查询恒为空。
         const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
         if (gen !== ocrGeneration) return; // 旧代际结果丢弃
-        setOcrState(isOcrReady(pickEngineStatus(list, OCR_ENGINE_ID)) ? "ready" : "not-installed");
+        const status = pickEngineStatus(list, OCR_ENGINE_ID);
+        const activeOpId = activeOperationId(status);
+        if (activeOpId) {
+            ocrOperationId = activeOpId;
+            setOcrState("installing");
+        } else {
+            setOcrState(isOcrReady(status) ? "ready" : "not-installed");
+        }
     } catch (e) {
         console.error("welcome: get_local_engine_status failed:", e);
         if (gen !== ocrGeneration) return;
@@ -353,14 +417,60 @@ async function checkOcr() {
     }
 }
 
+const OCR_OPERATION_BIND_ATTEMPTS = 40;
+const OCR_OPERATION_BIND_INTERVAL_MS = 50;
+
+/**
+ * 安装命令本身直到终态才返回，因此安装进行中必须主动从状态真源取得
+ * operation_id。在绑定完成前事件监听器保持 fail-closed。
+ */
+async function bindOcrOperationFromStatus(gen) {
+    for (let attempt = 0; attempt < OCR_OPERATION_BIND_ATTEMPTS; attempt++) {
+        if (gen !== ocrGeneration || ocrState !== "installing" || ocrOperationId) {
+            return ocrOperationId;
+        }
+        try {
+            const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
+            if (gen !== ocrGeneration || ocrState !== "installing") return null;
+            const activeOpId = activeOperationId(pickEngineStatus(list, OCR_ENGINE_ID));
+            if (activeOpId) {
+                ocrOperationId = activeOpId;
+                return ocrOperationId;
+            }
+        } catch (error) {
+            // 安装命令的错误路径负责最终提示；这里继续短暂轮询以跨过 claim 竞态。
+            console.debug("welcome: operation_id 尚不可用", error);
+        }
+        await new Promise((resolve) => setTimeout(resolve, OCR_OPERATION_BIND_INTERVAL_MS));
+    }
+    return null;
+}
+
 async function installOcr() {
     const gen = ++ocrGeneration;
+    // 重置 operation_id：新安装操作的进度事件从此刻起绑定新 operation_id
+    ocrOperationId = null;
     setOcrState("installing");
     try {
         // PP-OCR 一键安装 = 引擎级安装：ORT DLL 与模型在同一安装事务内联合提交
         // （0.22 §3.9），没有独立模型安装步骤；幂等，已就绪时后端自动跳过。
-        await invoke("install_local_engine", {engineId: OCR_ENGINE_ID, computePreference: null});
+        //
+        // install_local_engine 是阻塞命令：会等到安装完成（或失败/取消）才返回。
+        // 返回值 EngineOperationFinishedDto 包含 operation_id。
+        // 安装期间，后端通过 install-stage / install-progress 事件推送进度。
+        const installPromise = invoke("install_local_engine", {
+            engineId: OCR_ENGINE_ID,
+            computePreference: null,
+        });
+        // 不等待阻塞安装命令结束；从状态真源尽早绑定当前 operation。
+        const bindPromise = bindOcrOperationFromStatus(gen);
+        const result = await installPromise;
         if (gen !== ocrGeneration) return;
+        // 从返回值绑定 operation_id（即使安装已完成，终态事件仍需校验）
+        if (result?.operation_id) {
+            ocrOperationId = result.operation_id;
+        }
+        await bindPromise;
         // 完成后复查状态定终态；未达 ready（异常场景）给失败态可重试
         const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
         if (gen !== ocrGeneration) return;
@@ -368,18 +478,39 @@ async function installOcr() {
     } catch (e) {
         console.error("welcome: OCR install failed:", e);
         if (gen !== ocrGeneration) return;
-        // already_running = 已有安装在进行（如设置页发起）→ 留在 installing，
-        // 由 install-stage 终态事件接管刷新；其余错误给失败态 + 重试
-        if (errorCodeOf(e) !== "already_running") setOcrState("failed");
+        // already_running = 已有安装在进行（如设置页发起）
+        // 从后端状态获取当前 operation_id，用于事件隔离
+        if (errorCodeOf(e) === "already_running") {
+            try {
+                const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
+                if (gen !== ocrGeneration) return;
+                const status = pickEngineStatus(list, OCR_ENGINE_ID);
+                ocrOperationId = activeOperationId(status);
+            } catch (queryErr) {
+                console.warn("welcome: query operation_id for already_running failed:", queryErr);
+            }
+            // 留在 installing，由 install-stage 终态事件接管刷新
+            return;
+        }
+        // 其余错误给失败态 + 重试
+        setOcrState("failed");
     }
 }
 
-/** 监听引擎安装进度事件：接管「外部发起的安装」的进度展示与终态刷新。 */
+/** 监听引擎安装进度事件：接管「外部发起的安装」的进度展示与终态刷新。
+ *
+ *  **operation_id 隔离铁则**：
+ *  - operation_id 从 get_local_engine_status 主动获取；命令终态返回值只作兜底，
+ *    不允许从首事件绑定（首事件可能来自旧操作的迟到推送）。
+ *  - 已绑定 operation_id 时，事件 operation_id 必须匹配才接受。
+ *  - 未绑定 operation_id 时拒绝事件，避免旧操作迟到推送污染当前 UI。 */
 function watchInstallEvents() {
     // 阶段事件：更新 installing 态的主文案（下载中/校验中/…）
     listen(EVENTS.LOCAL_ENGINE_INSTALL_STAGE, (ev) => {
         const p = ev?.payload;
         if (!p || p.engine_id !== OCR_ENGINE_ID) return;
+        if (ocrState !== "installing") return;
+        if (!shouldAcceptInstallEvent(ocrOperationId, p.operation_id).accept) return;
         const kind = classifyInstallStage(p.stage);
         if (kind === "active") {
             if (ocrState === "installing") {
@@ -390,6 +521,8 @@ function watchInstallEvents() {
         }
         // 终态：稍候重查（给安装命令收尾提交状态留出时间）；已就绪则不折腾
         if (ocrState === "ready") return;
+        // 终态事件到达时清理 operation 状态
+        ocrOperationId = null;
         setTimeout(() => {
             if (ocrState === "installing") checkOcr();
         }, 600);
@@ -400,6 +533,7 @@ function watchInstallEvents() {
         const p = ev?.payload;
         if (!p || p.engine_id !== OCR_ENGINE_ID) return;
         if (ocrState !== "installing") return;
+        if (!shouldAcceptInstallEvent(ocrOperationId, p.operation_id).accept) return;
         const downloaded = Number(p.downloaded);
         if (!Number.isFinite(downloaded) || downloaded < 0) return;
         const total = Number.isFinite(Number(p.total)) && p.total > 0 ? Number(p.total) : null;
@@ -431,7 +565,11 @@ async function init() {
         toggleValues = {
             auto_start: cfg.auto_start === true,
             chord_enabled: cfg.chord_enabled === true,
-            chord_hint_visible: cfg.chord_hint_visible === true,
+            chord_hint_visible: cfg.chord_hint_visible === false ? false : true,
+        };
+        chordToggleConfirmed = {
+            chord_enabled: toggleValues.chord_enabled,
+            chord_hint_visible: toggleValues.chord_hint_visible,
         };
     } catch (e) {
         console.error("welcome: get_config failed:", e);

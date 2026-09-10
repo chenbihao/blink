@@ -110,7 +110,7 @@ impl Capability for ListWindows {
                 let pid = crate::infra::platform::window::get_window_pid(hwnd_raw);
                 let is_blink = pid == current_pid;
 
-                // 注册 opaque window_ref
+                // 注册 opaque window_ref（CSPRNG 失败时结构化错误传播）
                 let window_ref = crate::infra::platform::window::register_window_ref(
                     w.hwnd,
                     pid,
@@ -118,7 +118,10 @@ impl Capability for ListWindows {
                     &w.title,
                     &w.process_name,
                     gen_val,
-                );
+                )
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("window_ref 注册失败: {e}"),
+                })?;
 
                 let data = json!({
                     "window_ref": window_ref,
@@ -136,13 +139,13 @@ impl Capability for ListWindows {
                 } else {
                     format!("{} ({})", w.title, w.process_name)
                 };
-                ItemResult {
+                Ok(ItemResult {
                     data,
                     desc: Some(desc),
                     actions: vec![], // 感知能力，无直接操作
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         tracing::debug!(
             count = results.len(),

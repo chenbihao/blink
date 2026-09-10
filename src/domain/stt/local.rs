@@ -61,15 +61,20 @@ impl LocalSttEngine {
     }
 
     /// 通过 worker transport 转录（channel 与模型就绪由实现承载）。
-    async fn transcribe_via_worker(&self, wav_bytes: &[u8]) -> Result<String, String> {
-        let conn = self
-            .connection
-            .as_ref()
-            .ok_or_else(|| "本地引擎无连接快照".to_string())?;
-        let transport = conn
-            .transport
-            .as_ref()
-            .ok_or_else(|| "本地引擎连接缺少 worker 通道".to_string())?;
+    async fn transcribe_via_worker(
+        &self,
+        wav_bytes: &[u8],
+    ) -> Result<String, crate::domain::stt::SttTransportError> {
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::domain::stt::SttTransportError::Unavailable {
+                detail: "本地引擎无连接快照".to_string(),
+            }
+        })?;
+        let transport = conn.transport.as_ref().ok_or_else(|| {
+            crate::domain::stt::SttTransportError::Unavailable {
+                detail: "本地引擎连接缺少 worker 通道".to_string(),
+            }
+        })?;
         transport.transcribe(wav_bytes).await
     }
 }
@@ -101,7 +106,7 @@ impl SttEngine for LocalSttEngine {
         let text = self
             .transcribe_via_worker(&wav_bytes)
             .await
-            .map_err(SttError::Engine)?;
+            .map_err(|e| SttError::Engine(e.to_string()))?;
 
         tracing::info!(
             text_len = text.chars().count(),
@@ -153,10 +158,13 @@ mod tests {
         struct NoopTransport;
         #[async_trait::async_trait]
         impl crate::domain::stt::SttTransport for NoopTransport {
-            async fn check_ready(&self) -> Result<(), String> {
+            async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
                 Ok(())
             }
-            async fn transcribe(&self, _wav: &[u8]) -> Result<String, String> {
+            async fn transcribe(
+                &self,
+                _wav: &[u8],
+            ) -> Result<String, crate::domain::stt::SttTransportError> {
                 Ok("mock".to_string())
             }
         }

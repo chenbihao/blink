@@ -14,16 +14,20 @@
 import assert from "node:assert/strict";
 import {
     STEP_COUNT,
+    activeOperationId,
     canGoBack,
     canGoNext,
     classifyInstallStage,
     clampStep,
     installStageTextKey,
+    isChordToggleRevisionValid,
     isLastStep,
     isOcrReady,
     nextStep,
     pickEngineStatus,
     prevStep,
+    rollbackChordToggles,
+    shouldAcceptInstallEvent,
 } from "./wizard.js";
 
 // ── 步骤状态机 ────────────────────────────────────────────────────────────────
@@ -70,6 +74,16 @@ assert.equal(pickEngineStatus(list, "paddleocr").status.environment, "ready");
 assert.equal(pickEngineStatus([], "paddleocr"), null);
 assert.equal(pickEngineStatus(undefined, "paddleocr"), null);
 
+assert.equal(activeOperationId({
+    status: {operation: {kind: "installing", stage: "downloading", operation_id: "op-1"}},
+}), "op-1");
+assert.equal(activeOperationId({
+    status: {operation: {kind: "installing", stage: "completed", operation_id: "op-old"}},
+}), null, "终态 operation 不得重新绑定");
+assert.equal(activeOperationId({
+    status: {operation: {kind: "idle", stage: "pending", operation_id: ""}},
+}), null);
+
 // ── install-stage 分类 ───────────────────────────────────────────────────────
 
 assert.equal(classifyInstallStage("downloading"), "active");
@@ -86,3 +100,113 @@ assert.equal(
 );
 
 console.log("welcome/wizard.test.mjs: all assertions passed");
+
+// ── Chord toggles 竞态防护 ─────────────────────────────────────────────────────
+
+assert.equal(isChordToggleRevisionValid(1, 1), true, "相同 revision 有效");
+assert.equal(isChordToggleRevisionValid(1, 2), false, "旧 revision 已过期");
+assert.equal(isChordToggleRevisionValid(2, 1), false, "新 revision 尚未提交");
+assert.equal(isChordToggleRevisionValid(0, 0), true, "初始 revision 有效");
+
+// ── Chord toggles 失败回滚 ─────────────────────────────────────────────────────
+
+assert.deepEqual(
+    rollbackChordToggles({chord_enabled: true, chord_hint_visible: false}),
+    {chord_enabled: true, chord_hint_visible: false},
+    "回滚到已确认值",
+);
+assert.deepEqual(
+    rollbackChordToggles({chord_enabled: false, chord_hint_visible: true}),
+    {chord_enabled: false, chord_hint_visible: true},
+    "回滚到已确认值（全 false→hint 默认 true）",
+);
+assert.deepEqual(
+    rollbackChordToggles(null),
+    {chord_enabled: false, chord_hint_visible: true},
+    "null 安全回滚到默认值",
+);
+assert.deepEqual(
+    rollbackChordToggles(undefined),
+    {chord_enabled: false, chord_hint_visible: true},
+    "undefined 安全回滚到默认值",
+);
+
+// ── 安装进度事件 operation_id 隔离 ─────────────────────────────────────────────
+
+// **铁则：operation_id 不从事件绑定**
+// operation_id 必须从后端命令返回值或 get_local_engine_status 获取。
+// shouldAcceptInstallEvent 只做校验，不做绑定。
+
+// 未绑定 + 事件有 operation_id：无法证明归属，拒绝
+{
+    const r = shouldAcceptInstallEvent(null, "op-1");
+    assert.equal(r.accept, false, "未绑定时必须 fail-closed");
+    assert.equal(r.newOpId, null, "不从事件绑定：newOpId 保持 null");
+}
+
+// 已绑定 + 匹配：接受
+{
+    const r = shouldAcceptInstallEvent("op-1", "op-1");
+    assert.equal(r.accept, true, "匹配：接受");
+    assert.equal(r.newOpId, "op-1", "匹配：newOpId 不变");
+}
+
+// 已绑定 + 不匹配：拒绝（旧操作迟到）
+{
+    const r = shouldAcceptInstallEvent("op-2", "op-1");
+    assert.equal(r.accept, false, "旧操作迟到：拒绝");
+    assert.equal(r.newOpId, "op-2", "旧操作迟到：newOpId 不变");
+}
+
+// 已绑定 + 事件无 operation_id：无法核对身份，拒绝
+{
+    const r = shouldAcceptInstallEvent("op-1", null);
+    assert.equal(r.accept, false, "事件无 operation_id：拒绝");
+    assert.equal(r.newOpId, "op-1", "事件无 operation_id：newOpId 不变");
+}
+
+// 双方无 operation_id：拒绝
+{
+    const r = shouldAcceptInstallEvent(null, undefined);
+    assert.equal(r.accept, false, "双方无 operation_id：拒绝");
+    assert.equal(r.newOpId, null, "双方无 operation_id：newOpId null");
+}
+
+// ── 并发/连续 operation 事件交错场景 ───────────────────────────────────────────
+
+// 模拟：操作 A (op-a) 进行中，操作 B (op-b) 发起，op-a 的迟到事件到达
+{
+    // 1. op-a 从后端获取（不从事件绑定）
+    let current = "op-a";
+
+    // 2. op-a 事件匹配
+    let r = shouldAcceptInstallEvent(current, "op-a");
+    assert.equal(r.accept, true);
+    current = r.newOpId;
+
+    // 3. 新操作 op-b 发起（installOcr 重置 currentOpId = null）
+    current = null;
+
+    // 4. op-b 事件到达（未绑定，拒绝且不绑定）
+    r = shouldAcceptInstallEvent(current, "op-b");
+    assert.equal(r.accept, false);
+    current = r.newOpId; // 仍为 null
+    assert.equal(current, null, "不从事件绑定");
+
+    // 5. 状态查询绑定 op-b 后，op-a 的迟到事件必须拒绝
+    current = "op-b";
+    r = shouldAcceptInstallEvent(current, "op-a");
+    assert.equal(r.accept, false, "op-a 迟到事件必须拒绝");
+    assert.equal(r.newOpId, "op-b", "current 保持 op-b");
+}
+
+// 模拟：操作 A 终态后清理；操作 B 在状态查询重新绑定前不接受事件
+{
+    let current = "op-a";
+    // 终态事件到达（终态处理清理 currentOpId）
+    current = null;
+    // 操作 B 事件（未绑定，拒绝）
+    const r = shouldAcceptInstallEvent(current, "op-b");
+    assert.equal(r.accept, false, "重新绑定前必须拒绝新操作事件");
+    assert.equal(r.newOpId, null, "不从事件绑定");
+}

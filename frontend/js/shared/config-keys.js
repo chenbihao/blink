@@ -36,3 +36,22 @@ import {invoke} from "./tauri.js";
 export async function saveConfig(key, value) {
     return invoke("set_config", {key, value});
 }
+
+/**
+ * 构造 chord_toggles 分片的 wire payload。
+ *
+ * 后端 `ChordTogglesUpdate` 使用 `#[serde(rename_all = "camelCase")]`，
+ * 因此 wire 字段名是 `chordEnabled` / `chordHintVisible`。
+ * 前端各入口（设置页 general.js、首启向导 welcome.js）统一调此 helper，
+ * 避免某一路径遗漏字段名契约。
+ *
+ * @param {boolean} chordEnabled
+ * @param {boolean} chordHintVisible
+ * @returns {{chordEnabled: boolean, chordHintVisible: boolean}}
+ */
+export function buildChordTogglesPayload(chordEnabled, chordHintVisible) {
+    return {
+        chordEnabled: chordEnabled === true,
+        chordHintVisible: chordHintVisible === true,
+    };
+}

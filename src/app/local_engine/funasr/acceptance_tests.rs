@@ -557,7 +557,6 @@ fn privacy_transcription_result_no_secrets() {
         duration_ms: 1000,
         engine_id: "funasr".into(),
         model_id: "sensevoice-small".into(),
-        engine_generation: 1,
         engine_instance_id: "inst-1".into(),
         source_format: "2ch 48000Hz 16-bit PCM".into(),
         normalized_format: "1ch 16000Hz mono".into(),

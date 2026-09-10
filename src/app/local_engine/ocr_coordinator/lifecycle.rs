@@ -38,7 +38,11 @@ impl OcrCoordinator {
                                 .send(LifecycleState::Stopping { generation })
                                 .ok();
                             tracing::info!("lifecycle=StopAfterUse，立即停止 ONNX executor");
-                            let executor = self.executor.read().unwrap().clone();
+                            let executor = self
+                                .executor
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
                             let lifecycle_tx = self.lifecycle_tx.clone();
                             let start_elapsed_ms = self.start_elapsed_ms.clone();
                             let engine_service =
@@ -58,7 +62,9 @@ impl OcrCoordinator {
                                     LifecycleState::Stopping { generation }
                                         if *generation == target_gen =>
                                     {
-                                        *start_elapsed_ms.lock().unwrap() = None;
+                                        *start_elapsed_ms
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner()) = None;
                                         lifecycle_tx
                                             .send(LifecycleState::Idle {
                                                 generation: target_gen + 1,
@@ -103,7 +109,11 @@ impl OcrCoordinator {
         };
 
         let in_flight = self.in_flight.clone();
-        let executor = self.executor.read().unwrap().clone();
+        let executor = self
+            .executor
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let idle_cancel = self.idle_cancel.clone();
         let lifecycle_tx = self.lifecycle_tx.clone();
         let start_elapsed_ms = self.start_elapsed_ms.clone();
@@ -148,7 +158,9 @@ impl OcrCoordinator {
                     let current = lifecycle_tx.borrow().clone();
                     match &current {
                         LifecycleState::Stopping { generation } if *generation == target_gen => {
-                            *start_elapsed_ms.lock().unwrap() = None;
+                            *start_elapsed_ms
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = None;
                             lifecycle_tx.send(LifecycleState::Idle { generation: target_gen + 1 }).ok();
                             tracing::debug!("start_state 已重置为 Idle（idle stop 后）");
                         }

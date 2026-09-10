@@ -172,7 +172,11 @@ impl OcrCoordinator {
             match &current {
                 LifecycleState::Ready { generation, .. } => {
                     if self.is_paddleocr_ready().await {
-                        let elapsed = self.start_elapsed_ms.lock().unwrap().unwrap_or(0);
+                        let elapsed = self
+                            .start_elapsed_ms
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .unwrap_or(0);
                         return Ok(elapsed);
                     } else {
                         tracing::debug!(generation, "Ready 但 executor 不 Ready，过时");
@@ -271,7 +275,7 @@ impl OcrCoordinator {
                         instance_token,
                     })
                     .ok();
-                *start_elapsed_ms.lock().unwrap() = Some(total_ms);
+                *start_elapsed_ms.lock().unwrap_or_else(|e| e.into_inner()) = Some(total_ms);
                 tracing::info!(
                     generation,
                     total_ms,
@@ -305,7 +309,7 @@ impl OcrCoordinator {
                 lifecycle_tx
                     .send(LifecycleState::Failed { generation, error })
                     .ok();
-                *start_elapsed_ms.lock().unwrap() = None;
+                *start_elapsed_ms.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 tracing::warn!(generation, "shared startup: 失败已提交");
                 true
             }
@@ -328,7 +332,11 @@ impl OcrCoordinator {
         // 0.22.9：'static spawn 不能捕获 &self——提前取 owned 的 manager 升级与引擎 id
         let engine_service = self.engine_service.get().and_then(|w| w.upgrade());
         let engine_id = self.paddleocr_engine_id.clone();
-        let executor = self.executor.read().unwrap().clone();
+        let executor = self
+            .executor
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let executor = match executor {
             Some(e) => e,
             // executor 未注入（用户未手动点「启动」）——0.22.9 起懒构建：
@@ -338,7 +346,8 @@ impl OcrCoordinator {
             None => match super::build_onnx_executor_from_deployment() {
                 Some(built) => {
                     tracing::info!("OCR 懒启动：executor 未注入，已从 active deployment 构建");
-                    *self.executor.write().unwrap() = Some(Arc::clone(&built));
+                    *self.executor.write().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Arc::clone(&built));
                     built
                 }
                 None => {

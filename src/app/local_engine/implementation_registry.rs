@@ -34,6 +34,26 @@ use super::funasr::descriptor::FUNASR_GGUF_ARTIFACT_ID;
 use super::funasr::gguf::{GGUF_NANO_ID, GGUF_PARAFORMER_ID, GGUF_SENSEVOICE_ID};
 use super::paddleocr::PADDLEOCR_ENGINE_ID;
 
+use crate::domain::local_engine::ExecutorTopology;
+
+/// 查询 engine 的执行拓扑（0.22.11）。
+///
+/// 从闭合 implementation registry 派生，替代 command 层的 engine_id 字符串比较。
+/// 返回该 engine 唯一 implementation 的 topology；
+/// 无 implementation 声明的 engine 返回 None。
+///
+/// 生产引擎只有一个 implementation（paddleocr = InProcess, funasr = ManagedWorker），
+/// 所以取第一个即可；多 implementation 的 engine 需要模型绑定解析，
+/// 不走此函数。
+pub fn topology_for_engine(engine_id: &EngineId) -> Option<ExecutorTopology> {
+    let registry = make_builtin_implementation_registry();
+    let impls = registry.implementations_for_engine(engine_id);
+    impls
+        .first()
+        .and_then(|id| registry.descriptor(*id))
+        .map(|d| d.executor_topology)
+}
+
 // ── 可承载模型 id 常量（绑定表与测试共用）────────────────────────────────────
 
 /// FunASR GGUF implementation 可承载的全部模型（模型目录唯一来源）。

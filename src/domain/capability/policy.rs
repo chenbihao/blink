@@ -335,13 +335,6 @@ pub trait SurfacePort: Send + Sync {
     /// 不直接接触 `crate::infra::platform::window`。
     fn validate_window_ref(&self, ref_id: &str) -> Result<isize, SurfaceError>;
 
-    /// 0.22.14 review：截图执行前二次核验窗口身份。
-    ///
-    /// 在 `validate_window_ref` 返回 HWND 后，截图回调执行前，
-    /// 调用此方法重新核验 generation、TTL、PID 和标题。
-    /// HWND 被复用时此方法会检测到 PID/标题变化并返回错误。
-    fn verify_window_identity(&self, ref_id: &str) -> Result<(), SurfaceError>;
-
     /// 0.22.14：判断 HWND 是否属于 Blink 当前进程。
     fn is_blink_hwnd(&self, hwnd: isize) -> bool;
 
@@ -355,6 +348,7 @@ pub trait SurfacePort: Send + Sync {
         plan: CaptureCleansePlan,
         target_hwnd: Option<isize>,
         capture_fn: CaptureFn,
+        verify_window_ref: Option<String>,
     ) -> Result<CaptureResult, SurfaceError>;
 
     /// 0.22.14 review：执行窗口操作并核验结果状态。
@@ -830,9 +824,6 @@ mod tests {
                     detail: "DummySurface 不支持 window_ref 校验".into(),
                 })
             }
-            fn verify_window_identity(&self, _ref_id: &str) -> Result<(), SurfaceError> {
-                Ok(())
-            }
             fn is_blink_hwnd(&self, _hwnd: isize) -> bool {
                 false
             }
@@ -841,6 +832,7 @@ mod tests {
                 _plan: CaptureCleansePlan,
                 _target_hwnd: Option<isize>,
                 capture_fn: CaptureFn,
+                _verify_window_ref: Option<String>,
             ) -> Result<CaptureResult, SurfaceError> {
                 let image = capture_fn().map_err(|e| SurfaceError::CreateFailed { detail: e })?;
                 Ok(CaptureResult { image })

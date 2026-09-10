@@ -40,8 +40,6 @@ pub struct AudioTranscriptionResult {
     pub engine_id: String,
     /// 模型 id（如 "sensevoice-small"）。
     pub model_id: String,
-    /// 引擎 generation（执行时冻结的）。
-    pub engine_generation: u64,
     /// 引擎实例 id（执行时冻结的）。
     pub engine_instance_id: String,
     /// 来源格式摘要（人类可读，如 "2ch 48000Hz 16-bit PCM"）。
@@ -98,9 +96,9 @@ pub enum AudioTranscriptionError {
     #[error("stt identity changed: {detail}")]
     SttIdentityChanged { detail: String },
 
-    /// 云端转写未经授权（音频将发送给外部供应商但未获动态外发确认）。
-    #[error("cloud egress not authorized")]
-    CloudEgressNotAuthorized,
+    /// 当前构建不支持该转写路线（例如尚未实现的云端文件转写）。
+    #[error("unsupported transcription operation: {detail}")]
+    Unsupported { detail: String },
 
     /// 超时——deadline 触发。
     #[error("timeout: {detail}")]
@@ -128,7 +126,7 @@ impl AudioTranscriptionError {
             Self::SttBackendUnavailable { .. } => "stt_backend_unavailable",
             Self::SttBusy => "stt_busy",
             Self::SttIdentityChanged { .. } => "stt_identity_changed",
-            Self::CloudEgressNotAuthorized => "cloud_egress_not_authorized",
+            Self::Unsupported { .. } => "unsupported",
             Self::Timeout { .. } => "timeout",
             Self::Cancelled => "cancelled",
             Self::Internal { .. } => "internal",
@@ -148,7 +146,7 @@ impl AudioTranscriptionError {
             Self::SttBackendUnavailable { .. } => true,
             Self::SttBusy => true,
             Self::SttIdentityChanged { .. } => false,
-            Self::CloudEgressNotAuthorized => false,
+            Self::Unsupported { .. } => false,
             Self::Timeout { .. } => true,
             Self::Cancelled => false,
             Self::Internal { .. } => true,
@@ -194,8 +192,9 @@ impl AudioTranscriptionError {
             Self::SttIdentityChanged { detail } => CapabilityError::Conflict {
                 detail: detail.clone(),
             },
-            Self::CloudEgressNotAuthorized => CapabilityError::Permission {
-                detail: "cloud audio egress not authorized".into(),
+            Self::Unsupported { detail } => CapabilityError::Unsupported {
+                required: "implemented file transcription backend".into(),
+                actual: detail.clone(),
             },
             Self::Timeout { detail } => CapabilityError::Timeout {
                 detail: detail.clone(),
@@ -224,12 +223,12 @@ pub trait AudioTranscriptionPort: Send + Sync {
     /// 实现方负责：
     /// 1. 检查 deadline
     /// 2. 解析 audio_ref 并持有已打开资源
-    /// 3. 冻结 STT config、engine/model、instance/generation
+    /// 3. 冻结 STT config、engine/model/instance 身份
     /// 4. 验证已配置、已安装且当前可用
     /// 5. 在 blocking pool 中有界读取、decode、normalize
     /// 6. 再检查 deadline 和被冻结身份
     /// 7. 编码成 canonical 16k mono PCM16 WAV，调用现有唯一 transport
-    /// 8. 返回前再次验证 generation/instance
+    /// 8. 返回前再次验证 model/instance
     async fn transcribe(
         &self,
         request: AudioTranscriptionRequest,
@@ -279,8 +278,8 @@ mod tests {
             "stt_identity_changed"
         );
         assert_eq!(
-            AudioTranscriptionError::CloudEgressNotAuthorized.category(),
-            "cloud_egress_not_authorized"
+            AudioTranscriptionError::Unsupported { detail: "x".into() }.category(),
+            "unsupported"
         );
         assert_eq!(
             AudioTranscriptionError::Timeout { detail: "x".into() }.category(),
@@ -303,7 +302,7 @@ mod tests {
         assert!(AudioTranscriptionError::SttBackendUnavailable { detail: "x".into() }.retryable());
         assert!(AudioTranscriptionError::SttBusy.retryable());
         assert!(!AudioTranscriptionError::SttIdentityChanged { detail: "x".into() }.retryable());
-        assert!(!AudioTranscriptionError::CloudEgressNotAuthorized.retryable());
+        assert!(!AudioTranscriptionError::Unsupported { detail: "x".into() }.retryable());
         assert!(AudioTranscriptionError::Timeout { detail: "x".into() }.retryable());
         assert!(!AudioTranscriptionError::Cancelled.retryable());
     }
@@ -330,9 +329,11 @@ mod tests {
         let cap = e.to_capability_error();
         assert!(matches!(cap, CapabilityError::Conflict { .. }));
 
-        let e = AudioTranscriptionError::CloudEgressNotAuthorized;
+        let e = AudioTranscriptionError::Unsupported {
+            detail: "not implemented".into(),
+        };
         let cap = e.to_capability_error();
-        assert!(matches!(cap, CapabilityError::Permission { .. }));
+        assert!(matches!(cap, CapabilityError::Unsupported { .. }));
 
         let e = AudioTranscriptionError::Timeout {
             detail: "30s".into(),
@@ -358,7 +359,6 @@ mod tests {
             duration_ms: 1000,
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            engine_generation: 42,
             engine_instance_id: "inst-abc".into(),
             source_format: "2ch 48000Hz 16-bit PCM".into(),
             normalized_format: "1ch 16000Hz mono".into(),
@@ -380,7 +380,6 @@ mod tests {
             duration_ms: 5000,
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            engine_generation: 1,
             engine_instance_id: "inst-1".into(),
             source_format: "1ch 16000Hz 16-bit PCM".into(),
             normalized_format: "1ch 16000Hz mono".into(),

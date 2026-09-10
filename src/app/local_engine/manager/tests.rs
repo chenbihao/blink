@@ -1838,20 +1838,23 @@ fn artifact_drift_matrix() {
     assert_eq!(got_expected, expected);
 
     // 一致 → 信任
-    assert!(deployment_artifact_drift(
-        &manifest_with_artifact(&eid, "dep-1", expected),
-        Some(expected)
-    )
-    .is_none());
+    assert!(
+        deployment_artifact_drift(
+            &manifest_with_artifact(&eid, "dep-1", expected),
+            Some(expected)
+        )
+        .is_none()
+    );
     // 非 ManagedBinary 引擎（无期望）→ 不校验
-    assert!(deployment_artifact_drift(
-        &manifest_with_artifact(&eid, "dep-1", "anything"),
-        None
-    )
-    .is_none());
+    assert!(
+        deployment_artifact_drift(&manifest_with_artifact(&eid, "dep-1", "anything"), None)
+            .is_none()
+    );
     // legacy 空 id（存量部署）→ 信任，不强制重装
-    assert!(deployment_artifact_drift(&manifest_with_artifact(&eid, "dep-1", ""), Some(expected))
-        .is_none());
+    assert!(
+        deployment_artifact_drift(&manifest_with_artifact(&eid, "dep-1", ""), Some(expected))
+            .is_none()
+    );
 }
 
 /// probe：漂移部署上报 Broken（而非 Ready），一致部署照常 Ready。
@@ -2050,17 +2053,23 @@ async fn install_fails_closed_when_contract_model_unbound() {
 /// 内存 fake selected 存储（事务配置提交/回写端口）。
 struct FakeSelectedStore {
     current: std::sync::Mutex<Option<String>>,
+    commit_count: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeSelectedStore {
     fn with_initial(model_id: &str) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             current: std::sync::Mutex::new(Some(model_id.to_string())),
+            commit_count: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     fn selected(&self) -> Option<String> {
         self.current.lock().unwrap().clone()
+    }
+
+    fn commit_count(&self) -> usize {
+        self.commit_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -2070,6 +2079,8 @@ impl super::switch::SelectedModelStore for FakeSelectedStore {
         self.current.lock().unwrap().clone()
     }
     async fn commit_selected(&self, model_id: &str) -> Result<(), String> {
+        self.commit_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.current.lock().unwrap() = Some(model_id.to_string());
         Ok(())
     }
@@ -2205,6 +2216,50 @@ async fn switch_target_not_installed_fails_before_any_mutation() {
         "验证失败不应停止实例"
     );
     assert_eq!(store.selected().as_deref(), Some("fake-model"));
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+}
+
+#[tokio::test]
+async fn switch_stop_failure_never_commits_or_starts_target() {
+    let eid = EngineId::new("fake-switch-stop-failure").unwrap();
+    let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
+    let svc = make_switch_manager(&eid, make_gguf_impl_registry_two_models(&eid));
+    let store = FakeSelectedStore::with_initial("fake-model");
+    svc.set_selected_store(store.clone());
+
+    let entry = svc.get_entry_internal(&eid).await.unwrap();
+    inject_launch(&entry, "fake-model", "inst-before-stop-failure").await;
+    write_installed_model(&eid, "fake-model-2");
+    svc.fail_next_stop_for_test(
+        &eid,
+        LocalEngineError::with_detail(
+            LocalEngineErrorCode::StopFailed,
+            ErrorPhase::Stop,
+            "模拟停止失败",
+            "test injected stop failure",
+        ),
+    );
+
+    let err = svc.switch_model(&eid, "fake-model-2").await.unwrap_err();
+    assert!(matches!(
+        err,
+        super::switch::SwitchModelFailure::StopFailed { .. }
+    ));
+    assert_eq!(store.selected().as_deref(), Some("fake-model"));
+    assert_eq!(
+        store.commit_count(),
+        0,
+        "stop 失败后不得提交 target selection"
+    );
+    let launch = entry
+        .current_launch()
+        .await
+        .expect("旧 active identity 必须保留");
+    assert_eq!(
+        launch.model.as_ref().map(|model| model.model_id.as_str()),
+        Some("fake-model"),
+        "stop 失败后不得启动或提交 target active"
+    );
     let _ = std::fs::remove_dir_all(runtime::engine_root(&eid));
 }
 

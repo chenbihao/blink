@@ -172,9 +172,17 @@ function showCustomDialog(opts) {
         actionsEl.className = "confirm-dialog-actions";
 
         let resolved = false;
+
+        // 幂等 cleanup：所有完成路径统一调此函数，确保 keydown 监听器不残留。
+        // 连续打开和点击关闭多个弹窗后，document 上不得残留旧 handler。
+        const cleanup = () => {
+            document.removeEventListener("keydown", onKey, true);
+        };
+
         const finish = (result) => {
             if (resolved) return;
             resolved = true;
+            cleanup();
             overlay.classList.add("confirm-dialog-closing");
             setTimeout(() => overlay.remove(), 150);
             resolve(result);
@@ -218,18 +226,17 @@ function showCustomDialog(opts) {
             });
         }
 
-        // Escape 取消；Enter 走主出口（有第三动作时为第三动作，否则为 ok）
+        // Escape 取消；Enter 走主出口（有第三动作时为第三动作，否则为 ok）。
+        // onKey 的移除统一由 finish() → cleanup() 负责，此处不再手动 removeEventListener。
         const onKey = (e) => {
             if (e.key === "Escape") {
                 e.preventDefault();
                 e.stopPropagation();
                 finish(hasCancel ? false : true);
-                document.removeEventListener("keydown", onKey, true);
             } else if (e.key === "Enter") {
                 e.preventDefault();
                 e.stopPropagation();
                 finish(primaryBtn === okBtn ? true : thirdAction.value || "third");
-                document.removeEventListener("keydown", onKey, true);
             }
         };
         document.addEventListener("keydown", onKey, true);

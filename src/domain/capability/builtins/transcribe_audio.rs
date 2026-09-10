@@ -141,7 +141,6 @@ impl Capability for TranscribeAudio {
             "duration_ms": result.duration_ms,
             "engine_id": result.engine_id,
             "model_id": result.model_id,
-            "engine_generation": result.engine_generation,
             "engine_instance_id": result.engine_instance_id,
             "source_format": result.source_format,
             "normalized_format": result.normalized_format,

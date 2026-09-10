@@ -399,7 +399,7 @@ pub(super) async fn op_capture(
         });
 
         let result = surface
-            .capture_with_cleanse(cleanse_plan, None, capture_fn)
+            .capture_with_cleanse(cleanse_plan, None, capture_fn, None)
             .await
             .map_err(map_surface_error)?;
 
@@ -456,7 +456,7 @@ pub(super) async fn op_capture(
     });
 
     let result = surface
-        .capture_with_cleanse(cleanse_plan, None, capture_fn)
+        .capture_with_cleanse(cleanse_plan, None, capture_fn, None)
         .await
         .map_err(map_surface_error)?;
 
@@ -552,18 +552,21 @@ pub(super) async fn op_window(
         })
     });
 
-    // 在调用 capture_with_cleanse 之前，做完整的 ref_id 二次核验（如果存在 ref_id）
-    // 这确保在 cloak 和截图之间不会因为 HWND 复用而截错窗口
-    if let Some(ref_id) = &ref_id_for_verify {
-        surface
-            .verify_window_identity(ref_id)
-            .map_err(|e| CapabilityError::StaleRef {
-                detail: map_surface_error_detail(e),
-            })?;
-    }
-
+    // 0.22.18：将 ref_id 身份核验推迟到 cloak 和激活完成后、截图之前
+    // 修复 TOCTOU：之前的 verify_window_identity 在 capture_with_cleanse 之前调用，
+    // cloak + 激活 + DWM flush 期间 HWND 可能被复用。
+    // 现在由 SurfacePort 实现在 cloak 和激活完成后、截图回调之前按 ref_id 核验。
+    //
+    // 核验通过 SurfacePort::verify_window_identity trait 方法做完整身份核验
+    //（generation、TTL、HWND、PID、标题），不直接依赖 infra 实现。
+    // 回调接收 &dyn SurfacePort 参数，由 app 层在调用时传入。
     let result = surface
-        .capture_with_cleanse(cleanse_plan, Some(target.hwnd), capture_fn)
+        .capture_with_cleanse(
+            cleanse_plan,
+            Some(target.hwnd),
+            capture_fn,
+            ref_id_for_verify,
+        )
         .await
         .map_err(map_surface_error)?;
 
@@ -638,7 +641,7 @@ async fn op_capture_to_clipboard_with_writer(
         });
 
         let result = surface
-            .capture_with_cleanse(cleanse_plan, None, capture_fn)
+            .capture_with_cleanse(cleanse_plan, None, capture_fn, None)
             .await
             .map_err(map_surface_error)?;
 
@@ -677,7 +680,7 @@ async fn op_capture_to_clipboard_with_writer(
     });
 
     let result = surface
-        .capture_with_cleanse(cleanse_plan, None, capture_fn)
+        .capture_with_cleanse(cleanse_plan, None, capture_fn, None)
         .await
         .map_err(map_surface_error)?;
 
@@ -1061,12 +1064,6 @@ mod tests {
                 detail: "MockSurface: window_ref 不存在".into(),
             })
         }
-        fn verify_window_identity(
-            &self,
-            _ref_id: &str,
-        ) -> Result<(), crate::domain::capability::SurfaceError> {
-            Ok(())
-        }
         fn is_blink_hwnd(&self, _hwnd: isize) -> bool {
             false
         }
@@ -1075,6 +1072,7 @@ mod tests {
             _: crate::domain::capability::CaptureCleansePlan,
             _: Option<isize>,
             capture_fn: crate::domain::capability::CaptureFn,
+            _verify_window_ref: Option<String>,
         ) -> Result<crate::domain::capability::CaptureResult, crate::domain::capability::SurfaceError>
         {
             let image = capture_fn()

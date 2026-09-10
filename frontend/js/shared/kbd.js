@@ -216,3 +216,58 @@ export function renderHint(template, params = {}) {
     }
     return frag;
 }
+
+// ── 安全的 HTML 字符串渲染（供 innerHTML 拼接场景用）────────────────────────────
+//
+// **动机**：kbd.js 的 renderKey/renderCombo 返回 DOM 元素，但部分历史模块（如
+// chord.js）使用 innerHTML 拼接行模板，无法直接 appendChild。为避免这些模块
+// 自行手拼 "Alt + X" 字符串（违反 §4.1 键盘提示样式统一铁则），提供此安全、
+// 受限的 HTML 字符串接口——只产出 <kbd class="kbd"> + <span class="kbd-plus">+</span>
+// 结构的 HTML 字符串，值经 textContent 级别转义（通过 DOM 写入再读 innerHTML）。
+
+/**
+ * 单键的 HTML 字符串（安全转义）。
+ * @param {string} key
+ * @returns {string} `<kbd class="kbd">...</kbd>`
+ */
+export function renderKeyHTML(key) {
+    const kbd = renderKey(key);
+    return kbd.outerHTML;
+}
+
+/**
+ * 组合键的 HTML 字符串（安全转义，含 + 连接符）。
+ * @param {string | string[]} combo "Ctrl+K" 或 ["Ctrl", "K"]
+ * @returns {string} `<span class="kbd-group">...</span>`
+ */
+export function renderComboHTML(combo) {
+    const group = renderCombo(combo);
+    return group.outerHTML;
+}
+
+/**
+ * 把修饰键数组 + 主键归一化为 canonical 组合键字符串。
+ *
+ * 用于把后端 wire 格式（modifiers 数组 + key 字符串）归一化为
+ * "Ctrl+Alt+K" 格式的字符串，供 renderComboHTML 消费。
+ *
+ * @param {string[]} modifiers - 修饰键数组（如 ["ctrl", "alt"]）
+ * @param {string} key - 主键（如 "a"、" "、"F1"）
+ * @returns {string} 归一化的组合键字符串，如 "Ctrl+Alt+A"
+ */
+export function normalizeCombo(modifiers, key) {
+    const MOD_ORDER = ["ctrl", "alt", "shift", "meta"];
+    const MOD_LABEL = {ctrl: "Ctrl", alt: "Alt", shift: "Shift", meta: "Win"};
+    const alias = {
+        lctrl: "ctrl", rctrl: "ctrl", control: "ctrl",
+        lalt: "alt", ralt: "alt",
+        lshift: "shift", rshift: "shift",
+        meta: "meta", win: "meta", super: "meta",
+    };
+    const norm = (m) => alias[m] || m;
+    const mods = (Array.isArray(modifiers) ? modifiers : []).map(norm);
+    const ordered = MOD_ORDER.filter((m) => mods.includes(m));
+    const rest = mods.filter((m) => !MOD_ORDER.includes(m));
+    const keyLabel = key === " " ? "Space" : String(key || "").toUpperCase();
+    return [...ordered, ...rest].map((m) => MOD_LABEL[m] || m).concat(keyLabel).join("+");
+}

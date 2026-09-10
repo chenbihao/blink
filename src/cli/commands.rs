@@ -60,6 +60,10 @@ pub fn dispatch(cli: Cli) -> i32 {
 
     // 初始化注册表
     let cap_registry = Arc::new(crate::domain::capability::CapabilityRegistry::new());
+    // 0.22.18：初始化有界审计队列
+    tauri::async_runtime::block_on(async {
+        crate::domain::capability::CapabilityRegistry::init_audit_writer();
+    });
 
     // 0.14.6 §2.2：创建 DomainEnv 桥接器（CLI 模式最小化，仅注入 Capability）。
     let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
@@ -114,7 +118,7 @@ pub fn dispatch(cli: Cli) -> i32 {
 
     // 执行 CLI 命令
 
-    match cli.command {
+    let exit_code = match cli.command {
         Commands::McpServer => run_mcp_server(),
         Commands::Search { query, json } => run_search(&handle, &query, json),
         Commands::Run { capability, args } => {
@@ -139,7 +143,11 @@ pub fn dispatch(cli: Cli) -> i32 {
             eprintln!("onnx-validate 应通过 try_run_cli 直接分派，不应到达 dispatch");
             1
         }
-    }
+    };
+    tauri::async_runtime::block_on(
+        crate::domain::capability::CapabilityRegistry::shutdown_audit_writer(),
+    );
+    exit_code
 }
 
 fn build_cli_engine_manager() -> Arc<crate::app::local_engine::EngineManager> {

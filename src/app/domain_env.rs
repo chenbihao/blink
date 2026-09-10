@@ -26,6 +26,40 @@ use crate::domain::sticky::{
 };
 use crate::domain::stt::transcribe::AudioTranscriptionPort;
 use crate::infra::data::pools::DbPools;
+
+fn verify_window_identity_for_capture(ref_id: &str) -> Result<(), SurfaceError> {
+    match crate::infra::platform::window::validate_window_ref_detailed(ref_id) {
+        crate::infra::platform::window::RefValidation::Valid(_) => Ok(()),
+        crate::infra::platform::window::RefValidation::NotFound => Err(SurfaceError::Unavailable {
+            detail: "window_ref 不存在（二次核验）".into(),
+        }),
+        crate::infra::platform::window::RefValidation::ExpiredGeneration => {
+            Err(SurfaceError::Unavailable {
+                detail: "window_ref 已过期（二次核验）".into(),
+            })
+        }
+        crate::infra::platform::window::RefValidation::ExpiredTtl => {
+            Err(SurfaceError::Unavailable {
+                detail: "window_ref 已超时（二次核验）".into(),
+            })
+        }
+        crate::infra::platform::window::RefValidation::InvalidHwnd => {
+            Err(SurfaceError::Unavailable {
+                detail: "窗口句柄已失效（二次核验）".into(),
+            })
+        }
+        crate::infra::platform::window::RefValidation::PidMismatch => {
+            Err(SurfaceError::Unavailable {
+                detail: "窗口 PID 已变化（HWND 可能被复用）".into(),
+            })
+        }
+        crate::infra::platform::window::RefValidation::TitleMismatch => {
+            Err(SurfaceError::Unavailable {
+                detail: "窗口标题已变化（身份变化）".into(),
+            })
+        }
+    }
+}
 /// Tauri 运行时环境实现（0.21.14 最小 port 拆分）。
 ///
 /// 同时实现 `EventPort`、`CapabilityEnv` 和 `SurfacePort`，但消费者只注入
@@ -642,43 +676,6 @@ impl SurfacePort for TauriDomainEnv {
         }
     }
 
-    fn verify_window_identity(&self, ref_id: &str) -> Result<(), SurfaceError> {
-        // 截图前二次核验：重新走完整的 ref 校验（generation、TTL、HWND、PID、标题）
-        match crate::infra::platform::window::validate_window_ref_detailed(ref_id) {
-            crate::infra::platform::window::RefValidation::Valid(_) => Ok(()),
-            crate::infra::platform::window::RefValidation::NotFound => {
-                Err(SurfaceError::Unavailable {
-                    detail: "window_ref 不存在（二次核验）".into(),
-                })
-            }
-            crate::infra::platform::window::RefValidation::ExpiredGeneration => {
-                Err(SurfaceError::Unavailable {
-                    detail: "window_ref 已过期（二次核验）".into(),
-                })
-            }
-            crate::infra::platform::window::RefValidation::ExpiredTtl => {
-                Err(SurfaceError::Unavailable {
-                    detail: "window_ref 已超时（二次核验）".into(),
-                })
-            }
-            crate::infra::platform::window::RefValidation::InvalidHwnd => {
-                Err(SurfaceError::Unavailable {
-                    detail: "窗口句柄已失效（二次核验）".into(),
-                })
-            }
-            crate::infra::platform::window::RefValidation::PidMismatch => {
-                Err(SurfaceError::Unavailable {
-                    detail: "窗口 PID 已变化（HWND 可能被复用）".into(),
-                })
-            }
-            crate::infra::platform::window::RefValidation::TitleMismatch => {
-                Err(SurfaceError::Unavailable {
-                    detail: "窗口标题已变化（身份变化）".into(),
-                })
-            }
-        }
-    }
-
     fn is_blink_hwnd(&self, hwnd: isize) -> bool {
         let hwnd_raw = windows::Win32::Foundation::HWND(hwnd as *mut _);
         let pid = crate::infra::platform::window::get_window_pid(hwnd_raw);
@@ -691,6 +688,7 @@ impl SurfacePort for TauriDomainEnv {
         plan: CaptureCleansePlan,
         target_hwnd: Option<isize>,
         capture_fn: CaptureFn,
+        verify_window_ref: Option<String>,
     ) -> Result<CaptureResult, SurfaceError> {
         let app_plan = match plan {
             CaptureCleansePlan::Noop => crate::app::capture_orchestrator::CleansePlan::Noop,
@@ -714,6 +712,19 @@ impl SurfacePort for TauriDomainEnv {
                             SurfaceError::CreateFailed { detail }
                         }
                     })?;
+
+            // 0.22.18：在 cloak 和激活完成后、截图回调之前执行身份核验
+            // 修复 TOCTOU：validate_window_ref 返回 HWND 后到此期间，HWND 可能被复用
+            // SurfacePort 实现持有平台核验职责；domain 只传递 opaque ref_id。
+            if let Some(ref_id) = &verify_window_ref
+                && let Err(verify_error) = verify_window_identity_for_capture(ref_id)
+            {
+                // 身份失败同样走显式恢复；不能只依赖 Drop 吞掉恢复异常。
+                guard
+                    .finalize()
+                    .map_err(|detail| SurfaceError::RestoreFailed { detail })?;
+                return Err(verify_error);
+            }
 
             // guard 已完成 cloak + DwmFlush + 目标激活
             let result = capture_fn().map_err(|e| SurfaceError::CreateFailed { detail: e })?;

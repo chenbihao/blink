@@ -49,6 +49,15 @@ export function pickEngineStatus(list, engineId) {
     return list.find((s) => s && s.engine_id === engineId) ?? null;
 }
 
+/** 从引擎状态中提取仍在进行的安装/修复 operation id。终态和 idle 不绑定。 */
+export function activeOperationId(statusDto) {
+    const operation = statusDto?.status?.operation;
+    if (!operation || operation.kind === "idle" || !operation.operation_id) return null;
+    return classifyInstallStage(operation.stage) === "active"
+        ? String(operation.operation_id)
+        : null;
+}
+
 /**
  * 引擎级状态 → OCR 是否已就绪可用。
  *
@@ -88,3 +97,63 @@ export function installStageTextKey(stage) {
 
 // 注：下载进度纯函数（样本窗口/ETA/格式化）已提取到 ../shared/download-progress.js，
 // 由欢迎页与设置页引擎页共用（0.22.14）。
+
+// ── Chord toggles 竞态防护（纯函数，供测试）─────────────────────────────────────
+
+/**
+ * 判断某次异步保存的响应是否仍然有效（revision 匹配当前最新）。
+ *
+ * 快速连续切换 chord 开关时，旧请求可能比新请求晚完成。
+ * 旧请求的响应必须被丢弃，否则会覆盖用户最后一次操作。
+ *
+ * @param {number} requestRevision - 发起请求时的 revision
+ * @param {number} currentRevision - 当前最新 revision
+ * @returns {boolean} true = 仍然有效，可以提交；false = 已过期，丢弃
+ */
+export function isChordToggleRevisionValid(requestRevision, currentRevision) {
+    return Number(requestRevision) === Number(currentRevision);
+}
+
+/**
+ * 构造失败回滚后的 toggle 值。
+ *
+ * @param {object} confirmed - 最后一次后端已确认的值 { chord_enabled, chord_hint_visible }
+ * @returns {{chord_enabled: boolean, chord_hint_visible: boolean}}
+ */
+export function rollbackChordToggles(confirmed) {
+    return {
+        chord_enabled: confirmed?.chord_enabled === true,
+        chord_hint_visible: confirmed?.chord_hint_visible !== false,
+    };
+}
+
+// ── 安装进度事件 operation_id 隔离（纯函数，供测试）───────────────────────────
+
+/**
+ * 判断一条安装进度/阶段事件是否应该被当前操作接受。
+ *
+ * **铁则：operation_id 不从事件绑定**——operation_id 必须从后端命令返回值
+ * 或 get_local_engine_status 主动获取，不允许从首条事件猜测绑定
+ * （首事件可能来自旧操作的迟到推送）。
+ *
+ * 接受规则：
+ * - 已绑定 operation_id 时，事件 operation_id 必须匹配（否则丢弃）。
+ * - 未绑定 operation_id 时拒绝事件，直到状态查询建立可信绑定。
+ * - 事件无 operation_id 时拒绝，不能绕过身份隔离。
+ *
+ * @param {string|null} currentOpId - 当前已从后端获取的 operation_id
+ * @param {string|null|undefined} eventOpId - 事件携带的 operation_id
+ * @returns {{accept: boolean, newOpId: string|null}}
+ *   accept = 是否接受此事件；newOpId = 始终等于 currentOpId（不从事件绑定）
+ */
+export function shouldAcceptInstallEvent(currentOpId, eventOpId) {
+    // 无可信绑定时，任何事件都无法证明属于当前操作；宁可暂时不显示早期
+    // 进度，也不能让上一操作的迟到事件污染新操作 UI。
+    if (!currentOpId || !eventOpId) {
+        return {accept: false, newOpId: currentOpId ?? null};
+    }
+    return {
+        accept: String(eventOpId) === String(currentOpId),
+        newOpId: currentOpId,
+    };
+}

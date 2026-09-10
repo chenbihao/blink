@@ -188,7 +188,10 @@ pub fn downmix_to_mono(
 ///
 /// 如果 mask 为 0 或完全不匹配已知声道位，返回 `None`，调用方回退到简单平均。
 fn downmix_with_mask(input: &[f32], channels: usize, mask: u32) -> Option<Vec<f32>> {
-    if mask == 0 || channels == 0 {
+    // WAVEFORMATEXTENSIBLE 的 channel mask 只有 32 位，无法描述第 33 个及
+    // 之后的声道。此时不能把“无对应 bit”猜成“该声道不参与”，否则会静默
+    // 丢失音频；统一 fail-safe 回退到所有声道简单平均。
+    if mask == 0 || channels == 0 || channels > u32::BITS as usize {
         return None;
     }
 
@@ -678,6 +681,34 @@ mod tests {
         let (output, strategy) = downmix_to_mono(&[0.5], 0, None);
         assert!(output.is_empty());
         assert_eq!(strategy, DownmixStrategy::Identity);
+    }
+
+    #[test]
+    fn downmix_32_channels_can_consume_full_mask() {
+        let input = vec![1.0; 32];
+        let (output, strategy) = downmix_to_mono(&input, 32, Some(0x7ff));
+        assert_eq!(output, vec![1.0]);
+        assert_eq!(strategy, DownmixStrategy::ChannelMask);
+    }
+
+    #[test]
+    fn downmix_mask_falls_back_when_channels_exceed_mask_width() {
+        for channels in [33_u16, 64, 256] {
+            let input: Vec<f32> = (0..channels).map(|i| i as f32).collect();
+            let expected = (channels as f32 - 1.0) / 2.0;
+            let (output, strategy) = downmix_to_mono(&input, channels, Some(u32::MAX));
+            assert_eq!(output.len(), 1);
+            assert!((output[0] - expected).abs() < 1e-5);
+            assert_eq!(strategy, DownmixStrategy::FallbackAverage);
+        }
+    }
+
+    #[test]
+    fn downmix_zero_mask_falls_back_for_32_channels() {
+        let input = vec![0.25; 32];
+        let (output, strategy) = downmix_to_mono(&input, 32, Some(0));
+        assert_eq!(output, vec![0.25]);
+        assert_eq!(strategy, DownmixStrategy::FallbackAverage);
     }
 
     // ── StreamingResampler: identity ─────────────────────────────────────

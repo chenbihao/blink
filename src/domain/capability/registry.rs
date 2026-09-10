@@ -5,11 +5,22 @@
 //! `inventory::submit!`，注册表零改动**。
 //!
 //! `invoke()` 包装层统一 SLO 埋点（§3.5 铁则 3）——实现方无需手写 perf record。
+//!
+//! **0.22.18 审计契约**：`invoke()` 对非 MCP 来源统一写最小审计事件到
+//! `ai_tool_audit` 表。MCP 来源在 `server.rs` 中已有自己的审计写入
+//!（含完整参数和结果摘要），不在此重复。审计只记录 capability id、
+//! origin、outcome 分类和耗时——**不记录完整参数、结果、窗口标题
+//! 或截图内容**。写入失败只 warn 不阻塞主流程。
+//!
+//! **0.22.18 有界审计队列**：审计事件通过有界 mpsc channel + 专用 writer
+//! task 写入 DB，替代无界 `tokio::spawn`。队列满时 warn 并按溢出策略丢弃，
+//! DB 失败只 warn。Cancelled 和早退路径也记录审计事件。
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde_json::Value;
+use tokio::sync::mpsc::{self, Sender};
 
 use super::error::CapabilityError;
 use super::result::CapabilityResult;
@@ -26,6 +37,25 @@ pub enum RegistryError {
     #[error("CapabilityRegistry: 重复 id \"{id}\"——身份冲突，拒绝静默选择实现")]
     DuplicateId { id: String },
 }
+
+/// 审计队列容量——超过此数量时丢弃新事件。
+const AUDIT_QUEUE_CAPACITY: usize = 64;
+
+/// 审计事件载荷——通过有界 channel 发送给 writer task。
+struct AuditEvent {
+    cap_id: String,
+    origin_str: String,
+    summary: String,
+    db_pool: sqlx::SqlitePool,
+}
+
+struct AuditWriter {
+    sender: std::sync::Mutex<Option<Sender<AuditEvent>>>,
+    handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// 进程级单 writer。sender 可在退出时 take，从而关闭 channel 并 drain。
+static AUDIT_WRITER: OnceLock<AuditWriter> = OnceLock::new();
 
 /// 能力注册表。id → `Arc<dyn Capability>` 的映射。
 ///
@@ -53,6 +83,76 @@ impl CapabilityRegistry {
     /// 错误消息明确包含冲突 id，便于诊断。
     pub fn new() -> Self {
         Self::try_new().unwrap_or_else(|e| panic!("CapabilityRegistry 初始化失败: {e}"))
+    }
+
+    /// 初始化有界审计队列——在 tokio runtime 上下文中调用。
+    ///
+    /// 创建有界 mpsc channel 和专用 writer task。writer task 从 channel
+    /// 接收审计事件并写入 DB，DB 失败只 warn。
+    /// 队列满时 `try_send` 失败，warn 并按溢出策略丢弃事件。
+    ///
+    /// 此方法幂等——多次调用安全，只有首次调用创建 channel 和 task。
+    pub fn init_audit_writer() {
+        if AUDIT_WRITER.get().is_some() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(AUDIT_QUEUE_CAPACITY);
+        let handle = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                // save_audit_log 内部处理错误（warn 不阻塞），返回 ()
+                crate::infra::data::ai_audit::save_audit_log(
+                    &event.db_pool,
+                    &event.cap_id,
+                    &serde_json::Value::Object(serde_json::Map::new()), // 不记录参数
+                    &event.summary,
+                    "", // provider_kind
+                    "", // model_id
+                    1,  // turn
+                    &event.origin_str,
+                )
+                .await;
+            }
+            tracing::debug!("审计 writer task 退出（channel 已关闭）");
+        });
+        let writer = AuditWriter {
+            sender: std::sync::Mutex::new(Some(tx)),
+            handle: std::sync::Mutex::new(Some(handle)),
+        };
+        if let Err(writer) = AUDIT_WRITER.set(writer)
+            && let Some(handle) = writer
+                .handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            handle.abort();
+        }
+    }
+
+    /// 关闭发送端并等待 writer 排空队列。退出路径使用短超时兜底，避免数据库
+    /// 异常拖住进程；超时后 abort 尚未完成的 writer 并明确记录丢失风险。
+    pub async fn shutdown_audit_writer() {
+        let Some(writer) = AUDIT_WRITER.get() else {
+            return;
+        };
+        writer
+            .sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let handle = writer
+            .handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(mut handle) = handle
+            && tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+                .await
+                .is_err()
+        {
+            tracing::warn!("审计队列退出排空超时，终止 writer");
+            handle.abort();
+        }
     }
 
     /// 从 inventory 收集能力，重复 id 返回确定性错误（0.21.13）。
@@ -177,13 +277,16 @@ impl CapabilityRegistry {
         pairs
     }
 
-    /// invoke 包装层（§3.5 铁则 3）——统一 SLO 埋点 + tracing + origin/runtime 门禁。
+    /// invoke 包装层（§3.5 铁则 3）——统一 SLO 埋点 + tracing + origin/runtime 门禁 + 审计。
     ///
     /// **0.21.0**：在调用 `cap.invoke()` 前执行代码级 origin/runtime 门禁：
     /// - origin 不在 `policy().allowed_origins` 中 → `OriginDenied`
     /// - runtime 不满足 `policy().runtime_requirement` → `Unsupported`
     ///
-    /// **调用方应优先用此方法**而非直接 `cap.invoke()`——保证 SLO 一致性 + 门禁。
+    /// **0.22.18**：对非 MCP 来源统一写最小审计事件。MCP 来源在 `server.rs`
+    /// 中已有自己的审计写入（含参数和结果摘要），不在此重复。
+    ///
+    /// **调用方应优先用此方法**而非直接 `cap.invoke()`——保证 SLO 一致性 + 门禁 + 审计。
     ///
     /// **outcome 分桶**（文档 §3.3）：
     /// - `Ok` → "ok"
@@ -196,10 +299,12 @@ impl CapabilityRegistry {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
+        let start = std::time::Instant::now();
         let cap = match self.get(id) {
             Some(c) => c,
             None => {
                 tracing::warn!(capability = id, "invoke: 能力不存在");
+                Self::emit_audit(ctx, id, "not_found", start.elapsed().as_secs_f64() * 1000.0);
                 return Err(CapabilityError::NotFound { id: id.into() });
             }
         };
@@ -214,6 +319,12 @@ impl CapabilityRegistry {
                 origin = %ctx.origin,
                 allowed = %policy.allowed_origins,
                 "invoke: 来源不被允许"
+            );
+            Self::emit_audit(
+                ctx,
+                id,
+                "origin_denied",
+                start.elapsed().as_secs_f64() * 1000.0,
             );
             return Err(CapabilityError::OriginDenied {
                 origin: ctx.origin.to_string(),
@@ -230,18 +341,23 @@ impl CapabilityRegistry {
                 actual = %actual_runtime,
                 "invoke: 运行时不满足要求"
             );
+            Self::emit_audit(
+                ctx,
+                id,
+                "unsupported",
+                start.elapsed().as_secs_f64() * 1000.0,
+            );
             return Err(CapabilityError::Unsupported {
                 required: policy.runtime_requirement.to_string(),
                 actual: actual_runtime.to_string(),
             });
         }
 
-        let start = std::time::Instant::now();
         let outcome = cap.invoke(args, ctx).await;
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
         // outcome 分桶 + SLO 埋点（Cancelled 不计）
-        match &outcome {
+        let outcome_label = match &outcome {
             Ok(_) => {
                 tracing::debug!(
                     target: crate::infra::utils::perf::ai_slo::TARGET,
@@ -256,6 +372,7 @@ impl CapabilityRegistry {
                     elapsed,
                     Some("ok"),
                 );
+                "ok"
             }
             Err(CapabilityError::Cancelled) => {
                 // 用户取消——不计 perf（用户行为，非能力问题），trace 留痕
@@ -264,6 +381,9 @@ impl CapabilityRegistry {
                     capability = id,
                     "capability invoke cancelled（不计 SLO）"
                 );
+                // 0.22.18：Cancelled 也写审计——记录所有尝试
+                Self::emit_audit(ctx, id, "cancelled", elapsed);
+                return outcome;
             }
             Err(CapabilityError::Timeout { .. }) => {
                 tracing::debug!(
@@ -279,6 +399,7 @@ impl CapabilityRegistry {
                     elapsed,
                     Some("timeout"),
                 );
+                "timeout"
             }
             Err(e) => {
                 tracing::debug!(
@@ -295,10 +416,60 @@ impl CapabilityRegistry {
                     elapsed,
                     Some("error"),
                 );
+                "error"
             }
-        }
+        };
+
+        // ── 0.22.18 统一审计契约（有界队列） ─────────────────────────
+        // 对非 MCP 来源写最小审计事件到 ai_tool_audit 表。
+        // MCP 来源在 server.rs 中已有自己的审计写入（含参数和结果摘要），不在此重复。
+        //
+        // 审计数据范围（隐私保护）：
+        // - 记录：capability id、origin、outcome 分类、耗时
+        // - 不记录：完整参数、结果内容、窗口标题、截图内容、路径
+        // - arguments 存空 JSON（{}），result_summary 存 outcome 标签
+        //
+        // 通过有界 mpsc channel 发送给专用 writer task，队列满时 warn 并丢弃。
+        Self::emit_audit(ctx, id, outcome_label, elapsed);
 
         outcome
+    }
+
+    /// 发送审计事件到有界队列——非阻塞，队列满时 warn 并丢弃。
+    ///
+    /// MCP 来源不在此重复写入（server.rs 已有审计）。
+    /// 审计数据不含敏感原文（参数/结果/标题等）。
+    fn emit_audit(ctx: &InvokeContext<'_>, id: &str, outcome_label: &str, elapsed: f64) {
+        if ctx.origin == crate::domain::capability::InvocationOrigin::Mcp {
+            return;
+        }
+        let Some(writer) = AUDIT_WRITER.get() else {
+            // 审计 writer 未初始化——跳过（测试环境正常）
+            return;
+        };
+        let tx = writer
+            .sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(tx) = tx else {
+            tracing::warn!(capability = id, "审计 writer 已关闭，丢弃审计事件");
+            return;
+        };
+        let event = AuditEvent {
+            cap_id: id.to_string(),
+            origin_str: ctx.origin.to_string(),
+            summary: format!("{outcome_label} ({elapsed:.0}ms)"),
+            db_pool: ctx.env.db_pools().ai.clone(),
+        };
+        // try_send：队列满时立即返回错误——warn 并按溢出策略丢弃
+        if tx.try_send(event).is_err() {
+            tracing::warn!(
+                capability = id,
+                "审计队列已满（{}），丢弃审计事件",
+                AUDIT_QUEUE_CAPACITY
+            );
+        }
     }
 }
 
@@ -600,10 +771,32 @@ mod tests {
     /// 只实现 invoke 测试路径必需的方法，其余返回 unimplemented。
     struct MockEnv;
 
+    /// 0.22.18：测试用 in-memory DbPools——避免 `db_pools()` panic。
+    /// 审计写入走后台 spawn，测试中不需要等待其完成。
+    static TEST_POOLS: std::sync::OnceLock<crate::infra::data::DbPools> =
+        std::sync::OnceLock::new();
+
+    fn test_pools() -> &'static crate::infra::data::DbPools {
+        TEST_POOLS.get_or_init(|| {
+            // 用 connect_lazy 避免在 tokio runtime 内 block_on panic。
+            // 审计写入失败时 save_audit_log 内部只 warn 不阻塞。
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("sqlite::memory:")
+                .expect("test: lazy SQLite 连接构建失败");
+            crate::infra::data::DbPools {
+                config: pool.clone(),
+                history: pool.clone(),
+                ai: pool.clone(),
+                cache: pool,
+            }
+        })
+    }
+
     #[async_trait::async_trait]
     impl CapabilityEnv for MockEnv {
         fn db_pools(&self) -> &crate::infra::data::DbPools {
-            unimplemented!("test mock: db_pools not needed for registry invoke tests")
+            test_pools()
         }
         fn plugin_engine(&self) -> Option<&std::sync::Arc<crate::domain::plugin::PluginEngine>> {
             None

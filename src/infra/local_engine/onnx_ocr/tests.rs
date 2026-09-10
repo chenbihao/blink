@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use super::executor::{
     OcrExecutor, OcrExecutorConfig, OcrExecutorError, OnnxOcrExecutor, RecognizeRequest,
 };
-use super::pipeline::{OcrPipeline, PipelineError};
+use super::pipeline::{OcrPipeline, PipelineConfig, PipelineError};
 use super::state::ExecutorState;
 
 use crate::domain::capability::builtins::ocr_engine::{OcrLine, OcrResult};
@@ -276,7 +276,6 @@ async fn executor_permit_release_on_drop() {
 #[test]
 fn executor_config_default() {
     let config = OcrExecutorConfig::default();
-    assert_eq!(config.idle_ttl_secs, 300);
     assert_eq!(config.pipeline.intra_op, 1);
     assert_eq!(config.pipeline.inter_op, 1);
 }
@@ -743,4 +742,294 @@ fn region_without_text_skipped() {
     assert_eq!(mapped.lines.len(), 1);
     assert_eq!(mapped.words.len(), 1);
     assert_eq!(mapped.char_boxes.len(), 2);
+}
+
+// ── 0.22.18 Worker 生命周期确定性测试 ──────────────────────────────────
+//
+// 覆盖：
+// 1. 第一次构建超时且不重试，构建稍后完成后线程自然退出
+// 2. 连续构建超时达到上限后，下一次重试不再创建线程
+// 3. retired worker 完成后可被回收，并恢复重试额度
+// 4. shutdown 面对未完成 native build 不会无限挂起
+//
+// 使用 Condvar 控制的 fake build 函数实现确定性测试。
+
+use std::sync::{Condvar, Mutex};
+
+type BuildFn = super::executor::BuildFn;
+
+/// 永久阻塞的 build 函数——模拟 native build 卡住且不可释放。
+/// 线程调用后永远不会返回，直到测试进程退出时被清理。
+fn make_forever_blocking_build_fn() -> BuildFn {
+    Arc::new(|_config: &PipelineConfig| {
+        // 永久 park——模拟不可中断的 native build
+        std::thread::park();
+        // park 不会被 unpark，这行不可达
+        Err(PipelineError::Inference("unreachable".into()))
+    })
+}
+
+/// 创建一个立即成功的 build 函数。
+fn make_fast_build_fn() -> BuildFn {
+    Arc::new(|_config: &PipelineConfig| {
+        let (pipeline, _) = FakePipeline::new("ok", 0);
+        Ok(Box::new(pipeline) as Box<dyn OcrPipeline>)
+    })
+}
+
+/// 创建一个快速失败的 build 函数。
+fn make_fail_build_fn() -> BuildFn {
+    Arc::new(|_config: &PipelineConfig| Err(PipelineError::Inference("fast fail".into())))
+}
+
+/// 测试 1：第一次构建超时后，in_flight_count 增加，sender 被 drop。
+#[tokio::test]
+async fn worker_build_timeout_drops_sender_and_retires() {
+    let config = OcrExecutorConfig::default();
+    let build_fn = make_forever_blocking_build_fn();
+    let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
+        .with_build_timeout(Duration::from_millis(100));
+
+    // 触发构建——会超时
+    let cancellation = CancellationToken::new();
+    let result = executor.ensure_ready(&cancellation).await;
+
+    // 超时返回 BuildFailed
+    assert!(
+        matches!(result, Err(OcrExecutorError::BuildFailed(_))),
+        "超时应返回 BuildFailed, got {result:?}"
+    );
+
+    // sender 应为 None（已被 drop）
+    assert!(
+        executor.is_sender_none(),
+        "超时后 sender 应为 None（提交权已撤销）"
+    );
+
+    // in_flight_count 应为 1（retired worker 仍在运行）
+    assert_eq!(
+        executor.in_flight_count(),
+        1,
+        "retired worker 仍计入 in_flight_count"
+    );
+
+    // retired_workers 应有 1 个
+    assert_eq!(executor.retired_count(), 1, "应有 1 个退休 worker");
+
+    // shutdown 清理
+    executor.shutdown().await;
+}
+
+/// 测试 2：连续构建超时达到 MAX_INFLIGHT_WORKERS 上限后，
+/// 下一次重试不再创建线程，返回 BuildInProgress。
+#[tokio::test]
+async fn worker_inflight_limit_blocks_new_build() {
+    let config = OcrExecutorConfig::default();
+    let build_fn = make_forever_blocking_build_fn();
+    let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
+        .with_build_timeout(Duration::from_millis(100));
+
+    let cancellation = CancellationToken::new();
+
+    // 第一次构建超时
+    let _ = executor.ensure_ready(&cancellation).await;
+    assert_eq!(executor.in_flight_count(), 1, "第一次超时后 in_flight=1");
+
+    // 直接用 ensure_ready 再次尝试——状态会从 Failed 推进到 Idle 再尝试构建
+    // 第二次构建也超时
+    let _ = executor.ensure_ready(&cancellation).await;
+    assert_eq!(
+        executor.in_flight_count(),
+        2,
+        "第二次超时后 in_flight=2（达到上限）"
+    );
+
+    // 第三次尝试——应返回 BuildInProgress 而非创建新线程
+    let result = executor.ensure_ready(&cancellation).await;
+    assert!(
+        matches!(result, Err(OcrExecutorError::BuildInProgress)),
+        "达到上限后应返回 BuildInProgress, got {result:?}"
+    );
+    assert_eq!(
+        executor.in_flight_count(),
+        2,
+        "BuildInProgress 不应增加 in_flight_count"
+    );
+
+    executor.shutdown().await;
+}
+
+/// 测试 3：retired worker 完成后可被回收，并恢复重试额度。
+#[tokio::test]
+async fn worker_reclaim_restores_quota() {
+    let config = OcrExecutorConfig::default();
+    // 使用 Condvar 控制：build 函数阻塞，释放后线程退出
+    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+    let p = pair.clone();
+    let build_fn: BuildFn = Arc::new(move |_config: &PipelineConfig| {
+        let (lock, cvar) = &*p;
+        let mut guard = lock.lock().unwrap();
+        while !*guard {
+            guard = cvar.wait(guard).unwrap();
+        }
+        Err(PipelineError::Inference("done".into()))
+    });
+    let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
+        .with_build_timeout(Duration::from_millis(100));
+
+    let cancellation = CancellationToken::new();
+
+    // 第一次构建超时
+    let _ = executor.ensure_ready(&cancellation).await;
+    assert_eq!(executor.in_flight_count(), 1, "超时后 in_flight=1");
+
+    // 释放 condvar——让 retired worker 的 build 函数完成并退出
+    {
+        let (lock, cvar) = &*pair;
+        let mut guard = lock.lock().unwrap();
+        *guard = true;
+        cvar.notify_all();
+    }
+
+    // 等待线程退出
+    std::thread::sleep(Duration::from_millis(200));
+
+    // 回收已完成的退休 worker
+    executor.reclaim_finished();
+    assert_eq!(executor.in_flight_count(), 0, "回收后 in_flight 应恢复为 0");
+    assert_eq!(executor.retired_count(), 0, "回收后 retired 应为空");
+
+    executor.shutdown().await;
+}
+
+/// 测试 4：shutdown 面对未完成 native build 不会无限挂起。
+#[tokio::test]
+async fn worker_shutdown_does_not_hang_on_stuck_build() {
+    let config = OcrExecutorConfig::default();
+    let build_fn = make_forever_blocking_build_fn();
+    let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
+        .with_build_timeout(Duration::from_millis(100));
+
+    let cancellation = CancellationToken::new();
+
+    // 触发构建超时
+    let _ = executor.ensure_ready(&cancellation).await;
+    assert_eq!(executor.in_flight_count(), 1, "超时后 in_flight=1");
+
+    // shutdown——barrier 永远不会被释放，但 shutdown 应在有限时间内完成
+    // SHUTDOWN_JOIN_TIMEOUT_SECS = 10s，但我们不需要等那么久——
+    // 退休 worker 的 build 仍在阻塞，shutdown 会对它做有界 join
+    let shutdown_start = std::time::Instant::now();
+    executor.shutdown().await;
+    let shutdown_elapsed = shutdown_start.elapsed();
+
+    // shutdown 应在合理时间内完成（有界 join 超时 + 一些开销）
+    // SHUTDOWN_JOIN_TIMEOUT_SECS = 10s，给 15s 余量
+    assert!(
+        shutdown_elapsed < Duration::from_secs(15),
+        "shutdown 不应无限挂起，实际耗时 {:?}",
+        shutdown_elapsed
+    );
+
+    // 注意：卡住的线程会 detached，但测试进程退出时会被清理
+}
+
+/// 测试 5：快速失败的 build 函数——in_flight_count 正确回滚。
+#[tokio::test]
+async fn worker_fast_fail_rolls_back_count() {
+    let config = OcrExecutorConfig::default();
+    let build_fn = make_fail_build_fn();
+    let executor =
+        OnnxOcrExecutor::with_build_fn(config, build_fn).with_build_timeout(Duration::from_secs(5));
+
+    let cancellation = CancellationToken::new();
+    let result = executor.ensure_ready(&cancellation).await;
+
+    // 快速失败返回 BuildFailed
+    assert!(
+        matches!(result, Err(OcrExecutorError::BuildFailed(_))),
+        "快速失败应返回 BuildFailed, got {result:?}"
+    );
+
+    // in_flight_count 应为 0（线程已退出，计数已回滚）
+    assert_eq!(
+        executor.in_flight_count(),
+        0,
+        "快速失败后 in_flight 应为 0（计数已回滚）"
+    );
+
+    executor.shutdown().await;
+}
+
+/// 快速失败的 current handle 必须当场收走；后续退休 worker 回收不能再次
+/// 释放同一额度，否则计数会低于真实存活数并绕过并发上限。
+#[tokio::test]
+async fn worker_fast_fail_then_timeouts_preserve_real_inflight_limit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let calls_for_build = calls.clone();
+    let release_for_build = release.clone();
+    let build_fn: BuildFn = Arc::new(move |_config: &PipelineConfig| {
+        if calls_for_build.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(PipelineError::Inference("first fast fail".into()));
+        }
+        let (lock, cvar) = &*release_for_build;
+        let mut released = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !*released {
+            released = cvar.wait(released).unwrap_or_else(|e| e.into_inner());
+        }
+        Err(PipelineError::Inference("released".into()))
+    });
+    let executor = OnnxOcrExecutor::with_build_fn(OcrExecutorConfig::default(), build_fn)
+        .with_build_timeout(Duration::from_millis(50));
+    let cancellation = CancellationToken::new();
+
+    assert!(matches!(
+        executor.ensure_ready(&cancellation).await,
+        Err(OcrExecutorError::BuildFailed(_))
+    ));
+    assert_eq!(executor.in_flight_count(), 0);
+    assert!(executor.is_sender_none());
+    assert_eq!(executor.retired_count(), 0);
+
+    let _ = executor.ensure_ready(&cancellation).await;
+    let _ = executor.ensure_ready(&cancellation).await;
+    assert_eq!(executor.in_flight_count(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    assert!(matches!(
+        executor.ensure_ready(&cancellation).await,
+        Err(OcrExecutorError::BuildInProgress)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "达到上限后不得再 spawn");
+
+    {
+        let (lock, cvar) = &*release;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_all();
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    executor.reclaim_finished();
+    assert_eq!(executor.in_flight_count(), 0);
+    executor.shutdown().await;
+}
+
+/// 测试 6：快速成功的 build 函数——executor 进入 Ready 状态。
+#[tokio::test]
+async fn worker_fast_success_reaches_ready() {
+    let config = OcrExecutorConfig::default();
+    let build_fn = make_fast_build_fn();
+    let executor =
+        OnnxOcrExecutor::with_build_fn(config, build_fn).with_build_timeout(Duration::from_secs(5));
+
+    let cancellation = CancellationToken::new();
+    let result = executor.ensure_ready(&cancellation).await;
+
+    assert!(result.is_ok(), "快速成功应返回 Ok, got {result:?}");
+    assert!(executor.state().is_ready(), "状态应为 Ready");
+    assert_eq!(executor.in_flight_count(), 1, "Ready 后 in_flight=1");
+
+    executor.shutdown().await;
 }

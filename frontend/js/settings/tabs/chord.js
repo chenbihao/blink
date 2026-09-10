@@ -18,11 +18,12 @@
  * 开关 + 跟随触发键 / 自定义组合键（RegisterHotKey 系统级注册）。注册结果经
  * `blink://global-hotkey-status` 事件回显（occupied = 被其他程序占用）。
  */
-import {invoke, listen} from "../../shared/tauri.js";
+import {invoke, listen, normalizeError} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
+import {renderComboHTML, normalizeCombo} from "../../shared/kbd.js";
 
 let actionsLoadRevision = 0;
 
@@ -130,6 +131,10 @@ async function loadChordActions() {
 
     if (revision !== actionsLoadRevision) return;
 
+    // 后端配置是已确认状态的真源。每次完整加载时重建快照，确保首次保存
+    // 失败也能恢复用户原有的 global binding，而不是错误回退为 disabled。
+    replaceConfirmedGlobalBindings(chordBindings);
+
     // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
     const CHORD_SUBTITLE = {
         chat: t("chord.action.chat.subtitle"),
@@ -157,9 +162,9 @@ async function loadChordActions() {
 function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
     subtitle = subtitle || "";
     binding = binding || {};
-    // key=' '（语音输入）→ 显示 "Space"
-    const keyLabel = a.key === " " ? "Space" : a.key.toUpperCase();
-    const combo = `Alt + ${keyLabel}`;
+    // 使用共享 kbd.js 规范渲染组合键（不再手拼 "Alt + X"）
+    const combo = normalizeCombo(["alt"], a.key);
+    const comboHtml = renderComboHTML(combo);
     const rowClass = a.enabled ? "" : "is-disabled";
 
     // voice_input 锁定（键位由 hotkey 配置决定；Hold 语义亦不参与全局键）
@@ -167,6 +172,8 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
     const lockedMsg = t("chord.binding.voice_input.locked");
 
     // 整行可点击展开；voice_input 锁定时展开体只有 locked 说明，意义不大但保留以维持一致交互
+    // chordCombo 仍用字符串形式给 follow 模式标签（renderGlobalBlock 中用 renderComboHTML 渲染）
+    const chordComboStr = combo;
     const subtitleHtml = subtitle
         ? `<div class="action-subtitle">${escapeHtml(subtitle)}</div>`
         : "";
@@ -180,7 +187,7 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
     // 0.22.12：全局快捷键块（voice_input 除外——Hold 语义不走 RegisterHotKey）
     const globalBlockHtml = keyLocked
         ? `<div class="chord-locked-note">${t("chord.global.voice_input.locked")}</div>`
-        : renderGlobalBlock(a, binding, combo);
+        : renderGlobalBlock(a, binding, chordComboStr);
 
     // 展开体内容（用 .chord-field 紧凑布局，label 用 --settings-label-width 对齐）
     const bodyInnerHtml = keyLocked
@@ -191,9 +198,9 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
            <span class="field-hint-icon" title="${escapeAttr(t("chord.binding.key.hint"))}">ⓘ</span>
          </label>
          <div class="chord-field-control">
-           <button class="hotkey-btn chord-binding-record" data-id="${escapeAttr(a.id)}" title="${escapeAttr(t("chord.binding.record"))}">
-             <span class="chord-binding-combo">${escapeHtml(combo)}</span>
-           </button>
+         <button class="hotkey-btn chord-binding-record" data-id="${escapeAttr(a.id)}" title="${escapeAttr(t("chord.binding.record"))}">
+             <span class="chord-binding-combo">${comboHtml}</span>
+         </button>
            <button class="btn-small chord-binding-reset" data-id="${escapeAttr(a.id)}">${t("chord.binding.reset")}</button>
          </div>
        </div>
@@ -204,7 +211,7 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
     return `<div class="action-list-row chord-row ${rowClass}" data-chord-id="${escapeAttr(a.id)}">
     <div class="chord-row-header" data-id="${escapeAttr(a.id)}" role="button" aria-expanded="false" tabindex="0">
       <span class="chord-expand-arrow" aria-hidden="true">▶</span>
-      <div class="chord-kbd-slot"><div class="action-kbd">${escapeHtml(combo)}</div></div>
+      <div class="chord-kbd-slot"><div class="action-kbd">${comboHtml}</div></div>
       <div class="action-info">
         <div class="action-title">${escapeHtml(a.label)}</div>
         ${subtitleHtml}
@@ -232,9 +239,11 @@ function renderGlobalBlock(a, binding, chordCombo) {
     const isCustom = global?.mode === "custom";
 
     // 自定义组合键显示：未录制时给出 Ctrl+Alt+<触发键> 的建议值
-    const customCombo = isCustom
-        ? formatCombo(global.modifiers, global.key)
-        : formatCombo(["ctrl", "alt"], a.key);
+    // 使用共享 kbd.js 规范渲染（normalizeCombo 归一化 + renderComboHTML 安全 HTML）
+    const customComboStr = isCustom
+        ? normalizeCombo(global.modifiers, global.key)
+        : normalizeCombo(["ctrl", "alt"], a.key);
+    const customComboHtml = renderComboHTML(customComboStr);
 
     const statusHtml = globalStatusBlockHtml(a.id, enabled);
 
@@ -253,13 +262,13 @@ function renderGlobalBlock(a, binding, chordCombo) {
           <label class="chord-global-radio">
             <input type="radio" name="chord-global-mode-${escapeAttr(a.id)}" class="chord-global-mode" data-id="${escapeAttr(a.id)}" value="follow" ${!isCustom ? "checked" : ""} />
             <span>${t("chord.global.mode.follow")}</span>
-            <span class="action-kbd chord-global-follow-kbd">${escapeHtml(chordCombo)}</span>
+            <span class="action-kbd chord-global-follow-kbd">${renderComboHTML(chordCombo)}</span>
           </label>
           <label class="chord-global-radio">
             <input type="radio" name="chord-global-mode-${escapeAttr(a.id)}" class="chord-global-mode" data-id="${escapeAttr(a.id)}" value="custom" ${isCustom ? "checked" : ""} />
             <span>${t("chord.global.mode.custom")}</span>
             <button class="hotkey-btn chord-global-record" data-id="${escapeAttr(a.id)}" title="${escapeAttr(t("chord.global.record"))}">
-              <span class="chord-global-combo" data-id="${escapeAttr(a.id)}">${escapeHtml(customCombo)}</span>
+              <span class="chord-global-combo" data-id="${escapeAttr(a.id)}">${customComboHtml}</span>
             </button>
             <button class="btn-small chord-global-clear" data-id="${escapeAttr(a.id)}">${t("chord.global.clear")}</button>
           </label>
@@ -292,73 +301,213 @@ function globalStatusBlockHtml(id, enabled) {
 
 /**
  * 注册状态事件到达后原位刷新状态行（不整行重渲染，避免展开态闪烁）。
+ *
+ * **timer 取消**：事件刷新会替换 DOM 内容，此时任何挂起的临时消息 timer
+ * 都不能再执行清除（其对应的 DOM 已被覆盖）。取消该 action 的 timer
+ * 并递增 revision，使 timer 即使漏取消也不会抹掉新状态。
  */
 function updateGlobalStatusDom() {
     document.querySelectorAll(".chord-global-status[data-id]").forEach((el) => {
+        const id = el.dataset.id;
+        // 取消该 action 的临时消息 timer（事件刷新替换了 DOM）
+        const oldTimer = statusMessageTimers.get(id);
+        if (oldTimer) {
+            clearTimeout(oldTimer);
+            statusMessageTimers.delete(id);
+        }
+        // 递增 revision：漏取消的 timer 回调检测到 revision 不匹配时不会清除
+        statusMessageRevisions.set(id, (statusMessageRevisions.get(id) ?? 0) + 1);
+
         const enabled = !!el.closest(".chord-global-block")
             ?.querySelector(".chord-global-toggle")?.checked;
-        el.innerHTML = globalStatusBlockHtml(el.dataset.id, enabled);
+        el.innerHTML = globalStatusBlockHtml(id, enabled);
     });
 }
 
-/**
- * 组合键显示名：修饰键按 Ctrl/Alt/Shift/Win 排序，主键 " " → Space。
- */
-function formatCombo(modifiers, key) {
-    const MOD_ORDER = ["ctrl", "alt", "shift", "meta"];
-    const MOD_LABEL = {ctrl: "Ctrl", alt: "Alt", shift: "Shift", meta: "Win"};
-    const norm = (m) => {
-        const alias = {
-            lctrl: "ctrl", rctrl: "ctrl", control: "ctrl",
-            lalt: "alt", ralt: "alt",
-            lshift: "shift", rshift: "shift",
-            meta: "meta", win: "meta", super: "meta",
-        };
-        return alias[m] || m;
-    };
-    const mods = (Array.isArray(modifiers) ? modifiers : []).map(norm);
-    const ordered = MOD_ORDER.filter((m) => mods.includes(m));
-    const rest = mods.filter((m) => !MOD_ORDER.includes(m));
-    const keyLabel = key === " " ? "Space" : String(key || "").toUpperCase();
-    return [...ordered, ...rest].map((m) => MOD_LABEL[m] || m).concat(keyLabel).join(" + ");
+/** 最近一次后端已确认的全局快捷键绑定（actionId → binding.global 或 null）。
+ *  用于保存失败时回滚 UI 到最后一次后端已确认状态。
+ *  **真源**：回滚时从此 Map 取值，不重新 get_config（避免读到并发写入的中间态）。 */
+let confirmedGlobalBindings = new Map();
+
+function replaceConfirmedGlobalBindings(bindings) {
+    confirmedGlobalBindings.clear();
+    Object.entries(bindings || {}).forEach(([id, binding]) => {
+        confirmedGlobalBindings.set(
+            id,
+            binding?.global ? JSON.parse(JSON.stringify(binding.global)) : null,
+        );
+    });
 }
+
+/** 临时状态消息的 timer 集合（actionId → timerId），确保新消息替换旧消息时取消旧 timer。 */
+let statusMessageTimers = new Map();
+
+/** 临时状态消息的 revision token（actionId → revision number）。
+ *  每次写入临时消息递增；timer 回调和 updateGlobalStatusDom 只清除自己
+ *  对应 revision 的消息，不抹掉后来到达的新状态。 */
+let statusMessageRevisions = new Map();
+
+/** chord_bindings shard 写入串行化链（promise chain）。
+ *
+ *  同一 shard 的并发 read-modify-write 会导致 last-writer-wins 数据丢失。
+ *  通过将所有写入操作串行化为顺序执行的 promise chain，确保每个写入
+ *  都基于前一个写入完成后的最新状态读取，不会互相覆盖。
+ *
+ *  **铁则**：所有 chord_bindings 的 get_config → modify → set_config
+ *  操作必须经过此队列，不得并发执行。 */
+let chordBindingsWriteChain = Promise.resolve();
+
+/** 每个 action 独立的保存 revision。不同 action 不得互相取消。 */
+let globalBindingRevisions = new Map();
 
 /**
  * 保存某动作的全局快捷键设置（binding.global 字段级更新）。
  *
+ * **串行化**：所有 chord_bindings shard 写入通过 promise chain 串行执行，
+ * 避免并发 read-modify-write 导致 last-writer-wins 数据丢失。
+ *
+ * **confirmedGlobalBindings 真源**：失败回滚时从此 Map 取值，不重新 get_config
+ * （避免读到并发写入的中间态或旧缓存）。
+ *
+ * 失败时回滚 UI 到最后一次后端已确认状态（toggle/radio/combo/配置区）。
+ *
  * @param {string} id 动作 id
  * @param {object|null} global `{mode:"follow_chord"}` 或 `{mode:"custom",modifiers,key}`；null = 清除
- * @returns {Promise<boolean>} 是否保存成功（false = 后端冲突拒绝）
+ * @returns {Promise<boolean>} 是否保存成功（false = 后端冲突拒绝或被更新 revision 取代）
  */
 async function saveGlobalBinding(id, global) {
-    const fullCfg = await invoke("get_config");
-    const bindings = fullCfg?.chord_bindings || {};
-    if (!bindings[id]) {
-        bindings[id] = {key: "", modifiers: ["alt"]};
-    }
+    const rev = (globalBindingRevisions.get(id) ?? 0) + 1;
+    globalBindingRevisions.set(id, rev);
+
+    // 串行化：排队等待前一个 chord_bindings 写入完成
+    // 每次写入基于前一个完成后的最新 get_config 读取，不会互相覆盖
+    const result = await new Promise((resolve) => {
+        chordBindingsWriteChain = chordBindingsWriteChain.then(async () => {
+            // 旧请求被取代：不再执行写入
+            if (rev !== globalBindingRevisions.get(id)) {
+                resolve(false);
+                return;
+            }
+
+            const fullCfg = await invoke("get_config");
+            if (rev !== globalBindingRevisions.get(id)) {
+                resolve(false);
+                return;
+            }
+
+            const bindings = fullCfg?.chord_bindings || {};
+            if (!bindings[id]) {
+                bindings[id] = {key: "", modifiers: ["alt"]};
+            }
+
+            if (global) {
+                bindings[id].global = global;
+            } else {
+                delete bindings[id].global;
+            }
+            try {
+                await saveConfig("chord_bindings", bindings);
+                if (rev !== globalBindingRevisions.get(id)) {
+                    resolve(false);
+                    return;
+                }
+                // 保存成功：更新已确认状态（真源）
+                confirmedGlobalBindings.set(id, global ? JSON.parse(JSON.stringify(global)) : null);
+                resolve(true);
+            } catch (err) {
+                if (rev !== globalBindingRevisions.get(id)) {
+                    resolve(false);
+                    return;
+                }
+                // 后端冲突检查拒绝（组合键撞主热键 / 撞其他全局键 / 撞 chord 键）
+                console.warn("save chord global binding rejected:", err);
+                const errObj = normalizeError(err);
+                showGlobalStatusMessage(id, errObj.message);
+                // 回滚 UI：从 confirmedGlobalBindings 真源取值
+                const confirmedGlobal = confirmedGlobalBindings.get(id) ?? null;
+                rollbackGlobalBindingUI(id, confirmedGlobal);
+                resolve(false);
+            }
+        }).catch((err) => {
+            // chain 内部不应抛出（已 try-catch），但防御性兜底
+            console.error("chord bindings write chain error:", err);
+            resolve(false);
+        });
+    });
+
+    return result;
+}
+
+/**
+ * 回滚某动作的全局快捷键 UI 到指定状态。
+ *
+ * @param {string} id 动作 id
+ * @param {object|null} global - 要回滚到的 binding.global 状态
+ */
+function rollbackGlobalBindingUI(id, global) {
+    const container = document.getElementById("chord-actions-container");
+    if (!container) return;
+
+    const toggle = container.querySelector(`.chord-global-toggle[data-id="${CSS.escape(id)}"]`);
+    const configEl = container.querySelector(`.chord-global-config[data-id="${CSS.escape(id)}"]`);
+    const comboEl = container.querySelector(`.chord-global-combo[data-id="${CSS.escape(id)}"]`);
+
     if (global) {
-        bindings[id].global = global;
+        // 回滚到 enabled 状态
+        if (toggle) toggle.checked = true;
+        configEl?.removeAttribute("hidden");
+
+        if (global.mode === "custom") {
+            setGlobalModeRadio(id, "custom");
+            if (comboEl) {
+                const comboStr = normalizeCombo(global.modifiers, global.key);
+                comboEl.innerHTML = renderComboHTML(comboStr);
+            }
+        } else {
+            setGlobalModeRadio(id, "follow");
+        }
     } else {
-        delete bindings[id].global;
-    }
-    try {
-        await saveConfig("chord_bindings", bindings);
-        return true;
-    } catch (err) {
-        // 后端冲突检查拒绝（组合键撞主热键 / 撞其他全局键 / 撞 chord 键）
-        console.warn("save chord global binding rejected:", err);
-        showGlobalStatusMessage(id, String(err?.message || err || ""));
-        return false;
+        // 回滚到 disabled 状态
+        if (toggle) toggle.checked = false;
+        configEl?.setAttribute("hidden", "");
     }
 }
 
 /**
  * 在状态行显示一条临时消息（保存被拒等场景），8 秒后或下次状态事件刷新时消失。
+ *
+ * 每个 action 独立管理 timer 和 revision token；新消息替换旧消息时取消旧 timer
+ * 并递增 revision。timer 到期时只清除自己对应 revision 的消息，
+ * 不能抹掉后来到达的新状态（updateGlobalStatusDom 或新临时消息）。
  */
 function showGlobalStatusMessage(id, msg) {
     const el = document.querySelector(`.chord-global-status[data-id="${CSS.escape(id)}"]`);
     if (!el || !msg) return;
+
+    // 取消旧 timer（新消息替换旧消息）
+    const oldTimer = statusMessageTimers.get(id);
+    if (oldTimer) clearTimeout(oldTimer);
+
+    // 递增 revision：此消息的 timer 只在自己对应的 revision 下才能清除 DOM
+    const msgRev = (statusMessageRevisions.get(id) ?? 0) + 1;
+    statusMessageRevisions.set(id, msgRev);
+
     el.innerHTML = `<span class="chord-global-status-line is-warn">${escapeHtml(msg)}</span>`;
+
+    // 8 秒后自动清除这条消息
+    const timer = setTimeout(() => {
+        statusMessageTimers.delete(id);
+        // revision 不匹配 = 此消息已被新状态/新消息取代，不碰 DOM
+        if (statusMessageRevisions.get(id) !== msgRev) return;
+        // 只在当前内容确实是临时消息时清除（不抹掉后来到达的新状态）
+        const current = el.querySelector(".is-warn");
+        if (current && current.textContent === msg) {
+            el.innerHTML = globalStatusBlockHtml(id, true);
+        }
+        // 消息清除后递增 revision，使后续漏取消的 timer 不误操作
+        statusMessageRevisions.set(id, msgRev + 1);
+    }, 8000);
+    statusMessageTimers.set(id, timer);
 }
 
 /**
@@ -417,7 +566,7 @@ async function startGlobalRecording(btn) {
             return;
         }
         // 保存成功：切到 custom 单选并显示新组合，等状态事件回显生效结果
-        comboEl.textContent = formatCombo(canonical, key);
+        comboEl.innerHTML = renderComboHTML(normalizeCombo(canonical, key));
         setGlobalModeRadio(id, "custom");
     } catch (err) {
         console.warn("record global hotkey failed:", err);
@@ -675,17 +824,26 @@ function bindRowEvents(container) {
         btn.addEventListener("click", async (e) => {
             e.stopPropagation();
             const id = btn.dataset.id;
-            // 读当前 chord 配置，把该 id 的 binding.key 清空（触发 default 兜底）
+            // 串行化：通过 chordBindingsWriteChain 排队，避免与其他 binding 写入并发覆盖
             try {
-                const fullCfg = await invoke("get_config");
-                const bindings = fullCfg?.chord_bindings;
-                if (bindings && bindings[id]) {
-                    bindings[id].key = "";
-                    await saveConfig("chord_bindings", bindings);
-                    // 保持该 row 展开状态，重新渲染后恢复
-                    container._expandedChordIds.add(id);
-                    await loadChordActions();
-                }
+                await new Promise((resolve, reject) => {
+                    chordBindingsWriteChain = chordBindingsWriteChain.then(async () => {
+                        try {
+                            const fullCfg = await invoke("get_config");
+                            const bindings = fullCfg?.chord_bindings;
+                            if (bindings && bindings[id]) {
+                                bindings[id].key = "";
+                                await saveConfig("chord_bindings", bindings);
+                            }
+                            resolve();
+                        } catch (err) {
+                            reject(err);
+                        }
+                    });
+                });
+                // 保持该 row 展开状态，重新渲染后恢复
+                container._expandedChordIds.add(id);
+                await loadChordActions();
             } catch (err) {
                 console.error("reset chord binding failed:", err);
             }
@@ -724,12 +882,18 @@ function bindRowEvents(container) {
             }
             // 切自定义：已有自定义组合则原样保存，否则写入建议值 Ctrl+Alt+<触发键>
             let existing = null;
-            try {
-                const fullCfg = await invoke("get_config");
-                existing = fullCfg?.chord_bindings?.[id]?.global;
-            } catch (err) {
-                console.warn("load chord binding for global default failed:", err);
-            }
+            await new Promise((resolve) => {
+                chordBindingsWriteChain = chordBindingsWriteChain.then(async () => {
+                    try {
+                        const fullCfg = await invoke("get_config");
+                        existing = fullCfg?.chord_bindings?.[id]?.global ?? null;
+                        resolve();
+                    } catch (err) {
+                        console.warn("load chord binding for global default failed:", err);
+                        resolve();
+                    }
+                });
+            });
             if (existing?.mode === "custom") {
                 const ok = await saveGlobalBinding(id, existing);
                 if (!ok) setGlobalModeRadio(id, "follow");
@@ -746,7 +910,7 @@ function bindRowEvents(container) {
             const comboEl = container.querySelector(
                 `.chord-global-combo[data-id="${CSS.escape(id)}"]`,
             );
-            if (comboEl) comboEl.textContent = formatCombo(modifiers, key);
+            if (comboEl) comboEl.innerHTML = renderComboHTML(normalizeCombo(modifiers, key));
         });
     });
 
@@ -792,7 +956,11 @@ function bindRowEvents(container) {
             snapToggle.addEventListener("change", () => {
                 const visible = snapToggle.checked;
                 shotDetail.querySelectorAll(".control-snap-params").forEach((row) => {
-                    row.style.display = visible ? "" : "none";
+                    if (visible) {
+                        row.removeAttribute("hidden");
+                    } else {
+                        row.setAttribute("hidden", "");
+                    }
                 });
             });
         }
@@ -854,17 +1022,24 @@ async function startRecording(btn) {
         }
 
         // 保存新 binding（key 转小写以与 default_key / effective_key 对齐）
+        // 串行化：通过 chordBindingsWriteChain 排队，避免与其他 binding 写入并发覆盖
         const key = result.key.toLowerCase();
-        const fullCfg = await invoke("get_config");
-        const bindings = fullCfg?.chord_bindings || {};
-        if (!bindings[id]) {
-            // 只补 key/modifiers，不写 semantic —— semantic 缺省即走后端 default_semantic()。
-            // 早期版本曾写 `semantic: "tap"`，会让 voice_input（若日后允许改键）从 Hold 静默降级 Tap，
-            // 并被收进 tap_keys 让 LL hook 吞 Alt+Space。0.11.7 已在后端加 id 特判兜底，此处配合去掉。
-            bindings[id] = {key: "", modifiers: ["alt"]};
-        }
-        bindings[id].key = key;
-        await saveConfig("chord_bindings", bindings);
+        await new Promise((resolve, reject) => {
+            chordBindingsWriteChain = chordBindingsWriteChain.then(async () => {
+                try {
+                    const fullCfg = await invoke("get_config");
+                    const bindings = fullCfg?.chord_bindings || {};
+                    if (!bindings[id]) {
+                        bindings[id] = {key: "", modifiers: ["alt"]};
+                    }
+                    bindings[id].key = key;
+                    await saveConfig("chord_bindings", bindings);
+                    resolve();
+                } catch (err) {
+                    reject(err);
+                }
+            });
+        });
         // 保持该 row 展开状态，重新渲染后恢复
         const container = btn.closest("#chord-actions-container");
         if (container) container._expandedChordIds.add(id);
@@ -967,3 +1142,23 @@ function escapeHtml(str) {
 function escapeAttr(str) {
     return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
+
+// ── 测试导出（仅用于单元测试纯逻辑，生产代码不依赖）────────────────────────────
+
+export const __test__ = {
+    saveGlobalBinding,
+    rollbackGlobalBindingUI,
+    showGlobalStatusMessage,
+    updateGlobalStatusDom,
+    confirmedGlobalBindings,
+    replaceConfirmedGlobalBindings,
+    statusMessageTimers,
+    get statusMessageRevisions() { return statusMessageRevisions; },
+    globalBindingRevisions,
+    get actionsLoadRevision() { return actionsLoadRevision; },
+    // 串行化链重置（测试间隔离）
+    resetChordBindingsWriteChain() {
+        chordBindingsWriteChain = Promise.resolve();
+        globalBindingRevisions.clear();
+    },
+};

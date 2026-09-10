@@ -358,6 +358,24 @@ pub async fn set_local_stt_selection(
             tracing::warn!(engine_id = %engine_id, model_id = %model_id, %err, "模型切换事务失败");
             return Err(CommandError::from(err));
         }
+        Err(crate::app::local_engine::manager::SwitchModelFailure::StopFailed { stop_error }) => {
+            tracing::error!(
+                engine_id = %engine_id,
+                target = %model_id,
+                error = %stop_error,
+                "模型切换在停止旧实例时失败，未提交新选择"
+            );
+            return Err(CommandError::with_detail(
+                "switch_stop_failed",
+                "旧模型未能可靠停止；新选择未提交，也未启动目标模型。请先处理引擎停止错误。",
+                true,
+                serde_json::json!({
+                    "engine_id": engine_id,
+                    "target_model_id": model_id,
+                    "stop_error_code": format!("{:?}", stop_error.code),
+                }),
+            ));
+        }
         Err(crate::app::local_engine::manager::SwitchModelFailure::RollbackFailed {
             target_error,
             rollback_error,

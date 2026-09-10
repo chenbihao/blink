@@ -523,6 +523,8 @@ pub struct EngineManager {
     /// 安全移除对应 ProcessKey 条目，避免 registry 泄漏。
     /// 不形成强引用环：Arc 指向 Mutex，不指向 EngineManager 自身。
     process_registry: Arc<std::sync::Mutex<HashMap<ProcessKey, Arc<ManagedProcess>>>>,
+    #[cfg(test)]
+    stop_failure_for_test: std::sync::Mutex<HashMap<EngineId, LocalEngineError>>,
 }
 
 impl EngineManager {
@@ -640,6 +642,8 @@ impl EngineManager {
             onnx_provider: crate::infra::local_engine::providers::onnx::OnnxRuntimeProvider::new(),
             selected_store: std::sync::OnceLock::new(),
             process_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            stop_failure_for_test: std::sync::Mutex::new(HashMap::new()),
         });
 
         // 后台探测每个引擎的 active 部署（含事务 journal fail-closed 恢复）
@@ -666,6 +670,14 @@ impl EngineManager {
     #[cfg(test)]
     pub fn coordinator(&self) -> &EngineOperationCoordinator {
         &self.coordinator
+    }
+
+    #[cfg(test)]
+    fn fail_next_stop_for_test(&self, engine_id: &EngineId, error: LocalEngineError) {
+        self.stop_failure_for_test
+            .lock()
+            .unwrap()
+            .insert(engine_id.clone(), error);
     }
 
     /// 返回模型目录引用（commands DTO 投影用）。

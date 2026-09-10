@@ -9,7 +9,7 @@
 //! - CPU 密集解码/规范化不在 async worker 上裸跑——走 `spawn_blocking`。
 //! - 日志/错误/断言不含音频字节、绝对路径、私有文件名或转写全文。
 //! - deadline/cancel 后的迟到结果只记分类并丢弃。
-//! - 切模或重启后旧结果不得成功投影（generation/instance 二次验证）。
+//! - 切模或重启后旧结果不得成功投影（冻结的 model/instance 二次验证）。
 //!
 //! **分层**：app 层模块，消费 `domain::stt::transcribe`、
 //! `app::audio_resource`、`infra::platform::audio` 和 `app::local_engine`。
@@ -19,12 +19,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use crate::domain::config::stt_config::{SttConfig, SttMode, get_stt_config};
-use crate::domain::stt::SttTransport;
+use crate::domain::config::stt_config::{LocalSttSelection, SttMode, get_stt_config};
 use crate::domain::stt::transcribe::{
     AudioTranscriptionError, AudioTranscriptionPort, AudioTranscriptionRequest,
     AudioTranscriptionResult,
 };
+use crate::domain::stt::{SttTransport, SttTransportError};
 use crate::infra::platform::audio::format::AudioDecodeError;
 use crate::infra::platform::audio::normalize::{AudioNormalizer, NormalizationSummary};
 use crate::infra::platform::audio::wav::decode_wav_with_budget;
@@ -62,14 +62,11 @@ impl Default for TranscriptionConfig {
 /// 冻结的引擎身份快照——在转写开始时冻结，结束时二次验证。
 ///
 /// 包含足以判断"引擎是否被切换或重启"的信息：
-/// engine_id、model_id、generation、instance_id。
+/// engine_id、model_id、instance_id。
 #[derive(Debug, Clone)]
 pub struct FrozenEngineIdentity {
     pub engine_id: String,
     pub model_id: String,
-    /// 引擎 generation——由调用方定义的版本号。
-    /// 切模或重启后 generation 应变化，使旧结果失效。
-    pub generation: u64,
     pub instance_id: String,
 }
 
@@ -86,6 +83,7 @@ pub trait EngineConnectionPort: Send + Sync {
     /// 返回 `Some(transport, identity)` 表示已就绪。
     async fn get_stt_connection(
         &self,
+        frozen_selection: &LocalSttSelection,
     ) -> Result<Option<(Arc<dyn SttTransport>, FrozenEngineIdentity)>, String>;
 }
 
@@ -96,8 +94,8 @@ pub trait CloudEgressAuthorizer: Send + Sync {
     /// 检查给定供应商的云端转写是否已获动态外发确认。
     ///
     /// 返回 `true` 表示已授权，可以发起网络请求。
-    /// 返回 `false` 表示未授权——调用方必须返回 `CloudEgressNotAuthorized`，
-    /// 不得发起网络请求，也不得偷偷切换本地模型。
+    /// 当前文件转写尚未实现云端执行，因此无论授权状态如何都优先返回
+    /// `Unsupported`；此 seam 仅为未来实现保留，任何路径都不得偷偷切换本地模型。
     fn is_authorized(&self, provider_kind: &str) -> bool;
 }
 
@@ -108,12 +106,12 @@ pub trait CloudEgressAuthorizer: Send + Sync {
 /// 编排顺序（Handoff 04 要求）：
 /// 1. 检查 deadline
 /// 2. resolve audio_ref 并持有已打开资源
-/// 3. 冻结 STT config、engine/model、instance/generation
+/// 3. 冻结 STT config、engine/model/instance 身份
 /// 4. 验证已配置、已安装且当前可用；不启动、安装、下载或切换
 /// 5. 在 blocking pool 中有界读取、decode、normalize
 /// 6. 再检查 deadline 和被冻结身份
 /// 7. 编码成 canonical 16k mono PCM16 WAV，调用现有唯一 transport
-/// 8. 返回前再次验证 generation/instance
+/// 8. 返回前再次验证 model/instance
 ///
 /// deadline/cancel 后的迟到结果只记分类并丢弃。
 pub struct AudioTranscriptionService {
@@ -183,13 +181,8 @@ impl AudioTranscriptionService {
     /// 冻结当前 STT 配置和引擎身份。
     async fn freeze_identity(
         &self,
-    ) -> Result<
-        (
-            SttConfig,
-            Option<(Arc<dyn SttTransport>, FrozenEngineIdentity)>,
-        ),
-        AudioTranscriptionError,
-    > {
+    ) -> Result<Option<(Arc<dyn SttTransport>, FrozenEngineIdentity)>, AudioTranscriptionError>
+    {
         let config = get_stt_config();
 
         // 验证已配置
@@ -208,7 +201,7 @@ impl AudioTranscriptionService {
                 // 获取连接——不启动、不安装
                 let conn = self
                     .engine_conn
-                    .get_stt_connection()
+                    .get_stt_connection(selection)
                     .await
                     .map_err(|e| AudioTranscriptionError::Internal { detail: e })?;
 
@@ -226,7 +219,13 @@ impl AudioTranscriptionService {
                                     .into(),
                             });
                         }
-                        Ok((config, Some((transport, identity))))
+                        if identity.model_id != selection.model_id {
+                            return Err(AudioTranscriptionError::SttIdentityChanged {
+                                detail: "model_id mismatch between selection and running instance"
+                                    .into(),
+                            });
+                        }
+                        Ok(Some((transport, identity)))
                     }
                     None => Err(AudioTranscriptionError::SttBackendUnavailable {
                         detail: "local STT engine not running".into(),
@@ -240,13 +239,10 @@ impl AudioTranscriptionService {
                     .as_ref()
                     .ok_or(AudioTranscriptionError::SttNotConfigured)?;
 
-                if !self.cloud_auth.is_authorized(&provider.kind) {
-                    return Err(AudioTranscriptionError::CloudEgressNotAuthorized);
-                }
-
-                // 云端没有本地 transport——transport 由 cloud.rs 在请求时创建
-                // 此处返回 None，transport 在调用方通过 wav::transcribe_async 处理
-                Ok((config, None))
+                let _authorized = self.cloud_auth.is_authorized(&provider.kind);
+                Err(AudioTranscriptionError::Unsupported {
+                    detail: "cloud file transcription is not implemented".into(),
+                })
             }
         }
     }
@@ -260,7 +256,10 @@ impl AudioTranscriptionService {
     ) -> Result<(), AudioTranscriptionError> {
         let conn = self
             .engine_conn
-            .get_stt_connection()
+            .get_stt_connection(&LocalSttSelection {
+                engine_id: frozen.engine_id.clone(),
+                model_id: frozen.model_id.clone(),
+            })
             .await
             .map_err(|e| AudioTranscriptionError::Internal { detail: e })?;
 
@@ -268,7 +267,7 @@ impl AudioTranscriptionService {
             Some((_transport, current)) => {
                 if current.engine_id != frozen.engine_id
                     || current.instance_id != frozen.instance_id
-                    || current.generation != frozen.generation
+                    || current.model_id != frozen.model_id
                 {
                     tracing::warn!(
                         "transcribe: identity changed during execution (engine/model/instance mismatch)"
@@ -305,8 +304,8 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
         let opened = self.resolve_audio_ref(&request.audio_ref)?;
         let file_size = opened.size;
 
-        // 3. 冻结 STT config、engine/model、instance/generation
-        let (_stt_config, conn_info) = self.freeze_identity().await?;
+        // 3. 冻结 STT config、engine/model/instance 身份
+        let conn_info = self.freeze_identity().await?;
         let frozen_identity = conn_info.as_ref().map(|(_, id)| id.clone());
 
         // 4. 本地模式需要 transport 可用
@@ -316,7 +315,9 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
                 // 云端模式——不通过此路径调用本地 transport
                 // 云端转写在当前首版暂不支持通过此 port 调用
                 // （需要额外的 HTTP 转写逻辑和 secret 管理）
-                return Err(AudioTranscriptionError::CloudEgressNotAuthorized);
+                return Err(AudioTranscriptionError::Unsupported {
+                    detail: "cloud file transcription is not implemented".into(),
+                });
             }
         };
 
@@ -374,7 +375,7 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
         // 8. 调用 transport
         let transcribe_result = transport.transcribe(&wav_bytes).await;
 
-        // 9. 返回前再次验证 generation/instance
+        // 9. 返回前再次验证 model/instance
         if let Err(e) = self.verify_identity(&frozen).await {
             // 迟到结果丢弃——只记分类
             tracing::warn!(
@@ -387,20 +388,7 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
         // 处理 transport 结果
         let text = match transcribe_result {
             Ok(text) => text,
-            Err(msg) => {
-                // 分类 transport 错误
-                let lower = msg.to_lowercase();
-                if lower.contains("busy") || lower.contains("queue") || lower.contains("backlog") {
-                    return Err(AudioTranscriptionError::SttBusy);
-                }
-                if lower.contains("timeout") || lower.contains("timed out") {
-                    return Err(AudioTranscriptionError::Timeout { detail: msg });
-                }
-                if lower.contains("cancelled") || lower.contains("canceled") {
-                    return Err(AudioTranscriptionError::Cancelled);
-                }
-                return Err(AudioTranscriptionError::SttBackendUnavailable { detail: msg });
-            }
+            Err(error) => return Err(map_transport_error(error)),
         };
 
         // 检查 deadline 是否在 transport 期间过期
@@ -420,7 +408,6 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
             duration_ms,
             engine_id: frozen.engine_id.clone(),
             model_id: frozen.model_id.clone(),
-            engine_generation: frozen.generation,
             engine_instance_id: frozen.instance_id.clone(),
             source_format: format!("{}", source_format),
             normalized_format: format!(
@@ -515,6 +502,18 @@ fn map_audio_ref_error(e: AudioRefError) -> AudioTranscriptionError {
     }
 }
 
+fn map_transport_error(error: SttTransportError) -> AudioTranscriptionError {
+    match error {
+        SttTransportError::Busy { .. } => AudioTranscriptionError::SttBusy,
+        SttTransportError::Timeout { detail } => AudioTranscriptionError::Timeout { detail },
+        SttTransportError::Cancelled => AudioTranscriptionError::Cancelled,
+        SttTransportError::Unavailable { detail } => {
+            AudioTranscriptionError::SttBackendUnavailable { detail }
+        }
+        SttTransportError::Internal { detail } => AudioTranscriptionError::Internal { detail },
+    }
+}
+
 /// 把 `AudioDecodeError` 映射为 `AudioTranscriptionError`。
 fn map_decode_error(e: AudioDecodeError) -> AudioTranscriptionError {
     match e {
@@ -579,17 +578,12 @@ impl EngineConnectionAdapter {
 impl EngineConnectionPort for EngineConnectionAdapter {
     async fn get_stt_connection(
         &self,
+        frozen_selection: &LocalSttSelection,
     ) -> Result<Option<(Arc<dyn SttTransport>, FrozenEngineIdentity)>, String> {
-        // 读取 STT 配置获取当前 engine_id
-        let stt_config = get_stt_config();
-        let selection = stt_config
-            .local_stt_selection
-            .as_ref()
-            .ok_or_else(|| "stt selection not configured".to_string())?;
-
-        // 通过 EngineManager 获取连接——不启动、不安装
-        let engine_id = crate::infra::local_engine::runtime::EngineId::new(&selection.engine_id)
-            .map_err(|e| format!("invalid engine_id: {e}"))?;
+        // 只消费请求开始时冻结的 selection；禁止在适配层二次读取全局配置。
+        let engine_id =
+            crate::infra::local_engine::runtime::EngineId::new(&frozen_selection.engine_id)
+                .map_err(|e| format!("invalid engine_id: {e}"))?;
 
         let conn = self
             .engine_manager
@@ -603,23 +597,19 @@ impl EngineConnectionPort for EngineConnectionAdapter {
                     "engine running but no worker transport available".to_string()
                 })?;
 
-                // generation 使用 service epoch——EngineManager 实例不变则 epoch 不变
-                let generation = self.engine_manager.epoch().0;
-
                 let running_model_id = c.model_id.ok_or_else(|| {
                     "engine running but launch snapshot has no frozen model identity".to_string()
                 })?;
-                if running_model_id != selection.model_id {
+                if running_model_id != frozen_selection.model_id {
                     return Err(format!(
                         "running model does not match selected model: running={running_model_id}, selected={}",
-                        selection.model_id
+                        frozen_selection.model_id
                     ));
                 }
 
                 let identity = FrozenEngineIdentity {
                     engine_id: c.engine_id.clone(),
                     model_id: running_model_id,
-                    generation,
                     instance_id: c.instance_id.clone(),
                 };
 
@@ -669,6 +659,32 @@ mod tests {
     fn production_cloud_authorizer_is_fail_closed() {
         assert!(!SttCloudEgressAuthorizer::new().is_authorized("openai"));
     }
+
+    #[test]
+    fn structured_transport_error_mapping_contract() {
+        assert!(matches!(
+            map_transport_error(SttTransportError::Busy {
+                detail: "full".into()
+            }),
+            AudioTranscriptionError::SttBusy
+        ));
+        assert!(matches!(
+            map_transport_error(SttTransportError::Timeout {
+                detail: "deadline".into()
+            }),
+            AudioTranscriptionError::Timeout { .. }
+        ));
+        assert!(matches!(
+            map_transport_error(SttTransportError::Cancelled),
+            AudioTranscriptionError::Cancelled
+        ));
+        assert!(matches!(
+            map_transport_error(SttTransportError::Unavailable {
+                detail: "closed".into()
+            }),
+            AudioTranscriptionError::SttBackendUnavailable { .. }
+        ));
+    }
     use crate::infra::platform::audio::test_fixtures::*;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -678,40 +694,53 @@ mod tests {
     /// Fake transport——受控 barrier + oneshot，模拟成功/失败/延迟。
     struct FakeTransport {
         response_text: String,
-        should_fail: bool,
-        fail_msg: String,
+        failure: Option<SttTransportError>,
     }
 
     impl FakeTransport {
         fn success(text: &str) -> Self {
             Self {
                 response_text: text.to_string(),
-                should_fail: false,
-                fail_msg: String::new(),
+                failure: None,
             }
         }
 
-        fn fail(msg: &str) -> Self {
+        fn fail(error: SttTransportError) -> Self {
             Self {
                 response_text: String::new(),
-                should_fail: true,
-                fail_msg: msg.to_string(),
+                failure: Some(error),
             }
         }
     }
 
     #[async_trait]
     impl SttTransport for FakeTransport {
-        async fn check_ready(&self) -> Result<(), String> {
+        async fn check_ready(&self) -> Result<(), SttTransportError> {
             Ok(())
         }
 
-        async fn transcribe(&self, _wav_bytes: &[u8]) -> Result<String, String> {
-            if self.should_fail {
-                Err(self.fail_msg.clone())
+        async fn transcribe(&self, _wav_bytes: &[u8]) -> Result<String, SttTransportError> {
+            if let Some(error) = &self.failure {
+                Err(error.clone())
             } else {
                 Ok(self.response_text.clone())
             }
+        }
+    }
+
+    struct ConfigChangingTransport;
+
+    #[async_trait]
+    impl SttTransport for ConfigChangingTransport {
+        async fn check_ready(&self) -> Result<(), SttTransportError> {
+            Ok(())
+        }
+
+        async fn transcribe(&self, _wav_bytes: &[u8]) -> Result<String, SttTransportError> {
+            let mut changed = get_stt_config();
+            changed.local_stt_selection = Some(LocalSttSelection::new("funasr", "paraformer-zh"));
+            crate::domain::config::stt_config::update_cache(&changed);
+            Ok("冻结配置仍然有效".into())
         }
     }
 
@@ -722,6 +751,7 @@ mod tests {
         /// 第二次调用（verify_identity）时返回的 identity——用于切模测试。
         second_identity: Mutex<Option<Option<FrozenEngineIdentity>>>,
         call_count: Mutex<u32>,
+        requested_selections: Mutex<Vec<LocalSttSelection>>,
     }
 
     impl FakeEngineConnection {
@@ -731,6 +761,7 @@ mod tests {
                 identity: Some(identity),
                 second_identity: Mutex::new(None),
                 call_count: Mutex::new(0),
+                requested_selections: Mutex::new(Vec::new()),
             }
         }
 
@@ -738,13 +769,22 @@ mod tests {
         fn set_second_identity(&self, identity: Option<FrozenEngineIdentity>) {
             *self.second_identity.lock().unwrap() = Some(identity);
         }
+
+        fn requested_selections(&self) -> Vec<LocalSttSelection> {
+            self.requested_selections.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
     impl EngineConnectionPort for FakeEngineConnection {
         async fn get_stt_connection(
             &self,
+            frozen_selection: &LocalSttSelection,
         ) -> Result<Option<(Arc<dyn SttTransport>, FrozenEngineIdentity)>, String> {
+            self.requested_selections
+                .lock()
+                .unwrap()
+                .push(frozen_selection.clone());
             let mut count = self.call_count.lock().unwrap();
             *count += 1;
 
@@ -872,7 +912,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -898,11 +937,56 @@ mod tests {
         assert!(!result.no_speech);
         assert_eq!(result.engine_id, "funasr");
         assert_eq!(result.model_id, "sensevoice-small");
-        assert_eq!(result.engine_generation, 1);
         assert_eq!(result.engine_instance_id, "inst-1");
         assert!(result.source_format.contains("1ch"));
         assert!(result.source_format.contains("16000Hz"));
         assert!(result.normalized_format.contains("mono"));
+    }
+
+    #[tokio::test]
+    async fn config_change_during_transcription_keeps_frozen_selection() {
+        let _lock = init_local_stt_config(true).await;
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(AudioResourceRegistry::default());
+        let (audio_ref, _) = make_test_wav(
+            &registry,
+            dir.path(),
+            "config-change.wav",
+            &FixtureConfig::default(),
+        );
+        let identity = FrozenEngineIdentity {
+            engine_id: "funasr".into(),
+            model_id: "sensevoice-small".into(),
+            instance_id: "inst-frozen".into(),
+        };
+        let engine_conn = Arc::new(FakeEngineConnection::new(
+            Arc::new(ConfigChangingTransport),
+            identity,
+        ));
+        let service = AudioTranscriptionService::new(
+            registry,
+            engine_conn.clone(),
+            Arc::new(FakeCloudAuth { authorized: false }),
+            default_test_config(),
+        );
+
+        let result = service
+            .transcribe(AudioTranscriptionRequest { audio_ref }, None)
+            .await
+            .unwrap();
+        assert_eq!(result.model_id, "sensevoice-small");
+        assert_eq!(
+            engine_conn.requested_selections(),
+            vec![
+                LocalSttSelection::new("funasr", "sensevoice-small"),
+                LocalSttSelection::new("funasr", "sensevoice-small"),
+            ]
+        );
+
+        // 恢复全局测试配置，避免影响后续串行用例。
+        let mut restored = get_stt_config();
+        restored.local_stt_selection = Some(LocalSttSelection::new("funasr", "sensevoice-small"));
+        crate::domain::config::stt_config::update_cache(&restored);
     }
 
     // ── 空文本 ───────────────────────────────────────────────────────────
@@ -920,7 +1004,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -955,7 +1038,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1054,7 +1136,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1086,6 +1167,56 @@ mod tests {
         let _ = init_local_stt_config(true).await;
     }
 
+    #[tokio::test]
+    #[allow(clippy::field_reassign_with_default)]
+    async fn cloud_file_transcription_reports_unsupported_not_authorization() {
+        let _lock = STT_CONFIG_TEST_LOCK.lock().await;
+        let mut cloud = crate::domain::config::stt_config::SttConfig::default();
+        cloud.enabled = true;
+        cloud.mode = SttMode::Cloud;
+        cloud.cloud_provider = Some(crate::domain::config::stt_config::SttCloudProvider {
+            kind: "openai".into(),
+            base_url: None,
+            model_id: "whisper".into(),
+        });
+        crate::domain::config::stt_config::init_cache(cloud.clone());
+        crate::domain::config::stt_config::update_cache(&cloud);
+
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(AudioResourceRegistry::default());
+        let (audio_ref, _) = make_test_wav(
+            &registry,
+            dir.path(),
+            "cloud.wav",
+            &FixtureConfig::default(),
+        );
+        let engine_conn = Arc::new(FakeEngineConnection {
+            transport: None,
+            identity: None,
+            second_identity: Mutex::new(None),
+            call_count: Mutex::new(0),
+            requested_selections: Mutex::new(Vec::new()),
+        });
+        let service = AudioTranscriptionService::new(
+            registry,
+            engine_conn,
+            Arc::new(FakeCloudAuth { authorized: false }),
+            default_test_config(),
+        );
+
+        let error = service
+            .transcribe(AudioTranscriptionRequest { audio_ref }, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AudioTranscriptionError::Unsupported { .. }));
+
+        let mut restored = cloud;
+        restored.mode = SttMode::Local;
+        restored.cloud_provider = None;
+        restored.local_stt_selection = Some(LocalSttSelection::new("funasr", "sensevoice-small"));
+        crate::domain::config::stt_config::update_cache(&restored);
+    }
+
     // ── 引擎不可用 ───────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1103,6 +1234,7 @@ mod tests {
             identity: None,
             second_identity: Mutex::new(None),
             call_count: Mutex::new(0),
+            requested_selections: Mutex::new(Vec::new()),
         });
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
@@ -1140,7 +1272,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1149,8 +1280,7 @@ mod tests {
         engine_conn.set_second_identity(Some(FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "paraformer-zh".into(), // 不同 model
-            generation: 2,
-            instance_id: "inst-2".into(),
+            instance_id: "inst-1".into(),
         }));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
@@ -1173,6 +1303,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn transcribe_instance_restart_discards_old_result() {
+        let _lock = init_local_stt_config(true).await;
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(AudioResourceRegistry::default());
+        let (audio_ref, _) = make_test_wav(
+            &registry,
+            dir.path(),
+            "restart.wav",
+            &FixtureConfig::default(),
+        );
+        let transport = Arc::new(FakeTransport::success("迟到结果"));
+        let engine_conn = Arc::new(FakeEngineConnection::new(
+            transport,
+            FrozenEngineIdentity {
+                engine_id: "funasr".into(),
+                model_id: "sensevoice-small".into(),
+                instance_id: "inst-old".into(),
+            },
+        ));
+        engine_conn.set_second_identity(Some(FrozenEngineIdentity {
+            engine_id: "funasr".into(),
+            model_id: "sensevoice-small".into(),
+            instance_id: "inst-new".into(),
+        }));
+        let service = AudioTranscriptionService::new(
+            registry,
+            engine_conn,
+            Arc::new(FakeCloudAuth { authorized: false }),
+            default_test_config(),
+        );
+
+        let error = service
+            .transcribe(AudioTranscriptionRequest { audio_ref }, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AudioTranscriptionError::SttIdentityChanged { .. }
+        ));
+    }
+
     // ── 引擎在执行期间停止 ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -1188,7 +1360,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1239,7 +1410,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1278,7 +1448,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1315,11 +1484,12 @@ mod tests {
         let cfg = FixtureConfig::default();
         let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
 
-        let transport = Arc::new(FakeTransport::fail("engine busy: queue full"));
+        let transport = Arc::new(FakeTransport::fail(SttTransportError::Busy {
+            detail: "queue full".into(),
+        }));
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1355,11 +1525,12 @@ mod tests {
         let cfg = FixtureConfig::default();
         let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
 
-        let transport = Arc::new(FakeTransport::fail("request timed out"));
+        let transport = Arc::new(FakeTransport::fail(SttTransportError::Timeout {
+            detail: "request timed out".into(),
+        }));
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1408,7 +1579,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-1".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
@@ -1454,7 +1624,6 @@ mod tests {
         let identity = FrozenEngineIdentity {
             engine_id: "funasr".into(),
             model_id: "sensevoice-small".into(),
-            generation: 1,
             instance_id: "inst-abc".into(),
         };
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));

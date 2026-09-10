@@ -73,6 +73,9 @@ pub enum SwitchModelOutcome {
 /// 切换事务失败。
 #[derive(Debug, Clone)]
 pub enum SwitchModelFailure {
+    /// 旧实例停止失败：selected/active 身份均未提交新值，目标绝不启动。
+    /// 当前进程状态不确定，调用方应先处理 stop 错误后再重试。
+    StopFailed { stop_error: LocalEngineError },
     /// 目标验证/提交/启动失败——引擎回到事务前状态或已恢复旧模型失败前的
     /// 稳定态（具体见变体）。
     Target(LocalEngineError),
@@ -181,7 +184,15 @@ impl EngineManager {
         }
 
         // ── 3. stop old ──────────────────────────────────────────────────
-        self.stop_internal(engine_id, &entry, &operation_id).await;
+        if let Err(stop_error) = self.stop_internal(engine_id, &entry, &operation_id).await {
+            tracing::error!(
+                engine = %engine_id,
+                target = %target_model_id,
+                error = %stop_error,
+                "模型切换事务：旧实例停止失败，保留旧 selected/active 并中止"
+            );
+            return Err(SwitchModelFailure::StopFailed { stop_error });
+        }
 
         // ── 4. commit selected target ────────────────────────────────────
         if let Err(commit_err) = store.commit_selected(target_model_id).await {

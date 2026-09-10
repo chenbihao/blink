@@ -30,10 +30,9 @@ impl EngineManager {
         engine_id: &EngineId,
         entry: &Arc<EngineEntry>,
         operation_id: &str,
-    ) {
-        let _ = self
-            .stop_internal_with_status(engine_id, entry, operation_id)
-            .await;
+    ) -> Result<(), LocalEngineError> {
+        self.stop_internal_with_status(engine_id, entry, operation_id)
+            .await
     }
 
     /// 停止执行体（携带用于状态提交的 operation_id）。
@@ -43,6 +42,11 @@ impl EngineManager {
         entry: &Arc<EngineEntry>,
         operation_id: &str,
     ) -> Result<(), LocalEngineError> {
+        #[cfg(test)]
+        if let Some(error) = self.stop_failure_for_test.lock().unwrap().remove(engine_id) {
+            return Err(error);
+        }
+
         // 幂等检查
         let managed = {
             let mp = entry.managed_process.lock().await;
@@ -83,9 +87,11 @@ impl EngineManager {
                     Err(e) => {
                         let err = from_process(ErrorPhase::Stop, "停止失败", &e);
                         self.commit_status_internal(engine_id, Some(operation_id), |status| {
-                            status.process = ProcessState::Exited {
-                                reason: format!("stop failed: {e}"),
-                            };
+                            // stop 失败时无法证明实例已经退出。保留 launch/active
+                            // 身份，并以 Stopping 表达“不确定、禁止启动替代实例”。
+                            status.process = ProcessState::Stopping;
+                            status.service = ServiceHealth::Unknown;
+                            status.model = ModelHealth::Unknown;
                             status.last_error = Some(err.clone());
                         })
                         .await?;
@@ -253,7 +259,7 @@ impl EngineManager {
                 tracing::debug!(engine = %engine_id, "clear_running_instance: 销毁 worker 客户端");
             }
         }
-        super::super::super::funasr::worker::clean_audio_tmp_dir(engine_id);
+        super::super::super::funasr::worker::clean_audio_tmp_dir(engine_id).await;
 
         // 取出 instance_id 用于 lease 删除与 registry 移除
         let saved_instance_id = entry

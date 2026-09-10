@@ -333,16 +333,8 @@ fn detect_segments(samples: &[f32]) -> u32 {
     segments
 }
 
-fn classify_transport_error(error: &str) -> String {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("timeout") {
-        "timeout"
-    } else if lower.contains("closed") || lower.contains("broken pipe") {
-        "transport_closed"
-    } else {
-        "transcription_failed"
-    }
-    .to_string()
+fn classify_transport_error(error: &crate::domain::stt::SttTransportError) -> String {
+    error.category().to_string()
 }
 
 /// 解码和规范化后的音频摘要。
@@ -655,18 +647,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SttTransport for FakeCorpusTransport {
-        async fn check_ready(&self) -> Result<(), String> {
+        async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
             Ok(())
         }
 
-        async fn transcribe(&self, _wav_bytes: &[u8]) -> Result<String, String> {
+        async fn transcribe(
+            &self,
+            _wav_bytes: &[u8],
+        ) -> Result<String, crate::domain::stt::SttTransportError> {
             Ok("hello".to_string())
         }
 
         async fn transcribe_with_metrics(
             &self,
             _wav_bytes: &[u8],
-        ) -> Result<crate::domain::stt::SttTransportResult, String> {
+        ) -> Result<crate::domain::stt::SttTransportResult, crate::domain::stt::SttTransportError>
+        {
             Ok(crate::domain::stt::SttTransportResult {
                 text: "hello".to_string(),
                 inference_ms: Some(1.0),

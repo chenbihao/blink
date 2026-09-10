@@ -578,6 +578,10 @@ fn main() {
             let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
             // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
             let capability_registry = std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
+            // 0.22.18：初始化有界审计队列（tokio runtime 上下文中）
+            tauri::async_runtime::block_on(async {
+                crate::domain::capability::CapabilityRegistry::init_audit_writer();
+            });
             domain_env.set_cap_registry(capability_registry.clone());
 
             // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
@@ -1656,6 +1660,9 @@ app::commands::repair_local_engine,
                         ).await;
                     });
                 }
+                tauri::async_runtime::block_on(async {
+                    crate::domain::capability::CapabilityRegistry::shutdown_audit_writer().await;
+                });
             }
         });
 }

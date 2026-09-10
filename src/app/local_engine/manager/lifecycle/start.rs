@@ -695,7 +695,7 @@ impl EngineManager {
                         tracing::debug!(engine = %engine_id, "exit monitor: 销毁 worker 客户端");
                     }
                 }
-                super::super::super::funasr::worker::clean_audio_tmp_dir(&engine_id);
+                super::super::super::funasr::worker::clean_audio_tmp_dir(&engine_id).await;
 
                 // 取出 instance_id 用于 lease 删除
                 let saved_instance_id = entry

@@ -115,13 +115,44 @@ impl StructuredOcrError {
     }
 
     /// 模型未就绪错误。
+    ///
+    /// `state` 为模型状态描述；`reason` 为机器可读的原因代码，
+    /// 用于控制流判断（替代字符串哨兵）。
     pub fn model_not_ready(state: impl Into<String>) -> Self {
         Self::with_detail(
             OcrErrorCategory::ModelNotReady,
             "PaddleOCR 模型未就绪",
             false,
-            serde_json::json!({ "model_state": state.into() }),
+            serde_json::json!({ "model_state": state.into(), "reason": "not_ready" }),
         )
+    }
+
+    /// 模型未就绪错误（hot-only 模式专用）。
+    ///
+    /// `reason = "hot_only_not_ready"` 用于 auto 路由判定是否应回退 WinRT。
+    /// 这个 reason code 是结构化的，控制流不再依赖 message 文本匹配。
+    pub fn model_not_ready_hot_only() -> Self {
+        Self::with_detail(
+            OcrErrorCategory::ModelNotReady,
+            "PaddleOCR 模型未就绪（hot-only）",
+            false,
+            serde_json::json!({ "model_state": "hot_only", "reason": "hot_only_not_ready" }),
+        )
+    }
+
+    /// 检查错误是否为 hot-only 模式下的 NotReady（用于 auto 路由判定）。
+    ///
+    /// 替代旧的 `e.message.contains("not_ready_hot_only")` 字符串哨兵。
+    /// 通过检查 `detail.reason` 字段做结构化判定。
+    pub fn is_hot_only_not_ready(&self) -> bool {
+        if self.category != OcrErrorCategory::ModelNotReady {
+            return false;
+        }
+        self.detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str())
+            == Some("hot_only_not_ready")
     }
 
     /// 超时错误。

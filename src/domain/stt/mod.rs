@@ -64,20 +64,47 @@ pub struct SttTransportResult {
     pub inference_ms: Option<f64>,
 }
 
+/// STT transport 的稳定错误分类。业务层不得再解析错误文案猜测语义。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SttTransportError {
+    #[error("STT transport busy: {detail}")]
+    Busy { detail: String },
+    #[error("STT transport timeout: {detail}")]
+    Timeout { detail: String },
+    #[error("STT transport cancelled")]
+    Cancelled,
+    #[error("STT transport unavailable: {detail}")]
+    Unavailable { detail: String },
+    #[error("STT transport internal error: {detail}")]
+    Internal { detail: String },
+}
+
+impl SttTransportError {
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Busy { .. } => "busy",
+            Self::Timeout { .. } => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable { .. } => "transport_unavailable",
+            Self::Internal { .. } => "transport_internal",
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait SttTransport: Send + Sync {
     /// 通道与模型就绪检查（身份校验由实现承载）。
-    async fn check_ready(&self) -> Result<(), String>;
+    async fn check_ready(&self) -> Result<(), SttTransportError>;
 
     /// 转录一段 WAV 字节（16kHz mono PCM WAV），返回识别文本。
-    async fn transcribe(&self, wav_bytes: &[u8]) -> Result<String, String>;
+    async fn transcribe(&self, wav_bytes: &[u8]) -> Result<String, SttTransportError>;
 
     /// 带可选 worker 推理耗时的诊断入口。生产业务仍调用 `transcribe`；
     /// corpus/benchmark 可用此方法拆分 IPC 排队与模型推理时间。
     async fn transcribe_with_metrics(
         &self,
         wav_bytes: &[u8],
-    ) -> Result<SttTransportResult, String> {
+    ) -> Result<SttTransportResult, SttTransportError> {
         self.transcribe(wav_bytes)
             .await
             .map(|text| SttTransportResult {

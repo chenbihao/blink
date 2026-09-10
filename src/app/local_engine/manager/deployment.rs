@@ -156,7 +156,15 @@ impl EngineManager {
         .await?;
 
         // 更新会切换 slot——先停止运行中的实例（复用当前 claim 的 operation_id）
-        self.stop_internal(engine_id, &entry, &operation_id).await;
+        if let Err(err) = self.stop_internal(engine_id, &entry, &operation_id).await {
+            self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                status.last_error = Some(err.clone());
+                status.clear_operation();
+            })
+            .await?;
+            tracing::error!(engine = %engine_id, error = %err, "install: 停止运行实例失败，中止部署切换");
+            return Err(err);
+        }
 
         let result = self
             .install_transaction_locked(
@@ -691,7 +699,15 @@ impl EngineManager {
         };
 
         // 更新会切换 slot——先停止运行中的实例（复用当前 claim 的 operation_id）
-        self.stop_internal(engine_id, &entry, &operation_id).await;
+        if let Err(err) = self.stop_internal(engine_id, &entry, &operation_id).await {
+            self.commit_status_internal(engine_id, Some(&operation_id), |status| {
+                status.last_error = Some(err.clone());
+                status.clear_operation();
+            })
+            .await?;
+            tracing::error!(engine = %engine_id, error = %err, "repair: 停止运行实例失败，中止部署切换");
+            return Err(err);
+        }
 
         let result = self
             .install_transaction_locked(

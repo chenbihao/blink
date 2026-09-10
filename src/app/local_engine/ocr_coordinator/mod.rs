@@ -62,8 +62,6 @@ use crate::infra::local_engine::runtime::EngineId;
 
 use singleflight::{LeaseError, LifecycleState};
 
-const PADDLEOCR_ENGINE_ID_STR: &str = "paddleocr";
-
 /// Task 6: RAII guard for repair mode——确保无论 repair 路径如何结束，
 /// repair mode 都会被退出。
 ///
@@ -131,7 +129,8 @@ impl OcrCoordinator {
     ///
     /// executor 传 `None` 时，PaddleOCR 路径将不可用（auto 回退 WinRT）。
     pub fn new(executor: Option<Arc<OnnxOcrExecutor>>) -> Arc<Self> {
-        let paddleocr_engine_id = EngineId::new(PADDLEOCR_ENGINE_ID_STR).unwrap();
+        let paddleocr_engine_id =
+            EngineId::new(crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID).unwrap();
         let (lifecycle_tx, lifecycle_rx) = watch::channel(LifecycleState::Idle { generation: 0 });
         Arc::new(Self {
             executor: std::sync::RwLock::new(executor),
@@ -212,13 +211,20 @@ impl OcrCoordinator {
         }
 
         // 0.22.8-D: 停止 executor（无条件——repair 需要确保 Session drop）
-        let executor_for_shutdown = self.executor.read().unwrap().clone();
+        let executor_for_shutdown = self
+            .executor
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(ref executor) = executor_for_shutdown {
             executor.shutdown().await;
         }
 
         let reset_gen = target_gen.unwrap_or_else(|| self.lifecycle_state().generation());
-        *self.start_elapsed_ms.lock().unwrap() = None;
+        *self
+            .start_elapsed_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.lifecycle_tx
             .send(LifecycleState::Idle {
                 generation: reset_gen + 1,
@@ -239,7 +245,10 @@ impl OcrCoordinator {
         self.repair_mode.store(false, Ordering::SeqCst);
         // 确保状态为 Idle——下次请求会触发正常启动
         let current_gen = self.lifecycle_state().generation();
-        *self.start_elapsed_ms.lock().unwrap() = None;
+        *self
+            .start_elapsed_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.lifecycle_tx
             .send(LifecycleState::Idle {
                 generation: current_gen + 1,
@@ -272,18 +281,18 @@ impl OcrCoordinator {
             Err(LeaseError::Cancelled) => return (Err(StructuredOcrError::cancelled()), 0, 0),
             Err(LeaseError::Timeout) => return (Err(StructuredOcrError::timeout()), 0, 0),
             Err(LeaseError::NotReady) => {
-                return (
-                    Err(StructuredOcrError::model_not_ready("not_ready_hot_only")),
-                    0,
-                    0,
-                );
+                return (Err(StructuredOcrError::model_not_ready_hot_only()), 0, 0);
             }
             Err(LeaseError::Error(e)) => return (Err(e), 0, 0),
         };
         let start_wait_ms = total_start.elapsed().as_millis() as u64;
         let recognize_start = Instant::now();
 
-        let executor = self.executor.read().unwrap().clone();
+        let executor = self
+            .executor
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let executor = match &executor {
             Some(e) => e.clone(),
             None => {
@@ -361,13 +370,20 @@ impl OcrCoordinator {
             waited += 10;
         }
         // 0.22.8-D: 停止 executor
-        let executor_for_shutdown = self.executor.read().unwrap().clone();
+        let executor_for_shutdown = self
+            .executor
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(ref executor) = executor_for_shutdown {
             executor.shutdown().await;
         }
         // 重置状态机
         let final_gen = self.lifecycle_state().generation();
-        *self.start_elapsed_ms.lock().unwrap() = None;
+        *self
+            .start_elapsed_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.lifecycle_tx
             .send(LifecycleState::Idle {
                 generation: final_gen + 1,
@@ -384,7 +400,10 @@ impl OcrCoordinator {
         );
         self.idle_cancel.notify_waiters();
         let current_gen = self.lifecycle_state().generation();
-        *self.start_elapsed_ms.lock().unwrap() = None;
+        *self
+            .start_elapsed_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.lifecycle_tx
             .send(LifecycleState::Idle {
                 generation: current_gen + 1,
@@ -399,7 +418,7 @@ impl OcrCoordinator {
     pub async fn inject_executor(&self, new_executor: Arc<OnnxOcrExecutor>) {
         // 如果已有旧 executor，先停止
         let old = {
-            let mut w = self.executor.write().unwrap();
+            let mut w = self.executor.write().unwrap_or_else(|e| e.into_inner());
             let old = w.take();
             *w = Some(new_executor);
             old
@@ -410,7 +429,10 @@ impl OcrCoordinator {
         }
         // 重置状态机——下次 OCR 请求会触发 lazy load
         let current_gen = self.lifecycle_state().generation();
-        *self.start_elapsed_ms.lock().unwrap() = None;
+        *self
+            .start_elapsed_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.lifecycle_tx
             .send(LifecycleState::Idle {
                 generation: current_gen + 1,
@@ -556,13 +578,10 @@ impl OcrBackendRouter for OcrCoordinator {
                             .await
                         };
 
-                        let used_paddleocr =
-                            match &res {
-                                Ok(_) => true,
-                                Err(e) => e.category
-                                    != crate::domain::ocr::error::OcrErrorCategory::ModelNotReady
-                                    || !e.message.contains("not_ready_hot_only"),
-                            };
+                        let used_paddleocr = match &res {
+                            Ok(_) => true,
+                            Err(e) => !e.is_hot_only_not_ready(),
+                        };
 
                         if used_paddleocr {
                             self.schedule_idle_stop(snapshot);
@@ -818,7 +837,7 @@ pub fn build_onnx_executor_from_deployment() -> Option<Arc<OnnxOcrExecutor>> {
     use crate::infra::local_engine::onnx_ocr::{OcrExecutorConfig, OnnxOcrExecutor};
     use crate::infra::local_engine::runtime::EngineId;
 
-    let engine_id = EngineId::new(PADDLEOCR_ENGINE_ID_STR).ok()?;
+    let engine_id = EngineId::new(crate::app::local_engine::paddleocr::PADDLEOCR_ENGINE_ID).ok()?;
 
     // 从 active deployment pointer 获取部署目录（ONNX in-process implementation
     // 空间 = engine 级兼容真源，0.22.9 映射不搬迁）
@@ -857,7 +876,6 @@ pub fn build_onnx_executor_from_deployment() -> Option<Arc<OnnxOcrExecutor>> {
             intra_op: 1,
             inter_op: 1,
         },
-        idle_ttl_secs: 300,
     };
 
     let executor = OnnxOcrExecutor::new(config);

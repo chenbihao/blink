@@ -240,13 +240,22 @@ pub struct WindowRefRecord {
     pub hwnd: isize,
     /// 进程 PID
     pub pid: u32,
-    /// 是否属于 Blink 当前进程
+    /// 是否属于 Blink 当前进程——签发快照（不参与安全校验）。
+    ///
+    /// 0.22.18：`is_blink` 只在签发时记录，不参与 `validate_window_ref_detailed` 的安全校验。
+    /// 安全校验基于 PID（稳定可获得）和标题（可变但非空时必须匹配）。
+    /// `is_blink` 用于 `CaptureGuard` 决定是否对目标做 restore/activate（
+    /// 可通过当前 HWND 动态复验 `get_window_pid == GetCurrentProcessId`）。
     #[allow(dead_code)]
     pub is_blink: bool,
     /// 窗口标题（用于身份校验，**不记录在日志中**）
     #[allow(dead_code)]
     pub title: String,
-    /// 进程名（用于身份校验）
+    /// 进程名——签发快照（不参与安全校验）。
+    ///
+    /// 0.22.18：`process_name` 是易变展示字段（可被重命名/路径变化），
+    /// 不参与 `validate_window_ref_detailed` 的安全校验。
+    /// 保留用于诊断和调试，不做 `dead_code` 消除式的强行比较。
     #[allow(dead_code)]
     pub process_name: String,
     /// 签发时间（参与 TTL 校验）
@@ -297,27 +306,28 @@ fn registry() -> &'static Mutex<HashMap<String, WindowRefRecord>> {
 }
 
 /// 生成不可预测的 128-bit hex token。
-fn generate_token(generation: u64) -> String {
-    // 使用进程级随机源——不依赖外部 crate，用 Win32 CryptGenRandom 或
-    // 退而用 PID + Instant nanos + generation + 序列号的混合 hash。
-    // 这里用简单但足够的方案：时间戳纳秒 + generation + counter 混合。
-    // 对于安全敏感场景应使用 getrandom，但 0.22.14 不引入新依赖。
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u64(generation);
-    hasher.write_u64(SEQ.fetch_add(1, Ordering::SeqCst));
-    hasher.write_u64(Instant::now().elapsed().as_nanos() as u64);
-    // 追加额外熵：PID + 线程 ID
-    let pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
-    hasher.write_u32(pid);
-    let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-    hasher.write_u32(tid);
-    let h1 = hasher.finish();
-    let mut hasher2 = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher2.write_u64(h1);
-    hasher2.write_u64(generation.wrapping_add(0xDEAD_BEEF));
-    let h2 = hasher2.finish();
-    format!("wref_{h1:016x}{h2:016x}")
+///
+/// 0.22.18：使用 Windows CSPRNG（`BCryptGenRandom`）替代手搓 hash 方案。
+/// 不再依赖 `RandomState + counter + Instant::now().elapsed()`。
+/// token 不得写日志。
+///
+/// 返回 `Err` 表示 CSPRNG 不可用——fail-closed，不生成不安全 token。
+fn generate_token(_generation: u64) -> Result<String, String> {
+    // 使用 Windows CSPRNG 生成 16 字节（128-bit）随机数。
+    // BCryptGenRandom 是 Windows 推荐的 CSPRNG，无需额外依赖。
+    let mut buf = [0u8; 16];
+    use windows::Win32::Security::Cryptography::{
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+    };
+    let hr = unsafe { BCryptGenRandom(None, &mut buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if hr.is_err() {
+        // CSPRNG 不可用——以安全为优先 fail-closed
+        tracing::error!("BCryptGenRandom 失败，无法生成安全 token");
+        return Err("CSPRNG 不可用，无法生成安全 window_ref token".into());
+    }
+    // 编码为 hex
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("wref_{hex}"))
 }
 
 /// 生成新 generation（每次 list_windows 调用时推进）。
@@ -333,6 +343,8 @@ pub fn current_generation() -> u64 {
 /// 注册一个窗口引用，返回 opaque 不可预测的 ref_id。
 ///
 /// 调用方在 `list_windows` 中对每个窗口调用此函数。
+///
+/// 返回 `Err` 表示 CSPRNG 不可用——fail-closed，不生成不安全 token。
 pub fn register_window_ref(
     hwnd: isize,
     pid: u32,
@@ -340,8 +352,8 @@ pub fn register_window_ref(
     title: &str,
     process_name: &str,
     generation: u64,
-) -> String {
-    let ref_id = generate_token(generation);
+) -> Result<String, String> {
+    let ref_id = generate_token(generation)?;
     let record = WindowRefRecord {
         ref_id: ref_id.clone(),
         hwnd,
@@ -354,10 +366,10 @@ pub fn register_window_ref(
     };
     let mut map = registry().lock().unwrap_or_else(|e| e.into_inner());
     map.insert(ref_id.clone(), record);
-    ref_id
+    Ok(ref_id)
 }
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
+// 0.22.18：SEQ 已随 `generate_token` 迁移到 CSPRNG 而完全退役删除。
 
 /// 校验 window_ref 并返回详细结果。
 ///
@@ -427,7 +439,6 @@ pub fn registry_size() -> usize {
 #[cfg(test)]
 pub fn clear_registry() {
     registry().lock().unwrap_or_else(|e| e.into_inner()).clear();
-    SEQ.store(0, Ordering::SeqCst);
     GENERATION.store(0, Ordering::SeqCst);
 }
 
@@ -446,7 +457,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen_val = next_generation();
-        let ref_id = register_window_ref(12345, 999, false, "TestWin", "test.exe", gen_val);
+        let ref_id = register_window_ref(12345, 999, false, "TestWin", "test.exe", gen_val)
+            .expect("CSPRNG 应在测试环境可用");
         assert!(!ref_id.is_empty());
         assert!(ref_id.starts_with("wref_"));
 
@@ -467,16 +479,16 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen1 = next_generation();
-        let _ = register_window_ref(100, 1, false, "A", "a.exe", gen1);
+        let _ = register_window_ref(100, 1, false, "A", "a.exe", gen1).unwrap();
         let gen2 = next_generation();
-        let _ = register_window_ref(200, 2, false, "B", "b.exe", gen2);
+        let _ = register_window_ref(200, 2, false, "B", "b.exe", gen2).unwrap();
         assert_eq!(registry_size(), 2);
 
         cleanup_old_refs();
         assert_eq!(registry_size(), 1);
 
         let gen3 = next_generation();
-        let _ = register_window_ref(300, 3, false, "C", "c.exe", gen3);
+        let _ = register_window_ref(300, 3, false, "C", "c.exe", gen3).unwrap();
         cleanup_old_refs();
         assert_eq!(registry_size(), 1);
     }
@@ -495,7 +507,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen_val = next_generation();
-        let ref_id = register_window_ref(42, 100, true, "BlinkWin", "blink.exe", gen_val);
+        let ref_id = register_window_ref(42, 100, true, "BlinkWin", "blink.exe", gen_val).unwrap();
         // opaque 格式：wref_{128-bit hex}，不暴露 HWND/PID/generation/sequence
         assert!(ref_id.starts_with("wref_"));
         // token 长度：wref_ + 32 hex chars = 37
@@ -518,8 +530,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen_val = next_generation();
-        let ref1 = register_window_ref(1, 100, false, "A", "a.exe", gen_val);
-        let ref2 = register_window_ref(2, 200, false, "B", "b.exe", gen_val);
+        let ref1 = register_window_ref(1, 100, false, "A", "a.exe", gen_val).unwrap();
+        let ref2 = register_window_ref(2, 200, false, "B", "b.exe", gen_val).unwrap();
         // 两个 ref 的 token 部分应不同（不可预测）
         let token1 = &ref1[5..]; // strip "wref_"
         let token2 = &ref2[5..];
@@ -546,8 +558,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen_val = next_generation();
-        let ref1 = register_window_ref(1, 100, false, "A", "a.exe", gen_val);
-        let ref2 = register_window_ref(2, 200, false, "B", "b.exe", gen_val);
+        let ref1 = register_window_ref(1, 100, false, "A", "a.exe", gen_val).unwrap();
+        let ref2 = register_window_ref(2, 200, false, "B", "b.exe", gen_val).unwrap();
         // 同 generation 内 token 不同（不可预测）
         assert_ne!(ref1, ref2);
     }
@@ -558,7 +570,8 @@ mod tests {
         clear_registry();
         for i in 0..5 {
             let g = next_generation();
-            let _ = register_window_ref(i, i as u32 + 1, false, &format!("Win{i}"), "app.exe", g);
+            let _ = register_window_ref(i, i as u32 + 1, false, &format!("Win{i}"), "app.exe", g)
+                .unwrap();
         }
         assert_eq!(registry_size(), 5);
 
@@ -571,8 +584,10 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen_val = next_generation();
-        let ref_blink = register_window_ref(100, 42, true, "BlinkWin", "blink.exe", gen_val);
-        let ref_external = register_window_ref(200, 99, false, "External", "app.exe", gen_val);
+        let ref_blink =
+            register_window_ref(100, 42, true, "BlinkWin", "blink.exe", gen_val).unwrap();
+        let ref_external =
+            register_window_ref(200, 99, false, "External", "app.exe", gen_val).unwrap();
 
         // 验证注册表中的 is_blink 标记（通过注册表直接读取）
         {
@@ -588,7 +603,7 @@ mod tests {
     fn generation_zero_is_valid() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
-        let ref_id = register_window_ref(42, 100, false, "Test", "test.exe", 0);
+        let ref_id = register_window_ref(42, 100, false, "Test", "test.exe", 0).unwrap();
         assert!(ref_id.starts_with("wref_"));
     }
 
@@ -598,7 +613,7 @@ mod tests {
         clear_registry();
         let gen_val = next_generation();
         // 注册一个"已过期"的 ref——手动修改 issued_at
-        let ref_id = register_window_ref(42, 100, false, "Test", "test.exe", gen_val);
+        let ref_id = register_window_ref(42, 100, false, "Test", "test.exe", gen_val).unwrap();
         {
             let mut map = registry().lock().unwrap_or_else(|e| e.into_inner());
             if let Some(rec) = map.get_mut(&ref_id) {
@@ -615,7 +630,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_registry();
         let gen1 = next_generation(); // gen1=0, current=1
-        let ref_id = register_window_ref(42, 100, false, "Test", "test.exe", gen1);
+        let ref_id = register_window_ref(42, 100, false, "Test", "test.exe", gen1).unwrap();
         // 推进 3 个 generation，使 gen1 过期
         let _ = next_generation(); // current=2
         let _ = next_generation(); // current=3

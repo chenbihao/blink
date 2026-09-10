@@ -89,7 +89,15 @@ pub struct PseudoStreamingSttEngine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SegmentIdentity {
     session_generation: u64,
+    commit_generation: u64,
     segment_id: u64,
+}
+
+/// 录音结束时唯一拥有剩余音频提交权的终态请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalFinalizeIdentity {
+    session_generation: u64,
+    commit_generation: u64,
 }
 
 /// 0.22.15：pending segment——句尾产生的候选，等待定稿结果决定 commit 或 rollback。
@@ -159,6 +167,7 @@ impl PseudoInner {
                 pending = self.sentences.pending.is_some(),
                 deferred = self.sentences.deferred.is_some(),
                 finalize_in_flight = self.sentences.finalize_in_flight,
+                terminal_finalizing = self.sentences.finalizing.is_some(),
                 preview_in_flight = self.preview_in_flight,
                 "STT session 进入失败态"
             );
@@ -188,10 +197,14 @@ struct SentenceState {
     session_generation: u64,
     /// 单调 segment id（每个句尾递增）
     next_segment_id: u64,
+    /// 提交权代际。terminal finalize 接管或 reset 时递增，使所有旧 task 失效。
+    commit_generation: u64,
     /// 当前 pending segment（如果有）
     pending: Option<PendingSegment>,
     /// 有 finalize task 在飞行中
     finalize_in_flight: bool,
+    /// terminal finalize 已冻结音频并独占提交权；此时不再接受新 chunk。
+    finalizing: Option<TerminalFinalizeIdentity>,
     /// 0.22.15 fix: pending 期间再次出现句尾时排队的 deferred segment
     /// （finalize_in_flight 为 true 时，新句尾暂存于此，finalize 完成后再处理）
     deferred: Option<PendingSegment>,
@@ -210,8 +223,10 @@ impl SentenceState {
             committed_sample_end: 0,
             session_generation: 1,
             next_segment_id: 1,
+            commit_generation: 1,
             pending: None,
             finalize_in_flight: false,
+            finalizing: None,
             deferred: None,
             buffer_base_sample: 0,
         }
@@ -283,6 +298,7 @@ impl SentenceState {
         let range = start..end;
         let identity = SegmentIdentity {
             session_generation: self.session_generation,
+            commit_generation: self.commit_generation,
             segment_id,
         };
         let pending = PendingSegment {
@@ -316,6 +332,20 @@ impl SentenceState {
     /// - `None` = 已处理，无 deferred
     /// - （被丢弃的 stale result 也返回 None）
     fn commit_or_rollback(&mut self, result: &FinalizeResult) -> Option<PendingSegment> {
+        if result.identity.session_generation != self.session_generation
+            || result.identity.commit_generation != self.commit_generation
+            || self.finalizing.is_some()
+        {
+            tracing::debug!(
+                result_session = result.identity.session_generation,
+                current_session = self.session_generation,
+                result_commit_generation = result.identity.commit_generation,
+                current_commit_generation = self.commit_generation,
+                terminal_finalizing = self.finalizing.is_some(),
+                "丢弃已失去提交权的 finalize 结果"
+            );
+            return None;
+        }
         // identity 校验
         let pending = match &self.pending {
             Some(p) if p.identity == result.identity => p,
@@ -363,8 +393,12 @@ impl SentenceState {
         self.finalize_in_flight = false;
 
         // 0.22.15 fix: 如果有 deferred segment，返回它让调用方 spawn 新 finalize
-        let deferred = self.deferred.take();
-        if let Some(ref d) = deferred {
+        let mut deferred = self.deferred.take();
+        if let Some(ref mut d) = deferred {
+            // deferred 在前一任务仍飞行时创建，其起点基于当时尚未推进的
+            // committed_sample_end。前一段成功 commit 后必须重定位，避免
+            // 下一任务再次拥有已经提交音频的提交权。
+            d.range.start = d.range.start.max(self.committed_sample_end);
             self.pending = Some(d.clone());
             self.finalize_in_flight = true;
         }
@@ -421,15 +455,55 @@ impl SentenceState {
         self.confirmed_sentences.join("")
     }
 
+    /// terminal finalize 原子接管所有尚未提交的音频。
+    ///
+    /// 无论等待是否超时，接管都会推进 `commit_generation` 并清除
+    /// pending/deferred；旧 segment task 即使迟到也无法再通过代际校验。
+    fn begin_terminal_finalize(&mut self) -> TerminalFinalizeIdentity {
+        self.commit_generation = self.commit_generation.wrapping_add(1);
+        let identity = TerminalFinalizeIdentity {
+            session_generation: self.session_generation,
+            commit_generation: self.commit_generation,
+        };
+        self.pending = None;
+        self.deferred = None;
+        self.finalize_in_flight = false;
+        self.finalizing = Some(identity);
+        identity
+    }
+
+    /// 提交 terminal finalize；reset/新接管发生后返回 false 并确定性丢弃。
+    fn commit_terminal_finalize(
+        &mut self,
+        identity: TerminalFinalizeIdentity,
+        range_end: usize,
+        text: &str,
+    ) -> bool {
+        if self.finalizing != Some(identity)
+            || self.session_generation != identity.session_generation
+            || self.commit_generation != identity.commit_generation
+        {
+            return false;
+        }
+        if !text.is_empty() {
+            self.confirmed_sentences.push(text.to_string());
+            self.committed_sample_end = self.committed_sample_end.max(range_end);
+        }
+        self.finalizing = None;
+        true
+    }
+
     /// reset：递增 session_generation，清空所有状态。
     fn reset(&mut self) {
         self.confirmed_sentences.clear();
         self.committed_sample_end = 0;
         self.session_generation = self.session_generation.wrapping_add(1);
+        self.commit_generation = self.commit_generation.wrapping_add(1);
         self.next_segment_id = 1;
         self.pending = None;
         self.deferred = None;
         self.finalize_in_flight = false;
+        self.finalizing = None;
         self.buffer_base_sample = 0;
     }
 }
@@ -569,7 +643,7 @@ impl PseudoStreamingSttEngine {
         let text = transport
             .transcribe(&wav_bytes)
             .await
-            .map_err(SttError::Engine)?;
+            .map_err(|e| SttError::Engine(e.to_string()))?;
 
         // 剥离 SenseVoice 幻觉的英文语气词
         Ok(strip_filler_words(&text))
@@ -814,13 +888,120 @@ impl PseudoStreamingSttEngine {
                 }
             }
 
-            inner.preview_in_flight = false;
             if inner.preview_generation == generation {
+                inner.preview_in_flight = false;
                 inner.last_preview = Instant::now();
                 inner.last_preview_elapsed = elapsed;
                 inner.last_preview_sample_end = snapshot_end;
             }
         });
+    }
+
+    async fn finalize_with_wait_timeout(&self, wait_timeout: Duration) -> Result<String, SttError> {
+        // 先给 preview/segment task 一个有界完成窗口。超时不是“都完成了”：
+        // 后续会原子推进提交权代际并接管剩余区间，迟到 task 只能被丢弃。
+        let deadline = Instant::now() + wait_timeout;
+        let timed_out = loop {
+            let (preview_in_flight, finalize_in_flight) = {
+                let inner = Self::try_lock(&self.inner).ok_or_else(|| {
+                    SttError::Engine("STT session 已损坏 (Mutex poisoned)".to_string())
+                })?;
+                if inner.session_failed {
+                    return Err(SttError::Engine(
+                        "STT session 已失败，需要 reset 后重试".to_string(),
+                    ));
+                }
+                (inner.preview_in_flight, inner.sentences.finalize_in_flight)
+            };
+            if !preview_in_flight && !finalize_in_flight {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        // 原子冻结本 session 的尾段并取得唯一提交权。推进 preview 代际也会
+        // 使迟到 preview 无法写入 reset 后或 terminal finalize 中的状态。
+        let (identity, remaining_samples, abs_end, off_threshold) = {
+            let mut inner = Self::try_lock(&self.inner).ok_or_else(|| {
+                SttError::Engine("STT session 已损坏 (Mutex poisoned)".to_string())
+            })?;
+            if inner.sentences.finalizing.is_some() {
+                return Err(SttError::Engine("STT session 正在 finalize".to_string()));
+            }
+            let abs_start = inner.sentences.committed_sample_end;
+            let abs_end = inner
+                .sentences
+                .buffer_base_sample
+                .checked_add(inner.samples.len())
+                .ok_or_else(|| SttError::Engine("STT 音频坐标溢出".to_string()))?;
+            let local_range = inner
+                .sentences
+                .abs_to_local_range(&(abs_start..abs_end), inner.samples.len())
+                .ok_or_else(|| SttError::Engine("STT finalize 音频坐标非法".to_string()))?;
+            let remaining_samples = inner.samples[local_range].to_vec();
+            let off_threshold = inner.vad.current_off_threshold();
+            let identity = inner.sentences.begin_terminal_finalize();
+            inner.preview_generation = inner.preview_generation.wrapping_add(1);
+            inner.preview_in_flight = false;
+            (identity, remaining_samples, abs_end, off_threshold)
+        };
+
+        if timed_out {
+            tracing::warn!(
+                session = identity.session_generation,
+                commit_generation = identity.commit_generation,
+                "finalize: 等待 in-flight 超时，已撤销旧任务提交权并接管尾段"
+            );
+        }
+
+        let finalize_text = if remaining_samples.is_empty() {
+            String::new()
+        } else {
+            match self
+                .transcribe_samples(&remaining_samples, off_threshold)
+                .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(%e, "finalize 定稿识别失败，使用已有结果");
+                    String::new()
+                }
+            }
+        };
+
+        let final_text = {
+            let mut inner = Self::try_lock(&self.inner).ok_or_else(|| {
+                SttError::Engine("STT session 已损坏 (Mutex poisoned)".to_string())
+            })?;
+            if !inner
+                .sentences
+                .commit_terminal_finalize(identity, abs_end, &finalize_text)
+            {
+                tracing::debug!(
+                    session = identity.session_generation,
+                    commit_generation = identity.commit_generation,
+                    "丢弃 reset/新接管后的 terminal finalize 结果"
+                );
+                return Err(SttError::Engine(
+                    "STT session 在 finalize 期间已重置".to_string(),
+                ));
+            }
+
+            let mut result = inner.sentences.confirmed_text();
+            if finalize_text.is_empty() && !inner.latest_preview.is_empty() {
+                let preview = strip_confirmed_prefix(&result, &inner.latest_preview);
+                if !preview.is_empty() {
+                    result.push_str(&preview);
+                }
+            }
+            result
+        };
+
+        tracing::info!(text_len = final_text.chars().count(), "伪流式识别完成");
+        Ok(final_text)
     }
 }
 
@@ -977,8 +1158,6 @@ fn strip_filler_words(text: &str) -> String {
 /// 尝试从文本末尾剥离一个英文语气词后缀。
 /// 返回剥离后的文本；如果没有匹配则原样返回。
 fn strip_one_filler_suffix(text: &str) -> String {
-    let lower = text.to_lowercase();
-
     for &filler in FILLER_WORDS {
         let filler_lower = filler.to_lowercase();
 
@@ -986,9 +1165,8 @@ fn strip_one_filler_suffix(text: &str) -> String {
         // 前面是空格或中文标点
         for &suffix in &[".", ",", "!", "?", ""] {
             let pattern = format!(" {}{}", filler_lower, suffix);
-            if lower.ends_with(&pattern) {
-                let cut = text.len() - pattern.len();
-                return text[..cut].to_string();
+            if let Some(prefix) = strip_suffix_case_insensitive(text, &pattern) {
+                return prefix.to_string();
             }
         }
 
@@ -996,22 +1174,32 @@ fn strip_one_filler_suffix(text: &str) -> String {
         // 仅当 filler 前面是中文字符或中文标点时才匹配
         for &suffix in &[".", ",", "!", "?"] {
             let pattern = format!("{}{}", filler_lower, suffix);
-            if lower.ends_with(&pattern) {
-                let cut = text.len() - pattern.len();
-                if cut > 0 {
-                    let prev_char = text[..cut].chars().next_back();
-                    if let Some(pc) = prev_char {
-                        // 非 ASCII 字符 = 中文（汉字或标点）
-                        if !pc.is_ascii() {
-                            return text[..cut].to_string();
-                        }
-                    }
+            if let Some(prefix) = strip_suffix_case_insensitive(text, &pattern)
+                && let Some(pc) = prefix.chars().next_back()
+            {
+                // 非 ASCII 字符 = 中文（汉字或标点）
+                if !pc.is_ascii() {
+                    return prefix.to_string();
                 }
             }
         }
     }
 
     text.to_string()
+}
+
+/// 在原始字符串的 Unicode 字符边界上做不区分大小写的后缀匹配。
+///
+/// Unicode 小写映射可能改变 UTF-8 字节长度（例如 `İ` → `i` + 组合点），
+/// 因此绝不能用 lowercased 字符串的字节长度反切原文。
+fn strip_suffix_case_insensitive<'a>(text: &'a str, lowercase_suffix: &str) -> Option<&'a str> {
+    text.char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+        .find_map(|index| {
+            let suffix = text.get(index..)?;
+            (suffix.to_lowercase() == lowercase_suffix).then(|| text.get(..index))?
+        })
 }
 
 #[async_trait::async_trait]
@@ -1033,6 +1221,9 @@ impl SttEngine for PseudoStreamingSttEngine {
                 return Err(SttError::Engine(
                     "STT session 已失败，需要 reset 后重试".to_string(),
                 ));
+            }
+            if inner.sentences.finalizing.is_some() {
+                return Err(SttError::Engine("STT session 正在 finalize".to_string()));
             }
             inner.samples.extend_from_slice(samples);
             // 绝对尾端 = buffer_base + samples.len()
@@ -1236,133 +1427,8 @@ impl SttEngine for PseudoStreamingSttEngine {
     }
 
     async fn finalize(&self) -> Result<String, SttError> {
-        // 1. 先等待 in_flight 预览/定稿请求完成（最多 3s）
-        //
-        // **必须在发送新的 transcribe 请求之前等待**——否则 worker 在处理
-        // in-flight 请求时又收到新请求，可能导致内存访问竞争（0xC0000005）。
-        // NdjsonWorkerClient 虽有请求锁串行化，但 worker 进程侧的推理线程
-        // 可能在处理上一个请求的清理路径时被新请求打断，触发访问违例。
-        let deadline = Instant::now() + Duration::from_millis(FINALIZE_WAIT_TIMEOUT_MS);
-        loop {
-            let (preview_in_flight, finalize_in_flight) = {
-                let inner = match Self::try_lock(&self.inner) {
-                    Some(g) => g,
-                    None => {
-                        tracing::error!("Mutex poisoned at finalize wait loop");
-                        return Err(SttError::Engine(
-                            "STT session 已损坏 (Mutex poisoned)".to_string(),
-                        ));
-                    }
-                };
-                (inner.preview_in_flight, inner.sentences.finalize_in_flight)
-            };
-
-            if !preview_in_flight && !finalize_in_flight {
-                break;
-            }
-            if Instant::now() >= deadline {
-                tracing::warn!("finalize: 等待 in_flight 请求超时，使用已有结果");
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        // 2. 0.22.15：pending segment 的 commit/rollback 已在后台 task 中由
-        // commit_or_rollback 处理完毕。rollback 后 committed_sample_end 不变，
-        // remaining samples 会包含回退的音频，在第 3 步中被最终识别。
-
-        // 3. 定稿剩余音频（此时 in-flight 请求已全部完成，安全发新请求）
-        let (remaining_samples, off_threshold) = {
-            let inner = match Self::try_lock(&self.inner) {
-                Some(g) => g,
-                None => {
-                    tracing::error!("Mutex poisoned at finalize remaining samples");
-                    return Err(SttError::Engine(
-                        "STT session 已损坏 (Mutex poisoned)".to_string(),
-                    ));
-                }
-            };
-            // 绝对 range → 局部切片
-            let abs_start = inner.sentences.committed_sample_end;
-            let abs_end = match inner
-                .sentences
-                .buffer_base_sample
-                .checked_add(inner.samples.len())
-            {
-                Some(end) => end,
-                None => return Err(SttError::Engine("STT 音频坐标溢出".to_string())),
-            };
-            let abs_range = abs_start..abs_end;
-            let samples = match inner
-                .sentences
-                .abs_to_local_range(&abs_range, inner.samples.len())
-            {
-                Some(local_range) => inner.samples[local_range].to_vec(),
-                None => {
-                    tracing::warn!(
-                        committed_end = abs_start,
-                        total = abs_end,
-                        buffer_base = inner.sentences.buffer_base_sample,
-                        samples_len = inner.samples.len(),
-                        "finalize 坐标非法，使用空剩余"
-                    );
-                    Vec::new()
-                }
-            };
-            (samples, inner.vad.current_off_threshold())
-        };
-
-        let finalize_text = if !remaining_samples.is_empty() {
-            match self
-                .transcribe_samples(&remaining_samples, off_threshold)
-                .await
-            {
-                Ok(text) => text,
-                Err(e) => {
-                    tracing::warn!(%e, "finalize 定稿识别失败，使用已有结果");
-                    String::new()
-                }
-            }
-        } else {
-            String::new()
-        };
-
-        // 4. 拼接 confirmed + finalize_text + 最后一段 preview
-        // 0.22.15 fix: preview 兜底——即使已有 confirmed，如果 finalize_text 为空，
-        // 仍用 latest_preview 作为尾段兜底（做好 confirmed prefix 去重）
-        let final_text = {
-            let inner = match Self::try_lock(&self.inner) {
-                Some(g) => g,
-                None => {
-                    tracing::error!("Mutex poisoned at finalize text compose");
-                    return Err(SttError::Engine(
-                        "STT session 已损坏 (Mutex poisoned)".to_string(),
-                    ));
-                }
-            };
-            let mut result = inner.sentences.confirmed_text();
-            if !finalize_text.is_empty() {
-                result.push_str(&finalize_text);
-            }
-            // 如果 finalize 没有识别到文本，用最后一段 preview 兜底
-            // 0.22.15 fix: 即使 result 非空（已有 confirmed），
-            // 如果 finalize_text 为空且 preview 存在，仍用 preview 补尾段
-            if finalize_text.is_empty() && !inner.latest_preview.is_empty() {
-                let preview = strip_confirmed_prefix(&result, &inner.latest_preview);
-                if !preview.is_empty() {
-                    result.push_str(&preview);
-                }
-            }
-            // 全空的兜底：只有 result 和 preview 都空时才用 preview
-            if result.is_empty() && !inner.latest_preview.is_empty() {
-                result = inner.latest_preview.clone();
-            }
-            result
-        };
-
-        tracing::info!(text_len = final_text.chars().count(), "伪流式识别完成",);
-
-        Ok(final_text)
+        self.finalize_with_wait_timeout(Duration::from_millis(FINALIZE_WAIT_TIMEOUT_MS))
+            .await
     }
 
     fn reset(&self) {
@@ -1412,6 +1478,83 @@ impl SttEngine for PseudoStreamingSttEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{Notify, oneshot};
+
+    struct ControlledTransport {
+        responses: Mutex<VecDeque<oneshot::Receiver<Result<String, String>>>>,
+        calls: AtomicUsize,
+        called: Notify,
+    }
+
+    impl ControlledTransport {
+        fn new(responses: Vec<oneshot::Receiver<Result<String, String>>>) -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(responses.into()),
+                calls: AtomicUsize::new(0),
+                called: Notify::new(),
+            })
+        }
+
+        async fn wait_for_calls(&self, expected: usize) {
+            while self.calls.load(Ordering::SeqCst) < expected {
+                self.called.notified().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::stt::SttTransport for ControlledTransport {
+        async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+            Ok(())
+        }
+
+        async fn transcribe(
+            &self,
+            _wav_bytes: &[u8],
+        ) -> Result<String, crate::domain::stt::SttTransportError> {
+            let rx = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("测试必须提供 transport response");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.called.notify_waiters();
+            rx.await
+                .expect("测试 response sender 不应提前 drop")
+                .map_err(|detail| crate::domain::stt::SttTransportError::Unavailable { detail })
+        }
+    }
+
+    fn controlled_engine(
+        transport: Arc<ControlledTransport>,
+        samples: Vec<f32>,
+    ) -> PseudoStreamingSttEngine {
+        PseudoStreamingSttEngine {
+            inner: Arc::new(Mutex::new(PseudoInner {
+                vad: EnergyVad::new(16_000),
+                sentences: SentenceState::new(),
+                samples,
+                last_preview: Instant::now(),
+                last_preview_elapsed: Duration::ZERO,
+                last_preview_sample_end: 0,
+                preview_in_flight: false,
+                latest_preview: String::new(),
+                preview_generation: 0,
+                session_failed: false,
+            })),
+            connection: Some(crate::domain::stt::SttEngineConnection {
+                host: "127.0.0.1".into(),
+                port: 0,
+                engine_id: "funasr".into(),
+                instance_id: "test-instance".into(),
+                transport: Some(transport),
+            }),
+            sample_rate: 16_000,
+        }
+    }
 
     // ── SentenceState 基础测试 ──
 
@@ -1488,6 +1631,7 @@ mod tests {
         let stale_result = FinalizeResult {
             identity: SegmentIdentity {
                 session_generation: pending.identity.session_generation,
+                commit_generation: pending.identity.commit_generation,
                 segment_id: pending.identity.segment_id + 999, // 不匹配
             },
             text: "过期结果".to_string(),
@@ -1508,6 +1652,7 @@ mod tests {
         let stale_result = FinalizeResult {
             identity: SegmentIdentity {
                 session_generation: pending.identity.session_generation + 1,
+                commit_generation: pending.identity.commit_generation,
                 segment_id: pending.identity.segment_id,
             },
             text: "旧session结果".to_string(),
@@ -1817,6 +1962,14 @@ mod tests {
         assert_eq!(strip_filler_words("好的，我知道了。"), "好的，我知道了。");
     }
 
+    #[test]
+    fn filler_strip_uses_original_unicode_boundaries() {
+        // `İ`.to_lowercase() 的 UTF-8 字节长度会增长；旧实现按 lowercased
+        // pattern 长度反切原文，可能切进字符内部而 panic。
+        assert_eq!(strip_filler_words("你好İYeah."), "你好İ");
+        assert_eq!(strip_filler_words("你好İ Yeah."), "你好İ");
+    }
+
     // ── 引擎 reset 测试 ──
 
     #[test]
@@ -1973,6 +2126,7 @@ mod tests {
         let r1 = FinalizeResult {
             identity: SegmentIdentity {
                 session_generation: state.session_generation,
+                commit_generation: state.commit_generation,
                 segment_id: 1,
             },
             text: "第一句".to_string(),
@@ -1982,6 +2136,22 @@ mod tests {
         assert!(deferred.is_some(), "应返回 deferred segment");
         assert!(state.pending.is_some(), "deferred 应已转为 pending");
         assert!(state.finalize_in_flight, "finalize_in_flight 应为 true");
+        let deferred = deferred.unwrap();
+        assert_eq!(deferred.range, 1000..2000, "不得重复识别已提交区间");
+
+        let before = state.committed_sample_end;
+        assert!(
+            state
+                .commit_or_rollback(&FinalizeResult {
+                    identity: deferred.identity,
+                    text: "第二句".to_string(),
+                    ok: true,
+                })
+                .is_none()
+        );
+        assert!(state.committed_sample_end >= before);
+        assert_eq!(state.committed_sample_end, 2000);
+        assert_eq!(state.confirmed_text(), "第一句第二句");
     }
 
     #[test]
@@ -2230,6 +2400,7 @@ mod tests {
         state.commit_or_rollback(&FinalizeResult {
             identity: SegmentIdentity {
                 session_generation: state.session_generation,
+                commit_generation: state.commit_generation,
                 segment_id: 1,
             },
             text: "x".to_string(),
@@ -2278,5 +2449,113 @@ mod tests {
 
         // reset 后 abs_to_local_range 在空 samples 上工作正常
         assert_eq!(state.abs_to_local_range(&(0..0), 0), Some(0..0));
+    }
+
+    #[tokio::test]
+    async fn finalize_waits_for_in_flight_commit_before_timeout() {
+        let (tx, rx) = oneshot::channel();
+        let transport = ControlledTransport::new(vec![rx]);
+        let samples = vec![0.1; 1600];
+        let engine = controlled_engine(transport.clone(), samples.clone());
+        let pending = {
+            let mut inner = engine.inner.lock().unwrap();
+            inner.sentences.on_sentence_end(samples.len(), "").unwrap()
+        };
+        engine.spawn_sentence_finalize(samples, pending.identity);
+        transport.wait_for_calls(1).await;
+
+        let finalize = engine.finalize_with_wait_timeout(Duration::from_secs(3));
+        tx.send(Ok("第一句".into())).unwrap();
+        let text = finalize.await.unwrap();
+
+        assert_eq!(text, "第一句");
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(inner.sentences.committed_sample_end, 1600);
+        assert_eq!(inner.sentences.confirmed_text(), "第一句");
+    }
+
+    #[tokio::test]
+    async fn finalize_timeout_revokes_late_segment_commit_right() {
+        let (old_tx, old_rx) = oneshot::channel();
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        let transport = ControlledTransport::new(vec![old_rx, terminal_rx]);
+        let samples = vec![0.1; 1600];
+        let engine = Arc::new(controlled_engine(transport.clone(), samples.clone()));
+        let pending = {
+            let mut inner = engine.inner.lock().unwrap();
+            inner
+                .sentences
+                .on_sentence_end(samples.len(), "旧预览")
+                .unwrap()
+        };
+        engine.spawn_sentence_finalize(samples, pending.identity);
+        transport.wait_for_calls(1).await;
+
+        let task = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .finalize_with_wait_timeout(Duration::from_millis(20))
+                    .await
+            })
+        };
+        transport.wait_for_calls(2).await;
+        terminal_tx.send(Ok("完整尾段".into())).unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), "完整尾段");
+
+        old_tx.send(Ok("迟到旧段".into())).unwrap();
+        tokio::task::yield_now().await;
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(inner.sentences.confirmed_text(), "完整尾段");
+        assert_eq!(inner.sentences.committed_sample_end, 1600);
+    }
+
+    #[tokio::test]
+    async fn terminal_takeover_invalidates_pending_and_deferred_together() {
+        let mut state = SentenceState::new();
+        let first = state.on_sentence_end(1000, "p1").unwrap();
+        state.finalize_in_flight = true;
+        assert!(state.on_sentence_end(2000, "p2").is_none());
+        assert!(state.pending.is_some() && state.deferred.is_some());
+
+        let terminal = state.begin_terminal_finalize();
+        assert!(state.pending.is_none() && state.deferred.is_none());
+        assert!(!state.finalize_in_flight);
+        assert!(
+            state
+                .commit_or_rollback(&FinalizeResult {
+                    identity: first.identity,
+                    text: "迟到".into(),
+                    ok: true,
+                })
+                .is_none()
+        );
+        assert!(state.commit_terminal_finalize(terminal, 2000, "完整"));
+        assert_eq!(state.confirmed_text(), "完整");
+        assert_eq!(state.committed_sample_end, 2000);
+    }
+
+    #[tokio::test]
+    async fn reset_during_terminal_finalize_discards_old_result() {
+        let (tx, rx) = oneshot::channel();
+        let transport = ControlledTransport::new(vec![rx]);
+        let engine = Arc::new(controlled_engine(transport.clone(), vec![0.1; 1600]));
+        let task = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .finalize_with_wait_timeout(Duration::from_millis(20))
+                    .await
+            })
+        };
+        transport.wait_for_calls(1).await;
+        engine.reset();
+        tx.send(Ok("旧 session".into())).unwrap();
+
+        assert!(task.await.unwrap().is_err());
+        let inner = engine.inner.lock().unwrap();
+        assert!(inner.sentences.confirmed_text().is_empty());
+        assert_eq!(inner.sentences.committed_sample_end, 0);
+        assert!(inner.samples.is_empty());
     }
 }
