@@ -10,7 +10,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{ERROR_INVALID_HOOK_HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_INVALID_HOOK_HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
@@ -67,6 +70,8 @@ const TIMER_ID_REINSTALL: usize = 3;
 const SESSION_RECOVERY_DELAY_MS: u32 = 250;
 /// 门禁未满足时的短间隔重新检查延迟（毫秒）。
 const REINSTALL_RECHECK_DELAY_MS: u32 = 200;
+/// LL Hook 与 Raw Input 对同一物理边沿的时间戳最大容差。
+const HOOK_RAW_EDGE_MATCH_TOLERANCE_MS: u32 = 100;
 
 // ── Hook 线程状态 ─────────────────────────────────────────────────────────────
 
@@ -90,6 +95,31 @@ thread_local! {
     static REINSTALL_STATE: std::cell::RefCell<ReinstallState> = const { std::cell::RefCell::new(ReinstallState::new()) };
     static WTS_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static RAW_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 最近一个由 LL Hook 观察到的主键边沿，供随后到达的 WM_INPUT 去重。
+    static LAST_HOOK_MAIN_EDGE: std::cell::Cell<Option<HookMainEdge>> = const { std::cell::Cell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HookMainEdge {
+    vk: u32,
+    is_down: bool,
+    time_ms: u32,
+}
+
+fn hook_edge_matches_raw(hook: HookMainEdge, vk: u32, is_down: bool, time_ms: u32) -> bool {
+    let delta_ms = (time_ms as i32)
+        .wrapping_sub(hook.time_ms as i32)
+        .unsigned_abs();
+    hook.vk == vk && hook.is_down == is_down && delta_ms <= HOOK_RAW_EDGE_MATCH_TOLERANCE_MS
+}
+
+/// 消费最近的 Hook 主键边沿；匹配说明正常 Hook 已经处理，本次 Raw 不再进 reducer。
+fn take_matching_hook_main_edge(vk: u32, is_down: bool, time_ms: u32) -> bool {
+    LAST_HOOK_MAIN_EDGE.with(|cell| {
+        cell.take()
+            .map(|hook| hook_edge_matches_raw(hook, vk, is_down, time_ms))
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -697,6 +727,20 @@ fn try_reinstall_if_safe() {
     });
 }
 
+/// 安装进程内实现的全局低级键盘 Hook。
+///
+/// `WH_KEYBOARD_LL` 只能全局安装（`dwThreadId = 0`）。显式传当前 EXE 的模块句柄，
+/// 避免 `hMod = NULL` 在安装版、多窗口线程场景下出现“返回成功但同进程窗口前台时
+/// 回调漏收”的平台差异。初装和心跳重装必须共用这一个入口，防止参数再次漂移。
+unsafe fn install_low_level_keyboard_hook() -> windows::core::Result<HHOOK> {
+    let module = unsafe { GetModuleHandleW(None)? };
+    tracing::debug!(
+        module_ptr = module.0 as usize,
+        "installing WH_KEYBOARD_LL with executable module"
+    );
+    unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), Some(HINSTANCE(module.0)), 0) }
+}
+
 /// 执行卸载→安装。返回 true 表示成功。
 fn do_reinstall(reason: state::ReinstallReason) -> bool {
     let old_generation = hook_generation();
@@ -736,7 +780,7 @@ fn do_reinstall(reason: state::ReinstallReason) -> bool {
         }
 
         // 安装新 Hook
-        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) } {
+        match unsafe { install_low_level_keyboard_hook() } {
             Ok(new_hook) => {
                 *slot = Some(new_hook);
                 let new_generation = HOOK_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
@@ -926,6 +970,16 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             // 状态未初始化（启动时短暂窗口）：放行
             return Propagation::Pass;
         };
+
+        if event.key == state.config.hotkey.key {
+            LAST_HOOK_MAIN_EDGE.with(|cell| {
+                cell.set(Some(HookMainEdge {
+                    vk,
+                    is_down: event.is_down,
+                    time_ms: event.time_ms,
+                }));
+            });
+        }
 
         // 主键触发前强制 reconciliation：
         // 非修饰键 keydown 前，读取物理修饰键快照，校正内部状态。
@@ -1168,7 +1222,78 @@ fn handle_wm_input(lparam: LPARAM) {
         }
 
         let Some(normalized) = raw_keyboard_to_modifier(kb, device_id) else {
-            return; // 非修饰键，不进 reducer
+            // 录制期间 Raw Input 只交给 recorder，不能触发正常动作。
+            if recorder::is_recording() {
+                return;
+            }
+
+            // 正常情况下 LL Hook 先处理主键，随后到达的 Raw 只用于诊断对账；
+            // 若同一边沿没有 Hook 配对，则由 Raw 兜底喂入同一个 reducer。
+            let is_down = (kb.Flags & RI_KEY_BREAK) == 0;
+            if let Some(key) = vk_to_key(kb.VKey as u32) {
+                INPUT_STATE.with(|cell| {
+                    let mut guard = cell.borrow_mut();
+                    let Some(state) = guard.as_mut() else {
+                        return;
+                    };
+                    if state.config.hotkey.key == key {
+                        if take_matching_hook_main_edge(kb.VKey as u32, is_down, time_ms) {
+                            // 保留 Raw 观察事件，供 Hook/Raw 对账，但不重复执行业务动作。
+                            diagnostics::push_diagnostic_event(InputDiagnosticEvent {
+                                seq: diagnostics::next_seq(),
+                                elapsed_ms: diagnostics::elapsed_ms(),
+                                source: diagnostics::DiagnosticSource::Raw,
+                                key: diagnostics::DiagnosticKeyClass::MainKey,
+                                transition: if is_down {
+                                    diagnostics::DiagnosticTransition::Down
+                                } else {
+                                    diagnostics::DiagnosticTransition::Up
+                                },
+                                injected: None,
+                                before_level: None,
+                                after_level: None,
+                                chord_before: state.chord.is_active(),
+                                chord_after: state.chord.is_active(),
+                                ui_effect_emitted: false,
+                            });
+                            return;
+                        }
+
+                        let now = Instant::now();
+                        let event = HookKeyEvent {
+                            source: InputSource::Local,
+                            key,
+                            is_down,
+                            is_modifier: false,
+                            time_ms,
+                            injected: false,
+                            lower_integrity_injected: false,
+                            extended: (kb.Flags & (RI_KEY_E0 | RI_KEY_E1)) != 0,
+                            alt_down_flag: state.modifiers.alt_down(),
+                        };
+                        if needs_physical_reconciliation(&event) {
+                            reduce_and_apply(
+                                state,
+                                InputEvent::PhysicalModifiersObserved {
+                                    snapshot: read_physical_modifier_snapshot(),
+                                    reason: state::PhysicalObservationReason::MainKeyBoundary,
+                                },
+                                now,
+                            );
+                        }
+                        tracing::warn!(
+                            key = %event.key,
+                            transition = if event.is_down { "down" } else { "up" },
+                            "Raw Input main-key fallback: matching WH_KEYBOARD_LL edge missing"
+                        );
+                        reduce_and_apply(state, InputEvent::RawMainKey(event), now);
+                    } else {
+                        // 防止不相关键让旧 Hook 边沿跨事件残留。
+                        LAST_HOOK_MAIN_EDGE.with(|edge| edge.set(None));
+                    }
+                });
+            }
+            return;
         };
 
         INPUT_STATE.with(|cell| {
@@ -1228,7 +1353,7 @@ fn hook_thread_main() {
         });
 
         // 安装 Hook。首次安装失败时保留消息泵，由同一退避机制持续恢复。
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
+        match install_low_level_keyboard_hook() {
             Ok(hhook) => {
                 HHOOK_SLOT.with(|slot| {
                     *slot.borrow_mut() = Some(hhook);
@@ -1463,5 +1588,31 @@ mod tests {
             normalize_raw_recorder_input(VK_RWIN.0, 0x5C, RI_KEY_E0 | RI_KEY_BREAK),
             RawRecorderInput::ModifierUp("meta".to_string())
         );
+    }
+
+    #[test]
+    fn hook_raw_edge_match_accepts_same_edge_with_small_delay() {
+        let hook = HookMainEdge {
+            vk: VK_SPACE.0 as u32,
+            is_down: true,
+            time_ms: 1_000,
+        };
+        assert!(hook_edge_matches_raw(hook, VK_SPACE.0 as u32, true, 1_012));
+    }
+
+    #[test]
+    fn hook_raw_edge_match_rejects_opposite_or_stale_edge() {
+        let hook = HookMainEdge {
+            vk: VK_SPACE.0 as u32,
+            is_down: true,
+            time_ms: 1_000,
+        };
+        assert!(!hook_edge_matches_raw(
+            hook,
+            VK_SPACE.0 as u32,
+            false,
+            1_012
+        ));
+        assert!(!hook_edge_matches_raw(hook, VK_SPACE.0 as u32, true, 1_101));
     }
 }

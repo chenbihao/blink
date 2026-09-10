@@ -300,6 +300,12 @@ fn format_diagnostic_info(
     if !snapshot.hook.hook_installed || !snapshot.hook.hook_available {
         findings.push("ERROR HOOK_UNAVAILABLE".to_string());
     }
+    if has_unmatched_raw_main_key(events) {
+        findings.push(
+            "ERROR HOOK_MAIN_KEY_MISSED: Raw Input observed the configured main key without a matching WH_KEYBOARD_LL event"
+                .to_string(),
+        );
+    }
     if findings.is_empty() {
         lines.push("OK: no known input inconsistency detected".to_string());
     } else {
@@ -307,6 +313,25 @@ fn format_diagnostic_info(
     }
 
     lines.join("\n")
+}
+
+/// Raw 与 LL Hook 对同一物理事件通常在相邻消息中到达；允许 100ms 调度余量。
+/// 这里只做诊断，不参与输入决策，因此宁可提示复核，也不改变 tap/hold 语义。
+fn has_unmatched_raw_main_key(
+    events: &[crate::infra::platform::hotkey::diagnostics::InputDiagnosticEvent],
+) -> bool {
+    use crate::infra::platform::hotkey::diagnostics::{DiagnosticKeyClass, DiagnosticSource};
+
+    events.iter().any(|raw| {
+        raw.source == DiagnosticSource::Raw
+            && raw.key == DiagnosticKeyClass::MainKey
+            && !events.iter().any(|hook| {
+                hook.source == DiagnosticSource::Hook
+                    && hook.key == DiagnosticKeyClass::MainKey
+                    && hook.transition == raw.transition
+                    && hook.elapsed_ms.abs_diff(raw.elapsed_ms) <= 100
+            })
+    })
 }
 
 /// 格式化 ModifierLevel 为短字符串。
@@ -396,6 +421,29 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::platform::hotkey::diagnostics::{
+        DiagnosticKeyClass, DiagnosticSource, DiagnosticTransition, InputDiagnosticEvent,
+    };
+
+    fn main_key_event(
+        source: DiagnosticSource,
+        transition: DiagnosticTransition,
+        elapsed_ms: u64,
+    ) -> InputDiagnosticEvent {
+        InputDiagnosticEvent {
+            seq: elapsed_ms,
+            elapsed_ms,
+            source,
+            key: DiagnosticKeyClass::MainKey,
+            transition,
+            injected: None,
+            before_level: None,
+            after_level: None,
+            chord_before: false,
+            chord_after: false,
+            ui_effect_emitted: false,
+        }
+    }
 
     #[test]
     fn blink_print_debug_info_is_sensitive_ai_off() {
@@ -421,5 +469,33 @@ mod tests {
         assert!(!s.description.is_empty());
         let s = BlinkDebugInitHook.schema();
         assert!(!s.description.is_empty());
+    }
+
+    #[test]
+    fn raw_main_key_without_nearby_hook_is_reported() {
+        let events = vec![main_key_event(
+            DiagnosticSource::Raw,
+            DiagnosticTransition::Down,
+            1_000,
+        )];
+        assert!(has_unmatched_raw_main_key(&events));
+    }
+
+    #[test]
+    fn raw_main_key_with_matching_hook_is_not_reported() {
+        let events = vec![
+            main_key_event(DiagnosticSource::Hook, DiagnosticTransition::Down, 1_000),
+            main_key_event(DiagnosticSource::Raw, DiagnosticTransition::Down, 1_008),
+        ];
+        assert!(!has_unmatched_raw_main_key(&events));
+    }
+
+    #[test]
+    fn raw_main_key_does_not_match_opposite_hook_edge() {
+        let events = vec![
+            main_key_event(DiagnosticSource::Hook, DiagnosticTransition::Up, 1_000),
+            main_key_event(DiagnosticSource::Raw, DiagnosticTransition::Down, 1_008),
+        ];
+        assert!(has_unmatched_raw_main_key(&events));
     }
 }

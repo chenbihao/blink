@@ -334,7 +334,7 @@ pub fn extract_event_meta(
     use super::state::InputEvent as E;
 
     match event {
-        E::HookKey(e) => {
+        E::HookKey(e) | E::RawMainKey(e) => {
             let key_class = if e.is_modifier {
                 DiagnosticKeyClass::Modifier(
                     ModifierKey::from_key_name(&e.key).unwrap_or(ModifierKey::LAlt),
@@ -349,12 +349,12 @@ pub fn extract_event_meta(
             } else {
                 DiagnosticTransition::Up
             };
-            (
-                DiagnosticSource::Hook,
-                key_class,
-                transition,
-                Some(e.injected),
-            )
+            let source = if matches!(event, E::HookKey(_)) {
+                DiagnosticSource::Hook
+            } else {
+                DiagnosticSource::Raw
+            };
+            (source, key_class, transition, Some(e.injected))
         }
         E::RawModifier(e) => {
             let transition = if e.is_down {

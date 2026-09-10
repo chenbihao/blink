@@ -966,6 +966,9 @@ pub enum SessionResetReason {
 #[derive(Clone, Debug)]
 pub enum InputEvent {
     HookKey(HookKeyEvent),
+    /// Raw Input 主键兜底：仅当 adapter 未观察到同一边沿的 LL Hook 事件时产生。
+    /// 业务语义与 HookKey 相同，但保留独立事件类型用于诊断来源标记。
+    RawMainKey(HookKeyEvent),
     RawModifier(RawModifierEvent),
     RawDeviceRemoved {
         device_id: usize,
@@ -1082,6 +1085,7 @@ impl ReduceResult {
 pub fn reduce(state: &mut InputState, event: InputEvent, now: Instant) -> ReduceResult {
     match event {
         InputEvent::HookKey(e) => reduce_hook_key(state, e, now),
+        InputEvent::RawMainKey(e) => reduce_hook_key(state, e, now),
         InputEvent::RawModifier(e) => reduce_raw_modifier(state, e),
         InputEvent::RawDeviceRemoved { device_id } => reduce_raw_device_removed(state, device_id),
         InputEvent::HoldDeadline { gesture_id } => reduce_hold_deadline(state, gesture_id, now),
@@ -2043,6 +2047,26 @@ mod tests {
             Instant::now(),
         );
         assert!(has_tap(&r.effects));
+        assert!(matches!(s.gesture, GestureState::Idle));
+    }
+
+    #[test]
+    fn raw_main_key_fallback_uses_the_same_tap_state_machine() {
+        let mut s = armed_state();
+        let down = reduce(
+            &mut s,
+            InputEvent::RawMainKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        assert!(!has_tap(&down.effects));
+        assert!(matches!(s.gesture, GestureState::Armed { .. }));
+
+        let up = reduce(
+            &mut s,
+            InputEvent::RawMainKey(hook_key_up(" ", 250)),
+            Instant::now(),
+        );
+        assert!(has_tap(&up.effects));
         assert!(matches!(s.gesture, GestureState::Idle));
     }
 
