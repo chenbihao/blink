@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import {processDisplay, processClass} from "./local-engine-process.js";
+import {processClass, processDisplay} from "./local-engine-process.js";
 
 let testCount = 0;
 let passCount = 0;

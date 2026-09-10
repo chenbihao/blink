@@ -9,9 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import {
-    paddleocrCatalog,
-} from "./local-engine-fixtures.js";
+import {paddleocrCatalog,} from "./local-engine-fixtures.js";
 
 // ── DOM mock ──────────────────────────────────────────────────────────────────
 
@@ -30,18 +28,32 @@ function makeElement(tag) {
         dataset: {},
         classList: {
             _set: new Set(),
-            add(...c) { c.forEach((x) => this._set.add(x)); },
-            remove(...c) { c.forEach((x) => this._set.delete(x)); },
+            add(...c) {
+                c.forEach((x) => this._set.add(x));
+            },
+            remove(...c) {
+                c.forEach((x) => this._set.delete(x));
+            },
             toggle(c, force) {
                 if (force === true || (force === undefined && !this._set.has(c))) this._set.add(c);
                 else this._set.delete(c);
             },
-            contains(c) { return this._set.has(c); },
+            contains(c) {
+                return this._set.has(c);
+            },
         },
-        setAttribute(k, v) { this._attributes[k] = v; },
-        getAttribute(k) { return this._attributes[k] ?? null; },
-        removeAttribute(k) { delete this._attributes[k]; },
-        hasAttribute(k) { return k in this._attributes; },
+        setAttribute(k, v) {
+            this._attributes[k] = v;
+        },
+        getAttribute(k) {
+            return this._attributes[k] ?? null;
+        },
+        removeAttribute(k) {
+            delete this._attributes[k];
+        },
+        hasAttribute(k) {
+            return k in this._attributes;
+        },
         appendChild(child) {
             this._children.push(child);
             child._parent = this;
@@ -51,7 +63,10 @@ function makeElement(tag) {
         },
         removeChild(child) {
             const i = this._children.indexOf(child);
-            if (i >= 0) { this._children.splice(i, 1); child._parent = null; }
+            if (i >= 0) {
+                this._children.splice(i, 1);
+                child._parent = null;
+            }
             return child;
         },
         remove() {
@@ -81,17 +96,28 @@ function makeElement(tag) {
             if (!this._listeners[type]) this._listeners[type] = [];
             this._listeners[type].push(fn);
         },
-        removeEventListener() {},
+        removeEventListener() {
+        },
         dispatchEvent(ev) {
             const arr = this._listeners[ev?.type];
             if (arr) arr.forEach((fn) => fn(ev));
             return true;
         },
-        focus() {},
-        get textContent() { return this._textContent; },
-        set textContent(v) { this._textContent = String(v); this._innerHTML = String(v); },
-        get innerHTML() { return this._innerHTML; },
-        set innerHTML(v) { this._innerHTML = String(v); },
+        focus() {
+        },
+        get textContent() {
+            return this._textContent;
+        },
+        set textContent(v) {
+            this._textContent = String(v);
+            this._innerHTML = String(v);
+        },
+        get innerHTML() {
+            return this._innerHTML;
+        },
+        set innerHTML(v) {
+            this._innerHTML = String(v);
+        },
         get outerHTML() {
             const tag = this.tagName.toLowerCase();
             const cls = this.className ? ` class="${this.className}"` : "";
@@ -99,18 +125,30 @@ function makeElement(tag) {
         },
     };
     Object.defineProperty(el, "checked", {
-        get() { return this._checked ?? false; },
-        set(v) { this._checked = v; },
+        get() {
+            return this._checked ?? false;
+        },
+        set(v) {
+            this._checked = v;
+        },
         configurable: true,
     });
     Object.defineProperty(el, "value", {
-        get() { return this._value ?? ""; },
-        set(v) { this._value = v; },
+        get() {
+            return this._value ?? "";
+        },
+        set(v) {
+            this._value = v;
+        },
         configurable: true,
     });
     Object.defineProperty(el, "selected", {
-        get() { return this._selected ?? false; },
-        set(v) { this._selected = v; },
+        get() {
+            return this._selected ?? false;
+        },
+        set(v) {
+            this._selected = v;
+        },
         configurable: true,
     });
     return el;
@@ -121,11 +159,19 @@ globalThis.document = {
     createTextNode: (text) => ({textContent: String(text), _parent: null}),
     createDocumentFragment: () => makeElement("fragment"),
     body: makeElement("body"),
-    getElementById() { return null; },
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
-    addEventListener() {},
-    removeEventListener() {},
+    getElementById() {
+        return null;
+    },
+    querySelector() {
+        return null;
+    },
+    querySelectorAll() {
+        return [];
+    },
+    addEventListener() {
+    },
+    removeEventListener() {
+    },
 };
 
 Object.defineProperty(globalThis, "navigator", {

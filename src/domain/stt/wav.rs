@@ -30,7 +30,7 @@ use std::path::Path;
 #[allow(unused_imports)]
 pub use crate::infra::platform::audio::format::{AudioDecodeError, SampleKind, SourceFormat};
 #[allow(unused_imports)]
-pub use crate::infra::platform::audio::wav::{decode_wav, decode_wav_with_budget, DecodedWav};
+pub use crate::infra::platform::audio::wav::{DecodedWav, decode_wav, decode_wav_with_budget};
 
 // ── WAV 编码 ─────────────────────────────────────────────────────────────
 

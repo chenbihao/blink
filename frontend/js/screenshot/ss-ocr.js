@@ -12,10 +12,10 @@ import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
 import {cssPointToScreen, cssRectToBitmap, uiScaleAtCss} from './ss-selection-geometry.js';
 import {enterReadingMode} from './ss-reading.js';
 import * as annot from './annotation-engine.js';
-import {copyToClipboard, ocrImage, cancelOcrRequest, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
-import {normalizeError, commandErrorText} from '../shared/tauri.js';
+import {copyToClipboard, ocrImage, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
+import {commandErrorText, normalizeError} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
-import {computeResizedPanel, clampPanelToMonitor} from './ss-panel-resize.js';
+import {clampPanelToMonitor, computeResizedPanel} from './ss-panel-resize.js';
 
 // ════════════════════════════════════════════════════════════
 //  OCR Request Cancellation (Task 6)
@@ -40,7 +40,8 @@ export function cancelActiveOcr() {
     if (ss.activeOcrHandle) {
         const handle = ss.activeOcrHandle;
         ss.activeOcrHandle = null;
-        handle.cancel().catch(() => {});
+        handle.cancel().catch(() => {
+        });
     }
     // 同时取消预热（如果有）
     if (ss.ocrPrewarm) {

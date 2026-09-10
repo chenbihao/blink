@@ -18,22 +18,17 @@
  */
 
 import {
-    MODEL_ACTIVE_STATES,
-    hasActiveOperation,
-    isOperationCancellable,
-    getPrimaryAction,
-    isPendingRestart,
-    hasDeploymentMismatch,
     getLegacyDeployment,
+    getPrimaryAction,
+    hasActiveOperation,
+    hasDeploymentMismatch,
+    isOperationCancellable,
+    isPendingRestart,
+    MODEL_ACTIVE_STATES,
     selectedModelDownloadState,
 } from "./local-engine-state.js";
 import {getSelection} from "./local-engine-selection.js";
-import {
-    estimateEtaMs,
-    etaTextKeyAndParams,
-    formatBytes,
-    progressPercent,
-} from "../../../shared/download-progress.js";
+import {estimateEtaMs, etaTextKeyAndParams, formatBytes, progressPercent,} from "../../../shared/download-progress.js";
 
 // ── 内部常量 ─────────────────────────────────────────────────────────────────
 

@@ -4,8 +4,8 @@ import test from "node:test";
 import {
     findTapActionById,
     findTapActionByKey,
-    isClipboardModeSwitch,
     isAvailableWithQuery,
+    isClipboardModeSwitch,
 } from "./chord-availability.js";
 
 const actions = [

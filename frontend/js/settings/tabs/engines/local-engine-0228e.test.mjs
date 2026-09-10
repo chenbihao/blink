@@ -17,27 +17,23 @@
 import assert from "node:assert/strict";
 import {
     createInitialState,
-    setCatalog,
-    mergeStatus,
     getDesiredDeployment,
-    getLoadedDeployment,
-    isPendingRestart,
-    getLegacyDeployment,
-    hasDeploymentMismatch,
     getEntry,
+    getLegacyDeployment,
+    getLoadedDeployment,
+    hasDeploymentMismatch,
+    isPendingRestart,
+    mergeStatus,
+    setCatalog,
 } from "./local-engine-state.js";
 import {
-    paddleocrCatalog,
-    makeStatus,
-    makeOnnxDiagnostics,
     makeOnnxDeploymentBackend,
+    makeOnnxDiagnostics,
+    makeStatus,
+    paddleocrCatalog,
     processState,
 } from "./local-engine-fixtures.js";
-import {
-    computeEngineSummary,
-    computeFeedback,
-    computeKeyline,
-} from "./local-engine-summary.js";
+import {computeEngineSummary, computeFeedback, computeKeyline,} from "./local-engine-summary.js";
 
 // ── 测试框架 ─────────────────────────────────────────────────────────────────
 

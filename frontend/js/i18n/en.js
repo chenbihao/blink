@@ -1520,11 +1520,11 @@ export const en = {
     // ── Orphan engine stop (0.22.6) ──
     "local_engine.diagnostic.stop_orphan": "Stop orphan process",
     "local_engine.diagnostic.stop_orphan_confirm": "This will terminate the leftover engine process and clear its lease. Continue?",
-"local_engine.diagnostic.orphan_stopped": "Orphan process terminated",
-"local_engine.diagnostic.orphan_not_stopped": "Failed to stop: {reason}",
-"local_engine.diagnostic.orphan_error": "Operation failed: {error}",
-"local_engine.diagnostic.cancel": "Cancel",
-"local_engine.diagnostic.confirm": "Confirm",
+    "local_engine.diagnostic.orphan_stopped": "Orphan process terminated",
+    "local_engine.diagnostic.orphan_not_stopped": "Failed to stop: {reason}",
+    "local_engine.diagnostic.orphan_error": "Operation failed: {error}",
+    "local_engine.diagnostic.cancel": "Cancel",
+    "local_engine.diagnostic.confirm": "Confirm",
 
     // ── Log source labels (distinguish operation vs instance) ──
     "local_engine.log.source.operation": "Operation",

@@ -27,7 +27,10 @@ globalThis.window = {
                 return {};
             },
         },
-        event: {listen: async () => () => {}},
+        event: {
+            listen: async () => () => {
+            }
+        },
     },
 };
 globalThis.CSS = {escape: (s) => String(s)};
@@ -71,6 +74,15 @@ class ShimElement {
         });
     }
 
+    get textContent() {
+        return this._text + this._children.map((c) => c.textContent).join("");
+    }
+
+    set textContent(value) {
+        this._children = [];
+        this._text = String(value);
+    }
+
     appendChild(child) {
         if (child && child.nodeType === 11 && child._children) {
             for (const c of child._children) this.appendChild(c);
@@ -101,15 +113,6 @@ class ShimElement {
 
     remove() {
         if (this._parent) this._parent.removeChild(this);
-    }
-
-    get textContent() {
-        return this._text + this._children.map((c) => c.textContent).join("");
-    }
-
-    set textContent(value) {
-        this._children = [];
-        this._text = String(value);
     }
 
     setAttribute(name, value) {
@@ -279,12 +282,18 @@ const controllerStub = {
         preferenceCalls.push({engineId, patch});
         return {engine_id: engineId, ...patch};
     },
-    openEngineFolder: async () => {},
-    install: async () => {},
-    start: async () => {},
-    stop: async () => {},
-    repair: async () => {},
-    cancel: async () => {},
+    openEngineFolder: async () => {
+    },
+    install: async () => {
+    },
+    start: async () => {
+    },
+    stop: async () => {
+    },
+    repair: async () => {
+    },
+    cancel: async () => {
+    },
     getDiagnostics: async (engineId) => ({
         engine_id: engineId,
         environment: "ready",
@@ -335,8 +344,18 @@ await test("两个引擎共用 renderer：结构一致（无 engine_id 分支 DO
     const funasr = makeEntry("funasr", {status: READY_STOPPED, preferences: makePreferences()});
     const paddle = makeEntry("paddleocr", {
         status: READY_STOPPED,
-        models: [makeModel({engine_id: "paddleocr", model_id: "PP-OCRv6", display_name: "PP-OCRv6", is_selected: true})],
-        preferences: makePreferences({engine_id: "paddleocr", compute_preference: "auto", ocr_backend: "windows", lifecycle: "on_demand"}),
+        models: [makeModel({
+            engine_id: "paddleocr",
+            model_id: "PP-OCRv6",
+            display_name: "PP-OCRv6",
+            is_selected: true
+        })],
+        preferences: makePreferences({
+            engine_id: "paddleocr",
+            compute_preference: "auto",
+            ocr_backend: "windows",
+            lifecycle: "on_demand"
+        }),
     });
     renderEngineCard(container, funasr, controllerStub, undefined);
     renderEngineCard(container, paddle, controllerStub, undefined);
@@ -434,8 +453,20 @@ await test("清理入口双态：无可清理 → 「查看占用」", () => {
     entry.storage = {
         ...VIEW_MODE_TARGETS,
         targets: [
-            {target_id: "environment:slot-a", kind: "engine_environment", removable: false, blocked_reason: "current_environment", current: true},
-            {target_id: "model:gguf/a", kind: "installed_model", removable: false, blocked_reason: "model_managed", current: false},
+            {
+                target_id: "environment:slot-a",
+                kind: "engine_environment",
+                removable: false,
+                blocked_reason: "current_environment",
+                current: true
+            },
+            {
+                target_id: "model:gguf/a",
+                kind: "installed_model",
+                removable: false,
+                blocked_reason: "model_managed",
+                current: false
+            },
         ],
     };
     renderEngineCard(container, entry, controllerStub, undefined);
@@ -456,8 +487,20 @@ await test("清理入口双态：有可清理 → 「清理引擎缓存」", () 
         total_size_bytes: 1160 * 1024 * 1024,
         releasable_size_bytes: 7 * 1024 * 1024,
         targets: [
-            {target_id: "environment:slot-a", kind: "engine_environment", removable: false, blocked_reason: "current_environment", current: true},
-            {target_id: "cache:model_cache", kind: "engine_cache", removable: true, blocked_reason: null, current: false},
+            {
+                target_id: "environment:slot-a",
+                kind: "engine_environment",
+                removable: false,
+                blocked_reason: "current_environment",
+                current: true
+            },
+            {
+                target_id: "cache:model_cache",
+                kind: "engine_cache",
+                removable: true,
+                blocked_reason: null,
+                current: false
+            },
         ],
     };
     renderEngineCard(container, entry, controllerStub, undefined);
@@ -533,8 +576,18 @@ await test("模型列表默认折叠，selected/active 摘要仍在默认卡片�
     const entry = makeEntry("funasr", {
         status: RUNNING_READY,
         models: [
-            makeModel({model_id: "iic/SenseVoiceSmall", display_name: "SenseVoiceSmall", is_selected: true, is_active: false}),
-            makeModel({model_id: "iic/paraformer-zh", display_name: "Paraformer-zh", is_selected: false, is_active: true}),
+            makeModel({
+                model_id: "iic/SenseVoiceSmall",
+                display_name: "SenseVoiceSmall",
+                is_selected: true,
+                is_active: false
+            }),
+            makeModel({
+                model_id: "iic/paraformer-zh",
+                display_name: "Paraformer-zh",
+                is_selected: false,
+                is_active: true
+            }),
         ],
         preferences: makePreferences(),
     });
@@ -612,17 +665,19 @@ await test("日志展开/收起保持 aria-expanded，新日志不重建按钮",
 
 await test("backend mismatch 在默认卡片直接可见", () => {
     const container = makeContainer();
-    const entry = makeEntry("funasr", {status: {
-        ...RUNNING_READY,
-        available: false,
-        backend: {
-            requested_preference: "cpu",
-            backend_verification: {
-                state: "mismatched", expected_backend: "cpu", actual_backend: "cuda",
-                device_name: null, mismatch_reason: "identity mismatch",
+    const entry = makeEntry("funasr", {
+        status: {
+            ...RUNNING_READY,
+            available: false,
+            backend: {
+                requested_preference: "cpu",
+                backend_verification: {
+                    state: "mismatched", expected_backend: "cpu", actual_backend: "cuda",
+                    device_name: null, mismatch_reason: "identity mismatch",
+                },
             },
-        },
-    }});
+        }
+    });
     renderEngineCard(container, entry, controllerStub, undefined);
     const summary = container.querySelector(".le-card-summary");
     assert.ok(summary.textContent.includes("启动失败 · 后端身份不匹配"), summary.textContent);
@@ -630,9 +685,11 @@ await test("backend mismatch 在默认卡片直接可见", () => {
 
 await test("operation stage 在默认卡片直接可见（反馈槽）", () => {
     const container = makeContainer();
-    const entry = makeEntry("funasr", {status: {
-        operation: {kind: "installing", operation_id: "op-1", stage: "verifying", cancellable: true},
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            operation: {kind: "installing", operation_id: "op-1", stage: "verifying", cancellable: true},
+        }
+    });
     renderEngineCard(container, entry, controllerStub, undefined);
     const feedback = container.querySelector(".le-feedback");
     assert.ok(feedback.textContent.includes("校验中"), feedback.textContent);
@@ -644,10 +701,18 @@ await test("operation stage 在默认卡片直接可见（反馈槽）", () => {
 
 await test("last_error 默认可见 + detail 折叠源", () => {
     const container = makeContainer();
-    const entry = makeEntry("funasr", {status: {
-        ...READY_STOPPED,
-        last_error: {code: "start_failed", message: "expected=cpu, actual=cuda", action_hint: null, detail: "traceback...", phase: "start"},
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            ...READY_STOPPED,
+            last_error: {
+                code: "start_failed",
+                message: "expected=cpu, actual=cuda",
+                action_hint: null,
+                detail: "traceback...",
+                phase: "start"
+            },
+        }
+    });
     renderEngineCard(container, entry, controllerStub, undefined);
     const feedback = container.querySelector(".le-feedback");
     assert.ok(feedback.textContent.includes("expected=cpu"), feedback.textContent);
@@ -700,7 +765,12 @@ await test("PaddleOCR 配置：OCR 后端/运行策略 select + 计算设备静�
     const container = makeContainer();
     const entry = makeEntry("paddleocr", {
         status: READY_STOPPED,
-        models: [makeModel({engine_id: "paddleocr", model_id: "PP-OCRv6", display_name: "PP-OCRv6", is_selected: true})],
+        models: [makeModel({
+            engine_id: "paddleocr",
+            model_id: "PP-OCRv6",
+            display_name: "PP-OCRv6",
+            is_selected: true
+        })],
         preferences: makePreferences({
             engine_id: "paddleocr",
             compute_preference: "cpu",

@@ -12,10 +12,10 @@ import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
 import {
-    createVoiceTranscriptState,
-    beginRecording,
-    applyPartial,
     applyFinal,
+    applyPartial,
+    beginRecording,
+    createVoiceTranscriptState,
     endRecording,
     getFinalQuery,
     hasResult,

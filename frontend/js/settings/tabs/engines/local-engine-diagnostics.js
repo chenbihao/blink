@@ -11,7 +11,7 @@
  */
 
 import {renderIcon} from "../../../shared/icon.js";
-import {tt, copyTextWithFeedback} from "./local-engine-card-utils.js";
+import {copyTextWithFeedback, tt} from "./local-engine-card-utils.js";
 import {formatLocalLogTimestamp} from "./local-engine-log-format.js";
 import {getEntry} from "./local-engine-state.js";
 
@@ -371,7 +371,8 @@ function renderDiagnosticContent(container, diag, i18n, engineId, entry, control
                     showOrphanNotification(msg, result?.stopped !== false);
                     // 刷新 diagnostics 和 status
                     if (typeof controller.refreshStatus === "function") {
-                        controller.refreshStatus().catch(() => {});
+                        controller.refreshStatus().catch(() => {
+                        });
                     }
                 }).catch((e) => {
                     orphanBtn.disabled = false;

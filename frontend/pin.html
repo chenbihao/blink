@@ -625,6 +625,7 @@
         dragEndTime = Date.now();
         reconcileFromBackend();
     }
+
     if (tauriWin?.onMoved) {
         tauriWin.onMoved(() => {
             clearTimeout(movedDebounce);
@@ -922,7 +923,8 @@
             console.error(`[pin OCR] [${err.code}] ${err.message}`);
             showPinOcrPanel(`识别失败：${err.message}`);
             // Task 11: 出错时取消在途请求
-            if (ocrHandle) ocrHandle.cancel().catch(() => {});
+            if (ocrHandle) ocrHandle.cancel().catch(() => {
+            });
         } finally {
             ocrBusy = false;
         }

@@ -20,35 +20,27 @@
 
 import assert from "node:assert/strict";
 import {
-    createInitialState,
-    setCatalog,
-    mergeStatus,
-    applyInstallStage,
-    applyInstallProgress,
     appendLog,
+    applyInstallProgress,
+    applyInstallStage,
+    clearLogs,
+    createInitialState,
+    getEntry,
+    getPrimaryAction,
+    hasActiveOperation,
+    isActionBlocked,
+    isEngineReady,
+    isOperationCancellable,
+    MAX_LOG_LINES,
+    mergeStatus,
+    setCatalog,
     setLogHistory,
-    setStorage,
+    setModels,
     setPendingAction,
     setPendingModelAction,
-    setModels,
-    clearLogs,
-    getEntry,
-    isEngineReady,
-    hasActiveOperation,
-    isOperationCancellable,
-    getPrimaryAction,
-    isActionBlocked,
-    MAX_LOG_LINES,
+    setStorage,
 } from "./local-engine-state.js";
-import {
-    funasrCatalog,
-    paddleocrCatalog,
-    makeCatalog,
-    makeStatus,
-    makeLog,
-    makeStorage,
-    processState,
-} from "./local-engine-fixtures.js";
+import {makeCatalog, makeLog, makeStatus, makeStorage, processState,} from "./local-engine-fixtures.js";
 
 // ── 辅助 ──────────────────────────────────────────────────────────────────────
 
@@ -697,8 +689,18 @@ test("applyInstallProgress：引擎级 operation 活跃且 operation_id 匹配 �
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
 
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 1024, total: 4096}, 1000);
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 2048, total: 4096}, 1300);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 1024,
+        total: 4096
+    }, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 2048,
+        total: 4096
+    }, 1300);
 
     const entry = getEntry(state, "funasr");
     assert.equal(entry.installProgress.downloaded, 2048);
@@ -711,7 +713,12 @@ test("applyInstallProgress：operation_id 不匹配的迟到事件拒绝", () =>
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
 
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-old", downloaded: 9999, total: 9999}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-old",
+        downloaded: 9999,
+        total: 9999
+    }, 1000);
     assert.equal(getEntry(state, "funasr").installProgress, null);
 });
 
@@ -730,7 +737,12 @@ test("applyInstallProgress：模型下载链路（pendingModelActions）→ 接�
     state = mergeStatus(state, makeStatus({engine_id: "funasr"}));
     state = setPendingModelAction(state, "funasr", "sensevoice", {kind: "install", operationId: "op-model-1"});
 
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-1", downloaded: 500, total: null}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-model-1",
+        downloaded: 500,
+        total: null
+    }, 1000);
 
     const entry = getEntry(state, "funasr");
     assert.equal(entry.installProgress.downloaded, 500);
@@ -742,8 +754,18 @@ test("applyInstallProgress：字节回退（多文件切换）重置样本窗口
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
 
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 8000, total: 10000}, 0);
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 100, total: 500}, 200);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 8000,
+        total: 10000
+    }, 0);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 100,
+        total: 500
+    }, 200);
 
     const entry = getEntry(state, "funasr");
     assert.deepEqual(entry.installProgress.samples, [{t: 200, bytes: 100}], "回退时窗口重置");
@@ -754,7 +776,12 @@ test("终态清理：operation completed 后 installProgress 清空", () => {
     let state = createInitialState();
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 4096, total: 4096}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 4096,
+        total: 4096
+    }, 1000);
     assert.ok(getEntry(state, "funasr").installProgress);
 
     // 终态阶段事件 → 清空
@@ -762,7 +789,12 @@ test("终态清理：operation completed 后 installProgress 清空", () => {
     assert.equal(getEntry(state, "funasr").installProgress, null);
 
     // 再次推进度（陈旧事件）→ 拒绝（op 已终态且无模型上下文）
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 4096, total: 4096}, 2000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 4096,
+        total: 4096
+    }, 2000);
     assert.equal(getEntry(state, "funasr").installProgress, null);
 });
 
@@ -770,7 +802,12 @@ test("终态清理：mergeStatus 投影 idle op 且无模型上下文时清空",
     let state = createInitialState();
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 100, total: 200}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 100,
+        total: 200
+    }, 1000);
 
     // 新 revision 快照：operation 已结束（idle）
     state = mergeStatus(state, makeStatus({
@@ -785,7 +822,12 @@ test("mergeStatus：operation 活跃期间保留 installProgress", () => {
     let state = createInitialState();
     state = setCatalog(state, makeCatalog());
     state = mergeStatus(state, makeInstallingStatus("funasr", "op-env-1"));
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-env-1", downloaded: 100, total: 200}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-env-1",
+        downloaded: 100,
+        total: 200
+    }, 1000);
 
     // 更大 revision 的快照：operation 仍活跃 → 进度保留
     const newer = makeInstallingStatus("funasr", "op-env-1");
@@ -804,7 +846,12 @@ test("applyInstallProgress：模型操作 operation_id 不匹配 pending → 拒
     state = setPendingModelAction(state, "funasr", "sensevoice", {kind: "install", operationId: "op-model-correct"});
 
     // operation_id 不匹配当前 pending model action → 拒绝
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-stale", downloaded: 500, total: 1000}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-model-stale",
+        downloaded: 500,
+        total: 1000
+    }, 1000);
     assert.equal(getEntry(state, "funasr").installProgress, null, "不匹配 operation_id 的进度事件应被拒绝");
 });
 
@@ -817,19 +864,34 @@ test("applyInstallProgress：多模型并行下载时 operation_id 精确匹配"
     state = setPendingModelAction(state, "funasr", "sensevoice", {kind: "install", operationId: "op-model-b"});
 
     // op-model-a 的进度 → 接受
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-a", downloaded: 100, total: 200}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-model-a",
+        downloaded: 100,
+        total: 200
+    }, 1000);
     let entry = getEntry(state, "funasr");
     assert.equal(entry.installProgress.downloaded, 100);
     assert.equal(entry.installProgress.operationId, "op-model-a");
 
     // op-model-b 的进度 → 接受（覆盖前一条，同一进度条槽位）
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-model-b", downloaded: 300, total: 600}, 1100);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-model-b",
+        downloaded: 300,
+        total: 600
+    }, 1100);
     entry = getEntry(state, "funasr");
     assert.equal(entry.installProgress.downloaded, 300);
     assert.equal(entry.installProgress.operationId, "op-model-b");
 
     // 未知的 operation_id → 拒绝
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-unknown", downloaded: 999, total: 999}, 1200);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-unknown",
+        downloaded: 999,
+        total: 999
+    }, 1200);
     entry = getEntry(state, "funasr");
     assert.equal(entry.installProgress.downloaded, 300, "未知 operation_id 不应覆盖进度");
 });
@@ -842,7 +904,12 @@ test("applyInstallProgress：pending 已清除但后端仍活跃——有 operat
     state = setModels(state, "funasr", [{model_id: "sensevoice", install_state: "downloading"}]);
 
     // 有 operation_id 的迟到进度 → 接受（pending 已清但后端还在推）
-    state = applyInstallProgress(state, {engine_id: "funasr", operation_id: "op-tail-1", downloaded: 100, total: 200}, 1000);
+    state = applyInstallProgress(state, {
+        engine_id: "funasr",
+        operation_id: "op-tail-1",
+        downloaded: 100,
+        total: 200
+    }, 1000);
     assert.ok(getEntry(state, "funasr").installProgress, "pending 清除但后端活跃+有 op_id → 接受");
 });
 

@@ -711,12 +711,12 @@ body.image-editor-mode #canvas.long-image-editing {
     pointer-events: auto;
     /* 用 CSS 画对角线条，视觉提示可拖拽 */
     background-image: linear-gradient(
-        135deg,
-        transparent 0,
-        transparent 45%,
-        rgba(255, 255, 255, 0.35) 50%,
-        transparent 55%,
-        transparent 100%
+            135deg,
+            transparent 0,
+            transparent 45%,
+            rgba(255, 255, 255, 0.35) 50%,
+            transparent 55%,
+            transparent 100%
     );
     background-size: 8px 8px;
     background-position: bottom right;

@@ -71,7 +71,8 @@
             <!-- Header（三段式布局：侧边栏toggle + 对话标题 + 操作按钮） -->
             <div class="chat-header">
                 <button class="chat-header-btn" id="chat-sidebar-toggle" title="对话列表">
-                    <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                         stroke-width="2"
                          viewBox="0 0 24 24">
                         <line x1="3" x2="21" y1="6" y2="6"/>
                         <line x1="3" x2="21" y1="12" y2="12"/>
@@ -100,7 +101,9 @@
                         </svg>
                     </button>
                     <button class="chat-header-btn" id="chat-provider-settings-btn" title="供应商设置">
-                        <svg class="icon" aria-hidden="true"><use href="#icon-cable"/></svg>
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-cable"/>
+                        </svg>
                     </button>
                     <button class="chat-header-btn" id="chat-settings-btn" title="对话设置">
                         <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
@@ -172,7 +175,8 @@
                             <!-- 思考强度（0.21.17：支持 reasoning_effort 的模型展开等级下拉，否则退化为简单开关；0.21.18 默认档） -->
                             <button class="chat-thinking-btn" id="chat-thinking-btn" title="思考强度">
                                 <span id="chat-thinking-label">深度思考</span>
-                                <svg class="chat-thinking-caret" fill="none" stroke="currentColor" stroke-linecap="round"
+                                <svg class="chat-thinking-caret" fill="none" stroke="currentColor"
+                                     stroke-linecap="round"
                                      stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
                                     <polyline points="6 9 12 15 18 9"/>
                                 </svg>

@@ -104,8 +104,12 @@
 }
 
 @keyframes le-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 #engines .le-error-region {
@@ -153,11 +157,22 @@
 }
 
 /* 顶部摘要语气色（正常克制，需要关注才用警示色） */
-#engines .le-runtime-summary.le-tone-error { color: var(--red); }
-#engines .le-runtime-summary.le-tone-warn { color: var(--warning); }
+#engines .le-runtime-summary.le-tone-error {
+    color: var(--red);
+}
+
+#engines .le-runtime-summary.le-tone-warn {
+    color: var(--warning);
+}
+
 #engines .le-runtime-summary.le-tone-muted,
-#engines .le-runtime-summary.le-tone-neutral { color: var(--text-dim); }
-#engines .le-runtime-summary.le-tone-ok { color: var(--text-sub); }
+#engines .le-runtime-summary.le-tone-neutral {
+    color: var(--text-dim);
+}
+
+#engines .le-runtime-summary.le-tone-ok {
+    color: var(--text-sub);
+}
 
 #engines .le-runtime-details-toggle {
     flex-shrink: 0;
@@ -251,15 +266,34 @@
     flex-shrink: 0;
 }
 
-#engines .le-tone-ok .le-summary-dot { background: var(--green); }
-#engines .le-tone-busy .le-summary-dot { background: var(--accent); }
-#engines .le-tone-error .le-summary-dot { background: var(--red); }
-#engines .le-tone-warn .le-summary-dot { background: var(--warning); }
+#engines .le-tone-ok .le-summary-dot {
+    background: var(--green);
+}
 
-#engines .le-card-summary.le-tone-error { color: var(--red); }
-#engines .le-card-summary.le-tone-warn { color: var(--warning); }
+#engines .le-tone-busy .le-summary-dot {
+    background: var(--accent);
+}
+
+#engines .le-tone-error .le-summary-dot {
+    background: var(--red);
+}
+
+#engines .le-tone-warn .le-summary-dot {
+    background: var(--warning);
+}
+
+#engines .le-card-summary.le-tone-error {
+    color: var(--red);
+}
+
+#engines .le-card-summary.le-tone-warn {
+    color: var(--warning);
+}
+
 #engines .le-card-summary.le-tone-muted,
-#engines .le-card-summary.le-tone-neutral { color: var(--text-sub); }
+#engines .le-card-summary.le-tone-neutral {
+    color: var(--text-sub);
+}
 
 #engines .le-card-primary {
     flex-shrink: 0;

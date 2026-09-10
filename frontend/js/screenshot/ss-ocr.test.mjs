@@ -19,7 +19,7 @@
 //! - auto fallback reason 只展示给当前 session
 //! - Task 11: cancel 幂等——多次调用安全
 
-import {test, describe, beforeEach, afterEach} from 'node:test';
+import {beforeEach, describe, test} from 'node:test';
 import assert from 'node:assert';
 import crypto from 'node:crypto';
 
@@ -73,7 +73,8 @@ function cancelActiveOcr(ss) {
     if (ss.activeOcrHandle) {
         const handle = ss.activeOcrHandle;
         ss.activeOcrHandle = null;
-        handle.cancel().catch(() => {});
+        handle.cancel().catch(() => {
+        });
     }
     if (ss.ocrPrewarm) {
         ss.ocrPrewarm = null;

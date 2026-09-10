@@ -21,11 +21,7 @@ import {
 } from "./provider.js";
 import {bindAIModelEditModalEvents} from "./model-edit.js";
 import {initSkillImportHandlers, loadSkillList, showSkillImportPanel} from "./skill.js";
-import {
-    clampAIHardTimeoutMs,
-    effectiveAIHardTimeoutMs,
-    memoryExpertVisibility,
-} from "./semantics.js";
+import {clampAIHardTimeoutMs, effectiveAIHardTimeoutMs, memoryExpertVisibility,} from "./semantics.js";
 import {confirmDialog, invoke} from "../../../shared/tauri.js";
 import {onLangChange, t} from "../../../i18n/index.js";
 

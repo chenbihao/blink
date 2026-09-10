@@ -6,7 +6,7 @@
  */
 
 import {applyTheme} from "../shared/theme.js";
-import {applyI18n, setLang, t} from "../i18n/index.js";
+import {applyI18n, onLangChange, setLang, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
 import {hideSettingsWindow, loadConfig} from "./shared/ipc.js";
 import {setCurrentConfig} from "./shared/state.js";
@@ -28,11 +28,10 @@ import {initMcpServerSection} from "./tabs/mcp-server.js";
 import {createLocalEngineController} from "./tabs/engines/local-runtime.js";
 import {renderEngineCard} from "./tabs/engines/local-engine-card.js";
 import {computeRuntimeSummary} from "./tabs/engines/local-engine-summary.js";
-import {processDisplay, processClass} from "./tabs/engines/local-engine-process.js";
+import {processClass, processDisplay} from "./tabs/engines/local-engine-process.js";
 import {statusClass} from "./tabs/engines/local-engine-card-utils.js";
 import {registerLocalEngineHooks, unregisterLocalEngineHooks} from "./tabs/engines/local-engine-hooks.js";
-import {createCleanupModal, aggregateSharedTargets} from "./tabs/engines/local-engine-cleanup-modal.js";
-import {onLangChange} from "../i18n/index.js";
+import {aggregateSharedTargets, createCleanupModal} from "./tabs/engines/local-engine-cleanup-modal.js";
 import {markSettingsTabActivation, resetSettingsContentScroll} from "./navigation.js";
 
 // ── Tab 切换 + 生命周期管理 ─────────────────────────────────────────────────
@@ -135,12 +134,12 @@ async function mountLocalRuntime() {
             if (emptyRegion) emptyRegion.hidden = false;
         }
 
-    // 0.22.6: 初始化运行时底座（只读）与「运行时与缓存」折叠区
-    initFoundation();
-    initRuntimeDetailsToggle();
+        // 0.22.6: 初始化运行时底座（只读）与「运行时与缓存」折叠区
+        initFoundation();
+        initRuntimeDetailsToggle();
 
-    // 初始渲染顶部摘要（loading 态）
-    renderRuntimeSummary(_leController.getState());
+        // 初始渲染顶部摘要（loading 态）
+        renderRuntimeSummary(_leController.getState());
 
         // resolve mount resolvers
         for (const resolve of _mountResolvers) resolve();

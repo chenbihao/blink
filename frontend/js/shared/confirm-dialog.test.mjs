@@ -12,7 +12,7 @@
  * 8. 连续弹窗：旧 handler 不拦截新弹窗的 Esc/Enter
  */
 
-import {test, describe, before, after} from "node:test";
+import {describe, test} from "node:test";
 import assert from "node:assert";
 
 // ── DOM 环境 mock ─────────────────────────────────────────────────────────────
@@ -40,22 +40,43 @@ function makeElement(tag) {
         dataset: {},
         classList: {
             _set: new Set(),
-            add(...c) { c.forEach((x) => this._set.add(x)); },
-            remove(...c) { c.forEach((x) => this._set.delete(x)); },
+            add(...c) {
+                c.forEach((x) => this._set.add(x));
+            },
+            remove(...c) {
+                c.forEach((x) => this._set.delete(x));
+            },
             toggle(c, force) {
                 if (force === true || (force === undefined && !this._set.has(c))) this._set.add(c);
                 else this._set.delete(c);
             },
-            contains(c) { return this._set.has(c); },
+            contains(c) {
+                return this._set.has(c);
+            },
         },
-        setAttribute(k, v) { this._attributes[k] = v; },
-        getAttribute(k) { return this._attributes[k] ?? null; },
-        removeAttribute(k) { delete this._attributes[k]; },
-        hasAttribute(k) { return k in this._attributes; },
-        appendChild(child) { this._children.push(child); child._parent = this; return child; },
+        setAttribute(k, v) {
+            this._attributes[k] = v;
+        },
+        getAttribute(k) {
+            return this._attributes[k] ?? null;
+        },
+        removeAttribute(k) {
+            delete this._attributes[k];
+        },
+        hasAttribute(k) {
+            return k in this._attributes;
+        },
+        appendChild(child) {
+            this._children.push(child);
+            child._parent = this;
+            return child;
+        },
         removeChild(child) {
             const i = this._children.indexOf(child);
-            if (i >= 0) { this._children.splice(i, 1); child._parent = null; }
+            if (i >= 0) {
+                this._children.splice(i, 1);
+                child._parent = null;
+            }
             return child;
         },
         remove() {
@@ -63,8 +84,12 @@ function makeElement(tag) {
                 this._parent.removeChild(this);
             }
         },
-        querySelector() { return null; },
-        querySelectorAll() { return []; },
+        querySelector() {
+            return null;
+        },
+        querySelectorAll() {
+            return [];
+        },
         addEventListener(type, fn) {
             if (!this._listeners[type]) this._listeners[type] = [];
             this._listeners[type].push(fn);
@@ -81,15 +106,28 @@ function makeElement(tag) {
             if (arr) arr.forEach((fn) => fn(ev));
             return true;
         },
-        focus() {},
-        get textContent() { return this._textContent; },
-        set textContent(v) { this._textContent = String(v); },
-        get innerHTML() { return this._innerHTML; },
-        set innerHTML(v) { this._innerHTML = String(v); },
+        focus() {
+        },
+        get textContent() {
+            return this._textContent;
+        },
+        set textContent(v) {
+            this._textContent = String(v);
+        },
+        get innerHTML() {
+            return this._innerHTML;
+        },
+        set innerHTML(v) {
+            this._innerHTML = String(v);
+        },
     };
     Object.defineProperty(el, "checked", {
-        get() { return this._checked ?? false; },
-        set(v) { this._checked = v; },
+        get() {
+            return this._checked ?? false;
+        },
+        set(v) {
+            this._checked = v;
+        },
         configurable: true,
     });
     return el;
@@ -119,8 +157,12 @@ globalThis.document = {
             if (i >= 0) arr.splice(i, 1);
         }
     },
-    querySelector() { return null; },
-    getElementById() { return null; },
+    querySelector() {
+        return null;
+    },
+    getElementById() {
+        return null;
+    },
 };
 
 // 统计 document keydown capture 监听器数量
@@ -138,7 +180,11 @@ function resetDocListeners() {
 function dispatchKeydown(key) {
     const arr = docListeners["keydown::capture"];
     if (arr) {
-        const ev = {key, preventDefault() {}, stopPropagation() {}};
+        const ev = {
+            key, preventDefault() {
+            }, stopPropagation() {
+            }
+        };
         // 复制一份，避免在遍历中修改数组
         [...arr].forEach((fn) => fn(ev));
     }
@@ -254,7 +300,9 @@ describe("confirm-dialog keydown 监听器泄漏修复", () => {
         // 第二次点击不应该再 resolve（Promise 已 settled）
         // 用一个标志验证
         let secondResolved = false;
-        p.then(() => { secondResolved = true; });
+        p.then(() => {
+            secondResolved = true;
+        });
         okBtn.dispatchEvent({type: "click"});
         // 给 microtask 一个 tick
         await new Promise((r) => setTimeout(r, 10));

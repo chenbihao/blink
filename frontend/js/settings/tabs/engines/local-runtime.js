@@ -32,31 +32,31 @@
 import {invoke, listen, normalizeError} from "../../../shared/tauri.js";
 import {EVENTS} from "../../../shared/event-names.js";
 import {
-    createInitialState,
-    setCatalog,
-    mergeStatus,
-    applyInstallStage,
-    applyInstallProgress,
     appendLog,
-    setLogHistory,
-    setStorage,
-    setPendingAction,
-    setTransientError,
-    setPendingModelAction,
-    getPendingModelAction,
-    clearLogs,
-    getEngineIds,
-    setModels,
-    setPreferences,
+    applyInstallProgress,
+    applyInstallStage,
     bindRealOperationId,
+    clearLogs,
+    createInitialState,
+    getEngineIds,
+    getPendingModelAction,
+    mergeStatus,
+    setCatalog,
+    setLogHistory,
+    setModels,
+    setPendingAction,
+    setPendingModelAction,
+    setPreferences,
+    setStorage,
+    setTransientError,
 } from "./local-engine-state.js";
 import {
     beginModelSwitch,
-    resolveModelSwitch,
-    reconcileSelection,
     clearSelection,
     createSelectionRequestId,
     isSwitching,
+    reconcileSelection,
+    resolveModelSwitch,
 } from "./local-engine-selection.js";
 
 // ── 命令清单（与后端 commands/local_engine.rs 逐一核对）─────────────────────────
@@ -147,8 +147,8 @@ export function createLocalEngineController(callbacks = {}) {
     /**
      * 通知状态变化。
      */
-    // 高频日志事件（下载时每行一条）会触发整卡重渲染——合并为最多
-    // ~12 次/秒，避免按钮 hover 闪烁、点击落空与 DOM 抖动。
+        // 高频日志事件（下载时每行一条）会触发整卡重渲染——合并为最多
+        // ~12 次/秒，避免按钮 hover 闪烁、点击落空与 DOM 抖动。
     let notifyTimer = null;
 
     function notifyStateChange() {
@@ -940,7 +940,8 @@ export function createLocalEngineController(callbacks = {}) {
                 });
                 reportEngineError(engineId, "model_select", e);
                 // 失败后刷新最终状态，使 last_error / active 投影可见
-                this.refreshStatus().catch(() => {});
+                this.refreshStatus().catch(() => {
+                });
                 throw err;
             }
         },
@@ -1067,14 +1068,16 @@ export function createLocalEngineController(callbacks = {}) {
                 clearEngineError(engineId);
                 notifyStateChange();
                 // 完成后受 epoch/revision 防护的状态刷新（兜底丢失的终态事件）
-                this.refreshStatus().catch(() => {});
+                this.refreshStatus().catch(() => {
+                });
                 return result;
             } catch (e) {
                 // 失败也清除 pending action（错误通过状态事件反馈）
                 state = setPendingAction(state, engineId, null);
                 const err = reportEngineError(engineId, actionKind, e);
                 // 失败后刷新最终状态，使 rollback error / last_error 可见
-                this.refreshStatus().catch(() => {});
+                this.refreshStatus().catch(() => {
+                });
                 throw err;
             } finally {
                 activeActions.delete(key);

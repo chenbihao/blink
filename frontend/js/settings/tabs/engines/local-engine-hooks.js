@@ -25,14 +25,13 @@
 
 import {registerAdapterHook, unregisterAdapterHook} from "./local-engine-card.js";
 import {t} from "../../../i18n/index.js";
-import {computeOptionsDisplayMode} from "./local-engine-state.js";
 import {
-    isPendingRestart,
+    computeOptionsDisplayMode,
     getDesiredDeployment,
-    getLoadedDeployment,
     getLegacyDeployment,
+    getLoadedDeployment,
+    isPendingRestart
 } from "./local-engine-state.js";
-import {getSelection} from "./local-engine-selection.js";
 
 // ── 公共构造 ──────────────────────────────────────────────────────────────────
 
@@ -218,7 +217,8 @@ function appendComputeGroup(container, entry, engineId, controller) {
             select.dataset.savedValue = accepted;
             select.value = accepted;
             if (controller?.isMounted()) {
-                controller.refreshStatus().catch(() => {});
+                controller.refreshStatus().catch(() => {
+                });
             }
         } catch (err) {
             console.error(`[${engineId}-hook] save compute preference failed:`, err);

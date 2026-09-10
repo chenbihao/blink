@@ -12,7 +12,10 @@ import assert from "node:assert/strict";
 globalThis.window = {
     __TAURI__: {
         core: {invoke: async () => ({})},
-        event: {listen: async () => () => {}},
+        event: {
+            listen: async () => () => {
+            }
+        },
     },
 };
 
@@ -45,6 +48,15 @@ class ShimElement {
         });
     }
 
+    get textContent() {
+        return this._text + this._children.map((c) => c.textContent).join("");
+    }
+
+    set textContent(value) {
+        this._children = [];
+        this._text = String(value);
+    }
+
     appendChild(child) {
         if (child._parent) child._parent.removeChild(child);
         child._parent = this;
@@ -61,15 +73,6 @@ class ShimElement {
 
     remove() {
         if (this._parent) this._parent.removeChild(this);
-    }
-
-    get textContent() {
-        return this._text + this._children.map((c) => c.textContent).join("");
-    }
-
-    set textContent(value) {
-        this._children = [];
-        this._text = String(value);
     }
 
     setAttribute(name, value) {
@@ -177,7 +180,8 @@ await test("orphan actionable：渲染停止按钮且不抛 ReferenceError", asy
     const controller = {
         getDiagnostics: async () => makeDiag(),
         stopOrphan: async () => ({stopped: true}),
-        refreshStatus: async () => {},
+        refreshStatus: async () => {
+        },
     };
     const diagPanel = documentShim.createElement("div");
     diagPanel.hidden = true; // 初始折叠（与卡片装配一致）

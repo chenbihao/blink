@@ -22,7 +22,10 @@ if (!globalThis.window) {
 
 globalThis.window.__TAURI__ = {
     core: {invoke: async () => []},
-    event: {listen: async () => () => {}},
+    event: {
+        listen: async () => () => {
+        }
+    },
 };
 
 // ── 最小 document mock ────────────────────────────────────────────────────
@@ -69,37 +72,79 @@ function mockElement(tag) {
         _attrs: {},
         classList: {
             _set: new Set(),
-            add(c) { this._set.add(c); },
-            remove(c) { this._set.delete(c); },
-            contains(c) { return this._set.has(c); },
+            add(c) {
+                this._set.add(c);
+            },
+            remove(c) {
+                this._set.delete(c);
+            },
+            contains(c) {
+                return this._set.has(c);
+            },
         },
         style: {},
         _parent: null,
         scrollTop: 0,
         scrollHeight: 0,
     };
-    el.setAttribute = (k, v) => { el._attrs[k] = v; if (k.startsWith("data-")) el.dataset[k.slice(5)] = v; };
+    el.setAttribute = (k, v) => {
+        el._attrs[k] = v;
+        if (k.startsWith("data-")) el.dataset[k.slice(5)] = v;
+    };
     el.getAttribute = (k) => el._attrs[k] ?? null;
     el.hasAttribute = (k) => k in el._attrs;
-    el.removeAttribute = (k) => { delete el._attrs[k]; };
-    el.appendChild = (child) => { child._parent = el; el._children.push(child); return child; };
-    el.removeChild = (child) => { const i = el._children.indexOf(child); if (i >= 0) el._children.splice(i, 1); };
-    el.remove = () => { if (el._parent) el._parent.removeChild(el); };
-    el.addEventListener = (type, fn) => { (el._listeners[type] ||= []).push(fn); };
-    el.removeEventListener = (type, fn) => { const a = el._listeners[type]; if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } };
-    el.focus = () => {};
-    el.scrollIntoView = () => {};
-    el.click = () => { for (const h of el._listeners["click"] || []) h({preventDefault() {}, stopPropagation() {}}); };
+    el.removeAttribute = (k) => {
+        delete el._attrs[k];
+    };
+    el.appendChild = (child) => {
+        child._parent = el;
+        el._children.push(child);
+        return child;
+    };
+    el.removeChild = (child) => {
+        const i = el._children.indexOf(child);
+        if (i >= 0) el._children.splice(i, 1);
+    };
+    el.remove = () => {
+        if (el._parent) el._parent.removeChild(el);
+    };
+    el.addEventListener = (type, fn) => {
+        (el._listeners[type] ||= []).push(fn);
+    };
+    el.removeEventListener = (type, fn) => {
+        const a = el._listeners[type];
+        if (a) {
+            const i = a.indexOf(fn);
+            if (i >= 0) a.splice(i, 1);
+        }
+    };
+    el.focus = () => {
+    };
+    el.scrollIntoView = () => {
+    };
+    el.click = () => {
+        for (const h of el._listeners["click"] || []) h({
+            preventDefault() {
+            }, stopPropagation() {
+            }
+        });
+    };
     el.querySelector = (sel) => queryInChildren(el._children, sel, false);
     el.querySelectorAll = (sel) => queryInChildren(el._children, sel, true);
     el.closest = () => null;
     Object.defineProperty(el, "textContent", {
         get: () => el._textContent,
-        set: (v) => { el._textContent = String(v); el._children = []; },
+        set: (v) => {
+            el._textContent = String(v);
+            el._children = [];
+        },
     });
     Object.defineProperty(el, "innerHTML", {
         get: () => el._textContent,
-        set: (v) => { el._textContent = String(v); el._children = []; },
+        set: (v) => {
+            el._textContent = String(v);
+            el._children = [];
+        },
     });
     return el;
 }
@@ -153,7 +198,10 @@ function makeModal(overrides = {}) {
     const modalEl = mockElement("div");
     const bodyEl = mockElement("div");
     const confirmBtn = mockElement("button");
-    const opts = {modalEl, bodyEl, confirmBtn, onConfirm: async () => {}, ...overrides};
+    const opts = {
+        modalEl, bodyEl, confirmBtn, onConfirm: async () => {
+        }, ...overrides
+    };
     const modal = createCleanupModal(opts);
     return {modal, modalEl, bodyEl, confirmBtn};
 }
@@ -180,11 +228,20 @@ test("aggregateSharedTargets：空状态返回空数组", () => {
 
 test("aggregateSharedTargets：只返回后端标记 shared 的 target", () => {
     const state = new Map([
-        ["funasr", {storage: {targets: [
-            {target_id: "environment:slot-a", kind: "engine_environment", shared: false, engine_id: "funasr"},
-            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "funasr"},
-            {target_id: "cache:staging", kind: "engine_cache", shared: false, engine_id: "funasr"},
-        ]}}],
+        ["funasr", {
+            storage: {
+                targets: [
+                    {target_id: "environment:slot-a", kind: "engine_environment", shared: false, engine_id: "funasr"},
+                    {
+                        target_id: "shared_runtime:python_venv:py312",
+                        kind: "shared_runtime",
+                        shared: true,
+                        engine_id: "funasr"
+                    },
+                    {target_id: "cache:staging", kind: "engine_cache", shared: false, engine_id: "funasr"},
+                ]
+            }
+        }],
     ]);
     const result = aggregateSharedTargets(state);
     assert.equal(result.length, 1);
@@ -193,10 +250,14 @@ test("aggregateSharedTargets：只返回后端标记 shared 的 target", () => {
 
 test("aggregateSharedTargets：target.shared=true 的 generation 也被识别为共享", () => {
     const state = new Map([
-        ["funasr", {storage: {targets: [
-            {target_id: "environment:slot-a", kind: "engine_environment", shared: false, engine_id: "funasr"},
-            {target_id: "shared-asset", kind: "engine_environment", shared: true, engine_id: "funasr"},
-        ]}}],
+        ["funasr", {
+            storage: {
+                targets: [
+                    {target_id: "environment:slot-a", kind: "engine_environment", shared: false, engine_id: "funasr"},
+                    {target_id: "shared-asset", kind: "engine_environment", shared: true, engine_id: "funasr"},
+                ]
+            }
+        }],
     ]);
     const result = aggregateSharedTargets(state);
     assert.equal(result.length, 1);
@@ -205,12 +266,30 @@ test("aggregateSharedTargets：target.shared=true 的 generation 也被识别为
 
 test("aggregateSharedTargets：跨引擎同 target_id 去重并合并", () => {
     const state = new Map([
-        ["funasr", {storage: {targets: [
-            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "funasr"},
-        ]}}],
-        ["paddleocr", {storage: {targets: [
-            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "paddleocr"},
-        ]}}],
+        ["funasr", {
+            storage: {
+                targets: [
+                    {
+                        target_id: "shared_runtime:python_venv:py312",
+                        kind: "shared_runtime",
+                        shared: true,
+                        engine_id: "funasr"
+                    },
+                ]
+            }
+        }],
+        ["paddleocr", {
+            storage: {
+                targets: [
+                    {
+                        target_id: "shared_runtime:python_venv:py312",
+                        kind: "shared_runtime",
+                        shared: true,
+                        engine_id: "paddleocr"
+                    },
+                ]
+            }
+        }],
     ]);
     const result = aggregateSharedTargets(state);
     assert.equal(result.length, 1, "同 target_id 应去重");
@@ -220,13 +299,36 @@ test("aggregateSharedTargets：跨引擎同 target_id 去重并合并", () => {
 
 test("aggregateSharedTargets：不同 target_id 不合并", () => {
     const state = new Map([
-        ["funasr", {storage: {targets: [
-            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "funasr"},
-            {target_id: "shared_download_cache:python_venv", kind: "shared_download_cache", shared: true, engine_id: "funasr"},
-        ]}}],
-        ["paddleocr", {storage: {targets: [
-            {target_id: "shared_runtime:python_venv:py312", kind: "shared_runtime", shared: true, engine_id: "paddleocr"},
-        ]}}],
+        ["funasr", {
+            storage: {
+                targets: [
+                    {
+                        target_id: "shared_runtime:python_venv:py312",
+                        kind: "shared_runtime",
+                        shared: true,
+                        engine_id: "funasr"
+                    },
+                    {
+                        target_id: "shared_download_cache:python_venv",
+                        kind: "shared_download_cache",
+                        shared: true,
+                        engine_id: "funasr"
+                    },
+                ]
+            }
+        }],
+        ["paddleocr", {
+            storage: {
+                targets: [
+                    {
+                        target_id: "shared_runtime:python_venv:py312",
+                        kind: "shared_runtime",
+                        shared: true,
+                        engine_id: "paddleocr"
+                    },
+                ]
+            }
+        }],
     ]);
     assert.equal(aggregateSharedTargets(state).length, 2);
 });
@@ -302,7 +404,12 @@ test("createCleanupModal：shared target 默认不选但有非 shared 时按钮�
     modal.open({
         targets: [
             makeTarget(),
-            makeTarget({target_id: "shared_runtime:py", kind: "shared_runtime", shared: true, label_fallback: "共享 Python"}),
+            makeTarget({
+                target_id: "shared_runtime:py",
+                kind: "shared_runtime",
+                shared: true,
+                label_fallback: "共享 Python"
+            }),
         ],
         mode: "engine",
     });
@@ -339,7 +446,9 @@ await asyncTest("createCleanupModal：confirm 成功后关闭 modal", async () =
 
 await asyncTest("createCleanupModal：confirm 失败保留 modal 并展示错误", async () => {
     const {modal, modalEl, bodyEl, confirmBtn} = makeModal({
-        onConfirm: async () => { throw {message: "清理失败：进程占用", action_hint: "请先停止引擎"}; },
+        onConfirm: async () => {
+            throw {message: "清理失败：进程占用", action_hint: "请先停止引擎"};
+        },
     });
     modal.open({targets: [makeTarget()], mode: "engine"});
     confirmBtn.click();
@@ -352,7 +461,12 @@ await asyncTest("createCleanupModal：confirm 期间禁用重复提交", async (
     let count = 0;
     let resolveFn;
     const {modal, confirmBtn} = makeModal({
-        onConfirm: async () => { count++; return new Promise((r) => { resolveFn = r; }); },
+        onConfirm: async () => {
+            count++;
+            return new Promise((r) => {
+                resolveFn = r;
+            });
+        },
     });
     modal.open({targets: [makeTarget()], mode: "engine"});
     confirmBtn.click();
@@ -366,7 +480,9 @@ await asyncTest("createCleanupModal：confirm 期间禁用重复提交", async (
 await asyncTest("createCleanupModal：shared 模式传入 mode=shared", async () => {
     let receivedMode = null;
     const {modal, confirmBtn} = makeModal({
-        onConfirm: async (_, mode) => { receivedMode = mode; },
+        onConfirm: async (_, mode) => {
+            receivedMode = mode;
+        },
     });
     // 用 engine_model_cache kind（非 shared kind）确保默认选中
     modal.open({
@@ -457,7 +573,8 @@ await asyncTest("createCleanupModal：部分成功 + 部分跳过 → 展示释�
 
 await asyncTest("createCleanupModal：onConfirm 返回 null（旧调用方）→ 视为成功关闭", async () => {
     const {modal, modalEl, confirmBtn} = makeModal({
-        onConfirm: async () => {},
+        onConfirm: async () => {
+        },
     });
     modal.open({targets: [makeTarget()], mode: "engine"});
     confirmBtn.click();

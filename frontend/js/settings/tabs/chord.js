@@ -23,7 +23,7 @@ import {EVENTS} from "../../shared/event-names.js";
 import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
-import {renderComboHTML, normalizeCombo} from "../../shared/kbd.js";
+import {normalizeCombo, renderComboHTML} from "../../shared/kbd.js";
 
 let actionsLoadRevision = 0;
 
@@ -1153,9 +1153,13 @@ export const __test__ = {
     confirmedGlobalBindings,
     replaceConfirmedGlobalBindings,
     statusMessageTimers,
-    get statusMessageRevisions() { return statusMessageRevisions; },
+    get statusMessageRevisions() {
+        return statusMessageRevisions;
+    },
     globalBindingRevisions,
-    get actionsLoadRevision() { return actionsLoadRevision; },
+    get actionsLoadRevision() {
+        return actionsLoadRevision;
+    },
     // 串行化链重置（测试间隔离）
     resetChordBindingsWriteChain() {
         chordBindingsWriteChain = Promise.resolve();

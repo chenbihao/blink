@@ -1513,11 +1513,11 @@ export const zh = {
     // ── 孤儿引擎停止（0.22.6）──
     "local_engine.diagnostic.stop_orphan": "停止孤儿进程",
     "local_engine.diagnostic.stop_orphan_confirm": "将终止遗留的引擎进程并清理 lease。是否继续？",
-"local_engine.diagnostic.orphan_stopped": "孤儿进程已终止",
-"local_engine.diagnostic.orphan_not_stopped": "未能终止进程：{reason}",
-"local_engine.diagnostic.orphan_error": "操作失败：{error}",
-"local_engine.diagnostic.cancel": "取消",
-"local_engine.diagnostic.confirm": "确认",
+    "local_engine.diagnostic.orphan_stopped": "孤儿进程已终止",
+    "local_engine.diagnostic.orphan_not_stopped": "未能终止进程：{reason}",
+    "local_engine.diagnostic.orphan_error": "操作失败：{error}",
+    "local_engine.diagnostic.cancel": "取消",
+    "local_engine.diagnostic.confirm": "确认",
 
     // ── 日志来源标签（区分 operation vs instance）──
     "local_engine.log.source.operation": "操作",

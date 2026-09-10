@@ -13,12 +13,11 @@
 
 import assert from "node:assert/strict";
 import {
-    STEP_COUNT,
     activeOperationId,
     canGoBack,
     canGoNext,
-    classifyInstallStage,
     clampStep,
+    classifyInstallStage,
     installStageTextKey,
     isChordToggleRevisionValid,
     isLastStep,
@@ -28,6 +27,7 @@ import {
     prevStep,
     rollbackChordToggles,
     shouldAcceptInstallEvent,
+    STEP_COUNT,
 } from "./wizard.js";
 
 // ── 步骤状态机 ────────────────────────────────────────────────────────────────

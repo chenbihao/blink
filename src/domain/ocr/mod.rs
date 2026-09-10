@@ -40,8 +40,8 @@ pub use crate::domain::capability::builtins::ocr_engine::{
 pub use config::{ComputePreference, OcrBackendKind, OcrLifecycle, PaddleModel};
 #[allow(unused_imports)]
 pub use context::{
-    ocr_request_tracker, OcrRequestContext, OcrRequestGuard, OcrRequestOrigin, OcrRequestTracker,
-    ScreenshotOrigin,
+    OcrRequestContext, OcrRequestGuard, OcrRequestOrigin, OcrRequestTracker, ScreenshotOrigin,
+    ocr_request_tracker,
 };
 #[allow(unused_imports)]
 pub use error::{OcrErrorCategory, StructuredOcrError};

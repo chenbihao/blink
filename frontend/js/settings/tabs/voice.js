@@ -14,12 +14,9 @@
 import {commandErrorText, invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {onLangChange, t} from "../../i18n/index.js";
-import {ensureLocalRuntimeMounted, waitForEngineCard, getLocalEngineEntry} from "../index.js";
+import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from "../index.js";
 import {navigateSettings} from "../navigation.js";
-import {
-    formatAudioTranscriptionIdentity,
-    parseAudioTranscriptionCapability,
-} from "./voice-file-transcribe.js";
+import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，

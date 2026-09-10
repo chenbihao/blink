@@ -41,7 +41,7 @@ pub use policy::{
     WindowActionResult,
 };
 #[allow(unused_imports)]
-pub use projection::{normalize, ActionDef, ActionKindDef, ProjectionRule, ResultShape};
+pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, normalize};
 #[allow(unused_imports)]
 pub use registry::{CapabilityRegistry, RegistryError};
 pub use result::{CapabilityResult, ItemAction, ItemResult, rig_tool_result_to_text};

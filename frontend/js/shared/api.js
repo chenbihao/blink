@@ -461,12 +461,12 @@ export function listSystemFonts() {
 }
 
 /** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。
-*  0.19.14 raw IPC：PNG 直接传 Uint8Array。
-*  0.22.4：可选 screenshotSession/screenshotRevision 参数，携带截图来源信息。
-*  0.22.4 Task 6：同步产生 requestId（UUID），立即暴露 cancel()。
-*  Task 11：cancel 幂等——多次调用安全，只发一次后端取消请求。
-*
-*  @returns {{ requestId: string, promise: Promise<{result: *, requestId: string}>, cancel: () => Promise<boolean> }} */
+ *  0.19.14 raw IPC：PNG 直接传 Uint8Array。
+ *  0.22.4：可选 screenshotSession/screenshotRevision 参数，携带截图来源信息。
+ *  0.22.4 Task 6：同步产生 requestId（UUID），立即暴露 cancel()。
+ *  Task 11：cancel 幂等——多次调用安全，只发一次后端取消请求。
+ *
+ *  @returns {{ requestId: string, promise: Promise<{result: *, requestId: string}>, cancel: () => Promise<boolean> }} */
 export function ocrImage(pngData, screenshotSession, screenshotRevision) {
     const headers = {};
     if (screenshotSession != null && screenshotRevision != null) {
@@ -494,10 +494,10 @@ export function ocrImage(pngData, screenshotSession, screenshotRevision) {
 }
 
 /** 0.22.4：取消在途的 OCR 请求。
-*  @param {string} requestId — ocrImage 返回的 requestId
-*  @returns {Promise<boolean>} 是否成功取消（false 表示请求已完成或不存在） */
+ *  @param {string} requestId — ocrImage 返回的 requestId
+ *  @returns {Promise<boolean>} 是否成功取消（false 表示请求已完成或不存在） */
 export function cancelOcrRequest(requestId) {
-return invoke("cancel_ocr_request", {requestId});
+    return invoke("cancel_ocr_request", {requestId});
 }
 
 /** 0.17.5：OCR 诊断——返回已安装语言列表、引擎语言、中文包状态。 */

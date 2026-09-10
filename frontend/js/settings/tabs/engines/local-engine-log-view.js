@@ -8,7 +8,7 @@
  * @module local-engine-log-view
  */
 
-import {tt, copyTextWithFeedback} from "./local-engine-card-utils.js";
+import {copyTextWithFeedback, tt} from "./local-engine-card-utils.js";
 import {formatLocalLogTimestamp, formatLogLine} from "./local-engine-log-format.js";
 
 /**

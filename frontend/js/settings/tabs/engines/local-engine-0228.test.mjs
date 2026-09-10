@@ -15,23 +15,19 @@
 
 import assert from "node:assert/strict";
 import {
-    createInitialState,
-    setCatalog,
-    setPendingAction,
-    mergeStatus,
     applyInstallStage,
     bindRealOperationId,
     computeOptionsDisplayMode,
+    createInitialState,
     getEntry,
+    getPrimaryAction,
     hasActiveOperation,
     isActionBlocked,
-    getPrimaryAction,
+    mergeStatus,
+    setCatalog,
+    setPendingAction,
 } from "./local-engine-state.js";
-import {
-    makeCatalog,
-    makeStatus,
-    processState,
-} from "./local-engine-fixtures.js";
+import {makeCatalog, makeStatus, processState,} from "./local-engine-fixtures.js";
 
 // ── mock 基建（必须在动态 import local-runtime.js 之前设置）─────────────────
 
@@ -42,7 +38,10 @@ if (!globalThis.window) {
 const _invokeImpl = {fn: async () => []};
 globalThis.window.__TAURI__ = {
     core: {invoke: (cmd, args) => _invokeImpl.fn(cmd, args)},
-    event: {listen: async () => () => {}},
+    event: {
+        listen: async () => () => {
+        }
+    },
 };
 
 // mock 设置后动态导入

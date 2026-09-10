@@ -10,7 +10,7 @@
  * 6. 键位展示：normalizeCombo + renderComboHTML 不再使用手拼 formatCombo
  */
 
-import {test, describe, before, after, afterEach} from "node:test";
+import {before, describe, test} from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
 
@@ -36,20 +36,35 @@ function makeElement(tag) {
         dataset: {},
         classList: {
             _set: new Set(),
-            add(...c) { c.forEach((x) => this._set.add(x)); },
-            remove(...c) { c.forEach((x) => this._set.delete(x)); },
+            add(...c) {
+                c.forEach((x) => this._set.add(x));
+            },
+            remove(...c) {
+                c.forEach((x) => this._set.delete(x));
+            },
             toggle(c, force) {
                 if (force === true || (force === undefined && !this._set.has(c))) this._set.add(c);
                 else this._set.delete(c);
             },
-            contains(c) { return this._set.has(c); },
+            contains(c) {
+                return this._set.has(c);
+            },
         },
-        setAttribute(k, v) { this._attributes[k] = v; },
-        getAttribute(k) { return this._attributes[k] ?? null; },
-        removeAttribute(k) { delete this._attributes[k]; },
-        hasAttribute(k) { return k in this._attributes; },
+        setAttribute(k, v) {
+            this._attributes[k] = v;
+        },
+        getAttribute(k) {
+            return this._attributes[k] ?? null;
+        },
+        removeAttribute(k) {
+            delete this._attributes[k];
+        },
+        hasAttribute(k) {
+            return k in this._attributes;
+        },
         appendChild(child) {
-            this._children.push(child); child._parent = this;
+            this._children.push(child);
+            child._parent = this;
             // 同步更新 _innerHTML 以便 outerHTML 能反映子元素
             const childHtml = child.outerHTML || child.textContent || "";
             this._innerHTML += childHtml;
@@ -57,7 +72,10 @@ function makeElement(tag) {
         },
         removeChild(child) {
             const i = this._children.indexOf(child);
-            if (i >= 0) { this._children.splice(i, 1); child._parent = null; }
+            if (i >= 0) {
+                this._children.splice(i, 1);
+                child._parent = null;
+            }
             return child;
         },
         remove() {
@@ -68,7 +86,9 @@ function makeElement(tag) {
         querySelector(sel) {
             return this._children[0] || null;
         },
-        querySelectorAll() { return []; },
+        querySelectorAll() {
+            return [];
+        },
         addEventListener(type, fn) {
             if (!this._listeners[type]) this._listeners[type] = [];
             this._listeners[type].push(fn);
@@ -85,11 +105,21 @@ function makeElement(tag) {
             if (arr) arr.forEach((fn) => fn(ev));
             return true;
         },
-        focus() {},
-        get textContent() { return this._textContent; },
-        set textContent(v) { this._textContent = String(v); this._innerHTML = String(v); },
-        get innerHTML() { return this._innerHTML; },
-        set innerHTML(v) { this._innerHTML = String(v); },
+        focus() {
+        },
+        get textContent() {
+            return this._textContent;
+        },
+        set textContent(v) {
+            this._textContent = String(v);
+            this._innerHTML = String(v);
+        },
+        get innerHTML() {
+            return this._innerHTML;
+        },
+        set innerHTML(v) {
+            this._innerHTML = String(v);
+        },
         get outerHTML() {
             const tag = this.tagName.toLowerCase();
             const cls = this.className ? ` class="${this.className}"` : "";
@@ -97,8 +127,12 @@ function makeElement(tag) {
         },
     };
     Object.defineProperty(el, "checked", {
-        get() { return this._checked ?? false; },
-        set(v) { this._checked = v; },
+        get() {
+            return this._checked ?? false;
+        },
+        set(v) {
+            this._checked = v;
+        },
         configurable: true,
     });
     return el;
@@ -121,9 +155,13 @@ globalThis.document = {
         if (sel && sel.startsWith(".chord-global-status")) return null;
         return null;
     },
-    querySelectorAll() { return []; },
-    addEventListener() {},
-    removeEventListener() {},
+    querySelectorAll() {
+        return [];
+    },
+    addEventListener() {
+    },
+    removeEventListener() {
+    },
 };
 
 // Mock CSS.escape
@@ -185,7 +223,10 @@ globalThis.window.__TAURI__ = {
         },
     },
     event: {
-        listen() { return Promise.resolve(() => {}); },
+        listen() {
+            return Promise.resolve(() => {
+            });
+        },
     },
 };
 
@@ -254,7 +295,11 @@ describe("saveGlobalBinding — revision token 竞态防护", () => {
 
         // 再保存失败
         mockSaveConfigShouldFail = true;
-        const result = await __test__.saveGlobalBinding("clipboard_history", {mode: "custom", modifiers: ["ctrl"], key: "x"});
+        const result = await __test__.saveGlobalBinding("clipboard_history", {
+            mode: "custom",
+            modifiers: ["ctrl"],
+            key: "x"
+        });
         assert.equal(result, false, "保存失败返回 false");
 
         const confirmedAfter = __test__.confirmedGlobalBindings.get("clipboard_history");

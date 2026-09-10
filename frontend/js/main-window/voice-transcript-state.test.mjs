@@ -6,10 +6,10 @@ import {describe, test} from "node:test";
 import assert from "node:assert/strict";
 
 import {
-    createVoiceTranscriptState,
-    beginRecording,
-    applyPartial,
     applyFinal,
+    applyPartial,
+    beginRecording,
+    createVoiceTranscriptState,
     endRecording,
     getFinalQuery,
     hasResult,

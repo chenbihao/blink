@@ -8,7 +8,7 @@
 //! 5. 编辑后 panelDirty 标记失效（行为验证）
 //! 6. **0.22.8 三层契约**：`computeCharBoxRanges` 逐字符框 UTF-16 转换
 
-import {test, describe} from 'node:test';
+import {describe, test} from 'node:test';
 import assert from 'node:assert';
 
 // Mock window before importing ss-reading.js (which imports api.js → tauri.js)
@@ -362,8 +362,16 @@ function makeCharTrackReading() {
         dragStart: null,
         hoverWord: null,
     };
-    ss.hitCtx = {clearRect() {}, fillRect() {}, strokeRect() {}};
-    ss.hitCanvas = {width: 100, height: 100, removeAttribute() {}, style: {}};
+    ss.hitCtx = {
+        clearRect() {
+        }, fillRect() {
+        }, strokeRect() {
+        }
+    };
+    ss.hitCanvas = {
+        width: 100, height: 100, removeAttribute() {
+        }, style: {}
+    };
 }
 
 describe('0.22.10 字符级选择轨', () => {

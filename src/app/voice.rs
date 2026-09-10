@@ -22,8 +22,8 @@
 //! - hold 时主窗口 + chat 均不可见 → G2: 文字注入前台应用
 
 use std::sync::{
-    atomic::{AtomicU64, Ordering}, Arc,
-    Mutex,
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 use tauri::{Emitter, Manager};

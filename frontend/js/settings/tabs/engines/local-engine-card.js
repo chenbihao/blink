@@ -51,13 +51,12 @@ import {updateKeyline} from "./local-engine-card-sections.js";
 import {updateModelList} from "./local-engine-models.js";
 import {showEngineDiagnostics} from "./local-engine-diagnostics.js";
 import {renderLogComponent, updateLogList} from "./local-engine-log-view.js";
-import {tt, cssEscape, copyTextWithFeedback} from "./local-engine-card-utils.js";
+import {copyTextWithFeedback, cssEscape, tt} from "./local-engine-card-utils.js";
 import {isActionBlocked} from "./local-engine-state.js";
 import {
     computeEngineSummary,
     computeFeedback,
     computeInstallProgressView,
-    computeKeyline,
     computeModelSummary,
     primaryActionView,
 } from "./local-engine-summary.js";
@@ -353,7 +352,8 @@ function buildToolsRow(entry, controller, i18n) {
     openDirLabel.textContent = tt(i18n, "local_engine.foundation.open_engine_dir", "打开引擎目录");
     openDirBtn.appendChild(openDirLabel);
     openDirBtn.addEventListener("click", () => {
-        controller?.openEngineFolder?.(engineId).catch(() => {});
+        controller?.openEngineFolder?.(engineId).catch(() => {
+        });
     });
     tools.appendChild(openDirBtn);
 
@@ -425,7 +425,8 @@ function buildMaintenancePanel(entry, controller, i18n) {
     repairLabel.textContent = tt(i18n, "local_engine.maintenance.repair_env", "修复环境");
     repairBtn.appendChild(repairLabel);
     repairBtn.addEventListener("click", () => {
-        controller?.repair(engineId).catch(() => {});
+        controller?.repair(engineId).catch(() => {
+        });
     });
     actions.appendChild(repairBtn);
 
@@ -769,16 +770,20 @@ function handleActionClick(kind, entry, controller, i18n, anchorBtn) {
         case "install":
             // 不传 compute_preference：由后端从配置真源构造 AdapterConfig
             // 前端 catalog.current_compute_preference 可能是过期快照
-            controller.install(engineId, null).catch(() => {});
+            controller.install(engineId, null).catch(() => {
+            });
             break;
         case "start":
-            controller.start(engineId, null).catch(() => {});
+            controller.start(engineId, null).catch(() => {
+            });
             break;
         case "stop":
-            controller.stop(engineId).catch(() => {});
+            controller.stop(engineId).catch(() => {
+            });
             break;
         case "repair":
-            controller.repair(engineId).catch(() => {});
+            controller.repair(engineId).catch(() => {
+            });
             break;
         case "download_model": {
             const card = anchorBtn?.closest(".le-card");
@@ -790,7 +795,8 @@ function handleActionClick(kind, entry, controller, i18n, anchorBtn) {
         }
         case "cancel":
             if (entry.status?.status?.operation?.operation_id) {
-                controller.cancel(engineId, entry.status.status.operation.operation_id).catch(() => {});
+                controller.cancel(engineId, entry.status.status.operation.operation_id).catch(() => {
+                });
             }
             break;
     }

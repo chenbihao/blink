@@ -6,7 +6,12 @@ import assert from "node:assert/strict";
 globalThis.window = globalThis.window || {};
 globalThis.window.__TAURI__ = {
     core: {invoke: async () => ({})},
-    event: {listen: async () => ({unlisten: () => {}})},
+    event: {
+        listen: async () => ({
+            unlisten: () => {
+            }
+        })
+    },
 };
 
 // ── DOM 桩 ──────────────────────────────────────────────────────────────────
@@ -63,8 +68,10 @@ function makeElement(tag) {
                 if (idx >= 0) parent._children.splice(idx, 1);
             }
         },
-        addEventListener() {},
-        removeEventListener() {},
+        addEventListener() {
+        },
+        removeEventListener() {
+        },
     };
     return el;
 }

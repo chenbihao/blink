@@ -17,7 +17,10 @@ import assert from "node:assert/strict";
 globalThis.window = {
     __TAURI__: {
         core: {invoke: async () => ({})},
-        event: {listen: async () => () => {}},
+        event: {
+            listen: async () => () => {
+            }
+        },
     },
 };
 globalThis.CSS = {escape: (s) => String(s)};
@@ -43,6 +46,24 @@ class ShimElement {
                 return obj[prop];
             },
         });
+    }
+
+    get textContent() {
+        if (this._children.length === 0) return this._text;
+        return this._children.map((c) => c.textContent).join("");
+    }
+
+    set textContent(v) {
+        this._children = [];
+        this._text = String(v);
+    }
+
+    get disabled() {
+        return this._disabled === true;
+    }
+
+    set disabled(v) {
+        this._disabled = v === true;
     }
 
     appendChild(child) {
@@ -71,24 +92,6 @@ class ShimElement {
 
     addEventListener(type, fn) {
         (this._listeners[type] ||= []).push(fn);
-    }
-
-    get textContent() {
-        if (this._children.length === 0) return this._text;
-        return this._children.map((c) => c.textContent).join("");
-    }
-
-    set textContent(v) {
-        this._children = [];
-        this._text = String(v);
-    }
-
-    get disabled() {
-        return this._disabled === true;
-    }
-
-    set disabled(v) {
-        this._disabled = v === true;
     }
 
     /** 测试辅助：递归收集子树。 */
@@ -333,7 +336,10 @@ await test("reconcile：selected===active===target 一致快照收敛 switching�
 
     // 中间态：仅 selected 已提交（active 未变）→ 不收敛
     const midModels = makeFunasrModels().map((m) =>
-        m.model_id === "gguf/fun-asr-nano-q4km" ? {...m, install_state: "installed", is_selected: true} : {...m, is_selected: false});
+        m.model_id === "gguf/fun-asr-nano-q4km" ? {...m, install_state: "installed", is_selected: true} : {
+            ...m,
+            is_selected: false
+        });
     state = setModels(state, "funasr", midModels);
     state = reconcileSelection(state, "funasr");
     assert.equal(getSelection(state.get("funasr"))?.phase, "switching",

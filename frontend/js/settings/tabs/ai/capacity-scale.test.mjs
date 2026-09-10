@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {CONTEXT_WINDOW_STOPS, MAX_OUTPUT_TOKEN_STOPS, formatCapacityStop, nearestStopIndex} from "./capacity-scale.js";
+import {CONTEXT_WINDOW_STOPS, formatCapacityStop, MAX_OUTPUT_TOKEN_STOPS, nearestStopIndex} from "./capacity-scale.js";
 
 assert.equal(MAX_OUTPUT_TOKEN_STOPS[nearestStopIndex(MAX_OUTPUT_TOKEN_STOPS, 9000)], 8192);
 assert.equal(MAX_OUTPUT_TOKEN_STOPS.at(-1), 262144);

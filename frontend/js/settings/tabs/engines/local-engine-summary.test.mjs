@@ -8,21 +8,19 @@
 
 import assert from "node:assert/strict";
 import {
+    appendLog,
     createInitialState,
+    mergeStatus,
     setCatalog,
     setModels,
     setPreferences,
-    mergeStatus,
-    appendLog,
     setStorage,
 } from "./local-engine-state.js";
 import {
-    funasrCatalog,
-    paddleocrCatalog,
     makeCatalog,
-    makeStatus,
     makeModel,
     makePreferences,
+    makeStatus,
     makeStorage,
     processState,
 } from "./local-engine-fixtures.js";
@@ -31,9 +29,9 @@ import {
     computeFeedback,
     computeKeyline,
     computeModelSummary,
-    primaryActionView,
     computeRuntimeSummary,
     errorDetailText,
+    primaryActionView,
 } from "./local-engine-summary.js";
 
 // i18n/index.js 的 import 链经过 shared/tauri.js（模块级访问 window）——
@@ -133,9 +131,11 @@ await test("FunASR 未安装：摘要/主操作/反馈（含预计空间）", ()
 // ── 2. 安装中 stage=verifying ────────────────────────────────────────────────
 
 await test("安装中：摘要与反馈默认可见 operation 阶段", () => {
-    const entry = makeEntry("funasr", {status: {
-        operation: {kind: "installing", operation_id: "op-1", stage: "verifying", cancellable: true},
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            operation: {kind: "installing", operation_id: "op-1", stage: "verifying", cancellable: true},
+        }
+    });
     const summary = computeEngineSummary(entry, t);
     assert.equal(summary.tone, "busy");
     assert.ok(summary.text.includes("安装"), summary.text);
@@ -197,10 +197,12 @@ await test("正在启动：主操作为禁用的「启动中」", () => {
     assert.ok(action.label.includes("启动"), action.label);
 
     // 4b. 进程 starting
-    const entryStarting = makeEntry("funasr", {status: {
-        environment: "ready",
-        process: processState.starting(),
-    }});
+    const entryStarting = makeEntry("funasr", {
+        status: {
+            environment: "ready",
+            process: processState.starting(),
+        }
+    });
     assert.equal(computeEngineSummary(entryStarting, t).text, "启动中");
     assert.equal(primaryActionView(entryStarting, t).disabled, true);
 });
@@ -246,20 +248,22 @@ await test("运行且模型 ready：运行中 · 实际设备（不带模型名�
 // ── 6. backend mismatch ──────────────────────────────────────────────────────
 
 await test("backend mismatch：默认卡片直接可见", () => {
-    const entry = makeEntry("funasr", {status: {
-        ...RUNNING_READY,
-        available: false,
-        backend: {
-            requested_preference: "cpu",
-            backend_verification: {
-                state: "mismatched",
-                expected_backend: "cpu",
-                actual_backend: "cuda",
-                device_name: null,
-                mismatch_reason: "identity mismatch",
+    const entry = makeEntry("funasr", {
+        status: {
+            ...RUNNING_READY,
+            available: false,
+            backend: {
+                requested_preference: "cpu",
+                backend_verification: {
+                    state: "mismatched",
+                    expected_backend: "cpu",
+                    actual_backend: "cuda",
+                    device_name: null,
+                    mismatch_reason: "identity mismatch",
+                },
             },
-        },
-    }});
+        }
+    });
     const summary = computeEngineSummary(entry, t);
     assert.equal(summary.tone, "error");
     assert.equal(summary.text, "启动失败 · 后端身份不匹配");
@@ -300,14 +304,16 @@ await test("PaddleOCR 按需待机：策略与主操作（启动）", () => {
 // ── 8. PaddleOCR 活跃 operation（非 idle）──────────────────────────────────
 
 await test("PaddleOCR 活跃 operation：忙碌态摘要", () => {
-    const entry = makeEntry("paddleocr", {status: {
-        environment: "ready",
-        process: processState.running(999),
-        service: "healthy",
-        model: "ready",
-        available: true,
-        operation: {kind: "updating", operation_id: "op-x", stage: "switching", cancellable: false},
-    }});
+    const entry = makeEntry("paddleocr", {
+        status: {
+            environment: "ready",
+            process: processState.running(999),
+            service: "healthy",
+            model: "ready",
+            available: true,
+            operation: {kind: "updating", operation_id: "op-x", stage: "switching", cancellable: false},
+        }
+    });
     const summary = computeEngineSummary(entry, t);
     assert.equal(summary.tone, "busy");
     assert.ok(summary.text.includes("切换中"), summary.text);
@@ -352,8 +358,18 @@ await test("selected ≠ active：反馈槽显示待重启", () => {
     const entry = makeEntry("funasr", {
         status: RUNNING_READY,
         models: [
-            makeModel({model_id: "iic/SenseVoiceSmall", display_name: "SenseVoiceSmall", is_selected: true, is_active: false}),
-            makeModel({model_id: "iic/paraformer-zh", display_name: "Paraformer-zh", is_selected: false, is_active: true}),
+            makeModel({
+                model_id: "iic/SenseVoiceSmall",
+                display_name: "SenseVoiceSmall",
+                is_selected: true,
+                is_active: false
+            }),
+            makeModel({
+                model_id: "iic/paraformer-zh",
+                display_name: "Paraformer-zh",
+                is_selected: false,
+                is_active: true
+            }),
         ],
     });
     const modelSummary = computeModelSummary(entry);
@@ -386,10 +402,12 @@ await test("模型损坏（verification corrupted）：keyline 呈失败色", ()
 // ── 13. operation cancellable ────────────────────────────────────────────────
 
 await test("cancellable operation：主操作=取消（enabled）", () => {
-    const entry = makeEntry("funasr", {status: {
-        environment: "ready",
-        operation: {kind: "installing", operation_id: "op-9", stage: "downloading", cancellable: true},
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            environment: "ready",
+            operation: {kind: "installing", operation_id: "op-9", stage: "downloading", cancellable: true},
+        }
+    });
     const action = primaryActionView(entry, t);
     assert.equal(action.kind, "cancel");
     assert.equal(action.disabled, false);
@@ -398,10 +416,12 @@ await test("cancellable operation：主操作=取消（enabled）", () => {
 // ── 14. operation 不可取消 ───────────────────────────────────────────────────
 
 await test("不可取消 operation：主操作为禁用按钮，无可用取消", () => {
-    const entry = makeEntry("funasr", {status: {
-        environment: "ready",
-        operation: {kind: "installing", operation_id: "op-9", stage: "verifying", cancellable: false},
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            environment: "ready",
+            operation: {kind: "installing", operation_id: "op-9", stage: "verifying", cancellable: false},
+        }
+    });
     const action = primaryActionView(entry, t);
     assert.equal(action.kind, null);
     assert.equal(action.disabled, true);
@@ -466,29 +486,33 @@ await test("运行时摘要：空状态 loading", () => {
 // ── 补充：服务异常但进程存活必须显式暴露 ────────────────────────────────────
 
 await test("进程存活但服务不可达：不能显示为运行中", () => {
-    const entry = makeEntry("funasr", {status: {
-        environment: "ready",
-        process: processState.running(777),
-        service: "unreachable",
-        model: "not_loaded",
-        available: false,
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            environment: "ready",
+            process: processState.running(777),
+            service: "unreachable",
+            model: "not_loaded",
+            available: false,
+        }
+    });
     const summary = computeEngineSummary(entry, t);
     assert.equal(summary.tone, "error");
     assert.equal(summary.text, "服务异常 · 进程仍在运行");
 });
 
 await test("last_error：反馈槽直接显示错误 + detail 折叠源", () => {
-    const entry = makeEntry("funasr", {status: {
-        ...READY_STOPPED,
-        last_error: {
-            code: "start_failed",
-            message: "expected=cpu, actual=cuda",
-            action_hint: null,
-            detail: "traceback...",
-            phase: "start",
-        },
-    }});
+    const entry = makeEntry("funasr", {
+        status: {
+            ...READY_STOPPED,
+            last_error: {
+                code: "start_failed",
+                message: "expected=cpu, actual=cuda",
+                action_hint: null,
+                detail: "traceback...",
+                phase: "start",
+            },
+        }
+    });
     const feedback = computeFeedback(entry, t);
     assert.equal(feedback.tone, "error");
     assert.ok(feedback.text.includes("expected=cpu"), feedback.text);

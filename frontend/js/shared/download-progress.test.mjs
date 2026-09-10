@@ -77,7 +77,10 @@ import {
     assert.deepEqual(etaTextKeyAndParams(0), {key: "local_engine.progress.eta.sec", params: {sec: 1}});
     assert.deepEqual(etaTextKeyAndParams(59_000), {key: "local_engine.progress.eta.sec", params: {sec: 59}});
     assert.deepEqual(etaTextKeyAndParams(60_000), {key: "local_engine.progress.eta.min", params: {min: 1}});
-    assert.deepEqual(etaTextKeyAndParams(90_000), {key: "local_engine.progress.eta.min", params: {min: 2}}, "秒数向上取整到分钟");
+    assert.deepEqual(etaTextKeyAndParams(90_000), {
+        key: "local_engine.progress.eta.min",
+        params: {min: 2}
+    }, "秒数向上取整到分钟");
     assert.deepEqual(etaTextKeyAndParams(3_600_000), {key: "local_engine.progress.eta.hour", params: {hour: 1}});
 }
 

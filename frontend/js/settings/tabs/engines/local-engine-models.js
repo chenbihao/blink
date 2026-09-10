@@ -16,7 +16,7 @@
 import {renderIcon} from "../../../shared/icon.js";
 import {confirmDialog} from "../../../shared/tauri.js";
 import {t} from "../../../i18n/index.js";
-import {tt, formatMB} from "./local-engine-card-utils.js";
+import {formatMB, tt} from "./local-engine-card-utils.js";
 import {getEffectiveModelInstallState} from "./local-engine-state.js";
 import {getSelection} from "./local-engine-selection.js";
 
@@ -351,7 +351,8 @@ function renderModelActions(model, entry, controller, i18n, selectionPhase = "")
                 "预计体积 {size}，下载过程中可取消。是否开始下载？", {size: sizeText});
             confirmDialog(confirmMsg, {kind: "info"}).then((ok) => {
                 if (!ok) return;
-                controller?.installModel?.(engineId, modelId).catch(() => {});
+                controller?.installModel?.(engineId, modelId).catch(() => {
+                });
             });
         });
         frag.appendChild(btn);
@@ -375,7 +376,8 @@ function renderModelActions(model, entry, controller, i18n, selectionPhase = "")
                 console.warn("[local-engine] cancel: no operationId for", modelId);
                 return;
             }
-            controller?.cancelModelOperation?.(engineId, modelId, opId).catch(() => {});
+            controller?.cancelModelOperation?.(engineId, modelId, opId).catch(() => {
+            });
         });
         frag.appendChild(btn);
     }
@@ -420,13 +422,15 @@ function renderModelActions(model, entry, controller, i18n, selectionPhase = "")
                 // 0.22.7 契约要求经用户确认；未运行时仅提交 selected，无副作用。
                 const activeImpl = entry?.status?.status?.active_implementation;
                 if (!activeImpl) {
-                    controller?.selectModel?.(engineId, modelId).catch(() => {});
+                    controller?.selectModel?.(engineId, modelId).catch(() => {
+                    });
                     return;
                 }
                 const confirmMsg = tt(i18n, "local_engine.model.action.switch_confirm_desc",
                     "服务运行中切换模型：将停止当前模型并启动新模型，失败时自动回滚。确认切换？");
                 confirmDialog(confirmMsg, {kind: "info"}).then((ok) => {
-                    if (ok) controller?.selectModel?.(engineId, modelId).catch(() => {});
+                    if (ok) controller?.selectModel?.(engineId, modelId).catch(() => {
+                    });
                 });
             });
             frag.appendChild(useBtn);
@@ -441,7 +445,8 @@ function renderModelActions(model, entry, controller, i18n, selectionPhase = "")
         repairLabel.textContent = tt(i18n, "local_engine.model.action.repair", "修复");
         repairBtn.appendChild(repairLabel);
         repairBtn.addEventListener("click", () => {
-            controller?.repairModel?.(engineId, modelId).catch(() => {});
+            controller?.repairModel?.(engineId, modelId).catch(() => {
+            });
         });
         frag.appendChild(repairBtn);
 

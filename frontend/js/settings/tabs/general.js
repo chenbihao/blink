@@ -5,7 +5,7 @@
 
 import {applyTheme} from "../../shared/theme.js";
 import {applyI18n, setLang} from "../../i18n/index.js";
-import {saveConfig, buildChordTogglesPayload} from "../../shared/config-keys.js";
+import {buildChordTogglesPayload, saveConfig} from "../../shared/config-keys.js";
 import {getCurrentConfig} from "../shared/state.js";
 
 /**

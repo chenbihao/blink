@@ -7,10 +7,10 @@
 
 import {
     clampPanelSize,
-    computeResizedPanel,
     clampPanelToMonitor,
-    PANEL_MIN_W,
+    computeResizedPanel,
     PANEL_MIN_H,
+    PANEL_MIN_W,
 } from './ss-panel-resize.js';
 
 // ── 断言辅助 ──────────────────────────────────────────────────────────────

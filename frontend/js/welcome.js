@@ -10,7 +10,7 @@
  * 纯逻辑（步骤状态机/OCR 编排纯函数）在 ./welcome/wizard.js，本模块只做 DOM 与 invoke。
  */
 
-import {getCurrentWindow, invoke, listen, commandErrorText} from "./shared/tauri.js";
+import {commandErrorText, getCurrentWindow, invoke, listen} from "./shared/tauri.js";
 import {applyI18nFromConfig, onLangChange, t} from "./i18n/index.js";
 import {renderCombo} from "./shared/kbd.js";
 import {EVENTS} from "./shared/event-names.js";
@@ -25,9 +25,8 @@ import {
 import {
     activeOperationId,
     canGoBack,
-    canGoNext,
-    classifyInstallStage,
     clampStep,
+    classifyInstallStage,
     installStageTextKey,
     isLastStep,
     isOcrReady,
@@ -272,7 +271,7 @@ async function applyToggle(id, enabled) {
                 chord_hint_visible: payload.chordHintVisible,
             };
             // 旧请求的迟到响应不再更新 UI。
-            if (rev !== chordToggleRevision) return;
+            if (rev !== chordToggleRevision)
         }
     } catch (e) {
         console.error(`welcome: set_config ${id} failed:`, e);

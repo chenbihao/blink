@@ -27,7 +27,13 @@ export const funasrCatalog = {
     },
     compute_options: [
         {preference: "cpu", profile_id: "cpu-x64", backend: "cpu", compatible: true, disabled_reason: null},
-        {preference: "cuda", profile_id: "cuda12", backend: "cuda", compatible: false, disabled_reason: "本机无 CUDA GPU"},
+        {
+            preference: "cuda",
+            profile_id: "cuda12",
+            backend: "cuda",
+            compatible: false,
+            disabled_reason: "本机无 CUDA GPU"
+        },
     ],
     current_compute_preference: "cpu",
 };

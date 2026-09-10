@@ -8,7 +8,7 @@
 //! 三字段（name / description / parameters）保持扁平——所有构造点和字段访问零改动。
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::domain::schema::ToolSchema;
 

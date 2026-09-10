@@ -8,7 +8,7 @@
  * 3. 非布尔输入安全归一化为布尔。
  */
 
-import {test, describe} from "node:test";
+import {describe, test} from "node:test";
 import assert from "node:assert";
 
 // tauri.js 模块加载时会给 window.alert/confirm/prompt 打补丁，先 mock window
@@ -33,7 +33,10 @@ describe("buildChordTogglesPayload — wire contract", () => {
 
     test("非布尔输入安全归一化为布尔（=== true 语义）", () => {
         assert.deepStrictEqual(buildChordTogglesPayload(1, 0), {chordEnabled: false, chordHintVisible: false});
-        assert.deepStrictEqual(buildChordTogglesPayload(null, undefined), {chordEnabled: false, chordHintVisible: false});
+        assert.deepStrictEqual(buildChordTogglesPayload(null, undefined), {
+            chordEnabled: false,
+            chordHintVisible: false
+        });
         assert.deepStrictEqual(buildChordTogglesPayload("yes", ""), {chordEnabled: false, chordHintVisible: false});
         // 只有真正的 boolean true 才是 true
         assert.deepStrictEqual(buildChordTogglesPayload(true, true), {chordEnabled: true, chordHintVisible: true});

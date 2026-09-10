@@ -12,12 +12,7 @@ import {renderAITierBanner, renderAITierSelects} from "./tier.js";
 import {t} from "../../../i18n/index.js";
 import {iconHTML} from "../../../shared/icon.js";
 import {EFFORT_LEVELS} from "../../../shared/effort-levels.js";
-import {
-    CONTEXT_WINDOW_STOPS,
-    MAX_OUTPUT_TOKEN_STOPS,
-    formatCapacityStop,
-    nearestStopIndex,
-} from "./capacity-scale.js";
+import {CONTEXT_WINDOW_STOPS, formatCapacityStop, MAX_OUTPUT_TOKEN_STOPS, nearestStopIndex,} from "./capacity-scale.js";
 import {formatContextWindowLabel} from "./model-meta.js";
 
 /**

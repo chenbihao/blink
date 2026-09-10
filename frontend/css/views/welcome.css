@@ -415,7 +415,7 @@
     cursor: pointer;
     font-style: normal;
     transition: background var(--transition-fast, 0.1s), opacity var(--transition-fast, 0.1s),
-        transform var(--transition-fast, 0.1s);
+    transform var(--transition-fast, 0.1s);
 }
 
 .welcome-btn:hover:not(:disabled) {

@@ -64,15 +64,15 @@ export function waitForSettingsTarget(target, {
  * target / focusTarget 支持 CSS selector、HTMLElement 或延迟求值函数。
  */
 export async function navigateSettings({
-    tabId,
-    target = null,
-    focusTarget = null,
-    prepare = null,
-    behavior = "smooth",
-    block = "start",
-    timeoutMs = 2000,
-    documentRef = document,
-} = {}) {
+                                           tabId,
+                                           target = null,
+                                           focusTarget = null,
+                                           prepare = null,
+                                           behavior = "smooth",
+                                           block = "start",
+                                           timeoutMs = 2000,
+                                           documentRef = document,
+                                       } = {}) {
     if (!activateSettingsTab(tabId, documentRef)) {
         return {activated: false, target: null};
     }

@@ -275,9 +275,9 @@ export function renderContextSection(s) {
         ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，使用 32K 保守回退值">估算</span>`
         : contextLimitSource === "catalog"
             ? `<span class="cbp-context-source" title="模型未配置 context window，使用内置模型目录推荐值">目录识别</span>`
-        : contextLimitSource === "tiered"
-            ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，按端点归属分档估算">分档估算</span>`
-            : "";
+            : contextLimitSource === "tiered"
+                ? `<span class="cbp-context-source cbp-context-source-fallback" title="模型未配置 context window，按端点归属分档估算">分档估算</span>`
+                : "";
     // 0.21.17: 置信度标签
     const confidenceLabel = confidence === "low"
         ? `<span class="cbp-confidence cbp-confidence-low" title="包含多模态内容，估算精度较低">低精度</span>`

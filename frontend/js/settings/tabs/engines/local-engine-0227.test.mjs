@@ -11,24 +11,19 @@
 
 import assert from "node:assert/strict";
 import {
+    applyInstallStage,
     createInitialState,
+    getEffectiveModelInstallState,
+    getEntry,
+    getPrimaryAction,
+    hasActiveOperation,
+    isActionBlocked,
+    isOperationCancellable,
+    mergeStatus,
     setCatalog,
     setPendingModelAction,
-    mergeStatus,
-    applyInstallStage,
-    getEntry,
-    hasActiveOperation,
-    isOperationCancellable,
-    getPrimaryAction,
-    isActionBlocked,
-    getEffectiveModelInstallState,
 } from "./local-engine-state.js";
-import {
-    makeCatalog,
-    makeStatus,
-    processState,
-    makeModel,
-} from "./local-engine-fixtures.js";
+import {makeCatalog, makeModel, makeStatus, processState,} from "./local-engine-fixtures.js";
 
 // ── mock 基建（local-engine-models 的 import 链需要 window.__TAURI__）────────
 // 必须在动态 import local-engine-models.js 之前设置——tauri.js 在加载时
@@ -41,7 +36,10 @@ if (!globalThis.window) {
 const _invokeImpl = {fn: async () => []};
 globalThis.window.__TAURI__ = {
     core: {invoke: (cmd, args) => _invokeImpl.fn(cmd, args)},
-    event: {listen: async () => () => {}},
+    event: {
+        listen: async () => () => {
+        }
+    },
 };
 
 // mock 设置后动态导入（静态 import 会被提升到 mock 之前执行）

@@ -253,7 +253,8 @@
 
             <!-- 搜索候选来源 -->
             <h3 class="section-heading" data-i18n="engines.section.search_sources">搜索候选来源</h3>
-            <p class="section-desc" data-i18n="engines.section.search_sources.desc">应用 / 文件 / 计算器 —— 构成主窗口搜索结果。</p>
+            <p class="section-desc" data-i18n="engines.section.search_sources.desc">应用 / 文件 / 计算器 ——
+                构成主窗口搜索结果。</p>
 
             <!-- 应用搜索（StartMenu） -->
             <div class="extension-card">
@@ -406,9 +407,12 @@
 
             <!-- 用户脚本解释器 -->
             <h3 class="section-heading" data-i18n="engines.section.script_interpreters">用户脚本解释器</h3>
-            <p class="section-desc" data-i18n="engines.section.script_interpreters.desc">Python / Node.js 解释器用于运行脚本插件。这是你系统上的解释器，Blink 不会修改它。</p>
+            <p class="section-desc" data-i18n="engines.section.script_interpreters.desc">Python / Node.js
+                解释器用于运行脚本插件。这是你系统上的解释器，Blink 不会修改它。</p>
             <div class="section-note">
-                <svg aria-hidden="true" class="icon section-note-icon"><use href="#icon-lightbulb"/></svg>
+                <svg aria-hidden="true" class="icon section-note-icon">
+                    <use href="#icon-lightbulb"/>
+                </svg>
                 <span data-i18n="engines.section.script_interpreters.note">与下方 Blink 托管运行时不同：脚本解释器读取你的 PATH 或手动配置路径，不共享隔离环境。</span>
             </div>
 
@@ -466,17 +470,23 @@
             <!-- ── 本地模型引擎（Blink 托管本地模型运行时）──────────────
                  摘要一行 + 全宽引擎卡片上下排列；
                  运行时底座/公共缓存折叠进「运行时与缓存」。 -->
-            <section class="le-runtime-section" id="local-model-runtime" aria-labelledby="le-runtime-heading">
+            <section aria-labelledby="le-runtime-heading" class="le-runtime-section" id="local-model-runtime">
                 <div class="le-runtime-header">
                     <div class="le-runtime-head-info">
-                        <h3 class="section-heading" id="le-runtime-heading" data-i18n="engines.section.local_runtime">本地模型引擎</h3>
+                        <h3 class="section-heading" data-i18n="engines.section.local_runtime" id="le-runtime-heading">
+                            本地模型引擎</h3>
                         <p class="le-runtime-summary" id="le-runtime-summary" role="status">正在加载引擎信息…</p>
                     </div>
                     <button aria-controls="le-runtime-details" aria-expanded="false"
-                            class="btn btn-small le-runtime-details-toggle" id="le-runtime-details-toggle" type="button">
-                        <svg aria-hidden="true" class="icon"><use href="#icon-database"/></svg>
+                            class="btn btn-small le-runtime-details-toggle" id="le-runtime-details-toggle"
+                            type="button">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-database"/>
+                        </svg>
                         <span data-i18n="local_engine.runtime.details_btn">运行时与缓存</span>
-                        <svg aria-hidden="true" class="icon le-disclosure-icon"><use href="#icon-chevron-down"/></svg>
+                        <svg aria-hidden="true" class="icon le-disclosure-icon">
+                            <use href="#icon-chevron-down"/>
+                        </svg>
                     </button>
                 </div>
 
@@ -514,17 +524,23 @@
                         <div class="le-foundation-head">
                             <h4 class="le-foundation-title" data-i18n="local_engine.foundation.title">运行时底座</h4>
                             <div class="le-foundation-actions">
-                                <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh" type="button">
-                                    <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
+                                <button class="btn btn-small le-foundation-refresh" id="le-foundation-refresh"
+                                        type="button">
+                                    <svg aria-hidden="true" class="icon">
+                                        <use href="#icon-refresh-cw"/>
+                                    </svg>
                                     <span data-i18n="local_engine.foundation.refresh">刷新</span>
                                 </button>
                                 <button class="btn btn-small le-foundation-open" id="le-foundation-open" type="button">
-                                    <svg aria-hidden="true" class="icon"><use href="#icon-folder-open"/></svg>
+                                    <svg aria-hidden="true" class="icon">
+                                        <use href="#icon-folder-open"/>
+                                    </svg>
                                     <span data-i18n="local_engine.foundation.open_dir">打开根目录</span>
                                 </button>
                             </div>
                         </div>
-                        <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">各本地引擎的运行环境与模型缓存总览，只读展示。</p>
+                        <p class="le-foundation-desc" data-i18n="local_engine.foundation.desc">
+                            各本地引擎的运行环境与模型缓存总览，只读展示。</p>
                         <div class="le-foundation-body" id="le-foundation-body">
                             <!-- JS 装配底座信息 -->
                         </div>
@@ -533,9 +549,11 @@
                     <!-- 全局/公共 storage 区域 -->
                     <div class="le-shared-storage" hidden id="le-shared-storage">
                         <h4 class="le-shared-storage-title" data-i18n="local_engine.storage.shared_title">公共缓存</h4>
-                        <p class="le-shared-storage-desc" data-i18n="local_engine.storage.shared_desc">多个引擎共享的缓存资产。清理公共缓存不影响引擎运行，但可能导致引擎下次启动时需要重新下载依赖。</p>
+                        <p class="le-shared-storage-desc" data-i18n="local_engine.storage.shared_desc">
+                            多个引擎共享的缓存资产。清理公共缓存不影响引擎运行，但可能导致引擎下次启动时需要重新下载依赖。</p>
                         <div class="le-shared-storage-content" id="le-shared-storage-content"></div>
-                        <button class="btn btn-small le-shared-cleanup-btn" hidden id="le-shared-cleanup-btn" type="button">
+                        <button class="btn btn-small le-shared-cleanup-btn" hidden id="le-shared-cleanup-btn"
+                                type="button">
                             <svg aria-hidden="true" class="icon">
                                 <use href="#icon-trash-2"/>
                             </svg>
@@ -550,11 +568,13 @@
                 </div>
 
                 <!-- cleanup modal -->
-                <div aria-labelledby="le-cleanup-title" aria-modal="true" class="le-cleanup-modal" hidden id="le-cleanup-modal" role="dialog">
+                <div aria-labelledby="le-cleanup-title" aria-modal="true" class="le-cleanup-modal" hidden
+                     id="le-cleanup-modal" role="dialog">
                     <div class="le-cleanup-overlay" data-le-cleanup-close></div>
                     <div class="le-cleanup-dialog">
                         <div class="le-cleanup-header">
-                            <h3 class="le-cleanup-title" data-i18n="local_engine.cleanup.title" id="le-cleanup-title">清理确认</h3>
+                            <h3 class="le-cleanup-title" data-i18n="local_engine.cleanup.title" id="le-cleanup-title">
+                                清理确认</h3>
                             <button aria-label="关闭" class="le-cleanup-close" data-le-cleanup-close type="button">
                                 <svg aria-hidden="true" class="icon">
                                     <use href="#icon-x"/>
@@ -563,8 +583,12 @@
                         </div>
                         <div class="le-cleanup-body" id="le-cleanup-body"></div>
                         <div class="le-cleanup-actions">
-                            <button class="btn btn-small" data-i18n="local_engine.cleanup.cancel" data-le-cleanup-close type="button">取消</button>
-                            <button class="btn btn-small le-btn-danger" data-i18n="local_engine.cleanup.confirm" id="le-cleanup-confirm" type="button">确认清理</button>
+                            <button class="btn btn-small" data-i18n="local_engine.cleanup.cancel" data-le-cleanup-close
+                                    type="button">取消
+                            </button>
+                            <button class="btn btn-small le-btn-danger" data-i18n="local_engine.cleanup.confirm"
+                                    id="le-cleanup-confirm" type="button">确认清理
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1498,7 +1522,7 @@
                         <label class="setting-label"><span data-i18n="ai.model_modal.model_id">Model ID</span><span
                                 class="field-hint-icon" data-i18n-title="ai.model_modal.model_id.hint">ⓘ</span></label>
                         <div class="ai-model-edit-id-wrap" id="ai-model-edit-id-wrap">
-                            <input autocomplete="off" autocapitalize="off" class="input-wide"
+                            <input autocapitalize="off" autocomplete="off" class="input-wide"
                                    data-1p-ignore data-form-type="other" data-i18n-ph="ai.model_modal.model_id.ph"
                                    data-lpignore="true" id="ai-model-edit-id" name="blink-model-id"
                                    spellcheck="false" type="text"/>
@@ -1509,7 +1533,8 @@
                     </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.model_modal.display_name">显示名</label>
-                        <input autocomplete="section-blink-model nickname" class="input-wide" data-1p-ignore data-form-type="other"
+                        <input autocomplete="section-blink-model nickname" class="input-wide" data-1p-ignore
+                               data-form-type="other"
                                data-i18n-ph="ai.model_modal.display_name.ph" data-lpignore="true"
                                id="ai-model-edit-display-name" name="blink-model-display-label" type="text"/>
                     </div>
@@ -1527,15 +1552,17 @@
 
                 <!-- 段二:调用参数 -->
                 <div class="ai-modal-section">
-                    <div class="ai-modal-section-label"><span data-i18n="ai.model_modal.section.params">调用参数</span><span
+                    <div class="ai-modal-section-label"><span
+                            data-i18n="ai.model_modal.section.params">调用参数</span><span
                             class="field-hint-icon" data-i18n-title="ai.model_modal.params.hint">ⓘ</span></div>
 
                     <!-- Temperature 覆盖开关 + slider -->
                     <div class="ai-model-param" id="ai-model-param-temperature">
                         <div class="ai-model-param-head">
                             <div class="ai-model-param-title"><label class="setting-label"
-                                    data-i18n="ai.model_modal.temperature">Temperature</label><span
-                                    class="field-hint-icon" data-i18n-title="ai.model_modal.temperature.hint">ⓘ</span></div>
+                                                                     data-i18n="ai.model_modal.temperature">Temperature</label><span
+                                    class="field-hint-icon" data-i18n-title="ai.model_modal.temperature.hint">ⓘ</span>
+                            </div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-temperature-toggle" type="checkbox"/>
                                 <span class="slider"></span>
@@ -1554,7 +1581,8 @@
                     <div class="ai-model-param" id="ai-model-param-max-tokens">
                         <div class="ai-model-param-head">
                             <div class="ai-model-param-title">
-                                <label class="setting-label" data-i18n="ai.model_modal.max_tokens">Max Output Tokens</label>
+                                <label class="setting-label" data-i18n="ai.model_modal.max_tokens">Max Output
+                                    Tokens</label>
                                 <span class="field-hint-icon" data-i18n-title="ai.model_modal.max_tokens.hint">ⓘ</span>
                             </div>
                             <label class="switch switch-sm">
@@ -1564,7 +1592,8 @@
                         </div>
                         <div class="ai-model-param-body hidden" id="ai-model-param-max-tokens-body">
                             <div class="ai-capacity-control">
-                                <input id="ai-model-edit-max-tokens-range" max="8" min="0" step="1" type="range" value="4"/>
+                                <input id="ai-model-edit-max-tokens-range" max="8" min="0" step="1" type="range"
+                                       value="4"/>
                                 <div class="ai-capacity-marks" id="ai-model-edit-max-tokens-marks"></div>
                             </div>
                             <input class="ai-model-param-num" id="ai-model-edit-max-tokens-num" min="1" step="1"
@@ -1577,8 +1606,10 @@
                     <div class="ai-model-param" id="ai-model-param-context-window">
                         <div class="ai-model-param-head">
                             <div class="ai-model-param-title">
-                                <label class="setting-label" data-i18n="ai.model_modal.context_window">上下文窗口</label>
-                                <span class="field-hint-icon" data-i18n-title="ai.model_modal.context_window.hint">ⓘ</span>
+                                <label class="setting-label"
+                                       data-i18n="ai.model_modal.context_window">上下文窗口</label>
+                                <span class="field-hint-icon"
+                                      data-i18n-title="ai.model_modal.context_window.hint">ⓘ</span>
                             </div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-context-window-toggle" type="checkbox"/>
@@ -1587,10 +1618,12 @@
                         </div>
                         <div class="ai-model-param-body hidden" id="ai-model-param-context-window-body">
                             <div class="ai-capacity-control">
-                                <input id="ai-model-edit-context-window-range" max="8" min="0" step="1" type="range" value="4"/>
+                                <input id="ai-model-edit-context-window-range" max="8" min="0" step="1" type="range"
+                                       value="4"/>
                                 <div class="ai-capacity-marks" id="ai-model-edit-context-window-marks"></div>
                             </div>
-                            <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.context_window.ph" id="ai-model-edit-context-window-num"
+                            <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.context_window.ph"
+                                   id="ai-model-edit-context-window-num"
                                    min="1024" step="1024" type="number"
                                    value="131072"/>
                         </div>
@@ -1600,8 +1633,9 @@
                     <div class="ai-model-param" id="ai-model-param-thinking-style">
                         <div class="ai-model-param-head">
                             <div class="ai-model-param-title"><label class="setting-label"
-                                    data-i18n="ai.model_modal.thinking_style">思考控件显示方式（兼容）</label><span
-                                    class="field-hint-icon" data-i18n-title="ai.model_modal.thinking_style.hint">ⓘ</span></div>
+                                                                     data-i18n="ai.model_modal.thinking_style">思考控件显示方式（兼容）</label><span
+                                    class="field-hint-icon"
+                                    data-i18n-title="ai.model_modal.thinking_style.hint">ⓘ</span></div>
                             <select class="ai-model-edit-inline-select" id="ai-model-edit-thinking-style-select">
                                 <option data-i18n="ai.model_modal.thinking_style.auto" value="auto">自动</option>
                                 <option data-i18n="ai.model_modal.thinking_style.effort" value="effort">强制强度下拉
@@ -1616,8 +1650,9 @@
                     <div class="ai-model-param" id="ai-model-param-reasoning-effort">
                         <div class="ai-model-param-head">
                             <div class="ai-model-param-title"><label class="setting-label"
-                                    data-i18n="ai.model_modal.reasoning_effort">思考强度</label><span
-                                    class="field-hint-icon" data-i18n-title="ai.model_modal.reasoning_effort.hint">ⓘ</span></div>
+                                                                     data-i18n="ai.model_modal.reasoning_effort">思考强度</label><span
+                                    class="field-hint-icon"
+                                    data-i18n-title="ai.model_modal.reasoning_effort.hint">ⓘ</span></div>
                             <label class="switch switch-sm">
                                 <input id="ai-model-edit-reasoning-effort-toggle" type="checkbox"/>
                                 <span class="slider"></span>
@@ -1634,7 +1669,8 @@
                                 <option data-i18n="ai.model_modal.reasoning_effort.custom" value="custom">自定义…
                                 </option>
                             </select>
-                            <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.reasoning_effort.custom_ph" hidden
+                            <input class="ai-model-param-num" data-i18n-ph="ai.model_modal.reasoning_effort.custom_ph"
+                                   hidden
                                    id="ai-model-edit-reasoning-effort-custom"
                                    placeholder="留空 = 不发送（模型默认档）" type="text"/>
                         </div>
@@ -1643,12 +1679,14 @@
 
                 <!-- 段三:高级(自定义参数) -->
                 <div class="ai-modal-section ai-model-advanced-section">
-                    <div class="ai-modal-section-label"><span data-i18n="ai.model_modal.section.advanced">高级</span><span
+                    <div class="ai-modal-section-label"><span
+                            data-i18n="ai.model_modal.section.advanced">高级</span><span
                             class="field-hint-icon" data-i18n-title="ai.model_modal.custom_params.hint">ⓘ</span></div>
                     <div class="ai-model-custom-params" id="ai-model-edit-custom-params">
                         <!-- 由 JS 动态渲染 -->
                     </div>
-                    <button class="btn btn-small ai-model-custom-params-add" data-i18n="ai.model_modal.custom_params.add"
+                    <button class="btn btn-small ai-model-custom-params-add"
+                            data-i18n="ai.model_modal.custom_params.add"
                             id="ai-model-edit-custom-params-add" type="button">+
                         添加参数
                     </button>
@@ -1656,11 +1694,13 @@
 
                 <p class="modal-error" id="ai-model-edit-error"></p>
                 <div class="modal-actions">
-                    <button class="btn btn-small" data-i18n="ai.model_modal.cancel" id="ai-model-edit-cancel">取消</button>
+                    <button class="btn btn-small" data-i18n="ai.model_modal.cancel" id="ai-model-edit-cancel">取消
+                    </button>
                     <button class="btn btn-primary btn-continue" data-i18n="ai.model_modal.save_continue"
                             id="ai-model-edit-continue">继续添加
                     </button>
-                    <button class="btn btn-primary" data-i18n="ai.model_modal.save" id="ai-model-edit-save">保存</button>
+                    <button class="btn btn-primary" data-i18n="ai.model_modal.save" id="ai-model-edit-save">保存
+                    </button>
                 </div>
             </div>
         </div>
@@ -1819,7 +1859,8 @@
                         </svg>
                         <div>
                             <h4 data-i18n="voice.local.runtime_link.title">FunASR 本地引擎</h4>
-                            <p data-i18n="voice.local.runtime_link.desc">环境安装、服务启停、设备切换、日志查看已迁移至引擎页。</p>
+                            <p data-i18n="voice.local.runtime_link.desc">
+                                环境安装、服务启停、设备切换、日志查看已迁移至引擎页。</p>
                         </div>
                     </div>
                     <button class="btn btn-small voice-runtime-link-btn" id="voice-goto-engines-btn" type="button">
@@ -1845,13 +1886,18 @@
                 <div class="voice-file-transcribe-card">
                     <div class="voice-file-transcribe-copy">
                         <div class="voice-file-transcribe-title" data-i18n="voice.local.file.title">转写 WAV 文件</div>
-                        <div class="voice-file-transcribe-desc" data-i18n="voice.local.file.desc">选择本地 WAV，使用当前运行中的模型一次性转写。文件路径不会交给前端。</div>
+                        <div class="voice-file-transcribe-desc" data-i18n="voice.local.file.desc">选择本地
+                            WAV，使用当前运行中的模型一次性转写。文件路径不会交给前端。
+                        </div>
                     </div>
                     <button class="btn btn-small" id="voice-file-transcribe-btn" type="button">
-                        <svg aria-hidden="true" class="icon"><use href="#icon-audio-lines"/></svg>
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-audio-lines"/>
+                        </svg>
                         <span data-i18n="voice.local.file.choose">选择并转写</span>
                     </button>
-                    <div aria-live="polite" class="voice-file-transcribe-status" id="voice-file-transcribe-status"></div>
+                    <div aria-live="polite" class="voice-file-transcribe-status"
+                         id="voice-file-transcribe-status"></div>
                     <pre class="voice-file-transcribe-output" hidden id="voice-file-transcribe-output"></pre>
                     <div class="voice-file-transcribe-meta" id="voice-file-transcribe-meta"></div>
                 </div>
@@ -1861,7 +1907,8 @@
                     <summary class="voice-advanced-header">
                         <span class="voice-advanced-chevron"></span>
                         <span class="voice-advanced-title" data-i18n="voice.local.advanced.title">高级选项</span>
-                        <span class="voice-advanced-desc" data-i18n="voice.local.advanced.desc">流式识别 · VAD 切句参数</span>
+                        <span class="voice-advanced-desc"
+                              data-i18n="voice.local.advanced.desc">流式识别 · VAD 切句参数</span>
                     </summary>
                     <div class="voice-advanced-body">
                         <!-- 流式识别（仅本地模式生效） -->
@@ -2234,7 +2281,9 @@
                         <div class="db-stat-row">
                             <span class="db-stat" id="db-conversation-count">-</span>
                             <span class="db-stat" id="db-message-count">-</span>
-                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-all-conversations">清空</button>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-all-conversations">
+                                清空
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -2255,7 +2304,8 @@
                         </div>
                         <div class="db-stat-row">
                             <span class="db-stat" id="db-clipboard-image-count">-</span>
-                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-clipboard-images">清空</button>
+                            <button class="btn-small" data-i18n="storage.clear_short" id="clear-clipboard-images">清空
+                            </button>
                         </div>
                     </div>
                 </div>

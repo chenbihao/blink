@@ -26,7 +26,10 @@ if (!globalThis.window) {
 
 // 闭包代理——后续 createMockEnvironment 会替换 invokeImpl/listenImpl
 const _invokeImpl = {fn: async () => []};
-const _listenImpl = {fn: async () => () => {}};
+const _listenImpl = {
+    fn: async () => () => {
+    }
+};
 globalThis.window.__TAURI__ = {
     core: {
         // invoke 绑定到箭头函数，实际调用 _invokeImpl.fn（可运行时替换）
@@ -75,7 +78,10 @@ function createMockEnvironment() {
     globalThis.window.__TAURI__.event.listen = mockListen;
 
     let invokeImpl = async () => [];
-    const setInvoke = (impl) => { invokeImpl = impl; _invokeImpl.fn = impl; };
+    const setInvoke = (impl) => {
+        invokeImpl = impl;
+        _invokeImpl.fn = impl;
+    };
 
     return {
         listeners,
@@ -128,7 +134,12 @@ async function runTests() {
             if (cmd === "get_local_engine_catalog") return makeCatalog();
             if (cmd === "get_local_engine_status") return [];
             if (cmd === "get_local_engine_logs") return [];
-            if (cmd === "get_local_engine_storage") return {engine_id: "funasr", targets: [], total_size_bytes: 0, releasable_size_bytes: 0};
+            if (cmd === "get_local_engine_storage") return {
+                engine_id: "funasr",
+                targets: [],
+                total_size_bytes: 0,
+                releasable_size_bytes: 0
+            };
             return [];
         });
 
@@ -172,7 +183,9 @@ async function runTests() {
 
         let stateChangeCount = 0;
         const controller = createLocalEngineController({
-            onStateChange: () => { stateChangeCount++; },
+            onStateChange: () => {
+                stateChangeCount++;
+            },
         });
 
         await controller.mount();

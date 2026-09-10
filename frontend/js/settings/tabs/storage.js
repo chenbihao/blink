@@ -7,7 +7,6 @@ import {confirmDialog, invoke, messageDialog} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {clearClipboardImages, optimizeStorage} from "../../shared/api.js";
-import {saveConfig} from "../../shared/config-keys.js";
 
 /**
  * 初始化存储设置 Tab

@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 
-import {
-    formatAudioTranscriptionIdentity,
-    parseAudioTranscriptionCapability,
-} from "./voice-file-transcribe.js";
+import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
 
 const parsed = parseAudioTranscriptionCapability({
     kind: "items",

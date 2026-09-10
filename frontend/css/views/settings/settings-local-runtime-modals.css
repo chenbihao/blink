@@ -139,9 +139,8 @@
     cursor: pointer;
     display: inline-grid;
     place-content: center;
-    transition:
-        background var(--transition-fast),
-        border-color var(--transition-fast);
+    transition: background var(--transition-fast),
+    border-color var(--transition-fast);
 }
 
 #engines .le-cleanup-checkbox:hover:not(:disabled) {

@@ -35,8 +35,12 @@
 }
 
 @keyframes le-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
 }
 
 #engines .le-feedback-ok {
@@ -265,9 +269,17 @@
     font-style: normal;
 }
 
-#engines .le-log-info .le-log-level { color: var(--text-dim); }
-#engines .le-log-warn .le-log-level { color: var(--warning); }
-#engines .le-log-error .le-log-level { color: var(--red); }
+#engines .le-log-info .le-log-level {
+    color: var(--text-dim);
+}
+
+#engines .le-log-warn .le-log-level {
+    color: var(--warning);
+}
+
+#engines .le-log-error .le-log-level {
+    color: var(--red);
+}
 
 #engines .le-log-separator {
     text-align: center;
@@ -453,10 +465,21 @@
     color: var(--text-dim);
 }
 
-#engines .le-diagnostic-check-ok .le-diagnostic-check-icon { color: var(--green); }
-#engines .le-diagnostic-check-warn .le-diagnostic-check-icon { color: var(--warning); }
-#engines .le-diagnostic-check-error .le-diagnostic-check-icon { color: var(--red); }
-#engines .le-diagnostic-check-busy .le-diagnostic-check-icon { color: var(--accent); }
+#engines .le-diagnostic-check-ok .le-diagnostic-check-icon {
+    color: var(--green);
+}
+
+#engines .le-diagnostic-check-warn .le-diagnostic-check-icon {
+    color: var(--warning);
+}
+
+#engines .le-diagnostic-check-error .le-diagnostic-check-icon {
+    color: var(--red);
+}
+
+#engines .le-diagnostic-check-busy .le-diagnostic-check-icon {
+    color: var(--accent);
+}
 
 /* 图标语义（0.22.10 统一）：✓ 通过 / ✗ 异常 / ⚠ 需要注意 / ○ 进行中；
    neutral 行是纯信息（如当前模型名），不渲染图标不占语义。

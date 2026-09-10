@@ -19,10 +19,10 @@
 //! 内部通过 `tokio::sync::Mutex` 串行化所有引擎调用，确保同一时刻只有一个操作。
 //! `push_audio` 不阻塞调用方——音频采样在独立 task 中通过 channel 转发。
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use super::{StreamingSttPort, SttEngine, SttError, SttEvent};
 

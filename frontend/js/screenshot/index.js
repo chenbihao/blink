@@ -45,7 +45,13 @@ import {
     norm,
     pointInRect
 } from "./ss-utils.js";
-import {cssRectToBitmap, getRenderScale, pointNearWindowEdge, shouldStartFreeSelection, syncRenderScale} from "./ss-selection-geometry.js";
+import {
+    cssRectToBitmap,
+    getRenderScale,
+    pointNearWindowEdge,
+    shouldStartFreeSelection,
+    syncRenderScale
+} from "./ss-selection-geometry.js";
 import {
     cancelDrawFinalSelectionRaf,
     cancelDrawSelectionRaf,
@@ -73,12 +79,12 @@ import {
 } from "./ss-interaction.js";
 import {copyReadingSelection, exitReadingMode, getReadingSelectionText, showReadingContextMenu,} from "./ss-reading.js";
 import {
+    cancelActiveOcr,
     doPanelToggle,
     showOcrResult,
     showTransientHint,
     updateOutputButtonsDisabled,
     updateOverlayButtonsActive,
-    cancelActiveOcr,
 } from "./ss-ocr.js";
 import {
     cleanupCanvasVisuals,

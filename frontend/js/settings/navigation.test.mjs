@@ -1,9 +1,5 @@
 import assert from "node:assert/strict";
-import {
-    markSettingsTabActivation,
-    navigateSettings,
-    resetSettingsContentScroll,
-} from "./navigation.js";
+import {markSettingsTabActivation, navigateSettings, resetSettingsContentScroll,} from "./navigation.js";
 
 function makeDocument({target = null, focusTarget = null} = {}) {
     const content = {scrollTop: 640};
@@ -101,13 +97,19 @@ function makeDocument({target = null, focusTarget = null} = {}) {
     let target = null;
     let observerCallback = null;
     let timerCleared = false;
+
     class FakeMutationObserver {
         constructor(callback) {
             observerCallback = callback;
         }
-        observe() {}
-        disconnect() {}
+
+        observe() {
+        }
+
+        disconnect() {
+        }
     }
+
     const documentRef = makeDocument();
     documentRef.defaultView = {
         MutationObserver: FakeMutationObserver,
@@ -128,7 +130,10 @@ function makeDocument({target = null, focusTarget = null} = {}) {
         target: "#late-target",
         documentRef,
     });
-    target = {scrollIntoView() {}};
+    target = {
+        scrollIntoView() {
+        }
+    };
     observerCallback();
 
     const result = await navigation;

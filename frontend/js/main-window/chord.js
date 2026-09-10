@@ -25,11 +25,7 @@
 import {invoke} from "../shared/tauri.js";
 import {listChordActions} from "../shared/api.js";
 import {queryEl} from "./dom.js";
-import {
-    findTapActionById,
-    findTapActionByKey,
-    isAvailableWithQuery,
-} from "./chord-availability.js";
+import {findTapActionById, findTapActionByKey, isAvailableWithQuery,} from "./chord-availability.js";
 
 let chordActions = [];
 let ghostChordEl = null;

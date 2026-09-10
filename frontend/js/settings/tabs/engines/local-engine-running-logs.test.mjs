@@ -1,11 +1,5 @@
 import assert from "node:assert/strict";
-import {
-    appendLog,
-    createInitialState,
-    getEntry,
-    mergeStatus,
-    setLogHistory,
-} from "./local-engine-state.js";
+import {appendLog, createInitialState, getEntry, mergeStatus, setLogHistory,} from "./local-engine-state.js";
 import {makeStatus, processState} from "./local-engine-fixtures.js";
 
 function operationLog(seq = "1") {

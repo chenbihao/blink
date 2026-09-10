@@ -4,7 +4,7 @@
 //! 1. normalizeError：结构化 CommandError 透传 + 旧字符串错误包装
 //! 2. commandErrorText：IPC 投影类别前缀剥离 + 兜底文案 + 字符串错误
 
-import {test, describe} from 'node:test';
+import {describe, test} from 'node:test';
 import assert from 'node:assert';
 
 // tauri.js 模块加载时会给 window.alert/confirm/prompt 打补丁，先 mock window
