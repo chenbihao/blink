@@ -338,7 +338,9 @@ pub mod gguf_postprocess;
 pub mod local;
 #[cfg(test)]
 mod mock;
+pub(crate) mod postprocess;
 pub mod pseudo_streaming;
+pub(crate) mod sentence_state;
 pub mod streaming_port;
 pub mod transcribe; // 0.22.16 Handoff 04：一次性文件转写领域契约
 pub mod vad;

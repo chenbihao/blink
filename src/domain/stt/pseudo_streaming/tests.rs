@@ -1,0 +1,1081 @@
+//! 伪流式 STT 引擎测试。
+//!
+//! 测试覆盖：
+//! - [`SentenceState`](super::super::sentence_state::SentenceState)：commit/rollback/deferred/compact
+//! - [`PseudoStreamingSttEngine`](super::PseudoStreamingSttEngine)：reset、hard limit、finalize 超时
+//! - 后处理函数：[`strip_confirmed_prefix`]、[`strip_filler_words`]、[`trim_trailing_silence`]
+//! - [`EnergyVad`](super::super::vad::EnergyVad)：底噪自适应、句尾检测、脉冲抑制
+
+use super::*;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Notify, oneshot};
+
+struct ControlledTransport {
+    responses: Mutex<VecDeque<oneshot::Receiver<Result<String, String>>>>,
+    calls: AtomicUsize,
+    called: Notify,
+}
+
+impl ControlledTransport {
+    fn new(responses: Vec<oneshot::Receiver<Result<String, String>>>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into()),
+            calls: AtomicUsize::new(0),
+            called: Notify::new(),
+        })
+    }
+
+    async fn wait_for_calls(&self, expected: usize) {
+        while self.calls.load(Ordering::SeqCst) < expected {
+            self.called.notified().await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domain::stt::SttTransport for ControlledTransport {
+    async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+        Ok(())
+    }
+
+    async fn transcribe(
+        &self,
+        _wav_bytes: &[u8],
+    ) -> Result<String, crate::domain::stt::SttTransportError> {
+        let rx = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("测试必须提供 transport response");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.called.notify_waiters();
+        rx.await
+            .expect("测试 response sender 不应提前 drop")
+            .map_err(|detail| crate::domain::stt::SttTransportError::Unavailable { detail })
+    }
+}
+
+fn controlled_engine(
+    transport: Arc<ControlledTransport>,
+    samples: Vec<f32>,
+) -> PseudoStreamingSttEngine {
+    PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner {
+            vad: EnergyVad::new(16_000),
+            sentences: SentenceState::new(),
+            samples,
+            last_preview: Instant::now(),
+            last_preview_elapsed: Duration::ZERO,
+            last_preview_sample_end: 0,
+            preview_in_flight: false,
+            latest_preview: String::new(),
+            preview_generation: 0,
+            session_failed: false,
+        })),
+        connection: Some(crate::domain::stt::SttEngineConnection {
+            host: "127.0.0.1".into(),
+            port: 0,
+            engine_id: "funasr".into(),
+            instance_id: "test-instance".into(),
+            transport: Some(transport),
+        }),
+        sample_rate: 16_000,
+    }
+}
+
+// ── SentenceState 基础测试 ──
+
+#[test]
+fn sentence_state_compose() {
+    let mut state = SentenceState::new();
+    state.append_confirmed("你好世界。");
+    state.append_confirmed("今天天气不错。");
+    assert_eq!(state.confirmed_text(), "你好世界。今天天气不错。");
+}
+
+#[test]
+fn sentence_state_empty() {
+    let state = SentenceState::new();
+    assert_eq!(state.confirmed_text(), "");
+}
+
+#[test]
+fn sentence_state_on_sentence_end_creates_pending() {
+    let mut state = SentenceState::new();
+    let pending = state
+        .on_sentence_end(1000, "预览快照")
+        .expect("应有 pending");
+    assert_eq!(pending.range, 0..1000);
+    assert_eq!(pending.preview_snapshot, "预览快照");
+    // committed end 不应推进
+    assert_eq!(state.committed_sample_end, 0);
+    assert!(state.pending.is_some());
+}
+
+#[test]
+fn sentence_state_commit_advances_committed_end() {
+    let mut state = SentenceState::new();
+    let pending = state.on_sentence_end(1000, "").expect("应有 pending");
+    let result = FinalizeResult {
+        identity: pending.identity,
+        text: "你好".to_string(),
+        ok: true,
+    };
+    let deferred = state.commit_or_rollback(&result);
+    assert!(deferred.is_none(), "无 deferred");
+    assert_eq!(state.committed_sample_end, 1000);
+    assert_eq!(state.confirmed_text(), "你好");
+    assert!(state.pending.is_none());
+}
+
+#[test]
+fn sentence_state_rollback_keeps_committed_end() {
+    let mut state = SentenceState::new();
+    let pending = state
+        .on_sentence_end(1000, "预览快照")
+        .expect("应有 pending");
+    let result = FinalizeResult {
+        identity: pending.identity,
+        text: String::new(),
+        ok: false,
+    };
+    let deferred = state.commit_or_rollback(&result);
+    assert!(deferred.is_none());
+    // committed end 不变
+    assert_eq!(state.committed_sample_end, 0);
+    assert_eq!(state.confirmed_text(), "");
+    assert!(state.pending.is_none());
+    // finalize_in_flight 应清除
+    assert!(!state.finalize_in_flight);
+}
+
+#[test]
+fn sentence_state_stale_identity_discarded() {
+    let mut state = SentenceState::new();
+    // 创建一个 pending
+    let pending = state.on_sentence_end(1000, "").expect("应有 pending");
+    // 模拟旧 session 的结果（segment_id 不匹配）
+    let stale_result = FinalizeResult {
+        identity: SegmentIdentity {
+            session_generation: pending.identity.session_generation,
+            commit_generation: pending.identity.commit_generation,
+            segment_id: pending.identity.segment_id + 999, // 不匹配
+        },
+        text: "过期结果".to_string(),
+        ok: true,
+    };
+    let deferred = state.commit_or_rollback(&stale_result);
+    assert!(deferred.is_none(), "stale identity 应被丢弃");
+    // pending 应仍然存在
+    assert!(state.pending.is_some());
+    assert_eq!(state.committed_sample_end, 0);
+}
+
+#[test]
+fn sentence_state_wrong_session_discarded() {
+    let mut state = SentenceState::new();
+    let pending = state.on_sentence_end(1000, "").expect("应有 pending");
+    // 模拟旧 session 的结果
+    let stale_result = FinalizeResult {
+        identity: SegmentIdentity {
+            session_generation: pending.identity.session_generation + 1,
+            commit_generation: pending.identity.commit_generation,
+            segment_id: pending.identity.segment_id,
+        },
+        text: "旧session结果".to_string(),
+        ok: true,
+    };
+    let deferred = state.commit_or_rollback(&stale_result);
+    assert!(deferred.is_none(), "旧 session 结果应被丢弃");
+    assert!(state.pending.is_some());
+}
+
+#[test]
+fn sentence_state_reset_clears_everything() {
+    let mut state = SentenceState::new();
+    state.append_confirmed("测试");
+    state.committed_sample_end = 500;
+    state.on_sentence_end(1000, "");
+    state.finalize_in_flight = true;
+    let old_session = state.session_generation;
+
+    state.reset();
+
+    assert_eq!(state.confirmed_text(), "");
+    assert_eq!(state.committed_sample_end, 0);
+    assert!(state.pending.is_none());
+    assert!(state.deferred.is_none());
+    assert!(!state.finalize_in_flight);
+    assert_eq!(state.buffer_base_sample, 0);
+    assert_ne!(state.session_generation, old_session);
+    assert_eq!(state.next_segment_id, 1);
+}
+
+#[test]
+fn sentence_state_multiple_sentences_commit_in_order() {
+    let mut state = SentenceState::new();
+    // 第一句
+    let p1 = state.on_sentence_end(1000, "").expect("应有 pending");
+    // commit 第一句
+    let r1 = FinalizeResult {
+        identity: p1.identity,
+        text: "第一句。".to_string(),
+        ok: true,
+    };
+    assert!(state.commit_or_rollback(&r1).is_none());
+    assert_eq!(state.committed_sample_end, 1000);
+    assert_eq!(state.confirmed_text(), "第一句。");
+
+    // 第二句
+    let p2 = state.on_sentence_end(2500, "").expect("应有 pending");
+    assert_eq!(p2.range, 1000..2500);
+    let r2 = FinalizeResult {
+        identity: p2.identity,
+        text: "第二句。".to_string(),
+        ok: true,
+    };
+    assert!(state.commit_or_rollback(&r2).is_none());
+    assert_eq!(state.committed_sample_end, 2500);
+    assert_eq!(state.confirmed_text(), "第一句。第二句。");
+}
+
+#[test]
+fn sentence_state_commit_empty_text_rollback() {
+    let mut state = SentenceState::new();
+    let pending = state.on_sentence_end(1000, "").expect("应有 pending");
+    // ok=true 但 text 为空 → rollback
+    let result = FinalizeResult {
+        identity: pending.identity,
+        text: String::new(),
+        ok: true,
+    };
+    assert!(state.commit_or_rollback(&result).is_none());
+    assert_eq!(state.committed_sample_end, 0);
+    assert_eq!(state.confirmed_text(), "");
+}
+
+// ── compose_result 测试 ──
+
+#[test]
+fn compose_result_empty_returns_empty_string() {
+    assert_eq!(PseudoStreamingSttEngine::compose_result("", ""), "");
+}
+
+#[test]
+fn compose_result_with_preview_only() {
+    let result = PseudoStreamingSttEngine::compose_result("", "你好");
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["confirmed"], "");
+    assert_eq!(v["preview"], "你好");
+}
+
+#[test]
+fn compose_result_with_both() {
+    let result = PseudoStreamingSttEngine::compose_result("你好。", "世界");
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["confirmed"], "你好。");
+    assert_eq!(v["preview"], "世界");
+}
+
+// ── preview_interval 测试 ──
+
+#[test]
+fn preview_interval_normal() {
+    let interval = PseudoStreamingSttEngine::preview_interval(16000 * 3, 16000, Duration::ZERO);
+    assert_eq!(interval, Duration::from_millis(PREVIEW_INTERVAL_MS));
+}
+
+#[test]
+fn preview_interval_slowdown() {
+    let interval = PseudoStreamingSttEngine::preview_interval(16000 * 10, 16000, Duration::ZERO);
+    assert_eq!(interval, Duration::from_millis(PREVIEW_SLOW_INTERVAL_MS));
+}
+
+#[test]
+fn preview_interval_adapts_to_slow_inference_with_cap() {
+    let adaptive =
+        PseudoStreamingSttEngine::preview_interval(16000 * 3, 16000, Duration::from_millis(800));
+    assert_eq!(adaptive, Duration::from_millis(1600));
+
+    let capped =
+        PseudoStreamingSttEngine::preview_interval(16000 * 3, 16000, Duration::from_secs(10));
+    assert_eq!(capped, Duration::from_millis(PREVIEW_MAX_INTERVAL_MS));
+}
+
+#[test]
+fn absolute_uncommitted_hard_limit_does_not_depend_on_vad_state() {
+    assert_eq!(
+        PseudoStreamingSttEngine::exceeds_uncommitted_hard_limit(16_000 * 12, 0, 16_000),
+        Some(true)
+    );
+    assert_eq!(
+        PseudoStreamingSttEngine::exceeds_uncommitted_hard_limit(16_000 * 20, 16_000 * 9, 16_000),
+        Some(false)
+    );
+    assert_eq!(
+        PseudoStreamingSttEngine::exceeds_uncommitted_hard_limit(10, 11, 16_000),
+        None
+    );
+}
+
+#[test]
+fn preview_growth_requires_500ms_and_rejects_backward_end() {
+    assert_eq!(
+        PseudoStreamingSttEngine::has_min_preview_growth(8_000, 0, 16_000),
+        Some(true)
+    );
+    assert_eq!(
+        PseudoStreamingSttEngine::has_min_preview_growth(7_999, 0, 16_000),
+        Some(false)
+    );
+    assert_eq!(
+        PseudoStreamingSttEngine::has_min_preview_growth(100, 101, 16_000),
+        None
+    );
+}
+
+// ── strip_confirmed_prefix 测试 ──
+
+#[test]
+fn strip_prefix_exact_match() {
+    assert_eq!(
+        strip_confirmed_prefix("你好世界。", "你好世界。今天天气"),
+        "今天天气"
+    );
+}
+
+#[test]
+fn strip_prefix_no_confirmed() {
+    assert_eq!(strip_confirmed_prefix("", "你好"), "你好");
+}
+
+#[test]
+fn strip_prefix_no_preview() {
+    assert_eq!(strip_confirmed_prefix("你好", ""), "");
+}
+
+#[test]
+fn strip_prefix_no_overlap() {
+    assert_eq!(
+        strip_confirmed_prefix("你好世界。", "今天天气不错"),
+        "今天天气不错"
+    );
+}
+
+#[test]
+fn strip_prefix_partial_match() {
+    assert_eq!(
+        strip_confirmed_prefix("你好世", "你好时间今天天气"),
+        "时间今天天气"
+    );
+}
+
+#[test]
+fn strip_prefix_short_common_prefix_not_stripped() {
+    assert_eq!(
+        strip_confirmed_prefix("你好世界今天", "你好朋友"),
+        "你好朋友"
+    );
+}
+
+#[test]
+fn strip_prefix_preview_equals_confirmed() {
+    assert_eq!(strip_confirmed_prefix("你好世界。", "你好世界。"), "");
+}
+
+// ── trim_trailing_silence 测试 ──
+
+#[test]
+fn trim_silence_all_silence() {
+    // 0.22.15：全静音 → 返回空 Vec（不送入 SenseVoice 避免幻觉）
+    let samples = vec![0.0f32; 1600];
+    let trimmed = trim_trailing_silence(&samples, 16000, 0.003);
+    assert!(trimmed.is_empty(), "全静音应返回空 Vec");
+}
+
+#[test]
+fn trim_silence_empty() {
+    let trimmed = trim_trailing_silence(&[], 16000, 0.003);
+    assert!(trimmed.is_empty());
+}
+
+#[test]
+fn trim_silence_trims_trailing_zeros() {
+    // 有声 50ms + 静音 1s → 裁剪后保留有声 + 150ms 缓冲
+    let mut samples = vec![0.1f32; 800]; // 有声 50ms
+    samples.extend(vec![0.0f32; 16000]); // 静音 1s
+    let trimmed = trim_trailing_silence(&samples, 16000, 0.003);
+    // 最后有声样本在 index 799，缓冲 = 150ms * 16000 / 1000 = 2400
+    // end = min(800 + 2400, 16800) = 3200
+    assert_eq!(trimmed.len(), 3200);
+}
+
+#[test]
+fn trim_silence_no_trailing_silence() {
+    let samples = vec![0.1f32; 1600];
+    let trimmed = trim_trailing_silence(&samples, 16000, 0.003);
+    assert_eq!(trimmed.len(), 1600);
+}
+
+// ── strip_filler_words 测试 ──
+
+#[test]
+fn filler_strip_yeah_period() {
+    assert_eq!(
+        strip_filler_words("我现在在做一个语音输入的。Yeah."),
+        "我现在在做一个语音输入的。"
+    );
+}
+
+#[test]
+fn filler_strip_okay_period() {
+    assert_eq!(
+        strip_filler_words("然后有一个假的流逝输入。Okay."),
+        "然后有一个假的流逝输入。"
+    );
+}
+
+#[test]
+fn filler_strip_multiple_fillers() {
+    assert_eq!(strip_filler_words("你好世界。Yeah. Okay."), "你好世界。");
+}
+
+#[test]
+fn filler_strip_no_chinese_not_stripped() {
+    assert_eq!(strip_filler_words("Hello world Yeah."), "Hello world Yeah.");
+}
+
+#[test]
+fn filler_strip_no_filler() {
+    assert_eq!(
+        strip_filler_words("你好世界。今天天气不错。"),
+        "你好世界。今天天气不错。"
+    );
+}
+
+#[test]
+fn filler_strip_empty() {
+    assert_eq!(strip_filler_words(""), "");
+}
+
+#[test]
+fn filler_strip_only_filler_with_chinese() {
+    assert_eq!(strip_filler_words("你好世界 Yeah"), "你好世界");
+}
+
+#[test]
+fn filler_strip_no_space_variant() {
+    assert_eq!(strip_filler_words("你好世界。Yeah."), "你好世界。");
+}
+
+#[test]
+fn filler_strip_chinese_period_then_yeah() {
+    assert_eq!(
+        strip_filler_words("我现在呢在做一个语音输入的。然后有一个假的流逝输入。Yeah."),
+        "我现在呢在做一个语音输入的。然后有一个假的流逝输入。"
+    );
+}
+
+#[test]
+fn filler_strip_preserves_chinese_text() {
+    assert_eq!(strip_filler_words("好的，我知道了。"), "好的，我知道了。");
+}
+
+#[test]
+fn filler_strip_uses_original_unicode_boundaries() {
+    // `İ`.to_lowercase() 的 UTF-8 字节长度会增长；旧实现按 lowercased
+    // pattern 长度反切原文，可能切进字符内部而 panic。
+    assert_eq!(strip_filler_words("你好İYeah."), "你好İ");
+    assert_eq!(strip_filler_words("你好İ Yeah."), "你好İ");
+}
+
+// ── 引擎 reset 测试 ──
+
+#[test]
+fn engine_reset_clears_state() {
+    let engine = PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner {
+            vad: {
+                let mut v = EnergyVad::new(16000);
+                v.process_chunk(&[0.1; 1600]);
+                v
+            },
+            sentences: {
+                let mut s = SentenceState::new();
+                s.append_confirmed("测试");
+                s
+            },
+            samples: vec![0.1; 1000],
+            last_preview: Instant::now() - Duration::from_secs(10),
+            last_preview_elapsed: Duration::ZERO,
+            last_preview_sample_end: 0,
+            preview_in_flight: true,
+            latest_preview: "测试预览".to_string(),
+            preview_generation: 0,
+            session_failed: false,
+        })),
+        connection: None,
+        sample_rate: 16000,
+    };
+
+    engine.reset();
+
+    let inner = engine.inner.lock().unwrap();
+    assert!(!inner.vad.is_speaking());
+    assert!(inner.samples.is_empty());
+    assert!(inner.latest_preview.is_empty());
+    assert!(!inner.preview_in_flight);
+    assert_eq!(
+        inner.preview_generation, 1,
+        "reset 应递增 preview_generation"
+    );
+    assert_eq!(inner.sentences.confirmed_text(), "");
+    assert_eq!(inner.sentences.committed_sample_end, 0);
+    assert!(inner.sentences.pending.is_none());
+    assert!(!inner.sentences.finalize_in_flight);
+}
+
+// 验证带连接快照的引擎能正常构造和 reset
+#[test]
+fn engine_with_token_constructs_and_resets() {
+    let engine = PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner {
+            vad: EnergyVad::new(16000),
+            sentences: SentenceState::new(),
+            samples: vec![0.1; 100],
+            last_preview: Instant::now(),
+            last_preview_elapsed: Duration::ZERO,
+            last_preview_sample_end: 0,
+            preview_in_flight: false,
+            latest_preview: String::new(),
+            preview_generation: 0,
+            session_failed: false,
+        })),
+        connection: Some(crate::domain::stt::SttEngineConnection {
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            engine_id: "funasr".to_string(),
+            instance_id: "inst-test".to_string(),
+            transport: None,
+        }),
+        sample_rate: 16000,
+    };
+
+    engine.reset();
+
+    let inner = engine.inner.lock().unwrap();
+    assert!(inner.samples.is_empty());
+    assert_eq!(inner.preview_generation, 1);
+}
+
+#[tokio::test]
+async fn hard_limit_forces_boundary_for_audio_stuck_outside_vad_speaking() {
+    let engine = PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner {
+            vad: EnergyVad::new(16_000),
+            sentences: SentenceState::new(),
+            samples: Vec::new(),
+            last_preview: Instant::now(),
+            last_preview_elapsed: Duration::ZERO,
+            last_preview_sample_end: 0,
+            preview_in_flight: false,
+            latest_preview: String::new(),
+            preview_generation: 0,
+            session_failed: false,
+        })),
+        connection: None,
+        sample_rate: 16_000,
+    };
+
+    // 该幅度低于当前 off threshold，不会进入 VAD speaking；绝对窗口保险
+    // 仍必须在 12 秒处制造边界。无 transport 会立即安全 rollback。
+    let audio = vec![0.006; 16_000 * 12];
+    engine.transcribe_chunk(&audio).await.unwrap();
+
+    let inner = engine.inner.lock().unwrap();
+    assert!(!inner.vad.is_speaking());
+    assert_eq!(inner.preview_generation, 1, "强制边界必须推进预览代际");
+    assert_eq!(inner.last_preview_sample_end, audio.len());
+}
+
+#[test]
+fn reset_recovers_and_clears_poisoned_mutex() {
+    let engine = PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner {
+            vad: EnergyVad::new(16_000),
+            sentences: SentenceState::new(),
+            samples: Vec::new(),
+            last_preview: Instant::now(),
+            last_preview_elapsed: Duration::ZERO,
+            last_preview_sample_end: 0,
+            preview_in_flight: false,
+            latest_preview: String::new(),
+            preview_generation: 0,
+            session_failed: false,
+        })),
+        connection: None,
+        sample_rate: 16_000,
+    };
+    let inner = Arc::clone(&engine.inner);
+    let _ = std::panic::catch_unwind(move || {
+        let _guard = inner.lock().unwrap();
+        panic!("poison for reset test");
+    });
+    assert!(engine.inner.is_poisoned());
+    engine.reset();
+    assert!(!engine.inner.is_poisoned());
+    assert!(engine.inner.lock().is_ok());
+}
+
+// ── 0.22.15 fix 新增测试 ──
+
+#[test]
+fn sentence_state_deferred_when_finalize_in_flight() {
+    // finalize_in_flight 时句尾暂存到 deferred
+    let mut state = SentenceState::new();
+    let _p1 = state.on_sentence_end(1000, "").expect("应有 pending");
+    state.finalize_in_flight = true;
+
+    // 第二句尾应被暂存
+    let p2 = state.on_sentence_end(2000, "preview2");
+    assert!(p2.is_none(), "finalize_in_flight 时应返回 None");
+    assert!(state.deferred.is_some(), "应暂存到 deferred");
+
+    // commit 第一句后，deferred 转为 pending
+    let r1 = FinalizeResult {
+        identity: SegmentIdentity {
+            session_generation: state.session_generation,
+            commit_generation: state.commit_generation,
+            segment_id: 1,
+        },
+        text: "第一句".to_string(),
+        ok: true,
+    };
+    let deferred = state.commit_or_rollback(&r1);
+    assert!(deferred.is_some(), "应返回 deferred segment");
+    assert!(state.pending.is_some(), "deferred 应已转为 pending");
+    assert!(state.finalize_in_flight, "finalize_in_flight 应为 true");
+    let deferred = deferred.unwrap();
+    assert_eq!(deferred.range, 1000..2000, "不得重复识别已提交区间");
+
+    let before = state.committed_sample_end;
+    assert!(
+        state
+            .commit_or_rollback(&FinalizeResult {
+                identity: deferred.identity,
+                text: "第二句".to_string(),
+                ok: true,
+            })
+            .is_none()
+    );
+    assert!(state.committed_sample_end >= before);
+    assert_eq!(state.committed_sample_end, 2000);
+    assert_eq!(state.confirmed_text(), "第一句第二句");
+}
+
+#[test]
+fn sentence_state_try_compact_after_commit() {
+    // commit 后可以 compact 已 committed 的 PCM
+    let mut state = SentenceState::new();
+    let p1 = state.on_sentence_end(1000, "").expect("应有 pending");
+    let r1 = FinalizeResult {
+        identity: p1.identity,
+        text: "你好".to_string(),
+        ok: true,
+    };
+    state.commit_or_rollback(&r1);
+    assert_eq!(state.committed_sample_end, 1000);
+
+    // try_compact 应返回 1000（可回收 1000 个样本）
+    let n = state.try_compact(1000);
+    assert_eq!(n, Ok(Some(1000)));
+    assert_eq!(state.buffer_base_sample, 1000);
+
+    // 再次 try_compact 应返回 None
+    assert_eq!(state.try_compact(0), Ok(None));
+}
+
+#[test]
+fn sentence_state_try_compact_blocked_by_pending() {
+    // 有 pending 时不 compact
+    let mut state = SentenceState::new();
+    state.on_sentence_end(1000, "");
+    assert_eq!(state.try_compact(1000), Ok(None), "有 pending 不应 compact");
+}
+
+#[test]
+fn compact_rejects_committed_end_past_buffer() {
+    let mut state = SentenceState::new();
+    state.committed_sample_end = 1_001;
+    assert!(state.try_compact(1_000).is_err());
+    assert_eq!(state.buffer_base_sample, 0, "失败时不得推进 buffer base");
+}
+
+#[test]
+fn sentence_state_compact_adjusts_range() {
+    // compact 后 on_sentence_end 的 range 应为绝对坐标
+    let mut state = SentenceState::new();
+    let p1 = state.on_sentence_end(1000, "").expect("应有 pending");
+    let r1 = FinalizeResult {
+        identity: p1.identity,
+        text: "你好".to_string(),
+        ok: true,
+    };
+    state.commit_or_rollback(&r1);
+    state.try_compact(1000).unwrap(); // buffer_base_sample = 1000
+
+    // 第二句绝对范围 [1000, 2000)
+    let p2 = state.on_sentence_end(2000, "").expect("应有 pending");
+    assert_eq!(p2.range, 1000..2000, "range 应为绝对坐标");
+}
+
+// ── 0.22.15 follow-up: 统一绝对坐标后的新增测试 ──
+
+/// 复现生产崩溃：第一段 commit + compact 后，第二段 SentenceEnd 不 panic。
+///
+/// 生产调用方式：维护真实 `Vec<f32>`，实际执行 drain/切片。
+#[test]
+fn production_semantics_compact_then_second_sentence_no_panic() {
+    let mut state = SentenceState::new();
+    let mut samples: Vec<f32> = vec![0.1; 1000]; // 第一段 1000 samples
+
+    // 第一段句尾 → pending [0..1000)（绝对）
+    let p1 = state
+        .on_sentence_end(1000, "preview1")
+        .expect("应有 pending");
+    // commit 第一段
+    let r1 = FinalizeResult {
+        identity: p1.identity,
+        text: "第一句".to_string(),
+        ok: true,
+    };
+    state.commit_or_rollback(&r1);
+    assert_eq!(state.committed_sample_end, 1000);
+
+    // compact：drain 前 1000 个样本
+    let n = state
+        .try_compact(samples.len())
+        .expect("坐标应合法")
+        .expect("应可 compact");
+    assert_eq!(n, 1000);
+    samples.drain(..n);
+    assert_eq!(samples.len(), 0);
+    assert_eq!(state.buffer_base_sample, 1000);
+
+    // 追加第二段 600 samples
+    samples.extend(vec![0.1; 600]);
+    let total = state.buffer_base_sample + samples.len(); // 1600
+
+    // 第二段句尾 → pending [1000..1600)（绝对）→ 不 panic
+    let p2 = state
+        .on_sentence_end(total, "preview2")
+        .expect("应有 pending");
+    assert_eq!(p2.range, 1000..1600);
+
+    // 用 abs_to_local_range 取局部切片 → 0..600
+    let local = state.abs_to_local_range(&p2.range, samples.len());
+    assert_eq!(local, Some(0..600));
+
+    // commit 第二段
+    let r2 = FinalizeResult {
+        identity: p2.identity,
+        text: "第二句".to_string(),
+        ok: true,
+    };
+    state.commit_or_rollback(&r2);
+    assert_eq!(state.committed_sample_end, 1600);
+    assert_eq!(state.confirmed_text(), "第一句第二句");
+}
+
+/// compact 后第三段继续工作。
+#[test]
+fn production_semantics_three_segments_with_compact() {
+    let mut state = SentenceState::new();
+    let mut samples: Vec<f32> = vec![0.1; 1000];
+
+    // Seg1: 0..1000
+    let p1 = state.on_sentence_end(1000, "").unwrap();
+    state.commit_or_rollback(&FinalizeResult {
+        identity: p1.identity,
+        text: "A".to_string(),
+        ok: true,
+    });
+    // compact
+    let n = state.try_compact(samples.len()).unwrap().unwrap();
+    samples.drain(..n);
+    // buffer_base = 1000
+
+    // Seg2: append 600 → total 1600
+    samples.extend(vec![0.1; 600]);
+    let total = state.buffer_base_sample + samples.len();
+    let p2 = state.on_sentence_end(total, "").unwrap();
+    assert_eq!(p2.range, 1000..1600);
+    state.commit_or_rollback(&FinalizeResult {
+        identity: p2.identity,
+        text: "B".to_string(),
+        ok: true,
+    });
+    // compact again
+    let n = state.try_compact(samples.len()).unwrap().unwrap();
+    samples.drain(..n);
+    // buffer_base = 1600
+
+    // Seg3: append 400 → total 2000
+    samples.extend(vec![0.1; 400]);
+    let total = state.buffer_base_sample + samples.len();
+    let p3 = state.on_sentence_end(total, "").unwrap();
+    assert_eq!(p3.range, 1600..2000);
+    state.commit_or_rollback(&FinalizeResult {
+        identity: p3.identity,
+        text: "C".to_string(),
+        ok: true,
+    });
+    assert_eq!(state.committed_sample_end, 2000);
+    assert_eq!(state.confirmed_text(), "ABC");
+}
+
+/// compact 后 preview snapshot 只包含未 committed PCM。
+#[test]
+fn preview_snapshot_after_compact_only_uncommitted() {
+    let mut state = SentenceState::new();
+    let samples: Vec<f32> = vec![0.1; 600]; // 600 samples after compact
+
+    // committed_sample_end = 1000, buffer_base = 1000
+    state.committed_sample_end = 1000;
+    state.buffer_base_sample = 1000;
+
+    // preview range = [1000, 1600) → local [0, 600)
+    let total = state.buffer_base_sample + samples.len();
+    let abs_range = state.committed_sample_end..total;
+    let local = state.abs_to_local_range(&abs_range, samples.len());
+    assert_eq!(local, Some(0..600));
+    // 切片取到的就是全部 600 samples
+    let snapshot = &samples[local.unwrap()];
+    assert_eq!(snapshot.len(), 600);
+}
+
+/// compact 后 finalize 只转录剩余 PCM。
+#[test]
+fn finalize_after_compact_only_remaining() {
+    let mut state = SentenceState::new();
+    let samples: Vec<f32> = vec![0.1; 400]; // 400 remaining after compact
+
+    state.committed_sample_end = 1000;
+    state.buffer_base_sample = 1000;
+
+    // finalize 取 [1000, 1400) → local [0, 400)
+    let abs_start = state.committed_sample_end;
+    let abs_end = state.buffer_base_sample + samples.len();
+    let abs_range = abs_start..abs_end;
+    let local = state.abs_to_local_range(&abs_range, samples.len());
+    assert_eq!(local, Some(0..400));
+    let remaining = &samples[local.unwrap()];
+    assert_eq!(remaining.len(), 400);
+}
+
+/// 非法 absolute range 不 panic，返回 None。
+#[test]
+fn abs_to_local_range_invalid_returns_none() {
+    let mut state = SentenceState::new();
+    state.buffer_base_sample = 1000;
+
+    // abs_start < buffer_base
+    assert_eq!(
+        state.abs_to_local_range(&(500..1500), 1000),
+        None,
+        "abs_start < buffer_base 应返回 None"
+    );
+
+    // abs_end < abs_start
+    let reversed_start = 1200;
+    let reversed_end = 1100;
+    assert_eq!(
+        state.abs_to_local_range(&(reversed_start..reversed_end), 1000),
+        None,
+        "abs_end < abs_start 应返回 None"
+    );
+
+    // local_end > samples_len
+    assert_eq!(
+        state.abs_to_local_range(&(1000..3000), 1000),
+        None,
+        "local_end > samples_len 应返回 None"
+    );
+
+    // 合法 range
+    assert_eq!(state.abs_to_local_range(&(1000..2000), 1000), Some(0..1000));
+}
+
+/// pending/deferred 存在时不能 drain 它们仍引用的音频。
+#[test]
+fn compact_blocked_when_pending_or_deferred() {
+    let mut state = SentenceState::new();
+
+    // 有 pending
+    state.on_sentence_end(1000, "");
+    assert_eq!(state.try_compact(1000), Ok(None), "有 pending 不应 compact");
+
+    // commit pending
+    state.commit_or_rollback(&FinalizeResult {
+        identity: SegmentIdentity {
+            session_generation: state.session_generation,
+            commit_generation: state.commit_generation,
+            segment_id: 1,
+        },
+        text: "x".to_string(),
+        ok: true,
+    });
+
+    // 无 pending/deferred → 可以 compact
+    assert!(state.try_compact(1000).unwrap().is_some());
+
+    // 有 deferred
+    state.buffer_base_sample = state.committed_sample_end; // reset compact state
+    state.on_sentence_end(state.committed_sample_end + 1000, "");
+    state.finalize_in_flight = true;
+    state.on_sentence_end(state.committed_sample_end + 2000, ""); // → deferred
+    assert!(state.deferred.is_some());
+    assert_eq!(
+        state.try_compact(2000),
+        Ok(None),
+        "有 deferred 不应 compact"
+    );
+}
+
+/// reset 后 base、committed、pending、deferred 和 generation 全部回到一致状态。
+#[test]
+fn reset_full_consistency() {
+    let mut state = SentenceState::new();
+    state.append_confirmed("test");
+    state.committed_sample_end = 5000;
+    state.buffer_base_sample = 3000;
+    state.on_sentence_end(6000, "");
+    state.finalize_in_flight = true;
+    let old_gen = state.session_generation;
+    let old_seg = state.next_segment_id;
+
+    state.reset();
+
+    assert_eq!(state.confirmed_text(), "");
+    assert_eq!(state.committed_sample_end, 0);
+    assert_eq!(state.buffer_base_sample, 0);
+    assert!(state.pending.is_none());
+    assert!(state.deferred.is_none());
+    assert!(!state.finalize_in_flight);
+    assert_ne!(state.session_generation, old_gen);
+    assert_eq!(state.next_segment_id, 1);
+    assert_ne!(state.next_segment_id, old_seg);
+
+    // reset 后 abs_to_local_range 在空 samples 上工作正常
+    assert_eq!(state.abs_to_local_range(&(0..0), 0), Some(0..0));
+}
+
+#[tokio::test]
+async fn finalize_waits_for_in_flight_commit_before_timeout() {
+    let (tx, rx) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx]);
+    let samples = vec![0.1; 1600];
+    let engine = controlled_engine(transport.clone(), samples.clone());
+    let pending = {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.sentences.on_sentence_end(samples.len(), "").unwrap()
+    };
+    engine.spawn_sentence_finalize(samples, pending.identity);
+    transport.wait_for_calls(1).await;
+
+    let finalize = engine.finalize_with_wait_timeout(Duration::from_secs(3));
+    tx.send(Ok("第一句".into())).unwrap();
+    let text = finalize.await.unwrap();
+
+    assert_eq!(text, "第一句");
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.sentences.committed_sample_end, 1600);
+    assert_eq!(inner.sentences.confirmed_text(), "第一句");
+}
+
+#[tokio::test]
+async fn finalize_timeout_revokes_late_segment_commit_right() {
+    let (old_tx, old_rx) = oneshot::channel();
+    let (terminal_tx, terminal_rx) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![old_rx, terminal_rx]);
+    let samples = vec![0.1; 1600];
+    let engine = Arc::new(controlled_engine(transport.clone(), samples.clone()));
+    let pending = {
+        let mut inner = engine.inner.lock().unwrap();
+        inner
+            .sentences
+            .on_sentence_end(samples.len(), "旧预览")
+            .unwrap()
+    };
+    engine.spawn_sentence_finalize(samples, pending.identity);
+    transport.wait_for_calls(1).await;
+
+    let task = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move {
+            engine
+                .finalize_with_wait_timeout(Duration::from_millis(20))
+                .await
+        })
+    };
+    transport.wait_for_calls(2).await;
+    terminal_tx.send(Ok("完整尾段".into())).unwrap();
+    assert_eq!(task.await.unwrap().unwrap(), "完整尾段");
+
+    old_tx.send(Ok("迟到旧段".into())).unwrap();
+    tokio::task::yield_now().await;
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.sentences.confirmed_text(), "完整尾段");
+    assert_eq!(inner.sentences.committed_sample_end, 1600);
+}
+
+#[tokio::test]
+async fn terminal_takeover_invalidates_pending_and_deferred_together() {
+    let mut state = SentenceState::new();
+    let first = state.on_sentence_end(1000, "p1").unwrap();
+    state.finalize_in_flight = true;
+    assert!(state.on_sentence_end(2000, "p2").is_none());
+    assert!(state.pending.is_some() && state.deferred.is_some());
+
+    let terminal = state.begin_terminal_finalize();
+    assert!(state.pending.is_none() && state.deferred.is_none());
+    assert!(!state.finalize_in_flight);
+    assert!(
+        state
+            .commit_or_rollback(&FinalizeResult {
+                identity: first.identity,
+                text: "迟到".into(),
+                ok: true,
+            })
+            .is_none()
+    );
+    assert!(state.commit_terminal_finalize(terminal, 2000, "完整"));
+    assert_eq!(state.confirmed_text(), "完整");
+    assert_eq!(state.committed_sample_end, 2000);
+}
+
+#[tokio::test]
+async fn reset_during_terminal_finalize_discards_old_result() {
+    let (tx, rx) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx]);
+    let engine = Arc::new(controlled_engine(transport.clone(), vec![0.1; 1600]));
+    let task = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move {
+            engine
+                .finalize_with_wait_timeout(Duration::from_millis(20))
+                .await
+        })
+    };
+    transport.wait_for_calls(1).await;
+    engine.reset();
+    tx.send(Ok("旧 session".into())).unwrap();
+
+    assert!(task.await.unwrap().is_err());
+    let inner = engine.inner.lock().unwrap();
+    assert!(inner.sentences.confirmed_text().is_empty());
+    assert_eq!(inner.sentences.committed_sample_end, 0);
+    assert!(inner.samples.is_empty());
+}
