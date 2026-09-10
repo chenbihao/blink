@@ -119,7 +119,7 @@ While the main window is open, hold Alt and letter keys become quick action shor
 | `Alt + Space` | Voice input (supports input in the main window or as a separate voice input method) |
 | `Alt + 1~9` | Quick launch item by position in results |
 
-Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
+Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. OCR uses Windows' built-in engine by default with no additional installation; you can also download PP-OCRv6 on demand for higher-quality local text recognition. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
 
 ---
 
@@ -147,6 +147,7 @@ Blink's reusable capabilities can be called by AI and connected to external tool
 - **Skill Support** — Use `SKILL.md` files to give AI specialized workflows and domain knowledge
 - **MCP Client** — Blink can connect to external MCP Servers and use their tools in conversations
 - **MCP Server** — Blink can also make user-selected local capabilities available to other agents
+- **Independent Permissions** — Manage AI and MCP capability access separately in the feature catalog, without conflating local feature settings with external access
 - **Multi-provider Support** — Includes presets for OpenAI, DeepSeek, and more, with support for compatible providers and local models such as Ollama and LM Studio
 - **Chat Window** — A standalone agent window where natural language can be used to combine and invoke capabilities
 
@@ -161,6 +162,11 @@ Blink's reusable capabilities can be called by AI and connected to external tool
 - **Core-path Reliability** — Continue protecting summon, focus, input, and first-result performance
 - **Capability Foundation** — Let more existing capabilities share implementations and form more natural workflows
 - **Capability Discoverability** — Make existing capabilities easier for both users and AI to find, understand, and invoke
+
+**Near-term Plans:**
+
+- **Continuous Editor Dictation** — Support long-form dictation with continuous recording, pause and resume, reliable segmented insertion, and selection-based AI rewriting with diff confirmation
+- **Smart Tab** — Unify keyword completion, contextual actions, and AI suggestions, with `Tab` / `Shift+Tab` to accept primary and secondary suggestions
 
 ---
 
