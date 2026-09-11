@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Blink 0.23.0 编辑工作台原型</title>
+<!--
+  0.23.0 单窗口原型 —— 只验证布局与信息呈现，不迁移生产入口。
+
+  打开方式：直接双击本文件（任意 Chromium 浏览器，file:// 即可）。
+  - Tiptap 走仓库内 ../../../frontend/vendor/tiptap.bundle.min.js（IIFE，无构建）。
+  - 全部交互为前端模拟：保存、录音、整理均不打后端；协议字段（session/generation/
+    revision/epoch/seq/request）由底部调试条实时展示，用于冻结 §3.9 契约的可视化确认。
+  - 视觉：token 值复制自 frontend/css/themes/dark.css（Catppuccin Mocha）。0.23.1 落地时
+    必须迁回 css 七层（tokens/themes/components/views）并补 light 主题对比度验证。
+  - 铁则自审：中文不斜体（preview 用 opacity+虚线下划线）；图标全 SVG 无 emoji；
+    显隐用 .hidden class 不用 opacity+transform；异步结果带 request/epoch 校验演示。
+-->
+<style>
+/* ── token（复制自 dark.css，0.23.1 迁回七层）── */
+:root {
+    --bg: #1e1e2e;
+    --bg-deep: #11111b;
+    --surface: #313244;
+    --surface-2: #45475a;
+    --text: #cdd6f4;
+    --text-sub: #a6adc8;
+    --text-dim: #6c7086;
+    --accent: #89b4fa;
+    --accent-bg: rgba(137, 180, 250, 0.15);
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --red-bg: #45273a;
+    --green-bg: #2a3f4e;
+    --warning: #fab387;
+    --warning-bg: #3a2e3a;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+    --t-fast: 0.1s;
+    --t-base: 0.15s;
+    --t-slow: 0.2s;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+    background: var(--bg-deep);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-style: normal;
+    overflow: hidden;
+}
+.hidden { display: none !important; }
+button {
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background var(--t-base), color var(--t-base);
+}
+button:hover { background: var(--surface-2); }
+button.primary { background: var(--accent); color: var(--bg-deep); font-weight: 600; }
+button.primary:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+kbd {
+    font: 11px/1 Consolas, monospace;
+    background: var(--surface-2);
+    border-radius: var(--radius-sm);
+    padding: 2px 5px;
+    color: var(--text-sub);
+}
+.icon { width: 1em; height: 1em; stroke: currentColor; fill: none; stroke-width: 1.75; vertical-align: -0.125em; }
+
+/* ── 根布局 ── */
+.proto-root { display: flex; flex-direction: column; height: 100vh; }
+
+/* ── 顶部任务条：正在编辑什么 + 原文/MD ── */
+.taskbar {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 42px; padding: 0 10px 0 14px;
+    background: var(--bg); border-bottom: 1px solid var(--surface);
+    flex-shrink: 0; user-select: none;
+}
+.task-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.source-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--accent);
+    background: var(--accent-bg);
+    border-radius: var(--radius-md);
+    padding: 2px 8px;
+    flex-shrink: 0;
+}
+.task-title { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-right { display: flex; align-items: center; gap: 8px; }
+.view-switch {
+    display: flex; background: var(--surface); border-radius: var(--radius-md); padding: 2px;
+}
+.view-switch button {
+    border-radius: var(--radius-sm); padding: 2px 12px; font-size: 12px;
+    background: transparent; color: var(--text-sub);
+}
+.view-switch button.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
+
+/* ── 更多菜单 ── */
+.menu-anchor { position: relative; }
+.more-menu {
+    position: absolute; right: 0; top: 30px; z-index: 50;
+    min-width: 230px;
+    background: var(--surface); border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px var(--shadow);
+    padding: 6px; display: flex; flex-direction: column;
+}
+.more-menu button {
+    text-align: left; background: transparent; padding: 7px 10px;
+    display: flex; align-items: center; gap: 8px; font-size: 13px;
+    border-radius: var(--radius-md);
+}
+.more-menu hr { border: none; border-top: 1px solid var(--surface-2); margin: 4px 0; }
+.menu-check { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+.menu-check.on { color: var(--green); }
+.menu-note { font-size: 11px; color: var(--text-dim); padding: 4px 10px 2px; }
+
+/* ── MD 工具栏（仅 MD 视图）── */
+.format-toolbar {
+    display: flex; gap: 2px; padding: 4px 10px;
+    background: var(--bg); border-bottom: 1px solid var(--surface);
+    flex-shrink: 0;
+}
+.format-toolbar button {
+    font-size: 12px; padding: 3px 8px; background: transparent; color: var(--text-sub);
+}
+.format-toolbar button:hover { color: var(--text); background: var(--surface); }
+
+/* ── 正文 ── */
+.body-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#source-view {
+    flex: 1; width: 100%; resize: none;
+    background: var(--bg); color: var(--text);
+    border: none; outline: none;
+    padding: 16px 20px 8px;
+    font: 14px/1.7 Consolas, "Microsoft YaHei", monospace;
+}
+#source-view::selection { background: var(--accent-bg); }
+#md-view {
+    flex: 1; overflow-y: auto; padding: 16px 20px 8px;
+    background: var(--bg);
+}
+#md-view .ProseMirror { outline: none; min-height: 100%; font: 14px/1.7 "Microsoft YaHei", sans-serif; }
+#md-view h1, #md-view h2, #md-view h3 { margin: 0.6em 0 0.3em; }
+#md-view p { margin: 0.35em 0; }
+#md-view ul, #md-view ol { padding-left: 1.6em; margin: 0.35em 0; }
+#md-view blockquote {
+    border-left: 3px solid var(--surface-2); padding: 2px 12px; margin: 0.5em 0;
+    color: var(--text-sub); background: rgba(49, 50, 68, 0.4);
+}
+#md-view pre {
+    background: var(--bg-deep); border-radius: var(--radius-md);
+    padding: 10px 14px; margin: 0.5em 0; overflow-x: auto;
+    font: 13px/1.6 Consolas, monospace;
+}
+#md-view code { font: 13px Consolas, monospace; background: var(--surface); border-radius: var(--radius-sm); padding: 1px 5px; }
+#md-view pre code { background: transparent; padding: 0; }
+#md-view ul[data-type="taskList"] { list-style: none; padding-left: 0.2em; }
+#md-view ul[data-type="taskList"] li { display: flex; gap: 8px; }
+#md-view ul[data-type="taskList"] li > label { user-select: none; }
+
+/* ── preview 装饰条（识别中灰字，非斜体）── */
+.preview-bar {
+    flex-shrink: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 20px;
+    border-top: 1px dashed var(--surface-2);
+    background: var(--bg);
+    color: var(--text-dim);
+    font-size: 13px;
+    min-height: 32px;
+}
+.preview-bar .icon { color: var(--red); animation: micPulse 1.2s ease-in-out infinite; flex-shrink: 0; }
+.preview-text { border-bottom: 1px dashed var(--text-dim); padding-bottom: 1px; }
+@keyframes micPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ── 听写/整理动作 chips ── */
+.action-chips {
+    flex-shrink: 0;
+    display: flex; gap: 8px; padding: 6px 14px;
+    background: var(--bg);
+    min-height: 40px; align-items: center;
+}
+.chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; padding: 4px 12px;
+    background: var(--surface); color: var(--text-sub);
+    border-radius: 999px;
+}
+.chip:hover { color: var(--text); background: var(--surface-2); }
+.chip .icon { color: var(--accent); }
+
+/* ── 底部保存区 ── */
+.savebar {
+    display: flex; align-items: center; gap: 10px;
+    height: 46px; padding: 0 12px 0 14px;
+    background: var(--bg); border-top: 1px solid var(--surface);
+    flex-shrink: 0;
+}
+.target-zone {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-sub);
+    background: var(--surface);
+    border-radius: var(--radius-md);
+    padding: 4px 10px;
+    max-width: 46%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.target-zone .icon { color: var(--green); flex-shrink: 0; }
+.dirty-dot { font-size: 11px; color: var(--warning); flex-shrink: 0; }
+.save-status { font-size: 12px; color: var(--text-dim); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#btn-save { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; }
+#btn-mic {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; padding: 0; flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--surface); color: var(--text-sub);
+    font-size: 16px;
+}
+#btn-mic:hover { color: var(--text); }
+#btn-mic.recording { background: var(--red-bg); color: var(--red); animation: micPulse 1.2s ease-in-out infinite; }
+
+/* ── 调试条（冻结协议字段可视化）── */
+.debug-strip {
+    flex-shrink: 0;
+    font: 11px/1.4 Consolas, monospace;
+    color: var(--text-dim);
+    background: var(--bg-deep);
+    padding: 3px 14px;
+    border-top: 1px solid var(--surface);
+    user-select: text;
+}
+.debug-strip b { color: var(--text-sub); font-weight: 400; }
+
+/* ── 非模态 Diff 卡片 ── */
+.diff-card {
+    position: fixed; right: 16px; bottom: 110px; z-index: 60;
+    width: 380px; max-height: 46vh;
+    display: flex; flex-direction: column;
+    background: var(--surface);
+    border-radius: var(--radius-xl);
+    box-shadow: 0 12px 32px var(--shadow);
+    overflow: hidden;
+}
+.diff-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px;
+    background: var(--surface-2);
+    font-size: 13px; font-weight: 600;
+    flex-shrink: 0;
+}
+.diff-head .icon { color: var(--accent); }
+.diff-head .close { margin-left: auto; background: transparent; padding: 2px 6px; font-size: 12px; }
+.stale-strip {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--warning-bg); color: var(--warning);
+    font-size: 12px; padding: 6px 12px;
+    flex-shrink: 0;
+}
+.diff-body {
+    padding: 12px 14px; overflow-y: auto;
+    font-size: 13px; line-height: 1.8;
+}
+.d-del { background: var(--red-bg); color: var(--red); text-decoration: line-through; border-radius: 3px; padding: 0 2px; }
+.d-del::before { content: "−"; opacity: 0.7; margin-right: 1px; }
+.d-add { background: var(--green-bg); color: var(--green); border-radius: 3px; padding: 0 2px; }
+.d-add::before { content: "+"; opacity: 0.7; margin-right: 1px; }
+.diff-actions {
+    display: flex; gap: 8px; padding: 10px 12px;
+    border-top: 1px solid var(--surface-2);
+    flex-shrink: 0; align-items: center;
+}
+.diff-hint { font-size: 11px; color: var(--text-dim); flex: 1; }
+
+/* ── toast ── */
+.toast-wrap {
+    position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
+    z-index: 80; display: flex; flex-direction: column; gap: 6px; align-items: center;
+    pointer-events: none;
+}
+.toast {
+    background: var(--surface); color: var(--text);
+    border-radius: var(--radius-md);
+    box-shadow: 0 6px 20px var(--shadow);
+    padding: 7px 16px; font-size: 12px;
+}
+.toast.err { color: var(--red); }
+.toast.ok { color: var(--green); }
+</style>
+</head>
+<body>
+
+<!-- 内嵌图标（body 提取自 frontend/assets/icons/sprite.svg；缺者按 Lucide 官方 path 补） -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <symbol id="i-clipboard" viewBox="0 0 24 24"><rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></symbol>
+    <symbol id="i-sticky" viewBox="0 0 24 24"><path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11l5-5V5a2 2 0 0 0-2-2Z"/><path d="M15 21v-4a2 2 0 0 1 2-2h4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></symbol>
+    <symbol id="i-ellipsis" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+    <symbol id="i-crosshair" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M22 12h-4"/><path d="M6 12H2"/><path d="M12 6V2"/><path d="M12 22v-4"/></symbol>
+    <symbol id="i-task" viewBox="0 0 24 24"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m4 8 1.5 1.5L8 6.5"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M3 17h6"/><path d="M13 18h8"/></symbol>
+</svg>
+
+<div class="proto-root">
+    <!-- 顶部：正在编辑什么 + 原文/MD -->
+    <header class="taskbar">
+        <div class="task-left">
+            <span class="source-badge" id="source-badge">
+                <svg class="icon"><use href="#i-clipboard"/></svg>
+                <span id="source-label">剪贴板</span>
+            </span>
+            <span class="task-title" id="task-title">会议记录草稿</span>
+        </div>
+        <div class="task-right">
+            <div class="view-switch" id="view-switch">
+                <button data-view="source" class="active">原文</button>
+                <button data-view="md">MD</button>
+            </div>
+            <div class="menu-anchor">
+                <button id="btn-more" title="更多操作"><svg class="icon"><use href="#i-ellipsis"/></svg></button>
+                <div class="more-menu hidden" id="more-menu">
+                    <button id="menu-save-to"><svg class="icon"><use href="#i-folder"/></svg>保存到…<span class="menu-note-inline"></span></button>
+                    <button id="menu-save-copy"><svg class="icon"><use href="#i-copy"/></svg>另存为副本…</button>
+                    <button id="menu-copy"><svg class="icon"><use href="#i-copy"/></svg>复制全文</button>
+                    <button id="menu-sticky"><svg class="icon"><use href="#i-sticky"/></svg>创建便签</button>
+                    <button id="menu-send-chat"><svg class="icon"><use href="#i-send"/></svg>发送到 AI 对话</button>
+                    <hr/>
+                    <div class="menu-note">原型模拟（验证语义用）</div>
+                    <button id="menu-ai-busy">模拟主窗口 AI 占用<span class="menu-check" id="ai-busy-check">关</span></button>
+                    <button id="menu-switch-source">模拟切换来源（便签）<span class="menu-check" id="source-switch-check">关</span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- MD 工具栏（仅 MD 视图） -->
+    <div class="format-toolbar hidden" id="format-toolbar">
+        <button data-cmd="bold" title="粗体">B</button>
+        <button data-cmd="italic" title="斜体">I</button>
+        <button data-cmd="strike" title="删除线">S</button>
+        <button data-cmd="h2" title="二级标题">H2</button>
+        <button data-cmd="bulletList" title="无序列表">•≡</button>
+        <button data-cmd="orderedList" title="有序列表">1≡</button>
+        <button data-cmd="taskList" title="任务列表"><svg class="icon"><use href="#i-task"/></svg></button>
+        <button data-cmd="blockquote" title="引用">"</button>
+        <button data-cmd="codeBlock" title="代码块">{ }</button>
+    </div>
+
+    <!-- 正文 -->
+    <main class="body-wrap">
+        <textarea id="source-view" spellcheck="false"></textarea>
+        <div id="md-view" class="hidden"></div>
+
+        <!-- preview 装饰条：识别中灰字（不进正文/dirty/undo/AI） -->
+        <div class="preview-bar hidden" id="preview-bar">
+            <svg class="icon"><use href="#i-mic"/></svg>
+            <span class="preview-text" id="preview-text"></span>
+        </div>
+
+        <!-- 上下文动作 chips -->
+        <div class="action-chips" id="action-chips"></div>
+    </main>
+
+    <!-- 底部：当前保存目标 + 保存 + 连续录音 -->
+    <footer class="savebar">
+        <span class="target-zone" id="target-zone">
+            <svg class="icon" id="target-icon"><use href="#i-clipboard" id="target-use"/></svg>
+            <span id="target-label">保存到：会话剪贴板结果</span>
+        </span>
+        <span class="dirty-dot hidden" id="dirty-dot">● 未保存</span>
+        <span class="save-status" id="save-status"></span>
+        <button id="btn-save"><svg class="icon"><use href="#i-save"/></svg>保存 <kbd>Ctrl+S</kbd></button>
+        <button id="btn-mic" title="连续听写（原型：点击开始/结束）"><svg class="icon"><use href="#i-mic"/></svg></button>
+    </footer>
+
+    <!-- 冻结协议字段可视化 -->
+    <div class="debug-strip" id="debug-strip"></div>
+</div>
+
+<!-- 非模态 Diff 卡片 -->
+<aside class="diff-card hidden" id="diff-card">
+    <div class="diff-head">
+        <svg class="icon"><use href="#i-sparkles"/></svg>
+        <span id="diff-title">整理候选</span>
+        <button class="close" id="diff-close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="stale-strip hidden" id="stale-strip">
+        <svg class="icon"><use href="#i-x"/></svg>
+        正文已变化，候选已过期：仅可复制或按最新内容重新整理
+    </div>
+    <div class="diff-body" id="diff-body"></div>
+    <div class="diff-actions">
+        <button class="primary" id="diff-apply"><svg class="icon"><use href="#i-check"/></svg>应用替换</button>
+        <button id="diff-copy"><svg class="icon"><use href="#i-copy"/></svg>复制</button>
+        <button id="diff-discard">放弃</button>
+        <span class="diff-hint">应用为单事务，一次 Ctrl+Z 恢复</span>
+    </div>
+</aside>
+
+<div class="toast-wrap" id="toast-wrap"></div>
+
+<script src="../../../frontend/vendor/tiptap.bundle.min.js"></script>
+<script>
+"use strict";
+/* ═══════════════ 0.23.0 原型状态（模拟 §3.2 正交切片 + §3.9 协议字段）═══════════════ */
+
+const S = {
+    // lifecycle（模拟）
+    sessionRef: "es_demo01",
+    generation: 3,
+    // 来源 / 目标
+    source: "clipboard",            // clipboard | sticky
+    commitTarget: "clipboard_result", // clipboard_result | confirmed_file
+    fileName: "demo-notes.md",
+    // save / voice / transform
+    dirty: false,
+    contentRevision: 0,             // 正文每次编辑 +1
+    voiceEpoch: 0,
+    voiceSeq: 0,
+    lastSeqHandled: 0,
+    recording: false,
+    previewTimer: null,
+    segmentTimer: null,
+    dictationRange: null,           // {from, to} 本次听写追加范围（字符下标）
+    transform: {
+        requestId: 0,
+        active: false,
+        candidate: null,            // {targetKind:'selection'|'dictation', sourceText, revisedText, frozenRevision}
+        stale: false,
+    },
+    aiBusySim: false,
+    mdEdited: false,
+    view: "source",
+};
+
+const $ = (id) => document.getElementById(id);
+const sourceEl = $("source-view");
+const mdEl = $("md-view");
+let tiptap = null;
+
+const INITIAL_MD = [
+    "# 项目周会记录",
+    "",
+    "时间：周四 15:00　地点：3F 会议室",
+    "",
+    "## 进度",
+    "",
+    "- 编辑器：会话底座开发中",
+    "- 语音：连续听写方案已冻结",
+    "  - 待办：浮窗投影",
+    "",
+    "## 决策",
+    "",
+    "> 文档尺寸上限由数据决定，不由直觉决定。",
+    "",
+    "- [x] 确认 round-trip 语料",
+    "- [ ] 保存目标联调",
+    "",
+    "```yaml",
+    "editor:",
+    "  session: single",
+    "```",
+    "",
+].join("\n");
+
+/* ═══════════════ 工具 ═══════════════ */
+
+function toast(msg, kind) {
+    const el = document.createElement("div");
+    el.className = "toast" + (kind ? " " + kind : "");
+    el.textContent = msg;
+    $("toast-wrap").appendChild(el);
+    setTimeout(() => el.remove(), 2600);
+}
+
+function renderDebug() {
+    $("debug-strip").innerHTML =
+        `协议面板：<b>session</b> ${S.sessionRef} · <b>gen</b> ${S.generation} · ` +
+        `<b>rev</b> ${S.contentRevision} · <b>epoch</b> ${S.voiceEpoch || "—"} · ` +
+        `<b>seq</b> ${S.voiceSeq || "—"} · <b>req</b> ${S.transform.requestId || "—"} · ` +
+        `<b>view</b> ${S.view}`;
+}
+
+function renderTarget() {
+    if (S.commitTarget === "clipboard_result") {
+        $("target-use").setAttribute("href", "#i-clipboard");
+        $("target-label").textContent = "保存到：会话剪贴板结果";
+    } else {
+        $("target-use").setAttribute("href", "#i-file");
+        $("target-label").textContent = `保存到：${S.fileName}（已确认文件）`;
+    }
+}
+
+function renderDirty() {
+    $("dirty-dot").classList.toggle("hidden", !S.dirty);
+}
+
+function currentText() {
+    return S.view === "md" && tiptap ? tiptap.getMarkdown() : sourceEl.value;
+}
+
+function markDirty() {
+    S.dirty = true;
+    S.contentRevision++;
+    renderDirty();
+    renderDebug();
+    // §3.7：请求后正文任何变化 → 候选 stale
+    if (S.transform.candidate && !S.transform.stale) {
+        S.transform.stale = true;
+        renderDiffCard();
+    }
+}
+
+/* ═══════════════ 视图切换（原文 / MD）═══════════════ */
+
+function cancelCandidate(reason) {
+    if (!S.transform.candidate) return;
+    S.transform.candidate = null;
+    S.transform.stale = false;
+    S.transform.active = false;
+    $("diff-card").classList.add("hidden");
+    toast(reason || "已取消整理候选", "err");
+}
+
+function switchView(next) {
+    if (next === S.view) return;
+    // §3.3：切换视图取消运行中的整理请求并丢弃候选
+    cancelCandidate("切换视图，整理候选已取消");
+    if (next === "md") {
+        if (!window.BlinkTiptap) {
+            toast("BlinkTiptap 未加载（检查 vendor 相对路径），保持原文视图", "err");
+            return;
+        }
+        const {Editor, StarterKit, Markdown, TaskList, TaskItem} = window.BlinkTiptap;
+        const src = sourceEl.value;
+        sourceEl.classList.add("hidden");
+        mdEl.classList.remove("hidden");
+        $("format-toolbar").classList.remove("hidden");
+        if (!tiptap) {
+            tiptap = new Editor({
+                element: mdEl,
+                extensions: [StarterKit, Markdown, TaskList, TaskItem],
+                content: src,
+                contentType: "markdown",
+                editorProps: {attributes: {class: "content-editor-tiptap", spellcheck: "false"}},
+            });
+            // 创建期初始内容规范化也会触发 update——不计入"用户已编辑"，
+            // 否则未编辑切回原文会误走序列化路径、破坏逐字符保真演示。
+            let creating = true;
+            tiptap.on("create", () => { creating = false; });
+            tiptap.on("update", () => {
+                if (creating) return;
+                S.mdEdited = true;
+                markDirty();
+            });
+            tiptap.on("selectionUpdate", renderChips);
+        } else {
+            // Tiptap v3 签名：setContent(content, options)——contentType 必须进 options
+            tiptap.commands.setContent(src, {emitUpdate: false, contentType: "markdown"});
+        }
+        tiptap.commands.focus();
+        S.view = "md";
+    } else {
+        const mdText = tiptap ? tiptap.getMarkdown() : "";
+        const mdHadEdits = S.mdEdited;
+        if (tiptap) tiptap.commands.setContent("", false);
+        mdEl.classList.add("hidden");
+        $("format-toolbar").classList.add("hidden");
+        sourceEl.classList.remove("hidden");
+        if (!mdHadEdits) {
+            // §3.3：未编辑 MD 时切回原文逐字符保留（原型直接持有原串模拟检查点）
+            toast("未编辑 MD，原文逐字符保留（会话级检查点）", "ok");
+        } else {
+            sourceEl.value = mdText;
+            toast("MD 已编辑：以序列化产物为准（含规范化，见 round-trip 报告）");
+        }
+        S.view = "source";
+        S.mdEdited = false;
+        sourceEl.focus();
+    }
+    $("view-switch").querySelectorAll("button").forEach((b) =>
+        b.classList.toggle("active", b.dataset.view === S.view));
+    renderChips();
+    renderDebug();
+}
+
+$("view-switch").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-view]");
+    if (btn) switchView(btn.dataset.view);
+});
+
+/* ═══════════════ MD 工具栏 ═══════════════ */
+
+$("format-toolbar").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-cmd]");
+    if (!btn || !tiptap) return;
+    const c = tiptap.chain().focus();
+    const map = {
+        bold: () => c.toggleBold().run(),
+        italic: () => c.toggleItalic().run(),
+        strike: () => c.toggleStrike().run(),
+        h2: () => c.toggleHeading({level: 2}).run(),
+        bulletList: () => c.toggleBulletList().run(),
+        orderedList: () => c.toggleOrderedList().run(),
+        taskList: () => c.toggleTaskList().run(),
+        blockquote: () => c.toggleBlockquote().run(),
+        codeBlock: () => c.toggleCodeBlock().run(),
+    };
+    (map[btn.dataset.cmd] || (() => {}))();
+});
+
+/* ═══════════════ 更多菜单（次级动作不改变主目标）═══════════════ */
+
+const moreMenu = $("more-menu");
+$("btn-more").addEventListener("click", () => moreMenu.classList.toggle("hidden"));
+document.addEventListener("click", (e) => {
+    if (!e.target.closest(".menu-anchor")) moreMenu.classList.add("hidden");
+});
+
+$("menu-save-to").addEventListener("click", () => {
+    moreMenu.classList.add("hidden");
+    // 模拟"保存到…"原生对话框成功
+    S.commitTarget = "confirmed_file";
+    renderTarget();
+    toast("已确认目标文件 demo-notes.md，主保存区已切换");
+});
+$("menu-save-copy").addEventListener("click", () => {
+    moreMenu.classList.add("hidden");
+    toast("已写出副本 demo-notes.copy.md —— 主目标不变", "ok");
+});
+$("menu-copy").addEventListener("click", () => {
+    moreMenu.classList.add("hidden");
+    toast("全文已复制到剪贴板（内部写入，监听器抑制）", "ok");
+});
+$("menu-sticky").addEventListener("click", () => {
+    moreMenu.classList.add("hidden");
+    toast("已创建便签（原型不落库）—— 主目标不变", "ok");
+});
+$("menu-send-chat").addEventListener("click", () => {
+    moreMenu.classList.add("hidden");
+    const sel = getSelectionText();
+    toast(sel ? `已预填选区（${sel.length} 字）到对话窗口 —— 不自动发送、不关闭编辑器、不改主目标` :
+        "已预填全文到对话窗口 —— 不自动发送、不关闭编辑器、不改主目标", "ok");
+});
+$("menu-ai-busy").addEventListener("click", () => {
+    S.aiBusySim = !S.aiBusySim;
+    $("ai-busy-check").textContent = S.aiBusySim ? "开" : "关";
+    $("ai-busy-check").classList.toggle("on", S.aiBusySim);
+});
+$("menu-switch-source").addEventListener("click", () => {
+    const on = $("source-switch-check").textContent === "关";
+    $("source-switch-check").textContent = on ? "开" : "关";
+    $("source-switch-check").classList.toggle("on", on);
+    S.source = on ? "sticky" : "clipboard";
+    $("source-label").textContent = on ? "便签 · demo-note" : "剪贴板";
+    $("task-title").textContent = on ? "便签：购物清单（编辑中）" : "会议记录草稿";
+    toast(on ? "来源切为便签（模拟编辑租约：原便签只读，可返回编辑器）" : "来源切回剪贴板");
+});
+
+/* ═══════════════ 选区 / chips ═══════════════ */
+
+function getSelectionText() {
+    if (S.view === "md" && tiptap) {
+        const {from, to} = tiptap.state.selection;
+        return from === to ? "" : tiptap.state.doc.textBetween(from, to, "\n");
+    }
+    const ta = sourceEl;
+    return ta.value.slice(ta.selectionStart, ta.selectionEnd);
+}
+
+function renderChips() {
+    const chips = $("action-chips");
+    chips.innerHTML = "";
+    // 录音结束动作
+    if (!S.recording && S.dictationRange) {
+        chips.appendChild(makeChip("i-crosshair", "定位到本次听写", locateDictation));
+        chips.appendChild(makeChip("i-sparkles", "整理本次听写", () => tidy("dictation")));
+    }
+    // 选区动作
+    const sel = getSelectionText();
+    if (sel.trim()) {
+        chips.appendChild(makeChip("i-sparkles", `整理选中内容（${sel.length} 字）`, () => tidy("selection")));
+    }
+    chips.classList.toggle("hidden", chips.childElementCount === 0);
+}
+
+function makeChip(icon, label, onClick) {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.innerHTML = `<svg class="icon"><use href="#${icon}"/></svg>${label}`;
+    b.addEventListener("click", onClick);
+    return b;
+}
+
+sourceEl.addEventListener("input", markDirty);
+sourceEl.addEventListener("select", renderChips);
+sourceEl.addEventListener("keyup", renderChips);
+sourceEl.addEventListener("mouseup", renderChips);
+
+/* ═══════════════ 保存（模拟 §3.5）═══════════════ */
+
+function save() {
+    if (!S.dirty) {
+        $("save-status").textContent = "没有改动";
+        return;
+    }
+    S.dirty = false;
+    renderDirty();
+    if (S.commitTarget === "clipboard_result") {
+        $("save-status").textContent = "已写入会话剪贴板结果 #1 —— 再次保存更新同一项（不堆积历史，监听抑制）";
+    } else {
+        $("save-status").textContent = `已原位写入 ${S.fileName}（identity/mtime/hash 校验通过，UTF-8 原子替换）`;
+    }
+    toast("已保存", "ok");
+}
+$("btn-save").addEventListener("click", save);
+
+/* ═══════════════ 连续听写（模拟 §3.6）═══════════════ */
+
+const DEMO_SEGMENTS = [
+    "嗯，今天下午三点开项目会，",
+    "那个进度整体正常，",
+    "呃，服务器到期是下个月底，记得续费。",
+];
+
+$("btn-mic").addEventListener("click", () => {
+    if (S.recording) stopDictation();
+    else startDictation();
+});
+
+function startDictation() {
+    // VoiceBusy 演示位：全进程单 VoiceSession（原型直接允许）
+    S.recording = true;
+    S.voiceEpoch += 1;
+    S.voiceSeq = 0;
+    S.lastSeqHandled = 0;
+    S.dictationRange = null;
+    $("btn-mic").classList.add("recording");
+    $("save-status").textContent = `录音中 · 连续听写 epoch=${S.voiceEpoch}（失焦/最小化不中断）`;
+    $("preview-bar").classList.remove("hidden");
+    renderChips();
+
+    let segIdx = 0;
+    // preview 先出现 → 1.6s 后转 confirmed（epoch+seq 追加）
+    S.segmentTimer = setInterval(() => {
+        if (segIdx >= DEMO_SEGMENTS.length) { stopDictation(); return; }
+        const seg = DEMO_SEGMENTS[segIdx];
+        S.voiceSeq += 1;
+        const seq = S.voiceSeq;
+        $("preview-text").textContent = seg;
+        S.previewTimer = setTimeout(() => {
+            $("preview-text").textContent = "";
+            appendConfirmed(seg, seq);
+        }, 1600);
+        segIdx++;
+    }, 2000);
+}
+
+function appendConfirmed(seg, seq) {
+    // 前端按 seq 去重演示：重复/回退 seq 忽略
+    if (seq <= S.lastSeqHandled) { toast(`忽略重复 seq=${seq}`); return; }
+    S.lastSeqHandled = seq;
+    const needGap = !S.dictationRange;
+    if (S.view === "md" && tiptap) {
+        if (needGap) tiptap.commands.focus("end");
+        tiptap.chain().focus("end").insertContent((needGap ? "\n" : "") + seg).run();
+    } else {
+        const pos = sourceEl.value.length;
+        sourceEl.value += (needGap && pos > 0 ? "\n" : "") + seg;
+        sourceEl.selectionStart = sourceEl.selectionEnd = sourceEl.value.length;
+        if (!S.dictationRange) S.dictationRange = {from: pos + (needGap && pos > 0 ? 1 : 0), to: sourceEl.value.length};
+        else S.dictationRange.to = sourceEl.value.length;
+    }
+    if (S.view === "md" && tiptap) {
+        const end = tiptap.state.doc.content.size;
+        if (!S.dictationRange) S.dictationRange = {from: Math.max(0, end - seg.length), to: end};
+        else S.dictationRange.to = end;
+    }
+    markDirty();
+    renderDebug();
+}
+
+function stopDictation() {
+    S.recording = false;
+    clearInterval(S.segmentTimer);
+    clearTimeout(S.previewTimer);
+    $("btn-mic").classList.remove("recording");
+    $("preview-bar").classList.add("hidden");
+    $("preview-text").textContent = "";
+    $("save-status").textContent = `录音结束：confirmed ${S.voiceSeq} 段保留，preview 丢弃（snapshot 可补齐）`;
+    renderChips();
+    renderDebug();
+}
+
+function locateDictation() {
+    if (!S.dictationRange) return;
+    if (S.view === "md" && tiptap) {
+        const r = S.dictationRange;
+        tiptap.chain().focus().setTextSelection({from: Math.min(r.from, tiptap.state.doc.content.size - 1), to: Math.min(r.to, tiptap.state.doc.content.size - 1)}).run();
+    } else {
+        sourceEl.focus();
+        sourceEl.setSelectionRange(S.dictationRange.from, S.dictationRange.to);
+    }
+    toast("已定位并选中本次听写范围", "ok");
+}
+
+/* ═══════════════ AI 整理（模拟 §3.7：单活跃 + 候选 + 稳定 Diff）═══════════════ */
+
+function cleanText(text) {
+    // 演示用"整理"：去口水词 + 规整标点（真实实现走无记忆 AIProvider::complete）
+    return text
+        .replace(/(嗯|呃|那个)[，,、]?/g, "")
+        .replace(/([^\s。！？])，\s*/g, "$1，")
+        .replace(/，\s*。/g, "。")
+        .replace(/([\u4e00-\u9fff])$/u, "$1。");
+}
+
+function tidy(kind) {
+    if (S.transform.active || S.transform.candidate) {
+        cancelCandidate("已取消旧请求");
+    }
+    if (S.aiBusySim) {
+        toast("AlreadyActive：主窗口 AI 请求运行中（全局单活跃，原型模拟）", "err");
+        return;
+    }
+    const text = kind === "dictation"
+        ? currentText().slice(S.dictationRange ? S.dictationRange.from : 0, S.dictationRange ? S.dictationRange.to : undefined)
+        : getSelectionText();
+    if (!text || !text.trim()) { toast("范围为空"); return; }
+
+    S.transform.active = true;
+    S.transform.requestId += 1;
+    const myReq = S.transform.requestId;
+    const frozenRevision = S.contentRevision;
+    $("save-status").textContent = `整理请求运行中 req=${myReq}（全局单活跃，冻结 rev=${frozenRevision}）`;
+    renderDebug();
+
+    // 模拟模型往返：完成后带 req 校验，旧请求不得写入新状态（§5.1 竞态铁则演示）
+    setTimeout(() => {
+        if (myReq !== S.transform.requestId) return; // 已被新请求/视图切换作废
+        S.transform.active = false;
+        S.transform.candidate = {
+            kind,
+            sourceText: text,
+            revisedText: cleanText(text),
+            frozenRevision,
+        };
+        S.transform.stale = S.contentRevision !== frozenRevision;
+        renderDiffCard();
+        $("save-status").textContent = `整理完成 req=${myReq} —— 候选待确认（未经确认不改正文）`;
+    }, 900);
+}
+
+/* ── 稳定 Diff 渲染（字符级 LCS，演示终稿一次性 Diff）── */
+
+function diffTokens(a, b) {
+    const A = [...a];
+    const B = [...b];
+    const n = A.length;
+    const m = B.length;
+    // 公共前后缀预剪 + 小规模 LCS（原型文本量小）
+    let start = 0;
+    while (start < n && start < m && A[start] === B[start]) start++;
+    let endA = n, endB = m;
+    while (endA > start && endB > start && A[endA - 1] === B[endB - 1]) { endA--; endB--; }
+    const an = A.slice(start, endA);
+    const bn = B.slice(start, endB);
+    const dp = Array.from({length: an.length + 1}, () => new Uint32Array(bn.length + 1));
+    for (let i = an.length - 1; i >= 0; i--)
+        for (let j = bn.length - 1; j >= 0; j--)
+            dp[i][j] = an[i] === bn[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    const ops = [];
+    let i = 0, j = 0;
+    const push = (kind, ch) => {
+        const last = ops[ops.length - 1];
+        if (last && last.kind === kind) last.text += ch;
+        else ops.push({kind, text: ch});
+    };
+    for (let k = 0; k < start; k++) push("eq", A[k]);
+    while (i < an.length && j < bn.length) {
+        if (an[i] === bn[j]) { push("eq", an[i]); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { push("del", an[i++]); }
+        else { push("add", bn[j++]); }
+    }
+    while (i < an.length) push("del", an[i++]);
+    while (j < bn.length) push("add", bn[j++]);
+    for (let k = endA; k < A.length; k++) push("eq", A[k]);
+    return ops;
+}
+
+function renderDiffCard() {
+    const cand = S.transform.candidate;
+    if (!cand) { $("diff-card").classList.add("hidden"); return; }
+    $("diff-card").classList.remove("hidden");
+    $("diff-title").textContent = cand.kind === "dictation" ? "整理候选 · 本次听写" : "整理候选 · 选中内容";
+    $("stale-strip").classList.toggle("hidden", !S.transform.stale);
+    $("diff-apply").disabled = S.transform.stale;
+    const ops = diffTokens(cand.sourceText, cand.revisedText);
+    $("diff-body").innerHTML = ops.map((o) => {
+        if (o.kind === "eq") return escapeHTML(o.text);
+        if (o.kind === "del") return `<span class="d-del">${escapeHTML(o.text)}</span>`;
+        return `<span class="d-add">${escapeHTML(o.text)}</span>`;
+    }).join("");
+}
+
+function escapeHTML(s) {
+    return s.replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+}
+
+function applyCandidate() {
+    const cand = S.transform.candidate;
+    if (!cand || S.transform.stale) return;
+    // §3.7：revision/hash 校验通过后单事务替换（原型直接字符串拼接模拟）
+    if (cand.kind === "dictation" && S.dictationRange) {
+        const {from, to} = S.dictationRange;
+        if (S.view === "md" && tiptap) {
+            // MD 视图简化演示：JSON 文档整体替换模拟单事务
+            const all = tiptap.getMarkdown();
+            const patched = all.slice(0, from) + cand.revisedText + all.slice(to);
+            tiptap.commands.setContent(patched, {emitUpdate: false, contentType: "markdown"});
+            S.dictationRange = {from, to: from + cand.revisedText.length};
+        } else {
+            sourceEl.value = sourceEl.value.slice(0, from) + cand.revisedText + sourceEl.value.slice(to);
+            sourceEl.selectionStart = from;
+            sourceEl.selectionEnd = from + cand.revisedText.length;
+            S.dictationRange = {from, to: from + cand.revisedText.length};
+        }
+    } else {
+        // 选区整理（原型：替换当前选区）
+        if (S.view === "md" && tiptap) {
+            tiptap.chain().focus().insertContent(cand.revisedText).run();
+        } else {
+            const {selectionStart: from, selectionEnd: to} = sourceEl;
+            sourceEl.value = sourceEl.value.slice(0, from) + cand.revisedText + sourceEl.value.slice(to);
+        }
+    }
+    cancelCandidateSilent();
+    toast("已单事务替换 —— 一次 Ctrl+Z 可恢复", "ok");
+}
+
+function cancelCandidateSilent() {
+    S.transform.candidate = null;
+    S.transform.stale = false;
+    $("diff-card").classList.add("hidden");
+}
+
+$("diff-apply").addEventListener("click", applyCandidate);
+$("diff-discard").addEventListener("click", () => cancelCandidate("已放弃候选"));
+$("diff-close").addEventListener("click", () => cancelCandidate("已关闭候选"));
+$("diff-copy").addEventListener("click", () => toast("候选结果已复制（不改正文）", "ok"));
+
+/* ═══════════════ Esc 分层 + 键盘 ═══════════════ */
+
+document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(); return; }
+    if (e.key === "Escape") {
+        if (!moreMenu.classList.contains("hidden")) { moreMenu.classList.add("hidden"); return; }
+        if (!$("diff-card").classList.contains("hidden")) { cancelCandidate("Esc 关闭候选卡片"); return; }
+        if (S.recording) { stopDictation(); return; }
+        toast("原型：无会话层可退（0.23.1 中 Esc→关窗三态保护）");
+    }
+});
+
+/* ═══════════════ 启动 ═══════════════ */
+
+sourceEl.value = INITIAL_MD;
+renderTarget();
+renderDirty();
+renderChips();
+renderDebug();
+sourceEl.focus();
+</script>
+</body>
+</html>
