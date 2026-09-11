@@ -1191,8 +1191,11 @@ fn main() {
             // 持有服务列表,保证其生命周期与 app 一致。
             app.manage(services);
 
-            // 0.16.3：内容编辑器 payload 暂存（open → get 中转）
-            app.manage(app::commands::PendingEditorPayload::default());
+            // 0.23.1：单 EditorSession 服务（会话身份/窗口绑定/保存分派；
+            // 依赖的 DomainEnv/连接池在运行时经 app.state 解析，此处只注入 handle）
+            app.manage(std::sync::Arc::new(app::editor::EditorSessionService::new(
+                app.handle().clone(),
+            )));
 
             // 0.16.7：便签服务（domain 层，框架无关；command 层经 app.state 取用）
             let sticky_service = std::sync::Arc::new(
@@ -1441,10 +1444,11 @@ app::commands::search_clipboard_history,
             app::commands::copy_clipboard_image,
             // 0.16.5 剪贴板图片 pin
             app::commands::pin_clipboard_image,
-            // 0.16.3 内容编辑器
+            // 0.16.3 内容编辑器（0.23.1 会话化重构）
             app::commands::open_content_editor,
-            app::commands::get_content_editor_payload,
-            app::commands::save_content_editor,
+            app::commands::get_content_editor_session,
+            app::commands::commit_content_editor,
+            app::commands::end_content_editor,
             app::commands::get_perf_overview,
             app::commands::get_perf_percentiles,
             app::commands::get_perf_slow_queries,

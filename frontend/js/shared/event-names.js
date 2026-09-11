@@ -2,7 +2,7 @@
  * 事件名常量清单。
  *
  * 所有 blink:// 事件名的 single source of truth（前端侧）。
- * 后端对应文件：src/app/event_names.rs（手动同步，后续可考虑 codegen）。
+ * 后端对应文件：src/infra/event_names.rs（手动同步，后续可考虑 codegen）。
  *
  * 使用方式：
  *   import { EVENTS } from './event-names.js';
@@ -130,6 +130,15 @@ export const EVENTS = Object.freeze({
     STICKY_CONTENT_CHANGED: 'blink://sticky-content-changed',
     STICKY_TRASHED: 'blink://sticky-trashed',
     STICKY_RESTORED: 'blink://sticky-restored',
+
+    // ── 内容编辑器会话（0.23.1）──
+    /**
+     * 编辑器会话变更。payload:
+     * { kind: "bound"|"ended", sessionRef?, generation?, stickyId? }
+     * 编辑器窗口在 bound 且 sessionRef 变化时 reset 并拉取快照；
+     * 便签窗口按 stickyId 进入/退出编辑租约（只读）。
+     */
+    EDITOR_SESSION_CHANGED: 'blink://editor-session-changed',
 
     // ── 截图（0.18.x）──
     /** 截图控件吸附 hints 流式推送 */

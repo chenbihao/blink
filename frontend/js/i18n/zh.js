@@ -967,6 +967,19 @@ export const zh = {
     "editor.discard": "放弃更改",
     "editor.continueEdit": "继续编辑",
     "editor.saveFailed": "保存失败: {message}",
+    // 0.23.1：双视图 / 会话化
+    "editor.view.source": "原文",
+    "editor.view.markdown": "MD",
+    "editor.rewritten": "已保存（已按编辑器规范重写格式）",
+    "editor.conflict": "内容已被外部修改，保存被拒绝。可复制当前内容后重新载入",
+    "editor.gate.rejected": "内容包含编辑器不支持的结构（表格/脚注/公式/HTML 等），已保持原文视图",
+    "editor.gate.large": "内容超过 128KB，MD 视图不可用，已保持原文视图",
+    "editor.gate.slow": "内容较大（32KB+），MD 视图可能卡顿，已保持原文视图",
+    "editor.gate.fallback": "Markdown 编辑器初始化失败，已降级为原文视图",
+    "editor.busy": "已有编辑任务进行中，请先完成当前任务",
+    // 0.23.1：便签编辑租约
+    "sticky.lease.readonly": "该便签正在编辑器中编辑",
+    "sticky.lease.back": "返回编辑器",
 
     // ── Toast / 通用 ──
     "toast.file_search_saved": "文件搜索配置已保存",

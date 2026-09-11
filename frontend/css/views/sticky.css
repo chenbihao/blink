@@ -603,3 +603,53 @@
 /* 0.18.3：Tiptap IR 编辑器样式。配色统一走 --sticky-* 变量（与色板/按钮一致），
    Markdown 排版元素（h1/h2/p/ul/blockquote/code 等）在 .ProseMirror 内联渲染。
    降级 textarea 保留 .sticky-textarea 样式不变。 */
+
+/* ── 0.23.1：编辑租约横幅（该便签正在独立编辑器中编辑）── */
+
+.sticky-lease-banner {
+    position: absolute;
+    left: 50%;
+    bottom: 8px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100% - 16px);
+    padding: 4px 10px;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: var(--sticky-bg, var(--surface));
+    color: var(--sticky-text, var(--text));
+    font-size: var(--text-xs);
+    /* 中文不斜体铁则 */
+    font-style: normal;
+    box-shadow: var(--shadow-modal);
+    z-index: 900;
+}
+
+.sticky-lease-text {
+    opacity: 0.75;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sticky-lease-back {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    font-size: var(--text-xs);
+    font-style: normal;
+    color: var(--sticky-text, var(--text));
+    background: var(--surface-2);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+
+.sticky-lease-back:hover {
+    color: var(--text);
+}
+
+.sticky-lease-banner[hidden] {
+    display: none;
+}

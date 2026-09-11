@@ -133,6 +133,12 @@
     <div class="sticky-editor-fallback" hidden id="sticky-fallback">
         <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false"></textarea>
     </div>
+
+    <!-- 0.23.1：编辑租约横幅（该便签正在独立编辑器中编辑，本窗口只读） -->
+    <div class="sticky-lease-banner" hidden id="sticky-lease-banner">
+        <span class="sticky-lease-text" data-i18n="sticky.lease.readonly">该便签正在编辑器中编辑</span>
+        <button class="sticky-lease-back" data-i18n="sticky.lease.back" id="sticky-lease-back" type="button">返回编辑器</button>
+    </div>
 </div>
 
 <!-- Tiptap IIFE（window.BlinkTiptap，0.18.3 IR 编辑器） -->

@@ -34,8 +34,16 @@
     <!-- Toolbar -->
     <div class="editor-toolbar">
         <div class="editor-toolbar-left">
-            <!-- MD 格式工具栏（0.18.3：与便签共用 components/md-toolbar.css，默认展示） -->
-            <div class="md-toolbar editor-md-toolbar" id="md-toolbar"></div>
+            <!-- 0.23.1：原文/MD 双视图切换（同一文本的双视图，风险门在 JS 侧拦截） -->
+            <div class="editor-view-switch" id="editor-view-switch" role="tablist">
+                <button class="editor-view-btn is-active" data-i18n="editor.view.source" id="btn-view-source"
+                        type="button">原文
+                </button>
+                <button class="editor-view-btn" data-i18n="editor.view.markdown" id="btn-view-md" type="button">MD
+                </button>
+            </div>
+            <!-- MD 格式工具栏（与便签共用 components/md-toolbar.css；MD 视图时展示） -->
+            <div class="md-toolbar editor-md-toolbar" hidden id="md-toolbar"></div>
         </div>
         <div class="editor-toolbar-right">
             <span class="editor-status" id="editor-status"></span>

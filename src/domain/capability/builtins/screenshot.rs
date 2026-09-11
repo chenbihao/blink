@@ -1047,7 +1047,7 @@ mod tests {
         }
         fn start_content_editor(
             &self,
-            _: crate::domain::capability::ContentEditorRequest,
+            _: crate::domain::editor::OpenEditorRequest,
         ) -> Result<(), crate::domain::capability::SurfaceError> {
             unreachable!()
         }

@@ -548,7 +548,7 @@ pub enum ChordTarget {
         /// 从 chord input_text 提取的参数键名（如 "content" / "prefill" / "body"）。
         /// None 表示无参数传入。
         input_param: Option<&'static str>,
-        /// 额外固定参数（如 origin / save_policy）
+        /// 额外固定参数（Capability 的补充结构化参数）
         extra_args: Vec<(&'static str, &'static str)>,
         /// 是否在调用 Capability 前隐藏主窗（如 sticky chord 需要隐藏主窗，
         /// 而 open_clipboard_mode 需要显示主窗）。
@@ -769,7 +769,8 @@ impl ChordAction for EditAction {
         ChordTarget::Capability {
             capability_id: "start_content_editor",
             input_param: Some("body"),
-            extra_args: vec![("origin", "chord"), ("save_policy", "clipboard_new")],
+            // 0.23.1：来源/保存目标由编辑器会话结构化推导，无 extra_args
+            extra_args: vec![],
             hide_main_before: false, // start_content_editor 自己负责 hide_main_window
         }
     }
@@ -1404,16 +1405,8 @@ mod tests {
             } => {
                 assert_eq!(capability_id, "start_content_editor");
                 assert_eq!(input_param, Some("body"));
-                assert!(
-                    extra_args
-                        .iter()
-                        .any(|(k, v)| *k == "origin" && *v == "chord")
-                );
-                assert!(
-                    extra_args
-                        .iter()
-                        .any(|(k, v)| *k == "save_policy" && *v == "clipboard_new")
-                );
+                // 0.23.1：来源/保存目标由编辑器会话结构化推导
+                assert!(extra_args.is_empty());
             }
             _ => panic!("edit target 应为 Capability"),
         }

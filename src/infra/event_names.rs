@@ -203,6 +203,12 @@ impl EventNames {
     #[allow(dead_code)]
     pub const STICKY_CLOSE_ACK: &str = "blink://sticky-close-ack";
 
+    // ── 内容编辑器会话（0.23.1）──
+    /// 编辑器会话变更。payload: `{ kind: "bound"|"ended", sessionRef?, generation?,
+    /// stickyId? }`。编辑器窗口在 `bound` 且 sessionRef 变化时 reset 并拉取快照；
+    /// 便签窗口按 `stickyId` 进入/退出编辑租约（只读）。
+    pub const EDITOR_SESSION_CHANGED: &str = "blink://editor-session-changed";
+
     // ── 截图（0.18.x）──
     /// 截图控件吸附 hints 流式推送（0.18.x）。
     /// payload: `ControlHintsEvent { generation, kind: "batch"|"done", depth, hints, ... }`

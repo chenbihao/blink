@@ -14,10 +14,11 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::policy::{
-    CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage, ContentEditorRequest,
-    EditorSourceRef, SurfaceError, SurfacePort, WindowActionResult,
+    CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage, EditorSourceRef, SurfaceError,
+    SurfacePort, WindowActionResult,
 };
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
+use crate::domain::editor::OpenEditorRequest;
 use crate::domain::event::{CapabilityEnv, EventPort};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
@@ -607,24 +608,19 @@ impl SurfacePort for TauriDomainEnv {
         }
     }
 
-    fn start_content_editor(&self, request: ContentEditorRequest) -> Result<(), SurfaceError> {
+    fn start_content_editor(&self, request: OpenEditorRequest) -> Result<(), SurfaceError> {
         use tauri::Manager;
-        let payload = crate::app::commands::EditableContentPayload {
-            body: request.body,
-            format: "plain".to_string(),
-            title: request.title,
-            origin: request.origin,
-            origin_ref: request.origin_ref,
-            save_policy: request.save_policy,
-        };
-        let pending = self
+        let service = self
             .app
-            .state::<crate::app::commands::PendingEditorPayload>();
-        *pending.0.lock().map_err(|e| SurfaceError::CreateFailed {
-            detail: format!("锁失败: {e}"),
-        })? = Some(payload);
-        crate::infra::platform::window::show_content_editor_window(&self.app)
-            .map_err(|e| SurfaceError::CreateFailed { detail: e })
+            .state::<std::sync::Arc<crate::app::editor::EditorSessionService>>();
+        // Capability 路径来源固定为 CapabilityResult（非便签），同步入口足够；
+        // 编辑器服务内部负责绑定会话、发事件与显示窗口。
+        service
+            .open_sync(request)
+            .map(|_| ())
+            .map_err(|e| SurfaceError::Unavailable {
+                detail: e.to_string(),
+            })
     }
 
     fn hide_main_window(&self, reason: &str) {

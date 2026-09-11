@@ -974,6 +974,19 @@ export const en = {
     "editor.discard": "Discard",
     "editor.continueEdit": "Keep Editing",
     "editor.saveFailed": "Save failed: {message}",
+    // 0.23.1: dual view / sessionized editor
+    "editor.view.source": "Source",
+    "editor.view.markdown": "MD",
+    "editor.rewritten": "Saved (reformatted to editor conventions)",
+    "editor.conflict": "Content was modified externally; save was rejected. Copy your content and reload",
+    "editor.gate.rejected": "Content contains unsupported structures (tables/footnotes/math/HTML); kept in Source view",
+    "editor.gate.large": "Content exceeds 128KB; MD view unavailable, kept in Source view",
+    "editor.gate.slow": "Large content (32KB+); MD view may lag, kept in Source view",
+    "editor.gate.fallback": "Markdown editor failed to initialize; fell back to Source view",
+    "editor.busy": "An editing task is already active. Finish it first",
+    // 0.23.1: sticky editing lease
+    "sticky.lease.readonly": "This sticky is being edited in the editor",
+    "sticky.lease.back": "Back to editor",
 
     // ── Toast / common ──
     "toast.file_search_saved": "File search settings saved",

@@ -1,13 +1,12 @@
-//! `start_content_editor` Capability（0.21.2）——Chord `edit` binding 的 GUI starter target。
+//! `start_content_editor` Capability（0.21.2，0.23.1 迁移结构化请求）——
+//! Chord `edit` binding 的 GUI starter target。
 //!
-//! 打开通用内容编辑器窗口。可选 `body` / `title` / `origin` / `origin_ref` / `save_policy`
-//! 参数作为结构化 prefill。
+//! 打开通用内容编辑器窗口。可选 `body` / `title` 参数作为结构化 prefill，
+//! 来源固定为 `CapabilityResult`（保存目标按来源默认映射推导为剪贴板结果）。
 //! 需要 GUI_SURFACE 运行时。AI 推荐 allowlist 默认开启；MCP 代码级禁止（GUI 副作用）。
 //!
-//! **与旧 ChordAction 的关系**：旧 `EditAction` 实现 `Action::execute()`，
-//! 内部调 `DomainEnv::show_content_editor(...)` + `hide_main_window`。
-//! 本 Capability 通过 `SurfacePort::start_content_editor` 启动编辑器，
-//! 返回"已启动内容编辑器，等待用户编辑"。
+//! **会话语义（0.23.1）**：编辑器同一时刻只允许一个活动会话；已有异源任务时
+//! 返回“已有编辑任务进行中”，不覆盖正文。
 
 use std::sync::Arc;
 
@@ -15,9 +14,9 @@ use serde_json::{Value, json};
 
 use crate::domain::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
-    ConfirmationPolicy, ContentEditorRequest, DangerClass, InvokeContext, McpDefault, OriginSet,
-    RuntimeRequirement,
+    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
 };
+use crate::domain::editor::{OpenEditorRequest, SourceDescriptor};
 
 pub struct StartContentEditor;
 
@@ -41,18 +40,6 @@ impl Capability for StartContentEditor {
                     "title": {
                         "type": "string",
                         "description": "Optional window title"
-                    },
-                    "origin": {
-                        "type": "string",
-                        "description": "Source identifier (e.g. 'chord', 'clipboard', 'sticky')"
-                    },
-                    "origin_ref": {
-                        "type": "string",
-                        "description": "Optional reference to original entity id (e.g. clipboard record id)"
-                    },
-                    "save_policy": {
-                        "type": "string",
-                        "description": "Save policy: 'clipboard_new' or 'sticky_update'"
                     }
                 }
             }),
@@ -94,27 +81,13 @@ impl Capability for StartContentEditor {
             .get("title")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let origin = args
-            .get("origin")
-            .and_then(|v| v.as_str())
-            .unwrap_or("chord")
-            .to_string();
-        let origin_ref = args
-            .get("origin_ref")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let save_policy = args
-            .get("save_policy")
-            .and_then(|v| v.as_str())
-            .unwrap_or("clipboard_new")
-            .to_string();
 
-        let request = ContentEditorRequest {
+        let request = OpenEditorRequest {
             body,
             title,
-            origin,
-            origin_ref,
-            save_policy,
+            source: SourceDescriptor::CapabilityResult {
+                capability_id: self.id().to_string(),
+            },
         };
 
         surface.hide_main_window("start_content_editor");

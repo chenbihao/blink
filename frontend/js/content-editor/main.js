@@ -1,57 +1,30 @@
 /**
- * 内容编辑器窗口入口（0.16.3）。
+ * 内容编辑器窗口入口（0.16.3；0.23.1 会话化重构为纯装配层）。
  *
- * 装配主题 / i18n / 图标 sprite，从后端拉取 payload，初始化编辑/保存逻辑。
- * 编辑逻辑全在前端，后端只做窗口创建 + 剪贴板读写桥接。
+ * 职责只剩装配：主题/i18n/图标、构造 Adapter + EditorSession、绑定窗口控制
+ * 与快捷键、注册后端事件并分发。编辑语义在 EditorAdapter + Engine，
+ * 会话语义在 EditorSession，后端会话编排在 EditorSessionService。
  *
- * 0.18.3：移除编辑/预览模式切换（死代码），统一使用 Tiptap IR 编辑。
- *         MD 工具栏移入 editor-toolbar-left，默认展示。
+ * 关联模块：
+ * - editor-adapter.js     Source/MD 双视图唯一操作面（检查点/风险门/revision）
+ * - editor-session.js     前端会话状态机（commit/end 代际防护）
+ * - engines/              SourceEngine（textarea）/ MarkdownIrEngine（Tiptap）
+ * - shared/tiptap-editor.js  Tiptap vendor 封装（EOF 换行约定）
  */
 
 import {applyThemeFromConfig} from "../shared/theme.js";
 import {applyI18nFromConfig, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
-import {choiceDialog, getCurrentWindow, listen} from "../shared/tauri.js";
+import {choiceDialog, getCurrentWindow, listen, normalizeError} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
-import {getContentEditorPayload, getStickyNote, saveContentEditor} from "../shared/api.js";
-import {bindMdToolbar, createMdToolbar, updateToolbarStates} from "../shared/md-toolbar.js";
-
-// ── 状态 ──────────────────────────────────────────────
-
-/** 原始 payload（用于对比是否有未保存改动） */
-let originalBody = "";
-
-/** 当前 originRef（保存时传给后端继承 hit_count） */
-let originRef = null;
-
-/** 当前 savePolicy（0.16.9：clipboard_new | sticky_update） */
-let savePolicy = "clipboard_new";
-
-/** 当前内容格式：plain | markdown */
-let currentFormat = "plain";
-
-/** 当前来源：clipboard | sticky | query */
-let currentOrigin = "";
-
-/** Tiptap IR 编辑器实例（null = 纯文本模式） */
-let tiptapEditor = null;
-
-/** 防止重复保存 */
-let saving = false;
-
-/** 已确认关闭——跳过 onCloseRequested 拦截 */
-let allowClose = false;
-
-/** 0.18.3: 已废弃——保存改为立即隐藏。保留变量供生命周期处理器安全清理 */
-let closeTimeout = null;
-
-/** 0.18.3: 编辑会话代际计数器。
- *
- * 每次 loadPayload 或生命周期关闭时递增。handleSave 捕获当前 gen 作为 savedGen，
- * 后台保存完成后对比——不匹配说明窗口已被复用或被生命周期关闭，
- * 回调不再触碰模块级状态（避免污染新会话或错误地重新显示窗口）。
- */
-let sessionGen = 0;
+import {
+    commitEditorSession,
+    endEditorSession,
+    getEditorSession,
+    getStickyNote,
+} from "../shared/api.js";
+import {EditorAdapter} from "./editor-adapter.js";
+import {EditorSession} from "./editor-session.js";
 
 // ── DOM 引用 ──────────────────────────────────────────
 
@@ -62,6 +35,53 @@ const mdToolbarEl = document.getElementById("md-toolbar");
 const saveBtn = document.getElementById("btn-save");
 const cancelBtn = document.getElementById("btn-cancel");
 const statusEl = document.getElementById("editor-status");
+const viewSourceBtn = document.getElementById("btn-view-source");
+const viewMdBtn = document.getElementById("btn-view-md");
+
+// ── 模块装配 ──────────────────────────────────────────
+
+/** 关闭已被会话语义确认（跳过 onCloseRequested 拦截） */
+let allowClose = false;
+
+/** 当前来源的便签 id（非便签来源为 null） */
+function originStickyId() {
+    return session.source?.kind === "sticky" ? session.source.stickyId : null;
+}
+
+const adapter = new EditorAdapter(
+    {sourceEl: textareaEl, mdContainerEl, mdToolbarEl},
+    {
+        onNotice: (reasonKey) => {
+            // 弱内容检测只提示，不阻断编辑（Source 恒可编辑）
+            const key = t(reasonKey);
+            if (key && key !== reasonKey) setStatus(key);
+        },
+    },
+);
+
+const session = new EditorSession(
+    {
+        api: {
+            getEditorSession,
+            commitEditorSession,
+            endEditorSession,
+        },
+        adapter,
+    },
+    {
+        onTitle: (title) => {
+            titleEl.textContent = title || t("editor.title.default");
+        },
+        onStatus: (message) => setStatus(message),
+        onError: (message) => setStatus(message),
+        onSnapshotApplied: () => {
+            updateViewSwitchState();
+        },
+        onSessionCleared: () => {
+            updateViewSwitchState();
+        },
+    },
+);
 
 // ── 初始化 ────────────────────────────────────────────
 
@@ -71,51 +91,18 @@ async function init() {
     await applyThemeFromConfig();
     await applyI18nFromConfig();
 
-    // 从后端拉取 payload
-    await loadPayload();
-
-    // 绑定事件
     bindToolbar();
     bindWindowControls();
     bindKeyboard();
+    bindBackendEvents();
 
-    // 0.18.3 fix: 监听便签内容变更——当编辑器来源是 sticky 且用户无未保存改动时自动刷新
-    // 0.18.3 fix: 跳过 source="content-editor" 的变更（自己刚保存的，无需 reload）
-    listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
-        const payload = event.payload;
-        if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
-            if (payload.source === "content-editor") return;
-            if (!hasUnsavedChanges()) {
-                reloadFromSticky();
-            }
-        }
-    });
-
-    // 0.18.3: 生命周期绑定——编辑器从便签打开时，便签关闭/隐藏/删除/回收 时自动关闭编辑器
-    // 递增 sessionGen 确保正在进行的后台保存不会在完成后重新显示窗口
-    listen(EVENTS.STICKY_TRASHED, (event) => {
-        const payload = event.payload;
-        if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
-            lifecycleClose("便签被回收");
-        }
-    });
-
-    listen(EVENTS.STICKY_VISIBILITY_CHANGED, (event) => {
-        const payload = event.payload;
-        if (payload && payload.stickyId === originRef && currentOrigin === "sticky" && payload.visible === false) {
-            lifecycleClose("便签已隐藏");
-        }
-    });
-
-    listen(EVENTS.STICKY_DELETED, (event) => {
-        const payload = event.payload;
-        if (payload && payload.stickyId === originRef && currentOrigin === "sticky") {
-            lifecycleClose("便签已删除");
-        }
-    });
-
-    // 注册窗口复用回调（后端 eval 调用）
-    window.__contentEditorReload = loadPayload;
+    // init 主动拉取：覆盖“事件先于监听器注册”的时序（§1.4 存在不等于就绪）
+    try {
+        await session.activate();
+    } catch (e) {
+        const err = normalizeError(e);
+        console.error(`[content-editor] init 拉取会话失败 [${err.code}]: ${err.message}`);
+    }
 
     const win = getCurrentWindow();
     if (win) {
@@ -130,151 +117,50 @@ async function init() {
     tracing("editor window: init 完成");
 }
 
-/**
- * 从后端拉取 payload 并填充编辑器。
- * 窗口首次打开和复用时都会调用。
- */
-async function loadPayload() {
-    // 0.18.3 fix: 立即清除可能残留的 closeTimeout，防止在 await 期间
-    // 旧计时器触发 closeWindow() 导致窗口被隐藏（"一次失败一次成功"竞态）
-    if (closeTimeout) {
-        clearTimeout(closeTimeout);
-        closeTimeout = null;
-    }
+// ── 后端事件 ──────────────────────────────────────────
 
-    // 0.18.3: 递增代际计数器，使正在进行的后台保存回调不再操作当前状态
-    sessionGen++;
+function bindBackendEvents() {
+    // 会话绑定/结束（事件 + init 拉取双路径，§3.9）
+    listen(EVENTS.EDITOR_SESSION_CHANGED, (event) => {
+        session.handleSessionEvent(event.payload);
+    });
 
-    try {
-        const payload = await getContentEditorPayload();
-        if (!payload) {
-            tracing("loadPayload: 无 payload，可能是窗口已关闭后再次打开");
-            return;
+    // 便签联动（来源为 sticky 时生效）
+    listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
+        const payload = event.payload;
+        if (!payload || payload.stickyId !== originStickyId()) return;
+        if (payload.source === "content-editor") return; // 自己刚保存的
+        reloadFromSticky();
+    });
+
+    listen(EVENTS.STICKY_TRASHED, (event) => {
+        if (event.payload?.stickyId === originStickyId()) lifecycleClose("便签被回收");
+    });
+
+    listen(EVENTS.STICKY_DELETED, (event) => {
+        if (event.payload?.stickyId === originStickyId()) lifecycleClose("便签已删除");
+    });
+
+    listen(EVENTS.STICKY_VISIBILITY_CHANGED, (event) => {
+        const payload = event.payload;
+        if (payload?.stickyId === originStickyId() && payload.visible === false) {
+            lifecycleClose("便签已隐藏");
         }
-
-        // 0.16.13: 归一化 \r\n → \n
-        originalBody = (payload.body || "").replace(/\r\n/g, "\n");
-        originRef = payload.originRef || null;
-        savePolicy = payload.savePolicy || "clipboard_new";
-        currentFormat = payload.format || "plain";
-        currentOrigin = payload.origin || "";
-
-        // format=markdown 时使用 Tiptap IR 编辑器
-        if (currentFormat === "markdown" && mdContainerEl) {
-            textareaEl.hidden = true;
-            mdContainerEl.hidden = false;
-            if (mdToolbarEl) mdToolbarEl.style.display = "";
-
-            // 创建或复用 Tiptap 编辑器
-            if (tiptapEditor) {
-                // 复用：设入新内容
-                const json = tiptapEditor.markdown.parse(originalBody);
-                tiptapEditor.commands.setContent(json, false);
-            } else if (window.BlinkTiptap) {
-                try {
-                    const {Editor, StarterKit, Markdown, TaskList, TaskItem} = window.BlinkTiptap;
-                    tiptapEditor = new Editor({
-                        element: mdContainerEl,
-                        extensions: [StarterKit, Markdown, TaskList, TaskItem],
-                        content: originalBody,
-                        contentType: "markdown",
-                        editorProps: {
-                            attributes: {
-                                class: "content-editor-tiptap",
-                                spellcheck: "false",
-                            },
-                        },
-                    });
-                    // 创建并绑定 MD 格式工具栏（与便签共用逻辑）
-                    if (mdToolbarEl) {
-                        mdToolbarEl.innerHTML = "";
-                        const toolbar = createMdToolbar("md-toolbar-inner");
-                        mdToolbarEl.appendChild(toolbar);
-                        bindMdToolbar(toolbar, tiptapEditor, {editorEl: mdContainerEl});
-                        tiptapEditor.on("selectionUpdate", () => updateToolbarStates(toolbar, tiptapEditor));
-                        tiptapEditor.on("transaction", () => updateToolbarStates(toolbar, tiptapEditor));
-                    }
-                    console.log("[content-editor] Tiptap IR 编辑器初始化成功");
-                } catch (e) {
-                    console.error("[content-editor] Tiptap 初始化失败，降级为纯文本:", e);
-                    tiptapEditor = null;
-                    textareaEl.hidden = false;
-                    mdContainerEl.hidden = true;
-                    if (mdToolbarEl) mdToolbarEl.style.display = "none";
-                    textareaEl.value = originalBody;
-                }
-            } else {
-                console.warn("[content-editor] BlinkTiptap 未加载，降级为纯文本");
-                textareaEl.hidden = false;
-                mdContainerEl.hidden = true;
-                if (mdToolbarEl) mdToolbarEl.style.display = "none";
-                textareaEl.value = originalBody;
-            }
-        } else {
-            // 纯文本模式：显示 textarea，隐藏 Tiptap 编辑器
-            textareaEl.hidden = false;
-            mdContainerEl.hidden = true;
-            if (mdToolbarEl) mdToolbarEl.style.display = "none";
-
-            // 销毁 Tiptap 编辑器（如果之前创建过）
-            if (tiptapEditor) {
-                tiptapEditor.destroy();
-                tiptapEditor = null;
-            }
-
-            // 填充编辑器
-            textareaEl.value = originalBody;
-        }
-
-        // 设置标题
-        titleEl.textContent = payload.title || t("editor.title.default");
-
-        // 重置状态——saving/allowClose 已在函数开头清除 closeTimeout
-        saving = false;
-        allowClose = false;
-        statusEl.textContent = "";
-        saveBtn.disabled = false;
-
-        // 聚焦编辑器
-        if (currentFormat === "markdown" && tiptapEditor) {
-            tiptapEditor.commands.focus();
-        } else {
-            textareaEl.focus();
-        }
-    } catch (e) {
-        console.error("[content-editor] loadPayload 失败:", e);
-    }
+    });
 }
 
-/**
- * 0.18.3 fix: 从后端重新拉取便签内容并更新编辑器。
- * 当编辑器来源是 sticky 且收到 STICKY_CONTENT_CHANGED 事件时调用。
- * 仅在用户无未保存改动时执行（hasUnsavedChanges() === false）。
- */
+/** 便签来源且本地 clean 时同步最新内容（保留 0.18.3 行为语义） */
 async function reloadFromSticky() {
-    if (!originRef) return;
+    const stickyId = originStickyId();
+    if (!stickyId || !session.isActive) return;
+    if (adapter.isDirty()) return; // 有未保存改动时不打断用户
     try {
-        const note = await getStickyNote(originRef);
-        if (!note) {
-            tracing("reloadFromSticky: 便签不存在");
-            return;
-        }
-        const newBody = (note.content || "").replace(/\r\n/g, "\n");
-        originalBody = newBody;
-
-        if (tiptapEditor) {
-            try {
-                const json = tiptapEditor.markdown.parse(newBody);
-                tiptapEditor.commands.setContent(json, false);
-            } catch (e) {
-                console.error("[content-editor] reloadFromSticky setContent 失败:", e);
-            }
-        } else {
-            textareaEl.value = newBody;
-        }
-        tracing("reloadFromSticky: 已从便签同步最新内容");
+        const note = await getStickyNote(stickyId);
+        if (!note || stickyId !== originStickyId()) return; // 会话已切换，丢弃旧结果
+        session.syncExternalContent(note.content || "");
     } catch (e) {
-        console.error("[content-editor] reloadFromSticky 失败:", e);
+        const err = normalizeError(e);
+        console.error(`[content-editor] 便签同步失败 [${err.code}]: ${err.message}`);
     }
 }
 
@@ -283,88 +169,75 @@ async function reloadFromSticky() {
 function bindToolbar() {
     saveBtn.addEventListener("click", handleSave);
     cancelBtn.addEventListener("click", handleCancel);
+
+    viewSourceBtn?.addEventListener("click", () => switchView("source"));
+    viewMdBtn?.addEventListener("click", () => switchView("markdown"));
+}
+
+/** 视图切换（Source/MD 是同一文本的双视图，§3.3）。
+ *  拒绝原因提示由 adapter.onNotice 给出（structure/large 分档）。 */
+function switchView(target) {
+    if (!adapter.switchView(target)) return;
+    updateViewSwitchState();
+    adapter.focus();
+}
+
+function updateViewSwitchState() {
+    if (!viewSourceBtn || !viewMdBtn) return;
+    const view = adapter.view;
+    viewSourceBtn.classList.toggle("is-active", view === "source");
+    viewMdBtn.classList.toggle("is-active", view === "markdown");
+    const mdAllowed = adapter.markdownPolicy !== "disabled"
+        && (!adapter.gate || adapter.gate.allowed);
+    viewMdBtn.disabled = !mdAllowed;
+    if (!mdAllowed) {
+        viewMdBtn.title = t("editor.gate.rejected");
+    } else if (adapter.gate?.sizeWarn) {
+        viewMdBtn.title = t("editor.gate.slow");
+    } else {
+        viewMdBtn.title = "";
+    }
+}
+
+function setStatus(message) {
+    statusEl.textContent = message ?? "";
 }
 
 // ── 保存 ──────────────────────────────────────────────
 
 /**
- * 0.18.3: 生命周期关闭——递增代际、清理计时器、隐藏窗口。
- * 供 STICKY_TRASHED / VISIBILITY_CHANGED / DELETED 事件处理器共用。
- * 递增 sessionGen 确保正在进行的后台保存回调不会重新显示窗口。
+ * 保存（§3.5：保存/Ctrl+S 只保存不关闭；关闭走 handleCancel 三态）。
+ * MD 首次编辑保存时提示"已按编辑器规范重写"（§3.10）。
  */
-function lifecycleClose(reason) {
-    tracing(`${reason}，自动关闭编辑器`);
-    allowClose = true;
-    sessionGen++;
-    if (closeTimeout) {
-        clearTimeout(closeTimeout);
-        closeTimeout = null;
-    }
-    closeWindow();
-}
-
 async function handleSave() {
-    if (saving) return;
-    saving = true;
+    if (!session.isActive) return;
     saveBtn.disabled = true;
 
-    // 获取内容
-    let body;
-    if (tiptapEditor) {
-        try {
-            body = tiptapEditor.getMarkdown();
-        } catch (mdErr) {
-            console.error("[content-editor] getMarkdown 失败:", mdErr);
-            body = textareaEl.value;
-        }
-    } else {
-        body = textareaEl.value;
+    const rewrittenHint = adapter.isNormalizedMd() ? t("editor.rewritten") : null;
+    const result = await session.commit();
+    saveBtn.disabled = false;
+
+    if (result.ok) {
+        setStatus(rewrittenHint || t("editor.saved"));
+        return;
     }
-
-    // 捕获保存参数——后台保存期间窗口可能被复用，模块级变量会被 loadPayload 重置
-    const savedBody = body;
-    const savedOriginRef = originRef;
-    const savedPolicy = savePolicy;
-    const savedGen = sessionGen;
-
-    tracing(`handleSave: policy=${savedPolicy}, originRef=${savedOriginRef}, bodyLen=${savedBody.length}`);
-
-    // 0.18.3: 立即隐藏窗口——不阻塞用户，保存转为后台进行
-    allowClose = true;
-    closeWindow();
-
-    // 后台保存（不阻塞 UI）——窗口已隐藏，用户无需等待
-    try {
-        await saveContentEditor(savedBody, savedOriginRef, savedPolicy);
-        tracing("后台保存成功");
-        // 仅当窗口未被复用（代际未变）时更新状态
-        if (savedGen === sessionGen) {
-            originalBody = savedBody;
-            saving = false;
-        }
-    } catch (e) {
-        console.error("[content-editor] 后台保存失败:", e);
-        const msg = typeof e === "string" ? e : String(e?.message || e);
-        // 仅当窗口未被复用时重新显示并提示错误
-        if (savedGen === sessionGen) {
-            saving = false;
-            saveBtn.disabled = false;
-            allowClose = false;
-            statusEl.textContent = t("editor.saveFailed", {message: msg});
-            const win = getCurrentWindow();
-            if (win) win.show();
+    if (result.error) {
+        if (result.error.code === "source_conflict") {
+            setStatus(t("editor.conflict"));
+        } else {
+            setStatus(t("editor.saveFailed", {message: result.error.message}));
         }
     }
 }
 
-// ── 关闭 / 取消 ───────────────────────────────────────
+// ── 关闭 / 取消 ──────────────────────────────────────
 
 /**
- * 0.22.11: 关闭确认三态化——保存并关闭（主按钮/Enter）/ 放弃更改 / 继续编辑（Esc）。
- * 标题栏 X、Esc、Alt+F4 三个关闭入口都收敛到这里。
+ * 0.22.11 三态关闭（0.23.1 接入会话 end）：
+ * 保存并关闭（commit + end(saved)）/ 放弃更改（end(abandoned)）/ 继续编辑。
  */
 async function handleCancel() {
-    if (hasUnsavedChanges() && !allowClose) {
+    if (session.isActive && adapter.isDirty()) {
         const choice = await choiceDialog(t("editor.unsavedWarning"), {
             kind: "warning",
             okLabel: t("editor.discard"),
@@ -373,32 +246,48 @@ async function handleCancel() {
         });
         if (choice === "cancel") return; // 继续编辑
         if (choice === "third") {
-            // 保存并关闭——handleSave 自带「隐藏 → 后台保存 → 失败回显」闭环，失败时内容不丢
-            await handleSave();
+            allowClose = true;
+            const result = await session.commit();
+            // commit 失败（冲突等）：留在编辑器，正文不丢
+            if (!result.ok) {
+                allowClose = false;
+                setStatus(
+                    result.error?.code === "source_conflict"
+                        ? t("editor.conflict")
+                        : t("editor.saveFailed", {message: result.error?.message ?? ""}),
+                );
+                return;
+            }
+            await session.end("saved");
+            closeWindow();
             return;
         }
-        // "ok" → 放弃更改，走下方关闭路径
+        // "ok" → 放弃更改
+        allowClose = true;
+        await session.end("abandoned");
+        closeWindow();
+        return;
     }
     allowClose = true;
+    if (session.isActive) await session.end("abandoned");
     closeWindow();
 }
 
-/** 检查是否有未保存的改动 */
-function hasUnsavedChanges() {
-    let current;
-    if (tiptapEditor) {
-        try {
-            current = tiptapEditor.getMarkdown();
-        } catch {
-            current = textareaEl.value;
-        }
-    } else {
-        current = textareaEl.value;
+/**
+ * 生命周期强制关闭（来源便签被回收/删除/隐藏）——不弹确认，正文丢弃
+ * （沿用 0.18.3 语义；会话 end 释放便签租约）。
+ */
+function lifecycleClose(reason) {
+    if (!session.isActive) {
+        closeWindow();
+        return;
     }
-    return current !== originalBody;
+    tracing(`${reason}，自动关闭编辑器`);
+    allowClose = true;
+    session.end("abandoned").finally(() => closeWindow());
 }
 
-/** 关闭窗口（改为 hide 复用模式，不再销毁窗口） */
+/** 关闭窗口（hide 复用模式；会话已 end，窗口回预热态） */
 function closeWindow() {
     const win = getCurrentWindow();
     if (win) {
@@ -441,10 +330,11 @@ function bindWindowControls() {
     if (win?.onCloseRequested) {
         win.onCloseRequested(async (event) => {
             event.preventDefault(); // 始终阻止销毁
-            if (allowClose || !hasUnsavedChanges()) {
-                closeWindow(); // win.hide()
+            if (allowClose || !session.isActive || !adapter.isDirty()) {
+                if (session.isActive) await session.end("abandoned");
+                closeWindow();
             } else {
-                handleCancel(); // 显示未保存确认对话框
+                handleCancel();
             }
         });
     }
@@ -454,23 +344,18 @@ function bindWindowControls() {
 
 function bindKeyboard() {
     document.addEventListener("keydown", (e) => {
-        // 0.22.11: 自绘弹窗（关闭确认三态框等）打开时交给弹窗内部键盘逻辑——
-        // 否则 Ctrl+S 会绕过模态对话框直接隐藏窗口，留下悬挂的遮罩层。
-        // 与 settings/index.js 的 ESC 让路模式一致。
+        // 自绘弹窗打开时交给弹窗内部键盘逻辑（0.22.11 与 settings 一致）
         if (document.querySelector(".modal-overlay")) return;
 
-        // Ctrl+S：保存
         if ((e.ctrlKey || e.metaKey) && e.key === "s") {
             e.preventDefault();
             handleSave();
             return;
         }
 
-        // Esc：关闭（有未保存改动时提示）
         if (e.key === "Escape") {
             e.preventDefault();
             handleCancel();
-
         }
     });
 }

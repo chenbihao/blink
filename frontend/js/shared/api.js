@@ -533,26 +533,38 @@ export function translateLines(lines, targetLang) {
     return invoke("translate_lines", {lines, targetLang: targetLang ?? null});
 }
 
-// ── 0.16.3 内容编辑器 ──
+// ── 0.23.1 内容编辑器（EditorSession 会话协议）──
 
-/** 打开内容编辑器窗口。payload 为 EditableContentPayload（camelCase）。 */
-export function openContentEditor(payload) {
-    return invoke("open_content_editor", {payload});
+/**
+ * 打开内容编辑器：无活动会话则绑定并显示；同一持久来源激活现有窗口；
+ * 不同来源 reject `{code:"editor_busy", ...}`（结构化 EditorError 投影）。
+ * @param {*} request - { body, title?, source } source 为 SourceDescriptor（camelCase tagged）
+ * @returns {Promise<{sessionRef, generation, title?, body, source, sourceRevision?, markdownPolicy}>}
+ */
+export function openContentEditor(request) {
+    return invoke("open_content_editor", {request});
 }
 
-/** 前端 init 时拉取待编辑 payload（取出后清空）。 */
-export function getContentEditorPayload() {
-    return invoke("get_content_editor_payload");
+/** 前端绑定时拉取只读会话快照；无活动会话返回 null。仅 content-editor 窗口可调。 */
+export function getEditorSession() {
+    return invoke("get_content_editor_session");
 }
 
-/** 保存编辑后的内容。返回新记录 id（clipboard_new）或原 sticky id（sticky_update）。
- *  0.16.9：savePolicy 为 "clipboard_new"（默认）或 "sticky_update"（回写便签）。 */
-export function saveContentEditor(body, originRef, savePolicy) {
-    return invoke("save_content_editor", {
-        body,
-        originRef: originRef ?? null,
-        savePolicy: savePolicy ?? null,
-    });
+/**
+ * 提交正文：按来源推导的保存目标执行副作用（便签→原位更新，其余→剪贴板结果）。
+ * @param {*} request - { sessionRef, generation, revision, body }
+ * @returns {Promise<{sourceRevision?: number}>}
+ */
+export function commitEditorSession(request) {
+    return invoke("commit_content_editor", {request});
+}
+
+/**
+ * 结束会话并释放便签租约。request: { sessionRef, generation, reason: "saved"|"abandoned" }。
+ * 仅 content-editor 窗口可调。
+ */
+export function endEditorSession(request) {
+    return invoke("end_content_editor", {request});
 }
 
 // ── 0.16.4-0.16.5 剪贴板图片 ──

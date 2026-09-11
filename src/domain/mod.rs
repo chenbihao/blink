@@ -7,6 +7,7 @@ pub mod clipboard; // 0.19.6：剪贴板读写共享语义（command / Capabilit
 pub mod color; // 0.20.3：确定性颜色字面量解析（纯函数，Rust/JS 共享 fixture）
 pub mod config; // 0.14.6 §2.1：配置域（从 app/ 下沉）
 pub mod context;
+pub mod editor; // 0.23.1：内容编辑器域（SourceDescriptor/会话类型/纯决策，框架无关）
 pub mod event; // 0.14.6 §2.2 / 0.21.14：领域环境抽象（EventPort + CapabilityEnv，domain 去 tauri）
 pub mod event_names; // 0.14.6 §3.3 / 0.21.14：blink:// 事件名常量（infra 重导出，避免反向依赖）
 pub mod feature_catalog; // 0.21.4：功能目录聚合层

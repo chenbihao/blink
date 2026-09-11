@@ -143,6 +143,53 @@
     color: var(--text);
 }
 
+/* ── 0.23.1：原文/MD 视图切换 ── */
+
+.editor-view-switch {
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.editor-view-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-sub);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+    font-style: normal;
+}
+
+.editor-view-btn + .editor-view-btn {
+    border-left: 1px solid var(--surface-2);
+}
+
+.editor-view-btn:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.editor-view-btn.is-active {
+    color: var(--text);
+    background: var(--surface-2);
+    font-weight: 600;
+}
+
+.editor-view-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* hidden 属性在 .md-toolbar 的显式 display:flex 下失效，恢复显隐语义 */
+.editor-md-toolbar[hidden] {
+    display: none;
+}
+
 /* ── 编辑区 ── */
 
 /* 0.18.3：MD 工具栏主题适配（共有组件在 components/md-toolbar.css） */

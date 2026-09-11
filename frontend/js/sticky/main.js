@@ -208,6 +208,7 @@ async function init() {
     bindGeometryTracking();
     bindKeyboard();
     bindContextMenu();
+    bindEditorLease();
 
     // 内容变更：只在用户未在编辑时刷新，避免打断输入
     // 外部入口（内容编辑器 / Capability）的变更始终 reload；本窗口防抖写入才避开输入中刷新。
@@ -271,6 +272,57 @@ async function init() {
     console.log("[sticky] init 完成");
 }
 
+// ── 0.23.1：编辑器租约——便签在独立编辑器中编辑期间进入只读 ──
+
+/** 当前是否处于编辑租约（该便签正文由编辑器窗口负责） */
+let editorLeaseActive = false;
+
+/** 绑定编辑器会话事件（正常 init 与 preheat 首借两条路径各调用一次） */
+function bindEditorLease() {
+    listen(EVENTS.EDITOR_SESSION_CHANGED, (event) => {
+        const payload = event.payload;
+        if (!payload || !payload.stickyId || payload.stickyId !== stickyId) return;
+        if (payload.kind === "bound") {
+            enterEditorLease();
+        } else if (payload.kind === "ended") {
+            exitEditorLease();
+        }
+    });
+
+    document.getElementById("sticky-lease-back")?.addEventListener("click", async () => {
+        try {
+            // 同源重复打开：后端激活现有编辑器窗口（不新建会话）
+            await openContentEditor({
+                title: "编辑便签内容",
+                source: {kind: "sticky", stickyId},
+            });
+        } catch (e) {
+            const err = normalizeError(e);
+            console.warn(`[sticky] 返回编辑器失败 [${err.code}]: ${err.message}`);
+        }
+    });
+}
+
+/** 进入只读租约：编辑器不可写 + 显示横幅 */
+function enterEditorLease() {
+    if (editorLeaseActive) return;
+    editorLeaseActive = true;
+    if (tiptapEditor) tiptapEditor.setEditable(false);
+    if (textareaEl) textareaEl.readOnly = true;
+    document.getElementById("sticky-lease-banner")?.removeAttribute("hidden");
+    console.log("[sticky] 编辑租约生效：只读");
+}
+
+/** 退出租约：恢复可编辑 */
+function exitEditorLease() {
+    if (!editorLeaseActive) return;
+    editorLeaseActive = false;
+    if (tiptapEditor) tiptapEditor.setEditable(true);
+    if (textareaEl) textareaEl.readOnly = false;
+    document.getElementById("sticky-lease-banner")?.setAttribute("hidden", "");
+    console.log("[sticky] 编辑租约解除");
+}
+
 /**
  * 注册 __stickyReload 回调——预热和正常路径共享。
  * 预热分支也调用此函数，确保后端 eval 能找到 __stickyReload。
@@ -284,6 +336,8 @@ function registerStickyReload() {
         }
         // 重新初始化 Tiptap（editorEl 已被 destroy 清理）
         initTiptapEditor();
+        // 新便签不继承旧便签的编辑租约状态
+        exitEditorLease();
 
         // 0.18.3：首次从预热唤醒需绑定全部 DOM 事件；
         // recycled spare（非首次）只需重建 Tiptap 实例级监听
@@ -342,6 +396,7 @@ function registerStickyReload() {
 
             // bindEditing 单独调用（在 setContent 之前绑定 update 事件）
             bindEditing();
+            bindEditorLease();
         } else {
             // 0.18.3：recycled spare — 编辑器已重建，需重新绑定 Tiptap 实例级事件
             bindEditing();
@@ -590,6 +645,8 @@ function bindEditing() {
 function scheduleSave() {
     // 0.18.3 fix: 程序化设入内容时跳过，避免反馈循环
     if (isLoading) return;
+    // 0.23.1：编辑租约期间该便签由编辑器负责保存，本窗口不再写库
+    if (editorLeaseActive) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
         saveTimer = null; // 0.18.3 fix: 触发后清空，避免 flushSave 误判
@@ -764,17 +821,20 @@ function bindMoreMenu() {
         moreMenu.hidden = true;
         await flushSave();
         try {
+            // 0.23.1：结构化来源；正文与 revision 由后端从 DB 读取
             await openContentEditor({
-                body: getContent(),
-                format: "markdown",
                 title: "编辑便签内容",
-                origin: "sticky",
-                originRef: stickyId,
-                savePolicy: "sticky_update",
+                source: {kind: "sticky", stickyId},
             });
         } catch (e) {
             const err = normalizeError(e);
-            console.error(`[sticky] 打开编辑器失败 [${err.code}]: ${err.message}`);
+            if (err.code === "editor_busy") {
+                // 0.23.1：编辑器已有异源任务——可见提示，正文不覆盖
+                showError(t("editor.busy"));
+            } else {
+                showError(err.message);
+                console.error(`[sticky] 打开编辑器失败 [${err.code}]: ${err.message}`);
+            }
         }
     });
 
@@ -1028,17 +1088,20 @@ function showContextMenu(x, y) {
         hideContextMenu();
         await flushSave();
         try {
+            // 0.23.1：结构化来源；正文与 revision 由后端从 DB 读取
             await openContentEditor({
-                body: getContent(),
-                format: "markdown",
                 title: "编辑便签内容",
-                origin: "sticky",
-                originRef: stickyId,
-                savePolicy: "sticky_update",
+                source: {kind: "sticky", stickyId},
             });
         } catch (e) {
             const err = normalizeError(e);
-            console.error(`[sticky] 打开编辑器失败 [${err.code}]: ${err.message}`);
+            if (err.code === "editor_busy") {
+                // 0.23.1：编辑器已有异源任务——可见提示，正文不覆盖
+                showError(t("editor.busy"));
+            } else {
+                showError(err.message);
+                console.error(`[sticky] 打开编辑器失败 [${err.code}]: ${err.message}`);
+            }
         }
     });
     menu.appendChild(itemEditor);

@@ -42,6 +42,8 @@ const CODE_I18N_KEYS = {
     runtime_error: "action.error.runtime",
     missing_arg: "action.error.missing_arg",
     unknown_error: "action.error.unknown",
+    // 0.23.1：编辑器已有活动会话（EditorBusy）
+    editor_busy: "editor.busy",
 };
 
 /**

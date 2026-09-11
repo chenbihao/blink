@@ -198,13 +198,10 @@ function createItem(note, isTrash) {
         }
 
         actions.appendChild(makeActionBtn("编辑", "pencil", async () => {
+            // 0.23.1：结构化来源；正文与 revision 由后端从 DB 读取
             await openContentEditor({
-                body: note.content || "",
-                format: "markdown",
                 title: "编辑便签内容",
-                origin: "sticky",
-                originRef: note.id,
-                savePolicy: "sticky_update",
+                source: {kind: "sticky", stickyId: note.id},
             }).catch((e) => console.error("openContentEditor failed:", e));
         }));
 

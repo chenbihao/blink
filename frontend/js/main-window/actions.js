@@ -128,13 +128,11 @@ export async function activateItem(data) {
             }
             const isClipboard = source === "clipboard";
             try {
+                // 0.23.1：结构化来源；保存目标由后端按来源推导（剪贴板结果）
                 await openContentEditor({
                     body: text,
-                    format: "plain",
                     title: isClipboard ? "编辑剪贴板内容" : "编辑内容",
-                    origin: isClipboard ? "clipboard" : "item",
-                    originRef,
-                    savePolicy: "clipboard_new",
+                    source: {kind: "clipboard_item", itemRef: originRef},
                 });
             } catch (e) {
                 showActionError("edit_text_item", e);

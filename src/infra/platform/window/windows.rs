@@ -1582,11 +1582,12 @@ pub fn hide_chat_window_primitive(app: &AppHandle) {
     }
 }
 
-/// 显示内容编辑器窗口（0.16.3）。
+/// 显示内容编辑器窗口（0.16.3；0.23.1 移除 eval 重载钩子）。
 ///
 /// 独立 Tauri 窗口，启动后预热并复用；用户唤起与预热共用 single-flight 创建入口。
 /// 看门狗按 PID 判定，前台切到编辑器时主窗不会被误隐藏。
-/// payload 经 PendingEditorPayload State 中转，前端 init 时调 get_content_editor_payload 拉取。
+/// 会话内容由 `EditorSessionService` 管理：绑定后发 `editor-session-changed`
+/// 事件 + 前端 init 主动拉取快照，双路径覆盖“监听器未就绪”与“已就绪”两种时序。
 pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
 
@@ -1615,10 +1616,7 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
         tracing::warn!(error = %e, "content-editor window: 创建失败");
         e
     })?;
-    if !is_new {
-        // 复用已有窗口——前端需重新拉取 payload
-        let _ = win.eval("window.__contentEditorReload && window.__contentEditorReload()");
-    }
+    let _ = is_new; // 复用与新窗口统一走事件 + 前端 init 拉取，无需差异化处理
 
     // 系统菜单拦截 + 圆角（与 chat 窗口一致）
     if let Ok(hwnd) = win.hwnd() {

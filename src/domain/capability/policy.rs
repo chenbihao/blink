@@ -14,6 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::editor::OpenEditorRequest;
+
 // ── DangerClass 迁移 ─────────────────────────────────────────────────────────
 
 /// 危险等级——安全枚举只有一份，Capability / AI 确认 / 审计共用。
@@ -318,7 +320,7 @@ pub trait SurfacePort: Send + Sync {
     /// （所见即所得）。全量 cloak 净化只属于 headless `screenshot` capability。
     async fn start_region_capture(&self, hide_blink_main: bool) -> Result<(), SurfaceError>;
     fn start_image_editor(&self, source: EditorSourceRef) -> Result<(), SurfaceError>;
-    fn start_content_editor(&self, request: ContentEditorRequest) -> Result<(), SurfaceError>;
+    fn start_content_editor(&self, request: OpenEditorRequest) -> Result<(), SurfaceError>;
 
     /// 隐藏主窗口（GUI starter Capability 打开新窗口前调用）。
     fn hide_main_window(&self, reason: &str);
@@ -452,7 +454,7 @@ pub enum SurfaceError {
     WindowStateMismatch { expected: String, actual: String },
 }
 
-// ── EditorSourceRef / ContentEditorRequest ───────────────────────────────────
+// ── EditorSourceRef ──────────────────────────────────────────────────────────
 
 /// 图片编辑器来源引用——避免传递大 Blob。
 #[derive(Debug, Clone)]
@@ -464,15 +466,8 @@ pub enum EditorSourceRef {
     StashRef(String),
 }
 
-/// 内容编辑器请求——结构化 prefill。
-#[derive(Debug, Clone)]
-pub struct ContentEditorRequest {
-    pub body: String,
-    pub title: Option<String>,
-    pub origin: String,
-    pub origin_ref: Option<String>,
-    pub save_policy: String,
-}
+// 0.23.1：内容编辑器请求类型收敛到 `crate::domain::editor::OpenEditorRequest`
+//（结构化 SourceDescriptor，替代旧裸字符串 DTO）。
 
 // ── AiDefault / McpDefault ───────────────────────────────────────────────────
 
@@ -811,7 +806,7 @@ mod tests {
             fn start_image_editor(&self, _: EditorSourceRef) -> Result<(), SurfaceError> {
                 Ok(())
             }
-            fn start_content_editor(&self, _: ContentEditorRequest) -> Result<(), SurfaceError> {
+            fn start_content_editor(&self, _: OpenEditorRequest) -> Result<(), SurfaceError> {
                 Ok(())
             }
             fn hide_main_window(&self, _reason: &str) {}

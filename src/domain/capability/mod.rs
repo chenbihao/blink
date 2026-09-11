@@ -36,9 +36,8 @@ pub use image_stash::StashedImage;
 #[allow(unused_imports)]
 pub use policy::{
     AiDefault, CapabilityPolicy, CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage,
-    ConfirmationPolicy, ContentEditorRequest, DangerClass, EditorSourceRef, InvocationOrigin,
-    McpDefault, OriginSet, RuntimeCapabilities, RuntimeRequirement, SurfaceError, SurfacePort,
-    WindowActionResult,
+    ConfirmationPolicy, DangerClass, EditorSourceRef, InvocationOrigin, McpDefault, OriginSet,
+    RuntimeCapabilities, RuntimeRequirement, SurfaceError, SurfacePort, WindowActionResult,
 };
 #[allow(unused_imports)]
 pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, normalize};
