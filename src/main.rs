@@ -1198,6 +1198,10 @@ fn main() {
                 app.handle().clone(),
             )));
 
+            // 修复：编辑器恢复草稿存储（原子持久化 + 单调 revision 水位；
+            // 与保存目标完全分离，只写 %APPDATA%\blink\editor-drafts）
+            app.manage(std::sync::Arc::new(app::editor_draft::EditorDraftStore::new()));
+
             // 0.23.4：编辑器 AI 整理服务（全局单活跃经 ChatService tracker；
             // provider 池与活跃槽在运行时经 app.state 解析）
             if let Some(chat) = app
@@ -1464,6 +1468,13 @@ app::commands::search_clipboard_history,
             app::commands::commit_content_editor,
             app::commands::end_content_editor,
             app::commands::resolve_editor_exit,
+            // 修复：编辑器恢复草稿（与 Ctrl+S 分离的持久化通道）
+            app::commands::save_editor_draft,
+            app::commands::load_editor_draft,
+            app::commands::list_editor_drafts,
+            app::commands::clear_editor_draft,
+            app::commands::orphan_editor_draft,
+            app::commands::archive_editor_draft,
             // 0.23.3 编辑器连续听写
             app::commands::start_editor_voice,
             app::commands::pause_editor_voice,

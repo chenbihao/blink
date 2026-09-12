@@ -22,6 +22,28 @@ import {EVENTS} from "../shared/event-names.js";
 import {t} from "../i18n/index.js";
 import {computeDiff, diffToHtml, hasChanges} from "./diff.js";
 
+/**
+ * "仍在处理中"档位阈值（秒，0.23.7）。
+ *
+ * 真实请求常见 20s+，静态"正在整理"会让用户以为卡死。超过该阈值后等待态
+ * 追加"仍在处理中"提示，并始终展示真实经过时间——**不展示百分比**：后端
+ * 当前没有可用的阶段进度，虚假进度比没有进度更糟。
+ */
+export const STILL_WORKING_AFTER_SECONDS = 10;
+
+/** 等待态文案 key（纯函数）：未超阈值用常态文案，超过后提示仍在处理。 */
+export function runningLabelKey(seconds) {
+    return seconds >= STILL_WORKING_AFTER_SECONDS
+        ? "editor.transform.stillWorking"
+        : "editor.transform.running";
+}
+
+/** 真实经过时间（秒，向下取整、非负；起点缺失时按 0）。 */
+export function elapsedSeconds(startedAt, now) {
+    if (startedAt == null || now == null) return 0;
+    return Math.max(0, Math.floor((now - startedAt) / 1000));
+}
+
 export class EditorTransformController {
     /** @type {"idle"|"running"|"candidate"} */
     phase = "idle";
@@ -52,6 +74,12 @@ export class EditorTransformController {
     /** retired 记录上限（完成事件迟于响应的窗口有限，32 足够宽裕） */
     static RETIRED_CAP = 32;
 
+    /** 等待态计时器句柄（running 期间每秒刷新真实经过时间） */
+    _runTimer = null;
+
+    /** running 起始时刻（ms；离开 running 时清空） */
+    _runStartedAt = null;
+
     /**
      * @param {object} deps
      * @param {*} deps.api - shared/api.js 子集（测试注入 fake）：
@@ -64,24 +92,54 @@ export class EditorTransformController {
      * @param {HTMLElement|null} [deps.el.card] [deps.el.title] [deps.el.staleStrip]
      * @param {HTMLElement|null} [deps.el.body] [deps.el.applyBtn] [deps.el.copyBtn]
      * @param {HTMLElement|null} [deps.el.discardBtn] [deps.el.closeBtn]
+     * @param {() => number} [deps.now] - 时钟（测试注入假时钟）
+     * @param {(fn: () => void, ms: number) => *} [deps.setTimer] - 计时器（测试注入）
+     * @param {(id: *) => void} [deps.clearTimer]
      * @param {object} callbacks
      * @param {(phase: string) => void} [callbacks.onPhaseChanged]
      * @param {(message: string) => void} [callbacks.onStatus] - 状态行文案（已翻译）
      * @param {(message: string) => void} [callbacks.onError] - 已翻译错误文案
      */
-    constructor({api, adapter, getSession, listen, copyToClipboard, el = {}}, callbacks = {}) {
+    constructor(
+        {
+            api,
+            adapter,
+            getSession,
+            listen,
+            copyToClipboard,
+            el = {},
+            now = () => Date.now(),
+            // UI 心跳不应单独维持进程存活（Node 测试/CLI 场景会因此挂死）；
+            // 浏览器返回值是 number，无 unref，`?.` 直接忽略。
+            setTimer = (fn, ms) => {
+                const id = setInterval(fn, ms);
+                id?.unref?.();
+                return id;
+            },
+            clearTimer = (id) => clearInterval(id),
+        },
+        callbacks = {},
+    ) {
         this._api = api;
         this._adapter = adapter;
         this._getSession = getSession;
         this._listen = listen;
         this._copyToClipboard = copyToClipboard;
         this._el = el;
+        this._now = now;
+        this._setTimer = setTimer;
+        this._clearTimer = clearTimer;
         this._callbacks = callbacks;
         this._unlisteners = null;
     }
 
     get isBusy() {
         return this.phase === "running";
+    }
+
+    /** 等待态真实经过时间（秒） */
+    get runningElapsedSeconds() {
+        return elapsedSeconds(this._runStartedAt, this._now());
     }
 
     /** 注册后端完成/失败事件。幂等。 */
@@ -96,6 +154,7 @@ export class EditorTransformController {
 
     /** 解绑事件监听（测试/卸载用）。 */
     unbind() {
+        this._stopTicker();
         for (const off of this._unlisteners ?? []) {
             try {
                 off();
@@ -104,6 +163,11 @@ export class EditorTransformController {
             }
         }
         this._unlisteners = null;
+    }
+
+    /** 语言切换后重绘卡片动态文案（等待态标签、取消/放弃按钮）。 */
+    refreshCard() {
+        this._renderCard();
     }
 
     // ── 入口 ──────────────────────────────────────────────────────────────
@@ -135,11 +199,9 @@ export class EditorTransformController {
         // 发生的取消/新请求会推进 _opSeq 或离开 running；迟到响应据此不写回
         // 状态，并立即补发取消（追认），不让被弃请求占用全局 AI 单槽。
         const op = ++this._opSeq;
-        this.phase = "running";
         // 新一代请求起步即清空运行槽：上一代遗留的 requestId 不得参与本代
         // 完成事件过滤（二次 Review：连续极早完成不得遗留旧 id）。
         this.runRequestId = null;
-        this._callbacks.onPhaseChanged?.(this.phase);
         this.pendingRun = {
             scope,
             sourceText: frozen.text,
@@ -147,7 +209,7 @@ export class EditorTransformController {
             frozenRevision: this._adapter.revision,
         };
         this._callbacks.onStatus?.(t("editor.transform.running"));
-        this._renderCard();
+        this._setPhase("running");
 
         try {
             const res = await this._api.startEditorTransform({
@@ -183,12 +245,10 @@ export class EditorTransformController {
             const err = normalizeError(e);
             console.warn(`[editor-transform] start 失败 [${err.code}]: ${err.message}`);
             if (op !== this._opSeq || this.phase !== "running") return; // 迟到失败不污染新状态
-            this.phase = "idle";
             this.runRequestId = null;
             this.pendingRun = null;
-            this._callbacks.onPhaseChanged?.(this.phase);
+            this._setPhase("idle");
             this._callbacks.onError?.(this._describe(err.code, err.detail));
-            this._renderCard();
         }
     }
 
@@ -201,10 +261,10 @@ export class EditorTransformController {
     async cancel({silent = false} = {}) {
         const hadRunning = this.phase === "running";
         const requestId = this.runRequestId;
-        this.phase = "idle";
         this.runRequestId = null;
         this.pendingRun = null;
         if (this.candidate) this._discardCandidate({silent: true});
+        this._setPhase("idle");
 
         if (hadRunning && requestId != null) {
             this._retire(requestId);
@@ -216,8 +276,6 @@ export class EditorTransformController {
             }
             if (!silent) this._callbacks.onStatus?.(t("editor.transform.cancelled"));
         }
-        this._callbacks.onPhaseChanged?.(this.phase);
-        this._renderCard();
     }
 
     // ── 后端事件 ──────────────────────────────────────────────────────────
@@ -239,9 +297,6 @@ export class EditorTransformController {
         const session = this._getSession();
         if (!session || p.sessionRef !== session.sessionRef || p.generation !== session.generation) return;
         if (this.runRequestId != null && p.requestId !== this.runRequestId) return;
-        this.runRequestId = p.requestId;
-
-        this.phase = "candidate";
         this.runRequestId = null;
         const stale = p.revision !== this._adapter.revision;
         this.candidate = {
@@ -254,9 +309,8 @@ export class EditorTransformController {
             stale,
         };
         this.pendingRun = null;
-        this._callbacks.onPhaseChanged?.(this.phase);
+        this._setPhase("candidate");
         this._callbacks.onStatus?.(t("editor.transform.candidateReady"));
-        this._renderCard();
     }
 
     /**
@@ -277,14 +331,12 @@ export class EditorTransformController {
 
         const code = p.code ?? "provider";
         const alreadyIdle = code === "cancelled";
-        this.phase = "idle";
         this.runRequestId = null;
         this.pendingRun = null;
-        this._callbacks.onPhaseChanged?.(this.phase);
+        this._setPhase("idle");
         if (!alreadyIdle) {
             this._callbacks.onError?.(this._describe(code, ""));
         }
-        this._renderCard();
     }
 
     // ── 候选操作 ──────────────────────────────────────────────────────────
@@ -314,16 +366,10 @@ export class EditorTransformController {
             // Engine 复核失败（正文实际内容与冻结不符）：候选作废
             this._callbacks.onError?.(t("editor.transform.err.applyFailed"));
             this._discardCandidate({silent: true});
-            this.phase = "idle";
-            this._callbacks.onPhaseChanged?.(this.phase);
-            this._renderCard();
             return false;
         }
         this._discardCandidate({silent: true});
-        this.phase = "idle";
-        this._callbacks.onPhaseChanged?.(this.phase);
         this._callbacks.onStatus?.(t("editor.transform.applied"));
-        this._renderCard();
         return true;
     }
 
@@ -339,13 +385,79 @@ export class EditorTransformController {
         }
     }
 
-    /** 放弃候选（用户显式）。 */
+    /**
+     * 放弃候选 / 取消运行中的请求（用户显式）。
+     * 运行中时"放弃"即取消请求——候选卡上该按钮文案相应显示为"取消"，
+     * 与关闭按钮同义，两个入口都保留（0.23.7 等待态要求保留取消/关闭入口）。
+     */
     async discard() {
+        if (this.phase === "running") {
+            await this.cancel();
+            return;
+        }
         if (!this.candidate) return;
         this._discardCandidate({silent: false});
     }
 
     // ── 内部 ──────────────────────────────────────────────────────────────
+
+    /**
+     * 唯一 phase 写入口：同步等待态计时器 → 通知 phase 变化 → 重绘卡片。
+     * running 期间启动 1s 心跳刷新真实经过时间；离开 running 立即停表，
+     * 不留悬挂计时器（会话结束/取消/候选/失败都走这里）。
+     * @param {"idle"|"running"|"candidate"} next
+     */
+    _setPhase(next) {
+        this.phase = next;
+        if (next === "running") {
+            if (this._runStartedAt == null) this._runStartedAt = this._now();
+            this._startTicker();
+        } else {
+            this._stopTicker();
+            this._runStartedAt = null;
+        }
+        this._callbacks.onPhaseChanged?.(next);
+        this._renderCard();
+    }
+
+    /** 启动等待态心跳（幂等：先停旧表）。 */
+    _startTicker() {
+        this._stopTicker();
+        this._runTimer = this._setTimer(() => {
+            if (this.phase !== "running") {
+                this._stopTicker();
+                return;
+            }
+            this._renderRunningText();
+        }, 1000);
+    }
+
+    _stopTicker() {
+        if (this._runTimer == null) return;
+        this._clearTimer(this._runTimer);
+        this._runTimer = null;
+    }
+
+    /** 只更新等待行的文案节点（避免整段 innerHTML 重建重启 spinner 动画）。 */
+    _renderRunningText() {
+        const body = this._el.body;
+        if (!body?.querySelector) return;
+        const seconds = this.runningElapsedSeconds;
+        const label = body.querySelector(".editor-diff-running-label");
+        if (label) label.textContent = t(runningLabelKey(seconds));
+        const elapsed = body.querySelector(".editor-diff-running-elapsed");
+        if (elapsed) elapsed.textContent = t("editor.transform.elapsed", {seconds});
+    }
+
+    /** 等待态行：spinner + 状态文案 + 真实经过时间（无百分比，§3.7）。 */
+    _runningHtml() {
+        const seconds = this.runningElapsedSeconds;
+        return '<span class="editor-diff-running">'
+            + '<span class="spinner spinner-sm" aria-hidden="true"></span>'
+            + `<span class="editor-diff-running-label">${escapeHtml(t(runningLabelKey(seconds)))}</span>`
+            + `<span class="editor-diff-running-elapsed">${escapeHtml(t("editor.transform.elapsed", {seconds}))}</span>`
+            + "</span>";
+    }
 
     /**
      * 退役一个请求 id：标记其迟到事件无效，并维持有界（超上限按插入序淘汰
@@ -372,10 +484,15 @@ export class EditorTransformController {
     }
 
     _discardCandidate({silent}) {
+        const wasCandidate = this.phase === "candidate";
         this.candidate = null;
-        if (this.phase === "candidate") this.phase = "idle";
         if (!silent) this._callbacks.onStatus?.(t("editor.transform.discarded"));
-        this._renderCard();
+        if (wasCandidate) {
+            // 经唯一 phase 入口：通知下游（chips 可见性等）并重绘
+            this._setPhase("idle");
+        } else {
+            this._renderCard();
+        }
     }
 
     _bindCardActions() {
@@ -388,7 +505,7 @@ export class EditorTransformController {
 
     /** 候选卡投影（无头模式下为空操作）。 */
     _renderCard() {
-        const {card, title, staleStrip, body, applyBtn, copyBtn} = this._el;
+        const {card, title, staleStrip, body, applyBtn, copyBtn, discardBtn} = this._el;
         if (!card) return;
         const show = !!this.candidate || this.phase === "running";
         card.classList.toggle("hidden", !show);
@@ -397,9 +514,18 @@ export class EditorTransformController {
         if (this.phase === "running") {
             if (title) title.textContent = t("editor.transform.cardTitleRunning");
             if (staleStrip) staleStrip.classList.add("hidden");
-            if (body) body.innerHTML = `<span class="diff-running">${t("editor.transform.running")}</span>`;
-            if (applyBtn) applyBtn.disabled = true;
-            if (copyBtn) copyBtn.disabled = true;
+            // 等待态：spinner + 状态文案 + 真实经过时间（超过阈值提示"仍在处理中"）
+            if (body) body.innerHTML = this._runningHtml();
+            // 尚不可用的应用/复制入口禁用；放弃按钮改为"取消"语义（等同关闭）
+            if (applyBtn) {
+                applyBtn.disabled = true;
+                applyBtn.title = t("editor.transform.runningHint");
+            }
+            if (copyBtn) {
+                copyBtn.disabled = true;
+                copyBtn.title = t("editor.transform.runningHint");
+            }
+            if (discardBtn) discardBtn.textContent = t("editor.transform.cancel");
             return;
         }
 
@@ -410,6 +536,7 @@ export class EditorTransformController {
                 : "editor.transform.cardTitleSelection");
         }
         if (staleStrip) staleStrip.classList.toggle("hidden", !cand.stale);
+        if (discardBtn) discardBtn.textContent = t("editor.transform.discard");
 
         const segments = computeDiff(cand.sourceText, cand.revisedText);
         if (body) {

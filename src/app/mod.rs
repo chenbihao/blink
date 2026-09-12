@@ -9,6 +9,7 @@ pub mod commands;
 pub mod config;
 pub mod domain_env; // 0.14.6 §2.2：TauriDomainEnv——DomainEnv trait 的 Tauri 实现
 pub mod editor; // 0.23.1：单 EditorSession 服务（会话身份/窗口绑定/保存分派）
+pub mod editor_draft; // 修复：编辑器恢复草稿存储（原子持久化 + 单调 revision 水位）
 pub mod editor_transform; // 0.23.4：编辑器 AI 整理编排（全局单活跃/只产候选）
 pub mod local_engine; // 0.22.3：本地引擎生命周期编排服务（EngineManager + EngineRegistry）
 pub mod mcp_server_runtime; // 0.19.13：主进程 Streamable HTTP MCP Server 生命周期管理

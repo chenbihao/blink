@@ -137,6 +137,11 @@ ICON_LIST = [
     "play",             # 启动引擎
     "wrench",           # 修复引擎
     "stethoscope",      # 引擎诊断按钮（0.22.6：诊断面板入口）
+
+    # 语音浮窗（0.23.7：editor 模式三个控制按钮图标化）
+    "pause",            # 暂停连续听写（与已有 play 组成 暂停/继续 对）
+    "arrow-left",        # 返回编辑器
+
     # 已有：square（停止）、trash-2（清理）、x（取消）、terminal（日志）、server、scan-text
 ]
 

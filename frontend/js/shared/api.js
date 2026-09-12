@@ -637,6 +637,56 @@ export function getChatStatus() {
     return invoke("get_chat_status");
 }
 
+// ── 编辑器恢复草稿（与 Ctrl+S 分离的持久化通道）──
+
+/**
+ * 保存恢复草稿。同一会话身份下旧 revision 会被后端拒绝
+ * （reject `{code:"stale_revision"}`），保证旧异步写入不覆盖新正文。
+ * @param {*} request - { key, sessionRef, generation, revision, hash, body,
+ *   baseDigest, baseRevision, sourceInstanceId, schemaVersion }
+ * @returns {Promise<{storedRevision: number}>}
+ */
+export function saveEditorDraft(request) {
+    return invoke("save_editor_draft", {request});
+}
+
+/**
+ * 读取恢复草稿（会话绑定时探测崩溃残留）；无草稿返回 null。
+ * @param {string} key 来源键（跨崩溃稳定）
+ * @param {{sessionRef?: string, generation?: number}} [identity]
+ * @returns {Promise<{key, revision, hash, body, updatedAtMs}|null>}
+ */
+export function loadEditorDraft(key, identity = {}) {
+    return invoke("load_editor_draft", {
+        key,
+        sessionRef: identity.sessionRef ?? null,
+        generation: identity.generation ?? null,
+    });
+}
+
+/** 最近的恢复候选；临时来源只能由用户显式选择。 */
+export function listEditorDrafts() {
+    return invoke("list_editor_drafts");
+}
+
+/**
+ * 清理恢复草稿（成功提交 / 放弃修改 / 会话结束）。幂等。
+ * @param {*} request - { key, sessionRef, generation, expectedRevision, expectedHash }
+ */
+export function clearEditorDraft(request) {
+    return invoke("clear_editor_draft", {request});
+}
+
+/** 标记来源失效后的草稿为 orphan 候选（带版本墙）。 */
+export function orphanEditorDraft(request) {
+    return invoke("orphan_editor_draft", {request});
+}
+
+/** 将精确匹配的旧候选迁移到独立 orphan 键；不匹配返回 null。 */
+export function archiveEditorDraft(request) {
+    return invoke("archive_editor_draft", {request});
+}
+
 // ── 0.16.4-0.16.5 剪贴板图片 ──
 
 /** 0.16.4：将剪贴板图片写回系统剪贴板。imageId 为 clipboard_images 表 id。 */

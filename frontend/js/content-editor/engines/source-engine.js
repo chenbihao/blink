@@ -25,6 +25,9 @@ export class SourceEngine {
     /** 引擎种类标识（range handle 前缀共用） */
     kind = "source";
 
+    /** Source 视图恒可编辑（2M 字符 envelope 内）；与 MD 引擎契约保持一致 */
+    readOnly = false;
+
     /**
      * @param {object} options
      * @param {HTMLTextAreaElement} options.element
@@ -82,9 +85,10 @@ export class SourceEngine {
      * undo 栈；未聚焦时直写并手动通知——**不抢焦点**（失焦期间听写继续）。
      * 追加后恢复用户此前 selection；选区原在文末时自然跟随到新文末。
      * @param {string} text
+     * @returns {boolean} 是否已写入
      */
     appendText(text) {
-        if (!text) return;
+        if (!text) return false;
         const el = this.el;
         const prevStart = el.selectionStart;
         const prevEnd = el.selectionEnd;
@@ -104,22 +108,24 @@ export class SourceEngine {
                 this._onChange?.();
             }
             if (!atEnd) el.setSelectionRange(prevStart, prevEnd);
-            return;
+            return true;
         }
 
         // 未聚焦：直写（value 赋值会把 caret 移到末尾，需恢复）
         el.value = el.value + text;
         this._onChange?.();
         if (!atEnd) el.setSelectionRange(prevStart, prevEnd);
+        return true;
     }
 
     /**
      * 文末新起一段追加（0.23.3 首段语义）：按需补段落分隔后追加。
      * @param {string} text
+     * @returns {boolean} 是否已写入
      */
     appendParagraph(text) {
-        if (!text) return;
-        this.appendText(dictationGapPrefix(this.el.value) + text);
+        if (!text) return false;
+        return this.appendText(dictationGapPrefix(this.el.value) + text);
     }
 
     /**

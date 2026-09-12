@@ -35,6 +35,10 @@ export class EditorSession {
     /** 会话代际 */
     generation = 0;
 
+    /** 后端生成的恢复草稿键/来源实例，前端不从来源描述符猜测 */
+    draftKey = null;
+    sourceInstanceId = null;
+
     /** 来源描述符（快照下发） */
     source = null;
 
@@ -98,6 +102,10 @@ export class EditorSession {
         this.sessionRef = snap.sessionRef;
         this.generation = generation;
         this._latestGeneration = generation;
+        this.draftKey = typeof snap.draftKey === "string" ? snap.draftKey : null;
+        this.sourceInstanceId = typeof snap.sourceInstanceId === "string"
+            ? snap.sourceInstanceId
+            : null;
         this.source = snap.source ?? null;
         this.sourceRevision = snap.sourceRevision ?? null;
         this.target = snap.commitTarget ?? null;
@@ -254,6 +262,8 @@ export class EditorSession {
     _resetLocal() {
         this.sessionRef = null;
         this.generation = 0;
+        this.draftKey = null;
+        this.sourceInstanceId = null;
         this.source = null;
         this.sourceRevision = null;
         this.target = null;

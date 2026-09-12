@@ -22,6 +22,7 @@ package-lock.json
 .codex/
 .zcode/
 .agents/
+.workbuddy/
 
 # OS
 .DS_Store

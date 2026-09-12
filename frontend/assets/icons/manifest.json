@@ -1,8 +1,9 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-09-12T00:32:46Z",
+  "generatedAt": "2026-09-12T12:17:41Z",
   "icons": [
     "aperture",
+    "arrow-left",
     "audio-lines",
     "bookmark-check",
     "brain",
@@ -48,6 +49,7 @@
     "mouse-pointer-2",
     "move-up-right",
     "paintbrush",
+    "pause",
     "pencil",
     "pencil-sparkles",
     "pin",

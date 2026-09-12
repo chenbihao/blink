@@ -307,6 +307,10 @@ pub struct OpenEditorRequest {
 pub struct EditorSessionSnapshot {
     pub session_ref: String,
     pub generation: u64,
+    /// 后端生成的恢复草稿键。前端不得从 SourceDescriptor 猜测临时来源身份。
+    pub draft_key: String,
+    /// 本次来源实例的后端不透明身份；临时来源不会复用。
+    pub source_instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// 初始正文（UTF-8 真源）。

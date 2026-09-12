@@ -8,9 +8,13 @@
 </head>
 <body>
 <!-- 0.23.3 通用浮窗：同一窗口按 target/mode/phase 投影（§5.4）。
-     g2 hold 模式 = 既有布局；editor 连续听写模式 = 拖拽条 + 波形 + 预览 + 控制。 -->
+     g2 hold 模式 = 既有布局；editor 连续听写模式 = 拖拽条 + 波形 + 预览 + 控制。
+     0.23.7：editor 模式进入即用固定稳定尺寸（js/voice-overlay/layout.js），预览区
+     内部滚动，窗口不再随识别文本跳动；三个控制按钮图标化，"返回编辑器"有足够宽度。 -->
 <div id="overlay" class="mode-g2">
-    <!-- editor 模式拖拽条（mini/展开切换 + 语音设置入口） -->
+    <!-- editor 模式拖拽条（mini/展开切换 + 语音设置入口）。
+         整条都是 data-tauri-drag-region，标题占满剩余宽度，拖拽热区不再只有窄窄一条；
+         两个图标按钮是交互控件，Tauri 拖拽判定只命中带属性的元素本身，按钮天然 no-drag。 -->
     <div class="editor-strip hidden" data-tauri-drag-region id="editor-strip">
         <span aria-label="" class="editor-dot" id="editor-dot" role="img"></span>
         <span class="editor-strip-title" data-i18n="voice.overlay.dictation" data-tauri-drag-region>连续听写</span>
@@ -37,10 +41,25 @@
     <div aria-atomic="true" aria-live="polite" class="text" id="partial-text" role="status">语音输入中…</div>
     <div class="hint" data-i18n="voice.overlay.hint" id="hint">松开结束 · ESC 取消</div>
     <div class="editor-controls hidden" id="editor-controls">
-        <button class="editor-ctl" data-i18n="voice.overlay.pause" id="btn-pause" type="button">暂停</button>
-        <button class="editor-ctl editor-ctl-stop" data-i18n="voice.overlay.stop" id="btn-stop" type="button">结束
+        <!-- 暂停/继续：图标 + title 提示（文案随 phase 切换，由 JS 维护 aria-label） -->
+        <button aria-label="暂停" class="editor-ctl editor-ctl-icon" id="btn-pause" title="暂停" type="button">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-pause"/>
+            </svg>
         </button>
-        <button class="editor-ctl" data-i18n="voice.overlay.backToEditor" id="btn-back" type="button">返回编辑器
+        <!-- 结束：图标 + title 提示 -->
+        <button aria-label="结束" class="editor-ctl editor-ctl-icon editor-ctl-stop" id="btn-stop" title="结束"
+                type="button">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-square"/>
+            </svg>
+        </button>
+        <!-- 返回编辑器：主操作，图标 + 完整文案（flex 撑开剩余宽度，不再溢出） -->
+        <button class="editor-ctl editor-ctl-back" id="btn-back" type="button">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-arrow-left"/>
+            </svg>
+            <span data-i18n="voice.overlay.backToEditor">返回编辑器</span>
         </button>
     </div>
 </div>
@@ -50,6 +69,7 @@
     import {t, applyI18nFromConfig, onLangChange} from "./js/i18n/index.js";
     import {applyThemeFromConfig} from "./js/shared/theme.js";
     import {ensureSpriteLoaded} from "./js/shared/icon.js";
+    import {resolveOverlaySize} from "./js/voice-overlay/layout.js";
     import {
         focusContentEditor,
         pauseEditorVoice,
@@ -73,6 +93,7 @@
     const backBtn = document.getElementById("btn-back");
     const toggleSizeBtn = document.getElementById("btn-toggle-size");
     const toggleSizeIconUse = toggleSizeBtn.querySelector("use");
+    const pauseIconUse = pauseBtn.querySelector("use");
 
     // textEl 当前是否显示默认文案（非 partial / status / error 文本）
     // 用于语言切换时判断是否需要更新默认文案
@@ -113,13 +134,13 @@
         const busy = phase === "finalizing";
         pauseBtn.disabled = busy;
         stopBtn.disabled = busy;
-        if (phase === "paused") {
-            pauseBtn.textContent = t("voice.overlay.resume");
-            pauseBtn.dataset.i18n = "voice.overlay.resume";
-        } else {
-            pauseBtn.textContent = t("voice.overlay.pause");
-            pauseBtn.dataset.i18n = "voice.overlay.pause";
-        }
+        const paused = phase === "paused";
+        // 暂停/继续是图标按钮：图标、title 与 aria-label 三者随 phase 同步切换
+        //（非颜色单通道：图标形状 + 可访问名称双通道表达状态）
+        pauseIconUse.setAttribute("href", paused ? "#icon-play" : "#icon-pause");
+        const pauseLabel = t(paused ? "voice.overlay.resume" : "voice.overlay.pause");
+        pauseBtn.title = pauseLabel;
+        pauseBtn.setAttribute("aria-label", pauseLabel);
     }
 
     /** 文本区渲染：editor 模式只显示 preview（confirmed 进正文，浮窗不重复展示） */
@@ -136,24 +157,40 @@
         }
     }
 
-    // ── 自动撑高（0.10.6）─────────────────────────────────────────────
-    // 文本更新后测量内容高度，调用 Rust 侧 resize_voice_overlay 撑高窗口。
-    const MIN_HEIGHT = 140;
-    const MAX_HEIGHT = 400;
-    let lastResizeHeight = MIN_HEIGHT;
+    // ── 窗口尺寸（0.10.6 内容撑高 + 0.23.7 editor 固定稳定尺寸）────────
+    // g2：rAF 后测量内容高度撑高（§5.2 窗体尺寸稳定）；
+    // editor：固定尺寸（layout.js），预览文本内部滚动，窗口不随识别文本跳动。
+    let lastSize = {width: -1, height: -1};
+    // editor 模式尺寸断言标记：首个状态事件上再强制应用一次，
+    // 覆盖后端 show/复用窗口时序把尺寸重置回默认值的竞态。
+    let editorSizeAsserted = false;
 
-    function autoResize() {
+    function sendSize(width, height, {force = false} = {}) {
+        if (!force
+            && Math.abs(width - lastSize.width) < 1
+            && Math.abs(height - lastSize.height) <= 2) {
+            return;
+        }
+        lastSize = {width, height};
+        invoke("resize_voice_overlay", {height, width}).catch(() => {
+        });
+    }
+
+    /** 应用当前模式的目标尺寸；force 时绕过缓存强制下发。 */
+    function applySize({force = false} = {}) {
+        if (force) lastSize = {width: -1, height: -1};
+        if (mode === "editor") {
+            const {width, height} = resolveOverlaySize({mode, mini});
+            sendSize(width, height);
+            return;
+        }
+        // 文本更新后测量内容高度：必须在 rAF 内读 scrollHeight，否则拿到旧 layout
         requestAnimationFrame(() => {
-            const h = Math.min(
-                Math.max(document.body.scrollHeight, MIN_HEIGHT),
-                MAX_HEIGHT,
-            );
-            // 仅在高度变化 > 2px 时调用，避免频繁 IPC
-            if (Math.abs(h - lastResizeHeight) > 2) {
-                lastResizeHeight = h;
-                invoke("resize_voice_overlay", {height: h}).catch(() => {
-                });
-            }
+            const {width, height} = resolveOverlaySize({
+                mode,
+                contentHeight: document.body.scrollHeight,
+            });
+            sendSize(width, height);
         });
     }
 
@@ -192,7 +229,7 @@
         toggleSizeBtn.setAttribute("aria-label", toggleSizeBtn.title);
         controlsEl.classList.toggle("hidden", mode !== "editor" || mini);
         textEl.classList.toggle("hidden", mode === "editor" && mini);
-        autoResize();
+        applySize({force: true});
     });
 
     document.getElementById("btn-settings").addEventListener("click", () => {
@@ -206,6 +243,9 @@
 
     onLangChange(() => {
         if (isDefaultText) resetToDefaultText();
+        // 语言切换会改变按钮文案宽度，editor 模式为固定尺寸（预留了余量），
+        // g2 模式按内容重新撑高一次。
+        applySize({force: true});
     });
 
     // ── 音量级别 → 波形（g2 / editor 都驱动）────────────────────────
@@ -230,10 +270,14 @@
             setMode("editor");
             setEditorPhase("recording");
             setEditorText("");
+            // 0.23.7：进入 editor 模式立即设定稳定尺寸，不等第一条预览文本；
+            // force 覆盖后端 show/复用时重置默认尺寸的时序。
+            editorSizeAsserted = false;
+            applySize({force: true});
         } else {
             setMode("g2");
             resetToDefaultText();
-            autoResize();
+            applySize({force: true});
         }
     });
 
@@ -247,18 +291,26 @@
             setMode("g2");
             resetToDefaultText();
             resetWave();
-            autoResize();
+            applySize({force: true});
             return;
         }
         if (p.phase === "error") {
             textEl.textContent = t("voice.overlay.error");
             isDefaultText = false;
             waveEl.classList.add("voice-error");
-            autoResize();
+            applySize();
             return;
         }
         setEditorText(p.preview || "");
-        autoResize();
+        if (mode === "editor") {
+            if (!editorSizeAsserted) {
+                editorSizeAsserted = true;
+                applySize({force: true});
+            }
+            // editor 模式此后不再随预览文本调整窗口，预览区内部滚动
+            return;
+        }
+        applySize();
     });
 
     // ── 录音结束 → 复位（g2 / editor 兜底路径）───────────────────────
@@ -266,7 +318,7 @@
         setMode("g2");
         resetToDefaultText();
         resetWave();
-        autoResize();
+        applySize({force: true});
     });
 
     // ── g2 流式 partial 文本 ─────────────────────────────────────────
@@ -286,13 +338,13 @@
                 textEl.querySelector(".voice-confirmed").textContent = confirmed;
                 textEl.querySelector(".voice-preview").textContent = preview;
                 isDefaultText = false;
-                autoResize();
+                applySize();
             }
         } else if (payload.text) {
             // 兼容旧格式（真流式 / 非流式引擎）
             textEl.textContent = payload.text;
             isDefaultText = false;
-            autoResize();
+            applySize();
         }
     });
 
@@ -305,7 +357,7 @@
         // 模型加载中：波形转蓝色（清除可能残留的错误态红色）
         waveEl.classList.remove("voice-error");
         waveEl.classList.add("voice-loading");
-        autoResize();
+        applySize();
     });
 
     // ── 语音错误提示（STT 未配置 / 服务未启动等）────────────────────
@@ -317,7 +369,7 @@
         waveEl.classList.remove("voice-loading"); // 清除可能残留的加载态
         waveEl.classList.add("voice-error");
         if (target === "editor") setEditorPhase("error");
-        autoResize();
+        applySize();
     });
 </script>
 </body>

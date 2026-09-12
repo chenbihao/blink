@@ -34,7 +34,10 @@ pub struct CreateSticky;
 fn parse_content(args: &Value) -> Result<String, CapabilityError> {
     match args.get("content") {
         None | Some(Value::Null) => Ok(String::new()),
-        Some(Value::String(s)) => Ok(s.trim().to_string()),
+        // Whitespace is valid editor content.  Validation/blank semantics may
+        // inspect `trim()`, but the value handed to the atomic capability must
+        // remain byte-for-byte unchanged.
+        Some(Value::String(s)) => Ok(s.to_string()),
         Some(_) => Err(CapabilityError::InvalidArgs {
             detail: "create_sticky: content 参数类型错误，应为字符串".into(),
         }),
@@ -155,14 +158,18 @@ mod tests {
         assert_eq!(parse_content(&json!({})).unwrap(), "");
         assert_eq!(parse_content(&json!({"content": null})).unwrap(), "");
         assert_eq!(parse_content(&json!({"content": ""})).unwrap(), "");
-        assert_eq!(parse_content(&json!({"content": "   "})).unwrap(), "");
+        assert_eq!(parse_content(&json!({"content": "   "})).unwrap(), "   ");
     }
 
     #[test]
-    fn parse_content_trims_and_keeps_text() {
+    fn parse_content_preserves_editor_whitespace() {
         assert_eq!(
             parse_content(&json!({"content": "  hello  "})).unwrap(),
-            "hello"
+            "  hello  "
+        );
+        assert_eq!(
+            parse_content(&json!({"content": "\n  hello  \n"})).unwrap(),
+            "\n  hello  \n"
         );
     }
 

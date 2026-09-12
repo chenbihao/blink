@@ -13,7 +13,7 @@
 import {iconHTML} from "../shared/icon.js";
 import {saveDialog} from "../shared/tauri.js";
 import {t} from "../i18n/index.js";
-import {copyToClipboard, createStickyNote, runBuiltinAction} from "../shared/api.js";
+import {copyToClipboard, runBuiltinAction} from "../shared/api.js";
 
 /** "更多"菜单清单——顺序即展示顺序。 */
 export const MENU_ITEMS = [
@@ -22,7 +22,31 @@ export const MENU_ITEMS = [
     {id: "copy-all", icon: "copy", key: "editor.menu.copyAll"},
     {id: "create-sticky", icon: "sticky-note", key: "editor.menu.createSticky"},
     {id: "send-chat", icon: "send", key: "editor.menu.sendChat"},
+    {id: "recover-draft", icon: "rotate-ccw", key: "editor.menu.recoverDraft"},
 ];
+
+/**
+ * 便签冲突三选映射（0.23.6：choiceDialog 返回字符串契约，调用方统一
+ * 经此纯函数分派，杜绝 `choice === true` 的布尔比较）。
+ * @param {"ok"|"cancel"|"third"} choice
+ * @returns {"copy"|"reload"|"stay"}
+ */
+export function stickyConflictAction(choice) {
+    if (choice === "ok") return "copy";
+    if (choice === "third") return "reload";
+    return "stay"; // "cancel"（取消/Esc/遮罩/异常 fallback）
+}
+
+/**
+ * 文件冲突三选映射（同上，字符串契约）。
+ * @param {"ok"|"cancel"|"third"} choice
+ * @returns {"overwrite"|"saveCopy"|"stay"}
+ */
+export function fileConflictAction(choice) {
+    if (choice === "ok") return "overwrite";
+    if (choice === "third") return "saveCopy";
+    return "stay";
+}
 
 /**
  * CommitTarget → 显示信息（纯函数）。
@@ -71,11 +95,13 @@ export class EditorActions {
      * @param {object} [deps.api] - IPC 依赖（测试注入 fake）
      * @param {(opts: object) => Promise<string|null>} [deps.api.saveDialog]
      * @param {(text: string) => Promise<*>} [deps.api.copyToClipboard]
-     * @param {(content: string, color: string|null) => Promise<*>} [deps.api.createStickyNote]
      * @param {(id: string, arg: object|null) => Promise<*>} [deps.api.runBuiltinAction]
      * @param {object} callbacks
      * @param {(message: string) => void} [callbacks.onStatus] - 状态行文案（已翻译）
      * @param {(error: {code: string, message: string}) => void} [callbacks.onError] - 结构化保存错误
+     * @param {() => void} [callbacks.onTargetSaved] - 主目标变化后刷新展示
+     * @param {() => void} [callbacks.onCommitted] - 提交成功（基线前移 → 清理恢复草稿）
+     * @param {() => void} [callbacks.onRecoverDraft] - 打开恢复候选列表（0.23.6 恢复入口）
      */
     constructor({session, adapter, api = {}, callbacks = {}}) {
         this.session = session;
@@ -83,7 +109,6 @@ export class EditorActions {
         this.api = {
             saveDialog,
             copyToClipboard,
-            createStickyNote,
             runBuiltinAction,
             ...api,
         };
@@ -214,7 +239,9 @@ export class EditorActions {
 
     // ── 动作分派 ────────────────────────────────────────────────────────────
 
-    /** 菜单动作入口（主窗口测试/键盘可达性也可直接调用） */
+    /**
+     * 菜单动作入口（主窗口测试/键盘可达性也可直接调用）
+     */
     async handleAction(id) {
         switch (id) {
             case "save-to":
@@ -227,6 +254,9 @@ export class EditorActions {
                 return this.createSticky();
             case "send-chat":
                 return this.sendToChat();
+            case "recover-draft":
+                // 恢复候选列表是 main.js 编排的专用对话框，这里只回调。
+                return this._callbacks.onRecoverDraft?.();
             default:
                 console.warn(`[editor-actions] 未知动作: ${id}`);
         }
@@ -256,6 +286,8 @@ export class EditorActions {
         // 副本成功只提示，不刷新主目标显示（目标未变）
         if (result?.ok) {
             this._callbacks.onStatus?.(t("editor.savedCopy", {path}));
+            // 提交成功：正文已成为新基线，恢复草稿不再需要
+            this._callbacks.onCommitted?.();
         } else if (result?.error) {
             this._callbacks.onError?.(result.error);
         }
@@ -273,11 +305,19 @@ export class EditorActions {
         }
     }
 
-    /** 创建便签（全文；不改主目标，不关闭编辑器） */
+    /**
+     * 创建便签（全文；不改主目标，不关闭编辑器）。
+     *
+     * 0.23.7 修复：此前只调 `create_sticky_note`（纯落库）且丢弃返回值，
+     * 于是"创建成功但没有窗口"。改为经统一 `create_sticky` Capability——
+     * 创建 + 居中定位 + 显示窗口是同一个原子执行入口（spec-architecture §A3.5
+     * 单一原子执行语义），与 Alt+S chord、主窗口动作走同一条链路。单次调用
+     * 因此天然只创建一次，不存在 create/show 两步之间重复创建的可能。
+     */
     async createSticky() {
         if (!this.session?.isActive) return;
         try {
-            await this.api.createStickyNote(this.adapter.getText(), null);
+            await this.api.runBuiltinAction("create_sticky", {content: this.adapter.getText()});
             this._callbacks.onStatus?.(t("editor.stickyCreated"));
         } catch (e) {
             console.error("[editor-actions] 创建便签失败:", e);
@@ -303,6 +343,8 @@ export class EditorActions {
         if (result?.ok) {
             this._callbacks.onStatus?.(t("editor.savedToFile"));
             this._callbacks.onTargetSaved?.(this.session.target);
+            // 提交成功：正文已成为新基线，恢复草稿不再需要
+            this._callbacks.onCommitted?.();
             return;
         }
         if (result?.error) {

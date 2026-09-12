@@ -73,6 +73,11 @@ pub(crate) struct SentenceState {
     /// 初始为 0，compact 时 `drain_count = committed_sample_end - buffer_base_sample`，
     /// drain 后 `buffer_base_sample = committed_sample_end`。
     pub(crate) buffer_base_sample: usize,
+    /// confirmed 提交版本：每次成功 commit（confirmed 实际增长）递增。
+    ///
+    /// 供上层做「状态边沿触发」判定——引擎状态是否变化由本版本号与
+    /// 预览版本号共同表达，避免每块音频都对外搬运全量正文。
+    pub(crate) confirmed_revision: u64,
 }
 
 impl SentenceState {
@@ -88,6 +93,7 @@ impl SentenceState {
             finalizing: None,
             deferred: None,
             buffer_base_sample: 0,
+            confirmed_revision: 0,
         }
     }
 
@@ -230,6 +236,7 @@ impl SentenceState {
             // range.end 是绝对坐标，直接推进 committed_sample_end
             self.confirmed_sentences.push(result.text.clone());
             self.committed_sample_end = range.end;
+            self.confirmed_revision = self.confirmed_revision.wrapping_add(1);
             tracing::debug!(
                 seg = result.identity.segment_id,
                 text_len = result.text.chars().count(),
@@ -350,6 +357,7 @@ impl SentenceState {
         if !text.is_empty() {
             self.confirmed_sentences.push(text.to_string());
             self.committed_sample_end = self.committed_sample_end.max(range_end);
+            self.confirmed_revision = self.confirmed_revision.wrapping_add(1);
         }
         self.finalizing = None;
         true
@@ -367,5 +375,6 @@ impl SentenceState {
         self.finalize_in_flight = false;
         self.finalizing = None;
         self.buffer_base_sample = 0;
+        self.confirmed_revision = 0;
     }
 }

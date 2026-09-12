@@ -132,10 +132,214 @@ pub async fn end_content_editor(
 pub fn resolve_editor_exit(
     app: tauri::AppHandle,
     request: ResolveEditorExitRequest,
-) -> Result<(), CommandError> {
+) -> Result<bool, CommandError> {
     let service = service(&app)?;
-    service.resolve_editor_exit(&request.request_id, request.confirmed);
-    Ok(())
+    Ok(service.resolve_editor_exit(&request.request_id, request.confirmed))
+}
+
+// ── 编辑器恢复草稿（与 Ctrl+S 完全分离的持久化通道）─────────────────────
+//
+// 只读写草稿文件：**绝不**触发剪贴板 / 便签 / 文件 / Capability 等保存目标
+// 副作用（草稿与"发布"是两条独立链路）。全部命令只接受 `content-editor` 窗口，
+// 并在前端传入会话身份时校验 `session_ref + generation`。
+
+/// save_editor_draft 请求：来源键 + 冻结会话身份 + 单调 revision + 正文。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveEditorDraftRequest {
+    pub key: String,
+    #[serde(default)]
+    pub session_ref: Option<String>,
+    #[serde(default)]
+    pub generation: u64,
+    pub revision: u64,
+    #[serde(default)]
+    pub hash: String,
+    pub body: String,
+    #[serde(default)]
+    pub base_digest: String,
+    #[serde(default)]
+    pub base_revision: Option<i64>,
+    #[serde(default)]
+    pub source_instance_id: String,
+    #[serde(default)]
+    pub schema_version: u32,
+}
+
+/// 落盘后的 revision 水位。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveEditorDraftResult {
+    pub stored_revision: u64,
+}
+
+/// clear_editor_draft 请求：会话结束/放弃修改时清理草稿。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearEditorDraftRequest {
+    pub key: String,
+    #[serde(default)]
+    pub session_ref: Option<String>,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub expected_hash: Option<String>,
+}
+
+fn draft_store(
+    app: &tauri::AppHandle,
+) -> Result<std::sync::Arc<crate::app::editor_draft::EditorDraftStore>, CommandError> {
+    Ok(app
+        .try_state::<std::sync::Arc<crate::app::editor_draft::EditorDraftStore>>()
+        .map(|s| s.inner().clone())
+        .ok_or_else(|| CommandError::new("io", "草稿存储不可用", false))?)
+}
+
+/// 保存恢复草稿（防抖 / 关键边界 flush）。同一会话身份下旧 revision 被拒绝。
+#[tauri::command]
+pub async fn save_editor_draft(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    request: SaveEditorDraftRequest,
+) -> Result<SaveEditorDraftResult, CommandError> {
+    ensure_editor_caller(window.label())?;
+    if let Some(session_ref) = request.session_ref.as_deref() {
+        if !service(&app)?.verify_active_session(session_ref, request.generation) {
+            return Err(CommandError::from(EditorError::StaleSession));
+        }
+    }
+    let store = draft_store(&app)?;
+    let computed_hash = format!("{:016x}", crate::domain::editor::body_digest(&request.body));
+    if !request.hash.is_empty() && request.hash != computed_hash {
+        tracing::debug!("save_editor_draft: 纠正前端正文摘要");
+    }
+    let draft = crate::app::editor_draft::EditorDraft {
+        key: request.key,
+        session_ref: request.session_ref.unwrap_or_default(),
+        generation: request.generation,
+        revision: request.revision,
+        // EditorDraftStore recomputes this again; retaining the field keeps
+        // the IPC contract explicit while making the backend the authority.
+        hash: computed_hash,
+        body: request.body,
+        base_digest: request.base_digest,
+        base_revision: request.base_revision,
+        source_instance_id: request.source_instance_id,
+        schema_version: if request.schema_version == 0 {
+            crate::app::editor_draft::CURRENT_EDITOR_DRAFT_SCHEMA
+        } else {
+            request.schema_version
+        },
+        orphaned: false,
+        updated_at_ms: 0,
+    };
+    let stored_revision = store.save(draft).await?;
+    Ok(SaveEditorDraftResult { stored_revision })
+}
+
+/// 读取恢复草稿（会话绑定时探测崩溃残留）。无草稿返回 null。
+#[tauri::command]
+pub async fn load_editor_draft(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    key: String,
+    session_ref: Option<String>,
+    generation: Option<u64>,
+) -> Result<Option<crate::app::editor_draft::EditorDraft>, CommandError> {
+    ensure_editor_caller(window.label())?;
+    if let Some(session_ref) = session_ref.as_deref() {
+        if !service(&app)?.verify_active_session(session_ref, generation.unwrap_or(0)) {
+            return Err(CommandError::from(EditorError::StaleSession));
+        }
+    }
+    Ok(draft_store(&app)?.load(&key).await?)
+}
+
+/// 返回最近恢复候选，供无法自动关联临时来源的新会话显式选择。
+#[tauri::command]
+pub async fn list_editor_drafts(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+) -> Result<Vec<crate::app::editor_draft::EditorDraft>, CommandError> {
+    ensure_editor_caller(window.label())?;
+    Ok(draft_store(&app)?.list().await?)
+}
+
+/// 清理恢复草稿（成功提交 / 放弃修改 / 会话结束）。幂等。
+/// 会话可能已经结束，故不强制校验会话身份，仍只允许编辑器窗口调用。
+#[tauri::command]
+pub async fn clear_editor_draft(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    request: ClearEditorDraftRequest,
+) -> Result<bool, CommandError> {
+    ensure_editor_caller(window.label())?;
+    // 会话可能已结束（end 后才 discard），故不强制校验身份；身份仅作诊断。
+    tracing::debug!(
+        key = %request.key,
+        session_ref = ?request.session_ref,
+        generation = request.generation,
+        "clear_editor_draft"
+    );
+    let cleared = draft_store(&app)
+        .map_err(|e| e)?
+        .clear_if_matches(
+            &request.key,
+            request.session_ref.as_deref(),
+            Some(request.generation),
+            request.expected_revision,
+            request.expected_hash.as_deref(),
+        )
+        .await?;
+    if !cleared {
+        tracing::debug!(key = %request.key, "clear_editor_draft: 草稿身份不匹配，保留当前草稿");
+    }
+    Ok(cleared)
+}
+
+/// 将来源失效后的恢复草稿转存为 orphan 候选。幂等且带完整身份墙。
+#[tauri::command]
+pub async fn orphan_editor_draft(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    request: ClearEditorDraftRequest,
+) -> Result<bool, CommandError> {
+    ensure_editor_caller(window.label())?;
+    let marked = draft_store(&app)?
+        .mark_orphaned_if_matches(
+            &request.key,
+            request.session_ref.as_deref(),
+            Some(request.generation),
+            request.expected_revision,
+            request.expected_hash.as_deref(),
+        )
+        .await?;
+    if !marked {
+        tracing::debug!(key = %request.key, "orphan_editor_draft: 草稿身份不匹配，保留原状态");
+    }
+    Ok(marked)
+}
+
+/// 同键冲突选择“暂不处理”时，把旧候选迁移到独立 orphan 键，
+/// 避免当前会话后续自动保存覆盖它。返回新键；版本墙不匹配返回 null。
+#[tauri::command]
+pub async fn archive_editor_draft(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    request: ClearEditorDraftRequest,
+) -> Result<Option<String>, CommandError> {
+    ensure_editor_caller(window.label())?;
+    Ok(draft_store(&app)?
+        .archive_if_matches(
+            &request.key,
+            request.session_ref.as_deref(),
+            Some(request.generation),
+            request.expected_revision,
+            request.expected_hash.as_deref(),
+        )
+        .await?)
 }
 
 // ── 编辑器连续听写（0.23.3 §3.6 / §3.9）─────────────────────────────────

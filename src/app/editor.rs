@@ -48,6 +48,8 @@ impl MutationGate {
 struct LiveSession {
     session_ref: String,
     generation: u64,
+    draft_key: String,
+    source_instance_id: String,
     title: Option<String>,
     /// 会话绑定时后端记录的基线正文（便签来源为 DB 内容）。
     body: String,
@@ -69,6 +71,8 @@ impl LiveSession {
         EditorSessionSnapshot {
             session_ref: self.session_ref.clone(),
             generation: self.generation,
+            draft_key: self.draft_key.clone(),
+            source_instance_id: self.source_instance_id.clone(),
             title: self.title.clone(),
             body: self.body.clone(),
             source: self.source.clone(),
@@ -163,9 +167,13 @@ impl EditorSessionService {
             match decide_open(active_key.as_deref(), &source) {
                 OpenDecision::Create => {
                     let generation = self.generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    let source_instance_id = generate_source_instance_id(&source);
+                    let draft_key = draft_key_for_source(&source, &source_instance_id);
                     let session = LiveSession {
                         session_ref: generate_session_ref(),
                         generation,
+                        draft_key,
+                        source_instance_id,
                         title,
                         body,
                         source,
@@ -982,6 +990,22 @@ fn generate_session_ref() -> String {
     format!("ed_{nanos:016x}{seq:04x}")
 }
 
+/// 持久来源沿用稳定键；临时来源使用后端生成的不透明实例键。
+/// 临时草稿在无法安全关联新会话时由恢复候选列表发现，不注入其它来源。
+fn generate_source_instance_id(source: &SourceDescriptor) -> String {
+    match source {
+        SourceDescriptor::Sticky { sticky_id } => format!("sticky:{sticky_id}"),
+        _ => generate_session_ref().replace("ed_", "src_"),
+    }
+}
+
+fn draft_key_for_source(source: &SourceDescriptor, source_instance_id: &str) -> String {
+    match source {
+        SourceDescriptor::Sticky { sticky_id } => format!("sticky:{sticky_id}"),
+        _ => format!("editor:{source_instance_id}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -992,6 +1016,36 @@ mod tests {
         let b = generate_session_ref();
         assert_ne!(a, b);
         assert!(a.starts_with("ed_"));
+    }
+
+    #[test]
+    fn temporary_sources_get_distinct_backend_draft_keys() {
+        let sources = [
+            SourceDescriptor::Empty,
+            SourceDescriptor::Selection,
+            SourceDescriptor::ClipboardItem { item_ref: None },
+            SourceDescriptor::CapabilityResult {
+                capability_id: "same-capability".into(),
+            },
+        ];
+        for source in sources {
+            let first_id = generate_source_instance_id(&source);
+            let second_id = generate_source_instance_id(&source);
+            assert_ne!(first_id, second_id, "临时来源实例不得复用身份");
+            assert_ne!(
+                draft_key_for_source(&source, &first_id),
+                draft_key_for_source(&source, &second_id),
+                "连续临时会话不得串草稿"
+            );
+        }
+        let sticky = SourceDescriptor::Sticky {
+            sticky_id: "s1".into(),
+        };
+        assert_eq!(
+            draft_key_for_source(&sticky, "ignored"),
+            "sticky:s1",
+            "sticky 允许稳定键"
+        );
     }
 
     #[tokio::test]

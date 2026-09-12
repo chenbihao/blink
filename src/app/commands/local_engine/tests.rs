@@ -416,8 +416,8 @@ fn all_frontend_stt_commands_are_registered() {
                 true
             }
             "resize_voice_overlay" => {
-                let _ =
-                    crate::app::commands::resize_voice_overlay as fn(tauri::AppHandle, f64) -> _;
+                let _ = crate::app::commands::resize_voice_overlay
+                    as fn(tauri::AppHandle, f64, Option<f64>) -> _;
                 true
             }
             "start_chat_stt" => {

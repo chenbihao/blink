@@ -33,7 +33,7 @@ globalThis.document = {
 
 const {test} = await import("node:test");
 const assert = (await import("node:assert/strict")).default;
-const {EditorActions, MENU_ITEMS, nextMenuIndex, targetDisplay, pickSendText} = await import("./actions.js");
+const {EditorActions, MENU_ITEMS, nextMenuIndex, targetDisplay, pickSendText, stickyConflictAction, fileConflictAction} = await import("./actions.js");
 const {t: realT} = await import("../i18n/index.js");
 
 function makeHarness() {
@@ -60,10 +60,13 @@ function makeHarness() {
         async copyToClipboard(text) {
             log.copies.push(text);
         },
-        async createStickyNote(content, color) {
-            log.stickies.push({content, color});
-        },
+        /** 0.23.7：create_sticky 走统一 Capability（创建 + 显示窗口同一原子入口） */
         async runBuiltinAction(id, arg) {
+            if (id === "create_sticky") {
+                log.stickies.push({content: arg?.content});
+                if (api._stickyError) throw api._stickyError;
+                return;
+            }
             log.chats.push({id, arg});
         },
     };
@@ -100,9 +103,9 @@ test("pickSendText prefers selection, falls back to full text", () => {
     assert.equal(pickSendText(null, "全文"), "全文");
 });
 
-test("menu items cover the five 0.23.2 actions", () => {
+test("menu items cover the five 0.23.2 actions + 0.23.6 recovery entry", () => {
     assert.deepEqual(MENU_ITEMS.map((i) => i.id), [
-        "save-to", "save-copy", "copy-all", "create-sticky", "send-chat",
+        "save-to", "save-copy", "copy-all", "create-sticky", "send-chat", "recover-draft",
     ]);
 });
 
@@ -155,10 +158,20 @@ test("copyAll copies full text via IPC", async () => {
     assert.deepEqual(log.copies, ["全文内容"]);
 });
 
-test("createSticky sends full text with null color", async () => {
+test("createSticky 经统一 create_sticky Capability 创建（含显示窗口）且只调用一次", async () => {
     const {actions, log} = makeHarness();
     await actions.createSticky();
-    assert.deepEqual(log.stickies, [{content: "全文内容", color: null}]);
+    // 只调一次原子入口：创建与显示由后端同一次调用完成，不存在二次创建
+    assert.deepEqual(log.stickies, [{content: "全文内容"}]);
+    assert.equal(log.status.at(-1), realT("editor.stickyCreated"));
+});
+
+test("createSticky 创建/显示失败时上报状态且不抛出", async () => {
+    const {actions, api, log} = makeHarness();
+    api._stickyError = new Error("窗口创建失败");
+    await actions.createSticky();
+    assert.equal(log.stickies.length, 1);
+    assert.match(log.status.at(-1), /操作失败/);
 });
 
 test("sendToChat passes selection or full text as prefill via open_chat capability", async () => {
@@ -194,6 +207,17 @@ test("i18n dictionary contains all action/target keys", () => {
         "editor.target.sticky",
         "editor.target.file",
         "editor.target.caller",
+        // 0.23.7：顶部来源徽标
+        "editor.source.empty",
+        "editor.source.clipboard",
+        "editor.source.sticky",
+        "editor.source.selection",
+        "editor.source.capability",
+        // 0.23.7：整理等待态
+        "editor.transform.stillWorking",
+        "editor.transform.elapsed",
+        "editor.transform.cancel",
+        "editor.transform.runningHint",
         "editor.copied",
         "editor.stickyCreated",
         "editor.sentToChat",
@@ -207,8 +231,60 @@ test("i18n dictionary contains all action/target keys", () => {
         "editor.conflict.reload",
         "editor.conflict.overwrite",
         "editor.conflict.saveCopy",
+        // 0.23.6：恢复候选入口
+        "editor.draft.dismiss",
+        "editor.draft.deferred",
+        "editor.draft.kept",
+        "editor.draft.copyFailed",
+        "editor.draft.restoreFailed",
+        "editor.draft.staleFence",
+        "editor.draft.flushFailed",
+        "editor.draft.orphanFailed",
+        "editor.draft.exitFlushFailed",
+        "editor.draft.list.title",
+        "editor.draft.list.meta",
+        "editor.draft.list.empty",
+        "editor.draft.list.failed",
+        "editor.draft.kind.sticky",
+        "editor.draft.kind.temporary",
+        "editor.draft.orphanBadge",
+        "editor.draft.restoreTo",
+        "editor.draft.copyBtn",
+        "editor.draft.deleteBtn",
+        "editor.draft.deleteWarning",
+        "editor.draft.deleteFailed",
+        "editor.draft.deleted",
+        "editor.draft.replaceWarning",
     ];
     for (const key of keys) {
         assert.notEqual(realT(key), key, `缺少 i18n 词条: ${key}`);
     }
+});
+
+// ── 0.23.6：choiceDialog 字符串契约映射（三出口各自正确分派）──────────
+
+test("stickyConflictAction: ok=copy, third=reload, cancel/其余=stay", () => {
+    assert.equal(stickyConflictAction("ok"), "copy");
+    assert.equal(stickyConflictAction("third"), "reload");
+    assert.equal(stickyConflictAction("cancel"), "stay");
+    // 历史缺陷回归：布尔 true（旧契约残留）绝不能命中任何动作
+    assert.equal(stickyConflictAction(true), "stay");
+    assert.equal(stickyConflictAction(undefined), "stay");
+});
+
+test("fileConflictAction: ok=overwrite, third=saveCopy, cancel/其余=stay", () => {
+    assert.equal(fileConflictAction("ok"), "overwrite");
+    assert.equal(fileConflictAction("third"), "saveCopy");
+    assert.equal(fileConflictAction("cancel"), "stay");
+    assert.equal(fileConflictAction(true), "stay", "布尔残留不得触发覆盖");
+});
+
+test("recover-draft 菜单动作回调 onRecoverDraft", async () => {
+    let opened = 0;
+    const {actions} = makeHarness();
+    actions._callbacks.onRecoverDraft = () => {
+        opened += 1;
+    };
+    await actions.handleAction("recover-draft");
+    assert.equal(opened, 1, "恢复入口经回调进入候选列表");
 });

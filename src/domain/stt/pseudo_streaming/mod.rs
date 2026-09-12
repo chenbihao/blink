@@ -27,9 +27,19 @@
 //!
 //! ## transcribe_chunk 返回值
 //!
-//! 返回 JSON 字符串 `{"confirmed":"...","preview":"..."}`，
-//! voice.rs 解析后分别 emit confirmed 和 preview。
-//! 如果 confirmed 和 preview 都为空，返回空字符串（兼容现有逻辑）。
+//! 返回 JSON 字符串（协议 v2）：
+//!
+//! ```json
+//! {"v":2,"revision":12,"confirmed_changed":true,"confirmed":"第一句。","preview":"第二句"}
+//! ```
+//!
+//! - `revision`：引擎状态版本，confirmed 提交 / 预览变化时递增；
+//! - `confirmed_changed`：本次是否带来 confirmed 增长（false 时 `confirmed` 为空串，
+//!   避免每块音频重复搬运随时长增长的全量正文）；
+//! - 状态版本未变化（与上次返回相同）时直接返回空字符串，消费方不产生任何事件。
+//!
+//! 这取代了旧协议「每块音频都返回完整累计 confirmed + preview」的行为——后者
+//! 使事件量与正文搬运量随录音时长平方级增长。
 //!
 //! ## 并发安全
 //!
@@ -41,9 +51,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::postprocess::{strip_confirmed_prefix, strip_filler_words, trim_trailing_silence};
-use super::sentence_state::{FinalizeResult, SegmentIdentity, SentenceState};
+use super::sentence_state::{FinalizeResult, PendingSegment, SegmentIdentity, SentenceState};
 use super::vad::{EnergyVad, VadEvent};
-use super::{SttEngine, SttError};
+use super::{SttEngine, SttError, SttStreamStats};
 
 /// 预览识别间隔（毫秒）。
 const PREVIEW_INTERVAL_MS: u64 = 500;
@@ -103,14 +113,37 @@ struct PseudoInner {
     last_preview_sample_end: usize,
     /// 是否有预览识别请求在飞行中
     preview_in_flight: bool,
+    /// 当前在途预览任务的所有者 token（0 = 无）。
+    ///
+    /// 预览任务完成时只允许**所有者本人**清除 `preview_in_flight`。
+    /// 旧实现按 `preview_generation` 相等与否决定清除，句尾递增代际后
+    /// 旧任务的清除分支被跳过，标志永久为 true，预览从此彻底停止
+    /// （0.24 修复）。owner token 在成功、失败、取消、panic 任何路径
+    /// 都由 RAII guard 释放，且旧任务无法清除新任务的所有权。
+    preview_owner: u64,
+    /// 下一个预览请求 id（单调递增，从 1 开始；0 保留给"无 owner"）。
+    next_preview_request: u64,
     /// 最新预览文本
     latest_preview: String,
+    /// 预览状态版本（预览文本每次实际变化递增）。
+    preview_revision: u64,
     /// 预览代际计数器（0.10.6 防重复影子）
     ///
     /// 每次 VAD 句尾时递增。`spawn_preview_recognition` 启动时捕获当前代际，
     /// 返回时校验：若代际不匹配（句尾已发生），说明此预览的音频跨越了句子边界，
     /// 包含已定稿句子的内容，直接丢弃避免覆盖 `latest_preview` 造成重复影子。
     preview_generation: u64,
+    /// 引擎状态版本（confirmed 提交或预览变化时递增）。
+    ///
+    /// 对外状态快照携带本版本号；未变化时 `transcribe_chunk` 返回空串，
+    /// 使事件量随"状态变化次数"而非音频块数增长。
+    state_revision: u64,
+    /// 上一次对外上报的状态版本（None = 尚未上报，首个快照必须上报）。
+    last_reported_state: Option<u64>,
+    /// 上一次对外上报时的 confirmed 版本。
+    ///
+    /// 用于判断本次快照是否需要携带完整累计正文——仅 confirmed 真正增长时携带。
+    last_reported_confirmed_revision: u64,
     /// 0.22.15 follow-up: session 失败标志。
     ///
     /// 当内部不变量被破坏（如坐标非法）时设为 `true`。
@@ -120,6 +153,76 @@ struct PseudoInner {
 }
 
 impl PseudoInner {
+    /// 仅供测试：构造干净的内部状态。
+    #[cfg(test)]
+    fn for_test(samples: Vec<f32>) -> Self {
+        Self {
+            vad: EnergyVad::new(16_000),
+            sentences: SentenceState::new(),
+            samples,
+            last_preview: Instant::now(),
+            last_preview_elapsed: Duration::ZERO,
+            last_preview_sample_end: 0,
+            preview_in_flight: false,
+            preview_owner: 0,
+            next_preview_request: 0,
+            latest_preview: String::new(),
+            preview_revision: 0,
+            preview_generation: 0,
+            state_revision: 0,
+            last_reported_state: None,
+            last_reported_confirmed_revision: 0,
+            session_failed: false,
+        }
+    }
+
+    /// 提交/回滚一个 finalize 结果，并在 confirmed 实际增长时推进状态版本。
+    fn commit_or_rollback(&mut self, result: &FinalizeResult) -> Option<PendingSegment> {
+        let before = self.sentences.confirmed_revision;
+        let deferred = self.sentences.commit_or_rollback(result);
+        if self.sentences.confirmed_revision != before {
+            self.state_revision = self.state_revision.wrapping_add(1);
+        }
+        deferred
+    }
+
+    /// 更新预览文本（仅在实际变化时推进状态与预览版本）。
+    fn set_preview_if_changed(&mut self, preview: String) {
+        if preview.is_empty() || preview == self.latest_preview {
+            return;
+        }
+        self.latest_preview = preview;
+        self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.state_revision = self.state_revision.wrapping_add(1);
+        tracing::trace!(
+            preview_revision = self.preview_revision,
+            chars = self.latest_preview.chars().count(),
+            "预览版本变化"
+        );
+    }
+
+    /// 清空预览（句尾/终态）；非空时才推进版本。
+    fn clear_preview(&mut self) {
+        if self.latest_preview.is_empty() {
+            return;
+        }
+        self.latest_preview.clear();
+        self.preview_revision = self.preview_revision.wrapping_add(1);
+        self.state_revision = self.state_revision.wrapping_add(1);
+        tracing::trace!(
+            preview_revision = self.preview_revision,
+            "预览已清空（句尾）"
+        );
+    }
+
+    /// 释放预览所有者（仅 owner 本人可释放）。
+    fn release_preview_owner(&mut self, request_id: u64) {
+        if self.preview_in_flight && self.preview_owner == request_id {
+            self.preview_in_flight = false;
+            self.preview_owner = 0;
+        }
+    }
+
     /// 0.22.15 follow-up: 标记 session 为失败态。
     ///
     /// 检测到内部不变量破坏时调用。失败后 session 不再处理新音频，
@@ -140,6 +243,28 @@ impl PseudoInner {
             );
         }
         self.session_failed = true;
+    }
+
+    /// 在途推理任务数（预览 + 定稿 + 排队句段；诊断用）。
+    fn in_flight_inferences(&self) -> usize {
+        usize::from(self.preview_in_flight)
+            + usize::from(self.sentences.finalize_in_flight)
+            + usize::from(self.sentences.pending.is_some())
+            + usize::from(self.sentences.deferred.is_some())
+    }
+}
+
+/// 预览任务所有者守卫：任何退出路径（成功/错误/取消/panic）都释放 owner。
+struct PreviewOwnerGuard {
+    inner: Arc<Mutex<PseudoInner>>,
+    request_id: u64,
+}
+
+impl Drop for PreviewOwnerGuard {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.release_preview_owner(self.request_id);
+        }
     }
 }
 
@@ -186,8 +311,14 @@ impl PseudoStreamingSttEngine {
                 last_preview_elapsed: Duration::ZERO,
                 last_preview_sample_end: 0,
                 preview_in_flight: false,
+                preview_owner: 0,
+                next_preview_request: 0,
                 latest_preview: String::new(),
+                preview_revision: 0,
                 preview_generation: 0,
+                state_revision: 0,
+                last_reported_state: None,
+                last_reported_confirmed_revision: 0,
                 session_failed: false,
             })),
             connection: Some(conn),
@@ -237,11 +368,23 @@ impl PseudoStreamingSttEngine {
     }
 
     /// 组装返回 JSON 字符串。
-    fn compose_result(confirmed: &str, preview: &str) -> String {
+    ///
+    /// 携带状态版本号（`revision`）与 `confirmed_changed` 标记：只有当
+    /// confirmed 真正增长时才携带完整累计正文，避免每块音频都搬运全文。
+    /// confirmed 与 preview 同时为空时返回空串（消费方不产生任何事件）。
+    fn compose_result(
+        revision: u64,
+        confirmed: &str,
+        preview: &str,
+        confirmed_changed: bool,
+    ) -> String {
         if confirmed.is_empty() && preview.is_empty() {
             return String::new();
         }
         serde_json::json!({
+            "v": 2,
+            "revision": revision,
+            "confirmed_changed": confirmed_changed,
             "confirmed": confirmed,
             "preview": preview,
         })
@@ -306,7 +449,7 @@ impl PseudoStreamingSttEngine {
                     return;
                 }
             };
-            if let Some(deferred) = inner.sentences.commit_or_rollback(&result) {
+            if let Some(deferred) = inner.commit_or_rollback(&result) {
                 // deferred.range 是绝对坐标，转换为局部切片
                 let samples: Vec<f32> = match inner
                     .sentences
@@ -358,7 +501,7 @@ impl PseudoStreamingSttEngine {
                     return;
                 }
             };
-            if let Some(deferred) = inner.sentences.commit_or_rollback(&result) {
+            if let Some(deferred) = inner.commit_or_rollback(&result) {
                 let samples: Vec<f32> = match inner
                     .sentences
                     .abs_to_local_range(&deferred.range, inner.samples.len())
@@ -428,7 +571,7 @@ impl PseudoStreamingSttEngine {
                         return;
                     }
                 };
-                if let Some(deferred) = inner.sentences.commit_or_rollback(&finalize_result) {
+                if let Some(deferred) = inner.commit_or_rollback(&finalize_result) {
                     let Some(local_range) = inner
                         .sentences
                         .abs_to_local_range(&deferred.range, inner.samples.len())
@@ -452,13 +595,18 @@ impl PseudoStreamingSttEngine {
     }
 
     /// 后台 spawn 一个预览识别 task（worker transport 通道）。
+    ///
+    /// **所有权约定（0.24）**：启动时独占 `preview_in_flight` 并记录 owner token
+    /// （request id）。返回时**只有 owner 本人**才可释放该标志，且释放由 RAII
+    /// 守卫保证覆盖成功/失败/取消/panic 全部路径。旧任务的迟到结果一律无法
+    /// 清除新任务的状态。
     fn spawn_preview_recognition(&self, samples_snapshot: Vec<f32>, snapshot_end: usize) {
         if samples_snapshot.is_empty() {
             return;
         }
 
-        // 标记 in_flight + 捕获当前代际 + 获取 VAD off_threshold
-        let (generation, off_threshold) = {
+        // 登记所有权 + 捕获当前代际 + 获取 VAD off_threshold
+        let (request_id, generation, off_threshold) = {
             let mut inner = match Self::try_lock(&self.inner) {
                 Some(g) => g,
                 None => {
@@ -466,21 +614,34 @@ impl PseudoStreamingSttEngine {
                     return;
                 }
             };
+            let request_id = inner.next_preview_request.wrapping_add(1);
+            inner.next_preview_request = request_id;
             inner.preview_in_flight = true;
-            (inner.preview_generation, inner.vad.current_off_threshold())
+            inner.preview_owner = request_id;
+            (
+                request_id,
+                inner.preview_generation,
+                inner.vad.current_off_threshold(),
+            )
         };
 
         let inner = Arc::clone(&self.inner);
         let Some(transport) = self.connection.as_ref().and_then(|c| c.transport.clone()) else {
             tracing::warn!("预览识别缺少 worker 通道，跳过");
             if let Some(mut g) = Self::try_lock(&self.inner) {
-                g.preview_in_flight = false;
+                g.release_preview_owner(request_id);
             }
             return;
         };
         let sample_rate = self.sample_rate;
 
         tokio::spawn(async move {
+            // RAII：任何退出路径都释放 owner（旧任务不会误清新任务的状态）
+            let _owner = PreviewOwnerGuard {
+                inner: Arc::clone(&inner),
+                request_id,
+            };
+
             let started_at = Instant::now();
             // 0.22.15：裁剪尾部静音——使用 VAD off_threshold 统一静音语义
             let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate, off_threshold);
@@ -496,26 +657,28 @@ impl PseudoStreamingSttEngine {
                     return;
                 }
             };
+            // 已被新任务接管：旧结果彻底丢弃，且不得触碰新任务状态
+            if inner.preview_in_flight && inner.preview_owner != request_id {
+                tracing::debug!(
+                    request_id,
+                    current_owner = inner.preview_owner,
+                    "丢弃已被新任务接管的预览结果"
+                );
+                return;
+            }
+
             match result {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
-                    if !cleaned.is_empty() {
-                        tracing::trace!(
-                            text_len = cleaned.chars().count(),
-                            modified = cleaned != text,
-                            "预览识别"
+                    // 代际校验：句尾后丢弃过期预览（防重复影子）
+                    if inner.preview_generation == generation {
+                        inner.set_preview_if_changed(cleaned);
+                    } else {
+                        tracing::debug!(
+                            gen = generation,
+                            cur_gen = inner.preview_generation,
+                            "丢弃过期预览（句尾已发生）"
                         );
-                        // 写入 latest_preview（代际校验：句尾后丢弃过期预览）
-                        // 0.22.15 follow-up: poison 时只清除 in_flight 不 panic
-                        if inner.preview_generation == generation {
-                            inner.latest_preview = cleaned;
-                        } else {
-                            tracing::debug!(
-                                gen = generation,
-                                cur_gen = inner.preview_generation,
-                                "丢弃过期预览（句尾已发生）"
-                            );
-                        }
                     }
                 }
                 Err(e) => {
@@ -523,8 +686,8 @@ impl PseudoStreamingSttEngine {
                 }
             }
 
+            // 速率控制只在代际仍有效时推进（句尾已自行重置计时）
             if inner.preview_generation == generation {
-                inner.preview_in_flight = false;
                 inner.last_preview = Instant::now();
                 inner.last_preview_elapsed = elapsed;
                 inner.last_preview_sample_end = snapshot_end;
@@ -581,6 +744,8 @@ impl PseudoStreamingSttEngine {
             let identity = inner.sentences.begin_terminal_finalize();
             inner.preview_generation = inner.preview_generation.wrapping_add(1);
             inner.preview_in_flight = false;
+            // 原子撤销预览所有权：在途预览任务即使迟到也无法再写状态
+            inner.preview_owner = 0;
             (identity, remaining_samples, abs_end, off_threshold)
         };
 
@@ -611,6 +776,7 @@ impl PseudoStreamingSttEngine {
             let mut inner = Self::try_lock(&self.inner).ok_or_else(|| {
                 SttError::Engine("STT session 已损坏 (Mutex poisoned)".to_string())
             })?;
+            let before_confirmed = inner.sentences.confirmed_revision;
             if !inner
                 .sentences
                 .commit_terminal_finalize(identity, abs_end, &finalize_text)
@@ -623,6 +789,9 @@ impl PseudoStreamingSttEngine {
                 return Err(SttError::Engine(
                     "STT session 在 finalize 期间已重置".to_string(),
                 ));
+            }
+            if inner.sentences.confirmed_revision != before_confirmed {
+                inner.state_revision = inner.state_revision.wrapping_add(1);
             }
 
             let mut result = inner.sentences.confirmed_text();
@@ -737,7 +906,7 @@ impl SttEngine for PseudoStreamingSttEngine {
             // 句尾时清空预览（本句已定稿，下一段预览从空开始）
             // 同时递增 generation，使 in-flight 的旧预览返回时被丢弃（防重复影子）
             if event.is_boundary() {
-                inner.latest_preview.clear();
+                inner.clear_preview();
                 inner.preview_generation = inner.preview_generation.wrapping_add(1);
                 inner.last_preview = Instant::now();
                 inner.last_preview_elapsed = Duration::ZERO;
@@ -843,11 +1012,14 @@ impl SttEngine for PseudoStreamingSttEngine {
             self.spawn_preview_recognition(samples_snapshot, snapshot_end);
         }
 
-        // ── 4. 组装返回 ──
+        // ── 4. 组装返回（状态边沿触发） ──
+        // 状态版本未变化时返回空串——消费方据此不产生任何对外事件。
+        // 修复前每块音频都返回一整套「全量 confirmed + preview」，事件量与
+        // 正文搬运量随录音时长平方级增长（92s 录音 ≈ 8,800 条状态事件）。
         // strip_confirmed_prefix 兜底：即使预览只取了未确认音频，
         // 模型仍可能因为句子边界切分不完全而产生部分重叠文本
-        let (confirmed, preview) = {
-            let inner = match Self::try_lock(&self.inner) {
+        let (revision, confirmed, preview, confirmed_changed) = {
+            let mut inner = match Self::try_lock(&self.inner) {
                 Some(g) => g,
                 None => {
                     tracing::error!("Mutex poisoned at result compose");
@@ -856,12 +1028,31 @@ impl SttEngine for PseudoStreamingSttEngine {
                     ));
                 }
             };
-            let confirmed = inner.sentences.confirmed_text();
-            let preview = strip_confirmed_prefix(&confirmed, &inner.latest_preview);
-            (confirmed, preview)
+            let revision = inner.state_revision;
+            if inner.last_reported_state == Some(revision) {
+                return Ok(String::new());
+            }
+            inner.last_reported_state = Some(revision);
+            // 仅当 confirmed 真正增长时才携带累计正文
+            let confirmed_changed =
+                inner.sentences.confirmed_revision != inner.last_reported_confirmed_revision;
+            inner.last_reported_confirmed_revision = inner.sentences.confirmed_revision;
+            let full_confirmed = inner.sentences.confirmed_text();
+            let preview = strip_confirmed_prefix(&full_confirmed, &inner.latest_preview);
+            let confirmed = if confirmed_changed {
+                full_confirmed
+            } else {
+                String::new()
+            };
+            (revision, confirmed, preview, confirmed_changed)
         };
 
-        Ok(Self::compose_result(&confirmed, &preview))
+        Ok(Self::compose_result(
+            revision,
+            &confirmed,
+            &preview,
+            confirmed_changed,
+        ))
     }
 
     async fn finalize(&self) -> Result<String, SttError> {
@@ -884,8 +1075,13 @@ impl SttEngine for PseudoStreamingSttEngine {
                 g.last_preview_elapsed = Duration::ZERO;
                 g.last_preview_sample_end = 0;
                 g.preview_in_flight = false;
+                g.preview_owner = 0;
                 g.latest_preview.clear();
+                g.preview_revision = 0;
                 g.preview_generation = g.preview_generation.wrapping_add(1);
+                g.state_revision = 0;
+                g.last_reported_state = None;
+                g.last_reported_confirmed_revision = 0;
                 g.session_failed = false;
                 drop(g);
                 self.inner.clear_poison();
@@ -900,10 +1096,32 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.last_preview_elapsed = Duration::ZERO;
         inner.last_preview_sample_end = 0;
         inner.preview_in_flight = false;
+        inner.preview_owner = 0;
         inner.latest_preview.clear();
+        inner.preview_revision = 0;
         inner.preview_generation = inner.preview_generation.wrapping_add(1);
+        inner.state_revision = 0;
+        inner.last_reported_state = None;
+        inner.last_reported_confirmed_revision = 0;
         inner.session_failed = false;
         tracing::debug!("伪流式引擎 reset");
+    }
+
+    /// 诊断快照：PCM 大小、在途推理任务数、状态版本（不含正文）。
+    fn stream_stats(&self) -> SttStreamStats {
+        match Self::try_lock(&self.inner) {
+            Some(inner) => SttStreamStats {
+                pcm_samples: inner.samples.len(),
+                pcm_committed_end: inner.sentences.committed_sample_end,
+                preview_in_flight: inner.preview_in_flight,
+                finalize_in_flight: inner.sentences.finalize_in_flight,
+                in_flight_inferences: inner.in_flight_inferences(),
+                confirmed_revision: inner.sentences.confirmed_revision,
+                preview_revision: inner.preview_revision,
+                ..SttStreamStats::default()
+            },
+            None => SttStreamStats::default(),
+        }
     }
 }
 

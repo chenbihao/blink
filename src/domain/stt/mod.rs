@@ -179,11 +179,22 @@ pub enum SttEvent {
     /// 真流式引擎（ParaformerOnline）每次推理产生 native partial；
     /// 伪流式引擎（PseudoStreaming）通过 VAD 切句 + 定时预览产生 partial；
     /// 非流式引擎不产生 Partial。
+    ///
+    /// **边沿触发约定**：引擎状态（confirmed/preview）未变化时不得产出本事件；
+    /// 引擎以 `revision` 标识状态版本，消费方可据此去重与合并。
     Partial {
         /// 当前 generation（session 标识）。
         generation: u64,
+        /// 引擎状态版本（单调递增）；状态未变化时不得重复产出同一 revision。
+        revision: u64,
         /// 已确认文本（不再变化的部分）。
+        ///
+        /// **仅当 `confirmed_changed` 为 true 时为完整累计正文**，否则为空串——
+        /// 避免每个音频块重复搬运随时长增长的全量正文。消费方需自行缓存
+        /// 最近一次收到的累计正文。
         confirmed: String,
+        /// 本次是否带来 confirmed 新增（true 时 `confirmed` 为完整累计正文）。
+        confirmed_changed: bool,
         /// 预览文本（可能继续变化的部分）。
         preview: String,
     },
@@ -229,8 +240,10 @@ pub enum SttEvent {
 ///
 /// ## 事件消费
 ///
-/// `events()` 返回一个 `tokio::sync::mpsc::UnboundedReceiver<SttEvent>`。
+/// `events()` 返回一个**有界** `tokio::sync::mpsc::Receiver<SttEvent>`。
 /// 消费方（VoiceService）在独立 task 中循环 `recv()`，按 generation 过滤旧事件。
+/// 有界是硬约束：实现方在队列满时必须按重要性分流（可合并的进度类事件允许丢弃，
+/// 终态与"已确认、有序"的交付物不得静默丢失），禁止无界排队。
 ///
 /// ## 并发约束
 ///
@@ -290,11 +303,61 @@ pub trait StreamingSttPort: Send + Sync {
     #[allow(dead_code)]
     fn supports_native_partial(&self) -> bool;
 
-    /// 获取事件 receiver。
+    /// 获取事件 receiver（有界通道）。
     ///
     /// 返回的 receiver 用于接收 `SttEvent`。消费方应在独立 task 中循环 `recv()`。
     /// 多次调用返回同一 channel 的新 receiver（旧 receiver 失效）。
-    fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<SttEvent>;
+    fn events(&self) -> tokio::sync::mpsc::Receiver<SttEvent>;
+
+    /// 链路诊断快照（引擎状态 + 事件通道指标；默认无数据）。
+    ///
+    /// 只读、同步、无副作用——供 VoiceService 打定期统计日志。
+    fn stream_stats(&self) -> SttStreamStats {
+        SttStreamStats::default()
+    }
+}
+
+// ── 流式链路诊断快照（0.24）────────────────────────────────────────────
+
+/// STT 流式链路的诊断计数快照。
+///
+/// **只含计数、布尔与长度，绝不含正文/转写内容**（spec-backend §三）。
+/// 由 `StreamingSttPort::stream_stats` 汇总「引擎内部状态 + 事件通道指标」，
+/// 供 VoiceService 打定期统计日志与排障。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SttStreamStats {
+    /// 已收到的音频块数（`push_audio` 调用次数）。
+    pub chunks_received: u64,
+    /// 实际对外产出的 Partial 事件数（= 状态变化次数）。
+    pub partials_emitted: u64,
+    /// 因状态未变化被抑制的事件数（去重/合并）。
+    pub partials_suppressed: u64,
+    /// 纯预览被 latest slot 替换的次数（被替换值从未作为事件交付）。
+    pub partials_coalesced: u64,
+    /// 事件通道已关闭而未能交付的 Partial 数。
+    pub partials_dropped_closed: u64,
+    /// 因队列已满而降级为阻塞发送的「携带 confirmed 变化」事件数（背压次数）。
+    pub confirmed_backpressure: u64,
+    /// 当前事件队列深度。
+    pub queue_depth: usize,
+    /// 事件队列有界容量。
+    pub queue_capacity: usize,
+    /// 观测到的最大队列深度。
+    pub max_queue_depth: usize,
+    /// 引擎内当前累积的 PCM 样本数。
+    pub pcm_samples: usize,
+    /// 引擎已提交（compact 后可回收）的绝对样本末尾。
+    pub pcm_committed_end: usize,
+    /// 预览识别是否在飞行中。
+    pub preview_in_flight: bool,
+    /// 句段定稿识别是否在飞行中。
+    pub finalize_in_flight: bool,
+    /// 在途推理任务数（预览 + 定稿 + 排队句段）。
+    pub in_flight_inferences: usize,
+    /// confirmed 提交版本（每次成功 commit 递增）。
+    pub confirmed_revision: u64,
+    /// 预览状态版本（预览文本每次变化递增）。
+    pub preview_revision: u64,
 }
 
 // ── STT Engine trait（旧接口，保留兼容）──────────────────────────────────
@@ -314,6 +377,13 @@ pub trait SttEngine: Send + Sync {
 
     /// 重置引擎状态(新录音会话前调用)。
     fn reset(&self);
+
+    /// 引擎侧诊断快照（默认无数据）。
+    ///
+    /// 只读、无副作用：不得因读取而启动推理或改变 generation。
+    fn stream_stats(&self) -> SttStreamStats {
+        SttStreamStats::default()
+    }
 }
 // ── STT Engines ──────────────────────────────────────────────────────────
 

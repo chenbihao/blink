@@ -1,6 +1,6 @@
 /* ── Voice overlay mini 窗口 entry ──────────────────────────────────────────
-   G2 录音指示器。加载顺序铁则：reset → tokens → themes → base → components → views
-   voice-overlay.html 只需 <link href="css/entries/voice-overlay.css"> */
+   G2 录音指示器 + editor 连续听写浮窗。加载顺序铁则：reset → tokens → themes →
+   base → components → views。voice-overlay.html 只需 <link href="css/entries/voice-overlay.css"> */
 
 /* reset */
 @import '../base/reset.css';
@@ -21,6 +21,9 @@
 
 /* 组件 */
 @import '../components/voice-wave.css';
+/* 0.23.7 修复：浮窗使用 Lucide sprite 图标（editor 控制按钮/拖拽条按钮），
+   缺失该组件时 .icon 无尺寸/描边规则，图标渲染成巨大或不可见。 */
+@import '../components/icon.css';
 
 /* ── Voice overlay 视图 ──────────────────────────────────────────────────── */
 
@@ -43,10 +46,12 @@ body {
     border-radius: 14px;
     border: 1px solid var(--border-glow);
     box-shadow: 0 4px 16px var(--shadow);
-    min-width: 200px;
-    max-width: 360px;
-    /* 0.10.6: 窗口由 autoResize() 撑高，overlay 随内容增长 */
-    max-height: 380px;
+    /* 0.23.7：宽度不再写死——窗口宽度由 layout.js 按模式下发（g2 260 / editor 304），
+       overlay 始终铺满窗口可用宽度；高度同理（g2 撑高 / editor 固定稳定值）。 */
+    width: 100%;
+    box-sizing: border-box;
+    max-width: none;
+    max-height: none;
 }
 
 /* 文本区域 */
@@ -57,12 +62,27 @@ body {
     text-align: center;
     word-break: break-all;
     min-height: 20px;
-    /* 0.10.6: 超长文本限制高度，超出后滚动；窗口由 autoResize() 撑高至 MAX_HEIGHT */
+    /* g2：超长文本限制高度，超出后滚动；窗口由前端按内容高度撑高至 MAX */
     max-height: 280px;
     overflow-y: auto;
     /* 滚动条细美化 */
     scrollbar-width: thin;
     scrollbar-color: var(--text-dim) transparent;
+}
+
+/* editor 模式：预览区在固定窗口内滚动（0.23.7，窗口不随文本跳动）。
+   高度预算与 layout.js 的 EDITOR_SIZE 注释保持一致：padding 10/12 + gap 8，
+   预览区 max-height 56，总高约 205，窗口 220 留余量，控制条不会被裁切。 */
+#overlay.mode-editor {
+    padding: 10px 16px 12px;
+    gap: 8px;
+}
+
+#overlay.mode-editor .text {
+    flex: 0 1 auto;
+    min-height: 24px;
+    max-height: 56px;
+    align-self: stretch;
 }
 
 /* 0.10.4 伪流式双色文本 */
@@ -103,13 +123,15 @@ body {
     display: none;
 }
 
-/* 拖拽条（顶部窄条，data-tauri-drag-region） */
+/* 拖拽条（0.23.7：整条都是 data-tauri-drag-region；加高拖拽热区，
+   标题占满剩余宽度——此前热区只有一条窄边，几乎拖不动）。
+   高度 3 + 22 + 7 = 32 + 1px 分隔线，计入 layout.js 的高度预算。 */
 .editor-strip {
     display: flex;
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 2px 4px 6px;
+    padding: 3px 4px 7px;
     border-bottom: 1px solid var(--surface-2);
     cursor: move;
 }
@@ -163,14 +185,17 @@ body {
 
 .editor-strip-btn {
     flex-shrink: 0;
-    width: 20px;
-    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
     padding: 0;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1;
     cursor: pointer;
 }
@@ -180,7 +205,8 @@ body {
     color: var(--text);
 }
 
-/* 控制按钮排 */
+/* 控制按钮排（0.23.7：暂停/结束收为紧凑图标按钮，"返回编辑器"占剩余宽度，
+   三个按钮在 304px 宽度下不再互相挤压、文案不再溢出）。 */
 .editor-controls {
     display: flex;
     align-items: center;
@@ -189,7 +215,6 @@ body {
 }
 
 .editor-ctl {
-    flex: 1;
     min-width: 0;
     padding: 5px 8px;
     border: 1px solid var(--border-glow);
@@ -199,6 +224,37 @@ body {
     font-size: 12px;
     cursor: pointer;
     white-space: nowrap;
+}
+
+/* 紧凑图标按钮：固定方形，tooltip 走原生 title（CSS 气泡会被窗口边界裁切） */
+.editor-ctl-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 14px;
+}
+
+/* 主操作：图标 + 完整文案，占据剩余宽度 */
+.editor-ctl-back {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.editor-ctl-back .icon {
+    flex-shrink: 0;
+}
+
+.editor-ctl-back span {
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .editor-ctl:hover {
@@ -222,11 +278,7 @@ body {
     outline-offset: 2px;
 }
 
-/* mini 态：只留拖拽条 + 波形，正文隐藏 */
-#overlay.mode-editor.mini {
-    min-width: 160px;
-}
-
+/* mini 态：只留拖拽条 + 波形（宽度沿用 editor 模式，由 layout.js 下发） */
 #overlay.mode-editor.mini .text,
 #overlay.mode-editor.mini .editor-controls {
     display: none;

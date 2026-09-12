@@ -274,7 +274,14 @@ export class EditorVoiceController {
             return;
         }
         const isFirst = this.segments.length === 0;
-        this._adapter.appendDictation(text, {newParagraph: isFirst});
+        const written = this._adapter.appendDictation(text, {newParagraph: isFirst});
+        if (written === false) {
+            // 只读 MD 预览等不可编辑场景：不写正文、不吞段——停止听写并提示
+            this.lastSeq = Math.max(this.lastSeq, seq);
+            this._callbacks.onError?.(this._callbacks.describeError?.("readonly") ?? "");
+            void this.stop();
+            return;
+        }
         this.segments.push(text);
         this.lastSeq = Math.max(this.lastSeq, seq);
         this._callbacks.onSegmentAppended?.();

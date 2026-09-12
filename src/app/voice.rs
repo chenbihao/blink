@@ -67,6 +67,50 @@ impl VoiceTarget {
     }
 }
 
+/// 编辑器听写状态事件的「边沿触发」判定（0.24）。
+///
+/// 修复前每个音频块（~10ms）都会发一次 `EDITOR_VOICE_STATUS`——92 秒录音
+/// 产生 8,791 条事件（约 95.5 条/秒），其中真正不同的状态只有约 25 种。
+/// 现在仅当 phase / seq / preview / message / code 任一变化时才对外发送。
+#[derive(Default)]
+struct EditorStatusEdge {
+    last: Option<EditorStatusKey>,
+}
+
+#[derive(PartialEq, Eq)]
+struct EditorStatusKey {
+    phase: String,
+    seq: u64,
+    preview: Option<String>,
+    message: Option<String>,
+    code: Option<String>,
+}
+
+impl EditorStatusEdge {
+    /// 判断本次状态是否需要对外发送；返回 `true` 时同步记录新状态。
+    fn should_emit(
+        &mut self,
+        phase: &str,
+        seq: u64,
+        preview: Option<&str>,
+        message: Option<&str>,
+        code: Option<&str>,
+    ) -> bool {
+        let key = EditorStatusKey {
+            phase: phase.to_string(),
+            seq,
+            preview: preview.map(str::to_string),
+            message: message.map(str::to_string),
+            code: code.map(str::to_string),
+        };
+        if self.last.as_ref() == Some(&key) {
+            return false;
+        }
+        self.last = Some(key);
+        true
+    }
+}
+
 /// 编辑器连续听写的有界 confirmed 快照状态（0.23.3 §3.6）。
 ///
 /// 一个听写 epoch 一份；`VoiceService.editor_state` 持有共享句柄，
@@ -84,11 +128,34 @@ pub struct EditorDictationState {
     segments: VecDeque<(u64, String)>,
     /// 因缓冲满被淘汰的最旧段数（诊断用）。
     truncated: usize,
+    /// 已对外发出的状态事件数（诊断用）。
+    status_emitted: u64,
+    /// 因状态未变化被去重抑制的状态数（诊断用）。
+    status_suppressed: u64,
+    /// 已交付的 confirmed 段数（诊断用）。
+    segments_emitted: u64,
+    /// 状态边沿触发器（去重，0.24）。
+    status_edge: EditorStatusEdge,
 }
 
 /// 快照缓冲上限（段数）。一段通常是一句话（几十字符），256 段远超
 /// 一次听写的合理长度，同时保证内存有界（§3.6 有界 snapshot）。
 const SNAPSHOT_MAX_SEGMENTS: usize = 256;
+
+/// 波形音量事件的最小间隔（0.24）。
+///
+/// 音频块约 10ms 一块；100/s 的音量事件对波形动画没有额外信息量，
+/// 却带来同频的 IPC + JSON + DOM 更新。25/s 视觉上无差别。
+const VOICE_LEVEL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// 单次录音的流式链路计数器（音频 task 写、事件 task 读；诊断用）。
+#[derive(Default)]
+struct StreamCounters {
+    /// 实际推送给 STT 的音频块数。
+    chunks_received: AtomicU64,
+    /// 因暂停被丢弃的音频块数。
+    chunks_skipped_paused: AtomicU64,
+}
 
 impl EditorDictationState {
     fn new(epoch: u64, session_ref: String, generation: u64) -> Self {
@@ -99,6 +166,10 @@ impl EditorDictationState {
             tracker: EditorDictationTracker::new(),
             segments: VecDeque::new(),
             truncated: 0,
+            status_emitted: 0,
+            status_suppressed: 0,
+            segments_emitted: 0,
+            status_edge: EditorStatusEdge::default(),
         }
     }
 
@@ -928,6 +999,9 @@ impl VoiceService {
         let epoch_for_events = recording_epoch;
         let epoch_arc = self.recording_epoch.clone();
         let paused_for_events = paused_flag.clone();
+        let port_for_events = stt_port.clone();
+        let counters = Arc::new(StreamCounters::default());
+        let counters_for_events = counters.clone();
         let event_task = tokio::spawn(async move {
             consume_stt_events(
                 event_rx,
@@ -940,6 +1014,8 @@ impl VoiceService {
                 editor_state_for_events,
                 paused_for_events,
                 voice_for_events,
+                port_for_events,
+                counters_for_events,
             )
             .await;
         });
@@ -948,24 +1024,38 @@ impl VoiceService {
         let app = self.app.clone();
         let port_for_audio = stt_port.clone();
         let target_for_audio = target;
+        let counters_for_audio = counters.clone();
 
         let task_handle = tokio::spawn(async move {
+            // 首块立即发一次音量，之后按 VOICE_LEVEL_MIN_INTERVAL 节流
+            let mut last_level_emit = std::time::Instant::now() - VOICE_LEVEL_MIN_INTERVAL;
             while let Some(chunk) = rx.recv().await {
                 // 0.23.3：Editor 听写暂停时丢弃 chunk（不推 STT、不发音量事件），
                 // 恢复后从静音继续，暂停期间的话语不进识别。
                 if paused_flag.load(Ordering::Relaxed) {
+                    counters_for_audio
+                        .chunks_skipped_paused
+                        .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                // 计算 RMS 音量（0.0 ~ 1.0）
-                let level = compute_rms(&chunk.samples);
-                let target_str = target_for_audio.as_str();
-                let _ = app.emit(
-                    EventNames::VOICE_LEVEL,
-                    serde_json::json!({
-                        "level": level,
-                        "target": target_str,
-                    }),
-                );
+                counters_for_audio
+                    .chunks_received
+                    .fetch_add(1, Ordering::Relaxed);
+
+                // 计算 RMS 音量（0.0 ~ 1.0）——按 25/s 节流发音量事件：
+                // 10ms/chunk 的 100/s 对波形动画没有额外信息量，只增加 IPC 负载
+                if last_level_emit.elapsed() >= VOICE_LEVEL_MIN_INTERVAL {
+                    last_level_emit = std::time::Instant::now();
+                    let level = compute_rms(&chunk.samples);
+                    let target_str = target_for_audio.as_str();
+                    let _ = app.emit(
+                        EventNames::VOICE_LEVEL,
+                        serde_json::json!({
+                            "level": level,
+                            "target": target_str,
+                        }),
+                    );
+                }
 
                 // 0.22.9：通过统一 port 推送音频
                 // push_audio 不阻塞——内部通过 channel 转发
@@ -1211,7 +1301,8 @@ fn emit_editor_segment(
     text: &str,
 ) {
     let (epoch, session_ref, generation) = {
-        let st = state.lock().unwrap();
+        let mut st = state.lock().unwrap();
+        st.segments_emitted = st.segments_emitted.saturating_add(1);
         (st.epoch, st.session_ref.clone(), st.generation)
     };
     let _ = app.emit(
@@ -1235,6 +1326,10 @@ fn emit_editor_segment(
 }
 
 /// 发射编辑器听写状态事件（供 VoiceService 与事件 task 共用）。
+///
+/// **边沿触发（0.24）**：phase/seq/preview/message/code 全部未变化时不发送、
+/// 不写日志，仅累加诊断计数——修复了"每 10ms 一条状态事件 + 一条 debug 日志"
+/// 的风暴。
 fn emit_editor_status(
     app: &tauri::AppHandle,
     state: &Arc<Mutex<EditorDictationState>>,
@@ -1243,8 +1338,21 @@ fn emit_editor_status(
     preview: Option<&str>,
     message: Option<&str>,
 ) {
+    let code = if phase == "error" {
+        Some("stt_failed")
+    } else {
+        None
+    };
     let (epoch, session_ref, generation) = {
-        let st = state.lock().unwrap();
+        let mut st = state.lock().unwrap();
+        if !st
+            .status_edge
+            .should_emit(phase, seq, preview, message, code)
+        {
+            st.status_suppressed = st.status_suppressed.saturating_add(1);
+            return;
+        }
+        st.status_emitted = st.status_emitted.saturating_add(1);
         (st.epoch, st.session_ref.clone(), st.generation)
     };
     let _ = app.emit(
@@ -1257,7 +1365,7 @@ fn emit_editor_status(
             "seq": seq,
             "preview": preview,
             "message": message,
-            "code": if phase == "error" { Some("stt_failed") } else { None },
+            "code": code,
         }),
     );
     tracing::debug!(
@@ -1270,6 +1378,61 @@ fn emit_editor_status(
         has_message = message.is_some(),
         "编辑器听写状态已更新"
     );
+}
+
+/// 输出 STT 流式链路统计（0.24）。
+///
+/// 只含计数、布尔与长度，**不含正文/转写内容**（spec-backend §三）。
+/// `final_report` 为 true 时用 info（会话终态汇总），否则用 debug（定期统计）。
+///
+/// 字段清单抽在此宏内，避免两条日志分支重复抄写（`tracing::event!` 的
+/// level 必须是常量，故按级别分支调用）。
+macro_rules! stream_stats_log {
+    ($macro:ident, $target:expr, $stats:expr, $counters:expr, $status:expr) => {
+        tracing::$macro!(
+            voice_target = $target.as_str(),
+            chunks_received = $counters.chunks_received.load(Ordering::Relaxed),
+            chunks_skipped_paused = $counters.chunks_skipped_paused.load(Ordering::Relaxed),
+            partial_events = $stats.partials_emitted,
+            partial_events_suppressed = $stats.partials_suppressed,
+            partial_events_coalesced = $stats.partials_coalesced,
+            partial_events_dropped_closed = $stats.partials_dropped_closed,
+            confirmed_backpressure = $stats.confirmed_backpressure,
+            status_events = $status.0,
+            status_events_suppressed = $status.1,
+            segments_delivered = $status.2,
+            queue_depth = $stats.queue_depth,
+            queue_capacity = $stats.queue_capacity,
+            max_queue_depth = $stats.max_queue_depth,
+            pcm_samples = $stats.pcm_samples,
+            pcm_committed_end = $stats.pcm_committed_end,
+            in_flight_inferences = $stats.in_flight_inferences,
+            confirmed_revision = $stats.confirmed_revision,
+            preview_revision = $stats.preview_revision,
+            "STT 流式链路统计"
+        );
+    };
+}
+
+fn log_stream_stats(
+    target: VoiceTarget,
+    stats: &crate::domain::stt::SttStreamStats,
+    counters: &StreamCounters,
+    editor: Option<&Arc<Mutex<EditorDictationState>>>,
+    final_report: bool,
+) {
+    let status = editor
+        .map(|state| {
+            let st = state.lock().unwrap();
+            (st.status_emitted, st.status_suppressed, st.segments_emitted)
+        })
+        .unwrap_or((0, 0, 0));
+
+    if final_report {
+        stream_stats_log!(info, target, stats, counters, status);
+    } else {
+        stream_stats_log!(debug, target, stats, counters, status);
+    }
 }
 
 /// 0.22.15：统一交付最终文本——供 `deliver_final_text`（stop 路径）
@@ -1346,7 +1509,7 @@ fn deliver_final(
 /// **事件处理**：
 /// - `Partial` → emit `VOICE_PARTIAL`（confirmed + preview 都空时跳过）；
 ///   Editor 路径（0.23.3）改推 `EDITOR_VOICE_SEGMENT`（confirmed 增量段）
-///   与 `EDITOR_VOICE_STATUS`（preview 投影）
+///   与 `EDITOR_VOICE_STATUS`（preview 投影，边沿触发去重）
 /// - `Final` → Editor 路径补收尾段 + ended 状态；其余调 `deliver_final` 交付
 /// - `Busy` → 打 debug 日志
 /// - `Error` → emit `VOICE_ERROR`；Editor 路径额外做终态清理（保留 confirmed）
@@ -1356,9 +1519,12 @@ fn deliver_final(
 /// - recording epoch（0.22.15）：VoiceService 级单调递增
 ///
 /// 两者是不同边界的校验，缺一不可。
+///
+/// **可观测性（0.24）**：每 5 秒输出一次链路统计（收到多少块音频、实际发出多少
+/// 状态、被去重/合并多少、队列深度、PCM 大小、在途推理任务数），退出时输出终态汇总。
 #[allow(clippy::too_many_arguments)]
 async fn consume_stt_events(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<SttEvent>,
+    mut rx: tokio::sync::mpsc::Receiver<SttEvent>,
     expected_gen: u64,
     recording_epoch: u64,
     current_epoch: Arc<AtomicU64>,
@@ -1368,11 +1534,37 @@ async fn consume_stt_events(
     editor_state: Option<Arc<Mutex<EditorDictationState>>>,
     paused: Arc<AtomicBool>,
     voice: Option<Arc<VoiceService>>,
+    port: Arc<dyn StreamingSttPort>,
+    counters: Arc<StreamCounters>,
 ) {
     let target_str = target.as_str();
     let is_editor = target == VoiceTarget::Editor;
 
-    while let Some(event) = rx.recv().await {
+    /// 统计输出间隔。
+    const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
+    stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // 消耗立即触发的首拍：首次统计在 5 秒后
+    stats_tick.tick().await;
+
+    // 非 Editor 路径的 confirmed 累计缓存——引擎在 confirmed 未变化时
+    // 只发空串（不再每块重复搬运全量正文），前端契约仍是累计文本。
+    let mut confirmed_cache = String::new();
+
+    loop {
+        let event = tokio::select! {
+            maybe = rx.recv() => match maybe {
+                Some(event) => event,
+                None => break,
+            },
+            _ = stats_tick.tick() => {
+                let stats = port.stream_stats();
+                log_stream_stats(target, &stats, &counters, editor_state.as_ref(), false);
+                continue;
+            }
+        };
+
         // 0.22.15：epoch 墙——实时对比当前 VoiceService epoch，
         // 旧 epoch 的事件（Partial/Final/Error）全部丢弃。
         // 这与 generation 校验是两层不同边界：generation 过滤同一 adapter 内的旧 session，
@@ -1390,7 +1582,9 @@ async fn consume_stt_events(
         match event {
             SttEvent::Partial {
                 generation,
+                revision: _,
                 confirmed,
+                confirmed_changed,
                 preview,
             } => {
                 if generation != expected_gen {
@@ -1420,18 +1614,22 @@ async fn consume_stt_events(
                         "recording"
                     };
                     let last_seq = state.lock().unwrap().last_seq();
+                    // 边沿触发：状态未变化时该调用直接返回（不发事件、不写日志）
                     emit_editor_status(&app, state, phase, last_seq, Some(&preview), None);
                     continue;
                 }
 
                 // 0.22.15：confirmed 和 preview 都为空时不发 VOICE_PARTIAL
-                if confirmed.is_empty() && preview.is_empty() {
+                if confirmed_changed || !confirmed.is_empty() {
+                    confirmed_cache = confirmed;
+                }
+                if confirmed_cache.is_empty() && preview.is_empty() {
                     continue;
                 }
                 let _ = app.emit(
                     EventNames::VOICE_PARTIAL,
                     serde_json::json!({
-                        "confirmed": confirmed,
+                        "confirmed": confirmed_cache.as_str(),
                         "preview": preview,
                         "target": target_str,
                         "epoch": recording_epoch,
@@ -1508,6 +1706,10 @@ async fn consume_stt_events(
             }
         }
     }
+
+    // 会话终态汇总（info；只含计数与长度）
+    let stats = port.stream_stats();
+    log_stream_stats(target, &stats, &counters, editor_state.as_ref(), true);
 }
 
 /// STT finalize + 10s 超时保护（G1/G2/G3 三路共用）。
@@ -1561,7 +1763,7 @@ fn compute_rms(samples: &[f32]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorDictationState, SNAPSHOT_MAX_SEGMENTS, compute_rms};
+    use super::{EditorDictationState, EditorStatusEdge, SNAPSHOT_MAX_SEGMENTS, compute_rms};
 
     #[test]
     fn rms_empty_returns_zero() {
@@ -1629,5 +1831,103 @@ mod tests {
         let snapshot = state.after(7, 0).unwrap();
         assert_eq!(snapshot.len(), SNAPSHOT_MAX_SEGMENTS);
         assert!(state.after(8, 0).is_none(), "旧 epoch 不得读取当前快照");
+    }
+
+    // ── 0.24: 状态边沿触发 ────────────────────────────────────────────────
+
+    /// 验收：confirmed 句段可靠、有序且只追加一次（重复快照不重复成段）。
+    #[test]
+    fn editor_confirmed_segments_are_ordered_and_single_shot() {
+        let mut state = EditorDictationState::new(1, "ed_test".into(), 1);
+
+        assert_eq!(
+            state.push_confirmed_delta("第一句。"),
+            Some((1, "第一句。".to_string()))
+        );
+        assert_eq!(
+            state.push_confirmed_delta("第一句。"),
+            None,
+            "重复的同一累计快照不得重复成段"
+        );
+        assert_eq!(
+            state.push_confirmed_delta("第一句。第二句。"),
+            Some((2, "第二句。".to_string())),
+            "新增部分只追加一次"
+        );
+        // Final 收尾段继续单调追加，重复 Final 不产段
+        assert_eq!(
+            state.push_final_delta("第一句。第二句。第三句。"),
+            Some((3, "第三句。".to_string()))
+        );
+        assert_eq!(state.push_final_delta("第一句。第二句。第三句。"), None);
+        assert_eq!(state.last_seq(), 3, "seq 必须严格单调且不跳号");
+
+        // 快照按序可补齐（前端恢复路径）
+        let segments = state.after(1, 0).expect("epoch 匹配应可读快照");
+        assert_eq!(
+            segments.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(state.after(2, 0), None, "旧 epoch 不得读取当前快照");
+    }
+
+    #[test]
+    fn editor_status_edge_emits_only_on_change() {
+        let mut edge = EditorStatusEdge::default();
+
+        assert!(edge.should_emit("recording", 0, Some("预览"), None, None));
+        assert!(
+            !edge.should_emit("recording", 0, Some("预览"), None, None),
+            "完全相同的状态不得重复发送"
+        );
+        assert!(
+            edge.should_emit("recording", 0, Some("预览2"), None, None),
+            "preview 变化必须发送"
+        );
+        assert!(
+            edge.should_emit("recording", 1, Some("预览2"), None, None),
+            "seq 变化必须发送"
+        );
+        assert!(
+            edge.should_emit("paused", 1, Some("预览2"), None, None),
+            "phase 变化必须发送"
+        );
+        assert!(edge.should_emit("error", 1, Some("预览2"), Some("boom"), Some("stt_failed")));
+        assert!(
+            !edge.should_emit("error", 1, Some("预览2"), Some("boom"), Some("stt_failed")),
+            "重复的 error 状态不得重复发送"
+        );
+        assert!(
+            edge.should_emit("error", 1, Some("预览2"), Some("boom2"), Some("stt_failed")),
+            "message 变化必须发送"
+        );
+        assert!(
+            edge.should_emit("ended", 1, None, None, None),
+            "ended 与上一状态不同必须发送"
+        );
+    }
+
+    #[test]
+    fn repeated_identical_partial_yields_single_status_change() {
+        // 验收：相同 Partial 连续出现时只产生一次对外状态变化。
+        let mut edge = EditorStatusEdge::default();
+        let mut emitted = 0;
+        for _ in 0..100 {
+            if edge.should_emit("recording", 7, Some("同一预览"), None, None) {
+                emitted += 1;
+            }
+        }
+        assert_eq!(emitted, 1, "100 次相同 Partial 只允许一次对外状态变化");
+    }
+
+    #[test]
+    fn status_edge_handles_preview_cleared_and_empty() {
+        let mut edge = EditorStatusEdge::default();
+        assert!(edge.should_emit("recording", 0, Some("有预览"), None, None));
+        // 句尾清空预览 → None 与 Some("") 都是不同状态，必须各自发送一次
+        assert!(edge.should_emit("recording", 0, Some(""), None, None));
+        assert!(!edge.should_emit("recording", 0, Some(""), None, None));
+        assert!(edge.should_emit("recording", 0, None, None, None));
+        assert!(!edge.should_emit("recording", 0, None, None, None));
     }
 }

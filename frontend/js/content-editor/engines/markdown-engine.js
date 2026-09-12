@@ -1,13 +1,23 @@
 /**
- * MarkdownIrEngine（0.23.1）——Tiptap/ProseMirror 所见即所得编辑引擎。
+ * MarkdownIrEngine（0.23.1；本次修复引入源码感知 patch）——Tiptap/ProseMirror 所见即所得引擎。
  *
- * 与 SourceEngine 共同满足 Adapter 契约（§3.4）。MD 侧特殊职责：
- * - **edited 标志**：首次用户编辑前置位。未编辑时 Adapter 用会话级检查点
- *   逐字符还原原文（Tiptap 规范化重写不回写正文）。
- * - **suppress 抑制**：程序化 setContent（markdown parse 路径）可能仍触发
- *   update 事件（便签侧实证），载入/还原期间屏蔽，防止假 edited。
- * - **normalized 检测**：载入后立即序列化一次，与原文比对得出"已按编辑器
- *   规范重写"标志（§3.10：首次 MD 编辑保存时提示）。
+ * ## 与 CanonicalBuffer 的关系（本次修复的核心）
+ *
+ * 修复前：本引擎的 `getText()`（= `editor.getMarkdown()` 整篇序列化）就是
+ * MD 视图下的"正文"，于是**一次局部编辑会把整篇文档按编辑器规范重写**
+ * （`*`→`-`、`__`→`**`、Setext→ATX、空行收敛），未编辑区间被静默改变。
+ *
+ * 现在：会话正文的唯一真源是 `CanonicalBuffer`（见 canonical-buffer.js），
+ * 本引擎只是它的**投影**：
+ * - 载入时建立「源文内容块 ↔ 文档顶层节点」映射并做对齐验证
+ *   （md-source-patch.js::buildBlockMap）；
+ * - 用户编辑后由 `takeSourcePatch(baseSource)` 产出**最小块级 patch**，
+ *   只改写变更窗口对应的源文区间；
+ * - 对齐验证不通过（罕见结构 / 块丢失）→ `readOnly = true`：仍可预览，
+ *   但**禁止富文本编辑**，也不会产出任何 patch。
+ *
+ * `getText()`（整篇序列化）保留仅用于诊断与规范化比对，
+ * **不再作为会话正文真源**（EditorAdapter 一律读缓冲区）。
  */
 
 import {
@@ -17,6 +27,8 @@ import {
     serializeMarkdown,
 } from "../../shared/tiptap-editor.js";
 import {createMdToolbar, bindMdToolbar, updateToolbarStates} from "../../shared/md-toolbar.js";
+import {buildBlockMap, jsonEqual, planSourcePatch} from "../md-source-patch.js";
+import {CanonicalBuffer} from "../canonical-buffer.js";
 
 export class MarkdownIrEngine {
     kind = "markdown";
@@ -28,16 +40,37 @@ export class MarkdownIrEngine {
     normalized = false;
 
     /**
+     * 只读预览：对齐验证失败或显式 `editable=false`。
+     * 只读时禁止一切正文修改（用户输入 + 程序化追加/替换），
+     * 也不产出 patch——"无法保证无损就不修改"。
+     */
+    readOnly = false;
+
+    /** 只读原因：`"align"`（块对齐验证失败）/ `"forced"`（调用方禁止编辑） */
+    readOnlyReason = null;
+
+    /**
      * @param {object} options
      * @param {HTMLElement} options.element - Tiptap 挂载容器
-     * @param {HTMLElement|null} options.toolbarMount - MD 工具栏挂载点（null 则不装配）
-     * @param {string} options.initialMarkdown - 初始 Markdown（应为载入侧 \r\n 归一化后的文本）
+     * @param {HTMLElement|null} options.toolbarMount - MD 工具栏挂载点（null/只读时不装配）
+     * @param {string} options.initialMarkdown - 初始 Markdown（canonical 原文）
      * @param {boolean} [options.editable=true]
      * @param {() => void} [options.onChange] - 用户可感知变更
      * @param {() => void} [options.onSelectionChange]
+     * @param {object} [options.deps] - 解析/序列化注入（测试用）
+     * @param {(md: string) => any} [options.deps.parseDoc]
+     * @param {(json: any) => string} [options.deps.serializeDoc]
      * @throws Tiptap bundle 未加载或初始化失败时抛错（调用方降级 Source）
      */
-    constructor({element, toolbarMount, initialMarkdown, editable = true, onChange, onSelectionChange}) {
+    constructor({
+        element,
+        toolbarMount,
+        initialMarkdown,
+        editable = true,
+        onChange,
+        onSelectionChange,
+        deps = {},
+    }) {
         if (!window.BlinkTiptap) {
             throw new Error("BlinkTiptap bundle 未加载");
         }
@@ -45,6 +78,7 @@ export class MarkdownIrEngine {
         this._onChange = onChange ?? null;
         this._onSelectionChange = onSelectionChange ?? null;
         this._suppress = false;
+        this._editable = editable;
 
         this.editor = createMarkdownEditor({
             element,
@@ -59,6 +93,10 @@ export class MarkdownIrEngine {
             onTransaction: () => this._onSelectionChange?.(),
         });
 
+        // 解析/序列化适配：默认走生产 Tiptap MarkdownManager（editor.markdown）
+        this._parseDoc = deps.parseDoc ?? ((md) => this.editor.markdown.parse(md));
+        this._serializeDoc = deps.serializeDoc ?? ((json) => this.editor.markdown.serialize(json));
+
         // 载入后立即序列化比对——规范化检测（一次性成本，见 0.23.0 perf 报告）
         try {
             this.normalized = normalizeEol(serializeMarkdown(this.editor)) !== normalizeEol(initialMarkdown);
@@ -66,8 +104,11 @@ export class MarkdownIrEngine {
             this.normalized = false;
         }
 
-        // MD 工具栏（与便签共用 components/md-toolbar）；引擎实例级监听随引擎创建
-        if (toolbarMount) {
+        // 建立块映射与只读判定（必须在任何用户交互之前）
+        const map = this._rebuildDocumentState(initialMarkdown);
+
+        // MD 工具栏：只读预览下不装配（编辑工具无意义）
+        if (toolbarMount && !this.readOnly) {
             toolbarMount.innerHTML = "";
             this.toolbar = createMdToolbar("md-toolbar-inner");
             toolbarMount.appendChild(this.toolbar);
@@ -76,12 +117,180 @@ export class MarkdownIrEngine {
             this.editor.on("transaction", () => updateToolbarStates(this.toolbar, this.editor));
         }
 
+        if (this.readOnly && editable) {
+            // 对齐验证失败：禁止富文本编辑（保留渲染预览）
+            try {
+                this.editor.setEditable(false);
+            } catch (e) {
+                console.error("[markdown-engine] 切换只读失败:", e);
+            }
+        }
+        void map;
+
         this.el.hidden = false;
     }
 
+    // ── 源码感知 patch ──────────────────────────────────────────────────────
+
     /**
-     * 全文快照。未编辑时返回 undefined 语义由 Adapter 决定（用检查点还原），
-     * 编辑后返回序列化文本（含 EOF 换行约定）。
+     * 自上次同步以来文档顶层节点是否发生了变化（廉价：未改动子树命中缓存）。
+     * 供 Adapter 做 O(1) 级 dirty 判定，避免每次按键都物化整篇源文。
+     */
+    hasPendingSourcePatch() {
+        if (this.readOnly) return false;
+        return !jsonEqual(this._nodeSnapshot, this._topSnapshot());
+    }
+
+    /**
+     * 产出针对 canonical 源文的最小块级 patch（延迟物化）。
+     *
+     * @param {string} baseSource - 当前 canonical 源文
+     * @returns {{text: string, exact: true}|{exact: false, reason: string}|null}
+     *   - `null`：无可应用变更（未编辑 / 只读 / 源文已被外部改变）
+     *   - `exact:true`：块级无损（未编辑区间逐字节保留）
+     *   - `exact:false`：块级无损无法保证；canonical source 不变，投影进入只读
+     */
+    takeSourcePatch(baseSource) {
+        if (this.readOnly) return null;
+        if (typeof baseSource !== "string") return null;
+
+        if (baseSource !== this._baseSource) {
+            // 外部已改变源文（不应发生）：保守重建映射，不产出 patch
+            this._rebuildDocumentState(baseSource);
+            return null;
+        }
+
+        const after = this._topSnapshot();
+        if (jsonEqual(this._nodeSnapshot, after)) return null;
+
+        const patches = planSourcePatch({
+            sourceText: baseSource,
+            blocks: this._sourceMap?.blocks ?? [],
+            beforeNodes: this._nodeSnapshot,
+            afterNodes: after,
+            serializeNode: (node) => this._serializeNodeText(node),
+        });
+
+        const buffer = new CanonicalBuffer(baseSource);
+        const applied = patches.length > 0 ? buffer.applyPatches(patches) : false;
+        const candidate = applied ? buffer.text : baseSource;
+
+        // 整篇复核：新源文必须解析回当前文档——否则块级无损不成立
+        let exact = false;
+        try {
+            exact = jsonEqual(this._parseDoc(candidate), {type: "doc", content: after});
+        } catch {
+            exact = false;
+        }
+
+        if (!exact) {
+            // Never promote a best-effort/full-document serialization to the
+            // canonical buffer.  Close the rich-text transaction by rebuilding
+            // the projection from the unchanged source and making it read-only.
+            this._restoreCanonicalProjection(baseSource, "patch-rejected");
+            return {exact: false, reason: "patch-verification"};
+        }
+
+        this._baseSource = candidate;
+        this._nodeSnapshot = after;
+        this._sourceMap = buildBlockMap(
+            candidate,
+            {type: "doc", content: after},
+            (text) => this._parseBlockNode(text),
+        );
+        this.edited = false;
+        return {text: candidate, exact: true};
+    }
+
+    /** 文档顶层节点 JSON 快照（WeakMap 缓存：未改动子树仅一次引用比较） */
+    _topSnapshot() {
+        const doc = this.editor.state.doc;
+        const out = [];
+        for (let i = 0; i < doc.childCount; i += 1) {
+            const node = doc.child(i);
+            let json = this._jsonCache.get(node);
+            if (json === undefined) {
+                json = node.toJSON();
+                this._jsonCache.set(node, json);
+            }
+            out.push(json);
+        }
+        return out;
+    }
+
+    /** 以给定源文重建映射与快照；同步刷新 `readOnly` */
+    _rebuildDocumentState(source) {
+        this._baseSource = typeof source === "string" ? source : "";
+        this._jsonCache = new WeakMap();
+        this._nodeSnapshot = this._topSnapshot();
+        const map = buildBlockMap(
+            this._baseSource,
+            {type: "doc", content: this._nodeSnapshot},
+            (text) => this._parseBlockNode(text),
+        );
+        this._sourceMap = map;
+        this.readOnly = !map.ok || !this._editable;
+        this.readOnlyReason = !map.ok ? "align" : (this._editable ? null : "forced");
+        return map;
+    }
+
+    /** 单块解析：解析结果必须是恰好一个顶层节点，否则视为不可对齐 */
+    _parseBlockNode(blockText) {
+        try {
+            const json = this._parseDoc(blockText);
+            const content = json?.content;
+            if (!Array.isArray(content) || content.length !== 1) return null;
+            return content[0];
+        } catch {
+            return null;
+        }
+    }
+
+    /** 单节点序列化（`&nbsp;` 等内部表示由序列化器决定） */
+    _serializeNodeText(node) {
+        try {
+            const raw = this._serializeDoc({type: "doc", content: [node]});
+            return typeof raw === "string" ? raw.replace(/^\n+/, "").replace(/\s+$/, "") : "";
+        } catch {
+            return "";
+        }
+    }
+
+    /**
+     * Restore the rendered document to canonical source after a rejected
+     * source patch.  This deliberately does not touch the caller's buffer.
+     */
+    _restoreCanonicalProjection(source, reason) {
+        try {
+            const json = this._parseDoc(source);
+            this._suppress = true;
+            try {
+                this.editor.commands.setContent(json, false);
+            } finally {
+                this._suppress = false;
+            }
+            this.edited = false;
+            this._rebuildDocumentState(source);
+            this.readOnly = true;
+            this.readOnlyReason = reason;
+            this.editor.setEditable(false);
+            if (this.toolbar) this.toolbar.hidden = true;
+        } catch (error) {
+            // A source that was previously aligned should parse here.  If a
+            // vendor/parser regression still prevents reconstruction, retain
+            // the safety invariant: remain read-only and never emit source text.
+            this.readOnly = true;
+            this.readOnlyReason = reason;
+            console.warn("[markdown-engine] canonical projection restore failed", error);
+        }
+    }
+
+    // ── 引擎契约（§3.4）────────────────────────────────────────────────────
+
+    /**
+     * 整篇序列化快照。
+     * **不作为会话正文真源**（真源是 CanonicalBuffer）——仅用于诊断与
+     * 序列化形态比对。
      */
     getText() {
         return serializeMarkdown(this.editor);
@@ -96,10 +305,11 @@ export class MarkdownIrEngine {
     }
 
     /**
-     * 程序化全文替换（单事务）。0.23.4 AI 候选确认应用走此路径；
-     * 置 edited=true（内容确已改变）。
+     * 程序化全文替换（单事务）。仅用于「外部同步」这类源文整体变更路径
+     * （调用方同时会把 CanonicalBuffer 设为同一文本）；只读预览下拒绝。
      */
     replaceAll(markdown) {
+        if (this.readOnly) return false;
         const json = parseMarkdown(this.editor, markdown);
         this._suppress = true;
         try {
@@ -108,28 +318,31 @@ export class MarkdownIrEngine {
             this._suppress = false;
         }
         this.edited = true;
+        this._rebuildDocumentState(markdown);
         this._onChange?.();
+        return true;
     }
 
     /**
-     * 文末追加文本（0.23.3 听写追尾，单事务）。末尾节点是段落时在段内
-     * 追加；否则（空文档/围栏代码块等收尾）插入新段落。恢复用户此前
-     * selection、不抢焦点、不滚动。onUpdate 置 edited 并通知 revision。
+     * 文末追加文本（0.23.3 听写追尾，单事务）。只读预览下拒绝。
      * @param {string} text
+     * @returns {boolean} 是否已写入
      */
     appendText(text) {
-        if (!text) return;
+        if (this.readOnly || !text) return false;
         this._insertAtDocEnd(text, {newParagraph: false});
+        return true;
     }
 
     /**
-     * 文末新起一段追加（0.23.3 首段语义）：末段非空段落时插入新段落，
-     * 其余情况与 appendText 等价（空段落被填充/非段落收尾本就需新段）。
+     * 文末新起一段追加（0.23.3 首段语义）。只读预览下拒绝。
      * @param {string} text
+     * @returns {boolean} 是否已写入
      */
     appendParagraph(text) {
-        if (!text) return;
+        if (this.readOnly || !text) return false;
         this._insertAtDocEnd(text, {newParagraph: true});
+        return true;
     }
 
     /** appendText / appendParagraph 共用实现（单事务 + selection 恢复） */
@@ -167,8 +380,6 @@ export class MarkdownIrEngine {
     /**
      * 在当前文档中选中给定文本并滚动到可见（"定位到本次听写"）。
      * 跨 text node 拼接全文后按字符下标映射回 doc position。
-     * @param {string} text
-     * @returns {boolean} 是否找到并选中
      */
     locateText(text) {
         if (!text) return false;
@@ -205,8 +416,6 @@ export class MarkdownIrEngine {
     /**
      * 冻结 [fromChar, 文末] 的本轮听写范围（0.23.6 §5.7）。
      * 锚点为听写开始时记录的拼接文本偏移，不做全文 indexOf 猜测。
-     * @param {number} fromChar
-     * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
      */
     createTailRangeHandle(fromChar) {
         const {full, spans} = this._concatText();
@@ -226,11 +435,8 @@ export class MarkdownIrEngine {
 
     /**
      * 选中并滚动到冻结的听写范围（"定位到本次听写"）。
-     * 直接消费结束时冻结的 opaque handle——右边界是冻结时的文末，听写
-     * 结束后用户继续输入不会被一并选中（0.23.6 二次 Review）；范围内
-     * 文本已被编辑过时定位失效（返回 false）。
-     * @param {{kind: string, from: number, to: number, text: string}} handle
-     * @returns {boolean} 范围是否有效并已选中
+     * 右边界是冻结时的文末，听写结束后继续输入不会被一并选中；
+     * 范围内文本已被编辑过时返回 false。
      */
     locateRange(handle) {
         if (!handle || handle.kind !== this.kind) return false;
@@ -253,7 +459,11 @@ export class MarkdownIrEngine {
         return null;
     }
 
-    /** 程序化载入/还原内容（不置 edited，抑制假更新；edited/normalized 复位） */
+    /**
+     * 程序化载入外部内容（便签同步等）。**允许在只读预览下执行**：
+     * 外部同步不是"富文本编辑"，且调用方会把 CanonicalBuffer 设为同一文本。
+     * edited/normalized 与块映射按新内容重算。
+     */
     loadContent(markdown) {
         const json = parseMarkdown(this.editor, markdown);
         this._suppress = true;
@@ -262,21 +472,21 @@ export class MarkdownIrEngine {
         } finally {
             this._suppress = false;
         }
-        // 同步/还原后回到 clean 基线：未编辑、规范化标志按新内容重算
         this.edited = false;
         try {
             this.normalized = normalizeEol(serializeMarkdown(this.editor)) !== normalizeEol(markdown);
         } catch {
             this.normalized = false;
         }
+        this._rebuildDocumentState(markdown);
     }
 
     /**
      * 冻结当前选区为 opaque range handle（0.23.4 §3.4）。
-     * 跨文本块范围 blockSafe=false（§3.7：Markdown 块边界不安全时只允许复制）。
-     * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
+     * 只读预览下不签发 handle（整理结果无法确认替换）。
      */
     createSelectionRangeHandle() {
+        if (this.readOnly) return null;
         const {state} = this.editor;
         const {from, to, empty} = state.selection;
         if (empty) return null;
@@ -292,12 +502,9 @@ export class MarkdownIrEngine {
     /**
      * 在当前文档文本中定位给定文本并冻结为 range handle（选区整理）。
      * 定位口径与 locateText 一致（text node 拼接，不含块分隔符）。
-     * 听写范围请走 createTailRangeHandle（真实追加锚点，0.23.6 §5.7）。
-     * @param {string} text
-     * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
      */
     createTextRangeHandle(text) {
-        if (!text) return null;
+        if (this.readOnly || !text) return null;
         const {full, spans} = this._concatText();
         const idx = full.indexOf(text);
         if (idx < 0) return null;
@@ -326,14 +533,11 @@ export class MarkdownIrEngine {
 
     /**
      * 单事务替换 handle 范围（0.23.4 §3.7 确认应用路径）。
-     * 仅接受 blockSafe 范围；先复核冻结文本，再一次事务完成替换——单行输出
-     * 走 insertText（保持段落），多行输出按行拆段落（保持 Markdown 块结构）。
-     * 校验失败返回 false，不产生任何修改。
-     * @param {{from: number, to: number, text: string, blockSafe: boolean}} handle
-     * @param {string} newText
-     * @returns {boolean}
+     * 仅接受 blockSafe 范围；先复核冻结文本，再一次事务完成替换。
+     * 只读预览、校验失败或引擎不支持时返回 false（不产生修改）。
      */
     replaceRange(handle, newText) {
+        if (this.readOnly) return false;
         if (!handle || typeof newText !== "string" || !handle.blockSafe) return false;
         const {from, to, text: expected} = handle;
         const {state} = this.editor;

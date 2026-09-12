@@ -31,14 +31,21 @@ pub async fn stop_chat_stt(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 调整 voice-overlay 窗口高度（G2 语音 mini overlay 自动撑高）。
+/// 调整 voice-overlay 窗口尺寸（语音浮窗自动撑高 / editor 模式切换尺寸）。
 ///
-/// 前端在文本更新后调用，传入期望的逻辑高度。宽度固定 300。
+/// 前端在文本更新或模式切换后调用，传入期望的逻辑高度与可选逻辑宽度。
+/// `width` 省略时沿用 g2 hold 的默认宽度（`VOICE_W`）；editor 连续听写模式传入
+/// 更宽的稳定宽度，使三个控制按钮 + 预览区不再被挤压。
 /// 若窗口底部超出显示器工作区，自动上移使其完整可见。
 #[tauri::command]
-pub async fn resize_voice_overlay(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+pub async fn resize_voice_overlay(
+    app: tauri::AppHandle,
+    height: f64,
+    width: Option<f64>,
+) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("voice-overlay") {
-        let size = tauri::LogicalSize::new(260.0, height);
+        let w = width.unwrap_or(crate::infra::platform::window::VOICE_W);
+        let size = tauri::LogicalSize::new(w, height);
         win.set_size(size).map_err(|e| e.to_string())?;
         crate::infra::platform::window::clamp_to_work_area(&win);
     }

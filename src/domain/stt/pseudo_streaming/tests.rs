@@ -31,6 +31,13 @@ impl ControlledTransport {
             self.called.notified().await;
         }
     }
+
+    /// 带超时的等待——用于断言"某次推理必须/不得被启动"。
+    async fn wait_for_calls_or_fail(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), self.wait_for_calls(expected))
+            .await
+            .expect("推理调用次数未在超时内达到预期");
+    }
 }
 
 #[async_trait::async_trait]
@@ -62,18 +69,7 @@ fn controlled_engine(
     samples: Vec<f32>,
 ) -> PseudoStreamingSttEngine {
     PseudoStreamingSttEngine {
-        inner: Arc::new(Mutex::new(PseudoInner {
-            vad: EnergyVad::new(16_000),
-            sentences: SentenceState::new(),
-            samples,
-            last_preview: Instant::now(),
-            last_preview_elapsed: Duration::ZERO,
-            last_preview_sample_end: 0,
-            preview_in_flight: false,
-            latest_preview: String::new(),
-            preview_generation: 0,
-            session_failed: false,
-        })),
+        inner: Arc::new(Mutex::new(PseudoInner::for_test(samples))),
         connection: Some(crate::domain::stt::SttEngineConnection {
             host: "127.0.0.1".into(),
             port: 0,
@@ -83,6 +79,26 @@ fn controlled_engine(
         }),
         sample_rate: 16_000,
     }
+}
+
+/// 无 transport 的引擎（纯状态语义测试用）。
+fn engine_without_transport(samples: Vec<f32>) -> PseudoStreamingSttEngine {
+    PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner::for_test(samples))),
+        connection: None,
+        sample_rate: 16_000,
+    }
+}
+
+/// 等待条件成立（带超时；用于等待后台推理 task 写入状态）。
+async fn wait_until(condition: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("条件未在超时内成立");
 }
 
 // ── SentenceState 基础测试 ──
@@ -260,23 +276,30 @@ fn sentence_state_commit_empty_text_rollback() {
 
 #[test]
 fn compose_result_empty_returns_empty_string() {
-    assert_eq!(PseudoStreamingSttEngine::compose_result("", ""), "");
+    assert_eq!(
+        PseudoStreamingSttEngine::compose_result(0, "", "", false),
+        ""
+    );
 }
 
 #[test]
 fn compose_result_with_preview_only() {
-    let result = PseudoStreamingSttEngine::compose_result("", "你好");
+    let result = PseudoStreamingSttEngine::compose_result(3, "", "你好", false);
     let v: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["confirmed"], "");
     assert_eq!(v["preview"], "你好");
+    assert_eq!(v["revision"], 3, "必须携带状态版本号");
+    assert_eq!(v["confirmed_changed"], false);
 }
 
 #[test]
 fn compose_result_with_both() {
-    let result = PseudoStreamingSttEngine::compose_result("你好。", "世界");
+    let result = PseudoStreamingSttEngine::compose_result(5, "你好。", "世界", true);
     let v: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["confirmed"], "你好。");
     assert_eq!(v["preview"], "世界");
+    assert_eq!(v["confirmed_changed"], true);
+    assert_eq!(v["v"], 2, "协议版本号必须存在");
 }
 
 // ── preview_interval 测试 ──
@@ -496,25 +519,16 @@ fn filler_strip_uses_original_unicode_boundaries() {
 #[test]
 fn engine_reset_clears_state() {
     let engine = PseudoStreamingSttEngine {
-        inner: Arc::new(Mutex::new(PseudoInner {
-            vad: {
-                let mut v = EnergyVad::new(16000);
-                v.process_chunk(&[0.1; 1600]);
-                v
-            },
-            sentences: {
-                let mut s = SentenceState::new();
-                s.append_confirmed("测试");
-                s
-            },
-            samples: vec![0.1; 1000],
-            last_preview: Instant::now() - Duration::from_secs(10),
-            last_preview_elapsed: Duration::ZERO,
-            last_preview_sample_end: 0,
-            preview_in_flight: true,
-            latest_preview: "测试预览".to_string(),
-            preview_generation: 0,
-            session_failed: false,
+        inner: Arc::new(Mutex::new({
+            let mut inner = PseudoInner::for_test(vec![0.1; 1000]);
+            inner.vad.process_chunk(&[0.1; 1600]);
+            inner.sentences.append_confirmed("测试");
+            inner.last_preview = Instant::now() - Duration::from_secs(10);
+            inner.preview_in_flight = true;
+            inner.preview_owner = 7;
+            inner.next_preview_request = 7;
+            inner.latest_preview = "测试预览".to_string();
+            inner
         })),
         connection: None,
         sample_rate: 16000,
@@ -527,6 +541,7 @@ fn engine_reset_clears_state() {
     assert!(inner.samples.is_empty());
     assert!(inner.latest_preview.is_empty());
     assert!(!inner.preview_in_flight);
+    assert_eq!(inner.preview_owner, 0, "reset 必须清空预览 owner");
     assert_eq!(
         inner.preview_generation, 1,
         "reset 应递增 preview_generation"
@@ -535,24 +550,17 @@ fn engine_reset_clears_state() {
     assert_eq!(inner.sentences.committed_sample_end, 0);
     assert!(inner.sentences.pending.is_none());
     assert!(!inner.sentences.finalize_in_flight);
+    assert_eq!(
+        inner.last_reported_state, None,
+        "reset 后首个 chunk 必须重新上报状态"
+    );
 }
 
 // 验证带连接快照的引擎能正常构造和 reset
 #[test]
 fn engine_with_token_constructs_and_resets() {
     let engine = PseudoStreamingSttEngine {
-        inner: Arc::new(Mutex::new(PseudoInner {
-            vad: EnergyVad::new(16000),
-            sentences: SentenceState::new(),
-            samples: vec![0.1; 100],
-            last_preview: Instant::now(),
-            last_preview_elapsed: Duration::ZERO,
-            last_preview_sample_end: 0,
-            preview_in_flight: false,
-            latest_preview: String::new(),
-            preview_generation: 0,
-            session_failed: false,
-        })),
+        inner: Arc::new(Mutex::new(PseudoInner::for_test(vec![0.1; 100]))),
         connection: Some(crate::domain::stt::SttEngineConnection {
             host: "127.0.0.1".to_string(),
             port: 8000,
@@ -572,22 +580,7 @@ fn engine_with_token_constructs_and_resets() {
 
 #[tokio::test]
 async fn hard_limit_forces_boundary_for_audio_stuck_outside_vad_speaking() {
-    let engine = PseudoStreamingSttEngine {
-        inner: Arc::new(Mutex::new(PseudoInner {
-            vad: EnergyVad::new(16_000),
-            sentences: SentenceState::new(),
-            samples: Vec::new(),
-            last_preview: Instant::now(),
-            last_preview_elapsed: Duration::ZERO,
-            last_preview_sample_end: 0,
-            preview_in_flight: false,
-            latest_preview: String::new(),
-            preview_generation: 0,
-            session_failed: false,
-        })),
-        connection: None,
-        sample_rate: 16_000,
-    };
+    let engine = engine_without_transport(Vec::new());
 
     // 该幅度低于当前 off threshold，不会进入 VAD speaking；绝对窗口保险
     // 仍必须在 12 秒处制造边界。无 transport 会立即安全 rollback。
@@ -602,22 +595,7 @@ async fn hard_limit_forces_boundary_for_audio_stuck_outside_vad_speaking() {
 
 #[test]
 fn reset_recovers_and_clears_poisoned_mutex() {
-    let engine = PseudoStreamingSttEngine {
-        inner: Arc::new(Mutex::new(PseudoInner {
-            vad: EnergyVad::new(16_000),
-            sentences: SentenceState::new(),
-            samples: Vec::new(),
-            last_preview: Instant::now(),
-            last_preview_elapsed: Duration::ZERO,
-            last_preview_sample_end: 0,
-            preview_in_flight: false,
-            latest_preview: String::new(),
-            preview_generation: 0,
-            session_failed: false,
-        })),
-        connection: None,
-        sample_rate: 16_000,
-    };
+    let engine = engine_without_transport(Vec::new());
     let inner = Arc::clone(&engine.inner);
     let _ = std::panic::catch_unwind(move || {
         let _guard = inner.lock().unwrap();
@@ -1078,4 +1056,170 @@ async fn reset_during_terminal_finalize_discards_old_result() {
     assert!(inner.sentences.confirmed_text().is_empty());
     assert_eq!(inner.sentences.committed_sample_end, 0);
     assert!(inner.samples.is_empty());
+}
+
+// ── 0.24: 预览生命周期（preview_in_flight 泄漏）、状态边沿触发、可观测性 ──
+
+/// 回归：句尾使在途预览过期后，预览任务返回时必须释放 `preview_in_flight`。
+///
+/// 旧实现只在 `preview_generation` 相等时清除该标志，句尾递增代际后
+/// 标志永久为 true，`should_preview` 再也不会成立——表现为"录制一两句后
+/// 预览永久停止"。
+#[tokio::test]
+async fn preview_in_flight_released_after_sentence_boundary() {
+    let (tx, rx) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx]);
+    let engine = Arc::new(controlled_engine(transport.clone(), vec![]));
+
+    engine.spawn_preview_recognition(vec![0.1; 1600], 1600);
+    transport.wait_for_calls_or_fail(1).await;
+    assert!(
+        engine.inner.lock().unwrap().preview_in_flight,
+        "预览应在飞行中"
+    );
+
+    // 模拟句尾：仅代际推进（句尾对预览所有权的影响就在这里）
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.preview_generation = inner.preview_generation.wrapping_add(1);
+    }
+
+    tx.send(Ok("过期预览".into())).unwrap();
+    wait_until(|| !engine.inner.lock().unwrap().preview_in_flight).await;
+
+    let inner = engine.inner.lock().unwrap();
+    assert!(
+        inner.latest_preview.is_empty(),
+        "过期预览不得写入 latest_preview"
+    );
+    assert_eq!(inner.preview_owner, 0, "释放后 owner token 必须归零");
+}
+
+/// 回归：预览过期后必须能重新启动——即 `should_preview` 条件重新成立。
+#[tokio::test]
+async fn preview_restarts_after_stale_preview_released() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx1, rx2]);
+    let engine = Arc::new(controlled_engine(transport.clone(), vec![]));
+
+    // 第一轮：低于 VAD off threshold 的音频，累积 8000 样本并让预览间隔到期
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.last_preview = Instant::now() - Duration::from_millis(600);
+    }
+    engine.transcribe_chunk(&[0.006; 8_000]).await.unwrap();
+    transport.wait_for_calls_or_fail(1).await;
+    assert!(engine.inner.lock().unwrap().preview_in_flight);
+
+    // 句尾使其过期
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.preview_generation = inner.preview_generation.wrapping_add(1);
+    }
+    tx1.send(Ok("过期预览".into())).unwrap();
+    wait_until(|| !engine.inner.lock().unwrap().preview_in_flight).await;
+
+    // 第二轮：同样的音频 + 间隔再次到期 → 必须能启动新一轮预览
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.last_preview = Instant::now() - Duration::from_millis(600);
+    }
+    engine.transcribe_chunk(&[0.006; 8_000]).await.unwrap();
+    transport.wait_for_calls_or_fail(2).await;
+
+    tx2.send(Ok("新预览".into())).unwrap();
+    wait_until(|| engine.inner.lock().unwrap().latest_preview == "新预览").await;
+}
+
+/// 旧预览任务不得清除新一轮预览的所有权状态。
+#[tokio::test]
+async fn stale_preview_task_cannot_clear_new_preview_owner() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx1, rx2]);
+    let engine = Arc::new(controlled_engine(transport.clone(), vec![]));
+
+    engine.spawn_preview_recognition(vec![0.1; 1600], 1600);
+    transport.wait_for_calls_or_fail(1).await;
+    // 句尾后启动新一轮（模拟 owner 已被新请求接管）
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.preview_generation = inner.preview_generation.wrapping_add(1);
+    }
+    engine.spawn_preview_recognition(vec![0.1; 1600], 1600);
+    transport.wait_for_calls_or_fail(2).await;
+
+    tx1.send(Ok("旧预览".into())).unwrap();
+    // 给旧任务足够时间跑完（不能靠断言"未被清除"来等待）
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert!(inner.preview_in_flight, "旧任务不得清除新任务的 in_flight");
+        assert!(
+            inner.latest_preview.is_empty(),
+            "旧任务不得写入 latest_preview"
+        );
+    }
+
+    tx2.send(Ok("新预览".into())).unwrap();
+    wait_until(|| engine.inner.lock().unwrap().latest_preview == "新预览").await;
+}
+
+/// 状态未变化的音频块不得产生对外状态（返回空串 = 无事件）。
+#[tokio::test]
+async fn transcribe_chunk_suppresses_unchanged_state() {
+    let engine = engine_without_transport(Vec::new());
+
+    for _ in 0..5 {
+        let out = engine.transcribe_chunk(&[0.0; 160]).await.unwrap();
+        assert_eq!(out, "", "状态未变化时必须返回空串（不发送状态）");
+    }
+}
+
+/// confirmed 变化必须上报且只上报一次；重复的同一状态被抑制。
+#[tokio::test]
+async fn transcribe_chunk_reports_confirmed_change_once() {
+    let (tx, rx) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx]);
+    let engine = Arc::new(controlled_engine(transport.clone(), vec![0.1; 1600]));
+
+    let pending = {
+        let mut inner = engine.inner.lock().unwrap();
+        let pending = inner.sentences.on_sentence_end(1600, "").unwrap();
+        inner.vad.reset_sentence();
+        pending
+    };
+    engine.spawn_sentence_finalize(vec![0.1; 1600], pending.identity);
+    transport.wait_for_calls_or_fail(1).await;
+    tx.send(Ok("第一句。".into())).unwrap();
+    wait_until(|| engine.inner.lock().unwrap().sentences.confirmed_text() == "第一句。").await;
+
+    let first = engine.transcribe_chunk(&[0.0; 160]).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&first).expect("变化时必须返回 JSON 快照");
+    assert_eq!(v["confirmed"], "第一句。");
+    assert_eq!(v["confirmed_changed"], true);
+    assert!(v["revision"].as_u64().unwrap() > 0, "必须携带状态版本号");
+
+    // 同一状态重复调用 → 抑制
+    assert_eq!(engine.transcribe_chunk(&[0.0; 160]).await.unwrap(), "");
+}
+
+/// 诊断快照暴露 PCM 大小与在途推理任务数（不含正文）。
+#[test]
+fn stream_stats_reports_pcm_and_inflight() {
+    let engine = engine_without_transport(vec![0.1; 4000]);
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.preview_in_flight = true;
+        inner.sentences.finalize_in_flight = true;
+    }
+
+    let stats = engine.stream_stats();
+    assert_eq!(stats.pcm_samples, 4000);
+    assert!(stats.preview_in_flight);
+    assert!(stats.finalize_in_flight);
+    assert_eq!(stats.in_flight_inferences, 2);
 }

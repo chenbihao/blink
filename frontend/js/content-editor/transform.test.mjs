@@ -16,11 +16,54 @@ globalThis.window = globalThis;
 
 const {test} = await import("node:test");
 const assert = (await import("node:assert/strict")).default;
-const {EditorTransformController} = await import("./transform.js");
+const {
+    EditorTransformController,
+    STILL_WORKING_AFTER_SECONDS,
+    elapsedSeconds,
+    runningLabelKey,
+} = await import("./transform.js");
+const {t: realT} = await import("../i18n/index.js");
 const {SourceEngine} = await import("./engines/source-engine.js");
 
 const COMPLETED = "blink://editor-transform-completed";
 const FAILED = "blink://editor-transform-failed";
+
+/** 候选卡 DOM 桩（0.23.7 等待态断言用：只需 textContent / disabled / querySelector）。 */
+function makeCardStub() {
+    const node = () => ({
+        textContent: "",
+        title: "",
+        disabled: false,
+        innerHTML: "",
+        addEventListener() {},
+        removeEventListener() {},
+        classList: {add() {}, remove() {}, toggle() {}},
+        setAttribute() {},
+        getAttribute() {
+            return null;
+        },
+    });
+    const runningLabel = node();
+    const runningElapsed = node();
+    const body = node();
+    body.querySelector = (sel) => {
+        if (sel === ".editor-diff-running-label") return runningLabel;
+        if (sel === ".editor-diff-running-elapsed") return runningElapsed;
+        return null;
+    };
+    return {
+        card: node(),
+        title: node(),
+        staleStrip: node(),
+        body,
+        applyBtn: node(),
+        copyBtn: node(),
+        discardBtn: node(),
+        closeBtn: node(),
+        _runningLabel: runningLabel,
+        _runningElapsed: runningElapsed,
+    };
+}
 
 /** 构造控制器 + fake api/adapter/listen */
 function makeController({
@@ -29,6 +72,9 @@ function makeController({
     replaceResult = true,
     startError = null,
     revision = 5,
+    el = {},
+    now = undefined,
+    timers = null,
 } = {}) {
     const calls = {starts: [], cancels: [], replaces: [], copies: []};
     const api = {
@@ -62,15 +108,21 @@ function makeController({
     };
     const session = {isActive: true, sessionRef: "ed_t", generation: 2};
     const events = {phases: [], status: [], errors: []};
+    const deps = {
+        api,
+        adapter,
+        getSession: () => session,
+        listen,
+        copyToClipboard: async (text) => calls.copies.push(text),
+        el,
+    };
+    if (now) deps.now = now;
+    if (timers) {
+        deps.setTimer = (fn, ms) => timers.start(fn, ms);
+        deps.clearTimer = (id) => timers.clear(id);
+    }
     const controller = new EditorTransformController(
-        {
-            api,
-            adapter,
-            getSession: () => session,
-            listen,
-            copyToClipboard: async (text) => calls.copies.push(text),
-            el: {}, // 无头模式
-        },
+        deps,
         {
             onPhaseChanged: (p) => events.phases.push(p),
             onStatus: (m) => events.status.push(m),
@@ -534,4 +586,136 @@ test("transform: start(dictation, {handle}) 直用冻结范围，不做 Engine �
     assert.equal(calls.starts[0].text, "本轮听写");
     assert.equal(JSON.parse(calls.starts[0].rangeHandle).start, 3, "rangeHandle 为冻结的真实范围");
     assert.equal(controller.pendingRun.sourceText, "本轮听写");
+});
+
+// ── 0.23.7：整理等待态（spinner / 真实经过时间 / 超阈值提示 / 可取消）────
+
+test("transform 等待态纯函数：10s 阈值与真实经过时间", () => {
+    assert.equal(STILL_WORKING_AFTER_SECONDS, 10);
+    assert.equal(runningLabelKey(0), "editor.transform.running");
+    assert.equal(runningLabelKey(9), "editor.transform.running");
+    assert.equal(runningLabelKey(10), "editor.transform.stillWorking");
+    assert.equal(runningLabelKey(600), "editor.transform.stillWorking");
+
+    assert.equal(elapsedSeconds(null, 1000), 0);
+    assert.equal(elapsedSeconds(1000, null), 0);
+    // 回拨/边界不做负数
+    assert.equal(elapsedSeconds(1000, 999), 0);
+    assert.equal(elapsedSeconds(1000, 4999), 3);
+    assert.equal(elapsedSeconds(1000, 5000), 4);
+});
+
+test("transform 等待态：spinner + 真实经过时间，超 10s 提示仍在处理，且无虚假百分比", async () => {
+    let clock = 1_000;
+    const timers = {
+        list: [],
+        start(fn, ms) {
+            this.list.push({fn, ms, cleared: false});
+            return this.list.length;
+        },
+        clear(id) {
+            this.list[id - 1].cleared = true;
+        },
+    };
+    const el = makeCardStub();
+    const {controller} = makeController({el, now: () => clock, timers});
+
+    await controller.start("selection");
+    assert.equal(controller.phase, "running");
+    // 等待视觉语言：共享 spinner 组件 + 自定义经过时间行
+    assert.match(el.body.innerHTML, /class="spinner spinner-sm"/);
+    assert.match(el.body.innerHTML, /editor-diff-running-label/);
+    assert.doesNotMatch(el.body.innerHTML, /%/, "不展示虚假百分比");
+    // 尚不可用的应用/复制禁用；放弃按钮改为取消语义；关闭入口仍在
+    assert.equal(el.applyBtn.disabled, true);
+    assert.equal(el.copyBtn.disabled, true);
+    assert.equal(el.discardBtn.textContent, realT("editor.transform.cancel"));
+    assert.ok(el.closeBtn, "等待态保留关闭入口");
+    // 心跳 1s 一次
+    assert.equal(timers.list.length, 1);
+    assert.equal(timers.list[0].ms, 1000);
+
+    // 9s：仍是常态文案
+    clock += 9_000;
+    timers.list[0].fn();
+    assert.equal(el._runningLabel.textContent, realT("editor.transform.running"));
+    assert.equal(el._runningElapsed.textContent, realT("editor.transform.elapsed", {seconds: 9}));
+
+    // 12s：切到"仍在处理中"，经过时间同步（合计 12s）
+    clock += 3_000;
+    timers.list[0].fn();
+    assert.equal(el._runningLabel.textContent, realT("editor.transform.stillWorking"));
+    assert.equal(el._runningElapsed.textContent, realT("editor.transform.elapsed", {seconds: 12}));
+});
+
+test("transform 等待态：离开 running 立即停表，无悬挂计时器", async () => {
+    const timers = {
+        list: [],
+        start(fn, ms) {
+            this.list.push({fn, ms, cleared: false});
+            return this.list.length;
+        },
+        clear(id) {
+            this.list[id - 1].cleared = true;
+        },
+    };
+    const el = makeCardStub();
+    const {controller, handlers} = makeController({el, now: () => 5_000, timers});
+    await bind(controller);
+    await controller.start("selection");
+    assert.equal(timers.list.length, 1);
+
+    handlers[COMPLETED]({
+        payload: {
+            sessionRef: "ed_t",
+            generation: 2,
+            requestId: 101,
+            scope: "selection",
+            revisedText: "第一段。",
+            revision: 5,
+            rangeHandle: "x",
+        },
+    });
+
+    assert.equal(controller.phase, "candidate");
+    assert.equal(timers.list[0].cleared, true, "进入候选态必须停表");
+    assert.equal(controller.runningElapsedSeconds, 0);
+    // 候选态的"放弃"恢复原语义
+    assert.equal(el.discardBtn.textContent, realT("editor.transform.discard"));
+});
+
+test("transform 等待态：运行中点放弃/关闭即取消请求", async () => {
+    const el = makeCardStub();
+    const {controller, calls} = makeController({el});
+    await bind(controller);
+    await controller.start("selection");
+    assert.equal(controller.runRequestId, 101);
+
+    await controller.discard(); // 等待态下的"取消"（与关闭按钮同一入口）
+
+    assert.equal(controller.phase, "idle");
+    assert.deepEqual(calls.cancels, [101], "取消必须真实下发后端，释放全局 AI 单槽");
+});
+
+test("transform 等待态：取消后的迟到完成事件不重开候选", async () => {
+    const el = makeCardStub();
+    const {controller, handlers} = makeController({el});
+    await bind(controller);
+    await controller.start("selection");
+    await controller.discard();
+
+    handlers[COMPLETED]({
+        payload: {
+            sessionRef: "ed_t",
+            generation: 2,
+            requestId: 101,
+            scope: "selection",
+            revisedText: "已取消，不应成为候选",
+            revision: 5,
+            rangeHandle: "x",
+        },
+    });
+
+    assert.equal(controller.phase, "idle");
+    assert.equal(controller.candidate, null);
 });

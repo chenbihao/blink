@@ -286,8 +286,11 @@ const CHAT_MIN_W: f64 = 560.0;
 const CHAT_MIN_H: f64 = 420.0;
 
 /// 内容编辑器窗口
+///
+/// 0.23.7：高度 560 -> 660。顶部区域整合为单行 header 后，正文需要更舒适的可视
+/// 高度（640-680 区间），避免工具栏 + 正文 + footer 在小窗下正文过窄。
 const EDITOR_W: f64 = 720.0;
-const EDITOR_H: f64 = 560.0;
+const EDITOR_H: f64 = 660.0;
 const EDITOR_MIN_W: f64 = 400.0;
 const EDITOR_MIN_H: f64 = 300.0;
 
@@ -307,8 +310,11 @@ const SETTINGS_MIN_H: f64 = 520.0;
 const STICKY_MIN_W: f64 = 120.0;
 const STICKY_MIN_H: f64 = 80.0;
 
-/// 语音浮层窗口
-const VOICE_W: f64 = 260.0;
+/// 语音浮层窗口——g2 hold 默认尺寸。
+///
+/// editor 连续听写模式由前端经 `resize_voice_overlay(height, width)` 改为更宽的
+/// 稳定尺寸（约 304x208）；创建/复用时的初始尺寸仍是本常量。
+pub const VOICE_W: f64 = 260.0;
 const VOICE_H: f64 = 140.0;
 
 /// 唤起时的基准逻辑尺寸——用来在跨 DPI 屏定位时算出目标屏上的物理尺寸。

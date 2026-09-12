@@ -15,11 +15,13 @@
 import {applyThemeFromConfig} from "../shared/theme.js";
 import {applyI18nFromConfig, onLangChange, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
-import {choiceDialog, getCurrentWindow, listen, normalizeError} from "../shared/tauri.js";
+import {choiceDialog, confirmDialog, getCurrentWindow, listen, normalizeError} from "../shared/tauri.js";
 import {renderComboHTML} from "../shared/kbd.js";
 import {EVENTS} from "../shared/event-names.js";
 import {
     cancelEditorTransform,
+    clearEditorDraft,
+    archiveEditorDraft,
     commitEditorSession,
     copyToClipboard,
     endEditorSession,
@@ -27,20 +29,35 @@ import {
     getEditorSession,
     getEditorVoiceSnapshot,
     getStickyNote,
+    listEditorDrafts,
+    loadEditorDraft,
+    orphanEditorDraft,
     resolveEditorExit,
+    saveEditorDraft,
     startEditorTransform,
     startEditorVoice,
     stopEditorVoice,
 } from "../shared/api.js";
 import {EditorAdapter} from "./editor-adapter.js";
 import {EditorSession} from "./editor-session.js";
-import {EditorActions} from "./actions.js";
+import {EditorActions, fileConflictAction, stickyConflictAction} from "./actions.js";
 import {EditorVoiceController} from "./voice.js";
 import {EditorTransformController} from "./transform.js";
+import {
+    RecoveryDraft,
+    draftKeyForSource,
+    recoveryFenceMatches,
+    recoverySourceMatches,
+} from "./recovery-draft.js";
+import {showRecoveryConflictDialog} from "./recovery-dialog.js";
+import {RecoveryCandidates, RecoveryConflictResolver} from "./recovery-candidates.js";
+import {EditorExit, EditorLifecycle} from "./editor-lifecycle.js";
+import {fnv1a64Hex} from "./canonical-buffer.js";
 
 // ── DOM 引用 ──────────────────────────────────────────
 
 const titleEl = document.getElementById("editor-title");
+const sourceEl = document.getElementById("editor-source");
 const textareaEl = document.getElementById("editor-textarea");
 const mdContainerEl = document.getElementById("editor-tiptap-container");
 const mdToolbarEl = document.getElementById("md-toolbar");
@@ -55,6 +72,7 @@ const targetZoneEl = document.getElementById("target-zone");
 const targetIconUseEl = document.querySelector("#target-icon use");
 const targetLabelEl = document.getElementById("target-label");
 const dirtyDotEl = document.getElementById("dirty-dot");
+const readOnlyBadgeEl = document.getElementById("md-readonly-badge");
 const micBtn = document.getElementById("btn-mic");
 const voiceChipsEl = document.getElementById("voice-chips");
 const chipLocateEl = document.getElementById("chip-locate");
@@ -84,6 +102,10 @@ function originStickyId() {
     return session.source?.kind === "sticky" ? session.source.stickyId : null;
 }
 
+function activeDraftKey() {
+    return session.draftKey || draftKeyForSource(session.source);
+}
+
 const adapter = new EditorAdapter(
     {sourceEl: textareaEl, mdContainerEl, mdToolbarEl},
     {
@@ -97,8 +119,11 @@ const adapter = new EditorAdapter(
             // 0.23.4：请求后任何正文变化 → 候选 stale（§3.7）
             transform.notifyContentChanged();
             updateActionChips();
+            // 实时恢复草稿：防抖落盘（大文档 MD 不做高频整篇物化，只等边界 flush）
+            draft.schedule({defer: adapter.isHeavyMd()});
         },
         onSelectionChanged: () => updateActionChips(),
+        onMdModeChanged: () => updateViewSwitchState(),
     },
 );
 
@@ -121,17 +146,171 @@ const session = new EditorSession(
         onSnapshotApplied: () => {
             updateViewSwitchState();
             updateDirtyDot();
+            updateSourceDisplay();
+            // 会话绑定：冻结草稿身份并尝试恢复崩溃残留草稿
+            void bindRecoveryDraft();
         },
         onSessionCleared: () => {
             voice.handleSessionEnded();
             void transform.cancel({silent: true});
+            draft.unbind();
             updateViewSwitchState();
             updateDirtyDot();
             updateTargetDisplay();
+            updateSourceDisplay();
             updateActionChips();
         },
     },
 );
+
+// ── 实时恢复草稿（与 Ctrl+S 分离的持久化通道）──────────────
+
+/**
+ * 草稿控制器：只走草稿专用 IPC（绝不触发文件/剪贴板/便签等保存目标副作用）。
+ * getText 会触发 MD 延迟物化，因此大文档 MD 走 defer（只在关键边界 flush）。
+ */
+const draft = new RecoveryDraft({
+    api: {saveEditorDraft, loadEditorDraft, clearEditorDraft, orphanEditorDraft, archiveEditorDraft},
+    getIdentity: () => (session.isActive
+        ? {sessionRef: session.sessionRef, generation: session.generation}
+        : null),
+    getText: () => adapter.getText(),
+    getRevision: () => adapter.revision,
+    getCheckpoint: () => adapter.checkpointText,
+    getSourceRevision: () => session.sourceRevision,
+    isDirty: () => adapter.isDirty(),
+    hashOf: fnv1a64Hex,
+    onError: (error) => {
+        // 旧 revision / 旧会话被拒是预期结果（更新的一次写入已覆盖），只记日志
+        if (error.code === "stale_revision" || error.code === "stale_session") {
+            console.warn(`[content-editor] 草稿写入被拒（已有更新正文）[${error.code}]`);
+            return;
+        }
+        console.error(`[content-editor] 草稿保存失败 [${error.code}]: ${error.message}`);
+        setStatus(t("editor.draft.failed", {message: error.message ?? error.code}));
+    },
+});
+
+/**
+ * 会话绑定后：冻结草稿身份，并尝试恢复上次异常退出残留的草稿。
+ * 恢复只改变工作正文（checkpoint 不动）→ 会话保持 dirty，等待用户显式保存或放弃；
+ * 异步读取期间会话被替换时丢弃回流（身份墙）。
+ */
+async function bindRecoveryDraft() {
+    if (!session.isActive) return;
+    const key = activeDraftKey();
+    const identity = {
+        sessionRef: session.sessionRef,
+        generation: session.generation,
+        key,
+        sourceInstanceId: session.sourceInstanceId,
+    };
+    draft.bind(identity);
+    if (!key) return;
+
+    // Freeze every observable boundary before the disk read.  The editor stays
+    // focusable; only the eventual recovery decision is gated by this fence.
+    const frozen = currentRecoveryFence();
+    const restored = await draft.restore({
+        key,
+        authoritativeBody: frozen.body,
+        authoritativeDigest: frozen.bodyHash,
+        authoritativeRevision: frozen.sourceRevision,
+    });
+    if (!restored) return;
+    const current = currentRecoveryFence();
+    if (!recoverySourceMatches(frozen, current)) {
+        // Session/source/window changes make the response unrelated; do not
+        // even present it in the new session.
+        return;
+    }
+    if (!recoveryFenceMatches(frozen, current)) {
+        // User input or an external source refresh raced the disk read.  Keep
+        // the current body and offer the late draft as an explicit candidate;
+        // only the user's choice may replace the current text.  The dialog's
+        // wall is the post-read state (the divergence is the reason we ask).
+        await conflictResolver.resolve(current, restored);
+        return;
+    }
+    if (restored.status === "same") {
+        // The authoritative source already contains the draft; clear only the
+        // exact loaded identity, never by key alone.
+        await draft.discardCandidate(restored.identity);
+        return;
+    }
+    if (restored.status === "conflict") {
+        await conflictResolver.resolve(frozen, restored);
+        return;
+    }
+    if (!adapter.restoreDraft(restored.text)) return;
+    updateDirtyDot();
+    updateViewSwitchState();
+    setStatus(t("editor.draft.restored"));
+}
+
+/** 当前完整恢复围栏（session/generation/来源实例/revision/正文）。 */
+function currentRecoveryFence() {
+    const body = session.isActive ? adapter.getText() : "";
+    return {
+        sessionActive: session.isActive,
+        sessionRef: session.sessionRef,
+        generation: session.generation,
+        key: activeDraftKey(),
+        sourceInstanceId: session.sourceInstanceId,
+        sourceRevision: session.sourceRevision,
+        adapterRevision: adapter.revision,
+        body,
+        bodyHash: fnv1a64Hex(body),
+    };
+}
+
+/** 恢复草稿正文进入编辑器（resolver 回调：替换工作正文 + 刷新投影）。 */
+function restoreDraftIntoEditor(text) {
+    const ok = adapter.restoreDraft(text);
+    if (ok) {
+        updateDirtyDot();
+        updateViewSwitchState();
+    }
+    return ok;
+}
+
+/**
+ * 同键恢复冲突的四动作解析（0.23.6）：
+ * - keep    精确清理冻结旧候选 + 立即 flush 当前正文；
+ * - restore 恢复草稿到编辑器；
+ * - copy    显式复制候选正文（失败保留候选）→ 清理旧候选 + flush 当前；
+ * - dismiss 关闭/Esc/遮罩/异常 = 暂不处理：无剪贴板写入、无清理、正文不动。
+ */
+const conflictResolver = new RecoveryConflictResolver({
+    api: {copyToClipboard},
+    draft,
+    getFenceState: currentRecoveryFence,
+    restoreIntoEditor: restoreDraftIntoEditor,
+    showDialog: ({untrusted}) => showRecoveryConflictDialog({
+        message: t(untrusted ? "editor.draft.untrusted" : "editor.draft.conflict"),
+        kind: "warning",
+        labels: {
+            keepCurrent: t("editor.draft.keepCurrent"),
+            restore: t("editor.draft.restore"),
+            copy: t("editor.draft.copy"),
+            dismiss: t("editor.draft.dismiss"),
+        },
+    }),
+    onStatus: (message) => setStatus(message),
+    t,
+});
+
+/** "更多 → 恢复未保存草稿…"：临时来源草稿崩溃后的人工找回入口。 */
+const recoveryCandidates = new RecoveryCandidates({
+    api: {listEditorDrafts, clearEditorDraft, copyToClipboard},
+    getFenceState: currentRecoveryFence,
+    isDirty: () => adapter.isDirty(),
+    flushVerified: () => draft.flushVerified(),
+    restoreIntoEditor: restoreDraftIntoEditor,
+    confirmDialog,
+    onStatus: (message) => setStatus(message),
+    t,
+});
 
 const actions = new EditorActions({
     session,
@@ -140,6 +319,15 @@ const actions = new EditorActions({
         onStatus: (message) => setStatus(message),
         onError: (error) => reportSaveError(error),
         onTargetSaved: () => updateTargetDisplay(),
+        // 任一提交成功（保存到/另存副本/覆盖）：提交水位对应的草稿可清理
+        onCommitted: () => {
+            void draft.discardCurrent();
+            updateDirtyDot();
+        },
+        // "更多 → 恢复未保存草稿…"：打开候选列表对话框
+        onRecoverDraft: () => {
+            void recoveryCandidates.open();
+        },
     },
 });
 
@@ -154,6 +342,9 @@ function describeVoiceError(code /* , message */) {
             return t("editor.voice.stale");
         case "voice_failed":
             return t("editor.voice.failed");
+        // 只读 MD 预览：听写（富文本编辑的一种）同样被禁止
+        case "readonly":
+            return t("editor.md.readOnly");
         default:
             return t("editor.voice.error", {message: code});
     }
@@ -237,14 +428,34 @@ async function init() {
             await win.setFocus();
             // 0.23.3：窗口重新聚焦时补齐听写段（§3.6 恢复/重新聚焦拉 snapshot）
             win.onFocusChanged?.(({payload: focused}) => {
-                if (focused) voice.resyncIfActive().catch(() => {});
+                if (focused) {
+                    voice.resyncIfActive().catch(() => {});
+                } else {
+                    // 关键边界强制 flush：失焦后可能长期不回来，先落草稿
+                    void draft.flush();
+                }
             });
         } catch (e) {
             console.error("[content-editor] show window 失败:", e);
         }
     }
 
+    bindDraftBoundaries();
     tracing("editor window: init 完成");
+}
+
+/** 恢复草稿的关键边界（隐藏 / 失焦 / 页面卸载）强制 flush */
+function bindDraftBoundaries() {
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) void draft.flush();
+    });
+    window.addEventListener("blur", () => {
+        void draft.flush();
+    });
+    // 窗口被隐藏/卸载前最后一次落草稿（进程异常退出时这里是最后一道防线）
+    window.addEventListener("beforeunload", () => {
+        void draft.flush();
+    });
 }
 
 // ── 后端事件 ──────────────────────────────────────────
@@ -428,21 +639,26 @@ function refreshLocalizedUi() {
     if (saveBtn) saveBtn.innerHTML = `${t("editor.save")} ${renderComboHTML("Ctrl+S")}`;
     actions.renderMenu(moreMenuEl);
     bindTransformControls();
+    // 运行/候选卡的动态文案（等待态标签、取消/放弃按钮）也随语言刷新
+    transform.refreshCard();
     if (chipLocateEl) chipLocateEl.textContent = t("editor.voice.locate");
     updateViewSwitchState();
     updateTargetDisplay();
     updateDirtyDot();
+    updateSourceDisplay();
     updateVoiceUi();
 }
 
 /** 动作条可见性（§3.8 按上下文出现的整理动作）：
- * 录音结束且有本次追加 → 定位/整理听写；AI 可用且有选区 → 整理选中。 */
+ * 录音结束且有本次追加 → 定位/整理听写；AI 可用且有选区 → 整理选中。
+ * 0.23.7：整理请求运行中/候选卡打开时隐藏 chips——候选卡与 chips 共用
+ * footer 上方同一锚点，避免两层浮层重叠；候选卡自身带取消/关闭入口。 */
 function updateActionChips() {
     if (!voiceChipsEl) return;
-    const dictationReady = voice.phase === "idle" && voice.segments.length > 0;
+    const transformIdle = !transform.isBusy && !transform.candidate;
+    const dictationReady = voice.phase === "idle" && voice.segments.length > 0 && transformIdle;
     const selectionText = session.isActive ? adapter.getSelectionText() : "";
-    const selectionReady = transform.aiAvailable && !!selectionText.trim()
-        && !transform.isBusy && !transform.candidate;
+    const selectionReady = transform.aiAvailable && !!selectionText.trim() && transformIdle;
     const show = dictationReady || selectionReady;
     voiceChipsEl.classList.toggle("hidden", !show);
     if (!show) return;
@@ -474,6 +690,8 @@ function hideVoiceChips() {
  *  听写进行中时在新引擎上重新记录本轮追加锚点（已入正文的旧段不再纳入
  *  定位/整理范围）；非听写中时本次范围随旧引擎作废，chips 同步隐藏。 */
 function switchView(target) {
+    // 关键边界强制 flush：切换视图前把当前正文落到恢复草稿
+    void draft.flush();
     if (!adapter.switchView(target)) return;
     void transform.cancel({silent: true});
     if (voice.isBusy) {
@@ -497,15 +715,24 @@ function updateViewSwitchState() {
     viewMdBtn.tabIndex = view === "markdown" ? 0 : -1;
     textareaEl?.setAttribute("aria-hidden", String(view !== "source"));
     mdContainerEl?.setAttribute("aria-hidden", String(view !== "markdown"));
-    const mdAllowed = adapter.markdownPolicy !== "disabled"
-        && (!adapter.gate || adapter.gate.allowed);
-    viewMdBtn.disabled = !mdAllowed;
-    if (!mdAllowed) {
-        viewMdBtn.title = t("editor.gate.rejected");
+    // 无法保证无损编辑的结构仍允许进入 MD（只读预览）；策略禁用与超尺寸时不可达
+    const mdReachable = adapter.mdReachable();
+    viewMdBtn.disabled = !mdReachable;
+    const mdReadOnly = adapter.isMdReadOnly();
+    if (!mdReachable) {
+        viewMdBtn.title = adapter.markdownPolicy === "disabled"
+            ? t("editor.gate.rejected")
+            : t("editor.gate.large");
+    } else if (mdReadOnly) {
+        viewMdBtn.title = t("editor.md.readOnly");
     } else if (adapter.gate?.sizeWarn) {
         viewMdBtn.title = t("editor.gate.slow");
     } else {
         viewMdBtn.title = "";
+    }
+    if (readOnlyBadgeEl) {
+        readOnlyBadgeEl.classList.toggle("hidden", !mdReadOnly);
+        readOnlyBadgeEl.title = t("editor.md.readOnly");
     }
 }
 
@@ -520,6 +747,29 @@ function updateTargetDisplay() {
         const target = session.target;
         targetZoneEl.title = target?.kind === "confirmed_file" ? (target.path ?? "") : "";
     }
+}
+
+/** 来源徽标（§3.8：顶部必须清楚回答"正在编辑什么、内容从哪来"）。
+ *  来源种类固定五种，未知/无会话时整块隐藏——不占位、不留空白噪声。 */
+const SOURCE_LABEL_KEYS = {
+    empty: "editor.source.empty",
+    clipboard_item: "editor.source.clipboard",
+    sticky: "editor.source.sticky",
+    selection: "editor.source.selection",
+    capability_result: "editor.source.capability",
+};
+
+function updateSourceDisplay() {
+    if (!sourceEl) return;
+    const kind = session.source?.kind;
+    const key = kind ? SOURCE_LABEL_KEYS[kind] : null;
+    if (!key) {
+        sourceEl.textContent = "";
+        sourceEl.classList.add("hidden");
+        return;
+    }
+    sourceEl.textContent = t(key);
+    sourceEl.classList.remove("hidden");
 }
 
 /** 脏状态点（保存成功/外部同步/清空后收敛为隐藏） */
@@ -563,6 +813,8 @@ async function handleSave() {
         updateDirtyDot();
         updateTargetDisplay();
         setStatus(rewrittenHint || t("editor.saved"));
+        // 成功提交：正文已成为新基线，恢复草稿不再需要（生命周期收口）
+        void draft.discardCurrent();
         return;
     }
     reportSaveError(result.error);
@@ -581,7 +833,7 @@ async function handleSaveConflict() {
     return handleStickyConflict();
 }
 
-/** 便签冲突三选（§5.3 冻结交互） */
+/** 便签冲突三选（§5.3 冻结交互；choiceDialog 字符串契约经映射函数分派） */
 async function handleStickyConflict() {
     const choice = await choiceDialog(t("editor.conflict"), {
         kind: "warning",
@@ -589,7 +841,8 @@ async function handleStickyConflict() {
         cancelLabel: t("editor.conflict.cancel"),
         thirdAction: {label: t("editor.conflict.reload")},
     });
-    if (choice === true) {
+    const action = stickyConflictAction(choice);
+    if (action === "copy") {
         // 复制当前内容：保住用户编辑，由用户自行决定去向
         try {
             await copyToClipboard(adapter.getText());
@@ -600,12 +853,12 @@ async function handleStickyConflict() {
         }
         return;
     }
-    if (choice === "third") {
+    if (action === "reload") {
         // 放弃修改并重新载入：DB 为真源，revision 基线一并前移
         await reloadFromSticky({force: true});
         setStatus(t("editor.conflict.reloaded"));
     }
-    // false（取消/Esc）→ 继续编辑，保持现状
+    // "stay"（取消/Esc/遮罩/异常 fallback）→ 继续编辑，保持现状
 }
 
 /** 已确认文件冲突三选（§5.3：外部修改不被静默覆盖） */
@@ -616,21 +869,24 @@ async function handleFileConflict() {
         cancelLabel: t("editor.conflict.cancel"),
         thirdAction: {label: t("editor.conflict.saveCopy")},
     });
-    if (choice === true) {
+    const action = fileConflictAction(choice);
+    if (action === "overwrite") {
         // 用户显式覆盖：跳过 identity 校验原位写入
         const result = await session.commit({kind: "overwrite_confirmed_file"});
         if (result.ok) {
             updateDirtyDot();
             updateTargetDisplay();
             setStatus(t("editor.saved"));
+            void draft.discardCurrent();
         } else {
             reportSaveError(result.error);
         }
         return;
     }
-    if (choice === "third") {
+    if (action === "saveCopy") {
         await actions.saveCopy();
     }
+    // "stay"（取消/Esc/遮罩/异常 fallback）→ 继续编辑，保持现状
 }
 
 // ── 关闭 / 取消 ──────────────────────────────────────
@@ -661,7 +917,7 @@ async function handleCancel() {
                 reportSaveError(result.error);
                 return;
             }
-            const ended = await session.end("saved");
+            const ended = await lifecycle.endSession("saved", {clearDraft: true});
             if (!ended.ok) {
                 allowClose = false;
                 reportEndError(ended.error);
@@ -672,7 +928,7 @@ async function handleCancel() {
         }
         // "ok" → 放弃更改
         allowClose = true;
-        const ended = await session.end("abandoned");
+        const ended = await lifecycle.endSession("abandoned", {clearDraft: true});
         if (!ended.ok) {
             allowClose = false;
             reportEndError(ended.error);
@@ -684,7 +940,7 @@ async function handleCancel() {
     allowClose = true;
     await transform.cancel({silent: true});
     if (session.isActive) {
-        const ended = await session.end("abandoned");
+        const ended = await lifecycle.endSession();
         if (!ended.ok) {
             allowClose = false;
             reportEndError(ended.error);
@@ -694,13 +950,37 @@ async function handleCancel() {
     closeWindow();
 }
 
+/**
+ * 会话结束 + 草稿收尾编排（0.23.6 抽为可测控制器）：
+ * - `retainDraft`（来源失效强制关闭）：dirty 正文先 flushVerified 确认落盘、
+ *   markOrphaned 显式转存成功，才发起 end；失败即中止，编辑器保持可编辑、
+ *   自动保存保持绑定；
+ * - 只有 end 成功（或后端明确 stale）才解除草稿绑定；
+ * - `clearDraft` / clean 收尾走 discardCurrent / discardIfBodyEquals。
+ */
+const lifecycle = new EditorLifecycle({
+    session,
+    adapter,
+    draft,
+    setEditingLocked: (locked) => adapter.setInteractionLocked(locked),
+});
+
 function reportEndError(error) {
+    if (error?.code === "draft_flush_failed") {
+        setStatus(t("editor.draft.flushFailed"));
+        return;
+    }
+    if (error?.code === "draft_orphan_failed") {
+        setStatus(t("editor.draft.orphanFailed"));
+        return;
+    }
     setStatus(t("editor.closeFailed", {message: error?.message ?? ""}));
 }
 
 /**
- * 生命周期强制关闭（来源便签被回收/删除/隐藏）——不弹确认，正文丢弃
- * （沿用 0.18.3 语义；会话 end 释放便签租约）。
+ * 生命周期强制关闭（来源便签被回收/删除/隐藏）——不弹确认，但未保存
+ * 正文必须先确认可靠落盘并转存为 orphan 恢复候选；任何一步失败都留在
+ * 编辑器（不静默关闭、不丢正文），等用户手动保存后重试。
  */
 async function lifecycleClose(reason) {
     if (!session.isActive) {
@@ -710,9 +990,9 @@ async function lifecycleClose(reason) {
     tracing(`${reason}，自动关闭编辑器`);
     if (voice.isBusy) await voice.stop();
     await transform.cancel({silent: true});
-    allowClose = true;
-    const ended = await session.end("abandoned");
+    const ended = await lifecycle.endSession("abandoned", {retainDraft: true});
     if (ended.ok) {
+        allowClose = true;
         closeWindow();
     } else {
         allowClose = false;
@@ -768,7 +1048,7 @@ function bindWindowControls() {
             if (voice.isBusy) await voice.stop();
             if (allowClose || !session.isActive || !adapter.isDirty()) {
                 if (session.isActive) {
-                    const ended = await session.end("abandoned");
+                    const ended = await lifecycle.endSession("abandoned");
                     if (!ended.ok) {
                         allowClose = false;
                         reportEndError(ended.error);
@@ -820,38 +1100,29 @@ function bindKeyboard() {
 
 // ── 用户退出确认 ──────────────────────────────────────
 
-/** 退出确认对话框去重（§3.5：一次退出只显示一次汇总确认） */
-let exitDialogOpen = false;
-
 /**
- * 退出确认请求处理：无会话或 clean 直接放行（无数据丢失）；
- * dirty 时显示一次汇总确认，用户选择后应答后端。
- * 超时兜底在后端（10s 无应答放弃本次退出）。
+ * 退出确认控制器（0.23.6 抽为可测）：无会话/clean 快速放行；dirty 时一次
+ * 汇总确认；用户确认后必须 `await flushVerified()` 真正等到最新正文落盘
+ * （失败/过期/等待期间继续编辑/会话变化 → confirmed:false 阻止退出并提示）。
+ * 超时兜底在后端（10s 无应答放弃本次退出，迟到应答被忽略）。
  */
-async function handleExitRequest(payload) {
-    const requestId = payload?.requestId;
-    if (!requestId) return;
-    if (!session.isActive || !adapter.isDirty()) {
-        await resolveEditorExit({requestId, confirmed: true}).catch(() => {});
-        return;
-    }
-    if (exitDialogOpen) return; // 已有一次确认在展示，忽略重复请求
-    exitDialogOpen = true;
-    let confirmed = false;
-    try {
-        const choice = await choiceDialog(t("editor.exitConfirm"), {
-            kind: "warning",
-            okLabel: t("editor.exitConfirmQuit"),
-            cancelLabel: t("editor.exitConfirmCancel"),
-        });
-        confirmed = choice === true;
-    } finally {
-        exitDialogOpen = false;
-    }
-    await resolveEditorExit({requestId, confirmed}).catch((e) => {
-        const err = normalizeError(e);
-        console.error(`[content-editor] 退出确认应答失败 [${err.code}]: ${err.message}`);
-    });
+const exitController = new EditorExit({
+    api: {resolveEditorExit},
+    getSession: () => session,
+    isDirty: () => adapter.isDirty(),
+    flushVerified: () => draft.flushVerified(),
+    setEditingLocked: (locked) => adapter.setInteractionLocked(locked),
+    showDialog: () => choiceDialog(t("editor.exitConfirm"), {
+        kind: "warning",
+        okLabel: t("editor.exitConfirmQuit"),
+        cancelLabel: t("editor.exitConfirmCancel"),
+    }),
+    onStatus: (message) => setStatus(message),
+    t,
+});
+
+function handleExitRequest(payload) {
+    void exitController.handleRequest(payload);
 }
 
 // ── 工具 ──────────────────────────────────────────────
