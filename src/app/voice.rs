@@ -599,6 +599,54 @@ impl VoiceService {
         Some((st.epoch, segments, st.truncated))
     }
 
+    /// EditorSession 结束后的最终兜底：只释放匹配会话的连续听写与快照。
+    /// 若仍在录音则按取消语义保留已交付 confirmed、丢弃 preview；绝不影响
+    /// 此后可能启动的 G1/G2/G3 或新一代 Editor VoiceSession。
+    pub fn release_editor_session(&self, session_ref: &str, generation: u64) {
+        let state = {
+            let guard = self.editor_state.lock().unwrap();
+            guard
+                .as_ref()
+                .filter(|state| {
+                    let st = state.lock().unwrap();
+                    st.session_ref == session_ref && st.generation == generation
+                })
+                .cloned()
+        };
+        let Some(state) = state else { return };
+
+        // 与 start_editor_recording 相同的锁顺序（session → editor_state）复核，
+        // 避免旧会话释放与新一代听写启动交错时误取消新录音。
+        let recording_matches = {
+            let session = self.session.lock().unwrap();
+            let mut editor_guard = self.editor_state.lock().unwrap();
+            let still_current = editor_guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &state));
+            if !still_current {
+                return;
+            }
+            let matches =
+                session.recording && session.continuous && session.target == VoiceTarget::Editor;
+            if !matches {
+                *editor_guard = None;
+            }
+            matches
+        };
+        if recording_matches {
+            // 活动录音会阻止另一录音并发启动；释放锁后取消不会波及新会话。
+            self.cancel_recording();
+            let mut guard = self.editor_state.lock().unwrap();
+            if guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &state))
+            {
+                *guard = None;
+            }
+        }
+        tracing::debug!(%session_ref, generation, "编辑器听写状态已随会话释放");
+    }
+
     /// 是否存在活动的编辑器连续听写（0.23.5 看门狗预留）。
     #[allow(dead_code)]
     pub fn is_editor_recording(&self) -> bool {
@@ -1177,6 +1225,8 @@ fn emit_editor_segment(
         }),
     );
     tracing::debug!(
+        session_ref = %session_ref,
+        generation,
         epoch,
         seq,
         chars = text.chars().count(),
@@ -1207,7 +1257,18 @@ fn emit_editor_status(
             "seq": seq,
             "preview": preview,
             "message": message,
+            "code": if phase == "error" { Some("stt_failed") } else { None },
         }),
+    );
+    tracing::debug!(
+        session_ref = %session_ref,
+        generation,
+        epoch,
+        seq,
+        phase,
+        preview_chars = preview.map(str::chars).map(Iterator::count).unwrap_or(0),
+        has_message = message.is_some(),
+        "编辑器听写状态已更新"
     );
 }
 
@@ -1500,7 +1561,7 @@ fn compute_rms(samples: &[f32]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_rms;
+    use super::{EditorDictationState, SNAPSHOT_MAX_SEGMENTS, compute_rms};
 
     #[test]
     fn rms_empty_returns_zero() {
@@ -1553,5 +1614,20 @@ mod tests {
         assert!(level > 0.0, "小信号应非零");
         // 线性值 ≈ 0.06，sqrt 后 ≈ 0.25，应明显大于线性值
         assert!(level > 0.06, "sqrt 曲线应增强小信号: got {level}");
+    }
+
+    #[test]
+    fn editor_snapshot_is_bounded_and_reports_eviction() {
+        let mut state = EditorDictationState::new(7, "ed_test".into(), 3);
+        for seq in 1..=(SNAPSHOT_MAX_SEGMENTS as u64 + 4) {
+            state.remember(seq, format!("segment-{seq}"));
+        }
+
+        assert_eq!(state.segments.len(), SNAPSHOT_MAX_SEGMENTS);
+        assert_eq!(state.truncated, 4);
+        assert_eq!(state.segments.front().map(|(seq, _)| *seq), Some(5));
+        let snapshot = state.after(7, 0).unwrap();
+        assert_eq!(snapshot.len(), SNAPSHOT_MAX_SEGMENTS);
+        assert!(state.after(8, 0).is_none(), "旧 epoch 不得读取当前快照");
     }
 }

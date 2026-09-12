@@ -714,8 +714,8 @@
 }
 
 #engines .le-model-btn-pending-restart {
-    color: var(--warning, #e6a700);
-    border-color: var(--warning-border, var(--warning, #e6a700));
+    color: var(--warning);
+    border-color: var(--warning-border);
 }
 
 #engines .le-model-empty {

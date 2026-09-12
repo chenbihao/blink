@@ -82,6 +82,7 @@ const ATTRS = [
  */
 export function applyI18n(lang) {
     if (lang) setLang(lang);
+    document.documentElement?.setAttribute?.("lang", currentLang === "zh" ? "zh-CN" : "en");
     for (const [attr, prop] of ATTRS) {
         document.querySelectorAll(`[${attr}]`).forEach((el) => {
             if (prop === "textContent" && el.childElementCount > 0) {

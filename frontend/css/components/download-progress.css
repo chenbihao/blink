@@ -36,7 +36,7 @@
     height: 100%;
     width: 0%;
     border-radius: inherit;
-    background: var(--accent, #89b4fa);
+    background: var(--accent);
     transition: width var(--transition-base, 0.15s) ease-out;
 }
 
@@ -57,7 +57,7 @@
 
 .download-progress__text {
     font-size: 11px;
-    color: var(--text-sub, var(--subtext0, #a6adc8));
+    color: var(--text-sub);
     opacity: 0.75;
     font-style: normal;
 }

@@ -93,10 +93,14 @@ impl EditorSessionService {
         &self,
         request: OpenEditorRequest,
     ) -> Result<EditorSessionSnapshot, EditorError> {
-        validate_source_body(&request.body)?;
-
-        // 便签来源：正文与 revision 以 DB 为真源，不信任调用方传入的 body。
-        let (body, source_revision) = self.load_sticky_authoritative(&request.source).await?;
+        // 便签来源：正文与 revision 以 DB 为真源，不信任调用方传入的 body；
+        // 其他来源必须保留调用方正文。最终只校验实际将绑定的权威正文。
+        let (body, source_revision) = if request.source.sticky_id().is_some() {
+            self.load_sticky_authoritative(&request.source).await?
+        } else {
+            (request.body, None)
+        };
+        validate_source_body(&body)?;
         self.decide_and_apply(request.title, request.source, body, source_revision)
     }
 
@@ -124,14 +128,14 @@ impl EditorSessionService {
         source_revision: Option<i64>,
     ) -> Result<EditorSessionSnapshot, EditorError> {
         enum OpenOutcome {
-            Created(LiveSession),
+            Created(EditorSessionSnapshot, Option<String>),
             Activate(EditorSessionSnapshot),
             Busy(Option<String>),
         }
 
         // 锁内完成决策与状态写入（无 await）；副作用在锁外执行。
         let outcome = {
-            let guard = self.lock()?;
+            let mut guard = self.lock()?;
             let active_key = guard
                 .as_ref()
                 .and_then(|s| s.source.persistence_key())
@@ -140,7 +144,7 @@ impl EditorSessionService {
             match decide_open(active_key.as_deref(), &source) {
                 OpenDecision::Create => {
                     let generation = self.generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    OpenOutcome::Created(LiveSession {
+                    let session = LiveSession {
                         session_ref: generate_session_ref(),
                         generation,
                         title,
@@ -150,7 +154,13 @@ impl EditorSessionService {
                         commit_target,
                         result_item_id: None,
                         file_identity: None,
-                    })
+                    };
+                    let snapshot = session.snapshot();
+                    let sticky_id = session.source.sticky_id().map(str::to_string);
+                    // 决策与写槽在同一个 guard 内完成：并发 open 只有一个创建者，
+                    // 其余请求必然观察到活动槽并走 Activate/Busy。
+                    *guard = Some(session);
+                    OpenOutcome::Created(snapshot, sticky_id)
                 }
                 OpenDecision::ActivateExisting => {
                     let existing = guard.as_ref().ok_or(EditorError::StaleSession)?;
@@ -163,10 +173,7 @@ impl EditorSessionService {
         };
 
         match outcome {
-            OpenOutcome::Created(session) => {
-                let snapshot = session.snapshot();
-                let sticky_id = session.source.sticky_id().map(str::to_string);
-                *self.lock()? = Some(session);
+            OpenOutcome::Created(snapshot, sticky_id) => {
                 self.emit_session_changed(
                     "bound",
                     Some(&snapshot.session_ref),

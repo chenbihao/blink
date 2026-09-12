@@ -205,3 +205,32 @@ test("adapter: revision 单调递增", () => {
     created.at(-1).setText("c");
     assert.ok(adapter.revision >= before + 2);
 });
+
+test("adapter: 2M Source envelope 可原样载入并完成 reset", () => {
+    const {factory, created} = makeFakeEngines();
+    const {adapter} = makeAdapter(factory);
+    const body = "中".repeat(2_000_000);
+
+    adapter.loadInitial({body, markdownPolicy: "available"});
+    assert.equal(adapter.view, "source");
+    assert.equal(adapter.getText(), body);
+    adapter.reset();
+    assert.ok(created.every((engine) => engine.disposed));
+    assert.equal(adapter.getText(), "");
+});
+
+test("adapter: 100 次会话复用后每个引擎都销毁且无状态残留", () => {
+    const {factory, created} = makeFakeEngines();
+    const {adapter} = makeAdapter(factory);
+
+    for (let i = 0; i < 100; i++) {
+        adapter.loadInitial({body: `session-${i}`, markdownPolicy: "available"});
+        assert.equal(adapter.switchView("markdown"), true);
+        adapter.reset();
+    }
+
+    assert.equal(adapter.view, null);
+    assert.equal(adapter.revision, 0);
+    assert.equal(adapter.checkpoint, "");
+    assert.ok(created.every((engine) => engine.disposed));
+});

@@ -189,12 +189,12 @@ test("voice: paused/recording 状态投影；ended 保留范围并回调", async
     assert.equal(controller.joinedText, "一", "结束后本次追加文本保留供定位");
 });
 
-test("voice: stop → stopping；ended 回落 idle", async () => {
+test("voice: stop command 返回后即使 ended 事件丢失也回落 idle", async () => {
     const {controller, handlers, calls} = makeController();
     await start(controller);
 
     await controller.stop();
-    assert.equal(controller.phase, "stopping");
+    assert.equal(controller.phase, "idle");
     assert.equal(calls.stops.length, 1);
 
     handlers[STS]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, phase: "ended"}});
@@ -232,6 +232,29 @@ test("voice: 会话结束联动 → 清运行状态并兜底 stop", async () => 
     assert.equal(controller.phase, "idle");
     assert.equal(controller.sessionRef, null);
     assert.equal(calls.stops.length, 1, "正常路径未停时兜底释放麦克风");
+});
+
+test("voice: 已 ended 的段缓存也会在 EditorSession 结束时清空", async () => {
+    const {controller, handlers} = makeController();
+    await start(controller);
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1, text: "旧段"}});
+    handlers[STS]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, phase: "ended"}});
+    assert.equal(controller.phase, "idle");
+    assert.equal(controller.joinedText, "旧段");
+
+    controller.handleSessionEnded();
+    assert.equal(controller.joinedText, "");
+    assert.equal(controller.epoch, 0);
+});
+
+test("voice: STT error code 走本地化映射，不直接展示后端 message", async () => {
+    const {controller, handlers, events} = makeController();
+    await start(controller);
+    handlers[STS]({payload: {
+        sessionRef: "ed_voice", generation: 3, epoch: 7,
+        phase: "error", code: "stt_failed", message: "raw backend detail",
+    }});
+    assert.deepEqual(events.errors, ["#stt_failed"]);
 });
 
 test("voice: idle 时 toggle 无会话给出 stale 文案", async () => {

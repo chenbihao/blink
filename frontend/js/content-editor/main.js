@@ -13,7 +13,7 @@
  */
 
 import {applyThemeFromConfig} from "../shared/theme.js";
-import {applyI18nFromConfig, t} from "../i18n/index.js";
+import {applyI18nFromConfig, onLangChange, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
 import {choiceDialog, getCurrentWindow, listen, normalizeError} from "../shared/tauri.js";
 import {renderComboHTML} from "../shared/kbd.js";
@@ -210,6 +210,7 @@ async function init() {
     await ensureSpriteLoaded();
     await applyThemeFromConfig();
     await applyI18nFromConfig();
+    onLangChange(refreshLocalizedUi);
 
     bindToolbar();
     bindVoiceControls();
@@ -289,6 +290,11 @@ function bindBackendEvents() {
 
     // 0.23.4：AI 配置热更新 → 刷新整理入口可见性（未配置时隐藏，§3.8）
     listen(EVENTS.CONFIG_CHANGED, (event) => {
+        void applyThemeFromConfig();
+        // 通用 save_config 广播 unit payload；细分设置广播携带 key。
+        if (!event.payload?.key || event.payload.key === "language") {
+            void applyI18nFromConfig();
+        }
         if (typeof event.payload?.key === "string" && event.payload.key.startsWith("ai")) {
             refreshAiAvailability();
         }
@@ -333,13 +339,22 @@ function bindToolbar() {
 
     // 更多动作菜单（保存到/另存副本/复制/创建便签/发送到 AI 对话）
     actions.renderMenu(moreMenuEl);
-    moreBtn?.addEventListener("click", () => actions.toggleMenu());
+    actions.bindMenuTrigger(moreBtn);
     actions.bindMenuHover(menuAnchorEl);
     updateTargetDisplay();
     updateDirtyDot();
 
     viewSourceBtn?.addEventListener("click", () => switchView("source"));
     viewMdBtn?.addEventListener("click", () => switchView("markdown"));
+    document.getElementById("editor-view-switch")?.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const target = event.key === "Home" || event.key === "ArrowLeft" ? "source" : "markdown";
+        const targetBtn = target === "source" ? viewSourceBtn : viewMdBtn;
+        if (targetBtn?.disabled) return;
+        switchView(target);
+        targetBtn?.focus();
+    });
 }
 
 // ── 连续听写 UI（0.23.3 §3.6/§3.8）────────────────────
@@ -404,7 +419,21 @@ function updateVoiceUi() {
     micBtn.title = phase === "recording" || phase === "paused"
         ? t("editor.voice.stop")
         : t("editor.voice.start");
+    micBtn.setAttribute("aria-label", micBtn.title);
+    micBtn.setAttribute("aria-pressed", String(phase === "recording" || phase === "paused"));
     updateActionChips();
+}
+
+/** 刷新由 JS 动态生成的文案；静态 data-i18n 文案由 i18n 模块负责。 */
+function refreshLocalizedUi() {
+    if (saveBtn) saveBtn.innerHTML = `${t("editor.save")} ${renderComboHTML("Ctrl+S")}`;
+    actions.renderMenu(moreMenuEl);
+    bindTransformControls();
+    if (chipLocateEl) chipLocateEl.textContent = t("editor.voice.locate");
+    updateViewSwitchState();
+    updateTargetDisplay();
+    updateDirtyDot();
+    updateVoiceUi();
 }
 
 /** 动作条可见性（§3.8 按上下文出现的整理动作）：
@@ -456,6 +485,12 @@ function updateViewSwitchState() {
     const view = adapter.view;
     viewSourceBtn.classList.toggle("is-active", view === "source");
     viewMdBtn.classList.toggle("is-active", view === "markdown");
+    viewSourceBtn.setAttribute("aria-selected", String(view === "source"));
+    viewMdBtn.setAttribute("aria-selected", String(view === "markdown"));
+    viewSourceBtn.tabIndex = view === "source" ? 0 : -1;
+    viewMdBtn.tabIndex = view === "markdown" ? 0 : -1;
+    textareaEl?.setAttribute("aria-hidden", String(view !== "source"));
+    mdContainerEl?.setAttribute("aria-hidden", String(view !== "markdown"));
     const mdAllowed = adapter.markdownPolicy !== "disabled"
         && (!adapter.gate || adapter.gate.allowed);
     viewMdBtn.disabled = !mdAllowed;
@@ -595,7 +630,7 @@ async function handleFileConflict() {
  */
 async function handleCancel() {
     // 0.23.3：关闭前停听写（confirmed 已保留；未定稿 preview 按 §3.6 丢弃）
-    if (voice.isBusy) voice.stop();
+    if (voice.isBusy) await voice.stop();
     if (session.isActive && adapter.isDirty()) {
         const choice = await choiceDialog(t("editor.unsavedWarning"), {
             kind: "warning",
@@ -615,36 +650,63 @@ async function handleCancel() {
                 reportSaveError(result.error);
                 return;
             }
-            await session.end("saved");
+            const ended = await session.end("saved");
+            if (!ended.ok) {
+                allowClose = false;
+                reportEndError(ended.error);
+                return;
+            }
             closeWindow();
             return;
         }
         // "ok" → 放弃更改
         allowClose = true;
-        await session.end("abandoned");
+        const ended = await session.end("abandoned");
+        if (!ended.ok) {
+            allowClose = false;
+            reportEndError(ended.error);
+            return;
+        }
         closeWindow();
         return;
     }
     allowClose = true;
     await transform.cancel({silent: true});
-    if (session.isActive) await session.end("abandoned");
+    if (session.isActive) {
+        const ended = await session.end("abandoned");
+        if (!ended.ok) {
+            allowClose = false;
+            reportEndError(ended.error);
+            return;
+        }
+    }
     closeWindow();
+}
+
+function reportEndError(error) {
+    setStatus(t("editor.closeFailed", {message: error?.message ?? ""}));
 }
 
 /**
  * 生命周期强制关闭（来源便签被回收/删除/隐藏）——不弹确认，正文丢弃
  * （沿用 0.18.3 语义；会话 end 释放便签租约）。
  */
-function lifecycleClose(reason) {
+async function lifecycleClose(reason) {
     if (!session.isActive) {
         closeWindow();
         return;
     }
     tracing(`${reason}，自动关闭编辑器`);
-    if (voice.isBusy) voice.stop();
-    void transform.cancel({silent: true});
+    if (voice.isBusy) await voice.stop();
+    await transform.cancel({silent: true});
     allowClose = true;
-    session.end("abandoned").finally(() => closeWindow());
+    const ended = await session.end("abandoned");
+    if (ended.ok) {
+        closeWindow();
+    } else {
+        allowClose = false;
+        reportEndError(ended.error);
+    }
 }
 
 /** 关闭窗口（hide 复用模式；会话已 end，窗口回预热态） */
@@ -653,6 +715,8 @@ function closeWindow() {
     if (win) {
         win.hide();
     }
+    // 预热窗口会复用；放行标记只属于本次关闭，不能泄漏到下一会话。
+    allowClose = false;
 }
 
 // ── 窗口控制 ──────────────────────────────────────────
@@ -690,9 +754,16 @@ function bindWindowControls() {
     if (win?.onCloseRequested) {
         win.onCloseRequested(async (event) => {
             event.preventDefault(); // 始终阻止销毁
-            if (voice.isBusy) voice.stop();
+            if (voice.isBusy) await voice.stop();
             if (allowClose || !session.isActive || !adapter.isDirty()) {
-                if (session.isActive) await session.end("abandoned");
+                if (session.isActive) {
+                    const ended = await session.end("abandoned");
+                    if (!ended.ok) {
+                        allowClose = false;
+                        reportEndError(ended.error);
+                        return;
+                    }
+                }
                 closeWindow();
             } else {
                 handleCancel();
@@ -718,7 +789,7 @@ function bindKeyboard() {
             e.preventDefault();
             // 更多菜单打开时先关菜单，不触发关闭流程
             if (moreMenuEl && !moreMenuEl.classList.contains("hidden")) {
-                actions.closeMenu();
+                actions.closeMenu({restoreFocus: true});
                 return;
             }
             // 0.23.3 ESC 分层：听写中先停听写（confirmed 保留），不关窗口

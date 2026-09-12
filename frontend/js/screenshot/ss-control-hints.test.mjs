@@ -221,8 +221,9 @@ class ControlHintsSimulator {
     }
 
     ensureListener() {
-        if (this.listenerCallback)
-        // Simulated listener
+        if (this.listenerCallback) return;
+        // Simulated listener：测试替身只需记录已注册，事件由 simulate* 主动注入。
+        this.listenerCallback = (payload) => this.onEvent(payload);
     }
 
     onEvent(payload) {

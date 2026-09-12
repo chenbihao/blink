@@ -121,6 +121,9 @@ pub async fn end_content_editor(
             .cancel_active_for_session(&session_ref, generation)
             .await;
     }
+    if let Ok(voice) = voice_service(&app) {
+        voice.release_editor_session(&session_ref, generation);
+    }
     Ok(())
 }
 /// 前端应答退出确认（§3.5 主动退出一次汇总确认的应答侧）。

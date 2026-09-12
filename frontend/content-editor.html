@@ -12,20 +12,23 @@
     <div class="editor-titlebar" data-tauri-drag-region>
         <span class="editor-titlebar-title" data-tauri-drag-region id="editor-title">编辑内容</span>
         <div class="editor-titlebar-btns">
-            <button class="editor-titlebar-btn" id="titlebar-minimize" title="最小化">
-                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <line x1="5" x2="19" y1="12" y2="12"/>
+            <button aria-label="最小化" class="editor-titlebar-btn" data-i18n-aria-label="window.minimize"
+                    data-i18n-title="window.minimize" id="titlebar-minimize" title="最小化" type="button">
+                <svg aria-hidden="true" class="icon">
+                    <use href="#icon-chevron-down"/>
                 </svg>
             </button>
-            <button class="editor-titlebar-btn" id="titlebar-maximize" title="最大化">
-                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <rect height="14" rx="2" width="14" x="5" y="5"/>
+            <button aria-label="最大化" class="editor-titlebar-btn" data-i18n-aria-label="window.maximize"
+                    data-i18n-title="window.maximize" id="titlebar-maximize" title="最大化" type="button">
+                <svg class="icon">
+                    <use href="#icon-square"/>
                 </svg>
             </button>
-            <button class="editor-titlebar-btn editor-titlebar-btn-close" id="titlebar-close" title="关闭">
-                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <line x1="6" x2="18" y1="6" y2="18"/>
-                    <line x1="6" x2="18" y1="18" y2="6"/>
+            <button aria-label="关闭" class="editor-titlebar-btn editor-titlebar-btn-close"
+                    data-i18n-aria-label="common.close" data-i18n-title="common.close" id="titlebar-close"
+                    title="关闭" type="button">
+                <svg class="icon">
+                    <use href="#icon-x"/>
                 </svg>
             </button>
         </div>
@@ -36,10 +39,13 @@
         <div class="editor-toolbar-left">
             <!-- 0.23.1：原文/MD 双视图切换（同一文本的双视图，风险门在 JS 侧拦截） -->
             <div class="editor-view-switch" id="editor-view-switch" role="tablist">
-                <button class="editor-view-btn is-active" data-i18n="editor.view.source" id="btn-view-source"
+                <button aria-controls="editor-textarea" aria-selected="true" class="editor-view-btn is-active"
+                        data-i18n="editor.view.source" id="btn-view-source" role="tab" tabindex="0"
                         type="button">原文
                 </button>
-                <button class="editor-view-btn" data-i18n="editor.view.markdown" id="btn-view-md" type="button">MD
+                <button aria-controls="editor-tiptap-container" aria-selected="false" class="editor-view-btn"
+                        data-i18n="editor.view.markdown" id="btn-view-md" role="tab" tabindex="-1"
+                        type="button">MD
                 </button>
             </div>
             <!-- MD 格式工具栏（与便签共用 components/md-toolbar.css；MD 视图时展示） -->
@@ -48,8 +54,9 @@
         <div class="editor-toolbar-right">
             <!-- 0.23.2：更多动作（保存到/另存副本/复制/创建便签/发送到 AI 对话） -->
             <div class="editor-menu-anchor">
-                <button class="editor-more-btn" data-i18n-title="editor.more" id="btn-more" title="更多操作"
-                        type="button">
+                <button aria-controls="more-menu" aria-expanded="false" aria-haspopup="menu"
+                        aria-label="更多操作" class="editor-more-btn" data-i18n-aria-label="editor.more"
+                        data-i18n-title="editor.more" id="btn-more" title="更多操作" type="button">
                     <svg class="icon">
                         <use href="#icon-ellipsis"/>
                     </svg>
@@ -62,10 +69,12 @@
     <!-- Editor body -->
     <div class="editor-body">
         <!-- 纯文本编辑区（format=plain 时使用） -->
-        <textarea class="editor-textarea" data-i18n-ph="editor.placeholder" id="editor-textarea"
+        <textarea aria-label="编辑内容" aria-labelledby="btn-view-source" class="editor-textarea" data-i18n-aria-label="editor.body"
+                  data-i18n-ph="editor.placeholder" id="editor-textarea" role="tabpanel"
                   placeholder="输入或编辑内容..." spellcheck="false"></textarea>
         <!-- Tiptap IR 编辑器容器（0.18.3：format=markdown 时使用，替换 Cherry 双栏） -->
-        <div class="editor-tiptap-container" hidden id="editor-tiptap-container"></div>
+        <div aria-label="Markdown 编辑内容" aria-labelledby="btn-view-md" class="editor-tiptap-container"
+             data-i18n-aria-label="editor.bodyMarkdown" hidden id="editor-tiptap-container" role="tabpanel"></div>
     </div>
 
     <!-- 0.23.3：本次听写动作（定位/整理）+ 0.23.4：整理选中入口（按上下文出现） -->
@@ -74,27 +83,26 @@
         <button class="editor-chip" id="chip-tidy" type="button"></button>
         <button class="editor-chip" id="chip-tidy-selection" type="button"></button>
         <button class="editor-chip editor-chip-dismiss" id="chip-dismiss" type="button"
-                data-i18n-title="editor.voice.dismiss" title="关闭">
-            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                <line x1="6" x2="18" y1="6" y2="18"/>
-                <line x1="6" x2="18" y1="18" y2="6"/>
+                data-i18n-aria-label="editor.voice.dismiss" data-i18n-title="editor.voice.dismiss" title="关闭">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-x"/>
             </svg>
         </button>
     </div>
 
     <!-- 0.23.4：整理候选卡（非模态，完成事件驱动；未经确认不改正文 §3.7） -->
-    <aside class="editor-diff-card hidden" id="transform-card">
+    <aside aria-labelledby="transform-title" aria-live="polite" class="editor-diff-card hidden"
+           id="transform-card" role="region">
         <div class="editor-diff-head">
-            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round" viewBox="0 0 24 24">
-                <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/>
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-sparkles"/>
             </svg>
             <span class="editor-diff-title" id="transform-title"></span>
-            <button class="editor-diff-close" data-i18n-title="editor.transform.close" id="transform-close"
-                    title="关闭" type="button">
-                <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <line x1="6" x2="18" y1="6" y2="18"/>
-                    <line x1="6" x2="18" y1="18" y2="6"/>
+            <button aria-label="关闭" class="editor-diff-close"
+                    data-i18n-aria-label="editor.transform.close" data-i18n-title="editor.transform.close"
+                    id="transform-close" title="关闭" type="button">
+                <svg aria-hidden="true" class="icon">
+                    <use href="#icon-x"/>
                 </svg>
             </button>
         </div>
@@ -117,15 +125,13 @@
             <span class="editor-target-label" id="target-label"></span>
         </span>
         <span class="editor-dirty-dot hidden" id="dirty-dot"></span>
-        <span class="editor-status" id="editor-status"></span>
+        <span aria-atomic="true" aria-live="polite" class="editor-status" id="editor-status" role="status"></span>
         <!-- 0.23.3：常驻连续听写按钮（§3.8） -->
-        <button class="editor-mic-btn" data-i18n-title="editor.voice.start" id="btn-mic" title="连续听写"
-                type="button">
-            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round" viewBox="0 0 24 24">
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                <line x1="12" x2="12" y1="19" y2="22"/>
+        <button aria-label="连续听写" aria-pressed="false" class="editor-mic-btn"
+                data-i18n-aria-label="editor.voice.start" data-i18n-title="editor.voice.start" id="btn-mic"
+                title="连续听写" type="button">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-mic"/>
             </svg>
         </button>
         <button class="editor-save-btn" id="btn-save" type="button"></button>

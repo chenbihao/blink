@@ -530,7 +530,6 @@ export const en = {
     // G1 main window indicator / G2 mini overlay
     "voice.indicator.recording": "Voice input",
     "voice.overlay.recording": "Listening…",
-    "voice.overlay.recording": "Listening…",
     "voice.overlay.hint": "Release to finish · ESC to cancel",
     // 0.23.3 editor continuous dictation overlay
     "voice.overlay.dictation": "Continuous dictation",
@@ -543,6 +542,7 @@ export const en = {
     "voice.overlay.collapse": "Collapse",
     "voice.overlay.settings": "Voice settings",
     "voice.overlay.expand": "Expand",
+    "voice.overlay.error": "Dictation failed. Return to the editor and try again",
     "ai.lede": "Manage AI providers, models, and the main-window AI hint. Keys are stored in Windows Credential Manager; SQLite only keeps a reference.",
     "ai.followup_placeholder": "Ask follow-up…",
     // ── Main window AI mode (0.17.6) ──
@@ -889,6 +889,8 @@ export const en = {
     "common.confirm": "Confirm",
     "common.error": "Error",
     "common.close": "Close",
+    "window.minimize": "Minimize",
+    "window.maximize": "Maximize",
     "ai.saved.toast": "Provider saved. Enable AI hint?",
     "ai.saved.enable": "Enable",
     "ai.saved.later": "Later",
@@ -985,9 +987,12 @@ export const en = {
     "editor.discard": "Discard",
     "editor.continueEdit": "Keep Editing",
     "editor.saveFailed": "Save failed: {message}",
+    "editor.closeFailed": "Could not close; your content is still here: {message}",
     // 0.23.1: dual view / sessionized editor
     "editor.view.source": "Source",
     "editor.view.markdown": "MD",
+    "editor.body": "Edit content",
+    "editor.bodyMarkdown": "Edit Markdown content",
     "editor.rewritten": "Saved (reformatted to editor conventions)",
     "editor.conflict": "Content was modified externally; save was rejected. Copy your content and reload",
     "editor.gate.rejected": "Content contains unsupported structures (tables/footnotes/math/HTML); kept in Source view",

@@ -523,7 +523,6 @@ export const zh = {
     // G1 主窗口指示器 / G2 mini overlay
     "voice.indicator.recording": "语音输入中",
     "voice.overlay.recording": "语音输入中…",
-    "voice.overlay.recording": "语音输入中…",
     "voice.overlay.hint": "松开结束 · ESC 取消",
     // 0.23.3 编辑器连续听写浮窗
     "voice.overlay.dictation": "连续听写",
@@ -536,6 +535,7 @@ export const zh = {
     "voice.overlay.collapse": "收起",
     "voice.overlay.settings": "语音设置",
     "voice.overlay.expand": "展开",
+    "voice.overlay.error": "听写发生错误，请返回编辑器重试",
     "ai.lede": "管理 AI 供应商与模型，以及主窗口的 AI 提示。密钥存 Windows Credential Manager，SQLite 只存别名。",
     "ai.followup_placeholder": "追问…",
     // ── 主窗口 AI 模式（0.17.6）──
@@ -882,6 +882,8 @@ export const zh = {
     "common.confirm": "确认",
     "common.error": "错误",
     "common.close": "关闭",
+    "window.minimize": "最小化",
+    "window.maximize": "最大化",
     "ai.saved.toast": "供应商已保存。启用 AI 提示？",
     "ai.saved.enable": "启用",
     "ai.saved.later": "稍后",
@@ -978,9 +980,12 @@ export const zh = {
     "editor.discard": "放弃更改",
     "editor.continueEdit": "继续编辑",
     "editor.saveFailed": "保存失败: {message}",
+    "editor.closeFailed": "关闭失败，内容仍保留: {message}",
     // 0.23.1：双视图 / 会话化
     "editor.view.source": "原文",
     "editor.view.markdown": "MD",
+    "editor.body": "编辑内容",
+    "editor.bodyMarkdown": "Markdown 编辑内容",
     "editor.rewritten": "已保存（已按编辑器规范重写格式）",
     "editor.conflict": "内容已被外部修改，保存被拒绝。可复制当前内容后重新载入",
     "editor.gate.rejected": "内容包含编辑器不支持的结构（表格/脚注/公式/HTML 等），已保持原文视图",

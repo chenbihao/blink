@@ -33,7 +33,7 @@ globalThis.document = {
 
 const {test} = await import("node:test");
 const assert = (await import("node:assert/strict")).default;
-const {EditorActions, MENU_ITEMS, targetDisplay, pickSendText} = await import("./actions.js");
+const {EditorActions, MENU_ITEMS, nextMenuIndex, targetDisplay, pickSendText} = await import("./actions.js");
 const {t: realT} = await import("../i18n/index.js");
 
 function makeHarness() {
@@ -104,6 +104,15 @@ test("menu items cover the five 0.23.2 actions", () => {
     assert.deepEqual(MENU_ITEMS.map((i) => i.id), [
         "save-to", "save-copy", "copy-all", "create-sticky", "send-chat",
     ]);
+});
+
+test("menu keyboard navigation wraps and supports Home/End", () => {
+    assert.equal(nextMenuIndex(0, 5, "ArrowDown"), 1);
+    assert.equal(nextMenuIndex(4, 5, "ArrowDown"), 0);
+    assert.equal(nextMenuIndex(0, 5, "ArrowUp"), 4);
+    assert.equal(nextMenuIndex(3, 5, "Home"), 0);
+    assert.equal(nextMenuIndex(1, 5, "End"), 4);
+    assert.equal(nextMenuIndex(1, 0, "ArrowDown"), -1);
 });
 
 test("saveTo: dialog cancel has no side effects", async () => {

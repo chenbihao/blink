@@ -126,9 +126,14 @@ export class EditorVoiceController {
         this._setPhase("stopping");
         try {
             await this._api.stopEditorVoice();
+            // command 在后端收尾完成后才返回；若 ended 事件丢失，防御性回落，
+            // 避免预热窗口复用后永久卡在 stopping。
+            if (this.phase === "stopping") this._finish();
         } catch (e) {
             const err = normalizeError(e);
             console.warn(`[editor-voice] stop 失败 [${err.code}]: ${err.message}`);
+            this._setPhase("idle");
+            this._callbacks.onError?.(this._describe(err.code || "voice_failed", err.message));
         }
     }
 
@@ -144,10 +149,13 @@ export class EditorVoiceController {
      * 会话已结束则停听写并清本地状态（confirmed 已在正文中，不回撤）。
      */
     handleSessionEnded() {
-        if (this.phase === "idle") return;
-        // 防御性释放：正常路径 main.js 已先 stop，此处兜底回收麦克风
-        this.stop().catch(() => {});
+        if (this.phase !== "idle") {
+            // 防御性释放：正常路径 main.js 已先 stop，此处兜底回收麦克风
+            this.stop().catch(() => {});
+        }
         this._setPhase("idle");
+        // 即使听写已正常 ended（phase 已是 idle），结束 EditorSession 也必须
+        // 清掉定位/整理用的段缓存，禁止跨会话残留。
         this._clearRun();
     }
 
@@ -197,7 +205,9 @@ export class EditorVoiceController {
                 if (this.phase !== "idle") this._setPhase("stopping");
                 break;
             case "error":
-                if (p.message) this._callbacks.onError?.(p.message);
+                this._callbacks.onError?.(
+                    this._describe(p.code || "voice_failed", p.message || ""),
+                );
                 break;
             case "ended":
                 // stopped→ended（正常）或 starting→ended（秒错）：confirmed 保留

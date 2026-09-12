@@ -34,6 +34,7 @@ function makeDeps() {
         },
         async endEditorSession(request) {
             calls.ends.push(request);
+            if (api._endError) throw api._endError;
         },
     };
     const adapter = {
@@ -179,18 +180,49 @@ test("session: commit 结构化错误按 code 透传，saving 复位", async () 
     assert.equal(s.saving, false);
 });
 
-test("session: end 先本地清空再通知后端", async () => {
-    const {api, adapter, callbacks, calls, adapterLog} = makeDeps();
+test("session: end 经后端确认后清空本地与外围控制器", async () => {
+    const {api, adapter, callbacks, calls, adapterLog, events} = makeDeps();
     api._snapshot = snapshotA;
     const s = new EditorSession({api, adapter}, callbacks);
     await s.activate();
 
-    await s.end("saved");
+    const result = await s.end("saved");
+    assert.equal(result.ok, true);
     assert.equal(s.sessionRef, null);
     assert.equal(adapterLog.resets, 1);
+    assert.equal(events.cleared, 1);
     assert.equal(calls.ends.length, 1);
     assert.equal(calls.ends[0].reason, "saved");
     assert.equal(calls.ends[0].sessionRef, "ed_aaa");
+});
+
+test("session: end 失败保留正文与会话，允许重试", async () => {
+    const {api, adapter, callbacks, adapterLog} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+    api._endError = {code: "io", message: "temporary failure", retryable: true};
+
+    const result = await s.end("abandoned");
+    assert.equal(result.ok, false);
+    assert.equal(s.sessionRef, "ed_aaa");
+    assert.equal(adapterLog.resets, 0);
+});
+
+test("session: reset 后迟到的旧 generation 快照不能复活旧会话", async () => {
+    const {api, adapter, callbacks, adapterLog} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+    await s.end("abandoned");
+
+    s.applySnapshot({...snapshotA, body: "迟到旧正文"});
+    assert.equal(s.sessionRef, null);
+    assert.equal(adapterLog.loaded.length, 1);
+
+    s.applySnapshot({...snapshotA, sessionRef: "ed_new", generation: 2, body: "新正文"});
+    assert.equal(s.sessionRef, "ed_new");
+    assert.equal(adapterLog.loaded.length, 2);
 });
 
 test("session: 无会话时 commit/end 不动作", async () => {

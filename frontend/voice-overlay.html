@@ -12,25 +12,29 @@
 <div id="overlay" class="mode-g2">
     <!-- editor 模式拖拽条（mini/展开切换 + 语音设置入口） -->
     <div class="editor-strip hidden" data-tauri-drag-region id="editor-strip">
-        <span class="editor-dot" id="editor-dot"></span>
+        <span aria-label="" class="editor-dot" id="editor-dot" role="img"></span>
         <span class="editor-strip-title" data-i18n="voice.overlay.dictation" data-tauri-drag-region>连续听写</span>
-        <button class="editor-strip-btn" data-i18n-title="voice.overlay.settings" id="btn-settings" title="语音设置">
-            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        <button aria-label="语音设置" class="editor-strip-btn" data-i18n-aria-label="voice.overlay.settings"
+                data-i18n-title="voice.overlay.settings" id="btn-settings" title="语音设置" type="button">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-settings"/>
             </svg>
         </button>
-        <button class="editor-strip-btn" data-i18n-title="voice.overlay.collapse" id="btn-toggle-size" title="收起">—
+        <button aria-label="收起" class="editor-strip-btn" data-i18n-aria-label="voice.overlay.collapse"
+                data-i18n-title="voice.overlay.collapse" id="btn-toggle-size" title="收起" type="button">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-chevron-down"/>
+            </svg>
         </button>
     </div>
-    <div class="voice-wave" id="wave">
+    <div aria-hidden="true" class="voice-wave" id="wave">
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
     </div>
-    <div class="text" id="partial-text">语音输入中…</div>
+    <div aria-atomic="true" aria-live="polite" class="text" id="partial-text" role="status">语音输入中…</div>
     <div class="hint" data-i18n="voice.overlay.hint" id="hint">松开结束 · ESC 取消</div>
     <div class="editor-controls hidden" id="editor-controls">
         <button class="editor-ctl" data-i18n="voice.overlay.pause" id="btn-pause" type="button">暂停</button>
@@ -45,6 +49,7 @@
     import {EVENTS} from "./js/shared/event-names.js";
     import {t, applyI18nFromConfig, onLangChange} from "./js/i18n/index.js";
     import {applyThemeFromConfig} from "./js/shared/theme.js";
+    import {ensureSpriteLoaded} from "./js/shared/icon.js";
     import {
         focusContentEditor,
         pauseEditorVoice,
@@ -52,6 +57,7 @@
         stopEditorVoice,
     } from "./js/shared/api.js";
     // 应用主题（与主窗口/设置页统一）
+    ensureSpriteLoaded();
     applyThemeFromConfig();
 
     const overlayEl = document.getElementById("overlay");
@@ -66,6 +72,7 @@
     const stopBtn = document.getElementById("btn-stop");
     const backBtn = document.getElementById("btn-back");
     const toggleSizeBtn = document.getElementById("btn-toggle-size");
+    const toggleSizeIconUse = toggleSizeBtn.querySelector("use");
 
     // textEl 当前是否显示默认文案（非 partial / status / error 文本）
     // 用于语言切换时判断是否需要更新默认文案
@@ -101,6 +108,7 @@
         if (phase) overlayEl.classList.add(`editor-${phase}`);
         const titleKey = PHASE_TITLE_KEYS[phase];
         dotEl.title = titleKey ? t(titleKey) : "";
+        dotEl.setAttribute("aria-label", dotEl.title);
         controlsEl.classList.toggle("hidden", mode !== "editor" || mini);
         const busy = phase === "finalizing";
         pauseBtn.disabled = busy;
@@ -179,8 +187,9 @@
     toggleSizeBtn.addEventListener("click", () => {
         mini = !mini;
         overlayEl.classList.toggle("mini", mini);
-        toggleSizeBtn.textContent = mini ? "□" : "—";
+        toggleSizeIconUse.setAttribute("href", mini ? "#icon-square" : "#icon-chevron-down");
         toggleSizeBtn.title = t(mini ? "voice.overlay.expand" : "voice.overlay.collapse");
+        toggleSizeBtn.setAttribute("aria-label", toggleSizeBtn.title);
         controlsEl.classList.toggle("hidden", mode !== "editor" || mini);
         textEl.classList.toggle("hidden", mode === "editor" && mini);
         autoResize();
@@ -241,8 +250,8 @@
             autoResize();
             return;
         }
-        if (p.phase === "error" && p.message) {
-            textEl.textContent = p.message;
+        if (p.phase === "error") {
+            textEl.textContent = t("voice.overlay.error");
             isDefaultText = false;
             waveEl.classList.add("voice-error");
             autoResize();
@@ -303,7 +312,7 @@
     listen(EVENTS.VOICE_ERROR, (event) => {
         const {message, target} = event.payload ?? {};
         if ((target !== "g2" && target !== "editor") || !message) return;
-        textEl.textContent = message;
+        textEl.textContent = target === "editor" ? t("voice.overlay.error") : message;
         isDefaultText = false;
         waveEl.classList.remove("voice-loading"); // 清除可能残留的加载态
         waveEl.classList.add("voice-error");

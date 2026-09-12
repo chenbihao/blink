@@ -1243,7 +1243,8 @@ pub fn compute_cursor_titlebar_position(phys_w: i32) -> Option<(i32, i32)> {
     }
 }
 
-/// resize 后若窗口底部超出显示器工作区，向上移动使其完整可见。
+/// resize / 多屏 DPI 切换后把窗口原点限制在最近显示器工作区内。
+/// 窗口大于工作区时贴齐左上，计算使用 i64 避免异常尺寸溢出。
 pub fn clamp_to_work_area(win: &WebviewWindow) {
     let Ok(pos) = win.outer_position() else {
         return;
@@ -1260,16 +1261,30 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
             return;
         }
         let work = mi.rcWork; // 工作区(排除任务栏)
-        let bottom = pos.y + size.height as i32;
-        if bottom > work.bottom {
-            let new_y = (work.bottom - size.height as i32).max(work.top);
-            let _ = win.set_position(PhysicalPosition::new(pos.x, new_y));
+        let width = i64::from(size.width);
+        let height = i64::from(size.height);
+        let left = i64::from(work.left);
+        let top = i64::from(work.top);
+        let right = i64::from(work.right);
+        let bottom = i64::from(work.bottom);
+        let max_x = (right - width).max(left);
+        let max_y = (bottom - height).max(top);
+        let new_x = i64::from(pos.x).clamp(left, max_x) as i32;
+        let new_y = i64::from(pos.y).clamp(top, max_y) as i32;
+        if new_x != pos.x || new_y != pos.y {
+            let _ = win.set_position(PhysicalPosition::new(new_x, new_y));
             tracing::debug!(
+                old_x = pos.x,
                 old_y = pos.y,
+                new_x,
                 new_y,
+                work_left = work.left,
+                work_top = work.top,
+                work_right = work.right,
                 work_bottom = work.bottom,
+                width = size.width,
                 height = size.height,
-                "窗口超出屏幕底部,上移"
+                "窗口已限制到显示器工作区"
             );
         }
     }
@@ -1630,6 +1645,7 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
         win.show().map_err(|e| format!("显示编辑器窗口失败: {e}"))?;
     }
     let _ = win.unminimize();
+    clamp_to_work_area(&win);
     win.set_focus()
         .map_err(|e| format!("聚焦编辑器窗口失败: {e}"))?;
 

@@ -728,6 +728,24 @@
     color: var(--text);
 }
 
+/* 键盘导航焦点：工具栏、菜单、听写与候选卡均不能只靠 hover/颜色表达。 */
+.editor-titlebar-btn:focus-visible,
+.editor-save-btn:focus-visible,
+.editor-view-btn:focus-visible,
+.editor-more-btn:focus-visible,
+.editor-more-menu button:focus-visible,
+.editor-mic-btn:focus-visible,
+.editor-chip:focus-visible,
+.editor-diff-close:focus-visible,
+.editor-diff-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.editor-more-menu button:focus-visible {
+    background: var(--surface-2);
+}
+
 .diff-running {
     color: var(--text-sub);
     font-size: 12px;

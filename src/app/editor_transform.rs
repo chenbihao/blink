@@ -194,7 +194,10 @@ impl EditorTransformService {
                 Ok(resp) => match evaluate_transform_output(resp.finish_reason, resp.text) {
                     TransformOutput::Applicable { text } => {
                         tracing::info!(
+                            session_ref = %session_ref,
+                            generation,
                             request_id,
+                            revision,
                             elapsed_ms,
                             output_chars = text.chars().count(),
                             output_tokens = resp.usage.output_tokens,
@@ -217,7 +220,10 @@ impl EditorTransformService {
                     TransformOutput::Truncated { reason } => {
                         // §3.10：明确截断不生成可应用候选
                         tracing::warn!(
+                            session_ref = %session_ref,
+                            generation,
                             request_id,
+                            revision,
                             reason,
                             elapsed_ms,
                             "editor transform: 输出被截断"
@@ -228,7 +234,14 @@ impl EditorTransformService {
                         )
                     }
                     TransformOutput::Empty => {
-                        tracing::warn!(request_id, elapsed_ms, "editor transform: 输出为空");
+                        tracing::warn!(
+                            session_ref = %session_ref,
+                            generation,
+                            request_id,
+                            revision,
+                            elapsed_ms,
+                            "editor transform: 输出为空"
+                        );
                         (
                             EventNames::EDITOR_TRANSFORM_FAILED,
                             failed_payload(&session_ref, generation, request_id, "empty"),
@@ -236,14 +249,28 @@ impl EditorTransformService {
                     }
                 },
                 Err(crate::domain::ai::AIError::Cancelled) => {
-                    tracing::info!(request_id, elapsed_ms, "editor transform: 已取消");
+                    tracing::info!(
+                        session_ref = %session_ref,
+                        generation,
+                        request_id,
+                        revision,
+                        elapsed_ms,
+                        "editor transform: 已取消"
+                    );
                     (
                         EventNames::EDITOR_TRANSFORM_FAILED,
                         failed_payload(&session_ref, generation, request_id, "cancelled"),
                     )
                 }
                 Err(crate::domain::ai::AIError::Timeout) => {
-                    tracing::warn!(request_id, elapsed_ms, "editor transform: 超时");
+                    tracing::warn!(
+                        session_ref = %session_ref,
+                        generation,
+                        request_id,
+                        revision,
+                        elapsed_ms,
+                        "editor transform: 超时"
+                    );
                     (
                         EventNames::EDITOR_TRANSFORM_FAILED,
                         failed_payload(&session_ref, generation, request_id, "timeout"),
@@ -304,7 +331,9 @@ impl EditorTransformService {
                 _ => return, // 不匹配的取消（迟到/重复）忽略
             }
         };
-        cancel.notify_waiters();
+        // notify_one 会在后台任务尚未首次 poll `notified()` 时保留 permit；
+        // notify_waiters 不保留 permit，极快取消可能丢信号并等到 provider/超时结束。
+        cancel.notify_one();
 
         let deadline = std::time::Instant::now() + CANCEL_JOIN_TIMEOUT;
         while std::time::Instant::now() < deadline {

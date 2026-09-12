@@ -53,6 +53,16 @@ export function pickSendText(selection, fullText) {
     return trimmed.length > 0 ? selection : fullText;
 }
 
+/** 菜单键盘导航的下一个索引（纯函数，Arrow/Home/End 可测）。 */
+export function nextMenuIndex(current, count, key) {
+    if (count <= 0) return -1;
+    if (key === "Home") return 0;
+    if (key === "End") return count - 1;
+    if (key === "ArrowDown") return (Math.max(current, -1) + 1) % count;
+    if (key === "ArrowUp") return (current <= 0 ? count : current) - 1;
+    return current;
+}
+
 export class EditorActions {
     /**
      * @param {object} deps
@@ -79,6 +89,7 @@ export class EditorActions {
         };
         this._callbacks = callbacks;
         this._menuEl = null;
+        this._triggerEl = null;
         this._closeTimer = null;
     }
 
@@ -118,6 +129,21 @@ export class EditorActions {
             });
             menuEl.appendChild(btn);
         }
+        menuEl.onkeydown = (event) => this._handleMenuKeydown(event);
+    }
+
+    /** 绑定菜单触发按钮并维护 aria-expanded。 */
+    bindMenuTrigger(triggerEl) {
+        if (!triggerEl) return;
+        this._triggerEl = triggerEl;
+        triggerEl.setAttribute("aria-haspopup", "menu");
+        triggerEl.setAttribute("aria-expanded", "false");
+        triggerEl.addEventListener("click", () => this.toggleMenu());
+        triggerEl.addEventListener("keydown", (event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+            event.preventDefault();
+            this.openMenu({focus: event.key === "ArrowDown" ? "first" : "last"});
+        });
     }
 
     toggleMenu() {
@@ -125,17 +151,40 @@ export class EditorActions {
         this._menuEl.classList.contains("hidden") ? this.openMenu() : this.closeMenu();
     }
 
-    openMenu() {
+    openMenu({focus = "first"} = {}) {
         this._menuEl?.classList.remove("hidden");
+        this._triggerEl?.setAttribute("aria-expanded", "true");
+        const items = this._menuItems();
+        if (focus === "last") items.at(-1)?.focus();
+        else if (focus === "first") items[0]?.focus();
         return true;
     }
 
-    closeMenu() {
+    closeMenu({restoreFocus = false} = {}) {
         if (this._closeTimer) {
             clearTimeout(this._closeTimer);
             this._closeTimer = null;
         }
         this._menuEl?.classList.add("hidden");
+        this._triggerEl?.setAttribute("aria-expanded", "false");
+        if (restoreFocus) this._triggerEl?.focus();
+    }
+
+    _menuItems() {
+        return [...(this._menuEl?.querySelectorAll?.('[role="menuitem"]') ?? [])];
+    }
+
+    _handleMenuKeydown(event) {
+        const items = this._menuItems();
+        if (event.key === "Escape") {
+            event.preventDefault();
+            this.closeMenu({restoreFocus: true});
+            return;
+        }
+        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const current = items.indexOf(document.activeElement);
+        items[nextMenuIndex(current, items.length, event.key)]?.focus();
     }
 
     /**

@@ -30,6 +30,9 @@ export class EditorSession {
     /** commit 进行中（save 切片） */
     saving = false;
 
+    /** 已观察到的最高后端 generation；reset 后保留，用于拒绝迟到快照复活旧会话。 */
+    _latestGeneration = 0;
+
     /**
      * @param {object} deps
      * @param {*} deps.api - shared/api.js（测试可注入 fake）
@@ -65,8 +68,12 @@ export class EditorSession {
         if (!snap || !snap.sessionRef) return;
         if (snap.sessionRef === this.sessionRef) return;
 
+        const generation = Number(snap.generation ?? 0);
+        if (!Number.isFinite(generation) || generation <= this._latestGeneration) return;
+
         this.sessionRef = snap.sessionRef;
-        this.generation = snap.generation ?? 0;
+        this.generation = generation;
+        this._latestGeneration = generation;
         this.source = snap.source ?? null;
         this.sourceRevision = snap.sourceRevision ?? null;
         this.target = snap.commitTarget ?? null;
@@ -101,7 +108,6 @@ export class EditorSession {
             if (payload.sessionRef && payload.sessionRef !== this.sessionRef) return;
             if (this.sessionRef) {
                 this._resetLocal();
-                this._callbacks.onSessionCleared?.();
             }
         }
     }
@@ -148,23 +154,34 @@ export class EditorSession {
     }
 
     /**
-     * 结束会话（保存后结束或明确放弃）。先本地清空再通知后端——
-     * 即使 IPC 失败，窗口侧也回到无会话态，后端会话由下次 open 覆盖。
+     * 结束会话（保存后结束或明确放弃）。后端确认成功后才清本地状态；
+     * IPC 失败时保留正文与会话身份，避免窗口隐藏后留下无法重新打开的后端活跃槽。
      * @param {"saved"|"abandoned"} reason
      */
     async end(reason = "abandoned") {
-        if (!this.isActive) return;
+        if (!this.isActive) return {ok: true};
         const request = {
             sessionRef: this.sessionRef,
             generation: this.generation,
             reason,
         };
-        this._resetLocal();
         try {
             await this.api.endEditorSession(request);
+            if (request.sessionRef === this.sessionRef && request.generation === this.generation) {
+                this._resetLocal();
+            }
+            return {ok: true};
         } catch (e) {
             const err = normalizeError(e);
             console.warn(`[editor-session] end 失败 [${err.code}]: ${err.message}`);
+            // stale_session 表示后端已经不再拥有该会话，本地可安全复位。
+            if (err.code === "stale_session"
+                && request.sessionRef === this.sessionRef
+                && request.generation === this.generation) {
+                this._resetLocal();
+                return {ok: true, stale: true};
+            }
+            return {ok: false, error: err};
         }
     }
 
@@ -177,6 +194,7 @@ export class EditorSession {
         this.target = null;
         this.adapter.reset();
         this._callbacks.onStatus?.("");
+        this._callbacks.onSessionCleared?.();
     }
 
     /**
