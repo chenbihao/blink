@@ -208,6 +208,8 @@ impl EventNames {
     /// stickyId? }`。编辑器窗口在 `bound` 且 sessionRef 变化时 reset 并拉取快照；
     /// 便签窗口按 `stickyId` 进入/退出编辑租约（只读）。
     pub const EDITOR_SESSION_CHANGED: &str = "blink://editor-session-changed";
+    /// 编辑器退出确认请求（0.23.2 §3.5：主动退出一次汇总确认，请求-应答协议）。
+    pub const EDITOR_EXIT_REQUEST: &str = "blink://editor-exit-request";
 
     // ── 截图（0.18.x）──
     /// 截图控件吸附 hints 流式推送（0.18.x）。

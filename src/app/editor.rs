@@ -19,8 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
 
 use crate::domain::editor::{
-    CommitEditorRequest, CommitOutcome, EditorError, EditorSessionSnapshot, EndEditorRequest,
-    OpenDecision, OpenEditorRequest, SourceDescriptor, decide_open, validate_source_body,
+    CommitEditorRequest, CommitOutcome, CommitPlan, CommitState, CommitTarget, EditorError,
+    EditorSessionSnapshot, EndEditorRequest, FileIdentity, OpenDecision, OpenEditorRequest,
+    SourceDescriptor, decide_open, default_commit_target, plan_commit, validate_source_body,
 };
 use crate::domain::event::CapabilityEnv;
 use crate::domain::sticky::StickyChangeSource;
@@ -39,6 +40,12 @@ struct LiveSession {
     source: SourceDescriptor,
     /// 便签来源的冲突基线（打开时的 `updated_at`），随每次成功提交前移。
     source_revision: Option<i64>,
+    /// 主保存目标（§3.5）：绑定时按来源推导，"保存到…"成功后切换。
+    commit_target: CommitTarget,
+    /// 会话剪贴板结果项 id（首次保存创建后存在，后续保存更新同一项）。
+    result_item_id: Option<String>,
+    /// 已确认文件身份（写入成功后记录；原位保存前据此判外部修改）。
+    file_identity: Option<FileIdentity>,
 }
 
 impl LiveSession {
@@ -51,15 +58,21 @@ impl LiveSession {
             source: self.source.clone(),
             source_revision: self.source_revision,
             markdown_policy: crate::domain::editor::markdown_view_policy(&self.source),
+            commit_target: self.commit_target.clone(),
         }
     }
 }
+
+/// 编辑器退出确认超时（§3.5）：前端无响应时放弃本次退出，可重试。
+const EXIT_CONFIRM_TIMEOUT_SECS: u64 = 10;
 
 /// 单活动 EditorSession 服务。由 main.rs manage，command 层经 State 取用。
 pub struct EditorSessionService {
     app: tauri::AppHandle,
     active: Mutex<Option<LiveSession>>,
     generation_counter: AtomicU64,
+    /// 待决退出确认请求 id（一次只挂一个；超时或应答后清除）。
+    pending_exit: Mutex<Option<String>>,
 }
 
 impl EditorSessionService {
@@ -68,6 +81,7 @@ impl EditorSessionService {
             app,
             active: Mutex::new(None),
             generation_counter: AtomicU64::new(0),
+            pending_exit: Mutex::new(None),
         }
     }
 
@@ -122,6 +136,7 @@ impl EditorSessionService {
                 .as_ref()
                 .and_then(|s| s.source.persistence_key())
                 .map(|k| k.to_string());
+            let commit_target = default_commit_target(&source);
             match decide_open(active_key.as_deref(), &source) {
                 OpenDecision::Create => {
                     let generation = self.generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -132,6 +147,9 @@ impl EditorSessionService {
                         body,
                         source,
                         source_revision,
+                        commit_target,
+                        result_item_id: None,
+                        file_identity: None,
                     })
                 }
                 OpenDecision::ActivateExisting => {
@@ -194,8 +212,11 @@ impl EditorSessionService {
 
     // ── commit ──────────────────────────────────────────────────────────────
 
-    /// 按来源推导的保存目标提交正文（0.23.1 默认映射：便签→原位更新，
-    /// 其余→剪贴板结果）。
+    /// 按保存目标提交正文（§3.5）。
+    ///
+    /// 锁内取会话状态 → `plan_commit` 纯决策 → 锁外执行副作用 → 锁内按
+    /// `session_ref + generation` 复查后落新基线。保存失败/冲突/取消不改变
+    /// 正文基线、结果项、文件身份或主目标。
     pub async fn commit(
         &self,
         caller_label: &str,
@@ -204,8 +225,16 @@ impl EditorSessionService {
         self.ensure_editor_window(caller_label)?;
         validate_source_body(&request.body)?;
 
-        // 锁内校验会话身份并取出来源快照。
-        let (session_ref, generation, source, source_revision) = {
+        // 锁内校验会话身份并取出状态快照（拷贝出锁，借用不跨块）。
+        let (
+            session_ref,
+            generation,
+            state_target,
+            state_result_item,
+            state_file_identity,
+            state_sticky_revision,
+            state_source_item_ref,
+        ) = {
             let guard = self.lock()?;
             let live = guard.as_ref().ok_or(EditorError::StaleSession)?;
             if live.session_ref != request.session_ref || live.generation != request.generation {
@@ -216,83 +245,303 @@ impl EditorSessionService {
                 );
                 return Err(EditorError::StaleSession);
             }
+            let source_item_ref = match &live.source {
+                SourceDescriptor::ClipboardItem { item_ref } => item_ref.clone(),
+                _ => None,
+            };
             (
                 live.session_ref.clone(),
                 live.generation,
-                live.source.clone(),
+                live.commit_target.clone(),
+                live.result_item_id.clone(),
+                live.file_identity,
                 live.source_revision,
+                source_item_ref,
             )
         };
 
-        match &source {
-            SourceDescriptor::Sticky { sticky_id } => {
+        let plan_state = CommitState {
+            target: &state_target,
+            result_item_id: state_result_item.as_deref(),
+            file_identity: state_file_identity,
+            sticky_revision: state_sticky_revision,
+            source_item_ref: state_source_item_ref.as_deref(),
+        };
+        let plan = plan_commit(plan_state, request.target.as_ref());
+        tracing::debug!(
+            session_ref = %session_ref,
+            plan = ?plan,
+            "editor session commit: 执行计划"
+        );
+
+        // 锁外执行副作用；产出待落槽的新状态。
+        let executed = self.execute_plan(&plan, &request.body).await?;
+
+        // 副作用完成后复查会话身份，落新基线；旧会话迟到结果丢弃。
+        let mut guard = self.lock()?;
+        let live = match guard.as_mut() {
+            Some(live) if live.session_ref == session_ref && live.generation == generation => live,
+            _ => {
+                tracing::warn!(
+                    session_ref = %session_ref,
+                    "editor session commit: 保存成功但会话已结束，丢弃新基线"
+                );
+                return Err(EditorError::StaleSession);
+            }
+        };
+        if let Some(revision) = executed.new_sticky_revision {
+            live.source_revision = Some(revision);
+        }
+        if let Some(item_id) = executed.result_item_id {
+            live.result_item_id = Some(item_id);
+        }
+        if let Some(identity) = executed.file_identity {
+            live.file_identity = Some(identity);
+        }
+        if let Some(target) = executed.switch_target.as_ref() {
+            live.commit_target = target.clone();
+        }
+        live.body = request.body.clone();
+        drop(guard);
+
+        let target = executed.switch_target.unwrap_or(state_target);
+        tracing::info!(
+            session_ref = %session_ref,
+            target = ?target,
+            "editor session commit: 完成"
+        );
+        Ok(CommitOutcome {
+            source_revision: executed.new_sticky_revision,
+            commit_target: target,
+            file_identity: executed.file_identity.map(Into::into),
+        })
+    }
+
+    /// 执行单条提交计划（锁外副作用）。文件写入统一经
+    /// [`Self::write_text_file_target`] 原语——0.23.2 起唯一文本文件输出。
+    async fn execute_plan(
+        &self,
+        plan: &CommitPlan,
+        body: &str,
+    ) -> Result<ExecutedCommit, EditorError> {
+        match plan {
+            CommitPlan::UpdateSticky {
+                sticky_id,
+                expected_revision,
+            } => {
                 let env = self.domain_env()?;
                 let new_revision = env
                     .update_sticky_content_and_notify(
                         sticky_id,
-                        &request.body,
-                        source_revision,
+                        body,
+                        *expected_revision,
                         StickyChangeSource::ContentEditor,
                     )
                     .await
                     .map_err(|e| map_sticky_workflow_error(e, sticky_id))?;
-
-                // 副作用在锁外完成后回写基线；会话已被替换/结束时视为迟到结果。
-                let mut guard = self.lock()?;
-                match guard.as_mut() {
-                    Some(live)
-                        if live.session_ref == session_ref && live.generation == generation =>
-                    {
-                        live.source_revision = Some(new_revision);
-                        live.body = request.body.clone();
-                        drop(guard);
-                        tracing::info!(
-                            session_ref = %session_ref,
-                            sticky_id = %sticky_id,
-                            revision = new_revision,
-                            "editor session commit: 便签原位更新完成"
-                        );
-                        Ok(CommitOutcome {
-                            source_revision: Some(new_revision),
-                        })
-                    }
-                    _ => {
-                        tracing::warn!(
-                            session_ref = %session_ref,
-                            "editor session commit: 保存成功但会话已结束，丢弃新基线"
-                        );
-                        Err(EditorError::StaleSession)
-                    }
-                }
-            }
-            _ => {
-                // 剪贴板结果：继承命中数新建历史项 + 写回系统剪贴板
-                //（0.23.2 起改为“首次创建、后续更新同一结果项”）。
-                let item_ref = match &source {
-                    SourceDescriptor::ClipboardItem { item_ref } => item_ref.clone(),
-                    _ => None,
-                };
-                let new_id = self
-                    .commit_clipboard_result(&request.body, item_ref.as_deref())
-                    .await?;
-                // 基线前移（失败不回滚：文本已是事实）。
-                let mut guard = self.lock()?;
-                if let Some(live) = guard.as_mut() {
-                    if live.session_ref == session_ref && live.generation == generation {
-                        live.body = request.body.clone();
-                    }
-                }
-                drop(guard);
                 tracing::info!(
-                    session_ref = %session_ref,
-                    new_id = %new_id,
-                    "editor session commit: 剪贴板结果完成"
+                    sticky_id = %sticky_id,
+                    revision = new_revision,
+                    "editor session commit: 便签原位更新完成"
                 );
-                Ok(CommitOutcome {
-                    source_revision: None,
+                Ok(ExecutedCommit {
+                    new_sticky_revision: Some(new_revision),
+                    ..ExecutedCommit::default()
                 })
             }
+            CommitPlan::CreateClipboardResult { origin_ref } => {
+                let item_id = self
+                    .create_clipboard_result(body, origin_ref.as_deref())
+                    .await?;
+                Ok(ExecutedCommit {
+                    result_item_id: Some(item_id),
+                    ..ExecutedCommit::default()
+                })
+            }
+            CommitPlan::UpdateClipboardResult { result_item_id } => {
+                self.update_clipboard_result(result_item_id, body).await?;
+                Ok(ExecutedCommit {
+                    result_item_id: Some(result_item_id.clone()),
+                    ..ExecutedCommit::default()
+                })
+            }
+            CommitPlan::WriteConfirmedFile { path, identity } => {
+                let new_identity = self
+                    .write_text_file_target(path, body, Some(*identity))
+                    .await?;
+                Ok(ExecutedCommit {
+                    file_identity: Some(new_identity),
+                    ..ExecutedCommit::default()
+                })
+            }
+            CommitPlan::OverwriteConfirmedFile { path } => {
+                let new_identity = self.write_text_file_target(path, body, None).await?;
+                Ok(ExecutedCommit {
+                    file_identity: Some(new_identity),
+                    ..ExecutedCommit::default()
+                })
+            }
+            CommitPlan::SaveToFile { path } => {
+                let new_identity = self.write_text_file_target(path, body, None).await?;
+                Ok(ExecutedCommit {
+                    file_identity: Some(new_identity),
+                    switch_target: Some(CommitTarget::ConfirmedFile { path: path.clone() }),
+                    ..ExecutedCommit::default()
+                })
+            }
+            CommitPlan::SaveCopyToFile { path } => {
+                // 副本写入不记录 identity、不切换主目标（§3.5）。
+                self.write_text_file_target(path, body, None).await?;
+                Ok(ExecutedCommit::default())
+            }
+            CommitPlan::ReturnToCaller => Err(EditorError::TargetUnavailable {
+                detail: "调用方回写端点不可用（0.23 无可靠 endpoint 调用方）".into(),
+            }),
         }
+    }
+
+    /// 剪贴板结果首存：新建历史项（继承原条目命中数）+ 写回系统剪贴板。
+    ///
+    /// 写入带 `EditorResult` 自写标记——监听器跳过持久化，结果项由本服务
+    /// 显式入库，同一会话不堆积历史（§3.10）。
+    ///
+    /// 顺序：先剪贴板后 DB——剪贴板失败则整体未发生（无残留）；DB 失败时
+    /// 剪贴板已有内容（用户可粘贴），重试保存自然重建结果项。
+    async fn create_clipboard_result(
+        &self,
+        body: &str,
+        item_ref: Option<&str>,
+    ) -> Result<String, EditorError> {
+        let pool = self.history_pool()?;
+
+        write_clipboard_suppressed(body).await?;
+
+        let hit_count = match item_ref {
+            Some(id) => match crate::infra::data::clipboard::query_by_id(&pool, id).await {
+                Some(item) => item.hit_count,
+                None => {
+                    tracing::warn!(origin_ref = %id, "原剪贴板记录不存在，hit_count 从 0 开始");
+                    0
+                }
+            },
+            None => 0,
+        };
+
+        let new_item = crate::infra::data::clipboard::ClipboardItem {
+            id: crate::infra::data::clipboard::generate_id(),
+            text: body.to_string(),
+            preview: crate::infra::data::clipboard::make_preview(body),
+            created_at: chrono::Utc::now().timestamp(),
+            source_app: None,
+            hit_count,
+        };
+
+        crate::infra::data::clipboard::save_item(&pool, &new_item)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "editor session commit: 保存剪贴板记录失败");
+                EditorError::Io {
+                    detail: format!("保存失败: {e}"),
+                }
+            })?;
+
+        tracing::info!(result_item_id = %new_item.id, "editor session commit: 剪贴板结果项已创建");
+        Ok(new_item.id)
+    }
+
+    /// 剪贴板结果后续保存：按原 id 原位更新同一项 + 写回系统剪贴板。
+    async fn update_clipboard_result(
+        &self,
+        result_item_id: &str,
+        body: &str,
+    ) -> Result<(), EditorError> {
+        let pool = self.history_pool()?;
+        let updated = crate::infra::data::clipboard::update_item_text(&pool, result_item_id, body)
+            .await
+            .map_err(|e| EditorError::Io {
+                detail: format!("更新结果项失败: {e}"),
+            })?;
+        if !updated {
+            // 结果项被用户从历史中删除：以原 id 重建（hit_count 从 0），
+            // 保证"同一会话始终对应同一结果项"的契约。
+            tracing::info!(result_item_id = %result_item_id, "结果项已被删除，按原 id 重建");
+            let item = crate::infra::data::clipboard::ClipboardItem {
+                id: result_item_id.to_string(),
+                text: body.to_string(),
+                preview: crate::infra::data::clipboard::make_preview(body),
+                created_at: chrono::Utc::now().timestamp(),
+                source_app: None,
+                hit_count: 0,
+            };
+            crate::infra::data::clipboard::save_item(&pool, &item)
+                .await
+                .map_err(|e| EditorError::Io {
+                    detail: format!("重建结果项失败: {e}"),
+                })?;
+        }
+
+        write_clipboard_suppressed(body).await?;
+        Ok(())
+    }
+
+    /// 文件保存目标原语（§3.5：UTF-8、临时文件 + 原子替换、identity 冲突保护）。
+    ///
+    /// 统一走 `write_text_file` Capability（registry 唯一实现，§A3.5）；
+    /// identity 检查在 Capability 内部的写入同闭包内完成，无 TOCTOU 窗口。
+    /// 成功后读取新身份作为后续冲突基线；失败不产生任何落槽副作用。
+    async fn write_text_file_target(
+        &self,
+        path: &str,
+        body: &str,
+        expected: Option<FileIdentity>,
+    ) -> Result<FileIdentity, EditorError> {
+        let env_arc = self.domain_env()?;
+        let cap_reg = self
+            .app
+            .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+        let ctx = crate::domain::capability::InvokeContext {
+            env: env_arc.as_ref(),
+            origin: crate::domain::capability::InvocationOrigin::LocalSurface,
+            runtime: crate::domain::capability::RuntimeCapabilities {
+                surface: Some(env_arc.as_ref()),
+                main_process: true,
+                desktop_session: true,
+            },
+            deadline: None,
+        };
+        let mut args = serde_json::json!({ "path": path, "content": body });
+        if let Some(exp) = expected {
+            args["expected_size"] = serde_json::json!(exp.size);
+            args["expected_mtime_ms"] = serde_json::json!(exp.mtime_ms);
+        }
+
+        match cap_reg.invoke("write_text_file", args, &ctx).await {
+            Ok(_) => {}
+            Err(crate::domain::capability::CapabilityError::Conflict { .. }) => {
+                // 冲突：读取磁盘现状构造结构化 SourceConflict（前端按 code 分类）。
+                let actual = file_mtime_ms(path);
+                let expected_updated_at = expected.map(|e| e.mtime_ms).unwrap_or(0);
+                tracing::warn!(
+                    path = %path,
+                    expected = expected_updated_at,
+                    actual = actual,
+                    "editor session commit: 文件已被外部修改"
+                );
+                return Err(EditorError::SourceConflict {
+                    expected_updated_at,
+                    actual_updated_at: actual,
+                });
+            }
+            Err(e) => return Err(map_capability_error(e)),
+        }
+
+        let path_buf = std::path::PathBuf::from(path);
+        let (size, mtime_ms) =
+            crate::infra::utils::fs::file_identity(&path_buf).ok_or_else(|| EditorError::Io {
+                detail: format!("写入后读取文件身份失败: {path}"),
+            })?;
+        tracing::info!(path = %path, size, "editor session commit: 文件写入完成");
+        Ok(FileIdentity { size, mtime_ms })
     }
 
     // ── end ─────────────────────────────────────────────────────────────────
@@ -328,6 +577,103 @@ impl EditorSessionService {
             "editor session: 已结束"
         );
         Ok(())
+    }
+
+    // ── 用户退出确认（§3.5）───────────────────────────────────────────────
+
+    /// 用户主动退出的统一入口（托盘退出 / `exit_blink` Capability）。
+    ///
+    /// 无活动会话立即退出；有活动会话时向 content-editor 发出一次汇总确认
+    /// 请求（显示并聚焦编辑器窗口），由前端展示三态对话框后经
+    /// [`Self::resolve_editor_exit`] 应答。超时视为放弃本次退出——
+    /// 不静默丢稿。系统关机/强制退出走 `RunEvent::Exit`，不经此路径。
+    pub fn request_user_exit(self: &std::sync::Arc<Self>) {
+        let has_session = match self.lock() {
+            Ok(guard) => guard.is_some(),
+            Err(_) => true, // 状态不可读时保守视为有会话，走确认路径
+        };
+        if !has_session {
+            tracing::info!("user exit: 无活动编辑会话，直接退出");
+            self.app.exit(0);
+            return;
+        }
+
+        let request_id = generate_exit_request_id();
+        self.set_pending_exit(Some(request_id.clone()));
+
+        // 确认对话框在编辑器窗口展示——先带到底前
+        if let Err(e) = self.show_window() {
+            tracing::warn!(error = %e, "user exit: 唤起编辑器窗口失败");
+        }
+        if let Some(win) = self.app.get_webview_window(CONTENT_EDITOR_LABEL)
+            && let Err(e) = win.set_focus()
+        {
+            tracing::warn!(error = %e, "user exit: 聚焦编辑器窗口失败");
+        }
+        if let Err(e) = self.app.emit_to(
+            CONTENT_EDITOR_LABEL,
+            crate::infra::event_names::EventNames::EDITOR_EXIT_REQUEST,
+            serde_json::json!({ "requestId": request_id }),
+        ) {
+            tracing::warn!(error = %e, "user exit: 退出确认事件发送失败");
+        }
+        tracing::info!(request_id = %request_id, "user exit: 已请求编辑器确认（存在活动会话）");
+
+        // 超时守护：webview 无响应（异常/挂起）时放弃本次退出，不阻塞
+        let service = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(EXIT_CONFIRM_TIMEOUT_SECS)).await;
+            if service.take_pending_exit_if(&request_id) {
+                tracing::warn!(
+                    request_id = %request_id,
+                    timeout_secs = EXIT_CONFIRM_TIMEOUT_SECS,
+                    "user exit: 确认超时，放弃本次退出"
+                );
+            }
+        });
+    }
+
+    /// 前端应答退出确认。只有与待决 id 匹配的应答生效；`confirmed=true`
+    /// 时执行退出（`RunEvent::Exit` 收尾 flush）。返回应答是否被接受。
+    pub fn resolve_editor_exit(&self, request_id: &str, confirmed: bool) -> bool {
+        if !self.take_pending_exit_if(request_id) {
+            tracing::debug!(request_id = %request_id, "user exit: 迟到或不匹配的应答，忽略");
+            return false;
+        }
+        if confirmed {
+            tracing::info!("user exit: 用户确认退出");
+            self.app.exit(0);
+        } else {
+            tracing::info!("user exit: 用户取消退出");
+        }
+        true
+    }
+
+    fn set_pending_exit(&self, value: Option<String>) {
+        match self.pending_exit.lock() {
+            Ok(mut guard) => *guard = value,
+            Err(poisoned) => *poisoned.into_inner() = value,
+        }
+    }
+
+    /// 取出待决请求（仅当 id 匹配）；返回是否命中。
+    fn take_pending_exit_if(&self, request_id: &str) -> bool {
+        match self.pending_exit.lock() {
+            Ok(mut guard) => {
+                guard.as_deref() == Some(request_id) && {
+                    *guard = None;
+                    true
+                }
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                let hit = guard.as_deref() == Some(request_id);
+                if hit {
+                    *guard = None;
+                }
+                hit
+            }
+        }
     }
 
     // ── 内部工具 ────────────────────────────────────────────────────────────
@@ -400,55 +746,6 @@ impl EditorSessionService {
         Ok((note.content, Some(note.updated_at)))
     }
 
-    /// 剪贴板结果提交：新建历史项（继承 hit_count）+ 写回系统剪贴板。
-    async fn commit_clipboard_result(
-        &self,
-        body: &str,
-        item_ref: Option<&str>,
-    ) -> Result<String, EditorError> {
-        let pool = self.history_pool()?;
-
-        let hit_count = match item_ref {
-            Some(id) => match crate::infra::data::clipboard::query_by_id(&pool, id).await {
-                Some(item) => item.hit_count,
-                None => {
-                    tracing::warn!(origin_ref = %id, "原剪贴板记录不存在，hit_count 从 0 开始");
-                    0
-                }
-            },
-            None => 0,
-        };
-
-        let new_item = crate::infra::data::clipboard::ClipboardItem {
-            id: crate::infra::data::clipboard::generate_id(),
-            text: body.to_string(),
-            preview: crate::infra::data::clipboard::make_preview(body),
-            created_at: chrono::Utc::now().timestamp(),
-            source_app: None,
-            hit_count,
-        };
-
-        crate::infra::data::clipboard::save_item(&pool, &new_item)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "editor session commit: 保存剪贴板记录失败");
-                EditorError::Io {
-                    detail: format!("保存失败: {e}"),
-                }
-            })?;
-
-        crate::app::commands::copy_to_clipboard(body.to_string())
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "editor session commit: 写回系统剪贴板失败");
-                EditorError::TargetUnavailable {
-                    detail: format!("写回剪贴板失败: {e}"),
-                }
-            })?;
-
-        Ok(new_item.id)
-    }
-
     fn show_window(&self) -> Result<(), EditorError> {
         crate::infra::platform::window::show_content_editor_window(&self.app).map_err(|e| {
             EditorError::Io {
@@ -475,6 +772,81 @@ impl EditorSessionService {
             payload,
         ) {
             tracing::warn!(kind, %error, "editor session: 会话变更事件发送失败");
+        }
+    }
+}
+
+/// 一次提交计划执行后的状态增量（只在副作用全部成功后由调用方落槽）。
+#[derive(Debug, Default)]
+struct ExecutedCommit {
+    /// 便签写入后的新 revision。
+    new_sticky_revision: Option<i64>,
+    /// 剪贴板结果项 id（首存后存在；更新时回传确认）。
+    result_item_id: Option<String>,
+    /// 文件写入后的新身份。
+    file_identity: Option<FileIdentity>,
+    /// 主目标切换（仅"保存到…"成功后发生）。
+    switch_target: Option<CommitTarget>,
+}
+
+/// 编辑器结果回写剪贴板（带 `EditorResult` 自写标记，监听器不重复采集）。
+async fn write_clipboard_suppressed(body: &str) -> Result<(), EditorError> {
+    crate::domain::clipboard::write_text(
+        body.to_string(),
+        crate::domain::clipboard::ClipboardWriteSource::EditorResult,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "editor session commit: 写回系统剪贴板失败");
+        EditorError::TargetUnavailable {
+            detail: format!("写回剪贴板失败: {e}"),
+        }
+    })
+}
+
+/// 读取文件 mtime（ms）；不可读时返回 0（仅用于冲突详情展示）。
+fn file_mtime_ms(path: &str) -> i64 {
+    crate::infra::utils::fs::file_identity(std::path::Path::new(path))
+        .map(|(_, m)| m)
+        .unwrap_or(0)
+}
+
+/// CapabilityError → EditorError（编辑器侧语义投影）。
+fn map_capability_error(error: crate::domain::capability::CapabilityError) -> EditorError {
+    use crate::domain::capability::CapabilityError as CapErr;
+    match error {
+        // 冲突的正常路径已在 write_text_file_target 特判（带结构化时间戳）；
+        // 此处为兜底投影。
+        CapErr::Conflict { .. } => EditorError::SourceConflict {
+            expected_updated_at: 0,
+            actual_updated_at: 0,
+        },
+        CapErr::InvalidArgs { detail } | CapErr::InvalidState { detail } => {
+            EditorError::Unsupported { detail }
+        }
+        CapErr::Permission { detail } => EditorError::TargetUnavailable { detail },
+        other => EditorError::Io {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// 生成不可猜测的退出确认请求 id（同 session_ref 生成策略）。
+fn generate_exit_request_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("ex_{nanos:016x}{seq:04x}")
+}
+
+/// 用户主动退出统一入口（自由函数包装：托盘退出与 `exit_app` SurfacePort
+/// 都从 `AppHandle` 进入；服务未初始化时直接退出兜底）。
+pub fn request_user_exit(app: &tauri::AppHandle) {
+    match app.try_state::<std::sync::Arc<EditorSessionService>>() {
+        Some(service) => service.request_user_exit(),
+        None => {
+            tracing::warn!("user exit: 编辑器会话服务不可用，跳过确认直接退出");
+            app.exit(0);
         }
     }
 }

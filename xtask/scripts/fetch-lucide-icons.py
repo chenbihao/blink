@@ -105,6 +105,11 @@ ICON_LIST = [
     "trash-2",          # 便签管理删除（0.17.7）——移入回收站
     "rotate-ccw",       # 便签管理恢复（0.17.7）——从回收站恢复
 
+    # 内容编辑器（0.23.2）
+    "ellipsis",         # 更多操作菜单
+    "sticky-note",      # 创建便签
+    "send",             # 发送到 AI 对话
+
     # AI 确认徽章
     "triangle-alert",   # AI 需确认 ⚠  （Lucide 1.x 从 alert-triangle 重命名）
 

@@ -127,22 +127,6 @@
     cursor: not-allowed;
 }
 
-.editor-cancel-btn {
-    padding: 5px 12px;
-    border: 1px solid var(--surface-2);
-    background: transparent;
-    color: var(--text-sub);
-    font-size: 12px;
-    cursor: pointer;
-    border-radius: var(--radius-md);
-    transition: all var(--transition-fast);
-}
-
-.editor-cancel-btn:hover {
-    border-color: var(--text-dim);
-    color: var(--text);
-}
-
 /* ── 0.23.1：原文/MD 视图切换 ── */
 
 .editor-view-switch {
@@ -183,6 +167,145 @@
 .editor-view-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+/* ── 0.23.2：更多动作菜单 ── */
+
+.editor-menu-anchor {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.editor-more-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: none;
+    background: transparent;
+    color: var(--text-sub);
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.editor-more-btn:hover,
+.editor-more-btn.is-open {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.editor-more-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 168px;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    z-index: 30;
+}
+
+.editor-more-menu.hidden {
+    display: none;
+}
+
+.editor-more-menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast);
+}
+
+.editor-more-menu button:hover {
+    background: var(--surface-2);
+}
+
+.editor-more-menu button .icon {
+    color: var(--text-sub);
+}
+
+/* ── 0.23.2：底部保存区（§3.8：当前保存目标 + 保存按钮） ── */
+
+.editor-savebar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    padding: 0 16px;
+    background: var(--surface);
+    border-top: 1px solid var(--surface-2);
+    flex-shrink: 0;
+}
+
+.editor-target-zone {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+    color: var(--text-sub);
+}
+
+.editor-target-zone .icon {
+    flex-shrink: 0;
+}
+
+.editor-target-label {
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.editor-dirty-dot {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-sub);
+}
+
+.editor-dirty-dot::before {
+    content: "●";
+    margin-right: 4px;
+    color: var(--accent);
+}
+
+.editor-dirty-dot.hidden {
+    display: none;
+}
+
+.editor-savebar .editor-status {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: right;
+}
+
+.editor-savebar .editor-save-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.editor-savebar .editor-save-btn .kbd {
+    font-size: 10px;
+    opacity: 0.8;
 }
 
 /* hidden 属性在 .md-toolbar 的显式 display:flex 下失效，恢复显隐语义 */

@@ -18,7 +18,7 @@ use crate::app::command_error::CommandError;
 use crate::app::editor::EditorSessionService;
 use crate::domain::editor::{
     CommitEditorRequest, CommitOutcome, EditorError, EditorSessionSnapshot, EndEditorRequest,
-    OpenEditorRequest,
+    OpenEditorRequest, ResolveEditorExitRequest,
 };
 
 impl From<EditorError> for CommandError {
@@ -109,5 +109,17 @@ pub async fn end_content_editor(
     let label = window.label().to_string();
     // end 是纯内存操作（清会话槽 + 发事件），同步完成。
     service.end(&label, request)?;
+    Ok(())
+}
+
+/// 前端应答退出确认（§3.5 主动退出一次汇总确认的应答侧）。
+/// 只有与待决请求 id 匹配的应答生效；迟到的旧应答静默忽略。
+#[tauri::command]
+pub fn resolve_editor_exit(
+    app: tauri::AppHandle,
+    request: ResolveEditorExitRequest,
+) -> Result<(), CommandError> {
+    let service = service(&app)?;
+    service.resolve_editor_exit(&request.request_id, request.confirmed);
     Ok(())
 }

@@ -329,11 +329,39 @@ pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(),
 /// 保存文本到指定路径（0.12.5 §5.6 导出对话用）。
 ///
 /// 前端通过 Tauri `dialog.save()` 获取路径后调用此 command 写文件。
-/// 仅写 UTF-8 文本文件，不做任何特权操作（无路径穿越风险——路径来自用户主动选择）。
+/// 0.23.2：写入收敛走 `write_text_file` Capability（原子替换，§A3.5 唯一
+/// 原子执行入口）；路径来自用户主动选择的保存对话框，无冲突检查需求。
 #[tauri::command]
-pub async fn save_text_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content.as_bytes()).map_err(|e| format!("写入文件失败: {e}"))?;
-    tracing::info!(%path, bytes = content.len(), "save_text_file: 文件已保存");
+pub async fn save_text_file(
+    app: tauri::AppHandle,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let env_arc = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalCommand,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: Some(env_arc.as_ref()),
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: None,
+    };
+    let args = serde_json::json!({ "path": path, "content": content });
+    cap_reg
+        .invoke("write_text_file", args, &ctx)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            tracing::error!(%path, error = %e, "save_text_file: write_text_file Capability 执行失败");
+            e.to_string()
+        })?;
+    tracing::info!(%path, "save_text_file: 文件已保存");
     Ok(())
 }
 

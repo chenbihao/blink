@@ -139,6 +139,7 @@ export const EVENTS = Object.freeze({
      * 便签窗口按 stickyId 进入/退出编辑租约（只读）。
      */
     EDITOR_SESSION_CHANGED: 'blink://editor-session-changed',
+    EDITOR_EXIT_REQUEST: 'blink://editor-exit-request',
 
     // ── 截图（0.18.x）──
     /** 截图控件吸附 hints 流式推送 */

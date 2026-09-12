@@ -1,4 +1,4 @@
-//! 内容编辑器域（0.23.1）——单 EditorSession 的类型与纯逻辑。
+//! 内容编辑器域（0.23.1；0.23.2 起含保存目标）——单 EditorSession 的类型与纯逻辑。
 //!
 //! **定位**：框架无关。本模块不 `use tauri`（arch_guard 强制），不持有窗口、
 //! DB 或事件副作用；会话的编排（窗口绑定、保存副作用、事件发射）在应用层
@@ -6,7 +6,7 @@
 //!
 //! **核心规则**（docs/phases/0.23-editor-voice-ai-workflow.md §3.1/§3.3/§3.5）：
 //! - 全进程最多一个活动 EditorSession；再次打开同源激活现有窗口，异源返回 `EditorBusy`。
-//! - `SourceDescriptor` 只描述来源；保存目标由来源按默认映射推导（0.23.2 起可显式选择）。
+//! - `SourceDescriptor` 只描述来源；`CommitTarget` 只描述主保存去向，二者分离（§3.5）。
 //! - `session_ref` 是后端生成的不可猜测 opaque 引用；所有 IPC 校验 `session_ref + generation`。
 //! - Source envelope：2,000,000 字符硬上限，超限拒绝载入（§3.10 冻结值）。
 
@@ -55,6 +55,156 @@ impl SourceDescriptor {
             _ => None,
         }
     }
+}
+
+/// 主保存目标（§3.5，0.23.2 类型化）——只描述"保存到哪里"，与来源分离。
+///
+/// `ClipboardResult` 为会话结果历史项：第一次保存创建，后续保存更新同一项
+///（§3.10，以结果项 id 为键）。`ConfirmedFile` 仅由用户完成"保存到…"后建立，
+/// 后续保存校验文件 identity 后原位写入。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum CommitTarget {
+    /// 会话剪贴板结果（默认：剪贴板、空白、选区、不可回写能力结果）。
+    ClipboardResult,
+    /// 便签原位更新（默认：便签来源）。
+    UpdateSticky { sticky_id: String },
+    /// 回写具有可靠 endpoint 的 Blink 调用方（0.23.2 无此入口，协议预留）。
+    #[allow(dead_code)] // 协议完备性：默认映射与"保存到…"都不会产生该目标
+    ReturnToCaller,
+    /// 已确认文件（用户"保存到…"后建立；后续保存原位写入）。
+    ConfirmedFile { path: String },
+}
+
+/// 按来源推导默认保存目标（§3.5 冻结映射）。
+pub fn default_commit_target(source: &SourceDescriptor) -> CommitTarget {
+    match source {
+        SourceDescriptor::Sticky { sticky_id } => CommitTarget::UpdateSticky {
+            sticky_id: sticky_id.clone(),
+        },
+        _ => CommitTarget::ClipboardResult,
+    }
+}
+
+/// 单次提交的目标覆盖（§3.5：「保存到…」切换主目标；「另存为副本…」不改）。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommitTargetOverride {
+    /// 写入指定文件并切换主目标为 `ConfirmedFile`。
+    SaveToFile { path: String },
+    /// 写入指定文件副本，主目标不变。
+    SaveCopyToFile { path: String },
+    /// 已确认文件被外部修改后，用户显式选择覆盖（跳过 identity 校验）。
+    OverwriteConfirmedFile,
+}
+
+/// 单次提交的执行计划——`plan_commit` 纯函数产物，应用层照单执行副作用。
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommitPlan {
+    /// 便签原位更新（携带冲突基线 revision）。
+    UpdateSticky {
+        sticky_id: String,
+        expected_revision: Option<i64>,
+    },
+    /// 创建新的会话剪贴板结果项。
+    CreateClipboardResult { origin_ref: Option<String> },
+    /// 更新既有的会话剪贴板结果项（同一项不堆积）。
+    UpdateClipboardResult { result_item_id: String },
+    /// 原位写入已确认文件（先校验 identity）。
+    WriteConfirmedFile {
+        path: String,
+        identity: FileIdentity,
+    },
+    /// 用户跳过 identity 校验强制覆盖已确认文件。
+    OverwriteConfirmedFile { path: String },
+    /// 写入"保存到…"目标并切换主目标。
+    SaveToFile { path: String },
+    /// 写入副本文件，主目标不变。
+    SaveCopyToFile { path: String },
+    /// 回写调用方（0.23.2 无可靠 endpoint，恒不可用）。
+    ReturnToCaller,
+}
+
+/// 已确认文件的写入身份（§3.5：identity/mtime 保护，不被静默覆盖）。
+///
+/// 仅在会话内存活：写入成功后记录 size + mtime_ms，下次原位保存前
+/// 与磁盘现状比对，不一致返回 `SourceConflict`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
+/// 提交计划纯决策（§3.5/§3.10）。
+///
+/// 输入会话当前状态（主目标、结果项 id、文件 identity、便签冲突基线、来源
+/// 原始引用）与单次覆盖，产出完整执行计划；应用层照单执行副作用，不再自行
+/// 分支。
+///
+/// - 显式覆盖优先：`SaveToFile`/`SaveCopyToFile`/`OverwriteConfirmedFile`；
+/// - 否则按当前主目标分派：便签带 revision；剪贴板结果首存创建、后续更新
+///   同一项；已确认文件带 identity 校验（无 identity 视为首次落盘，直接写）。
+pub fn plan_commit(
+    state: CommitState<'_>,
+    r#override: Option<&CommitTargetOverride>,
+) -> CommitPlan {
+    match r#override {
+        Some(CommitTargetOverride::SaveToFile { path }) => {
+            CommitPlan::SaveToFile { path: path.clone() }
+        }
+        Some(CommitTargetOverride::SaveCopyToFile { path }) => {
+            CommitPlan::SaveCopyToFile { path: path.clone() }
+        }
+        Some(CommitTargetOverride::OverwriteConfirmedFile) => match state.target {
+            CommitTarget::ConfirmedFile { path } => {
+                CommitPlan::OverwriteConfirmedFile { path: path.clone() }
+            }
+            _ => CommitPlan::OverwriteConfirmedFile {
+                path: String::new(),
+            },
+        },
+        None => match state.target {
+            CommitTarget::UpdateSticky { sticky_id } => CommitPlan::UpdateSticky {
+                sticky_id: sticky_id.clone(),
+                expected_revision: state.sticky_revision,
+            },
+            CommitTarget::ClipboardResult => match state.result_item_id {
+                Some(result_item_id) => CommitPlan::UpdateClipboardResult {
+                    result_item_id: result_item_id.to_string(),
+                },
+                None => CommitPlan::CreateClipboardResult {
+                    origin_ref: state.source_item_ref.map(str::to_string),
+                },
+            },
+            CommitTarget::ConfirmedFile { path } => match state.file_identity {
+                Some(identity) => CommitPlan::WriteConfirmedFile {
+                    path: path.clone(),
+                    identity,
+                },
+                None => CommitPlan::OverwriteConfirmedFile { path: path.clone() },
+            },
+            CommitTarget::ReturnToCaller => CommitPlan::ReturnToCaller,
+        },
+    }
+}
+
+/// `plan_commit` 的会话状态输入（借用快照，避免搬运 LiveSession）。
+#[derive(Debug, Clone, Copy)]
+pub struct CommitState<'a> {
+    /// 当前主保存目标。
+    pub target: &'a CommitTarget,
+    /// 会话剪贴板结果项 id（首存后存在）。
+    pub result_item_id: Option<&'a str>,
+    /// 已确认文件的写入身份（"保存到…"成功后存在）。
+    pub file_identity: Option<FileIdentity>,
+    /// 便签冲突基线（打开/上次成功提交时的 `updated_at`）。
+    pub sticky_revision: Option<i64>,
+    /// 剪贴板来源的原始历史项 id（首存继承命中数用）。
+    pub source_item_ref: Option<&'a str>,
 }
 
 /// Markdown 视图入口策略（§3.3）——按来源声明，风险门在前端执行且优先于本策略。
@@ -144,6 +294,8 @@ pub struct EditorSessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<i64>,
     pub markdown_policy: MarkdownViewPolicy,
+    /// 当前主保存目标（0.23.2）——前端主保存区按此显示真实去向。
+    pub commit_target: CommitTarget,
 }
 
 /// 提交请求（§3.9 `commit_content_editor(request)`）——前端提交完整 UTF-8 文本。
@@ -155,15 +307,49 @@ pub struct CommitEditorRequest {
     /// 前端单调 `content_revision`（0.23.1 作簿记，0.23.4 AI 候选以此判 stale）。
     pub revision: u64,
     pub body: String,
+    /// 单次目标覆盖（"保存到…"/"另存为副本…"/覆盖冲突文件）；省略按主目标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CommitTargetOverride>,
 }
 
-/// 提交结果——按当前 CommitTarget 保存后的新基线。
+/// 提交结果——按目标保存后的新基线与新主目标。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitOutcome {
     /// 便签来源：写入后的新 `updated_at`；其余来源为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<i64>,
+    /// 本次提交后的主保存目标（"保存到…"会从默认目标切换为 ConfirmedFile）。
+    pub commit_target: CommitTarget,
+    /// 目标文件身份（ConfirmedFile/保存到 成功后返回，供诊断与测试；冲突基线在后端）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_identity: Option<FileIdentityDto>,
+}
+
+/// 文件身份的 IPC 投影（ms 时间戳，跨进程序稳定）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileIdentityDto {
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
+impl From<FileIdentity> for FileIdentityDto {
+    fn from(i: FileIdentity) -> Self {
+        Self {
+            size: i.size,
+            mtime_ms: i.mtime_ms,
+        }
+    }
+}
+
+impl From<FileIdentityDto> for FileIdentity {
+    fn from(i: FileIdentityDto) -> Self {
+        Self {
+            size: i.size,
+            mtime_ms: i.mtime_ms,
+        }
+    }
 }
 
 /// 结束请求（§3.9 `end_content_editor(request)`）——保存后结束或明确放弃。
@@ -174,6 +360,17 @@ pub struct EndEditorRequest {
     pub generation: u64,
     /// `"saved"`（已提交）或 `"abandoned"`（放弃修改）；仅作日志语义。
     pub reason: EndReason,
+}
+
+/// 退出确认应答（§3.5 主动退出一次汇总确认）——前端对
+/// `blink://editor-exit-request` 的回应。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveEditorExitRequest {
+    /// 必须与待决请求 id 一致（不可猜测），迟到的旧应答直接忽略。
+    pub request_id: String,
+    /// true = 用户确认退出；false = 取消退出。
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -345,5 +542,164 @@ mod tests {
         let req: OpenEditorRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.body, "hello");
         assert_eq!(req.source, sticky("s1"));
+    }
+
+    // ── 0.23.2 保存目标 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn default_target_follows_source() {
+        assert_eq!(
+            default_commit_target(&sticky("s1")),
+            CommitTarget::UpdateSticky {
+                sticky_id: "s1".into()
+            }
+        );
+        for source in [
+            SourceDescriptor::Empty,
+            SourceDescriptor::Selection,
+            SourceDescriptor::ClipboardItem { item_ref: None },
+            SourceDescriptor::CapabilityResult {
+                capability_id: "x".into(),
+            },
+        ] {
+            assert_eq!(
+                default_commit_target(&source),
+                CommitTarget::ClipboardResult,
+                "{source:?} 默认目标应为剪贴板结果"
+            );
+        }
+    }
+
+    fn commit_state<'a>(
+        target: &'a CommitTarget,
+        result_item_id: Option<&'a str>,
+        file_identity: Option<FileIdentity>,
+    ) -> CommitState<'a> {
+        CommitState {
+            target,
+            result_item_id,
+            file_identity,
+            sticky_revision: Some(42),
+            source_item_ref: Some("orig-1"),
+        }
+    }
+
+    #[test]
+    fn plan_sticky_carries_revision_baseline() {
+        let target = CommitTarget::UpdateSticky {
+            sticky_id: "s1".into(),
+        };
+        let plan = plan_commit(commit_state(&target, None, None), None);
+        assert_eq!(
+            plan,
+            CommitPlan::UpdateSticky {
+                sticky_id: "s1".into(),
+                expected_revision: Some(42)
+            }
+        );
+    }
+
+    #[test]
+    fn plan_clipboard_first_creates_then_updates_same_item() {
+        let target = CommitTarget::ClipboardResult;
+        assert_eq!(
+            plan_commit(commit_state(&target, None, None), None),
+            CommitPlan::CreateClipboardResult {
+                origin_ref: Some("orig-1".into())
+            }
+        );
+        assert_eq!(
+            plan_commit(commit_state(&target, Some("res-1"), None), None),
+            CommitPlan::UpdateClipboardResult {
+                result_item_id: "res-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_confirmed_file_checks_identity_until_forced() {
+        let target = CommitTarget::ConfirmedFile {
+            path: "C:\\a.md".into(),
+        };
+        let identity = FileIdentity {
+            size: 5,
+            mtime_ms: 100,
+        };
+        assert_eq!(
+            plan_commit(commit_state(&target, None, Some(identity)), None),
+            CommitPlan::WriteConfirmedFile {
+                path: "C:\\a.md".into(),
+                identity
+            }
+        );
+        // identity 尚未建立（首存落盘前）直接写
+        assert_eq!(
+            plan_commit(commit_state(&target, None, None), None),
+            CommitPlan::OverwriteConfirmedFile {
+                path: "C:\\a.md".into()
+            }
+        );
+        // 用户显式覆盖
+        let force = CommitTargetOverride::OverwriteConfirmedFile;
+        assert_eq!(
+            plan_commit(commit_state(&target, None, Some(identity)), Some(&force)),
+            CommitPlan::OverwriteConfirmedFile {
+                path: "C:\\a.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_override_save_to_switches_and_copy_does_not() {
+        let target = CommitTarget::ClipboardResult;
+        let save_to = CommitTargetOverride::SaveToFile {
+            path: "D:\\out.md".into(),
+        };
+        assert_eq!(
+            plan_commit(commit_state(&target, Some("res-1"), None), Some(&save_to)),
+            CommitPlan::SaveToFile {
+                path: "D:\\out.md".into()
+            }
+        );
+        let save_copy = CommitTargetOverride::SaveCopyToFile {
+            path: "D:\\copy.md".into(),
+        };
+        assert_eq!(
+            plan_commit(commit_state(&target, Some("res-1"), None), Some(&save_copy)),
+            CommitPlan::SaveCopyToFile {
+                path: "D:\\copy.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn commit_target_and_request_serde_roundtrip() {
+        let encoded = serde_json::to_value(CommitTarget::ConfirmedFile {
+            path: "D:\\a.md".into(),
+        })
+        .unwrap();
+        assert_eq!(encoded["kind"], "confirmed_file");
+        assert_eq!(encoded["path"], "D:\\a.md");
+
+        // 请求覆盖字段：camelCase tagged + 可省略
+        let raw = serde_json::json!({
+            "sessionRef": "ed_x",
+            "generation": 1,
+            "revision": 3,
+            "body": "text",
+            "target": { "kind": "save_to_file", "path": "D:\\out.md" }
+        });
+        let req: CommitEditorRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            req.target,
+            Some(CommitTargetOverride::SaveToFile {
+                path: "D:\\out.md".into()
+            })
+        );
+        let bare = serde_json::json!({
+            "sessionRef": "ed_x", "generation": 1, "revision": 3, "body": "t"
+        });
+        let req: CommitEditorRequest = serde_json::from_value(bare).unwrap();
+        assert_eq!(req.target, None);
     }
 }

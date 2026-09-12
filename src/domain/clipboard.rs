@@ -23,18 +23,23 @@ pub enum ClipboardWriteSource {
     Screenshot,
     /// 历史图片回贴；避免同一图片删旧留新后覆盖原始来源。
     HistoryRepost,
+    /// 编辑器会话结果回写（0.23.2）；结果项由 EditorSessionService 显式
+    /// 创建/更新（同一项不堆积），监听器跳过持久化防止重复采集。
+    EditorResult,
 }
 
 impl ClipboardWriteSource {
     fn marker(self) -> (&'static str, bool) {
         use crate::infra::platform::clipboard::{
-            SELF_LABEL_APP, SELF_LABEL_BLINK, SELF_LABEL_REPOST, SELF_LABEL_SCREENSHOT,
+            SELF_LABEL_APP, SELF_LABEL_BLINK, SELF_LABEL_EDITOR, SELF_LABEL_REPOST,
+            SELF_LABEL_SCREENSHOT,
         };
         match self {
             Self::User => (SELF_LABEL_APP, false),
             Self::Capability => (SELF_LABEL_BLINK, false),
             Self::Screenshot => (SELF_LABEL_SCREENSHOT, false),
             Self::HistoryRepost => (SELF_LABEL_REPOST, true),
+            Self::EditorResult => (SELF_LABEL_EDITOR, true),
         }
     }
 }

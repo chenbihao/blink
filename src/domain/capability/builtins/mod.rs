@@ -65,6 +65,7 @@ pub mod trash_sticky;
 pub mod update_setting;
 pub mod update_sticky;
 pub mod write_clipboard;
+pub mod write_text_file;
 
 #[cfg(test)]
 mod tests {
@@ -78,6 +79,14 @@ mod tests {
             "set_sticky_visibility",
             "read_text_file",
         ] {
+            assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
+        }
+    }
+
+    #[test]
+    fn phase_0_23_2_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        for id in ["write_text_file"] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
     }

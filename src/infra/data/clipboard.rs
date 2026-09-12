@@ -549,6 +549,24 @@ pub async fn record_hit(pool: &SqlitePool, id: &str) {
         .await;
 }
 
+/// 按原 id 原位更新条目文本（0.23.2 编辑器会话结果项：同一项不堆积历史）。
+///
+/// 仅更新 text/preview/created_at（顶置到最新）；id、hit_count、source_app
+/// 保持不变。返回是否有行被更新（false = 条目已被外部删除，调用方可重建）。
+pub async fn update_item_text(pool: &SqlitePool, id: &str, text: &str) -> Result<bool, String> {
+    let result = sqlx::query(
+        "UPDATE clipboard_history SET text = ?2, preview = ?3, created_at = ?4 WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(text)
+    .bind(make_preview(text))
+    .bind(chrono::Utc::now().timestamp())
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// 删除指定条目。
 pub async fn delete_item(pool: &SqlitePool, id: &str) {
     let _ = sqlx::query("DELETE FROM clipboard_history WHERE id = ?1")
@@ -724,6 +742,30 @@ mod tests {
         let preview = make_preview(&text);
         assert_eq!(preview.len(), 83); // 80 + "..."
         assert!(preview.ends_with("..."));
+    }
+
+    #[tokio::test]
+    async fn update_item_text_keeps_id_and_hit_count() {
+        let pool = test_pool().await;
+        save_item(&pool, &item("clip_1", "original", 1, 5))
+            .await
+            .unwrap();
+
+        assert!(update_item_text(&pool, "clip_1", "revised").await.unwrap());
+
+        let rows = query_recent(&pool, 10).await;
+        assert_eq!(rows.len(), 1, "同一结果项不堆积历史");
+        let row = &rows[0];
+        assert_eq!(row.id, "clip_1");
+        assert_eq!(row.text, "revised");
+        assert_eq!(row.hit_count, 5, "hit_count 保持不变");
+        assert_eq!(row.source_app, None);
+    }
+
+    #[tokio::test]
+    async fn update_item_text_reports_missing_row() {
+        let pool = test_pool().await;
+        assert!(!update_item_text(&pool, "ghost", "x").await.unwrap());
     }
 
     #[test]

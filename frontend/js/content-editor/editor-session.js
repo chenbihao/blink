@@ -24,6 +24,9 @@ export class EditorSession {
     /** 便签来源 revision（原位保存冲突基线） */
     sourceRevision = null;
 
+    /** 主保存目标（后端 CommitTarget，0.23.2；"保存到…"成功后切换） */
+    target = null;
+
     /** commit 进行中（save 切片） */
     saving = false;
 
@@ -66,6 +69,7 @@ export class EditorSession {
         this.generation = snap.generation ?? 0;
         this.source = snap.source ?? null;
         this.sourceRevision = snap.sourceRevision ?? null;
+        this.target = snap.commitTarget ?? null;
 
         this.adapter.loadInitial({
             body: snap.body ?? "",
@@ -73,6 +77,7 @@ export class EditorSession {
         });
         this._callbacks.onTitle?.(snap.title || "");
         this._callbacks.onStatus?.("");
+        this._callbacks.onTargetChanged?.(this.target);
         this._callbacks.onSnapshotApplied?.();
         this.adapter.focus();
     }
@@ -102,20 +107,23 @@ export class EditorSession {
     }
 
     /**
-     * 提交正文（保存目标由后端按来源分派）。
+     * 提交正文（保存目标由后端按主目标分派；可传单次覆盖，§3.5）。
      * 代际防护：await 前捕获会话身份，返回时身份已变则不落任何状态。
+     * @param {{kind: string, path?: string}|null} [targetOverride] - "保存到…"/"另存为副本…"/覆盖冲突文件
      * @returns {Promise<{ok: boolean, stale?: boolean, error?: {code, message}}>}
      */
-    async commit() {
+    async commit(targetOverride = null) {
         if (this.saving || !this.isActive) return {ok: false};
         this.saving = true;
 
-        const captured = {
+        const request = {
             sessionRef: this.sessionRef,
             generation: this.generation,
             revision: this.adapter.revision,
             body: this.adapter.getText(),
         };
+        if (targetOverride) request.target = targetOverride;
+        const captured = request;
 
         try {
             const outcome = await this.api.commitEditorSession(captured);
@@ -125,6 +133,10 @@ export class EditorSession {
             this.adapter.setCheckpoint(captured.body);
             if (outcome?.sourceRevision != null) {
                 this.sourceRevision = outcome.sourceRevision;
+            }
+            if (outcome?.commitTarget) {
+                this.target = outcome.commitTarget;
+                this._callbacks.onTargetChanged?.(this.target);
             }
             return {ok: true};
         } catch (e) {
@@ -162,16 +174,20 @@ export class EditorSession {
         this.generation = 0;
         this.source = null;
         this.sourceRevision = null;
+        this.target = null;
         this.adapter.reset();
         this._callbacks.onStatus?.("");
     }
 
     /**
-     * 外部内容同步（便签在会话外被改且本地 clean）：替换正文并前移检查点。
+     * 外部内容同步（便签在会话外被改且本地 clean，或用户显式放弃重载）：
+     * 替换正文并前移检查点；提供 revision 时一并前移冲突基线，
+     * 后续保存不再误报冲突。
      */
-    syncExternalContent(text) {
+    syncExternalContent(text, sourceRevision = null) {
         if (!this.isActive) return;
         this.adapter.syncFromExternal(text);
+        if (sourceRevision != null) this.sourceRevision = sourceRevision;
         this._callbacks.onStatus?.("");
     }
 }

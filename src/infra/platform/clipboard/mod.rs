@@ -62,6 +62,8 @@ pub const SELF_LABEL_SCREENSHOT: &str = "blink:screenshot";
 pub const SELF_LABEL_REPOST: &str = "blink:repost";
 pub const SELF_LABEL_APP: &str = "blink:app";
 pub const SELF_LABEL_BLINK: &str = "blink:ai";
+/// 编辑器会话结果回写（0.23.2）——结果项由服务显式入库，监听器不重复采集。
+pub const SELF_LABEL_EDITOR: &str = "blink:editor";
 
 /// 进程级自写入标记（0.17.9）。
 struct SelfWriteMark {
@@ -448,5 +450,6 @@ mod tests {
         assert_eq!(SELF_LABEL_REPOST, "blink:repost");
         assert_eq!(SELF_LABEL_APP, "blink:app");
         assert_eq!(SELF_LABEL_BLINK, "blink:ai");
+        assert_eq!(SELF_LABEL_EDITOR, "blink:editor");
     }
 }

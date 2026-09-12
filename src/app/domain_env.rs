@@ -632,7 +632,8 @@ impl SurfacePort for TauriDomainEnv {
     }
 
     fn exit_app(&self) {
-        self.app.exit(0);
+        // 0.23.2：主动退出统一入口（托盘/exit_blink 共用，§3.5 一次汇总确认）
+        crate::app::editor::request_user_exit(&self.app);
     }
 
     fn validate_window_ref(&self, ref_id: &str) -> Result<isize, SurfaceError> {

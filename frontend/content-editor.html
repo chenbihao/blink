@@ -46,9 +46,16 @@
             <div class="md-toolbar editor-md-toolbar" hidden id="md-toolbar"></div>
         </div>
         <div class="editor-toolbar-right">
-            <span class="editor-status" id="editor-status"></span>
-            <button class="editor-save-btn" data-i18n="editor.save" id="btn-save">保存</button>
-            <button class="editor-cancel-btn" data-i18n="editor.cancel" id="btn-cancel">取消</button>
+            <!-- 0.23.2：更多动作（保存到/另存副本/复制/创建便签/发送到 AI 对话） -->
+            <div class="editor-menu-anchor">
+                <button class="editor-more-btn" data-i18n-title="editor.more" id="btn-more" title="更多操作"
+                        type="button">
+                    <svg class="icon">
+                        <use href="#icon-ellipsis"/>
+                    </svg>
+                </button>
+                <div class="editor-more-menu hidden" id="more-menu" role="menu"></div>
+            </div>
         </div>
     </div>
 
@@ -60,6 +67,19 @@
         <!-- Tiptap IR 编辑器容器（0.18.3：format=markdown 时使用，替换 Cherry 双栏） -->
         <div class="editor-tiptap-container" hidden id="editor-tiptap-container"></div>
     </div>
+
+    <!-- 0.23.2：底部保存区——当前保存目标 + 保存（§3.8：主保存区始终显示真实去向） -->
+    <footer class="editor-savebar">
+        <span class="editor-target-zone" id="target-zone" title="">
+            <svg class="icon" id="target-icon">
+                <use href="#icon-copy"/>
+            </svg>
+            <span class="editor-target-label" id="target-label"></span>
+        </span>
+        <span class="editor-dirty-dot hidden" id="dirty-dot"></span>
+        <span class="editor-status" id="editor-status"></span>
+        <button class="editor-save-btn" id="btn-save" type="button"></button>
+    </footer>
 </div>
 
 <!-- Vendor -->

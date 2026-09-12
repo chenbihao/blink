@@ -567,6 +567,14 @@ export function endEditorSession(request) {
     return invoke("end_content_editor", {request});
 }
 
+/**
+ * 应答退出确认（§3.5 主动退出一次汇总确认）。
+ * @param {*} request - { requestId, confirmed }
+ */
+export function resolveEditorExit(request) {
+    return invoke("resolve_editor_exit", {request});
+}
+
 // ── 0.16.4-0.16.5 剪贴板图片 ──
 
 /** 0.16.4：将剪贴板图片写回系统剪贴板。imageId 为 clipboard_images 表 id。 */

@@ -203,3 +203,48 @@ test("session: 无会话时 commit/end 不动作", async () => {
     assert.equal(calls.commits.length, 0);
     assert.equal(calls.ends.length, 0);
 });
+
+test("session: commit 携带目标覆盖并回填 commitTarget（0.23.2）", async () => {
+    const {api, adapter, callbacks, calls} = makeDeps();
+    api._snapshot = snapshotA;
+    api.commitEditorSession = async (request) => {
+        calls.commits.push(request);
+        assert.equal(request.target.kind, "save_to_file");
+        assert.equal(request.target.path, "D:/out.md");
+        return {sourceRevision: null, commitTarget: {kind: "confirmed_file", path: "D:/out.md"}};
+    };
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    const result = await s.commit({kind: "save_to_file", path: "D:/out.md"});
+    assert.equal(result.ok, true);
+    assert.deepEqual(s.target, {kind: "confirmed_file", path: "D:/out.md"});
+});
+
+test("session: syncExternalContent 可前移便签冲突基线（0.23.2）", async () => {
+    const {api, adapter, callbacks} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+    const revisionBefore = s.sourceRevision;
+
+    s.syncExternalContent("外部最新内容", 999);
+    assert.equal(adapter.text, "外部最新内容");
+    assert.equal(s.sourceRevision, 999);
+    assert.notEqual(s.sourceRevision, revisionBefore);
+
+    // 不带 revision 的调用不改动基线
+    s.syncExternalContent("再同步");
+    assert.equal(s.sourceRevision, 999);
+});
+
+test("session: applySnapshot 读取 commitTarget，reset 清空（0.23.2）", async () => {
+    const {api, adapter, callbacks} = makeDeps();
+    api._snapshot = {...snapshotA, commitTarget: {kind: "update_sticky", stickyId: "st1"}};
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+    assert.deepEqual(s.target, {kind: "update_sticky", stickyId: "st1"});
+
+    await s.end("abandoned");
+    assert.equal(s.target, null);
+});

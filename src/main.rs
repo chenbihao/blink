@@ -393,7 +393,8 @@ fn main() {
                         tracing::info!("托盘菜单：用户请求恢复输入钩子");
                         crate::infra::platform::hotkey::InputController::request_manual_recovery();
                     }
-                    "quit" => app.exit(0),
+                    // 0.23.2：主动退出统一入口——有活动编辑会话时先请求一次汇总确认（§3.5）
+                    "quit" => crate::app::editor::request_user_exit(&app),
                     _ => {}
                 })
                 // 0.17.2：托盘图标左键单击拉起主窗口（符合 Windows 惯例）
@@ -1449,6 +1450,7 @@ app::commands::search_clipboard_history,
             app::commands::get_content_editor_session,
             app::commands::commit_content_editor,
             app::commands::end_content_editor,
+            app::commands::resolve_editor_exit,
             app::commands::get_perf_overview,
             app::commands::get_perf_percentiles,
             app::commands::get_perf_slow_queries,
