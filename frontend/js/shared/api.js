@@ -615,6 +615,28 @@ export function focusContentEditor() {
     return invoke("focus_content_editor");
 }
 
+// ── 0.23.4 编辑器 AI 整理（Transform）──
+
+/**
+ * 发起编辑器整理（整理选中内容 / 整理本次听写）。
+ * request: { sessionRef, generation, scope: "selection"|"dictation", text, revision, rangeHandle }
+ * 全局单活跃：reject `{code:"ai_already_active", detail:{activeWindow}}`。
+ * @returns {Promise<{requestId: number}>}
+ */
+export function startEditorTransform(request) {
+    return invoke("start_editor_transform", {request});
+}
+
+/** 取消运行中整理请求（幂等；不匹配的 requestId 静默忽略）。 */
+export function cancelEditorTransform(requestId) {
+    return invoke("cancel_editor_transform", {requestId});
+}
+
+/** AI 状态（provider_configured 判定整理入口是否可见）。 */
+export function getChatStatus() {
+    return invoke("get_chat_status");
+}
+
 // ── 0.16.4-0.16.5 剪贴板图片 ──
 
 /** 0.16.4：将剪贴板图片写回系统剪贴板。imageId 为 clipboard_images 表 id。 */

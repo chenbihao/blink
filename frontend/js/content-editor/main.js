@@ -19,13 +19,16 @@ import {choiceDialog, getCurrentWindow, listen, normalizeError} from "../shared/
 import {renderComboHTML} from "../shared/kbd.js";
 import {EVENTS} from "../shared/event-names.js";
 import {
+    cancelEditorTransform,
     commitEditorSession,
     copyToClipboard,
     endEditorSession,
+    getChatStatus,
     getEditorSession,
     getEditorVoiceSnapshot,
     getStickyNote,
     resolveEditorExit,
+    startEditorTransform,
     startEditorVoice,
     stopEditorVoice,
 } from "../shared/api.js";
@@ -33,6 +36,7 @@ import {EditorAdapter} from "./editor-adapter.js";
 import {EditorSession} from "./editor-session.js";
 import {EditorActions} from "./actions.js";
 import {EditorVoiceController} from "./voice.js";
+import {EditorTransformController} from "./transform.js";
 
 // ── DOM 引用 ──────────────────────────────────────────
 
@@ -55,7 +59,20 @@ const micBtn = document.getElementById("btn-mic");
 const voiceChipsEl = document.getElementById("voice-chips");
 const chipLocateEl = document.getElementById("chip-locate");
 const chipTidyEl = document.getElementById("chip-tidy");
+const chipTidySelectionEl = document.getElementById("chip-tidy-selection");
 const chipDismissEl = document.getElementById("chip-dismiss");
+// 0.23.4：整理候选卡
+const transformCardEl = document.getElementById("transform-card");
+const transformEls = {
+    card: transformCardEl,
+    title: document.getElementById("transform-title"),
+    staleStrip: document.getElementById("transform-stale"),
+    body: document.getElementById("transform-body"),
+    applyBtn: document.getElementById("transform-apply"),
+    copyBtn: document.getElementById("transform-copy"),
+    discardBtn: document.getElementById("transform-discard"),
+    closeBtn: document.getElementById("transform-close"),
+};
 
 // ── 模块装配 ──────────────────────────────────────────
 
@@ -75,7 +92,13 @@ const adapter = new EditorAdapter(
             const key = t(reasonKey);
             if (key && key !== reasonKey) setStatus(key);
         },
-        onContentChanged: () => updateDirtyDot(),
+        onContentChanged: () => {
+            updateDirtyDot();
+            // 0.23.4：请求后任何正文变化 → 候选 stale（§3.7）
+            transform.notifyContentChanged();
+            updateActionChips();
+        },
+        onSelectionChanged: () => updateActionChips(),
     },
 );
 
@@ -101,9 +124,11 @@ const session = new EditorSession(
         },
         onSessionCleared: () => {
             voice.handleSessionEnded();
+            void transform.cancel({silent: true});
             updateViewSwitchState();
             updateDirtyDot();
             updateTargetDisplay();
+            updateActionChips();
         },
     },
 );
@@ -160,6 +185,24 @@ const voice = new EditorVoiceController(
     },
 );
 
+// ── AI 整理（0.23.4 §3.7：只产候选，确认后单事务替换）────
+
+const transform = new EditorTransformController(
+    {
+        api: {startEditorTransform, cancelEditorTransform},
+        adapter,
+        getSession: () => session,
+        listen,
+        copyToClipboard,
+        el: transformEls,
+    },
+    {
+        onPhaseChanged: () => updateActionChips(),
+        onStatus: (message) => setStatus(message),
+        onError: (message) => setStatus(message),
+    },
+);
+
 // ── 初始化 ────────────────────────────────────────────
 
 async function init() {
@@ -170,10 +213,13 @@ async function init() {
 
     bindToolbar();
     bindVoiceControls();
+    bindTransformControls();
     bindWindowControls();
     bindKeyboard();
     bindBackendEvents();
     await voice.bind();
+    await transform.bind();
+    refreshAiAvailability();
 
     // init 主动拉取：覆盖“事件先于监听器注册”的时序（§1.4 存在不等于就绪）
     try {
@@ -240,6 +286,25 @@ function bindBackendEvents() {
             lifecycleClose("便签已隐藏");
         }
     });
+
+    // 0.23.4：AI 配置热更新 → 刷新整理入口可见性（未配置时隐藏，§3.8）
+    listen(EVENTS.CONFIG_CHANGED, (event) => {
+        if (typeof event.payload?.key === "string" && event.payload.key.startsWith("ai")) {
+            refreshAiAvailability();
+        }
+    });
+}
+
+/** AI 可用性探测（provider_configured 决定整理入口是否可见；失败按不可用） */
+async function refreshAiAvailability() {
+    try {
+        const status = await getChatStatus();
+        transform.aiAvailable = !!status?.provider_configured;
+    } catch (e) {
+        console.warn("[content-editor] AI 状态探测失败:", e);
+        transform.aiAvailable = false;
+    }
+    updateActionChips();
 }
 
 /** 便签来源且本地 clean 时同步最新内容（保留 0.18.3 行为语义）；
@@ -279,8 +344,10 @@ function bindToolbar() {
 
 // ── 连续听写 UI（0.23.3 §3.6/§3.8）────────────────────
 
-/** 麦克风按钮 + 本次听写 chips 的状态投影 */
+/** 麦克风按钮 + 本次听写 chips + 整理入口的状态投影 */
 function bindVoiceControls() {
+    if (chipLocateEl) chipLocateEl.textContent = t("editor.voice.locate");
+
     micBtn?.addEventListener("click", () => {
         if (!session.isActive) {
             setStatus(t("editor.voice.stale"));
@@ -299,12 +366,32 @@ function bindVoiceControls() {
         }
     });
 
-    // 整理入口（0.23.3 只记录范围，AI 整理在 0.23.4 接入）
+    // 整理本次听写（0.23.4 §3.7 显式入口：定位本次拼接范围并发起整理）
     chipTidyEl?.addEventListener("click", () => {
-        setStatus(t("editor.voice.tidyPending"));
+        const text = voice.joinedText;
+        if (!text) return;
+        void transform.start("dictation", {text});
+    });
+
+    // 整理选中内容（选区非空时出现，§3.8 按上下文出现的整理动作）
+    chipTidySelectionEl?.addEventListener("click", () => {
+        void transform.start("selection");
     });
 
     chipDismissEl?.addEventListener("click", hideVoiceChips);
+}
+
+// ── 整理候选卡（0.23.4 §3.7）──────────────────────────
+
+/** 候选卡静态按钮文案（i18n 一次性装配） */
+function bindTransformControls() {
+    if (transformEls.applyBtn) transformEls.applyBtn.textContent = t("editor.transform.apply");
+    if (transformEls.copyBtn) transformEls.copyBtn.textContent = t("editor.transform.copy");
+    if (transformEls.discardBtn) transformEls.discardBtn.textContent = t("editor.transform.discard");
+    if (transformEls.staleStrip) transformEls.staleStrip.textContent = t("editor.transform.stale");
+    if (transformEls.closeBtn) transformEls.closeBtn.title = t("editor.transform.close");
+    const hintEl = document.getElementById("transform-hint");
+    if (hintEl) hintEl.textContent = t("editor.transform.hint");
 }
 
 /** 听写按钮态：idle=开始，recording/paused=结束（脉冲高亮），其余禁用 */
@@ -317,30 +404,50 @@ function updateVoiceUi() {
     micBtn.title = phase === "recording" || phase === "paused"
         ? t("editor.voice.stop")
         : t("editor.voice.start");
-    updateVoiceChips();
+    updateActionChips();
 }
 
-/** 录音结束且存在本次追加文本时显示"定位/整理"入口（§3.6 显式动作） */
-function updateVoiceChips() {
+/** 动作条可见性（§3.8 按上下文出现的整理动作）：
+ * 录音结束且有本次追加 → 定位/整理听写；AI 可用且有选区 → 整理选中。 */
+function updateActionChips() {
     if (!voiceChipsEl) return;
-    const show = voice.phase === "idle" && voice.segments.length > 0;
+    const dictationReady = voice.phase === "idle" && voice.segments.length > 0;
+    const selectionText = session.isActive ? adapter.getSelectionText() : "";
+    const selectionReady = transform.aiAvailable && !!selectionText.trim()
+        && !transform.isBusy && !transform.candidate;
+    const show = dictationReady || selectionReady;
     voiceChipsEl.classList.toggle("hidden", !show);
-    if (show) {
-        if (chipLocateEl) chipLocateEl.textContent = t("editor.voice.locate");
-        if (chipTidyEl) chipTidyEl.textContent = t("editor.voice.tidy");
+    if (!show) return;
+
+    if (chipLocateEl) chipLocateEl.classList.toggle("hidden", !dictationReady);
+    if (chipTidyEl) {
+        chipTidyEl.classList.toggle("hidden", !dictationReady || !transform.aiAvailable);
+        if (dictationReady) chipTidyEl.textContent = t("editor.voice.tidy");
     }
+    if (chipTidySelectionEl) {
+        chipTidySelectionEl.classList.toggle("hidden", !selectionReady);
+        if (selectionReady) {
+            chipTidySelectionEl.textContent = t("editor.transform.tidySelection", {
+                count: selectionText.length,
+            });
+        }
+    }
+    if (chipDismissEl) chipDismissEl.classList.toggle("hidden", !dictationReady);
 }
 
 function hideVoiceChips() {
     voice.segments = [];
-    updateVoiceChips();
+    updateActionChips();
 }
 
 /** 视图切换（Source/MD 是同一文本的双视图，§3.3）。
+ *  切换取消运行中的整理请求并丢弃候选（§3.3/§3.7），引擎内 handle 随旧引擎作废；
  *  拒绝原因提示由 adapter.onNotice 给出（structure/large 分档）。 */
 function switchView(target) {
     if (!adapter.switchView(target)) return;
+    void transform.cancel({silent: true});
     updateViewSwitchState();
+    updateActionChips();
     adapter.focus();
 }
 
@@ -496,7 +603,9 @@ async function handleCancel() {
             cancelLabel: t("editor.continueEdit"),
             thirdAction: {label: t("editor.saveAndClose")},
         });
-        if (choice === "cancel") return; // 继续编辑
+        if (choice === "cancel") return; // 继续编辑：整理请求/候选保持不动
+        // 0.23.4：真正关闭才取消整理请求/丢弃候选（§3.7 关闭取消旧请求）
+        await transform.cancel({silent: true});
         if (choice === "third") {
             allowClose = true;
             const result = await session.commit();
@@ -517,6 +626,7 @@ async function handleCancel() {
         return;
     }
     allowClose = true;
+    await transform.cancel({silent: true});
     if (session.isActive) await session.end("abandoned");
     closeWindow();
 }
@@ -532,6 +642,7 @@ function lifecycleClose(reason) {
     }
     tracing(`${reason}，自动关闭编辑器`);
     if (voice.isBusy) voice.stop();
+    void transform.cancel({silent: true});
     allowClose = true;
     session.end("abandoned").finally(() => closeWindow());
 }
@@ -613,6 +724,11 @@ function bindKeyboard() {
             // 0.23.3 ESC 分层：听写中先停听写（confirmed 保留），不关窗口
             if (voice.isBusy) {
                 voice.stop();
+                return;
+            }
+            // 0.23.4 ESC 分层：候选卡打开时先关卡（正文不动），不关窗口
+            if (transform.candidate || transform.isBusy) {
+                void transform.cancel();
                 return;
             }
             handleCancel();

@@ -216,6 +216,111 @@ export class MarkdownIrEngine {
         }
     }
 
+    /**
+     * 冻结当前选区为 opaque range handle（0.23.4 §3.4）。
+     * 跨文本块范围 blockSafe=false（§3.7：Markdown 块边界不安全时只允许复制）。
+     * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
+     */
+    createSelectionRangeHandle() {
+        const {state} = this.editor;
+        const {from, to, empty} = state.selection;
+        if (empty) return null;
+        return {
+            kind: this.kind,
+            from,
+            to,
+            text: state.doc.textBetween(from, to, "\n"),
+            blockSafe: MarkdownIrEngine._blockSafe(state, from, to),
+        };
+    }
+
+    /**
+     * 在当前文档文本中定位给定文本并冻结为 range handle（本次听写整理）。
+     * 定位口径与 locateText 一致（text node 拼接，不含块分隔符）。
+     * @param {string} text
+     * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
+     */
+    createTextRangeHandle(text) {
+        if (!text) return null;
+        const {state} = this.editor;
+        let full = "";
+        /** @type {Array<{start: number, pos: number}>} */
+        const spans = [];
+        state.doc.descendants((node, pos) => {
+            if (node.isText && node.text) {
+                spans.push({start: full.length, pos});
+                full += node.text;
+            }
+            return true;
+        });
+        const idx = full.indexOf(text);
+        if (idx < 0) return null;
+        const posAt = (ci) => {
+            for (let i = spans.length - 1; i >= 0; i--) {
+                if (spans[i].start <= ci) return spans[i].pos + (ci - spans[i].start);
+            }
+            return null;
+        };
+        const from = posAt(idx);
+        if (from == null) return null;
+        const to = posAt(idx + text.length) ?? from + text.length;
+        return {
+            kind: this.kind,
+            from,
+            to,
+            text,
+            blockSafe: MarkdownIrEngine._blockSafe(state, from, to),
+        };
+    }
+
+    /** 块边界安全判定：range 两端同属一个文本块（§3.7 替换安全条件）。 */
+    static _blockSafe(state, from, to) {
+        try {
+            const $from = state.doc.resolve(from);
+            const $to = state.doc.resolve(to);
+            return $from.sameParent($to) && $from.parent.isTextblock;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 单事务替换 handle 范围（0.23.4 §3.7 确认应用路径）。
+     * 仅接受 blockSafe 范围；先复核冻结文本，再一次事务完成替换——单行输出
+     * 走 insertText（保持段落），多行输出按行拆段落（保持 Markdown 块结构）。
+     * 校验失败返回 false，不产生任何修改。
+     * @param {{from: number, to: number, text: string, blockSafe: boolean}} handle
+     * @param {string} newText
+     * @returns {boolean}
+     */
+    replaceRange(handle, newText) {
+        if (!handle || typeof newText !== "string" || !handle.blockSafe) return false;
+        const {from, to, text: expected} = handle;
+        const {state} = this.editor;
+        if (!Number.isInteger(from) || !Number.isInteger(to)
+            || from < 0 || to > state.doc.content.size || from >= to) {
+            return false;
+        }
+        if (state.doc.textBetween(from, to, "\n") !== expected) return false;
+
+        const schema = state.schema;
+        const lines = newText.split("\n");
+        this.editor.chain().command(({tr}) => {
+            if (lines.length === 1) {
+                tr.insertText(lines[0], from, to);
+            } else {
+                const nodes = lines.map((line) =>
+                    schema.nodes.paragraph.create(null, line ? schema.text(line) : null));
+                tr.replaceWith(from, to, nodes);
+            }
+            return true;
+        }).run();
+        // 焦点交还编辑器（selection 随事务映射），保证"一次 Ctrl+Z 恢复"可达
+        this.editor.commands.focus();
+        // 程序化替换是真实编辑：onUpdate 触发 edited=true + onChange（revision 自增）
+        return true;
+    }
+
     focus() {
         this.editor.commands.focus();
     }

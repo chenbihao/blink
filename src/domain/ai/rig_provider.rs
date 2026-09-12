@@ -47,13 +47,16 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use rig_core::completion::{
     AssistantContent, CompletionError, CompletionModel as RigCompletionModel,
-    CompletionRequest as RigCompletionRequest, Message as RigMessage,
+    CompletionRequest as RigCompletionRequest, FinishReason as RigFinishReason,
+    Message as RigMessage,
 };
 use rig_core::message::{ToolCall as RigToolCall, ToolFunction as RigToolFunc};
 use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
 use tokio::sync::mpsc;
 
-use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
+use crate::domain::ai::message::{
+    CompletionRequest, CompletionResponse, FinishReasonKind, Role, ToolCall, Usage,
+};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::domain::ai::thinking::thinking_request_patch;
 use crate::domain::config::ai_config::{
@@ -503,12 +506,23 @@ pub(crate) fn map_rig_response(
     // 3 个字段，cache-only / reasoning-only 报告会被误判为未报告
     let usage = Usage::from_rig_usage(&rig_resp.usage);
 
+    // 0.23.4 §3.10: finish_reason 类型墙投影——rig 归一化枚举映射为我们的
+    // `FinishReasonKind`（Other 不携带 wire 原文）；None = provider 未报告。
+    let finish_reason = rig_resp.finish_reason().map(|f| match f {
+        RigFinishReason::Stop => FinishReasonKind::Stop,
+        RigFinishReason::Length => FinishReasonKind::Length,
+        RigFinishReason::ToolCalls => FinishReasonKind::ToolCalls,
+        RigFinishReason::ContentFilter => FinishReasonKind::ContentFilter,
+        RigFinishReason::Other(_) => FinishReasonKind::Other,
+    });
+
     CompletionResponse {
         text,
         tool_calls,
         usage,
         first_token_ms: elapsed_ms,
         total_ms: elapsed_ms,
+        finish_reason,
     }
 }
 

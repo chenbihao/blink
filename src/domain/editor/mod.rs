@@ -1,14 +1,24 @@
-//! 内容编辑器域（0.23.1；0.23.2 起含保存目标）——单 EditorSession 的类型与纯逻辑。
+//! 内容编辑器域（0.23.1；0.23.2 起含保存目标；0.23.4 起含 AI 整理纯逻辑）——
+//! 单 EditorSession 的类型与纯逻辑。
 //!
 //! **定位**：框架无关。本模块不 `use tauri`（arch_guard 强制），不持有窗口、
 //! DB 或事件副作用；会话的编排（窗口绑定、保存副作用、事件发射）在应用层
-//! `crate::app::editor::EditorSessionService`。
+//! `crate::app::editor::EditorSessionService`；AI 整理的编排（provider 调用、
+//! 取消、事件）在应用层 `crate::app::editor_transform::EditorTransformService`。
 //!
-//! **核心规则**（docs/phases/0.23-editor-voice-ai-workflow.md §3.1/§3.3/§3.5）：
+//! **核心规则**（docs/phases/0.23-editor-voice-ai-workflow.md §3.1/§3.3/§3.5/§3.7）：
 //! - 全进程最多一个活动 EditorSession；再次打开同源激活现有窗口，异源返回 `EditorBusy`。
-//! - `SourceDescriptor` 只描述来源；`CommitTarget` 只描述主保存去向，二者分离（§3.5）。
+//! - `SourceDescriptor` 只描述来源；`CommitTarget` 只描述保存去向，二者分离（§3.5）。
 //! - `session_ref` 是后端生成的不可猜测 opaque 引用；所有 IPC 校验 `session_ref + generation`。
 //! - Source envelope：2,000,000 字符硬上限，超限拒绝载入（§3.10 冻结值）。
+//! - AI 整理服从全局单活跃、只产候选，未经确认不改正文（§3.7，纯逻辑见 `transform`）。
+
+mod transform;
+
+pub use transform::{
+    EditorTransformError, TRANSFORM_SYSTEM_INSTRUCTION, TransformOutput, TransformScope,
+    evaluate_transform_output, plan_transform,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -243,6 +253,16 @@ pub enum EditorError {
     /// 已有其他目标的 VoiceSession 在录音（0.23.3 §3.6：G1/G2/G3/Editor 互斥）。
     #[error("已有语音输入在进行")]
     VoiceBusy,
+    /// 已有其他窗口的 AI 请求在运行（0.23.4 §3.7/§3.10 全局单活跃）。
+    #[error("AI 正在其他窗口处理")]
+    AiAlreadyActive {
+        /// 当前活跃请求所在窗口（"main" / "chat" / "editor"），供提示。
+        #[serde(default)]
+        active_window: Option<String>,
+    },
+    /// 整理请求已取消（0.23.4 §3.7：新请求/视图切换/会话结束）。
+    #[error("整理请求已取消")]
+    Cancelled,
     /// session_ref 或 generation 不匹配——请求来自旧会话，只能清理自身。
     #[error("编辑会话已失效")]
     StaleSession,

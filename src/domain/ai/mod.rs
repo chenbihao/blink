@@ -36,7 +36,9 @@ pub mod tool_adapter;
 #[allow(unused_imports)] // 0.9.1 Phase 5 起被 AppContext 消费
 pub use factory::default_factory;
 #[allow(unused_imports)]
-pub use message::{ChatMessage, CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
+pub use message::{
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReasonKind, Role, ToolCall, Usage,
+};
 #[allow(unused_imports)]
 pub use provider::{AIError, AIProvider, StreamChunk};
 #[allow(unused_imports)]

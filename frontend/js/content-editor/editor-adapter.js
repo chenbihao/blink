@@ -175,6 +175,38 @@ export class EditorAdapter {
         return this.engine.locateText?.(text) ?? false;
     }
 
+    // ── 0.23.4 AI 整理范围（§3.4 冻结三元组的 Engine 侧）────────────────────
+
+    /**
+     * 冻结整理范围为 opaque range handle。
+     * scope="selection" 取当前选区；scope="dictation" 在全文定位给定文本。
+     * handle 由当前 Engine 签发（含冻结文本与块安全标志），仅当前 Engine
+     * 可解析与校验；视图切换后旧 handle 随引擎丢弃。
+     * @param {"selection"|"dictation"} scope
+     * @param {string} [text] - dictation 范围文本（本次听写拼接）
+     * @returns {{handle: object, text: string, blockSafe: boolean}|null} 范围不存在/为空返回 null
+     */
+    freezeRange(scope, text) {
+        if (!this.engine) return null;
+        const frozen = scope === "selection"
+            ? this.engine.createSelectionRangeHandle?.() ?? null
+            : this.engine.createTextRangeHandle?.(text) ?? null;
+        if (!frozen || !frozen.text) return null;
+        return {handle: frozen, text: frozen.text, blockSafe: frozen.blockSafe ?? false};
+    }
+
+    /**
+     * 单事务替换冻结范围（§3.7 确认应用路径）。Engine 复核冻结文本通过后
+     * 替换；revision 由引擎 onChange 回调自增（替换是真实编辑，计入 undo）。
+     * @param {object} handle - freezeRange 返回的 handle
+     * @param {string} newText
+     * @returns {boolean} 校验失败或引擎不支持返回 false（不产生修改）
+     */
+    replaceRange(handle, newText) {
+        if (!this.engine?.replaceRange) return false;
+        return this.engine.replaceRange(handle, newText);
+    }
+
     /** 外部同步内容（便签变更 reload）：替换正文且前移检查点，不计用户编辑 */
     syncFromExternal(text) {
         const next = normalizeEol(text);
@@ -221,6 +253,11 @@ export class EditorAdapter {
     }
 
     _enterView(target, {initialText}) {
+        const engineCallbacks = () => ({
+            onChange: () => this._bumpRevision(),
+            // 选区变化通知（0.23.4：整理选中入口的可见性跟随选区）
+            onSelectionChange: () => this._callbacks.onSelectionChanged?.(),
+        });
         if (this.engine) {
             this.engine.dispose();
             this.engine = null;
@@ -233,8 +270,7 @@ export class EditorAdapter {
             this.engine = this._factories.source({
                 element: this.sourceEl,
                 initialText,
-                onChange: () => this._bumpRevision(),
-                onSelectionChange: () => {},
+                ...engineCallbacks(),
             });
         } else {
             // Tiptap 不可用或初始化失败 → 降级 Source（保留文本，提示）
@@ -244,8 +280,7 @@ export class EditorAdapter {
                     element: this.mdContainerEl,
                     toolbarMount: this.mdToolbarEl,
                     initialMarkdown: initialText,
-                    onChange: () => this._bumpRevision(),
-                    onSelectionChange: () => {},
+                    ...engineCallbacks(),
                 });
                 this.sourceEl.hidden = true;
             } catch (e) {
@@ -255,8 +290,7 @@ export class EditorAdapter {
                 this.engine = this._factories.source({
                     element: this.sourceEl,
                     initialText,
-                    onChange: () => this._bumpRevision(),
-                    onSelectionChange: () => {},
+                    ...engineCallbacks(),
                 });
                 this._callbacks.onNotice?.("editor.gate.fallback");
             }

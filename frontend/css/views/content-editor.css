@@ -2,6 +2,7 @@
 
 /* ── 根布局 ── */
 .editor-root {
+    position: relative; /* 候选卡等浮动层的定位基准 */
     display: flex;
     flex-direction: column;
     height: 100vh;
@@ -585,4 +586,149 @@
     border: none;
     border-top: 1px solid var(--surface-2);
     margin: 12px 0;
+}
+
+/* ═══ 0.23.4 整理候选卡（非模态；§3.7 只产候选不改正文）═══ */
+
+.editor-diff-card {
+    position: absolute;
+    right: 12px;
+    bottom: 52px;
+    width: min(560px, calc(100% - 24px));
+    max-height: 55%;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px var(--shadow);
+    z-index: 30;
+    overflow: hidden;
+}
+
+.editor-diff-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--surface-2);
+    color: var(--text);
+}
+
+.editor-diff-head .icon {
+    width: 14px;
+    height: 14px;
+    color: var(--accent);
+    flex: none;
+}
+
+.editor-diff-title {
+    font-size: 12px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.editor-diff-close {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--text-sub);
+    padding: 2px;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    display: flex;
+}
+
+.editor-diff-close:hover {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.editor-diff-stale {
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text);
+    background: color-mix(in srgb, var(--red) 14%, transparent);
+    border-bottom: 1px solid var(--surface-2);
+}
+
+.editor-diff-body {
+    padding: 10px 12px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-style: normal;
+}
+
+.editor-diff-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--surface-2);
+}
+
+.editor-diff-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.editor-diff-btn:hover:not(:disabled) {
+    background: var(--surface-2);
+}
+
+.editor-diff-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.editor-diff-btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+}
+
+.editor-diff-btn-primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 85%, var(--bg));
+}
+
+.editor-diff-hint {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-sub);
+    opacity: 0.7;
+}
+
+/* Diff 段：删除浅红底 + 删除线 + −，新增浅绿底 + ＋（§3.7 非颜色双通道） */
+.diff-del {
+    background: color-mix(in srgb, var(--red) 18%, transparent);
+    text-decoration: line-through;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+.diff-add {
+    background: color-mix(in srgb, var(--green) 18%, transparent);
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+.diff-plain {
+    color: var(--text);
+}
+
+.diff-running {
+    color: var(--text-sub);
+    font-size: 12px;
 }

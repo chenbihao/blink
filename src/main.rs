@@ -1198,6 +1198,19 @@ fn main() {
                 app.handle().clone(),
             )));
 
+            // 0.23.4：编辑器 AI 整理服务（全局单活跃经 ChatService tracker；
+            // provider 池与活跃槽在运行时经 app.state 解析）
+            if let Some(chat) = app
+                .try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
+                .map(|c| c.inner().clone())
+            {
+                app.manage(std::sync::Arc::new(
+                    app::editor_transform::EditorTransformService::new(app.handle().clone(), chat),
+                ));
+            } else {
+                tracing::warn!("editor transform: ChatService 不可用，整理功能未启用");
+            }
+
             // 0.16.7：便签服务（domain 层，框架无关；command 层经 app.state 取用）
             let sticky_service = std::sync::Arc::new(
                 domain::sticky::StickyService::new(pools.history.clone()),
@@ -1458,6 +1471,9 @@ app::commands::search_clipboard_history,
             app::commands::stop_editor_voice,
             app::commands::get_editor_voice_snapshot,
             app::commands::focus_content_editor,
+            // 0.23.4 编辑器 AI 整理
+            app::commands::start_editor_transform,
+            app::commands::cancel_editor_transform,
             app::commands::get_perf_overview,
             app::commands::get_perf_percentiles,
             app::commands::get_perf_slow_queries,

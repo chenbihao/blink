@@ -133,6 +133,19 @@ struct ActiveChatRequest {
     /// 0.17.6: 活跃请求所在窗口（"chat" / "main"），供 AlreadyActive 错误提示。
     target_window: String,
     abort_handle: AbortHandle,
+    /// 0.23.4: 请求来源（§3.10 全局 AI 并发）。Editor 整理请求的取消路径唯一
+    /// （cancel_editor_transform / 自然完成），chat 侧 abort 不得误杀——
+    /// abort* 路径对 Editor 来源直接拒绝（见 `RequestTracker`）。
+    origin: RequestOrigin,
+}
+
+/// 0.23.4: 活跃请求来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestOrigin {
+    /// 对话/主窗口 prompt（abort 路径可中止底层任务）。
+    Chat,
+    /// 编辑器整理请求（abort 路径拒绝；取消走 EditorTransformService）。
+    Editor,
 }
 
 /// 可序列化的 active request 快照，供 Phase 4 `get_chat_status` 使用。
@@ -269,10 +282,10 @@ impl RequestTracker {
 
     fn abort(&self, request_id: u64) -> bool {
         let mut active = self.active.lock().expect("chat active lock poisoned");
-        if active
-            .as_ref()
-            .is_none_or(|request| request.request_id != request_id)
-        {
+        let Some(request) = active.as_ref() else {
+            return false;
+        };
+        if request.request_id != request_id || request.origin != RequestOrigin::Chat {
             return false;
         }
         let request = active.take().expect("active request checked above");
@@ -282,6 +295,14 @@ impl RequestTracker {
 
     fn abort_active(&self) -> bool {
         let mut active = self.active.lock().expect("chat active lock poisoned");
+        // 0.23.4: Editor 来源不可被 chat 生命周期 abort 误杀——返回 false 且
+        // 槽位保持，编辑器请求只能经自身取消路径或自然完成释放。
+        if active
+            .as_ref()
+            .is_some_and(|request| request.origin != RequestOrigin::Chat)
+        {
+            return false;
+        }
         let Some(request) = active.take() else {
             return false;
         };
@@ -1175,6 +1196,7 @@ impl ChatService {
                 conversation_id: conversation_id.clone(),
                 target_window: target_window.clone(),
                 abort_handle,
+                origin: RequestOrigin::Chat,
             })
             .map_err(ChatError::AlreadyActive)?;
 
@@ -1222,6 +1244,52 @@ impl ChatService {
             );
         }
         aborted
+    }
+
+    // ── 0.23.4: Editor 整理请求接入全局单活跃协调器（phase 文档 §3.10）──────
+
+    /// 把编辑器整理请求注册进同一全局单活跃协调器（与 prompt 共用 tracker）。
+    ///
+    /// `start_gate` 串行化"检查 + 安装"，与 `prompt()` 互斥；任一方向冲突都
+    /// 返回当前活跃请求状态（前端据 `target_window` 提示"AI 正在 X 中处理"）。
+    ///
+    /// **取消路径唯一**：editor 请求不挂真实任务 AbortHandle——chat 侧
+    /// `abort/abort_active` 对 Editor 来源直接拒绝（见 tracker），取消只能经
+    /// `cancel_editor_transform` 或自然完成，由 `EditorTransformService` 全权
+    /// 管理任务生命周期并在收尾时调用 [`Self::release_editor_transform`]。
+    pub async fn register_editor_transform(&self) -> Result<u64, ActiveChatStatus> {
+        let _start_guard = self.start_gate.lock().await;
+        if let Some(active) = self.requests.status() {
+            return Err(active);
+        }
+        let request_id = self.requests.next_id();
+        // 空转 handle：editor 请求不可被 tracker abort（取消路径唯一）。
+        // tokio 未公开 AbortHandle 构造器，用即完成任务的 handle 兜底——
+        // 即便被误 abort 也无任务可杀。
+        let inert_task = tokio::spawn(async {});
+        self.requests
+            .install(ActiveChatRequest {
+                request_id,
+                conversation_id: format!("editor-transform-{request_id}"),
+                target_window: "editor".to_string(),
+                abort_handle: inert_task.abort_handle(),
+                origin: RequestOrigin::Editor,
+            })
+            .expect("start_gate 已确认槽位为空");
+        tracing::info!(
+            request_id,
+            "ChatService: editor 整理请求已注册（全局单活跃）"
+        );
+        Ok(request_id)
+    }
+
+    /// 释放编辑器整理请求槽位（完成/失败/取消收尾时调用；幂等）。
+    pub fn release_editor_transform(&self, request_id: u64) -> bool {
+        let released = self.requests.clear_if(request_id);
+        if released {
+            tracing::debug!(request_id, "ChatService: editor 整理请求槽位已释放");
+        }
+        released
     }
 
     /// 0.17.6a: 导出临时对话的全部消息（供 promote 为持久对话用）。
@@ -1679,6 +1747,7 @@ mod tests {
             conversation_id: conversation_id.to_string(),
             target_window: "chat".to_string(),
             abort_handle,
+            origin: RequestOrigin::Chat,
         }
     }
 
@@ -1739,6 +1808,7 @@ mod tests {
                 conversation_id: "c9".into(),
                 target_window: "chat".to_string(),
                 abort_handle,
+                origin: RequestOrigin::Chat,
             })
             .unwrap();
         started_rx.await.unwrap();
@@ -1755,5 +1825,60 @@ mod tests {
             target_window: Some("chat".to_string()),
         });
         assert!(error.to_string().contains("42"));
+    }
+
+    // ── 0.23.4: Editor 整理请求接入全局单活跃 ─────────────────────────────
+
+    fn editor_request(request_id: u64) -> ActiveChatRequest {
+        let inert = tokio::spawn(async {});
+        ActiveChatRequest {
+            request_id,
+            conversation_id: format!("editor-transform-{request_id}"),
+            target_window: "editor".to_string(),
+            abort_handle: inert.abort_handle(),
+            origin: RequestOrigin::Editor,
+        }
+    }
+
+    #[tokio::test]
+    async fn editor_request_conflicts_with_chat_request_both_ways() {
+        // chat 在先：editor 注册被拒并看到 chat 活跃状态
+        let tracker = RequestTracker::new();
+        tracker.install(pending_request(1, "c1")).unwrap();
+        let err = tracker.install(editor_request(2)).unwrap_err();
+        assert_eq!(err.target_window.as_deref(), Some("chat"));
+
+        // editor 在先：chat 安装被拒并看到 editor 活跃状态
+        let tracker = RequestTracker::new();
+        tracker.install(editor_request(1)).unwrap();
+        let err = tracker.install(pending_request(2, "c2")).unwrap_err();
+        assert_eq!(err.target_window.as_deref(), Some("editor"));
+        assert_eq!(err.conversation_id, "editor-transform-1");
+        tracker.clear_if(1);
+    }
+
+    #[tokio::test]
+    async fn editor_request_cannot_be_aborted_via_tracker() {
+        let tracker = RequestTracker::new();
+        tracker.install(editor_request(5)).unwrap();
+
+        // 指定 id 与 abort_active 都拒绝 Editor 来源，槽位保持占用
+        assert!(!tracker.abort(5));
+        assert!(!tracker.abort_active());
+        assert_eq!(tracker.status().unwrap().request_id, 5);
+
+        // 只有释放路径（编辑器自身取消/完成收尾）能清槽
+        assert!(tracker.clear_if(5));
+        assert!(tracker.status().is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_abort_still_works_after_editor_release() {
+        let tracker = RequestTracker::new();
+        tracker.install(editor_request(1)).unwrap();
+        assert!(tracker.clear_if(1));
+        tracker.install(pending_request(2, "c2")).unwrap();
+        assert!(tracker.abort_active());
+        assert!(tracker.status().is_none());
     }
 }

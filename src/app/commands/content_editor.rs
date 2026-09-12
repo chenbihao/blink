@@ -26,6 +26,8 @@ impl From<EditorError> for CommandError {
         let (code, retryable) = match &e {
             EditorError::EditorBusy { .. } => ("editor_busy", false),
             EditorError::VoiceBusy => ("voice_busy", false),
+            EditorError::AiAlreadyActive { .. } => ("ai_already_active", false),
+            EditorError::Cancelled => ("cancelled", false),
             EditorError::StaleSession => ("stale_session", false),
             EditorError::StaleRevision => ("stale_revision", false),
             EditorError::SourceConflict { .. } => ("source_conflict", true),
@@ -108,11 +110,19 @@ pub async fn end_content_editor(
 ) -> Result<(), CommandError> {
     let service = service(&app)?;
     let label = window.label().to_string();
+    // 先取会话身份（end 会消费 request），end 后兜底清理悬空整理请求。
+    let (session_ref, generation) = (request.session_ref.clone(), request.generation);
     // end 是纯内存操作（清会话槽 + 发事件），同步完成。
     service.end(&label, request)?;
+    // 0.23.4：会话结束时清理悬空整理请求（防跨会话迟到事件）。
+    // 前端正常路径已显式 cancel；此处兜底（幂等，不匹配时静默忽略）。
+    if let Ok(transform) = editor_transform_service(&app) {
+        transform
+            .cancel_active_for_session(&session_ref, generation)
+            .await;
+    }
     Ok(())
 }
-
 /// 前端应答退出确认（§3.5 主动退出一次汇总确认的应答侧）。
 /// 只有与待决请求 id 匹配的应答生效；迟到的旧应答静默忽略。
 #[tauri::command]
@@ -313,4 +323,88 @@ fn ensure_editor_caller(label: &str) -> Result<(), CommandError> {
             false,
         ))
     }
+}
+
+// ── 编辑器 AI 整理（0.23.4 §3.7 / §3.9）─────────────────────────────────
+
+/// start_editor_transform 请求：冻结的会话身份 + 整理范围 + 冻结三元组。
+///
+/// `text` 为整理输入（选区文本或本次听写拼接）；`revision` / `rangeHandle`
+/// 是前端 Engine 冻结的 opaque 值，后端不解释、仅随完成事件回显，最终由
+/// 前端 Engine 在确认替换前复核。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartEditorTransformRequest {
+    pub session_ref: String,
+    pub generation: u64,
+    pub scope: crate::domain::editor::TransformScope,
+    pub text: String,
+    pub revision: u64,
+    pub range_handle: String,
+}
+
+/// start_editor_transform 结果：全局单活跃协调器分配的请求 id。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorTransformStartResult {
+    pub request_id: u64,
+}
+
+fn editor_transform_service(
+    app: &tauri::AppHandle,
+) -> Result<std::sync::Arc<crate::app::editor_transform::EditorTransformService>, CommandError> {
+    Ok(app
+        .try_state::<std::sync::Arc<crate::app::editor_transform::EditorTransformService>>()
+        .map(|s| s.inner().clone())
+        .ok_or_else(|| CommandError::new("io", "整理服务不可用", false))?)
+}
+
+/// 发起编辑器 AI 整理（整理选中内容 / 整理本次听写）。
+///
+/// 全局单活跃：主窗口或 Chat 有运行中请求时返回 `ai_already_active`
+/// （detail.activeWindow 携带当前活跃窗口标识，§3.10）。
+#[tauri::command]
+pub async fn start_editor_transform(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    request: StartEditorTransformRequest,
+) -> Result<EditorTransformStartResult, CommandError> {
+    let label = window.label().to_string();
+    ensure_editor_caller(&label)?;
+    tracing::info!(
+        session_ref = %request.session_ref,
+        generation = request.generation,
+        scope = request.scope.as_str(),
+        revision = request.revision,
+        text_chars = request.text.chars().count(),
+        "start_editor_transform"
+    );
+
+    let editor = service(&app)?;
+    let transform = editor_transform_service(&app)?;
+    let request_id = transform
+        .start(
+            &editor,
+            request.session_ref,
+            request.generation,
+            request.scope,
+            request.text,
+            request.revision,
+            request.range_handle,
+        )
+        .await?;
+    Ok(EditorTransformStartResult { request_id })
+}
+
+/// 取消编辑器整理请求（新请求/视图切换/会话结束/窗口关闭）。
+/// 与运行中 request_id 不匹配的取消静默忽略（幂等）。
+#[tauri::command]
+pub async fn cancel_editor_transform(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    request_id: u64,
+) -> Result<(), CommandError> {
+    ensure_editor_caller(window.label())?;
+    editor_transform_service(&app)?.cancel(request_id).await;
+    Ok(())
 }

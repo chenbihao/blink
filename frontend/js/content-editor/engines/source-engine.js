@@ -144,6 +144,71 @@ export class SourceEngine {
         return true;
     }
 
+    /**
+     * 冻结当前选区为 opaque range handle（0.23.4 §3.4 整理请求）。
+     * handle 携带 {kind, start, end} 锚点 + 冻结文本；Source 视图恒 blockSafe。
+     * @returns {{kind: string, start: number, end: number, text: string, blockSafe: boolean}|null}
+     */
+    createSelectionRangeHandle() {
+        const {selectionStart, selectionEnd} = this.el;
+        if (selectionStart == null || selectionEnd <= selectionStart) return null;
+        return {
+            kind: this.kind,
+            start: selectionStart,
+            end: selectionEnd,
+            text: this.el.value.slice(selectionStart, selectionEnd),
+            blockSafe: true,
+        };
+    }
+
+    /**
+     * 在当前正文中定位给定文本并冻结为 range handle（本次听写整理）。
+     * @param {string} text
+     * @returns {{kind: string, start: number, end: number, text: string, blockSafe: boolean}|null}
+     */
+    createTextRangeHandle(text) {
+        if (!text) return null;
+        const idx = this.el.value.indexOf(text);
+        if (idx < 0) return null;
+        return {kind: this.kind, start: idx, end: idx + text.length, text, blockSafe: true};
+    }
+
+    /**
+     * 单事务替换 handle 范围（0.23.4 §3.7 确认应用路径）。
+     * Engine 先复核冻结文本仍在锚点处（§3.4 range handle 校验），再走
+     * execCommand 并入原生 undo 栈——一次 Ctrl+Z 恢复；校验失败返回 false，
+     * 不产生任何修改。
+     * @param {{start: number, end: number, text: string}} handle
+     * @param {string} newText
+     * @returns {boolean}
+     */
+    replaceRange(handle, newText) {
+        if (!handle || typeof newText !== "string") return false;
+        const {start, end, text: expected} = handle;
+        const current = this.el.value;
+        if (
+            !Number.isInteger(start) || !Number.isInteger(end)
+            || start < 0 || end > current.length || start >= end
+            || current.slice(start, end) !== expected
+        ) {
+            return false;
+        }
+        this.el.focus();
+        this.el.setSelectionRange(start, end);
+        let ok = false;
+        try {
+            ok = document.execCommand("insertText", false, newText);
+        } catch {
+            ok = false;
+        }
+        if (!ok) {
+            // 降级直写：手动通知（input 事件不会触发）
+            this.el.value = current.slice(0, start) + newText + current.slice(end);
+            this._onChange?.();
+        }
+        return true;
+    }
+
     focus() {
         this.el.focus();
     }

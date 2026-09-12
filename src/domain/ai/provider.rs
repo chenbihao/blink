@@ -136,7 +136,7 @@ pub trait AIProvider: Send + Sync {
 
 #[cfg(test)]
 pub mod tests {
-    use super::super::message::{ChatMessage, ToolCall, Usage};
+    use super::super::message::{ChatMessage, FinishReasonKind, ToolCall, Usage};
     use super::*;
     use crate::domain::schema::ToolSchema;
 
@@ -148,6 +148,16 @@ pub mod tests {
     }
 
     impl MockProvider {
+        /// 默认 usage（已报告、少量 token）。
+        fn default_usage() -> Usage {
+            Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                reported: true,
+                ..Default::default()
+            }
+        }
+
         pub fn echo_tool_call(name: &str, args: serde_json::Value) -> Self {
             Self {
                 model: "mock-echo".into(),
@@ -158,14 +168,10 @@ pub mod tests {
                         name: name.into(),
                         arguments: args,
                     }],
-                    usage: Usage {
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        reported: true,
-                        ..Default::default()
-                    },
+                    usage: Self::default_usage(),
                     first_token_ms: 42,
                     total_ms: 87,
+                    finish_reason: Some(FinishReasonKind::Stop),
                 },
                 delay_ms: 0,
             }
@@ -180,6 +186,7 @@ pub mod tests {
                     usage: Usage::default(),
                     first_token_ms: ms as u32,
                     total_ms: ms as u32,
+                    finish_reason: Some(FinishReasonKind::Stop),
                 },
                 delay_ms: ms,
             }

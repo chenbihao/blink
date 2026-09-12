@@ -69,6 +69,16 @@ impl EventNames {
     /// `{ sessionRef, generation, epoch, phase: "recording"|"paused"|"finalizing"|"ended"|"error",
     ///    seq, preview?, message? }`。preview 只进装饰层，不进正文。
     pub const EDITOR_VOICE_STATUS: &str = "blink://editor-voice-status";
+    /// 编辑器 AI 整理完成（0.23.4 §3.7，只产候选不改正文）。payload:
+    /// `{ sessionRef, generation, requestId, scope, revisedText, revision, rangeHandle }`。
+    /// `revision/rangeHandle` 为请求冻结值回显；前端按身份 + requestId 过滤，
+    /// 并对 `revision` 与当前 content_revision 比对判 stale。
+    pub const EDITOR_TRANSFORM_COMPLETED: &str = "blink://editor-transform-completed";
+    /// 编辑器 AI 整理失败/取消（0.23.4 §3.9）。payload:
+    /// `{ sessionRef, generation, requestId, code }`；
+    /// `code`: `cancelled` / `length` / `content_filter` / `empty` / `timeout` /
+    /// `provider` / `network` / `not_configured`。不含正文与 AI 输出。
+    pub const EDITOR_TRANSFORM_FAILED: &str = "blink://editor-transform-failed";
 
     // ── 配置 ──
     pub const CONFIG_CHANGED: &str = "blink://config-changed";

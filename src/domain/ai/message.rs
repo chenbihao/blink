@@ -263,6 +263,35 @@ pub struct CompletionRequest {
     pub timeout_ms: Option<u32>,
 }
 
+/// 模型终止原因的类型墙投影（0.23.4 §3.10）。
+///
+/// rig 0.42 `FinishReason` 的四出口归一化枚举映射；`Other` 不携带 provider
+/// 原文（wire 拼写可能含任意内容，不越过类型墙）。`None` 表示 provider 未报告。
+///
+/// **截断保护语义**（`truncated_output` 镜像 rig 判定）：`Length | ContentFilter`
+/// = 输出被截断；`None | Other` 不宣称截断保护（记非敏感诊断）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReasonKind {
+    /// 自然结束。
+    Stop,
+    /// 输出 token 达到上限（截断）。
+    Length,
+    /// 模型停止以调用工具。
+    ToolCalls,
+    /// 供应商过滤了内容（截断）。
+    ContentFilter,
+    /// 供应商特有原因（未归一化）。
+    Other,
+}
+
+impl FinishReasonKind {
+    /// 是否为"输出被截断"——镜像 rig `FinishReason::truncated_output`。
+    pub fn truncated_output(self) -> bool {
+        matches!(self, Self::Length | Self::ContentFilter)
+    }
+}
+
 /// AI 调用响应。
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -276,6 +305,8 @@ pub struct CompletionResponse {
     pub first_token_ms: u32,
     /// §3.3 骨架 SLO——响应完整收齐时刻
     pub total_ms: u32,
+    /// 终止原因投影（0.23.4）。`None` = provider 未报告；旧构造点缺省 None。
+    pub finish_reason: Option<FinishReasonKind>,
 }
 
 // ── 测试 ────────────────────────────────────────────────────────────────
@@ -351,6 +382,24 @@ mod tests {
         assert!(
             s.contains("search_apps"),
             "tool_name 值应出现在序列化结果中: {s}"
+        );
+    }
+
+    #[test]
+    fn finish_reason_kind_truncated_semantics() {
+        assert!(!FinishReasonKind::Stop.truncated_output());
+        assert!(!FinishReasonKind::ToolCalls.truncated_output());
+        // Length/ContentFilter = 截断；None/Other 不宣称截断保护
+        assert!(FinishReasonKind::Length.truncated_output());
+        assert!(FinishReasonKind::ContentFilter.truncated_output());
+        assert!(!FinishReasonKind::Other.truncated_output());
+    }
+
+    #[test]
+    fn finish_reason_kind_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&FinishReasonKind::ContentFilter).unwrap(),
+            "\"content_filter\""
         );
     }
 }
