@@ -133,7 +133,60 @@ export class SourceEngine {
         if (idx < 0) return false;
         this.el.focus();
         this.el.setSelectionRange(idx, idx + text.length);
-        // 近似滚动使选区进入视口（textarea 不会自动滚动到 setSelectionRange 处）
+        this._revealOffset(idx);
+        return true;
+    }
+
+    /** 当前正文尾部字符偏移（听写追加锚点，0.23.6 §5.7 真实追加范围）。 */
+    tailCharLength() {
+        return this.el.value.length;
+    }
+
+    /**
+     * 冻结 [fromChar, 文末] 的本轮听写范围（0.23.6 §5.7）。
+     * 不做全文 indexOf 猜测——锚点来自听写开始时记录的真实文末偏移，
+     * 前部存在相同文本也只会命中文末本轮范围。
+     * @param {number} fromChar - 追加锚点（首段分隔字符之后）
+     * @returns {{kind: string, start: number, end: number, text: string, blockSafe: boolean}|null}
+     */
+    createTailRangeHandle(fromChar) {
+        const len = this.el.value.length;
+        const start = Math.min(Math.max(fromChar, 0), len);
+        if (start >= len) return null;
+        return {
+            kind: this.kind,
+            start,
+            end: len,
+            text: this.el.value.slice(start),
+            blockSafe: true,
+        };
+    }
+
+    /**
+     * 选中并滚动到冻结的听写范围（"定位到本次听写"）。
+     * 直接消费结束时冻结的 opaque handle——右边界是冻结时的文末，听写
+     * 结束后用户继续输入不会被一并选中（0.23.6 二次 Review）；范围内
+     * 文本已被编辑过时定位失效（返回 false，不产生错误选区）。
+     * @param {{kind: string, start: number, end: number, text: string}} handle
+     * @returns {boolean} 范围是否有效并已选中
+     */
+    locateRange(handle) {
+        if (!handle || handle.kind !== this.kind) return false;
+        const {start, end, text: expected} = handle;
+        const current = this.el.value;
+        if (!Number.isInteger(start) || !Number.isInteger(end)
+            || start < 0 || end > current.length || start >= end) {
+            return false;
+        }
+        if (current.slice(start, end) !== expected) return false;
+        this.el.focus();
+        this.el.setSelectionRange(start, end);
+        this._revealOffset(start);
+        return true;
+    }
+
+    /** 近似滚动使给定偏移进入视口（textarea 不会自动滚动到 setSelectionRange 处）。 */
+    _revealOffset(idx) {
         const line = this.el.value.substring(0, idx).split("\n").length - 1;
         const lineHeight = parseFloat(getComputedStyle(this.el).lineHeight) || 20;
         const targetTop = line * lineHeight;
@@ -141,7 +194,6 @@ export class SourceEngine {
         if (targetTop < viewTop || targetTop > viewTop + this.el.clientHeight - lineHeight) {
             this.el.scrollTop = Math.max(0, targetTop - this.el.clientHeight / 2);
         }
-        return true;
     }
 
     /**

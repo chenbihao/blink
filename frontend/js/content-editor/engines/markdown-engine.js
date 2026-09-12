@@ -172,30 +172,85 @@ export class MarkdownIrEngine {
      */
     locateText(text) {
         if (!text) return false;
-        const {state} = this.editor;
+        const {full, spans} = this._concatText();
+        const idx = full.indexOf(text);
+        if (idx < 0) return false;
+        const from = MarkdownIrEngine._posAt(spans, idx);
+        if (from == null) return false;
+        const to = MarkdownIrEngine._posAt(spans, idx + text.length) ?? from + text.length;
+        this.editor.chain().setTextSelection({from, to}).scrollIntoView().run();
+        return true;
+    }
+
+    /** 文档 text node 拼接全文 + 各 text node 起点的字符偏移映射。 */
+    _concatText() {
         let full = "";
         /** @type {Array<{start: number, pos: number}>} text node 起点映射 */
         const spans = [];
-        state.doc.descendants((node, pos) => {
+        this.editor.state.doc.descendants((node, pos) => {
             if (node.isText && node.text) {
                 spans.push({start: full.length, pos});
                 full += node.text;
             }
             return true;
         });
-        const idx = full.indexOf(text);
-        if (idx < 0) return false;
-        const posAt = (ci) => {
-            for (let i = spans.length - 1; i >= 0; i--) {
-                if (spans[i].start <= ci) return spans[i].pos + (ci - spans[i].start);
-            }
-            return null;
+        return {full, spans};
+    }
+
+    /** 当前文档拼接文本的字符长度（听写追加锚点，0.23.6 §5.7）。 */
+    tailCharLength() {
+        return this._concatText().full.length;
+    }
+
+    /**
+     * 冻结 [fromChar, 文末] 的本轮听写范围（0.23.6 §5.7）。
+     * 锚点为听写开始时记录的拼接文本偏移，不做全文 indexOf 猜测。
+     * @param {number} fromChar
+     * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
+     */
+    createTailRangeHandle(fromChar) {
+        const {full, spans} = this._concatText();
+        const start = Math.min(Math.max(fromChar, 0), full.length);
+        if (start >= full.length) return null;
+        const from = MarkdownIrEngine._posAt(spans, start);
+        if (from == null) return null;
+        const to = MarkdownIrEngine._posAt(spans, full.length) ?? from + (full.length - start);
+        return {
+            kind: this.kind,
+            from,
+            to,
+            text: full.slice(start),
+            blockSafe: MarkdownIrEngine._blockSafe(this.editor.state, from, to),
         };
-        const from = posAt(idx);
-        if (from == null) return false;
-        const to = posAt(idx + text.length) ?? from + text.length;
+    }
+
+    /**
+     * 选中并滚动到冻结的听写范围（"定位到本次听写"）。
+     * 直接消费结束时冻结的 opaque handle——右边界是冻结时的文末，听写
+     * 结束后用户继续输入不会被一并选中（0.23.6 二次 Review）；范围内
+     * 文本已被编辑过时定位失效（返回 false）。
+     * @param {{kind: string, from: number, to: number, text: string}} handle
+     * @returns {boolean} 范围是否有效并已选中
+     */
+    locateRange(handle) {
+        if (!handle || handle.kind !== this.kind) return false;
+        const {from, to, text: expected} = handle;
+        const {state} = this.editor;
+        if (!Number.isInteger(from) || !Number.isInteger(to)
+            || from < 0 || to > state.doc.content.size || from >= to) {
+            return false;
+        }
+        if (state.doc.textBetween(from, to, "\n") !== expected) return false;
         this.editor.chain().setTextSelection({from, to}).scrollIntoView().run();
         return true;
+    }
+
+    /** 字符偏移 → doc position（spans 逆序查找；越界返回 null）。 */
+    static _posAt(spans, charIndex) {
+        for (let i = spans.length - 1; i >= 0; i--) {
+            if (spans[i].start <= charIndex) return spans[i].pos + (charIndex - spans[i].start);
+        }
+        return null;
     }
 
     /** 程序化载入/还原内容（不置 edited，抑制假更新；edited/normalized 复位） */
@@ -235,41 +290,26 @@ export class MarkdownIrEngine {
     }
 
     /**
-     * 在当前文档文本中定位给定文本并冻结为 range handle（本次听写整理）。
+     * 在当前文档文本中定位给定文本并冻结为 range handle（选区整理）。
      * 定位口径与 locateText 一致（text node 拼接，不含块分隔符）。
+     * 听写范围请走 createTailRangeHandle（真实追加锚点，0.23.6 §5.7）。
      * @param {string} text
      * @returns {{kind: string, from: number, to: number, text: string, blockSafe: boolean}|null}
      */
     createTextRangeHandle(text) {
         if (!text) return null;
-        const {state} = this.editor;
-        let full = "";
-        /** @type {Array<{start: number, pos: number}>} */
-        const spans = [];
-        state.doc.descendants((node, pos) => {
-            if (node.isText && node.text) {
-                spans.push({start: full.length, pos});
-                full += node.text;
-            }
-            return true;
-        });
+        const {full, spans} = this._concatText();
         const idx = full.indexOf(text);
         if (idx < 0) return null;
-        const posAt = (ci) => {
-            for (let i = spans.length - 1; i >= 0; i--) {
-                if (spans[i].start <= ci) return spans[i].pos + (ci - spans[i].start);
-            }
-            return null;
-        };
-        const from = posAt(idx);
+        const from = MarkdownIrEngine._posAt(spans, idx);
         if (from == null) return null;
-        const to = posAt(idx + text.length) ?? from + text.length;
+        const to = MarkdownIrEngine._posAt(spans, idx + text.length) ?? from + text.length;
         return {
             kind: this.kind,
             from,
             to,
             text,
-            blockSafe: MarkdownIrEngine._blockSafe(state, from, to),
+            blockSafe: MarkdownIrEngine._blockSafe(this.editor.state, from, to),
         };
     }
 

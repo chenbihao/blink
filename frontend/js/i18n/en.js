@@ -987,6 +987,7 @@ export const en = {
     "editor.discard": "Discard",
     "editor.continueEdit": "Keep Editing",
     "editor.saveFailed": "Save failed: {message}",
+    "editor.staleRevision": "Save failed: content revision is stale, please retry",
     "editor.closeFailed": "Could not close; your content is still here: {message}",
     // 0.23.1: dual view / sessionized editor
     "editor.view.source": "Source",

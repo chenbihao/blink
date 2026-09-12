@@ -38,6 +38,20 @@ export class EditorTransformController {
     /** AI 是否可用（未配置时隐藏整理入口，§3.8） */
     aiAvailable = true;
 
+    /** 本地 operation generation（0.23.6 §5.7：每次 start 递增） */
+    _opSeq = 0;
+
+    /**
+     * 已取消/追认取消的请求 id：其迟到完成/失败事件不得污染新请求。
+     * 有界 Map（id → 退役时 opSeq），超上限按插入序淘汰最旧——预热窗口
+     * 长会话下不无界增长（0.23.6 二次 Review）。
+     * @type {Map<number, number>}
+     */
+    _retiredRequestIds = new Map();
+
+    /** retired 记录上限（完成事件迟于响应的窗口有限，32 足够宽裕） */
+    static RETIRED_CAP = 32;
+
     /**
      * @param {object} deps
      * @param {*} deps.api - shared/api.js 子集（测试注入 fake）：
@@ -98,9 +112,11 @@ export class EditorTransformController {
      * 发起整理。scope="selection" 冻结当前选区；scope="dictation" 定位拼接文本。
      * 已有运行请求时先取消（§3.7 新请求取消旧请求）；已有候选直接丢弃。
      * @param {"selection"|"dictation"} scope
-     * @param {{text?: string}} [opts] - dictation 的范围文本（本次听写拼接）
+     * @param {{text?: string, handle?: {handle: object, text: string, blockSafe: boolean}|null}} [opts]
+     *   dictation 的范围文本（本次听写拼接）；handle = Adapter 已冻结的
+     *   本轮听写范围（0.23.6 §5.7，提供时跳过 Engine 内 indexOf 定位）
      */
-    async start(scope, {text = ""} = {}) {
+    async start(scope, {text = "", handle = null} = {}) {
         const session = this._getSession();
         if (!session || !session.isActive) {
             this._callbacks.onError?.(t("editor.transform.err.stale_session"));
@@ -109,13 +125,20 @@ export class EditorTransformController {
         if (this.isBusy) await this.cancel({silent: true});
         if (this.candidate) this._discardCandidate({silent: true});
 
-        const frozen = this._adapter.freezeRange(scope, text);
+        const frozen = handle ?? this._adapter.freezeRange(scope, text);
         if (!frozen || !frozen.text.trim()) {
             this._callbacks.onError?.(t("editor.transform.err.empty"));
             return;
         }
 
+        // 本地 operation generation（0.23.6 §5.7）：start IPC 响应未返回期间
+        // 发生的取消/新请求会推进 _opSeq 或离开 running；迟到响应据此不写回
+        // 状态，并立即补发取消（追认），不让被弃请求占用全局 AI 单槽。
+        const op = ++this._opSeq;
         this.phase = "running";
+        // 新一代请求起步即清空运行槽：上一代遗留的 requestId 不得参与本代
+        // 完成事件过滤（二次 Review：连续极早完成不得遗留旧 id）。
+        this.runRequestId = null;
         this._callbacks.onPhaseChanged?.(this.phase);
         this.pendingRun = {
             scope,
@@ -135,10 +158,31 @@ export class EditorTransformController {
                 revision: this._adapter.revision,
                 rangeHandle: JSON.stringify(frozen.handle),
             });
+            if (op !== this._opSeq) {
+                // 已被更新一代请求取代：追认取消，不写回任何状态。
+                this._retireLateRequest(res?.requestId);
+                return;
+            }
+            if (this.phase !== "running") {
+                if (this.phase === "candidate" && this.candidate
+                    && res?.requestId != null && this.candidate.requestId === res.requestId) {
+                    // 完成事件早于 start 响应被采纳（§3.7 契约）：响应只确认
+                    // 候选归属。不得把已完成 id 写回 runRequestId——否则放弃
+                    // 候选后的下一请求会被旧 id 拒绝其早到完成事件，永久停在
+                    // running（0.23.6 二次 Review）。
+                    this._retiredRequestIds.delete(res.requestId);
+                    return;
+                }
+                // 已被取消（idle）：迟到响应不得复活状态，追认取消。
+                this._retireLateRequest(res?.requestId);
+                return;
+            }
             this.runRequestId = res?.requestId ?? null;
+            if (this.runRequestId != null) this._retiredRequestIds.delete(this.runRequestId);
         } catch (e) {
             const err = normalizeError(e);
             console.warn(`[editor-transform] start 失败 [${err.code}]: ${err.message}`);
+            if (op !== this._opSeq || this.phase !== "running") return; // 迟到失败不污染新状态
             this.phase = "idle";
             this.runRequestId = null;
             this.pendingRun = null;
@@ -150,17 +194,20 @@ export class EditorTransformController {
 
     /**
      * 取消运行请求并丢弃候选（视图切换/会话结束/窗口关闭/新请求）。
+     * start 响应尚未返回（runRequestId == null）时只清本地状态——迟到响应
+     * 到达后由 start 内的 op/phase 检查追认取消。
      * @param {{silent?: boolean}} [opts] - silent 时只清状态不提示
      */
     async cancel({silent = false} = {}) {
-        const hadRunning = this.phase === "running" && this.runRequestId != null;
+        const hadRunning = this.phase === "running";
         const requestId = this.runRequestId;
         this.phase = "idle";
         this.runRequestId = null;
         this.pendingRun = null;
         if (this.candidate) this._discardCandidate({silent: true});
 
-        if (hadRunning) {
+        if (hadRunning && requestId != null) {
+            this._retire(requestId);
             try {
                 await this._api.cancelEditorTransform(requestId);
             } catch (e) {
@@ -187,6 +234,8 @@ export class EditorTransformController {
      */
     handleCompleted(p) {
         if (!p || this.phase !== "running" || !this.pendingRun) return;
+        // 已取消请求的迟到完成事件：不污染当前/后续请求（0.23.6 §5.7）
+        if (this._retiredRequestIds.has(p.requestId)) return;
         const session = this._getSession();
         if (!session || p.sessionRef !== session.sessionRef || p.generation !== session.generation) return;
         if (this.runRequestId != null && p.requestId !== this.runRequestId) return;
@@ -217,6 +266,8 @@ export class EditorTransformController {
      */
     handleFailed(p) {
         if (!p) return;
+        // 已取消请求的迟到失败（含后端 confirmed 的 cancelled）：忽略（0.23.6 §5.7）
+        if (this._retiredRequestIds.has(p.requestId)) return;
         const session = this._getSession();
         if (!session || p.sessionRef !== session.sessionRef || p.generation !== session.generation) return;
         // 运行中才消费（迟到失败不影响新请求）；candidate 态收到 cancelled
@@ -295,6 +346,30 @@ export class EditorTransformController {
     }
 
     // ── 内部 ──────────────────────────────────────────────────────────────
+
+    /**
+     * 退役一个请求 id：标记其迟到事件无效，并维持有界（超上限按插入序淘汰
+     * 最旧）。0.23.6 二次 Review：预热窗口长会话下 retired 记录不得无界增长。
+     * @param {number|null} requestId
+     */
+    _retire(requestId) {
+        if (requestId == null) return;
+        this._retiredRequestIds.set(requestId, this._opSeq);
+        while (this._retiredRequestIds.size > EditorTransformController.RETIRED_CAP) {
+            const oldest = this._retiredRequestIds.keys().next().value;
+            this._retiredRequestIds.delete(oldest);
+        }
+    }
+
+    /** 追认取消：迟到 start 响应携带的请求已不属于当前状态，标记退役并补发取消。 */
+    _retireLateRequest(requestId) {
+        if (requestId == null) return;
+        this._retire(requestId);
+        void this._api.cancelEditorTransform(requestId).catch((e) => {
+            const err = normalizeError(e);
+            console.warn(`[editor-transform] 追认取消失败 [${err.code}]: ${err.message}`);
+        });
+    }
 
     _discardCandidate({silent}) {
         this.candidate = null;

@@ -12,7 +12,7 @@
  * 不暴露 DOM Range / ProseMirror position / 通用 offset。
  */
 
-import {SourceEngine} from "./engines/source-engine.js";
+import {SourceEngine, dictationGapPrefix} from "./engines/source-engine.js";
 import {MarkdownIrEngine} from "./engines/markdown-engine.js";
 import {evaluateMarkdownGate} from "./engines/markdown-gate.js";
 import {normalizeEol} from "../shared/tiptap-editor.js";
@@ -35,6 +35,9 @@ export class EditorAdapter {
 
     /** 单调内容版本 */
     revision = 0;
+
+    /** 本轮听写追加锚点（0.23.6 §5.7）：{engineKind, fromChar, extended}；无听写为 null */
+    _dictationRun = null;
 
     /**
      * @param {object} deps
@@ -153,16 +156,70 @@ export class EditorAdapter {
      * 听写追尾（0.23.3 §3.6）：confirmed segment 追加到最新文末。
      * newParagraph=true 时先补段落分隔（首段语义）；revision 由引擎
      * onChange 回调自增（追加是真实编辑，计入正文/dirty/undo）。
+     * 0.23.6 §5.7：本轮听写范围锚点在首段补分隔后前移——段落分隔字符
+     * 不属于听写文本，避免定位/整理把分隔一并替换；只在本轮尚未追加
+     * 过内容时前移一次。
      * @param {string} text
      * @param {{newParagraph?: boolean}} [opts]
      */
     appendDictation(text, {newParagraph = false} = {}) {
         if (!this.engine || !text) return;
         if (newParagraph && this.engine.appendParagraph) {
+            const run = this._dictationRun;
+            if (run && !run.extended && run.engineKind === "source" && this.engine.kind === "source") {
+                run.fromChar += dictationGapPrefix(this.engine.getText()).length;
+            }
+            if (run) run.extended = true;
             this.engine.appendParagraph(text);
         } else {
+            if (this._dictationRun) this._dictationRun.extended = true;
             this.engine.appendText(text);
         }
+    }
+
+    // ── 本轮听写范围（0.23.6 §5.7：真实追加锚点，替代全文 indexOf 猜测）────
+
+    /**
+     * 记录本轮听写追加锚点（听写开始时调用）。锚点 = 当前引擎的文末字符
+     * 偏移；后续"定位/整理本次听写"只作用于锚点之后的真实追加范围。
+     */
+    beginDictationRun() {
+        if (!this.engine) {
+            this._dictationRun = null;
+            return;
+        }
+        this._dictationRun = {
+            engineKind: this.engine.kind,
+            fromChar: this.engine.tailCharLength?.() ?? 0,
+            extended: false,
+        };
+    }
+
+    /**
+     * 冻结本轮听写范围为 opaque range handle（听写结束时调用）。
+     * @returns {{handle: object, text: string, blockSafe: boolean}|null}
+     *   无锚点、视图已切换（引擎不匹配）或范围为空时返回 null。
+     */
+    freezeDictationRun() {
+        const run = this._dictationRun;
+        if (!run || !this.engine || this.engine.kind !== run.engineKind) return null;
+        const handle = this.engine.createTailRangeHandle?.(run.fromChar) ?? null;
+        if (!handle || !handle.text) return null;
+        return {handle, text: handle.text, blockSafe: handle.blockSafe ?? false};
+    }
+
+    /**
+     * 选中并滚动到冻结的本轮听写范围（"定位到本次听写"）。
+     * 直接消费听写结束时冻结的 opaque handle：右边界是冻结时的文末，
+     * 听写结束后用户继续输入不会被一并选中（0.23.6 二次 Review）；
+     * 视图切换后旧 handle 随引擎作废（无跨引擎迁移，§3.3）。
+     * @param {{handle: object, text: string, blockSafe: boolean}|null} frozen - freezeDictationRun 产物
+     * @returns {boolean} 范围是否有效并已选中
+     */
+    locateDictationRun(frozen) {
+        if (!frozen?.handle || !this.engine) return false;
+        if (this.engine.kind !== frozen.handle.kind) return false;
+        return this.engine.locateRange?.(frozen.handle) ?? false;
     }
 
     /**
@@ -231,8 +288,8 @@ export class EditorAdapter {
     }
 
     /**
-     * 完整 reset（§3.1/§6.2）：正文、undo、selection、引擎监听、检查点、
-     * 门结果、revision 全部清空。引擎实例销毁保证 Tiptap 侧无残留。
+     * 完整 reset（§3.1/§6.2）：正文、undo、selection、监听、检查点、
+     * 门结果、revision、听写范围锚点全部清空。引擎实例销毁保证 Tiptap 侧无残留。
      */
     reset() {
         if (this.engine) {
@@ -243,6 +300,7 @@ export class EditorAdapter {
         this.checkpoint = "";
         this.gate = null;
         this.revision = 0;
+        this._dictationRun = null;
     }
 
     // ── 内部 ────────────────────────────────────────────────────────────────
@@ -253,6 +311,9 @@ export class EditorAdapter {
     }
 
     _enterView(target, {initialText}) {
+        // 听写锚点随旧引擎作废（§3.3 无跨引擎 anchor 迁移）；听写进行中时
+        // 由 main.switchView 在切换后重新 beginDictationRun。
+        this._dictationRun = null;
         const engineCallbacks = () => ({
             onChange: () => this._bumpRevision(),
             // 选区变化通知（0.23.4：整理选中入口的可见性跟随选区）

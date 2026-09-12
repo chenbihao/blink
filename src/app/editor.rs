@@ -19,9 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
 
 use crate::domain::editor::{
-    CommitEditorRequest, CommitOutcome, CommitPlan, CommitState, CommitTarget, EditorError,
-    EditorSessionSnapshot, EndEditorRequest, FileIdentity, OpenDecision, OpenEditorRequest,
-    SourceDescriptor, decide_open, default_commit_target, plan_commit, validate_source_body,
+    CommitEditorRequest, CommitOutcome, CommitPlan, CommitState, CommitTarget, CommittedRevision,
+    EditorError, EditorSessionSnapshot, EndEditorRequest, FileIdentity, OpenDecision,
+    OpenEditorRequest, RevisionVerdict, SourceDescriptor, body_digest, check_commit_revision,
+    decide_open, default_commit_target, plan_commit, validate_source_body,
 };
 use crate::domain::event::CapabilityEnv;
 use crate::domain::sticky::StickyChangeSource;
@@ -29,6 +30,19 @@ use crate::domain::sticky::StickyError;
 
 /// 编辑器窗口唯一 label（窗口、命令校验、事件 source 共用）。
 pub const CONTENT_EDITOR_LABEL: &str = "content-editor";
+
+/// 同会话变更串行门（0.23.6 §5.7 ④）：`commit` 的锁外副作用与 `end` 互斥，
+/// 防止"end 清槽后 commit 副作用迟到写入"——用户放弃修改后不会再有该会话
+/// 的便签、文件或剪贴板写入。tokio Mutex 的 guard 可跨 `.await` 持有
+///（这正是本门的用途）；锁序恒为 gate → active 槽，无反向获取路径。
+#[derive(Default)]
+struct MutationGate(tokio::sync::Mutex<()>);
+
+impl MutationGate {
+    async fn acquire(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
+}
 
 /// 一个活动会话的后端状态。
 struct LiveSession {
@@ -46,6 +60,8 @@ struct LiveSession {
     result_item_id: Option<String>,
     /// 已确认文件身份（写入成功后记录；原位保存前据此判外部修改）。
     file_identity: Option<FileIdentity>,
+    /// 已接受的提交水位（0.23.6 §5.7 ⑤：revision + 正文摘要；None = 尚未提交）。
+    committed: Option<CommittedRevision>,
 }
 
 impl LiveSession {
@@ -73,6 +89,8 @@ pub struct EditorSessionService {
     generation_counter: AtomicU64,
     /// 待决退出确认请求 id（一次只挂一个；超时或应答后清除）。
     pending_exit: Mutex<Option<String>>,
+    /// commit/end 同会话串行门（0.23.6 §5.7 ④）。
+    mutation_gate: MutationGate,
 }
 
 impl EditorSessionService {
@@ -82,6 +100,7 @@ impl EditorSessionService {
             active: Mutex::new(None),
             generation_counter: AtomicU64::new(0),
             pending_exit: Mutex::new(None),
+            mutation_gate: MutationGate::default(),
         }
     }
 
@@ -154,6 +173,7 @@ impl EditorSessionService {
                         commit_target,
                         result_item_id: None,
                         file_identity: None,
+                        committed: None,
                     };
                     let snapshot = session.snapshot();
                     let sticky_id = session.source.sticky_id().map(str::to_string);
@@ -244,6 +264,10 @@ impl EditorSessionService {
         self.ensure_editor_window(caller_label)?;
         validate_source_body(&request.body)?;
 
+        // ④ 同会话 mutation gate（§5.7）：gate 持有覆盖"取状态 → 锁外副作用
+        // → 复查落槽"全程，end 在此期间排队等待。
+        let _gate = self.mutation_gate.acquire().await;
+
         // 锁内校验会话身份并取出状态快照（拷贝出锁，借用不跨块）。
         let (
             session_ref,
@@ -253,6 +277,7 @@ impl EditorSessionService {
             state_file_identity,
             state_sticky_revision,
             state_source_item_ref,
+            state_committed,
         ) = {
             let guard = self.lock()?;
             let live = guard.as_ref().ok_or(EditorError::StaleSession)?;
@@ -276,8 +301,44 @@ impl EditorSessionService {
                 live.file_identity,
                 live.source_revision,
                 source_item_ref,
+                live.committed.clone(),
             )
         };
+
+        // ⑤ 提交协议校验（§5.7）：副作用前完成——旧 revision 与"同 revision、
+        // 不同正文"的重放返回 StaleRevision；同 revision 同正文仅在"同一
+        // mutation 的精确重放"（mutation id 一致）时幂等跳过副作用，新意图
+        // （切换目标/保存副本/覆盖/重新复制）必须真实执行（二次 Review）。
+        let body_hash = body_digest(&request.body);
+        match check_commit_revision(
+            state_committed.clone(),
+            request.revision,
+            &request.body,
+            request.mutation_id.as_deref(),
+        ) {
+            RevisionVerdict::Accept => {}
+            RevisionVerdict::Idempotent => {
+                tracing::info!(
+                    session_ref = %session_ref,
+                    revision = request.revision,
+                    "editor session commit: 幂等提交（同一 mutation 精确重放），跳过副作用"
+                );
+                return Ok(CommitOutcome {
+                    source_revision: state_sticky_revision,
+                    commit_target: state_target,
+                    file_identity: state_file_identity.map(Into::into),
+                });
+            }
+            RevisionVerdict::StaleRevision => {
+                tracing::warn!(
+                    session_ref = %session_ref,
+                    accepted = ?state_committed.map(|c| c.revision),
+                    incoming = request.revision,
+                    "editor session commit: revision 过期或重放，拒绝提交"
+                );
+                return Err(EditorError::StaleRevision);
+            }
+        }
 
         let plan_state = CommitState {
             target: &state_target,
@@ -321,6 +382,12 @@ impl EditorSessionService {
             live.commit_target = target.clone();
         }
         live.body = request.body.clone();
+        // ⑤ 提交水位与新 baseline 同一 guard 内原子前移（§5.7）。
+        live.committed = Some(CommittedRevision {
+            revision: request.revision,
+            body_hash,
+            mutation_id: request.mutation_id.clone(),
+        });
         drop(guard);
 
         let target = executed.switch_target.unwrap_or(state_target);
@@ -566,8 +633,16 @@ impl EditorSessionService {
     // ── end ─────────────────────────────────────────────────────────────────
 
     /// 结束会话并释放便签租约；窗口由前端负责隐藏与完整 reset。
-    pub fn end(&self, caller_label: &str, request: EndEditorRequest) -> Result<(), EditorError> {
+    ///
+    /// ④（§5.7）：先取得 mutation gate——进行中的 commit 副作用（含落槽）
+    /// 完成后才清槽结束，保证"放弃修改"之后不再有该会话的迟到外部写入。
+    pub async fn end(
+        &self,
+        caller_label: &str,
+        request: EndEditorRequest,
+    ) -> Result<(), EditorError> {
         self.ensure_editor_window(caller_label)?;
+        let _gate = self.mutation_gate.acquire().await;
         let ended = {
             let mut guard = self.lock()?;
             match guard.as_ref() {
@@ -917,6 +992,26 @@ mod tests {
         let b = generate_session_ref();
         assert_ne!(a, b);
         assert!(a.starts_with("ed_"));
+    }
+
+    #[tokio::test]
+    async fn mutation_gate_serializes_concurrent_access() {
+        // ④（§5.7）：第二个获取者必须等第一个释放后才进入——end 与 commit
+        // 副作用互斥的结构保证。
+        let gate = std::sync::Arc::new(MutationGate::default());
+        let first = gate.acquire().await;
+
+        let g = std::sync::Arc::clone(&gate);
+        let second = tokio::spawn(async move {
+            let _guard = g.acquire().await;
+            42u8
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!second.is_finished(), "gate 被持有时后来者必须等待");
+
+        drop(first);
+        assert_eq!(tokio::join!(second).0.unwrap(), 42);
     }
 
     #[test]

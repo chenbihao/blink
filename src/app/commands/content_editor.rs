@@ -112,8 +112,8 @@ pub async fn end_content_editor(
     let label = window.label().to_string();
     // 先取会话身份（end 会消费 request），end 后兜底清理悬空整理请求。
     let (session_ref, generation) = (request.session_ref.clone(), request.generation);
-    // end 是纯内存操作（清会话槽 + 发事件），同步完成。
-    service.end(&label, request)?;
+    // end 先等待进行中的 commit 副作用完成（mutation gate，§5.7 ④），再清槽。
+    service.end(&label, request).await?;
     // 0.23.4：会话结束时清理悬空整理请求（防跨会话迟到事件）。
     // 前端正常路径已显式 cancel；此处兜底（幂等，不匹配时静默忽略）。
     if let Ok(transform) = editor_transform_service(&app) {

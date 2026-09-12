@@ -140,6 +140,24 @@ test("session: commit 成功 → 检查点前移、revision 提交", async () =>
     assert.deepEqual(adapterLog.checkpoints, ["正文"]);
 });
 
+test("session: 每次显式提交携带唯一 mutationId（0.23.6 二次 Review）", async () => {
+    const {api, adapter, callbacks, calls} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    // 同 revision、同正文的两次显式提交：意图标识必须不同——后端据此把
+    // 幂等早退限定为"同一 mutation 的精确重放"，不吞新的显式输出
+    await s.commit();
+    await s.commit();
+
+    assert.equal(calls.commits.length, 2);
+    const [first, second] = calls.commits;
+    assert.ok(first.mutationId, "commit 请求携带 mutationId");
+    assert.ok(second.mutationId);
+    assert.notEqual(first.mutationId, second.mutationId, "重复保存也是新提交意图");
+});
+
 test("session: commit 期间会话切换 → 迟到结果不落状态", async () => {
     const {api, adapter, callbacks, calls, adapterLog} = makeDeps();
     api._snapshot = snapshotA;
@@ -153,6 +171,7 @@ test("session: commit 期间会话切换 → 迟到结果不落状态", async ()
     });
 
     const pending = s.commit();
+    await new Promise((r) => setTimeout(r, 0)); // mutation 队列：commit 在微任务中发起
     assert.equal(calls.commits.length, 1);
 
     api._snapshot = {...snapshotA, sessionRef: "ed_bbb", generation: 2};
@@ -279,4 +298,164 @@ test("session: applySnapshot 读取 commitTarget，reset 清空（0.23.2）", as
 
     await s.end("abandoned");
     assert.equal(s.target, null);
+});
+
+// ── 0.23.6 §5.7：便签异步回载双重版本墙 ──────────────────────────────────
+
+test("session: 便签读取期间用户开始输入 → 非 force 回流丢弃，不覆盖新输入", async () => {
+    const {api, adapter, callbacks} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    let resolveNote;
+    const getNote = () => new Promise((r) => {
+        resolveNote = r;
+    });
+    const pending = s.reloadFromSticky({stickyId: "s1", getNote});
+
+    // 读取期间用户编辑（dirty）
+    adapter.isDirtyValue = true;
+    adapter.text = "用户的新输入";
+    resolveNote({content: "便签外部新内容", updatedAt: 200});
+    const result = await pending;
+
+    assert.equal(result.applied, false);
+    assert.equal(result.dirty, true);
+    assert.equal(adapter.text, "用户的新输入", "旧回流不得覆盖读取期间的新输入");
+    assert.equal(s.sourceRevision, 100, "冲突基线不前移");
+});
+
+test("session: 便签异步回载后二次校验身份（§5.7 双重版本墙）", async () => {
+    const {api, adapter, callbacks} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    // 便签来源切换（当前来源已是别的便签）→ 丢弃
+    s.source = {kind: "sticky", stickyId: "s2"};
+    const mismatched = await s.reloadFromSticky({
+        stickyId: "s1",
+        getNote: async () => ({content: "别的便签内容", updatedAt: 200}),
+    });
+    assert.equal(mismatched.applied, false);
+    assert.equal(mismatched.stale, true, "stickyId 与当前来源不符时丢弃");
+
+    // 正常路径：身份一致 → 应用
+    s.source = {kind: "sticky", stickyId: "s1"};
+    adapter.isDirtyValue = false;
+    const ok = await s.reloadFromSticky({
+        stickyId: "s1",
+        getNote: async () => ({content: "外部新内容", updatedAt: 200}),
+    });
+    assert.equal(ok.applied, true);
+    assert.equal(adapter.text, "外部新内容");
+    assert.equal(s.sourceRevision, 200);
+});
+
+test("session: 同便签重开（新 generation）后旧读取不写入新会话", async () => {
+    const {api, adapter, callbacks} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    let resolveNote;
+    const getNote = () => new Promise((r) => {
+        resolveNote = r;
+    });
+    const pending = s.reloadFromSticky({stickyId: "s1", getNote});
+
+    // 读取期间同便签被重开：新 sessionRef + generation
+    s.sessionRef = "ed_new";
+    s.generation = 9;
+    resolveNote({content: "旧读取结果", updatedAt: 300});
+    const result = await pending;
+
+    assert.equal(result.applied, false);
+    assert.equal(result.stale, true, "旧 generation 的同便签读取必须被身份墙丢弃");
+    assert.equal(adapter.text, "正文", "新会话正文未被旧读取覆盖");
+});
+
+test("session: force 重载跳过 dirty 检查但受身份墙约束", async () => {
+    const {api, adapter, callbacks} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    // force：即使 dirty 也应用（用户显式放弃修改并重载）
+    adapter.isDirtyValue = true;
+    const forced = await s.reloadFromSticky({
+        stickyId: "s1",
+        force: true,
+        getNote: async () => ({content: "DB 真源", updatedAt: 300}),
+    });
+    assert.equal(forced.applied, true);
+    assert.equal(adapter.text, "DB 真源");
+
+    // force 的身份墙：发起后切会话，结果丢弃
+    let resolveNote;
+    const getNote = () => new Promise((r) => {
+        resolveNote = r;
+    });
+    const pending = s.reloadFromSticky({stickyId: "s1", force: true, getNote});
+    s.sessionRef = "ed_other";
+    s.generation = 5;
+    resolveNote({content: "迟到强制重载", updatedAt: 400});
+    const stale = await pending;
+    assert.equal(stale.applied, false);
+    assert.equal(stale.stale, true);
+});
+
+// ── 0.23.6 §5.7：commit/end 同会话串行化 ─────────────────────────────────
+
+test("session: 保存中发起 end → 等待 commit 确定结果后才 end（串行化）", async () => {
+    const {api, adapter, callbacks, calls} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    let releaseCommit;
+    api._commitGate = () => new Promise((resolve) => {
+        releaseCommit = resolve;
+    });
+
+    const saving = s.commit();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(calls.commits.length, 1);
+    assert.equal(calls.ends.length, 0, "commit 未决时 end 不得发出");
+
+    const ending = s.end("abandoned");
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(calls.ends.length, 0, "end 排队等待 commit 完成");
+
+    releaseCommit({sourceRevision: null});
+    await Promise.all([saving, ending]);
+    assert.equal(calls.ends.length, 1, "commit 确定后 end 才发出");
+    assert.equal(calls.ends[0].sessionRef, "ed_aaa");
+});
+
+test("session: commit 失败后 end 仍按序执行，不产生迟到写入窗口", async () => {
+    const {api, adapter, callbacks, calls} = makeDeps();
+    api._snapshot = snapshotA;
+    const s = new EditorSession({api, adapter}, callbacks);
+    await s.activate();
+
+    api._commitError = {code: "source_conflict", message: "冲突", retryable: true};
+    const saving = s.commit();
+    const ending = s.end("abandoned");
+    const [saveResult, endResult] = await Promise.all([saving, ending]);
+
+    assert.equal(saveResult.ok, false);
+    assert.equal(endResult.ok, true);
+    assert.equal(calls.commits.length, 1);
+    assert.equal(calls.ends.length, 1);
+});
+
+// ── 0.23.6 §5.7：stale_revision 分类词条 ────────────────────────────────
+
+test("i18n dictionaries contain staleRevision key (zh/en)", async () => {
+    const {zh} = await import("../i18n/zh.js");
+    const {en} = await import("../i18n/en.js");
+    assert.ok(typeof zh["editor.staleRevision"] === "string", "缺少 zh 词条");
+    assert.ok(typeof en["editor.staleRevision"] === "string", "缺少 en 词条");
 });

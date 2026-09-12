@@ -234,3 +234,154 @@ test("adapter: 100 次会话复用后每个引擎都销毁且无状态残留", (
     assert.equal(adapter.checkpoint, "");
     assert.ok(created.every((engine) => engine.disposed));
 });
+
+// ── 0.23.6 §5.7：本轮听写真实追加范围（去 indexOf 猜测）─────────────────
+
+const {SourceEngine} = await import("./engines/source-engine.js");
+
+globalThis.getComputedStyle = () => ({lineHeight: "20px"});
+// appendText 判断 activeElement 走"未聚焦直写"路径（headless 无 document）
+globalThis.document = {activeElement: null, execCommand: () => false};
+
+
+/** 最小 textarea 假体（无头环境） */
+function fakeTextarea(initial) {
+    return {
+        value: initial,
+        hidden: false,
+        selectionStart: 0,
+        selectionEnd: 0,
+        listeners: {},
+        addEventListener(type, fn) {
+            this.listeners[type] = fn;
+        },
+        removeEventListener() {},
+        focus() {},
+        setSelectionRange(s, e) {
+            this.selectionStart = s;
+            this.selectionEnd = e;
+        },
+        scrollTop: 0,
+        clientHeight: 100,
+    };
+}
+
+test("adapter: 前部相同文本时听写范围仍命中文末本轮追加（核心回归）", () => {
+    const el = fakeTextarea("DICT");
+    const adapter = new EditorAdapter(
+        {sourceEl: el, mdContainerEl: {}, mdToolbarEl: null},
+        {},
+        {
+            source: (opts) => new SourceEngine(opts),
+            markdown: () => {
+                throw new Error("unused");
+            },
+        },
+    );
+    adapter.loadInitial({body: "DICT", markdownPolicy: "available"});
+
+    // 听写开始记录锚点（此时全文只有前部那个 "DICT"）
+    adapter.beginDictationRun();
+    // 追加一段与前部完全相同的文本
+    adapter.appendDictation("DICT", {newParagraph: true});
+    assert.equal(adapter.getText(), "DICT\n\nDICT");
+
+    const run = adapter.freezeDictationRun();
+    assert.ok(run, "本轮范围有效");
+    assert.equal(run.text, "DICT", "范围文本不含首段分隔符，且为追加的这段");
+    assert.deepEqual(
+        {start: run.handle.start, end: run.handle.end},
+        {start: 6, end: 10},
+        "锚点跳过段落分隔，命中尾部而非前部相同文本",
+    );
+
+    // 确认替换只改尾部本轮范围
+    assert.equal(adapter.replaceRange(run.handle, "整理稿"), true);
+    assert.equal(adapter.getText(), "DICT\n\n整理稿", "前部 'DICT' 未被误替换");
+});
+
+test("adapter: locateDictationRun 消费冻结 handle；听写后继续输入只选本轮（核心回归）", () => {
+    const el = fakeTextarea("前文");
+    const fakeMd = {
+        kind: "markdown",
+        getText: () => "正文",
+        edited: false,
+        normalized: false,
+        focus() {},
+        dispose() {},
+    };
+    const adapter = new EditorAdapter(
+        {sourceEl: el, mdContainerEl: {}, mdToolbarEl: null},
+        {},
+        {
+            source: (opts) => new SourceEngine(opts),
+            markdown: () => fakeMd,
+        },
+    );
+    adapter.loadInitial({body: "前文", markdownPolicy: "available"});
+
+    adapter.beginDictationRun();
+    adapter.appendDictation("听写内容", {newParagraph: true});
+
+    // 听写结束冻结范围；此后用户继续输入
+    const run = adapter.freezeDictationRun();
+    assert.ok(run, "结束即冻结本轮范围");
+    el.value = adapter.getText() + "，后续手输";
+
+    assert.equal(adapter.locateDictationRun(run), true);
+    assert.deepEqual(
+        {start: el.selectionStart, end: el.selectionEnd},
+        {start: 4, end: 8},
+        "定位只选本轮听写，右边界为冻结时的文末（不含后续手输）",
+    );
+
+    // 范围内文本被编辑过：定位失效，不产生错误选区
+    const tampered = {handle: {...run.handle, text: "被改过"}, text: "被改过", blockSafe: true};
+    assert.equal(adapter.locateDictationRun(tampered), false);
+
+    // 视图切换：冻结 handle 随旧引擎作废（无跨引擎迁移，§3.3）
+    assert.equal(adapter.switchView("markdown"), true);
+    assert.equal(adapter.freezeDictationRun(), null);
+    assert.equal(adapter.locateDictationRun(run), false);
+});
+
+test("adapter: locateDictationRun 按 Engine kind 分派 locateRange（MD 契约）", () => {
+    const located = [];
+    const fakeMd = {
+        kind: "markdown",
+        getText: () => "正文",
+        edited: false,
+        normalized: false,
+        focus() {},
+        dispose() {},
+        locateRange(handle) {
+            located.push(handle);
+            return true;
+        },
+    };
+    const adapter = new EditorAdapter(
+        {sourceEl: {}, mdContainerEl: {}, mdToolbarEl: null},
+        {},
+        {
+            source: () => {
+                throw new Error("unused");
+            },
+            markdown: () => fakeMd,
+        },
+    );
+    adapter.loadInitial({body: "正文", markdownPolicy: "preferred"});
+    assert.equal(adapter.view, "markdown");
+
+    const mdRun = {
+        handle: {kind: "markdown", from: 0, to: 2, text: "正文"},
+        text: "正文",
+        blockSafe: true,
+    };
+    assert.equal(adapter.locateDictationRun(mdRun), true, "kind 匹配时分派 Engine.locateRange");
+    assert.deepEqual(located, [mdRun.handle]);
+
+    // 异 kind handle（旧引擎的 Source handle）拒绝
+    const sourceRun = {handle: {kind: "source", start: 0, end: 2, text: "正文"}, text: "正文", blockSafe: true};
+    assert.equal(adapter.locateDictationRun(sourceRun), false, "异 kind 不得进入当前 Engine");
+    assert.equal(adapter.locateDictationRun(null), false);
+});

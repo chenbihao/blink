@@ -34,6 +34,9 @@ export class EditorVoiceController {
     /** 本次听写已追加的段文本（定位/整理入口用） */
     segments = [];
 
+    /** 本轮听写冻结范围（Adapter 签发的 opaque handle；结束/清空/失效为 null） */
+    runHandle = null;
+
     /**
      * @param {object} deps
      * @param {*} deps.api - shared/api.js 子集（测试注入 fake）：
@@ -111,7 +114,11 @@ export class EditorVoiceController {
             this.epoch = res?.epoch ?? 0;
             this.lastSeq = 0;
             this.segments = [];
+            this.runHandle = null;
             this._setPhase("recording");
+            // 记录本轮真实追加锚点（0.23.6 §5.7）：定位/整理只作用于
+            // 锚点之后的范围，正文前部相同文本不会被误命中。
+            this._adapter.beginDictationRun?.();
         } catch (e) {
             this._setPhase("idle");
             const err = normalizeError(e);
@@ -172,11 +179,12 @@ export class EditorVoiceController {
         if (p.epoch !== this.epoch) return;
         if (typeof p.seq !== "number" || p.seq <= this.lastSeq) return; // 重复/回退
         if (p.seq > this.lastSeq + 1) {
-            // 缺号：先拉快照补齐（追完再消费当前事件）
-            await this._resync();
+            // 缺号：先拉快照补齐（追完再消费当前事件）；真实缺口由 _resync
+            // 显式上报后从最早可用段继续，此处只在快照不可用时兜底上报。
+            const {gapReported} = await this._resync();
             if (p.seq <= this.lastSeq) return; // 快照已覆盖当前段
-            if (p.seq > this.lastSeq + 1) {
-                console.warn(`[editor-voice] 缺号无法补齐（snapshot 截断），跳号 ${this.lastSeq + 1}-${p.seq - 1}`);
+            if (p.seq > this.lastSeq + 1 && !gapReported) {
+                console.warn(`[editor-voice] 缺号无法补齐（snapshot 不可用），跳号 ${this.lastSeq + 1}-${p.seq - 1}`);
                 this._callbacks.onGapLost?.();
             }
         }
@@ -220,17 +228,42 @@ export class EditorVoiceController {
 
     // ── 内部 ──────────────────────────────────────────────────────────────
 
-    /** 拉取 snapshot 补 lastSeq 之后的段（epoch 失配/无状态 → 忽略） */
+    /**
+     * 拉取 snapshot 补 lastSeq 之后的段（epoch 失配/无状态 → 忽略）。
+     *
+     * 缺口显式判定（0.23.6 §5.7）：snapshot 首段 seq 不紧接 `lastSeq + 1`
+     * 时，所需区间已被淘汰——显式触发一次 `onGapLost`，再从最早可用段继续，
+     * 禁止静默丢段；首段紧接 lastSeq（已越过淘汰区间）时即使历史
+     * `truncated > 0` 也不误报。
+     * @returns {Promise<{appended: number, gapReported: boolean}>}
+     */
     async _resync() {
         try {
             const snap = await this._api.getEditorVoiceSnapshot(this.epoch, this.lastSeq);
-            if (!snap || snap.epoch !== this.epoch || !Array.isArray(snap.segments)) return;
-            for (const seg of snap.segments) {
-                if (seg.seq > this.lastSeq) this._appendSegment(seg.seq, seg.text);
+            if (!snap || snap.epoch !== this.epoch || !Array.isArray(snap.segments)) {
+                return {appended: 0, gapReported: false};
             }
+            let gapReported = false;
+            const first = snap.segments[0];
+            if (first && first.seq > this.lastSeq + 1) {
+                console.warn(
+                    `[editor-voice] 听写段 ${this.lastSeq + 1}-${first.seq - 1} 已被快照淘汰，无法补齐`,
+                );
+                this._callbacks.onGapLost?.();
+                gapReported = true;
+            }
+            let appended = 0;
+            for (const seg of snap.segments) {
+                if (seg.seq > this.lastSeq) {
+                    this._appendSegment(seg.seq, seg.text);
+                    appended += 1;
+                }
+            }
+            return {appended, gapReported};
         } catch (e) {
             const err = normalizeError(e);
             console.warn(`[editor-voice] snapshot 补齐失败 [${err.code}]: ${err.message}`);
+            return {appended: 0, gapReported: false};
         }
     }
 
@@ -249,12 +282,30 @@ export class EditorVoiceController {
 
     _finish() {
         const count = this.segments.length;
+        // 听写一结束即冻结本轮真实范围：此后用户编辑使 Engine 复核拒绝应用，
+        // 但范围本身不再依赖点击时的全文 indexOf 猜测（0.23.6 §5.7）。
+        this.runHandle = count > 0 ? (this._adapter.freezeDictationRun?.() ?? null) : null;
         this._setPhase("idle");
         if (count > 0) {
             this._callbacks.onEnded?.({count});
         } else {
             this._clearRun();
         }
+    }
+
+    /** 用户关闭 chips：丢弃本次听写范围缓存（不回撤正文）。 */
+    clearRunResult() {
+        this.segments = [];
+        this.runHandle = null;
+    }
+
+    /**
+     * 本轮范围失效（视图切换后引擎已更换，无跨引擎 anchor 迁移，§3.3）：
+     * 清空段缓存与冻结范围，chips 随之隐藏。
+     */
+    invalidateRun() {
+        this.segments = [];
+        this.runHandle = null;
     }
 
     _setPhase(phase) {
@@ -269,6 +320,7 @@ export class EditorVoiceController {
         this.epoch = 0;
         this.lastSeq = 0;
         this.segments = [];
+        this.runHandle = null;
     }
 
     _describe(code, message) {

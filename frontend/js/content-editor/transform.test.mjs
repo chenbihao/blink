@@ -362,5 +362,176 @@ test("transform: 早到完成事件（start 响应前）被采纳，不卡 runni
     assert.equal(controller.candidate.revisedText, "整理稿");
 
     await starting;
-    assert.equal(controller.runRequestId, 101);
+    assert.equal(controller.runRequestId, null, "候选态不写回运行槽（已完成 id 不得占用）");
+    assert.equal(controller.phase, "candidate");
+});
+
+// ── 0.23.6 §5.7：AI 启动期取消追认 ───────────────────────────────────
+
+test("transform: start 响应前取消 → 迟到响应追认取消，不复活 running", async () => {
+    const {controller, calls} = makeController();
+    await bind(controller);
+
+    // 可控的 start 响应：模拟 IPC 迟迟未返回
+    let releaseStart;
+    controller._api.startEditorTransform = async (req) => {
+        calls.starts.push(req);
+        return new Promise((resolve) => {
+            releaseStart = () => resolve({requestId: 202});
+        });
+    };
+
+    const starting = controller.start("selection");
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(controller.phase, "running");
+    assert.equal(controller.runRequestId, null);
+
+    // 响应未返回时取消（ESC/视图切换/关闭）
+    const cancelling = controller.cancel({silent: true});
+    assert.equal(controller.phase, "idle", "取消立即生效，不等待响应");
+
+    releaseStart();
+    await Promise.all([starting, cancelling]);
+
+    assert.deepEqual(calls.cancels, [202], "响应到达后补发取消（追认）");
+    assert.equal(controller.phase, "idle");
+    assert.equal(controller.runRequestId, null, "迟到响应不得写回 requestId");
+});
+
+test("transform: 新请求使旧 start 迟到响应被追认取消，新请求不受影响", async () => {
+    const {controller, calls} = makeController();
+    await bind(controller);
+
+    let releaseFirst;
+    controller._api.startEditorTransform = async (req) => {
+        calls.starts.push(req);
+        if (calls.starts.length === 1) {
+            return new Promise((resolve) => {
+                releaseFirst = () => resolve({requestId: 301});
+            });
+        }
+        return {requestId: 302};
+    };
+
+    const first = controller.start("selection");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 新请求：cancel 清 running（旧请求 requestId 尚未回填），随后 start 第二次
+    const second = controller.start("selection");
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(controller.phase, "running");
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    assert.deepEqual(calls.cancels, [301], "旧请求在迟到响应到达后被追认取消");
+    assert.equal(controller.runRequestId, 302, "新请求 requestId 正常回填");
+    assert.equal(controller.phase, "running");
+});
+
+test("transform: 已取消请求的迟到完成/失败事件被忽略（retired 过滤）", async () => {
+    const {controller, handlers, calls, events} = makeController();
+    await bind(controller);
+    await controller.start("selection"); // requestId 101
+    await controller.cancel({silent: true});
+    assert.deepEqual(calls.cancels, [101]);
+
+    // 迟到完成事件：不构建候选
+    handlers[COMPLETED]({payload: {
+        sessionRef: "ed_t", generation: 2, requestId: 101, scope: "selection",
+        revisedText: "迟到候选", revision: 5,
+    }});
+    assert.equal(controller.candidate, null, "已取消请求的迟到候选被忽略");
+    assert.equal(controller.phase, "idle");
+
+    // 新请求复用 fake 的同一 id（生产 id 单调不复用；此处验证退役标记不误伤新请求）
+    await controller.start("selection");
+    assert.equal(controller.phase, "running");
+    handlers[FAILED]({payload: {sessionRef: "ed_t", generation: 2, requestId: 999, code: "cancelled"}});
+    // 999 从未属于本控制器 → 忽略，不污染
+    assert.equal(controller.phase, "running");
+});
+
+// ── 0.23.6 二次 Review：连续极早完成不遗留旧 requestId ───────────────
+
+test("transform: 连续极早完成（A 放弃候选后 B）不遗留旧 id，不卡 running", async () => {
+    const {controller, handlers, calls} = makeController();
+    await bind(controller);
+
+    let nextId = 401;
+    controller._api.startEditorTransform = async (req) => {
+        calls.starts.push(req);
+        return {requestId: nextId++};
+    };
+
+    // 请求 A：完成事件早于 start 响应 → 采纳进 candidate
+    const startA = controller.start("selection");
+    handlers[COMPLETED]({payload: {
+        sessionRef: "ed_t", generation: 2, requestId: 401, scope: "selection",
+        revisedText: "A 稿", revision: 5,
+    }});
+    assert.equal(controller.phase, "candidate");
+    await startA;
+    assert.equal(controller.runRequestId, null, "候选态不回填已完成 id");
+
+    // 用户放弃 A 的候选 → idle
+    await controller.discard();
+    assert.equal(controller.phase, "idle");
+    assert.equal(controller.runRequestId, null);
+
+    // 请求 B：完成事件同样早于响应；不得被 A 遗留的旧 id 拒绝
+    const startB = controller.start("selection");
+    assert.equal(controller.phase, "running");
+    handlers[COMPLETED]({payload: {
+        sessionRef: "ed_t", generation: 2, requestId: 402, scope: "selection",
+        revisedText: "B 稿", revision: 5,
+    }});
+    assert.equal(controller.phase, "candidate", "B 的早到完成事件被采纳");
+    assert.equal(controller.candidate?.revisedText, "B 稿");
+
+    await startB;
+    assert.equal(controller.phase, "candidate", "B 响应确认候选后不回退 running");
+    assert.equal(controller.runRequestId, null);
+});
+
+test("transform: retired 记录有界，长会话不无界增长", async () => {
+    const {controller} = makeController();
+    await bind(controller);
+
+    let nextId = 500;
+    controller._api.startEditorTransform = async () => ({requestId: nextId++});
+
+    for (let i = 0; i < 64; i++) {
+        await controller.start("selection");
+        await controller.cancel({silent: true});
+    }
+
+    assert.ok(
+        controller._retiredRequestIds.size <= EditorTransformController.RETIRED_CAP,
+        `retired 记录应有界（实际 ${controller._retiredRequestIds.size}）`,
+    );
+});
+
+// ── 0.23.6 §5.7：dictation 使用冻结的本轮听写范围 handle ─────────────
+
+test("transform: start(dictation, {handle}) 直用冻结范围，不做 Engine 内定位", async () => {
+    let freezeCalled = false;
+    const {controller, calls} = makeController();
+    controller._adapter.freezeRange = () => {
+        freezeCalled = true;
+        return null;
+    };
+
+    const handle = {
+        handle: {kind: "source", start: 3, end: 8, text: "本轮听写", blockSafe: true},
+        text: "本轮听写",
+        blockSafe: true,
+    };
+    await controller.start("dictation", {handle});
+
+    assert.equal(freezeCalled, false, "提供 handle 时不走 indexOf 定位");
+    assert.equal(calls.starts.length, 1);
+    assert.equal(calls.starts[0].text, "本轮听写");
+    assert.equal(JSON.parse(calls.starts[0].rangeHandle).start, 3, "rangeHandle 为冻结的真实范围");
+    assert.equal(controller.pendingRun.sourceText, "本轮听写");
 });

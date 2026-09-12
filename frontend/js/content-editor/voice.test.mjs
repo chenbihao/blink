@@ -308,3 +308,127 @@ test("adapter: appendDictation 按 newParagraph 分派引擎方法", async () =>
         ["appendText", "第二段"],
     ]);
 });
+
+// ── 0.23.6 §5.7：本轮听写真实追加范围 ────────────────────────────────
+
+/** 构造带 run-range 记录的 fake adapter 控制器 */
+function makeRunController() {
+    const calls = {begins: 0, freezes: 0};
+    let anchor = null;
+    let appended = "";
+    const adapter = {
+        appendDictation(text, opts = {}) {
+            appended += text;
+        },
+        beginDictationRun() {
+            calls.begins += 1;
+            anchor = appended.length;
+        },
+        freezeDictationRun() {
+            calls.freezes += 1;
+            if (anchor == null || appended.length <= anchor) return null;
+            return {
+                handle: {kind: "source", start: anchor, end: appended.length},
+                text: appended.slice(anchor),
+                blockSafe: true,
+            };
+        },
+    };
+    const base = makeController();
+    base.controller._adapter = adapter;
+    return {...base, adapter, calls, get appended() {
+        return appended;
+    }};
+}
+
+test("voice: start 建立听写锚点，结束冻结本轮真实范围（非全文猜测）", async () => {
+    const run = makeRunController();
+    await start(run.controller);
+    assert.equal(run.calls.begins, 1, "start 时记录锚点");
+
+    const {handlers} = run;
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1, text: "第一句。"}});
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 2, text: "第二句。"}});
+    handlers[STS]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, phase: "ended"}});
+
+    assert.equal(run.controller.phase, "idle");
+    assert.equal(run.calls.freezes, 1, "结束时冻结一次范围");
+    assert.deepEqual(run.controller.runHandle, {
+        handle: {kind: "source", start: 0, end: 8},
+        text: "第一句。第二句。",
+        blockSafe: true,
+    }, "handle 覆盖本轮全部追加文本");
+});
+
+test("voice: 无段结束/清空/失效时 runHandle 不残留", async () => {
+    const run = makeRunController();
+    await start(run.controller);
+
+    // 无段结束 → _clearRun
+    const {handlers} = run;
+    handlers[STS]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, phase: "ended"}});
+    assert.equal(run.controller.runHandle, null);
+    assert.equal(run.calls.freezes, 0, "无段不冻结");
+
+    // 有段结束后：dismiss 与视图切换失效都清缓存
+    await start(run.controller);
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1, text: "一"}});
+    handlers[STS]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, phase: "ended"}});
+    assert.ok(run.controller.runHandle);
+
+    run.controller.clearRunResult();
+    assert.deepEqual(run.controller.segments, []);
+    assert.equal(run.controller.runHandle, null);
+
+    run.controller.segments = ["残留"];
+    run.controller.runHandle = {stale: true};
+    run.controller.invalidateRun();
+    assert.deepEqual(run.controller.segments, []);
+    assert.equal(run.controller.runHandle, null);
+});
+
+// ── 0.23.6 §5.7：听写快照缺口显式报告 ────────────────────────────────
+
+test("voice: 快照首段不连续（区间已淘汰）→ onGapLost 一次并从最早可用段继续", async () => {
+    const {controller, handlers, appends, events, calls} = makeController({
+        snapshot: {
+            epoch: 7,
+            truncated: 5,
+            segments: [
+                {seq: 10, text: "十"},
+                {seq: 11, text: "十一"},
+            ],
+        },
+    });
+    await start(controller);
+
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1, text: "一"}});
+    // seq 2-9 已被快照淘汰：缺口必须显式报告
+    await handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 12, text: "十二"}});
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.equal(events.gapLost, 1, "真实缺口显式报告一次");
+    assert.deepEqual(appends.map((a) => a.text), ["一", "十", "十一", "十二"], "从最早可用段继续消费");
+    assert.equal(controller.lastSeq, 12);
+    assert.deepEqual(calls.snapshots[0], {epoch: 7, afterSeq: 1});
+});
+
+test("voice: 快照首段紧接 lastSeq 时即使 truncated>0 也不误报", async () => {
+    const {controller, handlers, events, calls} = makeController({
+        snapshot: {
+            epoch: 7,
+            truncated: 3,
+            segments: [{seq: 3, text: "三"}],
+        },
+    });
+    await start(controller);
+
+    // 已处理 1-2，重新聚焦补齐 3：淘汰区间早已越过，不得因历史 truncated 误报
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1, text: "一"}});
+    handlers[SEG]({payload: {sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 2, text: "二"}});
+    await controller.resyncIfActive();
+
+    assert.equal(events.gapLost, 0, "已越过淘汰区间不误报");
+    assert.equal(controller.segments.length, 3);
+    assert.equal(calls.snapshots.length, 1);
+});

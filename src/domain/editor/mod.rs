@@ -266,9 +266,9 @@ pub enum EditorError {
     /// session_ref 或 generation 不匹配——请求来自旧会话，只能清理自身。
     #[error("编辑会话已失效")]
     StaleSession,
-    /// 前端提交的 content_revision 已过期（§3.9 冻结错误集；0.23.4 AI 候选启用）。
+    /// 前端提交的 content_revision 已过期，或"同 revision、不同正文"的重放
+    ///（§5.7 ⑤：0.23.6 起有真实产生路径——提交协议校验）。
     #[error("内容版本已过期")]
-    #[allow(dead_code)]
     StaleRevision,
     /// 便签等持久来源在会话外被修改，原位保存被拒绝。
     #[error("内容已被外部修改")]
@@ -326,12 +326,91 @@ pub struct EditorSessionSnapshot {
 pub struct CommitEditorRequest {
     pub session_ref: String,
     pub generation: u64,
-    /// 前端单调 `content_revision`（0.23.1 作簿记，0.23.4 AI 候选以此判 stale）。
+    /// 前端单调 `content_revision`（0.23.6 起为提交协议的一部分：后端拒绝
+    /// 旧 revision 与"同 revision、不同正文"的重放，同 revision 同正文幂等）。
     pub revision: u64,
     pub body: String,
     /// 单次目标覆盖（"保存到…"/"另存为副本…"/覆盖冲突文件）；省略按主目标。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<CommitTargetOverride>,
+    /// 本次提交的意图标识（前端生成，每次显式提交唯一）。幂等只对"已成功
+    /// 执行过的同一 mutation 的精确重放"（相同 mutation id）早退；同
+    /// revision、同正文但意图不同的新提交（切换目标/保存副本/覆盖/复制）
+    /// 必须真实执行，不被吞掉（0.23.6 二次 Review）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_id: Option<String>,
+}
+
+/// 后端已接受的提交水位（0.23.6 §5.7 ⑤）：revision + 正文摘要 + 提交意图。
+///
+/// 仅在会话内存活（`LiveSession`），不持久化；摘要用于识别
+/// "同 revision、不同正文"的重放，意图标识用于识别"同一 mutation 的精确重放"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedRevision {
+    pub revision: u64,
+    pub body_hash: u64,
+    /// 已成功执行的提交意图标识（前端每次显式提交生成唯一 id）。
+    pub mutation_id: Option<String>,
+}
+
+/// 提交 revision 校验结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionVerdict {
+    /// 正常接受：revision 前进、会话尚无已接受水位，或同 revision 同正文的
+    /// 新提交意图（mutation id 不同——显式输出必须真实执行）。
+    Accept,
+    /// 幂等提交：同 revision、同正文且与已成功 mutation 完全相同（mutation
+    /// id 一致）的精确重放——跳过副作用直接返回当前基线。
+    Idempotent,
+    /// 拒绝：旧 revision，或同 revision 但正文摘要不符（重放/错位）。
+    StaleRevision,
+}
+
+/// 正文摘要：FNV-1a 64。会话内一致性判定用，不跨进程、不持久化。
+pub fn body_digest(body: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in body.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// 提交 revision 校验（0.23.6 §5.7 ⑤ 纯逻辑；二次 Review 后幂等键纳入
+/// 提交意图）。
+///
+/// - 会话尚无已接受水位（`last == None`，绑定后首次提交）→ `Accept`；
+/// - `incoming > last.revision` → `Accept`（正常前进，允许跳号——revision
+///   由前端按编辑次数单调自增，保存间隔内的编辑数不限）；
+/// - `incoming < last.revision` → `StaleRevision`（旧 revision）；
+/// - `incoming == last.revision` 且摘要不一致 → `StaleRevision`（重放）；
+/// - `incoming == last.revision` 且摘要一致、mutation id 与已成功 mutation
+///   相同 → `Idempotent`（同一 mutation 的精确重放，如重试）；
+/// - `incoming == last.revision` 且摘要一致、mutation id 不同或缺省 →
+///   `Accept`（新的显式提交意图：切换目标/保存副本/覆盖/重新复制都必须
+///   真实执行，不能凭"同 revision 同正文"吞掉）。
+pub fn check_commit_revision(
+    last: Option<CommittedRevision>,
+    incoming_revision: u64,
+    body: &str,
+    mutation_id: Option<&str>,
+) -> RevisionVerdict {
+    let Some(last) = last else {
+        return RevisionVerdict::Accept;
+    };
+    if incoming_revision > last.revision {
+        return RevisionVerdict::Accept;
+    }
+    if incoming_revision < last.revision {
+        return RevisionVerdict::StaleRevision;
+    }
+    if last.body_hash != body_digest(body) {
+        return RevisionVerdict::StaleRevision;
+    }
+    if last.mutation_id.is_some() && last.mutation_id.as_deref() == mutation_id {
+        return RevisionVerdict::Idempotent;
+    }
+    RevisionVerdict::Accept
 }
 
 /// 提交结果——按目标保存后的新基线与新主目标。
@@ -723,5 +802,203 @@ mod tests {
         });
         let req: CommitEditorRequest = serde_json::from_value(bare).unwrap();
         assert_eq!(req.target, None);
+    }
+
+    // ── 0.23.6 ⑤ 提交协议 ───────────────────────────────────────────────
+
+    #[test]
+    fn body_digest_is_stable_and_content_sensitive() {
+        assert_eq!(body_digest("你好，世界"), body_digest("你好，世界"));
+        assert_ne!(body_digest("你好，世界"), body_digest("你好，世界 "));
+        assert_ne!(body_digest("a"), body_digest("b"));
+    }
+
+    /// 构造已成功执行的水位（mutation id 可指定）。
+    fn committed(revision: u64, body: &str, mutation_id: &str) -> CommittedRevision {
+        CommittedRevision {
+            revision,
+            body_hash: body_digest(body),
+            mutation_id: Some(mutation_id.into()),
+        }
+    }
+
+    #[test]
+    fn first_commit_without_watermark_accepts_any_revision() {
+        assert_eq!(
+            check_commit_revision(None, 0, "hello", Some("m1")),
+            RevisionVerdict::Accept
+        );
+        assert_eq!(
+            check_commit_revision(None, 7, "hello", None),
+            RevisionVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn forward_revision_accepts() {
+        let last = committed(5, "old", "m1");
+        assert_eq!(
+            check_commit_revision(Some(last.clone()), 6, "new", Some("m2")),
+            RevisionVerdict::Accept
+        );
+        // 跳号前进合法（revision 按编辑次数自增，保存间隔不限编辑数）
+        assert_eq!(
+            check_commit_revision(Some(last), 9, "new", Some("m2")),
+            RevisionVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn same_revision_same_body_same_mutation_is_idempotent() {
+        // 同一 mutation 的精确重放（如响应丢失后的重试）→ 幂等跳过副作用
+        assert_eq!(
+            check_commit_revision(Some(committed(5, "same", "m1")), 5, "same", Some("m1")),
+            RevisionVerdict::Idempotent
+        );
+    }
+
+    #[test]
+    fn same_revision_same_body_new_mutation_executes() {
+        // 二次 Review：同 revision、同正文的新显式提交（保存到/副本/覆盖/复制）
+        // 必须真实执行，不能凭内容相同吞掉
+        assert_eq!(
+            check_commit_revision(Some(committed(5, "same", "m1")), 5, "same", Some("m2")),
+            RevisionVerdict::Accept
+        );
+        // 无 mutation id 的调用永不幂等（缺意图标识即视为新提交）
+        assert_eq!(
+            check_commit_revision(Some(committed(5, "same", "m1")), 5, "same", None),
+            RevisionVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn same_revision_different_body_rejected_even_same_mutation() {
+        assert_eq!(
+            check_commit_revision(Some(committed(5, "same", "m1")), 5, "tampered", Some("m1")),
+            RevisionVerdict::StaleRevision
+        );
+        assert_eq!(
+            check_commit_revision(Some(committed(5, "same", "m1")), 5, "tampered", Some("m2")),
+            RevisionVerdict::StaleRevision
+        );
+    }
+
+    #[test]
+    fn old_revision_rejected_even_with_matching_body() {
+        let last = committed(5, "v5", "m1");
+        assert_eq!(
+            check_commit_revision(Some(last), 4, "v4", Some("m2")),
+            RevisionVerdict::StaleRevision
+        );
+    }
+
+    // ── 0.23.6 二次 Review：同 revision 显式输出协议回归 ────────────────
+    //
+    // 复现服务层次序：check_commit_revision 判定（副作用前）→ plan_commit
+    // 产出执行计划。以下场景的水位均处于 revision 5 且正文未变。
+
+    /// 按服务层次序模拟一次提交：返回 (判定, 执行计划)。
+    fn simulate_commit(
+        last: Option<CommittedRevision>,
+        mutation_id: &str,
+        body: &str,
+        target: &CommitTarget,
+        r#override: Option<CommitTargetOverride>,
+    ) -> (RevisionVerdict, CommitPlan) {
+        let verdict = check_commit_revision(last, 5, body, Some(mutation_id));
+        let plan_state = CommitState {
+            target,
+            result_item_id: Some("res-1"),
+            file_identity: Some(FileIdentity {
+                size: 5,
+                mtime_ms: 100,
+            }),
+            sticky_revision: Some(42),
+            source_item_ref: None,
+        };
+        (verdict, plan_commit(plan_state, r#override.as_ref()))
+    }
+
+    #[test]
+    fn protocol_same_revision_switch_target_really_executes() {
+        // 首存剪贴板结果后，同一正文触发"保存到…"：必须真实写盘并切换目标
+        let last = committed(5, "same", "m1");
+        let clipboard = CommitTarget::ClipboardResult;
+        let save_to = CommitTargetOverride::SaveToFile {
+            path: "D:\\out.md".into(),
+        };
+        let (verdict, plan) = simulate_commit(Some(last), "m2", "same", &clipboard, Some(save_to));
+        assert_eq!(verdict, RevisionVerdict::Accept, "新意图不得被幂等吞掉");
+        assert_eq!(
+            plan,
+            CommitPlan::SaveToFile {
+                path: "D:\\out.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn protocol_same_revision_save_copy_really_executes() {
+        let last = committed(5, "same", "m1");
+        let clipboard = CommitTarget::ClipboardResult;
+        let save_copy = CommitTargetOverride::SaveCopyToFile {
+            path: "D:\\copy.md".into(),
+        };
+        let (verdict, plan) =
+            simulate_commit(Some(last), "m2", "same", &clipboard, Some(save_copy));
+        assert_eq!(verdict, RevisionVerdict::Accept);
+        assert_eq!(
+            plan,
+            CommitPlan::SaveCopyToFile {
+                path: "D:\\copy.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn protocol_same_revision_force_overwrite_really_executes() {
+        // 冲突后"仍要覆盖"：显式覆盖必须真实执行，跳过 identity 校验
+        let last = committed(5, "same", "m1");
+        let confirmed = CommitTarget::ConfirmedFile {
+            path: "C:\\a.md".into(),
+        };
+        let (verdict, plan) = simulate_commit(
+            Some(last),
+            "m2",
+            "same",
+            &confirmed,
+            Some(CommitTargetOverride::OverwriteConfirmedFile),
+        );
+        assert_eq!(verdict, RevisionVerdict::Accept);
+        assert_eq!(
+            plan,
+            CommitPlan::OverwriteConfirmedFile {
+                path: "C:\\a.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn protocol_same_revision_plain_recommit_really_executes() {
+        // 同 revision 的再次普通保存（如重新复制到剪贴板）：新意图 → 真实执行
+        let last = committed(5, "same", "m1");
+        let clipboard = CommitTarget::ClipboardResult;
+        let (verdict, plan) = simulate_commit(Some(last), "m2", "same", &clipboard, None);
+        assert_eq!(verdict, RevisionVerdict::Accept);
+        assert_eq!(
+            plan,
+            CommitPlan::UpdateClipboardResult {
+                result_item_id: "res-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn protocol_exact_replay_is_idempotent_and_skips_side_effects() {
+        // 同一 mutation 的精确重放 → 幂等：服务层直接返回基线，不产出计划
+        let last = committed(5, "same", "m1");
+        let verdict = check_commit_revision(Some(last), 5, "same", Some("m1"));
+        assert_eq!(verdict, RevisionVerdict::Idempotent);
     }
 }

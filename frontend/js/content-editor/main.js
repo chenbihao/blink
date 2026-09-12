@@ -313,20 +313,15 @@ async function refreshAiAvailability() {
     updateActionChips();
 }
 
-/** 便签来源且本地 clean 时同步最新内容（保留 0.18.3 行为语义）；
- *  force = 冲突后用户显式放弃修改的重载（跳过 dirty 保护） */
+/** 便签来源且本地 clean 时同步最新内容（身份墙与 dirty 重查在 EditorSession 内，§5.7）；
+ *  force = 冲突后用户显式放弃修改的重载（跳过 dirty 保护，仍受身份墙约束） */
 async function reloadFromSticky({force = false} = {}) {
     const stickyId = originStickyId();
     if (!stickyId || !session.isActive) return;
-    if (!force && adapter.isDirty()) return; // 有未保存改动时不打断用户
-    try {
-        const note = await getStickyNote(stickyId);
-        if (!note || stickyId !== originStickyId()) return; // 会话已切换，丢弃旧结果
-        session.syncExternalContent(note.content || "", note.updatedAt ?? null);
-        updateDirtyDot();
-    } catch (e) {
-        const err = normalizeError(e);
-        console.error(`[content-editor] 便签同步失败 [${err.code}]: ${err.message}`);
+    const result = await session.reloadFromSticky({stickyId, force, getNote: getStickyNote});
+    if (result.applied) updateDirtyDot();
+    if (result.error) {
+        console.error(`[content-editor] 便签同步失败 [${result.error.code}]: ${result.error.message}`);
     }
 }
 
@@ -371,21 +366,25 @@ function bindVoiceControls() {
         voice.toggle();
     });
 
+    // 定位本次听写：直接消费听写结束时冻结的真实追加范围 handle
+    //（0.23.6 二次 Review）——右边界是冻结时的文末，听写结束后继续输入
+    // 不会被一并选中；前部相同文本也不会误命中。
     chipLocateEl?.addEventListener("click", () => {
-        const text = voice.joinedText;
-        if (!text) return;
-        if (adapter.locateText(text)) {
+        if (!voice.runHandle) {
+            setStatus(t("editor.voice.locateFailed"));
+            return;
+        }
+        if (adapter.locateDictationRun(voice.runHandle)) {
             setStatus(t("editor.voice.located"));
         } else {
             setStatus(t("editor.voice.locateFailed"));
         }
     });
 
-    // 整理本次听写（0.23.4 §3.7 显式入口：定位本次拼接范围并发起整理）
+    // 整理本次听写（0.23.4 §3.7 显式入口；0.23.6 使用冻结的听写范围 handle）
     chipTidyEl?.addEventListener("click", () => {
-        const text = voice.joinedText;
-        if (!text) return;
-        void transform.start("dictation", {text});
+        if (!voice.runHandle) return;
+        void transform.start("dictation", {handle: voice.runHandle});
     });
 
     // 整理选中内容（选区非空时出现，§3.8 按上下文出现的整理动作）
@@ -465,16 +464,23 @@ function updateActionChips() {
 }
 
 function hideVoiceChips() {
-    voice.segments = [];
+    voice.clearRunResult();
     updateActionChips();
 }
 
 /** 视图切换（Source/MD 是同一文本的双视图，§3.3）。
  *  切换取消运行中的整理请求并丢弃候选（§3.3/§3.7），引擎内 handle 随旧引擎作废；
- *  拒绝原因提示由 adapter.onNotice 给出（structure/large 分档）。 */
+ *  拒绝原因提示由 adapter.onNotice 给出（structure/large 分档）。
+ *  听写进行中时在新引擎上重新记录本轮追加锚点（已入正文的旧段不再纳入
+ *  定位/整理范围）；非听写中时本次范围随旧引擎作废，chips 同步隐藏。 */
 function switchView(target) {
     if (!adapter.switchView(target)) return;
     void transform.cancel({silent: true});
+    if (voice.isBusy) {
+        adapter.beginDictationRun();
+    } else {
+        voice.invalidateRun();
+    }
     updateViewSwitchState();
     updateActionChips();
     adapter.focus();
@@ -524,11 +530,16 @@ function updateDirtyDot() {
     if (dirty) dirtyDotEl.title = t("editor.dirty");
 }
 
-/** 保存错误统一上报：冲突转专用处理，其余显示状态行 */
+/** 保存错误统一上报：冲突转专用处理，stale_revision 分类展示（§5.7 ⑤），
+ * 其余显示状态行 */
 function reportSaveError(error) {
     if (!error) return;
     if (error.code === "source_conflict") {
         handleSaveConflict();
+        return;
+    }
+    if (error.code === "stale_revision") {
+        setStatus(t("editor.staleRevision"));
         return;
     }
     setStatus(t("editor.saveFailed", {message: error.message ?? ""}));

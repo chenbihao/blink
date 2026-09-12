@@ -980,6 +980,7 @@ export const zh = {
     "editor.discard": "放弃更改",
     "editor.continueEdit": "继续编辑",
     "editor.saveFailed": "保存失败: {message}",
+    "editor.staleRevision": "保存失败：内容版本已过期，请重试",
     "editor.closeFailed": "关闭失败，内容仍保留: {message}",
     // 0.23.1：双视图 / 会话化
     "editor.view.source": "原文",
