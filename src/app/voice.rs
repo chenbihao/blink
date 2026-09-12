@@ -21,19 +21,21 @@
 //! - hold 时 chat 窗口可见 → G3: 文字填 chat composer textarea
 //! - hold 时主窗口 + chat 均不可见 → G2: 文字注入前台应用
 
+use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use tauri::{Emitter, Manager};
 
 use crate::domain::event_names::EventNames;
+use crate::domain::stt::dictation::EditorDictationTracker;
 use crate::domain::stt::{StreamingSttPort, SttEngine, SttEvent};
 use crate::infra::platform;
 use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 
-/// 语音目标(G1 主窗口 / G2 前台应用 / G3 chat 窗口)。
+/// 语音目标(G1 主窗口 / G2 前台应用 / G3 chat 窗口 / Editor 编辑器连续听写)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceTarget {
     /// G1: 文字填进 blink 主窗口 #query
@@ -46,6 +48,11 @@ pub enum VoiceTarget {
     /// 0.12.3: 热键驱动也走此路径——chat 窗口可见时 hold Alt+Space
     /// 自动检测并走 G3 而非 G2（不唤起前台注入）。
     ChatWindow,
+    /// Editor: 编辑器连续听写（0.23.3 §3.6）。
+    ///
+    /// 仅 IPC 驱动（start_editor_voice），由编辑器按钮显式开始；
+    /// confirmed segment 按 epoch + seq 推送，preview 只进事件不进正文。
+    Editor,
 }
 
 impl VoiceTarget {
@@ -55,8 +62,98 @@ impl VoiceTarget {
             VoiceTarget::MainWindow => "g1",
             VoiceTarget::ForegroundApp => "g2",
             VoiceTarget::ChatWindow => "chat",
+            VoiceTarget::Editor => "editor",
         }
     }
+}
+
+/// 编辑器连续听写的有界 confirmed 快照状态（0.23.3 §3.6）。
+///
+/// 一个听写 epoch 一份；`VoiceService.editor_state` 持有共享句柄，
+/// 事件消费 task 推段、command 层读取补齐。段缓冲有界（淘汰最旧），
+/// 结束后保留到下一次听写开始（供前端迟到的补齐请求）。
+pub struct EditorDictationState {
+    /// 听写 epoch（每次 start_editor_voice 单调递增，从 1 开始）。
+    pub epoch: u64,
+    /// 冻结的编辑器会话身份（start 时校验，事件携带供前端过滤）。
+    pub session_ref: String,
+    pub generation: u64,
+    /// 段推导器（confirmed 增量 + Final 收尾段 + seq 单调）。
+    tracker: EditorDictationTracker,
+    /// confirmed 段缓冲（有界，FIFO 淘汰）。
+    segments: VecDeque<(u64, String)>,
+    /// 因缓冲满被淘汰的最旧段数（诊断用）。
+    truncated: usize,
+}
+
+/// 快照缓冲上限（段数）。一段通常是一句话（几十字符），256 段远超
+/// 一次听写的合理长度，同时保证内存有界（§3.6 有界 snapshot）。
+const SNAPSHOT_MAX_SEGMENTS: usize = 256;
+
+impl EditorDictationState {
+    fn new(epoch: u64, session_ref: String, generation: u64) -> Self {
+        Self {
+            epoch,
+            session_ref,
+            generation,
+            tracker: EditorDictationTracker::new(),
+            segments: VecDeque::new(),
+            truncated: 0,
+        }
+    }
+
+    /// 推导并记录一个 confirmed 增量段；返回 `(seq, text)` 供事件发射。
+    fn push_confirmed_delta(&mut self, confirmed: &str) -> Option<(u64, String)> {
+        let (seq, text) = self.tracker.extract_delta(confirmed)?;
+        self.remember(seq, text.clone());
+        Some((seq, text))
+    }
+
+    /// 推导并记录 Final 收尾段。
+    fn push_final_delta(&mut self, final_text: &str) -> Option<(u64, String)> {
+        let (seq, text) = self.tracker.extract_final_delta(final_text)?;
+        self.remember(seq, text.clone());
+        Some((seq, text))
+    }
+
+    fn remember(&mut self, seq: u64, text: String) {
+        if self.segments.len() >= SNAPSHOT_MAX_SEGMENTS {
+            self.segments.pop_front();
+            self.truncated += 1;
+        }
+        self.segments.push_back((seq, text));
+    }
+
+    /// 返回 seq > after_seq 的段（epoch 不匹配返回 None）。
+    fn after(&self, epoch: u64, after_seq: u64) -> Option<Vec<(u64, String)>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        Some(
+            self.segments
+                .iter()
+                .filter(|(seq, _)| *seq > after_seq)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    fn last_seq(&self) -> u64 {
+        self.tracker.last_seq()
+    }
+}
+
+/// 编辑器连续听写启动结果（command 层投影为结构化错误码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorVoiceStart {
+    /// 已启动，携带本次听写 epoch。
+    Started(u64),
+    /// STT 总开关未启用。
+    Disabled,
+    /// 已有 VoiceSession 在录音（G1/G2/G3/Editor 互斥，§6.4）。
+    Busy,
+    /// 服务未就绪 / 引擎创建失败等（详情已经 VOICE_ERROR 事件下发）。
+    Failed,
 }
 
 /// 语音会话状态。
@@ -76,12 +173,16 @@ struct VoiceSession {
     capture: Option<Box<dyn AudioCapture>>,
     /// 音频采集 task 的 JoinHandle（stop/cancel 时 abort，避免与 finalize 锁竞争）
     audio_task: Option<tokio::task::JoinHandle<()>>,
-    /// 目标(G1/G2/G3)
+    /// 目标(G1/G2/G3/Editor)
     target: VoiceTarget,
     /// 是否正在录音
     recording: bool,
     /// G2: 录音开始时的前台窗口 HWND（用于注入前恢复焦点）
     prev_fg_hwnd: Option<isize>,
+    /// Editor 连续听写模式（0.23.3）：录音持续到显式 stop，段式交付。
+    continuous: bool,
+    /// 暂停标志（Editor 连续听写）：true 时音频 task 丢弃 chunk 不推给 STT。
+    paused: Arc<AtomicBool>,
 }
 
 impl Default for VoiceSession {
@@ -96,6 +197,8 @@ impl Default for VoiceSession {
             target: VoiceTarget::ForegroundApp,
             recording: false,
             prev_fg_hwnd: None,
+            continuous: false,
+            paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -110,6 +213,14 @@ pub struct VoiceService {
     /// 而是在 VoiceService 层维护单调递增的 epoch，
     /// 确保 new epoch 后旧 epoch 的任何 final/end 都不能影响 UI。
     recording_epoch: Arc<AtomicU64>,
+    /// 0.23.3: 编辑器连续听写 epoch（每次 start_editor_voice 递增，从 1 开始）。
+    ///
+    /// 与 recording_epoch 是两个边界：后者过滤跨录音的迟到事件，
+    /// 前者标识一次听写会话（事件携带、前端按 epoch+seq 去重补齐）。
+    dictation_epoch: AtomicU64,
+    /// 当前/最近一次听写的共享状态（事件 task 推段，command 层读补齐）。
+    /// 结束后保留到下一次听写开始；hold/chat 路径不消费它。
+    editor_state: Mutex<Option<Arc<Mutex<EditorDictationState>>>>,
 }
 
 impl VoiceService {
@@ -118,6 +229,8 @@ impl VoiceService {
             session: Mutex::new(VoiceSession::default()),
             app,
             recording_epoch: Arc::new(AtomicU64::new(0)),
+            dictation_epoch: AtomicU64::new(0),
+            editor_state: Mutex::new(None),
         }
     }
 
@@ -252,6 +365,264 @@ impl VoiceService {
         }
     }
 
+    // ── Editor 连续听写（0.23.3 §3.6）─────────────────────────────────────
+
+    /// 编辑器连续听写：显式开始（由 start_editor_voice IPC 驱动）。
+    ///
+    /// 与 hold/chat 路径的差异：
+    /// - target 固定 `Editor`，continuous 模式（录音持续到显式 stop）；
+    /// - 启动即创建听写 epoch + 有界 snapshot 状态；
+    /// - 不设置 hotkey flag（编辑器窗口无需吞 Alt+Space）；
+    /// - G1/G2/G3/Editor 互斥沿用 `session.recording` 单槽。
+    ///
+    /// 会话身份（session_ref + generation）由 command 层经 EditorSessionService
+    /// 校验后才传入；本方法只做 VoiceSession 侧的编排。
+    pub async fn start_editor_recording(
+        &self,
+        session_ref: String,
+        generation: u64,
+    ) -> EditorVoiceStart {
+        // ── 总开关检查 ──
+        let config = crate::app::stt_config::get_stt_config();
+        if !config.enabled {
+            tracing::debug!("语音未启用,忽略 editor 听写请求");
+            return EditorVoiceStart::Disabled;
+        }
+
+        // ── 互斥检查 + 设置 Editor 模式字段 ──
+        {
+            let mut session = self.session.lock().unwrap();
+            if session.recording {
+                tracing::warn!(active_target = ?session.target, "start_editor_recording: 已在录音中,拒绝");
+                return EditorVoiceStart::Busy;
+            }
+            session.target = VoiceTarget::Editor;
+            session.continuous = true;
+            session.paused = Arc::new(AtomicBool::new(false));
+            session.prev_fg_hwnd = None;
+        }
+
+        // ── 听写 epoch + 有界 snapshot ──
+        let epoch = self.dictation_epoch.fetch_add(1, Ordering::Release) + 1;
+        *self.editor_state.lock().unwrap() = Some(Arc::new(Mutex::new(EditorDictationState::new(
+            epoch,
+            session_ref,
+            generation,
+        ))));
+
+        // 浮窗就近反馈（用户刚点了编辑器麦克风按钮，光标即按钮附近）
+        platform::window::show_voice_overlay(&self.app);
+
+        if self.begin_recording(&config, false).await {
+            crate::app::tray::start_breathing(&self.app);
+            tracing::info!(epoch, "编辑器连续听写开始");
+            EditorVoiceStart::Started(epoch)
+        } else {
+            // begin_recording 失败详情已经 VOICE_ERROR(target=editor) 下发；
+            // 此处回收浮窗与听写状态，不留残留。
+            platform::window::hide_voice_overlay(&self.app);
+            *self.editor_state.lock().unwrap() = None;
+            self.session.lock().unwrap().continuous = false;
+            EditorVoiceStart::Failed
+        }
+    }
+
+    /// 暂停编辑器听写：音频 task 丢弃 chunk，STT 不再收到新音频；
+    /// confirmed/preview 保持。返回是否生效。
+    pub fn pause_editor_recording(&self) -> bool {
+        let (paused, was_idle) = {
+            let session = self.session.lock().unwrap();
+            (
+                session.paused.clone(),
+                !session.recording || !session.continuous,
+            )
+        };
+        if was_idle {
+            tracing::warn!("pause_editor_recording: 未在连续听写中,忽略");
+            return false;
+        }
+        if paused.swap(true, Ordering::SeqCst) {
+            return true; // 已是暂停态，幂等
+        }
+        if let Some(state) = self.editor_state.lock().unwrap().clone() {
+            let seq = state.lock().unwrap().last_seq();
+            self.emit_editor_status(&state, "paused", seq, None, None);
+        }
+        tracing::info!("编辑器连续听写已暂停");
+        true
+    }
+
+    /// 继续编辑器听写。返回是否生效。
+    pub fn resume_editor_recording(&self) -> bool {
+        let (paused, was_idle) = {
+            let session = self.session.lock().unwrap();
+            (
+                session.paused.clone(),
+                !session.recording || !session.continuous,
+            )
+        };
+        if was_idle {
+            tracing::warn!("resume_editor_recording: 未在连续听写中,忽略");
+            return false;
+        }
+        if !paused.swap(false, Ordering::SeqCst) {
+            return true; // 已是录音态，幂等
+        }
+        if let Some(state) = self.editor_state.lock().unwrap().clone() {
+            let seq = state.lock().unwrap().last_seq();
+            self.emit_editor_status(&state, "recording", seq, None, None);
+        }
+        tracing::info!("编辑器连续听写已继续");
+        true
+    }
+
+    /// 结束编辑器听写（显式 stop）：通知引擎收尾，尾段经 Final 事件补交，
+    /// 保留 confirmed、丢弃 preview。事件 task 完成后由本方法收尾浮窗与状态。
+    pub async fn stop_editor_recording(&self) {
+        let (stt_port, engine, generation) = {
+            let mut session = self.session.lock().unwrap();
+            if !session.recording || !session.continuous {
+                tracing::warn!("stop_editor_recording: 未在连续听写中,忽略");
+                return;
+            }
+            if let Some(mut capture) = session.capture.take() {
+                capture.stop();
+            }
+            if let Some(handle) = session.audio_task.take() {
+                handle.abort();
+            }
+            session.recording = false;
+            session.continuous = false;
+            (
+                session.stt_port.take(),
+                session.engine.take(),
+                session.generation.take(),
+            )
+        };
+
+        // finalizing 状态先行（尾段识别可能耗时数秒）
+        if let Some(state) = self.editor_state.lock().unwrap().clone() {
+            let seq = state.lock().unwrap().last_seq();
+            self.emit_editor_status(&state, "finalizing", seq, None, None);
+        }
+
+        if let (Some(port), Some(session_gen)) = (&stt_port, generation) {
+            if let Err(e) = port.finish_session(session_gen).await {
+                tracing::warn!(%e, "editor 听写 finish_session 失败，回退 finalize 路径");
+                let final_text = finalize_engine(engine).await;
+                self.deliver_editor_final(&final_text).await;
+            }
+            // 成功路径：Final 由事件 task 处理（补尾段 + ended 状态），
+            // 此处等待事件 task 完成（与 stop_recording 同款超时）。
+            let event_task = self.session.lock().unwrap().event_task.take();
+            if let Some(handle) = event_task {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(12), handle).await;
+            }
+        } else {
+            // 无 port（异常态）：按 finalize 回退路径收尾，避免听写悬挂
+            let final_text = finalize_engine(engine).await;
+            self.deliver_editor_final(&final_text).await;
+            self.session.lock().unwrap().event_task.take();
+        }
+
+        platform::window::hide_voice_overlay(&self.app);
+        crate::app::tray::stop_breathing(&self.app);
+        let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+        tracing::info!("编辑器连续听写结束（confirmed 已保留）");
+    }
+
+    /// Editor 回退路径的 Final 交付（finish_session 失败 / 无 port 时）。
+    /// 正常路径 Final 由事件 task 处理，不走这里。
+    async fn deliver_editor_final(&self, final_text: &str) {
+        let Some(state) = self.editor_state.lock().unwrap().clone() else {
+            return;
+        };
+        let mut st = state.lock().unwrap();
+        let last_seq = st.last_seq();
+        match st.push_final_delta(final_text) {
+            Some((seq, text)) => {
+                drop(st);
+                self.emit_editor_segment(&state, seq, &text);
+                self.emit_editor_status(&state, "ended", seq, None, None);
+            }
+            None => {
+                drop(st);
+                self.emit_editor_status(&state, "ended", last_seq, None, None);
+            }
+        }
+    }
+
+    /// STT 引擎 Error 事件的终态清理（仅 Editor 路径）：保留 confirmed、
+    /// 丢弃 preview，结束会话并回收录音资源。由事件 task 调用（此时该 task
+    /// 即将退出，event_task 句柄置 None 即可）。
+    pub fn handle_editor_terminal_error(&self, message: &str) {
+        {
+            let mut session = self.session.lock().unwrap();
+            if !session.recording || !session.continuous {
+                return;
+            }
+            if let Some(mut capture) = session.capture.take() {
+                capture.stop();
+            }
+            if let Some(handle) = session.audio_task.take() {
+                handle.abort();
+            }
+            session.recording = false;
+            session.continuous = false;
+            session.event_task = None;
+        }
+        if let Some(state) = self.editor_state.lock().unwrap().clone() {
+            let seq = state.lock().unwrap().last_seq();
+            self.emit_editor_status(&state, "error", seq, None, Some(message));
+            self.emit_editor_status(&state, "ended", seq, None, None);
+        }
+        let _ = self.app.emit(
+            EventNames::VOICE_ERROR,
+            serde_json::json!({ "message": message, "target": VoiceTarget::Editor.as_str() }),
+        );
+        let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+        platform::window::hide_voice_overlay(&self.app);
+        crate::app::tray::stop_breathing(&self.app);
+        tracing::warn!("编辑器连续听写因 STT 错误结束（confirmed 已保留）");
+    }
+
+    /// 补齐快照：返回 epoch 匹配且 seq > after_seq 的 confirmed 段。
+    /// epoch 不匹配或无听写状态返回 None（前端按 None 提示无法补齐）。
+    pub fn editor_voice_snapshot(
+        &self,
+        epoch: u64,
+        after_seq: u64,
+    ) -> Option<(u64, Vec<(u64, String)>, usize)> {
+        let state = self.editor_state.lock().unwrap().clone()?;
+        let st = state.lock().unwrap();
+        let segments = st.after(epoch, after_seq)?;
+        Some((st.epoch, segments, st.truncated))
+    }
+
+    /// 是否存在活动的编辑器连续听写（0.23.5 看门狗预留）。
+    #[allow(dead_code)]
+    pub fn is_editor_recording(&self) -> bool {
+        let session = self.session.lock().unwrap();
+        session.recording && session.continuous
+    }
+
+    /// 发射编辑器听写段事件（blink://editor-voice-segment）。
+    fn emit_editor_segment(&self, state: &Arc<Mutex<EditorDictationState>>, seq: u64, text: &str) {
+        emit_editor_segment(&self.app, state, seq, text);
+    }
+
+    /// 发射编辑器听写状态事件（blink://editor-voice-status）。
+    fn emit_editor_status(
+        &self,
+        state: &Arc<Mutex<EditorDictationState>>,
+        phase: &str,
+        seq: u64,
+        preview: Option<&str>,
+        message: Option<&str>,
+    ) {
+        emit_editor_status(&self.app, state, phase, seq, preview, message);
+    }
+
     /// 共享录音启动逻辑：服务就绪检查 + 模型加载检查 + 引擎创建 + 音频采集 + 采集 task。
     ///
     /// **调用方职责**：
@@ -372,7 +743,7 @@ impl VoiceService {
 
         // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
         // 注意：std::sync::MutexGuard 不是 Send，所有锁操作必须在不含 await 的 block 内完成。
-        let (stt_port, engine_arc, mut rx, target, _target_str, prev_fg_hwnd) = {
+        let (stt_port, engine_arc, mut rx, target, _target_str, prev_fg_hwnd, paused_flag) = {
             let mut session = self.session.lock().unwrap();
 
             // 二次检查：模型加载等待期间可能已被 cancel
@@ -437,6 +808,7 @@ impl VoiceService {
                     let target = session.target;
                     let target_str = session.target.as_str();
                     let prev_fg_hwnd = session.prev_fg_hwnd;
+                    let paused_flag = session.paused.clone();
 
                     // 通知前端录音已开始
                     let epoch_val = self.recording_epoch.fetch_add(1, Ordering::Release) + 1;
@@ -445,7 +817,15 @@ impl VoiceService {
                         serde_json::json!({ "target": target_str, "epoch": epoch_val }),
                     );
 
-                    (stt_port, engine_arc, rx, target, target_str, prev_fg_hwnd)
+                    (
+                        stt_port,
+                        engine_arc,
+                        rx,
+                        target,
+                        target_str,
+                        prev_fg_hwnd,
+                        paused_flag,
+                    )
                 }
                 Err(e) => {
                     tracing::error!(%e, "音频采集启动失败");
@@ -481,12 +861,25 @@ impl VoiceService {
         // 获取事件 receiver（在 begin_session 之后）
         let event_rx = port.events();
 
+        // Editor 连续听写：事件 task 携带共享听写状态（推段/补齐）+ 暂停标志 +
+        // VoiceService 句柄（STT 错误终态清理）。非 Editor 路径 editor_state 为 None。
+        let editor_state_for_events = if target == VoiceTarget::Editor {
+            self.editor_state.lock().unwrap().clone()
+        } else {
+            None
+        };
+        let voice_for_events = self
+            .app
+            .try_state::<std::sync::Arc<VoiceService>>()
+            .map(|s| s.inner().clone());
+
         // spawn 事件消费 task：按 generation 过滤，emit 到前端
         let app_for_events = self.app.clone();
         let target_for_events = target;
         let prev_hwnd_for_events = prev_fg_hwnd;
         let epoch_for_events = recording_epoch;
         let epoch_arc = self.recording_epoch.clone();
+        let paused_for_events = paused_flag.clone();
         let event_task = tokio::spawn(async move {
             consume_stt_events(
                 event_rx,
@@ -496,6 +889,9 @@ impl VoiceService {
                 target_for_events,
                 prev_hwnd_for_events,
                 app_for_events,
+                editor_state_for_events,
+                paused_for_events,
+                voice_for_events,
             )
             .await;
         });
@@ -507,6 +903,11 @@ impl VoiceService {
 
         let task_handle = tokio::spawn(async move {
             while let Some(chunk) = rx.recv().await {
+                // 0.23.3：Editor 听写暂停时丢弃 chunk（不推 STT、不发音量事件），
+                // 恢复后从静音继续，暂停期间的话语不进识别。
+                if paused_flag.load(Ordering::Relaxed) {
+                    continue;
+                }
                 // 计算 RMS 音量（0.0 ~ 1.0）
                 let level = compute_rms(&chunk.samples);
                 let target_str = target_for_audio.as_str();
@@ -641,7 +1042,7 @@ impl VoiceService {
 
     pub fn cancel_recording(&self) {
         // 取出 stt_port + generation + 停止采集 + abort tasks，然后释放锁
-        let (stt_port, generation, _target) = {
+        let (stt_port, generation, _target, was_editor) = {
             let mut session = self.session.lock().unwrap();
 
             if !session.recording {
@@ -667,13 +1068,15 @@ impl VoiceService {
             let generation = session.generation.take();
             session.recording = false;
             session.engine = None;
+            let was_editor = target == VoiceTarget::Editor && session.continuous;
+            session.continuous = false;
 
             // 通知输入状态机回 Idle
             crate::infra::platform::hotkey::InputController::update_voice_phase(
                 crate::infra::platform::hotkey::VoicePhase::Idle,
             );
 
-            (stt_port, generation, target)
+            (stt_port, generation, target, was_editor)
         }; // 锁在此释放
 
         // 0.22.9：通过 StreamingSttPort::cancel_session 通知引擎丢弃在途结果。
@@ -688,6 +1091,16 @@ impl VoiceService {
         }
 
         tracing::info!("语音录音已取消");
+
+        // Editor 连续听写取消（0.23.3）：confirmed 已交付的段保留（不回撤正文），
+        // 在途 preview 丢弃；通知编辑器前端回到 idle。
+        if was_editor {
+            if let Some(state) = self.editor_state.lock().unwrap().clone() {
+                let seq = state.lock().unwrap().last_seq();
+                self.emit_editor_status(&state, "ended", seq, None, None);
+            }
+            crate::app::tray::stop_breathing(&self.app);
+        }
 
         // 隐藏 mini overlay(G2)
         platform::window::hide_voice_overlay(&self.app);
@@ -740,6 +1153,62 @@ impl VoiceService {
         let prev_hwnd = self.session.lock().unwrap().prev_fg_hwnd;
         deliver_final(&self.app, target, &final_text, prev_hwnd);
     }
+}
+
+/// 发射编辑器听写段事件（供 VoiceService 与事件 task 共用）。
+fn emit_editor_segment(
+    app: &tauri::AppHandle,
+    state: &Arc<Mutex<EditorDictationState>>,
+    seq: u64,
+    text: &str,
+) {
+    let (epoch, session_ref, generation) = {
+        let st = state.lock().unwrap();
+        (st.epoch, st.session_ref.clone(), st.generation)
+    };
+    let _ = app.emit(
+        EventNames::EDITOR_VOICE_SEGMENT,
+        serde_json::json!({
+            "sessionRef": session_ref,
+            "generation": generation,
+            "epoch": epoch,
+            "seq": seq,
+            "text": text,
+        }),
+    );
+    tracing::debug!(
+        epoch,
+        seq,
+        chars = text.chars().count(),
+        "编辑器听写段已交付"
+    );
+}
+
+/// 发射编辑器听写状态事件（供 VoiceService 与事件 task 共用）。
+fn emit_editor_status(
+    app: &tauri::AppHandle,
+    state: &Arc<Mutex<EditorDictationState>>,
+    phase: &str,
+    seq: u64,
+    preview: Option<&str>,
+    message: Option<&str>,
+) {
+    let (epoch, session_ref, generation) = {
+        let st = state.lock().unwrap();
+        (st.epoch, st.session_ref.clone(), st.generation)
+    };
+    let _ = app.emit(
+        EventNames::EDITOR_VOICE_STATUS,
+        serde_json::json!({
+            "sessionRef": session_ref,
+            "generation": generation,
+            "epoch": epoch,
+            "phase": phase,
+            "seq": seq,
+            "preview": preview,
+            "message": message,
+        }),
+    );
 }
 
 /// 0.22.15：统一交付最终文本——供 `deliver_final_text`（stop 路径）
@@ -799,6 +1268,11 @@ fn deliver_final(
             );
             let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
         }
+        // Editor 不经 deliver_final（连续听写走 EDITOR_VOICE_* 事件路径）；
+        // 此分支仅为穷尽性兜底。
+        VoiceTarget::Editor => {
+            tracing::debug!("deliver_final: Editor 目标不应到达此处，忽略");
+        }
     }
 }
 
@@ -809,16 +1283,19 @@ fn deliver_final(
 /// 在 `stop_recording`（等待完成或超时）或 `cancel_recording`（abort）时终止。
 ///
 /// **事件处理**：
-/// - `Partial` → emit `VOICE_PARTIAL`（confirmed + preview 都空时跳过）
-/// - `Final` → 调用 `deliver_final` 交付最终文本
+/// - `Partial` → emit `VOICE_PARTIAL`（confirmed + preview 都空时跳过）；
+///   Editor 路径（0.23.3）改推 `EDITOR_VOICE_SEGMENT`（confirmed 增量段）
+///   与 `EDITOR_VOICE_STATUS`（preview 投影）
+/// - `Final` → Editor 路径补收尾段 + ended 状态；其余调 `deliver_final` 交付
 /// - `Busy` → 打 debug 日志
-/// - `Error` → emit `VOICE_ERROR`
+/// - `Error` → emit `VOICE_ERROR`；Editor 路径额外做终态清理（保留 confirmed）
 ///
 /// **双层过滤**：
 /// - adapter generation：每次 begin_session 从 1 开始
 /// - recording epoch（0.22.15）：VoiceService 级单调递增
 ///
 /// 两者是不同边界的校验，缺一不可。
+#[allow(clippy::too_many_arguments)]
 async fn consume_stt_events(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SttEvent>,
     expected_gen: u64,
@@ -827,8 +1304,12 @@ async fn consume_stt_events(
     target: VoiceTarget,
     prev_fg_hwnd: Option<isize>,
     app: tauri::AppHandle,
+    editor_state: Option<Arc<Mutex<EditorDictationState>>>,
+    paused: Arc<AtomicBool>,
+    voice: Option<Arc<VoiceService>>,
 ) {
     let target_str = target.as_str();
+    let is_editor = target == VoiceTarget::Editor;
 
     while let Some(event) = rx.recv().await {
         // 0.22.15：epoch 墙——实时对比当前 VoiceService epoch，
@@ -859,6 +1340,29 @@ async fn consume_stt_events(
                     );
                     continue;
                 }
+
+                // ── Editor 连续听写：confirmed 增量成段 + preview 状态投影 ──
+                if is_editor {
+                    let Some(state) = editor_state.as_ref() else {
+                        continue;
+                    };
+                    let next_seq = {
+                        let mut st = state.lock().unwrap();
+                        st.push_confirmed_delta(&confirmed)
+                    };
+                    if let Some((seq, text)) = next_seq {
+                        emit_editor_segment(&app, state, seq, &text);
+                    }
+                    let phase = if paused.load(Ordering::Relaxed) {
+                        "paused"
+                    } else {
+                        "recording"
+                    };
+                    let last_seq = state.lock().unwrap().last_seq();
+                    emit_editor_status(&app, state, phase, last_seq, Some(&preview), None);
+                    continue;
+                }
+
                 // 0.22.15：confirmed 和 preview 都为空时不发 VOICE_PARTIAL
                 if confirmed.is_empty() && preview.is_empty() {
                     continue;
@@ -888,6 +1392,24 @@ async fn consume_stt_events(
                     "收到 Final 事件"
                 );
 
+                // ── Editor：补收尾段（confirmed 之后的尾段定稿）+ ended 状态 ──
+                if is_editor {
+                    if let Some(state) = editor_state.as_ref() {
+                        let next = {
+                            let mut st = state.lock().unwrap();
+                            st.push_final_delta(&text)
+                        };
+                        match next {
+                            Some((seq, seg)) => emit_editor_segment(&app, state, seq, &seg),
+                            None => tracing::debug!("editor Final 无新增尾段"),
+                        }
+                        let last_seq = state.lock().unwrap().last_seq();
+                        emit_editor_status(&app, state, "ended", last_seq, None, None);
+                    }
+                    // Final 是 session 的最后一个事件，退出循环
+                    break;
+                }
+
                 // 0.22.15：统一调用 deliver_final
                 deliver_final(&app, target, &text, prev_fg_hwnd);
 
@@ -902,6 +1424,16 @@ async fn consume_stt_events(
                     continue;
                 }
                 tracing::error!(%message, "STT 引擎错误事件");
+
+                // ── Editor：终态清理（保留 confirmed、丢弃 preview、回收资源）──
+                if is_editor {
+                    if let Some(v) = voice.as_ref() {
+                        v.handle_editor_terminal_error(&message);
+                    }
+                    // Error 是终止事件，退出循环
+                    break;
+                }
+
                 let _ = app.emit(
                     EventNames::VOICE_ERROR,
                     serde_json::json!({

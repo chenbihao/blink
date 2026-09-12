@@ -49,6 +49,20 @@ export const EVENTS = Object.freeze({
     VOICE_STATUS: 'blink://voice-status',
     VOICE_ERROR: 'blink://voice-error',
 
+    /**
+     * 编辑器连续听写 confirmed 段（0.23.3）。
+     * payload: { sessionRef, generation, epoch, seq, text }
+     * 前端按 sessionRef + generation + epoch 过滤、seq 去重，缺号拉快照补齐。
+     */
+    EDITOR_VOICE_SEGMENT: 'blink://editor-voice-segment',
+    /**
+     * 编辑器连续听写状态（0.23.3）。
+     * payload: { sessionRef, generation, epoch, phase, seq, preview?, message? }
+     * phase: "recording" | "paused" | "finalizing" | "ended" | "error"
+     * preview 只进装饰层，不进正文、dirty、undo、保存或 AI。
+     */
+    EDITOR_VOICE_STATUS: 'blink://editor-voice-status',
+
     // ── 配置 ──
     CONFIG_CHANGED: 'blink://config-changed',
 

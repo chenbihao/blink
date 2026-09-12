@@ -7,7 +7,22 @@
     <link href="css/entries/voice-overlay.css" rel="stylesheet"/>
 </head>
 <body>
-<div id="overlay">
+<!-- 0.23.3 通用浮窗：同一窗口按 target/mode/phase 投影（§5.4）。
+     g2 hold 模式 = 既有布局；editor 连续听写模式 = 拖拽条 + 波形 + 预览 + 控制。 -->
+<div id="overlay" class="mode-g2">
+    <!-- editor 模式拖拽条（mini/展开切换 + 语音设置入口） -->
+    <div class="editor-strip hidden" data-tauri-drag-region id="editor-strip">
+        <span class="editor-dot" id="editor-dot"></span>
+        <span class="editor-strip-title" data-i18n="voice.overlay.dictation" data-tauri-drag-region>连续听写</span>
+        <button class="editor-strip-btn" data-i18n-title="voice.overlay.settings" id="btn-settings" title="语音设置">
+            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+        </button>
+        <button class="editor-strip-btn" data-i18n-title="voice.overlay.collapse" id="btn-toggle-size" title="收起">—
+        </button>
+    </div>
     <div class="voice-wave" id="wave">
         <div class="vw-bar"></div>
         <div class="vw-bar"></div>
@@ -16,28 +31,105 @@
         <div class="vw-bar"></div>
     </div>
     <div class="text" id="partial-text">语音输入中…</div>
-    <div class="hint" data-i18n="voice.overlay.hint">松开结束 · ESC 取消</div>
+    <div class="hint" data-i18n="voice.overlay.hint" id="hint">松开结束 · ESC 取消</div>
+    <div class="editor-controls hidden" id="editor-controls">
+        <button class="editor-ctl" data-i18n="voice.overlay.pause" id="btn-pause" type="button">暂停</button>
+        <button class="editor-ctl editor-ctl-stop" data-i18n="voice.overlay.stop" id="btn-stop" type="button">结束
+        </button>
+        <button class="editor-ctl" data-i18n="voice.overlay.backToEditor" id="btn-back" type="button">返回编辑器
+        </button>
+    </div>
 </div>
 <script type="module">
-    import {listen, invoke} from "./js/shared/tauri.js";
+    import {invoke, listen} from "./js/shared/tauri.js";
     import {EVENTS} from "./js/shared/event-names.js";
     import {t, applyI18nFromConfig, onLangChange} from "./js/i18n/index.js";
     import {applyThemeFromConfig} from "./js/shared/theme.js";
-
+    import {
+        focusContentEditor,
+        pauseEditorVoice,
+        resumeEditorVoice,
+        stopEditorVoice,
+    } from "./js/shared/api.js";
     // 应用主题（与主窗口/设置页统一）
     applyThemeFromConfig();
 
+    const overlayEl = document.getElementById("overlay");
     const textEl = document.getElementById("partial-text");
     const waveEl = document.getElementById("wave");
     const bars = waveEl.querySelectorAll(".vw-bar");
+    const hintEl = document.getElementById("hint");
+    const stripEl = document.getElementById("editor-strip");
+    const dotEl = document.getElementById("editor-dot");
+    const controlsEl = document.getElementById("editor-controls");
+    const pauseBtn = document.getElementById("btn-pause");
+    const stopBtn = document.getElementById("btn-stop");
+    const backBtn = document.getElementById("btn-back");
+    const toggleSizeBtn = document.getElementById("btn-toggle-size");
 
     // textEl 当前是否显示默认文案（非 partial / status / error 文本）
     // 用于语言切换时判断是否需要更新默认文案
     let isDefaultText = true;
 
+    // ── 模式与状态（0.23.3 §5.4 投影）────────────────────────────────
+    // mode: "g2" | "editor"；editorPhase: recording/paused/finalizing/error/null
+    let mode = "g2";
+    let editorPhase = null;
+    let mini = false;
+
+    function setMode(next) {
+        mode = next;
+        overlayEl.classList.toggle("mode-g2", mode === "g2");
+        overlayEl.classList.toggle("mode-editor", mode === "editor");
+        stripEl.classList.toggle("hidden", mode !== "editor");
+        controlsEl.classList.toggle("hidden", mode !== "editor" || mini);
+        hintEl.classList.toggle("hidden", mode === "editor");
+        textEl.classList.toggle("hidden", mode === "editor" && mini);
+    }
+
+    const PHASE_TITLE_KEYS = {
+        recording: "voice.overlay.recording",
+        paused: "voice.overlay.paused",
+        finalizing: "voice.overlay.finalizing",
+        error: "voice.overlay.paused",
+        ended: "voice.overlay.stop",
+    };
+
+    function setEditorPhase(phase) {
+        editorPhase = phase;
+        overlayEl.classList.remove("editor-recording", "editor-paused", "editor-finalizing", "editor-error");
+        if (phase) overlayEl.classList.add(`editor-${phase}`);
+        const titleKey = PHASE_TITLE_KEYS[phase];
+        dotEl.title = titleKey ? t(titleKey) : "";
+        controlsEl.classList.toggle("hidden", mode !== "editor" || mini);
+        const busy = phase === "finalizing";
+        pauseBtn.disabled = busy;
+        stopBtn.disabled = busy;
+        if (phase === "paused") {
+            pauseBtn.textContent = t("voice.overlay.resume");
+            pauseBtn.dataset.i18n = "voice.overlay.resume";
+        } else {
+            pauseBtn.textContent = t("voice.overlay.pause");
+            pauseBtn.dataset.i18n = "voice.overlay.pause";
+        }
+    }
+
+    /** 文本区渲染：editor 模式只显示 preview（confirmed 进正文，浮窗不重复展示） */
+    function setEditorText(preview) {
+        if (preview) {
+            textEl.innerHTML = '<span class="voice-preview"></span>';
+            textEl.querySelector(".voice-preview").textContent = preview;
+            isDefaultText = false;
+        } else {
+            textEl.textContent = editorPhase === "paused"
+                ? t("voice.overlay.paused")
+                : t("voice.overlay.recording");
+            isDefaultText = true;
+        }
+    }
+
     // ── 自动撑高（0.10.6）─────────────────────────────────────────────
     // 文本更新后测量内容高度，调用 Rust 侧 resize_voice_overlay 撑高窗口。
-    // 超长文本由 CSS .text { max-height + overflow-y: auto } 限制，窗口不超过 MAX_HEIGHT。
     const MIN_HEIGHT = 140;
     const MAX_HEIGHT = 400;
     let lastResizeHeight = MIN_HEIGHT;
@@ -57,20 +149,60 @@
         });
     }
 
-    // 初始化 i18n（设置 data-i18n 元素文本 + 触发 onLangChange 回调）
+    function resetWave() {
+        bars.forEach((bar) => (bar.style.height = "4px"));
+        waveEl.classList.remove("voice-loading", "voice-error");
+    }
+
+    function resetToDefaultText() {
+        textEl.textContent = t("voice.overlay.recording");
+        isDefaultText = true;
+    }
+
+    // ── 控制按钮（仅 editor 模式）────────────────────────────────────
+    pauseBtn.addEventListener("click", () => {
+        if (editorPhase === "paused") {
+            resumeEditorVoice().catch(() => {});
+        } else {
+            pauseEditorVoice().catch(() => {});
+        }
+    });
+
+    stopBtn.addEventListener("click", () => {
+        stopEditorVoice().catch(() => {});
+    });
+
+    backBtn.addEventListener("click", () => {
+        focusContentEditor().catch(() => {});
+    });
+
+    toggleSizeBtn.addEventListener("click", () => {
+        mini = !mini;
+        overlayEl.classList.toggle("mini", mini);
+        toggleSizeBtn.textContent = mini ? "□" : "—";
+        toggleSizeBtn.title = t(mini ? "voice.overlay.expand" : "voice.overlay.collapse");
+        controlsEl.classList.toggle("hidden", mode !== "editor" || mini);
+        textEl.classList.toggle("hidden", mode === "editor" && mini);
+        autoResize();
+    });
+
+    document.getElementById("btn-settings").addEventListener("click", () => {
+        invoke("open_settings_tab", {tab: "voice"}).catch(() => {});
+    });
+
+    // ── i18n 初始化 ──────────────────────────────────────────────────
     applyI18nFromConfig().then(() => {
-        if (isDefaultText) textEl.textContent = t("voice.overlay.recording");
+        if (isDefaultText) resetToDefaultText();
     });
 
-    // 语言切换时更新默认文案（仅在显示默认文案时）
     onLangChange(() => {
-        if (isDefaultText) textEl.textContent = t("voice.overlay.recording");
+        if (isDefaultText) resetToDefaultText();
     });
 
-    // 监听音量级别 → 驱动波形条高度
+    // ── 音量级别 → 波形（g2 / editor 都驱动）────────────────────────
     listen(EVENTS.VOICE_LEVEL, (event) => {
         const {level, target} = event.payload ?? {};
-        if (target !== "g2") return;
+        if (target !== "g2" && target !== "editor") return;
         const lv = Math.max(0, Math.min(1, level || 0));
         bars.forEach((bar, i) => {
             const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
@@ -81,8 +213,54 @@
         });
     });
 
-    // 监听流式 partial 文本
-    // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
+    // ── 录音开始：按 target 切换模式 ─────────────────────────────────
+    listen(EVENTS.VOICE_RECORDING_START, (event) => {
+        const {target} = event.payload ?? {};
+        resetWave();
+        if (target === "editor") {
+            setMode("editor");
+            setEditorPhase("recording");
+            setEditorText("");
+        } else {
+            setMode("g2");
+            resetToDefaultText();
+            autoResize();
+        }
+    });
+
+    // ── editor 听写状态（phase 投影 + preview 装饰层）────────────────
+    listen(EVENTS.EDITOR_VOICE_STATUS, (event) => {
+        const p = event.payload ?? {};
+        if (p.phase === undefined && p.preview === undefined) return;
+        if (p.phase) setEditorPhase(p.phase);
+        if (p.phase === "ended") {
+            // 后端随之隐藏窗口；页面复位等待下次复用
+            setMode("g2");
+            resetToDefaultText();
+            resetWave();
+            autoResize();
+            return;
+        }
+        if (p.phase === "error" && p.message) {
+            textEl.textContent = p.message;
+            isDefaultText = false;
+            waveEl.classList.add("voice-error");
+            autoResize();
+            return;
+        }
+        setEditorText(p.preview || "");
+        autoResize();
+    });
+
+    // ── 录音结束 → 复位（g2 / editor 兜底路径）───────────────────────
+    listen(EVENTS.VOICE_RECORDING_END, () => {
+        setMode("g2");
+        resetToDefaultText();
+        resetWave();
+        autoResize();
+    });
+
+    // ── g2 流式 partial 文本 ─────────────────────────────────────────
     listen(EVENTS.VOICE_PARTIAL, (event) => {
         const payload = event.payload ?? {};
         if (payload.target !== "g2") return;
@@ -109,27 +287,7 @@
         }
     });
 
-    // 录音结束 → 重置
-    listen(EVENTS.VOICE_RECORDING_END, () => {
-        textEl.textContent = t("voice.overlay.recording");
-        isDefaultText = true;
-        bars.forEach((bar) => (bar.style.height = "4px"));
-        waveEl.classList.remove("voice-loading", "voice-error");
-        autoResize();
-    });
-
-    // 录音开始 → 重置文案（覆盖 voice-status 的加载中文案）
-    listen(EVENTS.VOICE_RECORDING_START, (event) => {
-        const {target} = event.payload ?? {};
-        if (target !== "g2") return;
-        textEl.textContent = t("voice.overlay.recording");
-        isDefaultText = true;
-        // 录音开始：波形切回绿色（移除加载态蓝色 + 错误态红色）
-        waveEl.classList.remove("voice-loading", "voice-error");
-        autoResize();
-    });
-
-    // 语音状态提示（模型加载中等）
+    // ── 语音状态提示（g2 模型加载中等）──────────────────────────────
     listen(EVENTS.VOICE_STATUS, (event) => {
         const {message, target} = event.payload ?? {};
         if (target !== "g2" || !message) return;
@@ -141,15 +299,15 @@
         autoResize();
     });
 
-    // 语音错误提示（STT 未配置 / 服务未启动等）
-    // 波形转红色，与加载态蓝色区分。错误信息显示在文本区域。
+    // ── 语音错误提示（STT 未配置 / 服务未启动等）────────────────────
     listen(EVENTS.VOICE_ERROR, (event) => {
         const {message, target} = event.payload ?? {};
-        if (target !== "g2" || !message) return;
+        if ((target !== "g2" && target !== "editor") || !message) return;
         textEl.textContent = message;
         isDefaultText = false;
         waveEl.classList.remove("voice-loading"); // 清除可能残留的加载态
         waveEl.classList.add("voice-error");
+        if (target === "editor") setEditorPhase("error");
         autoResize();
     });
 </script>

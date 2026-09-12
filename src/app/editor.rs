@@ -210,6 +210,18 @@ impl EditorSessionService {
         Ok(self.lock()?.as_ref().map(LiveSession::snapshot))
     }
 
+    /// 校验会话身份是否仍然活动且匹配（0.23.3：start_editor_voice 冻结身份用）。
+    ///
+    /// 只读、不产生副作用；锁 poisoned 时保守返回 false（拒绝启动听写）。
+    pub fn verify_active_session(&self, session_ref: &str, generation: u64) -> bool {
+        match self.lock() {
+            Ok(guard) => guard.as_ref().is_some_and(|live| {
+                live.session_ref == session_ref && live.generation == generation
+            }),
+            Err(_) => false,
+        }
+    }
+
     // ── commit ──────────────────────────────────────────────────────────────
 
     /// 按保存目标提交正文（§3.5）。

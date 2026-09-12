@@ -308,6 +308,98 @@
     opacity: 0.8;
 }
 
+/* ── 0.23.3 连续听写（§3.6/§3.8）────────────────────────────────── */
+
+/* 常驻麦克风按钮（savebar 内，保存按钮左侧） */
+.editor-mic-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--border-glow);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--text-sub);
+    cursor: pointer;
+}
+
+.editor-mic-btn:hover {
+    color: var(--text);
+    border-color: var(--accent);
+}
+
+.editor-mic-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* 录音中：绿色高亮 + 脉冲（非颜色辅助：title 文案随态切换） */
+.editor-mic-btn.is-recording {
+    background: var(--green-bg);
+    border-color: var(--green);
+    color: var(--green);
+    animation: editor-mic-pulse 1.4s ease-in-out infinite;
+}
+
+/* 暂停：静态高亮，不脉冲 */
+.editor-mic-btn.is-paused {
+    background: var(--green-bg);
+    border-color: var(--green);
+    color: var(--green);
+}
+
+@keyframes editor-mic-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 var(--accent-bg);
+    }
+    50% {
+        box-shadow: 0 0 0 4px var(--accent-bg);
+    }
+}
+
+/* 本次听写动作条（savebar 上方，录音结束且有追加范围时出现） */
+.editor-voice-chips {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 6px 16px;
+    background: var(--surface);
+    border-top: 1px solid var(--surface-2);
+}
+
+.editor-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border: 1px solid var(--border-glow);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.editor-chip:hover {
+    border-color: var(--accent);
+}
+
+.editor-chip-dismiss {
+    padding: 4px 6px;
+}
+
+.editor-chip-dismiss .icon {
+    width: 12px;
+    height: 12px;
+}
+
 /* hidden 属性在 .md-toolbar 的显式 display:flex 下失效，恢复显隐语义 */
 .editor-md-toolbar[hidden] {
     display: none;

@@ -111,6 +111,93 @@ export class MarkdownIrEngine {
         this._onChange?.();
     }
 
+    /**
+     * 文末追加文本（0.23.3 听写追尾，单事务）。末尾节点是段落时在段内
+     * 追加；否则（空文档/围栏代码块等收尾）插入新段落。恢复用户此前
+     * selection、不抢焦点、不滚动。onUpdate 置 edited 并通知 revision。
+     * @param {string} text
+     */
+    appendText(text) {
+        if (!text) return;
+        this._insertAtDocEnd(text, {newParagraph: false});
+    }
+
+    /**
+     * 文末新起一段追加（0.23.3 首段语义）：末段非空段落时插入新段落，
+     * 其余情况与 appendText 等价（空段落被填充/非段落收尾本就需新段）。
+     * @param {string} text
+     */
+    appendParagraph(text) {
+        if (!text) return;
+        this._insertAtDocEnd(text, {newParagraph: true});
+    }
+
+    /** appendText / appendParagraph 共用实现（单事务 + selection 恢复） */
+    _insertAtDocEnd(text, {newParagraph}) {
+        const {state, schema} = this.editor;
+        const lastNode = state.doc.lastChild;
+        const lastIsParagraph = !!lastNode && lastNode.type === schema.nodes.paragraph;
+        const lastEmpty = lastIsParagraph && lastNode.content.size === 0;
+        // 段内追加：doc 收尾 token 占 1，插到 docEnd-1；新段落：插到 docEnd
+        const intoParagraph = lastIsParagraph && (!newParagraph || lastEmpty);
+        const insertPos = intoParagraph ? state.doc.content.size - 1 : state.doc.content.size;
+        const prevFrom = state.selection.from;
+        const prevTo = state.selection.to;
+        // 光标原在文末时让它自然跟随追加内容（打字语义）；其余恢复原选区，
+        // 追尾不移动前文 selection（§6.4）
+        const docEndPos = state.doc.content.size - 1;
+        const atEnd = prevFrom >= docEndPos && prevTo >= docEndPos;
+
+        let chain = this.editor.chain().command(({tr}) => {
+            if (intoParagraph) {
+                tr.insertText(text, insertPos);
+            } else {
+                const para = schema.nodes.paragraph.create(null, schema.text(text));
+                tr.insert(insertPos, para);
+            }
+            return true;
+        });
+        if (!atEnd) {
+            chain = chain.setTextSelection({from: prevFrom, to: prevTo});
+        }
+        chain.run();
+        // 程序化插入是真实编辑：onUpdate 触发 edited=true + onChange（不 suppress）
+    }
+
+    /**
+     * 在当前文档中选中给定文本并滚动到可见（"定位到本次听写"）。
+     * 跨 text node 拼接全文后按字符下标映射回 doc position。
+     * @param {string} text
+     * @returns {boolean} 是否找到并选中
+     */
+    locateText(text) {
+        if (!text) return false;
+        const {state} = this.editor;
+        let full = "";
+        /** @type {Array<{start: number, pos: number}>} text node 起点映射 */
+        const spans = [];
+        state.doc.descendants((node, pos) => {
+            if (node.isText && node.text) {
+                spans.push({start: full.length, pos});
+                full += node.text;
+            }
+            return true;
+        });
+        const idx = full.indexOf(text);
+        if (idx < 0) return false;
+        const posAt = (ci) => {
+            for (let i = spans.length - 1; i >= 0; i--) {
+                if (spans[i].start <= ci) return spans[i].pos + (ci - spans[i].start);
+            }
+            return null;
+        };
+        const from = posAt(idx);
+        if (from == null) return false;
+        const to = posAt(idx + text.length) ?? from + text.length;
+        this.editor.chain().setTextSelection({from, to}).scrollIntoView().run();
+        return true;
+    }
+
     /** 程序化载入/还原内容（不置 edited，抑制假更新；edited/normalized 复位） */
     loadContent(markdown) {
         const json = parseMarkdown(this.editor, markdown);

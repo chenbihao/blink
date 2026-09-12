@@ -149,6 +149,32 @@ export class EditorAdapter {
         this.revision += 1;
     }
 
+    /**
+     * 听写追尾（0.23.3 §3.6）：confirmed segment 追加到最新文末。
+     * newParagraph=true 时先补段落分隔（首段语义）；revision 由引擎
+     * onChange 回调自增（追加是真实编辑，计入正文/dirty/undo）。
+     * @param {string} text
+     * @param {{newParagraph?: boolean}} [opts]
+     */
+    appendDictation(text, {newParagraph = false} = {}) {
+        if (!this.engine || !text) return;
+        if (newParagraph && this.engine.appendParagraph) {
+            this.engine.appendParagraph(text);
+        } else {
+            this.engine.appendText(text);
+        }
+    }
+
+    /**
+     * 在当前视图中选中给定文本并滚动到可见（"定位到本次听写"）。
+     * @param {string} text
+     * @returns {boolean} 是否找到
+     */
+    locateText(text) {
+        if (!this.engine || !text) return false;
+        return this.engine.locateText?.(text) ?? false;
+    }
+
     /** 外部同步内容（便签变更 reload）：替换正文且前移检查点，不计用户编辑 */
     syncFromExternal(text) {
         const next = normalizeEol(text);

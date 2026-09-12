@@ -319,6 +319,7 @@ pub trait SttEngine: Send + Sync {
 
 pub(crate) mod cloud;
 
+pub mod dictation; // 0.23.3：编辑器连续听写段推导（纯逻辑）
 pub mod gguf_postprocess;
 pub mod local;
 #[cfg(test)]

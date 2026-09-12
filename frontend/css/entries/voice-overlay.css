@@ -95,3 +95,133 @@ body {
     font-size: 11px;
     letter-spacing: 0.5px;
 }
+
+/* ── Editor 连续听写模式（0.23.3 §5.4）────────────────────────────── */
+
+/* editor 模式下隐藏 g2 专属提示 */
+#overlay.mode-editor .hint {
+    display: none;
+}
+
+/* 拖拽条（顶部窄条，data-tauri-drag-region） */
+.editor-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 2px 4px 6px;
+    border-bottom: 1px solid var(--surface-2);
+    cursor: move;
+}
+
+.editor-dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    /* 非颜色状态辅助：录音态脉冲 + 状态文案在 dot.title 与文本区 */
+}
+
+.editor-recording .editor-dot {
+    animation: editor-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.editor-paused .editor-dot {
+    background: var(--warning, var(--text-dim));
+}
+
+.editor-finalizing .editor-dot {
+    background: var(--accent);
+}
+
+.editor-error .editor-dot {
+    background: var(--red);
+}
+
+@keyframes editor-dot-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
+}
+
+.editor-strip-title {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-sub);
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+}
+
+.editor-strip-btn {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.editor-strip-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+/* 控制按钮排 */
+.editor-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+
+.editor-ctl {
+    flex: 1;
+    min-width: 0;
+    padding: 5px 8px;
+    border: 1px solid var(--border-glow);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.editor-ctl:hover {
+    border-color: var(--accent);
+}
+
+.editor-ctl:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.editor-ctl-stop {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+}
+
+/* mini 态：只留拖拽条 + 波形，正文隐藏 */
+#overlay.mode-editor.mini {
+    min-width: 160px;
+}
+
+#overlay.mode-editor.mini .text,
+#overlay.mode-editor.mini .editor-controls {
+    display: none;
+}

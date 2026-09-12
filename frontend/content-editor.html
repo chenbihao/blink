@@ -68,6 +68,19 @@
         <div class="editor-tiptap-container" hidden id="editor-tiptap-container"></div>
     </div>
 
+    <!-- 0.23.3：本次听写动作（定位/整理，录音结束且存在追加范围时出现） -->
+    <div class="editor-voice-chips hidden" id="voice-chips">
+        <button class="editor-chip" id="chip-locate" type="button"></button>
+        <button class="editor-chip" id="chip-tidy" type="button"></button>
+        <button class="editor-chip editor-chip-dismiss" id="chip-dismiss" type="button"
+                data-i18n-title="editor.voice.dismiss" title="关闭">
+            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <line x1="6" x2="18" y1="6" y2="18"/>
+                <line x1="6" x2="18" y1="18" y2="6"/>
+            </svg>
+        </button>
+    </div>
+
     <!-- 0.23.2：底部保存区——当前保存目标 + 保存（§3.8：主保存区始终显示真实去向） -->
     <footer class="editor-savebar">
         <span class="editor-target-zone" id="target-zone" title="">
@@ -78,6 +91,16 @@
         </span>
         <span class="editor-dirty-dot hidden" id="dirty-dot"></span>
         <span class="editor-status" id="editor-status"></span>
+        <!-- 0.23.3：常驻连续听写按钮（§3.8） -->
+        <button class="editor-mic-btn" data-i18n-title="editor.voice.start" id="btn-mic" title="连续听写"
+                type="button">
+            <svg class="icon" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" viewBox="0 0 24 24">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" x2="12" y1="19" y2="22"/>
+            </svg>
+        </button>
         <button class="editor-save-btn" id="btn-save" type="button"></button>
     </footer>
 </div>

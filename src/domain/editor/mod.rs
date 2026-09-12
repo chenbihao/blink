@@ -227,10 +227,9 @@ pub fn markdown_view_policy(source: &SourceDescriptor) -> MarkdownViewPolicy {
     }
 }
 
-/// 编辑器结构化错误（§3.9 冻结集合的 0.23.1 子集）。
+/// 编辑器结构化错误（§3.9 冻结集合；`AiAlreadyActive`/`Cancelled` 随 0.23.4 补充）。
 ///
 /// 经 `CommandError` 投影后前端按 `code` 分类展示，不解析中文 message。
-/// `VoiceBusy`/`AiAlreadyActive`/`Cancelled` 随 0.23.3/0.23.4 接入时补充。
 #[derive(Debug, Clone, PartialEq, thiserror::Error, Serialize)]
 #[serde(
     tag = "kind",
@@ -241,6 +240,9 @@ pub enum EditorError {
     /// 已有不同来源的活动会话——正文绝不覆盖。
     #[error("已有编辑任务进行中")]
     EditorBusy { active_title: Option<String> },
+    /// 已有其他目标的 VoiceSession 在录音（0.23.3 §3.6：G1/G2/G3/Editor 互斥）。
+    #[error("已有语音输入在进行")]
+    VoiceBusy,
     /// session_ref 或 generation 不匹配——请求来自旧会话，只能清理自身。
     #[error("编辑会话已失效")]
     StaleSession,

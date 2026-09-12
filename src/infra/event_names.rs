@@ -61,6 +61,15 @@ impl EventNames {
     pub const VOICE_PARTIAL: &str = "blink://voice-partial";
     pub const VOICE_ERROR: &str = "blink://voice-error";
 
+    /// 编辑器连续听写 confirmed 段（0.23.3 §3.6）。payload:
+    /// `{ sessionRef, generation, epoch, seq, text }`。
+    /// 前端按 sessionRef + generation + epoch 过滤、seq 去重，缺号拉快照补齐。
+    pub const EDITOR_VOICE_SEGMENT: &str = "blink://editor-voice-segment";
+    /// 编辑器连续听写状态（0.23.3 §3.6）。payload:
+    /// `{ sessionRef, generation, epoch, phase: "recording"|"paused"|"finalizing"|"ended"|"error",
+    ///    seq, preview?, message? }`。preview 只进装饰层，不进正文。
+    pub const EDITOR_VOICE_STATUS: &str = "blink://editor-voice-status";
+
     // ── 配置 ──
     pub const CONFIG_CHANGED: &str = "blink://config-changed";
 

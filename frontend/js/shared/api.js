@@ -575,6 +575,46 @@ export function resolveEditorExit(request) {
     return invoke("resolve_editor_exit", {request});
 }
 
+// ── 0.23.3 编辑器连续听写（Editor VoiceSession）──
+
+/**
+ * 开始编辑器连续听写。sessionRef/generation 必须匹配活动会话。
+ * @returns {Promise<{epoch: number}>} 本次听写 epoch（段事件携带同一 epoch）
+ */
+export function startEditorVoice(sessionRef, generation) {
+    return invoke("start_editor_voice", {request: {sessionRef, generation}});
+}
+
+/** 暂停听写（音频丢弃不识别，confirmed 保持）。幂等。仅编辑器/浮窗窗口可调。 */
+export function pauseEditorVoice() {
+    return invoke("pause_editor_voice");
+}
+
+/** 继续听写。幂等。仅编辑器/浮窗窗口可调。 */
+export function resumeEditorVoice() {
+    return invoke("resume_editor_voice");
+}
+
+/** 结束听写：confirmed 保留、preview 丢弃。仅编辑器/浮窗窗口可调。 */
+export function stopEditorVoice() {
+    return invoke("stop_editor_voice");
+}
+
+/**
+ * 拉取听写 confirmed 快照（缺号/窗口恢复/重新聚焦时补齐）。
+ * @param {number} epoch 听写 epoch
+ * @param {number} afterSeq 只返回 seq > afterSeq 的段
+ * @returns {Promise<{epoch: number, segments: Array<{seq: number, text: string}>, truncated: number}|null>}
+ */
+export function getEditorVoiceSnapshot(epoch, afterSeq) {
+    return invoke("get_editor_voice_snapshot", {epoch, afterSeq});
+}
+
+/** 唤起并聚焦编辑器窗口（浮窗"返回编辑器"按钮）。 */
+export function focusContentEditor() {
+    return invoke("focus_content_editor");
+}
+
 // ── 0.16.4-0.16.5 剪贴板图片 ──
 
 /** 0.16.4：将剪贴板图片写回系统剪贴板。imageId 为 clipboard_images 表 id。 */

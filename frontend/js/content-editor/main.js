@@ -23,12 +23,16 @@ import {
     copyToClipboard,
     endEditorSession,
     getEditorSession,
+    getEditorVoiceSnapshot,
     getStickyNote,
     resolveEditorExit,
+    startEditorVoice,
+    stopEditorVoice,
 } from "../shared/api.js";
 import {EditorAdapter} from "./editor-adapter.js";
 import {EditorSession} from "./editor-session.js";
 import {EditorActions} from "./actions.js";
+import {EditorVoiceController} from "./voice.js";
 
 // ── DOM 引用 ──────────────────────────────────────────
 
@@ -47,6 +51,11 @@ const targetZoneEl = document.getElementById("target-zone");
 const targetIconUseEl = document.querySelector("#target-icon use");
 const targetLabelEl = document.getElementById("target-label");
 const dirtyDotEl = document.getElementById("dirty-dot");
+const micBtn = document.getElementById("btn-mic");
+const voiceChipsEl = document.getElementById("voice-chips");
+const chipLocateEl = document.getElementById("chip-locate");
+const chipTidyEl = document.getElementById("chip-tidy");
+const chipDismissEl = document.getElementById("chip-dismiss");
 
 // ── 模块装配 ──────────────────────────────────────────
 
@@ -91,6 +100,7 @@ const session = new EditorSession(
             updateDirtyDot();
         },
         onSessionCleared: () => {
+            voice.handleSessionEnded();
             updateViewSwitchState();
             updateDirtyDot();
             updateTargetDisplay();
@@ -108,6 +118,48 @@ const actions = new EditorActions({
     },
 });
 
+/** 听写错误码 → 文案（前端按 code 分类，不解析后端中文 message） */
+function describeVoiceError(code /* , message */) {
+    switch (code) {
+        case "voice_busy":
+            return t("editor.voice.busy");
+        case "stt_disabled":
+            return t("editor.voice.disabled");
+        case "stale_session":
+            return t("editor.voice.stale");
+        case "voice_failed":
+            return t("editor.voice.failed");
+        default:
+            return t("editor.voice.error", {message: code});
+    }
+}
+
+// ── 连续听写（0.23.3 §3.6）────────────────────────────
+
+const voice = new EditorVoiceController(
+    {
+        api: {startEditorVoice, stopEditorVoice, getEditorVoiceSnapshot},
+        adapter,
+        getSession: () => session,
+        listen,
+    },
+    {
+        onPhaseChanged: () => updateVoiceUi(),
+        onSegmentAppended: () => updateDirtyDot(),
+        onGapLost: () => setStatus(t("editor.voice.gapLost")),
+        onEnded: ({count}) => {
+            updateVoiceUi();
+            updateDirtyDot();
+            setStatus(t("editor.voice.ended", {count}));
+        },
+        onError: (message) => {
+            updateVoiceUi();
+            setStatus(message);
+        },
+        describeError: describeVoiceError,
+    },
+);
+
 // ── 初始化 ────────────────────────────────────────────
 
 async function init() {
@@ -117,9 +169,11 @@ async function init() {
     await applyI18nFromConfig();
 
     bindToolbar();
+    bindVoiceControls();
     bindWindowControls();
     bindKeyboard();
     bindBackendEvents();
+    await voice.bind();
 
     // init 主动拉取：覆盖“事件先于监听器注册”的时序（§1.4 存在不等于就绪）
     try {
@@ -134,6 +188,10 @@ async function init() {
         try {
             await win.show();
             await win.setFocus();
+            // 0.23.3：窗口重新聚焦时补齐听写段（§3.6 恢复/重新聚焦拉 snapshot）
+            win.onFocusChanged?.(({payload: focused}) => {
+                if (focused) voice.resyncIfActive().catch(() => {});
+            });
         } catch (e) {
             console.error("[content-editor] show window 失败:", e);
         }
@@ -153,6 +211,11 @@ function bindBackendEvents() {
     // 用户主动退出的一次汇总确认（§3.5，0.23.2 请求-应答协议）
     listen(EVENTS.EDITOR_EXIT_REQUEST, (event) => {
         handleExitRequest(event.payload);
+    });
+
+    // 0.23.3：会话被外部结束时停听写（confirmed 已在正文中，不回撤）
+    listen(EVENTS.EDITOR_SESSION_CHANGED, (event) => {
+        if (event.payload?.kind === "ended") voice.handleSessionEnded();
     });
 
     // 便签联动（来源为 sticky 时生效）
@@ -212,6 +275,65 @@ function bindToolbar() {
 
     viewSourceBtn?.addEventListener("click", () => switchView("source"));
     viewMdBtn?.addEventListener("click", () => switchView("markdown"));
+}
+
+// ── 连续听写 UI（0.23.3 §3.6/§3.8）────────────────────
+
+/** 麦克风按钮 + 本次听写 chips 的状态投影 */
+function bindVoiceControls() {
+    micBtn?.addEventListener("click", () => {
+        if (!session.isActive) {
+            setStatus(t("editor.voice.stale"));
+            return;
+        }
+        voice.toggle();
+    });
+
+    chipLocateEl?.addEventListener("click", () => {
+        const text = voice.joinedText;
+        if (!text) return;
+        if (adapter.locateText(text)) {
+            setStatus(t("editor.voice.located"));
+        } else {
+            setStatus(t("editor.voice.locateFailed"));
+        }
+    });
+
+    // 整理入口（0.23.3 只记录范围，AI 整理在 0.23.4 接入）
+    chipTidyEl?.addEventListener("click", () => {
+        setStatus(t("editor.voice.tidyPending"));
+    });
+
+    chipDismissEl?.addEventListener("click", hideVoiceChips);
+}
+
+/** 听写按钮态：idle=开始，recording/paused=结束（脉冲高亮），其余禁用 */
+function updateVoiceUi() {
+    if (!micBtn) return;
+    const phase = voice.phase;
+    micBtn.classList.toggle("is-recording", phase === "recording");
+    micBtn.classList.toggle("is-paused", phase === "paused");
+    micBtn.disabled = phase === "starting" || phase === "stopping";
+    micBtn.title = phase === "recording" || phase === "paused"
+        ? t("editor.voice.stop")
+        : t("editor.voice.start");
+    updateVoiceChips();
+}
+
+/** 录音结束且存在本次追加文本时显示"定位/整理"入口（§3.6 显式动作） */
+function updateVoiceChips() {
+    if (!voiceChipsEl) return;
+    const show = voice.phase === "idle" && voice.segments.length > 0;
+    voiceChipsEl.classList.toggle("hidden", !show);
+    if (show) {
+        if (chipLocateEl) chipLocateEl.textContent = t("editor.voice.locate");
+        if (chipTidyEl) chipTidyEl.textContent = t("editor.voice.tidy");
+    }
+}
+
+function hideVoiceChips() {
+    voice.segments = [];
+    updateVoiceChips();
 }
 
 /** 视图切换（Source/MD 是同一文本的双视图，§3.3）。
@@ -365,6 +487,8 @@ async function handleFileConflict() {
  * 保存并关闭（commit + end(saved)）/ 放弃更改（end(abandoned)）/ 继续编辑。
  */
 async function handleCancel() {
+    // 0.23.3：关闭前停听写（confirmed 已保留；未定稿 preview 按 §3.6 丢弃）
+    if (voice.isBusy) voice.stop();
     if (session.isActive && adapter.isDirty()) {
         const choice = await choiceDialog(t("editor.unsavedWarning"), {
             kind: "warning",
@@ -407,6 +531,7 @@ function lifecycleClose(reason) {
         return;
     }
     tracing(`${reason}，自动关闭编辑器`);
+    if (voice.isBusy) voice.stop();
     allowClose = true;
     session.end("abandoned").finally(() => closeWindow());
 }
@@ -454,6 +579,7 @@ function bindWindowControls() {
     if (win?.onCloseRequested) {
         win.onCloseRequested(async (event) => {
             event.preventDefault(); // 始终阻止销毁
+            if (voice.isBusy) voice.stop();
             if (allowClose || !session.isActive || !adapter.isDirty()) {
                 if (session.isActive) await session.end("abandoned");
                 closeWindow();
@@ -482,6 +608,11 @@ function bindKeyboard() {
             // 更多菜单打开时先关菜单，不触发关闭流程
             if (moreMenuEl && !moreMenuEl.classList.contains("hidden")) {
                 actions.closeMenu();
+                return;
+            }
+            // 0.23.3 ESC 分层：听写中先停听写（confirmed 保留），不关窗口
+            if (voice.isBusy) {
+                voice.stop();
                 return;
             }
             handleCancel();
