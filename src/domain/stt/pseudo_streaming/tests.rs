@@ -329,18 +329,17 @@ fn preview_interval_adapts_to_slow_inference_with_cap() {
 
 #[test]
 fn absolute_uncommitted_hard_limit_does_not_depend_on_vad_state() {
+    let engine = engine_without_transport(Vec::new());
+    let inner = engine.inner.lock().unwrap();
     assert_eq!(
-        PseudoStreamingSttEngine::exceeds_uncommitted_hard_limit(16_000 * 12, 0, 16_000),
+        inner.exceeds_uncommitted_hard_limit(16_000 * 12, 0, 16_000),
         Some(true)
     );
     assert_eq!(
-        PseudoStreamingSttEngine::exceeds_uncommitted_hard_limit(16_000 * 20, 16_000 * 9, 16_000),
+        inner.exceeds_uncommitted_hard_limit(16_000 * 20, 16_000 * 9, 16_000),
         Some(false)
     );
-    assert_eq!(
-        PseudoStreamingSttEngine::exceeds_uncommitted_hard_limit(10, 11, 16_000),
-        None
-    );
+    assert_eq!(inner.exceeds_uncommitted_hard_limit(10, 11, 16_000), None);
 }
 
 #[test]
@@ -593,6 +592,181 @@ async fn hard_limit_forces_boundary_for_audio_stuck_outside_vad_speaking() {
     assert_eq!(inner.last_preview_sample_end, audio.len());
 }
 
+// ── 0.23.7: 未提交上限合成场景测试 ──
+//
+// 这组测试单独证明"未提交音频上限"确实生效且独立于 EnergyVad 的
+// 软/硬窗口计时——不能只凭 WAV 识别结果判断它。
+
+/// 合成场景 1：VAD 滞回区徘徊（RMS 长期落在 off/on 阈值之间）。
+///
+/// VAD 的 speaking 与静默计时都不前进（两种事件都不会发生），
+/// 未提交上限必须按绝对未提交音频兜底切分。此处把上限配置为 16s：
+/// 13s 滞回音频在旧默认 12s 上限下会切、新上限下必须不切；越过 16s
+/// 后必须切——证明上限读取的是配置值而非默认常量。
+#[tokio::test]
+async fn uncommitted_cap_fires_when_vad_timer_stuck_in_hysteresis() {
+    let engine = engine_without_transport(Vec::new());
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.max_uncommitted_audio_ms = 16_000;
+    }
+
+    // 正弦幅度 0.0045 → RMS ≈ 0.0032，稳定落在默认阈值 off(≈0.002) 与
+    // on(≈0.004) 之间的滞回区：不进 speaking、也不算静默。
+    let hysteresis_tone = tone_200ms_chunk(0.0045_f32);
+    let chunk_len = hysteresis_tone.len();
+
+    // 喂 13s：默认 12s 上限会在此区间切，配置 16s 上限必须不切。
+    for _ in 0..65 {
+        engine.transcribe_chunk(&hysteresis_tone).await.unwrap();
+    }
+    assert_eq!(
+        engine.inner.lock().unwrap().preview_generation,
+        0,
+        "13s 滞回音频在 16s 配置上限下不应产生任何边界（12s 默认会误切）"
+    );
+
+    // 继续喂到恰好 16.0s：未提交音频达到 16s，cap 必须兜底触发一次。
+    //（不再多喂：无 transport 时 rollback 不推进 committed，后续 chunk
+    // 会按设计重复兜底同一区间，见有 transport 场景的单次触发验证。）
+    for _ in 0..15 {
+        engine.transcribe_chunk(&hysteresis_tone).await.unwrap();
+    }
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(
+        inner.preview_generation, 1,
+        "越过 16s 后未提交上限必须产生兜底边界（默认 12s 上限会在 13s 内提前触发）"
+    );
+    assert_eq!(
+        inner.last_preview_sample_end,
+        80 * chunk_len,
+        "边界必须由未提交上限在 16s 绝对音频处触发"
+    );
+    assert!(
+        !inner.vad.is_speaking(),
+        "滞回区音频不应进入 speaking——证明边界与 VAD 状态无关"
+    );
+}
+
+/// 合成场景 2：持续有声 + 定稿挂起。
+///
+/// 持续有声时 EnergyVad 的硬窗口（12s）计时正常推进，但未提交上限
+/// （此处配置 4s）更早到达——证明 cap 与 VAD 内部计时是两套独立边界。
+/// 边界产生后 finalize 请求挂起（定稿滞后），此时 cap 不得重复切分
+/// 制造乱序边界，直到定稿完成。
+#[tokio::test]
+async fn uncommitted_cap_fires_before_hard_window_and_waits_for_pending_finalize() {
+    // response 挂起不回复——模拟慢定稿
+    let (tx, rx) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![rx]);
+    let engine = controlled_engine(transport.clone(), Vec::new());
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.max_uncommitted_audio_ms = 4_000;
+    }
+
+    // 持续有声（RMS 0.07 远超 on 阈值），每次喂 200ms。
+    let speech = tone_200ms_chunk(0.1_f32);
+
+    // 3.9s：cap（4s）与硬窗口（12s）都未到，无边界。
+    for _ in 0..19 {
+        engine.transcribe_chunk(&speech).await.unwrap();
+    }
+    assert_eq!(
+        engine.inner.lock().unwrap().preview_generation,
+        0,
+        "3.9s 时任何边界都不应发生"
+    );
+
+    // 喂到 4.2s：cap 在 4s 处触发（远早于 12s 硬窗口），建立 pending
+    // 并发出定稿请求（挂起）。
+    for _ in 0..2 {
+        engine.transcribe_chunk(&speech).await.unwrap();
+    }
+    transport.wait_for_calls_or_fail(1).await;
+    assert_eq!(
+        engine.inner.lock().unwrap().preview_generation,
+        1,
+        "4s 处未提交上限应恰好产生一次边界"
+    );
+
+    // 继续喂到 5s：定稿挂起期间 cap 不得重复切边界（防乱序），
+    // 硬窗口（12s）也未到。
+    for _ in 0..4 {
+        engine.transcribe_chunk(&speech).await.unwrap();
+    }
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.preview_generation, 1, "定稿挂起期间不得产生额外边界");
+    assert!(
+        inner.sentences.pending.is_some() && inner.sentences.finalize_in_flight,
+        "挂起的定稿应保持 pending 状态"
+    );
+    assert_eq!(
+        transport.calls.load(Ordering::SeqCst),
+        1,
+        "只应有一次定稿请求"
+    );
+    // 显式释放锁再等待后台 task 写状态（std Mutex 不可重入）
+    drop(inner);
+
+    // 让挂起的定稿失败返回 → rollback，committed 不推进，链路收敛。
+    let _ = tx.send(Err("simulated slow finalize".to_string()));
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        !inner.sentences.finalize_in_flight && inner.sentences.pending.is_none()
+    })
+    .await;
+}
+
+/// 合成场景 3：cap 边界与自然句尾交替时坐标不重复、不丢段。
+///
+/// 正常说话（1s 句 + 静默）触发 SentenceEnd 后，cap 从新的 committed
+/// 基点重新计数——证明它按"绝对未提交音频"计算而非自身独立计时器。
+#[tokio::test]
+async fn uncommitted_cap_resets_with_committed_base() {
+    let engine = engine_without_transport(Vec::new());
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.max_uncommitted_audio_ms = 2_000;
+    }
+    let speech = tone_200ms_chunk(0.1_f32);
+    let silence = tone_200ms_chunk(0.0_f32);
+
+    // 1s 语音 + 400ms 静默 → 自然句尾（SentenceEnd）
+    for _ in 0..7 {
+        engine.transcribe_chunk(&speech).await.unwrap();
+    }
+    for _ in 0..2 {
+        engine.transcribe_chunk(&silence).await.unwrap();
+    }
+    assert_eq!(
+        engine.inner.lock().unwrap().preview_generation,
+        1,
+        "自然句尾应产生一次边界"
+    );
+
+    // 句尾定稿无 transport 立即 rollback（committed 不推进是 0.22.15 语义），
+    // 因此未提交音频继续累积，2s 后 cap 兜底再次触发。
+    for _ in 0..6 {
+        engine.transcribe_chunk(&speech).await.unwrap();
+    }
+    assert!(
+        engine.inner.lock().unwrap().preview_generation >= 2,
+        "cap 应在新的未提交音频达到 2s 后再次兜底"
+    );
+}
+
+/// 生成 200ms 的 16kHz 单声道音频块（测试辅助）。
+fn tone_200ms_chunk(amplitude: f32) -> Vec<f32> {
+    let n = 16_000 * 200 / 1000;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / 16_000.0;
+            (2.0 * std::f32::consts::PI * 440.0 * t).sin() * amplitude
+        })
+        .collect()
+}
+
 #[test]
 fn reset_recovers_and_clears_poisoned_mutex() {
     let engine = engine_without_transport(Vec::new());
@@ -605,6 +779,53 @@ fn reset_recovers_and_clears_poisoned_mutex() {
     engine.reset();
     assert!(!engine.inner.is_poisoned());
     assert!(engine.inner.lock().is_ok());
+}
+
+// ── 0.23.7: 窗口配置接线测试 ──
+
+/// from_connection 把 SttConfig 的三窗口配置投影到 VAD 实例与未提交上限，
+/// 保证设置页保存的值确实控制切片（非仅持久化展示）。
+#[test]
+fn from_connection_projects_window_config_into_engine() {
+    // H 组合：soft=10s / hard=14s / uncommitted=16s
+    let config = crate::domain::config::stt_config::SttConfig {
+        local_engine: crate::domain::config::stt_config::LocalEngineConfig {
+            vad: crate::domain::config::stt_config::VadConfig {
+                soft_window_s: 10,
+                hard_window_s: 14,
+                max_uncommitted_s: 16,
+                ..crate::domain::config::stt_config::VadConfig::default()
+            },
+            ..crate::domain::config::stt_config::LocalEngineConfig::default()
+        },
+        ..crate::domain::config::stt_config::SttConfig::default()
+    };
+    let conn = crate::domain::stt::SttEngineConnection {
+        host: "127.0.0.1".into(),
+        port: 0,
+        engine_id: "funasr".into(),
+        instance_id: "test-instance".into(),
+        transport: Some(ControlledTransport::new(Vec::new())),
+    };
+    let engine =
+        PseudoStreamingSttEngine::from_connection(&config, conn).expect("engine should construct");
+
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.vad.window_ms(), (10_000, 14_000));
+    assert_eq!(inner.max_uncommitted_audio_ms, 16_000);
+
+    // 未提交上限判定使用配置值：13s 未提交在配置 16s 上限下不触发，
+    // 在旧默认 12s 上限下触发——证明判定读取的是配置而非默认常量。
+    let thirteen_s = 16_000 * 13;
+    assert_eq!(
+        inner.exceeds_uncommitted_hard_limit(thirteen_s, 0, 16_000),
+        Some(false),
+        "配置 16s 上限时 13s 未提交不应触发（12s 默认上限会误触发）"
+    );
+    assert_eq!(
+        inner.exceeds_uncommitted_hard_limit(16_000 * 16, 0, 16_000),
+        Some(true)
+    );
 }
 
 // ── 0.22.15 fix 新增测试 ──

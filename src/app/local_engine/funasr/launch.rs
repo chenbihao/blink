@@ -40,6 +40,27 @@ pub struct VadConfigProjection {
     /// 最小句子长度。
     #[serde(default)]
     pub min_sentence_ms: u32,
+    /// 软窗口：持续有声达到该秒数后可在低能量帧切段（0.23.7）。
+    #[serde(default = "default_projection_soft_window_s")]
+    pub soft_window_s: u32,
+    /// 硬窗口：持续有声达到该秒数后强制切段（0.23.7）。
+    #[serde(default = "default_projection_hard_window_s")]
+    pub hard_window_s: u32,
+    /// 未提交音频上限（秒；伪流式层兜底，0.23.7）。
+    #[serde(default = "default_projection_max_uncommitted_s")]
+    pub max_uncommitted_s: u32,
+}
+
+fn default_projection_soft_window_s() -> u32 {
+    8
+}
+
+fn default_projection_hard_window_s() -> u32 {
+    12
+}
+
+fn default_projection_max_uncommitted_s() -> u32 {
+    12
 }
 
 impl FunasrEngineConfig {
@@ -55,6 +76,9 @@ impl FunasrEngineConfig {
                 silence_threshold: local.vad.silence_threshold,
                 min_silence_ms: local.vad.min_silence_ms,
                 min_sentence_ms: local.vad.min_sentence_ms,
+                soft_window_s: local.vad.soft_window_s,
+                hard_window_s: local.vad.hard_window_s,
+                max_uncommitted_s: local.vad.max_uncommitted_s,
             },
             auto_start_server: local.auto_start_server,
         }

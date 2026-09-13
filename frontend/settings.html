@@ -1982,6 +1982,49 @@
                                            min="200" step="100" type="range"/>
                                     <div class="voice-vad-param-range"><span>200ms</span><span>2000ms</span></div>
                                 </div>
+                                <div class="voice-vad-subgroup-title" data-i18n="voice.local.vad.windows.title">切片窗口（高级）</div>
+                                <div class="voice-vad-param">
+                                    <div class="voice-vad-param-head">
+                                        <span class="voice-vad-param-label"><span
+                                                data-i18n="voice.local.vad.soft_window_s.label">软窗口</span><span
+                                                class="field-hint-icon"
+                                                data-i18n-title="voice.local.vad.soft_window_s.hint"
+                                                title="持续说话达到该秒数后，可在声音稍低处提前切段（默认 8 秒）。调长可减少长句被切碎，但定稿更晚；长时间连续听写建议 10 秒。">ⓘ</span></span>
+                                        <span class="voice-vad-param-value"
+                                              id="voice-vad-soft-window-s-val">8s</span>
+                                    </div>
+                                    <input aria-label="软窗口秒数" class="voice-vad-slider" id="voice-vad-soft-window-s" max="20"
+                                           min="3" step="1" type="range"/>
+                                    <div class="voice-vad-param-range"><span>3s</span><span>20s</span></div>
+                                </div>
+                                <div class="voice-vad-param">
+                                    <div class="voice-vad-param-head">
+                                        <span class="voice-vad-param-label"><span
+                                                data-i18n="voice.local.vad.hard_window_s.label">硬窗口</span><span
+                                                class="field-hint-icon"
+                                                data-i18n-title="voice.local.vad.hard_window_s.hint"
+                                                title="持续说话达到该秒数后无条件强制切段（默认 12 秒）。必须大于软窗口。调长可保留更长上下文，但停顿处可能切在词中。">ⓘ</span></span>
+                                        <span class="voice-vad-param-value"
+                                              id="voice-vad-hard-window-s-val">12s</span>
+                                    </div>
+                                    <input aria-label="硬窗口秒数" class="voice-vad-slider" id="voice-vad-hard-window-s" max="30"
+                                           min="5" step="1" type="range"/>
+                                    <div class="voice-vad-param-range"><span>5s</span><span>30s</span></div>
+                                </div>
+                                <div class="voice-vad-param">
+                                    <div class="voice-vad-param-head">
+                                        <span class="voice-vad-param-label"><span
+                                                data-i18n="voice.local.vad.max_uncommitted_s.label">未提交上限</span><span
+                                                class="field-hint-icon"
+                                                data-i18n-title="voice.local.vad.max_uncommitted_s.hint"
+                                                title="未送识别的音频达到该秒数后强制切段兜底（默认 12 秒），防止识别卡住时缓冲无限增长。必须不小于硬窗口。">ⓘ</span></span>
+                                        <span class="voice-vad-param-value"
+                                              id="voice-vad-max-uncommitted-s-val">12s</span>
+                                    </div>
+                                    <input aria-label="未提交上限秒数" class="voice-vad-slider" id="voice-vad-max-uncommitted-s" max="30"
+                                           min="5" step="1" type="range"/>
+                                    <div class="voice-vad-param-range"><span>5s</span><span>30s</span></div>
+                                </div>
                             </div>
                         </div>
                     </div>

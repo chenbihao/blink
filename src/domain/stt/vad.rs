@@ -129,6 +129,10 @@ pub struct EnergyVad {
     /// 最小句子长度：短于此值不切句（默认 800ms）
     /// 避免咳嗽、短暂噪声等触发误切
     min_sentence_ms: u32,
+    /// 软窗口：持续有声达到该时长后可在低能量帧切段（默认 8s，0.23.7 可配置）
+    soft_window_ms: u64,
+    /// 硬窗口：持续有声达到该时长后强制切段（默认 12s，0.23.7 可配置）
+    hard_window_ms: u64,
     /// 采样率
     sample_rate: u32,
     // ── 自适应状态 ──
@@ -158,8 +162,8 @@ const ENERGY_HISTORY_CAPACITY: usize = 150;
 /// attack debounce 所需连续有声 frame 数（约 30ms @ 10ms）。
 /// 单个脉冲不会进入 speaking，需连续 3 帧才算入句。
 const ATTACK_DEBOUNCE_FRAMES: usize = 3;
-const SOFT_WINDOW_MS: u32 = 8_000;
-const HARD_WINDOW_MS: u32 = 12_000;
+const SOFT_WINDOW_MS: u64 = 8_000;
+const HARD_WINDOW_MS: u64 = 12_000;
 
 /// noise floor 更新速率：慢速上升（×0.02），较快下降（×0.1）。
 /// 非对称更新避免持续人声快速抬高噪声基线。
@@ -187,6 +191,8 @@ impl EnergyVad {
             silence_threshold: 0.005,
             min_silence_ms: 300,
             min_sentence_ms: 800,
+            soft_window_ms: SOFT_WINDOW_MS,
+            hard_window_ms: HARD_WINDOW_MS,
             sample_rate,
             energy_history: EnergyHistory::new(ENERGY_HISTORY_CAPACITY),
             noise_floor: 0.0,
@@ -199,7 +205,11 @@ impl EnergyVad {
         }
     }
 
-    /// 创建带自定义参数的能量 VAD。
+    /// 创建带自定义参数的能量 VAD（使用默认 8s/12s 切片窗口）。
+    ///
+    /// 0.23.7 后生产路径经 [`Self::with_params_and_windows`] 从配置注入窗口；
+    /// 本构造函数仅保留给测试。
+    #[cfg(test)]
     pub fn with_params(
         sample_rate: u32,
         silence_threshold: f64,
@@ -210,6 +220,38 @@ impl EnergyVad {
             silence_threshold,
             min_silence_ms,
             min_sentence_ms,
+            soft_window_ms: SOFT_WINDOW_MS,
+            hard_window_ms: HARD_WINDOW_MS,
+            sample_rate,
+            energy_history: EnergyHistory::new(ENERGY_HISTORY_CAPACITY),
+            noise_floor: 0.0,
+            noise_initialized: false,
+            silence_samples: 0,
+            speaking: false,
+            sentence_samples: 0,
+            attack_counter: 0,
+            segment_samples: 0,
+        }
+    }
+
+    /// 创建带自定义参数与切片窗口的能量 VAD（0.23.7 高级配置）。
+    ///
+    /// `soft_window_ms` / `hard_window_ms` 分别控制"低能量可切"与"强制切"
+    /// 窗口；调用方（`VadConfig::sanitize`）负责保证 `soft < hard`。
+    pub fn with_params_and_windows(
+        sample_rate: u32,
+        silence_threshold: f64,
+        min_silence_ms: u32,
+        min_sentence_ms: u32,
+        soft_window_ms: u64,
+        hard_window_ms: u64,
+    ) -> Self {
+        Self {
+            silence_threshold,
+            min_silence_ms,
+            min_sentence_ms,
+            soft_window_ms,
+            hard_window_ms,
             sample_rate,
             energy_history: EnergyHistory::new(ENERGY_HISTORY_CAPACITY),
             noise_floor: 0.0,
@@ -238,8 +280,8 @@ impl EnergyVad {
             (self.min_silence_ms as u64 * self.sample_rate as u64 / 1000) as usize;
         let min_sentence_samples =
             (self.min_sentence_ms as u64 * self.sample_rate as u64 / 1000) as usize;
-        let soft_window_samples = (SOFT_WINDOW_MS as u64 * self.sample_rate as u64 / 1000) as usize;
-        let hard_window_samples = (HARD_WINDOW_MS as u64 * self.sample_rate as u64 / 1000) as usize;
+        let soft_window_samples = (self.soft_window_ms * self.sample_rate as u64 / 1000) as usize;
+        let hard_window_samples = (self.hard_window_ms * self.sample_rate as u64 / 1000) as usize;
 
         let mut event = VadEvent::None;
 
@@ -383,6 +425,12 @@ impl EnergyVad {
     #[cfg(test)]
     pub fn sentence_samples(&self) -> usize {
         self.sentence_samples
+    }
+
+    /// 0.23.7：当前软/硬窗口（ms）——供配置接线测试消费。
+    #[cfg(test)]
+    pub fn window_ms(&self) -> (u64, u64) {
+        (self.soft_window_ms, self.hard_window_ms)
     }
 
     /// 0.22.15：当前 off 阈值——供裁剪等逻辑消费，避免两套静音定义。
@@ -542,7 +590,7 @@ mod tests {
     #[test]
     fn vad_soft_window_uses_low_energy_boundary() {
         let mut vad = EnergyVad::new(SAMPLE_RATE);
-        let speech = generate_tone(SOFT_WINDOW_MS + 100, 0.1);
+        let speech = generate_tone(SOFT_WINDOW_MS as u32 + 100, 0.1);
         let mut event = VadEvent::None;
         for chunk in speech.chunks(160) {
             event = vad.process_chunk(chunk);
@@ -564,7 +612,7 @@ mod tests {
     #[test]
     fn vad_hard_window_bounds_continuous_speech() {
         let mut vad = EnergyVad::new(SAMPLE_RATE);
-        let speech = generate_tone(HARD_WINDOW_MS + 500, 0.1);
+        let speech = generate_tone(HARD_WINDOW_MS as u32 + 500, 0.1);
         let mut event = VadEvent::None;
         for chunk in speech.chunks(160) {
             event = vad.process_chunk(chunk);
@@ -573,6 +621,82 @@ mod tests {
             }
         }
         assert_eq!(event, VadEvent::HardWindow);
+    }
+
+    /// 0.23.7：自定义软/硬窗口生效——窗口推迟后，同一段音频不再在默认
+    /// 8s 软窗口处切，而在配置的更长窗口后低能量帧切段。
+    #[test]
+    fn vad_custom_windows_replace_defaults() {
+        // 持续有声 8.5s + 200ms 短静默（不足 min_silence）：默认软窗口（8s）
+        // 已过线，在静默帧按 SoftWindow 切；配置 10s 软窗口未过线，不切。
+        let mut speech = generate_tone(8_500, 0.1);
+        speech.extend(generate_silence(200));
+
+        let mut default_vad = EnergyVad::new(SAMPLE_RATE);
+        let mut configured = EnergyVad::with_params_and_windows(
+            SAMPLE_RATE,
+            0.005,
+            300,
+            800,
+            10_000, // 软窗口推迟到 10s
+            14_000, // 硬窗口推迟到 14s
+        );
+
+        let mut default_cut = false;
+        let mut configured_cut = false;
+        for chunk in speech.chunks(160) {
+            if !default_cut && default_vad.process_chunk(chunk).is_boundary() {
+                default_cut = true;
+            }
+            if !configured_cut && configured.process_chunk(chunk).is_boundary() {
+                configured_cut = true;
+            }
+        }
+
+        assert!(default_cut, "默认窗口应在 8.5s 有声后的静默帧按软窗口切句");
+        assert!(!configured_cut, "推迟软窗口后 8.5s 持续有声不应切段");
+
+        // 配置版补一段有声 + 静默越过 10s 后，应在软窗口后低能量处切（SoftWindow）
+        let mut event = VadEvent::None;
+        let mut more = generate_tone(2_000, 0.1);
+        more.extend(generate_silence(200));
+        for chunk in more.chunks(160) {
+            event = configured.process_chunk(chunk);
+            if event.is_boundary() {
+                break;
+            }
+        }
+        assert_eq!(event, VadEvent::SoftWindow, "推迟后的软窗口仍走低能量切点");
+    }
+
+    /// 0.23.7：硬窗口可配置——14s 硬窗口下持续有声到 12.5s 不切，
+    /// 超过 14s 才强制切。
+    #[test]
+    fn vad_custom_hard_window_defers_forced_cut() {
+        let mut vad =
+            EnergyVad::with_params_and_windows(SAMPLE_RATE, 0.005, 300, 800, 10_000, 14_000);
+
+        // 12.5s 持续有声：默认硬窗口（12s）已切，14s 硬窗口不切
+        let speech = generate_tone(12_500, 0.1);
+        let mut cut = false;
+        for chunk in speech.chunks(160) {
+            if vad.process_chunk(chunk).is_boundary() {
+                cut = true;
+                break;
+            }
+        }
+        assert!(!cut, "14s 硬窗口下 12.5s 持续有声不应强制切");
+
+        // 补 0.6s（越过 14s 但不到 14s+0.5s 的余量则仍不切；这里直接推过线）
+        let speech = generate_tone(2_000, 0.1);
+        let mut event = VadEvent::None;
+        for chunk in speech.chunks(160) {
+            event = vad.process_chunk(chunk);
+            if event.is_boundary() {
+                break;
+            }
+        }
+        assert_eq!(event, VadEvent::HardWindow, "越过 14s 后应强制切");
     }
 
     #[test]

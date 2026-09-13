@@ -536,6 +536,165 @@ mod tests {
         assert!(should_run_for_path(&dir.path().join("missing")).is_none());
     }
 
+    /// 用私有语料回放生产 EnergyVad，比较参数对切段数量和触发时刻的影响。
+    /// 只写匿名 case id 与时间点；不输出音频、路径或转写正文。
+    /// 这里不执行 ASR/terminal finalize：短词即使未触发 VAD，松键后仍可能识别成功。
+    #[test]
+    fn private_corpus_vad_parameter_sweep() {
+        if std::env::var("BLINK_STT_VAD_SWEEP").ok().as_deref() != Some("1") {
+            return;
+        }
+        let corpus_dir =
+            should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
+        let manifest = load_manifest(&corpus_dir).expect("load private corpus manifest");
+        let listed_names: HashSet<_> = manifest
+            .cases
+            .iter()
+            .map(|case| case.filename.to_lowercase())
+            .collect();
+        let mut cases: Vec<_> = manifest
+            .cases
+            .into_iter()
+            .map(|case| {
+                let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read corpus WAV");
+                let audio = decode_and_normalize(&wav).expect("decode and normalize corpus WAV");
+                (case.case_id, Some(case.expected_segments), audio.samples)
+            })
+            .collect();
+        // 新录音不要求立即维护 manifest；以文件内容哈希标识，报告不泄漏文件名。
+        let mut unlisted = Vec::new();
+        for entry in std::fs::read_dir(&corpus_dir).expect("read corpus directory") {
+            let entry = entry.expect("read corpus entry");
+            let path = entry.path();
+            if !path.is_file()
+                || path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
+                || listed_names.contains(&entry.file_name().to_string_lossy().to_lowercase())
+            {
+                continue;
+            }
+            let wav = std::fs::read(path).expect("read unlisted WAV");
+            let id = {
+                use sha2::{Digest, Sha256};
+                let digest = format!("{:x}", Sha256::digest(&wav));
+                format!("new_{}", &digest[..8])
+            };
+            let audio = decode_and_normalize(&wav).expect("decode and normalize unlisted WAV");
+            unlisted.push((id, None, audio.samples));
+        }
+        unlisted.sort_by(|a, b| a.0.cmp(&b.0));
+        cases.extend(unlisted);
+
+        // 0.23.7 候选矩阵：固定能量阈值与最短静音，按
+        // "最短句长 ms / 软窗口 s / 硬窗口 s / 未提交上限 s" 比较 A–H。
+        // 离线重放以最近边界为已提交位置近似伪流式层的未提交上限。
+        let candidates: Vec<(&str, u32, u32, u32, u32)> = vec![
+            ("A", 800, 8, 12, 12),   // 现有基线
+            ("B", 1000, 8, 12, 12),  // 上轮长语音候选
+            ("C", 1000, 10, 12, 12), // 单独推迟软切
+            ("D", 1000, 8, 14, 14),  // 延长硬切与兜底
+            ("E", 1000, 10, 14, 14), // 中等长度组合
+            ("F", 1000, 10, 16, 16), // 长上下文上界
+            ("G", 1000, 6, 10, 10),  // 低延迟对照
+            ("H", 1000, 10, 14, 16), // 测定稿滞后时的未提交上限兜底
+        ];
+        let threshold = 0.005_f64;
+        let silence_ms = 300_u32;
+
+        let mut runs = Vec::new();
+        for (label, sentence_ms, soft_window_s, hard_window_s, max_uncommitted_s) in candidates {
+            let mut forced_boundaries = 0u32;
+            let mut uncommitted_cap_boundaries = 0u32;
+            let mut case_results = Vec::new();
+            for (case_id, expected, samples) in &cases {
+                let mut vad = EnergyVad::with_params_and_windows(
+                    TARGET_SAMPLE_RATE,
+                    threshold,
+                    silence_ms,
+                    sentence_ms,
+                    soft_window_s as u64 * 1000,
+                    hard_window_s as u64 * 1000,
+                );
+                let max_uncommitted_samples =
+                    max_uncommitted_s as usize * TARGET_SAMPLE_RATE as usize;
+                let mut events = Vec::new();
+                let mut processed = 0usize;
+                let mut segment_start = 0usize;
+                for chunk in samples.chunks((TARGET_SAMPLE_RATE / 100) as usize) {
+                    processed += chunk.len();
+                    let mut event = vad.process_chunk(chunk);
+                    // 伪流式层的未提交音频硬上限；无并发 finalize 的
+                    // 离线重放以最近边界为已提交位置，覆盖长段的保底切片。
+                    // 与生产一致按绝对未提交音频计算，不依赖 VAD speaking。
+                    let mut cap_triggered = false;
+                    if !event.is_boundary() && processed - segment_start >= max_uncommitted_samples
+                    {
+                        event = VadEvent::HardWindow;
+                        cap_triggered = true;
+                    }
+                    if event.is_boundary() {
+                        if event != VadEvent::SentenceEnd {
+                            forced_boundaries += 1;
+                        }
+                        if cap_triggered {
+                            uncommitted_cap_boundaries += 1;
+                        }
+                        events.push(serde_json::json!({
+                            "time_ms": processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                            "reason": if cap_triggered { "uncommitted_cap" } else { event.reason() },
+                            "off_threshold": vad.current_off_threshold(),
+                        }));
+                        segment_start = processed;
+                        vad.reset_sentence();
+                    }
+                }
+                // 松键后 terminal finalize 会处理剩余音频，即使 VAD 已不在
+                // speaking 状态。以相同 off threshold 判断尾段是否非全静音。
+                let terminal_off_threshold = vad.current_off_threshold();
+                let terminal_tail_has_audio = samples[segment_start..]
+                    .iter()
+                    .any(|sample| sample.abs() > terminal_off_threshold as f32);
+                let potential_transcribe_calls =
+                    events.len() as u32 + u32::from(terminal_tail_has_audio);
+                case_results.push(serde_json::json!({
+                    "case_id": case_id,
+                    "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                    "expected_segments": expected,
+                    "potential_transcribe_calls": potential_transcribe_calls,
+                    "events": events,
+                    "trailing_speech": vad.is_speaking(),
+                    "terminal_tail_has_audio": terminal_tail_has_audio,
+                    "terminal_off_threshold": terminal_off_threshold,
+                }));
+            }
+            runs.push(serde_json::json!({
+                "label": label,
+                "silence_threshold": threshold,
+                "min_silence_ms": silence_ms,
+                "min_sentence_ms": sentence_ms,
+                "soft_window_s": soft_window_s,
+                "hard_window_s": hard_window_s,
+                "max_uncommitted_s": max_uncommitted_s,
+                "forced_boundaries": forced_boundaries,
+                "uncommitted_cap_boundaries": uncommitted_cap_boundaries,
+                "cases": case_results,
+            }));
+        }
+
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/stt-vad-parameter-sweep.json");
+        let report = serde_json::json!({
+            "scope": "0.23.7 candidate matrix (A-H): EnergyVad soft/hard windows plus pseudo-streaming uncommitted-cap boundary replay; potential final calls, not recognized speech. ASR quality is evaluated separately.",
+            "labeled_cases": listed_names.len(),
+            "unlabeled_cases": cases.len() - listed_names.len(),
+            "runs": runs,
+        });
+        std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+            .expect("write anonymous VAD parameter report");
+    }
+
     /// 验证 48k stereo WAV 能正确解码和规范化为 16k mono。
     #[test]
     fn decode_and_normalize_48k_stereo_to_16k_mono() {

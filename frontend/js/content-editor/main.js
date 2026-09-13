@@ -53,6 +53,7 @@ import {showRecoveryConflictDialog} from "./recovery-dialog.js";
 import {RecoveryCandidates, RecoveryConflictResolver} from "./recovery-candidates.js";
 import {EditorExit, EditorLifecycle} from "./editor-lifecycle.js";
 import {fnv1a64Hex} from "./canonical-buffer.js";
+import {bindEditorContextMenu} from "./context-menu.js";
 
 // ── DOM 引用 ──────────────────────────────────────────
 
@@ -96,6 +97,7 @@ const transformEls = {
 
 /** 关闭已被会话语义确认（跳过 onCloseRequested 拦截） */
 let allowClose = false;
+let closeEditorMenu = () => {};
 
 /** 当前来源的便签 id（非便签来源为 null） */
 function originStickyId() {
@@ -144,6 +146,7 @@ const session = new EditorSession(
         onError: (message) => setStatus(message),
         onTargetChanged: () => updateTargetDisplay(),
         onSnapshotApplied: () => {
+            closeEditorMenu();
             updateViewSwitchState();
             updateDirtyDot();
             updateSourceDisplay();
@@ -151,6 +154,7 @@ const session = new EditorSession(
             void bindRecoveryDraft();
         },
         onSessionCleared: () => {
+            closeEditorMenu();
             voice.handleSessionEnded();
             void transform.cancel({silent: true});
             draft.unbind();
@@ -404,6 +408,13 @@ async function init() {
     onLangChange(refreshLocalizedUi);
 
     bindToolbar();
+    closeEditorMenu = bindEditorContextMenu({
+        root: document.querySelector(".editor-root"),
+        source: textareaEl,
+        markdown: mdContainerEl,
+        adapter, session, transform, setStatus,
+        closeMoreMenu: () => actions.closeMenu(),
+    });
     bindVoiceControls();
     bindTransformControls();
     bindWindowControls();
@@ -690,6 +701,7 @@ function hideVoiceChips() {
  *  听写进行中时在新引擎上重新记录本轮追加锚点（已入正文的旧段不再纳入
  *  定位/整理范围）；非听写中时本次范围随旧引擎作废，chips 同步隐藏。 */
 function switchView(target) {
+    closeEditorMenu();
     // 关键边界强制 flush：切换视图前把当前正文落到恢复草稿
     void draft.flush();
     if (!adapter.switchView(target)) return;
@@ -1002,6 +1014,7 @@ async function lifecycleClose(reason) {
 
 /** 关闭窗口（hide 复用模式；会话已 end，窗口回预热态） */
 function closeWindow() {
+    closeEditorMenu();
     const win = getCurrentWindow();
     if (win) {
         win.hide();

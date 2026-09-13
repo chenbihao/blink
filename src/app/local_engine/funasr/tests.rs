@@ -188,6 +188,9 @@ fn funasr_engine_config_preserves_vad() {
             silence_threshold: 0.003,
             min_silence_ms: 200,
             min_sentence_ms: 600,
+            soft_window_s: 10,
+            hard_window_s: 14,
+            max_uncommitted_s: 16,
         },
         ..Default::default()
     };
@@ -195,6 +198,10 @@ fn funasr_engine_config_preserves_vad() {
     assert_eq!(funasr_config.vad.silence_threshold, 0.003);
     assert_eq!(funasr_config.vad.min_silence_ms, 200);
     assert_eq!(funasr_config.vad.min_sentence_ms, 600);
+    // 0.23.7：窗口字段同步投影，保证 engine_config 消费方拿到完整 VAD 形状
+    assert_eq!(funasr_config.vad.soft_window_s, 10);
+    assert_eq!(funasr_config.vad.hard_window_s, 14);
+    assert_eq!(funasr_config.vad.max_uncommitted_s, 16);
 }
 
 #[test]
@@ -1339,4 +1346,253 @@ fn count_worker_processes() -> usize {
             .unwrap_or(0),
         _ => 0,
     }
+}
+
+// ── 0.23.7 真实伪流式链路回放（env 门控：BLINK_STT_REAL_PSEUDO=1）──────────
+//
+// 用真实 worker 驱动生产 PseudoStreamingSttEngine（离线 WAV 按 100ms 块喂入，
+// 不 sleep 模拟实时），验证定稿推进、回滚收敛、松键收尾与可配置的未提交
+// 上限在真实链路工作。与离线 sweep 互补：sweep 近似模拟异步提交，这里走
+// 真实的 spawn finalize / commit / rollback 路径。
+//
+// 观察口径（报告只含数值与匿名 id，不含转写正文）：
+// - confirmed_events：每次 confirmed 增长的（已喂入音频 ms, 已确认末端 ms）；
+// - peak_buffer_ms：max(pcm_samples)（缓冲有界性）；
+// - finalize_ms：松键收尾墙钟耗时；final_chars：终稿字符数（>0 即收尾有效）。
+#[tokio::test(flavor = "multi_thread")]
+async fn pseudo_streaming_real_worker_replay() {
+    if std::env::var("BLINK_STT_REAL_PSEUDO").ok().as_deref() != Some("1") {
+        eprintln!("跳过：设置 BLINK_STT_REAL_PSEUDO=1 运行真实伪流式链路回放");
+        return;
+    }
+    let Some(corpus_dir) = super::corpus_runner::should_run() else {
+        eprintln!("跳过：未设置 BLINK_STT_CORPUS_DIR");
+        return;
+    };
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let worker_dir = root.join("resources/bin/funasr-worker");
+    let worker_exe = worker_dir.join("funasr-nano-worker.exe");
+    // Nano 模型走 AppData 安装缓存（只读；音频临时目录仍在 target 下）
+    let appdata = std::env::var("APPDATA").expect("APPDATA");
+    let model_root = std::path::PathBuf::from(&appdata)
+        .join("blink/models/funasr/gguf-fun-asr-nano-q4km-9faa9616b982");
+    let active = std::fs::read_to_string(model_root.join("active.json")).ok();
+    let payload = active.and_then(|text| {
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                let slot = v["slot_id"].as_str()?.to_string();
+                Some(model_root.join("slots").join(slot).join("payload"))
+            })
+    });
+    let (encoder, llm) = match &payload {
+        Some(payload)
+            if payload.join("funasr-encoder-f16.gguf").is_file()
+                && payload.join("qwen3-0.6b-q4km.gguf").is_file() =>
+        {
+            (
+                payload.join("funasr-encoder-f16.gguf"),
+                payload.join("qwen3-0.6b-q4km.gguf"),
+            )
+        }
+        _ => {
+            eprintln!("跳过：AppData 缺少已安装的 Nano 模型 payload");
+            return;
+        }
+    };
+    if !worker_exe.is_file() {
+        eprintln!("跳过：本地缺少 funasr-nano-worker.exe");
+        return;
+    }
+    let payload_dir = payload.expect("payload resolved above");
+
+    // 只回放未列入 manifest 的长录音（与 sweep 的 unlabeled 集一致）
+    let manifest = super::corpus_runner::load_manifest(&corpus_dir).expect("load manifest");
+    let listed: std::collections::HashSet<_> = manifest
+        .cases
+        .iter()
+        .map(|case| case.filename.to_lowercase())
+        .collect();
+    let mut wavs: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus_dir)
+        .expect("read corpus dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+                && !listed.contains(&path.file_name().unwrap().to_string_lossy().to_lowercase())
+        })
+        .collect();
+    wavs.sort();
+    assert!(!wavs.is_empty(), "corpus dir has no unlabeled long wavs");
+
+    let audio_dir_guard = tempfile::Builder::new()
+        .prefix("real-pseudo-audio-")
+        .tempdir_in(root.join("target"))
+        .expect("create audio tempdir");
+    let audio_dir = audio_dir_guard.path().to_path_buf();
+
+    let mut command = tokio::process::Command::new(&worker_exe);
+    command
+        .args([
+            "--enc",
+            encoder.to_str().unwrap(),
+            "-m",
+            llm.to_str().unwrap(),
+            "--stdin-server",
+        ])
+        .current_dir(&worker_dir)
+        .env("BLINK_ENGINE_ID", "funasr")
+        .env("BLINK_INSTANCE_ID", "real-pseudo-replay")
+        .env("BLINK_ENGINE_TOKEN", "real-pseudo-token")
+        .env("BLINK_MODEL_ID", "gguf/fun-asr-nano-q4km")
+        .env("BLINK_MODEL_REVISION", "gguf-v0.2.6")
+        .env("BLINK_MODEL_PAYLOAD_DIR", &payload_dir)
+        .env("BLINK_AUDIO_DIR", &audio_dir)
+        .env("BLINK_WORKER_THREADS", "4")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = crate::infra::platform::no_window_tokio(command)
+        .spawn()
+        .expect("spawn worker for real pseudo replay");
+    let stdin = child.stdin.take().expect("worker stdin");
+    let stdout = child.stdout.take().expect("worker stdout");
+    let client = crate::infra::local_engine::worker_proto::NdjsonWorkerClient::new(stdin, stdout);
+    client
+        .hello(std::time::Duration::from_secs(60))
+        .await
+        .expect("worker ready within 60s");
+
+    // A（现状默认 8/12/12）与 H（长上下文 10/14/16，未提交上限与硬窗分离）：
+    // 同一批音频上 A 应出现 cap 兜底边界而 H 不应出现——直接证明未提交上限
+    // 读取的是配置值，而非 VAD 内部计时。
+    use crate::domain::config::stt_config::{LocalEngineConfig, SttConfig, VadConfig};
+    use crate::domain::stt::SttEngine;
+    let profiles: Vec<(&str, VadConfig)> = vec![
+        ("A", VadConfig::default()),
+        (
+            "H",
+            VadConfig {
+                min_sentence_ms: 1000,
+                soft_window_s: 10,
+                hard_window_s: 14,
+                max_uncommitted_s: 16,
+                ..VadConfig::default()
+            },
+        ),
+    ];
+
+    let mut report_cases = Vec::new();
+    for (label, vad) in profiles {
+        let config = SttConfig {
+            local_engine: LocalEngineConfig {
+                vad: vad.clone(),
+                ..LocalEngineConfig::default()
+            },
+            ..SttConfig::default()
+        };
+        let transport: std::sync::Arc<dyn crate::domain::stt::SttTransport> = std::sync::Arc::new(
+            worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
+        );
+        let conn = crate::domain::stt::SttEngineConnection {
+            host: "127.0.0.1".into(),
+            port: 0,
+            engine_id: "funasr".into(),
+            instance_id: "real-pseudo-replay".into(),
+            transport: Some(transport),
+        };
+        let engine =
+            crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
+                &config, conn,
+            )
+            .expect("engine constructs");
+
+        for path in &wavs {
+            let wav = std::fs::read(path).expect("read wav");
+            let audio =
+                super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
+            let case_id = {
+                use sha2::{Digest, Sha256};
+                format!("new_{:x}", Sha256::digest(&wav))[..8].to_string()
+            };
+            let sample_rate = 16_000usize;
+            let mut fed_samples = 0usize;
+            let mut confirmed_events: Vec<serde_json::Value> = Vec::new();
+            let mut peak_buffer_ms = 0f64;
+            let mut peak_uncommitted_ms = 0f64;
+
+            for chunk in audio.samples.chunks(sample_rate / 10) {
+                engine.transcribe_chunk(chunk).await.expect("chunk ok");
+                fed_samples += chunk.len();
+                // 实时速率喂入：让流式阶段的定稿/回滚真实发生（快速回放时
+                // 推理慢于喂入，所有边界都会推迟到松键收尾，掩盖窗口差异）
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let stats = engine.stream_stats();
+                peak_buffer_ms =
+                    peak_buffer_ms.max(stats.pcm_samples as f64 * 1000.0 / sample_rate as f64);
+                peak_uncommitted_ms = peak_uncommitted_ms.max(
+                    (fed_samples.saturating_sub(stats.pcm_committed_end)) as f64 * 1000.0
+                        / sample_rate as f64,
+                );
+                let committed_ms = stats.pcm_committed_end * 1000 / sample_rate;
+                let need_push = match confirmed_events.last() {
+                    Some(last) => last["committed_ms"] != committed_ms,
+                    None => true,
+                };
+                if need_push {
+                    confirmed_events.push(serde_json::json!({
+                        "fed_ms": fed_samples * 1000 / sample_rate,
+                        "committed_ms": committed_ms,
+                    }));
+                }
+            }
+
+            // 松键收尾：等待后台定稿 + 终段识别
+            let finalize_started = std::time::Instant::now();
+            let final_text = engine.finalize().await.expect("finalize ok");
+            let finalize_ms = finalize_started.elapsed().as_millis() as u64;
+
+            report_cases.push(serde_json::json!({
+                "profile": label,
+                "case_id": case_id,
+                "duration_ms": audio.samples.len() * 1000 / sample_rate,
+                "confirmed_events": confirmed_events,
+                "peak_buffer_ms": peak_buffer_ms.round() as u64,
+                "peak_uncommitted_ms": peak_uncommitted_ms.round() as u64,
+                "finalize_ms": finalize_ms,
+                "final_chars": final_text.chars().count(),
+            }));
+            println!(
+                "profile {label} case {case_id}: events={} peak_buffer={}ms peak_uncommitted={}ms finalize={finalize_ms}ms final_chars={}",
+                confirmed_events.len(),
+                peak_buffer_ms.round() as u64,
+                peak_uncommitted_ms.round() as u64,
+                final_text.chars().count()
+            );
+        }
+        engine.reset();
+    }
+
+    client.request_shutdown().await;
+    drop(client);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+    }
+
+    let output = root.join("target/stt-vad-real-pseudo-replay.json");
+    let report = serde_json::json!({
+        "scope": "Real PseudoStreamingSttEngine replay (A vs H) over unlabeled long wavs; numeric metrics only, no transcript content.",
+        "cases": report_cases,
+    });
+    std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+        .expect("write real pseudo replay report");
 }

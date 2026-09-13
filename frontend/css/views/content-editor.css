@@ -11,6 +11,46 @@
     color: var(--text);
 }
 
+/* 0.23.8：正文右键菜单挂在根节点，避免被 .editor-body 裁剪。 */
+.editor-context-menu {
+    position: absolute;
+    z-index: 80;
+    display: flex;
+    flex-direction: column;
+    min-width: 176px;
+    max-height: calc(100vh - 8px);
+    overflow-y: auto;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-modal);
+}
+
+.editor-context-menu button {
+    padding: 7px 10px;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.editor-context-menu button:hover,
+.editor-context-menu button:focus-visible {
+    background: var(--surface-2);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+.editor-context-separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--surface-2);
+}
+
 /* ── 顶部一体化区域（0.23.7）──
    标题 + 来源 + 原文/MD 切换 + 更多 + 窗口控制同处一条 40px 顶栏：单层背景、
    单条分隔线。信息不丢失，但不再拆成 titlebar + toolbar 两层。 */
@@ -164,8 +204,14 @@
     flex-shrink: 0;
 }
 
+/* 盒高固定：CJK（原文）与拉丁（MD）字形 metrics 不同，加选中态 font-weight
+   会撑出 22/25px 盒高差，容器被"原文"撑高后 MD 选中背景铺不满（上下漏缝） */
 .editor-view-btn {
-    padding: 4px 12px;
+    display: inline-flex;
+    align-items: center;
+    height: 25px;
+    padding: 0 12px;
+    line-height: 1;
     font-size: 12px;
     background: transparent;
     border: none;

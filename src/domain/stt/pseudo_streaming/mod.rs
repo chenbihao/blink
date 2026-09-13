@@ -72,8 +72,13 @@ const PREVIEW_MIN_NEW_AUDIO_MS: u64 = 500;
 /// 刚结束一次重推理就很快开始下一次，形成持续高 CPU 占用。
 const PREVIEW_MAX_INTERVAL_MS: u64 = 5000;
 
+/// 未提交音频上限的默认值（毫秒），对应 `VadConfig.max_uncommitted_s = 12`。
+///
 /// VAD 状态异常或音量长期落在滞回区时的最终保险：未提交音频达到
-/// 12 秒后仍强制切段。这个上限按绝对音频坐标计算，不依赖 speaking 状态。
+/// 上限后仍强制切段。这个上限按绝对音频坐标计算，不依赖 speaking 状态。
+/// 0.23.7 起上限值可配置，此常量仅作测试基准，生产值经
+/// `PseudoStreamingSttEngine::from_connection` 从配置注入。
+#[cfg(test)]
 const MAX_UNCOMMITTED_AUDIO_MS: u64 = 12_000;
 
 /// finalize 等待 in_flight 请求的最大时间。
@@ -144,6 +149,11 @@ struct PseudoInner {
     ///
     /// 用于判断本次快照是否需要携带完整累计正文——仅 confirmed 真正增长时携带。
     last_reported_confirmed_revision: u64,
+    /// 未提交音频上限（毫秒）：未提交音频达到该值后强制切段（0.23.7 可配置）。
+    ///
+    /// 按**绝对未提交音频**计算，与 VAD speaking 状态无关——VAD 的
+    /// 软/硬窗口只在有声阶段计时，此上限额外覆盖 VAD 计时停滞的场景。
+    max_uncommitted_audio_ms: u64,
     /// 0.22.15 follow-up: session 失败标志。
     ///
     /// 当内部不变量被破坏（如坐标非法）时设为 `true`。
@@ -172,6 +182,7 @@ impl PseudoInner {
             state_revision: 0,
             last_reported_state: None,
             last_reported_confirmed_revision: 0,
+            max_uncommitted_audio_ms: MAX_UNCOMMITTED_AUDIO_MS,
             session_failed: false,
         }
     }
@@ -184,6 +195,18 @@ impl PseudoInner {
             self.state_revision = self.state_revision.wrapping_add(1);
         }
         deferred
+    }
+
+    fn exceeds_uncommitted_hard_limit(
+        &self,
+        total: usize,
+        committed_end: usize,
+        sample_rate: u32,
+    ) -> Option<bool> {
+        let max_samples = (self.max_uncommitted_audio_ms * sample_rate as u64 / 1000) as usize;
+        total
+            .checked_sub(committed_end)
+            .map(|uncommitted| uncommitted >= max_samples)
     }
 
     /// 更新预览文本（仅在实际变化时推进状态与预览版本）。
@@ -294,16 +317,21 @@ impl PseudoStreamingSttEngine {
             silence_threshold = vad_cfg.silence_threshold,
             min_silence_ms = vad_cfg.min_silence_ms,
             min_sentence_ms = vad_cfg.min_sentence_ms,
+            soft_window_s = vad_cfg.soft_window_s,
+            hard_window_s = vad_cfg.hard_window_s,
+            max_uncommitted_s = vad_cfg.max_uncommitted_s,
             "伪流式 STT 引擎: VAD + GGUF worker 通道 (就绪)"
         );
 
         Ok(Self {
             inner: Arc::new(Mutex::new(PseudoInner {
-                vad: EnergyVad::with_params(
+                vad: EnergyVad::with_params_and_windows(
                     16000,
                     vad_cfg.silence_threshold,
                     vad_cfg.min_silence_ms,
                     vad_cfg.min_sentence_ms,
+                    vad_cfg.soft_window_ms(),
+                    vad_cfg.hard_window_ms(),
                 ),
                 sentences: SentenceState::new(),
                 samples: Vec::new(),
@@ -319,6 +347,7 @@ impl PseudoStreamingSttEngine {
                 state_revision: 0,
                 last_reported_state: None,
                 last_reported_confirmed_revision: 0,
+                max_uncommitted_audio_ms: vad_cfg.max_uncommitted_ms(),
                 session_failed: false,
             })),
             connection: Some(conn),
@@ -338,17 +367,6 @@ impl PseudoStreamingSttEngine {
         // 冷却 2N ms。短音频仍受 500ms 基础间隔约束。
         let adaptive = last_elapsed.as_millis().saturating_mul(2);
         Duration::from_millis(base.max(adaptive.min(PREVIEW_MAX_INTERVAL_MS as u128) as u64))
-    }
-
-    fn exceeds_uncommitted_hard_limit(
-        total: usize,
-        committed_end: usize,
-        sample_rate: u32,
-    ) -> Option<bool> {
-        let max_samples = (MAX_UNCOMMITTED_AUDIO_MS * sample_rate as u64 / 1000) as usize;
-        total
-            .checked_sub(committed_end)
-            .map(|uncommitted| uncommitted >= max_samples)
     }
 
     fn has_min_preview_growth(total: usize, last_end: usize, sample_rate: u32) -> Option<bool> {
@@ -856,7 +874,7 @@ impl SttEngine for PseudoStreamingSttEngine {
                 && inner.sentences.pending.is_none()
                 && !inner.sentences.finalize_in_flight
             {
-                match Self::exceeds_uncommitted_hard_limit(
+                match inner.exceeds_uncommitted_hard_limit(
                     total,
                     inner.sentences.committed_sample_end,
                     self.sample_rate,

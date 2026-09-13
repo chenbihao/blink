@@ -684,6 +684,17 @@ fn main() {
                 );
                 tracing::info!("STT 云端配置迁移已持久化到配置库");
             }
+            // 0.23.7：旧库中非法的 VAD 窗口组合安全归一化并持久化，
+            // 保证引擎与设置页读到的恒为有效组合（缺字段时 serde 默认 8/12/12）。
+            if stt_config.local_engine.vad.sanitize() {
+                let _ = tauri::async_runtime::block_on(
+                    app::config::ConfigStore::set::<app::stt_config::SttConfig>(
+                        &pools.config,
+                        &stt_config,
+                    ),
+                );
+                tracing::info!("STT VAD 窗口配置已归一化并持久化");
+            }
             app::stt_config::init_cache(stt_config);
 
             let voice_service = std::sync::Arc::new(app::voice::VoiceService::new(app.handle().clone()));

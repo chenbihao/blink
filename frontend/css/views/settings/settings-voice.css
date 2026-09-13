@@ -323,6 +323,11 @@
     line-height: 1.6;
     border-radius: var(--radius-sm);
     background: var(--surface-2);
+    /* 转写结果要能划词复制（同 settings-mcp.css 的 log/endpoint 先例）：
+       设置页整体不保证可选，结果文本显式开启 text 选择 */
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
 }
 
 .audio-test-container {
@@ -543,6 +548,17 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-md, 14px);
+}
+
+/* 0.23.7 切片窗口分组标题（高级窗口三项的前导弱化标题） */
+#voice .voice-vad-subgroup-title {
+    font-size: var(--text-xs, 11px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text-sub);
+    opacity: 0.7;
+    margin-top: var(--space-xs, 4px);
+    padding-top: var(--space-sm, 10px);
+    border-top: 1px dashed var(--surface-2);
 }
 
 #voice .voice-vad-param {

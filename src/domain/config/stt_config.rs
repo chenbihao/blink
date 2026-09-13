@@ -296,6 +296,19 @@ pub struct LocalEngineConfig {
 ///
 /// 控制伪流式引擎何时判定"用户停顿了"从而触发句尾定稿。
 /// 离麦克风较远或环境噪声较高时，可适当调低 `silence_threshold`。
+///
+/// 0.23.7 新增三个窗口字段（单位：秒）：
+/// - `soft_window_s`：EnergyVad 的软窗口——持续有声达到该时长后，
+///   在低能量帧即可切段（不必等完整静默）；
+/// - `hard_window_s`：EnergyVad 的硬窗口——持续有声达到该时长后
+///   无条件强制切段；
+/// - `max_uncommitted_s`：伪流式层的未提交音频上限——按**绝对未提交
+///   音频**计算（与 VAD speaking 状态无关），在 VAD 状态异常或长期
+///   落在滞回区时兜底，保证送模型的窗口不会无限增长。
+///
+/// 有效组合规则：`soft_window_s < hard_window_s <= max_uncommitted_s`。
+/// 非法值通过 [`VadConfig::sanitize`] 安全归一化，旧配置缺字段时保持
+/// 8/12/12 秒的既有行为。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
     /// RMS 低于此值视为静默（默认 0.005，约 -46dB）。
@@ -314,7 +327,27 @@ pub struct VadConfig {
     /// 避免咳嗽、短暂噪声等触发误切。调低可让短句也定稿，但误切风险增大。
     #[serde(default = "default_vad_min_sentence_ms")]
     pub min_sentence_ms: u32,
+    /// 软窗口：持续有声达到该秒数后，可在低能量帧切段（默认 8 秒）。
+    #[serde(default = "default_vad_soft_window_s")]
+    pub soft_window_s: u32,
+    /// 硬窗口：持续有声达到该秒数后无条件强制切段（默认 12 秒）。
+    #[serde(default = "default_vad_hard_window_s")]
+    pub hard_window_s: u32,
+    /// 未提交音频上限：未提交音频达到该秒数后强制切段（默认 12 秒）。
+    ///
+    /// 属于伪流式层（不依赖 VAD speaking 状态），与硬窗口职责不同：
+    /// 硬窗口只在持续有声时计时，此上限覆盖 VAD 计时停滞的场景。
+    #[serde(default = "default_vad_max_uncommitted_s")]
+    pub max_uncommitted_s: u32,
 }
+
+/// 窗口字段的安全边界（秒）。serde 缺字段补默认值，越界值由 [`VadConfig::sanitize`] 收敛。
+pub const VAD_SOFT_WINDOW_MIN_S: u32 = 3;
+pub const VAD_SOFT_WINDOW_MAX_S: u32 = 30;
+pub const VAD_HARD_WINDOW_MIN_S: u32 = 5;
+pub const VAD_HARD_WINDOW_MAX_S: u32 = 30;
+pub const VAD_MAX_UNCOMMITTED_MIN_S: u32 = 5;
+pub const VAD_MAX_UNCOMMITTED_MAX_S: u32 = 30;
 
 fn default_server_port() -> u16 {
     8000
@@ -375,6 +408,18 @@ fn default_vad_min_sentence_ms() -> u32 {
     800
 }
 
+fn default_vad_soft_window_s() -> u32 {
+    8
+}
+
+fn default_vad_hard_window_s() -> u32 {
+    12
+}
+
+fn default_vad_max_uncommitted_s() -> u32 {
+    12
+}
+
 fn default_streaming_mode() -> StreamingMode {
     StreamingMode::Pseudo
 }
@@ -428,7 +473,68 @@ impl Default for VadConfig {
             silence_threshold: default_vad_silence_threshold(),
             min_silence_ms: default_vad_min_silence_ms(),
             min_sentence_ms: default_vad_min_sentence_ms(),
+            soft_window_s: default_vad_soft_window_s(),
+            hard_window_s: default_vad_hard_window_s(),
+            max_uncommitted_s: default_vad_max_uncommitted_s(),
         }
+    }
+}
+
+impl VadConfig {
+    /// 把三个窗口字段收敛到安全范围并满足顺序约束
+    /// `soft < hard <= max_uncommitted`（0.23.7）。
+    ///
+    /// 用于处理非法旧值和越界保存：越界字段先 clamp 到自身边界，
+    /// 再按顺序约束前移前项。返回 `true` 表示发生了调整（调用方记
+    /// warn 日志并按需持久化）。默认值组合（8/12/12）恒为不动点。
+    pub fn sanitize(&mut self) -> bool {
+        let before = (
+            self.soft_window_s,
+            self.hard_window_s,
+            self.max_uncommitted_s,
+        );
+
+        // 1. 各字段 clamp 到自身安全范围
+        self.soft_window_s = self
+            .soft_window_s
+            .clamp(VAD_SOFT_WINDOW_MIN_S, VAD_SOFT_WINDOW_MAX_S);
+        self.hard_window_s = self
+            .hard_window_s
+            .clamp(VAD_HARD_WINDOW_MIN_S, VAD_HARD_WINDOW_MAX_S);
+        self.max_uncommitted_s = self
+            .max_uncommitted_s
+            .clamp(VAD_MAX_UNCOMMITTED_MIN_S, VAD_MAX_UNCOMMITTED_MAX_S);
+
+        // 2. 顺序约束：hard <= max_uncommitted，soft < hard。
+        //    clamp 后 hard >= VAD_HARD_WINDOW_MIN_S(5)，
+        //    soft.min(hard-1) >= 4 > VAD_SOFT_WINDOW_MIN_S(3)，无需再回 clamp。
+        self.hard_window_s = self.hard_window_s.min(self.max_uncommitted_s);
+        self.soft_window_s = self.soft_window_s.min(self.hard_window_s - 1);
+
+        let after = (
+            self.soft_window_s,
+            self.hard_window_s,
+            self.max_uncommitted_s,
+        );
+        if after != before {
+            tracing::warn!(?before, ?after, "VAD 窗口配置非法，已安全归一化");
+        }
+        after != before
+    }
+
+    /// 软窗口（毫秒）——供 EnergyVad 消费。
+    pub fn soft_window_ms(&self) -> u64 {
+        self.soft_window_s as u64 * 1000
+    }
+
+    /// 硬窗口（毫秒）——供 EnergyVad 消费。
+    pub fn hard_window_ms(&self) -> u64 {
+        self.hard_window_s as u64 * 1000
+    }
+
+    /// 未提交音频上限（毫秒）——供伪流式层消费。
+    pub fn max_uncommitted_ms(&self) -> u64 {
+        self.max_uncommitted_s as u64 * 1000
     }
 }
 
@@ -714,6 +820,9 @@ mod tests {
         assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
         assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
         assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
+        assert_eq!(cfg.local_engine.vad.soft_window_s, 8);
+        assert_eq!(cfg.local_engine.vad.hard_window_s, 12);
+        assert_eq!(cfg.local_engine.vad.max_uncommitted_s, 12);
         assert_eq!(cfg.local_engine.vad_kind, "auto");
     }
 
@@ -740,6 +849,9 @@ mod tests {
                     silence_threshold: 0.003,
                     min_silence_ms: 200,
                     min_sentence_ms: 600,
+                    soft_window_s: 10,
+                    hard_window_s: 14,
+                    max_uncommitted_s: 16,
                 },
                 vad_kind: "energy".into(),
                 streaming_model: None,
@@ -773,6 +885,9 @@ mod tests {
         assert_eq!(restored.local_engine.vad.silence_threshold, 0.003);
         assert_eq!(restored.local_engine.vad.min_silence_ms, 200);
         assert_eq!(restored.local_engine.vad.min_sentence_ms, 600);
+        assert_eq!(restored.local_engine.vad.soft_window_s, 10);
+        assert_eq!(restored.local_engine.vad.hard_window_s, 14);
+        assert_eq!(restored.local_engine.vad.max_uncommitted_s, 16);
         assert_eq!(restored.local_engine.vad_kind, "energy");
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
@@ -1663,5 +1778,126 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: SttConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.local_engine.vad_kind, "fsmn");
+    }
+
+    // ── 0.23.7: VAD 窗口高级配置测试 ─────────────────────────────────────
+
+    /// 旧配置缺三个窗口字段时保持 8/12/12 秒既有行为。
+    #[test]
+    fn old_config_missing_window_fields_keeps_8_12_12() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"vad":{"silence_threshold":0.005,"min_silence_ms":300,"min_sentence_ms":1000}}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.local_engine.vad.soft_window_s, 8);
+        assert_eq!(cfg.local_engine.vad.hard_window_s, 12);
+        assert_eq!(cfg.local_engine.vad.max_uncommitted_s, 12);
+    }
+
+    /// ms 助手按秒换算（供 EnergyVad / 伪流式层消费）。
+    #[test]
+    fn window_ms_helpers_convert_seconds() {
+        let mut vad = VadConfig::default();
+        vad.soft_window_s = 10;
+        vad.hard_window_s = 14;
+        vad.max_uncommitted_s = 16;
+        assert_eq!(vad.soft_window_ms(), 10_000);
+        assert_eq!(vad.hard_window_ms(), 14_000);
+        assert_eq!(vad.max_uncommitted_ms(), 16_000);
+    }
+
+    /// 合法组合 sanitize 为不动点；默认值组合恒不动。
+    #[test]
+    fn sanitize_keeps_valid_combinations() {
+        let mut vad = VadConfig::default();
+        assert!(!vad.sanitize(), "默认值 8/12/12 不应被调整");
+        assert_eq!(
+            (vad.soft_window_s, vad.hard_window_s, vad.max_uncommitted_s),
+            (8, 12, 12)
+        );
+
+        // H 组合 10/14/16：soft < hard <= uncommitted，合法
+        let mut vad = VadConfig {
+            soft_window_s: 10,
+            hard_window_s: 14,
+            max_uncommitted_s: 16,
+            ..VadConfig::default()
+        };
+        assert!(!vad.sanitize());
+        assert_eq!(
+            (vad.soft_window_s, vad.hard_window_s, vad.max_uncommitted_s),
+            (10, 14, 16)
+        );
+
+        // A 组合 8/12/12 同样是不动点
+        let mut vad = VadConfig {
+            soft_window_s: 8,
+            hard_window_s: 12,
+            max_uncommitted_s: 12,
+            ..VadConfig::default()
+        };
+        assert!(!vad.sanitize());
+    }
+
+    /// 非法旧值：越界与顺序破坏都被安全归一化为有效组合。
+    #[test]
+    fn sanitize_normalizes_illegal_values() {
+        // 顺序破坏：soft >= hard >= uncommitted
+        let mut vad = VadConfig {
+            soft_window_s: 15,
+            hard_window_s: 10,
+            max_uncommitted_s: 8,
+            ..VadConfig::default()
+        };
+        assert!(vad.sanitize());
+        assert_eq!(
+            (vad.soft_window_s, vad.hard_window_s, vad.max_uncommitted_s),
+            (7, 8, 8),
+            "各字段先 clamp（此处本就在范围内），再按 hard<=uncommitted、soft<hard 前移"
+        );
+        // 重申顺序约束
+        assert!(vad.soft_window_s < vad.hard_window_s);
+        assert!(vad.hard_window_s <= vad.max_uncommitted_s);
+
+        // 越界：超出最大值
+        let mut vad = VadConfig {
+            soft_window_s: 100,
+            hard_window_s: 200,
+            max_uncommitted_s: 999,
+            ..VadConfig::default()
+        };
+        assert!(vad.sanitize());
+        assert_eq!(
+            (vad.soft_window_s, vad.hard_window_s, vad.max_uncommitted_s),
+            (
+                VAD_SOFT_WINDOW_MAX_S - 1,
+                VAD_HARD_WINDOW_MAX_S,
+                VAD_MAX_UNCOMMITTED_MAX_S
+            )
+        );
+
+        // 越界：低于最小值（0 = 缺省占位或损坏值）
+        let mut vad = VadConfig {
+            soft_window_s: 0,
+            hard_window_s: 0,
+            max_uncommitted_s: 0,
+            ..VadConfig::default()
+        };
+        assert!(vad.sanitize());
+        assert!(vad.soft_window_s >= VAD_SOFT_WINDOW_MIN_S);
+        assert!(vad.hard_window_s >= VAD_HARD_WINDOW_MIN_S);
+        assert!(vad.soft_window_s < vad.hard_window_s);
+        assert!(vad.hard_window_s <= vad.max_uncommitted_s);
+
+        // 相等值：soft == hard == uncommitted（全 12）→ soft 前移
+        let mut vad = VadConfig {
+            soft_window_s: 12,
+            hard_window_s: 12,
+            max_uncommitted_s: 12,
+            ..VadConfig::default()
+        };
+        assert!(vad.sanitize());
+        assert_eq!(
+            (vad.soft_window_s, vad.hard_window_s, vad.max_uncommitted_s),
+            (11, 12, 12)
+        );
     }
 }

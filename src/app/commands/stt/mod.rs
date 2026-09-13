@@ -149,6 +149,11 @@ pub async fn set_stt_config(
     // 规范化不返回错误（前端已隐藏 UI），只在日志中记录 warn。
     normalize_config_against_model_capabilities(&mut config);
 
+    // ── VAD 窗口归一化（0.23.7）──
+    // 前端已联动钳制，这里是后端兜底：非法/越界窗口组合安全归一化后
+    // 再持久化，保证引擎从配置缓存读到的恒为有效组合。
+    config.local_engine.vad.sanitize();
+
     crate::app::config::ConfigStore::set(pool, &config)
         .await
         .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
@@ -186,6 +191,9 @@ pub async fn set_stt_config(
                 vad_silence_threshold = config.local_engine.vad.silence_threshold,
                 vad_min_silence_ms = config.local_engine.vad.min_silence_ms,
                 vad_min_sentence_ms = config.local_engine.vad.min_sentence_ms,
+                vad_soft_window_s = config.local_engine.vad.soft_window_s,
+                vad_hard_window_s = config.local_engine.vad.hard_window_s,
+                vad_max_uncommitted_s = config.local_engine.vad.max_uncommitted_s,
                 "STT 配置已更新"
             );
         }

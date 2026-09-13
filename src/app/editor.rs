@@ -696,6 +696,7 @@ impl EditorSessionService {
         };
         if !has_session {
             tracing::info!("user exit: 无活动编辑会话，直接退出");
+            self.hide_editor_window_for_exit();
             self.app.exit(0);
             return;
         }
@@ -721,9 +722,12 @@ impl EditorSessionService {
         }
         tracing::info!(request_id = %request_id, "user exit: 已请求编辑器确认（存在活动会话）");
 
-        // 超时守护：webview 无响应（异常/挂起）时放弃本次退出，不阻塞
+        // 超时守护：webview 无响应（异常/挂起）时放弃本次退出，不阻塞。
+        // tauri::async_runtime::spawn 不依赖线程本地 runtime 上下文——本函数
+        // 会从托盘菜单回调（主线程）与 async 能力执行两条路径进入，裸
+        // tokio::spawn 在主线程会 panic（no reactor）。
         let service = std::sync::Arc::clone(self);
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(EXIT_CONFIRM_TIMEOUT_SECS)).await;
             if service.take_pending_exit_if(&request_id) {
                 tracing::warn!(
@@ -744,11 +748,23 @@ impl EditorSessionService {
         }
         if confirmed {
             tracing::info!("user exit: 用户确认退出");
+            self.hide_editor_window_for_exit();
             self.app.exit(0);
         } else {
             tracing::info!("user exit: 用户取消退出");
         }
         true
+    }
+
+    /// 退出收尾在 `RunEvent::Exit` 主线程同步执行（引擎回收 + 窗口销毁），
+    /// 先隐藏编辑器窗口，避免前台可见窗口在收尾期间停止响应输入
+    /// （实机表现为"卡鼠标一两秒"）。隐藏失败不阻断退出。
+    fn hide_editor_window_for_exit(&self) {
+        if let Some(win) = self.app.get_webview_window(CONTENT_EDITOR_LABEL)
+            && let Err(e) = win.hide()
+        {
+            tracing::warn!(error = %e, "user exit: 编辑器窗口隐藏失败");
+        }
     }
 
     fn set_pending_exit(&self, value: Option<String>) {

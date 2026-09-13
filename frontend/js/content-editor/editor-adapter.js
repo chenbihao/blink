@@ -206,6 +206,11 @@ export class EditorAdapter {
             && !this.engine.readOnly && !this._interactionLocked;
     }
 
+    /** 当前正文是否允许用户编辑（右键动作与双视图共用此门禁）。 */
+    isEditable() {
+        return !!this.engine && !this.engine.readOnly && !this._interactionLocked;
+    }
+
     /** 冻结/恢复正文交互，用于验证式落盘后的生命周期临界区。 */
     setInteractionLocked(locked) {
         this._interactionLocked = locked === true;

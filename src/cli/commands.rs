@@ -76,9 +76,12 @@ pub fn dispatch(cli: Cli) -> i32 {
     // 文件转写 CLI 构造最小 FunASR EngineManager：只使用已安装环境/模型，
     // 不安装、不下载，也不创建 GUI。其他 CLI 命令不承担本地引擎启动成本。
     let cli_engine_service = if matches!(&cli.command, Commands::TranscribeAudio { .. }) {
-        let stt_config = tauri::async_runtime::block_on(crate::app::config::ConfigStore::get::<
-            crate::app::stt_config::SttConfig,
-        >(&pools.config));
+        let mut stt_config =
+            tauri::async_runtime::block_on(crate::app::config::ConfigStore::get::<
+                crate::app::stt_config::SttConfig,
+            >(&pools.config));
+        // 0.23.7：CLI 路径同样归一化 VAD 窗口（仅缓存，不回写 DB）
+        stt_config.local_engine.vad.sanitize();
         crate::app::stt_config::init_cache(stt_config);
         Some(build_cli_engine_manager())
     } else {

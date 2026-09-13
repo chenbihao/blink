@@ -17,6 +17,7 @@ import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from "../index.js";
 import {navigateSettings} from "../navigation.js";
 import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
+import {VAD_DEFAULTS, VAD_WINDOW_KEYS, VAD_WINDOW_RANGE, ensureVadWindowFields, normalizeVadWindows,} from "./voice-vad.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
@@ -401,13 +402,7 @@ function initFileTranscription() {
 }
 
 // ── 0.10.3 高级选项（VAD）──────────────────
-
-// VAD 参数默认值（与 Rust 侧 default_vad_* 一致）
-const VAD_DEFAULTS = {
-    silence_threshold: 0.005,
-    min_silence_ms: 300,
-    min_sentence_ms: 800,
-};
+// VAD 默认值与窗口归一化逻辑在 ./voice-vad.js（纯模块，voice-vad-windows.test.mjs 覆盖）
 
 async function initAdvancedOptions(config) {
     // 流式识别（伪流式：VAD 切句 + 累积预览）——仅本地模式生效
@@ -430,14 +425,69 @@ function initVadConfig(config) {
         config.local_engine.vad = {...VAD_DEFAULTS};
     }
     const vad = config.local_engine.vad;
+    // 旧配置可能缺窗口字段（0.23.7 前只有 3 个参数）；非法旧值安全归一化，
+    // 与后端 VadConfig::sanitize 规则一致
+    ensureVadWindowFields(vad);
 
-    const thresholdInput = document.getElementById("voice-vad-silence-threshold");
-    const silenceMsInput = document.getElementById("voice-vad-min-silence-ms");
-    const sentenceMsInput = document.getElementById("voice-vad-min-sentence-ms");
-    const thresholdVal = document.getElementById("voice-vad-silence-threshold-val");
-    const silenceMsVal = document.getElementById("voice-vad-min-silence-ms-val");
-    const sentenceMsVal = document.getElementById("voice-vad-min-sentence-ms-val");
-    const resetBtn = document.getElementById("voice-vad-reset-btn");
+    const controls = [
+        {
+            input: document.getElementById("voice-vad-silence-threshold"),
+            val: document.getElementById("voice-vad-silence-threshold-val"),
+            key: "silence_threshold",
+            format: (v) => v.toFixed(3),
+            validate: (v) => !isNaN(v) && v >= 0.001 && v <= 0.02,
+            parse: (raw) => parseFloat(raw),
+            ariaKey: "voice.local.vad.silence_threshold.label",
+        },
+        {
+            input: document.getElementById("voice-vad-min-silence-ms"),
+            val: document.getElementById("voice-vad-min-silence-ms-val"),
+            key: "min_silence_ms",
+            format: (v) => `${v}ms`,
+            validate: (v) => !isNaN(v) && v >= 100 && v <= 1000,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.vad.min_silence_ms.label",
+        },
+        {
+            input: document.getElementById("voice-vad-min-sentence-ms"),
+            val: document.getElementById("voice-vad-min-sentence-ms-val"),
+            key: "min_sentence_ms",
+            format: (v) => `${v}ms`,
+            validate: (v) => !isNaN(v) && v >= 200 && v <= 2000,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.vad.min_sentence_ms.label",
+        },
+        {
+            input: document.getElementById("voice-vad-soft-window-s"),
+            val: document.getElementById("voice-vad-soft-window-s-val"),
+            key: "soft_window_s",
+            format: (v) => `${v}s`,
+            validate: (v) => !isNaN(v) && v >= VAD_WINDOW_RANGE.soft_window_s.min,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.vad.soft_window_s.label",
+            isWindow: true,
+        },
+        {
+            input: document.getElementById("voice-vad-hard-window-s"),
+            val: document.getElementById("voice-vad-hard-window-s-val"),
+            key: "hard_window_s",
+            format: (v) => `${v}s`,
+            validate: (v) => !isNaN(v) && v >= VAD_WINDOW_RANGE.hard_window_s.min,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.vad.hard_window_s.label",
+            isWindow: true,
+        },
+        {
+            input: document.getElementById("voice-vad-max-uncommitted-s"),
+            val: document.getElementById("voice-vad-max-uncommitted-s-val"),
+            key: "max_uncommitted_s",
+            format: (v) => `${v}s`,
+            validate: (v) => !isNaN(v) && v >= VAD_WINDOW_RANGE.max_uncommitted_s.min,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.vad.max_uncommitted_s.label",
+            isWindow: true,
+        },
+    ];
 
     // 更新滑动条填充进度（CSS 变量 --fill-pct 驱动 linear-gradient）
     function updateSliderFill(slider) {
@@ -449,82 +499,64 @@ function initVadConfig(config) {
         slider.style.setProperty("--fill-pct", pct + "%");
     }
 
-    // 回显当前值（缺失时用默认值）
-    if (thresholdInput) {
-        const v = vad.silence_threshold ?? VAD_DEFAULTS.silence_threshold;
-        thresholdInput.value = v;
-        if (thresholdVal) thresholdVal.textContent = v.toFixed(3);
-        updateSliderFill(thresholdInput);
-        thresholdInput.addEventListener("input", () => {
-            const val = parseFloat(thresholdInput.value);
-            if (thresholdVal) thresholdVal.textContent = val.toFixed(3);
-            updateSliderFill(thresholdInput);
-        });
-        thresholdInput.addEventListener("change", () => {
-            const val = parseFloat(thresholdInput.value);
-            if (!isNaN(val) && val >= 0.001 && val <= 0.02) {
-                vad.silence_threshold = val;
-                saveSttConfig(config, "local");
-            }
-        });
+    function syncDisplay() {
+        for (const control of controls) {
+            if (!control.input) continue;
+            control.input.value = String(vad[control.key]);
+            if (control.val) control.val.textContent = control.format(vad[control.key]);
+            updateSliderFill(control.input);
+        }
     }
 
-    if (silenceMsInput) {
-        const v = vad.min_silence_ms ?? VAD_DEFAULTS.min_silence_ms;
-        silenceMsInput.value = v;
-        if (silenceMsVal) silenceMsVal.textContent = `${v}ms`;
-        updateSliderFill(silenceMsInput);
-        silenceMsInput.addEventListener("input", () => {
-            const val = parseInt(silenceMsInput.value, 10);
-            if (silenceMsVal) silenceMsVal.textContent = `${val}ms`;
-            updateSliderFill(silenceMsInput);
-        });
-        silenceMsInput.addEventListener("change", () => {
-            const val = parseInt(silenceMsInput.value, 10);
-            if (!isNaN(val) && val >= 100 && val <= 1000) {
-                vad.min_silence_ms = val;
-                saveSttConfig(config, "local");
-            }
-        });
+    // 回显当前值 + 可访问名称（滑块 label 是纯 span，读屏需要显式 aria-label）
+    syncDisplay();
+    for (const control of controls) {
+        if (control.input && control.ariaKey) {
+            control.input.setAttribute("aria-label", t(control.ariaKey));
+        }
     }
 
-    if (sentenceMsInput) {
-        const v = vad.min_sentence_ms ?? VAD_DEFAULTS.min_sentence_ms;
-        sentenceMsInput.value = v;
-        if (sentenceMsVal) sentenceMsVal.textContent = `${v}ms`;
-        updateSliderFill(sentenceMsInput);
-        sentenceMsInput.addEventListener("input", () => {
-            const val = parseInt(sentenceMsInput.value, 10);
-            if (sentenceMsVal) sentenceMsVal.textContent = `${val}ms`;
-            updateSliderFill(sentenceMsInput);
+    for (const control of controls) {
+        if (!control.input) continue;
+        control.input.addEventListener("input", () => {
+            const val = control.parse(control.input.value);
+            if (control.val && !isNaN(val)) control.val.textContent = control.format(val);
+            updateSliderFill(control.input);
         });
-        sentenceMsInput.addEventListener("change", () => {
-            const val = parseInt(sentenceMsInput.value, 10);
-            if (!isNaN(val) && val >= 200 && val <= 2000) {
-                vad.min_sentence_ms = val;
-                saveSttConfig(config, "local");
+        control.input.addEventListener("change", () => {
+            const val = control.parse(control.input.value);
+            if (!control.validate(val)) return;
+            vad[control.key] = val;
+            if (control.isWindow) {
+                // 窗口组合联动钳制：非法组合安全归一化（soft < hard <= uncommitted），
+                // 并同步其它滑块的显示
+                normalizeVadWindows(vad);
+                syncDisplay();
             }
+            saveSttConfig(config, "local");
         });
     }
 
     // 恢复默认
+    const resetBtn = document.getElementById("voice-vad-reset-btn");
     if (resetBtn) {
         resetBtn.addEventListener("click", () => {
-            vad.silence_threshold = VAD_DEFAULTS.silence_threshold;
-            vad.min_silence_ms = VAD_DEFAULTS.min_silence_ms;
-            vad.min_sentence_ms = VAD_DEFAULTS.min_sentence_ms;
-            if (thresholdInput) thresholdInput.value = VAD_DEFAULTS.silence_threshold;
-            if (silenceMsInput) silenceMsInput.value = VAD_DEFAULTS.min_silence_ms;
-            if (sentenceMsInput) sentenceMsInput.value = VAD_DEFAULTS.min_sentence_ms;
-            if (thresholdVal) thresholdVal.textContent = VAD_DEFAULTS.silence_threshold.toFixed(3);
-            if (silenceMsVal) silenceMsVal.textContent = `${VAD_DEFAULTS.min_silence_ms}ms`;
-            if (sentenceMsVal) sentenceMsVal.textContent = `${VAD_DEFAULTS.min_sentence_ms}ms`;
-            updateSliderFill(thresholdInput);
-            updateSliderFill(silenceMsInput);
-            updateSliderFill(sentenceMsInput);
+            for (const control of controls) {
+                vad[control.key] = VAD_DEFAULTS[control.key];
+            }
+            syncDisplay();
             saveSttConfig(config, "local");
         });
     }
+
+    // 语言切换时刷新滑块可访问名称
+    onLangChange(() => {
+        for (const control of controls) {
+            if (control.input && control.ariaKey) {
+                control.input.setAttribute("aria-label", t(control.ariaKey));
+            }
+        }
+    });
 }
 
 // ── 音频调试测试 ──────────────────────────────────────────────────────

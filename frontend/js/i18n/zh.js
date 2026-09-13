@@ -516,6 +516,13 @@ export const zh = {
     "voice.local.vad.min_silence_ms.hint": "静默持续多久判定句尾（默认 300ms）。说话连贯停顿短时调低（如 200ms）加快定稿；慢速思考调高（如 500ms）。",
     "voice.local.vad.min_sentence_ms.label": "最小句长",
     "voice.local.vad.min_sentence_ms.hint": "短于此值不切句（默认 800ms），避免咳嗽、短暂噪声等触发误切。调低可让短句也定稿，但误切风险增大。",
+    "voice.local.vad.windows.title": "切片窗口（高级）",
+    "voice.local.vad.soft_window_s.label": "软窗口",
+    "voice.local.vad.soft_window_s.hint": "持续说话达到该秒数后，可在声音稍低处提前切段（默认 8 秒）。调长可减少长句被切碎，但定稿更晚；长时间连续听写建议 10 秒。",
+    "voice.local.vad.hard_window_s.label": "硬窗口",
+    "voice.local.vad.hard_window_s.hint": "持续说话达到该秒数后无条件强制切段（默认 12 秒）。必须大于软窗口。调长可保留更长上下文，但停顿处可能切在词中。",
+    "voice.local.vad.max_uncommitted_s.label": "未提交上限",
+    "voice.local.vad.max_uncommitted_s.hint": "未送识别的音频达到该秒数后强制切段兜底（默认 12 秒），防止识别卡住时缓冲无限增长。必须不小于硬窗口。",
     // 使用说明
     "voice.usage.g1": "<strong>主窗口语音输入：</strong>Alt+Space 短按出窗 → 再长按说话 → 松开文字填入搜索框",
     "voice.usage.g2": "<strong>语音输入法：</strong>在前台应用中直接长按 Alt+Space → 说话 → 松开文字上屏",

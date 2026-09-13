@@ -520,6 +520,13 @@ export const en = {
     "voice.local.vad.min_silence_ms.hint": "How long silence must last to finalize a sentence (default 300ms). Lower it (e.g. 200ms) for fluent speech to finalize faster; raise it (e.g. 500ms) for slow thinkers.",
     "voice.local.vad.min_sentence_ms.label": "Min sentence length",
     "voice.local.vad.min_sentence_ms.hint": "Shorter than this won't split (default 800ms), to avoid coughs and brief noise triggering splits. Lowering it lets short sentences finalize but increases misfires.",
+    "voice.local.vad.windows.title": "Splitting windows (advanced)",
+    "voice.local.vad.soft_window_s.label": "Soft window",
+    "voice.local.vad.soft_window_s.hint": "After continuous speech reaches this many seconds, a cut may happen at a quieter moment (default 8s). Longer values keep long sentences intact but finalize later; for long continuous dictation, 10s is recommended.",
+    "voice.local.vad.hard_window_s.label": "Hard window",
+    "voice.local.vad.hard_window_s.hint": "Continuous speech is force-split unconditionally after this many seconds (default 12s). Must be longer than the soft window. Longer values keep more context but may cut mid-word.",
+    "voice.local.vad.max_uncommitted_s.label": "Uncommitted cap",
+    "voice.local.vad.max_uncommitted_s.hint": "Unsent audio older than this many seconds is force-split as a safety net (default 12s), keeping the buffer bounded if recognition stalls. Must be at least the hard window.",
     // Space management
     // Install progress
     // Python environment status badges
