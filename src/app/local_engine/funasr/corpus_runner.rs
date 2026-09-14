@@ -546,46 +546,11 @@ mod tests {
         }
         let corpus_dir =
             should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
-        let manifest = load_manifest(&corpus_dir).expect("load private corpus manifest");
-        let listed_names: HashSet<_> = manifest
-            .cases
+        let cases = collect_corpus_cases(&corpus_dir);
+        let labeled_count = cases
             .iter()
-            .map(|case| case.filename.to_lowercase())
-            .collect();
-        let mut cases: Vec<_> = manifest
-            .cases
-            .into_iter()
-            .map(|case| {
-                let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read corpus WAV");
-                let audio = decode_and_normalize(&wav).expect("decode and normalize corpus WAV");
-                (case.case_id, Some(case.expected_segments), audio.samples)
-            })
-            .collect();
-        // 新录音不要求立即维护 manifest；以文件内容哈希标识，报告不泄漏文件名。
-        let mut unlisted = Vec::new();
-        for entry in std::fs::read_dir(&corpus_dir).expect("read corpus directory") {
-            let entry = entry.expect("read corpus entry");
-            let path = entry.path();
-            if !path.is_file()
-                || path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
-                || listed_names.contains(&entry.file_name().to_string_lossy().to_lowercase())
-            {
-                continue;
-            }
-            let wav = std::fs::read(path).expect("read unlisted WAV");
-            let id = {
-                use sha2::{Digest, Sha256};
-                let digest = format!("{:x}", Sha256::digest(&wav));
-                format!("new_{}", &digest[..8])
-            };
-            let audio = decode_and_normalize(&wav).expect("decode and normalize unlisted WAV");
-            unlisted.push((id, None, audio.samples));
-        }
-        unlisted.sort_by(|a, b| a.0.cmp(&b.0));
-        cases.extend(unlisted);
+            .filter(|(id, _, _)| id.starts_with("case_"))
+            .count();
 
         // 0.23.7 候选矩阵：固定能量阈值与最短静音，按
         // "最短句长 ms / 软窗口 s / 硬窗口 s / 未提交上限 s" 比较 A–H。
@@ -687,12 +652,151 @@ mod tests {
             .join("target/stt-vad-parameter-sweep.json");
         let report = serde_json::json!({
             "scope": "0.23.7 candidate matrix (A-H): EnergyVad soft/hard windows plus pseudo-streaming uncommitted-cap boundary replay; potential final calls, not recognized speech. ASR quality is evaluated separately.",
-            "labeled_cases": listed_names.len(),
-            "unlabeled_cases": cases.len() - listed_names.len(),
+            "labeled_cases": labeled_count,
+            "unlabeled_cases": cases.len() - labeled_count,
             "runs": runs,
         });
         std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
             .expect("write anonymous VAD parameter report");
+    }
+
+    /// 收集 corpus 全部 case：manifest 标注样本 + 目录内未列入 manifest 的
+    /// WAV（以内容哈希匿名 id 标识）。返回 (id, expected_segments, samples)。
+    /// 两个私有回放测试（sweep / 帧诊断）共用，避免发现逻辑双份漂移。
+    fn collect_corpus_cases(corpus_dir: &Path) -> Vec<(String, Option<u32>, Vec<f32>)> {
+        let manifest = load_manifest(corpus_dir).expect("load private corpus manifest");
+        let listed: HashSet<String> = manifest
+            .cases
+            .iter()
+            .map(|case| case.filename.to_lowercase())
+            .collect();
+        let mut cases: Vec<_> = manifest
+            .cases
+            .into_iter()
+            .map(|case| {
+                let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read corpus WAV");
+                let audio = decode_and_normalize(&wav).expect("decode and normalize corpus WAV");
+                (case.case_id, Some(case.expected_segments), audio.samples)
+            })
+            .collect();
+        // 新录音不要求立即维护 manifest；以文件内容哈希标识，报告不泄漏文件名。
+        for entry in std::fs::read_dir(corpus_dir).expect("read corpus directory") {
+            let entry = entry.expect("read corpus entry");
+            let path = entry.path();
+            if !path.is_file()
+                || path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
+                || listed.contains(&entry.file_name().to_string_lossy().to_lowercase())
+            {
+                continue;
+            }
+            let wav = std::fs::read(path).expect("read unlisted WAV");
+            use sha2::{Digest, Sha256};
+            let id = format!("new_{}", &format!("{:x}", Sha256::digest(&wav))[..8]);
+            let audio = decode_and_normalize(&wav).expect("decode and normalize unlisted WAV");
+            cases.push((id, None, audio.samples));
+        }
+        cases.sort_by(|a, b| a.0.cmp(&b.0));
+        cases
+    }
+
+    /// 0.23.7.1：逐帧 VAD 状态诊断（env 门控 `BLINK_STT_VAD_DIAG=1`）。
+    ///
+    /// 用生产 `EnergyVad`（默认 A 参数）按 10ms 帧回放全部 corpus 音频，
+    /// 逐帧记录规范化 PCM 的 RMS、on/off 阈值、speaking、句长/静默/段长
+    /// 计数与切点事件。用于核实"轻声短句停顿不定稿"的根因（最短句长
+    /// 计数语义、滞回区与静默判据各自的贡献）。报告只含匿名 id 与数值，
+    /// 不含音频或转写正文；写入 `target/stt-vad-frame-diagnostics.json`
+    /// （运行产物，不入库）。
+    #[test]
+    fn private_corpus_vad_frame_diagnostics() {
+        if std::env::var("BLINK_STT_VAD_DIAG").ok().as_deref() != Some("1") {
+            return;
+        }
+        let corpus_dir =
+            should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
+        let cases = collect_corpus_cases(&corpus_dir);
+
+        // 默认 A 组合（生产默认），与 sweep 的 A 行为一致；不执行 ASR。
+        let threshold = 0.005_f64;
+        let silence_ms = 300_u32;
+        let sentence_ms = 800_u32;
+        let frame_len = (TARGET_SAMPLE_RATE / 100) as usize;
+
+        let mut case_reports = Vec::new();
+        for (case_id, _expected, samples) in &cases {
+            let mut vad = EnergyVad::with_params_and_windows(
+                TARGET_SAMPLE_RATE,
+                threshold,
+                silence_ms,
+                sentence_ms,
+                8_000,
+                12_000,
+            );
+            let mut frames = Vec::with_capacity(samples.len() / frame_len);
+            let mut events = Vec::new();
+            let mut processed = 0usize;
+            for chunk in samples.chunks(frame_len) {
+                processed += chunk.len();
+                let rms = frame_rms(chunk);
+                let event = vad.process_chunk(chunk);
+                let state = vad.dump_state();
+                frames.push(serde_json::json!({
+                    "t_ms": processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                    "rms": (rms * 1e6).round() / 1e6,
+                    "on": (state.on_threshold * 1e6).round() / 1e6,
+                    "off": (state.off_threshold * 1e6).round() / 1e6,
+                    "nf": (state.noise_floor * 1e6).round() / 1e6,
+                    "sp": u8::from(state.speaking),
+                    "sent_ms": state.sentence_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                    "sil_ms": state.silence_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                    "seg_ms": state.segment_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                }));
+                if event.is_boundary() {
+                    events.push(serde_json::json!({
+                        "time_ms": processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                        "reason": event.reason(),
+                    }));
+                    vad.reset_sentence();
+                }
+            }
+            case_reports.push(serde_json::json!({
+                "case_id": case_id,
+                "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                "events": events,
+                "frames": frames,
+            }));
+        }
+
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/stt-vad-frame-diagnostics.json");
+        let report = serde_json::json!({
+            "scope": "0.23.7.1 frame-level EnergyVad diagnostics (default A params) over private corpus; numeric only, no audio or transcript content.",
+            "params": {
+                "silence_threshold": threshold,
+                "min_silence_ms": silence_ms,
+                "min_sentence_ms": sentence_ms,
+                "soft_window_s": 8,
+                "hard_window_s": 12,
+            },
+            "cases": case_reports,
+        });
+        std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+            .expect("write anonymous frame diagnostics report");
+    }
+
+    /// 与生产 `EnergyVad` 相同的帧 RMS 公式（10ms 帧对齐时结果一致）。
+    fn frame_rms(samples: &[f32]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f64 = samples
+            .iter()
+            .map(|s| (*s as f64) * (*s as f64))
+            .sum::<f64>();
+        (sum_sq / samples.len() as f64).sqrt()
     }
 
     /// 验证 48k stereo WAV 能正确解码和规范化为 16k mono。

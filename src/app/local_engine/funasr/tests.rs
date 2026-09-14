@@ -1359,6 +1359,138 @@ fn count_worker_processes() -> usize {
 // - confirmed_events：每次 confirmed 增长的（已喂入音频 ms, 已确认末端 ms）；
 // - peak_buffer_ms：max(pcm_samples)（缓冲有界性）；
 // - finalize_ms：松键收尾墙钟耗时；final_chars：终稿字符数（>0 即收尾有效）。
+// - 0.23.7.1 新增：transcribe_calls 逐请求（相对 case 起点偏移 / WAV 时长 /
+//   耗时 / 成败），用于把"切句→定稿"拆分为 worker 排队与推理两段；
+//   offline_boundaries / long_pauses 为同参数 EnergyVad 离线回放的切点与
+//   ≥800ms 低能量停顿区间，供停顿→切句→定稿→交付三段延迟对照。
+
+/// 0.23.7.1：包装 transport，记录每次 transcribe 的数值时序（不含正文）。
+struct RecordingTransport {
+    inner: std::sync::Arc<dyn crate::domain::stt::SttTransport>,
+    origin: std::sync::Mutex<Option<std::time::Instant>>,
+    records: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+impl RecordingTransport {
+    fn wrap(inner: std::sync::Arc<dyn crate::domain::stt::SttTransport>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            inner,
+            origin: std::sync::Mutex::new(None),
+            records: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// case 喂入开始时启动时钟。
+    fn start_clock(&self) {
+        *self.origin.lock().unwrap() = Some(std::time::Instant::now());
+    }
+
+    fn take_records(&self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut *self.records.lock().unwrap())
+    }
+
+    fn offset_ms(&self, now: std::time::Instant) -> u64 {
+        match *self.origin.lock().unwrap() {
+            Some(origin) => now.duration_since(origin).as_millis() as u64,
+            None => 0,
+        }
+    }
+}
+
+/// 解析 canonical PCM16 WAV 头，返回音频时长（ms）。解析失败返回 None。
+fn wav_header_duration_ms(wav: &[u8]) -> Option<u64> {
+    if wav.len() < 44 || &wav[0..4] != b"RIFF" {
+        return None;
+    }
+    let channels = u16::from_le_bytes([wav[22], wav[23]]);
+    let sample_rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+    let bits = u16::from_le_bytes([wav[34], wav[35]]);
+    let data_len = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]) as u64;
+    if sample_rate == 0 || channels == 0 || bits == 0 {
+        return None;
+    }
+    let bytes_per_frame = (channels * bits / 8) as u64;
+    Some(data_len / bytes_per_frame * 1000 / sample_rate as u64)
+}
+
+#[async_trait::async_trait]
+impl crate::domain::stt::SttTransport for RecordingTransport {
+    async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+        self.inner.check_ready().await
+    }
+
+    async fn transcribe(
+        &self,
+        wav_bytes: &[u8],
+    ) -> Result<String, crate::domain::stt::SttTransportError> {
+        let started = std::time::Instant::now();
+        let offset_ms = self.offset_ms(started);
+        let wav_ms = wav_header_duration_ms(wav_bytes);
+        let result = self.inner.transcribe(wav_bytes).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let out_chars = result.as_ref().map(|t| t.chars().count()).ok();
+        self.records.lock().unwrap().push(serde_json::json!({
+            "offset_ms": offset_ms,
+            "wav_ms": wav_ms,
+            "elapsed_ms": elapsed_ms,
+            "out_chars": out_chars,
+            "ok": result.is_ok(),
+        }));
+        result
+    }
+}
+
+/// 离线回放与引擎同参数的 EnergyVad：返回（切点 [(ms, reason)]，长停顿
+/// [(start_ms, end_ms)]）。停顿按每帧 off 阈值判定（≥800ms 低能量连续区）。
+fn offline_vad_timeline(
+    samples: &[f32],
+    vad: &crate::domain::config::stt_config::VadConfig,
+) -> (Vec<serde_json::Value>, Vec<(u64, u64)>) {
+    use crate::domain::stt::vad::EnergyVad;
+    let mut v = EnergyVad::with_params_and_windows(
+        16_000,
+        vad.silence_threshold,
+        vad.min_silence_ms,
+        vad.min_sentence_ms,
+        vad.soft_window_ms(),
+        vad.hard_window_ms(),
+    );
+    let frame = 160usize; // 10ms @16k，与引擎喂入粒度一致
+    let mut boundaries = Vec::new();
+    let mut pauses = Vec::new();
+    let mut pause_start: Option<u64> = None;
+    let mut processed = 0usize;
+    for chunk in samples.chunks(frame) {
+        processed += chunk.len();
+        let t_ms = processed as u64 * 1000 / 16_000;
+        let off = v.current_off_threshold();
+        let sum_sq: f64 = chunk.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+        let rms = (sum_sq / chunk.len() as f64).sqrt();
+        if rms < off {
+            pause_start.get_or_insert(t_ms);
+        } else if let Some(start) = pause_start.take() {
+            if t_ms.saturating_sub(start) >= 800 {
+                pauses.push((start, t_ms));
+            }
+        }
+        let event = v.process_chunk(chunk);
+        if event.is_boundary() {
+            boundaries.push(serde_json::json!({
+                "time_ms": t_ms,
+                "reason": event.reason(),
+            }));
+            v.reset_sentence();
+        }
+    }
+    if let Some(start) = pause_start {
+        let end = samples.len() as u64 * 1000 / 16_000;
+        if end.saturating_sub(start) >= 800 {
+            pauses.push((start, end));
+        }
+    }
+    (boundaries, pauses)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pseudo_streaming_real_worker_replay() {
     if std::env::var("BLINK_STT_REAL_PSEUDO").ok().as_deref() != Some("1") {
@@ -1497,23 +1629,24 @@ async fn pseudo_streaming_real_worker_replay() {
             },
             ..SttConfig::default()
         };
-        let transport: std::sync::Arc<dyn crate::domain::stt::SttTransport> = std::sync::Arc::new(
-            worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
-        );
-        let conn = crate::domain::stt::SttEngineConnection {
-            host: "127.0.0.1".into(),
-            port: 0,
-            engine_id: "funasr".into(),
-            instance_id: "real-pseudo-replay".into(),
-            transport: Some(transport),
-        };
-        let engine =
-            crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
-                &config, conn,
-            )
-            .expect("engine constructs");
 
         for path in &wavs {
+            let recorder = RecordingTransport::wrap(std::sync::Arc::new(
+                worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
+            ));
+            let conn = crate::domain::stt::SttEngineConnection {
+                host: "127.0.0.1".into(),
+                port: 0,
+                engine_id: "funasr".into(),
+                instance_id: "real-pseudo-replay".into(),
+                transport: Some(recorder.clone()),
+            };
+            let engine =
+                crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
+                    &config, conn,
+                )
+                .expect("engine constructs");
+
             let wav = std::fs::read(path).expect("read wav");
             let audio =
                 super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
@@ -1521,12 +1654,14 @@ async fn pseudo_streaming_real_worker_replay() {
                 use sha2::{Digest, Sha256};
                 format!("new_{:x}", Sha256::digest(&wav))[..8].to_string()
             };
+            let (offline_boundaries, long_pauses) = offline_vad_timeline(&audio.samples, &vad);
             let sample_rate = 16_000usize;
             let mut fed_samples = 0usize;
             let mut confirmed_events: Vec<serde_json::Value> = Vec::new();
             let mut peak_buffer_ms = 0f64;
             let mut peak_uncommitted_ms = 0f64;
 
+            recorder.start_clock();
             for chunk in audio.samples.chunks(sample_rate / 10) {
                 engine.transcribe_chunk(chunk).await.expect("chunk ok");
                 fed_samples += chunk.len();
@@ -1567,6 +1702,9 @@ async fn pseudo_streaming_real_worker_replay() {
                 "peak_uncommitted_ms": peak_uncommitted_ms.round() as u64,
                 "finalize_ms": finalize_ms,
                 "final_chars": final_text.chars().count(),
+                "offline_boundaries": offline_boundaries,
+                "long_pauses_ms": long_pauses,
+                "transcribe_calls": recorder.take_records(),
             }));
             println!(
                 "profile {label} case {case_id}: events={} peak_buffer={}ms peak_uncommitted={}ms finalize={finalize_ms}ms final_chars={}",
@@ -1575,8 +1713,73 @@ async fn pseudo_streaming_real_worker_replay() {
                 peak_uncommitted_ms.round() as u64,
                 final_text.chars().count()
             );
+            engine.reset();
         }
-        engine.reset();
+    }
+
+    // 0.23.7.1：标注语料（短词/轻声/远场/键鼠/风扇/咳嗽/静音等）过同一真实
+    // 引擎（默认 A 参数），验证修正没有给无语音场景引入切句定稿请求，且
+    // 既有样本的流式定稿/松键收尾正常。报告只含匿名 case id 与数值。
+    let mut labeled_reports = Vec::new();
+    {
+        let manifest = super::corpus_runner::load_manifest(&corpus_dir).expect("load manifest");
+        let config = SttConfig::default();
+        for case in manifest.cases {
+            let recorder = RecordingTransport::wrap(std::sync::Arc::new(
+                worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
+            ));
+            let conn = crate::domain::stt::SttEngineConnection {
+                host: "127.0.0.1".into(),
+                port: 0,
+                engine_id: "funasr".into(),
+                instance_id: "real-pseudo-replay".into(),
+                transport: Some(recorder.clone()),
+            };
+            let engine =
+                crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
+                    &config, conn,
+                )
+                .expect("engine constructs");
+
+            let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read labeled wav");
+            let audio =
+                super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
+            let sample_rate = 16_000usize;
+            let mut confirmed_events: Vec<serde_json::Value> = Vec::new();
+            recorder.start_clock();
+            for chunk in audio.samples.chunks(sample_rate / 10) {
+                engine.transcribe_chunk(chunk).await.expect("chunk ok");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let stats = engine.stream_stats();
+                let committed_ms = stats.pcm_committed_end * 1000 / sample_rate;
+                let need_push = match confirmed_events.last() {
+                    Some(last) => last["committed_ms"] != committed_ms,
+                    None => committed_ms > 0,
+                };
+                if need_push {
+                    confirmed_events.push(serde_json::json!({ "committed_ms": committed_ms }));
+                }
+            }
+            let final_text = engine.finalize().await.expect("finalize ok");
+            // confirmed_events 只在 committed 真正推进时 push（首个元素即首个
+            // 流中 commit），故流中确认数 = 数组长度。
+            labeled_reports.push(serde_json::json!({
+                "case_id": case.case_id,
+                "expected_segments": case.expected_segments,
+                "expected_empty": case.expected_empty,
+                "duration_ms": audio.samples.len() * 1000 / sample_rate,
+                "confirmed_events": confirmed_events,
+                "final_chars": final_text.chars().count(),
+                "transcribe_calls": recorder.take_records(),
+            }));
+            println!(
+                "labeled {}: stream_confirms={} final_chars={}",
+                case.case_id,
+                confirmed_events.len(),
+                final_text.chars().count()
+            );
+            engine.reset();
+        }
     }
 
     client.request_shutdown().await;
@@ -1590,8 +1793,9 @@ async fn pseudo_streaming_real_worker_replay() {
 
     let output = root.join("target/stt-vad-real-pseudo-replay.json");
     let report = serde_json::json!({
-        "scope": "Real PseudoStreamingSttEngine replay (A vs H) over unlabeled long wavs; numeric metrics only, no transcript content.",
+        "scope": "Real PseudoStreamingSttEngine replay (A vs H) over unlabeled long wavs plus labeled corpus pass (0.23.7.1); numeric metrics only, no transcript content.",
         "cases": report_cases,
+        "labeled_cases": labeled_reports,
     });
     std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
         .expect("write real pseudo replay report");

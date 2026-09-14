@@ -756,6 +756,55 @@ async fn uncommitted_cap_resets_with_committed_base() {
     );
 }
 
+/// 0.23.7.1 根因回归（引擎级）：轻声语音帧能量落在 on/off 滞回区时，
+/// VAD 句长按非静默帧累计，引擎在 300ms 停顿处产生边界并派发定稿
+/// （preview_generation 推进）；旧语义只计高于 on 的帧，句长停在起句
+/// 爆发的几十毫秒，整句被最短句长保护重置，只能等未提交上限兜底。
+#[tokio::test]
+async fn soft_voice_pause_finalizes_through_engine_boundary() {
+    let engine = engine_without_transport(Vec::new());
+
+    // 安静起底（校准底噪：on≈0.010 / off≈0.005）
+    for _ in 0..5 {
+        engine
+            .transcribe_chunk(&tone_200ms_chunk(0.0_f32))
+            .await
+            .unwrap();
+    }
+    // 起句爆发 200ms（RMS≈0.014 > on）进入 speaking
+    engine
+        .transcribe_chunk(&tone_200ms_chunk(0.02_f32))
+        .await
+        .unwrap();
+    // 轻声主体 1s（RMS≈0.0071，滞回区）
+    for _ in 0..5 {
+        engine
+            .transcribe_chunk(&tone_200ms_chunk(0.010_f32))
+            .await
+            .unwrap();
+    }
+    assert!(
+        engine.inner.lock().unwrap().vad.is_speaking(),
+        "滞回区帧应保持 speaking"
+    );
+    // 400ms 停顿 → 自然句尾边界（非静默 1.2s ≥ 800ms）
+    for _ in 0..2 {
+        engine
+            .transcribe_chunk(&tone_200ms_chunk(0.0_f32))
+            .await
+            .unwrap();
+    }
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(
+        inner.preview_generation, 1,
+        "轻声句停顿应经引擎产生自然边界并清空预览代际"
+    );
+    assert_eq!(
+        inner.sentences.next_segment_id, 2,
+        "边界应建立过 pending segment（无 transport 时立即回滚，但段 id 已分配）"
+    );
+}
+
 /// 生成 200ms 的 16kHz 单声道音频块（测试辅助）。
 fn tone_200ms_chunk(amplitude: f32) -> Vec<f32> {
     let n = 16_000 * 200 / 1000;

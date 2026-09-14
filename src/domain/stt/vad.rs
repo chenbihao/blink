@@ -15,7 +15,9 @@
 //! 3. 从 noise floor 推导有上下界的 on/off threshold（滞回）
 //! 4. RMS > on_threshold → 进入 speaking；RMS < off_threshold 且持续
 //!    ≥ `min_silence_ms` → 触发 `SentenceEnd`
-//! 5. 短 attack debounce 抑制单个脉冲；最小句子长度保护不变
+//! 5. 短 attack debounce 抑制单个脉冲；最短句长按"非静默帧"（RMS ≥ off
+//!    阈值，含滞回区）累计——只计高于 on 的帧会让轻声语音（帧能量大多
+//!    落在滞回区）永远凑不满句长，停顿被重置而非切句（0.23.7.1 修正）
 //!
 //! 旧 `silence_threshold` 保留为灵敏度基准（影响 on/off 的基线偏移），
 //! 旧 JSON 配置继续反序列化，`min_silence_ms`、`min_sentence_ms` 语义不变。
@@ -147,7 +149,7 @@ pub struct EnergyVad {
     silence_samples: usize,
     /// 是否正在说话（有声阶段）
     speaking: bool,
-    /// 当前句子已累积的样本数（用于最小句子长度保护）
+    /// 当前句子已累积的非静默样本数（RMS ≥ off 阈值，用于最小句子长度保护）
     sentence_samples: usize,
     /// attack debounce：短暂有声脉冲后需要连续有声才算入句
     /// （抑制键盘/鼠标单脉冲）
@@ -314,10 +316,6 @@ impl EnergyVad {
                         self.segment_samples = 0;
                     }
                 }
-
-                if self.speaking {
-                    self.sentence_samples += frame_samples;
-                }
             } else if rms < off_thresh {
                 // ── 静默 ──
                 self.attack_counter = 0;
@@ -339,7 +337,16 @@ impl EnergyVad {
                     event = VadEvent::SoftWindow;
                 }
             }
-            // off_thresh ≤ rms ≤ on_thresh：滞回区间，保持当前状态
+            // off_thresh ≤ rms ≤ on_thresh：滞回区间，保持 speaking/静默计时状态
+
+            // 0.23.7.1：句长按"非静默帧"（RMS ≥ off 阈值，含 on/off 滞回区）累计。
+            // 轻声语音的帧能量大多落在滞回区——只计高于 on 阈值的帧会让句长在
+            // 停顿处永远凑不满 min_sentence_ms，300ms 静默反而把整句重置，全片
+            // 无自然切点、只能等未提交上限兜底。咳嗽/键盘等短暂脉冲不受影响：
+            // 它们的非静默时长本身不足最短句长。
+            if self.speaking && rms >= off_thresh {
+                self.sentence_samples += frame_samples;
+            }
 
             if self.speaking {
                 self.segment_samples = self.segment_samples.saturating_add(frame_samples);
@@ -570,6 +577,105 @@ mod tests {
             }
         }
         assert!(!got_end, "句子 <800ms 不应触发句尾");
+    }
+
+    // ── 0.23.7.1：最短句长按非静默帧（≥ off 阈值，含滞回区）累计 ──
+
+    /// 根因回归：轻声语音的帧能量大多落在 on/off 滞回区，只计高于 on 的帧
+    /// 会让句长永远凑不满 800ms——300ms 静默把整句重置而非切句，全片无
+    /// 自然切点。修正后滞回区帧计入句长，停顿处应自然定稿。
+    #[test]
+    fn vad_soft_voice_in_hysteresis_band_reaches_min_sentence() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 300, 800);
+
+        // 安静环境校准底噪：on ≈ 0.010，off ≈ 0.005
+        for chunk in generate_silence(500).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+
+        // 起始爆发（RMS ≈ 0.014 > on）通过 attack debounce 进入 speaking
+        for chunk in generate_tone(50, 0.02).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        assert!(vad.is_speaking());
+
+        // 轻声主体：幅度 0.010 → RMS ≈ 0.0071，落在滞回区（off < RMS < on）
+        // 旧语义句长停在 50ms；新语义累计非静默帧到 950ms ≥ 800ms。
+        for chunk in generate_tone(900, 0.010).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        assert!(vad.is_speaking(), "滞回区帧应保持 speaking");
+        let state = vad.dump_state();
+        assert!(
+            state.sentence_samples >= 800 * SAMPLE_RATE as usize / 1000,
+            "轻声滞回区帧必须计入句长，实际 {}",
+            state.sentence_samples
+        );
+
+        // 300ms 静默后自然切句
+        let mut got_end = false;
+        for chunk in generate_silence(400).chunks(160) {
+            if vad.process_chunk(chunk) == VadEvent::SentenceEnd {
+                got_end = true;
+            }
+        }
+        assert!(got_end, "轻声短句在停顿处应自然定稿（0.23.7.1 根因回归）");
+    }
+
+    /// 保护语义不变：滞回区轻声不足最短句长时，停顿仍不切句。
+    #[test]
+    fn vad_short_soft_burst_still_protected_by_min_sentence() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 300, 800);
+
+        for chunk in generate_silence(500).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        // 50ms 爆发 + 300ms 滞回区轻声 = 350ms 非静默 < 800ms
+        for chunk in generate_tone(50, 0.02).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        for chunk in generate_tone(300, 0.010).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        let silence = generate_silence(400);
+        let mut got_end = false;
+        for chunk in silence.chunks(160) {
+            if vad.process_chunk(chunk) == VadEvent::SentenceEnd {
+                got_end = true;
+            }
+        }
+        assert!(!got_end, "非静默不足 800ms 的轻声短促段不应切句");
+    }
+
+    /// 句中低于 off 阈值的真实静默不计入句长（计的是"非静默"而非段全时长）。
+    #[test]
+    fn vad_intra_sentence_silence_excluded_from_sentence_length() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 300, 800);
+
+        for chunk in generate_silence(500).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        // 400ms 爆发 + 250ms 静默（< min_silence 不切句）+ 300ms 滞回区：
+        // 非静默 = 700ms < 800ms，随后 300ms 静默不切句。
+        for chunk in generate_tone(400, 0.02).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        for chunk in generate_silence(250).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        for chunk in generate_tone(300, 0.010).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        let mut got_end = false;
+        for chunk in generate_silence(400).chunks(160) {
+            if vad.process_chunk(chunk) == VadEvent::SentenceEnd {
+                got_end = true;
+            }
+        }
+        assert!(
+            !got_end,
+            "句中静默不计入句长：700ms 非静默 + 段全时长 950ms 不应切句"
+        );
     }
 
     #[test]
