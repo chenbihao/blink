@@ -20,10 +20,14 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use crate::domain::config::stt_config::{LocalSttSelection, SttMode, get_stt_config};
+use crate::domain::stt::pseudo_streaming::{PseudoStreamingSttEngine, SttBoundaryRecord};
 use crate::domain::stt::transcribe::{
     AudioTranscriptionError, AudioTranscriptionPort, AudioTranscriptionRequest,
     AudioTranscriptionResult,
 };
+use crate::domain::stt::vad::EnergyVad;
+use crate::domain::stt::vad_diagnostics::{VadTrace, trace_vad};
+use crate::domain::stt::{SttEngine, SttEngineConnection};
 use crate::domain::stt::{SttTransport, SttTransportError};
 use crate::infra::platform::audio::format::AudioDecodeError;
 use crate::infra::platform::audio::normalize::{AudioNormalizer, NormalizationSummary};
@@ -121,6 +125,36 @@ pub struct AudioTranscriptionService {
     config: TranscriptionConfig,
 }
 
+/// 设置页 WAV 伪流式诊断结果。正文只返回给主动发起的本地设置页，不写日志。
+#[derive(Debug, serde::Serialize)]
+pub struct VadDebugResult {
+    pub duration_ms: u64,
+    pub min_sentence_ms: u32,
+    pub wall_ms: u64,
+    pub finalize_ms: u64,
+    pub engine_id: String,
+    pub model_id: String,
+    pub final_text: String,
+    pub trace: VadTrace,
+    pub boundaries: Vec<SttBoundaryRecord>,
+    pub text_events: Vec<VadDebugTextEvent>,
+    pub commits: Vec<VadDebugCommit>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct VadDebugTextEvent {
+    pub kind: &'static str,
+    pub fed_ms: u64,
+    pub wall_ms: u64,
+    pub text: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct VadDebugCommit {
+    pub audio_ms: u64,
+    pub observed_wall_ms: u64,
+}
+
 impl AudioTranscriptionService {
     /// 构造转写服务。
     ///
@@ -137,6 +171,142 @@ impl AudioTranscriptionService {
             cloud_auth,
             config,
         }
+    }
+
+    /// 同一可信 WAV 走真实伪流式引擎按 10ms 实时喂入；一次性转写入口保持独立。
+    pub async fn debug_vad(
+        &self,
+        audio_ref: &str,
+        progress: impl Fn(&'static str, u64, u64) + Send + Sync,
+    ) -> Result<VadDebugResult, AudioTranscriptionError> {
+        progress("preparing", 0, 0);
+        let opened = self.resolve_audio_ref(audio_ref)?;
+        let file_size = opened.size;
+        let (transport, frozen) =
+            self.freeze_identity()
+                .await?
+                .ok_or_else(|| AudioTranscriptionError::Unsupported {
+                    detail: "VAD debug requires a running local STT engine".into(),
+                })?;
+        let stt_config = get_stt_config();
+        let vad_config = stt_config.local_engine.vad.clone();
+        let min_sentence_ms = vad_config.min_sentence_ms;
+        let decode_config = self.config.clone();
+        let (samples, trace) = tokio::task::spawn_blocking(move || {
+            let mut file = opened.file;
+            let bytes = Self::read_file_bytes(&mut file, file_size)?;
+            let (samples, _, _) = Self::decode_and_normalize_with_config(&bytes, &decode_config)?;
+            if samples.len() > 120 * 16_000 {
+                return Err(AudioTranscriptionError::AudioBudgetExceeded {
+                    detail: "VAD debug accepts WAV files up to 120 seconds".into(),
+                });
+            }
+            let mut vad = EnergyVad::with_params_and_windows(
+                16_000,
+                vad_config.silence_threshold,
+                vad_config.min_silence_ms,
+                vad_config.min_sentence_ms,
+                vad_config.soft_window_ms(),
+                vad_config.hard_window_ms(),
+            );
+            let trace = trace_vad(&samples, 16_000, &mut vad);
+            Ok::<_, AudioTranscriptionError>((samples, trace))
+        })
+        .await
+        .map_err(|error| AudioTranscriptionError::Internal {
+            detail: format!("VAD debug decode task failed: {error}"),
+        })??;
+
+        self.verify_identity(&frozen).await?;
+        let duration_ms = trace.duration_ms;
+        progress("replaying", 0, duration_ms);
+        let boundaries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connection = SttEngineConnection {
+            host: "127.0.0.1".into(),
+            port: 0,
+            engine_id: frozen.engine_id.clone(),
+            instance_id: frozen.instance_id.clone(),
+            transport: Some(transport),
+        };
+        let engine = PseudoStreamingSttEngine::from_connection(&stt_config, connection)
+            .map_err(|detail| AudioTranscriptionError::Internal { detail })?
+            .with_boundary_observer(Arc::clone(&boundaries));
+        let started = Instant::now();
+        let mut text_events = Vec::new();
+        let mut commits = Vec::new();
+        let mut last_preview = String::new();
+        let mut last_confirmed = String::new();
+        let mut last_confirmed_revision = 0u64;
+        let mut fed = 0usize;
+
+        for chunk in samples.chunks(160) {
+            let response = engine.transcribe_chunk(chunk).await.map_err(|error| {
+                AudioTranscriptionError::Internal {
+                    detail: error.to_string(),
+                }
+            })?;
+            fed += chunk.len();
+            let fed_ms = fed as u64 * 1000 / 16_000;
+            collect_vad_debug_text(
+                &response,
+                fed_ms,
+                started.elapsed().as_millis() as u64,
+                &mut last_preview,
+                &mut last_confirmed,
+                &mut text_events,
+            );
+            tokio::time::sleep_until(
+                tokio::time::Instant::from_std(started) + std::time::Duration::from_millis(fed_ms),
+            )
+            .await;
+            if fed_ms % 250 == 0 || fed == samples.len() {
+                progress("replaying", fed_ms, duration_ms);
+            }
+            let stats = engine.stream_stats();
+            if stats.confirmed_revision > last_confirmed_revision {
+                commits.push(VadDebugCommit {
+                    audio_ms: stats.pcm_committed_end as u64 * 1000 / 16_000,
+                    observed_wall_ms: started.elapsed().as_millis() as u64,
+                });
+                last_confirmed_revision = stats.confirmed_revision;
+            }
+        }
+        progress("finalizing", duration_ms, duration_ms);
+        let finalize_started = Instant::now();
+        let final_text =
+            engine
+                .finalize()
+                .await
+                .map_err(|error| AudioTranscriptionError::Internal {
+                    detail: error.to_string(),
+                })?;
+        let finalize_ms = finalize_started.elapsed().as_millis() as u64;
+        self.verify_identity(&frozen).await?;
+        progress("done", duration_ms, duration_ms);
+        let result = VadDebugResult {
+            duration_ms: trace.duration_ms,
+            min_sentence_ms,
+            wall_ms: started.elapsed().as_millis() as u64,
+            finalize_ms,
+            engine_id: frozen.engine_id,
+            model_id: frozen.model_id,
+            final_text,
+            trace,
+            boundaries: boundaries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            text_events,
+            commits,
+        };
+        tracing::info!(
+            duration_ms = result.duration_ms,
+            boundaries = result.boundaries.len(),
+            commits = result.commits.len(),
+            final_chars = result.final_text.chars().count(),
+            "VAD WAV 伪流式诊断完成"
+        );
+        Ok(result)
     }
 
     /// 检查 deadline 是否已过期。
@@ -285,6 +455,58 @@ impl AudioTranscriptionService {
                 })
             }
         }
+    }
+}
+
+/// 把引擎的 v2 状态投影为可观察的预览与确认片段；不在日志中记录正文。
+fn collect_vad_debug_text(
+    response: &str,
+    fed_ms: u64,
+    wall_ms: u64,
+    last_preview: &mut String,
+    last_confirmed: &mut String,
+    events: &mut Vec<VadDebugTextEvent>,
+) {
+    if response.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return;
+    };
+    if value["confirmed_changed"].as_bool() == Some(true)
+        && let Some(confirmed) = value["confirmed"].as_str()
+    {
+        let added = confirmed
+            .strip_prefix(last_confirmed.as_str())
+            .unwrap_or(confirmed);
+        if !added.is_empty() {
+            events.push(VadDebugTextEvent {
+                kind: "confirmed",
+                fed_ms,
+                wall_ms,
+                text: added.to_string(),
+            });
+        }
+        *last_confirmed = confirmed.to_string();
+    }
+    if let Some(preview) = value["preview"].as_str()
+        && !preview.is_empty()
+        && preview != last_preview
+    {
+        if events
+            .iter()
+            .filter(|event| event.kind == "preview")
+            .count()
+            < 256
+        {
+            events.push(VadDebugTextEvent {
+                kind: "preview",
+                fed_ms,
+                wall_ms,
+                text: preview.to_string(),
+            });
+        }
+        *last_preview = preview.to_string();
     }
 }
 

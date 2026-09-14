@@ -400,6 +400,7 @@ pub(crate) mod sentence_state;
 pub mod streaming_port;
 pub mod transcribe; // 0.22.16 Handoff 04：一次性文件转写领域契约
 pub mod vad;
+pub mod vad_diagnostics;
 pub(crate) mod wav;
 
 /// 创建 STT 引擎实例(工厂函数)。

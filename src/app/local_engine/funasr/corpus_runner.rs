@@ -727,6 +727,19 @@ mod tests {
 
         let mut case_reports = Vec::new();
         for (case_id, _expected, samples) in &cases {
+            let mut compact_vad = EnergyVad::with_params_and_windows(
+                TARGET_SAMPLE_RATE,
+                threshold,
+                silence_ms,
+                sentence_ms,
+                8_000,
+                12_000,
+            );
+            let compact_trace = crate::domain::stt::vad_diagnostics::trace_vad(
+                samples,
+                TARGET_SAMPLE_RATE,
+                &mut compact_vad,
+            );
             let mut vad = EnergyVad::with_params_and_windows(
                 TARGET_SAMPLE_RATE,
                 threshold,
@@ -762,10 +775,29 @@ mod tests {
                     vad.reset_sentence();
                 }
             }
+            let frame_events: Vec<_> = events
+                .iter()
+                .map(|event| {
+                    (
+                        event["time_ms"].as_u64().unwrap(),
+                        event["reason"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            let trace_events: Vec<_> = compact_trace
+                .events
+                .iter()
+                .map(|event| (event.time_ms, event.reason))
+                .collect();
+            assert_eq!(
+                trace_events, frame_events,
+                "compact VAD trace drifted for {case_id}"
+            );
             case_reports.push(serde_json::json!({
                 "case_id": case_id,
                 "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
                 "events": events,
+                "compact_trace": compact_trace,
                 "frames": frames,
             }));
         }

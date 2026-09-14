@@ -48,6 +48,8 @@ export const EVENTS = Object.freeze({
     VOICE_PARTIAL: 'blink://voice-partial',
     VOICE_STATUS: 'blink://voice-status',
     VOICE_ERROR: 'blink://voice-error',
+    /** 设置页 WAV 伪流式诊断进度：{ runId, phase, fedMs, durationMs }。 */
+    STT_VAD_DEBUG_PROGRESS: 'blink://stt-vad-debug-progress',
 
     /**
      * 编辑器连续听写 confirmed 段（0.23.3）。

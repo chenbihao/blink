@@ -13,12 +13,13 @@
 //! - 不复制 STT service，不接 VoiceService，不发送录音 UI 事件
 //! - 不新增大规模设置页或通用附件系统
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::domain::capability::{
     CapabilityRegistry, InvocationOrigin, InvokeContext, RuntimeCapabilities,
 };
+use crate::domain::event_names::EventNames;
 
 /// `pick_audio_file` — 由可信 native picker 选择本地 .wav 文件。
 ///
@@ -30,6 +31,34 @@ use crate::domain::capability::{
 pub async fn pick_audio_file(
     app: tauri::AppHandle,
 ) -> Result<Option<String>, crate::app::command_error::CommandError> {
+    Ok(pick_audio_file_ref(&app)
+        .await?
+        .map(|(audio_ref, _)| audio_ref))
+}
+
+/// 调试入口额外返回文件名供界面标识；不向前端暴露目录或绝对路径。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VadDebugPickedFile {
+    audio_ref: String,
+    display_name: String,
+}
+
+#[tauri::command]
+pub async fn pick_audio_file_for_vad_debug(
+    app: tauri::AppHandle,
+) -> Result<Option<VadDebugPickedFile>, crate::app::command_error::CommandError> {
+    Ok(pick_audio_file_ref(&app)
+        .await?
+        .map(|(audio_ref, display_name)| VadDebugPickedFile {
+            audio_ref,
+            display_name,
+        }))
+}
+
+async fn pick_audio_file_ref(
+    app: &tauri::AppHandle,
+) -> Result<Option<(String, String)>, crate::app::command_error::CommandError> {
     let audio_registry = app
         .state::<std::sync::Arc<crate::app::audio_resource::AudioResourceRegistry>>()
         .inner()
@@ -70,7 +99,8 @@ pub async fn pick_audio_file(
     match audio_registry.issue(&path, "stt_transcribe") {
         Ok(audio_ref) => {
             tracing::debug!("pick_audio_file: audio_ref issued");
-            Ok(Some(audio_ref))
+            let display_name = safe_audio_display_name(&path);
+            Ok(Some((audio_ref, display_name)))
         }
         Err(e) => {
             tracing::warn!(error = %e, "pick_audio_file: 无法签发 audio_ref");
@@ -80,6 +110,32 @@ pub async fn pick_audio_file(
                 false,
             ))
         }
+    }
+}
+
+fn safe_audio_display_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| {
+            name.to_string_lossy()
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(160)
+                .collect()
+        })
+        .filter(|name: &String| !name.is_empty())
+        .unwrap_or_else(|| "WAV 文件".into())
+}
+
+#[cfg(test)]
+mod vad_debug_picker_tests {
+    use super::safe_audio_display_name;
+
+    #[test]
+    fn display_name_contains_only_safe_basename() {
+        let path = std::path::Path::new("private/audio/测试录音.wav");
+        assert_eq!(safe_audio_display_name(path), "测试录音.wav");
+        let noisy = std::path::Path::new("private/audio/name\n.wav");
+        assert_eq!(safe_audio_display_name(noisy), "name.wav");
     }
 }
 
@@ -126,4 +182,40 @@ pub async fn transcribe_audio_file(
     serde_json::to_value(&result).map_err(|_| {
         crate::app::command_error::CommandError::new("internal_error", "转写结果序列化失败", false)
     })
+}
+
+/// 使用用户主动选择的一次性 audio_ref，按实时速率回放伪流式 VAD 与当前本地模型。
+#[tauri::command]
+pub async fn debug_vad_audio_file(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    audio_ref: String,
+    run_id: String,
+) -> Result<
+    crate::app::audio_transcription_service::VadDebugResult,
+    crate::app::command_error::CommandError,
+> {
+    let service = app
+        .state::<std::sync::Arc<crate::app::audio_transcription_service::AudioTranscriptionService>>()
+        .inner()
+        .clone();
+    let target = window.label().to_string();
+    let progress_app = app.clone();
+    service
+        .debug_vad(&audio_ref, move |phase, fed_ms, duration_ms| {
+            let _ = progress_app.emit_to(
+                target.as_str(),
+                EventNames::STT_VAD_DEBUG_PROGRESS,
+                serde_json::json!({
+                    "runId": run_id,
+                    "phase": phase,
+                    "fedMs": fed_ms,
+                    "durationMs": duration_ms,
+                }),
+            );
+        })
+        .await
+        .map_err(|error| {
+            crate::app::command_error::CommandError::new(error.category(), error.to_string(), false)
+        })
 }

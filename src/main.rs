@@ -1545,7 +1545,9 @@ app::commands::toggle_default_trigger,
             app::commands::resize_voice_overlay,
             // 0.22.16 Handoff 06：本地 UI 音频转写（picker + invoke 同一 Capability）
             app::commands::pick_audio_file,
+            app::commands::pick_audio_file_for_vad_debug,
             app::commands::transcribe_audio_file,
+            app::commands::debug_vad_audio_file,
             app::commands::get_default_hotkey,
             // 0.13.0 MCP client
             app::commands::list_mcp_servers,

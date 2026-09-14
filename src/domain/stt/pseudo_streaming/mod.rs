@@ -100,6 +100,15 @@ pub struct PseudoStreamingSttEngine {
     connection: Option<crate::domain::stt::SttEngineConnection>,
     /// 采样率
     sample_rate: u32,
+    /// 仅诊断回放设置；生产录音不分配切点记录。
+    boundary_observer: Option<Arc<Mutex<Vec<SttBoundaryRecord>>>>,
+}
+
+/// 伪流式引擎实际产生的边界（包含未提交上限兜底）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SttBoundaryRecord {
+    pub audio_ms: u64,
+    pub reason: &'static str,
 }
 
 /// 伪流式引擎内部状态。
@@ -352,7 +361,14 @@ impl PseudoStreamingSttEngine {
             })),
             connection: Some(conn),
             sample_rate: 16000,
+            boundary_observer: None,
         })
+    }
+
+    /// 给独立的 WAV 诊断回放挂载数值切点记录器。
+    pub fn with_boundary_observer(mut self, observer: Arc<Mutex<Vec<SttBoundaryRecord>>>) -> Self {
+        self.boundary_observer = Some(observer);
+        self
     }
 
     /// 返回当前应使用的预览间隔（累积过长时降频）。
@@ -866,6 +882,7 @@ impl SttEngine for PseudoStreamingSttEngine {
 
             // 喂 VAD
             let mut event = inner.vad.process_chunk(samples);
+            let mut boundary_reason = event.reason();
 
             // VAD 的 speaking 状态不是内存/负载边界：真实麦克风输入可能长期
             // 落在 on/off 滞回区，导致 VAD 计时不前进。按绝对未提交音频长度
@@ -879,7 +896,10 @@ impl SttEngine for PseudoStreamingSttEngine {
                     inner.sentences.committed_sample_end,
                     self.sample_rate,
                 ) {
-                    Some(true) => event = VadEvent::HardWindow,
+                    Some(true) => {
+                        event = VadEvent::HardWindow;
+                        boundary_reason = "uncommitted_cap";
+                    }
                     Some(false) => {}
                     None => {
                         inner.mark_session_failed("计算未提交音频长度失败");
@@ -892,7 +912,16 @@ impl SttEngine for PseudoStreamingSttEngine {
             // 先 clone latest_preview 避免 mutable/immutable 借用冲突
             let pending = if event.is_boundary() {
                 let preview_snapshot = inner.latest_preview.clone();
-                tracing::debug!(reason = event.reason(), total, "STT segment boundary");
+                tracing::debug!(reason = boundary_reason, total, "STT segment boundary");
+                if let Some(observer) = &self.boundary_observer {
+                    observer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(SttBoundaryRecord {
+                            audio_ms: total as u64 * 1000 / self.sample_rate as u64,
+                            reason: boundary_reason,
+                        });
+                }
                 inner.sentences.on_sentence_end(total, &preview_snapshot)
             } else {
                 None

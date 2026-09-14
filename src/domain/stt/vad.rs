@@ -56,7 +56,6 @@ impl VadEvent {
 }
 
 /// VAD 内部状态（用于测试和诊断导出）。
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VadState {
     /// 是否正在说话
@@ -462,7 +461,6 @@ impl EnergyVad {
     }
 
     /// 导出当前内部状态（用于测试和诊断）。
-    #[cfg(test)]
     pub fn dump_state(&self) -> VadState {
         let (on, off) = self.compute_thresholds();
         VadState {

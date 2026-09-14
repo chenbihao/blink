@@ -37,6 +37,9 @@ for (const id of [
     "voice-file-transcribe-status",
     "voice-file-transcribe-output",
     "voice-file-transcribe-meta",
+    "voice-vad-debug-btn",
+    "voice-vad-debug-chart",
+    "voice-vad-debug-transcript",
 ]) {
     assert.match(html, new RegExp(`id="${id}"`));
 }

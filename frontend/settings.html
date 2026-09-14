@@ -1886,20 +1886,41 @@
                 <div class="voice-file-transcribe-card">
                     <div class="voice-file-transcribe-copy">
                         <div class="voice-file-transcribe-title" data-i18n="voice.local.file.title">转写 WAV 文件</div>
-                        <div class="voice-file-transcribe-desc" data-i18n="voice.local.file.desc">选择本地
-                            WAV，使用当前运行中的模型一次性转写。文件路径不会交给前端。
-                        </div>
+                        <div class="voice-file-transcribe-desc" data-i18n="voice.local.file.desc">“选择并转写”整段一次性识别；“调试 VAD 切句”按录音速度回放伪流式链路，展示能量、停顿与定稿（最长 120 秒）。文件路径不会交给前端。</div>
                     </div>
-                    <button class="btn btn-small" id="voice-file-transcribe-btn" type="button">
-                        <svg aria-hidden="true" class="icon">
-                            <use href="#icon-audio-lines"/>
-                        </svg>
-                        <span data-i18n="voice.local.file.choose">选择并转写</span>
-                    </button>
+                    <div class="voice-file-actions">
+                        <button class="btn btn-small" id="voice-file-transcribe-btn" type="button">
+                            <svg aria-hidden="true" class="icon"><use href="#icon-audio-lines"/></svg>
+                            <span data-i18n="voice.local.file.choose">选择并转写</span>
+                        </button>
+                        <button class="btn btn-small" id="voice-vad-debug-btn" type="button">
+                            <span data-i18n="voice.local.vad_debug.choose">调试 VAD 切句</span>
+                        </button>
+                    </div>
                     <div aria-live="polite" class="voice-file-transcribe-status"
                          id="voice-file-transcribe-status"></div>
                     <pre class="voice-file-transcribe-output" hidden id="voice-file-transcribe-output"></pre>
                     <div class="voice-file-transcribe-meta" id="voice-file-transcribe-meta"></div>
+                    <div aria-live="polite" class="voice-file-transcribe-status" id="voice-vad-debug-status"></div>
+                    <div class="voice-vad-debug-file" hidden id="voice-vad-debug-file"></div>
+                    <div class="voice-vad-debug-progress" hidden id="voice-vad-debug-progress">
+                        <div class="voice-vad-debug-progress-head">
+                            <span data-i18n="voice.local.vad_debug.audio_progress">音频回放进度</span>
+                            <span id="voice-vad-debug-progress-time"></span>
+                        </div>
+                        <progress id="voice-vad-debug-progress-bar" max="100"></progress>
+                        <div class="voice-vad-debug-progress-detail" id="voice-vad-debug-progress-detail"></div>
+                    </div>
+                    <section class="voice-vad-debug-result" hidden id="voice-vad-debug-result">
+                        <div class="voice-vad-debug-meta" id="voice-vad-debug-meta"></div>
+                        <div class="voice-vad-debug-legend" data-i18n="voice.local.vad_debug.legend">蓝线：能量 · 红线：on 阈值 · 绿线：off 阈值 · 阴影：低能量 · 实线：实际切点 · 虚线：短句未切</div>
+                        <div class="voice-vad-debug-chart" id="voice-vad-debug-chart"></div>
+                        <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.timeline_title">切句与识别</h4>
+                        <div class="voice-vad-debug-timeline-hint" data-i18n="voice.local.vad_debug.timeline_hint">每张卡片描述标出的音频区间，旁边的竖向能量条也对应同一段；灰色表示低能量。</div>
+                        <div class="voice-vad-debug-timeline" id="voice-vad-debug-events"></div>
+                        <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.final_title">最终全文</h4>
+                        <pre class="voice-file-transcribe-output" id="voice-vad-debug-transcript"></pre>
+                    </section>
                 </div>
 
                 <!-- 高级选项（独立卡片，不嵌套在 FunASR 内） -->

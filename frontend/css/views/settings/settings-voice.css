@@ -290,6 +290,13 @@
     font-weight: 600;
 }
 
+#voice .voice-file-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    justify-content: flex-end;
+}
+
 #voice .voice-file-transcribe-desc,
 #voice .voice-file-transcribe-meta,
 #voice .voice-file-transcribe-status {
@@ -303,6 +310,275 @@
 #voice .voice-file-transcribe-meta {
     grid-column: 1 / -1;
 }
+
+#voice .voice-vad-debug-file,
+#voice .voice-vad-debug-progress {
+    grid-column: 1 / -1;
+    min-width: 0;
+}
+
+#voice .voice-vad-debug-file[hidden],
+#voice .voice-vad-debug-progress[hidden] { display: none; }
+
+#voice .voice-vad-debug-file {
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+#voice .voice-vad-debug-progress {
+    display: grid;
+    gap: var(--space-xs);
+}
+
+#voice .voice-vad-debug-progress-head {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    color: var(--text);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-progress progress {
+    width: 100%;
+    height: 8px;
+    appearance: none;
+    border: 0;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--surface);
+}
+
+#voice .voice-vad-debug-progress progress::-webkit-progress-bar { background: var(--surface); }
+#voice .voice-vad-debug-progress progress::-webkit-progress-value { background: var(--accent); }
+
+#voice .voice-vad-debug-progress-detail {
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-result {
+    grid-column: 1 / -1;
+    min-width: 0;
+    display: grid;
+    gap: var(--space-sm);
+}
+
+#voice .voice-vad-debug-result[hidden] {
+    display: none;
+}
+
+#voice .voice-vad-debug-meta,
+#voice .voice-vad-debug-legend {
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-chart {
+    overflow-x: auto;
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+}
+
+#voice .voice-vad-debug-chart svg {
+    display: block;
+    width: 100%;
+    min-width: 480px;
+    height: 150px;
+}
+
+#voice .voice-vad-debug-chart .vad-energy { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+#voice .voice-vad-debug-chart .vad-quiet { fill: var(--surface); }
+#voice .voice-vad-debug-chart .vad-on { fill: none; stroke: var(--red); stroke-width: 1; stroke-dasharray: 4 3; }
+#voice .voice-vad-debug-chart .vad-off { fill: none; stroke: var(--green); stroke-width: 1; stroke-dasharray: 4 3; }
+#voice .voice-vad-debug-chart .vad-cut { stroke: var(--text); stroke-width: 1.5; }
+#voice .voice-vad-debug-chart .vad-rejected { stroke: var(--red); stroke-width: 1; stroke-dasharray: 2 3; }
+#voice .voice-vad-debug-chart .vad-time-label { fill: var(--text-dim); font-size: 10px; }
+
+#voice .voice-vad-debug-section-title {
+    margin: var(--space-sm) 0 0;
+    color: var(--text);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    font-style: normal;
+}
+
+#voice .voice-vad-debug-timeline-hint {
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-timeline {
+    display: grid;
+    min-width: 0;
+    max-height: 36rem;
+    overflow: auto;
+    user-select: text;
+}
+
+#voice .voice-vad-debug-entry {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: var(--space-sm);
+    min-width: 0;
+    font-style: normal;
+}
+
+#voice .voice-vad-debug-rail {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 64px;
+}
+
+#voice .voice-vad-debug-rail::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 12px;
+    left: calc(50% - 1px);
+    width: 2px;
+    background: var(--surface);
+}
+
+#voice .voice-vad-debug-rail-node {
+    position: relative;
+    z-index: 1;
+    width: 11px;
+    height: 11px;
+    margin-bottom: 7px;
+    border: 2px solid var(--bg-sidebar);
+    border-radius: 50%;
+    background: var(--green);
+}
+
+#voice .voice-vad-debug-entry-rejected .voice-vad-debug-rail-node,
+#voice .voice-vad-debug-entry-forced .voice-vad-debug-rail-node { background: var(--red); }
+#voice .voice-vad-debug-entry-tail .voice-vad-debug-rail-node { background: var(--text-dim); }
+#voice .voice-vad-debug-entry-start .voice-vad-debug-rail-node { background: var(--accent); }
+#voice .voice-vad-debug-entry-confirmed_text .voice-vad-debug-rail-node { background: var(--green); }
+
+#voice .voice-vad-debug-entry-start .voice-vad-debug-rail { min-height: 32px; }
+#voice .voice-vad-debug-entry-start .voice-vad-debug-rail-node { margin-top: 7px; margin-bottom: 0; }
+
+#voice .voice-vad-debug-wave {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    flex: 1;
+    min-height: 16px;
+    margin: var(--space-xs) 0;
+}
+
+#voice .voice-vad-debug-wave-bar {
+    display: block;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+}
+
+#voice .voice-vad-debug-wave-bar.quiet { background: var(--text-dim); }
+
+#voice .voice-vad-debug-entry-body {
+    min-width: 0;
+    margin-bottom: var(--space-md);
+    padding: var(--space-sm);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+}
+
+#voice .voice-vad-debug-entry-start .voice-vad-debug-entry-body {
+    padding: var(--space-xs) 0;
+    border: 0;
+    background: transparent;
+}
+
+#voice .voice-vad-debug-entry-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-xs);
+}
+
+#voice .voice-vad-debug-entry-time,
+#voice .voice-vad-debug-preview-time {
+    color: var(--text-sub);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+}
+
+#voice .voice-vad-debug-entry-time {
+    padding: 2px var(--space-xs);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    font-weight: 600;
+}
+
+#voice .voice-vad-debug-entry-reason { color: var(--text); font-weight: 600; }
+#voice .voice-vad-debug-entry-rejected .voice-vad-debug-entry-reason,
+#voice .voice-vad-debug-entry-forced .voice-vad-debug-entry-reason { color: var(--red); }
+
+#voice .voice-vad-debug-entry-meta,
+#voice .voice-vad-debug-entry-interval,
+#voice .voice-vad-debug-entry-text-label,
+#voice .voice-vad-debug-entry-empty {
+    margin-top: var(--space-xs);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-entry-interval,
+#voice .voice-vad-debug-entry-meta { color: var(--text-sub); }
+
+#voice .voice-vad-debug-entry-transcript {
+    margin-top: var(--space-sm);
+    padding-top: var(--space-xs);
+    border-top: 1px solid var(--surface);
+}
+
+#voice .voice-vad-debug-entry-text {
+    margin-top: var(--space-xs);
+    color: var(--text);
+    font-size: var(--text-lg);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+#voice .voice-vad-debug-entry-transcript.preview .voice-vad-debug-entry-text { color: var(--text-sub); }
+#voice .voice-vad-debug-entry-transcript.confirmed .voice-vad-debug-entry-text { font-weight: 600; }
+#voice .voice-vad-debug-entry-transcript.silence .voice-vad-debug-entry-text {
+    color: var(--text-dim);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+}
+
+#voice .voice-vad-debug-preview-history {
+    margin-top: var(--space-sm);
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-preview-history summary { cursor: pointer; }
+
+#voice .voice-vad-debug-preview-row {
+    display: grid;
+    grid-template-columns: 4rem minmax(0, 1fr);
+    gap: var(--space-xs);
+    margin-top: var(--space-xs);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+#voice .voice-vad-debug-preview-silence { color: var(--text-dim); }
+#voice .voice-vad-debug-preview-text { color: var(--text-sub); }
 
 #voice .voice-file-transcribe-status.success {
     color: var(--green);

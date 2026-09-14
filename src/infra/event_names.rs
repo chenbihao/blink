@@ -122,6 +122,9 @@ impl EventNames {
     /// i18n key：`local_engine.operation.{kind}` / `local_engine.operation.stage.{stage}`。
     pub const LOCAL_ENGINE_STATUS: &str = "blink://local-engine-status";
 
+    /// 设置页 WAV 伪流式诊断回放进度。payload: { runId, phase, fedMs, durationMs }。
+    pub const STT_VAD_DEBUG_PROGRESS: &str = "blink://stt-vad-debug-progress";
+
     /// 通用引擎日志条目。payload: `EngineLogDto`。
     ///
     /// **运行时日志**（instance_id 隔离）：

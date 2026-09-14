@@ -17,6 +17,7 @@ import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from "../index.js";
 import {navigateSettings} from "../navigation.js";
 import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
+import {renderVadDebugResult, vadDebugProgressState} from "./voice-vad-debug.js";
 import {VAD_DEFAULTS, VAD_WINDOW_KEYS, VAD_WINDOW_RANGE, ensureVadWindowFields, normalizeVadWindows,} from "./voice-vad.js";
 
 /**
@@ -301,6 +302,7 @@ export async function initVoiceTab() {
     // FunASR 本地模型选择（业务设置）
     initLocalModelSelect(config);
     initFileTranscription();
+    initVadDebug();
 
     // ── 跳转入口：点击切换到引擎页并定位 FunASR 卡片 ──
     const gotoEnginesBtn = document.getElementById("voice-goto-engines-btn");
@@ -363,6 +365,7 @@ export async function initVoiceTab() {
 
 function initFileTranscription() {
     const button = document.getElementById("voice-file-transcribe-btn");
+    const debugButton = document.getElementById("voice-vad-debug-btn");
     const status = document.getElementById("voice-file-transcribe-status");
     const output = document.getElementById("voice-file-transcribe-output");
     const meta = document.getElementById("voice-file-transcribe-meta");
@@ -372,6 +375,7 @@ function initFileTranscription() {
     button.addEventListener("click", async () => {
         if (button.disabled) return;
         button.disabled = true;
+        if (debugButton) debugButton.disabled = true;
         status.textContent = t("voice.local.file.picking");
         status.className = "voice-file-transcribe-status";
         output.hidden = true;
@@ -397,6 +401,83 @@ function initFileTranscription() {
             status.className = "voice-file-transcribe-status error";
         } finally {
             button.disabled = false;
+            if (debugButton) debugButton.disabled = false;
+        }
+    });
+}
+
+function initVadDebug() {
+    const button = document.getElementById("voice-vad-debug-btn");
+    const transcribeButton = document.getElementById("voice-file-transcribe-btn");
+    const status = document.getElementById("voice-vad-debug-status");
+    const file = document.getElementById("voice-vad-debug-file");
+    const progress = document.getElementById("voice-vad-debug-progress");
+    const progressBar = document.getElementById("voice-vad-debug-progress-bar");
+    const progressTime = document.getElementById("voice-vad-debug-progress-time");
+    const progressDetail = document.getElementById("voice-vad-debug-progress-detail");
+    const result = document.getElementById("voice-vad-debug-result");
+    if (!button || !status || !file || !progress || !progressBar || !progressTime || !progressDetail
+        || !result || button.dataset.bound === "true") return;
+    button.dataset.bound = "true";
+    let runSerial = 0;
+
+    function showProgress(payload) {
+        const state = vadDebugProgressState(payload, t);
+        if (!state) return;
+        progress.hidden = false;
+        if (status.textContent !== state.status) status.textContent = state.status;
+        if (state.percent == null) progressBar.removeAttribute("value");
+        else progressBar.value = state.percent;
+        progressTime.textContent = state.time;
+        progressDetail.textContent = state.detail;
+    }
+
+    button.addEventListener("click", async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        if (transcribeButton) transcribeButton.disabled = true;
+        result.hidden = true;
+        file.hidden = true;
+        progress.hidden = true;
+        status.className = "voice-file-transcribe-status";
+        status.textContent = t("voice.local.file.picking");
+        let unlisten = null;
+        try {
+            const picked = await invoke("pick_audio_file_for_vad_debug");
+            if (!picked) {
+                status.textContent = t("voice.local.file.cancelled");
+                return;
+            }
+            file.textContent = `${t("voice.local.vad_debug.selected_file")} ${picked.displayName}`;
+            file.hidden = false;
+            const runId = `${Date.now()}-${++runSerial}`;
+            showProgress({phase: "preparing", fedMs: 0, durationMs: 0});
+            try {
+                unlisten = await listen(EVENTS.STT_VAD_DEBUG_PROGRESS, event => {
+                    if (event.payload?.runId === runId) showProgress(event.payload);
+                });
+            } catch (error) {
+                console.warn("VAD progress listener unavailable:", error);
+            }
+            const data = await invoke("debug_vad_audio_file", {audioRef: picked.audioRef, runId});
+            showProgress({phase: "done", fedMs: data.duration_ms, durationMs: data.duration_ms});
+            renderVadDebugResult(data, {
+                chart: document.getElementById("voice-vad-debug-chart"),
+                events: document.getElementById("voice-vad-debug-events"),
+                transcript: document.getElementById("voice-vad-debug-transcript"),
+                meta: document.getElementById("voice-vad-debug-meta"),
+            }, t);
+            result.hidden = false;
+            status.textContent = t("voice.local.vad_debug.done");
+            status.className = "voice-file-transcribe-status success";
+        } catch (error) {
+            progress.hidden = true;
+            status.textContent = commandErrorText(error, t("voice.local.vad_debug.failed"));
+            status.className = "voice-file-transcribe-status error";
+        } finally {
+            if (unlisten) unlisten();
+            button.disabled = false;
+            if (transcribeButton) transcribeButton.disabled = false;
         }
     });
 }

@@ -78,6 +78,7 @@ fn controlled_engine(
             transport: Some(transport),
         }),
         sample_rate: 16_000,
+        boundary_observer: None,
     }
 }
 
@@ -87,6 +88,7 @@ fn engine_without_transport(samples: Vec<f32>) -> PseudoStreamingSttEngine {
         inner: Arc::new(Mutex::new(PseudoInner::for_test(samples))),
         connection: None,
         sample_rate: 16_000,
+        boundary_observer: None,
     }
 }
 
@@ -531,6 +533,7 @@ fn engine_reset_clears_state() {
         })),
         connection: None,
         sample_rate: 16000,
+        boundary_observer: None,
     };
 
     engine.reset();
@@ -568,6 +571,7 @@ fn engine_with_token_constructs_and_resets() {
             transport: None,
         }),
         sample_rate: 16000,
+        boundary_observer: None,
     };
 
     engine.reset();
@@ -803,6 +807,34 @@ async fn soft_voice_pause_finalizes_through_engine_boundary() {
         inner.sentences.next_segment_id, 2,
         "边界应建立过 pending segment（无 transport 时立即回滚，但段 id 已分配）"
     );
+}
+
+#[tokio::test]
+async fn vad_debug_observer_records_actual_natural_boundary() {
+    let observer = Arc::new(Mutex::new(Vec::new()));
+    let engine = engine_without_transport(Vec::new()).with_boundary_observer(observer.clone());
+    for _ in 0..5 {
+        engine
+            .transcribe_chunk(&tone_200ms_chunk(0.0))
+            .await
+            .unwrap();
+    }
+    for _ in 0..6 {
+        engine
+            .transcribe_chunk(&tone_200ms_chunk(0.02))
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        engine
+            .transcribe_chunk(&tone_200ms_chunk(0.0))
+            .await
+            .unwrap();
+    }
+    let records = observer.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].reason, "natural_silence");
+    assert_eq!(records[0].audio_ms, 2_600); // 引擎按 200ms 喂入块记录实际边界
 }
 
 /// 生成 200ms 的 16kHz 单声道音频块（测试辅助）。
