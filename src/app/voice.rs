@@ -1473,7 +1473,7 @@ fn deliver_final(
             tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
                     if let Some(hwnd) = prev_fg_hwnd {
-                        platform::window::restore_foreground(hwnd);
+                        platform::window::restore_foreground_g2(hwnd);
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     if let Err(e) = platform::inject::inject_text(&text_owned) {

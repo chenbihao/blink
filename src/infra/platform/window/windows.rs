@@ -1411,7 +1411,7 @@ pub fn last_external_foreground_hwnd() -> Option<isize> {
     (hwnd != 0).then_some(hwnd)
 }
 
-/// 恢复前台窗口焦点（G2 注入文本前调用）。
+/// 恢复前台窗口焦点（剪贴板回填等路径调用）。
 ///
 /// Alt+Space 唤起 Blink 时，组合键到达前台应用会弹出系统菜单（Alt+Space 的系统行为），
 /// 导致焦点从文本输入框漂移到系统菜单。本函数负责在注入前修复焦点：
@@ -1421,14 +1421,23 @@ pub fn last_external_foreground_hwnd() -> Option<isize> {
 /// 2. **AttachThreadInput + SetForegroundWindow**：恢复前台窗口，绕过 Windows 前台锁定。
 ///    不使用 Alt 欺骗——合成 Alt keydown 会被目标应用接收，在 Electron/Chromium 上
 ///    可能激活菜单栏，反而干扰焦点。
-/// 3. **UIA SetFocus**：关闭系统菜单后 Windows 自动恢复焦点到弹出前的控件，
-///    但不保证可靠。用 UIA `GetFocusedElement` + `SetFocus` 保险——如果焦点恢复后
-///    的控件是文本输入框（Edit/Document），主动 SetFocus 确保焦点到位。
+/// 3. **UIA SetFocus**：普通回填路径保留原有的输入控件设焦逻辑。
+///    G2 语音上屏不执行这一步：在部分应用中对已聚焦控件再次 SetFocus
+///    会破坏后续 IME 候选窗定位。
 ///
 /// > **不吞键时 Alt+Space 只触发系统菜单，不触发 Alt tap 菜单栏激活**——
 /// > 因为 Alt keydown→keyup 之间有 Space 到达应用，Windows 不判定为 Alt tap。
 /// > 所以只需关闭系统菜单，不需要处理 Chromium 菜单栏。
 pub fn restore_foreground(hwnd: isize) {
+    restore_foreground_impl(hwnd, true);
+}
+
+/// G2 通用焦点恢复：保留菜单关闭和前台窗口恢复，不主动重设输入控件焦点。
+pub fn restore_foreground_g2(hwnd: isize) {
+    restore_foreground_impl(hwnd, false);
+}
+
+fn restore_foreground_impl(hwnd: isize, set_uia_focus: bool) {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1460,10 +1469,11 @@ pub fn restore_foreground(hwnd: isize) {
         }
     }
 
-    // 3. UIA 焦点恢复（保险）：关闭系统菜单后 Windows 自动恢复焦点，
-    //    但不保证可靠。用 UIA GetFocusedElement + SetFocus 主动恢复。
-    //    等 50ms 让菜单关闭 + 焦点自动恢复完成，再检查。
+    // 等待系统菜单关闭和前台焦点稳定；普通回填路径继续执行原有 UIA 保险。
     std::thread::sleep(std::time::Duration::from_millis(50));
+    if !set_uia_focus {
+        return;
+    }
 
     if let Some(elem) = crate::infra::platform::uia::get_focused_element() {
         // 焦点已恢复到某个元素——如果它是文本输入控件，主动 SetFocus 确保到位
