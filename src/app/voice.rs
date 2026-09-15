@@ -360,7 +360,8 @@ impl VoiceService {
         // downcast Arc<dyn SttEngine> 到 PseudoStreamingSttEngine
         let pseudo = engine
             .as_any()
-            .downcast_ref::<crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine>()?;
+            .downcast_ref::<crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine>(
+        )?;
         pseudo.snapshot_coordinator_trace(max_uncommitted_s)
     }
 
@@ -1066,6 +1067,12 @@ impl VoiceService {
             e
         };
 
+        // 0.23.10.2：会话开始即预热 worker——首次推理的懒加载开销（冷启
+        // ~650ms）被移到用户尚未说话的窗口，首个预览/短语结果提前落地。
+        if let Err(e) = port.warm_up().await {
+            tracing::debug!(%e, "worker 预热触发失败（忽略）");
+        }
+
         // 获取事件 receiver（在 begin_session 之后）
         let event_rx = port.events();
 
@@ -1120,6 +1127,12 @@ impl VoiceService {
         let task_handle = tokio::spawn(async move {
             // 首块立即发一次音量，之后按 VOICE_LEVEL_MIN_INTERVAL 节流
             let mut last_level_emit = std::time::Instant::now() - VOICE_LEVEL_MIN_INTERVAL;
+            // TEMP-PROBE(0.23.9 G2预览排查)：每秒汇总输入 RMS，与 VAD 阈值
+            // （on≈0.01 / off≈0.005）对照。收尾删除。
+            let mut probe_sec_sum = 0f64;
+            let mut probe_sec_max = 0f64;
+            let mut probe_sec_n = 0u32;
+            let mut probe_sec_start = std::time::Instant::now();
             while let Some(chunk) = rx.recv().await {
                 // 0.23.3：Editor 听写暂停时丢弃 chunk（不推 STT、不发音量事件），
                 // 恢复后从静音继续，暂停期间的话语不进识别。
@@ -1139,6 +1152,23 @@ impl VoiceService {
                     last_level_emit = std::time::Instant::now();
                     let level = compute_rms(&chunk.samples);
                     let target_str = target_for_audio.as_str();
+                    // TEMP-PROBE(0.23.9 G2预览排查)：输入 RMS 每秒汇总。收尾删除。
+                    probe_sec_sum += level;
+                    probe_sec_max = probe_sec_max.max(level);
+                    probe_sec_n += 1;
+                    if probe_sec_start.elapsed().as_millis() >= 1000 {
+                        tracing::debug!(
+                            target_kind = target_str,
+                            mean = probe_sec_sum / probe_sec_n.max(1) as f64,
+                            max = probe_sec_max,
+                            samples = probe_sec_n,
+                            "TEMP-PROBE 输入RMS每秒汇总"
+                        );
+                        probe_sec_sum = 0.0;
+                        probe_sec_max = 0.0;
+                        probe_sec_n = 0;
+                        probe_sec_start = std::time::Instant::now();
+                    }
                     let _ = app.emit(
                         EventNames::VOICE_LEVEL,
                         serde_json::json!({
@@ -1827,6 +1857,13 @@ async fn consume_stt_events(
                             "epoch": recording_epoch,
                         }),
                     );
+                    // TEMP-PROBE(0.23.9 G2预览排查)：G2 confirmed 增量已发送。收尾删除。
+                    tracing::debug!(
+                        target_kind = target_str,
+                        confirmed_chars = confirmed_cache.chars().count(),
+                        preview_chars = preview_cache.chars().count(),
+                        "TEMP-PROBE VOICE_PARTIAL(draft) 已发送"
+                    );
                 }
             }
             SttEvent::Preview {
@@ -1874,18 +1911,28 @@ async fn consume_stt_events(
                         confirmed_cache = draft_ledger_text(&draft_ledger);
                         confirmed_cache.as_str()
                     };
-                    if !confirmed.is_empty() || !preview_cache.is_empty() {
-                        let _ = app.emit(
-                            EventNames::VOICE_PARTIAL,
-                            serde_json::json!({
-                                "confirmed": confirmed,
-                                "preview": preview_cache.as_str(),
-                                "previewRequestId": request_id,
-                                "target": target_str,
-                                "epoch": recording_epoch,
-                            }),
-                        );
-                    }
+                    // 0.23.9.10：Preview 事件到达即意味着预览状态变化（引擎边沿
+                    // 触发，只在短语追加/尾部更新/显式清空时产出）。confirmed 与
+                    // preview 均空的显式清空也必须发送——否则句尾旧虚字残留到
+                    // 下一事件才被覆盖。
+                    let _ = app.emit(
+                        EventNames::VOICE_PARTIAL,
+                        serde_json::json!({
+                            "confirmed": confirmed,
+                            "preview": preview_cache.as_str(),
+                            "previewRequestId": request_id,
+                            "target": target_str,
+                            "epoch": recording_epoch,
+                        }),
+                    );
+                    // TEMP-PROBE(0.23.9 G2预览排查)：G2 预览已发送。收尾删除。
+                    tracing::debug!(
+                        target_kind = target_str,
+                        request_id,
+                        confirmed_chars = confirmed.chars().count(),
+                        preview_chars = preview_cache.chars().count(),
+                        "TEMP-PROBE VOICE_PARTIAL(preview) 已发送"
+                    );
                 }
             }
             SttEvent::Partial {

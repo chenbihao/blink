@@ -603,7 +603,9 @@ async fn preview_draft_silence_marker_result_consumes_without_span() {
         }
     }
     transport.wait_for_calls_or_fail(1).await;
-    sender.send(Ok("/sil".to_string())).expect("sender 不应泄漏");
+    sender
+        .send(Ok("/sil".to_string()))
+        .expect("sender 不应泄漏");
     wait_until(|| engine.stream_stats().pcm_committed_end > 0).await;
 
     let final_text = engine.finalize().await.expect("finalize ok");
@@ -611,6 +613,332 @@ async fn preview_draft_silence_marker_result_consumes_without_span() {
     assert!(
         engine.stream_stats().pcm_committed_end >= 16_000 * 5 / 2,
         "NoSpeech 消费必须推进 committed 水位"
+    );
+}
+
+/// 0.23.9.10 预览定稿：短停顿候选被复语作废 → 短语冻结进账本并拼接；
+/// 强停顿真实切割 → Draft 整段重识别提交，覆盖范围内的短语清退。
+/// 预期对外预览从"滚动替换"变为"短语增量 + 尾部"的组合视图。
+#[tokio::test]
+async fn phrase_finalizes_accumulate_then_draft_replaces() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..3).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    let speech = vec![0.1f32; 16_000];
+    let short_pause = vec![0.0f32; 16_000 * 4 / 10];
+    let strong_pause = vec![0.0f32; 16_000 * 8 / 10];
+
+    let feed = |source: Vec<f32>| {
+        let engine = &engine;
+        async move {
+            for chunk in source.chunks(160) {
+                engine.transcribe_chunk(chunk).await.expect("chunk ok");
+            }
+        }
+    };
+
+    // 第 1 短语：2s 语音 + 400ms 停顿（候选）+ 复语 → 候选作废 → 短语定稿
+    feed(speech.clone()).await;
+    feed(short_pause.clone()).await;
+    feed(speech.clone()).await;
+    transport.wait_for_calls_or_fail(1).await;
+    senders
+        .remove(0)
+        .send(Ok("明确的多句话。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| engine.inner.lock().unwrap().latest_preview == "明确的多句话。").await;
+
+    // 第 2 短语：锚点推进到上一候选 quiet_start，短语范围 [2.0s, 3.4s]
+    feed(short_pause.clone()).await;
+    feed(speech.clone()).await;
+    transport.wait_for_calls_or_fail(2).await;
+    senders
+        .remove(0)
+        .send(Ok("句与句之间。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| engine.inner.lock().unwrap().latest_preview == "明确的多句话。句与句之间。")
+        .await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(inner.preview_phrases.len(), 2, "两条短语定稿入账");
+        // 时间线：1s 语音 + 0.4s 停顿 ×2 —— 第 2 候选 quiet_start = 2.4s
+        assert_eq!(
+            inner.phrase_anchor,
+            (16_000 * 24 / 10) as u64,
+            "锚点推进到第 2 候选 quiet_start"
+        );
+    }
+
+    // 真实切割：800ms 强停顿 → Draft 整段重识别 → 短语清退、尾部清空
+    feed(strong_pause).await;
+    transport.wait_for_calls_or_fail(3).await;
+    senders
+        .remove(0)
+        .send(Ok("草稿正文。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        inner.preview_phrases.is_empty() && inner.latest_preview.is_empty()
+    })
+    .await;
+
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "草稿正文。", "最终文本以 Draft 为准");
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(
+            inner.phrase_anchor, inner.sentences.committed_sample_end as u64,
+            "锚点不低于已提交水位"
+        );
+    }
+}
+
+/// 0.23.9.10 入队刷新限频：尾部预览 in-flight 期间，排队快照只在新音频
+/// ≥500ms 时替换。修复前每个 10ms 音频块都 replace 并消耗一个 coordinator
+/// request id（~100/s），spawn id 从 1 膨胀到三位数。
+#[tokio::test]
+async fn pending_preview_queue_refresh_is_rate_limited() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..3).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    // last_preview 从引擎创建起计时；越过刷新间隔后快速喂入才会触发尾部调度
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // 1.3s 语音满足首预览门槛（≥1.2s 有效输入）→ spawn 尾部预览（不响应，
+    // 保持 in-flight）
+    let speech = vec![0.1f32; 16_000 * 13 / 10];
+    for chunk in speech.chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    transport.wait_for_calls_or_fail(1).await;
+
+    // in-flight 期间再喂 2s：限频后排队替换只应发生 ~4 次
+    let more = vec![0.1f32; 16_000 * 2];
+    for chunk in more.chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    let burned = engine.inner.lock().unwrap().next_preview_request;
+    assert!(
+        burned <= 10,
+        "入队刷新必须限频：next_preview_request={burned}（修复前以块率膨胀到数百）"
+    );
+
+    // 收尾：空结果释放 in-flight，排队快照接管（第二次尾部调用）
+    senders
+        .remove(0)
+        .send(Ok(String::new()))
+        .expect("sender 不应泄漏");
+    wait_until(|| !engine.inner.lock().unwrap().preview_in_flight).await;
+    let tail = vec![0.1f32; 16_000 / 10];
+    for chunk in tail.chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    transport.wait_for_calls_or_fail(2).await;
+    senders
+        .remove(0)
+        .send(Ok(String::new()))
+        .expect("sender 不应泄漏");
+    wait_until(|| !engine.inner.lock().unwrap().preview_in_flight).await;
+
+    // finalize：剩余全部为语音 → terminal 识别（第三次调用；提前应答，
+    // 否则 transport 的 oneshot 会永久等待）
+    senders
+        .remove(0)
+        .send(Ok("终稿。".to_string()))
+        .expect("sender 不应泄漏");
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "终稿。", "terminal 定稿文本应原样返回");
+    assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+/// 0.23.9.10 清空信封的 requestId 不得倒退：`clear_preview` 保留最近一次
+/// 尾部结果的 request id，否则清空信封携带低 id 被消费方的 request-id 墙
+/// 当作过期丢弃，句尾旧虚字残留。
+#[tokio::test]
+async fn clear_envelope_request_id_stays_monotonic() {
+    let transport = ControlledTransport::new(vec![]);
+    let engine = preview_draft_engine(transport);
+
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.preview_tail = "旧预览".to_string();
+        inner.latest_preview = "旧预览".to_string();
+        inner.latest_preview_request_id = 235;
+        inner.preview_revision = 7;
+        inner.last_reported_preview_revision = 6;
+    }
+
+    let first = engine
+        .transcribe_chunk(&[0.0; 160])
+        .await
+        .expect("chunk ok");
+    let first: serde_json::Value = serde_json::from_str(&first).expect("预览信封");
+    assert_eq!(first["kind"], "preview");
+    assert_eq!(first["requestId"].as_u64(), Some(235));
+
+    engine.inner.lock().unwrap().clear_preview();
+
+    let second = engine
+        .transcribe_chunk(&[0.0; 160])
+        .await
+        .expect("chunk ok");
+    let second: serde_json::Value = serde_json::from_str(&second).expect("清空信封");
+    assert_eq!(second["kind"], "preview");
+    assert_eq!(second["text"].as_str(), Some(""));
+    assert!(
+        second["requestId"].as_u64().unwrap_or(0) >= 235,
+        "清空信封 requestId 不得倒退（实测 {}）",
+        second["requestId"]
+    );
+}
+
+// ── 引擎 reset 测试 ──
+
+/// 0.23.10.2 短句停顿即时短语定稿：句长不足 min_sentence（默认 800ms）的
+/// 停顿被 VAD 判为 ShortPhraseEnd——不再等复语作废候选，暂停达 min_silence
+/// 即对 [phrase_anchor, quiet_start) 定稿并推进锚点。修复前该短语被静默
+/// 吞掉（无事件、无候选、无定稿），短首句的首个可见文本被推迟数秒。
+#[tokio::test]
+async fn short_phrase_pause_freezes_phrase_without_waiting_for_resume() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..2).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    // 600ms 语音（< min_sentence 800ms）+ 400ms 停顿（≥ min_silence 300ms）
+    let speech = vec![0.1f32; 16_000 * 6 / 10];
+    let pause = vec![0.0f32; 16_000 * 4 / 10];
+    for source in [&speech, &pause] {
+        for chunk in source.chunks(160) {
+            engine.transcribe_chunk(chunk).await.expect("chunk ok");
+        }
+    }
+
+    // 停顿期间（未复语）短语推理即已发起——这是本修复的核心断言
+    transport.wait_for_calls_or_fail(1).await;
+    senders
+        .remove(0)
+        .send(Ok("短句定稿。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| engine.inner.lock().unwrap().latest_preview == "短句定稿。").await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(inner.preview_phrases.len(), 1, "短句必须定稿入账");
+        assert_eq!(
+            inner.phrase_anchor,
+            (16_000 * 6 / 10) as u64,
+            "锚点推进到停顿起点（600ms），尾部不再重复识别该短语"
+        );
+        assert!(
+            inner.latest_preview_range.is_some(),
+            "短语事件必须携带真实音频范围，不得回退到 (0,0) 退化区间"
+        );
+    }
+
+    // 终态：terminal drain 识别剩余全部音频（第二次调用需提前应答）
+    senders
+        .remove(0)
+        .send(Ok("终稿。".to_string()))
+        .expect("sender 不应泄漏");
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "终稿。");
+}
+
+/// 0.23.10.2 尾部清空从"边界接受"迁移到"真实提交"：Draft 推理在途的
+/// 数百毫秒内已显示的尾部虚字必须保留，提交（confirmed 增长/NoSpeech
+/// 消费推进 committed）时才清退。修复前接受即清空，用户看到文字先消失
+/// 再以实字重现（08:32 实测 21 字符 → 9 → 0 的回缩闪烁）。
+#[tokio::test]
+async fn tail_survives_boundary_accept_until_commit() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..3).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    // last_preview 从引擎创建起计时，越过刷新间隔后尾部调度才会触发
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // 2.2s 连续语音：首预览在 1.2s 门槛处起飞（调用 1），后续音频按
+    // 500ms 限频排队替换快照——与 08:32 实测会话的调度形态一致。
+    let speech = vec![0.1f32; 16_000 * 22 / 10];
+    for chunk in speech.chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    transport.wait_for_calls_or_fail(1).await;
+    senders
+        .remove(0)
+        .send(Ok("尾部预览。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| engine.inner.lock().unwrap().latest_preview == "尾部预览。").await;
+    // 让完成 task 走完收尾（释放 owner/gate）再喂停顿——真实录音里音频
+    // 块每 10ms 一个，任务天然有调度窗口；测试同步喂入必须显式让出。
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 800ms 强停顿：排队快照在首块接管（调用 2）；静默 700ms 处候选升级
+    // strong（owned 2.2s ≥ 2s）→ 边界接受 → Draft 定稿起飞（调用 3）。
+    // current-thread runtime 下 spawn 的任务只在 await 挂起点被调度，
+    // 因此按"调用发生顺序"逐个应答。
+    let pause = vec![0.0f32; 16_000 * 8 / 10];
+    for chunk in pause.chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    transport.wait_for_calls_or_fail(2).await;
+    // 边界接受已发生（代际推进）：迟到的尾部结果被丢弃，不清写状态
+    senders
+        .remove(0)
+        .send(Ok("迟到尾部。".to_string()))
+        .expect("sender 不应泄漏");
+    transport.wait_for_calls_or_fail(3).await;
+
+    // Draft 在途（尚未应答）：尾部必须原样保留——修复前接受即清空，
+    // 已显示的虚字会先消失、等 Draft 提交后再以实字重现
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(
+            inner.preview_tail, "尾部预览。",
+            "边界接受不得清空尾部（Draft 在途期间保持显示连续）"
+        );
+        assert!(
+            inner.sentences.finalize_in_flight,
+            "前置条件：Draft 定稿确已起飞"
+        );
+    }
+
+    // 提交：confirmed 增长 → settle 清退尾部
+    senders
+        .remove(0)
+        .send(Ok("草稿正文。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        inner.sentences.committed_sample_end > 0
+            && inner.preview_tail.is_empty()
+            && inner.latest_preview.is_empty()
+    })
+    .await;
+
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "草稿正文。");
+    assert_eq!(
+        transport.calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "全程只有两次尾部预览 + Draft 定稿三次推理"
     );
 }
 

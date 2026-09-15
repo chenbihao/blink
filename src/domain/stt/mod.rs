@@ -462,6 +462,15 @@ pub trait StreamingSttPort: Send + Sync {
         RecognitionProfile::Legacy
     }
 
+    /// 会话开始后触发一次推理预热（fire-and-forget，不阻塞录音链路）。
+    ///
+    /// 0.23.10.2：GGUF worker 首次推理有懒加载开销（冷启 ~650ms vs 热态
+    /// ~300ms），预热把该开销移到用户尚未说话的窗口。默认 no-op——仅
+    /// 伪流式 GGUF 适配器需要；调用方在 `begin_session` 成功后调用。
+    async fn warm_up(&self) -> Result<(), SttError> {
+        Ok(())
+    }
+
     /// 获取事件 receiver（有界通道）。
     ///
     /// 返回的 receiver 用于接收 `SttEvent`。消费方应在独立 task 中循环 `recv()`。
@@ -536,6 +545,12 @@ pub trait SttEngine: Send + Sync {
 
     /// 重置引擎状态(新录音会话前调用)。
     fn reset(&self);
+
+    /// 会话开始后触发一次推理预热（默认 no-op）。
+    ///
+    /// 0.23.10.2：仅伪流式 GGUF 引擎需要——首次推理的懒加载开销被移到
+    /// 用户尚未说话的窗口。同步触发、内部 fire-and-forget，立即返回。
+    fn warm_up(&self) {}
 
     /// 引擎侧诊断快照（默认无数据）。
     ///

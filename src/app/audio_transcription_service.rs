@@ -245,6 +245,10 @@ impl AudioTranscriptionService {
             .map_err(|detail| AudioTranscriptionError::Internal { detail })?
             .with_boundary_observer(Arc::clone(&boundaries))
             .with_decision_observer(Arc::clone(&decisions));
+        // 0.23.10.2：回放同样预热 worker——VAD 调试页测得的"首预览 4s+"
+        // 有相当部分是闲置 worker 的首次推理懒加载，预热后回放与真机
+        // 的首预览延迟口径才一致。
+        engine.warm_up_worker();
         let started = Instant::now();
         let mut text_events = Vec::new();
         let mut commits = Vec::new();

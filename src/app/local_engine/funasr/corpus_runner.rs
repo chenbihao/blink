@@ -23,7 +23,7 @@ use std::time::Instant;
 use serde::Deserialize;
 
 use crate::domain::stt::SttTransport;
-use crate::domain::stt::vad::{EnergyVad, VadEvent};
+use crate::domain::stt::vad::EnergyVad;
 use crate::domain::stt::wav::{decode_wav, pcm_to_wav};
 use crate::infra::platform::audio::normalize::{AudioNormalizer, TARGET_SAMPLE_RATE};
 
@@ -323,7 +323,8 @@ fn detect_segments(samples: &[f32]) -> u32 {
     let mut vad = EnergyVad::new(TARGET_SAMPLE_RATE);
     let mut segments = 0u32;
     for chunk in samples.chunks((TARGET_SAMPLE_RATE / 100) as usize) {
-        if vad.process_chunk(chunk) != VadEvent::None {
+        // ShortPhraseEnd（短句停顿）不是切分事件，不计入段数。
+        if vad.process_chunk(chunk).is_boundary() {
             segments = segments.saturating_add(1);
         }
     }
@@ -524,6 +525,7 @@ pub fn format_anonymous_summary(results: &[CorpusResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::stt::vad::VadEvent;
     use crate::infra::platform::audio::test_fixtures::*;
 
     #[test]

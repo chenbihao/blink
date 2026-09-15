@@ -1996,7 +1996,9 @@ async fn pseudo_streaming_real_worker_replay() {
 async fn private_corpus_unlisted_full_transcribe() {
     let full_text_mode = std::env::var("BLINK_STT_FULL_TEXT").ok();
     if !matches!(full_text_mode.as_deref(), Some("1") | Some("all")) {
-        eprintln!("跳过：设置 BLINK_STT_FULL_TEXT=1（或 =all 复验已收录 case）运行整条+伪流式文本基线");
+        eprintln!(
+            "跳过：设置 BLINK_STT_FULL_TEXT=1（或 =all 复验已收录 case）运行整条+伪流式文本基线"
+        );
         return;
     }
     let Some(corpus_dir) = super::corpus_runner::should_run() else {
@@ -2061,7 +2063,8 @@ async fn private_corpus_unlisted_full_transcribe() {
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
                 && (include_listed
-                    || !listed.contains(&path.file_name().unwrap().to_string_lossy().to_lowercase()))
+                    || !listed
+                        .contains(&path.file_name().unwrap().to_string_lossy().to_lowercase()))
         })
         .collect();
     wavs.sort();
@@ -2116,18 +2119,17 @@ async fn private_corpus_unlisted_full_transcribe() {
         let filename = path.file_name().unwrap().to_string_lossy().into_owned();
         let wav = std::fs::read(path).expect("read wav");
         let case_id = anonymous_recording_case_id(&wav);
-        let audio =
-            super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
+        let audio = super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
         let duration_ms = audio.samples.len() * 1000 / sample_rate;
 
         // 1) 整条识别：最大上下文的基准文本
-        let whole_transport =
-            std::sync::Arc::new(worker::GgufSttTransport::new(client.clone(), audio_dir.clone()));
+        let whole_transport = std::sync::Arc::new(worker::GgufSttTransport::new(
+            client.clone(),
+            audio_dir.clone(),
+        ));
         let whole_started = std::time::Instant::now();
         let whole = whole_transport
-            .transcribe_with_metrics(&super::corpus_runner::encode_canonical_wav(
-                &audio.samples,
-            ))
+            .transcribe_with_metrics(&super::corpus_runner::encode_canonical_wav(&audio.samples))
             .await
             .expect("whole-file transcribe");
         let whole_total_ms = whole_started.elapsed().as_millis() as u64;
@@ -2140,9 +2142,7 @@ async fn private_corpus_unlisted_full_transcribe() {
             offline_vad_timeline(&audio.samples, &config.local_engine.vad);
         let boundary_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let decision_observer: std::sync::Arc<
-            std::sync::Mutex<
-                Vec<crate::domain::stt::pseudo_streaming::SttDecisionRecord>,
-            >,
+            std::sync::Mutex<Vec<crate::domain::stt::pseudo_streaming::SttDecisionRecord>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = RecordingTransport::wrap(std::sync::Arc::new(
             worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
@@ -2235,7 +2235,9 @@ async fn private_corpus_unlisted_full_transcribe() {
             stream_text.chars().count(),
             finalize_ms,
             transcribe_calls.len(),
-            stream_error.as_ref().map(|v| v["error"].as_str().unwrap_or("?")),
+            stream_error
+                .as_ref()
+                .map(|v| v["error"].as_str().unwrap_or("?")),
         );
 
         private_cases.push(serde_json::json!({
@@ -2313,4 +2315,375 @@ async fn private_corpus_unlisted_full_transcribe() {
         .unwrap(),
     )
     .expect("write anonymous full-text report");
+}
+
+/// G2 投影链复现：engine(PreviewDraft) → `GgufStreamingAdapter` → `events()` 时间线。
+///
+/// VAD 调试页只观测引擎内部（boundary/decision observer + coordinator trace），
+/// 不覆盖 typed envelope 投影（`compose_typed_result` → adapter → `SttEvent`）。
+/// 生产 G2 链路里预览若在这段丢失，overlay 只显示默认文案直到收尾。本测试用
+/// 真实 worker 按实时速率喂入 case_12（多句不同停顿，与手工验收同一条），
+/// 记录每个 Preview/Draft/Final 事件的墙钟时间，断言预览在录音期间到达。
+/// 门控：`BLINK_STT_G2_PROJECTION=1` 且 `BLINK_STT_CORPUS_DIR` 指向有效目录。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g2_projection_real_worker_timeline() {
+    if std::env::var("BLINK_STT_G2_PROJECTION").ok().as_deref() != Some("1") {
+        eprintln!("跳过：设置 BLINK_STT_G2_PROJECTION=1 运行 G2 投影链时间线复现");
+        return;
+    }
+    let Some(corpus_dir) = super::corpus_runner::should_run() else {
+        eprintln!("跳过：未设置 BLINK_STT_CORPUS_DIR");
+        return;
+    };
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let worker_dir = root.join("resources/bin/funasr-worker");
+    let worker_exe = worker_dir.join("funasr-nano-worker.exe");
+    let appdata = std::env::var("APPDATA").expect("APPDATA");
+    let model_root = std::path::PathBuf::from(&appdata)
+        .join("blink/models/funasr/gguf-fun-asr-nano-q4km-9faa9616b982");
+    let payload = std::fs::read_to_string(model_root.join("active.json"))
+        .ok()
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| {
+                    let slot = v["slot_id"].as_str()?.to_string();
+                    Some(model_root.join("slots").join(slot).join("payload"))
+                })
+        });
+    let (encoder, llm) = match &payload {
+        Some(payload)
+            if payload.join("funasr-encoder-f16.gguf").is_file()
+                && payload.join("qwen3-0.6b-q4km.gguf").is_file() =>
+        {
+            (
+                payload.join("funasr-encoder-f16.gguf"),
+                payload.join("qwen3-0.6b-q4km.gguf"),
+            )
+        }
+        _ => {
+            eprintln!("跳过：AppData 缺少已安装的 Nano 模型 payload");
+            return;
+        }
+    };
+    if !worker_exe.is_file() {
+        eprintln!("跳过：本地缺少 funasr-nano-worker.exe");
+        return;
+    }
+    let payload_dir = payload.expect("payload resolved above");
+
+    // case_12 = 多句不同停顿（与手工 G2 验收同一条语料）
+    let manifest = super::corpus_runner::load_manifest(&corpus_dir).expect("load manifest");
+    let case = manifest
+        .cases
+        .iter()
+        .find(|case| case.case_id == "case_12")
+        .expect("manifest contains case_12");
+    let wav_path = corpus_dir.join(&case.filename);
+    assert!(wav_path.is_file(), "case_12 wav exists: {}", case.filename);
+
+    let audio_dir_guard = tempfile::Builder::new()
+        .prefix("g2-projection-audio-")
+        .tempdir_in(root.join("target"))
+        .expect("create audio tempdir");
+    let audio_dir = audio_dir_guard.path().to_path_buf();
+
+    let mut command = tokio::process::Command::new(&worker_exe);
+    command
+        .args([
+            "--enc",
+            encoder.to_str().unwrap(),
+            "-m",
+            llm.to_str().unwrap(),
+            "--stdin-server",
+        ])
+        .current_dir(&worker_dir)
+        .env("BLINK_ENGINE_ID", "funasr")
+        .env("BLINK_INSTANCE_ID", "g2-projection-replay")
+        .env("BLINK_ENGINE_TOKEN", "g2-projection-token")
+        .env("BLINK_MODEL_ID", "gguf/fun-asr-nano-q4km")
+        .env("BLINK_MODEL_REVISION", "gguf-v0.2.6")
+        .env("BLINK_MODEL_PAYLOAD_DIR", &payload_dir)
+        .env("BLINK_AUDIO_DIR", &audio_dir)
+        .env("BLINK_WORKER_THREADS", "4")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = crate::infra::platform::no_window_tokio(command)
+        .spawn()
+        .expect("spawn worker for g2 projection replay");
+    let stdin = child.stdin.take().expect("worker stdin");
+    let stdout = child.stdout.take().expect("worker stdout");
+    let client = crate::infra::local_engine::worker_proto::NdjsonWorkerClient::new(stdin, stdout);
+    client
+        .hello(std::time::Duration::from_secs(60))
+        .await
+        .expect("worker ready within 60s");
+
+    // ── 生产同构链路：PreviewDraft 引擎 + GgufStreamingAdapter ──
+    use crate::domain::config::stt_config::SttConfig;
+    use crate::domain::stt::RecognitionProfile;
+    use crate::domain::stt::StreamingSttPort;
+    use crate::domain::stt::streaming_port::GgufStreamingAdapter;
+
+    let transport = worker::GgufSttTransport::new(client.clone(), audio_dir.clone());
+    let conn = crate::domain::stt::SttEngineConnection {
+        host: "127.0.0.1".into(),
+        port: 0,
+        engine_id: "funasr".into(),
+        instance_id: "g2-projection-replay".into(),
+        transport: Some(std::sync::Arc::new(transport)),
+    };
+    let engine =
+        crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection_with_profile(
+            &SttConfig::default(),
+            conn,
+            RecognitionProfile::PreviewDraft,
+        )
+        .expect("engine constructs");
+    let engine_arc: std::sync::Arc<dyn crate::domain::stt::SttEngine> = std::sync::Arc::new(engine);
+    let port = GgufStreamingAdapter::new_with_profile(
+        engine_arc.clone(),
+        RecognitionProfile::PreviewDraft,
+    );
+
+    let wav = std::fs::read(&wav_path).expect("read wav");
+    let audio = super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
+    let sample_rate = 16_000usize;
+
+    let generation = port.begin_session().await.expect("begin session");
+    let mut rx = port.events();
+    let started = std::time::Instant::now();
+
+    let mut timeline: Vec<serde_json::Value> = Vec::new();
+    let mut fed_ms = 0usize;
+    let mut feed_error: Option<String> = None;
+    for chunk in audio.samples.chunks(sample_rate / 10) {
+        if let Err(e) = port.push_audio(generation, chunk).await {
+            feed_error = Some(e.to_string());
+            break;
+        }
+        fed_ms += chunk.len() * 1000 / sample_rate;
+        // 实时速率：模拟 CPAL 按壁钟到达的音频块
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        while let Ok(event) = rx.try_recv() {
+            timeline.push(timeline_entry(&event, started, fed_ms));
+        }
+    }
+
+    let finalize_wall_ms = started.elapsed().as_millis() as u64;
+    if feed_error.is_none() {
+        port.finish_session(generation)
+            .await
+            .expect("finish session");
+    }
+    // 收尾事件（Final/Finalize Draft 尾段）最多等 30s
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            Ok(Some(event)) => timeline.push(timeline_entry(&event, started, fed_ms)),
+            Ok(None) => break,
+            Err(_) => {
+                let mut drained = true;
+                while let Ok(event) = rx.try_recv() {
+                    timeline.push(timeline_entry(&event, started, fed_ms));
+                    drained = false;
+                }
+                if drained {
+                    break;
+                }
+            }
+        }
+        let saw_final = timeline
+            .iter()
+            .any(|entry| entry["kind"] == "final" || entry["kind"] == "error");
+        if saw_final {
+            break;
+        }
+    }
+
+    client.request_shutdown().await;
+    drop(client);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+    }
+
+    // ── 诊断输出 ──
+    // 私有时间线（含正文）：只写 corpus 私有目录（gitignored）
+    let private_output = corpus_dir.join("g2-projection-private.json");
+    std::fs::write(
+        &private_output,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "scope": "private G2 projection timeline: contains transcripts and filename; never commit",
+            "case": case.case_id,
+            "filename": case.filename,
+            "timeline": timeline,
+        }))
+        .unwrap(),
+    )
+    .expect("write private g2 projection timeline");
+
+    let preview_events: Vec<&serde_json::Value> = timeline
+        .iter()
+        .filter(|entry| entry["kind"] == "preview")
+        .collect();
+    let draft_events: Vec<&serde_json::Value> = timeline
+        .iter()
+        .filter(|entry| entry["kind"] == "draft")
+        .collect();
+    let final_events: Vec<&serde_json::Value> = timeline
+        .iter()
+        .filter(|entry| entry["kind"] == "final")
+        .collect();
+
+    println!(
+        "g2 projection: previews={} drafts={} finals={} fed_ms={fed_ms} finalize_wall_ms={finalize_wall_ms} feed_error={feed_error:?}",
+        preview_events.len(),
+        draft_events.len(),
+        final_events.len(),
+    );
+    for entry in &timeline {
+        println!(
+            "  +{}ms kind={} range={}..{}ms chars={}",
+            entry["wall_ms"],
+            entry["kind"],
+            entry["range_start_ms"],
+            entry["range_end_ms"],
+            entry["chars"],
+        );
+    }
+
+    // 匿名数值报告：target/ 下不含正文
+    let output = root.join("target/g2-projection-timeline.json");
+    std::fs::write(
+        &output,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "scope": "anonymous G2 projection timeline: numeric only, no transcripts or filenames",
+            "duration_ms": audio.samples.len() * 1000 / sample_rate,
+            "fed_ms": fed_ms,
+            "finalize_wall_ms": finalize_wall_ms,
+            "feed_error": feed_error,
+            "timeline": timeline
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "wall_ms": entry["wall_ms"],
+                        "kind": entry["kind"],
+                        "request_id": entry["request_id"],
+                        "range_start_ms": entry["range_start_ms"],
+                        "range_end_ms": entry["range_end_ms"],
+                        "chars": entry["chars"],
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap(),
+    )
+    .expect("write anonymous g2 projection timeline");
+
+    // ── 断言：预览必须在录音期间到达（不是全部推迟到收尾）──
+    assert!(feed_error.is_none(), "push_audio 不应失败: {feed_error:?}");
+    assert!(
+        !preview_events.is_empty(),
+        "录音期间应产出至少一个 Preview 事件（时间线: {timeline:?}）"
+    );
+    let first_preview_wall = preview_events[0]["wall_ms"].as_u64().unwrap_or(u64::MAX);
+    assert!(
+        first_preview_wall < 8_000,
+        "首个 Preview 应在 8s 内到达（实际 {first_preview_wall}ms）"
+    );
+    let mid_recording_previews = preview_events
+        .iter()
+        .filter(|entry| entry["wall_ms"].as_u64().unwrap_or(0) < finalize_wall_ms)
+        .count();
+    assert!(
+        mid_recording_previews >= 3,
+        "收尾前应至少有 3 个 Preview（实际 {mid_recording_previews}）"
+    );
+    assert!(
+        !draft_events.is_empty(),
+        "多句停顿语料应产出 Draft 事件（时间线: {timeline:?}）"
+    );
+    let mid_drafts = draft_events
+        .iter()
+        .filter(|entry| entry["wall_ms"].as_u64().unwrap_or(0) < finalize_wall_ms)
+        .count();
+    assert!(
+        mid_drafts >= 2,
+        "收尾前应至少有 2 个 Draft 提交（实际 {mid_drafts}）"
+    );
+    assert_eq!(final_events.len(), 1, "应恰好一个 Final 事件");
+}
+
+/// 时间线条目：墙钟 + 类型 + 音频范围 + 字数 + 正文（正文只进私有报告）。
+fn timeline_entry(
+    event: &crate::domain::stt::SttEvent,
+    started: std::time::Instant,
+    fed_ms: usize,
+) -> serde_json::Value {
+    let wall_ms = started.elapsed().as_millis() as u64;
+    match event {
+        crate::domain::stt::SttEvent::Preview {
+            request_id,
+            audio_range,
+            text,
+            ..
+        } => serde_json::json!({
+            "wall_ms": wall_ms,
+            "fed_ms": fed_ms,
+            "kind": "preview",
+            "request_id": request_id,
+            "range_start_ms": audio_range.start_sample * 1000 / 16_000,
+            "range_end_ms": audio_range.end_sample * 1000 / 16_000,
+            "chars": text.chars().count(),
+            "text": text,
+        }),
+        crate::domain::stt::SttEvent::Draft { span, .. } => serde_json::json!({
+            "wall_ms": wall_ms,
+            "fed_ms": fed_ms,
+            "kind": "draft",
+            "request_id": serde_json::Value::Null,
+            "range_start_ms": span.audio_range.start_sample * 1000 / 16_000,
+            "range_end_ms": span.audio_range.end_sample * 1000 / 16_000,
+            "chars": span.text.chars().count(),
+            "text": span.text,
+        }),
+        crate::domain::stt::SttEvent::Partial {
+            confirmed, preview, ..
+        } => serde_json::json!({
+            "wall_ms": wall_ms,
+            "fed_ms": fed_ms,
+            "kind": "partial",
+            "request_id": serde_json::Value::Null,
+            "range_start_ms": 0,
+            "range_end_ms": fed_ms,
+            "chars": confirmed.chars().count() + preview.chars().count(),
+            "text": format!("{confirmed}|{preview}"),
+        }),
+        crate::domain::stt::SttEvent::Final { text, .. } => serde_json::json!({
+            "wall_ms": wall_ms,
+            "fed_ms": fed_ms,
+            "kind": "final",
+            "request_id": serde_json::Value::Null,
+            "range_start_ms": 0,
+            "range_end_ms": fed_ms,
+            "chars": text.chars().count(),
+            "text": text,
+        }),
+        crate::domain::stt::SttEvent::Error { message, .. } => serde_json::json!({
+            "wall_ms": wall_ms,
+            "fed_ms": fed_ms,
+            "kind": "error",
+            "request_id": serde_json::Value::Null,
+            "range_start_ms": 0,
+            "range_end_ms": fed_ms,
+            "chars": 0,
+            "text": message,
+        }),
+    }
 }

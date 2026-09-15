@@ -258,10 +258,16 @@ pub async fn read_audio_for_playback(
         .state::<std::sync::Arc<crate::app::audio_resource::AudioResourceRegistry>>()
         .inner()
         .clone();
-    let opened = registry.resolve(&audio_ref, "stt_transcribe").map_err(|error| {
-        tracing::warn!(error = %error, "read_audio_for_playback: 无法解析 audio_ref");
-        crate::app::command_error::CommandError::new(error.kind.as_str(), "音频资源不可用", false)
-    })?;
+    let opened = registry
+        .resolve(&audio_ref, "stt_transcribe")
+        .map_err(|error| {
+            tracing::warn!(error = %error, "read_audio_for_playback: 无法解析 audio_ref");
+            crate::app::command_error::CommandError::new(
+                error.kind.as_str(),
+                "音频资源不可用",
+                false,
+            )
+        })?;
     let size = opened.size;
     let mut file = opened.file;
     // 从 resolve 返回的已验证 file handle 读取，不走"路径再打开"路径

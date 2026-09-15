@@ -347,6 +347,10 @@ impl RecognitionCoordinator {
     }
 
     /// 选择下一请求：可靠 Draft 优先，Preview 只有没有 Draft 时才可开始。
+    ///
+    /// 仅测试消费——生产引擎在 PseudoInner 侧直接 spawn（preview_in_flight
+    /// + spawn 路径），协调器槽位只做状态同步。
+    #[cfg(test)]
     pub fn take_next(&mut self) -> Option<ScheduledRequest> {
         if self.running_draft.is_some() || self.running_preview.is_some() {
             return None;
@@ -528,6 +532,9 @@ impl RecognitionCoordinator {
 }
 
 /// 选择结果，便于 transport/app 层只消费一个动作。
+///
+/// 仅测试消费（配合 `take_next`）；生产引擎直接 spawn，不走此类型。
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduledRequest {
     Draft(DraftRequest),

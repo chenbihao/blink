@@ -657,6 +657,12 @@ impl StreamingSttPort for GgufStreamingAdapter {
         Ok(session_gen)
     }
 
+    /// 0.23.10.2：会话开始即预热 worker（内部 fire-and-forget，立即返回）。
+    async fn warm_up(&self) -> Result<(), SttError> {
+        self.engine.warm_up();
+        Ok(())
+    }
+
     async fn push_audio(&self, generation: u64, samples: &[f32]) -> Result<(), SttError> {
         // 检查 generation 匹配（guard 不跨 await）
         {

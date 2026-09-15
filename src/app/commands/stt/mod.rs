@@ -556,8 +556,7 @@ pub fn get_coordinator_trace(
     app: tauri::AppHandle,
     max_uncommitted_s: u64,
 ) -> Option<crate::domain::stt::pseudo_streaming::CoordinatorTrace> {
-    let voice = app
-        .try_state::<std::sync::Arc<crate::app::voice::VoiceService>>()?;
+    let voice = app.try_state::<std::sync::Arc<crate::app::voice::VoiceService>>()?;
     voice.coordinator_trace(max_uncommitted_s)
 }
 

@@ -38,11 +38,25 @@ pub enum VadEvent {
     SoftWindow,
     /// 持续有声达到硬上限，强制切段。
     HardWindow,
+    /// 短句停顿（句长不足 `min_sentence_ms`，静默已达 `min_silence_ms`）。
+    ///
+    /// 0.23.10.2：该停顿不构成 Draft 切分候选（句长门槛不满足），旧实现
+    /// 静默丢弃整句——短首句既进不了短语定稿也凑不满首预览门槛，首个
+    /// 可见文本被推迟数秒。现在显式上报，供 PreviewDraft 引擎把
+    /// `[phrase_anchor, quiet_start)` 按短语立即定稿；Legacy 路径忽略。
+    ShortPhraseEnd,
 }
 
 impl VadEvent {
+    /// 是否为 Draft 切分候选事件（可升级为真实切割）。
+    ///
+    /// `ShortPhraseEnd` 刻意不在此列：它只驱动预览短语定稿，
+    /// 不得进入候选/切割/未提交上限等切分语义。
     pub fn is_boundary(self) -> bool {
-        self != Self::None
+        matches!(
+            self,
+            Self::SentenceEnd | Self::SoftWindow | Self::HardWindow
+        )
     }
 
     pub fn reason(self) -> &'static str {
@@ -51,6 +65,7 @@ impl VadEvent {
             Self::SentenceEnd => "natural_silence",
             Self::SoftWindow => "soft_window",
             Self::HardWindow => "hard_window",
+            Self::ShortPhraseEnd => "short_phrase",
         }
     }
 }
@@ -410,10 +425,13 @@ impl EnergyVad {
                         // 保留 sentence_samples 以便上层取出本句音频范围
                         event = VadEvent::SentenceEnd;
                     } else {
-                        // 句子太短，不切——重置为静默等待状态
+                        // 句子太短，不构成切分候选——重置为静默等待状态。
+                        // 0.23.10.2：上报 ShortPhraseEnd 而非静默吞掉，
+                        // 让 PreviewDraft 引擎能对该短语做预览定稿。
                         self.speaking = false;
                         self.sentence_samples = 0;
                         self.segment_samples = 0;
+                        event = VadEvent::ShortPhraseEnd;
                     }
                 } else if self.speaking && self.segment_samples >= soft_window_samples {
                     let segment_ms = self.segment_samples as u64 * 1000 / self.sample_rate as u64;

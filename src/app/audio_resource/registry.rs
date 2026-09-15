@@ -406,12 +406,17 @@ impl AudioResourceRegistry {
     pub fn clone_audio_ref(&self, audio_ref: &str, scope: &str) -> Result<String, AudioRefError> {
         let canonical_path = {
             let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = entries.get(audio_ref).ok_else(AudioRefErrorKind::InvalidAudioRef)?;
+            let entry = entries
+                .get(audio_ref)
+                .ok_else(AudioRefErrorKind::InvalidAudioRef)?;
             let current_gen = self.generation.load(Ordering::SeqCst);
             if entry.generation != current_gen {
                 return Err(AudioRefError::with_detail(
                     AudioRefErrorKind::GenerationMismatch,
-                    format!("ref gen {} != current gen {}", entry.generation, current_gen),
+                    format!(
+                        "ref gen {} != current gen {}",
+                        entry.generation, current_gen
+                    ),
                 ));
             }
             if Instant::now() > entry.expires_at {
@@ -648,9 +653,15 @@ mod tests {
 
         let original = reg.issue(&path, "scope_a").unwrap();
         let unknown = reg.clone_audio_ref("aref_0000000000000000", "scope_a");
-        assert_eq!(unknown.unwrap_err().kind, AudioRefErrorKind::InvalidAudioRef);
+        assert_eq!(
+            unknown.unwrap_err().kind,
+            AudioRefErrorKind::InvalidAudioRef
+        );
         let mismatched = reg.clone_audio_ref(&original, "scope_b");
-        assert_eq!(mismatched.unwrap_err().kind, AudioRefErrorKind::ScopeMismatch);
+        assert_eq!(
+            mismatched.unwrap_err().kind,
+            AudioRefErrorKind::ScopeMismatch
+        );
         // 失败的 clone 不消费原 ref
         assert!(reg.resolve(&original, "scope_a").is_ok());
     }
@@ -664,7 +675,8 @@ mod tests {
         let original = reg.issue(&path, "test").unwrap();
         {
             let mut entries = reg.entries.lock().unwrap();
-            entries.get_mut(&original).unwrap().expires_at = Instant::now() - Duration::from_secs(1);
+            entries.get_mut(&original).unwrap().expires_at =
+                Instant::now() - Duration::from_secs(1);
         }
         let cloned = reg.clone_audio_ref(&original, "test");
         assert_eq!(cloned.unwrap_err().kind, AudioRefErrorKind::StaleAudioRef);
