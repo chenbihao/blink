@@ -1736,6 +1736,8 @@ export const zh = {
     "voice.local.vad_debug.elapsed": "耗时",
     "voice.local.vad_debug.timeline_title": "切句与识别",
     "voice.local.vad_debug.timeline_hint": "左侧时间轴贯通到底，每个节点是一个事件时刻；中间是该时刻的识别文本，悬浮文本行可查看 request/rev 等细节；右侧卡片由虚线引出，说明当时为什么切分或不切。",
+    "voice.local.vad_debug.play": "播放",
+    "voice.local.vad_debug.pause": "暂停",
     "voice.local.vad_debug.draft": "草稿",
     "voice.local.vad_debug.returned_at": "返回于",
     "voice.local.vad_debug.inferred_range": "范围由旧协议推算",

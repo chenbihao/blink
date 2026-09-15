@@ -60,7 +60,7 @@ pub use self::coordinator::CoordinatorTrace;
 use super::postprocess::{strip_confirmed_prefix, strip_filler_words, trim_trailing_silence};
 use super::sentence_state::{FinalizeResult, PendingSegment, SegmentIdentity, SentenceState};
 use super::vad::{EnergyVad, VadEvent};
-use super::{SttEngine, SttError, SttStreamStats};
+use super::{DraftSpan, SttEngine, SttError, SttStreamStats};
 
 /// 预览识别间隔（毫秒）。
 const PREVIEW_INTERVAL_MS: u64 = 500;
@@ -1594,6 +1594,26 @@ impl PseudoStreamingSttEngine {
             .to_string());
         }
         Ok(String::new())
+    }
+
+    /// 取走已提交但尚未经 `compose_typed_result` 上报的 Draft span。
+    ///
+    /// 供一次性回放诊断在 `finalize` 后补收尾段与句间在途 Draft——terminal
+    /// finalize 通过 `commit_terminal_finalize` 直接把尾段写入 Draft ledger，
+    /// 不经过 chunk 响应，逐块上报的游标在此之后不会再推进。生产事件路径
+    /// 不使用（Final 携带累计全文）。游标语义与 `compose_typed_result`
+    /// 一致：取走后不会再次出现。
+    pub fn drain_unreported_draft_spans(&self) -> Vec<DraftSpan> {
+        let Some(mut inner) = Self::try_lock(&self.inner) else {
+            return Vec::new();
+        };
+        let spans = inner.sentences.draft_spans();
+        let pending = spans
+            .get(inner.last_reported_span_count..)
+            .unwrap_or_default()
+            .to_vec();
+        inner.last_reported_span_count = spans.len();
+        pending
     }
 
     /// 0.23.9: 从生产 Coordinator 产出只读诊断快照。

@@ -1260,6 +1260,38 @@ fn reset_full_consistency() {
     assert_eq!(state.abs_to_local_range(&(0..0), 0), Some(0..0));
 }
 
+/// finalize 后补收未上报 Draft：drain 只取游标之后的 span，取后不重复出现。
+/// 对应 VAD 调试回放在 finalize 阶段补收尾段草稿的语义。
+#[test]
+fn drain_unreported_draft_spans_returns_only_after_cursor() {
+    let engine = engine_without_transport(vec![]);
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        for (end, text) in [(1000usize, "第一句"), (2000, "尾段")] {
+            let pending = inner
+                .sentences
+                .on_sentence_end(end, "")
+                .expect("句尾应创建 pending");
+            inner.sentences.commit_or_rollback(&FinalizeResult {
+                identity: pending.identity,
+                text: text.to_string(),
+                ok: true,
+            });
+        }
+    }
+    // 模拟 chunk 循环已经逐块上报了第一个 span
+    engine.inner.lock().unwrap().last_reported_span_count = 1;
+
+    let drained = engine.drain_unreported_draft_spans();
+    assert_eq!(drained.len(), 1, "只应取走游标之后的尾段 Draft");
+    assert_eq!(drained[0].text, "尾段");
+    assert_eq!(drained[0].audio_range.end_sample, 2000);
+    assert!(
+        engine.drain_unreported_draft_spans().is_empty(),
+        "取走后不得重复出现"
+    );
+}
+
 #[tokio::test]
 async fn finalize_waits_for_in_flight_commit_before_timeout() {
     let (tx, rx) = oneshot::channel();

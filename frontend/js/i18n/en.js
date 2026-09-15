@@ -1743,6 +1743,8 @@ export const en = {
     "voice.local.vad_debug.elapsed": "elapsed",
     "voice.local.vad_debug.timeline_title": "Cuts and recognition",
     "voice.local.vad_debug.timeline_hint": "The left timeline runs unbroken, one node per event anchor; the middle shows the recognized text at that moment (hover a line for request/rev details); the cards on the right are pulled out by dashed lines and explain why it split or kept buffering.",
+    "voice.local.vad_debug.play": "Play",
+    "voice.local.vad_debug.pause": "Pause",
     "voice.local.vad_debug.draft": "Draft",
     "voice.local.vad_debug.returned_at": "Returned at",
     "voice.local.vad_debug.inferred_range": "Range inferred from legacy protocol",

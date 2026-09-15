@@ -296,6 +296,32 @@ impl AudioTranscriptionService {
                 })?;
         let finalize_ms = finalize_started.elapsed().as_millis() as u64;
         self.verify_identity(&frozen).await?;
+        // 尾段 Draft 由 terminal finalize 直接写入 ledger，不经过 chunk 响应；
+        // 最后一个 chunk 之后才完成的句段同样如此。这里显式补收，
+        // 时间轴才能像 final_text 一样看到收尾草稿段。
+        let finalize_wall_ms = started.elapsed().as_millis() as u64;
+        for span in engine.drain_unreported_draft_spans() {
+            if span.text.is_empty() {
+                continue;
+            }
+            text_events.push(VadDebugTextEvent {
+                kind: "draft",
+                fed_ms: span.audio_range.end_sample * 1000 / 16_000,
+                wall_ms: finalize_wall_ms,
+                text: span.text,
+                request_id: None,
+                span_id: Some(span.span_id),
+                revision: Some(span.revision),
+                audio_range: Some(span.audio_range),
+            });
+        }
+        // finalize 期间的尾段提交也要记入 commits，末尾锚点才有"定稿"决策。
+        if engine.stream_stats().confirmed_revision > last_confirmed_revision {
+            commits.push(VadDebugCommit {
+                audio_ms: duration_ms,
+                observed_wall_ms: finalize_wall_ms,
+            });
+        }
         progress("done", duration_ms, duration_ms);
         let result = VadDebugResult {
             duration_ms: trace.duration_ms,

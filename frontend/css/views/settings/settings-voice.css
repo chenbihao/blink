@@ -436,6 +436,41 @@
 #voice .voice-vad-debug-chart .vad-rejected { stroke: var(--warning, var(--red)); stroke-width: 1; stroke-dasharray: 2 3; }
 #voice .voice-vad-debug-chart .vad-time-label { fill: var(--text-dim); font-size: 10px; }
 
+#voice .voice-vad-debug-chart .vad-playhead { stroke: var(--accent); stroke-width: 1.5; visibility: hidden; }
+#voice .voice-vad-debug-chart.seekable .vad-playhead { visibility: visible; }
+#voice .voice-vad-debug-chart.seekable { cursor: pointer; }
+
+#voice .voice-vad-debug-transport {
+    display: flex;
+    gap: var(--space-sm);
+    align-items: center;
+    min-width: 0;
+}
+
+#voice .voice-vad-debug-transport[hidden] { display: none; }
+
+#voice .voice-vad-debug-play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+    font-size: var(--text-md);
+}
+
+#voice .voice-vad-debug-play:hover { border-color: var(--surface-2); }
+
+#voice .voice-vad-debug-play-time {
+    color: var(--text-dim);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+}
+
 #voice .voice-vad-debug-section-title {
     margin: var(--space-sm) 0 0;
     color: var(--text);

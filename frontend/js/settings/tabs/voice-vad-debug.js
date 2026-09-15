@@ -355,6 +355,9 @@ export function renderVadDebugResult(raw, elements, t) {
         marker.append(title);
         svg.append(marker);
     }
+    // 播放头：voice.js 回放时按 currentTime 更新 x（viewBox 时间映射 t/duration×1000），
+    // 默认 visibility:hidden，回放就绪后由 .seekable 显示
+    svg.append(svgElement("line", {x1: 0, x2: 0, y1: 0, y2: 122, class: "vad-playhead"}));
     for (let quarter = 0; quarter <= 4; quarter++) {
         const x = quarter * 250;
         const label = svgElement("text", {

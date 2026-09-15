@@ -133,6 +133,8 @@ assert.match(source, /invoke\("debug_vad_audio_file", \{audioRef: picked\.audioR
 assert.match(source, /listen\(EVENTS\.STT_VAD_DEBUG_PROGRESS/);
 assert.match(source, /event\.payload\?\.runId === runId/);
 assert.match(source, /invoke\("transcribe_audio_file", \{audioRef\}\)/);
+assert.match(source, /invoke\("clone_audio_ref_for_vad_debug"/);
+assert.match(source, /invoke\("read_audio_for_playback"/);
 
 // ── 0.23.9 PreviewDraft 协调器状态映射测试 ──
 
