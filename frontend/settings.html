@@ -1915,11 +1915,11 @@
                         <div class="voice-vad-debug-meta" id="voice-vad-debug-meta"></div>
                         <div class="voice-vad-debug-legend" data-i18n="voice.local.vad_debug.legend">蓝线：能量 · 红线：on 阈值 · 绿线：off 阈值 · 阴影：低能量 · 实线：实际切点 · 虚线：短句未切</div>
                         <div class="voice-vad-debug-chart" id="voice-vad-debug-chart"></div>
+                        <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.final_title">最终全文</h4>
+                        <pre class="voice-file-transcribe-output" id="voice-vad-debug-transcript"></pre>
                         <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.timeline_title">切句与识别</h4>
                         <div class="voice-vad-debug-timeline-hint" data-i18n="voice.local.vad_debug.timeline_hint">每张卡片描述标出的音频区间，旁边的竖向能量条也对应同一段；灰色表示低能量。</div>
                         <div class="voice-vad-debug-timeline" id="voice-vad-debug-events"></div>
-                        <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.final_title">最终全文</h4>
-                        <pre class="voice-file-transcribe-output" id="voice-vad-debug-transcript"></pre>
                     </section>
                 </div>
 
@@ -1937,7 +1937,7 @@
                             <div class="voice-adv-field-label">
                                 <span data-i18n="voice.local.streaming.label">流式识别</span><span
                                     class="field-hint-icon" data-i18n-title="voice.local.streaming.hint"
-                                    title="开启后 VAD 切句 + 每 500ms 预览识别，实现边说边出字。关闭后松开一次性识别。">ⓘ</span>
+                                    title="开启后边说边显示预览，并在检测到切点时形成稳定文本；关闭后松开再一次性识别。">ⓘ</span>
                             </div>
                             <div class="voice-adv-field-control">
                                 <label class="switch switch-sm">
@@ -1954,7 +1954,7 @@
                                 <span class="voice-vad-card-title"><span
                                         data-i18n="voice.local.vad.title">VAD 切句参数</span><span
                                         class="field-hint-icon" data-i18n-title="voice.local.vad.hint"
-                                        title="控制伪流式引擎何时判定用户停顿从而触发句尾定稿。离麦克风远时声音能量低，可调低静默阈值；说话连贯时可调低静默时长加快定稿。">ⓘ</span></span>
+                                        title="控制静音判定、短噪声过滤和长语音切点。可按环境噪声与说话节奏调整。">ⓘ</span></span>
                                 <button class="voice-vad-reset-btn" data-i18n="voice.local.vad.reset"
                                         id="voice-vad-reset-btn"
                                         type="button">恢复默认
@@ -1967,7 +1967,7 @@
                                                 data-i18n="voice.local.vad.silence_threshold.label">静默阈值</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.silence_threshold.hint"
-                                                title="RMS 低于此值视为静默（默认 0.005，约 -46dB）。离麦克风远一直灰色不定稿时调低（如 0.002）；嘈杂环境调高（如 0.01）。">ⓘ</span></span>
+                                                title="RMS 低于此值视为静音。声音较轻或离麦克风较远时调低；环境噪声较大时调高。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-silence-threshold-val">0.005</span>
                                     </div>
@@ -1981,7 +1981,7 @@
                                                 data-i18n="voice.local.vad.min_silence_ms.label">静默时长</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.min_silence_ms.hint"
-                                                title="静默持续多久判定句尾（默认 300ms）。说话连贯停顿短时调低（如 200ms）加快定稿；慢速思考调高（如 500ms）。">ⓘ</span></span>
+                                                title="低能量持续达到此时长后判定停顿。调短更灵敏；调长可减少短暂停顿造成的切分。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-min-silence-ms-val">300ms</span>
                                     </div>
@@ -1995,7 +1995,7 @@
                                                 data-i18n="voice.local.vad.min_sentence_ms.label">最小句长</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.min_sentence_ms.hint"
-                                                title="短于此值不切句（默认 800ms），避免咳嗽、短暂噪声等触发误切。调低可让短句也定稿，但误切风险增大。">ⓘ</span></span>
+                                                title="有效语音短于此时长不切分，用于过滤咳嗽和瞬时噪声。调短更灵敏，但误触风险更高。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-min-sentence-ms-val">800ms</span>
                                     </div>
@@ -2003,14 +2003,14 @@
                                            min="200" step="100" type="range"/>
                                     <div class="voice-vad-param-range"><span>200ms</span><span>2000ms</span></div>
                                 </div>
-                                <div class="voice-vad-subgroup-title" data-i18n="voice.local.vad.windows.title">切片窗口（高级）</div>
+                                <div class="voice-vad-subgroup-title" data-i18n="voice.local.vad.windows.title">长语音切分（高级）</div>
                                 <div class="voice-vad-param">
                                     <div class="voice-vad-param-head">
                                         <span class="voice-vad-param-label"><span
                                                 data-i18n="voice.local.vad.soft_window_s.label">软窗口</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.soft_window_s.hint"
-                                                title="持续说话达到该秒数后，可在声音稍低处提前切段（默认 8 秒）。调长可减少长句被切碎，但定稿更晚；长时间连续听写建议 10 秒。">ⓘ</span></span>
+                                                title="连续语音达到此时长后，遇到低能量位置可提前切分。调短落字更快；调长保留更多上下文。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-soft-window-s-val">8s</span>
                                     </div>
@@ -2024,7 +2024,7 @@
                                                 data-i18n="voice.local.vad.hard_window_s.label">硬窗口</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.hard_window_s.hint"
-                                                title="持续说话达到该秒数后无条件强制切段（默认 12 秒）。必须大于软窗口。调长可保留更长上下文，但停顿处可能切在词中。">ⓘ</span></span>
+                                                title="连续语音达到此时长后强制切分。必须大于软窗口；调长可保留更多上下文，也会延后定稿。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-hard-window-s-val">12s</span>
                                     </div>
@@ -2038,7 +2038,7 @@
                                                 data-i18n="voice.local.vad.max_uncommitted_s.label">未提交上限</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.max_uncommitted_s.hint"
-                                                title="未送识别的音频达到该秒数后强制切段兜底（默认 12 秒），防止识别卡住时缓冲无限增长。必须不小于硬窗口。">ⓘ</span></span>
+                                                title="未提交音频达到此时长后强制切分，防止缓冲持续增长。必须不小于硬窗口。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-max-uncommitted-s-val">12s</span>
                                     </div>

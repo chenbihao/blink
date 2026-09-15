@@ -84,6 +84,12 @@ const MAX_UNCOMMITTED_AUDIO_MS: u64 = 12_000;
 /// finalize 等待 in_flight 请求的最大时间。
 const FINALIZE_WAIT_TIMEOUT_MS: u64 = 3000;
 
+/// 0.23.7.2 D：强制切（硬窗口/未提交上限）回退谷底的搜索窗口（毫秒）。
+///
+/// 有界——同时受 `EnergyVad` 帧历史容量（约 1.5s）限制。内部实验参数，
+/// 不进设置页；只移动强制切点位置，不改变兜底触发时机。
+const HARD_CUT_VALLEY_WINDOW_MS: u64 = 1_200;
+
 /// 伪流式 STT 引擎。
 ///
 /// 组合 VAD 切句 + 累积预览，在非自回归 SenseVoice 上实现"边说边出字"体感。
@@ -102,6 +108,9 @@ pub struct PseudoStreamingSttEngine {
     sample_rate: u32,
     /// 仅诊断回放设置；生产录音不分配切点记录。
     boundary_observer: Option<Arc<Mutex<Vec<SttBoundaryRecord>>>>,
+    /// 仅诊断回放设置；生产录音不分配定稿阶段记录。
+    #[cfg(test)]
+    finalize_observer: Option<Arc<Mutex<Vec<SttFinalizeRecord>>>>,
 }
 
 /// 伪流式引擎实际产生的边界（包含未提交上限兜底）。
@@ -109,6 +118,26 @@ pub struct PseudoStreamingSttEngine {
 pub struct SttBoundaryRecord {
     pub audio_ms: u64,
     pub reason: &'static str,
+    /// 边界在引擎内被确认的单调时钟；诊断回放用同一原点换算墙钟延迟。
+    #[cfg(test)]
+    #[serde(skip)]
+    pub observed_at: Instant,
+}
+
+/// 定稿任务的阶段观察记录（仅诊断回放使用）。
+///
+/// `observed_at` 使用与回放同源的单调时钟，跳过序列化；调用方可以用同一
+/// `Instant` 原点换算墙钟毫秒。生产引擎不挂 observer，因此不会分配记录。
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg(test)]
+pub struct SttFinalizeRecord {
+    /// `created` = 句尾创建定稿 segment；`transport_start` = 即将发起 worker 请求。
+    pub phase: &'static str,
+    pub session_generation: u64,
+    pub commit_generation: u64,
+    pub segment_id: u64,
+    #[serde(skip)]
+    pub observed_at: Instant,
 }
 
 /// 伪流式引擎内部状态。
@@ -216,6 +245,34 @@ impl PseudoInner {
         total
             .checked_sub(committed_end)
             .map(|uncommitted| uncommitted >= max_samples)
+    }
+
+    /// 在句尾把 VAD 状态对齐到实际切点。
+    ///
+    /// 强制切点可能从当前 `total` 回退到历史谷底。那段回退后的 PCM 仍会
+    /// 留给下一次定稿，但已经被本轮 VAD 消费过；重置句子计数后重放这段
+    /// 尾音，才能让下一句的句长、段长和 speaking/silence 状态与真实边界
+    /// 一致。`reset_sentence` 保留 adaptive noise history 和 speaking 状态，
+    /// 因此连续语音的回退尾段仍可自然接续。
+    fn reset_vad_at_boundary(
+        &mut self,
+        boundary_total: usize,
+        total: usize,
+    ) -> Result<(), &'static str> {
+        self.vad.reset_sentence();
+        if boundary_total == total {
+            return Ok(());
+        }
+
+        let local_range = self
+            .sentences
+            .abs_to_local_range(&(boundary_total..total), self.samples.len())
+            .ok_or("回退边界的 VAD 重放坐标非法")?;
+        let replay = self.samples[local_range].to_vec();
+        // `replay_chunk` 只恢复句子状态，不重复写入 adaptive energy history
+        // 或更新 noise floor；这些帧已经在本轮正常 process_chunk 中消费过。
+        self.vad.replay_chunk(&replay);
+        Ok(())
     }
 
     /// 更新预览文本（仅在实际变化时推进状态与预览版本）。
@@ -362,6 +419,8 @@ impl PseudoStreamingSttEngine {
             connection: Some(conn),
             sample_rate: 16000,
             boundary_observer: None,
+            #[cfg(test)]
+            finalize_observer: None,
         })
     }
 
@@ -369,6 +428,35 @@ impl PseudoStreamingSttEngine {
     pub fn with_boundary_observer(mut self, observer: Arc<Mutex<Vec<SttBoundaryRecord>>>) -> Self {
         self.boundary_observer = Some(observer);
         self
+    }
+
+    /// 给独立的 WAV 诊断回放挂载定稿阶段记录器。
+    #[cfg(test)]
+    pub fn with_finalize_observer(mut self, observer: Arc<Mutex<Vec<SttFinalizeRecord>>>) -> Self {
+        self.finalize_observer = Some(observer);
+        self
+    }
+
+    /// 记录定稿阶段时间戳；生产路径未挂 observer 时不分配记录。
+    #[cfg(test)]
+    fn record_finalize(
+        observer: &Option<Arc<Mutex<Vec<SttFinalizeRecord>>>>,
+        phase: &'static str,
+        identity: SegmentIdentity,
+    ) {
+        let Some(observer) = observer else {
+            return;
+        };
+        observer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(SttFinalizeRecord {
+                phase,
+                session_generation: identity.session_generation,
+                commit_generation: identity.commit_generation,
+                segment_id: identity.segment_id,
+                observed_at: Instant::now(),
+            });
     }
 
     /// 返回当前应使用的预览间隔（累积过长时降频）。
@@ -552,6 +640,8 @@ impl PseudoStreamingSttEngine {
             return;
         };
         let sample_rate = self.sample_rate;
+        #[cfg(test)]
+        let finalize_observer = self.finalize_observer.clone();
 
         tokio::spawn(async move {
             let mut current_samples = sentence_samples;
@@ -565,6 +655,19 @@ impl PseudoStreamingSttEngine {
                     Ok(String::new())
                 } else {
                     let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
+                    #[cfg(test)]
+                    if let Some(observer) = &finalize_observer {
+                        observer
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .push(SttFinalizeRecord {
+                                phase: "transport_start",
+                                session_generation: current_identity.session_generation,
+                                commit_generation: current_identity.commit_generation,
+                                segment_id: current_identity.segment_id,
+                                observed_at: Instant::now(),
+                            });
+                    }
                     transport.transcribe(&wav_bytes).await
                 };
 
@@ -912,17 +1015,63 @@ impl SttEngine for PseudoStreamingSttEngine {
             // 先 clone latest_preview 避免 mutable/immutable 借用冲突
             let pending = if event.is_boundary() {
                 let preview_snapshot = inner.latest_preview.clone();
-                tracing::debug!(reason = boundary_reason, total, "STT segment boundary");
+                // 0.23.7.2 D：强制切（VAD 硬窗口/未提交上限）优先回退到近期
+                // 有界能量谷底；无合格谷底或回退点不落在未提交区间内时，
+                // 保持当前时刻兜底。只移动切点位置，不新增边界。
+                let mut boundary_total = total;
+                if event == VadEvent::HardWindow {
+                    if let Some(offset) = inner
+                        .vad
+                        .low_energy_valley_offset(HARD_CUT_VALLEY_WINDOW_MS)
+                    {
+                        let candidate = total.saturating_sub(offset);
+                        let committed = inner.sentences.committed_sample_end;
+                        if candidate > committed && candidate < total {
+                            boundary_total = candidate;
+                            boundary_reason = match boundary_reason {
+                                "uncommitted_cap" => "uncommitted_cap_valley",
+                                _ => "hard_window_valley",
+                            };
+                        }
+                    }
+                }
+                tracing::debug!(
+                    reason = boundary_reason,
+                    total,
+                    boundary_total,
+                    "STT segment boundary"
+                );
                 if let Some(observer) = &self.boundary_observer {
                     observer
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(SttBoundaryRecord {
-                            audio_ms: total as u64 * 1000 / self.sample_rate as u64,
+                            audio_ms: boundary_total as u64 * 1000 / self.sample_rate as u64,
                             reason: boundary_reason,
+                            #[cfg(test)]
+                            observed_at: Instant::now(),
                         });
                 }
-                inner.sentences.on_sentence_end(total, &preview_snapshot)
+                // 记录 segment 在边界处创建的时间。即使上一个 finalize 仍在
+                // 飞行中、此处转为 deferred，也必须保留该时间点以测量排队。
+                // identity 与 SentenceState::on_sentence_end 使用同一组当前值。
+                #[cfg(test)]
+                {
+                    let created_identity = SegmentIdentity {
+                        session_generation: inner.sentences.session_generation,
+                        commit_generation: inner.sentences.commit_generation,
+                        segment_id: inner.sentences.next_segment_id,
+                    };
+                    Self::record_finalize(&self.finalize_observer, "created", created_identity);
+                }
+                let pending = inner
+                    .sentences
+                    .on_sentence_end(boundary_total, &preview_snapshot);
+                if let Err(reason) = inner.reset_vad_at_boundary(boundary_total, total) {
+                    inner.mark_session_failed(reason);
+                    return Err(SttError::Engine(reason.to_string()));
+                }
+                pending
             } else {
                 None
             };
@@ -1023,11 +1172,6 @@ impl SttEngine for PseudoStreamingSttEngine {
             };
 
             self.spawn_sentence_finalize(sentence_samples, pending.identity);
-
-            // VAD 句尾后重置句子计数
-            if let Some(mut g) = Self::try_lock(&self.inner) {
-                g.vad.reset_sentence();
-            }
         }
 
         // 0.22.15 fix: 尝试 compact 已 committed PCM（防止长录音内存无界增长）

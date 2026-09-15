@@ -509,24 +509,24 @@ export const en = {
     "voice.local.advanced.desc": "Streaming · VAD params",
     // Streaming
     "voice.local.streaming.label": "Streaming recognition",
-    "voice.local.streaming.hint": "When on: VAD sentence-splitting + a preview every 500ms lets you see text as you speak. When off: a single recognition pass after release.",
+    "voice.local.streaming.hint": "When on, speech appears as a live preview and becomes stable text at detected cut points. When off, recognition runs once after release.",
     // VAD
     "voice.local.vad.title": "VAD sentence-splitting params",
-    "voice.local.vad.hint": "Controls when the pseudo-streaming engine decides the user paused and finalizes a sentence. Lower the silence threshold if you're far from the mic; lower the silence duration if you speak fluently to finalize faster.",
+    "voice.local.vad.hint": "Controls silence detection, brief-noise filtering, and cut points in long speech. Adjust it for your environment and speaking pace.",
     "voice.local.vad.reset": "Reset to default",
     "voice.local.vad.silence_threshold.label": "Silence threshold",
-    "voice.local.vad.silence_threshold.hint": "RMS below this is treated as silence (default 0.005, about -46dB). Lower it (e.g. 0.002) if you're far from the mic and it stays gray; raise it (e.g. 0.01) in noisy environments.",
+    "voice.local.vad.silence_threshold.hint": "RMS below this value is treated as silence. Lower it for quiet or distant speech; raise it in noisier environments.",
     "voice.local.vad.min_silence_ms.label": "Silence duration",
-    "voice.local.vad.min_silence_ms.hint": "How long silence must last to finalize a sentence (default 300ms). Lower it (e.g. 200ms) for fluent speech to finalize faster; raise it (e.g. 500ms) for slow thinkers.",
+    "voice.local.vad.min_silence_ms.hint": "A low-energy period this long is treated as a pause. Shorter is more responsive; longer avoids cuts at brief pauses.",
     "voice.local.vad.min_sentence_ms.label": "Min sentence length",
-    "voice.local.vad.min_sentence_ms.hint": "Shorter than this won't split (default 800ms), to avoid coughs and brief noise triggering splits. Lowering it lets short sentences finalize but increases misfires.",
-    "voice.local.vad.windows.title": "Splitting windows (advanced)",
+    "voice.local.vad.min_sentence_ms.hint": "Speech shorter than this is not split, filtering coughs and brief noise. Shorter is more responsive but increases false triggers.",
+    "voice.local.vad.windows.title": "Long-speech splitting (advanced)",
     "voice.local.vad.soft_window_s.label": "Soft window",
-    "voice.local.vad.soft_window_s.hint": "After continuous speech reaches this many seconds, a cut may happen at a quieter moment (default 8s). Longer values keep long sentences intact but finalize later; for long continuous dictation, 10s is recommended.",
+    "voice.local.vad.soft_window_s.hint": "After continuous speech reaches this duration, a quieter point may be used for an early cut. Shorter commits sooner; longer preserves more context.",
     "voice.local.vad.hard_window_s.label": "Hard window",
-    "voice.local.vad.hard_window_s.hint": "Continuous speech is force-split unconditionally after this many seconds (default 12s). Must be longer than the soft window. Longer values keep more context but may cut mid-word.",
+    "voice.local.vad.hard_window_s.hint": "Continuous speech is force-split after this duration. It must exceed the soft window; longer preserves more context but commits later.",
     "voice.local.vad.max_uncommitted_s.label": "Uncommitted cap",
-    "voice.local.vad.max_uncommitted_s.hint": "Unsent audio older than this many seconds is force-split as a safety net (default 12s), keeping the buffer bounded if recognition stalls. Must be at least the hard window.",
+    "voice.local.vad.max_uncommitted_s.hint": "Uncommitted audio is force-split at this duration so the buffer cannot keep growing. It must be at least the hard window.",
     // Space management
     // Install progress
     // Python environment status badges

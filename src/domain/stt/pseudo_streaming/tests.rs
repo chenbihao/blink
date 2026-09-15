@@ -79,6 +79,7 @@ fn controlled_engine(
         }),
         sample_rate: 16_000,
         boundary_observer: None,
+        finalize_observer: None,
     }
 }
 
@@ -89,6 +90,7 @@ fn engine_without_transport(samples: Vec<f32>) -> PseudoStreamingSttEngine {
         connection: None,
         sample_rate: 16_000,
         boundary_observer: None,
+        finalize_observer: None,
     }
 }
 
@@ -534,6 +536,7 @@ fn engine_reset_clears_state() {
         connection: None,
         sample_rate: 16000,
         boundary_observer: None,
+        finalize_observer: None,
     };
 
     engine.reset();
@@ -572,6 +575,7 @@ fn engine_with_token_constructs_and_resets() {
         }),
         sample_rate: 16000,
         boundary_observer: None,
+        finalize_observer: None,
     };
 
     engine.reset();
@@ -1524,4 +1528,466 @@ fn stream_stats_reports_pcm_and_inflight() {
     assert!(stats.preview_in_flight);
     assert!(stats.finalize_in_flight);
     assert_eq!(stats.in_flight_inferences, 2);
+}
+
+// ── 0.23.7.2 D：强制切谷底回退的引擎级不变量测试 ──
+//
+// 证明 SentenceState 在 on_sentence_end 收到"回退的历史边界"（非当前
+// 绝对末端）时，pending/deferred/finalize/terminal/compact 各状态下
+// 提交区间单调、无重复提交、无丢段、缓冲有界。
+
+/// 合成指定毫秒数的 440Hz 音（引擎测试粒度）。
+fn valley_tone(ms: u32, amp: f32) -> Vec<f32> {
+    let n = 16_000u32 * ms / 1000;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / 16_000.0;
+            (2.0 * std::f32::consts::PI * 440.0 * t).sin() * amp
+        })
+        .collect()
+}
+
+fn valley_silence(ms: u32) -> Vec<f32> {
+    vec![0.0; 16_000u32 as usize * ms as usize / 1000]
+}
+
+fn valley_concat(parts: &[Vec<f32>]) -> Vec<f32> {
+    let mut out = Vec::new();
+    for p in parts {
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+/// 11.5s 有声 + 100ms 谷底 + 尾部有声：硬窗口在 ~12.03s 触发，
+/// 谷底回退应把切点移到 11.6s（谷底末帧，11600ms*16=185600 样本）。
+fn valley_audio(tail_ms: u32) -> Vec<f32> {
+    valley_concat(&[
+        valley_tone(11_500, 0.1),
+        valley_silence(100),
+        valley_tone(tail_ms, 0.1),
+    ])
+}
+
+/// 解析 pcm_to_wav 产物（16k/mono/16bit）data chunk 的时长（ms）。
+fn valley_wav_ms(wav: &[u8]) -> u64 {
+    let mut pos = 12usize;
+    while pos + 8 <= wav.len() {
+        let size =
+            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]) as usize;
+        if &wav[pos..pos + 4] == b"data" {
+            return size as u64 / 32; // 16000Hz*2B = 32 字节/ms
+        }
+        pos += 8 + size + (size & 1);
+    }
+    panic!("wav 缺少 data chunk");
+}
+
+/// 记录每次 transcribe WAV 时长的受控 transport（响应仍由 oneshot 提供）。
+struct WavCaptureTransport {
+    responses: Mutex<VecDeque<oneshot::Receiver<Result<String, String>>>>,
+    wav_ms: Mutex<Vec<u64>>,
+    calls: AtomicUsize,
+    called: Notify,
+}
+
+impl WavCaptureTransport {
+    fn new(responses: Vec<oneshot::Receiver<Result<String, String>>>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into()),
+            wav_ms: Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+            called: Notify::new(),
+        })
+    }
+
+    fn captured_ms(&self) -> Vec<u64> {
+        self.wav_ms.lock().unwrap().clone()
+    }
+
+    async fn wait_for_calls(&self, expected: usize) {
+        while self.calls.load(Ordering::SeqCst) < expected {
+            self.called.notified().await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domain::stt::SttTransport for WavCaptureTransport {
+    async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+        Ok(())
+    }
+
+    async fn transcribe(
+        &self,
+        wav_bytes: &[u8],
+    ) -> Result<String, crate::domain::stt::SttTransportError> {
+        self.wav_ms.lock().unwrap().push(valley_wav_ms(wav_bytes));
+        let rx = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("测试必须提供 transport response");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.called.notify_waiters();
+        rx.await
+            .expect("测试 response sender 不应提前 drop")
+            .map_err(|detail| crate::domain::stt::SttTransportError::Unavailable { detail })
+    }
+}
+
+/// 构造带捕获 transport 的引擎，并禁用定时预览（预览会竞争 transport 响应）。
+fn valley_engine(transport: Arc<WavCaptureTransport>) -> PseudoStreamingSttEngine {
+    let engine = PseudoStreamingSttEngine {
+        inner: Arc::new(Mutex::new(PseudoInner::for_test(Vec::new()))),
+        connection: Some(crate::domain::stt::SttEngineConnection {
+            host: "127.0.0.1".into(),
+            port: 0,
+            engine_id: "funasr".into(),
+            instance_id: "valley-test".into(),
+            transport: Some(transport),
+        }),
+        sample_rate: 16_000,
+        boundary_observer: None,
+        finalize_observer: None,
+    };
+    engine.inner.lock().unwrap().last_preview = Instant::now() + Duration::from_secs(600);
+    engine
+}
+
+/// 回退边界提交后区间单调、无重复、无丢段；terminal 覆盖余下全部音频。
+#[tokio::test]
+async fn hard_cut_retreats_to_valley_and_covers_all_audio() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let transport = WavCaptureTransport::new(vec![rx1, rx2]);
+    let engine = std::sync::Arc::new(valley_engine(transport.clone()));
+
+    // 12.2s：未提交上限在 12.0s 兜底触发，谷底回退到 11600ms；
+    // 该段 pending = [0, 185600)，尾随 100ms 谷底静音被裁剪。
+    let audio = valley_audio(600);
+    for chunk in audio.chunks(1_600) {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    transport.wait_for_calls(1).await;
+    tx1.send(Ok("第一段。".into())).unwrap();
+    wait_until(|| engine.inner.lock().unwrap().sentences.committed_sample_end == 185_600).await;
+
+    let finalize_engine = std::sync::Arc::clone(&engine);
+    let task = tokio::spawn(async move {
+        finalize_engine
+            .finalize_with_wait_timeout(Duration::from_secs(3))
+            .await
+    });
+    transport.wait_for_calls(2).await;
+    tx2.send(Ok("第二段。".into())).unwrap();
+    let final_text = task.await.unwrap().unwrap();
+
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.sentences.confirmed_text(), "第一段。第二段。");
+    assert_eq!(inner.sentences.committed_sample_end, 195_200);
+    assert_eq!(final_text, "第一段。第二段。");
+    let ms = transport.captured_ms();
+    assert_eq!(ms.len(), 2, "恰好一次回退段定稿 + 一次 terminal");
+    // 回退段 [0,11600)——100ms 谷底短于 150ms 尾缓冲不被裁剪；
+    // terminal [11600,12200) = 600ms
+    assert_eq!(ms[0], 11_600);
+    assert_eq!(ms[1], 600);
+}
+
+/// 强制切点回退后，保留在 PCM 中的尾部语音必须重新进入 VAD 状态；
+/// 随后的语音与 300ms 停顿合计达到最短句长时，应产生 deferred 的自然边界。
+#[tokio::test]
+async fn retreated_tail_replay_allows_deferred_natural_boundary() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let transport = WavCaptureTransport::new(vec![rx1, rx2]);
+    let boundaries = Arc::new(Mutex::new(Vec::new()));
+    let finalize_records = Arc::new(Mutex::new(Vec::new()));
+    let engine = std::sync::Arc::new(
+        valley_engine(transport.clone())
+            .with_boundary_observer(boundaries.clone())
+            .with_finalize_observer(finalize_records.clone()),
+    );
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        // 700ms speech + 100ms valley + 500ms speech = 1.3s；
+        // 用较小 cap 复现生产的未提交上限回退路径。
+        inner.max_uncommitted_audio_ms = 1_300;
+    }
+
+    let first = valley_concat(&[
+        valley_tone(700, 0.1),
+        valley_silence(100),
+        valley_tone(500, 0.1),
+    ]);
+    for chunk in first.chunks(1_600) {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    transport.wait_for_calls(1).await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        let pending = inner.sentences.pending.as_ref().expect("首段应已 pending");
+        assert_eq!(pending.range, 0..12_800, "首段应回退到 800ms 谷底");
+        // 回退后重放的 500ms 尾音已经进入下一句状态；若未重放，
+        // 此处 sentence_samples 会是 0，后续短语音将无法满足 800ms。
+        let state = inner.vad.dump_state();
+        assert!(state.speaking, "回退尾音应保持 speaking");
+        assert_eq!(state.sentence_samples, 8_000, "应重放 500ms 尾音");
+        assert_eq!(state.segment_samples, 8_000, "段长也应从真实切点重建");
+    }
+
+    // 首段 finalize 在途时触发第二个边界，必须进入 deferred。
+    let continuation = valley_concat(&[valley_tone(400, 0.1), valley_silence(300)]);
+    for chunk in continuation.chunks(1_600) {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    {
+        let inner = engine.inner.lock().unwrap();
+        let deferred = inner
+            .sentences
+            .deferred
+            .as_ref()
+            .expect("第二段应 deferred");
+        assert_eq!(deferred.range, 0..32_000, "自然边界应位于 2s");
+    }
+
+    tx1.send(Ok("第一段。".into())).unwrap();
+    transport.wait_for_calls(2).await;
+    tx2.send(Ok("第二段。".into())).unwrap();
+    wait_until(|| engine.inner.lock().unwrap().sentences.confirmed_text() == "第一段。第二段。")
+        .await;
+
+    let observed_boundaries = boundaries.lock().unwrap().clone();
+    assert_eq!(
+        observed_boundaries
+            .iter()
+            .map(|record| (record.audio_ms, record.reason))
+            .collect::<Vec<_>>(),
+        vec![(800, "uncommitted_cap_valley"), (2_000, "natural_silence")]
+    );
+
+    let observed_finalize = finalize_records.lock().unwrap().clone();
+    assert_eq!(
+        observed_finalize
+            .iter()
+            .map(|record| (record.phase, record.segment_id))
+            .collect::<Vec<_>>(),
+        vec![
+            ("created", 1),
+            ("transport_start", 1),
+            ("created", 2),
+            ("transport_start", 2),
+        ]
+    );
+    assert!(
+        observed_finalize[0].observed_at <= observed_finalize[1].observed_at
+            && observed_finalize[1].observed_at <= observed_finalize[2].observed_at
+            && observed_finalize[2].observed_at <= observed_finalize[3].observed_at,
+        "定稿阶段时间戳必须保持创建→请求顺序"
+    );
+}
+
+/// 第一个（回退）定稿在途时第二个回退边界进 deferred；前段 commit 后
+/// deferred 起点重定位到已提交末端——区间连续单调，不重复提交 [0,V1)。
+#[tokio::test]
+async fn retreated_deferred_boundary_keeps_monotone_coverage() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let (tx3, rx3) = oneshot::channel();
+    let transport = WavCaptureTransport::new(vec![rx1, rx2, rx3]);
+    let engine = std::sync::Arc::new(valley_engine(transport.clone()));
+
+    // 两段 12.2s 模式：cap 边界1 回退到 11600ms；回退尾音重放后，
+    // 下一段硬窗口从真实切点计满 12s，于 23600ms 产生 deferred。
+    let audio = valley_concat(&[valley_audio(600), valley_audio(600)]);
+    for chunk in audio.chunks(1_600) {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    transport.wait_for_calls(1).await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert!(inner.sentences.deferred.is_some(), "边界2 应暂存 deferred");
+        assert_eq!(inner.sentences.deferred.as_ref().unwrap().range, 0..377_600);
+    }
+
+    tx1.send(Ok("第一段。".into())).unwrap();
+    // commit1 推进到回退点 185600，deferred 提升为 pending 并派发段2
+    wait_until(|| engine.inner.lock().unwrap().sentences.committed_sample_end == 185_600).await;
+    transport.wait_for_calls(2).await;
+    tx2.send(Ok("第二段。".into())).unwrap();
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        inner.sentences.committed_sample_end == 377_600
+            && inner.sentences.confirmed_text() == "第一段。第二段。"
+    })
+    .await;
+
+    let finalize_engine = std::sync::Arc::clone(&engine);
+    let task = tokio::spawn(async move {
+        finalize_engine
+            .finalize_with_wait_timeout(Duration::from_secs(3))
+            .await
+    });
+    transport.wait_for_calls(3).await;
+    tx3.send(Ok("第三段。".into())).unwrap();
+    let _ = task.await.unwrap().unwrap();
+
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.sentences.confirmed_text(), "第一段。第二段。第三段。");
+    let ms = transport.captured_ms();
+    // 段2 必须从 11600ms 起（12000ms 长），证明 deferred 重定位生效、
+    // 没有重复提交 [0,11600)
+    assert_eq!(ms, vec![11_600, 12_000, 800]);
+}
+
+/// 回退段定稿失败回滚后 committed 不动；terminal 重新覆盖全部未提交音频。
+#[tokio::test]
+async fn retreated_rollback_lets_terminal_recover_everything() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let transport = WavCaptureTransport::new(vec![rx1, rx2]);
+    let engine = std::sync::Arc::new(valley_engine(transport.clone()));
+
+    let audio = valley_audio(600);
+    for chunk in audio.chunks(1_600) {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    transport.wait_for_calls(1).await;
+    tx1.send(Err("worker 暂不可用".into())).unwrap();
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        inner.sentences.pending.is_none() && !inner.sentences.finalize_in_flight
+    })
+    .await;
+    assert_eq!(
+        engine.inner.lock().unwrap().sentences.committed_sample_end,
+        0,
+        "回滚不得推进 committed"
+    );
+
+    let finalize_engine = std::sync::Arc::clone(&engine);
+    let task = tokio::spawn(async move {
+        finalize_engine
+            .finalize_with_wait_timeout(Duration::from_secs(3))
+            .await
+    });
+    transport.wait_for_calls(2).await;
+    tx2.send(Ok("恢复段。".into())).unwrap();
+    let _ = task.await.unwrap().unwrap();
+
+    let ms = transport.captured_ms();
+    // terminal 从 0 覆盖全部 12200ms（回退段失败被回滚），无丢段
+    assert_eq!(ms, vec![11_600, 12_200]);
+    assert_eq!(
+        engine.inner.lock().unwrap().sentences.confirmed_text(),
+        "恢复段。"
+    );
+}
+
+/// 回退段定稿在途时 terminal 接管：旧结果被代际丢弃，terminal 从
+/// committed 起覆盖全部，无丢段。
+#[tokio::test]
+async fn terminal_takeover_discards_retreated_pending_without_loss() {
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    let transport = WavCaptureTransport::new(vec![rx1, rx2]);
+    let engine = std::sync::Arc::new(valley_engine(transport.clone()));
+
+    let audio = valley_audio(600);
+    for chunk in audio.chunks(1_600) {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    transport.wait_for_calls(1).await;
+
+    // 终态接管：20ms 等待内 in-flight 不返回 → terminal 获得提交权
+    let finalize_engine = std::sync::Arc::clone(&engine);
+    let task = tokio::spawn(async move {
+        finalize_engine
+            .finalize_with_wait_timeout(Duration::from_millis(20))
+            .await
+    });
+    transport.wait_for_calls(2).await;
+    tx2.send(Ok("终稿。".into())).unwrap();
+    let text = task.await.unwrap().unwrap();
+    assert!(text.contains("终稿。"));
+
+    // 旧（回退）段结果此刻才返回：必须被丢弃
+    tx1.send(Ok("迟到段。".into())).unwrap();
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(inner.sentences.confirmed_text(), "终稿。");
+    assert!(inner.sentences.pending.is_none());
+    let ms = transport.captured_ms();
+    // terminal 覆盖 [0,12200)，旧段请求虽已发出但结果被丢弃（不重复入账）
+    assert_eq!(ms, vec![11_600, 12_200]);
+}
+
+/// 回退候选不高于 committed 时必须放弃回退，保持当前时刻兜底，
+/// 不得产生空/负区间。生产两条强制切路径都要求 12s 未提交/段长，
+/// 数学上候选恒大于 committed；此处的钳制是防御性验证——用物理合法
+/// 的构造（committed ≤ 当前 total，cap 上限放大以防提前兜底）触发。
+#[tokio::test]
+async fn retreat_candidate_at_or_below_committed_falls_back() {
+    let engine = engine_without_transport(Vec::new());
+    let observer = Arc::new(Mutex::new(Vec::new()));
+    let engine = engine.with_boundary_observer(observer.clone());
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.last_preview = Instant::now() + Duration::from_secs(600);
+        inner.max_uncommitted_audio_ms = 30_000;
+    }
+
+    // 12300ms：VAD 硬窗口在 ~12030ms（chunk #121，[12000,12100)）触发；
+    // 谷底候选 11600ms。在触发 chunk 之前把 committed 设为 185601
+    // （略高于候选、低于当前 total），模拟回滚后长 speaking 的偏置。
+    let audio = valley_audio(700);
+    let chunks: Vec<&[f32]> = audio.chunks(1_600).collect();
+    for chunk in &chunks[..120] {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+    engine.inner.lock().unwrap().sentences.committed_sample_end = 185_601;
+    for chunk in &chunks[120..] {
+        engine.transcribe_chunk(chunk).await.unwrap();
+    }
+
+    let records = observer.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].reason, "hard_window", "无合格回退时保持原兜底");
+    assert_eq!(records[0].audio_ms, 12_100);
+    drop(records);
+    let inner = engine.inner.lock().unwrap();
+    assert!(
+        inner.sentences.pending.is_none(),
+        "无 transport 回滚后无 pending"
+    );
+    assert_eq!(inner.sentences.committed_sample_end, 185_601);
+}
+
+/// 回退边界 commit 后 compact 只回收已提交前缀；下一段从回退点起步。
+#[test]
+fn sentence_state_compact_after_retreated_boundary() {
+    let mut state = SentenceState::new();
+    let pending = state.on_sentence_end(185_600, "").unwrap();
+    assert_eq!(pending.range, 0..185_600);
+    let result = FinalizeResult {
+        identity: pending.identity,
+        text: "段一".to_string(),
+        ok: true,
+    };
+    state.commit_or_rollback(&result);
+
+    let drain = state.try_compact(387_200).unwrap().unwrap();
+    assert_eq!(drain, 185_600);
+    assert_eq!(state.buffer_base_sample, 185_600);
+
+    let next = state.on_sentence_end(379_200, "").unwrap();
+    assert_eq!(
+        next.range,
+        185_600..379_200,
+        "回退点之后的下一段必须从已提交末端起步，无交叠无丢失"
+    );
 }

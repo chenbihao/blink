@@ -536,11 +536,12 @@ mod tests {
         assert!(should_run_for_path(&dir.path().join("missing")).is_none());
     }
 
-    /// 用私有语料回放生产 EnergyVad，比较参数对切段数量和触发时刻的影响。
+    /// 用私有语料回放 EnergyVad 的历史 A-H 参数矩阵，保留 0ms 软静默作为
+    /// legacy baseline；当前生产渐进策略由 C 候选回放单独报告。
     /// 只写匿名 case id 与时间点；不输出音频、路径或转写正文。
     /// 这里不执行 ASR/terminal finalize：短词即使未触发 VAD，松键后仍可能识别成功。
     #[test]
-    fn private_corpus_vad_parameter_sweep() {
+    fn private_corpus_vad_parameter_sweep_legacy_baseline() {
         if std::env::var("BLINK_STT_VAD_SWEEP").ok().as_deref() != Some("1") {
             return;
         }
@@ -574,13 +575,14 @@ mod tests {
             let mut uncommitted_cap_boundaries = 0u32;
             let mut case_results = Vec::new();
             for (case_id, expected, samples) in &cases {
-                let mut vad = EnergyVad::with_params_and_windows(
+                let mut vad = EnergyVad::with_params_and_windows_and_soft_silence_floor(
                     TARGET_SAMPLE_RATE,
                     threshold,
                     silence_ms,
                     sentence_ms,
                     soft_window_s as u64 * 1000,
                     hard_window_s as u64 * 1000,
+                    0,
                 );
                 let max_uncommitted_samples =
                     max_uncommitted_s as usize * TARGET_SAMPLE_RATE as usize;
@@ -651,13 +653,949 @@ mod tests {
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target/stt-vad-parameter-sweep.json");
         let report = serde_json::json!({
-            "scope": "0.23.7 candidate matrix (A-H): EnergyVad soft/hard windows plus pseudo-streaming uncommitted-cap boundary replay; potential final calls, not recognized speech. ASR quality is evaluated separately.",
+            "scope": "0.23.7 historical A-H legacy baseline matrix: 0ms single-low-frame SoftWindow comparison plus pseudo-streaming uncommitted-cap boundary replay; not current production progressive behavior and not recognized speech. ASR quality is evaluated separately.",
             "labeled_cases": labeled_count,
             "unlabeled_cases": cases.len() - labeled_count,
             "runs": runs,
         });
         std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
             .expect("write anonymous VAD parameter report");
+    }
+
+    /// 0.23.7.2 B：比较短句门槛候选，不执行 ASR 或 terminal worker。
+    ///
+    /// 基线沿用生产 800ms；直接候选把最短有效语音降到 200/250ms，但仍依赖
+    /// 现有 3 帧 attack debounce 作为可靠起声；另一候选再加 600ms 边界抑制
+    /// 间隔，用于观察快速连续边界是否能收敛。报告只写匿名 id、音频时间、
+    /// 原因和计数，不把 preview 或低能量自动解释为语义正确。
+    #[test]
+    fn private_corpus_short_sentence_candidates() {
+        if std::env::var("BLINK_STT_VAD_SHORT_SWEEP").ok().as_deref() != Some("1") {
+            return;
+        }
+        let corpus_dir =
+            should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
+        let cases = collect_corpus_cases(&corpus_dir);
+
+        let candidates = [
+            ShortGateCandidate {
+                label: "baseline_800",
+                min_sentence_ms: 800,
+                min_boundary_interval_ms: 0,
+            },
+            ShortGateCandidate {
+                label: "low_effective_200_after_attack",
+                min_sentence_ms: 200,
+                min_boundary_interval_ms: 0,
+            },
+            ShortGateCandidate {
+                label: "low_effective_250_after_attack",
+                min_sentence_ms: 250,
+                min_boundary_interval_ms: 0,
+            },
+            ShortGateCandidate {
+                label: "low_effective_250_after_attack_interval_600",
+                min_sentence_ms: 250,
+                min_boundary_interval_ms: 600,
+            },
+        ];
+
+        let mut candidate_reports = Vec::new();
+        for candidate in candidates {
+            let case_reports = cases
+                .iter()
+                .map(|(case_id, expected, samples)| {
+                    let mut result = replay_short_gate_candidate(samples, candidate);
+                    result["case_id"] = serde_json::json!(case_id);
+                    result["expected_segments"] = serde_json::json!(expected);
+                    result
+                })
+                .collect::<Vec<_>>();
+            candidate_reports.push(serde_json::json!({
+                "label": candidate.label,
+                "min_sentence_ms": candidate.min_sentence_ms,
+                "min_boundary_interval_ms": candidate.min_boundary_interval_ms,
+                "cases": case_reports,
+            }));
+        }
+
+        let synthetic_cases = [
+            (
+                "short_word_250ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(250, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "short_word_300ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(300, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "three_short_words_300ms_gaps",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(300, 0.1),
+                    generate_silence(300),
+                    generate_tone(300, 0.1),
+                    generate_silence(300),
+                    generate_tone(300, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "transient_pulse_80ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(80, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "transient_burst_180ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(180, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "intra_sentence_pause_200ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(450, 0.1),
+                    generate_silence(200),
+                    generate_tone(450, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "two_short_words_280ms_gap_300ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(280, 0.1),
+                    generate_silence(300),
+                    generate_tone(280, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            (
+                "continuous_speech_9000ms",
+                join_audio(&[
+                    generate_silence(500),
+                    generate_tone(9000, 0.1),
+                    generate_silence(400),
+                ]),
+            ),
+            ("all_silence_2000ms", generate_silence(2000)),
+        ];
+        let synthetic_reports = candidates
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "label": candidate.label,
+                    "min_sentence_ms": candidate.min_sentence_ms,
+                    "min_boundary_interval_ms": candidate.min_boundary_interval_ms,
+                    "cases": synthetic_cases
+                        .iter()
+                        .map(|(case_id, samples)| {
+                            let mut result = replay_short_gate_candidate(samples, *candidate);
+                            result["case_id"] = serde_json::json!(case_id);
+                            result
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let accumulated_windows_ms = [2000_u32, 4000_u32];
+        let accumulated_candidate_reports = accumulated_windows_ms
+            .iter()
+            .map(|window_ms| {
+                serde_json::json!({
+                    "label": format!("accumulate_effective_800_within_{window_ms}"),
+                    "min_sentence_ms": 800,
+                    "evidence_window_ms": window_ms,
+                    "cases": cases
+                        .iter()
+                        .map(|(case_id, expected, samples)| {
+                            let mut result =
+                                replay_accumulated_gate_candidate(samples, 800, *window_ms);
+                            result["case_id"] = serde_json::json!(case_id);
+                            result["expected_segments"] = serde_json::json!(expected);
+                            result
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let accumulated_synthetic_reports = accumulated_windows_ms
+            .iter()
+            .map(|window_ms| {
+                serde_json::json!({
+                    "label": format!("accumulate_effective_800_within_{window_ms}"),
+                    "min_sentence_ms": 800,
+                    "evidence_window_ms": window_ms,
+                    "cases": synthetic_cases
+                        .iter()
+                        .map(|(case_id, samples)| {
+                            let mut result =
+                                replay_accumulated_gate_candidate(samples, 800, *window_ms);
+                            result["case_id"] = serde_json::json!(case_id);
+                            result
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/stt-vad-short-sentence-candidates.json");
+        let report = serde_json::json!({
+            "scope": "0.23.7.2 B short effective-speech gate candidates; numeric VAD replay only, no audio, preview text or transcript content.",
+            "case_counts": {
+                "labeled": cases.iter().filter(|(id, _, _)| id.starts_with("case_")).count(),
+                "unlabeled": cases.iter().filter(|(id, _, _)| id.starts_with("new_")).count(),
+                "total": cases.len()
+            },
+            "candidate_notes": {
+                "baseline_800": "Current production min_sentence_ms=800; no independent boundary interval.",
+                "low_effective_200_after_attack": "200ms non-silent sentence gate after the existing 3-frame attack debounce; this is an acoustic candidate, not a semantic truth label.",
+                "low_effective_250_after_attack": "250ms non-silent sentence gate after the existing 3-frame attack debounce; this is an acoustic candidate, not a semantic truth label.",
+                "low_effective_250_after_attack_interval_600": "Same 250ms gate plus 600ms minimum accepted boundary interval; suppressed boundaries remain in numeric diagnostics and are not claimed as lost speech."
+            },
+            "limitations": [
+                "The interval candidate is an offline post-filter approximation: a suppressed boundary still resets the diagnostic VAD while segment_start stays at the previous accepted boundary, so this does not prove production wiring or no-loss behavior.",
+                "Synthetic 80ms and 180ms tones are transient energy proxies only; they are not substitutes for the real cough/keyboard acoustic samples.",
+                "Unlabeled new_ cases have no semantic truth labels; their energy valleys and candidate boundaries remain pending manual review."
+            ],
+            "additional_candidate_notes": {
+                "accumulate_effective_800": "Keeps the 800ms single-segment protection, carries rejected effective speech for a finite window, and permits a later pause only after the accumulated evidence reaches 800ms. The 2000ms and 4000ms windows are diagnostic candidates; neither is wired into production VAD."
+            },
+            "decision": {
+                "production_min_sentence_ms": 800,
+                "production_change": "none",
+                "protected_empty_cases": ["case_09", "case_10", "case_11"],
+                "reason": "Direct 200/250ms gates add a natural boundary to the expected-empty case_10 at 2690ms; the 600ms interval does not suppress that first boundary. Accumulation preserves case_10 but adds extra accumulated boundaries to case_07; the 4000ms window reaches the 7340ms candidate in new_5ebac8df, whose semantic correctness remains pending manual review."
+            },
+            "synthetic_cases": {
+                "direct_gate_candidates": synthetic_reports,
+                "accumulated_gate_candidates": accumulated_synthetic_reports
+            },
+            "corpus_cases": {
+                "direct_gate_candidates": candidate_reports,
+                "accumulated_gate_candidates": accumulated_candidate_reports
+            },
+        });
+        std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+            .expect("write anonymous short-sentence candidate report");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ShortGateCandidate {
+        label: &'static str,
+        min_sentence_ms: u32,
+        min_boundary_interval_ms: u32,
+    }
+
+    /// 回放单个短句门槛候选。边界抑制只作为诊断层候选，不改变生产 VAD。
+    fn replay_short_gate_candidate(
+        samples: &[f32],
+        candidate: ShortGateCandidate,
+    ) -> serde_json::Value {
+        let mut vad = EnergyVad::with_params_and_windows_and_soft_silence_floor(
+            TARGET_SAMPLE_RATE,
+            0.005,
+            300,
+            candidate.min_sentence_ms,
+            8_000,
+            12_000,
+            0,
+        );
+        let frame_len = (TARGET_SAMPLE_RATE / 100) as usize;
+        let mut processed = 0usize;
+        let mut segment_start = 0usize;
+        let mut previous = vad.dump_state();
+        let mut last_accepted_boundary_ms: Option<u64> = None;
+        let mut boundaries = Vec::new();
+        let mut rejected_short_sentences = Vec::new();
+        let mut suppressed_boundaries = Vec::new();
+
+        for chunk in samples.chunks(frame_len) {
+            processed += chunk.len();
+            let time_ms = processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64;
+            let event = vad.process_chunk(chunk);
+            let state = vad.dump_state();
+            if event.is_boundary() {
+                let sentence_ms = state.sentence_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64;
+                let interval_ok = candidate.min_boundary_interval_ms == 0
+                    || last_accepted_boundary_ms.is_none_or(|last| {
+                        time_ms.saturating_sub(last) >= candidate.min_boundary_interval_ms as u64
+                    });
+                if interval_ok {
+                    boundaries.push(serde_json::json!({
+                        "time_ms": time_ms,
+                        "reason": event.reason(),
+                        "sentence_ms": sentence_ms,
+                    }));
+                    last_accepted_boundary_ms = Some(time_ms);
+                    segment_start = processed;
+                } else {
+                    suppressed_boundaries.push(serde_json::json!({
+                        "time_ms": time_ms,
+                        "reason": event.reason(),
+                        "sentence_ms": sentence_ms,
+                        "required_interval_ms": candidate.min_boundary_interval_ms,
+                    }));
+                }
+                vad.reset_sentence();
+            } else if previous.speaking && !state.speaking {
+                rejected_short_sentences.push(serde_json::json!({
+                    "time_ms": time_ms,
+                    "reason": "min_sentence",
+                    "sentence_ms": previous.sentence_samples as u64 * 1000
+                        / TARGET_SAMPLE_RATE as u64,
+                    "silence_ms": state.silence_samples as u64 * 1000
+                        / TARGET_SAMPLE_RATE as u64,
+                }));
+            }
+            previous = vad.dump_state();
+        }
+
+        let terminal_off_threshold = vad.current_off_threshold();
+        let terminal_tail_has_audio = samples[segment_start..]
+            .iter()
+            .any(|sample| sample.abs() > terminal_off_threshold as f32);
+        serde_json::json!({
+            "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+            "boundaries": boundaries,
+            "boundary_count": boundaries.len(),
+            "rejected_short_sentences": rejected_short_sentences,
+            "rejected_short_count": rejected_short_sentences.len(),
+            "suppressed_boundaries": suppressed_boundaries,
+            "suppressed_boundary_count": suppressed_boundaries.len(),
+            "terminal_tail_has_audio": terminal_tail_has_audio,
+            "potential_transcribe_calls": boundaries.len() as u32
+                + u32::from(terminal_tail_has_audio),
+        })
+    }
+
+    /// 诊断候选：保留单段 800ms 保护，但在有限窗口内累积被拒绝的有效
+    /// 非静默时长。它故意不改 EnergyVad 的生产字段，只验证该策略的候选
+    /// 端点与误切风险。
+    fn replay_accumulated_gate_candidate(
+        samples: &[f32],
+        min_sentence_ms: u32,
+        evidence_window_ms: u32,
+    ) -> serde_json::Value {
+        let mut vad = EnergyVad::with_params_and_windows_and_soft_silence_floor(
+            TARGET_SAMPLE_RATE,
+            0.005,
+            300,
+            min_sentence_ms,
+            8_000,
+            12_000,
+            0,
+        );
+        let frame_len = (TARGET_SAMPLE_RATE / 100) as usize;
+        let mut processed = 0usize;
+        let mut segment_start = 0usize;
+        let mut previous = vad.dump_state();
+        let mut evidence_ms = 0u64;
+        let mut evidence_anchor_ms: Option<u64> = None;
+        let mut boundaries = Vec::new();
+        let mut rejected_short_sentences = Vec::new();
+
+        for chunk in samples.chunks(frame_len) {
+            processed += chunk.len();
+            let time_ms = processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64;
+            if evidence_anchor_ms
+                .is_some_and(|anchor| time_ms.saturating_sub(anchor) > evidence_window_ms as u64)
+            {
+                evidence_ms = 0;
+                evidence_anchor_ms = None;
+            }
+
+            let event = vad.process_chunk(chunk);
+            let state = vad.dump_state();
+            if event.is_boundary() {
+                boundaries.push(serde_json::json!({
+                    "time_ms": time_ms,
+                    "reason": event.reason(),
+                    "sentence_ms": state.sentence_samples as u64 * 1000
+                        / TARGET_SAMPLE_RATE as u64,
+                    "accumulated_sentence_ms": evidence_ms,
+                }));
+                evidence_ms = 0;
+                evidence_anchor_ms = None;
+                segment_start = processed;
+                vad.reset_sentence();
+            } else if previous.speaking && !state.speaking {
+                let sentence_ms =
+                    previous.sentence_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64;
+                evidence_ms = if evidence_anchor_ms.is_some() {
+                    evidence_ms.saturating_add(sentence_ms)
+                } else {
+                    sentence_ms
+                };
+                evidence_anchor_ms.get_or_insert(time_ms);
+                if evidence_ms >= min_sentence_ms as u64 {
+                    boundaries.push(serde_json::json!({
+                        "time_ms": time_ms,
+                        "reason": "natural_silence_accumulated",
+                        "sentence_ms": sentence_ms,
+                        "accumulated_sentence_ms": evidence_ms,
+                    }));
+                    evidence_ms = 0;
+                    evidence_anchor_ms = None;
+                    segment_start = processed;
+                } else {
+                    rejected_short_sentences.push(serde_json::json!({
+                        "time_ms": time_ms,
+                        "reason": "min_sentence_accumulating",
+                        "sentence_ms": sentence_ms,
+                        "accumulated_sentence_ms": evidence_ms,
+                    }));
+                }
+            }
+            previous = vad.dump_state();
+        }
+
+        let terminal_off_threshold = vad.current_off_threshold();
+        let terminal_tail_has_audio = samples[segment_start..]
+            .iter()
+            .any(|sample| sample.abs() > terminal_off_threshold as f32);
+        serde_json::json!({
+            "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+            "boundaries": boundaries,
+            "boundary_count": boundaries.len(),
+            "rejected_short_sentences": rejected_short_sentences,
+            "rejected_short_count": rejected_short_sentences.len(),
+            "terminal_tail_has_audio": terminal_tail_has_audio,
+            "potential_transcribe_calls": boundaries.len() as u32
+                + u32::from(terminal_tail_has_audio),
+        })
+    }
+
+    fn generate_tone(duration_ms: u32, amplitude: f32) -> Vec<f32> {
+        let sample_count = duration_ms as usize * TARGET_SAMPLE_RATE as usize / 1000;
+        (0..sample_count)
+            .map(|index| {
+                let t = index as f32 / TARGET_SAMPLE_RATE as f32;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * amplitude
+            })
+            .collect()
+    }
+
+    fn generate_silence(duration_ms: u32) -> Vec<f32> {
+        vec![0.0; duration_ms as usize * TARGET_SAMPLE_RATE as usize / 1000]
+    }
+
+    fn join_audio(parts: &[Vec<f32>]) -> Vec<f32> {
+        parts.iter().flat_map(|part| part.iter().copied()).collect()
+    }
+
+    #[test]
+    fn short_sentence_candidate_policies_are_distinguishable() {
+        let short_word = join_audio(&[
+            generate_silence(500),
+            generate_tone(250, 0.1),
+            generate_silence(400),
+        ]);
+        let low_200 = replay_short_gate_candidate(
+            &short_word,
+            ShortGateCandidate {
+                label: "low_200",
+                min_sentence_ms: 200,
+                min_boundary_interval_ms: 0,
+            },
+        );
+        let low_250 = replay_short_gate_candidate(
+            &short_word,
+            ShortGateCandidate {
+                label: "low_250",
+                min_sentence_ms: 250,
+                min_boundary_interval_ms: 0,
+            },
+        );
+        assert_eq!(low_200["boundary_count"], 1);
+        assert_eq!(low_250["boundary_count"], 0);
+
+        let close_words = join_audio(&[
+            generate_silence(500),
+            generate_tone(280, 0.1),
+            generate_silence(300),
+            generate_tone(280, 0.1),
+            generate_silence(400),
+        ]);
+        let interval = replay_short_gate_candidate(
+            &close_words,
+            ShortGateCandidate {
+                label: "low_250_interval_600",
+                min_sentence_ms: 250,
+                min_boundary_interval_ms: 600,
+            },
+        );
+        assert_eq!(interval["boundary_count"], 1);
+        assert_eq!(interval["suppressed_boundary_count"], 1);
+
+        let accumulated = join_audio(&[
+            generate_silence(500),
+            generate_tone(300, 0.1),
+            generate_silence(300),
+            generate_tone(300, 0.1),
+            generate_silence(300),
+            generate_tone(300, 0.1),
+            generate_silence(400),
+        ]);
+        let accumulated = replay_accumulated_gate_candidate(&accumulated, 800, 2000);
+        assert_eq!(accumulated["boundary_count"], 1);
+        assert_eq!(
+            accumulated["boundaries"][0]["reason"],
+            "natural_silence_accumulated"
+        );
+    }
+
+    /// 0.23.7.2 C：比较软窗口的连续静默策略。
+    ///
+    /// 生产默认从软窗口开始时的 300ms 连续 `<off` 静默，逐步降到硬窗口
+    /// 处的 150ms；0ms 是旧的单帧切对照，200ms 与 50ms 只用于候选比较。
+    /// 只回放 VAD 和未提交 cap 近似，不执行 ASR/worker，报告不含音频或正文。
+    #[test]
+    fn private_corpus_progressive_soft_window_candidates() {
+        if std::env::var("BLINK_STT_VAD_PROGRESSIVE_SWEEP")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return;
+        }
+        let corpus_dir =
+            should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
+        let cases = collect_corpus_cases(&corpus_dir);
+        let candidates = [
+            SoftWindowCandidate {
+                label: "baseline_single_low_frame",
+                floor_ms: 0,
+            },
+            SoftWindowCandidate {
+                label: "progressive_300_to_150",
+                floor_ms: 150,
+            },
+            SoftWindowCandidate {
+                label: "progressive_300_to_200",
+                floor_ms: 200,
+            },
+            SoftWindowCandidate {
+                label: "emergency_50_only",
+                floor_ms: 50,
+            },
+        ];
+
+        let corpus_reports = candidates
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "label": candidate.label,
+                    "start_ms": 300,
+                    "floor_ms": candidate.floor_ms,
+                    "cases": cases.iter().map(|(case_id, expected, samples)| {
+                        let mut result = replay_soft_window_candidate(
+                            samples,
+                            *candidate,
+                            160,
+                            800,
+                        );
+                        result["case_id"] = serde_json::json!(case_id);
+                        result["expected_segments"] = serde_json::json!(expected);
+                        result
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let synthetic_cases = [
+            (
+                "at_8s_single_10ms_low",
+                join_audio(&[generate_tone(8_000, 0.1), generate_silence(10)]),
+            ),
+            (
+                "at_8s_200ms_low",
+                join_audio(&[generate_tone(8_000, 0.1), generate_silence(200)]),
+            ),
+            (
+                "at_8s_300ms_low",
+                join_audio(&[generate_tone(8_000, 0.1), generate_silence(300)]),
+            ),
+            (
+                "hysteresis_break_after_200ms_low",
+                join_audio(&[
+                    generate_tone(8_000, 0.1),
+                    generate_silence(200),
+                    generate_tone(10, 0.010),
+                    generate_silence(200),
+                ]),
+            ),
+            (
+                "near_hard_100ms_low",
+                join_audio(&[generate_tone(11_800, 0.1), generate_silence(100)]),
+            ),
+            (
+                "near_hard_160ms_low",
+                join_audio(&[generate_tone(11_800, 0.1), generate_silence(160)]),
+            ),
+            (
+                "continuous_12s",
+                join_audio(&[generate_tone(12_000, 0.1), generate_silence(100)]),
+            ),
+            (
+                "silence_interrupted_by_voice",
+                join_audio(&[
+                    generate_tone(8_000, 0.1),
+                    generate_silence(200),
+                    generate_tone(20, 0.1),
+                    generate_silence(200),
+                ]),
+            ),
+            ("hysteresis_stuck_cap_13s", generate_tone(13_000, 0.008)),
+            ("all_silence_2s", generate_silence(2_000)),
+        ];
+        let synthetic_reports = candidates
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "label": candidate.label,
+                    "start_ms": 300,
+                    "floor_ms": candidate.floor_ms,
+                    "cases": synthetic_cases.iter().map(|(case_id, samples)| {
+                        let mut result = replay_soft_window_candidate(
+                            samples,
+                            *candidate,
+                            160,
+                            800,
+                        );
+                        result["case_id"] = serde_json::json!(case_id);
+                        result
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let chunk_size_reports = [160_usize, 320, 480]
+            .iter()
+            .map(|chunk_samples| {
+                let mut result = replay_soft_window_candidate(
+                    &synthetic_cases[5].1,
+                    candidates[1],
+                    *chunk_samples,
+                    800,
+                );
+                result["chunk_samples"] = serde_json::json!(chunk_samples);
+                result
+            })
+            .collect::<Vec<_>>();
+
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/stt-vad-progressive-soft-window.json");
+        let report = serde_json::json!({
+            "scope": "0.23.7.2 C progressive soft-window candidate replay; numeric VAD and uncommitted-cap approximation only, no audio, ASR, preview or transcript content.",
+            "params": {
+                "silence_threshold": 0.005,
+                "min_silence_ms": 300,
+                "min_sentence_ms": 800,
+                "soft_window_ms": 8000,
+                "hard_window_ms": 12000,
+                "max_uncommitted_ms": 12000,
+                "frame_ms": 10,
+            },
+            "case_counts": {
+                "labeled": cases.iter().filter(|(id, _, _)| id.starts_with("case_")).count(),
+                "unlabeled": cases.iter().filter(|(id, _, _)| id.starts_with("new_")).count(),
+                "total": cases.len(),
+            },
+            "candidate_notes": {
+                "baseline_single_low_frame": "Legacy comparison: once the segment reaches 8s, the first RMS < off frame may produce SoftWindow.",
+                "progressive_300_to_150": "Selected production candidate: continuous RMS < off silence decreases from configured min_silence_ms=300 at 8s to a bounded 150ms floor at 12s.",
+                "progressive_300_to_200": "Slower relaxation comparison; not selected as default.",
+                "emergency_50_only": "Emergency comparison only; never a default because it accepts very short valleys near the hard limit.",
+            },
+            "limitations": [
+                "Numeric boundary changes are not semantic truth; unlabeled new_ cutpoints require manual listening.",
+                "The uncommitted cap is replayed from the last accepted boundary and does not measure worker queueing or UI delivery.",
+                "Synthetic tones represent energy patterns only; they are not labeled cough, keyboard or real speech acoustics.",
+                "Different chunk-size rows verify event counts for 10ms-aligned chunks; production audio timing still depends on actual callback delivery.",
+            ],
+            "protected_empty_cases": ["case_09", "case_10", "case_11"],
+            "corpus_candidates": corpus_reports,
+            "synthetic_candidates": synthetic_reports,
+            "chunk_size_equivalence": chunk_size_reports,
+            "decision": {
+                "production_candidate": "progressive_300_to_150",
+                "production_change": "EnergyVad only; defaults and upper bounds unchanged.",
+                "hard_cap": "Keep clear HardWindow and uncommitted_cap fallback at 12s; do not use 50ms as default.",
+            },
+        });
+        std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+            .expect("write anonymous progressive soft-window report");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SoftWindowCandidate {
+        label: &'static str,
+        floor_ms: u32,
+    }
+
+    fn replay_soft_window_candidate(
+        samples: &[f32],
+        candidate: SoftWindowCandidate,
+        chunk_samples: usize,
+        min_sentence_ms: u32,
+    ) -> serde_json::Value {
+        let mut vad = EnergyVad::with_params_and_windows_and_soft_silence_floor(
+            TARGET_SAMPLE_RATE,
+            0.005,
+            300,
+            min_sentence_ms,
+            8_000,
+            12_000,
+            candidate.floor_ms,
+        );
+        let max_uncommitted_samples = 12 * TARGET_SAMPLE_RATE as usize;
+        let mut processed = 0usize;
+        let mut segment_start = 0usize;
+        let mut events = Vec::new();
+        let mut natural_count = 0u32;
+        let mut soft_count = 0u32;
+        let mut hard_count = 0u32;
+        let mut cap_count = 0u32;
+
+        for chunk in samples.chunks(chunk_samples.max(1)) {
+            processed += chunk.len();
+            let mut event = vad.process_chunk(chunk);
+            let cap_triggered = !event.is_boundary()
+                && processed.saturating_sub(segment_start) >= max_uncommitted_samples;
+            if cap_triggered {
+                event = VadEvent::HardWindow;
+                cap_count += 1;
+            }
+            if event.is_boundary() {
+                let reason = if cap_triggered {
+                    "uncommitted_cap"
+                } else {
+                    event.reason()
+                };
+                match reason {
+                    "natural_silence" => natural_count += 1,
+                    "soft_window" => soft_count += 1,
+                    "hard_window" => hard_count += 1,
+                    _ => {}
+                }
+                events.push(serde_json::json!({
+                    "time_ms": processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                    "reason": reason,
+                }));
+                segment_start = processed;
+                vad.reset_sentence();
+            }
+        }
+
+        let terminal_off_threshold = vad.current_off_threshold();
+        let terminal_tail_has_audio = samples[segment_start..]
+            .iter()
+            .any(|sample| sample.abs() > terminal_off_threshold as f32);
+        serde_json::json!({
+            "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+            "events": events,
+            "natural_count": natural_count,
+            "soft_count": soft_count,
+            "hard_count": hard_count,
+            "cap_count": cap_count,
+            "terminal_tail_has_audio": terminal_tail_has_audio,
+            "potential_transcribe_calls": events.len() as u32
+                + u32::from(terminal_tail_has_audio),
+        })
+    }
+
+    /// 0.23.7.2 D：强制切（hard/cap）谷底回退的数值回放。
+    ///
+    /// 生产语义镜像：渐进软窗口 floor=150；强制切触发时在 1.2s 帧历史里
+    /// 找 ≥50ms 的连续 `<off` 谷底，回退到其末帧；候选不高于上一接受边界
+    /// （近似 committed）时放弃回退。回退只移动切点，不新增边界。
+    fn replay_hard_cut_valley_arm(samples: &[f32], enable_retreat: bool) -> serde_json::Value {
+        let mut vad = EnergyVad::with_params_and_windows_and_soft_silence_floor(
+            TARGET_SAMPLE_RATE,
+            0.005,
+            300,
+            800,
+            8_000,
+            12_000,
+            150,
+        );
+        let max_uncommitted_samples = 12 * TARGET_SAMPLE_RATE as usize;
+        let mut processed = 0usize;
+        let mut segment_start = 0usize;
+        let mut events = Vec::new();
+        let mut retreated_count = 0u32;
+
+        for chunk in samples.chunks(160) {
+            processed += chunk.len();
+            let mut event = vad.process_chunk(chunk);
+            let cap_triggered = !event.is_boundary()
+                && processed.saturating_sub(segment_start) >= max_uncommitted_samples;
+            if cap_triggered {
+                event = VadEvent::HardWindow;
+            }
+            if event.is_boundary() {
+                let mut boundary_samples = processed;
+                let mut reason = if cap_triggered {
+                    "uncommitted_cap"
+                } else {
+                    event.reason()
+                };
+                if enable_retreat
+                    && event == VadEvent::HardWindow
+                    && let Some(offset) = vad.low_energy_valley_offset(1_200)
+                {
+                    let candidate = processed.saturating_sub(offset);
+                    if candidate > segment_start && candidate < processed {
+                        retreated_count += 1;
+                        boundary_samples = candidate;
+                        reason = if cap_triggered {
+                            "uncommitted_cap_valley"
+                        } else {
+                            "hard_window_valley"
+                        };
+                    }
+                }
+                events.push(serde_json::json!({
+                    "time_ms": boundary_samples as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+                    "reason": reason,
+                    "retreated_from_ms": if boundary_samples == processed {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(processed as u64 * 1000 / TARGET_SAMPLE_RATE as u64)
+                    },
+                }));
+                segment_start = boundary_samples;
+                vad.reset_sentence();
+            }
+        }
+
+        let terminal_off_threshold = vad.current_off_threshold();
+        let terminal_tail_has_audio = samples[segment_start..]
+            .iter()
+            .any(|sample| sample.abs() > terminal_off_threshold as f32);
+        serde_json::json!({
+            "duration_ms": samples.len() as u64 * 1000 / TARGET_SAMPLE_RATE as u64,
+            "events": events,
+            "boundary_count": events.len(),
+            "retreated_count": retreated_count,
+            "terminal_tail_has_audio": terminal_tail_has_audio,
+            "potential_transcribe_calls": events.len() as u32
+                + u32::from(terminal_tail_has_audio),
+        })
+    }
+
+    /// 0.23.7.2 D：比较强制切"当前时刻兜底 vs 近期谷底回退"。
+    ///
+    /// 基线臂 = 生产渐进软窗口（floor 150）无回退，与 C 包报告的
+    /// progressive_300_to_150 臂数值一致；回退臂只移动 hard/cap 切点。
+    /// 报告只含匿名 id 与数值，不含音频或正文。
+    #[test]
+    fn private_corpus_hard_cut_valley_candidates() {
+        if std::env::var("BLINK_STT_VAD_VALLEY_SWEEP").ok().as_deref() != Some("1") {
+            return;
+        }
+        let corpus_dir =
+            should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
+        let cases = collect_corpus_cases(&corpus_dir);
+
+        let corpus_arms = [("baseline_no_retreat", false), ("valley_retreat", true)]
+            .iter()
+            .map(|(label, enable)| {
+                serde_json::json!({
+                    "label": label,
+                    "cases": cases.iter().map(|(case_id, expected, samples)| {
+                        let mut result = replay_hard_cut_valley_arm(samples, *enable);
+                        result["case_id"] = serde_json::json!(case_id);
+                        result["expected_segments"] = serde_json::json!(expected);
+                        result
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let synthetic_cases = [
+            (
+                "continuous_12s_no_valley",
+                join_audio(&[generate_tone(12_000, 0.1), generate_silence(100)]),
+            ),
+            (
+                "near_hard_80ms_notch",
+                join_audio(&[
+                    generate_tone(11_700, 0.1),
+                    generate_silence(80),
+                    generate_tone(400, 0.1),
+                ]),
+            ),
+            (
+                "near_hard_150ms_notch",
+                join_audio(&[
+                    generate_tone(11_700, 0.1),
+                    generate_silence(150),
+                    generate_tone(400, 0.1),
+                ]),
+            ),
+            ("hysteresis_stuck_cap_13s", generate_tone(13_000, 0.008)),
+            ("all_silence_2s", generate_silence(2_000)),
+        ];
+        let synthetic_arms = [("baseline_no_retreat", false), ("valley_retreat", true)]
+            .iter()
+            .map(|(label, enable)| {
+                serde_json::json!({
+                    "label": label,
+                    "cases": synthetic_cases.iter().map(|(case_id, samples)| {
+                        let mut result = replay_hard_cut_valley_arm(samples, *enable);
+                        result["case_id"] = serde_json::json!(case_id);
+                        result
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/stt-vad-hard-cut-valley.json");
+        let report = serde_json::json!({
+            "scope": "0.23.7.2 D hard-cut valley retreat candidate replay; numeric VAD approximation only, no audio, ASR, preview or transcript content. Engine-level invariants are proven separately in pseudo_streaming tests.",
+            "params": {
+                "silence_threshold": 0.005,
+                "min_silence_ms": 300,
+                "min_sentence_ms": 800,
+                "soft_window_ms": 8000,
+                "hard_window_ms": 12000,
+                "max_uncommitted_ms": 12000,
+                "progressive_soft_floor_ms": 150,
+                "valley_window_ms": 1200,
+                "valley_min_run_ms": 50,
+            },
+            "case_counts": {
+                "labeled": cases.iter().filter(|(id, _, _)| id.starts_with("case_")).count(),
+                "unlabeled": cases.iter().filter(|(id, _, _)| id.starts_with("new_")).count(),
+                "total": cases.len(),
+            },
+            "limitations": [
+                "The numeric replay approximates committed ends with the last accepted boundary and the engine cap with per-chunk checks; exact engine behavior is covered by pseudo_streaming invariant tests.",
+                "A retreated numeric boundary is an energy-based position, not a semantic truth label; unlabeled new_ cutpoints remain pending manual review.",
+            ],
+            "protected_empty_cases": ["case_09", "case_10", "case_11"],
+            "corpus_arms": corpus_arms,
+            "synthetic_arms": synthetic_arms,
+        });
+        std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+            .expect("write anonymous hard-cut valley report");
     }
 
     /// 收集 corpus 全部 case：manifest 标注样本 + 目录内未列入 manifest 的
@@ -719,7 +1657,7 @@ mod tests {
             should_run().expect("BLINK_STT_CORPUS_DIR must point to a corpus directory");
         let cases = collect_corpus_cases(&corpus_dir);
 
-        // 默认 A 组合（生产默认），与 sweep 的 A 行为一致；不执行 ASR。
+        // 默认 A 组合（当前生产渐进软窗口）；不执行 ASR。
         let threshold = 0.005_f64;
         let silence_ms = 300_u32;
         let sentence_ms = 800_u32;

@@ -72,48 +72,70 @@ pub struct VadState {
     pub silence_samples: usize,
     /// 当前未提交段的总样本数（含段内静音）。
     pub segment_samples: usize,
+    /// 软窗口要求的连续低能量样本数（用于诊断）。
+    pub soft_silence_samples: usize,
 }
 
-/// 固定容量的环形能量统计 buffer。
+use std::collections::VecDeque;
+
+/// 按时间容量限制的环形能量统计 buffer。
 ///
-/// 用于估计 noise floor——只存低能量分位附近的数据，
-/// 不随录音长度无界增长。
+/// 每项同时保存 RMS 和实际样本数。调用方的 chunk 可能小于一个 10ms
+/// frame，因此不能用“项数 × 10ms”推导历史时长或谷底偏移。
+/// 用样本总数限制容量，避免分块变小时历史覆盖时长缩短。
+#[derive(Debug, Clone, Copy)]
+struct EnergyFrame {
+    rms: f64,
+    samples: usize,
+}
+
 struct EnergyHistory {
-    /// 环形 buffer
-    buf: Vec<f64>,
-    /// 写入位置
-    head: usize,
-    /// 已写入数量（≤ buf.len()）
-    count: usize,
+    /// 环形 buffer；VecDeque 的 front 是最旧项，back 是最新项。
+    buf: VecDeque<EnergyFrame>,
+    /// 历史覆盖的最大样本数（约 1.5s，足够覆盖 1.2s 谷底窗口）。
+    max_samples: usize,
+    /// 当前 buffer 内的样本总数。
+    total_samples: usize,
 }
 
 impl EnergyHistory {
-    fn new(capacity: usize) -> Self {
+    fn new(max_samples: usize) -> Self {
         Self {
-            buf: vec![0.0; capacity],
-            head: 0,
-            count: 0,
+            buf: VecDeque::new(),
+            max_samples: max_samples.max(1),
+            total_samples: 0,
         }
     }
 
-    fn push(&mut self, val: f64) {
-        self.buf[self.head] = val;
-        self.head = (self.head + 1) % self.buf.len();
-        if self.count < self.buf.len() {
-            self.count += 1;
+    fn push(&mut self, rms: f64, samples: usize) {
+        if samples == 0 {
+            return;
+        }
+
+        // process_chunk 的单帧不会超过约 10ms，但对异常大输入仍保留
+        // 最新 max_samples 的范围，确保 total_samples 不溢出容量。
+        let samples = samples.min(self.max_samples);
+        self.buf.push_back(EnergyFrame { rms, samples });
+        self.total_samples = self.total_samples.saturating_add(samples);
+        while self.total_samples > self.max_samples {
+            let Some(oldest) = self.buf.pop_front() else {
+                self.total_samples = 0;
+                break;
+            };
+            self.total_samples = self.total_samples.saturating_sub(oldest.samples);
         }
     }
 
     /// 返回已存储的值（排序的副本），用于分位数计算。
     fn sorted_values(&self) -> Vec<f64> {
-        let mut v: Vec<f64> = self.buf[..self.count].to_vec();
+        let mut v: Vec<f64> = self.buf.iter().map(|frame| frame.rms).collect();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         v
     }
 
     fn clear(&mut self) {
-        self.head = 0;
-        self.count = 0;
+        self.buf.clear();
+        self.total_samples = 0;
     }
 }
 
@@ -130,7 +152,7 @@ pub struct EnergyVad {
     /// 最小句子长度：短于此值不切句（默认 800ms）
     /// 避免咳嗽、短暂噪声等触发误切
     min_sentence_ms: u32,
-    /// 软窗口：持续有声达到该时长后可在低能量帧切段（默认 8s，0.23.7 可配置）
+    /// 软窗口：持续有声达到该时长后，在渐进静默中切段（默认 8s，0.23.7 可配置）
     soft_window_ms: u64,
     /// 硬窗口：持续有声达到该时长后强制切段（默认 12s，0.23.7 可配置）
     hard_window_ms: u64,
@@ -155,16 +177,23 @@ pub struct EnergyVad {
     attack_counter: usize,
     /// 当前未提交段的总样本数（含段内静音）。
     segment_samples: usize,
+    /// 软窗口后的连续低能量静默样本数（只计 RMS < off 的连续帧）。
+    soft_silence_samples: usize,
+    /// 软窗口静默下限（毫秒）。0 表示旧的首个低能量帧即切，仅供对照。
+    soft_silence_floor_ms: u32,
 }
 
-/// 能量历史 buffer 容量（约 1.5 秒 @ 10ms frame ≈ 150 帧）
-const ENERGY_HISTORY_CAPACITY: usize = 150;
+/// 能量历史覆盖时长（约 1.5 秒，超过 1.2 秒谷底查询窗口）。
+const ENERGY_HISTORY_DURATION_MS: u64 = 1_500;
 
 /// attack debounce 所需连续有声 frame 数（约 30ms @ 10ms）。
 /// 单个脉冲不会进入 speaking，需连续 3 帧才算入句。
 const ATTACK_DEBOUNCE_FRAMES: usize = 3;
 const SOFT_WINDOW_MS: u64 = 8_000;
 const HARD_WINDOW_MS: u64 = 12_000;
+/// 渐进软窗口静默下限的保护值；实际起点来自 `min_silence_ms`。
+const SOFT_SILENCE_FLOOR_MIN_MS: u64 = 50;
+const PROGRESSIVE_SOFT_SILENCE_FLOOR_MS: u32 = 150;
 
 /// noise floor 更新速率：慢速上升（×0.02），较快下降（×0.1）。
 /// 非对称更新避免持续人声快速抬高噪声基线。
@@ -188,22 +217,15 @@ impl EnergyVad {
     /// 参数：
     /// - `sample_rate`：音频采样率（通常 16000）
     pub fn new(sample_rate: u32) -> Self {
-        Self {
-            silence_threshold: 0.005,
-            min_silence_ms: 300,
-            min_sentence_ms: 800,
-            soft_window_ms: SOFT_WINDOW_MS,
-            hard_window_ms: HARD_WINDOW_MS,
+        Self::from_params(
             sample_rate,
-            energy_history: EnergyHistory::new(ENERGY_HISTORY_CAPACITY),
-            noise_floor: 0.0,
-            noise_initialized: false,
-            silence_samples: 0,
-            speaking: false,
-            sentence_samples: 0,
-            attack_counter: 0,
-            segment_samples: 0,
-        }
+            0.005,
+            300,
+            800,
+            SOFT_WINDOW_MS,
+            HARD_WINDOW_MS,
+            PROGRESSIVE_SOFT_SILENCE_FLOOR_MS,
+        )
     }
 
     /// 创建带自定义参数的能量 VAD（使用默认 8s/12s 切片窗口）。
@@ -217,22 +239,15 @@ impl EnergyVad {
         min_silence_ms: u32,
         min_sentence_ms: u32,
     ) -> Self {
-        Self {
+        Self::from_params(
+            sample_rate,
             silence_threshold,
             min_silence_ms,
             min_sentence_ms,
-            soft_window_ms: SOFT_WINDOW_MS,
-            hard_window_ms: HARD_WINDOW_MS,
-            sample_rate,
-            energy_history: EnergyHistory::new(ENERGY_HISTORY_CAPACITY),
-            noise_floor: 0.0,
-            noise_initialized: false,
-            silence_samples: 0,
-            speaking: false,
-            sentence_samples: 0,
-            attack_counter: 0,
-            segment_samples: 0,
-        }
+            SOFT_WINDOW_MS,
+            HARD_WINDOW_MS,
+            PROGRESSIVE_SOFT_SILENCE_FLOOR_MS,
+        )
     }
 
     /// 创建带自定义参数与切片窗口的能量 VAD（0.23.7 高级配置）。
@@ -247,6 +262,26 @@ impl EnergyVad {
         soft_window_ms: u64,
         hard_window_ms: u64,
     ) -> Self {
+        Self::from_params(
+            sample_rate,
+            silence_threshold,
+            min_silence_ms,
+            min_sentence_ms,
+            soft_window_ms,
+            hard_window_ms,
+            PROGRESSIVE_SOFT_SILENCE_FLOOR_MS,
+        )
+    }
+
+    fn from_params(
+        sample_rate: u32,
+        silence_threshold: f64,
+        min_silence_ms: u32,
+        min_sentence_ms: u32,
+        soft_window_ms: u64,
+        hard_window_ms: u64,
+        soft_silence_floor_ms: u32,
+    ) -> Self {
         Self {
             silence_threshold,
             min_silence_ms,
@@ -254,7 +289,12 @@ impl EnergyVad {
             soft_window_ms,
             hard_window_ms,
             sample_rate,
-            energy_history: EnergyHistory::new(ENERGY_HISTORY_CAPACITY),
+            energy_history: EnergyHistory::new(
+                (sample_rate as u64)
+                    .saturating_mul(ENERGY_HISTORY_DURATION_MS)
+                    .saturating_add(999)
+                    .saturating_div(1000) as usize,
+            ),
             noise_floor: 0.0,
             noise_initialized: false,
             silence_samples: 0,
@@ -262,7 +302,31 @@ impl EnergyVad {
             sentence_samples: 0,
             attack_counter: 0,
             segment_samples: 0,
+            soft_silence_samples: 0,
+            soft_silence_floor_ms,
         }
+    }
+
+    /// 测试/诊断用：选择软窗口静默下限，0 保留旧的单帧切行为。
+    #[cfg(test)]
+    pub fn with_params_and_windows_and_soft_silence_floor(
+        sample_rate: u32,
+        silence_threshold: f64,
+        min_silence_ms: u32,
+        min_sentence_ms: u32,
+        soft_window_ms: u64,
+        hard_window_ms: u64,
+        soft_silence_floor_ms: u32,
+    ) -> Self {
+        Self::from_params(
+            sample_rate,
+            silence_threshold,
+            min_silence_ms,
+            min_sentence_ms,
+            soft_window_ms,
+            hard_window_ms,
+            soft_silence_floor_ms,
+        )
     }
 
     /// 处理一个音频 chunk，返回是否检测到句尾。
@@ -271,6 +335,19 @@ impl EnergyVad {
     ///
     /// 内部以固定 ~10ms frame 计算 RMS，确保不同 chunk size 得到等价时长行为。
     pub fn process_chunk(&mut self, samples: &[f32]) -> VadEvent {
+        self.process_chunk_internal(samples, true)
+    }
+
+    /// 重放已经进入上层 PCM 缓冲、但因历史切点回退而属于下一段的尾部。
+    ///
+    /// 这段音频此前已经参与过自适应底噪计算；重放时复用同一 VAD 状态机，
+    /// 只恢复 speaking/句长/静默计数，不重复写入 energy history 或更新
+    /// noise floor。调用方应在 `reset_sentence` 后调用此方法。
+    pub(crate) fn replay_chunk(&mut self, samples: &[f32]) {
+        let _ = self.process_chunk_internal(samples, false);
+    }
+
+    fn process_chunk_internal(&mut self, samples: &[f32], update_adaptive_state: bool) -> VadEvent {
         if samples.is_empty() {
             return VadEvent::None;
         }
@@ -296,8 +373,11 @@ impl EnergyVad {
             let rms = compute_rms(frame);
             let frame_samples = frame.len();
 
-            // 更新能量历史和底噪估计
-            self.update_noise_floor(rms);
+            // 正常输入更新自适应状态；历史回退重放只恢复运行时状态，
+            // 避免同一段 PCM 二次写入 P25 历史。
+            if update_adaptive_state {
+                self.update_noise_floor(rms, frame_samples);
+            }
 
             // 计算当前 on/off 阈值
             let (on_thresh, off_thresh) = self.compute_thresholds();
@@ -305,6 +385,7 @@ impl EnergyVad {
             if rms > on_thresh {
                 // ── 有声 ──
                 self.silence_samples = 0;
+                self.soft_silence_samples = 0;
 
                 if !self.speaking {
                     // attack debounce：需连续 ATTACK_DEBOUNCE_FRAMES 帧有声才算入句
@@ -319,6 +400,9 @@ impl EnergyVad {
                 // ── 静默 ──
                 self.attack_counter = 0;
                 self.silence_samples += frame_samples;
+                if self.speaking {
+                    self.soft_silence_samples += frame_samples;
+                }
 
                 if self.speaking && self.silence_samples >= min_silence_samples {
                     if self.sentence_samples >= min_sentence_samples {
@@ -332,9 +416,26 @@ impl EnergyVad {
                         self.segment_samples = 0;
                     }
                 } else if self.speaking && self.segment_samples >= soft_window_samples {
-                    self.speaking = false;
-                    event = VadEvent::SoftWindow;
+                    let segment_ms = self.segment_samples as u64 * 1000 / self.sample_rate as u64;
+                    let required_ms = progressive_soft_silence_ms(
+                        segment_ms,
+                        self.soft_window_ms,
+                        self.hard_window_ms,
+                        self.min_silence_ms,
+                        self.soft_silence_floor_ms,
+                    );
+                    let required_samples =
+                        required_ms.saturating_mul(self.sample_rate as u64) / 1000;
+                    if self.soft_silence_floor_ms == 0
+                        || self.soft_silence_samples as u64 >= required_samples
+                    {
+                        self.speaking = false;
+                        event = VadEvent::SoftWindow;
+                    }
                 }
+            } else {
+                // 滞回区帧保持 speaking，但会打断软窗口要求的连续低能量静默。
+                self.soft_silence_samples = 0;
             }
             // off_thresh ≤ rms ≤ on_thresh：滞回区间，保持 speaking/静默计时状态
 
@@ -360,7 +461,7 @@ impl EnergyVad {
     }
 
     /// 更新底噪估计：用能量历史低分位数 + 非对称更新。
-    fn update_noise_floor(&mut self, rms: f64) {
+    fn update_noise_floor(&mut self, rms: f64, frame_samples: usize) {
         // 处理非有限值
         let rms = if rms.is_nan() || rms.is_infinite() {
             0.0
@@ -368,7 +469,7 @@ impl EnergyVad {
             rms
         };
 
-        self.energy_history.push(rms);
+        self.energy_history.push(rms, frame_samples);
 
         // 用低分位数（P25）作为底噪候选
         let sorted = self.energy_history.sorted_values();
@@ -420,6 +521,7 @@ impl EnergyVad {
         self.sentence_samples = 0;
         self.silence_samples = 0;
         self.segment_samples = 0;
+        self.soft_silence_samples = 0;
     }
 
     /// 是否正在说话（有声阶段）。
@@ -448,6 +550,70 @@ impl EnergyVad {
         off
     }
 
+    /// 0.23.7.2 D：强制切（硬窗口/未提交上限）的有界近期能量谷底查询。
+    ///
+    /// 在最近 `max_back_ms` 的帧历史里找最长的连续 `RMS < off` 低能量段；
+    /// 长度 ≥ `SOFT_SILENCE_FLOOR_MIN_MS`（50ms）时返回"当前音频末端"到该
+    /// 低能量段**结束位置**的样本偏移——即建议的回退切点。多条等长取最新
+    /// （回退最少）。无合格谷底返回 `None`，调用方保持原兜底切点。
+    ///
+    /// 只读查询，不改变 VAD 状态；历史项可能不足 10ms，窗口和连续低能量
+    /// 时长均按每项实际样本数计算。
+    pub fn low_energy_valley_offset(&self, max_back_ms: u64) -> Option<usize> {
+        let max_back_samples = max_back_ms
+            .saturating_mul(self.sample_rate as u64)
+            .saturating_div(1000) as usize;
+        if max_back_samples == 0 || self.energy_history.buf.is_empty() {
+            return None;
+        }
+        let (_, off_thresh) = self.compute_thresholds();
+        let min_run_samples = SOFT_SILENCE_FLOOR_MIN_MS
+            .saturating_mul(self.sample_rate as u64)
+            .saturating_div(1000)
+            .max(1) as usize;
+        let mut remaining_samples = max_back_samples;
+        // 当前低能量段之后、直到当前音频末端的真实样本数。
+        let mut newer_samples = 0usize;
+        let mut best_run_samples = 0usize;
+        let mut best_run_offset = 0usize;
+        let mut current_run_samples = 0usize;
+        let mut current_run_offset = 0usize;
+        // 从最新项向历史项扫描。每项按实际样本数参与窗口和连续段计算；
+        // 最老项可能只取窗口剩余部分，但其 RMS 分类保持不变。
+        for frame in self.energy_history.buf.iter().rev() {
+            if remaining_samples == 0 {
+                break;
+            }
+            let frame_samples = frame.samples.min(remaining_samples);
+            remaining_samples -= frame_samples;
+
+            if frame.rms < off_thresh {
+                if current_run_samples == 0 {
+                    current_run_offset = newer_samples;
+                }
+                current_run_samples = current_run_samples.saturating_add(frame_samples);
+            } else {
+                if current_run_samples > best_run_samples {
+                    best_run_samples = current_run_samples;
+                    best_run_offset = current_run_offset;
+                }
+                current_run_samples = 0;
+            }
+            // 下一项（更旧的帧）若开启新的低能量段，其回退距离必须包含
+            // 当前帧，无论当前帧属于低能量段还是高能量间隔。
+            newer_samples = newer_samples.saturating_add(frame_samples);
+        }
+        // 扫描结束时未闭合的低能量段触及扫描窗口旧边界（可能继续向更旧延伸），
+        if current_run_samples > best_run_samples {
+            best_run_samples = current_run_samples;
+            best_run_offset = current_run_offset;
+        }
+        if best_run_samples < min_run_samples {
+            return None;
+        }
+        Some(best_run_offset)
+    }
+
     /// 完全重置状态（新录音会话）。
     pub fn reset(&mut self) {
         self.silence_samples = 0;
@@ -455,6 +621,7 @@ impl EnergyVad {
         self.sentence_samples = 0;
         self.attack_counter = 0;
         self.segment_samples = 0;
+        self.soft_silence_samples = 0;
         self.energy_history.clear();
         self.noise_floor = 0.0;
         self.noise_initialized = false;
@@ -471,8 +638,41 @@ impl EnergyVad {
             sentence_samples: self.sentence_samples,
             silence_samples: self.silence_samples,
             segment_samples: self.segment_samples,
+            soft_silence_samples: self.soft_silence_samples,
         }
     }
+}
+
+/// 计算软窗口所需的连续 `<off` 静默时长。
+///
+/// 软窗口处使用配置的 `min_silence_ms`，随后线性下降到硬窗口处的下限；
+/// 下限至少保持 50ms，并且不会超过起点。下限为 0 时保留 0.23.7.1
+/// 之前的单个低能量帧对照行为。该函数只影响 SoftWindow，自然句尾仍
+/// 使用配置的 `min_silence_ms`。
+fn progressive_soft_silence_ms(
+    segment_ms: u64,
+    soft_window_ms: u64,
+    hard_window_ms: u64,
+    start_ms: u32,
+    floor_ms: u32,
+) -> u64 {
+    if floor_ms == 0 {
+        return 0;
+    }
+    let start_ms = u64::from(start_ms);
+    if start_ms == 0 {
+        return 0;
+    }
+    let floor_ms = u64::from(floor_ms)
+        .max(SOFT_SILENCE_FLOOR_MIN_MS)
+        .min(start_ms);
+    let span_ms = hard_window_ms.saturating_sub(soft_window_ms);
+    if span_ms == 0 {
+        return floor_ms;
+    }
+    let elapsed_ms = segment_ms.saturating_sub(soft_window_ms).min(span_ms);
+    let reduction = start_ms - floor_ms;
+    start_ms - (reduction * elapsed_ms + span_ms / 2) / span_ms
 }
 
 /// 计算音频样本的 RMS 能量。
@@ -693,7 +893,7 @@ mod tests {
 
     #[test]
     fn vad_soft_window_uses_low_energy_boundary() {
-        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 300, 20_000);
         let speech = generate_tone(SOFT_WINDOW_MS as u32 + 100, 0.1);
         let mut event = VadEvent::None;
         for chunk in speech.chunks(160) {
@@ -704,6 +904,15 @@ mod tests {
         }
         assert_eq!(event, VadEvent::None, "软上限不应在持续高能量中硬切");
 
+        // 8s 后的单个低能量帧不再立即 SoftWindow；要求连续低于 off 的静默。
+        for chunk in generate_silence(200).chunks(160) {
+            event = vad.process_chunk(chunk);
+            if event.is_boundary() {
+                break;
+            }
+        }
+        assert_eq!(event, VadEvent::None);
+
         for chunk in generate_silence(100).chunks(160) {
             event = vad.process_chunk(chunk);
             if event.is_boundary() {
@@ -711,6 +920,289 @@ mod tests {
             }
         }
         assert_eq!(event, VadEvent::SoftWindow);
+    }
+
+    #[test]
+    fn progressive_soft_silence_uses_configured_minimum_and_bounded_floor() {
+        assert_eq!(
+            progressive_soft_silence_ms(8_000, 8_000, 12_000, 300, 150),
+            300
+        );
+        assert_eq!(
+            progressive_soft_silence_ms(10_000, 8_000, 12_000, 300, 150),
+            225
+        );
+        assert_eq!(
+            progressive_soft_silence_ms(12_000, 8_000, 12_000, 300, 150),
+            150
+        );
+        assert_eq!(
+            progressive_soft_silence_ms(8_000, 8_000, 12_000, 500, 150),
+            500
+        );
+        assert_eq!(
+            progressive_soft_silence_ms(12_000, 8_000, 12_000, 500, 150),
+            150
+        );
+        // 用户把自然静默设为 100ms 时，软窗口下限不能反过来更宽松。
+        assert_eq!(
+            progressive_soft_silence_ms(8_000, 8_000, 12_000, 100, 150),
+            100
+        );
+        assert_eq!(
+            progressive_soft_silence_ms(12_000, 8_000, 12_000, 100, 150),
+            100
+        );
+        // 50ms 只作为紧急诊断对照；0 保留旧单帧对照。
+        assert_eq!(
+            progressive_soft_silence_ms(12_000, 8_000, 12_000, 300, 50),
+            50
+        );
+        assert_eq!(progressive_soft_silence_ms(8_000, 8_000, 12_000, 300, 0), 0);
+    }
+
+    #[test]
+    fn vad_progressive_soft_window_requires_continuous_low_energy() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 300, 20_000);
+        for chunk in generate_tone(8_100, 0.1).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+
+        // 200ms 低于 off 后被一帧有声打断；总静默虽超过 300ms，
+        // 软窗口只应看到打断后的连续低能量时长。渐进要求随段长从
+        // 300ms 下降（此处约 279ms），因此切点落在打断后连续静默
+        // 约 280ms 处，而不是整 300ms。
+        for chunk in generate_silence(200).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        for chunk in generate_tone(10, 0.1).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        // 打断后连续静默累计到 260ms 仍低于渐进要求，不得切段。
+        for chunk in generate_silence(200).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        for chunk in generate_silence(60).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        let mut event = VadEvent::None;
+        for chunk in generate_silence(50).chunks(160) {
+            event = vad.process_chunk(chunk);
+            if event.is_boundary() {
+                break;
+            }
+        }
+        assert_eq!(event, VadEvent::SoftWindow);
+    }
+
+    #[test]
+    fn vad_progressive_soft_silence_resets_on_hysteresis_and_reset() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 1_000, 20_000);
+        for chunk in generate_tone(8_100, 0.1).chunks(320) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        for chunk in generate_silence(200).chunks(320) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        assert_eq!(vad.dump_state().soft_silence_samples, 200 * 16);
+
+        // RMS 约 0.007，位于默认 on/off 之间；它保持 speaking 但必须
+        // 打断“连续 RMS < off”计数。
+        for chunk in generate_tone(10, 0.010).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        assert_eq!(vad.dump_state().soft_silence_samples, 0);
+
+        for chunk in generate_silence(200).chunks(320) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        assert_eq!(vad.dump_state().soft_silence_samples, 200 * 16);
+
+        vad.reset();
+        assert_eq!(vad.dump_state().soft_silence_samples, 0);
+    }
+
+    #[test]
+    fn vad_progressive_soft_window_reaches_floor_before_hard_window() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.005, 300, 20_000);
+        for chunk in generate_tone(11_800, 0.1).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+        for chunk in generate_silence(140).chunks(160) {
+            assert_eq!(vad.process_chunk(chunk), VadEvent::None);
+        }
+
+        let mut event = VadEvent::None;
+        for chunk in generate_silence(40).chunks(160) {
+            event = vad.process_chunk(chunk);
+            if event.is_boundary() {
+                break;
+            }
+        }
+        assert_eq!(event, VadEvent::SoftWindow);
+    }
+
+    /// 拼接多段音频的测试辅助。
+    fn concat_audio(parts: &[Vec<f32>]) -> Vec<f32> {
+        let mut out = Vec::new();
+        for part in parts {
+            out.extend_from_slice(part);
+        }
+        out
+    }
+
+    #[test]
+    fn low_energy_valley_reports_notch_end_offset() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        let audio = concat_audio(&[
+            generate_tone(1_000, 0.1),
+            generate_silence(120),
+            generate_tone(1_000, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        // 谷底末帧结束于 1120ms，当前末端 2120ms → 建议回退 1000ms
+        assert_eq!(vad.low_energy_valley_offset(1_200), Some(1_000 * 16));
+    }
+
+    #[test]
+    fn low_energy_valley_is_chunk_size_invariant() {
+        let audio = concat_audio(&[
+            generate_tone(1_000, 0.1),
+            generate_silence(120),
+            generate_tone(1_000, 0.1),
+        ]);
+
+        let mut offsets = Vec::new();
+        for chunk_size in [80, 128, 160, 240, 320] {
+            let mut vad = EnergyVad::new(SAMPLE_RATE);
+            for chunk in audio.chunks(chunk_size) {
+                vad.process_chunk(chunk);
+            }
+            offsets.push(vad.low_energy_valley_offset(1_200));
+        }
+
+        assert_eq!(offsets, vec![Some(1_000 * 16); 5]);
+    }
+
+    #[test]
+    fn low_energy_valley_rejects_short_run_for_any_chunk_size() {
+        let audio = concat_audio(&[
+            generate_tone(1_000, 0.1),
+            generate_silence(40),
+            generate_tone(1_000, 0.1),
+        ]);
+
+        for chunk_size in [80, 128, 160, 240, 320] {
+            let mut vad = EnergyVad::new(SAMPLE_RATE);
+            for chunk in audio.chunks(chunk_size) {
+                vad.process_chunk(chunk);
+            }
+            assert_eq!(
+                vad.low_energy_valley_offset(1_200),
+                None,
+                "40ms 谷底不应因 chunk_size={chunk_size} 被放大到 50ms"
+            );
+        }
+    }
+
+    #[test]
+    fn low_energy_valley_rejects_notch_below_minimum_run() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        let audio = concat_audio(&[
+            generate_tone(1_000, 0.1),
+            generate_silence(40),
+            generate_tone(1_000, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        assert_eq!(vad.low_energy_valley_offset(1_200), None);
+    }
+
+    #[test]
+    fn low_energy_valley_prefers_longest_run_and_newest_on_tie() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        // 100ms 与 200ms 谷底：取更长（切点在 900ms 处）
+        let audio = concat_audio(&[
+            generate_tone(200, 0.1),
+            generate_silence(100),
+            generate_tone(400, 0.1),
+            generate_silence(200),
+            generate_tone(300, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        assert_eq!(vad.low_energy_valley_offset(1_200), Some(300 * 16));
+
+        // 两条 100ms 谷底等长：取最新（切点在 1200ms 处）
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        let audio = concat_audio(&[
+            generate_tone(500, 0.1),
+            generate_silence(100),
+            generate_tone(500, 0.1),
+            generate_silence(100),
+            generate_tone(500, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        assert_eq!(vad.low_energy_valley_offset(1_200), Some(500 * 16));
+    }
+
+    #[test]
+    fn low_energy_valley_offset_includes_newer_valleys() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        let audio = concat_audio(&[
+            generate_tone(200, 0.1),
+            generate_silence(200),
+            generate_tone(400, 0.1),
+            generate_silence(100),
+            generate_tone(300, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+
+        // 200ms 的旧谷底胜过 100ms 的新谷底；回退距离应包含新谷底本身：
+        // 300ms + 100ms + 400ms = 800ms。
+        assert_eq!(vad.low_energy_valley_offset(1_200), Some(800 * 16));
+    }
+
+    #[test]
+    fn low_energy_valley_hysteresis_frame_breaks_run() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        // 30ms 低 + 10ms 滞回 + 30ms 低：合计量足够但连续性被打断，
+        // 各自不足 50ms 下限 → 无合格谷底
+        let audio = concat_audio(&[
+            generate_tone(1_000, 0.1),
+            generate_silence(30),
+            generate_tone(10, 0.010),
+            generate_silence(30),
+            generate_tone(1_000, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        assert_eq!(vad.low_energy_valley_offset(1_200), None);
+    }
+
+    #[test]
+    fn low_energy_valley_respects_window_bound() {
+        let mut vad = EnergyVad::new(SAMPLE_RATE);
+        let audio = concat_audio(&[
+            generate_tone(1_000, 0.1),
+            generate_silence(200),
+            generate_tone(1_400, 0.1),
+        ]);
+        for chunk in audio.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        // 谷底结束于 1200ms，距末端 1400ms：1200ms 窗口外不可见
+        assert_eq!(vad.low_energy_valley_offset(1_200), None);
+        assert_eq!(vad.low_energy_valley_offset(2_000), Some(1_400 * 16));
     }
 
     #[test]
@@ -731,20 +1223,20 @@ mod tests {
     /// 8s 软窗口处切，而在配置的更长窗口后低能量帧切段。
     #[test]
     fn vad_custom_windows_replace_defaults() {
-        // 持续有声 8.5s + 200ms 短静默（不足 min_silence）：默认软窗口（8s）
-        // 已过线，在静默帧按 SoftWindow 切；配置 10s 软窗口未过线，不切。
-        let mut speech = generate_tone(8_500, 0.1);
-        speech.extend(generate_silence(200));
-
-        let mut default_vad = EnergyVad::new(SAMPLE_RATE);
+        // 持续有声 8.5s + 200ms 短静默：渐进软窗口尚未达到约 280ms，
+        // 配置 10s 软窗口也未过线，两者都不应因首个低能量帧切段。
+        let mut default_vad =
+            EnergyVad::with_params_and_windows(SAMPLE_RATE, 0.005, 300, 20_000, 8_000, 12_000);
         let mut configured = EnergyVad::with_params_and_windows(
             SAMPLE_RATE,
             0.005,
             300,
-            800,
+            20_000,
             10_000, // 软窗口推迟到 10s
             14_000, // 硬窗口推迟到 14s
         );
+        let mut speech = generate_tone(8_500, 0.1);
+        speech.extend(generate_silence(200));
 
         let mut default_cut = false;
         let mut configured_cut = false;
@@ -757,13 +1249,23 @@ mod tests {
             }
         }
 
-        assert!(default_cut, "默认窗口应在 8.5s 有声后的静默帧按软窗口切句");
+        assert!(!default_cut, "默认渐进软窗口不应在 200ms 静默首帧切句");
         assert!(!configured_cut, "推迟软窗口后 8.5s 持续有声不应切段");
 
-        // 配置版补一段有声 + 静默越过 10s 后，应在软窗口后低能量处切（SoftWindow）
+        // 默认版再补足连续低能量静默后切；配置版仍未到 10s。
         let mut event = VadEvent::None;
-        let mut more = generate_tone(2_000, 0.1);
-        more.extend(generate_silence(200));
+        for chunk in generate_silence(200).chunks(160) {
+            event = default_vad.process_chunk(chunk);
+            if event.is_boundary() {
+                break;
+            }
+        }
+        assert_eq!(event, VadEvent::SoftWindow);
+
+        // 配置版补一段有声越过 10s，再用连续低能量静默触发渐进 SoftWindow。
+        let mut event = VadEvent::None;
+        let mut more = generate_tone(1_600, 0.1);
+        more.extend(generate_silence(400));
         for chunk in more.chunks(160) {
             event = configured.process_chunk(chunk);
             if event.is_boundary() {

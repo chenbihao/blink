@@ -4,7 +4,7 @@
 
 > 📖 **文档入口**：[docs/README.md](docs/README.md)（文档体系总览）→ [docs/product.md](docs/product.md)（产品是什么、为什么）→ [docs/specs/](docs/specs/)（怎么做·铁则）→ [docs/phases/](docs/phases/)（各版做了什么）。
 
-更新时间 20260817
+更新时间 20260914
 
 ---
 
@@ -55,6 +55,8 @@ cargo tauri dev          # 开发（debug，控制台 tracing，默认 error 级
 cargo xtask release      # 打包（= 编译插件 + cargo tauri build；需先 cargo install tauri-cli）
 cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 ```
+
+**本机 Nano STT 模型位置**：`C:\Users\99452\AppData\Roaming\blink\models\funasr\`（即 `%APPDATA%\blink\models\funasr\`）已安装 Fun-ASR-Nano。真实回放应从对应模型目录的 `active.json` 读取当前 `slot_id`，再到 `slots\<slot_id>\payload\` 查找 `funasr-encoder-f16.gguf` 与 `qwen3-0.6b-q4km.gguf`。若沙箱对 AppData 报访问拒绝，不能据此说模型不存在；先做获授权的只读核验，并在可读取模型的环境运行回放。
 
 ---
 
