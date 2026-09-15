@@ -31,7 +31,9 @@ use tauri::{Emitter, Manager};
 
 use crate::domain::event_names::EventNames;
 use crate::domain::stt::dictation::EditorDictationTracker;
-use crate::domain::stt::{StreamingSttPort, SttEngine, SttEvent};
+use crate::domain::stt::{
+    AudioRange, DraftSpan, RecognitionProfile, StreamingSttPort, SttEngine, SttEvent,
+};
 use crate::infra::platform;
 use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 
@@ -126,6 +128,8 @@ pub struct EditorDictationState {
     tracker: EditorDictationTracker,
     /// confirmed 段缓冲（有界，FIFO 淘汰）。
     segments: VecDeque<(u64, String)>,
+    /// 类型化 Draft span 缓冲（与 `segments` 并行保留，兼容旧 snapshot DTO）。
+    draft_spans: VecDeque<(u64, DraftSpan)>,
     /// 因缓冲满被淘汰的最旧段数（诊断用）。
     truncated: usize,
     /// 已对外发出的状态事件数（诊断用）。
@@ -165,6 +169,7 @@ impl EditorDictationState {
             generation,
             tracker: EditorDictationTracker::new(),
             segments: VecDeque::new(),
+            draft_spans: VecDeque::new(),
             truncated: 0,
             status_emitted: 0,
             status_suppressed: 0,
@@ -187,12 +192,26 @@ impl EditorDictationState {
         Some((seq, text))
     }
 
+    /// 接收类型化 Draft；按 `span_id`/音频范围去重，不从累计文本反推增量。
+    fn push_draft_span(&mut self, span: DraftSpan) -> Option<(u64, DraftSpan)> {
+        let (seq, span) = self.tracker.accept_draft_span(span)?;
+        self.remember_draft(seq, span.clone());
+        Some((seq, span))
+    }
+
     fn remember(&mut self, seq: u64, text: String) {
         if self.segments.len() >= SNAPSHOT_MAX_SEGMENTS {
             self.segments.pop_front();
             self.truncated += 1;
         }
         self.segments.push_back((seq, text));
+    }
+
+    fn remember_draft(&mut self, seq: u64, span: DraftSpan) {
+        if self.draft_spans.len() >= SNAPSHOT_MAX_SEGMENTS {
+            self.draft_spans.pop_front();
+        }
+        self.draft_spans.push_back((seq, span));
     }
 
     /// 返回 seq > after_seq 的段（epoch 不匹配返回 None）。
@@ -202,6 +221,20 @@ impl EditorDictationState {
         }
         Some(
             self.segments
+                .iter()
+                .filter(|(seq, _)| *seq > after_seq)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// 返回带 span 身份的 snapshot，供新 DTO/前端补齐协议使用。
+    fn after_draft_spans(&self, epoch: u64, after_seq: u64) -> Option<Vec<(u64, DraftSpan)>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        Some(
+            self.draft_spans
                 .iter()
                 .filter(|(seq, _)| *seq > after_seq)
                 .cloned()
@@ -254,6 +287,8 @@ struct VoiceSession {
     continuous: bool,
     /// 暂停标志（Editor 连续听写）：true 时音频 task 丢弃 chunk 不推给 STT。
     paused: Arc<AtomicBool>,
+    /// 终态文本交付闸门：每个 VoiceSession 最多注入/提交一次。
+    final_delivery: Arc<AtomicBool>,
 }
 
 impl Default for VoiceSession {
@@ -270,6 +305,7 @@ impl Default for VoiceSession {
             prev_fg_hwnd: None,
             continuous: false,
             paused: Arc::new(AtomicBool::new(false)),
+            final_delivery: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -309,6 +345,23 @@ impl VoiceService {
     #[allow(dead_code)]
     pub fn current_epoch(&self) -> u64 {
         self.recording_epoch.load(Ordering::Acquire)
+    }
+
+    /// 0.23.9: 从当前生产会话的 Coordinator 产出只读诊断快照。
+    ///
+    /// 仅当 session 正在录音且引擎为伪流式引擎时返回 `Some`。
+    /// 不修改调度状态、不触发推理、不推进水位。
+    pub fn coordinator_trace(
+        &self,
+        max_uncommitted_s: u64,
+    ) -> Option<crate::domain::stt::pseudo_streaming::CoordinatorTrace> {
+        let session = self.session.lock().unwrap_or_else(|p| p.into_inner());
+        let engine = session.engine.as_ref()?;
+        // downcast Arc<dyn SttEngine> 到 PseudoStreamingSttEngine
+        let pseudo = engine
+            .as_any()
+            .downcast_ref::<crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine>()?;
+        pseudo.snapshot_coordinator_trace(max_uncommitted_s)
     }
 
     /// Hold 事件:开始录音。
@@ -670,6 +723,20 @@ impl VoiceService {
         Some((st.epoch, segments, st.truncated))
     }
 
+    /// 类型化 Editor snapshot：保留 `seq + DraftSpan`，供新 DTO/前端补缺。
+    /// 旧 `editor_voice_snapshot` 继续提供 `(seq, text)` 兼容形态，避免
+    /// 未同步升级的 command/前端在协议切换期间丢失已交付段。
+    pub fn editor_voice_snapshot_spans(
+        &self,
+        epoch: u64,
+        after_seq: u64,
+    ) -> Option<(u64, Vec<(u64, DraftSpan)>, usize)> {
+        let state = self.editor_state.lock().unwrap().clone()?;
+        let st = state.lock().unwrap();
+        let spans = st.after_draft_spans(epoch, after_seq)?;
+        Some((st.epoch, spans, st.truncated))
+    }
+
     /// EditorSession 结束后的最终兜底：只释放匹配会话的连续听写与快照。
     /// 若仍在录音则按取消语义保留已交付 confirmed、丢弃 preview；绝不影响
     /// 此后可能启动的 G1/G2/G3 或新一代 Editor VoiceSession。
@@ -862,7 +929,16 @@ impl VoiceService {
 
         // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
         // 注意：std::sync::MutexGuard 不是 Send，所有锁操作必须在不含 await 的 block 内完成。
-        let (stt_port, engine_arc, mut rx, target, _target_str, prev_fg_hwnd, paused_flag) = {
+        let (
+            stt_port,
+            engine_arc,
+            mut rx,
+            target,
+            _target_str,
+            prev_fg_hwnd,
+            paused_flag,
+            final_delivery,
+        ) = {
             let mut session = self.session.lock().unwrap();
 
             // 二次检查：模型加载等待期间可能已被 cancel
@@ -873,7 +949,16 @@ impl VoiceService {
 
             // GGUF 引擎创建 + 伪流式适配器包装（handoff-11 后唯一本地路径）。
             let (engine_arc, stt_port): (Option<Arc<dyn SttEngine>>, Arc<dyn StreamingSttPort>) = {
-                let engine = match crate::domain::stt::create_engine(connection.clone()) {
+                let profile = if matches!(target, VoiceTarget::ForegroundApp | VoiceTarget::Editor)
+                {
+                    RecognitionProfile::PreviewDraft
+                } else {
+                    RecognitionProfile::Legacy
+                };
+                let engine = match crate::domain::stt::create_engine_with_profile(
+                    connection.clone(),
+                    profile,
+                ) {
                     Ok(e) => e,
                     Err(e) => {
                         tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
@@ -885,8 +970,9 @@ impl VoiceService {
                 engine.reset();
                 let engine_arc: Arc<dyn SttEngine> = Arc::from(engine);
                 let port: Arc<dyn StreamingSttPort> = Arc::new(
-                    crate::domain::stt::streaming_port::GgufStreamingAdapter::new(
+                    crate::domain::stt::streaming_port::GgufStreamingAdapter::new_with_profile(
                         engine_arc.clone(),
+                        profile,
                     ),
                 );
                 (Some(engine_arc), port)
@@ -928,6 +1014,8 @@ impl VoiceService {
                     let target_str = session.target.as_str();
                     let prev_fg_hwnd = session.prev_fg_hwnd;
                     let paused_flag = session.paused.clone();
+                    let final_delivery = Arc::new(AtomicBool::new(false));
+                    session.final_delivery = final_delivery.clone();
 
                     // 通知前端录音已开始
                     let epoch_val = self.recording_epoch.fetch_add(1, Ordering::Release) + 1;
@@ -944,6 +1032,7 @@ impl VoiceService {
                         target_str,
                         prev_fg_hwnd,
                         paused_flag,
+                        final_delivery,
                     )
                 }
                 Err(e) => {
@@ -1002,6 +1091,7 @@ impl VoiceService {
         let port_for_events = stt_port.clone();
         let counters = Arc::new(StreamCounters::default());
         let counters_for_events = counters.clone();
+        let final_delivery_for_events = final_delivery.clone();
         let event_task = tokio::spawn(async move {
             consume_stt_events(
                 event_rx,
@@ -1016,6 +1106,7 @@ impl VoiceService {
                 voice_for_events,
                 port_for_events,
                 counters_for_events,
+                final_delivery_for_events,
             )
             .await;
         });
@@ -1288,8 +1379,17 @@ impl VoiceService {
     /// - G2: spawn 后台 inject_text（脱离 effect 循环，恢复焦点 + 注入）
     /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
     async fn deliver_final_text(&self, target: VoiceTarget, final_text: String) {
-        let prev_hwnd = self.session.lock().unwrap().prev_fg_hwnd;
-        deliver_final(&self.app, target, &final_text, prev_hwnd);
+        let (prev_hwnd, final_delivery) = {
+            let session = self.session.lock().unwrap();
+            (session.prev_fg_hwnd, session.final_delivery.clone())
+        };
+        deliver_final(
+            &self.app,
+            target,
+            &final_text,
+            prev_hwnd,
+            Some(final_delivery.as_ref()),
+        );
     }
 }
 
@@ -1300,21 +1400,44 @@ fn emit_editor_segment(
     seq: u64,
     text: &str,
 ) {
+    emit_editor_segment_with_span(app, state, seq, text, None);
+}
+
+/// 发射带 DraftSpan 身份的编辑器听写段；顶层 text 保留给旧前端兼容。
+fn emit_editor_draft_segment(
+    app: &tauri::AppHandle,
+    state: &Arc<Mutex<EditorDictationState>>,
+    seq: u64,
+    span: &DraftSpan,
+) {
+    emit_editor_segment_with_span(app, state, seq, &span.text, Some(span));
+}
+
+fn emit_editor_segment_with_span(
+    app: &tauri::AppHandle,
+    state: &Arc<Mutex<EditorDictationState>>,
+    seq: u64,
+    text: &str,
+    span: Option<&DraftSpan>,
+) {
     let (epoch, session_ref, generation) = {
         let mut st = state.lock().unwrap();
         st.segments_emitted = st.segments_emitted.saturating_add(1);
         (st.epoch, st.session_ref.clone(), st.generation)
     };
-    let _ = app.emit(
-        EventNames::EDITOR_VOICE_SEGMENT,
-        serde_json::json!({
-            "sessionRef": session_ref,
-            "generation": generation,
-            "epoch": epoch,
-            "seq": seq,
-            "text": text,
-        }),
-    );
+    let mut payload = serde_json::json!({
+        "sessionRef": session_ref,
+        "generation": generation,
+        "epoch": epoch,
+        "seq": seq,
+        "text": text,
+    });
+    if let Some(span) = span {
+        if let Ok(value) = serde_json::to_value(span) {
+            payload["span"] = value;
+        }
+    }
+    let _ = app.emit(EventNames::EDITOR_VOICE_SEGMENT, payload);
     tracing::debug!(
         session_ref = %session_ref,
         generation,
@@ -1446,10 +1569,20 @@ fn deliver_final(
     target: VoiceTarget,
     text: &str,
     prev_fg_hwnd: Option<isize>,
+    delivery_guard: Option<&AtomicBool>,
 ) {
     if text.is_empty() {
         tracing::debug!("识别结果为空,跳过交付");
         let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+        return;
+    }
+
+    // finish/fallback 与事件 task 可能在边界上同时看到终态；同一 session
+    // 只允许一次最终交付，防止 G2 重复注入或 G1/G3 重复提交。
+    if let Some(guard) = delivery_guard
+        && guard.swap(true, Ordering::AcqRel)
+    {
+        tracing::debug!(target = ?target, "忽略重复的 STT 最终交付");
         return;
     }
 
@@ -1500,6 +1633,54 @@ fn deliver_final(
     }
 }
 
+/// 把类型化 Draft ledger 投影为旧 G1/G2/G3 的累计 confirmed 文本。
+/// 这里是展示/提交层的投影，不是领域层的音频结果合并；Draft 本身仍按
+/// 非重叠时间范围进入 ledger。
+fn draft_ledger_text(ledger: &[DraftSpan]) -> String {
+    ledger.iter().map(|span| span.text.as_str()).collect()
+}
+
+fn append_draft_ledger(ledger: &mut Vec<DraftSpan>, span: DraftSpan) -> bool {
+    if span.text.is_empty()
+        || ledger.iter().any(|existing| {
+            existing.span_id == span.span_id
+                || (existing.audio_range.len() > 0
+                    && span.audio_range.len() > 0
+                    && (existing.audio_range.contains(span.audio_range)
+                        || span.audio_range.contains(existing.audio_range)
+                        || existing.audio_range.overlaps(span.audio_range)))
+        })
+    {
+        return false;
+    }
+    ledger.push(span);
+    true
+}
+
+/// 兼容两种 Final 语义：旧 profile 返回累计全文，PreviewDraft 可返回
+/// terminal tail。只基于已提交 Draft ledger 做明显前缀判断，绝不使用 Preview
+/// 作为最终文本，也不对 Draft 之间做字符串相似度合并。
+fn compose_final_text(ledger: &[DraftSpan], confirmed_cache: &str, final_text: &str) -> String {
+    let committed = if ledger.is_empty() {
+        confirmed_cache.to_string()
+    } else {
+        draft_ledger_text(ledger)
+    };
+    if committed.is_empty() {
+        return final_text.to_string();
+    }
+    if final_text.is_empty() {
+        return committed;
+    }
+    if final_text.starts_with(&committed) {
+        return final_text.to_string();
+    }
+    if committed.starts_with(final_text) {
+        return committed;
+    }
+    format!("{committed}{final_text}")
+}
+
 /// STT 事件消费 task：循环接收 `SttEvent`，按 generation + epoch 双层过滤旧事件，
 /// 将有效事件 emit 到前端或调用 `deliver_final` 交付最终文本。
 ///
@@ -1536,9 +1717,12 @@ async fn consume_stt_events(
     voice: Option<Arc<VoiceService>>,
     port: Arc<dyn StreamingSttPort>,
     counters: Arc<StreamCounters>,
+    final_delivery: Arc<AtomicBool>,
 ) {
     let target_str = target.as_str();
     let is_editor = target == VoiceTarget::Editor;
+    let profile = port.recognition_profile();
+    tracing::debug!(target = ?target, profile = ?profile, "STT 事件投影 profile");
 
     /// 统计输出间隔。
     const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1551,6 +1735,13 @@ async fn consume_stt_events(
     // 非 Editor 路径的 confirmed 累计缓存——引擎在 confirmed 未变化时
     // 只发空串（不再每块重复搬运全量正文），前端契约仍是累计文本。
     let mut confirmed_cache = String::new();
+    // 0.23.9 typed path：Draft 以非重叠 audio span 形成 G2/G1/G3 的兼容
+    // confirmed 视图；Editor 直接交给 EditorDictationState。Preview 只保留
+    // 一个可替换值及其时间范围。
+    let mut draft_ledger: Vec<DraftSpan> = Vec::new();
+    let mut preview_cache = String::new();
+    let mut preview_range: Option<AudioRange> = None;
+    let mut latest_preview_request = 0u64;
 
     loop {
         let event = tokio::select! {
@@ -1579,7 +1770,124 @@ async fn consume_stt_events(
             continue;
         }
 
+        tracing::trace!(lane = ?event.lane(), "收到 STT 事件");
         match event {
+            SttEvent::Draft { generation, span } => {
+                if generation != expected_gen {
+                    tracing::debug!(
+                        gen = generation,
+                        expected = expected_gen,
+                        "丢弃旧 generation 的 Draft 事件"
+                    );
+                    continue;
+                }
+
+                // Draft 覆盖的 Preview 整体失效；部分重叠也不裁剪字符串。
+                if preview_range.is_some_and(|range| range.overlaps(span.audio_range)) {
+                    preview_cache.clear();
+                    preview_range = None;
+                }
+
+                if is_editor {
+                    let Some(state) = editor_state.as_ref() else {
+                        continue;
+                    };
+                    let next = {
+                        let mut st = state.lock().unwrap();
+                        st.push_draft_span(span)
+                    };
+                    if let Some((seq, span)) = next {
+                        emit_editor_draft_segment(&app, state, seq, &span);
+                    }
+                    let phase = if paused.load(Ordering::Relaxed) {
+                        "paused"
+                    } else {
+                        "recording"
+                    };
+                    let last_seq = state.lock().unwrap().last_seq();
+                    emit_editor_status(
+                        &app,
+                        state,
+                        phase,
+                        last_seq,
+                        (!preview_cache.is_empty()).then_some(preview_cache.as_str()),
+                        None,
+                    );
+                    continue;
+                }
+
+                if append_draft_ledger(&mut draft_ledger, span) {
+                    confirmed_cache = draft_ledger_text(&draft_ledger);
+                    let _ = app.emit(
+                        EventNames::VOICE_PARTIAL,
+                        serde_json::json!({
+                            "confirmed": confirmed_cache.as_str(),
+                            "preview": preview_cache.as_str(),
+                            "target": target_str,
+                            "epoch": recording_epoch,
+                        }),
+                    );
+                }
+            }
+            SttEvent::Preview {
+                generation,
+                request_id,
+                audio_range,
+                revision: _,
+                text,
+            } => {
+                if generation != expected_gen || request_id < latest_preview_request {
+                    tracing::debug!(
+                        gen = generation,
+                        expected = expected_gen,
+                        request_id,
+                        latest_preview_request,
+                        "丢弃过期 Preview 事件"
+                    );
+                    continue;
+                }
+                latest_preview_request = request_id;
+                preview_cache = text;
+                preview_range = Some(audio_range);
+                if is_editor {
+                    let Some(state) = editor_state.as_ref() else {
+                        continue;
+                    };
+                    let phase = if paused.load(Ordering::Relaxed) {
+                        "paused"
+                    } else {
+                        "recording"
+                    };
+                    let last_seq = state.lock().unwrap().last_seq();
+                    emit_editor_status(
+                        &app,
+                        state,
+                        phase,
+                        last_seq,
+                        (!preview_cache.is_empty()).then_some(preview_cache.as_str()),
+                        None,
+                    );
+                } else {
+                    let confirmed = if draft_ledger.is_empty() {
+                        confirmed_cache.as_str()
+                    } else {
+                        confirmed_cache = draft_ledger_text(&draft_ledger);
+                        confirmed_cache.as_str()
+                    };
+                    if !confirmed.is_empty() || !preview_cache.is_empty() {
+                        let _ = app.emit(
+                            EventNames::VOICE_PARTIAL,
+                            serde_json::json!({
+                                "confirmed": confirmed,
+                                "preview": preview_cache.as_str(),
+                                "previewRequestId": request_id,
+                                "target": target_str,
+                                "epoch": recording_epoch,
+                            }),
+                        );
+                    }
+                }
+            }
             SttEvent::Partial {
                 generation,
                 revision: _,
@@ -1623,6 +1931,7 @@ async fn consume_stt_events(
                 if confirmed_changed || !confirmed.is_empty() {
                     confirmed_cache = confirmed;
                 }
+                preview_cache = preview.clone();
                 if confirmed_cache.is_empty() && preview.is_empty() {
                     continue;
                 }
@@ -1669,8 +1978,17 @@ async fn consume_stt_events(
                     break;
                 }
 
-                // 0.22.15：统一调用 deliver_final
-                deliver_final(&app, target, &text, prev_fg_hwnd);
+                let final_text = compose_final_text(&draft_ledger, &confirmed_cache, &text);
+
+                // 0.22.15：统一调用 deliver_final。Preview 不参与最终兜底；
+                // typed path 只允许已交付 Draft ledger + terminal text。
+                deliver_final(
+                    &app,
+                    target,
+                    &final_text,
+                    prev_fg_hwnd,
+                    Some(final_delivery.as_ref()),
+                );
 
                 // Final 是 session 的最后一个事件，退出循环
                 break;

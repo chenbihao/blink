@@ -316,3 +316,337 @@ export function renderVadDebugResult(raw, elements, t) {
         previousMs = timeline[index].audioMs;
     }
 }
+
+// ── 0.23.9 PreviewDraft 协调器状态映射 ──
+//
+// 这些函数将后端 CoordinatorTrace DTO 映射为调试界面可显示的状态对象。
+// VAD 停顿在 PreviewDraft 模式下只是候选边界，经过 Coordinator 接受后
+// 才成为稳定 Draft。
+
+/** 拒绝原因的安全兜底文案 key。 */
+const REJECT_FALLBACK_KEY = "voice.local.vad_debug.reject_unknown";
+
+/** 拒绝原因 code → i18n key 映射。 */
+const REJECT_REASON_KEYS = {
+    below_draft_min: "voice.local.vad_debug.reject_below_draft_min",
+    strong_pause_owned_too_short: "voice.local.vad_debug.reject_strong_pause_owned_too_short",
+    strong_pause_voiced_too_short: "voice.local.vad_debug.reject_strong_pause_voiced_too_short",
+    request_already_reserved: "voice.local.vad_debug.reject_request_already_reserved",
+    terminal_takeover: "voice.local.vad_debug.reject_terminal_takeover",
+};
+
+/**
+ * 将 CoordinatorTrace.profile 映射为安全标签。
+ * @param {string|null|undefined} profile
+ * @returns {string}
+ */
+export function mapProfileLabel(profile) {
+    if (profile === "PreviewDraft") return "PreviewDraft";
+    if (profile === "Legacy") return "Legacy";
+    return "Unknown";
+}
+
+/**
+ * 将拒绝原因 code 映射为 i18n key；未知 code 使用安全兜底。
+ * @param {string|null|undefined} reason
+ * @returns {string}
+ */
+export function mapRejectReasonKey(reason) {
+    if (typeof reason !== "string" || !reason) return REJECT_FALLBACK_KEY;
+    return REJECT_REASON_KEYS[reason] || REJECT_FALLBACK_KEY;
+}
+
+/**
+ * 将候选 trace 映射为调试状态对象。
+ * 候选不能被错误显示为 committed Draft。
+ * @param {object|null|undefined} candidate
+ * @returns {object|null}
+ */
+export function mapCandidateStatus(candidate) {
+    if (!candidate || typeof candidate !== "object") return null;
+    const boundarySample = Number.isFinite(candidate.boundary_sample) ? candidate.boundary_sample : 0;
+    const voicedSamples = Number.isFinite(candidate.voiced_samples) ? candidate.voiced_samples : 0;
+    const quietSamples = Number.isFinite(candidate.quiet_samples) ? candidate.quiet_samples : 0;
+    const reason = typeof candidate.reason === "string" ? candidate.reason : "unknown";
+    // 空对象（没有有意义的字段）返回 null
+    if (boundarySample === 0 && voicedSamples === 0 && quietSamples === 0 && reason === "unknown") {
+        return null;
+    }
+    return {
+        boundarySample,
+        quietStartSample: Number.isFinite(candidate.quiet_start_sample) ? candidate.quiet_start_sample : 0,
+        reason,
+        voicedSamples,
+        quietSamples,
+        accepted: Boolean(candidate.accepted),
+        rejectReasonKey: candidate.accepted ? null : mapRejectReasonKey(candidate.reject_reason),
+    };
+}
+
+/**
+ * 将请求 trace（Draft 或 Preview）映射为安全状态。
+ * @param {object|null|undefined} req
+ * @param {string} kind
+ * @returns {object|null}
+ */
+export function mapRequestStatus(req, kind) {
+    if (!req || typeof req !== "object") return null;
+    const requestId = Number.isFinite(req.request_id) ? req.request_id : 0;
+    const rangeStart = Number.isFinite(req.audio_range_start) ? req.audio_range_start : 0;
+    const rangeEnd = Number.isFinite(req.audio_range_end) ? req.audio_range_end : 0;
+    const revision = Number.isFinite(req.revision) ? req.revision : 0;
+    const state = typeof req.state === "string" ? req.state : "unknown";
+    return {kind, requestId, rangeStart, rangeEnd, revision, state};
+}
+
+/**
+ * 将 CoordinatorTrace 映射为完整的调试面板状态对象。
+ * 空数据、缺字段和异常数值不产生 NaN 或界面崩溃。
+ * @param {object|null|undefined} trace
+ * @returns {object|null}
+ */
+export function mapCoordinatorTrace(trace) {
+    if (!trace || typeof trace !== "object") return null;
+    const safeNum = (value) => (Number.isFinite(value) ? value : 0);
+    const safeBool = (value) => Boolean(value);
+    const profile = mapProfileLabel(trace.profile);
+    // 空对象（没有有意义的字段）返回 null
+    const hasProfile = profile !== "Unknown";
+    const hasNumeric = ["preview_window_ms", "preview_refresh_ms", "draft_min_s",
+        "strong_pause_ms", "sample_rate", "captured_audio_end",
+        "draft_committed_audio_end", "draft_reserved_audio_end",
+        "backlog_samples", "backlog_limit_samples", "committed_spans",
+        "drain_preview_count"].some(key => Number.isFinite(trace[key]) && trace[key] !== 0);
+    if (!hasProfile && !hasNumeric && !trace.candidate && !trace.running_draft
+        && !trace.pending_draft && !trace.running_preview && !trace.pending_preview
+        && !trace.overloaded && !trace.closing) {
+        return null;
+    }
+    return {
+        profile,
+        previewWindowMs: safeNum(trace.preview_window_ms),
+        previewRefreshMs: safeNum(trace.preview_refresh_ms),
+        draftMinS: safeNum(trace.draft_min_s),
+        strongPauseMs: safeNum(trace.strong_pause_ms),
+        sampleRate: safeNum(trace.sample_rate),
+        capturedAudioEnd: safeNum(trace.captured_audio_end),
+        draftCommittedAudioEnd: safeNum(trace.draft_committed_audio_end),
+        draftReservedAudioEnd: safeNum(trace.draft_reserved_audio_end),
+        backlogSamples: safeNum(trace.backlog_samples),
+        backlogLimitSamples: safeNum(trace.backlog_limit_samples),
+        overloaded: safeBool(trace.overloaded),
+        closing: safeBool(trace.closing),
+        candidate: mapCandidateStatus(trace.candidate),
+        runningDraft: mapRequestStatus(trace.running_draft, "draft"),
+        pendingDraft: mapRequestStatus(trace.pending_draft, "draft"),
+        runningPreview: mapRequestStatus(trace.running_preview, "preview"),
+        pendingPreview: mapRequestStatus(trace.pending_preview, "preview"),
+        committedSpans: safeNum(trace.committed_spans),
+        drainPreviewCount: safeNum(trace.drain_preview_count),
+    };
+}
+
+// ── 0.23.9: 协调器状态面板渲染 ──
+
+/**
+ * 将采样点数转为秒显示。
+ * @param {number} samples
+ * @param {number} sampleRate
+ * @returns {string}
+ */
+function samplesToSeconds(samples, sampleRate) {
+    if (!sampleRate || sampleRate <= 0) return `${samples}`;
+    return `${(samples / sampleRate).toFixed(2)}s`;
+}
+
+/**
+ * 渲染单个请求（Draft 或 Preview）的状态。
+ * @param {object|null} req - 映射后的请求状态
+ * @param {string} titleLabel - i18n key for section title
+ * @param {function} t - i18n translate
+ * @returns {HTMLElement}
+ */
+function renderRequestSection(req, titleLabel, t) {
+    const section = document.createElement("div");
+    section.className = "voice-coordinator-trace-section";
+    const title = document.createElement("div");
+    title.className = "voice-coordinator-trace-section-title";
+    title.textContent = t(titleLabel);
+    section.append(title);
+    if (!req) {
+        const empty = document.createElement("span");
+        empty.className = "voice-coordinator-trace-empty";
+        empty.textContent = t("voice.local.vad_debug.coordinator_no_request");
+        section.append(empty);
+        return section;
+    }
+    const grid = document.createElement("div");
+    grid.className = "voice-coordinator-trace-request";
+    const fields = [
+        ["coordinator_request_id", `#${req.requestId}`],
+        ["coordinator_audio_range", `${samplesToSeconds(req.rangeStart, 0)} – ${samplesToSeconds(req.rangeEnd, 0)}`],
+        ["coordinator_revision", `r${req.revision}`],
+        ["coordinator_state", req.state],
+    ];
+    for (const [key, value] of fields) {
+        const label = document.createElement("span");
+        label.className = "voice-coordinator-trace-request-label";
+        label.textContent = t(`voice.local.vad_debug.${key}`);
+        const val = document.createElement("span");
+        val.className = "voice-coordinator-trace-request-value";
+        val.textContent = value;
+        grid.append(label, val);
+    }
+    section.append(grid);
+    return section;
+}
+
+/**
+ * 渲染候选边界状态。
+ * @param {object|null} candidate - 映射后的候选状态
+ * @param {function} t - i18n translate
+ * @returns {HTMLElement}
+ */
+function renderCandidateSection(candidate, t) {
+    const section = document.createElement("div");
+    section.className = "voice-coordinator-trace-section";
+    const title = document.createElement("div");
+    title.className = "voice-coordinator-trace-section-title";
+    title.textContent = t("voice.local.vad_debug.coordinator_candidate");
+    section.append(title);
+    if (!candidate) {
+        const empty = document.createElement("span");
+        empty.className = "voice-coordinator-trace-empty";
+        empty.textContent = t("voice.local.vad_debug.coordinator_no_candidate");
+        section.append(empty);
+        return section;
+    }
+    const grid = document.createElement("div");
+    grid.className = "voice-coordinator-trace-candidate";
+    const fields = [
+        ["coordinator_boundary_sample", candidate.boundarySample],
+        ["coordinator_quiet_start", candidate.quietStartSample],
+        ["coordinator_voiced_samples", candidate.voicedSamples],
+        ["coordinator_quiet_samples", candidate.quietSamples],
+        ["coordinator_reason", candidate.reason],
+    ];
+    for (const [key, value] of fields) {
+        const label = document.createElement("span");
+        label.className = "voice-coordinator-trace-candidate-label";
+        label.textContent = t(`voice.local.vad_debug.${key}`);
+        const val = document.createElement("span");
+        val.className = "voice-coordinator-trace-candidate-value";
+        val.textContent = String(value);
+        grid.append(label, val);
+    }
+    // 接受/拒绝状态
+    const statusLabel = document.createElement("span");
+    statusLabel.className = "voice-coordinator-trace-candidate-label";
+    statusLabel.textContent = candidate.accepted
+        ? t("voice.local.vad_debug.coordinator_candidate_accepted")
+        : t("voice.local.vad_debug.coordinator_candidate_rejected");
+    const statusVal = document.createElement("span");
+    statusVal.className = `voice-coordinator-trace-candidate-value ${candidate.accepted ? "accepted" : "rejected"}`;
+    statusVal.textContent = candidate.accepted ? "✓" : "✗";
+    grid.append(statusLabel, statusVal);
+    // 拒绝原因
+    if (!candidate.accepted && candidate.rejectReasonKey) {
+        const reasonLabel = document.createElement("span");
+        reasonLabel.className = "voice-coordinator-trace-candidate-label";
+        reasonLabel.textContent = t("voice.local.vad_debug.coordinator_reason");
+        const reasonVal = document.createElement("span");
+        reasonVal.className = "voice-coordinator-trace-candidate-value rejected";
+        reasonVal.textContent = t(candidate.rejectReasonKey);
+        grid.append(reasonLabel, reasonVal);
+    }
+    section.append(grid);
+    return section;
+}
+
+/**
+ * 将 CoordinatorTrace 映射后的状态对象渲染到指定容器。
+ *
+ * @param {object|null} trace - 后端返回的原始 CoordinatorTrace
+ * @param {HTMLElement} container - 渲染目标容器
+ * @param {function} t - i18n translate
+ */
+export function renderCoordinatorTrace(trace, container, t) {
+    if (!container) return;
+    const mapped = mapCoordinatorTrace(trace);
+    container.replaceChildren();
+
+    if (!mapped) {
+        const empty = document.createElement("span");
+        empty.className = "voice-coordinator-trace-empty";
+        empty.textContent = t("voice.local.vad_debug.coordinator_no_session");
+        container.append(empty);
+        return;
+    }
+
+    // ── 概览网格 ──
+    const grid = document.createElement("div");
+    grid.className = "voice-coordinator-trace-grid";
+    const sr = mapped.sampleRate || 16000;
+    const overviewFields = [
+        ["coordinator_profile", mapped.profile],
+        ["coordinator_watermark", samplesToSeconds(mapped.draftCommittedAudioEnd, sr)],
+        ["coordinator_reserved", samplesToSeconds(mapped.draftReservedAudioEnd, sr)],
+        ["coordinator_captured", samplesToSeconds(mapped.capturedAudioEnd, sr)],
+        ["coordinator_backlog", `${mapped.backlogSamples} / ${mapped.backlogLimitSamples}`],
+        ["coordinator_committed_spans", mapped.committedSpans],
+        ["coordinator_drain_preview_count", mapped.drainPreviewCount],
+        ["coordinator_preview_window", `${mapped.previewWindowMs}ms`],
+        ["coordinator_preview_refresh", `${mapped.previewRefreshMs}ms`],
+        ["coordinator_draft_min", `${mapped.draftMinS}s`],
+        ["coordinator_strong_pause", `${mapped.strongPauseMs}ms`],
+        ["coordinator_sample_rate", `${mapped.sampleRate}Hz`],
+    ];
+    for (const [key, value] of overviewFields) {
+        const cell = document.createElement("div");
+        cell.className = "voice-coordinator-trace-cell";
+        const label = document.createElement("span");
+        label.className = "voice-coordinator-trace-cell-label";
+        label.textContent = t(`voice.local.vad_debug.${key}`);
+        const val = document.createElement("span");
+        val.className = "voice-coordinator-trace-cell-value";
+        val.textContent = String(value);
+        cell.append(label, val);
+        grid.append(cell);
+    }
+    // 过载与收尾标志
+    for (const [key, flag] of [["coordinator_overloaded", mapped.overloaded], ["coordinator_closing", mapped.closing]]) {
+        const cell = document.createElement("div");
+        cell.className = "voice-coordinator-trace-cell";
+        const label = document.createElement("span");
+        label.className = "voice-coordinator-trace-cell-label";
+        label.textContent = t(`voice.local.vad_debug.${key}`);
+        const val = document.createElement("span");
+        val.className = `voice-coordinator-trace-cell-value${flag ? " flag-true" : ""}`;
+        val.textContent = flag ? "✗" : "—";
+        cell.append(label, val);
+        grid.append(cell);
+    }
+    container.append(grid);
+
+    // ── 候选边界 ──
+    container.append(renderCandidateSection(mapped.candidate, t));
+
+    // ── 请求槽 ──
+    const requestsRow = document.createElement("div");
+    requestsRow.style.display = "grid";
+    requestsRow.style.gridTemplateColumns = "1fr 1fr";
+    requestsRow.style.gap = "var(--space-sm)";
+    requestsRow.append(
+        renderRequestSection(mapped.runningDraft, "voice.local.vad_debug.coordinator_running_draft", t),
+        renderRequestSection(mapped.pendingDraft, "voice.local.vad_debug.coordinator_pending_draft", t),
+    );
+    const previewRow = document.createElement("div");
+    previewRow.style.display = "grid";
+    previewRow.style.gridTemplateColumns = "1fr 1fr";
+    previewRow.style.gap = "var(--space-sm)";
+    previewRow.append(
+        renderRequestSection(mapped.runningPreview, "voice.local.vad_debug.coordinator_running_preview", t),
+        renderRequestSection(mapped.pendingPreview, "voice.local.vad_debug.coordinator_pending_preview", t),
+    );
+    container.append(requestsRow, previewRow);
+}

@@ -1,12 +1,14 @@
 //! 编辑器连续听写的段（segment）推导（0.23.3 §3.6）。
 //!
 //! 伪流式引擎在一次 STT session 内的 confirmed 文本单调增长（0.22.15
-//! 事务化句尾：commit 才追加，rollback 不回退）。本 tracker 从累积的
-//! confirmed 快照推导"新增段"并分配单调 seq；`finish_session` 产出的
-//! Final 全文相对已交付前缀的剩余部分作为收尾段。
+//! 事务化句尾：commit 才追加，rollback 不回退）。0.23.9 起优先接受带有
+//! `AudioRange`/`span_id` 的 Draft；旧累计 confirmed/Final 方法只保留给
+//! Legacy 兼容路径。
 //!
 //! 纯逻辑、框架无关：不依赖 tauri / tokio，单测覆盖重复、增长与
 //! Final 与增量前缀不一致的兜底路径。
+
+use super::DraftSpan;
 
 /// 编辑器听写段推导器。
 ///
@@ -17,6 +19,10 @@ pub struct EditorDictationTracker {
     delivered_text: String,
     /// 已交付的最大 seq；段号从 1 开始单调递增。
     last_seq: u64,
+    /// 已接受的类型化 Draft span（首版不允许同一 span 重复交付）。
+    delivered_spans: Vec<DraftSpan>,
+    /// 已接受 Draft 的最后音频边界；只用于时间轴去重，不参与文本合并。
+    last_audio_end: Option<u64>,
 }
 
 impl EditorDictationTracker {
@@ -27,6 +33,52 @@ impl EditorDictationTracker {
     /// 最后交付的 seq（0 = 尚无段）。
     pub fn last_seq(&self) -> u64 {
         self.last_seq
+    }
+
+    /// 接受一个类型化 Draft span，并分配 Editor 侧单调 seq。
+    ///
+    /// 同一 `span_id` 或与已交付范围重叠的 span 会被忽略；首版不做
+    /// 文本 LCP/LCS 合并。`revision` 已保留在 span 上供后续整句回改使用。
+    pub fn accept_draft_span(&mut self, span: DraftSpan) -> Option<(u64, DraftSpan)> {
+        if span.text.is_empty()
+            || self
+                .delivered_spans
+                .iter()
+                .any(|delivered| delivered.span_id == span.span_id)
+        {
+            return None;
+        }
+
+        let range = span.audio_range;
+        if !range.is_empty()
+            && self
+                .delivered_spans
+                .iter()
+                .any(|delivered| delivered.audio_range.overlaps(range))
+        {
+            return None;
+        }
+        if !range.is_empty()
+            && self
+                .last_audio_end
+                .is_some_and(|last_end| range.start_sample < last_end)
+        {
+            return None;
+        }
+
+        self.last_seq += 1;
+        if !range.is_empty() {
+            self.last_audio_end = Some(range.end_sample);
+        }
+        self.delivered_text.push_str(&span.text);
+        self.delivered_spans.push(span.clone());
+        Some((self.last_seq, span))
+    }
+
+    /// 已接受的 Draft span 快照（按交付顺序）。
+    #[allow(dead_code)]
+    pub fn draft_spans(&self) -> &[DraftSpan] {
+        &self.delivered_spans
     }
 
     /// 从累积 confirmed 快照推导新增段。
@@ -89,6 +141,7 @@ impl EditorDictationTracker {
 #[cfg(test)]
 mod tests {
     use super::EditorDictationTracker;
+    use crate::domain::stt::{AudioRange, DraftSpan};
 
     #[test]
     fn delta_grows_monotonically_with_seq() {
@@ -170,6 +223,44 @@ mod tests {
         assert_eq!(
             t.extract_delta("你好🌍再见🎯"),
             Some((2, "再见🎯".to_string()))
+        );
+    }
+
+    #[test]
+    fn typed_draft_spans_are_ordered_and_deduplicated_by_audio_identity() {
+        let mut tracker = EditorDictationTracker::new();
+        let first = DraftSpan::new(11, AudioRange::new(0, 80_000), "第一段。", 1);
+        assert_eq!(
+            tracker.accept_draft_span(first.clone()),
+            Some((1, first.clone()))
+        );
+        assert_eq!(tracker.accept_draft_span(first), None, "重复 span 不得追加");
+
+        let overlapping = DraftSpan::new(12, AudioRange::new(79_000, 120_000), "重叠。", 1);
+        assert_eq!(
+            tracker.accept_draft_span(overlapping),
+            None,
+            "重叠音频不做文本合并"
+        );
+
+        let second = DraftSpan::new(12, AudioRange::new(80_000, 160_000), "第二段。", 1);
+        assert_eq!(tracker.accept_draft_span(second.clone()), Some((2, second)));
+        assert_eq!(tracker.last_seq(), 2);
+        assert_eq!(tracker.draft_spans().len(), 2);
+    }
+
+    #[test]
+    fn typed_draft_span_keeps_final_compatibility_prefix() {
+        let mut tracker = EditorDictationTracker::new();
+        tracker.accept_draft_span(DraftSpan::new(
+            1,
+            AudioRange::new(0, 80_000),
+            "已经交付。",
+            1,
+        ));
+        assert_eq!(
+            tracker.extract_final_delta("已经交付。尾段。"),
+            Some((2, "尾段。".to_string()))
         );
     }
 }

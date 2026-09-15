@@ -104,6 +104,10 @@
     let mode = "g2";
     let editorPhase = null;
     let mini = false;
+    // G2 事件竞态墙：旧录音 epoch、旧 Preview request 不得覆盖当前显示。
+    let voiceEpoch = 0;
+    let latestPreviewRequest = 0;
+    let displayedConfirmed = "";
 
     function setMode(next) {
         mode = next;
@@ -264,7 +268,12 @@
 
     // ── 录音开始：按 target 切换模式 ─────────────────────────────────
     listen(EVENTS.VOICE_RECORDING_START, (event) => {
-        const {target} = event.payload ?? {};
+        const {target, epoch} = event.payload ?? {};
+        if (target === "g2" && Number.isFinite(Number(epoch))) {
+            voiceEpoch = Number(epoch);
+            latestPreviewRequest = 0;
+            displayedConfirmed = "";
+        }
         resetWave();
         if (target === "editor") {
             setMode("editor");
@@ -316,6 +325,8 @@
     // ── 录音结束 → 复位（g2 / editor 兜底路径）───────────────────────
     listen(EVENTS.VOICE_RECORDING_END, () => {
         setMode("g2");
+        displayedConfirmed = "";
+        latestPreviewRequest = 0;
         resetToDefaultText();
         resetWave();
         applySize({force: true});
@@ -326,10 +337,26 @@
         const payload = event.payload ?? {};
         if (payload.target !== "g2") return;
 
+        const eventEpoch = Number(payload.epoch ?? 0);
+        if (eventEpoch && voiceEpoch && eventEpoch < voiceEpoch) return;
+        if (eventEpoch > voiceEpoch) {
+            voiceEpoch = eventEpoch;
+            latestPreviewRequest = 0;
+            displayedConfirmed = "";
+        }
+        const requestId = Number(payload.previewRequestId ?? payload.requestId ?? 0);
+        if (requestId && requestId < latestPreviewRequest) return;
+        if (requestId) latestPreviewRequest = requestId;
+
         // 优先使用 confirmed + preview 双字段（伪流式）
-        if (payload.confirmed !== undefined || payload.preview !== undefined) {
-            const confirmed = payload.confirmed || "";
+        if (payload.confirmed !== undefined || payload.preview !== undefined || Array.isArray(payload.drafts)) {
+            const confirmed = payload.confirmed !== undefined
+                ? String(payload.confirmed || "")
+                : Array.isArray(payload.drafts)
+                    ? payload.drafts.map((draft) => draft?.text || "").join("")
+                    : displayedConfirmed;
             const preview = payload.preview || "";
+            displayedConfirmed = confirmed;
             if (confirmed || preview) {
                 // 双色渲染：confirmed 白色 + preview 灰色半透明
                 textEl.innerHTML =
@@ -337,6 +364,11 @@
                     '<span class="voice-preview"></span>';
                 textEl.querySelector(".voice-confirmed").textContent = confirmed;
                 textEl.querySelector(".voice-preview").textContent = preview;
+                isDefaultText = false;
+                applySize();
+            } else {
+                // Draft 覆盖后 Preview 可能被明确清空；不保留旧虚字。
+                textEl.textContent = "";
                 isDefaultText = false;
                 applySize();
             }

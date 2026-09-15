@@ -1,0 +1,95 @@
+/**
+ * Preview / Draft 识别协调参数的纯逻辑（0.23.9）。
+ *
+ * 默认值与 Rust 侧 `RecognitionConfig` 一一对应；`normalizeRecognitionConfig`
+ * 与 `RecognitionConfig::sanitize` 保持同样的 clamp / 关系约束，供设置页
+ * 回显和保存前即时归一化使用。
+ */
+
+export const RECOGNITION_DEFAULTS = {
+    preview_window_ms: 3000,
+    preview_refresh_ms: 700,
+    draft_min_s: 5,
+    strong_pause_ms: 700,
+};
+
+export const RECOGNITION_KEYS = [
+    "preview_window_ms",
+    "preview_refresh_ms",
+    "draft_min_s",
+    "strong_pause_ms",
+];
+
+export const RECOGNITION_RANGE = {
+    preview_window_ms: {min: 2000, max: 4000},
+    preview_refresh_ms: {min: 500, max: 1000},
+    draft_min_s: {min: 3, max: 10},
+    strong_pause_ms: {min: 500, max: 1500},
+};
+
+/**
+ * 归一化 Preview / Draft 配置。
+ *
+ * `maxUncommittedS` 是已归一化 VAD 的未提交上限；缺省时只应用字段自身
+ * 范围，便于旧配置回显。就地修改并返回是否发生调整。
+ */
+export function normalizeRecognitionConfig(recognition, maxUncommittedS = Infinity) {
+    let changed = false;
+    for (const key of RECOGNITION_KEYS) {
+        const range = RECOGNITION_RANGE[key];
+        const current = recognition[key];
+        const value = typeof current === "number" && Number.isFinite(current)
+            ? current
+            : RECOGNITION_DEFAULTS[key];
+        const clamped = Math.min(range.max, Math.max(range.min, value));
+        if (clamped !== current) {
+            recognition[key] = clamped;
+            changed = true;
+        }
+    }
+
+    // 当前安全范围本身保证 refresh < window；保留显式关系约束，避免
+    // 将来调整范围时前端回显与后端 sanitize 分叉。
+    if (recognition.preview_refresh_ms >= recognition.preview_window_ms) {
+        const refresh = Math.min(
+            RECOGNITION_RANGE.preview_refresh_ms.max,
+            Math.max(
+                RECOGNITION_RANGE.preview_refresh_ms.min,
+                recognition.preview_window_ms - 1,
+            ),
+        );
+        if (refresh !== recognition.preview_refresh_ms) {
+            recognition.preview_refresh_ms = refresh;
+            changed = true;
+        }
+    }
+
+    const numericMax = Number.isFinite(maxUncommittedS)
+        ? Math.max(0, maxUncommittedS)
+        : Infinity;
+    const draftMin = Math.min(RECOGNITION_RANGE.draft_min_s.min, numericMax);
+    const draftMax = Math.min(RECOGNITION_RANGE.draft_min_s.max, numericMax);
+    const draft = Math.min(draftMax, Math.max(draftMin, recognition.draft_min_s));
+    if (draft !== recognition.draft_min_s) {
+        recognition.draft_min_s = draft;
+        changed = true;
+    }
+
+    return changed;
+}
+
+/**
+ * 补齐旧配置缺失的 recognition 子对象/字段并归一化非法值。
+ */
+export function ensureRecognitionFields(recognition, maxUncommittedS = Infinity) {
+    if (!recognition || typeof recognition !== "object" || Array.isArray(recognition)) {
+        return {...RECOGNITION_DEFAULTS};
+    }
+    for (const key of RECOGNITION_KEYS) {
+        if (typeof recognition[key] !== "number" || !Number.isFinite(recognition[key])) {
+            recognition[key] = RECOGNITION_DEFAULTS[key];
+        }
+    }
+    normalizeRecognitionConfig(recognition, maxUncommittedS);
+    return recognition;
+}

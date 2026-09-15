@@ -277,6 +277,13 @@ pub struct LocalEngineConfig {
     #[serde(default)]
     pub vad: VadConfig,
 
+    /// 伪流式识别协调参数（Preview / Draft；本地伪流式模式生效）。
+    ///
+    /// 该配置独立于 VAD：VAD 只提供候选边界，识别协调器负责选择
+    /// 预览窗口、Draft 上下文和强停顿提前冲刷策略。
+    #[serde(default)]
+    pub recognition: RecognitionConfig,
+
     /// VAD 前端种类（内部解析用，不暴露给普通用户）。
     ///
     /// 0.22.9 Handoff 06：`auto` 在 production gate 前解析到 `energy`。
@@ -291,6 +298,37 @@ pub struct LocalEngineConfig {
     #[allow(dead_code)]
     pub streaming_model: Option<String>,
 }
+
+/// 伪流式识别协调参数。
+///
+/// Preview 是只读的短时反馈窗口；Draft 是交付给 G2/Editor 的稳定草稿。
+/// 两条 lane 共用同一个模型 worker，但职责和调度策略不同。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecognitionConfig {
+    /// Preview 每次送模携带的滚动上下文（默认 3000ms）。
+    #[serde(default = "default_recognition_preview_window_ms")]
+    pub preview_window_ms: u32,
+    /// Preview 尝试刷新的时间间隔（默认 700ms；不是送模音频长度）。
+    #[serde(default = "default_recognition_preview_refresh_ms")]
+    pub preview_refresh_ms: u32,
+    /// 普通 VAD 候选形成 Draft 前的最低累计上下文（默认 5s）。
+    #[serde(default = "default_recognition_draft_min_s")]
+    pub draft_min_s: u32,
+    /// 允许有效短语提前形成 Draft 的强停顿门槛（默认 700ms）。
+    #[serde(default = "default_recognition_strong_pause_ms")]
+    pub strong_pause_ms: u32,
+}
+
+/// Recognition 配置的安全边界。serde 缺字段补默认值，越界值由
+/// [`RecognitionConfig::sanitize`] 收敛。
+pub const RECOGNITION_PREVIEW_WINDOW_MIN_MS: u32 = 2_000;
+pub const RECOGNITION_PREVIEW_WINDOW_MAX_MS: u32 = 4_000;
+pub const RECOGNITION_PREVIEW_REFRESH_MIN_MS: u32 = 500;
+pub const RECOGNITION_PREVIEW_REFRESH_MAX_MS: u32 = 1_000;
+pub const RECOGNITION_DRAFT_MIN_MIN_S: u32 = 3;
+pub const RECOGNITION_DRAFT_MIN_MAX_S: u32 = 10;
+pub const RECOGNITION_STRONG_PAUSE_MIN_MS: u32 = 500;
+pub const RECOGNITION_STRONG_PAUSE_MAX_MS: u32 = 1_500;
 
 /// VAD 切句参数（伪流式模式生效）。
 ///
@@ -420,6 +458,22 @@ fn default_vad_max_uncommitted_s() -> u32 {
     12
 }
 
+fn default_recognition_preview_window_ms() -> u32 {
+    3_000
+}
+
+fn default_recognition_preview_refresh_ms() -> u32 {
+    700
+}
+
+fn default_recognition_draft_min_s() -> u32 {
+    5
+}
+
+fn default_recognition_strong_pause_ms() -> u32 {
+    700
+}
+
 fn default_streaming_mode() -> StreamingMode {
     StreamingMode::Pseudo
 }
@@ -461,8 +515,20 @@ impl Default for LocalEngineConfig {
             hotwords: None,
             use_itn: None,
             vad: VadConfig::default(),
+            recognition: RecognitionConfig::default(),
             vad_kind: default_vad_kind(),
             streaming_model: None,
+        }
+    }
+}
+
+impl Default for RecognitionConfig {
+    fn default() -> Self {
+        Self {
+            preview_window_ms: default_recognition_preview_window_ms(),
+            preview_refresh_ms: default_recognition_preview_refresh_ms(),
+            draft_min_s: default_recognition_draft_min_s(),
+            strong_pause_ms: default_recognition_strong_pause_ms(),
         }
     }
 }
@@ -535,6 +601,82 @@ impl VadConfig {
     /// 未提交音频上限（毫秒）——供伪流式层消费。
     pub fn max_uncommitted_ms(&self) -> u64 {
         self.max_uncommitted_s as u64 * 1000
+    }
+}
+
+impl RecognitionConfig {
+    /// 把 Preview / Draft 参数收敛到安全范围，并保证
+    /// `preview_refresh_ms < preview_window_ms` 与
+    /// `draft_min_s <= max_uncommitted_s`。
+    ///
+    /// `max_uncommitted_s` 应传入已由 [`VadConfig::sanitize`] 归一化后的值。
+    /// 返回 `true` 表示发生了调整。
+    pub fn sanitize(&mut self, max_uncommitted_s: u32) -> bool {
+        let before = (
+            self.preview_window_ms,
+            self.preview_refresh_ms,
+            self.draft_min_s,
+            self.strong_pause_ms,
+        );
+
+        self.preview_window_ms = self.preview_window_ms.clamp(
+            RECOGNITION_PREVIEW_WINDOW_MIN_MS,
+            RECOGNITION_PREVIEW_WINDOW_MAX_MS,
+        );
+        self.preview_refresh_ms = self.preview_refresh_ms.clamp(
+            RECOGNITION_PREVIEW_REFRESH_MIN_MS,
+            RECOGNITION_PREVIEW_REFRESH_MAX_MS,
+        );
+        self.draft_min_s = self
+            .draft_min_s
+            .clamp(RECOGNITION_DRAFT_MIN_MIN_S, RECOGNITION_DRAFT_MIN_MAX_S);
+        self.strong_pause_ms = self.strong_pause_ms.clamp(
+            RECOGNITION_STRONG_PAUSE_MIN_MS,
+            RECOGNITION_STRONG_PAUSE_MAX_MS,
+        );
+
+        // 当前安全范围本身保证 refresh < window，但保留显式约束，
+        // 让关系不随未来范围调整而失效。
+        if self.preview_refresh_ms >= self.preview_window_ms {
+            self.preview_refresh_ms = self.preview_window_ms.saturating_sub(1).clamp(
+                RECOGNITION_PREVIEW_REFRESH_MIN_MS,
+                RECOGNITION_PREVIEW_REFRESH_MAX_MS,
+            );
+        }
+
+        // max_uncommitted_s 来自 VAD，正常情况下至少为 5s；这里仍以
+        // 传入上限为准，避免单独调用此方法时产生 draft_min_s > 上限。
+        let draft_min = RECOGNITION_DRAFT_MIN_MIN_S.min(max_uncommitted_s);
+        let draft_max = RECOGNITION_DRAFT_MIN_MAX_S.min(max_uncommitted_s);
+        self.draft_min_s = self.draft_min_s.clamp(draft_min, draft_max);
+
+        let after = (
+            self.preview_window_ms,
+            self.preview_refresh_ms,
+            self.draft_min_s,
+            self.strong_pause_ms,
+        );
+        if after != before {
+            tracing::warn!(
+                ?before,
+                ?after,
+                max_uncommitted_s,
+                "识别协调配置非法，已安全归一化"
+            );
+        }
+        after != before
+    }
+}
+
+impl LocalEngineConfig {
+    /// 归一化本地伪流式识别相关配置。
+    ///
+    /// 必须先归一化 VAD，再把其 `max_uncommitted_s` 作为 Recognition
+    /// 的 Draft 上限，保证两个子配置之间的关系始终有效。
+    pub fn sanitize(&mut self) -> bool {
+        let vad_changed = self.vad.sanitize();
+        let recognition_changed = self.recognition.sanitize(self.vad.max_uncommitted_s);
+        vad_changed || recognition_changed
     }
 }
 
@@ -823,6 +965,10 @@ mod tests {
         assert_eq!(cfg.local_engine.vad.soft_window_s, 8);
         assert_eq!(cfg.local_engine.vad.hard_window_s, 12);
         assert_eq!(cfg.local_engine.vad.max_uncommitted_s, 12);
+        assert_eq!(cfg.local_engine.recognition.preview_window_ms, 3_000);
+        assert_eq!(cfg.local_engine.recognition.preview_refresh_ms, 700);
+        assert_eq!(cfg.local_engine.recognition.draft_min_s, 5);
+        assert_eq!(cfg.local_engine.recognition.strong_pause_ms, 700);
         assert_eq!(cfg.local_engine.vad_kind, "auto");
     }
 
@@ -852,6 +998,12 @@ mod tests {
                     soft_window_s: 10,
                     hard_window_s: 14,
                     max_uncommitted_s: 16,
+                },
+                recognition: RecognitionConfig {
+                    preview_window_ms: 4_000,
+                    preview_refresh_ms: 900,
+                    draft_min_s: 7,
+                    strong_pause_ms: 1_000,
                 },
                 vad_kind: "energy".into(),
                 streaming_model: None,
@@ -888,6 +1040,10 @@ mod tests {
         assert_eq!(restored.local_engine.vad.soft_window_s, 10);
         assert_eq!(restored.local_engine.vad.hard_window_s, 14);
         assert_eq!(restored.local_engine.vad.max_uncommitted_s, 16);
+        assert_eq!(restored.local_engine.recognition.preview_window_ms, 4_000);
+        assert_eq!(restored.local_engine.recognition.preview_refresh_ms, 900);
+        assert_eq!(restored.local_engine.recognition.draft_min_s, 7);
+        assert_eq!(restored.local_engine.recognition.strong_pause_ms, 1_000);
         assert_eq!(restored.local_engine.vad_kind, "energy");
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
@@ -913,6 +1069,7 @@ mod tests {
         assert_eq!(cfg.local_engine.server_port, 8000);
         assert_eq!(cfg.local_engine.funasr_model, GGUF_SENSEVOICE_MODEL_ID);
         assert!(cfg.local_engine.use_itn.is_none());
+        assert_eq!(cfg.local_engine.recognition, RecognitionConfig::default());
     }
 
     #[test]
@@ -1899,5 +2056,94 @@ mod tests {
             (vad.soft_window_s, vad.hard_window_s, vad.max_uncommitted_s),
             (11, 12, 12)
         );
+    }
+
+    // ── 0.23.9: Preview / Draft 识别协调配置测试 ─────────────────────────
+
+    #[test]
+    fn old_config_missing_recognition_fills_defaults() {
+        let json = r#"{
+            "enabled": true,
+            "mode": "local",
+            "local_engine": {
+                "vad": {
+                    "silence_threshold": 0.005,
+                    "min_silence_ms": 300,
+                    "min_sentence_ms": 800
+                }
+            }
+        }"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.local_engine.recognition, RecognitionConfig::default());
+    }
+
+    #[test]
+    fn recognition_sanitize_keeps_valid_values() {
+        let mut recognition = RecognitionConfig::default();
+        assert!(!recognition.sanitize(12));
+        assert_eq!(recognition, RecognitionConfig::default());
+
+        let mut recognition = RecognitionConfig {
+            preview_window_ms: 4_000,
+            preview_refresh_ms: 1_000,
+            draft_min_s: 10,
+            strong_pause_ms: 1_500,
+        };
+        assert!(!recognition.sanitize(12));
+        assert_eq!(recognition.preview_window_ms, 4_000);
+        assert_eq!(recognition.preview_refresh_ms, 1_000);
+        assert_eq!(recognition.draft_min_s, 10);
+        assert_eq!(recognition.strong_pause_ms, 1_500);
+    }
+
+    #[test]
+    fn recognition_sanitize_clamps_values_and_draft_to_vad_cap() {
+        let mut recognition = RecognitionConfig {
+            preview_window_ms: 1,
+            preview_refresh_ms: 9_999,
+            draft_min_s: 99,
+            strong_pause_ms: 1,
+        };
+        assert!(recognition.sanitize(6));
+        assert_eq!(
+            (
+                recognition.preview_window_ms,
+                recognition.preview_refresh_ms,
+                recognition.draft_min_s,
+                recognition.strong_pause_ms,
+            ),
+            (
+                RECOGNITION_PREVIEW_WINDOW_MIN_MS,
+                RECOGNITION_PREVIEW_REFRESH_MAX_MS,
+                6,
+                RECOGNITION_STRONG_PAUSE_MIN_MS,
+            )
+        );
+        assert!(recognition.preview_refresh_ms < recognition.preview_window_ms);
+        assert!(recognition.draft_min_s <= 6);
+    }
+
+    #[test]
+    fn local_engine_sanitize_orders_vad_before_recognition() {
+        let mut local = LocalEngineConfig {
+            vad: VadConfig {
+                soft_window_s: 15,
+                hard_window_s: 10,
+                max_uncommitted_s: 4,
+                ..VadConfig::default()
+            },
+            recognition: RecognitionConfig {
+                draft_min_s: 10,
+                ..RecognitionConfig::default()
+            },
+            ..LocalEngineConfig::default()
+        };
+
+        assert!(local.sanitize());
+        assert_eq!(local.vad.max_uncommitted_s, VAD_HARD_WINDOW_MIN_S);
+        assert!(local.vad.soft_window_s < local.vad.hard_window_s);
+        assert!(local.vad.hard_window_s <= local.vad.max_uncommitted_s);
+        assert!(local.recognition.draft_min_s <= local.vad.max_uncommitted_s);
+        assert!(local.recognition.preview_refresh_ms < local.recognition.preview_window_ms);
     }
 }

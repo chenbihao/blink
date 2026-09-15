@@ -459,6 +459,15 @@ impl AudioTranscriptionService {
 }
 
 /// 把引擎的 v2 状态投影为可观察的预览与确认片段；不在日志中记录正文。
+///
+/// 支持两种响应格式：
+/// - **Legacy v2**：`{"confirmed_changed": true, "confirmed": "...", "preview": "..."}`
+/// - **PreviewDraft typed**：`{"v":2, "kind":"draft", "span":"..."}` 或
+///   `{"v":2, "kind":"preview", "text":"...", "revision": N, ...}`
+///
+/// PreviewDraft 格式中 `kind=draft` 的 `span` 字段携带本次新提交的 Draft
+/// 正文（已去重），映射为 `confirmed` 事件；`kind=preview` 的 `text` 字段
+/// 映射为 `preview` 事件。
 fn collect_vad_debug_text(
     response: &str,
     fed_ms: u64,
@@ -473,6 +482,53 @@ fn collect_vad_debug_text(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
         return;
     };
+
+    // ── PreviewDraft typed envelope（v=2, kind=draft|preview）──
+    if value.get("v").and_then(|v| v.as_u64()) == Some(2)
+        && value.get("kind").and_then(|k| k.as_str()).is_some()
+    {
+        let kind = value["kind"].as_str().unwrap_or("");
+        if kind == "draft" {
+            if let Some(span) = value["span"].as_str() {
+                if !span.is_empty() && span != *last_confirmed {
+                    let added = span
+                        .strip_prefix(last_confirmed.as_str())
+                        .unwrap_or(span);
+                    if !added.is_empty() {
+                        events.push(VadDebugTextEvent {
+                            kind: "confirmed",
+                            fed_ms,
+                            wall_ms,
+                            text: added.to_string(),
+                        });
+                    }
+                    *last_confirmed = span.to_string();
+                }
+            }
+        } else if kind == "preview" {
+            if let Some(preview) = value["text"].as_str() {
+                if !preview.is_empty() && preview != *last_preview {
+                    if events
+                        .iter()
+                        .filter(|event| event.kind == "preview")
+                        .count()
+                        < 256
+                    {
+                        events.push(VadDebugTextEvent {
+                            kind: "preview",
+                            fed_ms,
+                            wall_ms,
+                            text: preview.to_string(),
+                        });
+                    }
+                    *last_preview = preview.to_string();
+                }
+            }
+        }
+        return;
+    }
+
+    // ── Legacy v2 格式 ──
     if value["confirmed_changed"].as_bool() == Some(true)
         && let Some(confirmed) = value["confirmed"].as_str()
     {

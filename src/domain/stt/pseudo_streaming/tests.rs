@@ -1377,7 +1377,7 @@ async fn preview_in_flight_released_after_sentence_boundary() {
     let transport = ControlledTransport::new(vec![rx]);
     let engine = Arc::new(controlled_engine(transport.clone(), vec![]));
 
-    engine.spawn_preview_recognition(vec![0.1; 1600], 1600);
+    engine.spawn_preview_recognition(vec![0.1; 1600], 1600, AudioRange::new(0, 1600));
     transport.wait_for_calls_or_fail(1).await;
     assert!(
         engine.inner.lock().unwrap().preview_in_flight,
@@ -1446,14 +1446,14 @@ async fn stale_preview_task_cannot_clear_new_preview_owner() {
     let transport = ControlledTransport::new(vec![rx1, rx2]);
     let engine = Arc::new(controlled_engine(transport.clone(), vec![]));
 
-    engine.spawn_preview_recognition(vec![0.1; 1600], 1600);
+    engine.spawn_preview_recognition(vec![0.1; 1600], 1600, AudioRange::new(0, 1600));
     transport.wait_for_calls_or_fail(1).await;
     // 句尾后启动新一轮（模拟 owner 已被新请求接管）
     {
         let mut inner = engine.inner.lock().unwrap();
         inner.preview_generation = inner.preview_generation.wrapping_add(1);
     }
-    engine.spawn_preview_recognition(vec![0.1; 1600], 1600);
+    engine.spawn_preview_recognition(vec![0.1; 1600], 1600, AudioRange::new(0, 1600));
     transport.wait_for_calls_or_fail(2).await;
 
     tx1.send(Ok("旧预览".into())).unwrap();

@@ -1,6 +1,7 @@
 /**
  * 语音输入 Tab 模块（0.22.5 重构）
- * STT 配置：总开关 / 模式切换 / 云端供应商 / 音频设备选择 + 调试 / 高级选项（VAD）
+ * STT 配置：总开关 / 模式切换 / 云端供应商 / 音频设备选择 + 调试 /
+ * 高级选项（VAD、Preview / Draft）
  *
  * FunASR 生命周期管理（环境安装 / 服务启停 / 设备切换 / 日志 / 空间管理）
  * 已迁移至引擎页「本地模型运行时」区域（engines/local-runtime）。
@@ -17,8 +18,9 @@ import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from "../index.js";
 import {navigateSettings} from "../navigation.js";
 import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
-import {renderVadDebugResult, vadDebugProgressState} from "./voice-vad-debug.js";
+import {renderVadDebugResult, vadDebugProgressState, renderCoordinatorTrace} from "./voice-vad-debug.js";
 import {VAD_DEFAULTS, VAD_WINDOW_KEYS, VAD_WINDOW_RANGE, ensureVadWindowFields, normalizeVadWindows,} from "./voice-vad.js";
+import {RECOGNITION_DEFAULTS, RECOGNITION_RANGE, ensureRecognitionFields, normalizeRecognitionConfig,} from "./voice-recognition.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
@@ -34,7 +36,7 @@ let sttSaveQueue = Promise.resolve();
  * scope 决定后端控制台日志打印哪个区段，避免改本地配置时把云端字段也全部打印出来：
  * - "global": 总开关 / 模式 / 流式 / 音频设备
  * - "cloud":  云端供应商
- * - "local":  本地引擎（VAD）
+ * - "local":  本地引擎（VAD、Preview / Draft）
  */
 function saveSttConfig(cfg, scope) {
     // 串行化：每个保存操作等前一个完成后才执行，保证后端按序持久化
@@ -303,6 +305,7 @@ export async function initVoiceTab() {
     initLocalModelSelect(config);
     initFileTranscription();
     initVadDebug();
+    initCoordinatorTrace();
 
     // ── 跳转入口：点击切换到引擎页并定位 FunASR 卡片 ──
     const gotoEnginesBtn = document.getElementById("voice-goto-engines-btn");
@@ -357,6 +360,12 @@ export async function initVoiceTab() {
         }
         if (streamingHint) {
             streamingHint.textContent = isLocal ? "" : t("voice.mode.local_only_hint");
+        }
+        const recognitionCard = document.getElementById("voice-recognition-card");
+        if (recognitionCard) {
+            const isPseudo = config.streaming_mode === "pseudo"
+                && document.getElementById("voice-streaming")?.checked !== false;
+            recognitionCard.classList.toggle("hidden", !(isLocal && isPseudo));
         }
     }
 
@@ -482,6 +491,93 @@ function initVadDebug() {
     });
 }
 
+// ── 0.23.9: 实时协调器状态面板 ──────────────────────────────────────────
+//
+// 录音时从后端 `get_coordinator_trace` 命令拉取当前生产会话的
+// RecognitionCoordinator 诊断快照，定期渲染到面板。
+// 不录音时显示空状态。面板始终可见（不 hidden），让用户知道功能存在。
+
+/**
+ * 初始化协调器状态面板。
+ *
+ * 轮询策略：设置页可见 + 录音中时每 500ms 拉取一次 trace；
+ * 不满足条件时显示空状态。
+ */
+async function initCoordinatorTrace() {
+    const panel = document.getElementById("voice-coordinator-trace-panel");
+    const body = document.getElementById("voice-coordinator-trace-body");
+    if (!panel || !body) return;
+
+    let polling = false;
+    let pollTimer = null;
+
+    async function pollOnce() {
+        try {
+            const maxUncommittedS = 30;
+            const trace = await invoke("get_coordinator_trace", {maxUncommittedS});
+            renderCoordinatorTrace(trace, body, t);
+        } catch (e) {
+            // 静默失败：录音未启动或引擎不是伪流式
+            renderCoordinatorTrace(null, body, t);
+        }
+    }
+
+    async function pollLoop() {
+        if (!polling) return;
+        await pollOnce();
+        if (!polling) return;
+        pollTimer = setTimeout(pollLoop, 500);
+    }
+
+    function startPolling() {
+        if (polling) return;
+        polling = true;
+        pollLoop();
+    }
+
+    function stopPolling() {
+        polling = false;
+        if (pollTimer) {
+            clearTimeout(pollTimer);
+            pollTimer = null;
+        }
+        // 恢复空状态
+        renderCoordinatorTrace(null, body, t);
+    }
+
+    // 通过 is_voice_recording 判断录音状态，启动/停止轮询
+    async function checkRecordingState() {
+        try {
+            const recording = await invoke("is_voice_recording");
+            if (recording) {
+                startPolling();
+            } else {
+                stopPolling();
+            }
+        } catch {
+            stopPolling();
+        }
+    }
+
+    // 监听录音状态变化事件
+    try {
+        await listen(EVENTS.VOICE_RECORDING_START, () => startPolling());
+        await listen(EVENTS.VOICE_RECORDING_END, () => stopPolling());
+    } catch {
+        // 事件监听失败时降级为定期检查
+    }
+
+    // 定期检查录音状态（降级兜底，3s 一次）
+    setInterval(checkRecordingState, 3000);
+    // 初始检查一次
+    checkRecordingState();
+
+    // 语言切换时重新渲染空状态文案
+    onLangChange(() => {
+        if (!polling) renderCoordinatorTrace(null, body, t);
+    });
+}
+
 // ── 0.10.3 高级选项（VAD）──────────────────
 // VAD 默认值与窗口归一化逻辑在 ./voice-vad.js（纯模块，voice-vad-windows.test.mjs 覆盖）
 
@@ -493,14 +589,18 @@ async function initAdvancedOptions(config) {
         streamingCheckbox.addEventListener("change", () => {
             config.streaming_mode = streamingCheckbox.checked ? "pseudo" : "off";
             saveSttConfig(config, "global");
+            updateModeVisibility();
         });
     }
 
     // VAD 切句参数
-    initVadConfig(config);
+    let recognitionControls = null;
+    initVadConfig(config, () => recognitionControls?.syncFromVad());
+    // Preview / Draft 识别协调参数（仅本地伪流式模式生效）
+    recognitionControls = initRecognitionConfig(config);
 }
 
-function initVadConfig(config) {
+function initVadConfig(config, onVADChanged) {
     // 确保 vad 对象存在（旧配置可能没有）
     if (!config.local_engine.vad) {
         config.local_engine.vad = {...VAD_DEFAULTS};
@@ -614,6 +714,7 @@ function initVadConfig(config) {
                 normalizeVadWindows(vad);
                 syncDisplay();
             }
+            onVADChanged?.();
             saveSttConfig(config, "local");
         });
     }
@@ -626,6 +727,7 @@ function initVadConfig(config) {
                 vad[control.key] = VAD_DEFAULTS[control.key];
             }
             syncDisplay();
+            onVADChanged?.();
             saveSttConfig(config, "local");
         });
     }
@@ -638,6 +740,127 @@ function initVadConfig(config) {
             }
         }
     });
+}
+
+function initRecognitionConfig(config) {
+    if (!config.local_engine.recognition
+        || typeof config.local_engine.recognition !== "object"
+        || Array.isArray(config.local_engine.recognition)) {
+        config.local_engine.recognition = {...RECOGNITION_DEFAULTS};
+    }
+    const recognition = config.local_engine.recognition;
+    const getMaxUncommittedS = () => Number(config.local_engine.vad?.max_uncommitted_s);
+    const currentMaxUncommittedS = () => {
+        const value = getMaxUncommittedS();
+        return Number.isFinite(value) ? value : undefined;
+    };
+    ensureRecognitionFields(recognition, currentMaxUncommittedS());
+
+    const controls = [
+        {
+            input: document.getElementById("voice-recognition-preview-window-ms"),
+            val: document.getElementById("voice-recognition-preview-window-ms-val"),
+            key: "preview_window_ms",
+            format: (v) => `${v}ms`,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.preview_window_ms.label",
+        },
+        {
+            input: document.getElementById("voice-recognition-preview-refresh-ms"),
+            val: document.getElementById("voice-recognition-preview-refresh-ms-val"),
+            key: "preview_refresh_ms",
+            format: (v) => `${v}ms`,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.preview_refresh_ms.label",
+        },
+        {
+            input: document.getElementById("voice-recognition-draft-min-s"),
+            val: document.getElementById("voice-recognition-draft-min-s-val"),
+            key: "draft_min_s",
+            format: (v) => `${v}s`,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.draft_min_s.label",
+        },
+        {
+            input: document.getElementById("voice-recognition-strong-pause-ms"),
+            val: document.getElementById("voice-recognition-strong-pause-ms-val"),
+            key: "strong_pause_ms",
+            format: (v) => `${v}ms`,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.strong_pause_ms.label",
+        },
+    ];
+
+    function updateSliderFill(slider) {
+        if (!slider) return;
+        const min = parseFloat(slider.min);
+        const max = parseFloat(slider.max);
+        const val = parseFloat(slider.value);
+        const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+        slider.style.setProperty("--fill-pct", pct + "%");
+    }
+
+    function syncDisplay() {
+        for (const control of controls) {
+            if (!control.input) continue;
+            control.input.value = String(recognition[control.key]);
+            if (control.val) control.val.textContent = control.format(recognition[control.key]);
+            updateSliderFill(control.input);
+        }
+    }
+
+    syncDisplay();
+    for (const control of controls) {
+        if (control.input && control.ariaKey) {
+            control.input.setAttribute("aria-label", t(control.ariaKey));
+        }
+    }
+
+    for (const control of controls) {
+        if (!control.input) continue;
+        control.input.addEventListener("input", () => {
+            const value = control.parse(control.input.value);
+            if (!Number.isNaN(value) && control.val) control.val.textContent = control.format(value);
+            updateSliderFill(control.input);
+        });
+        control.input.addEventListener("change", () => {
+            const value = control.parse(control.input.value);
+            const range = RECOGNITION_RANGE[control.key];
+            if (!Number.isFinite(value) || value < range.min || value > range.max) {
+                syncDisplay();
+                return;
+            }
+            recognition[control.key] = value;
+            normalizeRecognitionConfig(recognition, currentMaxUncommittedS());
+            syncDisplay();
+            saveSttConfig(config, "local");
+        });
+    }
+
+    const resetBtn = document.getElementById("voice-recognition-reset-btn");
+    if (resetBtn) {
+        resetBtn.addEventListener("click", () => {
+            Object.assign(recognition, RECOGNITION_DEFAULTS);
+            normalizeRecognitionConfig(recognition, currentMaxUncommittedS());
+            syncDisplay();
+            saveSttConfig(config, "local");
+        });
+    }
+
+    onLangChange(() => {
+        for (const control of controls) {
+            if (control.input && control.ariaKey) {
+                control.input.setAttribute("aria-label", t(control.ariaKey));
+            }
+        }
+    });
+
+    return {
+        syncFromVad() {
+            normalizeRecognitionConfig(recognition, currentMaxUncommittedS());
+            syncDisplay();
+        },
+    };
 }
 
 // ── 音频调试测试 ──────────────────────────────────────────────────────

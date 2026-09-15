@@ -36,7 +36,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tokio::sync::{Mutex as TokioMutex, Notify, mpsc, oneshot};
 
-use super::{StreamingSttPort, SttEngine, SttError, SttEvent, SttStreamStats};
+use super::{
+    AudioRange, DraftSpan, RecognitionProfile, StreamingSttPort, SttEngine, SttError, SttEvent,
+    SttStreamStats,
+};
 
 /// 事件通道容量（有界）。256 足以吸收正常消费抖动；溢出即按重要性分流。
 pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -92,6 +95,142 @@ struct EventBus {
     queue_depth: AtomicUsize,
 }
 
+/// 引擎结果中新增的类型化 envelope。旧引擎仍使用 JSON v2 累计字段，
+/// 适配器只在明确识别出 lane + 音频区间时走此协议，避免把旧 preview
+/// 字符串误判为 Draft。
+enum TypedResult {
+    Draft(DraftSpan),
+    Preview {
+        request_id: u64,
+        audio_range: AudioRange,
+        revision: u64,
+        text: String,
+    },
+}
+
+fn object_u64(value: Option<&serde_json::Value>, names: &[&str]) -> Option<u64> {
+    let object = value?.as_object()?;
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(serde_json::Value::as_u64))
+}
+
+fn object_str(value: Option<&serde_json::Value>, names: &[&str]) -> Option<String> {
+    let object = value?.as_object()?;
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+fn nested_object<'a>(
+    value: &'a serde_json::Value,
+    names: &[&str],
+) -> Option<&'a serde_json::Value> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).filter(|candidate| candidate.is_object()))
+}
+
+fn parse_audio_range(
+    root: &serde_json::Value,
+    nested: Option<&serde_json::Value>,
+) -> Option<AudioRange> {
+    let range = nested_object(
+        nested.unwrap_or(root),
+        &["audio_range", "audioRange", "range"],
+    )
+    .or_else(|| nested_object(root, &["audio_range", "audioRange", "range"]));
+    let start = object_u64(
+        range,
+        &["start_sample", "startSample", "audio_start", "audioStart"],
+    )
+    .or_else(|| {
+        object_u64(
+            nested,
+            &["start_sample", "startSample", "audio_start", "audioStart"],
+        )
+    })
+    .or_else(|| {
+        object_u64(
+            Some(root),
+            &["start_sample", "startSample", "audio_start", "audioStart"],
+        )
+    })?;
+    let end = object_u64(range, &["end_sample", "endSample", "audio_end", "audioEnd"])
+        .or_else(|| {
+            object_u64(
+                nested,
+                &["end_sample", "endSample", "audio_end", "audioEnd"],
+            )
+        })
+        .or_else(|| {
+            object_u64(
+                Some(root),
+                &["end_sample", "endSample", "audio_end", "audioEnd"],
+            )
+        })?;
+    Some(AudioRange::new(start, end))
+}
+
+/// 解析 0.23.9 类型化结果。字段接受 camelCase 与 snake_case，方便
+/// worker/测试逐步迁移；缺少明确 audio range 时返回 None，继续走 v2 兼容路径。
+fn parse_typed_result(value: &serde_json::Value) -> Option<TypedResult> {
+    let nested = nested_object(value, &["span", "draft_span", "draft"]);
+    let preview_nested = nested_object(value, &["preview"]);
+    let kind = object_str(Some(value), &["kind", "lane", "type"])
+        .or_else(|| object_str(nested, &["kind", "lane", "type"]))
+        .or_else(|| object_str(preview_nested, &["kind", "lane", "type"]))
+        .map(|kind| kind.to_ascii_lowercase());
+
+    let is_draft = matches!(kind.as_deref(), Some("draft") | Some("stable"))
+        || nested.is_some_and(|_| {
+            value.get("draft_span").is_some()
+                || value.get("draft").is_some()
+                || value.get("span").is_some()
+        });
+    let is_preview =
+        matches!(kind.as_deref(), Some("preview")) || (preview_nested.is_some() && !is_draft);
+
+    if is_draft {
+        let audio_range = parse_audio_range(value, nested)?;
+        let text = object_str(nested, &["text", "content"])
+            .or_else(|| object_str(Some(value), &["text", "content"]))?;
+        let revision = object_u64(nested, &["revision", "span_revision"])
+            .or_else(|| object_u64(Some(value), &["revision", "span_revision"]))
+            .unwrap_or(0);
+        let span_id = object_u64(nested, &["span_id", "spanId", "id"])
+            .or_else(|| object_u64(Some(value), &["span_id", "spanId"]))
+            .or_else(|| (revision > 0).then_some(revision))?;
+        return Some(TypedResult::Draft(DraftSpan::new(
+            span_id,
+            audio_range,
+            text,
+            revision,
+        )));
+    }
+
+    if is_preview {
+        let audio_range = parse_audio_range(value, preview_nested)?;
+        let text = object_str(preview_nested, &["text", "content"])
+            .or_else(|| object_str(Some(value), &["text", "content"]))?;
+        let revision = object_u64(preview_nested, &["revision"])
+            .or_else(|| object_u64(Some(value), &["revision"]))
+            .unwrap_or(0);
+        let request_id = object_u64(preview_nested, &["request_id", "requestId", "id"])
+            .or_else(|| object_u64(Some(value), &["request_id", "requestId"]))
+            .or_else(|| (revision > 0).then_some(revision))?;
+        return Some(TypedResult::Preview {
+            request_id,
+            audio_range,
+            revision,
+            text,
+        });
+    }
+
+    None
+}
+
 impl EventBus {
     fn new(
         active_generation: Arc<AtomicU64>,
@@ -121,9 +260,14 @@ impl EventBus {
                             }
                             continue;
                         }
-                        let partial = matches!(event, SttEvent::Partial { .. });
+                        let progress = matches!(
+                            event,
+                            SttEvent::Partial { .. }
+                                | SttEvent::Draft { .. }
+                                | SttEvent::Preview { .. }
+                        );
                         if output_tx.send(event).await.is_err() {
-                            if partial {
+                            if progress {
                                 bus.stats.partials_dropped_closed.fetch_add(1, Ordering::Relaxed);
                             }
                             if let Some(ack) = delivered {
@@ -131,7 +275,7 @@ impl EventBus {
                             }
                             break;
                         }
-                        if partial {
+                        if progress {
                             bus.stats.partials_emitted.fetch_add(1, Ordering::Relaxed);
                         }
                         if let Some(ack) = delivered {
@@ -174,11 +318,7 @@ impl EventBus {
 }
 
 fn event_generation(event: &SttEvent) -> u64 {
-    match event {
-        SttEvent::Partial { generation, .. }
-        | SttEvent::Final { generation, .. }
-        | SttEvent::Error { generation, .. } => *generation,
-    }
+    event.generation()
 }
 
 /// Deliver the one pending preview only when one output slot remains reserved
@@ -219,6 +359,8 @@ fn deliver_latest_preview(bus: &EventBus, output_tx: &mpsc::Sender<SttEvent>) {
 pub struct GgufStreamingAdapter {
     /// 内部引擎
     engine: Arc<dyn SttEngine>,
+    /// 识别调度 profile；旧构造函数保持 Legacy 兼容。
+    profile: RecognitionProfile,
     /// 可靠事件队列 + latest preview slot；events() 每次重建一组总线
     event_bus: std::sync::Mutex<Option<Arc<EventBus>>>,
     /// generation 计数器
@@ -241,7 +383,13 @@ pub struct GgufStreamingAdapter {
 
 impl GgufStreamingAdapter {
     /// 创建适配器，包装一个 `SttEngine`。
+    #[allow(dead_code)]
     pub fn new(engine: Arc<dyn SttEngine>) -> Self {
+        Self::new_with_profile(engine, RecognitionProfile::Legacy)
+    }
+
+    /// 创建带显式识别 profile 的适配器。
+    pub fn new_with_profile(engine: Arc<dyn SttEngine>, profile: RecognitionProfile) -> Self {
         let stats = Arc::new(EventStats {
             partials_emitted: Arc::new(AtomicU64::new(0)),
             partials_coalesced: Arc::new(AtomicU64::new(0)),
@@ -251,6 +399,7 @@ impl GgufStreamingAdapter {
         });
         Self {
             engine,
+            profile,
             event_bus: std::sync::Mutex::new(None),
             generation: AtomicU64::new(0),
             active_gen: TokioMutex::new(None),
@@ -298,7 +447,10 @@ impl GgufStreamingAdapter {
     /// 把 confirmed/终态事件送入可靠队列；预览永远不走这条等待路径。
     async fn send_reliable(&self, event: SttEvent, wait_delivery: bool) {
         let Some(bus) = self.bus() else {
-            if matches!(event, SttEvent::Partial { .. }) {
+            if matches!(
+                event,
+                SttEvent::Partial { .. } | SttEvent::Draft { .. } | SttEvent::Preview { .. }
+            ) {
                 self.partials_dropped_closed.fetch_add(1, Ordering::Relaxed);
             }
             return;
@@ -309,10 +461,13 @@ impl GgufStreamingAdapter {
         } else {
             (None, None)
         };
-        if matches!(event, SttEvent::Partial { .. }) && bus.reliable_tx.capacity() == 0 {
+        if event.is_reliable() && bus.reliable_tx.capacity() == 0 {
             self.confirmed_backpressure.fetch_add(1, Ordering::Relaxed);
         }
-        let partial = matches!(event, SttEvent::Partial { .. });
+        let progress = matches!(
+            event,
+            SttEvent::Partial { .. } | SttEvent::Draft { .. } | SttEvent::Preview { .. }
+        );
         if bus
             .reliable_tx
             .send(ReliableEvent {
@@ -322,7 +477,7 @@ impl GgufStreamingAdapter {
             .await
             .is_err()
         {
-            if partial {
+            if progress {
                 self.partials_dropped_closed.fetch_add(1, Ordering::Relaxed);
             }
             tracing::debug!("STT 可靠事件通道已关闭");
@@ -346,7 +501,28 @@ impl GgufStreamingAdapter {
         self.send_reliable(event, true).await;
     }
 
-    /// 解析引擎返回结果，做边沿触发去重后产出 Partial 事件。
+    /// 把可替换 Preview 放入 latest slot。Draft/终态永远不经过此路径。
+    fn enqueue_preview(&self, event: SttEvent) {
+        let Some(bus) = self.bus() else {
+            self.partials_dropped_closed.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        match bus.preview_slot.lock() {
+            Ok(mut slot) => {
+                if slot.replace(event).is_some() {
+                    self.partials_coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(poison) => {
+                if poison.into_inner().replace(event).is_some() {
+                    self.partials_coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        bus.notify.notify_one();
+    }
+
+    /// 解析引擎返回结果，做边沿触发去重后产出 Partial 或类型化事件。
     ///
     /// 返回值仅用于诊断；调用方不需要区分。
     async fn emit_partial_from_result(&self, generation: u64, text: &str) {
@@ -354,28 +530,54 @@ impl GgufStreamingAdapter {
             return;
         }
 
-        let (revision, confirmed, preview, confirmed_changed) =
-            match serde_json::from_str::<serde_json::Value>(text) {
-                Ok(value) => {
-                    let confirmed = value
-                        .get("confirmed")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    let preview = value.get("preview").and_then(|t| t.as_str()).unwrap_or("");
-                    let confirmed_changed = value
-                        .get("confirmed_changed")
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(!confirmed.is_empty());
-                    (
-                        value.get("revision").and_then(|r| r.as_u64()),
-                        confirmed.to_string(),
-                        preview.to_string(),
-                        confirmed_changed,
-                    )
+        let parsed = serde_json::from_str::<serde_json::Value>(text);
+        if let Ok(value) = &parsed {
+            if let Some(typed) = parse_typed_result(value) {
+                match typed {
+                    TypedResult::Draft(span) => {
+                        self.send_reliable(SttEvent::Draft { generation, span }, false)
+                            .await;
+                    }
+                    TypedResult::Preview {
+                        request_id,
+                        audio_range,
+                        revision,
+                        text,
+                    } => {
+                        self.enqueue_preview(SttEvent::Preview {
+                            generation,
+                            request_id,
+                            audio_range,
+                            revision,
+                            text,
+                        });
+                    }
                 }
-                // 纯文本（非流式引擎的兼容路径——不应在 push_audio 中出现）
-                Err(_) => (None, String::new(), text.to_string(), false),
-            };
+                return;
+            }
+        }
+
+        let (revision, confirmed, preview, confirmed_changed) = match parsed {
+            Ok(value) => {
+                let confirmed = value
+                    .get("confirmed")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let preview = value.get("preview").and_then(|t| t.as_str()).unwrap_or("");
+                let confirmed_changed = value
+                    .get("confirmed_changed")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(!confirmed.is_empty());
+                (
+                    value.get("revision").and_then(|r| r.as_u64()),
+                    confirmed.to_string(),
+                    preview.to_string(),
+                    confirmed_changed,
+                )
+            }
+            // 纯文本（非流式引擎的兼容路径——不应在 push_audio 中出现）
+            Err(_) => (None, String::new(), text.to_string(), false),
+        };
 
         if confirmed.is_empty() && preview.is_empty() {
             return;
@@ -431,23 +633,7 @@ impl GgufStreamingAdapter {
             return;
         }
 
-        let Some(bus) = self.bus() else {
-            self.partials_dropped_closed.fetch_add(1, Ordering::Relaxed);
-            return;
-        };
-        match bus.preview_slot.lock() {
-            Ok(mut slot) => {
-                if slot.replace(event).is_some() {
-                    self.partials_coalesced.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Err(poison) => {
-                if poison.into_inner().replace(event).is_some() {
-                    self.partials_coalesced.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-        bus.notify.notify_one();
+        self.enqueue_preview(event);
     }
 }
 
@@ -556,6 +742,10 @@ impl StreamingSttPort for GgufStreamingAdapter {
         false
     }
 
+    fn recognition_profile(&self) -> RecognitionProfile {
+        self.profile
+    }
+
     fn events(&self) -> mpsc::Receiver<SttEvent> {
         // 每次订阅重建总线。旧总线只持有弱引用的桥接任务，generation
         // 过滤会阻止旧会话事件进入新会话。
@@ -654,6 +844,67 @@ mod tests {
             }
             other => panic!("期望 Final，收到 {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn typed_draft_and_preview_envelopes_are_delivered_without_v2_projection() {
+        let engine = mock_engine(
+            r#"{"kind":"draft","span":{"spanId":7,"audioRange":{"startSample":0,"endSample":80000},"text":"稳定草稿。","revision":2}}"#,
+            "",
+        );
+        let adapter =
+            GgufStreamingAdapter::new_with_profile(engine, RecognitionProfile::PreviewDraft);
+        assert_eq!(
+            adapter.recognition_profile(),
+            RecognitionProfile::PreviewDraft
+        );
+        let generation = adapter.begin_session().await.unwrap();
+        let mut rx = adapter.events();
+
+        adapter.push_audio(generation, &[0.1; 320]).await.unwrap();
+        let draft = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("typed Draft should be delivered")
+            .expect("event channel remains open");
+        assert!(matches!(
+            draft,
+            SttEvent::Draft { generation: g, span }
+                if g == generation
+                    && span.span_id == 7
+                    && span.audio_range == AudioRange::new(0, 80_000)
+                    && span.text == "稳定草稿。"
+        ));
+
+        let preview_engine = mock_engine(
+            r#"{"kind":"preview","requestId":9,"audioRange":{"startSample":80000,"endSample":112000},"revision":3,"text":"预览"}"#,
+            "",
+        );
+        let preview_adapter = GgufStreamingAdapter::new_with_profile(
+            preview_engine,
+            RecognitionProfile::PreviewDraft,
+        );
+        let generation = preview_adapter.begin_session().await.unwrap();
+        let mut rx = preview_adapter.events();
+        preview_adapter
+            .push_audio(generation, &[0.1; 320])
+            .await
+            .unwrap();
+        let preview = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("typed Preview should be delivered")
+            .expect("event channel remains open");
+        assert!(matches!(
+            preview,
+            SttEvent::Preview {
+                generation: g,
+                request_id: 9,
+                audio_range,
+                text,
+                ..
+            } if g == generation
+                && audio_range == AudioRange::new(80_000, 112_000)
+                && text == "预览"
+        ));
     }
 
     #[tokio::test]

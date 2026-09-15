@@ -156,7 +156,102 @@ impl std::fmt::Debug for SttEngineConnection {
     }
 }
 
-// ── 结构化 STT 事件（0.22.9 Handoff 05）─────────────────────────────────
+// ── 结构化 STT 事件（0.22.9 Handoff 05 / 0.23.9）────────────────────────
+
+use serde::{Deserialize, Serialize};
+
+/// 音频时间轴上的半开绝对样本区间。
+///
+/// `start_sample`/`end_sample` 永远相对于当前识别 session 的起点，不能使用
+/// compact 后的 Vec 局部 offset。这样 Draft 与 Preview 可以在不同目标投影间
+/// 复用同一条时间轴，也不需要依赖文本相似度做去重。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioRange {
+    pub start_sample: u64,
+    pub end_sample: u64,
+}
+
+impl AudioRange {
+    pub const fn new(start_sample: u64, end_sample: u64) -> Self {
+        Self {
+            start_sample,
+            end_sample,
+        }
+    }
+
+    pub const fn len(self) -> u64 {
+        self.end_sample.saturating_sub(self.start_sample)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.start_sample >= self.end_sample
+    }
+
+    /// 判断两个半开区间是否有实际重叠。
+    pub const fn overlaps(self, other: Self) -> bool {
+        self.start_sample < other.end_sample && other.start_sample < self.end_sample
+    }
+
+    /// 判断 `other` 是否完全覆盖在当前区间内。
+    pub const fn contains(self, other: Self) -> bool {
+        self.start_sample <= other.start_sample && other.end_sample <= self.end_sample
+    }
+}
+
+/// 识别协调器交付的稳定草稿段。
+///
+/// `span_id` 在 session 内稳定；`revision` 只表示同一 span 的修订版本，
+/// 不与 VoiceService recording epoch、Editor content revision 或事件 seq 混用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSpan {
+    pub span_id: u64,
+    pub audio_range: AudioRange,
+    pub text: String,
+    pub revision: u64,
+}
+
+impl DraftSpan {
+    pub fn new(
+        span_id: u64,
+        audio_range: AudioRange,
+        text: impl Into<String>,
+        revision: u64,
+    ) -> Self {
+        Self {
+            span_id,
+            audio_range,
+            text: text.into(),
+            revision,
+        }
+    }
+}
+
+/// 识别调度策略。profile 不携带 VoiceTarget/Tauri 类型，只表达领域层调度行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecognitionProfile {
+    /// G2 与 Editor：滚动 Preview + 非重叠 Draft。
+    PreviewDraft,
+    /// G1/G3：保留现有累计 Partial/Final 投影契约。
+    Legacy,
+}
+
+impl Default for RecognitionProfile {
+    fn default() -> Self {
+        Self::Legacy
+    }
+}
+
+/// STT 逻辑 lane。实际执行仍由同一个 model worker 串行完成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SttLane {
+    Preview,
+    Draft,
+    Terminal,
+}
 
 /// 结构化 STT 事件。
 ///
@@ -199,6 +294,23 @@ pub enum SttEvent {
         preview: String,
     },
 
+    /// 类型化稳定草稿段（0.23.9）。
+    ///
+    /// 这是可靠、有序的交付物；消费方按 `span.audio_range`/`span_id` 去重，
+    /// 不应再从累计 confirmed 字符串反推增量。旧引擎仍可继续发送 `Partial`。
+    Draft { generation: u64, span: DraftSpan },
+
+    /// 类型化可替换预览（0.23.9）。
+    ///
+    /// 新 request id 发出后，旧 request 的结果只能被丢弃，不能覆盖当前预览。
+    Preview {
+        generation: u64,
+        request_id: u64,
+        audio_range: AudioRange,
+        revision: u64,
+        text: String,
+    },
+
     /// 最终识别结果（session 的正常终态）。
     ///
     /// `finish_session` 调用后产生此事件。之后此 generation 不应再产出事件。
@@ -218,6 +330,45 @@ pub enum SttEvent {
         /// 人类可读的错误信息。
         message: String,
     },
+}
+
+impl SttEvent {
+    /// 获取事件所属的识别 generation。
+    pub const fn generation(&self) -> u64 {
+        match self {
+            Self::Partial { generation, .. }
+            | Self::Draft { generation, .. }
+            | Self::Preview { generation, .. }
+            | Self::Final { generation, .. }
+            | Self::Error { generation, .. } => *generation,
+        }
+    }
+
+    /// 可靠顺序交付物：Draft、Final、Error，以及旧协议中带 confirmed 的 Partial。
+    pub fn is_reliable(&self) -> bool {
+        match self {
+            Self::Draft { .. } | Self::Final { .. } | Self::Error { .. } => true,
+            Self::Partial {
+                confirmed_changed,
+                confirmed,
+                ..
+            } => *confirmed_changed || !confirmed.is_empty(),
+            Self::Preview { .. } => false,
+        }
+    }
+
+    pub fn lane(&self) -> SttLane {
+        match self {
+            Self::Draft { .. } => SttLane::Draft,
+            Self::Partial {
+                confirmed_changed,
+                confirmed,
+                ..
+            } if *confirmed_changed || !confirmed.is_empty() => SttLane::Terminal,
+            Self::Preview { .. } | Self::Partial { .. } => SttLane::Preview,
+            Self::Final { .. } | Self::Error { .. } => SttLane::Terminal,
+        }
+    }
 }
 
 /// 结构化 STT 流式 port——框架无关的统一 STT 生命周期抽象。
@@ -303,6 +454,14 @@ pub trait StreamingSttPort: Send + Sync {
     #[allow(dead_code)]
     fn supports_native_partial(&self) -> bool;
 
+    /// 当前 session 使用的识别调度 profile。
+    ///
+    /// 旧实现默认为 `Legacy`，让新增类型事件可以渐进接入而不改变 G1/G3
+    /// 的提交协议。
+    fn recognition_profile(&self) -> RecognitionProfile {
+        RecognitionProfile::Legacy
+    }
+
     /// 获取事件 receiver（有界通道）。
     ///
     /// 返回的 receiver 用于接收 `SttEvent`。消费方应在独立 task 中循环 `recv()`。
@@ -384,6 +543,16 @@ pub trait SttEngine: Send + Sync {
     fn stream_stats(&self) -> SttStreamStats {
         SttStreamStats::default()
     }
+
+    /// 0.23.9: 提供 `Any` 引用以支持 downcast 到具体引擎类型。
+    ///
+    /// 用于诊断接口（如 `coordinator_trace`）在不暴露引擎内部结构的
+    /// 前提下访问引擎特有方法。生产路径不使用此方法。
+    fn as_any(&self) -> &dyn std::any::Any {
+        // 默认实现返回空 Any——具体引擎按需 override
+        // 安全性：此方法不修改状态、不触发推理，仅供只读诊断。
+        &()
+    }
 }
 // ── STT Engines ──────────────────────────────────────────────────────────
 
@@ -420,8 +589,22 @@ pub(crate) mod wav;
 ///
 /// **不会回退到 Mock 引擎**——未启用 / 未配置 / 服务未就绪时返回 Err，
 /// 由调用方（VoiceService）决定如何向用户反馈错误。
+#[allow(dead_code)]
 pub fn create_engine(
     connection: Option<SttEngineConnection>,
+) -> Result<Box<dyn SttEngine>, String> {
+    // 保持旧工厂调用方的 Legacy 行为；需要双层调度的 G2/Editor 由 app
+    // 显式调用 `create_engine_with_profile(..., PreviewDraft)`。
+    create_engine_with_profile(connection, RecognitionProfile::Legacy)
+}
+
+/// 按目标选择识别调度 profile 的引擎工厂。
+///
+/// `create_engine` 保留 Legacy 默认以兼容现有本地调用；G2/Editor
+/// 由 app 层显式传 `PreviewDraft`，避免把 VoiceTarget 泄漏到 domain。
+pub fn create_engine_with_profile(
+    connection: Option<SttEngineConnection>,
+    profile: RecognitionProfile,
 ) -> Result<Box<dyn SttEngine>, String> {
     let config = crate::domain::config::stt_config::get_stt_config();
 
@@ -463,9 +646,10 @@ pub fn create_engine(
             // ready 握手保证（worker 与实例绑定）。
             match config.streaming_mode {
                 crate::domain::config::stt_config::StreamingMode::Pseudo => {
-                    match pseudo_streaming::PseudoStreamingSttEngine::from_connection(
+                    match pseudo_streaming::PseudoStreamingSttEngine::from_connection_with_profile(
                         &config,
                         conn.clone(),
+                        profile,
                     ) {
                         Ok(engine) => {
                             tracing::info!("STT 引擎: pseudo-streaming (VAD + GGUF worker)");

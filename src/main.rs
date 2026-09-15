@@ -684,16 +684,17 @@ fn main() {
                 );
                 tracing::info!("STT 云端配置迁移已持久化到配置库");
             }
-            // 0.23.7：旧库中非法的 VAD 窗口组合安全归一化并持久化，
-            // 保证引擎与设置页读到的恒为有效组合（缺字段时 serde 默认 8/12/12）。
-            if stt_config.local_engine.vad.sanitize() {
+            // 0.23.7/0.23.9：旧库中非法的 VAD 窗口组合和 Recognition 参数安全
+            // 归一化并持久化，保证引擎与设置页读到的恒为有效组合（缺字段时
+            // serde 默认 VAD=8/12/12、Recognition=3000/700/5/700）。
+            if stt_config.local_engine.sanitize() {
                 let _ = tauri::async_runtime::block_on(
                     app::config::ConfigStore::set::<app::stt_config::SttConfig>(
                         &pools.config,
                         &stt_config,
                     ),
                 );
-                tracing::info!("STT VAD 窗口配置已归一化并持久化");
+                tracing::info!("STT VAD/Recognition 配置已归一化并持久化");
             }
             app::stt_config::init_cache(stt_config);
 
@@ -1532,6 +1533,8 @@ app::commands::toggle_default_trigger,
             app::commands::list_audio_devices,
             app::commands::start_audio_test,
             app::commands::stop_audio_test,
+            // 0.23.9: Coordinator 诊断快照（VAD 调试页消费）
+            app::commands::get_coordinator_trace,
             // 0.22.6 phase B: 旧 FunASR lifecycle 兼容命令已删除
             // （get_funasr_env/get_funasr_log_history/setup_python_env/
             //   start_funasr_server/stop_funasr_server/diagnose_stt/

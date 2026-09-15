@@ -364,11 +364,17 @@ pub struct EditorVoiceStartResult {
 }
 
 /// 快照段（补齐缺号用）。
+///
+/// `span` 在 PreviewDraft profile 下携带 `spanId + audioRange + text + revision`，
+/// 供前端按 span 身份去重；Legacy profile 或旧路径下为 `None`，前端退化为
+/// 纯文本补齐。
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorVoiceSegmentDto {
     pub seq: u64,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<crate::domain::stt::DraftSpan>,
 }
 
 /// 有界 confirmed 快照（§3.6：缺号、窗口恢复或重新聚焦时拉取补齐）。
@@ -488,6 +494,10 @@ pub async fn stop_editor_voice(
 
 /// 拉取听写 confirmed 快照：返回 epoch 匹配且 seq > afterSeq 的段。
 /// epoch 不匹配或无听写状态返回 null（前端提示无法补齐）。
+///
+/// 0.23.9：优先返回带 DraftSpan 身份的 snapshot（`seq + spanId +
+/// audioRange + text + revision`），前端按 span 去重补缺；旧兼容路径
+/// 无 span 时 `span` 字段序列化时跳过。
 #[tauri::command]
 pub fn get_editor_voice_snapshot(
     app: tauri::AppHandle,
@@ -496,14 +506,35 @@ pub fn get_editor_voice_snapshot(
     after_seq: u64,
 ) -> Result<Option<EditorVoiceSnapshotDto>, CommandError> {
     ensure_voice_control_caller(window.label())?;
-    Ok(voice_service(&app)?
+    let voice = voice_service(&app)?;
+    // 优先使用类型化 snapshot（携带 DraftSpan 身份）
+    if let Some((epoch, spans, truncated)) = voice.editor_voice_snapshot_spans(epoch, after_seq) {
+        return Ok(Some(EditorVoiceSnapshotDto {
+            epoch,
+            truncated,
+            segments: spans
+                .into_iter()
+                .map(|(seq, span)| EditorVoiceSegmentDto {
+                    seq,
+                    text: span.text.clone(),
+                    span: Some(span),
+                })
+                .collect(),
+        }));
+    }
+    // 回退到旧文本 snapshot（Legacy profile 或无 draft_spans 缓冲）
+    Ok(voice
         .editor_voice_snapshot(epoch, after_seq)
         .map(|(epoch, segments, truncated)| EditorVoiceSnapshotDto {
             epoch,
             truncated,
             segments: segments
                 .into_iter()
-                .map(|(seq, text)| EditorVoiceSegmentDto { seq, text })
+                .map(|(seq, text)| EditorVoiceSegmentDto {
+                    seq,
+                    text,
+                    span: None,
+                })
                 .collect(),
         }))
 }

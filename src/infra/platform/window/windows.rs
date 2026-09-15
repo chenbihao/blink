@@ -302,7 +302,7 @@ const MANAGER_MIN_H: f64 = 400.0;
 
 /// 设置窗口
 const SETTINGS_W: f64 = 960.0;
-const SETTINGS_H: f64 = 710.0;
+const SETTINGS_H: f64 = 800.0;
 const SETTINGS_MIN_W: f64 = 760.0;
 const SETTINGS_MIN_H: f64 = 520.0;
 

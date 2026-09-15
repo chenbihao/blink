@@ -11,6 +11,8 @@
 //!
 //! 局部切片通过 [`SentenceState::abs_to_local_range`] 统一转换，禁止手工减法。
 
+use super::{AudioRange, DraftSpan};
+
 /// 0.22.15：pending segment 的 identity——finalize task 返回时必须匹配。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SegmentIdentity {
@@ -52,6 +54,14 @@ pub(crate) struct SentenceState {
     pub(crate) confirmed_sentences: Vec<String>,
     /// 已 committed 的音频末尾（绝对坐标，下一句的起始）
     pub(crate) committed_sample_end: usize,
+    /// 已预留给 running/pending Draft 的绝对末端。
+    ///
+    /// `committed_sample_end` 只在成功 Draft 后推进；reserved 水位防止
+    /// worker 忙时后续候选再次从 committed 起点创建重叠请求。
+    pub(crate) draft_reserved_sample_end: usize,
+    /// 新版 Draft lane 需要按 reserved 水位分配不重叠区间；Legacy lane
+    /// 保留旧的 deferred 起点并在前段 commit 后再 rebase。
+    pub(crate) reserve_draft_ranges: bool,
     /// 单调 session generation（每次 reset 递增）
     pub(crate) session_generation: u64,
     /// 单调 segment id（每个句尾递增）
@@ -78,6 +88,8 @@ pub(crate) struct SentenceState {
     /// 供上层做「状态边沿触发」判定——引擎状态是否变化由本版本号与
     /// 预览版本号共同表达，避免每块音频都对外搬运全量正文。
     pub(crate) confirmed_revision: u64,
+    /// 已成功提交的 Draft ledger（按音频顺序追加）。
+    pub(crate) draft_spans: Vec<DraftSpan>,
 }
 
 impl SentenceState {
@@ -85,6 +97,8 @@ impl SentenceState {
         Self {
             confirmed_sentences: Vec::new(),
             committed_sample_end: 0,
+            draft_reserved_sample_end: 0,
+            reserve_draft_ranges: false,
             session_generation: 1,
             next_segment_id: 1,
             commit_generation: 1,
@@ -94,6 +108,19 @@ impl SentenceState {
             deferred: None,
             buffer_base_sample: 0,
             confirmed_revision: 0,
+            draft_spans: Vec::new(),
+        }
+    }
+
+    /// 选择是否由句子状态直接预留 Draft 的 owned range。
+    ///
+    /// Legacy 累计 Partial 仍让 deferred 从 committed 起点开始，保持旧
+    /// 的 rollback/rebase 契约；PreviewDraft 则开启该开关，避免 worker
+    /// 忙时后续候选反复拥有同一段音频。
+    pub(crate) fn set_draft_range_reservation(&mut self, enabled: bool) {
+        self.reserve_draft_ranges = enabled;
+        if !enabled {
+            self.draft_reserved_sample_end = self.committed_sample_end;
         }
     }
 
@@ -158,8 +185,17 @@ impl SentenceState {
         self.next_segment_id += 1;
 
         // 绝对坐标 range：[committed_sample_end, total_samples)
-        let start = self.committed_sample_end;
+        let start = if self.reserve_draft_ranges {
+            self.draft_reserved_sample_end
+                .max(self.committed_sample_end)
+        } else {
+            self.committed_sample_end
+        };
         let end = total_samples;
+        if end <= start {
+            tracing::debug!(start, end, "忽略没有新增音频覆盖范围的 Draft 候选");
+            return None;
+        }
         let range = start..end;
         let identity = SegmentIdentity {
             session_generation: self.session_generation,
@@ -178,11 +214,25 @@ impl SentenceState {
                 seg = segment_id,
                 "句尾时 finalize_in_flight，暂存到 deferred"
             );
-            self.deferred = Some(pending);
+            match self.deferred.as_mut() {
+                Some(existing) => {
+                    // 单槽合并：只扩展末端，不制造按候选增长的请求队列。
+                    existing.range.end = existing.range.end.max(pending.range.end);
+                    existing.preview_snapshot = pending.preview_snapshot;
+                }
+                None => self.deferred = Some(pending),
+            }
+            self.draft_reserved_sample_end = self
+                .deferred
+                .as_ref()
+                .map(|deferred| deferred.range.end)
+                .unwrap_or(self.draft_reserved_sample_end)
+                .max(self.draft_reserved_sample_end);
             return None;
         }
 
         self.pending = Some(pending.clone());
+        self.draft_reserved_sample_end = self.draft_reserved_sample_end.max(end);
         Some(pending)
     }
 
@@ -231,11 +281,21 @@ impl SentenceState {
         let range = pending.range.clone();
         let preview_snapshot = &pending.preview_snapshot;
 
-        if result.ok && !result.text.is_empty() {
+        let committed = result.ok && !result.text.is_empty();
+        if committed {
             // ── commit ──
             // range.end 是绝对坐标，直接推进 committed_sample_end
             self.confirmed_sentences.push(result.text.clone());
-            self.committed_sample_end = range.end;
+            self.committed_sample_end = self.committed_sample_end.max(range.end);
+            self.draft_reserved_sample_end = self
+                .draft_reserved_sample_end
+                .max(self.committed_sample_end);
+            self.draft_spans.push(DraftSpan {
+                span_id: result.identity.segment_id,
+                audio_range: AudioRange::new(range.start as u64, range.end as u64),
+                text: result.text.clone(),
+                revision: 1,
+            });
             self.confirmed_revision = self.confirmed_revision.wrapping_add(1);
             tracing::debug!(
                 seg = result.identity.segment_id,
@@ -253,6 +313,11 @@ impl SentenceState {
                 preview_len = preview_snapshot.chars().count(),
                 "rollback pending segment"
             );
+            // PreviewDraft 的 Draft 失败必须从 committed 水位重基；否则
+            // reserved 仍停在失败请求末端，下一次会跳过本应以更长上下文
+            // 重试的音频。Legacy 的 deferred 起点本来就是 committed，
+            // 这里的重置同样保持其旧语义。
+            self.draft_reserved_sample_end = self.committed_sample_end;
         }
 
         self.pending = None;
@@ -264,9 +329,20 @@ impl SentenceState {
             // deferred 在前一任务仍飞行时创建，其起点基于当时尚未推进的
             // committed_sample_end。前一段成功 commit 后必须重定位，避免
             // 下一任务再次拥有已经提交音频的提交权。
-            d.range.start = d.range.start.max(self.committed_sample_end);
+            d.range.start = if !committed && self.reserve_draft_ranges {
+                self.committed_sample_end
+            } else {
+                d.range.start.max(self.committed_sample_end)
+            };
+            if d.range.end <= d.range.start {
+                deferred = None;
+                self.draft_reserved_sample_end = self.committed_sample_end;
+            }
+        }
+        if let Some(ref d) = deferred {
             self.pending = Some(d.clone());
             self.finalize_in_flight = true;
+            self.draft_reserved_sample_end = self.draft_reserved_sample_end.max(d.range.end);
         }
         deferred
     }
@@ -337,6 +413,7 @@ impl SentenceState {
         self.pending = None;
         self.deferred = None;
         self.finalize_in_flight = false;
+        self.draft_reserved_sample_end = self.committed_sample_end;
         self.finalizing = Some(identity);
         identity
     }
@@ -354,12 +431,46 @@ impl SentenceState {
         {
             return false;
         }
+        let range_start = self.committed_sample_end;
         if !text.is_empty() {
             self.confirmed_sentences.push(text.to_string());
             self.committed_sample_end = self.committed_sample_end.max(range_end);
+            self.draft_reserved_sample_end = self
+                .draft_reserved_sample_end
+                .max(self.committed_sample_end);
             self.confirmed_revision = self.confirmed_revision.wrapping_add(1);
+            self.draft_spans.push(DraftSpan {
+                span_id: self.next_segment_id,
+                audio_range: AudioRange::new(range_start as u64, range_end as u64),
+                text: text.to_string(),
+                revision: 1,
+            });
+            self.next_segment_id = self.next_segment_id.wrapping_add(1);
+        } else {
+            // NoSpeech 是成功消费整个 owned range，而不是失败回滚。
+            self.committed_sample_end = self.committed_sample_end.max(range_end);
+            self.draft_reserved_sample_end = self
+                .draft_reserved_sample_end
+                .max(self.committed_sample_end);
         }
         self.finalizing = None;
+        true
+    }
+
+    /// terminal transport 失败时释放 finalize 所有权，但不推进覆盖水位。
+    ///
+    /// 与 `commit_terminal_finalize(..., "")` 区分：后者表示 gate 判定
+    /// `NoSpeech`，应消费整个 owned range；这里表示真实推理失败，必须保留
+    /// 尾段给上层重试/报告错误。
+    pub(crate) fn abort_terminal_finalize(&mut self, identity: TerminalFinalizeIdentity) -> bool {
+        if self.finalizing != Some(identity)
+            || self.session_generation != identity.session_generation
+            || self.commit_generation != identity.commit_generation
+        {
+            return false;
+        }
+        self.finalizing = None;
+        self.draft_reserved_sample_end = self.committed_sample_end;
         true
     }
 
@@ -367,6 +478,7 @@ impl SentenceState {
     pub(crate) fn reset(&mut self) {
         self.confirmed_sentences.clear();
         self.committed_sample_end = 0;
+        self.draft_reserved_sample_end = 0;
         self.session_generation = self.session_generation.wrapping_add(1);
         self.commit_generation = self.commit_generation.wrapping_add(1);
         self.next_segment_id = 1;
@@ -376,5 +488,45 @@ impl SentenceState {
         self.finalizing = None;
         self.buffer_base_sample = 0;
         self.confirmed_revision = 0;
+        self.draft_spans.clear();
+    }
+
+    /// NoSpeech 请求消费 owned range，但不产生 DraftSpan。
+    pub(crate) fn consume_no_speech(
+        &mut self,
+        identity: SegmentIdentity,
+        range_end: usize,
+    ) -> Option<PendingSegment> {
+        let Some(pending) = self.pending.as_ref() else {
+            return None;
+        };
+        if pending.identity != identity {
+            return None;
+        }
+        self.committed_sample_end = self.committed_sample_end.max(range_end);
+        self.draft_reserved_sample_end = self
+            .draft_reserved_sample_end
+            .max(self.committed_sample_end);
+        self.pending = None;
+        self.finalize_in_flight = false;
+        let mut deferred = self.deferred.take();
+        if let Some(ref mut next) = deferred {
+            next.range.start = next.range.start.max(self.committed_sample_end);
+            if next.range.end <= next.range.start {
+                deferred = None;
+            }
+        }
+        if let Some(ref next) = deferred {
+            self.pending = Some(next.clone());
+            self.finalize_in_flight = true;
+            self.draft_reserved_sample_end = self.draft_reserved_sample_end.max(next.range.end);
+        } else {
+            self.draft_reserved_sample_end = self.committed_sample_end;
+        }
+        deferred
+    }
+
+    pub(crate) fn draft_spans(&self) -> &[DraftSpan] {
+        &self.draft_spans
     }
 }

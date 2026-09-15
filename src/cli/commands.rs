@@ -80,8 +80,9 @@ pub fn dispatch(cli: Cli) -> i32 {
             tauri::async_runtime::block_on(crate::app::config::ConfigStore::get::<
                 crate::app::stt_config::SttConfig,
             >(&pools.config));
-        // 0.23.7：CLI 路径同样归一化 VAD 窗口（仅缓存，不回写 DB）
-        stt_config.local_engine.vad.sanitize();
+        // 0.23.7/0.23.9：CLI 路径同样归一化 VAD 窗口和 Recognition 参数
+        // （仅缓存，不回写 DB）
+        stt_config.local_engine.sanitize();
         crate::app::stt_config::init_cache(stt_config);
         Some(build_cli_engine_manager())
     } else {

@@ -3,7 +3,7 @@
  *
  * 职责（phase 文档 §3.6 / §6.4）：
  * - 由编辑器按钮显式开始/结束；启动时冻结 session_ref + generation；
- * - confirmed segment 按 epoch + seq 去重追尾：重复 seq 忽略，缺号拉
+ * - Draft segment 按 epoch + seq + span 身份去重追尾：重复段忽略，缺号拉
  *   snapshot 补齐，仍缺号则跳号继续（记 onGapLost）；
  * - preview 只进浮窗装饰层，本控制器不把它写进正文；
  * - 追加经 Adapter 单事务（首段补段落分隔），不抢焦点、不移动前文
@@ -16,6 +16,33 @@
 
 import {normalizeError} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
+
+/**
+ * 兼容 Rust serde camelCase 与迁移期 snake_case 的 DraftSpan。
+ * 缺少音频范围时仍保留 span 身份，方便旧 DTO 逐步升级；正式协议由后端
+ * 保证 spanId/audioRange/text/revision 完整。
+ */
+function normalizeDraftSpan(value) {
+    if (!value || typeof value !== "object") return null;
+    const spanId = value.spanId ?? value.span_id ?? value.id;
+    const text = value.text ?? value.content;
+    if (spanId === undefined || spanId === null || typeof text !== "string") return null;
+    const range = value.audioRange ?? value.audio_range ?? value.range;
+    let audioRange = null;
+    if (range && Number.isFinite(Number(range.startSample ?? range.start_sample))
+        && Number.isFinite(Number(range.endSample ?? range.end_sample))) {
+        audioRange = {
+            startSample: Number(range.startSample ?? range.start_sample),
+            endSample: Number(range.endSample ?? range.end_sample),
+        };
+    }
+    return {
+        spanId,
+        audioRange,
+        text,
+        revision: Number(value.revision ?? value.spanRevision ?? 0),
+    };
+}
 
 export class EditorVoiceController {
     /** @type {"idle"|"starting"|"recording"|"paused"|"stopping"} */
@@ -33,6 +60,12 @@ export class EditorVoiceController {
 
     /** 本次听写已追加的段文本（定位/整理入口用） */
     segments = [];
+
+    /** 本次听写已追加的 DraftSpan 身份（旧后端可能为空） */
+    draftSpans = [];
+
+    /** 已消费的 span id，防止重连/snapshot 将同一 Draft 追加两次 */
+    _spanIds = new Set();
 
     /** 本轮听写冻结范围（Adapter 签发的 opaque handle；结束/清空/失效为 null） */
     runHandle = null;
@@ -114,6 +147,8 @@ export class EditorVoiceController {
             this.epoch = res?.epoch ?? 0;
             this.lastSeq = 0;
             this.segments = [];
+            this.draftSpans = [];
+            this._spanIds = new Set();
             this.runHandle = null;
             this._setPhase("recording");
             // 记录本轮真实追加锚点（0.23.6 §5.7）：定位/整理只作用于
@@ -169,12 +204,12 @@ export class EditorVoiceController {
     // ── 后端事件 ──────────────────────────────────────────────────────────
 
     /**
-     * confirmed 段事件：身份/epoch 过滤 → seq 去重 → 缺号补齐 → 追加。
+     * Draft 段事件：身份/epoch 过滤 → seq/span 去重 → 缺号补齐 → 追加。
      * async：缺号路径需等待快照补齐（测试可 await；生产 fire-and-forget）。
-     * @param {{sessionRef: string, generation: number, epoch: number, seq: number, text: string}} p
+     * @param {{sessionRef: string, generation: number, epoch: number, seq: number, text?: string, span?: object}} p
      */
     async handleSegment(p) {
-        if (!p || this.phase === "idle" || this.phase === "stopping") return;
+        if (!p || this.phase === "idle") return;
         if (p.sessionRef !== this.sessionRef || p.generation !== this.generation) return;
         if (p.epoch !== this.epoch) return;
         if (typeof p.seq !== "number" || p.seq <= this.lastSeq) return; // 重复/回退
@@ -188,7 +223,14 @@ export class EditorVoiceController {
                 this._callbacks.onGapLost?.();
             }
         }
-        this._appendSegment(p.seq, p.text);
+        const span = normalizeDraftSpan(p.span);
+        const text = span?.text ?? p.text;
+        const spanKey = span && String(span.spanId);
+        if (spanKey && this._spanIds.has(spanKey)) {
+            this.lastSeq = Math.max(this.lastSeq, p.seq);
+            return;
+        }
+        this._appendSegment(p.seq, text, span);
     }
 
     /**
@@ -229,7 +271,7 @@ export class EditorVoiceController {
     // ── 内部 ──────────────────────────────────────────────────────────────
 
     /**
-     * 拉取 snapshot 补 lastSeq 之后的段（epoch 失配/无状态 → 忽略）。
+     * 拉取 snapshot 补 lastSeq 之后的 Draft 段（epoch 失配/无状态 → 忽略）。
      *
      * 缺口显式判定（0.23.6 §5.7）：snapshot 首段 seq 不紧接 `lastSeq + 1`
      * 时，所需区间已被淘汰——显式触发一次 `onGapLost`，再从最早可用段继续，
@@ -255,7 +297,15 @@ export class EditorVoiceController {
             let appended = 0;
             for (const seg of snap.segments) {
                 if (seg.seq > this.lastSeq) {
-                    this._appendSegment(seg.seq, seg.text);
+                    const span = normalizeDraftSpan(seg.span);
+                    const spanKey = span && String(span.spanId);
+                    if (spanKey && this._spanIds.has(spanKey)) {
+                        // 快照中的同一 Draft 可能带着新的 seq 重放；消费该
+                        // seq 但不重复写正文，避免之后的事件被误判为缺号。
+                        this.lastSeq = Math.max(this.lastSeq, seg.seq);
+                        continue;
+                    }
+                    this._appendSegment(seg.seq, span?.text ?? seg.text, span);
                     appended += 1;
                 }
             }
@@ -268,7 +318,7 @@ export class EditorVoiceController {
     }
 
     /** 追加一段到正文（Adapter 单事务；首段补段落分隔） */
-    _appendSegment(seq, text) {
+    _appendSegment(seq, text, span = null) {
         if (typeof text !== "string" || text.length === 0) {
             this.lastSeq = Math.max(this.lastSeq, seq);
             return;
@@ -283,6 +333,10 @@ export class EditorVoiceController {
             return;
         }
         this.segments.push(text);
+        if (span) {
+            this.draftSpans.push({seq, ...span});
+            this._spanIds.add(String(span.spanId));
+        }
         this.lastSeq = Math.max(this.lastSeq, seq);
         this._callbacks.onSegmentAppended?.();
     }
@@ -303,6 +357,8 @@ export class EditorVoiceController {
     /** 用户关闭 chips：丢弃本次听写范围缓存（不回撤正文）。 */
     clearRunResult() {
         this.segments = [];
+        this.draftSpans = [];
+        this._spanIds = new Set();
         this.runHandle = null;
     }
 
@@ -312,6 +368,8 @@ export class EditorVoiceController {
      */
     invalidateRun() {
         this.segments = [];
+        this.draftSpans = [];
+        this._spanIds = new Set();
         this.runHandle = null;
     }
 
@@ -327,6 +385,8 @@ export class EditorVoiceController {
         this.epoch = 0;
         this.lastSeq = 0;
         this.segments = [];
+        this.draftSpans = [];
+        this._spanIds = new Set();
         this.runHandle = null;
     }
 

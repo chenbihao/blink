@@ -149,10 +149,12 @@ pub async fn set_stt_config(
     // 规范化不返回错误（前端已隐藏 UI），只在日志中记录 warn。
     normalize_config_against_model_capabilities(&mut config);
 
-    // ── VAD 窗口归一化（0.23.7）──
-    // 前端已联动钳制，这里是后端兜底：非法/越界窗口组合安全归一化后
-    // 再持久化，保证引擎从配置缓存读到的恒为有效组合。
-    config.local_engine.vad.sanitize();
+    // ── VAD/Recognition 归一化（0.23.7/0.23.9）──
+    // 前端已联动钳制，这里是后端兜底：非法/越界 VAD 窗口和 Recognition
+    // 参数安全归一化后再持久化，保证引擎从配置缓存读到的恒为有效组合。
+    // sanitize 先归一化 VAD，再以 VAD max_uncommitted_s 作为 Recognition
+    // draft_min_s 的上限进行二次归一化。
+    config.local_engine.sanitize();
 
     crate::app::config::ConfigStore::set(pool, &config)
         .await
@@ -540,6 +542,23 @@ pub fn stop_audio_test() {
     use std::sync::atomic::Ordering;
     AUDIO_TEST_ACTIVE.store(false, Ordering::SeqCst);
     tracing::info!("音频测试: 用户停止");
+}
+
+/// 0.23.9: 获取当前生产会话的 Coordinator 诊断快照。
+///
+/// 从当前活跃的录音 session 中提取 `RecognitionCoordinator` 的只读快照，
+/// 供 VAD 调试页消费。快照不修改调度状态、不触发推理、不推进水位。
+///
+/// **返回**: `Some(CoordinatorTrace)` 当正在录音且引擎为伪流式引擎；
+///           `None` 当未录音或引擎不是伪流式引擎。
+#[tauri::command]
+pub fn get_coordinator_trace(
+    app: tauri::AppHandle,
+    max_uncommitted_s: u64,
+) -> Option<crate::domain::stt::pseudo_streaming::CoordinatorTrace> {
+    let voice = app
+        .try_state::<std::sync::Arc<crate::app::voice::VoiceService>>()?;
+    voice.coordinator_trace(max_uncommitted_s)
 }
 
 /// 递归复制目录。

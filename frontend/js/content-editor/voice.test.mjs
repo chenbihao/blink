@@ -112,6 +112,43 @@ test("voice: confirmed 段按序追加，首段补段落分隔", async () => {
     assert.equal(controller.joinedText, "第一句。第二句。");
 });
 
+test("voice: typed DraftSpan 按 span 身份追加并阻止跨 seq 重复", async () => {
+    const {controller, handlers, appends} = makeController();
+    await start(controller);
+    const span = {
+        spanId: 41,
+        audioRange: {startSample: 0, endSample: 80_000},
+        text: "稳定草稿。",
+        revision: 1,
+    };
+    await handlers[SEG]({payload: {
+        sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1, span,
+    }});
+    await handlers[SEG]({payload: {
+        sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 2, span: {...span, revision: 2},
+    }});
+
+    assert.deepEqual(appends.map((entry) => entry.text), ["稳定草稿。"]);
+    assert.deepEqual(controller.draftSpans, [{seq: 1, ...span}]);
+    assert.equal(controller.lastSeq, 2, "重复 span 仍消费事件 seq，避免后续持续误报缺号");
+});
+
+test("voice: stopping 阶段仍接收 final Draft，避免尾段丢失", async () => {
+    const {controller, handlers, appends} = makeController();
+    await start(controller);
+    controller.phase = "stopping";
+    await handlers[SEG]({payload: {
+        sessionRef: "ed_voice", generation: 3, epoch: 7, seq: 1,
+        span: {
+            spanId: 9,
+            audioRange: {startSample: 0, endSample: 40_000},
+            text: "尾段。",
+            revision: 1,
+        },
+    }});
+    assert.deepEqual(appends.map((entry) => entry.text), ["尾段。"]);
+});
+
 test("voice: 重复 seq 与异身份/异 epoch 事件全部忽略（§6.4 无重复）", async () => {
     const {controller, handlers, appends} = makeController();
     await start(controller);
