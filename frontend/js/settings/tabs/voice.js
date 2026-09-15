@@ -305,7 +305,7 @@ export async function initVoiceTab() {
     initLocalModelSelect(config);
     initFileTranscription();
     initVadDebug();
-    initCoordinatorTrace();
+    initCoordinatorTrace(config);
 
     // ── 跳转入口：点击切换到引擎页并定位 FunASR 卡片 ──
     const gotoEnginesBtn = document.getElementById("voice-goto-engines-btn");
@@ -503,7 +503,7 @@ function initVadDebug() {
  * 轮询策略：设置页可见 + 录音中时每 500ms 拉取一次 trace；
  * 不满足条件时显示空状态。
  */
-async function initCoordinatorTrace() {
+async function initCoordinatorTrace(config) {
     const panel = document.getElementById("voice-coordinator-trace-panel");
     const body = document.getElementById("voice-coordinator-trace-body");
     if (!panel || !body) return;
@@ -513,7 +513,7 @@ async function initCoordinatorTrace() {
 
     async function pollOnce() {
         try {
-            const maxUncommittedS = 30;
+            const maxUncommittedS = Number(config?.local_engine?.vad?.max_uncommitted_s) || 12;
             const trace = await invoke("get_coordinator_trace", {maxUncommittedS});
             renderCoordinatorTrace(trace, body, t);
         } catch (e) {

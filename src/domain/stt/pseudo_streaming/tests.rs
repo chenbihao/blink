@@ -79,6 +79,7 @@ fn controlled_engine(
         }),
         sample_rate: 16_000,
         boundary_observer: None,
+        decision_observer: None,
         finalize_observer: None,
     }
 }
@@ -90,6 +91,7 @@ fn engine_without_transport(samples: Vec<f32>) -> PseudoStreamingSttEngine {
         connection: None,
         sample_rate: 16_000,
         boundary_observer: None,
+        decision_observer: None,
         finalize_observer: None,
     }
 }
@@ -536,6 +538,7 @@ fn engine_reset_clears_state() {
         connection: None,
         sample_rate: 16000,
         boundary_observer: None,
+        decision_observer: None,
         finalize_observer: None,
     };
 
@@ -575,6 +578,7 @@ fn engine_with_token_constructs_and_resets() {
         }),
         sample_rate: 16000,
         boundary_observer: None,
+        decision_observer: None,
         finalize_observer: None,
     };
 
@@ -1650,6 +1654,7 @@ fn valley_engine(transport: Arc<WavCaptureTransport>) -> PseudoStreamingSttEngin
         }),
         sample_rate: 16_000,
         boundary_observer: None,
+        decision_observer: None,
         finalize_observer: None,
     };
     engine.inner.lock().unwrap().last_preview = Instant::now() + Duration::from_secs(600);

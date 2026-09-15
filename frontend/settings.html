@@ -1913,7 +1913,27 @@
                     </div>
                     <section class="voice-vad-debug-result" hidden id="voice-vad-debug-result">
                         <div class="voice-vad-debug-meta" id="voice-vad-debug-meta"></div>
-                        <div class="voice-vad-debug-legend" data-i18n="voice.local.vad_debug.legend">蓝线：能量 · 红线：on 阈值 · 绿线：off 阈值 · 阴影：低能量 · 实线：实际切点 · 虚线：短句未切</div>
+                        <div class="voice-vad-debug-legend" role="list"
+                            data-i18n-aria-label="voice.local.vad_debug.legend">
+                            <span class="voice-vad-debug-legend-item" role="listitem"><i
+                                    class="voice-vad-debug-legend-mark energy" aria-hidden="true"></i><span
+                                    data-i18n="voice.local.vad_debug.legend_energy">能量</span></span>
+                            <span class="voice-vad-debug-legend-item" role="listitem"><i
+                                    class="voice-vad-debug-legend-mark threshold-on" aria-hidden="true"></i><span
+                                    data-i18n="voice.local.vad_debug.legend_on">启动阈值</span></span>
+                            <span class="voice-vad-debug-legend-item" role="listitem"><i
+                                    class="voice-vad-debug-legend-mark threshold-off" aria-hidden="true"></i><span
+                                    data-i18n="voice.local.vad_debug.legend_off">停止阈值</span></span>
+                            <span class="voice-vad-debug-legend-item" role="listitem"><i
+                                    class="voice-vad-debug-legend-mark quiet" aria-hidden="true"></i><span
+                                    data-i18n="voice.local.vad_debug.legend_quiet">低能量区</span></span>
+                            <span class="voice-vad-debug-legend-item" role="listitem"><i
+                                    class="voice-vad-debug-legend-mark cut" aria-hidden="true"></i><span
+                                    data-i18n="voice.local.vad_debug.legend_cut">已切分</span></span>
+                            <span class="voice-vad-debug-legend-item" role="listitem"><i
+                                    class="voice-vad-debug-legend-mark waiting" aria-hidden="true"></i><span
+                                    data-i18n="voice.local.vad_debug.legend_waiting">候选，继续累积</span></span>
+                        </div>
                         <div class="voice-vad-debug-chart" id="voice-vad-debug-chart"></div>
                         <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.final_title">最终全文</h4>
                         <pre class="voice-file-transcribe-output" id="voice-vad-debug-transcript"></pre>

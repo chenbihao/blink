@@ -53,27 +53,53 @@ const timelineResult = {
     ],
 };
 const timeline = buildVadDebugTimeline(timelineResult);
-assert.deepEqual(timeline.map(entry => entry.kind), ["boundary", "boundary", "rejected"]);
-assert.equal(timeline[0].confirmedText.text, "第一段定稿");
-assert.deepEqual(timeline[1].previews.map(event => event.text), ["/sil", "第二段预览"]);
-assert.equal(timeline[1].confirmedText.text, "第二段定稿");
-assert.equal(timeline[2].previews[0].text, "短句预览");
-assert.equal(timeline[2].recognitionStartMs, 4000);
+assert.ok(timeline.every(entry => entry.kind === "moment"));
+assert.equal(timeline.find(entry => entry.audioMs === 2000).recognitions[0].text, "第一段定稿");
+assert.deepEqual(timeline.filter(entry => [2500, 3500].includes(entry.audioMs))
+    .flatMap(entry => entry.recognitions.map(event => event.text)), ["/sil", "第二段预览"]);
+assert.equal(timeline.find(entry => entry.audioMs === 4000).recognitions[0].text, "第二段定稿");
+assert.equal(timeline.find(entry => entry.audioMs === 4700).recognitions[0].text, "短句预览");
+assert.equal(timeline.find(entry => entry.audioMs === 4800).decisions[0].outcome, "waiting");
 const spanning = buildVadDebugTimeline({
     ...timelineResult,
     trace: {...timelineResult.trace, rejected_short_sentences: [{time_ms: 3000, sentence_ms: 370}]},
 });
-assert.equal(spanning[1].recognitionStartMs, 2000);
-assert.equal(spanning[2].recognitionStartMs, 2000,
-    "a rejected short sentence must not reset the recognition span of the later cut");
+assert.equal(spanning.find(entry => entry.audioMs === 3500).recognitions[0].audioStartMs, 2000,
+    "a rejected short sentence must not reset the inferred Legacy recognition span");
 const unmatched = buildVadDebugTimeline({
     ...result,
     boundaries: [],
     commits: [],
     text_events: [{kind: "confirmed", fed_ms: 1400, wall_ms: 1400, text: "独立定稿"}],
 });
-assert.ok(unmatched.some(entry => entry.kind === "confirmed_text" && entry.confirmedText.text === "独立定稿"),
+assert.ok(unmatched.some(entry => entry.recognitions.some(event => event.text === "独立定稿")),
     "an unpaired confirmed result must remain visible");
+
+const typedTimeline = buildVadDebugTimeline({
+    ...result,
+    duration_ms: 6000,
+    boundaries: [{audio_ms: 5000, reason: "natural_silence"}],
+    commits: [{audio_ms: 5000, observed_wall_ms: 5200}],
+    decisions: [
+        {audioMs: 3000, ownedStartMs: 0, ownedEndMs: 3000, reason: "natural_silence",
+            outcome: "waiting", waitReason: "below_draft_min", voicedMs: 2200, quietMs: 700},
+        {audioMs: 5000, ownedStartMs: 0, ownedEndMs: 5000, reason: "natural_silence",
+            outcome: "accepted", voicedMs: 4000, quietMs: 800},
+    ],
+    text_events: [
+        {kind: "preview", fed_ms: 4500, wall_ms: 4600, request_id: 9, revision: 2,
+            audio_range: {startSample: 24000, endSample: 72000}, text: "较长上下文预览"},
+        {kind: "draft", fed_ms: 5200, wall_ms: 5250, span_id: 3, revision: 1,
+            audio_range: {startSample: 0, endSample: 80000}, text: "稳定草稿"},
+    ],
+});
+const typedPreview = typedTimeline.find(entry => entry.audioMs === 4500).recognitions[0];
+assert.equal(typedPreview.audioStartMs, 1500);
+assert.equal(typedPreview.audioEndMs, 4500);
+assert.equal(typedPreview.exactRange, true);
+const typedDraftMoment = typedTimeline.find(entry => entry.audioMs === 5000);
+assert.equal(typedDraftMoment.recognitions[0].text, "稳定草稿");
+assert.equal(typedDraftMoment.decisions[0].outcome, "accepted");
 
 function fakeNode(name) {
     return {
@@ -87,10 +113,18 @@ function fakeNode(name) {
 globalThis.document = {createElement: fakeNode, createElementNS: (_ns, name) => fakeNode(name)};
 const elements = Object.fromEntries(["chart", "events", "transcript", "meta"].map(key => [key, fakeNode(key)]));
 renderVadDebugResult(timelineResult, elements, key => key);
-assert.equal(elements.events.children.length, 4, "start and all three markers share one vertical timeline");
+assert.equal(elements.events.children.length, timeline.length + 1, "all text and decision moments share one vertical timeline");
 assert.equal(elements.transcript.textContent, "测试");
-assert.ok(elements.events.children[1].children[1].children.some(node => node.className.includes("transcript")),
-    "the cut and its text share one marker card");
+const renderedClasses = JSON.stringify(elements.events);
+assert.match(renderedClasses, /voice-vad-debug-transcript-lane/);
+assert.match(renderedClasses, /voice-vad-debug-decision-lane/);
+assert.match(renderedClasses, /voice-vad-debug-recognition-meta/, "request/rev details live in the hover overlay");
+assert.match(renderedClasses, /voice-vad-debug-decision-meta/, "decision facts live in the hover overlay");
+assert.doesNotMatch(renderedClasses, /voice-vad-debug-entry-meta/, "always-visible meta lines are gone");
+assert.match(renderedClasses, /decision-accepted/, "an anchor whose final result is a cut takes the accepted color");
+assert.match(renderedClasses, /decision-waiting/, "kept-buffering anchors stay distinguishable");
+assert.doesNotMatch(renderedClasses, /voice-vad-debug-wave/, "mini waveform removed in favor of the continuous rail");
+assert.doesNotMatch(renderedClasses, /voice-vad-debug-connector/, "decision lead lines are CSS-drawn on the card");
 delete globalThis.document;
 
 const source = await readFile(new URL("./voice.js", import.meta.url), "utf8");

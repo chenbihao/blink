@@ -20,13 +20,16 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use crate::domain::config::stt_config::{LocalSttSelection, SttMode, get_stt_config};
-use crate::domain::stt::pseudo_streaming::{PseudoStreamingSttEngine, SttBoundaryRecord};
+use crate::domain::stt::pseudo_streaming::{
+    PseudoStreamingSttEngine, SttBoundaryRecord, SttDecisionRecord,
+};
 use crate::domain::stt::transcribe::{
     AudioTranscriptionError, AudioTranscriptionPort, AudioTranscriptionRequest,
     AudioTranscriptionResult,
 };
 use crate::domain::stt::vad::EnergyVad;
 use crate::domain::stt::vad_diagnostics::{VadTrace, trace_vad};
+use crate::domain::stt::{AudioRange, DraftSpan};
 use crate::domain::stt::{SttEngine, SttEngineConnection};
 use crate::domain::stt::{SttTransport, SttTransportError};
 use crate::infra::platform::audio::format::AudioDecodeError;
@@ -137,6 +140,7 @@ pub struct VadDebugResult {
     pub final_text: String,
     pub trace: VadTrace,
     pub boundaries: Vec<SttBoundaryRecord>,
+    pub decisions: Vec<SttDecisionRecord>,
     pub text_events: Vec<VadDebugTextEvent>,
     pub commits: Vec<VadDebugCommit>,
 }
@@ -147,6 +151,14 @@ pub struct VadDebugTextEvent {
     pub fed_ms: u64,
     pub wall_ms: u64,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_range: Option<AudioRange>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -221,6 +233,7 @@ impl AudioTranscriptionService {
         let duration_ms = trace.duration_ms;
         progress("replaying", 0, duration_ms);
         let boundaries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
         let connection = SttEngineConnection {
             host: "127.0.0.1".into(),
             port: 0,
@@ -230,7 +243,8 @@ impl AudioTranscriptionService {
         };
         let engine = PseudoStreamingSttEngine::from_connection(&stt_config, connection)
             .map_err(|detail| AudioTranscriptionError::Internal { detail })?
-            .with_boundary_observer(Arc::clone(&boundaries));
+            .with_boundary_observer(Arc::clone(&boundaries))
+            .with_decision_observer(Arc::clone(&decisions));
         let started = Instant::now();
         let mut text_events = Vec::new();
         let mut commits = Vec::new();
@@ -296,12 +310,17 @@ impl AudioTranscriptionService {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
+            decisions: decisions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
             text_events,
             commits,
         };
         tracing::info!(
             duration_ms = result.duration_ms,
             boundaries = result.boundaries.len(),
+            decisions = result.decisions.len(),
             commits = result.commits.len(),
             final_chars = result.final_text.chars().count(),
             "VAD WAV 伪流式诊断完成"
@@ -462,12 +481,11 @@ impl AudioTranscriptionService {
 ///
 /// 支持两种响应格式：
 /// - **Legacy v2**：`{"confirmed_changed": true, "confirmed": "...", "preview": "..."}`
-/// - **PreviewDraft typed**：`{"v":2, "kind":"draft", "span":"..."}` 或
+/// - **PreviewDraft typed**：`{"v":2, "kind":"draft", "span":{...}}` 或
 ///   `{"v":2, "kind":"preview", "text":"...", "revision": N, ...}`
 ///
-/// PreviewDraft 格式中 `kind=draft` 的 `span` 字段携带本次新提交的 Draft
-/// 正文（已去重），映射为 `confirmed` 事件；`kind=preview` 的 `text` 字段
-/// 映射为 `preview` 事件。
+/// PreviewDraft 格式保留 span/request identity 与绝对音频范围，调试界面据此
+/// 把重叠 Preview 和非重叠 Draft 投影回真实音频时间轴。
 fn collect_vad_debug_text(
     response: &str,
     fed_ms: u64,
@@ -489,21 +507,19 @@ fn collect_vad_debug_text(
     {
         let kind = value["kind"].as_str().unwrap_or("");
         if kind == "draft" {
-            if let Some(span) = value["span"].as_str() {
-                if !span.is_empty() && span != *last_confirmed {
-                    let added = span
-                        .strip_prefix(last_confirmed.as_str())
-                        .unwrap_or(span);
-                    if !added.is_empty() {
-                        events.push(VadDebugTextEvent {
-                            kind: "confirmed",
-                            fed_ms,
-                            wall_ms,
-                            text: added.to_string(),
-                        });
-                    }
-                    *last_confirmed = span.to_string();
-                }
+            if let Ok(span) = serde_json::from_value::<DraftSpan>(value["span"].clone())
+                && !span.text.is_empty()
+            {
+                events.push(VadDebugTextEvent {
+                    kind: "draft",
+                    fed_ms,
+                    wall_ms,
+                    text: span.text,
+                    request_id: None,
+                    span_id: Some(span.span_id),
+                    revision: Some(span.revision),
+                    audio_range: Some(span.audio_range),
+                });
             }
         } else if kind == "preview" {
             if let Some(preview) = value["text"].as_str() {
@@ -519,6 +535,18 @@ fn collect_vad_debug_text(
                             fed_ms,
                             wall_ms,
                             text: preview.to_string(),
+                            request_id: value
+                                .get("requestId")
+                                .or_else(|| value.get("request_id"))
+                                .and_then(serde_json::Value::as_u64),
+                            span_id: None,
+                            revision: value.get("revision").and_then(serde_json::Value::as_u64),
+                            audio_range: value
+                                .get("audioRange")
+                                .or_else(|| value.get("audio_range"))
+                                .and_then(|range| {
+                                    serde_json::from_value::<AudioRange>(range.clone()).ok()
+                                }),
                         });
                     }
                     *last_preview = preview.to_string();
@@ -541,6 +569,10 @@ fn collect_vad_debug_text(
                 fed_ms,
                 wall_ms,
                 text: added.to_string(),
+                request_id: None,
+                span_id: None,
+                revision: None,
+                audio_range: None,
             });
         }
         *last_confirmed = confirmed.to_string();
@@ -560,6 +592,10 @@ fn collect_vad_debug_text(
                 fed_ms,
                 wall_ms,
                 text: preview.to_string(),
+                request_id: None,
+                span_id: None,
+                revision: None,
+                audio_range: None,
             });
         }
         *last_preview = preview.to_string();
@@ -936,6 +972,45 @@ mod tests {
     #[test]
     fn production_cloud_authorizer_is_fail_closed() {
         assert!(!SttCloudEgressAuthorizer::new().is_authorized("openai"));
+    }
+
+    #[test]
+    fn vad_debug_preserves_typed_draft_identity_and_audio_range() {
+        let mut events = Vec::new();
+        collect_vad_debug_text(
+            r#"{"v":2,"kind":"draft","span":{"spanId":7,"audioRange":{"startSample":16000,"endSample":96000},"text":"稳定草稿","revision":3}}"#,
+            6_100,
+            6_250,
+            &mut String::new(),
+            &mut String::new(),
+            &mut events,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "draft");
+        assert_eq!(events[0].span_id, Some(7));
+        assert_eq!(events[0].revision, Some(3));
+        assert_eq!(events[0].audio_range, Some(AudioRange::new(16_000, 96_000)));
+        assert_eq!(events[0].text, "稳定草稿");
+    }
+
+    #[test]
+    fn vad_debug_preserves_typed_preview_request_and_range() {
+        let mut events = Vec::new();
+        collect_vad_debug_text(
+            r#"{"v":2,"kind":"preview","requestId":11,"audioRange":{"startSample":48000,"endSample":96000},"revision":5,"text":"滚动预览"}"#,
+            6_000,
+            6_080,
+            &mut String::new(),
+            &mut String::new(),
+            &mut events,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "preview");
+        assert_eq!(events[0].request_id, Some(11));
+        assert_eq!(events[0].revision, Some(5));
+        assert_eq!(events[0].audio_range, Some(AudioRange::new(48_000, 96_000)));
     }
 
     #[test]

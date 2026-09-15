@@ -115,6 +115,8 @@ pub struct PseudoStreamingSttEngine {
     sample_rate: u32,
     /// 仅诊断回放设置；生产录音不分配切点记录。
     boundary_observer: Option<Arc<Mutex<Vec<SttBoundaryRecord>>>>,
+    /// 仅诊断回放设置；记录候选边界最终“切/等待”的判断依据。
+    decision_observer: Option<Arc<Mutex<Vec<SttDecisionRecord>>>>,
     /// 仅诊断回放设置；生产录音不分配定稿阶段记录。
     #[cfg(test)]
     finalize_observer: Option<Arc<Mutex<Vec<SttFinalizeRecord>>>>,
@@ -129,6 +131,24 @@ pub struct SttBoundaryRecord {
     #[cfg(test)]
     #[serde(skip)]
     pub observed_at: Instant,
+}
+
+/// PreviewDraft 调度层对一个候选边界作出的诊断判断。
+///
+/// 与 [`SttBoundaryRecord`] 不同，这里既记录已经接受的切点，也记录因上下文
+/// 不足而继续累积的候选。所有区间均位于 session 的绝对音频时间轴上。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SttDecisionRecord {
+    pub audio_ms: u64,
+    pub owned_start_ms: u64,
+    pub owned_end_ms: u64,
+    pub reason: String,
+    pub outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<&'static str>,
+    pub voiced_ms: u64,
+    pub quiet_ms: u64,
 }
 
 /// 定稿任务的阶段观察记录（仅诊断回放使用）。
@@ -499,15 +519,15 @@ impl PseudoInner {
         }
     }
 
-    fn candidate_is_ready(
+    fn candidate_readiness(
         &self,
         candidate: &BoundaryCandidate,
         total: usize,
         sample_rate: u32,
-    ) -> bool {
+    ) -> Result<(), &'static str> {
         let sample_rate = u64::from(sample_rate);
         if sample_rate == 0 {
-            return false;
+            return Err("invalid_sample_rate");
         }
         let reserved = self
             .sentences
@@ -515,18 +535,32 @@ impl PseudoInner {
             .max(self.sentences.committed_sample_end);
         let end = (candidate.boundary_sample as usize).min(total);
         let owned_samples = end.saturating_sub(reserved) as u64;
-        let min_draft_samples = self.coordinator.settings.draft_min_s.saturating_mul(sample_rate);
+        let min_draft_samples = self
+            .coordinator
+            .settings
+            .draft_min_s
+            .saturating_mul(sample_rate);
         let min_strong_owned = 2 * sample_rate;
         let min_strong_voiced = 1_200 * sample_rate / 1000;
         if candidate.reason == "hard_window" || candidate.reason == "uncommitted_cap" {
-            return owned_samples > 0;
+            return (owned_samples > 0).then_some(()).ok_or("below_draft_min");
         }
         if owned_samples >= min_draft_samples {
-            return true;
+            return Ok(());
         }
-        candidate.is_strong(sample_rate as u32, self.coordinator.settings.strong_pause_ms)
-            && owned_samples >= min_strong_owned
-            && candidate.voiced_samples >= min_strong_voiced
+        if !candidate.is_strong(
+            sample_rate as u32,
+            self.coordinator.settings.strong_pause_ms,
+        ) {
+            return Err("below_draft_min");
+        }
+        if owned_samples < min_strong_owned {
+            return Err("strong_pause_owned_too_short");
+        }
+        if candidate.voiced_samples < min_strong_voiced {
+            return Err("strong_pause_voiced_too_short");
+        }
+        Ok(())
     }
 
     fn clear_candidate(&mut self) {
@@ -650,6 +684,7 @@ impl PseudoStreamingSttEngine {
             connection: Some(conn),
             sample_rate: 16000,
             boundary_observer: None,
+            decision_observer: None,
             #[cfg(test)]
             finalize_observer: None,
         })
@@ -658,6 +693,12 @@ impl PseudoStreamingSttEngine {
     /// 给独立的 WAV 诊断回放挂载数值切点记录器。
     pub fn with_boundary_observer(mut self, observer: Arc<Mutex<Vec<SttBoundaryRecord>>>) -> Self {
         self.boundary_observer = Some(observer);
+        self
+    }
+
+    /// 给独立的 WAV 诊断回放挂载候选切分判断记录器。
+    pub fn with_decision_observer(mut self, observer: Arc<Mutex<Vec<SttDecisionRecord>>>) -> Self {
+        self.decision_observer = Some(observer);
         self
     }
 
@@ -1189,6 +1230,7 @@ impl PseudoStreamingSttEngine {
                 event = VadEvent::HardWindow;
             }
 
+            let observed_new_candidate = event.is_boundary();
             inner.observe_boundary_candidate(
                 event,
                 total,
@@ -1199,7 +1241,8 @@ impl PseudoStreamingSttEngine {
 
             let mut accepted_boundary = None;
             if let Some(candidate) = inner.boundary_candidate.clone() {
-                if inner.candidate_is_ready(&candidate, total, self.sample_rate) {
+                let readiness = inner.candidate_readiness(&candidate, total, self.sample_rate);
+                if readiness.is_ok() {
                     let mut boundary_total = candidate.boundary_sample as usize;
                     let committed = inner
                         .sentences
@@ -1220,11 +1263,38 @@ impl PseudoStreamingSttEngine {
                         }
                     }
                     accepted_boundary = Some((boundary_total, candidate.reason.clone()));
+                } else if observed_new_candidate {
+                    let reserved = inner
+                        .sentences
+                        .draft_reserved_sample_end
+                        .max(inner.sentences.committed_sample_end)
+                        as u64;
+                    let sample_rate = u64::from(self.sample_rate).max(1);
+                    if let Some(observer) = &self.decision_observer {
+                        observer
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .push(SttDecisionRecord {
+                                audio_ms: candidate.boundary_sample * 1000 / sample_rate,
+                                owned_start_ms: reserved * 1000 / sample_rate,
+                                owned_end_ms: candidate.boundary_sample * 1000 / sample_rate,
+                                reason: candidate.reason,
+                                outcome: "waiting",
+                                wait_reason: readiness.err(),
+                                voiced_ms: candidate.voiced_samples * 1000 / sample_rate,
+                                quiet_ms: candidate.quiet_samples * 1000 / sample_rate,
+                            });
+                    }
                 }
             }
 
             let pending = if let Some((boundary_total, reason)) = accepted_boundary {
                 let preview_snapshot = inner.latest_preview.clone();
+                let reserved = inner
+                    .sentences
+                    .draft_reserved_sample_end
+                    .max(inner.sentences.committed_sample_end)
+                    as u64;
                 let observer_reason = match reason.as_str() {
                     "uncommitted_cap" => "uncommitted_cap",
                     "hard_window" => "hard_window",
@@ -1240,6 +1310,27 @@ impl PseudoStreamingSttEngine {
                             reason: observer_reason,
                             #[cfg(test)]
                             observed_at: Instant::now(),
+                        });
+                }
+                if let Some(observer) = &self.decision_observer {
+                    let sample_rate = u64::from(self.sample_rate).max(1);
+                    let candidate = inner.boundary_candidate.as_ref();
+                    observer
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(SttDecisionRecord {
+                            audio_ms: boundary_total as u64 * 1000 / sample_rate,
+                            owned_start_ms: reserved * 1000 / sample_rate,
+                            owned_end_ms: boundary_total as u64 * 1000 / sample_rate,
+                            reason: reason.clone(),
+                            outcome: "accepted",
+                            wait_reason: None,
+                            voiced_ms: candidate
+                                .map(|value| value.voiced_samples * 1000 / sample_rate)
+                                .unwrap_or(0),
+                            quiet_ms: candidate
+                                .map(|value| value.quiet_samples * 1000 / sample_rate)
+                                .unwrap_or(0),
                         });
                 }
                 #[cfg(test)]

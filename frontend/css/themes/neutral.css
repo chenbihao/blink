@@ -18,6 +18,7 @@
     --red-bg: #3b2020;
     --red-border: #5a3030;
     --green-bg: #2a3a20;
+    --warning: #e0af68; /* 中性暖琥珀 -- 警告/挂起态 */
     --shadow: rgba(0, 0, 0, 0.6);
     --shadow-strong: rgba(0, 0, 0, 0.6);
     --border-glow: rgba(255, 255, 255, 0.05);
