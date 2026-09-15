@@ -395,6 +395,40 @@ impl AudioResourceRegistry {
         })
     }
 
+    /// 从一条仍然有效的 ref 派生一条新 ref，**不消费原 ref**。
+    ///
+    /// 与 `resolve` 的一次性授权不同：同一文件需要两次独立使用时
+    /// （如 VAD 调试：引擎分析消费一条、前端取回放字节消费一条），
+    /// 先 clone 出同 scope、TTL 重新起算的新 ref，两条 ref 各自一次性消费。
+    ///
+    /// **校验链**：与 resolve 相同的存在/generation/TTL/scope 检查（不移除原条目），
+    /// 随后锁外走 `issue` 的完整校验（重新打开文件 + identity 复核 + 容量预算）签发。
+    pub fn clone_audio_ref(&self, audio_ref: &str, scope: &str) -> Result<String, AudioRefError> {
+        let canonical_path = {
+            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = entries.get(audio_ref).ok_else(AudioRefErrorKind::InvalidAudioRef)?;
+            let current_gen = self.generation.load(Ordering::SeqCst);
+            if entry.generation != current_gen {
+                return Err(AudioRefError::with_detail(
+                    AudioRefErrorKind::GenerationMismatch,
+                    format!("ref gen {} != current gen {}", entry.generation, current_gen),
+                ));
+            }
+            if Instant::now() > entry.expires_at {
+                return Err(AudioRefError::new(AudioRefErrorKind::StaleAudioRef));
+            }
+            if entry.scope != scope {
+                return Err(AudioRefError::with_detail(
+                    AudioRefErrorKind::ScopeMismatch,
+                    "scope does not match",
+                ));
+            }
+            entry.canonical_path.clone()
+        };
+        // 锁外重签，避免持锁重入；issue 自身重新打开文件并复核 identity（防 TOCTOU）
+        self.issue(&canonical_path, scope)
+    }
+
     /// 当前诊断统计（测试/诊断用，不含敏感信息）。
     #[allow(dead_code)]
     pub fn stats(&self) -> RegistryStats {
@@ -584,6 +618,56 @@ mod tests {
         let audio_ref = reg.issue(&path, "same_scope").unwrap();
         let result = reg.resolve(&audio_ref, "same_scope");
         assert!(result.is_ok(), "匹配的 scope 应能解析");
+    }
+
+    // ── clone_audio_ref ──────────────────────────────────────────────────
+
+    #[test]
+    fn clone_keeps_original_and_both_refs_resolve_once() {
+        let dir = tempdir().unwrap();
+        let path = make_test_file(dir.path(), "a.wav", &make_wav_bytes(256));
+        let reg = AudioResourceRegistry::default();
+
+        let original = reg.issue(&path, "test").unwrap();
+        let cloned = reg.clone_audio_ref(&original, "test").unwrap();
+        assert_ne!(original, cloned, "clone 应签发新 token");
+
+        // 原 ref 未被消费：两条 ref 各自可一次性解析
+        assert!(reg.resolve(&original, "test").is_ok());
+        assert!(reg.resolve(&cloned, "test").is_ok());
+        // 一次性授权：再次解析都应失败
+        assert!(reg.resolve(&original, "test").is_err());
+        assert!(reg.resolve(&cloned, "test").is_err());
+    }
+
+    #[test]
+    fn clone_rejects_unknown_ref_and_scope_mismatch() {
+        let dir = tempdir().unwrap();
+        let path = make_test_file(dir.path(), "a.wav", &make_wav_bytes(256));
+        let reg = AudioResourceRegistry::default();
+
+        let original = reg.issue(&path, "scope_a").unwrap();
+        let unknown = reg.clone_audio_ref("aref_0000000000000000", "scope_a");
+        assert_eq!(unknown.unwrap_err().kind, AudioRefErrorKind::InvalidAudioRef);
+        let mismatched = reg.clone_audio_ref(&original, "scope_b");
+        assert_eq!(mismatched.unwrap_err().kind, AudioRefErrorKind::ScopeMismatch);
+        // 失败的 clone 不消费原 ref
+        assert!(reg.resolve(&original, "scope_a").is_ok());
+    }
+
+    #[test]
+    fn clone_rejects_expired_ref() {
+        let dir = tempdir().unwrap();
+        let path = make_test_file(dir.path(), "a.wav", &make_wav_bytes(256));
+        let reg = AudioResourceRegistry::default();
+
+        let original = reg.issue(&path, "test").unwrap();
+        {
+            let mut entries = reg.entries.lock().unwrap();
+            entries.get_mut(&original).unwrap().expires_at = Instant::now() - Duration::from_secs(1);
+        }
+        let cloned = reg.clone_audio_ref(&original, "test");
+        assert_eq!(cloned.unwrap_err().kind, AudioRefErrorKind::StaleAudioRef);
     }
 
     // ── 容量淘汰 ──────────────────────────────────────────────────────────

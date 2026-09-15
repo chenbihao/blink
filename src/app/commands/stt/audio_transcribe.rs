@@ -219,3 +219,71 @@ pub async fn debug_vad_audio_file(
             crate::app::command_error::CommandError::new(error.category(), error.to_string(), false)
         })
 }
+
+/// 为 VAD 调试回放克隆一条新 audio_ref（不消费原 ref）。
+///
+/// `debug_vad_audio_file` 的分析会一次性消费原 ref，前端取回放字节
+/// （`read_audio_for_playback`）也需一次性授权，两条用途各持一条 ref。
+#[tauri::command]
+pub async fn clone_audio_ref_for_vad_debug(
+    app: tauri::AppHandle,
+    audio_ref: String,
+) -> Result<String, crate::app::command_error::CommandError> {
+    let registry = app
+        .state::<std::sync::Arc<crate::app::audio_resource::AudioResourceRegistry>>()
+        .inner()
+        .clone();
+    registry
+        .clone_audio_ref(&audio_ref, "stt_transcribe")
+        .map_err(|error| {
+            tracing::warn!(error = %error, "clone_audio_ref_for_vad_debug: 无法克隆 audio_ref");
+            crate::app::command_error::CommandError::new(
+                error.kind.as_str(),
+                "无法复用所选音频文件",
+                false,
+            )
+        })
+}
+
+/// 读取 audio_ref 指向的音频字节供前端本地播放（VAD 调试回放）。
+///
+/// 走 registry 完整校验并一次性消费该 ref；字节经原始 IPC 返回，
+/// 避免 JSON 数字数组序列化。前端转 blob URL 后交给 `<audio>` 播放。
+#[tauri::command]
+pub async fn read_audio_for_playback(
+    app: tauri::AppHandle,
+    audio_ref: String,
+) -> Result<tauri::ipc::Response, crate::app::command_error::CommandError> {
+    let registry = app
+        .state::<std::sync::Arc<crate::app::audio_resource::AudioResourceRegistry>>()
+        .inner()
+        .clone();
+    let opened = registry.resolve(&audio_ref, "stt_transcribe").map_err(|error| {
+        tracing::warn!(error = %error, "read_audio_for_playback: 无法解析 audio_ref");
+        crate::app::command_error::CommandError::new(error.kind.as_str(), "音频资源不可用", false)
+    })?;
+    let size = opened.size;
+    let mut file = opened.file;
+    // 从 resolve 返回的已验证 file handle 读取，不走"路径再打开"路径
+    let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut buffer = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut buffer).map(|_| buffer)
+    })
+    .await
+    .map_err(|error| {
+        crate::app::command_error::CommandError::new(
+            "internal_error",
+            format!("读取音频任务失败: {error}"),
+            true,
+        )
+    })?
+    .map_err(|error| {
+        crate::app::command_error::CommandError::new(
+            "io_error",
+            format!("读取音频失败: {error}"),
+            false,
+        )
+    })?;
+    Ok(tauri::ipc::Response::new(bytes))
+}

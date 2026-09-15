@@ -76,6 +76,29 @@ fn is_chinese_char(c: char) -> bool {
     matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}')
 }
 
+/// FunASR 系模型对静音/稳态噪声段输出的 "/sil" 标记。
+///
+/// 该标记只出现在无有效语音的识别结果里（整段 "/sil" 或正文尾部粘着），
+/// 不构成真实转写的一部分，全局移除；剥离后为空的 Draft 由调用方按
+/// NoSpeech 消费，不产生 span。
+fn strip_silence_markers(text: &str) -> String {
+    let mut result = text.trim().to_string();
+    loop {
+        let mut next = result.clone();
+        for suffix in ["。", ".", "，", ",", "！", "!", "？", "?", ""] {
+            let pattern = format!("/sil{suffix}");
+            if next.contains(&pattern) {
+                next = next.replace(&pattern, "");
+            }
+        }
+        next = next.trim().to_string();
+        if next.len() == result.len() {
+            return next;
+        }
+        result = next;
+    }
+}
+
 /// 剥离 SenseVoice 幻觉产生的尾部英文语气词。
 ///
 /// 当识别文本以中文为主时，模型可能在尾部静音段幻觉出
@@ -84,11 +107,12 @@ fn is_chinese_char(c: char) -> bool {
 /// emoji 和 CJK 间空格已由 Python server `_postprocess_text` 处理，
 /// 此处不再重复。
 ///
-/// 仅当文本包含中文字符时才执行剥离，避免误伤纯英文识别。
+/// 仅当文本包含中文字符时才执行语气词剥离，避免误伤纯英文识别；
+/// "/sil" 静音标记与语言无关，先于该判断移除。
 pub(crate) fn strip_filler_words(text: &str) -> String {
-    let trimmed = text.trim();
+    let trimmed = strip_silence_markers(text);
     if trimmed.is_empty() {
-        return trimmed.to_string();
+        return trimmed;
     }
 
     // 检查是否包含中文字符

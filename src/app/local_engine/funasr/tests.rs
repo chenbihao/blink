@@ -925,7 +925,7 @@ async fn private_corpus_manifest_end_to_end() {
     let results = run.expect("private corpus runner");
     assert_eq!(
         results.len(),
-        11,
+        17,
         "private corpus manifest case count drifted"
     );
     assert!(
@@ -1982,4 +1982,335 @@ async fn pseudo_streaming_real_worker_replay() {
     });
     std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
         .expect("write real pseudo replay report");
+}
+
+/// 未列入 manifest 的新录音基线：同一真实 Nano worker 上先整条识别（最大
+/// 上下文基准文本），再按默认参数（VAD A + PreviewDraft 双层）以实时速率
+/// 伪流式回放，对照切片链路最终文本与整条基准的相似度。
+///
+/// 门控：`BLINK_STT_FULL_TEXT=1` 且 `BLINK_STT_CORPUS_DIR` 指向 corpus 目录。
+/// 正文与文件名只写入 corpus 目录内 `full-transcribe-baseline.json`（该目录
+/// 已被 .gitignore 排除，与 manifest.toml 同为私有数据）；`target/` 只留
+/// 匿名哈希 id 与数值，保持与其他 sweep 报告一致的匿名约束。
+#[tokio::test(flavor = "multi_thread")]
+async fn private_corpus_unlisted_full_transcribe() {
+    let full_text_mode = std::env::var("BLINK_STT_FULL_TEXT").ok();
+    if !matches!(full_text_mode.as_deref(), Some("1") | Some("all")) {
+        eprintln!("跳过：设置 BLINK_STT_FULL_TEXT=1（或 =all 复验已收录 case）运行整条+伪流式文本基线");
+        return;
+    }
+    let Some(corpus_dir) = super::corpus_runner::should_run() else {
+        eprintln!("跳过：未设置 BLINK_STT_CORPUS_DIR");
+        return;
+    };
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let worker_dir = root.join("resources/bin/funasr-worker");
+    let worker_exe = worker_dir.join("funasr-nano-worker.exe");
+    // Nano 模型走 AppData 安装缓存（只读；音频临时目录仍在 target 下）
+    let appdata = std::env::var("APPDATA").expect("APPDATA");
+    let model_root = std::path::PathBuf::from(&appdata)
+        .join("blink/models/funasr/gguf-fun-asr-nano-q4km-9faa9616b982");
+    let active = std::fs::read_to_string(model_root.join("active.json")).ok();
+    let payload = active.and_then(|text| {
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                let slot = v["slot_id"].as_str()?.to_string();
+                Some(model_root.join("slots").join(slot).join("payload"))
+            })
+    });
+    let (encoder, llm) = match &payload {
+        Some(payload)
+            if payload.join("funasr-encoder-f16.gguf").is_file()
+                && payload.join("qwen3-0.6b-q4km.gguf").is_file() =>
+        {
+            (
+                payload.join("funasr-encoder-f16.gguf"),
+                payload.join("qwen3-0.6b-q4km.gguf"),
+            )
+        }
+        _ => {
+            eprintln!("跳过：AppData 缺少已安装的 Nano 模型 payload");
+            return;
+        }
+    };
+    if !worker_exe.is_file() {
+        eprintln!("跳过：本地缺少 funasr-nano-worker.exe");
+        return;
+    }
+    let payload_dir = payload.expect("payload resolved above");
+
+    // 只处理未列入 manifest 的新录音（与 real_worker_replay 的 unlabeled 集一致）；
+    // BLINK_STT_FULL_TEXT=all 时不按 manifest 过滤（manifest 收录后的复验用）。
+    let include_listed = full_text_mode.as_deref() == Some("all");
+    let manifest = super::corpus_runner::load_manifest(&corpus_dir).expect("load manifest");
+    let listed: std::collections::HashSet<_> = manifest
+        .cases
+        .iter()
+        .map(|case| case.filename.to_lowercase())
+        .collect();
+    let mut wavs: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus_dir)
+        .expect("read corpus dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+                && (include_listed
+                    || !listed.contains(&path.file_name().unwrap().to_string_lossy().to_lowercase()))
+        })
+        .collect();
+    wavs.sort();
+    assert!(!wavs.is_empty(), "corpus dir has no unlabeled long wavs");
+
+    let audio_dir_guard = tempfile::Builder::new()
+        .prefix("full-text-audio-")
+        .tempdir_in(root.join("target"))
+        .expect("create audio tempdir");
+    let audio_dir = audio_dir_guard.path().to_path_buf();
+
+    let mut command = tokio::process::Command::new(&worker_exe);
+    command
+        .args([
+            "--enc",
+            encoder.to_str().unwrap(),
+            "-m",
+            llm.to_str().unwrap(),
+            "--stdin-server",
+        ])
+        .current_dir(&worker_dir)
+        .env("BLINK_ENGINE_ID", "funasr")
+        .env("BLINK_INSTANCE_ID", "full-text-replay")
+        .env("BLINK_ENGINE_TOKEN", "full-text-token")
+        .env("BLINK_MODEL_ID", "gguf/fun-asr-nano-q4km")
+        .env("BLINK_MODEL_REVISION", "gguf-v0.2.6")
+        .env("BLINK_MODEL_PAYLOAD_DIR", &payload_dir)
+        .env("BLINK_AUDIO_DIR", &audio_dir)
+        .env("BLINK_WORKER_THREADS", "4")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = crate::infra::platform::no_window_tokio(command)
+        .spawn()
+        .expect("spawn worker for full text baseline");
+    let stdin = child.stdin.take().expect("worker stdin");
+    let stdout = child.stdout.take().expect("worker stdout");
+    let client = crate::infra::local_engine::worker_proto::NdjsonWorkerClient::new(stdin, stdout);
+    client
+        .hello(std::time::Duration::from_secs(60))
+        .await
+        .expect("worker ready within 60s");
+
+    use crate::domain::config::stt_config::SttConfig;
+    use crate::domain::stt::{SttEngine, SttTransport};
+    let sample_rate = 16_000usize;
+
+    let mut private_cases = Vec::new();
+    let mut anonymous_cases = Vec::new();
+    for path in &wavs {
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+        let wav = std::fs::read(path).expect("read wav");
+        let case_id = anonymous_recording_case_id(&wav);
+        let audio =
+            super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
+        let duration_ms = audio.samples.len() * 1000 / sample_rate;
+
+        // 1) 整条识别：最大上下文的基准文本
+        let whole_transport =
+            std::sync::Arc::new(worker::GgufSttTransport::new(client.clone(), audio_dir.clone()));
+        let whole_started = std::time::Instant::now();
+        let whole = whole_transport
+            .transcribe_with_metrics(&super::corpus_runner::encode_canonical_wav(
+                &audio.samples,
+            ))
+            .await
+            .expect("whole-file transcribe");
+        let whole_total_ms = whole_started.elapsed().as_millis() as u64;
+
+        // 2) 伪流式双层回放：默认 VAD(A) + PreviewDraft，实时速率喂入。
+        // 过载（stt_overloaded 等）是本回放要观测的结果：记录后停止喂入，
+        // 不作为测试失败。
+        let config = SttConfig::default();
+        let (offline_boundaries, long_pauses, rejected_short_sentences) =
+            offline_vad_timeline(&audio.samples, &config.local_engine.vad);
+        let boundary_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let decision_observer: std::sync::Arc<
+            std::sync::Mutex<
+                Vec<crate::domain::stt::pseudo_streaming::SttDecisionRecord>,
+            >,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = RecordingTransport::wrap(std::sync::Arc::new(
+            worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
+        ));
+        let conn = crate::domain::stt::SttEngineConnection {
+            host: "127.0.0.1".into(),
+            port: 0,
+            engine_id: "funasr".into(),
+            instance_id: "full-text-replay".into(),
+            transport: Some(recorder.clone()),
+        };
+        let engine =
+            crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
+                &config, conn,
+            )
+            .expect("engine constructs")
+            .with_boundary_observer(boundary_observer.clone())
+            .with_decision_observer(decision_observer.clone());
+
+        recorder.start_clock();
+        let mut fed_samples = 0usize;
+        let mut stream_error: Option<serde_json::Value> = None;
+        let mut watermarks: Vec<serde_json::Value> = Vec::new();
+        for (index, chunk) in audio.samples.chunks(sample_rate / 10).enumerate() {
+            if let Err(error) = engine.transcribe_chunk(chunk).await {
+                stream_error = Some(serde_json::json!({
+                    "error": error.to_string(),
+                    "fed_ms": fed_samples as u64 * 1000 / sample_rate as u64,
+                }));
+                break;
+            }
+            fed_samples += chunk.len();
+            // 实时速率喂入，让流式定稿/强停顿冲刷真实发生
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if index % 10 == 0 {
+                let stats = engine.stream_stats();
+                watermarks.push(serde_json::json!({
+                    "fed_ms": fed_samples as u64 * 1000 / sample_rate as u64,
+                    "buffer_ms": stats.pcm_samples as u64 * 1000 / sample_rate as u64,
+                    "committed_ms": stats.pcm_committed_end as u64 * 1000 / sample_rate as u64,
+                }));
+            }
+        }
+        let finalize_started = std::time::Instant::now();
+        let finalize_outcome = engine.finalize().await;
+        let finalize_ms = finalize_started.elapsed().as_millis() as u64;
+        let (stream_text, finalize_error) = match finalize_outcome {
+            Ok(text) => (text, None),
+            Err(error) => (String::new(), Some(error.to_string())),
+        };
+        let boundary_events: Vec<serde_json::Value> = boundary_observer
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|boundary| {
+                serde_json::json!({
+                    "audio_ms": boundary.audio_ms,
+                    "reason": boundary.reason,
+                })
+            })
+            .collect();
+        let decisions: Vec<serde_json::Value> = decision_observer
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                serde_json::json!({
+                    "audio_ms": record.audio_ms,
+                    "owned_start_ms": record.owned_start_ms,
+                    "owned_end_ms": record.owned_end_ms,
+                    "reason": record.reason,
+                    "outcome": record.outcome,
+                    "wait_reason": record.wait_reason,
+                    "voiced_ms": record.voiced_ms,
+                    "quiet_ms": record.quiet_ms,
+                })
+            })
+            .collect();
+        let transcribe_calls = recorder.take_records();
+        engine.reset();
+
+        let similarity = super::corpus_runner::edit_similarity_percent(
+            &super::corpus_runner::normalize_for_compare(&stream_text),
+            &super::corpus_runner::normalize_for_compare(&whole.text),
+        );
+        println!(
+            "full-text {case_id}: dur={duration_ms}ms whole={}chars/{}ms stream={}chars/{}ms sim={similarity}% calls={} err={:?}",
+            whole.text.chars().count(),
+            whole_total_ms,
+            stream_text.chars().count(),
+            finalize_ms,
+            transcribe_calls.len(),
+            stream_error.as_ref().map(|v| v["error"].as_str().unwrap_or("?")),
+        );
+
+        private_cases.push(serde_json::json!({
+            "filename": filename,
+            "case_id": case_id,
+            "duration_ms": duration_ms,
+            "whole_file": {
+                "text": whole.text,
+                "inference_ms": whole.inference_ms,
+                "total_ms": whole_total_ms,
+            },
+            "streaming": {
+                "final_text": stream_text,
+                "finalize_error": finalize_error,
+                "stream_error": stream_error,
+                "finalize_ms": finalize_ms,
+                "boundaries": boundary_events,
+                "decisions": decisions,
+                "watermarks": watermarks,
+                "transcribe_calls": transcribe_calls,
+            },
+            "offline_vad": {
+                "boundaries": offline_boundaries,
+                "long_pauses": long_pauses
+                    .iter()
+                    .map(|(start_ms, end_ms)| serde_json::json!({"start_ms": start_ms, "end_ms": end_ms}))
+                    .collect::<Vec<_>>(),
+                "rejected_short_sentences": rejected_short_sentences,
+            },
+            "similarity_stream_vs_whole_pct": similarity,
+        }));
+        anonymous_cases.push(serde_json::json!({
+            "case_id": case_id,
+            "duration_ms": duration_ms,
+            "whole_inference_ms": whole.inference_ms,
+            "whole_total_ms": whole_total_ms,
+            "whole_chars": whole.text.chars().count(),
+            "stream_chars": stream_text.chars().count(),
+            "stream_boundary_count": boundary_events.len(),
+            "stream_error": stream_error,
+            "finalize_error": finalize_error,
+            "finalize_ms": finalize_ms,
+            "similarity_stream_vs_whole_pct": similarity,
+        }));
+    }
+
+    client.request_shutdown().await;
+    drop(client);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+    }
+
+    // 私有正文基线：只写 corpus 私有目录（gitignored），与 manifest 同级同敏感度
+    let private_output = corpus_dir.join("full-transcribe-baseline.json");
+    std::fs::write(
+        &private_output,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "scope": "private full-text baseline for unlisted corpus wavs; contains transcripts and filenames; never commit",
+            "cases": private_cases,
+        }))
+        .unwrap(),
+    )
+    .expect("write private full-text baseline");
+
+    let output = root.join("target/stt-full-transcribe.json");
+    std::fs::write(
+        &output,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "scope": "anonymous numeric baseline: whole-file vs default PreviewDraft streaming on unlisted wavs; no transcripts, filenames or paths",
+            "cases": anonymous_cases,
+        }))
+        .unwrap(),
+    )
+    .expect("write anonymous full-text report");
 }

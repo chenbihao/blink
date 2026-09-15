@@ -14,6 +14,7 @@
  */
 import {commandErrorText, invoke, listen} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
+import {iconHTML} from "../../shared/icon.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from "../index.js";
 import {navigateSettings} from "../navigation.js";
@@ -425,10 +426,111 @@ function initVadDebug() {
     const progressTime = document.getElementById("voice-vad-debug-progress-time");
     const progressDetail = document.getElementById("voice-vad-debug-progress-detail");
     const result = document.getElementById("voice-vad-debug-result");
+    const chart = document.getElementById("voice-vad-debug-chart");
+    const transport = document.getElementById("voice-vad-debug-transport");
+    const playButton = document.getElementById("voice-vad-debug-play");
+    const playTime = document.getElementById("voice-vad-debug-play-time");
     if (!button || !status || !file || !progress || !progressBar || !progressTime || !progressDetail
-        || !result || button.dataset.bound === "true") return;
+        || !result || !chart || !transport || !playButton || !playTime
+        || button.dataset.bound === "true") return;
     button.dataset.bound = "true";
     let runSerial = 0;
+
+    // ── 回放（调试增强）：WAV 字节经原始 IPC 到前端后 blob 播放，失败静默降级 ──
+    const playback = {audio: null, url: "", raf: 0};
+
+    function formatPlaySeconds(value) {
+        return `${Number(value).toFixed(1)}s`;
+    }
+
+    function resetPlayback() {
+        if (playback.raf) cancelAnimationFrame(playback.raf);
+        playback.raf = 0;
+        if (playback.audio) {
+            playback.audio.pause();
+            playback.audio.removeAttribute("src");
+            playback.audio.load();
+        }
+        if (playback.url) URL.revokeObjectURL(playback.url);
+        playback.audio = null;
+        playback.url = "";
+        transport.hidden = true;
+        chart.classList.remove("seekable");
+    }
+
+    function updatePlayback() {
+        const audio = playback.audio;
+        if (!audio) return;
+        const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+        const playhead = chart.querySelector(".vad-playhead");
+        if (playhead) {
+            const x = duration ? (Math.min(1, audio.currentTime / duration) * 1000).toFixed(1) : "0";
+            playhead.setAttribute("x1", x);
+            playhead.setAttribute("x2", x);
+        }
+        playTime.textContent = `${formatPlaySeconds(audio.currentTime)} / ${formatPlaySeconds(duration)}`;
+    }
+
+    function setPlayButton(playing) {
+        playButton.innerHTML = iconHTML(playing ? "pause" : "play");
+        const label = t(playing ? "voice.local.vad_debug.pause" : "voice.local.vad_debug.play");
+        playButton.setAttribute("aria-label", label);
+        playButton.title = label;
+    }
+
+    function setupPlayback(playbackRef, epoch) {
+        invoke("read_audio_for_playback", {audioRef: playbackRef}).then(buffer => {
+            if (epoch !== runSerial) return; // 新一轮已开始，旧回流不得覆盖（竞态防护）
+            const url = URL.createObjectURL(new Blob([buffer], {type: "audio/wav"}));
+            const audio = new Audio(url);
+            playback.audio = audio;
+            playback.url = url;
+            audio.addEventListener("play", () => {
+                setPlayButton(true);
+                if (!playback.raf) playback.raf = requestAnimationFrame(function frame() {
+                    updatePlayback();
+                    if (playback.audio && !playback.audio.paused) playback.raf = requestAnimationFrame(frame);
+                    else playback.raf = 0;
+                });
+            });
+            const onStopped = () => {
+                setPlayButton(false);
+                if (playback.raf) {
+                    cancelAnimationFrame(playback.raf);
+                    playback.raf = 0;
+                }
+                updatePlayback();
+            };
+            audio.addEventListener("pause", onStopped);
+            audio.addEventListener("ended", onStopped);
+            transport.hidden = false;
+            chart.classList.add("seekable");
+            setPlayButton(false);
+            updatePlayback();
+        }).catch(error => {
+            console.warn("VAD playback unavailable:", error);
+        });
+    }
+
+    playButton.addEventListener("click", () => {
+        const audio = playback.audio;
+        if (!audio) return;
+        if (audio.paused) audio.play().catch(() => {});
+        else audio.pause();
+    });
+
+    // 点击图表按时间定位（SVG viewBox 宽 1000 即全程，线性映射）
+    chart.addEventListener("click", event => {
+        const audio = playback.audio;
+        if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        const svg = chart.querySelector("svg");
+        if (!svg) return;
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width) return;
+        const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+        audio.currentTime = ratio * audio.duration;
+        updatePlayback();
+    });
 
     function showProgress(payload) {
         const state = vadDebugProgressState(payload, t);
@@ -446,6 +548,7 @@ function initVadDebug() {
         button.disabled = true;
         if (transcribeButton) transcribeButton.disabled = true;
         result.hidden = true;
+        resetPlayback();
         file.hidden = true;
         progress.hidden = true;
         status.className = "voice-file-transcribe-status";
@@ -460,6 +563,13 @@ function initVadDebug() {
             file.textContent = `${t("voice.local.vad_debug.selected_file")} ${picked.displayName}`;
             file.hidden = false;
             const runId = `${Date.now()}-${++runSerial}`;
+            // 分析会一次性消费原 ref；回放取字节用克隆 ref，两条授权互不影响
+            let playbackRef = null;
+            try {
+                playbackRef = await invoke("clone_audio_ref_for_vad_debug", {audioRef: picked.audioRef});
+            } catch (error) {
+                console.warn("VAD playback clone unavailable:", error);
+            }
             showProgress({phase: "preparing", fedMs: 0, durationMs: 0});
             try {
                 unlisten = await listen(EVENTS.STT_VAD_DEBUG_PROGRESS, event => {
@@ -479,6 +589,7 @@ function initVadDebug() {
             result.hidden = false;
             status.textContent = t("voice.local.vad_debug.done");
             status.className = "voice-file-transcribe-status success";
+            if (playbackRef) setupPlayback(playbackRef, runSerial);
         } catch (error) {
             progress.hidden = true;
             status.textContent = commandErrorText(error, t("voice.local.vad_debug.failed"));

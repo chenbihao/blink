@@ -413,7 +413,7 @@ pub fn evaluate_result(case: &CorpusCase, _text: &str, normalized_text: &str) ->
 }
 
 /// 归一化文本用于比较：去标点、去空格、统一大小写。
-fn normalize_for_compare(text: &str) -> String {
+pub(crate) fn normalize_for_compare(text: &str) -> String {
     text.chars()
         .filter(|c| {
             // 去除 ASCII 标点、空格和中文标点
@@ -433,7 +433,7 @@ fn best_similarity_percent(case: &CorpusCase, actual: &str) -> u8 {
         .unwrap_or(if actual.is_empty() { 100 } else { 0 })
 }
 
-fn edit_similarity_percent(left: &str, right: &str) -> u8 {
+pub(crate) fn edit_similarity_percent(left: &str, right: &str) -> u8 {
     let left: Vec<char> = left.chars().collect();
     let right: Vec<char> = right.chars().collect();
     let max_len = left.len().max(right.len());

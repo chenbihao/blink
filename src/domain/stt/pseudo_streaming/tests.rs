@@ -519,6 +519,101 @@ fn filler_strip_uses_original_unicode_boundaries() {
     assert_eq!(strip_filler_words("你好İ Yeah."), "你好İ");
 }
 
+#[test]
+fn silence_marker_strip_covers_standalone_suffix_and_repeats() {
+    // 稳态噪声段的 "/sil" 标记不得进入 Draft/最终文本
+    assert_eq!(strip_filler_words("/sil"), "");
+    assert_eq!(strip_filler_words("/sil/sil"), "");
+    assert_eq!(strip_filler_words("风扇背景。/sil"), "风扇背景。");
+    assert_eq!(strip_filler_words("可能会比较长。/sil。"), "可能会比较长。");
+    // 无标记的纯英文识别不受影响
+    assert_eq!(strip_filler_words("yes"), "yes");
+}
+
+// ── 0.23.9 PreviewDraft 引擎回归 ──
+
+/// 构造默认参数（VAD A + PreviewDraft）的受控引擎。
+fn preview_draft_engine(transport: Arc<ControlledTransport>) -> PseudoStreamingSttEngine {
+    let conn = crate::domain::stt::SttEngineConnection {
+        host: "127.0.0.1".into(),
+        port: 0,
+        engine_id: "funasr".into(),
+        instance_id: "pd-test".into(),
+        transport: Some(transport),
+    };
+    PseudoStreamingSttEngine::from_connection_with_profile(
+        &crate::domain::config::stt_config::SttConfig::default(),
+        conn,
+        RecognitionProfile::PreviewDraft,
+    )
+    .expect("engine constructs")
+}
+
+/// Draft 提交推进 committed 水位后，backlog 必须按未提交音频计算：
+/// 27.2s 会话（超过 2 × max_uncommitted = 24s 硬限）逐段提交不得触发
+/// stt_overloaded。修复前协调器 committed 水位不随 Draft 提交推进，
+/// backlog 退化为会话总时长，第 24s 起误报过载。
+#[tokio::test]
+async fn preview_draft_long_session_does_not_overload_after_draft_commits() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..4).map(|_| oneshot::channel()).collect();
+    let (senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    let speech = vec![0.1f32; 16_000 * 6];
+    let pause = vec![0.0f32; 16_000 * 8 / 10];
+    let mut committed_before = 0usize;
+    for (index, sender) in senders.into_iter().enumerate() {
+        for source in [&speech, &pause] {
+            for chunk in source.chunks(160) {
+                engine
+                    .transcribe_chunk(chunk)
+                    .await
+                    .expect("长会话喂入不得过载");
+            }
+        }
+        transport.wait_for_calls_or_fail(index + 1).await;
+        sender
+            .send(Ok(format!("第{}段。", index + 1)))
+            .expect("response sender 不应泄漏");
+        wait_until(|| engine.stream_stats().pcm_committed_end > committed_before).await;
+        committed_before = engine.stream_stats().pcm_committed_end;
+    }
+
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "第1段。第2段。第3段。第4段。");
+}
+
+/// 模型对噪声段返回 "/sil"：剥离后为空 → 按 NoSpeech 消费 owned range，
+/// 不产生 span、不进 confirmed，但 committed 水位推进（避免反复重试）。
+#[tokio::test]
+async fn preview_draft_silence_marker_result_consumes_without_span() {
+    let (sender, receiver) = oneshot::channel();
+    let transport = ControlledTransport::new(vec![receiver]);
+    let engine = preview_draft_engine(transport.clone());
+
+    let speech = vec![0.1f32; 16_000 * 5 / 2];
+    let pause = vec![0.0f32; 16_000 * 8 / 10];
+    for source in [&speech, &pause] {
+        for chunk in source.chunks(160) {
+            engine.transcribe_chunk(chunk).await.expect("chunk ok");
+        }
+    }
+    transport.wait_for_calls_or_fail(1).await;
+    sender.send(Ok("/sil".to_string())).expect("sender 不应泄漏");
+    wait_until(|| engine.stream_stats().pcm_committed_end > 0).await;
+
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "", "静音标记不得进入最终文本");
+    assert!(
+        engine.stream_stats().pcm_committed_end >= 16_000 * 5 / 2,
+        "NoSpeech 消费必须推进 committed 水位"
+    );
+}
+
 // ── 引擎 reset 测试 ──
 
 #[test]

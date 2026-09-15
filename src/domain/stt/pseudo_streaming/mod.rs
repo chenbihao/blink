@@ -1008,8 +1008,15 @@ impl PseudoStreamingSttEngine {
                         return;
                     }
                 };
+                // 识别成功但正文为空（纯静音，或剥离 "/sil" 后为空的噪声段）
+                // 与音频级 NoSpeech 同等对待：PreviewDraft 消费 owned range、
+                // 不产生 span；Legacy 保持空文本 rollback 语义不变。
+                let silence_only =
+                    finalize_result.ok && finalize_result.text.is_empty();
                 let deferred =
-                    if no_speech && recognition_profile == RecognitionProfile::PreviewDraft {
+                    if (no_speech || silence_only)
+                        && recognition_profile == RecognitionProfile::PreviewDraft
+                    {
                         let range_end = inner
                             .sentences
                             .pending
@@ -1205,6 +1212,14 @@ impl PseudoStreamingSttEngine {
             // 不能继续持有无界 PCM。保留已提交 Draft 与完整绝对水位。
             // 0.23.9：通过 coordinator 的 accept_audio_end 检查 backlog，
             // coordinator 成为过载判定的唯一真源。
+            // Draft 提交走 SentenceState（不经 coordinator.finish），因此
+            // 判定前必须把生产 committed 水位同步进 coordinator；否则
+            // backlog 退化为会话总时长，24s 硬限会在正常听写中误触发。
+            let committed_end = inner.sentences.committed_sample_end as u64;
+            inner.coordinator.draft_committed_audio_end = inner
+                .coordinator
+                .draft_committed_audio_end
+                .max(committed_end);
             let max_uncommitted_s = inner.max_uncommitted_audio_ms / 1000;
             if !inner
                 .coordinator

@@ -1551,6 +1551,8 @@ app::commands::toggle_default_trigger,
             app::commands::pick_audio_file_for_vad_debug,
             app::commands::transcribe_audio_file,
             app::commands::debug_vad_audio_file,
+            app::commands::clone_audio_ref_for_vad_debug,
+            app::commands::read_audio_for_playback,
             app::commands::get_default_hotkey,
             // 0.13.0 MCP client
             app::commands::list_mcp_servers,
