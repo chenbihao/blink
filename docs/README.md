@@ -57,7 +57,7 @@
 | **0.20** | [0.20-content-visual-workflow.md](./phases/0.20-content-visual-workflow.md) | 高频内容与视觉工作流（便签可靠性 / 剪贴板多选 / 颜色 / 图片编辑 / 截图性能与精调） | ✅ |
 | **0.21** | [0.21-capability-unification-feature-catalog.md](./phases/0.21-capability-unification-feature-catalog.md) | Capability 唯一执行入口、Action 全量分流、功能目录及 AI/MCP 出口策略 | ✅ |
 | **0.22** | [0.22-local-model-runtime-ppocrv6.md](./phases/0.22-local-model-runtime-ppocrv6.md) | 本地模型运行时、PP-OCRv6、OCR ONNX、Nano GGUF、implementation 拓扑与 ASR ONNX 退役；0.22.11~0.22.13 交互收尾（设置页关闭/编辑器三态确认、chord 全局快捷键、首启向导分步化） | ✅ |
-| **0.23** | [0.23-editor-voice-ai-workflow.md](./phases/0.23-editor-voice-ai-workflow.md) | 单会话文本工作台、Preview/Draft 双层识别、AI 确认与主链路稳定性收口 | ✅ |
+| **0.23** | [0.23-editor-voice-ai-workflow.md](./phases/0.23-editor-voice-ai-workflow.md) | 单会话文本工作台、Preview/Draft 双层识别、AI 确认与主链路稳定性收口；0.23.12 统一资源 ref 层（规划中） | 🚧 |
 | **0.24** | [0.24-smart-tab-suggestion-system.md](./phases/0.24-smart-tab-suggestion-system.md) | Smart Tab 与统一建议系统（双槽位仲裁、Query/Awareness 评分、主窗口提示 UI 收敛、Needle 路由 Spike） | 📋 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
@@ -87,7 +87,7 @@
 | 0.21.x | Capability 唯一原子执行入口、Action 全量分流删除、功能目录与 AI/MCP 授权、AI 对话预算、摘要与记忆链路 | ✅ 0.21.0~0.21.23 完成 |
 | 0.22.x | 本地模型运行时、FunASR 生命周期与模型资产迁移、PP-OCRv6/WinRT、OCR ONNX、Nano GGUF 与 ASR ONNX 退役 | ✅ 0.22.0~0.22.10 完成 |
 | 0.22.11 ~ 0.22.13 | 交互修复（设置页关闭按钮 / 编辑器三态确认）、chord 全局快捷键（RegisterHotKey + 双层冲突探测）、首次引导向导（开关配置 + 引擎下载引导） | ✅ 完成（档案已并入 0.22） |
-| 0.23.x | 单会话编辑底座、连续听写、Preview/Draft 双层识别、显式 AI 整理与主链路稳定性收口 | ✅ 已完成 |
+| 0.23.x | 单会话编辑底座、连续听写、Preview/Draft 双层识别、显式 AI 整理与主链路稳定性收口 | 🚧 0.23.0~0.23.11 完成；0.23.12 统一资源 ref 层已规划 |
 | 0.24.x | Smart Tab、SuggestionSet/Coordinator、Query/Awareness 简单评分、主窗口提示 UI 收敛与 Needle Spike | 📋 规划中 |
 | 未立项 | 见 roadmap：subagent / proactivity / 同步 / 远期向量与 RAG 观察 | 🔮 候选池 |
 

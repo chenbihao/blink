@@ -43,7 +43,9 @@ globalThis.document = {
 
 const {sampleOriginalInkColorFromPixels, sampleOriginalInkColorsFromPixels,
     sampleAverageBackgroundColorFromPixels, chooseStableTranslatedInk,
-    buildInkSegments, quantizeInkColors, wcagContrastRatio} = await import('./annotation-engine.js');
+    buildInkSegments, quantizeInkColors, wcagContrastRatio,
+    countSolidInkClusters, isCodeLikeInkLayout,
+    mergeTranslatedInkFragments, alignInkColorsToWords} = await import('./annotation-engine.js');
 
 /** 构造 ImageData 样例。fill(x, y) → [r, g, b]。 */
 function makeImage(w, h, fill) {
@@ -496,5 +498,204 @@ describe('buildInkSegments — 译文分段着色', () => {
     test('译文被截断时分段仍完整覆盖显示文本', () => {
         const segs = buildInkSegments(6, 'hel', [BLUE, BLUE, BLUE, RED, RED, RED], BLACK);
         assert.strictEqual(segs.reduce((n, s) => n + s.text.length, 0), 3);
+    });
+});
+
+// ── 译文模式代码行分段着色（isCodeLikeInkLayout / mergeTranslatedInkFragments）──
+
+describe('countSolidInkClusters — 扎实结构簇统计', () => {
+    const BLUE = 'rgb(60, 120, 220)';   // 亮度 ≈ 117，真语法色
+    const PURPLE = 'rgb(170, 100, 190)'; // 亮度 ≈ 130
+    const GRAY = 'rgb(100, 105, 110)';  // 亮度 ≈ 104
+    const WHITE = 'rgb(255, 255, 255)'; // 亮度 255，近白主体
+    const DARK_BG = {r: 25, g: 26, b: 28};
+
+    test('双结构簇 → 计 2', () => {
+        const inks = [BLUE, BLUE, BLUE, BLUE, PURPLE, PURPLE, PURPLE, PURPLE];
+        assert.strictEqual(countSolidInkClusters(inks, DARK_BG).length, 2);
+    });
+
+    test('近白簇被排除（白色文字主体不是结构色）', () => {
+        const inks = [WHITE, WHITE, WHITE, WHITE, BLUE, BLUE, BLUE, BLUE];
+        assert.strictEqual(countSolidInkClusters(inks, DARK_BG).length, 1);
+    });
+
+    test('占比低于 15% 的碎片簇被排除', () => {
+        // 8 字符里只有 1 个 RED（12.5% < 15%）
+        const inks = [BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, 'rgb(200, 40, 40)'];
+        assert.strictEqual(countSolidInkClusters(inks, DARK_BG).length, 1);
+    });
+
+    test('对背景不可读的簇被排除', () => {
+        // 暗色簇对深背景 WCAG < 2.5
+        const inks = [BLUE, BLUE, BLUE, BLUE, 'rgb(35, 36, 38)', 'rgb(35, 36, 38)',
+            'rgb(35, 36, 38)', 'rgb(35, 36, 38)'];
+        assert.strictEqual(countSolidInkClusters(inks, DARK_BG).length, 1);
+    });
+
+    test('null 字符不计入占比分母', () => {
+        // 有效 6 字符 = 3 蓝 3 紫，各占 50%
+        const inks = [BLUE, BLUE, BLUE, null, PURPLE, PURPLE, PURPLE, null];
+        assert.strictEqual(countSolidInkClusters(inks, DARK_BG).length, 2);
+    });
+
+    test('空输入 / 全 null → 空数组', () => {
+        assert.deepStrictEqual(countSolidInkClusters([], DARK_BG), []);
+        assert.deepStrictEqual(countSolidInkClusters([null, null], DARK_BG), []);
+        assert.deepStrictEqual(countSolidInkClusters(null, DARK_BG), []);
+    });
+});
+
+describe('isCodeLikeInkLayout — 代码特征行判定', () => {
+    const BLUE = 'rgb(60, 120, 220)';
+    const PURPLE = 'rgb(170, 100, 190)';
+    const WHITE = 'rgb(255, 255, 255)';
+    const DARK_BG_CSS = 'rgb(25, 26, 28)';
+
+    const makeSampled = (charInks) => ({ink: charInks[0] || null, charInks, inkConfidence: 0.8});
+
+    test('高覆盖 + 双结构簇 → true（代码行）', () => {
+        const sampled = makeSampled([BLUE, BLUE, BLUE, BLUE, PURPLE, PURPLE, PURPLE, PURPLE]);
+        assert.strictEqual(isCodeLikeInkLayout(sampled, DARK_BG_CSS), true);
+    });
+
+    test('覆盖率低（大量 null）→ false', () => {
+        const sampled = makeSampled([BLUE, null, null, null, PURPLE, null, null, null]);
+        assert.strictEqual(isCodeLikeInkLayout(sampled, DARK_BG_CSS), false);
+    });
+
+    test('单结构簇 → false（无分段意义）', () => {
+        const sampled = makeSampled([BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE]);
+        assert.strictEqual(isCodeLikeInkLayout(sampled, DARK_BG_CSS), false);
+    });
+
+    test('白主体 + 单彩簇（图标/白字彩边形态）→ false', () => {
+        const sampled = makeSampled([WHITE, WHITE, WHITE, WHITE, WHITE, BLUE, BLUE, BLUE]);
+        assert.strictEqual(isCodeLikeInkLayout(sampled, DARK_BG_CSS), false);
+    });
+
+    test('结构簇超过 3 → false（杂色花斑风险）', () => {
+        const sampled = makeSampled([
+            'rgb(60, 120, 220)', 'rgb(60, 120, 220)',          // 蓝
+            'rgb(170, 100, 190)', 'rgb(170, 100, 190)',        // 紫
+            'rgb(200, 120, 60)', 'rgb(200, 120, 60)',          // 橙
+            'rgb(80, 180, 90)', 'rgb(80, 180, 90)',            // 绿
+        ]);
+        assert.strictEqual(isCodeLikeInkLayout(sampled, DARK_BG_CSS), false);
+    });
+
+    test('charInks 为空 / 背景不可解析 → false', () => {
+        assert.strictEqual(isCodeLikeInkLayout(makeSampled([]), DARK_BG_CSS), false);
+        assert.strictEqual(isCodeLikeInkLayout(makeSampled([BLUE, BLUE, PURPLE, PURPLE]), ''), false);
+        assert.strictEqual(isCodeLikeInkLayout(null, DARK_BG_CSS), false);
+    });
+});
+
+describe('mergeTranslatedInkFragments — 碎片段合并', () => {
+    const RED = 'rgb(200, 40, 40)';
+    const DARKRED = 'rgb(160, 60, 60)';  // 与 RED 色距 ≈ 57 < 120
+    const GREEN = 'rgb(40, 180, 60)';    // 与 RED 色距 ≈ 245 > 120
+
+    test('孤立短段并入色距近的邻段', () => {
+        // 暗红短段夹在两个红长段之间 → 并入（合并后剩 2 段）
+        const segs = mergeTranslatedInkFragments([
+            {text: 'abcdef', color: RED},
+            {text: 'x', color: DARKRED},
+            {text: 'ghijkl', color: RED},
+        ]);
+        assert.strictEqual(segs.length, 2);
+        // 短段并入左邻（色距相等时取左），文本随合并移动
+        assert.strictEqual(segs[0].text, 'abcdefx');
+        assert.strictEqual(segs[0].color, RED);
+        assert.strictEqual(segs[1].text, 'ghijkl');
+    });
+
+    test('与两邻段色距都大的短段保留（真语法色）', () => {
+        const segs = mergeTranslatedInkFragments([
+            {text: 'abcdef', color: RED},
+            {text: 'x', color: GREEN},
+            {text: 'ghijkl', color: RED},
+        ]);
+        assert.strictEqual(segs.length, 3, '绿色短段是真语法色，不应被合并');
+    });
+
+    test('占比达 8% 的段不合并', () => {
+        // 短段 3 字符 / 总 27 = 11% ≥ 8%
+        const segs = mergeTranslatedInkFragments([
+            {text: 'abcdefghijkl', color: RED},
+            {text: 'mno', color: DARKRED},
+            {text: 'pqrstuvwxyz', color: RED},
+        ]);
+        assert.strictEqual(segs.length, 3);
+    });
+
+    test('迭代合并：多个碎片段逐一收敛', () => {
+        const segs = mergeTranslatedInkFragments([
+            {text: 'abcdefghijklmnopqrst', color: RED},
+            {text: 'x', color: DARKRED},
+            {text: 'y', color: DARKRED},
+            {text: 'uvwxyz', color: RED},
+        ]);
+        assert.strictEqual(segs.length, 2);
+        assert.strictEqual(segs[0].text, 'abcdefghijklmnopqrstxy');
+    });
+
+    test('边界：空 / 单段原样返回', () => {
+        assert.strictEqual(mergeTranslatedInkFragments(null), null);
+        assert.strictEqual(mergeTranslatedInkFragments([]), null);
+        const single = [{text: 'abc', color: RED}];
+        assert.strictEqual(mergeTranslatedInkFragments(single).length, 1);
+    });
+});
+
+describe('alignInkColorsToWords — 词单元染色对齐', () => {
+    const BLUE = 'rgb(60, 120, 220)';
+    const RED = 'rgb(200, 40, 40)';
+    const GRAYISH = 'rgb(120, 128, 130)'; // 蓝的采样噪声变体（距离 < 60）
+
+    test('词内颜色抖动统一为主色（camelCase 不拆）', () => {
+        // "chatPrompt" 中段两个字符采样发灰 → 整词统一回蓝
+        const out = alignInkColorsToWords('chatPrompt',
+            [BLUE, BLUE, GRAYISH, GRAYISH, BLUE, BLUE, BLUE, BLUE, BLUE]);
+        assert.strictEqual(out.length, 9);
+        for (const c of out) assert.strictEqual(c, BLUE);
+    });
+
+    test('snake_case 整体一个染色单元', () => {
+        const out = alignInkColorsToWords('chat_prompt',
+            [RED, GRAYISH, RED, RED, RED, GRAYISH, RED, RED, RED, RED, RED]);
+        for (const c of out) assert.strictEqual(c, RED);
+    });
+
+    test('不同词保持各自颜色（词边界不被抹掉）', () => {
+        const out = alignInkColorsToWords('foo bar',
+            [BLUE, BLUE, BLUE, null, RED, RED, RED]);
+        assert.strictEqual(out[0], BLUE);
+        assert.strictEqual(out[2], BLUE);
+        assert.strictEqual(out[4], RED);
+    });
+
+    test('标点自成单元，不影响相邻词', () => {
+        // "id:" → id 为蓝单元，":" 为独立单元
+        const out = alignInkColorsToWords('id:',
+            [BLUE, GRAYISH, RED]);
+        assert.strictEqual(out[0], BLUE);
+        assert.strictEqual(out[1], BLUE);
+        assert.strictEqual(out[2], RED);
+    });
+
+    test('全 null 词保留 null（继承整行色）', () => {
+        const out = alignInkColorsToWords('foo bar',
+            [null, null, null, BLUE, BLUE, BLUE, BLUE]);
+        assert.strictEqual(out[0], null);
+        assert.strictEqual(out[2], null);
+        assert.strictEqual(out[4], BLUE);
+    });
+
+    test('边界：空输入原样返回', () => {
+        assert.strictEqual(alignInkColorsToWords('', []), null);
+        assert.strictEqual(alignInkColorsToWords(null, null), null);
+        // 单字符输入返回内容一致的新数组
+        assert.deepStrictEqual(alignInkColorsToWords('a', [BLUE]), [BLUE]);
     });
 });

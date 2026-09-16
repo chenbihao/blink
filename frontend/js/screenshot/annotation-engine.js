@@ -1714,10 +1714,20 @@ function drawOverlay(targetCtx, layer, _w, _h) {
         targetCtx.font = `${fontPx}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
         targetCtx.textBaseline = 'middle';
         targetCtx.textAlign = 'left';
-        // 逐字符分色只对原文有意义；译文始终使用稳定的整行主色。
-        const segments = mode === 'source' ? buildInkSegments(
-            (line.srcText || '').length, display,
-            line.inkSampled ? line.inkSampled.charInks : null, ink) : null;
+        // 逐字符分色对原文总是启用（按词对齐消采样抖动）；译文模式仅对
+        // "代码特征行"启用——代码翻译语序近似保留，比例映射的色系区间误差
+        // 可接受，换来语法色保留（否则 chooseStableTranslatedInk 的共识门槛
+        // 会把多色代码行全部打回黑白灰）。非代码行译文仍用稳定的整行主色。
+        const segments = mode === 'source'
+            ? buildInkSegments(
+                (line.srcText || '').length, display,
+                line.inkSampled
+                    ? alignInkColorsToWords(line.srcText || '', line.inkSampled.charInks)
+                    : null, ink)
+            : (mode === 'translated' && line.inkSampled
+                && isCodeLikeInkLayout(line.inkSampled, bg)
+                ? buildTranslatedInkSegments(line, display, ink)
+                : null);
         if (segments) {
             let cursorX = r.x + 2;
             for (const seg of segments) {
@@ -1943,6 +1953,24 @@ const INK_MIN_CONTRAST = 2.5;
 const INK_BG_PIXEL_MIN = 30;
 /** 背景色簇上限:行内同时存在的背景色(徽章内底+外围底等)通常 ≤ 2-3 种。 */
 const INK_BG_CLUSTER_MAX = 4;
+
+// ── 译文模式代码行分段着色(0.23.x)─────────────────────────────
+
+/** charInks 覆盖率下限：低于此视为非文字密集行(图标/壁纸行的 charInks 大量为 null)。 */
+const INK_CODE_COVERAGE_MIN = 0.7;
+/** 结构簇占比下限：低于此的簇是采样碎片，不计入结构色。 */
+const INK_CODE_CLUSTER_RATIO_MIN = 0.15;
+/** 结构簇数下限：少于 2 无分段意义(整行同色走 fillText 快路径)。 */
+const INK_CODE_CLUSTERS_MIN = 2;
+/** 结构簇数上限：更多簇是图标彩边/照片纹理的杂色，分段会涂成花斑。 */
+const INK_CODE_CLUSTERS_MAX = 3;
+/** 结构簇亮度上限：更亮的簇是白色文字主体/浅彩抗锯齿边，不是结构色；
+ *  真语法色(蓝 #5ba2f3 / 紫 #b476ae / 橙 #c07349 / 黄绿 #b97c53)亮度均 < 170。 */
+const INK_CODE_CLUSTER_LUM_MAX = 205;
+/** 碎片段占比上限：低于此的段视为采样噪声段，并入相邻长段。 */
+const INK_FRAGMENT_RATIO_MAX = 0.08;
+/** 碎片段并入邻段的最大 RGB 色距：超出视为真语法色保留。 */
+const INK_FRAGMENT_MERGE_DIST = 120;
 
 /**
  * WCAG 相对亮度对比度(1.0-21.0)。与 luminance() 的区别:luminance() 是
@@ -2348,6 +2376,188 @@ export function chooseStableTranslatedInk(sampled, fallbackColor, drawnBgCss = n
 
     // 行级结果若稳定落在中性色，可吸收逐字符框中的少量彩色离群点。
     return isNeutralRgb(sampledRgb) && readable(sampled.ink) ? sampled.ink : fallback;
+}
+
+// ── 译文模式代码行分段着色(0.23.x)─────────────────────────────
+
+/**
+ * 统计逐字符采样的"扎实结构簇"。
+ *
+ * 对归并后的颜色簇做三道过滤：占比 ≥ INK_CODE_CLUSTER_RATIO_MIN（碎片簇
+ * 不计）、对背景 WCAG ≥ INK_MIN_CONTRAST（不可读色不计）、亮度 <
+ * INK_CODE_CLUSTER_LUM_MAX（白色文字主体/浅彩抗锯齿边不是结构色——
+ * corpus 实测真语法色蓝/紫/橙/黄绿的亮度均 < 170，而误判行的扎实簇全是
+ * 近白/浅彩：白字主体 #e0e2e3、图标浅彩边 #99e3fe）。
+ *
+ * @param {Array<string|null>} charInks 逐字符颜色（null 不计入占比分母）
+ * @param {{r: number, g: number, b: number}} bgRgb 实际绘制背景
+ * @returns {Array<{rgb: {r: number, g: number, b: number}, ratio: number}>}
+ */
+export function countSolidInkClusters(charInks, bgRgb) {
+    if (!Array.isArray(charInks) || charInks.length === 0 || !bgRgb) return [];
+    const validTotal = charInks.filter(Boolean).length;
+    if (validTotal === 0) return [];
+    const normalized = quantizeInkColors(charInks, INK_DIST_THRESHOLD);
+    const counts = new Map();
+    for (const css of normalized) {
+        if (!css) continue;
+        counts.set(css, (counts.get(css) || 0) + 1);
+    }
+    const solid = [];
+    for (const [css, n] of counts) {
+        const rgb = parseRgb(css);
+        if (!rgb) continue;
+        const ratio = n / validTotal;
+        if (ratio < INK_CODE_CLUSTER_RATIO_MIN) continue;
+        if (wcagContrastRatio(rgb, bgRgb) < INK_MIN_CONTRAST) continue;
+        const lum = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+        if (lum >= INK_CODE_CLUSTER_LUM_MAX) continue;
+        solid.push({rgb, ratio});
+    }
+    return solid;
+}
+
+/**
+ * 判定是否"代码特征行"（译文模式是否启用分段着色）。
+ *
+ * 主判据：charInks 覆盖率 ≥ INK_CODE_COVERAGE_MIN（文字密集行）且扎实结构
+ * 簇数 ∈ [INK_CODE_CLUSTERS_MIN, INK_CODE_CLUSTERS_MAX]——下限排除整行
+ * 单色（无分段意义，走整行快路径），上限排除图标彩边/照片纹理的杂色花斑。
+ * corpus 验证：coding 正文 0 漏检；discord / x com / 桌面图标的白底彩边
+ * 误判全部排除；commit 文件状态色、google 关键词高亮等真结构色保留。
+ *
+ * @param {{charInks: Array<string|null>|null}} sampled sampleOriginalInkColors 的结果
+ * @param {string} drawnBgCss 实际绘制背景（结构簇对比度的校验基准）
+ * @returns {boolean}
+ */
+export function isCodeLikeInkLayout(sampled, drawnBgCss) {
+    if (!sampled || !Array.isArray(sampled.charInks) || sampled.charInks.length === 0) return false;
+    const bgRgb = parseRgb(drawnBgCss || '');
+    if (!bgRgb) return false;
+    const valid = sampled.charInks.filter(Boolean).length;
+    if (valid / sampled.charInks.length < INK_CODE_COVERAGE_MIN) return false;
+    const solid = countSolidInkClusters(sampled.charInks, bgRgb);
+    return solid.length >= INK_CODE_CLUSTERS_MIN && solid.length <= INK_CODE_CLUSTERS_MAX;
+}
+
+/**
+ * 合并分段结果中的碎片段。
+ *
+ * 颜色距离区分不了"采样噪声变体"和"真语法色"（corpus 实测两者分布重叠：
+ * 注释行噪声变体簇间距离 ≈ 98，语法色区分距离 ≈ 110），但 run 持续性可以
+ * ——噪声是 1-2 字符的孤立短段，语法色是连续长段。占比 <
+ * INK_FRAGMENT_RATIO_MAX 的短段并入色距 ≤ INK_FRAGMENT_MERGE_DIST 的相邻
+ * 长段；与两邻段都超过色距的短段保留（可能是真语法色，如行尾独立彩色标点）。
+ *
+ * @param {Array<{text: string, color: string}>} segments buildInkSegments 的输出
+ * @returns {Array<{text: string, color: string}>|null} 合并后的分段
+ */
+export function mergeTranslatedInkFragments(segments) {
+    if (!Array.isArray(segments) || segments.length === 0) return null;
+    if (segments.length === 1) return segments;
+    const segs = segments.map((s) => ({text: s.text, color: s.color, rgb: parseRgb(s.color)}));
+    for (;;) {
+        if (segs.length <= 1) break;
+        const totalLen = segs.reduce((n, s) => n + s.text.length, 0);
+        let minIdx = -1;
+        let minLen = Infinity;
+        segs.forEach((s, i) => {
+            if (s.text.length < minLen) {
+                minLen = s.text.length;
+                minIdx = i;
+            }
+        });
+        if (segs[minIdx].text.length / totalLen >= INK_FRAGMENT_RATIO_MAX) break;
+        const left = segs[minIdx - 1];
+        const right = segs[minIdx + 1];
+        const dL = left ? rgbDist2(segs[minIdx].rgb, left.rgb) : Infinity;
+        const dR = right ? rgbDist2(segs[minIdx].rgb, right.rgb) : Infinity;
+        if (Math.min(dL, dR) > INK_FRAGMENT_MERGE_DIST * INK_FRAGMENT_MERGE_DIST) break;
+        if (dL <= dR) {
+            left.text += segs[minIdx].text;
+            segs.splice(minIdx, 1);
+        } else {
+            right.text = segs[minIdx].text + right.text;
+            segs.splice(minIdx, 1);
+        }
+    }
+    return segs.map(({text, color}) => ({text, color}));
+}
+
+/**
+ * 译文模式分段着色的组合入口：null 填充 → 色系归并 → 比例映射 → 碎片合并。
+ *
+ * null 位必须先填充：采样失败字符回退的行级色与相邻实采色"相近但不相等"，
+ * run 合并的 30 容差合不掉，是分段碎片化的主要来源。归并容差沿用
+ * INK_DIST_THRESHOLD 不放大——90 会把黄绿关键字和灰青标识符错误合并
+ * （两者距离 ≈ 110，与噪声变体距离 ≈ 98 重叠）。
+ */
+function buildTranslatedInkSegments(line, displayText, fallbackColor) {
+    const sampled = line.inkSampled;
+    if (!sampled || !Array.isArray(sampled.charInks) || sampled.charInks.length === 0) return null;
+    const filled = sampled.charInks.map((c) => c || sampled.ink);
+    const wordAligned = alignInkColorsToWords(line.srcText || '', filled);
+    const premerged = quantizeInkColors(wordAligned, INK_DIST_THRESHOLD);
+    const raw = buildInkSegments((line.srcText || '').length, displayText, premerged, fallbackColor);
+    return raw ? mergeTranslatedInkFragments(raw) : null;
+}
+
+/**
+ * 把逐字符颜色按"词单元"对齐：同一词内的字符统一为词内主色。
+ *
+ * 词单元切分（正则级，无语义分词）：连续字母/数字/下划线为一个词
+ * （camelCase / snake_case 不拆——一个词一个色正是目标观感）；单个非空白
+ * 字符（标点/符号）自成单元；CJK 逐字成单元（相邻同色由 run 合并收拢）。
+ * 词内主色 = 词内非 null 颜色量化（INK_DIST_THRESHOLD）后的最大簇均值。
+ *
+ * 动机：逐字符采样噪声让同一词内出现颜色抖动（"chatPrompt" 中段发灰、
+ * 译文分段在词中间断开），以词为染色单位后 run 边界天然落在词边界。
+ *
+ * @param {string} srcText 原文（切词基准）
+ * @param {Array<string|null>} charInks 逐字符颜色
+ * @returns {Array<string|null>} 词对齐后的逐字符颜色（全 null 词保留 null）
+ */
+export function alignInkColorsToWords(srcText, charInks) {
+    if (!srcText || !Array.isArray(charInks) || charInks.length === 0) return null;
+    const out = charInks.slice();
+    const n = Math.min(srcText.length, charInks.length);
+    const isWordChar = (ch) => /[\w]/.test(ch);
+    let i = 0;
+    while (i < n) {
+        if (/\s/.test(srcText[i])) {
+            // 空白不可见，颜色跟随前一个字符，避免把同色词的 run 无谓断开
+            out[i] = i > 0 ? out[i - 1] : out[i];
+            i++;
+            continue;
+        }
+        let j = i + 1;
+        if (isWordChar(srcText[i])) {
+            while (j < n && isWordChar(srcText[j])) j++;
+        }
+        // [i, j) 为一个染色单元（词或单标点）
+        const colors = [];
+        for (let k = i; k < j; k++) {
+            if (out[k]) colors.push(out[k]);
+        }
+        if (colors.length > 0) {
+            const quantized = quantizeInkColors(colors, INK_DIST_THRESHOLD);
+            const counts = new Map();
+            for (const css of quantized) {
+                counts.set(css, (counts.get(css) || 0) + 1);
+            }
+            let best = null;
+            let bestN = 0;
+            for (const [css, cnt] of counts) {
+                if (cnt > bestN) {
+                    best = css;
+                    bestN = cnt;
+                }
+            }
+            for (let k = i; k < j; k++) out[k] = best;
+        }
+        i = j;
+    }
+    return out;
 }
 
 /** 相邻字色合并阈值:RGB 欧氏距离低于此值视为同色(采样噪声容差)。 */

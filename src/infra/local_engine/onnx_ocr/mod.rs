@@ -29,6 +29,9 @@ pub mod pipeline;
 #[allow(dead_code)]
 pub mod state;
 
+#[cfg(test)]
+mod corpus_probe;
+
 #[allow(unused_imports)]
 pub use executor::{
     OcrExecutor, OcrExecutorConfig, OcrExecutorError, OnnxOcrExecutor, RecognizeRequest,
