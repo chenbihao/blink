@@ -20,14 +20,21 @@ function getTAU() {
     };
 });
 
-/** 调用 Rust command。 */
-export function invoke(cmd, args) {
+/**
+ * 调用 Rust command。
+ *
+ * 第三参 options 必须原样透传——raw IPC（Uint8Array body）靠它携带 headers
+ * （如 screenshot_pin 的 screen-x/screen-y、ocr_image 的 X-Request-Id）。
+ * 此前包装函数只声明 (cmd, args)，options 被静默丢弃，导致 0.22.6 起
+ * 所有依赖 headers 的 raw IPC 命令（钉图/RGBA 复制/OCR 取消等）隐形回归。
+ */
+export function invoke(cmd, args, options) {
     const TAU = getTAU();
     const fn = TAU?.core?.invoke ?? TAU?.invoke;
     if (typeof fn !== "function") {
         return Promise.reject(new Error(`invoke 不可用：__TAURI__ 未注入（${cmd}）`));
     }
-    return fn(cmd, args);
+    return fn(cmd, args, options);
 }
 
 // ── IPC 错误归一化（0.14.7 W3）──────────────────────────────────────────────

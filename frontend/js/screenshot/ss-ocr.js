@@ -15,7 +15,7 @@ import * as annot from './annotation-engine.js';
 import {copyToClipboard, ocrImage, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
 import {commandErrorText, normalizeError} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
-import {clampPanelToMonitor, computeResizedPanel} from './ss-panel-resize.js';
+import {clampPanelToMonitor, computeResizedPanel, placeOcrPanel} from './ss-panel-resize.js';
 
 // ════════════════════════════════════════════════════════════
 //  OCR Request Cancellation (Task 6)
@@ -57,6 +57,14 @@ export function cancelActiveOcr() {
 export function hasText(value) {
     return typeof value === 'string' && value.trim().length > 0;
 }
+
+/**
+ * 提取后端下发的字号参考高度（`OcrLine.font_height`，JSON 字段 `font_h`）与
+ * OCR 结果 → overlay 行数组（`toOverlayLines`）已移入 annotation-engine.js——
+ * 识别/翻译嵌图/静默划词（截图窗口）与 pin 右键翻译覆盖（pin 窗口）两窗口共用，
+ * 避免 char_boxes→line_index 映射语义双份漂移。
+ */
+import {toOverlayLines} from './annotation-engine.js';
 
 export function showSelLoading(text) {
     const el = document.getElementById('sel-loading');
@@ -403,9 +411,7 @@ export async function doTranslateAndPin() {
             return;
         }
 
-        const lines = ocrResult.lines.filter(
-            (ln) => ln && ln.text && ln.rect && ln.rect.w > 0 && ln.rect.h > 0
-        );
+        const lines = toOverlayLines(ocrResult);
         if (lines.length === 0) {
             await screenshotPinRefresh(rawPng, false).catch(() => {
             });
@@ -414,13 +420,7 @@ export async function doTranslateAndPin() {
 
         // 2b. 构造任务局部 overlay（最终 Pin 合成以此为准）
         const jobOverlay = {
-            lines: lines.map((ln) => ({
-                rect: {x: ln.rect.x, y: ln.rect.y, w: ln.rect.w, h: ln.rect.h},
-                srcText: ln.text,
-                dstText: null,
-                bgColor: null,
-                inkColor: null,
-            })),
+            lines: lines.map((l) => ({...l, dstText: null, bgColor: null, inkColor: null})),
             mode: 'translated',
             bgStrategy: 'average',
             fontScale: 1.0,
@@ -438,7 +438,7 @@ export async function doTranslateAndPin() {
         }
 
         // 2c. 翻译
-        const srcs = lines.map((ln) => ln.text);
+        const srcs = lines.map((ln) => ln.srcText);
         let translations;
         try {
             translations = await translateLines(srcs, null);
@@ -583,24 +583,46 @@ function _runOcrFresh(opts = {}) {
     });
 }
 
+/**
+ * 预热 OCR 成功后的静默激活（0.24.x）：不开面板、不弹 loading/提示，
+ * 直接挂 overlay 行数据（mode=null，图上不画任何可见文字）并进入划词模式。
+ *
+ * 跳过条件：
+ * - 无选区 / 无有效文字行 → 完全静默（点[识别]时仍有正常重试路径）
+ * - ss.ocrBusy：用户已点[识别]/[翻译]正在等待本预热结果，交给 activateOverlay 走面板链路
+ * - ss.reading：划词已激活（同一结果），不重复进入以免清掉用户已划的选区
+ * - canvas 编辑器（长图/剪贴板/钉图）：左键拖拽 = 平移图像，划词层会拦截点击
+ *   导致平移失效，且平移后 hit-canvas 错位——只保留预热缓存，不静默激活
+ */
+export function activateSilentOcrReading(result) {
+    if (!ss.selCss || !result || ss.ocrBusy || ss.reading) return;
+    if (ss.editorSession?.canvasBacked) return;
+    const nonEmpty = toOverlayLines(result);
+    if (nonEmpty.length === 0) return;
+    console.debug('[screenshot] 预热 OCR 静默激活划词', {lines: nonEmpty.length});
+    ss.ocrResultCache = result;
+    annot.setOverlay({
+        lines: nonEmpty,
+        mode: null,
+    });
+    enterReadingMode(result);
+}
+
 /** 把 OCR 结果落地为 overlayLayer + reading + 面板。 */
 function activateOverlay(result, opts = {}) {
-    const lines = (result && Array.isArray(result.lines)) ? result.lines : [];
-    const nonEmpty = lines.filter((ln) => ln && ln.text && ln.rect && ln.rect.w > 0 && ln.rect.h > 0);
+    const nonEmpty = toOverlayLines(result);
     if (nonEmpty.length === 0) {
         showTransientHint('未识别到文字');
         return false;
     }
     const mode = opts.showOverlay ? (opts.panelTab === 'translated' ? 'translated' : 'source') : null;
     annot.setOverlay({
-        lines: nonEmpty.map((ln) => ({
-            rect: {x: ln.rect.x, y: ln.rect.y, w: ln.rect.w, h: ln.rect.h},
-            srcText: ln.text,
-        })),
+        lines: nonEmpty,
         mode,
     });
     ss.ocrResultCache = result;
-    if (result && Array.isArray(result.words) && result.words.length > 0) {
+    // 划词已激活（如预热静默激活过）则不重建，保留用户已划的选区
+    if (!ss.reading && result && Array.isArray(result.words) && result.words.length > 0) {
         enterReadingMode(result);
     }
     redrawAnnotFull();
@@ -637,6 +659,9 @@ function requestOverlayTranslation(targetLang) {
             if (revision !== ss.translationRevision) return;
             ss.translationBusy = false;
             updateOutputButtonsDisabled();
+            // 面板可能已被 ESC/会话退出移除；loading 属于翻译任务，
+            // 由任务的 finally 收口，不再依赖面板局部轮询存活。
+            if (annot.isOverlayLoading()) annot.setOverlayLoading(false);
             if (!useOverlayLoading) hideSelLoading();
         });
 }
@@ -791,15 +816,11 @@ export function showOcrResult(result, options = {}) {
     const anchorBtn = document.getElementById('btn-ocr');
     const anchorRect = anchorBtn ? anchorBtn.getBoundingClientRect() : ss.toolbar.getBoundingClientRect();
 
-    let left = anchorRect.left;
-    if (left + pw > mon.x + mon.w - MARGIN) left = mon.x + mon.w - MARGIN - pw;
-    left = Math.max(mon.x + MARGIN, left);
-
-    let top = anchorRect.bottom + 4;
-    if (top + ph > mon.y + mon.h - MARGIN) top = anchorRect.top - ph - 4;
-    if (top < mon.y + MARGIN) top = Math.max(mon.y + MARGIN, mon.y + mon.h - MARGIN - ph);
-    panel.style.left = left + 'px';
-    panel.style.top = top + 'px';
+    // 0.23.12：落位避让选区——工具栏翻到选区上方/浮入选区时，面板不再固定
+    // 从工具栏下弹压住选区内容（含嵌图译文），改为取第一个不压选区的候选位
+    const placed = placeOcrPanel(anchorRect, pw, ph, mon, ss.selCss, MARGIN);
+    panel.style.left = placed.left + 'px';
+    panel.style.top = placed.top + 'px';
 
     panel.addEventListener('mousedown', (e) => e.stopPropagation());
     document.getElementById('ocr-close').addEventListener('click', () => {
@@ -1035,6 +1056,7 @@ export function showOcrResult(result, options = {}) {
     // 翻译
     let translating = false;
     let loadingAnimTimer = null;
+    let translationPollTimer = null;
     const doTranslate = async () => {
         if (translating) return;
         const src = sourceTa.value.trim();
@@ -1056,8 +1078,21 @@ export function showOcrResult(result, options = {}) {
         }, 50);
         const overlayLang = annot.getOverlay()?.translationTargetLang;
         requestOverlayTranslation(overlayLang);
+        const selectionAtStart = ss.selectionRevision;
+        const translationAtStart = ss.translationRevision;
         const startTime = Date.now();
         const waitForTranslation = () => {
+            translationPollTimer = null;
+            // 旧面板/旧会话只能结束自己的轮询，不得触碰新 overlay。
+            if (!panel.isConnected
+                || selectionAtStart !== ss.selectionRevision
+                || translationAtStart !== ss.translationRevision) {
+                if (loadingAnimTimer) {
+                    clearInterval(loadingAnimTimer);
+                    loadingAnimTimer = null;
+                }
+                return;
+            }
             const latest = annot.getOverlay();
             const allTranslated = latest && latest.lines.length > 0
                 && latest.lines.every((line) => hasText(line.dstText));
@@ -1082,7 +1117,7 @@ export function showOcrResult(result, options = {}) {
                     translatedTa.value = `翻译中 ${done}/${total}…`;
                 }
                 if (Date.now() - startTime < 30000) {
-                    setTimeout(waitForTranslation, 100);
+                    translationPollTimer = setTimeout(waitForTranslation, 100);
                     return;
                 }
             }
@@ -1099,7 +1134,8 @@ export function showOcrResult(result, options = {}) {
                 translatedTa.value = '翻译失败，请重试';
             }
         };
-        setTimeout(waitForTranslation, 100);
+        if (translationPollTimer) clearTimeout(translationPollTimer);
+        translationPollTimer = setTimeout(waitForTranslation, 100);
     };
     translateBtn.addEventListener('click', () => {
         showTab('translated');

@@ -294,6 +294,20 @@ export function screenshotPinRefresh(pngData, showTranslating) {
     });
 }
 
+/** 0.23.12：按 label 原地刷新指定 pin 窗口的图片。
+ *  供 pin 窗口自身「翻译覆盖/还原原图」使用——多 pin 下后端 LAST_PIN_LABEL
+ *  可能指向其它窗口，必须由窗口自报 label 精确定位。
+ *  raw IPC：PNG 直接传 Uint8Array，label/showTranslating 走 headers。 */
+export function screenshotPinRefreshByLabel(pngData, label, showTranslating, expectedSeq) {
+    return invoke("screenshot_pin_refresh_by_label", pngData, {
+        headers: {
+            "label": String(label ?? ""),
+            "show-translating": String(showTranslating ?? false),
+            ...(Number.isSafeInteger(expectedSeq) ? {"expected-seq": String(expectedSeq)} : {}),
+        },
+    });
+}
+
 /** 0.11.8：钉图窗口一次性设置位置+尺寸（物理像素，含 PIN_PAD）。
  *  多 Pin：label 为当前窗口 label。 */
 export function screenshotPinTransform(label, winX, winY, winW, winH) {

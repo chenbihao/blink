@@ -68,6 +68,7 @@ impl OcrPipeline for FakePipeline {
                     h: 20,
                 },
                 word_indices: vec![],
+                font_height: None,
             }],
             words: vec![],
             text_angle: None,

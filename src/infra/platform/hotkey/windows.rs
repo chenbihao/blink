@@ -66,6 +66,14 @@ const TIMER_ID_HEARTBEAT: usize = 2;
 const HEARTBEAT_INTERVAL_MS: u32 = 60_000;
 /// 重装定时器 ID（one-shot，用于 SessionRecovery 延迟和 retry 退避）。
 const TIMER_ID_REINSTALL: usize = 3;
+/// 卡键巡检定时器 ID（0.23.11：周期对比内部 modifier level 与物理快照）。
+const TIMER_ID_STUCK_PATROL: usize = 4;
+/// 卡键巡检间隔（毫秒）。
+const STUCK_PATROL_INTERVAL_MS: u32 = 2_000;
+/// 同一修饰键连续多少次巡检命中「内部 pressed && 物理 Up」才判定卡死。
+/// 2 次 × 2s：单次快照会被注入事件污染（见 state.rs apply_physical_snapshot），
+/// 跨时间连续一致才足以清除真实 Down。
+const STUCK_PATROL_CONSECUTIVE_TICKS: u32 = 2;
 /// SessionRecovery 初始延迟（毫秒）。
 const SESSION_RECOVERY_DELAY_MS: u32 = 250;
 /// 门禁未满足时的短间隔重新检查延迟（毫秒）。
@@ -106,6 +114,9 @@ thread_local! {
     static RAW_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 最近一个由 LL Hook 观察到的主键边沿，供随后到达的 WM_INPUT 去重。
     static LAST_HOOK_MAIN_EDGE: std::cell::Cell<Option<HookMainEdge>> = const { std::cell::Cell::new(None) };
+    /// 卡键巡检去抖：上一 tick 判定为「内部 pressed && 物理 Up」的修饰键 bitmask
+    /// （bit 与 ModifierKey::bit() 对齐）。连续两个 tick 命中同一键才喂 reducer。
+    static STUCK_PATROL_PENDING: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -660,6 +671,102 @@ fn apply_session_reset(reason: state::SessionResetReason) {
     try_reinstall_if_safe();
 }
 
+// ── 卡键巡检（0.23.11）───────────────────────────────────────────────────────
+
+/// 卡键巡检 tick（hook 线程，`TIMER_ID_STUCK_PATROL` 定时器触发）。
+///
+/// **背景**：真实 modifier Down 只能由真实 keyup / Raw up 清除；重负载下 LL Hook
+/// 会丢事件（本机日志 2026-09-16 单日 353 次 main-key fallback 实证），若 Raw 兜底
+/// 同时失效（如注入事件曾毒化时间游标），Alt 会永久卡死——此前唯一出口是托盘
+/// 手动恢复。本巡检周期对比内部 level 与 `GetAsyncKeyState` 快照，连续
+/// [`STUCK_PATROL_CONSECUTIVE_TICKS`] 次命中「内部 pressed && 物理 Up」才判定
+/// 卡死并定向清除（`StuckModifiersObserved` → reducer `force_clear`）。
+///
+/// **热路径约束**：GetAsyncKeyState 非阻塞；全部 thread-local，无锁无 IO。
+///
+/// **安全门禁**：只在主窗口隐藏、gesture/chord/voice/recorder 全部空闲时自愈。
+/// `GetAsyncKeyState` 会被抢焦点产生的注入 Alt-up 污染；连续采样同一个受污染
+/// 来源并不能证明用户真的松开了修饰键。因此活跃交互期间绝不清真实 Down，避免
+/// 长按 Alt 时巡检误退 chord 或截断 hold。隐藏且空闲时即使误清，下一次真实
+/// Hook/Raw 边沿仍会重建状态，不会破坏进行中的用户操作。
+fn stuck_patrol_context_is_safe(state: &state::InputState) -> bool {
+    matches!(state.voice, state::VoicePhase::Idle)
+        && matches!(state.recorder, state::RecorderMode::Idle)
+        && !state.window.visible
+        && matches!(state.gesture, state::GestureState::Idle)
+        && !state.chord.is_active()
+}
+
+fn stuck_patrol_tick() {
+    if recorder::is_recording() {
+        STUCK_PATROL_PENDING.with(|c| c.set(0));
+        return;
+    }
+
+    let candidates = INPUT_STATE.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(state) = guard.as_mut() else {
+            return 0;
+        };
+        if !stuck_patrol_context_is_safe(state) {
+            return 0;
+        }
+        let internal_pressed = state.modifiers.pressed_mask();
+        if internal_pressed == 0 {
+            return 0;
+        }
+        let physical_pressed = read_physical_modifier_snapshot().pressed_mask();
+        internal_pressed & !physical_pressed
+    });
+
+    // 业务豁免分支与「无不一致」共用 0 值：清空去抖状态。
+    // 真实按住场景下 autorepeat 会把物理键表刷回 Down，不会误清空。
+    if candidates == 0 {
+        STUCK_PATROL_PENDING.with(|c| c.set(0));
+        return;
+    }
+
+    // 去抖：只清除「本轮和上一轮都不一致」的键
+    let heal = STUCK_PATROL_PENDING.with(|pending| {
+        let prev = pending.get();
+        pending.set(candidates);
+        candidates & prev
+    });
+    if heal == 0 {
+        return;
+    }
+
+    let keys: Vec<state::ModifierKey> = state::ModifierKey::ALL
+        .into_iter()
+        .filter(|k| heal & (1 << (*k as u8)) != 0)
+        .collect();
+
+    tracing::warn!(
+        ?keys,
+        ticks = STUCK_PATROL_CONSECUTIVE_TICKS,
+        interval_ms = STUCK_PATROL_INTERVAL_MS,
+        "卡键巡检：内部 pressed 与物理快照连续不一致，请求自愈"
+    );
+
+    INPUT_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            reduce_and_apply(
+                state,
+                InputEvent::StuckModifiersObserved {
+                    keys: keys.clone(),
+                },
+                Instant::now(),
+            );
+        }
+    });
+
+    // 现场回放：把诊断环形缓冲区最近事件落入日志（罕见事件，可承受）
+    tracing::info!(
+        events = %diagnostics::format_recent_events_brief(24),
+        "卡键自愈现场事件回放"
+    );
+}
+
 // ── 请求式 Hook 重装 ─────────────────────────────────────────────────────────
 
 /// 尝试重装 Hook（如果条件安全）。
@@ -716,6 +823,25 @@ fn try_reinstall_if_safe() {
 
     // 3. 执行重装
     let success = do_reinstall(reason);
+
+    if success {
+        // 重装窗口期内 LL Hook 不投递事件，keyup 可能丢失。成功后立即用物理
+        // 快照校正 InferredDown/InjectedDown 漂移（保守语义，不动真实 Down——
+        // 单次快照不可信，真实 Down 的清除由卡键巡检去抖处理）。
+        let snapshot = read_physical_modifier_snapshot();
+        INPUT_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                reduce_and_apply(
+                    state,
+                    state::InputEvent::PhysicalModifiersObserved {
+                        snapshot,
+                        reason: state::PhysicalObservationReason::AfterHookReinstall,
+                    },
+                    Instant::now(),
+                );
+            }
+        });
+    }
 
     REINSTALL_STATE.with(|s| {
         let mut s = s.borrow_mut();
@@ -1114,6 +1240,7 @@ unsafe extern "system" fn wnd_proc(
                     });
                     try_reinstall_if_safe();
                 }
+                TIMER_ID_STUCK_PATROL => stuck_patrol_tick(),
                 _ => {}
             }
             LRESULT(0)
@@ -1426,7 +1553,17 @@ fn hook_thread_main() {
         if let Some(&hwnd_raw) = WND_HWND.get() {
             let hwnd = HWND(hwnd_raw as *mut _);
             let _ = SetTimer(Some(hwnd), TIMER_ID_HEARTBEAT, HEARTBEAT_INTERVAL_MS, None);
-            tracing::debug!("Heartbeat timer started ({}ms)", HEARTBEAT_INTERVAL_MS);
+            let _ = SetTimer(
+                Some(hwnd),
+                TIMER_ID_STUCK_PATROL,
+                STUCK_PATROL_INTERVAL_MS,
+                None,
+            );
+            tracing::debug!(
+                "Heartbeat timer started ({}ms), stuck-key patrol timer started ({}ms)",
+                HEARTBEAT_INTERVAL_MS,
+                STUCK_PATROL_INTERVAL_MS
+            );
         }
 
         // 消息循环
@@ -1443,6 +1580,7 @@ fn hook_thread_main() {
             let hwnd = HWND(hwnd_raw as *mut _);
             let _ = KillTimer(Some(hwnd), TIMER_ID_HEARTBEAT);
             let _ = KillTimer(Some(hwnd), TIMER_ID_REINSTALL);
+            let _ = KillTimer(Some(hwnd), TIMER_ID_STUCK_PATROL);
         }
         HHOOK_SLOT.with(|slot| {
             if let Some(hhook) = slot.borrow_mut().take() {
@@ -1641,5 +1779,21 @@ mod tests {
             1_012
         ));
         assert!(!hook_edge_matches_raw(hook, VK_SPACE.0 as u32, true, 1_101));
+    }
+
+    #[test]
+    fn stuck_patrol_never_force_clears_during_visible_or_chord_interaction() {
+        let mut state = state::InputState::default();
+        assert!(stuck_patrol_context_is_safe(&state));
+
+        state.window.visible = true;
+        assert!(!stuck_patrol_context_is_safe(&state));
+
+        state.window.visible = false;
+        state.chord = state::ChordSession::Active {
+            session_id: 1,
+            last_triggered_key: None,
+        };
+        assert!(!stuck_patrol_context_is_safe(&state));
     }
 }

@@ -79,8 +79,10 @@ import {
 } from "./ss-interaction.js";
 import {copyReadingSelection, exitReadingMode, getReadingSelectionText, showReadingContextMenu,} from "./ss-reading.js";
 import {
+    activateSilentOcrReading,
     cancelActiveOcr,
     doPanelToggle,
+    hideSelLoading,
     showOcrResult,
     showTransientHint,
     updateOutputButtonsDisabled,
@@ -188,6 +190,15 @@ ss._doCancel = doCancel;
 ss._compositeSelection = compositeSelection;
 ss._doPinSelection = doPinSelection;
 ss._outputEditorPng = outputEditorPng;
+// 0.23.12：hide 前全量清场（cleanupCanvasVisuals 经此回调调用，避免循环依赖）
+ss._cleanupSessionVisuals = cleanupSessionVisuals;
+// 0.23.11.2：划词层真空白双击 → 复制选区（hit-canvas 与主 canvas 是兄弟元素，
+// dblclick 冒泡不可达，经此回调转发；语义对齐主 canvas dblclick 的标注分支）
+ss._dblClickBlankCopy = function (e) {
+    if (ss.isAnnotating && ss.selCss && pointInEditableImage(e)) {
+        doCopySelection();
+    }
+};
 // 0.15.7：长截图回调
 ss._enterCanvasImageEditor = enterCanvasImageEditor;
 
@@ -367,6 +378,8 @@ window.__blinkStartScreenshotSession = function (meta, activeDisplay) {
     window.__blinkScreenMeta = meta;
     window.__blinkActiveDisplay = activeDisplay ?? meta?.activeDisplay ?? 0;
     window.__blinkClearScreenshotVisual();
+    // resetState 已同步清理上一轮并画好暗罩，此时才允许 WebView 可见。
+    document.documentElement.classList.remove('screenshot-session-inactive');
     requestAnimationFrame(() => {
         requestAnimationFrame(() => window.__blinkReloadScreenshot());
     });
@@ -397,6 +410,7 @@ window.__blinkOpenImageEditor = function () {
     console.info('[image-editor] __blinkOpenImageEditor called');
     try {
         resetState();
+        document.documentElement.classList.remove('screenshot-session-inactive');
         loadEditorImage(window.__blinkEditorSource?.kind || IMAGE_SOURCE.CLIPBOARD);
     } catch (e) {
         console.error('[image-editor] 初始化失败', e);
@@ -409,6 +423,58 @@ window.__blinkOpenImageEditor = function () {
 // ════════════════════════════════════════════════════════════
 //  选区生命周期
 // ════════════════════════════════════════════════════════════
+
+/**
+ * 0.23.12：hide 前全量清场——清理 cleanupCanvasVisuals 画布/工具栏之外的
+ * 全部可见残留：划词 hit-canvas、窗口/控件预选虚线框、interaction 层、
+ * OCR 面板、像素放大镜、sel-loading、precision hint、toast、文本输入框。
+ *
+ * 动机：overlay 窗口复用（cloak hide → 下次 show 先于 resetState eval），
+ * show 与 reset 之间上一轮残留图层会闪现；0.23.11 预热静默划词让上一轮
+ * 更常处于"划词已激活"退出，词框/全选高亮的闪现由此变得明显。
+ * 幂等，可重复调用；由 ss-output.cleanupCanvasVisuals 经 ss._cleanupSessionVisuals 调用。
+ */
+function cleanupSessionVisuals() {
+    try {
+        exitReadingMode();
+    } catch (e) {
+        console.warn('[screenshot] cleanup: exitReadingMode failed', e);
+    }
+    try {
+        const panel = document.getElementById('ocr-panel');
+        if (panel) panel.remove();
+        updateOverlayButtonsActive();
+    } catch (e) {
+        console.warn('[screenshot] cleanup: remove ocr-panel failed', e);
+    }
+    try {
+        clearHover();
+        clearControlHints();
+    } catch (e) {
+        console.warn('[screenshot] cleanup: clear hints failed', e);
+    }
+    if (ss.interactionCanvas && ss.interactionCtx && ss.interactionCanvas.width > 0) {
+        ss.interactionCtx.clearRect(0, 0, ss.interactionCanvas.width, ss.interactionCanvas.height);
+    }
+    try {
+        hidePixelMagnifier();
+    } catch (e) {
+        console.warn('[screenshot] cleanup: hide magnifier failed', e);
+    }
+    // W4 例外：strokeCursor 高频逐帧更新，直接写 display
+    if (ss.strokeCursor) ss.strokeCursor.style.display = 'none';
+    try {
+        hideSelLoading();
+    } catch (e) {
+        console.warn('[screenshot] cleanup: hideSelLoading failed', e);
+    }
+    if (ss.precisionHint) ss.precisionHint.classList.add('hidden');
+    ss.errorHint.classList.add('hidden');
+    ss.errorHint.classList.remove('ss-toast-error');
+    ss.errorHint.textContent = '';
+    const staleTextInput = document.querySelector('.text-annot-input');
+    if (staleTextInput) staleTextInput.remove();
+}
 
 /** 完全重置前端状态——每次 overlay 显示时都要走一遍 */
 function resetState() {
@@ -1089,6 +1155,9 @@ function triggerOcrPrewarm(pw, ph) {
                     }
                     const elapsed = Math.round(performance.now() - startTs);
                     console.debug('[screenshot] OCR 预热完成', {ms: elapsed, textLen: result?.text?.length ?? 0});
+                    // 预热开关开启时，结果回来即静默激活划词（不开面板、无提示）；
+                    // 内部跳过 ocrBusy/reading 已激活场景，交给正常识别链路
+                    activateSilentOcrReading(result);
                     resolve(result);
                 })
                 .catch((rawErr) => {
@@ -1589,6 +1658,8 @@ canvas.addEventListener('mouseup', (e) => {
             ss.singleClickTimeout = null;
             if (!ss.isAnnotating && !ss.sent) {
                 console.debug('[screenshot] single click → hide overlay');
+                // 0.23.12：此路径原先不做清理，是旧图层残留闪现的出口之一
+                cleanupCanvasVisuals();
                 hideScreenshotOverlay().catch((err) => console.error('hideScreenshotOverlay 失败', err));
             }
         }, 200);
@@ -2007,3 +2078,6 @@ window.addEventListener('blur', () => {
 // ════════════════════════════════════════════════════════════
 
 bindToolbar();
+
+// 所有正常交互 handler 已完成注册；从此 ESC 只能走模块的分层关闭/会话清理路径。
+window.__blinkDisableEmergencyScreenshotEscape?.();

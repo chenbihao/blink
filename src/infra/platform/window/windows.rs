@@ -3542,7 +3542,7 @@ pub fn refresh_pin_image(
             return Ok(());
         }
     };
-    refresh_pin_image_by_label(app, &label, png_data, show_translating)
+    refresh_pin_image_by_label(app, &label, png_data, show_translating, None)
 }
 
 /// 0.20.x：按窗口 label 原地刷新 pin 图片（`refresh_pin_image` 的 label 定向版本）。
@@ -3557,6 +3557,7 @@ pub fn refresh_pin_image_by_label(
     label: &str,
     png_data: Vec<u8>,
     show_translating: bool,
+    expected_seq: Option<u64>,
 ) -> Result<(), String> {
     let win = match app.get_webview_window(label) {
         Some(w) => w,
@@ -3576,22 +3577,33 @@ pub fn refresh_pin_image_by_label(
         .map(|(w, h)| (w as f64, h as f64))
         .unwrap_or((0.0, 0.0));
 
-    let pin_seq = store_pin_image(PinImage::Png(Arc::new(png_data)));
+    // expected_seq 校验与 label 映射更新必须在同一临界区内；否则窗口回收复用
+    // 可能夹在两者之间，让旧任务覆盖新会话。校验通过后才存图，避免失败请求
+    // 占用 registry 槽位并淘汰仍在显示的旧图。
+    let pin_seq = {
+        let mut labels = pin_label_to_seq().lock().unwrap();
+        if let Some(expected) = expected_seq {
+            let current = labels.get(label).copied();
+            if current != Some(expected) {
+                return Err(format!(
+                    "pin 图片会话已变化: label={label}, expected_seq={expected}, current_seq={current:?}"
+                ));
+            }
+        }
+        let pin_seq = store_pin_image(PinImage::Png(Arc::new(png_data)));
+        labels.insert(label.to_string(), pin_seq);
+        pin_seq
+    };
     let img_url = format!("http://blink-pin.localhost/{pin_seq}");
-
-    // 0.20.4：更新 label → seq 映射（刷新后旧 seq 对应的图片已过时）
-    pin_label_to_seq()
-        .lock()
-        .unwrap()
-        .insert(label.to_string(), pin_seq);
 
     // 只换 img.src + 控制指示器，不调 place_at_physical，不调 __blinkResetPin
     let js = format!(
-        "if (window.__blinkRefreshPinImage) window.__blinkRefreshPinImage('{url}', {w}, {h}, {st});",
+        "if (window.__blinkRefreshPinImage) window.__blinkRefreshPinImage('{url}', {w}, {h}, {st}, {expected});",
         url = img_url,
         w = png_w,
         h = png_h,
-        st = if show_translating { "true" } else { "false" }
+        st = if show_translating { "true" } else { "false" },
+        expected = expected_seq.map_or_else(|| "null".to_string(), |seq| seq.to_string()),
     );
     win.eval(&js)
         .map_err(|e| format!("eval 刷新 pin 图片失败: {e}"))?;

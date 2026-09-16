@@ -537,6 +537,7 @@ pub fn rebuild_with_line_grouping_and_diag(
                 text: String::new(),
                 bounding_rect: line_rect,
                 word_indices: current_word_indices.clone(),
+                font_height: None,
             });
             current_word_indices.clear();
             current_rects.clear();
@@ -557,6 +558,7 @@ pub fn rebuild_with_line_grouping_and_diag(
             text: String::new(),
             bounding_rect: line_rect,
             word_indices: current_word_indices.clone(),
+            font_height: None,
         });
     }
 

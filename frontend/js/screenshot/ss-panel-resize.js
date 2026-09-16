@@ -87,3 +87,52 @@ export function computeResizedPanel(startW, startH, deltaW, deltaH, uiScale) {
     const dh = uiScale > 0 ? deltaH / uiScale : deltaH;
     return clampPanelSize(startW + dw, startH + dh);
 }
+
+/**
+ * OCR 面板落位：在候选位置中选第一个「钳制后完全在 mon 内、且不与选区相交」的位置。
+ *
+ * 候选顺序（0.23.12）：
+ * 1. 工具栏锚点（识别按钮）下方——常规情况，工具栏在选区下方
+ * 2. 工具栏锚点上方——选区贴近屏幕底部、工具栏已翻到选区上方时，
+ *    面板改往上弹，不再固定下弹压住选区内容（含嵌图译文）
+ * 3. 选区下方 / 4. 选区上方——工具栏两向都放不下时的兜底
+ *
+ * 全部候选都避不开选区时（如全屏选区），退化为候选 1 的钳制位置——
+ * 此时面板必然与选区重叠，保持可预测的旧行为。
+ *
+ * 所有坐标均为 CSS 像素；panelW/panelH 是经 `transform: scale(uiScale)` 后的视觉尺寸。
+ *
+ * @param {{left: number, top: number, right: number, bottom: number}} anchorRect - 锚点按钮视口矩形
+ * @param {number} panelW - 面板视觉宽度（CSS px）
+ * @param {number} panelH - 面板视觉高度（CSS px）
+ * @param {{x: number, y: number, w: number, h: number}} mon - 锚点所在显示器 CSS 矩形
+ * @param {{x: number, y: number, w: number, h: number}|null} selRect - 选区 CSS 矩形（null 时不做遮挡规避）
+ * @param {number} [margin=8] - 显示器边界留白
+ * @param {number} [gap=4] - 与锚点/选区的间距
+ * @returns {{left: number, top: number}} 面板落位（CSS px）
+ */
+export function placeOcrPanel(anchorRect, panelW, panelH, mon, selRect, margin = 8, gap = 4) {
+    const maxLeft = Math.max(mon.x + margin, mon.x + mon.w - margin - panelW);
+    const maxTop = Math.max(mon.y + margin, mon.y + mon.h - margin - panelH);
+    const clampPos = (left, top) => ({
+        left: Math.min(Math.max(left, mon.x + margin), maxLeft),
+        top: Math.min(Math.max(top, mon.y + margin), maxTop),
+    });
+    const intersectsSel = (left, top) => !!selRect
+        && left < selRect.x + selRect.w && left + panelW > selRect.x
+        && top < selRect.y + selRect.h && top + panelH > selRect.y;
+
+    const candidates = [
+        {left: anchorRect.left, top: anchorRect.bottom + gap},
+        {left: anchorRect.left, top: anchorRect.top - panelH - gap},
+    ];
+    if (selRect) {
+        candidates.push({left: selRect.x, top: selRect.y + selRect.h + gap});
+        candidates.push({left: selRect.x, top: selRect.y - panelH - gap});
+    }
+    for (const c of candidates) {
+        const p = clampPos(c.left, c.top);
+        if (!intersectsSel(p.left, p.top)) return p;
+    }
+    return clampPos(anchorRect.left, anchorRect.bottom + gap);
+}

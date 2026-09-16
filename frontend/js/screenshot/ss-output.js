@@ -22,14 +22,24 @@ import {
 } from '../shared/api.js';
 import {IMAGE_SOURCE} from './image-editor-session.js';
 import {cancelActiveOcr, hideSelLoading, showTransientHint} from './ss-ocr.js';
+import {normalizeError} from '../shared/tauri.js';
 
 /**
- * 清理画布视觉状态——在输出完成（copy/pin/save/cancel）后、窗口隐藏前调用。
+ * 清理画布视觉状态——在输出完成（copy/pin/save/cancel）、失焦、单击隐藏等
+ * 任何窗口即将 hide 的路径上调用。
  *
  * 动机：窗口复用时 eval resetState 与 win.show() 有竞态，旧画面会一闪而过。
  * 在完成时主动清空 canvas + 标注层，使窗口隐藏时画面已干净，下次唤起无残留。
+ *
+ * 0.23.12：除本函数直接清理的画布/工具栏外，再经 `ss._cleanupSessionVisuals`
+ * 回调（index.js 注册，避免循环依赖）清掉划词 hit-canvas、预选虚线框、
+ * interaction 层、OCR 面板、放大镜、各类提示等全部可见残留——
+ * 预热静默划词上线后，上一轮会话更常带着划词高亮/词框退出，残留闪现明显。
  */
 export function cleanupCanvasVisuals() {
+    // 先关闭整个 session 的可见性，再逐层清理。即使后端立即 cloak/hide，
+    // 下次 show 也会保持隐藏，直到新 session reset 完成。
+    document.documentElement.classList.add('screenshot-session-inactive');
     const {canvas, ctx, annotCanvas, annotCtx, toolbar, sizeHint, errorHint} = ss;
     // 清主 canvas
     if (canvas && ctx && canvas.width > 0) {
@@ -48,6 +58,13 @@ export function cleanupCanvasVisuals() {
     // 隐藏 UI 元素
     if (toolbar) toolbar.classList.add('hidden');
     if (sizeHint) sizeHint.classList.add('hidden');
+    if (typeof ss._cleanupSessionVisuals === 'function') {
+        try {
+            ss._cleanupSessionVisuals();
+        } catch (e) {
+            console.warn('[screenshot] cleanupSessionVisuals 失败', e);
+        }
+    }
 }
 
 export function ensureOutputReady() {
@@ -99,8 +116,20 @@ export function doCopySelection() {
                     ss.sent = false;
                 });
         }).catch((err) => {
-            console.error('[screenshot] compositeSelectionRgba failed', err);
-            ss.sent = false;
+            console.error('[screenshot] compositeSelectionRgba failed, fallback to PNG path', err);
+            // RGBA 快路径失败（如选区尺寸非法）→ 回退 PNG 合成路径，而不是把错误暴露给用户。
+            // 此时 cleanupCanvasVisuals 尚未执行，ss.screenshot / annotCanvas 仍可用。
+            compositeSelection((pngBytes) => {
+                cleanupCanvasVisuals();
+                outputEditorPng('copy', pngBytes)
+                    .then(() => cleanupLongCapture())
+                    .catch((e) => {
+                        console.error('[screenshot] copy 失败（PNG 回退路径）', e);
+                        ss.errorHint.textContent = '截图保存失败：' + e;
+                        ss.errorHint.classList.remove('hidden');
+                        ss.sent = false;
+                    });
+            });
         });
         return;
     }
@@ -170,6 +199,7 @@ export function doPinSelection() {
             .then(() => console.info('[screenshot] pin 成功（快路径）', {ms: Math.round(performance.now() - _t0)}))
             .catch((err) => {
                 console.error('[screenshot] pin 失败（快路径）', err);
+                showTransientHint(`钉图失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
                 ss.sent = false;
             });
         return;
@@ -184,6 +214,7 @@ export function doPinSelection() {
             })
             .catch((err) => {
                 console.error('[screenshot] pin 失败', err);
+                showTransientHint(`钉图失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
                 ss.sent = false;
             });
     });
@@ -373,8 +404,9 @@ async function compositeSelectionRgba() {
     const pw = bmp.w;
     const ph = bmp.h;
 
-    // 防御校验：输出尺寸必须 > 0
-    if (pw <= 0 || ph <= 0) {
+    // 防御校验：输出尺寸必须为有限正数。`pw <= 0` 防不住 NaN/Infinity
+    // （NaN <= 0 为 false），非法值经 header 传到后端会报「header w 非法」。
+    if (!Number.isFinite(pw) || !Number.isFinite(ph) || pw <= 0 || ph <= 0) {
         throw new Error(`compositeSelectionRgba: invalid output dimensions { pw: ${pw}, ph: ${ph} }`);
     }
 
@@ -461,6 +493,9 @@ export function doCancel() {
         console.warn('[screenshot] doCancel: cancelInProgress still true, ignoring');
         return;
     }
+    // 先失效会话内的 OCR/翻译回调，避免 hide 后旧结果再写回图层。
+    ss.selectionRevision++;
+    ss.translationRevision++;
     // Task 6: 取消在途 OCR 请求
     cancelActiveOcr();
     ss.cancelInProgress = true;

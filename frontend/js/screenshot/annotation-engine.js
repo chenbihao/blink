@@ -950,6 +950,8 @@ export function clearAll() {
     overlayLayer = null;
     currentPoints = [];
     pendingTextCmd = null;
+    _loadingSnapshot = null;
+    _skipLoadingSpinner = false;
     redrawAll();
 }
 
@@ -999,10 +1001,14 @@ export function setOverlay(config = {}) {
         mode,
         lines: lines.map((l) => ({
             rect: l.rect,
+            fontH: l.fontH ?? null,
             srcText: l.srcText || '',
             dstText: l.dstText || null,
             bgColor: bgStrategyChanged ? null : (l.bgColor || null),
             inkColor: bgStrategyChanged ? null : (l.inkColor || null),
+            inkSampled: bgStrategyChanged ? null : (l.inkSampled || null),
+            blurBase: bgStrategyChanged ? null : (l.blurBase || null),
+            charRects: Array.isArray(l.charRects) ? l.charRects : null,
         })),
         bgStrategy: newBgStrategy,
         fontScale: typeof config.fontScale === 'number' ? config.fontScale : (prev.fontScale ?? 1.0),
@@ -1083,7 +1089,57 @@ export function redrawLoadingSpinner() {
 /** 清空嵌图图层(整片下线)。 */
 export function clearOverlay() {
     overlayLayer = null;
+    _loadingSnapshot = null;
+    _skipLoadingSpinner = false;
     redrawAll();
+}
+
+// ── OCR 结果 → overlay 行映射（0.23.12 自 ss-ocr.js 移入，跨窗口共用）──────
+
+/**
+ * 提取后端下发的字号参考高度（`OcrLine.font_height`，JSON 字段 `font_h`）。
+ *
+ * PP-OCR det 框经 unclip 外扩后 rect.h 大于实际字形高度，后端按经验系数
+ * 折减后随行下发；仅用于嵌图字号推导，rect 本身不动。WinRT 路径不下发
+ * 该字段（词框 union 已紧贴字形）→ 返回 null，渲染回退 rect.h。
+ */
+export function toFontH(ln) {
+    return (ln && Number.isFinite(ln.font_h) && ln.font_h > 0) ? ln.font_h : null;
+}
+
+/**
+ * OCR 结果 → overlay 行数组（识别/翻译嵌图/静默划词/pin 翻译覆盖共用）。
+ *
+ * 行过滤 + 字段映射之外，把 `char_boxes`（逐字符框，X 向紧贴字形）按
+ * `line_index` 聚合为每行的 `charRects`，供字色采样把候选像素收紧到字形
+ * 内部、几何排除行内非文字干扰（下划线/图标/底纹）。
+ * 注意 char_boxes.line_index 对应 result.lines 的**原始下标**；行过滤后
+ * 下标会前移，需按原始下标建映射后再归位。
+ */
+export function toOverlayLines(result) {
+    const rawLines = (result && Array.isArray(result.lines)) ? result.lines : [];
+    const charBoxes = (result && Array.isArray(result.char_boxes)) ? result.char_boxes : [];
+    const out = [];
+    const origToOverlay = new Map();
+    rawLines.forEach((ln, origIdx) => {
+        if (!(ln && ln.text && ln.rect && ln.rect.w > 0 && ln.rect.h > 0)) return;
+        origToOverlay.set(origIdx, out.length);
+        out.push({
+            rect: {x: ln.rect.x, y: ln.rect.y, w: ln.rect.w, h: ln.rect.h},
+            fontH: toFontH(ln),
+            srcText: ln.text,
+        });
+    });
+    for (const cb of charBoxes) {
+        const overlayIdx = (cb && Number.isInteger(cb.line_index))
+            ? origToOverlay.get(cb.line_index) : undefined;
+        if (overlayIdx === undefined) continue;
+        if (!(cb.rect && cb.rect.w > 0 && cb.rect.h > 0)) continue;
+        const line = out[overlayIdx];
+        if (!line.charRects) line.charRects = [];
+        line.charRects.push({x: cb.rect.x, y: cb.rect.y, w: cb.rect.w, h: cb.rect.h});
+    }
+    return out;
 }
 
 /**
@@ -1458,12 +1514,17 @@ export function hasAnnotations() {
 // 输出:每行画背景遮罩 + 字号自适应文字。
 //
 // 策略:
-// - 背景色:采样 rect 周围环形环带(rect.h 高向外扩 4px)的像素,忽略暗色"字色"像素,
-//          剩余取 RGB 平均;若采样为空退化到白色。
-// - 字色:根据背景亮度阈值 128 切换深/浅字体(深底→浅字/浅底→深字)。
-// - 字号:起始 rect.h * 1.0,迭代减 1 直到 measureText.width <= rect.w * 0.95,
-//        下限 8px;若仍超宽二分找最长前缀 + 省略号。
-//        相邻行字号偏差超 25% 视为有意不同层级(标题/正文),分组各自均值统一。
+// - 背景色:采样 rect 周围环形环带,以通道中位数为中心做稳健平均,
+//          对深底浅字/浅底深字对称;若采样为空退化到白色。
+// - 字色:优先采样 rect 内原图像素的真实字色(蓝链接/红警告/灰提示等,见
+//        sampleOriginalInkColors),有 charRects 时收紧到字形内部并采出逐字
+//        符色;原文可按 buildInkSegments 分段着色,译文只采用高置信整行主色;
+//        采不到或对比度不足时回退背景对比色(深底→浅字/浅底→深字)。
+// - 字号:起始(行 fontH ?? rect.h) * fontScale,迭代减 1 直到
+//        measureText.width <= rect.w * 0.95,下限 8px;若仍超宽二分找最长前缀 + 省略号。
+//        fontH 是后端折减的字号参考高度(PP-OCR det 框 unclip 外扩,rect.h 偏大;
+//        WinRT 路径无 fontH → 直接用 rect.h)。相邻行字号偏差超 25%
+//        视为有意不同层级(标题/正文),分组各自均值统一。
 //
 // 所有采样/字号算法都是纯函数(见文件末尾的 `sample*` / `fitFontSize` / `luminance`),
 // 便于后续在 Node 环境 mock ctx 做单测。
@@ -1547,7 +1608,12 @@ function drawOverlay(targetCtx, layer, _w, _h) {
         const text = mode === 'translated' ? line.dstText : line.srcText;
         if (!text) continue;
         lineEntries.push({line, r, text});
-        const {size} = fitFontSize(targetCtx, text, r, fontScale);
+        // PP-OCR det 框含 unclip 外扩，rect.h 偏大；fontH 是后端折减后的字号
+        // 参考高度（WinRT 无此字段 → 回退 rect.h）。字号推导用 fontRect，
+        // 背景覆盖仍用原 rect（见下方 fillRect）。
+        const fontRect = (line.fontH && line.fontH > 0 && line.fontH < r.h)
+            ? {...r, h: line.fontH} : r;
+        const {size} = fitFontSize(targetCtx, text, fontRect, fontScale);
         rawSizes.push(size > 0 ? size : 0);
     }
     if (lineEntries.length === 0) {
@@ -1593,7 +1659,8 @@ function drawOverlay(targetCtx, layer, _w, _h) {
     for (let i = 0; i < lineEntries.length; i++) {
         const {line, r, text} = lineEntries[i];
         // ── 背景 ──
-        // blur 直接把原图对应区域模糊绘回；其它策略再用色块覆盖。
+        // blur = 垫底平均色抹掉原文字 + 叠半透明模糊原图保留背景质感；
+        // 其它策略用色块覆盖。
         // H3 优化：bgColor/inkColor 首次计算后缓存到 line 对象，后续重绘直接读取
         let backgroundDrawn = false;
         let bg = line.bgColor;
@@ -1601,13 +1668,14 @@ function drawOverlay(targetCtx, layer, _w, _h) {
             if (bgStrategy === 'solid') {
                 bg = 'rgba(255, 255, 255, 0.92)';
             } else if (bgStrategy === 'blur') {
-                backgroundDrawn = drawBlurredBackground(targetCtx, r);
+                backgroundDrawn = drawBlurredBackground(targetCtx, r, line);
                 if (!backgroundDrawn) bg = 'rgba(255, 255, 255, 0.92)';
             } else {
                 // 平均色策略(默认):采样 rect 周围环形区
                 bg = sampleAverageBackgroundColor(r) || 'rgba(255, 255, 255, 0.95)';
             }
-            // 缓存到 line 对象（blur 策略不缓存——它是绘制操作而非纯色值）
+            // 缓存到 line 对象（blur 的模糊层是绘制操作不缓存，
+            // 但其垫底色在 drawBlurredBackground 内经 line.blurBase 缓存）
             if (bg && bgStrategy !== 'blur') {
                 line.bgColor = bg;
             }
@@ -1619,25 +1687,50 @@ function drawOverlay(targetCtx, layer, _w, _h) {
 
         // ── 文字 ──
 
-        // 字色：优先采样原图文字颜色（匹配原文字色），失败时用背景亮度决定深/浅
-        // H3 优化：inkColor 缓存到 line；sampleInkColor 接收 bg 参数避免重复采样
-        let ink = line.inkColor;
-        if (!ink) {
-            ink = sampleInkColor(r, bg) || pickInkColorByBg(bg || 'rgba(255, 255, 255, 0.95)');
-            if (ink) {
-                line.inkColor = ink;
-            }
+        // 字色：原文模式保留真实原文字色；译文模式只接受高置信度的整行主色。
+        // 翻译会改变语序与长度，逐字符颜色按长度比例映射既无语义依据，也会把
+        // 壁纸/图标/抗锯齿噪声放大成“五颜六色”的译文。
+        let sampled = line.inkSampled;
+        let sourceInk = line.inkColor;
+        const fallbackBg = bg || line.blurBase || null;
+        const fallbackInk = sampleInkColor(r, fallbackBg)
+            || pickInkColorByBg(fallbackBg || 'rgba(255, 255, 255, 0.95)');
+        if (!sampled && !sourceInk) {
+            sampled = sampleOriginalInkColors(r, bg, line.charRects);
+            if (sampled) line.inkSampled = sampled;
         }
+        if (!sourceInk) {
+            sourceInk = (sampled && sampled.ink) || fallbackInk;
+            line.inkColor = sourceInk;
+        }
+        const ink = mode === 'translated'
+            ? chooseStableTranslatedInk(sampled, fallbackInk, fallbackBg)
+            : sourceInk;
         // 组内统一字号 + 重新计算截断/省略
         const fontPx = unifiedSizes[i];
         const display = fitDisplayText(targetCtx, text, r, fontPx);
         if (fontPx <= 0) continue;
 
-        targetCtx.fillStyle = ink;
         targetCtx.font = `${fontPx}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
         targetCtx.textBaseline = 'middle';
         targetCtx.textAlign = 'left';
-        targetCtx.fillText(display, r.x + 2, r.y + r.h / 2);
+        // 逐字符分色只对原文有意义；译文始终使用稳定的整行主色。
+        const segments = mode === 'source' ? buildInkSegments(
+            (line.srcText || '').length, display,
+            line.inkSampled ? line.inkSampled.charInks : null, ink) : null;
+        if (segments) {
+            let cursorX = r.x + 2;
+            for (const seg of segments) {
+                targetCtx.fillStyle = seg.color;
+                targetCtx.fillText(seg.text, cursorX, r.y + r.h / 2);
+                cursorX += targetCtx.measureText(seg.text).width;
+            }
+        } else {
+            const textX = r.x + 2;
+            const textY = r.y + r.h / 2;
+            targetCtx.fillStyle = ink;
+            targetCtx.fillText(display, textX, textY);
+        }
 
         // ── 保留原文对照(0.11.10-j)──
         // 仅在译文模式 + showOriginal 打开 + 有 srcText 时叠加,画在 rect 顶部小字
@@ -1667,17 +1760,18 @@ function drawOverlay(targetCtx, layer, _w, _h) {
 // ── 背景采样(0.11.10-h §2.8)─────────────────────────
 
 /**
- * 采样 rect 周围环形带的像素平均色(忽略字色暗像素)。
+ * 采样 rect 周围环形带的稳健背景色。
  *
  * 环形带 = 以 rect 为核心,向外扩 4px 的边框区域(内圈是 rect 本身)。
- * 忽略字色的启发式:先算带内所有像素的平均亮度,亮度低于 平均值 - 20 的像素视为"字色",
- * 不参与最终 RGB 平均。这样文字周围环带上"字延伸出去的部分"不会污染背景色。
+ * 对 R/G/B 分别取中位数作为背景中心，再只平均与中心足够接近的像素。
+ * 相比旧版“只排除暗像素”，该方法对浅底深字和深底浅字对称，白字阴影、
+ * 抗锯齿亮边及少量彩色图标都不会单向拉偏背景色。
  *
  * 空采样(rect 挨着裁剪区边缘导致带完全在外)返回 null,调用方 fallback。
  */
-function sampleAverageBackgroundColor(rect) {
-    if (!cropImageData) return null;
-    const {data, width: iw, height: ih} = cropImageData;
+export function sampleAverageBackgroundColorFromPixels(imageData, rect) {
+    if (!imageData || !imageData.data || !rect) return null;
+    const {data, width: iw, height: ih} = imageData;
     const margin = 4;
     const x0 = Math.max(0, Math.floor(rect.x - margin));
     const x1 = Math.min(iw - 1, Math.ceil(rect.x + rect.w + margin));
@@ -1688,55 +1782,61 @@ function sampleAverageBackgroundColor(rect) {
     const ry0 = Math.max(0, Math.floor(rect.y));
     const ry1 = Math.min(ih - 1, Math.ceil(rect.y + rect.h));
 
-    // Pass 1:收集环带所有像素 + 记录亮度
-    const samples = [];   // {r,g,b,lum}
-    let sumLum = 0;
+    const samples = [];
     for (let py = y0; py <= y1; py++) {
         for (let px = x0; px <= x1; px++) {
             // 只要环形带内(排除 rect 内部)
             if (px >= rx0 && px <= rx1 && py >= ry0 && py <= ry1) continue;
             const idx = (py * iw + px) * 4;
             const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-            const l = luminance(r, g, b);
-            samples.push({r, g, b, l});
-            sumLum += l;
+            samples.push({r, g, b});
         }
     }
     if (samples.length === 0) return null;
-    const avgLum = sumLum / samples.length;
-    const inkThreshold = avgLum - 20;
 
-    // Pass 2:忽略字色像素,累加剩余
-    let sumR = 0, sumG = 0, sumB = 0, count = 0;
-    for (const s of samples) {
-        if (s.l < inkThreshold) continue;
+    const median = (values) => {
+        const sorted = values.slice().sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    const center = {
+        r: median(samples.map((s) => s.r)),
+        g: median(samples.map((s) => s.g)),
+        b: median(samples.map((s) => s.b)),
+    };
+    const maxDist2 = 72 * 72;
+    let inliers = samples.filter((s) => rgbDist2(s, center) <= maxDist2);
+    // 高纹理背景可能没有明显紧簇；此时中位数本身比全量均值更抗离群点。
+    if (inliers.length < Math.max(4, samples.length * 0.2)) inliers = [center];
+    let sumR = 0, sumG = 0, sumB = 0;
+    for (const s of inliers) {
         sumR += s.r;
         sumG += s.g;
         sumB += s.b;
-        count++;
     }
-    if (count === 0) {
-        // 所有像素都被判定为"字色" → 极小概率,退化用全体平均
-        for (const s of samples) {
-            sumR += s.r;
-            sumG += s.g;
-            sumB += s.b;
-        }
-        count = samples.length;
-    }
+    const count = inliers.length;
     const R = Math.round(sumR / count);
     const G = Math.round(sumG / count);
     const B = Math.round(sumB / count);
     return `rgba(${R}, ${G}, ${B}, 0.95)`;
 }
 
+function sampleAverageBackgroundColor(rect) {
+    return sampleAverageBackgroundColorFromPixels(cropImageData, rect);
+}
+
 /**
- * 高斯模糊策略：从缓存的原始裁剪图扩大取样，再裁回目标行区域。
- * 扩大 6px 可避免 blur 边缘透明；目标 ctx 的 save/restore 保证 filter 不外泄。
+ * 高斯模糊策略：大半径模糊原图铺底，区域性还原背景，细笔画文字被高频滤除。
+ *
+ * 高斯模糊保低频(背景色块/渐变,几十到几百 px 尺度)压高频(1-3px 文字笔画)，
+ * 半径越大这个分离越彻底：12px 下原文残影只剩低对比云雾，而同行内不同底色的
+ * 区域差异几乎完整保留——这就是"区域性"的来源。垫底平均色仅 15% 权重，
+ * 轻微统一色调并进一步压残影，不破坏区域感（此前垫底 100% 导致整行一个色）。
+ * 扩大 2×半径取样可避免 blur 边缘透明；目标 ctx 的 save/restore 保证 filter 不外泄。
  */
-function drawBlurredBackground(targetCtx, rect) {
+function drawBlurredBackground(targetCtx, rect, line) {
     if (!cropSourceCanvas) return false;
-    const blurPx = 4;
+    const blurPx = 12;
     const pad = blurPx * 2;
     const sx = Math.max(0, Math.floor(rect.x - pad));
     const sy = Math.max(0, Math.floor(rect.y - pad));
@@ -1746,13 +1846,25 @@ function drawBlurredBackground(targetCtx, rect) {
     const sh = sy2 - sy;
     if (sw <= 0 || sh <= 0) return false;
 
+    // 垫底色按行缓存（blurBase 独立于 bgColor——调用方读 bgColor 判定是否已处理，
+    // 复用会让 blur 分支被跳过退化成纯色填充）
+    let base = line.blurBase;
+    if (!base) {
+        base = sampleAverageBackgroundColor(rect) || 'rgba(255, 255, 255, 0.95)';
+        line.blurBase = base;
+    }
+
     targetCtx.save();
     targetCtx.beginPath();
     targetCtx.rect(rect.x, rect.y, rect.w, rect.h);
     targetCtx.clip();
+    targetCtx.fillStyle = base;
+    targetCtx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    targetCtx.globalAlpha = 0.85;
     targetCtx.filter = `blur(${blurPx}px)`;
     targetCtx.drawImage(cropSourceCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
     targetCtx.filter = 'none';
+    targetCtx.globalAlpha = 1;
     targetCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
     targetCtx.fillRect(rect.x, rect.y, rect.w, rect.h);
     targetCtx.restore();
@@ -1769,11 +1881,19 @@ function luminance(r, g, b) {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-/** 从 CSS 颜色字符串抽 rgb;不支持的格式返回 null。用于背景色 → 字色反查。 */
+/** 从 CSS rgb/rgba/#rgb/#rrggbb 颜色字符串抽 rgb；不支持的格式返回 null。 */
 function parseRgb(css) {
     const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(css);
-    if (!m) return null;
-    return {r: +m[1], g: +m[2], b: +m[3]};
+    if (m) return {r: +m[1], g: +m[2], b: +m[3]};
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(css || '').trim());
+    if (!hex) return null;
+    const raw = hex[1].length === 3
+        ? hex[1].split('').map((c) => c + c).join('') : hex[1];
+    return {
+        r: parseInt(raw.slice(0, 2), 16),
+        g: parseInt(raw.slice(2, 4), 16),
+        b: parseInt(raw.slice(4, 6), 16),
+    };
 }
 
 /** 根据背景色选深/浅字色(阈值 128)。 */
@@ -1790,6 +1910,9 @@ function pickInkColorByBg(bgCss) {
  * - 深色背景 → 白色字
  * - 浅色背景 → 黑色字
  *
+ * 0.23.x 起为**回退路径**：真实原文字色采样见 sampleOriginalInkColor，
+ * 本函数在其采不到/对比度不足时兜底。
+ *
  * @returns {string|null} CSS 颜色字符串，采样失败返回 null
  */
 function sampleInkColor(rect, bgCss) {
@@ -1799,12 +1922,508 @@ function sampleInkColor(rect, bgCss) {
     return pickInkColorByBg(bg);
 }
 
+// ── 原文字色采样(0.23.x)─────────────────────────────
+
+/** 与背景基准的 RGB 距离(欧氏,0-441)超过此值视为文字像素。 */
+const INK_DIST_THRESHOLD = 60;
+/** 文字候选中 RGB 距离最远的前 30% 视为字形核心(滤掉抗锯齿半混色边缘)。 */
+const INK_CORE_RATIO = 0.3;
+/** 亮度中位数簇半径:与中位数亮度差 ≤ 20 的像素视为背景。 */
+const INK_BG_CLUSTER_LUM = 20;
+/** 候选占比下限对应的最小绝对像素数(避免大 rect 下阈值过严)。 */
+const INK_MIN_CANDIDATES = 4;
+/** 候选占比下限:低于视为"没采到文字"(纯色块/噪声)。 */
+const INK_MIN_CANDIDATE_RATIO = 0.02;
+/** 候选占比上限:过高说明背景基准翻转或区域杂乱,采样不可信。 */
+const INK_MAX_CANDIDATE_RATIO = 0.7;
+/** 接受采样字色的最低 WCAG 对比度(对实际绘制背景)。
+ *  取 2.5 而非 3.0:浅灰次要文字(#999 对白底 ≈ 2.85)是合法原色,应保留。 */
+const INK_MIN_CONTRAST = 2.5;
+/** 框外背景像素低于此数时退回整行中位数簇单基准(字符框几乎铺满整行的极端密度)。 */
+const INK_BG_PIXEL_MIN = 30;
+/** 背景色簇上限:行内同时存在的背景色(徽章内底+外围底等)通常 ≤ 2-3 种。 */
+const INK_BG_CLUSTER_MAX = 4;
+
+/**
+ * WCAG 相对亮度对比度(1.0-21.0)。与 luminance() 的区别:luminance() 是
+ * 0-255 线性 BT.709 近似(用于阈值判断),此处按 WCAG 公式做 gamma 展开,
+ * 用于字色可读性校验。
+ */
+export function wcagContrastRatio(rgbA, rgbB) {
+    const relLum = (c) => {
+        const f = (v) => {
+            v /= 255;
+            return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+    };
+    const l1 = relLum(rgbA);
+    const l2 = relLum(rgbB);
+    const [hi, lo] = l1 > l2 ? [l1, l2] : [l2, l1];
+    return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * 从行 rect 内原图像素采样真实字色(嵌字时匹配原文字色)。
+ *
+ * 背景:pickInkColorByBg 只按背景亮度切黑白,彩色原文(蓝链接/红警告/灰提示)
+ * 嵌字后会失真。本函数从像素估计真实字色:
+ *
+ * 1. 背景基准 = rect 内亮度中位数簇(±INK_BG_CLUSTER_LUM)均值——文字像素
+ *    占行框比例低,中位数天然落在背景上;
+ * 2. 文字候选 = 与基准 RGB 距离 > INK_DIST_THRESHOLD 的像素;
+ * 3. 候选字色 = 候选中距离最远的前 INK_CORE_RATIO(字形核心)均值,
+ *    避免抗锯齿半混色边缘把颜色洗淡;
+ * 4. 兜底:候选过少/过多,或与实际绘制背景对比度 < INK_MIN_CONTRAST → null,
+ *    调用方回退黑白字色。
+ *
+ * 字色识别只依赖原图像素(自估背景),不信任 drawnBgCss——solid 策略的白色
+ * 会把深色底整片误判成"字"。drawnBgCss 仅用于对比度校验(字实际画在什么上);
+ * blur 策略无绘制背景色,传 null,此时用背景基准代替。
+ *
+ * charRects(逐字符框,PP-OCR char_boxes 聚合)把文字候选池收紧到字形内部:
+ * 背景基准仍取整行 rect(行框内背景占多数,中位数稳),但候选像素只从字符框
+ * 里找——行内非文字干扰(下划线/图标/底纹)被几何排除。字符框全部越界时
+ * 回退整行采样。WinRT 等无 char_boxes 的路径不传,维持整行行为。
+ *
+ * @param {{data: Uint8ClampedArray, width: number, height: number}|null} imageData - 裁剪区像素
+ * @param {{x: number, y: number, w: number, h: number}} rect - 行包围盒(物理像素)
+ * @param {string|null} drawnBgCss - 实际绘制在字下的背景色
+ * @param {Array<{x: number, y: number, w: number, h: number}>|null} [charRects] - 逐字符框并集
+ * @returns {string|null} 'rgb(r, g, b)';null = 采不到/不可信
+ */
+export function sampleOriginalInkColorFromPixels(imageData, rect, drawnBgCss, charRects) {
+    const s = sampleOriginalInkColorsFromPixels(imageData, rect, drawnBgCss, charRects);
+    return s ? s.ink : null;
+}
+
+/**
+ * 逐字符颜色采样下限:字符框内文字候选像素少于此数(细窄字符/标点)不单独立色,
+ * 继承整行字色。
+ */
+const INK_CHAR_MIN_CANDIDATES = 3;
+
+/** 单背景基准:亮度中位数簇(±INK_BG_CLUSTER_LUM)均值(无字符框几何时的原有逻辑)。 */
+function medianClusterBg(pixels) {
+    const lums = pixels.map((p) => p.l);
+    lums.sort((a, b) => a - b);
+    const medLum = lums[Math.floor(lums.length / 2)];
+    let r = 0, g = 0, b = 0, n = 0;
+    for (const p of pixels) {
+        if (Math.abs(p.l - medLum) <= INK_BG_CLUSTER_LUM) {
+            r += p.r;
+            g += p.g;
+            b += p.b;
+            n++;
+        }
+    }
+    return n === 0 ? null : {r: r / n, g: g / n, b: b / n};
+}
+
+/** 贪心颜色聚类:像素并入距离 ≤ tol 的最近簇(增量均值),返回原始簇(未按大小排序)。 */
+function greedyColorClusters(pixels, tol) {
+    const tol2 = tol * tol;
+    const clusters = [];
+    for (const p of pixels) {
+        let best = null;
+        for (const cl of clusters) {
+            const d2 = (p.r - cl.sr / cl.n) ** 2 + (p.g - cl.sg / cl.n) ** 2 + (p.b - cl.sb / cl.n) ** 2;
+            if (d2 <= tol2 && (!best || d2 < best.d2)) best = {cl, d2};
+        }
+        if (best) {
+            best.cl.sr += p.r;
+            best.cl.sg += p.g;
+            best.cl.sb += p.b;
+            best.cl.n++;
+        } else {
+            clusters.push({sr: p.r, sg: p.g, sb: p.b, n: 1});
+        }
+    }
+    return clusters;
+}
+
+/** 背景多色聚类:贪心聚类后按像素数取前 maxK 簇(带 n 供"框内外占比"判别)。 */
+function clusterBgColors(pixels, tol, maxK) {
+    return greedyColorClusters(pixels, tol)
+        .sort((a, b) => b.n - a.n)
+        .slice(0, maxK)
+        .map((cl) => ({r: cl.sr / cl.n, g: cl.sg / cl.n, b: cl.sb / cl.n, n: cl.n}));
+}
+
+/**
+ * 行级 + 逐字符字色采样(sampleOriginalInkColorFromPixels 的完整版)。
+ *
+ * 算法同上,额外地:charRects 收紧路径下,文字候选按所属字符框分桶,
+ * 每桶独立求均值与对比度校验 → charInks[i](null = 该字符无足够候选,
+ * 继承整行字色)。charInks 与 charRects/srcText 字符一一对应,
+ * 供混合色行(如"红色警告:普通文本")分段着色。
+ *
+ * @returns {{ink: string|null, charInks: Array<string|null>|null, inkConfidence: number}|null}
+ *   charInks 为 null 表示非字符框收紧路径(整行采样,无逐字符信息)；
+ *   inkConfidence 是字形核心最大颜色簇占比(0-1)。
+ */
+export function sampleOriginalInkColorsFromPixels(imageData, rect, drawnBgCss, charRects) {
+    if (!imageData || !imageData.data) return null;
+    const {data, width: iw, height: ih} = imageData;
+
+    const clampRect = (r) => ({
+        x0: Math.max(0, Math.floor(r.x)),
+        y0: Math.max(0, Math.floor(r.y)),
+        x1: Math.min(iw - 1, Math.ceil(r.x + r.w) - 1),
+        y1: Math.min(ih - 1, Math.ceil(r.y + r.h) - 1),
+    });
+    const collect = (b) => {
+        const pxs = [];
+        for (let py = b.y0; py <= b.y1; py++) {
+            const rowBase = py * iw;
+            for (let px = b.x0; px <= b.x1; px++) {
+                const idx = (rowBase + px) * 4;
+                const p = {r: data[idx], g: data[idx + 1], b: data[idx + 2]};
+                p.l = luminance(p.r, p.g, p.b);
+                p.key = rowBase + px;
+                pxs.push(p);
+            }
+        }
+        return pxs;
+    };
+
+    // Pass 1:行内全部像素(背景基准) + 字符框内像素(文字候选池,带所属字符索引)
+    const lineBox = clampRect(rect);
+    if (lineBox.x1 < lineBox.x0 || lineBox.y1 < lineBox.y0) return null;
+    const linePixels = collect(lineBox);
+    if (linePixels.length === 0) return null;
+
+    const clampedChars = [];
+    if (Array.isArray(charRects)) {
+        for (const cr of charRects) {
+            if (!cr || !(cr.w > 0) || !(cr.h > 0)) continue;
+            const b = clampRect(cr);
+            if (b.x1 < b.x0 || b.y1 < b.y0) continue;
+            clampedChars.push(b);
+        }
+    }
+    let inkPixels = linePixels;
+    if (clampedChars.length > 0) {
+        inkPixels = [];
+        clampedChars.forEach((b, ci) => {
+            for (const p of collect(b)) {
+                p.ci = ci;
+                inkPixels.push(p);
+            }
+        });
+        // 字符框全部越界/无效 → 回退整行采样
+        if (inkPixels.length === 0) inkPixels = linePixels;
+    }
+    const charConstrained = inkPixels !== linePixels;
+
+    // Pass 2 背景基准:字符框收紧时,用"框外像素"(字间隙/行内空白,保证是背景)
+    // 聚出最多 INK_BG_CLUSTER_MAX 个背景色——行内可能同时有两种背景(如徽章内
+    // 绿底 + 外围黄底,亮度接近),单一中位数基准会偏向占比大的一方,把少数背景
+    // 误判成文字(绿底黑字嵌在黄底上 → 字色采成绿黑混合)。文字候选须与所有
+    // 背景簇都足够远。框外像素过少(字符框铺满整行)退回整行中位数簇单基准。
+    const thr2 = INK_DIST_THRESHOLD * INK_DIST_THRESHOLD;
+    let refBgs = null;
+    let refBg = null;
+    if (charConstrained) {
+        const boxKeys = new Set(inkPixels.map((p) => p.key));
+        const bgPixels = linePixels.filter((p) => !boxKeys.has(p.key));
+        if (bgPixels.length >= INK_BG_PIXEL_MIN) {
+            const clusters = clusterBgColors(bgPixels, INK_DIST_THRESHOLD, INK_BG_CLUSTER_MAX);
+            // 最大簇无条件保留为主背景:字符框铺满行时,主背景在框内(字间隙)
+            // 天然多于框外,不能用内外占比否决——否则主背景被踢出背景模型,
+            // 整行字色会采成背景色(画在原底上=隐形)。
+            // 次要簇:框内出现多于框外 → 是文字色(同色装饰/火花) → 不作背景。
+            refBgs = clusters.filter((c, i) => {
+                if (i === 0) return true;
+                let inCount = 0;
+                for (const p of inkPixels) {
+                    if ((p.r - c.r) ** 2 + (p.g - c.g) ** 2 + (p.b - c.b) ** 2 <= thr2) inCount++;
+                }
+                return inCount < c.n;
+            });
+            if (refBgs.length === 0) refBgs = null;
+        }
+    }
+    if (!refBgs) {
+        refBg = medianClusterBg(linePixels);
+    }
+    if (!refBg && !refBgs) return null;
+
+    // Pass 2 文字候选:只从候选池里找,与(所有)背景基准距离超阈值
+    const candidates = [];
+    for (const p of inkPixels) {
+        let d2;
+        if (refBgs) {
+            d2 = Infinity;
+            for (const c of refBgs) {
+                const d = (p.r - c.r) ** 2 + (p.g - c.g) ** 2 + (p.b - c.b) ** 2;
+                if (d < d2) d2 = d;
+            }
+        } else {
+            d2 = (p.r - refBg.r) ** 2 + (p.g - refBg.g) ** 2 + (p.b - refBg.b) ** 2;
+        }
+        if (d2 > thr2) candidates.push({r: p.r, g: p.g, b: p.b, d2, ci: p.ci});
+    }
+    if (candidates.length < Math.max(INK_MIN_CANDIDATES, inkPixels.length * INK_MIN_CANDIDATE_RATIO)) {
+        return null;
+    }
+    // 占比上限只约束"候选池=整行"的路径——字符框内墨水占比天然偏高,不适用
+    if (!charConstrained && candidates.length > linePixels.length * INK_MAX_CANDIDATE_RATIO) {
+        return null;
+    }
+
+    // 字形核心:距离最远的前 N%。核心内部再按颜色聚类，使用最大簇均值作为
+    // 行级字色，并记录最大簇占比作为可信度。真实字形通常在核心区高度同色；
+    // 壁纸/图标噪声往往会分散到多个颜色簇。
+    candidates.sort((a, b) => b.d2 - a.d2);
+    const coreN = Math.max(1, Math.ceil(candidates.length * INK_CORE_RATIO));
+    const coreClusters = greedyColorClusters(candidates.slice(0, coreN), INK_DIST_THRESHOLD)
+        .sort((a, b) => b.n - a.n);
+    const dominantCore = coreClusters[0];
+    const inkConfidence = dominantCore.n / coreN;
+    const ink = {
+        r: Math.round(dominantCore.sr / dominantCore.n),
+        g: Math.round(dominantCore.sg / dominantCore.n),
+        b: Math.round(dominantCore.sb / dominantCore.n),
+    };
+
+    // 对比度兜底:对实际绘制背景(无则对背景基准)校验可读性
+    const checkBg = parseRgb(drawnBgCss || '') || refBg || (refBgs && refBgs[0]) || null;
+    if (!checkBg || wcagContrastRatio(ink, checkBg) < INK_MIN_CONTRAST) {
+        return null;
+    }
+    const inkCss = `rgb(${ink.r}, ${ink.g}, ${ink.b})`;
+
+    // 逐字符分桶:字符框内候选独立求均值,可读则单独立色
+    let charInks = null;
+    if (charConstrained) {
+        charInks = clampedChars.map(() => null);
+        const buckets = clampedChars.map(() => []);
+        for (const c of candidates) {
+            if (c.ci !== undefined && c.ci < buckets.length) buckets[c.ci].push(c);
+        }
+        buckets.forEach((bucket, i) => {
+            if (bucket.length < INK_CHAR_MIN_CANDIDATES) return;
+            // 桶内可能混入穿过字形的装饰线像素,取最大颜色簇的均值而非全桶均值,
+            // 避免两色混合出中间色(橙字+绿线 → 橄榄绿)
+            const top = greedyColorClusters(bucket, INK_DIST_THRESHOLD)
+                .sort((a, b) => b.n - a.n)[0];
+            const col = {
+                r: Math.round(top.sr / top.n),
+                g: Math.round(top.sg / top.n),
+                b: Math.round(top.sb / top.n),
+            };
+            if (wcagContrastRatio(col, checkBg) < INK_MIN_CONTRAST) return;
+            charInks[i] = `rgb(${col.r}, ${col.g}, ${col.b})`;
+        });
+        // 归一化:相近色聚到同一簇均值,消除逐字采样噪声的同色微差波动
+        charInks = quantizeInkColors(charInks, INK_DIST_THRESHOLD);
+    }
+
+    return {ink: inkCss, charInks, inkConfidence};
+}
+
+/** 从当前裁剪区像素采样原文字色(sampleOriginalInkColorFromPixels 的模块态入口)。 */
+function sampleOriginalInkColor(rect, drawnBgCss, charRects) {
+    return sampleOriginalInkColorFromPixels(cropImageData, rect, drawnBgCss, charRects);
+}
+
+/** 模块态完整版:行级 + 逐字符字色(嵌图分段着色用)。 */
+function sampleOriginalInkColors(rect, drawnBgCss, charRects) {
+    return sampleOriginalInkColorsFromPixels(cropImageData, rect, drawnBgCss, charRects);
+}
+
+/** RGB 欧氏距离平方;任一端解析失败返回 Infinity(视为不同色)。 */
+function rgbDist2(a, b) {
+    if (!a || !b) return Infinity;
+    return (a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2;
+}
+
+/**
+ * 逐字符颜色归一化:相近色(距离 ≤ tol)贪心聚到同一簇,全部替换为簇均值,
+ * 消除逐字采样噪声导致的"同色微差"波动(相邻红字呈现不同红)。
+ * null 位(继承整行色)原样保留。
+ */
+export function quantizeInkColors(charInks, tol = 60) {
+    const tol2 = tol * tol;
+    const clusters = [];   // {sr, sg, sb, n}
+    const assign = charInks.map((c) => {
+        const rgb = parseRgb(c || '');
+        if (!rgb) return -1;
+        for (let i = 0; i < clusters.length; i++) {
+            const cl = clusters[i];
+            if (rgbDist2(rgb, {r: cl.sr / cl.n, g: cl.sg / cl.n, b: cl.sb / cl.n}) <= tol2) {
+                cl.sr += rgb.r;
+                cl.sg += rgb.g;
+                cl.sb += rgb.b;
+                cl.n++;
+                return i;
+            }
+        }
+        clusters.push({sr: rgb.r, sg: rgb.g, sb: rgb.b, n: 1});
+        return clusters.length - 1;
+    });
+    const means = clusters.map((cl) => `rgb(${Math.round(cl.sr / cl.n)}, ${Math.round(cl.sg / cl.n)}, ${Math.round(cl.sb / cl.n)})`);
+    return charInks.map((c, i) => (assign[i] >= 0 ? means[assign[i]] : null));
+}
+
+/**
+ * 译文颜色保真门槛。沿用原文字色采样的 2.5 下限，避免误杀白底绿字、
+ * 黑底蓝字等明显彩色文字；更低对比度仍回退背景对比色。
+ */
+const TRANSLATED_INK_MIN_CONTRAST = 2.5;
+/** 彩色主色比中性色更容易来自壁纸噪声，因此要求更高的一致性与覆盖率。 */
+const TRANSLATED_COLOR_DOMINANCE = 0.75;
+const TRANSLATED_COLOR_COVERAGE = 0.6;
+const TRANSLATED_NEUTRAL_DOMINANCE = 0.6;
+const TRANSLATED_NEUTRAL_COVERAGE = 0.45;
+/** 无逐字符框时，整行核心颜色簇至少达到此占比才接受彩色。 */
+const TRANSLATED_LINE_COLOR_CONFIDENCE = 0.8;
+
+function isNeutralRgb(rgb) {
+    return !!rgb && Math.max(rgb.r, rgb.g, rgb.b) - Math.min(rgb.r, rgb.g, rgb.b) <= 24;
+}
+
+/**
+ * 从原文字色采样结果中选择译文整行色。
+ *
+ * 规则：
+ * - 不把逐字符色段按长度映射到译文；只选一个有足够字符共识的主色。
+ * - 黑/白/灰中性色允许较宽松的共识；彩色需覆盖至少 60% 字符且占有效
+ *   采样的 75%，避免桌面壁纸、图标和抗锯齿噪声被放大。
+ * - 无字符框时，彩色行需通过核心颜色簇可信度校验。
+ * - 对可解析的实际绘制背景执行 2.5:1 保真门槛。
+ */
+export function chooseStableTranslatedInk(sampled, fallbackColor, drawnBgCss = null) {
+    const fallback = fallbackColor || '#111';
+    if (!sampled || !sampled.ink) return fallback;
+
+    const bgRgb = parseRgb(drawnBgCss || '');
+    const readable = (css) => {
+        const rgb = parseRgb(css || '');
+        return !!rgb && (!bgRgb || wcagContrastRatio(rgb, bgRgb) >= TRANSLATED_INK_MIN_CONTRAST);
+    };
+    const sampledRgb = parseRgb(sampled.ink);
+    const charInks = Array.isArray(sampled.charInks) ? sampled.charInks : null;
+    if (!charInks || charInks.length === 0) {
+        const stableLineColor = Number.isFinite(sampled.inkConfidence)
+            && sampled.inkConfidence >= TRANSLATED_LINE_COLOR_CONFIDENCE;
+        return (isNeutralRgb(sampledRgb) || stableLineColor) && readable(sampled.ink)
+            ? sampled.ink : fallback;
+    }
+
+    const normalized = quantizeInkColors(charInks, INK_DIST_THRESHOLD);
+    const counts = new Map();
+    let validCount = 0;
+    for (const css of normalized) {
+        if (!css) continue;
+        validCount++;
+        counts.set(css, (counts.get(css) || 0) + 1);
+    }
+    if (validCount === 0) {
+        return isNeutralRgb(sampledRgb) && readable(sampled.ink) ? sampled.ink : fallback;
+    }
+
+    let dominantColor = null;
+    let dominantCount = 0;
+    for (const [css, count] of counts) {
+        if (count > dominantCount) {
+            dominantColor = css;
+            dominantCount = count;
+        }
+    }
+    const dominantRgb = parseRgb(dominantColor || '');
+    const dominance = dominantCount / validCount;
+    const coverage = validCount / charInks.length;
+    const neutral = isNeutralRgb(dominantRgb);
+    const singleCharStrong = charInks.length === 1 && validCount === 1
+        && Number.isFinite(sampled.inkConfidence)
+        && sampled.inkConfidence >= TRANSLATED_LINE_COLOR_CONFIDENCE;
+    const enoughSupport = neutral
+        ? dominance >= TRANSLATED_NEUTRAL_DOMINANCE && coverage >= TRANSLATED_NEUTRAL_COVERAGE
+        : singleCharStrong || (validCount >= 2
+            && dominance >= TRANSLATED_COLOR_DOMINANCE
+            && coverage >= TRANSLATED_COLOR_COVERAGE);
+    if (enoughSupport && readable(dominantColor)) return dominantColor;
+
+    // 行级结果若稳定落在中性色，可吸收逐字符框中的少量彩色离群点。
+    return isNeutralRgb(sampledRgb) && readable(sampled.ink) ? sampled.ink : fallback;
+}
+
+/** 相邻字色合并阈值:RGB 欧氏距离低于此值视为同色(采样噪声容差)。 */
+const INK_SEGMENT_MERGE_DIST = 30;
+
+/**
+ * 把逐字符字色映射为显示文本的颜色分段（当前生产路径仅供原文模式使用）。
+ *
+ * 当显示文本长度与原文不同，按长度比例映射：原文 run [a, b) →
+ * 显示文本 [a/srcLen·dstLen, b/srcLen·dstLen)。译文模式不调用本函数，避免
+ * 无语义依据的跨语言颜色映射。相邻字符颜色相近(采样噪声内)
+ * 先合并为同色 run;全行同色返回 null(调用方走整行 fillText 快路径)。
+ * 分段首尾强制对齐 [0, dstLen],保证覆盖无缺口。
+ *
+ * @param {number} srcLen - 原文字符数(分段映射的基准长度)
+ * @param {string} displayText - 实际要绘制的文本(译文或截断后的显示文本)
+ * @param {Array<string|null>|null} charInks - 逐字符颜色(null = 继承整行字色)
+ * @param {string} fallbackColor - 整行字色
+ * @returns {Array<{text: string, color: string}>|null} null = 无需分段
+ */
+export function buildInkSegments(srcLen, displayText, charInks, fallbackColor) {
+    if (!displayText || !srcLen || !Array.isArray(charInks) || charInks.length === 0
+        || !fallbackColor) {
+        return null;
+    }
+    const colorOf = (i) => charInks[i] || fallbackColor;
+
+    // 1. 相邻同色合并为 run(锚点取 run 首字符颜色,防采样噪声漂移)
+    const runs = [];
+    let runStart = 0;
+    let runColor = parseRgb(colorOf(0));
+    for (let i = 1; i < charInks.length; i++) {
+        const c = parseRgb(colorOf(i));
+        if (rgbDist2(c, runColor) > INK_SEGMENT_MERGE_DIST * INK_SEGMENT_MERGE_DIST) {
+            runs.push({
+                start: runStart,
+                end: i,
+                color: runColor
+                    ? `rgb(${runColor.r}, ${runColor.g}, ${runColor.b})` : fallbackColor,
+            });
+            runStart = i;
+            runColor = c;
+        }
+    }
+    runs.push({
+        start: runStart,
+        end: charInks.length,
+        color: runColor
+            ? `rgb(${runColor.r}, ${runColor.g}, ${runColor.b})` : fallbackColor,
+    });
+    if (runs.length <= 1) return null;
+
+    // 2. 原文 run → 译文区间(比例映射,首尾钳位,顺序推进保证无缺口)
+    const dstLen = displayText.length;
+    const segments = [];
+    let prevEnd = 0;
+    for (let i = 0; i < runs.length; i++) {
+        const run = runs[i];
+        const end = i === runs.length - 1
+            ? dstLen
+            : Math.min(dstLen, Math.max(prevEnd, Math.round((run.end / srcLen) * dstLen)));
+        if (end > prevEnd) {
+            segments.push({text: displayText.slice(prevEnd, end), color: run.color});
+            prevEnd = end;
+        }
+    }
+    return segments.length > 0 ? segments : null;
+}
+
 /**
  * 迭代找到能塞进 rect.w * 0.95 的最大字号。
  *
- * 起始 rect.h * 0.85 * fontScale,每次 -1 逐步尝试(rect 高度一般不超过 60px,循环上限 ~50 次可控)。
+ * 起始 rect.h * fontScale,每次 -1 逐步尝试(rect 高度一般不超过 60px,循环上限 ~50 次可控)。
  * 到达下限 8px 仍超宽 → 用 8px + 二分找最长前缀 + 省略号截断。
  * rect 极窄(连一个字都放不下 8px)→ 返回 size=0 让 drawOverlay 跳过。
+ * 传入的 rect 通常是 fontRect(= 原 rect 换上折减后的 fontH,见 drawOverlay)。
  *
  * @param {number} fontScale - 用户在面板里指定的字号缩放系数(0.4-2.0),默认 1.0
  */

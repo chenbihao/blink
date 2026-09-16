@@ -38,6 +38,7 @@ fn make_valid_result() -> OcrResult {
                 h: 30,
             },
             word_indices: vec![0],
+            font_height: None,
         }],
         words: vec![OcrWord {
             text: "hello".to_string(),

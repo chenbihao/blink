@@ -76,12 +76,26 @@ fn extract_png_from_request(request: &tauri::ipc::Request<'_>) -> Result<Vec<u8>
 }
 
 /// 0.19.14 raw IPC 辅助：从 headers 提取 i32。
+///
+/// 错误文案区分「缺失」与「不可解析」并带实际值——此前统一报 `missing header: {key}`，
+/// 偶发 `missing header: w` 无法定位是前端没传还是传了 NaN/Infinity。
+/// 同时打 warn 日志（该失败会直接透传给前端，后端无其他痕迹）。
 fn header_i32(headers: &tauri::http::HeaderMap, key: &str) -> Result<i32, String> {
-    headers
-        .get(key)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| format!("missing header: {key}"))
+    let Some(raw) = headers.get(key) else {
+        tracing::warn!(header = key, "raw IPC header 缺失");
+        return Err(format!("缺少 header: {key}"));
+    };
+    let value = raw.to_str().map_err(|_| {
+        tracing::warn!(header = key, "raw IPC header 非 UTF-8");
+        format!("header {key} 非法: 非 UTF-8")
+    })?;
+    match value.parse::<i32>() {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            tracing::warn!(header = key, value, "raw IPC header 无法解析为 i32");
+            Err(format!("header {key} 非法: {value}"))
+        }
+    }
 }
 
 /// 0.19.14 raw IPC 辅助：从 headers 提取 Option<bool>。
@@ -328,6 +342,39 @@ pub fn screenshot_pin_refresh(
     Ok(())
 }
 
+/// 0.23.12：按 label 原地刷新指定 pin 窗口的图片。
+///
+/// 供 pin 窗口自身「翻译覆盖/还原原图」使用——多 pin 下 `LAST_PIN_LABEL`
+/// 可能指向其它窗口，必须由窗口自报 label 精确定位。
+///
+/// raw IPC：body = PNG bytes；header `label` 必填，`show-translating` 可选。
+#[tauri::command]
+pub fn screenshot_pin_refresh_by_label(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let png_data = extract_png_from_request(&request)?;
+    let label = header_opt_string(request.headers(), "label")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "缺少 header: label".to_string())?;
+    let show_translating = header_opt_bool(request.headers(), "show-translating").unwrap_or(false);
+    let expected_seq = header_opt_string(request.headers(), "expected-seq")
+        .map(|raw| {
+            raw.parse::<u64>()
+                .map_err(|_| format!("header expected-seq 非法: {raw}"))
+        })
+        .transpose()?;
+    crate::infra::platform::window::refresh_pin_image_by_label(
+        &app,
+        &label,
+        png_data,
+        show_translating,
+        expected_seq,
+    )?;
+    tracing::info!(label = %label, show_translating, "pin 图片已按 label 原地刷新");
+    Ok(())
+}
+
 /// 0.11.7-f：保存截图选区为文件（PNG/JPEG）。
 ///
 /// `path=None` 弹出保存对话框；用户取消时返回 Err，前端应识别 "用户取消了保存"
@@ -415,6 +462,7 @@ pub fn image_editor_apply_to_pin(
             label,
             png_data.clone(),
             false,
+            None,
         )?;
         tracing::info!(label = %label, "编辑图片已替换回原 pin 窗口");
         true

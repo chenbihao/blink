@@ -6,15 +6,39 @@
 //! 本模块负责**后处理**：
 //! - 校验 rect 边界（坐标非负、宽高正面积、不越出图片尺寸）
 //! - 过滤零面积/空文本 word/line
+//! - 为每行补字号参考高度 `font_height`（det 框 unclip 折减，嵌图字号用）
 //! - **0.22.8 三层契约**：当 ONNX 结果携带 `char_boxes` 时，文本已由
 //!   pipeline 以 `region.text` 为真源正确构建，**不再走词级 grouping 重建**，
 //!   避免逐字符框被 `join_words_intra_line_with_gaps` 误判为词级 token。
 //! - 无 `char_boxes` 的旧结果仍走 `rebuild_with_line_grouping`（WinRT 兼容）。
 
 use crate::domain::capability::builtins::ocr_engine::{
-    OcrRect, OcrResult, OcrWord, rebuild_with_line_grouping_and_diag,
+    OcrLine, OcrRect, OcrResult, OcrWord, rebuild_with_line_grouping_and_diag,
 };
 use crate::domain::ocr::error::StructuredOcrError;
+
+/// PP-OCR det 框 unclip 外扩的字号折减系数（视觉调优旋钮）。
+///
+/// DBNet 检测框后处理按 `delta = area × unclip_ratio / perimeter` 四边外扩
+/// （`oar-ocr` general 档 unclip_ratio = 2.0），行框高度系统性大于实际字形
+/// 高度（经验约 1.3-1.6 倍）。翻译嵌图的字号按 rect.h 推导会偏大，故按
+/// `rect.h × 该系数` 作为字号参考高度随结果下发（`OcrLine.font_height`）。
+/// rect 本身不折减——背景色块仍需完整覆盖原文。
+///
+/// 取值：1.0 = 不折减（font_h == rect.h，前端推导与引入 font_h 前一致）；
+/// 0.7 = 首版折减值（观感偏小，已回调）。可在 0.7-1.0 间按实际观感取值。
+const DET_UNCLIP_FONT_HEIGHT_FACTOR: f64 = 1.0;
+
+/// 为每行生成折减后的字号参考高度（恒 ≤ rect.h）。
+fn apply_font_height(lines: &mut [OcrLine]) {
+    for line in lines.iter_mut() {
+        let rect_h = line.bounding_rect.h;
+        let reduced = ((rect_h as f64) * DET_UNCLIP_FONT_HEIGHT_FACTOR)
+            .round()
+            .max(1.0) as u32;
+        line.font_height = Some(reduced.min(rect_h));
+    }
+}
 
 /// 映射 executor 返回的 OcrResult → 最终 OcrResult（含校验 + line grouping）。
 ///
@@ -73,8 +97,10 @@ pub(super) fn map_executor_result(
     }
 
     // 3. 走 rebuild_with_line_grouping 做 line grouping
-    let (grouped_result, diag) =
+    let (mut grouped_result, diag) =
         rebuild_with_line_grouping_and_diag(valid_words, result.text_angle);
+    // ONNX det 框含 unclip 外扩，grouping 后的行框同样偏大，统一补字号参考高度
+    apply_font_height(&mut grouped_result.lines);
 
     tracing::debug!(
         backend = "onnx-ocr",
@@ -109,9 +135,10 @@ pub(super) fn map_executor_result(
 /// 3. 为每个非空白字符生成 `OcrCharBox`（含全局 char range）
 /// 4. 为每个 region 生成语义级 `OcrWord`（含 char_ranges）
 ///
-/// 此函数仅校验 rect 边界，不重新拼接文本。
+/// 此函数校验 rect 边界，不重新拼接文本；并为每行补字号参考高度
+/// `font_height`（det 框 unclip 折减，见 [`apply_font_height`]）。
 fn map_executor_result_with_char_boxes(
-    result: OcrResult,
+    mut result: OcrResult,
     image_width: u32,
     image_height: u32,
 ) -> Result<OcrResult, StructuredOcrError> {
@@ -135,6 +162,9 @@ fn map_executor_result_with_char_boxes(
         }
         validate_rect(&line.bounding_rect, idx, image_width, image_height)?;
     }
+
+    // ONNX det 框含 unclip 外扩，行框高度大于实际字形高度，补字号参考高度
+    apply_font_height(&mut result.lines);
 
     tracing::debug!(
         backend = "onnx-ocr",
@@ -215,6 +245,7 @@ mod tests {
                 text: "hello".to_string(),
                 bounding_rect: make_rect(0, 0, 100, 30),
                 word_indices: vec![0],
+                font_height: None,
             }],
             words: vec![make_word("hello", 0, 0, 100, 30, 0)],
             text_angle: None,
@@ -349,6 +380,7 @@ mod tests {
                 text: "PP-OCRv6".to_string(),
                 bounding_rect: make_rect(0, 0, 80, 20),
                 word_indices: vec![0],
+                font_height: None,
             }],
             words: vec![OcrWord {
                 text: "PP-OCRv6".to_string(),
@@ -408,6 +440,7 @@ mod tests {
                 text: "文字识别".to_string(),
                 bounding_rect: make_rect(0, 0, 80, 20),
                 word_indices: vec![0],
+                font_height: None,
             }],
             words: vec![OcrWord {
                 text: "文字识别".to_string(),
@@ -496,5 +529,89 @@ mod tests {
         // 走了 grouping → 文本由 join_words_intra_line_with_gaps 重建
         assert_eq!(mapped.text, "hello world");
         assert!(mapped.char_boxes.is_empty());
+    }
+
+    // ── font_height（det unclip 字号折减）测试 ────────────────────
+
+    #[test]
+    fn char_boxes_path_sets_font_height() {
+        // 当前系数 1.0（中性）：font_h == rect.h，前端推导与无折减一致
+        let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
+            backend_degrade_hint: None,
+            text: "文字识别".to_string(),
+            lines: vec![OcrLine {
+                text: "文字识别".to_string(),
+                bounding_rect: make_rect(0, 0, 80, 40),
+                word_indices: vec![0],
+                font_height: None,
+            }],
+            words: vec![make_word("文字识别", 0, 0, 80, 40, 0)],
+            text_angle: None,
+            char_ranges: vec![(0, 4)],
+            char_boxes: vec![OcrCharBox {
+                text: "文".into(),
+                bounding_rect: make_rect(0, 0, 20, 40),
+                line_index: 0,
+                char_start: 0,
+                char_end: 1,
+            }],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        assert_eq!(mapped.lines[0].font_height, Some(40));
+        // rect 本身不折减——背景色块仍按原 rect 覆盖原文
+        assert_eq!(mapped.lines[0].bounding_rect.h, 40);
+    }
+
+    #[test]
+    fn word_grouping_path_sets_font_height() {
+        // grouping 后行框 h=30 → 系数 1.0 时 font_h == rect.h
+        let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
+            backend_degrade_hint: None,
+            text: "hello world".to_string(),
+            lines: vec![],
+            words: vec![
+                make_word("hello", 0, 0, 50, 30, 0),
+                make_word("world", 60, 0, 50, 30, 0),
+            ],
+            text_angle: None,
+            char_ranges: vec![],
+            char_boxes: vec![],
+        };
+        let mapped = map_executor_result(result, (200, 100)).unwrap();
+        assert_eq!(mapped.lines.len(), 1);
+        assert_eq!(mapped.lines[0].font_height, Some(30));
+    }
+
+    #[test]
+    fn font_height_clamped_to_rect_h() {
+        // 极小框（h=1）折减后不低于 1，且不超过 rect.h
+        let result = OcrResult {
+            backend_used: None,
+            backend_fallback_reason: None,
+            backend_degrade_hint: None,
+            text: "a".to_string(),
+            lines: vec![OcrLine {
+                text: "a".to_string(),
+                bounding_rect: make_rect(0, 0, 10, 1),
+                word_indices: vec![0],
+                font_height: None,
+            }],
+            words: vec![make_word("a", 0, 0, 10, 1, 0)],
+            text_angle: None,
+            char_ranges: vec![(0, 1)],
+            char_boxes: vec![OcrCharBox {
+                text: "a".into(),
+                bounding_rect: make_rect(0, 0, 10, 1),
+                line_index: 0,
+                char_start: 0,
+                char_end: 1,
+            }],
+        };
+        let mapped = map_executor_result(result, (100, 50)).unwrap();
+        assert_eq!(mapped.lines[0].font_height, Some(1));
     }
 }

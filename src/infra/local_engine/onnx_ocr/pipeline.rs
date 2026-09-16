@@ -224,6 +224,8 @@ pub(super) fn map_oarocr_to_ocr_result(
                 text: line_text,
                 bounding_rect: line_rect,
                 word_indices: vec![word_idx],
+                // 字号折减由 coordinator mapping 层统一补（det unclip 语义）
+                font_height: None,
             });
 
             // ── 字符层：word_boxes → OcrCharBox（逐字符对齐）──

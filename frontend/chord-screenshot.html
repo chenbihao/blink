@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html class="screenshot-session-inactive" lang="zh-CN">
 <head>
     <meta charset="UTF-8"/>
     <title>Blink Screenshot</title>
@@ -520,7 +520,7 @@
 
 <!--
   以下 <script> 块在 ES module 加载/执行失败时提供最小逃生通道。
-  如果 index.js 成功加载，这些 handler 会被其 preventDefault 覆盖或共存（ESC/cancel 重复调用幂等）。
+  如果 index.js 成功加载，它会在交互绑定完成后移除 ESC 容灾 handler；contextmenu 禁用可幂等共存。
   问题背景：0.15 新增 ss-scroll.js / ss-hover.js 等模块，若任一 import 失败或运行时抛异常，
   整个 module 不执行 → 无 keydown/contextmenu/blur handler → 用户被 always_on_top 全屏遮罩困住。
 -->
@@ -528,16 +528,24 @@
     // 1. 禁用 WebView2 原生右键菜单（模块成功加载后 contextmenu 上的 preventDefault 与此共存）
     document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    // 2. ESC 兜底退出：模块加载失败时用户仍可 ESC 关闭 overlay
-    document.addEventListener('keydown', (e) => {
+    // 2. ESC 兜底退出：只在正常模块尚未完成初始化时生效。
+    //    正常模块就绪后会移除该 handler，避免绕过前端会话清理直接 hide。
+    const emergencyEscapeHandler = (e) => {
         if (e.key === 'Escape') {
             e.preventDefault();
+            // 即使模块失败，也先隐藏旧 surface；下次复用窗口时不会闪回旧图层。
+            document.documentElement.classList.add('screenshot-session-inactive');
             // 直接调 invoke，不走 api.js（api.js 也可能因模块加载失败而不可用）
             if (window.__TAURI_INTERNALS__) {
                 window.__TAURI_INTERNALS__.invoke('hide_screenshot_overlay');
             }
         }
-    });
+    };
+    document.addEventListener('keydown', emergencyEscapeHandler);
+    window.__blinkDisableEmergencyScreenshotEscape = function () {
+        document.removeEventListener('keydown', emergencyEscapeHandler);
+        window.__blinkDisableEmergencyScreenshotEscape = null;
+    };
 
     // 3. 模块加载超时检测：5 秒后若 __blinkScreenMeta 未被注入，说明模块未成功执行
     //    主动调后端隐藏 overlay，避免用户被困

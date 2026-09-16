@@ -1043,7 +1043,9 @@ export function bindToolbar() {
     // 0.15.7：长截图入口——只在选区已定时可用（disabled 属性在 index.js 控制）
     bind('btn-scroll', () => {
         if (ss.selCss && !ss.sent) {
-            enterScrollCapture(ss.selCss);
+            // 0.23.11：enterScrollCapture 内部有静默 abort 出口，reject 也曾无人接——
+            // 用户视角"点了没反应"，至少落 error 日志留痕
+            enterScrollCapture(ss.selCss).catch((e) => console.error('[screenshot] enterScrollCapture 失败', e));
         }
     });
     bind('btn-pin', doPinSelection);

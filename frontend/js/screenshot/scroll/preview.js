@@ -154,7 +154,18 @@ export function positionScrollToolbar(rect) {
     scrollTb.style.transform = `scale(${uiScale})`;
     scrollTb.style.left = '-9999px';
     scrollTb.style.top = '-9999px';
-    requestAnimationFrame(() => {
+    placeScrollToolbar(scrollTb, rect, anchorX, anchorY, uiScale);
+}
+
+/**
+ * 同步摆位（0.23.11）。原实现把 computeFloatingPlacement 放进 rAF——实测设置
+ * WDA_EXCLUDEFROMCAPTURE 后 WebView2 的呈现可能停摆（DOM/命中正常、画面不更新），
+ * 摆位帧被吞，工具栏停留在 -9999px 隐身，用户视角即"点长截图没反应"。
+ * offsetWidth 读取本身会强制同步布局，无需 rAF；同步摆位保证工具栏进入
+ * 蒙版清除后的第一帧，呈现停摆时也已至少呈现过一次完整 UI。
+ */
+function placeScrollToolbar(scrollTb, rect, anchorX, anchorY, uiScale) {
+    try {
         const visualW = scrollTb.offsetWidth * uiScale;
         const visualH = scrollTb.offsetHeight * uiScale;
         const mon = getMonitorForScroll(ss.scrollSession) || findDisplayCssAt(anchorX, anchorY);
@@ -168,7 +179,11 @@ export function positionScrollToolbar(rect) {
         });
         scrollTb.style.left = placement.left + 'px';
         scrollTb.style.top = placement.top + 'px';
-    });
+    } catch (e) {
+        console.error('[scroll] 滚动工具栏定位失败，降级为选区下方固定偏移', e);
+        scrollTb.style.left = Math.max(8, rect.x) + 'px';
+        scrollTb.style.top = (rect.y + rect.h + 8) + 'px';
+    }
 }
 
 /**

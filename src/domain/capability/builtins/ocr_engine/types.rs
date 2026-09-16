@@ -65,6 +65,14 @@ pub struct OcrLine {
     pub bounding_rect: OcrRect,
     /// 该行对应的 `OcrResult.words` 索引段（0.11.9-b 新增）
     pub word_indices: Vec<usize>,
+    /// 字号参考高度（PP-OCR det 框 unclip 折减，翻译嵌图字号推导用）。
+    ///
+    /// PP-OCR 的 DBNet 检测框经 unclip 外扩后，`rect.h` 系统性大于实际字形
+    /// 高度，直接按 rect.h 推导嵌图字号会偏大。此字段给出折减后的参考高度，
+    /// **仅用于字号推导**——背景覆盖、hit-test 仍用 `rect`。
+    /// `None` 表示无需折减（WinRT 词框 union 已紧贴字形），前端回退 rect.h。
+    #[serde(rename = "font_h", skip_serializing_if = "Option::is_none")]
+    pub font_height: Option<u32>,
 }
 
 /// OCR 单词结果（0.11.9-b 新增）

@@ -142,21 +142,13 @@ export async function enterScrollCapture(rect) {
     const monitorAnchorY = rect.y + Math.max(0, rect.h - 1);
     session.scrollSourceMonitor = findDisplayCssAt(monitorAnchorX, monitorAnchorY);
 
-    // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在整段采集会话中不进入 BitBlt。
-    try {
-        await screenshotSetCaptureExclusion(true);
-    } catch (e) {
-        if (!captureStillActive(generation)) return false;
-        console.warn('[scroll] 设置捕获排除失败，已中止长截图', e);
-        resetScrollCaptureState();
-        ss._showTransientHint?.('当前系统无法排除截图工具界面，长截图已取消');
-        screenshotSetCaptureExclusion(false)
-            .catch((cleanupError) => console.warn('[scroll] 捕获排除失败后的清理失败', cleanupError));
-        return false;
-    }
-    // ESC、失焦、overlay 重载或新会话都可能发生在上面的 IPC 等待期间。
-    // 旧入口不得继续修改新一代 canvas / toolbar 状态。
-    if (!captureStillActive(generation)) return false;
+    // ── 0.23.11 修复：先就位全部采集 UI，最后才设 WDA_EXCLUDEFROMCAPTURE ──
+    // 实测（Windows 本机 Console 会话）：设置 DisplayAffinity 后 WebView2 的上屏
+    // 呈现可能停摆——DOM/输入命中/IPC 全部正常（诊断日志、rAF、elementsFromPoint
+    // 均正常），唯独画面不再更新。旧顺序"先设排除再摆 UI"会把工具栏摆位帧吞掉，
+    // 用户看到"蒙版消失但工具栏永远不出现、点击无反应"的冻屏。
+    // 现改为：可见 UI 同步就位（单帧呈现）→ 设排除 → 首帧采集。即便呈现从此停摆，
+    // 用户也已看到完整采集 UI，工具栏按钮的 DOM 命中不受呈现影响，采集/取消可用。
 
     // 清除暗色蒙版，让用户看到真实背景。DOM pointer-events 不等于 Win32 窗口穿透；
     // wheel 仍由 overlay window listener 接收，再显式投递给目标 HWND。
@@ -179,11 +171,50 @@ export async function enterScrollCapture(rect) {
     // 显示预览缩略图——贴选区侧边
     // 纵向：贴右边；横向：贴下边
     positionPreview(rect);
+
+    // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在整段采集会话中不进入 BitBlt。
+    try {
+        await screenshotSetCaptureExclusion(true);
+    } catch (e) {
+        if (!captureStillActive(generation)) {
+            console.warn('[scroll] 设置捕获排除期间会话已被并发失效，长截图静默中止', {
+                generation,
+                current: session.captureGeneration,
+                phase: session.scrollCapturePhase,
+            });
+            return false;
+        }
+        console.warn('[scroll] 设置捕获排除失败，已中止长截图', e);
+        resetScrollCaptureState();
+        ss._showTransientHint?.('当前系统无法排除截图工具界面，长截图已取消');
+        screenshotSetCaptureExclusion(false)
+            .catch((cleanupError) => console.warn('[scroll] 捕获排除失败后的清理失败', cleanupError));
+        return false;
+    }
+    // ESC、失焦、overlay 重载或新会话都可能发生在上面的 IPC 等待期间。
+    // 旧入口不得继续修改新一代 canvas / toolbar 状态。
+    if (!captureStillActive(generation)) {
+        // 0.23.11：此处曾是完全静默 return——"点长截图没反应"类现场无法从日志定位
+        console.warn('[scroll] 排除设置完成后会话已被并发失效，长截图静默中止', {
+            generation,
+            current: session.captureGeneration,
+            phase: session.scrollCapturePhase,
+        });
+        return false;
+    }
+
     logScrollUiDiagnostics(rect);
 
     // 截取第一帧
     await captureFrame(0, generation);
-    if (!captureStillActive(generation)) return false;
+    if (!captureStillActive(generation)) {
+        console.warn('[scroll] 首帧采集后会话已被并发失效，长截图静默中止', {
+            generation,
+            current: session.captureGeneration,
+            phase: session.scrollCapturePhase,
+        });
+        return false;
+    }
     if (!session.scrollHwnd) {
         ss._showTransientHint?.('未找到可滚动窗口，请重新框选目标窗口内的区域');
     }

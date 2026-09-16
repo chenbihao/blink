@@ -134,32 +134,26 @@ function charKind(ch) {
     return 'other';
 }
 
+// 0.23.12：命中/距离/行块合并纯函数下沉 shared/text-selection.js（pin 文字
+// 图层共用同一套"空白放行"语义）；此处 re-export 保持既有 import 兼容。
+// 空白阈值沿用 shared 的 BLANK_RELEASE_THRESHOLD_CSS（CSS px，乘 renderScale）。
+export {pointToRectDistance, nearestTextDistance, mergeRunsByLine} from '../shared/text-selection.js';
+import {
+    BLANK_RELEASE_THRESHOLD_CSS,
+    hitTestItems,
+    mergeRunsByLine,
+    nearestItemByLine,
+    nearestTextDistance,
+} from '../shared/text-selection.js';
+
 /** 命中测试：把点击的 CSS 坐标(相对 hitCanvas)映射到物理像素 + 找命中 word/char */
 function hitTestWord(cssX, cssY) {
     if (!ss.reading) return -1;
     // hit canvas backing store = 物理像素，CSS→bitmap 使用实测 renderScale
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const bmp = cssPointToBitmap(cssX, cssY, meta);
-    const px = bmp.x;
-    const py = bmp.y;
-
-    // 0.22.10: char 轨下直接返回 char_box index（字符级选择，不再映射回整行 word）
-    if (useCharTrack()) {
-        for (let i = 0; i < ss.reading.charBoxes.length; i++) {
-            const r = ss.reading.charBoxes[i].rect;
-            if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    // 降级：走 word 级 hit-test
-    for (let i = 0; i < ss.reading.words.length; i++) {
-        const r = ss.reading.words[i].rect;
-        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
-    }
-    return -1;
+    const items = useCharTrack() ? ss.reading.charBoxes : ss.reading.words;
+    return hitTestItems(items, bmp.x, bmp.y);
 }
 
 /** 当前是否使用 char_box 选择轨（0.22.10：有 char_boxes 即字符级选择） */
@@ -172,93 +166,26 @@ function nearestWordByLine(cssX, cssY) {
     if (!ss.reading || ss.reading.words.length === 0) return -1;
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const bmp = cssPointToBitmap(cssX, cssY, meta);
-    const px = bmp.x;
-    const py = bmp.y;
-
-    // 0.22.10: char 轨——先找最近行，再找该行最近 char_box（返回 char_box index）
-    if (useCharTrack()) {
-        let bestLine = ss.reading.charBoxes[0].lineIndex;
-        let bestDy = Infinity;
-        for (const cb of ss.reading.charBoxes) {
-            const cy = cb.rect.y + cb.rect.h / 2;
-            const dy = Math.abs(cy - py);
-            if (dy < bestDy) {
-                bestDy = dy;
-                bestLine = cb.lineIndex;
-            }
-        }
-        let bestIdx = -1;
-        let bestDx = Infinity;
-        for (let i = 0; i < ss.reading.charBoxes.length; i++) {
-            const cb = ss.reading.charBoxes[i];
-            if (cb.lineIndex !== bestLine) continue;
-            const cx = cb.rect.x + cb.rect.w / 2;
-            const dx = Math.abs(cx - px);
-            if (dx < bestDx) {
-                bestDx = dx;
-                bestIdx = i;
-            }
-        }
-        return bestIdx;
-    }
-
-    // 降级：走 word 级
-    let bestLine = ss.reading.words[0].lineIndex;
-    let bestDy = Infinity;
-    for (const w of ss.reading.words) {
-        const cy = w.rect.y + w.rect.h / 2;
-        const dy = Math.abs(cy - py);
-        if (dy < bestDy) {
-            bestDy = dy;
-            bestLine = w.lineIndex;
-        }
-    }
-    let bestIdx = -1;
-    let bestDx = Infinity;
-    for (let i = 0; i < ss.reading.words.length; i++) {
-        const w = ss.reading.words[i];
-        if (w.lineIndex !== bestLine) continue;
-        const cx = w.rect.x + w.rect.w / 2;
-        const dx = Math.abs(cx - px);
-        if (dx < bestDx) {
-            bestDx = dx;
-            bestIdx = i;
-        }
-    }
-    return bestIdx;
+    const items = useCharTrack() ? ss.reading.charBoxes : ss.reading.words;
+    if (!items || items.length === 0) return -1;
+    return nearestItemByLine(items, bmp.x, bmp.y);
 }
 
 /**
- * 把 [lo, hi] 范围内的选中框按行合并为连续块矩形（bitmap 坐标）。
+ * hit-canvas 上的 CSS 坐标点是否处于"真空白"（可放行为移动选区手势）。
  *
- * 选区是连续索引段，同一行合并成一个包围块（文本编辑器选区观感），块内不会
- * 盖到未选内容；跨行选区每行各一个块。合并后只在行块轮廓描一次边，不再逐
- * char/word 描框——相邻小框描边叠加会形成密集蓝网格。
- *
- * @param {{rect:{x,y,w,h}, lineIndex:number}[]} items - charBoxes 或 words
- * @param {number} lo - 起始索引（含）
- * @param {number} hi - 结束索引（含）
- * @returns {{x:number,y:number,w:number,h:number}[]} 合并后的行块列表
+ * 0.23.12 空白放行：距离在物理像素域计算（与 hitTestWord 同一转换），
+ * 阈值按 CSS px 定义、乘实测 renderScale。划词层无数据时恒为空白。
  */
-export function mergeRunsByLine(items, lo, hi) {
-    const byLine = new Map();
-    for (let i = lo; i <= hi; i++) {
-        const it = items[i];
-        if (!it) continue;
-        const r = it.rect;
-        const cur = byLine.get(it.lineIndex);
-        if (!cur) {
-            byLine.set(it.lineIndex, {x: r.x, y: r.y, w: r.w, h: r.h});
-        } else {
-            const right = Math.max(cur.x + cur.w, r.x + r.w);
-            const bottom = Math.max(cur.y + cur.h, r.y + r.h);
-            cur.x = Math.min(cur.x, r.x);
-            cur.y = Math.min(cur.y, r.y);
-            cur.w = right - cur.x;
-            cur.h = bottom - cur.y;
-        }
-    }
-    return [...byLine.values()];
+function isBlankForMove(cssX, cssY) {
+    if (!ss.reading) return true;
+    const items = useCharTrack() ? ss.reading.charBoxes : ss.reading.words;
+    if (!items || items.length === 0) return true;
+    const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+    const bmp = cssPointToBitmap(cssX, cssY, meta);
+    const {scaleX} = getRenderScale(meta);
+    const thresholdPx = BLANK_RELEASE_THRESHOLD_CSS * scaleX;
+    return nearestTextDistance(items, bmp.x, bmp.y) > thresholdPx;
 }
 
 /** 重绘 hit-canvas：高亮当前选中 words + hover word */
@@ -409,6 +336,7 @@ export function exitReadingMode() {
     const {hitCanvas, hitCtx} = ss;
     hitCanvas.removeAttribute('data-reading');
     hitCanvas.removeAttribute('data-resizing');
+    hitCanvas.removeAttribute('data-interacting');
     hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
     ss.reading = null;
 }
@@ -439,7 +367,18 @@ function bindHitCanvasEvents() {
             return;
         }
         let idx = hitTestWord(e.offsetX, e.offsetY);
-        if (idx < 0) idx = nearestWordByLine(e.offsetX, e.offsetY);
+        if (idx < 0) {
+            // 0.23.12 空白放行：真空白处按下转为移动选区手势（与 resize 分支对称），
+            // 恢复被划词层截获的选区 move；阈值内仍走 nearestWordByLine 划词兜底
+            if (isBlankForMove(e.offsetX, e.offsetY)) {
+                e.stopPropagation();
+                e.preventDefault();
+                hitCanvas.setAttribute('data-interacting', 'true');
+                beginPointerSelection('move', e);
+                return;
+            }
+            idx = nearestWordByLine(e.offsetX, e.offsetY);
+        }
         if (idx < 0) return;
         e.stopPropagation();
         e.preventDefault();
@@ -458,7 +397,10 @@ function bindHitCanvasEvents() {
         }
         if (!ss.reading) return;
         const idx = hitTestWord(e.offsetX, e.offsetY);
-        hitCanvas.style.cursor = 'text';
+        // 0.23.12：真空白处显示 move 光标提示可拖动选区；文字上与划词拖动中保持 text
+        hitCanvas.style.cursor = (idx < 0 && ss.reading.dragStart === null && isBlankForMove(e.offsetX, e.offsetY))
+            ? 'move'
+            : 'text';
         if (ss.reading.dragStart !== null) {
             const endIdx = idx >= 0 ? idx : nearestWordByLine(e.offsetX, e.offsetY);
             if (endIdx >= 0) {
@@ -477,6 +419,7 @@ function bindHitCanvasEvents() {
     const finishHitPointer = (e) => {
         if (ss.selectionInteraction) {
             hitCanvas.removeAttribute('data-resizing');
+            hitCanvas.removeAttribute('data-interacting');
             hitCanvas.style.cursor = 'text';
             finishSelectionInteraction({offsetX: e.clientX, offsetY: e.clientY});
         } else if (ss.reading) {
@@ -497,11 +440,21 @@ function bindHitCanvasEvents() {
         redrawHitLayer();
     });
 
-    // 双击选一整行——若面板未开则先召唤面板，之后再高亮整行
+    // 双击选一整行——若面板未开则先召唤面板，之后再高亮整行；
+    // 真空白双击放行回"复制选区"（主 canvas 是兄弟元素，冒泡不可达，
+    // 经 ss._dblClickBlankCopy 回调转发，与 pointerdown 空白放行同语义）
     hitCanvas.addEventListener('dblclick', (e) => {
         if (!ss.reading) return;
         let idx = hitTestWord(e.offsetX, e.offsetY);
-        if (idx < 0) idx = nearestWordByLine(e.offsetX, e.offsetY);
+        if (idx < 0) {
+            if (isBlankForMove(e.offsetX, e.offsetY)) {
+                if (typeof ss._dblClickBlankCopy === 'function') {
+                    ss._dblClickBlankCopy({offsetX: e.clientX, offsetY: e.clientY});
+                }
+                return;
+            }
+            idx = nearestWordByLine(e.offsetX, e.offsetY);
+        }
         if (idx < 0) return;
         // 0.22.10: char 轨下双击 = 该行的连续 char_box 段
         if (useCharTrack()) {

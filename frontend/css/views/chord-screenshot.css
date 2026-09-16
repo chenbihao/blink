@@ -23,6 +23,13 @@ html, body {
     background: rgba(0, 0, 0, 0.15);
 }
 
+/* 复用 WebView 在下一轮 session reset 之前必须隐藏上一轮视觉子层。
+ * 保留 body 兜底背景和 error-hint：若输出 IPC 失败、窗口没有真正 hide，
+ * 用户仍能看到错误并按 ESC 退出，不会落入“透明但拦截输入”的窗口。 */
+html.screenshot-session-inactive body > :not(#error-hint) {
+    visibility: hidden;
+}
+
 /* 通用图片编辑复用透明 overlay 外壳，但图片以外不应遮住桌面。
  * 交互控件和 canvas 自身都有不透明像素，仍可正常接收输入；完全透明的空白区域
  * 则保留桌面上下文，也避免普通图片编辑产生“再次截图”的沉浸式错觉。 */
@@ -107,8 +114,10 @@ body.image-editor-mode #canvas.long-image-editing {
     clip-path: inset(8px);
 }
 
-/* resize 进行中暂时彻底让出鼠标，防止命中层抢走后续事件。 */
-#ocr-hit-canvas[data-reading="true"][data-tool="select"][data-resizing="true"] {
+/* resize 进行中暂时彻底让出鼠标，防止命中层抢走后续事件。
+   0.23.12：`data-interacting` 同语义——空白放行的 move 选区手势进行中让出。 */
+#ocr-hit-canvas[data-reading="true"][data-tool="select"][data-resizing="true"],
+#ocr-hit-canvas[data-reading="true"][data-tool="select"][data-interacting="true"] {
     pointer-events: none;
 }
 

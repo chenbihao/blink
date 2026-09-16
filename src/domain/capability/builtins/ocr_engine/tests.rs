@@ -122,6 +122,7 @@ fn join_empty_words_falls_back_to_lines_text() {
                 h: 0,
             },
             word_indices: vec![],
+            font_height: None,
         },
         OcrLine {
             text: "fallback line 2".into(),
@@ -132,6 +133,7 @@ fn join_empty_words_falls_back_to_lines_text() {
                 h: 0,
             },
             word_indices: vec![],
+            font_height: None,
         },
     ];
     assert_eq!(

@@ -309,6 +309,61 @@ pub fn take_diagnostic_events() -> Vec<InputDiagnosticEvent> {
         .unwrap_or_default()
 }
 
+/// 把最近的诊断事件压缩成单行文本（0.23.11 卡键自愈现场回放用）。
+///
+/// 环形缓冲区是 clone 读取（不清空），此处只做格式化、不消费数据。
+/// 使用 `try_lock`：本函数会在 hook 线程（巡检 tick）调用，遵守
+/// 「hook 线程不阻塞」铁则——锁被占用（主线程恰在读）时放弃回放。
+/// 输出不含用户输入内容（与 ring 本身的隐私约定一致）。
+pub fn format_recent_events_brief(max: usize) -> String {
+    let Ok(guard) = ring_buffer_lock().try_lock() else {
+        return "(诊断缓冲区忙，跳过回放)".to_string();
+    };
+    let events = guard.clone();
+    drop(guard);
+    let start = events.len().saturating_sub(max);
+    events[start..]
+        .iter()
+        .map(|e| {
+            let key = match e.key {
+                DiagnosticKeyClass::Modifier(k) => format!("{k:?}"),
+                DiagnosticKeyClass::MainKey => "main".to_string(),
+                DiagnosticKeyClass::OtherKey => "other".to_string(),
+                DiagnosticKeyClass::None => "-".to_string(),
+            };
+            let transition = match e.transition {
+                DiagnosticTransition::Down => "down",
+                DiagnosticTransition::Up => "up",
+                DiagnosticTransition::Reconcile => "reconcile",
+                DiagnosticTransition::ConfigChanged => "config",
+                DiagnosticTransition::WindowChanged => "window",
+                DiagnosticTransition::VoicePhaseChanged => "voice",
+                DiagnosticTransition::RecorderModeChanged => "recorder",
+                DiagnosticTransition::SessionReset => "session-reset",
+                DiagnosticTransition::ManualRecovery => "manual-recovery",
+                DiagnosticTransition::HoldDeadline => "hold-deadline",
+                DiagnosticTransition::RawDeviceRemoved => "device-removed",
+            };
+            format!(
+                "{}s/{:?}/{}/{} inj={:?} {:?}->{:?}{}",
+                e.elapsed_ms / 1000,
+                e.source,
+                key,
+                transition,
+                e.injected,
+                e.before_level,
+                e.after_level,
+                if e.chord_after != e.chord_before {
+                    " chord±"
+                } else {
+                    ""
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 /// 分配下一个序列号。
 pub fn next_seq() -> u64 {
     RING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -376,6 +431,12 @@ pub fn extract_event_meta(
             None,
         ),
         E::PhysicalModifiersObserved { .. } => (
+            DiagnosticSource::Physical,
+            DiagnosticKeyClass::None,
+            DiagnosticTransition::Reconcile,
+            None,
+        ),
+        E::StuckModifiersObserved { .. } => (
             DiagnosticSource::Physical,
             DiagnosticKeyClass::None,
             DiagnosticTransition::Reconcile,

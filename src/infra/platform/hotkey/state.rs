@@ -197,8 +197,14 @@ impl ModifierState {
         } else {
             ModifierLevel::Down
         };
-        self.sides[key as usize].level = new_level;
-        self.sides[key as usize].last_hook_time = Some(time_ms);
+        // 无状态转换（注入事件被转换表拒绝）不推进时间游标。
+        // last_hook_time 是 Raw 事件乱序过滤的基准：注入事件没改变状态却推进游标，
+        // 会把随后到达的真实 Raw keyup（时间戳更旧）当过期事件丢弃——卡键的
+        // Raw 自愈通道被毒化，真实 Down 无出口（Alt 卡死链路的一环）。
+        if new_level != current {
+            self.sides[key as usize].level = new_level;
+            self.sides[key as usize].last_hook_time = Some(time_ms);
+        }
     }
 
     /// Hook 路径处理修饰键 keyup。
@@ -222,8 +228,8 @@ impl ModifierState {
                 self.sides[key as usize].last_hook_time = Some(time_ms);
                 return true;
             }
-            // Down / InferredDown / Unknown / Up：不清 level
-            self.sides[key as usize].last_hook_time = Some(time_ms);
+            // Down / InferredDown / Unknown / Up：不清 level，也**不推进时间游标**
+            // （理由同 set_level_hook_keydown：拒绝的注入事件不得毒化 Raw 乱序过滤）
             return false;
         }
         self.sides[key as usize].level = ModifierLevel::Up;
@@ -388,6 +394,28 @@ impl ModifierState {
             }
         }
         changed
+    }
+
+    /// 巡检强制清除指定修饰键（0.23.11 卡键自愈）。
+    ///
+    /// 与 [`Self::apply_physical_snapshot`] 的区别：本方法可以清除真实 `Down`。
+    /// 前提是调用方（Windows adapter 巡检）已连续多次采样确认「内部 pressed &&
+    /// 物理 Up」——单次快照会被注入事件污染，跨时间的连续一致才足以推翻真实 Down。
+    ///
+    /// 返回是否实际发生了清除（原本未按下的键返回 false）。
+    pub fn force_clear(&mut self, key: ModifierKey) -> bool {
+        if !self.sides[key as usize].level.is_pressed() {
+            return false;
+        }
+        self.sides[key as usize].level = ModifierLevel::Up;
+        let bit = 1 << (key as u8);
+        for mask in self.raw_devices.values_mut() {
+            *mask &= !bit;
+        }
+        if key.is_alt() {
+            self.clear_inferred_alt();
+        }
+        true
     }
 }
 
@@ -905,6 +933,17 @@ impl PhysicalModifierSnapshot {
             && !self.lmeta
             && !self.rmeta
     }
+
+    /// 物理按下位掩码（bit 与 [`ModifierKey::bit`] 对齐，供卡键巡检做位运算比对）。
+    pub fn pressed_mask(self) -> u16 {
+        let mut mask = 0u16;
+        for key in ModifierKey::ALL {
+            if self.is_down(key) {
+                mask |= key.bit();
+            }
+        }
+        mask
+    }
 }
 
 /// 物理修饰键观察的原因。
@@ -921,6 +960,8 @@ pub enum PhysicalObservationReason {
     ManualRecovery,
     /// 锁屏解锁后的会话恢复。
     SessionRecovery,
+    /// Hook 重装成功后立即校正（重装窗口期可能丢失 Hook 事件）。
+    AfterHookReinstall,
 }
 
 /// Raw Input 归一化修饰键结构体（供诊断和精确映射使用）。
@@ -1003,6 +1044,13 @@ pub enum InputEvent {
         #[allow(dead_code)]
         reason: PhysicalObservationReason,
     },
+    /// 卡键巡检判定（0.23.11）。
+    ///
+    /// Windows adapter 以固定间隔连续采样物理快照，同一修饰键连续多次出现
+    /// 「内部 pressed && 物理 Up」才发本事件；reducer 定向清除（含真实 Down）。
+    /// 与 [`InputEvent::PhysicalModifiersObserved`] 的区别：巡检事件携带
+    /// 跨时间去抖后的结论，单次快照不足以支撑清除真实 Down。
+    StuckModifiersObserved { keys: Vec<ModifierKey> },
 }
 
 /// 单个 chord 全局快捷键的注册状态（0.22.12，投影给设置页）。
@@ -1109,6 +1157,7 @@ pub fn reduce(state: &mut InputState, event: InputEvent, now: Instant) -> Reduce
             snapshot,
             reason: _,
         } => reduce_physical_modifiers(state, snapshot),
+        InputEvent::StuckModifiersObserved { keys } => reduce_stuck_modifiers(state, &keys),
     }
 }
 
@@ -1502,6 +1551,28 @@ fn reduce_physical_modifiers(
     snapshot: PhysicalModifierSnapshot,
 ) -> ReduceResult {
     let changed = state.modifiers.apply_physical_snapshot(snapshot);
+    let effects = if changed { finalize(state) } else { Vec::new() };
+    ReduceResult {
+        propagation: Propagation::Pass,
+        effects,
+    }
+}
+
+// ── StuckModifiersObserved 处理 ─────────────────────────────────────────────
+
+/// 卡键巡检清除（0.23.11）。
+///
+/// adapter 已跨时间去抖确认「内部 pressed && 物理 Up」，这里定向清除指定
+/// 修饰键（含真实 Down——这是真实 Down 唯一的自动出口），随后 finalize
+/// 重建 chord session 与 UI 状态。业务副作用（chord 退出等）由 effect 链传导。
+fn reduce_stuck_modifiers(state: &mut InputState, keys: &[ModifierKey]) -> ReduceResult {
+    let mut changed = false;
+    for &key in keys {
+        if state.modifiers.force_clear(key) {
+            tracing::info!(?key, "卡键巡检：清除内部 pressed 修饰键");
+            changed = true;
+        }
+    }
     let effects = if changed { finalize(state) } else { Vec::new() };
     ReduceResult {
         propagation: Propagation::Pass,
@@ -4465,5 +4536,190 @@ mod tests {
         assert_eq!(retry_delay_ms(3), 1_000);
         assert_eq!(retry_delay_ms(4), 5_000);
         assert_eq!(retry_delay_ms(10), 5_000);
+    }
+
+    // ── 0.23.11 卡键自愈：拒绝的注入事件不推进时间游标 + 巡检强制清除 ──
+
+    fn physical_snapshot(down: &[ModifierKey]) -> PhysicalModifierSnapshot {
+        let mut snap = PhysicalModifierSnapshot::default();
+        for &k in down {
+            match k {
+                ModifierKey::LAlt => snap.lalt = true,
+                ModifierKey::RAlt => snap.ralt = true,
+                ModifierKey::LCtrl => snap.lctrl = true,
+                ModifierKey::RCtrl => snap.rctrl = true,
+                ModifierKey::LShift => snap.lshift = true,
+                ModifierKey::RShift => snap.rshift = true,
+                ModifierKey::LMeta => snap.lmeta = true,
+                ModifierKey::RMeta => snap.rmeta = true,
+            }
+        }
+        snap
+    }
+
+    /// 注入 keyup 被转换表拒绝时不得刷新 last_hook_time——否则随后的真实
+    /// Raw keyup（时间戳更旧）会被乱序过滤丢弃，卡键自愈通道被毒化。
+    #[test]
+    fn refused_injected_keyup_does_not_advance_time_cursor() {
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 真实 LAlt down（time=100）→ Down，游标 = 100
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
+
+        // 注入 keyup（time=200）被拒绝 → 游标必须仍是 100
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
+        assert_eq!(
+            s.modifiers.sides[ModifierKey::LAlt as usize].last_hook_time,
+            Some(100),
+            "拒绝的注入 keyup 不得推进时间游标"
+        );
+
+        // 真实 Raw keyup（time=150，比注入事件旧但比真实 down 新）→ 应被接受并清除
+        reduce(
+            &mut s,
+            InputEvent::RawModifier(RawModifierEvent {
+                device_id: 1,
+                key: ModifierKey::LAlt,
+                is_down: false,
+                time_ms: 150,
+            }),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::Up,
+            "真实 Raw keyup 不应被乱序过滤丢弃"
+        );
+    }
+
+    /// 注入 keydown 命中已 Down 的键（无状态转换）同样不推进时间游标。
+    #[test]
+    fn refused_injected_keydown_does_not_advance_time_cursor() {
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 300)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.sides[ModifierKey::LAlt as usize].last_hook_time,
+            Some(100),
+            "拒绝的注入 keydown 不得推进时间游标"
+        );
+
+        // 真实 down 落在已 Down 的键上（autorepeat）同样无状态转换 → 不推游标。
+        // 这是新设计的预期行为：无转换就没有新信息，不推进 Raw 过滤基准；
+        // 真实 keyup（有转换）会正常推进（见 refused_injected_keyup 测试末段）。
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 400)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.sides[ModifierKey::LAlt as usize].last_hook_time,
+            Some(100),
+            "autorepeat 落在已 Down 键上无转换，不推游标"
+        );
+
+        // 真实 keyup（有转换）→ 游标推进
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_up("lalt", 500)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.sides[ModifierKey::LAlt as usize].last_hook_time,
+            Some(500)
+        );
+    }
+
+    /// 巡检 force_clear：清除真实 Down 的 Alt，chord session 退出，UI 发布 alt_down=false。
+    #[test]
+    fn stuck_patrol_clears_real_down_and_exits_chord() {
+        let mut s = armed_state(); // Alt down + 主窗可见 + view ready → chord Active
+        assert!(s.chord.is_active());
+        assert!(s.modifiers.alt_down());
+
+        let r = reduce(
+            &mut s,
+            InputEvent::StuckModifiersObserved {
+                keys: vec![ModifierKey::LAlt],
+            },
+            Instant::now(),
+        );
+
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Up);
+        assert!(!s.modifiers.alt_down());
+        assert!(!s.chord.is_active(), "Alt 清除后 chord session 应退出");
+        assert!(
+            r.effects.iter().any(|e| matches!(
+                e,
+                InputEffect::UiStateChanged(ui) if !ui.alt_down
+            )),
+            "应发布 alt_down=false 的 UI 状态"
+        );
+    }
+
+    /// 巡检 force_clear 对本就松开的键是 no-op（不产生 UI 抖动）。
+    #[test]
+    fn stuck_patrol_noop_on_released_key() {
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        let r = reduce(
+            &mut s,
+            InputEvent::StuckModifiersObserved {
+                keys: vec![ModifierKey::LAlt],
+            },
+            Instant::now(),
+        );
+        assert!(r.effects.is_empty(), "无变化不应产生 effect");
+    }
+
+    /// PhysicalModifierSnapshot::pressed_mask 位与 ModifierKey::bit 对齐。
+    #[test]
+    fn physical_snapshot_pressed_mask_bits() {
+        let snap = physical_snapshot(&[ModifierKey::LAlt, ModifierKey::RShift]);
+        assert_eq!(snap.pressed_mask(), ModifierKey::LAlt.bit() | ModifierKey::RShift.bit());
+        assert_eq!(PhysicalModifierSnapshot::default().pressed_mask(), 0);
     }
 }
