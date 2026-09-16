@@ -73,6 +73,15 @@ const REINSTALL_RECHECK_DELAY_MS: u32 = 200;
 /// LL Hook 与 Raw Input 对同一物理边沿的时间戳最大容差。
 const HOOK_RAW_EDGE_MATCH_TOLERANCE_MS: u32 = 100;
 
+/// Raw 主键兜底 WARN 限频间隔（毫秒）：窗口期内重复事件只累计数量，不打日志。
+/// 语音 hold 期间若 Hook 回调漏收，Space autorepeat 会以 ~30Hz 触发兜底，
+/// 逐事件 WARN 会刷屏；限频后仍保留首条 + 量级信息。
+const RAW_MAINKEY_FALLBACK_WARN_INTERVAL_MS: u64 = 2_000;
+/// 上次 Raw 主键兜底 WARN 的墙钟毫秒（0 = 尚未打过，首条立即输出）。
+static RAW_MAINKEY_FALLBACK_LAST_WARN_MS: AtomicU64 = AtomicU64::new(0);
+/// 限频窗口内被抑制的兜底事件数（下条 WARN 的 suppressed 字段）。
+static RAW_MAINKEY_FALLBACK_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
 // ── Hook 线程状态 ─────────────────────────────────────────────────────────────
 
 /// Hook 线程的 message-only window HWND（供控制消息唤醒 / 全局快捷键注册）。
@@ -1282,11 +1291,28 @@ fn handle_wm_input(lparam: LPARAM) {
                                 now,
                             );
                         }
-                        tracing::warn!(
-                            key = %event.key,
-                            transition = if event.is_down { "down" } else { "up" },
-                            "Raw Input main-key fallback: matching WH_KEYBOARD_LL edge missing"
-                        );
+                        // 限频 WARN（spec-backend §三"量适中"）：语音 hold 期间可能以
+                        // ~30Hz 触发本分支，逐事件输出会刷屏；2s 窗口内只打首条并
+                        // 附被抑制计数。hook 热路径内仅原子操作，无锁无 IO。
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or_default();
+                        let last_warn = RAW_MAINKEY_FALLBACK_LAST_WARN_MS.load(Ordering::Relaxed);
+                        if now_ms.saturating_sub(last_warn) >= RAW_MAINKEY_FALLBACK_WARN_INTERVAL_MS
+                        {
+                            let suppressed =
+                                RAW_MAINKEY_FALLBACK_SUPPRESSED.swap(0, Ordering::Relaxed);
+                            RAW_MAINKEY_FALLBACK_LAST_WARN_MS.store(now_ms, Ordering::Relaxed);
+                            tracing::warn!(
+                                key = %event.key,
+                                transition = if event.is_down { "down" } else { "up" },
+                                suppressed_since_last = suppressed,
+                                "Raw Input main-key fallback: matching WH_KEYBOARD_LL edge missing"
+                            );
+                        } else {
+                            RAW_MAINKEY_FALLBACK_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+                        }
                         reduce_and_apply(state, InputEvent::RawMainKey(event), now);
                     } else {
                         // 防止不相关键让旧 Hook 边沿跨事件残留。

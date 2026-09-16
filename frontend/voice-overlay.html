@@ -222,6 +222,16 @@
         }
     });
 
+    // ── G2 模式整体可拖动（0.23.x 跟随光标落点可能不理想，允许手动挪动）──
+    // 浮窗是小尺寸 HUD，除按钮外整面都是拖拽热区（按下即进系统拖拽循环，
+    // 不做文本选择）；editor 模式保持 strip 拖拽，按钮/预览滚动区不受影响。
+    overlayEl.addEventListener("mousedown", (event) => {
+        if (mode !== "g2" || event.button !== 0) return;
+        if (event.target.closest("button")) return;
+        event.preventDefault();
+        invoke("plugin:window|start_dragging").catch(() => {});
+    });
+
     stopBtn.addEventListener("click", () => {
         stopEditorVoice().catch(() => {});
     });

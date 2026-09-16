@@ -638,7 +638,7 @@ export const en = {
     "ai.chat.agent_mode.pure": "All chat only",
     "ai.chat.agent_mode.pure.hint": "Both the main window and standalone chat window only chat, with no capabilities, MCP tools, or Skills",
     "ai.chat.main_model.label": "Main-window AI model",
-    "ai.chat.main_model.hint": "Ephemeral main-window chats use the Light tier by default, or can follow Main or use a specific model.",
+    "ai.chat.main_model.hint": "Main-window ephemeral chats and editor text transforms share this policy: Light tier by default, or follow Main or use a specific model. Changes apply to the next call immediately.",
     "ai.chat.main_model.light": "Light (default)",
     "ai.chat.main_model.main": "Main",
     "ai.chat.main_model.custom": "Custom model",

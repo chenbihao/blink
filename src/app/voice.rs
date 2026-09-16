@@ -443,8 +443,11 @@ impl VoiceService {
         // G2: 在服务就绪检查之前立即显示 overlay，让用户瞬间看到反馈。
         // overlay 初始显示默认文案（"语音输入中…"），服务检查完成后再更新内容
         // （错误消息或录音开始）。避免服务检查阻塞导致窗口延迟出现。
+        // 定位：此刻前台仍是注入目标，先记下它的窗口句柄——浮窗先按鼠标即时
+        // 显示，随后后台精化到该窗口的文本光标处（0.23.x 跟随光标）。
         if target == VoiceTarget::ForegroundApp {
-            platform::window::show_voice_overlay(&self.app);
+            let owner_hwnd = platform::window::get_foreground_hwnd();
+            platform::window::show_voice_overlay(&self.app, owner_hwnd);
         }
 
         // ── 共享录音启动逻辑 ──
@@ -535,8 +538,9 @@ impl VoiceService {
             generation,
         ))));
 
-        // 浮窗就近反馈（用户刚点了编辑器麦克风按钮，光标即按钮附近）
-        platform::window::show_voice_overlay(&self.app);
+        // 浮窗就近反馈（用户刚点了编辑器麦克风按钮，光标即按钮附近）；
+        // 编辑器听写保持鼠标定位，不做 caret 精化（caret 在 blink 自己的 webview 内）
+        platform::window::show_voice_overlay(&self.app, None);
 
         if self.begin_recording(&config, false).await {
             crate::app::tray::start_breathing(&self.app);
@@ -1127,12 +1131,6 @@ impl VoiceService {
         let task_handle = tokio::spawn(async move {
             // 首块立即发一次音量，之后按 VOICE_LEVEL_MIN_INTERVAL 节流
             let mut last_level_emit = std::time::Instant::now() - VOICE_LEVEL_MIN_INTERVAL;
-            // TEMP-PROBE(0.23.9 G2预览排查)：每秒汇总输入 RMS，与 VAD 阈值
-            // （on≈0.01 / off≈0.005）对照。收尾删除。
-            let mut probe_sec_sum = 0f64;
-            let mut probe_sec_max = 0f64;
-            let mut probe_sec_n = 0u32;
-            let mut probe_sec_start = std::time::Instant::now();
             while let Some(chunk) = rx.recv().await {
                 // 0.23.3：Editor 听写暂停时丢弃 chunk（不推 STT、不发音量事件），
                 // 恢复后从静音继续，暂停期间的话语不进识别。
@@ -1152,23 +1150,6 @@ impl VoiceService {
                     last_level_emit = std::time::Instant::now();
                     let level = compute_rms(&chunk.samples);
                     let target_str = target_for_audio.as_str();
-                    // TEMP-PROBE(0.23.9 G2预览排查)：输入 RMS 每秒汇总。收尾删除。
-                    probe_sec_sum += level;
-                    probe_sec_max = probe_sec_max.max(level);
-                    probe_sec_n += 1;
-                    if probe_sec_start.elapsed().as_millis() >= 1000 {
-                        tracing::debug!(
-                            target_kind = target_str,
-                            mean = probe_sec_sum / probe_sec_n.max(1) as f64,
-                            max = probe_sec_max,
-                            samples = probe_sec_n,
-                            "TEMP-PROBE 输入RMS每秒汇总"
-                        );
-                        probe_sec_sum = 0.0;
-                        probe_sec_max = 0.0;
-                        probe_sec_n = 0;
-                        probe_sec_start = std::time::Instant::now();
-                    }
                     let _ = app.emit(
                         EventNames::VOICE_LEVEL,
                         serde_json::json!({
@@ -1857,13 +1838,6 @@ async fn consume_stt_events(
                             "epoch": recording_epoch,
                         }),
                     );
-                    // TEMP-PROBE(0.23.9 G2预览排查)：G2 confirmed 增量已发送。收尾删除。
-                    tracing::debug!(
-                        target_kind = target_str,
-                        confirmed_chars = confirmed_cache.chars().count(),
-                        preview_chars = preview_cache.chars().count(),
-                        "TEMP-PROBE VOICE_PARTIAL(draft) 已发送"
-                    );
                 }
             }
             SttEvent::Preview {
@@ -1924,14 +1898,6 @@ async fn consume_stt_events(
                             "target": target_str,
                             "epoch": recording_epoch,
                         }),
-                    );
-                    // TEMP-PROBE(0.23.9 G2预览排查)：G2 预览已发送。收尾删除。
-                    tracing::debug!(
-                        target_kind = target_str,
-                        request_id,
-                        confirmed_chars = confirmed.chars().count(),
-                        preview_chars = preview_cache.chars().count(),
-                        "TEMP-PROBE VOICE_PARTIAL(preview) 已发送"
                     );
                 }
             }

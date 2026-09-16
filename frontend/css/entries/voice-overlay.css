@@ -46,12 +46,19 @@ body {
     border-radius: 14px;
     border: 1px solid var(--border-glow);
     box-shadow: 0 4px 16px var(--shadow);
+    /* 0.23.x：g2 模式整面可拖动（与 editor strip 的 move 光标一致） */
+    cursor: move;
     /* 0.23.7：宽度不再写死——窗口宽度由 layout.js 按模式下发（g2 260 / editor 304），
        overlay 始终铺满窗口可用宽度；高度同理（g2 撑高 / editor 固定稳定值）。 */
     width: 100%;
     box-sizing: border-box;
     max-width: none;
     max-height: none;
+}
+
+/* editor 模式拖拽语义只在 strip 上，正文/预览区恢复默认光标 */
+#overlay.mode-editor {
+    cursor: default;
 }
 
 /* 文本区域 */
@@ -118,7 +125,7 @@ body {
 
 /* 录音中出错且已有转写：正文保留，错误信息挂提示行（红=错误，与波形铁则一致） */
 .hint.voice-hint-error {
-    color: var(--red, #f38ba8);
+    color: var(--red);
 }
 
 /* ── Editor 连续听写模式（0.23.3 §5.4）────────────────────────────── */

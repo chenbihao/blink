@@ -312,6 +312,39 @@ mod tests {
             fg.0 as isize,
             unsafe { GetWindowThreadProcessId(fg, None) }
         );
+
+        // [MSAA] OBJID_CARET 探测：Java/Swing 系与部分自绘编辑器的备选光标通道
+        unsafe {
+            use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
+            use windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
+            use windows::Win32::UI::WindowsAndMessaging::OBJID_CARET;
+            let mut pv: *mut core::ffi::c_void = std::ptr::null_mut();
+            if (AccessibleObjectFromWindow(fg, OBJID_CARET.0 as u32, &IAccessible::IID, &mut pv)).is_ok()
+                && !pv.is_null()
+            {
+                let caret: IAccessible = windows::core::Type::from_abi(pv).unwrap();
+                let (mut x, mut y, mut w, mut h) = (0i32, 0i32, 0i32, 0i32);
+                // varChild = CHILDID_SELF（VT_I4 0）
+                let child = VARIANT {
+                    Anonymous: VARIANT_0 {
+                        Anonymous: core::mem::ManuallyDrop::new(VARIANT_0_0 {
+                            vt: VT_I4,
+                            wReserved1: 0,
+                            wReserved2: 0,
+                            wReserved3: 0,
+                            Anonymous: VARIANT_0_0_0 { lVal: 0 },
+                        }),
+                    },
+                };
+                match caret.accLocation(&mut x, &mut y, &mut w, &mut h, &child) {
+                    Ok(()) => println!("[MSAA] OBJID_CARET: x={x} y={y} w={w} h={h}"),
+                    Err(e) => println!("[MSAA] OBJID_CARET: accLocation 失败 {e}"),
+                }
+            } else {
+                println!("[MSAA] OBJID_CARET: 无对象");
+            }
+        }
+
         let fg_raw = fg.0 as isize;
         println!(
             "[5] get_caret_rect_for(owner=前台): {:?}",

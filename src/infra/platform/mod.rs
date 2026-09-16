@@ -3,6 +3,7 @@
 //! 0.14.6 §2.3：收纳从 domain 泄漏的 Win32 调用——icon 提取 / shell 枚举 / lock。
 
 pub mod audio;
+pub mod caret; // 0.23.x：前台文本光标矩形（G2 语音浮窗跟随光标）
 pub mod clipboard;
 pub mod context;
 #[cfg(windows)]

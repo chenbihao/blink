@@ -257,11 +257,6 @@ struct PseudoInner {
     /// 设为 true 后，`transcribe_chunk` 和 `finalize` 返回 `SttError`，
     /// 不再处理新音频。`reset` 清除此标志。
     session_failed: bool,
-    /// TEMP-PROBE(0.23.9 G2预览排查)：1Hz 调度探针的上次输出时刻。收尾删除。
-    probe_last_log: Option<Instant>,
-    /// TEMP-PROBE(0.23.9 G2预览排查)：最近一次 preview gate 评估结果
-    /// （kind, 有效有声毫秒）。收尾删除。
-    probe_last_gate: Option<(&'static str, u64)>,
     /// 0.23.9.10 预览定稿短语账本：(end_sample, text)。候选停顿被新语音
     /// 作废（未升级为真实切割）时，对 [phrase_anchor, quiet_start] 做一次
     /// 短语识别并冻结在此；真实 Draft 提交覆盖其范围后清退。仅
@@ -322,8 +317,6 @@ impl PseudoInner {
             single_worker: false,
             worker_gate: Arc::new(tokio::sync::Mutex::new(())),
             session_failed: false,
-            probe_last_log: None,
-            probe_last_gate: None,
             preview_phrases: Vec::new(),
             phrase_anchor: 0,
             preview_tail: String::new(),
@@ -768,8 +761,6 @@ impl PseudoStreamingSttEngine {
                 single_worker: true,
                 worker_gate: Arc::new(tokio::sync::Mutex::new(())),
                 session_failed: false,
-                probe_last_log: None,
-                probe_last_gate: None,
                 preview_phrases: Vec::new(),
                 phrase_anchor: 0,
                 preview_tail: String::new(),
@@ -1194,14 +1185,6 @@ impl PseudoStreamingSttEngine {
             )
         };
 
-        // TEMP-PROBE(0.23.9 G2预览排查)：预览任务实际发起点。收尾删除。
-        tracing::debug!(
-            request_id,
-            window_ms = (snapshot_range.end_sample - snapshot_range.start_sample) * 1000
-                / u64::from(self.sample_rate),
-            "TEMP-PROBE 预览推理发起"
-        );
-
         let inner = Arc::clone(&self.inner);
         let Some(transport) = self.connection.as_ref().and_then(|c| c.transport.clone()) else {
             tracing::warn!("预览识别缺少 worker 通道，跳过");
@@ -1397,8 +1380,6 @@ impl PseudoStreamingSttEngine {
     /// 改变；G2/Editor 通过 `from_connection` 默认进入此路径。VAD 只在这里
     /// 形成候选，候选满足上下文/强停顿条件后才交给 SentenceState 预留。
     async fn transcribe_chunk_preview_draft(&self, samples: &[f32]) -> Result<String, SttError> {
-        // TEMP-PROBE(0.23.9 G2预览排查)：1Hz 调度探针输出缓存，收尾删除。
-        let mut probe_line: Option<String> = None;
         let (
             pending_segment,
             should_preview,
@@ -1770,13 +1751,8 @@ impl PseudoStreamingSttEngine {
                 );
                 match gate {
                     RequestAudioGate::Valid {
-                        model_input_range,
-                        voiced_samples,
-                        ..
+                        model_input_range, ..
                     } => {
-                        // TEMP-PROBE(0.23.9 G2预览排查)：gate 通过，记录有效有声量
-                        inner.probe_last_gate =
-                            Some(("valid", voiced_samples * 1000 / u64::from(self.sample_rate)));
                         let start_offset = model_input_range
                             .start_sample
                             .saturating_sub(preview_range.start_sample)
@@ -1835,49 +1811,12 @@ impl PseudoStreamingSttEngine {
                         }
                     }
                     RequestAudioGate::TooShort => {
-                        // TEMP-PROBE(0.23.9 G2预览排查)：gate 判定有声不足
-                        inner.probe_last_gate = Some(("too_short", 0));
                         snapshot.clear();
                     }
                     RequestAudioGate::NoSpeech => {
-                        // TEMP-PROBE(0.23.9 G2预览排查)：gate 判定整窗无语音
-                        inner.probe_last_gate = Some(("no_speech", 0));
                         snapshot.clear();
                     }
                 }
-            }
-            // TEMP-PROBE(0.23.9 G2预览排查)：每秒输出一次预览调度全量状态，
-            // 用于定位 live 麦克风会话零预览/零自然切点的原因。收尾整体删除。
-            if inner
-                .probe_last_log
-                .map_or(true, |t| t.elapsed().as_millis() >= 1000)
-            {
-                inner.probe_last_log = Some(Instant::now());
-                let vad_state = inner.vad.dump_state();
-                let sr_ms = self.sample_rate as usize / 1000;
-                probe_line = Some(format!(
-                    "TEMP-PROBE 预览调度 audio={}.{:03}s speaking={} nf={:.5} on={:.5} off={:.5} \
-                     sent_ms={} sil_ms={} seg_ms={} due={} growth={} inflight={} pending={} \
-                     started={} last_prev_ms={} phrases={} anchor_s={} gate={:?}",
-                    total / self.sample_rate as usize,
-                    total % self.sample_rate as usize * 1000 / self.sample_rate as usize,
-                    vad_state.speaking,
-                    vad_state.noise_floor,
-                    vad_state.on_threshold,
-                    vad_state.off_threshold,
-                    vad_state.sentence_samples / sr_ms,
-                    vad_state.silence_samples / sr_ms,
-                    vad_state.segment_samples / sr_ms,
-                    preview_due,
-                    has_growth,
-                    inner.preview_in_flight,
-                    pending.is_some(),
-                    inner.preview_started,
-                    inner.last_preview.elapsed().as_millis(),
-                    inner.preview_phrases.len(),
-                    inner.phrase_anchor * 1000 / (self.sample_rate as u64).max(1),
-                    inner.probe_last_gate,
-                ));
             }
 
             (
@@ -1889,10 +1828,6 @@ impl PseudoStreamingSttEngine {
                 phrase_snapshot,
             )
         };
-
-        if let Some(line) = probe_line {
-            tracing::debug!("{}", line);
-        }
 
         // 0.23.9.10：预览定稿短语识别（锁外 spawn，见 spawn_phrase_recognition）。
         if let Some((phrase_samples, ledger_end, phrase_range)) = phrase_snapshot {

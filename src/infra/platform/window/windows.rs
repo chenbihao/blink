@@ -259,9 +259,10 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic,
-    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    IsWindowVisible, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION,
+    WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -1091,7 +1092,9 @@ unsafe extern "system" fn sysmenu_block_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_KEYMENU {
-        tracing::info!(
+        // debug 而非 info：语音 hold 期间 Space autorepeat 以 ~30Hz 触发本分支
+        //（hook 兜底场景），info 级会刷屏；正常语义是"拦截成功"，无里程碑价值。
+        tracing::debug!(
             hwnd = hwnd.0 as isize,
             wparam = wparam.0,
             "sysmenu_blocker_intercepted_keymenu"
@@ -2461,9 +2464,13 @@ pub fn destroy_sticky_window(app: &AppHandle, sticky_id: &str) {
 }
 
 /// 显示语音录音 mini overlay（0.10 G2）。
-/// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE），显示在光标附近。
-/// 录音结束后由 voice::VoiceService::stop_recording 发 voice-recording-end → 前端隐藏。
-pub fn show_voice_overlay(app: &AppHandle) {
+/// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE）。
+///
+/// 定位策略（0.23.x 跟随光标）：先用鼠标位置即时显示（0ms 反馈），`owner_hwnd`
+/// 为 `Some`（G2 唤起前记忆的目标窗口）时再由后台线程查询该窗口的文本光标矩形
+/// 并精化定位（UIA 跨进程 COM 需几十 ms，不能阻塞显示主链路）；取不到光标
+///（焦点不在文本）保持鼠标位置。`None` 表示保持鼠标定位（编辑器听写）。
+pub fn show_voice_overlay(app: &AppHandle, owner_hwnd: Option<isize>) {
     const LABEL: &str = "voice-overlay";
     let (mx, my) = unsafe {
         let mut pt = POINT { x: 0, y: 0 };
@@ -2504,6 +2511,11 @@ pub fn show_voice_overlay(app: &AppHandle) {
                     force_topmost(hwnd);
                 }
                 clamp_to_work_area(&win);
+                if let Some(owner) = owner_hwnd {
+                    if let Some(hwnd) = hwnd {
+                        spawn_voice_overlay_caret_refine(hwnd, owner);
+                    }
+                }
                 Ok(())
             });
             match ready {
@@ -2524,6 +2536,84 @@ pub fn hide_voice_overlay(app: &AppHandle) {
     cancel_pending_window_activation("voice-overlay");
     if let Some(win) = app.get_webview_window("voice-overlay") {
         let _ = win.hide();
+    }
+}
+
+/// 后台查询目标窗口的文本光标，把语音浮窗从鼠标位置精化到光标处（0.23.x 跟随光标）。
+///
+/// `owner_hwnd` = G2 唤起前记忆的目标窗口——查询锁定它而非当前前台，避免
+/// 自家窗口抢占前台后取到自己的"光标"。查询在后台线程完成（UIA 跨进程 COM
+/// 几十 ms），绝不在显示主链路上等待。查询完成时浮窗可能已隐藏（用户已松键），
+/// 此时直接放弃；窗口句柄失效则 SetWindowPos 自然失败，无害。
+fn spawn_voice_overlay_caret_refine(hwnd: HWND, owner_hwnd: isize) {
+    let hwnd_raw = hwnd.0 as isize;
+    let spawned = std::thread::Builder::new()
+        .name("voice-caret".into())
+        .spawn(move || {
+            let Some(caret) = crate::infra::platform::caret::get_caret_rect_for(Some(owner_hwnd))
+            else {
+                tracing::debug!(owner_hwnd, "voice-overlay: 未取到目标窗口光标，保持鼠标定位");
+                return;
+            };
+            refine_voice_overlay_position(HWND(hwnd_raw as *mut _), &caret);
+        });
+    if let Err(error) = spawned {
+        tracing::debug!(%error, "voice-caret 线程启动失败，保持鼠标定位");
+    }
+}
+
+/// 把语音浮窗定位到 caret 附近：优先文本行下方，贴近工作区底部时翻到行上方，
+/// 并 clamp 到光标所在显示器的工作区。只挪位置不动尺寸/层级，不抢焦点。
+fn refine_voice_overlay_position(hwnd: HWND, caret: &RECT) {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return;
+        }
+        let mut window_rect = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut window_rect).is_err() {
+            return;
+        }
+        let width = window_rect.right - window_rect.left;
+        let height = window_rect.bottom - window_rect.top;
+
+        let anchor = POINT {
+            x: caret.left,
+            y: caret.bottom,
+        };
+        let hmon = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info: MONITORINFO = std::mem::zeroed();
+        monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut monitor_info).as_bool() {
+            return;
+        }
+        let work = monitor_info.rcWork;
+
+        const GAP: i32 = 4;
+        let below_y = caret.bottom + GAP;
+        let y = if below_y + height <= work.bottom {
+            below_y
+        } else {
+            (caret.top - GAP - height).max(work.top)
+        };
+        let new_x = caret.left.clamp(work.left, (work.right - width).max(work.left));
+        let new_y = y.clamp(work.top, (work.bottom - height).max(work.top));
+
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            new_x,
+            new_y,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
+        );
+        tracing::debug!(
+            new_x,
+            new_y,
+            caret_left = caret.left,
+            caret_top = caret.top,
+            "voice-overlay: 已精化到光标位置"
+        );
     }
 }
 

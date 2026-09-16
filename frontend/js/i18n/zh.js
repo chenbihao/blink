@@ -631,7 +631,7 @@ export const zh = {
     "ai.chat.agent_mode.pure": "全部纯对话",
     "ai.chat.agent_mode.pure.hint": "主窗口与独立对话窗口都只聊天，不装配能力、MCP 和 Skill",
     "ai.chat.main_model.label": "主窗口 AI 模型",
-    "ai.chat.main_model.hint": "主窗口临时对话默认使用轻量档，也可跟随主档或固定到一个自选模型。",
+    "ai.chat.main_model.hint": "主窗口临时对话与编辑器文本整理共用此策略：默认使用轻量档，也可跟随主档或固定到一个自选模型；切换后对下一次调用立即生效。",
     "ai.chat.main_model.light": "轻量档（默认）",
     "ai.chat.main_model.main": "主档",
     "ai.chat.main_model.custom": "自选模型",
