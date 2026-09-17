@@ -426,12 +426,14 @@ function initVadDebug() {
     const progressTime = document.getElementById("voice-vad-debug-progress-time");
     const progressDetail = document.getElementById("voice-vad-debug-progress-detail");
     const result = document.getElementById("voice-vad-debug-result");
+    const finalTitle = document.getElementById("voice-vad-debug-final-title");
+    const transcript = document.getElementById("voice-vad-debug-transcript");
     const chart = document.getElementById("voice-vad-debug-chart");
     const transport = document.getElementById("voice-vad-debug-transport");
     const playButton = document.getElementById("voice-vad-debug-play");
     const playTime = document.getElementById("voice-vad-debug-play-time");
     if (!button || !status || !file || !progress || !progressBar || !progressTime || !progressDetail
-        || !result || !chart || !transport || !playButton || !playTime
+        || !result || !finalTitle || !transcript || !chart || !transport || !playButton || !playTime
         || button.dataset.bound === "true") return;
     button.dataset.bound = "true";
     let runSerial = 0;
@@ -550,6 +552,8 @@ function initVadDebug() {
         result.hidden = true;
         resetPlayback();
         file.hidden = true;
+        finalTitle.hidden = true;
+        transcript.hidden = true;
         progress.hidden = true;
         status.className = "voice-file-transcribe-status";
         status.textContent = t("voice.local.file.picking");
@@ -583,10 +587,12 @@ function initVadDebug() {
             renderVadDebugResult(data, {
                 chart: document.getElementById("voice-vad-debug-chart"),
                 events: document.getElementById("voice-vad-debug-events"),
-                transcript: document.getElementById("voice-vad-debug-transcript"),
+                transcript,
                 meta: document.getElementById("voice-vad-debug-meta"),
             }, t);
             result.hidden = false;
+            finalTitle.hidden = false;
+            transcript.hidden = false;
             status.textContent = t("voice.local.vad_debug.done");
             status.className = "voice-file-transcribe-status success";
             if (playbackRef) setupPlayback(playbackRef, runSerial);
@@ -722,15 +728,8 @@ function initVadConfig(config, onVADChanged) {
     ensureVadWindowFields(vad);
 
     const controls = [
-        {
-            input: document.getElementById("voice-vad-silence-threshold"),
-            val: document.getElementById("voice-vad-silence-threshold-val"),
-            key: "silence_threshold",
-            format: (v) => v.toFixed(3),
-            validate: (v) => !isNaN(v) && v >= 0.001 && v <= 0.02,
-            parse: (raw) => parseFloat(raw),
-            ariaKey: "voice.local.vad.silence_threshold.label",
-        },
+        // 0.23.13：silence_threshold 滑杆已移除——底噪自适应主导 on/off 阈值，
+        // 字段仅作旧配置兼容保留（Rust 侧默认 0.001）。
         {
             input: document.getElementById("voice-vad-min-silence-ms"),
             val: document.getElementById("voice-vad-min-silence-ms-val"),

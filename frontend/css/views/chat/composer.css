@@ -498,7 +498,7 @@
     color: var(--text-sub);
 }
 
-/* ── 0.23.13 音频附件（attach 按钮 + chips） ─────────── */
+/* ── 0.23.12 音频附件（attach 按钮 + chips） ─────────── */
 
 .chat-attach-btn {
     display: flex;

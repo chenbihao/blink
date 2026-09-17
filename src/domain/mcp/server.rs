@@ -243,8 +243,8 @@ impl BlinkMcpServer {
     /// 0.14.1: 改调 canonical 投影（`to_rig_tool_result()` + `rig_tool_result_to_text()`），
     /// 消除内联 match + Blob 摘要重复 + Items score 漂移。
     /// 0.19.4: 改用 `to_rig_tool_result_with_stash()`，image Blob 移入 stash 并返回 image_ref。
-    /// 0.23.13: 改用 `to_rig_tool_result_with_store()`——图片 Blob 统一入 ResourceStore。
-    /// 0.23.14: **CapabilityResult 只投影一次**——此前成功路径为审计先投影一次、
+    /// 0.23.12: 改用 `to_rig_tool_result_with_store()`——图片 Blob 统一入 ResourceStore。
+    /// 0.23.12 review 收紧：**CapabilityResult 只投影一次**——此前成功路径为审计先投影一次、
     /// 本函数再投影一次，图片 Blob 会签发两个 ref、缓存两份内容，且第一个 ref
     /// 只进审计记录（bearer token 泄露进审计库）。现在投影一次，MCP 返回与审计
     /// 共用；审计摘要对 Blob 只记脱敏元数据（MIME + 尺寸），不含 `rref_` token。
@@ -386,7 +386,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             let call_tool_result = match result {
                 Ok(cap_result) => {
                     let store = self.cap_env.resource_store();
-                    // 单次投影：MCP 返回与审计摘要共用同一份投影产物（0.23.14），
+                    // 单次投影：MCP 返回与审计摘要共用同一份投影产物（0.23.12），
                     // 图片 Blob 只签发一个 ref；审计摘要不含 bearer token
                     let (mcp_result, summary) =
                         BlinkMcpServer::project_call_tool_result(
@@ -526,7 +526,7 @@ mod tests {
         assert!(audit.contains("已写入剪贴板"));
     }
 
-    /// 0.23.13：无 store 时 Blob 投影为**结构化**降级（blob_unavailable JSON），
+    /// 0.23.12：无 store 时 Blob 投影为**结构化**降级（blob_unavailable JSON），
     /// 不再静默吞成尺寸摘要——外部 MCP client 可据此区分"资源不可用"与"空结果"。
     #[test]
     fn blob_result_without_store_degrades_structured() {
@@ -550,7 +550,7 @@ mod tests {
         assert!(!audit.contains("rref_"));
     }
 
-    /// 0.23.14 验收：一次 MCP 图片 Blob 投影只新增一个 store entry，
+    /// 0.23.12 验收：一次 MCP 图片 Blob 投影只新增一个 store entry，
     /// 返回文本恰含一个 ref token，审计摘要不含任何 `rref_`。
     #[test]
     fn blob_projection_with_store_issues_exactly_one_ref_and_sanitized_audit() {
@@ -637,7 +637,7 @@ mod tests {
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("test.txt"));
 
-        // Blob → 结构化降级（0.23.13：无 store 不静默吞摘要）
+        // Blob → 结构化降级（0.23.12：无 store 不静默吞摘要）
         let result = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0u8; 4096],

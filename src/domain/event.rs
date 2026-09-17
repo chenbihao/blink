@@ -152,7 +152,7 @@ pub trait CapabilityEnv: Send + Sync {
         expected_updated_at: Option<i64>,
     ) -> Result<StickyCloseOutcome, StickyWorkflowError>;
 
-    // ── 统一资源 ref 层（0.23.12 建、0.23.13 图片腿迁入后为唯一资源入口）──
+    // ── 统一资源 ref 层（0.23.12：唯一资源入口）──
 
     /// 统一资源 store——跨 Capability 传递大资源的短期授权句柄，
     /// 取代 0.19.4 ImageStash（内存腿）与 0.22.16 AudioResourceRegistry（音频腿）。

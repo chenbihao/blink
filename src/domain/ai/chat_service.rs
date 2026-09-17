@@ -229,7 +229,7 @@ pub struct ChatStreamEvent {
 
 /// 单条对话音频附件元数据（`chat_prompt` 命令 wire schema，camelCase）。
 ///
-/// **0.23.14 边界**：附件只以结构化元数据随本轮请求进入后端；`audio_ref`
+/// **0.23.12 边界**：附件只以结构化元数据随本轮请求进入后端；`audio_ref`
 /// 是短期 bearer 句柄，仅注入**本轮模型输入**的附件上下文，不进入用户可见
 /// 正文、标题截断/生成输入或持久化历史。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -1074,7 +1074,7 @@ impl ChatService {
             (message.clone(), Vec::new())
         };
 
-        // 0.23.14：模型输入与用户可见正文分离——附件 ref 只注入**本轮模型输入**；
+        // 0.23.12：模型输入与用户可见正文分离——附件 ref 只注入**本轮模型输入**；
         // 预写落库、标题截断与 LLM 命名全部使用用户可见正文（`message`/`visible_message`），
         // 持久化历史中不出现 `rref_` 技术块。
         let attachments = sanitize_attachments(attachments);
@@ -1091,7 +1091,7 @@ impl ChatService {
         // 与 `append` 的「跳过已预写 user」去重配合，正常完成后不产生重复行；
         // 中断/失败时用户消息已落库，侧边栏立即可见。
         // 失败不阻塞对话（warn-and-continue），与「持久化分组失败不影响对话」一致。
-        // 0.23.14：附件以**展示文件名**随预写行落库（徽标渲染用；ref 不落库）。
+        // 0.23.12：附件以**展示文件名**随预写行落库（徽标渲染用；ref 不落库）。
         if kind == ConversationKind::Persistent
             && let Err(e) = self
                 .persistent_memory()
@@ -1706,7 +1706,7 @@ fn compute_allowlist_fingerprint(allowlist: &std::collections::HashSet<String>) 
 mod tests {
     use super::*;
 
-    // ── 0.23.14：模型输入与用户可见正文分离 ────────────────────────────────
+    // ── 0.23.12：模型输入与用户可见正文分离 ────────────────────────────────
 
     fn attachment(r: &str, name: &str) -> ChatAttachmentInput {
         ChatAttachmentInput {

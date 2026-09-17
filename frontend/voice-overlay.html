@@ -147,11 +147,17 @@
         pauseBtn.setAttribute("aria-label", pauseLabel);
     }
 
-    /** 文本区渲染：editor 模式只显示 preview（confirmed 进正文，浮窗不重复展示） */
-    function setEditorText(preview) {
-        if (preview) {
-            textEl.innerHTML = '<span class="voice-preview"></span>';
-            textEl.querySelector(".voice-preview").textContent = preview;
+    /** 文本区渲染：confirmed（保留窗口定稿）+ preview 双层，与 G2 模式同构。
+     *  0.23.13：保留窗口外的定稿已进正文，浮窗只显示窗口内最新 1 段 + 实时预览 */
+    function setEditorText(preview, confirmed) {
+        if (preview || confirmed) {
+            textEl.innerHTML = '<span class="voice-confirmed"></span>' +
+                '<span class="voice-preview"></span>';
+            textEl.querySelector(".voice-confirmed").textContent = confirmed || "";
+            textEl.querySelector(".voice-preview").textContent = preview || "";
+            // 预览区固定高度内部滚动：最新文本在底部，每次更新滚到底，
+            // 避免录制中超出的内容被藏在可视区外
+            textEl.scrollTop = textEl.scrollHeight;
             isDefaultText = false;
         } else {
             textEl.textContent = editorPhase === "paused"
@@ -326,7 +332,7 @@
             applySize();
             return;
         }
-        setEditorText(p.preview || "");
+        setEditorText(p.preview || "", p.confirmed || "");
         if (mode === "editor") {
             if (!editorSizeAsserted) {
                 editorSizeAsserted = true;

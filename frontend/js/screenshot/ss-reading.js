@@ -375,6 +375,9 @@ function bindHitCanvasEvents() {
                 e.preventDefault();
                 hitCanvas.setAttribute('data-interacting', 'true');
                 beginPointerSelection('move', e);
+                // data-interacting 期间事件让回主 canvas，同步压掉 beginSelectionInteraction
+                // 设置的 move 四向箭头，空白拖动全程保持普通箭头
+                ss.canvas.style.cursor = 'default';
                 return;
             }
             idx = nearestWordByLine(e.offsetX, e.offsetY);
@@ -397,9 +400,10 @@ function bindHitCanvasEvents() {
         }
         if (!ss.reading) return;
         const idx = hitTestWord(e.offsetX, e.offsetY);
-        // 0.23.12：真空白处显示 move 光标提示可拖动选区；文字上与划词拖动中保持 text
+        // 0.23.13：真空白处保持普通箭头光标（可拖动选区不再用 move 四向箭头提示）；
+        // 文字上与划词拖动中保持 text
         hitCanvas.style.cursor = (idx < 0 && ss.reading.dragStart === null && isBlankForMove(e.offsetX, e.offsetY))
-            ? 'move'
+            ? 'default'
             : 'text';
         if (ss.reading.dragStart !== null) {
             const endIdx = idx >= 0 ? idx : nearestWordByLine(e.offsetX, e.offsetY);

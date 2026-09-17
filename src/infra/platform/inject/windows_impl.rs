@@ -61,17 +61,21 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
     // 编码为 UTF-16，逐码元构造 INPUT
     let utf16: Vec<u16> = text.encode_utf16().collect();
 
-    let mut inputs: Vec<INPUT> = Vec::with_capacity(utf16.len() * 2); // 每字符 keydown + keyup
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(utf16.len() * 2 + 2);
+    neutralize_pressed_alt(&mut inputs);
 
     for &code_unit in &utf16 {
         if code_unit == b'\n' as u16 || code_unit == b'\r' as u16 {
             // 换行符用 VK_RETURN 代替（KEYEVENTF_UNICODE 发 \n 很多应用不认）
-            inputs.push(make_keydown(VK_RETURN.0, KEYBD_EVENT_FLAGS(0)));
-            inputs.push(make_keyup(VK_RETURN.0, KEYEVENTF_KEYUP));
+            inputs.push(make_virtual_key(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(make_virtual_key(VK_RETURN, KEYEVENTF_KEYUP));
         } else {
             // 普通字符：KEYEVENTF_UNICODE 逐码元发送
-            inputs.push(make_keydown(code_unit, KEYEVENTF_UNICODE));
-            inputs.push(make_keyup(code_unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+            inputs.push(make_unicode_key(code_unit, KEYEVENTF_UNICODE));
+            inputs.push(make_unicode_key(
+                code_unit,
+                KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+            ));
         }
     }
 
@@ -95,14 +99,52 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
     Ok(())
 }
 
-/// 构造 keydown INPUT（Unicode 字符）。
-fn make_keydown(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+/// Alt 处于逻辑按下态时，在 INPUT 序列头部追加合成 Alt keyup 中和。
+///
+/// G2 hold-to-talk 录音中的渐进上屏必然处于该状态：第一个物理 Alt keydown
+/// 在 Idle 时放行（系统 async 状态 Alt=down），后续 autorepeat 被热键 hook
+/// 吞掉但不会清除已置位的 down。Alt down 时 VK_PACKET 字符到达目标应用是
+/// WM_SYSKEYDOWN → TranslateMessage 产出 WM_SYSCHAR（菜单助记路径），
+/// 编辑控件不处理 → 字符不进输入框，而 SendInput 仍返回成功（文本静默丢失）。
+///
+/// 合成 keyup 幂等且对 blink 状态机无感知：事件带 LLKHF_INJECTED，gesture
+/// source 配对不接受 injected keyup（不触发 HoldReleased），modifier level
+/// 也不被 injected keyup 清除；物理 autorepeat 被吞不进输入流，async 状态
+/// 保持 Up；用户松手时的物理 Alt keyup 照常收尾录音。
+fn neutralize_pressed_alt(inputs: &mut Vec<INPUT>) {
+    let (left_alt_down, right_alt_down) = unsafe {
+        (
+            GetAsyncKeyState(VK_LMENU.0 as i32) < 0,
+            GetAsyncKeyState(VK_RMENU.0 as i32) < 0,
+        )
+    };
+    if !left_alt_down && !right_alt_down {
+        return;
+    }
+    tracing::debug!(
+        left_alt_down,
+        right_alt_down,
+        "检测到 Alt 逻辑按下，注入前合成 Alt keyup 中和（规避 WM_SYSCHAR 丢字符）"
+    );
+    if left_alt_down {
+        inputs.push(make_virtual_key(VK_LMENU, KEYEVENTF_KEYUP));
+    }
+    if right_alt_down {
+        inputs.push(make_virtual_key(
+            VK_RMENU,
+            KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+        ));
+    }
+}
+
+/// 构造 Unicode INPUT。`KEYEVENTF_UNICODE` 路径要求 `wVk = 0`，字符写入 `wScan`。
+fn make_unicode_key(code_unit: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(0),
-                wScan: scan,
+                wScan: code_unit,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -111,14 +153,14 @@ fn make_keydown(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// 构造 keyup INPUT（Unicode 字符）。
-fn make_keyup(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+/// 构造普通虚拟键 INPUT。非 Unicode/扫描码路径必须把键码写入 `wVk`。
+fn make_virtual_key(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
-                wScan: scan,
+                wVk: vk,
+                wScan: 0,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -223,7 +265,11 @@ fn set_clipboard_text(text: &str) -> Result<(), String> {
 /// 导致 Ctrl+V 组合不生效。
 fn send_paste() -> Result<(), String> {
     unsafe {
-        let inputs = [
+        // Alt 按住时 V 会变 Ctrl+Alt+V（AltGr 特殊字符），先中和（见
+        // neutralize_pressed_alt 文档）
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(6);
+        neutralize_pressed_alt(&mut inputs);
+        inputs.extend([
             // Ctrl↓ — 左Ctrl 不是扩展键,dwFlags = 0
             INPUT {
                 r#type: INPUT_KEYBOARD,
@@ -276,7 +322,7 @@ fn send_paste() -> Result<(), String> {
                     },
                 },
             },
-        ];
+        ]);
 
         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         if sent != inputs.len() as u32 {
@@ -293,5 +339,30 @@ impl Drop for ClipboardGuard {
         unsafe {
             let _ = CloseClipboard();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_key_input_writes_vk_instead_of_scan_code() {
+        let input = make_virtual_key(VK_LMENU, KEYEVENTF_KEYUP);
+        let keyboard = unsafe { input.Anonymous.ki };
+
+        assert_eq!(keyboard.wVk, VK_LMENU);
+        assert_eq!(keyboard.wScan, 0);
+        assert_eq!(keyboard.dwFlags, KEYEVENTF_KEYUP);
+    }
+
+    #[test]
+    fn unicode_input_writes_code_unit_to_scan_field() {
+        let input = make_unicode_key('测' as u16, KEYEVENTF_UNICODE);
+        let keyboard = unsafe { input.Anonymous.ki };
+
+        assert_eq!(keyboard.wVk, VIRTUAL_KEY(0));
+        assert_eq!(keyboard.wScan, '测' as u16);
+        assert_eq!(keyboard.dwFlags, KEYEVENTF_UNICODE);
     }
 }

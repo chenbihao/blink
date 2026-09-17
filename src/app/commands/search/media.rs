@@ -951,7 +951,7 @@ fn project_ocr_command_result(
     }
 }
 
-/// RAII cleanup guard for ResourceStore refs（0.23.13：从 ImageStash 平移）。
+/// RAII cleanup guard for ResourceStore refs（0.23.12：从 ImageStash 平移）。
 ///
 /// `ocr_image` 创建 image_ref 后，无论成功/失败/取消，都需显式 revoke ref
 /// 避免占用 store 项数上限（内存腿 16 项）。Drop 时调用 cleanup closure。
@@ -994,7 +994,7 @@ pub async fn ocr_image(
 
     // Task 10: 消除 PNG JSON 数字数组和多份图片复制
     // 旧方式：serde_json::json!({ "png": png_data }) → Vec<u8> 被序列化为 JSON 数字数组
-    // 方式（0.23.13）：存入统一 ResourceStore（以 Bytes 零拷贝），传 image_ref 给 Capability
+    // 方式（0.23.12）：存入统一 ResourceStore（以 Bytes 零拷贝），传 image_ref 给 Capability
     //
     // 铁则：
     // - png_data 只在此处出现一次，不 .clone()
@@ -1015,7 +1015,7 @@ pub async fn ocr_image(
         .clone();
 
     // 通过统一 ResourceStore 传 image_ref，避免 PNG 字节被 JSON 数字数组序列化
-    //（0.23.13 从 ImageStash 平移：issue_memory + OcrImage use + Reusable）
+    //（0.23.12 从 ImageStash 平移：issue_memory + OcrImage use + Reusable）
     // Bytes::from(Vec) 消费 Vec 不复制；issue_memory 接收 Bytes，不额外复制
     let png_bytes = bytes::Bytes::from(png_data);
     let image_ref = {

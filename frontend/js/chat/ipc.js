@@ -14,7 +14,7 @@ import {EVENTS} from "../shared/event-names.js";
  *
  * 0.12.6：新增可选 `groupId` 参数——设置对话所属分组并注入分组级系统提示词。
  * 传 null/undefined 时保持现有分组不变（后端查询对话当前分组的 system_prompt）。
- * 0.23.14：`opts.attachments` 携带本轮音频附件元数据（{audioRef, displayName}[]）——
+ * 0.23.12：`opts.attachments` 携带本轮音频附件元数据（{audioRef, displayName}[]）——
  * 后端只注入本轮模型输入，用户可见正文/标题/持久化历史不含附件技术块。
  *
  * @param {string} conversationId
@@ -115,7 +115,7 @@ export function confirmChatAction(confirmId, approved) {
     return invoke("confirm_chat_action", {confirmId, approved});
 }
 
-// ── 音频附件（0.23.13 对话窗口附件闭环）──────────────────────────────
+// ── 音频附件（0.23.12 对话窗口附件闭环）──────────────────────────────
 
 /**
  * 选择本地 WAV 作为对话音频附件。
@@ -200,7 +200,7 @@ export function renameChatConversation(conversationId, title) {
 
 /**
  * 加载对话的完整消息历史。
- * 0.23.14：user 消息可能携带 `attachments`（音频附件展示文件名数组，无 ref）。
+ * 0.23.12：user 消息可能携带 `attachments`（音频附件展示文件名数组，无 ref）。
  * @returns {Promise<Array<{role: string, text: string, thinking: string|null, attachments?: string[]}>>}
  */
 export function getChatMessages(conversationId) {
@@ -254,7 +254,7 @@ export async function exportConversation(conversationId, title) {
 
 /**
  * 将对话消息列表格式化为 Markdown 字符串。
- * 0.23.14：user 消息的音频附件以引用行列出（仅文件名）。
+ * 0.23.12：user 消息的音频附件以引用行列出（仅文件名）。
  * @param {string} title 对话标题
  * @param {Array<{role: string, text: string, thinking: string|null, tool_name?: string, tool_result?: string, attachments?: string[]}>} messages
  * @returns {string}

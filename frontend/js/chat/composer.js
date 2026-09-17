@@ -10,7 +10,7 @@
  * - voice-partial(target="chat") 实时更新 textarea
  * - voice-recording-start/end + voice-level 驱动指示器 show/hide + 波形动画
  *
- * 0.23.13 音频附件（0.23.14 修正）：
+ * 0.23.12 音频附件：
  * - 当前会话 id 经 initComposer({getConversationId}) 注入，不依赖未导入的全局绑定
  * - picker 异步返回后校验会话一致，切换/新建会话则撤销刚签发的 ref 并丢弃
  * - 发送负载 = {text（用户可见正文）, attachments（结构化元数据）}；
@@ -42,7 +42,7 @@ let onSend = null;
 /** @type {() => void} */
 let onStop = null;
 
-/** @type {(() => string)|null} 获取当前会话 id（main.js 注入，0.23.14） */
+/** @type {(() => string)|null} 获取当前会话 id（main.js 注入，0.23.12） */
 let getConversationId = null;
 
 /** @type {boolean} 是否正在语音录音 */
@@ -54,16 +54,16 @@ let voiceBaseText = "";
 /** @type {HTMLElement} /skill 命令提示弹层 */
 let skillHintEl = null;
 
-/** @type {HTMLElement} 音频附件 chips 容器（0.23.13） */
+/** @type {HTMLElement} 音频附件 chips 容器（0.23.12） */
 let attachmentsEl = null;
 
-/** @type {HTMLButtonElement|null} 音频附件按钮（0.23.13） */
+/** @type {HTMLButtonElement|null} 音频附件按钮（0.23.12） */
 let attachBtn = null;
 
-/** @type {Array<{audioRef: string, displayName: string}>} 当前音频附件（0.23.13） */
+/** @type {Array<{audioRef: string, displayName: string}>} 当前音频附件（0.23.12） */
 let audioAttachments = [];
 
-/** @type {boolean} attach picker 是否进行中（防重复打开，0.23.13） */
+/** @type {boolean} attach picker 是否进行中（防重复打开，0.23.12） */
 let attaching = false;
 
 /** @type {Array} 缓存的 skill 列表（避免每次输入都请求） */
@@ -143,7 +143,7 @@ export function initComposer(callbacks) {
         }
     });
 
-    // 0.23.13: 音频附件按钮 + chips 容器
+    // 0.23.12: 音频附件按钮 + chips 容器
     attachBtn = document.getElementById("chat-attach-btn");
     attachmentsEl = document.getElementById("chat-audio-attachments");
     if (attachBtn) attachBtn.addEventListener("click", handleAttachAudio);
@@ -352,7 +352,7 @@ export function isVoiceRecording() {
     return voiceRecording;
 }
 
-// ── 音频附件（0.23.13 对话窗口附件闭环；0.23.14 会话一致性 + 负载分离）──────
+// ── 音频附件（0.23.12：对话窗口附件闭环 + 会话一致性 + 负载分离）──────
 
 /** 当前附件快照（只读副本）。 */
 export function getAudioAttachments() {
@@ -375,7 +375,7 @@ export function clearAudioAttachments() {
 }
 
 /**
- * 消息发出后把**本次已发送**的附件从输入框移除（0.23.14）。
+ * 消息发出后把**本次已发送**的附件从输入框移除（0.23.12）。
  *
  * 不撤销后端 ref——本轮 agent 仍要消费它转写；生命周期由会话切换/
  * 新对话的按 owner 批量撤销统一回收。只过滤匹配的 ref，发送等待期间
@@ -469,7 +469,7 @@ async function removeAudioAttachment(audioRef) {
 
 function handleSend() {
     const text = textarea?.value?.trim() ?? "";
-    // 0.23.14：负载 = {text（可见正文）, attachments（结构化元数据）}；
+    // 0.23.12：负载 = {text（可见正文）, attachments（结构化元数据）}；
     // 纯附件（空正文）时 text 为人类可读摘要，气泡/标题/历史保持无 rref_
     const payload = buildOutgoingMessage(text, audioAttachments);
     if (!payload) return;
@@ -494,7 +494,7 @@ function updateSendButtonState() {
         sendBtn.disabled = true;
         return;
     }
-    // 0.23.13：附件存在时也允许发送
+    // 0.23.12：附件存在时也允许发送
     const hasContent = textarea.value.trim().length > 0 || audioAttachments.length > 0;
     sendBtn.disabled = !hasContent;
 }

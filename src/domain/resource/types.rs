@@ -51,9 +51,9 @@ impl std::fmt::Display for ResourceRef {
 /// - `TranscribeAudio` — `transcribe_audio` Capability / VAD 调试回放分析 /
 ///   CLI `blink transcribe`
 /// - `PreviewAudio` — `read_audio_for_playback`（设置页回放）
-/// - `DecodeImage` — `write_clipboard` 图片模式 / `analyze_image_palette`（0.23.13）
-/// - `OcrImage` — `ocr_image`（0.23.13）
-/// - `PinImage` — `pin_image`（0.23.13）
+/// - `DecodeImage` — `write_clipboard` 图片模式 / `analyze_image_palette`（0.23.12）
+/// - `OcrImage` — `ocr_image`（0.23.12）
+/// - `PinImage` — `pin_image`（0.23.12）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceUse {
     /// 解码图片（写剪贴板 / 配色分析）。
@@ -137,7 +137,7 @@ impl From<ResourceUse> for ResourceUseSet {
 
 // ── ReusePolicy ─────────────────────────────────────────────────────────────
 
-/// 复用策略——grant 属性，不再由媒体类型隐含（0.23.12 决策 2）。
+/// 复用策略——grant 属性，不再由媒体类型隐含（0.23 §8.2 决策 2）。
 ///
 /// - 转写默认 `OneShot`（一次性授权）；VAD 调试的双用途走 `issue_from_ref`
 ///   派生，不靠预先签发 `MaxReads(2)` 弱化转写 one-shot。
@@ -354,7 +354,7 @@ impl OpenedResource {
         self.mime.as_deref()
     }
 
-    /// 有界整读——本阶段唯一落地的读取接口（0.23.12 决策 7；
+    /// 有界整读——本阶段唯一落地的读取接口（0.23 §8.2 决策 9；
     /// `read_range`/`open_stream` 只留签名不实现，等真实需求再立项）。
     ///
     /// 超过 `max_bytes` 返回 `BudgetExceeded`，不返回部分数据。

@@ -458,7 +458,7 @@ pub enum SurfaceError {
 
 /// 图片编辑器来源引用——避免传递大 Blob。
 ///
-/// 0.23.13：dead 变体 `StashRef`（0.19.4 遗留双轨）已删除——stash 来源的
+/// 0.23.12：dead 变体 `StashRef`（0.19.4 遗留双轨）已删除——stash 来源的
 /// 图片编辑器从未接入；将来需要时按 ResourceRef 投影重新立项，不留双轨。
 #[derive(Debug, Clone)]
 pub enum EditorSourceRef {

@@ -85,7 +85,7 @@ pub async fn get_chat_messages(
     for (role, content_json, created_at, attachments_json) in rows {
         let msg: Message =
             serde_json::from_str(&content_json).map_err(|e| format!("反序列化消息失败: {e}"))?;
-        // 0.23.14：附件展示元数据（JSON 字符串数组，仅文件名）——解析失败按无附件降级
+        // 0.23.12：附件展示元数据（JSON 字符串数组，仅文件名）——解析失败按无附件降级
         let attachments: Option<Vec<String>> = attachments_json
             .and_then(|json| serde_json::from_str(&json).ok())
             .filter(|list: &Vec<String>| !list.is_empty());

@@ -79,7 +79,8 @@ body {
 
 /* editor 模式：预览区在固定窗口内滚动（0.23.7，窗口不随文本跳动）。
    高度预算与 layout.js 的 EDITOR_SIZE 注释保持一致：padding 10/12 + gap 8，
-   预览区 max-height 56，总高约 205，窗口 220 留余量，控制条不会被裁切。 */
+   预览区 max-height 157（8 行 × 14px × 1.4 ≈ 156.8），总高约 306，
+   窗口 321 留余量，控制条不会被裁切。 */
 #overlay.mode-editor {
     padding: 10px 16px 12px;
     gap: 8px;
@@ -88,7 +89,7 @@ body {
 #overlay.mode-editor .text {
     flex: 0 1 auto;
     min-height: 24px;
-    max-height: 56px;
+    max-height: 157px;
     align-self: stretch;
 }
 

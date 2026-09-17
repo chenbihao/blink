@@ -90,7 +90,7 @@ impl Capability for PinImage {
             });
         }
 
-        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4；0.23.13 迁 ResourceStore）
+        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4；0.23.12 迁 ResourceStore）
         let store = ctx.env.resource_store();
         let png_bytes = resolve_png_input(
             &args,

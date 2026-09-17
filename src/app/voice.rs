@@ -11,7 +11,8 @@
 //!   → stop AudioCapture
 //!   → SttEngine::finalize() → 最终文本
 //!   → G1: emit EventNames::CHORD_FILL_QUERY(文本)
-//!     G2: inject_text(文本)
+//!     G2: 渐进上屏（0.23.13）——Draft 定稿按保留窗口分批 inject_text，
+//!         终态只补交剩余
 //!     G3: emit EventNames::VOICE_PARTIAL(target="chat", 文本)
 //! ```
 //!
@@ -30,7 +31,7 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 
 use crate::domain::event_names::EventNames;
-use crate::domain::stt::dictation::EditorDictationTracker;
+use crate::domain::stt::dictation::DictationLedger;
 use crate::domain::stt::{
     AudioRange, DraftSpan, RecognitionProfile, StreamingSttPort, SttEngine, SttEvent,
 };
@@ -73,7 +74,7 @@ impl VoiceTarget {
 ///
 /// 修复前每个音频块（~10ms）都会发一次 `EDITOR_VOICE_STATUS`——92 秒录音
 /// 产生 8,791 条事件（约 95.5 条/秒），其中真正不同的状态只有约 25 种。
-/// 现在仅当 phase / seq / preview / message / code 任一变化时才对外发送。
+/// 现在仅当 phase / seq / confirmed / preview / message / code 任一变化时才对外发送。
 #[derive(Default)]
 struct EditorStatusEdge {
     last: Option<EditorStatusKey>,
@@ -83,6 +84,7 @@ struct EditorStatusEdge {
 struct EditorStatusKey {
     phase: String,
     seq: u64,
+    confirmed: Option<String>,
     preview: Option<String>,
     message: Option<String>,
     code: Option<String>,
@@ -90,10 +92,12 @@ struct EditorStatusKey {
 
 impl EditorStatusEdge {
     /// 判断本次状态是否需要对外发送；返回 `true` 时同步记录新状态。
+    #[allow(clippy::too_many_arguments)]
     fn should_emit(
         &mut self,
         phase: &str,
         seq: u64,
+        confirmed: Option<&str>,
         preview: Option<&str>,
         message: Option<&str>,
         code: Option<&str>,
@@ -101,6 +105,7 @@ impl EditorStatusEdge {
         let key = EditorStatusKey {
             phase: phase.to_string(),
             seq,
+            confirmed: confirmed.map(str::to_string),
             preview: preview.map(str::to_string),
             message: message.map(str::to_string),
             code: code.map(str::to_string),
@@ -124,8 +129,11 @@ pub struct EditorDictationState {
     /// 冻结的编辑器会话身份（start 时校验，事件携带供前端过滤）。
     pub session_ref: String,
     pub generation: u64,
-    /// 段推导器（confirmed 增量 + Final 收尾段 + seq 单调）。
-    tracker: EditorDictationTracker,
+    /// 统一听写账本（0.23.13）：Draft 去重 + 保留窗口 + Final 裁剪。
+    ///
+    /// Editor 保留窗口 = 1：最新定稿句在浮窗短暂停留，下一句定稿时
+    /// 前一句写入正文（与 G2 渐进上屏同一调度器，仅窗口大小不同）。
+    ledger: DictationLedger,
     /// confirmed 段缓冲（有界，FIFO 淘汰）。
     segments: VecDeque<(u64, String)>,
     /// 类型化 Draft span 缓冲（与 `segments` 并行保留，兼容旧 snapshot DTO）。
@@ -145,6 +153,13 @@ pub struct EditorDictationState {
 /// 快照缓冲上限（段数）。一段通常是一句话（几十字符），256 段远超
 /// 一次听写的合理长度，同时保证内存有界（§3.6 有界 snapshot）。
 const SNAPSHOT_MAX_SEGMENTS: usize = 256;
+
+/// Editor 听写保留窗口：最新 1 段定稿停留在浮窗，下一段定稿时冲刷（0.23.13）。
+const EDITOR_DICTATION_RETENTION: usize = 1;
+
+/// G2 渐进上屏保留窗口：0 = 无保留，每段定稿立即注入前台应用，
+/// 浮窗只显示实时预览、不滞留已定稿段（0.23.13）。
+const G2_DICTATION_RETENTION: usize = 0;
 
 /// 波形音量事件的最小间隔（0.24）。
 ///
@@ -167,7 +182,7 @@ impl EditorDictationState {
             epoch,
             session_ref,
             generation,
-            tracker: EditorDictationTracker::new(),
+            ledger: DictationLedger::new(EDITOR_DICTATION_RETENTION),
             segments: VecDeque::new(),
             draft_spans: VecDeque::new(),
             truncated: 0,
@@ -180,23 +195,53 @@ impl EditorDictationState {
 
     /// 推导并记录一个 confirmed 增量段；返回 `(seq, text)` 供事件发射。
     fn push_confirmed_delta(&mut self, confirmed: &str) -> Option<(u64, String)> {
-        let (seq, text) = self.tracker.extract_delta(confirmed)?;
+        let (seq, text) = self.ledger.extract_delta(confirmed)?;
         self.remember(seq, text.clone());
         Some((seq, text))
     }
 
-    /// 推导并记录 Final 收尾段。
-    fn push_final_delta(&mut self, final_text: &str) -> Option<(u64, String)> {
-        let (seq, text) = self.tracker.extract_final_delta(final_text)?;
-        self.remember(seq, text.clone());
-        Some((seq, text))
+    /// 接收类型化 Draft；按 `span_id`/音频范围去重。0.23.13 起不再直接
+    /// 产段——段由 [`EditorDictationState::drain_flushable_spans`] 按保留
+    /// 窗口调度产出。返回是否新接受。
+    fn push_draft_span(&mut self, span: DraftSpan) -> bool {
+        self.ledger.accept_draft_span(span)
     }
 
-    /// 接收类型化 Draft；按 `span_id`/音频范围去重，不从累计文本反推增量。
-    fn push_draft_span(&mut self, span: DraftSpan) -> Option<(u64, DraftSpan)> {
-        let (seq, span) = self.tracker.accept_draft_span(span)?;
-        self.remember_draft(seq, span.clone());
-        Some((seq, span))
+    /// 产出保留窗口外可交付段（最新段停留在浮窗，前一段写正文）。
+    fn drain_flushable_spans(&mut self) -> Vec<(u64, DraftSpan)> {
+        let flushed = self.ledger.drain_flushable();
+        for (seq, span) in &flushed {
+            self.remember_draft(*seq, span.clone());
+        }
+        flushed
+    }
+
+    /// 冲刷全部未交付段（终态：Final/error/cancel 补交）。
+    fn flush_pending_spans(&mut self) -> Vec<(u64, DraftSpan)> {
+        let pending = self.ledger.take_pending();
+        for (seq, span) in &pending {
+            self.remember_draft(*seq, span.clone());
+        }
+        pending
+    }
+
+    /// 未交付段文本（浮窗 confirmed 窗口展示）。
+    fn pending_text(&self) -> String {
+        self.ledger.pending_text()
+    }
+
+    /// Final 终态拆解：先冲刷全部未交付段，再从 Final 全文推导尾段。
+    /// 两部分分别发射（段带 span 身份，尾段为纯文本段）。
+    fn finalize_parts(
+        &mut self,
+        final_text: &str,
+    ) -> (Vec<(u64, DraftSpan)>, Option<(u64, String)>) {
+        let pending = self.flush_pending_spans();
+        let tail = self.ledger.extract_final_tail(final_text).map(|(seq, text)| {
+            self.remember(seq, text.clone());
+            (seq, text)
+        });
+        (pending, tail)
     }
 
     fn remember(&mut self, seq: u64, text: String) {
@@ -243,7 +288,7 @@ impl EditorDictationState {
     }
 
     fn last_seq(&self) -> u64 {
-        self.tracker.last_seq()
+        self.ledger.last_seq()
     }
 }
 
@@ -289,6 +334,12 @@ struct VoiceSession {
     paused: Arc<AtomicBool>,
     /// 终态文本交付闸门：每个 VoiceSession 最多注入/提交一次。
     final_delivery: Arc<AtomicBool>,
+    /// 0.23.13 G2 渐进上屏：PreviewDraft 听写账本（事件 task 接受/冲刷，
+    /// cancel/error 终态补冲刷共享访问）。
+    dictation_ledger: Option<Arc<Mutex<DictationLedger>>>,
+    /// 0.23.13 G2 注入 worker 发送端：保序冲刷（worker 在所有 sender
+    /// drop 后自动退出）。
+    g2_flush_tx: Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
 }
 
 impl Default for VoiceSession {
@@ -306,6 +357,8 @@ impl Default for VoiceSession {
             continuous: false,
             paused: Arc::new(AtomicBool::new(false)),
             final_delivery: Arc::new(AtomicBool::new(false)),
+            dictation_ledger: None,
+            g2_flush_tx: None,
         }
     }
 }
@@ -574,8 +627,18 @@ impl VoiceService {
             return true; // 已是暂停态，幂等
         }
         if let Some(state) = self.editor_state.lock().unwrap().clone() {
-            let seq = state.lock().unwrap().last_seq();
-            self.emit_editor_status(&state, "paused", seq, None, None);
+            let (seq, confirmed) = {
+                let st = state.lock().unwrap();
+                (st.last_seq(), st.pending_text())
+            };
+            self.emit_editor_status(
+                &state,
+                "paused",
+                seq,
+                (!confirmed.is_empty()).then_some(confirmed.as_str()),
+                None,
+                None,
+            );
         }
         tracing::info!("编辑器连续听写已暂停");
         true
@@ -598,8 +661,18 @@ impl VoiceService {
             return true; // 已是录音态，幂等
         }
         if let Some(state) = self.editor_state.lock().unwrap().clone() {
-            let seq = state.lock().unwrap().last_seq();
-            self.emit_editor_status(&state, "recording", seq, None, None);
+            let (seq, confirmed) = {
+                let st = state.lock().unwrap();
+                (st.last_seq(), st.pending_text())
+            };
+            self.emit_editor_status(
+                &state,
+                "recording",
+                seq,
+                (!confirmed.is_empty()).then_some(confirmed.as_str()),
+                None,
+                None,
+            );
         }
         tracing::info!("编辑器连续听写已继续");
         true
@@ -631,8 +704,18 @@ impl VoiceService {
 
         // finalizing 状态先行（尾段识别可能耗时数秒）
         if let Some(state) = self.editor_state.lock().unwrap().clone() {
-            let seq = state.lock().unwrap().last_seq();
-            self.emit_editor_status(&state, "finalizing", seq, None, None);
+            let (seq, confirmed) = {
+                let st = state.lock().unwrap();
+                (st.last_seq(), st.pending_text())
+            };
+            self.emit_editor_status(
+                &state,
+                "finalizing",
+                seq,
+                (!confirmed.is_empty()).then_some(confirmed.as_str()),
+                None,
+                None,
+            );
         }
 
         if let (Some(port), Some(session_gen)) = (&stt_port, generation) {
@@ -662,28 +745,29 @@ impl VoiceService {
 
     /// Editor 回退路径的 Final 交付（finish_session 失败 / 无 port 时）。
     /// 正常路径 Final 由事件 task 处理，不走这里。
+    /// 0.23.13：与事件路径同一拆解——冲刷全部 pending 段 + 尾段收尾。
     async fn deliver_editor_final(&self, final_text: &str) {
         let Some(state) = self.editor_state.lock().unwrap().clone() else {
             return;
         };
-        let mut st = state.lock().unwrap();
-        let last_seq = st.last_seq();
-        match st.push_final_delta(final_text) {
-            Some((seq, text)) => {
-                drop(st);
-                self.emit_editor_segment(&state, seq, &text);
-                self.emit_editor_status(&state, "ended", seq, None, None);
-            }
-            None => {
-                drop(st);
-                self.emit_editor_status(&state, "ended", last_seq, None, None);
-            }
+        let (pending, tail) = {
+            let mut st = state.lock().unwrap();
+            st.finalize_parts(final_text)
+        };
+        for (seq, span) in &pending {
+            emit_editor_draft_segment(&self.app, &state, *seq, span);
         }
+        if let Some((seq, text)) = tail {
+            self.emit_editor_segment(&state, seq, &text);
+        }
+        let last_seq = state.lock().unwrap().last_seq();
+        self.emit_editor_status(&state, "ended", last_seq, None, None, None);
     }
 
     /// STT 引擎 Error 事件的终态清理（仅 Editor 路径）：保留 confirmed、
     /// 丢弃 preview，结束会话并回收录音资源。由事件 task 调用（此时该 task
     /// 即将退出，event_task 句柄置 None 即可）。
+    /// 0.23.13：保留窗口内已定稿段补交写正文（错误不丢已定稿内容）。
     pub fn handle_editor_terminal_error(&self, message: &str) {
         {
             let mut session = self.session.lock().unwrap();
@@ -701,9 +785,16 @@ impl VoiceService {
             session.event_task = None;
         }
         if let Some(state) = self.editor_state.lock().unwrap().clone() {
+            let flushed = {
+                let mut st = state.lock().unwrap();
+                st.flush_pending_spans()
+            };
+            for (seq, span) in &flushed {
+                emit_editor_draft_segment(&self.app, &state, *seq, span);
+            }
             let seq = state.lock().unwrap().last_seq();
-            self.emit_editor_status(&state, "error", seq, None, Some(message));
-            self.emit_editor_status(&state, "ended", seq, None, None);
+            self.emit_editor_status(&state, "error", seq, None, None, Some(message));
+            self.emit_editor_status(&state, "ended", seq, None, None, None);
         }
         let _ = self.app.emit(
             EventNames::VOICE_ERROR,
@@ -808,10 +899,11 @@ impl VoiceService {
         state: &Arc<Mutex<EditorDictationState>>,
         phase: &str,
         seq: u64,
+        confirmed: Option<&str>,
         preview: Option<&str>,
         message: Option<&str>,
     ) {
-        emit_editor_status(&self.app, state, phase, seq, preview, message);
+        emit_editor_status(&self.app, state, phase, seq, confirmed, preview, message);
     }
 
     /// 共享录音启动逻辑：服务就绪检查 + 模型加载检查 + 引擎创建 + 音频采集 + 采集 task。
@@ -1022,6 +1114,20 @@ impl VoiceService {
                     let final_delivery = Arc::new(AtomicBool::new(false));
                     session.final_delivery = final_delivery.clone();
 
+                    // 0.23.13 G2 渐进上屏：PreviewDraft 账本（保留窗口 0，
+                    // 定稿即上屏）+ 单消费者保序注入 worker。其他 target 清空
+                    // 旧会话残留。
+                    session.dictation_ledger = None;
+                    session.g2_flush_tx = None;
+                    if session.target == VoiceTarget::ForegroundApp {
+                        let ledger =
+                            Arc::new(Mutex::new(DictationLedger::new(G2_DICTATION_RETENTION)));
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                        tokio::spawn(run_g2_flush_worker(rx));
+                        session.dictation_ledger = Some(ledger);
+                        session.g2_flush_tx = Some(tx);
+                    }
+
                     // 通知前端录音已开始
                     let epoch_val = self.recording_epoch.fetch_add(1, Ordering::Release) + 1;
                     let _ = self.app.emit(
@@ -1103,6 +1209,14 @@ impl VoiceService {
         let counters = Arc::new(StreamCounters::default());
         let counters_for_events = counters.clone();
         let final_delivery_for_events = final_delivery.clone();
+        // 0.23.13 G2 渐进上屏：事件 task 携带账本与注入 worker 发送端
+        let (g2_ledger_for_events, g2_flush_tx_for_events) = {
+            let session = self.session.lock().unwrap();
+            (
+                session.dictation_ledger.clone(),
+                session.g2_flush_tx.clone(),
+            )
+        };
         let event_task = tokio::spawn(async move {
             consume_stt_events(
                 event_rx,
@@ -1111,6 +1225,8 @@ impl VoiceService {
                 epoch_arc,
                 target_for_events,
                 prev_hwnd_for_events,
+                g2_ledger_for_events,
+                g2_flush_tx_for_events,
                 app_for_events,
                 editor_state_for_events,
                 paused_for_events,
@@ -1262,12 +1378,16 @@ impl VoiceService {
                 }
                 // 事件消费 task 已完成（或超时），清理
             }
+            // 0.23.13：释放 G2 注入 worker 的 session 发送端——事件 task 已退出，
+            // worker 处理完队列（含终态补交）后自动收尾。
+            self.session.lock().unwrap().g2_flush_tx.take();
             return;
         }
 
         // 回退：旧 finalize 路径（stt_port 不存在时）
         let final_text = finalize_engine(engine).await;
         self.deliver_final_text(target, final_text).await;
+        self.session.lock().unwrap().g2_flush_tx.take();
     }
 
     /// Chat 窗口 IPC 驱动:停止录音（0.12.2 §4.3）。
@@ -1282,7 +1402,7 @@ impl VoiceService {
 
     pub fn cancel_recording(&self) {
         // 取出 stt_port + generation + 停止采集 + abort tasks，然后释放锁
-        let (stt_port, generation, _target, was_editor) = {
+        let (stt_port, generation, target, was_editor, prev_fg_hwnd, ledger, flush_tx) = {
             let mut session = self.session.lock().unwrap();
 
             if !session.recording {
@@ -1310,13 +1430,26 @@ impl VoiceService {
             session.engine = None;
             let was_editor = target == VoiceTarget::Editor && session.continuous;
             session.continuous = false;
+            let prev_fg_hwnd = session.prev_fg_hwnd;
+            let ledger = session.dictation_ledger.clone();
+            // 取出发送端：本方法补交完 pending 后 worker 随最后一个 sender
+            // drop 自动退出。
+            let flush_tx = session.g2_flush_tx.take();
 
             // 通知输入状态机回 Idle
             crate::infra::platform::hotkey::InputController::update_voice_phase(
                 crate::infra::platform::hotkey::VoicePhase::Idle,
             );
 
-            (stt_port, generation, target, was_editor)
+            (
+                stt_port,
+                generation,
+                target,
+                was_editor,
+                prev_fg_hwnd,
+                ledger,
+                flush_tx,
+            )
         }; // 锁在此释放
 
         // 0.22.9：通过 StreamingSttPort::cancel_session 通知引擎丢弃在途结果。
@@ -1332,12 +1465,37 @@ impl VoiceService {
 
         tracing::info!("语音录音已取消");
 
+        // 0.23.13 G2 渐进上屏：取消 = 停止后续识别，已定稿草稿全部补注入
+        // （在途未识别音频仍丢弃）。录音已结束，可走完整注入路径（允许
+        // 剪贴板降级），与此前已入队的渐进冲刷经 worker 保序衔接。
+        if target == VoiceTarget::ForegroundApp {
+            if let Some(ledger) = ledger.as_ref() {
+                let pending = ledger.lock().unwrap().take_pending();
+                if !pending.is_empty() {
+                    let text: String = pending.iter().map(|(_, s)| s.text.as_str()).collect();
+                    tracing::debug!(
+                        spans = pending.len(),
+                        chars = text.chars().count(),
+                        "G2 取消：补注入全部已定稿草稿"
+                    );
+                    send_g2_flush(&flush_tx, text, prev_fg_hwnd, false);
+                }
+            }
+        }
+
         // Editor 连续听写取消（0.23.3）：confirmed 已交付的段保留（不回撤正文），
-        // 在途 preview 丢弃；通知编辑器前端回到 idle。
+        // 在途 preview 丢弃；0.23.13 起保留窗口内已定稿段同样补交写正文。
         if was_editor {
             if let Some(state) = self.editor_state.lock().unwrap().clone() {
+                let flushed = {
+                    let mut st = state.lock().unwrap();
+                    st.flush_pending_spans()
+                };
+                for (seq, span) in &flushed {
+                    emit_editor_draft_segment(&self.app, &state, *seq, span);
+                }
                 let seq = state.lock().unwrap().last_seq();
-                self.emit_editor_status(&state, "ended", seq, None, None);
+                self.emit_editor_status(&state, "ended", seq, None, None, None);
             }
             crate::app::tray::stop_breathing(&self.app);
         }
@@ -1390,10 +1548,27 @@ impl VoiceService {
     /// - G2: spawn 后台 inject_text（脱离 effect 循环，恢复焦点 + 注入）
     /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
     async fn deliver_final_text(&self, target: VoiceTarget, final_text: String) {
-        let (prev_hwnd, final_delivery) = {
+        let (prev_hwnd, final_delivery, ledger, flush_tx) = {
             let session = self.session.lock().unwrap();
-            (session.prev_fg_hwnd, session.final_delivery.clone())
+            (
+                session.prev_fg_hwnd,
+                session.final_delivery.clone(),
+                session.dictation_ledger.clone(),
+                session.g2_flush_tx.clone(),
+            )
         };
+        // 0.23.13 G2 渐进上屏：终态只补交剩余文本（经注入 worker 保序），
+        // 与事件 Final 路径共用同一交付函数。
+        if let (VoiceTarget::ForegroundApp, Some(ledger)) = (target, ledger) {
+            deliver_g2_remaining(
+                &ledger,
+                &flush_tx,
+                final_delivery.as_ref(),
+                prev_hwnd,
+                &final_text,
+            );
+            return;
+        }
         deliver_final(
             &self.app,
             target,
@@ -1461,14 +1636,19 @@ fn emit_editor_segment_with_span(
 
 /// 发射编辑器听写状态事件（供 VoiceService 与事件 task 共用）。
 ///
-/// **边沿触发（0.24）**：phase/seq/preview/message/code 全部未变化时不发送、
-/// 不写日志，仅累加诊断计数——修复了"每 10ms 一条状态事件 + 一条 debug 日志"
-/// 的风暴。
+/// **边沿触发（0.24）**：phase/seq/confirmed/preview/message/code 全部未变化
+/// 时不发送、不写日志，仅累加诊断计数——修复了"每 10ms 一条状态事件 +
+/// 一条 debug 日志"的风暴。
+///
+/// `confirmed` 为保留窗口内未交付段文本（0.23.13 浮窗双层展示的白色层；
+/// 进正文的段落不再重复展示）。
+#[allow(clippy::too_many_arguments)]
 fn emit_editor_status(
     app: &tauri::AppHandle,
     state: &Arc<Mutex<EditorDictationState>>,
     phase: &str,
     seq: u64,
+    confirmed: Option<&str>,
     preview: Option<&str>,
     message: Option<&str>,
 ) {
@@ -1481,7 +1661,7 @@ fn emit_editor_status(
         let mut st = state.lock().unwrap();
         if !st
             .status_edge
-            .should_emit(phase, seq, preview, message, code)
+            .should_emit(phase, seq, confirmed, preview, message, code)
         {
             st.status_suppressed = st.status_suppressed.saturating_add(1);
             return;
@@ -1497,6 +1677,7 @@ fn emit_editor_status(
             "epoch": epoch,
             "phase": phase,
             "seq": seq,
+            "confirmed": confirmed,
             "preview": preview,
             "message": message,
             "code": code,
@@ -1508,6 +1689,7 @@ fn emit_editor_status(
         epoch,
         seq,
         phase,
+        confirmed_chars = confirmed.map(str::chars).map(Iterator::count).unwrap_or(0),
         preview_chars = preview.map(str::chars).map(Iterator::count).unwrap_or(0),
         has_message = message.is_some(),
         "编辑器听写状态已更新"
@@ -1644,52 +1826,172 @@ fn deliver_final(
     }
 }
 
-/// 把类型化 Draft ledger 投影为旧 G1/G2/G3 的累计 confirmed 文本。
-/// 这里是展示/提交层的投影，不是领域层的音频结果合并；Draft 本身仍按
-/// 非重叠时间范围进入 ledger。
-fn draft_ledger_text(ledger: &[DraftSpan]) -> String {
-    ledger.iter().map(|span| span.text.as_str()).collect()
+/// G2 渐进上屏注入 job（0.23.13）。
+struct G2FlushJob {
+    text: String,
+    /// 录音开始时的前台 HWND（终态 job 恢复焦点用）。
+    hwnd: Option<isize>,
+    /// 录音进行中（热键仍按住）：仅 Unicode 注入——剪贴板降级会注入真实
+    /// Ctrl+V keydown，触发输入状态机 armed→aborted（该分支不区分
+    /// injected 键），破坏 hold-to-talk 会话。
+    unicode_only: bool,
 }
 
-fn append_draft_ledger(ledger: &mut Vec<DraftSpan>, span: DraftSpan) -> bool {
-    if span.text.is_empty()
-        || ledger.iter().any(|existing| {
-            existing.span_id == span.span_id
-                || (existing.audio_range.len() > 0
-                    && span.audio_range.len() > 0
-                    && (existing.audio_range.contains(span.audio_range)
-                        || span.audio_range.contains(existing.audio_range)
-                        || existing.audio_range.overlaps(span.audio_range)))
+/// G2 注入 worker：单消费者保序执行冲刷 job（0.23.13）。
+///
+/// 渐进 job（unicode_only）在前台已离开目标窗口时挂起（deferred），
+/// 终态 job 恢复前台后一并补交；两类 job 注入前统一做焦点修复——
+/// Alt+Space hold 会在目标应用弹出系统菜单、焦点漂离输入框
+/// （`restore_foreground` 文档），不关菜单 WM_CHAR 进不了编辑控件，
+/// 这是渐进上屏丢字的根因。Unicode 失败挂起，等终态 job 走完整
+/// 路径（允许剪贴板降级）重试。所有 sender drop 后 worker 退出。
+async fn run_g2_flush_worker(mut rx: tokio::sync::mpsc::UnboundedReceiver<G2FlushJob>) {
+    let mut deferred = String::new();
+    while let Some(job) = rx.recv().await {
+        if job.unicode_only
+            && job
+                .hwnd
+                .is_some_and(|h| platform::window::get_foreground_hwnd() != Some(h))
+        {
+            tracing::debug!(chars = job.text.chars().count(), "G2 渐进上屏推迟：前台已离开目标窗口");
+            deferred.push_str(&job.text);
+            continue;
+        }
+        let mut text = std::mem::take(&mut deferred);
+        text.push_str(&job.text);
+        let hwnd = job.hwnd;
+        let unicode_only = job.unicode_only;
+        let chars = text.chars().count();
+        // await 保序：下一次冲刷等本次注入完成，文本顺序不乱。
+        let outcome = tokio::task::spawn_blocking(move || {
+            let result = if let Some(hwnd) = hwnd {
+                // 渐进与终态统一先修焦点：WM_CANCELMODE 关 Alt+Space 系统菜单
+                // + 前台确认。前台已是目标窗口时 SetForegroundWindow 近似
+                // no-op，不构成渐进抢焦点。
+                platform::window::restore_foreground_g2(hwnd);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                // 诊断：焦点修复后的前台与目标对比——SendInput 只投给"此刻前台"，
+                // 两者不一致说明字符会进别的窗口（"成功但没上屏"的定位证据）。
+                let fg_after = platform::window::get_foreground_hwnd();
+                tracing::debug!(
+                    target_hwnd = hwnd,
+                    fg_after = ?fg_after,
+                    unicode_only,
+                    chars,
+                    "G2 冲刷执行注入"
+                );
+                if unicode_only {
+                    // 录音中不降级剪贴板：真实 Ctrl+V keydown 会打断 hold 状态机
+                    platform::inject::inject_text_unicode_strict(&text)
+                } else {
+                    platform::inject::inject_text(&text)
+                }
+            } else if unicode_only {
+                platform::inject::inject_text_unicode_strict(&text)
+            } else {
+                platform::inject::inject_text(&text)
+            };
+            (result, text)
         })
-    {
-        return false;
+        .await;
+        match outcome {
+            Ok((Ok(()), _)) => tracing::debug!(chars, "G2 冲刷上屏完成"),
+            Ok((Err(e), text)) => {
+                if unicode_only {
+                    // 渐冲失败不丢文本：挂起等终态 job（完整注入路径）重试
+                    tracing::warn!(%e, chars, "G2 渐进上屏 Unicode 失败，挂起等终态重试");
+                    deferred.push_str(&text);
+                } else {
+                    tracing::error!(%e, chars, "G2 终态注入失败");
+                }
+            }
+            Err(e) => tracing::error!(%e, "G2 注入 blocking task join 失败"),
+        }
     }
-    ledger.push(span);
-    true
+    if !deferred.is_empty() {
+        tracing::warn!(
+            chars = deferred.chars().count(),
+            "G2 注入 worker 退出时仍有未上屏文本（会话终止）"
+        );
+    }
 }
 
-/// 兼容两种 Final 语义：旧 profile 返回累计全文，PreviewDraft 可返回
-/// terminal tail。只基于已提交 Draft ledger 做明显前缀判断，绝不使用 Preview
-/// 作为最终文本，也不对 Draft 之间做字符串相似度合并。
-fn compose_final_text(ledger: &[DraftSpan], confirmed_cache: &str, final_text: &str) -> String {
-    let committed = if ledger.is_empty() {
-        confirmed_cache.to_string()
-    } else {
-        draft_ledger_text(ledger)
+/// 向 G2 注入 worker 投递冲刷 job；worker 不在时打日志返回。
+fn send_g2_flush(
+    flush_tx: &Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
+    text: String,
+    hwnd: Option<isize>,
+    unicode_only: bool,
+) {
+    let Some(tx) = flush_tx else {
+        tracing::warn!(chars = text.chars().count(), "G2 注入 worker 不存在，冲刷丢弃");
+        return;
     };
-    if committed.is_empty() {
+    if tx.send(G2FlushJob {
+        text,
+        hwnd,
+        unicode_only,
+    })
+    .is_err()
+    {
+        tracing::warn!("G2 注入 worker 已退出，冲刷丢弃");
+    }
+}
+
+/// G2 终态剩余交付（0.23.13）：Final 全文剥去已冲刷前缀（pending 窗口 +
+/// 未上报 terminal span + 尾段），经注入 worker 保序上屏。
+///
+/// 供事件 Final 路径与 stop 回退路径共用；`final_delivery` 闸门防止两路
+/// 边界双发。
+fn deliver_g2_remaining(
+    ledger: &Arc<Mutex<DictationLedger>>,
+    flush_tx: &Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
+    final_delivery: &AtomicBool,
+    prev_fg_hwnd: Option<isize>,
+    final_text: &str,
+) {
+    let diverged = {
+        let ledger = ledger.lock().unwrap();
+        !final_text.is_empty()
+            && !ledger.flushed_text().is_empty()
+            && !final_text.starts_with(ledger.flushed_text())
+    };
+    if diverged {
+        tracing::warn!(
+            final_chars = final_text.chars().count(),
+            "G2 Final 与已上屏前缀不一致，按公共前缀裁剪剩余（引擎整段重排？）"
+        );
+    }
+    let remaining = ledger.lock().unwrap().remaining_from_final(final_text);
+    if remaining.is_empty() {
+        tracing::debug!("G2 Final 无剩余文本（已全部渐进上屏）");
+        return;
+    }
+    if final_delivery.swap(true, Ordering::AcqRel) {
+        tracing::debug!("忽略重复的 G2 终态交付");
+        return;
+    }
+    tracing::debug!(chars = remaining.chars().count(), "G2 终态交付剩余文本");
+    send_g2_flush(flush_tx, remaining, prev_fg_hwnd, false);
+}
+
+/// Legacy Final 组合（G1/G3）：旧 profile 返回累计全文，PreviewDraft 可返回
+/// terminal tail。只基于 confirmed 累计做明显前缀判断，绝不使用 Preview
+/// 作为最终文本。
+fn compose_final_text(confirmed_cache: &str, final_text: &str) -> String {
+    if confirmed_cache.is_empty() {
         return final_text.to_string();
     }
     if final_text.is_empty() {
-        return committed;
+        return confirmed_cache.to_string();
     }
-    if final_text.starts_with(&committed) {
+    if final_text.starts_with(confirmed_cache) {
         return final_text.to_string();
     }
-    if committed.starts_with(final_text) {
-        return committed;
+    if confirmed_cache.starts_with(final_text) {
+        return confirmed_cache.to_string();
     }
-    format!("{committed}{final_text}")
+    format!("{confirmed_cache}{final_text}")
 }
 
 /// STT 事件消费 task：循环接收 `SttEvent`，按 generation + epoch 双层过滤旧事件，
@@ -1722,6 +2024,8 @@ async fn consume_stt_events(
     current_epoch: Arc<AtomicU64>,
     target: VoiceTarget,
     prev_fg_hwnd: Option<isize>,
+    g2_ledger: Option<Arc<Mutex<DictationLedger>>>,
+    g2_flush_tx: Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
     app: tauri::AppHandle,
     editor_state: Option<Arc<Mutex<EditorDictationState>>>,
     paused: Arc<AtomicBool>,
@@ -1743,13 +2047,13 @@ async fn consume_stt_events(
     // 消耗立即触发的首拍：首次统计在 5 秒后
     stats_tick.tick().await;
 
-    // 非 Editor 路径的 confirmed 累计缓存——引擎在 confirmed 未变化时
+    // Legacy 路径（G1/G3）的 confirmed 累计缓存——引擎在 confirmed 未变化时
     // 只发空串（不再每块重复搬运全量正文），前端契约仍是累计文本。
     let mut confirmed_cache = String::new();
-    // 0.23.9 typed path：Draft 以非重叠 audio span 形成 G2/G1/G3 的兼容
-    // confirmed 视图；Editor 直接交给 EditorDictationState。Preview 只保留
+    // 0.23.13：PreviewDraft 路径的 Draft 统一进 DictationLedger——
+    // G2 按保留窗口渐进上屏（g2_ledger + 注入 worker），
+    // Editor 经 EditorDictationState 的同款账本延迟写正文。Preview 只保留
     // 一个可替换值及其时间范围。
-    let mut draft_ledger: Vec<DraftSpan> = Vec::new();
     let mut preview_cache = String::new();
     let mut preview_range: Option<AudioRange> = None;
     let mut latest_preview_request = 0u64;
@@ -1799,46 +2103,82 @@ async fn consume_stt_events(
                     preview_range = None;
                 }
 
+                // ── Editor：接受进账本 → 保留窗口外冲刷写正文 ──
                 if is_editor {
                     let Some(state) = editor_state.as_ref() else {
                         continue;
                     };
-                    let next = {
+                    let accepted = {
                         let mut st = state.lock().unwrap();
                         st.push_draft_span(span)
                     };
-                    if let Some((seq, span)) = next {
-                        emit_editor_draft_segment(&app, state, seq, &span);
+                    if accepted {
+                        let flushed = {
+                            let mut st = state.lock().unwrap();
+                            st.drain_flushable_spans()
+                        };
+                        for (seq, span) in &flushed {
+                            emit_editor_draft_segment(&app, state, *seq, span);
+                        }
                     }
                     let phase = if paused.load(Ordering::Relaxed) {
                         "paused"
                     } else {
                         "recording"
                     };
-                    let last_seq = state.lock().unwrap().last_seq();
+                    let (last_seq, confirmed) = {
+                        let st = state.lock().unwrap();
+                        (st.last_seq(), st.pending_text())
+                    };
                     emit_editor_status(
                         &app,
                         state,
                         phase,
                         last_seq,
+                        (!confirmed.is_empty()).then_some(confirmed.as_str()),
                         (!preview_cache.is_empty()).then_some(preview_cache.as_str()),
                         None,
                     );
                     continue;
                 }
 
-                if append_draft_ledger(&mut draft_ledger, span) {
-                    confirmed_cache = draft_ledger_text(&draft_ledger);
-                    let _ = app.emit(
-                        EventNames::VOICE_PARTIAL,
-                        serde_json::json!({
-                            "confirmed": confirmed_cache.as_str(),
-                            "preview": preview_cache.as_str(),
-                            "target": target_str,
-                            "epoch": recording_epoch,
-                        }),
-                    );
+                // ── G2 PreviewDraft：接受进账本 → 保留窗口外渐进上屏 ──
+                let Some(ledger) = g2_ledger.as_ref() else {
+                    continue;
+                };
+                let (accepted, flushed) = {
+                    let mut ledger = ledger.lock().unwrap();
+                    let accepted = ledger.accept_draft_span(span);
+                    let flushed = if accepted {
+                        ledger.drain_flushable()
+                    } else {
+                        Vec::new()
+                    };
+                    (accepted, flushed)
+                };
+                if !accepted {
+                    continue;
                 }
+                if !flushed.is_empty() {
+                    let text: String = flushed.iter().map(|(_, s)| s.text.as_str()).collect();
+                    tracing::debug!(
+                        spans = flushed.len(),
+                        chars = text.chars().count(),
+                        "G2 渐进上屏：冲刷保留窗口外草稿"
+                    );
+                    send_g2_flush(&g2_flush_tx, text, prev_fg_hwnd, true);
+                }
+                // 浮窗 confirmed 投影改为保留窗口文本（接受/冲刷都可能变化）
+                confirmed_cache = ledger.lock().unwrap().pending_text();
+                let _ = app.emit(
+                    EventNames::VOICE_PARTIAL,
+                    serde_json::json!({
+                        "confirmed": confirmed_cache.as_str(),
+                        "preview": preview_cache.as_str(),
+                        "target": target_str,
+                        "epoch": recording_epoch,
+                    }),
+                );
             }
             SttEvent::Preview {
                 generation,
@@ -1869,21 +2209,26 @@ async fn consume_stt_events(
                     } else {
                         "recording"
                     };
-                    let last_seq = state.lock().unwrap().last_seq();
+                    let (last_seq, confirmed) = {
+                        let st = state.lock().unwrap();
+                        (st.last_seq(), st.pending_text())
+                    };
                     emit_editor_status(
                         &app,
                         state,
                         phase,
                         last_seq,
+                        (!confirmed.is_empty()).then_some(confirmed.as_str()),
                         (!preview_cache.is_empty()).then_some(preview_cache.as_str()),
                         None,
                     );
                 } else {
-                    let confirmed = if draft_ledger.is_empty() {
-                        confirmed_cache.as_str()
+                    // G2 PreviewDraft：confirmed 投影为保留窗口文本（0.23.13），
+                    // 已上屏段落不再重复展示；Legacy 无账本时退回累计缓存。
+                    let confirmed = if let Some(ledger) = g2_ledger.as_ref() {
+                        ledger.lock().unwrap().pending_text()
                     } else {
-                        confirmed_cache = draft_ledger_text(&draft_ledger);
-                        confirmed_cache.as_str()
+                        confirmed_cache.clone()
                     };
                     // 0.23.9.10：Preview 事件到达即意味着预览状态变化（引擎边沿
                     // 触发，只在短语追加/尾部更新/显式清空时产出）。confirmed 与
@@ -1892,7 +2237,7 @@ async fn consume_stt_events(
                     let _ = app.emit(
                         EventNames::VOICE_PARTIAL,
                         serde_json::json!({
-                            "confirmed": confirmed,
+                            "confirmed": confirmed.as_str(),
                             "preview": preview_cache.as_str(),
                             "previewRequestId": request_id,
                             "target": target_str,
@@ -1936,7 +2281,15 @@ async fn consume_stt_events(
                     };
                     let last_seq = state.lock().unwrap().last_seq();
                     // 边沿触发：状态未变化时该调用直接返回（不发事件、不写日志）
-                    emit_editor_status(&app, state, phase, last_seq, Some(&preview), None);
+                    emit_editor_status(
+                        &app,
+                        state,
+                        phase,
+                        last_seq,
+                        None,
+                        (!preview.is_empty()).then_some(preview.as_str()),
+                        None,
+                    );
                     continue;
                 }
 
@@ -1973,28 +2326,43 @@ async fn consume_stt_events(
                     "收到 Final 事件"
                 );
 
-                // ── Editor：补收尾段（confirmed 之后的尾段定稿）+ ended 状态 ──
+                // ── Editor：冲刷全部 pending 段 + 尾段收尾 + ended 状态 ──
                 if is_editor {
                     if let Some(state) = editor_state.as_ref() {
-                        let next = {
+                        let (pending, tail) = {
                             let mut st = state.lock().unwrap();
-                            st.push_final_delta(&text)
+                            st.finalize_parts(&text)
                         };
-                        match next {
-                            Some((seq, seg)) => emit_editor_segment(&app, state, seq, &seg),
-                            None => tracing::debug!("editor Final 无新增尾段"),
+                        for (seq, span) in &pending {
+                            emit_editor_draft_segment(&app, state, *seq, span);
+                        }
+                        if let Some((seq, tail_text)) = tail {
+                            emit_editor_segment(&app, state, seq, &tail_text);
+                        } else {
+                            tracing::debug!("editor Final 无新增尾段");
                         }
                         let last_seq = state.lock().unwrap().last_seq();
-                        emit_editor_status(&app, state, "ended", last_seq, None, None);
+                        emit_editor_status(&app, state, "ended", last_seq, None, None, None);
                     }
                     // Final 是 session 的最后一个事件，退出循环
                     break;
                 }
 
-                let final_text = compose_final_text(&draft_ledger, &confirmed_cache, &text);
+                // ── G2 PreviewDraft：终态只补交剩余（渐进上屏后的差量）──
+                if let Some(ledger) = g2_ledger.as_ref() {
+                    deliver_g2_remaining(
+                        ledger,
+                        &g2_flush_tx,
+                        final_delivery.as_ref(),
+                        prev_fg_hwnd,
+                        &text,
+                    );
+                    // Final 是 session 的最后一个事件，退出循环
+                    break;
+                }
 
-                // 0.22.15：统一调用 deliver_final。Preview 不参与最终兜底；
-                // typed path 只允许已交付 Draft ledger + terminal text。
+                // ── G1/G3 Legacy：confirmed 累计 + Final 组合，一次性交付 ──
+                let final_text = compose_final_text(&confirmed_cache, &text);
                 deliver_final(
                     &app,
                     target,
@@ -2022,6 +2390,25 @@ async fn consume_stt_events(
                     }
                     // Error 是终止事件，退出循环
                     break;
+                }
+
+                // ── G2：已定稿未上屏草稿补注入（0.23.13 语义：错误不丢已定稿）。
+                // 录音尚未停止（热键可能仍按住），仅 Unicode 注入。
+                if let Some(ledger) = g2_ledger.as_ref() {
+                    let pending = {
+                        let mut ledger = ledger.lock().unwrap();
+                        ledger.take_pending()
+                    };
+                    if !pending.is_empty() {
+                        let text: String =
+                            pending.iter().map(|(_, s)| s.text.as_str()).collect();
+                        tracing::debug!(
+                            spans = pending.len(),
+                            chars = text.chars().count(),
+                            "G2 错误终态：补注入已定稿未上屏草稿"
+                        );
+                        send_g2_flush(&g2_flush_tx, text, prev_fg_hwnd, true);
+                    }
                 }
 
                 let _ = app.emit(
@@ -2185,12 +2572,12 @@ mod tests {
             Some((2, "第二句。".to_string())),
             "新增部分只追加一次"
         );
-        // Final 收尾段继续单调追加，重复 Final 不产段
-        assert_eq!(
-            state.push_final_delta("第一句。第二句。第三句。"),
-            Some((3, "第三句。".to_string()))
-        );
-        assert_eq!(state.push_final_delta("第一句。第二句。第三句。"), None);
+        // Final 收尾段继续单调追加（finalize_parts：pending 空 + 尾段），
+        // 重复 Final 不产段
+        let (pending, tail) = state.finalize_parts("第一句。第二句。第三句。");
+        assert!(pending.is_empty(), "Legacy 增量路径无 pending 段");
+        assert_eq!(tail, Some((3, "第三句。".to_string())));
+        assert_eq!(state.finalize_parts("第一句。第二句。第三句。"), (Vec::new(), None));
         assert_eq!(state.last_seq(), 3, "seq 必须严格单调且不跳号");
 
         // 快照按序可补齐（前端恢复路径）
@@ -2202,38 +2589,98 @@ mod tests {
         assert_eq!(state.after(2, 0), None, "旧 epoch 不得读取当前快照");
     }
 
+    /// 验收（0.23.13）：保留窗口外段先行冲刷，Final 冲刷 pending + 尾段。
+    #[test]
+    fn editor_retention_window_flushes_and_finalizes() {
+        let mut state = EditorDictationState::new(1, "ed_test".into(), 1);
+        let mk = |id: u64, text: &str| {
+            crate::domain::stt::DraftSpan::new(
+                id,
+                crate::domain::stt::AudioRange::new(id * 80_000, id * 80_000 + 80_000),
+                text,
+                1,
+            )
+        };
+
+        // 第一段停留在保留窗口（浮窗展示），不写正文
+        assert!(state.push_draft_span(mk(1, "第一句。")));
+        assert!(state.drain_flushable_spans().is_empty());
+        assert_eq!(state.pending_text(), "第一句。");
+
+        // 第二段定稿 → 第一段冲刷写正文，第二段停留窗口
+        assert!(state.push_draft_span(mk(2, "第二句。")));
+        let flushed = state.drain_flushable_spans();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].1.text, "第一句。");
+        assert_eq!(state.pending_text(), "第二句。");
+
+        // Final：冲刷 pending + 尾段，seq 连续
+        let (pending, tail) = state.finalize_parts("第一句。第二句。尾段。");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.text, "第二句。");
+        assert_eq!(tail, Some((3, "尾段。".to_string())));
+        assert_eq!(state.pending_text(), "");
+        // 重复 Final 无新增
+        assert_eq!(state.finalize_parts("第一句。第二句。尾段。"), (Vec::new(), None));
+    }
+
     #[test]
     fn editor_status_edge_emits_only_on_change() {
         let mut edge = EditorStatusEdge::default();
 
-        assert!(edge.should_emit("recording", 0, Some("预览"), None, None));
+        assert!(edge.should_emit("recording", 0, None, Some("预览"), None, None));
         assert!(
-            !edge.should_emit("recording", 0, Some("预览"), None, None),
+            !edge.should_emit("recording", 0, None, Some("预览"), None, None),
             "完全相同的状态不得重复发送"
         );
         assert!(
-            edge.should_emit("recording", 0, Some("预览2"), None, None),
+            edge.should_emit("recording", 0, None, Some("预览2"), None, None),
             "preview 变化必须发送"
         );
         assert!(
-            edge.should_emit("recording", 1, Some("预览2"), None, None),
+            edge.should_emit("recording", 1, None, Some("预览2"), None, None),
             "seq 变化必须发送"
         );
         assert!(
-            edge.should_emit("paused", 1, Some("预览2"), None, None),
+            edge.should_emit("recording", 1, Some("窗口定稿"), Some("预览2"), None, None),
+            "confirmed 窗口变化必须发送"
+        );
+        assert!(
+            edge.should_emit("paused", 1, Some("窗口定稿"), Some("预览2"), None, None),
             "phase 变化必须发送"
         );
-        assert!(edge.should_emit("error", 1, Some("预览2"), Some("boom"), Some("stt_failed")));
+        assert!(edge.should_emit(
+            "error",
+            1,
+            Some("窗口定稿"),
+            Some("预览2"),
+            Some("boom"),
+            Some("stt_failed")
+        ));
         assert!(
-            !edge.should_emit("error", 1, Some("预览2"), Some("boom"), Some("stt_failed")),
+            !edge.should_emit(
+                "error",
+                1,
+                Some("窗口定稿"),
+                Some("预览2"),
+                Some("boom"),
+                Some("stt_failed")
+            ),
             "重复的 error 状态不得重复发送"
         );
         assert!(
-            edge.should_emit("error", 1, Some("预览2"), Some("boom2"), Some("stt_failed")),
+            edge.should_emit(
+                "error",
+                1,
+                Some("窗口定稿"),
+                Some("预览2"),
+                Some("boom2"),
+                Some("stt_failed")
+            ),
             "message 变化必须发送"
         );
         assert!(
-            edge.should_emit("ended", 1, None, None, None),
+            edge.should_emit("ended", 1, None, None, None, None),
             "ended 与上一状态不同必须发送"
         );
     }
@@ -2244,7 +2691,7 @@ mod tests {
         let mut edge = EditorStatusEdge::default();
         let mut emitted = 0;
         for _ in 0..100 {
-            if edge.should_emit("recording", 7, Some("同一预览"), None, None) {
+            if edge.should_emit("recording", 7, None, Some("同一预览"), None, None) {
                 emitted += 1;
             }
         }
@@ -2254,11 +2701,11 @@ mod tests {
     #[test]
     fn status_edge_handles_preview_cleared_and_empty() {
         let mut edge = EditorStatusEdge::default();
-        assert!(edge.should_emit("recording", 0, Some("有预览"), None, None));
+        assert!(edge.should_emit("recording", 0, None, Some("有预览"), None, None));
         // 句尾清空预览 → None 与 Some("") 都是不同状态，必须各自发送一次
-        assert!(edge.should_emit("recording", 0, Some(""), None, None));
-        assert!(!edge.should_emit("recording", 0, Some(""), None, None));
-        assert!(edge.should_emit("recording", 0, None, None, None));
-        assert!(!edge.should_emit("recording", 0, None, None, None));
+        assert!(edge.should_emit("recording", 0, None, Some(""), None, None));
+        assert!(!edge.should_emit("recording", 0, None, Some(""), None, None));
+        assert!(edge.should_emit("recording", 0, None, None, None, None));
+        assert!(!edge.should_emit("recording", 0, None, None, None, None));
     }
 }

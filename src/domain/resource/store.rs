@@ -326,7 +326,7 @@ impl DefaultResourceStore {
 
     /// open——按声明的 use 取得 lease。
     ///
-    /// **校验链（全过才消费，同一临界区内原子完成；0.23 §8.2 决策 4）**：
+    /// **校验链（全过才消费，同一临界区内原子完成；0.23 §8.2 决策 5）**：
     /// 1. ref 存在
     /// 2. TTL 未超时
     /// 3. use 在 grant 授予集合内（错误 use **不**消耗 one-shot——修复
@@ -478,7 +478,7 @@ impl DefaultResourceStore {
     // ── 派生 ─────────────────────────────────────────────────────────────
 
     /// 从仍有效的 ref 派生新 grant——**权限衰减**语义（VAD 调试 clone 语义平移，
-    /// 0.23 §8.2 决策 2；0.23.14 收紧为 attenuation-only）。
+    /// 0.23 §8.2 决策 3：attenuation-only）。
     ///
     /// 派生只能缩小授权，不能仅凭 bearer ref 增权：
     /// - **use 子集**：`spec.uses` 必须全部来自源 grant 的 use 集；

@@ -107,6 +107,28 @@ async fn wait_until(condition: impl Fn() -> bool) {
     .expect("条件未在超时内成立");
 }
 
+/// 应答一个推理调用后等待进展：committed 水位推进（句定稿落地）或
+/// 下一个推理调用到达（短语/预览应答只进预览账本、不推进 committed）。
+async fn wait_committed_or_next_call(
+    engine: &PseudoStreamingSttEngine,
+    transport: &ControlledTransport,
+    committed_before: usize,
+    answered: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if engine.stream_stats().pcm_committed_end > committed_before
+                || transport.calls.load(Ordering::SeqCst) > answered
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("应答后既未推进 committed 也未等到下一个推理调用");
+}
+
 // ── SentenceState 基础测试 ──
 
 #[test]
@@ -550,23 +572,30 @@ fn preview_draft_engine(transport: Arc<ControlledTransport>) -> PseudoStreamingS
 }
 
 /// Draft 提交推进 committed 水位后，backlog 必须按未提交音频计算：
-/// 27.2s 会话（超过 2 × max_uncommitted = 24s 硬限）逐段提交不得触发
+/// 超过 2 × max_uncommitted = 24s 硬限的长会话逐段提交不得触发
 /// stt_overloaded。修复前协调器 committed 水位不随 Draft 提交推进，
-/// backlog 退化为会话总时长，第 24s 起误报过载。
+/// backlog 退化为会话总时长，24s 硬限会在正常听写中误触发。
+///
+/// 0.23.13 时间冻结兜底使每轮调用数浮动：短语锚点停在上轮边界，
+/// 滚动窗前缀跨轮积满 1.2s 冻结线后，句定稿之外还会出现短语调用。
+/// 应答循环消费所有已到调用，直到本轮 Draft 提交（committed 水位
+/// 推进）才进入下一轮；短语/预览应答只进预览账本，最终文本仍只由
+/// 各轮 Draft 按提交顺序拼接。
 #[tokio::test]
 async fn preview_draft_long_session_does_not_overload_after_draft_commits() {
     let channels: Vec<(
         oneshot::Sender<Result<String, String>>,
         oneshot::Receiver<Result<String, String>>,
-    )> = (0..4).map(|_| oneshot::channel()).collect();
-    let (senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    )> = (0..24).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
     let transport = ControlledTransport::new(receivers);
     let engine = preview_draft_engine(transport.clone());
 
-    let speech = vec![0.1f32; 16_000 * 6];
+    let speech = vec![0.1f32; 16_000 * 32 / 10];
     let pause = vec![0.0f32; 16_000 * 8 / 10];
     let mut committed_before = 0usize;
-    for (index, sender) in senders.into_iter().enumerate() {
+    let mut answered = 0usize;
+    for round in 0..8 {
         for source in [&speech, &pause] {
             for chunk in source.chunks(160) {
                 engine
@@ -575,16 +604,25 @@ async fn preview_draft_long_session_does_not_overload_after_draft_commits() {
                     .expect("长会话喂入不得过载");
             }
         }
-        transport.wait_for_calls_or_fail(index + 1).await;
-        sender
-            .send(Ok(format!("第{}段。", index + 1)))
-            .expect("response sender 不应泄漏");
-        wait_until(|| engine.stream_stats().pcm_committed_end > committed_before).await;
+        while engine.stream_stats().pcm_committed_end <= committed_before {
+            answered += 1;
+            transport.wait_for_calls_or_fail(answered).await;
+            senders
+                .remove(0)
+                .send(Ok(format!("第{}段。", round + 1)))
+                .expect("response sender 不应泄漏");
+            // 短语/预览应答不推进 committed；等结果落地或下一个调用
+            // 到达后循环继续应答（该轮句定稿最后到达并推进水位）。
+            wait_committed_or_next_call(&engine, &transport, committed_before, answered).await;
+        }
         committed_before = engine.stream_stats().pcm_committed_end;
     }
 
     let final_text = engine.finalize().await.expect("finalize ok");
-    assert_eq!(final_text, "第1段。第2段。第3段。第4段。");
+    assert_eq!(
+        final_text,
+        "第1段。第2段。第3段。第4段。第5段。第6段。第7段。第8段。"
+    );
 }
 
 /// 模型对噪声段返回 "/sil"：剥离后为空 → 按 NoSpeech 消费 owned range，
@@ -696,6 +734,56 @@ async fn phrase_finalizes_accumulate_then_draft_replaces() {
             "锚点不低于已提交水位"
         );
     }
+}
+
+/// 0.23.13 时间触发短语冻结：连续语音无任何停顿候选（停顿检测失灵的
+/// 等效场景——底噪高于停顿电平、VAD 永不判安静）时，滚动窗前缀积满
+/// 1.2s 主动追认为短语，灰色预览仍按短语增量累积而非只剩最近 3s 碎片。
+#[tokio::test]
+async fn time_freeze_finalizes_prefix_without_pause_candidates() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..2).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    // 4.5s 连续语音（恒定幅度，无停顿）：不形成候选、不作废、自然切句
+    // 也不触发——唯一的短语入账路径是时间冻结（前缀 [0, total-3s] ≥ 1.2s
+    // 在 total ≥ 4.2s 时成立）。
+    let speech = vec![0.1f32; 16_000 * 45 / 10];
+    for chunk in speech.chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    transport.wait_for_calls_or_fail(1).await;
+    senders
+        .remove(0)
+        .send(Ok("时间冻结短语。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        inner.preview_phrases.len() == 1
+    })
+    .await;
+
+    let inner = engine.inner.lock().unwrap();
+    assert_eq!(
+        inner.preview_phrases.len(),
+        1,
+        "无停顿场景前缀仍按时间冻结入账"
+    );
+    assert!(
+        inner.phrase_anchor >= (16_000 * 12 / 10) as u64,
+        "锚点推进到滚动窗起点（实际 {}）",
+        inner.phrase_anchor
+    );
+    // 组合预览 = 冻结短语 + 尾部，前缀不再随滚动窗丢失
+    assert!(
+        inner.latest_preview.contains("时间冻结短语。"),
+        "组合预览包含冻结短语（实际 {:?}）",
+        inner.latest_preview
+    );
 }
 
 /// 0.23.9.10 入队刷新限频：尾部预览 in-flight 期间，排队快照只在新音频

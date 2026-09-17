@@ -309,7 +309,7 @@ async fn persist_live_assistant(
 /// 0.12.6：`group_id` 参数注入分组级系统提示词。
 /// 0.17.6：`target_window`（默认 "chat"）+ `ephemeral`（默认 false）参数。
 /// 主窗口 AI 传 `target_window="main"` + `ephemeral=true`，使用临时对话记忆。
-/// 0.23.14：`attachments` 携带本轮音频附件**元数据**——后端只把 ref 注入本轮
+/// 0.23.12：`attachments` 携带本轮音频附件**元数据**——后端只把 ref 注入本轮
 /// 模型输入，用户可见正文/标题/持久化历史保持干净（不含 `rref_` 技术块）。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -1074,7 +1074,7 @@ pub struct ChatMessageSnapshot {
     /// 0.12.7 §6.4：消息创建时间戳（Unix 秒），前端据此插入时间分隔符
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
-    /// 0.23.14：用户消息携带的音频附件**展示元数据**（仅文件名，无 ref），
+    /// 0.23.12：用户消息携带的音频附件**展示元数据**（仅文件名，无 ref），
     /// 前端渲染消息气泡内的附件徽标；历史加载与导出消费
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,

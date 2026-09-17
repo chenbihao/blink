@@ -335,7 +335,7 @@ export function renderVadDebugResult(raw, elements, t) {
         if (!Number.isFinite(audioMs)) continue;
         waitingMarkerMs.add(Math.round(audioMs));
         const x = Math.min(1000, Math.max(0, audioMs / duration * 1000));
-        const marker = svgElement("line", {x1: x, x2: x, y1: 0, y2: 122, class: "vad-rejected"});
+        const marker = svgElement("line", {x1: x, x2: x, y1: 0, y2: 122, class: "vad-waiting"});
         const title = svgElement("title");
         const waitReason = decision.waitReason ?? decision.wait_reason;
         title.textContent = `${seconds(audioMs)} ${t("voice.local.vad_debug.decision_keep")} · ${t(mapRejectReasonKey(waitReason))}`;

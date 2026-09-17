@@ -14,11 +14,12 @@
 /** g2 hold：按内容高度撑高（0.10.6 行为保持不变） */
 export const G2_SIZE = {width: 260, minHeight: 140, maxHeight: 400};
 
-/** editor 模式：稳定尺寸（约 300-320 宽 / 190-220 高区间的实测取值）。
- *  高度预算（0.23.7）：body padding 20 + overlay padding 22 + 3 个 gap 24 +
- *  拖拽条 33 + 波形 20 + 控制条 30 = 149，预览区 max-height 56 → 205，
- *  留 15px 余量，保证控制条不被窗口底边裁切。 */
-export const EDITOR_SIZE = {width: 304, height: 220};
+/** editor 模式：稳定尺寸（约 300-320 宽 / 300-340 高区间的实测取值）。
+ *  高度预算（0.23.7；0.23.13 预览区提到 8 行）：body padding 20 +
+ *  overlay padding 22 + 3 个 gap 24 + 拖拽条 33 + 波形 20 + 控制条 30 = 149，
+ *  预览区 max-height 157（8 行 × 14px × 1.4）→ 306，留 15px 余量，
+ *  保证控制条不被窗口底边裁切。 */
+export const EDITOR_SIZE = {width: 304, height: 321};
 
 /** editor mini：只留拖拽条 + 波形（20 + 22 + 8 + 33 + 20 = 103，留 1px 余量） */
 export const EDITOR_MINI_SIZE = {width: 304, height: 104};

@@ -159,7 +159,7 @@
                         </div>
                         <span class="voice-label">语音输入中</span>
                     </div>
-                    <!-- 0.23.13: 音频附件 chips（ref 注入对话上下文，供 transcribe_audio 消费） -->
+                    <!-- 0.23.12: 音频附件 chips（ref 注入对话上下文，供 transcribe_audio 消费） -->
                     <div class="chat-audio-attachments hidden" id="chat-audio-attachments"></div>
                     <textarea autofocus id="chat-input" placeholder="输入消息..." rows="1"></textarea>
                     <div class="chat-composer-bar">
@@ -184,7 +184,7 @@
                                 </svg>
                                 <div class="chat-thinking-dropdown" hidden id="chat-thinking-dropdown"></div>
                             </button>
-                            <!-- 0.23.13: 音频附件（本地 WAV 经 ResourceStore 签发 ref，AI 用 transcribe_audio 转写） -->
+                            <!-- 0.23.12: 音频附件（本地 WAV 经 ResourceStore 签发 ref，AI 用 transcribe_audio 转写） -->
                             <button class="chat-attach-btn" id="chat-attach-btn" title="附加音频文件（转写）">
                                 <svg class="icon" aria-hidden="true"><use href="#icon-audio-lines"/></svg>
                             </button>

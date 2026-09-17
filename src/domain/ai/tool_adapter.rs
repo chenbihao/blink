@@ -586,7 +586,7 @@ impl CapabilityTool {
                     // 调用 Capability（0.21.11：统一经 CapabilityRegistry::invoke）
                     match registry.invoke(&cap_id, args_value, &ctx).await {
                         Ok(cap_result) => {
-                            // 0.23.13：投影统一经 ResourceStore（消除 image/* 特殊分支）
+                            // 0.23.12：投影统一经 ResourceStore（消除 image/* 特殊分支）
                             let store = cap_env.resource_store();
                             let contents =
                                 cap_result.to_rig_tool_result_with_store(store.map(|s| s.as_ref()));

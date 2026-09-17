@@ -349,10 +349,11 @@ pub const RECOGNITION_STRONG_PAUSE_MAX_MS: u32 = 1_500;
 /// 8/12/12 秒的既有行为。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
-    /// RMS 低于此值视为静默（默认 0.005，约 -46dB）。
+    /// RMS 低于此值视为静默（默认 0.001，约 -60dB）。
     ///
-    /// 离麦克风远时声音能量低，可能被误判为静默导致一直灰色不定稿——
-    /// 此时调低此值（如 0.002）。嘈杂环境调高（如 0.01）避免噪声触发。
+    /// 0.23.13 起退化为兼容字段：底噪自适应（稳定性护栏修复自举死锁后）
+    /// 主导 on/off 阈值推导，此值只保留加法项的微小影响，UI 已移除滑杆。
+    /// 字段保留是为了旧配置文件反序列化兼容。
     #[serde(default = "default_vad_silence_threshold")]
     pub silence_threshold: f64,
     /// 静默持续多久判定句尾（默认 300ms）。
@@ -435,7 +436,7 @@ fn default_vad_kind() -> String {
 }
 
 fn default_vad_silence_threshold() -> f64 {
-    0.005
+    0.001
 }
 
 fn default_vad_min_silence_ms() -> u32 {
@@ -959,7 +960,7 @@ mod tests {
         assert_eq!(cfg.local_engine.device, "cpu");
         assert!(cfg.local_engine.hotwords.is_none());
         assert!(cfg.local_engine.use_itn.is_none());
-        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
+        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.001);
         assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
         assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
         assert_eq!(cfg.local_engine.vad.soft_window_s, 8);
@@ -1913,7 +1914,7 @@ mod tests {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"gguf/sensevoice-small-q8","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         // vad 缺失 → 默认值
-        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
+        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.001);
         assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
         assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
         // vad_kind 也缺失 → auto

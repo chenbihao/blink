@@ -419,7 +419,7 @@ fn issue_from_ref_on_memory_backing() {
     assert!(store.open(&original, ResourceUse::OcrImage).is_ok());
 }
 
-// ── issue_from_ref 权限衰减（0.23.14 收紧）────────────────────────────────
+// ── issue_from_ref 权限衰减（attenuation-only，0.23 §8.2 决策 3）──────────
 
 /// 派生 use 必须是源 grant 的子集——只允许 TranscribeAudio 的 ref
 /// （普通 picker / chat 附件的形态）不得扩出 PreviewAudio。

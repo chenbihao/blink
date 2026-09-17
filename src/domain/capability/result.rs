@@ -57,21 +57,21 @@ impl CapabilityResult {
         }
     }
 
-    /// 带 ResourceStore 上下文的 canonical agent 投影（0.19.4 §3.6；0.23.13 统一入 store）。
+    /// 带 ResourceStore 上下文的 canonical agent 投影（0.19.4 §3.6；0.23.12 统一入 store）。
     ///
-    /// **0.23.13 变化**：消除 `image/*` 特殊分支——**图片 Blob** 按统一策略移入
+    /// **0.23.12 变化**：消除 `image/*` 特殊分支——**图片 Blob** 按统一策略移入
     /// store（Memory 腿、Reusable、图片消费 use 集），返回结构化 ref JSON：
     /// - `{"kind":"image_ref","image_ref":"rref_...","mime":"image/png","size_bytes":12345,"expires_in_seconds":900}`
     /// - `expires_in_seconds` 由 grant 元数据派生（内存腿 TTL 15 分钟 → 900）
     ///
-    /// **0.23.14 变化**：非图片 Blob 不再签发 `resource_ref`——图片消费 use
+    /// **0.23.12 收紧**：非图片 Blob 不再签发 `resource_ref`——图片消费 use
     /// （DecodeImage/OcrImage/PinImage）对非图片内容没有任何合法消费方，
     /// 签发"假可用"ref 只会制造越权假象。此类 Blob 返回结构化
     /// `{"kind":"blob_unavailable","reason":"unsupported_media_type",...}`，
     /// 不为没有真实消费方的 use 占位（0.23 §8.2 决策 2 同源原则）。
     ///
     /// 无 store 或入 store 失败 → **结构化**降级（`kind=blob_unavailable`，
-    /// 不静默吞成纯文本摘要——0.23 §8.2 决策 9）
+    /// 不静默吞成纯文本摘要——0.23 §8.2 决策 10）
     ///
     /// **消费方**：内部 AI（`CapabilityTool::call`）和 MCP server 共用此方法，
     /// 保证投影策略一致。
@@ -774,7 +774,7 @@ mod tests {
         }
     }
 
-    // ── to_rig_tool_result_with_store 测试（0.19.4 投影；0.23.13 统一入 store）──
+    // ── to_rig_tool_result_with_store 测试（0.19.4 投影；0.23.12 统一入 store）──
 
     #[test]
     fn with_store_image_blob_produces_image_ref() {
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn with_store_non_image_blob_degrades_unsupported_media_type() {
-        // 0.23.14：非图片 Blob 不再签发"假可用" resource_ref——图片消费 use
+        // 0.23.12：非图片 Blob 不再签发"假可用" resource_ref——图片消费 use
         // 对非图片内容没有合法消费方，返回结构化降级（稳定 reason），store 零新增
         use rig_core::completion::message::ToolResultContent;
         let store = super::DefaultResourceStore::default();

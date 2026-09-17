@@ -1,9 +1,9 @@
-//! 图片输入解析 helper（0.19.4 §3.6；0.23.13 迁移到统一 ResourceStore）。
+//! 图片输入解析 helper（0.19.4 §3.6；0.23.12 迁移到统一 ResourceStore）。
 //!
 //! `pin_image`、`ocr_image` 和 `write_clipboard` 图片模式的公共解析逻辑收敛于此，
 //! 避免三个消费者各自实现 `image_ref` / 原始字节二选一校验。
 //!
-//! **规则**（§3.9 + 0.23.13 use 授权）：
+//! **规则**（§3.9 + 0.23.12 use 授权）：
 //! - `image_ref` 与原始字节二选一；同时提供或都不提供均返回 `InvalidArgs`
 //! - `image_ref` 从统一 ResourceStore 按**消费方声明的 use** open
 //!   （ocr_image→OcrImage / pin_image→PinImage / write_clipboard·palette→DecodeImage），
@@ -57,7 +57,7 @@ pub fn resolve_png_input(
 
 /// 解析并校验 `image_ref` 指向的图片字节。
 ///
-/// 返回 `Bytes`——零拷贝。`use_` 由消费方点名（0.23.13 ResourceUse 封闭枚举），
+/// 返回 `Bytes`——零拷贝。`use_` 由消费方点名（0.23.12 ResourceUse 封闭枚举），
 /// grant 未授予该 use 时返回结构化错误（AI 只能消费签发方授予的用途）。
 pub fn resolve_image_ref(
     args: &Value,
@@ -199,7 +199,7 @@ mod tests {
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
     }
 
-    /// 0.23.13：use 未授予 → 结构化拒绝（且不静默降级为字节路径）。
+    /// 0.23.12：use 未授予 → 结构化拒绝（且不静默降级为字节路径）。
     #[test]
     fn resolve_ref_with_wrong_use_is_error() {
         let store = image_store();

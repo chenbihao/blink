@@ -136,7 +136,7 @@ const sent = [];
 composer.initComposer({
     onSend: (payload) => sent.push(payload),
     onStop: () => {},
-    // 0.23.14：会话 id 由 main.js 注入——composer 不再依赖未导入的全局绑定
+    // 0.23.12：会话 id 由 main.js 注入——composer 不再依赖未导入的全局绑定
     getConversationId: () => currentConv,
 });
 

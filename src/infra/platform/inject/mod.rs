@@ -66,6 +66,19 @@ pub fn inject_text(text: &str) -> Result<(), InjectError> {
     }
 }
 
+/// 仅 SendInput Unicode 注入，失败不降级剪贴板（0.23.13 G2 渐进上屏）。
+///
+/// 录音进行中的渐进冲刷必须走此路径：剪贴板降级会注入真实 Ctrl+V 按键，
+/// 其 keydown 会触发输入状态机 armed→aborted（该分支不区分 injected 键），
+/// 破坏 hold-to-talk 会话。失败由调用方挂起重试，终态再走完整路径。
+#[cfg(target_os = "windows")]
+pub fn inject_text_unicode_strict(text: &str) -> Result<(), InjectError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    windows_impl::inject_text_unicode(text)
+}
+
 // 平台特定实现
 #[cfg(target_os = "windows")]
 mod windows_impl;

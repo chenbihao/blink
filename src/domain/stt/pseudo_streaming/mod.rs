@@ -77,6 +77,10 @@ const PREVIEW_MIN_NEW_AUDIO_MS: u64 = 500;
 /// 预览定稿短语的最小有效有声时长（毫秒）。低于该值的片段并入下一短语，
 /// 不单独送识别（过短片段的独立识别质量不可靠）。
 const PHRASE_MIN_VOICED_MS: u64 = 500;
+
+/// 0.23.13 时间触发短语冻结的前缀最小长度（毫秒）：滚动窗前缀积满该值
+/// 即主动追认为短语，不再依赖停顿候选被作废——停顿检测失灵时预览仍增量。
+const TIME_FREEZE_MIN_PREFIX_MS: u64 = 1_200;
 /// 自适应预览间隔上限。
 ///
 /// 冷却从上一轮推理完成后开始计算；较长上限可避免慢机器在长音频上
@@ -1322,15 +1326,30 @@ impl PseudoStreamingSttEngine {
                 tracing::debug!("丢弃迟到短语定稿（代际已推进）");
                 return;
             }
-            if let Ok(text) = result {
-                let cleaned = strip_filler_words(&text);
-                if !cleaned.is_empty() {
-                    inner.preview_phrases.push((ledger_end, cleaned));
-                    // 信封 range 跟随最近定稿的短语，避免回退到 (committed,
-                    // committed) 退化区间——VAD 调试时间线因此能显示短语
-                    // 的真实音频范围而非 0.00s–0.00s。
-                    inner.latest_preview_range = Some(range);
-                    inner.rebuild_preview_text();
+            match result {
+                Ok(text) => {
+                    let cleaned = strip_filler_words(&text);
+                    if !cleaned.is_empty() {
+                        let chars = cleaned.chars().count();
+                        inner.preview_phrases.push((ledger_end, cleaned));
+                        // 信封 range 跟随最近定稿的短语，避免回退到 (committed,
+                        // committed) 退化区间——VAD 调试时间线因此能显示短语
+                        // 的真实音频范围而非 0.00s–0.00s。
+                        inner.latest_preview_range = Some(range);
+                        inner.rebuild_preview_text();
+                        tracing::debug!(
+                            ledger_len = inner.preview_phrases.len(),
+                            chars,
+                            "短语定稿入账"
+                        );
+                    } else {
+                        tracing::debug!("短语定稿识别返回空文本，未入账");
+                    }
+                }
+                Err(e) => {
+                    // 0.23.13 排查：实时链路短语前缀丢失嫌疑点之一——
+                    // 此前错误被静默吞掉，无任何可观测信号。
+                    tracing::debug!(%e, "短语定稿识别失败，未入账");
                 }
             }
         });
@@ -1695,6 +1714,73 @@ impl PseudoStreamingSttEngine {
             let window_samples = inner.coordinator.settings.preview_window_ms as usize
                 * self.sample_rate as usize
                 / 1000;
+            // 0.23.13 时间触发短语冻结兜底：停顿检测失灵（底噪高于停顿电平、
+            // 连续无候选等）时，滚动窗前缀会无声滚出 preview_window 而从未
+            // 冻结——灰色预览只剩最近 3s 碎片。前缀积满 1.2s 即主动追认为
+            // 短语（与"安静候选被作废"路径同一入账通道），保证预览无条件
+            // 按短语增量累积。纯静音前缀直接跳过锚点，不等识别。
+            let roll_start = total.saturating_sub(window_samples);
+            if phrase_snapshot.is_none()
+                && pending.is_none()
+                && !inner.sentences.finalize_in_flight
+                && (inner.phrase_anchor as usize) < roll_start
+                && roll_start - inner.phrase_anchor as usize
+                    >= TIME_FREEZE_MIN_PREFIX_MS as usize * self.sample_rate as usize / 1000
+            {
+                let prefix_range = inner.phrase_anchor as usize..roll_start;
+                let prefix_audio = AudioRange::new(prefix_range.start as u64, prefix_range.end as u64);
+                match inner
+                    .sentences
+                    .abs_to_local_range(&prefix_range, inner.samples.len())
+                {
+                    Some(local) => {
+                        let prefix_samples = &inner.samples[local];
+                        let gate = RequestAudioGate::evaluate(
+                            prefix_audio,
+                            prefix_samples,
+                            self.sample_rate,
+                            off_threshold,
+                            PHRASE_MIN_VOICED_MS,
+                            false,
+                        );
+                        match gate {
+                            RequestAudioGate::Valid {
+                                model_input_range, ..
+                            } => {
+                                let offset_start = model_input_range
+                                    .start_sample
+                                    .saturating_sub(prefix_audio.start_sample)
+                                    .min(prefix_samples.len() as u64) as usize;
+                                let offset_end = model_input_range
+                                    .end_sample
+                                    .saturating_sub(prefix_audio.start_sample)
+                                    .min(prefix_samples.len() as u64) as usize;
+                                if offset_start < offset_end {
+                                    phrase_snapshot = Some((
+                                        prefix_samples[offset_start..offset_end].to_vec(),
+                                        roll_start as u64,
+                                        AudioRange::new(
+                                            model_input_range.start_sample,
+                                            model_input_range.end_sample,
+                                        ),
+                                    ));
+                                }
+                                inner.phrase_anchor = roll_start as u64;
+                            }
+                            RequestAudioGate::TooShort => {
+                                // 有声不足 500ms：等前缀再长一点，锚点不动
+                            }
+                            RequestAudioGate::NoSpeech => {
+                                inner.phrase_anchor = roll_start as u64;
+                            }
+                        }
+                    }
+                    None => {
+                        // 坐标越界（紧凑边界）：跳过该前缀，锚点仍推进
+                        inner.phrase_anchor = roll_start as u64;
+                    }
+                }
+            }
             // 0.23.9.10：尾部窗口锚定在短语锚点（最近作废候选 quiet_start 与
             // 已提交水位的较大者）——短语内从头增长成整句，仅当单个短语超过
             // preview_window 后才回退为滚动尾部。Legacy 路径不经过此处。

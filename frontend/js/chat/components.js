@@ -130,7 +130,7 @@ export function renderUserMessage(text) {
 }
 
 /**
- * 渲染用户附件卡片——音频等文件附件作为**独立气泡**展示（0.23.14）。
+ * 渲染用户附件卡片——音频等文件附件作为**独立气泡**展示（0.23.12）。
  *
  * 每个附件一张右对齐静音卡片（surface 底 + accent 图标 + 弱化字，与
  * thinking/tool 卡同一家族），圆角语言与用户气泡一致。前缀 paperclip
@@ -524,7 +524,7 @@ function startEditMessage(el, originalText) {
         el.classList.remove("editing");
         el.textContent = originalText;
         el.dataset.rawText = originalText;
-        // 0.23.14：恢复附件徽标行（置于正文之前）——编辑取消不应丢徽标
+        // 0.23.12：恢复附件徽标行（置于正文之前）——编辑取消不应丢徽标
         if (Array.isArray(el.__attachmentNames) && el.__attachmentNames.length > 0) {
             el.insertBefore(renderAttachmentBadges(el.__attachmentNames), el.firstChild);
         }

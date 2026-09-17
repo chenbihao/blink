@@ -62,7 +62,7 @@ ICON_LIST = [
     "spotlight",        # context.js 环境感知（0.11.8：从 globe 换成 spotlight，语义更精准）
     "ghost",            # settings.html Ghost 触发规则（0.11.8：从 zap 换成 ghost，与"Ghost"命名呼应）
     "audio-lines",      # settings.html 语音输入 card（0.11.8）
-    "paperclip",        # chat 附件卡片通用附件符（0.23.14）
+    "paperclip",        # chat 附件卡片通用附件符（0.23.12）
     "search",           # settings.html 应用搜索 🔍
     "calculator",       # settings.html 计算器 🧮
     "terminal",         # settings.html Python 🐍

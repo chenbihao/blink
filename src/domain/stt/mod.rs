@@ -180,10 +180,6 @@ impl AudioRange {
         }
     }
 
-    pub const fn len(self) -> u64 {
-        self.end_sample.saturating_sub(self.start_sample)
-    }
-
     pub const fn is_empty(self) -> bool {
         self.start_sample >= self.end_sample
     }
@@ -191,11 +187,6 @@ impl AudioRange {
     /// 判断两个半开区间是否有实际重叠。
     pub const fn overlaps(self, other: Self) -> bool {
         self.start_sample < other.end_sample && other.start_sample < self.end_sample
-    }
-
-    /// 判断 `other` 是否完全覆盖在当前区间内。
-    pub const fn contains(self, other: Self) -> bool {
-        self.start_sample <= other.start_sample && other.end_sample <= self.end_sample
     }
 }
 

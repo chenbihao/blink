@@ -215,6 +215,19 @@ const PROGRESSIVE_SOFT_SILENCE_FLOOR_MS: u32 = 150;
 const NOISE_FLOOR_RISE_RATE: f64 = 0.02;
 const NOISE_FLOOR_FALL_RATE: f64 = 0.1;
 
+/// 0.23.13 底噪上升的稳定性护栏：窗口 p75 ≤ p25 × 该系数视为"平稳噪声态"。
+///
+/// 旧护栏 `p25 < off` 是自指的（off 由底噪算出）：环境底噪高于初始 off
+/// 时底噪永远升不上去（自举死锁），停顿永远判定为有声——短语不冻结、
+/// 无自然切句，只剩硬窗口强切。平稳性判定不依赖任何由卡死底噪推出的
+/// 阈值：停顿期间窗口分位挤拢 → 允许收敛；语音期间分位拉开 → 冻结。
+const NOISE_FLOOR_STABLE_RATIO: f64 = 2.5;
+
+/// 0.23.13 底噪吸收的绝对上限：稳态但响于该值的能量是内容（语音），
+/// 不可能是环境底噪。真实麦克风底噪（含高增益自噪声）通常 ≤ ~0.005；
+/// 持续元音/响纯音可平稳至 0.05+，只靠分位挤拢无法与之区分。
+const NOISE_FLOOR_ABS_MAX: f64 = 0.006;
+
 /// on/off threshold 相对 noise_floor 的偏移倍数。
 /// on = noise_floor + max(silence_threshold, noise_floor × on_factor)
 /// off = noise_floor + max(silence_threshold * 0.5, noise_floor × off_factor)
@@ -489,29 +502,34 @@ impl EnergyVad {
 
         self.energy_history.push(rms, frame_samples);
 
-        // 用低分位数（P25）作为底噪候选
+        // 用低分位数（P25）作为底噪候选，高分位（P75）判平稳
         let sorted = self.energy_history.sorted_values();
         if sorted.is_empty() {
             return;
         }
         let p25_idx = sorted.len() / 4;
         let p25 = sorted[p25_idx];
+        let p75_idx = (sorted.len() * 3).saturating_sub(1) / 4;
+        let p75 = sorted[p75_idx.min(sorted.len() - 1)];
 
         if !self.noise_initialized {
             // 首帧可能就是人声，不能把整帧能量直接吸收到 noise floor；否则中低音量
             // 语音会把 on threshold 抬到自身之上，此后整段都无法进入 speaking。
-            // 先以阈值下界作保守种子，后续只在安全的低能量帧上自适应收敛。
+            // 先以阈值下界作保守种子，后续只在平稳噪声态上自适应收敛。
             self.noise_floor = p25.min(THRESHOLD_MIN);
             self.noise_initialized = true;
             return;
         }
 
         // 非对称更新：慢升快降
-        // 只在安全条件下更新：p25 不远高于当前 noise_floor 时才升（避免人声抬高底噪）
+        // 0.23.13 上升护栏改为平稳性判定：p75 ≤ p25×系数（窗口分位挤拢的
+        // 噪声态）且 p25 不高于绝对吸收上限（响的稳态是语音不是底噪），
+        // 允许向 p25 收敛；语音期间分位拉开则冻结。旧护栏 `p25 < off`
+        // 自指——off 由底噪算出，环境底噪高于初始 off 时底噪永远升不上去
+        // （自举死锁），停顿永远判定为有声。
         if p25 > self.noise_floor {
-            // 上升：只在 p25 < off_threshold 时才升（人在说话时 p25 会很高，不应更新底噪）
-            let (_, off_thresh) = self.compute_thresholds();
-            if p25 < off_thresh {
+            let steady = p75 <= p25.max(f64::MIN_POSITIVE) * NOISE_FLOOR_STABLE_RATIO;
+            if steady && p25 <= NOISE_FLOOR_ABS_MAX {
                 self.noise_floor += (p25 - self.noise_floor) * NOISE_FLOOR_RISE_RATE;
             }
         } else {
@@ -750,6 +768,61 @@ mod tests {
             let _ = vad.process_chunk(chunk);
         }
         assert!(vad.is_speaking(), "流首中低音量语音应通过 attack debounce");
+    }
+
+    // ── 0.23.13 稳定性护栏（修复自举死锁）──────────────────────────────
+
+    /// 回归：环境底噪高于初始 off 阈值时，旧护栏 `p25 < off` 自指——底噪
+    /// 永远升不上去，停顿永远判定为有声（短语不冻结、只剩硬窗口强切）。
+    /// 平稳性护栏下，持续平稳的高底噪应能收敛。
+    #[test]
+    fn noise_floor_converges_to_steady_ambient_above_initial_threshold() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.001, 300, 800);
+        // 正弦幅度 0.0042 → RMS ≈ 0.003，持续 2s（窗口 1.5s 全部被平稳底噪占据）
+        let ambient = generate_tone(2000, 0.0042);
+        for chunk in ambient.chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        assert!(
+            vad.noise_floor > 0.002,
+            "平稳高底噪应收敛到环境（实际 {:.4}）",
+            vad.noise_floor
+        );
+    }
+
+    /// 语音期间（窗口分位拉开、动态范围大）底噪不应被吸收抬升。
+    #[test]
+    fn noise_floor_frozen_during_varying_speech_window() {
+        let mut vad = EnergyVad::with_params(SAMPLE_RATE, 0.001, 300, 800);
+        // 先短暂安静初始化
+        for chunk in generate_silence(300).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        let floor_after_quiet = vad.noise_floor;
+
+        // 响/轻交替 1.5s：p75（响段 RMS≈0.035）与 p25（轻段 RMS≈0.0057）
+        // 比值 ≈ 6 > 稳定系数 → 上升被冻结
+        for chunk in generate_tone(300, 0.05).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        for chunk in generate_tone(200, 0.008).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        for chunk in generate_tone(300, 0.05).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        for chunk in generate_tone(200, 0.008).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        for chunk in generate_tone(500, 0.05).chunks(160) {
+            vad.process_chunk(chunk);
+        }
+        assert!(
+            vad.noise_floor < floor_after_quiet + 0.001,
+            "语音期间底噪不应显著抬升（安静后 {:.4} → 实际 {:.4}）",
+            floor_after_quiet,
+            vad.noise_floor
+        );
     }
 
     #[test]

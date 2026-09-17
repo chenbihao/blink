@@ -49,9 +49,9 @@ test("editor mini：独立一档更小尺寸", () => {
     assert.ok(mini.height < EDITOR_SIZE.height, "mini 高度应小于展开态");
 });
 
-test("editor 尺寸落在任务约定的舒适区间（300-320 宽 / 190-220 高）", () => {
+test("editor 尺寸与预览区 8 行预算一致（300-320 宽 / 300-340 高）", () => {
     assert.ok(EDITOR_SIZE.width >= 300 && EDITOR_SIZE.width <= 320);
-    assert.ok(EDITOR_SIZE.height >= 190 && EDITOR_SIZE.height <= 220);
+    assert.ok(EDITOR_SIZE.height >= 300 && EDITOR_SIZE.height <= 340);
 });
 
 test("非法/缺失输入回退到安全值，不产生 NaN", () => {

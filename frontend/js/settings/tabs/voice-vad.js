@@ -7,7 +7,8 @@
  */
 
 export const VAD_DEFAULTS = {
-    silence_threshold: 0.005,
+    // 0.23.13：与 Rust 默认对齐（底噪自适应主导阈值推导，此值仅兼容保留）
+    silence_threshold: 0.001,
     min_silence_ms: 300,
     min_sentence_ms: 800,
     soft_window_s: 8,

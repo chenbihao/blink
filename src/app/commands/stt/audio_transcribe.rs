@@ -134,7 +134,7 @@ async fn pick_audio_file_ref(
                 tracing::debug!(revoked, "pick_audio_file: 已撤销上一次会话未消费 ref");
             }
             tracing::debug!("pick_audio_file: audio_ref issued");
-            // 0.23.13：设置页转写测试同模式预热（best-effort，决策 11）
+            // 0.23.12：设置页转写测试同模式预热（best-effort，决策 11）
             spawn_stt_engine_prewarm(app);
             let display_name = safe_audio_display_name(&path);
             Ok(Some((audio_ref.as_str().to_string(), display_name)))
@@ -291,7 +291,7 @@ pub async fn clone_audio_ref_for_vad_debug(
         })
 }
 
-// ── 对话窗口音频附件闭环（0.23.13 §8.3-4）───────────────────────────────
+// ── 对话窗口音频附件闭环（0.23.12 §8.2 决策 12）─────────────────────────
 
 /// chat 附件签发结果——不暴露目录或绝对路径。
 #[derive(serde::Serialize)]
@@ -302,12 +302,12 @@ pub struct ChatAudioAttachment {
 }
 
 /// chat 附件 grant TTL：一轮对话常超过 LocalFile 默认 5 分钟，
-/// Reusable + 会话结束 revoke 场景放宽到 30 分钟（0.23 §8.3-4 决策）。
+/// Reusable + 会话结束 revoke 场景放宽到 30 分钟（0.23 §8.2 实现期补充定案）。
 const CHAT_ATTACHMENT_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// `pick_chat_audio_attachment` — 对话窗口附加本地 WAV 附件。
 ///
-/// 资源层的第一个 GUI 消费证明（0.23.13）：
+/// 资源层的第一个 GUI 消费证明（0.23.12）：
 /// - 可信 native picker 选择文件 → 签发 `use={TranscribeAudio}`、
 ///   `owner=chat_attach:<conversation_id>` 的 **Reusable** grant
 ///   （转写失败重试不烧 ref——ReusePolicy 上移为 grant 属性的价值）

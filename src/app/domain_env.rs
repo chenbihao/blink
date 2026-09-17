@@ -76,7 +76,7 @@ pub struct TauriDomainEnv {
     /// 一次性文件转写服务（0.22.16 Handoff 04）。
     /// 由 main.rs 在 EngineManager + AudioResourceRegistry 就绪后注入。
     audio_transcription: OnceLock<Arc<dyn AudioTranscriptionPort>>,
-    /// 统一资源 store（0.23.12 建、0.23.13 收口为唯一资源入口）——
+    /// 统一资源 store（0.23.12 统一资源 ref 层，唯一资源入口）——
     /// 构造时创建，生命周期与 app 相同。
     resource_store: Arc<DefaultResourceStore>,
 }

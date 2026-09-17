@@ -312,13 +312,17 @@
 }
 
 #voice .voice-vad-debug-file,
-#voice .voice-vad-debug-progress {
+#voice .voice-vad-debug-progress,
+#voice .voice-vad-debug-final-title,
+#voice .voice-vad-debug-transcript {
     grid-column: 1 / -1;
     min-width: 0;
 }
 
 #voice .voice-vad-debug-file[hidden],
-#voice .voice-vad-debug-progress[hidden] { display: none; }
+#voice .voice-vad-debug-progress[hidden],
+#voice .voice-vad-debug-final-title[hidden],
+#voice .voice-vad-debug-transcript[hidden] { display: none; }
 
 #voice .voice-vad-debug-file {
     color: var(--text-sub);
@@ -410,7 +414,8 @@
     background: var(--surface-2);
 }
 #voice .voice-vad-debug-legend-mark.cut { height: 3px; background: var(--text); }
-#voice .voice-vad-debug-legend-mark.waiting {
+#voice .voice-vad-debug-legend-mark.waiting { background: var(--warning, var(--red)); }
+#voice .voice-vad-debug-legend-mark.rejected-short {
     background: repeating-linear-gradient(to right, var(--warning, var(--red)) 0 4px, transparent 4px 8px);
 }
 
@@ -433,6 +438,7 @@
 #voice .voice-vad-debug-chart .vad-on { fill: none; stroke: var(--red); stroke-width: 1; stroke-dasharray: 4 3; }
 #voice .voice-vad-debug-chart .vad-off { fill: none; stroke: var(--green); stroke-width: 1; stroke-dasharray: 4 3; }
 #voice .voice-vad-debug-chart .vad-cut { stroke: var(--text); stroke-width: 1.5; }
+#voice .voice-vad-debug-chart .vad-waiting { stroke: var(--warning, var(--red)); stroke-width: 1.5; }
 #voice .voice-vad-debug-chart .vad-rejected { stroke: var(--warning, var(--red)); stroke-width: 1; stroke-dasharray: 2 3; }
 #voice .voice-vad-debug-chart .vad-time-label { fill: var(--text-dim); font-size: 10px; }
 
@@ -701,6 +707,23 @@
 #voice .voice-vad-debug-decision:focus-within .voice-vad-debug-decision-meta {
     visibility: visible;
     opacity: 1;
+}
+
+/* 悬浮预览是跨行绝对定位叠加层；lane 均为 z-index:1 的层叠上下文，
+   按 DOM 顺序会被同条目决策卡与后续条目盖住——hover/focus 时抬升所在
+   lane 与条目，让叠加层悬浮在最上层。 */
+#voice .voice-vad-debug-entry:has(.voice-vad-debug-recognition:hover),
+#voice .voice-vad-debug-entry:has(.voice-vad-debug-recognition:focus-within),
+#voice .voice-vad-debug-entry:has(.voice-vad-debug-decision:hover),
+#voice .voice-vad-debug-entry:has(.voice-vad-debug-decision:focus-within) {
+    z-index: 10;
+}
+
+#voice .voice-vad-debug-transcript-lane:has(.voice-vad-debug-recognition:hover),
+#voice .voice-vad-debug-transcript-lane:has(.voice-vad-debug-recognition:focus-within),
+#voice .voice-vad-debug-decision-lane:has(.voice-vad-debug-decision:hover),
+#voice .voice-vad-debug-decision-lane:has(.voice-vad-debug-decision:focus-within) {
+    z-index: 20;
 }
 
 @media (max-width: 600px) {

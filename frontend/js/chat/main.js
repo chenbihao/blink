@@ -97,7 +97,7 @@ async function init() {
     initComposer({
         onSend: handleSend,
         onStop: handleStop,
-        // 0.23.14：composer 附件 picker 需要当前会话 id 做竞态校验
+        // 0.23.12：composer 附件 picker 需要当前会话 id 做竞态校验
         // （picker 返回时会话已切换则撤销刚签发的 ref）
         getConversationId: () => state.conversationId,
     });
@@ -268,7 +268,7 @@ async function init() {
 // ── 发送 ────────────────────────────────────────
 
 /**
- * 渲染一条用户消息的完整展示（0.23.14：附件独立成卡片气泡）。
+ * 渲染一条用户消息的完整展示（0.23.12：附件独立成卡片气泡）。
  *
  * - 有附件：先渲染附件卡片（每个文件一张，右对齐静音卡片）；
  *   纯附件消息的持久化正文是"（音频附件：…）"人类可读摘要（FTS/导出/标题
@@ -294,7 +294,7 @@ function renderUserEntry(text, attachmentNames = []) {
 /**
  * 发送一条用户消息。
  *
- * 0.23.14：composer 传结构化负载 `{text, attachments}`——text 是用户可见/
+ * 0.23.12：composer 传结构化负载 `{text, attachments}`——text 是用户可见/
  * 持久化正文（气泡、state、标题），attachments 是本轮附件元数据（只注入
  * 本轮模型输入，不进入气泡/标题/历史）。编辑重发/重试路径传纯字符串。
  *
@@ -334,7 +334,7 @@ async function handleSend(input, isEdit = false) {
         const opts = state.ephemeralMode
             ? {ephemeral: true, targetWindow: "chat", thinkingEnabled, reasoningEffort}
             : {thinkingEnabled, reasoningEffort};
-        // 0.23.14：附件元数据随本轮请求给后端（后端只注入本轮模型输入）
+        // 0.23.12：附件元数据随本轮请求给后端（后端只注入本轮模型输入）
         if (payload.attachments.length > 0) {
             opts.attachments = payload.attachments;
         }
@@ -346,7 +346,7 @@ async function handleSend(input, isEdit = false) {
         // 0.21.16: 挪到 chatPrompt 成功之后——后端已预写对话记录（发出即保存），
         // rename 才能命中；此前在 prompt 前调用是 no-op。
         // 0.17.6a: 临时对话跳过标题生成（不写 SQLite，promote 后由主窗口负责）
-        // 0.23.14：标题输入 = 用户可见正文，不出现 rref_/技术提示
+        // 0.23.12：标题输入 = 用户可见正文，不出现 rref_/技术提示
         const isNewConversation = !isEdit && state.messages.length === 1;
         if (isNewConversation && !state.ephemeralMode) {
             const truncatedTitle = payload.text.slice(0, 20) + (payload.text.length > 20 ? "…" : "");
@@ -391,7 +391,7 @@ async function handleSend(input, isEdit = false) {
     }
 
     clearInput();
-    // 0.23.14：附件随消息发出后离开输入框（与输入清空同一成功时机；
+    // 0.23.12：附件随消息发出后离开输入框（与输入清空同一成功时机；
     // 只移除本次发送的 ref，发送间隙新附的文件不受影响）。后端 ref 不撤销——
     // 本轮 agent 仍要消费，生命周期由会话切换/新对话按 owner 统一回收。
     clearSentAttachments(payload.attachments);
@@ -424,7 +424,7 @@ async function handleEditMessage(msgIndex, newText) {
     // 2. 截断 state.messages
     state.messages.length = msgIndex;
 
-    // 3. 重新渲染消息列表（0.23.14：历史消息的附件卡片一并保留）
+    // 3. 重新渲染消息列表（0.23.12：历史消息的附件卡片一并保留）
     components.clearMessages();
     for (const msg of state.messages) {
         if (msg.role === "user") {
@@ -917,7 +917,7 @@ async function handleNewConversation(groupId = null) {
     if (state.isStreaming) {
         handleStop();
     }
-    // 0.23.13：新对话 = 当前会话结束 → 撤销其未消费附件 ref
+    // 0.23.12：新对话 = 当前会话结束 → 撤销其未消费附件 ref
     ipc.revokeChatAudioAttachments(state.conversationId).catch((error) => {
         console.warn("revoke chat audio attachments failed:", error);
     });
@@ -946,7 +946,7 @@ async function handleNewEphemeralConversation() {
     if (state.isStreaming) {
         handleStop();
     }
-    // 0.23.13：同 handleNewConversation——撤销当前会话附件
+    // 0.23.12：同 handleNewConversation——撤销当前会话附件
     ipc.revokeChatAudioAttachments(state.conversationId).catch((error) => {
         console.warn("revoke chat audio attachments failed:", error);
     });
@@ -1001,7 +1001,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
         handleStop();
     }
 
-    // 0.23.13：离开旧会话 → 按 owner 批量撤销其未消费附件 ref（会话结束语义）
+    // 0.23.12：离开旧会话 → 按 owner 批量撤销其未消费附件 ref（会话结束语义）
     if (conversationId !== state.conversationId) {
         const previousId = state.conversationId;
         ipc.revokeChatAudioAttachments(previousId).catch((error) => {
@@ -1041,7 +1041,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
                 }
 
                 if (msg.role === "user") {
-                    // 0.23.14：历史加载同样渲染独立附件卡片（DB attachments 元数据，仅文件名）
+                    // 0.23.12：历史加载同样渲染独立附件卡片（DB attachments 元数据，仅文件名）
                     renderUserEntry(msg.text, msg.attachments ?? []);
                     state.addMessage({role: "user", content: msg.text});
                 } else if (msg.role === "assistant") {

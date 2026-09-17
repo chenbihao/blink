@@ -383,7 +383,7 @@ pub struct SqliteConversationMemory {
     /// 记忆 load 出来再**追加一次**当前 prompt——若 load 也带上这条预写 user，
     /// 请求上下文里同一 user 就会出现两次（模型看到"用户询问了我两次"）。
     /// `load` 据此丢弃尾部匹配的预写 user；`append` 完成本轮后清除标记。
-    /// 0.23.14：`append` 侧按 pending 标记**位置跳过** rig 追加的首条 user
+    /// 0.23.12：`append` 侧按 pending 标记**位置跳过** rig 追加的首条 user
     /// （带附件轮次的模型输入与预写可见正文不同文，不能靠文本匹配）。
     pending_users: RwLock<HashMap<String, String>>,
 }
@@ -702,7 +702,7 @@ impl SqliteConversationMemory {
     /// 幂等去重：尾部已是相同 user 消息（重发/重试）则跳过，不产生重复行。
     /// rig 结束时的 `append` 会跳过这条已写的 user 消息，只补写 assistant。
     ///
-    /// 0.23.14：`attachment_names` 为本轮音频附件的**展示文件名**（不含 ref），
+    /// 0.23.12：`attachment_names` 为本轮音频附件的**展示文件名**（不含 ref），
     /// 随预写行存入 `messages.attachments`，供气泡徽标与历史渲染；
     /// `audio_ref` bearer token 不落库。
     pub async fn persist_user_message(
@@ -976,7 +976,7 @@ impl ConversationMemory for SqliteConversationMemory {
             }
 
             // 跳过已被「发出即保存」预写的本轮 user 消息。
-            // 0.23.14 起 pending 标记按**位置**生效而非文本匹配：带音频附件的
+            // 0.23.12 起 pending 标记按**位置**生效而非文本匹配：带音频附件的
             // 轮次，rig 收到的 prompt（模型输入 = 附件上下文 + 可见正文）与
             // 预写的用户可见正文不同文——以预写的可见正文落库为准，rig 追加的
             // 首条 user（即本轮 prompt）视为已写跳过。rig 每次 run 结束只
@@ -1235,7 +1235,7 @@ mod tests {
 
     // ── 原有测试（0.12.3）──────────────────────────────────────────────────────
 
-    /// 0.23.14：带音频附件的轮次——rig 收到的模型输入（附件上下文 + 可见正文）
+    /// 0.23.12：带音频附件的轮次——rig 收到的模型输入（附件上下文 + 可见正文）
     /// 与预写的用户可见正文**不同文**，append 仍须按 pending 标记跳过，
     /// 落库历史只有干净的可见正文，不含 `rref_` 技术块。
     #[tokio::test]
@@ -1295,7 +1295,7 @@ mod tests {
         );
     }
 
-    /// 0.23.14：预写时携带附件**展示文件名**——落库 `messages.attachments`
+    /// 0.23.12：预写时携带附件**展示文件名**——落库 `messages.attachments`
     /// 供历史徽标渲染；`audio_ref` bearer token 不落库。
     #[tokio::test]
     async fn persist_user_message_stores_attachment_names_without_refs() {
