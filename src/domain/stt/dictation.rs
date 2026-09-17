@@ -215,22 +215,64 @@ impl DictationLedger {
     /// worker 的文本，含未 ack——worker 保序必达）开头；不一致（引擎整段
     /// 重排等异常）时退化为最长公共字符前缀裁剪——绝不重复已上屏文本。
     /// Final 为空（finalize 失败/超时）时补交 pending。
+    ///
+    /// 0.23.14.6：生产路径改用 peek + commit 两段式（投递成功才落账），
+    /// 本方法保留为两者的语义组合供测试直接验证。
+    #[cfg(test)]
     pub fn remaining_from_final(&mut self, final_text: &str) -> String {
+        let remaining = self.peek_remaining_from_final(final_text);
+        self.commit_remaining(&remaining);
+        remaining
+    }
+
+    /// 纯计算 [`Self::remaining_from_final`] 的剩余（不推进水位）。
+    ///
+    /// 0.23.14.6：终态交付先投递 worker、成功后才 [`Self::commit_remaining`]
+    /// 落账——投递失败时账本不误报"已由 worker 接管"，pending 保持可见。
+    pub fn peek_remaining_from_final(&self, final_text: &str) -> String {
         if final_text.is_empty() {
-            return self
-                .take_pending()
+            return self.entries[self.queued..]
                 .iter()
                 .map(|(_, span)| span.text.as_str())
                 .collect();
         }
-        let remaining = if final_text.starts_with(self.flushed_text.as_str()) {
-            final_text[self.flushed_text.len()..].to_string()
+        if final_text.starts_with(self.flushed_text.as_str()) {
+            self.trim_at_byte_boundary(final_text, self.flushed_text.len())
         } else {
             self.trim_flushed_prefix_common(final_text)
-        };
-        self.flushed_text.push_str(&remaining);
+        }
+    }
+
+    /// 终态投递成功后的落账：剩余并入 `flushed_text`，queued 推进到全部段。
+    pub fn commit_remaining(&mut self, remaining: &str) {
+        self.flushed_text.push_str(remaining);
         self.queued = self.entries.len();
-        remaining
+    }
+
+    /// 回滚一次失败的投递（0.23.14.6）：把 `queue_flushable` / `take_pending`
+    /// 刚推进的那批段退回未投递态（queued 回退、flushed_text 截去对应字节）。
+    ///
+    /// 仅在投递失败（文本未进入 worker 队列）时调用；seq 不匹配立即停止，
+    /// 防止误撤后续状态。acked 同步收敛到 queued（被回滚的段不可能有 ack）。
+    pub fn unqueue_spans(&mut self, flushed: &[(u64, DraftSpan)]) {
+        for (seq, span) in flushed.iter().rev() {
+            let Some(index) = self.queued.checked_sub(1) else {
+                break;
+            };
+            if self.entries[index].0 != *seq {
+                tracing::warn!(seq, expect = self.entries[index].0, "unqueue 段序不匹配，停止回滚");
+                break;
+            }
+            self.flushed_text
+                .truncate(self.flushed_text.len() - span.text.len());
+            self.queued = index;
+        }
+        self.acked = self.acked.min(self.queued);
+    }
+
+    /// 按已验证的字节边界切子串（前缀长度来自同一字符串的合法切点）。
+    fn trim_at_byte_boundary(&self, text: &str, byte_index: usize) -> String {
+        text.get(byte_index..).unwrap_or_default().to_string()
     }
 
     /// Final 剥去 `delivered_text` 前缀；空剩余返回 `None`。
@@ -537,5 +579,71 @@ mod tests {
             ledger.extract_final_tail("已经交付。尾段。"),
             Some((2, "尾段。".to_string()))
         );
+    }
+
+    // ── 0.23.14.6 终态投递 peek/commit 两段式与失败回滚 ──
+
+    /// peek 不推进水位：终态投递必须先投递 worker、成功后才 commit 落账。
+    #[test]
+    fn peek_does_not_advance_watermarks_and_commit_matches_remaining() {
+        let mut ledger = DictationLedger::new(0);
+        ledger.accept_draft_span(span(1, 0, 80_000, "已渐进。"));
+        ledger.queue_flushable(); // 已投递 worker（保序必达）
+        ledger.accept_draft_span(span(2, 80_000, 160_000, "待补交。"));
+
+        let peeked = ledger.peek_remaining_from_final("已渐进。待补交。尾段。");
+        assert_eq!(peeked, "待补交。尾段。");
+        // peek 后水位不动：再次 peek 结果一致，pending 仍可见
+        assert_eq!(
+            ledger.peek_remaining_from_final("已渐进。待补交。尾段。"),
+            "待补交。尾段。"
+        );
+        // queued 未 ack 的段按双水位语义保持可见（已渐进段在注入确认前
+        // 不退场）；peek/commit 不影响该投影。
+        assert_eq!(ledger.pending_text(), "已渐进。待补交。");
+
+        ledger.commit_remaining(&peeked);
+        assert_eq!(ledger.flushed_text(), "已渐进。待补交。尾段。");
+        assert_eq!(ledger.peek_remaining_from_final("已渐进。待补交。尾段。"), "");
+    }
+
+    /// 投递失败回滚：queue_flushable 推进的水位必须能退回——文本未进入
+    /// worker 队列时不得被视为已接管，pending 恢复可见、flushed_text 截回。
+    #[test]
+    fn unqueue_spans_restores_pending_after_failed_dispatch() {
+        let mut ledger = DictationLedger::new(0);
+        ledger.accept_draft_span(span(1, 0, 80_000, "第一句。"));
+        ledger.accept_draft_span(span(2, 80_000, 160_000, "第二句。"));
+        let flushed = ledger.queue_flushable();
+        assert_eq!(flushed.len(), 2);
+        assert_eq!(ledger.flushed_text(), "第一句。第二句。");
+
+        ledger.unqueue_spans(&flushed);
+        assert!(ledger.flushed_text().is_empty(), "flushed_text 必须截回");
+        assert_eq!(
+            ledger.pending_text(),
+            "第一句。第二句。",
+            "回滚后段恢复可见，可重新投递"
+        );
+        // 可再次投递（重试路径）
+        assert_eq!(ledger.queue_flushable().len(), 2);
+    }
+
+    /// 回滚的 ack 收敛：被回滚的段不可能有 ack，acked 不得超过回退后的
+    /// queued 水位（pending_text 切片安全）。
+    #[test]
+    fn unqueue_spans_keeps_acked_bounded_by_queued() {
+        let mut ledger = DictationLedger::new(0);
+        ledger.accept_draft_span(span(1, 0, 80_000, "一。"));
+        ledger.accept_draft_span(span(2, 80_000, 160_000, "二。"));
+        let flushed = ledger.queue_flushable();
+        ledger.ack_delivered(Some(1)); // 首段已确认交付
+        ledger.unqueue_spans(&flushed);
+        assert_eq!(ledger.acked, 0, "acked 收敛到回退后的 queued");
+        // 语义核对：未回滚场景 ack 不受影响
+        let flushed2 = ledger.queue_flushable();
+        ledger.ack_delivered(Some(1));
+        ledger.unqueue_spans(&flushed2[1..]); // 只回滚第二段
+        assert_eq!(ledger.acked, 1);
     }
 }

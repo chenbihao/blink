@@ -336,6 +336,13 @@ pub const RECOGNITION_STRONG_PAUSE_MIN_MS: u32 = 500;
 pub const RECOGNITION_STRONG_PAUSE_MAX_MS: u32 = 1_500;
 pub const RECOGNITION_LONG_PAUSE_MIN_MS: u32 = 800;
 pub const RECOGNITION_LONG_PAUSE_MAX_MS: u32 = 2_000;
+/// `long_pause_ms` 必须严格大于 `strong_pause_ms` 的最小间隔（毫秒）。
+///
+/// 与设置页两个滑块的步长（50ms）一致：相等时 `candidate_readiness` 的
+/// long 分支会以约 300ms 有声门槛接受候选，强停顿的
+/// `owned ≥ 2s / voiced ≥ 1.2s` 保护在 [strong, long) 空区间内永远不可达
+/// （0.23.14.6 修复）。前后端 sanitize/normalize 使用同一间隔。
+pub const RECOGNITION_PAUSE_MIN_GAP_MS: u32 = 50;
 
 /// VAD 切句参数（伪流式模式生效）。
 ///
@@ -652,9 +659,15 @@ impl RecognitionConfig {
             RECOGNITION_LONG_PAUSE_MIN_MS,
             RECOGNITION_LONG_PAUSE_MAX_MS,
         );
-        // 长静音终结必须晚于强停顿，否则强停顿规则永远不可达。
-        if self.long_pause_ms < self.strong_pause_ms {
-            self.long_pause_ms = self.strong_pause_ms;
+        // 长静音终结必须严格晚于强停顿（至少一个滑块步长），否则强停顿
+        // 规则在 [strong, long) 空区间内永远不可达（0.23.14.6）。
+        // strong 上限 1500 + 50 ≤ long 上限 2000，抬高不会越界。
+        let long_pause_floor = self.strong_pause_ms.saturating_add(RECOGNITION_PAUSE_MIN_GAP_MS);
+        if self.long_pause_ms < long_pause_floor {
+            self.long_pause_ms = long_pause_floor.clamp(
+                RECOGNITION_LONG_PAUSE_MIN_MS,
+                RECOGNITION_LONG_PAUSE_MAX_MS,
+            );
         }
 
         // 当前安全范围本身保证 refresh < window，但保留显式约束，
@@ -2150,6 +2163,32 @@ mod tests {
         );
         assert!(recognition.preview_refresh_ms < recognition.preview_window_ms);
         assert!(recognition.draft_min_s <= 6);
+    }
+
+    /// 0.23.14.6：`long_pause_ms == strong_pause_ms` 会让 readiness 的
+    /// long 分支（约 300ms 有声即接受）完全遮蔽强停顿保护——sanitize 必须
+    /// 拉开至少一个滑块步长（50ms）。
+    #[test]
+    fn recognition_sanitize_enforces_strict_gap_between_long_and_strong_pause() {
+        let mut recognition = RecognitionConfig {
+            strong_pause_ms: 1_200,
+            long_pause_ms: 1_200,
+            ..RecognitionConfig::default()
+        };
+        assert!(recognition.sanitize(12));
+        assert_eq!(
+            recognition.long_pause_ms,
+            recognition.strong_pause_ms + RECOGNITION_PAUSE_MIN_GAP_MS
+        );
+
+        // 已合法的间隔保持不动
+        let mut valid = RecognitionConfig {
+            strong_pause_ms: 1_200,
+            long_pause_ms: 1_300,
+            ..RecognitionConfig::default()
+        };
+        assert!(!valid.sanitize(12));
+        assert_eq!(valid.long_pause_ms, 1_300);
     }
 
     #[test]

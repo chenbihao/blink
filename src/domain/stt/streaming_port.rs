@@ -37,8 +37,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Mutex as TokioMutex, Notify, mpsc, oneshot};
 
 use super::{
-    AudioRange, DraftSpan, RecognitionProfile, StreamingSttPort, SttEngine, SttError, SttEvent,
-    SttStreamStats,
+    AudioRange, DraftSpan, PreviewSegment, RecognitionProfile, StreamingSttPort, SttEngine,
+    SttError, SttEvent, SttStreamStats,
 };
 
 /// 事件通道容量（有界）。256 足以吸收正常消费抖动；溢出即按重要性分流。
@@ -105,6 +105,7 @@ enum TypedResult {
         audio_range: AudioRange,
         revision: u64,
         text: String,
+        spans: Vec<PreviewSegment>,
     },
 }
 
@@ -220,15 +221,41 @@ fn parse_typed_result(value: &serde_json::Value) -> Option<TypedResult> {
         let request_id = object_u64(preview_nested, &["request_id", "requestId", "id"])
             .or_else(|| object_u64(Some(value), &["request_id", "requestId"]))
             .or_else(|| (revision > 0).then_some(revision))?;
+        // 0.23.14.6：组合预览的组成段清单（每段文本 + 音频范围）。缺失时
+        // 退化为单一尾部段（旧引擎兼容），顶层 audio_range 即该段范围。
+        let spans = parse_preview_spans(value, preview_nested).unwrap_or_else(|| {
+            vec![PreviewSegment::new(audio_range, text.clone())]
+        });
         return Some(TypedResult::Preview {
             request_id,
             audio_range,
             revision,
             text,
+            spans,
         });
     }
 
     None
+}
+
+/// 解析 `spans` 数组：`[{"text": "...", "range": {"startSample": ..}}, ..]`。
+/// 任一段缺少 text/区间即视为整体缺失（返回 None，调用方走兼容退化）。
+fn parse_preview_spans(
+    root: &serde_json::Value,
+    nested: Option<&serde_json::Value>,
+) -> Option<Vec<PreviewSegment>> {
+    let host = nested.unwrap_or(root);
+    let spans = host.get("spans").or_else(|| root.get("spans"))?.as_array()?;
+    if spans.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        let text = object_str(Some(span), &["text", "content"])?;
+        let range = parse_audio_range(span, None)?;
+        out.push(PreviewSegment::new(range, text));
+    }
+    Some(out)
 }
 
 impl EventBus {
@@ -543,6 +570,7 @@ impl GgufStreamingAdapter {
                         audio_range,
                         revision,
                         text,
+                        spans,
                     } => {
                         self.enqueue_preview(SttEvent::Preview {
                             generation,
@@ -550,6 +578,7 @@ impl GgufStreamingAdapter {
                             audio_range,
                             revision,
                             text,
+                            spans,
                         });
                     }
                 }

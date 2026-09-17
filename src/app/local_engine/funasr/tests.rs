@@ -1509,16 +1509,61 @@ impl crate::domain::stt::SttTransport for RecordingTransport {
         let request_end_wall_ms = self.offset_ms(std::time::Instant::now());
         let elapsed_ms = request_end_wall_ms.saturating_sub(request_start_wall_ms);
         let out_chars = result.as_ref().map(|t| t.chars().count()).ok();
+        // 0.23.14.7 case_17 证据链：输出分类（不含正文）——空 / 噪声标记
+        // （strip_filler_words 后为空，如 /sil）/ 纯标点 / 正文 N 字。
+        // 区分"标点、噪声标记或伪文本"不需要把正文写进报告。
+        let out_class = result
+            .as_ref()
+            .map(|text| classify_transcript_output(text))
+            .ok();
         self.records.lock().unwrap().push(serde_json::json!({
             "request_start_wall_ms": request_start_wall_ms,
             "request_end_wall_ms": request_end_wall_ms,
             "wav_ms": wav_ms,
             "elapsed_ms": elapsed_ms,
             "out_chars": out_chars,
+            "out_class": out_class,
             "ok": result.is_ok(),
         }));
         result
     }
+}
+
+/// 模型输出分类（仅类别与字数，不含正文；0.23.14.7 case_17 证据链）。
+/// 按生产消费口径先剥离噪声标记再统计正文。
+fn classify_transcript_output(text: &str) -> String {
+    if text.is_empty() {
+        return "empty".to_string();
+    }
+    let stripped = crate::domain::stt::postprocess::strip_filler_words(text);
+    if stripped.is_empty() {
+        return "silence_marker".to_string();
+    }
+    let body_chars = stripped
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .filter(|c| {
+            !matches!(
+                c,
+                '，' | '。' | '！' | '？' | '、' | '；' | '：' | '（' | '）' | '《' | '》' | '…'
+                    | '—' | ',' | '.' | '!' | '?' | ';' | ':' | '"' | '\'' | '(' | ')' | '-'
+            )
+        })
+        .count();
+    if body_chars == 0 {
+        "punctuation_only".to_string()
+    } else {
+        format!("text:{body_chars}")
+    }
+}
+
+#[test]
+fn classify_transcript_output_covers_case17_evidence_classes() {
+    assert_eq!(classify_transcript_output(""), "empty");
+    assert_eq!(classify_transcript_output("/sil"), "silence_marker");
+    assert_eq!(classify_transcript_output("。"), "punctuation_only");
+    assert_eq!(classify_transcript_output("嗯。"), "text:1");
+    assert_eq!(classify_transcript_output("风扇背景。/sil"), "text:4");
 }
 
 /// 离线回放与引擎同参数的 EnergyVad：返回（切点 [(ms, reason)]，长停顿
@@ -1659,7 +1704,12 @@ async fn pseudo_streaming_real_worker_replay() {
         })
         .collect();
     wavs.sort();
-    assert!(!wavs.is_empty(), "corpus dir has no unlabeled long wavs");
+    if wavs.is_empty() {
+        // 0.23.14.6：corpus 全部收录进 manifest 后 unlabeled 段自然为空——
+        // 跳过 A/H 长录音对照，标注语料段（含 case 01/08/13/16 等关注样本）
+        // 仍然完整回放。
+        eprintln!("跳过 unlabeled 长录音段：corpus 已全部列入 manifest（labeled 段仍执行）");
+    }
 
     let audio_dir_guard = tempfile::Builder::new()
         .prefix("real-pseudo-audio-")
@@ -1864,6 +1914,8 @@ async fn pseudo_streaming_real_worker_replay() {
                 transport: Some(recorder.clone()),
             };
             let boundary_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let decision_observer =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let finalize_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let engine =
                 crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
@@ -1871,6 +1923,7 @@ async fn pseudo_streaming_real_worker_replay() {
                 )
                 .expect("engine constructs")
                 .with_boundary_observer(boundary_observer.clone())
+                .with_decision_observer(decision_observer.clone())
                 .with_finalize_observer(finalize_observer.clone());
 
             let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read labeled wav");
@@ -1883,19 +1936,34 @@ async fn pseudo_streaming_real_worker_replay() {
             let mut confirmed_events: Vec<serde_json::Value> = Vec::new();
             let mut confirmed_deliveries: Vec<serde_json::Value> = Vec::new();
             let mut boundary_events: Vec<serde_json::Value> = Vec::new();
+            // 0.23.14.7 case_17 证据链：生产 Draft envelope 解析（kind=draft）
+            // ——可靠 DraftSpan 的音频范围与正文字数（不含正文本身）。
+            let mut draft_events: Vec<serde_json::Value> = Vec::new();
             recorder.start_clock();
             for chunk in audio.samples.chunks(sample_rate / 10) {
                 let delivered = engine.transcribe_chunk(chunk).await.expect("chunk ok");
                 fed_samples += chunk.len();
-                if serde_json::from_str::<serde_json::Value>(&delivered)
-                    .ok()
-                    .and_then(|v| v["confirmed_changed"].as_bool())
-                    == Some(true)
-                {
-                    confirmed_deliveries.push(serde_json::json!({
-                        "wall_ms": recorder.offset_ms(std::time::Instant::now()),
-                        "fed_ms": fed_samples * 1000 / sample_rate,
-                    }));
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&delivered) {
+                    if value["kind"] == "draft" {
+                        let span = &value["span"];
+                        let range = &span["audioRange"];
+                        draft_events.push(serde_json::json!({
+                            "fed_ms": fed_samples * 1000 / sample_rate,
+                            "wall_ms": recorder.offset_ms(std::time::Instant::now()),
+                            "span_id": span["spanId"].as_u64(),
+                            "range_start_ms":
+                                range["startSample"].as_u64().map(|v| v * 1000 / 16_000),
+                            "range_end_ms":
+                                range["endSample"].as_u64().map(|v| v * 1000 / 16_000),
+                            "text_chars": span["text"].as_str().map(|t| t.chars().count()),
+                        }));
+                    }
+                    if value["confirmed_changed"].as_bool() == Some(true) {
+                        confirmed_deliveries.push(serde_json::json!({
+                            "wall_ms": recorder.offset_ms(std::time::Instant::now()),
+                            "fed_ms": fed_samples * 1000 / sample_rate,
+                        }));
+                    }
                 }
                 let observed = boundary_observer.lock().unwrap();
                 while boundary_events.len() < observed.len() {
@@ -1924,8 +1992,31 @@ async fn pseudo_streaming_real_worker_replay() {
                 }
             }
             let final_text = engine.finalize().await.expect("finalize ok");
+            // 0.23.14.6 诊断：gate 后 stale 淘汰数与预览回缩字符数进报告
+            //（流式回放观察口径，与生产 SttStreamStats 同源）。
+            let final_stats = engine.stream_stats();
             // confirmed_events 只在 committed 真正推进时 push（首个元素即首个
             // 流中 commit），故流中确认数 = 数组长度。
+            // 0.23.14.7 case_17 证据链：采纳分支直方图 + 无正文调用数。
+            let mut accepted_via_counts: std::collections::BTreeMap<String, u64> =
+                std::collections::BTreeMap::new();
+            let decisions = decision_observer.lock().unwrap().clone();
+            for decision in &decisions {
+                if decision.outcome == "accepted" {
+                    let via = decision.accepted_via.unwrap_or("unknown").to_string();
+                    *accepted_via_counts.entry(via).or_insert(0) += 1;
+                }
+            }
+            let calls = recorder.take_records();
+            let no_body_calls = calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call["out_class"].as_str(),
+                        Some("empty") | Some("silence_marker") | Some("punctuation_only")
+                    )
+                })
+                .count();
             labeled_reports.push(serde_json::json!({
                 "case_id": case.case_id,
                 "expected_segments": case.expected_segments,
@@ -1934,18 +2025,31 @@ async fn pseudo_streaming_real_worker_replay() {
                 "confirmed_events": confirmed_events,
                 "confirmed_deliveries": confirmed_deliveries,
                 "boundaries": boundary_events,
+                "production_draft_count": draft_events.len(),
+                "draft_spans": draft_events,
+                "decisions": decisions,
+                "accepted_via_counts": accepted_via_counts,
+                "raw_vad_boundary_count": offline_boundaries.len(),
+                "no_body_calls": no_body_calls,
                 "offline_boundaries": offline_boundaries,
                 "rejected_short_sentences": rejected_short_sentences,
                 "long_pauses_ms": long_pauses,
                 "final_chars": final_text.chars().count(),
+                "stale_before_worker": final_stats.stale_before_worker,
+                "preview_retreat_chars": final_stats.preview_retreat_chars,
                 "finalize_timings": finalize_timing_report(&finalize_observer, &recorder),
-                "transcribe_calls": recorder.take_records(),
+                "transcribe_calls": calls,
             }));
             println!(
-                "labeled {}: stream_confirms={} final_chars={}",
+                "labeled {}: accepted_boundaries={} production_drafts={} final_chars={} no_body_calls={} accepted_via={:?} stale_before_worker={} preview_retreat_chars={}",
                 case.case_id,
-                confirmed_events.len(),
-                final_text.chars().count()
+                boundary_events.len(),
+                draft_events.len(),
+                final_text.chars().count(),
+                no_body_calls,
+                accepted_via_counts,
+                final_stats.stale_before_worker,
+                final_stats.preview_retreat_chars,
             );
             engine.reset();
         }
@@ -2436,13 +2540,18 @@ async fn g2_projection_real_worker_timeline() {
         instance_id: "g2-projection-replay".into(),
         transport: Some(std::sync::Arc::new(transport)),
     };
+    // 候选裁决观察：引擎内每个候选边界"切/等待"的判定依据（诊断进报告）。
+    let boundary_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let decision_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let engine =
         crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection_with_profile(
             &SttConfig::default(),
             conn,
             RecognitionProfile::PreviewDraft,
         )
-        .expect("engine constructs");
+        .expect("engine constructs")
+        .with_boundary_observer(boundary_observer.clone())
+        .with_decision_observer(decision_observer.clone());
     let engine_arc: std::sync::Arc<dyn crate::domain::stt::SttEngine> = std::sync::Arc::new(engine);
     let port = GgufStreamingAdapter::new_with_profile(
         engine_arc.clone(),
@@ -2452,6 +2561,13 @@ async fn g2_projection_real_worker_timeline() {
     let wav = std::fs::read(&wav_path).expect("read wav");
     let audio = super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
     let sample_rate = 16_000usize;
+
+    // 原始 VAD 诊断（生产默认参数离线回放）：只说明音频里的自然停顿数，
+    // 与生产 PreviewDraft 实际采纳的 Draft 数**分开报告**（0.23.14.7 P1-3：
+    // raw VAD 计数不得作为生产验收口径）。
+    let default_vad = SttConfig::default().local_engine.vad;
+    let (raw_vad_boundaries, _raw_pauses, _raw_rejected) =
+        offline_vad_timeline(&audio.samples, &default_vad);
 
     let generation = port.begin_session().await.expect("begin session");
     let mut rx = port.events();
@@ -2514,20 +2630,6 @@ async fn g2_projection_real_worker_timeline() {
     }
 
     // ── 诊断输出 ──
-    // 私有时间线（含正文）：只写 corpus 私有目录（gitignored）
-    let private_output = corpus_dir.join("g2-projection-private.json");
-    std::fs::write(
-        &private_output,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "scope": "private G2 projection timeline: contains transcripts and filename; never commit",
-            "case": case.case_id,
-            "filename": case.filename,
-            "timeline": timeline,
-        }))
-        .unwrap(),
-    )
-    .expect("write private g2 projection timeline");
-
     let preview_events: Vec<&serde_json::Value> = timeline
         .iter()
         .filter(|entry| entry["kind"] == "preview")
@@ -2540,9 +2642,37 @@ async fn g2_projection_real_worker_timeline() {
         .iter()
         .filter(|entry| entry["kind"] == "final")
         .collect();
+    // 私有时间线（含正文）：只写 corpus 私有目录（gitignored）
+    let private_output = corpus_dir.join("g2-projection-private.json");
+    std::fs::write(
+        &private_output,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "scope": "private G2 projection timeline: contains transcripts and filename; never commit",
+            "case": case.case_id,
+            "filename": case.filename,
+            "raw_vad_diagnostic": {
+                "note": "raw EnergyVad boundaries (production default params) — diagnostic only, NOT production Draft acceptance",
+                "boundary_count": raw_vad_boundaries.len(),
+                "boundaries": raw_vad_boundaries,
+            },
+            "engine_decisions": {
+                "accepted_boundaries": boundary_observer.lock().unwrap().clone(),
+                "candidate_waiting": decision_observer.lock().unwrap().clone(),
+            },
+            "production_acceptance": {
+                "expected_segments": case.expected_segments,
+                "draft_count": draft_events.len(),
+                "drafts": draft_events,
+            },
+            "timeline": timeline,
+        }))
+        .unwrap(),
+    )
+    .expect("write private g2 projection timeline");
 
     println!(
-        "g2 projection: previews={} drafts={} finals={} fed_ms={fed_ms} finalize_wall_ms={finalize_wall_ms} feed_error={feed_error:?}",
+        "g2 projection: raw_vad_boundaries={} previews={} drafts={} finals={} fed_ms={fed_ms} finalize_wall_ms={finalize_wall_ms} feed_error={feed_error:?}",
+        raw_vad_boundaries.len(),
         preview_events.len(),
         draft_events.len(),
         final_events.len(),
@@ -2568,6 +2698,20 @@ async fn g2_projection_real_worker_timeline() {
             "fed_ms": fed_ms,
             "finalize_wall_ms": finalize_wall_ms,
             "feed_error": feed_error,
+            "raw_vad_diagnostic": {
+                "note": "raw EnergyVad boundaries — diagnostic only, NOT production Draft acceptance",
+                "boundary_count": raw_vad_boundaries.len(),
+            },
+            "production_acceptance": {
+                "expected_segments": case.expected_segments,
+                "draft_count": draft_events.len(),
+                "drafts": draft_events.iter().map(|entry| serde_json::json!({
+                    "wall_ms": entry["wall_ms"],
+                    "range_start_ms": entry["range_start_ms"],
+                    "range_end_ms": entry["range_end_ms"],
+                    "chars": entry["chars"],
+                })).collect::<Vec<_>>(),
+            },
             "timeline": timeline
                 .iter()
                 .map(|entry| {
@@ -2586,7 +2730,7 @@ async fn g2_projection_real_worker_timeline() {
     )
     .expect("write anonymous g2 projection timeline");
 
-    // ── 断言：预览必须在录音期间到达（不是全部推迟到收尾）──
+    // ── 断言：生产同构链路验收（raw VAD 诊断不参与裁决）──────────────
     assert!(feed_error.is_none(), "push_audio 不应失败: {feed_error:?}");
     assert!(
         !preview_events.is_empty(),
@@ -2605,33 +2749,143 @@ async fn g2_projection_real_worker_timeline() {
         mid_recording_previews >= 3,
         "收尾前应至少有 3 个 Preview（实际 {mid_recording_previews}）"
     );
-    assert!(
-        !draft_events.is_empty(),
-        "多句停顿语料应产出 Draft 事件（时间线: {timeline:?}）"
+
+    // 0.23.14.7 P1-3：生产链路实际采纳的 Draft 数必须等于 manifest 期望
+    // （case_12 = 4），且全部发生在收尾之前——raw VAD 计数只是诊断，
+    // 不得降级为 `>= 2` 放行漏切。
+    assert_eq!(
+        final_events.len(),
+        1,
+        "应恰好一个 Final 事件（时间线: {timeline:?}）"
+    );
+    assert_eq!(
+        draft_events.len(),
+        case.expected_segments as usize,
+        "生产链路 Draft 数必须等于 manifest 期望（raw VAD 诊断 = {} 边界）",
+        raw_vad_boundaries.len()
     );
     let mid_drafts = draft_events
         .iter()
         .filter(|entry| entry["wall_ms"].as_u64().unwrap_or(0) < finalize_wall_ms)
         .count();
-    assert!(
-        mid_drafts >= 2,
-        "收尾前应至少有 2 个 Draft 提交（实际 {mid_drafts}）"
+    assert_eq!(
+        mid_drafts, case.expected_segments as usize,
+        "全部 Draft 必须在收尾前提交（不得堆到 Final）"
     );
-    assert_eq!(final_events.len(), 1, "应恰好一个 Final 事件");
+
+    // Draft 边界窗口（谷内切点允许少量漂移）与首个 Draft 的及时性——
+    // 修复前首个 Draft 被门槛夹缝卡到 ~7.66s（与第二句合并）。
+    let draft_windows_ms: &[(u64, u64)] = &[
+        (2_300, 3_000),
+        (7_300, 8_200),
+        (9_800, 10_800),
+        (12_900, 13_800),
+    ];
+    assert_eq!(
+        draft_windows_ms.len(),
+        case.expected_segments as usize,
+        "边界窗口数应与 manifest 期望一致"
+    );
+    let first_draft_wall = draft_events[0]["wall_ms"].as_u64().unwrap_or(u64::MAX);
+    assert!(
+        first_draft_wall < 6_500,
+        "首个 Draft 应在首个自然停顿附近定稿（实际 {first_draft_wall}ms，修复前 ~7.66s）"
+    );
+    let mut previous_end_ms: Option<u64> = None;
+    for (index, (entry, &(window_start, window_end))) in
+        draft_events.iter().zip(draft_windows_ms).enumerate()
+    {
+        let start_ms = entry["range_start_ms"].as_u64().unwrap_or(u64::MAX);
+        let end_ms = entry["range_end_ms"].as_u64().unwrap_or(u64::MAX);
+        assert!(
+            start_ms < end_ms,
+            "Draft {index} 必须是有效半开区间（{start_ms}..{end_ms}ms）"
+        );
+        assert!(
+            (window_start..=window_end).contains(&end_ms),
+            "Draft {index} 边界应在 {window_start}–{window_end}ms 窗口内（实际 {end_ms}ms）"
+        );
+        if let Some(prev_end) = previous_end_ms {
+            assert_eq!(
+                start_ms, prev_end,
+                "Draft {index} 必须与上一段无缝衔接（音频 ownership 无重叠无丢失）"
+            );
+        }
+        previous_end_ms = Some(end_ms);
+    }
+
+    // Preview 投影不得出现明显连续重复短语（`明确的多句话。明确的多句话。`
+    // 类重复投影）：按句末标点切分检查相邻句相等，span 邻接相等同样拒绝。
+    // 文本断言不依赖模型偶发错别字，只抓结构性重复。
+    for entry in &preview_events {
+        let text = entry["text"].as_str().unwrap_or_default();
+        assert!(
+            !has_adjacent_duplicate_sentence(text),
+            "Preview 投影出现连续重复短语：{text:?}（+{}ms）",
+            entry["wall_ms"]
+        );
+        let spans = entry["spans"].as_array().cloned().unwrap_or_default();
+        let mut previous_span_range_end: Option<u64> = None;
+        for span in &spans {
+            let start = span["range"]["start"].as_u64().unwrap_or(0);
+            let end = span["range"]["end"].as_u64().unwrap_or(0);
+            assert!(start < end, "Preview span 区间必须有效（{start}..{end}ms）");
+            if let Some(prev_end) = previous_span_range_end {
+                assert!(
+                    start >= prev_end,
+                    "Preview spans 必须单调不重叠（{prev_end}ms 后出现 {start}ms）"
+                );
+            }
+            previous_span_range_end = Some(end);
+        }
+    }
+
+    // Final 全文必须覆盖尾部"就是这样"（最后一短句不被终态吞掉）。
+    let final_text = final_events[0]["text"].as_str().unwrap_or_default();
+    assert!(
+        final_text.contains("就是这样"),
+        "Final 全文必须覆盖尾部短句（实际 {final_text:?}）"
+    );
+}
+
+/// 按句末标点切分后检查相邻句相等——只抓结构性重复投影，对模型偶发
+/// 错别字不敏感。
+fn has_adjacent_duplicate_sentence(text: &str) -> bool {
+    let mut previous: Option<&str> = None;
+    for segment in text.split(['。', '！', '？']) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        if previous == Some(segment) {
+            return true;
+        }
+        previous = Some(segment);
+    }
+    false
 }
 
 /// 时间线条目：墙钟 + 类型 + 音频范围 + 字数 + 正文（正文只进私有报告）。
+/// 0.23.14.7 P1-1：Preview 携带组成段清单（text + 毫秒范围）——重复投影
+/// 验收按 span 邻接相等裁决，不靠全文猜测。
 fn timeline_entry(
     event: &crate::domain::stt::SttEvent,
     started: std::time::Instant,
     fed_ms: usize,
 ) -> serde_json::Value {
     let wall_ms = started.elapsed().as_millis() as u64;
+    let range_ms = |range: crate::domain::stt::AudioRange| {
+        serde_json::json!({
+            "start": range.start_sample * 1000 / 16_000,
+            "end": range.end_sample * 1000 / 16_000,
+        })
+    };
     match event {
         crate::domain::stt::SttEvent::Preview {
             request_id,
             audio_range,
             text,
+            spans,
             ..
         } => serde_json::json!({
             "wall_ms": wall_ms,
@@ -2642,6 +2896,10 @@ fn timeline_entry(
             "range_end_ms": audio_range.end_sample * 1000 / 16_000,
             "chars": text.chars().count(),
             "text": text,
+            "spans": spans.iter().map(|span| serde_json::json!({
+                "text": span.text,
+                "range": range_ms(span.range),
+            })).collect::<Vec<_>>(),
         }),
         crate::domain::stt::SttEvent::Draft { span, .. } => serde_json::json!({
             "wall_ms": wall_ms,

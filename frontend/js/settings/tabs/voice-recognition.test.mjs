@@ -79,8 +79,24 @@ assert.deepEqual(RECOGNITION_KEYS, [
 {
     const recognition = {...RECOGNITION_DEFAULTS, strong_pause_ms: 1200, long_pause_ms: 900};
     assert.equal(normalizeRecognitionConfig(recognition, 12), true);
-    assert.equal(recognition.long_pause_ms, 1200);
-    assert.ok(recognition.long_pause_ms >= recognition.strong_pause_ms);
+    assert.equal(recognition.long_pause_ms, 1250);
+    assert.ok(recognition.long_pause_ms > recognition.strong_pause_ms);
+}
+
+// 0.23.14.6 相等门槛必须被拉开至少一个滑块步长（50ms）——相等会让
+// 长静音分支遮蔽强停顿的 2s/1.2s 保护
+{
+    const recognition = {...RECOGNITION_DEFAULTS, strong_pause_ms: 1200, long_pause_ms: 1200};
+    assert.equal(normalizeRecognitionConfig(recognition, 12), true);
+    assert.equal(recognition.long_pause_ms, 1250);
+    assert.equal(recognition.strong_pause_ms, 1200);
+}
+
+// 已合法间隔（> 步长）不调整
+{
+    const recognition = {...RECOGNITION_DEFAULTS, strong_pause_ms: 1200, long_pause_ms: 1300};
+    assert.equal(normalizeRecognitionConfig(recognition, 12), false);
+    assert.equal(recognition.long_pause_ms, 1300);
 }
 
 const voiceSource = await readFile(new URL("./voice.js", import.meta.url), "utf8");

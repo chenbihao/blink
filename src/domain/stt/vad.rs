@@ -586,6 +586,13 @@ impl EnergyVad {
         (self.soft_window_ms, self.hard_window_ms)
     }
 
+    /// 最小句子长度（毫秒）。0.23.14.7：自然句尾采纳路径的有声可信度
+    /// 与 VAD 自身的 `SentenceEnd` 校验对齐（同源同值），不再由上层
+    /// 重复硬编码门槛。
+    pub fn min_sentence_ms(&self) -> u32 {
+        self.min_sentence_ms
+    }
+
     /// 0.22.15：当前 off 阈值——供裁剪等逻辑消费，避免两套静音定义。
     ///
     /// 此值随 `noise_floor` 自适应变化，反映当前环境底噪。
@@ -593,6 +600,13 @@ impl EnergyVad {
     pub fn current_off_threshold(&self) -> f64 {
         let (_, off) = self.compute_thresholds();
         off
+    }
+
+    /// 0.23.14.7 case_17：当前 on 阈值——供有声可信度统计消费（强帧 =
+    /// RMS ≥ on）。与 `current_off_threshold` 同源自适应。
+    pub fn current_on_threshold(&self) -> f64 {
+        let (on, _) = self.compute_thresholds();
+        on
     }
 
     /// 0.23.7.2 D：强制切（硬窗口/未提交上限）的有界近期能量谷底查询。

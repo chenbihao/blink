@@ -73,9 +73,18 @@ pub struct CorpusResult {
     pub inference_ms: Option<u64>,
     pub total_ms: u64,
     pub peak_memory_bytes: Option<u64>,
+    /// 原始 EnergyVad（生产默认参数）对整段音频的自然边界计数——**诊断列**。
+    /// 它只说明音频里有多少个声学停顿，不代表生产 PreviewDraft 实际采纳
+    /// 的 Draft 数（0.23.14.7 P1-3：两者口径分离，禁止混入 matched）。
     pub detected_segments: u32,
     pub expected_segments: u32,
-    pub segments_matched: bool,
+    /// 诊断列：原始 VAD 边界数与 manifest 期望一致（不参与 `matched`）。
+    pub vad_segments_matched: bool,
+    /// 生产同构链路（PreviewDraft 流式回放）实际采纳的 Draft 数。
+    /// `None` = 本路径未测量（整条识别验收不携带流式段数）。
+    pub production_draft_count: Option<u32>,
+    /// 生产 Draft 采纳数与 manifest 期望一致；`None` = 未测量。
+    pub production_drafts_matched: Option<bool>,
     pub text_empty: bool,
     pub text_matched: bool,
     pub text_chars: usize,
@@ -235,7 +244,9 @@ pub async fn run_corpus(config: CorpusRunnerConfig) -> Result<Vec<CorpusResult>,
                         .and_then(crate::infra::platform::process::peak_working_set_bytes),
                     detected_segments: 0,
                     expected_segments: case.expected_segments,
-                    segments_matched: false,
+                    vad_segments_matched: false,
+                    production_draft_count: None,
+                    production_drafts_matched: None,
                     text_empty: true,
                     text_matched: false,
                     text_chars: 0,
@@ -248,8 +259,9 @@ pub async fn run_corpus(config: CorpusRunnerConfig) -> Result<Vec<CorpusResult>,
         };
 
         let format_ok = assert_normalized_format(&summary).is_ok();
+        // 原始 VAD 边界计数只作诊断（见 CorpusResult 字段注释），不进 matched。
         let detected_segments = detect_segments(&summary.samples);
-        let segments_matched = detected_segments == case.expected_segments;
+        let vad_segments_matched = detected_segments == case.expected_segments;
         let wav = encode_canonical_wav(&summary.samples);
         let transport_start = Instant::now();
         let transcription = transport.transcribe_with_metrics(&wav).await;
@@ -281,12 +293,16 @@ pub async fn run_corpus(config: CorpusRunnerConfig) -> Result<Vec<CorpusResult>,
                     peak_memory_bytes,
                     detected_segments,
                     expected_segments: case.expected_segments,
-                    segments_matched,
+                    vad_segments_matched,
+                    production_draft_count: None,
+                    production_drafts_matched: None,
                     text_empty,
                     text_matched,
                     text_chars: normalized.chars().count(),
                     best_similarity_percent,
-                    matched: format_ok && segments_matched && text_matched,
+                    // 0.23.14.7 P1-3：整条验收 = 格式 + 文本；原始 VAD 段数
+                    // 是诊断列，生产 Draft 采纳数由流式回放路径单独测量。
+                    matched: format_ok && text_matched,
                     error_category: None,
                 });
             }
@@ -305,7 +321,9 @@ pub async fn run_corpus(config: CorpusRunnerConfig) -> Result<Vec<CorpusResult>,
                 peak_memory_bytes,
                 detected_segments,
                 expected_segments: case.expected_segments,
-                segments_matched,
+                vad_segments_matched,
+                production_draft_count: None,
+                production_drafts_matched: None,
                 text_empty: true,
                 text_matched: false,
                 text_chars: 0,
@@ -482,6 +500,8 @@ fn is_cjk_punctuation(c: char) -> bool {
 /// 输出匿名验收表。
 ///
 /// 不输出完整转写文本，只输出 case_id、格式、时长、是否命中和错误类别。
+/// 0.23.14.7 P1-3：原始 VAD 段数（诊断）与生产 Draft 采纳数（流式回放
+/// 路径测量，整条路径为 `-`）分列报告，互不混算。
 pub fn format_anonymous_summary(results: &[CorpusResult]) -> String {
     use std::fmt::Write;
 
@@ -489,7 +509,7 @@ pub fn format_anonymous_summary(results: &[CorpusResult]) -> String {
     writeln!(output, "STT corpus acceptance (anonymous)").unwrap();
     writeln!(
         output,
-        "{:<12} {:<6} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8}",
+        "{:<12} {:<6} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<10} {:<10} {:<8} {:<8} {:<8} {:<8}",
         "case_id",
         "fmt",
         "dur_ms",
@@ -498,7 +518,8 @@ pub fn format_anonymous_summary(results: &[CorpusResult]) -> String {
         "infer",
         "total",
         "peak_mb",
-        "segments",
+        "vad_seg*",
+        "drafts",
         "text",
         "chars",
         "sim%",
@@ -508,7 +529,7 @@ pub fn format_anonymous_summary(results: &[CorpusResult]) -> String {
     for r in results {
         writeln!(
             output,
-            "{:<12} {:<6} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8}",
+            "{:<12} {:<6} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<10} {:<10} {:<8} {:<8} {:<8} {:<8}",
             r.case_id,
             if r.format_ok { "Y" } else { "N" },
             r.duration_ms,
@@ -519,6 +540,8 @@ pub fn format_anonymous_summary(results: &[CorpusResult]) -> String {
             r.peak_memory_bytes
                 .map_or_else(|| "-".into(), |bytes| (bytes / (1024 * 1024)).to_string()),
             format!("{}/{}", r.detected_segments, r.expected_segments),
+            r.production_draft_count
+                .map_or_else(|| "-".into(), |count| count.to_string()),
             if r.text_matched { "Y" } else { "N" },
             r.text_chars,
             r.best_similarity_percent,
@@ -2020,7 +2043,9 @@ mod tests {
             peak_memory_bytes: Some(1024),
             detected_segments: 1,
             expected_segments: 1,
-            segments_matched: true,
+            vad_segments_matched: true,
+            production_draft_count: None,
+            production_drafts_matched: None,
             text_empty: false,
             text_matched: true,
             text_chars: 4,

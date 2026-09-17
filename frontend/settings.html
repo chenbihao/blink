@@ -1947,7 +1947,14 @@
                             <button type="button" class="voice-vad-debug-play" id="voice-vad-debug-play"></button>
                             <time class="voice-vad-debug-play-time" id="voice-vad-debug-play-time"></time>
                         </div>
-                        <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.timeline_title">切句与识别</h4>
+                        <div class="voice-vad-debug-section-head">
+                            <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.timeline_title">切句与识别</h4>
+                            <button class="btn btn-small" id="voice-vad-debug-copy" type="button"
+                                    data-i18n-title="voice.local.vad_debug.copy_debug_hint">
+                                <svg aria-hidden="true" class="icon"><use href="#icon-copy"/></svg>
+                                <span data-i18n="voice.local.vad_debug.copy_debug">复制调试信息</span>
+                            </button>
+                        </div>
                         <div class="voice-vad-debug-timeline-hint" data-i18n="voice.local.vad_debug.timeline_hint">每张卡片描述标出的音频区间，旁边的竖向能量条也对应同一段；灰色表示低能量。</div>
                         <div class="voice-vad-debug-timeline" id="voice-vad-debug-events"></div>
                     </section>

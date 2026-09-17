@@ -31,6 +31,13 @@ export const RECOGNITION_RANGE = {
 };
 
 /**
+ * long_pause_ms 必须严格大于 strong_pause_ms 的最小间隔（毫秒）。
+ * 与后端 RECOGNITION_PAUSE_MIN_GAP_MS（滑块步长 50ms）一致：相等会让
+ * 长静音分支（约 300ms 有声即定稿）遮蔽强停顿的 2s/1.2s 保护。
+ */
+export const RECOGNITION_PAUSE_MIN_GAP_MS = 50;
+
+/**
  * 归一化 Preview / Draft 配置。
  *
  * `maxUncommittedS` 是已归一化 VAD 的未提交上限；缺省时只应用字段自身
@@ -78,11 +85,17 @@ export function normalizeRecognitionConfig(recognition, maxUncommittedS = Infini
         changed = true;
     }
 
-    // 长静音终结必须晚于强停顿，否则强停顿规则永远不可达（与后端
-    // RecognitionConfig::sanitize 同一关系约束）。
-    if (recognition.long_pause_ms < recognition.strong_pause_ms) {
-        recognition.long_pause_ms = recognition.strong_pause_ms;
-        changed = true;
+    // 长静音终结必须严格晚于强停顿（至少一个滑块步长），否则强停顿规则
+    // 在 [strong, long) 空区间内永远不可达（与后端 sanitize 同一约束）。
+    if (recognition.long_pause_ms <= recognition.strong_pause_ms) {
+        const floor = Math.min(
+            RECOGNITION_RANGE.long_pause_ms.max,
+            recognition.strong_pause_ms + RECOGNITION_PAUSE_MIN_GAP_MS,
+        );
+        if (recognition.long_pause_ms < floor) {
+            recognition.long_pause_ms = floor;
+            changed = true;
+        }
     }
 
     return changed;

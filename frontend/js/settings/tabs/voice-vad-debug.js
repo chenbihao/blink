@@ -180,6 +180,49 @@ export function buildVadDebugTimeline(result) {
     return [...groups.values()].sort((a, b) => a.audioMs - b.audioMs);
 }
 
+// ── 0.23.14.7 VAD 候选原因映射 ──
+//
+// `boundaries[].reason` / `decisions[].reason` 直接来自后端 code（VadEvent 的
+// reason）。此前按 `voice.local.vad_debug.${reason}` 拼 key，未登记的 code
+// （如 short_phrase）会把裸 key 显示到界面上。这里统一走映射 + 兜底：
+// 未登记 code 显示兜底文案并附上原始 code，既不露 key 也不丢排查线索。
+
+/** 候选原因 code → i18n key。 */
+const VAD_REASON_KEYS = {
+    natural_silence: "voice.local.vad_debug.natural_silence",
+    soft_window: "voice.local.vad_debug.soft_window",
+    hard_window: "voice.local.vad_debug.hard_window",
+    short_phrase: "voice.local.vad_debug.short_phrase",
+    uncommitted_cap: "voice.local.vad_debug.uncommitted_cap",
+    none: "voice.local.vad_debug.none",
+};
+
+/** 未登记原因的统一兜底文案 key。 */
+const VAD_REASON_FALLBACK_KEY = "voice.local.vad_debug.reason_unknown";
+
+/**
+ * 将候选原因 code 映射为 i18n key；未登记 code 返回兜底 key。
+ * @param {string|null|undefined} reason
+ * @returns {string}
+ */
+export function mapVadReasonKey(reason) {
+    if (typeof reason !== "string" || !reason) return VAD_REASON_FALLBACK_KEY;
+    return VAD_REASON_KEYS[reason] || VAD_REASON_FALLBACK_KEY;
+}
+
+/**
+ * 候选原因的可显示文案；未登记 code 在兜底文案后附上原始 code。
+ * @param {string|null|undefined} reason
+ * @param {function} t - i18n translate
+ * @returns {string}
+ */
+export function vadReasonLabel(reason, t) {
+    const key = mapVadReasonKey(reason);
+    if (key !== VAD_REASON_FALLBACK_KEY) return t(key);
+    const raw = typeof reason === "string" && reason ? reason : "unknown";
+    return `${t(key)} (${raw})`;
+}
+
 function addText(parent, tag, className, value) {
     const node = document.createElement(tag);
     node.className = className;
@@ -235,7 +278,7 @@ function appendDecisionLane(parent, decisions, result, t) {
         const reason = decision.reason === "tail" ? t("voice.local.vad_debug.tail") :
             decision.reason === "commit" ? t("voice.local.vad_debug.confirmed") :
                 decision.reason === "min_sentence" ? t("voice.local.vad_debug.min_sentence") :
-                    t(`voice.local.vad_debug.${decision.reason}`);
+                    vadReasonLabel(decision.reason, t);
         const verdict = outcome === "accepted" ? t("voice.local.vad_debug.decision_cut") :
             outcome === "tail" ? t("voice.local.vad_debug.decision_pending") :
                 outcome === "committed" ? t("voice.local.vad_debug.confirmed") :
@@ -351,7 +394,7 @@ export function renderVadDebugResult(raw, elements, t) {
         const x = Math.min(1000, Math.max(0, boundary.audio_ms / duration * 1000));
         const marker = svgElement("line", {x1: x, x2: x, y1: 0, y2: 122, class: "vad-cut"});
         const title = svgElement("title");
-        title.textContent = `${seconds(boundary.audio_ms)} ${t(`voice.local.vad_debug.${boundary.reason}`)}`;
+        title.textContent = `${seconds(boundary.audio_ms)} ${vadReasonLabel(boundary.reason, t)}`;
         marker.append(title);
         svg.append(marker);
     }
@@ -377,6 +420,149 @@ export function renderVadDebugResult(raw, elements, t) {
     for (const entry of timeline) appendTimelineEntry(events, entry, result, t);
 }
 
+// ── 0.23.14.7 复制调试信息 ──
+//
+// 面板只呈现"看得见"的部分（能量曲线 + 时间轴）。排查误切需要的是**完整**的
+// 证据链：环境与参数、每个候选的全部字段（含 voiced/strong/strong_run/quiet）、
+// 能量轨迹与原始 JSON；协调器快照在调用方确实取到时才附上。这里把它们组装成
+// 一段可直接粘贴的文本。
+
+/** 毫秒转秒（保留两位）；非有限值显示占位符。 */
+function debugSeconds(value) {
+    return Number.isFinite(value) ? `${(Number(value) / 1000).toFixed(2)}s` : "—";
+}
+
+/** 阈值类小数值的固定精度输出（CSV 用，非有限值留空）。 */
+function debugThreshold(value) {
+    return Number.isFinite(value) ? Number(value).toFixed(6) : "";
+}
+
+/** 决策/事件字段兼容 camelCase 与 snake_case 两种来源。 */
+function debugField(object, camel, snake) {
+    const value = object?.[camel] ?? object?.[snake];
+    return value === undefined ? null : value;
+}
+
+/** 单条决策压缩成一行：完整字段名 + 秒制时间，便于与代码/JSON 对照检索。 */
+function formatDecisionLine(decision) {
+    const parts = [`t=${debugSeconds(debugField(decision, "audioMs", "audio_ms"))}`,
+        `outcome=${decision.outcome ?? "—"}`];
+    const via = debugField(decision, "acceptedVia", "accepted_via");
+    if (via != null) parts.push(`accepted_via=${via}`);
+    parts.push(`reason=${decision.reason ?? "—"}`);
+    const ownedStart = debugField(decision, "ownedStartMs", "owned_start_ms");
+    const ownedEnd = debugField(decision, "ownedEndMs", "owned_end_ms");
+    if (Number.isFinite(ownedStart) && Number.isFinite(ownedEnd)) {
+        parts.push(`owned=${debugSeconds(ownedStart)}-${debugSeconds(ownedEnd)}`);
+    }
+    for (const [camel, snake] of [["voicedMs", "voiced_ms"], ["strongMs", "strong_ms"],
+        ["strongRunMs", "strong_run_ms"], ["quietMs", "quiet_ms"], ["sentenceMs", "sentence_ms"]]) {
+        const value = debugField(decision, camel, snake);
+        if (Number.isFinite(value)) parts.push(`${snake}=${value}ms`);
+    }
+    const waitReason = debugField(decision, "waitReason", "wait_reason");
+    if (waitReason != null) parts.push(`wait_reason=${waitReason}`);
+    return `  ${parts.join(" ")}`;
+}
+
+/** 单条识别事件压缩成一行。 */
+function formatTextEventLine(event) {
+    const parts = [`[${event.kind ?? "?"}]`, `fed=${debugSeconds(event.fed_ms)}`,
+        `wall=${debugSeconds(event.wall_ms)}`];
+    const range = eventAudioRange(event, 0);
+    parts.push(`range=${debugSeconds(range.startMs)}-${debugSeconds(range.endMs)}`);
+    if (!range.exact) parts.push("range=inferred");
+    if (event.span_id != null) parts.push(`span_id=${event.span_id}`);
+    if (event.request_id != null) parts.push(`request_id=${event.request_id}`);
+    if (event.revision != null) parts.push(`revision=${event.revision}`);
+    parts.push(`text=${JSON.stringify(event.text ?? "")}`);
+    return `  ${parts.join(" ")}`;
+}
+
+/**
+ * 把一次 VAD 调试结果组装成可直接粘贴排查的完整文本。
+ *
+ * 结构：环境与参数 → 最终全文 → 切句与识别（boundaries / commits / decisions /
+ * text_events / quiet_spans / rejected_short_sentences）→ 能量轨迹 CSV →
+ * 协调器状态 → 原始 JSON。字段名保持后端原始命名，便于与代码、JSON 互相检索；
+ * 秒制量只追加在括号/等号后，不替代原始毫秒值。
+ *
+ * @param {object} raw - `debug_vad_audio_file` 的返回值
+ * @param {{t?: function, fileLabel?: string, settings?: object, coordinatorTrace?: object|null}} [options]
+ * @returns {string}
+ */
+export function buildVadDebugCopyText(raw, options = {}) {
+    const t = typeof options.t === "function" ? options.t : key => key;
+    const result = parseVadDebugResult(raw);
+    const lines = [];
+    const push = (...values) => lines.push(...values);
+    const tracePoints = Array.isArray(result.trace.points) ? result.trace.points : [];
+    const decisions = Array.isArray(result.decisions) ? result.decisions : [];
+
+    push(`=== ${t("voice.local.vad_debug.copy_header")} ===`, "");
+    push(`[${t("voice.local.vad_debug.copy_env")}]`);
+    push(`engine_id=${result.engine_id ?? "—"} model_id=${result.model_id ?? "—"}`);
+    if (options.fileLabel) push(`file=${options.fileLabel}`);
+    push(`duration_ms=${result.duration_ms} wall_ms=${result.wall_ms} finalize_ms=${Number.isFinite(result.finalize_ms) ? result.finalize_ms : "—"}`);
+    push(`min_sentence_ms=${result.min_sentence_ms} trace_points=${tracePoints.length}`);
+    // 参数快照补充结果里没有的项；与结果同名的不重复输出（同一项出现两次只会干扰阅读）
+    const reservedKeys = new Set(["engine_id", "model_id", "duration_ms", "wall_ms",
+        "finalize_ms", "min_sentence_ms", "trace_points"]);
+    for (const [key, value] of Object.entries(options.settings || {})) {
+        if (value === undefined || value === null || reservedKeys.has(key)) continue;
+        push(`${key}=${value}`);
+    }
+    push("");
+
+    push(`[${t("voice.local.vad_debug.copy_final_text")}] chars=${result.final_text.length}`);
+    push(result.final_text || t("voice.local.vad_debug.copy_empty"));
+    push("");
+
+    push(`[${t("voice.local.vad_debug.copy_timeline")}]`);
+    push(`boundaries (${result.boundaries.length}):`);
+    for (const boundary of result.boundaries) {
+        push(`  t=${debugSeconds(boundary.audio_ms)} reason=${boundary.reason ?? "—"}`);
+    }
+    push(`commits (${result.commits.length}):`);
+    for (const commit of result.commits) {
+        push(`  t=${debugSeconds(commit.audio_ms)} observed_wall=${debugSeconds(commit.observed_wall_ms)}`);
+    }
+    push(`decisions (${decisions.length}):`);
+    for (const decision of decisions) push(formatDecisionLine(decision));
+    const textEvents = Array.isArray(result.text_events) ? result.text_events : [];
+    push(`text_events (${textEvents.length}):`);
+    for (const event of textEvents) push(formatTextEventLine(event));
+    const quietSpans = Array.isArray(result.trace.quiet_spans) ? result.trace.quiet_spans : [];
+    push(`trace.quiet_spans (${quietSpans.length}):`);
+    for (const span of quietSpans) {
+        push(`  ${debugSeconds(span.start_ms)}-${debugSeconds(span.end_ms)}`);
+    }
+    const rejected = Array.isArray(result.trace.rejected_short_sentences) ? result.trace.rejected_short_sentences : [];
+    push(`trace.rejected_short_sentences (${rejected.length}):`);
+    for (const event of rejected) {
+        push(`  t=${debugSeconds(event.time_ms)} sentence_ms=${event.sentence_ms} silence_ms=${event.silence_ms ?? "—"} reason=${event.reason ?? "—"}`);
+    }
+    push("");
+
+    push(`[${t("voice.local.vad_debug.copy_energy")}] time_ms,rms,on,off,speaking`);
+    for (const point of tracePoints) {
+        push(`${point.time_ms},${debugThreshold(point.rms)},${debugThreshold(point.on)},${debugThreshold(point.off)},${point.speaking ? 1 : 0}`);
+    }
+    push("");
+
+    // 协调器快照只在调用方确实取到时才输出——文件回放走独立引擎，
+    // 生产会话的实时水位不反映这次回放，宁可不写也不写错。
+    if (options.coordinatorTrace) {
+        push(`[${t("voice.local.vad_debug.copy_coordinator")}]`);
+        push(JSON.stringify(options.coordinatorTrace, null, 2));
+        push("");
+    }
+
+    push(`[${t("voice.local.vad_debug.copy_raw")}]`);
+    push(JSON.stringify(result, null, 2));
+    return lines.join("\n");
+}
+
 // ── 0.23.9 PreviewDraft 协调器状态映射 ──
 //
 // 这些函数将后端 CoordinatorTrace DTO 映射为调试界面可显示的状态对象。
@@ -391,6 +577,12 @@ const REJECT_REASON_KEYS = {
     below_draft_min: "voice.local.vad_debug.reject_below_draft_min",
     strong_pause_owned_too_short: "voice.local.vad_debug.reject_strong_pause_owned_too_short",
     strong_pause_voiced_too_short: "voice.local.vad_debug.reject_strong_pause_voiced_too_short",
+    below_natural_pause: "voice.local.vad_debug.reject_below_natural_pause",
+    natural_sentence_voiced_too_short: "voice.local.vad_debug.reject_natural_sentence_voiced_too_short",
+    natural_sentence_voiced_not_credible: "voice.local.vad_debug.reject_natural_sentence_voiced_not_credible",
+    long_pause_voiced_too_short: "voice.local.vad_debug.reject_long_pause_voiced_too_short",
+    long_pause_voiced_not_credible: "voice.local.vad_debug.reject_long_pause_voiced_not_credible",
+    invalid_sample_rate: "voice.local.vad_debug.reject_invalid_sample_rate",
     request_already_reserved: "voice.local.vad_debug.reject_request_already_reserved",
     terminal_takeover: "voice.local.vad_debug.reject_terminal_takeover",
 };

@@ -60,7 +60,9 @@ use self::coordinator::{
 use super::postprocess::{strip_confirmed_prefix, strip_filler_words, trim_trailing_silence};
 use super::sentence_state::{FinalizeResult, PendingSegment, SegmentIdentity, SentenceState};
 use super::vad::{EnergyVad, VadEvent};
-use super::{DraftSpan, SttEngine, SttError, SttStreamStats};
+use super::{
+    DraftSpan, PreviewSegment, SttEngine, SttError, SttStreamStats, settle_preview_segments,
+};
 
 /// 预览识别间隔（毫秒）。
 const PREVIEW_INTERVAL_MS: u64 = 500;
@@ -87,6 +89,70 @@ const TIME_FREEZE_MIN_PREFIX_MS: u64 = 1_200;
 /// 脉冲不因长静音升级为 Draft；更长噪声（咳嗽等）由模型 NoSpeech 消费，
 /// 不产生 span。
 const LONG_PAUSE_MIN_VOICED_MS: u64 = 300;
+
+/// 0.23.14.7 自然句尾独立采纳的停顿下限（毫秒，gate 静默口径）。
+///
+/// 只作用于 VAD 已完成 `min_sentence_ms` 校验的 `SentenceEnd` 候选。
+/// case_12 实测标定（真实回放 decision observer）：体感停顿经 gate 口径
+/// 系统性缩短——起音块内的静默前段不参与累计（块内出现有声帧即整块按
+/// 有声处理），呼吸/起音帧又消耗其余静默。用户四档停顿的 gate 口径实测
+/// 570/590/约 430–470/（5.66s owned 直采），最短一档 gate ≈400–470ms。
+/// 400ms = VAD 句尾声明的 `min_silence_ms`（300ms）再确认 100ms，是
+/// "每个 VAD 已校验自然句尾都按时定稿"的最低口径；采纳同时要求有声
+/// ≥ `min_sentence_ms`（≥800ms 连续有声）——慢速词间停顿跟随的是
+/// ShortPhraseEnd（词长 < min_sentence），仍走 long_pause 升级路径，
+/// 点击/咳嗽/呼吸也不进本分支。
+const NATURAL_PAUSE_MIN_MS: u64 = 400;
+
+/// 0.23.14.7 case_17：可信有声的**连续性**下限（毫秒，连续强有声段）。
+///
+/// 强有声 = 10ms 帧 RMS ≥ VAD 自适应 on 阈值（scale-free，阈值随底噪浮动）。
+/// 真语音的音节是**连续发声段**：一个音节即可给出上百毫秒的连续强帧；而
+/// 风扇/键盘这类环境声即使帧总量凑够（甚至越过 on），形态上也只是稀疏
+/// 短脉冲，连续段在几十毫秒内就断裂。
+///
+/// 真实 corpus 全量回放实测（candidate 证据链，17 例）：
+/// - 伪文本候选（case_17 尾段 21.60s）连续段 **50ms**；
+/// - 纯噪声但模型回 NoSpeech 的候选（case_11 全程静音、case_17 强脉冲
+///   19.29s）为 130ms / 140ms（无害，保留原行为）；
+/// - **全部真句候选最低 120ms**（case_15 远场轻声最弱一档），其余
+///   290ms～4230ms。
+///
+/// 100ms 取在 50ms 与 120ms 之间：拒绝侧 2.0×、保留侧 1.2×。该判据同时
+/// 用于候选采纳证据与送模前的范围门——**不可信范围不产生可靠 Draft，
+/// 也不进模型**（避免噪声幻觉进入终态文本）。
+const CREDIBLE_VOICED_RUN_MIN_MS: u64 = 100;
+
+/// 候选被生产采纳的依据分支（0.23.14.7 case_17 专项证据链）。
+///
+/// `candidate.reason == natural_silence` 只说明 VAD 事件类型（SentenceEnd），
+/// 不说明最终由 readiness 的哪条门槛放行——诊断必须区分
+/// `natural_pause`（400ms 自然句尾新路径）/ `long_pause`（1100ms 长静音）/
+/// `strong_pause`（既有强停顿）/ `draft_min`（owned ≥ 5s）/ `hard_window` /
+/// `uncommitted_cap`（强制切），否则环境声误切无法归因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptedVia {
+    HardWindow,
+    UncommittedCap,
+    DraftMin,
+    LongPause,
+    NaturalSentence,
+    StrongPause,
+}
+
+impl AcceptedVia {
+    fn as_str(self) -> &'static str {
+        match self {
+            AcceptedVia::HardWindow => "hard_window",
+            AcceptedVia::UncommittedCap => "uncommitted_cap",
+            AcceptedVia::DraftMin => "draft_min",
+            AcceptedVia::LongPause => "long_pause",
+            AcceptedVia::NaturalSentence => "natural_pause",
+            AcceptedVia::StrongPause => "strong_pause",
+        }
+    }
+}
+
 /// 自适应预览间隔上限。
 ///
 /// 冷却从上一轮推理完成后开始计算；较长上限可避免慢机器在长音频上
@@ -161,6 +227,21 @@ pub struct SttDecisionRecord {
     pub outcome: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<&'static str>,
+    /// 0.23.14.7：`outcome == accepted` 时标明放行分支
+    /// （natural_pause / long_pause / strong_pause / draft_min / hard_window /
+    /// uncommitted_cap）——candidate reason 只描述 VAD 事件类型，不构成
+    /// 采纳证据。等待中的候选为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_via: Option<&'static str>,
+    /// 0.23.14.7 case_17：强有声样本（RMS ≥ on）毫秒数。实测值域：
+    /// 误采纳的环境声尾段候选 340ms/1060ms（32%）——**与真句量级重叠**
+    /// （远场轻声最低档 600ms/1560ms 为 38.5%），因此占比本身不构成
+    /// 判据，只作证据链记录。
+    pub strong_ms: u64,
+    /// 0.23.14.7 case_17：最长连续强有声段毫秒数——真音节是连续发声段，
+    /// 环境声即使能量够也只是稀疏短脉冲（实测伪文本候选 50ms，合法候选
+    /// 最低 120ms）。
+    pub strong_run_ms: u64,
     pub voiced_ms: u64,
     pub quiet_ms: u64,
 }
@@ -209,8 +290,11 @@ struct PseudoInner {
     next_preview_request: u64,
     /// 最新预览文本
     latest_preview: String,
-    /// 当前预览对应的绝对音频范围；结果只在 request id/代际均有效时更新。
-    latest_preview_range: Option<AudioRange>,
+    /// 当前尾部预览的音频范围（尾部是滚动替换值；短语段的范围在
+    /// `preview_phrases` 内）。0.23.14.6：组合预览的范围真源是
+    /// 短语账本 + 本字段，对外信封按 span 清单推导，不再维护
+    /// "组合文本配最后一个局部范围"的旧字段。
+    preview_tail_range: Option<AudioRange>,
     /// 当前预览请求 id，供类型化 Preview 事件投影。
     latest_preview_request_id: u64,
     /// 预览状态版本（预览文本每次实际变化递增）。
@@ -254,6 +338,16 @@ struct PseudoInner {
     boundary_candidate: Option<BoundaryCandidate>,
     /// 当前未提交音频中按 audio gate 统计的有效有声样本。
     uncommitted_voiced_samples: u64,
+    /// 0.23.14.7 case_17：其中强有声样本（RMS ≥ on 阈值）。与
+    /// `uncommitted_voiced_samples` 同窗口累计，供候选携带有声可信度证据。
+    uncommitted_strong_samples: u64,
+    /// 0.23.14.7 case_17：当前仍在延续的强有声段长度（样本），跨块拼接。
+    uncommitted_strong_run_samples: u64,
+    /// 0.23.14.7 case_17：本窗口内最长连续强有声段（样本）。
+    uncommitted_strong_run_max: u64,
+    /// 0.23.14.7 case_17：最近一条已记录候选等待原因——同一候选只有原因
+    /// 变化时才补记决策记录，保证"候选被可信度门拒绝"有显式证据而不刷屏。
+    decision_wait_reason: Option<&'static str>,
     /// 尚未开始的最新 Preview；running Preview 完成后下一次音频块会取走。
     pending_preview: Option<PendingPreview>,
     /// 是否已发出首个 Preview。首个请求必须至少有 1.2s 有效输入。
@@ -305,13 +399,9 @@ struct PendingPreview {
 }
 
 /// 0.23.14 预览短语账本项：完整音频范围 + 冻结文本。
-#[derive(Debug, Clone)]
-struct PreviewSpan {
-    /// 短语覆盖的完整音频范围（start = 冻结时锚点，end = 停顿起点或
-    /// 时间冻结切点）。Draft settle 按该范围清退。
-    range: AudioRange,
-    text: String,
-}
+///
+/// 0.23.14.6 起与对外协议的 [`PreviewSegment`] 同型（组合预览的组成段）。
+type PreviewSpan = PreviewSegment;
 
 /// 0.23.14 事务式短语在途登记。
 #[derive(Debug, Clone)]
@@ -319,13 +409,30 @@ struct PendingPhrase {
     request_id: u64,
     /// 冻结前的锚点——error/空文本时的回退目标。
     anchor_before: u64,
-    /// 短语完整范围（settle / 账本口径）。
+    /// 短语完整范围（settle / 账本 / 对外 span 口径）。
     range: AudioRange,
-    /// 送模范围（首尾静音裁剪后），作为 Preview 信封的 audioRange。
-    model_range: AudioRange,
     /// 登记时的预览代际；完成时不匹配即 stale。
     generation: u64,
 }
+
+/// 0.23.14.7 case_17：单块音频的强有声结构（连音 vs 脉冲）。
+///
+/// 与 [`PseudoInner::frames_at_least`] 同 10ms 帧口径，区分"总量"与
+/// "连续性"：真语音的音节是连续发声段（连续强帧可长达数百毫秒），而
+/// 风扇/键盘这类环境声在能量上可能凑够总量，却只是稀疏短脉冲（连续强帧
+/// 多在几十毫秒内断裂）。`lead/trail` 供跨块拼接连续段，`max` 是块内最长段。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StrongRunProfile {
+    /// 本块强有声样本数（RMS ≥ on）。
+    strong_samples: u64,
+    /// 本块内最长连续强有声段（样本）。
+    max_run: u64,
+    /// 块首连续强有声段（样本），0 表示块首非强帧。
+    lead_run: u64,
+    /// 块尾连续强有声段（样本），0 表示块尾非强帧。
+    trail_run: u64,
+}
+
 
 impl PseudoInner {
     /// 仅供测试：构造干净的内部状态。
@@ -342,7 +449,7 @@ impl PseudoInner {
             preview_owner: 0,
             next_preview_request: 0,
             latest_preview: String::new(),
-            latest_preview_range: None,
+            preview_tail_range: None,
             latest_preview_request_id: 0,
             preview_revision: 0,
             preview_generation: 0,
@@ -359,6 +466,10 @@ impl PseudoInner {
             ),
             boundary_candidate: None,
             uncommitted_voiced_samples: 0,
+            uncommitted_strong_samples: 0,
+            uncommitted_strong_run_samples: 0,
+            uncommitted_strong_run_max: 0,
+            decision_wait_reason: None,
             pending_preview: None,
             preview_started: false,
             single_worker: false,
@@ -402,8 +513,9 @@ impl PseudoInner {
             return;
         }
         let phrases_before = self.preview_phrases.len();
-        self.preview_phrases
-            .retain(|span| span.range.start_sample >= committed);
+        // 0.23.14.6：与事件消费方共用同一清退语义（见 settle_preview_segments
+        // 的契约注释）——完全覆盖与跨界段整条删除，起点在边界之后的段保留。
+        settle_preview_segments(&mut self.preview_phrases, committed);
         if let Some(pending) = &self.pending_phrase
             && pending.range.start_sample < committed
         {
@@ -415,7 +527,7 @@ impl PseudoInner {
         if committed_advanced {
             self.preview_settled_committed = committed;
             self.preview_tail.clear();
-            self.latest_preview_range = None;
+            self.preview_tail_range = None;
         }
         if committed_advanced || self.preview_phrases.len() != phrases_before {
             self.rebuild_preview_text();
@@ -475,6 +587,22 @@ impl PseudoInner {
 
     /// 更新预览文本（仅在实际变化时推进状态与预览版本）。
     fn set_preview_if_changed(&mut self, preview: String, range: AudioRange, request_id: u64) {
+        // 0.23.14.7 P1-1：尾部候选范围与已入账内容的重叠终审。短语冻结不推进
+        // preview_generation（只有 Draft 边界/reset/终态推进），冻结前起飞的
+        // 预览不会被代际墙拦住；迟到结果若与短语账本或已提交水位重叠，说明
+        // 其文本包含已入账音频——尾部是整串替换值，无法按字符对齐裁剪，
+        // 整条丢弃，未覆盖后缀交回尾部窗口（锚点已推进）重识别。这是
+        // `明确的多句话。明确的多句话。` 重复投影的第二道闸（第一道是
+        // 短语入账时的 settle_tail_for_phrase）。
+        if self.tail_range_is_stale(&range) {
+            tracing::debug!(
+                request_id,
+                start = range.start_sample,
+                end = range.end_sample,
+                "丢弃与已入账内容重叠的迟到预览（范围裁决）"
+            );
+            return;
+        }
         if preview.is_empty() || preview == self.preview_tail {
             return;
         }
@@ -487,9 +615,52 @@ impl PseudoInner {
                 .saturating_add((old_chars - new_chars) as u64);
         }
         self.preview_tail = preview;
-        self.latest_preview_range = Some(range);
+        self.preview_tail_range = Some(range);
         self.latest_preview_request_id = request_id;
         self.rebuild_preview_text();
+    }
+
+    /// 0.23.14.7 P1-1：尾部候选范围是否已被短语账本/已提交水位覆盖。
+    ///
+    /// 尾部窗口锚定在 `phrase_anchor`（≥ 全部短语终点与已提交水位），正常
+    /// 路径不会重叠；重叠只可能来自冻结前起飞、迟到返回的预览——其文本
+    /// 必然包含已由 phrase/Draft 消费的音频。
+    fn tail_range_is_stale(&self, range: &AudioRange) -> bool {
+        let committed = self.sentences.committed_sample_end as u64;
+        if range.start_sample < committed || range.end_sample <= committed {
+            return true;
+        }
+        self.preview_phrases
+            .iter()
+            .any(|phrase| range.overlaps(phrase.range))
+    }
+
+    /// 0.23.14.7 P1-1：冻结短语入账时同步清退与该范围重叠的尾部预览。
+    ///
+    /// 尾部与短语都锚定同一个 `phrase_anchor` 起步，短语覆盖 [anchor,
+    /// quiet_start)，冻结前显示的尾部必然投影了同一音频——不同步清退就会
+    /// 出现同一文本双份（case_12 实测时间线）。按音频范围裁决（范围是
+    /// 唯一真源，不做字符串相似度/前缀裁剪）：
+    /// - 完全覆盖（tail.end ≤ phrase_end）：整条清退，文本由短语 span 接管；
+    /// - 跨界（tail.start < phrase_end < tail.end）：整条清退，未覆盖后缀
+    ///   [phrase_end, tail.end) 交回尾部窗口重识别——与 Draft settle 的
+    ///   "跨界整条删除、剩余交回尾部窗口"同一语义。
+    /// 短语之后的真实后缀不靠残留 tail 保留，靠锚点推进后的下一次尾部
+    /// 预览重新投影（`retreated_boundary_preserves_uncommitted_preview_suffix`
+    /// 的既有语义）。
+    fn settle_tail_for_phrase(&mut self, phrase_end: u64) {
+        let Some(range) = self.preview_tail_range else {
+            return;
+        };
+        if range.start_sample < phrase_end {
+            self.preview_tail.clear();
+            self.preview_tail_range = None;
+            tracing::debug!(
+                phrase_end,
+                tail_end = range.end_sample,
+                "短语入账：清退与其重叠的尾部预览"
+            );
+        }
     }
 
     /// 重算对外预览文本 = 已定稿短语拼接 + 当前尾部。
@@ -524,7 +695,7 @@ impl PseudoInner {
     /// 的 request-id 墙当作过期丢弃，句尾旧虚字因此残留。
     fn clear_preview(&mut self) {
         self.preview_tail.clear();
-        self.latest_preview_range = None;
+        self.preview_tail_range = None;
         self.rebuild_preview_text();
     }
 
@@ -570,12 +741,18 @@ impl PseudoInner {
 
     /// 按与 RequestAudioGate 相同的 10ms frame 统计有效有声样本。
     fn voiced_samples(samples: &[f32], off_threshold: f64, sample_rate: u32) -> u64 {
+        Self::frames_at_least(samples, off_threshold, sample_rate)
+    }
+
+    /// 0.23.14.7 case_17：统计强有声样本（RMS ≥ threshold）——与
+    /// [`Self::voiced_samples`] 同帧口径，阈值传 on 即得强帧数。
+    fn frames_at_least(samples: &[f32], threshold: f64, sample_rate: u32) -> u64 {
         if samples.is_empty() || sample_rate == 0 {
             return 0;
         }
         let frame_size = (u64::from(sample_rate) / 100).max(1) as usize;
-        let threshold = if off_threshold.is_finite() {
-            off_threshold.max(0.0)
+        let threshold = if threshold.is_finite() {
+            threshold.max(0.0)
         } else {
             0.0
         };
@@ -605,17 +782,77 @@ impl PseudoInner {
         voiced
     }
 
-    /// 0.23.14 时间冻结切点优先低能量谷底：在前缀范围内按 10ms frame
-    /// 扫描，返回**最后一个**连续低能量段（谷 ≥ 120ms，低于 VAD
-    /// min_silence 的句内停顿）的起点（绝对采样）。无合格谷底（连续
-    /// 语音）返回 None——调用方回退滚动窗起点。任意 1.2s 时间前缀不再
-    /// 直接变成切点，词中切断由谷底约束缓解；识别失败由事务式锚点回退。
-    fn low_energy_valley_start_in_range(
+    /// 0.23.14.7 case_17：单块音频的强有声结构（连音 vs 脉冲）。
+    ///
+    /// 与 [`Self::frames_at_least`] 同 10ms 帧口径，区分"总量"与"连续性"：
+    /// 真语音的音节是连续发声段（连续强帧可长达数百毫秒），而风扇/键盘
+    /// 这类环境声在能量上可能凑够总量，却只是稀疏短脉冲（连续强帧多在
+    /// 几十毫秒内断裂）。`lead/trail` 供跨块拼接连续段，`max` 是块内最长段。
+    fn strong_run_profile(samples: &[f32], threshold: f64, sample_rate: u32) -> StrongRunProfile {
+        let mut profile = StrongRunProfile::default();
+        if samples.is_empty() || sample_rate == 0 {
+            return profile;
+        }
+        let frame_size = (u64::from(sample_rate) / 100).max(1) as usize;
+        let threshold = if threshold.is_finite() {
+            threshold.max(0.0)
+        } else {
+            0.0
+        };
+        let mut run = 0u64;
+        let mut seen_gap = false;
+        let mut offset = 0usize;
+        while offset < samples.len() {
+            let end = (offset + frame_size).min(samples.len());
+            let frame = &samples[offset..end];
+            let rms = (frame
+                .iter()
+                .map(|sample| {
+                    let value = f64::from(*sample);
+                    if value.is_finite() {
+                        value * value
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>()
+                / frame.len() as f64)
+                .sqrt();
+            let len = (end - offset) as u64;
+            if rms >= threshold {
+                profile.strong_samples = profile.strong_samples.saturating_add(len);
+                run = run.saturating_add(len);
+                profile.max_run = profile.max_run.max(run);
+            } else {
+                if !seen_gap {
+                    profile.lead_run = run;
+                }
+                seen_gap = true;
+                run = 0;
+            }
+            offset = end;
+        }
+        // 整块无间隔时 lead 即块首段（= run 全程），trail 同值。
+        if !seen_gap {
+            profile.lead_run = run;
+        }
+        profile.trail_run = run;
+        profile
+    }
+
+    /// 0.23.14.6 时间冻结切点：枚举前缀范围内的低能量谷候选。
+    ///
+    /// 按 10ms frame 扫描，返回每个 ≥120ms 连续低能量段（谷）的**起点**
+    /// （绝对采样，升序）。调用方从新到旧寻找"切点前已满足有声门槛"的
+    /// 合格谷——不合格的早期谷（切点前有效有声不足）不得阻塞对后续谷
+    /// 的考察，也不能永久卡住时间冻结（0.23.14.5 的缺陷：总是选最后一
+    /// 个谷 + TooShort 不动锚点 → 无新谷时每次扫描重复同一无效切点）。
+    fn low_energy_valley_candidates(
         samples: &[f32],
         range_start_abs: u64,
         off_threshold: f64,
         sample_rate: u32,
-    ) -> Option<u64> {
+    ) -> Vec<u64> {
         const MIN_DIP_MS: u64 = 120;
         let frame = (u64::from(sample_rate) / 100).max(1) as usize;
         let min_frames = ((MIN_DIP_MS * u64::from(sample_rate) / 1000) as usize) / frame;
@@ -639,8 +876,8 @@ impl PseudoInner {
                 / chunk.len() as f64)
                 .sqrt()
         };
+        let mut candidates = Vec::new();
         let mut quiet_run_start: Option<usize> = None;
-        let mut last_valley_start: Option<usize> = None;
         let mut frame_idx = 0usize;
         for chunk in samples.chunks(frame) {
             if frame_rms(chunk) < threshold {
@@ -648,7 +885,7 @@ impl PseudoInner {
             } else if let Some(start) = quiet_run_start.take()
                 && frame_idx - start >= min_frames
             {
-                last_valley_start = Some(start);
+                candidates.push(start);
             }
             frame_idx += 1;
         }
@@ -656,9 +893,159 @@ impl PseudoInner {
         if let Some(start) = quiet_run_start
             && frame_idx - start >= min_frames
         {
-            last_valley_start = Some(start);
+            candidates.push(start);
         }
-        last_valley_start.map(|start| range_start_abs + (start * frame) as u64)
+        candidates.into_iter().map(|start| range_start_abs + (start * frame) as u64).collect()
+    }
+
+    /// 0.23.14.6 稳健谷内切点偏移：切点不落在能量刚跌破阈值的下降沿，
+    /// 而是谷内约 30ms 平滑 RMS 的最低平台中点——轻声尾音、擦音和自然
+    /// 衰减得以保留（`trim_trailing_silence` 的 150ms 尾部缓冲不再被上游
+    /// 预先切掉）。
+    ///
+    /// 返回相对谷起点的采样偏移，约束在 [30ms, 150ms]（谷本身不足 30ms
+    /// 时取谷长的一半）。不用单个最低采样点——数字零点/爆音/随机噪声
+    /// 容易把逐样本最低点拉偏；10ms frame + 3 帧（约 30ms）平滑后的最低
+    /// 平台抗脉冲。
+    fn robust_in_valley_offset(valley_samples: &[f32], sample_rate: u32) -> usize {
+        const MIN_OFFSET_MS: u64 = 30;
+        const MAX_OFFSET_MS: u64 = 150;
+        let frame = (u64::from(sample_rate) / 100).max(1) as usize;
+        let min_offset = (MIN_OFFSET_MS * u64::from(sample_rate) / 1000) as usize;
+        let max_offset = (MAX_OFFSET_MS * u64::from(sample_rate) / 1000) as usize;
+        if valley_samples.len() <= min_offset {
+            return valley_samples.len() / 2;
+        }
+        // 1) 10ms frame RMS。
+        let mut frame_rms: Vec<f64> = Vec::with_capacity(valley_samples.len() / frame + 1);
+        for chunk in valley_samples.chunks(frame) {
+            let rms = (chunk
+                .iter()
+                .map(|sample| {
+                    let value = f64::from(*sample);
+                    if value.is_finite() {
+                        value * value
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>()
+                / chunk.len() as f64)
+                .sqrt();
+            frame_rms.push(rms);
+        }
+        // 2) 约 30ms（3 帧）居中平滑；边界帧取可用窗口均值。
+        let smoothed: Vec<f64> = (0..frame_rms.len())
+            .map(|i| {
+                let lo = i.saturating_sub(1);
+                let hi = (i + 2).min(frame_rms.len());
+                frame_rms[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
+            })
+            .collect();
+        // 3) 最低平台：与全局最小同水平的连续帧，取中点。
+        let min_value = smoothed.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut best_start = 0usize;
+        let mut best_len = 0usize;
+        let mut run_start: Option<usize> = None;
+        let tolerance = min_value.max(1e-12) * 1.05;
+        for (i, value) in smoothed.iter().enumerate() {
+            if *value <= tolerance {
+                run_start.get_or_insert(i);
+            } else if let Some(start) = run_start.take() {
+                let len = i - start;
+                if len > best_len {
+                    best_len = len;
+                    best_start = start;
+                }
+            }
+        }
+        if let Some(start) = run_start {
+            let len = smoothed.len() - start;
+            if len > best_len {
+                best_len = len;
+                best_start = start;
+            }
+        }
+        let plateau_mid = (best_start + best_len / 2) * frame;
+        plateau_mid.clamp(min_offset, max_offset)
+    }
+
+    /// 把切点从谷起点（能量刚跌破阈值处）推进到谷内稳健位置。
+    ///
+    /// `valley_samples` 是从谷起点开始的音频；返回值仍以绝对采样表达。
+    /// 谷内偏移受 150ms 上限约束，送模尾部低能量不会突破
+    /// `trim_trailing_silence` 的既有缓冲语义。
+    fn valley_start_to_in_valley_cut(
+        valley_start: u64,
+        valley_samples: &[f32],
+        sample_rate: u32,
+    ) -> u64 {
+        valley_start + Self::robust_in_valley_offset(valley_samples, sample_rate) as u64
+    }
+
+    /// 把 VAD 停顿的谷起点切点推进到谷内稳健位置（实例方法：读取缓冲内
+    /// [quiet_start, total) 的真实谷音频）。坐标越界/空谷时保持原切点。
+    fn in_valley_boundary(&self, quiet_start: u64, total: usize, sample_rate: u32) -> u64 {
+        let start = (quiet_start as usize).min(total);
+        if start >= total {
+            return quiet_start;
+        }
+        // 谷内搜索取到 total 的整段（偏移上限 150ms 约束结果；长谷的
+        // plateau 中点不受窗口影响）。
+        let Some(local) = self
+            .sentences
+            .abs_to_local_range(&(start..total), self.samples.len())
+        else {
+            return quiet_start;
+        };
+        Self::valley_start_to_in_valley_cut(quiet_start, &self.samples[local], sample_rate)
+    }
+
+    /// 0.23.14.6 时间冻结切点选择（纯函数，供单测直接驱动）：
+    ///
+    /// 1. 枚举前缀内 ≥120ms 低能量谷候选（升序）；
+    /// 2. 从新到旧找"切点前有效有声 ≥ `PHRASE_MIN_VOICED_MS`"的合格谷——
+    ///    不合格的早期谷跳过，不得阻塞后续谷，也不能永久卡住时间冻结
+    ///    （0.23.14.5 缺陷：总选最后一个谷 + TooShort 不动锚点）；
+    /// 3. 合格谷的切点推进到谷内稳健位置（30–150ms，
+    ///    [`Self::robust_in_valley_offset`]），不贴刚跌破阈值的下降沿；
+    /// 4. 无合格谷回退 `roll_start` 安全切点（词中硬切交事务式锚点回退兜底）。
+    fn choose_time_freeze_cut(
+        prefix_samples: &[f32],
+        anchor_before: u64,
+        roll_start: u64,
+        off_threshold: f64,
+        sample_rate: u32,
+    ) -> u64 {
+        let candidates = Self::low_energy_valley_candidates(
+            prefix_samples,
+            anchor_before,
+            off_threshold,
+            sample_rate,
+        );
+        let min_voiced_samples = PHRASE_MIN_VOICED_MS * u64::from(sample_rate) / 1000;
+        let mut chosen_valley = None;
+        for &valley_start in candidates.iter().rev() {
+            if valley_start <= anchor_before {
+                continue;
+            }
+            let voiced_before = Self::voiced_samples(
+                &prefix_samples[..(valley_start - anchor_before) as usize],
+                off_threshold,
+                sample_rate,
+            );
+            if voiced_before >= min_voiced_samples {
+                chosen_valley = Some(valley_start);
+                break;
+            }
+        }
+        match chosen_valley {
+            Some(valley_start) => {
+                let valley_samples = &prefix_samples[(valley_start - anchor_before) as usize..];
+                Self::valley_start_to_in_valley_cut(valley_start, valley_samples, sample_rate)
+            }
+            None => roll_start,
+        }
     }
 
     /// 记录 VAD 候选而不立即创建 Draft。普通句尾先保留，后续静默帧
@@ -673,6 +1060,39 @@ impl PseudoInner {
     ) -> Option<u64> {
         let voiced = Self::voiced_samples(chunk, off_threshold, sample_rate);
         self.uncommitted_voiced_samples = self.uncommitted_voiced_samples.saturating_add(voiced);
+        // 0.23.14.7 case_17：同帧口径累计强有声样本（RMS ≥ on），候选据此
+        // 携带有声可信度证据——稳态噪声多数帧落在 on/off 滞回带，真语音的
+        // 音节峰值大量越过 on。除总量外同时累计**最长连续强有声段**：
+        // 环境声即使总量够，也只能凑出稀疏短脉冲，真音节是连续发声段。
+        let on_threshold = self.vad.current_on_threshold();
+        let profile = Self::strong_run_profile(chunk, on_threshold, sample_rate);
+        self.uncommitted_strong_samples = self
+            .uncommitted_strong_samples
+            .saturating_add(profile.strong_samples);
+        // 跨块拼接：块首强段与上一块末尾强段相接时合并为一段。整块全强时
+        // 当前段必须延续（否则连续段被截断在单块长度，长音节永远测不出来）。
+        let chunk_samples = chunk.len() as u64;
+        let bridged = if profile.lead_run > 0 {
+            self.uncommitted_strong_run_samples
+                .saturating_add(profile.lead_run)
+        } else {
+            0
+        };
+        self.uncommitted_strong_run_max = self
+            .uncommitted_strong_run_max
+            .max(profile.max_run)
+            .max(bridged);
+        self.uncommitted_strong_run_samples = if profile.strong_samples > 0
+            && profile.strong_samples == chunk_samples
+        {
+            bridged.max(profile.trail_run)
+        } else {
+            profile.trail_run
+        };
+
+        // 0.23.14.7：自然句尾采纳判据的常量先于 &mut 借用取出（见下方复语
+        // 分支与 natural_sentence_adoptable）。
+        let min_sentence_ms = self.vad.min_sentence_ms();
 
         // 0.23.10.2：短句停顿（句长不足 min_sentence）被 VAD 丢弃——它永远
         // 不会升级为 Draft 切割，无需等复语确认，立即作为短语定稿信号返回。
@@ -686,16 +1106,21 @@ impl PseudoInner {
         if event == VadEvent::ShortPhraseEnd {
             let silence_samples = self.vad.dump_state().silence_samples;
             let quiet_start = total.saturating_sub(silence_samples);
+            // 0.23.14.6：切点推进到谷内稳健位置（30–150ms）——短句自然
+            // 衰减尾音保留给短语识别，不再贴着下降沿切断。
+            let boundary = self.in_valley_boundary(quiet_start as u64, total, sample_rate);
             let candidate = BoundaryCandidate {
-                boundary_sample: quiet_start as u64,
-                quiet_start_sample: quiet_start as u64,
+                boundary_sample: boundary,
+                quiet_start_sample: boundary,
                 reason: "short_phrase".to_string(),
                 voiced_samples: self.uncommitted_voiced_samples,
+                strong_samples: self.uncommitted_strong_samples,
+                strong_run_max_samples: self.uncommitted_strong_run_max,
                 quiet_samples: silence_samples as u64,
             };
             self.boundary_candidate = Some(candidate.clone());
             self.coordinator.set_candidate(candidate);
-            return Some(quiet_start as u64);
+            return Some(boundary);
         }
 
         if event.is_boundary() {
@@ -708,11 +1133,22 @@ impl PseudoInner {
                 VadEvent::ShortPhraseEnd | VadEvent::None => 0,
             } as u64;
             let quiet_start_sample = total.saturating_sub(quiet_samples as usize);
+            // 0.23.14.6：普通句尾/软窗停顿的切点同样推进到谷内稳健位置
+            // （hard/cap 无静音可依，保持当前时刻）。短语与 Draft 因此携带
+            // ≤150ms 的自然衰减尾部，`trim_trailing_silence` 的尾部缓冲
+            // 不再被上游预先切掉。
+            let boundary_sample = if quiet_samples > 0 {
+                self.in_valley_boundary(quiet_start_sample as u64, total, sample_rate)
+            } else {
+                quiet_start_sample as u64
+            };
             let candidate = BoundaryCandidate {
-                boundary_sample: quiet_start_sample as u64,
-                quiet_start_sample: quiet_start_sample as u64,
+                boundary_sample,
+                quiet_start_sample: boundary_sample,
                 reason: event.reason().to_string(),
                 voiced_samples: self.uncommitted_voiced_samples,
+                strong_samples: self.uncommitted_strong_samples,
+                strong_run_max_samples: self.uncommitted_strong_run_max,
                 quiet_samples,
             };
             self.boundary_candidate = Some(candidate.clone());
@@ -724,27 +1160,90 @@ impl PseudoInner {
             return None;
         };
         if voiced > 0 {
-            // 普通候选遇到新的有效语音即作废；下一次 VAD 停顿会创建新候选。
-            // 0.23.9.10：作废即"预览定稿"信号——该停顿没有升级为真实切割，
-            // [phrase_anchor, quiet_start) 作为短语冻结进预览账本。
-            let invalidated_quiet_start = candidate.quiet_start_sample;
-            self.boundary_candidate = None;
-            self.coordinator.clear_candidate();
-            Some(invalidated_quiet_start)
-        } else {
-            candidate.quiet_samples = candidate.quiet_samples.saturating_add(chunk.len() as u64);
-            candidate.boundary_sample = candidate.quiet_start_sample;
-            self.coordinator.set_candidate(candidate.clone());
-            None
+            // 0.23.14.7 复语块裁决：起音块头部的静默仍是停顿的一部分——块内
+            // 出现有声帧时整块按有声处理会让 gate 口径的停顿系统性短于真实
+            // 值（case_12 实测体感 900ms 的停顿 quiet 只累计到 570ms），这里
+            // 把块内静默样本补计入 quiet 再裁决。满足自然采纳条件的 VAD
+            // 句尾候选保留给本轮 readiness 采纳（切点仍是创建时的谷内位置，
+            // 复语音频经 reset_vad_at_boundary 重放归入下一段）；其余候选
+            // 照旧作废并触发短语冻结。
+            candidate.quiet_samples = candidate
+                .quiet_samples
+                .saturating_add((chunk.len() as u64).saturating_sub(voiced));
+            if candidate.reason != "natural_silence"
+                || !Self::natural_sentence_adoptable(candidate, sample_rate, min_sentence_ms)
+            {
+                // 普通候选遇到新的有效语音即作废；下一次 VAD 停顿会创建
+                // 新候选。0.23.9.10：作废即"预览定稿"信号——该停顿没有
+                // 升级为真实切割，[phrase_anchor, quiet_start) 作为短语
+                // 冻结进预览账本。
+                let invalidated_quiet_start = candidate.quiet_start_sample;
+                self.boundary_candidate = None;
+                self.coordinator.clear_candidate();
+                return Some(invalidated_quiet_start);
+            }
+            // 保留候选：本轮 readiness 的自然句尾分支立即采纳。
+            return None;
         }
+        candidate.quiet_samples = candidate.quiet_samples.saturating_add(chunk.len() as u64);
+        candidate.boundary_sample = candidate.quiet_start_sample;
+        self.coordinator.set_candidate(candidate.clone());
+        None
     }
 
+    /// 0.23.14.7 case_17 自然句尾候选是否满足采纳条件：停顿达到
+    /// `NATURAL_PAUSE_MIN_MS`、有效有声与 VAD 的 `min_sentence_ms` 句长
+    /// 校验同源对齐，且**存在可信的连续发声段**（连续强有声 ≥
+    /// `CREDIBLE_VOICED_RUN_MIN_MS`）。`candidate_readiness` 的自然分支与
+    /// 复语保留裁决（`observe_boundary_candidate`）共用同一判据，避免双份
+    /// 阈值漂移。
+    ///
+    /// 0.23.14.7 case_17 修复：风扇/键盘稳态噪声可以被 EnergyVad 当成持续
+    /// 有声（≥ min_sentence）并在 400ms 停顿后由自然句尾分支放行。能量口径
+    /// 的占比判据区分度不足（实测伪文本候选 strong/voiced = 32.1%，而合法
+    /// 噪声候选 case_11 仅 21.9%，真句最弱 38.5%——区间重叠，任何占比门槛
+    /// 都会误伤）；改用**形态**证据：真音节是连续发声段，环境声只是稀疏
+    /// 脉冲（实测 50ms vs 真句最低 120ms）。
+    ///
+    /// 不可信候选降级回既有路径（继续等待 → long_pause 兜底或复语作废），
+    /// 且两类 pause 分支与送模范围门共用同一判据，不会"换个分支再采纳一次"。
+    fn natural_sentence_adoptable(
+        candidate: &BoundaryCandidate,
+        sample_rate: u32,
+        min_sentence_ms: u32,
+    ) -> bool {
+        let sr = u64::from(sample_rate);
+        candidate.quiet_samples >= NATURAL_PAUSE_MIN_MS.saturating_mul(sr) / 1000
+            && candidate.voiced_samples >= u64::from(min_sentence_ms).saturating_mul(sr) / 1000
+            && Self::credible_voicing_run(candidate.strong_run_max_samples, sample_rate)
+    }
+
+    /// 0.23.14.7 case_17：连续强有声段是否达到可信发声下限。
+    fn credible_voicing_run(run_samples: u64, sample_rate: u32) -> bool {
+        run_samples >= CREDIBLE_VOICED_RUN_MIN_MS.saturating_mul(u64::from(sample_rate)) / 1000
+    }
+
+    /// 0.23.14.7 case_17：音频范围内是否存在可信发声证据（仅测试消费）。
+    ///
+    /// 生产路径不用"当下阈值重新测量范围"——VAD 的 on 阈值随底噪自适应，
+    /// 尾段静音会让底噪漂移，同一段音频在不同时刻得出矛盾结论（远场低声
+    /// 实测 290ms vs 90ms）。生产一律复用流式累计的
+    /// [`PseudoInner::uncommitted_strong_run_max`]（见 `finalize_with_wait_timeout`）。
+    /// 本函数保留给单元测试直接断言"连续发声段"语义。
+    #[cfg(test)]
+    fn range_has_credible_voicing(samples: &[f32], on_threshold: f64, sample_rate: u32) -> bool {
+        let profile = Self::strong_run_profile(samples, on_threshold, sample_rate);
+        Self::credible_voicing_run(profile.max_run, sample_rate)
+    }
+
+    /// 返回 `Ok(via)` = 采纳，`via` 标明放行分支（诊断证据链）；
+    /// `Err(reason)` = 继续等待。
     fn candidate_readiness(
         &self,
         candidate: &BoundaryCandidate,
         total: usize,
         sample_rate: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<AcceptedVia, &'static str> {
         let sample_rate = u64::from(sample_rate);
         if sample_rate == 0 {
             return Err("invalid_sample_rate");
@@ -762,11 +1261,18 @@ impl PseudoInner {
             .saturating_mul(sample_rate);
         let min_strong_owned = 2 * sample_rate;
         let min_strong_voiced = 1_200 * sample_rate / 1000;
-        if candidate.reason == "hard_window" || candidate.reason == "uncommitted_cap" {
-            return (owned_samples > 0).then_some(()).ok_or("below_draft_min");
+        if candidate.reason == "hard_window" {
+            return (owned_samples > 0)
+                .then_some(AcceptedVia::HardWindow)
+                .ok_or("below_draft_min");
+        }
+        if candidate.reason == "uncommitted_cap" {
+            return (owned_samples > 0)
+                .then_some(AcceptedVia::UncommittedCap)
+                .ok_or("below_draft_min");
         }
         if owned_samples >= min_draft_samples {
-            return Ok(());
+            return Ok(AcceptedVia::DraftMin);
         }
         // 0.23.14 长静音独立终结：停顿达到 long_pause_ms 且存在可信有声即可
         // 接受，不再要求 owned ≥ 2s / voiced ≥ 1.2s——0.8～2 秒短句后的
@@ -780,11 +1286,48 @@ impl PseudoInner {
             .saturating_mul(sample_rate)
             / 1000;
         if candidate.quiet_samples >= long_pause_samples {
+            // 0.23.14.7 case_17：长静音兜底同样要求可信连续发声——否则被自然
+            // 句尾分支拒绝的噪声候选会静默增长 quiet，到 1100ms 后由本分支
+            // 再次放行（"换个分支再采纳一次"），修复等同无效。
+            if !Self::credible_voicing_run(candidate.strong_run_max_samples, sample_rate as u32) {
+                return Err("long_pause_voiced_not_credible");
+            }
             let min_voiced = LONG_PAUSE_MIN_VOICED_MS.saturating_mul(sample_rate) / 1000;
             if candidate.voiced_samples >= min_voiced {
-                return Ok(());
+                return Ok(AcceptedVia::LongPause);
             }
             return Err("long_pause_voiced_too_short");
+        }
+        // 0.23.14.7 自然句尾独立采纳：`reason == natural_silence` 表示 VAD 已
+        // 完成 `SentenceEnd` 的 min_sentence_ms 有声校验——该候选携带的
+        // "自然句"证据足以替代 generic strong pause 的 owned ≥ 2s / voiced
+        // ≥ 1.2s 硬门槛。停顿达到 NATURAL_PAUSE_MIN_MS 且有效有声与 VAD
+        // 句长校验同源对齐（≥ min_sentence_ms）即接受，消除 case_12 实测的
+        // 门槛夹缝（1.79s 句 + 门控口径约 570ms 停顿：strong 差 voiced、
+        // long 差 quiet，两边都够不着，最终与下一句合并）。点击/咳嗽/呼吸
+        // 仍被 voiced ≥ min_sentence_ms 挡住；慢速词间停顿跟随
+        // ShortPhraseEnd 候选，不进本分支。generic strong pause 规则对无
+        // 自然句尾证据的候选（soft_window/short_phrase）保持原样。
+        // case_17 修复：采纳同时要求有声可信度（见 `natural_sentence_adoptable`）
+        // ——稳态噪声候选被拒绝并留下 `natural_sentence_voiced_not_credible`
+        // 证据；静默继续累计可走 long_pause 兜底，复语作废。
+        // 0.23.14.7 case_17：不可信候选（无连续发声段）在这里被拒——判据见
+        // `natural_sentence_adoptable`；后续 long_pause 分支共用同一判据。
+        if candidate.reason == "natural_silence" {
+            let min_sentence_ms = self.vad.min_sentence_ms();
+            if Self::natural_sentence_adoptable(candidate, sample_rate as u32, min_sentence_ms) {
+                return Ok(AcceptedVia::NaturalSentence);
+            }
+            let natural_pause_samples = NATURAL_PAUSE_MIN_MS.saturating_mul(sample_rate) / 1000;
+            if candidate.quiet_samples < natural_pause_samples {
+                return Err("below_natural_pause");
+            }
+            if candidate.voiced_samples
+                < u64::from(min_sentence_ms).saturating_mul(sample_rate) / 1000
+            {
+                return Err("natural_sentence_voiced_too_short");
+            }
+            return Err("natural_sentence_voiced_not_credible");
         }
         if !candidate.is_strong(
             sample_rate as u32,
@@ -798,7 +1341,7 @@ impl PseudoInner {
         if candidate.voiced_samples < min_strong_voiced {
             return Err("strong_pause_voiced_too_short");
         }
-        Ok(())
+        Ok(AcceptedVia::StrongPause)
     }
 
     /// 0.23.14 在途短语按失败收场：作废登记并把锚点回退到冻结前位置，
@@ -816,6 +1359,7 @@ impl PseudoInner {
 
     fn clear_candidate(&mut self) {
         self.boundary_candidate = None;
+        self.decision_wait_reason = None;
         self.coordinator.clear_candidate();
     }
 }
@@ -915,7 +1459,7 @@ impl PseudoStreamingSttEngine {
                 preview_owner: 0,
                 next_preview_request: 0,
                 latest_preview: String::new(),
-                latest_preview_range: None,
+                preview_tail_range: None,
                 latest_preview_request_id: 0,
                 preview_revision: 0,
                 preview_generation: 0,
@@ -928,6 +1472,10 @@ impl PseudoStreamingSttEngine {
                 coordinator: RecognitionCoordinator::new(16000, profile, recognition),
                 boundary_candidate: None,
                 uncommitted_voiced_samples: 0,
+                uncommitted_strong_samples: 0,
+                uncommitted_strong_run_samples: 0,
+                uncommitted_strong_run_max: 0,
+                decision_wait_reason: None,
                 pending_preview: None,
                 preview_started: false,
                 single_worker: true,
@@ -1550,11 +2098,7 @@ impl PseudoStreamingSttEngine {
                         // 范围已由 Draft/reset 接管，作废登记（锚点不回退）。
                         inner.pending_phrase = None;
                     }
-                    tracing::debug!(
-                        request_id,
-                        gen_stale,
-                        "gate 后淘汰过期短语（未调用模型）"
-                    );
+                    tracing::debug!(request_id, gen_stale, "gate 后淘汰过期短语（未调用模型）");
                     return;
                 }
             }
@@ -1591,14 +2135,16 @@ impl PseudoStreamingSttEngine {
                     if !cleaned.is_empty() {
                         let chars = cleaned.chars().count();
                         inner.pending_phrase = None;
-                        inner.preview_phrases.push(PreviewSpan {
-                            range: owned.range,
-                            text: cleaned,
-                        });
-                        // 信封 range 跟随最近定稿的短语，避免回退到 (committed,
-                        // committed) 退化区间——VAD 调试时间线因此能显示短语
-                        // 的真实音频范围而非 0.00s–0.00s。
-                        inner.latest_preview_range = Some(owned.model_range);
+                        inner
+                            .preview_phrases
+                            .push(PreviewSpan::new(owned.range, cleaned));
+                        // 0.23.14.7 P1-1：冻结短语入账必须同步清退与该音频范围
+                        // 重叠的尾部——tail 与短语共享 phrase_anchor 起点，
+                        // 不清退会出现同一音频被投影两次。
+                        inner.settle_tail_for_phrase(owned.range.end_sample);
+                        // 0.23.14.6：对外范围信封按 span 清单推导（见
+                        // compose_typed_result），不再单独维护"组合文本配
+                        // 最后一个局部范围"的字段。
                         inner.rebuild_preview_text();
                         tracing::debug!(
                             ledger_len = inner.preview_phrases.len(),
@@ -1794,10 +2340,6 @@ impl PseudoStreamingSttEngine {
                                         request_id: inner.next_phrase_request,
                                         anchor_before,
                                         range: phrase_range,
-                                        model_range: AudioRange::new(
-                                            model_input_range.start_sample,
-                                            model_input_range.end_sample,
-                                        ),
                                         generation: inner.preview_generation,
                                     };
                                     phrase_snapshot = Some((samples_snapshot, pending.clone()));
@@ -1822,7 +2364,7 @@ impl PseudoStreamingSttEngine {
             let mut accepted_boundary = None;
             if let Some(candidate) = inner.boundary_candidate.clone() {
                 let readiness = inner.candidate_readiness(&candidate, total, self.sample_rate);
-                if readiness.is_ok() {
+                if let Ok(accepted_via) = readiness {
                     let mut boundary_total = candidate.boundary_sample as usize;
                     let committed = inner
                         .sentences
@@ -1842,33 +2384,46 @@ impl PseudoStreamingSttEngine {
                             }
                         }
                     }
-                    accepted_boundary = Some((boundary_total, candidate.reason.clone()));
-                } else if observed_new_candidate {
-                    let reserved = inner
-                        .sentences
-                        .draft_reserved_sample_end
-                        .max(inner.sentences.committed_sample_end)
-                        as u64;
-                    let sample_rate = u64::from(self.sample_rate).max(1);
-                    if let Some(observer) = &self.decision_observer {
-                        observer
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .push(SttDecisionRecord {
-                                audio_ms: candidate.boundary_sample * 1000 / sample_rate,
-                                owned_start_ms: reserved * 1000 / sample_rate,
-                                owned_end_ms: candidate.boundary_sample * 1000 / sample_rate,
-                                reason: candidate.reason,
-                                outcome: "waiting",
-                                wait_reason: readiness.err(),
-                                voiced_ms: candidate.voiced_samples * 1000 / sample_rate,
-                                quiet_ms: candidate.quiet_samples * 1000 / sample_rate,
-                            });
+                    accepted_boundary = Some((boundary_total, candidate.reason.clone(), accepted_via));
+                } else {
+                    // 0.23.14.7 case_17：候选被拒的证据必须可追溯——只在候选
+                    // 新建时记录会漏掉"候选随静默增长后改由可信度门拒绝"
+                    // （噪声尾段正是被这条路拦下的）。这里对同一候选按
+                    // **等待原因变化**补记，噪声尾段的拒绝原因因此显式落报告，
+                    // 而稳态等待不产生重复行。
+                    let wait_reason = readiness.err();
+                    if observed_new_candidate || inner.decision_wait_reason != wait_reason {
+                        inner.decision_wait_reason = wait_reason;
+                        let reserved = inner
+                            .sentences
+                            .draft_reserved_sample_end
+                            .max(inner.sentences.committed_sample_end)
+                            as u64;
+                        let sample_rate = u64::from(self.sample_rate).max(1);
+                        if let Some(observer) = &self.decision_observer {
+                            observer
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .push(SttDecisionRecord {
+                                    audio_ms: candidate.boundary_sample * 1000 / sample_rate,
+                                    owned_start_ms: reserved * 1000 / sample_rate,
+                                    owned_end_ms: candidate.boundary_sample * 1000 / sample_rate,
+                                    reason: candidate.reason,
+                                    outcome: "waiting",
+                                    wait_reason,
+                                    accepted_via: None,
+                                    strong_ms: candidate.strong_samples * 1000 / sample_rate,
+                                    strong_run_ms: candidate.strong_run_max_samples * 1000
+                                        / sample_rate,
+                                    voiced_ms: candidate.voiced_samples * 1000 / sample_rate,
+                                    quiet_ms: candidate.quiet_samples * 1000 / sample_rate,
+                                });
+                        }
                     }
                 }
             }
 
-            let pending = if let Some((boundary_total, reason)) = accepted_boundary {
+            let pending = if let Some((boundary_total, reason, accepted_via)) = accepted_boundary {
                 let preview_snapshot = inner.latest_preview.clone();
                 let reserved = inner
                     .sentences
@@ -1905,6 +2460,13 @@ impl PseudoStreamingSttEngine {
                             reason: reason.clone(),
                             outcome: "accepted",
                             wait_reason: None,
+                            accepted_via: Some(accepted_via.as_str()),
+                            strong_ms: candidate
+                                .map(|value| value.strong_samples * 1000 / sample_rate)
+                                .unwrap_or(0),
+                            strong_run_ms: candidate
+                                .map(|value| value.strong_run_max_samples * 1000 / sample_rate)
+                                .unwrap_or(0),
                             voiced_ms: candidate
                                 .map(|value| value.voiced_samples * 1000 / sample_rate)
                                 .unwrap_or(0),
@@ -1939,10 +2501,19 @@ impl PseudoStreamingSttEngine {
                         SttError::Engine("STT Draft 坐标非法".to_string())
                     })?;
                 inner.uncommitted_voiced_samples = PseudoInner::voiced_samples(
-                    &inner.samples[suffix],
+                    &inner.samples[suffix.clone()],
                     off_threshold,
                     self.sample_rate,
                 );
+                // 0.23.14.7 case_17：可信度证据随回退后归属重算。
+                let suffix_profile = PseudoInner::strong_run_profile(
+                    &inner.samples[suffix],
+                    inner.vad.current_on_threshold(),
+                    self.sample_rate,
+                );
+                inner.uncommitted_strong_samples = suffix_profile.strong_samples;
+                inner.uncommitted_strong_run_samples = suffix_profile.trail_run;
+                inner.uncommitted_strong_run_max = suffix_profile.max_run;
                 // 0.23.9：通过 coordinator 同步 Draft 预留水位，使 coordinator
                 // 的 reserved/committed 水位与 SentenceState 保持一致。
                 let max_uncommitted_s = inner.max_uncommitted_audio_ms / 1000;
@@ -2022,17 +2593,16 @@ impl PseudoStreamingSttEngine {
                 {
                     Some(local) => {
                         let prefix_samples = &inner.samples[local];
-                        // 0.23.14 切点优先低能量谷底（句内 120ms+ 停顿）：
-                        // 连续语音中的自然换气/微停顿处切开，词中硬切交给
-                        // 滚动窗起点兜底；识别失败由事务式锚点回退恢复。
-                        let cut_abs = PseudoInner::low_energy_valley_start_in_range(
+                        // 0.23.14.6 切点选择（合格谷枚举 + 谷内稳健位置 +
+                        // roll_start 回退）见 choose_time_freeze_cut；词中硬切
+                        // 交事务式锚点回退兜底。
+                        let cut_abs = PseudoInner::choose_time_freeze_cut(
                             prefix_samples,
                             anchor_before,
+                            roll_start as u64,
                             off_threshold,
                             self.sample_rate,
-                        )
-                        .filter(|cut| *cut > anchor_before)
-                        .unwrap_or(roll_start as u64);
+                        );
                         let prefix_audio =
                             AudioRange::new(anchor_before, cut_abs);
                         let gate = RequestAudioGate::evaluate(
@@ -2067,10 +2637,6 @@ impl PseudoStreamingSttEngine {
                                         request_id: inner.next_phrase_request,
                                         anchor_before,
                                         range: prefix_audio,
-                                        model_range: AudioRange::new(
-                                            model_input_range.start_sample,
-                                            model_input_range.end_sample,
-                                        ),
                                         generation: inner.preview_generation,
                                     };
                                     phrase_snapshot =
@@ -2264,6 +2830,23 @@ impl PseudoStreamingSttEngine {
         self.compose_typed_result()
     }
 
+    /// 0.23.14.7 P1-1 Preview 投影不变量：span 序列全部为有效半开区间，且按音频
+    /// 时间单调、互不重叠（`previous.end_sample <= next.start_sample`）。
+    /// 返回首个违规 span 的下标（语义上属于"应被移除的后到者"：区间退化，
+    /// 或与前一个 span 重叠）。组合预览出口（`compose_typed_result`）以此
+    /// 终审，事件消费方的 span 清单同源同构。
+    fn preview_spans_invariant_violation(spans: &[PreviewSegment]) -> Option<usize> {
+        for (index, span) in spans.iter().enumerate() {
+            if span.range.start_sample >= span.range.end_sample {
+                return Some(index);
+            }
+            if index > 0 && spans[index - 1].range.end_sample > span.range.start_sample {
+                return Some(index);
+            }
+        }
+        None
+    }
+
     /// PreviewDraft profile 的类型化兼容 envelope。
     ///
     /// `streaming_port` 优先解析 `kind=draft/preview`；旧 G1/G3 仍消费上面
@@ -2288,12 +2871,67 @@ impl PseudoStreamingSttEngine {
         }
         if inner.preview_revision != inner.last_reported_preview_revision {
             inner.last_reported_preview_revision = inner.preview_revision;
-            let range = inner.latest_preview_range.unwrap_or_else(|| {
-                AudioRange::new(
-                    inner.sentences.committed_sample_end as u64,
-                    inner.sentences.committed_sample_end as u64,
-                )
-            });
+            let committed = inner.sentences.committed_sample_end as u64;
+            // 0.23.14.6：组合预览的组成段清单 = 短语账本 + 当前尾部，每段
+            // 携带自己的音频范围——这是对外范围的单一真源；顶层 audioRange
+            // 是全部 span 的包络。非空预览必然至少有一个非退化 span，禁止
+            // 退化为 (committed, committed) 零长度区间。
+            let mut spans: Vec<PreviewSegment> = inner.preview_phrases.clone();
+            if !inner.preview_tail.is_empty()
+                && let Some(tail_range) = inner.preview_tail_range
+            {
+                spans.push(PreviewSegment::new(tail_range, inner.preview_tail.clone()));
+            }
+            // 0.23.14.7 P1-1：投影不变量终审——span 序列必须单调、互不重叠、
+            // 区间有效。上游裁决（settle_tail_for_phrase / tail_range_is_stale）
+            // 之后的违规是缺陷信号，不允许带病投影变成用户可见的重复文本；
+            // 就地移除违规 span（后到者让位），同步修正组合文本并记 error。
+            let mut repaired = false;
+            while let Some(index) = Self::preview_spans_invariant_violation(&spans) {
+                tracing::error!(
+                    index,
+                    spans = spans.len(),
+                    "Preview span 不变量破坏：移除违规 span 修复投影"
+                );
+                spans.remove(index);
+                repaired = true;
+            }
+            if repaired {
+                // 0.23.14.7 P2：修复必须持久化回 Preview 真源（短语账本 +
+                // 尾部），否则下次 compose 从未修复的真源重建同一冲突——再次
+                // 记 error、再次发同一 Preview。span 清单 = 短语账本 + 尾部
+                // 顺序拼接，repair 只删除不重排：尾部若幸存必在末尾，按
+                // AudioRange 身份判定（重叠副本已被修复移除，range 相等唯一）。
+                let tail_survived = inner.preview_tail_range.is_some()
+                    && spans
+                        .last()
+                        .is_some_and(|last| Some(last.range) == inner.preview_tail_range);
+                if tail_survived {
+                    let phrases_len = spans.len() - 1;
+                    inner.preview_phrases = spans[..phrases_len].to_vec();
+                    // preview_tail / preview_tail_range 保持不变（幸存 span 即
+                    // 尾部本体，不按字符串重裁）。
+                } else {
+                    inner.preview_phrases = spans.clone();
+                    inner.preview_tail.clear();
+                    inner.preview_tail_range = None;
+                }
+                inner.latest_preview = spans.iter().map(|span| span.text.as_str()).collect();
+                // 0.23.14.7 P2：不再递增 preview_revision——本次调用返回的
+                // envelope 已经携带修复后内容，且 reported cursor 在本调用
+                // 开头已对齐当前 revision；若在此再递增，下一次 compose 会把
+                // 同一份（已修复的）内容当"未上报变化"再次发出。真源已收敛，
+                // revision 只随真实预览状态变化推进（rebuild_preview_text）。
+            }
+            let envelope_start = spans
+                .first()
+                .map(|span| span.range.start_sample)
+                .unwrap_or(committed);
+            let envelope_end = spans
+                .last()
+                .map(|span| span.range.end_sample)
+                .unwrap_or(committed);
+            let range = AudioRange::new(envelope_start, envelope_end);
             return Ok(serde_json::json!({
                 "v": 2,
                 "kind": "preview",
@@ -2301,6 +2939,7 @@ impl PseudoStreamingSttEngine {
                 "audioRange": range,
                 "revision": inner.preview_revision,
                 "text": inner.latest_preview,
+                "spans": spans,
             })
             .to_string());
         }
@@ -2380,7 +3019,7 @@ impl PseudoStreamingSttEngine {
 
         // 原子冻结本 session 的尾段并取得唯一提交权。推进 preview 代际也会
         // 使迟到 preview 无法写入 reset 后或 terminal finalize 中的状态。
-        let (identity, remaining_samples, abs_end, off_threshold) = {
+        let (identity, remaining_samples, abs_end, off_threshold, tail_strong_run, profile) = {
             let mut inner = Self::try_lock(&self.inner).ok_or_else(|| {
                 SttError::Engine("STT session 已损坏 (Mutex poisoned)".to_string())
             })?;
@@ -2399,6 +3038,15 @@ impl PseudoStreamingSttEngine {
                 .ok_or_else(|| SttError::Engine("STT finalize 音频坐标非法".to_string()))?;
             let remaining_samples = inner.samples[local_range].to_vec();
             let off_threshold = inner.vad.current_off_threshold();
+            // 0.23.14.7 case_17：终态尾段的可信发声证据**复用流式期间冻结的
+            // 累计值**，不在 finalize 时用"当下阈值"重新测量。原因：VAD 的
+            // on 阈值随底噪自适应，而在尾段静音中底噪会漂移，同一段音频在
+            // 不同时刻用不同阈值测量会得出互相矛盾的结论（实测 case_04 远场
+            // 低声：流式累计连续段 290ms、finalize 时刻重测只有 90ms）。
+            // `uncommitted_strong_run_max` 自上一次采纳（或会话开始）起累计，
+            // 正好覆盖 [上次采纳边界, 当前尾端] ⊇ [committed, 尾端]。
+            let tail_strong_run = inner.uncommitted_strong_run_max;
+            let profile = inner.coordinator.profile;
             let identity = inner.sentences.begin_terminal_finalize();
             inner.preview_generation = inner.preview_generation.wrapping_add(1);
             inner.preview_in_flight = false;
@@ -2407,7 +3055,7 @@ impl PseudoStreamingSttEngine {
             inner.coordinator.begin_closing(abs_end as u64);
             // 原子撤销预览所有权：在途预览任务即使迟到也无法再写状态
             inner.preview_owner = 0;
-            (identity, remaining_samples, abs_end, off_threshold)
+            (identity, remaining_samples, abs_end, off_threshold, tail_strong_run, profile)
         };
 
         if timed_out {
@@ -2418,9 +3066,30 @@ impl PseudoStreamingSttEngine {
             );
         }
 
-        let (finalize_text, finalize_error) = if remaining_samples.is_empty() {
-            (String::new(), None)
-        } else {
+        // 0.23.14.7 case_17 噪声门控：终态尾段必须先有可信发声证据。纯环境声
+        // 尾段（只有风扇/键盘脉冲）在此按 NoSpeech 消费——不调用模型，从而不会
+        // 把环境声幻觉追加进终态文本。没有这道门，被候选采纳层拒绝的噪声尾段
+        // 会在 drain 里"补一刀"重新进入模型。
+        //
+        // **仅 PreviewDraft**：可信度证据（连续强有声段）只在 PreviewDraft 的
+        // 候选观察路径累计；Legacy（G1/G3 默认）没有这条证据链，若一并套用会
+        // 因证据恒为空而**拒掉全部终态文本**——终态覆盖未提交音频是 Legacy 的
+        // 既有契约，必须原样保留（引擎级不变量测试 `valley_*` / `retreated_*`
+        // 覆盖该契约）。
+        let tail_credible = profile != RecognitionProfile::PreviewDraft
+            || PseudoInner::credible_voicing_run(tail_strong_run, self.sample_rate);
+        if !tail_credible && !remaining_samples.is_empty() {
+            tracing::debug!(
+                session = identity.session_generation,
+                samples = remaining_samples.len(),
+                strong_run_ms = tail_strong_run * 1000 / u64::from(self.sample_rate).max(1),
+                "终态尾段无可信发声证据，按 NoSpeech 消费"
+            );
+        }
+        let (finalize_text, finalize_error) =
+            if remaining_samples.is_empty() || !tail_credible {
+                (String::new(), None)
+            } else {
             match self
                 .transcribe_samples(&remaining_samples, off_threshold)
                 .await
@@ -2814,13 +3483,17 @@ impl SttEngine for PseudoStreamingSttEngine {
                 g.preview_in_flight = false;
                 g.preview_owner = 0;
                 g.latest_preview.clear();
-                g.latest_preview_range = None;
+                g.preview_tail_range = None;
                 g.latest_preview_request_id = 0;
                 g.preview_revision = 0;
                 g.preview_generation = g.preview_generation.wrapping_add(1);
                 g.coordinator.reset();
                 g.boundary_candidate = None;
                 g.uncommitted_voiced_samples = 0;
+                g.uncommitted_strong_samples = 0;
+                g.uncommitted_strong_run_samples = 0;
+                g.uncommitted_strong_run_max = 0;
+                g.decision_wait_reason = None;
                 g.pending_preview = None;
                 g.preview_started = false;
                 g.preview_phrases.clear();
@@ -2852,13 +3525,17 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.preview_in_flight = false;
         inner.preview_owner = 0;
         inner.latest_preview.clear();
-        inner.latest_preview_range = None;
+        inner.preview_tail_range = None;
         inner.latest_preview_request_id = 0;
         inner.preview_revision = 0;
         inner.preview_generation = inner.preview_generation.wrapping_add(1);
         inner.coordinator.reset();
         inner.boundary_candidate = None;
         inner.uncommitted_voiced_samples = 0;
+        inner.uncommitted_strong_samples = 0;
+        inner.uncommitted_strong_run_samples = 0;
+        inner.uncommitted_strong_run_max = 0;
+        inner.decision_wait_reason = None;
         inner.pending_preview = None;
         inner.preview_started = false;
         inner.preview_phrases.clear();

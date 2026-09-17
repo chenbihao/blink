@@ -13,13 +13,14 @@
  * - 支持预设快捷填充（OpenAI / Groq / MiMo）
  */
 import {commandErrorText, invoke, listen} from "../../shared/tauri.js";
+import {copyToClipboard} from "../../shared/api.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {iconHTML} from "../../shared/icon.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from "../index.js";
 import {navigateSettings} from "../navigation.js";
 import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
-import {renderVadDebugResult, vadDebugProgressState, renderCoordinatorTrace} from "./voice-vad-debug.js";
+import {buildVadDebugCopyText, renderVadDebugResult, vadDebugProgressState, renderCoordinatorTrace} from "./voice-vad-debug.js";
 import {VAD_DEFAULTS, VAD_WINDOW_KEYS, VAD_WINDOW_RANGE, ensureVadWindowFields, normalizeVadWindows,} from "./voice-vad.js";
 import {RECOGNITION_DEFAULTS, RECOGNITION_RANGE, ensureRecognitionFields, normalizeRecognitionConfig,} from "./voice-recognition.js";
 
@@ -305,7 +306,7 @@ export async function initVoiceTab() {
     // FunASR 本地模型选择（业务设置）
     initLocalModelSelect(config);
     initFileTranscription();
-    initVadDebug();
+    initVadDebug(config);
     initCoordinatorTrace(config);
 
     // ── 跳转入口：点击切换到引擎页并定位 FunASR 卡片 ──
@@ -416,7 +417,7 @@ function initFileTranscription() {
     });
 }
 
-function initVadDebug() {
+function initVadDebug(config) {
     const button = document.getElementById("voice-vad-debug-btn");
     const transcribeButton = document.getElementById("voice-file-transcribe-btn");
     const status = document.getElementById("voice-vad-debug-status");
@@ -432,11 +433,36 @@ function initVadDebug() {
     const transport = document.getElementById("voice-vad-debug-transport");
     const playButton = document.getElementById("voice-vad-debug-play");
     const playTime = document.getElementById("voice-vad-debug-play-time");
+    const copyButton = document.getElementById("voice-vad-debug-copy");
     if (!button || !status || !file || !progress || !progressBar || !progressTime || !progressDetail
         || !result || !finalTitle || !transcript || !chart || !transport || !playButton || !playTime
-        || button.dataset.bound === "true") return;
+        || !copyButton || button.dataset.bound === "true") return;
     button.dataset.bound = "true";
     let runSerial = 0;
+    // 最近一次成功回放的完整结果与文件名——"复制调试信息"的唯一数据来源。
+    // 新一轮开始时清空，避免失败后复制到上一轮的陈旧数据。
+    let lastDebugResult = null;
+    let lastFileLabel = "";
+
+    /** 复制载荷里的参数快照；传入最新配置时优先用它。 */
+    function debugSettingsSnapshot(source) {
+        const cfg = source || config || {};
+        const vad = cfg.local_engine?.vad || {};
+        const recognition = cfg.local_engine?.recognition || {};
+        return {
+            silence_threshold: vad.silence_threshold,
+            min_silence_ms: vad.min_silence_ms,
+            min_sentence_ms: vad.min_sentence_ms,
+            soft_window_s: vad.soft_window_s,
+            hard_window_s: vad.hard_window_s,
+            max_uncommitted_s: vad.max_uncommitted_s,
+            draft_min_s: recognition.draft_min_s,
+            strong_pause_ms: recognition.strong_pause_ms,
+            long_pause_ms: recognition.long_pause_ms,
+            preview_window_ms: recognition.preview_window_ms,
+            preview_refresh_ms: recognition.preview_refresh_ms,
+        };
+    }
 
     // ── 回放（调试增强）：WAV 字节经原始 IPC 到前端后 blob 播放，失败静默降级 ──
     const playback = {audio: null, url: "", raf: 0};
@@ -534,6 +560,38 @@ function initVadDebug() {
         updatePlayback();
     });
 
+    // ── 复制调试信息：环境与参数 + 最终全文 + 切句与识别 + 能量轨迹 + 原始 JSON ──
+    // 走系统剪贴板 command（WebView 的 navigator.clipboard 在设置窗口不可靠）。
+    copyButton.addEventListener("click", async () => {
+        if (!lastDebugResult || copyButton.disabled) return;
+        copyButton.disabled = true;
+        // 先取快照再 await：等待期间若发起新一轮回放会清空 lastDebugResult，
+        // 捕获后的局部引用保证复制的是用户点下按钮时看到的那一份结果。
+        const snapshot = lastDebugResult;
+        const fileLabel = lastFileLabel;
+        const label = copyButton.querySelector("span");
+        try {
+            let settings = debugSettingsSnapshot();
+            try {
+                // 复制瞬间重新取一次配置：面板持有的快照可能落后于刚保存的滑块值。
+                settings = debugSettingsSnapshot(await invoke("get_stt_config"));
+            } catch (error) {
+                console.warn("[vad-debug] settings snapshot unavailable:", error);
+            }
+            const text = buildVadDebugCopyText(snapshot, {t, fileLabel, settings});
+            await copyToClipboard(text);
+            if (label) label.textContent = t("voice.local.vad_debug.copy_done");
+        } catch (error) {
+            console.error("[vad-debug] copy failed:", error);
+            if (label) label.textContent = t("voice.local.vad_debug.copy_failed");
+        } finally {
+            window.setTimeout(() => {
+                if (label) label.textContent = t("voice.local.vad_debug.copy_debug");
+                copyButton.disabled = false;
+            }, 1200);
+        }
+    });
+
     function showProgress(payload) {
         const state = vadDebugProgressState(payload, t);
         if (!state) return;
@@ -555,6 +613,8 @@ function initVadDebug() {
         finalTitle.hidden = true;
         transcript.hidden = true;
         progress.hidden = true;
+        lastDebugResult = null;
+        lastFileLabel = "";
         status.className = "voice-file-transcribe-status";
         status.textContent = t("voice.local.file.picking");
         let unlisten = null;
@@ -593,6 +653,8 @@ function initVadDebug() {
             result.hidden = false;
             finalTitle.hidden = false;
             transcript.hidden = false;
+            lastDebugResult = data;
+            lastFileLabel = picked.displayName || "";
             status.textContent = t("voice.local.vad_debug.done");
             status.className = "voice-file-transcribe-status success";
             if (playbackRef) setupPlayback(playbackRef, runSerial);

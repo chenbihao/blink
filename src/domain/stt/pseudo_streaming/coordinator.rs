@@ -55,6 +55,9 @@ impl RecognitionSettings {
     pub const STRONG_PAUSE_MAX_MS: u64 = 1_500;
     pub const LONG_PAUSE_MIN_MS: u64 = 800;
     pub const LONG_PAUSE_MAX_MS: u64 = 2_000;
+    /// `long_pause_ms` 严格大于 `strong_pause_ms` 的最小间隔（毫秒）。
+    /// 与配置层 `RECOGNITION_PAUSE_MIN_GAP_MS`（滑块步长 50ms）保持一致。
+    pub const PAUSE_MIN_GAP_MS: u64 = 50;
 
     /// 与配置层保持同一组边界；`max_uncommitted_s` 是现有 VAD 配置，
     /// 因而作为 sanitize 的输入而不是重复存一份设置。
@@ -76,10 +79,15 @@ impl RecognitionSettings {
         let strong_pause_ms = self
             .strong_pause_ms
             .clamp(Self::STRONG_PAUSE_MIN_MS, Self::STRONG_PAUSE_MAX_MS);
+        // 0.23.14.6：长静音必须严格晚于强停顿（至少一个滑块步长）——相等时
+        // long 分支的约 300ms 有声门槛会遮蔽强停顿的 2s/1.2s 保护。
+        let long_pause_floor = strong_pause_ms
+            .saturating_add(Self::PAUSE_MIN_GAP_MS)
+            .clamp(Self::LONG_PAUSE_MIN_MS, Self::LONG_PAUSE_MAX_MS);
         let long_pause_ms = self
             .long_pause_ms
             .clamp(Self::LONG_PAUSE_MIN_MS, Self::LONG_PAUSE_MAX_MS)
-            .max(strong_pause_ms);
+            .max(long_pause_floor);
         Self {
             preview_window_ms,
             preview_refresh_ms,
@@ -110,8 +118,20 @@ pub struct BoundaryCandidate {
     pub quiet_start_sample: u64,
     /// `natural_silence` / `soft_window` / `hard_window` 等稳定原因。
     pub reason: String,
-    /// 候选所属未提交区间内的有效有声样本数。
+    /// 候选所属未提交区间内的有效有声样本数（gate 口径，RMS ≥ off）。
     pub voiced_samples: u64,
+    /// 0.23.14.7 case_17：其中强有声样本数（RMS ≥ on）。与
+    /// `voiced_samples` 同窗口累计。**注意：两者之比实测不具区分度**
+    /// （伪文本候选 32.1%、合法噪声候选 21.9%、真句最弱档 38.5%，区间重叠），
+    /// 只作证据链记录，不构成采纳判据；采纳判据见 `strong_run_max_samples`。
+    pub strong_samples: u64,
+    /// 0.23.14.7 case_17：其中**最长连续强有声段**（RMS ≥ on 的连续帧）。
+    ///
+    /// 与 `strong_samples` 互补：环境声可以在总量上凑够强有声，但形态上是
+    /// 稀疏短脉冲（键盘敲击、风扇换挡），连续段只有几十毫秒；真语音的音节
+    /// 是连续发声段，连续强帧可达数百毫秒。该量是"有没有真正发过声"的
+    /// 形态证据，与能量占比无关，因此不随底噪量级漂移。
+    pub strong_run_max_samples: u64,
     /// 已观察到的连续低能量时长。
     pub quiet_samples: u64,
 }
@@ -630,16 +650,26 @@ mod tests {
         assert_eq!(settings.long_pause_ms, 800);
     }
 
-    /// 0.23.14 长静音门槛 sanitize：越界收敛，且不得低于强停顿。
+    /// 0.23.14.6 长静音门槛 sanitize：越界收敛，且必须严格大于强停顿至少
+    /// 一个滑块步长（50ms）——相等会让 long 分支遮蔽强停顿保护。
     #[test]
-    fn sanitize_clamps_long_pause_and_keeps_it_above_strong_pause() {
+    fn sanitize_clamps_long_pause_and_keeps_it_strictly_above_strong_pause() {
         let too_low = RecognitionSettings {
             long_pause_ms: 100,
             strong_pause_ms: 900,
             ..RecognitionSettings::default()
         }
         .sanitize(12);
-        assert_eq!(too_low.long_pause_ms, 900, "长静音不低于强停顿");
+        assert_eq!(too_low.long_pause_ms, 950, "长静音必须严格大于强停顿 ≥50ms");
+
+        // 相等输入同样被拉开
+        let equal = RecognitionSettings {
+            long_pause_ms: 1_200,
+            strong_pause_ms: 1_200,
+            ..RecognitionSettings::default()
+        }
+        .sanitize(12);
+        assert_eq!(equal.long_pause_ms, 1_250);
 
         let too_high = RecognitionSettings {
             long_pause_ms: 9_999,

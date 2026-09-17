@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
-import {buildVadDebugCutRows, buildVadDebugTimeline, parseVadDebugResult, renderVadDebugResult, vadChartY, vadDebugProgressState, vadIntervalSummary, mapProfileLabel, mapRejectReasonKey, mapCandidateStatus, mapRequestStatus, mapCoordinatorTrace, renderCoordinatorTrace} from "./voice-vad-debug.js";
+import {buildVadDebugCopyText, buildVadDebugCutRows, buildVadDebugTimeline, mapVadReasonKey, parseVadDebugResult, renderVadDebugResult, vadChartY, vadDebugProgressState, vadIntervalSummary, vadReasonLabel, mapProfileLabel, mapRejectReasonKey, mapCandidateStatus, mapRequestStatus, mapCoordinatorTrace, renderCoordinatorTrace} from "./voice-vad-debug.js";
 
 const result = {
     duration_ms: 1500,
@@ -135,6 +135,12 @@ assert.match(source, /event\.payload\?\.runId === runId/);
 assert.match(source, /invoke\("transcribe_audio_file", \{audioRef\}\)/);
 assert.match(source, /invoke\("clone_audio_ref_for_vad_debug"/);
 assert.match(source, /invoke\("read_audio_for_playback"/);
+// 0.23.14.7：切句与识别区的"复制调试信息"必须接线到完整载荷与系统剪贴板
+assert.match(source, /getElementById\("voice-vad-debug-copy"\)/);
+assert.match(source, /const snapshot = lastDebugResult/);
+assert.match(source, /buildVadDebugCopyText\(snapshot,/);
+assert.match(source, /copyToClipboard\(text\)/);
+assert.match(source, /invoke\("get_stt_config"\)/);
 
 // ── 0.23.9 PreviewDraft 协调器状态映射测试 ──
 
@@ -313,5 +319,138 @@ assert.ok(traceContainer.children.length >= 3, "full trace renders grid, candida
 // 第一个子元素是概览网格
 const grid = traceContainer.children[0];
 assert.equal(grid.className, "voice-coordinator-trace-grid");
+
+// ── 0.23.14.7 候选原因映射：界面不再显示裸 i18n key ──
+//
+// 此前 reason 直接拼 `voice.local.vad_debug.${code}`，未登记的 code（short_phrase）
+// 会把裸 key 显示成"不切 · voice.local.vad_debug.short_phrase"。
+
+// 后端 VadEvent::reason() 的全部取值都必须登记（新增 code 才会落到兜底）
+for (const code of ["natural_silence", "soft_window", "hard_window", "short_phrase", "uncommitted_cap", "none"]) {
+    assert.equal(mapVadReasonKey(code), `voice.local.vad_debug.${code}`, `${code} 必须映射到同名 key`);
+}
+assert.equal(mapVadReasonKey("brand_new_reason"), "voice.local.vad_debug.reason_unknown");
+assert.equal(mapVadReasonKey(""), "voice.local.vad_debug.reason_unknown");
+assert.equal(mapVadReasonKey(null), "voice.local.vad_debug.reason_unknown");
+
+// 文案字典：与 i18n 的降级链一致（缺 key 时返回 key 本身）
+const labelDict = {
+    "voice.local.vad_debug.short_phrase": "短句停顿",
+    "voice.local.vad_debug.reason_unknown": "其他停顿",
+};
+const translate = key => labelDict[key] ?? key;
+assert.equal(vadReasonLabel("short_phrase", translate), "短句停顿");
+assert.equal(vadReasonLabel("brand_new_reason", translate), "其他停顿 (brand_new_reason)",
+    "未登记 code 必须附上原始 code，既不露 key 也不丢排查线索");
+assert.equal(vadReasonLabel(undefined, translate), "其他停顿 (unknown)");
+assert.doesNotMatch(vadReasonLabel("brand_new_reason", translate), /voice\.local\.vad_debug\./);
+
+// 渲染层同样不再露出裸 key（决策行与切点悬浮文案）
+globalThis.document = {createElement: fakeNode, createElementNS: (_ns, name) => fakeNode(name)};
+const reasonElements = Object.fromEntries(["chart", "events", "transcript", "meta"].map(key => [key, fakeNode(key)]));
+renderVadDebugResult({
+    ...result,
+    boundaries: [{audio_ms: 1200, reason: "short_phrase"}],
+    decisions: [{
+        audioMs: 1200, ownedStartMs: 0, ownedEndMs: 1200, reason: "short_phrase",
+        outcome: "waiting", waitReason: "below_natural_pause",
+    }],
+}, reasonElements, translate);
+const renderedReasons = JSON.stringify(reasonElements.events);
+assert.match(renderedReasons, /短句停顿/, "已登记的 reason 必须显示本地化文案");
+assert.doesNotMatch(renderedReasons, /voice\.local\.vad_debug\.(short_phrase|natural_silence)/,
+    "reason 不得以裸 i18n key 出现在界面上");
+delete globalThis.document;
+
+// 新增的等待原因 code 也要有登记（否则降级为"未知原因"，丢掉本轮新增的证据）
+for (const code of ["below_natural_pause", "natural_sentence_voiced_too_short",
+    "natural_sentence_voiced_not_credible", "long_pause_voiced_too_short",
+    "long_pause_voiced_not_credible", "invalid_sample_rate"]) {
+    assert.notEqual(mapRejectReasonKey(code), "voice.local.vad_debug.reject_unknown",
+        `${code} 必须登记到拒绝原因映射`);
+}
+
+// ── 0.23.14.7 复制调试信息：载荷必须完整到能独立排查 ──
+
+const copyDict = {
+    "voice.local.vad_debug.copy_header": "Blink VAD 调试信息",
+    "voice.local.vad_debug.copy_env": "环境与参数",
+    "voice.local.vad_debug.copy_final_text": "最终全文",
+    "voice.local.vad_debug.copy_timeline": "切句与识别",
+    "voice.local.vad_debug.copy_energy": "能量轨迹",
+    "voice.local.vad_debug.copy_coordinator": "协调器状态",
+    "voice.local.vad_debug.copy_raw": "原始 JSON",
+    "voice.local.vad_debug.copy_empty": "（无）",
+};
+const copyTranslate = key => copyDict[key] ?? labelDict[key] ?? key;
+
+const copyResult = {
+    duration_ms: 23_170,
+    min_sentence_ms: 800,
+    wall_ms: 24_100,
+    finalize_ms: 300,
+    engine_id: "funasr",
+    model_id: "gguf/fun-asr-nano-q4km",
+    final_text: "在风扇下说长句。",
+    trace: {
+        points: [
+            {time_ms: 50, rms: 0.0012, on: 0.01, off: 0.005, speaking: false},
+            {time_ms: 100, rms: 0.02, on: 0.01, off: 0.005, speaking: true},
+        ],
+        quiet_spans: [{start_ms: 19_290, end_ms: 20_230}],
+        rejected_short_sentences: [{time_ms: 2_800, sentence_ms: 370, silence_ms: 300, reason: "short_phrase"}],
+    },
+    boundaries: [{audio_ms: 6_120, reason: "natural_silence"}],
+    commits: [{audio_ms: 6_120, observed_wall_ms: 7_700}],
+    decisions: [
+        {audioMs: 6_120, ownedStartMs: 0, ownedEndMs: 6_120, reason: "natural_silence",
+            outcome: "accepted", acceptedVia: "draft_min", voicedMs: 4_050, strongMs: 2_850,
+            strongRunMs: 1_150, quietMs: 310},
+        {audioMs: 21_600, ownedStartMs: 19_290, ownedEndMs: 21_600, reason: "natural_silence",
+            outcome: "waiting", waitReason: "natural_sentence_voiced_not_credible",
+            voicedMs: 1_060, strongMs: 340, strongRunMs: 50, quietMs: 440},
+    ],
+    text_events: [{
+        kind: "draft", fed_ms: 7_100, wall_ms: 7_700, span_id: 1, revision: 2,
+        audio_range: {startSample: 0, endSample: 97_920}, text: "在风扇下说长句。",
+    }],
+};
+const copyText = buildVadDebugCopyText(copyResult, {
+    t: copyTranslate,
+    fileLabel: "sample.wav",
+    settings: {silence_threshold: 0.001, draft_min_s: 5, strong_pause_ms: 700,
+        long_pause_ms: 1_100, min_sentence_ms: 900},
+});
+assert.match(copyText, /=== Blink VAD 调试信息 ===/);
+assert.match(copyText, /engine_id=funasr model_id=gguf\/fun-asr-nano-q4km/);
+assert.match(copyText, /file=sample\.wav/);
+assert.match(copyText, /min_sentence_ms=800 trace_points=2/);
+assert.equal(copyText.split("min_sentence_ms=").length - 1, 1,
+    "结果已有的字段不得被参数快照重复输出");
+assert.match(copyText, /draft_min_s=5/, "参数快照必须进载荷");
+assert.match(copyText, /\[最终全文\] chars=8[\s\S]*在风扇下说长句。/);
+assert.match(copyText, /boundaries \(1\):\n {2}t=6\.12s reason=natural_silence/);
+assert.match(copyText, /commits \(1\):\n {2}t=6\.12s observed_wall=7\.70s/);
+assert.match(copyText, /owned=0\.00s-6\.12s voiced_ms=4050ms strong_ms=2850ms strong_run_ms=1150ms quiet_ms=310ms/,
+    "决策必须带上完整证据字段（含连续强有声）");
+assert.match(copyText, /accepted_via=draft_min/);
+assert.match(copyText, /wait_reason=natural_sentence_voiced_not_credible/);
+assert.match(copyText, /strong_run_ms=50ms/);
+assert.match(copyText, /text_events \(1\):\n {2}\[draft\] fed=7\.10s wall=7\.70s range=0\.00s-6\.12s span_id=1 revision=2 text="在风扇下说长句。"/);
+assert.match(copyText, /trace\.quiet_spans \(1\):\n {2}19\.29s-20\.23s/);
+assert.match(copyText, /trace\.rejected_short_sentences \(1\):\n {2}t=2\.80s sentence_ms=370 silence_ms=300 reason=short_phrase/);
+assert.match(copyText, /\[能量轨迹\] time_ms,rms,on,off,speaking/);
+assert.match(copyText, /100,0\.020000,0\.010000,0\.005000,1/);
+assert.match(copyText, /\[原始 JSON\]/);
+assert.match(copyText, /"strongRunMs": 1150/, "原始 JSON 必须是完整未裁剪的");
+assert.doesNotMatch(copyText, /voice\.local\.vad_debug\.copy_/, "载荷文案必须已本地化");
+// 无协调器快照时整段省略，不写占位假信息
+assert.doesNotMatch(copyText, /协调器状态/);
+assert.match(buildVadDebugCopyText(copyResult, {t: copyTranslate, coordinatorTrace: {profile: "PreviewDraft"}}),
+    /\[协调器状态\][\s\S]*"profile": "PreviewDraft"/);
+// 载荷自洽：载荷里出现的 reason code 必须都能被映射（含兜底）识别
+const knownReasons = new Set(["natural_silence", "soft_window", "hard_window", "short_phrase", "uncommitted_cap", "none"]);
+for (const code of ["short_phrase", "uncommitted_cap"]) assert.ok(knownReasons.has(code));
+assert.ok(copyText.length > 500, "载荷必须足够完整而不是摘要");
 
 console.log("voice-vad-debug.test.mjs: all assertions passed");

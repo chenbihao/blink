@@ -219,6 +219,37 @@ impl DraftSpan {
     }
 }
 
+/// 类型化 Preview 的组成段（0.23.14.6）：复合预览的单一范围真源。
+///
+/// 对外 Preview 是多个冻结短语 + 当前尾部的组合文本；每一段携带自己的
+/// 音频范围，消费方按范围精确 settle（Draft 覆盖前缀时未覆盖后缀继续
+/// 显示），禁止用字符串长度或 LCP/LCS 猜测音频归属。顶层 `audioRange`
+/// 只是全部 span 的包络（诊断/时间轴用），不参与 settle 决策。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSegment {
+    pub text: String,
+    pub range: AudioRange,
+}
+
+impl PreviewSegment {
+    pub fn new(range: AudioRange, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            range,
+        }
+    }
+}
+
+/// 按 Draft 提交边界清退 Preview 段（0.23.14.6，引擎与事件消费方共用）。
+///
+/// 与引擎 `settle_preview_after_commit` 同一语义：完全覆盖（end ≤ boundary）
+/// 与跨界（start < boundary < end）的段都整条删除——跨界段的剩余音频交回
+/// 尾部窗口重新识别，不做字符串硬裁剪；起点在边界之后的段保持可见。
+pub fn settle_preview_segments(segments: &mut Vec<PreviewSegment>, boundary_sample: u64) {
+    segments.retain(|segment| segment.range.start_sample >= boundary_sample);
+}
+
 /// 识别调度策略。profile 不携带 VoiceTarget/Tauri 类型，只表达领域层调度行为。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -294,12 +325,19 @@ pub enum SttEvent {
     /// 类型化可替换预览（0.23.9）。
     ///
     /// 新 request id 发出后，旧 request 的结果只能被丢弃，不能覆盖当前预览。
+    ///
+    /// 0.23.14.6：`spans` 是组合预览的组成段清单（每段文本 + 音频范围），
+    /// 是范围的单一真源；`audio_range` 退化为全部 span 的包络，仅供诊断
+    /// 时间轴使用。消费方 Draft settle 按 span 范围精确清退（见
+    /// [`settle_preview_segments`]），不依赖 `audio_range`。
     Preview {
         generation: u64,
         request_id: u64,
         audio_range: AudioRange,
         revision: u64,
         text: String,
+        /// 组合预览的组成段（短语账本 + 尾部；可为空 = 显式清空）。
+        spans: Vec<PreviewSegment>,
     },
 
     /// 最终识别结果（session 的正常终态）。

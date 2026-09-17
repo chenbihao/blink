@@ -477,6 +477,18 @@
     white-space: nowrap;
 }
 
+#voice .voice-vad-debug-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin: var(--space-sm) 0 0;
+}
+
+#voice .voice-vad-debug-section-head .voice-vad-debug-section-title {
+    margin: 0;
+}
+
 #voice .voice-vad-debug-section-title {
     margin: var(--space-sm) 0 0;
     color: var(--text);
