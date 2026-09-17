@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use crate::domain::capability::ImageStash;
 use crate::domain::config::{ManagedSetting, ManagedSettingUpdate};
 use crate::domain::plugin::PluginEngine;
+use crate::domain::resource::DefaultResourceStore;
 use crate::domain::search::SearchService;
 use crate::domain::sticky::{
     StickyChangeSource, StickyCloseOutcome, StickyColor, StickyNote, StickyService,
@@ -152,13 +152,16 @@ pub trait CapabilityEnv: Send + Sync {
         expected_updated_at: Option<i64>,
     ) -> Result<StickyCloseOutcome, StickyWorkflowError>;
 
-    // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
+    // ── 统一资源 ref 层（0.23.12 建、0.23.13 图片腿迁入后为唯一资源入口）──
 
-    /// 进程级图片暂存——投影层把 image/* Blob 字节移入 stash 并生成 `image_ref`，
-    /// 后续 tool 只传 ref，不把图片编码进 LLM 上下文。
+    /// 统一资源 store——跨 Capability 传递大资源的短期授权句柄，
+    /// 取代 0.19.4 ImageStash（内存腿）与 0.22.16 AudioResourceRegistry（音频腿）。
     ///
-    /// 返回 `None`——CLI/MCP 最小运行时不构造，投影层降级为摘要。
-    fn image_stash(&self) -> Option<&Arc<ImageStash>>;
+    /// 返回 `None`——MCP minimal 等无 store 运行时，消费方在 invoke 边界
+    /// 返回结构化 Unsupported，不静默吞成摘要。
+    fn resource_store(&self) -> Option<&Arc<DefaultResourceStore>> {
+        None
+    }
 
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 

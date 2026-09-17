@@ -22,6 +22,70 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
+/* 0.23.14：用户附件卡片——文件附件独立成气泡。
+   右对齐表明归属用户；surface 底 + accent 图标 + 弱化字，与 thinking/tool 卡
+   同一静音家族；圆角语言与用户气泡一致（左上大圆角、右下收角）。
+   **不带 .chat-msg 类**：不参与 startEditMessage 的消息索引与编辑流。 */
+.chat-attachment-card {
+    align-self: flex-end;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    max-width: 90%;
+    margin-top: var(--space-xl);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    border-bottom-right-radius: var(--radius-sm);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    font-size: 13px;
+    color: var(--text-sub);
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* 同一条消息的多张附件卡紧凑成组 */
+.chat-attachment-card + .chat-attachment-card {
+    margin-top: var(--space-2xs);
+}
+
+/* 卡片组与同条消息的正文气泡贴紧（跨消息间距仍由 .chat-msg-user 的 xl 承担；
+   本文件在 messages.css 之后加载，同优先级下此处胜出） */
+.chat-attachment-card + .chat-msg-user {
+    margin-top: var(--space-xs);
+}
+
+.chat-attachment-card-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.chat-attachment-card-icon .icon {
+    width: 15px;
+    height: 15px;
+    color: var(--accent);
+}
+
+/* 前缀 paperclip：附件语义符，配色对齐 chat-tool-card-icon（text-sub） */
+.chat-attachment-card-clip {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.chat-attachment-card-clip .icon {
+    width: 13px;
+    height: 13px;
+    color: var(--text-sub);
+}
+
+.chat-attachment-card-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .chat-msg-assistant {
     align-self: flex-start;
     position: relative; /* 复制按钮绝对定位的上下文（0.12.2 §4.6） */

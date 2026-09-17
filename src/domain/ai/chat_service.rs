@@ -227,6 +227,83 @@ pub struct ChatStreamEvent {
     pub chunk: ChatStreamChunk,
 }
 
+/// 单条对话音频附件元数据（`chat_prompt` 命令 wire schema，camelCase）。
+///
+/// **0.23.14 边界**：附件只以结构化元数据随本轮请求进入后端；`audio_ref`
+/// 是短期 bearer 句柄，仅注入**本轮模型输入**的附件上下文，不进入用户可见
+/// 正文、标题截断/生成输入或持久化历史。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAttachmentInput {
+    pub audio_ref: String,
+    pub display_name: String,
+}
+
+/// 单轮允许的最大附件数（防御性上限，与 composer chip 面板容量对齐）。
+const MAX_CHAT_ATTACHMENTS: usize = 8;
+
+/// 清洗 `chat_prompt` 收到的附件元数据——字段卫生 + 防御性上限。
+///
+/// 拒绝非 `rref_` 形态或超长的 ref；display_name 去控制字符并截断
+/// （对齐后端 `safe_audio_display_name` 的规则）。
+fn sanitize_attachments(attachments: Vec<ChatAttachmentInput>) -> Vec<ChatAttachmentInput> {
+    attachments
+        .into_iter()
+        .filter(|attachment| {
+            let r = attachment.audio_ref.trim();
+            r.starts_with("rref_") && r.len() <= 128
+        })
+        .take(MAX_CHAT_ATTACHMENTS)
+        .map(|mut attachment| {
+            attachment.audio_ref = attachment.audio_ref.trim().to_string();
+            attachment.display_name = attachment
+                .display_name
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(160)
+                .collect();
+            attachment
+        })
+        .collect()
+}
+
+/// 附件上下文块——本轮模型输入的技术段（附件 ref + 使用提示）。
+///
+/// 仅供模型消费；用户可见正文/标题/历史不含此块。
+fn attachment_context_block(attachments: &[ChatAttachmentInput]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::with_capacity(attachments.len() + 1);
+    for (index, attachment) in attachments.iter().enumerate() {
+        lines.push(format!(
+            "[音频附件 {}] file=\"{}\" audio_ref=\"{}\"",
+            index + 1,
+            attachment.display_name.replace('"', "'"),
+            attachment.audio_ref
+        ));
+    }
+    lines.push("（以上为本地音频附件，可用 transcribe_audio 能力转写后处理）".to_string());
+    Some(lines.join("\n"))
+}
+
+/// 组装本轮模型输入：附件上下文（仅本轮有效）+ 用户可见正文。
+///
+/// 无附件时模型输入 = 用户可见正文（与既有行为一致）；正文为空而仅有附件时，
+/// 模型输入 = 附件上下文块。
+fn compose_model_input(visible: &str, attachments: &[ChatAttachmentInput]) -> String {
+    match attachment_context_block(attachments) {
+        None => visible.to_string(),
+        Some(block) => {
+            if visible.is_empty() {
+                block
+            } else {
+                format!("{block}\n{visible}")
+            }
+        }
+    }
+}
+
 /// ChatService 请求错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
@@ -326,7 +403,7 @@ impl RequestTracker {
 /// 对话服务。
 pub struct ChatService {
     emitter: Arc<dyn EventPort>,
-    /// CapabilityEnv 引用——用于构造 InvokeContext 和 image_stash。
+    /// CapabilityEnv 引用——用于构造 InvokeContext 和 resource_store。
     cap_env: Arc<dyn crate::domain::event::CapabilityEnv>,
     /// GUI surface（主进程 Some，CLI 等无 GUI 宿主 None）——AI tool 调 GUI starter
     /// 能力（open_settings 等）时经 InvokeContext 传给 Registry runtime 门禁。
@@ -967,6 +1044,7 @@ impl ChatService {
         self: &Arc<Self>,
         conversation_id: String,
         message: String,
+        attachments: Vec<ChatAttachmentInput>,
         group_system_prompt: Option<String>,
         kind: ConversationKind,
         target_window: String,
@@ -990,20 +1068,41 @@ impl ChatService {
         // 1. 检查 /skill 显式激活指令
         // 2. 阶段 1：所有 Skill 摘要常驻
         // 3. 阶段 2：触发匹配（关键词/正则）或显式激活的 Skill 全文注入
-        let (effective_message, triggered_skills) = if plan.includes_extensions() {
+        let (visible_message, triggered_skills) = if plan.includes_extensions() {
             self.resolve_skill_triggers(&message)
         } else {
             (message.clone(), Vec::new())
         };
 
+        // 0.23.14：模型输入与用户可见正文分离——附件 ref 只注入**本轮模型输入**；
+        // 预写落库、标题截断与 LLM 命名全部使用用户可见正文（`message`/`visible_message`），
+        // 持久化历史中不出现 `rref_` 技术块。
+        let attachments = sanitize_attachments(attachments);
+        let model_input = compose_model_input(&visible_message, &attachments);
+        if !attachments.is_empty() {
+            tracing::debug!(
+                request_id,
+                attachments = attachments.len(),
+                "ChatService: 本轮模型输入已注入附件上下文（不进入持久化历史）"
+            );
+        }
+
         // 0.21.16：发出即保存——Persistent 模式预写用户消息 + 建对话记录。
         // 与 `append` 的「跳过已预写 user」去重配合，正常完成后不产生重复行；
         // 中断/失败时用户消息已落库，侧边栏立即可见。
         // 失败不阻塞对话（warn-and-continue），与「持久化分组失败不影响对话」一致。
+        // 0.23.14：附件以**展示文件名**随预写行落库（徽标渲染用；ref 不落库）。
         if kind == ConversationKind::Persistent
             && let Err(e) = self
                 .persistent_memory()
-                .persist_user_message(&conversation_id, &effective_message)
+                .persist_user_message(
+                    &conversation_id,
+                    &visible_message,
+                    &attachments
+                        .iter()
+                        .map(|a| a.display_name.clone())
+                        .collect::<Vec<_>>(),
+                )
                 .await
         {
             tracing::warn!(
@@ -1128,7 +1227,7 @@ impl ChatService {
                     let context_status = service
                         .compute_context_status(
                             &conversation_for_task,
-                            Some(&effective_message),
+                            Some(&model_input),
                             Some(&preamble),
                             &provider,
                             &resolved,
@@ -1159,7 +1258,7 @@ impl ChatService {
                         &provider,
                         &resolved,
                         &conversation_for_task,
-                        &effective_message,
+                        &model_input,
                         chunk_tx,
                         thinking_enabled,
                         reasoning_effort.clone(),
@@ -1606,6 +1705,68 @@ fn compute_allowlist_fingerprint(allowlist: &std::collections::HashSet<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 0.23.14：模型输入与用户可见正文分离 ────────────────────────────────
+
+    fn attachment(r: &str, name: &str) -> ChatAttachmentInput {
+        ChatAttachmentInput {
+            audio_ref: r.to_string(),
+            display_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn compose_model_input_without_attachments_is_identity() {
+        assert_eq!(compose_model_input("你好", &[]), "你好");
+    }
+
+    #[test]
+    fn compose_model_input_prepends_attachment_context() {
+        let attachments = vec![attachment("rref_aaaabbbbccccdddd", "录音.wav")];
+        let input = compose_model_input("转写这个附件", &attachments);
+        assert!(
+            input.contains("audio_ref=\"rref_aaaabbbbccccdddd\""),
+            "模型输入应含附件 ref: {input}"
+        );
+        assert!(input.contains("transcribe_audio"), "模型输入应含使用提示");
+        assert!(input.ends_with("转写这个附件"), "可见正文应在其后: {input}");
+        // 文件名中的引号被中和，不会破坏块结构
+        let quoted = vec![attachment("rref_aaaabbbbccccdddd", "a\"b.wav")];
+        let input2 = compose_model_input("x", &quoted);
+        assert!(!input2.contains("a\"b.wav"), "引号应被中和: {input2}");
+    }
+
+    #[test]
+    fn compose_model_input_attachment_only_when_visible_empty() {
+        let attachments = vec![attachment("rref_aaaabbbbccccdddd", "a.wav")];
+        let input = compose_model_input("", &attachments);
+        assert!(input.contains("audio_ref=\"rref_aaaabbbbccccdddd\""));
+        assert!(!input.ends_with("\n"));
+    }
+
+    #[test]
+    fn sanitize_attachments_drops_invalid_and_caps() {
+        let ok = attachment("rref_aaaabbbbccccdddd", "a.wav");
+        let bad_prefix = attachment("bearer-token", "b.wav");
+        let empty = attachment("  ", "c.wav");
+        let oversized = attachment(format!("rref_{}", "x".repeat(200)).as_str(), "d.wav");
+        // 10 条有效 + 3 条无效：无效被剔除后剩 10 条，再被上限截到 8
+        let mut inputs = std::iter::repeat_n(ok.clone(), 10).collect::<Vec<_>>();
+        inputs.insert(0, bad_prefix);
+        inputs.insert(1, empty);
+        inputs.push(oversized);
+        let sanitized = sanitize_attachments(inputs);
+        assert_eq!(sanitized.len(), MAX_CHAT_ATTACHMENTS);
+        assert!(sanitized.iter().all(|a| a.audio_ref.starts_with("rref_")));
+        assert_eq!(sanitized[0], ok, "有效条目应保留且顺序稳定");
+    }
+
+    #[test]
+    fn sanitize_attachments_strips_control_chars_in_display_name() {
+        let dirty = attachment("rref_aaaabbbbccccdddd", "a\nb\x07.wav");
+        let sanitized = sanitize_attachments(vec![dirty]);
+        assert_eq!(sanitized[0].display_name, "ab.wav");
+    }
 
     #[test]
     fn agent_mode_scopes_extensions_by_window() {

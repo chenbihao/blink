@@ -129,6 +129,9 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 0.12.6 迁移：conversations 表加 group_id 列（若不存在）
     migrate_add_group_id_column(pool).await?;
 
+    // 0.23.14 迁移：messages 表加 attachments 列（若不存在）
+    migrate_add_attachments_column(pool).await?;
+
     // 0.21.19: conversation_summaries 表（摘要压缩）
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS conversation_summaries (
@@ -218,6 +221,30 @@ async fn migrate_add_group_id_column(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
         tracing::info!("conversations 表已迁移：新增 group_id 列");
+    }
+    Ok(())
+}
+
+/// 检测 `messages` 表是否有 `attachments` 列，没有则 `ALTER TABLE ADD COLUMN`。
+///
+/// 0.23.14：用户消息的音频附件**展示元数据**（JSON 字符串数组，仅文件名——
+/// 绝不存 `audio_ref` bearer token）。NULL = 无附件；气泡徽标与历史渲染消费。
+async fn migrate_add_attachments_column(pool: &SqlitePool) -> Result<(), String> {
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('messages')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let has_attachments = columns.iter().any(|(name,)| name == "attachments");
+    if !has_attachments {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE messages ADD COLUMN attachments TEXT".to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("messages 表已迁移：新增 attachments 列");
     }
     Ok(())
 }
@@ -352,14 +379,30 @@ pub async fn append_message(
     role: &str,
     content: &str,
 ) -> Result<i64, String> {
+    append_message_with_attachments(pool, conversation_id, role, content, None).await
+}
+
+/// 插入一条消息并携带附件展示元数据（0.23.14）。
+///
+/// `attachments_json` 为 JSON 字符串数组（**仅文件名，不含 `audio_ref`**）；
+/// None = 无附件。供「发出即保存」预写用户消息时记录附件徽标。
+pub async fn append_message_with_attachments(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    attachments_json: Option<&str>,
+) -> Result<i64, String> {
     let now = chrono::Utc::now().timestamp();
     let result = sqlx::query(
-        "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO messages (conversation_id, role, content, created_at, attachments) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )
     .bind(conversation_id)
     .bind(role)
     .bind(content)
     .bind(now)
+    .bind(attachments_json)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -634,13 +677,16 @@ pub async fn truncate_messages(
 /// 加载对话的**全部**消息（按 id 升序，即时间顺序）。
 ///
 /// 供 `get_chat_messages` IPC 加载历史用——展示用全量，agent context 用滑动窗口。
-/// 0.12.7：返回 `(role, content, created_at)` 三元组，前端据此插入时间分隔符。
+/// 0.12.7：返回 `(role, content, created_at)`，前端据此插入时间分隔符。
+/// 0.23.14：追加第四元 `attachments`（JSON 字符串数组，仅文件名；None = 无附件），
+/// 前端渲染用户消息的附件徽标。
 pub async fn load_all_messages(
     pool: &SqlitePool,
     conversation_id: &str,
-) -> Result<Vec<(String, String, i64)>, String> {
-    let rows: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT role, content, created_at FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
+) -> Result<Vec<(String, String, i64, Option<String>)>, String> {
+    let rows: Vec<(String, String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT role, content, created_at, attachments FROM messages \
+         WHERE conversation_id = ?1 ORDER BY id ASC",
     )
     .bind(conversation_id)
     .fetch_all(pool)
@@ -1668,6 +1714,41 @@ mod tests {
         assert_eq!(count_messages(&pool).await, 0);
         // conversation 记录仍在
         assert_eq!(count_conversations(&pool).await, 1);
+    }
+
+    // ── 0.23.14: 附件展示元数据 ─────────────────────────────────────────
+
+    /// 带附件元数据的预写行：load 返回文件名数组；无附件行为 NULL；
+    /// 列经 init_db 迁移存在（幂等已由 init_db_is_idempotent 覆盖）。
+    #[tokio::test]
+    async fn append_with_attachments_and_load_roundtrip() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+
+        let names = vec!["录音.wav".to_string(), "会议.wav".to_string()];
+        append_message_with_attachments(
+            &pool,
+            "c1",
+            "user",
+            r#"{"role":"user"}"#,
+            Some(&serde_json::to_string(&names).unwrap()),
+        )
+        .await
+        .unwrap();
+        // 无附件消息
+        append_message(&pool, "c1", "user", "plain").await.unwrap();
+
+        let msgs = load_all_messages(&pool, "c1").await.unwrap();
+        assert_eq!(msgs.len(), 2);
+        let (role, _, _, attachments) = &msgs[0];
+        assert_eq!(role, "user");
+        let parsed: Vec<String> = serde_json::from_str(attachments.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed, names);
+        // 绝不存 ref：该列值只应含文件名
+        assert!(!attachments.as_deref().unwrap().contains("rref_"));
+        assert!(msgs[1].3.is_none(), "无附件消息应为 NULL");
     }
 
     // ── 0.12.5 §5.5: truncate_messages ──────────────────────────────────

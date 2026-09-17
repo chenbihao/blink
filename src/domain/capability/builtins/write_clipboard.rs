@@ -112,9 +112,12 @@ impl Capability for WriteClipboard {
                     detail: "image_ref 与 image_bytes 不能同时提供".into(),
                 });
             }
-            // Task 10: resolve_image_ref 返回 Bytes（零拷贝），write_png 需要 Vec
-            let png_bytes =
-                resolve_image_ref(&args, ctx.env.image_stash().map(|stash| stash.as_ref()))?;
+            // resolve_image_ref 返回 Bytes（零拷贝），write_png 需要 Vec
+            let png_bytes = resolve_image_ref(
+                &args,
+                ctx.env.resource_store().map(|store| store.as_ref()),
+                crate::domain::resource::ResourceUse::DecodeImage,
+            )?;
             crate::domain::clipboard::write_png(
                 png_bytes.to_vec(),
                 ClipboardWriteSource::Capability,

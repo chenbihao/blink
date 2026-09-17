@@ -90,7 +90,12 @@ pub fn dispatch(cli: Cli) -> i32 {
     };
 
     if let Some(engine_service) = cli_engine_service.as_ref() {
-        let audio_registry = Arc::new(crate::app::audio_resource::AudioResourceRegistry::default());
+        // 0.23.12：CLI 与 GUI 共用统一 ResourceStore（TauriDomainEnv 持有）。
+        // CLI 是真实消费方——签发 → 转写 → 一次性消费走全链路，不降级 Unsupported。
+        let resource_store = std::sync::Arc::clone(
+            crate::domain::event::CapabilityEnv::resource_store(domain_env.as_ref())
+                .expect("TauriDomainEnv 持有统一 ResourceStore"),
+        );
         let engine_conn: Arc<dyn crate::app::audio_transcription_service::EngineConnectionPort> =
             Arc::new(
                 crate::app::audio_transcription_service::EngineConnectionAdapter::new(
@@ -101,13 +106,13 @@ pub fn dispatch(cli: Cli) -> i32 {
             Arc::new(crate::app::audio_transcription_service::SttCloudEgressAuthorizer::new());
         let transcription_service = Arc::new(
             crate::app::audio_transcription_service::AudioTranscriptionService::new(
-                audio_registry.clone(),
+                resource_store.clone(),
                 engine_conn,
                 cloud_auth,
                 crate::app::audio_transcription_service::TranscriptionConfig::default(),
             ),
         );
-        app.manage(audio_registry);
+        app.manage(resource_store);
         domain_env.set_audio_transcription(
             transcription_service
                 as Arc<dyn crate::domain::stt::transcribe::AudioTranscriptionPort>,
@@ -492,14 +497,21 @@ fn run_transcribe_audio(
         return 1;
     }
 
-    // 4. 获取 AudioResourceRegistry 并签发 audio_ref
-    let audio_registry = handle
-        .state::<std::sync::Arc<crate::app::audio_resource::AudioResourceRegistry>>()
+    // 4. 获取统一 ResourceStore 并签发 audio_ref（0.23.12：grant 取代 scope）
+    let resource_store = handle
+        .state::<std::sync::Arc<crate::domain::resource::DefaultResourceStore>>()
         .inner()
         .clone();
 
-    let audio_ref = match audio_registry.issue(file_path, "stt_transcribe") {
-        Ok(ref_) => ref_,
+    let audio_ref = match resource_store.issue_local_file(
+        file_path,
+        crate::domain::resource::ResourceGrantSpec::new(
+            crate::domain::resource::ResourceUse::TranscribeAudio,
+            crate::domain::resource::ReusePolicy::OneShot,
+            "cli_transcribe",
+        ),
+    ) {
+        Ok(ref_) => ref_.as_str().to_string(),
         Err(e) => {
             eprintln!("错误：无法签发音频引用: {e}");
             return 1;

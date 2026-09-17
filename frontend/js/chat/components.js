@@ -8,6 +8,7 @@ import {highlightCodeBlocks, renderMarkdown} from "./renderer.js";
 import {escapeText} from "./utils.js";
 import {getMcpToolSource, isMcpTool} from "./state.js";
 import {copyToClipboard} from "../shared/api.js";
+import {iconHTML} from "../shared/icon.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -104,7 +105,7 @@ export function clearMessages() {
 }
 
 /**
- * 渲染用户消息 bubble。
+ * 渲染用户消息 bubble（纯正文——附件经 renderUserAttachmentCards 独立成卡）。
  * @param {string} text
  * @returns {HTMLElement|null} 消息元素引用（0.12.5 §5.5 编辑重发需要）
  */
@@ -126,6 +127,59 @@ export function renderUserMessage(text) {
     messagesEl.appendChild(el);
     scrollToBottom();
     return el;
+}
+
+/**
+ * 渲染用户附件卡片——音频等文件附件作为**独立气泡**展示（0.23.14）。
+ *
+ * 每个附件一张右对齐静音卡片（surface 底 + accent 图标 + 弱化字，与
+ * thinking/tool 卡同一家族），圆角语言与用户气泡一致。前缀 paperclip
+ * 表达"附件"语义，随后是类型图标（音频为 audio-lines）。文件名超长时
+ * 中段省略（保住扩展名），CSS ellipsis 仅作窄窗口兜底。**不带 `.chat-msg`
+ * 类**——`startEditMessage` 用 `.chat-msg` 集合定位消息下标，附件卡片
+ * 不参与编辑/重试索引；复制/编辑只作用于正文气泡。
+ *
+ * @param {string[]} names 附件展示文件名（仅文件名，ref 不进 DOM）
+ */
+export function renderUserAttachmentCards(names) {
+    if (!messagesEl) return;
+    for (const name of names) {
+        const card = document.createElement("div");
+        card.className = "chat-attachment-card";
+        card.title = `${name}（音频附件）`;
+        const clip = document.createElement("span");
+        clip.className = "chat-attachment-card-clip";
+        clip.innerHTML = iconHTML("paperclip");
+        const typeIcon = document.createElement("span");
+        typeIcon.className = "chat-attachment-card-icon";
+        typeIcon.innerHTML = iconHTML("audio-lines");
+        const label = document.createElement("span");
+        label.className = "chat-attachment-card-name";
+        label.textContent = middleEllipsis(name);
+        card.append(clip, typeIcon, label);
+        messagesEl.appendChild(card);
+    }
+    scrollToBottom();
+}
+
+/** 文件名展示的字符预算（超长中段省略；CJK 与拉丁混排下的经验值）。 */
+const FILENAME_MAX_CHARS = 24;
+
+/**
+ * 文件名中段省略——保留开头 + 结尾（扩展名在尾部，不能被省略号吃掉）。
+ * hover 的 title 仍展示完整文件名。
+ * @param {string} name
+ * @param {number} [max=FILENAME_MAX_CHARS]
+ * @returns {string}
+ */
+export function middleEllipsis(name, max = FILENAME_MAX_CHARS) {
+    const text = String(name ?? "");
+    if (text.length <= max) return text;
+    const keep = max - 1; // 减去省略号
+    // 尾部至少保留 1 字符（扩展名在尾部，不能被省略号吃掉）
+    const tail = Math.max(1, Math.floor(keep * 0.4));
+    const head = keep - tail;
+    return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
 }
 
 /**
@@ -470,6 +524,10 @@ function startEditMessage(el, originalText) {
         el.classList.remove("editing");
         el.textContent = originalText;
         el.dataset.rawText = originalText;
+        // 0.23.14：恢复附件徽标行（置于正文之前）——编辑取消不应丢徽标
+        if (Array.isArray(el.__attachmentNames) && el.__attachmentNames.length > 0) {
+            el.insertBefore(renderAttachmentBadges(el.__attachmentNames), el.firstChild);
+        }
         // 重新注入操作行
         const row = createActionsRow();
         row.appendChild(createCopyAction(() => el.dataset.rawText || ""));

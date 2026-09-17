@@ -14,10 +14,13 @@ import {EVENTS} from "../shared/event-names.js";
  *
  * 0.12.6：新增可选 `groupId` 参数——设置对话所属分组并注入分组级系统提示词。
  * 传 null/undefined 时保持现有分组不变（后端查询对话当前分组的 system_prompt）。
+ * 0.23.14：`opts.attachments` 携带本轮音频附件元数据（{audioRef, displayName}[]）——
+ * 后端只注入本轮模型输入，用户可见正文/标题/持久化历史不含附件技术块。
  *
  * @param {string} conversationId
- * @param {string} message
+ * @param {string} message 用户可见正文
  * @param {string|null} [groupId] 分组 ID（0.12.6）
+ * @param {{targetWindow?: string|null, ephemeral?: boolean|null, thinkingEnabled?: boolean, reasoningEffort?: string|null, attachments?: Array<{audioRef: string, displayName: string}>|null}} [opts]
  * @returns {Promise<number>} request_id
  */
 export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
@@ -29,6 +32,7 @@ export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
         ephemeral: opts.ephemeral ?? null,
         thinkingEnabled: opts.thinkingEnabled ?? false,
         reasoningEffort: opts.reasoningEffort ?? null,
+        attachments: opts.attachments ?? null,
     });
 }
 
@@ -111,6 +115,37 @@ export function confirmChatAction(confirmId, approved) {
     return invoke("confirm_chat_action", {confirmId, approved});
 }
 
+// ── 音频附件（0.23.13 对话窗口附件闭环）──────────────────────────────
+
+/**
+ * 选择本地 WAV 作为对话音频附件。
+ * 后端经可信 picker 签发 Reusable audio_ref（owner 绑定会话）并后台预热 STT 引擎；
+ * 用户取消返回 null。
+ * @param {string} conversationId
+ * @returns {Promise<{audioRef: string, displayName: string}|null>}
+ */
+export function pickChatAudioAttachment(conversationId) {
+    return invoke("pick_chat_audio_attachment", {conversationId});
+}
+
+/**
+ * 移除单个附件 chip 时撤销其 audio_ref。
+ * @param {string} audioRef
+ * @returns {Promise<boolean>}
+ */
+export function removeChatAudioAttachment(audioRef) {
+    return invoke("remove_chat_audio_attachment", {audioRef});
+}
+
+/**
+ * 会话结束/切换时按 owner 批量撤销该会话的附件 ref。
+ * @param {string} conversationId
+ * @returns {Promise<number>} 撤销条数
+ */
+export function revokeChatAudioAttachments(conversationId) {
+    return invoke("revoke_chat_audio_attachments", {conversationId});
+}
+
 /**
  * 隐藏 chat 窗口。
  */
@@ -165,8 +200,8 @@ export function renameChatConversation(conversationId, title) {
 
 /**
  * 加载对话的完整消息历史。
- * @param {string} conversationId
- * @returns {Promise<Array<{role: string, text: string, thinking: string|null}>>}
+ * 0.23.14：user 消息可能携带 `attachments`（音频附件展示文件名数组，无 ref）。
+ * @returns {Promise<Array<{role: string, text: string, thinking: string|null, attachments?: string[]}>>}
  */
 export function getChatMessages(conversationId) {
     return invoke("get_chat_messages", {conversationId});
@@ -219,15 +254,20 @@ export async function exportConversation(conversationId, title) {
 
 /**
  * 将对话消息列表格式化为 Markdown 字符串。
+ * 0.23.14：user 消息的音频附件以引用行列出（仅文件名）。
  * @param {string} title 对话标题
- * @param {Array<{role: string, text: string, thinking: string|null, tool_name?: string, tool_result?: string}>} messages
+ * @param {Array<{role: string, text: string, thinking: string|null, tool_name?: string, tool_result?: string, attachments?: string[]}>} messages
  * @returns {string}
  */
 function formatConversationMarkdown(title, messages) {
     let md = `# ${title || "对话"}\n\n`;
     for (const msg of messages) {
         if (msg.role === "user") {
-            md += `## 用户\n\n${msg.text}\n\n---\n\n`;
+            md += `## 用户\n\n`;
+            for (const name of msg.attachments ?? []) {
+                md += `> [音频附件] ${name}\n\n`;
+            }
+            md += `${msg.text}\n\n---\n\n`;
         } else if (msg.role === "assistant") {
             // 纯工具调用（无文本回复）
             if (msg.tool_name && !msg.text) {

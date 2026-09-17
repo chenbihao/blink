@@ -75,10 +75,15 @@ impl Capability for OcrImage {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4）
-        // Task 10: resolve_png_input 返回 Bytes（Arc-backed），零拷贝
-        let stash = ctx.env.image_stash();
-        let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
+        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4；0.23.13 迁 ResourceStore）
+        // resolve_png_input 返回 Bytes（Arc-backed），零拷贝
+        let store = ctx.env.resource_store();
+        let png_bytes = resolve_png_input(
+            &args,
+            store.map(|s| s.as_ref()),
+            "png",
+            crate::domain::resource::ResourceUse::OcrImage,
+        )?;
 
         // 0.22.4：优先使用 OcrBackendRouter（支持 windows/paddleocr/auto 路由）
         // 如果未安装 router（测试/旧环境），回退到直接调用 backend()

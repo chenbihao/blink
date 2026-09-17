@@ -238,19 +238,31 @@ impl BlinkMcpServer {
         }
     }
 
-    /// 把 CapabilityResult 投影为 MCP CallToolResult。
+    /// 把 CapabilityResult **单次投影**为 MCP CallToolResult + 审计摘要。
     ///
     /// 0.14.1: 改调 canonical 投影（`to_rig_tool_result()` + `rig_tool_result_to_text()`），
     /// 消除内联 match + Blob 摘要重复 + Items score 漂移。
     /// 0.19.4: 改用 `to_rig_tool_result_with_stash()`，image Blob 移入 stash 并返回 image_ref。
-    fn result_to_call_tool_result(
+    /// 0.23.13: 改用 `to_rig_tool_result_with_store()`——图片 Blob 统一入 ResourceStore。
+    /// 0.23.14: **CapabilityResult 只投影一次**——此前成功路径为审计先投影一次、
+    /// 本函数再投影一次，图片 Blob 会签发两个 ref、缓存两份内容，且第一个 ref
+    /// 只进审计记录（bearer token 泄露进审计库）。现在投影一次，MCP 返回与审计
+    /// 共用；审计摘要对 Blob 只记脱敏元数据（MIME + 尺寸），不含 `rref_` token。
+    fn project_call_tool_result(
         result: CapabilityResult,
-        stash: Option<&crate::domain::capability::ImageStash>,
-    ) -> CallToolResult {
-        let text = crate::domain::capability::rig_tool_result_to_text(
-            &result.to_rig_tool_result_with_stash(stash),
-        );
-        CallToolResult::success(vec![ContentBlock::text(text)])
+        store: Option<&crate::domain::resource::DefaultResourceStore>,
+    ) -> (CallToolResult, String) {
+        let projected = result.to_rig_tool_result_with_store(store);
+        let audit_summary = match &result {
+            // Blob 投影产物含 bearer ref——审计只保留脱敏元数据摘要
+            CapabilityResult::Blob { .. } => result.blob_summary(),
+            _ => crate::domain::capability::rig_tool_result_to_text(&projected),
+        };
+        let text = crate::domain::capability::rig_tool_result_to_text(&projected);
+        (
+            CallToolResult::success(vec![ContentBlock::text(text)]),
+            audit_summary,
+        )
     }
 
     /// 把错误投影为 MCP CallToolResult（is_error = true）。
@@ -373,11 +385,14 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 
             let call_tool_result = match result {
                 Ok(cap_result) => {
-                    let stash = self.cap_env.image_stash();
-                    // 审计日志（caller = mcp_external）
-                    let summary = crate::domain::capability::rig_tool_result_to_text(
-                        &cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref())),
-                    );
+                    let store = self.cap_env.resource_store();
+                    // 单次投影：MCP 返回与审计摘要共用同一份投影产物（0.23.14），
+                    // 图片 Blob 只签发一个 ref；审计摘要不含 bearer token
+                    let (mcp_result, summary) =
+                        BlinkMcpServer::project_call_tool_result(
+                            cap_result,
+                            store.map(|s| s.as_ref()),
+                        );
                     ai_audit::save_audit_log(
                         &ai_pool,
                         &tool_name_for_audit,
@@ -390,10 +405,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                     )
                     .await;
 
-                    BlinkMcpServer::result_to_call_tool_result(
-                        cap_result,
-                        stash.map(|s| s.as_ref()),
-                    )
+                    mcp_result
                 }
                 Err(e) => {
                     let err_msg = format!("{e}");
@@ -497,9 +509,10 @@ mod tests {
             content: "hello world".into(),
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, summary) = BlinkMcpServer::project_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         assert_eq!(projected.is_error, Some(false));
+        assert_eq!(summary, "hello world");
     }
 
     #[test]
@@ -507,26 +520,65 @@ mod tests {
         let result = CapabilityResult::Done {
             summary: "已写入剪贴板".into(),
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, audit) = BlinkMcpServer::project_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         assert_eq!(projected.is_error, Some(false));
+        assert!(audit.contains("已写入剪贴板"));
     }
 
+    /// 0.23.13：无 store 时 Blob 投影为**结构化**降级（blob_unavailable JSON），
+    /// 不再静默吞成尺寸摘要——外部 MCP client 可据此区分"资源不可用"与"空结果"。
     #[test]
-    fn blob_result_projects_to_text_summary() {
+    fn blob_result_without_store_degrades_structured() {
         let result = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0u8; 2048],
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, audit) = BlinkMcpServer::project_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0]
             .as_text()
             .map(|t| t.text.as_str())
             .unwrap_or("");
-        assert!(text.contains("image/png"));
-        assert!(text.contains("KB"));
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["kind"], "blob_unavailable");
+        assert_eq!(parsed["reason"], "resource_store_unavailable");
+        assert_eq!(parsed["mime"], "image/png");
+        assert_eq!(parsed["size_bytes"], 2048);
+        // 审计摘要不含 token（Blob 只记 MIME + 尺寸）
+        assert!(!audit.contains("rref_"));
+    }
+
+    /// 0.23.14 验收：一次 MCP 图片 Blob 投影只新增一个 store entry，
+    /// 返回文本恰含一个 ref token，审计摘要不含任何 `rref_`。
+    #[test]
+    fn blob_projection_with_store_issues_exactly_one_ref_and_sanitized_audit() {
+        use crate::domain::resource::DefaultResourceStore;
+        let store = DefaultResourceStore::default();
+        let result = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0x89, 0x50, 0x4E, 0x47],
+            desc: None,
+        };
+        let (projected, audit) =
+            BlinkMcpServer::project_call_tool_result(result, Some(&store));
+
+        // store 只新增一个条目（双重投影会产生两个）
+        assert_eq!(store.stats().memory_entries, 1);
+
+        // MCP 返回文本含一个 ref token
+        let text = projected.content[0]
+            .as_text()
+            .map(|t| t.text.as_str())
+            .unwrap_or("");
+        let ref_count = text.matches("rref_").count();
+        assert_eq!(ref_count, 1, "返回文本应恰含一个 ref token: {text}");
+
+        // 审计摘要只记脱敏元数据（MIME + 尺寸），不含 bearer token
+        assert!(!audit.contains("rref_"), "审计摘要泄露 token: {audit}");
+        assert!(audit.contains("image/png"));
+        assert!(audit.contains("KB"), "审计应记尺寸元数据: {audit}");
     }
 
     #[test]
@@ -539,7 +591,7 @@ mod tests {
                 actions: vec![],
             }],
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, _) = BlinkMcpServer::project_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0]
             .as_text()
@@ -558,7 +610,7 @@ mod tests {
             content: "hello".into(),
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, _) = BlinkMcpServer::project_call_tool_result(result, None);
         assert_eq!(projected.is_error, Some(false));
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0].as_text().unwrap().text.clone();
@@ -568,7 +620,7 @@ mod tests {
         let result = CapabilityResult::Done {
             summary: "已完成".into(),
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, _) = BlinkMcpServer::project_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("已完成"));
@@ -581,20 +633,22 @@ mod tests {
                 actions: vec![],
             }],
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, _) = BlinkMcpServer::project_call_tool_result(result, None);
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("test.txt"));
 
-        // Blob → 文本摘要
+        // Blob → 结构化降级（0.23.13：无 store 不静默吞摘要）
         let result = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0u8; 4096],
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
+        let (projected, audit) = BlinkMcpServer::project_call_tool_result(result, None);
         let text = projected.content[0].as_text().unwrap().text.clone();
-        assert!(text.contains("image/png"));
-        assert!(text.contains("KB"));
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["kind"], "blob_unavailable");
+        assert_eq!(parsed["mime"], "image/png");
+        assert!(!audit.contains("rref_"));
 
         // Error → is_error = true
         let err = BlinkMcpServer::error_to_call_tool_result("something failed");

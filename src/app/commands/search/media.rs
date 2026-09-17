@@ -951,15 +951,15 @@ fn project_ocr_command_result(
     }
 }
 
-/// Task 10: RAII cleanup guard for ImageStash refs.
+/// RAII cleanup guard for ResourceStore refs（0.23.13：从 ImageStash 平移）。
 ///
-/// `ocr_image` 创建 stash ref 后，无论成功/失败/取消，都需显式删除 ref
-/// 避免占用 stash 项数上限（16 项）。Drop 时调用 cleanup closure。
-struct ImageStashCleanupGuard<F: FnOnce()> {
+/// `ocr_image` 创建 image_ref 后，无论成功/失败/取消，都需显式 revoke ref
+/// 避免占用 store 项数上限（内存腿 16 项）。Drop 时调用 cleanup closure。
+struct ResourceRefCleanupGuard<F: FnOnce()> {
     cleanup: Option<F>,
 }
 
-impl<F: FnOnce()> ImageStashCleanupGuard<F> {
+impl<F: FnOnce()> ResourceRefCleanupGuard<F> {
     fn new(cleanup: F) -> Self {
         Self {
             cleanup: Some(cleanup),
@@ -967,7 +967,7 @@ impl<F: FnOnce()> ImageStashCleanupGuard<F> {
     }
 }
 
-impl<F: FnOnce()> Drop for ImageStashCleanupGuard<F> {
+impl<F: FnOnce()> Drop for ResourceRefCleanupGuard<F> {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
             cleanup();
@@ -994,12 +994,12 @@ pub async fn ocr_image(
 
     // Task 10: 消除 PNG JSON 数字数组和多份图片复制
     // 旧方式：serde_json::json!({ "png": png_data }) → Vec<u8> 被序列化为 JSON 数字数组
-    // 新方式：存入 ImageStash（以 Bytes 零拷贝），传 image_ref 给 Capability
+    // 方式（0.23.13）：存入统一 ResourceStore（以 Bytes 零拷贝），传 image_ref 给 Capability
     //
     // 铁则：
     // - png_data 只在此处出现一次，不 .clone()
     // - 无 stash 环境（CLI/MCP）也不回退 JSON 数组——直接返回错误
-    // - stash.put 失败（超过 32MiB）也不回退 JSON 数组——直接返回错误
+    // - 入 store 失败（超过 32MiB）也不回退 JSON 数组——直接返回错误
     // - 请求结束后显式删除 stash ref
 
     // 0.22.4：从 headers 提取截图 session 信息（可选）
@@ -1014,32 +1014,47 @@ pub async fn ocr_image(
         .inner()
         .clone();
 
-    // Task 10: 通过 ImageStash 传 image_ref，避免 PNG 字节被 JSON 数字数组序列化
-    // Bytes::from(Vec) 消费 Vec 不复制；stash.put 接收 Bytes，不额外复制
+    // 通过统一 ResourceStore 传 image_ref，避免 PNG 字节被 JSON 数字数组序列化
+    //（0.23.13 从 ImageStash 平移：issue_memory + OcrImage use + Reusable）
+    // Bytes::from(Vec) 消费 Vec 不复制；issue_memory 接收 Bytes，不额外复制
     let png_bytes = bytes::Bytes::from(png_data);
     let image_ref = {
         use crate::domain::event::CapabilityEnv;
-        let stash = env_arc.image_stash().ok_or_else(|| {
-            CommandError::new("internal_error", "ImageStash 不可用（运行时未启用）", false)
+        let store = env_arc.resource_store().ok_or_else(|| {
+            CommandError::new(
+                "internal_error",
+                "ResourceStore 不可用（运行时未启用）",
+                false,
+            )
         })?;
-        stash.put(png_bytes, "image/png".into()).ok_or_else(|| {
-            CommandError::new("invalid_args", "图片过大（超过 32MiB 上限）或为空", false)
-        })?
+        store
+            .issue_memory(
+                png_bytes,
+                "image/png",
+                crate::domain::resource::ResourceGrantSpec::new(
+                    crate::domain::resource::ResourceUse::OcrImage,
+                    crate::domain::resource::ReusePolicy::Reusable,
+                    "media.ocr_command",
+                ),
+            )
+            .map_err(|_| {
+                CommandError::new("invalid_args", "图片过大（超过 32MiB 上限）或为空", false)
+            })?
     };
 
-    // Task 10: RAII cleanup guard——请求结束后显式删除 stash ref
-    // 无论成功/失败/取消，都删除临时 stash ref 避免占用上限
-    let stash_for_cleanup = env_arc.clone();
+    // RAII cleanup guard——请求结束后显式 revoke ref
+    // 无论成功/失败/取消，都撤销临时 ref 避免占用上限
+    let store_for_cleanup = env_arc.clone();
     let image_ref_for_cleanup = image_ref.clone();
-    let _cleanup_guard = ImageStashCleanupGuard::new(move || {
+    let _cleanup_guard = ResourceRefCleanupGuard::new(move || {
         use crate::domain::event::CapabilityEnv;
-        if let Some(stash) = stash_for_cleanup.image_stash() {
-            stash.remove(&image_ref_for_cleanup);
+        if let Some(store) = store_for_cleanup.resource_store() {
+            store.revoke(&image_ref_for_cleanup);
         }
     });
 
     let mut arguments = serde_json::json!({});
-    arguments["image_ref"] = serde_json::Value::from(image_ref);
+    arguments["image_ref"] = serde_json::Value::from(image_ref.as_str());
     if let (Some(epoch), Some(rev)) = (screenshot_session, screenshot_revision) {
         arguments["screenshot_session"] = serde_json::Value::from(epoch);
         arguments["screenshot_revision"] = serde_json::Value::from(rev);

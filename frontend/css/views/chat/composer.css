@@ -497,3 +497,103 @@
     border-left-color: var(--accent);
     color: var(--text-sub);
 }
+
+/* ── 0.23.13 音频附件（attach 按钮 + chips） ─────────── */
+
+.chat-attach-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all var(--transition-base);
+    user-select: none;
+}
+
+.chat-attach-btn .icon {
+    width: 15px;
+    height: 15px;
+}
+
+.chat-attach-btn:hover {
+    color: var(--text-sub);
+    background: var(--surface);
+}
+
+.chat-attach-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.chat-audio-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2xs);
+    padding: var(--space-sm) var(--space-lg) 0;
+    border-radius: 14px 14px 0 0;
+}
+
+/* chips 可见时由其承接顶部圆角，textarea 顶部不再圆角（避免缺口） */
+.chat-composer-input-wrap:has(.chat-audio-attachments:not(.hidden)) textarea {
+    border-radius: 0;
+}
+
+.chat-audio-attachments.hidden {
+    display: none;
+}
+
+.chat-audio-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2xs);
+    max-width: 260px;
+    padding: 2px var(--space-xs) 2px var(--space-2xs);
+    border: 1px solid var(--surface);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text-sub);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.chat-audio-chip-icon .icon {
+    width: 13px;
+    height: 13px;
+    color: var(--accent);
+}
+
+.chat-audio-chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-audio-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.chat-audio-chip-remove .icon {
+    width: 12px;
+    height: 12px;
+    color: currentColor;
+}
+
+.chat-audio-chip-remove:hover {
+    color: var(--text);
+}

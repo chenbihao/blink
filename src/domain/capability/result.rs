@@ -15,8 +15,10 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::image_stash::ImageStash;
 use super::projection::{ProjectionRule, jsonpath_query, value_to_string};
+use crate::domain::resource::{
+    DefaultResourceStore, ResourceGrantSpec, ResourceUseSet, ReusePolicy,
+};
 
 // ── rig 投影层（0.12.0 统一投影入口，0.14 适配新结构）──────────────────────
 //
@@ -55,46 +57,100 @@ impl CapabilityResult {
         }
     }
 
-    /// 带 ImageStash 上下文的 canonical agent 投影（0.19.4 §3.6）。
+    /// 带 ResourceStore 上下文的 canonical agent 投影（0.19.4 §3.6；0.23.13 统一入 store）。
     ///
-    /// **与 `to_rig_tool_result()` 的区别**：
-    /// - `image/*` Blob + stash=Some → 字节移入 stash，返回结构化 `image_ref` JSON：
-    ///   `{"kind":"image_ref","image_ref":"<token>","mime":"image/png","size_bytes":12345,"expires_in_seconds":900}`
-    /// - 非 image Blob 或 stash=None → 降级为现有 blob_summary（尺寸摘要）
+    /// **0.23.13 变化**：消除 `image/*` 特殊分支——**图片 Blob** 按统一策略移入
+    /// store（Memory 腿、Reusable、图片消费 use 集），返回结构化 ref JSON：
+    /// - `{"kind":"image_ref","image_ref":"rref_...","mime":"image/png","size_bytes":12345,"expires_in_seconds":900}`
+    /// - `expires_in_seconds` 由 grant 元数据派生（内存腿 TTL 15 分钟 → 900）
+    ///
+    /// **0.23.14 变化**：非图片 Blob 不再签发 `resource_ref`——图片消费 use
+    /// （DecodeImage/OcrImage/PinImage）对非图片内容没有任何合法消费方，
+    /// 签发"假可用"ref 只会制造越权假象。此类 Blob 返回结构化
+    /// `{"kind":"blob_unavailable","reason":"unsupported_media_type",...}`，
+    /// 不为没有真实消费方的 use 占位（0.23 §8.2 决策 2 同源原则）。
+    ///
+    /// 无 store 或入 store 失败 → **结构化**降级（`kind=blob_unavailable`，
+    /// 不静默吞成纯文本摘要——0.23 §8.2 决策 9）
     ///
     /// **消费方**：内部 AI（`CapabilityTool::call`）和 MCP server 共用此方法，
     /// 保证投影策略一致。
-    pub fn to_rig_tool_result_with_stash(
+    pub fn to_rig_tool_result_with_store(
         &self,
-        stash: Option<&ImageStash>,
+        store: Option<&DefaultResourceStore>,
     ) -> Vec<rig_core::completion::message::ToolResultContent> {
         use rig_core::completion::message::ToolResultContent;
 
         match self {
-            CapabilityResult::Blob { mime, bytes, .. } if mime.starts_with("image/") => {
-                if let Some(stash) = stash {
-                    // 尝试移入 stash
-                    // Task 10: Bytes::from(Vec) 消费 Vec 不复制
-                    if let Some(image_ref) =
-                        stash.put(bytes::Bytes::from(bytes.clone()), mime.clone())
-                    {
-                        // TTL 固定 15 分钟，直接用常量避免额外 get 调用
-                        let size_bytes = bytes.len();
-                        let structured = serde_json::json!({
-                            "kind": "image_ref",
-                            "image_ref": image_ref,
+            CapabilityResult::Blob { mime, bytes, .. } => {
+                // 非图片 Blob：无真实消费方的 use 不占位，结构化降级（稳定 reason）
+                if !mime.starts_with("image/") {
+                    return vec![ToolResultContent::text(
+                        serde_json::json!({
+                            "kind": "blob_unavailable",
+                            "reason": "unsupported_media_type",
                             "mime": mime,
-                            "size_bytes": size_bytes,
-                            "expires_in_seconds": 900,
-                        });
-                        return vec![ToolResultContent::text(structured.to_string())];
-                    }
-                    // stash put 失败（超单项上限等）→ 降级摘要
+                            "size_bytes": bytes.len(),
+                        })
+                        .to_string(),
+                    )];
                 }
-                // 无 stash 或 put 失败 → 摘要降级
-                vec![ToolResultContent::text(self.blob_summary())]
+                if let Some(store) = store {
+                    // 投影边界签发方授权：图片消费 use 全集（签发方无法预知
+                    // 下一个 tool 是 OCR 还是 pin——这是有意的宽授权，
+                    // 受 Reusable + 15 分钟 TTL + 项数/字节配额约束）
+                    let uses =
+                        ResourceUseSet::single(crate::domain::resource::ResourceUse::DecodeImage)
+                            .union(ResourceUseSet::single(
+                                crate::domain::resource::ResourceUse::OcrImage,
+                            ))
+                            .union(ResourceUseSet::single(
+                                crate::domain::resource::ResourceUse::PinImage,
+                            ));
+                    let spec = ResourceGrantSpec::new(uses, ReusePolicy::Reusable, "projection");
+                    if let Ok(resource_ref) =
+                        store.issue_memory(bytes::Bytes::from(bytes.clone()), mime.clone(), spec)
+                    {
+                        // expires_in_seconds 由 grant 元数据派生（内存腿默认 15 分钟 = 900）
+                        let expires_in_seconds = store
+                            .inspect(&resource_ref)
+                            .map(|meta| meta.expires_in_seconds)
+                            .unwrap_or(900);
+                        return vec![ToolResultContent::text(
+                            serde_json::json!({
+                                "kind": "image_ref",
+                                "image_ref": resource_ref.as_str(),
+                                "mime": mime,
+                                "size_bytes": bytes.len(),
+                                "expires_in_seconds": expires_in_seconds,
+                            })
+                            .to_string(),
+                        )];
+                    }
+                    // 入 store 失败（超单项上限等）→ 结构化降级
+                    vec![ToolResultContent::text(
+                        serde_json::json!({
+                            "kind": "blob_unavailable",
+                            "reason": "resource_budget_exceeded",
+                            "mime": mime,
+                            "size_bytes": bytes.len(),
+                        })
+                        .to_string(),
+                    )]
+                } else {
+                    // 无 store 运行时（MCP minimal 等）→ 结构化降级，不静默吞摘要
+                    vec![ToolResultContent::text(
+                        serde_json::json!({
+                            "kind": "blob_unavailable",
+                            "reason": "resource_store_unavailable",
+                            "mime": mime,
+                            "size_bytes": bytes.len(),
+                        })
+                        .to_string(),
+                    )]
+                }
             }
-            // 非 image Blob / 其他变体 → 原有逻辑
+            // 非 Blob 变体 → 原有逻辑
             _ => self.to_rig_tool_result(),
         }
     }
@@ -718,18 +774,19 @@ mod tests {
         }
     }
 
-    // ── to_rig_tool_result_with_stash 测试（0.19.4 ImageStash 投影）──────────
+    // ── to_rig_tool_result_with_store 测试（0.19.4 投影；0.23.13 统一入 store）──
 
     #[test]
-    fn with_stash_image_blob_produces_image_ref() {
+    fn with_store_image_blob_produces_image_ref() {
+        use crate::domain::resource::ResourceUse;
         use rig_core::completion::message::ToolResultContent;
-        let stash = super::ImageStash::new();
+        let store = super::DefaultResourceStore::default();
         let r = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0x89, 0x50, 0x4E, 0x47],
             desc: None,
         };
-        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        let contents = r.to_rig_tool_result_with_store(Some(&store));
         assert_eq!(contents.len(), 1);
         if let ToolResultContent::Text(t) = &contents[0] {
             let parsed: serde_json::Value = serde_json::from_str(t.text()).unwrap();
@@ -738,64 +795,84 @@ mod tests {
             assert_eq!(parsed["mime"], "image/png");
             assert_eq!(parsed["size_bytes"], 4);
             assert!(parsed["expires_in_seconds"].as_u64().unwrap() <= 900);
-            // image_ref 可从 stash 取回
+            assert!(parsed["expires_in_seconds"].as_u64().unwrap() > 850);
+            // image_ref 可从 store 按 OcrImage use 取回
             let token = parsed["image_ref"].as_str().unwrap();
-            let img = stash.get(token).expect("stash 应有刚放入的图片");
-            assert_eq!(img.bytes, vec![0x89, 0x50, 0x4E, 0x47]);
+            let mut opened = store
+                .open(
+                    &crate::domain::resource::ResourceRef::from_token(token),
+                    ResourceUse::OcrImage,
+                )
+                .expect("store 应有刚签发的图片");
+            assert_eq!(
+                &opened.read_all_bounded(1024).unwrap()[..],
+                &[0x89, 0x50, 0x4E, 0x47]
+            );
         } else {
-            panic!("image Blob with stash should produce image_ref JSON");
+            panic!("image Blob with store should produce image_ref JSON");
         }
     }
 
     #[test]
-    fn with_stash_non_image_blob_degrades_to_summary() {
+    fn with_store_non_image_blob_degrades_unsupported_media_type() {
+        // 0.23.14：非图片 Blob 不再签发"假可用" resource_ref——图片消费 use
+        // 对非图片内容没有合法消费方，返回结构化降级（稳定 reason），store 零新增
         use rig_core::completion::message::ToolResultContent;
-        let stash = super::ImageStash::new();
+        let store = super::DefaultResourceStore::default();
         let r = CapabilityResult::Blob {
             mime: "application/octet-stream".into(),
             bytes: vec![1, 2, 3, 4],
             desc: None,
         };
-        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        let contents = r.to_rig_tool_result_with_store(Some(&store));
         assert_eq!(contents.len(), 1);
         if let ToolResultContent::Text(t) = &contents[0] {
-            // 非图片 → 摘要降级
-            assert!(t.text().contains("application/octet-stream"));
-            assert!(!t.text().contains("image_ref"));
+            let parsed: serde_json::Value = serde_json::from_str(t.text()).unwrap();
+            assert_eq!(parsed["kind"], "blob_unavailable");
+            assert_eq!(parsed["reason"], "unsupported_media_type");
+            assert_eq!(parsed["mime"], "application/octet-stream");
+            assert_eq!(parsed["size_bytes"], 4);
+            assert!(parsed.get("resource_ref").is_none());
+            assert!(parsed.get("image_ref").is_none());
+            // 未签发任何 ref——store 没有新条目，JSON 不含 token
+            assert_eq!(store.stats().memory_entries, 0);
+            assert!(!parsed.to_string().contains("rref_"));
         } else {
-            panic!("non-image Blob should degrade to summary");
+            panic!("non-image Blob should degrade to blob_unavailable JSON");
         }
     }
 
     #[test]
-    fn with_stash_none_degrades_to_summary() {
+    fn with_store_none_degrades_structured() {
         use rig_core::completion::message::ToolResultContent;
         let r = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0u8; 2048],
             desc: None,
         };
-        let contents = r.to_rig_tool_result_with_stash(None);
+        let contents = r.to_rig_tool_result_with_store(None);
         assert_eq!(contents.len(), 1);
         if let ToolResultContent::Text(t) = &contents[0] {
-            // 无 stash → 摘要降级
-            assert!(t.text().contains("image/png"));
-            assert!(t.text().contains("KB"));
-            assert!(!t.text().contains("image_ref"));
+            // 无 store → 结构化降级（不静默吞成纯文本摘要）
+            let parsed: serde_json::Value = serde_json::from_str(t.text()).unwrap();
+            assert_eq!(parsed["kind"], "blob_unavailable");
+            assert_eq!(parsed["reason"], "resource_store_unavailable");
+            assert_eq!(parsed["mime"], "image/png");
+            assert_eq!(parsed["size_bytes"], 2048);
         } else {
-            panic!("image Blob without stash should degrade to summary");
+            panic!("image Blob without store should degrade structurally");
         }
     }
 
     #[test]
-    fn with_stash_text_unchanged() {
+    fn with_store_text_unchanged() {
         use rig_core::completion::message::ToolResultContent;
-        let stash = super::ImageStash::new();
+        let store = super::DefaultResourceStore::default();
         let r = CapabilityResult::Text {
             content: "hello".into(),
             desc: None,
         };
-        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        let contents = r.to_rig_tool_result_with_store(Some(&store));
         assert_eq!(contents.len(), 1);
         if let ToolResultContent::Text(t) = &contents[0] {
             assert_eq!(t.text(), "hello");
@@ -805,24 +882,25 @@ mod tests {
     }
 
     #[test]
-    fn with_stash_image_ref_non_consuming() {
-        // 投影后 image_ref 可多次读取（先 OCR 再 pin）
-        let stash = super::ImageStash::new();
+    fn with_store_image_ref_reusable_across_uses() {
+        // 投影签发的 ref 为 Reusable——先 OCR 再 pin 都可消费
+        use crate::domain::resource::{ResourceRef, ResourceUse};
+        let store = super::DefaultResourceStore::default();
         let r = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![1, 2, 3],
             desc: None,
         };
-        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        let contents = r.to_rig_tool_result_with_store(Some(&store));
         let text = match &contents[0] {
             rig_core::completion::message::ToolResultContent::Text(t) => t.text().to_string(),
             _ => panic!("expected Text"),
         };
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let token = parsed["image_ref"].as_str().unwrap();
-        // 两次读取都应成功
-        assert!(stash.get(token).is_some(), "第一次读取应成功");
-        assert!(stash.get(token).is_some(), "第二次读取应成功");
+        let token = ResourceRef::from_token(parsed["image_ref"].as_str().unwrap());
+        // OCR 与 PinImage 两个 use 依次消费都应成功（Reusable）
+        assert!(store.open(&token, ResourceUse::OcrImage).is_ok());
+        assert!(store.open(&token, ResourceUse::PinImage).is_ok());
     }
 
     // ── to_display_text 测试（0.14.1 CLI canonical 投影）─────────────────

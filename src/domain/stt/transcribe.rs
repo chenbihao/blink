@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 /// AI/MCP 等外部出口不得使用裸路径或 URL 绕过。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioTranscriptionRequest {
-    /// opaque audio_ref——由 `AudioResourceRegistry::issue` 签发。
+    /// opaque audio_ref——由统一 `ResourceStore::issue_local_file` 签发（0.23.12），
+    /// grant 携带 `ResourceUse::TranscribeAudio` 授权。
     pub audio_ref: String,
 }
 

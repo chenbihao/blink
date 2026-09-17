@@ -1,7 +1,6 @@
 //! 应用层：命令编排、配置管理、服务生命周期
 
 pub mod ai_config;
-pub mod audio_resource; // 0.22.16 H03：有界 audio_ref 资源注册表
 pub mod audio_transcription_service; // 0.22.16 Handoff 04：一次性 STT 编排
 pub mod capture_orchestrator; // 0.22.14：AI 净化截图原子事务 guard
 pub mod command_error; // 0.14.7 W3：IPC 边界的结构化错误协议

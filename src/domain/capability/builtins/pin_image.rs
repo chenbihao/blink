@@ -90,10 +90,14 @@ impl Capability for PinImage {
             });
         }
 
-        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4）
-        // Task 10: resolve_png_input 返回 Bytes（零拷贝 from stash）
-        let stash = ctx.env.image_stash();
-        let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
+        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4；0.23.13 迁 ResourceStore）
+        let store = ctx.env.resource_store();
+        let png_bytes = resolve_png_input(
+            &args,
+            store.map(|s| s.as_ref()),
+            "png",
+            crate::domain::resource::ResourceUse::PinImage,
+        )?;
 
         // 提取可选位置
         let x = optional_i32(&args, "x")?;

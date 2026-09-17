@@ -595,6 +595,7 @@ dependencies = [
  "dirs-next",
  "evalexpr",
  "futures",
+ "getrandom 0.3.4",
  "http",
  "hyper",
  "hyper-util",

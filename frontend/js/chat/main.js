@@ -13,10 +13,12 @@ import {escapeAttr, escapeText} from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
 import {
     clearInput,
+    clearSentAttachments,
     focusInput,
     hideVoiceIndicator,
     initComposer,
     invalidateSkillCache,
+    clearAudioAttachments,
     isVoiceRecording,
     setInputMode,
     setInputValue,
@@ -36,6 +38,7 @@ import {applyThemeFromConfig} from "../shared/theme.js";
 import {getCurrentWindow, invoke, listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
 import {promoteEphemeralConversation} from "../shared/api.js";
+import {attachmentSummaryText} from "./outgoing.js";
 import {initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible} from "./composer-bar-popup.js";
 // invalidateComposerBarCache 仍在 handleContextStatus 中使用
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
@@ -94,6 +97,9 @@ async function init() {
     initComposer({
         onSend: handleSend,
         onStop: handleStop,
+        // 0.23.14：composer 附件 picker 需要当前会话 id 做竞态校验
+        // （picker 返回时会话已切换则撤销刚签发的 ref）
+        getConversationId: () => state.conversationId,
     });
     // 0.21.17：思考控件初始视觉按默认态渲染；refreshModelSelector 拉到模型能力后
     // 再同步真实状态（支持等级 → 强度下拉，否则 → 简单开关）。
@@ -261,15 +267,55 @@ async function init() {
 
 // ── 发送 ────────────────────────────────────────
 
-async function handleSend(message, isEdit = false) {
+/**
+ * 渲染一条用户消息的完整展示（0.23.14：附件独立成卡片气泡）。
+ *
+ * - 有附件：先渲染附件卡片（每个文件一张，右对齐静音卡片）；
+ *   纯附件消息的持久化正文是"（音频附件：…）"人类可读摘要（FTS/导出/标题
+ *   种子用），卡片已展示文件名，文本气泡不再重复渲染。
+ * - 无附件：正文即文本气泡。
+ *
+ * @param {string} text 持久化正文
+ * @param {string[]} [attachmentNames] 附件展示文件名（仅文件名，无 ref）
+ */
+function renderUserEntry(text, attachmentNames = []) {
+    if (attachmentNames.length > 0) {
+        components.renderUserAttachmentCards(attachmentNames);
+        if (text && text !== attachmentSummaryText(attachmentNames)) {
+            components.renderUserMessage(text);
+        }
+        return;
+    }
+    if (text) {
+        components.renderUserMessage(text);
+    }
+}
+
+/**
+ * 发送一条用户消息。
+ *
+ * 0.23.14：composer 传结构化负载 `{text, attachments}`——text 是用户可见/
+ * 持久化正文（气泡、state、标题），attachments 是本轮附件元数据（只注入
+ * 本轮模型输入，不进入气泡/标题/历史）。编辑重发/重试路径传纯字符串。
+ *
+ * @param {{text: string, attachments?: Array<{audioRef: string, displayName: string}>}|string} input
+ * @param {boolean} [isEdit] 编辑重发/重试（跳过截断标题逻辑）
+ */
+async function handleSend(input, isEdit = false) {
+    const payload = typeof input === "string"
+        ? {text: input, attachments: []}
+        : {text: input?.text ?? "", attachments: input?.attachments ?? []};
+    if (!payload.text) return;
+
     // 移除空状态
     components.removeEmptyState();
 
-    // 添加用户消息
-    components.renderUserMessage(message);
+    // 添加用户消息：附件卡片 + 正文气泡（徽标只含文件名，ref 不进 DOM/正文）
+    const attachmentNames = payload.attachments.map((a) => a.displayName);
+    renderUserEntry(payload.text, attachmentNames);
     // 用户发消息 → 强制滚到底部（重置上滚标记）
     forceScrollToBottom();
-    state.addMessage({role: "user", content: message});
+    state.addMessage({role: "user", content: payload.text, attachments: attachmentNames});
 
     // 切换到流式模式
     setStreamingMode();
@@ -288,22 +334,27 @@ async function handleSend(message, isEdit = false) {
         const opts = state.ephemeralMode
             ? {ephemeral: true, targetWindow: "chat", thinkingEnabled, reasoningEffort}
             : {thinkingEnabled, reasoningEffort};
-        const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId, opts);
+        // 0.23.14：附件元数据随本轮请求给后端（后端只注入本轮模型输入）
+        if (payload.attachments.length > 0) {
+            opts.attachments = payload.attachments;
+        }
+        const requestId = await ipc.chatPrompt(state.conversationId, payload.text, state.currentGroupId, opts);
         state.setActiveRequestId(requestId);
-        for (const payload of earlyStreamBuffer.resolve(requestId)) dispatchStreamPayload(payload);
+        for (const payloadChunk of earlyStreamBuffer.resolve(requestId)) dispatchStreamPayload(payloadChunk);
 
         // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
         // 0.21.16: 挪到 chatPrompt 成功之后——后端已预写对话记录（发出即保存），
         // rename 才能命中；此前在 prompt 前调用是 no-op。
         // 0.17.6a: 临时对话跳过标题生成（不写 SQLite，promote 后由主窗口负责）
+        // 0.23.14：标题输入 = 用户可见正文，不出现 rref_/技术提示
         const isNewConversation = !isEdit && state.messages.length === 1;
         if (isNewConversation && !state.ephemeralMode) {
-            const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
+            const truncatedTitle = payload.text.slice(0, 20) + (payload.text.length > 20 ? "…" : "");
             try {
                 await ipc.renameChatConversation(state.conversationId, truncatedTitle);
                 await updateBreadcrumb(truncatedTitle);
                 // 0.12.5 §5.3：异步触发 LLM 命名（不等待，失败静默降级保持截断标题）
-                ipc.generateConversationTitle(state.conversationId, message).catch((e) => {
+                ipc.generateConversationTitle(state.conversationId, payload.text).catch((e) => {
                     console.warn("[chat] LLM 标题生成失败:", e);
                 });
             } catch (e) {
@@ -340,6 +391,10 @@ async function handleSend(message, isEdit = false) {
     }
 
     clearInput();
+    // 0.23.14：附件随消息发出后离开输入框（与输入清空同一成功时机；
+    // 只移除本次发送的 ref，发送间隙新附的文件不受影响）。后端 ref 不撤销——
+    // 本轮 agent 仍要消费，生命周期由会话切换/新对话按 owner 统一回收。
+    clearSentAttachments(payload.attachments);
     // 刷新侧边栏（更新 last_active_at + 标题）
     // 注意：对话持久化由 rig memory.append 异步完成，done chunk 到达后再刷新一次
     refreshSidebar();
@@ -369,11 +424,11 @@ async function handleEditMessage(msgIndex, newText) {
     // 2. 截断 state.messages
     state.messages.length = msgIndex;
 
-    // 3. 重新渲染消息列表
+    // 3. 重新渲染消息列表（0.23.14：历史消息的附件卡片一并保留）
     components.clearMessages();
     for (const msg of state.messages) {
         if (msg.role === "user") {
-            components.renderUserMessage(msg.content);
+            renderUserEntry(msg.content, msg.attachments ?? []);
         } else if (msg.role === "assistant") {
             const el = components.createAssistantMessage();
             if (el) {
@@ -862,6 +917,11 @@ async function handleNewConversation(groupId = null) {
     if (state.isStreaming) {
         handleStop();
     }
+    // 0.23.13：新对话 = 当前会话结束 → 撤销其未消费附件 ref
+    ipc.revokeChatAudioAttachments(state.conversationId).catch((error) => {
+        console.warn("revoke chat audio attachments failed:", error);
+    });
+    clearAudioAttachments();
     state.resetConversation();
     state.setCurrentGroupId(groupId);
     components.clearMessages();
@@ -886,6 +946,11 @@ async function handleNewEphemeralConversation() {
     if (state.isStreaming) {
         handleStop();
     }
+    // 0.23.13：同 handleNewConversation——撤销当前会话附件
+    ipc.revokeChatAudioAttachments(state.conversationId).catch((error) => {
+        console.warn("revoke chat audio attachments failed:", error);
+    });
+    clearAudioAttachments();
     state.resetConversation();
     state.setEphemeralMode(true);
     components.clearMessages();
@@ -936,6 +1001,15 @@ async function handleSwitchConversation(conversationId, groupId = null) {
         handleStop();
     }
 
+    // 0.23.13：离开旧会话 → 按 owner 批量撤销其未消费附件 ref（会话结束语义）
+    if (conversationId !== state.conversationId) {
+        const previousId = state.conversationId;
+        ipc.revokeChatAudioAttachments(previousId).catch((error) => {
+            console.warn("revoke chat audio attachments failed:", error);
+        });
+        clearAudioAttachments();
+    }
+
     // 更新 state（0.12.4 §6.1：用 setter 替代直接赋值，避免 ES module 只读绑定 TypeError）
     state.setConversationId(conversationId);
     state.setCurrentGroupId(groupId);
@@ -967,7 +1041,8 @@ async function handleSwitchConversation(conversationId, groupId = null) {
                 }
 
                 if (msg.role === "user") {
-                    components.renderUserMessage(msg.text);
+                    // 0.23.14：历史加载同样渲染独立附件卡片（DB attachments 元数据，仅文件名）
+                    renderUserEntry(msg.text, msg.attachments ?? []);
                     state.addMessage({role: "user", content: msg.text});
                 } else if (msg.role === "assistant") {
                     // 包含 tool_name 的 assistant 消息渲染为工具调用卡片

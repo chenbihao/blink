@@ -377,12 +377,14 @@ pub struct SqliteConversationMemory {
     /// 正常跑完时 `append` 据此删除部分回复行、用 rig 的最终完整消息替换；
     /// 中断/崩溃时该行保留在 DB，让用户下次进入能看到断在哪。
     live_turns: RwLock<HashMap<String, i64>>,
-    /// 「发出即保存」预写的当前 user（conversation_id -> user 文本）。
+    /// 「发出即保存」预写的当前 user（conversation_id -> user 可见正文）。
     ///
     /// 预写保证中断/失败时用户消息已落库；但 rig 的 `stream_prompt` 会先把
     /// 记忆 load 出来再**追加一次**当前 prompt——若 load 也带上这条预写 user，
     /// 请求上下文里同一 user 就会出现两次（模型看到"用户询问了我两次"）。
     /// `load` 据此丢弃尾部匹配的预写 user；`append` 完成本轮后清除标记。
+    /// 0.23.14：`append` 侧按 pending 标记**位置跳过** rig 追加的首条 user
+    /// （带附件轮次的模型输入与预写可见正文不同文，不能靠文本匹配）。
     pending_users: RwLock<HashMap<String, String>>,
 }
 
@@ -699,10 +701,15 @@ impl SqliteConversationMemory {
     ///
     /// 幂等去重：尾部已是相同 user 消息（重发/重试）则跳过，不产生重复行。
     /// rig 结束时的 `append` 会跳过这条已写的 user 消息，只补写 assistant。
+    ///
+    /// 0.23.14：`attachment_names` 为本轮音频附件的**展示文件名**（不含 ref），
+    /// 随预写行存入 `messages.attachments`，供气泡徽标与历史渲染；
+    /// `audio_ref` bearer token 不落库。
     pub async fn persist_user_message(
         &self,
         conversation_id: &str,
         user_msg: &str,
+        attachment_names: &[String],
     ) -> Result<(), String> {
         let pool = self.pool.clone();
 
@@ -735,11 +742,17 @@ impl SqliteConversationMemory {
             if title.is_empty() { None } else { Some(&title) },
         )
         .await?;
-        crate::infra::data::conversations::append_message(
+        let attachments_json = if attachment_names.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&attachment_names).map_err(|e| e.to_string())?)
+        };
+        crate::infra::data::conversations::append_message_with_attachments(
             &pool,
             conversation_id,
             "user",
             &serde_json::to_string(&msg).map_err(|e| e.to_string())?,
+            attachments_json.as_deref(),
         )
         .await?;
         crate::infra::data::conversations::touch_conversation(&pool, conversation_id).await?;
@@ -962,21 +975,20 @@ impl ConversationMemory for SqliteConversationMemory {
                 );
             }
 
-            // 跳过已被「发出即保存」预写过的 user 消息（尾部同文 user 视为已写）
+            // 跳过已被「发出即保存」预写的本轮 user 消息。
+            // 0.23.14 起 pending 标记按**位置**生效而非文本匹配：带音频附件的
+            // 轮次，rig 收到的 prompt（模型输入 = 附件上下文 + 可见正文）与
+            // 预写的用户可见正文不同文——以预写的可见正文落库为准，rig 追加的
+            // 首条 user（即本轮 prompt）视为已写跳过。rig 每次 run 结束只
+            // append 一次且首条消息恒为本轮 prompt user，按位置跳转安全。
             let mut to_insert: &[Message] = &messages;
+            let has_pending_user =
+                self.pending_users.read().await.contains_key(conversation_id);
             if let Some(first) = messages.first()
                 && matches!(first, Message::User { .. })
+                && has_pending_user
             {
-                let last =
-                    crate::infra::data::conversations::load_last_message(&pool, conversation_id)
-                        .await
-                        .map_err(|e| MemoryError::Backend(Box::from(e)))?;
-                if let Some((role, content)) = last
-                    && role == "user"
-                    && Self::user_text_matches(&content, &extract_message_text(first))
-                {
-                    to_insert = &messages[1..];
-                }
+                to_insert = &messages[1..];
             }
 
             // 自动创建 conversation 记录（已存在则 IGNORE）
@@ -1172,7 +1184,7 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         // 1. 发出即保存：预写当前 user → pending 标记 + DB 写入
-        mem.persist_user_message("c1", "hello").await.unwrap();
+        mem.persist_user_message("c1", "hello", &[]).await.unwrap();
         // 2. load：应丢弃预写 user（rig 会把 prompt 追加一次）
         let loaded = mem.load("c1").await.unwrap();
         assert!(
@@ -1194,7 +1206,7 @@ mod tests {
         );
 
         // 5. 第二轮：预写 world → load 只丢 world，hello/hi 仍在历史
-        mem.persist_user_message("c1", "world").await.unwrap();
+        mem.persist_user_message("c1", "world", &[]).await.unwrap();
         let loaded = mem.load("c1").await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
@@ -1222,6 +1234,92 @@ mod tests {
     }
 
     // ── 原有测试（0.12.3）──────────────────────────────────────────────────────
+
+    /// 0.23.14：带音频附件的轮次——rig 收到的模型输入（附件上下文 + 可见正文）
+    /// 与预写的用户可见正文**不同文**，append 仍须按 pending 标记跳过，
+    /// 落库历史只有干净的可见正文，不含 `rref_` 技术块。
+    #[tokio::test]
+    async fn append_skips_prewritten_user_when_model_input_differs() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool);
+
+        // 1. 预写用户可见正文（不含附件块）
+        let visible = "转写这个附件";
+        mem.persist_user_message("c1", visible, &[]).await.unwrap();
+
+        // 2. rig 实际收到的模型输入（附件上下文 + 可见正文），回合结束时原样 append
+        let model_input = "[音频附件 1] file=\"a.wav\" audio_ref=\"rref_abc123\"\n\
+                           （以上为本地音频附件，可用 transcribe_audio 能力转写后处理）\n\
+                           转写这个附件";
+        mem.append(
+            "c1",
+            vec![user_msg(model_input), assistant_msg("好的，我来转写")],
+        )
+        .await
+        .unwrap();
+
+        // 3. 历史：只有一条干净的可见正文 user + assistant，无技术块/无重复
+        let loaded = mem.load("c1").await.unwrap();
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert_eq!(
+            texts,
+            vec![visible.to_string(), "好的，我来转写".to_string()],
+            "落库历史应只有用户可见正文: {texts:?}"
+        );
+        let dumped = serde_json::to_string(&loaded).unwrap();
+        assert!(!dumped.contains("rref_"), "历史不得含附件 ref: {dumped}");
+        assert!(
+            !dumped.contains("audio_ref"),
+            "历史不得含附件技术块: {dumped}"
+        );
+
+        // 4. 下一轮无附件：行为与既有语义一致（文本匹配路径已由位置语义覆盖）
+        mem.persist_user_message("c1", "总结一下", &[]).await.unwrap();
+        mem.append(
+            "c1",
+            vec![user_msg("总结一下"), assistant_msg("总结完成")],
+        )
+        .await
+        .unwrap();
+        let loaded = mem.load("c1").await.unwrap();
+        let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                visible.to_string(),
+                "好的，我来转写".to_string(),
+                "总结一下".to_string(),
+                "总结完成".to_string()
+            ],
+            "第二轮后历史应四段完整: {texts:?}"
+        );
+    }
+
+    /// 0.23.14：预写时携带附件**展示文件名**——落库 `messages.attachments`
+    /// 供历史徽标渲染；`audio_ref` bearer token 不落库。
+    #[tokio::test]
+    async fn persist_user_message_stores_attachment_names_without_refs() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool.clone());
+
+        mem.persist_user_message(
+            "c1",
+            "转写这个附件",
+            &["录音.wav".to_string(), "会议.wav".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let msgs =
+            crate::infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        let attachments_json = msgs[0].3.as_deref().expect("附件元数据应落库");
+        let names: Vec<String> = serde_json::from_str(attachments_json).unwrap();
+        assert_eq!(names, vec!["录音.wav".to_string(), "会议.wav".to_string()]);
+        // 正文与元数据均不含 ref token
+        assert!(!msgs[0].1.contains("rref_"));
+        assert!(!attachments_json.contains("rref_"));
+    }
 
     #[tokio::test]
     async fn append_and_load_roundtrip() {
@@ -2303,14 +2401,14 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         // 第一轮：预写 user → 流式部分回复 → 中断（不调 append）
-        mem.persist_user_message("c", "q1").await.unwrap();
+        mem.persist_user_message("c", "q1", &[]).await.unwrap();
         mem.persist_assistant_delta("c", "partial1", "")
             .await
             .unwrap();
         // 模拟中断：不调 append，live_turns 残留 "c" -> 旧行 id
 
         // 第二轮：persist_user_message 应清掉残留的 live_turns 标记
-        mem.persist_user_message("c", "q2").await.unwrap();
+        mem.persist_user_message("c", "q2", &[]).await.unwrap();
         // 第二轮的流式部分回复——不应 UPDATE 第一轮的断点行
         mem.persist_assistant_delta("c", "partial2", "")
             .await

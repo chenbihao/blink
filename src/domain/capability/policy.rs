@@ -457,13 +457,13 @@ pub enum SurfaceError {
 // ── EditorSourceRef ──────────────────────────────────────────────────────────
 
 /// 图片编辑器来源引用——避免传递大 Blob。
+///
+/// 0.23.13：dead 变体 `StashRef`（0.19.4 遗留双轨）已删除——stash 来源的
+/// 图片编辑器从未接入；将来需要时按 ResourceRef 投影重新立项，不留双轨。
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // StashRef 待 0.19.4 ImageStash 引用闭环完整落地后消费
 pub enum EditorSourceRef {
     /// 剪贴板图片字节。
     ClipboardImage(Vec<u8>),
-    /// ImageStash 引用 id。
-    StashRef(String),
 }
 
 // 0.23.1：内容编辑器请求类型收敛到 `crate::domain::editor::OpenEditorRequest`

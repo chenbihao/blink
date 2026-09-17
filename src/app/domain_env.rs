@@ -13,14 +13,15 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::ai::chat_service::ChatService;
+use crate::domain::capability::CapabilityRegistry;
 use crate::domain::capability::policy::{
     CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage, EditorSourceRef, SurfaceError,
     SurfacePort, WindowActionResult,
 };
-use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::editor::OpenEditorRequest;
 use crate::domain::event::{CapabilityEnv, EventPort};
 use crate::domain::plugin::PluginEngine;
+use crate::domain::resource::DefaultResourceStore;
 use crate::domain::search::SearchService;
 use crate::domain::sticky::{
     StickyChangeSource, StickyCloseOutcome, StickyService, StickyWorkflowError,
@@ -75,8 +76,9 @@ pub struct TauriDomainEnv {
     /// 一次性文件转写服务（0.22.16 Handoff 04）。
     /// 由 main.rs 在 EngineManager + AudioResourceRegistry 就绪后注入。
     audio_transcription: OnceLock<Arc<dyn AudioTranscriptionPort>>,
-    /// 进程级图片暂存（0.19.4）——构造时创建，生命周期与 app 相同。
-    image_stash: Arc<ImageStash>,
+    /// 统一资源 store（0.23.12 建、0.23.13 收口为唯一资源入口）——
+    /// 构造时创建，生命周期与 app 相同。
+    resource_store: Arc<DefaultResourceStore>,
 }
 
 impl TauriDomainEnv {
@@ -110,7 +112,7 @@ impl TauriDomainEnv {
             search_service: OnceLock::new(),
             chat_service: OnceLock::new(),
             audio_transcription: OnceLock::new(),
-            image_stash: Arc::new(ImageStash::new()),
+            resource_store: Arc::new(DefaultResourceStore::default()),
         }
     }
 
@@ -211,10 +213,10 @@ impl CapabilityEnv for TauriDomainEnv {
         .await
     }
 
-    // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
+    // ── 统一资源 ref 层（0.23.12）─────────────────────────────────────
 
-    fn image_stash(&self) -> Option<&Arc<ImageStash>> {
-        Some(&self.image_stash)
+    fn resource_store(&self) -> Option<&Arc<DefaultResourceStore>> {
+        Some(&self.resource_store)
     }
 
     // ── 便签窗口操作（0.19.3 从 DomainEnv 提升到 CapabilityEnv）─────────
@@ -602,9 +604,6 @@ impl SurfacePort for TauriDomainEnv {
                     SurfaceError::CreateFailed { detail: e }
                 })
             }
-            EditorSourceRef::StashRef(_) => Err(SurfaceError::Unavailable {
-                detail: "StashRef 来源的图片编辑器尚未接入".into(),
-            }),
         }
     }
 
@@ -901,9 +900,6 @@ mod tests {
                 immediately_effective: true,
                 requires_restart: false,
             })
-        }
-        fn image_stash(&self) -> Option<&Arc<ImageStash>> {
-            None
         }
         fn sticky_service(&self) -> Option<&Arc<StickyService>> {
             None

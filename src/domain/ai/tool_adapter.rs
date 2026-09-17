@@ -586,9 +586,10 @@ impl CapabilityTool {
                     // 调用 Capability（0.21.11：统一经 CapabilityRegistry::invoke）
                     match registry.invoke(&cap_id, args_value, &ctx).await {
                         Ok(cap_result) => {
-                            let stash = cap_env.image_stash();
+                            // 0.23.13：投影统一经 ResourceStore（消除 image/* 特殊分支）
+                            let store = cap_env.resource_store();
                             let contents =
-                                cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
+                                cap_result.to_rig_tool_result_with_store(store.map(|s| s.as_ref()));
                             // 0.42: 返回 ToolOutput（含 Vec<ToolResultContent>）
                             match ToolOutput::content(contents) {
                                 Ok(output) => Ok(output),

@@ -12,7 +12,7 @@
 //! - 切模或重启后旧结果不得成功投影（冻结的 model/instance 二次验证）。
 //!
 //! **分层**：app 层模块，消费 `domain::stt::transcribe`、
-//! `app::audio_resource`、`infra::platform::audio` 和 `app::local_engine`。
+//! `domain::resource`（统一 ResourceStore）、`infra::platform::audio` 和 `app::local_engine`。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +20,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use crate::domain::config::stt_config::{LocalSttSelection, SttMode, get_stt_config};
+use crate::domain::resource::{
+    DefaultResourceStore, ResourceError, ResourceErrorKind, ResourceRef, ResourceUse,
+};
 use crate::domain::stt::pseudo_streaming::{
     PseudoStreamingSttEngine, SttBoundaryRecord, SttDecisionRecord,
 };
@@ -36,13 +39,11 @@ use crate::infra::platform::audio::format::AudioDecodeError;
 use crate::infra::platform::audio::normalize::{AudioNormalizer, NormalizationSummary};
 use crate::infra::platform::audio::wav::decode_wav_with_budget;
 
-use crate::app::audio_resource::{AudioRefError, AudioRefErrorKind, AudioResourceRegistry};
-
 // ── 配置 ─────────────────────────────────────────────────────────────────
 
 /// 转写服务的配置参数。
 ///
-/// TTL、预算属于实现/config 参数，按真实负载调整，不在规范中固化。
+/// 预算属于实现/config 参数，按真实负载调整，不在规范中固化。
 #[derive(Debug, Clone)]
 pub struct TranscriptionConfig {
     /// 解码后 f32 样本数上限（含声道维度）。
@@ -50,8 +51,6 @@ pub struct TranscriptionConfig {
     pub sample_budget: usize,
     /// 音频时长上限（秒）——超出返回 `AudioBudgetExceeded`。
     pub max_duration_secs: f64,
-    /// audio_ref 的 scope 标签——跨 scope 拒绝。
-    pub audio_ref_scope: String,
 }
 
 impl Default for TranscriptionConfig {
@@ -59,7 +58,6 @@ impl Default for TranscriptionConfig {
         Self {
             sample_budget: 50_000_000,
             max_duration_secs: 600.0, // 10 分钟
-            audio_ref_scope: "stt_transcribe".into(),
         }
     }
 }
@@ -122,7 +120,7 @@ pub trait CloudEgressAuthorizer: Send + Sync {
 ///
 /// deadline/cancel 后的迟到结果只记分类并丢弃。
 pub struct AudioTranscriptionService {
-    registry: Arc<AudioResourceRegistry>,
+    store: Arc<DefaultResourceStore>,
     engine_conn: Arc<dyn EngineConnectionPort>,
     cloud_auth: Arc<dyn CloudEgressAuthorizer>,
     config: TranscriptionConfig,
@@ -171,14 +169,15 @@ impl AudioTranscriptionService {
     /// 构造转写服务。
     ///
     /// 所有依赖通过 trait object 注入，便于测试替换。
+    /// `store` 必须与 picker 命令共享同一实例（ref 跨 command/service 流通）。
     pub fn new(
-        registry: Arc<AudioResourceRegistry>,
+        store: Arc<DefaultResourceStore>,
         engine_conn: Arc<dyn EngineConnectionPort>,
         cloud_auth: Arc<dyn CloudEgressAuthorizer>,
         config: TranscriptionConfig,
     ) -> Self {
         Self {
-            registry,
+            store,
             engine_conn,
             cloud_auth,
             config,
@@ -192,8 +191,7 @@ impl AudioTranscriptionService {
         progress: impl Fn(&'static str, u64, u64) + Send + Sync,
     ) -> Result<VadDebugResult, AudioTranscriptionError> {
         progress("preparing", 0, 0);
-        let opened = self.resolve_audio_ref(audio_ref)?;
-        let file_size = opened.size;
+        let mut opened = self.resolve_audio_ref(audio_ref, ResourceUse::TranscribeAudio)?;
         let (transport, frozen) =
             self.freeze_identity()
                 .await?
@@ -205,8 +203,7 @@ impl AudioTranscriptionService {
         let min_sentence_ms = vad_config.min_sentence_ms;
         let decode_config = self.config.clone();
         let (samples, trace) = tokio::task::spawn_blocking(move || {
-            let mut file = opened.file;
-            let bytes = Self::read_file_bytes(&mut file, file_size)?;
+            let bytes = Self::read_opened_bounded(&mut opened)?;
             let (samples, _, _) = Self::decode_and_normalize_with_config(&bytes, &decode_config)?;
             if samples.len() > 120 * 16_000 {
                 return Err(AudioTranscriptionError::AudioBudgetExceeded {
@@ -371,30 +368,34 @@ impl AudioTranscriptionService {
         Ok(())
     }
 
-    /// 解析 audio_ref，返回已打开的文件句柄 + 体积。
+    /// 解析 audio_ref，返回已打开的资源 lease（0.23.12：走统一 ResourceStore）。
     fn resolve_audio_ref(
         &self,
         audio_ref: &str,
-    ) -> Result<crate::app::audio_resource::OpenedAudioResource, AudioTranscriptionError> {
-        self.registry
-            .resolve(audio_ref, &self.config.audio_ref_scope)
-            .map_err(map_audio_ref_error)
+        use_: ResourceUse,
+    ) -> Result<crate::domain::resource::OpenedResource, AudioTranscriptionError> {
+        self.store
+            .open(&ResourceRef::from_token(audio_ref), use_)
+            .map_err(map_resource_error)
     }
 
-    /// 读取文件全部字节到 Vec（在 blocking pool 中调用）。
-    fn read_file_bytes(
-        file: &mut std::fs::File,
-        size: u64,
-    ) -> Result<Vec<u8>, AudioTranscriptionError> {
-        use std::io::Read;
-        // 预分配但不超过预算
-        let cap = size.min(256 * 1024 * 1024) as usize; // 256MB cap
-        let mut buf = Vec::with_capacity(cap);
-        file.read_to_end(&mut buf)
-            .map_err(|e| AudioTranscriptionError::Internal {
-                detail: format!("io read error: {:?}", e.kind()),
-            })?;
-        Ok(buf)
+    /// 有界整读上限（沿用 0.22.16 read_file_bytes 的 256MB cap）。
+    fn read_opened_bounded(
+        opened: &mut crate::domain::resource::OpenedResource,
+    ) -> Result<bytes::Bytes, AudioTranscriptionError> {
+        const READ_BOUND_BYTES: u64 = 256 * 1024 * 1024;
+        opened
+            .read_all_bounded(READ_BOUND_BYTES)
+            .map_err(|error| match error.kind {
+                ResourceErrorKind::ResourceBudgetExceeded => {
+                    AudioTranscriptionError::AudioBudgetExceeded {
+                        detail: "resource exceeds read bound".into(),
+                    }
+                }
+                _ => AudioTranscriptionError::Internal {
+                    detail: "io error during bounded read".into(),
+                },
+            })
     }
 
     /// 冻结当前 STT 配置和引擎身份。
@@ -645,8 +646,8 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
         self.check_deadline(deadline)?;
 
         // 2. 解析 audio_ref
-        let opened = self.resolve_audio_ref(&request.audio_ref)?;
-        let file_size = opened.size;
+        let mut opened =
+            self.resolve_audio_ref(&request.audio_ref, ResourceUse::TranscribeAudio)?;
 
         // 3. 冻结 STT config、engine/model/instance 身份
         let conn_info = self.freeze_identity().await?;
@@ -684,8 +685,7 @@ impl AudioTranscriptionPort for AudioTranscriptionService {
             ),
             AudioTranscriptionError,
         > {
-            let mut file = opened.file;
-            let bytes = Self::read_file_bytes(&mut file, file_size)?;
+            let bytes = Self::read_opened_bounded(&mut opened)?;
             Self::decode_and_normalize_with_config(&bytes, &config_clone)
         })
         .await
@@ -815,33 +815,36 @@ impl AudioTranscriptionService {
 
 // ── 错误映射 ─────────────────────────────────────────────────────────────
 
-/// 把 `AudioRefError` 映射为 `AudioTranscriptionError`。
-fn map_audio_ref_error(e: AudioRefError) -> AudioTranscriptionError {
+/// 把 `ResourceError` 映射为 `AudioTranscriptionError`（0.23.12：ResourceStore 取代 AudioResourceRegistry）。
+fn map_resource_error(e: ResourceError) -> AudioTranscriptionError {
     match e.kind {
-        AudioRefErrorKind::StaleAudioRef => AudioTranscriptionError::StaleAudioRef,
-        AudioRefErrorKind::InvalidAudioRef => AudioTranscriptionError::InvalidAudioRef {
+        ResourceErrorKind::StaleResourceRef => AudioTranscriptionError::StaleAudioRef,
+        ResourceErrorKind::InvalidResourceRef => AudioTranscriptionError::InvalidAudioRef {
             detail: "audio reference not found or invalid".into(),
         },
-        AudioRefErrorKind::FileIdentityChanged => AudioTranscriptionError::InvalidAudioRef {
+        ResourceErrorKind::UseDenied => AudioTranscriptionError::InvalidAudioRef {
+            detail: "use not granted for this audio reference".into(),
+        },
+        ResourceErrorKind::PermissionEscalation => AudioTranscriptionError::InvalidAudioRef {
+            detail: "derive would escalate the source grant".into(),
+        },
+        ResourceErrorKind::FileIdentityChanged => AudioTranscriptionError::InvalidAudioRef {
             detail: "file identity changed after issue".into(),
         },
-        AudioRefErrorKind::NotRegularFile => AudioTranscriptionError::UnsupportedAudioFormat {
+        ResourceErrorKind::NotRegularFile => AudioTranscriptionError::UnsupportedAudioFormat {
             detail: "not a regular file".into(),
         },
-        AudioRefErrorKind::ResourceBudgetExceeded => AudioTranscriptionError::AudioBudgetExceeded {
+        ResourceErrorKind::ResourceBudgetExceeded => AudioTranscriptionError::AudioBudgetExceeded {
             detail: "resource budget exceeded".into(),
         },
-        AudioRefErrorKind::GenerationMismatch => AudioTranscriptionError::InvalidAudioRef {
-            detail: "registry generation mismatch".into(),
-        },
-        AudioRefErrorKind::ScopeMismatch => AudioTranscriptionError::InvalidAudioRef {
-            detail: "scope mismatch".into(),
-        },
-        AudioRefErrorKind::FileNotFound => AudioTranscriptionError::InvalidAudioRef {
+        ResourceErrorKind::FileNotFound => AudioTranscriptionError::InvalidAudioRef {
             detail: "file not found".into(),
         },
-        AudioRefErrorKind::IoError => AudioTranscriptionError::Internal {
+        ResourceErrorKind::IoError => AudioTranscriptionError::Internal {
             detail: "io error".into(),
+        },
+        ResourceErrorKind::UnsupportedBacking => AudioTranscriptionError::Unsupported {
+            detail: "resource backing not supported".into(),
         },
     }
 }
@@ -1068,6 +1071,7 @@ mod tests {
             AudioTranscriptionError::SttBackendUnavailable { .. }
         ));
     }
+    use crate::domain::resource::{ResourceGrantSpec, ReusePolicy};
     use crate::infra::platform::audio::test_fixtures::*;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -1215,7 +1219,7 @@ mod tests {
 
     /// 生成临时 WAV 文件并返回路径 + audio_ref。
     fn make_test_wav(
-        registry: &AudioResourceRegistry,
+        store: &DefaultResourceStore,
         dir: &std::path::Path,
         name: &str,
         cfg: &FixtureConfig,
@@ -1223,17 +1227,22 @@ mod tests {
         let wav_bytes = build_wav(cfg);
         let path = dir.join(name);
         std::fs::write(&path, &wav_bytes).unwrap();
-        let audio_ref = registry.issue(&path, "stt_transcribe").unwrap();
-        (audio_ref, path)
+        let audio_ref = store
+            .issue_local_file(
+                &path,
+                ResourceGrantSpec::new(
+                    ResourceUse::TranscribeAudio,
+                    ReusePolicy::OneShot,
+                    "stt_test",
+                ),
+            )
+            .unwrap();
+        (audio_ref.as_str().to_string(), path)
     }
 
     /// 默认测试配置。
     fn default_test_config() -> TranscriptionConfig {
-        TranscriptionConfig {
-            sample_budget: 50_000_000,
-            max_duration_secs: 600.0,
-            audio_ref_scope: "stt_transcribe".into(),
-        }
+        TranscriptionConfig::default()
     }
 
     /// 创建本地模式 SttConfig 缓存。
@@ -1287,9 +1296,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("你好世界"));
         let identity = FrozenEngineIdentity {
@@ -1300,12 +1309,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1330,9 +1335,9 @@ mod tests {
     async fn config_change_during_transcription_keeps_frozen_selection() {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let (audio_ref, _) = make_test_wav(
-            &registry,
+            &store,
             dir.path(),
             "config-change.wav",
             &FixtureConfig::default(),
@@ -1347,7 +1352,7 @@ mod tests {
             identity,
         ));
         let service = AudioTranscriptionService::new(
-            registry,
+            store,
             engine_conn.clone(),
             Arc::new(FakeCloudAuth { authorized: false }),
             default_test_config(),
@@ -1379,9 +1384,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success(""));
         let identity = FrozenEngineIdentity {
@@ -1392,12 +1397,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await.unwrap();
@@ -1413,9 +1414,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("你好"));
         let identity = FrozenEngineIdentity {
@@ -1426,12 +1427,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         // deadline 已过期
         let deadline = Some(Instant::now() - std::time::Duration::from_millis(1));
@@ -1511,9 +1508,9 @@ mod tests {
 
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("你好"));
         let identity = FrozenEngineIdentity {
@@ -1524,12 +1521,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1566,13 +1559,9 @@ mod tests {
         crate::domain::config::stt_config::update_cache(&cloud);
 
         let dir = tempdir().unwrap();
-        let registry = Arc::new(AudioResourceRegistry::default());
-        let (audio_ref, _) = make_test_wav(
-            &registry,
-            dir.path(),
-            "cloud.wav",
-            &FixtureConfig::default(),
-        );
+        let store = Arc::new(DefaultResourceStore::default());
+        let (audio_ref, _) =
+            make_test_wav(&store, dir.path(), "cloud.wav", &FixtureConfig::default());
         let engine_conn = Arc::new(FakeEngineConnection {
             transport: None,
             identity: None,
@@ -1581,7 +1570,7 @@ mod tests {
             requested_selections: Mutex::new(Vec::new()),
         });
         let service = AudioTranscriptionService::new(
-            registry,
+            store,
             engine_conn,
             Arc::new(FakeCloudAuth { authorized: false }),
             default_test_config(),
@@ -1607,9 +1596,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         // FakeEngineConnection with no transport
         let engine_conn = Arc::new(FakeEngineConnection {
@@ -1621,12 +1610,8 @@ mod tests {
         });
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1647,9 +1632,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("你好世界"));
         let identity = FrozenEngineIdentity {
@@ -1667,12 +1652,8 @@ mod tests {
         }));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1690,13 +1671,9 @@ mod tests {
     async fn transcribe_instance_restart_discards_old_result() {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
-        let registry = Arc::new(AudioResourceRegistry::default());
-        let (audio_ref, _) = make_test_wav(
-            &registry,
-            dir.path(),
-            "restart.wav",
-            &FixtureConfig::default(),
-        );
+        let store = Arc::new(DefaultResourceStore::default());
+        let (audio_ref, _) =
+            make_test_wav(&store, dir.path(), "restart.wav", &FixtureConfig::default());
         let transport = Arc::new(FakeTransport::success("迟到结果"));
         let engine_conn = Arc::new(FakeEngineConnection::new(
             transport,
@@ -1712,7 +1689,7 @@ mod tests {
             instance_id: "inst-new".into(),
         }));
         let service = AudioTranscriptionService::new(
-            registry,
+            store,
             engine_conn,
             Arc::new(FakeCloudAuth { authorized: false }),
             default_test_config(),
@@ -1735,9 +1712,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("你好世界"));
         let identity = FrozenEngineIdentity {
@@ -1751,12 +1728,8 @@ mod tests {
         engine_conn.set_second_identity(None);
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1777,14 +1750,11 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::new(
-            crate::app::audio_resource::AudioResourceConfig {
-                ttl: std::time::Duration::from_millis(1),
-                ..Default::default()
-            },
-        ));
+        let mut store_config = crate::domain::resource::ResourceStoreConfig::production();
+        store_config.local.ttl = std::time::Duration::from_millis(1);
+        let store = Arc::new(DefaultResourceStore::new(store_config));
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         // 等待过期
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1798,12 +1768,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1820,12 +1786,23 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
 
         // 写入非 WAV 文件
         let path = dir.path().join("bad.wav");
         std::fs::write(&path, b"not a wav file at all").unwrap();
-        let audio_ref = registry.issue(&path, "stt_transcribe").unwrap();
+        let audio_ref = store
+            .issue_local_file(
+                &path,
+                ResourceGrantSpec::new(
+                    ResourceUse::TranscribeAudio,
+                    ReusePolicy::OneShot,
+                    "stt_test",
+                ),
+            )
+            .unwrap()
+            .as_str()
+            .to_string();
 
         let transport = Arc::new(FakeTransport::success("你好"));
         let identity = FrozenEngineIdentity {
@@ -1836,12 +1813,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1863,9 +1836,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::fail(SttTransportError::Busy {
             detail: "queue full".into(),
@@ -1878,12 +1851,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1904,9 +1873,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::fail(SttTransportError::Timeout {
             detail: "request timed out".into(),
@@ -1919,12 +1888,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1945,7 +1910,7 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig {
             channels: 2,
             sample_rate: 48000,
@@ -1956,7 +1921,7 @@ mod tests {
             values: FixtureValues::Zero,
             ..Default::default()
         };
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "stereo.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "stereo.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("测试"));
         let identity = FrozenEngineIdentity {
@@ -1967,12 +1932,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await;
@@ -1999,9 +1960,9 @@ mod tests {
         let _lock = init_local_stt_config(true).await;
         let dir = tempdir().unwrap();
 
-        let registry = Arc::new(AudioResourceRegistry::default());
+        let store = Arc::new(DefaultResourceStore::default());
         let cfg = FixtureConfig::default();
-        let (audio_ref, _path) = make_test_wav(&registry, dir.path(), "test.wav", &cfg);
+        let (audio_ref, _path) = make_test_wav(&store, dir.path(), "test.wav", &cfg);
 
         let transport = Arc::new(FakeTransport::success("你好世界"));
         let identity = FrozenEngineIdentity {
@@ -2012,12 +1973,8 @@ mod tests {
         let engine_conn = Arc::new(FakeEngineConnection::new(transport, identity));
         let cloud_auth = Arc::new(FakeCloudAuth { authorized: false });
 
-        let service = AudioTranscriptionService::new(
-            registry,
-            engine_conn,
-            cloud_auth,
-            default_test_config(),
-        );
+        let service =
+            AudioTranscriptionService::new(store, engine_conn, cloud_auth, default_test_config());
 
         let request = AudioTranscriptionRequest { audio_ref };
         let result = service.transcribe(request, None).await.unwrap();

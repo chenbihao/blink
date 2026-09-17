@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 
-import {filterActiveSkills} from "./composer.js";
+// composer.js → ipc.js → tauri.js 在模块顶层写 window（alert/confirm/prompt 拦截），
+// node 环境须先备好 window 桩再动态 import（与 composer-bar-popup.test.mjs 同模式）。
+globalThis.window = globalThis.window || {};
+globalThis.window.__TAURI__ = {
+    core: {invoke: async () => ({})},
+    event: {listen: async () => ({unlisten: () => {}})},
+};
+
+const {filterActiveSkills} = await import("./composer.js");
 
 const skills = [
     {name: "rust-debug", disabled: false},

@@ -6,7 +6,7 @@
 //! 本 Capability 只负责输入解析（`image_ref` / `png`）和输出封装（`Items`）。
 //!
 //! **输入模式**（二选一）：
-//! - `image_ref`：从 `ImageStash` 获取 PNG 字节，解码为 RGBA
+//! - `image_ref`：从统一 ResourceStore（DecodeImage use）获取 PNG 字节，解码为 RGBA
 //! - `png`：PNG 字节数组（有界兼容/测试输入），解码为 RGBA
 //!
 //! **资源上限**（常量集中定义）：
@@ -262,9 +262,13 @@ async fn resolve_image_input(
     }
 
     if has_ref {
-        // 从 ImageStash 获取 PNG 字节 → 解码为 RGBA
-        let stash = ctx.env.image_stash();
-        let png_bytes = resolve_image_ref(args, stash.map(|s| s.as_ref()))?;
+        // 从统一 ResourceStore 按 DecodeImage use 获取 PNG 字节 → 解码为 RGBA
+        let store = ctx.env.resource_store();
+        let png_bytes = resolve_image_ref(
+            args,
+            store.map(|s| s.as_ref()),
+            crate::domain::resource::ResourceUse::DecodeImage,
+        )?;
 
         // 资源上限校验：输入字节数
         if png_bytes.len() > MAX_INPUT_BYTES {

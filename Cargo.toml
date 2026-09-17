@@ -48,6 +48,9 @@ sse-stream = "0.2.5"
 thiserror = "1"
 # 链接期自动注册（0.9.7 Capability 层）——新增能力只需 `inventory::submit!`，注册表零改动
 inventory = "0.3"
+# getrandom: OS CSPRNG（0.23.12 ResourceStore token——ref 是 bearer capability，
+# ≥128 位熵；跨平台且 domain 分层安全，不走 windows crate）
+getrandom = "0.3"
 nucleo = "0.5.0"
 png = "0.17"
 open = "5.3.5"

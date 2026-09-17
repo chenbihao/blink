@@ -1245,7 +1245,7 @@ mod tests {
         ));
 
         // 1. 发出即保存：预写当前 user（与 ChatService::prompt 一致）
-        mem.persist_user_message("c1", "hello").await.unwrap();
+        mem.persist_user_message("c1", "hello", &[]).await.unwrap();
 
         // 2. 走 rig agent 流式路径（与 stream_prompt 一致），mock 记录收到的请求
         let model = MockCompletionModel::from_stream_turns(vec![vec![

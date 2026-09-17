@@ -21,7 +21,6 @@
 
 pub(crate) mod builtins; // Step 2 填真实能力（screenshot 等）
 mod error;
-mod image_stash;
 pub(crate) mod policy;
 mod projection;
 mod registry;
@@ -30,9 +29,6 @@ mod schema;
 pub mod tool_projection; // 0.21.7：从 execution::group 迁入
 
 pub use error::CapabilityError;
-pub use image_stash::ImageStash;
-#[allow(unused_imports)]
-pub use image_stash::StashedImage;
 #[allow(unused_imports)]
 pub use policy::{
     AiDefault, CapabilityPolicy, CaptureCleansePlan, CaptureFn, CaptureResult, CapturedImage,

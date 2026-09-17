@@ -871,9 +871,6 @@ mod tests {
         > {
             unimplemented!("test mock: close_sticky_and_notify not needed")
         }
-        fn image_stash(&self) -> Option<&std::sync::Arc<crate::domain::capability::ImageStash>> {
-            None
-        }
         fn show_pin_image(
             &self,
             _png_bytes: Vec<u8>,

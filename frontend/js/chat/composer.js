@@ -9,7 +9,17 @@
  * - 语音指示器（5 条波形 + "语音输入中" 标签）同主窗口 G1 风格
  * - voice-partial(target="chat") 实时更新 textarea
  * - voice-recording-start/end + voice-level 驱动指示器 show/hide + 波形动画
+ *
+ * 0.23.13 音频附件（0.23.14 修正）：
+ * - 当前会话 id 经 initComposer({getConversationId}) 注入，不依赖未导入的全局绑定
+ * - picker 异步返回后校验会话一致，切换/新建会话则撤销刚签发的 ref 并丢弃
+ * - 发送负载 = {text（用户可见正文）, attachments（结构化元数据）}；
+ *   附件 ref 只注入本轮模型输入（后端组装），不进入气泡/标题/持久化历史
  */
+
+import * as ipc from "./ipc.js";
+import {iconHTML} from "../shared/icon.js";
+import {buildOutgoingMessage} from "./outgoing.js";
 
 /** @type {HTMLTextAreaElement} */
 let textarea = null;
@@ -32,6 +42,9 @@ let onSend = null;
 /** @type {() => void} */
 let onStop = null;
 
+/** @type {(() => string)|null} 获取当前会话 id（main.js 注入，0.23.14） */
+let getConversationId = null;
+
 /** @type {boolean} 是否正在语音录音 */
 let voiceRecording = false;
 
@@ -40,6 +53,18 @@ let voiceBaseText = "";
 
 /** @type {HTMLElement} /skill 命令提示弹层 */
 let skillHintEl = null;
+
+/** @type {HTMLElement} 音频附件 chips 容器（0.23.13） */
+let attachmentsEl = null;
+
+/** @type {HTMLButtonElement|null} 音频附件按钮（0.23.13） */
+let attachBtn = null;
+
+/** @type {Array<{audioRef: string, displayName: string}>} 当前音频附件（0.23.13） */
+let audioAttachments = [];
+
+/** @type {boolean} attach picker 是否进行中（防重复打开，0.23.13） */
+let attaching = false;
 
 /** @type {Array} 缓存的 skill 列表（避免每次输入都请求） */
 let cachedSkills = null;
@@ -73,7 +98,9 @@ export function filterActiveSkills(skills, query = "") {
 
 /**
  * 初始化 composer。
- * @param {{ onSend: (message: string) => void, onStop: () => void }} callbacks
+ * @param {{ onSend: (payload: {text: string, attachments: Array}|null) => void,
+ *           onStop: () => void,
+ *           getConversationId?: () => string }} callbacks
  */
 export function initComposer(callbacks) {
     textarea = document.getElementById("chat-input");
@@ -83,6 +110,7 @@ export function initComposer(callbacks) {
     vwBars = voiceIndicator ? voiceIndicator.querySelectorAll(".vw-bar") : [];
     onSend = callbacks.onSend;
     onStop = callbacks.onStop;
+    getConversationId = callbacks.getConversationId ?? null;
 
     if (!textarea || !sendBtn) return;
 
@@ -114,6 +142,12 @@ export function initComposer(callbacks) {
             handleSend();
         }
     });
+
+    // 0.23.13: 音频附件按钮 + chips 容器
+    attachBtn = document.getElementById("chat-attach-btn");
+    attachmentsEl = document.getElementById("chat-audio-attachments");
+    if (attachBtn) attachBtn.addEventListener("click", handleAttachAudio);
+    renderAudioAttachments();
 
     // 0.13.3: /skill 命令提示初始化
     skillHintEl = document.getElementById("skill-hint");
@@ -318,12 +352,128 @@ export function isVoiceRecording() {
     return voiceRecording;
 }
 
+// ── 音频附件（0.23.13 对话窗口附件闭环；0.23.14 会话一致性 + 负载分离）──────
+
+/** 当前附件快照（只读副本）。 */
+export function getAudioAttachments() {
+    return [...audioAttachments];
+}
+
+/** 是否有附件。 */
+export function hasAudioAttachments() {
+    return audioAttachments.length > 0;
+}
+
+/**
+ * 仅清空 UI 附件状态（不触发后端 revoke——撤销由调用方按 owner 批量处理）。
+ * 会话切换/新对话时由 main.js 调用。
+ */
+export function clearAudioAttachments() {
+    audioAttachments = [];
+    renderAudioAttachments();
+    updateSendButtonState();
+}
+
+/**
+ * 消息发出后把**本次已发送**的附件从输入框移除（0.23.14）。
+ *
+ * 不撤销后端 ref——本轮 agent 仍要消费它转写；生命周期由会话切换/
+ * 新对话的按 owner 批量撤销统一回收。只过滤匹配的 ref，发送等待期间
+ * 用户新附的文件不受影响；ref 由 CSPRNG 签发不会撞号。
+ * @param {Array<{audioRef: string}>} sent 随消息发出的附件
+ */
+export function clearSentAttachments(sent) {
+    const sentRefs = new Set((Array.isArray(sent) ? sent : []).map((a) => a.audioRef));
+    if (sentRefs.size === 0) return;
+    audioAttachments = audioAttachments.filter((a) => !sentRefs.has(a.audioRef));
+    renderAudioAttachments();
+    updateSendButtonState();
+}
+
+async function handleAttachAudio() {
+    if (attaching) return;
+    attaching = true;
+    if (attachBtn) attachBtn.disabled = true;
+    // picker 打开前捕获目标会话——返回后必须校验会话仍一致（§5.1 异步竞态防护）
+    const requestedConversationId = getConversationId?.() ?? null;
+    try {
+        const picked = await ipc.pickChatAudioAttachment(requestedConversationId);
+        const currentConversationId = getConversationId?.() ?? null;
+        if (requestedConversationId !== currentConversationId) {
+            // 已切换/新建会话：立即撤销刚签发的 ref，旧会话附件不得落入新会话
+            if (picked?.audioRef) {
+                ipc.removeChatAudioAttachment(picked.audioRef).catch((error) => {
+                    console.warn("chat audio attachment revoke failed:", error);
+                });
+            }
+            return;
+        }
+        if (picked?.audioRef) {
+            audioAttachments.push({
+                audioRef: picked.audioRef,
+                displayName: picked.displayName || "WAV 文件"
+            });
+            renderAudioAttachments();
+            updateSendButtonState();
+        }
+    } catch (error) {
+        console.warn("chat audio attach failed:", error);
+    } finally {
+        attaching = false;
+        if (attachBtn) attachBtn.disabled = false;
+    }
+}
+
+function renderAudioAttachments() {
+    if (!attachmentsEl) return;
+    attachmentsEl.innerHTML = "";
+    for (const attachment of audioAttachments) {
+        const chip = document.createElement("span");
+        chip.className = "chat-audio-chip";
+        chip.title = `${attachment.displayName}（AI 可用 transcribe_audio 转写）`;
+
+        const icon = document.createElement("span");
+        icon.className = "chat-audio-chip-icon";
+        icon.innerHTML = iconHTML("audio-lines");
+
+        const name = document.createElement("span");
+        name.className = "chat-audio-chip-name";
+        name.textContent = attachment.displayName;
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "chat-audio-chip-remove";
+        remove.title = "移除附件";
+        remove.setAttribute("aria-label", "移除附件");
+        remove.innerHTML = iconHTML("x");
+        remove.addEventListener("click", () => removeAudioAttachment(attachment.audioRef));
+
+        chip.append(icon, name, remove);
+        attachmentsEl.appendChild(chip);
+    }
+    attachmentsEl.classList.toggle("hidden", audioAttachments.length === 0);
+}
+
+async function removeAudioAttachment(audioRef) {
+    audioAttachments = audioAttachments.filter((item) => item.audioRef !== audioRef);
+    renderAudioAttachments();
+    updateSendButtonState();
+    try {
+        await ipc.removeChatAudioAttachment(audioRef);
+    } catch (error) {
+        console.warn("chat audio attachment revoke failed:", error);
+    }
+}
+
 // ── 内部 ─────────────────────────────────────────
 
 function handleSend() {
-    const text = textarea?.value?.trim();
-    if (!text) return;
-    if (onSend) onSend(text);
+    const text = textarea?.value?.trim() ?? "";
+    // 0.23.14：负载 = {text（可见正文）, attachments（结构化元数据）}；
+    // 纯附件（空正文）时 text 为人类可读摘要，气泡/标题/历史保持无 rref_
+    const payload = buildOutgoingMessage(text, audioAttachments);
+    if (!payload) return;
+    if (onSend) onSend(payload);
 }
 
 function handleStop() {
@@ -344,8 +494,9 @@ function updateSendButtonState() {
         sendBtn.disabled = true;
         return;
     }
-    const hasText = textarea.value.trim().length > 0;
-    sendBtn.disabled = !hasText;
+    // 0.23.13：附件存在时也允许发送
+    const hasContent = textarea.value.trim().length > 0 || audioAttachments.length > 0;
+    sendBtn.disabled = !hasContent;
 }
 
 // ── Icons ────────────────────────────────────────

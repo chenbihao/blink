@@ -788,9 +788,6 @@ mod tests {
             > {
                 unimplemented!("not needed for runtime tests")
             }
-            fn image_stash(&self) -> Option<&Arc<crate::domain::capability::ImageStash>> {
-                None
-            }
             fn show_pin_image(
                 &self,
                 _png_bytes: Vec<u8>,

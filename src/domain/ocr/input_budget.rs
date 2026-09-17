@@ -3,7 +3,7 @@
 //! （0.22.6.1 时期与已退役的 Python OCR server 两侧一致；0.22.10 起
 //! Python 侧已删除，Rust 侧作为唯一信任边界继续强制执行。）
 //!
-//! - compressed/input bytes ≤ 32 MiB（与 ImageStash 单项上限一致）
+//! - compressed/input bytes ≤ 32 MiB（与 ResourceStore 内存腿单项上限一致）
 //! - 单边尺寸 ≤ 16384 px
 //! - decoded RGB/RGBA 预算 ≤ 256 MiB（`width * height * 4`，checked 乘法）
 //!
@@ -18,7 +18,7 @@ use bytes::Bytes;
 
 use super::error::StructuredOcrError;
 
-/// compressed/input bytes 上限：32 MiB（与 ImageStash 单项上限一致）。
+/// compressed/input bytes 上限：32 MiB（与 ResourceStore 内存腿单项上限一致）。
 pub const MAX_COMPRESSED_BYTES: usize = 32 * 1024 * 1024;
 
 /// 单边尺寸上限：16384 px。
