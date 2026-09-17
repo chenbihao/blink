@@ -60,6 +60,10 @@ impl EventNames {
     pub const VOICE_LEVEL: &str = "blink://voice-level";
     pub const VOICE_PARTIAL: &str = "blink://voice-partial";
     pub const VOICE_ERROR: &str = "blink://voice-error";
+    /// 0.23.14 G2 注入交付确认。payload: `{ target: "g2", epoch, confirmed }`。
+    /// 注入 worker 成功 ack 后下发；`confirmed` 为 ack 后剩余的待交付文本
+    /// （浮窗据此清退已上屏段；deferred/失败不发本事件，段保持可见）。
+    pub const VOICE_G2_DELIVERY: &str = "blink://voice-g2-delivery";
 
     /// 编辑器连续听写 confirmed 段（0.23.3 §3.6）。payload:
     /// `{ sessionRef, generation, epoch, seq, text }`。

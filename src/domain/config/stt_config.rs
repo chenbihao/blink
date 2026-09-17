@@ -317,6 +317,11 @@ pub struct RecognitionConfig {
     /// 允许有效短语提前形成 Draft 的强停顿门槛（默认 700ms）。
     #[serde(default = "default_recognition_strong_pause_ms")]
     pub strong_pause_ms: u32,
+    /// 0.23.14 长静音独立终结门槛（默认 1100ms）：停顿达到该值且存在
+    /// 可信有声即形成 Draft，不再要求最低累计上下文——短句后的长静音
+    /// 也必须定稿。句内 200～500ms 停顿不受影响。
+    #[serde(default = "default_recognition_long_pause_ms")]
+    pub long_pause_ms: u32,
 }
 
 /// Recognition 配置的安全边界。serde 缺字段补默认值，越界值由
@@ -329,6 +334,8 @@ pub const RECOGNITION_DRAFT_MIN_MIN_S: u32 = 3;
 pub const RECOGNITION_DRAFT_MIN_MAX_S: u32 = 10;
 pub const RECOGNITION_STRONG_PAUSE_MIN_MS: u32 = 500;
 pub const RECOGNITION_STRONG_PAUSE_MAX_MS: u32 = 1_500;
+pub const RECOGNITION_LONG_PAUSE_MIN_MS: u32 = 800;
+pub const RECOGNITION_LONG_PAUSE_MAX_MS: u32 = 2_000;
 
 /// VAD 切句参数（伪流式模式生效）。
 ///
@@ -475,6 +482,10 @@ fn default_recognition_strong_pause_ms() -> u32 {
     700
 }
 
+fn default_recognition_long_pause_ms() -> u32 {
+    1_100
+}
+
 fn default_streaming_mode() -> StreamingMode {
     StreamingMode::Pseudo
 }
@@ -530,6 +541,7 @@ impl Default for RecognitionConfig {
             preview_refresh_ms: default_recognition_preview_refresh_ms(),
             draft_min_s: default_recognition_draft_min_s(),
             strong_pause_ms: default_recognition_strong_pause_ms(),
+            long_pause_ms: default_recognition_long_pause_ms(),
         }
     }
 }
@@ -618,6 +630,7 @@ impl RecognitionConfig {
             self.preview_refresh_ms,
             self.draft_min_s,
             self.strong_pause_ms,
+            self.long_pause_ms,
         );
 
         self.preview_window_ms = self.preview_window_ms.clamp(
@@ -635,6 +648,14 @@ impl RecognitionConfig {
             RECOGNITION_STRONG_PAUSE_MIN_MS,
             RECOGNITION_STRONG_PAUSE_MAX_MS,
         );
+        self.long_pause_ms = self.long_pause_ms.clamp(
+            RECOGNITION_LONG_PAUSE_MIN_MS,
+            RECOGNITION_LONG_PAUSE_MAX_MS,
+        );
+        // 长静音终结必须晚于强停顿，否则强停顿规则永远不可达。
+        if self.long_pause_ms < self.strong_pause_ms {
+            self.long_pause_ms = self.strong_pause_ms;
+        }
 
         // 当前安全范围本身保证 refresh < window，但保留显式约束，
         // 让关系不随未来范围调整而失效。
@@ -656,6 +677,7 @@ impl RecognitionConfig {
             self.preview_refresh_ms,
             self.draft_min_s,
             self.strong_pause_ms,
+            self.long_pause_ms,
         );
         if after != before {
             tracing::warn!(
@@ -1005,6 +1027,7 @@ mod tests {
                     preview_refresh_ms: 900,
                     draft_min_s: 7,
                     strong_pause_ms: 1_000,
+                    long_pause_ms: 1_400,
                 },
                 vad_kind: "energy".into(),
                 streaming_model: None,
@@ -2089,12 +2112,14 @@ mod tests {
             preview_refresh_ms: 1_000,
             draft_min_s: 10,
             strong_pause_ms: 1_500,
+            long_pause_ms: 2_000,
         };
         assert!(!recognition.sanitize(12));
         assert_eq!(recognition.preview_window_ms, 4_000);
         assert_eq!(recognition.preview_refresh_ms, 1_000);
         assert_eq!(recognition.draft_min_s, 10);
         assert_eq!(recognition.strong_pause_ms, 1_500);
+        assert_eq!(recognition.long_pause_ms, 2_000);
     }
 
     #[test]
@@ -2104,6 +2129,7 @@ mod tests {
             preview_refresh_ms: 9_999,
             draft_min_s: 99,
             strong_pause_ms: 1,
+            long_pause_ms: 99,
         };
         assert!(recognition.sanitize(6));
         assert_eq!(
@@ -2112,12 +2138,14 @@ mod tests {
                 recognition.preview_refresh_ms,
                 recognition.draft_min_s,
                 recognition.strong_pause_ms,
+                recognition.long_pause_ms,
             ),
             (
                 RECOGNITION_PREVIEW_WINDOW_MIN_MS,
                 RECOGNITION_PREVIEW_REFRESH_MAX_MS,
                 6,
                 RECOGNITION_STRONG_PAUSE_MIN_MS,
+                RECOGNITION_LONG_PAUSE_MIN_MS,
             )
         );
         assert!(recognition.preview_refresh_ms < recognition.preview_window_ms);

@@ -48,6 +48,12 @@ export const EVENTS = Object.freeze({
     VOICE_PARTIAL: 'blink://voice-partial',
     VOICE_STATUS: 'blink://voice-status',
     VOICE_ERROR: 'blink://voice-error',
+    /**
+     * 0.23.14 G2 注入交付确认：{ target: "g2", epoch, confirmed }。
+     * 注入 worker 成功 ack 后下发；confirmed 为 ack 后剩余的待交付文本。
+     * deferred/失败不发本事件（待交付段保持可见）。
+     */
+    VOICE_G2_DELIVERY: 'blink://voice-g2-delivery',
     /** 设置页 WAV 伪流式诊断进度：{ runId, phase, fedMs, durationMs }。 */
     STT_VAD_DEBUG_PROGRESS: 'blink://stt-vad-debug-progress',
 

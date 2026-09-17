@@ -899,6 +899,14 @@ function initRecognitionConfig(config) {
             parse: (raw) => parseInt(raw, 10),
             ariaKey: "voice.local.recognition.strong_pause_ms.label",
         },
+        {
+            input: document.getElementById("voice-recognition-long-pause-ms"),
+            val: document.getElementById("voice-recognition-long-pause-ms-val"),
+            key: "long_pause_ms",
+            format: (v) => `${v}ms`,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.long_pause_ms.label",
+        },
     ];
 
     function updateSliderFill(slider) {

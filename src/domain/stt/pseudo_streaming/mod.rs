@@ -81,6 +81,12 @@ const PHRASE_MIN_VOICED_MS: u64 = 500;
 /// 0.23.13 时间触发短语冻结的前缀最小长度（毫秒）：滚动窗前缀积满该值
 /// 即主动追认为短语，不再依赖停顿候选被作废——停顿检测失灵时预览仍增量。
 const TIME_FREEZE_MIN_PREFIX_MS: u64 = 1_200;
+
+/// 0.23.14 长静音终结的可信有声下限（毫秒）：quiet 达到 `long_pause_ms`
+/// 时，owned 内有效有声低于该值的候选仍不接受——键盘点击、呼吸等短
+/// 脉冲不因长静音升级为 Draft；更长噪声（咳嗽等）由模型 NoSpeech 消费，
+/// 不产生 span。
+const LONG_PAUSE_MIN_VOICED_MS: u64 = 300;
 /// 自适应预览间隔上限。
 ///
 /// 冷却从上一轮推理完成后开始计算；较长上限可避免慢机器在长音频上
@@ -261,19 +267,33 @@ struct PseudoInner {
     /// 设为 true 后，`transcribe_chunk` 和 `finalize` 返回 `SttError`，
     /// 不再处理新音频。`reset` 清除此标志。
     session_failed: bool,
-    /// 0.23.9.10 预览定稿短语账本：(end_sample, text)。候选停顿被新语音
-    /// 作废（未升级为真实切割）时，对 [phrase_anchor, quiet_start] 做一次
-    /// 短语识别并冻结在此；真实 Draft 提交覆盖其范围后清退。仅
-    /// PreviewDraft 路径填充，Legacy 恒为空。
-    preview_phrases: Vec<(u64, String)>,
-    /// 当前短语起点（绝对样本）= 最近一次作废候选的 quiet_start 与已提交
-    /// 水位的较大者。尾部预览窗口锚定于此，短语内从头增长。
+    /// 0.23.14 预览短语 span：完整音频范围 + 冻结文本。范围与 Draft 的
+    /// owned_range 同在绝对采样坐标系——settle 按范围精确清退，跨界 span
+    /// 整条删除（前缀已被 Draft 消费，剩余部分交回尾部窗口重新识别），
+    /// 禁止字符串硬裁剪。仅 PreviewDraft 路径填充，Legacy 恒为空。
+    preview_phrases: Vec<PreviewSpan>,
+    /// 0.23.14 事务式短语在途登记：识别成功非空且代际有效才提交入账；
+    /// error/空文本回退锚点（音频并入下一次短语尝试）；stale（代际推进，
+    /// 范围已由 Draft/reset 消费）直接丢弃。单槽——在途期间新短语事件
+    /// 不再发起，等下一次触发合并覆盖。
+    pending_phrase: Option<PendingPhrase>,
+    /// 下一个短语请求 id（单调递增，从 1 开始）。
+    next_phrase_request: u64,
+    /// 当前短语起点（绝对样本）= 最近一次短语冻结推进的位置与已提交
+    /// 水位的较大者。0.23.14 起为投机推进：error/空文本时由
+    /// [`PendingPhrase::anchor_before`] 回退。尾部预览窗口锚定于此。
     phrase_anchor: u64,
     /// 尾部（未定稿部分）的最新预览文本；对外 `latest_preview` 为
     /// 短语账本拼接 + 本字段的重算结果。
     preview_tail: String,
     /// 上次 settle 时已见过的 committed 水位；再次推进时才清空尾部。
     preview_settled_committed: u64,
+    /// 0.23.14 诊断：拿到 worker gate 后、调用模型前被淘汰的 stale
+    /// Preview/Phrase 任务数（不占模型时间的提前淘汰）。
+    stale_before_worker: u64,
+    /// 0.23.14 诊断：尾部预览文本回退的累计字符数（新版字符数少于旧版
+    /// 时累计差值；尾部允许改写，该指标只用于观察回缩频率）。
+    preview_retreat_chars: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +301,29 @@ struct PendingPreview {
     samples: Vec<f32>,
     snapshot_end: usize,
     audio_range: AudioRange,
+    generation: u64,
+}
+
+/// 0.23.14 预览短语账本项：完整音频范围 + 冻结文本。
+#[derive(Debug, Clone)]
+struct PreviewSpan {
+    /// 短语覆盖的完整音频范围（start = 冻结时锚点，end = 停顿起点或
+    /// 时间冻结切点）。Draft settle 按该范围清退。
+    range: AudioRange,
+    text: String,
+}
+
+/// 0.23.14 事务式短语在途登记。
+#[derive(Debug, Clone)]
+struct PendingPhrase {
+    request_id: u64,
+    /// 冻结前的锚点——error/空文本时的回退目标。
+    anchor_before: u64,
+    /// 短语完整范围（settle / 账本口径）。
+    range: AudioRange,
+    /// 送模范围（首尾静音裁剪后），作为 Preview 信封的 audioRange。
+    model_range: AudioRange,
+    /// 登记时的预览代际；完成时不匹配即 stale。
     generation: u64,
 }
 
@@ -322,9 +365,13 @@ impl PseudoInner {
             worker_gate: Arc::new(tokio::sync::Mutex::new(())),
             session_failed: false,
             preview_phrases: Vec::new(),
+            pending_phrase: None,
+            next_phrase_request: 0,
             phrase_anchor: 0,
             preview_tail: String::new(),
             preview_settled_committed: 0,
+            stale_before_worker: 0,
+            preview_retreat_chars: 0,
         }
     }
 
@@ -339,9 +386,11 @@ impl PseudoInner {
         deferred
     }
 
-    /// 0.23.9.10：已提交水位推进后的预览账本收敛——真实 Draft/NoSpeech 消费
-    /// 覆盖的短语定稿退场（正文以 Draft 为准），锚点不低于已提交水位。
-    /// 幂等；所有推进 committed 的路径统一调用。
+    /// 0.23.9.10 / 0.23.14：已提交水位推进后的预览账本收敛——按**音频范围**
+    /// 清退被 Draft/NoSpeech 消费的短语：完全覆盖（end ≤ committed）退场；
+    /// 跨界 span（start < committed < end）整条删除，剩余部分交回尾部窗口
+    /// 重新识别，不做字符串硬裁剪。在途短语同样按范围裁决。锚点不低于已
+    /// 提交水位。幂等；所有推进 committed 的路径统一调用。
     ///
     /// 0.23.10.2：committed 水位实际推进（跨过上次 settle 水位）时同步清空
     /// 尾部——尾部覆盖的音频已由 Draft/NoSpeech 消费，保留会在 confirmed
@@ -354,7 +403,13 @@ impl PseudoInner {
         }
         let phrases_before = self.preview_phrases.len();
         self.preview_phrases
-            .retain(|(end_sample, _)| *end_sample > committed);
+            .retain(|span| span.range.start_sample >= committed);
+        if let Some(pending) = &self.pending_phrase
+            && pending.range.start_sample < committed
+        {
+            // 在途范围已被 Draft 覆盖或跨界：作废登记，迟到结果按 stale 丢弃。
+            self.pending_phrase = None;
+        }
         self.phrase_anchor = self.phrase_anchor.max(committed);
         let committed_advanced = committed > self.preview_settled_committed;
         if committed_advanced {
@@ -423,6 +478,14 @@ impl PseudoInner {
         if preview.is_empty() || preview == self.preview_tail {
             return;
         }
+        // 0.23.14 诊断：尾部回退字符数（尾部允许改写，只统计不阻断）。
+        let old_chars = self.preview_tail.chars().count();
+        let new_chars = preview.chars().count();
+        if new_chars < old_chars {
+            self.preview_retreat_chars = self
+                .preview_retreat_chars
+                .saturating_add((old_chars - new_chars) as u64);
+        }
         self.preview_tail = preview;
         self.latest_preview_range = Some(range);
         self.latest_preview_request_id = request_id;
@@ -436,8 +499,8 @@ impl PseudoInner {
     /// 无需感知内部分层。文本实际变化才推进版本（边沿触发）。
     fn rebuild_preview_text(&mut self) {
         let mut composed = String::new();
-        for (_, text) in &self.preview_phrases {
-            composed.push_str(text);
+        for span in &self.preview_phrases {
+            composed.push_str(&span.text);
         }
         composed.push_str(&self.preview_tail);
         if composed == self.latest_preview {
@@ -495,13 +558,14 @@ impl PseudoInner {
         self.session_failed = true;
     }
 
-    /// 在途推理任务数（预览 + 定稿 + 排队句段；诊断用）。
+    /// 在途推理任务数（预览 + 定稿 + 排队句段 + 在途短语；诊断用）。
     fn in_flight_inferences(&self) -> usize {
         usize::from(self.preview_in_flight)
             + usize::from(self.sentences.finalize_in_flight)
             + usize::from(self.sentences.pending.is_some())
             + usize::from(self.sentences.deferred.is_some())
             + usize::from(self.pending_preview.is_some())
+            + usize::from(self.pending_phrase.is_some())
     }
 
     /// 按与 RequestAudioGate 相同的 10ms frame 统计有效有声样本。
@@ -541,6 +605,62 @@ impl PseudoInner {
         voiced
     }
 
+    /// 0.23.14 时间冻结切点优先低能量谷底：在前缀范围内按 10ms frame
+    /// 扫描，返回**最后一个**连续低能量段（谷 ≥ 120ms，低于 VAD
+    /// min_silence 的句内停顿）的起点（绝对采样）。无合格谷底（连续
+    /// 语音）返回 None——调用方回退滚动窗起点。任意 1.2s 时间前缀不再
+    /// 直接变成切点，词中切断由谷底约束缓解；识别失败由事务式锚点回退。
+    fn low_energy_valley_start_in_range(
+        samples: &[f32],
+        range_start_abs: u64,
+        off_threshold: f64,
+        sample_rate: u32,
+    ) -> Option<u64> {
+        const MIN_DIP_MS: u64 = 120;
+        let frame = (u64::from(sample_rate) / 100).max(1) as usize;
+        let min_frames = ((MIN_DIP_MS * u64::from(sample_rate) / 1000) as usize) / frame;
+        let threshold = if off_threshold.is_finite() {
+            off_threshold.max(0.0)
+        } else {
+            0.0
+        };
+        let frame_rms = |chunk: &[f32]| -> f64 {
+            (chunk
+                .iter()
+                .map(|sample| {
+                    let value = f64::from(*sample);
+                    if value.is_finite() {
+                        value * value
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>()
+                / chunk.len() as f64)
+                .sqrt()
+        };
+        let mut quiet_run_start: Option<usize> = None;
+        let mut last_valley_start: Option<usize> = None;
+        let mut frame_idx = 0usize;
+        for chunk in samples.chunks(frame) {
+            if frame_rms(chunk) < threshold {
+                quiet_run_start.get_or_insert(frame_idx);
+            } else if let Some(start) = quiet_run_start.take()
+                && frame_idx - start >= min_frames
+            {
+                last_valley_start = Some(start);
+            }
+            frame_idx += 1;
+        }
+        // 尾部谷（range 末尾仍是低能量）同样有效。
+        if let Some(start) = quiet_run_start
+            && frame_idx - start >= min_frames
+        {
+            last_valley_start = Some(start);
+        }
+        last_valley_start.map(|start| range_start_abs + (start * frame) as u64)
+    }
+
     /// 记录 VAD 候选而不立即创建 Draft。普通句尾先保留，后续静默帧
     /// 可能把候选升级为 strong pause；恢复有声时该候选作废。
     fn observe_boundary_candidate(
@@ -558,8 +678,23 @@ impl PseudoInner {
         // 不会升级为 Draft 切割，无需等复语确认，立即作为短语定稿信号返回。
         // 修复前短首句既进不了短语账本也凑不满首预览 1.2s 门槛，首个可见
         // 文本被推迟到后续语音累计之后（实测 4s+）。
+        //
+        // 0.23.14：短句同时登记 `short_phrase` 候选——短语冻结只解决预览，
+        // 可靠 Draft 需要候选升级路径。后续静默块持续累计 quiet_samples，
+        // 达到 long_pause_ms 即按长静音规则接受；复语则候选作废（锚点已
+        // 在短语冻结时推进，作废信号为无操作）。
         if event == VadEvent::ShortPhraseEnd {
-            let quiet_start = total.saturating_sub(self.vad.dump_state().silence_samples);
+            let silence_samples = self.vad.dump_state().silence_samples;
+            let quiet_start = total.saturating_sub(silence_samples);
+            let candidate = BoundaryCandidate {
+                boundary_sample: quiet_start as u64,
+                quiet_start_sample: quiet_start as u64,
+                reason: "short_phrase".to_string(),
+                voiced_samples: self.uncommitted_voiced_samples,
+                quiet_samples: silence_samples as u64,
+            };
+            self.boundary_candidate = Some(candidate.clone());
+            self.coordinator.set_candidate(candidate);
             return Some(quiet_start as u64);
         }
 
@@ -633,6 +768,24 @@ impl PseudoInner {
         if owned_samples >= min_draft_samples {
             return Ok(());
         }
+        // 0.23.14 长静音独立终结：停顿达到 long_pause_ms 且存在可信有声即可
+        // 接受，不再要求 owned ≥ 2s / voiced ≥ 1.2s——0.8～2 秒短句后的
+        // 长静音也必须产生可靠 Draft，而不是停在 Preview 等复语。可信有声
+        // 下限挡住点击/呼吸级短脉冲；更长的噪声由模型 NoSpeech 结果消费，
+        // 不产生 span。句内 200～500ms 停顿（< strong_pause_ms）不受影响。
+        let long_pause_samples = self
+            .coordinator
+            .settings
+            .long_pause_ms
+            .saturating_mul(sample_rate)
+            / 1000;
+        if candidate.quiet_samples >= long_pause_samples {
+            let min_voiced = LONG_PAUSE_MIN_VOICED_MS.saturating_mul(sample_rate) / 1000;
+            if candidate.voiced_samples >= min_voiced {
+                return Ok(());
+            }
+            return Err("long_pause_voiced_too_short");
+        }
         if !candidate.is_strong(
             sample_rate as u32,
             self.coordinator.settings.strong_pause_ms,
@@ -646,6 +799,19 @@ impl PseudoInner {
             return Err("strong_pause_voiced_too_short");
         }
         Ok(())
+    }
+
+    /// 0.23.14 在途短语按失败收场：作废登记并把锚点回退到冻结前位置，
+    /// 音频交回下一次短语尝试合并覆盖（error/空文本/无通道统一路径）。
+    fn fail_pending_phrase(&mut self, request_id: u64, anchor_before: u64) {
+        if self
+            .pending_phrase
+            .as_ref()
+            .is_some_and(|p| p.request_id == request_id)
+        {
+            self.pending_phrase = None;
+            self.phrase_anchor = self.phrase_anchor.min(anchor_before);
+        }
     }
 
     fn clear_candidate(&mut self) {
@@ -708,6 +874,7 @@ impl PseudoStreamingSttEngine {
             preview_refresh_ms: u64::from(recognition_cfg.preview_refresh_ms),
             draft_min_s: u64::from(recognition_cfg.draft_min_s),
             strong_pause_ms: u64::from(recognition_cfg.strong_pause_ms),
+            long_pause_ms: u64::from(recognition_cfg.long_pause_ms),
         }
         .sanitize(u64::from(vad_cfg.max_uncommitted_s));
         tracing::info!(
@@ -722,6 +889,7 @@ impl PseudoStreamingSttEngine {
             preview_refresh_ms = recognition.preview_refresh_ms,
             draft_min_s = recognition.draft_min_s,
             strong_pause_ms = recognition.strong_pause_ms,
+            long_pause_ms = recognition.long_pause_ms,
             profile = ?profile,
             "伪流式 STT 引擎: VAD + GGUF worker 通道 (就绪)"
         );
@@ -766,9 +934,13 @@ impl PseudoStreamingSttEngine {
                 worker_gate: Arc::new(tokio::sync::Mutex::new(())),
                 session_failed: false,
                 preview_phrases: Vec::new(),
+                pending_phrase: None,
+                next_phrase_request: 0,
                 phrase_anchor: 0,
                 preview_tail: String::new(),
                 preview_settled_committed: 0,
+                stale_before_worker: 0,
+                preview_retreat_chars: 0,
             })),
             connection: Some(conn),
             sample_rate: 16000,
@@ -832,6 +1004,17 @@ impl PseudoStreamingSttEngine {
         // 冷却 2N ms。短音频仍受 500ms 基础间隔约束。
         let adaptive = last_elapsed.as_millis().saturating_mul(2);
         Duration::from_millis(base.max(adaptive.min(PREVIEW_MAX_INTERVAL_MS as u128) as u64))
+    }
+
+    /// 0.23.14 PreviewDraft 刷新间隔：配置下限与推理耗时冷却的较大值。
+    ///
+    /// PreviewDraft 的预览窗口锚定短语锚点、受 preview_window 有界约束，
+    /// 不需要 Legacy 的 8s 慢速降档；但同样遵守"推理 N ms 后至少冷却 2N ms"
+    /// 的占空比约束（≤ 1/3），并设 PREVIEW_MAX_INTERVAL_MS 上限——慢机器
+    /// 长音频上不再以固定 700ms 间隔持续制造推理积压。
+    fn preview_refresh_interval(base_ms: u64, last_elapsed: Duration) -> Duration {
+        let adaptive = last_elapsed.as_millis().saturating_mul(2);
+        Duration::from_millis(base_ms.max(adaptive.min(PREVIEW_MAX_INTERVAL_MS as u128) as u64))
     }
 
     fn has_min_preview_growth(total: usize, last_end: usize, sample_rate: u32) -> Option<bool> {
@@ -1212,6 +1395,31 @@ impl PseudoStreamingSttEngine {
             } else {
                 None
             };
+            // 0.23.14：gate 后、transport 前复核代际与所有权——排队期间句尾
+            // 已发生或新任务已接管的 stale Preview 直接退出，不再占用模型
+            // 时间（0.23.13 实测 487ms 过期预览仍完整推理后才被丢弃）。
+            {
+                let mut inner = match inner.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::error!(gen = generation, "Mutex poisoned at preview gate check");
+                        return;
+                    }
+                };
+                let stale = inner.preview_generation != generation
+                    || (inner.preview_in_flight && inner.preview_owner != request_id);
+                if stale {
+                    inner.stale_before_worker = inner.stale_before_worker.wrapping_add(1);
+                    tracing::debug!(
+                        request_id,
+                        gen_stale = inner.preview_generation != generation,
+                        "gate 后淘汰过期预览（未调用模型）"
+                    );
+                    inner.coordinator.finish(request_id, false, String::new());
+                    inner.release_preview_owner(request_id);
+                    return;
+                }
+            }
             // 0.22.15：裁剪尾部静音——使用 VAD off_threshold 统一静音语义
             let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate, off_threshold);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
@@ -1273,14 +1481,22 @@ impl PseudoStreamingSttEngine {
     /// 预览定稿：对被作废候选覆盖的短语做一次识别并冻结进账本。
     ///
     /// 与尾部预览不同，短语结果只追加、不替换；真实 Draft 提交覆盖其范围
-    /// 后由 `commit_or_rollback` 清退。代际校验与尾部预览一致：句尾/终态/
-    /// reset 已把该范围交给 Draft 时丢弃迟到结果，不追加。
-    fn spawn_phrase_recognition(&self, samples: Vec<f32>, ledger_end: u64, range: AudioRange) {
+    /// 后由 `commit_or_rollback` 清退。
+    ///
+    /// 0.23.14 事务式：锚点在登记时投机推进（尾部窗口不重复覆盖该音频），
+    /// 识别成功非空且代际/登记均有效才提交入账；error/空文本回退锚点，
+    /// 该音频并入下一次短语尝试（合并重识别，不丢前缀）；stale（代际推进
+    /// 或 settle 已消费范围）只丢弃登记——范围已由 Draft/reset 接管。
+    fn spawn_phrase_recognition(&self, samples: Vec<f32>, pending: PendingPhrase) {
         if samples.is_empty() {
+            // 无音频可送模：按失败处理，回退锚点恢复覆盖。
+            if let Some(mut inner) = Self::try_lock(&self.inner) {
+                inner.fail_pending_phrase(pending.request_id, pending.anchor_before);
+            }
             return;
         }
 
-        let (generation, off_threshold, worker_gate, single_worker) = {
+        let (off_threshold, worker_gate, single_worker) = {
             let inner = match Self::try_lock(&self.inner) {
                 Some(g) => g,
                 None => {
@@ -1289,19 +1505,22 @@ impl PseudoStreamingSttEngine {
                 }
             };
             (
-                inner.preview_generation,
                 inner.vad.current_off_threshold(),
                 Arc::clone(&inner.worker_gate),
                 inner.single_worker,
             )
         };
 
-        let inner = Arc::clone(&self.inner);
+        let inner_arc = Arc::clone(&self.inner);
         let Some(transport) = self.connection.as_ref().and_then(|c| c.transport.clone()) else {
-            tracing::warn!("短语定稿缺少 worker 通道，跳过");
+            tracing::warn!("短语定稿缺少 worker 通道，回退锚点");
+            if let Some(mut inner) = Self::try_lock(&self.inner) {
+                inner.fail_pending_phrase(pending.request_id, pending.anchor_before);
+            }
             return;
         };
         let sample_rate = self.sample_rate;
+        let request_id = pending.request_id;
 
         tokio::spawn(async move {
             let _worker_guard = if single_worker {
@@ -1309,20 +1528,60 @@ impl PseudoStreamingSttEngine {
             } else {
                 None
             };
+            // 0.23.14：gate 后、transport 前复核——排队期间边界已接受（代际
+            // 推进，范围由 Draft 接管）或登记已被 settle 消费的 stale 短语
+            // 直接退出，不占模型时间。
+            {
+                let mut inner = match inner_arc.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::error!("Mutex poisoned at phrase gate check");
+                        return;
+                    }
+                };
+                let owned_current = inner
+                    .pending_phrase
+                    .as_ref()
+                    .is_some_and(|p| p.request_id == request_id);
+                let gen_stale = inner.preview_generation != pending.generation;
+                if gen_stale || !owned_current {
+                    inner.stale_before_worker = inner.stale_before_worker.wrapping_add(1);
+                    if gen_stale && owned_current {
+                        // 范围已由 Draft/reset 接管，作废登记（锚点不回退）。
+                        inner.pending_phrase = None;
+                    }
+                    tracing::debug!(
+                        request_id,
+                        gen_stale,
+                        "gate 后淘汰过期短语（未调用模型）"
+                    );
+                    return;
+                }
+            }
             let trimmed = trim_trailing_silence(&samples, sample_rate, off_threshold);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
             let result = transport.transcribe(&wav_bytes).await;
 
-            let mut inner = match inner.lock() {
+            let mut inner = match inner_arc.lock() {
                 Ok(g) => g,
                 Err(_) => {
                     tracing::error!("Mutex poisoned at phrase completion");
                     return;
                 }
             };
+            // 只处理仍属于自己的登记；settle/替换/新短语会移除旧登记。
+            let Some(owned) = inner
+                .pending_phrase
+                .clone()
+                .filter(|p| p.request_id == request_id)
+            else {
+                tracing::debug!(request_id, "丢弃迟到短语定稿（登记已消费或易主）");
+                return;
+            };
             // 代际已推进（句尾/终态/reset）：该范围已交给 Draft 或已作废。
-            if inner.preview_generation != generation {
+            if inner.preview_generation != owned.generation {
+                inner.pending_phrase = None;
                 tracing::debug!("丢弃迟到短语定稿（代际已推进）");
                 return;
             }
@@ -1331,11 +1590,15 @@ impl PseudoStreamingSttEngine {
                     let cleaned = strip_filler_words(&text);
                     if !cleaned.is_empty() {
                         let chars = cleaned.chars().count();
-                        inner.preview_phrases.push((ledger_end, cleaned));
+                        inner.pending_phrase = None;
+                        inner.preview_phrases.push(PreviewSpan {
+                            range: owned.range,
+                            text: cleaned,
+                        });
                         // 信封 range 跟随最近定稿的短语，避免回退到 (committed,
                         // committed) 退化区间——VAD 调试时间线因此能显示短语
                         // 的真实音频范围而非 0.00s–0.00s。
-                        inner.latest_preview_range = Some(range);
+                        inner.latest_preview_range = Some(owned.model_range);
                         inner.rebuild_preview_text();
                         tracing::debug!(
                             ledger_len = inner.preview_phrases.len(),
@@ -1343,13 +1606,16 @@ impl PseudoStreamingSttEngine {
                             "短语定稿入账"
                         );
                     } else {
-                        tracing::debug!("短语定稿识别返回空文本，未入账");
+                        // 空文本：锚点回退，该范围并入下一次短语尝试。
+                        inner.fail_pending_phrase(owned.request_id, owned.anchor_before);
+                        tracing::debug!("短语定稿识别返回空文本，回退锚点等待合并");
                     }
                 }
                 Err(e) => {
-                    // 0.23.13 排查：实时链路短语前缀丢失嫌疑点之一——
-                    // 此前错误被静默吞掉，无任何可观测信号。
-                    tracing::debug!(%e, "短语定稿识别失败，未入账");
+                    // 0.23.13 排查：此前错误被静默吞掉。0.23.14：错误同样
+                    // 回退锚点——音频交回可识别覆盖范围，不静默丢失前缀。
+                    inner.fail_pending_phrase(owned.request_id, owned.anchor_before);
+                    tracing::debug!(%e, "短语定稿识别失败，回退锚点等待合并");
                 }
             }
         });
@@ -1474,13 +1740,18 @@ impl PseudoStreamingSttEngine {
             );
 
             // 0.23.9.10：候选被新语音作废 → 预览定稿。对 [phrase_anchor,
-            // quiet_start) 做有声门控：通过则快照送识别并推进锚点；
-            // 有声不足则保留锚点等下一短语合并；纯静音段直接跳过锚点。
-            let mut phrase_snapshot: Option<(Vec<f32>, u64, AudioRange)> = None;
+            // quiet_start) 做有声门控：通过则登记在途短语并投机推进锚点
+            // （error/空文本时回退，见 spawn_phrase_recognition）；有声不足
+            // 则保留锚点等下一短语合并；纯静音段直接跳过锚点。
+            // 0.23.14：在途短语未落地时不再发起新短语——下一次触发按
+            // 回退/推进后的锚点合并覆盖。
+            let mut phrase_snapshot: Option<(Vec<f32>, PendingPhrase)> = None;
             if let Some(quiet_start) = invalidated_candidate
                 && quiet_start > inner.phrase_anchor
+                && inner.pending_phrase.is_none()
             {
-                let start = inner.phrase_anchor.min(total as u64) as usize;
+                let anchor_before = inner.phrase_anchor;
+                let start = anchor_before.min(total as u64) as usize;
                 let end = (quiet_start as usize).min(total);
                 let phrase_range = AudioRange::new(start as u64, end as u64);
                 match inner
@@ -1511,15 +1782,26 @@ impl PseudoStreamingSttEngine {
                                     .saturating_sub(phrase_range.start_sample)
                                     .min(phrase_samples.len() as u64)
                                     as usize;
-                                if offset_start < offset_end {
-                                    phrase_snapshot = Some((
-                                        phrase_samples[offset_start..offset_end].to_vec(),
-                                        quiet_start,
-                                        AudioRange::new(
+                                let model_samples = if offset_start < offset_end {
+                                    Some(phrase_samples[offset_start..offset_end].to_vec())
+                                } else {
+                                    None
+                                };
+                                if let Some(samples_snapshot) = model_samples {
+                                    inner.next_phrase_request =
+                                        inner.next_phrase_request.wrapping_add(1).max(1);
+                                    let pending = PendingPhrase {
+                                        request_id: inner.next_phrase_request,
+                                        anchor_before,
+                                        range: phrase_range,
+                                        model_range: AudioRange::new(
                                             model_input_range.start_sample,
                                             model_input_range.end_sample,
                                         ),
-                                    ));
+                                        generation: inner.preview_generation,
+                                    };
+                                    phrase_snapshot = Some((samples_snapshot, pending.clone()));
+                                    inner.pending_phrase = Some(pending);
                                 }
                                 inner.phrase_anchor = quiet_start;
                             }
@@ -1700,8 +1982,12 @@ impl PseudoStreamingSttEngine {
 
             // Preview 使用滚动窗口而不是最近新增 chunk。首轮至少 1.2s
             // 有效输入；之后只要求增量达到 500ms，刷新周期与窗口解耦。
-            let preview_interval =
-                Duration::from_millis(inner.coordinator.settings.preview_refresh_ms);
+            // 0.23.14：固定刷新间隔升级为自适应冷却（配置下限与 2×上轮
+            // 推理耗时的较大值，带上限）。
+            let preview_interval = Self::preview_refresh_interval(
+                inner.coordinator.settings.preview_refresh_ms,
+                inner.last_preview_elapsed,
+            );
             let has_growth = Self::has_min_preview_growth(
                 total,
                 inner.last_preview_sample_end,
@@ -1721,20 +2007,34 @@ impl PseudoStreamingSttEngine {
             // 按短语增量累积。纯静音前缀直接跳过锚点，不等识别。
             let roll_start = total.saturating_sub(window_samples);
             if phrase_snapshot.is_none()
+                && inner.pending_phrase.is_none()
                 && pending.is_none()
                 && !inner.sentences.finalize_in_flight
                 && (inner.phrase_anchor as usize) < roll_start
                 && roll_start - inner.phrase_anchor as usize
                     >= TIME_FREEZE_MIN_PREFIX_MS as usize * self.sample_rate as usize / 1000
             {
+                let anchor_before = inner.phrase_anchor;
                 let prefix_range = inner.phrase_anchor as usize..roll_start;
-                let prefix_audio = AudioRange::new(prefix_range.start as u64, prefix_range.end as u64);
                 match inner
                     .sentences
                     .abs_to_local_range(&prefix_range, inner.samples.len())
                 {
                     Some(local) => {
                         let prefix_samples = &inner.samples[local];
+                        // 0.23.14 切点优先低能量谷底（句内 120ms+ 停顿）：
+                        // 连续语音中的自然换气/微停顿处切开，词中硬切交给
+                        // 滚动窗起点兜底；识别失败由事务式锚点回退恢复。
+                        let cut_abs = PseudoInner::low_energy_valley_start_in_range(
+                            prefix_samples,
+                            anchor_before,
+                            off_threshold,
+                            self.sample_rate,
+                        )
+                        .filter(|cut| *cut > anchor_before)
+                        .unwrap_or(roll_start as u64);
+                        let prefix_audio =
+                            AudioRange::new(anchor_before, cut_abs);
                         let gate = RequestAudioGate::evaluate(
                             prefix_audio,
                             prefix_samples,
@@ -1755,17 +2055,29 @@ impl PseudoStreamingSttEngine {
                                     .end_sample
                                     .saturating_sub(prefix_audio.start_sample)
                                     .min(prefix_samples.len() as u64) as usize;
-                                if offset_start < offset_end {
-                                    phrase_snapshot = Some((
-                                        prefix_samples[offset_start..offset_end].to_vec(),
-                                        roll_start as u64,
-                                        AudioRange::new(
+                                let model_samples = if offset_start < offset_end {
+                                    Some(prefix_samples[offset_start..offset_end].to_vec())
+                                } else {
+                                    None
+                                };
+                                if let Some(samples_snapshot) = model_samples {
+                                    inner.next_phrase_request =
+                                        inner.next_phrase_request.wrapping_add(1).max(1);
+                                    let pending_phrase = PendingPhrase {
+                                        request_id: inner.next_phrase_request,
+                                        anchor_before,
+                                        range: prefix_audio,
+                                        model_range: AudioRange::new(
                                             model_input_range.start_sample,
                                             model_input_range.end_sample,
                                         ),
-                                    ));
+                                        generation: inner.preview_generation,
+                                    };
+                                    phrase_snapshot =
+                                        Some((samples_snapshot, pending_phrase.clone()));
+                                    inner.pending_phrase = Some(pending_phrase);
                                 }
-                                inner.phrase_anchor = roll_start as u64;
+                                inner.phrase_anchor = cut_abs;
                             }
                             RequestAudioGate::TooShort => {
                                 // 有声不足 500ms：等前缀再长一点，锚点不动
@@ -1915,9 +2227,10 @@ impl PseudoStreamingSttEngine {
             )
         };
 
-        // 0.23.9.10：预览定稿短语识别（锁外 spawn，见 spawn_phrase_recognition）。
-        if let Some((phrase_samples, ledger_end, phrase_range)) = phrase_snapshot {
-            self.spawn_phrase_recognition(phrase_samples, ledger_end, phrase_range);
+        // 0.23.9.10 / 0.23.14：预览定稿短语识别（锁外 spawn，事务式入账，
+        // 见 spawn_phrase_recognition）。
+        if let Some((phrase_samples, pending_phrase)) = phrase_snapshot {
+            self.spawn_phrase_recognition(phrase_samples, pending_phrase);
         }
 
         if let Some(pending) = pending_segment {
@@ -2511,9 +2824,13 @@ impl SttEngine for PseudoStreamingSttEngine {
                 g.pending_preview = None;
                 g.preview_started = false;
                 g.preview_phrases.clear();
+                g.pending_phrase = None;
+                g.next_phrase_request = 0;
                 g.phrase_anchor = 0;
                 g.preview_tail.clear();
                 g.preview_settled_committed = 0;
+                g.stale_before_worker = 0;
+                g.preview_retreat_chars = 0;
                 g.state_revision = 0;
                 g.last_reported_state = None;
                 g.last_reported_confirmed_revision = 0;
@@ -2545,9 +2862,13 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.pending_preview = None;
         inner.preview_started = false;
         inner.preview_phrases.clear();
+        inner.pending_phrase = None;
+        inner.next_phrase_request = 0;
         inner.phrase_anchor = 0;
         inner.preview_tail.clear();
         inner.preview_settled_committed = 0;
+        inner.stale_before_worker = 0;
+        inner.preview_retreat_chars = 0;
         inner.state_revision = 0;
         inner.last_reported_state = None;
         inner.last_reported_confirmed_revision = 0;
@@ -2568,6 +2889,8 @@ impl SttEngine for PseudoStreamingSttEngine {
                 in_flight_inferences: inner.in_flight_inferences(),
                 confirmed_revision: inner.sentences.confirmed_revision,
                 preview_revision: inner.preview_revision,
+                stale_before_worker: inner.stale_before_worker,
+                preview_retreat_chars: inner.preview_retreat_chars,
                 ..SttStreamStats::default()
             },
             None => SttStreamStats::default(),

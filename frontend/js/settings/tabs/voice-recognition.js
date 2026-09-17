@@ -11,6 +11,7 @@ export const RECOGNITION_DEFAULTS = {
     preview_refresh_ms: 700,
     draft_min_s: 5,
     strong_pause_ms: 700,
+    long_pause_ms: 1100,
 };
 
 export const RECOGNITION_KEYS = [
@@ -18,6 +19,7 @@ export const RECOGNITION_KEYS = [
     "preview_refresh_ms",
     "draft_min_s",
     "strong_pause_ms",
+    "long_pause_ms",
 ];
 
 export const RECOGNITION_RANGE = {
@@ -25,6 +27,7 @@ export const RECOGNITION_RANGE = {
     preview_refresh_ms: {min: 500, max: 1000},
     draft_min_s: {min: 3, max: 10},
     strong_pause_ms: {min: 500, max: 1500},
+    long_pause_ms: {min: 800, max: 2000},
 };
 
 /**
@@ -72,6 +75,13 @@ export function normalizeRecognitionConfig(recognition, maxUncommittedS = Infini
     const draft = Math.min(draftMax, Math.max(draftMin, recognition.draft_min_s));
     if (draft !== recognition.draft_min_s) {
         recognition.draft_min_s = draft;
+        changed = true;
+    }
+
+    // 长静音终结必须晚于强停顿，否则强停顿规则永远不可达（与后端
+    // RecognitionConfig::sanitize 同一关系约束）。
+    if (recognition.long_pause_ms < recognition.strong_pause_ms) {
+        recognition.long_pause_ms = recognition.strong_pause_ms;
         changed = true;
     }
 

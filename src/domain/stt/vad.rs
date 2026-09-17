@@ -204,7 +204,11 @@ const ENERGY_HISTORY_DURATION_MS: u64 = 1_500;
 /// attack debounce 所需连续有声 frame 数（约 30ms @ 10ms）。
 /// 单个脉冲不会进入 speaking，需连续 3 帧才算入句。
 const ATTACK_DEBOUNCE_FRAMES: usize = 3;
+/// 0.23.14 起仅测试消费：生产路径（引擎构造、corpus runner）一律显式
+/// 传入 `VadConfig` 派生参数，默认窗口常量不再有生产调用方。
+#[cfg(test)]
 const SOFT_WINDOW_MS: u64 = 8_000;
+#[cfg(test)]
 const HARD_WINDOW_MS: u64 = 12_000;
 /// 渐进软窗口静默下限的保护值；实际起点来自 `min_silence_ms`。
 const SOFT_SILENCE_FLOOR_MIN_MS: u64 = 50;
@@ -242,8 +246,13 @@ const THRESHOLD_MAX: f64 = 0.1; // 约 -20dB
 impl EnergyVad {
     /// 创建默认配置的能量 VAD。
     ///
+    /// 0.23.14 起仅测试消费：生产路径一律经 `with_params_and_windows`
+    /// 显式传入 `VadConfig` 派生参数（旧默认灵敏度 0.005 与生产默认
+    /// 0.001 不一致，曾造成 corpus 段数验收口径漂移）。
+    ///
     /// 参数：
     /// - `sample_rate`：音频采样率（通常 16000）
+    #[cfg(test)]
     pub fn new(sample_rate: u32) -> Self {
         Self::from_params(
             sample_rate,

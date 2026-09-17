@@ -2150,6 +2150,21 @@
                                            type="range"/>
                                     <div class="voice-vad-param-range"><span>500ms</span><span>1500ms</span></div>
                                 </div>
+                                <div class="voice-vad-param">
+                                    <div class="voice-vad-param-head">
+                                        <span class="voice-vad-param-label"><span
+                                                data-i18n="voice.local.recognition.long_pause_ms.label">长静音定稿</span><span
+                                                class="field-hint-icon"
+                                                data-i18n-title="voice.local.recognition.long_pause_ms.hint"
+                                                title="静音达到该时长时，只要有可信语音即定稿上屏——短句后的长停顿不再悬停。句内 200～500ms 停顿不受影响。">ⓘ</span></span>
+                                        <span class="voice-vad-param-value"
+                                              id="voice-recognition-long-pause-ms-val">1100ms</span>
+                                    </div>
+                                    <input aria-label="长静音定稿" class="voice-vad-slider"
+                                           id="voice-recognition-long-pause-ms" max="2000" min="800" step="50"
+                                           type="range"/>
+                                    <div class="voice-vad-param-range"><span>800ms</span><span>2000ms</span></div>
+                                </div>
                             </div>
                         </div>
                     </div>

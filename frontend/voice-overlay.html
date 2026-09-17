@@ -108,6 +108,8 @@
     let voiceEpoch = 0;
     let latestPreviewRequest = 0;
     let displayedConfirmed = "";
+    // 最近一次 preview 文本（VOICE_G2_DELIVERY 只更新 confirmed 层时复用）
+    let displayedPreview = "";
 
     function setMode(next) {
         mode = next;
@@ -219,6 +221,25 @@
         isDefaultText = true;
     }
 
+    /** G2 双色渲染：confirmed 白色 + preview 灰色半透明（VOICE_PARTIAL 与
+     *  注入交付确认共用；两者均空时清空正文区——Draft 覆盖后 Preview 可能
+     *  被明确清空，不保留旧虚字）。 */
+    function renderG2Text(confirmed, preview) {
+        if (confirmed || preview) {
+            textEl.innerHTML =
+                '<span class="voice-confirmed"></span>' +
+                '<span class="voice-preview"></span>';
+            textEl.querySelector(".voice-confirmed").textContent = confirmed;
+            textEl.querySelector(".voice-preview").textContent = preview;
+            isDefaultText = false;
+            applySize();
+        } else {
+            textEl.textContent = "";
+            isDefaultText = false;
+            applySize();
+        }
+    }
+
     // ── 控制按钮（仅 editor 模式）────────────────────────────────────
     pauseBtn.addEventListener("click", () => {
         if (editorPhase === "paused") {
@@ -294,6 +315,7 @@
             voiceEpoch = Number(epoch);
             latestPreviewRequest = 0;
             displayedConfirmed = "";
+            displayedPreview = "";
         }
         resetWave();
         resetHint();
@@ -348,6 +370,7 @@
     listen(EVENTS.VOICE_RECORDING_END, () => {
         setMode("g2");
         displayedConfirmed = "";
+        displayedPreview = "";
         latestPreviewRequest = 0;
         resetToDefaultText();
         resetWave();
@@ -366,6 +389,7 @@
             voiceEpoch = eventEpoch;
             latestPreviewRequest = 0;
             displayedConfirmed = "";
+            displayedPreview = "";
         }
         const requestId = Number(payload.previewRequestId ?? payload.requestId ?? 0);
         if (requestId && requestId < latestPreviewRequest) return;
@@ -380,27 +404,27 @@
                     : displayedConfirmed;
             const preview = payload.preview || "";
             displayedConfirmed = confirmed;
-            if (confirmed || preview) {
-                // 双色渲染：confirmed 白色 + preview 灰色半透明
-                textEl.innerHTML =
-                    '<span class="voice-confirmed"></span>' +
-                    '<span class="voice-preview"></span>';
-                textEl.querySelector(".voice-confirmed").textContent = confirmed;
-                textEl.querySelector(".voice-preview").textContent = preview;
-                isDefaultText = false;
-                applySize();
-            } else {
-                // Draft 覆盖后 Preview 可能被明确清空；不保留旧虚字。
-                textEl.textContent = "";
-                isDefaultText = false;
-                applySize();
-            }
+            displayedPreview = preview;
+            renderG2Text(confirmed, preview);
         } else if (payload.text) {
             // 兼容旧格式（真流式 / 非流式引擎）
             textEl.textContent = payload.text;
             isDefaultText = false;
             applySize();
         }
+    });
+
+    // ── g2 注入交付确认（0.23.14）：confirmed 层在注入 ack 后才清退 ──
+    // 待交付段在注入成功前保持可见（VOICE_PARTIAL 已渲染）；本事件到达
+    // 时只更新 confirmed 层，preview 层保持最近状态不被清空。
+    listen(EVENTS.VOICE_G2_DELIVERY, (event) => {
+        const payload = event.payload ?? {};
+        if (payload.target !== "g2") return;
+        const eventEpoch = Number(payload.epoch ?? 0);
+        if (eventEpoch && voiceEpoch && eventEpoch < voiceEpoch) return;
+        if (mode !== "g2" || isDefaultText) return;
+        displayedConfirmed = String(payload.confirmed || "");
+        renderG2Text(displayedConfirmed, displayedPreview);
     });
 
     // ── 语音状态提示（g2 模型加载中等）──────────────────────────────

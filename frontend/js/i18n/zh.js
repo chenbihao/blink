@@ -534,6 +534,8 @@ export const zh = {
     "voice.local.recognition.draft_min_s.hint": "普通停顿候选形成实心 Draft 前，至少累计的音频上下文。调长通常更稳，但落字更晚。",
     "voice.local.recognition.strong_pause_ms.label": "强停顿门槛",
     "voice.local.recognition.strong_pause_ms.hint": "达到此静默时长后，较短但有效的语音也可提前形成 Draft。调长可减少提前切分。",
+    "voice.local.recognition.long_pause_ms.label": "长静音定稿",
+    "voice.local.recognition.long_pause_ms.hint": "静音达到该时长时，只要有可信语音即定稿上屏——短句后的长停顿不再悬停。句内 200～500ms 停顿不受影响。",
     // 使用说明
     "voice.usage.g1": "<strong>主窗口语音输入：</strong>Alt+Space 短按出窗 → 再长按说话 → 松开文字填入搜索框",
     "voice.usage.g2": "<strong>语音输入法：</strong>在前台应用中直接长按 Alt+Space → 说话 → 松开文字上屏",

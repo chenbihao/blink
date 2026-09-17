@@ -538,6 +538,8 @@ export const en = {
     "voice.local.recognition.draft_min_s.hint": "Minimum accumulated context before an ordinary pause candidate forms solid Draft text. Longer is usually steadier but commits later.",
     "voice.local.recognition.strong_pause_ms.label": "Strong-pause threshold",
     "voice.local.recognition.strong_pause_ms.hint": "After this much silence, a shorter but valid phrase may form a Draft early. Longer reduces early cuts.",
+    "voice.local.recognition.long_pause_ms.label": "Long-pause finalize",
+    "voice.local.recognition.long_pause_ms.hint": "Once silence reaches this length, any credible speech finalizes into a Draft — short phrases no longer hang after a long pause. In-sentence 200-500ms pauses are unaffected.",
     // Space management
     // Install progress
     // Python environment status badges

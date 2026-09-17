@@ -26,6 +26,10 @@ pub struct RecognitionSettings {
     pub preview_refresh_ms: u64,
     pub draft_min_s: u64,
     pub strong_pause_ms: u64,
+    /// 0.23.14 长静音独立终结门槛（毫秒）：停顿达到该值且存在可信有声
+    /// 即接受候选为 Draft，不再要求 owned ≥ draft_min / 2s——短句后的
+    /// 长静音也必须产生可靠 Draft。噪声由 voiced 下限与模型 NoSpeech 兜底。
+    pub long_pause_ms: u64,
 }
 
 impl Default for RecognitionSettings {
@@ -35,6 +39,7 @@ impl Default for RecognitionSettings {
             preview_refresh_ms: 700,
             draft_min_s: 5,
             strong_pause_ms: 700,
+            long_pause_ms: 1_100,
         }
     }
 }
@@ -48,6 +53,8 @@ impl RecognitionSettings {
     pub const DRAFT_MIN_MAX_S: u64 = 10;
     pub const STRONG_PAUSE_MIN_MS: u64 = 500;
     pub const STRONG_PAUSE_MAX_MS: u64 = 1_500;
+    pub const LONG_PAUSE_MIN_MS: u64 = 800;
+    pub const LONG_PAUSE_MAX_MS: u64 = 2_000;
 
     /// 与配置层保持同一组边界；`max_uncommitted_s` 是现有 VAD 配置，
     /// 因而作为 sanitize 的输入而不是重复存一份设置。
@@ -69,11 +76,16 @@ impl RecognitionSettings {
         let strong_pause_ms = self
             .strong_pause_ms
             .clamp(Self::STRONG_PAUSE_MIN_MS, Self::STRONG_PAUSE_MAX_MS);
+        let long_pause_ms = self
+            .long_pause_ms
+            .clamp(Self::LONG_PAUSE_MIN_MS, Self::LONG_PAUSE_MAX_MS)
+            .max(strong_pause_ms);
         Self {
             preview_window_ms,
             preview_refresh_ms,
             draft_min_s,
             strong_pause_ms,
+            long_pause_ms,
         }
     }
 
@@ -84,6 +96,7 @@ impl RecognitionSettings {
             preview_refresh_ms: 500,
             draft_min_s: 0,
             strong_pause_ms: 0,
+            long_pause_ms: 0,
         }
     }
 }
@@ -504,6 +517,7 @@ impl RecognitionCoordinator {
             preview_refresh_ms: self.settings.preview_refresh_ms,
             draft_min_s: self.settings.draft_min_s,
             strong_pause_ms: self.settings.strong_pause_ms,
+            long_pause_ms: self.settings.long_pause_ms,
             sample_rate: self.sample_rate,
             captured_audio_end: self.captured_audio_end,
             draft_committed_audio_end: self.draft_committed_audio_end,
@@ -577,6 +591,7 @@ pub struct CoordinatorTrace {
     pub preview_refresh_ms: u64,
     pub draft_min_s: u64,
     pub strong_pause_ms: u64,
+    pub long_pause_ms: u64,
     pub sample_rate: u32,
     pub captured_audio_end: u64,
     pub draft_committed_audio_end: u64,
@@ -605,12 +620,33 @@ mod tests {
             preview_refresh_ms: 10_000,
             draft_min_s: 99,
             strong_pause_ms: 1,
+            long_pause_ms: 99,
         }
         .sanitize(4);
         assert_eq!(settings.preview_window_ms, 2_000);
         assert_eq!(settings.preview_refresh_ms, 1_000);
         assert_eq!(settings.draft_min_s, 4);
         assert_eq!(settings.strong_pause_ms, 500);
+        assert_eq!(settings.long_pause_ms, 800);
+    }
+
+    /// 0.23.14 长静音门槛 sanitize：越界收敛，且不得低于强停顿。
+    #[test]
+    fn sanitize_clamps_long_pause_and_keeps_it_above_strong_pause() {
+        let too_low = RecognitionSettings {
+            long_pause_ms: 100,
+            strong_pause_ms: 900,
+            ..RecognitionSettings::default()
+        }
+        .sanitize(12);
+        assert_eq!(too_low.long_pause_ms, 900, "长静音不低于强停顿");
+
+        let too_high = RecognitionSettings {
+            long_pause_ms: 9_999,
+            ..RecognitionSettings::default()
+        }
+        .sanitize(12);
+        assert_eq!(too_high.long_pause_ms, 2_000);
     }
 
     #[test]

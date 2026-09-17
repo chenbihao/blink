@@ -517,6 +517,11 @@ pub struct SttStreamStats {
     pub confirmed_revision: u64,
     /// 预览状态版本（预览文本每次变化递增）。
     pub preview_revision: u64,
+    /// 0.23.14：拿到 worker gate 后、调用模型前被淘汰的 stale
+    /// Preview/Phrase 任务数（不占模型时间的提前淘汰）。
+    pub stale_before_worker: u64,
+    /// 0.23.14：尾部预览文本回退的累计字符数（仅诊断，不阻断改写）。
+    pub preview_retreat_chars: u64,
 }
 
 // ── STT Engine trait（旧接口，保留兼容）──────────────────────────────────

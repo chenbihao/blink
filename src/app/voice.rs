@@ -208,8 +208,12 @@ impl EditorDictationState {
     }
 
     /// 产出保留窗口外可交付段（最新段停留在浮窗，前一段写正文）。
+    ///
+    /// 0.23.14：Editor 的段经事件同步写正文（事件到达即交付），投递后
+    /// 立即 ack——confirmed 窗口行为与 0.23.13 一致。
     fn drain_flushable_spans(&mut self) -> Vec<(u64, DraftSpan)> {
-        let flushed = self.ledger.drain_flushable();
+        let flushed = self.ledger.queue_flushable();
+        self.ledger.ack_delivered(None);
         for (seq, span) in &flushed {
             self.remember_draft(*seq, span.clone());
         }
@@ -219,6 +223,7 @@ impl EditorDictationState {
     /// 冲刷全部未交付段（终态：Final/error/cancel 补交）。
     fn flush_pending_spans(&mut self) -> Vec<(u64, DraftSpan)> {
         let pending = self.ledger.take_pending();
+        self.ledger.ack_delivered(None);
         for (seq, span) in &pending {
             self.remember_draft(*seq, span.clone());
         }
@@ -340,6 +345,10 @@ struct VoiceSession {
     /// 0.23.13 G2 注入 worker 发送端：保序冲刷（worker 在所有 sender
     /// drop 后自动退出）。
     g2_flush_tx: Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
+    /// 0.23.14 G2 worker 内是否有挂起（deferred）文本：终态补交时即使
+    /// 无新增剩余，也要发一个终态 job 冲刷 deferred，否则 worker 退出
+    /// 丢字（ack task 维护：Deferred 置位、Delivered 复位）。
+    g2_deferred: Option<Arc<AtomicBool>>,
 }
 
 impl Default for VoiceSession {
@@ -359,6 +368,7 @@ impl Default for VoiceSession {
             final_delivery: Arc::new(AtomicBool::new(false)),
             dictation_ledger: None,
             g2_flush_tx: None,
+            g2_deferred: None,
         }
     }
 }
@@ -1115,21 +1125,40 @@ impl VoiceService {
                     session.final_delivery = final_delivery.clone();
 
                     // 0.23.13 G2 渐进上屏：PreviewDraft 账本（保留窗口 0，
-                    // 定稿即上屏）+ 单消费者保序注入 worker。其他 target 清空
-                    // 旧会话残留。
+                    // 定稿即投递注入 worker）+ 单消费者保序注入 worker +
+                    // 交付 ack task（0.23.14：ack 前浮窗保持待交付段）。
+                    // 其他 target 清空旧会话残留。
                     session.dictation_ledger = None;
                     session.g2_flush_tx = None;
+                    session.g2_deferred = None;
+                    let mut pending_epoch: Option<u64> = None;
                     if session.target == VoiceTarget::ForegroundApp {
                         let ledger =
                             Arc::new(Mutex::new(DictationLedger::new(G2_DICTATION_RETENTION)));
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                        tokio::spawn(run_g2_flush_worker(rx));
-                        session.dictation_ledger = Some(ledger);
+                        let (ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let deferred = Arc::new(AtomicBool::new(false));
+                        tokio::spawn(run_g2_flush_worker(rx, ack_tx));
+                        session.dictation_ledger = Some(ledger.clone());
                         session.g2_flush_tx = Some(tx);
+                        session.g2_deferred = Some(deferred.clone());
+                        // ack task 需要本会话 epoch（竞态墙）；epoch 在下方
+                        // 统一递增，这里先取 +1 后复用同一值。
+                        let epoch = self.recording_epoch.fetch_add(1, Ordering::Release) + 1;
+                        pending_epoch = Some(epoch);
+                        tokio::spawn(run_g2_ack_task(
+                            self.app.clone(),
+                            ack_rx,
+                            ledger,
+                            deferred,
+                            epoch,
+                        ));
                     }
 
                     // 通知前端录音已开始
-                    let epoch_val = self.recording_epoch.fetch_add(1, Ordering::Release) + 1;
+                    let epoch_val = pending_epoch.unwrap_or_else(|| {
+                        self.recording_epoch.fetch_add(1, Ordering::Release) + 1
+                    });
                     let _ = self.app.emit(
                         EventNames::VOICE_RECORDING_START,
                         serde_json::json!({ "target": target_str, "epoch": epoch_val }),
@@ -1209,12 +1238,14 @@ impl VoiceService {
         let counters = Arc::new(StreamCounters::default());
         let counters_for_events = counters.clone();
         let final_delivery_for_events = final_delivery.clone();
-        // 0.23.13 G2 渐进上屏：事件 task 携带账本与注入 worker 发送端
-        let (g2_ledger_for_events, g2_flush_tx_for_events) = {
+        // 0.23.13 G2 渐进上屏：事件 task 携带账本与注入 worker 发送端；
+        // 0.23.14 同时携带 worker deferred 标志（终态冲刷判定）。
+        let (g2_ledger_for_events, g2_flush_tx_for_events, g2_deferred_for_events) = {
             let session = self.session.lock().unwrap();
             (
                 session.dictation_ledger.clone(),
                 session.g2_flush_tx.clone(),
+                session.g2_deferred.clone(),
             )
         };
         let event_task = tokio::spawn(async move {
@@ -1227,6 +1258,7 @@ impl VoiceService {
                 prev_hwnd_for_events,
                 g2_ledger_for_events,
                 g2_flush_tx_for_events,
+                g2_deferred_for_events,
                 app_for_events,
                 editor_state_for_events,
                 paused_for_events,
@@ -1402,7 +1434,7 @@ impl VoiceService {
 
     pub fn cancel_recording(&self) {
         // 取出 stt_port + generation + 停止采集 + abort tasks，然后释放锁
-        let (stt_port, generation, target, was_editor, prev_fg_hwnd, ledger, flush_tx) = {
+        let (stt_port, generation, target, was_editor, prev_fg_hwnd, ledger, flush_tx, deferred_flag) = {
             let mut session = self.session.lock().unwrap();
 
             if !session.recording {
@@ -1435,6 +1467,7 @@ impl VoiceService {
             // 取出发送端：本方法补交完 pending 后 worker 随最后一个 sender
             // drop 自动退出。
             let flush_tx = session.g2_flush_tx.take();
+            let deferred_flag = session.g2_deferred.clone();
 
             // 通知输入状态机回 Idle
             crate::infra::platform::hotkey::InputController::update_voice_phase(
@@ -1449,6 +1482,7 @@ impl VoiceService {
                 prev_fg_hwnd,
                 ledger,
                 flush_tx,
+                deferred_flag,
             )
         }; // 锁在此释放
 
@@ -1468,17 +1502,23 @@ impl VoiceService {
         // 0.23.13 G2 渐进上屏：取消 = 停止后续识别，已定稿草稿全部补注入
         // （在途未识别音频仍丢弃）。录音已结束，可走完整注入路径（允许
         // 剪贴板降级），与此前已入队的渐进冲刷经 worker 保序衔接。
+        // 0.23.14：无新增剩余但 worker 内仍有 deferred 时同样发送终态
+        // job 冲刷，避免 worker 退出丢字。
         if target == VoiceTarget::ForegroundApp {
             if let Some(ledger) = ledger.as_ref() {
                 let pending = ledger.lock().unwrap().take_pending();
-                if !pending.is_empty() {
+                let has_deferred = deferred_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire));
+                if !pending.is_empty() || has_deferred {
                     let text: String = pending.iter().map(|(_, s)| s.text.as_str()).collect();
                     tracing::debug!(
                         spans = pending.len(),
                         chars = text.chars().count(),
-                        "G2 取消：补注入全部已定稿草稿"
+                        has_deferred,
+                        "G2 取消：补注入已定稿草稿（含 worker deferred 冲刷）"
                     );
-                    send_g2_flush(&flush_tx, text, prev_fg_hwnd, false);
+                    send_g2_flush(&flush_tx, text, prev_fg_hwnd, false, None);
                 }
             }
         }
@@ -1548,13 +1588,14 @@ impl VoiceService {
     /// - G2: spawn 后台 inject_text（脱离 effect 循环，恢复焦点 + 注入）
     /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
     async fn deliver_final_text(&self, target: VoiceTarget, final_text: String) {
-        let (prev_hwnd, final_delivery, ledger, flush_tx) = {
+        let (prev_hwnd, final_delivery, ledger, flush_tx, deferred) = {
             let session = self.session.lock().unwrap();
             (
                 session.prev_fg_hwnd,
                 session.final_delivery.clone(),
                 session.dictation_ledger.clone(),
                 session.g2_flush_tx.clone(),
+                session.g2_deferred.clone(),
             )
         };
         // 0.23.13 G2 渐进上屏：终态只补交剩余文本（经注入 worker 保序），
@@ -1563,6 +1604,7 @@ impl VoiceService {
             deliver_g2_remaining(
                 &ledger,
                 &flush_tx,
+                deferred.as_deref(),
                 final_delivery.as_ref(),
                 prev_hwnd,
                 &final_text,
@@ -1725,6 +1767,8 @@ macro_rules! stream_stats_log {
             in_flight_inferences = $stats.in_flight_inferences,
             confirmed_revision = $stats.confirmed_revision,
             preview_revision = $stats.preview_revision,
+            stale_before_worker = $stats.stale_before_worker,
+            preview_retreat_chars = $stats.preview_retreat_chars,
             "STT 流式链路统计"
         );
     };
@@ -1826,7 +1870,7 @@ fn deliver_final(
     }
 }
 
-/// G2 渐进上屏注入 job（0.23.13）。
+/// G2 渐进上屏注入 job（0.23.13；0.23.14 增加 seq 身份与交付 ack）。
 struct G2FlushJob {
     text: String,
     /// 录音开始时的前台 HWND（终态 job 恢复焦点用）。
@@ -1835,6 +1879,23 @@ struct G2FlushJob {
     /// Ctrl+V keydown，触发输入状态机 armed→aborted（该分支不区分
     /// injected 键），破坏 hold-to-talk 会话。
     unicode_only: bool,
+    /// 本 job 覆盖的最大 ledger seq；成功注入后 ack。`None` = 终态 job
+    /// （允许剪贴板降级，交付 deferred + 剩余），ack 全部已投递段。
+    ack_seq: Option<u64>,
+}
+
+/// G2 注入 worker 的交付回执（0.23.14）。
+#[derive(Debug)]
+enum G2FlushAck {
+    /// 成功注入到 `upto_seq`（None = 终态 job，确认全部已投递段）。
+    /// `elapsed_ms` 含排队等待，用于诊断注入确认延迟。
+    Delivered {
+        upto_seq: Option<u64>,
+        elapsed_ms: u64,
+    },
+    /// 渐进 job 推迟（前台漂移 / Unicode 失败挂起）：文本保留在 worker
+    /// 内等终态补交；账本不动（段保持浮窗可见），仅诊断。
+    Deferred { chars: usize },
 }
 
 /// G2 注入 worker：单消费者保序执行冲刷 job（0.23.13）。
@@ -1845,7 +1906,10 @@ struct G2FlushJob {
 /// （`restore_foreground` 文档），不关菜单 WM_CHAR 进不了编辑控件，
 /// 这是渐进上屏丢字的根因。Unicode 失败挂起，等终态 job 走完整
 /// 路径（允许剪贴板降级）重试。所有 sender drop 后 worker 退出。
-async fn run_g2_flush_worker(mut rx: tokio::sync::mpsc::UnboundedReceiver<G2FlushJob>) {
+async fn run_g2_flush_worker(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<G2FlushJob>,
+    ack_tx: tokio::sync::mpsc::UnboundedSender<G2FlushAck>,
+) {
     let mut deferred = String::new();
     while let Some(job) = rx.recv().await {
         if job.unicode_only
@@ -1853,14 +1917,18 @@ async fn run_g2_flush_worker(mut rx: tokio::sync::mpsc::UnboundedReceiver<G2Flus
                 .hwnd
                 .is_some_and(|h| platform::window::get_foreground_hwnd() != Some(h))
         {
-            tracing::debug!(chars = job.text.chars().count(), "G2 渐进上屏推迟：前台已离开目标窗口");
+            let chars = job.text.chars().count();
+            tracing::debug!(chars, "G2 渐进上屏推迟：前台已离开目标窗口");
             deferred.push_str(&job.text);
+            let _ = ack_tx.send(G2FlushAck::Deferred { chars });
             continue;
         }
         let mut text = std::mem::take(&mut deferred);
         text.push_str(&job.text);
         let hwnd = job.hwnd;
         let unicode_only = job.unicode_only;
+        let ack_seq = job.ack_seq;
+        let queued_at = std::time::Instant::now();
         let chars = text.chars().count();
         // await 保序：下一次冲刷等本次注入完成，文本顺序不乱。
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1895,12 +1963,23 @@ async fn run_g2_flush_worker(mut rx: tokio::sync::mpsc::UnboundedReceiver<G2Flus
         })
         .await;
         match outcome {
-            Ok((Ok(()), _)) => tracing::debug!(chars, "G2 冲刷上屏完成"),
+            Ok((Ok(()), _)) => {
+                tracing::debug!(chars, "G2 冲刷上屏完成");
+                // 0.23.14：交付确认回传账本——浮窗 confirmed 窗口此刻才
+                // 清退本 job 覆盖的段（终态 job ack 全部已投递段）。
+                let _ = ack_tx.send(G2FlushAck::Delivered {
+                    upto_seq: if unicode_only { ack_seq } else { None },
+                    elapsed_ms: queued_at.elapsed().as_millis() as u64,
+                });
+            }
             Ok((Err(e), text)) => {
                 if unicode_only {
-                    // 渐冲失败不丢文本：挂起等终态 job（完整注入路径）重试
+                    // 渐冲失败不丢文本：挂起等终态 job（完整注入路径）重试。
+                    // 无 ack——段保持浮窗可见直到终态补交。
+                    let failed_chars = text.chars().count();
                     tracing::warn!(%e, chars, "G2 渐进上屏 Unicode 失败，挂起等终态重试");
                     deferred.push_str(&text);
+                    let _ = ack_tx.send(G2FlushAck::Deferred { chars: failed_chars });
                 } else {
                     tracing::error!(%e, chars, "G2 终态注入失败");
                 }
@@ -1916,36 +1995,85 @@ async fn run_g2_flush_worker(mut rx: tokio::sync::mpsc::UnboundedReceiver<G2Flus
     }
 }
 
+/// G2 交付 ack 消费 task（0.23.14）：worker 回执推进账本 ack 水位，
+/// confirmed 窗口投影（仅 ack 后清退）经 `VOICE_G2_DELIVERY` 事件下发
+/// 浮窗。epoch 竞态墙与 VOICE_PARTIAL 同源。
+async fn run_g2_ack_task(
+    app: tauri::AppHandle,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<G2FlushAck>,
+    ledger: Arc<Mutex<DictationLedger>>,
+    worker_deferred: Arc<AtomicBool>,
+    epoch: u64,
+) {
+    while let Some(ack) = rx.recv().await {
+        match ack {
+            G2FlushAck::Delivered {
+                upto_seq,
+                elapsed_ms,
+            } => {
+                worker_deferred.store(false, Ordering::Release);
+                tracing::debug!(?upto_seq, elapsed_ms, "G2 注入交付确认（ack）");
+                let confirmed = {
+                    let mut ledger = ledger.lock().unwrap();
+                    ledger.ack_delivered(upto_seq);
+                    ledger.pending_text()
+                };
+                let _ = app.emit(
+                    EventNames::VOICE_G2_DELIVERY,
+                    serde_json::json!({
+                        "target": "g2",
+                        "epoch": epoch,
+                        "confirmed": confirmed,
+                    }),
+                );
+            }
+            G2FlushAck::Deferred { chars } => {
+                // 不改账本：段保持可见，等终态 job 补交后一并 ack。
+                // 置位 deferred 标志：终态即使无新增剩余也必须发 job 冲刷。
+                worker_deferred.store(true, Ordering::Release);
+                tracing::debug!(chars, "G2 注入推迟，待交付文本保持浮窗可见");
+            }
+        }
+    }
+}
+
 /// 向 G2 注入 worker 投递冲刷 job；worker 不在时打日志返回。
 fn send_g2_flush(
     flush_tx: &Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
     text: String,
     hwnd: Option<isize>,
     unicode_only: bool,
+    ack_seq: Option<u64>,
 ) {
     let Some(tx) = flush_tx else {
         tracing::warn!(chars = text.chars().count(), "G2 注入 worker 不存在，冲刷丢弃");
         return;
     };
-    if tx.send(G2FlushJob {
-        text,
-        hwnd,
-        unicode_only,
-    })
-    .is_err()
+    if tx
+        .send(G2FlushJob {
+            text,
+            hwnd,
+            unicode_only,
+            ack_seq,
+        })
+        .is_err()
     {
         tracing::warn!("G2 注入 worker 已退出，冲刷丢弃");
     }
 }
 
-/// G2 终态剩余交付（0.23.13）：Final 全文剥去已冲刷前缀（pending 窗口 +
-/// 未上报 terminal span + 尾段），经注入 worker 保序上屏。
+/// G2 终态剩余交付（0.23.13；0.23.14 结合 worker deferred 状态）：Final
+/// 全文剥去已投递前缀（pending 窗口 + 未上报 terminal span + 尾段），经
+/// 注入 worker 保序上屏。
 ///
 /// 供事件 Final 路径与 stop 回退路径共用；`final_delivery` 闸门防止两路
-/// 边界双发。
+/// 边界双发。终态 job 允许剪贴板降级并恢复前台——即使无新增剩余，只要
+/// worker 内仍有 deferred 文本（前台漂移期间挂起的渐进 job）也必须发送，
+/// 否则 worker 退出时丢字。
 fn deliver_g2_remaining(
     ledger: &Arc<Mutex<DictationLedger>>,
     flush_tx: &Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
+    worker_deferred: Option<&AtomicBool>,
     final_delivery: &AtomicBool,
     prev_fg_hwnd: Option<isize>,
     final_text: &str,
@@ -1963,7 +2091,8 @@ fn deliver_g2_remaining(
         );
     }
     let remaining = ledger.lock().unwrap().remaining_from_final(final_text);
-    if remaining.is_empty() {
+    let has_deferred = worker_deferred.is_some_and(|flag| flag.load(Ordering::Acquire));
+    if remaining.is_empty() && !has_deferred {
         tracing::debug!("G2 Final 无剩余文本（已全部渐进上屏）");
         return;
     }
@@ -1971,8 +2100,12 @@ fn deliver_g2_remaining(
         tracing::debug!("忽略重复的 G2 终态交付");
         return;
     }
-    tracing::debug!(chars = remaining.chars().count(), "G2 终态交付剩余文本");
-    send_g2_flush(flush_tx, remaining, prev_fg_hwnd, false);
+    if remaining.is_empty() {
+        tracing::debug!("G2 Final 无新增剩余，发送终态 job 冲刷 worker 内 deferred 文本");
+    } else {
+        tracing::debug!(chars = remaining.chars().count(), "G2 终态交付剩余文本");
+    }
+    send_g2_flush(flush_tx, remaining, prev_fg_hwnd, false, None);
 }
 
 /// Legacy Final 组合（G1/G3）：旧 profile 返回累计全文，PreviewDraft 可返回
@@ -2026,6 +2159,7 @@ async fn consume_stt_events(
     prev_fg_hwnd: Option<isize>,
     g2_ledger: Option<Arc<Mutex<DictationLedger>>>,
     g2_flush_tx: Option<tokio::sync::mpsc::UnboundedSender<G2FlushJob>>,
+    g2_deferred: Option<Arc<AtomicBool>>,
     app: tauri::AppHandle,
     editor_state: Option<Arc<Mutex<EditorDictationState>>>,
     paused: Arc<AtomicBool>,
@@ -2150,7 +2284,7 @@ async fn consume_stt_events(
                     let mut ledger = ledger.lock().unwrap();
                     let accepted = ledger.accept_draft_span(span);
                     let flushed = if accepted {
-                        ledger.drain_flushable()
+                        ledger.queue_flushable()
                     } else {
                         Vec::new()
                     };
@@ -2161,14 +2295,18 @@ async fn consume_stt_events(
                 }
                 if !flushed.is_empty() {
                     let text: String = flushed.iter().map(|(_, s)| s.text.as_str()).collect();
+                    // 0.23.14：job 携带覆盖的最大 seq；注入成功 ack 后
+                    // 浮窗 confirmed 窗口才清退（VOICE_G2_DELIVERY）。
+                    let ack_seq = flushed.last().map(|(seq, _)| *seq);
                     tracing::debug!(
                         spans = flushed.len(),
                         chars = text.chars().count(),
-                        "G2 渐进上屏：冲刷保留窗口外草稿"
+                        "G2 渐进上屏：投递保留窗口外草稿（等待注入 ack）"
                     );
-                    send_g2_flush(&g2_flush_tx, text, prev_fg_hwnd, true);
+                    send_g2_flush(&g2_flush_tx, text, prev_fg_hwnd, true, ack_seq);
                 }
-                // 浮窗 confirmed 投影改为保留窗口文本（接受/冲刷都可能变化）
+                // 浮窗 confirmed 投影 = 待交付文本（queued 未 ack 的段保持
+                // 可见，直到注入成功；ack 到达时由 ack task 更新）
                 confirmed_cache = ledger.lock().unwrap().pending_text();
                 let _ = app.emit(
                     EventNames::VOICE_PARTIAL,
@@ -2353,6 +2491,7 @@ async fn consume_stt_events(
                     deliver_g2_remaining(
                         ledger,
                         &g2_flush_tx,
+                        g2_deferred.as_deref(),
                         final_delivery.as_ref(),
                         prev_fg_hwnd,
                         &text,
@@ -2402,12 +2541,13 @@ async fn consume_stt_events(
                     if !pending.is_empty() {
                         let text: String =
                             pending.iter().map(|(_, s)| s.text.as_str()).collect();
+                        let ack_seq = pending.last().map(|(seq, _)| *seq);
                         tracing::debug!(
                             spans = pending.len(),
                             chars = text.chars().count(),
                             "G2 错误终态：补注入已定稿未上屏草稿"
                         );
-                        send_g2_flush(&g2_flush_tx, text, prev_fg_hwnd, true);
+                        send_g2_flush(&g2_flush_tx, text, prev_fg_hwnd, true, ack_seq);
                     }
                 }
 

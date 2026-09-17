@@ -320,7 +320,19 @@ pub async fn run_corpus(config: CorpusRunnerConfig) -> Result<Vec<CorpusResult>,
 }
 
 fn detect_segments(samples: &[f32]) -> u32 {
-    let mut vad = EnergyVad::new(TARGET_SAMPLE_RATE);
+    // 0.23.14 参数真源对齐：此前用 `EnergyVad::new`（旧默认灵敏度 0.005），
+    // 而生产 `SttConfig` 默认已是 0.001 + 300/800ms 双阈值与 8/12s 窗口——
+    // 段数验收口径必须与生产一致，否则出现假阳性/假阴性。生产默认变化时
+    // 以 `VadConfig::default()` 为准（此处程序化引用，避免双份漂移）。
+    let vad_cfg = crate::domain::config::stt_config::VadConfig::default();
+    let mut vad = EnergyVad::with_params_and_windows(
+        TARGET_SAMPLE_RATE,
+        vad_cfg.silence_threshold,
+        vad_cfg.min_silence_ms,
+        vad_cfg.min_sentence_ms,
+        vad_cfg.soft_window_ms(),
+        vad_cfg.hard_window_ms(),
+    );
     let mut segments = 0u32;
     for chunk in samples.chunks((TARGET_SAMPLE_RATE / 100) as usize) {
         // ShortPhraseEnd（短句停顿）不是切分事件，不计入段数。

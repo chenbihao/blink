@@ -15,18 +15,21 @@ assert.deepEqual(RECOGNITION_DEFAULTS, {
     preview_refresh_ms: 700,
     draft_min_s: 5,
     strong_pause_ms: 700,
+    long_pause_ms: 1100,
 });
 assert.deepEqual(RECOGNITION_RANGE, {
     preview_window_ms: {min: 2000, max: 4000},
     preview_refresh_ms: {min: 500, max: 1000},
     draft_min_s: {min: 3, max: 10},
     strong_pause_ms: {min: 500, max: 1500},
+    long_pause_ms: {min: 800, max: 2000},
 });
 assert.deepEqual(RECOGNITION_KEYS, [
     "preview_window_ms",
     "preview_refresh_ms",
     "draft_min_s",
     "strong_pause_ms",
+    "long_pause_ms",
 ]);
 
 {
@@ -41,6 +44,7 @@ assert.deepEqual(RECOGNITION_KEYS, [
         preview_refresh_ms: 9999,
         draft_min_s: 99,
         strong_pause_ms: 1,
+        long_pause_ms: 99,
     };
     assert.equal(normalizeRecognitionConfig(recognition, 6), true);
     assert.deepEqual(recognition, {
@@ -48,6 +52,7 @@ assert.deepEqual(RECOGNITION_KEYS, [
         preview_refresh_ms: 1000,
         draft_min_s: 6,
         strong_pause_ms: 500,
+        long_pause_ms: 800,
     });
     assert.ok(recognition.preview_refresh_ms < recognition.preview_window_ms);
     assert.ok(recognition.draft_min_s <= 6);
@@ -61,12 +66,21 @@ assert.deepEqual(RECOGNITION_KEYS, [
         preview_refresh_ms: 700,
         draft_min_s: 4,
         strong_pause_ms: 700,
+        long_pause_ms: 1100,
     });
 }
 
 {
     const recognition = ensureRecognitionFields([], 12);
     assert.deepEqual(recognition, RECOGNITION_DEFAULTS);
+}
+
+// 0.23.14 长静音不得低于强停顿：越界收敛后保持关系约束
+{
+    const recognition = {...RECOGNITION_DEFAULTS, strong_pause_ms: 1200, long_pause_ms: 900};
+    assert.equal(normalizeRecognitionConfig(recognition, 12), true);
+    assert.equal(recognition.long_pause_ms, 1200);
+    assert.ok(recognition.long_pause_ms >= recognition.strong_pause_ms);
 }
 
 const voiceSource = await readFile(new URL("./voice.js", import.meta.url), "utf8");
@@ -92,6 +106,7 @@ const htmlRanges = [
     [/id="voice-recognition-preview-refresh-ms" max="1000" min="500" step="50"/, "Preview refresh range"],
     [/id="voice-recognition-draft-min-s" max="10" min="3" step="1"/, "Draft minimum range"],
     [/id="voice-recognition-strong-pause-ms" max="1500" min="500" step="50"/, "Strong pause range"],
+    [/id="voice-recognition-long-pause-ms" max="2000" min="800" step="50"/, "Long pause range"],
 ];
 for (const [pattern, label] of htmlRanges) assert.match(html, pattern, label);
 assert.match(html, /data-i18n="voice\.local\.vad\.min_sentence_ms\.label">候选最短语音/);
@@ -109,6 +124,8 @@ const i18nKeys = [
     "voice.local.recognition.draft_min_s.hint",
     "voice.local.recognition.strong_pause_ms.label",
     "voice.local.recognition.strong_pause_ms.hint",
+    "voice.local.recognition.long_pause_ms.label",
+    "voice.local.recognition.long_pause_ms.hint",
 ];
 for (const lang of ["zh", "en"]) {
     const source = await readFile(new URL(`../../i18n/${lang}.js`, import.meta.url), "utf8");
