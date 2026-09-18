@@ -478,6 +478,28 @@ body.image-editor-mode #canvas.long-image-editing {
     color: #fff;
 }
 
+/* OCR 识别中呼吸动效（预热在途/用户识别共用）：
+   is-busy 由 ss-ocr-busy.js 维护，识别结束即摘除。仅动 opacity，不动布局与颜色 */
+.tool-btn.is-busy .icon {
+    animation: ocr-busy-breathe 1.2s ease-in-out infinite;
+}
+
+@keyframes ocr-busy-breathe {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tool-btn.is-busy .icon {
+        animation: none;
+        opacity: 0.55;
+    }
+}
+
 .tool-btn-primary {
     color: #4ade80;
 }

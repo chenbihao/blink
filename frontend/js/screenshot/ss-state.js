@@ -50,6 +50,7 @@ export const ss = {
     ocrBusy: false,            // 显式 OCR 请求门禁
     translationBusy: false,    // 图上译文请求中
     ocrPrewarm: null,          // Promise<OcrResult> | null
+    ocrPrewarmActive: false,   // 预热 OCR 请求在途（预热 Promise settle 后保留作缓存，不能据此判断忙碌态）
     // Task 6: 当前 active OCR request handle（{requestId, promise, cancel} | null）
     activeOcrHandle: null,
     screenshotConfig: {

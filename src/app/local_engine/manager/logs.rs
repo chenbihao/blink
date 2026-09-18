@@ -167,9 +167,27 @@ pub(super) fn classify_engine_log(
 /// 输出不受影响。前缀精确匹配——未列出的 `[sensevoice]` 行（如错误）
 /// 仍然透传。
 pub(super) fn is_third_party_internal_noise(text: &str) -> bool {
-    let trimmed = text.trim_start();
+    let mut trimmed = text.trim_start();
+    // 纯进度点行（"…" / "...."）：llama.cpp 模型加载/上下文构建的进度打点
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c == '.') {
+        return true;
+    }
+    // 加载进度点与后续行在同一 chunk 里粘连时会产生 ".repack: …" 这类前导点行
+    // ——匹配前先剥掉前导点，统一按正文前缀判定。
+    trimmed = trimmed.trim_start_matches('.');
     if trimmed.starts_with("llama_")
         || trimmed.starts_with("llm_load_")
+        // 0.23.16：GGUF worker 首次加载的模型级细节洪流——逐层分配
+        // `load_tensors: layer N …`（~300 行）、`repack:` / `create_tensor:`（~1000 行）。
+        // `load_tensors:` 其余行（CPU_Mapped/CPU_REPACK buffer size 等）同为噪声，
+        // 仅保留 `loading model tensors` / `offloaded …` 这类 phase 标记行作健康判据。
+        || (trimmed.starts_with("load_tensors:")
+            && !trimmed.starts_with("load_tensors: loading model tensors")
+            && !trimmed.starts_with("load_tensors: offloaded"))
+        || trimmed.starts_with("repack:")
+        || trimmed.starts_with("create_tensor:")
+        || trimmed.starts_with("done_getting_tensors:")
+        || trimmed.starts_with("set_abort_callback:")
         || trimmed.starts_with("sched_reserve:")
         || trimmed.starts_with("graph_reserve:")
         || trimmed.starts_with("resolve_fused_ops:")
@@ -226,6 +244,11 @@ pub(super) async fn pump_logs_to_event_port(
 ) {
     use tokio::sync::broadcast::error::RecvError;
 
+    // 0.23.16：抑制行计数——llama.cpp 模型加载一次可产生 ~1100 行内部噪声，
+    // 逐条 trace 依然会把日志文件刷屏。只抽样前 3 条 + 每 500 条 1 条透传，
+    // pump 退出时输出汇总计数，保留"加载是否正常"的最小判据。
+    let mut suppressed_total: u64 = 0;
+
     loop {
         // 先检查 cancellation——被 cancel 时立即退出
         if cancel_token.is_cancelled() {
@@ -259,7 +282,10 @@ pub(super) async fn pump_logs_to_event_port(
                                 // 降为 trace 且不投影前端——warn/error 仍按原级透传
                                 let suppress_ui = should_suppress_from_ui(&log_entry.text, level);
                                 if suppress_ui {
-                                    tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出（已抑制）");
+                                    suppressed_total = suppressed_total.saturating_add(1);
+                                    if suppressed_total <= 3 || suppressed_total % 500 == 0 {
+                                        tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, suppressed_total, output = %log_entry.text, "本地引擎输出（已抑制）");
+                                    }
                                 } else {
                                     match level {
                                         super::super::dto::EngineLogLevel::Error => tracing::error!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, output = %log_entry.text, "本地引擎输出"),
@@ -312,6 +338,16 @@ pub(super) async fn pump_logs_to_event_port(
                 }
             }
         }
+    }
+
+    // pump 退出（stop/重启/管道关闭）时汇总本次实例抑制的噪声总量
+    if suppressed_total > 0 {
+        tracing::debug!(
+            engine = %engine_id,
+            instance = %instance_id,
+            suppressed_total,
+            "日志 pump 结束：第三方内部噪声共抑制 N 条"
+        );
     }
 }
 
@@ -389,6 +425,53 @@ mod tests {
         ));
         assert!(should_suppress_from_ui(
             "[sensevoice] compute complete: status=0",
+            EngineLogLevel::Debug
+        ));
+        // 0.23.16：GGUF 首次加载洪流——逐层分配 / repack / 进度点行
+        assert!(should_suppress_from_ui(
+            "load_tensors: layer   0 assigned to device CPU, is_swa = 0",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "repack: repack tensor blk.27.attn_q.weight with q4_K_8x8",
+            EngineLogLevel::Debug
+        ));
+        // FunASR worker（llama.cpp 实测 22:21 日志）：逐 tensor 加载 + buffer 汇总
+        assert!(should_suppress_from_ui(
+            "create_tensor: loading tensor blk.27.attn_q.input_scale",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "done_getting_tensors: tensor 'token_embd.weight' (q4_K) (and 142 others) cannot be used with preferred buffer type CPU_REPACK, using CPU instead",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "load_tensors:   CPU_Mapped model buffer size =   454.42 MiB",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "load_tensors:   CPU_REPACK model buffer size =   204.75 MiB",
+            EngineLogLevel::Debug
+        ));
+        assert!(should_suppress_from_ui(
+            "set_abort_callback: call",
+            EngineLogLevel::Debug
+        ));
+        // 进度点与后续行粘连（前导点剥离后命中 repack:）
+        assert!(should_suppress_from_ui(
+            ".repack: repack tensor blk.26.ffn_up.weight with q4_K_8x8",
+            EngineLogLevel::Debug
+        ));
+        // 纯进度点行（"…" / "...."）
+        assert!(should_suppress_from_ui(".", EngineLogLevel::Debug));
+        assert!(should_suppress_from_ui("....", EngineLogLevel::Debug));
+        // phase 标记行保留：加载是否启动 / 卸载汇总仍可见
+        assert!(!should_suppress_from_ui(
+            "load_tensors: loading model tensors, this can take a while... (load_mode = mmap)",
+            EngineLogLevel::Debug
+        ));
+        assert!(!should_suppress_from_ui(
+            "load_tensors: offloaded 0/311 layers to GPU",
             EngineLogLevel::Debug
         ));
         // 未列入清单的 [sensevoice] 行（如错误）不受影响

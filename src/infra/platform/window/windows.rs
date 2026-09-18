@@ -4307,6 +4307,14 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             std::thread::spawn(move || {
                 let Ok(hwnd) = win.hwnd() else { return };
                 let hwnd = HWND(hwnd.0 as _);
+                // 0.23.16：窗口已可见 = 用户正占用 overlay（截图选区/图片编辑进行中）。
+                // 此时 SW_HIDE 会把焦点窗口从用户脚下抽走：前端 blur → 会话清场 →
+                // "截图已取消"，表现为"启动后立刻截图，松开左键确定选区时界面直接退出"。
+                // 真实 show 本身就会建立 WebView2 合成表面，暖渲染的目的已达成，直接跳过。
+                if unsafe { IsWindowVisible(hwnd).as_bool() } {
+                    tracing::debug!("preheat: chord-screenshot 正在使用，跳过暖渲染");
+                    return;
+                }
                 apply_cloak(hwnd, true);
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);

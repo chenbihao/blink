@@ -16,6 +16,7 @@ import {copyToClipboard, ocrImage, screenshotPinRefresh, translateLines, transla
 import {commandErrorText, normalizeError} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
 import {clampPanelToMonitor, computeResizedPanel, placeOcrPanel} from './ss-panel-resize.js';
+import {updateOcrButtonBusy} from './ss-ocr-busy.js';
 
 // ════════════════════════════════════════════════════════════
 //  OCR Request Cancellation (Task 6)
@@ -46,6 +47,11 @@ export function cancelActiveOcr() {
     // 同时取消预热（如果有）
     if (ss.ocrPrewarm) {
         ss.ocrPrewarm = null;
+    }
+    // 预热在途标志一并清除，呼吸动效同步熄灭
+    if (ss.ocrPrewarmActive) {
+        ss.ocrPrewarmActive = false;
+        updateOcrButtonBusy();
     }
 }
 
@@ -135,6 +141,8 @@ export function updateOutputButtonsDisabled() {
         const btn = document.getElementById(id);
         if (btn) btn.disabled = disabled;
     });
+    // OCR 按钮呼吸动效随 ocrBusy/ocrPrewarmActive 翻转（所有忙碌态翻转都经过这里）
+    updateOcrButtonBusy();
 }
 
 /** 工具栏「识别」/「翻译」按钮高亮态：跟随面板当前 tab。 */

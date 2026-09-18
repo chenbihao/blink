@@ -91,6 +91,7 @@ import {
     updateOutputButtonsDisabled,
     updateOverlayButtonsActive,
 } from "./ss-ocr.js";
+import {updateOcrButtonBusy} from "./ss-ocr-busy.js";
 import {
     cleanupCanvasVisuals,
     compositeSelection,
@@ -1161,6 +1162,9 @@ function triggerOcrPrewarm(pw, ph) {
             // Task 6: 使用 handle 接口，支持取消
             const handle = ocrImage(pngBytes, ss.editorSession.epoch, revision);
             ss.activeOcrHandle = handle;
+            // OCR 按钮呼吸动效：预热请求在途即点亮（handle 生命周期内）
+            ss.ocrPrewarmActive = true;
+            updateOcrButtonBusy();
             handle.promise
                 .then(({result}) => {
                     if (revision !== ss.selectionRevision) {
@@ -1186,6 +1190,9 @@ function triggerOcrPrewarm(pw, ph) {
                 .finally(() => {
                     if (ss.activeOcrHandle === handle) {
                         ss.activeOcrHandle = null;
+                        // 预热 settle/失败即熄灭呼吸动效（Promise 本体保留作缓存）
+                        ss.ocrPrewarmActive = false;
+                        updateOcrButtonBusy();
                     }
                 });
         });
