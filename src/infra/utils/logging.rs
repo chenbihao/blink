@@ -152,20 +152,40 @@ fn parse_level(level: &str) -> String {
     // VERBOSE 级别（rc.13 environment.rs），OCR in-process Session 构建期会喷
     // GraphTransformer/BFCArena 等内部细节 INFO（数百行）。用户调高级别是想看
     // blink 自身逻辑；ORT 内部细节由引擎日志面板（worker 管道）单独承载。
+    //
+    // **oar_ocr_core / oar_ocr 在 DEBUG·INFO 下压到 warn**（0.23.15 收尾）:
+    // oar-ocr（PP-OCRv6 det→crop→rec，in-process，不 spawn 子进程）的内部诊断全部是
+    // **逐 batch** 输出——`DBPostProcess: pred 416x704, src 414x695`、
+    // `CRNN forward: 16 images` / `First image size` / `preprocess output shape` /
+    // `postprocess: 16 texts, first 3: [...]`，另有一大批 slanet / pp_formulanet /
+    // table_structure_decode / layout_utils 的 tensor 细节。batch 数随文本行数线性增长，
+    // 一次大选区 OCR 就能连打几十行，把 blink 自身日志挤出视野。
+    // blink 侧已有等价摘要（`onnx_ocr/pipeline.rs` 的
+    // `map_oarocr_to_ocr_result 完成`:regions/lines/words/char_boxes/text_chars），
+    // 日常排查 OCR 是否"识别到东西"够用；WARN/ERROR（下载失败、resize 尺寸非法、
+    // 字符数不一致、解码失败）不受影响。
+    //
+    // **例外：TRACE 档不压**（见下方 match 的 trace 分支）。这里的其它噪音组在 trace 下
+    // 也一律压掉，因为协议帧 / IME 内部消息 / 密钥库调用对本项目永远没有诊断价值；
+    // 而 oar-ocr 的这几行是**唯一**能看到"模型真实输入尺寸 + 每 batch 原始识别文本"的
+    // 窗口，错字 / 漏字 / 字符框错位排查需要它。深挖 OCR 质量时把设置页级别切到 trace
+    // 即可拿回全部细节。
     let transport_noise =
         "hyper=warn,reqwest=warn,hyper_util=warn,h2=warn,rustls=warn,tower=warn,hpack=warn";
     let ai_noise = "rig=warn,rig_core=warn,rig_agent=warn";
     let keyring_noise = "keyring=warn,keyring_core=warn";
     let ort_noise = "ort=warn";
+    let ocr_noise = "oar_ocr_core=warn,oar_ocr=warn";
     match level {
+        // trace：唯一放开 oar_ocr_core 的档位（OCR 内部细节只在深挖时可见）
         "trace" => format!(
             "trace,sqlx=warn,tauri=warn,tao=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         "debug" => format!(
-            "debug,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
+            "debug,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{ocr_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         "info" => format!(
-            "info,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
+            "info,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{ocr_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         _ => "error".to_string(),
     }
@@ -200,13 +220,22 @@ mod tests {
 
     #[test]
     fn parse_level_caps_third_party_noise() {
-        for lvl in ["trace", "debug", "info"] {
+        for lvl in ["debug", "info"] {
             let f = parse_level(lvl);
             assert!(f.starts_with(lvl), "{f}");
             // 0.22.9：ort 内部细节恒压 warn（Env 硬编码 VERBOSE 的兜底）
             assert!(f.contains("ort=warn"), "{f}");
             assert!(f.contains("sqlx=warn"), "{f}");
+            // 0.23.15：oar-ocr（PP-OCRv6）逐 batch 内部细节在 debug/info 下压掉
+            assert!(f.contains("oar_ocr_core=warn"), "{f}");
+            assert!(f.contains("oar_ocr=warn"), "{f}");
         }
+        // trace 是唯一放开 oar_ocr_core 的档位：OCR 错字/漏框排查需要原始 batch 细节，
+        // 其余噪音组（协议帧 / IME / 密钥库）在 trace 下仍然压掉。
+        let t = parse_level("trace");
+        assert!(t.starts_with("trace"), "{t}");
+        assert!(t.contains("ort=warn"), "{t}");
+        assert!(!t.contains("oar_ocr"), "{t}");
         assert_eq!(parse_level("error"), "error");
         assert_eq!(parse_level("bogus"), "error");
     }

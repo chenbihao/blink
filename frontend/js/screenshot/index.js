@@ -8,12 +8,13 @@
 //! 本文件是编排层：
 //! - 初始化 DOM / 状态 / 回调注册
 //! - 选区生命周期管理（resetState / loadScreenshot / enterAnnotationMode / exitAnnotationMode）
-//! - 画布事件绑定（mousedown / mousemove / mouseup / dblclick / contextmenu / keydown / blur）
+//! - 画布事件绑定（pointerdown / pointermove / pointerup / pointercancel / dblclick / contextmenu / keydown / blur）
 //!
 //! 拆分模块：
 //! - ss-state.js    — 共享状态 + 常量 + initDOM
-//! - ss-utils.js     — 纯工具函数（norm / pointInRect / applySquareConstraint）
-//! - ss-draw.js      — 绘制函数（drawDimmed / drawSelection / drawFinalSelection / redrawAnnot*）
+//! - ss-utils.js     — 纯工具函数（norm / computeDragRect / pointInRect / applySquareConstraint）
+//! - ss-draw.js      — 绘制函数（drawDimmed / drawFinalSelection / redrawAnnot*）
+//! - ss-live-selection.js — 0.23.15：拖动期间的实时选区 DOM 层（单一调度入口）
 //! - ss-display.js   — 显示器几何（getDisplays / findDisplayCssAt / positionToolbar）
 //! - ss-interaction.js — 选区交互（beginSelectionInteraction / updateSelectionInteraction 等）
 //! - ss-reading.js   — OCR 阅读模式（hitTestWord / enterReadingMode / bindHitCanvasEvents 等）
@@ -25,9 +26,10 @@
 //! - canvas 内部像素 = 物理像素（BitBlt 输出）
 //! - canvas CSS 尺寸 = 视口大小（CSS 像素）
 //! - DPR = 物理像素 / CSS 像素
-//! - 鼠标事件 offsetX/Y = CSS 像素
+//! - 指针事件 offsetX/Y = CSS 像素
 //! - 选区 selCss 存 CSS 像素；annot-canvas 内部像素 = 物理像素
 //! - 标注坐标使用物理像素相对裁剪区
+//! - 0.23.15：拖动期间只有实时 DOM 层逐帧变化，interaction-canvas 零绘制
 
 import {copyToClipboard, hideScreenshotOverlay, invoke, ocrImage, screenshotSetAnnotationMode,} from "../shared/api.js";
 import {normalizeError} from "../shared/tauri.js";
@@ -41,8 +43,8 @@ import {IMAGE_SOURCE} from './image-editor-session.js';
 import {
     applySquareConstraint,
     computeCanvasEditorInitialPosition,
+    computeDragRect,
     computePanAxisBounds,
-    norm,
     pointInRect
 } from "./ss-utils.js";
 import {
@@ -53,15 +55,16 @@ import {
     syncRenderScale
 } from "./ss-selection-geometry.js";
 import {
-    cancelDrawFinalSelectionRaf,
-    cancelDrawSelectionRaf,
     drawDimmed,
     drawFinalSelection,
     redrawAnnotFull,
     redrawAnnotPreview,
-    scheduleDrawSelection,
     syncInteractionCanvasSize
 } from "./ss-draw.js";
+// 0.23.15：拖动期间的实时选区预览（单一调度入口）
+import {resetLiveSelection, updateLiveSelection} from "./ss-live-selection.js";
+// 0.23.15：Pointer Events 的 capture / 采样 / 中断判定（纯逻辑，可单测）
+import {capturePointer, hasActiveDragInteraction, pointerPoint, releasePointer} from "./ss-pointer.js";
 import {invalidateDisplaysCache, positionToolbar} from "./ss-display.js";
 import {
     beginSelectionInteraction,
@@ -429,6 +432,10 @@ window.__blinkOpenImageEditor = function () {
  * 全部可见残留：划词 hit-canvas、窗口/控件预选虚线框、interaction 层、
  * OCR 面板、像素放大镜、sel-loading、precision hint、toast、文本输入框。
  *
+ * 0.23.15：同时把**拖选状态**归零（isDragging / selectionInteraction /
+ * pendingSnap）——它们是"迟到的 pointercancel / lostpointercapture"会不会被
+ * 判成一次有效中断的依据，收尾后必须失效，详见 abortSelectionInteraction。
+ *
  * 动机：overlay 窗口复用（cloak hide → 下次 show 先于 resetState eval），
  * show 与 reset 之间上一轮残留图层会闪现；0.23.11 预热静默划词让上一轮
  * 更常处于"划词已激活"退出，词框/全选高亮的闪现由此变得明显。
@@ -456,6 +463,15 @@ function cleanupSessionVisuals() {
     if (ss.interactionCanvas && ss.interactionCtx && ss.interactionCanvas.width > 0) {
         ss.interactionCtx.clearRect(0, 0, ss.interactionCanvas.width, ss.interactionCanvas.height);
     }
+    // 0.23.15：实时选区层同样属于"上一轮残留"，必须复位（含在途 rAF）
+    resetLiveSelection();
+    // 0.23.15：拖选状态也必须在清场时归零。否则 ESC / 失焦 / 输出收尾之后，若浏览器
+    // 因窗口隐藏回收指针并补发 pointercancel / lostpointercapture，
+    // hasActiveDragInteraction 仍为 true，abortSelectionInteraction 会在一个已经 cancel
+    // 的会话上重建标注模式（重新裁图 + screenshotSetAnnotationMode(true) + OCR prewarm）。
+    ss.isDragging = false;
+    ss.selectionInteraction = null;
+    ss.pendingSnap = null;
     try {
         hidePixelMagnifier();
     } catch (e) {
@@ -492,9 +508,9 @@ function resetState() {
         cancelAnimationFrame(ss._annotRaf);
         ss._annotRaf = 0;
     }
-    // 取消待执行的选区绘制 rAF，防止 resetState 后旧 rAF 用 null source 尝试绘制
-    cancelDrawSelectionRaf();
-    cancelDrawFinalSelectionRaf();
+    // 0.23.15：取消待执行的实时预览 rAF 并复位实时选区层（含几何清零）。
+    // 会话切换后旧 rAF 不得重新显示实时层。
+    resetLiveSelection();
     // 0.15.10：清除快照
     ss._committedSnapshot = null;
     ss.isDragging = false;
@@ -1096,6 +1112,8 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     if (ss.interactionCtx) {
         ss.interactionCtx.clearRect(0, 0, pw, ph);
     }
+    // 0.23.15：canvas-backed 编辑模式不使用实线选区实时层，进入前确保已复位
+    resetLiveSelection();
 
     annotCanvas.classList.remove('hidden');
     annotCanvas.style.left = initialX + 'px';
@@ -1184,6 +1202,8 @@ function exitAnnotationMode() {
         cancelAnimationFrame(ss._annotRaf);
         ss._annotRaf = 0;
     }
+    // 0.23.15：退出标注模式时复位实时选区层（含在途预览 rAF）
+    resetLiveSelection();
     // 0.15.10：清除快照
     ss._committedSnapshot = null;
     const {canvas, annotCanvas, toolbar, sizeHint} = ss;
@@ -1309,11 +1329,30 @@ function endLongImagePan() {
     return true;
 }
 
-canvas.addEventListener('mousedown', (e) => {
+// ── 0.23.15：主画布输入统一走 Pointer Events ────────────────────────────
+//
+// 迁移原因：截图拖选必须支持"指针离开 canvas / 窗口后仍能正常结束交互"（快速拖出
+// 边缘再松手），这依赖真实的 pointer capture。此前监听挂在 MouseEvent 上，
+// `e.pointerId` 恒为 undefined，capture 分支从未生效，只能靠 window 层兜底。
+//
+// 迁移约定：
+// - pointerdown 起即 setPointerCapture，pointerup / pointercancel 安全释放
+// - 只保留 pointer 监听，不再同时挂 mouse 拖选监听（兼容鼠标事件会双处理）
+// - dblclick / contextmenu 等非拖选语义保持 MouseEvent 不变
+// - WebView2 提供 getCoalescedEvents() 时只取最后一个采样点，不重放历史点
+//
+// capture 的**适用范围**：只有拖选（pending-snap / move / resize / 新建自由拖选）与
+// 长图平移起 capture。标注笔画（`ss.isAnnotDragging`）仍走非 capture 路径，"拖出窗口
+// 再松手也送达"的保证**不适用于笔画**——这是刻意保持改造前行为，避免扩大改动面；
+// 同理 `ss-pointer.hasActiveDragInteraction` 也不含笔画态。
+//
+// capture / 采样 / 中断判定的实现见 ss-pointer.js（纯逻辑，可单测）。
+
+canvas.addEventListener('pointerdown', (e) => {
     if (!_firstMousedownLogged) {
         _firstMousedownLogged = true;
         const delta = _screenshotReadyTs > 0 ? Math.round(performance.now() - _screenshotReadyTs) : -1;
-        console.debug('[screenshot] first mousedown', {hasScreenshot: !!ss.screenshot, deltaSinceReady: delta});
+        console.debug('[screenshot] first pointerdown', {hasScreenshot: !!ss.screenshot, deltaSinceReady: delta});
     }
     if (!ss.screenshot && !ss._imagePan) return;
 
@@ -1321,44 +1360,45 @@ canvas.addEventListener('mousedown', (e) => {
 
     // 默认选取工具左键即可平移；其它工具仍可用 Space/中键临时平移。
     if (ss._imagePan && (_spaceDown || e.button === 1 || (e.button === 0 && tool === 'select'))) {
+        capturePointer(canvas, e);
         beginLongImagePan(e);
         return;
     }
 
     if (e.button !== 0) return;
 
+    const point = pointerPoint(e);
+
     // 0.15.8 R2 + 0.18.2：吸附——pending-snap 状态机（控件优先于窗口）
-    // mousedown 只记录候选矩形和起点，不立即吸附；
-    // mouseup 时若总位移 < 3px 才采用矩形；mousemove 达到阈值转 free-selecting。
+    // pointerdown 只记录候选矩形和起点，不立即吸附；
+    // pointerup 时若总位移 < 3px 才采用矩形；pointermove 达到阈值转 free-selecting。
     if (!ss.isAnnotating && !ss.selectionInteraction) {
         // 0.18.2：控件优先于窗口——控件命中时用控件矩形，否则回退窗口矩形
         const snapRect = getHoveredControlRect() || getHoveredWindowRect();
         if (snapRect) {
             ss.pendingSnap = {
-                startX: e.offsetX,
-                startY: e.offsetY,
+                startX: point.offsetX,
+                startY: point.offsetY,
                 winRect: snapRect,
                 pointerId: e.pointerId,
             };
-            // pointer capture 保证快速拖出 canvas 后仍能收到 mouseup
-            if (e.pointerId !== undefined && canvas.setPointerCapture) {
-                try {
-                    canvas.setPointerCapture(e.pointerId);
-                } catch (_) {
-                }
-            }
+            // 0.23.15：capture 保证快速拖出 canvas 后仍能收到 pointerup。
+            // 迁移前此处的 e.pointerId 恒为 undefined，该分支从未真正生效。
+            capturePointer(canvas, e);
             return;
         }
     }
 
     if (ss.isAnnotating && ss.selCss && tool === 'select') {
-        const handle = getSelectionHandle(e.offsetX, e.offsetY, ss.selCss);
+        const handle = getSelectionHandle(point.offsetX, point.offsetY, ss.selCss);
         if (handle) {
-            beginSelectionInteraction('resize', e, handle);
+            capturePointer(canvas, e);
+            beginSelectionInteraction('resize', point, handle);
             return;
         }
-        if (pointInRect(e.offsetX, e.offsetY, ss.selCss)) {
-            beginSelectionInteraction('move', e);
+        if (pointInRect(point.offsetX, point.offsetY, ss.selCss)) {
+            capturePointer(canvas, e);
+            beginSelectionInteraction('move', point);
             return;
         }
         // 0.19.15：点击选区外部 → 退出标注模式，回到自由框选状态（不取消截图）。
@@ -1372,11 +1412,11 @@ canvas.addEventListener('mousedown', (e) => {
         return;
     }
 
-    if (ss.isAnnotating && ss.selCss && pointInEditableImage(e)) {
+    if (ss.isAnnotating && ss.selCss && pointInEditableImage(point)) {
         if (tool === 'watermark') return;
-        const point = annotationPoint(e);
-        ss.annotStartX = point.x;
-        ss.annotStartY = point.y;
+        const annotPt = annotationPoint(point);
+        ss.annotStartX = annotPt.x;
+        ss.annotStartY = annotPt.y;
         ss.annotCurrentX = ss.annotStartX;
         ss.annotCurrentY = ss.annotStartY;
         annot.startDraw(ss.annotStartX, ss.annotStartY);
@@ -1402,21 +1442,27 @@ canvas.addEventListener('mousedown', (e) => {
     // 手动框选开始时立即关闭预选区虚线框，避免实线选区与虚线预选区同时出现
     clearHover();
     clearControlHover();
+    // 0.23.15：capture 让"拖出 canvas 边缘再松手"由浏览器保证送达
+    capturePointer(canvas, e);
     ss.isDragging = true;
     ss.sent = false;
-    ss.startX = e.offsetX;
-    ss.startY = e.offsetY;
+    ss.startX = point.offsetX;
+    ss.startY = point.offsetY;
     ss.endX = ss.startX;
     ss.endY = ss.startY;
 });
 
-canvas.addEventListener('mousemove', (e) => {
+canvas.addEventListener('pointermove', (e) => {
     // 0.15.7：长图平移拖拽
     if (moveLongImagePan(e)) return;
 
     if (!ss.screenshot && !ss.editorSession.canvasBacked) return;
 
-    if (!ss._imagePan) updateSelectionCursor(e.offsetX, e.offsetY);
+    // 0.23.15：只用最新采样点——同帧内的历史点对选区没有意义
+    const point = pointerPoint(e);
+    const {offsetX, offsetY} = point;
+
+    if (!ss._imagePan) updateSelectionCursor(offsetX, offsetY);
 
     // 0.18.2：选区拖拽阶段智能吸附（控件优先于窗口）
     // 0.18.x：跨屏预选——先命中全局顶层窗口 → 得到 hovered hwnd → setControlTarget → 控件 hit-test
@@ -1425,20 +1471,20 @@ canvas.addEventListener('mousemove', (e) => {
     // 避免控件命中时每帧 show→hide 窗口 hint 导致蓝色虚线框闪烁
     if (!ss.isAnnotating && !ss.selectionInteraction && !ss.isDragging) {
         // 第一步：窗口 hit-test（仅更新内部索引，不显示 hint）
-        updateWindowHover(e.offsetX, e.offsetY, {skipShowHint: true});
+        updateWindowHover(offsetX, offsetY, {skipShowHint: true});
         const winRect = getHoveredWindowRect();
         // 0.21.x：控件级吸附受 control_snap 开关门控——此前仅预热被门控、运行期恒启用，导致开关无效
         if (ss.screenshotConfig.controlSnap) {
             // 窗口边缘吸附：鼠标落在窗口四边 R px 内 → 清控件态、只显示窗口级蓝色框，
             // 保证控件铺满窗口时仍能选到整窗
             const edgePx = ss.screenshotConfig.windowEdgeSnap || 0;
-            if (winRect?.hwnd && edgePx > 0 && pointNearWindowEdge(e.offsetX, e.offsetY, winRect, edgePx)) {
+            if (winRect?.hwnd && edgePx > 0 && pointNearWindowEdge(offsetX, offsetY, winRect, edgePx)) {
                 setControlTarget(null);
                 showWindowHintIfPending();
             } else {
                 setControlTarget(winRect?.hwnd ?? null);
                 // 第二步：控件优先 hit-test
-                if (updateControlHover(e.offsetX, e.offsetY)) {
+                if (updateControlHover(offsetX, offsetY)) {
                     // 控件命中：隐藏窗口 hint（可能上次鼠标在窗口空白处时显示了）
                     hideWindowHintIfVisible();
                 } else {
@@ -1450,13 +1496,13 @@ canvas.addEventListener('mousemove', (e) => {
             // 控件级吸附关闭：仅显示窗口级蓝色预选框
             showWindowHintIfPending();
         }
-        updatePixelMagnifier(e.offsetX, e.offsetY);
+        updatePixelMagnifier(offsetX, offsetY);
         // 0.15.12：存储最新位置供 Shift 切格式时强制刷新
-        ss._lastMagnifierPos = {x: e.offsetX, y: e.offsetY};
+        ss._lastMagnifierPos = {x: offsetX, y: offsetY};
     } else if (ss.eyedropperActive) {
         // 0.15.10：取色器模式下显示像素放大镜预览
-        updatePixelMagnifier(e.offsetX, e.offsetY);
-        ss._lastMagnifierPos = {x: e.offsetX, y: e.offsetY};
+        updatePixelMagnifier(offsetX, offsetY);
+        ss._lastMagnifierPos = {x: offsetX, y: offsetY};
     } else if (ss.magnifierEl) {
         hidePixelMagnifier();
     }
@@ -1466,38 +1512,40 @@ canvas.addEventListener('mousemove', (e) => {
         if (shouldStartFreeSelection(
             ss.pendingSnap.startX,
             ss.pendingSnap.startY,
-            e.offsetX,
-            e.offsetY,
+            offsetX,
+            offsetY,
         )) {
             // 达到阈值，清除候选并从原始按下点开始自由框选
             clearHover();
             clearControlHover();
             ss.startX = ss.pendingSnap.startX;
             ss.startY = ss.pendingSnap.startY;
-            ss.endX = e.offsetX;
-            ss.endY = e.offsetY;
+            ss.endX = offsetX;
+            ss.endY = offsetY;
             ss.pendingSnap = null;
             ss.isDragging = true;
             ss.sent = false;
             ss.snappedHwnd = null;
-            // H1 优化：rAF 节流
-            scheduleDrawSelection();
+            // 0.23.15：实时预览交给统一调度（首次调用会清空 interaction-canvas 一次）
+            updateLiveSelection(
+                computeDragRect(ss.startX, ss.startY, offsetX, offsetY, !!point.shiftKey)
+            );
         }
         return;
     }
 
     if (ss.selectionInteraction) {
-        updateSelectionInteraction(e);
+        updateSelectionInteraction(point);
         return;
     }
 
     updateStrokeCursor(e.clientX, e.clientY);
 
     if (ss.isAnnotDragging && ss.selCss) {
-        const point = annotationPoint(e);
-        ss.annotCurrentX = point.x;
-        ss.annotCurrentY = point.y;
-        if (e.shiftKey) {
+        const annotPt = annotationPoint(point);
+        ss.annotCurrentX = annotPt.x;
+        ss.annotCurrentY = annotPt.y;
+        if (point.shiftKey) {
             const constrained = applySquareConstraint(
                 ss.annotStartX, ss.annotStartY, ss.annotCurrentX, ss.annotCurrentY, annot.getTool()
             );
@@ -1522,26 +1570,21 @@ canvas.addEventListener('mousemove', (e) => {
         // renderScale 全局一致，cssRectToBitmap 对任意屏的 CSS 坐标都能正确映射到
         // SESSION 物理像素坐标。跨 DPR 选区的裁剪/复制/pin 均由后端 crop_bgra_virtual
         // 按虚拟屏幕坐标直接裁剪，不存在比例错误。
-        // 0.20.6：Shift 按下时强制 1:1 正方形约束（自由框选 mousemove 路径同步）
-        if (e.shiftKey) {
-            const dx = e.offsetX - ss.startX;
-            const dy = e.offsetY - ss.startY;
-            const side = Math.max(Math.abs(dx), Math.abs(dy));
-            ss.endX = ss.startX + (dx >= 0 ? side : -side);
-            ss.endY = ss.startY + (dy >= 0 ? side : -side);
-        } else {
-            ss.endX = e.offsetX;
-            ss.endY = e.offsetY;
-        }
-        // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
-        scheduleDrawSelection();
+        // 0.20.6：Shift 按下时强制 1:1 正方形约束（自由框选路径，与 release 共用同一纯函数）
+        ss.endX = offsetX;
+        ss.endY = offsetY;
+        // 0.23.15：单飞实时预览——事件侧只写"最新矩形"，每帧最多更新一次 DOM
+        updateLiveSelection(
+            computeDragRect(ss.startX, ss.startY, offsetX, offsetY, !!point.shiftKey)
+        );
     }
 });
 
-canvas.addEventListener('mouseleave', () => {
+canvas.addEventListener('pointerleave', () => {
     // W4 例外：strokeCursor 是高频逐帧更新的画笔预览光标，直接写 style.display 性能更好
     if (ss.strokeCursor) ss.strokeCursor.style.display = 'none';
     // 0.15.8 R2：离开 canvas 时清除 pending-snap 状态
+    // （pointer capture 生效期间本事件被抑制，拖选不会因为指针移出而中断）
     if (ss.pendingSnap) {
         ss.pendingSnap = null;
         clearHover();
@@ -1554,26 +1597,30 @@ canvas.addEventListener('mouseleave', () => {
     }
 });
 
-canvas.addEventListener('mouseup', (e) => {
-    // H1 优化：取消待执行的 drawSelection rAF，确保最终绘制是最新的
-    cancelDrawSelectionRaf();
-    cancelDrawFinalSelectionRaf();
+canvas.addEventListener('pointerup', (e) => {
+    // 0.23.15：先取消未落地的实时预览 rAF 并复位实时层；canvas 提交由下面各条路径
+    // 在同一 JS task 内同步完成。两者同帧生效，因此不会闪白、双边框或短暂无蒙版。
+    resetLiveSelection();
     // 0.15.7：长图平移结束
-    if (endLongImagePan()) return;
+    if (endLongImagePan()) {
+        releasePointer(canvas, e);
+        return;
+    }
 
-    if (!ss.screenshot && !ss.editorSession.canvasBacked) return;
+    if (!ss.screenshot && !ss.editorSession.canvasBacked) {
+        releasePointer(canvas, e);
+        return;
+    }
+
+    // 0.23.15：release 也取最新采样点——被合帧丢弃的历史点不应决定最终矩形
+    const point = pointerPoint(e);
 
     // 0.15.8 R2：pending-snap 完成——未达阈值，采用窗口矩形
     if (ss.pendingSnap) {
         const winRect = ss.pendingSnap.winRect;
         ss.pendingSnap = null;
         // 释放 pointer capture
-        if (e.pointerId !== undefined && canvas.releasePointerCapture) {
-            try {
-                canvas.releasePointerCapture(e.pointerId);
-            } catch (_) {
-            }
-        }
+        releasePointer(canvas, e);
         if (winRect.w >= 5 && winRect.h >= 5) {
             ss.snappedHwnd = winRect.hwnd || null;
             ss.startX = winRect.x;
@@ -1591,7 +1638,10 @@ canvas.addEventListener('mouseup', (e) => {
         return;
     }
 
-    if (finishSelectionInteraction(e)) return;
+    if (finishSelectionInteraction(point)) {
+        releasePointer(canvas, e);
+        return;
+    }
 
     if (ss.isAnnotDragging) {
         ss.isAnnotDragging = false;
@@ -1602,10 +1652,10 @@ canvas.addEventListener('mouseup', (e) => {
         }
         // 0.15.10：清除快照
         ss._committedSnapshot = null;
-        const point = annotationPoint(e);
-        ss.annotCurrentX = point.x;
-        ss.annotCurrentY = point.y;
-        if (e.shiftKey) {
+        const annotPt = annotationPoint(point);
+        ss.annotCurrentX = annotPt.x;
+        ss.annotCurrentY = annotPt.y;
+        if (point.shiftKey) {
             const constrained = applySquareConstraint(
                 ss.annotStartX, ss.annotStartY, ss.annotCurrentX, ss.annotCurrentY, annot.getTool()
             );
@@ -1624,6 +1674,7 @@ canvas.addEventListener('mouseup', (e) => {
             console.debug('[screenshot] annotation drag too small, skip', {tool, dx, dy});
             ss._committedSnapshot = null;
             redrawAnnotFull();
+            releasePointer(canvas, e);
             return;
         }
 
@@ -1633,24 +1684,19 @@ canvas.addEventListener('mouseup', (e) => {
         }
         redrawAnnotFull();
         updateUndoRedoButtons();
+        releasePointer(canvas, e);
         return;
     }
 
-    if (!ss.isDragging) return;
-    ss.isDragging = false;
-    // 0.20.6：Shift 按下时强制 1:1 正方形约束（自由框选 mouseup 路径同步）
-    if (e.shiftKey) {
-        const dx = e.offsetX - ss.startX;
-        const dy = e.offsetY - ss.startY;
-        const side = Math.max(Math.abs(dx), Math.abs(dy));
-        ss.endX = ss.startX + (dx >= 0 ? side : -side);
-        ss.endY = ss.startY + (dy >= 0 ? side : -side);
-    } else {
-        ss.endX = e.offsetX;
-        ss.endY = e.offsetY;
+    if (!ss.isDragging) {
+        releasePointer(canvas, e);
+        return;
     }
-
-    const rect = norm(ss.startX, ss.startY, ss.endX, ss.endY);
+    ss.isDragging = false;
+    ss.endX = point.offsetX;
+    ss.endY = point.offsetY;
+    // 0.20.6：Shift 按下时强制 1:1 正方形约束（release 路径与拖动共用同一纯函数）
+    const rect = computeDragRect(ss.startX, ss.startY, point.offsetX, point.offsetY, !!point.shiftKey);
     if (rect.w < 5 || rect.h < 5) {
         console.debug('[screenshot] rect too small, wait for dblclick', rect);
         if (ss.singleClickTimeout) clearTimeout(ss.singleClickTimeout);
@@ -1663,6 +1709,7 @@ canvas.addEventListener('mouseup', (e) => {
                 hideScreenshotOverlay().catch((err) => console.error('hideScreenshotOverlay 失败', err));
             }
         }, 200);
+        releasePointer(canvas, e);
         return;
     }
 
@@ -1683,6 +1730,75 @@ canvas.addEventListener('mouseup', (e) => {
     } catch (e) {
         console.error('[screenshot] enterAnnotationMode threw', e);
     }
+    releasePointer(canvas, e);
+});
+
+/**
+ * 0.23.15：会话是否已进入收尾（由 ss-output.cleanupCanvasVisuals 置位）。
+ * 收尾态下只允许做状态复位，不允许重建任何会话内 UI。
+ */
+function isSessionTearingDown() {
+    return document.documentElement.classList.contains('screenshot-session-inactive');
+}
+
+/**
+ * 0.23.15：拖选被异常中断（pointercancel / lostpointercapture）时的收口。
+ *
+ * 与 finish 的区别是**不提交**本次拖拽，恢复到进入交互前的可用状态：
+ * - 移动 / 缩放：回到交互开始前的 original 矩形。激活时已执行
+ *   invalidateSelectionContent（标注层与工具栏被清），因此需要重新进入标注模式，
+ *   否则用户会看到"有选区但没有工具栏"的半残状态
+ * - 新建拖选：丢弃半程矩形（`kind === 'new'` 目前只有 ss-interaction.test.mjs 构造，
+ *   生产的新建拖选由 `ss.isDragging` 路径承载，因此这里的 selCss 归位实际只作用于
+ *   move / resize）
+ *
+ * 会话已进入收尾时（ESC / 失焦 / 输出清场之后浏览器补发的中断事件）**只复位状态、
+ * 不重建 UI**：重建会重新裁图、发 screenshotSetAnnotationMode(true) 并触发 OCR
+ * prewarm，等于把一个已经 cancel 的会话拉回标注态。
+ */
+function abortSelectionInteraction(e = null) {
+    resetLiveSelection();
+    releasePointer(canvas, e);
+    ss.pendingSnap = null;
+    const interaction = ss.selectionInteraction;
+    ss.selectionInteraction = null;
+    ss.isDragging = false;
+    if (interaction && interaction.kind !== 'new') {
+        ss.selCss = {...interaction.original};
+    }
+    if (isSessionTearingDown()) {
+        // 与 cleanupSessionVisuals 的拖选状态归零是双保险：那道清理挂在
+        // ss._cleanupSessionVisuals 回调上，而调用方是 try/catch 容错调用的
+        // （钩子没接上也只 warn）。收尾态下重建 UI 的代价极高，这里再判一次。
+        console.debug('[screenshot] abort ignored: session tearing down');
+        return;
+    }
+    ss.canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
+    if (ss.isAnnotating && ss.selCss) {
+        try {
+            enterAnnotationMode({...ss.selCss});
+        } catch (err) {
+            console.error('[screenshot] abort 后重建标注模式失败', err);
+        }
+    } else {
+        drawDimmed();
+    }
+}
+
+canvas.addEventListener('pointercancel', (e) => {
+    // 指针被系统或浏览器回收（触屏手势介入、窗口被抢占等）：按取消处理，
+    // 不把半程结果变成最终选区
+    if (!hasActiveDragInteraction(ss)) return;
+    console.debug('[screenshot] pointercancel → abort selection interaction');
+    abortSelectionInteraction(e);
+});
+
+canvas.addEventListener('lostpointercapture', (e) => {
+    // capture 被隐式释放（正常 pointerup 之后也会触发）。只有仍存在未结束的拖选时
+    // 才视为异常中断，避免把正常提交二次处理成取消。
+    if (!hasActiveDragInteraction(ss)) return;
+    console.debug('[screenshot] lostpointercapture with active drag → abort');
+    abortSelectionInteraction(e);
 });
 
 canvas.addEventListener('dblclick', (e) => {
@@ -1983,7 +2099,11 @@ window.addEventListener('keydown', refreshShapePreviewOnShift);
 // 0.15.7：长截图手动滚动检测——capturing 阶段 wheel 触发截帧
 window.addEventListener('wheel', onScrollWheel, {passive: true});
 
-// 鼠标在窄图边缘外松开时 canvas 收不到 mouseup，需在 window 层兜底结束平移。
+// 长图平移（Space / 中键）的窗口层兜底。
+// 0.23.15 后 canvas 的 pointerdown 已起 pointer capture，canvas 内发起的平移由
+// pointermove/pointerup 正常送达；这里保留 window 层兜底以覆盖"平移由非 canvas
+// 元素发起或 capture 被浏览器回收"的路径。capture 生效期间鼠标事件会被重定向到
+// canvas（e.target === canvas），因此不会与 canvas 的 pointer 处理双跑。
 window.addEventListener('mouseup', endLongImagePan);
 window.addEventListener('mousemove', (e) => {
     if (e.target !== canvas) moveLongImagePan(e);
@@ -2053,9 +2173,8 @@ window.addEventListener('blur', () => {
         return;
     }
 
-    // H1 优化：取消待执行的 drawSelection rAF
-    cancelDrawSelectionRaf();
-    cancelDrawFinalSelectionRaf();
+    // 0.23.15：取消未落地的实时预览 rAF 并复位实时层
+    resetLiveSelection();
     console.debug('[screenshot] window blur, hiding overlay', {
         phase: ss.scrollSession?.scrollCapturePhase,
         active: ss.scrollSession?.active,

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <title>PENDING</title>
+</head>
+<body>
+<!-- 本页在真实浏览器引擎里校验 0.23.15 实时选区层：直接注入产品 HTML 片段 + 产品 CSS，
+     再直接驱动产品模块 ss-live-selection.js，最后用 getBoundingClientRect /
+     getComputedStyle 断言"四块遮罩组合出选区外暗、选区内透明"确实成立。
+
+     动机：单元测试只能断言"JS 写了哪些 style 值"，写不进"浏览器算出来的布局对不对"。
+     0.23.15 自审就靠这类检查抓到一个真实缺陷——#live-mask-right 同时声明 right 与
+     width 形成过度约束，JS 写 left 时宽度被钉在 0，右遮罩永不显示（四遮罩不闭合）。
+
+     用法（必须经 HTTP 提供：ES module 在 file:// 下被 CORS 拦截）：
+        先用任意静态服务器在仓库根起服务，例如：
+          node -e "const h=require('http'),f=require('fs'),p=require('path');h.createServer((q,s)=>{const u=p.join(process.cwd(),decodeURIComponent(q.url.split('?')[0]));f.readFile(u,(e,d)=>e?(s.statusCode=404,s.end()):s.end(d))}).listen(8731)"
+        再执行：
+          chrome --headless=new --disable-gpu --virtual-time-budget=8000 \
+                 --window-size=1280,900 --dump-dom \
+                 http://127.0.0.1:8731/testdata/screenshot/live-selection-layout-check.html
+     结果写入 document.title（CHECK:PASS / CHECK:FAIL）与下方 <pre>。 -->
+<pre id="out">running…</pre>
+<script type="module">
+    const results = [];
+    const failures = [];
+    const out = document.getElementById('out');
+
+    function check(name, ok, detail = '') {
+        results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ::  ' + detail : ''}`);
+        if (!ok) failures.push(name);
+    }
+
+    /** 浮点比较容差：布局取整到设备像素，允许 1px 误差 */
+    function near(a, b, tol = 1) {
+        return Math.abs(a - b) <= tol;
+    }
+
+    function finish() {
+        const header = (failures.length === 0 ? 'CHECK:PASS:' : 'CHECK:FAIL:') + results.length;
+        out.textContent = header + '\n' + results.join('\n');
+        document.title = header;
+    }
+
+    /**
+     * 读本地文件。本页必须经 HTTP 提供（ES module 在 file:// 下被 CORS 拦截），
+     * 因此这里的 fetch 走 http://127.0.0.1。
+     */
+    async function loadText(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        return res.text();
+    }
+
+    /**
+     * 驱动实时层落地一次几何。
+     *
+     * 先 reset 让下一次 update 走"首次激活"路径——该路径**同步**写几何，
+     * 不依赖 requestAnimationFrame。这是刻意的：headless 无合成器时 rAF 不保证
+     * 触发，而本页要验证的是 HTML/CSS/布局契约（rAF 单飞与丢弃中间采样由
+     * ss-live-selection.test.mjs 用替身 rAF 覆盖）。
+     */
+    function applyGeometry(liveModule, x, y, w, h) {
+        liveModule.resetLiveSelection();
+        liveModule.updateLiveSelection({x, y, w, h});
+    }
+
+    try {
+        const vw = document.documentElement.clientWidth;
+        const vh = document.documentElement.clientHeight;
+
+        // ── 1. 注入产品 CSS（真实真源文本；@import 链里有跨层依赖，
+        //        这里只取本层真正依赖的两层：reset 提供 .hidden，views 提供实时层样式）──
+        const resetCss = await loadText('../../frontend/css/base/reset.css');
+        const viewCss = await loadText('../../frontend/css/views/chord-screenshot.css');
+        const styleEl = document.createElement('style');
+        styleEl.textContent = `${resetCss}\n${viewCss}`;
+        document.head.appendChild(styleEl);
+        check('产品 reset（.hidden 定义）已注入', resetCss.includes('.hidden'));
+
+        // ── 2. 注入产品 HTML 里的实时层结构（真实真源） ───────────────────
+        const htmlText = await loadText('../../frontend/chord-screenshot.html');
+        const parsed = new DOMParser().parseFromString(htmlText, 'text/html');
+        const sourceLayer = parsed.getElementById('live-selection');
+        check('real HTML exposes #live-selection', !!sourceLayer);
+        const layer = document.importNode(sourceLayer, true);
+        layer.classList.remove('hidden');
+        document.body.appendChild(layer);
+
+        check('实时层恰好 5 个子元素（四遮罩 + 一边框）', layer.children.length === 5,
+            `children=${layer.children.length}`);
+        check('实线边框在文档中唯一',
+            document.querySelectorAll('.live-selection-border').length === 1,
+            `count=${document.querySelectorAll('.live-selection-border').length}`);
+        check('遮罩恰好四块',
+            document.querySelectorAll('.live-selection-mask').length === 4,
+            `count=${document.querySelectorAll('.live-selection-mask').length}`);
+
+        // ── 3. 驱动产品模块（不复制几何逻辑） ────────────────────────────
+        const {ss} = await import('../../frontend/js/screenshot/ss-state.js');
+        ss.liveSelectionEl = document.getElementById('live-selection');
+        ss.liveMaskTop = document.getElementById('live-mask-top');
+        ss.liveMaskBottom = document.getElementById('live-mask-bottom');
+        ss.liveMaskLeft = document.getElementById('live-mask-left');
+        ss.liveMaskRight = document.getElementById('live-mask-right');
+        ss.liveBorderEl = document.getElementById('live-border');
+        ss.sizeHint = null;
+        ss.interactionCanvas = null;
+        ss.interactionCtx = null;
+
+        window.__blinkScreenMeta = {
+            vx: 0, vy: 0,
+            renderScaleX: 1, renderScaleY: 1,
+            physicalDisplays: [{x: 0, y: 0, w: vw, h: vh, dpi: 96}],
+        };
+
+        const live = await import('../../frontend/js/screenshot/ss-live-selection.js');
+        const border = ss.liveBorderEl;
+
+        const rect = (el) => {
+            const r = el.getBoundingClientRect();
+            return {x: r.left, y: r.top, w: r.width, h: r.height, right: r.right, bottom: r.bottom};
+        };
+
+        /**
+         * 对给定选区矩形验证：豁口 = 选区、四遮罩不重叠且恰好覆盖其余全部面积。
+         *
+         * `borderBoxFloor`：border-box 下边框占位有下限 2×线宽，因此极小的选区
+         * （< 2×线宽）边框盒会被撑到 2×线宽。这是浏览器的 layout 下限，不是几何
+         * 错误——遮罩仍需严格贴合选区（下面单独断言）。
+         */
+        function verifyRect(x, y, w, h, label, opts = {}) {
+            applyGeometry(live, x, y, w, h);
+
+            const top = rect(ss.liveMaskTop);
+            const bottom = rect(ss.liveMaskBottom);
+            const left = rect(ss.liveMaskLeft);
+            const right = rect(ss.liveMaskRight);
+            const bd = rect(border);
+
+            check(`${label}: 上遮罩下沿 = 选区上沿`, near(top.bottom, y), `top.bottom=${top.bottom} y=${y}`);
+            check(`${label}: 下遮罩上沿 = 选区下沿`, near(bottom.y, y + h), `bottom.y=${bottom.y} y+h=${y + h}`);
+            check(`${label}: 左遮罩右沿 = 选区左沿`, near(left.right, x), `left.right=${left.right} x=${x}`);
+            check(`${label}: 右遮罩左沿 = 选区右沿`, near(right.x, x + w), `right.x=${right.x} x+w=${x + w}`);
+            check(`${label}: 左遮罩只覆盖选区高度`, near(left.y, y) && near(left.h, h),
+                `left=(${left.y},${left.h}) rect=(${y},${h})`);
+            check(`${label}: 右遮罩只覆盖选区高度`, near(right.y, y) && near(right.h, h),
+                `right=(${right.y},${right.h}) rect=(${y},${h})`);
+
+            const covered = top.w * top.h + bottom.w * bottom.h + left.w * left.h + right.w * right.h;
+            const expected = vw * vh - w * h;
+            check(`${label}: 四遮罩无重叠且恰好覆盖选区外全部面积`,
+                near(covered, expected, vw + vh),
+                `covered=${Math.round(covered)} expected=${Math.round(expected)}`);
+
+            if (opts.borderBoxFloor) {
+                const line = parseFloat(getComputedStyle(border).borderTopWidth) || 2;
+                check(`${label}: 边框位置 = 选区位置`, near(bd.x, x) && near(bd.y, y),
+                    `border=(${bd.x},${bd.y}) rect=(${x},${y})`);
+                check(`${label}: 边框盒受 border-box 下限约束（≥ 选区，≤ 选区 + 2×线宽）`,
+                    bd.w >= w - 1 && bd.w <= w + 2 * line + 1 && bd.h >= h - 1 && bd.h <= h + 2 * line + 1,
+                    `border=(${bd.w},${bd.h}) rect=(${w},${h}) line=${line}`);
+            } else {
+                check(`${label}: 边框几何 = 选区几何`,
+                    near(bd.x, x) && near(bd.y, y) && near(bd.w, w) && near(bd.h, h),
+                    `border=(${bd.x},${bd.y},${bd.w},${bd.h}) rect=(${x},${y},${w},${h})`);
+            }
+        }
+
+        await verifyRect(200, 150, 400, 300, '常规');
+        await verifyRect(0, 0, 300, 200, '贴左上角');
+        await verifyRect(vw - 300, vh - 200, 300, 200, '贴右下角');
+        await verifyRect(600, 400, 1, 1, '极小选区', {borderBoxFloor: true});
+
+        // ── 4. 视觉与交互契约 ─────────────────────────────────────────────
+        const computed = (el) => getComputedStyle(el);
+        const sample = {x: 200, y: 150, w: 400, h: 300};
+        applyGeometry(live, sample.x, sample.y, sample.w, sample.h);
+
+        check('遮罩色 = rgba(0,0,0,0.45)',
+            computed(ss.liveMaskTop).backgroundColor === 'rgba(0, 0, 0, 0.45)',
+            computed(ss.liveMaskTop).backgroundColor);
+        check('边框色 = #4a9eff',
+            computed(border).borderTopColor === 'rgb(74, 158, 255)',
+            computed(border).borderTopColor);
+        check('实时层 pointer-events = none', computed(layer).pointerEvents === 'none',
+            computed(layer).pointerEvents);
+
+        for (const [name, el] of [
+            ['容器', layer], ['上遮罩', ss.liveMaskTop], ['下遮罩', ss.liveMaskBottom],
+            ['左遮罩', ss.liveMaskLeft], ['右遮罩', ss.liveMaskRight], ['边框', border],
+        ]) {
+            const st = computed(el);
+            check(`${name}: 无 transition`, st.transitionDuration === '0s', st.transitionDuration);
+            check(`${name}: 无 animation`, st.animationName === 'none', st.animationName);
+        }
+
+        // 1× 屏：线宽 2px（断言"写入值"——浏览器会把边框实际宽度取整到设备像素，
+        // computed 值不能作为跨屏补偿的判据）
+        check('1× 屏边框线宽 = 2px', near(parseFloat(border.style.borderWidth), 2, 0.01),
+            border.style.borderWidth);
+
+        // 200% 屏 + renderScale 1.5 → 2 × (192/96) / 1.5 ≈ 2.667px
+        live.resetLiveSelection();
+        window.__blinkScreenMeta = {
+            vx: 0, vy: 0,
+            renderScaleX: 1.5, renderScaleY: 1.5,
+            physicalDisplays: [{x: 0, y: 0, w: vw * 1.5, h: vh * 1.5, dpi: 192}],
+        };
+        live.updateLiveSelection(sample);
+        const expectedWidth = 2 * (192 / 96) / 1.5;
+        check('200% 屏 + renderScale 1.5 线宽补偿',
+            near(parseFloat(border.style.borderWidth), expectedWidth, 0.01),
+            `authored=${border.style.borderWidth}（浏览器取整后 computed=${computed(border).borderTopWidth}）`);
+
+        // 隐藏后不得残留可见几何（reset 复位契约）
+        live.resetLiveSelection();
+        check('reset 后实时层隐藏', computed(layer).display === 'none', computed(layer).display);
+
+        finish();
+    } catch (err) {
+        results.push('FAIL  运行时异常 :: ' + (err && err.stack ? err.stack : String(err)));
+        failures.push('运行时异常');
+        finish();
+    }
+</script>
+</body>
+</html>

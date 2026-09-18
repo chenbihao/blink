@@ -2,6 +2,7 @@
    Layer 0: body 兜底背景
    Layer 1: #canvas — 静态底图层（截图原图，0.20.5 分层）
    Layer 1.5: #interaction-canvas — 动态交互层（遮罩/边框/手柄，0.20.5 新增）
+   Layer 1.7: #live-selection — 实线选区实时层（0.23.15：四遮罩 + 唯一边框）
    Layer 2: #annot-canvas — 标注层（覆盖在裁剪区上）
    Layer 3: #toolbar — 工具栏（HTML 元素） */
 
@@ -80,6 +81,82 @@ body.image-editor-mode #canvas.long-image-editing {
     height: 100%;
     pointer-events: none;
     z-index: 1;
+}
+
+/* 0.23.15：实线选区实时层——拖动（新建/移动/缩放）期间的选区预览。
+   拖动期间 interaction-canvas 完全不参与绘制，本层承担全部实时几何，
+   因此每帧成本固定为 5 个元素的几何写入，与截图总像素面积无关。
+
+   铁则：
+   - 几何属性**禁止** transition / animation。逐帧写入必须立即呈现；
+     任何过渡都会重新引入「实线落后于鼠标」——这正是本层要消除的症状。
+   - 只消费 CSS 像素几何（norm(start,end) 或 ss.selCss），不做位图换算。
+   - 四块遮罩用 left/right/bottom 锚定，JS 每帧只写变化的那一个维度，
+     因此不需要读 innerWidth/innerHeight，无强制同步布局。
+   - 边框线宽由 JS 按目标屏 monitorDpr/renderScale 做视觉补偿后写入
+     `style.borderWidth`；`--live-border-width` 只是 CSS 侧的默认值（2px），
+     几何本身不受该缩放影响。 */
+.live-selection {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    /* 位于 #interaction-canvas（z=1）之上、#annot-canvas（z=2）之下 */
+    z-index: 1;
+    --live-border-width: 2px;
+}
+
+.live-selection-mask {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+/* 四块遮罩：上/下铺满整宽，左/右只覆盖选区高度。
+   锚定维度必须留 `auto`，否则会与 JS 写入的维度形成"过度约束"而被忽略：
+   - #live-mask-right 若同时声明 right 与 width，JS 写 left 时浏览器会丢弃 right，
+     宽度被钉在 0 → 右遮罩永不显示（0.23.15 自审发现的真实缺陷）。 */
+#live-mask-top {
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 0;
+}
+
+/* 只写 top；高度由 top + bottom 双锚定推出 */
+#live-mask-bottom {
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: 0;
+}
+
+/* 写 top / height / width */
+#live-mask-left {
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+}
+
+/* 只写 top / height / left；宽度由 left + right 双锚定推出（不得声明 width） */
+#live-mask-right {
+    top: 0;
+    right: 0;
+    height: 0;
+}
+
+/* 唯一的实线边框：始终只有这一个元素，不通过 append 新元素绘制。
+   box-sizing:border-box 让线宽向内生长，与 canvas strokeRect 的视觉宽一致。 */
+.live-selection-border {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    box-sizing: border-box;
+    border: var(--live-border-width) solid #4a9eff;
 }
 
 /* 标注 canvas：位置和尺寸由 JS 动态设置（覆盖在裁剪区上） */

@@ -1,18 +1,24 @@
-//! 截图 overlay 选区交互（0.14.6 §4 拆分）。
+//! 截图 overlay 选区交互（0.14.6 §4 拆分，0.23.15 实时预览与几何纯函数化）。
 //!
 //! 从 chord-screenshot.js 提取的选区交互函数：
 //! - selectionCursor / getSelectionHandle — 命中测试与光标样式
 //! - beginSelectionInteraction / updateSelectionInteraction / finishSelectionInteraction — 拖拽交互
+//! - computeInteractionRect — move/resize 的最新矩形（纯函数，拖动与松手共用）
 //! - updateSelectionCursor / refreshShapePreviewOnShift / updateStrokeCursor — 光标与预览更新
+//!
+//! 0.23.15：拖动期间的实时预览不再逐帧重绘 `#interaction-canvas`，而是把最新矩形
+//! 交给 `ss-live-selection.js`（单飞 rAF + DOM 四遮罩 + 唯一边框）。本模块只负责
+//! 「算出矩形」与「把矩形交出去」。
 //!
 //! 注意：invalidateSelectionContent 留在主文件（协调多模块）。
 
 import {MIN_SELECTION_SIZE, SELECTION_HANDLE_SIZE, ss, TOOL_CAPS} from './ss-state.js';
-import {applySquareConstraint, norm} from './ss-utils.js';
-import {cancelDrawFinalSelectionRaf, scheduleDrawFinalSelection, scheduleDrawSelection} from './ss-draw.js';
+import {applySquareConstraint, computeDragRect} from './ss-utils.js';
+import {resetLiveSelection, updateLiveSelection} from './ss-live-selection.js';
 import {applyFloatingUiScaleAt, findDisplayCssAt} from './ss-display.js';
 import * as annot from './annotation-engine.js';
 import {
+    applySquareResize,
     cssPointToBitmap,
     formatColor,
     getRenderScale,
@@ -74,6 +80,69 @@ export function beginSelectionInteraction(kind, e, handle = null) {
     ss.canvas.style.cursor = kind === 'resize' ? selectionCursor(handle) : (kind === 'move' ? 'move' : 'crosshair');
 }
 
+/** Shift 等边约束所需的环境快照。未按 Shift 时返回 null，避免逐帧读 window/canvas。 */
+function shiftEnv(shiftKey) {
+    if (!shiftKey) return null;
+    const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+    return {meta, canvasW: ss.canvas?.width || 0, canvasH: ss.canvas?.height || 0};
+}
+
+/**
+ * move / resize 的最新选区矩形（0.23.15 纯函数化）。
+ *
+ * `pointermove` 与 release 路径**共用本函数**：因此「松手用 release 坐标重算最终
+ * 矩形」与拖动过程中的采样使用完全相同的钳制、最小边长与 Shift 语义，不会漂移。
+ *
+ * @param {{kind,handle,original,monitor,startX,startY}} interaction 交互状态
+ * @param {number} curX 当前指针 CSS X
+ * @param {number} curY 当前指针 CSS Y
+ * @param {boolean} shiftKey 是否强制 1:1（仅 resize 生效）
+ * @param {{meta:object,canvasW:number,canvasH:number}|null} env Shift 约束所需环境
+ * @returns {{x:number,y:number,w:number,h:number}} CSS 像素矩形
+ */
+export function computeInteractionRect(interaction, curX, curY, shiftKey = false, env = null) {
+    const {original, monitor, handle, startX, startY, kind} = interaction;
+    if (kind === 'move') {
+        // 整体移动：钳制到交互起始时所在屏，宽高不变
+        const x = Math.max(monitor.x, Math.min(original.x + (curX - startX), monitor.x + monitor.w - original.w));
+        const y = Math.max(monitor.y, Math.min(original.y + (curY - startY), monitor.y + monitor.h - original.h));
+        return {x, y, w: original.w, h: original.h};
+    }
+    let left = original.x;
+    let top = original.y;
+    let right = original.x + original.w;
+    let bottom = original.y + original.h;
+    if (handle.includes('w')) left = Math.max(monitor.x, Math.min(curX, right - MIN_SELECTION_SIZE));
+    if (handle.includes('e')) right = Math.min(monitor.x + monitor.w, Math.max(curX, left + MIN_SELECTION_SIZE));
+    if (handle.includes('n')) top = Math.max(monitor.y, Math.min(curY, bottom - MIN_SELECTION_SIZE));
+    if (handle.includes('s')) bottom = Math.min(monitor.y + monitor.h, Math.max(curY, top + MIN_SELECTION_SIZE));
+    // 0.20.6：Shift 按下时强制 1:1 等边约束
+    if (shiftKey && env) {
+        const meta = env.meta || {vx: 0, vy: 0};
+        const {scaleX: rsx, scaleY: rsy} = getRenderScale(meta);
+        // 等边约束与钳制在 bitmap 空间完成，再换算回 CSS（与 0.20.6 行为一致）
+        const origBmp = {
+            x: Math.round(original.x * rsx),
+            y: Math.round(original.y * rsy),
+            w: Math.round(original.w * rsx),
+            h: Math.round(original.h * rsy),
+        };
+        const constrained = applySquareResize(
+            origBmp,
+            handle,
+            Math.round((right - left) * rsx),
+            Math.round((bottom - top) * rsy),
+            env.canvasW || meta.w || 0,
+            env.canvasH || meta.h || 0,
+        );
+        left = constrained.x / rsx;
+        top = constrained.y / rsy;
+        right = (constrained.x + constrained.w) / rsx;
+        bottom = (constrained.y + constrained.h) / rsy;
+    }
+    return {x: left, y: top, w: right - left, h: bottom - top};
+}
+
 export function updateSelectionInteraction(e) {
     if (!ss.selectionInteraction) return;
     const totalDx = e.offsetX - ss.selectionInteraction.startX;
@@ -90,80 +159,44 @@ export function updateSelectionInteraction(e) {
             ss.selCss = null;
         }
     }
+    // 0.23.15：本函数只「算出最新矩形」，逐帧落地由实时层调度负责
+    // （事件侧不直接写 DOM，同一帧的多个采样自然合并）。
+    // 注：`kind === 'new'` 目前只有 ss-interaction.test.mjs 构造——生产的新建拖选走的
+    // 是 index.js 的 `ss.isDragging` 路径。分支与断言保留（否则将来真出现调用方时会
+    // 静默绕过这里的约束），但改动本文件时不要以为它覆盖了生产的新建拖选。
     if (ss.selectionInteraction.kind === 'new') {
         // 0.20.6：Shift 按下时强制 1:1 正方形约束（新建拖选路径）
-        if (e.shiftKey) {
-            const sx = ss.selectionInteraction.startX;
-            const sy = ss.selectionInteraction.startY;
-            const dx = e.offsetX - sx;
-            const dy = e.offsetY - sy;
-            const side = Math.max(Math.abs(dx), Math.abs(dy));
-            ss.endX = sx + (dx >= 0 ? side : -side);
-            ss.endY = sy + (dy >= 0 ? side : -side);
-        } else {
-            ss.endX = e.offsetX;
-            ss.endY = e.offsetY;
-        }
-        // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
-        scheduleDrawSelection();
+        ss.selCss = computeDragRect(
+            ss.selectionInteraction.startX,
+            ss.selectionInteraction.startY,
+            e.offsetX,
+            e.offsetY,
+            !!e.shiftKey,
+        );
+        ss.endX = e.offsetX;
+        ss.endY = e.offsetY;
+        updateLiveSelection(ss.selCss);
         return;
     }
 
-    const {original, monitor, handle} = ss.selectionInteraction;
-    const dx = e.offsetX - ss.selectionInteraction.startX;
-    const dy = e.offsetY - ss.selectionInteraction.startY;
-    if (ss.selectionInteraction.kind === 'move') {
-        const x = Math.max(monitor.x, Math.min(original.x + dx, monitor.x + monitor.w - original.w));
-        const y = Math.max(monitor.y, Math.min(original.y + dy, monitor.y + monitor.h - original.h));
-        ss.selCss = {x, y, w: original.w, h: original.h};
-    } else {
-        let left = original.x;
-        let top = original.y;
-        let right = original.x + original.w;
-        let bottom = original.y + original.h;
-        if (handle.includes('w')) left = Math.max(monitor.x, Math.min(e.offsetX, right - MIN_SELECTION_SIZE));
-        if (handle.includes('e')) right = Math.min(monitor.x + monitor.w, Math.max(e.offsetX, left + MIN_SELECTION_SIZE));
-        if (handle.includes('n')) top = Math.max(monitor.y, Math.min(e.offsetY, bottom - MIN_SELECTION_SIZE));
-        if (handle.includes('s')) bottom = Math.min(monitor.y + monitor.h, Math.max(e.offsetY, top + MIN_SELECTION_SIZE));
-        // 0.20.6：Shift 按下时强制 1:1 等边约束
-        if (e.shiftKey) {
-            const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
-            const {scaleX: rsx, scaleY: rsy} = getRenderScale(meta);
-            // 把 CSS 坐标转换为 bitmap 坐标来调用 applySquareResize
-            const origBmpX = Math.round(original.x * rsx);
-            const origBmpY = Math.round(original.y * rsy);
-            const origBmpW = Math.round(original.w * rsx);
-            const origBmpH = Math.round(original.h * rsy);
-            const newBmpW = Math.round((right - left) * rsx);
-            const newBmpH = Math.round((bottom - top) * rsy);
-            const canvasW = ss.canvas?.width || meta?.w || 0;
-            const canvasH = ss.canvas?.height || meta?.h || 0;
-            const constrained = applySquareResize(
-                {x: origBmpX, y: origBmpY, w: origBmpW, h: origBmpH},
-                handle,
-                newBmpW,
-                newBmpH,
-                canvasW,
-                canvasH
-            );
-            left = constrained.x / rsx;
-            top = constrained.y / rsy;
-            right = (constrained.x + constrained.w) / rsx;
-            bottom = (constrained.y + constrained.h) / rsy;
-        }
-        ss.selCss = {x: left, y: top, w: right - left, h: bottom - top};
-    }
-    // 性能优化：rAF 节流，避免 move/resize mousemove 高频全量重绘
-    scheduleDrawFinalSelection();
-    // sizeHint 由 drawFinalSelection 统一显示（0.18 优化：合并到 drawFinalSelection，
-    // 修复智能选区路径不显示 sizeHint 的问题）
+    // move / resize：sizeHint 由实时层同步显示，不需要在此单独处理
+    ss.selCss = computeInteractionRect(
+        ss.selectionInteraction,
+        e.offsetX,
+        e.offsetY,
+        !!e.shiftKey,
+        shiftEnv(e.shiftKey),
+    );
+    updateLiveSelection(ss.selCss);
 }
 
 /** @returns {boolean} true 如果事件被消费（调用方应 return） */
 export function finishSelectionInteraction(e) {
     if (!ss.selectionInteraction) return false;
-    // 取消待执行的 rAF，确保最终绘制是最新的（不被节流帧覆盖）
-    cancelDrawFinalSelectionRaf();
+    // 0.23.15：先丢弃未落地的实时预览帧并复位 DOM 实时层。canvas 提交由调用方在同一
+    // JS task 内紧跟 drawFinalSelection()/drawDimmed() 完成——两者同帧生效，因此不会
+    // 出现闪白、双边框或短暂无蒙版。
+    resetLiveSelection();
     const {kind, activated} = ss.selectionInteraction;
     if (!activated) {
         ss.selectionInteraction = null;
@@ -171,20 +204,21 @@ export function finishSelectionInteraction(e) {
         return true;
     }
     if (kind === 'new') {
+        // 自由框选：用 release 坐标重算最终矩形，不依赖最后一帧 rAF 是否已运行
         ss.endX = e.offsetX;
         ss.endY = e.offsetY;
-        // 0.20.6：Shift 按下时强制 1:1 正方形约束（finish 路径同步）
-        if (e.shiftKey) {
-            const sx = ss.selectionInteraction.startX;
-            const sy = ss.selectionInteraction.startY;
-            const dx = e.offsetX - sx;
-            const dy = e.offsetY - sy;
-            const side = Math.max(Math.abs(dx), Math.abs(dy));
-            ss.endX = sx + (dx >= 0 ? side : -side);
-            ss.endY = sy + (dy >= 0 ? side : -side);
-        }
-        ss.selCss = norm(ss.startX, ss.startY, ss.endX, ss.endY);
+        ss.selCss = computeDragRect(ss.startX, ss.startY, e.offsetX, e.offsetY, !!e.shiftKey);
         ss.isDragging = false;
+    } else {
+        // 移动/缩放：同样用 release 坐标重算。若最后一帧 pointermove 被合帧丢弃，
+        // 只依赖上帧结果会让松手位置与最终选区不一致。
+        ss.selCss = computeInteractionRect(
+            ss.selectionInteraction,
+            e.offsetX,
+            e.offsetY,
+            !!e.shiftKey,
+            shiftEnv(e.shiftKey),
+        );
     }
     ss.selectionInteraction = null;
     if (!ss.selCss || ss.selCss.w < MIN_SELECTION_SIZE || ss.selCss.h < MIN_SELECTION_SIZE) {
@@ -192,7 +226,7 @@ export function finishSelectionInteraction(e) {
         if (typeof ss._exitAnnotationMode === 'function') ss._exitAnnotationMode();
         return true;
     }
-    // enterAnnotationMode 由主文件提供的回调执行
+    // enterAnnotationMode 由主文件提供的回调执行（内部完成 canvas 单次提交）
     if (typeof ss._enterAnnotationMode === 'function') ss._enterAnnotationMode({...ss.selCss});
     return true;
 }

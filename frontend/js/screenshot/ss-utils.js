@@ -16,6 +16,35 @@ export function pointInRect(px, py, rect) {
 }
 
 /**
+ * 拖拽产生的选区矩形（0.23.15 纯函数化）。
+ *
+ * 起点→当前点；`shiftKey` 按住时强制 1:1 正方形——边长取两轴较大位移，
+ * 符号各自保持拖拽方向（因此反向拖选同样成立）。
+ *
+ * 新建拖选、pending-snap 达到 3px 阈值后转自由框选，这两条路径在 pointermove
+ * 与 release 时都调用本函数。共用同一份数学，是「松手用 release 坐标重算最终
+ * 矩形」不会与拖动过程中的采样出现分歧的前提。
+ *
+ * @param {number} startX 起点 CSS X
+ * @param {number} startY 起点 CSS Y
+ * @param {number} curX 当前点 CSS X
+ * @param {number} curY 当前点 CSS Y
+ * @param {boolean} shiftKey 是否强制 1:1
+ * @returns {{x:number,y:number,w:number,h:number}} CSS 像素矩形（w/h 非负）
+ */
+export function computeDragRect(startX, startY, curX, curY, shiftKey = false) {
+    if (!shiftKey) return norm(startX, startY, curX, curY);
+    const dx = curX - startX;
+    const dy = curY - startY;
+    const side = Math.max(Math.abs(dx), Math.abs(dy));
+    return norm(
+        startX, startY,
+        startX + (dx >= 0 ? side : -side),
+        startY + (dy >= 0 ? side : -side),
+    );
+}
+
+/**
  * 矩形/椭圆按住 Shift 约束长宽等比（0.11.8-e）：
  * 从起点 (sx,sy) 到当前 (ex,ey)，取 max(|dx|,|dy|) 作等边，符号保持原方向。
  * 只对 rect/ellipse 生效——箭头/铅笔等自由笔画不约束。

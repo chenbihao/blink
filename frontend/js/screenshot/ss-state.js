@@ -13,6 +13,13 @@ export const ss = {
     // 0.20.5：动态交互层——遮罩/边框/手柄，拖动/缩放只清理此层
     interactionCanvas: null,
     interactionCtx: null,
+    // 0.23.15：实线选区实时层——拖动期间由 ss-live-selection.js 独家驱动
+    liveSelectionEl: null,
+    liveMaskTop: null,
+    liveMaskBottom: null,
+    liveMaskLeft: null,
+    liveMaskRight: null,
+    liveBorderEl: null,
     annotCanvas: null,
     annotCtx: null,
     toolbar: null,
@@ -330,6 +337,13 @@ export function initDOM() {
     // 0.20.5：动态交互层 canvas
     ss.interactionCanvas = document.getElementById('interaction-canvas');
     ss.interactionCtx = ss.interactionCanvas ? ss.interactionCanvas.getContext('2d') : null;
+    // 0.23.15：实线选区实时层（四遮罩 + 唯一边框）
+    ss.liveSelectionEl = document.getElementById('live-selection');
+    ss.liveMaskTop = document.getElementById('live-mask-top');
+    ss.liveMaskBottom = document.getElementById('live-mask-bottom');
+    ss.liveMaskLeft = document.getElementById('live-mask-left');
+    ss.liveMaskRight = document.getElementById('live-mask-right');
+    ss.liveBorderEl = document.getElementById('live-border');
     ss.hitCanvas = document.getElementById('ocr-hit-canvas');
     ss.hitCtx = ss.hitCanvas ? ss.hitCanvas.getContext('2d') : null;
     // 0.20.6：精调状态提示元素

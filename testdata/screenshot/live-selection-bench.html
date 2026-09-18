@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <title>截图实线选区：实时预览渲染策略基准（0.23.15）</title>
+    <style>
+        /* 基准页专用样式，与产品前端无关；不复用 frontend/css 任何 token。 */
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: #101014;
+            color: #e8e8ee;
+            font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+        }
+
+        #stage {
+            position: relative;
+            width: 100vw;
+            height: 60vh;
+            overflow: hidden;
+            background: #22222a;
+        }
+
+        #base-canvas, #interaction-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        #live-selection {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        #live-selection > div {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.45);
+        }
+
+        #live-border {
+            box-sizing: border-box;
+            border: 2px solid #4a9eff;
+        }
+
+        #out {
+            margin: 0;
+            padding: 12px 16px;
+            white-space: pre-wrap;
+            font-family: Consolas, monospace;
+        }
+
+        .hint {
+            padding: 8px 16px;
+            color: #9a9aa8;
+        }
+    </style>
+</head>
+<body>
+<div class="hint">
+    本页对比截图实线选区"拖动期间"的两套实时预览策略，用于在目标显示器上核对帧预算。<br/>
+    策略 A（改造前）：每帧在 W×H 物理像素的透明画布上 clearRect + 4×fillRect + strokeRect。<br/>
+    策略 B（改造后）：每帧只写 5 个 DOM 元素（四遮罩 + 一边框）的几何，画布零绘制。<br/>
+    直接双击本文件用 Edge/Chrome 打开即可；结果同时写入 document.title，便于无头环境抓取。
+</div>
+
+<div id="stage">
+    <canvas id="base-canvas"></canvas>
+    <canvas id="interaction-canvas"></canvas>
+    <div id="live-selection">
+        <div id="live-mask-top"></div>
+        <div id="live-mask-bottom"></div>
+        <div id="live-mask-left"></div>
+        <div id="live-mask-right"></div>
+        <div id="live-border"></div>
+    </div>
+</div>
+
+<pre id="out">跑分中…</pre>
+
+<script>
+    (function () {
+        'use strict';
+
+        const SURFACES = [
+            {name: '1080p 单屏', w: 1920, h: 1080},
+            {name: '4K 单屏', w: 3840, h: 2160},
+            {name: '双 4K 虚拟桌面', w: 7680, h: 4320},
+        ];
+        const ITERATIONS = 120;
+
+        const stage = document.getElementById('stage');
+        const baseCanvas = document.getElementById('base-canvas');
+        const interactionCanvas = document.getElementById('interaction-canvas');
+        const interactionCtx = interactionCanvas.getContext('2d');
+        const maskTop = document.getElementById('live-mask-top');
+        const maskBottom = document.getElementById('live-mask-bottom');
+        const maskLeft = document.getElementById('live-mask-left');
+        const maskRight = document.getElementById('live-mask-right');
+        const border = document.getElementById('live-border');
+
+        /** 取耗时分布（毫秒） */
+        function stats(samples) {
+            const sorted = samples.slice().sort((a, b) => a - b);
+            const sum = sorted.reduce((a, b) => a + b, 0);
+            return {
+                avg: sum / sorted.length,
+                p50: sorted[Math.floor(sorted.length * 0.5)],
+                p95: sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1],
+                max: sorted[sorted.length - 1],
+            };
+        }
+
+        /** 强制 canvas 把已提交的绘制命令真正光栅化（否则测到的是命令录制耗时） */
+        function flushCanvas(ctx) {
+            ctx.getImageData(0, 0, 1, 1);
+        }
+
+        /**
+         * 策略 A：改造前的逐帧全屏重绘。
+         * 每次迭代模拟一帧的鼠标位移（矩形缓慢位移 + 缩放）。
+         */
+        function benchCanvasStrategy(w, h) {
+            interactionCanvas.width = w;
+            interactionCanvas.height = h;
+            const ctx = interactionCtx;
+            const samples = [];
+            let rectX = Math.round(w * 0.1);
+            let rectY = Math.round(h * 0.1);
+            let rectW = Math.round(w * 0.3);
+            let rectH = Math.round(h * 0.3);
+            const lineWidth = 4;
+
+            // 预热：首帧包含画布分配
+            for (let warm = 0; warm < 3; warm++) {
+                const px = rectX, py = rectY, pw = rectW, ph = rectH;
+                ctx.clearRect(0, 0, w, h);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                ctx.fillRect(0, 0, w, py);
+                ctx.fillRect(0, py + ph, w, h - py - ph);
+                ctx.fillRect(0, py, px, ph);
+                ctx.fillRect(px + pw, py, w - px - pw, ph);
+                ctx.strokeStyle = '#4a9eff';
+                ctx.lineWidth = lineWidth;
+                ctx.strokeRect(px, py, pw, ph);
+                flushCanvas(ctx);
+            }
+
+            for (let i = 0; i < ITERATIONS; i++) {
+                rectX = Math.round(w * 0.1 + (w * 0.4) * (i / ITERATIONS));
+                rectY = Math.round(h * 0.1 + (h * 0.4) * (i / ITERATIONS));
+                rectW = Math.round(w * 0.3 + (w * 0.05) * (i / ITERATIONS));
+                rectH = Math.round(h * 0.3 + (h * 0.05) * (i / ITERATIONS));
+                const px = rectX, py = rectY, pw = rectW, ph = rectH;
+
+                const t0 = performance.now();
+                ctx.clearRect(0, 0, w, h);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                ctx.fillRect(0, 0, w, py);
+                ctx.fillRect(0, py + ph, w, h - py - ph);
+                ctx.fillRect(0, py, px, ph);
+                ctx.fillRect(px + pw, py, w - px - pw, ph);
+                ctx.strokeStyle = '#4a9eff';
+                ctx.lineWidth = lineWidth;
+                ctx.strokeRect(px, py, pw, ph);
+                flushCanvas(ctx);
+                samples.push(performance.now() - t0);
+            }
+            return stats(samples);
+        }
+
+        /**
+         * 策略 B：改造后的 DOM 实时层。
+         * 几何按"桌面尺寸"等比铺开（与 A 相同的位移轨迹），但只写 5 个元素的样式；
+         * 用一次强制同步布局（读 offsetHeight）捕获样式重算 + 布局开销——
+         * 绘制/合成由合成器承担，不在主线程同步预算内。
+         */
+        function benchDomStrategy(w, h) {
+            const stageW = stage.clientWidth;
+            const stageH = stage.clientHeight;
+            const samples = [];
+            let rectX = Math.round(stageW * 0.1);
+            let rectY = Math.round(stageH * 0.1);
+            let rectW = Math.round(stageW * 0.3);
+            let rectH = Math.round(stageH * 0.3);
+
+            for (let i = 0; i < ITERATIONS; i++) {
+                rectX = Math.round(stageW * 0.1 + (stageW * 0.4) * (i / ITERATIONS));
+                rectY = Math.round(stageH * 0.1 + (stageH * 0.4) * (i / ITERATIONS));
+                rectW = Math.round(stageW * 0.3 + (stageW * 0.05) * (i / ITERATIONS));
+                rectH = Math.round(stageH * 0.3 + (stageH * 0.05) * (i / ITERATIONS));
+                const x = rectX, y = rectY, wCss = rectW, hCss = rectH;
+
+                const t0 = performance.now();
+                maskTop.style.height = y + 'px';
+                maskBottom.style.top = (y + hCss) + 'px';
+                maskLeft.style.top = y + 'px';
+                maskLeft.style.height = hCss + 'px';
+                maskLeft.style.width = x + 'px';
+                maskRight.style.top = y + 'px';
+                maskRight.style.height = hCss + 'px';
+                maskRight.style.left = (x + wCss) + 'px';
+                border.style.left = x + 'px';
+                border.style.top = y + 'px';
+                border.style.width = wCss + 'px';
+                border.style.height = hCss + 'px';
+                // 强制同步布局：把样式重算 + 布局的开销计入本帧
+                void stage.offsetHeight;
+                samples.push(performance.now() - t0);
+            }
+            // 供读者核对：DOM 策略与桌面物理尺寸无关，这里记录一次几何量级
+            return {stats: stats(samples), desktop: {w, h}};
+        }
+
+        const lines = [];
+        const json = {surfaces: [], dom: null};
+
+        lines.push('截图实线选区实时预览渲染策略基准（0.23.15）');
+        lines.push('UA: ' + navigator.userAgent);
+        lines.push('devicePixelRatio: ' + window.devicePixelRatio
+            + ' / viewport: ' + window.innerWidth + '×' + window.innerHeight
+            + ' / 迭代: ' + ITERATIONS + ' 次');
+        lines.push('');
+
+        lines.push('── 策略 A：逐帧全屏 canvas 重绘（clear + 4×fill + stroke，含强制光栅化）');
+        for (const s of SURFACES) {
+            const st = benchCanvasStrategy(s.w, s.h);
+            json.surfaces.push({surface: s.name, w: s.w, h: s.h, avg: st.avg, p95: st.p95, max: st.max});
+            lines.push(
+                `  ${s.name.padEnd(18)} ${String(s.w + '×' + s.h).padEnd(12)}`
+                + ` avg ${st.avg.toFixed(2)} ms`
+                + `  p95 ${st.p95.toFixed(2)} ms`
+                + `  max ${st.max.toFixed(2)} ms`
+                + `  | 60Hz 预算占比 ${(st.avg / 16.67 * 100).toFixed(0)}%`
+                + `  120Hz ${(st.avg / 8.33 * 100).toFixed(0)}%`
+                + `  144Hz ${(st.avg / 6.94 * 100).toFixed(0)}%`
+            );
+        }
+        lines.push('');
+
+        const dom = benchDomStrategy(7680, 4320);
+        json.dom = dom.stats;
+        lines.push('── 策略 B：DOM 实时层（5 元素几何写入 + 强制同步布局）');
+        lines.push(
+            `  与桌面尺寸无关（同样按双 4K 桌面轨迹）`
+            + ` avg ${dom.stats.avg.toFixed(3)} ms`
+            + `  p95 ${dom.stats.p95.toFixed(3)} ms`
+            + `  max ${dom.stats.max.toFixed(3)} ms`
+            + `  | 60Hz 预算占比 ${(dom.stats.avg / 16.67 * 100).toFixed(1)}%`
+            + `  120Hz ${(dom.stats.avg / 8.33 * 100).toFixed(1)}%`
+        );
+        lines.push('');
+
+        // 每帧全屏像素操作量（结构性事实，与硬件无关）
+        lines.push('── 每帧全屏像素操作量（结构性）');
+        for (const s of SURFACES) {
+            const px = s.w * s.h;
+            lines.push(
+                `  ${s.name.padEnd(18)} 画布 ${(px / 1e6).toFixed(1)} MP`
+                + `  策略 A: clear ${(px / 1e6).toFixed(1)}MP + 遮罩 ${(px / 1e6).toFixed(1)}MP`
+                + `  = ${(2 * px / 1e6).toFixed(1)} MP/帧`
+                + `  | 120Hz → ${(2 * px * 120 / 1e9).toFixed(1)} GP/s`
+                + `  策略 B: 0 MP/帧`
+            );
+        }
+        lines.push('');
+        lines.push('说明：策略 A 的耗时包含强制光栅化（getImageData 冲刷），代表主线程光栅成本；');
+        lines.push('策略 B 只测样式重算 + 布局，绘制/合成由合成器承担（5 个纯色盒子，远小于 33MP 图层）。');
+        lines.push('两套策略都应结合目标显示器的实测帧间隔一起看（本页不替代真机手动验收矩阵）。');
+
+        document.getElementById('out').textContent = lines.join('\n');
+        document.title = 'BENCH_DONE';
+        window.__benchResult = json;
+    })();
+</script>
+</body>
+</html>

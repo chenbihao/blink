@@ -154,4 +154,63 @@ const MON = {x: 0, y: 0, w: 1920, h: 1080};
 
 console.log('✓ computeFloatingPlacement tests passed');
 
+// ── 0.23.15：computeDragRect（拖选矩形） ─────────────────────────────────
+//
+// 新建拖选与 pending-snap 转自由框选在 pointermove / release 两条路径共用本函数，
+// 因此这里的断言同时是"松手矩形 == 拖动最后一帧矩形"契约的守门条件。
+
+{
+    const {computeDragRect} = await import('./ss-utils.js');
+
+    // 普通拖拽（右下方向）
+    assert.deepEqual(
+        computeDragRect(10, 20, 110, 80),
+        {x: 10, y: 20, w: 100, h: 60},
+        '普通拖拽: 直接归一化',
+    );
+    // 反向拖拽（左上方向）——四个方向反向拖选都必须得到同一个矩形
+    assert.deepEqual(
+        computeDragRect(110, 80, 10, 20),
+        {x: 10, y: 20, w: 100, h: 60},
+        '反向拖拽: 与正向得到同一矩形',
+    );
+    // 零位移（单击，未达阈值）
+    assert.deepEqual(computeDragRect(50, 50, 50, 50), {x: 50, y: 50, w: 0, h: 0}, '零位移: 0×0');
+
+    // Shift 1:1：边长取两轴较大位移，符号各自保持方向
+    assert.deepEqual(
+        computeDragRect(100, 100, 160, 130, true),
+        {x: 100, y: 100, w: 60, h: 60},
+        'Shift 1:1: 取较大位移作边长',
+    );
+    assert.deepEqual(
+        computeDragRect(100, 100, 130, 160, true),
+        {x: 100, y: 100, w: 60, h: 60},
+        'Shift 1:1: 以纵轴较大位移为准',
+    );
+    assert.deepEqual(
+        computeDragRect(100, 100, 40, 70, true),
+        {x: 40, y: 40, w: 60, h: 60},
+        'Shift 1:1 + 左上反向: 边长不变、方向翻转',
+    );
+    assert.deepEqual(
+        computeDragRect(100, 100, 40, 130, true),
+        {x: 40, y: 100, w: 60, h: 60},
+        'Shift 1:1: 横向反向 + 纵向正向，边长仍取较大位移',
+    );
+    // 未按 Shift 时 shiftKey 缺省不约束
+    assert.deepEqual(
+        computeDragRect(0, 0, 100, 20),
+        {x: 0, y: 0, w: 100, h: 20},
+        '未按 Shift: 不约束',
+    );
+    assert.deepEqual(
+        computeDragRect(0, 0, 100, 20, false),
+        {x: 0, y: 0, w: 100, h: 20},
+        'shiftKey=false: 不约束',
+    );
+
+    console.log('✓ computeDragRect tests passed');
+}
+
 console.log('\nss-utils tests all passed');

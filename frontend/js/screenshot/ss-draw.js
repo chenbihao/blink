@@ -1,64 +1,32 @@
-//! 截图 overlay 绘制模块（0.14.6 §4 拆分，0.20.5 分层优化）。
+//! 截图 overlay 绘制模块（0.14.6 §4 拆分，0.20.5 分层优化，0.23.15 拖动期职责切换）。
 //!
-//! 0.20.5 分层架构：
+//! 分层架构：
 //! - #canvas（静态层）：只在 session 初始化/来源切换时 drawImage 绘制截图原图
-//! - #interaction-canvas（动态层）：统一绘制暗色遮罩、边框、手柄
+//! - #interaction-canvas（动态层）：**一次提交**成品——遮罩、边框、手柄
+//! - #live-selection（实时层，0.23.15）：拖动期间的选区预览，由 ss-live-selection.js 独家驱动
 //! - #annot-canvas（标注层）：保持独立生命周期，不合并回动态层
 //!
-//! 从 chord-screenshot.js 提取的绘制函数：
+//! 0.23.15 的关键变化：拖动期间 `#interaction-canvas` **零绘制**。
+//! 逐帧的几何变化交给 DOM 实时层（成本与截图总面积无关），canvas 只承担
+//! 「拖动开始时清空一次」与「松手时画回成品」两个动作。因此本模块不再提供
+//! 按帧调用的选区绘制入口（旧的 drawSelection / scheduleDrawSelection /
+//! scheduleDrawFinalSelection 已删除，避免重新形成两个独立实时队列）。
+//!
+//! 绘制函数：
 //! - drawStaticBase：静态原图（初始化/来源切换/drawDimmed 时调）
-//! - drawSelection：选区拖拽中的实时绘制（只画动态层）
-//! - drawFinalSelection：选区确定后的静态绘制（只画动态层）
-//! - redrawAnnotPreview：标注实时预览
-//! - redrawAnnotFull：全量重绘标注层
+//! - drawDimmed：无选区时的整屏暗罩
+//! - drawFinalSelection：选区确定后的单次提交（遮罩 + 边框 + 手柄）
+//! - redrawAnnotPreview / redrawAnnotFull：标注实时预览与全量重绘
 
 import {ss} from './ss-state.js';
-import {norm} from './ss-utils.js';
 import * as annot from './annotation-engine.js';
 import {cssPointToScreen, cssRectToBitmap, formatSelectionInfo, monitorDprAtCss} from './ss-selection-geometry.js';
 import {applyFloatingUiScaleAt} from './ss-display.js';
-
-// H1 优化：rAF 节流——同一帧内多次 mousemove 只绘制一次
-let _drawSelectionRaf = null;
-let _drawFinalSelectionRaf = null;
+import {hideLiveSelection} from './ss-live-selection.js';
 
 /** 取截图底图来源：优先用 screenshotOffscreen（canvas→canvas 无解码开销） */
 function getScreenshotSource() {
     return ss.screenshotOffscreen || ss.screenshot;
-}
-
-/** H1 优化：rAF 节流版 drawSelection，mousemove 高频调用时合并到单帧 */
-export function scheduleDrawSelection() {
-    if (_drawSelectionRaf !== null) return;
-    _drawSelectionRaf = requestAnimationFrame(() => {
-        _drawSelectionRaf = null;
-        drawSelection();
-    });
-}
-
-/** 取消待执行的 drawSelection rAF（mouseup / ESC 时调） */
-export function cancelDrawSelectionRaf() {
-    if (_drawSelectionRaf !== null) {
-        cancelAnimationFrame(_drawSelectionRaf);
-        _drawSelectionRaf = null;
-    }
-}
-
-/** 性能优化：rAF 节流版 drawFinalSelection，move/resize 高频调用时合并到单帧 */
-export function scheduleDrawFinalSelection() {
-    if (_drawFinalSelectionRaf !== null) return;
-    _drawFinalSelectionRaf = requestAnimationFrame(() => {
-        _drawFinalSelectionRaf = null;
-        drawFinalSelection();
-    });
-}
-
-/** 取消待执行的 drawFinalSelection rAF */
-export function cancelDrawFinalSelectionRaf() {
-    if (_drawFinalSelectionRaf !== null) {
-        cancelAnimationFrame(_drawFinalSelectionRaf);
-        _drawFinalSelectionRaf = null;
-    }
 }
 
 /**
@@ -102,6 +70,8 @@ export function drawStaticBase() {
 
 /** 暗色蒙版（初始态 + 无选区时）：原图在静态层，整屏遮罩只画到交互层。 */
 export function drawDimmed() {
+    // 0.23.15：canvas 提交与实时层隐藏必须同一帧，避免闪白 / 双蒙版
+    hideLiveSelection();
     drawStaticBase();
     const {interactionCtx, interactionCanvas} = ss;
     if (!interactionCtx || !interactionCanvas) return;
@@ -110,53 +80,18 @@ export function drawDimmed() {
 }
 
 /**
- * 选区绘制：选区外暗 + 选区内亮。
- * 0.20.5：只绘制动态交互层（遮罩 + 边框），不再重绘静态底图。
- * 拖拽期间 drawImage(底图) 次数为 0。
- */
-export function drawSelection() {
-    const {interactionCtx, interactionCanvas, startX, startY, endX, endY, sizeHint} = ss;
-    if (!interactionCtx || !interactionCanvas) return;
-    // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
-    const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
-    const r = norm(startX, startY, endX, endY);
-    const bmp = cssRectToBitmap(r, meta);
-    const px = bmp.x;
-    const py = bmp.y;
-    const pw = bmp.w;
-    const ph = bmp.h;
-    // 边框粗细按选区所在屏的 monitorDpr 做视觉补偿
-    const targetDpr = monitorDprAtCss(r.x, r.y, meta);
-
-    // 0.20.5：只清理动态交互层，不触碰静态底图
-    interactionCtx.clearRect(0, 0, interactionCanvas.width, interactionCanvas.height);
-
-    // 暗色蒙版（选区外）
-    interactionCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-    interactionCtx.fillRect(0, 0, interactionCanvas.width, py);
-    interactionCtx.fillRect(0, py + ph, interactionCanvas.width, interactionCanvas.height - py - ph);
-    interactionCtx.fillRect(0, py, px, ph);
-    interactionCtx.fillRect(px + pw, py, interactionCanvas.width - px - pw, ph);
-
-    // 选区边框（拖拽预览：实线，与智能预选的虚线区分）
-    interactionCtx.strokeStyle = '#4a9eff';
-    interactionCtx.lineWidth = 2 * targetDpr;
-    interactionCtx.strokeRect(px, py, pw, ph);
-
-    // size-hint 显示物理像素尺寸 + 坐标（0.15.8 R0：统一用 formatSelectionInfo）
-    const screenPos = cssPointToScreen(r.x, r.y, meta);
-    sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
-    sizeHint.classList.remove('hidden');
-    applyFloatingUiScaleAt(sizeHint, r.x, r.y);
-    sizeHint.style.left = (r.x + 4) + 'px';
-    sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';
-}
-
-/**
- * 确定选区后的静态绘制（选区不再随鼠标变化，但仍需要蒙版效果）。
+ * 确定选区后的**单次提交**（选区不再随鼠标变化，但仍需要蒙版效果）。
+ *
+ * 0.23.15：这是 canvas 侧唯一的选区提交入口。函数开头先隐藏实时 DOM 层，
+ * 于是「DOM 隐藏 + canvas 提交」必然落在同一个 JS task、同一帧内——
+ * 松手时不会出现闪白、双边框或短暂无蒙版，且自动覆盖全部退出路径
+ * （正常提交 / 选区过小 / ESC / reset / blur / 会话清场）。
+ *
  * 0.20.5：只绘制动态交互层，不重绘底图。拖动/缩放期间 drawImage(底图) 次数为 0。
+ * 0.23.15：本函数只在拖动结束/选区确定时调用一次，不在拖动热路径中。
  */
 export function drawFinalSelection() {
+    hideLiveSelection();
     const {interactionCtx, interactionCanvas, selCss} = ss;
     if (!selCss || !interactionCtx || !interactionCanvas) return;
     // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
@@ -184,8 +119,8 @@ export function drawFinalSelection() {
     interactionCtx.lineWidth = 2 * targetDpr;
     interactionCtx.strokeRect(px, py, pw, ph);
 
-    // size-hint：选区确定后也需显示尺寸+坐标（与拖拽阶段一致）。
-    // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过 drawSelection，
+    // size-hint：选区确定后也需显示尺寸+坐标（与拖动阶段一致）。
+    // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过拖动预览，
     // 需要在此统一补显。
     // 但 canvas-backed 来源（长截图/剪贴板）不显示截图坐标提示。
     if (ss.sizeHint && !ss.editorSession.canvasBacked) {
