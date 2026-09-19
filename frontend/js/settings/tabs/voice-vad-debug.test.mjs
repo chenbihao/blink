@@ -380,10 +380,19 @@ const copyDict = {
     "voice.local.vad_debug.copy_timeline": "切句与识别",
     "voice.local.vad_debug.copy_energy": "能量轨迹",
     "voice.local.vad_debug.copy_coordinator": "协调器状态",
-    "voice.local.vad_debug.copy_raw": "原始 JSON",
+    "voice.local.vad_debug.copy_summary": "摘要",
+    "voice.local.vad_debug.copy_waiting": "等待与拒绝（同一原因合并）",
+    "voice.local.vad_debug.copy_trimmed": "… 另有 {count} 条未列出（{kept} 条上限）",
+    "voice.local.vad_debug.copy_stride": "降采样：每 {stride} 帧取 1（原始 {total} 帧）",
+    "voice.local.vad_debug.copy_counts": "boundaries={boundaries} commits={commits} decisions={decisions}(accepted={accepted} waiting={waiting}) text_events={textEvents} composite={composite} quiet_spans={quiet} rejected={rejected}",
     "voice.local.vad_debug.copy_empty": "（无）",
 };
-const copyTranslate = key => copyDict[key] ?? labelDict[key] ?? key;
+/** 与 i18n 的 t(key, params) 同语义（含 {name} 插值），供载荷直接复用。 */
+const copyTranslate = (key, params) => {
+    const raw = copyDict[key] ?? labelDict[key] ?? key;
+    if (!params) return raw;
+    return raw.replace(/\{(\w+)\}/g, (_, name) => String(params[name] ?? ""));
+};
 
 const copyResult = {
     duration_ms: 23_170,
@@ -425,7 +434,9 @@ const copyText = buildVadDebugCopyText(copyResult, {
 assert.match(copyText, /=== Blink VAD 调试信息 ===/);
 assert.match(copyText, /engine_id=funasr model_id=gguf\/fun-asr-nano-q4km/);
 assert.match(copyText, /file=sample\.wav/);
-assert.match(copyText, /min_sentence_ms=800 trace_points=2/);
+assert.match(copyText, /min_sentence_ms=800/);
+assert.match(copyText, /boundaries=1 commits=1 decisions=2\(accepted=1 waiting=1\) text_events=1 composite=0 quiet_spans=1 rejected=1/,
+    "摘要必须给出各项计数（一眼看规模与异常）");
 assert.equal(copyText.split("min_sentence_ms=").length - 1, 1,
     "结果已有的字段不得被参数快照重复输出");
 assert.match(copyText, /draft_min_s=5/, "参数快照必须进载荷");
@@ -442,9 +453,43 @@ assert.match(copyText, /trace\.quiet_spans \(1\):\n {2}19\.29s-20\.23s/);
 assert.match(copyText, /trace\.rejected_short_sentences \(1\):\n {2}t=2\.80s sentence_ms=370 silence_ms=300 reason=short_phrase/);
 assert.match(copyText, /\[能量轨迹\] time_ms,rms,on,off,speaking/);
 assert.match(copyText, /100,0\.020000,0\.010000,0\.005000,1/);
-assert.match(copyText, /\[原始 JSON\]/);
-assert.match(copyText, /"strongRunMs": 1150/, "原始 JSON 必须是完整未裁剪的");
+// 0.23.17 精简：不再附整份原始 JSON（字段已被上面各小节覆盖），
+// 逐条 waiting 决策合并为区间行，能量轨迹按需降采样
+assert.doesNotMatch(copyText, /\[原始 JSON\]/, "不再转储原始 JSON");
+assert.match(copyText, /^ {2}t=21\.60s wait_reason=natural_sentence_voiced_not_credible/m,
+    "等待决策合并为一行（单条时不带区间与次数）");
+assert.doesNotMatch(copyText, /降采样/, "点数未超上限时不加降采样注释");
 assert.doesNotMatch(copyText, /voice\.local\.vad_debug\.copy_/, "载荷文案必须已本地化");
+
+// 连续同因的等待必须合并成区间行：×次数 + 区间终点
+const mergedWait = buildVadDebugCopyText({
+    ...copyResult,
+    decisions: [
+        ...copyResult.decisions,
+        {audioMs: 22_000, ownedStartMs: 19_290, ownedEndMs: 22_000, reason: "natural_silence",
+            outcome: "waiting", waitReason: "natural_sentence_voiced_not_credible",
+            voicedMs: 1_100, strongMs: 360, strongRunMs: 60, quietMs: 500},
+    ],
+}, {t: copyTranslate});
+assert.match(mergedWait, /t=21\.60s~22\.00s ×2 wait_reason=natural_sentence_voiced_not_credible[\s\S]*strong_run_ms=60ms/m,
+    "同一原因的连续等待合并为一行，并保留区间末端的判据快照");
+assert.match(mergedWait, /等待与拒绝（同一原因合并） \(1 runs \/ 2 decisions\):/);
+
+// 长列表封顶 + 能量轨迹降采样
+const manyPoints = Array.from({length: 1_200}, (_, index) => ({
+    time_ms: index * 10, rms: 0.01, on: 0.02, off: 0.005, speaking: index % 2 === 0,
+}));
+const longCopy = buildVadDebugCopyText({
+    ...copyResult,
+    trace: {...copyResult.trace, points: manyPoints},
+    text_events: Array.from({length: 70}, (_, index) => ({
+        kind: "preview", fed_ms: index * 10, wall_ms: index * 10, text: `t${index}`,
+    })),
+}, {t: copyTranslate});
+assert.match(longCopy, /降采样：每 6 帧取 1（原始 1200 帧）/, "能量轨迹必须降采样");
+assert.equal(longCopy.split("\n").filter(line => /^\d+,/.test(line)).length, 200,
+    "能量轨迹最多 200 行");
+assert.match(longCopy, /… 另有 10 条未列出（60 条上限）/, "长列表必须封顶并说明省略条数");
 // 无协调器快照时整段省略，不写占位假信息
 assert.doesNotMatch(copyText, /协调器状态/);
 assert.match(buildVadDebugCopyText(copyResult, {t: copyTranslate, coordinatorTrace: {profile: "PreviewDraft"}}),

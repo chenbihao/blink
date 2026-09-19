@@ -155,12 +155,41 @@ pub struct EditorDictationState {
 /// 一次听写的合理长度，同时保证内存有界（§3.6 有界 snapshot）。
 const SNAPSHOT_MAX_SEGMENTS: usize = 256;
 
-/// Editor 听写保留窗口：最新 1 段定稿停留在浮窗，下一段定稿时冲刷（0.23.13）。
-const EDITOR_DICTATION_RETENTION: usize = 1;
+/// 0.23.17 渐进上屏保留窗口（段数）的 app 层最后一道收敛。
+///
+/// 配置层 `RecognitionConfig::sanitize` 已在持久化与引擎构造时收敛过；
+/// 这里再收敛一次，防止外部构造的 `SttConfig`（测试替身 / 迁移路径）
+/// 绕过配置命令把越界值送进 `DictationLedger`。
+///
+/// 语义（0.23.13 起，不是实现细节）：
+/// - G2 默认 0 —— 每段定稿立即注入前台应用，浮窗只显示实时预览；
+/// - Editor 默认 1 —— 最新一段定稿停留在浮窗，下一段定稿时才写入正文。
+fn retention_segments(configured: u32) -> usize {
+    configured.clamp(
+        crate::app::stt_config::RECOGNITION_RETENTION_MIN_SEGMENTS,
+        crate::app::stt_config::RECOGNITION_RETENTION_MAX_SEGMENTS,
+    ) as usize
+}
 
-/// G2 渐进上屏保留窗口：0 = 无保留，每段定稿立即注入前台应用，
-/// 浮窗只显示实时预览、不滞留已定稿段（0.23.13）。
-const G2_DICTATION_RETENTION: usize = 0;
+/// 读取 G2 渐进上屏保留窗口（段数）。
+fn g2_retention_from_config() -> usize {
+    retention_segments(
+        crate::app::stt_config::get_stt_config()
+            .local_engine
+            .recognition
+            .g2_retention_segments,
+    )
+}
+
+/// 读取编辑器连续听写保留窗口（段数）。
+fn editor_retention_from_config() -> usize {
+    retention_segments(
+        crate::app::stt_config::get_stt_config()
+            .local_engine
+            .recognition
+            .editor_retention_segments,
+    )
+}
 
 /// 松键后等待事件消费 task 收口的预算（0.22.9 起为 12s）。
 ///
@@ -184,12 +213,14 @@ struct StreamCounters {
 }
 
 impl EditorDictationState {
-    fn new(epoch: u64, session_ref: String, generation: u64) -> Self {
+    /// `retention` 为听写保留窗口（段数），由调用方从配置读取——
+    /// 不在此处隐式读全局配置，便于测试直接构造确定性的窗口。
+    fn new(epoch: u64, session_ref: String, generation: u64, retention: usize) -> Self {
         Self {
             epoch,
             session_ref,
             generation,
-            ledger: DictationLedger::new(EDITOR_DICTATION_RETENTION),
+            ledger: DictationLedger::new(retention),
             segments: VecDeque::new(),
             draft_spans: VecDeque::new(),
             truncated: 0,
@@ -605,6 +636,7 @@ impl VoiceService {
             epoch,
             session_ref,
             generation,
+            editor_retention_from_config(),
         ))));
 
         // 浮窗就近反馈（用户刚点了编辑器麦克风按钮，光标即按钮附近）；
@@ -1130,16 +1162,18 @@ impl VoiceService {
                     let final_delivery = Arc::new(AtomicBool::new(false));
                     session.final_delivery = final_delivery.clone();
 
-                    // 0.23.13 G2 渐进上屏：PreviewDraft 账本（保留窗口 0，
-                    // 定稿即投递注入 worker）+ 单消费者保序注入 worker +
-                    // 交付 ack task（0.23.14：ack 前浮窗保持待交付段）。
-                    // 其他 target 清空旧会话残留。
+                    // 0.23.13 G2 渐进上屏：PreviewDraft 账本（保留窗口默认 0，
+                    // 定稿即投递注入 worker；0.23.17 起可配置）+ 单消费者
+                    // 保序注入 worker + 交付 ack task（0.23.14：ack 前浮窗
+                    // 保持待交付段）。其他 target 清空旧会话残留。
+                    // 保留窗口在会话开始时冻结——中途改配置不改变在途会话
+                    // 的交付节奏（避免"已经上屏的段又回退到保留窗口"）。
                     session.dictation_ledger = None;
                     session.g2_flush_tx = None;
                     let mut pending_epoch: Option<u64> = None;
                     if session.target == VoiceTarget::ForegroundApp {
                         let ledger =
-                            Arc::new(Mutex::new(DictationLedger::new(G2_DICTATION_RETENTION)));
+                            Arc::new(Mutex::new(DictationLedger::new(g2_retention_from_config())));
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                         let (ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel();
                         let deferred = Arc::new(AtomicBool::new(false));
@@ -3136,7 +3170,7 @@ mod tests {
 
     #[test]
     fn editor_snapshot_is_bounded_and_reports_eviction() {
-        let mut state = EditorDictationState::new(7, "ed_test".into(), 3);
+        let mut state = EditorDictationState::new(7, "ed_test".into(), 3, 1);
         for seq in 1..=(SNAPSHOT_MAX_SEGMENTS as u64 + 4) {
             state.remember(seq, format!("segment-{seq}"));
         }
@@ -3154,7 +3188,7 @@ mod tests {
     /// 验收：confirmed 句段可靠、有序且只追加一次（重复快照不重复成段）。
     #[test]
     fn editor_confirmed_segments_are_ordered_and_single_shot() {
-        let mut state = EditorDictationState::new(1, "ed_test".into(), 1);
+        let mut state = EditorDictationState::new(1, "ed_test".into(), 1, 1);
 
         assert_eq!(
             state.push_confirmed_delta("第一句。"),
@@ -3193,7 +3227,7 @@ mod tests {
     /// 验收（0.23.13）：保留窗口外段先行冲刷，Final 冲刷 pending + 尾段。
     #[test]
     fn editor_retention_window_flushes_and_finalizes() {
-        let mut state = EditorDictationState::new(1, "ed_test".into(), 1);
+        let mut state = EditorDictationState::new(1, "ed_test".into(), 1, 1);
         let mk = |id: u64, text: &str| {
             crate::domain::stt::DraftSpan::new(
                 id,

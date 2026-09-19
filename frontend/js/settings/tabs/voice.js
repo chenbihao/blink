@@ -21,8 +21,9 @@ import {ensureLocalRuntimeMounted, getLocalEngineEntry, waitForEngineCard} from 
 import {navigateSettings} from "../navigation.js";
 import {formatAudioTranscriptionIdentity, parseAudioTranscriptionCapability,} from "./voice-file-transcribe.js";
 import {buildVadDebugCopyText, renderVadDebugResult, vadDebugProgressState, renderCoordinatorTrace} from "./voice-vad-debug.js";
-import {VAD_DEFAULTS, VAD_WINDOW_KEYS, VAD_WINDOW_RANGE, ensureVadWindowFields, normalizeVadWindows,} from "./voice-vad.js";
-import {RECOGNITION_DEFAULTS, RECOGNITION_RANGE, ensureRecognitionFields, normalizeRecognitionConfig,} from "./voice-recognition.js";
+import {VAD_DEFAULTS, ensureVadWindowFields} from "./voice-vad.js";
+import {RECOGNITION_DEFAULTS, ensureRecognitionFields} from "./voice-recognition.js";
+import {initAdvancedVoiceControls} from "./voice-advanced-ui.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
@@ -762,7 +763,8 @@ async function initCoordinatorTrace(config) {
 }
 
 // ── 0.10.3 高级选项（VAD）──────────────────
-// VAD 默认值与窗口归一化逻辑在 ./voice-vad.js（纯模块，voice-vad-windows.test.mjs 覆盖）
+// 0.23.17：多手柄时序条 + 策略预设的重设计装配在 ./voice-advanced-ui.js；
+// 默认值与归一化纯逻辑仍在 ./voice-vad.js 与 ./voice-recognition.js。
 
 async function initAdvancedOptions(config) {
     // 流式识别（伪流式：VAD 切句 + 累积预览）——仅本地模式生效
@@ -776,305 +778,18 @@ async function initAdvancedOptions(config) {
         });
     }
 
-    // VAD 切句参数
-    let recognitionControls = null;
-    initVadConfig(config, () => recognitionControls?.syncFromVad());
-    // Preview / Draft 识别协调参数（仅本地伪流式模式生效）
-    recognitionControls = initRecognitionConfig(config);
-}
-
-function initVadConfig(config, onVADChanged) {
-    // 确保 vad 对象存在（旧配置可能没有）
+    // 切分时钟（VAD）+ 双层识别（Preview / Draft）：时序条 + 预设行
     if (!config.local_engine.vad) {
         config.local_engine.vad = {...VAD_DEFAULTS};
     }
-    const vad = config.local_engine.vad;
-    // 旧配置可能缺窗口字段（0.23.7 前只有 3 个参数）；非法旧值安全归一化，
-    // 与后端 VadConfig::sanitize 规则一致
-    ensureVadWindowFields(vad);
-
-    const controls = [
-        // 0.23.13：silence_threshold 滑杆已移除——底噪自适应主导 on/off 阈值，
-        // 字段仅作旧配置兼容保留（Rust 侧默认 0.001）。
-        {
-            input: document.getElementById("voice-vad-min-silence-ms"),
-            val: document.getElementById("voice-vad-min-silence-ms-val"),
-            key: "min_silence_ms",
-            format: (v) => `${v}ms`,
-            validate: (v) => !isNaN(v) && v >= 100 && v <= 1000,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.vad.min_silence_ms.label",
-        },
-        {
-            input: document.getElementById("voice-vad-min-sentence-ms"),
-            val: document.getElementById("voice-vad-min-sentence-ms-val"),
-            key: "min_sentence_ms",
-            format: (v) => `${v}ms`,
-            validate: (v) => !isNaN(v) && v >= 200 && v <= 2000,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.vad.min_sentence_ms.label",
-        },
-        {
-            input: document.getElementById("voice-vad-soft-window-s"),
-            val: document.getElementById("voice-vad-soft-window-s-val"),
-            key: "soft_window_s",
-            format: (v) => `${v}s`,
-            validate: (v) => !isNaN(v) && v >= VAD_WINDOW_RANGE.soft_window_s.min,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.vad.soft_window_s.label",
-            isWindow: true,
-        },
-        {
-            input: document.getElementById("voice-vad-hard-window-s"),
-            val: document.getElementById("voice-vad-hard-window-s-val"),
-            key: "hard_window_s",
-            format: (v) => `${v}s`,
-            validate: (v) => !isNaN(v) && v >= VAD_WINDOW_RANGE.hard_window_s.min,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.vad.hard_window_s.label",
-            isWindow: true,
-        },
-        {
-            input: document.getElementById("voice-vad-max-uncommitted-s"),
-            val: document.getElementById("voice-vad-max-uncommitted-s-val"),
-            key: "max_uncommitted_s",
-            format: (v) => `${v}s`,
-            validate: (v) => !isNaN(v) && v >= VAD_WINDOW_RANGE.max_uncommitted_s.min,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.vad.max_uncommitted_s.label",
-            isWindow: true,
-        },
-    ];
-
-    // 更新滑动条填充进度（CSS 变量 --fill-pct 驱动 linear-gradient）
-    function updateSliderFill(slider) {
-        if (!slider) return;
-        const min = parseFloat(slider.min);
-        const max = parseFloat(slider.max);
-        const val = parseFloat(slider.value);
-        const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
-        slider.style.setProperty("--fill-pct", pct + "%");
-    }
-
-    function syncDisplay() {
-        for (const control of controls) {
-            if (!control.input) continue;
-            control.input.value = String(vad[control.key]);
-            if (control.val) control.val.textContent = control.format(vad[control.key]);
-            updateSliderFill(control.input);
-        }
-    }
-
-    // 回显当前值 + 可访问名称（滑块 label 是纯 span，读屏需要显式 aria-label）
-    syncDisplay();
-    for (const control of controls) {
-        if (control.input && control.ariaKey) {
-            control.input.setAttribute("aria-label", t(control.ariaKey));
-        }
-    }
-
-    for (const control of controls) {
-        if (!control.input) continue;
-        control.input.addEventListener("input", () => {
-            const val = control.parse(control.input.value);
-            if (control.val && !isNaN(val)) control.val.textContent = control.format(val);
-            updateSliderFill(control.input);
-        });
-        control.input.addEventListener("change", () => {
-            const val = control.parse(control.input.value);
-            if (!control.validate(val)) return;
-            vad[control.key] = val;
-            if (control.isWindow) {
-                // 窗口组合联动钳制：非法组合安全归一化（soft < hard <= uncommitted），
-                // 并同步其它滑块的显示
-                normalizeVadWindows(vad);
-                syncDisplay();
-            }
-            onVADChanged?.();
-            saveSttConfig(config, "local");
-        });
-    }
-
-    // 恢复默认
-    const resetBtn = document.getElementById("voice-vad-reset-btn");
-    if (resetBtn) {
-        resetBtn.addEventListener("click", () => {
-            for (const control of controls) {
-                vad[control.key] = VAD_DEFAULTS[control.key];
-            }
-            syncDisplay();
-            onVADChanged?.();
-            saveSttConfig(config, "local");
-        });
-    }
-
-    // 语言切换时刷新滑块可访问名称
-    onLangChange(() => {
-        for (const control of controls) {
-            if (control.input && control.ariaKey) {
-                control.input.setAttribute("aria-label", t(control.ariaKey));
-            }
-        }
-    });
-}
-
-function initRecognitionConfig(config) {
+    ensureVadWindowFields(config.local_engine.vad);
     if (!config.local_engine.recognition
         || typeof config.local_engine.recognition !== "object"
         || Array.isArray(config.local_engine.recognition)) {
         config.local_engine.recognition = {...RECOGNITION_DEFAULTS};
     }
-    const recognition = config.local_engine.recognition;
-    const getMaxUncommittedS = () => Number(config.local_engine.vad?.max_uncommitted_s);
-    const currentMaxUncommittedS = () => {
-        const value = getMaxUncommittedS();
-        return Number.isFinite(value) ? value : undefined;
-    };
-    ensureRecognitionFields(recognition, currentMaxUncommittedS());
-
-    const controls = [
-        {
-            input: document.getElementById("voice-recognition-preview-window-ms"),
-            val: document.getElementById("voice-recognition-preview-window-ms-val"),
-            key: "preview_window_ms",
-            format: (v) => `${v}ms`,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.preview_window_ms.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-preview-refresh-ms"),
-            val: document.getElementById("voice-recognition-preview-refresh-ms-val"),
-            key: "preview_refresh_ms",
-            format: (v) => `${v}ms`,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.preview_refresh_ms.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-draft-min-s"),
-            val: document.getElementById("voice-recognition-draft-min-s-val"),
-            key: "draft_min_s",
-            format: (v) => `${v}s`,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.draft_min_s.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-strong-pause-ms"),
-            val: document.getElementById("voice-recognition-strong-pause-ms-val"),
-            key: "strong_pause_ms",
-            format: (v) => `${v}ms`,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.strong_pause_ms.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-long-pause-ms"),
-            val: document.getElementById("voice-recognition-long-pause-ms-val"),
-            key: "long_pause_ms",
-            format: (v) => `${v}ms`,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.long_pause_ms.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-phrase-freeze-interval-ms"),
-            val: document.getElementById("voice-recognition-phrase-freeze-interval-ms-val"),
-            key: "phrase_freeze_interval_ms",
-            format: (v) => v > 0 ? `${v}ms` : t("voice.local.recognition.off_state"),
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.phrase_freeze_interval_ms.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-draft-target-s"),
-            val: document.getElementById("voice-recognition-draft-target-s-val"),
-            key: "draft_target_s",
-            // 目标窗口可视化：0=关闭；设值时显示优选区间 [max(最短, c−tol), c+tol]
-            format: (v) => {
-                if (!(v > 0)) return t("voice.local.recognition.off_state");
-                const tolerance = recognition.draft_target_tolerance_s;
-                const floor = Math.max(recognition.draft_min_s, v - tolerance);
-                return `${v}s · ${floor}–${v + tolerance}s`;
-            },
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.draft_target_s.label",
-        },
-        {
-            input: document.getElementById("voice-recognition-draft-target-tolerance-s"),
-            val: document.getElementById("voice-recognition-draft-target-tolerance-s-val"),
-            key: "draft_target_tolerance_s",
-            format: (v) => `${v}s`,
-            parse: (raw) => parseInt(raw, 10),
-            ariaKey: "voice.local.recognition.draft_target_tolerance_s.label",
-        },
-    ];
-
-    function updateSliderFill(slider) {
-        if (!slider) return;
-        const min = parseFloat(slider.min);
-        const max = parseFloat(slider.max);
-        const val = parseFloat(slider.value);
-        const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
-        slider.style.setProperty("--fill-pct", pct + "%");
-    }
-
-    function syncDisplay() {
-        for (const control of controls) {
-            if (!control.input) continue;
-            control.input.value = String(recognition[control.key]);
-            if (control.val) control.val.textContent = control.format(recognition[control.key]);
-            updateSliderFill(control.input);
-        }
-    }
-
-    syncDisplay();
-    for (const control of controls) {
-        if (control.input && control.ariaKey) {
-            control.input.setAttribute("aria-label", t(control.ariaKey));
-        }
-    }
-
-    for (const control of controls) {
-        if (!control.input) continue;
-        control.input.addEventListener("input", () => {
-            const value = control.parse(control.input.value);
-            if (!Number.isNaN(value) && control.val) control.val.textContent = control.format(value);
-            updateSliderFill(control.input);
-        });
-        control.input.addEventListener("change", () => {
-            const value = control.parse(control.input.value);
-            const range = RECOGNITION_RANGE[control.key];
-            if (!Number.isFinite(value) || value < range.min || value > range.max) {
-                syncDisplay();
-                return;
-            }
-            recognition[control.key] = value;
-            normalizeRecognitionConfig(recognition, currentMaxUncommittedS());
-            syncDisplay();
-            saveSttConfig(config, "local");
-        });
-    }
-
-    const resetBtn = document.getElementById("voice-recognition-reset-btn");
-    if (resetBtn) {
-        resetBtn.addEventListener("click", () => {
-            Object.assign(recognition, RECOGNITION_DEFAULTS);
-            normalizeRecognitionConfig(recognition, currentMaxUncommittedS());
-            syncDisplay();
-            saveSttConfig(config, "local");
-        });
-    }
-
-    onLangChange(() => {
-        for (const control of controls) {
-            if (control.input && control.ariaKey) {
-                control.input.setAttribute("aria-label", t(control.ariaKey));
-            }
-        }
-    });
-
-    return {
-        syncFromVad() {
-            normalizeRecognitionConfig(recognition, currentMaxUncommittedS());
-            syncDisplay();
-        },
-    };
+    ensureRecognitionFields(config.local_engine.recognition, config.local_engine.vad.max_uncommitted_s);
+    initAdvancedVoiceControls(config, (scope) => saveSttConfig(config, scope));
 }
 
 // ── 音频调试测试 ──────────────────────────────────────────────────────

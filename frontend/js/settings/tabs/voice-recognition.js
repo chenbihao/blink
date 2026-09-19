@@ -14,8 +14,14 @@ export const RECOGNITION_DEFAULTS = {
     long_pause_ms: 1100,
     // 0.23.16.5：0 = 关闭（沿用现状）。
     phrase_freeze_interval_ms: 0,
-    draft_target_s: 0,
+    // 0.23.17：目标窗口默认开启（10s ± 2s —— stock 未提交上限 12s 下
+    // 优选窗 [8, 12] 恰好可达）。0 仍是合法的"关闭"。
+    draft_target_s: 10,
     draft_target_tolerance_s: 2,
+    // 0.23.17：渐进上屏保留窗口（段数）。G2 = 0（定稿即注入），
+    // Editor = 1（最新一段停留到下一段定稿时写入正文）。
+    g2_retention_segments: 0,
+    editor_retention_segments: 1,
 };
 
 export const RECOGNITION_KEYS = [
@@ -27,6 +33,8 @@ export const RECOGNITION_KEYS = [
     "phrase_freeze_interval_ms",
     "draft_target_s",
     "draft_target_tolerance_s",
+    "g2_retention_segments",
+    "editor_retention_segments",
 ];
 
 export const RECOGNITION_RANGE = {
@@ -38,6 +46,8 @@ export const RECOGNITION_RANGE = {
     phrase_freeze_interval_ms: {min: 0, max: 3000},
     draft_target_s: {min: 0, max: 30},
     draft_target_tolerance_s: {min: 1, max: 10},
+    g2_retention_segments: {min: 0, max: 5},
+    editor_retention_segments: {min: 0, max: 5},
 };
 
 /** 0.23.16.5：固定节奏设值时的安全边界（0=关闭；设值 800～3000ms）。 */

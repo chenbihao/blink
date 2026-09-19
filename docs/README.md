@@ -57,7 +57,7 @@
 | **0.20** | [0.20-content-visual-workflow.md](./phases/0.20-content-visual-workflow.md) | 高频内容与视觉工作流（便签可靠性 / 剪贴板多选 / 颜色 / 图片编辑 / 截图性能与精调） | ✅ |
 | **0.21** | [0.21-capability-unification-feature-catalog.md](./phases/0.21-capability-unification-feature-catalog.md) | Capability 唯一执行入口、Action 全量分流、功能目录及 AI/MCP 出口策略 | ✅ |
 | **0.22** | [0.22-local-model-runtime-ppocrv6.md](./phases/0.22-local-model-runtime-ppocrv6.md) | 本地模型运行时、PP-OCRv6、OCR ONNX、Nano GGUF、implementation 拓扑与 ASR ONNX 退役；0.22.11~0.22.13 交互收尾（设置页关闭/编辑器三态确认、chord 全局快捷键、首启向导分步化） | ✅ |
-| **0.23** | [0.23-editor-voice-ai-workflow.md](./phases/0.23-editor-voice-ai-workflow.md) | 单会话文本工作台、Preview/Draft 双层识别、AI 确认与主链路稳定性收口；0.23.12 统一资源 ref 层、0.23.14 VAD/Preview-Draft 收尾、0.23.15 截图实线选区拖动流畅度、0.23.16 VAD 双层识别体验收口（组合预览反回退 + 目标窗口）均已完成 | ✅ |
+| **0.23** | [0.23-editor-voice-ai-workflow.md](./phases/0.23-editor-voice-ai-workflow.md) | 单会话文本工作台、Preview/Draft 双层识别、AI 确认与主链路稳定性收口；0.23.12 统一资源 ref 层、0.23.14 VAD/Preview-Draft 收尾、0.23.15 截图实线选区拖动流畅度、0.23.16 双层识别体验收口（组合预览反回退、Draft 在途不停摆、目标窗口默认开启、渐进上屏保留窗口配置化、设置页体验收口）均已完成 | ✅ |
 | **0.24** | [0.24-smart-tab-suggestion-system.md](./phases/0.24-smart-tab-suggestion-system.md) | Smart Tab 与统一建议系统（双槽位仲裁、Query/Awareness 评分、主窗口提示 UI 收敛、Needle 路由 Spike） | 📋 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。

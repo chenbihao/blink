@@ -90,50 +90,60 @@ assert.deepEqual(
     assert.ok(vad.soft_window_s < vad.hard_window_s);
 }
 
-// ── 界面静态对齐：三个滑块 + 分组标题 + 可访问名称 ──
+// ── 界面静态对齐：0.23.17 时序条重设计后的新契约 ──
 
 const voiceSource = await readFile(new URL("./voice.js", import.meta.url), "utf8");
 assert.doesNotMatch(voiceSource, /__TAURI__/);
+assert.match(
+    voiceSource,
+    /initAdvancedVoiceControls\(config/,
+    "voice.js 应装配 voice-advanced-ui 的高级输入控件",
+);
+const advancedUiSource = await readFile(new URL("./voice-advanced-ui.js", import.meta.url), "utf8");
 for (const id of [
-    "voice-vad-soft-window-s",
-    "voice-vad-hard-window-s",
-    "voice-vad-max-uncommitted-s",
+    "voice-ts-windows",
+    "voice-ts-pauses",
+    "voice-vad-min-sentence-ms",
+    "voice-vad-reset-btn",
 ]) {
-    assert.match(voiceSource, new RegExp(`getElementById\\("${id}"\\)`), `voice.js 应接线 ${id}`);
+    // 0.23.17：独立滑杆改由 bindRangeControl({id: "…"}) 统一接线
+    // （值 + --fill-pct 高亮填充一起回写），因此按 id 字面量匹配。
+    assert.match(advancedUiSource, new RegExp(`"${id}"`), `voice-advanced-ui.js 应接线 ${id}`);
 }
-// 窗口滑块 change 时必须联动归一化
-assert.match(voiceSource, /isWindow[\s\S]*?normalizeVadWindows\(vad\)/);
-// 恢复默认必须覆盖全部 6 个参数
-assert.match(voiceSource, /vad\[control\.key\] = VAD_DEFAULTS\[control\.key\]/);
-// 滑块需要可访问名称（i18n 驱动）
-assert.match(voiceSource, /setAttribute\("aria-label", t\(control\.ariaKey\)\)/);
+// 时序条提交时必须联动归一化（soft < hard <= max_uncommitted）
+assert.match(advancedUiSource, /normalizeVadWindows\(vad\)/);
+// 卡1 恢复默认覆盖 VAD 全字段 + 跨字段呈现的 strong/long
+assert.match(advancedUiSource, /Object\.assign\(vad, VAD_DEFAULTS\)/);
+assert.match(advancedUiSource, /recognition\.strong_pause_ms = RECOGNITION_DEFAULTS\.strong_pause_ms/);
+assert.match(advancedUiSource, /recognition\.long_pause_ms = RECOGNITION_DEFAULTS\.long_pause_ms/);
 
 const html = await readFile(new URL("../../../settings.html", import.meta.url), "utf8");
 for (const id of [
-    "voice-vad-soft-window-s",
-    "voice-vad-soft-window-s-val",
-    "voice-vad-hard-window-s",
-    "voice-vad-hard-window-s-val",
-    "voice-vad-max-uncommitted-s",
-    "voice-vad-max-uncommitted-s-val",
+    "voice-ts-pauses",
+    "voice-ts-windows",
+    "voice-preset-row",
+    "voice-vad-min-sentence-ms",
+    "voice-vad-min-sentence-ms-val",
+    "voice-vad-reset-btn",
 ]) {
     assert.match(html, new RegExp(`id="${id}"`), `settings.html 应包含 ${id}`);
 }
-// 滑块范围与安全边界一致
-assert.match(html, /id="voice-vad-soft-window-s" max="20"\s*min="3"/);
-assert.match(html, /id="voice-vad-hard-window-s" max="30"\s*min="5"/);
-assert.match(html, /id="voice-vad-max-uncommitted-s" max="30"\s*min="5"/);
 
 // ── i18n：zh/en 词条 key 对齐 ──
 
 const VAD_I18N_KEYS = [
     "voice.local.vad.windows.title",
+    "voice.local.vad.pauses.title",
     "voice.local.vad.soft_window_s.label",
+    "voice.local.vad.soft_window_s.short",
     "voice.local.vad.soft_window_s.hint",
     "voice.local.vad.hard_window_s.label",
+    "voice.local.vad.hard_window_s.short",
     "voice.local.vad.hard_window_s.hint",
     "voice.local.vad.max_uncommitted_s.label",
+    "voice.local.vad.max_uncommitted_s.short",
     "voice.local.vad.max_uncommitted_s.hint",
+    "voice.local.vad.min_silence_ms.short",
 ];
 for (const lang of ["zh", "en"]) {
     const source = await readFile(new URL(`../../i18n/${lang}.js`, import.meta.url), "utf8");

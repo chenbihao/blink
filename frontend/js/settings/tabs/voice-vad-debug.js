@@ -670,26 +670,21 @@ function debugField(object, camel, snake) {
     return value === undefined ? null : value;
 }
 
-/** 单条决策压缩成一行：完整字段名 + 秒制时间，便于与代码/JSON 对照检索。 */
-function formatDecisionLine(decision) {
-    const parts = [`t=${debugSeconds(debugField(decision, "audioMs", "audio_ms"))}`,
-        `outcome=${decision.outcome ?? "—"}`];
-    const via = debugField(decision, "acceptedVia", "accepted_via");
-    if (via != null) parts.push(`accepted_via=${via}`);
-    parts.push(`reason=${decision.reason ?? "—"}`);
-    const ownedStart = debugField(decision, "ownedStartMs", "owned_start_ms");
-    const ownedEnd = debugField(decision, "ownedEndMs", "owned_end_ms");
-    if (Number.isFinite(ownedStart) && Number.isFinite(ownedEnd)) {
-        parts.push(`owned=${debugSeconds(ownedStart)}-${debugSeconds(ownedEnd)}`);
-    }
+/**
+ * 决策的"有声证据"后缀：voiced / strong / strong_run / quiet（毫秒）。
+ *
+ * 采纳与等待共用——`strong_run` 是 case_17 可信度判据的形态证据，误切成因
+ * 基本都落在这四个数上，所以两类都带着它，省掉单独的逐条决策清单。
+ */
+function formatDecisionEvidence(decision) {
+    if (!decision) return [];
+    const parts = [];
     for (const [camel, snake] of [["voicedMs", "voiced_ms"], ["strongMs", "strong_ms"],
-        ["strongRunMs", "strong_run_ms"], ["quietMs", "quiet_ms"], ["sentenceMs", "sentence_ms"]]) {
+        ["strongRunMs", "strong_run_ms"], ["quietMs", "quiet_ms"]]) {
         const value = debugField(decision, camel, snake);
         if (Number.isFinite(value)) parts.push(`${snake}=${value}ms`);
     }
-    const waitReason = debugField(decision, "waitReason", "wait_reason");
-    if (waitReason != null) parts.push(`wait_reason=${waitReason}`);
-    return `  ${parts.join(" ")}`;
+    return parts;
 }
 
 /** 单条识别事件压缩成一行。 */
@@ -706,13 +701,78 @@ function formatTextEventLine(event) {
     return `  ${parts.join(" ")}`;
 }
 
+/** 长列表的行数上限（超出部分只报条数，避免复制文本被尾部噪声淹没）。 */
+const COPY_LIST_CAP = 60;
+
+/** 能量轨迹的降采样目标行数。 */
+const COPY_ENERGY_MAX_ROWS = 200;
+
 /**
- * 把一次 VAD 调试结果组装成可直接粘贴排查的完整文本。
+ * 同一 `wait_reason` 的连续 waiting 决策合并成一行。
  *
- * 结构：环境与参数 → 最终全文 → 切句与识别（boundaries / commits / decisions /
- * text_events / quiet_spans / rejected_short_sentences）→ 能量轨迹 CSV →
- * 协调器状态 → 原始 JSON。字段名保持后端原始命名，便于与代码、JSON 互相检索；
- * 秒制量只追加在括号/等号后，不替代原始毫秒值。
+ * 长静音/复语等待会让同一个候选在每块音频上重复记录同一条等待原因，
+ * 原始的逐条输出把几十行压在一段音频上，真正的转折点反而看不见。
+ * 合并后语义不变（起点~终点 ×次数 + 该区间最后一次的判据快照）。
+ */
+function summarizeWaitingRuns(decisions) {
+    const runs = [];
+    for (const decision of decisions) {
+        if (decision.outcome !== "waiting") continue;
+        const reason = debugField(decision, "waitReason", "wait_reason") ?? "—";
+        const audioMs = Number(debugField(decision, "audioMs", "audio_ms"));
+        const last = runs[runs.length - 1];
+        if (last && last.reason === reason) {
+            last.count += 1;
+            last.endMs = audioMs;
+            last.last = decision;
+            continue;
+        }
+        runs.push({reason, startMs: audioMs, endMs: audioMs, count: 1, last: decision});
+    }
+    return runs;
+}
+
+/** 合并后的等待行：`t=起点~终点 ×n wait_reason=…(判据快照)`。 */
+function formatWaitingRun(run) {
+    const range = run.count > 1
+        ? `${debugSeconds(run.startMs)}~${debugSeconds(run.endMs)} ×${run.count}`
+        : debugSeconds(run.startMs);
+    const parts = [`  t=${range} wait_reason=${run.reason}`];
+    for (const [camel, snake] of [["ownedStartMs", "owned_start_ms"], ["ownedEndMs", "owned_end_ms"]]) {
+        const value = debugField(run.last, camel, snake);
+        if (Number.isFinite(value)) parts.push(`${snake}=${value}ms`);
+    }
+    // 该区间最后一次的判据快照（合并前每条都一样，取最后一条即可）
+    parts.push(...formatDecisionEvidence(run.last));
+    return parts.join(" ");
+}
+
+/** 有限行数输出 + "省略 N 条"尾注（长列表只报条数，不再整段倾倒）。 */
+function pushCapped(push, rows, t) {
+    for (const row of rows.slice(0, COPY_LIST_CAP)) push(row);
+    if (rows.length > COPY_LIST_CAP) {
+        push(`  ${t("voice.local.vad_debug.copy_trimmed", {
+            count: rows.length - COPY_LIST_CAP,
+            kept: COPY_LIST_CAP,
+        })}`);
+    }
+}
+
+/**
+ * 把一次 VAD 调试结果组装成可直接粘贴排查的**精简**文本（0.23.17 重构）。
+ *
+ * 排障时最需要的三件事按序前置：切了几段（含放行分支）、哪些候选在等/被拒
+ * （同一原因合并）、失败候选当时的有声证据。其余明细退居其后：
+ *
+ * 1. `[摘要]` 环境、参数快照与各项计数（一眼看规模与异常）
+ * 2. `[切句与识别]` 切分点（reason + 放行分支 via）+ 提交延迟 + 等待/拒绝
+ * 3. `[最终全文]`
+ * 4. 识别事件 / 组合预览 / 低能量区 / 短句拒绝（各自封顶 60 行）
+ * 5. `[能量轨迹]` 降采样 CSV（≤200 行）
+ * 6. `[协调器状态]`（仅调用方确实取到时）
+ *
+ * 与旧版的差异：不再附整份原始 JSON 转储（其字段已被上述结构化小节覆盖），
+ * 逐条 waiting 决策合并为区间行，能量轨迹降采样。
  *
  * @param {object} raw - `debug_vad_audio_file` 的返回值
  * @param {{t?: function, fileLabel?: string, settings?: object, coordinatorTrace?: object|null}} [options]
@@ -725,13 +785,34 @@ export function buildVadDebugCopyText(raw, options = {}) {
     const push = (...values) => lines.push(...values);
     const tracePoints = Array.isArray(result.trace.points) ? result.trace.points : [];
     const decisions = Array.isArray(result.decisions) ? result.decisions : [];
+    const textEvents = Array.isArray(result.text_events) ? result.text_events : [];
+    const quietSpans = Array.isArray(result.trace.quiet_spans) ? result.trace.quiet_spans : [];
+    const rejected = Array.isArray(result.trace.rejected_short_sentences)
+        ? result.trace.rejected_short_sentences
+        : [];
+    // 0.23.16.2：组合预览边沿记录——G2 体感回退的直证（行式记录不可见）。
+    const compositeRows = buildCompositePreviewTimeline(result.composite).rows;
+    const accepted = decisions.filter((decision) => decision.outcome === "accepted");
+    const waitingRuns = summarizeWaitingRuns(decisions);
+    const waitingCount = decisions.filter((decision) => decision.outcome === "waiting").length;
 
     push(`=== ${t("voice.local.vad_debug.copy_header")} ===`, "");
-    push(`[${t("voice.local.vad_debug.copy_env")}]`);
+    push(`[${t("voice.local.vad_debug.copy_summary")}]`);
     push(`engine_id=${result.engine_id ?? "—"} model_id=${result.model_id ?? "—"}`);
     if (options.fileLabel) push(`file=${options.fileLabel}`);
-    push(`duration_ms=${result.duration_ms} wall_ms=${result.wall_ms} finalize_ms=${Number.isFinite(result.finalize_ms) ? result.finalize_ms : "—"}`);
-    push(`min_sentence_ms=${result.min_sentence_ms} trace_points=${tracePoints.length}`);
+    push(`duration=${debugSeconds(result.duration_ms)} wall=${debugSeconds(result.wall_ms)} finalize_ms=${Number.isFinite(result.finalize_ms) ? result.finalize_ms : "—"}`);
+    push(`min_sentence_ms=${result.min_sentence_ms}`);
+    push(t("voice.local.vad_debug.copy_counts", {
+        boundaries: result.boundaries.length,
+        commits: result.commits.length,
+        decisions: decisions.length,
+        accepted: accepted.length,
+        waiting: waitingCount,
+        textEvents: textEvents.length,
+        composite: compositeRows.length,
+        quiet: quietSpans.length,
+        rejected: rejected.length,
+    }));
     // 参数快照补充结果里没有的项；与结果同名的不重复输出（同一项出现两次只会干扰阅读）
     const reservedKeys = new Set(["engine_id", "model_id", "duration_ms", "wall_ms",
         "finalize_ms", "min_sentence_ms", "trace_points"]);
@@ -741,44 +822,71 @@ export function buildVadDebugCopyText(raw, options = {}) {
     }
     push("");
 
-    push(`[${t("voice.local.vad_debug.copy_final_text")}] chars=${result.final_text.length}`);
-    push(result.final_text || t("voice.local.vad_debug.copy_empty"));
-    push("");
-
     push(`[${t("voice.local.vad_debug.copy_timeline")}]`);
+    // 切分点：把 accepted 决策的放行分支（accepted_via）按音频位置并到边界上，
+    // 一眼看出这一段是被哪个分支放行的（natural/strong/long/draft_min/强制切）。
+    const acceptedByMs = new Map();
+    for (const decision of accepted) {
+        const audioMs = Number(debugField(decision, "audioMs", "audio_ms"));
+        if (Number.isFinite(audioMs)) acceptedByMs.set(Math.round(audioMs), decision);
+    }
     push(`boundaries (${result.boundaries.length}):`);
     for (const boundary of result.boundaries) {
-        push(`  t=${debugSeconds(boundary.audio_ms)} reason=${boundary.reason ?? "—"}`);
+        const accepted = acceptedByMs.get(Math.round(boundary.audio_ms));
+        const viaText = accepted
+            ? debugField(accepted, "acceptedVia", "accepted_via") ?? "—"
+            : "—";
+        const ownedStart = accepted ? debugField(accepted, "ownedStartMs", "owned_start_ms") : null;
+        const ownedEnd = accepted ? debugField(accepted, "ownedEndMs", "owned_end_ms") : null;
+        const parts = [
+            `  t=${debugSeconds(boundary.audio_ms)}`,
+            `reason=${boundary.reason ?? "—"}`,
+            `accepted_via=${viaText}`,
+        ];
+        if (Number.isFinite(ownedStart) && Number.isFinite(ownedEnd)) {
+            parts.push(`owned=${debugSeconds(ownedStart)}-${debugSeconds(ownedEnd)}`);
+        }
+        parts.push(...formatDecisionEvidence(accepted));
+        push(parts.join(" "));
     }
     push(`commits (${result.commits.length}):`);
     for (const commit of result.commits) {
         push(`  t=${debugSeconds(commit.audio_ms)} observed_wall=${debugSeconds(commit.observed_wall_ms)}`);
     }
-    push(`decisions (${decisions.length}):`);
-    for (const decision of decisions) push(formatDecisionLine(decision));
-    const textEvents = Array.isArray(result.text_events) ? result.text_events : [];
-    push(`text_events (${textEvents.length}):`);
-    for (const event of textEvents) push(formatTextEventLine(event));
-    // 0.23.16.2：组合预览边沿记录——G2 体感回退的直证（行式记录不可见）。
-    const compositeRows = buildCompositePreviewTimeline(result.composite).rows;
-    push(`composite (${compositeRows.length}):`);
-    for (const row of compositeRows) {
-        push(...formatCompositeRowLines(row));
-    }
-    const quietSpans = Array.isArray(result.trace.quiet_spans) ? result.trace.quiet_spans : [];
-    push(`trace.quiet_spans (${quietSpans.length}):`);
-    for (const span of quietSpans) {
-        push(`  ${debugSeconds(span.start_ms)}-${debugSeconds(span.end_ms)}`);
-    }
-    const rejected = Array.isArray(result.trace.rejected_short_sentences) ? result.trace.rejected_short_sentences : [];
+    // 等待/拒绝：合并同一原因的连续等待——这是"为什么没在这里切"的答案
+    push(`${t("voice.local.vad_debug.copy_waiting")} (${waitingRuns.length} runs / ${waitingCount} decisions):`);
+    if (waitingRuns.length === 0) push(`  ${t("voice.local.vad_debug.copy_empty")}`);
+    for (const run of waitingRuns) push(formatWaitingRun(run));
     push(`trace.rejected_short_sentences (${rejected.length}):`);
     for (const event of rejected) {
         push(`  t=${debugSeconds(event.time_ms)} sentence_ms=${event.sentence_ms} silence_ms=${event.silence_ms ?? "—"} reason=${event.reason ?? "—"}`);
     }
     push("");
 
+    push(`[${t("voice.local.vad_debug.copy_final_text")}] chars=${result.final_text.length}`);
+    push(result.final_text || t("voice.local.vad_debug.copy_empty"));
+    push("");
+
+    push(`text_events (${textEvents.length}):`);
+    pushCapped(push, textEvents.map(formatTextEventLine), t);
+    push(`composite (${compositeRows.length}):`);
+    pushCapped(push, compositeRows.flatMap((row) => formatCompositeRowLines(row)), t);
+    push(`trace.quiet_spans (${quietSpans.length}):`);
+    pushCapped(push, quietSpans.map(
+        (span) => `  ${debugSeconds(span.start_ms)}-${debugSeconds(span.end_ms)}`,
+    ), t);
+    push("");
+
+    const stride = Math.max(1, Math.ceil(tracePoints.length / COPY_ENERGY_MAX_ROWS));
     push(`[${t("voice.local.vad_debug.copy_energy")}] time_ms,rms,on,off,speaking`);
-    for (const point of tracePoints) {
+    if (stride > 1) {
+        push(`# ${t("voice.local.vad_debug.copy_stride", {
+            stride,
+            total: tracePoints.length,
+        })}`);
+    }
+    for (let index = 0; index < tracePoints.length; index += stride) {
+        const point = tracePoints[index];
         push(`${point.time_ms},${debugThreshold(point.rms)},${debugThreshold(point.on)},${debugThreshold(point.off)},${point.speaking ? 1 : 0}`);
     }
     push("");
@@ -790,9 +898,6 @@ export function buildVadDebugCopyText(raw, options = {}) {
         push(JSON.stringify(options.coordinatorTrace, null, 2));
         push("");
     }
-
-    push(`[${t("voice.local.vad_debug.copy_raw")}]`);
-    push(JSON.stringify(result, null, 2));
     return lines.join("\n");
 }
 

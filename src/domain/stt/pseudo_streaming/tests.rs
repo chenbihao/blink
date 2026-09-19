@@ -555,6 +555,14 @@ fn silence_marker_strip_covers_standalone_suffix_and_repeats() {
 // ── 0.23.9 PreviewDraft 引擎回归 ──
 
 /// 构造默认参数（VAD A + PreviewDraft）的受控引擎。
+///
+/// 0.23.17：**显式关闭 Draft 目标窗口**（`draft_target_s = 0`）。目标窗口
+/// 自 0.23.17 起默认开启（10s ± 2s，采纳下限 floor = 8s），而本文件这些
+/// 用例考察的是"停顿候选 → 定稿"、"短语冻结"、"Draft 在途不停摆"等**与
+/// 目标窗口无关**的机制，语料多为秒级，开启目标门后候选会一直等待而让
+/// 用例超时。目标窗口自身的行为矩阵在 `candidate_readiness` 的目标门测试
+/// 与 0.23.16.5 矩阵里覆盖；这里固定"首个合格候选即切"的旧口径，让其余
+/// 用例继续测量它们真正关心的东西。
 fn preview_draft_engine(transport: Arc<ControlledTransport>) -> PseudoStreamingSttEngine {
     let conn = crate::domain::stt::SttEngineConnection {
         host: "127.0.0.1".into(),
@@ -563,8 +571,10 @@ fn preview_draft_engine(transport: Arc<ControlledTransport>) -> PseudoStreamingS
         instance_id: "pd-test".into(),
         transport: Some(transport),
     };
+    let mut config = crate::domain::config::stt_config::SttConfig::default();
+    config.local_engine.recognition.draft_target_s = 0;
     PseudoStreamingSttEngine::from_connection_with_profile(
-        &crate::domain::config::stt_config::SttConfig::default(),
+        &config,
         conn,
         RecognitionProfile::PreviewDraft,
     )

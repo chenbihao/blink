@@ -1120,6 +1120,299 @@
     font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
 }
 
+/* ── 0.23.17 多手柄时序条 ─────────────────────────────────────────── */
+/* 一条 0..max 时间轴 + 多个可拖手柄（顶住式约束）+ 可选选区带。 */
+
+#voice .voice-timespan {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs, 4px);
+    padding: var(--space-xs, 6px) 0 var(--space-2xs, 4px);
+    /* 左右留出手柄半径宽度，避免 0%/100% 位置的手柄被裁切 */
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+#voice .voice-timespan-track {
+    position: relative;
+    height: 28px;
+    cursor: pointer;
+    touch-action: none;
+}
+
+/* 轴线（居中横线） */
+#voice .voice-timespan-track::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 4px;
+    transform: translateY(-50%);
+    background: var(--surface-2);
+    border-radius: var(--radius-pill, 10px);
+}
+
+/* 选区带（draft 目标窗口 [target−tol, target+tol]） */
+#voice .voice-timespan-band {
+    position: absolute;
+    top: 50%;
+    height: 14px;
+    transform: translateY(-50%);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-xs, 4px);
+    cursor: grab;
+    transition: background var(--transition-fast, 0.1s);
+    z-index: 1;
+}
+
+#voice .voice-timespan-band:active {
+    cursor: grabbing;
+}
+
+#voice .voice-timespan-band:hover {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* 选区带边缘把手（拖动调整宽容） */
+#voice .voice-timespan-band-edge {
+    position: absolute;
+    top: 50%;
+    width: 8px;
+    height: 20px;
+    transform: translate(-50%, -50%);
+    background: var(--accent);
+    border-radius: 2px;
+    cursor: ew-resize;
+    opacity: 0.55;
+    z-index: 2;
+    transition: opacity var(--transition-fast, 0.1s);
+}
+
+#voice .voice-timespan-band-edge:hover,
+#voice .voice-timespan-band-edge:active {
+    opacity: 1;
+}
+
+/* 手柄：轴上的圆形把手 */
+#voice .voice-timespan-handle {
+    position: absolute;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    transform: translate(-50%, -50%);
+    background: var(--bg);
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    cursor: grab;
+    z-index: 3;
+    box-shadow: 0 1px 4px var(--shadow);
+    transition: transform var(--transition-fast, 0.1s), box-shadow var(--transition-fast, 0.1s);
+}
+
+#voice .voice-timespan-handle:hover {
+    transform: translate(-50%, -50%) scale(1.15);
+}
+
+#voice .voice-timespan-handle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+#voice .voice-timespan-handle:active {
+    cursor: grabbing;
+    transform: translate(-50%, -50%) scale(1.1);
+    box-shadow: 0 0 0 4px var(--accent-bg);
+}
+
+/* 手柄标签（名称 + 当前值），钉在手柄正下方 */
+/* 高度由 JS 按分行数写入（一/两行自适应）；min-height 只防首帧塌陷 */
+#voice .voice-timespan-labels {
+    position: relative;
+    min-height: 18px;
+}
+
+#voice .voice-timespan-label {
+    position: absolute;
+    top: 0;
+    /* 0.23.17：行高固定，与 JS 的 LABEL_ROW_HEIGHT(15px) 一致——分行后
+       第二行不会因为行高不同而压住第一行的数值 */
+    height: 15px;
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 3px;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* 0.23.17：标签文字对比度上调（原 --text-faint 10px 在浅色主题下几乎看不清） */
+#voice .voice-timespan-label-name {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    line-height: 1;
+}
+
+#voice .voice-timespan-label-value {
+    font-size: var(--text-sm, 12px);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--accent);
+    line-height: 1;
+}
+
+/* 轴端刻度 */
+#voice .voice-timespan-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--text-xs, 11px);
+    /* 0.23.17：与标签同步提对比度——首尾刻度是读轴的唯一参照 */
+    color: var(--text-sub);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+}
+
+/* ── 0.23.17 策略预设行 ───────────────────────────────────────────── */
+
+/* 0.23.17：预设行升级为独立区块（覆盖两张参数卡，放在两卡之前） */
+#voice .voice-preset-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-xs, 6px);
+    margin-bottom: var(--space-sm, 10px);
+    padding: var(--space-xs, 6px) var(--space-sm, 10px);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm, 6px);
+}
+
+#voice .voice-preset-label {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    font-weight: var(--weight-medium, 500);
+    margin-right: 2px;
+}
+
+#voice .voice-preset-chip {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-pill, 10px);
+    padding: 3px 12px;
+    cursor: pointer;
+    transition: color var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s),
+    background var(--transition-fast, 0.1s);
+}
+
+#voice .voice-preset-chip:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+#voice .voice-preset-chip[aria-pressed="true"] {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    font-weight: var(--weight-semibold, 600);
+}
+
+#voice .voice-preset-custom {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-faint);
+    opacity: 0.75;
+}
+
+/* ── 0.23.17 定稿目标开关行 ───────────────────────────────────────── */
+
+#voice .voice-draft-target-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 10px);
+    margin-bottom: var(--space-xs, 6px);
+}
+
+#voice .voice-target-toggle {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-xs, 4px);
+    padding: 2px 10px;
+    cursor: pointer;
+    transition: color var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s),
+    background var(--transition-fast, 0.1s);
+}
+
+#voice .voice-target-toggle:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+#voice .voice-target-toggle.is-on {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    font-weight: var(--weight-semibold, 600);
+}
+
+#voice .voice-draft-target-note {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+}
+
+/* 0.23.17：选区带下方"实际生效区间 + 为什么到不了更远"。
+   is-limited = 已顶到未提交上限，提示要先去切分窗口调大上限。 */
+#voice .voice-draft-target-effective {
+    margin-top: var(--space-2xs, 4px);
+    font-size: var(--text-xs, 11px);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    color: var(--text-sub);
+}
+
+#voice .voice-draft-target-effective.is-limited {
+    color: var(--warning, #b45309);
+}
+
+/* ── 0.23.17：可折叠的调试区块（组合预览泳道默认收起）── */
+#voice .voice-vad-debug-collapsible {
+    margin-top: var(--space-md);
+    border-top: 1px solid var(--surface-2);
+    padding-top: var(--space-sm);
+}
+
+#voice .voice-vad-debug-collapsible-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs, 6px);
+    cursor: pointer;
+    list-style: none;
+}
+
+#voice .voice-vad-debug-collapsible-head::-webkit-details-marker {
+    display: none;
+}
+
+#voice .voice-vad-debug-collapsible-chevron {
+    width: 8px;
+    height: 8px;
+    border-right: 1.5px solid var(--text-sub);
+    border-bottom: 1.5px solid var(--text-sub);
+    transform: rotate(-45deg);
+    transition: transform var(--transition-fast, 0.1s);
+}
+
+#voice .voice-vad-debug-collapsible[open] .voice-vad-debug-collapsible-chevron {
+    transform: rotate(45deg);
+}
+
+#voice .voice-vad-debug-collapsible-note {
+    font-size: var(--text-xs, 11px);
+    color: var(--text-sub);
+}
+
+
 /* ── 0.23.9: 实时协调器状态面板 ── */
 #voice .voice-coordinator-trace-panel {
     grid-column: 1 / -1;

@@ -2983,3 +2983,427 @@ fn timeline_entry(
         }),
     }
 }
+
+// ── 0.23.17 预设参数矩阵（真实 worker 回放）─────────────────────────────
+//
+// 三个用户可选预设（默认 / 快速反应 / 超长定稿 30s）在标注语料全集上的
+// 真实伪流式回放对比。验收口径：
+// - 伪流式切片路径与整条离线路径不同：corpus 验收（全量匹配）走离线
+//   整条识别，切片回放的绝对命中率低于离线（case_03/04/05/08 的相似
+//   度在所有预设下一致，是切片固有损失，与预设无关）。因此本测试的
+//   验收是**相对**口径：default 相似度均值 ≥ 85%，且全矩阵要求喂入
+//   无错误、无 stt_overloaded、finalize 成功；预设间的差异以报告数值
+//   呈现（matched / sim_avg / first_draft_avg / finalize_avg）。
+// 报告：target/preset-matrix.json（匿名数值，不含正文与文件名）。
+
+/// 预设定义（与前端 voice-presets.js 三处同步铁则：Rust / JS / 文档）。
+fn preset_matrix() -> Vec<(
+    &'static str,
+    crate::domain::config::stt_config::VadConfig,
+    crate::domain::config::stt_config::RecognitionConfig,
+)> {
+    use crate::domain::config::stt_config::{RecognitionConfig, VadConfig};
+    vec![
+        ("default", VadConfig::default(), RecognitionConfig::default()),
+        (
+            "fast",
+            VadConfig {
+                soft_window_s: 5,
+                hard_window_s: 8,
+                // 未提交上限保持 12：快切分（hard=8）已保证段落短，缩小
+                // 上限会收窄过载余量（矩阵首轮 case_14 连续 23s 语音时
+                // 推理落后于喂入，2×max=16s 触发 stt_overloaded）。
+                max_uncommitted_s: 12,
+                ..VadConfig::default()
+            },
+            RecognitionConfig {
+                preview_window_ms: 2_500,
+                preview_refresh_ms: 500,
+                draft_min_s: 3,
+                strong_pause_ms: 500,
+                long_pause_ms: 1_000,
+                phrase_freeze_interval_ms: 800,
+                // 0.23.17：三预设全部开启目标窗口。fast 取 5s ± 2s ——
+                // floor = max(draft_min 3, 5−2) = 3s，与 draft_min 同址，
+                // 快速反应的落字时机不变；优选窗 [3, 7] 落在 hard(8) 之内。
+                draft_target_s: 5,
+                draft_target_tolerance_s: 2,
+                g2_retention_segments: 0,
+                editor_retention_segments: 1,
+            },
+        ),
+        (
+            "long30",
+            VadConfig {
+                soft_window_s: 20,
+                hard_window_s: 26,
+                max_uncommitted_s: 30,
+                ..VadConfig::default()
+            },
+            RecognitionConfig {
+                preview_window_ms: 4_000,
+                preview_refresh_ms: 700,
+                draft_min_s: 10,
+                strong_pause_ms: 700,
+                long_pause_ms: 1_100,
+                phrase_freeze_interval_ms: 0,
+                draft_target_s: 24,
+                draft_target_tolerance_s: 6,
+                g2_retention_segments: 0,
+                editor_retention_segments: 1,
+            },
+        ),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preset_matrix_real_worker_replay() {
+    use crate::domain::config::stt_config::{LocalEngineConfig, SttConfig};
+    if std::env::var("BLINK_STT_PRESET_MATRIX").ok().as_deref() != Some("1") {
+        eprintln!("跳过：设置 BLINK_STT_PRESET_MATRIX=1 运行预设矩阵真实回放");
+        return;
+    }
+    let Some(corpus_dir) = super::corpus_runner::should_run() else {
+        eprintln!("跳过：未设置 BLINK_STT_CORPUS_DIR");
+        return;
+    };
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let worker_dir = root.join("resources/bin/funasr-worker");
+    let worker_exe = worker_dir.join("funasr-nano-worker.exe");
+    // Nano 模型走 AppData 安装缓存（只读；音频临时目录在 target 下）
+    let appdata = std::env::var("APPDATA").expect("APPDATA");
+    let model_root = std::path::PathBuf::from(&appdata)
+        .join("blink/models/funasr/gguf-fun-asr-nano-q4km-9faa9616b982");
+    let payload = std::fs::read_to_string(model_root.join("active.json"))
+        .ok()
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| {
+                let slot = v["slot_id"].as_str()?.to_string();
+                Some(model_root.join("slots").join(slot).join("payload"))
+            })
+        });
+    let (encoder, llm) = match &payload {
+        Some(payload)
+            if payload.join("funasr-encoder-f16.gguf").is_file()
+                && payload.join("qwen3-0.6b-q4km.gguf").is_file() =>
+        {
+            (
+                payload.join("funasr-encoder-f16.gguf"),
+                payload.join("qwen3-0.6b-q4km.gguf"),
+            )
+        }
+        _ => {
+            eprintln!("跳过：AppData 缺少已安装的 Nano 模型 payload");
+            return;
+        }
+    };
+    if !worker_exe.is_file() {
+        eprintln!("跳过：本地缺少 funasr-nano-worker.exe");
+        return;
+    }
+    let payload_dir = payload.expect("payload resolved above");
+
+    let manifest = super::corpus_runner::load_manifest(&corpus_dir).expect("load manifest");
+    assert!(
+        !manifest.cases.is_empty(),
+        "预设矩阵需要非空 manifest（corpus={}）",
+        corpus_dir.display()
+    );
+
+    let audio_dir_guard = tempfile::Builder::new()
+        .prefix("preset-matrix-audio-")
+        .tempdir_in(root.join("target"))
+        .expect("create preset matrix audio tempdir");
+    let audio_dir = audio_dir_guard.path().to_path_buf();
+
+    let mut command = tokio::process::Command::new(&worker_exe);
+    command
+        .args([
+            "--enc",
+            encoder.to_str().unwrap(),
+            "-m",
+            llm.to_str().unwrap(),
+            "--stdin-server",
+        ])
+        .current_dir(&worker_dir)
+        .env("BLINK_ENGINE_ID", "funasr")
+        .env("BLINK_INSTANCE_ID", "preset-matrix-replay")
+        .env("BLINK_ENGINE_TOKEN", "preset-matrix-token")
+        .env("BLINK_MODEL_ID", "gguf/fun-asr-nano-q4km")
+        .env("BLINK_MODEL_REVISION", "gguf-v0.2.6")
+        .env("BLINK_MODEL_PAYLOAD_DIR", &payload_dir)
+        .env("BLINK_AUDIO_DIR", &audio_dir)
+        .env("BLINK_WORKER_THREADS", "4")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = crate::infra::platform::no_window_tokio(command)
+        .spawn()
+        .expect("spawn worker for preset matrix replay");
+    let stdin = child.stdin.take().expect("worker stdin");
+    let stdout = child.stdout.take().expect("worker stdout");
+    let client = crate::infra::local_engine::worker_proto::NdjsonWorkerClient::new(stdin, stdout);
+    client
+        .hello(std::time::Duration::from_secs(60))
+        .await
+        .expect("worker ready within 60s");
+
+    use crate::domain::stt::SttEngine;
+    let mut report_cases: Vec<serde_json::Value> = Vec::new();
+    let mut default_similarity_sum: u64 = 0;
+    let mut default_case_count: u64 = 0;
+    let mut any_overload_or_error = false;
+
+    for (label, vad, recognition) in preset_matrix() {
+        let config = SttConfig {
+            local_engine: LocalEngineConfig {
+                vad: vad.clone(),
+                recognition: recognition.clone(),
+                ..LocalEngineConfig::default()
+            },
+            ..SttConfig::default()
+        };
+        for case in &manifest.cases {
+            let recorder = RecordingTransport::wrap(std::sync::Arc::new(
+                worker::GgufSttTransport::new(client.clone(), audio_dir.clone()),
+            ));
+            let conn = crate::domain::stt::SttEngineConnection {
+                host: "127.0.0.1".into(),
+                port: 0,
+                engine_id: "funasr".into(),
+                instance_id: "preset-matrix-replay".into(),
+                transport: Some(recorder.clone()),
+            };
+            let engine =
+                crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
+                    &config, conn,
+                )
+                .expect("engine constructs");
+
+            let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read case wav");
+            let audio =
+                super::corpus_runner::decode_and_normalize(&wav).expect("decode and normalize");
+            let sample_rate = 16_000usize;
+            let mut fed_samples = 0usize;
+            let mut draft_count = 0usize;
+            let mut preview_count = 0usize;
+            let mut first_draft_wall_ms: Option<u64> = None;
+            let mut first_preview_wall_ms: Option<u64> = None;
+            let mut first_confirmed_wall_ms: Option<u64> = None;
+            let mut feed_error: Option<String> = None;
+            let mut overloaded = false;
+            let mut peak_uncommitted_ms = 0f64;
+
+            recorder.start_clock();
+            for chunk in audio.samples.chunks(sample_rate / 10) {
+                let delivered = match engine.transcribe_chunk(chunk).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        overloaded = error.to_string().contains("stt_overloaded");
+                        feed_error = Some(error.to_string());
+                        break;
+                    }
+                };
+                fed_samples += chunk.len();
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&delivered) {
+                    let wall_ms = recorder.offset_ms(std::time::Instant::now());
+                    if value["kind"] == "draft" {
+                        draft_count += 1;
+                        first_draft_wall_ms.get_or_insert(wall_ms);
+                    }
+                    if value["kind"] == "preview" {
+                        preview_count += 1;
+                        first_preview_wall_ms.get_or_insert(wall_ms);
+                    }
+                    if value["confirmed_changed"].as_bool() == Some(true) {
+                        first_confirmed_wall_ms.get_or_insert(wall_ms);
+                    }
+                }
+                // 实时速率喂入：让流式定稿/回滚真实发生（快速回放时推理慢于
+                // 喂入，边界会推迟到松键收尾，掩盖预设差异）
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let stats = engine.stream_stats();
+                peak_uncommitted_ms = peak_uncommitted_ms.max(
+                    (fed_samples.saturating_sub(stats.pcm_committed_end)) as f64 * 1000.0
+                        / sample_rate as f64,
+                );
+            }
+
+            let finalize_started = std::time::Instant::now();
+            let finalize_result = if overloaded {
+                Err("stt_overloaded".to_string())
+            } else {
+                engine.finalize().await.map_err(|e| e.to_string())
+            };
+            let finalize_ms = finalize_started.elapsed().as_millis() as u64;
+            let final_text = finalize_result.unwrap_or_default();
+            let normalized = super::corpus_runner::normalize_for_compare(&final_text);
+            let matched = super::corpus_runner::evaluate_result(case, &final_text, &normalized);
+            let similarity = std::iter::once(&case.expected_text)
+                .chain(case.allowed_normalized.iter())
+                .map(|candidate| super::corpus_runner::normalize_for_compare(candidate))
+                .filter(|candidate| !candidate.is_empty())
+                .map(|candidate| {
+                    super::corpus_runner::edit_similarity_percent(&normalized, &candidate)
+                })
+                .max()
+                .unwrap_or(if normalized.is_empty() { 100 } else { 0 });
+
+            if feed_error.is_some() || overloaded {
+                any_overload_or_error = true;
+            }
+            if label == "default" {
+                default_similarity_sum += u64::from(similarity);
+                default_case_count += 1;
+            }
+            report_cases.push(serde_json::json!({
+                "preset": label,
+                "case_id": case.case_id,
+                "duration_ms": audio.samples.len() * 1000 / sample_rate,
+                "matched": matched,
+                "similarity_percent": similarity,
+                "expected_segments": case.expected_segments,
+                "draft_count": draft_count,
+                "preview_count": preview_count,
+                "first_preview_wall_ms": first_preview_wall_ms,
+                "first_draft_wall_ms": first_draft_wall_ms,
+                "first_confirmed_wall_ms": first_confirmed_wall_ms,
+                "peak_uncommitted_ms": peak_uncommitted_ms.round() as u64,
+                "finalize_ms": finalize_ms,
+                "final_chars": final_text.chars().count(),
+                "overloaded": overloaded,
+                "feed_error": feed_error,
+            }));
+            println!(
+                "preset {label} {}: matched={} sim={similarity}% drafts={draft_count}/{} previews={preview_count} first_draft={:?}ms finalize={finalize_ms}ms peak_uncommitted={:.0}ms overloaded={overloaded}",
+                case.case_id,
+                matched,
+                case.expected_segments,
+                first_draft_wall_ms,
+                peak_uncommitted_ms,
+            );
+            engine.reset();
+        }
+    }
+
+    client.request_shutdown().await;
+    drop(client);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+    }
+
+    // 匿名数值汇总（按预设计算命中率与均值）
+    let mut summary: Vec<serde_json::Value> = Vec::new();
+    for (label, vad, recognition) in preset_matrix() {
+        let cases: Vec<&serde_json::Value> = report_cases
+            .iter()
+            .filter(|entry| entry["preset"] == label)
+            .collect();
+        let matched_count = cases.iter().filter(|entry| entry["matched"] == true).count();
+        let similarity_avg = if cases.is_empty() {
+            0
+        } else {
+            cases
+                .iter()
+                .map(|entry| entry["similarity_percent"].as_u64().unwrap_or(0))
+                .sum::<u64>()
+                / cases.len() as u64
+        };
+        let first_draft_avg_ms = {
+            let values: Vec<u64> = cases
+                .iter()
+                .filter_map(|entry| entry["first_draft_wall_ms"].as_u64())
+                .collect();
+            if values.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(values.iter().sum::<u64>() / values.len() as u64)
+            }
+        };
+        let finalize_avg_ms = {
+            let values: Vec<u64> = cases
+                .iter()
+                .map(|entry| entry["finalize_ms"].as_u64().unwrap_or(0))
+                .collect();
+            if values.is_empty() {
+                0
+            } else {
+                values.iter().sum::<u64>() / values.len() as u64
+            }
+        };
+        let overload_count = cases
+            .iter()
+            .filter(|entry| entry["overloaded"] == true)
+            .count();
+        summary.push(serde_json::json!({
+            "preset": label,
+            "cases": cases.len(),
+            "matched": matched_count,
+            "similarity_avg_percent": similarity_avg,
+            "first_draft_avg_wall_ms": first_draft_avg_ms,
+            "finalize_avg_ms": finalize_avg_ms,
+            "overloaded_cases": overload_count,
+            "params": {
+                "vad": {
+                    "min_silence_ms": vad.min_silence_ms,
+                    "min_sentence_ms": vad.min_sentence_ms,
+                    "soft_window_s": vad.soft_window_s,
+                    "hard_window_s": vad.hard_window_s,
+                    "max_uncommitted_s": vad.max_uncommitted_s,
+                },
+                "recognition": {
+                    "preview_window_ms": recognition.preview_window_ms,
+                    "preview_refresh_ms": recognition.preview_refresh_ms,
+                    "draft_min_s": recognition.draft_min_s,
+                    "strong_pause_ms": recognition.strong_pause_ms,
+                    "long_pause_ms": recognition.long_pause_ms,
+                    "phrase_freeze_interval_ms": recognition.phrase_freeze_interval_ms,
+                    "draft_target_s": recognition.draft_target_s,
+                    "draft_target_tolerance_s": recognition.draft_target_tolerance_s,
+                },
+            },
+        }));
+    }
+
+    let report = serde_json::json!({
+        "scope": "anonymous preset matrix: numeric only, no transcripts or filenames",
+        "summary": summary,
+        "cases": report_cases,
+    });
+    let output = root.join("target/preset-matrix.json");
+    std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap())
+        .expect("write preset matrix report");
+
+    for entry in &summary {
+        println!(
+            "preset {} => matched {}/{} sim_avg={}% first_draft_avg={}ms finalize_avg={}ms overloaded={}",
+            entry["preset"],
+            entry["matched"],
+            entry["cases"],
+            entry["similarity_avg_percent"],
+            entry["first_draft_avg_wall_ms"],
+            entry["finalize_avg_ms"],
+            entry["overloaded_cases"],
+        );
+    }
+    println!("preset matrix report: {}", output.display());
+
+    assert!(
+        !any_overload_or_error,
+        "预设矩阵不得出现过载或喂入错误（见 target/preset-matrix.json）"
+    );
+    let default_similarity_avg = if default_case_count > 0 {
+        default_similarity_sum / default_case_count
+    } else {
+        0
+    };
+    assert!(
+        default_similarity_avg >= 85,
+        "default 预设伪流式回放相似度均值过低：{default_similarity_avg}%（见 target/preset-matrix.json）"
+    );
+}

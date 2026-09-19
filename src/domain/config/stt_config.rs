@@ -328,17 +328,35 @@ pub struct RecognitionConfig {
     /// 短语识别更频繁（单 worker 下占用推理预算）。
     #[serde(default)]
     pub phrase_freeze_interval_ms: u32,
-    /// 0.23.16.5 Draft 目标窗口中心（秒，默认 0=关闭）。0 = 现状"首个
+    /// 0.23.16.5 Draft 目标窗口中心（秒，默认 10；0 = 关闭）。0 = "首个
     /// 合格停顿候选即定稿"；设值后普通停顿候选只在优选窗口
     /// [target−tolerance, target+tolerance] 内采纳（更长的上下文通常
     /// 更准），长静音与强制切不受目标门影响（用户明显说完或音频超限
     /// 必须立即定稿）。
-    #[serde(default)]
+    ///
+    /// 0.23.17：默认由关闭改为 10（stock `max_uncommitted_s = 12` 下
+    /// 优选窗 [8, 12]，恰好可达）——三个预设全部开启目标窗口，设置页
+    /// 不再要求用户手动选择。旧配置若已显式存过 `0`，仍按用户值保留
+    /// （0 是合法的"关闭"），选一次预设或拨动开关即可切到新默认。
+    #[serde(default = "default_recognition_draft_target_s")]
     pub draft_target_s: u32,
     /// 0.23.16.5 Draft 目标窗口宽容（秒，默认 3，范围 1～10）：优选窗口
     /// 半宽。`draft_target_s = 0`（关闭）时未用。
     #[serde(default = "default_recognition_draft_target_tolerance_s")]
     pub draft_target_tolerance_s: u32,
+    /// 0.23.17 G2 语音输入法的渐进上屏保留窗口（段数，默认 0）。
+    ///
+    /// `DictationLedger` 的保留窗口：定稿段先在浮窗停留到窗口被挤满才注入
+    /// 前台应用。0 = 定稿即注入（0.23.13 的默认产品语义）；调大能让用户
+    /// 在浮窗多看几句，代价是上屏更滞后。
+    #[serde(default = "default_recognition_g2_retention_segments")]
+    pub g2_retention_segments: u32,
+    /// 0.23.17 编辑器连续听写的保留窗口（段数，默认 1）。
+    ///
+    /// 1 = 最新一段定稿停在浮窗，下一段定稿时前一段写入正文（0.23.13 的
+    /// 默认语义）；0 = 定稿立即写入正文。
+    #[serde(default = "default_recognition_editor_retention_segments")]
+    pub editor_retention_segments: u32,
 }
 
 /// Recognition 配置的安全边界。serde 缺字段补默认值，越界值由
@@ -362,6 +380,12 @@ pub const RECOGNITION_DRAFT_TARGET_MAX_S: u32 = 30;
 /// 0.23.16.5：目标窗口宽容（半宽）的安全边界。
 pub const RECOGNITION_DRAFT_TARGET_TOLERANCE_MIN_S: u32 = 1;
 pub const RECOGNITION_DRAFT_TARGET_TOLERANCE_MAX_S: u32 = 10;
+/// 0.23.17：渐进上屏保留窗口（段数）的安全边界。
+///
+/// 上限 5 段：一段通常是一句话，再多会让注入明显滞后于说话，且浮窗
+/// 可用高度有限（保留窗口的段同时显示在 confirmed 区）。
+pub const RECOGNITION_RETENTION_MIN_SEGMENTS: u32 = 0;
+pub const RECOGNITION_RETENTION_MAX_SEGMENTS: u32 = 5;
 /// `long_pause_ms` 必须严格大于 `strong_pause_ms` 的最小间隔（毫秒）。
 ///
 /// 与设置页两个滑块的步长（50ms）一致：相等时 `candidate_readiness` 的
@@ -525,6 +549,24 @@ fn default_recognition_draft_target_tolerance_s() -> u32 {
     2
 }
 
+/// 0.23.17：Draft 目标窗口中心默认值（秒）。
+///
+/// 10s 在 stock `max_uncommitted_s = 12` 下优选窗 [8, 12] 恰好可达
+/// （12 − tolerance 2 = 10），sanitize 不会收敛它。
+fn default_recognition_draft_target_s() -> u32 {
+    10
+}
+
+/// 0.23.17：G2 渐进上屏保留窗口默认 0（定稿即注入）。
+fn default_recognition_g2_retention_segments() -> u32 {
+    0
+}
+
+/// 0.23.17：编辑器连续听写保留窗口默认 1（最新一段停留到下一段定稿）。
+fn default_recognition_editor_retention_segments() -> u32 {
+    1
+}
+
 fn default_streaming_mode() -> StreamingMode {
     StreamingMode::Pseudo
 }
@@ -582,8 +624,10 @@ impl Default for RecognitionConfig {
             strong_pause_ms: default_recognition_strong_pause_ms(),
             long_pause_ms: default_recognition_long_pause_ms(),
             phrase_freeze_interval_ms: 0,
-            draft_target_s: 0,
+            draft_target_s: default_recognition_draft_target_s(),
             draft_target_tolerance_s: default_recognition_draft_target_tolerance_s(),
+            g2_retention_segments: default_recognition_g2_retention_segments(),
+            editor_retention_segments: default_recognition_editor_retention_segments(),
         }
     }
 }
@@ -676,6 +720,8 @@ impl RecognitionConfig {
             self.phrase_freeze_interval_ms,
             self.draft_target_s,
             self.draft_target_tolerance_s,
+            self.g2_retention_segments,
+            self.editor_retention_segments,
         );
 
         self.preview_window_ms = self.preview_window_ms.clamp(
@@ -764,6 +810,16 @@ impl RecognitionConfig {
             );
         }
 
+        // 0.23.17：渐进上屏保留窗口收敛到 [0, 5] 段（0 合法 = 立即交付）。
+        self.g2_retention_segments = self.g2_retention_segments.clamp(
+            RECOGNITION_RETENTION_MIN_SEGMENTS,
+            RECOGNITION_RETENTION_MAX_SEGMENTS,
+        );
+        self.editor_retention_segments = self.editor_retention_segments.clamp(
+            RECOGNITION_RETENTION_MIN_SEGMENTS,
+            RECOGNITION_RETENTION_MAX_SEGMENTS,
+        );
+
         let after = (
             self.preview_window_ms,
             self.preview_refresh_ms,
@@ -773,6 +829,8 @@ impl RecognitionConfig {
             self.phrase_freeze_interval_ms,
             self.draft_target_s,
             self.draft_target_tolerance_s,
+            self.g2_retention_segments,
+            self.editor_retention_segments,
         );
         if after != before {
             tracing::warn!(
@@ -1087,6 +1145,12 @@ mod tests {
         assert_eq!(cfg.local_engine.recognition.preview_refresh_ms, 700);
         assert_eq!(cfg.local_engine.recognition.draft_min_s, 5);
         assert_eq!(cfg.local_engine.recognition.strong_pause_ms, 700);
+        // 0.23.17：目标窗口默认开启（10s ± 2s，stock 上限 12 下恰好可达）
+        assert_eq!(cfg.local_engine.recognition.draft_target_s, 10);
+        assert_eq!(cfg.local_engine.recognition.draft_target_tolerance_s, 2);
+        // 0.23.17：渐进上屏保留窗口默认 G2=0 / Editor=1
+        assert_eq!(cfg.local_engine.recognition.g2_retention_segments, 0);
+        assert_eq!(cfg.local_engine.recognition.editor_retention_segments, 1);
         assert_eq!(cfg.local_engine.vad_kind, "auto");
     }
 
@@ -1126,6 +1190,8 @@ mod tests {
                     phrase_freeze_interval_ms: 1_200,
                     draft_target_s: 10,
                     draft_target_tolerance_s: 3,
+                    g2_retention_segments: 2,
+                    editor_retention_segments: 3,
                 },
                 vad_kind: "energy".into(),
                 streaming_model: None,
@@ -1169,6 +1235,9 @@ mod tests {
         assert_eq!(restored.local_engine.recognition.phrase_freeze_interval_ms, 1_200);
         assert_eq!(restored.local_engine.recognition.draft_target_s, 10);
         assert_eq!(restored.local_engine.recognition.draft_target_tolerance_s, 3);
+        // 0.23.17: 渐进上屏保留窗口 round-trip（0 也是合法值）
+        assert_eq!(restored.local_engine.recognition.g2_retention_segments, 2);
+        assert_eq!(restored.local_engine.recognition.editor_retention_segments, 3);
         assert_eq!(restored.local_engine.vad_kind, "energy");
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
@@ -2275,6 +2344,30 @@ mod tests {
         assert_eq!(recognition.draft_min_s, 10);
         assert_eq!(recognition.strong_pause_ms, 1_500);
         assert_eq!(recognition.long_pause_ms, 2_000);
+    }
+
+    /// 0.23.17：渐进上屏保留窗口收敛到 [0, 5] 段；0 是合法值（立即交付），
+    /// 不得被抬升——它表达"定稿即上屏"的产品语义。
+    #[test]
+    fn recognition_sanitize_clamps_retention_windows() {
+        let mut recognition = RecognitionConfig {
+            g2_retention_segments: 0,
+            editor_retention_segments: 99,
+            ..RecognitionConfig::default()
+        };
+        assert!(recognition.sanitize(12));
+        assert_eq!(recognition.g2_retention_segments, 0, "0 = 立即交付，不得抬升");
+        assert_eq!(
+            recognition.editor_retention_segments,
+            RECOGNITION_RETENTION_MAX_SEGMENTS
+        );
+
+        let mut valid = RecognitionConfig {
+            g2_retention_segments: 2,
+            editor_retention_segments: 1,
+            ..RecognitionConfig::default()
+        };
+        assert!(!valid.sanitize(12), "范围内保留窗口应为不动点");
     }
 
     #[test]

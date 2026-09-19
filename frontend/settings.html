@@ -1957,11 +1957,20 @@
                         </div>
                         <div class="voice-vad-debug-timeline-hint" data-i18n="voice.local.vad_debug.timeline_hint">每张卡片描述标出的音频区间，旁边的竖向能量条也对应同一段；灰色表示低能量。</div>
                         <div class="voice-vad-debug-timeline" id="voice-vad-debug-events"></div>
-                        <div class="voice-vad-debug-section-head">
-                            <h4 class="voice-vad-debug-section-title" data-i18n="voice.local.vad_debug.composite_title">组合预览泳道</h4>
-                        </div>
-                        <div class="voice-vad-debug-timeline-hint" data-i18n="voice.local.vad_debug.composite_hint">听写浮窗实际显示的预览文本（短语账本 + 尾部）随时间的变化；标注为回退的行是预览文本变少的时刻。</div>
-                        <div class="voice-vad-debug-composite" id="voice-vad-debug-composite"></div>
+                        <!-- 0.23.17：VAD 调试已收官，组合预览泳道（体感回退专项）
+                             默认收起——它是排查"预览文本回退"的专项证据，日常
+                             看切句只需上方时间轴。需要时展开即可（内容照常渲染）。 -->
+                        <details class="voice-vad-debug-collapsible" id="voice-vad-debug-composite-details">
+                            <summary class="voice-vad-debug-collapsible-head">
+                                <span class="voice-vad-debug-collapsible-chevron" aria-hidden="true"></span>
+                                <h4 class="voice-vad-debug-section-title"
+                                    data-i18n="voice.local.vad_debug.composite_title">组合预览泳道</h4>
+                                <span class="voice-vad-debug-collapsible-note"
+                                      data-i18n="voice.local.vad_debug.composite_collapsed_note">预览文本回退专项，默认收起</span>
+                            </summary>
+                            <div class="voice-vad-debug-timeline-hint" data-i18n="voice.local.vad_debug.composite_hint">听写浮窗实际显示的预览文本（短语账本 + 尾部）随时间的变化；标注为回退的行是预览文本变少的时刻。</div>
+                            <div class="voice-vad-debug-composite" id="voice-vad-debug-composite"></div>
+                        </details>
                     </section>
 
                     <!-- 0.23.9: 实时协调器状态面板（录音时从生产 Coordinator 拉取） -->
@@ -2001,41 +2010,35 @@
                             </div>
                         </div>
 
-                        <!-- VAD 停顿检测参数（预览 P / 定稿 D 共用） -->
+                        <!-- 策略预设：覆盖两张参数卡的全部字段，因此放在两卡之前。
+                             0.23.17 修正：此前挂在「切分时钟」卡内部，容易让人以为
+                             它只影响 VAD 而看不到它同时改双层识别参数。 -->
+                        <div class="voice-preset-row" id="voice-preset-row">
+                            <span class="voice-preset-label"
+                                  data-i18n="voice.local.preset.label">识别策略</span>
+                            <!-- JS 渲染策略预设 chips -->
+                        </div>
+
+                        <!-- 切分时钟（VAD 停顿 + 切分窗口，预览层与定稿层共用）0.23.17 时序条重设计 -->
                         <div class="voice-vad-card">
                             <div class="voice-vad-card-header">
                                 <span class="voice-vad-card-title"><span
-                                        data-i18n="voice.local.vad.title">VAD 停顿检测（预览/定稿共用）</span><span
+                                        data-i18n="voice.local.vad.title">切分时钟：停顿与切分（预览层与定稿层共用）</span><span
                                         class="field-hint-icon" data-i18n-title="voice.local.vad.hint"
-                                        title="停顿是双层识别的共同时钟：预览按停顿冻结短语增量（P），定稿按停顿候选切段（D）。可按环境噪声与说话节奏调整。">ⓘ</span></span>
+                                        title="停顿是双层识别的共同时钟：预览层按停顿冻结短语增量，定稿层按停顿候选切段。下面的三条手柄从左到右代表停顿升级的三个档位；拖动手柄可直接调整，手柄之间会互相让位。">ⓘ</span></span>
                                 <button class="voice-vad-reset-btn" data-i18n="voice.local.vad.reset"
                                         id="voice-vad-reset-btn"
                                         type="button">恢复默认
                                 </button>
                             </div>
                             <div class="voice-vad-params">
-                                <!-- 0.23.13：静默阈值滑杆移除——底噪自适应主导阈值推导，字段仅旧配置兼容 -->
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.vad.min_silence_ms.label">静默时长</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.vad.min_silence_ms.hint"
-                                                title="低能量持续达到此时长后判定停顿——停顿同时成为预览短语的切点与定稿候选的起点。调短更灵敏；调长可减少短暂停顿造成的切分。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-vad-min-silence-ms-val">300ms</span>
-                                    </div>
-                                    <input class="voice-vad-slider" id="voice-vad-min-silence-ms" max="1000" min="100"
-                                           step="50" type="range"/>
-                                    <div class="voice-vad-param-range"><span>100ms</span><span>1000ms</span></div>
-                                </div>
                                 <div class="voice-vad-param">
                                     <div class="voice-vad-param-head">
                                         <span class="voice-vad-param-label"><span
                                                 data-i18n="voice.local.vad.min_sentence_ms.label">候选最短语音</span><span
                                                 class="field-hint-icon"
                                                 data-i18n-title="voice.local.vad.min_sentence_ms.hint"
-                                                title="单次有效语音达到该时长，停顿才升级为定稿候选（D）；不足时该停顿只用于冻结预览短语（P），不定稿。调短更灵敏，但误触风险更高。">ⓘ</span></span>
+                                                title="单次有效语音达到该时长，停顿才升级为定稿候选；不足时该停顿只用于冻结预览短语，不定稿。调短更灵敏，但误触风险更高。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
                                               id="voice-vad-min-sentence-ms-val">800ms</span>
                                     </div>
@@ -2043,59 +2046,20 @@
                                            min="200" step="100" type="range"/>
                                     <div class="voice-vad-param-range"><span>200ms</span><span>2000ms</span></div>
                                 </div>
-                                <div class="voice-vad-subgroup-title" data-i18n="voice.local.vad.windows.title">长语音切分（定稿层兜底）</div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.vad.soft_window_s.label">软窗口</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.vad.soft_window_s.hint"
-                                                title="连续语音达到此时长后，遇到低能量位置可提前切分。调短落字更快；调长保留更多上下文。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-vad-soft-window-s-val">8s</span>
-                                    </div>
-                                    <input aria-label="软窗口秒数" class="voice-vad-slider" id="voice-vad-soft-window-s" max="20"
-                                           min="3" step="1" type="range"/>
-                                    <div class="voice-vad-param-range"><span>3s</span><span>20s</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.vad.hard_window_s.label">硬窗口</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.vad.hard_window_s.hint"
-                                                title="连续语音达到此时长后强制切分。必须大于软窗口；调长可保留更多上下文，也会延后定稿。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-vad-hard-window-s-val">12s</span>
-                                    </div>
-                                    <input aria-label="硬窗口秒数" class="voice-vad-slider" id="voice-vad-hard-window-s" max="30"
-                                           min="5" step="1" type="range"/>
-                                    <div class="voice-vad-param-range"><span>5s</span><span>30s</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.vad.max_uncommitted_s.label">未提交上限</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.vad.max_uncommitted_s.hint"
-                                                title="未提交音频达到此时长后强制切分，防止缓冲持续增长。必须不小于硬窗口。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-vad-max-uncommitted-s-val">12s</span>
-                                    </div>
-                                    <input aria-label="未提交上限秒数" class="voice-vad-slider" id="voice-vad-max-uncommitted-s" max="30"
-                                           min="5" step="1" type="range"/>
-                                    <div class="voice-vad-param-range"><span>5s</span><span>30s</span></div>
-                                </div>
+                                <div class="voice-vad-subgroup-title" data-i18n="voice.local.vad.pauses.title">停顿检测：多久算停顿、多久算说完</div>
+                                <div class="voice-timespan" id="voice-ts-pauses"><!-- JS：静默时长/强停顿/长静音 三手柄 --></div>
+                                <div class="voice-vad-subgroup-title" data-i18n="voice.local.vad.windows.title">连续说话的切分兜底（说得久也一定会切）</div>
+                                <div class="voice-timespan" id="voice-ts-windows"><!-- JS：软窗口/硬窗口/未提交上限 三手柄 --></div>
                             </div>
                         </div>
 
-                        <!-- 双层识别参数（仅本地伪流式模式生效）：预览层 P / 定稿层 D -->
+                        <!-- 双层识别参数（仅本地伪流式模式生效）：预览层 / 定稿层 -->
                         <div class="voice-recognition-card voice-vad-card hidden" id="voice-recognition-card">
                             <div class="voice-vad-card-header">
                                 <span class="voice-vad-card-title"><span
-                                        data-i18n="voice.local.recognition.title">双层识别：预览 P / 定稿 D</span><span
+                                        data-i18n="voice.local.recognition.title">双层识别：实时预览与定稿</span><span
                                         class="field-hint-icon" data-i18n-title="voice.local.recognition.hint"
-                                        title="预览（P）是快速反馈的灰色虚字，按短语增量冻结；定稿（D）累积更长上下文后形成白色实字，提交时整段重识别并替换覆盖的预览段。">ⓘ</span></span>
+                                        title="预览是快速反馈的灰色虚字，按短语增量冻结；定稿累积更长上下文后形成白色实字，提交时整段重识别并替换覆盖的预览段。">ⓘ</span></span>
                                 <button class="voice-vad-reset-btn" data-i18n="voice.local.recognition.reset"
                                         id="voice-recognition-reset-btn"
                                         type="button">恢复默认
@@ -2103,128 +2067,49 @@
                             </div>
                             <div class="voice-vad-params">
                                 <div class="voice-vad-subgroup-title"
-                                     data-i18n="voice.local.recognition.preview_group.title">实时预览 P（灰色虚字）</div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.preview_window_ms.label">预览上下文窗口</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.preview_window_ms.hint"
-                                                title="尾部虚字每次识别携带的最大音频窗口；单个短语超过该窗口后回退为滚动尾部。适当调长通常更稳，但反馈更慢。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-recognition-preview-window-ms-val">3000ms</span>
-                                    </div>
-                                    <input aria-label="预览上下文窗口长度" class="voice-vad-slider"
-                                           id="voice-recognition-preview-window-ms" max="4000" min="2000" step="100"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>2000ms</span><span>4000ms</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.preview_refresh_ms.label">预览刷新间隔</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.preview_refresh_ms.hint"
-                                                title="尾部虚字尝试刷新的间隔（实际节奏还会按上轮推理耗时自适应拉长）。调短更新更快，也会增加推理请求。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-recognition-preview-refresh-ms-val">700ms</span>
-                                    </div>
-                                    <input aria-label="预览刷新间隔" class="voice-vad-slider"
-                                           id="voice-recognition-preview-refresh-ms" max="1000" min="500" step="50"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>500ms</span><span>1000ms</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.phrase_freeze_interval_ms.label">短语冻结节奏</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.phrase_freeze_interval_ms.hint"
-                                                title="预览增量（P 段）的固定冻结周期：前缀积满该时长即冻结入账；0 = 只按停顿冻结，滚动窗口兜底。设值后实时增量更平稳（推理更频繁）。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-recognition-phrase-freeze-interval-ms-val">0（关闭）</span>
-                                    </div>
-                                    <input aria-label="短语冻结节奏" class="voice-vad-slider"
-                                           id="voice-recognition-phrase-freeze-interval-ms" max="3000" min="0" step="100"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>0</span><span>3000ms</span></div>
-                                </div>
+                                     data-i18n="voice.local.recognition.preview_group.title">实时预览（灰色虚字）：刷新节奏</div>
+                                <div class="voice-timespan" id="voice-ts-preview"><!-- JS：刷新间隔/冻结节奏/上下文窗口 三手柄 --></div>
                                 <div class="voice-vad-subgroup-title"
-                                     data-i18n="voice.local.recognition.draft_group.title">句子定稿 D（白色实字）</div>
+                                     data-i18n="voice.local.recognition.draft_group.title">句子定稿（白色实字）：什么时候落定</div>
+                                <div class="voice-draft-target-row">
+                                    <button class="voice-target-toggle" id="voice-draft-target-toggle"
+                                            type="button">目标窗口：开</button>
+                                    <span class="voice-draft-target-note"
+                                          data-i18n="voice.local.recognition.draft_target.note">默认开启：定稿会等到接近优选区间再落定；拖动选区带调整优选区间</span>
+                                </div>
+                                <div class="voice-timespan voice-timespan--draft" id="voice-ts-draft"><!-- JS：最短上下文手柄 + 目标±宽容选区带 --></div>
+                                <!-- 实际生效的优选区间 + 为什么调不到更远（0.23.17） -->
+                                <div class="voice-draft-target-effective" id="voice-draft-target-effective"></div>
+
+                                <div class="voice-vad-subgroup-title"
+                                     data-i18n="voice.local.recognition.delivery_group.title">渐进上屏：定稿后多久写入或上屏</div>
                                 <div class="voice-vad-param">
                                     <div class="voice-vad-param-head">
                                         <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.draft_min_s.label">定稿最短上下文</span><span
+                                                data-i18n="voice.local.recognition.g2_retention_segments.label">语音输入法·保留句数</span><span
                                                 class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.draft_min_s.hint"
-                                                title="普通停顿候选形成定稿前，至少累计的音频上下文；开启定稿目标窗口后，采纳下限取它与（目标−宽容）的较大值。调长通常更稳，但落字更晚。">ⓘ</span></span>
+                                                data-i18n-title="voice.local.recognition.g2_retention_segments.hint"
+                                                title="定稿后先留在浮窗、暂不上屏的句数：0 = 每句定稿立刻注入前台应用；调大可以多看几句再落屏，代价是上屏更滞后。会话开始后生效。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
-                                              id="voice-recognition-draft-min-s-val">5s</span>
+                                              id="voice-g2-retention-val">立即上屏</span>
                                     </div>
-                                    <input aria-label="定稿最短上下文" class="voice-vad-slider"
-                                           id="voice-recognition-draft-min-s" max="10" min="3" step="1"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>3s</span><span>10s</span></div>
+                                    <input class="voice-vad-slider" id="voice-g2-retention" max="5"
+                                           min="0" step="1" type="range"/>
+                                    <div class="voice-vad-param-range"><span>0（立即）</span><span>5 句</span></div>
                                 </div>
                                 <div class="voice-vad-param">
                                     <div class="voice-vad-param-head">
                                         <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.strong_pause_ms.label">强停顿门槛</span><span
+                                                data-i18n="voice.local.recognition.editor_retention_segments.label">编辑器听写·保留句数</span><span
                                                 class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.strong_pause_ms.hint"
-                                                title="无自然句尾证据的停顿候选，静默达到该时长且语音足够长时也可提前定稿。必须小于长静音定稿。调长可减少提前切分。">ⓘ</span></span>
+                                                data-i18n-title="voice.local.recognition.editor_retention_segments.hint"
+                                                title="连续听写时最新几句先留在浮窗、暂不写入正文的句数：1 = 下一句定稿时前一句写入正文；0 = 定稿立刻写入正文。会话开始后生效。">ⓘ</span></span>
                                         <span class="voice-vad-param-value"
-                                              id="voice-recognition-strong-pause-ms-val">700ms</span>
+                                              id="voice-editor-retention-val">保留 1 句</span>
                                     </div>
-                                    <input aria-label="强停顿门槛" class="voice-vad-slider"
-                                           id="voice-recognition-strong-pause-ms" max="1500" min="500" step="50"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>500ms</span><span>1500ms</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.long_pause_ms.label">长静音定稿</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.long_pause_ms.hint"
-                                                title="静音达到该时长时，只要有可信语音即定稿上屏——短句后的长停顿不再悬停，也不受定稿目标窗口限制。句内 200～500ms 停顿不受影响。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-recognition-long-pause-ms-val">1100ms</span>
-                                    </div>
-                                    <input aria-label="长静音定稿" class="voice-vad-slider"
-                                           id="voice-recognition-long-pause-ms" max="2000" min="800" step="50"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>800ms</span><span>2000ms</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.draft_target_s.label">定稿目标窗口（中心）</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.draft_target_s.hint"
-                                                title="0 = 首个合格停顿即定稿；设值后低于优选区间下限的停顿候选继续等待，积累更接近目标的上下文（长静音与强制切不受限），等不到时由硬窗口强制切兜底。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-recognition-draft-target-s-val">0（关闭）</span>
-                                    </div>
-                                    <input aria-label="定稿目标窗口（中心）" class="voice-vad-slider"
-                                           id="voice-recognition-draft-target-s" max="30" min="0" step="1"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>0</span><span>30s</span></div>
-                                </div>
-                                <div class="voice-vad-param">
-                                    <div class="voice-vad-param-head">
-                                        <span class="voice-vad-param-label"><span
-                                                data-i18n="voice.local.recognition.draft_target_tolerance_s.label">定稿目标宽容</span><span
-                                                class="field-hint-icon"
-                                                data-i18n-title="voice.local.recognition.draft_target_tolerance_s.hint"
-                                                title="优选窗口半宽（中心±宽容）。越界后长静音与强制切仍保底。目标关闭时未用。">ⓘ</span></span>
-                                        <span class="voice-vad-param-value"
-                                              id="voice-recognition-draft-target-tolerance-s-val">2s</span>
-                                    </div>
-                                    <input aria-label="定稿目标宽容" class="voice-vad-slider"
-                                           id="voice-recognition-draft-target-tolerance-s" max="10" min="1" step="1"
-                                           type="range"/>
-                                    <div class="voice-vad-param-range"><span>1s</span><span>10s</span></div>
+                                    <input class="voice-vad-slider" id="voice-editor-retention" max="5"
+                                           min="0" step="1" type="range"/>
+                                    <div class="voice-vad-param-range"><span>0（立即）</span><span>5 句</span></div>
                                 </div>
                             </div>
                         </div>

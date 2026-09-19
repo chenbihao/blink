@@ -17,8 +17,12 @@ assert.deepEqual(RECOGNITION_DEFAULTS, {
     strong_pause_ms: 700,
     long_pause_ms: 1100,
     phrase_freeze_interval_ms: 0,
-    draft_target_s: 0,
+    // 0.23.17：目标窗口默认开启（10s ± 2s，stock 上限 12 下恰好可达）
+    draft_target_s: 10,
     draft_target_tolerance_s: 2,
+    // 0.23.17：渐进上屏保留窗口（G2 定稿即上屏 / Editor 停留一句）
+    g2_retention_segments: 0,
+    editor_retention_segments: 1,
 });
 assert.deepEqual(RECOGNITION_RANGE, {
     preview_window_ms: {min: 2000, max: 4000},
@@ -29,6 +33,8 @@ assert.deepEqual(RECOGNITION_RANGE, {
     phrase_freeze_interval_ms: {min: 0, max: 3000},
     draft_target_s: {min: 0, max: 30},
     draft_target_tolerance_s: {min: 1, max: 10},
+    g2_retention_segments: {min: 0, max: 5},
+    editor_retention_segments: {min: 0, max: 5},
 });
 assert.deepEqual(RECOGNITION_KEYS, [
     "preview_window_ms",
@@ -39,6 +45,8 @@ assert.deepEqual(RECOGNITION_KEYS, [
     "phrase_freeze_interval_ms",
     "draft_target_s",
     "draft_target_tolerance_s",
+    "g2_retention_segments",
+    "editor_retention_segments",
 ]);
 
 {
@@ -63,8 +71,11 @@ assert.deepEqual(RECOGNITION_KEYS, [
         strong_pause_ms: 500,
         long_pause_ms: 800,
         phrase_freeze_interval_ms: 0,
-        draft_target_s: 0,
+        // 0.23.17：缺字段补默认目标 10s，再按未提交上限 6s 收敛到 6−2=4s
+        draft_target_s: 4,
         draft_target_tolerance_s: 2,
+        g2_retention_segments: 0,
+        editor_retention_segments: 1,
     });
     assert.ok(recognition.preview_refresh_ms < recognition.preview_window_ms);
     assert.ok(recognition.draft_min_s <= 6);
@@ -80,8 +91,12 @@ assert.deepEqual(RECOGNITION_KEYS, [
         strong_pause_ms: 700,
         long_pause_ms: 1100,
         phrase_freeze_interval_ms: 0,
+        // 0.23.17：上限 4s 放不下目标下限（4−2=2 < 4）→ 目标被关闭，
+        // 与后端 sanitize 的"不可达即关闭"一致
         draft_target_s: 0,
         draft_target_tolerance_s: 2,
+        g2_retention_segments: 0,
+        editor_retention_segments: 1,
     });
 }
 
@@ -144,39 +159,63 @@ assert.deepEqual(RECOGNITION_KEYS, [
     assert.equal(toleranceOnly.draft_target_tolerance_s, 10);
 }
 
+// 0.23.17 静态契约：时序条 + 预设行重设计后的接线对齐
 const voiceSource = await readFile(new URL("./voice.js", import.meta.url), "utf8");
+assert.match(voiceSource, /initAdvancedVoiceControls\(config/);
+const advancedUiSource = await readFile(new URL("./voice-advanced-ui.js", import.meta.url), "utf8");
 for (const id of [
-    "voice-recognition-preview-window-ms",
-    "voice-recognition-preview-refresh-ms",
-    "voice-recognition-draft-min-s",
-    "voice-recognition-strong-pause-ms",
-    "voice-recognition-phrase-freeze-interval-ms",
-    "voice-recognition-draft-target-s",
-    "voice-recognition-draft-target-tolerance-s",
+    "voice-ts-preview",
+    "voice-ts-draft",
+    "voice-draft-target-toggle",
     "voice-recognition-reset-btn",
+    // 0.23.17：选区带下方的"实际生效区间 + 上限约束"提示
+    "voice-draft-target-effective",
 ]) {
-    assert.match(voiceSource, new RegExp(`getElementById\\("${id}"\\)`), `voice.js 应接线 ${id}`);
+    assert.match(advancedUiSource, new RegExp(`getElementById\\("${id}"\\)`), `voice-advanced-ui.js 应接线 ${id}`);
 }
-assert.match(voiceSource, /initRecognitionConfig\(config\)/);
-assert.match(voiceSource, /recognitionCard\.classList\.toggle\("hidden"/);
-assert.match(voiceSource, /normalizeRecognitionConfig\(recognition/);
-assert.match(voiceSource, /setAttribute\("aria-label", t\(control\.ariaKey\)\)/);
+// 0.23.17：渐进上屏保留窗口滑杆走 bindRangeControl({id: "…"}) 统一接线
+for (const id of ["voice-g2-retention", "voice-editor-retention"]) {
+    assert.match(advancedUiSource, new RegExp(`id: "${id}"`), `voice-advanced-ui.js 应接线 ${id}`);
+}
+// 0.23.17：独立滑杆必须写 --fill-pct（否则高亮恒定停在 CSS 兜底的 50%）
+assert.match(advancedUiSource, /setProperty\("--fill-pct"/);
+// 卡2 恢复默认覆盖全部 recognition 字段；提交统一走归一化
+assert.match(advancedUiSource, /Object\.assign\(recognition, RECOGNITION_DEFAULTS\)/);
+assert.match(advancedUiSource, /normalizeRecognitionConfig\(recognition, currentMaxUncommittedS\(\)\)/);
 
 const html = await readFile(new URL("../../../settings.html", import.meta.url), "utf8");
 assert.match(html, /id="voice-recognition-card"/);
 assert.match(html, /class="voice-recognition-card voice-vad-card hidden"/);
-const htmlRanges = [
-    [/id="voice-recognition-preview-window-ms" max="4000" min="2000" step="100"/, "Preview window range"],
-    [/id="voice-recognition-preview-refresh-ms" max="1000" min="500" step="50"/, "Preview refresh range"],
-    [/id="voice-recognition-draft-min-s" max="10" min="3" step="1"/, "Draft minimum range"],
-    [/id="voice-recognition-strong-pause-ms" max="1500" min="500" step="50"/, "Strong pause range"],
-    [/id="voice-recognition-long-pause-ms" max="2000" min="800" step="50"/, "Long pause range"],
-    [/id="voice-recognition-phrase-freeze-interval-ms" max="3000" min="0" step="100"/, "Phrase freeze range"],
-    [/id="voice-recognition-draft-target-s" max="30" min="0" step="1"/, "Draft target range"],
-    [/id="voice-recognition-draft-target-tolerance-s" max="10" min="1" step="1"/, "Draft tolerance range"],
-];
-for (const [pattern, label] of htmlRanges) assert.match(html, pattern, label);
+for (const id of [
+    "voice-ts-preview",
+    "voice-ts-draft",
+    "voice-draft-target-toggle",
+    "voice-preset-row",
+    "voice-g2-retention",
+    "voice-editor-retention",
+    "voice-draft-target-effective",
+]) {
+    assert.match(html, new RegExp(`id="${id}"`), `settings.html 应包含 ${id}`);
+}
 assert.match(html, /data-i18n="voice\.local\.vad\.min_sentence_ms\.label">候选最短语音/);
+// 0.23.17 版式修正：预设行提到两张参数卡之前（紧跟流式识别）
+{
+    const streamingAt = html.indexOf('id="voice-streaming-field"');
+    const presetAt = html.indexOf('id="voice-preset-row"');
+    const vadCardAt = html.indexOf('id="voice-ts-pauses"');
+    assert.ok(streamingAt > 0 && presetAt > streamingAt && vadCardAt > presetAt,
+        "预设行必须位于流式识别之后、参数卡之前");
+    // 候选最短语音必须在停顿检测时序条之前
+    const minSentenceAt = html.indexOf('id="voice-vad-min-sentence-ms"');
+    assert.ok(minSentenceAt > 0 && minSentenceAt < vadCardAt,
+        "候选最短语音必须排在停顿检测时序条之前");
+}
+// 0.23.17：组合预览泳道默认收起（<details> 不带 open）
+assert.match(html, /<details class="voice-vad-debug-collapsible" id="voice-vad-debug-composite-details">/,
+    "组合预览泳道必须默认收起");
+// 0.23.17：面向用户的文案不再出现 P / D 缩写
+assert.doesNotMatch(html, /预览 P|定稿 D|预览（P）|定稿（D）/,
+    "HTML 文案不得再使用 P / D 缩写");
 
 const i18nKeys = [
     "voice.local.recognition.title",
@@ -199,12 +238,29 @@ const i18nKeys = [
     "voice.local.recognition.draft_target_s.hint",
     "voice.local.recognition.draft_target_tolerance_s.label",
     "voice.local.recognition.draft_target_tolerance_s.hint",
+    // 0.23.17：渐进上屏保留窗口 + 目标窗口生效区间提示
+    "voice.local.recognition.delivery_group.title",
+    "voice.local.recognition.g2_retention_segments.label",
+    "voice.local.recognition.g2_retention_segments.hint",
+    "voice.local.recognition.editor_retention_segments.label",
+    "voice.local.recognition.editor_retention_segments.hint",
+    "voice.local.recognition.retention.immediate",
+    "voice.local.recognition.retention.immediate_editor",
+    "voice.local.recognition.retention.segments",
+    "voice.local.recognition.draft_target.off_hint",
+    "voice.local.recognition.draft_target.effective",
+    "voice.local.recognition.draft_target.limited",
+    "voice.local.recognition.draft_target.unreachable",
+    "voice.local.preset.label",
 ];
 for (const lang of ["zh", "en"]) {
     const source = await readFile(new URL(`../../i18n/${lang}.js`, import.meta.url), "utf8");
     for (const key of i18nKeys) {
         assert.match(source, new RegExp(`"${key.replaceAll(".", "\\.")}":`), `${lang}.js 缺少词条 ${key}`);
     }
+    // 0.23.17：面向用户的文案不出现 P / D 缩写（缩写只留在代码与 phase 文档）
+    assert.doesNotMatch(source, /预览 P|定稿 D|预览（P）|定稿（D）/,
+        `${lang}.js 文案不得再使用 P / D 缩写`);
 }
 
 console.log("voice-recognition.test.mjs: all assertions passed");
