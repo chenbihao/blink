@@ -103,6 +103,12 @@ body {
     opacity: 0.6;
 }
 
+/* 0.23.16.4 组合预览双层：冻结短语（只增不减）比活动尾部更实 */
+.voice-preview-frozen {
+    color: var(--text-sub);
+    opacity: 0.8;
+}
+
 /* 0.10.6: WebKit 滚动条（WebView2 / Chromium） */
 .text::-webkit-scrollbar {
     width: 4px;

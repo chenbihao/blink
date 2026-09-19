@@ -12,6 +12,10 @@ export const RECOGNITION_DEFAULTS = {
     draft_min_s: 5,
     strong_pause_ms: 700,
     long_pause_ms: 1100,
+    // 0.23.16.5：0 = 关闭（沿用现状）。
+    phrase_freeze_interval_ms: 0,
+    draft_target_s: 0,
+    draft_target_tolerance_s: 2,
 };
 
 export const RECOGNITION_KEYS = [
@@ -20,6 +24,9 @@ export const RECOGNITION_KEYS = [
     "draft_min_s",
     "strong_pause_ms",
     "long_pause_ms",
+    "phrase_freeze_interval_ms",
+    "draft_target_s",
+    "draft_target_tolerance_s",
 ];
 
 export const RECOGNITION_RANGE = {
@@ -28,7 +35,15 @@ export const RECOGNITION_RANGE = {
     draft_min_s: {min: 3, max: 10},
     strong_pause_ms: {min: 500, max: 1500},
     long_pause_ms: {min: 800, max: 2000},
+    phrase_freeze_interval_ms: {min: 0, max: 3000},
+    draft_target_s: {min: 0, max: 30},
+    draft_target_tolerance_s: {min: 1, max: 10},
 };
+
+/** 0.23.16.5：固定节奏设值时的安全边界（0=关闭；设值 800～3000ms）。 */
+export const PHRASE_FREEZE_ACTIVE_MIN_MS = 800;
+/** 0.23.16.5：目标窗口中心设值时的安全边界（0=关闭；设值 4～30s）。 */
+export const DRAFT_TARGET_ACTIVE_MIN_S = 4;
 
 /**
  * long_pause_ms 必须严格大于 strong_pause_ms 的最小间隔（毫秒）。
@@ -94,6 +109,47 @@ export function normalizeRecognitionConfig(recognition, maxUncommittedS = Infini
         );
         if (recognition.long_pause_ms < floor) {
             recognition.long_pause_ms = floor;
+            changed = true;
+        }
+    }
+
+    // 0.23.16.5：固定节奏 0=关闭；设值收敛 [800, 3000]（与后端 sanitize
+    // 同一约束，三处同步铁则）。
+    if (recognition.phrase_freeze_interval_ms !== 0) {
+        const freeze = Math.min(
+            RECOGNITION_RANGE.phrase_freeze_interval_ms.max,
+            Math.max(PHRASE_FREEZE_ACTIVE_MIN_MS, recognition.phrase_freeze_interval_ms),
+        );
+        if (freeze !== recognition.phrase_freeze_interval_ms) {
+            recognition.phrase_freeze_interval_ms = freeze;
+            changed = true;
+        }
+    }
+
+    // 0.23.16.5：目标窗口宽容收敛；target 设值时中心收敛并保证
+    // target + tolerance ≤ max_uncommitted（不可达时关闭，与后端一致）。
+    const tolerance = Math.min(
+        RECOGNITION_RANGE.draft_target_tolerance_s.max,
+        Math.max(RECOGNITION_RANGE.draft_target_tolerance_s.min, recognition.draft_target_tolerance_s),
+    );
+    if (tolerance !== recognition.draft_target_tolerance_s) {
+        recognition.draft_target_tolerance_s = tolerance;
+        changed = true;
+    }
+    if (recognition.draft_target_s !== 0) {
+        const target = Math.min(
+            RECOGNITION_RANGE.draft_target_s.max,
+            Math.max(DRAFT_TARGET_ACTIVE_MIN_S, recognition.draft_target_s),
+        );
+        let next = target;
+        if (Number.isFinite(numericMax)) {
+            const ceilingCap = Math.max(0, numericMax - tolerance);
+            if (ceilingCap < target) {
+                next = ceilingCap >= DRAFT_TARGET_ACTIVE_MIN_S ? ceilingCap : 0;
+            }
+        }
+        if (next !== recognition.draft_target_s) {
+            recognition.draft_target_s = next;
             changed = true;
         }
     }

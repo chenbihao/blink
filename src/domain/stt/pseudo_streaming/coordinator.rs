@@ -30,6 +30,12 @@ pub struct RecognitionSettings {
     /// 即接受候选为 Draft，不再要求 owned ≥ draft_min / 2s——短句后的
     /// 长静音也必须产生可靠 Draft。噪声由 voiced 下限与模型 NoSpeech 兜底。
     pub long_pause_ms: u64,
+    /// 0.23.16.5 预览短语固定冻结节奏（毫秒，0=关闭，沿用窗口滚动兜底）。
+    pub phrase_freeze_interval_ms: u64,
+    /// 0.23.16.5 Draft 目标窗口中心（秒，0=关闭，现状"首个合格候选即切"）。
+    pub draft_target_s: u64,
+    /// 0.23.16.5 Draft 目标窗口宽容（秒，优选窗口半宽；target=0 时未用）。
+    pub draft_target_tolerance_s: u64,
 }
 
 impl Default for RecognitionSettings {
@@ -40,6 +46,9 @@ impl Default for RecognitionSettings {
             draft_min_s: 5,
             strong_pause_ms: 700,
             long_pause_ms: 1_100,
+            phrase_freeze_interval_ms: 0,
+            draft_target_s: 0,
+            draft_target_tolerance_s: 2,
         }
     }
 }
@@ -55,6 +64,15 @@ impl RecognitionSettings {
     pub const STRONG_PAUSE_MAX_MS: u64 = 1_500;
     pub const LONG_PAUSE_MIN_MS: u64 = 800;
     pub const LONG_PAUSE_MAX_MS: u64 = 2_000;
+    /// 0.23.16.5：短语固定冻结节奏边界（0=关闭；设值 800～3000ms）。
+    pub const PHRASE_FREEZE_MIN_MS: u64 = 800;
+    pub const PHRASE_FREEZE_MAX_MS: u64 = 3_000;
+    /// 0.23.16.5：Draft 目标窗口中心边界（0=关闭；设值 4～30s）。
+    pub const DRAFT_TARGET_MIN_S: u64 = 4;
+    pub const DRAFT_TARGET_MAX_S: u64 = 30;
+    /// 0.23.16.5：目标窗口宽容边界（秒）。
+    pub const DRAFT_TARGET_TOLERANCE_MIN_S: u64 = 1;
+    pub const DRAFT_TARGET_TOLERANCE_MAX_S: u64 = 10;
     /// `long_pause_ms` 严格大于 `strong_pause_ms` 的最小间隔（毫秒）。
     /// 与配置层 `RECOGNITION_PAUSE_MIN_GAP_MS`（滑块步长 50ms）保持一致。
     pub const PAUSE_MIN_GAP_MS: u64 = 50;
@@ -88,13 +106,59 @@ impl RecognitionSettings {
             .long_pause_ms
             .clamp(Self::LONG_PAUSE_MIN_MS, Self::LONG_PAUSE_MAX_MS)
             .max(long_pause_floor);
+        // 0.23.16.5：固定冻结节奏 / 目标窗口——边界与配置层同一组常量
+        //（sanitize 语义见 RecognitionConfig::sanitize）。
+        let phrase_freeze_interval_ms = if self.phrase_freeze_interval_ms == 0 {
+            0
+        } else {
+            self.phrase_freeze_interval_ms
+                .clamp(Self::PHRASE_FREEZE_MIN_MS, Self::PHRASE_FREEZE_MAX_MS)
+        };
+        let draft_target_tolerance_s = self
+            .draft_target_tolerance_s
+            .clamp(Self::DRAFT_TARGET_TOLERANCE_MIN_S, Self::DRAFT_TARGET_TOLERANCE_MAX_S);
+        let mut draft_target_s = if self.draft_target_s == 0 {
+            0
+        } else {
+            self.draft_target_s
+                .clamp(Self::DRAFT_TARGET_MIN_S, Self::DRAFT_TARGET_MAX_S)
+        };
+        if draft_target_s != 0 {
+            let ceiling_cap = max_uncommitted_s.saturating_sub(draft_target_tolerance_s);
+            if ceiling_cap < draft_target_s {
+                draft_target_s = if ceiling_cap >= Self::DRAFT_TARGET_MIN_S {
+                    ceiling_cap
+                } else {
+                    0
+                };
+            }
+        }
         Self {
             preview_window_ms,
             preview_refresh_ms,
             draft_min_s,
             strong_pause_ms,
             long_pause_ms,
+            phrase_freeze_interval_ms,
+            draft_target_s,
+            draft_target_tolerance_s,
         }
+    }
+
+    /// 0.23.16.5：目标窗口模式下普通停顿候选的采纳下限（样本）。
+    ///
+    /// floor = max(draft_min_s, target − tolerance)——目标模式下
+    /// draft_min 不再单独放行（被 floor 取代取大者）；返回 None 表示
+    /// 目标模式关闭（现状语义）。长静音与强制切不走此门。
+    pub fn draft_target_floor_samples(&self, sample_rate: u64) -> Option<u64> {
+        if self.draft_target_s == 0 || sample_rate == 0 {
+            return None;
+        }
+        let floor_s = self
+            .draft_target_s
+            .saturating_sub(self.draft_target_tolerance_s)
+            .max(self.draft_min_s);
+        Some(floor_s.saturating_mul(sample_rate))
     }
 
     #[cfg(test)]
@@ -105,6 +169,9 @@ impl RecognitionSettings {
             draft_min_s: 0,
             strong_pause_ms: 0,
             long_pause_ms: 0,
+            phrase_freeze_interval_ms: 0,
+            draft_target_s: 0,
+            draft_target_tolerance_s: 2,
         }
     }
 }
@@ -442,6 +509,19 @@ impl RecognitionCoordinator {
         self.pending_preview = None;
     }
 
+    /// 0.23.16.7：起点早于 `boundary_sample` 的排队 Preview 已覆盖被短语
+    /// 冻结/Draft 提交接管的音频，其结果注定被范围裁决（`tail_range_is_stale`）
+    /// 丢弃——提前清槽，省一次推理并把刷新机会让给从新锚点出发的快照。
+    pub fn clear_pending_preview_before(&mut self, boundary_sample: u64) {
+        if self
+            .pending_preview
+            .as_ref()
+            .is_some_and(|preview| preview.audio_range.start_sample < boundary_sample)
+        {
+            self.pending_preview = None;
+        }
+    }
+
     /// 重置协调器到初始状态（保留 sample_rate / profile / settings）。
     ///
     /// 调用方在 `reset` 时递增 preview_generation 等，这里只负责调度状态。
@@ -641,6 +721,7 @@ mod tests {
             draft_min_s: 99,
             strong_pause_ms: 1,
             long_pause_ms: 99,
+            ..RecognitionSettings::default()
         }
         .sanitize(4);
         assert_eq!(settings.preview_window_ms, 2_000);

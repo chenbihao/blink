@@ -1917,6 +1917,11 @@ async fn pseudo_streaming_real_worker_replay() {
             let decision_observer =
                 std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let finalize_observer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            // 0.23.16.7：组合预览边沿记录——回放侧度量 G2 体感回退（按归因
+            // 分组；报告只输出数值聚合计数/字符数，不含正文）。
+            let composite_observer: std::sync::Arc<
+                std::sync::Mutex<Vec<crate::domain::stt::pseudo_streaming::SttCompositeRecord>>,
+            > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let engine =
                 crate::domain::stt::pseudo_streaming::PseudoStreamingSttEngine::from_connection(
                     &config, conn,
@@ -1924,7 +1929,8 @@ async fn pseudo_streaming_real_worker_replay() {
                 .expect("engine constructs")
                 .with_boundary_observer(boundary_observer.clone())
                 .with_decision_observer(decision_observer.clone())
-                .with_finalize_observer(finalize_observer.clone());
+                .with_finalize_observer(finalize_observer.clone())
+                .with_composite_observer(composite_observer.clone());
 
             let wav = std::fs::read(corpus_dir.join(&case.filename)).expect("read labeled wav");
             let audio =
@@ -2008,6 +2014,31 @@ async fn pseudo_streaming_real_worker_replay() {
                 }
             }
             let calls = recorder.take_records();
+            // 0.23.16.7：组合预览回退聚合——G2 体感回退的回放侧度量。真实
+            // 回退 = 归因不在 settle_commit（定稿清退是"预览转入定稿"的记账
+            // 效应，实字由 Draft span 接管）；报告只含数值，不含正文。
+            let composite_records = composite_observer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let mut composite_retreat_counts: std::collections::BTreeMap<String, u64> =
+                Default::default();
+            let mut composite_retreat_chars: std::collections::BTreeMap<String, u64> =
+                Default::default();
+            for record in &composite_records {
+                if record.retreat_chars > 0 {
+                    *composite_retreat_counts
+                        .entry(record.cause.to_string())
+                        .or_insert(0) += 1;
+                    *composite_retreat_chars
+                        .entry(record.cause.to_string())
+                        .or_insert(0) += record.retreat_chars;
+                }
+            }
+            let composite_real_retreats = composite_records
+                .iter()
+                .filter(|record| record.retreat_chars > 0 && record.cause != "settle_commit")
+                .count();
             let no_body_calls = calls
                 .iter()
                 .filter(|call| {
@@ -2037,11 +2068,16 @@ async fn pseudo_streaming_real_worker_replay() {
                 "final_chars": final_text.chars().count(),
                 "stale_before_worker": final_stats.stale_before_worker,
                 "preview_retreat_chars": final_stats.preview_retreat_chars,
+                "preview_blocked_retreat_chars": final_stats.preview_blocked_retreat_chars,
+                "composite_changes": composite_records.len(),
+                "composite_retreat_counts": composite_retreat_counts,
+                "composite_retreat_chars": composite_retreat_chars,
+                "composite_real_retreats": composite_real_retreats,
                 "finalize_timings": finalize_timing_report(&finalize_observer, &recorder),
                 "transcribe_calls": calls,
             }));
             println!(
-                "labeled {}: accepted_boundaries={} production_drafts={} final_chars={} no_body_calls={} accepted_via={:?} stale_before_worker={} preview_retreat_chars={}",
+                "labeled {}: accepted_boundaries={} production_drafts={} final_chars={} no_body_calls={} accepted_via={:?} stale_before_worker={} preview_retreat_chars={} blocked={} composite_real_retreats={}",
                 case.case_id,
                 boundary_events.len(),
                 draft_events.len(),
@@ -2050,6 +2086,8 @@ async fn pseudo_streaming_real_worker_replay() {
                 accepted_via_counts,
                 final_stats.stale_before_worker,
                 final_stats.preview_retreat_chars,
+                final_stats.preview_blocked_retreat_chars,
+                composite_real_retreats,
             );
             engine.reset();
         }

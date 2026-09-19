@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
-import {buildVadDebugCopyText, buildVadDebugCutRows, buildVadDebugTimeline, mapVadReasonKey, parseVadDebugResult, renderVadDebugResult, vadChartY, vadDebugProgressState, vadIntervalSummary, vadReasonLabel, mapProfileLabel, mapRejectReasonKey, mapCandidateStatus, mapRequestStatus, mapCoordinatorTrace, renderCoordinatorTrace} from "./voice-vad-debug.js";
+import {buildCompositePreviewTimeline, buildVadDebugCopyText, buildVadDebugCutRows, buildVadDebugTimeline, mapCompositeCauseKey, mapVadReasonKey, parseVadDebugResult, renderVadDebugResult, vadChartY, vadDebugProgressState, vadIntervalSummary, vadReasonLabel, mapProfileLabel, mapRejectReasonKey, mapCandidateStatus, mapRequestStatus, mapCoordinatorTrace, renderCoordinatorTrace} from "./voice-vad-debug.js";
 
 const result = {
     duration_ms: 1500,
@@ -103,10 +103,11 @@ assert.equal(typedDraftMoment.decisions[0].outcome, "accepted");
 
 function fakeNode(name) {
     return {
-        name, children: [], style: {}, textContent: "", className: "",
+        name, children: [], style: {}, textContent: "", className: "", title: "", innerHTML: "",
         append(...children) { this.children.push(...children); },
         replaceChildren(...children) { this.children = [...children]; },
         setAttribute() {},
+        addEventListener() {},
         get firstChild() { return this.children[0]; },
     };
 }
@@ -452,5 +453,70 @@ assert.match(buildVadDebugCopyText(copyResult, {t: copyTranslate, coordinatorTra
 const knownReasons = new Set(["natural_silence", "soft_window", "hard_window", "short_phrase", "uncommitted_cap", "none"]);
 for (const code of ["short_phrase", "uncommitted_cap"]) assert.ok(knownReasons.has(code));
 assert.ok(copyText.length > 500, "载荷必须足够完整而不是摘要");
+
+
+// ── 0.23.16.2 组合预览泳道 ──
+const compositeResult = {...result, composite: []};
+assert.equal(parseVadDebugResult(compositeResult), compositeResult);
+assert.throws(() => parseVadDebugResult({...result, composite: "bad"}), "composite 必须是数组");
+assert.equal(buildCompositePreviewTimeline(undefined).rows.length, 0, "缺省 composite 兼容为空");
+
+const compositeTimeline = buildCompositePreviewTimeline([
+    {cause: "phrase_append", fed_ms: 2300, wall_ms: 2400, text: "明确的多句话。", retreat_chars: 0, spans: 1},
+    {cause: "tail_replace", fed_ms: 4000, wall_ms: 4100, text: "明确的多句话。今天天气", retreat_chars: 0, spans: 2},
+    {cause: "tail_replace", fed_ms: 5000, wall_ms: 5100, text: "明确的多句话。今天", retreat_chars: 2, spans: 2},
+    {cause: "settle_commit", fed_ms: 6200, wall_ms: 6300, text: "", retreat_chars: 5, spans: 0},
+]);
+assert.deepEqual(compositeTimeline.rows.map(row => row.changeKind),
+    ["growth", "growth", "retreat", "retreat"]);
+assert.deepEqual(compositeTimeline.summary, {changes: 4, retreats: 2, retreatChars: 7});
+assert.equal(compositeTimeline.rows[3].cause, "settle_commit");
+
+// 等长改写（非追加、非回退）归为 replace
+const replaceTimeline = buildCompositePreviewTimeline([
+    {cause: "tail_replace", fed_ms: 1000, wall_ms: 1100, text: "abcd", retreat_chars: 0, spans: 1},
+    {cause: "tail_replace", fed_ms: 2000, wall_ms: 2100, text: "abxd", retreat_chars: 0, spans: 1},
+]);
+assert.deepEqual(replaceTimeline.rows.map(row => row.changeKind), ["growth", "replace"]);
+
+// 归因映射：登记 code 命中、未知 code 走兜底
+assert.equal(mapCompositeCauseKey("settle_commit"), "voice.local.vad_debug.composite_cause_settle_commit");
+assert.equal(mapCompositeCauseKey("nope"), "voice.local.vad_debug.composite_cause_unknown");
+assert.equal(mapCompositeCauseKey(undefined), "voice.local.vad_debug.composite_cause_unknown");
+
+// 复制载荷必须带 composite 段（G2 体感回退的直证）
+const compositeCopy = buildVadDebugCopyText({
+    ...result,
+    composite: [
+        {cause: "phrase_append", fed_ms: 2300, wall_ms: 2400, text: "明确的多句话。", retreat_chars: 0, spans: 1},
+        {cause: "settle_commit", fed_ms: 6200, wall_ms: 6300, text: "", retreat_chars: 7, spans: 0},
+    ],
+}, {t: key => key});
+assert.match(compositeCopy, /composite \(2\):/);
+assert.match(compositeCopy, /cause=settle_commit kind=retreat retreat=7/);
+
+// ── 0.23.16.7 组合泳道渲染：行头/正文/组成段三层结构 + 行级复制按钮 ──
+globalThis.document = {createElement: fakeNode, createElementNS: (_ns, name) => fakeNode(name)};
+const compositeDomNode = fakeNode("composite-lane");
+renderVadDebugResult({
+    ...result,
+    composite: [
+        {cause: "phrase_append", fed_ms: 2300, wall_ms: 2400, text: "明确的多句话。", retreat_chars: 0,
+            spans: 2, spans_detail: [
+                {kind: "phrase", start_ms: 0, end_ms: 2000, text: "明确的"},
+                {kind: "tail", start_ms: 2000, end_ms: 2300, text: "多句话。"},
+            ]},
+        {cause: "settle_commit", fed_ms: 6200, wall_ms: 6300, text: "", retreat_chars: 5, spans: 0,
+            draft: {start_ms: 0, end_ms: 6000, text: "定稿正文"}},
+    ],
+}, {...elements, composite: compositeDomNode}, key => key);
+const laneJson = JSON.stringify(compositeDomNode);
+assert.match(laneJson, /voice-vad-debug-composite-head/, "元信息/徽标/复制按钮独立成行头");
+assert.match(laneJson, /voice-vad-debug-composite-copy/, "每行带行级复制按钮");
+assert.match(laneJson, /voice-vad-debug-composite-span-kind/, "组成段带类型徽标");
+assert.match(laneJson, /voice-vad-debug-composite-span-range/, "组成段带等宽时间区间");
+assert.match(laneJson, /voice-vad-debug-composite-span-draft/, "定稿清退行附带 D 段");
+assert.ok(laneJson.includes("#icon-copy"), "复制按钮使用 sprite 图标");
+delete globalThis.document;
 
 console.log("voice-vad-debug.test.mjs: all assertions passed");

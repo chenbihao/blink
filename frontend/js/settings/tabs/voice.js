@@ -461,6 +461,9 @@ function initVadDebug(config) {
             long_pause_ms: recognition.long_pause_ms,
             preview_window_ms: recognition.preview_window_ms,
             preview_refresh_ms: recognition.preview_refresh_ms,
+            phrase_freeze_interval_ms: recognition.phrase_freeze_interval_ms,
+            draft_target_s: recognition.draft_target_s,
+            draft_target_tolerance_s: recognition.draft_target_tolerance_s,
         };
     }
 
@@ -647,6 +650,7 @@ function initVadDebug(config) {
             renderVadDebugResult(data, {
                 chart: document.getElementById("voice-vad-debug-chart"),
                 events: document.getElementById("voice-vad-debug-events"),
+                composite: document.getElementById("voice-vad-debug-composite"),
                 transcript,
                 meta: document.getElementById("voice-vad-debug-meta"),
             }, t);
@@ -968,6 +972,36 @@ function initRecognitionConfig(config) {
             format: (v) => `${v}ms`,
             parse: (raw) => parseInt(raw, 10),
             ariaKey: "voice.local.recognition.long_pause_ms.label",
+        },
+        {
+            input: document.getElementById("voice-recognition-phrase-freeze-interval-ms"),
+            val: document.getElementById("voice-recognition-phrase-freeze-interval-ms-val"),
+            key: "phrase_freeze_interval_ms",
+            format: (v) => v > 0 ? `${v}ms` : t("voice.local.recognition.off_state"),
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.phrase_freeze_interval_ms.label",
+        },
+        {
+            input: document.getElementById("voice-recognition-draft-target-s"),
+            val: document.getElementById("voice-recognition-draft-target-s-val"),
+            key: "draft_target_s",
+            // 目标窗口可视化：0=关闭；设值时显示优选区间 [max(最短, c−tol), c+tol]
+            format: (v) => {
+                if (!(v > 0)) return t("voice.local.recognition.off_state");
+                const tolerance = recognition.draft_target_tolerance_s;
+                const floor = Math.max(recognition.draft_min_s, v - tolerance);
+                return `${v}s · ${floor}–${v + tolerance}s`;
+            },
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.draft_target_s.label",
+        },
+        {
+            input: document.getElementById("voice-recognition-draft-target-tolerance-s"),
+            val: document.getElementById("voice-recognition-draft-target-tolerance-s-val"),
+            key: "draft_target_tolerance_s",
+            format: (v) => `${v}s`,
+            parse: (raw) => parseInt(raw, 10),
+            ariaKey: "voice.local.recognition.draft_target_tolerance_s.label",
         },
     ];
 

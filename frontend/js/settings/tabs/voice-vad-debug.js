@@ -1,4 +1,6 @@
 /** WAV 伪流式诊断的只读时间轴。正文只用 textContent 写入。 */
+import {iconHTML} from "../../shared/icon.js";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export function parseVadDebugResult(value) {
@@ -9,6 +11,9 @@ export function parseVadDebugResult(value) {
         || !Array.isArray(value.boundaries) || !Array.isArray(value.commits)
         || !Array.isArray(value.text_events)) {
         throw new Error("invalid VAD debug result");
+    }
+    if (value.composite !== undefined && !Array.isArray(value.composite)) {
+        throw new Error("invalid VAD debug composite");
     }
     return value;
 }
@@ -223,6 +228,227 @@ export function vadReasonLabel(reason, t) {
     return `${t(key)} (${raw})`;
 }
 
+// ── 0.23.16.2 组合预览泳道 ──
+//
+// 组合预览 = 短语账本 + 尾部的拼接字符串，即用户在 G2 浮窗实际看到的
+// 预览文本。后端 composite 数组是它的边沿记录（每次实际变化一条）；
+// 这里把它们整理成可渲染的时间线行，并标记每次变化是"增长 / 回退 /
+// 改写"——行式识别记录无法复现的 G2 体感回退，在这一层显式可见。
+
+/** composite 变化归因 code → i18n key。 */
+const COMPOSITE_CAUSE_KEYS = {
+    tail_replace: "voice.local.vad_debug.composite_cause_tail_replace",
+    phrase_append: "voice.local.vad_debug.composite_cause_phrase_append",
+    settle_commit: "voice.local.vad_debug.composite_cause_settle_commit",
+    clear: "voice.local.vad_debug.composite_cause_clear",
+    repair: "voice.local.vad_debug.composite_cause_repair",
+};
+
+const COMPOSITE_CAUSE_FALLBACK_KEY = "voice.local.vad_debug.composite_cause_unknown";
+
+/** 归因 code → i18n key（未登记走兜底）。 */
+export function mapCompositeCauseKey(cause) {
+    return COMPOSITE_CAUSE_KEYS[cause] || COMPOSITE_CAUSE_FALLBACK_KEY;
+}
+
+/**
+ * 把 composite 边沿记录整理为渲染行。
+ *
+ * 每行标记 changeKind：
+ * - "retreat"：净字符减少（retreat_chars > 0），即用户体感的回退；
+ * - "growth"：新文本是旧文本的追加（旧 + 后缀），稳定递增；
+ * - "replace"：其余变化（等长改写或非追加替换）。
+ *
+ * @param {object[]|undefined} composite - 后端 composite 数组（可缺省，旧结果兼容）
+ * @returns {{rows: object[], summary: {changes: number, retreats: number, retreatChars: number}}}
+ */
+export function buildCompositePreviewTimeline(composite) {
+    const source = Array.isArray(composite) ? composite : [];
+    const rows = [];
+    let previous = "";
+    for (const entry of source) {
+        const text = typeof entry.text === "string" ? entry.text : "";
+        const retreatChars = Number(entry.retreat_chars) > 0 ? Math.floor(Number(entry.retreat_chars)) : 0;
+        let changeKind = "replace";
+        if (retreatChars > 0) {
+            changeKind = "retreat";
+        } else if (text.length >= previous.length && text.startsWith(previous)) {
+            changeKind = "growth";
+        }
+        // 0.23.16.6：组成段明细（P 短语/尾部 + 音频范围）与 SettleCommit 附带
+        // 的定稿段（D）。旧结果缺省时为空数组/null，渲染层按无明细处理。
+        const spansDetail = Array.isArray(entry.spans_detail)
+            ? entry.spans_detail
+                .filter(span => span && typeof span.text === "string")
+                .map(span => ({
+                    kind: span.kind === "tail" ? "tail" : "phrase",
+                    startMs: Number(span.start_ms) || 0,
+                    endMs: Number(span.end_ms) || 0,
+                    text: span.text,
+                }))
+            : [];
+        const draftSource = entry.draft;
+        const draft = draftSource && typeof draftSource.text === "string"
+            ? {
+                startMs: Number(draftSource.start_ms) || 0,
+                endMs: Number(draftSource.end_ms) || 0,
+                text: draftSource.text,
+            }
+            : null;
+        rows.push({
+            cause: typeof entry.cause === "string" ? entry.cause : "unknown",
+            fedMs: Number(entry.fed_ms) || 0,
+            wallMs: Number(entry.wall_ms) || 0,
+            text,
+            retreatChars,
+            spans: Number(entry.spans) || 0,
+            spansDetail,
+            draft,
+            changeKind,
+        });
+        previous = text;
+    }
+    const summary = {
+        changes: rows.length,
+        retreats: rows.filter(row => row.changeKind === "retreat").length,
+        retreatChars: rows.reduce((sum, row) => sum + row.retreatChars, 0),
+    };
+    return {rows, summary};
+}
+
+/** 组成段/定稿段标签：短语 / 尾部 / 定稿段（i18n 文案）。 */
+function compositeSpanKindLabel(kind, t) {
+    if (kind === "tail") return t("voice.local.vad_debug.composite_span_tail");
+    if (kind === "draft") return t("voice.local.vad_debug.composite_draft");
+    return t("voice.local.vad_debug.composite_span_phrase");
+}
+
+/** 单条 composite 行的可复制文本（与「复制调试信息」的 composite 段同格式）。 */
+function formatCompositeRowLines(row) {
+    const lines = [`  wall=${debugSeconds(row.wallMs)} fed=${debugSeconds(row.fedMs)} `
+        + `cause=${row.cause} kind=${row.changeKind} `
+        + `retreat=${row.retreatChars} spans=${row.spans} `
+        + `text=${JSON.stringify(row.text)}`];
+    for (const span of row.spansDetail) {
+        lines.push(`    span=${span.kind} ${debugSeconds(span.startMs)}-${debugSeconds(span.endMs)} `
+            + `text=${JSON.stringify(span.text)}`);
+    }
+    if (row.draft) {
+        lines.push(`    draft ${debugSeconds(row.draft.startMs)}-${debugSeconds(row.draft.endMs)} `
+            + `text=${JSON.stringify(row.draft.text)}`);
+    }
+    return lines;
+}
+
+/** 组成段单行：类型徽标 + 等宽时间区间 + 正文（各占一格，不再挤成一行）。 */
+function appendCompositeSpanLine(detail, kind, startMs, endMs, text, t) {
+    const line = document.createElement("div");
+    line.className = `voice-vad-debug-composite-span voice-vad-debug-composite-span-${kind}`;
+    const label = document.createElement("span");
+    label.className = "voice-vad-debug-composite-span-kind";
+    label.textContent = compositeSpanKindLabel(kind, t);
+    const range = document.createElement("span");
+    range.className = "voice-vad-debug-composite-span-range";
+    range.textContent = `${seconds(startMs)}–${seconds(endMs)}`;
+    const body = document.createElement("span");
+    body.className = "voice-vad-debug-composite-span-text";
+    body.textContent = text || "—";
+    line.append(label, range, body);
+    detail.append(line);
+}
+
+/** 渲染组合泳道一行的「复制本行」按钮：复制该行完整明细（同复制调试信息格式）。 */
+function appendCompositeCopyButton(head, row, t) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "voice-vad-debug-composite-copy";
+    button.title = t("voice.local.vad_debug.composite_copy_row");
+    button.setAttribute("aria-label", t("voice.local.vad_debug.composite_copy_row"));
+    button.innerHTML = iconHTML("copy");
+    button.addEventListener("click", async () => {
+        try {
+            // 动态加载：api.js → tauri.js 在模块加载期访问 window（node 测试
+            // 环境不可用），静态 import 会破坏纯函数单测的可运行性。
+            const {copyToClipboard} = await import("../../shared/api.js");
+            await copyToClipboard(formatCompositeRowLines(row).join("\n"));
+            button.classList.add("copied");
+            button.title = t("voice.local.vad_debug.composite_copy_done");
+            window.setTimeout(() => {
+                button.classList.remove("copied");
+                button.title = t("voice.local.vad_debug.composite_copy_row");
+            }, 1200);
+        } catch (error) {
+            console.warn("[vad-debug] composite row copy failed:", error);
+        }
+    });
+    head.append(button);
+}
+
+/** 渲染组合预览泳道（无数据时显示空态提示，不隐藏区块——空也是结论）。 */
+function appendCompositeLane(container, composite, t) {
+    container.replaceChildren();
+    const {rows, summary} = buildCompositePreviewTimeline(composite);
+    const head = document.createElement("div");
+    head.className = "voice-vad-debug-composite-summary";
+    head.textContent = t("voice.local.vad_debug.composite_summary")
+        .replace("{changes}", String(summary.changes))
+        .replace("{retreats}", String(summary.retreats))
+        .replace("{chars}", String(summary.retreatChars));
+    container.append(head);
+    if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "voice-vad-debug-composite-empty";
+        empty.textContent = t("voice.local.vad_debug.composite_empty");
+        container.append(empty);
+        return;
+    }
+    for (const row of rows) {
+        const item = document.createElement("div");
+        item.className = `voice-vad-debug-composite-row voice-vad-debug-composite-${row.changeKind}`;
+        // 头部：时刻 · 归因 · 组成段数（等宽）＋ 回退徽标 ＋ 复制按钮
+        const headLine = document.createElement("div");
+        headLine.className = "voice-vad-debug-composite-head";
+        const meta = document.createElement("span");
+        meta.className = "voice-vad-debug-composite-meta";
+        const cause = t(mapCompositeCauseKey(row.cause));
+        const parts = [`${seconds(row.wallMs)}`, cause];
+        if (row.fedMs > 0) parts.push(`${t("voice.local.vad_debug.audio_fed_at")} ${seconds(row.fedMs)}`);
+        if (row.spans > 0) parts.push(`${t("voice.local.vad_debug.composite_spans")} ${row.spans}`);
+        meta.textContent = parts.join(" · ");
+        headLine.append(meta);
+        if (row.changeKind === "retreat") {
+            const badge = document.createElement("span");
+            badge.className = "voice-vad-debug-composite-badge";
+            badge.textContent = t("voice.local.vad_debug.composite_retreat_badge")
+                .replace("{chars}", String(row.retreatChars));
+            headLine.append(badge);
+        }
+        appendCompositeCopyButton(headLine, row, t);
+        item.append(headLine);
+        // 组合文本独立成行：可选可复制，长文本自动换行
+        const text = document.createElement("div");
+        text.className = "voice-vad-debug-composite-text";
+        text.textContent = row.text || "—";
+        item.append(text);
+        // 0.23.16.6：组成段明细（P 短语 + 尾部，含音频范围）；定稿清退行
+        // 附带刚提交的 D 段——泳道由此并排展示 P/D 两层，而不是只有拼接
+        // 后的整串预览文本。0.23.16.7：每段独立一行（类型徽标 + 区间 +
+        // 正文），不再内联挤成一坨。
+        if (row.spansDetail.length || row.draft) {
+            const detail = document.createElement("div");
+            detail.className = "voice-vad-debug-composite-detail";
+            for (const span of row.spansDetail) {
+                appendCompositeSpanLine(detail, span.kind, span.startMs, span.endMs, span.text, t);
+            }
+            if (row.draft) {
+                appendCompositeSpanLine(detail, "draft", row.draft.startMs, row.draft.endMs, row.draft.text, t);
+            }
+            item.append(detail);
+        }
+        container.append(item);
+    }
+}
+
 function addText(parent, tag, className, value) {
     const node = document.createElement(tag);
     node.className = className;
@@ -351,7 +577,7 @@ function appendTimelineEntry(container, entry, result, t) {
 
 export function renderVadDebugResult(raw, elements, t) {
     const result = parseVadDebugResult(raw);
-    const {chart, events, transcript, meta} = elements;
+    const {chart, events, transcript, meta, composite} = elements;
     const duration = Math.max(1, result.duration_ms);
     meta.textContent = `${result.engine_id} · ${result.model_id} · ${seconds(result.duration_ms)} · ${t("voice.local.vad_debug.elapsed")} ${seconds(result.wall_ms)}`;
     transcript.textContent = result.final_text;
@@ -418,6 +644,7 @@ export function renderVadDebugResult(raw, elements, t) {
     const timeline = buildVadDebugTimeline(result);
     appendTimelineEntry(events, {kind: "start", audioMs: 0, previews: []}, result, t);
     for (const entry of timeline) appendTimelineEntry(events, entry, result, t);
+    if (composite) appendCompositeLane(composite, result.composite, t);
 }
 
 // ── 0.23.14.7 复制调试信息 ──
@@ -532,6 +759,12 @@ export function buildVadDebugCopyText(raw, options = {}) {
     const textEvents = Array.isArray(result.text_events) ? result.text_events : [];
     push(`text_events (${textEvents.length}):`);
     for (const event of textEvents) push(formatTextEventLine(event));
+    // 0.23.16.2：组合预览边沿记录——G2 体感回退的直证（行式记录不可见）。
+    const compositeRows = buildCompositePreviewTimeline(result.composite).rows;
+    push(`composite (${compositeRows.length}):`);
+    for (const row of compositeRows) {
+        push(...formatCompositeRowLines(row));
+    }
     const quietSpans = Array.isArray(result.trace.quiet_spans) ? result.trace.quiet_spans : [];
     push(`trace.quiet_spans (${quietSpans.length}):`);
     for (const span of quietSpans) {
@@ -575,6 +808,7 @@ const REJECT_FALLBACK_KEY = "voice.local.vad_debug.reject_unknown";
 /** 拒绝原因 code → i18n key 映射。 */
 const REJECT_REASON_KEYS = {
     below_draft_min: "voice.local.vad_debug.reject_below_draft_min",
+    below_draft_target: "voice.local.vad_debug.reject_below_draft_target",
     strong_pause_owned_too_short: "voice.local.vad_debug.reject_strong_pause_owned_too_short",
     strong_pause_voiced_too_short: "voice.local.vad_debug.reject_strong_pause_voiced_too_short",
     below_natural_pause: "voice.local.vad_debug.reject_below_natural_pause",

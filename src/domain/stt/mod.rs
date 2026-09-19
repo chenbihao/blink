@@ -560,6 +560,9 @@ pub struct SttStreamStats {
     pub stale_before_worker: u64,
     /// 0.23.14：尾部预览文本回退的累计字符数（仅诊断，不阻断改写）。
     pub preview_retreat_chars: u64,
+    /// 0.23.16.3：被反回退门拦截的"同锚范围未扩展且文本变短"替换累计
+    /// 字符数（旧文本保留，不产生可见回退）。
+    pub preview_blocked_retreat_chars: u64,
 }
 
 // ── STT Engine trait（旧接口，保留兼容）──────────────────────────────────

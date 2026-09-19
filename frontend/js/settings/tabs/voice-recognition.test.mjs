@@ -16,6 +16,9 @@ assert.deepEqual(RECOGNITION_DEFAULTS, {
     draft_min_s: 5,
     strong_pause_ms: 700,
     long_pause_ms: 1100,
+    phrase_freeze_interval_ms: 0,
+    draft_target_s: 0,
+    draft_target_tolerance_s: 2,
 });
 assert.deepEqual(RECOGNITION_RANGE, {
     preview_window_ms: {min: 2000, max: 4000},
@@ -23,6 +26,9 @@ assert.deepEqual(RECOGNITION_RANGE, {
     draft_min_s: {min: 3, max: 10},
     strong_pause_ms: {min: 500, max: 1500},
     long_pause_ms: {min: 800, max: 2000},
+    phrase_freeze_interval_ms: {min: 0, max: 3000},
+    draft_target_s: {min: 0, max: 30},
+    draft_target_tolerance_s: {min: 1, max: 10},
 });
 assert.deepEqual(RECOGNITION_KEYS, [
     "preview_window_ms",
@@ -30,6 +36,9 @@ assert.deepEqual(RECOGNITION_KEYS, [
     "draft_min_s",
     "strong_pause_ms",
     "long_pause_ms",
+    "phrase_freeze_interval_ms",
+    "draft_target_s",
+    "draft_target_tolerance_s",
 ]);
 
 {
@@ -53,6 +62,9 @@ assert.deepEqual(RECOGNITION_KEYS, [
         draft_min_s: 6,
         strong_pause_ms: 500,
         long_pause_ms: 800,
+        phrase_freeze_interval_ms: 0,
+        draft_target_s: 0,
+        draft_target_tolerance_s: 2,
     });
     assert.ok(recognition.preview_refresh_ms < recognition.preview_window_ms);
     assert.ok(recognition.draft_min_s <= 6);
@@ -67,6 +79,9 @@ assert.deepEqual(RECOGNITION_KEYS, [
         draft_min_s: 4,
         strong_pause_ms: 700,
         long_pause_ms: 1100,
+        phrase_freeze_interval_ms: 0,
+        draft_target_s: 0,
+        draft_target_tolerance_s: 2,
     });
 }
 
@@ -99,12 +114,45 @@ assert.deepEqual(RECOGNITION_KEYS, [
     assert.equal(recognition.long_pause_ms, 1300);
 }
 
+// 0.23.16.5：固定节奏与目标窗口归一化（与后端 sanitize 三处同步）
+{
+    // 固定节奏：0 保持关闭；500 收敛 800；4000 收敛 3000。
+    const freeze = {...RECOGNITION_DEFAULTS, phrase_freeze_interval_ms: 500};
+    assert.equal(normalizeRecognitionConfig(freeze, 12), true);
+    assert.equal(freeze.phrase_freeze_interval_ms, 800);
+    freeze.phrase_freeze_interval_ms = 4000;
+    normalizeRecognitionConfig(freeze, 12);
+    assert.equal(freeze.phrase_freeze_interval_ms, 3000);
+    const off = {...RECOGNITION_DEFAULTS, phrase_freeze_interval_ms: 0};
+    assert.equal(normalizeRecognitionConfig(off, 12), false, "0 = 关闭，不得被抬升");
+
+    // 目标窗口：10 + 2 在 max_uncommitted=12 内恰好可达（不动）。
+    const fit = {...RECOGNITION_DEFAULTS, draft_target_s: 10, draft_target_tolerance_s: 2};
+    assert.equal(normalizeRecognitionConfig(fit, 12), false);
+    // 超上限：target 收敛到 max − tolerance。
+    const overshoot = {...RECOGNITION_DEFAULTS, draft_target_s: 25, draft_target_tolerance_s: 3};
+    assert.equal(normalizeRecognitionConfig(overshoot, 12), true);
+    assert.equal(overshoot.draft_target_s, 9);
+    // 不可达（cap − tolerance < 4）：关闭。
+    const impossible = {...RECOGNITION_DEFAULTS, draft_target_s: 10, draft_target_tolerance_s: 10};
+    assert.equal(normalizeRecognitionConfig(impossible, 12), true);
+    assert.equal(impossible.draft_target_s, 0);
+    assert.equal(impossible.draft_target_tolerance_s, 10);
+    // 关闭状态宽容越界仍收敛。
+    const toleranceOnly = {...RECOGNITION_DEFAULTS, draft_target_tolerance_s: 99};
+    assert.equal(normalizeRecognitionConfig(toleranceOnly, 12), true);
+    assert.equal(toleranceOnly.draft_target_tolerance_s, 10);
+}
+
 const voiceSource = await readFile(new URL("./voice.js", import.meta.url), "utf8");
 for (const id of [
     "voice-recognition-preview-window-ms",
     "voice-recognition-preview-refresh-ms",
     "voice-recognition-draft-min-s",
     "voice-recognition-strong-pause-ms",
+    "voice-recognition-phrase-freeze-interval-ms",
+    "voice-recognition-draft-target-s",
+    "voice-recognition-draft-target-tolerance-s",
     "voice-recognition-reset-btn",
 ]) {
     assert.match(voiceSource, new RegExp(`getElementById\\("${id}"\\)`), `voice.js 应接线 ${id}`);
@@ -123,6 +171,9 @@ const htmlRanges = [
     [/id="voice-recognition-draft-min-s" max="10" min="3" step="1"/, "Draft minimum range"],
     [/id="voice-recognition-strong-pause-ms" max="1500" min="500" step="50"/, "Strong pause range"],
     [/id="voice-recognition-long-pause-ms" max="2000" min="800" step="50"/, "Long pause range"],
+    [/id="voice-recognition-phrase-freeze-interval-ms" max="3000" min="0" step="100"/, "Phrase freeze range"],
+    [/id="voice-recognition-draft-target-s" max="30" min="0" step="1"/, "Draft target range"],
+    [/id="voice-recognition-draft-target-tolerance-s" max="10" min="1" step="1"/, "Draft tolerance range"],
 ];
 for (const [pattern, label] of htmlRanges) assert.match(html, pattern, label);
 assert.match(html, /data-i18n="voice\.local\.vad\.min_sentence_ms\.label">候选最短语音/);
@@ -142,6 +193,12 @@ const i18nKeys = [
     "voice.local.recognition.strong_pause_ms.hint",
     "voice.local.recognition.long_pause_ms.label",
     "voice.local.recognition.long_pause_ms.hint",
+    "voice.local.recognition.phrase_freeze_interval_ms.label",
+    "voice.local.recognition.phrase_freeze_interval_ms.hint",
+    "voice.local.recognition.draft_target_s.label",
+    "voice.local.recognition.draft_target_s.hint",
+    "voice.local.recognition.draft_target_tolerance_s.label",
+    "voice.local.recognition.draft_target_tolerance_s.hint",
 ];
 for (const lang of ["zh", "en"]) {
     const source = await readFile(new URL(`../../i18n/${lang}.js`, import.meta.url), "utf8");

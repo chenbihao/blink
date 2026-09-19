@@ -322,6 +322,23 @@ pub struct RecognitionConfig {
     /// 也必须定稿。句内 200～500ms 停顿不受影响。
     #[serde(default = "default_recognition_long_pause_ms")]
     pub long_pause_ms: u32,
+    /// 0.23.16.5 预览短语固定冻结节奏（毫秒，默认 0=关闭）。0 = 沿用
+    /// 0.23.13 的"绑定预览窗滚动"兜底（前缀 1.2s 且滚出窗口才冻结）；
+    /// 设值（800～3000）后按固定时长主动冻结——预览增量更平稳，代价是
+    /// 短语识别更频繁（单 worker 下占用推理预算）。
+    #[serde(default)]
+    pub phrase_freeze_interval_ms: u32,
+    /// 0.23.16.5 Draft 目标窗口中心（秒，默认 0=关闭）。0 = 现状"首个
+    /// 合格停顿候选即定稿"；设值后普通停顿候选只在优选窗口
+    /// [target−tolerance, target+tolerance] 内采纳（更长的上下文通常
+    /// 更准），长静音与强制切不受目标门影响（用户明显说完或音频超限
+    /// 必须立即定稿）。
+    #[serde(default)]
+    pub draft_target_s: u32,
+    /// 0.23.16.5 Draft 目标窗口宽容（秒，默认 3，范围 1～10）：优选窗口
+    /// 半宽。`draft_target_s = 0`（关闭）时未用。
+    #[serde(default = "default_recognition_draft_target_tolerance_s")]
+    pub draft_target_tolerance_s: u32,
 }
 
 /// Recognition 配置的安全边界。serde 缺字段补默认值，越界值由
@@ -336,6 +353,15 @@ pub const RECOGNITION_STRONG_PAUSE_MIN_MS: u32 = 500;
 pub const RECOGNITION_STRONG_PAUSE_MAX_MS: u32 = 1_500;
 pub const RECOGNITION_LONG_PAUSE_MIN_MS: u32 = 800;
 pub const RECOGNITION_LONG_PAUSE_MAX_MS: u32 = 2_000;
+/// 0.23.16.5：短语固定冻结节奏的安全边界（0=关闭；设值时 800～3000ms）。
+pub const RECOGNITION_PHRASE_FREEZE_MIN_MS: u32 = 800;
+pub const RECOGNITION_PHRASE_FREEZE_MAX_MS: u32 = 3_000;
+/// 0.23.16.5：Draft 目标窗口中心的安全边界（0=关闭；设值时 4～30s）。
+pub const RECOGNITION_DRAFT_TARGET_MIN_S: u32 = 4;
+pub const RECOGNITION_DRAFT_TARGET_MAX_S: u32 = 30;
+/// 0.23.16.5：目标窗口宽容（半宽）的安全边界。
+pub const RECOGNITION_DRAFT_TARGET_TOLERANCE_MIN_S: u32 = 1;
+pub const RECOGNITION_DRAFT_TARGET_TOLERANCE_MAX_S: u32 = 10;
 /// `long_pause_ms` 必须严格大于 `strong_pause_ms` 的最小间隔（毫秒）。
 ///
 /// 与设置页两个滑块的步长（50ms）一致：相等时 `candidate_readiness` 的
@@ -493,6 +519,12 @@ fn default_recognition_long_pause_ms() -> u32 {
     1_100
 }
 
+fn default_recognition_draft_target_tolerance_s() -> u32 {
+    // 2s：默认目标 10s + 2s 宽容 = [8s, 12s]，恰好在 stock
+    // max_uncommitted_s = 12 的强制切上限内可达（sanitize 不再收敛）。
+    2
+}
+
 fn default_streaming_mode() -> StreamingMode {
     StreamingMode::Pseudo
 }
@@ -549,6 +581,9 @@ impl Default for RecognitionConfig {
             draft_min_s: default_recognition_draft_min_s(),
             strong_pause_ms: default_recognition_strong_pause_ms(),
             long_pause_ms: default_recognition_long_pause_ms(),
+            phrase_freeze_interval_ms: 0,
+            draft_target_s: 0,
+            draft_target_tolerance_s: default_recognition_draft_target_tolerance_s(),
         }
     }
 }
@@ -638,6 +673,9 @@ impl RecognitionConfig {
             self.draft_min_s,
             self.strong_pause_ms,
             self.long_pause_ms,
+            self.phrase_freeze_interval_ms,
+            self.draft_target_s,
+            self.draft_target_tolerance_s,
         );
 
         self.preview_window_ms = self.preview_window_ms.clamp(
@@ -685,12 +723,56 @@ impl RecognitionConfig {
         let draft_max = RECOGNITION_DRAFT_MIN_MAX_S.min(max_uncommitted_s);
         self.draft_min_s = self.draft_min_s.clamp(draft_min, draft_max);
 
+        // 0.23.16.5：短语固定冻结节奏——0=关闭；设值收敛到 [800, 3000]ms
+        //（低于 800ms 的冻结节奏会以块率制造短语识别，挤占尾部刷新）。
+        if self.phrase_freeze_interval_ms != 0 {
+            self.phrase_freeze_interval_ms = self.phrase_freeze_interval_ms.clamp(
+                RECOGNITION_PHRASE_FREEZE_MIN_MS,
+                RECOGNITION_PHRASE_FREEZE_MAX_MS,
+            );
+        }
+        // 0.23.16.5：Draft 目标窗口——0=关闭；设值时中心收敛到 [4, 30]s、
+        // 宽容收敛到 [1, 10]s，并保证优选窗口上界 target + tolerance 不超
+        // 过未提交音频上限（等不到合格停顿时由 hard window 强制切兜底，
+        // 上界不可达会让目标窗口形同虚设）。空间不足时关闭目标模式并
+        // warn（例如 max_uncommitted=12、tolerance=10 时 target 只剩 2s）。
+        if self.draft_target_s != 0 {
+            self.draft_target_s = self
+                .draft_target_s
+                .clamp(RECOGNITION_DRAFT_TARGET_MIN_S, RECOGNITION_DRAFT_TARGET_MAX_S);
+            self.draft_target_tolerance_s = self.draft_target_tolerance_s.clamp(
+                RECOGNITION_DRAFT_TARGET_TOLERANCE_MIN_S,
+                RECOGNITION_DRAFT_TARGET_TOLERANCE_MAX_S,
+            );
+            let ceiling_cap = max_uncommitted_s.saturating_sub(self.draft_target_tolerance_s);
+            if ceiling_cap >= self.draft_target_s {
+                // 上界可达：无需调整。
+            } else if ceiling_cap >= RECOGNITION_DRAFT_TARGET_MIN_S {
+                self.draft_target_s = ceiling_cap;
+            } else {
+                tracing::warn!(
+                    max_uncommitted_s,
+                    tolerance = self.draft_target_tolerance_s,
+                    "Draft 目标窗口在未提交上限内不可达，已关闭目标模式"
+                );
+                self.draft_target_s = 0;
+            }
+        } else {
+            self.draft_target_tolerance_s = self.draft_target_tolerance_s.clamp(
+                RECOGNITION_DRAFT_TARGET_TOLERANCE_MIN_S,
+                RECOGNITION_DRAFT_TARGET_TOLERANCE_MAX_S,
+            );
+        }
+
         let after = (
             self.preview_window_ms,
             self.preview_refresh_ms,
             self.draft_min_s,
             self.strong_pause_ms,
             self.long_pause_ms,
+            self.phrase_freeze_interval_ms,
+            self.draft_target_s,
+            self.draft_target_tolerance_s,
         );
         if after != before {
             tracing::warn!(
@@ -1041,6 +1123,9 @@ mod tests {
                     draft_min_s: 7,
                     strong_pause_ms: 1_000,
                     long_pause_ms: 1_400,
+                    phrase_freeze_interval_ms: 1_200,
+                    draft_target_s: 10,
+                    draft_target_tolerance_s: 3,
                 },
                 vad_kind: "energy".into(),
                 streaming_model: None,
@@ -1081,6 +1166,9 @@ mod tests {
         assert_eq!(restored.local_engine.recognition.preview_refresh_ms, 900);
         assert_eq!(restored.local_engine.recognition.draft_min_s, 7);
         assert_eq!(restored.local_engine.recognition.strong_pause_ms, 1_000);
+        assert_eq!(restored.local_engine.recognition.phrase_freeze_interval_ms, 1_200);
+        assert_eq!(restored.local_engine.recognition.draft_target_s, 10);
+        assert_eq!(restored.local_engine.recognition.draft_target_tolerance_s, 3);
         assert_eq!(restored.local_engine.vad_kind, "energy");
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
@@ -2114,6 +2202,59 @@ mod tests {
         assert_eq!(cfg.local_engine.recognition, RecognitionConfig::default());
     }
 
+    /// 0.23.16.5：短语固定节奏与目标窗口的 sanitize 边界。
+    #[test]
+    fn recognition_sanitize_clamps_phrase_freeze_and_draft_target() {
+        // 固定节奏：0 保持关闭；越界收敛 [800, 3000]。
+        let mut recognition = RecognitionConfig {
+            phrase_freeze_interval_ms: 500,
+            ..RecognitionConfig::default()
+        };
+        assert!(recognition.sanitize(12));
+        assert_eq!(recognition.phrase_freeze_interval_ms, 800);
+        recognition.phrase_freeze_interval_ms = 4_000;
+        recognition.sanitize(12);
+        assert_eq!(recognition.phrase_freeze_interval_ms, 3_000);
+        recognition.phrase_freeze_interval_ms = 0;
+        assert!(!recognition.sanitize(12), "0 = 关闭，不得被抬升");
+
+        // 目标窗口：10s + 2s 在 stock max_uncommitted=12 内恰好可达（不动）。
+        let mut target = RecognitionConfig {
+            draft_target_s: 10,
+            draft_target_tolerance_s: 2,
+            ..RecognitionConfig::default()
+        };
+        assert!(!target.sanitize(12));
+        assert_eq!((target.draft_target_s, target.draft_target_tolerance_s), (10, 2));
+
+        // target + tolerance 超上限：target 收敛到 max − tolerance。
+        let mut overshoot = RecognitionConfig {
+            draft_target_s: 25,
+            draft_target_tolerance_s: 3,
+            ..RecognitionConfig::default()
+        };
+        assert!(overshoot.sanitize(12));
+        assert_eq!(overshoot.draft_target_s, 9);
+
+        // 空间不足（cap − tolerance < 下限 4s）：关闭目标模式。
+        let mut impossible = RecognitionConfig {
+            draft_target_s: 10,
+            draft_target_tolerance_s: 10,
+            ..RecognitionConfig::default()
+        };
+        assert!(impossible.sanitize(12));
+        assert_eq!(impossible.draft_target_s, 0, "不可达的目标窗口必须被关闭");
+        assert_eq!(impossible.draft_target_tolerance_s, 10, "宽容仍收敛到范围内");
+
+        // 关闭状态下宽容也收敛。
+        let mut tolerance_only = RecognitionConfig {
+            draft_target_tolerance_s: 99,
+            ..RecognitionConfig::default()
+        };
+        assert!(tolerance_only.sanitize(12));
+        assert_eq!(tolerance_only.draft_target_tolerance_s, 10);
+    }
+
     #[test]
     fn recognition_sanitize_keeps_valid_values() {
         let mut recognition = RecognitionConfig::default();
@@ -2126,6 +2267,7 @@ mod tests {
             draft_min_s: 10,
             strong_pause_ms: 1_500,
             long_pause_ms: 2_000,
+            ..RecognitionConfig::default()
         };
         assert!(!recognition.sanitize(12));
         assert_eq!(recognition.preview_window_ms, 4_000);
@@ -2143,6 +2285,7 @@ mod tests {
             draft_min_s: 99,
             strong_pause_ms: 1,
             long_pause_ms: 99,
+            ..RecognitionConfig::default()
         };
         assert!(recognition.sanitize(6));
         assert_eq!(

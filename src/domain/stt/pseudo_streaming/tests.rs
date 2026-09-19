@@ -740,6 +740,166 @@ async fn phrase_finalizes_accumulate_then_draft_replaces() {
     }
 }
 
+/// 0.23.16.4 Draft 在途不停摆：Draft 推理挂起（transport 未应答）期间，
+/// 连续语音前缀积满时间冻结线必须照样**登记**短语（pending_phrase 置位、
+/// 锚点推进），不再等 Draft 完成后才评估——单 worker 下短语推理在
+/// worker gate 排队，Draft 应答后立刻执行（调度层并行、推理层串行）。
+#[tokio::test]
+async fn time_freeze_registers_phrase_while_draft_finalize_in_flight() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..3).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    let feed = |source: Vec<f32>| {
+        let engine = &engine;
+        async move {
+            for chunk in source.chunks(160) {
+                engine.transcribe_chunk(chunk).await.expect("chunk ok");
+            }
+        }
+    };
+
+    // 3.2s 语音 + 0.8s 强停顿 → Draft 边界被采纳，推理挂起（未应答）。
+    feed(vec![0.1f32; 16_000 * 32 / 10]).await;
+    feed(vec![0.0f32; 16_000 * 8 / 10]).await;
+    transport.wait_for_calls_or_fail(1).await;
+    assert!(
+        engine.stream_stats().finalize_in_flight,
+        "Draft 推理必须在途（transport 未应答）"
+    );
+
+    // Draft 在途继续说 4.6s：前缀积满 1.2s 冻结线即登记短语——修复前
+    // 时间冻结被 finalize_in_flight 停摆，登记要等 Draft 应答后才发生。
+    feed(vec![0.1f32; 16_000 * 46 / 10]).await;
+    wait_until(|| engine.inner.lock().unwrap().pending_phrase.is_some()).await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert!(
+            inner.phrase_anchor > 16_000 * 4,
+            "锚点在 Draft 在途期间推进到冻结切点（实测 {}）",
+            inner.phrase_anchor
+        );
+    }
+    assert!(
+        engine.stream_stats().finalize_in_flight,
+        "短语登记发生在 Draft 在途期间（不停摆）"
+    );
+
+    // 应答 Draft → 排队中的短语任务拿到 worker gate 执行 → 入账。
+    senders
+        .remove(0)
+        .send(Ok("草稿正文。".to_string()))
+        .expect("sender 不应泄漏");
+    transport.wait_for_calls_or_fail(2).await;
+    senders
+        .remove(0)
+        .send(Ok("冻结短语。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| !engine.inner.lock().unwrap().preview_phrases.is_empty()).await;
+
+    // 终态：尾段（边界之后的 4.6s 语音）在 finalize 内部再发起一次识别，
+    // transport 调用在 finalize 期间才到达——先挂应答任务再调 finalize。
+    let tail_sender = senders.remove(0);
+    let tail_transport = transport.clone();
+    tokio::spawn(async move {
+        tail_transport.wait_for_calls_or_fail(3).await;
+        tail_sender
+            .send(Ok("尾部。".to_string()))
+            .expect("tail sender 不应泄漏");
+    });
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "草稿正文。尾部。");
+}
+
+/// 0.23.16.1 组合投影诊断：短语入账（增长）与 Draft settle（清退回退）
+/// 必须在 composite observer 留下边沿记录——归因与变化后文本可重建
+/// "用户实际看到的组合字符串"时间线，G2 体感回退因此可复现、可归因。
+#[tokio::test]
+async fn composite_observer_records_phrase_growth_and_settle_retreat() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..2).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let composites: Arc<Mutex<Vec<SttCompositeRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    let engine = preview_draft_engine(transport.clone())
+        .with_composite_observer(Arc::clone(&composites));
+
+    let speech = vec![0.1f32; 16_000];
+    let short_pause = vec![0.0f32; 16_000 * 3 / 10];
+    let strong_pause = vec![0.0f32; 16_000 * 8 / 10];
+    let feed = |source: Vec<f32>| {
+        let engine = &engine;
+        async move {
+            for chunk in source.chunks(160) {
+                engine.transcribe_chunk(chunk).await.expect("chunk ok");
+            }
+        }
+    };
+
+    // 短语冻结：复语作废候选 → 短语入账（组合文本从空增长）。
+    feed(speech.clone()).await;
+    feed(short_pause.clone()).await;
+    feed(speech.clone()).await;
+    transport.wait_for_calls_or_fail(1).await;
+    senders
+        .remove(0)
+        .send(Ok("明确的多句话。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| {
+        composites
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| record.text == "明确的多句话。" && record.retreat_chars == 0)
+    })
+    .await;
+    {
+        let records = composites.lock().unwrap();
+        let append = records
+            .iter()
+            .find(|record| record.text == "明确的多句话。")
+            .expect("短语入账必须留下边沿记录");
+        assert_eq!(append.cause, "phrase_append");
+        assert_eq!(append.spans, 1, "组合 = 单短语 + 空尾部");
+        assert!(append.fed_ms > 0, "记录必须携带绝对音频位置");
+    }
+
+    // Draft settle：强停顿 → Draft 提交清退短语 → 组合文本回退到空。
+    feed(strong_pause).await;
+    transport.wait_for_calls_or_fail(2).await;
+    senders
+        .remove(0)
+        .send(Ok("草稿正文。".to_string()))
+        .expect("sender 不应泄漏");
+    let expected_retreat = "明确的多句话。".chars().count() as u64;
+    wait_until(|| {
+        composites.lock().unwrap().iter().any(|record| {
+            record.cause == "settle_commit"
+                && record.retreat_chars == expected_retreat
+                && record.text.is_empty()
+        })
+    })
+    .await;
+
+    // 墙钟单调：边沿记录按确认顺序推进。
+    let records = composites.lock().unwrap();
+    let walls: Vec<_> = records.iter().map(|record| record.observed_at).collect();
+    for pair in windows_pair(&walls) {
+        assert!(pair.0 <= pair.1, "composite 记录墙钟必须单调");
+    }
+}
+
+/// 相邻对迭代（测试断言用，避免引入 itertools）。
+fn windows_pair<'a>(items: &'a [Instant]) -> Vec<(Instant, Instant)> {
+    items.windows(2).map(|pair| (pair[0], pair[1])).collect()
+}
+
 /// 0.23.13 时间触发短语冻结：连续语音无任何停顿候选（停顿检测失灵的
 /// 等效场景——底噪高于停顿电平、VAD 永不判安静）时，滚动窗前缀积满
 /// 1.2s 主动追认为短语，灰色预览仍按短语增量累积而非只剩最近 3s 碎片。
@@ -952,6 +1112,146 @@ async fn short_phrase_pause_freezes_phrase_without_waiting_for_resume() {
     assert_eq!(final_text, "终稿。");
 }
 
+/// 0.23.16.6 短语防回退：短语入账时，若被清退的尾部范围完全落在短语
+/// 范围内（同一音频）且文本更长，冻结尾部文本而非本次识别结果——
+/// 组合预览不再因同范围重复识别的模型波动变短。尾部被清退时预览增长
+/// 门同步锚到短语终点，未覆盖后缀交回尾部窗口立即重投影（不等 ≥500ms
+/// 全新音频）。
+#[tokio::test]
+async fn phrase_freeze_adopts_longer_tail_within_range_and_reanchors_growth_gate() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..2).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    // 600ms 语音 + 400ms 停顿 → ShortPhraseEnd 在停顿期间发起短语推理。
+    let speech = vec![0.1f32; 16_000 * 6 / 10];
+    let pause = vec![0.0f32; 16_000 * 4 / 10];
+    for source in [&speech, &pause] {
+        for chunk in source.chunks(160) {
+            engine.transcribe_chunk(chunk).await.expect("chunk ok");
+        }
+    }
+    transport.wait_for_calls_or_fail(1).await;
+
+    // 短语在途期间，尾部已显示更长文本（范围 [0, 600ms] ⊆ 短语范围
+    // [0, 谷内 630~750ms]）；增长门模拟上一轮尾部快照结束于 1s。
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.set_preview_if_changed(
+            "八个字的长尾部文本".to_string(),
+            AudioRange::new(0, 9_600),
+            99,
+        );
+        inner.last_preview_sample_end = 16_000;
+    }
+
+    // 短语识别返回更短文本 → 采纳更长的尾部文本，组合预览零回退。
+    senders
+        .remove(0)
+        .send(Ok("短。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| engine.inner.lock().unwrap().preview_phrases.len() == 1).await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(inner.preview_phrases.len(), 1);
+        assert_eq!(
+            inner.preview_phrases[0].text, "八个字的长尾部文本",
+            "同范围内更长的尾部文本被冻结，短语文本不产生可见回退"
+        );
+        assert_eq!(inner.latest_preview, "八个字的长尾部文本");
+        let phrase_end = inner.preview_phrases[0].range.end_sample as usize;
+        assert_eq!(
+            inner.last_preview_sample_end, phrase_end,
+            "尾部被清退后增长门锚到短语终点，后缀重投影不等新音频"
+        );
+        assert!(inner.preview_tail.is_empty(), "重叠尾部照常清退");
+    }
+
+    senders
+        .remove(0)
+        .send(Ok("终稿。".to_string()))
+        .expect("sender 不应泄漏");
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "终稿。");
+}
+
+/// 0.23.16.7 跨界吸收：尾部覆盖超出短语终点且文本更长时，以**尾部完整
+/// 范围**冻结入账并把锚点推进到尾部终点——后缀音频随文本一并被该段
+/// 收编，不清退、不重识别，组合预览零回退；后续尾部从冻结终点继续，
+/// 不会与下一次识别重复。0.23.16.6 曾在此场景拒绝采纳（跨界清退 +
+/// 后缀重识别），是残留可见回退的主源。
+#[tokio::test]
+async fn phrase_freeze_adopts_crossing_tail_with_full_range_and_advances_anchor() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..2).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+
+    let speech = vec![0.1f32; 16_000 * 6 / 10];
+    let pause = vec![0.0f32; 16_000 * 4 / 10];
+    for source in [&speech, &pause] {
+        for chunk in source.chunks(160) {
+            engine.transcribe_chunk(chunk).await.expect("chunk ok");
+        }
+    }
+    transport.wait_for_calls_or_fail(1).await;
+
+    // 尾部范围 [0, 900ms] 超出短语终点（≤750ms），文本更长——完整范围收编。
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.set_preview_if_changed(
+            "更长但跨界".to_string(),
+            AudioRange::new(0, 14_400),
+            98,
+        );
+        inner.last_preview_sample_end = 16_000;
+    }
+    senders
+        .remove(0)
+        .send(Ok("短语。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| engine.inner.lock().unwrap().preview_phrases.len() == 1).await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert_eq!(
+            inner.preview_phrases[0].text, "更长但跨界",
+            "跨界更长尾部被采纳，短语文本不产生可见回退"
+        );
+        assert_eq!(
+            inner.preview_phrases[0].range,
+            AudioRange::new(0, 14_400),
+            "冻结 span 采用尾部完整范围（后缀音频随文本一并收编）"
+        );
+        assert_eq!(
+            inner.phrase_anchor, 14_400,
+            "锚点推进到冻结终点，下一段从其终点继续"
+        );
+        assert!(inner.preview_tail.is_empty(), "被收编的尾部照常清退");
+        assert_eq!(
+            inner.last_preview_sample_end, 14_400,
+            "增长门锚到冻结终点，后缀重投影不等新音频"
+        );
+        assert_eq!(
+            inner.latest_preview, "更长但跨界",
+            "组合文本零变化——冻结只移动归属，不改变已显示内容"
+        );
+    }
+
+    senders
+        .remove(0)
+        .send(Ok("终稿。".to_string()))
+        .expect("sender 不应泄漏");
+    let final_text = engine.finalize().await.expect("finalize ok");
+    assert_eq!(final_text, "终稿。");
+}
+
 // ── 0.23.14 P0-1 长静音可靠终结 ──────────────────────────────────
 
 /// 构造 PreviewDraft profile 的内部状态（candidate_readiness 纯逻辑测试用）。
@@ -977,6 +1277,151 @@ fn candidate_ms(voiced_ms: u64, quiet_ms: u64) -> BoundaryCandidate {
         strong_run_max_samples: voiced_ms * 16,
         quiet_samples: quiet_ms * 16,
     }
+}
+
+/// 0.23.16.3 反回退门：同锚范围未扩展（新范围 ⊆ 旧尾部范围）且文本
+/// 更短的替换被拒绝，旧文本保留；范围扩展（end 前移）时正常替换，
+/// 即使文本更短（新结果覆盖更多音频）。拦截按 span 音频范围裁决，
+/// 不做字符串裁剪。
+#[test]
+fn tail_replace_same_range_shorter_text_is_rejected() {
+    let mut inner = preview_draft_inner();
+    inner.set_preview_if_changed(
+        "八个字的预览文本".to_string(),
+        AudioRange::new(1_000, 3_000),
+        1,
+    );
+    assert_eq!(inner.preview_tail, "八个字的预览文本");
+
+    // 同范围变短：拒绝，旧文本保留。
+    inner.set_preview_if_changed("更短".to_string(), AudioRange::new(1_000, 3_000), 2);
+    assert_eq!(
+        inner.preview_tail, "八个字的预览文本",
+        "同范围变短必须被反回退门拦截"
+    );
+    assert_eq!(inner.preview_blocked_retreat_chars, 6);
+
+    // 同范围变长：允许（增长）。
+    inner.set_preview_if_changed(
+        "八个字的预览文本再加长".to_string(),
+        AudioRange::new(1_000, 3_000),
+        3,
+    );
+    assert_eq!(inner.preview_tail, "八个字的预览文本再加长");
+
+    // 范围收缩（start 后移、end 不变）且变短：⊆ 旧范围，同样拦截。
+    inner.set_preview_if_changed("缩".to_string(), AudioRange::new(1_500, 3_000), 4);
+    assert_eq!(inner.preview_tail, "八个字的预览文本再加长");
+    assert_eq!(inner.preview_blocked_retreat_chars, 16);
+
+    // 范围扩展（end 前移覆盖新音频）：正常替换，允许变短。
+    inner.set_preview_if_changed("短".to_string(), AudioRange::new(1_000, 3_500), 5);
+    assert_eq!(
+        inner.preview_tail, "短",
+        "范围扩展时的替换不受反回退门影响"
+    );
+    assert_eq!(inner.preview_blocked_retreat_chars, 16, "扩展替换不计拦截");
+
+    // 锚点回退场景（范围起点前移 = 覆盖变大）：不是子集，正常替换。
+    inner.set_preview_if_changed("回退重算".to_string(), AudioRange::new(500, 3_500), 6);
+    assert_eq!(inner.preview_tail, "回退重算");
+}
+
+/// 0.23.16.5 Draft 目标窗口门矩阵（draft_target_s=10、tolerance=2、
+/// draft_min=5 → floor = max(5, 8) = 8s）：
+/// - owned < floor 且停顿未达长静音 → 普通停顿候选等待（below_draft_target）；
+/// - 长静音（≥ long_pause）逃逸——用户明显说完，立即定稿；
+/// - owned ≥ floor → 现状分支正常裁决；
+/// - 关闭（默认 draft_target_s=0）→ 行为与现状完全一致。
+#[test]
+fn draft_target_window_gate_matrix() {
+    let mut inner = preview_draft_inner();
+    inner.coordinator.settings.draft_target_s = 10;
+    inner.coordinator.settings.draft_target_tolerance_s = 2;
+
+    // owned 3s < floor 8s，停顿 600ms（自然句尾候选，未达 long_pause）→ 等待。
+    let early = candidate_ms(3_000, 600);
+    let readiness = inner.candidate_readiness(&early, early.boundary_sample as usize, 16_000);
+    assert_eq!(readiness, Err("below_draft_target"));
+
+    // owned 3s，停顿 1200ms ≥ long_pause → 长静音逃逸，立即接受。
+    let long_silence = candidate_ms(3_000, 1_200);
+    let readiness = inner.candidate_readiness(
+        &long_silence,
+        long_silence.boundary_sample as usize,
+        16_000,
+    );
+    assert!(readiness.is_ok(), "长静音逃逸不受目标门影响");
+    assert_eq!(readiness, Ok(AcceptedVia::LongPause));
+
+    // owned 9s ∈ [floor 8s, ceiling 12s) → 现状分支裁决（自然句尾接受）。
+    let in_window = candidate_ms(9_000, 600);
+    let readiness = inner.candidate_readiness(
+        &in_window,
+        in_window.boundary_sample as usize,
+        16_000,
+    );
+    assert!(readiness.is_ok(), "优选窗口内合格候选即切");
+
+    // 关闭目标模式（默认）→ 同一早期候选走自然分支照常接受。
+    let disabled = preview_draft_inner();
+    let readiness =
+        disabled.candidate_readiness(&early, early.boundary_sample as usize, 16_000);
+    assert!(readiness.is_ok(), "目标模式关闭时行为与现状一致");
+}
+
+/// 0.23.16.5 固定冻结节奏：phrase_freeze_interval_ms=800 时，连续语音前缀
+/// 积满 800ms 即登记短语——不需要等前缀滚出 3s 预览窗（默认模式需要
+/// total > 4.2s 才触发）。无停顿候选的短会话因此也能增量冻结。
+#[tokio::test]
+async fn phrase_freeze_fixed_interval_registers_before_window_roll() {
+    let channels: Vec<(
+        oneshot::Sender<Result<String, String>>,
+        oneshot::Receiver<Result<String, String>>,
+    )> = (0..1).map(|_| oneshot::channel()).collect();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let transport = ControlledTransport::new(receivers);
+    let engine = preview_draft_engine(transport.clone());
+    {
+        let mut inner = engine.inner.lock().unwrap();
+        inner.coordinator.settings.phrase_freeze_interval_ms = 800;
+    }
+
+    // 1.6s 连续语音（无停顿）：0.8s 处即应登记首个短语；窗口滚动模式
+    // 下（roll_start = total − 3s = 0）该会话永远不会冻结。
+    for chunk in vec![0.1f32; 16_000 * 16 / 10].chunks(160) {
+        engine.transcribe_chunk(chunk).await.expect("chunk ok");
+    }
+    wait_until(|| {
+        let inner = engine.inner.lock().unwrap();
+        inner.pending_phrase.is_some() || !inner.preview_phrases.is_empty()
+    })
+    .await;
+    {
+        let inner = engine.inner.lock().unwrap();
+        assert!(
+            inner.phrase_anchor >= 16_000 * 8 / 10,
+            "固定节奏 800ms：锚点必须推进到冻结切点（实测 {}）",
+            inner.phrase_anchor
+        );
+    }
+
+    // 应答短语识别，入账。
+    transport.wait_for_calls_or_fail(1).await;
+    senders
+        .remove(0)
+        .send(Ok("固定节奏短语。".to_string()))
+        .expect("sender 不应泄漏");
+    wait_until(|| {
+        engine
+            .inner
+            .lock()
+            .unwrap()
+            .preview_phrases
+            .iter()
+            .any(|span| span.text == "固定节奏短语。")
+    })
+    .await;
 }
 
 /// 长静音终结决策矩阵：voiced × silence 组合下候选是否升级为 Draft。
@@ -1474,7 +1919,7 @@ fn phrase_landing_settles_overlapping_tail_to_single_projection() {
         "明确的多句话。",
     ));
     inner.settle_tail_for_phrase(48_000);
-    inner.rebuild_preview_text();
+    inner.rebuild_preview_text(CompositeCause::TailReplace);
     assert_eq!(
         inner.latest_preview, "明确的多句话。",
         "同一音频范围只投影一次 A"
@@ -1506,7 +1951,7 @@ fn crossing_tail_withdraws_overlap_and_suffix_recovers_from_tail_window() {
         .preview_phrases
         .push(PreviewSpan::new(AudioRange::new(0, 32_000), "A"));
     inner.settle_tail_for_phrase(32_000);
-    inner.rebuild_preview_text();
+    inner.rebuild_preview_text(CompositeCause::TailReplace);
     assert_eq!(inner.latest_preview, "A", "重叠前缀清退后只剩短语 A");
 
     // 迟到旧 Preview（覆盖短语范围）不得让 A 再次出现。
@@ -1583,7 +2028,7 @@ fn compose_repairs_overlapping_preview_spans() {
         // 尾部与短语重叠（模拟上游裁决之外的存量冲突状态）。
         inner.preview_tail = "短语A。尾部B".to_string();
         inner.preview_tail_range = Some(AudioRange::new(0, 32_000));
-        inner.rebuild_preview_text();
+        inner.rebuild_preview_text(CompositeCause::TailReplace);
     }
     let envelope = engine.compose_typed_result().expect("compose ok");
     let value: serde_json::Value = serde_json::from_str(&envelope).expect("envelope json");
@@ -1620,7 +2065,7 @@ fn consecutive_compose_persists_repair_and_does_not_reemit() {
         // 尾部与短语重叠（模拟上游裁决之外的存量冲突状态）。
         inner.preview_tail = "短语A。尾部B".to_string();
         inner.preview_tail_range = Some(AudioRange::new(0, 32_000));
-        inner.rebuild_preview_text();
+        inner.rebuild_preview_text(CompositeCause::TailReplace);
         revision_before = inner.preview_revision;
     }
 
@@ -1685,7 +2130,7 @@ fn compose_repair_keeps_surviving_tail_in_truth_source() {
             .push(PreviewSpan::new(AudioRange::new(8_000, 32_000), "重叠。"));
         inner.preview_tail = "尾部。".to_string();
         inner.preview_tail_range = Some(AudioRange::new(32_000, 48_000));
-        inner.rebuild_preview_text();
+        inner.rebuild_preview_text(CompositeCause::TailReplace);
     }
     let first = engine.compose_typed_result().expect("compose ok");
     let value: serde_json::Value = serde_json::from_str(&first).expect("envelope json");
@@ -3961,7 +4406,7 @@ fn composed_preview_envelope_covers_all_spans_and_settles_nonzero() {
         ];
         inner.preview_tail = "尾部预览。".into();
         inner.preview_tail_range = Some(AudioRange::new(320_000, 368_000));
-        inner.rebuild_preview_text();
+        inner.rebuild_preview_text(CompositeCause::TailReplace);
     }
     let payload = engine.compose_typed_result().expect("compose ok");
     let value: serde_json::Value = serde_json::from_str(&payload).expect("json");
@@ -3973,8 +4418,10 @@ fn composed_preview_envelope_covers_all_spans_and_settles_nonzero() {
     assert_eq!(spans.len(), 3, "短语 A/B + 尾部逐段携带");
     assert_eq!(spans[1]["text"], "第二短语。");
 
-    // Draft 只覆盖 A（committed 推进到 160_000）：A 退场、B 保留，尾部被
-    // 消费清空——剩余组合预览的信封仍必须覆盖 B 的完整范围。
+    // Draft 只覆盖 A（committed 推进到 160_000）：A 退场、B 保留。
+    // 0.23.16.4：尾部 [320_000, 368_000) 未覆盖任何已提交音频
+    // （start ≥ committed），保留不再清空——消除"定稿瞬间后缀文本消失、
+    // 下一次刷新再回场"的可见空洞；信封仍覆盖 B + 尾部完整范围。
     {
         let mut inner = engine.inner.lock().unwrap();
         inner.sentences.committed_sample_end = 160_000;
@@ -3987,9 +4434,9 @@ fn composed_preview_envelope_covers_all_spans_and_settles_nonzero() {
         envelope["startSample"], 160_000,
         "settle 后剩余 span 的信封起点 = B 起点"
     );
-    assert_eq!(envelope["endSample"], 320_000);
-    assert_eq!(value["spans"].as_array().expect("spans").len(), 1);
-    assert_eq!(value["text"], "第二短语。");
+    assert_eq!(envelope["endSample"], 368_000, "尾部未覆盖已提交音频时保留");
+    assert_eq!(value["spans"].as_array().expect("spans").len(), 2);
+    assert_eq!(value["text"], "第二短语。尾部预览。");
 }
 
 /// 消费方按 span 范围 settle（共享函数语义）：Draft 覆盖前缀时 A 退场、

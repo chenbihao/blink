@@ -2484,6 +2484,19 @@ fn preview_projection(spans: &[PreviewSegment]) -> String {
     spans.iter().map(|segment| segment.text.as_str()).collect()
 }
 
+/// 0.23.16.4 组合预览双层投影：除末段外视为已冻结短语（只增不减，较稳），
+/// 末段是活动尾部（可变，正在重复识别）。G2 浮窗以两级灰度呈现
+/// "稳定递增"的视觉语义——冻结短语比活动尾部更实。空清单返回两个空串。
+fn preview_two_layer_projection(spans: &[PreviewSegment]) -> (String, String) {
+    match spans.split_last() {
+        Some((tail, head)) => {
+            let frozen: String = head.iter().map(|segment| segment.text.as_str()).collect();
+            (frozen, tail.text.clone())
+        }
+        None => (String::new(), String::new()),
+    }
+}
+
 /// G2 投递失败的可见错误（0.23.14.6）：错误事件携带未上屏原文——终态
 /// 失败不得只记日志静默丢字，用户必须能拿回文本。
 fn emit_g2_delivery_error(app: &tauri::AppHandle, e: &G2SendError) {
@@ -2692,11 +2705,15 @@ async fn consume_stt_events(
                 // 浮窗 confirmed 投影 = 待交付文本（queued 未 ack 的段保持
                 // 可见，直到注入成功；ack 到达时由 ack task 更新）
                 confirmed_cache = ledger.lock().unwrap().pending_text();
+                // 0.23.16.4：携带双层投影（冻结短语 / 活动尾部），浮窗两级灰度。
+                let (preview_frozen, preview_tail) = preview_two_layer_projection(&preview_spans);
                 let _ = app.emit(
                     EventNames::VOICE_PARTIAL,
                     serde_json::json!({
                         "confirmed": confirmed_cache.as_str(),
                         "preview": preview_now.as_str(),
+                        "previewFrozen": preview_frozen.as_str(),
+                        "previewTail": preview_tail.as_str(),
                         "target": target_str,
                         "epoch": recording_epoch,
                     }),
@@ -2768,11 +2785,16 @@ async fn consume_stt_events(
                     // 触发，只在短语追加/尾部更新/显式清空时产出）。confirmed 与
                     // preview 均空的显式清空也必须发送——否则句尾旧虚字残留到
                     // 下一事件才被覆盖。
+                    // 0.23.16.4：携带双层投影（冻结短语 / 活动尾部）。
+                    let (preview_frozen, preview_tail) =
+                        preview_two_layer_projection(&preview_spans);
                     let _ = app.emit(
                         EventNames::VOICE_PARTIAL,
                         serde_json::json!({
                             "confirmed": confirmed.as_str(),
                             "preview": preview_now.as_str(),
+                            "previewFrozen": preview_frozen.as_str(),
+                            "previewTail": preview_tail.as_str(),
                             "previewRequestId": request_id,
                             "target": target_str,
                             "epoch": recording_epoch,

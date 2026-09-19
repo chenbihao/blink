@@ -1258,3 +1258,153 @@
 
 #voice .voice-coordinator-trace-candidate-value.accepted { color: var(--green); }
 #voice .voice-coordinator-trace-candidate-value.rejected { color: var(--red); }
+
+/* ── 0.23.16.2 组合预览泳道：浮窗实际显示的组合文本随墙钟演进 ── */
+
+#voice .voice-vad-debug-composite {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    margin-top: var(--space-xs);
+    /* 0.23.16.7：泳道文本可选可复制（面板默认继承 none 时也能选中） */
+    user-select: text;
+}
+
+#voice .voice-vad-debug-composite-summary {
+    color: var(--text-sub);
+    font-size: var(--text-xs);
+}
+
+#voice .voice-vad-debug-composite-empty {
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+}
+
+#voice .voice-vad-debug-composite-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    padding: var(--space-2xs) var(--space-xs);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--surface-2);
+}
+
+#voice .voice-vad-debug-composite-growth { border-left-color: var(--green); }
+#voice .voice-vad-debug-composite-retreat {
+    border-left-color: var(--warning, var(--red));
+    background: var(--surface);
+}
+
+/* 0.23.16.7：头部独立一行——等宽元信息在左，回退徽标与复制按钮在右 */
+#voice .voice-vad-debug-composite-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs);
+}
+
+#voice .voice-vad-debug-composite-meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+}
+
+#voice .voice-vad-debug-composite-text {
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+    font-style: normal;
+}
+
+#voice .voice-vad-debug-composite-retreat .voice-vad-debug-composite-text { color: var(--text); }
+
+#voice .voice-vad-debug-composite-badge {
+    flex: none;
+    padding: 1px var(--space-xs);
+    border: 1px solid var(--warning, var(--red));
+    border-radius: var(--radius-sm);
+    color: var(--warning, var(--red));
+    font-size: var(--text-xs);
+    font-weight: 600;
+}
+
+/* 0.23.16.7：行级复制按钮（复制该行完整明细，与「复制调试信息」同格式） */
+#voice .voice-vad-debug-composite-copy {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    line-height: 1;
+    cursor: pointer;
+    transition: color var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
+}
+
+#voice .voice-vad-debug-composite-copy:hover {
+    color: var(--text);
+    border-color: var(--text-sub);
+}
+
+#voice .voice-vad-debug-composite-copy.copied {
+    color: var(--green);
+    border-color: var(--green);
+}
+
+/* 0.23.16.7：组成段每段独立一行——类型徽标 + 等宽区间 + 正文三格对齐 */
+#voice .voice-vad-debug-composite-detail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    padding-top: var(--space-2xs);
+    border-top: 1px dashed var(--surface-2);
+}
+
+#voice .voice-vad-debug-composite-span {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: var(--space-xs);
+}
+
+#voice .voice-vad-debug-composite-span-kind {
+    padding: 0 var(--space-2xs);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+}
+
+#voice .voice-vad-debug-composite-span-range {
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    white-space: nowrap;
+}
+
+#voice .voice-vad-debug-composite-span-text {
+    min-width: 0;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+#voice .voice-vad-debug-composite-span-draft .voice-vad-debug-composite-span-kind {
+    color: var(--text-sub);
+    border-color: var(--text-sub);
+}
+
+#voice .voice-vad-debug-composite-span-draft .voice-vad-debug-composite-span-text {
+    color: var(--text-sub);
+}

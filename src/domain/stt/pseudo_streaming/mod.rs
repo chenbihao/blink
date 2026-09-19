@@ -262,6 +262,88 @@ pub struct SttFinalizeRecord {
     pub observed_at: Instant,
 }
 
+/// 0.23.16.1 组合预览变化的归因。
+///
+/// G2 用户实际看到的是"短语账本 + 尾部"的**组合**字符串；行式识别记录
+/// （`SttDecisionRecord` / text_events）无法复现组合层的回退。每次组合
+/// 文本实际变化时按调用路径记录归因，供调试页组合泳道标注"谁改的"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositeCause {
+    /// 尾部整串替换（预览刷新结果落地）。
+    TailReplace,
+    /// 短语冻结入账（含入账触发的尾部清退）。
+    PhraseAppend,
+    /// Draft/NoSpeech 提交后的 settle 清退。
+    SettleCommit,
+    /// 句尾/终态清空（Legacy 路径）。
+    Clear,
+    /// 组合投影不变量修复（compose_typed_result 终审移除违规 span）。
+    Repair,
+}
+
+impl CompositeCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            CompositeCause::TailReplace => "tail_replace",
+            CompositeCause::PhraseAppend => "phrase_append",
+            CompositeCause::SettleCommit => "settle_commit",
+            CompositeCause::Clear => "clear",
+            CompositeCause::Repair => "repair",
+        }
+    }
+}
+
+/// 0.23.16.6 组合预览组成段的诊断明细（仅诊断回放使用）。
+///
+/// 每条 [`SttCompositeRecord`] 携带变化后的完整段清单：`phrase`（已冻结
+/// 短语）/ `tail`（滚动尾部），含音频范围——组合泳道据此并排展示 P 层
+/// 的分段状态，而不只看拼接后的整串文本。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompositeSpanDetail {
+    pub kind: &'static str,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// 0.23.16.6 SettleCommit 归因时新提交 Draft 段的诊断明细。
+///
+/// 组合泳道此前只记录预览账本清退（回退字符数），看不见"换来的"定稿
+/// 文本——定稿清退是否等价（正文转入 confirmed）无从对账。携带刚提交
+/// 的 Draft 段文本与范围后，泳道可以并排展示 D 层的产出。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompositeDraftDetail {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// 0.23.16.1 组合预览状态变化的边沿记录（仅诊断回放使用）。
+///
+/// 生产引擎不挂 observer，零分配成本。`retreat_chars > 0` 即用户体感的
+/// "回退"时刻，`cause` 标明归因路径。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SttCompositeRecord {
+    /// 变化归因（见 [`CompositeCause::as_str`]）。
+    pub cause: &'static str,
+    /// 记录时刻的绝对音频位置（毫秒）。
+    pub fed_ms: u64,
+    /// 变化后的组合文本。
+    pub text: String,
+    /// 相对上一组合文本净减少的字符数（0 = 增长或等长替换）。
+    pub retreat_chars: u64,
+    /// 组成段数量（短语 + 尾部）。
+    pub spans: usize,
+    /// 0.23.16.6：变化后的组成段明细（短语 + 尾部，含音频范围）。
+    pub spans_detail: Vec<CompositeSpanDetail>,
+    /// 0.23.16.6：SettleCommit 时刚提交的 Draft 段；其他归因为 None。
+    pub draft: Option<CompositeDraftDetail>,
+    /// 引擎内确认时刻的单调时钟；诊断回放用同一原点换算墙钟。
+    #[serde(skip)]
+    pub observed_at: Instant,
+}
+
 /// 伪流式引擎内部状态。
 struct PseudoInner {
     /// VAD 切句器
@@ -388,6 +470,16 @@ struct PseudoInner {
     /// 0.23.14 诊断：尾部预览文本回退的累计字符数（新版字符数少于旧版
     /// 时累计差值；尾部允许改写，该指标只用于观察回缩频率）。
     preview_retreat_chars: u64,
+    /// 0.23.16.3 诊断：被反回退门拦截的替换累计字符数（同锚范围未扩展
+    /// 且文本变短时保留旧文本，不产生可见回退）。
+    preview_blocked_retreat_chars: u64,
+    /// 0.23.16.1 诊断：组合预览（短语账本 + 尾部）变化边沿记录器。
+    /// 仅诊断回放挂载；生产恒为 None，记录零分配。reset 不清除——
+    /// 它是回放侧的数据汇聚点，不是引擎会话状态。
+    composite_observer: Option<Arc<Mutex<Vec<SttCompositeRecord>>>>,
+    /// 0.23.16.6 诊断：commit 路径暂存的"刚提交 Draft 段"明细，供下一次
+    /// SettleCommit 归因的组合记录携带。只影响诊断记录，不参与调度。
+    composite_draft_pending: Option<CompositeDraftDetail>,
 }
 
 #[derive(Debug, Clone)]
@@ -483,6 +575,9 @@ impl PseudoInner {
             preview_settled_committed: 0,
             stale_before_worker: 0,
             preview_retreat_chars: 0,
+            preview_blocked_retreat_chars: 0,
+            composite_observer: None,
+            composite_draft_pending: None,
         }
     }
 
@@ -492,6 +587,8 @@ impl PseudoInner {
         let deferred = self.sentences.commit_or_rollback(result);
         if self.sentences.confirmed_revision != before {
             self.state_revision = self.state_revision.wrapping_add(1);
+            // 0.23.16.6：暂存刚提交的 Draft 段，随 settle 的组合记录携带。
+            self.stage_composite_draft();
         }
         self.settle_preview_after_commit();
         deferred
@@ -526,11 +623,38 @@ impl PseudoInner {
         let committed_advanced = committed > self.preview_settled_committed;
         if committed_advanced {
             self.preview_settled_committed = committed;
-            self.preview_tail.clear();
-            self.preview_tail_range = None;
+            // 0.23.16.4：尾部只在其覆盖了已提交音频时清退（start < committed，
+            // 含跨界——跨界整条删除、剩余交回尾部窗口重识别的语义不变）。
+            // start ≥ committed 的尾部只覆盖边界之后的音频（Draft 在途期间
+            // 刷新已不被停摆，会产生这样的实时后缀），保留它以消除"定稿
+            // 瞬间后缀文本消失、下一次刷新再回场"的可见空洞。范围裁决，
+            // 不做字符串裁剪。
+            let tail_covers_committed = self
+                .preview_tail_range
+                .as_ref()
+                .is_some_and(|range| range.start_sample < committed);
+            if tail_covers_committed {
+                self.preview_tail.clear();
+                self.preview_tail_range = None;
+                // 0.23.16.7：跨界尾部整条清退后，未覆盖后缀 [committed,
+                // 尾部终点) 需要重投影——增长门锚到已提交水位（下一次刷新
+                // 覆盖到即触发，不等 ≥500ms 全新音频），与短语冻结路径同
+                // 一语义；起点早于水位的排队快照注定被范围裁决丢弃，提前
+                // 作废省一次推理。
+                self.last_preview_sample_end =
+                    self.last_preview_sample_end.min(committed as usize);
+                if self
+                    .pending_preview
+                    .as_ref()
+                    .is_some_and(|queued| queued.audio_range.start_sample < committed)
+                {
+                    self.pending_preview = None;
+                }
+                self.coordinator.clear_pending_preview_before(committed);
+            }
         }
         if committed_advanced || self.preview_phrases.len() != phrases_before {
-            self.rebuild_preview_text();
+            self.rebuild_preview_text(CompositeCause::SettleCommit);
         }
     }
 
@@ -606,9 +730,33 @@ impl PseudoInner {
         if preview.is_empty() || preview == self.preview_tail {
             return;
         }
-        // 0.23.14 诊断：尾部回退字符数（尾部允许改写，只统计不阻断）。
         let old_chars = self.preview_tail.chars().count();
         let new_chars = preview.chars().count();
+        // 0.23.16.3 反回退门：新范围未超出旧尾部范围（含同范围）且文本
+        // 更短时拒绝替换，保留旧文本——同一段音频重复识别的变短结果
+        // （模型输出波动）不再变成用户可见的文本回退。范围扩展（end
+        // 前移，覆盖到新音频）时正常替换，即使文本更短：新结果携带
+        // 更多音频信息；锚点回退路径（覆盖范围反而变大）同样不受影响。
+        // 拦截只按 span 音频范围裁决，不做字符串裁剪（0.23.14 决策延续）。
+        if let Some(old_range) = self.preview_tail_range
+            && range.start_sample >= old_range.start_sample
+            && range.end_sample <= old_range.end_sample
+            && new_chars < old_chars
+        {
+            self.preview_blocked_retreat_chars = self
+                .preview_blocked_retreat_chars
+                .saturating_add((old_chars - new_chars) as u64);
+            tracing::debug!(
+                request_id,
+                start = range.start_sample,
+                end = range.end_sample,
+                old_chars,
+                new_chars,
+                "拦截同范围变短的尾部替换（反回退门）"
+            );
+            return;
+        }
+        // 0.23.14 诊断：尾部回退字符数（尾部允许改写，只统计不阻断）。
         if new_chars < old_chars {
             self.preview_retreat_chars = self
                 .preview_retreat_chars
@@ -617,7 +765,7 @@ impl PseudoInner {
         self.preview_tail = preview;
         self.preview_tail_range = Some(range);
         self.latest_preview_request_id = request_id;
-        self.rebuild_preview_text();
+        self.rebuild_preview_text(CompositeCause::TailReplace);
     }
 
     /// 0.23.14.7 P1-1：尾部候选范围是否已被短语账本/已提交水位覆盖。
@@ -668,7 +816,10 @@ impl PseudoInner {
     /// 0.23.9.10：预览从"单个可替换值"变为"短语账本 + 尾部"的组合视图，
     /// 但对外契约不变——仍是一个可替换字符串（`latest_preview`），消费方
     /// 无需感知内部分层。文本实际变化才推进版本（边沿触发）。
-    fn rebuild_preview_text(&mut self) {
+    /// 0.23.16.1：变化同时向 composite observer 记录边沿（归因 + 变化后
+    /// 文本 + 回退字符数），供诊断回放重建"用户实际看到的组合字符串"
+    /// 时间线——G2 体感回退发生在组合投影层，行式识别记录不可见。
+    fn rebuild_preview_text(&mut self, cause: CompositeCause) {
         let mut composed = String::new();
         for span in &self.preview_phrases {
             composed.push_str(&span.text);
@@ -677,15 +828,94 @@ impl PseudoInner {
         if composed == self.latest_preview {
             return;
         }
+        let retreat_chars = self
+            .latest_preview
+            .chars()
+            .count()
+            .saturating_sub(composed.chars().count()) as u64;
         self.latest_preview = composed;
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.state_revision = self.state_revision.wrapping_add(1);
+        self.note_composite_change(cause, retreat_chars);
         tracing::trace!(
             preview_revision = self.preview_revision,
             chars = self.latest_preview.chars().count(),
             phrases = self.preview_phrases.len(),
             "预览版本变化"
         );
+    }
+
+    /// 0.23.16.1 组合预览变化边沿记录（observer 未挂载时零成本）。
+    ///
+    /// fed_ms 按引擎固定采样率 16kHz 换算（构造器硬编码，无其他取值）。
+    /// 0.23.16.6：记录同时携带组成段明细（短语/尾部 + 音频范围）；
+    /// SettleCommit 归因时附带刚提交的 Draft 段（`composite_draft_pending`
+    /// 由 commit 路径暂存），其他归因丢弃暂存值。
+    fn note_composite_change(&mut self, cause: CompositeCause, retreat_chars: u64) {
+        let spans_detail = self.composite_spans_detail();
+        let draft = if cause == CompositeCause::SettleCommit {
+            self.composite_draft_pending.take()
+        } else {
+            self.composite_draft_pending = None;
+            None
+        };
+        let Some(observer) = &self.composite_observer else {
+            return;
+        };
+        let spans = self.preview_phrases.len() + usize::from(!self.preview_tail.is_empty());
+        let fed_sample = self.sentences.buffer_base_sample as u64 + self.samples.len() as u64;
+        observer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(SttCompositeRecord {
+                cause: cause.as_str(),
+                fed_ms: fed_sample * 1000 / 16_000,
+                text: self.latest_preview.clone(),
+                retreat_chars,
+                spans,
+                spans_detail,
+                draft,
+                observed_at: Instant::now(),
+            });
+    }
+
+    /// 0.23.16.6：组合预览当前的组成段明细（短语账本 + 尾部）。
+    fn composite_spans_detail(&self) -> Vec<CompositeSpanDetail> {
+        let to_ms = |samples: u64| samples * 1000 / 16_000;
+        let mut detail: Vec<CompositeSpanDetail> = self
+            .preview_phrases
+            .iter()
+            .map(|span| CompositeSpanDetail {
+                kind: "phrase",
+                start_ms: to_ms(span.range.start_sample),
+                end_ms: to_ms(span.range.end_sample),
+                text: span.text.clone(),
+            })
+            .collect();
+        if !self.preview_tail.is_empty()
+            && let Some(range) = self.preview_tail_range
+        {
+            detail.push(CompositeSpanDetail {
+                kind: "tail",
+                start_ms: to_ms(range.start_sample),
+                end_ms: to_ms(range.end_sample),
+                text: self.preview_tail.clone(),
+            });
+        }
+        detail
+    }
+
+    /// 0.23.16.6：commit 路径暂存刚提交的 Draft 段（confirmed 实际增长时）。
+    fn stage_composite_draft(&mut self) {
+        if let Some(span) = self.sentences.draft_spans().last()
+            && !span.text.is_empty()
+        {
+            self.composite_draft_pending = Some(CompositeDraftDetail {
+                start_ms: span.audio_range.start_sample * 1000 / 16_000,
+                end_ms: span.audio_range.end_sample * 1000 / 16_000,
+                text: span.text.clone(),
+            });
+        }
     }
 
     /// 清空尾部预览（句尾/终态）；短语账本保留到真实 Draft 提交覆盖。
@@ -696,7 +926,7 @@ impl PseudoInner {
     fn clear_preview(&mut self) {
         self.preview_tail.clear();
         self.preview_tail_range = None;
-        self.rebuild_preview_text();
+        self.rebuild_preview_text(CompositeCause::Clear);
     }
 
     /// 释放预览所有者（仅 owner 本人可释放）。
@@ -1271,6 +1501,29 @@ impl PseudoInner {
                 .then_some(AcceptedVia::UncommittedCap)
                 .ok_or("below_draft_min");
         }
+        // 0.23.16.5 目标窗口门（draft_target_s > 0 时启用）：owned 低于
+        // floor = max(draft_min_s, target − tolerance) 时普通停顿候选
+        // （natural/strong/draft_min 路径）继续等待——积累更接近目标的
+        // 上下文以提升准确率；逃逸阀：长静音（用户明显说完，走下方
+        // long_pause 分支）与强制切（上方已返回）不受目标门影响。
+        // floor 以上维持现状（合格候选即切）；ceiling 之上等不到合格
+        // 停顿时由 hard window 强制切兜底（sanitize 保证 ceiling ≤ 上限）。
+        if let Some(floor_samples) = self
+            .coordinator
+            .settings
+            .draft_target_floor_samples(sample_rate)
+            && owned_samples < floor_samples
+        {
+            let long_pause_samples = self
+                .coordinator
+                .settings
+                .long_pause_ms
+                .saturating_mul(sample_rate)
+                / 1000;
+            if candidate.quiet_samples < long_pause_samples {
+                return Err("below_draft_target");
+            }
+        }
         if owned_samples >= min_draft_samples {
             return Ok(AcceptedVia::DraftMin);
         }
@@ -1419,6 +1672,9 @@ impl PseudoStreamingSttEngine {
             draft_min_s: u64::from(recognition_cfg.draft_min_s),
             strong_pause_ms: u64::from(recognition_cfg.strong_pause_ms),
             long_pause_ms: u64::from(recognition_cfg.long_pause_ms),
+            phrase_freeze_interval_ms: u64::from(recognition_cfg.phrase_freeze_interval_ms),
+            draft_target_s: u64::from(recognition_cfg.draft_target_s),
+            draft_target_tolerance_s: u64::from(recognition_cfg.draft_target_tolerance_s),
         }
         .sanitize(u64::from(vad_cfg.max_uncommitted_s));
         tracing::info!(
@@ -1434,6 +1690,9 @@ impl PseudoStreamingSttEngine {
             draft_min_s = recognition.draft_min_s,
             strong_pause_ms = recognition.strong_pause_ms,
             long_pause_ms = recognition.long_pause_ms,
+            phrase_freeze_interval_ms = recognition.phrase_freeze_interval_ms,
+            draft_target_s = recognition.draft_target_s,
+            draft_target_tolerance_s = recognition.draft_target_tolerance_s,
             profile = ?profile,
             "伪流式 STT 引擎: VAD + GGUF worker 通道 (就绪)"
         );
@@ -1489,6 +1748,9 @@ impl PseudoStreamingSttEngine {
                 preview_settled_committed: 0,
                 stale_before_worker: 0,
                 preview_retreat_chars: 0,
+                preview_blocked_retreat_chars: 0,
+                composite_observer: None,
+                composite_draft_pending: None,
             })),
             connection: Some(conn),
             sample_rate: 16000,
@@ -1508,6 +1770,20 @@ impl PseudoStreamingSttEngine {
     /// 给独立的 WAV 诊断回放挂载候选切分判断记录器。
     pub fn with_decision_observer(mut self, observer: Arc<Mutex<Vec<SttDecisionRecord>>>) -> Self {
         self.decision_observer = Some(observer);
+        self
+    }
+
+    /// 0.23.16.1：给独立的 WAV 诊断回放挂载组合预览变化记录器。
+    ///
+    /// 记录器落在 PseudoInner 上（rebuild/repair 的写入点都在 inner 侧，
+    /// 含后台 task）；生产引擎不挂载，记录零分配。reset 不清除记录器。
+    pub fn with_composite_observer(
+        self,
+        observer: Arc<Mutex<Vec<SttCompositeRecord>>>,
+    ) -> Self {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.composite_observer = Some(observer);
+        }
         self
     }
 
@@ -2135,20 +2411,106 @@ impl PseudoStreamingSttEngine {
                     if !cleaned.is_empty() {
                         let chars = cleaned.chars().count();
                         inner.pending_phrase = None;
+                        // 0.23.16.7 短语入账零回退（分层替换模型）：
+                        // 尾部是同一音频上"最新已显示"的识别——尾部刷新晚于
+                        // 短语请求起飞，覆盖范围以短语范围前缀为起点。入账
+                        // 优先保留已显示文本，替代 0.23.16.6 的"范围内更长才
+                        // 采纳"：
+                        // - 尾部文本更长：冻结尾部文本。跨界尾部（覆盖超出
+                        //   短语终点）以**尾部完整范围**入账并把锚点推进到
+                        //   尾部终点——后缀音频随文本一并被该段收编，后续
+                        //   尾部从其终点继续，既不清退重识别（这正是此前
+                        //   残留回退的主源），也不会与重识别重复；范围内
+                        //   尾部沿用短语范围入账（0.23.16.6 行为不变）。
+                        // - 短语文本更长：使用短语结果——组合文本只增不减，
+                        //   跨界尾部照旧清退（净字符数增长，无可见回退）。
+                        // 短语文本不会被 Draft 复用（定稿一律整段重识别），
+                        // 丢弃无质量损失。范围裁决，不做字符串裁剪。
+                        // 单调性守卫：尾部范围不得与既有短语账本重叠
+                        // （`tail_range_is_stale` 已保证，这里显式复核，
+                        // 违规时退回短语自身范围）。
+                        let tail_text = inner.preview_tail.clone();
+                        let tail_range = inner.preview_tail_range;
+                        let tail_overlaps_phrase = tail_range.is_some_and(|range| {
+                            range.start_sample < owned.range.end_sample
+                                && range.end_sample > owned.range.start_sample
+                        });
+                        let last_phrase_end = inner
+                            .preview_phrases
+                            .last()
+                            .map_or(0, |span| span.range.end_sample);
+                        let tail_adoptable = tail_overlaps_phrase
+                            && tail_range.is_some_and(|range| last_phrase_end <= range.start_sample)
+                            && tail_text.chars().count() > chars;
+                        let (frozen_range, frozen_text) = match tail_range.filter(|_| tail_adoptable) {
+                            // 跨界吸收：尾部完整范围入账，锚点随后推进到尾部
+                            // 终点，下一段从其终点继续，不重复识别该音频。
+                            Some(range) if range.end_sample > owned.range.end_sample => {
+                                tracing::debug!(
+                                    request_id,
+                                    phrase_chars = chars,
+                                    tail_chars = tail_text.chars().count(),
+                                    frozen_end = range.end_sample,
+                                    "短语入账采纳更长的跨界尾部（完整范围收编）"
+                                );
+                                (range, tail_text)
+                            }
+                            // 范围内尾部：沿用短语范围冻结更长的已显示文本
+                            // （0.23.16.6 行为）。
+                            Some(_) => {
+                                tracing::debug!(
+                                    request_id,
+                                    phrase_chars = chars,
+                                    tail_chars = tail_text.chars().count(),
+                                    "短语入账采纳更长的范围内尾部（防回退）"
+                                );
+                                (owned.range, tail_text)
+                            }
+                            None => (owned.range, cleaned),
+                        };
                         inner
                             .preview_phrases
-                            .push(PreviewSpan::new(owned.range, cleaned));
+                            .push(PreviewSpan::new(frozen_range, frozen_text));
                         // 0.23.14.7 P1-1：冻结短语入账必须同步清退与该音频范围
                         // 重叠的尾部——tail 与短语共享 phrase_anchor 起点，
                         // 不清退会出现同一音频被投影两次。
-                        inner.settle_tail_for_phrase(owned.range.end_sample);
+                        inner.settle_tail_for_phrase(frozen_range.end_sample);
+                        // 0.23.16.6：尾部被清退时，未覆盖后缀交回尾部窗口——
+                        // 把预览增长门锚到冻结终点，下一次刷新立即重投影该
+                        // 后缀，而不是等 ≥500ms 全新音频。尾部未受影响（起点
+                        // ≥ 冻结终点）时不调整。
+                        if tail_range.is_some_and(|range| range.start_sample
+                            < frozen_range.end_sample)
+                        {
+                            inner.last_preview_sample_end = inner
+                                .last_preview_sample_end
+                                .min(frozen_range.end_sample as usize);
+                        }
+                        // 0.23.16.7 跨界吸收：尾部已按完整范围入账，锚点推进
+                        // 到冻结终点——下一段（尾部窗口/下一次短语冻结）从其
+                        // 终点继续，不重复识别该音频。
+                        inner.phrase_anchor = inner.phrase_anchor.max(frozen_range.end_sample);
+                        // 起点早于冻结终点的排队快照注定被范围裁决丢弃：提前
+                        // 作废，省一次推理并把刷新机会让给新锚点快照。
+                        if inner
+                            .pending_preview
+                            .as_ref()
+                            .is_some_and(|queued| {
+                                queued.audio_range.start_sample < frozen_range.end_sample
+                            })
+                        {
+                            inner.pending_preview = None;
+                        }
+                        inner
+                            .coordinator
+                            .clear_pending_preview_before(frozen_range.end_sample);
                         // 0.23.14.6：对外范围信封按 span 清单推导（见
                         // compose_typed_result），不再单独维护"组合文本配
                         // 最后一个局部范围"的字段。
-                        inner.rebuild_preview_text();
+                        inner.rebuild_preview_text(CompositeCause::PhraseAppend);
                         tracing::debug!(
                             ledger_len = inner.preview_phrases.len(),
-                            chars,
+                            chars = inner.preview_phrases.last().map(|span| span.text.chars().count()).unwrap_or(chars),
                             "短语定稿入账"
                         );
                     } else {
@@ -2576,17 +2938,44 @@ impl PseudoStreamingSttEngine {
             // 冻结——灰色预览只剩最近 3s 碎片。前缀积满 1.2s 即主动追认为
             // 短语（与"安静候选被作废"路径同一入账通道），保证预览无条件
             // 按短语增量累积。纯静音前缀直接跳过锚点，不等识别。
+            // 0.23.16.4：解除与 Draft finalize 的互斥——Draft 推理期间（单
+            // worker 串行，可达数百 ms～秒级）前缀继续滚出窗口，若冻结也被
+            // 停摆，恢复要等"Draft 完成 + 短语推理"两段延迟叠加。冻结登记
+            // 照常评估，短语推理在 worker gate 排队、Draft 完成后立刻执行
+            // （gate 后 stale 复核保证排队任务不浪费模型时间）。
+            // 0.23.16.5：`phrase_freeze_interval_ms > 0` 时启用固定节奏——
+            // 前缀积满配置时长即冻结，不再要求滚出预览窗；切点仍在该前缀
+            // 内做合格谷枚举（choose_time_freeze_cut），前缀目标终点 =
+            // min(anchor + interval, total)（到点即冻；锚点只会前进，
+            // 冻结的前缀必然新鲜）。
             let roll_start = total.saturating_sub(window_samples);
+            let freeze_interval_samples = inner.coordinator.settings.phrase_freeze_interval_ms
+                as usize
+                * self.sample_rate as usize
+                / 1000;
+            let anchor_pos = inner.phrase_anchor as usize;
+            let freeze_end = if freeze_interval_samples > 0 {
+                // 固定节奏：到点即冻，不等待窗口滚动（锚点只会前进，
+                // 冻结的前缀必然新鲜）；上限 total 防御越界。
+                (anchor_pos + freeze_interval_samples).min(total)
+            } else {
+                roll_start
+            };
+            let freeze_due = if freeze_interval_samples > 0 {
+                total.saturating_sub(anchor_pos) >= freeze_interval_samples
+            } else {
+                anchor_pos < roll_start
+                    && roll_start - anchor_pos
+                        >= TIME_FREEZE_MIN_PREFIX_MS as usize * self.sample_rate as usize / 1000
+            };
             if phrase_snapshot.is_none()
                 && inner.pending_phrase.is_none()
                 && pending.is_none()
-                && !inner.sentences.finalize_in_flight
-                && (inner.phrase_anchor as usize) < roll_start
-                && roll_start - inner.phrase_anchor as usize
-                    >= TIME_FREEZE_MIN_PREFIX_MS as usize * self.sample_rate as usize / 1000
+                && freeze_due
+                && freeze_end > anchor_pos
             {
                 let anchor_before = inner.phrase_anchor;
-                let prefix_range = inner.phrase_anchor as usize..roll_start;
+                let prefix_range = anchor_pos..freeze_end;
                 match inner
                     .sentences
                     .abs_to_local_range(&prefix_range, inner.samples.len())
@@ -2594,12 +2983,13 @@ impl PseudoStreamingSttEngine {
                     Some(local) => {
                         let prefix_samples = &inner.samples[local];
                         // 0.23.14.6 切点选择（合格谷枚举 + 谷内稳健位置 +
-                        // roll_start 回退）见 choose_time_freeze_cut；词中硬切
-                        // 交事务式锚点回退兜底。
+                        // 前缀终点回退）见 choose_time_freeze_cut；词中硬切
+                        // 交事务式锚点回退兜底。0.23.16.5 起前缀终点在固定
+                        // 节奏模式下早于 roll_start（固定节奏主动冻结）。
                         let cut_abs = PseudoInner::choose_time_freeze_cut(
                             prefix_samples,
                             anchor_before,
-                            roll_start as u64,
+                            freeze_end as u64,
                             off_threshold,
                             self.sample_rate,
                         );
@@ -2668,10 +3058,21 @@ impl PseudoStreamingSttEngine {
                 .min(total as u64) as usize;
             let range_start = anchor.max(total.saturating_sub(window_samples));
             let abs_range = range_start..total;
+            // 0.23.16.4：尾部刷新同样解除与 Draft finalize 的互斥——刷新
+            // 覆盖 [锚点, 当下] 的未提交音频（Draft 在途时锚点已推进到边界，
+            // 刷新只覆盖边界之后的音频，与 Draft 范围无重叠）。推理在
+            // worker gate 排队；单槽 + 入队限频（≥500ms 新音频才替换排队
+            // 快照）保证有界——至多 1 个在途 + 1 个排队。
+            // 0.23.16.7：尾部为空（短语冻结/Draft 清退后）时豁免 500ms 新
+            // 音频门——锚点之后还有未投影音频时，下一次刷新（仍受刷新间隔
+            // 与入队限频约束）应尽快重投影后缀，缩小"清退→恢复"的可见空
+            // 窗；纯静音段由 RequestAudioGate::NoSpeech 在送模前拦截，不会
+            // 产生模型调用。
+            let tail_empty_needs_projection =
+                inner.preview_started && inner.preview_tail.is_empty();
             let preview_due = pending.is_none()
-                && !inner.sentences.finalize_in_flight
                 && inner.last_preview.elapsed() >= preview_interval
-                && has_growth
+                && (has_growth || tail_empty_needs_projection)
                 && abs_range.end > abs_range.start
                 && (inner.preview_started
                     || abs_range.len() >= 1_200 * self.sample_rate as usize / 1000);
@@ -2679,10 +3080,7 @@ impl PseudoStreamingSttEngine {
             let mut snapshot = Vec::new();
             let mut snapshot_end = total;
             let mut preview_range = AudioRange::new(range_start as u64, total as u64);
-            let queued_preview = if pending.is_none()
-                && !inner.sentences.finalize_in_flight
-                && !inner.preview_in_flight
-            {
+            let queued_preview = if pending.is_none() && !inner.preview_in_flight {
                 let generation = inner.preview_generation;
                 inner
                     .pending_preview
@@ -2887,6 +3285,7 @@ impl PseudoStreamingSttEngine {
             // 之后的违规是缺陷信号，不允许带病投影变成用户可见的重复文本；
             // 就地移除违规 span（后到者让位），同步修正组合文本并记 error。
             let mut repaired = false;
+            let before_repair_chars = inner.latest_preview.chars().count();
             while let Some(index) = Self::preview_spans_invariant_violation(&spans) {
                 tracing::error!(
                     index,
@@ -2917,6 +3316,11 @@ impl PseudoStreamingSttEngine {
                     inner.preview_tail_range = None;
                 }
                 inner.latest_preview = spans.iter().map(|span| span.text.as_str()).collect();
+                let repaired_chars = inner.latest_preview.chars().count();
+                inner.note_composite_change(
+                    CompositeCause::Repair,
+                    before_repair_chars.saturating_sub(repaired_chars) as u64,
+                );
                 // 0.23.14.7 P2：不再递增 preview_revision——本次调用返回的
                 // envelope 已经携带修复后内容，且 reported cursor 在本调用
                 // 开头已对齐当前 revision；若在此再递增，下一次 compose 会把
@@ -3136,6 +3540,8 @@ impl PseudoStreamingSttEngine {
                 inner.state_revision = inner.state_revision.wrapping_add(1);
                 // 0.23.9：通过 coordinator 同步终态提交水位。
                 inner.coordinator.commit_terminal(abs_end as u64);
+                // 0.23.16.6：终态提交的 Draft 段同样进组合记录。
+                inner.stage_composite_draft();
             }
             // 0.23.9.10：终态提交覆盖整个会话尾段（含 NoSpeech 消费），
             // 统一收敛预览账本与锚点。
@@ -3504,6 +3910,8 @@ impl SttEngine for PseudoStreamingSttEngine {
                 g.preview_settled_committed = 0;
                 g.stale_before_worker = 0;
                 g.preview_retreat_chars = 0;
+                g.preview_blocked_retreat_chars = 0;
+                g.composite_draft_pending = None;
                 g.state_revision = 0;
                 g.last_reported_state = None;
                 g.last_reported_confirmed_revision = 0;
@@ -3546,6 +3954,8 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.preview_settled_committed = 0;
         inner.stale_before_worker = 0;
         inner.preview_retreat_chars = 0;
+        inner.preview_blocked_retreat_chars = 0;
+        inner.composite_draft_pending = None;
         inner.state_revision = 0;
         inner.last_reported_state = None;
         inner.last_reported_confirmed_revision = 0;
@@ -3568,6 +3978,7 @@ impl SttEngine for PseudoStreamingSttEngine {
                 preview_revision: inner.preview_revision,
                 stale_before_worker: inner.stale_before_worker,
                 preview_retreat_chars: inner.preview_retreat_chars,
+                preview_blocked_retreat_chars: inner.preview_blocked_retreat_chars,
                 ..SttStreamStats::default()
             },
             None => SttStreamStats::default(),

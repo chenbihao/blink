@@ -24,7 +24,8 @@ use crate::domain::resource::{
     DefaultResourceStore, ResourceError, ResourceErrorKind, ResourceRef, ResourceUse,
 };
 use crate::domain::stt::pseudo_streaming::{
-    PseudoStreamingSttEngine, SttBoundaryRecord, SttDecisionRecord,
+    CompositeDraftDetail, CompositeSpanDetail, PseudoStreamingSttEngine, SttBoundaryRecord,
+    SttCompositeRecord, SttDecisionRecord,
 };
 use crate::domain::stt::transcribe::{
     AudioTranscriptionError, AudioTranscriptionPort, AudioTranscriptionRequest,
@@ -141,6 +142,8 @@ pub struct VadDebugResult {
     pub decisions: Vec<SttDecisionRecord>,
     pub text_events: Vec<VadDebugTextEvent>,
     pub commits: Vec<VadDebugCommit>,
+    /// 0.23.16.1 组合预览时间线（边沿记录，墙钟换算后）。
+    pub composite: Vec<VadDebugComposite>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -163,6 +166,24 @@ pub struct VadDebugTextEvent {
 pub struct VadDebugCommit {
     pub audio_ms: u64,
     pub observed_wall_ms: u64,
+}
+
+/// 0.23.16.1 组合预览时间线的一条边沿记录（墙钟已换算）。
+///
+/// 组合预览 = 短语账本 + 尾部的拼接字符串，即用户在 G2 浮窗实际看到的
+/// 预览文本。`retreat_chars > 0` 即一次可见回退，`cause` 标明归因。
+#[derive(Debug, serde::Serialize)]
+pub struct VadDebugComposite {
+    pub cause: &'static str,
+    pub fed_ms: u64,
+    pub wall_ms: u64,
+    pub text: String,
+    pub retreat_chars: u64,
+    pub spans: usize,
+    /// 0.23.16.6：变化后的组成段明细（phrase/tail + 音频范围 + 文本）。
+    pub spans_detail: Vec<CompositeSpanDetail>,
+    /// 0.23.16.6：SettleCommit 时刚提交的 Draft 段（其他归因为 None）。
+    pub draft: Option<CompositeDraftDetail>,
 }
 
 impl AudioTranscriptionService {
@@ -231,6 +252,8 @@ impl AudioTranscriptionService {
         progress("replaying", 0, duration_ms);
         let boundaries = Arc::new(std::sync::Mutex::new(Vec::new()));
         let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let composites: Arc<std::sync::Mutex<Vec<SttCompositeRecord>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let connection = SttEngineConnection {
             host: "127.0.0.1".into(),
             port: 0,
@@ -241,7 +264,8 @@ impl AudioTranscriptionService {
         let engine = PseudoStreamingSttEngine::from_connection(&stt_config, connection)
             .map_err(|detail| AudioTranscriptionError::Internal { detail })?
             .with_boundary_observer(Arc::clone(&boundaries))
-            .with_decision_observer(Arc::clone(&decisions));
+            .with_decision_observer(Arc::clone(&decisions))
+            .with_composite_observer(Arc::clone(&composites));
         // 0.23.10.2：回放同样预热 worker——VAD 调试页测得的"首预览 4s+"
         // 有相当部分是闲置 worker 的首次推理懒加载，预热后回放与真机
         // 的首预览延迟口径才一致。
@@ -324,6 +348,24 @@ impl AudioTranscriptionService {
             });
         }
         progress("done", duration_ms, duration_ms);
+        let composite = composites
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .map(|record| VadDebugComposite {
+                cause: record.cause,
+                fed_ms: record.fed_ms,
+                wall_ms: record
+                    .observed_at
+                    .duration_since(started)
+                    .as_millis() as u64,
+                text: record.text.clone(),
+                retreat_chars: record.retreat_chars,
+                spans: record.spans,
+                spans_detail: record.spans_detail.clone(),
+                draft: record.draft.clone(),
+            })
+            .collect();
         let result = VadDebugResult {
             duration_ms: trace.duration_ms,
             min_sentence_ms,
@@ -343,12 +385,19 @@ impl AudioTranscriptionService {
                 .clone(),
             text_events,
             commits,
+            composite,
         };
         tracing::info!(
             duration_ms = result.duration_ms,
             boundaries = result.boundaries.len(),
             decisions = result.decisions.len(),
             commits = result.commits.len(),
+            composite_changes = result.composite.len(),
+            composite_retreats = result
+                .composite
+                .iter()
+                .filter(|change| change.retreat_chars > 0)
+                .count(),
             final_chars = result.final_text.chars().count(),
             "VAD WAV 伪流式诊断完成"
         );
