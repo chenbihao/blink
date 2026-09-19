@@ -393,6 +393,12 @@ const transform = new EditorTransformController(
     },
     {
         onPhaseChanged: () => updateActionChips(),
+        // 应用成功即消费掉冻结范围：听写 chips（定位/整理/关闭）立即隐藏，
+        // 防止用已失效的旧 handle 二次整理必失败（排查报告 §6.2）
+        onApplied: (scope) => {
+            if (scope === "dictation") voice.invalidateRun();
+            updateActionChips();
+        },
         onStatus: (message) => setStatus(message),
         onError: (message) => setStatus(message),
     },
@@ -624,7 +630,7 @@ function bindTransformControls() {
     if (transformEls.applyBtn) transformEls.applyBtn.textContent = t("editor.transform.apply");
     if (transformEls.copyBtn) transformEls.copyBtn.textContent = t("editor.transform.copy");
     if (transformEls.discardBtn) transformEls.discardBtn.textContent = t("editor.transform.discard");
-    if (transformEls.staleStrip) transformEls.staleStrip.textContent = t("editor.transform.stale");
+    // staleStrip 文案随状态动态切换（stale / 跨块仅复制），由 transform._renderCard 设置
     if (transformEls.closeBtn) transformEls.closeBtn.title = t("editor.transform.close");
     const hintEl = document.getElementById("transform-hint");
     if (hintEl) hintEl.textContent = t("editor.transform.hint");

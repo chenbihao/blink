@@ -61,6 +61,19 @@ export async function createManager() {
     });
 }
 
+/**
+ * 生产同源 schema（headless 事务测试用：不创建 Editor、不需要 DOM）。
+ * 扩展面与 createManager 一致；Markdown 扩展只配置序列化/解析，不加节点。
+ */
+export async function createSchema() {
+    ensureDeps();
+    const {getSchema} = await importFromDeps("@tiptap", "core", "dist", "index.js");
+    const {default: StarterKit} = await importFromDeps("@tiptap", "starter-kit", "dist", "index.js");
+    const {default: TaskList} = await importFromDeps("@tiptap", "extension-task-list", "dist", "index.js");
+    const {default: TaskItem} = await importFromDeps("@tiptap", "extension-task-item", "dist", "index.js");
+    return getSchema([StarterKit, TaskList, TaskItem]);
+}
+
 /** 生产入口同款换行归一化。 */
 export function normalizeEol(text) {
     return (text ?? "").replace(/\r\n/g, "\n");

@@ -99,6 +99,9 @@ export class EditorTransformController {
      * @param {(phase: string) => void} [callbacks.onPhaseChanged]
      * @param {(message: string) => void} [callbacks.onStatus] - 状态行文案（已翻译）
      * @param {(message: string) => void} [callbacks.onError] - 已翻译错误文案
+     * @param {(scope: string) => void} [callbacks.onApplied] - 应用成功（候选
+     *   已消费）：接线方据此清理听写 chips——冻结范围已替换，旧 handle 不得
+     *   再发起二次整理（排查报告 §6.2）
      */
     constructor(
         {
@@ -368,8 +371,10 @@ export class EditorTransformController {
             this._discardCandidate({silent: true});
             return false;
         }
+        const {scope} = this.candidate;
         this._discardCandidate({silent: true});
         this._callbacks.onStatus?.(t("editor.transform.applied"));
+        this._callbacks.onApplied?.(scope);
         return true;
     }
 
@@ -535,7 +540,15 @@ export class EditorTransformController {
                 ? "editor.transform.cardTitleDictation"
                 : "editor.transform.cardTitleSelection");
         }
-        if (staleStrip) staleStrip.classList.toggle("hidden", !cand.stale);
+        if (staleStrip) {
+            // 应用不可用的原因内联可见（不再只靠 hover tooltip）：stale 或
+            // MD 跨块范围仅支持复制（§3.7；排查报告 §6.1"点击零反馈"）
+            const copyOnly = !cand.stale && cand.handle?.blockSafe === false;
+            staleStrip.textContent = t(cand.stale
+                ? "editor.transform.stale"
+                : "editor.transform.copyOnlyHint");
+            staleStrip.classList.toggle("hidden", !cand.stale && !copyOnly);
+        }
         if (discardBtn) discardBtn.textContent = t("editor.transform.discard");
 
         const segments = computeDiff(cand.sourceText, cand.revisedText);

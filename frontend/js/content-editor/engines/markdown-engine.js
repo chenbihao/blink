@@ -532,6 +532,43 @@ export class MarkdownIrEngine {
     }
 
     /**
+     * 规划 blockSafe 范围的替换（纯函数，headless 可测）。
+     *
+     * 两条引擎级约束（docs/reports/20260919 排查报告 §4/§5.1）：
+     * - Markdown 源文不存在能解析回真实空段落节点的字节序列——AI 输出中的
+     *   空行必须跳过，`\n\n` 分隔由相邻段落序列化时自然恢复，否则延迟物化
+     *   的整篇复核必败（回滚 + 只读）；
+     * - 多行替换必须扩为父 textblock 的块级替换：在段内行内 range 上
+     *   `replaceWith` 段落数组会被 slice fitter 闭合出幽灵空段落。
+     *
+     * 范围外同段文字（blockSafe 只保证单块，不保证整块）回填进首/末新段，
+     * 保证实际替换的恰好是冻结文本本身。
+     *
+     * @param {object} state - 替换前的 ProseMirror EditorState（提供 doc/schema）
+     * @param {number} from @param {number} to - blockSafe 行内范围
+     * @param {string} newText - AI 整理稿（可含 `\n` / `\n\n`）
+     * @returns {{kind: "inline", text: string}
+     *          |{kind: "block", blockFrom: number, blockTo: number, nodes: object[]}}
+     */
+    static planRangeReplacement(state, from, to, newText) {
+        const lines = (typeof newText === "string" ? newText : "")
+            .split("\n").filter((line) => line.trim() !== "");
+        if (lines.length <= 1) {
+            // 单行（或全空行 = 删除范围文本）：行内替换，不动块结构
+            return {kind: "inline", text: lines[0] ?? ""};
+        }
+        const $from = state.doc.resolve(from);
+        const $to = state.doc.resolve(to);
+        const prefix = $from.parent.textBetween(0, $from.parentOffset, "\n");
+        const suffix = $to.parent.textBetween($to.parentOffset, $to.parent.content.size, "\n");
+        const nodes = lines.map((line, i) => {
+            const text = (i === 0 ? prefix : "") + line + (i === lines.length - 1 ? suffix : "");
+            return state.schema.nodes.paragraph.create(null, text ? state.schema.text(text) : null);
+        });
+        return {kind: "block", blockFrom: $from.before(), blockTo: $to.after(), nodes};
+    }
+
+    /**
      * 单事务替换 handle 范围（0.23.4 §3.7 确认应用路径）。
      * 仅接受 blockSafe 范围；先复核冻结文本，再一次事务完成替换。
      * 只读预览、校验失败或引擎不支持时返回 false（不产生修改）。
@@ -547,18 +584,21 @@ export class MarkdownIrEngine {
         }
         if (state.doc.textBetween(from, to, "\n") !== expected) return false;
 
-        const schema = state.schema;
-        const lines = newText.split("\n");
-        this.editor.chain().command(({tr}) => {
-            if (lines.length === 1) {
-                tr.insertText(lines[0], from, to);
-            } else {
-                const nodes = lines.map((line) =>
-                    schema.nodes.paragraph.create(null, line ? schema.text(line) : null));
-                tr.replaceWith(from, to, nodes);
-            }
-            return true;
-        }).run();
+        let plan = null;
+        try {
+            plan = MarkdownIrEngine.planRangeReplacement(state, from, to, newText);
+            this.editor.chain().command(({tr}) => {
+                if (plan.kind === "inline") {
+                    tr.insertText(plan.text, from, to);
+                } else {
+                    tr.replaceWith(plan.blockFrom, plan.blockTo, plan.nodes);
+                }
+                return true;
+            }).run();
+        } catch (e) {
+            console.warn("[markdown-engine] replaceRange 事务失败:", e);
+            return false;
+        }
         // 焦点交还编辑器（selection 随事务映射），保证"一次 Ctrl+Z 恢复"可达
         this.editor.commands.focus();
         // 程序化替换是真实编辑：onUpdate 触发 edited=true + onChange（revision 自增）

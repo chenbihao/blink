@@ -107,7 +107,7 @@ function makeController({
         return () => delete handlers[name];
     };
     const session = {isActive: true, sessionRef: "ed_t", generation: 2};
-    const events = {phases: [], status: [], errors: []};
+    const events = {phases: [], status: [], errors: [], applied: []};
     const deps = {
         api,
         adapter,
@@ -127,6 +127,7 @@ function makeController({
             onPhaseChanged: (p) => events.phases.push(p),
             onStatus: (m) => events.status.push(m),
             onError: (m) => events.errors.push(m),
+            onApplied: (s) => events.applied.push(s),
         },
     );
     return {controller, api, adapter, handlers, events, calls, session};
@@ -238,6 +239,73 @@ test("transform: Engine 复核失败（replaceRange false）→ 候选作废不�
     assert.equal(applied, false);
     assert.equal(controller.candidate, null, "复核失败候选作废");
     assert.ok(events.errors.length > 0);
+    assert.equal(events.applied.length, 0, "失败不触发 onApplied");
+});
+
+test("transform: 应用成功回调 onApplied(scope)——听写 chips 清理接线（§6.2）", async () => {
+    const {controller, handlers, events} = makeController({replaceResult: true});
+    await bind(controller);
+    const handle = {
+        handle: {kind: "source", start: 0, end: 5, text: "本轮听写", blockSafe: true},
+        text: "本轮听写",
+        blockSafe: true,
+    };
+    await controller.start("dictation", {handle});
+    handlers[COMPLETED]({payload: {
+        sessionRef: "ed_t", generation: 2, requestId: 101, scope: "dictation",
+        revisedText: "整理稿", revision: 5,
+    }});
+
+    const applied = await controller.apply();
+    assert.equal(applied, true);
+    assert.deepEqual(events.applied, ["dictation"], "携带 scope 供接线方清理对应 chips");
+});
+
+test("transform: 候选卡内联展示应用禁用原因（跨块仅复制不再只靠 hover tooltip，§6.1）", async () => {
+    const card = makeCardStub();
+    // 桩的 classList.toggle 不记录状态：包一层跟踪 hidden，供可见性断言
+    let staleVisible = true;
+    card.staleStrip.classList.toggle = (cls, force) => {
+        if (cls === "hidden") staleVisible = !(force ?? !staleVisible);
+    };
+    const {controller, handlers, adapter} = makeController({
+        el: card,
+        frozen: {handle: {kind: "markdown", from: 2, to: 6, text: "跨段范围", blockSafe: false}, text: "跨段范围", blockSafe: false},
+    });
+    await bind(controller);
+    await controller.start("selection");
+    handlers[COMPLETED]({payload: {
+        sessionRef: "ed_t", generation: 2, requestId: 101, scope: "selection",
+        revisedText: "整理稿", revision: 5,
+    }});
+
+    assert.equal(card.applyBtn.disabled, true, "跨块候选应用按钮禁用");
+    assert.equal(staleVisible, true, "禁用原因条内联可见");
+    assert.equal(card.staleStrip.textContent, realT("editor.transform.copyOnlyHint"));
+
+    // stale 优先于 copyOnly 展示
+    adapter.revision = 6;
+    controller.notifyContentChanged();
+    assert.equal(staleVisible, true);
+    assert.equal(card.staleStrip.textContent, realT("editor.transform.stale"));
+});
+
+test("transform: 正常候选不显示禁用原因条", async () => {
+    const card = makeCardStub();
+    let staleVisible = true;
+    card.staleStrip.classList.toggle = (cls, force) => {
+        if (cls === "hidden") staleVisible = !(force ?? !staleVisible);
+    };
+    const {controller, handlers} = makeController({el: card});
+    await bind(controller);
+    await controller.start("selection");
+    handlers[COMPLETED]({payload: {
+        sessionRef: "ed_t", generation: 2, requestId: 101, scope: "selection",
+        revisedText: "整理稿", revision: 5,
+    }});
+
+    assert.equal(card.applyBtn.disabled, false);
+    assert.equal(staleVisible, false, "blockSafe 且非 stale 时不显示提示条");
 });
 
 test("transform: 失败事件回落 idle；cancelled 不重复报错", async () => {
