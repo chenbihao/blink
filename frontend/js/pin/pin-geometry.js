@@ -136,6 +136,41 @@ export function computeWindowRect(state, targetDpr, padCss = PIN_PAD_CSS) {
     return {...rect, physW, physH, padPhys};
 }
 
+// ── 右键菜单临时扩窗 ───────────────────────────────────────────────────────
+
+/**
+ * 菜单打开期间的临时扩窗：把窗口物理矩形扩大到菜单完整显示所需的最小尺寸。
+ *
+ * 背景：窗口尺寸跟随图片缩放（baseCss × zoom），缩到很小的 pin 放不下完整
+ * 右键菜单。扩窗只发生在菜单打开期间（关闭即还原），不引入常驻的隐形
+ * 挡点击区域，也不参与 mini 动画（动画期间不可能开菜单）。
+ *
+ * 规则：
+ * - 默认只向右/下扩（origin 不动 → 图片物理位置不动）
+ * - 需要避让屏幕边缘时由调用方预先算好 `shiftX/shiftY`（物理像素，把窗口
+ *   左/上移回工作区内），本函数只负责平移；图片视觉位置由前端用
+ *   `pad + shift/dpr` 的 CSS 偏移补偿回来
+ *
+ * @param {{ winX: number, winY: number, winW: number, winH: number }} rect - 常规窗口矩形
+ * @param {{ cssW: number, cssH: number, shiftX?: number, shiftY?: number } | null} expand -
+ *        菜单所需最小窗口 CSS 尺寸与避让平移；null = 未扩窗
+ * @param {number} targetDpr - 目标屏 DPR
+ * @returns {{ winX: number, winY: number, winW: number, winH: number }} 扩窗后的矩形
+ */
+export function expandRectForMenu(rect, expand, targetDpr) {
+    if (!expand) return rect;
+    const dpr = Math.max(1, targetDpr);
+    const needW = Math.max(1, Math.round(expand.cssW * dpr));
+    const needH = Math.max(1, Math.round(expand.cssH * dpr));
+    return {
+        ...rect,
+        winX: rect.winX - (expand.shiftX || 0),
+        winY: rect.winY - (expand.shiftY || 0),
+        winW: Math.max(rect.winW, needW),
+        winH: Math.max(rect.winH, needH),
+    };
+}
+
 // ── 缩放锚点 ──────────────────────────────────────────────────────────────
 
 /**

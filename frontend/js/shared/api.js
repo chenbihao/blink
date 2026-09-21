@@ -334,6 +334,14 @@ export function win32LeftButtonDown() {
     return invoke("win32_left_button_down");
 }
 
+/** 查询 pin 窗口所在显示器的工作区（物理像素，虚拟屏幕坐标系）。
+ *  右键菜单临时扩窗时用于避让屏幕边缘。窗口不存在时返回 null。
+ *  @param {string} label 窗口 label
+ *  @returns {Promise<{x: number, y: number, w: number, h: number} | null>} */
+export function pinWorkArea(label) {
+    return invoke("pin_work_area", {label});
+}
+
 /** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。
  *  0.19.14 raw IPC：PNG 直接传 Uint8Array，path 走 headers。 */
 export function screenshotSave(pngData, path) {

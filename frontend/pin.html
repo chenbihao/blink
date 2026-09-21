@@ -50,6 +50,7 @@
         invoke,
         screenshotPinTransform,
         screenshotPinGetRect,
+        pinWorkArea,
         win32LeftButtonDown,
         ocrImage,
         translateText,
@@ -70,6 +71,7 @@
         PIN_PAD_CSS,
         baseCssSize,
         computeWindowRect,
+        expandRectForMenu,
         reconcileDpi,
         clampZoom,
     } from "./js/pin/pin-geometry.js";
@@ -133,6 +135,13 @@
 
     let isCtxOpen = false;
     let dragEndTime = 0;
+    // ── 右键菜单临时扩窗状态 ──
+    // 菜单打开期间窗口临时扩大到菜单完整可见；关闭即还原。不引入常驻的
+    // 隐形挡点击区域，也不参与 mini 动画（动画开始前先关菜单）。
+    // shiftX/shiftY：为避让屏幕边缘把窗口左/上移的物理像素；图片用
+    // menuShiftCss 的 CSS 偏移补偿，视觉位置不动。
+    let ctxExpand = null;
+    let menuShiftCss = {x: 0, y: 0};
 
     // 每次后端装载/回收一张 Pin 都递增；异步 OCR/翻译只能提交到启动时所属会话。
     let pinSessionGeneration = 0;
@@ -170,11 +179,11 @@
     }
 
     // ── 0.23.12：文字图层几何 provider + 轻量 toast ─────────────
-    /** 文字图层几何：pad + 图片 CSS 尺寸（baseCss × zoom）+ 资源像素尺寸。 */
+    /** 文字图层几何：pad（含菜单扩窗平移补偿）+ 图片 CSS 尺寸（baseCss × zoom）+ 资源像素尺寸。 */
     function pinTextLayerGeometry() {
         return {
-            padX: PIN_PAD_CSS,
-            padY: PIN_PAD_CSS,
+            padX: PIN_PAD_CSS + menuShiftCss.x,
+            padY: PIN_PAD_CSS + menuShiftCss.y,
             cssW: baseCssW * zoom,
             cssH: baseCssH * zoom,
             srcW: sourcePixelW,
@@ -216,21 +225,33 @@
         updatePinIndicatorPosition();
     }
 
+    /** 更新翻译中指示器中心（图片 CSS 中心 + pad/菜单平移补偿）。 */
     function updatePinIndicatorPosition() {
-        const cx = PIN_PAD_CSS + baseCssW * zoom / 2;
-        const cy = PIN_PAD_CSS + baseCssH * zoom / 2;
+        const cx = PIN_PAD_CSS + menuShiftCss.x + baseCssW * zoom / 2;
+        const cy = PIN_PAD_CSS + menuShiftCss.y + baseCssH * zoom / 2;
         document.documentElement.style.setProperty('--pin-cx', cx + 'px');
         document.documentElement.style.setProperty('--pin-cy', cy + 'px');
     }
 
+    /** 图片锚点：正常 = PIN_PAD_CSS；菜单扩窗平移期间补偿 shift，图片视觉位置不动。 */
+    function setImgAnchor() {
+        img.style.left = (PIN_PAD_CSS + menuShiftCss.x) + 'px';
+        img.style.top = (PIN_PAD_CSS + menuShiftCss.y) + 'px';
+    }
+
     /** 一步提交窗口位置和尺寸（物理像素，通过 SetWindowPos 原子设置）。
+     *  菜单扩窗激活时矩形先经 expandRectForMenu 放大（关闭菜单即还原）。
      *  @param {number} [zoomOverride] 显式 zoom（用于 mini 动画期间提交不同 zoom 的窗口尺寸）
      *  @returns {Promise<void>} */
     function commitWindowRect(zoomOverride) {
         const myGen = ++commitGen;
         const z = zoomOverride ?? zoom;
-        const rect = computeWindowRect(
-            {baseCssW, baseCssH, zoom: z, imageScreenX, imageScreenY},
+        const rect = expandRectForMenu(
+            computeWindowRect(
+                {baseCssW, baseCssH, zoom: z, imageScreenX, imageScreenY},
+                monitorDpr,
+            ),
+            ctxExpand,
             monitorDpr,
         );
         lastCommitAt = performance.now();
@@ -289,15 +310,21 @@
                 {winX: rect.x, winY: rect.y, winW: rect.w, winH: rect.h},
             );
 
-            imageScreenX = result.imageScreenX;
-            imageScreenY = result.imageScreenY;
+            // 菜单扩窗期间窗口 origin 含 shift 平移，reconcileDpi 按
+            // imageScreen = winX + pad 反推会偏差 shift；加回纠正
+            const shiftX = ctxExpand?.shiftX || 0;
+            const shiftY = ctxExpand?.shiftY || 0;
+            imageScreenX = result.imageScreenX + shiftX;
+            imageScreenY = result.imageScreenY + shiftY;
 
             // 用新矩形重设窗口（Windows 可能已改了位置或尺寸不对）；
-            // 与回读矩形一致时跳过——纯状态同步不需要多余的 SetWindowPos
-            const rectUnchanged = result.winX === rect.x && result.winY === rect.y
-                && result.winW === rect.w && result.winH === rect.h;
+            // 与回读矩形一致时跳过——纯状态同步不需要多余的 SetWindowPos。
+            // 比较和提交都要应用菜单扩窗，否则安全网会把扩着的窗口缩回去
+            const final = expandRectForMenu(result, ctxExpand, newDpr);
+            const rectUnchanged = final.winX === rect.x && final.winY === rect.y
+                && final.winW === rect.w && final.winH === rect.h;
             if (!rectUnchanged) {
-                screenshotPinTransform(myLabel, result.winX, result.winY, result.winW, result.winH).catch(() => {
+                screenshotPinTransform(myLabel, final.winX, final.winY, final.winW, final.winH).catch(() => {
                 });
             }
 
@@ -342,6 +369,7 @@
 
     function enterMiniMode() {
         if (miniState !== 'normal') return;
+        if (isCtxOpen) hideCtxMenu();
         const gen = ++miniAnimGen;
         miniState = 'entering';
         savedZoom = zoom;
@@ -397,6 +425,7 @@
 
     function exitMiniMode() {
         if (miniState !== 'mini') return;
+        if (isCtxOpen) hideCtxMenu();
         const gen = ++miniAnimGen;
         miniState = 'exiting';
         cancelPendingCommit();
@@ -474,6 +503,7 @@
     // sourceDpr 由后端从图片初始落点显示器算出，不依赖 window.devicePixelRatio
     window.__blinkResetPin = function (dataUrl, pngW, pngH, screenX, screenY, showTranslating, sourceDpr) {
         invalidatePinSession();
+        resetCtxExpansion();
         sourcePixelW = pngW;
         sourcePixelH = pngH;
         const sdpr = sourceDpr || 1;
@@ -498,11 +528,10 @@
         imageScreenY = screenY || 0;
         zoomLabel.textContent = '100%';
         zoomLabel.style.opacity = '0';
-        // CSS 布局：left/top = padding（CSS 逻辑像素），width/height = baseCss
+        // CSS 布局：left/top = padding（CSS 逻辑像素，含菜单扩窗补偿位），width/height = baseCss
+        setImgAnchor();
         img.style.width = baseCssW + 'px';
         img.style.height = baseCssH + 'px';
-        img.style.left = PIN_PAD_CSS + 'px';
-        img.style.top = PIN_PAD_CSS + 'px';
         img.style.transformOrigin = '0 0';
         img.style.transform = 'scale(1)';
         img.style.boxShadow = '';
@@ -551,6 +580,7 @@
     // N+1 回收时后端 eval 调用，清空图片和状态
     window.__blinkClearPin = function () {
         invalidatePinSession();
+        resetCtxExpansion();
         img.src = '';
         sourcePixelW = 0;
         sourcePixelH = 0;
@@ -605,11 +635,19 @@
     let dragCandidate = null;   // { pointerId, x, y } 或 null
     let nativeDragActive = false;
     let dragSession = 0;        // 每次 pointerdown 递增，作废在途 watchdog 的过期结果
-    let suppressClick = false;  // 拖动后吞掉一次残余 click
+    // 吞残余 click 的截止时间。原生拖动（startDragging 模态循环）结束后浏览器
+    // 往往根本不派发残余 click——若用永久布尔标志，会滞留吞掉用户下一次真实
+    // 点击（表现为"拖完 pin 后第一次左键没反应"）。改为限时窗口，过期自动失效。
+    let suppressClickUntil = 0;
 
     document.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
         if (isMiniAnimating()) return;
+        // 菜单外按下左键 = 关菜单（Windows 菜单语义：按下即关）。不用 click：
+        // click 在松开时才派发且可能被拖动残余逻辑吞掉，手感上"关不掉"。
+        if (isCtxOpen && !e.target.closest('#ctx-menu')) {
+            hideCtxMenu();
+        }
         if (e.target.closest('#ctx-menu')) return;
         // 检查是否点在图片可见区域内
         const imgLeft = PIN_PAD_CSS;
@@ -631,9 +669,10 @@
         const dx = e.clientX - dragCandidate.x;
         const dy = e.clientY - dragCandidate.y;
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-        // 达到阈值，启动系统原生拖动
+        // 达到阈值，启动系统原生拖动；菜单开着则先收起（拖动即关菜单）
         dragCandidate = null;
         nativeDragActive = true;
+        if (isCtxOpen) hideCtxMenu();
         tauriWin?.startDragging?.().catch(() => {
             nativeDragActive = false;
         });
@@ -643,7 +682,7 @@
         dragCandidate = null;
         if (!nativeDragActive) return;
         nativeDragActive = false;
-        suppressClick = true;
+        suppressClickUntil = Date.now() + 250;
         dragEndTime = Date.now();
         // 拖动刚结束，reconcile 从后端读真实位置
         reconcileFromBackend();
@@ -654,13 +693,15 @@
         nativeDragActive = false;
     });
 
-    // 吞掉原生拖动后浏览器可能产生的残余 click（capture 阶段，仅一次）
+    // 吞掉原生拖动后浏览器可能产生的残余 click（capture 阶段，限时窗口内仅一次）
     document.addEventListener('click', (e) => {
-        if (suppressClick) {
-            suppressClick = false;
-            e.stopPropagation();
-            e.preventDefault();
+        if (Date.now() >= suppressClickUntil) {
+            suppressClickUntil = 0;
+            return;
         }
+        suppressClickUntil = 0;
+        e.stopPropagation();
+        e.preventDefault();
     }, true);
 
     // ── DPI 变化监听 ──────────────────────────────────────────
@@ -671,6 +712,8 @@
             const newScaleFactor = payload?.scaleFactor ?? payload;
             if (typeof newScaleFactor === 'number' && newScaleFactor > 0) {
                 tracing_debug('onScaleChanged', {newScaleFactor, oldDpr: monitorDpr});
+                // 扩窗平移量按旧 DPR 算的物理值，DPI 翻转后语义失效——先还原再 reconcile
+                if (isCtxOpen) hideCtxMenu();
                 reconcileFromBackend(newScaleFactor);
             }
         }).catch(() => {
@@ -704,7 +747,7 @@
             return;
         }
         nativeDragActive = false;
-        suppressClick = true;
+        suppressClickUntil = Date.now() + 250;
         dragEndTime = Date.now();
         reconcileFromBackend();
     }
@@ -765,15 +808,12 @@
     document.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (isMiniAnimating()) return;
-        if (Date.now() - dragEndTime < 200) return;
-        if (e.target.closest('#ctx-menu')) return;
+        // 拖动刚结束的极短窗口内忽略右键（防拖动收尾误触；原 200ms 会吃掉
+        // "拖完立刻右键"的正常操作节奏，收窄到 80ms）
+        if (Date.now() - dragEndTime < 80) return;
+        // 右键落在已打开的菜单上同样重定位菜单（小 pin 上菜单可能盖住大部分
+        // 图片，静默忽略会让用户以为"没反应"、要按第二次）
         showCtxMenu(e.clientX, e.clientY);
-    });
-
-    document.addEventListener('click', (e) => {
-        if (isCtxOpen && !e.target.closest('#ctx-menu')) {
-            hideCtxMenu();
-        }
     });
 
     document.addEventListener('keydown', (e) => {
@@ -802,8 +842,9 @@
         }
     });
 
-    /** 右键菜单显示——钳制在窗口可视区域内，防止越界被裁。 */
-    function showCtxMenu(x, y) {
+    /** 右键菜单显示——窗口放不下完整菜单时临时扩窗；定位钳制在窗口可视区域内，防止越界被裁。
+     *  async：扩窗避让需查一次工作区（pin_work_area IPC）。 */
+    async function showCtxMenu(x, y) {
         // mini 模式只保留重置缩放 + 关闭
         ctxMenu.classList.toggle('ctx-menu-mini', isMinimized);
         // 0.23.12：文字图层状态化菜单——有划选时提供复制；原文层激活时
@@ -817,28 +858,92 @@
             ctxOcrBtn.textContent = getPinTextLayerKind() === 'source' ? '关闭识别' : '识别文字';
         }
         ctxMenu.classList.remove('hidden');
-        // 先显示才能测量尺寸
+        // 先显示才能测量尺寸（菜单 CSS 尺寸不随窗口 resize 变化，此处测量即最终值）
         const rect = ctxMenu.getBoundingClientRect();
-        const winW = window.innerWidth;
-        const winH = window.innerHeight;
-        let mx = x;
-        let my = y;
+        const EDGE = 4;
+
+        let winW = window.innerWidth;
+        let winH = window.innerHeight;
+        let shiftCssX = menuShiftCss.x;
+        let shiftCssY = menuShiftCss.y;
+        const needW = Math.ceil(rect.width) + EDGE * 2;
+        const needH = Math.ceil(rect.height) + EDGE * 2;
+        if (needW > winW || needH > winH) {
+            const targetW = Math.max(needW, winW);
+            const targetH = Math.max(needH, winH);
+            const shift = await computeExpandShift(targetW, targetH);
+            // await 期间菜单可能已被关闭（pointerdown dismiss / ESC），过期打开直接放弃
+            if (ctxMenu.classList.contains('hidden')) return;
+            ctxExpand = {cssW: targetW, cssH: targetH, shiftX: shift.x, shiftY: shift.y};
+            menuShiftCss = {x: shift.x / monitorDpr, y: shift.y / monitorDpr};
+            shiftCssX = menuShiftCss.x;
+            shiftCssY = menuShiftCss.y;
+            setImgAnchor();
+            applyTransformOnly();
+            relayoutPinTextLayer();
+            commitWindowRect();
+            winW = targetW;
+            winH = targetH;
+        }
+        let mx = x + shiftCssX;
+        let my = y + shiftCssY;
         // 右越界 → 左移
-        if (mx + rect.width > winW) {
-            mx = Math.max(0, winW - rect.width - 4);
+        if (mx + rect.width > winW - EDGE) {
+            mx = Math.max(EDGE, winW - rect.width - EDGE);
         }
         // 下越界 → 上移
-        if (my + rect.height > winH) {
-            my = Math.max(0, winH - rect.height - 4);
+        if (my + rect.height > winH - EDGE) {
+            my = Math.max(EDGE, winH - rect.height - EDGE);
         }
         ctxMenu.style.left = mx + 'px';
         ctxMenu.style.top = my + 'px';
         isCtxOpen = true;
     }
 
+    /** 计算菜单扩窗避让屏幕边缘所需的左/上平移（物理像素）。
+     *  扩窗默认只向右/下（origin 不动 → 图片物理位置不动）；右/下边界超出
+     *  工作区时把窗口左/上移回，平移量不超过扩大量、不越过工作区左/上沿。
+     *  查询失败返回 0（只向右/下扩，极端贴边时菜单仍可能被屏缘裁切，可接受降级）。 */
+    async function computeExpandShift(targetCssW, targetCssH) {
+        const shift = {x: 0, y: 0};
+        let wa = null;
+        try {
+            wa = await pinWorkArea(myLabel);
+        } catch (e) {
+            const err = normalizeError(e);
+            console.warn(`pin_work_area 失败 [${err.code}] ${err.message}，扩窗不做边缘避让`);
+        }
+        if (!wa) return shift;
+        const padPhys = Math.round(PIN_PAD_CSS * monitorDpr);
+        const winX = imageScreenX - padPhys;
+        const winY = imageScreenY - padPhys;
+        const overRight = (winX + Math.round(targetCssW * monitorDpr)) - (wa.x + wa.w);
+        shift.x = Math.min(Math.max(0, overRight), Math.max(0, winX - wa.x));
+        const overBottom = (winY + Math.round(targetCssH * monitorDpr)) - (wa.y + wa.h);
+        shift.y = Math.min(Math.max(0, overBottom), Math.max(0, winY - wa.y));
+        return shift;
+    }
+
     function hideCtxMenu() {
         ctxMenu.classList.add('hidden');
         isCtxOpen = false;
+        if (ctxExpand) {
+            ctxExpand = null;
+            menuShiftCss = {x: 0, y: 0};
+            setImgAnchor();
+            applyTransformOnly();
+            relayoutPinTextLayer();
+            if (!isMiniAnimating()) commitWindowRect();
+        }
+    }
+
+    /** 会话重置（__blinkResetPin / __blinkClearPin）时清掉菜单与扩窗状态。
+     *  不做还原提交——调用方随后会按新状态提交窗口矩形。 */
+    function resetCtxExpansion() {
+        ctxMenu.classList.add('hidden');
+        isCtxOpen = false;
+        ctxExpand = null;
+        menuShiftCss = {x: 0, y: 0};
     }
 
     document.getElementById('ctx-edit-image').addEventListener('click', () => {

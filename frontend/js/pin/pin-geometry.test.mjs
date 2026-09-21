@@ -10,6 +10,7 @@ import {
     clampZoom,
     computeWindowRect,
     displayPhysicalSize,
+    expandRectForMenu,
     imageCenter,
     imageScreenFromWinRect,
     MAX_ZOOM,
@@ -525,6 +526,60 @@ test('mini 左上角不变式：往返 winX/winY 恒等', () => {
     assertEqual(r3.winX, r1.winX, '往返 winX 恒等');
     assertEqual(r3.winW, r1.winW, '往返 winW 恒等');
     assertEqual(r3.winH, r1.winH, '往返 winH 恒等');
+});
+
+// ── 15. 右键菜单临时扩窗 ─────────────────────────────────────────────────
+
+test('expandRectForMenu：未扩窗时原样返回', () => {
+    const rect = {winX: 100, winY: 100, winW: 200, winH: 200, physW: 160, physH: 160, padPhys: 20};
+    assertEqual(expandRectForMenu(rect, null, 1.0), rect, 'null expand → 同一矩形');
+    assertEqual(expandRectForMenu(rect, undefined, 1.0), rect, 'undefined expand → 同一矩形');
+});
+
+test('expandRectForMenu：窗口小于菜单时向右/下扩，origin 不动', () => {
+    // mini pin：图片 160×120 CSS，窗口 = 200×160 物理（含 2×20 pad）
+    const rect = {winX: 500, winY: 500, winW: 200, winH: 160};
+    // 菜单需要 150×290 CSS
+    const expanded = expandRectForMenu(rect, {cssW: 150, cssH: 290}, 1.0);
+    assertEqual(expanded.winX, 500, 'winX 不动（图片物理位置不动）');
+    assertEqual(expanded.winY, 500, 'winY 不动');
+    assertEqual(expanded.winW, 200, 'winW 保持 200（菜单宽 150 + 8 边距 < 200）');
+    assertEqual(expanded.winH, 290, 'winH 扩到 290（菜单高 290 + 8 > 160）');
+});
+
+test('expandRectForMenu：菜单更小不缩窗', () => {
+    const rect = {winX: 500, winY: 500, winW: 800, winH: 600};
+    const expanded = expandRectForMenu(rect, {cssW: 150, cssH: 290}, 1.0);
+    assertEqual(expanded.winW, 800, 'winW 不缩小');
+    assertEqual(expanded.winH, 600, 'winH 不缩小');
+});
+
+test('expandRectForMenu：150% 屏物理需求按 DPR 放大', () => {
+    const rect = {winX: 500, winY: 500, winW: 200, winH: 200};
+    const expanded = expandRectForMenu(rect, {cssW: 150, cssH: 290}, 1.5);
+    assertEqual(expanded.winW, Math.max(200, Math.round(150 * 1.5)), 'winW = max(200, 225) = 225');
+    assertEqual(expanded.winH, Math.round(290 * 1.5), 'winH = round(290 * 1.5) = 435');
+});
+
+test('expandRectForMenu：shift 平移只影响 origin，不缩尺寸', () => {
+    const rect = {winX: 500, winY: 500, winW: 200, winH: 160};
+    const expanded = expandRectForMenu(rect, {cssW: 150, cssH: 290, shiftX: 60, shiftY: 30}, 1.0);
+    assertEqual(expanded.winX, 440, 'winX = 500 - 60（避让右缘左移）');
+    assertEqual(expanded.winY, 470, 'winY = 500 - 30');
+    assertEqual(expanded.winH, 290, '扩窗尺寸不受 shift 影响');
+});
+
+test('expandRectForMenu：扩窗后图片相对窗口左上的物理偏移 = pad + shift', () => {
+    // 前端补偿约定：img CSS left = pad + shift/dpr，物理偏移 = (pad + shift/dpr) × dpr = pad×dpr + shift
+    const rect = {winX: 500, winY: 500, winW: 200, winH: 160};
+    const shiftX = 60;
+    const dpr = 1.5;
+    const padPhys = Math.round(PIN_PAD_CSS * dpr);
+    const expanded = expandRectForMenu(rect, {cssW: 150, cssH: 290, shiftX}, dpr);
+    const imgPhysOffsetInWindow = (PIN_PAD_CSS + shiftX / dpr) * dpr;
+    const imgGlobalX = expanded.winX + imgPhysOffsetInWindow;
+    const originalImgX = rect.winX + padPhys;
+    assertEqual(imgGlobalX, originalImgX, '补偿后图片物理位置不变');
 });
 
 // ── 结果 ─────────────────────────────────────────────────────────────────

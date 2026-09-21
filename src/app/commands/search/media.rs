@@ -876,6 +876,17 @@ pub fn win32_left_button_down() -> bool {
     crate::infra::platform::window::is_left_button_down()
 }
 
+/// 查询 pin 窗口所在显示器的工作区（物理像素，虚拟屏幕坐标系）。
+///
+/// 右键菜单临时扩窗（小 pin 菜单完整显示）时用于边缘避让：扩窗默认向右/下
+/// 生长，超出工作区时前端把窗口左/上平移回屏内并补偿图片 CSS 偏移。
+/// 返回 `{ x, y, w, h }`，窗口不存在时返回 null。
+#[tauri::command]
+pub fn pin_work_area(app: tauri::AppHandle, label: String) -> Option<serde_json::Value> {
+    crate::infra::platform::window::get_pin_window_work_area(&app, &label)
+        .map(|(x, y, w, h)| serde_json::json!({ "x": x, "y": y, "w": w, "h": h }))
+}
+
 /// 将 pin 窗口图片复制到剪贴板。
 #[tauri::command]
 pub async fn pin_save_clipboard(request: tauri::ipc::Request<'_>) -> Result<(), String> {

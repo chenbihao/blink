@@ -3766,6 +3766,28 @@ pub fn get_pin_window_rect(app: &AppHandle, label: &str) -> Option<(i32, i32, u3
     Some((x, y, w, h, dpr))
 }
 
+/// 获取 Pin 窗口所在显示器的工作区（`rcWork`，排除任务栏；物理像素，虚拟屏幕坐标系）。
+///
+/// 用于右键菜单临时扩窗的边缘避让：小 pin 的菜单扩窗默认向右/下生长，
+/// 右/下边界超出工作区时前端把窗口左/上平移回屏内。返回 `None` 如果窗口
+/// 不存在或显示器信息读取失败。
+pub fn get_pin_window_work_area(app: &AppHandle, label: &str) -> Option<(i32, i32, u32, u32)> {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+
+    let win = app.get_webview_window(label)?;
+    let hwnd = win.hwnd().ok()?;
+    let hwnd_raw = windows::Win32::Foundation::HWND(hwnd.0 as _);
+
+    let hmon = unsafe { MonitorFromWindow(hwnd_raw, MONITOR_DEFAULTTONEAREST) };
+    let mut mi: MONITORINFO = unsafe { std::mem::zeroed() };
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if !unsafe { GetMonitorInfoW(hmon, &mut mi) }.as_bool() {
+        return None;
+    }
+    let rc = mi.rcWork;
+    Some((rc.left, rc.top, (rc.right - rc.left) as u32, (rc.bottom - rc.top) as u32))
+}
+
 /// 物理鼠标左键瞬时按下状态（`GetAsyncKeyState` 高位，全局键态、任意线程可查）。
 ///
 /// Pin 前端模态拖动中收不到 pointerup，`onMoved` 安全网以此判定拖动是否真正
