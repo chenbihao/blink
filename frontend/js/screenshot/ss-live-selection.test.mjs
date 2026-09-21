@@ -11,6 +11,9 @@
 //!    且 devicePixelRatio 不作为坐标换算真源
 //! 8. 尺寸提示与实时几何共用同一个 rAF，每帧最多更新一次
 //! 9. 实时层的几何属性没有 transition / animation；预选虚线框动画未被改动
+//! 10. DOM 层缺失时降级：不激活、不重复告警
+//! 11. 混合 DPI 小数坐标：全部几何从唯一整数格点推导，四遮罩拼满全屏
+//!     无 1px 空缝/叠色（多屏"跟随鼠标的横线"回归）
 
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -283,6 +286,98 @@ function frameStyleWrites() {
     assert.equal(ss.liveBorderEl.style.width, '100px', '边框宽仍为正');
     live.resetLiveSelection();
     console.log('✓ CSS 像素几何 + 跨屏线宽补偿');
+}
+
+// ── 11：混合 DPI 小数坐标——全部几何从唯一整数格点推导，无接缝 ──────────────
+//
+// 回归背景：单一跨屏 overlay 只有一个 renderScale，混合 DPI 下指针 offsetX/
+// offsetY（= 物理像素 ÷ renderScale）是小数；上游 computeDragRect/norm 不取整，
+// 小数原样流入 writeGeometry。旧实现把 y、h、y+h 作为三个独立取整表达式，
+// round(y)+round(h) ≠ round(y+h) 时左右遮罩与下遮罩之间出现整屏宽 1px 空缝
+// （暗桌面亮横线，新建拖选时跟随下边缘）或 1px 叠色——多屏混合 DPI 机器必现，
+// 单屏 100% 缩放（整数 CSS 坐标）不可现。
+
+{
+    installDoubles();
+    window.__blinkScreenMeta = {
+        vx: 0, vy: 0,
+        renderScaleX: 1.25, renderScaleY: 1.25,
+        physicalDisplays: [{x: 0, y: 0, w: 3840, h: 2160, dpi: 120}],
+    };
+
+    /** 写入矩形并冲帧（首帧同步落地、后续帧走单飞 rAF，两条路径都覆盖） */
+    const writeRect = (rect) => {
+        live.updateLiveSelection(rect);
+        runFrame();
+    };
+
+    /** 接缝不变量：四遮罩 + 边框拼满全屏，相邻边缘零重叠零空隙（x/y 非负时） */
+    const assertSeamFree = (label, rect) => {
+        writeRect(rect);
+        const topH = parseFloat(ss.liveMaskTop.style.height);
+        const bottomT = parseFloat(ss.liveMaskBottom.style.top);
+        const leftT = parseFloat(ss.liveMaskLeft.style.top);
+        const leftH = parseFloat(ss.liveMaskLeft.style.height);
+        const rightT = parseFloat(ss.liveMaskRight.style.top);
+        const rightH = parseFloat(ss.liveMaskRight.style.height);
+        const leftW = parseFloat(ss.liveMaskLeft.style.width);
+        const rightL = parseFloat(ss.liveMaskRight.style.left);
+        const bL = parseFloat(ss.liveBorderEl.style.left);
+        const bT = parseFloat(ss.liveBorderEl.style.top);
+        const bW = parseFloat(ss.liveBorderEl.style.width);
+        const bH = parseFloat(ss.liveBorderEl.style.height);
+        const ctx = `${label} rect=${JSON.stringify(rect)}`;
+        assert.ok(
+            [topH, bottomT, leftT, leftH, rightT, rightH, leftW, rightL, bL, bT, bW, bH]
+                .every(Number.isInteger),
+            `全部几何落在整数格点上：${ctx}`,
+        );
+        // 垂直接缝（本缺陷主症状）：上遮罩下边缘 = 侧遮罩上边缘 = 边框上边缘；
+        // 侧遮罩下边缘 = 下遮罩上边缘 = 边框下边缘
+        assert.equal(topH, leftT, `上/左遮罩在选区上边缘对齐：${ctx}`);
+        assert.equal(topH, rightT, `上/右遮罩在选区上边缘对齐：${ctx}`);
+        assert.equal(leftH, rightH, `两条侧遮罩同高：${ctx}`);
+        assert.equal(topH + leftH, bottomT, `侧遮罩下边缘与下遮罩上边缘无 1px 空缝/叠色：${ctx}`);
+        assert.equal(bT + bH, bottomT, `边框下边缘与下遮罩上边缘对齐：${ctx}`);
+        // 水平接缝（同根因次症状）：左遮罩右边缘贴边框左边缘，边框右边缘贴右遮罩左边缘
+        assert.equal(leftW, bL, `左遮罩右边缘与边框左边缘对齐：${ctx}`);
+        assert.equal(bL + bW, rightL, `边框右边缘与右遮罩左边缘无 1px 竖缝：${ctx}`);
+    };
+
+    // 旧实现两个典型缺陷样例（renderScale 1.25 网格上会出现）：
+    //   y=0.4, h=2.4 → round(0)+round(2.4)=2 ≠ round(2.8)=3 → 1px 空缝（亮横线）
+    //   y=0.6, h=2.6 → round(1)+round(3)=4 ≠ round(3.2)=3 → 1px 叠色（暗线段）
+    assertSeamFree('空缝样例', {x: 0.4, y: 0.4, w: 2.4, h: 2.4});
+    assertSeamFree('叠色样例', {x: 0.6, y: 0.6, w: 2.6, h: 2.6});
+
+    // 钉死具体格点：旧实现此处侧遮罩高 2px（空缝），必须为 3px 与下遮罩严丝合缝
+    writeRect({x: 0.4, y: 0.4, w: 2.4, h: 2.4});
+    assert.equal(ss.liveMaskTop.style.height, '0px', '上遮罩 height = round(0.4)');
+    assert.equal(ss.liveMaskLeft.style.height, '3px', '侧遮罩高 = round(2.8)-round(0.4)（旧实现为 2px → 1px 空缝）');
+    assert.equal(ss.liveMaskBottom.style.top, '3px', '下遮罩 top = round(0.4+2.4)');
+
+    // 全网格扫描：四角全部落在 0.8 步进（renderScale 1.25）的小数格点上，
+    // 旧实现约 1/4 组合错位；新实现任意组合都必须无接缝。
+    let swept = 0;
+    for (let i = 0; i < 12; i++) {
+        for (let j = 0; j < 12; j++) {
+            assertSeamFree(`sweep(${i},${j})`, {
+                x: i * 0.8, y: j * 0.8,
+                w: 100.8 - i * 0.8, h: 60.8 - j * 0.8,
+            });
+            swept++;
+        }
+    }
+    assert.ok(swept >= 100, '扫描规模足以覆盖错位组合');
+
+    // 还原默认 meta（renderScale=1），不污染后续 section
+    window.__blinkScreenMeta = {
+        vx: 0, vy: 0,
+        renderScaleX: 1, renderScaleY: 1,
+        physicalDisplays: [{x: 0, y: 0, w: 3840, h: 2160, dpi: 96}],
+    };
+    live.resetLiveSelection();
+    console.log(`✓ 混合 DPI 小数坐标无接缝（扫描 ${swept} 组）`);
 }
 
 // ── 8：尺寸提示与实时几何共用同一个 rAF，每帧最多更新一次 ─────────────────

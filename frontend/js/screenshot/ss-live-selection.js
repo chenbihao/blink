@@ -95,32 +95,52 @@ function px(value) {
  * 边框仍贴在正确位置，而不会被钳到 0。
  */
 function writeGeometry(rect, els) {
-    const x = Math.max(0, rect.x);
-    const y = Math.max(0, rect.y);
     const w = Math.max(0, rect.w);
     const h = Math.max(0, rect.h);
 
-    // 选区外暗：上/下/左/右四块，组合出选区内的透明豁口
-    els.liveMaskTop.style.height = px(y);
-    els.liveMaskBottom.style.top = px(y + h);
-    els.liveMaskLeft.style.top = px(y);
-    els.liveMaskLeft.style.height = px(h);
-    els.liveMaskLeft.style.width = px(x);
-    els.liveMaskRight.style.top = px(y);
-    els.liveMaskRight.style.height = px(h);
-    els.liveMaskRight.style.left = px(x + w);
+    // 先把矩形四角对齐到唯一整数格点，再推导所有边——禁止 round(y)、round(h)、
+    // round(y+h) 三个表达式独立取整：混合 DPI 下指针 CSS 坐标（物理像素 ÷
+    // renderScale）是小数，独立取整时 round(y)+round(h) 与 round(y+h) 约半数
+    // 位置差 1px，左右遮罩与下遮罩之间会出现整屏宽的 1px 空缝（暗桌面上的亮
+    // 横线，新建拖选时正好跟随下边缘移动）或 1px 叠色（α 0.45 → 0.70 暗线段）。
+    // 宽高由两个格点相减得出，与提交路径 drawFinalSelection「一份取整矩形推导
+    // 四块 fillRect」的纪律一致。
+    const bx = Math.round(rect.x);
+    const by = Math.round(rect.y);
+    const bw = Math.max(0, Math.round(rect.x + w) - bx);
+    const bh = Math.max(0, Math.round(rect.y + h) - by);
 
-    // 唯一边框：几何与选区完全一致
-    els.liveBorderEl.style.left = Math.round(rect.x) + 'px';
-    els.liveBorderEl.style.top = Math.round(rect.y) + 'px';
-    els.liveBorderEl.style.width = px(w);
-    els.liveBorderEl.style.height = px(h);
+    // 遮罩是屏幕覆盖：left/top 钳到可视区 0（与 canvas fillRect 负坐标被视口
+    // 自然裁剪的行为对齐），右/下边界保持原格点，四块遮罩拼满全屏无重叠无缝隙。
+    const left = Math.max(0, bx);
+    const top = Math.max(0, by);
+    const right = Math.max(left, bx + bw);
+    const bottom = Math.max(top, by + bh);
+
+    // 选区外暗：上/下/左/右四块，组合出选区内的透明豁口
+    els.liveMaskTop.style.height = px(top);
+    els.liveMaskBottom.style.top = px(bottom);
+    els.liveMaskLeft.style.top = px(top);
+    els.liveMaskLeft.style.height = px(bottom - top);
+    els.liveMaskLeft.style.width = px(left);
+    els.liveMaskRight.style.top = px(top);
+    els.liveMaskRight.style.height = px(bottom - top);
+    els.liveMaskRight.style.left = px(right);
+
+    // 唯一边框：真实取整矩形。left/top 允许为负，与 canvas strokeRect 支持负
+    // 坐标的语义一致——快速拖出屏幕边缘时边框仍贴在正确位置；宽高与遮罩同一
+    // 份格点，右/下边缘与遮罩边界天然对齐（旧实现 round(w) 与 round(x+w) 的
+    // ±1px 竖向错位一并消除）。
+    els.liveBorderEl.style.left = bx + 'px';
+    els.liveBorderEl.style.top = by + 'px';
+    els.liveBorderEl.style.width = px(bw);
+    els.liveBorderEl.style.height = px(bh);
 
     // 跨屏视觉补偿：与改造前 canvas 的 lineWidth = 2 × monitorDpr 等价
     // （canvas 位图宽 2×monitorDpr ÷ renderScale = 2×uiScale CSS 宽）。
     // 权威比例仍是 canvas 实测 renderScale；devicePixelRatio 只做兜底。
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
-    const borderWidth = Math.max(1, BORDER_CSS_WIDTH * uiScaleAtCss(x, y, meta));
+    const borderWidth = Math.max(1, BORDER_CSS_WIDTH * uiScaleAtCss(left, top, meta));
     if (borderWidth !== lastBorderWidth) {
         lastBorderWidth = borderWidth;
         els.liveBorderEl.style.borderWidth = borderWidth + 'px';
