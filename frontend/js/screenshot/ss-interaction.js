@@ -26,6 +26,7 @@ import {
     moveCrosshair1px,
     moveRect1px,
     screenPointToBitmap,
+    uiScaleAtCss,
 } from './ss-selection-geometry.js';
 import {screenshotCursorPosition} from '../shared/api.js';
 
@@ -633,6 +634,12 @@ function updatePrecisionHint() {
     if (ss.colorPickerMode === 'following') {
         ss.precisionHint.textContent = '方向键移动 1px · C 复制颜色 · Esc 取消';
         ss.precisionHint.classList.remove('hidden');
+        // 0.23.18：按提示条锚点（overlay 视口顶部中央）所在屏做视觉补偿，
+        // 与 sel-loading / showTransientHint 同一契约（spec-frontend §5.6）。
+        // translateX 的百分比基于未缩放盒宽，水平中心仍精确落在 left。
+        const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+        const uiScale = uiScaleAtCss(window.innerWidth / 2, 16, meta);
+        ss.precisionHint.style.transform = `translateX(-50%) scale(${uiScale})`;
     } else {
         ss.precisionHint.classList.add('hidden');
     }

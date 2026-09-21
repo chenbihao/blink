@@ -77,8 +77,16 @@ export function showSelLoading(text) {
     if (!el || !ss.selCss) return;
     const label = el.querySelector('.sel-loading-text');
     if (label) label.textContent = text;
-    el.style.left = (ss.selCss.x + ss.selCss.w / 2) + 'px';
-    el.style.top = (ss.selCss.y + ss.selCss.h / 2) + 'px';
+    const cx = ss.selCss.x + ss.selCss.w / 2;
+    const cy = ss.selCss.y + ss.selCss.h / 2;
+    el.style.left = cx + 'px';
+    el.style.top = cy + 'px';
+    // 0.23.18：按选区中心所在屏做视觉补偿（spec-frontend §5.6，与 showTransientHint /
+    // sizeHint / magnifier 同一契约）。translate 的百分比基于未缩放盒宽，元素中心
+    // 仍精确落在 (left, top)，无需改定位逻辑。
+    const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+    const uiScale = uiScaleAtCss(cx, cy, meta);
+    el.style.transform = `translate(-50%, -50%) scale(${uiScale})`;
     el.hidden = false;
 }
 

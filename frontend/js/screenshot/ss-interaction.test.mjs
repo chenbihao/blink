@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 
 // ss-interaction.js 导入 ../shared/api.js → tauri.js，后者在模块加载时读 window.__TAURI__。
 // Node 测试环境没有 window，需要先 mock。
@@ -225,6 +226,16 @@ const {computeInteractionRect, beginSelectionInteraction, updateSelectionInterac
     assert.equal(committed[committed.length - 1], 'exit', '过小选区退出标注模式而非进入');
 
     console.log('✓ release 坐标优先 / 阈值语义');
+}
+
+// 0.23.18：取色器 precision hint 的 DPI 视觉补偿（源码断言——updatePrecisionHint 未导出）
+{
+    const src = readFileSync(new URL('./ss-interaction.js', import.meta.url), 'utf8');
+    const m = src.match(/function updatePrecisionHint\(\)[\s\S]*?\n}/);
+    assert.ok(m, '找到 updatePrecisionHint');
+    assert.match(m[0], /uiScaleAtCss\(window\.innerWidth \/ 2, 16/, '按视口顶部中央锚点计算 uiScale');
+    assert.match(m[0], /translateX\(-50%\) scale\(/, 'transform 组合水平居中与缩放补偿');
+    console.log('✓ precision hint DPI 视觉补偿');
 }
 
 console.log('ss-interaction tests passed');

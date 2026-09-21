@@ -41,12 +41,16 @@ function createFakeDocument() {
 test('窗口与控件预选复用同一元素并连续交接', () => {
     const fakeDocument = createFakeDocument();
     globalThis.document = fakeDocument;
+    // 0.23.18：showPreselectionHint 按 uiScale 补偿边框线宽（读 __blinkScreenMeta，
+    // fallback devicePixelRatio=1 → 边框保持 3px）；与其他截图测试同样注入 window
+    globalThis.window = {devicePixelRatio: 1};
 
     showPreselectionHint({x: 10, y: 20, w: 800, h: 600}, 'window', 'Editor');
     const hint = fakeDocument.children[0];
     assert.equal(fakeDocument.children.length, 1);
     assert.equal(hint.style.left, '10px');
     assert.equal(hint.style.opacity, '1');
+    assert.equal(hint.style.borderWidth, '3px', 'uiScale=1 时边框线宽保持 3px');
 
     showPreselectionHint({x: 40, y: 60, w: 200, h: 80}, 'control');
     assert.equal(fakeDocument.children.length, 1, '层级切换不应创建第二个预选框');
@@ -68,4 +72,5 @@ test('窗口与控件预选复用同一元素并连续交接', () => {
     resetPreselectionHint();
     assert.equal(hint.style.visibility, 'hidden');
     delete globalThis.document;
+    delete globalThis.window;
 });

@@ -3,7 +3,10 @@
 //! 窗口与控件命中共用同一个 DOM 元素，因此跨层级切换时可以继承上一帧的
 //! 几何位置并连续形变；kind 只负责语义配色，不再用两个元素交叉淡入淡出。
 
+import {uiScaleAtCss} from './ss-selection-geometry.js';
+
 const HIDE_DELAY_MS = 120;
+const BORDER_CSS_WIDTH = 3; // 与 chord-screenshot.css .preselection-hint 的 border 同值
 
 let hintEl = null;
 let hintOwner = null;
@@ -41,6 +44,14 @@ export function showPreselectionHint(rect, kind, title = '') {
     el.style.top = `${rect.y}px`;
     el.style.width = `${rect.w}px`;
     el.style.height = `${rect.h}px`;
+    // 0.23.18：框体必须精确对齐窗口矩形（几何层不缩放），但边框线宽是视觉
+    // 重量——按预选框中心所在屏 uiScale 补偿（与实时选区边框 BORDER_CSS_WIDTH
+    // × uiScale 同一契约，spec-frontend §5.6），物理线宽跨屏一致。
+    const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+    const uiScale = uiScaleAtCss(rect.x + rect.w / 2, rect.y + rect.h / 2, meta);
+    const border = Math.max(1, Math.round(BORDER_CSS_WIDTH * uiScale));
+    el.style.borderWidth = border + 'px';
+    el.style.borderRadius = border + 'px';
     el.style.visibility = 'visible';
     el.style.opacity = '1';
     el.title = title;
