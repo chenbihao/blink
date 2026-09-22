@@ -2,6 +2,8 @@
  * 0.22.13 首次启动引导窗口——分步向导。
  *
  * 4 步（步步可跳过/后退）：核心快捷键 → 常用开关 → 引擎增强 → 完成。
+ * 第 1 步每个 Chord 快捷键右侧带开关，直接开启该动作的全局快捷键
+ * （与设置页 chord tab 同一 chord_bindings.global 契约，开启 = 跟随触发键）。
  * 任何退出路径（完成/跳过/关窗）都标记已完成当前版引导（onboarding_version）：
  * - 本页走 complete_onboarding 命令（版本常量唯一真源在后端）；
  * - 窗口 X 关闭由后端 CloseRequested 回调兜底。
@@ -12,9 +14,9 @@
 
 import {commandErrorText, getCurrentWindow, invoke, listen} from "./shared/tauri.js";
 import {applyI18nFromConfig, onLangChange, t} from "./i18n/index.js";
-import {renderCombo} from "./shared/kbd.js";
+import {normalizeCombo, renderCombo} from "./shared/kbd.js";
 import {EVENTS} from "./shared/event-names.js";
-import {buildChordTogglesPayload} from "./shared/config-keys.js";
+import {buildChordTogglesPayload, saveConfig} from "./shared/config-keys.js";
 import {
     estimateEtaMs,
     etaTextKeyAndParams,
@@ -24,6 +26,7 @@ import {
 } from "./shared/download-progress.js";
 import {
     activeOperationId,
+    applyChordGlobalToBindings,
     canGoBack,
     clampStep,
     classifyInstallStage,
@@ -46,13 +49,15 @@ const MAIN_SHORTCUT = {
     hintKey: "welcome.main.hint",
 };
 
-// Chord 快捷键：仅在主窗口可见时按住 Alt + 字母键触发
+// Chord 快捷键：仅在主窗口可见时按住 Alt + 字母键触发。
+// id = 后端 chord 动作 id（chord_bindings 的 key），右侧开关写入其 global 字段
+// 将组合键升级为全局快捷键；combo 为默认键位，自定义过触发键的按实际配置渲染。
 const CHORD_SHORTCUTS = [
-    {combo: "Alt+Q", labelKey: "welcome.shortcut.chat"},
-    {combo: "Alt+A", labelKey: "welcome.shortcut.screenshot"},
-    {combo: "Alt+C", labelKey: "welcome.shortcut.clipboard_history"},
-    {combo: "Alt+E", labelKey: "welcome.shortcut.edit"},
-    {combo: "Alt+S", labelKey: "welcome.shortcut.sticky"},
+    {id: "chat", combo: "Alt+Q", labelKey: "welcome.shortcut.chat"},
+    {id: "screenshot", combo: "Alt+A", labelKey: "welcome.shortcut.screenshot"},
+    {id: "clipboard_history", combo: "Alt+C", labelKey: "welcome.shortcut.clipboard_history"},
+    {id: "edit", combo: "Alt+E", labelKey: "welcome.shortcut.edit"},
+    {id: "sticky", combo: "Alt+S", labelKey: "welcome.shortcut.sticky"},
 ];
 
 // ── 第 2 步开关定义（0.22.13：悬浮球已随 0.11 划词 chord 移除，不再列入）────────
@@ -86,6 +91,21 @@ let chordToggleConfirmed = {chord_enabled: false, chord_hint_visible: true};
  *  通过 promise chain 串行化所有 chord_toggles 写入，确保每次写入
  *  都基于最新的 toggleValues 构造 payload，不会丢失字段。 */
 let chordTogglesWriteChain = Promise.resolve();
+/** 第 1 步 chord 全局快捷键当前值（id → boolean；get_config 读入，改动即时 set_config 生效）。 */
+let chordGlobalValues = {};
+/** chord_bindings 快照（id → binding）：渲染实际触发键位 + 保存成功后同步。 */
+let chordBindingsConfig = {};
+/** chord_bindings 写入串行化链（promise chain）。
+ *
+ *  chord_bindings 是结构体分片（每个动作一个条目），并发 read-modify-write
+ *  会 last-writer-wins 覆盖其他动作的 global/key 字段（与设置页 chord tab
+ *  同一问题域），所有写入必须经此链串行执行。 */
+let chordBindingsWriteChain = Promise.resolve();
+/** 每个 chord 动作独立的保存 revision：旧请求迟到响应不得覆盖新状态。 */
+const chordGlobalRevisions = new Map();
+/** 最后一次后端已确认的全局快捷键状态（id → boolean），失败回滚真源
+ *  （不重新 get_config，避免读到并发写入的中间态）。 */
+const confirmedChordGlobal = new Map();
 /** OCR 引导 UI 状态：idle | checking | not-installed | installing | ready | failed | unavailable。 */
 let ocrState = "idle";
 /** 最近一次 install-stage 的 stage wire 值（installing 态展示对应文案；渲染时翻译）。 */
@@ -144,20 +164,59 @@ function renderShortcuts() {
 
     const chordList = document.createElement("div");
     chordList.className = "welcome-chord-list";
-    for (const {combo, labelKey} of CHORD_SHORTCUTS) {
+    for (const {id, combo, labelKey} of CHORD_SHORTCUTS) {
+        const binding = chordBindingsConfig[id];
+        // 自定义过触发键的按实际配置渲染；空 key = 未覆盖默认（后端按 default_key 解析）
+        const comboStr = binding?.key
+            ? normalizeCombo(binding.modifiers ?? ["alt"], binding.key)
+            : combo;
+        const isGlobal = chordGlobalValues[id] === true;
+
         const row = document.createElement("div");
-        row.className = "welcome-shortcut-row";
+        row.className = isGlobal ? "welcome-shortcut-row is-global" : "welcome-shortcut-row";
         const label = document.createElement("span");
         label.className = "welcome-shortcut-label";
         label.textContent = t(labelKey);
+
+        const side = document.createElement("span");
+        side.className = "welcome-shortcut-side";
         const keys = document.createElement("span");
         keys.className = "welcome-shortcut-keys";
-        keys.appendChild(renderCombo(combo));
+        keys.appendChild(renderCombo(comboStr));
+        side.appendChild(keys);
+
+        // 模式状态标签：标注 switch 两态含义（窗口内 Chord / 全局快捷键）
+        const mode = document.createElement("span");
+        mode.className = isGlobal ? "welcome-shortcut-mode is-on" : "welcome-shortcut-mode";
+        mode.textContent = t(isGlobal ? "welcome.shortcut.mode.global" : "welcome.shortcut.mode.window");
+        side.appendChild(mode);
+
+        // 全局快捷键开关：打开 = 组合键注册为系统级全局键（任意界面可触发）
+        const wrap = document.createElement("label");
+        wrap.className = "welcome-switch";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = isGlobal;
+        input.addEventListener("change", () => {
+            setGlobalRowVisual(row, input.checked);
+            applyChordGlobal(id, input.checked);
+        });
+        const slider = document.createElement("span");
+        slider.className = "welcome-switch-slider";
+        wrap.appendChild(input);
+        wrap.appendChild(slider);
+        side.appendChild(wrap);
+
         row.appendChild(label);
-        row.appendChild(keys);
+        row.appendChild(side);
         chordList.appendChild(row);
     }
     chordSection.appendChild(chordList);
+
+    const globalHint = document.createElement("p");
+    globalHint.className = "welcome-section-hint";
+    globalHint.textContent = t("welcome.chord.global_hint");
+    chordSection.appendChild(globalHint);
 
     container.appendChild(chordSection);
 }
@@ -284,15 +343,88 @@ async function applyToggle(id, enabled) {
         }
         renderToggles();
         // 向用户显示可理解的错误
-        const msgEl = document.getElementById("welcome-error");
-        if (msgEl) {
-            msgEl.textContent = commandErrorText(e, t("welcome.step2.chord.save_failed"));
-            msgEl.classList.remove("hidden");
-            setTimeout(() => {
-                if (msgEl) msgEl.classList.add("hidden");
-            }, 4000);
-        }
+        showWelcomeError(commandErrorText(e, t("welcome.error.save_failed")));
     }
+}
+
+// ── 瞬时错误提示（第 1/2 步开关保存失败共用）────────────────────────────────
+
+let welcomeErrorTimer = 0;
+
+/** 底部居中显示一条错误提示，4 秒后自动隐藏；新消息覆盖旧消息与旧 timer。 */
+function showWelcomeError(message) {
+    const msgEl = document.getElementById("welcome-error");
+    if (!msgEl) return;
+    msgEl.textContent = message;
+    msgEl.classList.remove("hidden");
+    if (welcomeErrorTimer) clearTimeout(welcomeErrorTimer);
+    welcomeErrorTimer = setTimeout(() => {
+        msgEl.classList.add("hidden");
+        welcomeErrorTimer = 0;
+    }, 4000);
+}
+
+// ── 第 1 步：Chord 全局快捷键开关（复用设置页 chord tab 同一契约）────────────
+
+/** 开关切换时原位更新行视觉（状态标签 + 键帽染色），不重建列表避免闪烁。
+ *  乐观更新：保存失败由 applyChordGlobal 回滚 chordGlobalValues 后整体重渲染。 */
+function setGlobalRowVisual(row, isOn) {
+    row.classList.toggle("is-global", isOn);
+    const mode = row.querySelector(".welcome-shortcut-mode");
+    if (mode) {
+        mode.classList.toggle("is-on", isOn);
+        mode.textContent = t(isOn ? "welcome.shortcut.mode.global" : "welcome.shortcut.mode.window");
+    }
+}
+
+/** 开关写入即生效（chord_bindings.global 字段级更新）。
+ *
+ *  开启 = `{mode:"follow_chord"}`（跟随触发键，系统级注册，主窗隐藏时也可
+ *  触发）；关闭 = 删除 global 字段。
+ *
+ *  **串行化 + revision**：chord_bindings 是结构体分片，写入经 promise chain
+ *  串行执行（并发 read-modify-write 会 last-writer-wins 丢其他动作的字段）；
+ *  每个动作独立 revision，被新请求取代的旧响应不更新 UI。
+ *  失败时从 confirmedChordGlobal 真源回滚，不重新 get_config。 */
+async function applyChordGlobal(id, enabled) {
+    const rev = (chordGlobalRevisions.get(id) ?? 0) + 1;
+    chordGlobalRevisions.set(id, rev);
+    chordGlobalValues[id] = enabled;
+
+    let failure = null;
+    const result = await new Promise((resolve) => {
+        chordBindingsWriteChain = chordBindingsWriteChain.then(async () => {
+            if (rev !== chordGlobalRevisions.get(id)) return resolve("superseded");
+            try {
+                const fullCfg = await invoke("get_config");
+                if (rev !== chordGlobalRevisions.get(id)) return resolve("superseded");
+                const next = applyChordGlobalToBindings(fullCfg?.chord_bindings, id, enabled);
+                await saveConfig("chord_bindings", next);
+                if (rev !== chordGlobalRevisions.get(id)) return resolve("superseded");
+                // 保存成功：推进已确认状态与本地快照（后续渲染按实际键位显示）
+                confirmedChordGlobal.set(id, enabled);
+                chordBindingsConfig = next;
+                resolve("ok");
+            } catch (err) {
+                failure = err;
+                console.error(`welcome: set chord global (${id}) failed:`, err);
+                resolve("failed");
+            }
+        }).catch((err) => {
+            // chain 内部不应抛出（已 try-catch），防御性兜底
+            failure = err;
+            console.error("welcome: chord bindings write chain error:", err);
+            resolve("failed");
+        });
+    });
+    // ok / superseded 都不动 UI：被取代时新请求负责最新状态
+    if (result !== "failed") return;
+    // 失败返回时已有更新的请求接管同一动作：回滚会覆盖新请求的 UI 状态，跳过
+    if (rev !== chordGlobalRevisions.get(id)) return;
+
+    chordGlobalValues[id] = confirmedChordGlobal.get(id) === true;
+    renderShortcuts();
+    showWelcomeError(commandErrorText(failure, t("welcome.error.save_failed")));
 }
 
 // ── 第 3 步：OCR 引导编排（复用引擎页同一条 install 命令与进度事件）────────────
@@ -570,6 +702,13 @@ async function init() {
             chord_enabled: toggleValues.chord_enabled,
             chord_hint_visible: toggleValues.chord_hint_visible,
         };
+        // 第 1 步全局快捷键开关初值（chord_bindings.global 字段存在即开启）
+        chordBindingsConfig = cfg.chord_bindings ?? {};
+        for (const {id} of CHORD_SHORTCUTS) {
+            const enabled = chordBindingsConfig[id]?.global != null;
+            chordGlobalValues[id] = enabled;
+            confirmedChordGlobal.set(id, enabled);
+        }
     } catch (e) {
         console.error("welcome: get_config failed:", e);
     }

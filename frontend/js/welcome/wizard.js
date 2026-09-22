@@ -127,6 +127,32 @@ export function rollbackChordToggles(confirmed) {
     };
 }
 
+// ── Chord 全局快捷键开关（纯函数，供测试）─────────────────────────────────────
+
+/**
+ * 返回开启/关闭某 chord 动作全局快捷键后的 chord_bindings 新对象（不改原对象）。
+ *
+ * 与设置页 chord tab 同一契约（0.22.12）：开启 = 写入 `{mode:"follow_chord"}`
+ * （跟随触发键，零配置生效）；关闭 = 删除 global 字段，保留 key/modifiers 等
+ * 其他字段。动作条目不存在时创建空触发键条目（后端按 default_key 解析生效键）。
+ *
+ * @param {object|null} bindings - get_config 返回的 chord_bindings（id → binding）
+ * @param {string} id - chord 动作 id（如 "chat"）
+ * @param {boolean} enabled
+ * @returns {object} 新的 chord_bindings（顶层与目标条目均为浅拷贝）
+ */
+export function applyChordGlobalToBindings(bindings, id, enabled) {
+    const next = {...(bindings || {})};
+    const entry = {...(next[id] ?? {key: "", modifiers: ["alt"]})};
+    if (enabled) {
+        entry.global = {mode: "follow_chord"};
+    } else if (entry.global) {
+        delete entry.global;
+    }
+    next[id] = entry;
+    return next;
+}
+
 // ── 安装进度事件 operation_id 隔离（纯函数，供测试）───────────────────────────
 
 /**

@@ -54,8 +54,8 @@
                     <span class="welcome-engine-name" data-i18n="welcome.step3.ocr.title">OCR 文字识别增强</span>
                     <span class="welcome-engine-badge" data-i18n="welcome.step3.ocr.size">约 17 MB</span>
                 </div>
-                <p class="welcome-engine-desc" data-i18n="welcome.step3.ocr.desc">系统自带 OCR 对中文识别较弱；下载本地
-                    PP-OCR 引擎后截图识别显著提升，装完自动生效，无需改配置。</p>
+                <p class="welcome-engine-desc" data-i18n="welcome.step3.ocr.desc">强烈推荐下载：只需十几
+                    MB，中文识别效果大幅增强；装完自动生效，无需改配置。</p>
                 <div class="download-progress hidden" id="ocr-progress">
                     <div class="download-progress__bar">
                         <div class="download-progress__fill" id="ocr-progress-fill"></div>
@@ -99,6 +99,9 @@
             </div>
         </section>
     </div>
+
+    <!-- 瞬时错误提示条（开关保存失败等；JS 控制显隐） -->
+    <div class="welcome-error hidden" id="welcome-error"></div>
 
     <!-- 底部导航 -->
     <div class="welcome-footer">

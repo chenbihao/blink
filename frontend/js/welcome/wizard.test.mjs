@@ -7,6 +7,7 @@
  * 3. OCR 就绪判定：引擎级状态 environment=ready（模型目录不注册 OCR，不可用）
  * 4. 引擎状态列表按 engine_id 取项，缺项/非法输入安全返回 null
  * 5. install-stage 分类：终态 vs 进行中，未知 stage 不误报失败
+ * 6. chord 全局快捷键开关：chord_bindings.global 字段级更新（开启/关闭/幂等/空安全）
  *
  * 下载进度纯函数测试在 ../shared/download-progress.test.mjs（0.22.14 提取共用）。
  */
@@ -14,6 +15,7 @@
 import assert from "node:assert/strict";
 import {
     activeOperationId,
+    applyChordGlobalToBindings,
     canGoBack,
     canGoNext,
     clampStep,
@@ -130,6 +132,63 @@ assert.deepEqual(
     {chord_enabled: false, chord_hint_visible: true},
     "undefined 安全回滚到默认值",
 );
+
+// ── Chord 全局快捷键开关（chord_bindings.global 字段级更新）──────────────────
+
+// 开启：写入 follow_chord，保留本条目其他字段，不动其他动作
+{
+    const src = {
+        chat: {key: "q", modifiers: ["alt"]},
+        screenshot: {
+            key: "",
+            modifiers: ["alt"],
+            global: {mode: "custom", modifiers: ["ctrl", "alt"], key: "a"},
+        },
+    };
+    const next = applyChordGlobalToBindings(src, "chat", true);
+    assert.deepEqual(next.chat.global, {mode: "follow_chord"}, "开启写入 follow_chord");
+    assert.equal(next.chat.key, "q", "保留触发键字段");
+    assert.equal(src.chat.global, undefined, "不改原对象");
+    assert.deepEqual(
+        next.screenshot.global,
+        {mode: "custom", modifiers: ["ctrl", "alt"], key: "a"},
+        "不动其他动作的 global",
+    );
+}
+
+// 关闭：删除 global，保留 key/modifiers 等其他字段
+{
+    const src = {chat: {key: "q", modifiers: ["alt"], global: {mode: "follow_chord"}}};
+    const next = applyChordGlobalToBindings(src, "chat", false);
+    assert.equal(next.chat.global, undefined, "关闭删除 global");
+    assert.equal(next.chat.key, "q", "保留触发键字段");
+    assert.deepEqual(next.chat.modifiers, ["alt"], "保留修饰键字段");
+}
+
+// 关闭已无 global 的条目：幂等（不报错、不丢字段）
+{
+    const next = applyChordGlobalToBindings({edit: {key: "e", modifiers: ["alt"]}}, "edit", false);
+    assert.deepEqual(next.edit, {key: "e", modifiers: ["alt"]});
+}
+
+// 动作条目不存在：开启时创建空触发键条目（后端按 default_key 解析生效键）
+{
+    const next = applyChordGlobalToBindings({}, "sticky", true);
+    assert.deepEqual(next.sticky, {
+        key: "",
+        modifiers: ["alt"],
+        global: {mode: "follow_chord"},
+    });
+}
+
+// null / undefined bindings 安全
+{
+    assert.deepEqual(
+        applyChordGlobalToBindings(null, "chat", true).chat,
+        {key: "", modifiers: ["alt"], global: {mode: "follow_chord"}},
+    );
+    assert.equal(applyChordGlobalToBindings(undefined, "chat", true).chat.key, "");
+}
 
 // ── 安装进度事件 operation_id 隔离 ─────────────────────────────────────────────
 

@@ -4,6 +4,7 @@
    步骤指示器 / 开关行 / 引擎卡片 / 底部导航；文本一律 font-style: normal。 */
 
 .welcome-root {
+    position: relative; /* 错误提示条绝对定位的锚点 */
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -205,6 +206,42 @@
     gap: 2px;
 }
 
+/* 快捷键行右侧组合区：键帽 + 模式标签 + 全局快捷键开关（第 1 步 chord 行） */
+.welcome-shortcut-side {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* 模式状态标签：标注 switch 两态含义。固定 min-width 防止
+ * 「窗口内/全局」文案切换时行宽跳变（§5.2 体尺寸稳定） */
+.welcome-shortcut-mode {
+    flex-shrink: 0;
+    min-width: 40px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-sub);
+    opacity: 0.7;
+    font-style: normal;
+    transition: color var(--transition-fast, 0.1s), opacity var(--transition-fast, 0.1s);
+}
+
+/* 开启态：强调色标注「全局」 */
+.welcome-shortcut-mode.is-on {
+    color: var(--accent);
+    opacity: 1;
+    font-weight: 600;
+}
+
+/* 全局开启时键帽染强调色：把「开关状态 → 这组键升级为全局键」映射到键位本身 */
+.welcome-shortcut-row .kbd {
+    transition: background var(--transition-base, 0.15s);
+}
+
+.welcome-shortcut-row.is-global .kbd {
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+}
+
 /* ── 第 2 步：开关行 ────────────────────────────────────────────────────────── */
 
 .welcome-toggles {
@@ -262,6 +299,7 @@
     flex-shrink: 0;
     width: 36px;
     height: 20px;
+    cursor: pointer;
 }
 
 .welcome-switch input {
@@ -297,6 +335,27 @@
 .welcome-switch input:checked + .welcome-switch-slider::before {
     transform: translateX(16px);
     background: var(--bg);
+}
+
+/* 瞬时错误提示条（开关保存失败等；JS 控制显隐，4 秒自动消失） */
+.welcome-error {
+    position: absolute;
+    left: 50%;
+    bottom: 68px;
+    transform: translateX(-50%);
+    max-width: 440px;
+    padding: 6px 14px;
+    border-radius: var(--radius-md, 6px);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.4;
+    font-style: normal;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 10;
 }
 
 /* ── 第 3 步：引擎卡片 ──────────────────────────────────────────────────────── */
