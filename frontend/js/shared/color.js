@@ -481,8 +481,13 @@ function formatAlpha(a) {
 // ── Swatch Renderer ────────────────────────────────────────────────────────
 
 /**
- * 创建颜色 swatch DOM 元素（棋盘底 + 色块 + 浅色边界）。
+ * 创建颜色 swatch DOM 元素（棋盘底 + 颜色层 + 浅色边界）。
  * 用于主窗口结果列表和剪贴板颜色项的统一渲染。
+ *
+ * 0.23.19：层叠语义与绘画软件色盘一致——半透明色（alpha < 1）时棋盘格垫底、
+ * 颜色作为**上层背景图**叠加（多层背景先列出者在上）：越透明越透出棋盘格，
+ * 不透明色完全盖住棋盘格。不能用 background-color 承载颜色——它垫在
+ * background-image 之下，会被不透明棋盘格完全盖住（表现为"只有棋盘格"）。
  *
  * @param {Rgba8 | {r: number, g: number, b: number, a: number}} rgba
  * @param {object} [opts]
@@ -500,28 +505,21 @@ export function createSwatch(rgba, opts = {}) {
     swatch.style.flexShrink = "0";
     swatch.style.display = "inline-block";
     swatch.style.borderRadius = "var(--radius-sm, 4px)";
-    swatch.style.position = "relative";
     swatch.style.overflow = "hidden";
-    swatch.style.border = "1px solid var(--border, rgba(128,128,128,0.3))";
+    swatch.style.border = "1px solid color-mix(in srgb, var(--text) 25%, transparent)";
 
-    // 棋盘底（透明/半透明色显示棋盘格背景）
+    const color = `rgba(${rgba.r}, ${rgba.g}, ${rgba.b}, ${(rgba.a / 255).toFixed(4)})`;
     if (rgba.a < 255) {
-        swatch.style.backgroundImage = `
-      linear-gradient(45deg, var(--text-weak, #ccc) 25%, transparent 25%),
-      linear-gradient(-45deg, var(--text-weak, #ccc) 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, var(--text-weak, #ccc) 75%),
-      linear-gradient(-45deg, transparent 75%, var(--text-weak, #ccc) 75%)
-    `.replace(/\s+/g, " ").trim();
-        swatch.style.backgroundSize = `${Math.max(4, size / 3)}px ${Math.max(4, size / 3)}px`;
-        swatch.style.backgroundPosition = `0 0, 0 ${Math.max(4, size / 3) / 2}px, ${Math.max(4, size / 3) / 2}px ${-Math.max(4, size / 3) / 2}px`;
+        const cell = Math.max(5, Math.round(size / 4));
+        swatch.style.backgroundImage = `linear-gradient(${color}, ${color}), conic-gradient(
+            color-mix(in srgb, var(--text) 12%, var(--bg)) 0 25%,
+            color-mix(in srgb, var(--text) 26%, var(--bg)) 0 50%,
+            color-mix(in srgb, var(--text) 12%, var(--bg)) 0 75%,
+            color-mix(in srgb, var(--text) 26%, var(--bg)) 0)`;
+        swatch.style.backgroundSize = `100% 100%, ${cell}px ${cell}px`;
+    } else {
+        swatch.style.backgroundColor = color;
     }
-
-    // 色块层
-    const colorLayer = document.createElement("span");
-    colorLayer.style.position = "absolute";
-    colorLayer.style.inset = "0";
-    colorLayer.style.backgroundColor = `rgba(${rgba.r}, ${rgba.g}, ${rgba.b}, ${(rgba.a / 255).toFixed(4)})`;
-    swatch.appendChild(colorLayer);
 
     return swatch;
 }

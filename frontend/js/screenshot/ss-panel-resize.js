@@ -136,3 +136,52 @@ export function placeOcrPanel(anchorRect, panelW, panelH, mon, selRect, margin =
     }
     return clampPos(anchorRect.left, anchorRect.bottom + gap);
 }
+
+/**
+ * 0.23.19：颜色面板（含配色分析展开态）落位——与 placeOcrPanel 同一套
+ * 「不挡选区」策略，候选顺序按颜色面板的宽高特点调整：
+ *
+ * 1. 选区右侧——面板较宽较长时的既有默认停靠
+ * 2. 选区左侧——右侧放不下（贴屏）时
+ * 3. 选区下方 / 4. 选区上方——左右都放不下（窄屏或面板展开后很高）
+ * 5. 锚点（颜色按钮）下方——选区四面都避不开（如全屏选区）的兜底
+ *
+ * 全部候选都压选区时，退化为候选 1 的钳制位置，保持可预测。
+ *
+ * @param {{left: number, top: number, right: number, bottom: number}} anchorRect - 颜色按钮视口矩形
+ * @param {number} panelW - 面板视觉宽度（CSS px，含 uiScale）
+ * @param {number} panelH - 面板视觉高度（CSS px，含 uiScale）
+ * @param {{x: number, y: number, w: number, h: number}} mon - 显示器 CSS 矩形
+ * @param {{x: number, y: number, w: number, h: number}|null} selRect - 选区 CSS 矩形
+ * @param {number} [margin=8]
+ * @param {number} [gap=8]
+ * @returns {{left: number, top: number}}
+ */
+export function placeColorPanel(anchorRect, panelW, panelH, mon, selRect, margin = 8, gap = 8) {
+    const maxLeft = Math.max(mon.x + margin, mon.x + mon.w - margin - panelW);
+    const maxTop = Math.max(mon.y + margin, mon.y + mon.h - margin - panelH);
+    const clampPos = (left, top) => ({
+        left: Math.min(Math.max(left, mon.x + margin), maxLeft),
+        top: Math.min(Math.max(top, mon.y + margin), maxTop),
+    });
+    const intersectsSel = (left, top) => !!selRect
+        && left < selRect.x + selRect.w && left + panelW > selRect.x
+        && top < selRect.y + selRect.h && top + panelH > selRect.y;
+
+    const candidates = [];
+    if (selRect) {
+        candidates.push({left: selRect.x + selRect.w + gap, top: selRect.y});
+        candidates.push({left: selRect.x - panelW - gap, top: selRect.y});
+        candidates.push({left: selRect.x, top: selRect.y + selRect.h + gap});
+        candidates.push({left: selRect.x, top: selRect.y - panelH - gap});
+    }
+    candidates.push({left: anchorRect.left, top: anchorRect.bottom + gap});
+    for (const c of candidates) {
+        const p = clampPos(c.left, c.top);
+        if (!intersectsSel(p.left, p.top)) return p;
+    }
+    const fallback = selRect
+        ? {left: selRect.x + selRect.w + gap, top: selRect.y}
+        : {left: anchorRect.left, top: anchorRect.bottom + gap};
+    return clampPos(fallback.left, fallback.top);
+}

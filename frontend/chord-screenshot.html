@@ -264,7 +264,7 @@
         <button aria-controls="color-dropdown" aria-expanded="false" class="tool-btn dropdown-trigger"
                 id="color-trigger"
                 title="颜色">
-            <span class="color-dot" id="color-trigger-dot" style="background:#ff0000"></span>
+            <span class="color-dot" id="color-trigger-dot" style="--swatch-overlay:#ff0000"></span>
         </button>
         <div class="dropdown dropdown-color" data-open="false" id="color-dropdown">
             <div class="color-panel-drag" title="拖动颜色面板">
@@ -273,17 +273,21 @@
             </div>
             <!-- 预设色阵列 -->
             <div class="color-presets">
-                <button class="color-swatch active" data-color="#ff0000" style="background:#ff0000"
+                <button class="color-swatch active" data-color="#ff0000" style="background-color:#ff0000"
                         title="红色"></button>
-                <button class="color-swatch" data-color="#ffd700" style="background:#ffd700" title="黄色"></button>
-                <button class="color-swatch" data-color="#00cc00" style="background:#00cc00" title="绿色"></button>
-                <button class="color-swatch" data-color="#0088ff" style="background:#0088ff" title="蓝色"></button>
-                <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="白色"></button>
-                <button class="color-swatch" data-color="#000000" style="background:#000000" title="黑色"></button>
+                <button class="color-swatch" data-color="#ffd700" style="background-color:#ffd700"
+                        title="黄色"></button>
+                <button class="color-swatch" data-color="#00cc00" style="background-color:#00cc00"
+                        title="绿色"></button>
+                <button class="color-swatch" data-color="#0088ff" style="background-color:#0088ff"
+                        title="蓝色"></button>
+                <button class="color-swatch" data-color="#ffffff" style="background-color:#ffffff"
+                        title="白色"></button>
+                <button class="color-swatch" data-color="#000000" style="background-color:#000000"
+                        title="黑色"></button>
             </div>
             <div class="dropdown-separator"></div>
-            <!-- SV 色盘 -->
-            <canvas class="sv-canvas" height="120" width="206"></canvas>
+            <!-- 0.23.19：取色按钮行 + 色彩格式行移到 SV 色盘上方，方便高频点击 -->
             <!-- 色相条 + 透明度条 + 取色按钮（左按钮右2条） -->
             <div class="color-bars">
                 <button class="eyedropper-btn tool-btn" title="从截图取色">
@@ -296,15 +300,29 @@
                     <canvas class="alpha-bar" height="12" width="170"></canvas>
                 </div>
             </div>
-            <!-- HEX/RGB/HSL 输入 -->
+            <!-- HEX/RGB/HSL 输入（0.23.19：原生 select 弹层由浏览器定位，多屏 +
+                 工具栏 transform scale 下会向下偏移，改自定义下拉钉在面板内） -->
             <div class="color-input-row">
-                <select class="color-format" title="色彩格式">
-                    <option value="hex">HEX</option>
-                    <option value="rgb">RGB</option>
-                    <option value="hsl">HSL</option>
-                </select>
+                <div class="dropdown-wrap color-format-picker">
+                    <button class="color-format-trigger" title="色彩格式（滚轮切换）" type="button">
+                        <span class="color-format-label">HEX</span>
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-chevron-down"/>
+                        </svg>
+                    </button>
+                    <div class="dropdown color-format-menu" data-open="false">
+                        <button class="dropdown-item active" data-format="hex" type="button"><span
+                                class="item-label">HEX</span></button>
+                        <button class="dropdown-item" data-format="rgb" type="button"><span
+                                class="item-label">RGB</span></button>
+                        <button class="dropdown-item" data-format="hsl" type="button"><span
+                                class="item-label">HSL</span></button>
+                    </div>
+                </div>
                 <input class="color-value" spellcheck="false" type="text" value="#FF0000"/>
             </div>
+            <!-- SV 色盘 -->
+            <canvas class="sv-canvas" height="120" width="206"></canvas>
             <!-- 0.20.7：来源无关配色核心（OKLab 聚类 + 角色色 + harmony + 对比度） -->
             <div class="palette-divider"></div>
             <div class="palette-section-heading palette-source-heading">
@@ -404,11 +422,11 @@
                 <use href="#icon-undo-2"/>
             </svg>
             <span class="kbd-hint">Z</span></button>
-        <button class="tool-btn" disabled id="btn-redo" title="重做 (Ctrl+Y)">
+        <button class="tool-btn" disabled id="btn-redo" title="重做 (Alt+Y)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-redo-2"/>
             </svg>
-        </button>
+            <span class="kbd-hint">Y</span></button>
         <button class="tool-btn" id="btn-reset" title="重置全部标注 (Alt+R)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-refresh-cw"/>

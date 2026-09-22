@@ -341,6 +341,19 @@ export function exitReadingMode() {
     ss.reading = null;
 }
 
+/**
+ * 0.23.19：清除划词选中的文本（保留阅读层与词框，可继续重新划选）。
+ * 切到非选取工具（画笔等标注工具）时由 selectTool 调用——选中文本属于
+ * 选取工具的交互态，残留的蓝色高亮会与标注绘制视觉混在一起。幂等。
+ */
+export function clearReadingSelection() {
+    if (!ss.reading) return;
+    ss.reading.selectionStart = null;
+    ss.reading.selectionEnd = null;
+    ss.reading.dragStart = null;
+    redrawHitLayer();
+}
+
 // ── hit-canvas 事件（幂等绑定，模块生命周期只装一次） ──
 function bindHitCanvasEvents() {
     if (ss.hitEventsBound) return;

@@ -271,7 +271,7 @@ async function applyToggle(id, enabled) {
                 chord_hint_visible: payload.chordHintVisible,
             };
             // 旧请求的迟到响应不再更新 UI。
-            if (rev !== chordToggleRevision)
+            if (rev !== chordToggleRevision) return;
         }
     } catch (e) {
         console.error(`welcome: set_config ${id} failed:`, e);

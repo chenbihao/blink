@@ -27,11 +27,12 @@ pub fn from_runtime(
         | RE::ManifestSerializeFailed { .. }
         | RE::ManifestSchemaIncompatible { .. } => LocalEngineErrorCode::EnvironmentBroken,
 
-        // staging/install 失败
+        // staging/install 失败（下载内容 hash 校验失败与 InstallFailed 同类呈现）
         RE::StagingCreateFailed { .. }
         | RE::GenerationPromoteFailed { .. }
         | RE::CurrentPointerSwitchFailed { .. }
-        | RE::InstallFailed { .. } => LocalEngineErrorCode::InstallFailed,
+        | RE::InstallFailed { .. }
+        | RE::ChecksumMismatch { .. } => LocalEngineErrorCode::InstallFailed,
 
         // 磁盘不足
         RE::InsufficientDiskSpace { .. } => LocalEngineErrorCode::DiskFull,
@@ -125,6 +126,17 @@ mod tests {
             },
         );
         assert_eq!(err.code, LocalEngineErrorCode::EnvironmentBroken);
+
+        // ChecksumMismatch 与 InstallFailed 同类呈现（前端分类不变）
+        let err = from_runtime(
+            ErrorPhase::Install,
+            "下载校验失败",
+            &RuntimeError::ChecksumMismatch {
+                expected: "aa".to_string(),
+                actual: "bb".to_string(),
+            },
+        );
+        assert_eq!(err.code, LocalEngineErrorCode::InstallFailed);
     }
 
     #[test]

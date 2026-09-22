@@ -85,14 +85,83 @@ fn validator_exe_path() -> Result<PathBuf, RuntimeError> {
     })
 }
 
-/// 下载文件并校验 SHA-256（可选）。
+/// 下载文件并校验 SHA-256（可选）——按候选源降级重试（0.23.19）。
+///
+/// 候选源由 `infra::utils::mirrors::download_candidates` 按 URL 形态分派：
+/// - HF 链接（PP-OCR det/rec 模型）：`BLINK_HF_ENDPOINT` → HF 主站 → hf-mirror.com；
+/// - GitHub release 资产（ORT zip）：主站 → ghfast/gh-proxy/ghproxy 加速代理；
+/// - raw.githubusercontent（字典 txt）：主站 → cdn/fastly.jsdelivr.net。
+/// 其余 URL 候选只有自身，行为与单源下载一致。
+///
+/// 换源只发生在网络级失败（连接/HTTP 非 2xx/流中断）或镜像 hash 不匹配：
+/// **锁定主链**的 SHA-256 不匹配属上游供应链变更，直接失败不换源。
+/// 取消立即传播，不换源。
+async fn download_and_verify(
+    url: &str,
+    expected_sha256: Option<&str>,
+    expected_size: Option<u64>,
+    dest: &Path,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    sink: Option<&dyn InstallSink>,
+) -> Result<u64, RuntimeError> {
+    let candidates = crate::infra::utils::mirrors::download_candidates(url);
+    let mut last_err: Option<RuntimeError> = None;
+
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let has_next = idx + 1 < candidates.len();
+        match download_and_verify_once(
+            candidate,
+            expected_sha256,
+            expected_size,
+            dest,
+            cancel_token,
+            sink,
+        )
+        .await
+        {
+            Ok(n) => return Ok(n),
+            Err(e) => {
+                // 取消是用户意图，立即传播
+                if matches!(e, RuntimeError::OperationCancelled { .. }) {
+                    return Err(e);
+                }
+                // 锁定主链（asset-lock 里的原 URL）hash 不匹配 = 供应链变更，换源无意义
+                if matches!(&e, RuntimeError::ChecksumMismatch { .. }) && candidate.as_str() == url {
+                    return Err(e);
+                }
+                tracing::warn!(url = candidate.as_str(), error = %e, has_next, "下载失败");
+                if let Some(s) = sink {
+                    s.on_log(
+                        "warn",
+                        &if has_next {
+                            // 带候选序号：换源后进度从 0 重新计数，序号让回跳可解释
+                            format!(
+                                "从 {candidate} 下载失败（{e}），切换下载源 {}/{}（进度重新计数）",
+                                idx + 2,
+                                candidates.len()
+                            )
+                        } else {
+                            format!("从 {candidate} 下载失败：{e}")
+                        },
+                    );
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| RuntimeError::InstallFailed {
+        message: format!("下载失败: 无可用下载源 ({url})"),
+    }))
+}
+
+/// 单候选源下载 + 校验。
 ///
 /// 使用 reqwest 下载，stream 到临时文件。若 `expected_sha256` 为 `Some`，
 /// 下载完成后校验 hash；为 `None` 时跳过校验（调用方自行负责后续校验）。
 /// `expected_size` 用于进度总量（Content-Length 缺失时的 fallback），
 /// 不做下载后的大小断言——大小校验由调用方按 asset-lock 执行。
-/// 支持 cancel_token 取消。
-async fn download_and_verify(
+async fn download_and_verify_once(
     url: &str,
     expected_sha256: Option<&str>,
     expected_size: Option<u64>,
@@ -213,8 +282,9 @@ async fn download_and_verify(
         let actual_hash = format!("{:x}", hasher.finalize());
         if actual_hash != expected {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(RuntimeError::InstallFailed {
-                message: format!("SHA-256 校验失败: expected={expected}, actual={actual_hash}"),
+            return Err(RuntimeError::ChecksumMismatch {
+                expected: expected.to_string(),
+                actual: actual_hash,
             });
         }
     }

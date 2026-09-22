@@ -916,14 +916,39 @@ body.image-editor-mode #canvas.long-image-editing {
     background: var(--accent-bg);
 }
 
-/* 颜色触发器里的圆点（0.11.8-b：改实心圆，与 .color-swatch 视觉统一） */
+/* 颜色触发器里的圆点（0.11.8-b：改实心圆，与 .color-swatch 视觉统一）。
+   0.23.19：改 16px 圆角方块——正方形棋盘底裁进 14px 圆里会破碎不成格，
+   放大到 16px 并与配色预览块统一为小圆角方形。 */
 .color-dot {
     display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
     border: 1px solid rgba(255, 255, 255, 0.15);
     line-height: 1;
+}
+
+/* 0.23.19：色值预览统一正方形棋盘底——半透明色（alpha < 1）在深色工具栏上
+   会糊成近似黑，棋盘底让透明度可辨识。
+   层叠语义（绘画软件色盘）：颜色层 linear-gradient(--swatch-overlay) 在上，
+   棋盘格在下——JS 只写 --swatch-overlay 自定义属性，不碰 background 简写。
+   不透明色完全盖住棋盘格，半透明色越透明越透出棋盘格。
+   不能写 background-color：它垫在 background-image 之下，会被不透明
+   棋盘格完全盖住（表现为"只有棋盘格没有颜色"）。 */
+.color-dot,
+.pixel-magnifier .pm-color-swatch,
+.palette-more-swatch,
+.palette-generated-heading-swatch {
+    --swatch-overlay: transparent;
+    background-image:
+        linear-gradient(var(--swatch-overlay), var(--swatch-overlay)),
+        conic-gradient(
+            color-mix(in srgb, var(--text) 12%, var(--bg)) 0 25%,
+            color-mix(in srgb, var(--text) 26%, var(--bg)) 0 50%,
+            color-mix(in srgb, var(--text) 12%, var(--bg)) 0 75%,
+            color-mix(in srgb, var(--text) 26%, var(--bg)) 0);
+    background-size: 100% 100%, 8px 8px;
+    background-clip: padding-box;
 }
 
 /* ── 0.15.8-fix：split-btn 已移除，split-main 作为独立按钮 ────────────
@@ -1041,15 +1066,17 @@ body.image-editor-mode #canvas.long-image-editing {
     height: 4px;
 }
 
-/* 颜色下拉特殊布局：0.15.4 完整色盘 */
+/* 颜色下拉特殊布局：0.15.4 完整色盘。
+   0.23.19：背景/描边与工具栏外壳统一为中性暗色（原 var(--bg) 会跟随应用主题，
+   在 Mocha 等主题下呈藏青蓝，与写死暗灰的工具栏形成明显色差）。 */
 .dropdown-color {
     padding: 8px;
     width: 286px;
     min-width: 286px;
     max-height: min(720px, calc(100vh - 24px));
-    background: color-mix(in srgb, var(--bg) 96%, transparent);
-    border-color: color-mix(in srgb, var(--text) 18%, transparent);
-    box-shadow: 0 6px 20px var(--shadow);
+    background: rgba(30, 30, 30, 0.96);
+    border-color: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: auto;
@@ -1075,7 +1102,8 @@ body.image-editor-mode #canvas.long-image-editing {
     position: sticky;
     top: -2px;
     z-index: 1;
-    background: var(--bg);
+    /* 0.23.19：随面板统一为中性暗色（实色——sticky 头要完全遮住滚过的内容） */
+    background: #1e1e1e;
 }
 
 .color-panel-drag:active {
@@ -1107,10 +1135,11 @@ body.image-editor-mode #canvas.long-image-editing {
     min-width: 0;
 }
 
-/* SV 色盘 */
+/* SV 色盘（0.23.19：移到取色按钮/格式行下方，补顶部间距） */
 .sv-canvas {
     width: 100%;
     height: 120px;
+    margin-top: 4px;
     border-radius: var(--radius-xs);
     cursor: crosshair;
     border: 1px solid rgba(255, 255, 255, 0.15);
@@ -1189,25 +1218,47 @@ body.image-editor-mode #canvas.long-image-editing {
     margin-top: 4px;
 }
 
-/* 0.15.12：宽度与取色按钮/提取个数对齐 */
-.color-format {
-    width: 56px;
-    min-width: 56px;
+/* 0.23.19：色彩格式自定义下拉触发器（替换原生 select——其弹层由浏览器定位，
+   多屏 + 工具栏 scale 下偏下，且无法钳制到目标显示器） */
+.color-format-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    width: 60px;
+    min-width: 60px;
+    height: 24px;
     background: rgba(0, 0, 0, 0.35);
     border: 1px solid rgba(255, 255, 255, 0.15);
     color: #ccc;
     font-size: 11px;
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     font-style: normal;
-    padding: 3px 4px;
+    padding: 0 4px;
     border-radius: var(--radius-xs);
     cursor: pointer;
     outline: none;
 }
 
-.color-format option {
-    background: #2a2a2a;
-    color: #eee;
+.color-format-trigger:hover {
+    border-color: rgba(74, 158, 255, 0.7);
+    color: #fff;
+}
+
+.color-format-trigger .color-format-label {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    letter-spacing: 0.02em;
+}
+
+.color-format-trigger .icon {
+    width: 12px;
+    height: 12px;
+    opacity: 0.7;
+}
+
+.color-format-menu {
+    min-width: 72px;
+    z-index: calc(var(--z-dropdown) + 20);
 }
 
 .color-value {
@@ -1461,13 +1512,13 @@ body.image-editor-mode #canvas.long-image-editing {
     gap: 4px;
 }
 
-/* 生成搭配色按钮上的基准色预览块 */
+/* 生成搭配色按钮上的基准色预览块（0.23.19：10 → 14px，容纳棋盘格） */
 .palette-more-swatch {
     flex: none;
-    width: 10px;
-    height: 10px;
+    width: 14px;
+    height: 14px;
     border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
-    border-radius: 2px;
+    border-radius: 3px;
 }
 
 
@@ -1569,13 +1620,13 @@ body.image-editor-mode #canvas.long-image-editing {
     line-height: 1.3;
 }
 
-/* 生成方案标题前的锚点色预览块 */
+/* 生成方案标题前的锚点色预览块（0.23.19：10 → 14px，容纳棋盘格） */
 .palette-generated-heading-swatch {
     flex: none;
-    width: 10px;
-    height: 10px;
+    width: 14px;
+    height: 14px;
     border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
-    border-radius: 2px;
+    border-radius: 3px;
 }
 
 /* 复制失败反馈 */
@@ -1907,9 +1958,9 @@ body.image-editor-mode #canvas.long-image-editing {
 
 .pixel-magnifier .pm-color-swatch {
     display: inline-block;
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
     border: 1px solid rgba(255, 255, 255, 0.3);
     flex-shrink: 0;
 }
@@ -2348,4 +2399,51 @@ body.image-editor-mode #canvas.long-image-editing {
 body[data-alt-down="true"] .kbd-hint {
     opacity: 1;
     visibility: visible;
+    /* 0.23.19：按下立即显示（修饰键状态指示不该有入场延迟）；
+       基础规则里的 0.12s 过渡只在松开消失时生效（淡出）。 */
+    transition: none;
+}
+
+/* ── 0.23.19：取色器全局十字光标 ──────────────────────────
+   取色模式下指针可能位于划词层/工具栏等任意元素上，它们各自的光标样式
+   （text/default）会盖掉 canvas 上的 crosshair——用 html 级 class 统一压掉。 */
+html.eyedropper-picking,
+html.eyedropper-picking * {
+    cursor: crosshair !important;
+}
+
+/* ── 0.23.19：自定义 tooltip（js/screenshot/ss-tooltip.js）──────────────
+   替换原生 title 提示：跨虚拟桌面 + 工具栏 transform scale 的多屏环境下，
+   原生提示落点由浏览器计算会漂到别的显示器。本元素挂在 body（viewport
+   坐标），按锚点矩形定位并钳制到锚点所在显示器，随 uiScale 视觉补偿。 */
+.ss-tooltip {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: var(--z-toast);
+    max-width: 280px;
+    padding: 4px 8px;
+    /* 0.23.19：与工具栏外壳统一中性暗色（原 var(--bg) 随主题偏蓝） */
+    background: rgba(30, 30, 30, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    color: var(--text);
+    font-size: 12px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-style: normal;
+    line-height: 1.4;
+    pointer-events: none;
+    /* 0.23.19 R3：淡入淡出。transform 被 applyFloatingUiScaleAt 的 uiScale
+       缩放（inline style）占用，动画只走 opacity；visibility 延迟一个周期，
+       隐藏侧等淡出完成再让元素不可见。 */
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease-out, visibility 0s linear 0.12s;
+}
+
+.ss-tooltip.is-visible {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.12s ease-out;
 }

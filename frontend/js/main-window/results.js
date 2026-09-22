@@ -491,24 +491,25 @@ function createItem(app, i) {
         li.appendChild(badge);
     }
 
-    // 0.20.3：颜色结果项——用大格子 swatch（与剪贴板图片缩略图同级 36px）。
+    // 0.20.3：颜色结果项——用大格子 swatch（比剪贴板图片缩略图更大一圈，
+    // 颜色项里 swatch 就是内容主体，0.23.19 放大 36 → 44px 更醒目）。
     if (isColorEntry(app)) {
         const hex = getColorPayload(app) || app.name;
         const colorResult = parseColor(hex);
         if (colorResult) {
-            const swatch = createSwatch(colorResult.rgba, {className: "app-icon clip-thumb", size: 36});
+            const swatch = createSwatch(colorResult.rgba, {className: "app-icon clip-thumb", size: 44});
             li.appendChild(swatch);
         }
     }
         // 0.20：多行颜色列表——后端 is_color_list 标记 + color_list_hex 数组。
-    // 渲染一排小 swatch（16px），布局由 .color-list-swatch CSS 控制（宽度自适应）。
+    // 渲染一排小 swatch（20px），布局由 .color-list-swatch CSS 控制（宽度自适应）。
     else if (app.is_color_list && Array.isArray(app.color_list_hex) && app.color_list_hex.length >= 2) {
         const container = document.createElement("div");
         container.className = "app-icon color-list-swatch";
         for (const hex of app.color_list_hex) {
             const colorResult = parseColor(hex);
             if (colorResult) {
-                const swatch = createSwatch(colorResult.rgba, {size: 16});
+                const swatch = createSwatch(colorResult.rgba, {size: 20});
                 container.appendChild(swatch);
             }
         }
@@ -520,7 +521,7 @@ function createItem(app, i) {
     else if (!app.is_image && !app.lnk_path && !app.is_calc) {
         const clipColor = parseColor(app.name);
         if (clipColor) {
-            const swatch = createSwatch(clipColor.rgba, {className: "app-icon clip-thumb", size: 36});
+            const swatch = createSwatch(clipColor.rgba, {className: "app-icon clip-thumb", size: 44});
             li.appendChild(swatch);
         }
     }

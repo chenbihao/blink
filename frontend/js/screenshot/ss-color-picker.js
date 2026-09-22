@@ -18,7 +18,8 @@ import {
     hidePixelMagnifier,
     isColorPickerActive,
     movePickerPixel,
-    resetColorPickerState
+    resetColorPickerState,
+    updatePixelMagnifier
 } from './ss-interaction.js';
 import {screenshotCursorPosition} from '../shared/api.js';
 
@@ -185,7 +186,11 @@ let hueCtx = null;
 let alphaCanvas = null;  // 0.15.8-fix：透明度条
 let alphaCtx = null;
 let colorValueInput = null;
-let colorFormatSelect = null;
+// 0.23.19：色彩格式改自定义下拉（原生 select 弹层由浏览器定位，
+// 多屏 + 工具栏 transform scale 下会偏移，无法钳制到目标显示器）
+let colorFormatTrigger = null;
+let colorFormatLabel = null;
+let colorFormatMenu = null;
 let colorTriggerDot = null;
 let dropdown = null;
 
@@ -310,7 +315,10 @@ function updateAll() {
     updateValueInput();
     const colorStr = getColorString();
     annot.setColor(colorStr);
-    if (colorTriggerDot) colorTriggerDot.style.background = colorStr;
+    // 0.23.19：颜色写 --swatch-overlay（CSS 里叠在棋盘格上方的颜色层）。
+    // 不能写 background-color——它垫在 background-image 之下，会被不透明
+    // 棋盘格完全盖住（表现为"只有棋盘格没有颜色"）。
+    if (colorTriggerDot) colorTriggerDot.style.setProperty('--swatch-overlay', colorStr);
     // 更新预设 swatch active 状态
     if (dropdown) {
         const hex = rgbToHex(hsvToRgb(hsv.h, hsv.s, hsv.v).r, hsvToRgb(hsv.h, hsv.s, hsv.v).g, hsvToRgb(hsv.h, hsv.s, hsv.v).b);
@@ -374,6 +382,19 @@ function parseValueInput() {
     updateAll();
 }
 
+/** 0.23.19：统一格式切换入口——同步内部 format、触发器文案与菜单 active 态 */
+function setFormat(f) {
+    if (f !== 'hex' && f !== 'rgb' && f !== 'hsl') return;
+    format = f;
+    if (colorFormatLabel) colorFormatLabel.textContent = format.toUpperCase();
+    if (colorFormatMenu) {
+        colorFormatMenu.querySelectorAll('.dropdown-item').forEach((b) => {
+            b.classList.toggle('active', b.dataset.format === format);
+        });
+    }
+    updateValueInput();
+}
+
 // ── 取色器（吸管）模式 ────────────────────────────────────
 
 /** 进入取色模式 */
@@ -384,8 +405,14 @@ function enterPickMode() {
     enterColorPickerFollowing();
     if (dropdown) dropdown.setAttribute('data-open', 'false');
     ss.canvas.style.cursor = 'crosshair';
+    // 0.23.19：划词层 #ocr-hit-canvas 是主 canvas 的兄弟层且层级更高——此前
+    // 监听挂在 ss.canvas 上，划词激活时点击全被划词层截走，取色表现为
+    // 「被 OCR 划词识别覆盖」。改挂 document 捕获阶段并阻断传播：无论指针
+    // 落在划词层、标注层还是工具栏上，取色都优先接管；点击选区外也不会再
+    // 触发主 canvas 的「退出标注模式」分支（取消选取）。
+    document.documentElement.classList.add('eyedropper-picking');
 
-    // 统一清理：移除 mousedown + keydown 监听器，复位 cursor
+    // 统一清理：移除监听器，复位 cursor
     let cleaned = false;
     const cleanup = () => {
         if (cleaned) return;
@@ -395,13 +422,15 @@ function enterPickMode() {
         // 0.20.6：重置取色状态机
         resetColorPickerState();
         ss.canvas.style.cursor = '';
-        ss.canvas.removeEventListener('mousedown', onPick, true);
+        document.documentElement.classList.remove('eyedropper-picking');
+        document.removeEventListener('pointerdown', onPick, true);
+        document.removeEventListener('pointermove', onPickMove, true);
         document.removeEventListener('keydown', onPickKey, true);
         // 0.15.10：隐藏像素放大镜
         hidePixelMagnifier();
     };
 
-    // capture 阶段 mousedown：从原始截图像素采样。
+    // 捕获阶段 pointerdown：从原始截图像素采样。
     // 使用 Win32 GetCursorPos 获取物理屏幕坐标，直接映射到 bitmap 坐标，
     // 不通过 CSS 坐标插值，确保在高 DPI 屏幕上逐物理像素精确采样。
     const onPick = async (e) => {
@@ -419,13 +448,26 @@ function enterPickMode() {
         }
         cleanup();
     };
-    ss.canvas.addEventListener('mousedown', onPick, true);
+    document.addEventListener('pointerdown', onPick, true);
+
+    // 0.23.19：指针可能悬浮在划词层/放大镜等非 canvas 元素上，主 canvas 的
+    // pointermove 收不到——同样挂 document 捕获阶段驱动放大镜预览。
+    const onPickMove = (e) => {
+        if (!picking) return;
+        updatePixelMagnifier(e.clientX, e.clientY);
+        ss._lastMagnifierPos = {x: e.clientX, y: e.clientY};
+    };
+    document.addEventListener('pointermove', onPickMove, true);
 
     // 0.20.6：取色器键盘事件——方向键移动 1 物理像素、Esc 退出
     const onPickKey = (e) => {
         // IME composition 优先
         if (e.isComposing) return;
         if (e.key === 'Escape') {
+            // 精调提示承诺「Esc 取消」——只取消取色，不冒泡给主 ESC 级联
+            // （否则取色中按 Esc 会把整个截图会话一起取消）。
+            e.preventDefault();
+            e.stopPropagation();
             cleanup();
             return;
         }
@@ -485,6 +527,16 @@ export function syncFromAnnot() {
     }
 }
 
+/**
+ * 0.23.19：新截图会话把标注色重置为默认红（#FF0000，与预设第一格一致）。
+ * 复用窗口时上一会话选择的颜色不应跨会话残留——色盘每次会话首次打开默认红色。
+ */
+export function resetColorToDefault() {
+    hsv = {h: 0, s: 1, v: 1};
+    alpha = 1;
+    updateAll();
+}
+
 /** 初始化色盘模块（幂等，在 bindToolbar 中调用） */
 export function initColorPicker() {
     dropdown = document.getElementById('color-dropdown');
@@ -492,7 +544,9 @@ export function initColorPicker() {
     hueCanvas = dropdown ? dropdown.querySelector('.hue-bar') : null;
     alphaCanvas = dropdown ? dropdown.querySelector('.alpha-bar') : null;
     colorValueInput = dropdown ? dropdown.querySelector('.color-value') : null;
-    colorFormatSelect = dropdown ? dropdown.querySelector('.color-format') : null;
+    colorFormatTrigger = dropdown ? dropdown.querySelector('.color-format-trigger') : null;
+    colorFormatLabel = colorFormatTrigger ? colorFormatTrigger.querySelector('.color-format-label') : null;
+    colorFormatMenu = dropdown ? dropdown.querySelector('.color-format-menu') : null;
     colorTriggerDot = document.getElementById('color-trigger-dot');
 
     if (svCanvas) svCtx = svCanvas.getContext('2d');
@@ -544,16 +598,18 @@ export function initColorPicker() {
         });
     }
 
-    // 色彩格式切换
-    if (colorFormatSelect) {
-        colorFormatSelect.addEventListener('change', (e) => {
+    // 0.23.19：色彩格式自定义下拉（原生 select 弹层多屏定位偏移，见模块头注释）
+    if (colorFormatTrigger && colorFormatMenu) {
+        const toggleFormatMenu = (open) => {
+            colorFormatMenu.setAttribute('data-open', open ? 'true' : 'false');
+        };
+        colorFormatTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
-            format = e.target.value;
-            updateValueInput();
+            toggleFormatMenu(colorFormatMenu.getAttribute('data-open') !== 'true');
         });
-        colorFormatSelect.addEventListener('mousedown', (e) => e.stopPropagation());
+        colorFormatTrigger.addEventListener('mousedown', (e) => e.stopPropagation());
         // 0.15.10：滚轮切换色彩格式（HEX→RGB→HSL→HEX）
-        colorFormatSelect.addEventListener('wheel', (e) => {
+        colorFormatTrigger.addEventListener('wheel', (e) => {
             e.preventDefault();
             e.stopPropagation();
             const formats = ['hex', 'rgb', 'hsl'];
@@ -561,10 +617,23 @@ export function initColorPicker() {
             if (idx < 0) idx = 0;
             idx += e.deltaY > 0 ? 1 : -1;
             idx = (idx + formats.length) % formats.length;
-            format = formats[idx];
-            colorFormatSelect.value = format;
-            updateValueInput();
+            setFormat(formats[idx]);
         }, {passive: false});
+        colorFormatMenu.querySelectorAll('.dropdown-item').forEach((item) => {
+            item.addEventListener('mousedown', (e) => e.stopPropagation());
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setFormat(item.dataset.format);
+                toggleFormatMenu(false);
+            });
+        });
+        // 点击格式选择器外部时收起菜单（色盘面板内部的其余区域也算外部）
+        document.addEventListener('mousedown', (e) => {
+            if (colorFormatMenu.getAttribute('data-open') === 'true'
+                && !e.target.closest('.color-format-picker')) {
+                toggleFormatMenu(false);
+            }
+        });
     }
 
     // 数值输入
@@ -644,5 +713,5 @@ export function getColorFormat() {
 }
 
 export function setColorFormat(f) {
-    format = f;
+    setFormat(f);
 }

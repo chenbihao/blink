@@ -18,6 +18,8 @@ import {doOcrSelection, doTranslateAndPin, doTranslateSelection} from './ss-ocr.
 import {doOcrDiagnostics} from './ss-ocr-diagnostics.js';
 import * as annot from './annotation-engine.js';
 import {initColorPicker, syncFromAnnot} from './ss-color-picker.js';
+import {clearReadingSelection} from './ss-reading.js';
+import {placeColorPanel} from './ss-panel-resize.js';
 import {getRenderScale} from './ss-selection-geometry.js';
 
 export function updateUndoRedoButtons() {
@@ -66,6 +68,17 @@ export function selectTool(tool) {
         if (btn) btn.classList.add('active');
     }
     closeAllDropdowns();
+
+    // 0.23.19：划词选中文本随工具切换清理——选区文本是选取工具的交互态，
+    // 切到画笔等标注工具时残留的蓝色高亮选择会与绘制视觉混在一起。
+    // 阅读层与词框保留（切回选取工具可继续划选）。
+    if (tool !== 'select' && ss.reading) {
+        try {
+            clearReadingSelection();
+        } catch (e) {
+            console.warn('[screenshot] 切工具清理划词选择失败', e);
+        }
+    }
 
     // 0.15.8-fix：hover 模式下，如果鼠标仍在 dropdown-wrap 上，重新展开
     // 这样点击 dropdown item 后面板不会关闭，方便快速切换
@@ -167,6 +180,42 @@ export function cycleToolInGroup(groupName) {
     return nextTool;
 }
 
+// ── 0.23.19：快捷键切工具的 flash 反馈 ─────────────────────────────────────
+
+/** flash 自动收起定时器 */
+let flashCloseTimer = 0;
+/** flash 展开时长——够看清当前高亮的工具项，又不至于挡操作。 */
+const TOOL_FLASH_MS = 900;
+
+/**
+ * 快捷键切工具后短暂展开所属组下拉，让用户看见当前切到了哪个工具。
+ *
+ * 键盘切换（Alt+1~5 / 组内循环）此前没有任何视觉反馈——下拉不开、只有触发器
+ * 图标变化，连续切换时用户"跟抽盲盒一样"不知道停在哪个工具。展开期间高亮的
+ * dropdown-item 即当前工具（selectTool 已置 active）。
+ *
+ * 到时收起时若指针已进入该组（用户顺势接管），交给 hover 关闭逻辑不再强关。
+ * selectTool 内部的 closeAllDropdowns 会先关旧 flash，再由本函数展开新的。
+ *
+ * @param {string} tool 切换后的工具名（非工具组工具如 select 无下拉，静默跳过）
+ */
+export function flashToolDropdown(tool) {
+    const group = TOOL_GROUPS[tool];
+    const meta = group && group !== 'direct' ? GROUP_META[group] : null;
+    if (!meta) return;
+    const dd = document.querySelector(meta.dropdown);
+    const wrap = dd?.closest('.dropdown-wrap');
+    if (!dd || !wrap) return;
+    positionDropdown(dd);
+    setDropdownOpen(dd, true);
+    clearTimeout(flashCloseTimer);
+    flashCloseTimer = setTimeout(() => {
+        // 指针已在组内（触发器或下拉面板上）→ 用户接管，hover 逻辑负责后续关闭
+        if (wrap.matches(':hover')) return;
+        setDropdownOpen(dd, false);
+    }, TOOL_FLASH_MS);
+}
+
 function closeAllDropdowns(opts = {}) {
     const {includeColor = true} = opts;
     document.querySelectorAll('.dropdown').forEach((d) => {
@@ -179,6 +228,8 @@ function closeAllDropdowns(opts = {}) {
 
 function setDropdownOpen(dropdown, open) {
     dropdown.setAttribute('data-open', open ? 'true' : 'false');
+    // 0.23.19：颜色面板的"点击固定"标记随关闭一并清除——下次悬浮打开重新走悬浮逻辑
+    if (!open && dropdown.id === 'color-dropdown') delete dropdown.dataset.pinned;
     const trigger = dropdown.closest('.dropdown-wrap')?.querySelector('.dropdown-trigger');
     if (trigger) {
         trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -186,8 +237,9 @@ function setDropdownOpen(dropdown, open) {
     }
 }
 
-function positionDropdown(dropdown) {
+function positionDropdown(dropdown, opts = {}) {
     if (!dropdown) return;
+    const {preferAnchor = false} = opts;
     const wrap = dropdown.closest('.dropdown-wrap');
     const anchor = wrap ? wrap.getBoundingClientRect() : ss.toolbar.getBoundingClientRect();
     const mon = findDisplayCssAt(anchor.left + anchor.width / 2, anchor.top + anchor.height / 2);
@@ -210,23 +262,19 @@ function positionDropdown(dropdown) {
             return;
         }
 
-        // 配色分析有结果时，面板停靠到选区右方（面板较长，放选区下方展开会很别扭）。
-        // 未提取配色（paletteResult 为空）时维持"色按钮下方"的默认停靠。
-        if (ss.paletteResult && ss.selCss) {
+        // 配色分析有结果时，面板停靠走「不挡选区」候选算法
+        // （选区右→左→下→上→锚点下方，ss-panel-resize.placeColorPanel）。
+        // 此前只在选区右侧做屏内钳制，配色展开后面板变高会直接盖住选区。
+        // preferAnchor（悬浮展开路径）不做选区停靠，保持锚点下方展开，
+        // 与工具组下拉的悬浮行为一致。
+        if (ss.paletteResult && ss.selCss && !preferAnchor) {
             const sel = ss.selCss;
             const selMon = findDisplayCssAt(sel.x + sel.w, sel.y);
-            const desiredLeft = Math.max(
-                selMon.x + margin,
-                Math.min(sel.x + sel.w + margin, selMon.x + selMon.w - rect.width - margin),
-            );
-            const desiredTop = Math.max(
-                selMon.y + margin,
-                Math.min(sel.y, selMon.y + selMon.h - rect.height - margin),
-            );
+            const placed = placeColorPanel(anchor, rect.width, rect.height, selMon, sel);
             dropdown.removeAttribute('data-placement');
             dropdown.style.bottom = 'auto';
-            dropdown.style.left = `${(desiredLeft - anchor.left) / uiScale}px`;
-            dropdown.style.top = `${(desiredTop - anchor.top) / uiScale}px`;
+            dropdown.style.left = `${(placed.left - anchor.left) / uiScale}px`;
+            dropdown.style.top = `${(placed.top - anchor.top) / uiScale}px`;
             dropdown.style.visibility = '';
             return;
         }
@@ -320,6 +368,9 @@ function toggleDropdown(dropdown) {
 /** 新截图会话开始时关闭所有菜单，并让颜色面板重新跟随工具栏定位。 */
 export function resetToolbarDropdowns() {
     closeAllDropdowns();
+    // 0.23.19：会话重置时同步取消 flash 定时器——旧会话的定时回调不得
+    // 在新一轮会话里触发（虽然只做关闭动作，仍避免跨会话触碰下拉状态）。
+    clearTimeout(flashCloseTimer);
     const colorDropdown = document.getElementById('color-dropdown');
     if (!colorDropdown) return;
     delete colorDropdown.dataset.userMoved;
@@ -549,8 +600,11 @@ export function showTextInput(x, y) {
             commit(getText());
         } else if (e.key === 'Escape') {
             e.stopPropagation();
-            annot.cancelText();
-            cleanup();
+            // 0.23.19：有文本时 ESC = 落袋退出（Figma 语义——ESC 关掉输入框但
+            // 不丢已输入内容，误留可 Alt+Z 撤销）；空输入仍取消退场。
+            // commit() 内部按是否有文本分支 commitText/cancelText。
+            // stopPropagation 保留：ESC 不冒泡给编辑器级联（不退出整个会话）。
+            commit(getText());
         }
     });
 
@@ -567,6 +621,10 @@ export function bindToolbar() {
     const textDropdown = document.getElementById('text-dropdown');
     const blurDropdown = document.getElementById('blur-dropdown');
 
+    // 0.23.19：色盘悬浮展开的定时器（打开延迟防误触 / 关闭缓冲防误关）
+    let colorHoverOpenTimer = 0;
+    let colorHoverCloseTimer = 0;
+
     // 0.15.8-fix：hover 自动展开 dropdown（替代原 caret 点击展开）
     // 鼠标悬浮在 .dropdown-wrap 上时自动展开 dropdown，移开时延迟关闭。
     // 200ms 延迟确保用户能从触发器移到 dropdown 内部而不意外关闭。
@@ -581,12 +639,57 @@ export function bindToolbar() {
         if (isColor) {
             bindColorPanelDrag(dd);
             const trigger = wrap.querySelector('#color-trigger');
+            // 0.23.19：悬浮展开色盘（与其他工具组下拉一致的交互）。
+            // 打开有 250ms 延迟防路过误触；关闭留 400ms 缓冲（spec §5.3），
+            // 面板是 wrap 的绝对定位子元素，指针移入面板仍在 wrap 命中范围内，
+            // mouseleave 不会触发；配色停靠较远时也可在缓冲期内到达。
+            // 点击固定：面板打开后用户点击过（触发器或面板内部/拖动）即视为固定，
+            // 不再随鼠标移开自动关闭，直到点外部/切工具/ESC 显式关闭。
+            wrap.addEventListener('mouseenter', () => {
+                clearTimeout(colorHoverCloseTimer);
+                clearTimeout(colorHoverOpenTimer);
+                // dataset.dragging 是字符串（'true'/'false'），按值判断——
+                // 直接取真值会让拖动过一次的面板永远无法再悬浮打开。
+                if (dd.getAttribute('data-open') !== 'true' && dd.dataset.dragging !== 'true') {
+                    colorHoverOpenTimer = setTimeout(() => {
+                        if (dd.getAttribute('data-open') === 'true') return;
+                        // 悬浮路径不做选区停靠，保持锚点下方展开，悬浮→点击行为可预期
+                        delete dd.dataset.pinned;
+                        positionDropdown(dd, {preferAnchor: true});
+                        setDropdownOpen(dd, true);
+                        syncFromAnnot();
+                    }, 250);
+                }
+            });
+            wrap.addEventListener('mouseleave', () => {
+                clearTimeout(colorHoverOpenTimer);
+                if (dd.dataset.pinned === 'true') return;
+                colorHoverCloseTimer = setTimeout(() => setDropdownOpen(dd, false), 400);
+            });
+            dd.addEventListener('mouseenter', () => clearTimeout(colorHoverCloseTimer));
+            // 面板内任何按下（选色/拖动停靠/滚动交互前的 mousedown）都视为固定。
+            // capture 阶段监听：面板内多处 mousedown 带 stopPropagation，
+            // 冒泡阶段监听收不到。
+            dd.addEventListener('mousedown', () => {
+                dd.dataset.pinned = 'true';
+            }, true);
             trigger?.addEventListener('click', (e) => {
                 // 颜色面板是点击切换的二级页面，不参与工具组的 hover-dropdown 机制。
+                clearTimeout(colorHoverOpenTimer);
+                clearTimeout(colorHoverCloseTimer);
                 e.stopPropagation();
-                const willOpen = dd.getAttribute('data-open') !== 'true';
+                const isOpen = dd.getAttribute('data-open') === 'true';
+                // 0.23.19：悬浮已展开时，本次点击视为「固定」而非收起——与其他
+                // 工具组一致（悬浮展开不因点击触发器而关）。否则会出现"想点击
+                // 打开、鼠标先悬浮展开了、点击反而把它收起"的反直觉来回。
+                // 已固定的面板再点一次才收起（toggle 语义）。
+                if (isOpen && dd.dataset.pinned !== 'true') {
+                    dd.dataset.pinned = 'true';
+                    return;
+                }
                 closeAllDropdowns();
-                if (willOpen) {
+                if (!isOpen) {
+                    dd.dataset.pinned = 'true';
                     positionDropdown(dd);
                     setDropdownOpen(dd, true);
                     syncFromAnnot();
@@ -877,6 +980,10 @@ export function bindToolbar() {
                 fontDropdown.querySelectorAll('.font-item').forEach((b) => b.classList.remove('active'));
                 item.classList.add('active');
                 fontDropdown.classList.add('hidden');
+                // 0.23.19：选完字体主动交还焦点——列表项 mousedown preventDefault 保焦点
+                // 是为了让点击不丢，但焦点滞留在搜索框里会让 Alt 系快捷键持续被
+                // 输入框守卫拦掉（"选了文字工具 Alt 失灵"的主来源）。
+                if (fontSearch) fontSearch.blur();
             });
             fontDropdown.appendChild(item);
         }
@@ -921,7 +1028,9 @@ export function bindToolbar() {
             annot.setColor(color);
             swatches.forEach((b) => b.classList.remove('active'));
             btn.classList.add('active');
-            if (colorTriggerDot) colorTriggerDot.style.background = color;
+            // 0.23.19：写 --swatch-overlay 颜色层（叠在 CSS 棋盘格上方），
+            // 不写 background-color（会被不透明棋盘格盖住）
+            if (colorTriggerDot) colorTriggerDot.style.setProperty('--swatch-overlay', color);
             // 0.15.8-fix：hover 模式下不关闭，让 mouseleave 自然关闭
         });
     });

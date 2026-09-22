@@ -278,7 +278,8 @@ function setAnnotationColor(hex) {
     annot.setColor(hex);
     ss.paletteAnchorHex = hex;
     const dot = document.getElementById('color-trigger-dot');
-    if (dot) dot.style.background = hex;
+    // 0.23.19：写 --swatch-overlay 颜色层（叠在 CSS 棋盘格上方）
+    if (dot) dot.style.setProperty('--swatch-overlay', hex);
     syncFromAnnot();
     updateGenerateButtonLabel();
     if (ss.paletteMoreExpanded) void renderGeneratedSchemes();
@@ -289,7 +290,8 @@ function updateGenerateButtonLabel() {
     const hasAnchor = Boolean(ss.paletteAnchorHex);
     if (moreSwatchEl) {
         moreSwatchEl.hidden = !hasAnchor;
-        if (hasAnchor) moreSwatchEl.style.background = ss.paletteAnchorHex;
+        // 0.23.19：写 --swatch-overlay 颜色层（叠在 CSS 棋盘格上方）
+        if (hasAnchor) moreSwatchEl.style.setProperty('--swatch-overlay', ss.paletteAnchorHex);
     }
     // 文案独立写在 label span，避免 textContent 覆盖清掉按钮内的色块预览。
     moreLabelEl.textContent = ss.paletteMoreExpanded
@@ -496,7 +498,8 @@ function renderFullSchemes(schemes, heading = '', anchorHex = '') {
         if (anchorHex) {
             const swatch = document.createElement('span');
             swatch.className = 'palette-generated-heading-swatch';
-            swatch.style.background = anchorHex;
+            // 0.23.19：写 --swatch-overlay 颜色层（叠在 CSS 棋盘格上方）
+            swatch.style.setProperty('--swatch-overlay', anchorHex);
             swatch.title = `基准色 ${anchorHex}`;
             label.appendChild(swatch);
         }

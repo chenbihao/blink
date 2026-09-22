@@ -11,6 +11,7 @@ import {
     computeResizedPanel,
     PANEL_MIN_H,
     PANEL_MIN_W,
+    placeColorPanel,
 } from './ss-panel-resize.js';
 
 // ── 断言辅助 ──────────────────────────────────────────────────────────────
@@ -157,6 +158,61 @@ test('clampPanelToMonitor: 自定义 margin 且面板小于最小值时仍钳制
     // 但 w=100 < PANEL_MIN_W=280，所以 clampPanelSize 会拉到 280
     const r = clampPanelToMonitor(1850, 100, 100, 200, 1, mon, 20);
     assertEqual(r, {w: PANEL_MIN_W, h: PANEL_MIN_H}, '面板小于最小值时仍钳制到最小');
+});
+
+
+// ── 0.23.19：placeColorPanel（颜色面板不挡选区落位）────────────────────────
+
+test('placeColorPanel: 常规——选区右侧放得下 → 停靠选区右侧顶端对齐', () => {
+    const mon = {x: 0, y: 0, w: 1920, h: 1080};
+    const sel = {x: 200, y: 200, w: 400, h: 300};
+    const anchor = {left: 700, top: 520, right: 730, bottom: 548};
+    const p = placeColorPanel(anchor, 300, 400, mon, sel);
+    assertEqual(p, {left: 200 + 400 + 8, top: 200}, '右侧候选优先');
+});
+
+test('placeColorPanel: 右侧贴屏放不下 → 翻到选区左侧', () => {
+    const mon = {x: 0, y: 0, w: 1920, h: 1080};
+    const sel = {x: 1700, y: 200, w: 200, h: 300};
+    const anchor = {left: 1750, top: 520, right: 1780, bottom: 548};
+    const p = placeColorPanel(anchor, 300, 400, mon, sel);
+    // 左侧候选 left=1700-300-8=1392，不压选区且在屏内
+    assertEqual(p, {left: 1392, top: 200}, '右侧放不下翻左侧');
+});
+
+test('placeColorPanel: 右侧越屏被钳回压选区 → 翻到选区左侧', () => {
+    const mon = {x: 0, y: 0, w: 1920, h: 1080};
+    // 宽面板：右侧候选 left=1608 越屏钳到 1212，1212..1912 压到选区(1300..1600) → 弃；
+    // 左侧候选 left=1300-700-8=592，592..1292 不压选区 → 取左侧
+    const sel = {x: 1300, y: 100, w: 300, h: 300};
+    const anchor = {left: 1400, top: 420, right: 1430, bottom: 448};
+    const p = placeColorPanel(anchor, 700, 500, mon, sel);
+    assertEqual(p, {left: 592, top: 100}, '宽面板右侧压选区时翻左侧');
+});
+
+test('placeColorPanel: 全屏选区四面避不开 → 退化为候选1钳制（可预测旧行为）', () => {
+    const mon = {x: 0, y: 0, w: 1920, h: 1080};
+    const sel = {x: 0, y: 0, w: 1920, h: 1080};
+    const anchor = {left: 100, top: 520, right: 130, bottom: 548};
+    const p = placeColorPanel(anchor, 300, 400, mon, sel);
+    // 候选1 left=1920+8 钳到 maxLeft=1920-8-300=1612, top=0 钳到 8
+    assertEqual(p, {left: 1612, top: 8}, '全屏选区退化为右侧钳制');
+});
+
+test('placeColorPanel: selRect=null → 直接落锚点下方', () => {
+    const mon = {x: 0, y: 0, w: 1920, h: 1080};
+    const anchor = {left: 100, top: 520, right: 130, bottom: 548};
+    const p = placeColorPanel(anchor, 300, 400, mon, null);
+    assertEqual(p, {left: 100, top: 548 + 8}, '无选区时锚点下方');
+});
+
+test('placeColorPanel: 负坐标副屏钳制到该屏内', () => {
+    const mon = {x: -1920, y: 0, w: 1920, h: 1080};
+    const sel = {x: -1900, y: 100, w: 300, h: 200};
+    const anchor = {left: -1800, top: 320, right: -1770, bottom: 348};
+    const p = placeColorPanel(anchor, 300, 400, mon, sel);
+    // 候选1 left=-1900+300+8=-1592 → 钳制范围 [-1912, -1920+1920-8-300=-308] → -1592 合法；top=100
+    assertEqual(p, {left: -1592, top: 100}, '副屏选区右侧停靠');
 });
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────

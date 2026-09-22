@@ -42,6 +42,7 @@ import {
     waitForVisualSettle,
 } from './capture-driver.js';
 import {bindScrollDiagnostics, recordScrollDiagnostic, resetScrollDiagnostics,} from './diagnostics.js';
+import {isLongScreenshotPan} from '../ss-editor-policy.js';
 import {encodeImageDataPng, outputScreenshotPng} from '../ss-output.js';
 import {cssPointToScreen, cssRectToBitmap} from '../ss-selection-geometry.js';
 import {findDisplayCssAt} from '../ss-display.js';
@@ -564,7 +565,14 @@ export function resetScrollCaptureSession() {
 }
 
 export function isScrollCaptureActive() {
-    return session.active || !!ss._imagePan;
+    // 0.23.19：_imagePan 在**所有** canvas 编辑器（长图/剪贴板/历史/pin）都会被
+    // enterCanvasImageEditor 设置（图片平移用），不能据此判定"长截图会话活跃"——
+    // 否则普通图片编辑器里 ESC 首按会被"退出长截图"分支吃掉（exitScrollCapture
+    // 移除 long-image-editing 蓝色描边 + reset editorSession，编辑器却留在桌面，
+    // 用户须按第二次 ESC 才真正取消）。长图编辑态改用 source 判定
+    // （0.23.19-fix：判定抽至 ss-editor-policy.isLongScreenshotPan，行为测试锁定）。
+    if (session.active) return true;
+    return isLongScreenshotPan(ss._imagePan, ss.editorSession.source);
 }
 
 /**

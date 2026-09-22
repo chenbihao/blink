@@ -272,6 +272,12 @@ pub enum RuntimeError {
     #[error("安装失败: {message}")]
     InstallFailed { message: String },
 
+    /// 下载内容 SHA-256 校验失败。与网络级失败类型区分：候选源降级循环
+    /// 据此判定「主链不匹配 = 供应链变更直接失败 / 镜像不匹配 = 换下一源」，
+    /// 不再依赖错误消息前缀匹配。
+    #[error("SHA-256 校验失败: expected={expected}, actual={actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+
     #[error("self-test 失败: {message}")]
     SelfTestFailed { message: String },
 

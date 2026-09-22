@@ -3,6 +3,7 @@
 pub mod fs;
 pub mod http_log;
 pub mod logging;
+pub mod mirrors;
 pub mod paths;
 pub mod perf;
 pub mod text;

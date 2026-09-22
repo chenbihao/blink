@@ -105,6 +105,7 @@ import {
 import {
     bindToolbar,
     cycleToolInGroup,
+    flashToolDropdown,
     resetToolbarDropdowns,
     selectTool,
     showTextInput,
@@ -112,6 +113,12 @@ import {
     updateUndoRedoButtons
 } from "./ss-toolbar.js";
 import {resetPaletteState} from "./ss-palette.js";
+// 0.23.19：会话重置时把标注色归位默认红（色盘每次会话首次打开默认红色）
+import {resetColorToDefault} from "./ss-color-picker.js";
+// 0.23.19：自定义 tooltip（多屏 title 提示定位修复）
+import {initSsTooltip} from "./ss-tooltip.js";
+// 0.23.19-fix：编辑器会话决策纯函数（可行为测试），见 ss-editor-policy.js
+import {editorEscExempt, isTextEntryTarget} from "./ss-editor-policy.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
 import {
     clearHover,
@@ -538,6 +545,18 @@ function resetState() {
     ss.screenshotOffscreen = null;
     ss.editorSession.reset();
     document.body.classList.remove('image-editor-mode');
+    // 0.23.19：每次会话重置默认工具为「选取」——复用窗口时上一会话的工具不应跨会话
+    // 残留。必须在 editorSession.reset() 之后调用：selectTool 读取 canvasBacked 决定
+    // 光标语义，读到上一会话的旧状态会把 crosshair 误设为 grab。
+    // selectTool 内部 showSubPanel(null) 连带收掉 text/watermark 的 sub-panel；
+    // 否则 sub-panel 残留会让首次 ESC 只关面板、第二次才真正取消（含 pin 编辑会话）。
+    try {
+        selectTool('select');
+    } catch (e) {
+        console.warn('[screenshot] resetState: selectTool reset failed', e);
+    }
+    const staleSubPanel = document.getElementById('sub-panel');
+    if (staleSubPanel) staleSubPanel.classList.add('hidden');
     const scrollButton = document.getElementById('btn-scroll');
     if (scrollButton) scrollButton.hidden = false;
     // 0.20.x：恢复 pin 来源编辑时隐藏的「钉图」按钮
@@ -655,6 +674,12 @@ function resetState() {
         resetPaletteState();
     } catch (e) {
         console.warn('[screenshot] resetState: palette reset failed', e);
+    }
+    // 0.23.19：标注色归位默认红——复用窗口时上一会话的颜色不跨会话残留
+    try {
+        resetColorToDefault();
+    } catch (e) {
+        console.warn('[screenshot] resetState: color reset failed', e);
     }
     // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
     _spaceDown = false;
@@ -932,6 +957,32 @@ function loadEditorConfig(includeCaptureHints) {
         });
 }
 
+/**
+ * 0.23.19：编辑器路径的 renderScale 重推。
+ *
+ * 编辑器窗口由后端 place_at_physical 摆满目标显示器的物理矩形，视口 CSS 尺寸
+ * 稳定后 `meta 物理 wh / 视口 wh` 即真实 renderScale。图片编辑不经过
+ * loadScreenshot 的 canvas 实测（编辑画布尺寸由本模块自己写入），若沿用
+ * 上一会话的 meta.renderScaleX/Y（跨 DPI 屏残留），首次进入编辑器会按旧比例
+ * 换算 cssW/cssH，表现为图片首帧缩放不对。
+ */
+function syncEditorRenderScaleFromViewport() {
+    const meta = window.__blinkScreenMeta;
+    if (!meta || !(meta.w > 0) || !(meta.h > 0)) return;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (vw <= 0 || vh <= 0) return;
+    const scaleX = meta.w / vw;
+    const scaleY = meta.h / vh;
+    if (!(scaleX > 0) || !(scaleY > 0)) return;
+    meta.renderScaleX = scaleX;
+    meta.renderScaleY = scaleY;
+    invalidateDisplaysCache();
+    console.debug('[image-editor] renderScale 重推', {
+        scaleX, scaleY, dpr: window.devicePixelRatio, vw, vh, metaW: meta.w, metaH: meta.h,
+    });
+}
+
 /** 从独立用户编辑载荷初始化完整图片画布，不读取截图捕获 SESSION。 */
 function loadEditorImage(source) {
     if (source !== IMAGE_SOURCE.CLIPBOARD && source !== IMAGE_SOURCE.HISTORY && source !== IMAGE_SOURCE.PIN) {
@@ -953,6 +1004,16 @@ function loadEditorImage(source) {
     img.onload = () => {
         clearTimeout(timeoutId);
         if (gen !== ss._loadGen) return;
+        try {
+            // 0.23.19：图片编辑路径不经过 loadScreenshot 的 syncRenderScale，
+            // meta 里可能是上一会话（另一块不同 DPI 的屏）留下的旧 renderScale。
+            // 编辑器窗口被后端 place_at_physical 精确摆满目标显示器物理矩形，
+            // 此时「物理宽高 / 视口 CSS 宽高」就是真实 renderScale——在换算
+            // cssW/cssH 之前重推，修复多屏下首次进入编辑器的缩放错误。
+            syncEditorRenderScaleFromViewport();
+        } catch (e) {
+            console.warn('[image-editor] renderScale 重推失败', e);
+        }
         try {
             const baseCanvas = document.createElement('canvas');
             baseCanvas.width = img.width;
@@ -1396,7 +1457,7 @@ canvas.addEventListener('pointerdown', (e) => {
         }
     }
 
-    if (ss.isAnnotating && ss.selCss && tool === 'select') {
+    if (ss.isAnnotating && ss.selCss && tool === 'select' && !ss.eyedropperActive) {
         const handle = getSelectionHandle(point.offsetX, point.offsetY, ss.selCss);
         if (handle) {
             capturePointer(canvas, e);
@@ -1780,6 +1841,13 @@ function abortSelectionInteraction(e = null) {
         console.debug('[screenshot] abort ignored: session tearing down');
         return;
     }
+    // 0.23.19：canvas-backed 编辑器会话（剪贴板/历史/pin/长图）不走重建——
+    // enterAnnotationMode 会 beginScreenshotSelection 把 source 翻成 screenshot、
+    // annot.reset 清空标注层，编辑画布内容不受拖选中断影响，无需重建。
+    if (ss.editorSession.canvasBacked) {
+        ss.canvas.style.cursor = ss._imagePan ? 'grab' : 'default';
+        return;
+    }
     ss.canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
     if (ss.isAnnotating && ss.selCss) {
         try {
@@ -1944,6 +2012,8 @@ function queueSelectionNudge(dx, dy) {
     if (!nudgeRafId) nudgeRafId = requestAnimationFrame(flushSelectionNudge);
 }
 
+// 0.23.19：isTextEntryTarget（文本输入类控件判定）移至 ss-editor-policy.js（纯函数，行为测试）
+
 document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
         const tgt = e.target;
@@ -1984,10 +2054,27 @@ document.addEventListener('keydown', (e) => {
     }
     // ── Alt 快捷键：工具切换 + undo/reset（仅标注模式生效）──────────
     // Alt+` → 选取工具；Alt+1~5 → 图形/画笔/文字/马赛克/橡皮；重复按循环组内下一个
-    // Alt+Z → undo；Alt+R → reset（清除全部标注）
+    // Alt+Z → undo；Alt+Y → redo；Alt+R → reset（清除全部标注）
     if (e.altKey && !e.ctrlKey && !e.metaKey && ss.isAnnotating) {
+        // IME 组合中的按键不属于快捷键
+        if (e.isComposing || e.keyCode === 229) return;
+        // 0.23.19：只对**文本输入类**控件让位——文字工具的字体搜索框（选完字体
+        // 焦点滞留）、字号/粗细等滑杆（拖完焦点滞留）都曾因 tagName==='INPUT'
+        // 一刀切守卫把 Alt 快捷键全部拦掉，表现为"选了文字工具 Alt 就失灵"。
+        // Alt+数字在文本框里是合法输入（Windows Alt 码），必须让位；
+        // range/checkbox 等非文本控件上 Alt 组合无输入语义，正常响应。
         const tgt = e.target;
-        if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+        if (tgt && isTextEntryTarget(tgt)) {
+            // 0.23.19 R2：canvas 文字标注输入框是临时态——修饰键组合视为"结束
+            // 输入"意图：提交当前文本让输入框退场，快捷键继续生效（此前直接
+            // return，表现为"文本框还在快捷键就全失灵"）。blur 会同步走
+            // commit → 移除输入框。字体搜索等常规文本框仍让位。
+            if (tgt.classList && tgt.classList.contains('text-annot-input')) {
+                tgt.blur();
+            } else {
+                return;
+            }
+        }
         const key = e.key;
         if (key === '`' || key === '~') {
             e.preventDefault();
@@ -1999,35 +2086,49 @@ document.addEventListener('keydown', (e) => {
             // 当前已在 shape 组内则循环，否则切到默认工具
             if (TOOL_GROUPS[annot.getTool()] === 'shape') cycleToolInGroup('shape');
             else selectTool('rect');
+            // 0.23.19：快捷键切换后 flash 展开组下拉，让用户看见切到了哪个工具
+            flashToolDropdown(annot.getTool());
             return;
         }
         if (key === '2') {
             e.preventDefault();
             if (TOOL_GROUPS[annot.getTool()] === 'stroke') cycleToolInGroup('stroke');
             else selectTool('pencil');
+            flashToolDropdown(annot.getTool());
             return;
         }
         if (key === '3') {
             e.preventDefault();
             if (TOOL_GROUPS[annot.getTool()] === 'text') cycleToolInGroup('text');
             else selectTool('text');
+            flashToolDropdown(annot.getTool());
             return;
         }
         if (key === '4') {
             e.preventDefault();
             if (TOOL_GROUPS[annot.getTool()] === 'blur') cycleToolInGroup('blur');
             else selectTool('pixelate');
+            flashToolDropdown(annot.getTool());
             return;
         }
         if (key === '5') {
             e.preventDefault();
             if (TOOL_GROUPS[annot.getTool()] === 'eraser') cycleToolInGroup('eraser');
             else selectTool('eraser');
+            flashToolDropdown(annot.getTool());
             return;
         }
         if (key === 'z' || key === 'Z') {
             e.preventDefault();
             annot.undo();
+            updateUndoRedoButtons();
+            return;
+        }
+        // 0.23.19：重做统一走 Alt 系（与 Alt+Z 撤销成对）。旧按钮提示写的
+        // Ctrl+Y 从未有对应处理器——重做此前实际没有可用快捷键。
+        if (key === 'y' || key === 'Y') {
+            e.preventDefault();
+            annot.redo();
             updateUndoRedoButtons();
             return;
         }
@@ -2073,6 +2174,15 @@ document.addEventListener('keydown', (e) => {
             });
             return;
         }
+        // 0.23.19：图片编辑器（剪贴板/历史/pin 来源）是模态会话——一次 ESC 直接整体取消。
+        // 此前 ocr-panel / sub-panel / dropdown 分层关闭在编辑器里会造成"按多次 ESC
+        // 才退出"（首按只关面板/下拉，编辑图层和工具栏仍留在桌面上）。
+        // 窗口捕获层（见 imageEditorEscExempt 上方）通常已先处理；这里兜底
+        // capture 被移除/异常注册的场景。例外态（取色/输入）继续走分层链。
+        if (document.body.classList.contains('image-editor-mode') && !imageEditorEscExempt(e)) {
+            doCancel();
+            return;
+        }
         const ocrPanel = document.getElementById('ocr-panel');
         if (ocrPanel) {
             ocrPanel.remove();
@@ -2099,6 +2209,35 @@ document.addEventListener('keydown', (e) => {
         doPanelToggle();
     }
 });
+
+// 0.23.19：编辑器 ESC 的例外判定——取色器/文本输入/IME 各有自己的 ESC 语义，
+// 不做整体退出。纯函数在 ss-editor-policy.js（行为测试），此处注入取色器活跃态；
+// 窗口捕获层与 document 冒泡层共用，保证两层行为一致。
+const imageEditorEscExempt = (e) => editorEscExempt(e, {eyedropperActive: ss.eyedropperActive});
+
+// 0.23.19：图片编辑器（剪贴板/历史/pin）一次 ESC 整体退出——窗口捕获层兜底。
+//
+// 动机：编辑器是模态会话，用户对"按 ESC"的预期是退出编辑器本身。但页面内
+// 存在多层 ESC 消费者（取色器/tooltip 的 document 捕获监听、ocr-panel /
+// sub-panel / dropdown 的分层关闭、文字输入框自己的 ESC），任何一个先命中
+// 都会出现"首按只关一层、编辑图层和工具栏留在桌面上"的体验。
+//
+// window 捕获阶段先于页面内一切监听器（window capture → document capture →
+// target → document bubble），在这里拦截可保证编辑器内 ESC 语义唯一。
+// 例外放行（imageEditorEscExempt）：交还各自的 ESC 处理，走下方分层关闭链。
+window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!document.body.classList.contains('image-editor-mode')) return;
+    if (imageEditorEscExempt(e)) return;
+    if (isScrollCaptureActive()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    console.debug('[image-editor] ESC（窗口捕获层）→ 整体取消编辑会话', {
+        source: ss.editorSession.source,
+        sessionActive: ss.editorSession.active,
+    });
+    doCancel();
+}, true);
 
 // 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览
 window.addEventListener('keydown', refreshShapePreviewOnShift);
@@ -2137,11 +2276,21 @@ window.addEventListener('keyup', (e) => {
 
 // ── Alt 按键状态跟踪：显示/隐藏工具栏上的 kbd 快捷键提示 ──
 // 按住 Alt 时 body 加 data-alt-down，CSS 据此显示 .kbd-hint
+// 0.23.19：preventDefault 抑制 WebView2 把"单独按 Alt"当菜单激活键——
+// 那条路径会吞掉 Alt 的 keyup（甚至触发窗口失焦），此后再按 Alt 的 keydown
+// 带 repeat=true，旧守卫直接跳过，表现为"连按两下 Alt 提示不再显示"。
+// repeat 的 Alt keydown 现在也照常置位（幂等，只重设同一状态）。
 window.addEventListener('keydown', (e) => {
-    if (e.key === 'Alt' && !e.repeat) document.body.dataset.altDown = 'true';
+    if (e.key === 'Alt') {
+        e.preventDefault();
+        document.body.dataset.altDown = 'true';
+    }
 });
 window.addEventListener('keyup', (e) => {
-    if (e.key === 'Alt') delete document.body.dataset.altDown;
+    if (e.key === 'Alt') {
+        e.preventDefault();
+        delete document.body.dataset.altDown;
+    }
 });
 window.addEventListener('blur', () => {
     delete document.body.dataset.altDown;
@@ -2204,6 +2353,8 @@ window.addEventListener('blur', () => {
 // ════════════════════════════════════════════════════════════
 
 bindToolbar();
+// 0.23.19：自定义 tooltip——原生 title 提示在多屏混合 DPI 下会漂到别的屏幕
+initSsTooltip();
 
 // 所有正常交互 handler 已完成注册；从此 ESC 只能走模块的分层关闭/会话清理路径。
 window.__blinkDisableEmergencyScreenshotEscape?.();

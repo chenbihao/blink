@@ -21,6 +21,9 @@ import {
     screenshotSave,
 } from '../shared/api.js';
 import {IMAGE_SOURCE} from './image-editor-session.js';
+// 0.23.19-fix：取消路由纯函数 + 整体取消时收起 tooltip
+import {cancelIsImageEditorSession} from './ss-editor-policy.js';
+import {hideSsTooltip} from './ss-tooltip.js';
 import {cancelActiveOcr, hideSelLoading, showTransientHint} from './ss-ocr.js';
 import {normalizeError} from '../shared/tauri.js';
 
@@ -509,13 +512,23 @@ export function doCancel() {
     } catch (e) {
         console.warn('[screenshot] hideSelLoading failed', e);
     }
+    // 0.23.19-fix：整体取消路径收起自定义 tooltip——ESC 整体退出的
+    // stopPropagation 会跳过 tooltip 自己的 ESC 收起监听，气泡不应残留。
+    try {
+        hideSsTooltip();
+    } catch (e) {
+        console.warn('[screenshot] hideSsTooltip on cancel failed', e);
+    }
     // 0.15.7：长截图状态清理
     if (source === IMAGE_SOURCE.LONG_SCREENSHOT && (ss.scrollSession.active || ss._imagePan)) {
         // 异步清理，不阻塞 cancel；入口由长截图 session 唯一提供。
         Promise.resolve(ss.scrollSession.exit(false)).catch(() => {
         });
     }
-    if (source === IMAGE_SOURCE.CLIPBOARD || source === IMAGE_SOURCE.HISTORY || source === IMAGE_SOURCE.PIN) {
+    // 0.23.19-fix：路由判定抽至 ss-editor-policy.cancelIsImageEditorSession（行为测试）。
+    // body 的编辑器标记兜底——编辑器会话中的拖选中断（abortSelectionInteraction）
+    // 曾把 source 翻写成 screenshot，导致取消走截图分支、绕过 restore_demoted_pin。
+    if (cancelIsImageEditorSession(source, document.body.classList.contains('image-editor-mode'))) {
         cleanupCanvasVisuals();
         imageEditorCancel().catch((e) => console.error('[image-editor] cancel 失败', e));
     } else if (ss.isAnnotating) {

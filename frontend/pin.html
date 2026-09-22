@@ -171,6 +171,10 @@
         ocrBusy = false;
         pinOverlayBusy = false;
         pinOriginalPng = null;
+        // 0.23.19：会话切换时收起忙碌指示器并复位菜单禁用态（在途 OCR/翻译作废）
+        hideTranslatingIndicator();
+        const ocrBtn = document.getElementById('ctx-ocr');
+        if (ocrBtn) ocrBtn.disabled = false;
         const translateBtn = document.getElementById('ctx-translate');
         if (translateBtn) {
             translateBtn.disabled = false;
@@ -1045,6 +1049,10 @@
         if (ocrBusy) return;
         const generation = pinSessionGeneration;
         ocrBusy = true;
+        // 0.23.19：识别中加载动画（与翻译同一指示器，文案区分）；失败/完成统一在 finally 收起
+        showTranslatingIndicator('识别中');
+        const ctxOcr = document.getElementById('ctx-ocr');
+        if (ctxOcr) ctxOcr.disabled = true;
         let ocrHandle = null;
         try {
             const png = await pinImageToPng();
@@ -1075,6 +1083,8 @@
             });
         } finally {
             if (activePinOcrHandle === ocrHandle) activePinOcrHandle = null;
+            hideTranslatingIndicator();
+            if (ctxOcr) ctxOcr.disabled = false;
             if (generation === pinSessionGeneration) ocrBusy = false;
         }
     }
@@ -1280,10 +1290,14 @@
         }
     });
 
-    // ── 翻译中指示器 ──────────────────────────────────────────
-    function showTranslatingIndicator() {
+    // ── 忙碌指示器（翻译/OCR 共用） ──────────────────────────
+    function showTranslatingIndicator(text = '翻译中') {
         const el = document.getElementById('pin-translating-indicator');
-        if (el) el.classList.remove('hidden');
+        if (el) {
+            const label = el.querySelector('.pin-translating-text');
+            if (label) label.textContent = text;
+            el.classList.remove('hidden');
+        }
         updatePinIndicatorPosition();
         const ctxTranslate = document.getElementById('ctx-translate');
         if (ctxTranslate) ctxTranslate.disabled = true;

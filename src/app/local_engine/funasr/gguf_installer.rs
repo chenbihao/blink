@@ -66,44 +66,12 @@ type LogFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 /// 表示 Content-Length 缺失。每 chunk 调用，节流由 sink 实现方负责。
 type ProgressFn = std::sync::Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
-// ── 下载源候选（0.22.9 国内可达性）───────────────────────────────────────
-
-/// HuggingFace 主站 host 前缀（模型 URL 锁定格式，见 `gguf::validate_model_url_stable`）。
-const HF_HOST: &str = "https://huggingface.co/";
-/// HF 整站镜像，URL 路径同构（仅换 host）。SHA-256 编译期锁定，
-/// 换源不破坏供应链校验——hash 不匹配的镜像内容会被拒绝。
-const HF_MIRROR_HOST: &str = "https://hf-mirror.com/";
-/// 用户自定义 HF 端点（如自建镜像），置顶优先。
-const HF_ENDPOINT_ENV: &str = "BLINK_HF_ENDPOINT";
-
-/// 构建下载候选源列表（环境变量版入口）。
-fn hf_download_candidates(primary_url: &str) -> Vec<String> {
-    let endpoint = std::env::var(HF_ENDPOINT_ENV)
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty());
-    hf_download_candidates_with_endpoint(primary_url, endpoint.as_deref())
-}
-
-/// 构建下载候选源列表（纯函数）。
-///
-/// 顺序：`BLINK_HF_ENDPOINT` 覆盖 → 主站原链 → hf-mirror 镜像。
-/// 非 HF 主站 URL（未来接入其他源）不加镜像候选。
-fn hf_download_candidates_with_endpoint(primary_url: &str, endpoint: Option<&str>) -> Vec<String> {
-    let mut candidates = Vec::new();
-    if let Some(ep) = endpoint
-        .map(|s| s.trim().trim_end_matches('/'))
-        .filter(|s| !s.is_empty())
-        && let Some(path) = primary_url.strip_prefix(HF_HOST)
-    {
-        candidates.push(format!("{ep}/{path}"));
-    }
-    candidates.push(primary_url.to_string());
-    if let Some(path) = primary_url.strip_prefix(HF_HOST) {
-        candidates.push(format!("{HF_MIRROR_HOST}{path}"));
-    }
-    candidates
-}
+// ── 下载源候选（0.22.9 国内可达性；0.23.19 提取至 infra::utils::mirrors 共享）──
+//
+// 候选顺序与供应链说明见 `infra::utils::mirrors` 模块文档：
+// `BLINK_HF_ENDPOINT` 覆盖 → HF 主站原链 → hf-mirror 镜像，
+// SHA-256 编译期锁定，换源不放宽校验。
+use crate::infra::utils::mirrors::hf_download_candidates;
 
 /// 下载回调集：日志行 + 字节进度（0.22.14）。
 struct DownloadCallbacks {
@@ -530,7 +498,8 @@ async fn copy_and_verify(
 
 #[cfg(test)]
 mod tests {
-    use super::{HF_MIRROR_HOST, format_progress_log, hf_download_candidates_with_endpoint};
+    use super::format_progress_log;
+    use crate::infra::utils::mirrors::{HF_MIRROR_HOST, hf_download_candidates_with_endpoint};
 
     const NANO_LLM: &str =
         "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/46e8495/qwen3-0.6b-q4km.gguf";

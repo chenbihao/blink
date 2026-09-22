@@ -458,7 +458,9 @@ function renderMagnifierFromBitmap(px, py, cssX, cssY, meta) {
             const r = d[midIdx], g = d[midIdx + 1], b = d[midIdx + 2];
             ss.magnifierColor.textContent = formatColor(r, g, b, ss.magnifierFormat);
             if (ss.magnifierColorSwatch) {
-                ss.magnifierColorSwatch.style.background = `rgb(${r},${g},${b})`;
+                // 0.23.19：写 --swatch-overlay 颜色层——background 简写会清掉
+                // CSS 棋盘格背景图，background-color 会被不透明棋盘格盖住
+                ss.magnifierColorSwatch.style.setProperty('--swatch-overlay', `rgb(${r},${g},${b})`);
             }
         }
     }
