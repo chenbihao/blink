@@ -283,6 +283,11 @@ cargo test --bin blink
  
 ---
 
+Friendship Link:
+Thanks for the support and feedback from the friends at 52pojie, linux.do.
+
+---
+
 ## 许可
 
 [MIT](LICENSE)
