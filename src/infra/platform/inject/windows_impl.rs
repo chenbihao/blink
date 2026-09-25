@@ -13,14 +13,15 @@
 //! - ⚠️ 少数 IME 激活的应用可能把 Unicode 输入当候选词
 //! - **回退策略**：失败时回退到 Clipboard+Ctrl+V
 //!
-//! ## 方案 B: Clipboard + Ctrl+V（0.10.1~0.10.2）
+//! ## 方案 B: Clipboard + Ctrl+V（0.10.1~0.10.2；0.23.20 起兼长文本主路径）
 //!
 //! 时序:
 //! 1. 备份当前剪贴板文本(若可读)
-//! 2. 设置剪贴板为 STT 文本
+//! 2. 设置剪贴板为 STT 文本（`write_text_to_clipboard` 打 `blink:inject` 标记，
+//!    监听器跳过历史入库）
 //! 3. SendInput: Ctrl↓ → V↓ → V↑ → Ctrl↑
 //! 4. 等待 100ms 让前台应用处理粘贴
-//! 5. 恢复原剪贴板文本
+//! 5. 恢复原剪贴板文本（同样打标记）
 //!
 //! ## 注意事项
 //!
@@ -32,10 +33,6 @@
 
 use std::time::Duration;
 
-use windows::Win32::Foundation::HGLOBAL;
-use windows::Win32::System::DataExchange::*;
-use windows::Win32::System::Memory::*;
-use windows::Win32::System::Ole::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 use super::InjectError;
@@ -171,7 +168,11 @@ fn make_virtual_key(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 
 // ── 方案 B: Clipboard + Ctrl+V ──────────────────────────────────────────
 
-/// 通过剪贴板 + Ctrl+V 注入文本到前台应用。
+/// 通过剪贴板 + Ctrl+V 注入文本到前台应用（长文本主路径 / Unicode 失败降级路径）。
+///
+/// 写入与恢复均走 [`crate::infra::platform::clipboard::write_text_to_clipboard`] 打
+/// `blink:inject` 自写入标记（skip_persist）：中转文本与恢复的原内容都不进剪贴板
+/// 历史库——裸写会被监听器当成外部复制，STT 文本会重复入库（0.23.20 修复）。
 pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
     if text.is_empty() {
         return Ok(());
@@ -180,10 +181,15 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
     // 详细路径日志由 mod.rs 的 inject_text 统一打印
 
     // 1. 备份当前剪贴板文本
-    let backup = read_clipboard_text();
+    let backup = crate::infra::platform::clipboard::read_current_text();
 
-    // 2. 设置剪贴板为 STT 文本
-    set_clipboard_text(text).map_err(InjectError::Clipboard)?;
+    // 2. 设置剪贴板为 STT 文本（自写入标记：跳过历史入库）
+    crate::infra::platform::clipboard::write_text_to_clipboard(
+        text,
+        crate::infra::platform::clipboard::SELF_LABEL_INJECT,
+        true,
+    )
+    .map_err(InjectError::Clipboard)?;
 
     // 3. SendInput: Ctrl↓ → V↓ → V↑ → Ctrl↑
     send_paste().map_err(InjectError::SendInput)?;
@@ -191,71 +197,24 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
     // 4. 等待前台应用处理粘贴（100ms：Electron/Office 等需要更多时间）
     std::thread::sleep(Duration::from_millis(100));
 
-    // 5. 恢复原剪贴板文本
+    // 5. 恢复原剪贴板文本（同样打标记：恢复不是新的复制事件）
     if let Some(original) = backup {
-        let _ = set_clipboard_text(&original);
+        let _ = crate::infra::platform::clipboard::write_text_to_clipboard(
+            &original,
+            crate::infra::platform::clipboard::SELF_LABEL_INJECT,
+            true,
+        );
     }
 
     Ok(())
 }
 
-/// 读取当前剪贴板文本(若为文本格式)。
-fn read_clipboard_text() -> Option<String> {
-    unsafe {
-        // OleInitialize 确保剪贴板可用(可能已由 Tauri 初始化,OleInitialize 可重入)
-        let _ = OleInitialize(None);
-
-        if OpenClipboard(None).is_err() {
-            return None;
-        }
-        let _guard = ClipboardGuard;
-
-        let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
-        let hg = HGLOBAL(handle.0);
-        let ptr = GlobalLock(hg);
-        if ptr.is_null() {
-            let _ = GlobalUnlock(hg);
-            return None;
-        }
-
-        let wide = windows::core::PCWSTR(ptr as *const u16);
-        Some(wide.to_string().unwrap_or_default())
-    }
-}
-
-/// 设置剪贴板文本。
-fn set_clipboard_text(text: &str) -> Result<(), String> {
-    unsafe {
-        let _ = OleInitialize(None);
-
-        if OpenClipboard(None).is_err() {
-            return Err("OpenClipboard failed".into());
-        }
-        let _guard = ClipboardGuard;
-
-        EmptyClipboard().map_err(|e| format!("EmptyClipboard: {e}"))?;
-
-        // 分配全局内存存放 wide string
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0u16)).collect();
-        let byte_size = wide.len() * 2;
-
-        let handle =
-            GlobalAlloc(GMEM_MOVEABLE, byte_size).map_err(|e| format!("GlobalAlloc: {e}"))?;
-        let ptr = GlobalLock(handle);
-        if ptr.is_null() {
-            let _ = GlobalUnlock(handle);
-            return Err("GlobalLock failed".into());
-        }
-        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, byte_size);
-        let _ = GlobalUnlock(handle);
-
-        SetClipboardData(
-            CF_UNICODETEXT.0 as u32,
-            Some(windows::Win32::Foundation::HANDLE(handle.0)),
-        )
-        .map_err(|e| format!("SetClipboardData: {e}"))?;
-    }
-    Ok(())
+/// 对剪贴板现有内容直接发送 Ctrl+V（0.23.20，配合 mod.rs `paste_clipboard_text`）。
+///
+/// 不备份/不写入/不恢复——调用方已把目标文本写进系统剪贴板（复制语义本就是
+/// 预期行为），粘贴后剪贴板保持目标文本。
+pub fn paste_clipboard_text() -> Result<(), InjectError> {
+    send_paste().map_err(InjectError::SendInput)
 }
 
 /// 发送 Ctrl+V 按键序列。
@@ -330,16 +289,6 @@ fn send_paste() -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// RAII guard: 确保 CloseClipboard 被调用。
-struct ClipboardGuard;
-impl Drop for ClipboardGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseClipboard();
-        }
-    }
 }
 
 #[cfg(test)]

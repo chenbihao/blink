@@ -64,6 +64,9 @@ pub const SELF_LABEL_APP: &str = "blink:app";
 pub const SELF_LABEL_BLINK: &str = "blink:ai";
 /// 编辑器会话结果回写（0.23.2）——结果项由服务显式入库，监听器不重复采集。
 pub const SELF_LABEL_EDITOR: &str = "blink:editor";
+/// 注入上屏的剪贴板中转（0.23.20）——长文本/降级路径写 STT 文本进剪贴板，
+/// 粘贴后即恢复原内容，中间态不落库；监听器跳过持久化。
+pub const SELF_LABEL_INJECT: &str = "blink:inject";
 
 /// 进程级自写入标记（0.17.9）。
 struct SelfWriteMark {
@@ -451,5 +454,6 @@ mod tests {
         assert_eq!(SELF_LABEL_APP, "blink:app");
         assert_eq!(SELF_LABEL_BLINK, "blink:ai");
         assert_eq!(SELF_LABEL_EDITOR, "blink:editor");
+        assert_eq!(SELF_LABEL_INJECT, "blink:inject");
     }
 }
