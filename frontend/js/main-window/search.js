@@ -15,6 +15,18 @@ import * as clipboardMode from "./clipboard-mode.js";
 /** 防抖间隔。后端搜索实测 ~1ms（纯内存），仅用于合并极快连打。 */
 const DEBOUNCE_MS = 40;
 
+/**
+ * 0.24.1：SearchResponse.suggestion 已迁移为 SuggestionSet
+ * `{ revision, primary, secondary }`（0.24 §3.2 双槽位）。
+ * 过渡投影只消费 primary（行为与旧 `Option<Suggestion>` 等价）；
+ * secondary 槽消费随 0.24.4 SuggestionBar 落地。
+ * @param {{suggestion?: {primary?: object|null}}} resp search_apps 响应
+ * @returns {object|null} primary 建议或 null
+ */
+function primarySuggestion(resp) {
+    return resp.suggestion?.primary ?? null;
+}
+
 let timer = null;
 /** 请求序号：每发起一次搜索 +1，响应回来时只接受最新序号，丢弃过期结果（防竞态）。 */
 let seq = 0;
@@ -118,7 +130,7 @@ export async function fetchContextSuggestions() {
         // entries 通常为空（Context 已不产 candidate），但仍走 render 走清理路径
         results.render(resp.entries || [], mySeq);
         // Ghost：空 query 场景后端产 Context Suggestion,此处消费
-        ghost.update("", resp.suggestion);
+        ghost.update("", primarySuggestion(resp));
     } catch (e) {
         console.error("fetchContextSuggestions failed:", e);
     }
@@ -141,7 +153,7 @@ export async function fillQuery(text) {
         const resp = await searchApps(text, mySeq);
         if (mySeq !== seq) return;
         results.render(resp.entries || [], mySeq);
-        ghost.update(text, resp.suggestion);
+        ghost.update(text, primarySuggestion(resp));
     } catch (e) {
         console.error("fillQuery search failed:", e);
     }
@@ -194,7 +206,7 @@ function onInput() {
             // 丢弃过期响应：用户已输入新 query 或已复位
             if (mySeq !== seq) return;
             results.render(resp.entries || [], mySeq);
-            ghost.update(rawQuery, resp.suggestion);
+            ghost.update(rawQuery, primarySuggestion(resp));
         } catch (e) {
             console.error("search_apps failed:", e);
         }

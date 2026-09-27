@@ -432,7 +432,7 @@ fn main() {
             let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
             // 0.8.6 §8.1.2：共享 min_score 引用（SearchService ↔ KeywordProducer）
             let min_score_shared = std::sync::Arc::new(std::sync::RwLock::new(app_config.autosuggest_min_score));
-            router.init_arbiter(min_score_shared.clone());
+            router.init_coordinator(min_score_shared.clone());
 
             // 无条件构造 PluginEngine（空 plugins 也是合法态）。
             // 早期用 Option<Arc<PluginEngine>> 表示"无插件"，但导致：

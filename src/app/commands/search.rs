@@ -82,7 +82,7 @@ pub async fn search_apps(
     let results = service.search(&query, seq).await;
     tracing::debug!(
         count = results.entries.len(),
-        has_suggestion = results.suggestion.is_some(),
+        has_suggestion = results.suggestion.as_ref().is_some_and(|s| s.primary.is_some()),
         %query,
         "search_apps: 返回结果"
     );
@@ -101,14 +101,17 @@ pub async fn search_apps(
             "搜索结果项"
         );
     }
-    if let Some(sug) = &results.suggestion {
-        tracing::debug!(
-            display = %sug.display,
-            replacement = %sug.replacement,
-            source = ?sug.source,
-            confidence = sug.confidence,
-            "suggestion"
-        );
+    if let Some(set) = &results.suggestion {
+        if let Some(sug) = &set.primary {
+            tracing::debug!(
+                id = %sug.id,
+                kind = ?sug.kind,
+                rank_score = sug.rank_score,
+                display = %sug.display,
+                revision = set.revision,
+                "suggestion"
+            );
+        }
     }
     results
 }

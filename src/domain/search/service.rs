@@ -17,7 +17,10 @@ use sqlx::SqlitePool;
 use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::event_names::EventNames;
-use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
+use crate::domain::intent::{
+    Candidate, IntentRouter, RankingHint, Route, Suggestion, SuggestionAction, SuggestionKind,
+    SuggestionSet, Surface,
+};
 use crate::domain::plugin::PluginEngine;
 use crate::infra::platform::context::ContextSnapshot;
 use crate::infra::utils::perf::ai_slo;
@@ -30,18 +33,23 @@ use super::scorer::{boost_priority, placeholder_score, source_rank};
 // TURN2_TIMEOUT_MIN_MS / TURN2_TIMEOUT_MAX_MS / TURN2_FALLBACK_DELAY_MS）。
 // 主窗口 AI 改走 ChatService，超时由 AIConfig::slo_hard_timeout_ms 管理。
 
-/// 同步搜索返回契约（0.8.3 §4.3）——`SearchService::search` / `search_apps` command 出口。
+/// 同步搜索返回契约（0.8.3 §4.3；0.24.1 suggestion 迁移 SuggestionSet）——
+/// `SearchService::search` / `search_apps` command 出口。
 ///
-/// 在 `Vec<AppEntry>` 之外挂 `suggestion` 独立通道（0.8.3 起替代 0.8.1 的 `completion_hint`）：
-/// - Keyword 类：首拼命中（`fy` → `fanyi`）或 fuzzy 部分拼音（`fan hello` → `fanyi hello`）
-/// - Context 类：空 query + 选中英文 → 翻译 Ghost（Tab 采纳）
+/// 在 `Vec<AppEntry>` 之外挂 `suggestion` 独立通道（0.24.1 起为带 revision 的
+/// `SuggestionSet` 双槽位集合）：
+/// - Completion 类：首拼命中（`fy` → `fanyi`）或 fuzzy 部分拼音（`fan hello` → `fanyi hello`）
+/// - Translate 类：空 query + 选中英文 → 翻译建议（Tab 采纳）
+/// - AskAi 类：gating 过筛且无其他命中 → "按 Tab 问 AI"
 ///
-/// 用户按 Tab 后前端把输入替换为 `suggestion.replacement`，触发下一轮搜索。
+/// 用户按 Tab/Shift+Tab 后前端执行 `suggestion.primary/secondary.action`
+/// （0.24 §3.5：RouteQuery=改 query 重搜 / EnterAiMode=进 AI 模式）。
+/// `revision` = 本次 search seq，前端与本地 seq 比对拒绝过期采纳（§3.6）。
 /// `blink://results` 增量事件不带 suggestion（同步首次返回已给过）。
 ///
 /// **契约说明**：这是内部 API（前后端锁版本，同版本编译）。`entries` 必填；rename 会导致
-/// 前端 crash。序列化为 camelCase：`suggestion` 直接 `suggestion`，`SuggestionSource` 序列化为
-/// camelCase 字符串（`keyword` / `context`）。
+/// 前端 crash。序列化为 camelCase：`suggestion` 直接 `suggestion`，`SuggestionKind` 序列化为
+/// camelCase 字符串（`completion` / `translate` / `askAi`）。
 ///
 /// **兼容说明**：0.8.1 的 `completion_hint` 字段已删除；0.8.2 的 `fetchContextSuggestions` 前端通道
 /// 也已废弃（见 §4.13 P0-1）——空 query 现在也走 search 接口拿 suggestion。
@@ -50,7 +58,7 @@ use super::scorer::{boost_priority, placeholder_score, source_rank};
 pub struct SearchResponse {
     pub entries: Vec<AppEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<Suggestion>,
+    pub suggestion: Option<SuggestionSet>,
 }
 
 /// async lane 增量结果的事件 payload(emit "blink://results")。
@@ -538,12 +546,12 @@ impl SearchService {
             language: &language,
         };
 
-        // Suggestion（0.8.3 / 0.8.6 arbiter）
+        // Suggestion（0.8.3 / 0.8.6 coordinator）
         let mut suggestion = self.compute_suggestion(query, &snapshot);
 
         // ── 0.9.2 Phase 5b:AI Ghost Suggestion 覆盖 ─────────────────────
         // Tab 显式触发的核心机制:在**Keyword/Context 都没命中**且**过筛子**时,
-        // 产 `SuggestionSource::Ai` Ghost,让用户按 Tab 显式触发 AI。
+        // 产 `SuggestionKind::AskAi` Ghost,让用户按 Tab 显式触发 AI。
         // 避免:边打字边 spawn AI 造成的连续调用浪费。
         //
         // **触发条件**(与 §3.6 未命中过滤铁则一致):
@@ -554,6 +562,9 @@ impl SearchService {
         //
         // Takeover 被 filter 降级成 Mixed{[]} 时也允许走 AI——用户被拦了没得选,
         // 正是需要 AI 帮忙的场景。
+        //
+        // **0.24.2 归宿**：此"路由未命中才兜底 AI"的判定将并入 Coordinator
+        // eligibility（CoordinateInput.route_summary），届时删除此后置覆盖。
         if suggestion.is_none()
             && matches!(&route, Route::Mixed { candidates } if candidates.is_empty())
         {
@@ -579,6 +590,14 @@ impl SearchService {
             }
         };
 
+        // 0.24.1：组装 SuggestionSet（revision = search seq，§3.6 过期防护真源）。
+        // secondary 恒 None——coordinator 仍是 top-1 语义，双槽选取在 0.24.2。
+        let suggestion = suggestion.map(|primary| SuggestionSet {
+            revision: seq,
+            primary: Some(primary),
+            secondary: None,
+        });
+
         SearchResponse {
             entries,
             suggestion,
@@ -587,11 +606,9 @@ impl SearchService {
 
     /// 若过 gating 且 AI registry 就绪,产 AI Ghost Suggestion(0.9.2 Phase 5b)。
     ///
-    /// display="按 Tab 问 AI",replacement=原 query(前端见 `source==="ai"` 走独立
-    /// invoke `chat_prompt` 路径,**不**触发新一轮 search,避免"采纳后又搜索"的循环)。
+    /// display="按 Tab 问 AI",action=EnterAiMode{prompt=原 query}(前端按 kind==="askAi"
+    /// 走独立 `enterAiMode` 路径,**不**触发新一轮 search,避免"采纳后又搜索"的循环)。
     fn maybe_ai_suggestion(&self, q: &str) -> Option<Suggestion> {
-        use crate::domain::intent::SuggestionSource;
-
         // 空 query 直接排除——AI Ghost 强绑非空 query
         if q.is_empty() {
             return None;
@@ -610,10 +627,13 @@ impl SearchService {
                 // 但当前前端 ghost.js 直接读 display——先填中文,待 0.9.2 第二步统一 i18n
                 #[allow(deprecated)]
                 Some(Suggestion {
+                    id: "ai-query".to_string(),
+                    kind: SuggestionKind::AskAi,
+                    action: SuggestionAction::EnterAiMode {
+                        prompt: q.to_string(),
+                    },
+                    rank_score: 0.5, // 0.24.1 沿用旧值；0.24.2 按 §3.4 归一（AI 处理 Query 0.80）
                     display: "按 Tab 问 AI".to_string(),
-                    replacement: q.to_string(),
-                    source: SuggestionSource::Ai,
-                    confidence: 0.5,
                     prefix_len: 0,
                     origin: None,
                     ranking_hint: None,
@@ -634,13 +654,11 @@ impl SearchService {
     ///
     /// 用户输入 "ai xxx" 显式触发，跳过 gating 四筛子——"ai" 前缀本身就是强信号。
     /// 返回的 Suggestion 让前端 Ghost 渲染 "按 Tab 问 AI"，用户按 Tab 后走
-    /// `acceptCurrent() → invoke("chat_prompt")` 路径。
+    /// `acceptCurrent() → enterAiMode` 路径。
     ///
     /// **为什么不直接调 AI**：输入过程中不应立即消耗 token，
     /// 需要用户按 Tab 显式确认后才真正调用 AI（与 Ghost Tab 触发机制统一）。
     fn make_ai_suggestion(&self, arg: &str) -> Option<Suggestion> {
-        use crate::domain::intent::SuggestionSource;
-
         let reg = self
             .ai_registry
             .read()
@@ -657,10 +675,14 @@ impl SearchService {
         // 但当前前端 ghost.js 直接读 display——先填中文,待 0.9.2 第二步统一 i18n
         #[allow(deprecated)]
         Some(Suggestion {
+            id: "ai-trigger".to_string(),
+            kind: SuggestionKind::AskAi,
+            action: SuggestionAction::EnterAiMode {
+                prompt: arg.to_string(),
+            },
+            // AI 前缀触发是强信号，rank 高于兜底的 0.5（沿用旧 confidence 值）
+            rank_score: 1.0,
             display: "按 Tab 问 AI".to_string(),
-            replacement: arg.to_string(),
-            source: SuggestionSource::Ai,
-            confidence: 1.0, // AI 前缀触发是强信号，confidence 高于兜底的 0.5
             prefix_len: 0,
             origin: None,
             ranking_hint: None,

@@ -1,4 +1,4 @@
-//! Ghost text 补全 overlay（0.8.1 §2.6 / 0.8.3 §4.9）。
+//! Ghost text 补全 overlay（0.8.1 §2.6 / 0.8.3 §4.9；0.24.1 契约更新）。
 //!
 //! **视觉分工**（对齐 Raycast / Warp / VS Code Copilot 做法）：
 //! - **本模块（overlay）**：只负责在输入框里画"影子" ghost text（灰色 `→ fanyi`），
@@ -6,31 +6,33 @@
 //! - **statusbar**：承载"按 [Tab] 接受"提示，用键帽 chip 表达"active UI"语义。
 //!   两个层的视觉语言分开，各司其职。
 //!
-//! 数据流：`search.js` 在 `search_apps` 返回后调 `update(query, suggestion)`；
-//! `hasHint()` 供 statusbar / keyboard 层查询是否处于可接受态；
-//! 用户按 Tab（或 ArrowRight，视 `autosuggest_tab_key` 配置）时 `keyboard.js` 调
-//! `acceptCurrent()` 把输入替换为 `suggestion.replacement` 并触发一次 input 事件（进入
-//! 下一轮搜索，走完整 Takeover）。
+//! 数据流：`search.js` 在 `search_apps` 返回后调 `update(query, suggestion)`
+//! （0.24.1 起传 SuggestionSet.primary）；`hasHint()` 供 statusbar / keyboard 层查询
+//! 是否处于可接受态；用户按 Tab（或 ArrowRight，视 `autosuggest_tab_key` 配置）时
+//! `keyboard.js` 调 `acceptCurrent()` 执行建议携带的类型化 `action`
+//! （0.24 §3.5：RouteQuery=改 query 重搜 / EnterAiMode=进 AI 模式）。
 //!
-//! **0.8.3 契约变更**：入参从 0.8.1 的 `CompletionHint` 换成 `Suggestion { source, ... }`。
-//! source 分两类,视觉弱区分（§4.9）：
-//! - `keyword`：0.8.1 输入补全（`fy` → `fanyi`）——常规灰度。
-//! - `context`：0.8.3 环境感知（选中英文 → 翻译）——更浅灰度,让用户分辨「环境猜」vs「打字补全」。
+//! **0.24.1 契约**：suggestion 形如 `{ id, kind, action, rankScore, display, prefixLen }`。
+//! 按 `kind` 分视觉通道（弱区分 §4.9）：
+//! - `completion`：输入补全（`fy` → `fanyi`）——常规灰度，`->` 前缀。
+//! - `translate`：环境感知（选中英文 → 翻译）——不画影子（0.16.1），提示走 statusbar。
+//! - `askAi`：AI 触发（"按 Tab 问 AI"）——灰影无前缀 + ghost-context 样式。
+//! `action` 是类型化采纳动作：`{routeQuery:{query}}` / `{enterAiMode:{prompt}}`。
 //!
 //! **两种 hint 形态**（沿用 0.8.1）：
-//! - `display` 非空（补全场景 `fy` → `fanyi` / Context `翻译 "the..."`）：overlay 渲染灰影
+//! - `display` 非空（补全场景 `fy` → `fanyi`）：overlay 渲染灰影
 //! - `display` 为空（已完整无尾空格 `fanyi`）：overlay 不渲染任何字符,仅由 statusbar
 //!   提示"按 [Tab] 进入参数模式"
 //!
 //! **Ghost 是"发现工具"，不是"召回工具"**：
 //! - 部分拼音 `fan hello` 不进 route 匹配（翻译插件不出现在候选），但走独立 fuzzy
 //!   通道触发 ghost `→ fanyi`。用户 Tab 后重新触发搜索时才命中 Takeover。
-//! - 0.8.3 Context 类同理：Context 命中不进 route()（不产 candidate），只出 Ghost。
+//! - Translate 类同理：Context 命中不进 route()（不产 candidate），只出 Ghost。
 
 import {queryEl} from "./dom.js";
 import * as aiMode from "./ai-mode.js";
 
-// 当前 suggestion，形如 { display, replacement, source, confidence, prefixLen }
+// 当前 suggestion（SuggestionSet.primary），形如 { id, kind, action, rankScore, display, prefixLen, origin }
 let currentSuggestion = null;
 let ghostTypedEl = null;
 let ghostSuggestEl = null;
@@ -139,30 +141,27 @@ function renderToDom(query) {
     // 只在补全场景（display 非空）画影子文字；已完整场景（display 为空）
     // overlay 保持空--用户已看到自己的完整输入，加任何影子都是冗余；提示交给 statusbar。
     //
-    // 0.8.3：Context 类的 display 已是完整独立文本（"翻译 \"the...\""）,不需要 `->` 前缀。
-    // Keyword 类保留 `->` 前缀（表达"补全为..."的语义）。
-    // 0.9.2:AI 类 display 是 "按 Tab 问 AI",不属于补全语义,也不用 `->` 前缀。
-    //
-    // 0.16.1：Context 类不再画影子文字（环境感知是弱信号，不应占输入框影子位打扰
+    // 0.24.1：按 kind 分支（原 source 字段退役）。
+    // 0.16.1：Translate 类不再画影子文字（环境感知是弱信号，不应占输入框影子位打扰
     // 用户）。overlay 保持空，采纳提示只走 statusbar。currentSuggestion 状态仍正常
     // 持有--hasHint()/currentDisplay()/currentOrigin() 供 statusbar 读取。
     if (!currentSuggestion.display) {
         ghostSuggestEl.textContent = "";
-    } else if (currentSuggestion.source === "context") {
-        // 0.16.1：context 不画影子，只设 data-ghost-active 让 statusbar 知道有 hint
+    } else if (currentSuggestion.kind === "translate") {
+        // 0.16.1：translate（原 context）不画影子，只持有状态供 statusbar 提示
         ghostSuggestEl.textContent = "";
-    } else if (currentSuggestion.source === "ai") {
+    } else if (currentSuggestion.kind === "askAi") {
         ghostSuggestEl.textContent = ` ${currentSuggestion.display}`;
     } else {
         ghostSuggestEl.textContent = ` -> ${currentSuggestion.display}`;
     }
     ghostSuggestEl.classList.toggle(
         "ghost-context",
-        currentSuggestion.source === "ai",
+        currentSuggestion.kind === "askAi",
     );
-    // 0.16.1：context 类不再画影子，也不需要 ghost-context 样式（影子为空）
-    if (currentSuggestion.display && currentSuggestion.source !== "context") {
-        // 0.16.1：context 类不画影子，不设 data-ghost-active（overlay 无视觉变化），
+    // 0.16.1：translate 类不画影子，也不需要 ghost-context 样式（影子为空）
+    if (currentSuggestion.display && currentSuggestion.kind !== "translate") {
+        // 0.16.1：translate 类不画影子，不设 data-ghost-active（overlay 无视觉变化），
         // 也不需要 scrollWithMargin（没有影子要留空间）。但 currentSuggestion 仍持有，
         // hasHint() 返回 true，statusbar 会展示采纳提示。
         queryEl.setAttribute("data-ghost-active", "");
@@ -208,38 +207,46 @@ export function clear() {
 }
 
 /**
- * 接受当前补全提示。行为按 source 分:
+ * 接受当前建议。行为按 action 分派（0.24 §3.5 类型化动作）：
  *
- * - `keyword` / `context`:把输入替换为 `suggestion.replacement` 并触发一次 input
- *   事件走搜索路径。触发下一轮 search_apps。
- * - `ai`(0.9.2 Phase 5b, 0.17.6 重构):**不改输入框**,直接进入 AI 模式
- *   (aiMode.enterAiMode)，由 ChatService 接管对话流。
+ * - `routeQuery`（Completion / Translate）：把输入替换为 `action.query` 并触发一次
+ *   input 事件走搜索路径，触发下一轮 search_apps。
+ * - `enterAiMode`（AskAi，0.9.2 Phase 5b / 0.17.6 重构）：**不改输入框**，直接进入
+ *   AI 模式（aiMode.enterAiMode），由 ChatService 接管对话流。
  *
  * 接受后立即 `clear()` 而不是等新一轮 search 返回覆盖——search 有 40ms debounce，
  * 期间旧 hint 若保留：输入框已是 `fanyi `（尾空格），statusbar 却还显示"按 Tab → fanyi"
  * ——视觉错位。清空是收敛终态：新 query `fanyi ` 尾空格触发 suggest 返回 None，
  * hint 保持空——正确。若新 query 仍能命中新 hint（如首拼再补全），下一轮回调自然回填。
  *
- * 返回是否成功接受（无 suggestion 时返回 false，供 keyboard 层判断要不要 preventDefault）。
+ * 返回是否成功接受（无 suggestion / 无可执行 action 时返回 false，
+ * 供 keyboard 层判断要不要 preventDefault）。
  */
 export function acceptCurrent() {
     if (!currentSuggestion) return false;
 
-    // AI 类:进入 AI 模式（0.17.6: 改走 ChatService，不再调 trigger_ai）
-    if (currentSuggestion.source === "ai") {
-        const query = currentSuggestion.replacement;
+    const action = currentSuggestion.action;
+    // AskAi 类:进入 AI 模式（0.17.6: 改走 ChatService，不再调 trigger_ai）
+    if (action?.enterAiMode) {
+        const {prompt} = action.enterAiMode;
         clear();
-        aiMode.enterAiMode(query);
+        aiMode.enterAiMode(prompt);
         return true;
     }
 
-    const rep = currentSuggestion.replacement;
-    queryEl.value = rep;
-    queryEl.setSelectionRange(rep.length, rep.length);
+    if (action?.routeQuery) {
+        const rep = action.routeQuery.query;
+        queryEl.value = rep;
+        queryEl.setSelectionRange(rep.length, rep.length);
+        clear();
+        // 派发 input 事件，让 search.js 的 onInput 走一遍——重新算 route + ghost。
+        queryEl.dispatchEvent(new Event("input", {bubbles: true}));
+        return true;
+    }
+
+    // 防御：后端契约保证 action 必填；缺失时视为不可采纳，避免误吞 Tab
     clear();
-    // 派发 input 事件，让 search.js 的 onInput 走一遍——重新算 route + ghost。
-    queryEl.dispatchEvent(new Event("input", {bubbles: true}));
-    return true;
+    return false;
 }
 
 /** 是否有活跃 suggestion（keyboard / statusbar 层查询）。 */
@@ -252,9 +259,10 @@ export function currentDisplay() {
     return currentSuggestion?.display || "";
 }
 
-/** 当前 suggestion 的 source（statusbar 按源分文案时用）。 */
-export function currentSource() {
-    return currentSuggestion?.source || null;
+/** 当前 suggestion 的 kind（statusbar 按语义类分文案时用）。
+ *  值为 "completion" | "translate" | "askAi" | null（0.24.1 起 kind 取代 source）。 */
+export function currentKind() {
+    return currentSuggestion?.kind || null;
 }
 
 /** 当前 suggestion 的 origin（Context 类才有，statusbar 用来展示"来自划词/剪贴板"）。

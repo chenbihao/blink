@@ -39,18 +39,25 @@ impl SuggestionProducer for KeywordProducer {
         SuggestionSource::Keyword
     }
 
-    #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint: None，0.9 彻底移除字段后简化
+    #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint: None，0.24.2 producer 协议重构后移除
     fn produce(&self, query: &str, _snapshot: &AwarenessSnapshot) -> Vec<Suggestion> {
+        use super::{SuggestionAction, SuggestionKind};
+
         let min_score = *self.min_score.read().unwrap();
         let keywords = self.router.collect_suggest_keywords();
         let Some((hint, score)) = suggest::compute_hint_scored(&keywords, query, min_score) else {
             return Vec::new();
         };
         vec![Suggestion {
+            id: "completion-keyword".to_string(),
+            kind: SuggestionKind::Completion,
+            action: SuggestionAction::RouteQuery {
+                query: hint.replacement,
+            },
+            // 0.24.1 沿用 fuzzy 分原值（排序行为不变）；0.24.2 按 §3.4 归一为
+            // 0.70 + 0.28 × fuzzy
+            rank_score: score.min(1.0),
             display: hint.display,
-            replacement: hint.replacement,
-            source: SuggestionSource::Keyword,
-            confidence: score.min(1.0),
             prefix_len: hint.prefix_len,
             origin: None,
             ranking_hint: None,

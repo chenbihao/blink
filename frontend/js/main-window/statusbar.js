@@ -97,11 +97,12 @@ function fillPrimary(primary, active, hasHint) {
     if (hasHint) {
         const display = ghost.currentDisplay();
         const params = {key: renderKey(autosuggestConfig.getTabKey())};
-        const source = ghost.currentSource();
+        const kind = ghost.currentKind();
 
-        // 0.16.1：context 类走独立文案（环境感知不是"补全"，措辞要区分）。
-        // keyword/ai 类仍走 autosuggest_accept / autosuggest_enter。
-        if (source === "context") {
+        // 0.24.1：按 kind 分文案（原 source 字段退役）。
+        // translate 类走独立文案（环境感知不是"补全"，措辞要区分）。
+        // completion/askAi 类仍走 autosuggest_accept / autosuggest_enter。
+        if (kind === "translate") {
             if (display) {
                 primary.appendChild(renderHint(t("statusbar.context_accept"),
                     {...params, target: display}));

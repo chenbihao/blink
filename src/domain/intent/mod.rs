@@ -23,7 +23,9 @@ use crate::infra::utils::text::{pinyin_full, pinyin_initials};
 pub mod suggest;
 pub mod suggestion;
 pub use suggest::CompletionHint;
-pub use suggestion::{Suggestion, SuggestionOrigin, SuggestionSource};
+// SuggestionSource（producer 身份）0.24.1 起不上 wire，生产代码仅 suggestion 模块
+// 内部消费（producer trait 实现），不再从 intent 层 re-export。
+pub use suggestion::{Suggestion, SuggestionAction, SuggestionKind, SuggestionOrigin, SuggestionSet};
 
 // ── 呈现模式 ──────────────────────────────────────────────
 
@@ -371,11 +373,11 @@ pub struct RuleRouter {
     /// key = `binding_key(target_id, trigger_key)`。命中 key 的 binding 在
     /// `match_context_hits` 中被跳过——route() 与 best_suggestion() 共用此判定。
     disabled_bindings: RwLock<std::collections::HashSet<String>>,
-    /// Suggestion 多源竞争仲裁器（0.8.6 §8.1.2）。
-    /// `best_suggestion` 委托此 arbiter，不再内嵌 if/else 分支。
-    arbiter: RwLock<suggestion::arbiter::SuggestionArbiter>,
+    /// Suggestion 多源协调器（0.8.6 §8.1.2 建立，0.24.1 更名 Coordinator）。
+    /// `best_suggestion` 委托此 coordinator，不再内嵌 if/else 分支。
+    coordinator: RwLock<suggestion::coordinator::SuggestionCoordinator>,
     /// 上一次 `best_suggestion` 产出的 RankingHint（0.8.6 §8.1.2）。
-    /// 由 arbiter 竞争后写入，SearchService 下一轮 `route()` 读取做 Surface Booster。
+    /// 由 coordinator 竞争后写入，SearchService 下一轮 `route()` 读取做 Surface Booster。
     /// 替代原 `Suggestion.ranking_hint` 的跨轮反馈通道。
     last_ranking_hint: Mutex<Option<RankingHint>>,
 }
@@ -450,13 +452,13 @@ impl RuleRouter {
             // 单测下不注入 language → 用 "zh" 兜底（Blink 默认 UI 语言）。
             app_language: RwLock::new("zh".to_string()),
             disabled_bindings: RwLock::new(std::collections::HashSet::new()),
-            // arbiter 初始为空，构造完成后通过 `init_arbiter` 注入 producers
-            arbiter: RwLock::new(suggestion::arbiter::SuggestionArbiter::new()),
+            // coordinator 初始为空，构造完成后通过 `init_coordinator` 注入 producers
+            coordinator: RwLock::new(suggestion::coordinator::SuggestionCoordinator::new()),
             last_ranking_hint: Mutex::new(None),
         }
     }
 
-    /// 初始化 SuggestionArbiter 的 producers（0.8.6 §8.1.2）。
+    /// 初始化 SuggestionCoordinator 的 producers（0.8.6 §8.1.2；0.24.1 随 Arbiter 更名）。
     ///
     /// 必须在 `RuleRouter` 被 `Arc` 包装后调用——`ContextProducer` 和 `KeywordProducer`
     /// 都需要 `Arc<RuleRouter>` 来访问内部数据。
@@ -465,13 +467,13 @@ impl RuleRouter {
     /// `KeywordProducer.produce` 每次读取最新阈值，无需额外通知。
     ///
     /// 在 `main.rs` 中 `Arc::new(RuleRouter::new(...))` 之后立即调用。
-    pub fn init_arbiter(self: &Arc<Self>, min_score: Arc<std::sync::RwLock<f64>>) {
-        let mut arbiter = self.arbiter.write().unwrap();
-        arbiter.register(Arc::new(suggestion::keyword::KeywordProducer::from_router(
+    pub fn init_coordinator(self: &Arc<Self>, min_score: Arc<std::sync::RwLock<f64>>) {
+        let mut coordinator = self.coordinator.write().unwrap();
+        coordinator.register(Arc::new(suggestion::keyword::KeywordProducer::from_router(
             self.clone(),
             min_score,
         )));
-        arbiter.register(Arc::new(suggestion::context::ContextProducer::new(
+        coordinator.register(Arc::new(suggestion::context::ContextProducer::new(
             self.clone(),
         )));
     }
@@ -822,18 +824,18 @@ impl IntentRouter for RuleRouter {
         snapshot: &ContextSnapshot,
         min_score: f64,
     ) -> Option<Suggestion> {
-        // 0.8.6 §8.1.2：委托 SuggestionArbiter 做多源竞争。
-        // Keyword/Context 两个 producer 各自独立产出候选，arbiter 按 confidence 选 top-1。
-        let arbiter = self.arbiter.read().unwrap();
-        if arbiter.producer_count() > 0 {
-            // arbiter 已初始化（生产环境通过 init_arbiter 注入 producers）
-            let (sug, hint) = arbiter.best(query, snapshot);
+        // 0.8.6 §8.1.2：委托 SuggestionCoordinator 做多源竞争。
+        // Keyword/Context 两个 producer 各自独立产出候选，coordinator 按 rank_score 选 top-1。
+        let coordinator = self.coordinator.read().unwrap();
+        if coordinator.producer_count() > 0 {
+            // coordinator 已初始化（生产环境通过 init_coordinator 注入 producers）
+            let (sug, hint) = coordinator.coordinate(query, snapshot);
             *self.last_ranking_hint.lock().unwrap() = hint;
             return sug;
         }
-        drop(arbiter); // 释放读锁再调 fallback
+        drop(coordinator); // 释放读锁再调 fallback
 
-        // fallback：arbiter 未初始化时（单测环境），走原直接实现
+        // fallback：coordinator 未初始化时（单测环境），走原直接实现
         self.best_suggestion_direct(query, snapshot, min_score)
     }
 
@@ -873,10 +875,13 @@ impl RuleRouter {
             suggest::compute_hint_scored(&self.collect_suggest_keywords(), query, min_score)
         {
             let sug = Suggestion {
+                id: "completion-keyword".to_string(),
+                kind: SuggestionKind::Completion,
+                action: SuggestionAction::RouteQuery {
+                    query: hint.replacement,
+                },
+                rank_score: score.min(1.0),
                 display: hint.display,
-                replacement: hint.replacement,
-                source: SuggestionSource::Keyword,
-                confidence: score.min(1.0),
                 prefix_len: hint.prefix_len,
                 origin: None,
                 ranking_hint: None,
@@ -930,11 +935,21 @@ impl RuleRouter {
         let confidence = context_confidence(when, best_ctx.origin);
         let origin = best_ctx.origin.map(SuggestionOrigin::from);
         let (display, replacement) = self.build_context_suggestion_text(&best_ctx, snapshot);
+        // 0.24.1：当前 context 规则仅 translate 插件注册（text_is_non_target_lang），
+        // kind 恒映射 Translate；0.24.2 起按规则语义分类。id 按 origin 区分选区/剪贴板，
+        // 与 §3.4 rank 表 slug 对齐。
+        let id = match origin {
+            Some(SuggestionOrigin::Selection) => "translate-selection",
+            Some(SuggestionOrigin::Clipboard) => "translate-clipboard",
+            None => "translate-context",
+        }
+        .to_string();
         Some(Suggestion {
+            id,
+            kind: SuggestionKind::Translate,
+            action: SuggestionAction::RouteQuery { query: replacement },
+            rank_score: confidence,
             display,
-            replacement,
-            source: SuggestionSource::Context,
-            confidence,
             prefix_len: 0,
             origin,
             ranking_hint: Some(RankingHint {
@@ -1488,6 +1503,14 @@ fn match_keyword(query: &str, keyword: &str) -> Option<MatchType> {
 mod tests {
     use super::*;
 
+    /// 测试辅助：提取 RouteQuery 动作的 query（0.24.1 起 replacement 并入 action）。
+    fn route_query(sug: &Suggestion) -> &str {
+        match &sug.action {
+            SuggestionAction::RouteQuery { query } => query,
+            _ => panic!("期望 RouteQuery 动作，实际 {:?}", sug.action),
+        }
+    }
+
     fn router_with_rules(takeover_enabled: bool) -> RuleRouter {
         let r = RuleRouter::new(takeover_enabled);
         // echo: auto(默认),无参→Priority,带参→Takeover
@@ -1918,8 +1941,8 @@ mod tests {
         let route = run_route_with_snapshot(&r, "", snapshot.clone()).await;
         assert!(matches!(&route, Route::Mixed { candidates } if candidates.is_empty()));
         let sug = run_best_suggestion(&r, "", &snapshot).expect("expected context suggestion");
-        assert_eq!(sug.source, SuggestionSource::Context);
-        assert!(sug.replacement.contains("hello world foo"));
+        assert_eq!(sug.kind, SuggestionKind::Translate);
+        assert!(route_query(&sug).contains("hello world foo"));
     }
 
     #[tokio::test]
@@ -1929,7 +1952,7 @@ mod tests {
         let route = run_route_with_snapshot(&r, "", snapshot.clone()).await;
         assert!(matches!(&route, Route::Mixed { candidates } if candidates.is_empty()));
         let sug = run_best_suggestion(&r, "", &snapshot).expect("expected context suggestion");
-        assert_eq!(sug.source, SuggestionSource::Context);
+        assert_eq!(sug.kind, SuggestionKind::Translate);
     }
 
     #[tokio::test]
@@ -1950,9 +1973,9 @@ mod tests {
         );
         let sug_a = run_best_suggestion(&r, "", &snap_a).expect("expected context suggestion");
         assert!(
-            sug_a.replacement.contains("selected english text"),
-            "Selection 恒胜,replacement={}",
-            sug_a.replacement
+            route_query(&sug_a).contains("selected english text"),
+            "Selection 恒胜,action={:?}",
+            sug_a.action
         );
 
         // 情形 B:Clipboard 先、Selection 后 → Selection 胜
@@ -1967,9 +1990,9 @@ mod tests {
         );
         let sug_b = run_best_suggestion(&r, "", &snap_b).expect("expected context suggestion");
         assert!(
-            sug_b.replacement.contains("selected english text"),
-            "Selection 恒胜,replacement={}",
-            sug_b.replacement
+            route_query(&sug_b).contains("selected english text"),
+            "Selection 恒胜,action={:?}",
+            sug_b.action
         );
     }
 
@@ -2025,7 +2048,7 @@ mod tests {
         // app_language=en，selection 是中文 → 触发翻译（走 best_suggestion）
         let snapshot = snap_selection("你好世界啊");
         let sug = run_best_suggestion(&r, "", &snapshot).expect("expected suggestion");
-        assert_eq!(sug.source, SuggestionSource::Context);
+        assert_eq!(sug.kind, SuggestionKind::Translate);
     }
 
     #[tokio::test]
@@ -2052,8 +2075,8 @@ mod tests {
         let snapshot = snap_selection(&long_text);
         let sug = run_best_suggestion(&r, "", &snapshot).expect("expected suggestion");
         // replacement 里的 arg 部分应被截断（2000 char + '…'）
-        assert!(sug.replacement.chars().count() >= 2001);
-        assert!(sug.replacement.contains('…'));
+        assert!(route_query(&sug).chars().count() >= 2001);
+        assert!(route_query(&sug).contains('…'));
     }
 
     #[tokio::test]
@@ -2119,7 +2142,7 @@ mod tests {
         // best_suggestion 只产 top-1
         let sug = run_best_suggestion(&r, "", &snap_selection("hello world foo"))
             .expect("expected suggestion");
-        assert_eq!(sug.source, SuggestionSource::Context);
+        assert_eq!(sug.kind, SuggestionKind::Translate);
     }
 
     #[tokio::test]
@@ -2231,9 +2254,9 @@ mod tests {
         let sug = r
             .best_suggestion("fy", &snap, 0.7)
             .expect("expected keyword suggestion");
-        assert_eq!(sug.source, SuggestionSource::Keyword);
+        assert_eq!(sug.kind, SuggestionKind::Completion);
         assert_eq!(sug.display, "fanyi");
-        assert!((0.0..=1.0).contains(&sug.confidence));
+        assert!((0.0..=1.0).contains(&sug.rank_score));
     }
 
     #[tokio::test]
@@ -2250,8 +2273,8 @@ mod tests {
         let sug = r
             .best_suggestion("fanyi", &snap, 0.7)
             .expect("expected suggestion");
-        assert_eq!(sug.source, SuggestionSource::Keyword);
-        assert_eq!(sug.confidence, 1.0);
+        assert_eq!(sug.kind, SuggestionKind::Completion);
+        assert_eq!(sug.rank_score, 1.0);
     }
 
     #[tokio::test]
@@ -2261,7 +2284,7 @@ mod tests {
         let snap = snap_selection("hello world foo");
         // 空 query → Context Suggestion
         let sug = r.best_suggestion("", &snap, 0.7).expect("expected context");
-        assert_eq!(sug.source, SuggestionSource::Context);
+        assert_eq!(sug.kind, SuggestionKind::Translate);
         // 非空 query → 不显示 Context Ghost
         let sug = r.best_suggestion("chrome", &snap, 0.7);
         assert!(sug.is_none(), "非空 query 不应显示 Context Ghost");
@@ -2363,7 +2386,7 @@ mod tests {
         let sug = r
             .best_suggestion("", &snap, 0.7)
             .expect("expected top-1 suggestion");
-        assert!(sug.replacement.contains("open_url"));
+        assert!(route_query(&sug).contains("open_url"));
     }
 
     #[tokio::test]
@@ -2458,9 +2481,9 @@ mod tests {
             .expect("expected suggestion");
         // short_target_name("builtin.translate") = "translate"
         assert!(
-            sug.replacement.starts_with("translate"),
+            route_query(&sug).starts_with("translate"),
             "replacement={}",
-            sug.replacement
+            route_query(&sug)
         );
     }
 
@@ -2500,9 +2523,9 @@ mod tests {
             .best_suggestion("", &snap, 0.7)
             .expect("expected suggestion");
         assert!(
-            sug.replacement.starts_with("翻译 "),
+            route_query(&sug).starts_with("翻译 "),
             "expected CJK keyword, got: {}",
-            sug.replacement
+            route_query(&sug)
         );
     }
 
@@ -2541,9 +2564,9 @@ mod tests {
             .best_suggestion("", &snap, 0.7)
             .expect("expected suggestion");
         assert!(
-            sug.replacement.starts_with("translate "),
+            route_query(&sug).starts_with("translate "),
             "expected ASCII keyword, got: {}",
-            sug.replacement
+            route_query(&sug)
         );
     }
 
@@ -2613,7 +2636,7 @@ mod tests {
 
     #[tokio::test]
     async fn suggestion_ghost_replacement_hits_takeover_via_route() {
-        // 0.8.3 §4.13 P0 闭环单测：Ghost.replacement 喂回 route() 必须能命中 keyword Takeover。
+        // 0.8.3 §4.13 P0 闭环单测：Ghost 采纳 query（RouteQuery）喂回 route() 必须能命中 keyword Takeover。
         // 这条闭环旧实现（fallback 到 id 末段 `translate`）+ 无 keyword rule 会断链;
         // 新实现从 rules 反查偏好字符集的 keyword,确保能命中。
         let r = RuleRouter::new(true);
@@ -2642,7 +2665,7 @@ mod tests {
         let sug = r
             .best_suggestion("", &snap, 0.7)
             .expect("expected suggestion");
-        let replacement = sug.replacement.clone();
+        let replacement = route_query(&sug).to_string();
 
         // 2. 用 replacement 走 route(),期待 Takeover 命中 builtin.translate
         //    （keyword「翻译」+ arg 触发 Prefix 分支 → resolve_surface = Takeover）
@@ -2880,7 +2903,7 @@ mod tests {
         let sug = r
             .best_suggestion("fy", &snap, 0.7)
             .expect("expected keyword suggestion");
-        assert_eq!(sug.source, SuggestionSource::Keyword);
+        assert_eq!(sug.kind, SuggestionKind::Completion);
         assert!(sug.origin.is_none());
     }
 
@@ -2899,9 +2922,9 @@ mod tests {
         let sug1 = r.best_suggestion("", &with_sel, 0.7).unwrap();
         assert_eq!(sug1.origin, Some(SuggestionOrigin::Selection));
         assert!(
-            (sug1.confidence - 0.75).abs() < 1e-9,
+            (sug1.rank_score - 0.75).abs() < 1e-9,
             "expected 0.75, got {}",
-            sug1.confidence
+            sug1.rank_score
         );
 
         let with_clip = snap_clipboard("hello world foo");
@@ -2909,9 +2932,9 @@ mod tests {
         assert_eq!(sug2.origin, Some(SuggestionOrigin::Clipboard));
         // 0.75 * 0.85 = 0.6375
         assert!(
-            (sug2.confidence - 0.6375).abs() < 1e-9,
+            (sug2.rank_score - 0.6375).abs() < 1e-9,
             "expected 0.6375, got {}",
-            sug2.confidence
+            sug2.rank_score
         );
     }
 
