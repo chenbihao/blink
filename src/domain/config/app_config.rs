@@ -50,6 +50,17 @@ pub struct AppConfig {
     pub autosuggest_min_score: f64,
     #[serde(default = "default_autosuggest_tab_key")]
     pub autosuggest_tab_key: String,
+    /// 0.24.5 §5.6 建议展示策略开关组 + 降频（设置页 Smart Tab 建议区投影）。
+    #[serde(default = "default_true")]
+    pub completion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub context_suggestion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub ai_suggestion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub secondary_enabled: bool,
+    #[serde(default = "default_true")]
+    pub suppress_repeated: bool,
     #[serde(default)]
     pub disabled_context_bindings: Vec<String>,
     #[serde(default = "default_true")]
@@ -93,6 +104,11 @@ impl Default for AppConfig {
             autosuggest_enabled: true,
             autosuggest_min_score: 0.7,
             autosuggest_tab_key: "Tab".to_string(),
+            completion_enabled: true,
+            context_suggestion_enabled: true,
+            ai_suggestion_enabled: true,
+            secondary_enabled: true,
+            suppress_repeated: true,
             disabled_context_bindings: Vec::new(),
             chord_enabled: true,
             chord_hint_visible: true,
@@ -135,6 +151,18 @@ pub struct AutosuggestUpdate {
     pub enabled: bool,
     pub min_score: f64,
     pub tab_key: String,
+    /// 0.24.5 §5.6 展示策略开关组 + 降频。serde 默认全开：旧格式 payload
+    /// {enabled, minScore, tabKey} 不误关新特性（设置页始终发送完整字段）。
+    #[serde(default = "default_true")]
+    pub completion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub context_suggestion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub ai_suggestion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub secondary_enabled: bool,
+    #[serde(default = "default_true")]
+    pub suppress_repeated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +443,11 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         autosuggest_tab_key: suggestion.autosuggest_tab_key,
         proactive_enabled: suggestion.proactive_enabled,
         empty_query_topn: suggestion.empty_query_topn,
+        completion_enabled: suggestion.completion_enabled,
+        context_suggestion_enabled: suggestion.context_suggestion_enabled,
+        ai_suggestion_enabled: suggestion.ai_suggestion_enabled,
+        secondary_enabled: suggestion.secondary_enabled,
+        suppress_repeated: suggestion.suppress_repeated,
         chord_enabled: chord.chord_enabled,
         chord_hint_visible: chord.chord_hint_visible,
         chord_bindings: chord.bindings.clone(),
@@ -470,6 +503,11 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
             autosuggest_tab_key: config.autosuggest_tab_key.clone(),
             proactive_enabled: config.proactive_enabled,
             empty_query_topn: config.empty_query_topn,
+            completion_enabled: config.completion_enabled,
+            context_suggestion_enabled: config.context_suggestion_enabled,
+            ai_suggestion_enabled: config.ai_suggestion_enabled,
+            secondary_enabled: config.secondary_enabled,
+            suppress_repeated: config.suppress_repeated,
             // 未映射进 AppConfig 门面的字段（0.24 secondary_min_rank 等）保留 KV 现值
             ..ConfigStore::get::<SuggestionConfig>(pool).await
         },

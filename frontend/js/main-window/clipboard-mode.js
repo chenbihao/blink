@@ -24,7 +24,11 @@
 import {queryEl, resultsEl} from "./dom.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
-import {syncWindowSize} from "./window-size.js";
+import * as suggestionBar from "./suggestion-bar.js";
+import * as modeHeader from "./mode-header.js";
+import * as statusbar from "./statusbar.js";
+import {show as showFeedback} from "./transient-feedback.js";
+import {syncWindowSize, resyncWindowSize} from "./window-size.js";
 import {
     copyToClipboard,
     deleteClipboardImage,
@@ -58,9 +62,6 @@ let seq = 0;
 
 /** 0.20.2: 上次搜索的 trim 后 query——避免相同 query 重复搜索导致光标重置。 */
 let lastQuery = "";
-
-/** 模式徽章 DOM 元素。 */
-let badgeEl = null;
 
 // ── 状态查询 ──────────────────────────────────────────────────────────────
 
@@ -107,15 +108,8 @@ export function reloadList() {
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────
 
-/** 初始化：创建徽章 DOM 元素。main.js 启动时调一次。 */
+/** 初始化（0.24.4 起徽章统一走 ModeHeader，无自建 DOM；保留入口供装配一致性）。 */
 export function init() {
-    badgeEl = document.createElement("div");
-    badgeEl.id = "clipboard-mode-badge";
-    badgeEl.className = "clipboard-mode-badge hidden";
-    badgeEl.innerHTML =
-        '<svg class="icon"><use href="#icon-copy"/></svg><span>剪贴板</span>';
-    const searchMode = document.getElementById("search-mode");
-    searchMode.appendChild(badgeEl);
 }
 
 /** 复位：退出剪贴板模式（lifecycle shown/hidden 调用）。 */
@@ -153,13 +147,16 @@ export function enter({preserveQuery = false} = {}) {
     queryEl.value = initialQuery;
     queryEl.focus();
 
-    // 显示徽章
-    if (badgeEl) {
-        badgeEl.classList.remove("hidden");
-    }
+    // 0.24.4: 模式徽章统一走 ModeHeader
+    modeHeader.set({
+        id: "clipboard",
+        icon: "copy",
+        label: t("mode.clipboard.label"),
+    });
 
-    // 清空 ghost + 结果
+    // 清空 ghost + 建议 + 结果
     ghost.clear();
+    suggestionBar.clear();
     results.clear();
 
     // 标记 body——CSS 据此隐藏 chord 提示（独占模式下不显示 Alt+字母 待命列表）
@@ -186,10 +183,8 @@ export function exit() {
     // 恢复 placeholder
     queryEl.placeholder = savedPlaceholder;
 
-    // 隐藏徽章
-    if (badgeEl) {
-        badgeEl.classList.add("hidden");
-    }
+    // 0.24.4: 清 ModeHeader 徽章
+    modeHeader.clear();
 
     // 取消防抖
     clearTimeout(timer);
@@ -202,11 +197,14 @@ export function exit() {
     queryEl.value = "";
     results.clear();
     ghost.clear();
+    suggestionBar.clear();
+    statusbar.clearOverride();
 
     // 恢复正常搜索的 Context Suggestion
     // 不直接调 search.fetchContextSuggestions 避免循环依赖，
     // 由调用方（keyboard.js ESC / lifecycle reset）触发
-    syncWindowSize();
+    // 0.24.4: 模式退出是离散状态转换，resync 收缩被 ModeHeader/列表撑开的高度
+    resyncWindowSize();
 }
 
 // ── 输入处理 ──────────────────────────────────────────────────────────────
@@ -515,68 +513,37 @@ function refreshSelectionCss() {
         }
         li.classList.toggle("clipboard-selected", !!hitId && selection.isSelected(hitId));
     }
-    // 更新状态栏
+    // 更新状态栏覆写：有选择 → 多选计数覆写；无选择 → 恢复常规 footer
     if (selection.hasSelection()) {
         showStatusSelected(selection.selectedCount());
     } else {
-        // 恢复正常状态栏
+        statusbar.clearOverride();
         results.refreshStatusbar?.();
     }
 }
 
-// ── 0.20.2 状态栏反馈 ───────────────────────────────────────────────────────
+// ── 0.20.2 状态栏反馈（0.24.4 分工迁移）───────────────────────────────────
+// 多选计数是持续状态 → ResultFooter override；loading/success/error 是瞬态
+// → TransientFeedback。均不再直接改写 #statusbar DOM。
 
-/** 简单状态栏更新（直接写 DOM）。 */
+/** 多选计数覆写 ResultFooter（selection 存续期间持续显示）。 */
 function showStatusSelected(count) {
-    const el = document.getElementById("statusbar");
-    if (!el) return;
-    el.classList.add("visible");
-    el.replaceChildren();
-    const span = document.createElement("span");
-    span.className = "hint-primary";
-    span.textContent = t("clipboard.hint_selected", {count});
-    el.appendChild(span);
+    statusbar.setOverride(t("clipboard.hint_selected", {count}));
 }
 
+/** 批量复制进行中（持续显示直到被 success/error 替换或 dismiss）。 */
 function showStatusLoading(count) {
-    const el = document.getElementById("statusbar");
-    if (!el) return;
-    el.classList.add("visible");
-    el.replaceChildren();
-    const span = document.createElement("span");
-    span.className = "hint-primary";
-    span.textContent = t("clipboard.loading_count", {count});
-    el.appendChild(span);
+    showFeedback(t("clipboard.loading_count", {count}), {type: "info", durationMs: 0});
 }
 
+/** 批量复制成功（瞬态）。 */
 function showStatusCopied(count) {
-    const el = document.getElementById("statusbar");
-    if (!el) return;
-    el.classList.add("visible");
-    el.replaceChildren();
-    const span = document.createElement("span");
-    span.className = "hint-primary";
-    span.textContent = t("clipboard.copied_count", {count});
-    el.appendChild(span);
-    // 2 秒后恢复
-    setTimeout(() => {
-        if (selection.hasSelection()) return;
-        results.refreshStatusbar?.();
-    }, 2000);
+    showFeedback(t("clipboard.copied_count", {count}), {type: "success", durationMs: 2000});
 }
 
+/** 批量复制/删除失败（瞬态错误）。 */
 function showStatusError(message) {
-    const el = document.getElementById("statusbar");
-    if (!el) return;
-    el.classList.add("visible");
-    el.replaceChildren();
-    const span = document.createElement("span");
-    span.className = "hint-primary";
-    span.textContent = t("clipboard.copy_failed", {message});
-    el.appendChild(span);
-    setTimeout(() => {
-        results.refreshStatusbar?.();
-    }, 3000);
+    showFeedback(t("clipboard.copy_failed", {message}), {type: "error"});
 }
 
 // ── 0.20.8 快捷编辑/删除 ────────────────────────────────────────────────────

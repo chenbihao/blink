@@ -77,9 +77,6 @@ export const zh = {
     "general.max_results.hint": "搜索融合后返回上限",
     "general.page_size.label": "每页条数",
     "general.page_size.hint": "每屏最多显示多少条结果",
-    "general.autosuggest.title": "输入补全",
-    "general.autosuggest.enabled.label": "启用 Ghost Text 补全",
-    "general.autosuggest.enabled.hint": "首拼命中时在输入框显示灰色补全提示，按 Tab 接受",
     "general.autosuggest.min_score.label": "模糊阈值",
     "general.autosuggest.min_score.hint": "部分拼音触发 Ghost Text 的最低相似度（0.5~0.95）",
     "general.autosuggest.tab_key.label": "接受补全键",
@@ -331,7 +328,19 @@ export const zh = {
     "context.filter.desc": "前台是这些应用时暂停一切采集，避免密码 / 网银界面被读到",
     "context.trigger.card.title": "Ghost 触发规则",
     "context.trigger.card.desc": "环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现",
-    "context.autosuggest.title": "输入补全 · Ghost Text",
+    // 0.24.5：原"输入补全 · Ghost Text"卡片升级为 Smart Tab 建议区（含开关组）
+    "suggestion.smart_tab.title": "Smart Tab 建议",
+    "suggestion.smart_tab.desc": "输入与环境的下一步建议：Tab 采纳主建议、Shift+Tab 采纳次建议；关闭总开关后所有建议不再出现",
+    "suggestion.completion_enabled.label": "输入补全",
+    "suggestion.completion_enabled.hint": "首拼命中时在输入框显示灰色补全影子（fy → fanyi）",
+    "suggestion.context_enabled.label": "环境建议",
+    "suggestion.context_enabled.hint": "基于划词/剪贴板的建议（如翻译选中的外文）；输入内容本身的建议不受影响",
+    "suggestion.ai_enabled.label": "AI 兜底",
+    "suggestion.ai_enabled.hint": "自然语言输入时建议\"问 AI\"；只关建议，不影响 AI 功能本身",
+    "suggestion.secondary_enabled.label": "第二建议",
+    "suggestion.secondary_enabled.hint": "次建议槽（Shift+Tab 采纳）；关闭后只显示主建议",
+    "suggestion.suppress_repeated.label": "建议降频",
+    "suggestion.suppress_repeated.hint": "同一条建议连续 3 次未被采纳后，本次唤起期间不再显示；采纳或重新唤起即恢复",
     "context.bindings.title": "Context 触发规则",
     "context.bindings.empty": "暂无已注册的 Context 触发规则",
     "context.trigger.text_is_non_target_lang": "文本非目标语言",
@@ -1030,11 +1039,20 @@ export const zh = {
     "hint.navigate": "{{key:ArrowUp}}{{key:ArrowDown}} 选择",
     "hint.alt_number": "{{key:Alt}}+数字 快捷触发",
     "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} 翻页 · {page}/{pageCount}",
-    "statusbar.autosuggest_accept": "按 {key} 接受补全 → {target}",
-    "statusbar.autosuggest_enter": "按 {key} 进入参数模式",
-    "statusbar.context_accept": "按 {key} {target}",
     "suggestion.origin.selection": "来自划词",
     "suggestion.origin.clipboard": "来自剪贴板",
+
+    // ── Smart Tab 建议系统（0.24）──
+    // SuggestionBar 行文案：display 之外按 kind 覆盖（AskAi 后端 display 硬编码
+    // 键名"按 Tab 问 AI"，ArrowRight 配置用户会看到错误键名；bar 自带键帽 chip）
+    "suggestionbar.ask_ai": "问 AI",
+    "suggestionbar.completion_to": "补全 → {target}",
+
+    // ModeHeader（0.24.4 §5.5）：持续模式的唯一呈现
+    "mode.ai.label": "AI",
+    "mode.command.label": "命令",
+    "mode.command.hint": "输入命令，回车在终端执行",
+    "mode.clipboard.label": "剪贴板",
 
     // ── 内容编辑器（0.16.3）──
     "editor.title.default": "编辑剪贴板内容",

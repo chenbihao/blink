@@ -132,7 +132,7 @@ impl ConfigKey for SearchConfig {
 
 // ── SuggestionConfig ──────────────────────────────────────────────────────────
 
-/// 建议行为分片。autosuggest + proactive + 0.24 双槽门槛/降频。
+/// 建议行为分片。autosuggest + proactive + 0.24 双槽门槛/降频 + 展示策略开关组。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestionConfig {
     #[serde(default = "default_true")]
@@ -152,6 +152,20 @@ pub struct SuggestionConfig {
     /// 指纹) 连续 3 次未采纳 → 本会话抑制该候选。默认开（触发条件保守、误杀成本低）。
     #[serde(default = "default_true")]
     pub suppress_repeated: bool,
+    /// 输入补全显示开关（0.24 §5.6 设置投影）：Completion 影子候选（首拼 → keyword）。
+    #[serde(default = "default_true")]
+    pub completion_enabled: bool,
+    /// 环境建议显示开关：awareness 派生候选（选区/剪贴板翻译与 AI）。
+    /// query 派生候选（如直接输入英文的翻译）不受此开关影响——它是输入意图不是环境。
+    #[serde(default = "default_true")]
+    pub context_suggestion_enabled: bool,
+    /// AI 兜底建议显示开关：AskAi 候选（AI Provider 可用性 `ai_available` 之上的
+    /// 建议域独立闸——关建议不连坐 AI 功能本身，AI Provider 配置留在其真源）。
+    #[serde(default = "default_true")]
+    pub ai_suggestion_enabled: bool,
+    /// 第二建议槽显示开关（secondary 槽）：关闭时只出 primary 单槽。
+    #[serde(default = "default_true")]
+    pub secondary_enabled: bool,
 }
 
 impl Default for SuggestionConfig {
@@ -164,6 +178,10 @@ impl Default for SuggestionConfig {
             empty_query_topn: 5,
             secondary_min_rank: default_secondary_min_rank(),
             suppress_repeated: true,
+            completion_enabled: true,
+            context_suggestion_enabled: true,
+            ai_suggestion_enabled: true,
+            secondary_enabled: true,
         }
     }
 }

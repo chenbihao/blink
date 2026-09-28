@@ -1,10 +1,13 @@
 //! 0.18.6 命令执行 MVP：`> ` 前缀命令模式状态机。
 //!
-//! 用户在主窗口输入 `> ` 前缀 → 进入命令模式（清结果、停搜索、停 ghost、显示 hint）；
+//! 用户在主窗口输入 `> ` 前缀 → 进入命令模式（清结果、停搜索、停 ghost）；
 //! 退格删 `>` → 恢复搜索模式。回车 → 调 `runInTerminal` 在外部终端执行，关主窗。
 //!
 //! **模式切换铁则**（§3.5）：进入命令模式后，结果区的渲染/键盘逻辑完全切支
 //! （不触发 search、不显示 ghost、回车不走默认搜索项执行）。退出则完整恢复。
+//!
+//! 0.24.4 呈现迁移：模式徽章与常驻提示统一走 ModeHeader（mode-header.js）；
+//! 执行错误走 TransientFeedback（transient-feedback.js），不再自建 #command-hint。
 //!
 //! 前缀解析纯函数与后端 `terminal.rs::is_command_mode` / `extract_command` 等价对齐，
 //! Rust 侧为权威 spec + 单测载体，此处为运行时执行体。
@@ -12,15 +15,15 @@
 import {queryEl} from "./dom.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
-import {syncWindowSize} from "./window-size.js";
+import * as suggestionBar from "./suggestion-bar.js";
+import * as modeHeader from "./mode-header.js";
+import {show as showFeedback} from "./transient-feedback.js";
+import {syncWindowSize, resyncWindowSize} from "./window-size.js";
 import {hideWindow, runInTerminal} from "../shared/api.js";
 import {t} from "../i18n/index.js";
 
 /** 当前是否处于命令模式。 */
 let active = false;
-
-/** hint DOM 元素（动态创建，插入 #search-mode 内 #results 之后）。 */
-let hintEl = null;
 
 // ── 前缀解析纯函数（与 Rust terminal.rs 对齐）─────────────────────────────
 
@@ -53,19 +56,14 @@ export function isActive() {
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────
 
-/** 初始化：创建 hint DOM 元素。main.js 启动时调一次。 */
+/** 初始化（0.24.4 起无自建 DOM；保留入口供 main.js 装配一致性）。 */
 export function init() {
-    hintEl = document.createElement("div");
-    hintEl.id = "command-hint";
-    hintEl.className = "command-hint hidden";
-    const searchMode = document.getElementById("search-mode");
-    searchMode.appendChild(hintEl);
+    // ModeHeader / TransientFeedback 由各自模块 init
 }
 
-/** 复位：退出命令模式 + 隐藏 hint（lifecycle shown/hidden 调用）。 */
+/** 复位：退出命令模式（lifecycle shown/hidden 调用）。 */
 export function reset() {
-    active = false;
-    hideHint();
+    if (active) exit();
 }
 
 // ── 输入处理 ──────────────────────────────────────────────────────────────
@@ -82,17 +80,10 @@ export function handleInput(value) {
         if (!active) {
             enter();
         }
-        // 有命令时隐藏 hint，无命令时显示 hint
-        const cmd = extractCommand(value);
-        if (cmd) {
-            hideHint();
-        } else {
-            showHint();
-        }
         return true;
     }
 
-    // 退出命令模式：隐藏 hint，让 search.js 继续正常搜索
+    // 退出命令模式：清 ModeHeader，让 search.js 继续正常搜索
     if (active) {
         exit();
     }
@@ -117,49 +108,32 @@ export async function execute() {
         return true;
     } catch (e) {
         console.error("[command-mode] runInTerminal failed:", e);
-        showError(e);
+        const msg = typeof e === "string" ? e : e?.message || String(e);
+        showFeedback(t("command.error", {message: msg}), {type: "error"});
         return true;
     }
 }
 
 // ── 内部 ──────────────────────────────────────────────────────────────────
 
-/** 进入命令模式：清结果 + 清 ghost。 */
+/** 进入命令模式：清结果 + 清 ghost/建议 + 投影 ModeHeader。 */
 function enter() {
     active = true;
     results.clear();
     ghost.clear();
+    suggestionBar.clear();
+    modeHeader.set({
+        id: "command",
+        icon: "terminal",
+        label: t("mode.command.label"),
+        hint: t("mode.command.hint"),
+    });
+    syncWindowSize();
 }
 
-/** 退出命令模式：隐藏 hint。 */
+/** 退出命令模式：清 ModeHeader 并收缩窗口（模式转换是离散状态转换，允许 resync）。 */
 function exit() {
     active = false;
-    hideHint();
-}
-
-/** 显示 hint（无命令时）。 */
-function showHint() {
-    if (!hintEl) return;
-    hintEl.textContent = t("command.hint");
-    hintEl.classList.remove("hidden");
-    hintEl.classList.remove("command-error");
-    syncWindowSize();
-}
-
-/** 隐藏 hint。 */
-function hideHint() {
-    if (!hintEl) return;
-    hintEl.classList.add("hidden");
-    hintEl.classList.remove("command-error");
-    syncWindowSize();
-}
-
-/** 显示执行错误。 */
-function showError(e) {
-    if (!hintEl) return;
-    const msg = typeof e === "string" ? e : e?.message || String(e);
-    hintEl.textContent = t("command.error", {message: msg});
-    hintEl.classList.remove("hidden");
-    hintEl.classList.add("command-error");
-    syncWindowSize();
+    modeHeader.clear();
+    resyncWindowSize();
 }

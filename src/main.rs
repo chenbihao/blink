@@ -531,8 +531,9 @@ fn main() {
             search_service.update_max_results(app_config.max_results as usize);
             // 初始化内置动作 disable 列表（0.8.0 §1.3）
             search_service.update_disabled_builtin_actions(app_config.disabled_builtin_actions.clone());
-            // 初始化 Suggestion 运行时配置（0.8.1 §2.5；0.24.2 加 secondary 门槛）。
-            // secondary_min_rank 不在 AppConfig 门面里，直接读分片（启动一次 DB 读）。
+            // 初始化 Suggestion 运行时配置（0.8.1 §2.5；0.24.2 加 secondary 门槛；
+            // 0.24.5 加展示策略开关组）。这些字段不在 AppConfig 门面里，
+            // 直接读分片（启动一次 DB 读）。
             let suggestion_cfg = tauri::async_runtime::block_on(
                 domain::config::store::ConfigStore::get::<domain::config::shards::SuggestionConfig>(&pools.config),
             );
@@ -542,6 +543,10 @@ fn main() {
                     min_score: app_config.autosuggest_min_score,
                     secondary_min_rank: suggestion_cfg.secondary_min_rank,
                     suppress_repeated: suggestion_cfg.suppress_repeated,
+                    completion_enabled: suggestion_cfg.completion_enabled,
+                    context_suggestion_enabled: suggestion_cfg.context_suggestion_enabled,
+                    ai_suggestion_enabled: suggestion_cfg.ai_suggestion_enabled,
+                    secondary_enabled: suggestion_cfg.secondary_enabled,
                 },
             );
             // 初始化 context binding 禁用列表（0.8.3 §4.6）

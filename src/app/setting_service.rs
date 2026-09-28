@@ -188,6 +188,11 @@ pub async fn apply_autosuggest(
         autosuggest_enabled: update.enabled,
         autosuggest_min_score: update.min_score.clamp(0.0, 1.0),
         autosuggest_tab_key: update.tab_key.clone(),
+        completion_enabled: update.completion_enabled,
+        context_suggestion_enabled: update.context_suggestion_enabled,
+        ai_suggestion_enabled: update.ai_suggestion_enabled,
+        secondary_enabled: update.secondary_enabled,
+        suppress_repeated: update.suppress_repeated,
         ..ConfigStore::get::<SuggestionConfig>(pool).await
     };
     save_suggestion(app, &cfg).await
@@ -223,12 +228,17 @@ async fn save_suggestion(app: &tauri::AppHandle, cfg: &SuggestionConfig) -> Resu
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
         // 0.24.2：投影完整 runtime 配置（autosuggest 开关/阈值 + secondary 门槛），
         // 与 KeywordProducer 共享的 cell 一并热更新。
+        // 0.24.5：加展示策略开关组 + 降频（§5.6 设置投影）。
         service.update_suggestion_config(
             crate::domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
                 autosuggest_enabled: cfg.autosuggest_enabled,
                 min_score: cfg.autosuggest_min_score,
                 secondary_min_rank: cfg.secondary_min_rank,
                 suppress_repeated: cfg.suppress_repeated,
+                completion_enabled: cfg.completion_enabled,
+                context_suggestion_enabled: cfg.context_suggestion_enabled,
+                ai_suggestion_enabled: cfg.ai_suggestion_enabled,
+                secondary_enabled: cfg.secondary_enabled,
             },
         );
     }

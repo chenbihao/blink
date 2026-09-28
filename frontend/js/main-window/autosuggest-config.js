@@ -20,6 +20,14 @@ export async function init() {
     }
 }
 
+/** 从已读好的 config 对象刷新（lifecycle SHOWN / CONFIG_CHANGED 时调，
+ *  与 chord.refreshFromConfigData 同模式——避免重复 invoke get_config）。 */
+export function refreshFromConfigData(config) {
+    if (config && typeof config.autosuggest_tab_key === "string") {
+        tabKey = config.autosuggest_tab_key;
+    }
+}
+
 /** 设置页保存后直接同步（比再 fetch 快一步）。 */
 export function setKey(key) {
     if (key === "Tab" || key === "ArrowRight") {

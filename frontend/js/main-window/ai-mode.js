@@ -49,6 +49,7 @@ import {createEarlyStreamBuffer} from "../shared/early-stream-buffer.js";
 import * as ghost from "./ghost.js";
 import * as search from "./search.js";
 import * as results from "./results.js";
+import * as modeHeader from "./mode-header.js";
 
 // ── 状态 ──────────────────────────────────────────────────────────────────────
 
@@ -121,6 +122,9 @@ export async function enterAiMode(queryText) {
     aiQueryEl.value = "";
     aiQueryEl.focus();
 
+    // 0.24.4: 模式徽章统一走 ModeHeader（旧 .ai-mode-indicator 退役）
+    modeHeader.set({id: "ai", icon: "sparkles", label: t("mode.ai.label")});
+
     // 清空搜索结果 + statusbar（避免 AI 模式下残留搜索导航提示）
     results.clear();
 
@@ -175,6 +179,8 @@ export function exitAiMode() {
     // DOM 切换回搜索模式
     aiModeEl.hidden = true;
     searchModeEl.hidden = false;
+    // 0.24.4: 清 ModeHeader 徽章
+    modeHeader.clear();
     aiContentEl.innerHTML = "";
     aiToolLineEl.innerHTML = "";
     aiRoundsEl.innerHTML = "";

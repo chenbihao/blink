@@ -28,7 +28,7 @@ use super::{
     text_fingerprint,
 };
 
-/// Coordinator 运行时配置投影（0.24 §3.4 / §3.8）。
+/// Coordinator 运行时配置投影（0.24 §3.4 / §3.8；0.24.5 §5.6 加展示策略开关组）。
 ///
 /// 从 `SuggestionConfig` 投影出的热路径快照（零 IO），由编排层持有并热更新；
 /// KeywordProducer 共享同一 cell 读取 `min_score`。
@@ -41,6 +41,15 @@ pub struct SuggestionRuntimeConfig {
     pub secondary_min_rank: f64,
     /// 建议降频开关（§3.8，默认开）：同键连续 3 次未采纳 → 本会话抑制。
     pub suppress_repeated: bool,
+    /// 展示策略开关组（0.24.5 §5.6 设置投影，默认全开）：
+    /// - `completion_enabled`：Completion 影子候选
+    /// - `context_suggestion_enabled`：awareness 派生候选（选区/剪贴板）
+    /// - `ai_suggestion_enabled`：AskAi 候选（Provider 可用性之上的建议域独立闸）
+    /// - `secondary_enabled`：secondary 槽（关闭时只出 primary 单槽）
+    pub completion_enabled: bool,
+    pub context_suggestion_enabled: bool,
+    pub ai_suggestion_enabled: bool,
+    pub secondary_enabled: bool,
 }
 
 impl Default for SuggestionRuntimeConfig {
@@ -50,6 +59,10 @@ impl Default for SuggestionRuntimeConfig {
             min_score: 0.7,
             secondary_min_rank: 0.60,
             suppress_repeated: true,
+            completion_enabled: true,
+            context_suggestion_enabled: true,
+            ai_suggestion_enabled: true,
+            secondary_enabled: true,
         }
     }
 }
@@ -65,6 +78,12 @@ pub enum FilterReason {
     AiUnavailable,
     /// 降频抑制：同 (kind, origin, 指纹) 连续 3 次未采纳（§3.8）。
     FatigueSuppressed,
+    /// 展示策略开关组（0.24.5 §5.6）：对应候选类被用户在设置页关闭。
+    CompletionDisabled,
+    ContextSuggestionDisabled,
+    AiSuggestionDisabled,
+    /// secondary 槽被关闭（不进 eligibility 过滤，双槽选取阶段短路）。
+    SecondaryDisabled,
 }
 
 impl std::fmt::Display for FilterReason {
@@ -74,6 +93,10 @@ impl std::fmt::Display for FilterReason {
             FilterReason::RouteHit => write!(f, "route_hit"),
             FilterReason::AiUnavailable => write!(f, "ai_unavailable"),
             FilterReason::FatigueSuppressed => write!(f, "fatigue_suppressed"),
+            FilterReason::CompletionDisabled => write!(f, "completion_disabled"),
+            FilterReason::ContextSuggestionDisabled => write!(f, "context_suggestion_disabled"),
+            FilterReason::AiSuggestionDisabled => write!(f, "ai_suggestion_disabled"),
+            FilterReason::SecondaryDisabled => write!(f, "secondary_disabled"),
         }
     }
 }
@@ -167,16 +190,46 @@ impl SuggestionCoordinator {
         let kept: Vec<Suggestion> = all
             .into_iter()
             .filter(|s| {
-                // 3a. AI 可用性：AskAi 候选统一受 AI Provider 总闸
-                if s.kind == SuggestionKind::AskAi && !input.availability.ai_available {
+                // 3a. 展示策略：Completion 影子被设置页关闭（0.24.5 §5.6）
+                if s.kind == SuggestionKind::Completion && !input.config.completion_enabled {
                     tracing::debug!(
                         id = %s.id,
-                        reason = %FilterReason::AiUnavailable,
+                        reason = %FilterReason::CompletionDisabled,
                         "suggestion 过滤"
                     );
                     return false;
                 }
-                // 3b. 路由未命中：query 派生（origin=None）的 Translate/AskAi 候选
+                // 3b. 展示策略：awareness 派生候选（选区/剪贴板）被"环境建议"关闭。
+                //     query 派生候选不受影响——它是输入意图不是环境。
+                if s.origin.is_some() && !input.config.context_suggestion_enabled {
+                    tracing::debug!(
+                        id = %s.id,
+                        reason = %FilterReason::ContextSuggestionDisabled,
+                        "suggestion 过滤"
+                    );
+                    return false;
+                }
+                // 3c. AI 可用性 + 展示策略：AskAi 候选统一受 AI Provider 总闸
+                //     与建议域独立闸（关建议不连坐 AI 功能本身）
+                if s.kind == SuggestionKind::AskAi {
+                    if !input.availability.ai_available {
+                        tracing::debug!(
+                            id = %s.id,
+                            reason = %FilterReason::AiUnavailable,
+                            "suggestion 过滤"
+                        );
+                        return false;
+                    }
+                    if !input.config.ai_suggestion_enabled {
+                        tracing::debug!(
+                            id = %s.id,
+                            reason = %FilterReason::AiSuggestionDisabled,
+                            "suggestion 过滤"
+                        );
+                        return false;
+                    }
+                }
+                // 3d. 路由未命中：query 派生（origin=None）的 Translate/AskAi 候选
                 //     在已有确定路由/非空候选时排除——"已明确命中的路由不得被翻译抢占"。
                 //     Completion 豁免（输入延伸，非意图建议，且 exact/带参命中天然不产 hint）。
                 if routed
@@ -190,7 +243,7 @@ impl SuggestionCoordinator {
                     );
                     return false;
                 }
-                // 3c. 降频抑制（§3.8）：同 (kind, origin, 指纹) 连续 3 次未采纳。
+                // 3e. 降频抑制（§3.8）：同 (kind, origin, 指纹) 连续 3 次未采纳。
                 if input.config.suppress_repeated
                     && fatigue.is_suppressed(super::fatigue::fatigue_key(s))
                 {
@@ -243,10 +296,17 @@ impl SuggestionCoordinator {
         let mut output = CoordinateOutput::default();
         let mut iter = slots.into_iter();
         output.primary = iter.next();
-        if let Some(second) = iter.next()
-            && second.rank_score >= input.config.secondary_min_rank
-        {
-            output.secondary = Some(second);
+        // secondary 双闸（0.24.5 §5.6）：展示开关 + rank 门槛
+        if let Some(second) = iter.next() {
+            if !input.config.secondary_enabled {
+                tracing::debug!(
+                    id = %second.id,
+                    reason = %FilterReason::SecondaryDisabled,
+                    "secondary 槽被设置页关闭"
+                );
+            } else if second.rank_score >= input.config.secondary_min_rank {
+                output.secondary = Some(second);
+            }
         }
 
         // ── 6. 曝光计数（§3.8 降频输入；§5.4 可观测性——曝光→采纳转换率的分子侧）
@@ -880,5 +940,110 @@ mod tests {
         assert_eq!(p.id, "translate-selection");
         assert_eq!(sec.id, "ai-selection");
         assert_ne!(p.kind, sec.kind);
+    }
+
+    // ── 0.24.5 §5.6 展示策略开关组 ────────────────────────────────────────
+
+    /// completion_enabled=false：Completion 候选全灭，awareness 候选顶上。
+    #[test]
+    fn completion_disabled_filters_completion_only() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Keyword,
+            vec![make_sug("completion-keyword", SuggestionKind::Completion, 0.98, None)],
+        )));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "translate-clipboard",
+                SuggestionKind::Translate,
+                0.82,
+                Some(SuggestionOrigin::Clipboard),
+            )],
+        )));
+        let s = snap();
+        let mut i = input("fa", &s);
+        i.config.completion_enabled = false;
+        let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "translate-clipboard");
+    }
+
+    /// context_suggestion_enabled=false：awareness 派生候选全灭；
+    /// query 派生（translate-query）不受影响——它是输入意图不是环境。
+    #[test]
+    fn context_suggestion_disabled_filters_awareness_only() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![
+                make_sug("translate-query", SuggestionKind::Translate, 0.92, None),
+                make_sug(
+                    "translate-clipboard",
+                    SuggestionKind::Translate,
+                    0.82,
+                    Some(SuggestionOrigin::Clipboard),
+                ),
+                make_sug(
+                    "ai-selection",
+                    SuggestionKind::AskAi,
+                    0.72,
+                    Some(SuggestionOrigin::Selection),
+                ),
+            ],
+        )));
+        let s = snap();
+        let mut i = input("hello world", &s);
+        i.config.context_suggestion_enabled = false;
+        let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "translate-query");
+        assert!(
+            out.secondary.is_none(),
+            "awareness 派生的 ai-selection 被环境建议开关过滤"
+        );
+    }
+
+    /// ai_suggestion_enabled=false：AskAi 候选全灭（Provider 可用也不出），
+    /// Translate 不连坐。
+    #[test]
+    fn ai_suggestion_disabled_filters_askai_only() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Ai,
+            vec![make_sug("ai-query", SuggestionKind::AskAi, 0.80, None)],
+        )));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "translate-selection",
+                SuggestionKind::Translate,
+                0.92,
+                Some(SuggestionOrigin::Selection),
+            )],
+        )));
+        let s = snap();
+        let mut i = input("", &s);
+        i.config.ai_suggestion_enabled = false;
+        let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "translate-selection");
+        assert!(out.secondary.is_none(), "ai-query 被建议域独立闸过滤");
+    }
+
+    /// secondary_enabled=false：只出 primary 单槽（secondary 门槛无关）。
+    #[test]
+    fn secondary_disabled_yields_primary_only() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![
+                make_sug("translate-query", SuggestionKind::Translate, 0.92, None),
+                make_sug("ai-query", SuggestionKind::AskAi, 0.80, None),
+            ],
+        )));
+        let s = snap();
+        let mut i = input("hello world foo bar", &s);
+        i.config.secondary_enabled = false;
+        let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "translate-query");
+        assert!(out.secondary.is_none(), "secondary 槽被设置页关闭");
     }
 }

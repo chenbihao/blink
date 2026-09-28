@@ -189,21 +189,50 @@ function readGeneral() {
 }
 
 /**
- * 初始化 Autosuggestion 设置
+ * 初始化 Autosuggestion 设置（0.24.5 扩为 Smart Tab 建议区：总开关 + 展示策略
+ * 开关组 + 降频 + 模糊阈值 + 接受键，saveConfig("autosuggest") 单命令全量保存）
  */
 function initAutosuggestion() {
+    const TOGGLE_IDS = [
+        "suggestion-completion-enabled",
+        "suggestion-context-enabled",
+        "suggestion-ai-enabled",
+        "suggestion-secondary-enabled",
+        "suggestion-suppress-repeated",
+    ];
+
     async function saveAutosuggest() {
         const enabled = document.getElementById("autosuggest-enabled")?.checked !== false;
         const scoreRaw = document.getElementById("autosuggest-min-score")?.value ?? "0.7";
         const minScore = Math.min(0.95, Math.max(0.5, parseFloat(scoreRaw) || 0.7));
         const tabKey = document.getElementById("autosuggest-tab-key")?.value || "Tab";
+        // 0.24.5 展示策略开关组 + 降频（缺失防御：undefined → 后端 serde 默认 true 不误关）
+        const toggles = {};
+        for (const id of TOGGLE_IDS) {
+            const el = document.getElementById(id);
+            if (el) toggles[id] = el.checked !== false;
+        }
         try {
-            await saveConfig("autosuggest", {enabled, minScore, tabKey});
+            await saveConfig("autosuggest", {
+                enabled,
+                minScore,
+                tabKey,
+                completionEnabled: toggles["suggestion-completion-enabled"],
+                contextSuggestionEnabled: toggles["suggestion-context-enabled"],
+                aiSuggestionEnabled: toggles["suggestion-ai-enabled"],
+                secondaryEnabled: toggles["suggestion-secondary-enabled"],
+                suppressRepeated: toggles["suggestion-suppress-repeated"],
+            });
             const currentConfig = getCurrentConfig();
             if (currentConfig) {
                 currentConfig.autosuggest_enabled = enabled;
                 currentConfig.autosuggest_min_score = minScore;
                 currentConfig.autosuggest_tab_key = tabKey;
+                currentConfig.completion_enabled = toggles["suggestion-completion-enabled"] !== false;
+                currentConfig.context_suggestion_enabled = toggles["suggestion-context-enabled"] !== false;
+                currentConfig.ai_suggestion_enabled = toggles["suggestion-ai-enabled"] !== false;
+                currentConfig.secondary_enabled = toggles["suggestion-secondary-enabled"] !== false;
+                currentConfig.suppress_repeated = toggles["suggestion-suppress-repeated"] !== false;
             }
         } catch (err) {
             console.error("update_autosuggest_config failed:", err);
@@ -216,6 +245,10 @@ function initAutosuggestion() {
     if (autosuggestMinScoreEl) autosuggestMinScoreEl.addEventListener("change", saveAutosuggest);
     const autosuggestTabKeyEl = document.getElementById("autosuggest-tab-key");
     if (autosuggestTabKeyEl) autosuggestTabKeyEl.addEventListener("change", saveAutosuggest);
+    for (const id of TOGGLE_IDS) {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener("change", saveAutosuggest);
+    }
 }
 
 /**
@@ -318,6 +351,19 @@ function applyGeneralConfig(cfg) {
     }
     const autoTabKey = document.getElementById("autosuggest-tab-key");
     if (autoTabKey && typeof cfg.autosuggest_tab_key === "string") autoTabKey.value = cfg.autosuggest_tab_key;
+
+    // 0.24.5 Smart Tab 建议区开关组（默认全开：!== false）
+    const suggestionToggles = {
+        "suggestion-completion-enabled": cfg.completion_enabled,
+        "suggestion-context-enabled": cfg.context_suggestion_enabled,
+        "suggestion-ai-enabled": cfg.ai_suggestion_enabled,
+        "suggestion-secondary-enabled": cfg.secondary_enabled,
+        "suggestion-suppress-repeated": cfg.suppress_repeated,
+    };
+    for (const [id, val] of Object.entries(suggestionToggles)) {
+        const el = document.getElementById(id);
+        if (el) el.checked = val !== false;
+    }
 
     // Chord（默认关：=== true；hint 默认开：!== false）
     const chordEnabled = document.getElementById("chord-enabled");

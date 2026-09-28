@@ -2183,9 +2183,9 @@
                         </svg>
                     </div>
                     <div class="extension-info">
-                        <h3 data-i18n="context.autosuggest.title">输入补全 · Ghost Text</h3>
-                        <p class="extension-desc" data-i18n="general.autosuggest.enabled.hint">首拼命中时在输入框显示灰色补全提示，按
-                            Tab 接受</p>
+                        <h3 data-i18n="suggestion.smart_tab.title">Smart Tab 建议</h3>
+                        <p class="extension-desc" data-i18n="suggestion.smart_tab.desc">输入与环境的下一步建议：
+                            Tab 采纳主建议、Shift+Tab 采纳次建议；关闭总开关后所有建议不再出现</p>
                     </div>
                     <label class="switch">
                         <input id="autosuggest-enabled" type="checkbox"/>
@@ -2193,6 +2193,51 @@
                     </label>
                 </div>
                 <div class="extension-body">
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="suggestion.completion_enabled.label"
+                               for="suggestion-completion-enabled">输入补全<span class="field-hint-icon"
+                                                                                data-i18n-title="suggestion.completion_enabled.hint">ⓘ</span></label>
+                        <label class="switch switch-sm">
+                            <input id="suggestion-completion-enabled" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="suggestion.context_enabled.label"
+                               for="suggestion-context-enabled">环境建议<span class="field-hint-icon"
+                                                                           data-i18n-title="suggestion.context_enabled.hint">ⓘ</span></label>
+                        <label class="switch switch-sm">
+                            <input id="suggestion-context-enabled" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="suggestion.ai_enabled.label"
+                               for="suggestion-ai-enabled">AI 兜底<span class="field-hint-icon"
+                                                                     data-i18n-title="suggestion.ai_enabled.hint">ⓘ</span></label>
+                        <label class="switch switch-sm">
+                            <input id="suggestion-ai-enabled" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="suggestion.secondary_enabled.label"
+                               for="suggestion-secondary-enabled">第二建议<span class="field-hint-icon"
+                                                                             data-i18n-title="suggestion.secondary_enabled.hint">ⓘ</span></label>
+                        <label class="switch switch-sm">
+                            <input id="suggestion-secondary-enabled" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="suggestion.suppress_repeated.label"
+                               for="suggestion-suppress-repeated">建议降频<span class="field-hint-icon"
+                                                                             data-i18n-title="suggestion.suppress_repeated.hint">ⓘ</span></label>
+                        <label class="switch switch-sm">
+                            <input id="suggestion-suppress-repeated" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="general.autosuggest.min_score.label"
                                for="autosuggest-min-score">模糊阈值<span class="field-hint-icon"

@@ -1,5 +1,7 @@
 //! 键盘交互：结果导航、激活、ESC 隐藏、修饰键默认行为屏蔽。
-//! Tab / ArrowRight 拦截接受 ghost 文本补全（视配置 autosuggest_tab_key）。
+//! 建议采纳（0.24 §3.2 键随槽走）：Tab/ArrowRight（视配置 autosuggest_tab_key）
+//! 恒采纳 primary（Completion 走 ghost，其余走 SuggestionBar）；Shift+Tab 恒采纳
+//! secondary；点击与键盘共用 suggestion-accept.js 的 acceptance 路径。
 //! Alt 状态由后端事件驱动，不再轮询。chord 触发门禁用 `inputState.isAltDown() || e.altKey`。
 
 import {getAwarenessText, hideWindow, triggerChord} from "../shared/api.js";
@@ -8,6 +10,7 @@ import {EVENTS} from "../shared/event-names.js";
 import {activateItem} from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
+import * as suggestionBar from "./suggestion-bar.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as aiMode from "./ai-mode.js";
@@ -46,28 +49,55 @@ export function init() {
     });
 }
 
-// ── Autosuggestion Tab 接受 ────────────────────────────────────────
+// ── Autosuggestion 采纳（0.24 §3.2 键随槽走）───────────────────────────
 
 /**
- * Tab / ArrowRight（视配置）+ 有活跃 ghost → 接受补全。
- * 捕获阶段拦截，抢在 onNavigation 之前——ArrowRight 场景下必须先处理，
- * 否则会被 results 的方向键导航吞掉（虽然当前 ArrowRight 无导航语义，仍为将来预留）。
- * AiMode 下抑制 Tab Ghost 接受（AI 模式无 ghost）。
+ * 建议采纳键拦截（0.24.5 §5.6）：
+ * - Tab（或 ArrowRight，视 `autosuggest_tab_key` 配置）恒采纳 **primary**；
+ * - Shift+Tab 恒采纳 **secondary**（行为变更：不再与 Tab 等价）；
+ * - primary 为 Completion 时 Tab 作用于 ghost 影子（输入延伸），否则走 SuggestionBar；
+ * - 键盘与 bar 行点击共用 suggestion-accept.js 的 acceptance 路径。
+ *
+ * 门禁：IME 组字放行（输入法用 Tab 切候选）；AI/命令/剪贴板独立模式优先；
+ * Alt 按下放行（Alt+Tab 永远交还 Windows，§2.2）；无候选不吞键。
+ * 捕获阶段拦截，抢在 onNavigation 之前。
  */
 function onAutosuggestAccept(e) {
-    // AiMode 下抑制 Tab Ghost 接受
+    // AiMode 下抑制建议采纳（AI 模式无建议）
     if (aiMode.isActive()) return;
-    // 0.18.6: 命令模式下抑制 Tab Ghost 接受
+    // 0.18.6: 命令模式下抑制建议采纳
     if (cmdMode.isActive()) return;
-    // 0.19.15: 剪贴板模式下抑制 Tab Ghost 接受
+    // 0.19.15: 剪贴板模式下抑制建议采纳
     if (clipboardMode.isActive()) return;
-    // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
+    // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被吞掉。
     // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
     if (e.isComposing || e.keyCode === 229) return;
+    // Alt+Tab 永远交还 Windows（0.24 §2.2 "不是问题的"）
+    if (e.altKey) return;
+
+    // Shift+Tab 恒采纳 secondary；无该槽候选时放行默认行为（焦点移动）
+    if (e.key === "Tab" && e.shiftKey) {
+        if (suggestionBar.hasSlot("secondary") && suggestionBar.accept("secondary")) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        return;
+    }
+
     const tabKey = autosuggestConfig.getTabKey();
+    // Shift+ArrowRight 是输入框文本选择，不劫持；其余非配置键放行
+    if (e.shiftKey) return;
     if (e.key !== tabKey) return;
-    if (!ghost.hasHint()) return;
-    if (ghost.acceptCurrent()) {
+
+    // primary 采纳：Completion → ghost 影子（键盘焦点在输入框）；其余 → SuggestionBar
+    if (ghost.hasHint()) {
+        if (ghost.acceptCurrent()) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        return;
+    }
+    if (suggestionBar.hasSlot("primary") && suggestionBar.accept("primary")) {
         e.preventDefault();
         e.stopPropagation();
     }

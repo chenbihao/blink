@@ -1,0 +1,36 @@
+/* ── TransientFeedback（#transient-feedback，0.24.4 §5.5）─────────────────── */
+/* loading/success/error 瞬态反馈：底部覆盖层，不占布局、不触发窗口 resize。
+   后到的反馈替换先到的（不叠加）。#app overflow:hidden 负责圆角裁切。 */
+
+#transient-feedback {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-toast);
+    padding: var(--space-sm) var(--space-md);
+    font-size: var(--text-sm);
+    background: var(--bg-elevated, var(--bg-base));
+    border-top: 1px solid var(--surface);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    -webkit-app-region: no-drag;
+}
+
+#transient-feedback.hidden {
+    display: none;
+}
+
+#transient-feedback.feedback-info {
+    color: var(--text-dim);
+}
+
+#transient-feedback.feedback-success {
+    color: var(--text);
+}
+
+/* 错误走主题强调色（项目语义：accent 即告警/强调色，无独立 danger 色） */
+#transient-feedback.feedback-error {
+    color: var(--accent);
+}

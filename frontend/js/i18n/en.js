@@ -76,9 +76,6 @@ export const en = {
     "general.max_results.hint": "Cap after fusion",
     "general.page_size.label": "Items per page",
     "general.page_size.hint": "Max items displayed per screen",
-    "general.autosuggest.title": "Input completion",
-    "general.autosuggest.enabled.label": "Enable ghost text completion",
-    "general.autosuggest.enabled.hint": "Show gray inline suggestion on pinyin-initials hits; press Tab to accept",
     "general.autosuggest.min_score.label": "Fuzzy threshold",
     "general.autosuggest.min_score.hint": "Minimum similarity for partial-pinyin ghost text (0.5~0.95)",
     "general.autosuggest.tab_key.label": "Accept key",
@@ -330,7 +327,19 @@ export const en = {
     "context.filter.desc": "Pause all capture when these apps are foreground — avoids reading passwords / banking UIs",
     "context.trigger.card.title": "Ghost trigger rules",
     "context.trigger.card.desc": "Suggestions triggered by environment (select English→translate, clipboard URL→open link, etc.); disabling hides the Ghost",
-    "context.autosuggest.title": "Input Autosuggestion · Ghost Text",
+    // 0.24.5: "Input Autosuggestion · Ghost Text" card upgraded to Smart Tab section
+    "suggestion.smart_tab.title": "Smart Tab Suggestions",
+    "suggestion.smart_tab.desc": "Next-step suggestions from input & environment: Tab accepts primary, Shift+Tab accepts secondary; master switch hides all suggestions",
+    "suggestion.completion_enabled.label": "Input completion",
+    "suggestion.completion_enabled.hint": "Gray inline ghost on pinyin-initial hits (fy → fanyi)",
+    "suggestion.context_enabled.label": "Environment suggestions",
+    "suggestion.context_enabled.hint": "Suggestions from selection/clipboard (e.g. translate selected foreign text); query-derived ones unaffected",
+    "suggestion.ai_enabled.label": "AI fallback",
+    "suggestion.ai_enabled.hint": "Suggest \"Ask AI\" for natural-language input; only hides suggestions, AI features unaffected",
+    "suggestion.secondary_enabled.label": "Secondary suggestion",
+    "suggestion.secondary_enabled.hint": "Secondary slot (Shift+Tab); disable to show primary only",
+    "suggestion.suppress_repeated.label": "Suggestion fatigue",
+    "suggestion.suppress_repeated.hint": "Hide a suggestion after 3 consecutive unaccepted impressions within one summon; resets on adoption or re-summon",
     "context.bindings.title": "Context Triggers",
     "context.bindings.empty": "No registered Context triggers",
     "context.trigger.text_is_non_target_lang": "Text is non-target language",
@@ -1036,11 +1045,18 @@ export const en = {
     "hint.navigate": "{{key:ArrowUp}}{{key:ArrowDown}} Select",
     "hint.alt_number": "{{key:Alt}}+number quick launch",
     "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} page · {page}/{pageCount}",
-    "statusbar.autosuggest_accept": "Press {key} to accept → {target}",
-    "statusbar.autosuggest_enter": "Press {key} to enter parameters",
-    "statusbar.context_accept": "Press {key} {target}",
     "suggestion.origin.selection": "from selection",
     "suggestion.origin.clipboard": "from clipboard",
+
+    // ── Smart Tab suggestion system (0.24) ──
+    "suggestionbar.ask_ai": "Ask AI",
+    "suggestionbar.completion_to": "Complete → {target}",
+
+    // ModeHeader (0.24.4 §5.5): single presentation of persistent modes
+    "mode.ai.label": "AI",
+    "mode.command.label": "Command",
+    "mode.command.hint": "Type a command, press Enter to run in terminal",
+    "mode.clipboard.label": "Clipboard",
 
     // ── Content editor (0.16.3) ──
     "editor.title.default": "Edit Clipboard Content",

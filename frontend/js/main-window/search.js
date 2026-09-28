@@ -9,6 +9,7 @@ import {listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
+import * as suggestionBar from "./suggestion-bar.js";
 import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 
@@ -16,15 +17,26 @@ import * as clipboardMode from "./clipboard-mode.js";
 const DEBOUNCE_MS = 40;
 
 /**
- * 0.24.1：SearchResponse.suggestion 已迁移为 SuggestionSet
- * `{ revision, primary, secondary }`（0.24 §3.2 双槽位）。
- * 0.24.3：ghost 消费 primary + revision（采纳时与本地 seq 比对拒绝过期，§3.6）；
- * secondary 槽消费随 0.24.4 SuggestionBar 落地。
- * @param {{suggestion?: {primary?: object|null}}} resp search_apps 响应
- * @returns {object|null} primary 建议或 null
+ * 0.24.4：SearchResponse.suggestion 是 SuggestionSet `{ revision, primary, secondary }`。
+ * 消费按视觉区分叉（§5.5 五类 UI 语义）：
+ * - ghost（CompletionGhost）只吃 primary 为 Completion 的建议（输入延伸影子）；
+ * - suggestionBar 吃完整 Set（渲染非 Completion 槽位 + secondary，键随槽走）。
+ * @param {{suggestion?: {primary?: object}}|null} resp
+ * @returns {object|null} primary 中 kind=completion 的建议或 null
  */
-function primarySuggestion(resp) {
-    return resp.suggestion?.primary ?? null;
+function completionSuggestion(resp) {
+    return resp.suggestion?.primary?.kind === "completion" ? resp.suggestion.primary : null;
+}
+
+/**
+ * 把一轮搜索的 SuggestionSet 分发给 ghost 与 suggestion-bar（三处消费点共用）。
+ * @param {string} query 本轮 query（bar 的粘性槽位按空/非空转换）
+ * @param {{suggestion?: object}|null} resp search_apps 响应
+ */
+function dispatchSuggestion(query, resp) {
+    const set = resp?.suggestion ?? null;
+    ghost.update(query, completionSuggestion(resp), set?.revision ?? null);
+    suggestionBar.update(query, set);
 }
 
 /**
@@ -80,6 +92,7 @@ export function reset() {
     seq++;
     isComposing = false;
     ghost.clear();
+    suggestionBar.clear();
 }
 
 /** 取当前 seq(0.17.6: trigger_ai 已删除，此函数保留供未来扩展复用)。 */
@@ -140,8 +153,8 @@ export async function fetchContextSuggestions() {
         if (queryEl.value.trim()) return;
         // entries 通常为空（Context 已不产 candidate），但仍走 render 走清理路径
         results.render(resp.entries || [], mySeq);
-        // Ghost：空 query 场景后端产 Context Suggestion,此处消费
-        ghost.update("", primarySuggestion(resp), resp.suggestion?.revision);
+        // Suggestion 分叉消费：Completion → ghost；Translate/AskAi 双槽 → SuggestionBar
+        dispatchSuggestion("", resp);
     } catch (e) {
         console.error("fetchContextSuggestions failed:", e);
     }
@@ -164,7 +177,7 @@ export async function fillQuery(text) {
         const resp = await searchApps(text, mySeq);
         if (mySeq !== seq) return;
         results.render(resp.entries || [], mySeq);
-        ghost.update(text, primarySuggestion(resp), resp.suggestion?.revision);
+        dispatchSuggestion(text, resp);
     } catch (e) {
         console.error("fillQuery search failed:", e);
     }
@@ -203,6 +216,7 @@ function onInput() {
         seq++;
         results.clear();
         ghost.clear();
+        suggestionBar.clear();
         fetchContextSuggestions();
         return;
     }
@@ -217,7 +231,7 @@ function onInput() {
             // 丢弃过期响应：用户已输入新 query 或已复位
             if (mySeq !== seq) return;
             results.render(resp.entries || [], mySeq);
-            ghost.update(rawQuery, primarySuggestion(resp), resp.suggestion?.revision);
+            dispatchSuggestion(rawQuery, resp);
         } catch (e) {
             console.error("search_apps failed:", e);
         }

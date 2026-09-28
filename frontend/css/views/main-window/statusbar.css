@@ -1,51 +1,32 @@
-/* ── 状态栏 views（#statusbar）────────────────────────────────────────────── */
-/* 来源 style.css:413-459。scoped #statusbar .kbd 覆盖留此（晚于 components/kbd.css 加载）。 */
+/* ── ResultFooter views（#statusbar，0.24.4 §5.5）────────────────────────── */
+/* 结果导航/动作/分页 + 空 query 闲置态 Chord 一行提示 + 持续状态覆写。
+   0.24.4 职责收窄：建议采纳提示移居 #suggestion-bar，chord 副行移居 Cheat Sheet。
+   scoped #statusbar .kbd 覆盖留此（晚于 components/kbd.css 加载）。 */
 
 /* ── 底部提示栏 ───────────────────────────────────────────────────────────────
-   无结果时 .visible 移除 → display:none，不占窗口高度。
-   0.16.1：min-height 改为单行紧凑基线（24px），双行时自然撑高。
-   0.11.8：align-items 从 center 改 flex-start——让主行位置永远与右侧翻页对齐，
-   副行插入时主行不再被向上挤（原 center 布局下 hint-left 长高会推主行上移）。 */
+   无内容时 .visible 移除 → display:none，不占窗口高度。 */
 #statusbar {
     display: none;
     justify-content: space-between;
     align-items: flex-start;
+    gap: var(--space-sm);
     margin-top: var(--space-md);
     padding-top: var(--space-sm);
     border-top: 1px solid var(--surface);
     font-size: var(--text-sm);
     color: var(--text-dim);
     min-height: 24px;
-    /* 0.16.1：单行紧凑基线（padding-top 8px + line-height 17px ≈ 25px）。
-        双行（chord 副行）时自然撑高，不固定 32px 以免单行底部空白过多。 */
+    /* 单行紧凑基线（padding-top 8px + line-height 17px ≈ 25px）。 */
 }
 
 #statusbar.visible {
     display: flex;
-    margin-top: auto; /* 翻页不缩窗口：maxHeight 撑高 #app 时，statusbar 贴底而非紧跟 results */
-}
-
-/* 0.10.8 §11.2 方案 2：左侧改为垂直 stack，主行 primary + 可选副行 secondary。
-   0.11.8：align-items 已在 #statusbar 上改成 flex-start，primary 位置固定，
-   secondary 从 primary 下方自然向下伸展（statusbar 整体长高，右侧翻页仍与 primary 对齐）。 */
-#statusbar .hint-left {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0; /* flex 溢出保护：主行文本长时正常截断，不撑爆右侧翻页位 */
+    margin-top: auto; /* 翻页不缩窗口：maxHeight 撑高 #app 时，footer 贴底而非紧跟 results */
 }
 
 #statusbar .hint-primary {
-    /* primary 有独立 min-height，保证单行时也占 min-height=32px 的一半基线，
-       副行插入时它自身位置不变（与右侧翻页 flex-start 对齐一致）。 */
     line-height: 1.4;
-}
-
-#statusbar .hint-secondary {
-    font-size: 0.9em;
-    opacity: var(--opacity-muted);
-    line-height: 1.4;
-    /* secondary 走 chord 键帽 + 标签，本身就是弱信号——比 primary 更淡表达"待命入口" */
+    min-width: 0; /* flex 溢出保护：主行文本长时正常截断，不撑爆右侧翻页位 */
 }
 
 #statusbar .hint-right {
@@ -63,20 +44,22 @@
     margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
 }
 
-/* 0.8.3 §4.9：Context Suggestion 来源提示（"· 来自划词"）弱化——比常规 hint 更浅,
-   让用户扫一眼就知道是元信息不是核心提示。中文不用斜体（辨识度差）。 */
-#statusbar .hint-origin {
-    opacity: var(--opacity-dim);
+/* 闲置 Chord 一行提示（0.24.4 §5.5）：空 query 闲置态的精简键帽行——
+   完整键帽表按住 Alt 走 Cheat Sheet（cheat-sheet.css）。 */
+#statusbar .hint-idle-chord {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    row-gap: 2px;
+    opacity: var(--opacity-muted);
 }
 
-/* Chord 副行的分隔符 / 标签（0.10.8 §11.2：从右侧降级路径改到左侧副行）。
-   secondary 已整体 opacity 弱化，chord-sep 再叠低透明度会太糊——保留常规 muted。 */
-#statusbar .chord-sep {
+#statusbar .hint-idle-chord .chord-sep {
     color: var(--text-faint);
     margin: 0 0.5em;
     font-weight: var(--weight-light);
 }
 
-#statusbar .chord-label {
+#statusbar .hint-idle-chord .chord-label {
     margin-left: 0.3em;
 }

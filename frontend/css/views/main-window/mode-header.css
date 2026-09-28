@@ -1,0 +1,43 @@
+/* ── ModeHeader（#mode-header，0.24.4 §5.5）───────────────────────────────── */
+/* 持续模式的唯一呈现（AI / 命令 / 剪贴板）。无模式时 .hidden 不占高度；
+   模式切换是离散状态转换，高度随之变化（与逐键抖动不同类）。 */
+
+#mode-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    padding: 0 var(--space-sm) var(--space-xs);
+    margin-bottom: var(--space-xs);
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--surface);
+    -webkit-app-region: no-drag;
+}
+
+#mode-header.hidden {
+    display: none;
+}
+
+#mode-header .mode-icon {
+    display: inline-flex;
+    color: var(--accent);
+}
+
+#mode-header .mode-icon .icon {
+    width: 14px;
+    height: 14px;
+}
+
+#mode-header .mode-label {
+    font-weight: var(--weight-semibold);
+    color: var(--text);
+}
+
+#mode-header .mode-hint {
+    opacity: var(--opacity-muted);
+}
+
+#mode-header .mode-hint.hidden {
+    display: none;
+}

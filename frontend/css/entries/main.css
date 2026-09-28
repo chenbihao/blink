@@ -30,8 +30,12 @@
 @import '../components/icon.css';
 @import '../components/voice-wave.css';
 
-/* views（Step 5 拆分 style.css） */
+/* views（Step 5 拆分 style.css；0.24.4 增 smart-tab 信息架构四件套） */
 @import '../views/main-window/main-window.css';
+@import '../views/main-window/mode-header.css';
+@import '../views/main-window/suggestion-bar.css';
 @import '../views/main-window/result-item.css';
 @import '../views/main-window/statusbar.css';
+@import '../views/main-window/cheat-sheet.css';
+@import '../views/main-window/transient-feedback.css';
 @import '../views/main-window/ai-mode.css';

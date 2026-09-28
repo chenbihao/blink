@@ -13,16 +13,24 @@
 <!-- #app 整张卡片：只有容器本身可拖动，可点击元素（input/结果项）明确排除。
      不用 deep 模式，避免第一次点击被拖动检测吞掉导致"需要双击" -->
 <div data-tauri-drag-region id="app">
+    <!-- ModeHeader（0.24.4 §5.5）：持续模式的唯一呈现（AI / 命令 / 剪贴板）。
+         无模式时隐藏，不占高度；mode-header.js 投影。 -->
+    <div class="hidden" id="mode-header">
+        <span class="mode-icon"></span>
+        <span class="mode-label"></span>
+        <span class="mode-hint"></span>
+    </div>
+
     <!-- 搜索模式（0.17.6: 独立容器，与 AI 模式 display 切换） -->
     <div id="search-mode">
         <div id="search-bar">
             <div class="input-wrap">
-                <!-- Ghost overlay：0.8.1 §2.6 双层 DOM + 0.8.5 §6.4 三层。
-                     .ghost-typed 与用户输入等宽同字体但透明（占位对齐），
-                     .ghost-suggest 灰色半透明显示 "→ fanyi" 类补全后缀，
-                     .ghost-chord 单行小字提示 Alt+A/Q/C（仅 chord-visible + 无 ghost-suggest 时显示）。 -->
+                <!-- CompletionGhost overlay（0.24.4 收窄为输入延伸）：.ghost-typed 与用户输入
+                     等宽同字体但透明（占位对齐），.ghost-suggest 灰色半透明显示 "-> fanyi" 类
+                     补全后缀与语音转写预览。Translate/AskAi 建议走 #suggestion-bar；
+                     Chord 提示走 #chord-cheat-sheet（Alt 按住时）。 -->
                 <div aria-hidden="true" id="ghost-overlay"><span class="ghost-typed"></span><span
-                        class="ghost-suggest"></span><span class="ghost-chord"></span></div>
+                        class="ghost-suggest"></span></div>
                 <input autocomplete="off" id="query" spellcheck="false" type="text"/>
                 <!-- 0.10 G1 录音指示器：录音中显示音量波动条 + "语音输入中" -->
                 <div class="voice-indicator hidden" id="voice-indicator">
@@ -37,16 +45,17 @@
                 </div>
             </div>
         </div>
+        <!-- SuggestionBar（0.24.4 §5.2 双槽位）：Primary → Tab / Secondary → Shift+Tab，
+             只渲染非 Completion 槽位（Completion 走 ghost 影子，同一建议不在两个视觉区
+             重复出现）。suggestion-bar.js 投影；query 非空期间槽位粘性保留。 -->
+        <div id="suggestion-bar"></div>
         <ul id="results"></ul>
     </div>
 
-    <!-- AI 模式（0.17.6: 独立容器，Tab on AI Ghost 进入，ESC 退出） -->
+    <!-- AI 模式（0.17.6: 独立容器，Tab on AI Ghost 进入，ESC 退出）。
+         0.24.4: 模式徽章统一走 #mode-header，输入条只留输入框。 -->
     <div hidden id="ai-mode">
         <div id="ai-input-bar">
-            <span aria-hidden="true" class="ai-mode-indicator">
-                <svg class="icon"><use href="#icon-sparkles"/></svg>
-                <span>AI</span>
-            </span>
             <input autocomplete="off" data-i18n-placeholder="ai.followup_placeholder" id="ai-query" placeholder="追问…"
                    spellcheck="false" type="text"/>
         </div>
@@ -63,7 +72,16 @@
         </div>
     </div>
 
+    <!-- ResultFooter（0.24.4 §5.5）：结果导航/动作/分页 + 空 query 闲置态 Chord 一行提示 -->
     <div id="statusbar"></div>
+
+    <!-- Chord Cheat Sheet（0.24.4 §5.5）：按住 Alt 时的完整键帽表，独立覆盖层，
+         不再在输入框与 Footer 之间迁移。cheat-sheet.js 投影。 -->
+    <div class="hidden" id="chord-cheat-sheet"></div>
+
+    <!-- TransientFeedback（0.24.4 §5.5）：loading/success/error 瞬态反馈，
+         底部覆盖层不占布局。transient-feedback.js 投影。 -->
+    <div class="hidden" id="transient-feedback"></div>
 </div>
 <script src="js/main-window/main.js" type="module"></script>
 </body>

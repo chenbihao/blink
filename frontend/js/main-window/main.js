@@ -6,6 +6,11 @@ import * as lifecycle from "./lifecycle.js";
 import * as contextmenu from "./contextmenu.js";
 import * as ghost from "./ghost.js";
 import * as statusbar from "./statusbar.js";
+import * as suggestionBar from "./suggestion-bar.js";
+import * as suggestionAccept from "./suggestion-accept.js";
+import * as modeHeader from "./mode-header.js";
+import * as cheatSheet from "./cheat-sheet.js";
+import * as transientFeedback from "./transient-feedback.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
 import * as aiMode from "./ai-mode.js";
@@ -26,17 +31,22 @@ applyGlassOpacityFromConfig(); // 启动时应用毛玻璃透明度
 // 启动界面语言（静态文本如搜索框 placeholder；shown 时刷新）
 applyI18nFromConfig();
 ghost.init();
-// 0.24 §3.6：ghost 采纳前的 revision 过期校验（注入避免 ghost→search 反向 import 成环）
-ghost.setStalenessCheck((rev) => search.isLiveRevision(rev));
-statusbar.init(); // 订阅 ghost 变化——必须在 ghost.init 后
+// 0.24 §3.6：建议采纳前的 revision 过期校验（注入避免 accept→search 反向 import 成环；
+// ghost（Completion）与 suggestion-bar（双槽）共用同一采纳路径）
+suggestionAccept.setStalenessCheck((rev) => search.isLiveRevision(rev));
+statusbar.init(); // ResultFooter：订阅 chord 状态（闲置行）——须在 chord.init 前注册
+suggestionBar.init(); // SuggestionBar：双槽建议条（0.24.4）
+modeHeader.init(); // ModeHeader：持续模式徽章（0.24.4）
+transientFeedback.init(); // TransientFeedback：瞬态反馈覆盖层（0.24.4）
 // autosuggest 前端配置（tab_key）—— 异步 fetch，不 await（默认 Tab 已可用，回填后无缝切换）
 autosuggestConfig.init();
 search.init();
 keyboard.init();
 lifecycle.init();
 contextmenu.init();
-chord.init();
+chord.init(); // 预热 chord 配置 + 动作集（完成后 notify 订阅者）
+cheatSheet.init(); // Cheat Sheet：订阅 chord 可见性 + 初始渲染——须在 chord.init 后（拿到动作集）
 aiMode.init(); // 0.17.6: AI 模式初始化（注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听）
-cmdMode.init(); // 0.18.6: 命令模式初始化（创建 hint DOM）
-clipboardMode.init(); // 0.19.15: 剪贴板模式初始化（创建徽章 DOM）
+cmdMode.init(); // 0.18.6: 命令模式初始化（ModeHeader 投影由 enter/exit 触发）
+clipboardMode.init(); // 0.19.15: 剪贴板模式初始化（ModeHeader 投影由 enter/exit 触发）
 inputState.init(); // 输入状态桥接初始化（注册 listener + register_main_input_view）

@@ -1,0 +1,83 @@
+/* ── SuggestionBar（#suggestion-bar，0.24.4 §5.5）────────────────────────── */
+/* 双槽建议条：Primary（Tab）/ Secondary（Shift+Tab），只渲染非 Completion 槽位。
+   建议"弱信号不撑首屏"：条高一行紧凑，粘性槽位保证连续输入不逐键抖动。 */
+
+#suggestion-bar {
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+    flex-shrink: 0;
+    -webkit-app-region: no-drag;
+}
+
+#suggestion-bar.visible,
+/* 粘性态即使无内容也保持占位（display:none 会让 min-height 失效） */
+#suggestion-bar.slot-armed {
+    display: flex;
+}
+
+/* 粘性槽位（§5.5）：query 非空期间建议消失/重现时保持一行高度——
+   高度变化仅发生在空态↔建议态转换（suggestion-bar.js 在转换点 resync）。 */
+#suggestion-bar.slot-armed {
+    min-height: 24px;
+}
+
+.suggestion-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    width: 100%;
+    padding: 2px var(--space-sm);
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--transition-fast) ease, color var(--transition-fast) ease;
+}
+
+.suggestion-row:hover {
+    background: var(--surface);
+    color: var(--text);
+}
+
+/* 次槽视觉降一档：第二建议是备选，不该与主建议等权争夺注意力 */
+.suggestion-row.slot-secondary {
+    opacity: var(--opacity-muted);
+}
+
+.suggestion-row.slot-secondary:hover {
+    opacity: 1;
+}
+
+.suggestion-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--accent);
+}
+
+.suggestion-icon .icon {
+    width: 13px;
+    height: 13px;
+}
+
+.suggestion-text {
+    flex: 1;
+    min-width: 0; /* flex 溢出保护：长建议文本截断，不挤掉右侧键帽 */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 来源提示（"来自划词/剪贴板"）弱化——元信息不是核心提示，中文不用斜体 */
+.suggestion-origin {
+    opacity: var(--opacity-dim);
+}
+
+.suggestion-key {
+    flex-shrink: 0;
+    margin-left: auto;
+}

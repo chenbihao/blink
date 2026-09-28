@@ -1,6 +1,8 @@
 //! 0.20.0 主窗口动作错误投影 helper。
 //!
-//! 职责：结构化错误 → 本地化消息 → statusbar 可见反馈。
+//! 职责：结构化错误 → 本地化消息 → 可见反馈。
+//! 0.24.4 起呈现走 TransientFeedback（transient-feedback.js 底部瞬态覆盖层），
+//! 不再向 statusbar 叠加自建元素。
 //! 日志只记录 action id、error code 和长度/尺寸，不记录正文内容。
 //!
 //! 设计原则（spec-frontend）：
@@ -10,16 +12,7 @@
 
 import {normalizeError} from "../shared/tauri.js";
 import {t} from "../i18n/index.js";
-import {syncWindowSize} from "./window-size.js";
-
-/** statusbar 元素引用。 */
-const statusbarEl = document.getElementById("statusbar");
-
-/** 当前错误提示的定时器 ID（用于清除上一个提示）。 */
-let errorTimer = null;
-
-/** 当前错误提示 DOM 元素。 */
-let errorEl = null;
+import {show as showFeedback} from "./transient-feedback.js";
 
 /** 错误提示持续时间（毫秒）。 */
 const ERROR_DURATION_MS = 3500;
@@ -59,11 +52,8 @@ function projectErrorMessage(err) {
 }
 
 /**
- * 在 statusbar 显示动作错误反馈。
- *
- * 在 statusbar 内追加一个绝对定位的错误提示元素，3.5 秒后自动移除。
- * 不替换 statusbar 原有内容，避免丢失事件监听或破坏 statusbar.js 的渲染状态。
- * 若上一个错误提示仍在，会被新的替换（不叠加）。
+ * 显示动作错误反馈（TransientFeedback 瞬态错误，3.5 秒自动消失；
+ * 后到的反馈替换先到的，不叠加）。
  *
  * @param {string} actionId 动作标识（如 "copy_clipboard_image"、"pin_clipboard_image"、
  *                          "edit_text_item"、"pin_text_item"、"run_builtin_action"、
@@ -78,36 +68,8 @@ export function showActionError(actionId, err) {
         `[action-error] action=${actionId} code=${normalized.code} msg_len=${normalized.message.length} retryable=${normalized.retryable}`
     );
 
-    if (!statusbarEl) return;
-
-    // 清除上一个错误提示
-    if (errorTimer) {
-        clearTimeout(errorTimer);
-        errorTimer = null;
-    }
-    if (errorEl) {
-        errorEl.remove();
-        errorEl = null;
-    }
-
-    // 创建错误提示元素并叠加在 statusbar 上方
-    const message = projectErrorMessage(normalized);
-    errorEl = document.createElement("div");
-    errorEl.className = "action-error-hint";
-    errorEl.setAttribute("role", "alert");
-    errorEl.textContent = message;
-    statusbarEl.appendChild(errorEl);
-    statusbarEl.classList.add("has-action-error");
-    syncWindowSize();
-
-    // 定时移除错误提示
-    errorTimer = setTimeout(() => {
-        errorTimer = null;
-        if (errorEl) {
-            errorEl.remove();
-            errorEl = null;
-        }
-        statusbarEl.classList.remove("has-action-error");
-        syncWindowSize();
-    }, ERROR_DURATION_MS);
+    showFeedback(projectErrorMessage(normalized), {
+        type: "error",
+        durationMs: ERROR_DURATION_MS,
+    });
 }

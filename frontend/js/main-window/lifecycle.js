@@ -12,6 +12,7 @@ import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
+import * as autosuggestConfig from "./autosuggest-config.js";
 import {
     applyFinal,
     applyPartial,
@@ -78,6 +79,7 @@ export function init() {
             applyGlassOpacityFromConfigData(cfg);
             applyI18nFromConfigData(cfg);
             results.refreshMaxResultsFromConfigData(cfg);
+            autosuggestConfig.refreshFromConfigData(cfg);
             chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());
         }).catch((e) => console.error("SHOWN: get_config 失败", e));
         // 0.8.3 §4.13 P0-1：唤起瞬间发一次空 query,拉后端产的 Context Suggestion（Ghost）。
@@ -116,6 +118,8 @@ export function init() {
             applyGlassOpacityFromConfigData(cfg);
             applyI18nFromConfigData(cfg);
             results.refreshMaxResultsFromConfigData(cfg);
+            // 0.24.5：接受键配置热刷新（keyboard 分派 + bar 键帽投影同源）
+            autosuggestConfig.refreshFromConfigData(cfg);
             chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());
         }).catch((e) => console.error("CONFIG_CHANGED: get_config 失败", e));
     });
@@ -132,9 +136,8 @@ export function init() {
     });
 
     // 0.10 语音录音开始 → G1 隐藏 Ghost overlay + 显示语音指示器
-    // 注意：不清空 ghost-chord 文本内容——CSS body.voice-active 已隐藏它，
-    // 录音结束后移除 voice-active 即可恢复显示。清空 textContent 会导致
-    // chord.refresh() 未重新渲染前 :not(:empty) 不匹配，chord 提示永久消失。
+    // 注意：不清空 Cheat Sheet 内容——CSS body.voice-active 已隐藏它，
+    // 录音结束后移除 voice-active 即可恢复显示。
     listen(EVENTS.VOICE_RECORDING_START, (event) => {
         const {target} = event.payload ?? {};
         if (target !== "g1") return;
@@ -206,7 +209,6 @@ export function init() {
             if (ghostSuggest) {
                 ghostSuggest.textContent = preview ? ` ${preview}` : "";
                 ghostSuggest.classList.add("voice-preview-text");
-                ghostSuggest.classList.remove("ghost-context");
             }
             requestAnimationFrame(() => ghost.scrollWithMargin());
         } else if (payload.text) {
