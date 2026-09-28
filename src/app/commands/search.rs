@@ -116,6 +116,32 @@ pub async fn search_apps(
     results
 }
 
+/// 建议采纳遥测（0.24 §3.6 单向遥测，fire-and-forget）。
+///
+/// 前端 Tab/Shift+Tab/点击采纳成功后上报：`{ id, slot, revision }`。
+/// id 是语义 slug（前端不解释、仅回传）；revision = 采纳时的 search seq，
+/// 后端与近期环形记录比对记"匹配与否"。不记 query/选区原文。
+#[tauri::command]
+pub fn report_suggestion_adoption(
+    app: tauri::AppHandle,
+    id: String,
+    slot: String,
+    revision: u64,
+) -> Result<(), String> {
+    let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    service.record_adoption(&id, &slot, revision);
+    Ok(())
+}
+
+/// 建议会话重置（0.24 §3.8 降频清零）：主窗口隐藏时前端 lifecycle 调用——
+/// 每次唤起是新会话，降频计数与遥测环形表一并清零。
+#[tauri::command]
+pub fn reset_suggestion_session(app: tauri::AppHandle) -> Result<(), String> {
+    let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    service.reset_suggestion_session();
+    Ok(())
+}
+
 /// 前端回车/点击时调用：启动选中的应用（普通 lnk 路径）。
 ///
 /// 0.8.0 §1.3 起，内置动作走 `run_builtin_action`（前端 `Action.kind == "run"` 时分派），

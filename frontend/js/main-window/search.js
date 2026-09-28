@@ -18,13 +18,24 @@ const DEBOUNCE_MS = 40;
 /**
  * 0.24.1：SearchResponse.suggestion 已迁移为 SuggestionSet
  * `{ revision, primary, secondary }`（0.24 §3.2 双槽位）。
- * 过渡投影只消费 primary（行为与旧 `Option<Suggestion>` 等价）；
+ * 0.24.3：ghost 消费 primary + revision（采纳时与本地 seq 比对拒绝过期，§3.6）；
  * secondary 槽消费随 0.24.4 SuggestionBar 落地。
  * @param {{suggestion?: {primary?: object|null}}} resp search_apps 响应
  * @returns {object|null} primary 建议或 null
  */
 function primarySuggestion(resp) {
     return resp.suggestion?.primary ?? null;
+}
+
+/**
+ * 该 revision 是否仍是"当前最新搜索"（0.24 §3.6 过期防护）。
+ * seq 在每次发起新搜索时 +1；ghost 采纳前调用——不等说明建议已过期，
+ * 本地拒绝（零 IPC、零延迟）。
+ * @param {number} revision SuggestionSet.revision（渲染该建议时的 search seq）
+ * @returns {boolean}
+ */
+export function isLiveRevision(revision) {
+    return revision === seq;
 }
 
 let timer = null;
@@ -130,7 +141,7 @@ export async function fetchContextSuggestions() {
         // entries 通常为空（Context 已不产 candidate），但仍走 render 走清理路径
         results.render(resp.entries || [], mySeq);
         // Ghost：空 query 场景后端产 Context Suggestion,此处消费
-        ghost.update("", primarySuggestion(resp));
+        ghost.update("", primarySuggestion(resp), resp.suggestion?.revision);
     } catch (e) {
         console.error("fetchContextSuggestions failed:", e);
     }
@@ -153,7 +164,7 @@ export async function fillQuery(text) {
         const resp = await searchApps(text, mySeq);
         if (mySeq !== seq) return;
         results.render(resp.entries || [], mySeq);
-        ghost.update(text, primarySuggestion(resp));
+        ghost.update(text, primarySuggestion(resp), resp.suggestion?.revision);
     } catch (e) {
         console.error("fillQuery search failed:", e);
     }
@@ -206,7 +217,7 @@ function onInput() {
             // 丢弃过期响应：用户已输入新 query 或已复位
             if (mySeq !== seq) return;
             results.render(resp.entries || [], mySeq);
-            ghost.update(rawQuery, primarySuggestion(resp));
+            ghost.update(rawQuery, primarySuggestion(resp), resp.suggestion?.revision);
         } catch (e) {
             console.error("search_apps failed:", e);
         }

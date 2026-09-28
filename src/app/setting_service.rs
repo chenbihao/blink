@@ -221,7 +221,16 @@ async fn save_suggestion(app: &tauri::AppHandle, cfg: &SuggestionConfig) -> Resu
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     ConfigStore::set(pool, cfg).await?;
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        service.update_autosuggest_config(cfg.autosuggest_enabled, cfg.autosuggest_min_score);
+        // 0.24.2：投影完整 runtime 配置（autosuggest 开关/阈值 + secondary 门槛），
+        // 与 KeywordProducer 共享的 cell 一并热更新。
+        service.update_suggestion_config(
+            crate::domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
+                autosuggest_enabled: cfg.autosuggest_enabled,
+                min_score: cfg.autosuggest_min_score,
+                secondary_min_rank: cfg.secondary_min_rank,
+                suppress_repeated: cfg.suppress_repeated,
+            },
+        );
     }
     emit_changed(app, "app.suggestion");
     Ok(())

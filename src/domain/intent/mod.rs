@@ -9,11 +9,16 @@
 //! `PluginSettingResolver` trait 反转读插件 settings(`target_lang`)。
 //!
 //! 0.8.3 §4.4 加 `Suggestion` 通道 —— push→Ghost 转型：
-//! - 空 query 场景，Context 命中不再进 `route()` 产 candidate（抢首屏），改由 `best_suggestion` 产 Suggestion（Ghost + Tab 采纳）。
+//! - 空 query 场景，Context 命中不再进 `route()` 产 candidate（抢首屏），改产 Suggestion（Ghost + Tab 采纳）。
 //! - 非空 query 场景，keyword+context 同 plugin 命中的 `merge_hits` 加分逻辑保留（增强 keyword 命中，不是抢首屏）。
-//! - `suggest_completion`（0.8.1 旧接口）保留供 fallback / 单测，生产走 `best_suggestion` 统一入口。
+//! - `suggest_completion`（0.8.1 旧接口）保留供 fallback / 单测。
+//!
+//! 0.24.2：Suggestion 生产/仲裁整体迁入 `suggestion::coordinator::SuggestionCoordinator`
+//! （实例由 SearchService 持有，编排层传 `RouteSummary`/`SuggestionAvailability`）；
+//! RuleRouter 只保留 translate 文本判定方法（`context_suggestion` /
+//! `translate_query_suggestion` / `suggestion_target_lang`）供 producer 委托。
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger};
 use crate::domain::plugin::PluginSettingResolver;
@@ -25,7 +30,10 @@ pub mod suggestion;
 pub use suggest::CompletionHint;
 // SuggestionSource（producer 身份）0.24.1 起不上 wire，生产代码仅 suggestion 模块
 // 内部消费（producer trait 实现），不再从 intent 层 re-export。
-pub use suggestion::{Suggestion, SuggestionAction, SuggestionKind, SuggestionOrigin, SuggestionSet};
+pub use suggestion::{
+    RouteSummary, Suggestion, SuggestionAction, SuggestionAvailability, SuggestionKind,
+    SuggestionOrigin, SuggestionSet,
+};
 
 // ── 呈现模式 ──────────────────────────────────────────────
 
@@ -300,23 +308,8 @@ pub trait IntentRouter: Send + Sync {
     ) -> Route;
 
     /// 算 ghost text 补全（0.8.1 §2.4）。默认实现返回 None（非 RuleRouter 实现无需支持）。
-    #[allow(dead_code)] // 0.8.1 遗留 API；0.8.3 起走 best_suggestion，保留供单测
+    #[allow(dead_code)] // 0.8.1 遗留 API；0.8.3 起走 producer/coordinator，保留供单测
     fn suggest_completion(&self, _query: &str, _min_score: f64) -> Option<CompletionHint> {
-        None
-    }
-
-    /// 算 top-1 Suggestion（0.8.3 §4.4）。默认实现返回 None。
-    ///
-    /// `RuleRouter` 覆写：
-    /// - 空 query 走 Context 分支（`match_context_hits` + `context_confidence`）
-    /// - 非空 query 走 Keyword 分支（`compute_hint_scored`）
-    /// - 因空/非空互斥,0.8.3 阶段两路不直接竞争；0.9 AI 接入时加第三路 → 走同一竞争路径
-    fn best_suggestion(
-        &self,
-        _query: &str,
-        _snapshot: &ContextSnapshot,
-        _min_score: f64,
-    ) -> Option<Suggestion> {
         None
     }
 
@@ -328,11 +321,9 @@ pub trait IntentRouter: Send + Sync {
     /// 更新 context binding 禁用列表（0.8.3 §4.6）。默认 no-op。
     fn apply_context_disable_list(&self, _keys: Vec<String>) {}
 
-    /// 取走上一次 `best_suggestion` 产出的 RankingHint（0.8.6 §8.1.2）。
-    /// 默认返回 None（非 RuleRouter 实现无需支持）。
-    fn take_last_ranking_hint(&self) -> Option<RankingHint> {
-        None
-    }
+    // 0.24.2：`best_suggestion` / `take_last_ranking_hint` 已删除——Suggestion 仲裁
+    // 迁入 `SuggestionCoordinator`（实例由 SearchService 持有，编排层传 RouteSummary），
+    // RankingHint 由 coordinate 返回值直接回传，不再经 router 中转。
 }
 
 // ── RuleRouter ────────────────────────────────────────────
@@ -371,15 +362,11 @@ pub struct RuleRouter {
     app_language: RwLock<String>,
     /// 用户禁用的 context binding key 集合（0.8.3 §4.6）。
     /// key = `binding_key(target_id, trigger_key)`。命中 key 的 binding 在
-    /// `match_context_hits` 中被跳过——route() 与 best_suggestion() 共用此判定。
+    /// `match_context_hits` 中被跳过——route() 与 suggestion 判定共用此门槛。
     disabled_bindings: RwLock<std::collections::HashSet<String>>,
-    /// Suggestion 多源协调器（0.8.6 §8.1.2 建立，0.24.1 更名 Coordinator）。
-    /// `best_suggestion` 委托此 coordinator，不再内嵌 if/else 分支。
-    coordinator: RwLock<suggestion::coordinator::SuggestionCoordinator>,
-    /// 上一次 `best_suggestion` 产出的 RankingHint（0.8.6 §8.1.2）。
-    /// 由 coordinator 竞争后写入，SearchService 下一轮 `route()` 读取做 Surface Booster。
-    /// 替代原 `Suggestion.ranking_hint` 的跨轮反馈通道。
-    last_ranking_hint: Mutex<Option<RankingHint>>,
+    // 0.24.2：coordinator / last_ranking_hint 字段已删——SuggestionCoordinator 实例
+    // 迁至 SearchService 持有（编排层传 RouteSummary，§3.7），RankingHint 由
+    // coordinate 返回值直接回传，不再经 router 中转。
 }
 
 struct Rule {
@@ -452,38 +439,7 @@ impl RuleRouter {
             // 单测下不注入 language → 用 "zh" 兜底（Blink 默认 UI 语言）。
             app_language: RwLock::new("zh".to_string()),
             disabled_bindings: RwLock::new(std::collections::HashSet::new()),
-            // coordinator 初始为空，构造完成后通过 `init_coordinator` 注入 producers
-            coordinator: RwLock::new(suggestion::coordinator::SuggestionCoordinator::new()),
-            last_ranking_hint: Mutex::new(None),
         }
-    }
-
-    /// 初始化 SuggestionCoordinator 的 producers（0.8.6 §8.1.2；0.24.1 随 Arbiter 更名）。
-    ///
-    /// 必须在 `RuleRouter` 被 `Arc` 包装后调用——`ContextProducer` 和 `KeywordProducer`
-    /// 都需要 `Arc<RuleRouter>` 来访问内部数据。
-    ///
-    /// `min_score` 是共享引用——`SearchService` 的 autosuggest 配置热更新时写入新值，
-    /// `KeywordProducer.produce` 每次读取最新阈值，无需额外通知。
-    ///
-    /// 在 `main.rs` 中 `Arc::new(RuleRouter::new(...))` 之后立即调用。
-    pub fn init_coordinator(self: &Arc<Self>, min_score: Arc<std::sync::RwLock<f64>>) {
-        let mut coordinator = self.coordinator.write().unwrap();
-        coordinator.register(Arc::new(suggestion::keyword::KeywordProducer::from_router(
-            self.clone(),
-            min_score,
-        )));
-        coordinator.register(Arc::new(suggestion::context::ContextProducer::new(
-            self.clone(),
-        )));
-    }
-
-    /// 取走上一次 `best_suggestion` 产出的 RankingHint（一次性消费）。
-    ///
-    /// SearchService 每次 `search()` 结束后调用此方法拿 hint，
-    /// 存入 `last_ranking_hint` 给下一轮 `route()` 做 Surface Booster。
-    pub fn take_last_ranking_hint(&self) -> Option<RankingHint> {
-        self.last_ranking_hint.lock().unwrap().take()
     }
 
     /// 后置注入 `PluginSettingResolver`（0.8.2 §3.4）。
@@ -818,27 +774,6 @@ impl IntentRouter for RuleRouter {
         suggest::compute_hint(&keywords, query, min_score)
     }
 
-    fn best_suggestion(
-        &self,
-        query: &str,
-        snapshot: &ContextSnapshot,
-        min_score: f64,
-    ) -> Option<Suggestion> {
-        // 0.8.6 §8.1.2：委托 SuggestionCoordinator 做多源竞争。
-        // Keyword/Context 两个 producer 各自独立产出候选，coordinator 按 rank_score 选 top-1。
-        let coordinator = self.coordinator.read().unwrap();
-        if coordinator.producer_count() > 0 {
-            // coordinator 已初始化（生产环境通过 init_coordinator 注入 producers）
-            let (sug, hint) = coordinator.coordinate(query, snapshot);
-            *self.last_ranking_hint.lock().unwrap() = hint;
-            return sug;
-        }
-        drop(coordinator); // 释放读锁再调 fallback
-
-        // fallback：coordinator 未初始化时（单测环境），走原直接实现
-        self.best_suggestion_direct(query, snapshot, min_score)
-    }
-
     fn set_app_language(&self, language: String) {
         // 委托到 inherent method(单测直接用 RuleRouter 类型,生产环境走 trait)
         RuleRouter::set_app_language(self, language);
@@ -847,72 +782,26 @@ impl IntentRouter for RuleRouter {
     fn apply_context_disable_list(&self, keys: Vec<String>) {
         RuleRouter::apply_context_disable_list(self, keys);
     }
-
-    fn take_last_ranking_hint(&self) -> Option<RankingHint> {
-        RuleRouter::take_last_ranking_hint(self)
-    }
 }
 
 impl RuleRouter {
-    /// 直接实现的 best_suggestion（0.8.6 arbiter 未初始化时的 fallback）。
-    ///
-    /// 策略：空 query → Context Ghost；非空 → Keyword Ghost（无命中则 None）。
-    /// 单测环境走此路径（`init_arbiter` 未调用）。
-    #[allow(deprecated)] // fallback 仍读 Suggestion.ranking_hint，生产环境走 arbiter 不会到这里
-    fn best_suggestion_direct(
-        &self,
-        query: &str,
-        snapshot: &ContextSnapshot,
-        min_score: f64,
-    ) -> Option<Suggestion> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            let sug = self.context_suggestion(query, snapshot);
-            *self.last_ranking_hint.lock().unwrap() =
-                sug.as_ref().and_then(|s| s.ranking_hint.clone());
-            sug
-        } else if let Some((hint, score)) =
-            suggest::compute_hint_scored(&self.collect_suggest_keywords(), query, min_score)
-        {
-            let sug = Suggestion {
-                id: "completion-keyword".to_string(),
-                kind: SuggestionKind::Completion,
-                action: SuggestionAction::RouteQuery {
-                    query: hint.replacement,
-                },
-                rank_score: score.min(1.0),
-                display: hint.display,
-                prefix_len: hint.prefix_len,
-                origin: None,
-                ranking_hint: None,
-            };
-            *self.last_ranking_hint.lock().unwrap() = None;
-            Some(sug)
-        } else {
-            // 非空 query 无 Keyword 命中 → 不显示 Ghost
-            *self.last_ranking_hint.lock().unwrap() = None;
-            None
-        }
-    }
-
-    /// 从 Context 命中产出 top-1 Suggestion（空 query 专属）。
+    /// 从 Context 命中产出 awareness 派生的 Translate Suggestion（0.24.2 放开空 query 闸）。
     ///
     /// 多 Context 命中取 confidence 最高；产出的 Suggestion 携带 RankingHint（Surface Booster
     /// 单向反馈）。无命中返回 None。
     ///
-    /// **非空 query 短路**：用户已输入内容时不再显示 Context Ghost——输入即意图表达，
-    /// 环境感知建议会干扰用户操作。Context Ghost 只在空 query（用户刚唤起、尚未表达意图）时出现。
-    #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint，0.9 彻底移除字段后简化
+    /// **非空 query 不再短路**（0.24.2 §3.4）：awareness 派生候选在非空 query 下
+    /// 参选，最多占 secondary——"输入即意图表达"（0.8.4）由 Coordinator 分层保障，
+    /// 不再由本方法硬拦。
+    ///
+    /// 0.24.1：当前 context 规则仅 translate 插件注册（text_is_non_target_lang），
+    /// kind 恒映射 Translate；未来非翻译类 context 规则出现时按规则语义分类。
+    #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint（§3.7 冻结 produce 签名，过渡通道保留）
     pub(crate) fn context_suggestion(
         &self,
         query: &str,
         snapshot: &ContextSnapshot,
     ) -> Option<Suggestion> {
-        // 非空 query 不显示 Context Ghost——用户已表达意图，环境感知会干扰
-        if !query.trim().is_empty() {
-            return None;
-        }
-
         let hits = self.match_context_hits(snapshot);
         let best_ctx = hits.into_iter().max_by(|a, b| {
             let ca = a
@@ -927,35 +816,127 @@ impl RuleRouter {
         })?;
 
         // 采纳后自抑制：query 已命中 best_ctx 所属 plugin 的 keyword → 静默
+        // （0.8.8 bugfix：避免 Ghost 反复弹出 / 无限 Tab 叠加；§3.3 明确 keyword 走确定路由）
         if self.query_hits_plugin_keyword(query, &best_ctx.plugin_id) {
             return None;
         }
 
-        let when = best_ctx.when.as_ref()?;
-        let confidence = context_confidence(when, best_ctx.origin);
         let origin = best_ctx.origin.map(SuggestionOrigin::from);
         let (display, replacement) = self.build_context_suggestion_text(&best_ctx, snapshot);
-        // 0.24.1：当前 context 规则仅 translate 插件注册（text_is_non_target_lang），
-        // kind 恒映射 Translate；0.24.2 起按规则语义分类。id 按 origin 区分选区/剪贴板，
-        // 与 §3.4 rank 表 slug 对齐。
-        let id = match origin {
-            Some(SuggestionOrigin::Selection) => "translate-selection",
-            Some(SuggestionOrigin::Clipboard) => "translate-clipboard",
-            None => "translate-context",
-        }
-        .to_string();
+        // §3.4 rank 表固定值：Selection 0.92 / Clipboard 0.82（不再用 context_confidence，
+        // 后者只用于多命中时选 best_ctx）。id 按 origin 区分，与 §3.4 slug 对齐。
+        let (id, rank_score) = match origin {
+            Some(SuggestionOrigin::Selection) => ("translate-selection", 0.92),
+            Some(SuggestionOrigin::Clipboard) => ("translate-clipboard", 0.82),
+            None => ("translate-context", 0.92),
+        };
+        let when = best_ctx.when;
+        // 指纹来源文本：按 origin 从 snapshot 取（与 display/replacement 同源）
+        let fp_text = match (when, origin) {
+            (Some(ContextTrigger::TextIsNonTargetLang { source }), Some(_)) => source
+                .extract(snapshot)
+                .map(|v| truncate_arg(v.text))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         Some(Suggestion {
-            id,
+            id: id.to_string(),
             kind: SuggestionKind::Translate,
             action: SuggestionAction::RouteQuery { query: replacement },
-            rank_score: confidence,
+            rank_score,
             display,
             prefix_len: 0,
             origin,
+            fingerprint: suggestion::text_fingerprint(&fp_text),
             ranking_hint: Some(RankingHint {
                 boost_plugin_id: best_ctx.plugin_id.clone(),
             }),
         })
+    }
+
+    /// Query 派生的 Translate Suggestion（0.24 §3.3：Query 是并列评分输入）。
+    ///
+    /// 判定门禁（缺一不可）：
+    /// 1. **自然语言形态**（`is_natural_language_shaped`）：拉丁单 token 是应用名/
+    ///    搜索词不是句子——`chrome`、代码标识符等不得被翻译抢占（§3.3）；
+    /// 2. **`needs_translation`**：URL/路径/结构化文本/短文本/同族语言全排除；
+    /// 3. **未命中目标 plugin keyword**（明确 keyword 走确定路由，不叠加同义建议）。
+    ///
+    /// 采纳动作 = RouteQuery（query 变为 `翻译 {query}` 命中确定路由），rank 0.92。
+    #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint（§3.7 冻结 produce 签名，过渡通道保留）
+    pub(crate) fn translate_query_suggestion(&self, query: &str) -> Option<Suggestion> {
+        let q = query.trim();
+        if q.is_empty() {
+            return None;
+        }
+        let (plugin_id, target) = self.active_translate_binding()?;
+        if !crate::domain::context::probe::is_natural_language_shaped(q) {
+            return None;
+        }
+        if !crate::domain::context::probe::needs_translation(q, &target) {
+            return None;
+        }
+        // 自抑制：query 已命中该 plugin keyword（如 "翻译 xxx"）→ 不叠加
+        if self.query_hits_plugin_keyword(q, &plugin_id) {
+            return None;
+        }
+
+        let (display, replacement) =
+            self.translate_display_and_replacement(&plugin_id, &truncate_arg(q));
+        Some(Suggestion {
+            id: "translate-query".to_string(),
+            kind: SuggestionKind::Translate,
+            action: SuggestionAction::RouteQuery { query: replacement },
+            rank_score: 0.92,
+            display,
+            prefix_len: 0,
+            origin: None,
+            fingerprint: suggestion::text_fingerprint(q),
+            ranking_hint: None,
+        })
+    }
+
+    /// 建议侧目标语言：优先活跃翻译绑定的 `target_lang`，无绑定回退 `app_language`。
+    ///
+    /// 供 `AiProducer`（选区/外语分类）使用——翻译绑定的 target 是全应用统一的
+    /// "目标语言"语义真源（0.8.2 §3.4 起与 manifest context 同源解析）。
+    pub fn suggestion_target_lang(&self) -> String {
+        self.active_translate_binding()
+            .map(|(_, target)| target)
+            .unwrap_or_else(|| self.app_language.read().unwrap().clone())
+    }
+
+    /// 活跃的 `TextIsNonTargetLang` 绑定（应用黑名单 + 启用态 + target 解析）。
+    ///
+    /// 返回首个 `(plugin_id, target)`。当前仅 translate 插件注册此类规则（0.24.1
+    /// 实施注记），多绑定场景出现时再定多 target 仲裁。
+    fn active_translate_binding(&self) -> Option<(String, String)> {
+        let rules = self.context_rules.read().unwrap();
+        let rule = rules
+            .iter()
+            .find(|r| matches!(r.when, ContextTrigger::TextIsNonTargetLang { .. }))?;
+        let plugin_id = rule.plugin_id.clone();
+
+        // 与 match_context_hits 步骤 1/2/3 同源的检查（黑名单 / 启用态 / target 解析）
+        let key = binding_key(&plugin_id, trigger_key(&rule.when));
+        if self.disabled_bindings.read().unwrap().contains(&key) {
+            return None;
+        }
+        let resolver = self.settings.read().unwrap().clone();
+        if let Some(r) = resolver.as_ref()
+            && !r.is_enabled(&plugin_id)
+        {
+            return None;
+        }
+        let app_lang = self.app_language.read().unwrap().clone();
+        let plugin_target = resolver
+            .as_ref()
+            .and_then(|r| r.get_string(&plugin_id, "target_lang"));
+        let target = match plugin_target.as_deref() {
+            Some("auto") | None => app_lang,
+            Some(other) => other.to_string(),
+        };
+        Some((plugin_id, target))
     }
 
     /// 扫描 Context 规则表，返回命中的 Hit 列表（0.8.2 §3.4 / 0.8.3 §4.13 P1 共享判定）。
@@ -1095,7 +1076,8 @@ impl RuleRouter {
         self.match_context_hits(snapshot)
     }
 
-    /// 从 Context Hit 构造 Suggestion 显示文本（0.8.3 §4.13 P0 修订）。
+    /// 从 Context Hit 构造 Suggestion 显示文本（0.8.3 §4.13 P0 修订；0.24.2 收敛为
+    /// `translate_display_and_replacement` 的薄包装——query 派生与 awareness 派生同源）。
     ///
     /// **display**：本地化名（`翻译 "hello..."` / `Translate "hello..."`）——
     /// 从 `PluginSettingResolver::get_display_name(plugin_id, app_language)` 读 manifest.name；
@@ -1124,14 +1106,23 @@ impl RuleRouter {
                 .unwrap_or_default(),
             _ => String::new(),
         };
+        self.translate_display_and_replacement(&hit.plugin_id, &arg_text)
+    }
 
+    /// 翻译类 Suggestion 的 display / RouteQuery 文本构造（0.24.2 从
+    /// `build_context_suggestion_text` 提取，query 派生候选共用）。
+    fn translate_display_and_replacement(
+        &self,
+        plugin_id: &str,
+        arg_text: &str,
+    ) -> (String, String) {
         // display 截 40 字符便于 ghost 单行展示
         const DISPLAY_MAX: usize = 40;
         let display_arg: String = if arg_text.chars().count() > DISPLAY_MAX {
             let truncated: String = arg_text.chars().take(DISPLAY_MAX).collect();
             format!("{truncated}…")
         } else {
-            arg_text.clone()
+            arg_text.to_string()
         };
 
         let app_lang = self.app_language.read().unwrap().clone();
@@ -1142,9 +1133,9 @@ impl RuleRouter {
             .read()
             .unwrap()
             .as_ref()
-            .and_then(|r| r.get_display_name(&hit.plugin_id, &app_lang))
+            .and_then(|r| r.get_display_name(plugin_id, &app_lang))
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| short_target_name(&hit.plugin_id));
+            .unwrap_or_else(|| short_target_name(plugin_id));
 
         let display = if display_arg.is_empty() {
             display_name.clone()
@@ -1156,8 +1147,8 @@ impl RuleRouter {
         // 反查不到时 fallback 到 id 末段。**关键**：这是 Tab 后要塞回输入框重跑 route()
         // 的文本,必须能命中 keyword 表——用 display_name（本地化名）就断链了。
         let keyword = self
-            .preferred_keyword(&hit.plugin_id, &app_lang)
-            .unwrap_or_else(|| short_target_name(&hit.plugin_id));
+            .preferred_keyword(plugin_id, &app_lang)
+            .unwrap_or_else(|| short_target_name(plugin_id));
         let replacement = if arg_text.is_empty() {
             format!("{keyword} ")
         } else {
@@ -1502,6 +1493,7 @@ fn match_keyword(query: &str, keyword: &str) -> Option<MatchType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use suggestion::producer::SuggestionProducer;
 
     /// 测试辅助：提取 RouteQuery 动作的 query（0.24.1 起 replacement 并入 action）。
     fn route_query(sug: &Suggestion) -> &str {
@@ -1896,13 +1888,25 @@ mod tests {
         r.route(q, &h, None).await
     }
 
-    /// 0.8.3 §4.4：空 query 场景验 best_suggestion（Context 走 Ghost 不产 candidate）。
+    /// 0.8.3 §4.4：空 query 场景验 context_suggestion（Context 走 Ghost 不产 candidate）。
+    /// 0.24.2：best_suggestion 已删除，awareness 派生候选直接验 router 方法。
     fn run_best_suggestion(
         r: &RuleRouter,
         q: &str,
         snapshot: &ContextSnapshot,
     ) -> Option<Suggestion> {
-        r.best_suggestion(q, snapshot, 0.7)
+        r.context_suggestion(q, snapshot)
+    }
+
+    /// 构造 KeywordProducer（0.24.2：keyword 补全测试走 producer 直测）。
+    /// 调用方传入 `Arc<RuleRouter>`（producer 持有共享引用）。
+    fn keyword_producer(r: Arc<RuleRouter>) -> suggestion::keyword::KeywordProducer {
+        suggestion::keyword::KeywordProducer::from_router(
+            r,
+            Arc::new(std::sync::RwLock::new(
+                suggestion::coordinator::SuggestionRuntimeConfig::default(),
+            )),
+        )
     }
 
     fn snap_selection(text: &str) -> ContextSnapshot {
@@ -2210,6 +2214,110 @@ mod tests {
         }
     }
 
+    // ── 0.24.2 §3.3/§3.4：Query 派生翻译候选（translate_query_suggestion）─────
+
+    #[tokio::test]
+    async fn translate_query_english_natural_text_yields_suggestion() {
+        // 目标 zh + 输入英文自然句子 → translate-query（rank 0.92，RouteQuery 采纳）
+        let r = translate_router_with_target("zh");
+        let sug = r
+            .translate_query_suggestion("hello world foo bar")
+            .expect("expected translate-query");
+        assert_eq!(sug.kind, SuggestionKind::Translate);
+        assert_eq!(sug.id, "translate-query");
+        assert!((sug.rank_score - 0.92).abs() < 1e-9);
+        assert!(
+            sug.origin.is_none(),
+            "query 派生候选 origin=None（分层标记）"
+        );
+        // fixture 无 keyword rule → replacement fallback id 末段 "translate"
+        assert!(route_query(&sug).starts_with("translate "));
+    }
+
+    #[tokio::test]
+    async fn translate_query_single_token_not_suggested() {
+        // §6.1 验收："chrome" 等拉丁单 token 是应用名/搜索词，不得被翻译抢占
+        let r = translate_router_with_target("zh");
+        assert!(r.translate_query_suggestion("chrome").is_none());
+        assert!(r.translate_query_suggestion("vscode").is_none());
+    }
+
+    #[tokio::test]
+    async fn translate_query_target_language_not_suggested() {
+        // §3.3：Query 与目标语言同族 → 不产同语言翻译（AI 候选由 AiProducer 出）
+        let r = translate_router_with_target("zh");
+        assert!(r.translate_query_suggestion("帮我看看这段话").is_none());
+    }
+
+    #[tokio::test]
+    async fn translate_query_structured_text_not_suggested() {
+        // §6.1 验收：URL / 路径 / 结构化文本不被翻译抢占
+        let r = translate_router_with_target("zh");
+        assert!(
+            r.translate_query_suggestion("https://example.com/path?q=1")
+                .is_none()
+        );
+        assert!(
+            r.translate_query_suggestion(r"C:\Users\foo\bar.txt")
+                .is_none()
+        );
+        assert!(
+            r.translate_query_suggestion("550e8400-e29b-41d4-a716-446655440000")
+                .is_none()
+        );
+        assert!(r.translate_query_suggestion("user@example.com").is_none());
+    }
+
+    #[tokio::test]
+    async fn translate_query_keyword_self_suppression() {
+        // §3.3：明确 keyword 走确定路由，不叠加同义 translate-query
+        let r = translate_router_with_target("zh");
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        assert!(r.translate_query_suggestion("翻译 hello world").is_none());
+        // 拼音前缀形式同样抑制
+        assert!(r.translate_query_suggestion("fanyi hello world").is_none());
+    }
+
+    #[tokio::test]
+    async fn translate_query_no_binding_returns_none() {
+        // 无 TextIsNonTargetLang 绑定（翻译插件未注册/移除）→ 不产 query 派生翻译
+        let r = RuleRouter::new(true);
+        assert!(
+            r.translate_query_suggestion("hello world foo bar")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn translate_query_disabled_binding_returns_none() {
+        // binding 黑名单命中 → 不产（与 match_context_hits 同源检查）
+        let r = translate_router_with_target("zh");
+        r.apply_context_disable_list(vec![binding_key(
+            "builtin.translate",
+            "text_is_non_target_lang",
+        )]);
+        assert!(
+            r.translate_query_suggestion("hello world foo bar")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn suggestion_target_lang_falls_back_to_app_language() {
+        // 无绑定 → suggestion_target_lang 回退 app_language（AiProducer 分类用）
+        let r = RuleRouter::new(true);
+        r.set_app_language("en".into());
+        assert_eq!(r.suggestion_target_lang(), "en");
+        // 有绑定 → 用插件 target_lang
+        let r2 = translate_router_with_target("ja");
+        assert_eq!(r2.suggestion_target_lang(), "ja");
+    }
+
     #[tokio::test]
     async fn truncate_arg_short_unchanged() {
         assert_eq!(truncate_arg("hello"), "hello");
@@ -2243,7 +2351,7 @@ mod tests {
     #[tokio::test]
     async fn suggestion_keyword_first_letters_returns_keyword_source() {
         // Keyword 分支：非空 query "fy" 命中"翻译"首拼 → Suggestion { source=Keyword }
-        let r = RuleRouter::new(true);
+        let r = Arc::new(RuleRouter::new(true));
         r.add_keyword_rule(
             "builtin.translate".into(),
             "翻译".into(),
@@ -2251,9 +2359,9 @@ mod tests {
             SurfaceView::List,
         );
         let snap = ContextSnapshot::default();
-        let sug = r
-            .best_suggestion("fy", &snap, 0.7)
-            .expect("expected keyword suggestion");
+        let sugs = keyword_producer(r).produce("fy", &snap);
+        assert_eq!(sugs.len(), 1);
+        let sug = &sugs[0];
         assert_eq!(sug.kind, SuggestionKind::Completion);
         assert_eq!(sug.display, "fanyi");
         assert!((0.0..=1.0).contains(&sug.rank_score));
@@ -2262,7 +2370,7 @@ mod tests {
     #[tokio::test]
     async fn suggestion_keyword_exact_confidence_is_one() {
         // Keyword exact 命中 → confidence 恒 1.0（f64::INFINITY 归一 min(_,1.0)）
-        let r = RuleRouter::new(true);
+        let r = Arc::new(RuleRouter::new(true));
         r.add_keyword_rule(
             "builtin.translate".into(),
             "翻译".into(),
@@ -2270,24 +2378,26 @@ mod tests {
             SurfaceView::List,
         );
         let snap = ContextSnapshot::default();
-        let sug = r
-            .best_suggestion("fanyi", &snap, 0.7)
-            .expect("expected suggestion");
+        let sugs = keyword_producer(r).produce("fanyi", &snap);
+        assert_eq!(sugs.len(), 1);
+        let sug = &sugs[0];
         assert_eq!(sug.kind, SuggestionKind::Completion);
-        assert_eq!(sug.rank_score, 1.0);
+        // §3.4 rank 表：exact fuzzy=1.0 → 0.70 + 0.28 × 1.0 = 0.98（封顶）
+        assert!((sug.rank_score - 0.98).abs() < 1e-9);
     }
 
     #[tokio::test]
     async fn suggestion_context_only_on_empty_query() {
-        // 非空 query 不显示 Context Ghost——用户已输入内容即意图表达，环境感知会干扰
+        // 0.24.2 语义变更：awareness 派生候选不再因非空 query 短路——"输入即意图
+        // 表达"由 Coordinator 分层保障（非空 query 下 awareness 最多占 secondary）。
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
         // 空 query → Context Suggestion
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected context");
+        let sug = r.context_suggestion("", &snap).expect("expected context");
         assert_eq!(sug.kind, SuggestionKind::Translate);
-        // 非空 query → 不显示 Context Ghost
-        let sug = r.best_suggestion("chrome", &snap, 0.7);
-        assert!(sug.is_none(), "非空 query 不应显示 Context Ghost");
+        // 非空 query → 仍产出（primary/secondary 分配在 Coordinator）
+        let sug = r.context_suggestion("chrome", &snap);
+        assert!(sug.is_some(), "非空 query 下 awareness 候选仍应产出");
     }
 
     #[tokio::test]
@@ -2295,7 +2405,7 @@ mod tests {
         // URL 护栏：即使空 query,剪贴板是 URL 不触发翻译 Ghost
         let r = translate_router_with_target("zh");
         let snap = snap_clipboard("https://github.com/x/y");
-        assert!(r.best_suggestion("", &snap, 0.7).is_none());
+        assert!(r.context_suggestion("", &snap).is_none());
     }
 
     #[tokio::test]
@@ -2304,16 +2414,16 @@ mod tests {
         let r = translate_router_with_target("zh");
         // 空 query 时能命中
         let snap = snap_selection("hello world foo");
-        assert!(r.best_suggestion("", &snap, 0.7).is_some());
+        assert!(r.context_suggestion("", &snap).is_some());
         // disable 后不命中
         r.apply_context_disable_list(vec![binding_key(
             "builtin.translate",
             "text_is_non_target_lang",
         )]);
-        assert!(r.best_suggestion("", &snap, 0.7).is_none());
+        assert!(r.context_suggestion("", &snap).is_none());
         // 清空 disable 列表 → 恢复
         r.apply_context_disable_list(vec![]);
-        assert!(r.best_suggestion("", &snap, 0.7).is_some());
+        assert!(r.context_suggestion("", &snap).is_some());
     }
 
     #[tokio::test]
@@ -2338,7 +2448,7 @@ mod tests {
         );
         r.set_setting_resolver(Arc::new(DisabledResolver));
         let snap = snap_selection("hello world foo");
-        assert!(r.best_suggestion("", &snap, 0.7).is_none());
+        assert!(r.context_suggestion("", &snap).is_none());
     }
 
     #[tokio::test]
@@ -2352,7 +2462,7 @@ mod tests {
             SurfaceView::List,
         );
         let snap = ContextSnapshot::default(); // 无选区/剪贴板
-        assert!(r.best_suggestion("", &snap, 0.7).is_none());
+        assert!(r.context_suggestion("", &snap).is_none());
     }
 
     #[tokio::test]
@@ -2384,7 +2494,7 @@ mod tests {
         let snap =
             snap_clipboard("https://example.com/very-long-english-page-title-here-for-testing");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected top-1 suggestion");
         assert!(route_query(&sug).contains("open_url"));
     }
@@ -2421,18 +2531,27 @@ mod tests {
 
     #[tokio::test]
     async fn suggestion_disabled_by_autosuggest_returns_none_upstream() {
-        // best_suggestion 本身不查 autosuggest_enabled（那是 SearchService 层）,
-        // 但走 keyword 分支时 min_score 过高会返回 None。等效验证。
-        let r = RuleRouter::new(true);
+        // autosuggest_enabled=false 由 Coordinator eligibility 拦（filter reason），
+        // producer 不查总开关；但 min_score 过高时 keyword 分支返回空。等效验证。
+        let r = Arc::new(RuleRouter::new(true));
         r.add_keyword_rule(
             "builtin.translate".into(),
             "翻译".into(),
             Surface::Auto,
             SurfaceView::List,
         );
-        // 阈值 1.5 → 归一化后 fuzzy 分不可能到 1.5 → None
+        // 阈值 1.5 → 归一化后 fuzzy 分不可能到 1.5 → 无候选
+        let producer = suggestion::keyword::KeywordProducer::from_router(
+            r,
+            Arc::new(std::sync::RwLock::new(
+                suggestion::coordinator::SuggestionRuntimeConfig {
+                    min_score: 1.5,
+                    ..Default::default()
+                },
+            )),
+        );
         let snap = ContextSnapshot::default();
-        assert!(r.best_suggestion("fan", &snap, 1.5).is_none());
+        assert!(producer.produce("fan", &snap).is_empty());
     }
 
     #[tokio::test]
@@ -2477,7 +2596,7 @@ mod tests {
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         // short_target_name("builtin.translate") = "translate"
         assert!(
@@ -2520,7 +2639,7 @@ mod tests {
         r.set_app_language("zh".into());
         let snap = snap_selection("hello world foo");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         assert!(
             route_query(&sug).starts_with("翻译 "),
@@ -2561,7 +2680,7 @@ mod tests {
         // en UI + target=en → 需要选中非英文（中文）才触发翻译
         let snap = snap_selection("你好世界啊");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         assert!(
             route_query(&sug).starts_with("translate "),
@@ -2610,7 +2729,7 @@ mod tests {
         r.set_app_language("zh".into());
         let snap = snap_selection("hello world foo");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         assert!(
             sug.display.starts_with("翻译 "),
@@ -2625,7 +2744,7 @@ mod tests {
         r.set_app_language("en".into());
         let snap_zh = snap_selection("你好世界啊");
         let sug = r
-            .best_suggestion("", &snap_zh, 0.7)
+            .context_suggestion("", &snap_zh)
             .expect("expected suggestion");
         assert!(
             sug.display.starts_with("Translate "),
@@ -2663,7 +2782,7 @@ mod tests {
 
         // 1. 拿 Context Ghost 的 replacement
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         let replacement = route_query(&sug).to_string();
 
@@ -2693,7 +2812,7 @@ mod tests {
         let long_text = "hello ".repeat(200); // > 40 字符
         let snap = snap_selection(&long_text);
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         assert!(
             sug.display.contains('…'),
@@ -2704,11 +2823,13 @@ mod tests {
 
     #[tokio::test]
     async fn suggestion_non_empty_query_no_context_ghost() {
-        // 非空 query 不显示 Context Ghost——用户已输入内容即意图表达，环境感知会干扰
+        // 0.24.2 语义变更：非空 query 不再硬拦 awareness 候选（"chrome" 输入期间
+        // 仍产出 translate-selection，Coordinator 分层保证它最多占 secondary）。
+        // 拦截职责转移：query 派生候选由 eligibility（RouteHit）过滤。
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
-        let sug = r.best_suggestion("chrome", &snap, 0.7);
-        assert!(sug.is_none(), "非空 query 不应显示 Context Ghost");
+        let sug = r.context_suggestion("chrome", &snap);
+        assert!(sug.is_some(), "非空 query 下 awareness 候选仍应产出");
     }
 
     // ── 0.8.3 收尾 · 参数不隐式注入回归 ──────────────────────────
@@ -2849,7 +2970,7 @@ mod tests {
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         assert_eq!(sug.origin, Some(SuggestionOrigin::Selection));
     }
@@ -2860,7 +2981,7 @@ mod tests {
         let r = translate_router_with_target("zh");
         let snap = snap_clipboard("hello world foo");
         let sug = r
-            .best_suggestion("", &snap, 0.7)
+            .context_suggestion("", &snap)
             .expect("expected suggestion");
         assert_eq!(sug.origin, Some(SuggestionOrigin::Clipboard));
     }
@@ -2884,15 +3005,15 @@ mod tests {
             Some("https://example.com".into()),
         );
         let sug = r
-            .best_suggestion("", &snapshot, 0.7)
+            .context_suggestion("", &snapshot)
             .expect("expected suggestion");
         assert_eq!(sug.origin, Some(SuggestionOrigin::Clipboard));
     }
 
     #[tokio::test]
     async fn suggestion_origin_none_for_keyword_branch() {
-        // Keyword 分支恒 origin=None
-        let r = RuleRouter::new(true);
+        // Keyword 分支恒 origin=None（query 派生的分层标记）
+        let r = Arc::new(RuleRouter::new(true));
         r.add_keyword_rule(
             "builtin.translate".into(),
             "翻译".into(),
@@ -2900,11 +3021,10 @@ mod tests {
             SurfaceView::List,
         );
         let snap = ContextSnapshot::default();
-        let sug = r
-            .best_suggestion("fy", &snap, 0.7)
-            .expect("expected keyword suggestion");
-        assert_eq!(sug.kind, SuggestionKind::Completion);
-        assert!(sug.origin.is_none());
+        let sugs = keyword_producer(r).produce("fy", &snap);
+        assert_eq!(sugs.len(), 1);
+        assert_eq!(sugs[0].kind, SuggestionKind::Completion);
+        assert!(sugs[0].origin.is_none());
     }
 
     #[tokio::test]
@@ -2919,21 +3039,21 @@ mod tests {
         let r = translate_router_with_target("zh");
 
         let with_sel = snap_selection("hello world foo");
-        let sug1 = r.best_suggestion("", &with_sel, 0.7).unwrap();
+        let sug1 = r.context_suggestion("", &with_sel).unwrap();
         assert_eq!(sug1.origin, Some(SuggestionOrigin::Selection));
         assert!(
-            (sug1.rank_score - 0.75).abs() < 1e-9,
-            "expected 0.75, got {}",
+            (sug1.rank_score - 0.92).abs() < 1e-9,
+            "expected 0.92 (§3.4 固定值), got {}",
             sug1.rank_score
         );
 
         let with_clip = snap_clipboard("hello world foo");
-        let sug2 = r.best_suggestion("", &with_clip, 0.7).unwrap();
+        let sug2 = r.context_suggestion("", &with_clip).unwrap();
         assert_eq!(sug2.origin, Some(SuggestionOrigin::Clipboard));
-        // 0.75 * 0.85 = 0.6375
+        // 0.24.2 §3.4 固定值：Clipboard 0.82（不再用 confidence 乘积）
         assert!(
-            (sug2.rank_score - 0.6375).abs() < 1e-9,
-            "expected 0.6375, got {}",
+            (sug2.rank_score - 0.82).abs() < 1e-9,
+            "expected 0.82, got {}",
             sug2.rank_score
         );
     }
@@ -2965,17 +3085,18 @@ mod tests {
         // 用户 Tab 采纳后的 query：既走不进 Keyword 分支（fuzzy 带空格失败），
         // 也不该走进 Context fallback（护栏兜住）→ 整个 Suggestion 为 None。
         // 之前的 bug 行为：Suggestion 又给出 Context「翻译 "hello world foo"」→ Ghost 复活。
-        let sug = r.best_suggestion("翻译 tab", &snap, 0.7);
+        let sug = r.context_suggestion("翻译 tab", &snap);
         assert!(
             sug.is_none(),
             "Context should be silenced when query already hits same plugin's keyword, got: {sug:?}",
         );
 
-        // 对照组：非空无关 query 也不显示 Context Ghost
-        let sug_fallback = r.best_suggestion("xyz random", &snap, 0.7);
+        // 对照组：非空无关 query 下 awareness 候选照常产出（0.24.2 起
+        // "输入即意图表达"由 Coordinator 分层保障，不再由 context_suggestion 硬拦）
+        let sug_fallback = r.context_suggestion("xyz random", &snap);
         assert!(
-            sug_fallback.is_none(),
-            "non-empty query should not get Context Ghost"
+            sug_fallback.is_some(),
+            "unrelated non-empty query should still yield awareness candidate"
         );
     }
 
@@ -3019,14 +3140,15 @@ mod tests {
             "pinyin_initials Exact should silence"
         );
 
-        // 对照：空 query 仍能产 Context，非空无关 query 不产 Context
+        // 对照：空 query 仍能产 Context；非空无关 query 照常产出（0.24.2 起
+        // 非空 query 不再硬拦 awareness 候选，primary/secondary 分配在 Coordinator）
         assert!(
             r.context_suggestion("", &snap).is_some(),
             "empty query still fires"
         );
         assert!(
-            r.context_suggestion("xyz random", &snap).is_none(),
-            "non-empty query should not fire"
+            r.context_suggestion("xyz random", &snap).is_some(),
+            "unrelated non-empty query still yields awareness candidate"
         );
     }
 

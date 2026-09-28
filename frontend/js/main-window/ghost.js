@@ -31,9 +31,15 @@
 
 import {queryEl} from "./dom.js";
 import * as aiMode from "./ai-mode.js";
+import {reportSuggestionAdoption} from "../shared/api.js";
 
 // 当前 suggestion（SuggestionSet.primary），形如 { id, kind, action, rankScore, display, prefixLen, origin }
 let currentSuggestion = null;
+// 渲染当前 suggestion 时的 search seq（SuggestionSet.revision，0.24 §3.6 过期防护）。
+// null = 无建议或未携带 revision（防御：后端契约保证有 set 才有 primary）。
+let currentRevision = null;
+// 过期校验回调（main.js 注入 search.isLiveRevision——避免 ghost→search 反向 import 成环）。
+let stalenessCheck = null;
 let ghostTypedEl = null;
 let ghostSuggestEl = null;
 let ghostOverlayEl = null;
@@ -110,6 +116,15 @@ export function onChange(cb) {
     onChangeCallback = cb;
 }
 
+/**
+ * 注入过期校验回调（0.24 §3.6）。main.js 启动时接 `search.isLiveRevision`——
+ * ghost 反向 import search 会成环（search 已 import ghost），经注入解耦。
+ * @param {(revision: number) => boolean} fn 返回 false = 建议已过期
+ */
+export function setStalenessCheck(fn) {
+    stalenessCheck = fn;
+}
+
 function notify() {
     if (onChangeCallback) onChangeCallback(currentSuggestion);
 }
@@ -173,10 +188,12 @@ function renderToDom(query) {
     }
 }
 
-/** 更新 ghost 显示。suggestion 为 null/undefined 时清空。 */
-export function update(query, suggestion) {
+/** 更新 ghost 显示。suggestion 为 null/undefined 时清空。
+ * revision 为该 SuggestionSet 的 search seq（0.24 §3.6，采纳时校验）。 */
+export function update(query, suggestion, revision) {
     const prev = currentSuggestion;
     currentSuggestion = suggestion || null;
+    currentRevision = revision ?? null;
     lastQuery = query;
     if (!ghostTypedEl || !ghostSuggestEl) return;
     if (frozen) {
@@ -192,6 +209,7 @@ export function update(query, suggestion) {
 export function clear() {
     const prev = currentSuggestion;
     currentSuggestion = null;
+    currentRevision = null;
     lastQuery = "";
     if (frozen) {
         if (prev) notify();
@@ -225,11 +243,25 @@ export function clear() {
 export function acceptCurrent() {
     if (!currentSuggestion) return false;
 
+    // 0.24 §3.6 过期防护：revision 与前端当前 seq 不等 → 本地拒绝（零 IPC、零延迟）。
+    // 建议来自较早一轮搜索（用户已继续输入）——视为无建议，Tab 不被吞。
+    if (stalenessCheck && !stalenessCheck(currentRevision)) {
+        clear();
+        return false;
+    }
+
     const action = currentSuggestion.action;
+    // 采纳遥测（§3.6 单向 fire-and-forget）：本地执行后上报，失败静默
+    const adopted = {id: currentSuggestion.id, revision: currentRevision};
+    const report = () => {
+        reportSuggestionAdoption(adopted.id, "primary", adopted.revision).catch(() => {});
+    };
+
     // AskAi 类:进入 AI 模式（0.17.6: 改走 ChatService，不再调 trigger_ai）
     if (action?.enterAiMode) {
         const {prompt} = action.enterAiMode;
         clear();
+        report();
         aiMode.enterAiMode(prompt);
         return true;
     }
@@ -239,6 +271,7 @@ export function acceptCurrent() {
         queryEl.value = rep;
         queryEl.setSelectionRange(rep.length, rep.length);
         clear();
+        report();
         // 派发 input 事件，让 search.js 的 onInput 走一遍——重新算 route + ghost。
         queryEl.dispatchEvent(new Event("input", {bubbles: true}));
         return true;

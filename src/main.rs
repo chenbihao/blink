@@ -430,9 +430,35 @@ fn main() {
             let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
             let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
-            // 0.8.6 §8.1.2：共享 min_score 引用（SearchService ↔ KeywordProducer）
-            let min_score_shared = std::sync::Arc::new(std::sync::RwLock::new(app_config.autosuggest_min_score));
-            router.init_coordinator(min_score_shared.clone());
+            // 0.24.2 §3.7：SuggestionCoordinator 由编排层（SearchService）持有，
+            // producers 在此注册（Keyword → Context → Ai 注册序即同分稳定排序优先序）。
+            // runtime cell 与 SearchService/KeywordProducer 共享——热更新一处生效。
+            let suggestion_runtime = std::sync::Arc::new(std::sync::RwLock::new(
+                domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
+                    autosuggest_enabled: app_config.autosuggest_enabled,
+                    min_score: app_config.autosuggest_min_score,
+                    ..Default::default()
+                },
+            ));
+            let ai_registry_cell = std::sync::Arc::new(std::sync::RwLock::new(
+                None::<std::sync::Arc<domain::ai::AIProviderRegistry>>,
+            ));
+            let mut suggestion_coordinator = domain::intent::suggestion::coordinator::SuggestionCoordinator::new();
+            suggestion_coordinator.register(std::sync::Arc::new(
+                domain::intent::suggestion::keyword::KeywordProducer::from_router(
+                    router.clone(),
+                    suggestion_runtime.clone(),
+                ),
+            ));
+            suggestion_coordinator.register(std::sync::Arc::new(
+                domain::intent::suggestion::context::ContextProducer::new(router.clone()),
+            ));
+            suggestion_coordinator.register(std::sync::Arc::new(
+                domain::intent::suggestion::ai::AiProducer::new(
+                    ai_registry_cell.clone(),
+                    router.clone(),
+                ),
+            ));
 
             // 无条件构造 PluginEngine（空 plugins 也是合法态）。
             // 早期用 Option<Arc<PluginEngine>> 表示"无插件"，但导致：
@@ -495,7 +521,9 @@ fn main() {
                 domain::search::build_engines(engine_configs, pools.history.clone(), pools.cache.clone()),
                 plugin_engine.clone(),
                 router.clone(),
-                min_score_shared,
+                suggestion_runtime.clone(),
+                suggestion_coordinator,
+                ai_registry_cell.clone(),
             ));
             domain_env.set_search_service(search_service.clone());
             app.manage(search_service.clone());
@@ -503,10 +531,18 @@ fn main() {
             search_service.update_max_results(app_config.max_results as usize);
             // 初始化内置动作 disable 列表（0.8.0 §1.3）
             search_service.update_disabled_builtin_actions(app_config.disabled_builtin_actions.clone());
-            // 初始化 Autosuggestion 配置（0.8.1 §2.5）
-            search_service.update_autosuggest_config(
-                app_config.autosuggest_enabled,
-                app_config.autosuggest_min_score,
+            // 初始化 Suggestion 运行时配置（0.8.1 §2.5；0.24.2 加 secondary 门槛）。
+            // secondary_min_rank 不在 AppConfig 门面里，直接读分片（启动一次 DB 读）。
+            let suggestion_cfg = tauri::async_runtime::block_on(
+                domain::config::store::ConfigStore::get::<domain::config::shards::SuggestionConfig>(&pools.config),
+            );
+            search_service.update_suggestion_config(
+                domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
+                    autosuggest_enabled: app_config.autosuggest_enabled,
+                    min_score: app_config.autosuggest_min_score,
+                    secondary_min_rank: suggestion_cfg.secondary_min_rank,
+                    suppress_repeated: suggestion_cfg.suppress_repeated,
+                },
             );
             // 初始化 context binding 禁用列表（0.8.3 §4.6）
             search_service.update_disabled_context_bindings(
@@ -656,8 +692,9 @@ fn main() {
                     &ai_config,
                 ),
             );
-            // 注入 SearchService(0.9.2 setter 注入,规避 search_service 先于 ai_registry
-            // 构造的顺序倒挂)。未注入时 exec_mixed 的 AI lane 会安静跳过。
+            // 注入共享 registry cell(0.9.2 setter 注入,规避 search_service 先于 ai_registry
+            // 构造的顺序倒挂)。0.24.2 起该 cell 与 AiProducer 共享——availability
+            // 判定与 produce 文本分类读同一份；未注入时 AskAi 候选被 eligibility 排除。
             search_service.set_ai_registry(ai_registry.clone());
             tracing::info!(
                 enabled = ai_config.enabled,
@@ -1313,6 +1350,8 @@ fn main() {
             app::commands::hide_settings_window,
 
             app::commands::search_apps,
+            app::commands::report_suggestion_adoption,
+            app::commands::reset_suggestion_session,
             app::commands::launch_app,
             app::commands::run_builtin_action,
             app::commands::confirm_chat_action,

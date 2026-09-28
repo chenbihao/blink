@@ -607,6 +607,34 @@ fn is_cjk(c: char) -> bool {
     )
 }
 
+/// 文本是否含目标语言的书写系统字符（0.24 §3.3 TargetNatural 判定）。
+///
+/// 与 `needs_translation` 的分档互补：那边判"整段主要字符集是否异族"（触发翻译），
+/// 这边判"是否包含目标语系字符"（触发 AI 处理）。Mixed 文本含目标字符 → 视为
+/// 用户以目标语言主导（"hello 世界"给 AI 处理而非翻译）。
+///
+/// 未知 target 按 `en`（拉丁）处理——与 `needs_translation` 分档表的保守取向一致。
+pub fn contains_target_script(s: &str, target: &str) -> bool {
+    match target {
+        "zh" => s.chars().any(is_cjk),
+        "ja" => s.chars().any(|c| is_kana(c) || is_cjk(c)),
+        "ko" => s.chars().any(is_hangul),
+        _ => s.chars().any(is_latin_letter),
+    }
+}
+
+/// query 是否具备自然语言形态（0.24 §3.3 Query 派生候选的形态门禁）。
+///
+/// 拉丁单 token（`chrome` / `fanyihello`）是应用名/搜索词/代码标识符，不是句子，
+/// 不得被翻译建议抢占；含空格的拉丁文本才是自然语言。CJK 族书写系统豁免——
+/// 中日韩自然写作不需要空格分词（"帮我看看这句话"是完整意图）。
+///
+/// **仅用于 query 派生候选**：awareness（选区/剪贴板）文本是用户明确选中的，
+/// 无"搜索词 vs 句子"歧义，不套此门禁（与 0.8.2 起选区翻译行为一致）。
+pub fn is_natural_language_shaped(q: &str) -> bool {
+    q.contains(' ') || q.chars().any(|c| is_cjk(c) || is_kana(c) || is_hangul(c))
+}
+
 fn is_latin_letter(c: char) -> bool {
     matches!(c,
         'a'..='z' | 'A'..='Z'

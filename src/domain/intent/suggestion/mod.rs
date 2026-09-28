@@ -1,9 +1,13 @@
-//! Suggestion 统一契约（0.8.3 §4.3 / §4.4；0.24.1 类型化重构）。
+//! Suggestion 统一契约（0.8.3 §4.3 / §4.4；0.24.1 类型化重构；0.24.2 评分收敛）。
 //!
 //! **0.24.1 契约**：`SearchResponse.suggestion` 从 `Option<Suggestion>` 迁移为
 //! `Option<SuggestionSet>`（带 revision 的双槽位集合）。单个 `Suggestion` 携带语义
 //! `kind` 与类型化采纳动作 `action`——`replacement` 并入 `RouteQuery.query`，
 //! `source` 字段退役（producer 身份仍由 `SuggestionProducer::source()` 表达，不上 wire）。
+//!
+//! **0.24.2 契约**：`SuggestionCoordinator` 按 §3.4 执行 eligibility → 分层 →
+//! 按 Kind 去重 → 排序 → 双槽选取（secondary 过 `secondary_min_rank` 门槛）；
+//! 编排层输入收敛为 `RouteSummary` / `SuggestionAvailability`（§3.7）。
 //!
 //! **rank_score 与 confidence 分离**（0.24 §3.4）：规则排序值统一叫 `rank_score`；
 //! `confidence` 保留给未来具备校准语义的模型输出——0.24 规则侧无生产者，字段不建，
@@ -12,14 +16,18 @@
 //! 0.8.3 动机存档：所有「待用户采纳的建议」共用一个 `SearchResponse` 字段，多源
 //! 竞争产 top-1——每加一路信号不再多一个字段 + 多一层前端优先级分支。
 
+pub mod ai;
 pub mod context;
 pub mod coordinator;
+pub mod fatigue;
 pub mod keyword;
 pub mod producer;
 
+use std::hash::{Hash, Hasher};
+
 use serde::Serialize;
 
-use super::RankingHint;
+use super::{RankingHint, Route};
 use crate::infra::platform::context::AwarenessSource;
 
 /// Producer 身份标识（0.24.1 起仅日志/调试用，不序列化上 wire）。
@@ -45,7 +53,7 @@ pub enum SuggestionSource {
 ///
 /// `OpenUrl` / `OpenPath` 是 0.25 变体（随 `InvokeCapability` 激活），0.24 不建死——
 /// 打开类动作由结果列表承载（§3.5 决策：两步采纳劣于现状一步 Enter）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SuggestionKind {
     /// 输入补全：影子文字自然接在用户文本后（`fy` → `fanyi`）。
@@ -70,13 +78,9 @@ pub enum SuggestionKind {
 pub enum SuggestionAction {
     /// 回写输入框 + 触发新一轮搜索（补全采纳与翻译采纳同用；
     /// 翻译即 query 变为"翻译 xxx"后命中确定路由）。
-    RouteQuery {
-        query: String,
-    },
+    RouteQuery { query: String },
     /// 前端直进主窗口 AI 模式（0.17.6 起 ChatService ephemeral 对话）。
-    EnterAiMode {
-        prompt: String,
-    },
+    EnterAiMode { prompt: String },
 }
 
 /// Context 类 Suggestion 的取值来源（0.8.3 §4.9 UX 加强）——
@@ -86,7 +90,7 @@ pub enum SuggestionAction {
 /// 挂在 Ghost 尾部或 statusbar,弱视觉,不喧宾夺主。
 ///
 /// Keyword 类 Suggestion 恒 None（输入补全无外部来源）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SuggestionOrigin {
     /// 划词/UIA 抓取的选区文本（数据侧 `AwarenessSource::Selection`）
@@ -107,6 +111,55 @@ impl From<AwarenessSource> for SuggestionOrigin {
             AwarenessSource::Clipboard => SuggestionOrigin::Clipboard,
         }
     }
+}
+
+/// 会话内文本指纹（0.24 §3.8 降频计数键成分）。
+///
+/// `DefaultHasher`（SipHash）非跨运行稳定——指纹只活在进程内（降频计数不落盘），
+/// 与"日志不记原文"的隐私口径一致：指纹不可逆推原文，仅用于区分"剪贴板换内容了"。
+pub(crate) fn text_fingerprint(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 路由摘要（0.24 §3.7）——Coordinator eligibility 的编排层输入。
+///
+/// **编排顺序即防环**：SearchService 先算 Route、后算 Suggestion，本类型是编排层
+/// 传值不是域依赖——Routing 依旧对 Awareness 无知，Suggestion 域只读路由结果摘要。
+///
+/// - `Open`：空 Mixed（无任何规则命中）——query 派生的翻译/AI 兜底候选允许参选。
+/// - `Routed`：已有确定路由或非空候选（Takeover / EngineTakeover / 非空 Mixed）——
+///   query 派生的 Translate/AskAi 候选全部排除（"已明确命中的路由不得被翻译抢占"）。
+/// - `AiTrigger`：`"ai "` 前缀显式触发——Suggestion 恒为 ai-trigger AskAi（强信号独占）。
+#[derive(Debug, Clone)]
+pub enum RouteSummary {
+    Open,
+    Routed,
+    AiTrigger { arg: String },
+}
+
+impl From<&Route> for RouteSummary {
+    fn from(route: &Route) -> Self {
+        match route {
+            Route::Mixed { candidates } if candidates.is_empty() => RouteSummary::Open,
+            Route::Mixed { .. } => RouteSummary::Routed,
+            Route::Takeover { .. } | Route::EngineTakeover { .. } => RouteSummary::Routed,
+            Route::AiTrigger { arg } => RouteSummary::AiTrigger {
+                arg: arg.to_string(),
+            },
+        }
+    }
+}
+
+/// 能力可用性表（0.24 §3.7）——由编排层（SearchService）汇出传入 Coordinator。
+///
+/// 翻译插件绑定/黑名单检查留在 producer 路径（规则表状态，`match_context_hits` 已有），
+/// 这里只承载服务层才知道的可用性：AI Provider 是否配置并启用。
+#[derive(Debug, Clone, Copy)]
+pub struct SuggestionAvailability {
+    /// AI registry 已注入且 `AIConfig.enabled`——AskAi 候选与 ai-trigger 的总闸。
+    pub ai_available: bool,
 }
 
 /// 待用户采纳的建议。前端按 `kind` 分视觉通道（ghost 影子 / 采纳提示）；
@@ -138,6 +191,11 @@ pub struct Suggestion {
     /// Keyword 类恒 None；序列化时 `#[skip_serializing_if]` 省略字段减少前端 undefined 判定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<SuggestionOrigin>,
+    /// 候选来源文本的会话内指纹（0.24 §3.8 降频计数键成分，`text_fingerprint`）。
+    /// query 派生候选 = hash(query)；awareness 派生 = hash(选区/剪贴板文本)。
+    /// 不上 wire（`#[serde(skip)]`），不落盘。
+    #[serde(skip)]
+    pub fingerprint: u64,
     /// **0.8.6 deprecated**：RankingHint 由 Coordinator 独立返回，不再挂在 Suggestion 上。
     /// 0.24.1 保留（producer → coordinator 的过渡通道），0.24.2 随 `CoordinateInput`
     /// 重构改由 producer 返回值独立携带后移除。
@@ -153,8 +211,8 @@ pub struct Suggestion {
 ///
 /// 只暴露 primary / secondary 两个可见槽位，不展示第三条及更多候选；
 /// **键随槽走不随视觉区走**——Tab 恒采纳 primary、Shift+Tab 恒采纳 secondary。
-/// 0.24.1 secondary 恒 None（coordinator 仍是 top-1 语义），
-/// 0.24.2 起 Coordinator 按 Kind 去重 + 分层排序选取双槽。
+/// 0.24.2 起 Coordinator 按 Kind 去重 + 分层排序选取双槽（secondary 需过
+/// `secondary_min_rank` 门槛）。
 ///
 /// `revision` = 本次 search seq（后端原样回填）：前端与本地 seq 比对，
 /// 不等则拒绝采纳（§3.6 过期防护，本地零 IPC）。
@@ -165,7 +223,7 @@ pub struct SuggestionSet {
     /// 主建议槽（Tab）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary: Option<Suggestion>,
-    /// 次建议槽（Shift+Tab）。0.24.1 恒 None。
+    /// 次建议槽（Shift+Tab）。需过 `secondary_min_rank` 门槛（0.24 §3.4）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secondary: Option<Suggestion>,
 }
@@ -184,6 +242,7 @@ mod tests {
             display: "fanyi".to_string(),
             prefix_len: 2,
             origin: Some(SuggestionOrigin::Selection),
+            fingerprint: 0,
             ranking_hint: None,
         }
     }
@@ -199,7 +258,12 @@ mod tests {
                     query: "fanyi".to_string(),
                 },
             )),
-            secondary: None,
+            secondary: Some(sample(
+                SuggestionKind::Translate,
+                SuggestionAction::RouteQuery {
+                    query: "翻译 hello".to_string(),
+                },
+            )),
         };
         let v = serde_json::to_value(&set).unwrap();
         assert_eq!(v["revision"], 42);
@@ -208,13 +272,14 @@ mod tests {
         assert_eq!(v["primary"]["rankScore"], 0.9);
         assert_eq!(v["primary"]["action"]["routeQuery"]["query"], "fanyi");
         assert_eq!(v["primary"]["origin"], "selection");
-        assert!(
-            v.get("secondary").is_none(),
-            "空槽 skip_serializing_if 应省略"
-        );
+        assert_eq!(v["secondary"]["kind"], "translate");
         assert!(
             v["primary"].get("rankingHint").is_none(),
             "ranking_hint 内部通道不序列化"
+        );
+        assert!(
+            v["primary"].get("fingerprint").is_none(),
+            "fingerprint 内部字段不序列化"
         );
     }
 
@@ -233,5 +298,60 @@ mod tests {
         let v = serde_json::to_value(&set).unwrap();
         assert_eq!(v["primary"]["kind"], "askAi");
         assert_eq!(v["primary"]["action"]["enterAiMode"]["prompt"], "hello");
+        assert!(
+            v.get("secondary").is_none(),
+            "空槽 skip_serializing_if 应省略"
+        );
+    }
+
+    /// 指纹对相同文本稳定、对不同文本区分（会话内）。
+    #[test]
+    fn text_fingerprint_stable_and_distinct() {
+        assert_eq!(
+            text_fingerprint("hello world"),
+            text_fingerprint("hello world")
+        );
+        assert_ne!(
+            text_fingerprint("hello world"),
+            text_fingerprint("hello world!")
+        );
+    }
+
+    /// Route → RouteSummary 摘要映射（eligibility 的编排层输入）。
+    #[test]
+    fn route_summary_from_route() {
+        use super::super::{Candidate, ExecArg, Surface};
+        let empty_mixed = Route::Mixed { candidates: vec![] };
+        assert!(matches!(
+            RouteSummary::from(&empty_mixed),
+            RouteSummary::Open
+        ));
+        let non_empty = Route::Mixed {
+            candidates: vec![Candidate {
+                plugin_id: "p".into(),
+                arg: ExecArg::None,
+                surface: Surface::Inline,
+                hint: None,
+            }],
+        };
+        assert!(matches!(
+            RouteSummary::from(&non_empty),
+            RouteSummary::Routed
+        ));
+        let takeover = Route::Takeover {
+            plugin_id: "p".into(),
+            arg: ExecArg::None,
+            view: Default::default(),
+            hint: None,
+        };
+        assert!(matches!(
+            RouteSummary::from(&takeover),
+            RouteSummary::Routed
+        ));
+        let ai = Route::AiTrigger { arg: "hi".into() };
+        assert!(matches!(
+            RouteSummary::from(&ai),
+            RouteSummary::AiTrigger { arg } if arg == "hi"
+        ));
     }
 }

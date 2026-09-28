@@ -132,7 +132,7 @@ impl ConfigKey for SearchConfig {
 
 // ── SuggestionConfig ──────────────────────────────────────────────────────────
 
-/// 建议行为分片。autosuggest + proactive。
+/// 建议行为分片。autosuggest + proactive + 0.24 双槽门槛/降频。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestionConfig {
     #[serde(default = "default_true")]
@@ -145,6 +145,13 @@ pub struct SuggestionConfig {
     pub proactive_enabled: bool,
     #[serde(default = "default_5")]
     pub empty_query_topn: u32,
+    /// Secondary 槽门槛（0.24 §3.4）：精确挡掉 0.55 兜底——第二槽也该是有把握的建议。
+    #[serde(default = "default_secondary_min_rank")]
+    pub secondary_min_rank: f64,
+    /// 建议降频（0.24 §3.8 会话级抑制，设置页文案"建议降频"）：同 (kind, origin,
+    /// 指纹) 连续 3 次未采纳 → 本会话抑制该候选。默认开（触发条件保守、误杀成本低）。
+    #[serde(default = "default_true")]
+    pub suppress_repeated: bool,
 }
 
 impl Default for SuggestionConfig {
@@ -155,12 +162,18 @@ impl Default for SuggestionConfig {
             autosuggest_tab_key: "Tab".to_string(),
             proactive_enabled: false,
             empty_query_topn: 5,
+            secondary_min_rank: default_secondary_min_rank(),
+            suppress_repeated: true,
         }
     }
 }
 
 impl ConfigKey for SuggestionConfig {
     const KEY: &'static str = "app.suggestion";
+}
+
+fn default_secondary_min_rank() -> f64 {
+    0.60
 }
 
 // ── ChordConfig ───────────────────────────────────────────────────────────────

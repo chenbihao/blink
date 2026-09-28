@@ -1,6 +1,7 @@
 //! 窗口生命周期：响应后端 blink://shown / blink://hidden，复位输入与列表。
 
 import {invoke, listen} from "../shared/tauri.js";
+import {resetSuggestionSession} from "../shared/api.js";
 import {EVENTS} from "../shared/event-names.js";
 import {aiQueryEl, queryEl} from "./dom.js";
 import * as results from "./results.js";
@@ -103,6 +104,8 @@ export function init() {
         results.clear();
         cmdMode.reset(); // 0.18.6: 复位命令模式
         clipboardMode.reset(); // 0.19.15: 复位剪贴板模式
+        // 0.24.3 §3.8：建议会话结束——后端降频计数与遥测环形表清零（每次唤起是新会话）
+        resetSuggestionSession().catch(() => {});
     });
 
     // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）

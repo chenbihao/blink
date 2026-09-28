@@ -26,6 +26,8 @@ applyGlassOpacityFromConfig(); // 启动时应用毛玻璃透明度
 // 启动界面语言（静态文本如搜索框 placeholder；shown 时刷新）
 applyI18nFromConfig();
 ghost.init();
+// 0.24 §3.6：ghost 采纳前的 revision 过期校验（注入避免 ghost→search 反向 import 成环）
+ghost.setStalenessCheck((rev) => search.isLiveRevision(rev));
 statusbar.init(); // 订阅 ghost 变化——必须在 ghost.init 后
 // autosuggest 前端配置（tab_key）—— 异步 fetch，不 await（默认 Tab 已可用，回填后无缝切换）
 autosuggestConfig.init();

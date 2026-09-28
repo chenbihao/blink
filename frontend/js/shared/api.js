@@ -10,6 +10,24 @@ export function searchApps(query, seq) {
     return invoke("search_apps", {query, seq});
 }
 
+/**
+ * 建议采纳遥测（0.24 §3.6 单向遥测，fire-and-forget）。
+ * 前端 seq 本地校验通过并本地执行 action 后上报；失败静默（best-effort）。
+ * @param {string} id 语义 slug（前端不解释、仅回传）
+ * @param {string} slot "primary" | "secondary"
+ * @param {number} revision 采纳时的 search seq（后端原样回填的 SuggestionSet.revision）
+ */
+export function reportSuggestionAdoption(id, slot, revision) {
+    return invoke("report_suggestion_adoption", {id, slot, revision});
+}
+
+/**
+ * 建议会话重置（0.24 §3.8 降频清零）：主窗口隐藏时调用——每次唤起是新会话。
+ */
+export function resetSuggestionSession() {
+    return invoke("reset_suggestion_session");
+}
+
 /** 剪贴板模式直接搜索（bypass SearchService pipeline）。
  *  Alt+C 进入剪贴板模式后，前端输入直接调此命令，
  *  不经过 SearchService::search / IntentRouter / get_weights / Route 分派。

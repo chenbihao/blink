@@ -470,6 +470,8 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
             autosuggest_tab_key: config.autosuggest_tab_key.clone(),
             proactive_enabled: config.proactive_enabled,
             empty_query_topn: config.empty_query_topn,
+            // 未映射进 AppConfig 门面的字段（0.24 secondary_min_rank 等）保留 KV 现值
+            ..ConfigStore::get::<SuggestionConfig>(pool).await
         },
     )
     .await?;

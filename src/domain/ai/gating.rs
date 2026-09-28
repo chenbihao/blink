@@ -6,8 +6,8 @@
 //!
 //! 1. **验证成本低**:决策树是 AI 提示的第一道门,漏筛=白烧 token,错筛=用户以为坏了。
 //!    纯函数天然可穷举 case,单测能钉死所有边界。
-//! 2. **接入层薄**:`SearchService::maybe_ai_suggestion` 只调一次 `should_invoke_ai`,
-//!    不掺业务逻辑。
+//! 2. **接入层薄**:`AiProducer::produce`（0.24.2 起建议走 Producer 注册）只调一次
+//!    `classify_query` / `should_invoke_ai`,不掺业务逻辑。
 //! 3. **阈值可调**:`AiGate::from` 采 `AIConfig`,改阈值只改本文件,签名不变。
 //!
 //! ## 用户配置 vs 内部固定策略(0.21.x 收口)
@@ -102,7 +102,15 @@ pub fn should_invoke_ai(q: &str, gate: &AiGate) -> GateOutcome {
     if !gate.enabled {
         return GateOutcome::Fallback(FallbackReason::Disabled);
     }
+    structural_gate_outcome(q, gate)
+}
 
+/// 结构性自然语言门禁（不含总开关）：URL/路径 → 长度 → 纯数字 → 拉丁必含空格。
+///
+/// 从 `should_invoke_ai` 拆出（0.24 §3.3）：query 文本分类（`classify_query`）复用
+/// 这套筛子，但**不能连坐翻译候选**——AI 总开关关了翻译建议照常工作，故结构性
+/// 判定与总开关分离。
+fn structural_gate_outcome(q: &str, gate: &AiGate) -> GateOutcome {
     // ② URL/路径:交给"打开链接/打开路径"内置动作,不烧 AI(内部固定策略)
     if probe::is_url(q) || probe::is_file_path(q) {
         return GateOutcome::Fallback(FallbackReason::UrlOrPath);
@@ -126,12 +134,71 @@ pub fn should_invoke_ai(q: &str, gate: &AiGate) -> GateOutcome {
 
     // ⑤ 必含空格:"打错一个字"(如 "fanyi")不该触发 AI,让 fuzzy 覆盖
     //    **CJK 豁免**:中日韩自然写作不需要空格分词——"你用的是什么模型"9 个字明显是完整意图,
-    //    不能被英文分词习惯的筛子误伤。含至少一个 CJK 字符视为满足"结构化 query"条件。
-    if !q.contains(' ') && !contains_cjk(q) {
+    //    不能被英文分词习惯的筛子误伤。判定与 0.24 §3.3 query 形态门禁共用
+    //    `probe::is_natural_language_shaped`（单一真源）。
+    if !probe::is_natural_language_shaped(q) {
         return GateOutcome::Fallback(FallbackReason::NoWhitespace);
     }
 
     GateOutcome::Invoke
+}
+
+// ── 0.24 §3.3 文本分类：Query 与 Awareness 是并列评分输入 ─────────────────────
+
+/// 自然文本分类结果（0.24 §3.3 / §3.4 rank 表的输入）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NaturalTextClass {
+    /// 目标语言自然文本 → AI 处理（query 0.80 / 选区 0.72）。
+    TargetNatural,
+    /// 非目标语言自然文本 → 翻译（query/选区 0.92，剪贴板 0.82）+ AI 外语备选（0.62）。
+    ForeignNatural,
+    /// 其他通过自然语言门禁的文本（无目标语系的混合语言等）→ 通用 AI 兜底（0.55，仅 query 派生）。
+    NaturalFallback,
+    /// 结构化/短文本/URL/路径等 → 无派生候选。
+    Unclassified,
+}
+
+/// Query 文本分类（严格门禁）。
+///
+/// 比 awareness 分类多两道筛子：AI 长度阈值（`min_query_len`）与拉丁必含空格——
+/// `"abcd"` 是搜索词不是句子，不得被翻译建议抢占（§3.3"简短应用名不得被翻译抢占"）。
+/// **不含 AI 总开关**（结构性门禁与总开关分离，翻译候选不被 AI 开关连坐）。
+///
+/// **输入契约**：`q` 必须已 trim。
+pub fn classify_query(q: &str, target: &str, gate: &AiGate) -> NaturalTextClass {
+    if q.is_empty() || structural_gate_outcome(q, gate) != GateOutcome::Invoke {
+        return NaturalTextClass::Unclassified;
+    }
+    classify_shared(q, target)
+}
+
+/// Awareness 文本分类（宽松门禁，0.24 §3.3）。
+///
+/// 划词/剪贴板文本没有"搜索词 vs 句子"的歧义（用户明确选中了它），故不套
+/// query 专属的空格/长度筛子——与 0.8.2 起 `needs_translation` 对选区/剪贴板的
+/// 判定口径一致。无 `NaturalFallback`（兜底只在用户主动输入时才有意义）。
+pub fn classify_awareness_text(s: &str, target: &str) -> NaturalTextClass {
+    let s = s.trim();
+    if s.is_empty() {
+        return NaturalTextClass::Unclassified;
+    }
+    classify_shared(s, target)
+}
+
+/// 共享语系判定：外语（needs_translation 全套护栏）→ 目标语系 → 兜底。
+///
+/// 无可分类字符（纯数字/纯标点）→ Unclassified——它们不是"其他合法自然语言"。
+fn classify_shared(s: &str, target: &str) -> NaturalTextClass {
+    if probe::detect_lang(s) == probe::TextLang::Empty {
+        return NaturalTextClass::Unclassified;
+    }
+    if probe::needs_translation(s, target) {
+        return NaturalTextClass::ForeignNatural;
+    }
+    if probe::contains_target_script(s, target) {
+        return NaturalTextClass::TargetNatural;
+    }
+    NaturalTextClass::NaturalFallback
 }
 
 /// 是否含 CJK 字符(中日韩字符)——决定筛子 ⑤ 是否豁免"必含空格"。
@@ -402,5 +469,126 @@ mod tests {
             should_invoke_ai("ab", &g),
             GateOutcome::Fallback(FallbackReason::Disabled)
         );
+    }
+
+    // ── 0.24 §3.3 文本分类：classify_query / classify_awareness_text ──────────
+
+    mod classify {
+        use super::*;
+
+        #[test]
+        fn english_query_is_foreign_natural() {
+            // zh 目标下输入英文句子 → 翻译 Primary / AI 外语备选
+            assert_eq!(
+                classify_query("hello world foo", "zh", &default_gate()),
+                NaturalTextClass::ForeignNatural
+            );
+        }
+
+        #[test]
+        fn chinese_query_is_target_natural() {
+            // 目标语言自然文本 → AI 处理 Primary，不产同语言翻译
+            assert_eq!(
+                classify_query("你用的是什么模型", "zh", &default_gate()),
+                NaturalTextClass::TargetNatural
+            );
+        }
+
+        #[test]
+        fn mixed_query_with_target_script_is_target_natural() {
+            // 含目标语系的混合文本 → 目标语言主导，AI 处理
+            assert_eq!(
+                classify_query("hello 世界 nice", "zh", &default_gate()),
+                NaturalTextClass::TargetNatural
+            );
+        }
+
+        #[test]
+        fn mixed_query_without_target_script_is_fallback() {
+            // 无目标语系的混合 → 通用 AI 兜底（0.55，仅可独占 primary）
+            assert_eq!(
+                classify_query("hello こんにちは", "zh", &default_gate()),
+                NaturalTextClass::NaturalFallback
+            );
+        }
+
+        #[test]
+        fn single_latin_word_is_unclassified_for_query() {
+            // "abcd" 是搜索词不是句子——query 严格门禁（空格筛子）
+            assert_eq!(
+                classify_query("abcd", "zh", &default_gate()),
+                NaturalTextClass::Unclassified
+            );
+            // awareness 宽松门禁：选中单词可翻译
+            assert_eq!(
+                classify_awareness_text("abcd", "zh"),
+                NaturalTextClass::ForeignNatural
+            );
+        }
+
+        #[test]
+        fn structured_and_short_text_is_unclassified() {
+            for q in [
+                "chrome",
+                "https://example.com/x",
+                "C:\\Users\\foo\\bar",
+                "123456",
+                "#ff00aa",
+                "user@example.com",
+            ] {
+                assert_eq!(
+                    classify_query(q, "zh", &default_gate()),
+                    NaturalTextClass::Unclassified,
+                    "query {q} 不该被分类为自然文本"
+                );
+            }
+            // 太短的中文也拦（内部 CJK 阈值 2）
+            assert_eq!(
+                classify_query("翻", "zh", &default_gate()),
+                NaturalTextClass::Unclassified
+            );
+        }
+
+        #[test]
+        fn ai_disabled_does_not_affect_classification() {
+            // 总开关只连坐 AskAi（availability），不连坐翻译候选：
+            // classify_query 不读 gate.enabled
+            let mut g = default_gate();
+            g.enabled = false;
+            assert_eq!(
+                classify_query("hello world foo", "zh", &g),
+                NaturalTextClass::ForeignNatural
+            );
+        }
+
+        #[test]
+        fn same_family_query_is_not_foreign() {
+            // 目标 en 下的英文句子 → TargetNatural（不产同语言翻译）
+            assert_eq!(
+                classify_query("how to install rust", "en", &default_gate()),
+                NaturalTextClass::TargetNatural
+            );
+        }
+
+        #[test]
+        fn awareness_target_text_classifies_target() {
+            assert_eq!(
+                classify_awareness_text("帮我看看这段话", "zh"),
+                NaturalTextClass::TargetNatural
+            );
+            assert_eq!(
+                classify_awareness_text("this is selected text", "zh"),
+                NaturalTextClass::ForeignNatural
+            );
+            // 空/纯符号
+            assert_eq!(
+                classify_awareness_text("  ", "zh"),
+                NaturalTextClass::Unclassified
+            );
+            assert_eq!(
+                classify_awareness_text("12345", "zh"),
+                NaturalTextClass::Unclassified
+            );
+        }
     }
 }

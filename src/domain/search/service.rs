@@ -14,12 +14,15 @@ use crate::domain::event::EventPort;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::event_names::EventNames;
+use crate::domain::intent::suggestion::coordinator::{
+    CoordinateInput, SuggestionCoordinator, SuggestionRuntimeConfig,
+};
+use crate::domain::intent::suggestion::fatigue::SuggestionFatigue;
 use crate::domain::intent::{
-    Candidate, IntentRouter, RankingHint, Route, Suggestion, SuggestionAction, SuggestionKind,
-    SuggestionSet, Surface,
+    Candidate, IntentRouter, RankingHint, Route, RouteSummary, SuggestionAvailability,
+    SuggestionKind, SuggestionSet, Surface,
 };
 use crate::domain::plugin::PluginEngine;
 use crate::infra::platform::context::ContextSnapshot;
@@ -32,6 +35,34 @@ use super::scorer::{boost_priority, placeholder_score, source_rank};
 // 0.17.6: AI lane 常量已随 SearchService AI 路径删除（AI_DEFAULT_HARD_TIMEOUT_MS /
 // TURN2_TIMEOUT_MIN_MS / TURN2_TIMEOUT_MAX_MS / TURN2_FALLBACK_DELAY_MS）。
 // 主窗口 AI 改走 ChatService，超时由 AIConfig::slo_hard_timeout_ms 管理。
+
+/// 近期建议环形记录容量（0.24.3 §3.6 遥测关联用，有界防膨胀）。
+const RECENT_SUGGESTIONS_CAP: usize = 32;
+
+/// 建议槽位（遥测记录用；对应前端 §3.6 上报的 slot 字段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuggestionSlot {
+    Primary,
+    Secondary,
+}
+
+impl SuggestionSlot {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SuggestionSlot::Primary => "primary",
+            SuggestionSlot::Secondary => "secondary",
+        }
+    }
+}
+
+/// 遥测关联记录：一次搜索产出的一个槽位候选（不存原文）。
+#[derive(Debug, Clone)]
+struct RecentSuggestion {
+    revision: u64,
+    id: String,
+    kind: SuggestionKind,
+    slot: SuggestionSlot,
+}
 
 /// 同步搜索返回契约（0.8.3 §4.3；0.24.1 suggestion 迁移 SuggestionSet）——
 /// `SearchService::search` / `search_apps` command 出口。
@@ -100,52 +131,48 @@ pub struct SearchService {
     /// 消费——前者在 `apply_context_disable_list` 里独立持有副本，后者经 QueryContext 读。
     /// 读多写少，用 RwLock；每次 search 短时 read 不阻塞。
     disabled_context_bindings: Arc<RwLock<Vec<String>>>,
-    /// Autosuggestion 配置快照（0.8.1 §2.5）。热更新走 `update_autosuggest_config`。
-    /// - `enabled`: 关闭时 `search()` 恒返回 `completion_hint: None`（快速短路，不算 fuzzy）。
-    /// - `min_score`: `RuleRouter::suggest_completion` 阈值（默认 0.7）。
-    autosuggest: Arc<RwLock<AutosuggestState>>,
+    /// Suggestion 运行时配置快照（0.24.2：autosuggest 开关/阈值 + secondary 门槛）。
+    /// 与 `KeywordProducer` 共享同一 cell——`update_suggestion_config` 热更新时
+    /// producer 侧同步生效（0.8.6 §8.1.2 的 min_score 共享机制扩展）。
+    suggestion_runtime: Arc<RwLock<SuggestionRuntimeConfig>>,
+    /// Suggestion 协调器（0.24.2：实例从 RuleRouter 迁入，编排层持有）。
+    /// producers 在 main.rs wiring 时注册（Keyword/Context/Ai 三源）。
+    suggestion_coordinator: SuggestionCoordinator,
     /// 界面语言快照（0.8.1）。用于把 `empty_arg_hint` / 未来其他 `LocalizableText`
     /// 解析成当前语言字符串。热更新走 `update_language`，与 AppConfig.language 同步。
     language: Arc<RwLock<String>>,
-    /// 上一轮 best_suggestion 产出的 RankingHint 快照（0.8.4 §5.3.1 Surface Booster）。
+    /// 上一轮 coordinate 产出的 RankingHint 快照（0.8.4 §5.3.1 Surface Booster）。
     /// route() 下一轮读此值做 surface boost——跨轮反馈滞后一轮,0.8.4 同步阶段可接受
     /// （0.9 AI 异步化后失效,见 0.8 文档 §5.6）。
     last_ranking_hint: Arc<Mutex<Option<RankingHint>>>,
-    /// 共享的 min_score 阈值（0.8.6 §8.1.2）。
-    /// 与 `KeywordProducer` 共享同一份 `Arc<RwLock<f64>>`——
-    /// `update_autosuggest_config` 热更新时写入此引用，producer 侧同步生效。
-    min_score_shared: Arc<RwLock<f64>>,
-    /// AI Provider registry（0.9.2 Phase 5b setter 注入）。
+    /// 会话级建议降频计数器（0.24.3 §3.8）——任一采纳/主窗口隐藏清零
+    /// （`record_adoption` / `reset_suggestion_session`）。
+    suggestion_fatigue: Arc<Mutex<SuggestionFatigue>>,
+    /// 近期建议环形记录（0.24.3 §3.6 遥测关联）：采纳上报的 revision → (id, kind, slot)。
+    /// 有界（32 条），只存 id/kind 不存原文。
+    recent_suggestions: Mutex<std::collections::VecDeque<RecentSuggestion>>,
+    /// AI Provider registry cell（0.9.2 Phase 5b setter 注入；0.24.2 起与
+    /// `AiProducer` 共享同一 cell——availability 判定与 produce 分类读同一份）。
     ///
-    /// **为什么用 setter 注入而不是 `new` 参数**:`main.rs:256` 先建 search_service、
-    /// `:308` 后建 ai_registry —— 构造顺序倒挂,setter 规避不动 wiring 顺序。
-    /// setup 早期(setter 未调)读到 None → 跳过 AI lane → fallback fuzzy,无害。
+    /// **为什么用 setter 注入而不是 `new` 参数**:`main.rs` 先建 search_service、
+    /// 后建 ai_registry —— 构造顺序倒挂,setter 规避不动 wiring 顺序。
+    /// setup 早期(setter 未调)读到 None → AskAi 候选被 availability 排除,无害。
     ai_registry: Arc<RwLock<Option<Arc<AIProviderRegistry>>>>,
 }
 
-#[derive(Clone, Copy)]
-struct AutosuggestState {
-    enabled: bool,
-    min_score: f64,
-}
-
-impl Default for AutosuggestState {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            min_score: 0.7,
-        }
-    }
-}
-
 impl SearchService {
+    /// wiring 构造（参数即依赖装配清单，main.rs 唯一调用点——打包成 struct 反而
+    /// 隐藏依赖关系，8 参对 wiring 构造可接受）。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         env: Arc<dyn EventPort>,
         pool: SqlitePool,
         engines: Vec<Arc<dyn SearchEngine>>,
         plugin_engine: Arc<PluginEngine>,
         router: Arc<dyn IntentRouter>,
-        min_score_shared: Arc<RwLock<f64>>,
+        suggestion_runtime: Arc<RwLock<SuggestionRuntimeConfig>>,
+        suggestion_coordinator: SuggestionCoordinator,
+        ai_registry: Arc<RwLock<Option<Arc<AIProviderRegistry>>>>,
     ) -> Self {
         let mut sync_engines = Vec::new();
         let mut async_engines = Vec::new();
@@ -168,11 +195,13 @@ impl SearchService {
             clipboard_search_enabled: Arc::new(AtomicBool::new(true)),
             disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
             disabled_context_bindings: Arc::new(RwLock::new(Vec::new())),
-            autosuggest: Arc::new(RwLock::new(AutosuggestState::default())),
+            suggestion_runtime,
+            suggestion_coordinator,
             language: Arc::new(RwLock::new("zh".to_string())),
             last_ranking_hint: Arc::new(Mutex::new(None)),
-            min_score_shared,
-            ai_registry: Arc::new(RwLock::new(None)),
+            suggestion_fatigue: Arc::new(Mutex::new(SuggestionFatigue::new())),
+            recent_suggestions: Mutex::new(std::collections::VecDeque::new()),
+            ai_registry,
         }
     }
 
@@ -253,14 +282,12 @@ impl SearchService {
         tracing::debug!(count = guard.len(), "内置动作 disable 列表已热更新");
     }
 
-    /// 更新 Autosuggestion 配置（0.8.1 §2.5）。
-    /// 启动时读一次 AppConfig 注入；设置页开关/滑块调整时命令层调此方法。
-    pub fn update_autosuggest_config(&self, enabled: bool, min_score: f64) {
-        let mut guard = self.autosuggest.write().unwrap();
-        *guard = AutosuggestState { enabled, min_score };
-        // 同步到共享引用——KeywordProducer 侧同步生效
-        *self.min_score_shared.write().unwrap() = min_score;
-        tracing::debug!(enabled, min_score, "Autosuggest 配置已热更新");
+    /// 更新 Suggestion 运行时配置（0.8.1 §2.5 建立，0.24.2 扩展 secondary 门槛）。
+    /// 启动时读一次 SuggestionConfig 注入；设置页开关/滑块调整时命令层调此方法。
+    /// 写共享 cell——`KeywordProducer` 侧同步生效。
+    pub fn update_suggestion_config(&self, cfg: SuggestionRuntimeConfig) {
+        *self.suggestion_runtime.write().unwrap() = cfg;
+        tracing::debug!(?cfg, "Suggestion 运行时配置已热更新");
     }
 
     /// 更新 context binding 禁用列表（0.8.3 §4.6）。
@@ -546,30 +573,11 @@ impl SearchService {
             language: &language,
         };
 
-        // Suggestion（0.8.3 / 0.8.6 coordinator）
-        let mut suggestion = self.compute_suggestion(query, &snapshot);
-
-        // ── 0.9.2 Phase 5b:AI Ghost Suggestion 覆盖 ─────────────────────
-        // Tab 显式触发的核心机制:在**Keyword/Context 都没命中**且**过筛子**时,
-        // 产 `SuggestionKind::AskAi` Ghost,让用户按 Tab 显式触发 AI。
-        // 避免:边打字边 spawn AI 造成的连续调用浪费。
-        //
-        // **触发条件**(与 §3.6 未命中过滤铁则一致):
-        // 1. Keyword/Context Suggestion 未命中(suggestion.is_none())
-        // 2. Route = Mixed{candidates: []}(无 plugin/engine 规则命中,filter 后)
-        //    Takeover/EngineTakeover 天然命中规则,不覆盖
-        // 3. gating 四筛子过
-        //
-        // Takeover 被 filter 降级成 Mixed{[]} 时也允许走 AI——用户被拦了没得选,
-        // 正是需要 AI 帮忙的场景。
-        //
-        // **0.24.2 归宿**：此"路由未命中才兜底 AI"的判定将并入 Coordinator
-        // eligibility（CoordinateInput.route_summary），届时删除此后置覆盖。
-        if suggestion.is_none()
-            && matches!(&route, Route::Mixed { candidates } if candidates.is_empty())
-        {
-            suggestion = self.maybe_ai_suggestion(q);
-        }
+        // Suggestion（0.24.2 §3.7：编排顺序即防环——Route 先算、Coordinator 后算，
+        // route_summary 是编排层传值不是域依赖）。
+        // AiTrigger 路由的 ai-trigger 候选也由 Coordinator 从 route_summary 构造，
+        // SearchService 不再有独立 AI 覆盖分支（0.9.2 Phase 5b 后置注入已删）。
+        let suggestion = self.compute_suggestion(query, &snapshot, &route, seq);
 
         // 按 Route 分派到四个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
@@ -577,26 +585,15 @@ impl SearchService {
             Route::EngineTakeover { engine_id, arg } => {
                 self.exec_engine_takeover(engine_id, arg, &search_ctx).await
             }
-            // AI 前缀触发：产 AI Suggestion，让前端 Ghost + Tab 触发。
+            // AI 前缀触发：只产 Suggestion，让前端 Ghost + Tab 触发。
             // 不直接调用 AI——用户输入过程中不应立即消耗 token，
             // 需要用户按 Tab 显式确认后才真正调用 AI（0.17.6 后走 chat_prompt ephemeral）。
-            Route::AiTrigger { arg } => {
-                suggestion = self.make_ai_suggestion(&arg);
-                vec![]
-            }
+            Route::AiTrigger { .. } => vec![],
             Route::Mixed { candidates } => {
                 self.exec_mixed(q, candidates, seq, &search_ctx, search_start)
                     .await
             }
         };
-
-        // 0.24.1：组装 SuggestionSet（revision = search seq，§3.6 过期防护真源）。
-        // secondary 恒 None——coordinator 仍是 top-1 语义，双槽选取在 0.24.2。
-        let suggestion = suggestion.map(|primary| SuggestionSet {
-            revision: seq,
-            primary: Some(primary),
-            secondary: None,
-        });
 
         SearchResponse {
             entries,
@@ -604,104 +601,114 @@ impl SearchService {
         }
     }
 
-    /// 若过 gating 且 AI registry 就绪,产 AI Ghost Suggestion(0.9.2 Phase 5b)。
+    /// Suggestion 协调（0.8.6 §8.2.1 提取；0.24.2 重写为 Coordinator 唯一真源）。
     ///
-    /// display="按 Tab 问 AI",action=EnterAiMode{prompt=原 query}(前端按 kind==="askAi"
-    /// 走独立 `enterAiMode` 路径,**不**触发新一轮 search,避免"采纳后又搜索"的循环)。
-    fn maybe_ai_suggestion(&self, q: &str) -> Option<Suggestion> {
-        // 空 query 直接排除——AI Ghost 强绑非空 query
-        if q.is_empty() {
-            return None;
-        }
-
-        let reg = self
-            .ai_registry
-            .read()
-            .expect("ai_registry lock poisoned")
-            .clone()?;
-        let cfg = reg.config_snapshot();
-        let gate = AiGate::from(&cfg);
-        match should_invoke_ai(q, &gate) {
-            GateOutcome::Invoke => {
-                // display 提示文案由前端 i18n 决定,后端只填英文占位;
-                // 但当前前端 ghost.js 直接读 display——先填中文,待 0.9.2 第二步统一 i18n
-                #[allow(deprecated)]
-                Some(Suggestion {
-                    id: "ai-query".to_string(),
-                    kind: SuggestionKind::AskAi,
-                    action: SuggestionAction::EnterAiMode {
-                        prompt: q.to_string(),
-                    },
-                    rank_score: 0.5, // 0.24.1 沿用旧值；0.24.2 按 §3.4 归一（AI 处理 Query 0.80）
-                    display: "按 Tab 问 AI".to_string(),
-                    prefix_len: 0,
-                    origin: None,
-                    ranking_hint: None,
-                })
-            }
-            GateOutcome::Fallback(reason) => {
-                if matches!(reason, crate::domain::ai::gating::FallbackReason::Disabled) {
-                    tracing::trace!(target: ai_slo::TARGET, ?reason, "AI Ghost 未触发");
-                } else {
-                    tracing::debug!(target: ai_slo::TARGET, ?reason, query = %q, "AI Ghost 未触发");
-                }
-                None
-            }
-        }
-    }
-
-    /// AI 前缀触发专用 Suggestion 构造（0.9.x）。
-    ///
-    /// 用户输入 "ai xxx" 显式触发，跳过 gating 四筛子——"ai" 前缀本身就是强信号。
-    /// 返回的 Suggestion 让前端 Ghost 渲染 "按 Tab 问 AI"，用户按 Tab 后走
-    /// `acceptCurrent() → enterAiMode` 路径。
-    ///
-    /// **为什么不直接调 AI**：输入过程中不应立即消耗 token，
-    /// 需要用户按 Tab 显式确认后才真正调用 AI（与 Ghost Tab 触发机制统一）。
-    fn make_ai_suggestion(&self, arg: &str) -> Option<Suggestion> {
-        let reg = self
-            .ai_registry
-            .read()
-            .expect("ai_registry lock poisoned")
-            .clone()?;
-        // 检查 AI 是否启用——用户显式触发也要尊重总开关
-        let cfg = reg.config_snapshot();
-        if !cfg.enabled {
-            tracing::trace!(target: ai_slo::TARGET, "AiTrigger: AI 未启用，跳过");
-            return None;
-        }
-
-        // display 提示文案由前端 i18n 决定,后端只填英文占位;
-        // 但当前前端 ghost.js 直接读 display——先填中文,待 0.9.2 第二步统一 i18n
-        #[allow(deprecated)]
-        Some(Suggestion {
-            id: "ai-trigger".to_string(),
-            kind: SuggestionKind::AskAi,
-            action: SuggestionAction::EnterAiMode {
-                prompt: arg.to_string(),
-            },
-            // AI 前缀触发是强信号，rank 高于兜底的 0.5（沿用旧 confidence 值）
-            rank_score: 1.0,
-            display: "按 Tab 问 AI".to_string(),
-            prefix_len: 0,
-            origin: None,
-            ranking_hint: None,
-        })
-    }
-
-    /// Suggestion 计算（从 search() 提取，0.8.6 §8.2.1）。
+    /// 组装 `CoordinateInput`（route_summary / availability / runtime config）调用
+    /// `SuggestionCoordinator::coordinate`，回填 revision 组装 `SuggestionSet`。
+    /// RankingHint 由 coordinate 返回值直接写入 `last_ranking_hint`
+    /// （下一轮 route 的 Surface Booster，0.8.4 §5.3.1）。
     fn compute_suggestion(
         &self,
         query: &str,
-        snapshot: &crate::infra::platform::context::ContextSnapshot,
-    ) -> Option<Suggestion> {
-        let cfg = *self.autosuggest.read().unwrap();
-        if !cfg.enabled {
+        snapshot: &ContextSnapshot,
+        route: &Route,
+        seq: u64,
+    ) -> Option<SuggestionSet> {
+        let runtime = *self.suggestion_runtime.read().unwrap();
+        let input = CoordinateInput {
+            query,
+            snapshot,
+            route_summary: RouteSummary::from(route),
+            availability: SuggestionAvailability {
+                ai_available: self.ai_available(),
+            },
+            config: runtime,
+        };
+        let mut fatigue = self.suggestion_fatigue.lock().unwrap();
+        let (outcome, hint) = self.suggestion_coordinator.coordinate(&input, &mut fatigue);
+        drop(fatigue);
+        *self.last_ranking_hint.lock().unwrap() = hint;
+        if outcome.primary.is_none() && outcome.secondary.is_none() {
             return None;
         }
-        let sug = self.router.best_suggestion(query, snapshot, cfg.min_score);
-        *self.last_ranking_hint.lock().unwrap() = self.router.take_last_ranking_hint();
-        sug
+        // 遥测关联记录（§3.6）：revision → 槽位候选的有界环形表
+        {
+            let mut ring = self.recent_suggestions.lock().unwrap();
+            if let Some(sug) = &outcome.primary {
+                ring.push_back(RecentSuggestion {
+                    revision: seq,
+                    id: sug.id.clone(),
+                    kind: sug.kind,
+                    slot: SuggestionSlot::Primary,
+                });
+            }
+            if let Some(sug) = &outcome.secondary {
+                ring.push_back(RecentSuggestion {
+                    revision: seq,
+                    id: sug.id.clone(),
+                    kind: sug.kind,
+                    slot: SuggestionSlot::Secondary,
+                });
+            }
+            while ring.len() > RECENT_SUGGESTIONS_CAP {
+                ring.pop_front();
+            }
+        }
+        Some(SuggestionSet {
+            revision: seq,
+            primary: outcome.primary,
+            secondary: outcome.secondary,
+        })
+    }
+
+    /// 采纳上报（0.24.3 §3.6 单向遥测）：fire-and-forget，best-effort 记日志。
+    ///
+    /// - `matched`：revision + slot + id 与近期环形记录吻合（前端 seq 校验通过时
+    ///   通常为 true；false = 过期上报/跨会话残留，只记不纠错——0.24 采纳零执行，
+    ///   无需服务端强校验）。
+    /// - 任一次采纳 → 降频计数全量清零（§3.8）。
+    /// - **不记 query/选区原文**，只有 id/kind/slot/revision 匹配与否。
+    pub fn record_adoption(&self, id: &str, slot: &str, revision: u64) {
+        let (matched, kind) = {
+            let ring = self.recent_suggestions.lock().unwrap();
+            let matched = ring
+                .iter()
+                .any(|r| r.revision == revision && r.slot.as_str() == slot && r.id == id);
+            let kind = ring
+                .iter()
+                .find(|r| r.revision == revision && r.slot.as_str() == slot)
+                .map(|r| r.kind);
+            (matched, kind)
+        };
+        let latest = self.latest_seq.load(Ordering::SeqCst);
+        self.suggestion_fatigue.lock().unwrap().clear();
+        tracing::info!(
+            id = %id,
+            kind = ?kind,
+            slot = %slot,
+            revision,
+            is_latest_revision = revision == latest,
+            matched,
+            "suggestion adopted"
+        );
+    }
+
+    /// 建议会话重置（0.24.3 §3.8）：主窗口隐藏时清零降频计数 + 遥测环形表
+    /// （每次唤起是新会话）。前端 lifecycle HIDDEN 钩子触发。
+    pub fn reset_suggestion_session(&self) {
+        self.suggestion_fatigue.lock().unwrap().clear();
+        self.recent_suggestions.lock().unwrap().clear();
+        tracing::debug!("suggestion session 已重置（窗口隐藏）");
+    }
+
+    /// AI 可用性（0.24 §3.7 availability 表）：registry 已注入且 `AIConfig.enabled`。
+    fn ai_available(&self) -> bool {
+        let reg = self
+            .ai_registry
+            .read()
+            .expect("ai_registry lock poisoned")
+            .clone();
+        reg.is_some_and(|r| r.config_snapshot().enabled)
     }
 
     /// 插件显示名称查找。空插件场景（无 manifest 命中）自动回退到剥离 `builtin.` 前缀。
@@ -835,8 +842,8 @@ impl SearchService {
             })
             .collect();
 
-        // AI lane 触发不在这里判——0.9.2 起 AI 走 Tab 显式触发,在 search() 主入口
-        // 通过 maybe_ai_suggestion 覆盖 SearchResponse.suggestion 出 Ghost。
+        // AI lane 触发不在这里判——AI 走 Tab 显式触发：AskAi 候选由 AiProducer
+        // 产出、Coordinator 仲裁进 SearchResponse.suggestion（0.24.2 收敛）。
 
         if !plugin_ids.is_empty() || !self.async_engines.is_empty() {
             self.spawn_mixed_lane(q.to_string(), plugin_ids, priority, seq);
@@ -851,7 +858,7 @@ impl SearchService {
         all_items.extend(hint_entries);
         all_items.extend(placeholders);
 
-        // ── 0.9.2 AI Ghost 已在 `search()` 主入口通过 `maybe_ai_suggestion` 覆盖 ──
+        // ── AI Ghost 由 Coordinator 产出（0.24.2：AiProducer → coordinate → SuggestionSet）──
         // 不在 exec_mixed 自动 spawn AI:边打字连续 spawn 会浪费 token + h2 stream 堆积。
         // 用户看到 Ghost "按 Tab 问 AI" 后显式按 Tab → 前端 invoke `chat_prompt` command
         // → ChatService::prompt(ephemeral) → 单次 spawn。
