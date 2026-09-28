@@ -1,0 +1,13 @@
+[
+  {
+    "name": "route_intent",
+    "description": "Classify launcher input text to pick the next action suggestion. Call this for EVERY input; never stay silent. Rule 1: if the input is written IN CHINESE (中文), the intent is ask_ai - Chinese is the user's own language, NEVER translate it. Rule 2: translate only for a NON-CHINESE foreign-language sentence (English/Japanese/...) or an explicit 翻译/fanyi/translate request. Rule 3: open_url only for web URLs (http/https); open_path only for file system paths (C:\\dir\\file.ext, \\\\server\\share, /usr/bin). Rule 4: none for app names, search keywords, code identifiers, commands, emails, UUIDs, colors, IPs.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "intent": {"type": "string", "enum": ["translate", "ask_ai", "open_url", "open_path", "none"]}
+      },
+      "required": ["intent"]
+    }
+  }
+]

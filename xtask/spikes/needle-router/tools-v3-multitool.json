@@ -1,0 +1,27 @@
+[
+  {
+    "name": "suggest_translation",
+    "description": "Input is natural-language text (a full sentence or phrase, not a URL/path/identifier) written in a language foreign to the user's UI language Chinese, so the launcher suggests translating it to Chinese. Also for explicit translation requests (翻译 / fanyi / translate ...).",
+    "parameters": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "ask_ai",
+    "description": "Input is Chinese natural-language text addressed to an assistant: a question, request, or instruction.",
+    "parameters": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "open_url",
+    "description": "Input is a web URL (http/https, host or host/path, optionally port).",
+    "parameters": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "open_path",
+    "description": "Input is a file system path: Windows absolute like C:\\Users\\name\\file.ext, UNC \\\\server\\share\\file, or unix /usr/local/bin/tool, usually with a slash or drive letter and often an extension.",
+    "parameters": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "no_intent",
+    "description": "Input is an app name, search keyword, code identifier, shell command, email, UUID, color code, IP, or anything else meant for the search box - no special action to suggest.",
+    "parameters": {"type": "object", "properties": {}}
+  }
+]

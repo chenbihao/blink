@@ -1,0 +1,63 @@
+{
+  "_meta": {
+    "label_semantics": "expected 按 0.24 规则版（SuggestionCoordinator + gating）语义标注：非目标语言自然文本→translate 建议面；目标语言（中文）自然文本→ask_ai；URL→open_url；路径→open_path；应用名/结构化文本→none；明确翻译 keyword→translate（确定路由）。mixed 类含主观标注，decision.md 单独讨论。",
+    "categories": ["url", "path", "english_word", "long_sentence_en", "natural_zh", "keyword", "structured", "mixed"]
+  },
+  "cases": [
+    {"category": "url", "input": "https://github.com/cactus-compute/needle", "expected": "open_url"},
+    {"category": "url", "input": "http://localhost:3000/dashboard", "expected": "open_url"},
+    {"category": "url", "input": "https://www.bing.com/search?q=tauri+rust", "expected": "open_url"},
+    {"category": "url", "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript", "expected": "open_url"},
+    {"category": "url", "input": "http://192.168.1.1/admin", "expected": "open_url"},
+    {"category": "url", "input": "https://news.ycombinator.com", "expected": "open_url"},
+
+    {"category": "path", "input": "D:\\Projects\\Coding\\blink\\AGENTS.md", "expected": "open_path"},
+    {"category": "path", "input": "C:\\Users\\99452\\Documents\\report.pdf", "expected": "open_path"},
+    {"category": "path", "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "expected": "open_path"},
+    {"category": "path", "input": "/usr/local/bin/python3", "expected": "open_path"},
+    {"category": "path", "input": "./src/main.rs", "expected": "open_path"},
+    {"category": "path", "input": "\\\\server\\share\\file.txt", "expected": "open_path"},
+
+    {"category": "english_word", "input": "chrome", "expected": "none"},
+    {"category": "english_word", "input": "vscode", "expected": "none"},
+    {"category": "english_word", "input": "notepad", "expected": "none"},
+    {"category": "english_word", "input": "spotify", "expected": "none"},
+    {"category": "english_word", "input": "whatsapp", "expected": "none"},
+    {"category": "english_word", "input": "git", "expected": "none"},
+
+    {"category": "long_sentence_en", "input": "the quick brown fox jumps over the lazy dog", "expected": "translate"},
+    {"category": "long_sentence_en", "input": "how do I get better at cooking chinese food at home", "expected": "translate"},
+    {"category": "long_sentence_en", "input": "please summarize the main points of this article", "expected": "translate"},
+    {"category": "long_sentence_en", "input": "what time does the library close on weekends", "expected": "translate"},
+    {"category": "long_sentence_en", "input": "I need to book a flight to Tokyo next month", "expected": "translate"},
+    {"category": "long_sentence_en", "input": "could you explain the difference between affect and effect", "expected": "translate"},
+
+    {"category": "natural_zh", "input": "帮我总结一下这段话的主要意思", "expected": "ask_ai"},
+    {"category": "natural_zh", "input": "怎么在 Windows 上配置环境变量", "expected": "ask_ai"},
+    {"category": "natural_zh", "input": "今天天气怎么样", "expected": "ask_ai"},
+    {"category": "natural_zh", "input": "给我写一封感谢信", "expected": "ask_ai"},
+    {"category": "natural_zh", "input": "如何学习 Rust 语言", "expected": "ask_ai"},
+    {"category": "natural_zh", "input": "把这段话改得更正式一些", "expected": "ask_ai"},
+
+    {"category": "keyword", "input": "翻译 hello world", "expected": "translate"},
+    {"category": "keyword", "input": "fanyi the weather is nice", "expected": "translate"},
+    {"category": "keyword", "input": "translate this page to english", "expected": "translate"},
+    {"category": "keyword", "input": "翻译 How are you into Chinese", "expected": "translate"},
+    {"category": "keyword", "input": "fy good morning", "expected": "translate"},
+    {"category": "keyword", "input": "trans 你好世界", "expected": "translate"},
+
+    {"category": "structured", "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c", "expected": "none"},
+    {"category": "structured", "input": "user@example.com", "expected": "none"},
+    {"category": "structured", "input": "#FF5733", "expected": "none"},
+    {"category": "structured", "input": "npm install --save-dev typescript", "expected": "none"},
+    {"category": "structured", "input": "getUserById", "expected": "none"},
+    {"category": "structured", "input": "192.168.1.100", "expected": "none"},
+
+    {"category": "mixed", "input": "用英文介绍一下 Rust 语言", "expected": "ask_ai"},
+    {"category": "mixed", "input": "hello world 怎么翻译成中文", "expected": "translate"},
+    {"category": "mixed", "input": "帮我把 this is a test 翻译成英文", "expected": "translate"},
+    {"category": "mixed", "input": "React 和 Vue 哪个更好", "expected": "ask_ai"},
+    {"category": "mixed", "input": "vscode 怎么设置中文", "expected": "ask_ai"},
+    {"category": "mixed", "input": "查一下 MDN 上的 Array.map", "expected": "ask_ai"}
+  ]
+}

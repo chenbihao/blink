@@ -1,0 +1,13 @@
+[
+  {
+    "name": "route_intent",
+    "description": "Classify launcher input text to pick the next action suggestion. Call this for EVERY input; never stay silent. translate: input is natural-language text (a full sentence or phrase, NOT a URL/path/identifier) written in a language foreign to the user's UI language Chinese, OR an explicit translation request (翻译/fanyi/translate). ask_ai: input is Chinese natural-language text addressed to the assistant (question, request, instruction). open_url: input is a web URL. open_path: input is a file system path (Windows like C:\\dir\\file.ext, UNC \\\\server\\share, or unix /usr/bin/...). none: app names, search keywords, code identifiers, shell commands, emails, UUIDs, color codes, IPs - anything typed to search and launch.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "intent": {"type": "string", "enum": ["translate", "ask_ai", "open_url", "open_path", "none"]}
+      },
+      "required": ["intent"]
+    }
+  }
+]

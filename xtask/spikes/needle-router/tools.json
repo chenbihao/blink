@@ -1,0 +1,13 @@
+[
+  {
+    "name": "route_intent",
+    "description": "Classify the text typed in a launcher input bar into exactly one intent. translate = user wants text translated to another language. ask_ai = user wants an AI assistant to process/answer natural-language text. open_url = input is a web URL. open_path = input is a file system path. none = app name, command keyword, code identifier, or anything else.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "intent": {"type": "string", "enum": ["translate", "ask_ai", "open_url", "open_path", "none"]}
+      },
+      "required": ["intent"]
+    }
+  }
+]

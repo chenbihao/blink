@@ -1,0 +1,1496 @@
+{
+ "date": "2026-09-28 13:31:42",
+ "platform": "win32",
+ "artifact_total_mb": 35.14,
+ "phase1_oneshot": {
+  "wall_ms": {
+   "n": 10,
+   "min": 420.0,
+   "p50": 432.3,
+   "p95": 439.0,
+   "max": 439.0,
+   "mean": 430.2
+  },
+  "peak_ram_mb_reported": [
+   82.6,
+   82.6,
+   82.6,
+   82.6,
+   82.6,
+   82.6,
+   82.6,
+   82.6,
+   82.5,
+   82.5
+  ],
+  "sample_response": {
+   "type": "call",
+   "success": true,
+   "error": null,
+   "error_code": null,
+   "reason": null,
+   "function_calls": [],
+   "suppressed_calls": [],
+   "reasoning": "No tool available for weather or food lookup.",
+   "confidence": 0.6217,
+   "prefill_tps": 821.6,
+   "decode_tps": 248.6,
+   "peak_ram_mb": 82.5
+  }
+ },
+ "phase2_serve": {
+  "ready_s": 0.51,
+  "ram_after_start_mb": 58.7,
+  "first_request_ms": 143.8,
+  "followup_request_ms": {
+   "n": 5,
+   "min": 73.7,
+   "p50": 106.3,
+   "p95": 149.9,
+   "max": 149.9,
+   "mean": 108.5
+  },
+  "warm_long_sentence": {
+   "n": 40,
+   "min": 93.2,
+   "p50": 113.6,
+   "p95": 132.8,
+   "max": 134.3,
+   "mean": 112.8
+  },
+  "warm_short_keyword": {
+   "n": 40,
+   "min": 72.9,
+   "p50": 125.6,
+   "p95": 262.8,
+   "max": 509.5,
+   "mean": 144.4
+  },
+  "stability_errors_of_60": 0,
+  "ram_under_load_mb": 64.5,
+  "after_idle_20s_request_ms": 98.3,
+  "alive_after_idle": true
+ },
+ "phase2b_depth4": {
+  "warm_long_sentence": {
+   "n": 15,
+   "min": 504.7,
+   "p50": 528.7,
+   "p95": 914.2,
+   "max": 914.2,
+   "mean": 571.6
+  },
+  "ram_mb": 64.5
+ },
+ "phase3_dataset": {
+  "minimal": {
+   "overall_accuracy": 0.375,
+   "by_category": {
+    "url": {
+     "accuracy": 0.5,
+     "mismatches": [
+      {
+       "input": "http://localhost:3000/dashboard",
+       "expected": "open_url",
+       "got": "none",
+       "conf": 0.758
+      },
+      {
+       "input": "http://192.168.1.1/admin",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.24
+      },
+      {
+       "input": "https://news.ycombinator.com",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.232
+      }
+     ]
+    },
+    "path": {
+     "accuracy": 0.0,
+     "mismatches": [
+      {
+       "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.096
+      },
+      {
+       "input": "C:\\Users\\99452\\Documents\\report.pdf",
+       "expected": "open_path",
+       "got": "none",
+       "conf": 0.614
+      },
+      {
+       "input": "C:\\Program Files\\Google\\Chrome\\Applicati",
+       "expected": "open_path",
+       "got": "open_url",
+       "conf": 0.025
+      },
+      {
+       "input": "/usr/local/bin/python3",
+       "expected": "open_path",
+       "got": "open_url",
+       "conf": 0.353
+      },
+      {
+       "input": "./src/main.rs",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.232
+      },
+      {
+       "input": "\\\\server\\share\\file.txt",
+       "expected": "open_path",
+       "got": "none",
+       "conf": 0.685
+      }
+     ]
+    },
+    "english_word": {
+     "accuracy": 0.67,
+     "mismatches": [
+      {
+       "input": "vscode",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.083
+      },
+      {
+       "input": "git",
+       "expected": "none",
+       "got": "open_url",
+       "conf": 0.073
+      }
+     ]
+    },
+    "long_sentence_en": {
+     "accuracy": 0.33,
+     "mismatches": [
+      {
+       "input": "how do I get better at cooking chinese f",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.622
+      },
+      {
+       "input": "please summarize the main points of this",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.747
+      },
+      {
+       "input": "what time does the library close on week",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.471
+      },
+      {
+       "input": "I need to book a flight to Tokyo next mo",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.595
+      }
+     ]
+    },
+    "natural_zh": {
+     "accuracy": 0.0,
+     "mismatches": [
+      {
+       "input": "帮我总结一下这段话的主要意思",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.143
+      },
+      {
+       "input": "怎么在 Windows 上配置环境变量",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.131
+      },
+      {
+       "input": "今天天气怎么样",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.129
+      },
+      {
+       "input": "给我写一封感谢信",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.144
+      },
+      {
+       "input": "如何学习 Rust 语言",
+       "expected": "ask_ai",
+       "got": "open_url",
+       "conf": 0.274
+      },
+      {
+       "input": "把这段话改得更正式一些",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.135
+      }
+     ]
+    },
+    "keyword": {
+     "accuracy": 0.5,
+     "mismatches": [
+      {
+       "input": "翻译 hello world",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.53
+      },
+      {
+       "input": "fanyi the weather is nice",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.437
+      },
+      {
+       "input": "翻译 How are you into Chinese",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.476
+      }
+     ]
+    },
+    "structured": {
+     "accuracy": 0.67,
+     "mismatches": [
+      {
+       "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.155
+      },
+      {
+       "input": "#FF5733",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.164
+      }
+     ]
+    },
+    "mixed": {
+     "accuracy": 0.33,
+     "mismatches": [
+      {
+       "input": "用英文介绍一下 Rust 语言",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.125
+      },
+      {
+       "input": "React 和 Vue 哪个更好",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.064
+      },
+      {
+       "input": "vscode 怎么设置中文",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.086
+      },
+      {
+       "input": "查一下 MDN 上的 Array.map",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.027
+      }
+     ]
+    }
+   },
+   "confidence_thresholding": {
+    "acc_if_conf>=0.2": {
+     "accuracy": 0.423,
+     "kept": 26,
+     "dropped": 22
+    },
+    "acc_if_conf>=0.3": {
+     "accuracy": 0.45,
+     "kept": 20,
+     "dropped": 28
+    },
+    "acc_if_conf>=0.35": {
+     "accuracy": 0.45,
+     "kept": 20,
+     "dropped": 28
+    },
+    "acc_if_conf>=0.4": {
+     "accuracy": 0.474,
+     "kept": 19,
+     "dropped": 29
+    },
+    "acc_if_conf>=0.45": {
+     "accuracy": 0.5,
+     "kept": 18,
+     "dropped": 30
+    }
+   },
+   "conf_distribution": {
+    "match_mean": 0.352,
+    "mismatch_mean": 0.295
+   },
+   "rows": [
+    {
+     "category": "url",
+     "input": "https://github.com/cactus-compute/needle",
+     "expected": "open_url",
+     "got": "open_url",
+     "confidence": 0.48,
+     "call_kind": "call",
+     "match": true
+    },
+    {
+     "category": "url",
+     "input": "http://localhost:3000/dashboard",
+     "expected": "open_url",
+     "got": "none",
+     "confidence": 0.758,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "https://www.bing.com/search?q=tauri+rust",
+     "expected": "open_url",
+     "got": "open_url",
+     "confidence": 0.297,
+     "call_kind": "call",
+     "match": true
+    },
+    {
+     "category": "url",
+     "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript",
+     "expected": "open_url",
+     "got": "open_url",
+     "confidence": 0.286,
+     "call_kind": "call",
+     "match": true
+    },
+    {
+     "category": "url",
+     "input": "http://192.168.1.1/admin",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.24,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "https://news.ycombinator.com",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.232,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.096,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "C:\\Users\\99452\\Documents\\report.pdf",
+     "expected": "open_path",
+     "got": "none",
+     "confidence": 0.614,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+     "expected": "open_path",
+     "got": "open_url",
+     "confidence": 0.025,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "/usr/local/bin/python3",
+     "expected": "open_path",
+     "got": "open_url",
+     "confidence": 0.353,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "./src/main.rs",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.232,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "\\\\server\\share\\file.txt",
+     "expected": "open_path",
+     "got": "none",
+     "confidence": 0.685,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "english_word",
+     "input": "chrome",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.458,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "vscode",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.083,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "english_word",
+     "input": "notepad",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.705,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "spotify",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.577,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "whatsapp",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.698,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "git",
+     "expected": "none",
+     "got": "open_url",
+     "confidence": 0.073,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "the quick brown fox jumps over the lazy dog",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.045,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "how do I get better at cooking chinese food at home",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.622,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "please summarize the main points of this article",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.747,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "what time does the library close on weekends",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.471,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "I need to book a flight to Tokyo next month",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.595,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "could you explain the difference between affect and effect",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.053,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "natural_zh",
+     "input": "帮我总结一下这段话的主要意思",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.143,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "怎么在 Windows 上配置环境变量",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.131,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "今天天气怎么样",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.129,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "给我写一封感谢信",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.144,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "如何学习 Rust 语言",
+     "expected": "ask_ai",
+     "got": "open_url",
+     "confidence": 0.274,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "把这段话改得更正式一些",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.135,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "翻译 hello world",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.53,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "fanyi the weather is nice",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.437,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "translate this page to english",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.083,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "keyword",
+     "input": "翻译 How are you into Chinese",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.476,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "fy good morning",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.061,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "keyword",
+     "input": "trans 你好世界",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.178,
+     "call_kind": "call",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.155,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "structured",
+     "input": "user@example.com",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.583,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "#FF5733",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.164,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "structured",
+     "input": "npm install --save-dev typescript",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.479,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "getUserById",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.648,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "192.168.1.100",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.633,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "mixed",
+     "input": "用英文介绍一下 Rust 语言",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.125,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "mixed",
+     "input": "hello world 怎么翻译成中文",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.059,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "mixed",
+     "input": "帮我把 this is a test 翻译成英文",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.011,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "mixed",
+     "input": "React 和 Vue 哪个更好",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.064,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "mixed",
+     "input": "vscode 怎么设置中文",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.086,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "mixed",
+     "input": "查一下 MDN 上的 Array.map",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.027,
+     "call_kind": "suppressed",
+     "match": false
+    }
+   ]
+  },
+  "enriched": {
+   "overall_accuracy": 0.312,
+   "by_category": {
+    "url": {
+     "accuracy": 0.0,
+     "mismatches": [
+      {
+       "input": "https://github.com/cactus-compute/needle",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.158
+      },
+      {
+       "input": "http://localhost:3000/dashboard",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.122
+      },
+      {
+       "input": "https://www.bing.com/search?q=tauri+rust",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.161
+      },
+      {
+       "input": "https://developer.mozilla.org/zh-CN/docs",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.113
+      },
+      {
+       "input": "http://192.168.1.1/admin",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.13
+      },
+      {
+       "input": "https://news.ycombinator.com",
+       "expected": "open_url",
+       "got": "translate",
+       "conf": 0.102
+      }
+     ]
+    },
+    "path": {
+     "accuracy": 0.0,
+     "mismatches": [
+      {
+       "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.044
+      },
+      {
+       "input": "C:\\Users\\99452\\Documents\\report.pdf",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.054
+      },
+      {
+       "input": "C:\\Program Files\\Google\\Chrome\\Applicati",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.018
+      },
+      {
+       "input": "/usr/local/bin/python3",
+       "expected": "open_path",
+       "got": "ask_ai",
+       "conf": 0.082
+      },
+      {
+       "input": "./src/main.rs",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.033
+      },
+      {
+       "input": "\\\\server\\share\\file.txt",
+       "expected": "open_path",
+       "got": "translate",
+       "conf": 0.025
+      }
+     ]
+    },
+    "english_word": {
+     "accuracy": 0.67,
+     "mismatches": [
+      {
+       "input": "vscode",
+       "expected": "none",
+       "got": "ask_ai",
+       "conf": 0.032
+      },
+      {
+       "input": "git",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.035
+      }
+     ]
+    },
+    "long_sentence_en": {
+     "accuracy": 0.33,
+     "mismatches": [
+      {
+       "input": "how do I get better at cooking chinese f",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.465
+      },
+      {
+       "input": "please summarize the main points of this",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.713
+      },
+      {
+       "input": "what time does the library close on week",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.486
+      },
+      {
+       "input": "I need to book a flight to Tokyo next mo",
+       "expected": "translate",
+       "got": "none",
+       "conf": 0.468
+      }
+     ]
+    },
+    "natural_zh": {
+     "accuracy": 0.0,
+     "mismatches": [
+      {
+       "input": "帮我总结一下这段话的主要意思",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.068
+      },
+      {
+       "input": "怎么在 Windows 上配置环境变量",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.051
+      },
+      {
+       "input": "今天天气怎么样",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.066
+      },
+      {
+       "input": "给我写一封感谢信",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.073
+      },
+      {
+       "input": "如何学习 Rust 语言",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.05
+      },
+      {
+       "input": "把这段话改得更正式一些",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.056
+      }
+     ]
+    },
+    "keyword": {
+     "accuracy": 0.67,
+     "mismatches": [
+      {
+       "input": "翻译 hello world",
+       "expected": "translate",
+       "got": "ask_ai",
+       "conf": 0.017
+      },
+      {
+       "input": "fanyi the weather is nice",
+       "expected": "translate",
+       "got": "ask_ai",
+       "conf": 0.008
+      }
+     ]
+    },
+    "structured": {
+     "accuracy": 0.33,
+     "mismatches": [
+      {
+       "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.024
+      },
+      {
+       "input": "#FF5733",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.117
+      },
+      {
+       "input": "getUserById",
+       "expected": "none",
+       "got": "ask_ai",
+       "conf": 0.026
+      },
+      {
+       "input": "192.168.1.100",
+       "expected": "none",
+       "got": "translate",
+       "conf": 0.063
+      }
+     ]
+    },
+    "mixed": {
+     "accuracy": 0.5,
+     "mismatches": [
+      {
+       "input": "用英文介绍一下 Rust 语言",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.011
+      },
+      {
+       "input": "React 和 Vue 哪个更好",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.059
+      },
+      {
+       "input": "查一下 MDN 上的 Array.map",
+       "expected": "ask_ai",
+       "got": "translate",
+       "conf": 0.005
+      }
+     ]
+    }
+   },
+   "confidence_thresholding": {
+    "acc_if_conf>=0.2": {
+     "accuracy": 0.6,
+     "kept": 10,
+     "dropped": 38
+    },
+    "acc_if_conf>=0.3": {
+     "accuracy": 0.6,
+     "kept": 10,
+     "dropped": 38
+    },
+    "acc_if_conf>=0.35": {
+     "accuracy": 0.6,
+     "kept": 10,
+     "dropped": 38
+    },
+    "acc_if_conf>=0.4": {
+     "accuracy": 0.556,
+     "kept": 9,
+     "dropped": 39
+    },
+    "acc_if_conf>=0.45": {
+     "accuracy": 0.5,
+     "kept": 8,
+     "dropped": 40
+    }
+   },
+   "conf_distribution": {
+    "match_mean": 0.211,
+    "mismatch_mean": 0.119
+   },
+   "rows": [
+    {
+     "category": "url",
+     "input": "https://github.com/cactus-compute/needle",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.158,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "http://localhost:3000/dashboard",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.122,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "https://www.bing.com/search?q=tauri+rust",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.161,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.113,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "http://192.168.1.1/admin",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.13,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "url",
+     "input": "https://news.ycombinator.com",
+     "expected": "open_url",
+     "got": "translate",
+     "confidence": 0.102,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.044,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "C:\\Users\\99452\\Documents\\report.pdf",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.054,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.018,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "/usr/local/bin/python3",
+     "expected": "open_path",
+     "got": "ask_ai",
+     "confidence": 0.082,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "./src/main.rs",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.033,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "path",
+     "input": "\\\\server\\share\\file.txt",
+     "expected": "open_path",
+     "got": "translate",
+     "confidence": 0.025,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "english_word",
+     "input": "chrome",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.447,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "vscode",
+     "expected": "none",
+     "got": "ask_ai",
+     "confidence": 0.032,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "english_word",
+     "input": "notepad",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.545,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "spotify",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.495,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "whatsapp",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.49,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "english_word",
+     "input": "git",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.035,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "the quick brown fox jumps over the lazy dog",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.029,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "how do I get better at cooking chinese food at home",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.465,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "please summarize the main points of this article",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.713,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "what time does the library close on weekends",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.486,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "I need to book a flight to Tokyo next month",
+     "expected": "translate",
+     "got": "none",
+     "confidence": 0.468,
+     "call_kind": "empty",
+     "match": false
+    },
+    {
+     "category": "long_sentence_en",
+     "input": "could you explain the difference between affect and effect",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.05,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "natural_zh",
+     "input": "帮我总结一下这段话的主要意思",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.068,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "怎么在 Windows 上配置环境变量",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.051,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "今天天气怎么样",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.066,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "给我写一封感谢信",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.073,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "如何学习 Rust 语言",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.05,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "natural_zh",
+     "input": "把这段话改得更正式一些",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.056,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "翻译 hello world",
+     "expected": "translate",
+     "got": "ask_ai",
+     "confidence": 0.017,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "fanyi the weather is nice",
+     "expected": "translate",
+     "got": "ask_ai",
+     "confidence": 0.008,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "keyword",
+     "input": "translate this page to english",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.022,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "keyword",
+     "input": "翻译 How are you into Chinese",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.034,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "keyword",
+     "input": "fy good morning",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.039,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "keyword",
+     "input": "trans 你好世界",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.082,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.024,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "structured",
+     "input": "user@example.com",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.529,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "#FF5733",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.117,
+     "call_kind": "call",
+     "match": false
+    },
+    {
+     "category": "structured",
+     "input": "npm install --save-dev typescript",
+     "expected": "none",
+     "got": "none",
+     "confidence": 0.367,
+     "call_kind": "empty",
+     "match": true
+    },
+    {
+     "category": "structured",
+     "input": "getUserById",
+     "expected": "none",
+     "got": "ask_ai",
+     "confidence": 0.026,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "structured",
+     "input": "192.168.1.100",
+     "expected": "none",
+     "got": "translate",
+     "confidence": 0.063,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "mixed",
+     "input": "用英文介绍一下 Rust 语言",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.011,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "mixed",
+     "input": "hello world 怎么翻译成中文",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.014,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "mixed",
+     "input": "帮我把 this is a test 翻译成英文",
+     "expected": "translate",
+     "got": "translate",
+     "confidence": 0.009,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "mixed",
+     "input": "React 和 Vue 哪个更好",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.059,
+     "call_kind": "suppressed",
+     "match": false
+    },
+    {
+     "category": "mixed",
+     "input": "vscode 怎么设置中文",
+     "expected": "ask_ai",
+     "got": "ask_ai",
+     "confidence": 0.019,
+     "call_kind": "suppressed",
+     "match": true
+    },
+    {
+     "category": "mixed",
+     "input": "查一下 MDN 上的 Array.map",
+     "expected": "ask_ai",
+     "got": "translate",
+     "confidence": 0.005,
+     "call_kind": "suppressed",
+     "match": false
+    }
+   ]
+  }
+ },
+ "phase4_protocol": {
+  "get_health": "HTTP 404 (EngineManager 合同要求 200+身份 JSON)",
+  "complete_without_token": "accepted",
+  "identity_fields_in_response": [],
+  "shutdown_endpoint": "未见 /shutdown（EngineManager stop 合同走 HTTP /shutdown）",
+  "concurrent_two_requests": [
+   "ok",
+   "ok"
+  ],
+  "turns_accumulate": "是（官方 --serve 语义：turns accumulate until /reset）"
+ }
+}

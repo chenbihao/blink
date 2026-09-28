@@ -1,0 +1,456 @@
+{
+ "needle_fewshot": {
+  "tag": "N-FS v2+forced+zh-fewshot",
+  "overall": 0.312,
+  "by_category": {
+   "url": 0.67,
+   "path": 0.0,
+   "english_word": 0.0,
+   "long_sentence_en": 0.67,
+   "natural_zh": 0.0,
+   "keyword": 0.83,
+   "structured": 0.0,
+   "mixed": 0.33
+  },
+  "empty_calls": 0,
+  "conf": {
+   "match_mean": 0.077,
+   "mismatch_mean": 0.059
+  },
+  "latency_ms_p50": 474.4,
+  "rows": [
+   {
+    "category": "url",
+    "input": "https://github.com/cactus-compute/needle",
+    "expected": "open_url",
+    "got": "open_url",
+    "confidence": 0.15,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "url",
+    "input": "http://localhost:3000/dashboard",
+    "expected": "open_url",
+    "got": "translate",
+    "confidence": 0.206,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "url",
+    "input": "https://www.bing.com/search?q=tauri+rust",
+    "expected": "open_url",
+    "got": "open_url",
+    "confidence": 0.043,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "url",
+    "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript",
+    "expected": "open_url",
+    "got": "open_url",
+    "confidence": 0.187,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "url",
+    "input": "http://192.168.1.1/admin",
+    "expected": "open_url",
+    "got": "translate",
+    "confidence": 0.135,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "url",
+    "input": "https://news.ycombinator.com",
+    "expected": "open_url",
+    "got": "open_url",
+    "confidence": 0.219,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "path",
+    "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+    "expected": "open_path",
+    "got": "translate",
+    "confidence": 0.05,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "path",
+    "input": "C:\\Users\\99452\\Documents\\report.pdf",
+    "expected": "open_path",
+    "got": "translate",
+    "confidence": 0.184,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "path",
+    "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "expected": "open_path",
+    "got": "open_url",
+    "confidence": 0.03,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "path",
+    "input": "/usr/local/bin/python3",
+    "expected": "open_path",
+    "got": "open_url",
+    "confidence": 0.106,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "path",
+    "input": "./src/main.rs",
+    "expected": "open_path",
+    "got": "translate",
+    "confidence": 0.019,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "path",
+    "input": "\\\\server\\share\\file.txt",
+    "expected": "open_path",
+    "got": "translate",
+    "confidence": 0.017,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "english_word",
+    "input": "chrome",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.057,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "english_word",
+    "input": "vscode",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.029,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "english_word",
+    "input": "notepad",
+    "expected": "none",
+    "got": "open_url",
+    "confidence": 0.033,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "english_word",
+    "input": "spotify",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.034,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "english_word",
+    "input": "whatsapp",
+    "expected": "none",
+    "got": "ask_ai",
+    "confidence": 0.052,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "english_word",
+    "input": "git",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.026,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "the quick brown fox jumps over the lazy dog",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.03,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "how do I get better at cooking chinese food at home",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.005,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "please summarize the main points of this article",
+    "expected": "translate",
+    "got": "ask_ai",
+    "confidence": 0.156,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "what time does the library close on weekends",
+    "expected": "translate",
+    "got": "ask_ai",
+    "confidence": 0.063,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "I need to book a flight to Tokyo next month",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.031,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "could you explain the difference between affect and effect",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.031,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "natural_zh",
+    "input": "帮我总结一下这段话的主要意思",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.062,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "natural_zh",
+    "input": "怎么在 Windows 上配置环境变量",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.019,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "natural_zh",
+    "input": "今天天气怎么样",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.052,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "natural_zh",
+    "input": "给我写一封感谢信",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.061,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "natural_zh",
+    "input": "如何学习 Rust 语言",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.043,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "natural_zh",
+    "input": "把这段话改得更正式一些",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.046,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 hello world",
+    "expected": "translate",
+    "got": "open_url",
+    "confidence": 0.014,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "keyword",
+    "input": "fanyi the weather is nice",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.009,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "keyword",
+    "input": "translate this page to english",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.066,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 How are you into Chinese",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.079,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "keyword",
+    "input": "fy good morning",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.046,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "keyword",
+    "input": "trans 你好世界",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.197,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "structured",
+    "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.066,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "structured",
+    "input": "user@example.com",
+    "expected": "none",
+    "got": "ask_ai",
+    "confidence": 0.061,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "structured",
+    "input": "#FF5733",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.103,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "structured",
+    "input": "npm install --save-dev typescript",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.008,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "structured",
+    "input": "getUserById",
+    "expected": "none",
+    "got": "ask_ai",
+    "confidence": 0.045,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "structured",
+    "input": "192.168.1.100",
+    "expected": "none",
+    "got": "translate",
+    "confidence": 0.06,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "mixed",
+    "input": "用英文介绍一下 Rust 语言",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.01,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "mixed",
+    "input": "hello world 怎么翻译成中文",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.022,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "mixed",
+    "input": "帮我把 this is a test 翻译成英文",
+    "expected": "translate",
+    "got": "translate",
+    "confidence": 0.043,
+    "call_kind": "call",
+    "match": true
+   },
+   {
+    "category": "mixed",
+    "input": "React 和 Vue 哪个更好",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.073,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "mixed",
+    "input": "vscode 怎么设置中文",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.016,
+    "call_kind": "call",
+    "match": false
+   },
+   {
+    "category": "mixed",
+    "input": "查一下 MDN 上的 Array.map",
+    "expected": "ask_ai",
+    "got": "translate",
+    "confidence": 0.005,
+    "call_kind": "call",
+    "match": false
+   }
+  ]
+ }
+}

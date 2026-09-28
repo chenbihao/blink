@@ -1,0 +1,1355 @@
+{
+ "date": "2026-09-28 15:52:48",
+ "model": "qwen3.5-0.8b",
+ "baseline": "Q1 zero-shot 0.562 (natural_zh 0.0)",
+ "F1_zh_5shot": {
+  "tag": "F1 zh-dominant 5-shot",
+  "overall": 0.646,
+  "by_category": {
+   "url": 1.0,
+   "path": 0.83,
+   "english_word": 0.67,
+   "long_sentence_en": 0.5,
+   "natural_zh": 0.33,
+   "keyword": 0.67,
+   "structured": 0.5,
+   "mixed": 0.67
+  },
+  "unparsed": 5,
+  "latency_ms_p50": 126.4,
+  "rows": [
+   {
+    "category": "url",
+    "input": "https://github.com/cactus-compute/needle",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 363.8
+   },
+   {
+    "category": "url",
+    "input": "http://localhost:3000/dashboard",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 115.8
+   },
+   {
+    "category": "url",
+    "input": "https://www.bing.com/search?q=tauri+rust",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 130.6
+   },
+   {
+    "category": "url",
+    "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 136.8
+   },
+   {
+    "category": "url",
+    "input": "http://192.168.1.1/admin",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 142.1
+   },
+   {
+    "category": "url",
+    "input": "https://news.ycombinator.com",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 122.9
+   },
+   {
+    "category": "path",
+    "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 135.7
+   },
+   {
+    "category": "path",
+    "input": "C:\\Users\\99452\\Documents\\report.pdf",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 120.7
+   },
+   {
+    "category": "path",
+    "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 128.8
+   },
+   {
+    "category": "path",
+    "input": "/usr/local/bin/python3",
+    "expected": "open_path",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 136.3
+   },
+   {
+    "category": "path",
+    "input": "./src/main.rs",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 131.0
+   },
+   {
+    "category": "path",
+    "input": "\\\\server\\share\\file.txt",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 144.5
+   },
+   {
+    "category": "english_word",
+    "input": "chrome",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 123.1
+   },
+   {
+    "category": "english_word",
+    "input": "vscode",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 117.7
+   },
+   {
+    "category": "english_word",
+    "input": "notepad",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 132.3
+   },
+   {
+    "category": "english_word",
+    "input": "spotify",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 115.0
+   },
+   {
+    "category": "english_word",
+    "input": "whatsapp",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 136.3
+   },
+   {
+    "category": "english_word",
+    "input": "git",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 134.3
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "the quick brown fox jumps over the lazy dog",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 120.6
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "how do I get better at cooking chinese food at home",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 116.1
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "please summarize the main points of this article",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 132.4
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "what time does the library close on weekends",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 151.5
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "I need to book a flight to Tokyo next month",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 131.5
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "could you explain the difference between affect and effect",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 119.2
+   },
+   {
+    "category": "natural_zh",
+    "input": "帮我总结一下这段话的主要意思",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "总结：用户分享了一句关于“巧克力盒”的著名名言，并表达了今天心情不错想出去走走的",
+    "match": false,
+    "ms": 348.2
+   },
+   {
+    "category": "natural_zh",
+    "input": "怎么在 Windows 上配置环境变量",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 132.0
+   },
+   {
+    "category": "natural_zh",
+    "input": "今天天气怎么样",
+    "expected": "ask_ai",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 111.9
+   },
+   {
+    "category": "natural_zh",
+    "input": "给我写一封感谢信",
+    "expected": "ask_ai",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 104.5
+   },
+   {
+    "category": "natural_zh",
+    "input": "如何学习 Rust 语言",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 121.8
+   },
+   {
+    "category": "natural_zh",
+    "input": "把这段话改得更正式一些",
+    "expected": "ask_ai",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 126.4
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 hello world",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 107.0
+   },
+   {
+    "category": "keyword",
+    "input": "fanyi the weather is nice",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 118.6
+   },
+   {
+    "category": "keyword",
+    "input": "translate this page to english",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 131.0
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 How are you into Chinese",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "你好，我是你的助手。请问有什么可以帮您的吗？",
+    "match": false,
+    "ms": 245.8
+   },
+   {
+    "category": "keyword",
+    "input": "fy good morning",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 127.9
+   },
+   {
+    "category": "keyword",
+    "input": "trans 你好世界",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 114.3
+   },
+   {
+    "category": "structured",
+    "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+    "expected": "none",
+    "got": "unparsed",
+    "raw": "code_identifier",
+    "match": false,
+    "ms": 134.1
+   },
+   {
+    "category": "structured",
+    "input": "user@example.com",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 107.2
+   },
+   {
+    "category": "structured",
+    "input": "#FF5733",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 116.6
+   },
+   {
+    "category": "structured",
+    "input": "npm install --save-dev typescript",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 120.9
+   },
+   {
+    "category": "structured",
+    "input": "getUserById",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 115.4
+   },
+   {
+    "category": "structured",
+    "input": "192.168.1.100",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 113.0
+   },
+   {
+    "category": "mixed",
+    "input": "用英文介绍一下 Rust 语言",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "rust is a general-purpose, memory-safe p",
+    "match": false,
+    "ms": 352.5
+   },
+   {
+    "category": "mixed",
+    "input": "hello world 怎么翻译成中文",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "翻译",
+    "match": false,
+    "ms": 118.4
+   },
+   {
+    "category": "mixed",
+    "input": "帮我把 this is a test 翻译成英文",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 99.0
+   },
+   {
+    "category": "mixed",
+    "input": "React 和 Vue 哪个更好",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 123.2
+   },
+   {
+    "category": "mixed",
+    "input": "vscode 怎么设置中文",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 145.2
+   },
+   {
+    "category": "mixed",
+    "input": "查一下 MDN 上的 Array.map",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 117.6
+   }
+  ]
+ },
+ "F2_10shot": {
+  "tag": "F2 per-class 10-shot",
+  "overall": 0.542,
+  "by_category": {
+   "url": 0.33,
+   "path": 0.83,
+   "english_word": 0.5,
+   "long_sentence_en": 0.33,
+   "natural_zh": 0.5,
+   "keyword": 0.67,
+   "structured": 0.5,
+   "mixed": 0.67
+  },
+  "unparsed": 7,
+  "latency_ms_p50": 130.9,
+  "rows": [
+   {
+    "category": "url",
+    "input": "https://github.com/cactus-compute/needle",
+    "expected": "open_url",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 193.1
+   },
+   {
+    "category": "url",
+    "input": "http://localhost:3000/dashboard",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 133.4
+   },
+   {
+    "category": "url",
+    "input": "https://www.bing.com/search?q=tauri+rust",
+    "expected": "open_url",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 144.7
+   },
+   {
+    "category": "url",
+    "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript",
+    "expected": "open_url",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 107.5
+   },
+   {
+    "category": "url",
+    "input": "http://192.168.1.1/admin",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 128.8
+   },
+   {
+    "category": "url",
+    "input": "https://news.ycombinator.com",
+    "expected": "open_url",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 141.8
+   },
+   {
+    "category": "path",
+    "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 144.2
+   },
+   {
+    "category": "path",
+    "input": "C:\\Users\\99452\\Documents\\report.pdf",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 130.9
+   },
+   {
+    "category": "path",
+    "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 125.2
+   },
+   {
+    "category": "path",
+    "input": "/usr/local/bin/python3",
+    "expected": "open_path",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 128.7
+   },
+   {
+    "category": "path",
+    "input": "./src/main.rs",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 122.8
+   },
+   {
+    "category": "path",
+    "input": "\\\\server\\share\\file.txt",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 118.2
+   },
+   {
+    "category": "english_word",
+    "input": "chrome",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 134.4
+   },
+   {
+    "category": "english_word",
+    "input": "vscode",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 123.1
+   },
+   {
+    "category": "english_word",
+    "input": "notepad",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 112.6
+   },
+   {
+    "category": "english_word",
+    "input": "spotify",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 117.4
+   },
+   {
+    "category": "english_word",
+    "input": "whatsapp",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 126.4
+   },
+   {
+    "category": "english_word",
+    "input": "git",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 137.9
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "the quick brown fox jumps over the lazy dog",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 116.1
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "how do I get better at cooking chinese food at home",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 119.3
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "please summarize the main points of this article",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 118.7
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "what time does the library close on weekends",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 130.9
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "I need to book a flight to Tokyo next month",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 151.9
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "could you explain the difference between affect and effect",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 126.6
+   },
+   {
+    "category": "natural_zh",
+    "input": "帮我总结一下这段话的主要意思",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "总结：用户分享了一首流行歌曲《never gonna give you up》（",
+    "match": false,
+    "ms": 389.9
+   },
+   {
+    "category": "natural_zh",
+    "input": "怎么在 Windows 上配置环境变量",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 129.7
+   },
+   {
+    "category": "natural_zh",
+    "input": "今天天气怎么样",
+    "expected": "ask_ai",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 132.9
+   },
+   {
+    "category": "natural_zh",
+    "input": "给我写一封感谢信",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 123.4
+   },
+   {
+    "category": "natural_zh",
+    "input": "如何学习 Rust 语言",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 153.1
+   },
+   {
+    "category": "natural_zh",
+    "input": "把这段话改得更正式一些",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "请提供具体的文本内容，以便我为您进行正式的改写。",
+    "match": false,
+    "ms": 282.4
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 hello world",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 131.6
+   },
+   {
+    "category": "keyword",
+    "input": "fanyi the weather is nice",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 140.0
+   },
+   {
+    "category": "keyword",
+    "input": "translate this page to english",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 135.4
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 How are you into Chinese",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "你好！我是你的 ai 助手。请问有什么可以帮您的吗？",
+    "match": false,
+    "ms": 270.7
+   },
+   {
+    "category": "keyword",
+    "input": "fy good morning",
+    "expected": "translate",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 128.9
+   },
+   {
+    "category": "keyword",
+    "input": "trans 你好世界",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 118.7
+   },
+   {
+    "category": "structured",
+    "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+    "expected": "none",
+    "got": "unparsed",
+    "raw": "code_identifier",
+    "match": false,
+    "ms": 140.2
+   },
+   {
+    "category": "structured",
+    "input": "user@example.com",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 146.0
+   },
+   {
+    "category": "structured",
+    "input": "#FF5733",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 149.5
+   },
+   {
+    "category": "structured",
+    "input": "npm install --save-dev typescript",
+    "expected": "none",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": false,
+    "ms": 128.0
+   },
+   {
+    "category": "structured",
+    "input": "getUserById",
+    "expected": "none",
+    "got": "unparsed",
+    "raw": "command",
+    "match": false,
+    "ms": 110.5
+   },
+   {
+    "category": "structured",
+    "input": "192.168.1.100",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 111.8
+   },
+   {
+    "category": "mixed",
+    "input": "用英文介绍一下 Rust 语言",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "rust is a general-purpose, memory-safe p",
+    "match": false,
+    "ms": 362.8
+   },
+   {
+    "category": "mixed",
+    "input": "hello world 怎么翻译成中文",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "翻译",
+    "match": false,
+    "ms": 123.5
+   },
+   {
+    "category": "mixed",
+    "input": "帮我把 this is a test 翻译成英文",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 118.8
+   },
+   {
+    "category": "mixed",
+    "input": "React 和 Vue 哪个更好",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 151.4
+   },
+   {
+    "category": "mixed",
+    "input": "vscode 怎么设置中文",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 125.7
+   },
+   {
+    "category": "mixed",
+    "input": "查一下 MDN 上的 Array.map",
+    "expected": "ask_ai",
+    "got": "ask_ai",
+    "raw": "ask_ai",
+    "match": true,
+    "ms": 147.6
+   }
+  ]
+ },
+ "F3_en_3shot": {
+  "tag": "F3 en 3-shot (Q2 replay)",
+  "overall": 0.562,
+  "by_category": {
+   "url": 1.0,
+   "path": 1.0,
+   "english_word": 1.0,
+   "long_sentence_en": 0.17,
+   "natural_zh": 0.0,
+   "keyword": 0.67,
+   "structured": 0.67,
+   "mixed": 0.0
+  },
+  "unparsed": 10,
+  "latency_ms_p50": 126.9,
+  "rows": [
+   {
+    "category": "url",
+    "input": "https://github.com/cactus-compute/needle",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 215.4
+   },
+   {
+    "category": "url",
+    "input": "http://localhost:3000/dashboard",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 143.2
+   },
+   {
+    "category": "url",
+    "input": "https://www.bing.com/search?q=tauri+rust",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 114.7
+   },
+   {
+    "category": "url",
+    "input": "https://developer.mozilla.org/zh-CN/docs/Web/JavaScript",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 126.9
+   },
+   {
+    "category": "url",
+    "input": "http://192.168.1.1/admin",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 135.0
+   },
+   {
+    "category": "url",
+    "input": "https://news.ycombinator.com",
+    "expected": "open_url",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": true,
+    "ms": 132.0
+   },
+   {
+    "category": "path",
+    "input": "D:\\Projects\\Coding\\blink\\AGENTS.md",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 134.1
+   },
+   {
+    "category": "path",
+    "input": "C:\\Users\\99452\\Documents\\report.pdf",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 123.3
+   },
+   {
+    "category": "path",
+    "input": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 129.9
+   },
+   {
+    "category": "path",
+    "input": "/usr/local/bin/python3",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 127.4
+   },
+   {
+    "category": "path",
+    "input": "./src/main.rs",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 117.9
+   },
+   {
+    "category": "path",
+    "input": "\\\\server\\share\\file.txt",
+    "expected": "open_path",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": true,
+    "ms": 132.5
+   },
+   {
+    "category": "english_word",
+    "input": "chrome",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 123.1
+   },
+   {
+    "category": "english_word",
+    "input": "vscode",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 122.8
+   },
+   {
+    "category": "english_word",
+    "input": "notepad",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 119.0
+   },
+   {
+    "category": "english_word",
+    "input": "spotify",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 123.5
+   },
+   {
+    "category": "english_word",
+    "input": "whatsapp",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 127.6
+   },
+   {
+    "category": "english_word",
+    "input": "git",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 106.0
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "the quick brown fox jumps over the lazy dog",
+    "expected": "translate",
+    "got": "none",
+    "raw": "none",
+    "match": false,
+    "ms": 103.0
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "how do I get better at cooking chinese food at home",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 125.6
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "please summarize the main points of this article",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "summarize",
+    "match": false,
+    "ms": 131.5
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "what time does the library close on weekends",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "10:30 am",
+    "match": false,
+    "ms": 190.8
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "I need to book a flight to Tokyo next month",
+    "expected": "translate",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": false,
+    "ms": 132.7
+   },
+   {
+    "category": "long_sentence_en",
+    "input": "could you explain the difference between affect and effect",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "effect",
+    "match": false,
+    "ms": 105.0
+   },
+   {
+    "category": "natural_zh",
+    "input": "帮我总结一下这段话的主要意思",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "总结：用户希望我帮助总结一段关于天气很好、决定下午去徒步的文本。",
+    "match": false,
+    "ms": 309.2
+   },
+   {
+    "category": "natural_zh",
+    "input": "怎么在 Windows 上配置环境变量",
+    "expected": "ask_ai",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": false,
+    "ms": 151.0
+   },
+   {
+    "category": "natural_zh",
+    "input": "今天天气怎么样",
+    "expected": "ask_ai",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 126.0
+   },
+   {
+    "category": "natural_zh",
+    "input": "给我写一封感谢信",
+    "expected": "ask_ai",
+    "got": "translate",
+    "raw": "translate",
+    "match": false,
+    "ms": 107.3
+   },
+   {
+    "category": "natural_zh",
+    "input": "如何学习 Rust 语言",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "learn_rust",
+    "match": false,
+    "ms": 131.1
+   },
+   {
+    "category": "natural_zh",
+    "input": "把这段话改得更正式一些",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "请提供具体的修改内容，以便我为您进行更正式的改写。",
+    "match": false,
+    "ms": 260.8
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 hello world",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 111.0
+   },
+   {
+    "category": "keyword",
+    "input": "fanyi the weather is nice",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 157.6
+   },
+   {
+    "category": "keyword",
+    "input": "translate this page to english",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 107.7
+   },
+   {
+    "category": "keyword",
+    "input": "翻译 How are you into Chinese",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "你好！我是你的 ai 助手。很高兴能与你交流，请问有什么我可以帮你的吗？",
+    "match": false,
+    "ms": 311.7
+   },
+   {
+    "category": "keyword",
+    "input": "fy good morning",
+    "expected": "translate",
+    "got": "none",
+    "raw": "none",
+    "match": false,
+    "ms": 101.9
+   },
+   {
+    "category": "keyword",
+    "input": "trans 你好世界",
+    "expected": "translate",
+    "got": "translate",
+    "raw": "translate",
+    "match": true,
+    "ms": 128.4
+   },
+   {
+    "category": "structured",
+    "input": "3f8a1c2e-9b4d-4e6a-b1c3-7d9e0f1a2b3c",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 119.1
+   },
+   {
+    "category": "structured",
+    "input": "user@example.com",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 107.2
+   },
+   {
+    "category": "structured",
+    "input": "#FF5733",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 99.8
+   },
+   {
+    "category": "structured",
+    "input": "npm install --save-dev typescript",
+    "expected": "none",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": false,
+    "ms": 146.7
+   },
+   {
+    "category": "structured",
+    "input": "getUserById",
+    "expected": "none",
+    "got": "none",
+    "raw": "none",
+    "match": true,
+    "ms": 120.2
+   },
+   {
+    "category": "structured",
+    "input": "192.168.1.100",
+    "expected": "none",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": false,
+    "ms": 120.9
+   },
+   {
+    "category": "mixed",
+    "input": "用英文介绍一下 Rust 语言",
+    "expected": "ask_ai",
+    "got": "unparsed",
+    "raw": "rust is a general-purpose, memory-safe p",
+    "match": false,
+    "ms": 361.2
+   },
+   {
+    "category": "mixed",
+    "input": "hello world 怎么翻译成中文",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "你好",
+    "match": false,
+    "ms": 108.9
+   },
+   {
+    "category": "mixed",
+    "input": "帮我把 this is a test 翻译成英文",
+    "expected": "translate",
+    "got": "unparsed",
+    "raw": "this is a test",
+    "match": false,
+    "ms": 148.8
+   },
+   {
+    "category": "mixed",
+    "input": "React 和 Vue 哪个更好",
+    "expected": "ask_ai",
+    "got": "none",
+    "raw": "none",
+    "match": false,
+    "ms": 111.6
+   },
+   {
+    "category": "mixed",
+    "input": "vscode 怎么设置中文",
+    "expected": "ask_ai",
+    "got": "open_path",
+    "raw": "open_path",
+    "match": false,
+    "ms": 128.3
+   },
+   {
+    "category": "mixed",
+    "input": "查一下 MDN 上的 Array.map",
+    "expected": "ask_ai",
+    "got": "open_url",
+    "raw": "open_url",
+    "match": false,
+    "ms": 118.6
+   }
+  ]
+ }
+}
