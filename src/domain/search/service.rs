@@ -22,7 +22,7 @@ use crate::domain::intent::suggestion::coordinator::{
 use crate::domain::intent::suggestion::fatigue::SuggestionFatigue;
 use crate::domain::intent::{
     Candidate, IntentRouter, RankingHint, Route, RouteSummary, SuggestionAvailability,
-    SuggestionKind, SuggestionSet, Surface,
+    SuggestionKind, SuggestionSet, SuggestionSource, Surface,
 };
 use crate::domain::plugin::PluginEngine;
 use crate::infra::platform::context::ContextSnapshot;
@@ -61,6 +61,7 @@ struct RecentSuggestion {
     revision: u64,
     id: String,
     kind: SuggestionKind,
+    producer: SuggestionSource,
     slot: SuggestionSlot,
 }
 
@@ -639,6 +640,7 @@ impl SearchService {
                     revision: seq,
                     id: sug.id.clone(),
                     kind: sug.kind,
+                    producer: sug.source,
                     slot: SuggestionSlot::Primary,
                 });
             }
@@ -647,6 +649,7 @@ impl SearchService {
                     revision: seq,
                     id: sug.id.clone(),
                     kind: sug.kind,
+                    producer: sug.source,
                     slot: SuggestionSlot::Secondary,
                 });
             }
@@ -667,23 +670,23 @@ impl SearchService {
     ///   通常为 true；false = 过期上报/跨会话残留，只记不纠错——0.24 采纳零执行，
     ///   无需服务端强校验）。
     /// - 任一次采纳 → 降频计数全量清零（§3.8）。
-    /// - **不记 query/选区原文**，只有 id/kind/slot/revision 匹配与否。
+    /// - **不记 query/选区原文**，只有 producer/kind/slot/revision 匹配与否。
     pub fn record_adoption(&self, id: &str, slot: &str, revision: u64) {
-        let (matched, kind) = {
+        let entry = {
             let ring = self.recent_suggestions.lock().unwrap();
-            let matched = ring
-                .iter()
-                .any(|r| r.revision == revision && r.slot.as_str() == slot && r.id == id);
-            let kind = ring
-                .iter()
-                .find(|r| r.revision == revision && r.slot.as_str() == slot)
-                .map(|r| r.kind);
-            (matched, kind)
+            ring.iter()
+                .find(|r| r.revision == revision && r.slot.as_str() == slot && r.id == id)
+                .map(|r| (r.producer, r.kind))
         };
+        let matched = entry.is_some();
+        // 未匹配（过期上报/跨会话残留）时 producer/kind 如实记 None，不猜
+        let producer = entry.map(|(p, _)| p);
+        let kind = entry.map(|(_, k)| k);
         let latest = self.latest_seq.load(Ordering::SeqCst);
         self.suggestion_fatigue.lock().unwrap().clear();
         tracing::info!(
             id = %id,
+            producer = ?producer,
             kind = ?kind,
             slot = %slot,
             revision,

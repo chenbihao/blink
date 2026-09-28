@@ -10,8 +10,8 @@
     z-index: var(--z-toast);
     padding: var(--space-sm) var(--space-md);
     font-size: var(--text-sm);
-    background: var(--bg-elevated, var(--bg-base));
-    border-top: 1px solid var(--surface);
+    background: var(--surface);
+    border-top: 1px solid var(--surface-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

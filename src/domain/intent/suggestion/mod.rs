@@ -3,7 +3,8 @@
 //! **0.24.1 契约**：`SearchResponse.suggestion` 从 `Option<Suggestion>` 迁移为
 //! `Option<SuggestionSet>`（带 revision 的双槽位集合）。单个 `Suggestion` 携带语义
 //! `kind` 与类型化采纳动作 `action`——`replacement` 并入 `RouteQuery.query`，
-//! `source` 字段退役（producer 身份仍由 `SuggestionProducer::source()` 表达，不上 wire）。
+//! wire 不再有 `source` 字段（producer 身份由 `Suggestion.source` 内部携带，
+//! coordinator 盖章，仅供日志）。
 //!
 //! **0.24.2 契约**：`SuggestionCoordinator` 按 §3.4 执行 eligibility → 分层 →
 //! 按 Kind 去重 → 排序 → 双槽选取（secondary 过 `secondary_min_rank` 门槛）；
@@ -30,19 +31,19 @@ use serde::Serialize;
 use super::{RankingHint, Route};
 use crate::infra::platform::context::AwarenessSource;
 
-/// Producer 身份标识（0.24.1 起仅日志/调试用，不序列化上 wire）。
+/// Producer 身份标识（0.24.1 起不序列化上 wire）。
 ///
-/// 0.24.1 前 `Suggestion.source` 携带此值供前端分支；现前端改按 `kind` 分支，
-/// producer 身份只保留在 `SuggestionProducer::source()` 返回值里。
+/// 由 `SuggestionProducer::source()` 声明，`SuggestionCoordinator` 在收集候选时
+/// 盖章到 `Suggestion.source`（内部字段，`#[serde(skip)]`）——filter/impression/
+/// adoption 日志据此记 producer（§6.1"采纳遥测含 producer"）。前端不消费。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuggestionSource {
     /// 输入补全（首拼 fy → fanyi / 汉字 翻 → 翻译）。非空 query 独占。
     Keyword,
     /// 环境感知（选中英文 → 翻译）。空 query 独占。
     Context,
-    /// AI Producer（0.24.2 从 SearchService 后置注入迁入；当前 AI 建议由
-    /// SearchService 直接构造，不经 producer，故暂无构造点）。
-    #[allow(dead_code)]
+    /// AI Producer（0.24.2 从 SearchService 后置注入迁入；ai-trigger 候选由
+    /// Coordinator 直接构造，同样盖 Ai）。
     Ai,
 }
 
@@ -196,6 +197,10 @@ pub struct Suggestion {
     /// 不上 wire（`#[serde(skip)]`），不落盘。
     #[serde(skip)]
     pub fingerprint: u64,
+    /// 生产该候选的 Producer 身份（coordinator 收集时按 `producer.source()` 盖章，
+    /// 可观测性日志用）。不上 wire（`#[serde(skip)]`）。
+    #[serde(skip)]
+    pub source: SuggestionSource,
     /// **0.8.6 deprecated**：RankingHint 由 Coordinator 独立返回，不再挂在 Suggestion 上。
     /// 0.24.1 保留（producer → coordinator 的过渡通道），0.24.2 随 `CoordinateInput`
     /// 重构改由 producer 返回值独立携带后移除。
@@ -243,6 +248,7 @@ mod tests {
             prefix_len: 2,
             origin: Some(SuggestionOrigin::Selection),
             fingerprint: 0,
+            source: SuggestionSource::Keyword,
             ranking_hint: None,
         }
     }
@@ -280,6 +286,10 @@ mod tests {
         assert!(
             v["primary"].get("fingerprint").is_none(),
             "fingerprint 内部字段不序列化"
+        );
+        assert!(
+            v["primary"].get("source").is_none(),
+            "source 内部字段不序列化"
         );
     }
 

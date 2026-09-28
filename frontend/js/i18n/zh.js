@@ -1046,6 +1046,7 @@ export const zh = {
     // SuggestionBar 行文案：display 之外按 kind 覆盖（AskAi 后端 display 硬编码
     // 键名"按 Tab 问 AI"，ArrowRight 配置用户会看到错误键名；bar 自带键帽 chip）
     "suggestionbar.ask_ai": "问 AI",
+    "suggestionbar.ask_ai_with": "问 AI “{text}”",
     "suggestionbar.completion_to": "补全 → {target}",
 
     // ModeHeader（0.24.4 §5.5）：持续模式的唯一呈现

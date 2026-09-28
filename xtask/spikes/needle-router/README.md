@@ -30,10 +30,14 @@ python phase7_laya.py          # laya 决策模型（§九；需 `python -m venv
 python run_spike.py --skip-oneshot   # 跳过阶段 1（单发基准）
 ```
 
-- 首次运行自动从 HuggingFace `Cactus-Compute/needle3` 下载 runner/权重/tokenizer 到
+- 首次运行从 HuggingFace `Cactus-Compute/needle3` 下载 runner/权重/tokenizer 到
   `.assets/`（约 37MB，带大小校验；该目录被 gitignore，制品不入库）。
 - 结果写 `results/spike-results.json`；控制台打印摘要。
 - 需要 Python 3.8+（仅标准库）与 Windows x64。
+- **可重跑性例外**：`results/phase5b-needle-fewshot.json` 是一次 ad-hoc 补测
+  （Needle v2+forced+中文 6 示例，decision.md §九引用其 0.312/474ms），
+  组合参数未沉淀为独立脚本——复跑可用 `phase5_posture.py` 的 E4 姿势为底，
+  手工把 system 换成 `system-fewshot.txt` 并加 `--forced`（v2 语义工具表）。
 
 ## 范围边界
 

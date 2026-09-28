@@ -101,8 +101,8 @@ pub async fn search_apps(
             "搜索结果项"
         );
     }
-    if let Some(set) = &results.suggestion {
-        if let Some(sug) = &set.primary {
+    if let Some(set) = &results.suggestion
+        && let Some(sug) = &set.primary {
             tracing::debug!(
                 id = %sug.id,
                 kind = ?sug.kind,
@@ -112,7 +112,6 @@ pub async fn search_apps(
                 "suggestion"
             );
         }
-    }
     results
 }
 

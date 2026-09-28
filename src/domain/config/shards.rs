@@ -133,7 +133,7 @@ impl ConfigKey for SearchConfig {
 // ── SuggestionConfig ──────────────────────────────────────────────────────────
 
 /// 建议行为分片。autosuggest + proactive + 0.24 双槽门槛/降频 + 展示策略开关组。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuggestionConfig {
     #[serde(default = "default_true")]
     pub autosuggest_enabled: bool,
@@ -635,4 +635,50 @@ fn default_ai_access_schema_version() -> u32 {
 
 fn default_ai_access_profile() -> String {
     "recommended".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0.24 §3.4/§3.8/§5.6：SuggestionConfig 默认值钉死——展示策略开关组全开、
+    /// 降频默认开、secondary 门槛 0.60（精确挡掉 0.55 兜底）。
+    #[test]
+    fn suggestion_config_defaults() {
+        let c = SuggestionConfig::default();
+        assert!(c.autosuggest_enabled);
+        assert!((c.autosuggest_min_score - 0.7).abs() < 1e-9);
+        assert_eq!(c.autosuggest_tab_key, "Tab");
+        assert!((c.secondary_min_rank - 0.60).abs() < 1e-9);
+        assert!(c.suppress_repeated);
+        assert!(c.completion_enabled);
+        assert!(c.context_suggestion_enabled);
+        assert!(c.ai_suggestion_enabled);
+        assert!(c.secondary_enabled);
+        assert!(!c.proactive_enabled);
+        assert_eq!(c.empty_query_topn, 5);
+    }
+
+    /// 旧格式 KV（0.24.5 前只有 enabled/min_score/tab_key）反序列化不得误关新特性：
+    /// 五个新开关与 secondary_min_rank 走 serde 默认（phase §5.6 设置投影验收）。
+    #[test]
+    fn suggestion_config_legacy_json_keeps_new_defaults() {
+        let legacy = r#"{"autosuggest_enabled":true,"autosuggest_min_score":0.8,"autosuggest_tab_key":"ArrowRight"}"#;
+        let c: SuggestionConfig = serde_json::from_str(legacy).unwrap();
+        assert!((c.autosuggest_min_score - 0.8).abs() < 1e-9);
+        assert_eq!(c.autosuggest_tab_key, "ArrowRight");
+        assert!(c.suppress_repeated);
+        assert!(c.completion_enabled);
+        assert!(c.context_suggestion_enabled);
+        assert!(c.ai_suggestion_enabled);
+        assert!(c.secondary_enabled);
+        assert!((c.secondary_min_rank - 0.60).abs() < 1e-9);
+    }
+
+    /// 空 JSON / 部分字段 → 全默认（KV 损坏时的 `unwrap_or_default` 同语义兜底）。
+    #[test]
+    fn suggestion_config_empty_json_defaults() {
+        let c: SuggestionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c, SuggestionConfig::default());
+    }
 }

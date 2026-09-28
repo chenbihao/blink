@@ -529,6 +529,9 @@ impl SurfacePort for TauriDomainEnv {
         // 0.21.2：Chord clipboard_history binding 的 GUI starter target。
         // 旧 ClipboardHistoryAction 的行为：主窗 show + emit CHORD_ENTER_MODE
         crate::app::window_orchestrator::invoke(&self.app);
+        // 0.24.7 C3：目标窗口有文本光标时把主窗精化到输入框附近（后台线程，
+        // 取不到 caret 保持默认居中）。
+        crate::infra::platform::window::spawn_main_window_caret_refine(&self.app);
         let _ = self.app.emit(
             crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
             serde_json::json!({ "mode": "clipboard" }),

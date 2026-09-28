@@ -53,13 +53,8 @@ impl SuggestionFatigue {
         self.counters.clear();
     }
 
-    /// 当前计数条数（诊断用）。
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.counters.len()
-    }
-
-    #[allow(dead_code)]
+    /// 当前计数条数（测试断言用）。
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.counters.is_empty()
     }
@@ -161,6 +156,7 @@ mod tests {
             prefix_len: 0,
             origin,
             fingerprint,
+            source: crate::domain::intent::SuggestionSource::Ai,
             ranking_hint: None,
         }
     }

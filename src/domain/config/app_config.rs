@@ -817,6 +817,35 @@ mod tests {
         assert_eq!(parsed.hotkey.key, config.hotkey.key);
     }
 
+    /// 0.24.5 §5.6：`AutosuggestUpdate` 旧格式 payload（只有 enabled/minScore/tabKey）
+    /// 反序列化后五个新开关默认 true——防旧前端/异常路径误关展示策略。
+    #[test]
+    fn autosuggest_update_legacy_payload_defaults_new_toggles() {
+        let legacy = r#"{"enabled":true,"minScore":0.8,"tabKey":"Tab"}"#;
+        let u: AutosuggestUpdate = serde_json::from_str(legacy).unwrap();
+        assert!(u.enabled);
+        assert!((u.min_score - 0.8).abs() < 1e-9);
+        assert_eq!(u.tab_key, "Tab");
+        assert!(u.completion_enabled);
+        assert!(u.context_suggestion_enabled);
+        assert!(u.ai_suggestion_enabled);
+        assert!(u.secondary_enabled);
+        assert!(u.suppress_repeated);
+    }
+
+    /// 完整 payload 的显式 false 必须被尊重（serde default 只兜缺失字段）。
+    #[test]
+    fn autosuggest_update_full_payload_respects_explicit_false() {
+        let full = r#"{"enabled":false,"minScore":0.7,"tabKey":"Tab","completionEnabled":false,"contextSuggestionEnabled":false,"aiSuggestionEnabled":false,"secondaryEnabled":false,"suppressRepeated":false}"#;
+        let u: AutosuggestUpdate = serde_json::from_str(full).unwrap();
+        assert!(!u.enabled);
+        assert!(!u.completion_enabled);
+        assert!(!u.context_suggestion_enabled);
+        assert!(!u.ai_suggestion_enabled);
+        assert!(!u.secondary_enabled);
+        assert!(!u.suppress_repeated);
+    }
+
     #[tokio::test]
     async fn app_config_from_default_json() {
         let config = AppConfig::default();
@@ -853,6 +882,17 @@ mod tests {
         );
         assert_eq!(suggestion.autosuggest_enabled, app.autosuggest_enabled);
         assert_eq!(suggestion.proactive_enabled, app.proactive_enabled);
+        // 0.24.5 展示策略开关组 + 降频：分片与门面默认值一致（全开）
+        assert_eq!(suggestion.suppress_repeated, app.suppress_repeated);
+        assert_eq!(suggestion.completion_enabled, app.completion_enabled);
+        assert_eq!(
+            suggestion.context_suggestion_enabled,
+            app.context_suggestion_enabled
+        );
+        assert_eq!(suggestion.ai_suggestion_enabled, app.ai_suggestion_enabled);
+        assert_eq!(suggestion.secondary_enabled, app.secondary_enabled);
+        // secondary_min_rank 刻意不进门面（§5.6 注记：KV 原值保留），此处钉分片默认
+        assert!((suggestion.secondary_min_rank - 0.60).abs() < 1e-9);
         assert_eq!(chord.chord_enabled, app.chord_enabled);
         assert_eq!(chord.chord_hint_visible, app.chord_hint_visible);
         assert_eq!(
@@ -1009,6 +1049,12 @@ mod tests {
         assert!(!cfg.autosuggest_enabled);
         assert!((cfg.autosuggest_min_score - 0.9).abs() < 1e-9);
         assert_eq!(cfg.autosuggest_tab_key, "ArrowRight");
+        // 旧格式不含 0.24.5 新字段 → 门面 serde 默认全开，不误关新特性
+        assert!(cfg.suppress_repeated);
+        assert!(cfg.completion_enabled);
+        assert!(cfg.context_suggestion_enabled);
+        assert!(cfg.ai_suggestion_enabled);
+        assert!(cfg.secondary_enabled);
         assert_eq!(
             cfg.disabled_context_bindings,
             vec!["builtin.translate::text_is_non_target_lang"]

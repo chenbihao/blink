@@ -302,7 +302,7 @@ impl EditorDraftStore {
                 draft.hash = format!("{:016x}", body_digest(&draft.body));
                 drafts.push(draft);
             }
-            drafts.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+            drafts.sort_by_key(|d| std::cmp::Reverse(d.updated_at_ms));
             drafts.truncate(max_files);
             Ok(drafts)
         })

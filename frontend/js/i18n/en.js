@@ -1050,6 +1050,7 @@ export const en = {
 
     // ── Smart Tab suggestion system (0.24) ──
     "suggestionbar.ask_ai": "Ask AI",
+    "suggestionbar.ask_ai_with": "Ask AI \"{text}\"",
     "suggestionbar.completion_to": "Complete → {target}",
 
     // ModeHeader (0.24.4 §5.5): single presentation of persistent modes

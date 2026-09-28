@@ -1,6 +1,7 @@
 /* ── ResultFooter views（#statusbar，0.24.4 §5.5）────────────────────────── */
-/* 结果导航/动作/分页 + 空 query 闲置态 Chord 一行提示 + 持续状态覆写。
-   0.24.4 职责收窄：建议采纳提示移居 #suggestion-bar，chord 副行移居 Cheat Sheet。
+/* 结果导航/动作/分页 + Alt 按住时 Chord 副行（0.24.7 回退恢复）+ 持续状态覆写。
+   0.24.4 的空 query 闲置常驻行经实测多余已删（0.24 §5.9）。
+   0.24.4 职责收窄：建议采纳提示移居 #suggestion-bar。
    scoped #statusbar .kbd 覆盖留此（晚于 components/kbd.css 加载）。 */
 
 /* ── 底部提示栏 ───────────────────────────────────────────────────────────────
@@ -24,6 +25,22 @@
     margin-top: auto; /* 翻页不缩窗口：maxHeight 撑高 #app 时，footer 贴底而非紧跟 results */
 }
 
+/* 左侧容器：主行 + 可选 Chord 副行垂直 stack（0.24.7 回退恢复）。 */
+#statusbar .hint-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+/* Chord 副行：非空 query + Alt 按住时的待命键帽行。
+   走 chord 键帽 + 标签，本身就是弱信号——比 primary 更淡表达"待命入口"。 */
+#statusbar .hint-secondary {
+    font-size: 0.9em;
+    opacity: var(--opacity-muted);
+    line-height: 1.4;
+}
+
 #statusbar .hint-primary {
     line-height: 1.4;
     min-width: 0; /* flex 溢出保护：主行文本长时正常截断，不撑爆右侧翻页位 */
@@ -44,22 +61,14 @@
     margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
 }
 
-/* 闲置 Chord 一行提示（0.24.4 §5.5）：空 query 闲置态的精简键帽行——
-   完整键帽表按住 Alt 走 Cheat Sheet（cheat-sheet.css）。 */
-#statusbar .hint-idle-chord {
-    display: inline-flex;
-    align-items: center;
-    flex-wrap: wrap;
-    row-gap: 2px;
-    opacity: var(--opacity-muted);
-}
-
-#statusbar .hint-idle-chord .chord-sep {
+/* Chord 副行的分隔符 / 标签（0.10.8 §11.2，0.24.7 回退恢复）。
+   secondary 已整体 opacity 弱化，chord-sep 再叠低透明度会太糊——保留常规 muted。 */
+#statusbar .chord-sep {
     color: var(--text-faint);
     margin: 0 0.5em;
     font-weight: var(--weight-light);
 }
 
-#statusbar .hint-idle-chord .chord-label {
+#statusbar .chord-label {
     margin-left: 0.3em;
 }

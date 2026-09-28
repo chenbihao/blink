@@ -203,6 +203,19 @@ const EVENT_TASK_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_s
 /// 却带来同频的 IPC + JSON + DOM 更新。25/s 视觉上无差别。
 const VOICE_LEVEL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
 
+// ── 复合类型别名（clippy type_complexity：元组签名可读性）─────────────────────
+
+/// `editor_voice_snapshot` 兼容形态：`(epoch, [(seq, text)], truncated)`。
+type EditorVoiceTextSnapshot = (u64, Vec<(u64, String)>, usize);
+/// `editor_voice_snapshot_spans` 类型化形态：`(epoch, [(seq, DraftSpan)], truncated)`。
+type EditorVoiceSpanSnapshot = (u64, Vec<(u64, DraftSpan)>, usize);
+/// `finalize_parts` 产物：已交付 span 批 + 从 Final 全文推导的尾段。
+type FinalizedParts = (Vec<(u64, DraftSpan)>, Option<(u64, String)>);
+/// G2 注入函数替身签名（阻塞执行，调用方在 spawn_blocking 内调用）。
+type G2InjectFn = std::sync::Arc<
+    dyn Fn(&str, Option<isize>, bool) -> Result<(), String> + Send + Sync,
+>;
+
 /// 单次录音的流式链路计数器（音频 task 写、事件 task 读；诊断用）。
 #[derive(Default)]
 struct StreamCounters {
@@ -275,10 +288,7 @@ impl EditorDictationState {
 
     /// Final 终态拆解：先冲刷全部未交付段，再从 Final 全文推导尾段。
     /// 两部分分别发射（段带 span 身份，尾段为纯文本段）。
-    fn finalize_parts(
-        &mut self,
-        final_text: &str,
-    ) -> (Vec<(u64, DraftSpan)>, Option<(u64, String)>) {
+    fn finalize_parts(&mut self, final_text: &str) -> FinalizedParts {
         let pending = self.flush_pending_spans();
         let tail = self.ledger.extract_final_tail(final_text).map(|(seq, text)| {
             self.remember(seq, text.clone());
@@ -860,7 +870,7 @@ impl VoiceService {
         &self,
         epoch: u64,
         after_seq: u64,
-    ) -> Option<(u64, Vec<(u64, String)>, usize)> {
+    ) -> Option<EditorVoiceTextSnapshot> {
         let state = self.editor_state.lock().unwrap().clone()?;
         let st = state.lock().unwrap();
         let segments = st.after(epoch, after_seq)?;
@@ -874,7 +884,7 @@ impl VoiceService {
         &self,
         epoch: u64,
         after_seq: u64,
-    ) -> Option<(u64, Vec<(u64, DraftSpan)>, usize)> {
+    ) -> Option<EditorVoiceSpanSnapshot> {
         let state = self.editor_state.lock().unwrap().clone()?;
         let st = state.lock().unwrap();
         let spans = st.after_draft_spans(epoch, after_seq)?;
@@ -1814,11 +1824,10 @@ fn emit_editor_segment_with_span(
         "seq": seq,
         "text": text,
     });
-    if let Some(span) = span {
-        if let Ok(value) = serde_json::to_value(span) {
+    if let Some(span) = span
+        && let Ok(value) = serde_json::to_value(span) {
             payload["span"] = value;
         }
-    }
     let _ = app.emit(EventNames::EDITOR_VOICE_SEGMENT, payload);
     tracing::debug!(
         session_ref = %session_ref,
@@ -2181,7 +2190,7 @@ enum G2FlushAck {
 struct G2Runtime {
     /// `(text, hwnd, unicode_only) -> 注入结果`。阻塞执行（调用方在
     /// spawn_blocking 内调用）。
-    inject: Arc<dyn Fn(&str, Option<isize>, bool) -> Result<(), String> + Send + Sync>,
+    inject: G2InjectFn,
     /// 当前前台窗口探测（渐进 job 的漂移判定）。
     foreground_hwnd: Arc<dyn Fn() -> Option<isize> + Send + Sync>,
 }

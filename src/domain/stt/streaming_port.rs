@@ -558,8 +558,8 @@ impl GgufStreamingAdapter {
         }
 
         let parsed = serde_json::from_str::<serde_json::Value>(text);
-        if let Ok(value) = &parsed {
-            if let Some(typed) = parse_typed_result(value) {
+        if let Ok(value) = &parsed
+            && let Some(typed) = parse_typed_result(value) {
                 match typed {
                     TypedResult::Draft(span) => {
                         self.send_reliable(SttEvent::Draft { generation, span }, false)
@@ -584,7 +584,6 @@ impl GgufStreamingAdapter {
                 }
                 return;
             }
-        }
 
         let (revision, confirmed, preview, confirmed_changed) = match parsed {
             Ok(value) => {

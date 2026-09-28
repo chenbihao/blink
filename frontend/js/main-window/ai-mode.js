@@ -47,6 +47,7 @@ import {resetMaxHeight, resyncWindowSize, syncWindowSize} from "./window-size.js
 import {t} from "../i18n/index.js";
 import {createEarlyStreamBuffer} from "../shared/early-stream-buffer.js";
 import * as ghost from "./ghost.js";
+import * as suggestionBar from "./suggestion-bar.js";
 import * as search from "./search.js";
 import * as results from "./results.js";
 import * as modeHeader from "./mode-header.js";
@@ -125,8 +126,10 @@ export async function enterAiMode(queryText) {
     // 0.24.4: 模式徽章统一走 ModeHeader（旧 .ai-mode-indicator 退役）
     modeHeader.set({id: "ai", icon: "sparkles", label: t("mode.ai.label")});
 
-    // 清空搜索结果 + statusbar（避免 AI 模式下残留搜索导航提示）
+    // 清空搜索结果 + ghost/建议（避免 AI 模式下残留搜索导航提示与 Tab 建议条）
     results.clear();
+    ghost.clear();
+    suggestionBar.clear();
 
     // 加载当前模型标签（异步，不阻塞首条消息发送）
     refreshModelLabel();

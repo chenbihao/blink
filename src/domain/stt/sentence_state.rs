@@ -497,9 +497,7 @@ impl SentenceState {
         identity: SegmentIdentity,
         range_end: usize,
     ) -> Option<PendingSegment> {
-        let Some(pending) = self.pending.as_ref() else {
-            return None;
-        };
+        let pending = self.pending.as_ref()?;
         if pending.identity != identity {
             return None;
         }

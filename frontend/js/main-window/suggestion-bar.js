@@ -66,6 +66,10 @@ export function accept(slot) {
  * @param {{revision?: number, primary?: object, secondary?: object}|null} set
  */
 export function update(query, set) {
+    // 独占模式（剪贴板/AI/命令）不显示建议条——模式 bypass 搜索管线，残留的
+    // Tab 提示既不可采纳也不该出现（用户实测反馈）。enter 时已 clear，此处
+    // 守卫拦截模式内迟到的搜索/上下文响应。
+    if (exclusiveModeActive()) return;
     const queryEmpty = !query || !query.trim();
     if (queryEmpty && sticky) {
         // 空态转换（退格清空 / fetchContextSuggestions 空 query）：释放粘性槽位
@@ -168,12 +172,30 @@ function buildRow(sug, slot) {
     return row;
 }
 
+/** 独占交互模式判定：三类模式各自投影 body class / #ai-mode hidden（无循环依赖）。 */
+function exclusiveModeActive() {
+    if (document.body.classList.contains("clipboard-mode-active")) return true;
+    if (document.body.classList.contains("command-mode-active")) return true;
+    const ai = document.getElementById("ai-mode");
+    return !!(ai && !ai.hidden);
+}
+
+/** AskAi 携带原文的预览截断长度（与 translate display 的原文预览口径一致）。 */
+const ASK_AI_PREVIEW_MAX = 30;
+
 /**
- * 行文案：display 之外按 kind 覆盖——AskAi 的后端 display 硬编码"按 Tab 问 AI"，
- * ArrowRight 配置用户会看到错误键名；bar 自带键帽 chip，文案不应重复键名。
+ * 行文案：display 之外按 kind 覆盖——AskAi 的后端 display 硬编码"按 Tab 问 AI"
+ * （含键名，ArrowRight 配置用户会看到错误键名），故前端按 kind 重建：
+ * 带原文预览（"问 AI “xxx"），与 translate 行的"翻译划词 “xxx"" 信息密度对齐。
  */
 function rowText(sug) {
-    if (sug.kind === "askAi") return t("suggestionbar.ask_ai");
+    if (sug.kind === "askAi") {
+        const prompt = sug.action?.enterAiMode?.prompt || "";
+        if (!prompt) return t("suggestionbar.ask_ai");
+        const preview = prompt.length > ASK_AI_PREVIEW_MAX
+            ? prompt.slice(0, ASK_AI_PREVIEW_MAX) + "…" : prompt;
+        return t("suggestionbar.ask_ai_with", {text: preview});
+    }
     if (sug.kind === "completion") return t("suggestionbar.completion_to", {target: sug.display});
     return sug.display || "";
 }

@@ -119,6 +119,8 @@ export async function execute() {
 /** 进入命令模式：清结果 + 清 ghost/建议 + 投影 ModeHeader。 */
 function enter() {
     active = true;
+    // body class：供 suggestion-bar 等守卫判定独占模式（与 clipboard-mode 同口径）
+    document.body.classList.add("command-mode-active");
     results.clear();
     ghost.clear();
     suggestionBar.clear();
@@ -134,6 +136,7 @@ function enter() {
 /** 退出命令模式：清 ModeHeader 并收缩窗口（模式转换是离散状态转换，允许 resync）。 */
 function exit() {
     active = false;
+    document.body.classList.remove("command-mode-active");
     modeHeader.clear();
     resyncWindowSize();
 }

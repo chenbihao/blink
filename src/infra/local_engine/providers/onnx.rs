@@ -91,6 +91,7 @@ fn validator_exe_path() -> Result<PathBuf, RuntimeError> {
 /// - HF 链接（PP-OCR det/rec 模型）：`BLINK_HF_ENDPOINT` → HF 主站 → hf-mirror.com；
 /// - GitHub release 资产（ORT zip）：主站 → ghfast/gh-proxy/ghproxy 加速代理；
 /// - raw.githubusercontent（字典 txt）：主站 → cdn/fastly.jsdelivr.net。
+///
 /// 其余 URL 候选只有自身，行为与单源下载一致。
 ///
 /// 换源只发生在网络级失败（连接/HTTP 非 2xx/流中断）或镜像 hash 不匹配：

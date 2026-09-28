@@ -2511,11 +2511,10 @@ pub fn show_voice_overlay(app: &AppHandle, owner_hwnd: Option<isize>) {
                     force_topmost(hwnd);
                 }
                 clamp_to_work_area(&win);
-                if let Some(owner) = owner_hwnd {
-                    if let Some(hwnd) = hwnd {
+                if let Some(owner) = owner_hwnd
+                    && let Some(hwnd) = hwnd {
                         spawn_voice_overlay_caret_refine(hwnd, owner);
                     }
-                }
                 Ok(())
             });
             match ready {
@@ -2559,6 +2558,103 @@ fn spawn_voice_overlay_caret_refine(hwnd: HWND, owner_hwnd: isize) {
         });
     if let Err(error) = spawned {
         tracing::debug!(%error, "voice-caret 线程启动失败，保持鼠标定位");
+    }
+}
+
+/// 最近一次唤起主窗时记忆的外部目标窗口句柄（0.24.7 C3：Alt+C 唤起剪贴板
+/// 模式的 caret 定位用；0 = 尚未记忆）。
+pub fn last_external_hwnd() -> Option<isize> {
+    let hwnd = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        None
+    } else {
+        Some(hwnd)
+    }
+}
+
+/// Alt+C 唤起剪贴板模式后，把主窗从默认居中精化到目标输入框 caret 附近
+/// （0.24.7 C3：剪贴板历史常用于"贴到正在输入的地方"，就近定位省一次移动）。
+/// 几何复用 voice-overlay 的 caret 锚定算法；取不到 caret（目标无文本焦点 /
+/// UIA 不支持）保持 `launcher_position` 居中不动作。查询在后台线程执行
+/// （UIA 跨进程 COM 几十 ms，不得阻塞显示主链路）。
+pub fn spawn_main_window_caret_refine(app: &AppHandle) {
+    let Some(owner) = last_external_hwnd() else {
+        return;
+    };
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(hwnd) = win.hwnd() else {
+        return;
+    };
+    let hwnd_raw = hwnd.0 as isize;
+    let spawned = std::thread::Builder::new()
+        .name("main-caret".into())
+        .spawn(move || {
+            let Some(caret) = crate::infra::platform::caret::get_caret_rect_for(Some(owner))
+            else {
+                tracing::debug!(owner, "clipboard-mode: 未取到目标窗口光标，保持居中定位");
+                return;
+            };
+            refine_main_window_to_caret(HWND(hwnd_raw as *mut _), &caret);
+        });
+    if let Err(error) = spawned {
+        tracing::debug!(%error, "main-caret 线程启动失败，保持居中定位");
+    }
+}
+
+/// 主窗 caret 锚定：与 voice-overlay 同算法（行下方优先 / 底部翻上方 / 工作区
+/// clamp），差异是不带 SWP_NOACTIVATE——主窗本就是被唤起的目标焦点窗口。
+fn refine_main_window_to_caret(hwnd: HWND, caret: &RECT) {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return;
+        }
+        let mut window_rect = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut window_rect).is_err() {
+            return;
+        }
+        let width = window_rect.right - window_rect.left;
+        let height = window_rect.bottom - window_rect.top;
+
+        let anchor = POINT {
+            x: caret.left,
+            y: caret.bottom,
+        };
+        let hmon = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info: MONITORINFO = std::mem::zeroed();
+        monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut monitor_info).as_bool() {
+            return;
+        }
+        let work = monitor_info.rcWork;
+
+        const GAP: i32 = 8;
+        let below_y = caret.bottom + GAP;
+        let y = if below_y + height <= work.bottom {
+            below_y
+        } else {
+            (caret.top - GAP - height).max(work.top)
+        };
+        let new_x = caret.left.clamp(work.left, (work.right - width).max(work.left));
+        let new_y = y.clamp(work.top, (work.bottom - height).max(work.top));
+
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            new_x,
+            new_y,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0),
+        );
+        tracing::debug!(
+            new_x,
+            new_y,
+            caret_left = caret.left,
+            caret_top = caret.top,
+            "clipboard-mode: 主窗已定位到目标光标附近"
+        );
     }
 }
 

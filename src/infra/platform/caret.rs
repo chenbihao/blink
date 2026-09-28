@@ -81,9 +81,7 @@ fn owner_process_id(owner_hwnd: Option<isize>) -> Option<u32> {
 /// 经典 Win32 caret：`GetGUIThreadInfo` 读目标 GUI 线程的 caret 客户区矩形，
 /// `ClientToScreen` 转屏幕坐标。
 fn caret_via_guithreadinfo(owner_hwnd: Option<isize>) -> Option<RECT> {
-    let Some(tid) = owner_thread_id(owner_hwnd) else {
-        return None;
-    };
+    let tid = owner_thread_id(owner_hwnd)?;
 
     let mut gti = GUITHREADINFO {
         cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,

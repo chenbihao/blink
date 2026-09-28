@@ -3,7 +3,7 @@
 //! **0.24.4 视觉分工**（§5.5 五类 UI 语义）：本 overlay 只渲染**输入的自然延伸**——
 //! Completion 影子文字（`fy` → `fanyi`）与语音转写预览（组字中"用户自己的话"，
 //! 不穿信任边界）。Translate / AskAi 建议走 #suggestion-bar（suggestion-bar.js），
-//! Chord 键帽走 #chord-cheat-sheet（cheat-sheet.js）。
+//! Chord 键帽走 .ghost-chord（chord.js 渲染，CSS :has() 与补全影子互斥）。
 //!
 //! 数据流：`search.js` 在 `search_apps` 返回后调 `update(query, suggestion, revision)`
 //! （只传 primary 为 Completion 的建议）；用户按 Tab（或 ArrowRight，视

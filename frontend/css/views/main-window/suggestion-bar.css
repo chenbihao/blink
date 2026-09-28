@@ -30,7 +30,7 @@
     width: 100%;
     padding: 2px var(--space-sm);
     font-size: var(--text-sm);
-    color: var(--text-dim);
+    color: var(--text-sub);
     background: transparent;
     border: none;
     border-radius: var(--radius-sm);
@@ -44,14 +44,8 @@
     color: var(--text);
 }
 
-/* 次槽视觉降一档：第二建议是备选，不该与主建议等权争夺注意力 */
-.suggestion-row.slot-secondary {
-    opacity: var(--opacity-muted);
-}
-
-.suggestion-row.slot-secondary:hover {
-    opacity: 1;
-}
+/* 次槽文本与主槽同色（用户实测两次反馈：降色/降透明在毛玻璃下不可读）。
+   主次层级差异由行序（primary 在上）与 origin 弱化表达，不再压色彩。 */
 
 .suggestion-icon {
     display: inline-flex;

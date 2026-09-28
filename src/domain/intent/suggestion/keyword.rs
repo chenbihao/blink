@@ -66,6 +66,7 @@ impl SuggestionProducer for KeywordProducer {
             prefix_len: hint.prefix_len,
             origin: None,
             fingerprint: text_fingerprint(query),
+            source: SuggestionSource::Keyword,
             ranking_hint: None,
         }]
     }

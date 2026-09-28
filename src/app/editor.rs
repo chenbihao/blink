@@ -822,23 +822,23 @@ impl EditorSessionService {
     fn domain_env(
         &self,
     ) -> Result<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>, EditorError> {
-        Ok(self
+        self
             .app
             .try_state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
             .map(|s| s.inner().clone())
             .ok_or_else(|| EditorError::Io {
                 detail: "DomainEnv 不可用".into(),
-            })?)
+            })
     }
 
     fn history_pool(&self) -> Result<sqlx::SqlitePool, EditorError> {
-        Ok(self
+        self
             .app
             .try_state::<crate::infra::data::DbPools>()
             .map(|pools| pools.history.clone())
             .ok_or_else(|| EditorError::Io {
                 detail: "history 连接池不可用".into(),
-            })?)
+            })
     }
 
     /// 便签来源打开时读取 DB 真源（正文 + revision）。

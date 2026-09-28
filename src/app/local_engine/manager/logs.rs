@@ -283,7 +283,7 @@ pub(super) async fn pump_logs_to_event_port(
                                 let suppress_ui = should_suppress_from_ui(&log_entry.text, level);
                                 if suppress_ui {
                                     suppressed_total = suppressed_total.saturating_add(1);
-                                    if suppressed_total <= 3 || suppressed_total % 500 == 0 {
+                                    if suppressed_total <= 3 || suppressed_total.is_multiple_of(500) {
                                         tracing::trace!(engine = %engine_id, instance = %instance_id, seq = log_entry.seq, suppressed_total, output = %log_entry.text, "本地引擎输出（已抑制）");
                                     }
                                 } else {

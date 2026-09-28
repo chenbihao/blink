@@ -15,10 +15,12 @@
 <div data-tauri-drag-region id="app">
     <!-- ModeHeader（0.24.4 §5.5）：持续模式的唯一呈现（AI / 命令 / 剪贴板）。
          无模式时隐藏，不占高度；mode-header.js 投影。 -->
-    <div class="hidden" id="mode-header">
-        <span class="mode-icon"></span>
-        <span class="mode-label"></span>
-        <span class="mode-hint"></span>
+    <div class="hidden" data-tauri-drag-region id="mode-header">
+        <!-- drag-region：徽章行无交互，兼作拖动热区（非 deep 模式按 target 命中，
+             子元素同加属性；icon 由 CSS pointer-events:none 穿透） -->
+        <span class="mode-icon" data-tauri-drag-region></span>
+        <span class="mode-label" data-tauri-drag-region></span>
+        <span class="mode-hint" data-tauri-drag-region></span>
     </div>
 
     <!-- 搜索模式（0.17.6: 独立容器，与 AI 模式 display 切换） -->
@@ -27,10 +29,10 @@
             <div class="input-wrap">
                 <!-- CompletionGhost overlay（0.24.4 收窄为输入延伸）：.ghost-typed 与用户输入
                      等宽同字体但透明（占位对齐），.ghost-suggest 灰色半透明显示 "-> fanyi" 类
-                     补全后缀与语音转写预览。Translate/AskAi 建议走 #suggestion-bar；
-                     Chord 提示走 #chord-cheat-sheet（Alt 按住时）。 -->
+                     补全后缀与语音转写预览。.ghost-chord 是空 query + Alt 按住时的待命键帽
+                     影子（0.24.7 回退恢复）。Translate/AskAi 建议走 #suggestion-bar。 -->
                 <div aria-hidden="true" id="ghost-overlay"><span class="ghost-typed"></span><span
-                        class="ghost-suggest"></span></div>
+                        class="ghost-suggest"></span><span class="ghost-chord"></span></div>
                 <input autocomplete="off" id="query" spellcheck="false" type="text"/>
                 <!-- 0.10 G1 录音指示器：录音中显示音量波动条 + "语音输入中" -->
                 <div class="voice-indicator hidden" id="voice-indicator">
@@ -74,10 +76,6 @@
 
     <!-- ResultFooter（0.24.4 §5.5）：结果导航/动作/分页 + 空 query 闲置态 Chord 一行提示 -->
     <div id="statusbar"></div>
-
-    <!-- Chord Cheat Sheet（0.24.4 §5.5）：按住 Alt 时的完整键帽表，独立覆盖层，
-         不再在输入框与 Footer 之间迁移。cheat-sheet.js 投影。 -->
-    <div class="hidden" id="chord-cheat-sheet"></div>
 
     <!-- TransientFeedback（0.24.4 §5.5）：loading/success/error 瞬态反馈，
          底部覆盖层不占布局。transient-feedback.js 投影。 -->

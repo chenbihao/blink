@@ -67,14 +67,13 @@ pub fn trace_vad(samples: &[f32], sample_rate: u32, vad: &mut EnergyVad) -> VadT
             quiet_start.get_or_insert(
                 time_ms.saturating_sub(frame.len() as u64 * 1000 / sample_rate as u64),
             );
-        } else if let Some(start_ms) = quiet_start.take() {
-            if time_ms.saturating_sub(start_ms) >= 50 {
+        } else if let Some(start_ms) = quiet_start.take()
+            && time_ms.saturating_sub(start_ms) >= 50 {
                 trace.quiet_spans.push(VadQuietSpan {
                     start_ms,
                     end_ms: time_ms,
                 });
             }
-        }
 
         if event.is_boundary() {
             trace.events.push(VadTraceEvent {

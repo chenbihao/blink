@@ -75,12 +75,13 @@ impl SuggestionProducer for AiProducer {
                 prompt: text.to_string(),
             },
             rank_score: rank,
-            // display 文案由前端 i18n 决定是 0.9.2 遗留 TODO；当前 ghost.js 直接读
-            // display，沿用中文占位（与旧 SearchService 注入路径零变化）。
+            // AskAi 行文案由前端按 kind 经 i18n 覆盖（suggestion-bar rowText），
+            // 此处 display 不被消费，保留中文占位以兼容仍读 display 的旧前端路径。
             display: "按 Tab 问 AI".to_string(),
             prefix_len: 0,
             origin,
             fingerprint: text_fingerprint(text),
+            source: SuggestionSource::Ai,
             ranking_hint: None,
         };
 

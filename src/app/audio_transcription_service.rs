@@ -298,7 +298,7 @@ impl AudioTranscriptionService {
                 tokio::time::Instant::from_std(started) + std::time::Duration::from_millis(fed_ms),
             )
             .await;
-            if fed_ms % 250 == 0 || fed == samples.len() {
+            if fed_ms.is_multiple_of(250) || fed == samples.len() {
                 progress("replaying", fed_ms, duration_ms);
             }
             let stats = engine.stream_stats();
@@ -601,9 +601,9 @@ fn collect_vad_debug_text(
                     audio_range: Some(span.audio_range),
                 });
             }
-        } else if kind == "preview" {
-            if let Some(preview) = value["text"].as_str() {
-                if !preview.is_empty() && preview != *last_preview {
+        } else if kind == "preview"
+            && let Some(preview) = value["text"].as_str()
+                && !preview.is_empty() && preview != *last_preview {
                     if events
                         .iter()
                         .filter(|event| event.kind == "preview")
@@ -631,8 +631,6 @@ fn collect_vad_debug_text(
                     }
                     *last_preview = preview.to_string();
                 }
-            }
-        }
         return;
     }
 

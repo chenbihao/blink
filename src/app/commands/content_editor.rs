@@ -44,10 +44,10 @@ impl From<EditorError> for CommandError {
 }
 
 fn service(app: &tauri::AppHandle) -> Result<std::sync::Arc<EditorSessionService>, CommandError> {
-    Ok(app
+    app
         .try_state::<std::sync::Arc<EditorSessionService>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| CommandError::new("io", "编辑器会话服务不可用", false))?)
+        .ok_or_else(|| CommandError::new("io", "编辑器会话服务不可用", false))
 }
 
 /// 打开内容编辑器：无活动会话则绑定并显示；同一持久来源激活现有窗口；
@@ -191,10 +191,10 @@ pub struct ClearEditorDraftRequest {
 fn draft_store(
     app: &tauri::AppHandle,
 ) -> Result<std::sync::Arc<crate::app::editor_draft::EditorDraftStore>, CommandError> {
-    Ok(app
+    app
         .try_state::<std::sync::Arc<crate::app::editor_draft::EditorDraftStore>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| CommandError::new("io", "草稿存储不可用", false))?)
+        .ok_or_else(|| CommandError::new("io", "草稿存储不可用", false))
 }
 
 /// 保存恢复草稿（防抖 / 关键边界 flush）。同一会话身份下旧 revision 被拒绝。
@@ -205,11 +205,10 @@ pub async fn save_editor_draft(
     request: SaveEditorDraftRequest,
 ) -> Result<SaveEditorDraftResult, CommandError> {
     ensure_editor_caller(window.label())?;
-    if let Some(session_ref) = request.session_ref.as_deref() {
-        if !service(&app)?.verify_active_session(session_ref, request.generation) {
+    if let Some(session_ref) = request.session_ref.as_deref()
+        && !service(&app)?.verify_active_session(session_ref, request.generation) {
             return Err(CommandError::from(EditorError::StaleSession));
         }
-    }
     let store = draft_store(&app)?;
     let computed_hash = format!("{:016x}", crate::domain::editor::body_digest(&request.body));
     if !request.hash.is_empty() && request.hash != computed_hash {
@@ -249,11 +248,10 @@ pub async fn load_editor_draft(
     generation: Option<u64>,
 ) -> Result<Option<crate::app::editor_draft::EditorDraft>, CommandError> {
     ensure_editor_caller(window.label())?;
-    if let Some(session_ref) = session_ref.as_deref() {
-        if !service(&app)?.verify_active_session(session_ref, generation.unwrap_or(0)) {
+    if let Some(session_ref) = session_ref.as_deref()
+        && !service(&app)?.verify_active_session(session_ref, generation.unwrap_or(0)) {
             return Err(CommandError::from(EditorError::StaleSession));
         }
-    }
     Ok(draft_store(&app)?.load(&key).await?)
 }
 
@@ -283,8 +281,7 @@ pub async fn clear_editor_draft(
         generation = request.generation,
         "clear_editor_draft"
     );
-    let cleared = draft_store(&app)
-        .map_err(|e| e)?
+    let cleared = draft_store(&app)?
         .clear_if_matches(
             &request.key,
             request.session_ref.as_deref(),
@@ -390,10 +387,10 @@ pub struct EditorVoiceSnapshotDto {
 fn voice_service(
     app: &tauri::AppHandle,
 ) -> Result<std::sync::Arc<crate::app::voice::VoiceService>, CommandError> {
-    Ok(app
+    app
         .try_state::<std::sync::Arc<crate::app::voice::VoiceService>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| CommandError::new("io", "语音服务不可用", false))?)
+        .ok_or_else(|| CommandError::new("io", "语音服务不可用", false))
 }
 
 /// 校验调用窗口属于听写控制白名单（编辑器 + 浮窗）。
@@ -591,10 +588,10 @@ pub struct EditorTransformStartResult {
 fn editor_transform_service(
     app: &tauri::AppHandle,
 ) -> Result<std::sync::Arc<crate::app::editor_transform::EditorTransformService>, CommandError> {
-    Ok(app
+    app
         .try_state::<std::sync::Arc<crate::app::editor_transform::EditorTransformService>>()
         .map(|s| s.inner().clone())
-        .ok_or_else(|| CommandError::new("io", "整理服务不可用", false))?)
+        .ok_or_else(|| CommandError::new("io", "整理服务不可用", false))
 }
 
 /// 发起编辑器 AI 整理（整理选中内容 / 整理本次听写）。

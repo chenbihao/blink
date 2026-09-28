@@ -9,7 +9,6 @@ import * as statusbar from "./statusbar.js";
 import * as suggestionBar from "./suggestion-bar.js";
 import * as suggestionAccept from "./suggestion-accept.js";
 import * as modeHeader from "./mode-header.js";
-import * as cheatSheet from "./cheat-sheet.js";
 import * as transientFeedback from "./transient-feedback.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
@@ -45,7 +44,6 @@ keyboard.init();
 lifecycle.init();
 contextmenu.init();
 chord.init(); // 预热 chord 配置 + 动作集（完成后 notify 订阅者）
-cheatSheet.init(); // Cheat Sheet：订阅 chord 可见性 + 初始渲染——须在 chord.init 后（拿到动作集）
 aiMode.init(); // 0.17.6: AI 模式初始化（注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听）
 cmdMode.init(); // 0.18.6: 命令模式初始化（ModeHeader 投影由 enter/exit 触发）
 clipboardMode.init(); // 0.19.15: 剪贴板模式初始化（ModeHeader 投影由 enter/exit 触发）

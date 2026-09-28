@@ -397,6 +397,9 @@ impl OcrCoordinator {
     ///
     /// 返回 `Ok(request_png_size)` 表示前置检查通过；
     /// 返回 `Err(RouteResult)` 表示前置检查失败，直接返回错误结果。
+    /// `RouteResult` 尺寸较大是错误路径的既有契约（携带完整决策上下文供前端
+    /// 呈现），Box 化会连锁改动全部路由出口——不值得为 lint 收敛。
+    #[allow(clippy::result_large_err)]
     pub(super) fn preflight_check(
         &self,
         ctx: &OcrRequestContext,

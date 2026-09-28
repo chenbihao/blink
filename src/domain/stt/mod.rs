@@ -253,18 +253,15 @@ pub fn settle_preview_segments(segments: &mut Vec<PreviewSegment>, boundary_samp
 /// 识别调度策略。profile 不携带 VoiceTarget/Tauri 类型，只表达领域层调度行为。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RecognitionProfile {
     /// G2 与 Editor：滚动 Preview + 非重叠 Draft。
     PreviewDraft,
     /// G1/G3：保留现有累计 Partial/Final 投影契约。
+    #[default]
     Legacy,
 }
 
-impl Default for RecognitionProfile {
-    fn default() -> Self {
-        Self::Legacy
-    }
-}
 
 /// STT 逻辑 lane。实际执行仍由同一个 model worker 串行完成。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

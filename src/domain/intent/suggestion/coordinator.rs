@@ -176,10 +176,19 @@ impl SuggestionCoordinator {
             );
         }
 
-        // ── 2. 收集候选 ──
+        // ── 2. 收集候选（producer.source() 盖章身份，供可观测性日志）──
         let mut all: Vec<Suggestion> = Vec::new();
         for producer in &self.producers {
-            all.extend(producer.produce(input.query, input.snapshot));
+            let source = producer.source();
+            all.extend(
+                producer
+                    .produce(input.query, input.snapshot)
+                    .into_iter()
+                    .map(|mut s| {
+                        s.source = source;
+                        s
+                    }),
+            );
         }
         if all.is_empty() {
             return (CoordinateOutput::default(), None);
@@ -194,6 +203,7 @@ impl SuggestionCoordinator {
                 if s.kind == SuggestionKind::Completion && !input.config.completion_enabled {
                     tracing::debug!(
                         id = %s.id,
+                        producer = ?s.source,
                         reason = %FilterReason::CompletionDisabled,
                         "suggestion 过滤"
                     );
@@ -204,6 +214,7 @@ impl SuggestionCoordinator {
                 if s.origin.is_some() && !input.config.context_suggestion_enabled {
                     tracing::debug!(
                         id = %s.id,
+                        producer = ?s.source,
                         reason = %FilterReason::ContextSuggestionDisabled,
                         "suggestion 过滤"
                     );
@@ -215,6 +226,7 @@ impl SuggestionCoordinator {
                     if !input.availability.ai_available {
                         tracing::debug!(
                             id = %s.id,
+                            producer = ?s.source,
                             reason = %FilterReason::AiUnavailable,
                             "suggestion 过滤"
                         );
@@ -223,6 +235,7 @@ impl SuggestionCoordinator {
                     if !input.config.ai_suggestion_enabled {
                         tracing::debug!(
                             id = %s.id,
+                            producer = ?s.source,
                             reason = %FilterReason::AiSuggestionDisabled,
                             "suggestion 过滤"
                         );
@@ -238,6 +251,7 @@ impl SuggestionCoordinator {
                 {
                     tracing::debug!(
                         id = %s.id,
+                        producer = ?s.source,
                         reason = %FilterReason::RouteHit,
                         "suggestion 过滤"
                     );
@@ -249,6 +263,7 @@ impl SuggestionCoordinator {
                 {
                     tracing::debug!(
                         id = %s.id,
+                        producer = ?s.source,
                         reason = %FilterReason::FatigueSuppressed,
                         "suggestion 过滤"
                     );
@@ -320,6 +335,7 @@ impl SuggestionCoordinator {
                 tracing::debug!(
                     id = %sug.id,
                     kind = ?sug.kind,
+                    producer = ?sug.source,
                     slot,
                     unadopted = n,
                     "suggestion impression"
@@ -338,12 +354,6 @@ impl SuggestionCoordinator {
         );
 
         (output, hint)
-    }
-
-    /// producer 数量（调试用）。
-    #[allow(dead_code)]
-    pub fn producer_count(&self) -> usize {
-        self.producers.len()
     }
 }
 
@@ -379,6 +389,7 @@ fn ai_trigger_suggestion(arg: &str) -> Suggestion {
         prefix_len: 0,
         origin: None,
         fingerprint: text_fingerprint(arg),
+        source: super::SuggestionSource::Ai,
         ranking_hint: None,
     }
 }
@@ -448,8 +459,10 @@ mod tests {
             display: id.to_string(),
             prefix_len: 0,
             origin,
-            // 按 id 派生指纹：不同 id 的候选天然不同键（降频互不连坐的测试前提）
+            // 按 id 派生指纹：不同 id 的候选天然不同键（降频互不连坐的测试前提）。
+            // source 由 coordinator 收集时按 producer.source() 重新盖章，此处占位即可。
             fingerprint: text_fingerprint(id),
+            source: SuggestionSource::Ai,
             ranking_hint: None,
         }
     }
@@ -501,6 +514,20 @@ mod tests {
         assert_eq!(out.primary.unwrap().id, "completion");
         assert!(out.secondary.is_none());
         assert!(hint.is_none());
+    }
+
+    /// coordinator 收集候选时按 `producer.source()` 盖章身份（§6.1 可观测性：
+    /// filter/impression/adoption 日志的 producer 字段数据源）。
+    #[test]
+    fn producer_source_stamped_on_candidates() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug("t-sel", SuggestionKind::Translate, 0.92, None)],
+        )));
+        let s = snap();
+        let (out, _) = coordinator.coordinate(&input("", &s), &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().source, SuggestionSource::Context);
     }
 
     #[test]

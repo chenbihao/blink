@@ -101,8 +101,11 @@ pub fn default_commit_target(source: &SourceDescriptor) -> CommitTarget {
 }
 
 /// 单次提交的目标覆盖（§3.5：「保存到…」切换主目标；「另存为副本…」不改）。
+/// 变体名 File 后缀是刻意的语义区分（save/copy/overwrite 三种写文件意图），
+/// serde tag 已上 wire，改名即破坏契约。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub enum CommitTargetOverride {
     /// 写入指定文件并切换主目标为 `ConfirmedFile`。
     SaveToFile { path: String },

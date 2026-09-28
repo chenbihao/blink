@@ -235,6 +235,23 @@ function initAutosuggestion() {
                 currentConfig.suppress_repeated = toggles["suggestion-suppress-repeated"] !== false;
             }
         } catch (err) {
+            // 回滚控件到最后一次后端已确认状态（与 saveChordToggles 同范式），
+            // 避免保存失败时 checkbox 显示与持久化配置失步
+            const last = getCurrentConfig();
+            const rollback = (id, value) => {
+                const el = document.getElementById(id);
+                if (!el || value === undefined) return;
+                if (el.type === "checkbox") el.checked = value !== false;
+                else el.value = value;
+            };
+            rollback("autosuggest-enabled", last?.autosuggest_enabled);
+            rollback("autosuggest-min-score", last?.autosuggest_min_score);
+            rollback("autosuggest-tab-key", last?.autosuggest_tab_key);
+            rollback("suggestion-completion-enabled", last?.completion_enabled);
+            rollback("suggestion-context-enabled", last?.context_suggestion_enabled);
+            rollback("suggestion-ai-enabled", last?.ai_suggestion_enabled);
+            rollback("suggestion-secondary-enabled", last?.secondary_enabled);
+            rollback("suggestion-suppress-repeated", last?.suppress_repeated);
             console.error("update_autosuggest_config failed:", err);
         }
     }

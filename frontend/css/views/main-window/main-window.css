@@ -1,5 +1,7 @@
 /* ── 主窗口 views（#app / #search-bar / #query / ghost overlay）────────── */
-/* 来源 style.css:20-144。Step 5 拆分。body.chord-visible #ghost-overlay:has(...) 恐怖选择器原样保留，勿改 token。 */
+/* 来源 style.css:20-144。Step 5 拆分。0.24.7 chord 提示回退就近呈现：
+   空 query + Alt 为输入框 .ghost-chord 影子（规则见下），非空 query + Alt
+   为 statusbar 副行（statusbar.css）。 */
 
 /* ── 卡片容器 ─────────────────────────────────────────────────────────────────
    #app 四周 padding 即「呼吸空间」+ 拖动手柄（data-tauri-drag-region="deep"）。
@@ -101,7 +103,7 @@ body.no-glass #app::before {
    .input-wrap 定位容器；#ghost-overlay 与 <input> 绝对定位重叠，同 padding/font/line-height。
    .ghost-typed 与用户输入等宽但透明（占位对齐），.ghost-suggest 灰色显示 Completion
    影子与语音转写预览。pointer-events:none 让键盘/鼠标事件全部落到 <input>。
-   Chord 键帽提示已迁 #chord-cheat-sheet（0.24.4）。 */
+   Chord 待命影子（.ghost-chord）0.24.7 回退恢复至本 overlay（见上方规则段）。 */
 .input-wrap {
     position: relative;
     width: 100%;
@@ -130,6 +132,59 @@ body.no-glass #app::before {
     opacity: var(--opacity-faint);
 }
 
+/* ── Chord 待命影子（.ghost-chord，0.24.7 回退恢复 0.8.5 视觉）────────────
+   显示三重与门（纯 CSS，JS 只管内容填充）：
+   1. body.chord-visible（input-state 投影：Alt 按下 && chord 启用 && 非独占模式）
+   2. .ghost-suggest 为空（Ghost 补全优先——补全是强意图信号,Chord 是弱待命列表,不共存）
+   3. .ghost-chord 自身非空（数据未加载时不显示空框）
+   键帽走 kbd.css 通用样式,标签更淡与键帽形成对比。 */
+#ghost-overlay .ghost-chord {
+    display: none;
+    font-size: 0.72em; /* 相对 overlay 18px → ~13px，键帽再按 kbd.css 的 0.9em 收缩 */
+    color: var(--text-faint);
+    vertical-align: middle;
+    /* 让内嵌的 kbd/chord-item 恢复正常 white-space 排布,避免继承 overlay 的 pre 造成键帽间大空隙 */
+    white-space: normal;
+}
+
+body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:empty) {
+    display: inline;
+}
+
+/* 0.19.15: 剪贴板独占模式——隐藏 chord 待命提示（用户已在交互，Alt+字母提示无意义） */
+body.clipboard-mode-active #ghost-overlay .ghost-chord {
+    display: none !important;
+}
+
+#ghost-overlay .ghost-chord .chord-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    color: var(--text);
+    opacity: var(--opacity-muted);
+}
+
+#ghost-overlay .ghost-chord .chord-sep {
+    /* 竖线 + 左右大 margin,视觉上强分组边界（比 · 显著）
+       opacity 略低,不抢键帽/标签的注意力 */
+    color: var(--text-faint);
+    opacity: var(--opacity-disabled);
+    margin: 0 0.7em;
+    font-weight: var(--weight-light);
+}
+
+/* 语音录音中：隐藏 Chord 提示，避免与语音指示器并存造成视觉混乱。
+ghost-suggest 不隐藏——语音预览文本（voice-preview-text）会复用它显示 preview。 */
+body.voice-active #ghost-overlay .ghost-chord {
+    display: none !important;
+}
+
+/* 语音错误提示期间：隐藏 Chord 提示，避免错误文案（placeholder）与 chord 键帽重叠。
+   voice-error 由 lifecycle.js voice-error handler 添加，3s 后移除。 */
+body.voice-error #ghost-overlay .ghost-chord {
+    display: none !important;
+}
+
 /* Ghost 有内容时隐藏输入框自身 placeholder（0.8.3）:
    空 query + Context Ghost 场景下,placeholder「输入应用名、计算…」会与 Ghost 文字
    重叠。ghost.js 在 update 时给 <input> 加 data-ghost-active 属性,由此规则接管。 */
@@ -138,8 +193,6 @@ body.no-glass #app::before {
 }
 
 /* ── 0.10 G1 录音指示器 ──────────────────────────────────────────── */
-
-/* 语音录音/错误期间的 Chord Cheat Sheet 抑制见 cheat-sheet.css。 */
 
 /* 语音预览文本样式（G1 预上屏：preview 走 ghost-suggest，灰色半透明，
    与 G2 voice-overlay 的 .voice-preview 视觉一致） */
@@ -180,6 +233,36 @@ body.no-glass #app::before {
 }
 
 /* ── 0.18.6 命令模式 / 0.19.15 剪贴板模式徽章 ──────────────────────────── */
-/* 0.24.4 起两者统一走 #mode-header（mode-header.css）：
-   命令模式常驻提示与错误分别走 ModeHeader / TransientFeedback，
-   剪贴板徽章（.clipboard-mode-badge）退役。 */
+/* 0.24.4 起命令模式常驻提示走 ModeHeader（mode-header.css）、错误走
+   TransientFeedback。剪贴板徽章 0.24.7 回退恢复本文件（用户裁决：剪贴板
+   是轻量临时态，不值得占 ModeHeader 顶部整行 + 缩小拖动热区）。 */
+
+/* ── 剪贴板模式徽章（0.24.7 回退恢复 0.19.15 形态）────────────────────────── */
+/* Alt+C 进入剪贴板模式后，搜索栏右上角的浅色模式提示（绝对定位不占布局、
+   pointer-events:none 不抢交互）。原 0.19.15 版的 --bg-elevated 是不存在的
+   token（0.24.5 review 发现的同类问题），修正为 --surface。 */
+.clipboard-mode-badge {
+    position: absolute;
+    top: var(--space-xs);
+    right: var(--space-sm);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--space-xs);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    pointer-events: none;
+    -webkit-app-region: no-drag;
+}
+
+.clipboard-mode-badge.hidden {
+    display: none;
+}
+
+.clipboard-mode-badge .icon {
+    width: 12px;
+    height: 12px;
+    opacity: 0.7;
+}

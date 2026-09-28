@@ -71,6 +71,9 @@ impl EditorTransformService {
     /// 结构化错误经 command 层投影：`ai_already_active`（携带 activeWindow）、
     /// `unsupported`（AI 未配置/输入超限/上下文过小）、`stale_session`、
     /// `cancelled`。
+    /// 8 参对一次整理调用的完整上下文（会话身份 + 范围 + 文本 + 版本 + 资源引用）
+    /// 是刻意设计——打包成 struct 会掩盖"每次调用都必须全量携带"的契约。
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         editor: &EditorSessionService,
@@ -305,11 +308,10 @@ impl EditorTransformService {
             // 全局槽位释放：先清 tracker（单活跃），再清本服务槽（按 id 复查）。
             if let Some(svc) = app.try_state::<std::sync::Arc<EditorTransformService>>() {
                 svc.chat.release_editor_transform(request_id);
-                if let Ok(mut guard) = svc.active.lock() {
-                    if guard.as_ref().is_some_and(|a| a.request_id == request_id) {
+                if let Ok(mut guard) = svc.active.lock()
+                    && guard.as_ref().is_some_and(|a| a.request_id == request_id) {
                         *guard = None;
                     }
-                }
             }
         });
 

@@ -25,7 +25,6 @@ import {queryEl, resultsEl} from "./dom.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import * as suggestionBar from "./suggestion-bar.js";
-import * as modeHeader from "./mode-header.js";
 import * as statusbar from "./statusbar.js";
 import {show as showFeedback} from "./transient-feedback.js";
 import {syncWindowSize, resyncWindowSize} from "./window-size.js";
@@ -59,6 +58,9 @@ let timer = null;
 
 /** 请求序号（防竞态，与 search.js 独立）。 */
 let seq = 0;
+
+/** 模式徽章 DOM（搜索栏右上角浅提示）。 */
+let badgeEl = null;
 
 /** 0.20.2: 上次搜索的 trim 后 query——避免相同 query 重复搜索导致光标重置。 */
 let lastQuery = "";
@@ -108,8 +110,17 @@ export function reloadList() {
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────
 
-/** 初始化（0.24.4 起徽章统一走 ModeHeader，无自建 DOM；保留入口供装配一致性）。 */
+/** 初始化：创建搜索栏右上角模式徽章（0.24.7 回退恢复 0.19.15 形态——
+ *  ModeHeader 左上角整行版本经用户裁决还原：剪贴板模式是轻量临时态，
+ *  不值得占顶部一整行 + 缩小拖动热区）。 */
 export function init() {
+    if (badgeEl) return;
+    badgeEl = document.createElement("div");
+    badgeEl.id = "clipboard-mode-badge";
+    badgeEl.className = "clipboard-mode-badge hidden";
+    badgeEl.innerHTML =
+        '<svg class="icon"><use href="#icon-copy"/></svg><span></span>';
+    document.getElementById("search-mode").appendChild(badgeEl);
 }
 
 /** 复位：退出剪贴板模式（lifecycle shown/hidden 调用）。 */
@@ -147,12 +158,11 @@ export function enter({preserveQuery = false} = {}) {
     queryEl.value = initialQuery;
     queryEl.focus();
 
-    // 0.24.4: 模式徽章统一走 ModeHeader
-    modeHeader.set({
-        id: "clipboard",
-        icon: "copy",
-        label: t("mode.clipboard.label"),
-    });
+    // 0.24.7: 徽章回退为搜索栏右上角浅提示（文案复用 ModeHeader 的 label key）
+    if (badgeEl) {
+        badgeEl.querySelector("span").textContent = t("mode.clipboard.label");
+        badgeEl.classList.remove("hidden");
+    }
 
     // 清空 ghost + 建议 + 结果
     ghost.clear();
@@ -183,8 +193,8 @@ export function exit() {
     // 恢复 placeholder
     queryEl.placeholder = savedPlaceholder;
 
-    // 0.24.4: 清 ModeHeader 徽章
-    modeHeader.clear();
+    // 0.24.7: 隐藏右上角模式徽章
+    if (badgeEl) badgeEl.classList.add("hidden");
 
     // 取消防抖
     clearTimeout(timer);

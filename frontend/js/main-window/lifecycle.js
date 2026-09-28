@@ -105,7 +105,6 @@ export function init() {
         search.reset();
         results.clear();
         cmdMode.reset(); // 0.18.6: 复位命令模式
-        clipboardMode.reset(); // 0.19.15: 复位剪贴板模式
         // 0.24.3 §3.8：建议会话结束——后端降频计数与遥测环形表清零（每次唤起是新会话）
         resetSuggestionSession().catch(() => {});
     });

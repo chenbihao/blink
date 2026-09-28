@@ -1,6 +1,8 @@
 /* ── ModeHeader（#mode-header，0.24.4 §5.5）───────────────────────────────── */
-/* 持续模式的唯一呈现（AI / 命令 / 剪贴板）。无模式时 .hidden 不占高度；
-   模式切换是离散状态转换，高度随之变化（与逐键抖动不同类）。 */
+/* 持续模式的唯一呈现（AI / 命令）。无模式时 .hidden 不占高度；
+   模式切换是离散状态转换，高度随之变化（与逐键抖动不同类）。
+   剪贴板徽章 0.24.7 回退为搜索栏右上角浅提示（main-window.css），不经此层。
+   徽章行兼作拖动热区（C2）。 */
 
 #mode-header {
     display: flex;
@@ -12,7 +14,6 @@
     font-size: var(--text-sm);
     color: var(--text-dim);
     border-bottom: 1px solid var(--surface);
-    -webkit-app-region: no-drag;
 }
 
 #mode-header.hidden {
@@ -20,6 +21,7 @@
 }
 
 #mode-header .mode-icon {
+    pointer-events: none; /* 拖动热区覆盖徽章（drag-region 非deep按 target 命中） */
     display: inline-flex;
     color: var(--accent);
 }

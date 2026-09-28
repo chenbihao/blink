@@ -38,7 +38,7 @@ pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> io::Result<(u64, i64)>
     replace_via_rename(&tmp_path, path)?;
 
     file_identity(path)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "写入后读取文件身份失败"))
+        .ok_or_else(|| io::Error::other("写入后读取文件身份失败"))
 }
 
 /// 读取文件身份 `(size, mtime_ms)`；文件不存在或元数据不可读时返回 None。

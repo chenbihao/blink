@@ -394,7 +394,7 @@ fn main() {
                         crate::infra::platform::hotkey::InputController::request_manual_recovery();
                     }
                     // 0.23.2：主动退出统一入口——有活动编辑会话时先请求一次汇总确认（§3.5）
-                    "quit" => crate::app::editor::request_user_exit(&app),
+                    "quit" => crate::app::editor::request_user_exit(app),
                     _ => {}
                 })
                 // 0.17.2：托盘图标左键单击拉起主窗口（符合 Windows 惯例）

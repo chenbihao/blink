@@ -28,11 +28,11 @@ use crate::infra::utils::text::{pinyin_full, pinyin_initials};
 pub mod suggest;
 pub mod suggestion;
 pub use suggest::CompletionHint;
-// SuggestionSource（producer 身份）0.24.1 起不上 wire，生产代码仅 suggestion 模块
-// 内部消费（producer trait 实现），不再从 intent 层 re-export。
+// SuggestionSource（producer 身份）0.24.1 起不上 wire；由 coordinator 盖章到
+// Suggestion.source（内部字段），编排层（SearchService 遥测）经此 re-export 消费。
 pub use suggestion::{
     RouteSummary, Suggestion, SuggestionAction, SuggestionAvailability, SuggestionKind,
-    SuggestionOrigin, SuggestionSet,
+    SuggestionOrigin, SuggestionSet, SuggestionSource,
 };
 
 // ── 呈现模式 ──────────────────────────────────────────────
@@ -848,6 +848,7 @@ impl RuleRouter {
             prefix_len: 0,
             origin,
             fingerprint: suggestion::text_fingerprint(&fp_text),
+            source: suggestion::SuggestionSource::Context,
             ranking_hint: Some(RankingHint {
                 boost_plugin_id: best_ctx.plugin_id.clone(),
             }),
@@ -892,6 +893,7 @@ impl RuleRouter {
             prefix_len: 0,
             origin: None,
             fingerprint: suggestion::text_fingerprint(q),
+            source: suggestion::SuggestionSource::Context,
             ranking_hint: None,
         })
     }
@@ -1067,13 +1069,6 @@ impl RuleRouter {
             });
         }
         out
-    }
-
-    /// 0.8.3 之前的名字（历史兼容）。内部委托到 `match_context_hits`。
-    #[deprecated(note = "0.8.3: 用 match_context_hits")]
-    #[allow(dead_code)]
-    fn match_context_rules(&self, snapshot: &ContextSnapshot) -> Vec<Hit> {
-        self.match_context_hits(snapshot)
     }
 
     /// 从 Context Hit 构造 Suggestion 显示文本（0.8.3 §4.13 P0 修订；0.24.2 收敛为

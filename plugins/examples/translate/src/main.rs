@@ -974,7 +974,9 @@ fn build_result_items(
     _target_lang: &str,
 ) -> Vec<PluginItem> {
     let mut items = vec![PluginItem {
-        title: format!("📝 {result}"),
+        // title 不加 emoji 前缀（spec-frontend §4.2 图标用包禁 emoji；插件条目
+        // 前端本就不渲染图标位，区分信息在 subtitle）
+        title: result.to_string(),
         subtitle: Some(format!(
             "按 Enter 复制译文 | 原文: {}{}",
             &original_text[..original_text.chars().take(50).map(char::len_utf8).sum()],
@@ -1000,7 +1002,7 @@ fn build_result_items(
     // 预处理改变了文本 → 额外提供拆分后的版本
     if text != original_text {
         items.push(PluginItem {
-            title: format!("🔤 {text}"),
+            title: text.to_string(),
             subtitle: Some("按 Enter 复制拆分后的命名 | 来自命名风格预处理".into()),
             score: 0.9,
             action: PluginAction::Copy { text: text.into() },
@@ -1011,7 +1013,7 @@ fn build_result_items(
     let orig_preview = &original_text[..original_text.chars().take(60).map(char::len_utf8).sum()];
     items.push(PluginItem {
         title: format!(
-            "📄 {orig_preview}{}",
+            "{orig_preview}{}",
             if original_text.chars().count() > 60 {
                 "..."
             } else {
@@ -1278,8 +1280,8 @@ mod tests {
         let items = build_result_items("你好", "hello", "hello", "zh");
         // 译文项 + 原文项（无拆分版，因为 text == original_text）
         assert_eq!(items.len(), 2);
-        assert!(items[0].title.starts_with("📝"));
-        assert!(items[1].title.starts_with("📄"));
+        assert_eq!(items[0].title, "你好");
+        assert_eq!(items[1].title, "hello");
         assert_eq!(items[0].score, 1.0);
     }
 
@@ -1288,8 +1290,8 @@ mod tests {
         // text != original_text → 多一个拆分版
         let items = build_result_items("获取用户", "get user", "getUserName", "zh");
         assert_eq!(items.len(), 3);
-        assert!(items[0].title.starts_with("📝"));
-        assert!(items[1].title.starts_with("🔤"));
-        assert!(items[2].title.starts_with("📄"));
+        assert_eq!(items[0].title, "获取用户");
+        assert_eq!(items[1].title, "get user");
+        assert_eq!(items[2].title, "getUserName");
     }
 }

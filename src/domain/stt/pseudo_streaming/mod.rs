@@ -793,6 +793,7 @@ impl PseudoInner {
     /// - 跨界（tail.start < phrase_end < tail.end）：整条清退，未覆盖后缀
     ///   [phrase_end, tail.end) 交回尾部窗口重识别——与 Draft settle 的
     ///   "跨界整条删除、剩余交回尾部窗口"同一语义。
+    ///
     /// 短语之后的真实后缀不靠残留 tail 保留，靠锚点推进后的下一次尾部
     /// 预览重新投影（`retreated_boundary_preserves_uncommitted_preview_suffix`
     /// 的既有语义）。
@@ -1386,9 +1387,7 @@ impl PseudoInner {
             return None;
         }
 
-        let Some(candidate) = self.boundary_candidate.as_mut() else {
-            return None;
-        };
+        let candidate = self.boundary_candidate.as_mut()?;
         if voiced > 0 {
             // 0.23.14.7 复语块裁决：起音块头部的静默仍是停顿的一部分——块内
             // 出现有声帧时整块按有声处理会让 gate 口径的停顿系统性短于真实
@@ -2735,8 +2734,7 @@ impl PseudoStreamingSttEngine {
                     // hard/cap 可回退到近期谷底，但不得落到 reserved 之前。
                     if (candidate.reason == "hard_window" || candidate.reason == "uncommitted_cap")
                         && boundary_total > committed
-                    {
-                        if let Some(offset) = inner
+                        && let Some(offset) = inner
                             .vad
                             .low_energy_valley_offset(HARD_CUT_VALLEY_WINDOW_MS)
                         {
@@ -2745,7 +2743,6 @@ impl PseudoStreamingSttEngine {
                                 boundary_total = valley;
                             }
                         }
-                    }
                     accepted_boundary = Some((boundary_total, candidate.reason.clone(), accepted_via));
                 } else {
                     // 0.23.14.7 case_17：候选被拒的证据必须可追溯——只在候选
@@ -2883,7 +2880,7 @@ impl PseudoStreamingSttEngine {
                     .sentences
                     .draft_reserved_sample_end
                     .max(inner.sentences.committed_sample_end);
-                let span_id = inner.sentences.next_segment_id as u64;
+                let span_id = inner.sentences.next_segment_id;
                 let revision = inner.sentences.confirmed_revision + 1;
                 let request_id = inner.coordinator.next_request_id();
                 inner.coordinator.reserve_draft(
@@ -3139,7 +3136,7 @@ impl PseudoStreamingSttEngine {
                                 // spawn id 从 1 膨胀到三位数）。仅当排队快照落后
                                 // ≥500ms 新音频时才替换。
                                 let refresh_due =
-                                    inner.pending_preview.as_ref().map_or(true, |queued| {
+                                    inner.pending_preview.as_ref().is_none_or(|queued| {
                                         total.saturating_sub(queued.snapshot_end)
                                             >= (PREVIEW_MIN_NEW_AUDIO_MS * self.sample_rate as u64
                                                 / 1000)
@@ -3636,8 +3633,8 @@ impl SttEngine for PseudoStreamingSttEngine {
                 // 有界能量谷底；无合格谷底或回退点不落在未提交区间内时，
                 // 保持当前时刻兜底。只移动切点位置，不新增边界。
                 let mut boundary_total = total;
-                if event == VadEvent::HardWindow {
-                    if let Some(offset) = inner
+                if event == VadEvent::HardWindow
+                    && let Some(offset) = inner
                         .vad
                         .low_energy_valley_offset(HARD_CUT_VALLEY_WINDOW_MS)
                     {
@@ -3651,7 +3648,6 @@ impl SttEngine for PseudoStreamingSttEngine {
                             };
                         }
                     }
-                }
                 tracing::debug!(
                     reason = boundary_reason,
                     total,
