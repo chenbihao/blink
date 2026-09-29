@@ -188,6 +188,10 @@ export function trackScrollFrame(state, frame, options = {}) {
             expectedDirection,
             strictDirection: expectedDirection !== 0,
             rejectAmbiguous: true,
+            // 0.24.10：相邻帧追踪走鲁棒打分管线（行变化掩码 + 截尾候选 +
+            // 全量验证），抑制悬浮元素/周期内容/采样混叠导致的伪匹配与
+            // 空白页 unchanged 卡死。探针/重定位仍走默认打分。
+            robustScoring: true,
         });
     const adjacentMatch = summarizeMatch(match);
     if (!wasLost && match.status === 'matched') {

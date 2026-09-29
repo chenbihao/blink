@@ -61,15 +61,20 @@ export function computePredictedLocatorTop(options) {
         return currentTop;
     }
     const previousMagnitude = Math.abs(lastAcceptedShift || 0);
+    // 0.24.10 校准（实测反馈“提前量偏大”）：预测步长忠实于最近真实位移——
+    // 单滚轮刻度通常只有 0.07~0.12 视口高，原 0.15 下限会把小步预测夸大近
+    // 一倍；无历史时默认约 1.5 个刻度；上限保留给自动滚动的稳态大步进。
     const magnitude = clamp(
-        previousMagnitude || viewportHeight * 0.35,
-        viewportHeight * 0.15,
+        previousMagnitude || viewportHeight * 0.18,
+        viewportHeight * 0.06,
         viewportHeight * 0.65,
     );
     const base = Number.isFinite(pendingTop) ? pendingTop : currentTop;
+    // 累积墙 0.8→0.45 视口高：预测只是“领先一点”的视觉反馈，允许跑太远
+    // 表现为提前量过大；真实定位落地后预测即被覆盖。
     return Math.round(clamp(
         base + normalizedDirection * magnitude,
-        currentTop - viewportHeight * 0.8,
-        currentTop + viewportHeight * 0.8,
+        currentTop - viewportHeight * 0.45,
+        currentTop + viewportHeight * 0.45,
     ));
 }

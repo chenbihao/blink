@@ -18,6 +18,24 @@ const DEFAULT_DETAIL_LUMA_RANGE = 10;
 const DEFAULT_DETAIL_TILE_MISMATCH_THRESHOLD = 8;
 const DEFAULT_DETAIL_MISMATCH_RATIO = 0.32;
 
+// 0.24.10 鲁棒打分管线常量（xtask/spikes/scroll-stitch 校准）：
+// 采样行网格与周期行距锁相时整帧跳过墨行，远距位移拿到噪声级分数被
+// 错误接受（静默损坏）。候选选择换行级鲁棒分，接受判定回更密的全量口径。
+const ROBUST_SAMPLE_ROWS = 48;
+const ROBUST_TRIM_RATIO = 0.25;
+// 截尾后幸存行下限：行数不足时宁 INF 也不放水——spike 实测放松该下限
+// 会让稀疏混叠窗口重新刷出噪声级低分。
+const ROBUST_MIN_VALID_ROWS = 8;
+// 与 DEFAULT_MIN_POSITIONED_OVERLAP_RATIO 对齐：极小重叠窗口比较行太少，
+// 掩码+截尾可能把不匹配行删光后剩余纯噪声行刷出假低分。
+const ROBUST_MIN_OVERLAP_RATIO = 0.2;
+// 行同位差异低于该值视为固定层/死行（真实采集中静止像素应逐字节一致，
+// 该阈值只吸收光标闪烁等局部动态与压缩伪影的边沿）。
+const ROW_CHANGE_EPS = 2;
+// unchanged 短路要求几乎无行变化；少于此行数的变化行可能是稀疏内容
+// 真实滚动（空白页采集卡死修复），需要继续搜索确认。
+const UNCHANGED_MIN_CHANGED_ROWS = 4;
+
 function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 28, precomputed = null) {
     const w = Math.min(prevFrame.width, currFrame.width);
     const h = Math.min(prevFrame.height, currFrame.height);
@@ -67,9 +85,147 @@ function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 2
 }
 
 /**
+ * 逐行同位差异：rowChange[y] = 两帧同一屏幕行 y 在采样列上的平均 |ΔRGB|。
+ * 固定层（吸顶/置底/悬浮按钮）与空白死行 ≈ 0；内容行因滚动差异显著。
+ * 供 informative unchanged 判定与鲁棒打分的双侧掩码使用。
+ */
+function computeRowChange(prevFrame, currFrame, xs) {
+    const h = Math.min(prevFrame.height, currFrame.height);
+    const prev = prevFrame.data;
+    const curr = currFrame.data;
+    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
+    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+    const result = new Float32Array(h);
+    const samplesPerRow = xs.length * 3;
+    for (let y = 0; y < h; y++) {
+        const prevRowBase32 = y * prevFrame.width;
+        const currRowBase32 = y * currFrame.width;
+        let sum = 0;
+        for (let ci = 0; ci < xs.length; ci++) {
+            const x = xs[ci];
+            const pp = prev32[prevRowBase32 + x];
+            const cp = curr32[currRowBase32 + x];
+            sum += Math.abs((pp & 0xFF) - (cp & 0xFF));
+            sum += Math.abs(((pp >> 8) & 0xFF) - ((cp >> 8) & 0xFF));
+            sum += Math.abs(((pp >> 16) & 0xFF) - ((cp >> 16) & 0xFF));
+        }
+        result[y] = sum / samplesPerRow;
+    }
+    return result;
+}
+
+/**
+ * 0.24.10 鲁棒行级 SAD：双侧行变化掩码 + 截尾均值，只用于候选选择。
+ * 掩码必须双侧检查——比较对是 (curr 行 y, prev 行 y+shift)，悬浮元素会
+ * 经 prev 侧 y+shift 进入比较对，只查 curr 侧挡不住（spike 实测）。
+ * 有效行不足或重叠过小时返回 Infinity（宁缺毋滥，交给全量验证拒绝）。
+ */
+function sampledRobustSad(prevFrame, currFrame, shift, rowChange, xs) {
+    const h = Math.min(prevFrame.height, currFrame.height);
+    const overlap = h - shift;
+    if (overlap <= 8 || overlap < h * ROBUST_MIN_OVERLAP_RATIO) return Infinity;
+    const marginY = Math.min(
+        Math.floor(overlap / 4),
+        Math.max(16, Math.floor(h * 0.18)),
+    );
+    const usableH = Math.max(1, overlap - marginY * 2);
+    // 采样行去重：小重叠时 48 个采样位会重复命中同一行
+    const ys = [];
+    for (let sy = 0; sy < ROBUST_SAMPLE_ROWS; sy++) {
+        const y = marginY + Math.min(usableH - 1, Math.floor((sy + 0.5) * usableH / ROBUST_SAMPLE_ROWS));
+        if (ys.at(-1) !== y) ys.push(y);
+    }
+    const prev = prevFrame.data;
+    const curr = currFrame.data;
+    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
+    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+    const rowSads = [];
+    const samplesPerRow = xs.length * 3;
+    for (const y of ys) {
+        const prevY = y + shift;
+        if (rowChange[y] <= ROW_CHANGE_EPS || rowChange[prevY] <= ROW_CHANGE_EPS) continue;
+        const prevRowBase32 = prevY * prevFrame.width;
+        const currRowBase32 = y * currFrame.width;
+        let sad = 0;
+        for (let ci = 0; ci < xs.length; ci++) {
+            const x = xs[ci];
+            const pp = prev32[prevRowBase32 + x];
+            const cp = curr32[currRowBase32 + x];
+            sad += Math.abs((pp & 0xFF) - (cp & 0xFF));
+            sad += Math.abs(((pp >> 8) & 0xFF) - ((cp >> 8) & 0xFF));
+            sad += Math.abs(((pp >> 16) & 0xFF) - ((cp >> 16) & 0xFF));
+        }
+        rowSads.push(sad / samplesPerRow);
+    }
+    if (!rowSads.length) return Infinity;
+    rowSads.sort((a, b) => a - b);
+    const keep = Math.ceil(rowSads.length * (1 - ROBUST_TRIM_RATIO));
+    const taken = rowSads.slice(0, keep);
+    if (taken.length < ROBUST_MIN_VALID_ROWS) return Infinity;
+    let total = 0;
+    for (const value of taken) total += value;
+    return total / taken.length;
+}
+
+/**
+ * 0.24.10 内容行全量分：全量采样口径（供接受判定、候选选优与多义守门），
+ * 但剔除双侧行变化掩码认定的固定层行——悬浮元素经 prev 侧进入比较对时
+ * 会污染真位移的全量分（spike 后续实测），把它反噬成输给无污染窗口的
+ * 混叠位移。不截尾、不设行数下限（判别力来自全部内容行，包括空白行）；
+ * 内容行过少时退回普通全量分，避免统计空心化。
+ */
+function sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, sampleRows) {
+    const h = Math.min(prevFrame.height, currFrame.height);
+    const overlap = h - shift;
+    if (overlap <= 8) return Infinity;
+    const marginY = Math.min(
+        Math.floor(overlap / 4),
+        Math.max(16, Math.floor(h * 0.18)),
+    );
+    const usableH = Math.max(1, overlap - marginY * 2);
+    const prev = prevFrame.data;
+    const curr = currFrame.data;
+    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
+    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+    const samplesPerRow = xs.length * 3;
+    let sad = 0;
+    let rows = 0;
+    for (let sy = 0; sy < sampleRows; sy++) {
+        const y = marginY + Math.min(usableH - 1, Math.floor((sy + 0.5) * usableH / sampleRows));
+        const prevY = y + shift;
+        if (rowChange[y] <= ROW_CHANGE_EPS || rowChange[prevY] <= ROW_CHANGE_EPS) continue;
+        const prevRowBase32 = prevY * prevFrame.width;
+        const currRowBase32 = y * currFrame.width;
+        let rowSad = 0;
+        for (let ci = 0; ci < xs.length; ci++) {
+            const x = xs[ci];
+            const pp = prev32[prevRowBase32 + x];
+            const cp = curr32[currRowBase32 + x];
+            rowSad += Math.abs((pp & 0xFF) - (cp & 0xFF));
+            rowSad += Math.abs(((pp >> 8) & 0xFF) - ((cp >> 8) & 0xFF));
+            rowSad += Math.abs(((pp >> 16) & 0xFF) - ((cp >> 16) & 0xFF));
+        }
+        sad += rowSad / samplesPerRow;
+        rows++;
+    }
+    if (rows < 6) {
+        // 内容行不足（近乎全空白/全固定层）：退回普通全量口径
+        return shift >= 0
+            ? sampledSad(prevFrame, currFrame, shift, sampleRows, xs.length, {xs})
+            : sampledSad(currFrame, prevFrame, -shift, sampleRows, xs.length, {xs});
+    }
+    return sad / rows;
+}
+
+/**
  * 估算相邻两帧的纵向位移。
  * shift > 0 表示视口向下移动，shift < 0 表示视口向上移动。
  * expectedDirection 可用滚轮意图限定搜索方向，避免重复纹理在反向产生伪匹配。
+ *
+ * 0.24.10：options.robustScoring 启用鲁棒打分管线（相邻帧追踪路径）——
+ * 候选选择用行级鲁棒分（双侧行变化掩码 + 截尾），接受判定与多义守门回
+ * 更密的全量采样口径。默认路径（探针/重定位粗召回）保持原打分不变：
+ * 探针帧太小，截尾后有效行不足。
  */
 export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
     if (!prevFrame || !currFrame ||
@@ -82,9 +238,35 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
     const sampleRows = options.sampleRows ?? 24;
     const sampleCols = options.sampleCols ?? 28;
     const unchangedThreshold = options.unchangedThreshold ?? DEFAULT_UNCHANGED_THRESHOLD;
+    const useRobust = options.robustScoring === true;
+
+    // H8 优化：预计算采样坐标——shift 变化时 x 坐标和相对 y 坐标不变，无需每次重算
+    const xs = new Array(sampleCols);
+    for (let sx = 0; sx < sampleCols; sx++) {
+        xs[sx] = Math.min(w - 1, Math.floor((sx + 0.5) * w / sampleCols));
+    }
+
+    // 行级同位差异一次计算，informative unchanged 与鲁棒打分共用
+    const rowChange = useRobust ? computeRowChange(prevFrame, currFrame, xs) : null;
+
     const sameScore = sampledSad(prevFrame, currFrame, 0, sampleRows, sampleCols);
+    // 0.24.10：稀疏内容滚动时全局均分可能低于阈值，只凭均分会把“滚动了但
+    // 内容稀疏”误判为“没滚动”（空白页采集永不前进）。行变化行数足够说明
+    // 画面确实变了：继续搜索，搜不出可接受位移再回退 unchanged（保持
+    // “静止等待”语义，动画帧不升级为失败）。默认路径维持原短路行为。
+    let unchangedPending = false;
     if (sameScore <= unchangedThreshold) {
-        return {status: 'unchanged', shift: 0, score: sameScore};
+        if (!useRobust) {
+            return {status: 'unchanged', shift: 0, score: sameScore};
+        }
+        let changedRows = 0;
+        for (let y = 0; y < h && changedRows < UNCHANGED_MIN_CHANGED_ROWS; y++) {
+            if (rowChange[y] > ROW_CHANGE_EPS) changedRows++;
+        }
+        if (changedRows < UNCHANGED_MIN_CHANGED_ROWS) {
+            return {status: 'unchanged', shift: 0, score: sameScore};
+        }
+        unchangedPending = true;
     }
 
     const maxShift = Math.min(
@@ -100,28 +282,31 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
         ? [1, -1]
         : (options.strictDirection ? [expectedDirection] : [expectedDirection, -expectedDirection]);
 
-    // H8 优化：预计算采样坐标——shift 变化时 x 坐标和相对 y 坐标不变，无需每次重算
-    const xs = new Array(sampleCols);
-    for (let sx = 0; sx < sampleCols; sx++) {
-        xs[sx] = Math.min(w - 1, Math.floor((sx + 0.5) * w / sampleCols));
-    }
-    // y 坐标依赖 overlap（= h - shift），但 shift=0 时的 y 分布可作为近似
-    // 实际上 sampledSad 内部仍会按 overlap 重算 y，这里只传 x 做优化
-    const precomputed = {xs};
+    const scoreAt = (direction, distance) => {
+        if (direction > 0) {
+            return useRobust
+                ? sampledRobustSad(prevFrame, currFrame, distance, rowChange, xs)
+                : sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, {xs});
+        }
+        return useRobust
+            ? sampledRobustSad(currFrame, prevFrame, distance, rowChange, xs)
+            : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, {xs});
+    };
 
     // H8 优化：粗到细搜索——先以 step=4 找大致位置，再 ±3 精细搜索
-    // rejectAmbiguous 模式需收集所有候选位移做歧义检测，不能跳步——退回全量搜索
-    const useCoarseSearch = !options.rejectAmbiguous;
+    // rejectAmbiguous 模式需收集所有候选位移做歧义检测，不能跳步——退回全量搜索。
+    // 鲁棒路径同样禁止跳步：粗搜网格只覆盖 ≡1 (mod 4) 的位移，而稀疏周期内容
+    // 的双侧掩码幸存行随位移残差振荡，网格点可能全部落在掩码空集上（全 INF）。
+    // 鲁棒分只计算掩码后的少量行，全扫成本可接受。
+    const useCoarseSearch = !options.rejectAmbiguous && !useRobust;
     const coarseStep = 4;
     const refineRange = 3;
     for (const direction of directions) {
         const step = useCoarseSearch ? coarseStep : 1;
         for (let distance = 1; distance <= maxShift; distance += step) {
-            const score = direction > 0
-                ? sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, precomputed)
-                : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, precomputed);
+            const score = scoreAt(direction, distance);
             const rank = score * (expectedDirection !== 0 && direction !== expectedDirection ? 1.08 : 1);
-            if (options.rejectAmbiguous) candidates.push({shift: direction * distance, score});
+            if (options.rejectAmbiguous || useRobust) candidates.push({shift: direction * distance, score});
             if (rank < bestRank) {
                 bestRank = rank;
                 bestScore = score;
@@ -137,11 +322,11 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
         const refineStart = Math.max(1, coarseDist - refineRange);
         const refineEnd = Math.min(maxShift, coarseDist + refineRange);
         for (let distance = refineStart; distance <= refineEnd; distance++) {
-            // 跳过粗搜已试过的点（coarseStep 的倍数）
-            if (distance % coarseStep === 0 && distance <= coarseDist) continue;
-            const score = coarseDir > 0
-                ? sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, precomputed)
-                : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, precomputed);
+            // 只跳过粗搜真正走过的点：粗搜从 1 起步进 4，走过的是 ≡1 (mod 4)。
+            // 原条件 %4===0 跳的恰是粗搜从未测试的点，真位移 ≡0 (mod 4) 且粗搜
+            // 最佳落在 +1 时精搜永远测不到真峰（0.24.10 修复，spike 实测永久差一像素）。
+            if (distance % coarseStep === 1 && distance <= coarseDist) continue;
+            const score = scoreAt(coarseDir, distance);
             const rank = score * (expectedDirection !== 0 && coarseDir !== expectedDirection ? 1.08 : 1);
             if (rank < bestRank) {
                 bestRank = rank;
@@ -155,42 +340,81 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
     const improvementRatio = options.improvementRatio ?? 0.8;
     const rankedCandidates = [...candidates].sort((a, b) => a.score - b.score);
     const second = rankedCandidates.find((candidate) => candidate.shift !== bestShift);
-    // 必须既达到绝对阈值，又明显优于“没滚动”的对齐，避免动画/光标闪烁误判为滚动。
-    if (bestScore > matchThreshold || bestScore >= sameScore * improvementRatio) {
+
+    // 0.24.10 全量验证与选优（spike hybrid 设计）：鲁棒分只做候选预筛——
+    // 稀疏内容的空白对空白行会让鲁棒分在多个位移并列低分，纯 argmin 随机
+    // 命中错位移；全量分含未掩码行，在并列候选中区分真伪并直接选出最优。
+    let acceptedScore = bestScore;
+    let improvementBaseline = sameScore;
+    let rival = null;
+    if (useRobust) {
+        const contentScoreOf = (shift) => shift > 0
+            ? sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, ROBUST_SAMPLE_ROWS)
+            : sampledContentSad(currFrame, prevFrame, -shift, rowChange, xs, ROBUST_SAMPLE_ROWS);
+        const ambiguityRatio = options.ambiguityRatio ?? 1.12;
+        const ambiguityDelta = options.ambiguityDelta ?? 1.5;
+        const ambiguityDistance = options.ambiguityDistance ?? Math.max(12, h * 0.12);
+        const pool = candidates.filter((candidate) => (
+            candidate.score <= bestScore * ambiguityRatio + ambiguityDelta
+        ));
+        if (pool.length) {
+            let selected = null;
+            for (const candidate of pool) {
+                // 每个并列候选都要有内容行全量分：选优与多义守门都依赖它
+                candidate.dense = contentScoreOf(candidate.shift);
+                if (!selected || candidate.dense < selected.dense) selected = candidate;
+            }
+            bestShift = selected.shift;
+            acceptedScore = selected.dense;
+            improvementBaseline = contentScoreOf(0);
+            rival = pool.find((candidate) => (
+                Math.abs(candidate.shift - bestShift) >= ambiguityDistance
+                && candidate.dense <= acceptedScore * ambiguityRatio + ambiguityDelta
+            )) || null;
+        } else {
+            bestShift = 0;
+            acceptedScore = Infinity;
+        }
+    }
+
+    if (acceptedScore > matchThreshold || acceptedScore >= improvementBaseline * improvementRatio) {
+        if (unchangedPending) {
+            return {status: 'unchanged', shift: 0, score: sameScore};
+        }
         return {
             status: 'no-match',
-            reason: bestScore > matchThreshold ? 'low-confidence' : 'no-overlap',
+            reason: acceptedScore > matchThreshold ? 'low-confidence' : 'no-overlap',
             shift: 0,
             candidateShift: bestShift,
-            score: bestScore,
+            score: acceptedScore,
             secondScore: second?.score,
             sameScore,
         };
     }
-    if (options.rejectAmbiguous) {
+    if (!useRobust && options.rejectAmbiguous) {
         const ambiguityDistance = options.ambiguityDistance ?? Math.max(12, h * 0.12);
         const ambiguityRatio = options.ambiguityRatio ?? 1.12;
         const ambiguityDelta = options.ambiguityDelta ?? 1.5;
-        const rival = candidates.find((candidate) => (
+        rival = candidates.find((candidate) => (
             Math.abs(candidate.shift - bestShift) >= ambiguityDistance
             && candidate.score <= bestScore * ambiguityRatio + ambiguityDelta
         ));
-        if (rival) {
-            return {
-                status: 'no-match',
-                reason: 'ambiguous',
-                shift: 0,
-                candidateShift: bestShift,
-                score: bestScore,
-                secondScore: rival.score,
-                sameScore,
-                rivalShift: rival.shift,
-                rivalScore: rival.score,
-            };
-        }
+    }
+    if (rival) {
+        return {
+            status: 'no-match',
+            reason: 'ambiguous',
+            shift: 0,
+            candidateShift: bestShift,
+            score: acceptedScore,
+            secondScore: second?.score,
+            sameScore,
+            rivalShift: rival.shift,
+            rivalScore: rival.dense ?? rival.score,
+        };
     }
     return {
-        status: 'matched', shift: bestShift, score: bestScore, secondScore: second?.score, sameScore,
+        status: 'matched', shift: bestShift, score: acceptedScore, secondScore: second?.score, sameScore,
     };
 }
 

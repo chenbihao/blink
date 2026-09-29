@@ -148,6 +148,104 @@ assert.equal(
     '多个远距离位移同样匹配时应拒绝重复纹理',
 );
 
+// ── 0.24.10 回归 ────────────────────────────────────────────────
+
+// 精搜 skip bug 回归：构造“粗搜最佳落在真位移 +1”的分数地形。
+// prev 采样区内若干行被替换为上一行内容（模拟固定层/部分渲染差异），
+// 使 SAD(9) 因局部完美行低于 SAD(5)；真位移 8（≡0 mod 4）在原 skip
+// 规则（跳 ≡0 mod 4 的点）下永远不被精搜测试，永久差一像素。
+{
+    const skipPrev = documentFrame(0);
+    const pristine = documentFrame(0);
+    const rowBytes = skipPrev.width * 4;
+    for (let row = 59; row <= 65; row++) {
+        skipPrev.data.set(
+            pristine.data.subarray((row - 1) * rowBytes, row * rowBytes),
+            row * rowBytes,
+        );
+    }
+    assert.equal(
+        estimateVerticalShift(skipPrev, documentFrame(8), {expectedDirection: 1}).shift,
+        8,
+        '精搜必须能测试 ≡0 (mod 4) 的真位移（skip bug 回归）',
+    );
+}
+
+// 空白页 unchanged 卡死回归：稀疏细线、低对比、窄文字使全局均分 ≤ 2.5。
+// 行位置/长度由行号哈希决定（非周期），保证真实位移是唯一对齐。
+// 默认路径维持 unchanged 短路（探针/重定位不换管线）；robustScoring 存在
+// 足量行变化行，应继续搜索并找出真实位移。
+function sparseScrollFrame(top, width = 120, height = 240, contrast = 40,
+                           inkWidth = 12, textBits = 5) {
+    const image = new ImageData(width, height);
+    const darkValue = 250 - contrast;
+    for (let y = 0; y < height; y++) {
+        const documentY = top + y;
+        const line = Math.floor(documentY / 4);
+        const row = ((documentY % 4) + 4) % 4;
+        const lineHash = Math.imul(line, 2654435761) >>> 0;
+        const hasText = row <= 1 && (lineHash & 7) < textBits;
+        const xStart = 8 + ((lineHash >>> 8) % (width - inkWidth - 16));
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const dark = hasText && x >= xStart && x < xStart + inkWidth;
+            image.data[i] = dark ? darkValue : 250;
+            image.data[i + 1] = dark ? darkValue + 2 : 250;
+            image.data[i + 2] = dark ? darkValue - 2 : 250;
+            image.data[i + 3] = 255;
+        }
+    }
+    return image;
+}
+{
+    const sparsePrev = sparseScrollFrame(0);
+    const sparseNext = sparseScrollFrame(70);
+    assert.equal(
+        estimateVerticalShift(sparsePrev, sparseNext, {expectedDirection: 1}).status,
+        'unchanged',
+        '默认路径维持 unchanged 短路（探针/重定位不换管线）',
+    );
+    // 卡死边界的稀疏内容信息贫乏，匹配成败取决于局部纹理运气；断言语义
+    // 锁定为“不得再被判为没滚动”（应尝试匹配），精确位移由下方脱离边界
+    // 的用例与 tracker 绝对位置复核共同保证。
+    const sparseRobust = estimateVerticalShift(sparsePrev, sparseNext, {
+        expectedDirection: 1,
+        strictDirection: true,
+        rejectAmbiguous: true,
+        robustScoring: true,
+    });
+    assert.notEqual(
+        sparseRobust.status,
+        'unchanged',
+        '稀疏内容滚动不得被误判为没滚动（应尝试匹配）',
+    );
+    // 对比度/墨宽更高（全局均分高于 unchanged 阈值、脱离信息贫乏带）的
+    // 稀疏页面，鲁棒管线应精确恢复真实位移。
+    const readablePrev = sparseScrollFrame(0, 120, 240, 120, 16, 6);
+    const readableNext = sparseScrollFrame(70, 120, 240, 120, 16, 6);
+    assert.equal(
+        estimateVerticalShift(readablePrev, readableNext, {
+            expectedDirection: 1,
+            strictDirection: true,
+            rejectAmbiguous: true,
+            robustScoring: true,
+        }).shift,
+        70,
+        '稀疏内容应恢复真实位移',
+    );
+}
+
+// 固定层 + 鲁棒管线：吸顶/置底/悬浮块同时存在时精确位移。
+{
+    const overlayMatch = estimateVerticalShift(
+        withFixedBlocks(documentFrame(0)),
+        withFixedBlocks(documentFrame(20)),
+        {expectedDirection: 1, robustScoring: true},
+    );
+    assert.equal(overlayMatch.status, 'matched');
+    assert.equal(overlayMatch.shift, 20, '视口固定块不得破坏鲁棒管线的位移精度');
+}
+
 const captures = [
     {image: documentFrame(40), top: 0},
     {image: documentFrame(57), top: 17},

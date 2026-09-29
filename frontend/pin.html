@@ -49,6 +49,7 @@
     import {
         invoke,
         screenshotPinTransform,
+        screenshotPinMove,
         screenshotPinGetRect,
         pinWorkArea,
         win32LeftButtonDown,
@@ -631,10 +632,13 @@
         relayoutPinTextLayer();
     });
 
-    // ── 原生拖动（Tauri startDragging）─────────────────────────
-    // 系统处理鼠标捕获、跨屏边界和高频移动，移除每帧 IPC。
-    // 只在图片可见区域按下左键时触发。
-    // 移动阈值后再启动原生拖动，避免吞掉 click/dblclick。
+    // ── 拖动：原生 startDragging + 超高长图 JS 拖动（0.24.10 双轨）──────
+    // 普通尺寸：系统处理鼠标捕获、跨屏边界和高频移动，零拖动 IPC（0.19.16）。
+    // 超高长图（窗口高于所在屏工作区）：改用 JS 拖动（0.19.13~0.19.15 机制，
+    // rAF 合流 + 单在途 IPC）。原因：Windows DefWindowProc 的鼠标移动循环
+    // 把窗口顶边钳制在所在显示器顶边（左/右/下自由，仅顶边受限，与光标
+    // 无关）——原生拖动永远无法突破，长图屏幕下方内容将不可达。
+    // 移动阈值后再启动拖动，避免吞掉 click/dblclick。
     const DRAG_THRESHOLD = 5; // CSS px — 低于此位移视为点击
     let dragCandidate = null;   // { pointerId, x, y } 或 null
     let nativeDragActive = false;
@@ -643,6 +647,66 @@
     // 往往根本不派发残余 click——若用永久布尔标志，会滞留吞掉用户下一次真实
     // 点击（表现为"拖完 pin 后第一次左键没反应"）。改为限时窗口，过期自动失效。
     let suppressClickUntil = 0;
+
+    // JS 拖动状态（超高长图专用）
+    let jsDrag = null;          // {pointerId, startScreenX, startScreenY, startImageX, startImageY}
+    let jsDragRaf = 0;
+    let jsDragIpcInFlight = false;
+
+    /** 图片窗口（含发光 pad）是否高过所在显示器工作区（超高长图判定）。 */
+    function isTallPinOverflow() {
+        const rect = computeWindowRect(
+            {baseCssW, baseCssH, zoom, imageScreenX, imageScreenY}, monitorDpr,
+        );
+        // window.screen 反映 WebView 当前所在显示器；avail* 为该屏 CSS 像素
+        // （随该屏 DPR 缩放语义），× monitorDpr 近似物理工作区
+        const availTop = Number.isFinite(window.screen.availTop) ? window.screen.availTop : 0;
+        const availH = window.screen.availHeight || window.screen.height || 0;
+        if (availH <= 0) return false;
+        const dpr = monitorDpr || 1;
+        return rect.winH > Math.round(availH * dpr);
+    }
+
+    /** rAF 合流 + 单在途 IPC：一次只挂一个 screenshotPinMove，完成补尾随。 */
+    function scheduleJsDragMove() {
+        if (jsDragRaf !== 0) return;
+        jsDragRaf = requestAnimationFrame(() => {
+            jsDragRaf = 0;
+            if (jsDragIpcInFlight || !jsDrag) return;
+            const rect = computeWindowRect(
+                {baseCssW, baseCssH, zoom, imageScreenX, imageScreenY}, monitorDpr,
+            );
+            jsDragIpcInFlight = true;
+            screenshotPinMove(myLabel, rect.winX, rect.winY)
+                .catch(() => {
+                })
+                .finally(() => {
+                    jsDragIpcInFlight = false;
+                    if (jsDrag) scheduleJsDragMove();
+                });
+        });
+    }
+
+    function endJsDrag() {
+        if (!jsDrag) return;
+        if (jsDrag.pointerId != null && jsDrag.captureTarget) {
+            try {
+                jsDrag.captureTarget.releasePointerCapture?.(jsDrag.pointerId);
+            } catch {
+            }
+        }
+        jsDrag = null;
+        if (jsDragRaf !== 0) {
+            cancelAnimationFrame(jsDragRaf);
+            jsDragRaf = 0;
+        }
+        // 尾随提交最终位置（最后一次 pointermove 可能还在单飞队列外）
+        const rect = computeWindowRect(
+            {baseCssW, baseCssH, zoom, imageScreenX, imageScreenY}, monitorDpr,
+        );
+        screenshotPinMove(myLabel, rect.winX, rect.winY).catch(() => {
+        });
+    }
 
     document.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
@@ -668,22 +732,59 @@
     });
 
     document.addEventListener('pointermove', (e) => {
+        // JS 拖动进行中：按屏幕坐标增量移动窗口（e.screenX/Y 增量为物理像素，
+        // 与 0.19.13 旧实现同语义）
+        if (jsDrag) {
+            if (e.pointerId !== jsDrag.pointerId) return;
+            if (!(e.buttons & 1)) {
+                // 捕获丢失类异常收尾（正常松开走 pointerup）；残余 click 抑制
+                // 只在 pointerup/watchdog 两处设置（pin-ctx-menu 结构契约）
+                endJsDrag();
+                nativeDragActive = false;
+                return;
+            }
+            imageScreenX = jsDrag.startImageX + (e.screenX - jsDrag.startScreenX);
+            imageScreenY = jsDrag.startImageY + (e.screenY - jsDrag.startScreenY);
+            scheduleJsDragMove();
+            return;
+        }
         if (!dragCandidate || e.pointerId !== dragCandidate.pointerId) return;
         if (!(e.buttons & 1)) return;
         const dx = e.clientX - dragCandidate.x;
         const dy = e.clientY - dragCandidate.y;
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-        // 达到阈值，启动系统原生拖动；菜单开着则先收起（拖动即关菜单）
+        // 达到阈值，启动拖动；菜单开着则先收起（拖动即关菜单）
         dragCandidate = null;
         nativeDragActive = true;
         if (isCtxOpen) hideCtxMenu();
+        if (isTallPinOverflow()) {
+            // 超高长图：JS 拖动突破 DefWindowProc 移动循环的顶边钳制。
+            // pointer capture 尽量保住窗口外的事件流（长图窗口巨大，鼠标
+            // 拖动中几乎总在窗口内，这里只是边界保险）。
+            jsDrag = {
+                pointerId: e.pointerId,
+                captureTarget: e.target,
+                startScreenX: e.screenX,
+                startScreenY: e.screenY,
+                startImageX: imageScreenX,
+                startImageY: imageScreenY,
+            };
+            try {
+                e.target.setPointerCapture?.(e.pointerId);
+            } catch {
+            }
+            return;
+        }
         tauriWin?.startDragging?.().catch(() => {
             nativeDragActive = false;
         });
     });
 
-    document.addEventListener('pointerup', () => {
+    document.addEventListener('pointerup', (e) => {
         dragCandidate = null;
+        if (jsDrag) {
+            endJsDrag();
+        }
         if (!nativeDragActive) return;
         nativeDragActive = false;
         suppressClickUntil = Date.now() + 250;
@@ -694,7 +795,10 @@
 
     document.addEventListener('pointercancel', () => {
         dragCandidate = null;
-        nativeDragActive = false;
+        if (jsDrag) {
+            endJsDrag();
+            nativeDragActive = false;
+        }
     });
 
     // 吞掉原生拖动后浏览器可能产生的残余 click（capture 阶段，限时窗口内仅一次）
