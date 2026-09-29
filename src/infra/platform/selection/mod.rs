@@ -210,6 +210,8 @@ mod listener;
 
 #[cfg(target_os = "windows")]
 mod windows;
+// 0.24.7 C3：caret 定位复用"show 前捕获焦点元素"模式（跨模块传递元素引用）
+pub(crate) use windows::SendableElement;
 
 #[cfg(test)]
 mod tests {

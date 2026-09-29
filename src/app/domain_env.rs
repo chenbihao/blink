@@ -528,10 +528,34 @@ impl SurfacePort for TauriDomainEnv {
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
         // 0.21.2：Chord clipboard_history binding 的 GUI starter target。
         // 旧 ClipboardHistoryAction 的行为：主窗 show + emit CHORD_ENTER_MODE
+        // 0.24.7 C3：主窗隐藏的全局唤起场景，在 show 抢占焦点**之前**同步捕获
+        // 焦点元素（O(1) <5ms，同 orchestrator 的划词捕获模式），invoke 之后再
+        // 拿元素引用慢查 caret 定位（时序详见 windows.rs 函数注释）。
+        // 主窗可见（chord 场景）时跳过——窗口已在屏幕，无需重定位。
+        let caret_elem = if self
+            .app
+            .get_webview_window("main")
+            .and_then(|w| w.is_visible().ok())
+            .map(|v| !v)
+            .unwrap_or(true)
+        {
+            crate::infra::platform::selection::capture_focused_element()
+        } else {
+            None
+        };
+        // CHORD_ENTER_MODE 先于 show emit（0.24.7）：让前端在 SHOWN 到达前完成
+        // 模式切换——消除"先普通搜索态再闪成剪贴板模式"的一帧闪现，SHOWN 的
+        // 默认上下文搜索也被模式分支跳过。主窗隐藏态 hide() 不停 WebView JS
+        // 循环，事件一般可送达；极端丢失时下方 invoke 后补发兜底（enter 幂等）。
+        let _ = self.app.emit(
+            crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
+            serde_json::json!({ "mode": "clipboard" }),
+        );
         crate::app::window_orchestrator::invoke(&self.app);
-        // 0.24.7 C3：目标窗口有文本光标时把主窗精化到输入框附近（后台线程，
-        // 取不到 caret 保持默认居中）。
-        crate::infra::platform::window::spawn_main_window_caret_refine(&self.app);
+        if let Some(elem) = caret_elem {
+            crate::infra::platform::window::spawn_main_window_caret_refine(&self.app, elem);
+        }
+        // 幂等补发：前置 emit 若因隐藏态丢失，此处到达时前端照常 enter
         let _ = self.app.emit(
             crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
             serde_json::json!({ "mode": "clipboard" }),

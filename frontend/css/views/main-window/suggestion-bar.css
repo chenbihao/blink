@@ -30,7 +30,7 @@
     width: 100%;
     padding: 2px var(--space-sm);
     font-size: var(--text-sm);
-    color: var(--text-sub);
+    color: var(--text);
     background: transparent;
     border: none;
     border-radius: var(--radius-sm);
@@ -44,8 +44,12 @@
     color: var(--text);
 }
 
-/* 次槽文本与主槽同色（用户实测两次反馈：降色/降透明在毛玻璃下不可读）。
-   主次层级差异由行序（primary 在上）与 origin 弱化表达，不再压色彩。 */
+/* 次槽文本降一档（保留主次层级设计，用户裁决）：两档整体上移一档
+   ——primary 用 --text、secondary 用 --text-sub。此前 primary=text-sub /
+   secondary=text-dim 的组合在毛玻璃半透明下不可读（用户实测两次反馈）。 */
+.suggestion-row.slot-secondary .suggestion-text {
+    color: var(--text-sub);
+}
 
 .suggestion-icon {
     display: inline-flex;

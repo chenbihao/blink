@@ -64,6 +64,8 @@ let badgeEl = null;
 
 /** 0.20.2: 上次搜索的 trim 后 query——避免相同 query 重复搜索导致光标重置。 */
 let lastQuery = "";
+/** 最近一次 doSearch 时间戳（reloadList 短窗去重用）。 */
+let lastSearchAt = 0;
 
 // ── 状态查询 ──────────────────────────────────────────────────────────────
 
@@ -102,6 +104,10 @@ export function clearSelection() {
 
 /** 0.20.2: 刷新列表（右键删除后调用），维持当前页号。 */
 export function reloadList() {
+    // enter 首搜后短窗内跳过（0.24.7）：awareness-updated（选区提取完成 emit）
+    // 经 retrigger 到这里，与 enter 的首搜重复——剪贴板模式不消费选区，
+    // 这次重查纯浪费。右键删除刷新通常在 250ms 窗外，不受影响。
+    if (Date.now() - lastSearchAt < 250) return;
     // 不清多选、不清 generation——只是刷新列表数据
     // 清防抖，直接重新搜索当前 query
     clearTimeout(timer);
@@ -282,6 +288,7 @@ export function handleInput(value) {
 async function doSearch(query, keepPage = false) {
     const mySeq = ++seq;
     lastQuery = query;
+    lastSearchAt = Date.now();
     // 刷新（keepPage）时记住当前页号和光标位置
     const savedPage = keepPage ? results.getPage() : 0;
     const savedSelected = keepPage ? results.getSelectedIndex() : 0;

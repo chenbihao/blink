@@ -4,6 +4,7 @@ import {invoke, listen} from "../shared/tauri.js";
 import {resetSuggestionSession} from "../shared/api.js";
 import {EVENTS} from "../shared/event-names.js";
 import {aiQueryEl, queryEl} from "./dom.js";
+import {syncWindowSize} from "./window-size.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
 import * as chord from "./chord.js";
@@ -57,6 +58,17 @@ export function init() {
         if (aiMode.isActive()) {
             aiQueryEl.focus();
             inputState.onShown();
+            return;
+        }
+        // 0.24.7: 剪贴板模式下唤起（CHORD_ENTER_MODE 已先于 show 到达）——
+        // 保持过滤词与列表，不清 query、不跑默认上下文搜索（模式 bypass
+        // 搜索管线，重复查询还会烧 suggestion impression 计数）
+        if (clipboardMode.isActive()) {
+            queryEl.focus();
+            inputState.onShown();
+            // enter 先于 show 完成（列表已渲染），但 show_main_window 的
+            // set_size(BASE) 会把 enter 撑起的高度压回基础值——重测撑回
+            syncWindowSize();
             return;
         }
         queryEl.value = "";

@@ -146,6 +146,45 @@ fn caret_via_uia(owner_hwnd: Option<isize>) -> Option<RECT> {
     }
 }
 
+/// 从**已捕获的焦点元素引用**查 caret（0.24.7 C3 剪贴板模式定位用）。
+///
+/// 与 `get_caret_rect_for` 的区别：后者取"当前系统焦点"（主窗 show 抢焦点后
+/// 必然取到自家 WebView 被归属校验拒绝）；本函数基于 show **之前**经
+/// `selection::capture_focused_element()` 捕获的 COM 元素引用慢查——引用
+/// 不依赖系统焦点（MTA 公寓跨线程安全），show 之后仍指向目标输入框。
+pub fn caret_rect_from_captured(
+    elem: &crate::infra::platform::selection::SendableElement,
+) -> Option<RECT> {
+    // 签名收 &SendableElement（而非裸元素）：闭包精确捕获下，调用方
+    // spawn 线程必须捕获整个 Send 包装类型才满足 Send（裸字段非 Send）。
+    if let Some(rect) = try_caret_patterns(&elem.0, "captured") {
+        return Some(rect);
+    }
+    // TextPattern 不支持时退化为控件包围矩形——0.24.7 实测 Chrome 地址栏
+    // （OmniboxViewViews）等自绘 Edit 控件不实现 TextPattern，caret 无解；
+    // 而"定位到输入框附近"的语义本就是控件级近似，Edit/Document 控件的
+    // 包围矩形比 caret 更稳（任何输入控件都有）。非输入控件不兜底——
+    // 避免把主窗定位到整窗/整页矩形。
+    control_rect_fallback(&elem.0)
+}
+
+/// 输入控件包围矩形兜底：仅 Edit（50004）/ Document（50005）类控件。 */
+fn control_rect_fallback(elem: &windows::Win32::UI::Accessibility::IUIAutomationElement) -> Option<RECT> {
+    const UIA_EDIT_CONTROL_TYPE: i32 = 50004;
+    const UIA_DOCUMENT_CONTROL_TYPE: i32 = 50005;
+    let control_type = unsafe { elem.CurrentControlType() }.ok()?.0;
+    if control_type != UIA_EDIT_CONTROL_TYPE && control_type != UIA_DOCUMENT_CONTROL_TYPE {
+        tracing::debug!(control_type, "caret: 非输入控件，不做控件矩形兜底");
+        return None;
+    }
+    let rect = unsafe { elem.CurrentBoundingRectangle() }.ok()?;
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return None;
+    }
+    tracing::debug!("caret: TextPattern 不支持，退化为输入控件包围矩形");
+    Some(rect)
+}
+
 /// 在焦点元素上依次尝试 TextPattern2.GetCaretRange / TextPattern.GetSelection。
 fn try_caret_patterns(elem: &windows::Win32::UI::Accessibility::IUIAutomationElement, tag: &str) -> Option<RECT> {
     if tracing::enabled!(tracing::Level::TRACE) {

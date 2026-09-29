@@ -2561,26 +2561,20 @@ fn spawn_voice_overlay_caret_refine(hwnd: HWND, owner_hwnd: isize) {
     }
 }
 
-/// 最近一次唤起主窗时记忆的外部目标窗口句柄（0.24.7 C3：Alt+C 唤起剪贴板
-/// 模式的 caret 定位用；0 = 尚未记忆）。
-pub fn last_external_hwnd() -> Option<isize> {
-    let hwnd = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);
-    if hwnd == 0 {
-        None
-    } else {
-        Some(hwnd)
-    }
-}
-
-/// Alt+C 唤起剪贴板模式后，把主窗从默认居中精化到目标输入框 caret 附近
+/// Alt+C 全局唤起剪贴板模式时，把主窗从默认居中精化到目标输入框 caret 附近
 /// （0.24.7 C3：剪贴板历史常用于"贴到正在输入的地方"，就近定位省一次移动）。
-/// 几何复用 voice-overlay 的 caret 锚定算法；取不到 caret（目标无文本焦点 /
-/// UIA 不支持）保持 `launcher_position` 居中不动作。查询在后台线程执行
-/// （UIA 跨进程 COM 几十 ms，不得阻塞显示主链路）。
-pub fn spawn_main_window_caret_refine(app: &AppHandle) {
-    let Some(owner) = last_external_hwnd() else {
-        return;
-    };
+///
+/// **采用 G2/划词的"show 前捕获 + show 后慢查"模式**（0.24.7 二版，首版在
+/// show 后查系统焦点被自家 WebView 抢占必败，教训见 caret.rs）：
+/// 调用方在 invoke 之前 `selection::capture_focused_element()` 同步捕获焦点
+/// 元素（O(1) <5ms，此刻焦点还在目标应用），本函数在 invoke 之后拿引用
+/// 慢查 caret——COM 引用不依赖系统焦点。拿到后轮询等主窗可见再挪位
+/// （几何复用 voice-overlay 锚定算法）；捕获失败或目标无 TextPattern
+/// 保持 `launcher_position` 居中，零退化。
+pub fn spawn_main_window_caret_refine(
+    app: &AppHandle,
+    elem: crate::infra::platform::selection::SendableElement,
+) {
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
@@ -2588,14 +2582,23 @@ pub fn spawn_main_window_caret_refine(app: &AppHandle) {
         return;
     };
     let hwnd_raw = hwnd.0 as isize;
+    let app = app.clone();
     let spawned = std::thread::Builder::new()
         .name("main-caret".into())
         .spawn(move || {
-            let Some(caret) = crate::infra::platform::caret::get_caret_rect_for(Some(owner))
+            let Some(caret) = crate::infra::platform::caret::caret_rect_from_captured(&elem)
             else {
-                tracing::debug!(owner, "clipboard-mode: 未取到目标窗口光标，保持居中定位");
+                tracing::debug!("clipboard-mode: 捕获的焦点元素无文本光标，保持居中定位");
                 return;
             };
+            // 等 invoke 链路把主窗 show 出来（上限 600ms；超时说明本次唤起
+            // 中途失败，直接放弃——窗口不可见时 refine 也会自检跳过）
+            for _ in 0..60 {
+                if unsafe { IsWindowVisible(HWND(hwnd_raw as *mut _)) }.as_bool() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             refine_main_window_to_caret(HWND(hwnd_raw as *mut _), &caret);
         });
     if let Err(error) = spawned {
