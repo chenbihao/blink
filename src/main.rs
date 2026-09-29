@@ -64,6 +64,12 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let path_for_log = path.clone();
                 // 0.17.1：stock: 前缀走 SHGetStockIconInfo 路径（系统文件夹图标）
+                //
+                // 0.24.9：提取失败不再回 404——回退通用应用图标（SIID_APPLICATION=2，
+                // SHSTOCKICONID）。控制台不再每次渲染刷 GET 404 噪音（.man 文件、
+                // AppsFolder 里的 URL 项等本就抽不出图标），无图标条目也有占位图标，
+                // 行视觉一致；负缓存（内存 LRU 存 None）保证不重复提取。
+                const SIID_APPLICATION: u32 = 2;
                 let icon = tauri::async_runtime::spawn_blocking(move || {
                     if let Some(rest) = path.strip_prefix("stock:") {
                         rest.parse::<u32>()
@@ -71,6 +77,7 @@ fn main() {
                             .and_then(crate::infra::platform::icon::get_stock_icon_png)
                     } else {
                         crate::infra::platform::icon::get_icon_png(&path)
+                            .or_else(|| crate::infra::platform::icon::get_stock_icon_png(SIID_APPLICATION))
                     }
                 })
                 .await
@@ -83,7 +90,7 @@ fn main() {
                         .body(bytes)
                         .unwrap(),
                     None => {
-                        tracing::debug!(path = %path_for_log, "blink-icon: 未取到图标，返回 404");
+                        tracing::debug!(path = %path_for_log, "blink-icon: 兜底图标也未取到，返回 404");
                         tauri::http::Response::builder()
                             .status(404)
                             .body(Vec::new())

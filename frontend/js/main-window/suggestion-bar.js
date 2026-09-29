@@ -79,7 +79,7 @@ export function update(query, set) {
         secondary = null;
         revision = null;
         renderRows();
-        resyncWindowSize();
+        syncBarHeight();
         return;
     }
 
@@ -88,11 +88,13 @@ export function update(query, set) {
     secondary = set?.secondary ?? null;
     revision = set?.revision ?? null;
 
-    if (!queryEmpty && (primary || secondary)) {
-        sticky = true; // 首次出现即 arm；之后逐键更新不再改变槽位高度
-    }
+    // 0.24.9 修订：粘性占位只在建议存在期间保持——输入中建议收起（"输入即意图"
+    // primary 资格落地后是常态语义）立即释放，空条不再挡住高度收回。原 §5.5
+    // 防逐键抖动的场景（建议随输入隐现）已被降级规则消除大半，残留的分类边界
+    // 闪烁可接受。空 query 仍不 arm（与既有形态一致）。
+    sticky = !queryEmpty && !!(primary || secondary);
     renderRows();
-    syncWindowSize();
+    syncBarHeight();
 }
 
 /** 清空建议（reset / 窗口隐藏 / 独占模式进入时调）。释放粘性槽位。 */
@@ -103,6 +105,30 @@ export function clear() {
     revision = null;
     sticky = false;
     renderRows();
+    syncBarHeight();
+}
+
+// ── 渲染 ─────────────────────────────────────────────────────────────────────
+
+/**
+ * 建议条高度贡献跟踪（0.24.9）：贡献缩小时走 resync（允许窗口收回），否则维持
+ * syncWindowSize 的只增棘轮——翻页/流式结果的 resize 防抖由棘轮保留，本判断
+ * 只对建议条自身的高度变化敏感（两行 → 一行 → 隐藏）。修复实测反馈：建议条
+ * 收起后窗口保持撑开高度，直到删光文本触发空态转换才收回。
+ */
+let lastBarHeight = 0;
+
+/** 建议条当前高度贡献（display:none 时 0；粘性占位 min-height 24px；两行约 48px）。 */
+function barHeight() {
+    return barEl ? barEl.offsetHeight : 0;
+}
+
+/** 按建议条高度贡献方向选同步策略：缩小 → resync（可收回），否则 ratchet 只增。 */
+function syncBarHeight() {
+    const h = barHeight();
+    if (h < lastBarHeight) resyncWindowSize();
+    else syncWindowSize();
+    lastBarHeight = h;
 }
 
 // ── 渲染 ─────────────────────────────────────────────────────────────────────

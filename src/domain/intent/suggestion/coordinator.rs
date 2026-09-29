@@ -294,25 +294,34 @@ impl SuggestionCoordinator {
         sort_by_rank(&mut query_pool);
         sort_by_rank(&mut awareness_pool);
 
-        // ── 5. 按 Kind 去重 → 双槽 ──
-        //    两池串接后按 Kind 去重（每 Kind 留首个=层序内最高分），天然实现
-        //    "翻译主、AI 次"与"Selection 高于 Clipboard"。
-        let mut slots: Vec<Suggestion> = Vec::with_capacity(2);
-        for s in query_pool.into_iter().chain(awareness_pool) {
-            if slots.iter().any(|kept| kept.kind == s.kind) {
-                continue;
-            }
-            slots.push(s);
-            if slots.len() == 2 {
-                break;
-            }
-        }
+        // ── 5. 按 Kind 去重 → 双槽（0.24.9 修订：非空 query 下 awareness 不抢 primary）──
+        //    层序串接按 Kind 去重（每 Kind 留首个=层序内最高分）不变；变化在 primary
+        //    的担任资格：非空 query 时 primary 必须来自 query 池——§4 注释"输入即
+        //    意图表达"的完整落地。query 池空则 primary 轮空，最佳 awareness 候选
+        //    降级 secondary。修复实测反馈：剪贴板建议在用户开始输入后仍盘踞
+        //    primary，直到降频 3 连击才消失——"打几个字才收起"的假延迟实为
+        //    降频计数在充当隐藏机制。空 query 无 query 派生候选，awareness 照旧
+        //    担任 primary（0.8.3 空形态不变）。
+        let query_empty = input.query.trim().is_empty();
+        let primary = if query_empty {
+            query_pool
+                .first()
+                .or_else(|| awareness_pool.first())
+                .cloned()
+        } else {
+            query_pool.first().cloned()
+        };
+        // secondary：层序中与 primary Kind 互异的次位（primary 轮空时即层序首位）
+        let secondary = query_pool
+            .iter()
+            .chain(awareness_pool.iter())
+            .find(|s| primary.as_ref().map_or(true, |p| p.kind != s.kind))
+            .cloned();
 
         let mut output = CoordinateOutput::default();
-        let mut iter = slots.into_iter();
-        output.primary = iter.next();
+        output.primary = primary;
         // secondary 双闸（0.24.5 §5.6）：展示开关 + rank 门槛
-        if let Some(second) = iter.next() {
+        if let Some(second) = secondary {
             if !input.config.secondary_enabled {
                 tracing::debug!(
                     id = %second.id,
@@ -972,6 +981,9 @@ mod tests {
     // ── 0.24.5 §5.6 展示策略开关组 ────────────────────────────────────────
 
     /// completion_enabled=false：Completion 候选全灭，awareness 候选顶上。
+    /// 0.24.9 修订：非空 query 下 query 池空 → primary 轮空，awareness 降级
+    /// secondary（此前 awareness 直接顶 primary——正是"输入后建议盘踞 primary"
+    /// 的同一缺口，补全 completion 闸的镜像用例）。
     #[test]
     fn completion_disabled_filters_completion_only() {
         let mut coordinator = SuggestionCoordinator::new();
@@ -992,7 +1004,63 @@ mod tests {
         let mut i = input("fa", &s);
         i.config.completion_enabled = false;
         let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
-        assert_eq!(out.primary.unwrap().id, "translate-clipboard");
+        assert!(
+            out.primary.is_none(),
+            "非空 query 且 query 池空 → primary 轮空"
+        );
+        assert_eq!(
+            out.secondary.unwrap().id,
+            "translate-clipboard",
+            "awareness 最佳降级 secondary"
+        );
+    }
+
+    /// 0.24.9：非空 query 且 query 池空 → awareness 不抢 primary（输入即意图表达）。
+    /// 场景即实测反馈：剪贴板 URL 建议 0.95，输入任意文本后应立即让出 primary
+    /// （此前的隐藏靠降频 3 连击，表现为"打几个字才收起"的假延迟）。
+    #[test]
+    fn nonempty_query_awareness_demoted_to_secondary() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "open-url-clipboard",
+                SuggestionKind::OpenUrl,
+                0.95,
+                Some(SuggestionOrigin::Clipboard),
+            )],
+        )));
+        let s = snap();
+        let (out, _) = coordinator.coordinate(&input("xyz", &s), &mut fresh_fatigue());
+        assert!(out.primary.is_none(), "非空 query 下 awareness 不抢 primary");
+        assert_eq!(out.secondary.unwrap().id, "open-url-clipboard");
+
+        // 空 query：同一候选照旧担任 primary（唤起即环境建议的既有形态不变）
+        let (out, _) = coordinator.coordinate(&input("", &s), &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "open-url-clipboard");
+    }
+
+    /// 0.24.9：query 池非空时行为不变——query 派生 primary、awareness 最多 secondary。
+    #[test]
+    fn nonempty_query_with_query_pool_keeps_layering() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Keyword,
+            vec![make_sug("completion-keyword", SuggestionKind::Completion, 0.75, None)],
+        )));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "open-url-clipboard",
+                SuggestionKind::OpenUrl,
+                0.95,
+                Some(SuggestionOrigin::Clipboard),
+            )],
+        )));
+        let s = snap();
+        let (out, _) = coordinator.coordinate(&input("fa", &s), &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "completion-keyword");
+        assert_eq!(out.secondary.unwrap().id, "open-url-clipboard");
     }
 
     /// context_suggestion_enabled=false：awareness 派生候选全灭；

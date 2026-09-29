@@ -389,9 +389,29 @@ fn get_app_user_model_id(package_family_name: &str) -> Option<String> {
     Some(app_user_model_id)
 }
 
+/// 裸名/命令行 → System32 绝对路径（0.24.9）。
+///
+/// SystemShortcutEngine 的 exec_path 有两类不含路径分隔符的值：
+/// - 裸文件名：`appwiz.cpl` / `sysdm.cpl` / `devmgmt.msc` / `services.msc` / `taskmgr.exe`
+/// - 命令行：`rundll32.exe sysdm.cpl,EditEnvironmentVariables`（取首 token）
+///
+/// ShellExecute 启动侧靠系统路径解析它们；提取侧同样解析到
+/// `%SystemRoot%\System32`（找不到则 None——由协议层兜底通用图标）。
+fn resolve_bare_exec_path(bare: &str) -> Option<String> {
+    let first_token = bare.split_whitespace().next().unwrap_or(bare);
+    if first_token.is_empty() {
+        return None;
+    }
+    let system32 = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join(first_token);
+    system32.exists().then(|| system32.to_string_lossy().into_owned())
+}
+
 /// 实际提取：path -> PNG 字节。失败返回 None。
-fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
-    // COM 初始化 RAII guard：确保线程 COM 已初始化
+fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {    // COM 初始化 RAII guard：确保线程 COM 已初始化
     let _com_guard = ComGuard::init();
 
     // shell:AppsFolder 路径（UWP/MSIX 应用，由 scan_apps_folder 生成）
@@ -418,11 +438,23 @@ fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
             if path.contains('#') {
                 return None;
             }
+            // 裸名/命令行（SystemShortcutEngine 的 exec_path，如 "appwiz.cpl"、
+            // "rundll32.exe sysdm.cpl,..."）：lnk_path 是 history 主键不可改写
+            //（AGENTS.md 铁则），提取侧解析为 System32 绝对路径——ShellExecute
+            // 启动侧本就靠系统路径解析裸名，两侧口径一致。
+            let effective = if !path.contains('\\') && !path.contains('/') {
+                match resolve_bare_exec_path(path) {
+                    Some(p) => p,
+                    None => return None,
+                }
+            } else {
+                path.to_string()
+            };
             // 路径不存在的直接跳过（UWP 路径因权限问题不能用此检查）
-            if !std::path::Path::new(path).exists() {
+            if !std::path::Path::new(&effective).exists() {
                 return None;
             }
-            path.replace('/', "\\")
+            effective.replace('/', "\\")
         };
 
     unsafe {
@@ -605,6 +637,34 @@ mod tests {
     #[test]
     fn extract_from_nonexistent_returns_none() {
         assert!(extract_icon_png("C:\\definitely\\nope\\nonexistent.exe", 32).is_none());
+    }
+
+    /// 0.24.9：裸名（SystemShortcutEngine exec_path）解析到 System32 后可提取。
+    /// taskmgr.exe 在所有 Windows 上稳定存在；环境异常时跳过（与上文 explorer.exe 用例同款防御）。
+    #[test]
+    fn extract_bare_exec_name_resolves_system32() {
+        match extract_icon_png("taskmgr.exe", 32) {
+            Some(png) => assert_eq!(&png[..4], &PNG_MAGIC, "裸名解析后应提取出合法 PNG"),
+            None => {
+                if resolve_bare_exec_path("taskmgr.exe").is_none() {
+                    eprintln!("跳过：System32\\taskmgr.exe 不存在（环境相关）");
+                } else {
+                    panic!("taskmgr.exe 已解析到 System32 却未提取到图标");
+                }
+            }
+        }
+    }
+
+    /// 0.24.9：命令行取首 token（rundll32 条目），不存在首 token 走 None。
+    #[test]
+    fn resolve_bare_exec_path_first_token() {
+        assert!(
+            resolve_bare_exec_path("rundll32.exe sysdm.cpl,EditEnvironmentVariables")
+                .is_some(),
+            "命令行应取首 token 解析"
+        );
+        assert!(resolve_bare_exec_path("definitely_no_such_thing.cpl").is_none());
+        assert!(resolve_bare_exec_path("").is_none());
     }
 
     #[test]
