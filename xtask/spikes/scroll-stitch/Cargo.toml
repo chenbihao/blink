@@ -1,0 +1,11 @@
+[package]
+name = "scroll-stitch-spike"
+version = "0.1.0"
+edition = "2024"
+description = "长截图拼接算法 spike：SAD 基线 vs 鲁棒 SAD / 相位相关 / 混合"
+license = "MIT"
+
+# spike 惯例：独立于 blink 主 workspace，零外部依赖
+[workspace]
+
+[dependencies]
