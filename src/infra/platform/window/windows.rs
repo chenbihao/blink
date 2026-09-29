@@ -2582,7 +2582,6 @@ pub fn spawn_main_window_caret_refine(
         return;
     };
     let hwnd_raw = hwnd.0 as isize;
-    let app = app.clone();
     let spawned = std::thread::Builder::new()
         .name("main-caret".into())
         .spawn(move || {

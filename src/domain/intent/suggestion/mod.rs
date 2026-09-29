@@ -47,13 +47,15 @@ pub enum SuggestionSource {
     Ai,
 }
 
-/// 建议的语义类别（0.24 §3.4 / §3.5）。
+/// 建议的语义类别（0.24 §3.4 / §3.5；0.24.8 打开类激活）。
 ///
 /// 前端按 kind 决定视觉通道：`Completion` → ghost 影子文字；
-/// `Translate` / `AskAi` → 采纳提示（0.24.4 前暂走 statusbar，之后进 SuggestionBar）。
+/// `Translate` / `AskAi` / 打开类 → 采纳提示（SuggestionBar）。
 ///
-/// `OpenUrl` / `OpenPath` 是 0.25 变体（随 `InvokeCapability` 激活），0.24 不建死——
-/// 打开类动作由结果列表承载（§3.5 决策：两步采纳劣于现状一步 Enter）。
+/// 打开类三 Kind（0.24.8 激活，原 0.25 候选提前）：剪贴板/输入为 URL 或文件路径时
+/// 的打开动作建议，采纳动作为 `InvokeCapability`。环境感知的打开呈现从 result lane
+/// （BuiltinEngine context 召回）移交到建议槽——result 只保留 keyword 命中路径，
+/// 「智能提示统一走 Tab/Shift+Tab 采纳」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SuggestionKind {
@@ -63,17 +65,27 @@ pub enum SuggestionKind {
     Translate,
     /// AI 处理建议（"按 Tab 问 AI" / 进 AI 模式）。
     AskAi,
+    /// 打开 URL（剪贴板/输入为 URL）。rank 0.95（§3.4 rank 表预留值）。
+    OpenUrl,
+    /// 打开路径（剪贴板/输入为文件路径）。rank 0.93。
+    OpenPath,
+    /// 资源管理器定位（剪贴板/输入为文件路径）。rank 0.88（仅与 OpenPath 同现，
+    /// 场景内无翻译竞争，高于 AI 兜底 0.80）。
+    RevealInExplorer,
 }
 
 /// 类型化采纳动作（0.24 §3.5）。
 ///
 /// **0.24 采纳零执行能力**：只有"改 query 走一轮新搜索"与"进主窗口 AI 模式"两种
 /// 无副作用动作，最坏情况（query 改错）立即可见可撤销——这是 §3.6 采纳协议
-/// （前端乐观本地 + 单向遥测）成立的前提。`InvokeCapability` 变体留给 0.25，
-/// 届时执行类采纳按 action 类型分流到同步 IPC 校验。
+/// （前端乐观本地 + 单向遥测）成立的前提。
+///
+/// **0.24.8 契约修订**：新增 `InvokeCapability`（打开类建议），采纳侧复用
+/// `run_builtin_action` 同步 IPC——CapabilityRegistry 的 origin/runtime/policy
+/// 门禁全量生效，与 result Enter 路径同一执行边界；revision 过期防护不变。
 ///
 /// serde：externally tagged + camelCase → `{"routeQuery":{"query":"…"}}` /
-/// `{"enterAiMode":{"prompt":"…"}}`。
+/// `{"enterAiMode":{"prompt":"…"}}` / `{"invokeCapability":{"capabilityId":"…","args":{…}}}`。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SuggestionAction {
@@ -82,6 +94,15 @@ pub enum SuggestionAction {
     RouteQuery { query: String },
     /// 前端直进主窗口 AI 模式（0.17.6 起 ChatService ephemeral 对话）。
     EnterAiMode { prompt: String },
+    /// 调用 Capability 执行（0.24.8，打开类建议）。`args` 为目标 Capability
+    /// schema 接收的最终 JSON object（如 `{"url":"https://…"}`），由 producer
+    /// 构造——与 BuiltinEngine `ParamSource::extract` 的参数形状约定一致。
+    /// （enum 级 rename_all 只覆盖变体名，变体字段需自带 camelCase。）
+    #[serde(rename_all = "camelCase")]
+    InvokeCapability {
+        capability_id: String,
+        args: serde_json::Value,
+    },
 }
 
 /// Context 类 Suggestion 的取值来源（0.8.3 §4.9 UX 加强）——
@@ -311,6 +332,61 @@ mod tests {
         assert!(
             v.get("secondary").is_none(),
             "空槽 skip_serializing_if 应省略"
+        );
+    }
+
+    /// 0.24.8：InvokeCapability wire 形状（externally tagged camelCase，
+    /// capability_id → capabilityId，args 原样透传 JSON object）。
+    #[test]
+    #[allow(deprecated)]
+    fn invoke_capability_wire_shape() {
+        let set = SuggestionSet {
+            revision: 9,
+            primary: Some(Suggestion {
+                id: "open-url-clipboard".to_string(),
+                kind: SuggestionKind::OpenUrl,
+                action: SuggestionAction::InvokeCapability {
+                    capability_id: "open_url".to_string(),
+                    args: serde_json::json!({"url": "https://example.com"}),
+                },
+                rank_score: 0.95,
+                display: "https://example.com".to_string(),
+                prefix_len: 0,
+                origin: Some(SuggestionOrigin::Clipboard),
+                fingerprint: 0,
+                source: SuggestionSource::Context,
+                ranking_hint: None,
+            }),
+            secondary: Some(Suggestion {
+                id: "reveal-clipboard".to_string(),
+                kind: SuggestionKind::RevealInExplorer,
+                action: SuggestionAction::InvokeCapability {
+                    capability_id: "reveal_in_explorer".to_string(),
+                    args: serde_json::json!({"path": "C:\\tmp\\a.txt"}),
+                },
+                rank_score: 0.88,
+                display: "C:\\tmp\\a.txt".to_string(),
+                prefix_len: 0,
+                origin: Some(SuggestionOrigin::Clipboard),
+                fingerprint: 0,
+                source: SuggestionSource::Context,
+                ranking_hint: None,
+            }),
+        };
+        let v = serde_json::to_value(&set).unwrap();
+        assert_eq!(v["primary"]["kind"], "openUrl");
+        assert_eq!(
+            v["primary"]["action"]["invokeCapability"]["capabilityId"],
+            "open_url"
+        );
+        assert_eq!(
+            v["primary"]["action"]["invokeCapability"]["args"]["url"],
+            "https://example.com"
+        );
+        assert_eq!(v["secondary"]["kind"], "revealInExplorer");
+        assert_eq!(
+            v["secondary"]["action"]["invokeCapability"]["args"]["path"],
+            "C:\\tmp\\a.txt"
         );
     }
 

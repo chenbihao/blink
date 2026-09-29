@@ -350,11 +350,11 @@ impl SearchEngine for BuiltinEngine {
 
     /// 搜索内置动作。
     ///
-    /// 0.8.0 §1.3 双路匹配：
-    /// - **空 query**：只召回 Context 命中的动作，`base_score = 1.0` 确保首屏首位。
-    /// - **非空 query**：keyword/拼音 匹配（原逻辑）+ Context 命中（新逻辑）并行判定；
-    ///   两路都命中取 max(keyword_score, 0.3) 再 `+ 0.3` 作为 ctx 加成（上限 1.0），
-    ///   `score_detail` 反映两路来源。
+    /// 0.8.0 §1.3 双路匹配；**0.24.8 纯建议化**：Context-only 召回（空 query 首屏
+    /// 环境填充 / 非空 query 0.3 弱召回）整体移交 Suggestion lane——本引擎只承载
+    /// keyword/拼音命中路径，Context 门禁退化为参数化 Action 的参数合法性前置校验：
+    /// - **空 query**：不召回任何动作（环境感知的打开类走建议槽，Tab/Shift+Tab 采纳）。
+    /// - **非空 query**：keyword/拼音 命中才召回；Context 命中作 `+ 0.3` 加成（上限 1.0）。
     /// - **参数校验**：Action 声明 `param_source != None` 但从 snapshot 抽不到值 → 不召回
     ///   （避免"打开链接"配空参数的僵尸候选）。
     /// - **disable 校验**：`ctx.disabled_builtin_actions` 命中 → 跳过。
@@ -416,7 +416,10 @@ impl SearchEngine for BuiltinEngine {
                 continue;
             }
 
-            // 3. 双路评分
+            // 3. 评分：keyword 命中才召回，ctx 命中作 +0.3 加成。
+            //    Context-only（kw_match=None）不召回——0.24.8 纯建议化：环境感知的
+            //    打开呈现移交 Suggestion lane（ContextProducer 产 OpenUrl/OpenPath/
+            //    Reveal，Tab 采纳），result 只承载用户显式搜索（keyword）路径。
             let kw_match = if is_empty {
                 None
             } else {
@@ -424,15 +427,10 @@ impl SearchEngine for BuiltinEngine {
             };
 
             let (base_score, detail) = match (kw_match, ctx_hit) {
-                (None, false) => continue, // 两路都没命中，不召回
+                (None, _) => continue, // Context-only：0.24.8 起不召回（移交建议槽）
                 (Some(m), false) => {
                     let s = m.score();
                     (s, format!("builtin={:.1}", s))
-                }
-                (None, true) => {
-                    // Context-only 命中：空 query 时 1.0（首屏首位），非空时 0.3（弱加成）
-                    let s = if is_empty { 1.0 } else { 0.3 };
-                    (s, format!("ctx=+{:.1}", s))
                 }
                 (Some(m), true) => {
                     // 双路命中：以 keyword 分为主，附加 0.3 ctx 加成；上限 1.0
@@ -442,10 +440,6 @@ impl SearchEngine for BuiltinEngine {
                 }
             };
 
-            // 0.10.8 §11.2 方案 1：空 query + Context-only 命中 = 环境自动填充候选。
-            // keyword 命中 / 非空 query 表达了用户意图，不标记。
-            let context_aware = is_empty && kw_match.is_none() && ctx_hit;
-
             let item_id = format!("builtin:{}", action.id);
             let score = apply_history(base_score, &item_id, ctx.history);
             items.push(action_to_search_item(
@@ -453,7 +447,7 @@ impl SearchEngine for BuiltinEngine {
                 score,
                 arg,
                 detail,
-                context_aware,
+                false, // 0.24.8：context-only 召回已移交建议槽，不再产环境自动填充项
             ));
         }
         items
@@ -932,50 +926,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_query_context_url_hits_open_url() {
-        // 空 query + 剪贴板是 URL → 只召回 open_url，base_score=1.0
+    async fn empty_query_context_only_recall_removed() {
+        // 0.24.8 纯建议化：空 query + Context 命中不再召回——环境感知的打开呈现
+        // 移交 Suggestion lane（ContextProducer 产 OpenUrl/OpenPath/Reveal 建议，
+        // Tab/Shift+Tab 采纳）。URL 与文件路径两种快照都验。
         let engine = BuiltinEngine;
         let history = HashMap::new();
+
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
-
         let items = engine.search("", &ctx).await;
-        let open_url = items.iter().find(|it| it.id == "builtin:open_url");
-        assert!(open_url.is_some(), "剪贴板是 URL 应召回 open_url");
-        assert_eq!(
-            open_url.unwrap().score,
-            1.0,
-            "空 query Context-only base_score=1.0"
+        assert!(
+            items.iter().all(|it| it.id != "builtin:open_url"),
+            "0.24.8 起空 query Context-only 不召回 open_url"
         );
-        // arg 应携带 URL 的最终 JSON object
-        if let super::SearchAction::RunAction { arg, .. } = &open_url.unwrap().action {
-            assert_eq!(
-                arg.as_ref()
-                    .and_then(|v| v.get("url"))
-                    .and_then(|v| v.as_str()),
-                Some("https://example.com")
-            );
-        } else {
-            panic!("open_url 应产 RunAction");
-        }
-        // 剪贴板不是文件路径 → open_path / reveal_in_explorer 不召回
-        assert!(items.iter().all(|it| it.id != "builtin:open_path"));
-        assert!(items.iter().all(|it| it.id != "builtin:reveal_in_explorer"));
-    }
 
-    #[tokio::test]
-    async fn empty_query_context_path_hits_open_path_and_reveal() {
-        // 空 query + 剪贴板是文件路径 → open_path / reveal_in_explorer 都召回
-        let engine = BuiltinEngine;
-        let history = HashMap::new();
         let snapshot = snapshot_with_clipboard("C:\\Users\\test.txt");
         let ctx = make_ctx(&history, &snapshot);
-
         let items = engine.search("", &ctx).await;
-        assert!(items.iter().any(|it| it.id == "builtin:open_path"));
-        assert!(items.iter().any(|it| it.id == "builtin:reveal_in_explorer"));
-        // 不是 URL → open_url 不召回
-        assert!(items.iter().all(|it| it.id != "builtin:open_url"));
+        assert!(
+            items.iter().all(|it| it.id != "builtin:open_path")
+                && items.iter().all(|it| it.id != "builtin:reveal_in_explorer"),
+            "0.24.8 起空 query Context-only 不召回 open_path / reveal_in_explorer"
+        );
     }
 
     #[tokio::test]
@@ -1035,51 +1008,25 @@ mod tests {
                 .contains("ctx=+0.3"),
             "score_detail 应体现 ctx 加成"
         );
+        // keyword 路径的参数抽取仍生效（arg 为目标 Capability 的最终 JSON object）
+        if let super::SearchAction::RunAction { arg, .. } = &open_url_items[0].action {
+            assert_eq!(
+                arg.as_ref()
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str()),
+                Some("https://example.com")
+            );
+        } else {
+            panic!("open_url 应产 RunAction");
+        }
     }
 
-    #[tokio::test]
-    async fn empty_query_disabled_context_action_not_recalled() {
-        // 剪贴板是 URL，但 open_url 被 disable → 不召回
-        let engine = BuiltinEngine;
-        let history = HashMap::new();
-        let snapshot = snapshot_with_clipboard("https://example.com");
-        let disabled = vec!["open_url".to_string()];
-        let ctx = QueryContext {
-            history: &history,
-            snapshot: &snapshot,
-            disabled_builtin_actions: &disabled,
-            disabled_context_bindings: &[],
-            language: "zh",
-        };
-
-        let items = engine.search("", &ctx).await;
-        assert!(items.iter().all(|it| it.id != "builtin:open_url"));
-    }
+    // 0.24.8 注：`empty_query_disabled_context_action_not_recalled` 与
+    // `context_binding_disabled_blocks_empty_query_recall` 已删——空 query
+    // Context-only 召回整体移除后两断言被 `empty_query_context_only_recall_removed`
+    // 覆盖；disable/binding 对 keyword 路径的门禁语义由下方两个测试继续钉住。
 
     // ── 0.11.8：context binding 黑名单（disabled_context_bindings） ─────────
-
-    #[tokio::test]
-    async fn context_binding_disabled_blocks_empty_query_recall() {
-        // 剪贴板是 URL，但 `builtin:open_url::clipboard_is_url` 被 binding 粒度禁用
-        // → 空 query 时 open_url 不召回（与整条禁用等价，但能仅禁 context 不禁 keyword）
-        let engine = BuiltinEngine;
-        let history = HashMap::new();
-        let snapshot = snapshot_with_clipboard("https://example.com");
-        let disabled_ctx = vec!["builtin:open_url::clipboard_is_url".to_string()];
-        let ctx = QueryContext {
-            history: &history,
-            snapshot: &snapshot,
-            disabled_builtin_actions: &[],
-            disabled_context_bindings: &disabled_ctx,
-            language: "zh",
-        };
-
-        let items = engine.search("", &ctx).await;
-        assert!(
-            items.iter().all(|it| it.id != "builtin:open_url"),
-            "binding 黑名单禁用后，空 query Context 召回应被挡下"
-        );
-    }
 
     #[tokio::test]
     async fn context_binding_disabled_keeps_keyword_recall_when_context_still_hits() {
@@ -1110,8 +1057,7 @@ mod tests {
     #[tokio::test]
     async fn context_binding_unrelated_key_does_not_block() {
         // 保护：黑名单里是无关 key（其他 action 的 binding）不应误伤本 action。
-        // 剪贴板是 URL，黑名单含 `builtin:open_path::clipboard_is_file_path`（无关）→
-        // open_url 应正常召回。
+        // 0.24.8：空 query 不再召回，改用 keyword 路径验证（"打开链接" + 剪贴板 URL）。
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = snapshot_with_clipboard("https://example.com");
@@ -1124,34 +1070,16 @@ mod tests {
             language: "zh",
         };
 
-        let items = engine.search("", &ctx).await;
+        let items = engine.search("打开链接", &ctx).await;
         assert!(
             items.iter().any(|it| it.id == "builtin:open_url"),
-            "无关 binding key 不应影响 open_url 召回"
+            "无关 binding key 不应影响 open_url keyword 召回"
         );
     }
 
-    // ── 0.10.8 §11.2 方案 1：context_aware 标记 ──────────────────────────────
-
-    #[tokio::test]
-    async fn empty_query_context_only_marks_context_aware() {
-        // 空 query + 剪贴板是 URL → open_url 标 context_aware=true
-        // （前端 chordEligible 据此跳过，允许 chord 提示条与 Context Ghost 共存）
-        let engine = BuiltinEngine;
-        let history = HashMap::new();
-        let snapshot = snapshot_with_clipboard("https://example.com");
-        let ctx = make_ctx(&history, &snapshot);
-
-        let items = engine.search("", &ctx).await;
-        let open_url = items
-            .iter()
-            .find(|it| it.id == "builtin:open_url")
-            .expect("剪贴板是 URL 应召回 open_url");
-        assert!(
-            open_url.context_aware,
-            "空 query + Context-only 命中应标 context_aware=true"
-        );
-    }
+    // 0.24.8：`empty_query_context_only_marks_context_aware` 已删——context_aware
+    // 标记随 Context-only 召回一起移除（builtin 侧恒 false；字段保留给插件 context
+    // 触发结果，前端 hasNonContextItems/chordEligible 逻辑不变）。
 
     #[tokio::test]
     async fn keyword_hit_not_marked_context_aware() {
@@ -1187,9 +1115,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_empty_context_bonus_not_marked_context_aware() {
-        // 非空 query + Context-only 命中（kw_match=None, ctx_hit=true）
-        // 用户已开始输入，即使无 keyword 命中也不算"环境自动填充"。
+    async fn non_empty_context_only_recall_removed() {
+        // 0.24.8：非空 query 无 keyword 命中 + Context 命中（原 (None,true) 0.3
+        // 弱召回路径）→ 不再召回，环境感知呈现移交建议槽。
         // 构造：query="xyz" 不命中任何 keyword，剪贴板是 URL 触发 Context。
         let engine = BuiltinEngine;
         let history = HashMap::new();
@@ -1197,13 +1125,10 @@ mod tests {
         let ctx = make_ctx(&history, &snapshot);
 
         let items = engine.search("xyz", &ctx).await;
-        // 若召回（走 (None, true) 分支 base_score=0.3），context_aware 必须为 false
-        if let Some(open_url) = items.iter().find(|it| it.id == "builtin:open_url") {
-            assert!(
-                !open_url.context_aware,
-                "非空 query 即使走 Context-only 分支也不标 context_aware（用户已在输入）"
-            );
-        }
+        assert!(
+            items.iter().all(|it| it.id != "builtin:open_url"),
+            "Context-only（无 keyword 命中）0.24.8 起不召回"
+        );
     }
 
     // ── 0.19.17：诊断动作搜索 ─────────────────────────────────────────────────
@@ -1306,11 +1231,12 @@ mod tests {
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = engine.search("", &ctx).await;
+        // 0.24.8：空 query 不再召回，keyword 路径（参数抽取契约不变）
+        let items = engine.search("打开链接", &ctx).await;
         let open_url = items
             .iter()
             .find(|it| it.id == "builtin:open_url")
-            .expect("剪贴板是 URL 应召回 open_url");
+            .expect("keyword + 剪贴板是 URL 应召回 open_url");
         if let super::SearchAction::RunAction { arg, .. } = &open_url.action {
             let arg = arg.as_ref().expect("参数化 descriptor arg 不应为 None");
             assert_eq!(
@@ -1330,11 +1256,11 @@ mod tests {
         let snapshot = snapshot_with_clipboard("C:\\Users\\test.txt");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = engine.search("", &ctx).await;
+        let items = engine.search("打开路径", &ctx).await;
         let open_path = items
             .iter()
             .find(|it| it.id == "builtin:open_path")
-            .expect("剪贴板是文件路径应召回 open_path");
+            .expect("keyword + 剪贴板是文件路径应召回 open_path");
         if let super::SearchAction::RunAction { arg, .. } = &open_path.action {
             let arg = arg.as_ref().expect("参数化 descriptor arg 不应为 None");
             assert_eq!(
@@ -1354,11 +1280,11 @@ mod tests {
         let snapshot = snapshot_with_clipboard("C:\\Users\\test.txt");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = engine.search("", &ctx).await;
+        let items = engine.search("定位", &ctx).await;
         let reveal = items
             .iter()
             .find(|it| it.id == "builtin:reveal_in_explorer")
-            .expect("剪贴板是文件路径应召回 reveal_in_explorer");
+            .expect("keyword + 剪贴板是文件路径应召回 reveal_in_explorer");
         if let super::SearchAction::RunAction { arg, .. } = &reveal.action {
             let arg = arg.as_ref().expect("参数化 descriptor arg 不应为 None");
             assert_eq!(
@@ -1432,7 +1358,7 @@ mod tests {
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = engine.search("", &ctx).await;
+        let items = engine.search("打开链接", &ctx).await;
         let open_url = items
             .iter()
             .find(|it| it.id == "builtin:open_url")

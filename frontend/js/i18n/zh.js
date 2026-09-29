@@ -334,7 +334,7 @@ export const zh = {
     "suggestion.completion_enabled.label": "输入补全",
     "suggestion.completion_enabled.hint": "首拼命中时在输入框显示灰色补全影子（fy → fanyi）",
     "suggestion.context_enabled.label": "环境建议",
-    "suggestion.context_enabled.hint": "基于划词/剪贴板的建议（如翻译选中的外文）；输入内容本身的建议不受影响",
+    "suggestion.context_enabled.hint": "基于划词/剪贴板的建议（如翻译选中的外文、打开剪贴板中的链接）；输入内容本身的建议不受影响",
     "suggestion.ai_enabled.label": "AI 兜底",
     "suggestion.ai_enabled.hint": "自然语言输入时建议\"问 AI\"；只关建议，不影响 AI 功能本身",
     "suggestion.secondary_enabled.label": "第二建议",
@@ -1048,6 +1048,13 @@ export const zh = {
     "suggestionbar.ask_ai": "问 AI",
     "suggestionbar.ask_ai_with": "问 AI “{text}”",
     "suggestionbar.completion_to": "补全 → {target}",
+    // 打开类（0.24.8）：display 是目标文本（URL/路径），按 kind 拼标签 + 截断预览
+    "suggestionbar.openUrl": "打开链接",
+    "suggestionbar.openUrl_with": "打开链接 “{text}”",
+    "suggestionbar.openPath": "打开路径",
+    "suggestionbar.openPath_with": "打开路径 “{text}”",
+    "suggestionbar.revealInExplorer": "资源管理器定位",
+    "suggestionbar.revealInExplorer_with": "资源管理器定位 “{text}”",
 
     // ModeHeader（0.24.4 §5.5）：持续模式的唯一呈现
     "mode.ai.label": "AI",

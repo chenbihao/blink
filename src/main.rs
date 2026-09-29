@@ -443,6 +443,12 @@ fn main() {
             let ai_registry_cell = std::sync::Arc::new(std::sync::RwLock::new(
                 None::<std::sync::Arc<domain::ai::AIProviderRegistry>>,
             ));
+            // 0.24.8：禁用态共享 cell（SearchService 与 ContextProducer 同源）——
+            // 打开类建议的 action/binding 禁用判定与 result 侧一致，设置页保存即热生效。
+            let disabled_builtin_actions =
+                std::sync::Arc::new(std::sync::RwLock::new(Vec::<String>::new()));
+            let disabled_context_bindings =
+                std::sync::Arc::new(std::sync::RwLock::new(Vec::<String>::new()));
             let mut suggestion_coordinator = domain::intent::suggestion::coordinator::SuggestionCoordinator::new();
             suggestion_coordinator.register(std::sync::Arc::new(
                 domain::intent::suggestion::keyword::KeywordProducer::from_router(
@@ -451,7 +457,11 @@ fn main() {
                 ),
             ));
             suggestion_coordinator.register(std::sync::Arc::new(
-                domain::intent::suggestion::context::ContextProducer::new(router.clone()),
+                domain::intent::suggestion::context::ContextProducer::new(
+                    router.clone(),
+                    disabled_builtin_actions.clone(),
+                    disabled_context_bindings.clone(),
+                ),
             ));
             suggestion_coordinator.register(std::sync::Arc::new(
                 domain::intent::suggestion::ai::AiProducer::new(
@@ -524,6 +534,8 @@ fn main() {
                 suggestion_runtime.clone(),
                 suggestion_coordinator,
                 ai_registry_cell.clone(),
+                disabled_builtin_actions.clone(),
+                disabled_context_bindings.clone(),
             ));
             domain_env.set_search_service(search_service.clone());
             app.manage(search_service.clone());

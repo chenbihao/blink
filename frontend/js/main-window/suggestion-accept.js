@@ -1,12 +1,13 @@
 //! 建议采纳共享路径（0.24 §3.6 / §5.6）。
 //!
 //! Tab / Shift+Tab / 点击共用同一 acceptance：staleness 校验 → 类型化 action
-//! 本地执行 → fire-and-forget 遥测。ghost.js（Completion 影子）与
+//! 分派执行 → fire-and-forget 遥测。ghost.js（Completion 影子）与
 //! suggestion-bar.js（双槽建议行）都委托本模块，保证"采纳"只有一份实现。
 //!
-//! **0.24 采纳零执行能力**：action 只有 RouteQuery（改 query 重搜）与
-//! EnterAiMode（进主窗口 AI 模式）两种无副作用变体——本地乐观执行即可，
-//! 最坏情况立即可见可撤销。
+//! **action 分派**：RouteQuery / EnterAiMode 本地乐观执行（最坏情况立即可见
+//! 可撤销）；InvokeCapability（0.24.8 打开类）复用 `run_builtin_action` 同步
+//! IPC——与 result Enter 路径同一执行边界（CapabilityRegistry origin/runtime/
+//! policy 门禁全量生效），失败走动作错误反馈不静默吞错。
 //!
 //! stalenessCheck 由 main.js 注入（search.isLiveRevision）——本模块不 import
 //! search，避免 accept → search → ghost/bar → accept 的模块环。
@@ -14,7 +15,8 @@
 //! ai-mode ↔ ghost 的加载期环在现有代码已存在且安全）。
 
 import {queryEl} from "./dom.js";
-import {reportSuggestionAdoption} from "../shared/api.js";
+import {reportSuggestionAdoption, runBuiltinAction} from "../shared/api.js";
+import {showActionError} from "./action-error.js";
 import * as aiMode from "./ai-mode.js";
 
 // 过期校验回调（main.js 注入）。null = 未注入（防御：视为不过期，保持可用）。
@@ -53,19 +55,29 @@ export function acceptSuggestion(suggestion, slot, revision, hooks = {}) {
 
     const action = suggestion.action;
 
-    // 防御：后端契约保证 action 必填；缺失时视为不可采纳，避免误吞 Tab
-    if (!action?.routeQuery && !action?.enterAiMode) {
+    // 防御：后端契约保证 action 必填；缺失/未知变体时视为不可采纳，避免误吞 Tab
+    if (!action?.routeQuery && !action?.enterAiMode && !action?.invokeCapability) {
         hooks.onStale?.(suggestion);
         return false;
     }
 
     hooks.onAccepted?.(suggestion);
-    // 采纳遥测（§3.6 单向 fire-and-forget）：本地执行后上报，失败静默
+    // 采纳遥测（§3.6 单向 fire-and-forget）：action 分派后上报，失败静默
     reportSuggestionAdoption(suggestion.id, slot, revision).catch(() => {});
 
     if (action.enterAiMode) {
         // AskAi：不改输入框，直接进主窗口 AI 模式（ChatService ephemeral 对话）
         aiMode.enterAiMode(action.enterAiMode.prompt);
+        return true;
+    }
+
+    if (action.invokeCapability) {
+        // InvokeCapability（0.24.8 打开类）：复用 result Enter 的执行通道——
+        // 同步 IPC，Capability 门禁全量生效；成功后端隐藏主窗口，失败可见反馈。
+        const {capabilityId, args} = action.invokeCapability;
+        runBuiltinAction(capabilityId, args ?? null).catch((e) => {
+            showActionError("run_builtin_action", e);
+        });
         return true;
     }
 

@@ -183,10 +183,15 @@ function exclusiveModeActive() {
 /** AskAi 携带原文的预览截断长度（与 translate display 的原文预览口径一致）。 */
 const ASK_AI_PREVIEW_MAX = 30;
 
+/** 打开类目标预览截断长度（URL/路径普遍较长，比 AskAi 略宽）。 */
+const OPEN_TARGET_PREVIEW_MAX = 40;
+
 /**
  * 行文案：display 之外按 kind 覆盖——AskAi 的后端 display 硬编码"按 Tab 问 AI"
  * （含键名，ArrowRight 配置用户会看到错误键名），故前端按 kind 重建：
  * 带原文预览（"问 AI “xxx"），与 translate 行的"翻译划词 “xxx"" 信息密度对齐。
+ * 打开类（0.24.8）同理：display 是目标文本（URL/路径），按 kind 拼 i18n 标签
+ * + 截断预览（"打开链接 “example.com/…""）。
  */
 function rowText(sug) {
     if (sug.kind === "askAi") {
@@ -197,6 +202,17 @@ function rowText(sug) {
         return t("suggestionbar.ask_ai_with", {text: preview});
     }
     if (sug.kind === "completion") return t("suggestionbar.completion_to", {target: sug.display});
+    if (sug.kind === "openUrl" || sug.kind === "openPath" || sug.kind === "revealInExplorer") {
+        const bareKey = `suggestionbar.${sug.kind}`;
+        const withKey = `${bareKey}_with`;
+        const target = sug.display || "";
+        if (!target) return t(bareKey);
+        const preview = target.length > OPEN_TARGET_PREVIEW_MAX
+            ? target.slice(0, OPEN_TARGET_PREVIEW_MAX) + "…" : target;
+        const withText = t(withKey, {text: preview});
+        // 降级保护：t() 未命中返回 key 本身时退回裸标签（不显示字面 key）
+        return withText === withKey ? t(bareKey) : withText;
+    }
     return sug.display || "";
 }
 
@@ -204,5 +220,8 @@ function rowText(sug) {
 function iconFor(sug) {
     if (sug.kind === "translate") return "languages";
     if (sug.kind === "askAi") return "sparkles";
+    if (sug.kind === "openUrl") return "globe";
+    if (sug.kind === "openPath") return "folder-open";
+    if (sug.kind === "revealInExplorer") return "folder-search";
     return "zap";
 }

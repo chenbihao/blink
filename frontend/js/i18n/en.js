@@ -333,7 +333,7 @@ export const en = {
     "suggestion.completion_enabled.label": "Input completion",
     "suggestion.completion_enabled.hint": "Gray inline ghost on pinyin-initial hits (fy → fanyi)",
     "suggestion.context_enabled.label": "Environment suggestions",
-    "suggestion.context_enabled.hint": "Suggestions from selection/clipboard (e.g. translate selected foreign text); query-derived ones unaffected",
+    "suggestion.context_enabled.hint": "Suggestions from selection/clipboard (e.g. translate selected foreign text, open clipboard URL); query-derived ones unaffected",
     "suggestion.ai_enabled.label": "AI fallback",
     "suggestion.ai_enabled.hint": "Suggest \"Ask AI\" for natural-language input; only hides suggestions, AI features unaffected",
     "suggestion.secondary_enabled.label": "Secondary suggestion",
@@ -1052,6 +1052,13 @@ export const en = {
     "suggestionbar.ask_ai": "Ask AI",
     "suggestionbar.ask_ai_with": "Ask AI \"{text}\"",
     "suggestionbar.completion_to": "Complete → {target}",
+    // Open-target kinds (0.24.8): display carries the target (URL/path)
+    "suggestionbar.openUrl": "Open URL",
+    "suggestionbar.openUrl_with": "Open URL \"{text}\"",
+    "suggestionbar.openPath": "Open path",
+    "suggestionbar.openPath_with": "Open path \"{text}\"",
+    "suggestionbar.revealInExplorer": "Reveal in Explorer",
+    "suggestionbar.revealInExplorer_with": "Reveal \"{text}\"",
 
     // ModeHeader (0.24.4 §5.5): single presentation of persistent modes
     "mode.ai.label": "AI",

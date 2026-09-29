@@ -125,11 +125,13 @@ pub struct SearchService {
     clipboard_search_enabled: Arc<AtomicBool>,
     /// 用户禁用的内置动作 id 列表（0.8.0 §1.3）。
     /// BuiltinEngine 通过 QueryContext 只读，设置页保存时经 `update_disabled_builtin_actions`
-    /// 热更新。读多写少，用 RwLock；每次 search 短时 read 不阻塞。
+    /// 热更新。0.24.8 起与 `ContextProducer` 共享同一 cell（打开类建议的禁用一致性：
+    /// result 侧与建议侧同源判定）。读多写少，用 RwLock；每次 search 短时 read 不阻塞。
     disabled_builtin_actions: Arc<RwLock<Vec<String>>>,
     /// 用户禁用的 context binding key 列表（`{target_id}::{trigger_key}` 格式，0.8.3 §4.6）。
     /// 0.11.8 起同时被 `RuleRouter`（manifest context）和 `BuiltinEngine`（内置动作 context）
-    /// 消费——前者在 `apply_context_disable_list` 里独立持有副本，后者经 QueryContext 读。
+    /// 消费——前者在 `apply_context_disable_list` 里独立持有副本，后者经 QueryContext 读；
+    /// 0.24.8 起 `ContextProducer` 共享本 cell（awareness 派生打开类建议的 binding 粒度闸）。
     /// 读多写少，用 RwLock；每次 search 短时 read 不阻塞。
     disabled_context_bindings: Arc<RwLock<Vec<String>>>,
     /// Suggestion 运行时配置快照（0.24.2：autosuggest 开关/阈值 + secondary 门槛）。
@@ -174,6 +176,8 @@ impl SearchService {
         suggestion_runtime: Arc<RwLock<SuggestionRuntimeConfig>>,
         suggestion_coordinator: SuggestionCoordinator,
         ai_registry: Arc<RwLock<Option<Arc<AIProviderRegistry>>>>,
+        disabled_builtin_actions: Arc<RwLock<Vec<String>>>,
+        disabled_context_bindings: Arc<RwLock<Vec<String>>>,
     ) -> Self {
         let mut sync_engines = Vec::new();
         let mut async_engines = Vec::new();
@@ -194,8 +198,8 @@ impl SearchService {
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
             max_results: Arc::new(AtomicUsize::new(50)),
             clipboard_search_enabled: Arc::new(AtomicBool::new(true)),
-            disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
-            disabled_context_bindings: Arc::new(RwLock::new(Vec::new())),
+            disabled_builtin_actions,
+            disabled_context_bindings,
             suggestion_runtime,
             suggestion_coordinator,
             language: Arc::new(RwLock::new("zh".to_string())),
@@ -522,8 +526,10 @@ impl SearchService {
 
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。
     ///
-    /// 空 query 场景（0.8.0 §1.3）：跳过 intent 路由 + 插件；仅让 sync lane 内置引擎
-    /// 走 Context-only 分支（例如"打开链接"依剪贴板 URL 出现）。其他引擎不参与。
+    /// 空 query 场景（0.8.0 §1.3；0.24.8 纯建议化修订）：跳过 intent 路由 + 插件；
+    /// 引擎均无空 query 召回（BuiltinEngine 的 Context-only 分支已移交 Suggestion lane，
+    /// 环境感知的打开类走建议槽 Tab 采纳）——空 query 的 entries 恒为空，
+    /// 建议由 `compute_suggestion` 独立产出。
     ///
     /// 0.8.1 §2.5：返回类型改为 `SearchResponse { entries, completion_hint }`——
     /// 非空 query 时同步算 ghost text（`RuleRouter::suggest_completion`），首次返回带一次；
