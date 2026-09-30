@@ -24,7 +24,7 @@
 
 use std::sync::Mutex;
 
-use crate::infra::platform::secret;
+use blink_infra::platform::secret;
 
 use super::{SttEngine, SttError};
 
@@ -73,7 +73,7 @@ impl SttEngine for CloudSttEngine {
             return Ok(String::new());
         }
 
-        let config = crate::domain::config::stt_config::get_stt_config();
+        let config = blink_domain_config::stt_config::get_stt_config();
         let endpoint = resolve_stt_endpoint(&config)?;
 
         let wav_bytes = super::wav::pcm_to_wav(&samples, self.sample_rate, 1);
@@ -94,7 +94,7 @@ impl SttEngine for CloudSttEngine {
 
 /// 解析后的云端 STT endpoint--`finalize` 与 `test_cloud_stt` 共用，
 /// 保证测试按钮与实际识别走同一配置解析路径。
-pub(crate) struct ResolvedSttEndpoint {
+pub struct ResolvedSttEndpoint { // 0.25.3 crate 化：跨 crate 可见
     /// 去尾斜杠的 base_url（如 `https://api.openai.com/v1`）
     pub base_url: String,
     /// API Key
@@ -109,8 +109,8 @@ pub(crate) struct ResolvedSttEndpoint {
 /// API Key 从 Credential Manager 的 `stt:cloud` 加载。
 ///
 /// `finalize` 与 `test_cloud_stt` 共用此函数。
-pub(crate) fn resolve_stt_endpoint(
-    config: &crate::domain::config::stt_config::SttConfig,
+pub fn resolve_stt_endpoint(
+    config: &blink_domain_config::stt_config::SttConfig,
 ) -> Result<ResolvedSttEndpoint, SttError> {
     let provider = config
         .cloud_provider
@@ -140,7 +140,7 @@ pub(crate) fn resolve_stt_endpoint(
 }
 
 /// 发送 WAV 到云端 STT endpoint（`finalize` 与 `test_cloud_stt` 共用）。
-pub(crate) async fn send_stt_request(
+pub async fn send_stt_request(
     endpoint: &ResolvedSttEndpoint,
     wav_bytes: &[u8],
 ) -> Result<String, SttError> {
@@ -214,7 +214,7 @@ mod tests {
     /// resolve_stt_endpoint 在 cloud_provider 为 None 时返回 NotInitialized。
     #[test]
     fn resolve_stt_endpoint_returns_err_when_not_configured() {
-        let cfg = crate::domain::config::stt_config::SttConfig::default();
+        let cfg = blink_domain_config::stt_config::SttConfig::default();
         let r = resolve_stt_endpoint(&cfg);
         assert!(r.is_err());
     }

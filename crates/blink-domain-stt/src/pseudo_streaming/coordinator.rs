@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 
-pub(crate) use crate::domain::stt::{AudioRange, DraftSpan, RecognitionProfile};
+pub(crate) use crate::{AudioRange, DraftSpan, RecognitionProfile};
 
 fn range_is_valid(range: AudioRange) -> bool {
     range.end_sample >= range.start_sample

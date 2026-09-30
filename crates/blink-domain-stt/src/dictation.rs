@@ -318,7 +318,7 @@ impl DictationLedger {
 #[cfg(test)]
 mod tests {
     use super::DictationLedger;
-    use crate::domain::stt::{AudioRange, DraftSpan};
+    use crate::{AudioRange, DraftSpan};
 
     fn span(id: u64, start: u64, end: u64, text: &str) -> DraftSpan {
         DraftSpan::new(id, AudioRange::new(start, end), text, 1)

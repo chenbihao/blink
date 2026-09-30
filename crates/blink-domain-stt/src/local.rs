@@ -31,7 +31,7 @@ pub struct LocalSttEngine {
     /// 采样率
     sample_rate: u32,
     /// 连接快照（transport 必须存在——stdio worker 是唯一本地实现）
-    connection: Option<crate::domain::stt::SttEngineConnection>,
+    connection: Option<crate::SttEngineConnection>,
 }
 
 impl LocalSttEngine {
@@ -40,8 +40,8 @@ impl LocalSttEngine {
     /// 连接快照必须携带 worker transport（GGUF 常驻 worker 是唯一本地实现；
     /// 无 transport 的连接是上游接线错误，明确报错）。
     pub fn from_connection(
-        config: &crate::domain::config::stt_config::SttConfig,
-        conn: crate::domain::stt::SttEngineConnection,
+        config: &blink_domain_config::stt_config::SttConfig,
+        conn: crate::SttEngineConnection,
     ) -> Result<Self, String> {
         if conn.transport.is_none() {
             return Err(
@@ -64,14 +64,14 @@ impl LocalSttEngine {
     async fn transcribe_via_worker(
         &self,
         wav_bytes: &[u8],
-    ) -> Result<String, crate::domain::stt::SttTransportError> {
+    ) -> Result<String, crate::SttTransportError> {
         let conn = self.connection.as_ref().ok_or_else(|| {
-            crate::domain::stt::SttTransportError::Unavailable {
+            crate::SttTransportError::Unavailable {
                 detail: "本地引擎无连接快照".to_string(),
             }
         })?;
         let transport = conn.transport.as_ref().ok_or_else(|| {
-            crate::domain::stt::SttTransportError::Unavailable {
+            crate::SttTransportError::Unavailable {
                 detail: "本地引擎连接缺少 worker 通道".to_string(),
             }
         })?;
@@ -132,8 +132,8 @@ mod tests {
     /// 无 transport 的连接必须被拒绝（明确接线错误，不静默降级）。
     #[tokio::test]
     async fn reject_connection_without_transport() {
-        let config = crate::domain::config::stt_config::SttConfig::default();
-        let conn = crate::domain::stt::SttEngineConnection {
+        let config = blink_domain_config::stt_config::SttConfig::default();
+        let conn = crate::SttEngineConnection {
             host: "127.0.0.1".to_string(),
             port: 0,
             engine_id: "funasr".to_string(),
@@ -153,19 +153,19 @@ mod tests {
         // 用 mock transport 构造合法引擎
         struct NoopTransport;
         #[async_trait::async_trait]
-        impl crate::domain::stt::SttTransport for NoopTransport {
-            async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+        impl crate::SttTransport for NoopTransport {
+            async fn check_ready(&self) -> Result<(), crate::SttTransportError> {
                 Ok(())
             }
             async fn transcribe(
                 &self,
                 _wav: &[u8],
-            ) -> Result<String, crate::domain::stt::SttTransportError> {
+            ) -> Result<String, crate::SttTransportError> {
                 Ok("mock".to_string())
             }
         }
-        let config = crate::domain::config::stt_config::SttConfig::default();
-        let conn = crate::domain::stt::SttEngineConnection {
+        let config = blink_domain_config::stt_config::SttConfig::default();
+        let conn = crate::SttEngineConnection {
             host: "127.0.0.1".to_string(),
             port: 0,
             engine_id: "funasr".to_string(),

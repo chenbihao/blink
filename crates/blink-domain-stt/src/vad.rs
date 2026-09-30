@@ -345,7 +345,7 @@ impl EnergyVad {
     }
 
     /// 测试/诊断用：选择软窗口静默下限，0 保留旧的单帧切行为。
-    #[cfg(test)]
+    /// 0.25.3 crate 化：去掉 cfg(test)——bin 侧诊断回放测试跨 crate 使用。
     pub fn with_params_and_windows_and_soft_silence_floor(
         sample_rate: u32,
         silence_threshold: f64,

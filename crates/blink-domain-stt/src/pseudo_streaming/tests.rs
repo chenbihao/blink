@@ -41,15 +41,15 @@ impl ControlledTransport {
 }
 
 #[async_trait::async_trait]
-impl crate::domain::stt::SttTransport for ControlledTransport {
-    async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+impl crate::SttTransport for ControlledTransport {
+    async fn check_ready(&self) -> Result<(), crate::SttTransportError> {
         Ok(())
     }
 
     async fn transcribe(
         &self,
         _wav_bytes: &[u8],
-    ) -> Result<String, crate::domain::stt::SttTransportError> {
+    ) -> Result<String, crate::SttTransportError> {
         let rx = self
             .responses
             .lock()
@@ -60,7 +60,7 @@ impl crate::domain::stt::SttTransport for ControlledTransport {
         self.called.notify_waiters();
         rx.await
             .expect("测试 response sender 不应提前 drop")
-            .map_err(|detail| crate::domain::stt::SttTransportError::Unavailable { detail })
+            .map_err(|detail| crate::SttTransportError::Unavailable { detail })
     }
 }
 
@@ -70,7 +70,7 @@ fn controlled_engine(
 ) -> PseudoStreamingSttEngine {
     PseudoStreamingSttEngine {
         inner: Arc::new(Mutex::new(PseudoInner::for_test(samples))),
-        connection: Some(crate::domain::stt::SttEngineConnection {
+        connection: Some(crate::SttEngineConnection {
             host: "127.0.0.1".into(),
             port: 0,
             engine_id: "funasr".into(),
@@ -564,14 +564,14 @@ fn silence_marker_strip_covers_standalone_suffix_and_repeats() {
 /// 与 0.23.16.5 矩阵里覆盖；这里固定"首个合格候选即切"的旧口径，让其余
 /// 用例继续测量它们真正关心的东西。
 fn preview_draft_engine(transport: Arc<ControlledTransport>) -> PseudoStreamingSttEngine {
-    let conn = crate::domain::stt::SttEngineConnection {
+    let conn = crate::SttEngineConnection {
         host: "127.0.0.1".into(),
         port: 0,
         engine_id: "funasr".into(),
         instance_id: "pd-test".into(),
         transport: Some(transport),
     };
-    let mut config = crate::domain::config::stt_config::SttConfig::default();
+    let mut config = blink_domain_config::stt_config::SttConfig::default();
     config.local_engine.recognition.draft_target_s = 0;
     PseudoStreamingSttEngine::from_connection_with_profile(
         &config,
@@ -2386,9 +2386,9 @@ async fn case12_engine_candidate_timeline_diagnostic() {
         })
         .expect("case_12 wav");
     let wav = std::fs::read(&wav_path).expect("read wav");
-    let decoded = crate::domain::stt::wav::decode_wav(&wav).expect("decode");
+    let decoded = crate::wav::decode_wav(&wav).expect("decode");
     let mut normalizer =
-        crate::infra::platform::audio::normalize::AudioNormalizer::from_source_format(
+        blink_infra::platform::audio::normalize::AudioNormalizer::from_source_format(
             decoded.format,
         );
     let mut samples = normalizer.process(&decoded.samples);
@@ -2926,7 +2926,7 @@ fn engine_reset_clears_state() {
 fn engine_with_token_constructs_and_resets() {
     let engine = PseudoStreamingSttEngine {
         inner: Arc::new(Mutex::new(PseudoInner::for_test(vec![0.1; 100]))),
-        connection: Some(crate::domain::stt::SttEngineConnection {
+        connection: Some(crate::SttEngineConnection {
             host: "127.0.0.1".to_string(),
             port: 8000,
             engine_id: "funasr".to_string(),
@@ -3234,19 +3234,19 @@ fn reset_recovers_and_clears_poisoned_mutex() {
 #[test]
 fn from_connection_projects_window_config_into_engine() {
     // H 组合：soft=10s / hard=14s / uncommitted=16s
-    let config = crate::domain::config::stt_config::SttConfig {
-        local_engine: crate::domain::config::stt_config::LocalEngineConfig {
-            vad: crate::domain::config::stt_config::VadConfig {
+    let config = blink_domain_config::stt_config::SttConfig {
+        local_engine: blink_domain_config::stt_config::LocalEngineConfig {
+            vad: blink_domain_config::stt_config::VadConfig {
                 soft_window_s: 10,
                 hard_window_s: 14,
                 max_uncommitted_s: 16,
-                ..crate::domain::config::stt_config::VadConfig::default()
+                ..blink_domain_config::stt_config::VadConfig::default()
             },
-            ..crate::domain::config::stt_config::LocalEngineConfig::default()
+            ..blink_domain_config::stt_config::LocalEngineConfig::default()
         },
-        ..crate::domain::config::stt_config::SttConfig::default()
+        ..blink_domain_config::stt_config::SttConfig::default()
     };
-    let conn = crate::domain::stt::SttEngineConnection {
+    let conn = crate::SttEngineConnection {
         host: "127.0.0.1".into(),
         port: 0,
         engine_id: "funasr".into(),
@@ -4006,15 +4006,15 @@ impl WavCaptureTransport {
 }
 
 #[async_trait::async_trait]
-impl crate::domain::stt::SttTransport for WavCaptureTransport {
-    async fn check_ready(&self) -> Result<(), crate::domain::stt::SttTransportError> {
+impl crate::SttTransport for WavCaptureTransport {
+    async fn check_ready(&self) -> Result<(), crate::SttTransportError> {
         Ok(())
     }
 
     async fn transcribe(
         &self,
         wav_bytes: &[u8],
-    ) -> Result<String, crate::domain::stt::SttTransportError> {
+    ) -> Result<String, crate::SttTransportError> {
         self.wav_ms.lock().unwrap().push(valley_wav_ms(wav_bytes));
         let rx = self
             .responses
@@ -4026,7 +4026,7 @@ impl crate::domain::stt::SttTransport for WavCaptureTransport {
         self.called.notify_waiters();
         rx.await
             .expect("测试 response sender 不应提前 drop")
-            .map_err(|detail| crate::domain::stt::SttTransportError::Unavailable { detail })
+            .map_err(|detail| crate::SttTransportError::Unavailable { detail })
     }
 }
 
@@ -4034,7 +4034,7 @@ impl crate::domain::stt::SttTransport for WavCaptureTransport {
 fn valley_engine(transport: Arc<WavCaptureTransport>) -> PseudoStreamingSttEngine {
     let engine = PseudoStreamingSttEngine {
         inner: Arc::new(Mutex::new(PseudoInner::for_test(Vec::new()))),
-        connection: Some(crate::domain::stt::SttEngineConnection {
+        connection: Some(crate::SttEngineConnection {
             host: "127.0.0.1".into(),
             port: 0,
             engine_id: "funasr".into(),
@@ -4454,7 +4454,7 @@ fn composed_preview_envelope_covers_all_spans_and_settles_nonzero() {
 /// Preview 事件即可完成一致投影（杜绝 `confirmed=A, preview=A+B+C`）。
 #[test]
 fn settle_preview_segments_keeps_uncovered_suffix() {
-    use crate::domain::stt::{PreviewSegment, settle_preview_segments};
+    use crate::{PreviewSegment, settle_preview_segments};
     let mut segments = vec![
         PreviewSegment::new(AudioRange::new(0, 160_000), "A"),
         PreviewSegment::new(AudioRange::new(160_000, 320_000), "B"),

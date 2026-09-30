@@ -109,7 +109,7 @@ fn strip_silence_markers(text: &str) -> String {
 ///
 /// 仅当文本包含中文字符时才执行语气词剥离，避免误伤纯英文识别；
 /// "/sil" 静音标记与语言无关，先于该判断移除。
-pub(crate) fn strip_filler_words(text: &str) -> String {
+pub fn strip_filler_words(text: &str) -> String { // 0.25.3 crate 化：pub(crate) → pub（bin 测试跨 crate 使用）
     let trimmed = strip_silence_markers(text);
     if trimmed.is_empty() {
         return trimmed;

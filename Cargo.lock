@@ -591,6 +591,7 @@ dependencies = [
  "blink-domain-capability",
  "blink-domain-config",
  "blink-domain-local-engine",
+ "blink-domain-stt",
  "blink-infra",
  "bytes",
  "chrono",
@@ -679,6 +680,23 @@ dependencies = [
  "blink-infra",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "blink-domain-stt"
+version = "0.25.3"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blink-domain-capability",
+ "blink-domain-config",
+ "blink-infra",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

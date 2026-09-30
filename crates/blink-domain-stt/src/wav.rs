@@ -28,9 +28,9 @@ use std::path::Path;
 // `parse_wav_to_f32`（后者只在测试构建中按 16-bit/16k/mono 假设读取 data chunk）。
 // 以下 re-export 供测试和未来 transcribe_audio Capability 使用。
 #[allow(unused_imports)]
-pub use crate::infra::platform::audio::format::{AudioDecodeError, SampleKind, SourceFormat};
+pub use blink_infra::platform::audio::format::{AudioDecodeError, SampleKind, SourceFormat};
 #[allow(unused_imports)]
-pub use crate::infra::platform::audio::wav::{DecodedWav, decode_wav, decode_wav_with_budget};
+pub use blink_infra::platform::audio::wav::{DecodedWav, decode_wav, decode_wav_with_budget};
 
 // ── WAV 编码 ─────────────────────────────────────────────────────────────
 
@@ -450,7 +450,7 @@ mod tests {
     /// （而非 480 帧 ×2 声道），时长 = 960/16000 = 60ms 而非真实的 10ms。
     #[test]
     fn old_parser_misread_48k_stereo_reproduced() {
-        use crate::infra::platform::audio::test_fixtures::*;
+        use blink_infra::platform::audio::test_fixtures::*;
 
         // 构建 48kHz stereo PCM16, 480 帧
         let cfg = FixtureConfig {

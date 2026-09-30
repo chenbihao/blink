@@ -190,7 +190,7 @@ pub struct PseudoStreamingSttEngine {
     ///
     /// 0.22.6: health 和 transcribe 共用此快照，保证同一连接。
     /// 服务重启后旧连接的 instance_id 不匹配新实例，请求被拒绝。
-    connection: Option<crate::domain::stt::SttEngineConnection>,
+    connection: Option<crate::SttEngineConnection>,
     /// 采样率
     sample_rate: u32,
     /// 仅诊断回放设置；生产录音不分配切点记录。
@@ -198,7 +198,7 @@ pub struct PseudoStreamingSttEngine {
     /// 仅诊断回放设置；记录候选边界最终“切/等待”的判断依据。
     decision_observer: Option<Arc<Mutex<Vec<SttDecisionRecord>>>>,
     /// 仅诊断回放设置；生产录音不分配定稿阶段记录。
-    #[cfg(test)]
+    /// 0.25.3 crate 化：去掉 cfg(test)——bin 侧诊断回放测试跨 crate 使用。
     finalize_observer: Option<Arc<Mutex<Vec<SttFinalizeRecord>>>>,
 }
 
@@ -208,7 +208,7 @@ pub struct SttBoundaryRecord {
     pub audio_ms: u64,
     pub reason: &'static str,
     /// 边界在引擎内被确认的单调时钟；诊断回放用同一原点换算墙钟延迟。
-    #[cfg(test)]
+    /// 0.25.3 crate 化：去掉 cfg(test)——bin 侧诊断回放跨 crate 使用。
     #[serde(skip)]
     pub observed_at: Instant,
 }
@@ -250,8 +250,8 @@ pub struct SttDecisionRecord {
 ///
 /// `observed_at` 使用与回放同源的单调时钟，跳过序列化；调用方可以用同一
 /// `Instant` 原点换算墙钟毫秒。生产引擎不挂 observer，因此不会分配记录。
+/// 0.25.3 crate 化：去掉 cfg(test)——bin 侧诊断回放测试跨 crate 使用。
 #[derive(Debug, Clone, serde::Serialize)]
-#[cfg(test)]
 pub struct SttFinalizeRecord {
     /// `created` = 句尾创建定稿 segment；`transport_start` = 即将发起 worker 请求。
     pub phase: &'static str,
@@ -1637,8 +1637,8 @@ impl PseudoStreamingSttEngine {
     /// 无 transport 的连接是上游接线错误）。就绪由 start 时的 ready 握手
     /// 保证——这里不做端口探测。
     pub fn from_connection(
-        config: &crate::domain::config::stt_config::SttConfig,
-        conn: crate::domain::stt::SttEngineConnection,
+        config: &blink_domain_config::stt_config::SttConfig,
+        conn: crate::SttEngineConnection,
     ) -> Result<Self, String> {
         Self::from_connection_with_profile(config, conn, RecognitionProfile::PreviewDraft)
     }
@@ -1646,8 +1646,8 @@ impl PseudoStreamingSttEngine {
     /// 按目标选择识别调度 profile。G1/G3 可以显式传 `Legacy`，保持旧的
     /// 累计 Partial 契约；G2/Editor 使用默认 `PreviewDraft`。
     pub fn from_connection_with_profile(
-        config: &crate::domain::config::stt_config::SttConfig,
-        conn: crate::domain::stt::SttEngineConnection,
+        config: &blink_domain_config::stt_config::SttConfig,
+        conn: crate::SttEngineConnection,
         profile: RecognitionProfile,
     ) -> Result<Self, String> {
         let model = config.local_engine.funasr_model.clone();
@@ -1755,7 +1755,6 @@ impl PseudoStreamingSttEngine {
             sample_rate: 16000,
             boundary_observer: None,
             decision_observer: None,
-            #[cfg(test)]
             finalize_observer: None,
         })
     }
@@ -1787,7 +1786,6 @@ impl PseudoStreamingSttEngine {
     }
 
     /// 给独立的 WAV 诊断回放挂载定稿阶段记录器。
-    #[cfg(test)]
     pub fn with_finalize_observer(mut self, observer: Arc<Mutex<Vec<SttFinalizeRecord>>>) -> Self {
         self.finalize_observer = Some(observer);
         self
@@ -2802,7 +2800,6 @@ impl PseudoStreamingSttEngine {
                         .push(SttBoundaryRecord {
                             audio_ms: boundary_total as u64 * 1000 / self.sample_rate as u64,
                             reason: observer_reason,
-                            #[cfg(test)]
                             observed_at: Instant::now(),
                         });
                 }
@@ -3661,7 +3658,6 @@ impl SttEngine for PseudoStreamingSttEngine {
                         .push(SttBoundaryRecord {
                             audio_ms: boundary_total as u64 * 1000 / self.sample_rate as u64,
                             reason: boundary_reason,
-                            #[cfg(test)]
                             observed_at: Instant::now(),
                         });
                 }

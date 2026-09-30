@@ -155,8 +155,8 @@ impl AudioTranscriptionError {
     }
 
     /// 映射到 `CapabilityError`。
-    pub fn to_capability_error(&self) -> crate::domain::capability::CapabilityError {
-        use crate::domain::capability::CapabilityError;
+    pub fn to_capability_error(&self) -> blink_domain_capability::CapabilityError {
+        use blink_domain_capability::CapabilityError;
         match self {
             Self::UnsupportedAudioFormat { detail } => CapabilityError::InvalidData {
                 reason: self.category().to_string(),
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn to_capability_error_mapping() {
-        use crate::domain::capability::CapabilityError;
+        use blink_domain_capability::CapabilityError;
 
         let e = AudioTranscriptionError::UnsupportedAudioFormat {
             detail: "mp3".into(),
