@@ -4,3 +4,10 @@
 # 本地与 CI 同源：cwd 由 xtask 用 CARGO_MANIFEST_DIR 锚定 workspace 根，
 # 不再依赖 Tauri beforeBuildCommand 的不可控 cwd。
 xtask = "run --package xtask --"
+
+# Windows MSVC 链接器换 rust-lld（工具链自带，多线程并行链接）：
+# 本仓每轮验证都要重链接 ~100MB 的 debug 测试二进制，默认 link.exe 基本单线程，是验证耗时主瓶颈。
+# 产物功能等价；图标/manifest 嵌入走 rc 编译器在链接前完成，不受影响。
+# 回退：删除本段（会触发一次全量重建）。
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

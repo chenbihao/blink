@@ -9,6 +9,12 @@ repository = "https://github.com/chenbihao/blink"
 [workspace]
 members = ["plugins/examples/ip", "plugins/examples/translate", "plugins/examples/weather", "xtask"]
 
+# dev/test 只保留行号表级调试信息：每轮验证都要全量重链接 ~100MB 的 debug 二进制，
+# line-tables-only 让 obj/PDB 明显变小、链接更快，panic 回溯仍带行号。
+# 需要在调试器里查看变量值时临时改回 debug = 2。
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 codegen-units = 1
 lto = true
