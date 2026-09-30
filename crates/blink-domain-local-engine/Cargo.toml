@@ -1,0 +1,14 @@
+[package]
+name = "blink-domain-local-engine"
+version = "0.25.2"
+edition = "2024"
+description = "Blink 本地引擎领域协议（0.25.2 自 bin crate 拆出；零出边汇点，仅依赖 infra）"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+blink-infra = { path = "../blink-infra" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"

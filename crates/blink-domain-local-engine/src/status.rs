@@ -21,10 +21,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::local_engine::identity::{
+use crate::identity::{
     BackendVerificationResult, ComputePreference, ResolvedProfile,
 };
-use crate::domain::local_engine::implementation::ImplementationId;
+use crate::implementation::ImplementationId;
 
 use super::error::LocalEngineError;
 
@@ -404,8 +404,8 @@ impl Default for BackendInfo {
             requested_preference: ComputePreference::Auto,
             resolved_profile: None,
             backend_verification: BackendVerificationResult {
-                state: crate::domain::local_engine::identity::BackendState::Pending,
-                expected_backend: crate::domain::local_engine::identity::ComputeBackend::Cpu,
+                state: crate::identity::BackendState::Pending,
+                expected_backend: crate::identity::ComputeBackend::Cpu,
                 actual_backend: None,
                 device_name: None,
                 mismatch_reason: None,
@@ -540,7 +540,7 @@ impl EngineStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStatusSnapshot {
     /// 引擎 id。
-    pub engine_id: crate::domain::local_engine::identity::EngineId,
+    pub engine_id: crate::identity::EngineId,
     /// 服务 epoch。
     pub service_epoch: ServiceEpoch,
     /// revision。
@@ -919,14 +919,14 @@ mod tests {
         let back: EngineStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(
             back.active_implementation,
-            Some(crate::domain::local_engine::implementation::ImplementationId::FunasrGgufWorker)
+            Some(crate::implementation::ImplementationId::FunasrGgufWorker)
         );
     }
 
     fn status_active_impl() -> EngineStatus {
         EngineStatus {
             active_implementation: Some(
-                crate::domain::local_engine::implementation::ImplementationId::FunasrGgufWorker,
+                crate::implementation::ImplementationId::FunasrGgufWorker,
             ),
             ..Default::default()
         }
@@ -1078,7 +1078,7 @@ mod tests {
     /// CancelOutcome 序列化带 outcome tag，取消是正常语义非错误。
     #[test]
     fn cancel_outcome_serialization_has_outcome_tag() {
-        use crate::domain::local_engine::CancelOutcome;
+        use crate::CancelOutcome;
         let cancelled = serde_json::to_value(CancelOutcome::Cancelled).unwrap();
         assert_eq!(cancelled["outcome"], "cancelled");
 

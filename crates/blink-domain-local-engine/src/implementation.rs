@@ -32,7 +32,8 @@ use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 use super::identity::EngineId;
 
 // 0.25.1：ImplementationId 定义下沉 infra::local_engine::identity（运行时标识词汇），此处 re-export 保持旧路径。
-pub use crate::infra::local_engine::identity::ImplementationId;
+pub use blink_infra::local_engine::identity::ImplementationId;
+
 
 // ── ExecutorTopology ───────────────────────────────────────────────────────
 
@@ -344,7 +345,7 @@ fn validate_implementation(desc: &ImplementationDescriptor) -> Result<(), LocalE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::local_engine::identity::{ArtifactId, ComputePreference, RuntimePlan};
+    use crate::identity::{ArtifactId, ComputePreference, RuntimePlan};
 
     const ENGINE_A: &str = "funasr";
     const ENGINE_B: &str = "paddleocr";
@@ -733,7 +734,7 @@ mod tests {
 
     #[test]
     fn candidate_referencing_undeclared_artifact_rejected() {
-        use crate::domain::local_engine::descriptor::ComputeCandidate;
+        use crate::descriptor::ComputeCandidate;
         let mut desc = gguf_impl(
             &engine(ENGINE_A),
             ImplementationId::FunasrGgufWorker,

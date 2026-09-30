@@ -874,6 +874,22 @@ impl Default for SttConfig {
     }
 }
 
+
+/// 0.25.2 crate 化：STT 云端迁移的 AIConfig provider 投影（apply_migration 参数）。
+#[derive(Debug, Clone)]
+pub struct SttMigrationProvider {
+    pub id: String,
+    pub kind: SttMigrationProviderKind,
+    pub base_url: Option<String>,
+}
+
+/// 供应商协议分类投影——云端 STT kind 回推只用得到"是否 OpenAI 兼容"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttMigrationProviderKind {
+    OpenAICompatible,
+    Other,
+}
+
 impl SttConfig {
     /// 云端 STT 是否已配置（`cloud_provider` 有值即视为已配置）。
     pub fn is_cloud_configured(&self) -> bool {
@@ -890,10 +906,14 @@ impl SttConfig {
     /// 3. 云端迁移：旧 0.12 `cloud` 字段 → `cloud_provider` 独立模式
     ///
     /// 任一步骤产生变更时返回 `true`（调用方需持久化到 DB + 更新缓存）。
-    pub fn apply_migration(&mut self, ai_config: &super::ai_config::AIConfig) -> bool {
+    ///
+    /// 0.25.2 crate 化参数收窄：只消费 AIConfig providers 的
+    /// (id, kind, base_url) 投影（[`SttMigrationProvider`]），由上层
+    /// `ai_config::stt_migration_providers()` 构造——本模块不依赖 ai_config 全型。
+    pub fn apply_migration(&mut self, providers: &[SttMigrationProvider]) -> bool {
         let local_migrated = self.migrate_local_stt_selection();
         let gguf_migrated = self.migrate_selection_to_gguf();
-        let cloud_migrated = self.migrate_cloud_config(ai_config);
+        let cloud_migrated = self.migrate_cloud_config(providers);
         local_migrated || gguf_migrated || cloud_migrated
     }
 
@@ -1008,7 +1028,7 @@ impl SttConfig {
     /// 4. 找到匹配 provider → 构造 `SttCloudProvider`，清掉 cloud
     ///
     /// 返回 `true` = 已迁移（调用方需持久化）。
-    fn migrate_cloud_config(&mut self, ai_config: &super::ai_config::AIConfig) -> bool {
+    fn migrate_cloud_config(&mut self, providers: &[SttMigrationProvider]) -> bool {
         // cloud_provider 已有值 → 不迁移
         if self.cloud_provider.is_some() {
             return false;
@@ -1033,11 +1053,8 @@ impl SttConfig {
             }
         };
 
-        // 在 AIConfig 中找匹配的 provider
-        let provider = ai_config
-            .providers
-            .iter()
-            .find(|p| p.id == legacy.provider_id);
+        // 在 provider 投影中找匹配项
+        let provider = providers.iter().find(|p| p.id == legacy.provider_id);
         let Some(provider) = provider else {
             tracing::warn!(
                 provider_id = %legacy.provider_id,
@@ -1049,7 +1066,7 @@ impl SttConfig {
 
         // 从 ProviderKind + base_url 反推 STT kind 字符串
         let kind = match provider.kind {
-            super::ai_config::ProviderKind::OpenAICompatible
+            SttMigrationProviderKind::OpenAICompatible
                 // 检查 base_url 是否为 mimo
                 if provider
                     .base_url
@@ -1424,33 +1441,12 @@ mod tests {
             })),
             ..Default::default()
         };
-        let ai_config = crate::domain::config::ai_config::AIConfig {
-            providers: vec![crate::domain::config::ai_config::ProviderEntry {
-                id: "ai-p1".into(),
-                display_name: "OpenAI".into(),
-                kind: crate::domain::config::ai_config::ProviderKind::OpenAICompatible,
-                base_url: Some("https://api.openai.com/v1".into()),
-                secret_ref: "blink/ai-p1/key".into(),
-                models: vec![crate::domain::config::ai_config::ModelEntry {
-                    id: "whisper-1".into(),
-                    display_name: "Whisper".into(),
-                    enabled: true,
-                    context_window: None,
-                    input_price_per_million: None,
-                    output_price_per_million: None,
-                    temperature: None,
-                    max_tokens: None,
-                    custom_parameters: Vec::new(),
-                    reasoning_effort: None,
-                    thinking_style: None,
-                    capabilities: vec![crate::domain::config::ai_config::ModelCapability::Stt],
-                }],
-                enabled: true,
-                created_at: 0,
-            }],
-            ..Default::default()
-        };
-        assert!(cfg.apply_migration(&ai_config), "应成功迁移");
+        let providers = [SttMigrationProvider {
+            id: "ai-p1".into(),
+            kind: SttMigrationProviderKind::OpenAICompatible,
+            base_url: Some("https://api.openai.com/v1".into()),
+        }];
+        assert!(cfg.apply_migration(&providers), "应成功迁移");
         assert!(cfg.cloud_provider.is_some(), "cloud_provider 应已写回");
         assert!(cfg.cloud.is_none(), "cloud 字段应已清空");
         let cp = cfg.cloud_provider.as_ref().unwrap();
@@ -1469,33 +1465,12 @@ mod tests {
             })),
             ..Default::default()
         };
-        let ai_config = crate::domain::config::ai_config::AIConfig {
-            providers: vec![crate::domain::config::ai_config::ProviderEntry {
-                id: "mimo-p1".into(),
-                display_name: "MiMo".into(),
-                kind: crate::domain::config::ai_config::ProviderKind::OpenAICompatible,
-                base_url: Some("https://token-plan-cn.xiaomimimo.com/v1".into()),
-                secret_ref: "blink/mimo-p1/key".into(),
-                models: vec![crate::domain::config::ai_config::ModelEntry {
-                    id: "mimo-asr-1".into(),
-                    display_name: "MiMo ASR".into(),
-                    enabled: true,
-                    context_window: None,
-                    input_price_per_million: None,
-                    output_price_per_million: None,
-                    temperature: None,
-                    max_tokens: None,
-                    custom_parameters: Vec::new(),
-                    reasoning_effort: None,
-                    thinking_style: None,
-                    capabilities: vec![crate::domain::config::ai_config::ModelCapability::Stt],
-                }],
-                enabled: true,
-                created_at: 0,
-            }],
-            ..Default::default()
-        };
-        assert!(cfg.apply_migration(&ai_config));
+        let providers = [SttMigrationProvider {
+            id: "mimo-p1".into(),
+            kind: SttMigrationProviderKind::OpenAICompatible,
+            base_url: Some("https://token-plan-cn.xiaomimimo.com/v1".into()),
+        }];
+        assert!(cfg.apply_migration(&providers));
         let cp = cfg.cloud_provider.as_ref().unwrap();
         assert_eq!(cp.kind, "mimo_plan", "token-plan 域名应识别为 mimo_plan");
     }
@@ -1512,7 +1487,7 @@ mod tests {
             ..Default::default()
         };
         // cloud_provider 已有值 -> 不迁移
-        assert!(!cfg.apply_migration(&crate::domain::config::ai_config::AIConfig::default()));
+        assert!(!cfg.apply_migration(&[]));
         assert!(cfg.cloud_provider.is_some(), "cloud_provider 不变");
     }
 
@@ -1527,8 +1502,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let ai_config = crate::domain::config::ai_config::AIConfig::default();
-        assert!(cfg.apply_migration(&ai_config), "应清掉无效 cloud");
+        assert!(cfg.apply_migration(&[]), "应清掉无效 cloud");
         assert!(cfg.cloud.is_none(), "cloud 应已清空");
         assert!(cfg.cloud_provider.is_none(), "cloud_provider 仍为 None");
     }
@@ -1536,7 +1510,7 @@ mod tests {
     #[test]
     fn apply_migration_noop_when_both_none() {
         let mut cfg = SttConfig::default();
-        assert!(!cfg.apply_migration(&crate::domain::config::ai_config::AIConfig::default()));
+        assert!(!cfg.apply_migration(&[]));
     }
 
     // ── 0.22.6 H4: 本地 STT 选择迁移测试 ──────────────────────────────────
@@ -1629,20 +1603,12 @@ mod tests {
             })),
             ..Default::default()
         };
-        let ai_config = crate::domain::config::ai_config::AIConfig {
-            providers: vec![crate::domain::config::ai_config::ProviderEntry {
-                id: "ai-p1".into(),
-                display_name: "OpenAI".into(),
-                kind: crate::domain::config::ai_config::ProviderKind::OpenAICompatible,
-                base_url: Some("https://api.openai.com/v1".into()),
-                secret_ref: "blink/ai-p1/key".into(),
-                models: vec![],
-                enabled: true,
-                created_at: 0,
-            }],
-            ..Default::default()
-        };
-        assert!(cfg.apply_migration(&ai_config));
+        let providers = [SttMigrationProvider {
+            id: "ai-p1".into(),
+            kind: SttMigrationProviderKind::OpenAICompatible,
+            base_url: Some("https://api.openai.com/v1".into()),
+        }];
+        assert!(cfg.apply_migration(&providers));
         assert!(cfg.local_stt_selection.is_some());
         assert!(cfg.cloud_provider.is_some());
         assert!(cfg.cloud.is_none());
@@ -1753,28 +1719,28 @@ mod tests {
 
     /// EngineModelStatus.is_usable() 的行为验证——set_local_stt_selection
     /// 的验证逻辑依赖此方法。这里测试各组合。
-    fn test_model_descriptor() -> crate::domain::local_engine::model::EngineModelDescriptor {
-        use crate::domain::local_engine::model::EngineModelDescriptor;
+    fn test_model_descriptor() -> blink_domain_local_engine::model::EngineModelDescriptor {
+        use blink_domain_local_engine::model::EngineModelDescriptor;
         EngineModelDescriptor {
-            engine_id: crate::infra::local_engine::runtime::EngineId::new("funasr")
+            engine_id: blink_infra::local_engine::runtime::EngineId::new("funasr")
                 .expect("funasr is valid"),
             model_id: "gguf/sensevoice-small-q8".to_string(),
             display_name: "测试模型".to_string(),
             description: "测试".to_string(),
             revision: "gguf-v0.2.6".to_string(),
-            checksum_source: crate::infra::local_engine::runtime::ChecksumSource::Sha256(
+            checksum_source: blink_infra::local_engine::runtime::ChecksumSource::Sha256(
                 "ab".repeat(32),
             ),
             estimated_size_mb: Some(243),
             compatibility_schema: 1,
-            stt_capabilities: crate::domain::local_engine::SttModelCapabilities::default(),
+            stt_capabilities: blink_domain_local_engine::SttModelCapabilities::default(),
             business: None,
         }
     }
 
     #[test]
     fn model_usability_check_rejects_non_installed() {
-        use crate::domain::local_engine::model::{
+        use blink_domain_local_engine::model::{
             EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
         let desc = test_model_descriptor();
@@ -1787,7 +1753,7 @@ mod tests {
 
     #[test]
     fn model_usability_check_rejects_downloading() {
-        use crate::domain::local_engine::model::{
+        use blink_domain_local_engine::model::{
             EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
         let desc = test_model_descriptor();
@@ -1799,7 +1765,7 @@ mod tests {
 
     #[test]
     fn model_usability_check_rejects_download_failed() {
-        use crate::domain::local_engine::model::{EngineModelStatus, ModelInstallState};
+        use blink_domain_local_engine::model::{EngineModelStatus, ModelInstallState};
         let desc = test_model_descriptor();
         let mut status = EngineModelStatus::not_installed(&desc);
         status.install_state = ModelInstallState::DownloadFailed;
@@ -1808,7 +1774,7 @@ mod tests {
 
     #[test]
     fn model_usability_check_accepts_installed_verified() {
-        use crate::domain::local_engine::model::{
+        use blink_domain_local_engine::model::{
             EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
         let desc = test_model_descriptor();
@@ -1820,7 +1786,7 @@ mod tests {
 
     #[test]
     fn model_usability_check_accepts_installed_unverified() {
-        use crate::domain::local_engine::model::{
+        use blink_domain_local_engine::model::{
             EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
         let desc = test_model_descriptor();
@@ -1832,7 +1798,7 @@ mod tests {
 
     #[test]
     fn model_usability_check_rejects_installed_corrupted() {
-        use crate::domain::local_engine::model::{
+        use blink_domain_local_engine::model::{
             EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
         let desc = test_model_descriptor();
@@ -1844,7 +1810,7 @@ mod tests {
 
     #[test]
     fn model_usability_check_rejects_installed_mismatched() {
-        use crate::domain::local_engine::model::{
+        use blink_domain_local_engine::model::{
             EngineModelStatus, ModelInstallState, ModelVerificationState,
         };
         let desc = test_model_descriptor();

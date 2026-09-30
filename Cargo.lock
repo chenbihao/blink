@@ -588,6 +588,9 @@ version = "0.24.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "blink-domain-capability",
+ "blink-domain-config",
+ "blink-domain-local-engine",
  "blink-infra",
  "bytes",
  "chrono",
@@ -645,6 +648,37 @@ dependencies = [
  "winreg 0.55.0",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "blink-domain-capability"
+version = "0.25.1"
+dependencies = [
+ "rig-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "blink-domain-config"
+version = "0.25.2"
+dependencies = [
+ "blink-domain-local-engine",
+ "blink-infra",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+]
+
+[[package]]
+name = "blink-domain-local-engine"
+version = "0.25.2"
+dependencies = [
+ "blink-infra",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,18 @@
+[package]
+name = "blink-domain-capability"
+version = "0.25.1"
+edition = "2024"
+description = "Blink Capability 协议错误词汇（0.25.1 自 bin crate 拆出）"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "1"
+
+[dev-dependencies]
+# error.rs 测试断言 rig tool_result 错误投影（与根同版本）
+rig-core = "0.42"
+serde_json = "1.0.150"

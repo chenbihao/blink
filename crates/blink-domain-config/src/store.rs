@@ -31,7 +31,7 @@ impl ConfigStore {
     /// 读取配置分片。不存在或解析失败返回 `T::default()`。
     #[allow(dead_code)]
     pub async fn get<T: ConfigKey>(pool: &SqlitePool) -> T {
-        crate::infra::data::history::get_config(pool, T::KEY)
+        blink_infra::data::history::get_config(pool, T::KEY)
             .await
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default()
@@ -41,7 +41,7 @@ impl ConfigStore {
     #[allow(dead_code)]
     pub async fn set<T: ConfigKey>(pool: &SqlitePool, config: &T) -> Result<(), String> {
         let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-        crate::infra::data::history::set_config(pool, T::KEY, &json)
+        blink_infra::data::history::set_config(pool, T::KEY, &json)
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -50,7 +50,7 @@ impl ConfigStore {
 
 // ── 外部类型的 ConfigKey impl（类型定义不在本域的）─────────────────────────────
 
-impl ConfigKey for crate::infra::data::clipboard::ClipboardConfig {
+impl ConfigKey for blink_infra::data::clipboard::ClipboardConfig {
     /// 0.8.8 §8.7:剪贴板配置从原 `app_config.clipboard` nested 字段独立提升为 KV,
     /// 与 6 个 AppConfig 分片同级(但不属于 `app.*` 命名空间,归到 `clipboard:*`)。
     const KEY: &'static str = "clipboard:config";

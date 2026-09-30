@@ -291,7 +291,7 @@ impl EngineDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::local_engine::identity::{
+    use crate::identity::{
         ArtifactId, ComputeBackend, ComputePreference, EngineId, ModelContract, ResolvedProfile,
         RuntimePlan,
     };
@@ -323,7 +323,7 @@ mod tests {
             model_contract: ModelContract {
                 model_id: "funasr-model".to_string(),
                 revision: "v1.0".to_string(),
-                checksum_source: crate::domain::local_engine::identity::ChecksumSource::Unverified,
+                checksum_source: crate::identity::ChecksumSource::Unverified,
             },
             lifecycle: LifecyclePolicy::Manual,
             timeouts: EngineTimeouts::default(),

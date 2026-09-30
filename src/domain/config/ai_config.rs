@@ -739,6 +739,27 @@ fn default_chat_capability() -> Vec<ModelCapability> {
 
 // ── 测试 ────────────────────────────────────────────────────────────────
 
+
+/// 0.25.2 crate 化：STT 云端迁移的 provider 投影——`SttConfig::apply_migration`
+/// 参数收窄配套（stt_config 已拆至 blink-domain-config，不依赖本模块全型）。
+pub fn stt_migration_providers(
+    config: &AIConfig,
+) -> Vec<crate::domain::config::stt_config::SttMigrationProvider> {
+    use crate::domain::config::stt_config::{SttMigrationProvider, SttMigrationProviderKind};
+    config
+        .providers
+        .iter()
+        .map(|p| SttMigrationProvider {
+            id: p.id.clone(),
+            kind: match p.kind {
+                ProviderKind::OpenAICompatible => SttMigrationProviderKind::OpenAICompatible,
+                _ => SttMigrationProviderKind::Other,
+            },
+            base_url: p.base_url.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

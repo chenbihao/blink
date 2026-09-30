@@ -1,0 +1,20 @@
+[package]
+name = "blink-domain-config"
+version = "0.25.2"
+edition = "2024"
+description = "Blink 配置域（0.25.2 自 bin crate 拆出：stt_config + ConfigStore 协议）"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+blink-infra = { path = "../blink-infra" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# stt_config 模型注册表测试使用 local_engine 域类型（EngineModelDescriptor 等）
+blink-domain-local-engine = { path = "../blink-domain-local-engine" }

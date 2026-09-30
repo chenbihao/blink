@@ -20,7 +20,8 @@
 //! - SLO：`MetricCategory::Capability`，`CapabilityRegistry::invoke` 包装层自动埋点
 
 pub(crate) mod builtins; // Step 2 填真实能力（screenshot 等）
-mod error;
+// 0.25.1：error.rs 拆至 blink-domain-capability crate（51+ 文件共享错误词汇），此处 re-export 保持旧路径
+pub use blink_domain_capability::error;
 pub(crate) mod policy;
 mod projection;
 mod registry;

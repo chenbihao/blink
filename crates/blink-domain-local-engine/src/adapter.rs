@@ -253,12 +253,12 @@ impl AdapterConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::local_engine::descriptor::{
+    use crate::descriptor::{
         CapabilityKind, EngineDefinition, EngineDisplay, EngineTimeouts, InstallPlanRef,
         LifecyclePolicy, ResourceBudget, ServiceTransport,
     };
-    use crate::domain::local_engine::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
-    use crate::domain::local_engine::identity::{
+    use crate::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
+    use crate::identity::{
         ArtifactId, ComputeBackend, ComputePreference, EngineId, ResolvedProfile, RuntimePlan,
     };
 
@@ -292,11 +292,11 @@ mod tests {
                         }],
                         schema_version: 1,
                     },
-                    model_contract: crate::domain::local_engine::identity::ModelContract {
+                    model_contract: crate::identity::ModelContract {
                         model_id: "test-model".to_string(),
                         revision: "v1.0".to_string(),
                         checksum_source:
-                            crate::domain::local_engine::identity::ChecksumSource::Unverified,
+                            crate::identity::ChecksumSource::Unverified,
                     },
                     lifecycle: LifecyclePolicy::Manual,
                     timeouts: EngineTimeouts::default(),
@@ -391,7 +391,7 @@ mod tests {
 
     fn make_launch_context(profile: &ResolvedProfile) -> LaunchContext {
         LaunchContext {
-            endpoint: crate::domain::local_engine::identity::Endpoint::new(8080),
+            endpoint: crate::identity::Endpoint::new(8080),
             engine_id: "test-engine".to_string(),
             instance_id: "inst-test".to_string(),
             token: "test-token-abcdef0123456789".to_string(),

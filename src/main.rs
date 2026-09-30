@@ -740,7 +740,7 @@ fn main() {
                 app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pools.config),
             );
             // 启动期一次性迁移 STT 云端配置（0.12 cloud 引用模式 → 独立 cloud_provider 模式）
-            if stt_config.apply_migration(&ai_config) {
+            if stt_config.apply_migration(&crate::domain::config::ai_config::stt_migration_providers(&ai_config)) {
                 let _ = tauri::async_runtime::block_on(
                     app::config::ConfigStore::set::<app::stt_config::SttConfig>(
                         &pools.config,

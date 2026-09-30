@@ -19,8 +19,8 @@ pub mod managed_settings;
 pub mod ocr_config; // 0.22.4：OCR 配置分片（第 9 KV）
 pub mod plugin_config;
 pub mod shards;
-pub mod store;
-pub mod stt_config;
+pub use blink_domain_config::store; // 0.25.2 拆至 blink-domain-config crate，re-export 保持旧路径
+pub use blink_domain_config::stt_config; // 0.25.2 拆至 blink-domain-config crate，re-export 保持旧路径
 
 // ── 扁平 re-exports（方便 `crate::domain::config::*` 直接引用）─────────────────
 #[allow(unused_imports)]
