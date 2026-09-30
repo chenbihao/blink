@@ -53,7 +53,11 @@
 ```bash
 cargo tauri dev          # 开发（debug，控制台 tracing，默认 error 级；设置页可调）
 cargo xtask release      # 打包（= 编译插件 + cargo tauri build；需先 cargo install tauri-cli）
-cargo test --bin blink   # 跑单测（bin crate，无 lib target）
+cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translate --exclude blink-plugin-weather --exclude xtask
+                         # 全量单测（0.25 起 bin 只是 6 个 workspace crate 之一，--bin blink 只覆盖 app 侧）
+cargo test -p blink-domain-stt
+                         # 定向验证：改哪层就测哪个包（blink-domain / blink-infra / blink-domain-stt...），
+                         # 增量轮秒级（stt 5.9s / infra 11.8s / domain 13.8s / bin 17.6s 实测）
 ```
 
 **本机 Nano STT 模型位置**：`C:\Users\99452\AppData\Roaming\blink\models\funasr\`（即 `%APPDATA%\blink\models\funasr\`）已安装 Fun-ASR-Nano。真实回放应从对应模型目录的 `active.json` 读取当前 `slot_id`，再到 `slots\<slot_id>\payload\` 查找 `funasr-encoder-f16.gguf` 与 `qwen3-0.6b-q4km.gguf`。若沙箱对 AppData 报访问拒绝，不能据此说模型不存在；先做获授权的只读核验，并在可读取模型的环境运行回放。
@@ -104,18 +108,21 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 源码分层与模块拆分的完整说明见 [spec-architecture.md §A1](docs/specs/spec-architecture.md)。速查：
 
-- `src/main.rs` — Tauri 启动 + 托盘 + 服务 wiring
+- `src/main.rs` — Tauri 启动 + 托盘 + 服务 wiring + `runtime_mode::activate_production()`
 - `src/app/` — 应用层（commands / config / ai_config / stt_config / voice）
-- `src/domain/` — 业务域（context / intent / search / execution / plugin / chord / ai / stt / capability）—— **框架无关，不 use tauri（0.15 收敛中）**
-- `src/infra/` — 基础设施（platform / data / utils）—— 最底层，不反向依赖
 - `src/cli/` — 自身 CLI 化（mcp-server / search / run / chat）
+- `src/domain/`、`src/infra/` — **re-export shim**（0.25 crate 化后保持 `crate::domain::*` / `crate::infra::*` 旧路径，实体在 crates/）
+- `crates/blink-domain/` — 业务域主体（ai / capability 协议+builtins / search / intent / plugin / chord / context / editor / mcp / ocr / resource / sticky / config 剩余 + 根公共底座）—— **框架无关，不 use tauri（arch_guard 守卫）**
+- `crates/blink-domain-stt|config|local-engine|capability/` — 先行拆出的卫星域 crate（stt 热点域 / stt_config+store / 引擎协议 / CapabilityError）
+- `crates/blink-infra/` — 基础设施（platform / data / utils / local_engine / stt / event_names）—— 最底层，不反向依赖
 - `frontend/` — 纯静态前端（主窗口 / 设置页 / 对话窗口 / 截图 overlay / 语音 overlay / 悬浮球 / 右键菜单）
 
 **根目录**（非源码，勿与源码模块混淆）：
 
 | 目录 | 用途 | 易混淆点 |
 |---|---|---|
-| `capabilities/` | Tauri ACL 权限真源（`*.json`） | ≠ `src/domain/capability/`（业务域能力抽象） |
+| `crates/` | workspace crate 真源（0.25 拆出：blink-domain / blink-infra / blink-domain-stt 等 6 个） | bin 侧 `src/domain`、`src/infra` 只是 re-export shim |
+| `capabilities/` | Tauri ACL 权限真源（`*.json`） | ≠ `crates/blink-domain/src/capability/`（业务域能力抽象） |
 | `gen/schemas/` | Tauri 自动生成的 IPC Schema | 勿手改，由 `tauri build` / IDE 插件生成 |
 | `icons/` | 安装包图标（`.ico` / `.png`） | ≠ `frontend/assets/icons/`（前端 SVG sprite，由 `cargo xtask icons` 生成） |
 | `xtask/` | Rust workspace 构建编排入口（`cargo xtask <plugins\|copy\|release\|icons>`） | 脚本如 `xtask/scripts/fetch-lucide-icons.py` 归此管理 |

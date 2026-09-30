@@ -12,6 +12,8 @@ pub mod editor_draft; // 修复：编辑器恢复草稿存储（原子持久化 
 pub mod editor_transform; // 0.23.4：编辑器 AI 整理编排（全局单活跃/只产候选）
 pub mod local_engine; // 0.22.3：本地引擎生命周期编排服务（EngineManager + EngineRegistry）
 pub mod mcp_server_runtime; // 0.19.13：主进程 Streamable HTTP MCP Server 生命周期管理
+#[cfg(test)]
+mod skill_help_e2e; // 0.25.4：CLI help → skill e2e（测试对象是 bin 的 clap Cli）
 pub mod service;
 pub mod setting_service;
 pub mod stt_config;

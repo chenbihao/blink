@@ -588,6 +588,7 @@ version = "0.24.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "blink-domain",
  "blink-domain-capability",
  "blink-domain-config",
  "blink-domain-local-engine",
@@ -649,6 +650,55 @@ dependencies = [
  "winreg 0.55.0",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "blink-domain"
+version = "0.25.4"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blink-domain-capability",
+ "blink-domain-config",
+ "blink-domain-local-engine",
+ "blink-domain-stt",
+ "blink-infra",
+ "bytes",
+ "chrono",
+ "dirs-next",
+ "evalexpr",
+ "futures",
+ "getrandom 0.3.4",
+ "http",
+ "hyper",
+ "hyper-util",
+ "inventory",
+ "jsonpath-rust",
+ "keyring-core",
+ "nucleo",
+ "once_cell",
+ "open",
+ "pinyin",
+ "regex",
+ "reqwest",
+ "rig-agent",
+ "rig-core",
+ "rmcp",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "sse-stream",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "unicode-normalization",
+ "urlencoding",
+ "walkdir",
+ "zeroize",
 ]
 
 [[package]]
