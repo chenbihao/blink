@@ -87,10 +87,37 @@ fn run(cmd: &str, args: &[&str], cwd: impl AsRef<Path>) {
     }
 }
 
+/// release 总步骤进度：入口先确定总步数，各阶段经 `step_advance` 打 [k/N]
+/// 前缀，长流程（worker 构建 / 逐插件编译 / 校验 / 打包）随时可见整体位置。
+struct StepProgress {
+    total: usize,
+    current: usize,
+}
+
+impl StepProgress {
+    fn new(total: usize) -> Self {
+        Self { total, current: 0 }
+    }
+
+    fn advance(&mut self, title: &str) {
+        self.current += 1;
+        println!("\n[{}/{}] {}", self.current, self.total, title);
+    }
+}
+
+/// 推进一步并打标题；独立子命令（不经 release 流程）传 &mut None，退化为普通标题行。
+fn step_advance(step: &mut Option<StepProgress>, title: &str) {
+    match step {
+        Some(progress) => progress.advance(title),
+        None => println!("{title}"),
+    }
+}
+
 /// 编译所有 Rust 插件。
 /// debug = true 时用 debug profile（供 `cargo xtask release --debug` 使用，DevTools 可用）。
 /// copy_to_bin = true 时才拷贝到 plugins/builtin/<id>/bin/（仅打包时需要）。
-fn build_plugins(copy_to_bin: bool, debug: bool) {
+/// step = Some 时每个插件占 release 总进度的一步（[k/N]），None 时打普通标题行。
+fn build_plugins(copy_to_bin: bool, debug: bool, step: &mut Option<StepProgress>) {
     let root = workspace_root();
     let profile = if debug { "debug" } else { "release" };
     let target_dir = root.join("target").join(profile);
@@ -102,18 +129,24 @@ fn build_plugins(copy_to_bin: bool, debug: bool) {
         rust_plugins.len(),
         rust_plugins
     );
-    println!("🔨 编译 Rust 插件（{profile}）...");
 
-    for id in &rust_plugins {
+    for (i, id) in rust_plugins.iter().enumerate() {
         let pkg = format!("blink-plugin-{id}");
-        print!("  编译 {pkg} ... ");
+        step_advance(
+            step,
+            &format!(
+                "🔨 编译 {pkg}（{}/{}，{profile}）",
+                i + 1,
+                rust_plugins.len()
+            ),
+        );
         // -p 显式选 workspace 成员包（跨 cargo 版本稳定，详见原 copy-plugins.ps1 注释）
         let mut args = vec!["build", "-p", pkg.as_str()];
         if !debug {
             args.push("--release");
         }
         run("cargo", &args, &root);
-        println!("✓ -> target/{profile}/{pkg}.exe");
+        println!("  ✓ -> target/{profile}/{pkg}.exe");
 
         if copy_to_bin {
             let dest_dir = builtin_dir.join(id).join("bin");
@@ -329,8 +362,8 @@ fn extract_json_version(content: &str) -> Option<String> {
 /// ONNX OCR 供应链锁定、STT corpus 隐私守卫（testdata/stt/corpus 不入发布产物）。
 /// 分层守卫不在发布预检（它守的是代码结构而非打包产物），已迁至 blink bin crate 的
 /// `src/arch_guard.rs`，随 `cargo test --bin blink` 每次运行。
-fn check_release_resources() {
-    println!("🔒 release 资源前置校验开始...");
+fn check_release_resources(step: &mut Option<StepProgress>) {
+    step_advance(step, "🔒 release 资源前置校验");
     let mut failures = Vec::new();
 
     // 0. 版本一致性：Cargo.toml ↔ tauri.conf.json（真源是 Git tag，CI 构建时同步写入）
@@ -1050,24 +1083,32 @@ fn main() {
     });
 
     match task.as_str() {
-        "plugins" => build_plugins(false, false), // 开发期：仅编译，不复制到 bin
+        "plugins" => build_plugins(false, false, &mut None), // 开发期：仅编译，不复制到 bin
         "copy" => copy_plugins(),                 // CI：仅拷贝已编译的 exe 到 bin
         "release" => {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
+            // 总步数 = 1（GGUF worker）+ 插件数（每插件一步）+ 1（资源校验）+ 1（Tauri 打包）
+            let plugin_count = discover_rust_plugins().len();
+            let total = 1 + plugin_count + 2;
+            let mut step = Some(StepProgress::new(total));
+            println!(
+                "🚀 release 流程共 {total} 步：GGUF worker → 插件 ×{plugin_count} → 资源校验 → Tauri 打包"
+            );
+            step_advance(&mut step, "🔨 构建 GGUF STT worker（funasr-worker）");
             funasr_worker::build_workers(); // release 唯一入口必须自行生成 gitignore 的 worker 产物
-            build_plugins(true, debug); // 打包期：编译 + 复制到 bin
-            check_release_resources(); // release 资源前置校验（含 Python 语法）
+            build_plugins(true, debug, &mut step); // 打包期：编译 + 复制到 bin
+            check_release_resources(&mut step); // release 资源前置校验
             let root = workspace_root();
             if debug {
-                println!("📦 cargo tauri build --debug（DevTools 可用）...");
+                step_advance(&mut step, "📦 cargo tauri build --debug（DevTools 可用）");
                 run("cargo", &["tauri", "build", "--debug"], &root);
             } else {
-                println!("📦 cargo tauri build ...");
+                step_advance(&mut step, "📦 cargo tauri build");
                 run("cargo", &["tauri", "build"], &root);
             }
         }
-        "release-check" => check_release_resources(), // 仅运行 release 资源前置校验
+        "release-check" => check_release_resources(&mut None), // 仅运行 release 资源前置校验
         "icons" => fetch_icons(),                     // 拉取 Lucide 图标生成 sprite
         "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
         "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录

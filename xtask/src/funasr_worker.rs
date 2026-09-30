@@ -255,10 +255,12 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
             &FUNASR_COMMIT[..12]
         );
         std::fs::create_dir_all(work_root).unwrap();
+        // 不用 -s：透出 curl 自带进度表（\r 单行原地刷新，交互终端不滚屏；
+        // 非 TTY 下 curl 自行节流约 1 次/秒，CI 日志不刷屏）。-S 保证失败仍输出错误。
         run_ctx(
             "curl",
             &[
-                "-sSL",
+                "-SSL",
                 "--fail",
                 "-o",
                 zip_path.to_str().unwrap(),
