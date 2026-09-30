@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/chenbihao/blink"
 
 [workspace]
-members = ["plugins/examples/ip", "plugins/examples/translate", "plugins/examples/weather", "xtask"]
+members = ["crates/blink-infra", "plugins/examples/ip", "plugins/examples/translate", "plugins/examples/weather", "xtask"]
 
 # dev/test 只保留行号表级调试信息：每轮验证都要全量重链接 ~100MB 的 debug 二进制，
 # line-tables-only 让 obj/PDB 明显变小、链接更快，panic 回溯仍带行号。
@@ -38,6 +38,8 @@ opt-level = 3
 string_slice = "deny"  # 禁止直接按字节切片字符串（会导致中文 panic）
 
 [dependencies]
+# blink-infra: 基础设施层 crate（0.25.1 拆出；src/infra/mod.rs 为 re-export shim）
+blink-infra = { path = "crates/blink-infra" }
 async-trait = "0.1"
 base64 = "0.22"
 chrono = "0.4.45"

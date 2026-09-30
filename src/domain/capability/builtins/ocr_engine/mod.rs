@@ -24,10 +24,10 @@
 pub mod backend;
 #[cfg(test)]
 mod fake;
-pub mod layout;
+pub use crate::infra::platform::ocr::layout; // 0.25.1 定义下沉 infra，re-export 保持旧路径
 #[cfg(test)]
 mod tests;
-pub mod types;
+pub use crate::infra::platform::ocr::types; // 0.25.1 定义下沉 infra，re-export 保持旧路径
 
 // ── 公共 re-export（保持旧路径 `ocr_engine::*` 可用） ──────────────────────
 #[cfg(test)] // ocr_image 测试经旧路径 `ocr_engine::install_backend` 注入 fake

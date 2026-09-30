@@ -510,7 +510,7 @@ fn privacy_corpus_is_gitignored() {
 /// 检查 test_fixtures 源码不含真实音频内容。
 #[test]
 fn privacy_fixtures_contain_no_audio_content() {
-    let fixtures_src = include_str!("../../../../src/infra/platform/audio/test_fixtures.rs");
+    let fixtures_src = include_str!("../../../../crates/blink-infra/src/platform/audio/test_fixtures.rs");
     // 不应包含 base64 编码的音频数据
     assert!(
         !fixtures_src.contains("UklGR"),

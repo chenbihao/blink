@@ -22,9 +22,9 @@
 //!   `OcrRequestContext`（deadline / cancel / origin）。旧 `recognize` 保留兼容。
 //! - **OcrError 重构**：使用 `thiserror` + 稳定分类，至少区分 8 种错误类型。
 
-pub mod config;
+pub use crate::infra::platform::ocr::config; // 0.25.1 定义下沉 infra，re-export 保持旧路径
 pub mod context;
-pub mod error;
+pub use crate::infra::platform::ocr::error; // 0.25.1 定义下沉 infra，re-export 保持旧路径
 pub mod input_budget;
 pub mod router;
 

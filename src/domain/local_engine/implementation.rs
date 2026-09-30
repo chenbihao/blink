@@ -31,53 +31,8 @@ use super::descriptor::{EngineTimeouts, InstallPlanRef, ResourceBudget, ServiceT
 use super::error::{ErrorPhase, LocalEngineError, LocalEngineErrorCode};
 use super::identity::EngineId;
 
-// ── ImplementationId ───────────────────────────────────────────────────────
-
-/// 内部 implementation 稳定标识（编译期闭合枚举，0.22.9）。
-///
-/// 产品层 engine id 保持稳定；同一 engine 内部按模型/技术底座区分
-/// implementation。命名稳定且版本化演进靠 revision 声明（descriptor 的
-/// install plan artifact id / engine display version），不改 id。
-///
-/// **不接受前端提交**：serde 反序列化只接受下列 wire 值，未知值直接失败
-/// （fail-closed，不用默认值掩盖未知数据）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImplementationId {
-    /// FunASR GGUF 常驻 worker（llama.cpp 锁定构建，NDJSON stdio 协议）。
-    ///
-    /// 承载 SenseVoice / Paraformer-zh / Fun-ASR-Nano 三条既有模型路径。
-    FunasrGgufWorker,
-    /// PaddleOCR ONNX in-process（blink.exe 直持 ORT lazy Session）。
-    // 显式 rename：`rename_all` 会把 `PaddleOcr` 拆成 `paddle_ocr`，
-    // wire 值必须与产品 engine id 前缀（paddleocr）一致。
-    #[serde(rename = "paddleocr_onnx_in_process")]
-    PaddleOcrOnnxInProcess,
-}
-
-impl ImplementationId {
-    /// 返回 wire 值（与 serde 序列化一致，用于日志与诊断）。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::FunasrGgufWorker => "funasr_gguf_worker",
-            Self::PaddleOcrOnnxInProcess => "paddleocr_onnx_in_process",
-        }
-    }
-
-    /// 从 wire 值解析（未知值返回 `None`——fail-closed，不猜、不用默认值）。
-    ///
-    /// 用于磁盘目录名（`impl-{wire}`）反解 implementation；磁盘上出现的
-    /// 未知名字不是合法 implementation，调用方必须显式处理而非映射默认。
-    pub fn parse_wire(value: &str) -> Option<Self> {
-        serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
-    }
-}
-
-impl std::fmt::Display for ImplementationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+// 0.25.1：ImplementationId 定义下沉 infra::local_engine::identity（运行时标识词汇），此处 re-export 保持旧路径。
+pub use crate::infra::local_engine::identity::ImplementationId;
 
 // ── ExecutorTopology ───────────────────────────────────────────────────────
 

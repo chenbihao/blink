@@ -31,8 +31,8 @@
 
 pub mod adapter;
 pub mod descriptor;
-pub mod error;
-pub mod identity;
+pub use crate::infra::local_engine::error; // 0.25.1 定义下沉 infra，re-export 保持旧路径
+pub use crate::infra::local_engine::identity;
 pub mod implementation;
 pub mod model;
 pub mod operation;

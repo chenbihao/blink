@@ -2,8 +2,11 @@
 //!
 //! 0.22 收尾：从 `ocr_engine.rs` 按职责拆出。
 
-use super::layout::*;
-use super::types::*;
+// 0.25.1 crate 化：layout/types 已下沉 blink-infra，glob 经多层 re-export 失效，
+// 改为显式导入（其余类型经 mod.rs 的 pub use 由 super::* 提供）。
+use crate::infra::platform::ocr::layout::{
+    group_words_into_lines, join_words_smart, rect_union,
+};
 use super::*;
 
 #[tokio::test]

@@ -1,8 +1,7 @@
-//! 基础设施层：数据持久化、平台 API、通用工具
+//! 基础设施层 re-export shim（0.25.1 crate 化）。
+//!
+//! 实体已拆至 workspace crate `blink-infra`（`crates/blink-infra`）——编译记账
+//! 单位独立后，infra 改动不再触发 bin 的整 crate 重编。本模块保持
+//! `crate::infra::*` 旧路径可用，bin/domain 侧 330+ 处引用零改写。
 
-pub mod data;
-pub mod event_names; // 0.21.14：事件名常量（从 domain 下沉，消除 infra→domain 反向依赖）
-pub mod local_engine; // 0.22.1：ManagedProcess 受管子进程生命周期与日志管道
-pub mod platform;
-pub mod stt; // 0.22.9 Handoff 06：VAD frontend port 实现（EnergyVad adapter + FSMN-VAD ONNX）
-pub mod utils;
+pub use blink_infra::*;

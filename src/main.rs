@@ -17,6 +17,10 @@ use tauri::{
 };
 
 fn main() {
+    // 0.25.1 crate 化：infra 的 DB 读缓存与引擎数据目录改为运行时开关，
+    // 默认隔离模式（测试友好），生产入口在此显式激活（CLI 分支同样受益）。
+    blink_infra::runtime_mode::activate_production();
+
     // 0.13.5: CLI 模式检测——如果命令行参数匹配 CLI 子命令，执行 CLI 逻辑后退出。
     // 必须在任何 Tauri 初始化之前检测，避免创建不必要的 GUI 资源。
     if let Some(exit_code) = cli::try_run_cli() {

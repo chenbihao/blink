@@ -101,19 +101,9 @@ pub enum WindowMode {
     TokenAware,
 }
 
-/// 0.21.20: FTS5 召回范围（跨对话召回开关）。
-///
-/// 控制召回检索的 `conversation_id` 范围：仅当前对话或跨所有对话。
-/// AllConversations 时必须排除 `__` 前缀的内部临时对话（摘要/合并任务产生的 orphan）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RecallScope {
-    /// 仅当前对话（默认，向后兼容）。
-    #[default]
-    ThisConversation,
-    /// 跨所有对话（排除 `__` 前缀内部对话）。
-    AllConversations,
-}
+/// 0.21.20: FTS5 召回范围（跨对话召回开关）——0.25.1 定义下沉
+/// `infra::data::conversations`（会话库查询参数词汇，domain 侧 re-export 保持路径）。
+pub use crate::infra::data::conversations::RecallScope;
 
 /// 记忆策略配置（0.13.1 + 0.13.2）。
 ///
