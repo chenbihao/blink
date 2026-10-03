@@ -209,16 +209,23 @@ Download the latest installer from [Releases](../../releases).
 ### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.75+
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC C++ workload)
+- [tauri-cli](https://v2.tauri.app/start/prerequisites/) (the `cargo tauri` subcommand behind `cargo tauri dev` / `cargo tauri build`: `cargo install tauri-cli --locked`)
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC C++ workload; also tick the **C++ CMake tools for Windows** individual component, needed to build the GGUF STT worker)
 - [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 10/11)
 
 ### Build & Run
 
 ```bash
+# First-time dev prerequisites: generate the two build products dev needs in one command (not committed to Git — a fresh clone must run this; skips automatically when products are ready)
+# GGUF worker → resources/bin/funasr-worker/ (required by the tauri build script); 
+# plugins (debug) → target/debug/ (where dev mode loads them). 
+# Force worker rebuild: cargo xtask funasr-worker
+cargo xtask prebuild        
+
 # Dev mode
 cargo tauri dev
 
-# Release build (includes plugin compilation)
+# Release build (compiles the worker and plugins itself, covers the prerequisites above)
 cargo xtask release
 
 # Run tests

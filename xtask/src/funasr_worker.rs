@@ -370,9 +370,8 @@ pub fn build_workers() {
         assert!(p.exists(), "缺少 {}", p.display());
     }
 
-    let llama_dir = ensure_patched_source(&work_root, &patches_dir, &header);
-
-    // 工具链
+    // 工具链先行：cmake/ninja/vcvars 缺失时立即给出可操作的报错，
+    // 不要先下载/解压/打补丁几百 MB 源码后才失败（prebuild 前置体验）。
     let vs = find_vs_install();
     let vcvars = vs
         .as_ref()
@@ -394,6 +393,8 @@ pub fn build_workers() {
     println!("🔧 cmake: {}", cmake.display());
     println!("🔧 ninja: {}", ninja.display());
     println!("🔧 vcvars: {}", vcvars.display());
+
+    let llama_dir = ensure_patched_source(&work_root, &patches_dir, &header);
 
     let build_dir = llama_dir.join("build-blink");
 

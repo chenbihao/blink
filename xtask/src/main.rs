@@ -3,6 +3,7 @@
 //! 用法：
 //!   cargo xtask plugins        编译 Rust 插件（仅编译到 target/release，不复制到 bin）
 //!   cargo xtask release        构建 GGUF worker + 插件 + 资源校验 + cargo tauri build
+//!   cargo xtask prebuild       一键首次开发前置：GGUF worker + debug 插件（产物就绪自动跳过）
 //!   cargo xtask release --debug 同上，但用 debug profile（DevTools 可用，F12 打开）
 //!   cargo xtask release-check   仅运行 release 资源前置校验（不打包）
 //!   cargo xtask tiptap         打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
@@ -190,6 +191,41 @@ fn copy_plugins() {
         println!("  {pkg}.exe -> {}", dest.display());
     }
     println!("✅ 插件拷贝完成");
+}
+
+/// 一键首次开发前置：生成 dev 模式缺失的两类构建产物（均不入 Git，新克隆必须先跑）。
+///
+/// - GGUF STT worker → `resources/bin/funasr-worker/`：tauri 构建脚本对该目录
+///   声明了 resources glob，缺失则连 `cargo tauri dev` 都编译不过。产物已就绪
+///   且 manifest 校验通过时跳过（含 cmake 的完整重建走 `cargo xtask funasr-worker`）。
+/// - 内置 Rust 插件（debug）→ `target/debug/`：dev 模式只从该目录加载插件，
+///   release 的 `cargo xtask plugins` 产物 dev 读不到。
+fn prebuild() {
+    let root = workspace_root();
+    let worker_dir = root.join("resources").join("bin").join("funasr-worker");
+
+    step_advance(&mut None, "🔨 GGUF STT worker（funasr-worker）");
+    if worker_products_valid(&worker_dir) {
+        println!(
+            "✅ worker 产物已就绪（{}），跳过——强制重建: cargo xtask funasr-worker",
+            worker_dir.display()
+        );
+    } else {
+        funasr_worker::build_workers();
+    }
+
+    step_advance(&mut None, "🔨 内置 Rust 插件（debug -> target/debug）");
+    build_plugins(false, true, &mut None);
+
+    println!("✅ prebuild 完成，可运行 cargo tauri dev");
+}
+
+/// worker 构建产物是否就绪（manifest 存在且与目录逐文件哈希校验通过）。
+/// prebuild 以此决定跳过还是重建；产物由 `cargo xtask funasr-worker` 生成。
+fn worker_products_valid(worker_dir: &Path) -> bool {
+    let mut failures = Vec::new();
+    validate_worker_manifest_dir(worker_dir, &mut failures);
+    failures.is_empty()
 }
 
 /// 从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json（调用 Python 脚本）。
@@ -1079,7 +1115,7 @@ fn which_node() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let task = args.get(1).unwrap_or_else(|| {
-        panic!("用法: cargo xtask <plugins|copy|release|icons|tiptap|models|lint> [--debug]")
+        panic!("用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]")
     });
 
     match task.as_str() {
@@ -1109,6 +1145,7 @@ fn main() {
             }
         }
         "release-check" => check_release_resources(&mut None), // 仅运行 release 资源前置校验
+        "prebuild" => prebuild(),                 // 一键首次开发前置（worker + debug 插件）
         "icons" => fetch_icons(),                     // 拉取 Lucide 图标生成 sprite
         "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
         "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
@@ -1116,7 +1153,7 @@ fn main() {
         "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]"
             )
         }
     }
@@ -1356,7 +1393,7 @@ mod supply_chain_tests {
     #[test]
     fn worker_manifest_rejects_hash_drift() {
         let dir = TempWorkerDir::new("hash-drift");
-        std::fs::write(dir.path().join("worker.exe"), b"changed").unwrap();
+        std::fs::write(dir.path().join("worker.exe"), b"worker").unwrap();
         write_manifest(
             dir.path(),
             serde_json::json!({ "worker.exe": declared_file(b"original") }),
@@ -1369,6 +1406,27 @@ mod supply_chain_tests {
                 .iter()
                 .any(|failure| failure.contains("SHA-256 漂移"))
         );
+    }
+
+    /// prebuild 跳过判定：产物齐备且 manifest 校验通过才允许跳过；
+    /// 新克隆（空目录）或内容漂移必须走完整重建。
+    #[test]
+    fn prebuild_skips_only_when_products_valid() {
+        let dir = TempWorkerDir::new("prebuild");
+        // 新克隆状态：目录不存在/为空 → 不跳过
+        assert!(!super::worker_products_valid(dir.path()));
+
+        // 产物齐备 + manifest 一致 → 跳过
+        std::fs::write(dir.path().join("worker.exe"), b"worker").unwrap();
+        write_manifest(
+            dir.path(),
+            serde_json::json!({ "worker.exe": declared_file(b"worker") }),
+        );
+        assert!(super::worker_products_valid(dir.path()));
+
+        // 内容漂移 → 不跳过
+        std::fs::write(dir.path().join("worker.exe"), b"changed").unwrap();
+        assert!(!super::worker_products_valid(dir.path()));
     }
 }
 

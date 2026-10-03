@@ -211,16 +211,23 @@ Blink 中可复用的业务能力可以被 AI 调用，也可以通过开放协�
 ### 环境要求
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.75+
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（MSVC C++ 工作负载）
+- [tauri-cli](https://v2.tauri.app/start/prerequisites/)（`cargo tauri dev` / `cargo tauri build` 的 cargo 子命令：`cargo install tauri-cli --locked`）
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（MSVC C++ 工作负载；另需在「单个组件」中勾选**适用于 Windows 的 C++ CMake 工具**，用于构建 GGUF STT worker）
 - [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)（Windows 10/11 通常已预装）
 
 ### 构建运行
 
 ```bash
+# 首次开发前置：一键生成 dev 缺失的两类构建产物（均不入 Git，新克隆必须先跑；产物已就绪自动跳过）
+# GGUF worker → resources/bin/funasr-worker/（tauri 构建脚本要求存在）；
+# 插件 debug 编译 → target/debug/（dev 模式加载位置）。
+# 强制重建 worker: cargo xtask funasr-worker
+cargo xtask prebuild
+
 # 开发模式
 cargo tauri dev
 
-# 打包发布（含插件编译）
+# 打包发布（含 worker 与插件编译，自动覆盖前置内容，无需单独执行）
 cargo xtask release
 
 # 运行测试
