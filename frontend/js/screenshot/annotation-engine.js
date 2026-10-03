@@ -35,6 +35,7 @@
 //! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `renderScale` 转物理像素。
 
 import {TOOL_CAPS} from './ss-state.js';
+import {layoutOverlayText, OVERLAY_FONT_FAMILY} from './overlay-text-layout.js';
 
 /** 当前工具类型 */
 let currentTool = 'rect';
@@ -1520,13 +1521,11 @@ export function hasAnnotations() {
 //        sampleOriginalInkColors),有 charRects 时收紧到字形内部并采出逐字
 //        符色;原文可按 buildInkSegments 分段着色,译文只采用高置信整行主色;
 //        采不到或对比度不足时回退背景对比色(深底→浅字/浅底→深字)。
-// - 字号:起始(行 fontH ?? rect.h) * fontScale,迭代减 1 直到
-//        measureText.width <= rect.w * 0.95,下限 8px;若仍超宽二分找最长前缀 + 省略号。
-//        fontH 是后端折减的字号参考高度(PP-OCR det 框 unclip 外扩,rect.h 偏大;
-//        WinRT 路径无 fontH → 直接用 rect.h)。相邻行字号偏差超 25%
-//        视为有意不同层级(标题/正文),分组各自均值统一。
+// - 字号:OCR 参考高度 × OVERLAY_FONT_HEIGHT_FACTOR × fontScale 为起始上限；参考高度分组后
+//        逐行测实际宽高、独立缩小，最低字号仍放不下才按字素省略。
+//        字形边界按 alphabetic 基线居中；背景覆盖/划词仍用原 OCR rect。
 //
-// 所有采样/字号算法都是纯函数(见文件末尾的 `sample*` / `fitFontSize` / `luminance`),
+// 所有采样/字号算法都是纯函数(见 `sample*` / `luminance` 与 overlay-text-layout.js),
 // 便于后续在 Node 环境 mock ctx 做单测。
 
 /** H2 优化：绘制 loading 动画（旋转弧线）。从 drawOverlay 提取为独立函数，
@@ -1596,65 +1595,21 @@ function drawOverlay(targetCtx, layer, _w, _h) {
         // loading 态仍继续画文字（显示原文作为占位）
     }
 
-    // ── Pass 1: 预算每行字号,按偏差分组取中位数统一 ──
-    // 同段文字各行 rect.h 基本一致,但宽度适配会让长行字号更小;
-    // 相邻行字号跳变超过阈值视为有意不同层级(标题/正文),分组各自统一。
-    // 用中位数替代均值,天然抗异常行干扰;分组锚点用组内中位数而非首元素。
+    // 0.25.7：按 OCR 参考高度分组，再逐行宽高适配，避免长句被统一字号重新撑大。
     const lineEntries = [];  // { line, r, text }
-    const rawSizes = [];     // 与 lineEntries 一一对应,每行独立 fitFontSize 结果
     for (const line of layer.lines) {
         const r = line.rect;
         if (!r || r.w <= 0 || r.h <= 0) continue;
         const text = mode === 'translated' ? line.dstText : line.srcText;
         if (!text) continue;
         lineEntries.push({line, r, text});
-        // PP-OCR det 框含 unclip 外扩，rect.h 偏大；fontH 是后端折减后的字号
-        // 参考高度（WinRT 无此字段 → 回退 rect.h）。字号推导用 fontRect，
-        // 背景覆盖仍用原 rect（见下方 fillRect）。
-        const fontRect = (line.fontH && line.fontH > 0 && line.fontH < r.h)
-            ? {...r, h: line.fontH} : r;
-        const {size} = fitFontSize(targetCtx, text, fontRect, fontScale);
-        rawSizes.push(size > 0 ? size : 0);
     }
     if (lineEntries.length === 0) {
         targetCtx.restore();
         return;
     }
 
-    // 分组:相邻行字号偏差超过 25% 则断开,视为不同层级
-    // 锚点用组内中位数,比首元素更稳定
-    const GROUP_THRESHOLD = 0.25;
-    const groups = [];  // [{start, end, medianSize}]
-    let gStart = 0;
-    const medianOf = (arr) => {
-        if (arr.length === 0) return 0;
-        const sorted = arr.slice().sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        return sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
-    };
-
-    for (let i = 1; i <= rawSizes.length; i++) {
-        // 用组内已有行的中位数做锚点
-        const groupSizes = rawSizes.slice(gStart, i).filter((s) => s > 0);
-        const anchor = medianOf(groupSizes);
-        const shouldBreak = i === rawSizes.length
-            || rawSizes[i] === 0
-            || anchor === 0
-            || Math.abs(rawSizes[i] - anchor) / anchor > GROUP_THRESHOLD;
-        if (shouldBreak) {
-            const cleanSizes = rawSizes.slice(gStart, i).filter((s) => s > 0);
-            groups.push({start: gStart, end: i, medianSize: medianOf(cleanSizes)});
-            gStart = i;
-        }
-    }
-
-    // 为每行分配所属组的统一字号(中位数)
-    const unifiedSizes = new Array(lineEntries.length).fill(0);
-    for (const g of groups) {
-        for (let i = g.start; i < g.end; i++) {
-            unifiedSizes[i] = g.medianSize;
-        }
-    }
+    const layouts = layoutOverlayText(targetCtx, lineEntries, fontScale);
 
     for (let i = 0; i < lineEntries.length; i++) {
         const {line, r, text} = lineEntries[i];
@@ -1706,13 +1661,11 @@ function drawOverlay(targetCtx, layer, _w, _h) {
         const ink = mode === 'translated'
             ? chooseStableTranslatedInk(sampled, fallbackInk, fallbackBg)
             : sourceInk;
-        // 组内统一字号 + 重新计算截断/省略
-        const fontPx = unifiedSizes[i];
-        const display = fitDisplayText(targetCtx, text, r, fontPx);
+        const {size: fontPx, display, x: textX, y: textY} = layouts[i];
         if (fontPx <= 0) continue;
 
-        targetCtx.font = `${fontPx}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
-        targetCtx.textBaseline = 'middle';
+        targetCtx.font = `${fontPx}px ${OVERLAY_FONT_FAMILY}`;
+        targetCtx.textBaseline = 'alphabetic';
         targetCtx.textAlign = 'left';
         // 逐字符分色对原文总是启用（按词对齐消采样抖动）；译文模式仅对
         // "代码特征行"启用——代码翻译语序近似保留，比例映射的色系区间误差
@@ -1729,15 +1682,13 @@ function drawOverlay(targetCtx, layer, _w, _h) {
                 ? buildTranslatedInkSegments(line, display, ink)
                 : null);
         if (segments) {
-            let cursorX = r.x + 2;
+            let cursorX = textX;
             for (const seg of segments) {
                 targetCtx.fillStyle = seg.color;
-                targetCtx.fillText(seg.text, cursorX, r.y + r.h / 2);
+                targetCtx.fillText(seg.text, cursorX, textY);
                 cursorX += targetCtx.measureText(seg.text).width;
             }
         } else {
-            const textX = r.x + 2;
-            const textY = r.y + r.h / 2;
             targetCtx.fillStyle = ink;
             targetCtx.fillText(display, textX, textY);
         }
@@ -1749,7 +1700,7 @@ function drawOverlay(targetCtx, layer, _w, _h) {
             targetCtx.save();
             targetCtx.globalAlpha = 0.55;
             targetCtx.fillStyle = ink;
-            targetCtx.font = `${smallPx}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
+            targetCtx.font = `${smallPx}px ${OVERLAY_FONT_FAMILY}`;
             targetCtx.textBaseline = 'top';
             // 简单截断:测长后 slice
             let orig = line.srcText;
@@ -2625,73 +2576,4 @@ export function buildInkSegments(srcLen, displayText, charInks, fallbackColor) {
         }
     }
     return segments.length > 0 ? segments : null;
-}
-
-/**
- * 迭代找到能塞进 rect.w * 0.95 的最大字号。
- *
- * 起始 rect.h * fontScale,每次 -1 逐步尝试(rect 高度一般不超过 60px,循环上限 ~50 次可控)。
- * 到达下限 8px 仍超宽 → 用 8px + 二分找最长前缀 + 省略号截断。
- * rect 极窄(连一个字都放不下 8px)→ 返回 size=0 让 drawOverlay 跳过。
- * 传入的 rect 通常是 fontRect(= 原 rect 换上折减后的 fontH,见 drawOverlay)。
- *
- * @param {number} fontScale - 用户在面板里指定的字号缩放系数(0.4-2.0),默认 1.0
- */
-function fitFontSize(ctx, text, rect, fontScale = 1.0) {
-    const maxWidth = rect.w * 0.95;
-    const minSize = 8;
-    let size = Math.max(minSize, Math.floor(rect.h * 1.0 * fontScale));
-    ctx.save();
-    ctx.font = `${size}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
-    while (size > minSize && ctx.measureText(text).width > maxWidth) {
-        size -= 1;
-        ctx.font = `${size}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
-    }
-    if (ctx.measureText(text).width <= maxWidth) {
-        ctx.restore();
-        return {size, display: text};
-    }
-    // 到 minSize 仍超宽 → 截断 + 省略号
-    const ellipsis = '…';
-    const ellW = ctx.measureText(ellipsis).width;
-    if (ellW > maxWidth) {
-        ctx.restore();
-        return {size: 0, display: ''};   // rect 极窄,一个省略号都放不下
-    }
-    let lo = 0, hi = text.length;
-    while (lo < hi) {
-        const mid = Math.floor((lo + hi + 1) / 2);
-        if (ctx.measureText(text.slice(0, mid)).width + ellW <= maxWidth) lo = mid;
-        else hi = mid - 1;
-    }
-    ctx.restore();
-    return {size: minSize, display: text.slice(0, lo) + ellipsis};
-}
-
-/**
- * 字号已确定时,计算文字在 rect 内的显示文本(超宽则截断+省略号)。
- * 与 fitFontSize 的截断逻辑相同,但不调整字号。
- */
-function fitDisplayText(ctx, text, rect, fontSize) {
-    const maxWidth = rect.w * 0.95;
-    ctx.save();
-    ctx.font = `${fontSize}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
-    if (ctx.measureText(text).width <= maxWidth) {
-        ctx.restore();
-        return text;
-    }
-    const ellipsis = '…';
-    const ellW = ctx.measureText(ellipsis).width;
-    if (ellW > maxWidth) {
-        ctx.restore();
-        return '';
-    }
-    let lo = 0, hi = text.length;
-    while (lo < hi) {
-        const mid = Math.floor((lo + hi + 1) / 2);
-        if (ctx.measureText(text.slice(0, mid)).width + ellW <= maxWidth) lo = mid;
-        else hi = mid - 1;
-    }
-    ctx.restore();
-    return text.slice(0, lo) + ellipsis;
 }
