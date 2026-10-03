@@ -3,6 +3,8 @@
 use crate::domain::event_names::EventNames;
 use tauri::{Emitter, Manager};
 
+static APP_SEARCH_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 static INPUT_BINDING_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 获取完整配置。
@@ -354,9 +356,8 @@ async fn set_config_value(
             tracing::info!(enabled = fs.enabled, data_source = %fs.data_source, "文件搜索配置已更新");
         }
         "start_menu_config" => {
-            let sm: crate::app::config::StartMenuConfig =
-                serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_start_menu_config(pool, &sm).await?;
+            let _guard = APP_SEARCH_UPDATE_LOCK.lock().await;
+            let sm = crate::app::config::patch_start_menu_config(pool, value, expected).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
             {
@@ -564,6 +565,7 @@ async fn set_config_value(
         "language" | "log_level" | "ai_http_body_log" | "onboarding_version" => {
             Some("app.appearance")
         }
+        "start_menu_config" => Some("engine:start_menu"),
         "hotkey" | "tap_threshold" | "grace_period" => Some("app.hotkey"),
         "chord_toggles" | "chord_bindings" => Some("app.chord"),
         "disabled_builtin_actions" | "disabled_context_bindings" | "disabled_chord_actions" => {

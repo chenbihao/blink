@@ -776,18 +776,52 @@ pub async fn get_start_menu_config(pool: &SqlitePool) -> StartMenuConfig {
         .unwrap_or_default()
 }
 
-pub async fn update_start_menu_config(
+/// 字段补丁 + 可选 compare-and-set；旧客户端提交三个字段时保留新增开关。
+pub async fn patch_start_menu_config(
     pool: &SqlitePool,
-    config: &StartMenuConfig,
-) -> Result<(), String> {
-    let json = serde_json::to_value(config).map_err(|e| e.to_string())?;
-    set_engine_config(pool, "start_menu", &json).await?;
-    tracing::debug!(
-        enabled = config.enabled,
-        scan_depth = config.scan_depth,
-        "应用搜索配置已更新"
-    );
-    Ok(())
+    patch: serde_json::Value,
+    expected: Option<serde_json::Value>,
+) -> Result<StartMenuConfig, String> {
+    let fields = patch.as_object().ok_or("应用搜索配置必须为对象")?;
+    if fields.is_empty()
+        || fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "enabled"
+                    | "scan_depth"
+                    | "include_uwp"
+                    | "include_system_shortcuts"
+                    | "discover_system_settings"
+            )
+        })
+    {
+        return Err("应用搜索配置包含未知字段或为空".into());
+    }
+    let expected = expected
+        .as_ref()
+        .map(|v| v.as_object().ok_or("expected 必须为对象"))
+        .transpose()?;
+    if expected.is_some_and(|e| e.keys().any(|k| !fields.contains_key(k))) {
+        return Err("expected 包含未修改字段".into());
+    }
+    ConfigStore::update::<StartMenuConfig>(pool, |current| {
+        let mut value = serde_json::to_value(&*current).map_err(|e| e.to_string())?;
+        if let Some(expected) = expected {
+            for (key, before) in expected {
+                if value.get(key) != Some(before) {
+                    return Err("config_conflict: 应用搜索配置已变化，请重读后重试".into());
+                }
+            }
+        }
+        value.as_object_mut().unwrap().extend(fields.clone());
+        let next: StartMenuConfig = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if !(1..=10).contains(&next.scan_depth) {
+            return Err("开始菜单扫描深度必须为 1–10".into());
+        }
+        *current = next;
+        Ok(())
+    })
+    .await
 }
 
 pub async fn get_calc_config(pool: &SqlitePool) -> CalcConfig {
@@ -1051,6 +1085,82 @@ mod tests {
         .await
         .expect("create config table");
         pool
+    }
+
+    #[tokio::test]
+    async fn application_search_patch_preserves_old_preferences_unknown_fields_and_conflicts() {
+        let pool = in_memory_pool().await;
+        blink_infra::data::history::set_config(
+            &pool,
+            "engine:start_menu",
+            r#"{"enabled":false,"scan_depth":6,"include_uwp":false,"future":42}"#,
+        )
+        .await
+        .unwrap();
+        let old: StartMenuConfig = ConfigStore::get_checked(&pool).await.unwrap();
+        assert!(
+            !old.enabled
+                && !old.include_uwp
+                && old.include_system_shortcuts
+                && !old.discover_system_settings
+        );
+        let next = patch_start_menu_config(
+            &pool,
+            serde_json::json!({"discover_system_settings": true}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !next.enabled
+                && !next.include_uwp
+                && next.scan_depth == 6
+                && next.discover_system_settings
+        );
+        let raw = blink_infra::data::history::get_config(&pool, "engine:start_menu")
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()["future"],
+            42
+        );
+        assert!(
+            patch_start_menu_config(
+                &pool,
+                serde_json::json!({"enabled":true}),
+                Some(serde_json::json!({"enabled":true}))
+            )
+            .await
+            .unwrap_err()
+            .contains("config_conflict")
+        );
+        assert!(
+            patch_start_menu_config(&pool, serde_json::json!({"scan_depth":11}), None)
+                .await
+                .is_err()
+        );
+        let next = patch_start_menu_config(
+            &pool,
+            serde_json::json!({"enabled":true,"include_uwp":true,"scan_depth":3}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(next.discover_system_settings);
+        blink_infra::data::history::set_config(&pool, "engine:start_menu", "broken")
+            .await
+            .unwrap();
+        assert!(
+            patch_start_menu_config(&pool, serde_json::json!({"enabled":true}), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            blink_infra::data::history::get_config(&pool, "engine:start_menu")
+                .await
+                .unwrap(),
+            "broken"
+        );
     }
 
     #[tokio::test]

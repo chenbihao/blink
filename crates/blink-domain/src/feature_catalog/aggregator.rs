@@ -485,6 +485,7 @@ const CAPABILITY_TITLES: &[(&str, &str, &str)] = &[
     ("read_text_file", "读取文本文件", "Read Text File"),
     ("screenshot", "截图", "Screenshot"),
     ("search_apps", "搜索应用", "Search Apps"),
+    ("open_system_entry", "打开系统入口", "Open System Entry"),
     (
         "search_clipboard_history",
         "搜索剪贴板历史",

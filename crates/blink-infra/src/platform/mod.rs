@@ -23,6 +23,7 @@ pub mod screenshot;
 pub mod secret;
 pub mod selection;
 pub mod shell; // 0.14.6 §2.3：从 domain/search/windows.rs 迁入
+pub mod system_entries;
 #[cfg(windows)]
 pub mod uia;
 pub mod window;

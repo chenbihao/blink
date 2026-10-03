@@ -9,6 +9,7 @@
 import {invoke, messageDialog} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
+import {initApplicationSearch} from "./application-search.js";
 
 /**
  * 初始化搜索引擎 Tab
@@ -17,7 +18,7 @@ import {saveConfig} from "../../shared/config-keys.js";
 export function initEnginesTab(cfg) {
     // 回填配置（0.9.5 拆分时丢失的 loadEngineConfig，0.9.5.1 补回）
     loadEngineConfig();
-    initStartMenuConfig();
+    initApplicationSearch();
     initCalcConfig();
     initFileSearchConfig();
     initInterpreterProbing();
@@ -35,19 +36,6 @@ export function initEnginesTab(cfg) {
  * 拆自原 settings.js loadEngineConfig；loadBuiltinActions/loadPlugins 已归 plugins.js，不在此调。
  */
 async function loadEngineConfig() {
-    // 应用搜索（开始菜单）
-    try {
-        const startMenu = await invoke("get_start_menu_config");
-        const enabledEl = document.getElementById("start-menu-enabled");
-        const depthEl = document.getElementById("start-menu-scan-depth");
-        const includeUwpEl = document.getElementById("start-menu-include-uwp");
-        if (enabledEl) enabledEl.checked = startMenu.enabled !== false;
-        if (depthEl) depthEl.value = startMenu.scan_depth || 3;
-        if (includeUwpEl) includeUwpEl.checked = startMenu.include_uwp !== false;
-    } catch (e) {
-        console.error("loadStartMenuConfig failed:", e);
-    }
-
     // 文件搜索
     try {
         const fileSearch = await invoke("get_engine_config", {engineId: "file_search"});
@@ -84,31 +72,6 @@ async function loadEngineConfig() {
     } catch (e) {
         console.error("loadCalcConfig failed:", e);
     }
-}
-
-/**
- * 初始化应用搜索配置：三个字段（enabled / scan_depth / include_uwp）任一变更即保存
- */
-function initStartMenuConfig() {
-    const enabledEl = document.getElementById("start-menu-enabled");
-    const depthEl = document.getElementById("start-menu-scan-depth");
-    const includeUwpEl = document.getElementById("start-menu-include-uwp");
-
-    const save = async () => {
-        const enabled = enabledEl?.checked ?? true;
-        const scanDepth = parseInt(depthEl?.value, 10) || 3;
-        const includeUwp = includeUwpEl?.checked ?? true;
-        try {
-            await saveConfig("start_menu_config", {enabled, scan_depth: scanDepth, include_uwp: includeUwp});
-        } catch (e) {
-            console.error("update_start_menu_config failed:", e);
-            messageDialog(t("common.save_failed_msg", {err: e}), {title: t("common.error"), kind: "error"});
-        }
-    };
-
-    enabledEl?.addEventListener("change", save);
-    depthEl?.addEventListener("change", save);
-    includeUwpEl?.addEventListener("change", save);
 }
 
 /**

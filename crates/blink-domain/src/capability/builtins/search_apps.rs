@@ -128,25 +128,27 @@ impl Capability for SearchApps {
         let results: Vec<_> = items
             .into_iter()
             .map(|item| {
-                let path = match &item.action {
-                    SearchAction::Open { path } => Some(path.clone()),
-                    _ => None,
+                let mut data = json!({ "name": item.title, "score": item.score });
+                let actions = match item.action {
+                    SearchAction::Open { path } => {
+                        data["path"] = json!(path);
+                        vec![crate::capability::ItemAction::OpenFile {
+                            pointer: Some("$.path".into()),
+                        }]
+                    }
+                    SearchAction::SystemEntry { entry_id, .. } => {
+                        data["entry_id"] = json!(entry_id);
+                        vec![crate::capability::ItemAction::Invoke {
+                            capability_id: "open_system_entry".into(),
+                            args: Some(json!({"entry_id": entry_id})),
+                        }]
+                    }
+                    _ => Vec::new(),
                 };
-                let mut data = json!({ "name": item.title });
-                if let Some(ref p) = path {
-                    data["path"] = json!(p);
-                }
-                data["score"] = json!(item.score);
-
                 crate::capability::ItemResult {
                     data,
                     desc: item.subtitle,
-                    actions: path
-                        .map(|_| crate::capability::ItemAction::OpenFile {
-                            pointer: Some("$.path".into()),
-                        })
-                        .into_iter()
-                        .collect(),
+                    actions,
                 }
             })
             .collect();

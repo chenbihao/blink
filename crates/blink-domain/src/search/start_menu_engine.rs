@@ -40,6 +40,7 @@ struct CachedAppEntry {
 }
 
 /// 缓存内容(应用索引 + 根目录 mtime 快照 + 增量状态)。
+#[derive(Clone)]
 struct CacheState {
     entries: Vec<AppEntry>,
     /// 带元数据的缓存条目（用于增量对比）。
@@ -52,15 +53,21 @@ struct CacheState {
     last_full_refresh: Option<Instant>,
 }
 
+#[derive(Clone)]
 pub struct StartMenuEngine {
     cache: Arc<RwLock<CacheState>>,
-    /// 配置（运行时可更新）。
-    config: Arc<RwLock<StartMenuConfig>>,
+    work: Arc<RwLock<ScanState>>,
+    ready: Arc<tokio::sync::Notify>,
 }
-
+struct ScanState {
+    config: StartMenuConfig,
+    generation: u64,
+    building: bool,
+    force: bool,
+}
 impl StartMenuEngine {
     pub fn with_config(config: StartMenuConfig) -> Self {
-        StartMenuEngine {
+        Self {
             cache: Arc::new(RwLock::new(CacheState {
                 entries: Vec::new(),
                 cached_entries: Vec::new(),
@@ -68,110 +75,111 @@ impl StartMenuEngine {
                 incremental_count: 0,
                 last_full_refresh: None,
             })),
-            config: Arc::new(RwLock::new(config)),
+            work: Arc::new(RwLock::new(ScanState {
+                config,
+                generation: 0,
+                building: false,
+                force: true,
+            })),
+            ready: Arc::new(tokio::sync::Notify::new()),
         }
     }
-
-    /// 更新配置（供 SearchService 调用），并立即触发重新扫描。
     pub fn update_config(&self, config: StartMenuConfig) {
-        let mut cfg = self.config.write().unwrap();
-        *cfg = config;
-        drop(cfg); // 释放锁，避免死锁
-
-        // 配置变更后立即触发全量扫描（后台异步，不阻塞）
-        let cache = Arc::clone(&self.cache);
-        let config = Arc::clone(&self.config);
+        let changed = {
+            let mut state = self.work.write().unwrap();
+            let changed = state.config.enabled != config.enabled
+                || state.config.scan_depth != config.scan_depth
+                || state.config.include_uwp != config.include_uwp;
+            if changed {
+                state.generation += 1;
+                state.force = true;
+            }
+            state.config = config;
+            changed
+        };
+        if changed {
+            self.refresh();
+        }
+    }
+    fn refresh(&self) {
+        let (config, generation, force) = {
+            let mut state = self.work.write().unwrap();
+            if !state.config.enabled || state.building {
+                return;
+            }
+            state.building = true;
+            let force = state.force;
+            state.force = false;
+            (state.config.clone(), state.generation, force)
+        };
+        let engine = self.clone();
         tokio::spawn(async move {
-            let (depth, include_uwp) = {
-                let cfg = config.read().unwrap();
-                (cfg.scan_depth, cfg.include_uwp)
-            };
-            let _ = tokio::task::spawn_blocking(move || {
-                full_scan_into_cache(&cache, depth, include_uwp)
+            let staged = engine.cache.read().unwrap().clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let cache = RwLock::new(staged);
+                let full = {
+                    let guard = cache.read().unwrap();
+                    force
+                        || guard.incremental_count >= FORCE_FULL_AFTER_INCREMENTAL
+                        || guard
+                            .last_full_refresh
+                            .is_none_or(|t| t.elapsed() >= FULL_REFRESH_INTERVAL)
+                };
+                if full {
+                    full_scan_into_cache(&cache, config.scan_depth, config.include_uwp);
+                } else if roots_changed_since_last(&cache) {
+                    incremental_scan(&cache, config.scan_depth, config.include_uwp);
+                }
+                cache.into_inner().unwrap()
             })
             .await;
-        });
-    }
-
-    /// 启动后台:立即预扫一次 + 定时增量刷新。不阻塞调用方。
-    fn start_background(&self) {
-        let cache = Arc::clone(&self.cache);
-        let config = Arc::clone(&self.config);
-        tokio::spawn(async move {
-            // 立即预扫(后台，全量)
-            let (depth, include_uwp) = {
-                let cfg = config.read().unwrap();
-                (cfg.scan_depth, cfg.include_uwp)
-            };
-            let c = Arc::clone(&cache);
-            let _ =
-                tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp))
-                    .await;
-
-            loop {
-                tokio::time::sleep(CHECK_INTERVAL).await;
-
-                // 检查配置是否启用
-                {
-                    let cfg = config.read().unwrap();
-                    if !cfg.enabled {
-                        tracing::trace!("StartMenuEngine: 已禁用，跳过定时刷新");
-                        continue;
-                    }
-                }
-
-                // 检查是否需要全量刷新
-                let need_full = {
-                    let guard = cache.read().unwrap();
-                    // 连续增量次数达到阈值
-                    let incremental_exceeded =
-                        guard.incremental_count >= FORCE_FULL_AFTER_INCREMENTAL;
-                    // 距离上次全量刷新超过 2 小时
-                    let time_for_full = guard
-                        .last_full_refresh
-                        .map(|t| t.elapsed() >= FULL_REFRESH_INTERVAL)
-                        .unwrap_or(true);
-                    incremental_exceeded || time_for_full
-                };
-
-                let (depth, include_uwp) = {
-                    let cfg = config.read().unwrap();
-                    (cfg.scan_depth, cfg.include_uwp)
-                };
-                if need_full {
-                    let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        full_scan_into_cache(&c, depth, include_uwp)
-                    })
-                    .await;
-                } else if roots_changed_since_last(&cache) {
-                    // mtime 变化 → 增量扫描（.lnk 部分增量，UWP 部分全量重建）
-                    let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        incremental_scan(&c, depth, include_uwp)
-                    })
-                    .await;
-                }
+            let stale = engine.finish(generation, result);
+            if stale {
+                engine.refresh();
             }
         });
     }
-
-    /// 获取缓存的 entries 快照。命中直接返回;缓存空(预扫未完成)则 spawn_blocking
-    /// 扫一次后返回——保证首次搜索也有结果。
-    async fn get_entries(&self) -> Vec<AppEntry> {
-        {
-            let guard = self.cache.read().unwrap();
-            if !guard.entries.is_empty() {
-                return guard.entries.clone();
+    fn finish(&self, generation: u64, result: Result<CacheState, tokio::task::JoinError>) -> bool {
+        let mut state = self.work.write().unwrap();
+        state.building = false;
+        let stale = state.generation != generation;
+        if !stale && state.config.enabled {
+            match result {
+                Ok(cache) => *self.cache.write().unwrap() = cache,
+                Err(error) => {
+                    state.force = true;
+                    tracing::warn!(%error, generation, "开始菜单扫描任务失败");
+                }
             }
         }
-        let (depth, include_uwp) = {
-            let cfg = self.config.read().unwrap();
-            (cfg.scan_depth, cfg.include_uwp)
-        };
-        let c = Arc::clone(&self.cache);
-        let _ =
-            tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
+        self.ready.notify_waiters();
+        stale
+    }
+    /// 一次性 CLI 查询显式等待预扫；窗口搜索不调用此方法。
+    pub async fn prewarm(&self) {
+        self.refresh();
+        loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.work.read().unwrap().building {
+                return;
+            }
+            notified.await;
+        }
+    }
+    fn start_background(&self) {
+        self.refresh();
+        let engine = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(CHECK_INTERVAL).await;
+                engine.refresh();
+            }
+        });
+    }
+    async fn get_entries(&self) -> Vec<AppEntry> {
+        // 查询只读取已发布快照；冷启动预扫也不阻塞输入链路。
         self.cache.read().unwrap().entries.clone()
     }
 }
@@ -198,6 +206,17 @@ fn full_scan_into_cache(cache: &RwLock<CacheState>, scan_depth: u32, include_uwp
     let elapsed = start.elapsed();
 
     let mut guard = cache.write().unwrap();
+    guard.cached_entries = entries
+        .iter()
+        .filter_map(|entry| {
+            let mtime = std::fs::metadata(&entry.lnk_path).ok()?.modified().ok()?;
+            Some(CachedAppEntry {
+                entry: entry.clone(),
+                path: entry.lnk_path.clone(),
+                mtime,
+            })
+        })
+        .collect();
     guard.entries = entries.clone();
     guard.root_mtimes = mtimes;
     guard.incremental_count = 0;
@@ -261,9 +280,7 @@ fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32, include_uwp: boo
         let mut updated_cached: Vec<CachedAppEntry> = guard
             .cached_entries
             .iter()
-            .filter(|e| {
-                current_paths.contains(&e.path) && cached_paths.get(&e.path) == Some(&e.mtime)
-            })
+            .filter(|e| current_files.get(&e.path) == Some(&e.mtime))
             .cloned()
             .collect();
 
@@ -293,7 +310,10 @@ fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32, include_uwp: boo
 
     let elapsed = start.elapsed();
     tracing::debug!(
-        added = current_files.len() - cached_paths.len() + removed_count,
+        added = current_files
+            .len()
+            .saturating_add(removed_count)
+            .saturating_sub(cached_paths.len()),
         removed = removed_count,
         elapsed_ms = elapsed.as_millis(),
         "开始菜单增量扫描完成"
@@ -332,7 +352,10 @@ fn scan_dir_recursive(
         let path = entry.path();
         if path.is_dir() {
             scan_dir_recursive(&path, files, max_depth, current_depth + 1);
-        } else if path.extension().is_some_and(|ext| ext == "lnk")
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
             && let Ok(meta) = std::fs::metadata(&path)
             && let Ok(mtime) = meta.modified()
         {
@@ -375,8 +398,8 @@ impl SearchEngine for StartMenuEngine {
     async fn search(&self, query: &str, ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         // 检查是否启用
         {
-            let cfg = self.config.read().unwrap();
-            if !cfg.enabled {
+            let state = self.work.read().unwrap();
+            if !state.config.enabled {
                 tracing::trace!("StartMenuEngine: 已禁用，跳过");
                 return Vec::new();
             }
@@ -446,6 +469,42 @@ mod tests {
             actions: vec![Action::default()],
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_start_and_enhancement_only_changes_do_not_scan() {
+        let mut cfg = StartMenuConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let engine = StartMenuEngine::with_config(cfg.clone());
+        engine.start();
+        assert!(!engine.work.read().unwrap().building);
+        cfg.include_system_shortcuts = false;
+        engine.update_config(cfg);
+        assert_eq!(engine.work.read().unwrap().generation, 0);
+        assert!(!engine.work.read().unwrap().building);
+    }
+    #[tokio::test]
+    async fn disable_reenable_discards_inflight_start_menu_snapshot() {
+        let engine = StartMenuEngine::with_config(StartMenuConfig::default());
+        engine.work.write().unwrap().building = true;
+        let first_generation = engine.work.read().unwrap().generation;
+        engine.update_config(StartMenuConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        engine.update_config(StartMenuConfig::default()); // 单飞：当前构建仍未结束。
+        assert!(engine.work.read().unwrap().building);
+        let mut obsolete = engine.cache.read().unwrap().clone();
+        obsolete.entries.push(entry("old", "old.lnk"));
+        assert!(engine.finish(first_generation, Ok(obsolete)));
+        assert!(engine.cache.read().unwrap().entries.is_empty());
+        let generation = engine.work.read().unwrap().generation;
+        let mut current = engine.cache.read().unwrap().clone();
+        current.entries.push(entry("base", "base.lnk"));
+        assert!(!engine.finish(generation, Ok(current)));
+        assert_eq!(engine.get_entries().await[0].lnk_path, "base.lnk");
     }
 
     #[test]

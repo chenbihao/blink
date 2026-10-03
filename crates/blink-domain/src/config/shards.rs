@@ -249,6 +249,10 @@ pub struct StartMenuConfig {
     pub scan_depth: u32,
     #[serde(default = "default_true")]
     pub include_uwp: bool,
+    #[serde(default = "default_true")]
+    pub include_system_shortcuts: bool,
+    #[serde(default)]
+    pub discover_system_settings: bool,
 }
 
 impl Default for StartMenuConfig {
@@ -257,6 +261,8 @@ impl Default for StartMenuConfig {
             enabled: true,
             scan_depth: 3,
             include_uwp: true,
+            include_system_shortcuts: true,
+            discover_system_settings: false,
         }
     }
 }

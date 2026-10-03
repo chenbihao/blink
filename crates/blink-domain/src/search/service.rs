@@ -331,6 +331,9 @@ impl SearchService {
                 clip.update_language(language.clone());
             }
         }
+        if let Some(entries) = self.system_entries() {
+            entries.update_language(language);
+        }
         tracing::debug!("SearchService 界面语言已热更新");
     }
 
@@ -405,6 +408,16 @@ impl SearchService {
     /// 更新指定引擎的配置（运行时热更新）。
     /// 支持的 engine_id: "start_menu", "calc", "file"
     pub async fn update_engine_config(&self, engine_id: &str, config: EngineConfigUpdate) {
+        if let EngineConfigUpdate::StartMenu(cfg) = &config {
+            for engine in &self.sync_engines {
+                if let Some(system) = engine
+                    .as_any()
+                    .downcast_ref::<super::system_shortcuts::SystemShortcutEngine>()
+                {
+                    system.entries.update_config(cfg.clone());
+                }
+            }
+        }
         let engines = self.sync_engines.iter().chain(self.async_engines.iter());
         for engine in engines {
             if engine.id() == engine_id {
@@ -460,8 +473,10 @@ impl SearchService {
             return Vec::new();
         }
 
+        let mut all = Vec::new();
+        let language = self.language.read().unwrap().clone();
         for engine in &self.sync_engines {
-            if engine.id() == "start_menu" {
+            if matches!(engine.id(), "start_menu" | "system_shortcut") {
                 let history = std::collections::HashMap::new();
                 let snapshot = ContextSnapshot::default();
                 let disabled: Vec<String> = Vec::new();
@@ -471,13 +486,25 @@ impl SearchService {
                     snapshot: &snapshot,
                     disabled_builtin_actions: &disabled,
                     disabled_context_bindings: &disabled_ctx,
-                    language: "zh",
+                    language: &language,
                 };
                 let items = engine.search(query, &search_ctx).await;
-                return items.into_iter().take(max_results).collect();
+                all.extend(items);
             }
         }
-        Vec::new()
+        fuse_items(all, max_results)
+    }
+
+    pub fn system_entries(&self) -> Option<super::system_entries::SystemEntries> {
+        self.sync_engines.iter().find_map(|engine| {
+            engine
+                .as_any()
+                .downcast_ref::<super::system_shortcuts::SystemShortcutEngine>()
+                .map(|e| e.entries.clone())
+        })
+    }
+    pub fn resolve_system_entry(&self, id: &str) -> Option<super::system_entries::Entry> {
+        self.system_entries()?.resolve(id)
     }
 
     /// 剪贴板模式直接搜索（bypass SearchService pipeline）。

@@ -53,5 +53,7 @@ walkdir = "2.5"
 zeroize = { version = "1.9", features = ["derive"] }
 
 [dev-dependencies]
+# 只读系统目录回放与快照耗时报告
+tracing-subscriber = "0.3"
 keyring-core = "1"
 tempfile = "3"

@@ -308,6 +308,8 @@ export function hasUserItems() {
 
 /** 去重键：应用按路径（小写），计算结果按名，占位按名，颜色按 canonical hex，其余按 kind+名+描述。 */
 function itemKey(item) {
+    const action = item.actions?.[0];
+    if (action?.runId === "open_system_entry" && action.runArg?.entry_id) return action.runArg.entry_id;
     if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
     if (item.is_calc) return "calc:" + item.name;
     // 0.20.3：颜色结果项按 canonical hex 去重
@@ -518,7 +520,7 @@ function createItem(app, i) {
         }
     }
     // 0.20.3：剪贴板文本项降级检测——如果文本恰好是颜色字面量，也显示大格子 swatch
-    else if (!app.is_image && !app.lnk_path && !app.is_calc) {
+    else if (!app.is_image && !app.lnk_path && !app.icon_path && !app.is_calc) {
         const clipColor = parseColor(app.name);
         if (clipColor) {
             const swatch = createSwatch(clipColor.rgba, {className: "app-icon clip-thumb", size: 44});
@@ -535,9 +537,9 @@ function createItem(app, i) {
         img.alt = app.name;
         img.onerror = () => img.remove();
         li.appendChild(img);
-    } else if (!app.is_calc && app.lnk_path) {
+    } else if (!app.is_calc && (app.icon_path || app.lnk_path)) {
         const img = document.createElement("img");
-        img.src = "http://blink-icon.localhost/" + encodeURIComponent(app.lnk_path);
+        img.src = "http://blink-icon.localhost/" + encodeURIComponent(app.icon_path || app.lnk_path);
         img.className = "app-icon";
         img.alt = app.name;
         img.onerror = () => img.remove(); // 提取失败/无图标时不留破图

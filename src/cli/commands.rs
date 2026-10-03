@@ -205,7 +205,7 @@ fn run_mcp_server() -> i32 {
 ///
 /// CLI 模式直接创建 `StartMenuEngine`（通过 `build_engines`），不走 `SearchService`
 /// （`SearchService` 需要完整的路由 / 插件引擎初始化，CLI 场景太重）。
-/// `StartMenuEngine::search` 内部会在缓存空时触发全量扫描，保证首次搜索也有结果。
+/// 一次性 CLI 查询显式预热索引；桌面搜索只读取内存快照。
 fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
     use std::collections::HashMap;
     use tauri::Manager;
@@ -230,6 +230,12 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
         let start_menu = engines.iter().find(|e| e.id() == "start_menu");
         match start_menu {
             Some(engine) => {
+                if let Some(start_menu) = engine
+                    .as_any()
+                    .downcast_ref::<crate::domain::search::StartMenuEngine>()
+                {
+                    start_menu.prewarm().await;
+                }
                 let history = HashMap::new();
                 let snapshot = ContextSnapshot::default();
                 let disabled: Vec<String> = Vec::new();

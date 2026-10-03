@@ -41,9 +41,8 @@ impl FeatureGroup {
     pub fn infer_from_capability_id(cap_id: &str) -> Self {
         match cap_id {
             // 应用/文件与链接
-            "open_url" | "open_path" | "reveal_in_explorer" | "search_apps" | "search_files" => {
-                Self::AppsFilesLinks
-            }
+            "open_url" | "open_path" | "open_system_entry" | "reveal_in_explorer"
+            | "search_apps" | "search_files" => Self::AppsFilesLinks,
 
             // 剪贴板与文本（编辑窗口编辑的是剪贴板/输入文本内容，归此组；
             // transcribe_audio 产出文本，同属文本提取域）

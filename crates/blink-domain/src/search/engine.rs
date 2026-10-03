@@ -27,6 +27,8 @@ pub enum Lane {
 /// 与前端契约 `Action`(同样带 payload)一一对应——转换见 [`SearchItem::into_app_entry`]。
 #[derive(Debug, Clone)]
 pub enum SearchAction {
+    /// 系统入口；前端仍投影为既有 RunAction 协议。
+    SystemEntry { entry_id: String, icon_path: String },
     /// 纯展示项，无操作。
     None,
     /// 打开路径(应用/快捷方式/文件/URL)。
@@ -267,6 +269,25 @@ impl SearchItem {
                     ..Default::default()
                 }
             }
+            SearchAction::SystemEntry {
+                entry_id,
+                icon_path,
+            } => AppEntry {
+                name: self.title,
+                description: self.subtitle,
+                score,
+                source: self.source,
+                icon_path: Some(icon_path),
+                score_detail,
+                context_aware,
+                actions: vec![Action {
+                    kind: ActionKind::Run,
+                    run_id: Some("open_system_entry".into()),
+                    run_arg: Some(serde_json::json!({"entry_id": entry_id})),
+                    ..Action::default()
+                }],
+                ..Default::default()
+            },
             SearchAction::RunAction { id, arg } => {
                 // 0.16.4：剪贴板图片项的 run_id = "copy_clipboard_image"，
                 // arg = image_id。前端据此渲染缩略图。

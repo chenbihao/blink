@@ -244,9 +244,29 @@ pub async fn run_builtin_action(
             },
             deadline: None,
         };
+        let system_history_key = if id == "open_system_entry" {
+            args.get("entry_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|entry_id| {
+                    app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()?
+                        .resolve_system_entry(entry_id)
+                        .map(|e| e.history_key)
+                })
+        } else {
+            None
+        };
         // 0.21.0: 走 registry.invoke 执行 origin/runtime 门禁
         match cap_reg.invoke(&id, args, &ctx).await {
             Ok(result) => {
+                if let Some(key) = system_history_key {
+                    let pools = app.state::<crate::infra::data::DbPools>();
+                    if crate::app::config::get_config(&pools.config)
+                        .await
+                        .search_history_enabled
+                    {
+                        crate::infra::data::history::record_launch(&pools.history, &key).await;
+                    }
+                }
                 let projection = cap_reg.get(&id).and_then(|cap| cap.projection());
                 tracing::info!(%id, summary = %result.to_display_text(projection.as_ref()), "run_builtin_action: Capability 执行成功");
 
@@ -649,9 +669,51 @@ pub fn get_default_hotkey() -> serde_json::Value {
 
 /// 获取应用搜索配置。
 #[tauri::command]
-pub async fn get_start_menu_config(app: tauri::AppHandle) -> crate::app::config::StartMenuConfig {
+pub async fn get_start_menu_config(
+    app: tauri::AppHandle,
+) -> Result<crate::app::config::StartMenuConfig, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::get_start_menu_config(pool).await
+    crate::app::config::ConfigStore::get_checked(pool).await
+}
+
+#[tauri::command]
+pub fn get_system_entry_status(
+    service: tauri::State<'_, std::sync::Arc<crate::domain::search::SearchService>>,
+) -> Result<crate::domain::search::system_entries::Status, String> {
+    service
+        .system_entries()
+        .map(|entries| entries.status())
+        .ok_or_else(|| "系统入口搜索服务不可用".into())
+}
+
+#[tauri::command]
+pub async fn refresh_system_entries(
+    service: tauri::State<'_, std::sync::Arc<crate::domain::search::SearchService>>,
+) -> Result<(), String> {
+    let entries = service.system_entries().ok_or("系统入口搜索服务不可用")?;
+    // 同步 IPC 在 WebView 主线程执行；发现任务必须由异步运行时发起。
+    tracing::debug!("系统入口手动重新发现请求");
+    entries.refresh(true);
+    Ok(())
+}
+
+#[cfg(test)]
+mod system_entry_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn rediscovery_ipc_must_return_a_send_future() {
+        // 守住 IPC 调度契约：不能改回同步命令，否则主线程 tokio::spawn 会崩溃。
+        fn require_async<'a, F>(
+            _command: impl FnOnce(
+                tauri::State<'a, std::sync::Arc<crate::domain::search::SearchService>>,
+            ) -> F,
+        ) where
+            F: std::future::Future<Output = Result<(), String>> + Send,
+        {
+        }
+        require_async(refresh_system_entries);
+    }
 }
 
 /// 获取计算器配置。

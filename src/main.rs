@@ -580,7 +580,10 @@ fn main() {
                 app_config.disabled_context_bindings.clone(),
             );
             // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
-            search_service.update_language(app_config.language.clone());
+            // 自动发现开启时语言初始化会发起后台任务，不能在同步 setup 线程调用。
+            tauri::async_runtime::block_on(async {
+                search_service.update_language(app_config.language.clone());
+            });
             // 初始化 ClipboardEngine 展示页数快照（0.20.1：display_pages 配置项）
             search_service.update_clipboard_display_pages(app_config.clipboard.display_pages);
             search_service.update_clipboard_search_enabled(app_config.clipboard.search_enabled);
@@ -1512,6 +1515,8 @@ app::commands::generate_palette_schemes,
             app::commands::open_log_dir,
             app::commands::get_log_info,
             app::commands::get_start_menu_config,
+            app::commands::get_system_entry_status,
+            app::commands::refresh_system_entries,
             app::commands::get_calc_config,
             app::commands::probe_everything,
             app::commands::get_engine_config,

@@ -42,6 +42,7 @@ pub mod open_clipboard_mode;
 pub mod open_logs_data_dir;
 pub mod open_path;
 pub mod open_settings;
+pub mod open_system_entry;
 pub mod open_url;
 pub mod pin_image;
 pub mod read_clipboard;

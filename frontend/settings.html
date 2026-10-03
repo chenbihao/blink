@@ -267,7 +267,7 @@
                     <div class="extension-info">
                         <h3 data-i18n="engine.start_menu.title">应用搜索</h3>
                         <p class="extension-desc" data-i18n="engine.start_menu.desc">
-                            搜索开始菜单、桌面快捷方式等已安装应用</p>
+                            搜索已安装应用与 Windows 系统入口</p>
                     </div>
                     <label class="switch">
                         <input checked id="start-menu-enabled" type="checkbox"/>
@@ -275,7 +275,9 @@
                     </label>
                 </div>
 
-                <div class="extension-body">
+                <div class="extension-body" id="start-menu-options">
+                    <h4 class="plugin-section-title" data-i18n="engine.start_menu.baseline.title">基础搜索<span class="field-hint-icon"
+                            data-i18n-title="engine.start_menu.baseline.desc">ⓘ</span></h4>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.start_menu.scan_depth.label">扫描深度<span
                                 class="field-hint-icon"
@@ -292,6 +294,8 @@
                             </div>
                         </div>
                     </div>
+                    <h4 class="plugin-section-title" data-i18n="engine.start_menu.enhancements.title">增强搜索<span class="field-hint-icon"
+                            data-i18n-title="engine.start_menu.enhancements.desc">ⓘ</span></h4>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX
                             应用<span class="field-hint-icon"
@@ -300,6 +304,18 @@
                             <input checked id="start-menu-include-uwp" type="checkbox"/>
                             <span class="checkmark"></span>
                         </label>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label" id="start-menu-system-label" data-i18n="engine.start_menu.system.label">常用系统入口<span aria-hidden="true" class="field-hint-icon"
+                                data-i18n-title="engine.start_menu.system.hint">ⓘ</span></span>
+                        <label class="checkbox"><input aria-labelledby="start-menu-system-label" checked id="start-menu-include-system" type="checkbox"/><span class="checkmark"></span></label>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label" id="start-menu-discovery-label" data-i18n="engine.start_menu.discovery.label">发现更多系统设置项<span aria-hidden="true" class="field-hint-icon"
+                                data-i18n-title="engine.start_menu.discovery.hint">ⓘ</span></span>
+                        <label class="checkbox"><input aria-labelledby="start-menu-discovery-label" id="start-menu-discover-settings" type="checkbox"/><span class="checkmark"></span></label>
+                        <span aria-live="polite" class="status-badge status-unknown" id="system-entry-status"></span>
+                        <button class="btn-small" data-i18n="engine.start_menu.discovery.retry" id="system-entry-retry" type="button">重新发现</button>
                     </div>
                 </div>
             </div>

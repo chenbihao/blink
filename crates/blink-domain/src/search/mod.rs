@@ -100,6 +100,9 @@ pub struct AppEntry {
     pub pinyin_full: String,
     /// lnk 文件完整路径
     pub lnk_path: String,
+    /// 独立展示图标引用，系统 Run 动作不借用文件路径/历史身份。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<String>,
     /// 是否为计算结果（前端可据此显示特殊样式）
     #[serde(default)]
     pub is_calc: bool,
@@ -197,6 +200,7 @@ mod color_engine;
 pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
+pub mod system_entries;
 mod system_shortcuts;
 use builtin_engine::BuiltinEngine;
 use color_engine::ColorEngine;
@@ -213,7 +217,7 @@ use calc_engine::CalcEngine;
 use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;
 use mock_slow_engine::MockSlowEngine;
-use start_menu_engine::StartMenuEngine;
+pub use start_menu_engine::StartMenuEngine;
 use system_shortcuts::SystemShortcutEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
@@ -247,9 +251,9 @@ pub fn build_engines(
         // ClipboardEngine（0.8.5 §6.4，keyword 剪贴板/clip 触发展开历史）
         std::sync::Arc::new(ClipboardEngine::new(pool, cache_pool)),
         // StartMenuEngine（可配置）
-        std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu)),
-        // SystemShortcutEngine（0.17.1：系统快捷方式，始终启用）
-        std::sync::Arc::new(SystemShortcutEngine),
+        std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu.clone())),
+        // SystemShortcutEngine（常用入口与可选自动发现）
+        std::sync::Arc::new(SystemShortcutEngine::with_config(configs.start_menu)),
     ];
 
     // FileEngine（可配置，始终创建以支持热更新；search 内部检查 enabled）
@@ -295,7 +299,7 @@ pub use blink_infra::utils::text::{
 /// 只负责 nucleo fuzzy 匹配，**不含历史加权**——历史统一在归一化后由
 /// `scorer::apply_history` 处理（与 Builtin/Calc/File/Plugin 共用同一公式）。
 /// raw 分数供引擎做 top-relative 归一化。空 query 返回前 limit 条（分数置 0）。
-/// 由 `StartMenuEngine` 调用(SearchService 接管搜索后,这是唯一打分入口)。
+/// 开始菜单取 top-N；系统入口在别名合并后取 top-N，复用同一打分核心。
 pub fn fuzzy_score_entries(
     query: &str,
     entries: &[AppEntry],
@@ -303,6 +307,23 @@ pub fn fuzzy_score_entries(
 ) -> Vec<(u32, AppEntry)> {
     if query.is_empty() {
         return entries.iter().take(limit).map(|e| (0, e.clone())).collect();
+    }
+    let mut scored = fuzzy_entry_scores(query, entries);
+    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(s, e)| (s, e.clone()))
+        .collect()
+}
+
+/// 借用未排序的匹配结果，供多别名按身份合并，避免复制/排序全部候选。
+pub(super) fn fuzzy_entry_scores<'a>(
+    query: &str,
+    entries: &'a [AppEntry],
+) -> Vec<(u32, &'a AppEntry)> {
+    if query.is_empty() {
+        return entries.iter().map(|e| (0, e)).collect();
     }
     // 查询转小写：确保大写 "WX" 能匹配小写 "wx" 的拼音首字母
     let query_lower = query.to_ascii_lowercase();
@@ -314,7 +335,7 @@ pub fn fuzzy_score_entries(
         AtomKind::Fuzzy,
     );
     let mut buf = Vec::new();
-    let mut scored: Vec<(u32, &AppEntry)> = entries
+    entries
         .iter()
         .filter_map(|e| {
             let score_name = {
@@ -341,12 +362,6 @@ pub fn fuzzy_score_entries(
             };
             best.map(|s| (s, e))
         })
-        .collect();
-    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(s, e)| (s, e.clone()))
         .collect()
 }
 
