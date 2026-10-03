@@ -64,7 +64,11 @@ pub trait PluginSettingResolver: Send + Sync {
 /// 0.14.6 §2.2：`AppHandle` 参数移除，由调用方（main.rs）解析路径后传入。
 pub fn builtin_plugins_dir() -> PathBuf {
     if cfg!(debug_assertions) {
+        // 0.25.4 拆 crate 后，编译期目录是 crates/blink-domain，需上溯到仓库根。
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("blink-domain 应位于 workspace 的 crates/ 下")
             .join("plugins")
             .join("builtin")
     } else {
@@ -112,4 +116,34 @@ pub fn load_builtin_plugins(
         }
     }
     loaded
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_discovers_builtin_plugins_and_translation_tools() {
+        // 实际扫描仓库 manifest，防止拆 crate 后路径漂移但存量解析单测仍通过。
+        // PluginHandle 懒启动，此处不会拉起插件进程或读取用户配置。
+        let plugins = load_builtin_plugins(&builtin_plugins_dir(), None);
+        let mut ids: Vec<_> = plugins.iter().map(|plugin| plugin.id()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["builtin.ip", "builtin.translate", "builtin.weather"]);
+
+        let translate = plugins
+            .iter()
+            .find(|plugin| plugin.id() == "builtin.translate")
+            .expect("应发现翻译插件");
+        for tool_name in ["translate", "translate_batch"] {
+            assert!(
+                translate
+                    .manifest()
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == tool_name),
+                "翻译插件应声明 {tool_name} 能力"
+            );
+        }
+    }
 }
