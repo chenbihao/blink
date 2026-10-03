@@ -145,7 +145,7 @@ export function applyChordGlobalToBindings(bindings, id, enabled) {
     const next = {...(bindings || {})};
     const entry = {...(next[id] ?? {key: "", modifiers: ["alt"]})};
     if (enabled) {
-        entry.global = {mode: "follow_chord"};
+        entry.global = entry.global || {mode: "follow_chord"};
     } else if (entry.global) {
         delete entry.global;
     }

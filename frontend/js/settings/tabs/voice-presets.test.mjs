@@ -116,7 +116,7 @@ assert.ok(rustSource.includes("RecognitionConfig::default()"),
 // 渐进上屏保留窗口：Rust 侧边界必须与 JS RECOGNITION_RANGE 同值
 {
     const rustConfig = await readFile(
-        new URL("../../../../src/domain/config/stt_config.rs", import.meta.url),
+        new URL("../../../../crates/blink-domain-config/src/stt_config.rs", import.meta.url),
         "utf8",
     );
     for (const marker of [

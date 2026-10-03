@@ -1155,6 +1155,10 @@ unsafe extern "system" fn wnd_proc(
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_HOTKEY => {
+            // 0.25.5：录制 F1 等已注册按键时只记录，不执行对应功能。
+            if recorder::is_recording() {
+                return LRESULT(0);
+            }
             // 0.22.12：chord 全局快捷键（RegisterHotKey）。
             // wparam = hotkey id，lparam = (modifiers, vk)（此处不需要）。
             // 同线程消息循环 → 直接发 effect（无锁 channel send，符合热路径铁则）。
@@ -1288,6 +1292,14 @@ unsafe extern "system" fn wnd_proc(
 fn process_control_message(state: &mut InputState, msg: ControlMsg) {
     let now = Instant::now();
     let event = match msg {
+        ControlMsg::RetryGlobalHotkey { action_id, reply } => {
+            // 请求超时/页面关闭后不再执行迟到的注册副作用。
+            if !reply.is_closed() {
+                let status = global::retry_global_hotkey(&state.config.global_hotkeys, &action_id);
+                let _ = reply.send(status);
+            }
+            return;
+        }
         ControlMsg::Config(snapshot) => InputEvent::ConfigChanged(snapshot),
         ControlMsg::WindowChanged { visible, revision } => InputEvent::WindowChanged {
             visible,

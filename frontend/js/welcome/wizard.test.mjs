@@ -158,6 +158,13 @@ assert.deepEqual(
 
 // 关闭：删除 global，保留 key/modifiers 等其他字段
 {
+    const global = {mode: "custom", modifiers: [], key: "f1"};
+    const src = {screenshot: {key: "a", modifiers: ["alt"], global}};
+    assert.deepEqual(applyChordGlobalToBindings(src, "screenshot", true).screenshot.global, global,
+        "欢迎页开启已有自定义全局键时保留 F1，不覆盖为 Alt+A");
+}
+
+{
     const src = {chat: {key: "q", modifiers: ["alt"], global: {mode: "follow_chord"}}};
     const next = applyChordGlobalToBindings(src, "chat", false);
     assert.equal(next.chat.global, undefined, "关闭删除 global");

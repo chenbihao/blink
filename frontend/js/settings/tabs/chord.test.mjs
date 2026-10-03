@@ -179,6 +179,7 @@ Object.defineProperty(globalThis, "navigator", {
 // Mock invoke — 用于 chord.js 的 saveGlobalBinding
 let mockConfig = {};
 let mockSaveConfigShouldFail = false;
+let mockRetry = () => Promise.resolve({actionId: "screenshot", registered: false, reason: "occupied"});
 
 // set_config 需要写回 mockConfig，以模拟后端持久化（串行化测试需要）
 function setMockConfigValue(key, value) {
@@ -199,6 +200,7 @@ function setMockConfigValue(key, value) {
 globalThis.window.__TAURI__ = {
     core: {
         invoke(cmd, args) {
+            if (cmd === "retry_global_hotkey") return mockRetry(args);
             if (cmd === "get_config") {
                 return Promise.resolve(JSON.parse(JSON.stringify(mockConfig)));
             }
@@ -234,6 +236,47 @@ globalThis.window.__TAURI__ = {
 
 const chordModule = await import("./chord.js");
 const __test__ = chordModule.__test__;
+
+describe("全局键注册重试", () => {
+    test("占用未变化时仍结束等待，可再次重试", async () => {
+        __test__.globalStatuses.set("screenshot", {registered: false, reason: "occupied"});
+        await __test__.retryGlobalBinding("screenshot");
+        assert.equal(__test__.globalRetries.has("screenshot"), false);
+        assert.ok(__test__.globalStatusBlockHtml("screenshot", true).includes("chord-global-retry"));
+        assert.equal(__test__.globalStatusBlockHtml("screenshot", false), "");
+    });
+    test("连续点击只发送一次请求，成功后移除重试入口", async () => {
+        let resolve;
+        let calls = 0;
+        mockRetry = () => { calls++; return new Promise((done) => { resolve = done; }); };
+        const p1 = __test__.retryGlobalBinding("screenshot");
+        await __test__.retryGlobalBinding("screenshot");
+        assert.equal(calls, 1);
+        assert.ok(__test__.globalStatusBlockHtml("screenshot", true).includes("disabled"));
+        resolve({actionId: "screenshot", registered: true});
+        await p1;
+        assert.ok(!__test__.globalStatusBlockHtml("screenshot", true).includes("chord-global-retry"));
+    });
+    test("换键或关闭绑定后，旧重试结果不能覆盖新状态", async () => {
+        __test__.globalStatuses.set("screenshot", {registered: false, reason: "occupied", key: "f1"});
+        let resolve;
+        mockRetry = () => new Promise((done) => { resolve = done; });
+        const pending = __test__.retryGlobalBinding("screenshot");
+        __test__.globalBindingRevisions.set("screenshot", (__test__.globalBindingRevisions.get("screenshot") ?? 0) + 1);
+        __test__.globalStatuses.set("screenshot", {registered: true, key: "f2"});
+        resolve({actionId: "screenshot", registered: true, key: "f1"});
+        await pending;
+        assert.equal(__test__.globalStatuses.get("screenshot").key, "f2");
+        assert.equal(__test__.globalRetries.size, 0);
+    });
+    test("重试 IPC 失败也释放等待状态", async () => {
+        __test__.globalStatuses.set("screenshot", {registered: false, reason: "error"});
+        mockRetry = () => Promise.reject({code: "hotkey_retry_failed", message: "服务未就绪", retryable: true});
+        await __test__.retryGlobalBinding("screenshot");
+        assert.equal(__test__.globalRetries.size, 0);
+        assert.equal(__test__.globalStatuses.get("screenshot").registered, false);
+    });
+});
 
 // ── 测试 ─────────────────────────────────────────────────────────────────────
 

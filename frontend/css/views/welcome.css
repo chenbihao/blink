@@ -180,6 +180,33 @@
     gap: 4px;
 }
 
+.welcome-global-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-xs) var(--space-sm);
+    font-size: var(--text-sm);
+    color: var(--text-sub);
+}
+
+.welcome-global-status[hidden] {
+    display: none;
+}
+
+.welcome-global-status .is-ok {
+    color: var(--green);
+}
+
+.welcome-global-status .is-warn {
+    color: var(--red);
+}
+
+.welcome-hotkey-settings {
+    align-self: flex-start;
+    font-size: var(--text-sm);
+}
+
 .welcome-shortcut-row {
     display: flex;
     align-items: center;

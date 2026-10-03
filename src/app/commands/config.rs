@@ -134,7 +134,10 @@ pub async fn set_config(
                 })
                 .collect();
             if let Some(conflict) = main_hotkey_conflicts.first() {
-                return Err(conflict.describe());
+                let language = crate::app::config::get_config(pool).await.language;
+                return Err(app
+                    .state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                    .describe_binding_conflict(conflict, &language));
             }
             crate::app::config::update_hotkey(pool, hotkey.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;
@@ -173,9 +176,23 @@ pub async fn set_config(
             let bindings: crate::domain::chord::ChordBindings =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             let registry = app.state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>();
+            let language = crate::app::config::get_config(pool).await.language;
+            // 0.25.5：IPC 校验与系统注册层共用白名单，不能绕过 UI 全局占用裸输入键。
+            for (id, combo) in registry.global_hotkey_combos(&bindings) {
+                if !crate::infra::platform::hotkey::is_supported_global_hotkey(
+                    &combo.modifiers(),
+                    combo.key(),
+                ) {
+                    return Err(format!(
+                        "全局快捷键 {}（{}）不受支持：请使用单独 F1–F11 或 Ctrl/Alt/Win 组合键；F12 为系统保留",
+                        combo.display(),
+                        registry.action_label(&id, &language)
+                    ));
+                }
+            }
             // 既有检查：chord 生效键互相重复
             if let Some(conflict) = registry.binding_conflicts(&bindings).first() {
-                return Err(conflict.describe());
+                return Err(registry.describe_binding_conflict(conflict, &language));
             }
             // 0.22.12：全局快捷键冲突 + 主热键跨检查
             let hotkey_cfg =
@@ -185,7 +202,7 @@ pub async fn set_config(
                 .global_binding_conflicts(&bindings, Some((&hotkey_cfg.modifiers, &hotkey_cfg.key)))
                 .first()
             {
-                return Err(conflict.describe());
+                return Err(registry.describe_binding_conflict(conflict, &language));
             }
             crate::app::config::update_chord_bindings(pool, bindings.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;

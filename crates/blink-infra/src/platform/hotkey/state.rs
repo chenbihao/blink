@@ -504,6 +504,30 @@ impl NormalizedHotkey {
     }
 }
 
+/// 功能项全局键白名单：单独 F1–F11，或 Ctrl/Alt/Win + 字母/数字/F1–F11/空格。
+/// 接收 canonical 修饰键；F12 为系统调试器保留，裸输入键不允许全局占用。
+pub fn is_supported_global_hotkey(modifiers: &[String], key: &str) -> bool {
+    if modifiers
+        .iter()
+        .any(|m| !matches!(m.as_str(), "ctrl" | "alt" | "shift" | "meta"))
+    {
+        return false;
+    }
+    let key = key.to_ascii_lowercase();
+    let function_key = matches!(
+        key.as_str(),
+        "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
+    );
+    if modifiers.is_empty() {
+        return function_key;
+    }
+    let usable_modifier = modifiers
+        .iter()
+        .any(|m| matches!(m.as_str(), "ctrl" | "alt" | "meta"));
+    let input_key = key.len() == 1 && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ');
+    usable_modifier && (function_key || input_key || key == "space")
+}
+
 // ── 配置快照 ────────────────────────────────────────────────────────────────
 
 /// 已解析的 chord 全局快捷键（0.22.12，从 `ChordRegistry` 派生的 primitive 形状）。
@@ -1990,6 +2014,32 @@ pub fn injected_modifier_up(key: &str, time_ms: u32) -> HookKeyEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_hotkey_whitelist_allows_function_keys_without_modifiers() {
+        for n in 1..=11 {
+            assert!(is_supported_global_hotkey(&[], &format!("F{n}")));
+        }
+        for key in [
+            "F12", "f13", "f01", "a", "1", " ", "Enter", "Tab", "lalt", "",
+        ] {
+            assert!(!is_supported_global_hotkey(&[], key), "{key}");
+        }
+    }
+
+    #[test]
+    fn global_hotkey_whitelist_preserves_combo_rules() {
+        let ctrl = vec!["ctrl".to_string()];
+        for key in ["a", "Z", "0", " ", "space", "F1", "f11"] {
+            assert!(is_supported_global_hotkey(&ctrl, key), "{key}");
+        }
+        assert!(!is_supported_global_hotkey(&ctrl, "F12"));
+        assert!(!is_supported_global_hotkey(&["shift".to_string()], "F1"));
+        assert!(!is_supported_global_hotkey(
+            &["ctrl".to_string(), "fn".to_string()],
+            "a"
+        ));
+    }
 
     fn alt_space_config() -> InputConfigSnapshot {
         InputConfigSnapshot {

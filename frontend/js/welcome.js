@@ -3,7 +3,7 @@
  *
  * 4 步（步步可跳过/后退）：核心快捷键 → 常用开关 → 引擎增强 → 完成。
  * 第 1 步每个 Chord 快捷键右侧带开关，直接开启该动作的全局快捷键
- * （与设置页 chord tab 同一 chord_bindings.global 契约，开启 = 跟随触发键）。
+ * （与设置页 chord tab 同一 chord_bindings.global 契约，保留已有自定义全局键）。
  * 任何退出路径（完成/跳过/关窗）都标记已完成当前版引导（onboarding_version）：
  * - 本页走 complete_onboarding 命令（版本常量唯一真源在后端）；
  * - 窗口 X 关闭由后端 CloseRequested 回调兜底。
@@ -16,6 +16,7 @@ import {commandErrorText, getCurrentWindow, invoke, listen} from "./shared/tauri
 import {applyI18nFromConfig, onLangChange, t} from "./i18n/index.js";
 import {normalizeCombo, renderCombo} from "./shared/kbd.js";
 import {EVENTS} from "./shared/event-names.js";
+import {canRetryGlobalHotkey, configuredGlobalHotkey, globalHotkeyStatusTextKey} from "./shared/global-hotkey.js";
 import {buildChordTogglesPayload, saveConfig} from "./shared/config-keys.js";
 import {
     estimateEtaMs,
@@ -106,6 +107,9 @@ const chordGlobalRevisions = new Map();
 /** 最后一次后端已确认的全局快捷键状态（id → boolean），失败回滚真源
  *  （不重新 get_config，避免读到并发写入的中间态）。 */
 const confirmedChordGlobal = new Map();
+let globalHotkeyStatuses = new Map();
+let globalStatusRevision = 0;
+const globalRetries = new Set();
 /** OCR 引导 UI 状态：idle | checking | not-installed | installing | ready | failed | unavailable。 */
 let ocrState = "idle";
 /** 最近一次 install-stage 的 stage wire 值（installing 态展示对应文案；渲染时翻译）。 */
@@ -185,7 +189,7 @@ function renderShortcuts() {
         keys.appendChild(renderCombo(comboStr));
         side.appendChild(keys);
 
-        // 模式状态标签：标注 switch 两态含义（窗口内 Chord / 全局快捷键）
+        // 状态标签：开关表示全局配置开/关，注册结果在下方单独展示。
         const mode = document.createElement("span");
         mode.className = isGlobal ? "welcome-shortcut-mode is-on" : "welcome-shortcut-mode";
         mode.textContent = t(isGlobal ? "welcome.shortcut.mode.global" : "welcome.shortcut.mode.window");
@@ -196,6 +200,7 @@ function renderShortcuts() {
         wrap.className = "welcome-switch";
         const input = document.createElement("input");
         input.type = "checkbox";
+        input.setAttribute("aria-label", `${t(labelKey)} · ${t("chord.global.title")}`);
         input.checked = isGlobal;
         input.addEventListener("change", () => {
             setGlobalRowVisual(row, input.checked);
@@ -209,7 +214,15 @@ function renderShortcuts() {
 
         row.appendChild(label);
         row.appendChild(side);
-        chordList.appendChild(row);
+        const entry = document.createElement("div");
+        entry.className = "welcome-shortcut-entry";
+        entry.appendChild(row);
+        const status = document.createElement("div");
+        status.className = "welcome-global-status";
+        status.dataset.id = id;
+        status.setAttribute("aria-live", "polite");
+        entry.appendChild(status);
+        chordList.appendChild(entry);
     }
     chordSection.appendChild(chordList);
 
@@ -218,7 +231,75 @@ function renderShortcuts() {
     globalHint.textContent = t("welcome.chord.global_hint");
     chordSection.appendChild(globalHint);
 
+    const settings = document.createElement("button");
+    settings.type = "button";
+    settings.className = "btn-link welcome-hotkey-settings";
+    settings.textContent = t("welcome.chord.settings");
+    settings.addEventListener("click", async () => {
+        try {
+            await invoke("open_settings_tab", {tab: "chord"});
+        } catch (error) {
+            showWelcomeError(commandErrorText(error, t("welcome.error.save_failed")));
+        }
+    });
+    chordSection.appendChild(settings);
+
     container.appendChild(chordSection);
+    updateGlobalHotkeyStatusDom();
+}
+
+/** 开关表示配置已开启，生效与否由系统注册结果独立显示。 */
+function updateGlobalHotkeyStatusDom() {
+    document.querySelectorAll(".welcome-global-status[data-id]").forEach((el) => {
+        const id = el.dataset.id;
+        el.replaceChildren();
+        el.hidden = chordGlobalValues[id] !== true;
+        if (el.hidden) return;
+        const fallback = CHORD_SHORTCUTS.find((item) => item.id === id)?.combo.split("+").pop().toLowerCase();
+        const combo = configuredGlobalHotkey(chordBindingsConfig[id], fallback);
+        if (combo) {
+            const label = document.createElement("span");
+            label.textContent = `${t("chord.global.title")}：`;
+            el.appendChild(label);
+            el.appendChild(renderCombo(normalizeCombo(combo.modifiers, combo.key)));
+        }
+        const status = globalHotkeyStatuses.get(id);
+        const pending = globalRetries.has(id);
+        const text = document.createElement("span");
+        text.className = status?.registered ? "is-ok" : status ? "is-warn" : "";
+        text.textContent = t(pending ? "chord.global.retrying" : globalHotkeyStatusTextKey(status));
+        el.appendChild(text);
+        if (canRetryGlobalHotkey(status)) {
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "btn-small";
+            retry.disabled = pending;
+            retry.textContent = t(pending ? "chord.global.retrying" : "chord.global.retry");
+            retry.addEventListener("click", () => retryGlobalHotkey(id));
+            el.appendChild(retry);
+        }
+    });
+}
+
+async function retryGlobalHotkey(id) {
+    if (globalRetries.has(id) || !canRetryGlobalHotkey(globalHotkeyStatuses.get(id))) return;
+    const revision = chordGlobalRevisions.get(id);
+    const statusRevision = globalStatusRevision;
+    globalRetries.add(id);
+    updateGlobalHotkeyStatusDom();
+    try {
+        const status = await invoke("retry_global_hotkey", {actionId: id});
+        if (revision === chordGlobalRevisions.get(id) && statusRevision === globalStatusRevision) {
+            globalHotkeyStatuses.set(id, status);
+        }
+    } catch (error) {
+        if (revision === chordGlobalRevisions.get(id)) {
+            showWelcomeError(commandErrorText(error, t("chord.global.retry_failed")));
+        }
+    } finally {
+        globalRetries.delete(id);
+        updateGlobalHotkeyStatusDom();
+    }
 }
 
 // ── 步骤导航 ────────────────────────────────────────────────────────────────
@@ -379,8 +460,7 @@ function setGlobalRowVisual(row, isOn) {
 
 /** 开关写入即生效（chord_bindings.global 字段级更新）。
  *
- *  开启 = `{mode:"follow_chord"}`（跟随触发键，系统级注册，主窗隐藏时也可
- *  触发）；关闭 = 删除 global 字段。
+ *  开启保留已有 Custom，否则使用 `{mode:"follow_chord"}`；关闭删除 global 字段。
  *
  *  **串行化 + revision**：chord_bindings 是结构体分片，写入经 promise chain
  *  串行执行（并发 read-modify-write 会 last-writer-wins 丢其他动作的字段）；
@@ -390,6 +470,7 @@ async function applyChordGlobal(id, enabled) {
     const rev = (chordGlobalRevisions.get(id) ?? 0) + 1;
     chordGlobalRevisions.set(id, rev);
     chordGlobalValues[id] = enabled;
+    updateGlobalHotkeyStatusDom();
 
     let failure = null;
     const result = await new Promise((resolve) => {
@@ -417,7 +498,8 @@ async function applyChordGlobal(id, enabled) {
             resolve("failed");
         });
     });
-    // ok / superseded 都不动 UI：被取代时新请求负责最新状态
+    if (result === "ok") updateGlobalHotkeyStatusDom();
+    // 被取代时新请求负责最新状态
     if (result !== "failed") return;
     // 失败返回时已有更新的请求接管同一动作：回滚会覆盖新请求的 UI 状态，跳过
     if (rev !== chordGlobalRevisions.get(id)) return;
@@ -690,9 +772,16 @@ async function finish() {
 async function init() {
     await applyI18nFromConfig();
 
+    await listen(EVENTS.GLOBAL_HOTKEY_STATUS, (event) => {
+        ++globalStatusRevision;
+        globalHotkeyStatuses = new Map((Array.isArray(event.payload) ? event.payload : []).map((s) => [s.actionId, s]));
+        updateGlobalHotkeyStatusDom();
+    }).catch((error) => console.error("welcome: listen global hotkey status failed:", error));
+
     // 读取开关初始值（get_config 一次拿全量，向导会话内够用）
     try {
         const cfg = await invoke("get_config");
+        MAIN_SHORTCUT.combo = cfg.hotkey?.display || "Alt+Space";
         toggleValues = {
             auto_start: cfg.auto_start === true,
             chord_enabled: cfg.chord_enabled === true,
@@ -711,6 +800,16 @@ async function init() {
         }
     } catch (e) {
         console.error("welcome: get_config failed:", e);
+    }
+
+    try {
+        const revision = globalStatusRevision;
+        const statuses = await invoke("get_global_hotkey_statuses");
+        if (revision === globalStatusRevision) {
+            globalHotkeyStatuses = new Map((Array.isArray(statuses) ? statuses : []).map((s) => [s.actionId, s]));
+        }
+    } catch (error) {
+        console.error("welcome: get global hotkey statuses failed:", error);
     }
 
     renderShortcuts();

@@ -74,6 +74,7 @@ pub use state::{
     InputUiState, MainViewContext, ModifierKey, ModifierLevel, NormalizedHotkey,
     NormalizedRawModifier, PhysicalModifierSnapshot, PhysicalObservationReason, Propagation,
     RecorderMode, ResolvedGlobalHotkey, VoicePhase, WindowTransitionReason,
+    is_supported_global_hotkey,
 };
 
 // ── Effect channel（hook 线程 → 主线程）──────────────────────────────────────
@@ -151,6 +152,16 @@ pub fn alloc_view_epoch() -> u64 {
 pub struct InputController;
 
 impl InputController {
+    /// 单条重试只排入窗口归属线程，不注销其他已生效绑定。
+    pub async fn retry_global_hotkey(action_id: String) -> Result<GlobalHotkeyStatus, String> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        send_control(ControlMsg::RetryGlobalHotkey { action_id, reply });
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .map_err(|_| "快捷键重试超时，请稍后重试".to_string())?
+            .map_err(|_| "快捷键服务不可用，请稍后重试".to_string())?
+    }
+
     /// 更新配置快照（app 层 `refresh_input_config` 调用）。
     pub fn update_config(snapshot: InputConfigSnapshot) {
         if let Ok(mut g) = ensure_config_snapshot().write() {
@@ -199,7 +210,12 @@ impl InputController {
 
 /// 控制消息（主线程 → hook 线程）。
 #[derive(Debug)]
-pub enum ControlMsg { // 0.25.1 crate 化：pub(crate) → pub（跨 crate 可见性）
+pub enum ControlMsg {
+    // 0.25.1 crate 化：pub(crate) → pub（跨 crate 可见性）
+    RetryGlobalHotkey {
+        action_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<GlobalHotkeyStatus, String>>,
+    },
     Config(InputConfigSnapshot),
     WindowChanged {
         visible: bool,

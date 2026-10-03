@@ -1053,6 +1053,23 @@ pub async fn get_global_hotkey_statuses() -> Vec<crate::infra::platform::hotkey:
     crate::infra::platform::hotkey::global_hotkey_statuses()
 }
 
+/// 显式重试单个全局键，返回本次注册结果（即使占用状态未变化也有响应）。
+#[tauri::command]
+pub async fn retry_global_hotkey(
+    action_id: String,
+) -> Result<
+    crate::infra::platform::hotkey::GlobalHotkeyStatus,
+    crate::app::command_error::CommandError,
+> {
+    tracing::info!(%action_id, "global_hotkey_retry_requested");
+    crate::infra::platform::hotkey::InputController::retry_global_hotkey(action_id.clone())
+        .await
+        .map_err(|message| {
+            tracing::warn!(%action_id, %message, "global_hotkey_retry_failed");
+            crate::app::command_error::CommandError::new("hotkey_retry_failed", message, true)
+        })
+}
+
 /// 记录剪贴板命中（用户选择粘贴某条历史）。
 #[tauri::command]
 pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(), String> {

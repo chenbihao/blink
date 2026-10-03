@@ -139,6 +139,56 @@ pub fn apply_global_hotkeys(desired: &[ResolvedGlobalHotkey]) {
     publish_status(statuses);
 }
 
+/// 仅重试指定动作，保持其他成功注册的热键及其 id 不变。
+/// 在输入窗口归属线程读取已接受的配置，避免旧 UI 请求恢复已删除的绑定。
+pub fn retry_global_hotkey(
+    desired: &[ResolvedGlobalHotkey],
+    action_id: &str,
+) -> Result<GlobalHotkeyStatus, String> {
+    let Some((idx, entry)) = desired
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.action_id == action_id)
+    else {
+        return Err("该全局快捷键未启用，请检查功能和快捷键设置".to_string());
+    };
+    let Some(&raw) = WND_HWND.get() else {
+        return Err("快捷键服务尚未就绪，请稍后重试".to_string());
+    };
+    let hotkey_id = HOTKEY_ID_BASE + idx as i32;
+    let result = REGISTERED.with(|cell| {
+        let mut registered = cell.borrow_mut();
+        if registered.iter().any(|e| e.action_id == action_id) {
+            return Ok(());
+        }
+        register_one(HWND(raw as *mut _), hotkey_id, entry)?;
+        registered.push(RegisteredEntry {
+            hotkey_id,
+            action_id: entry.action_id.clone(),
+            follow_chord: entry.follow_chord,
+            key: entry.key.clone(),
+        });
+        Ok(())
+    });
+    let status = GlobalHotkeyStatus {
+        action_id: entry.action_id.clone(),
+        follow_chord: entry.follow_chord,
+        modifiers: entry.modifiers.clone(),
+        key: entry.key.clone(),
+        registered: result.is_ok(),
+        reason: result.err(),
+    };
+    tracing::info!(%action_id, registered = status.registered, reason = ?status.reason, "全局快捷键重试完成");
+    let mut statuses = global_hotkey_statuses();
+    if let Some(previous) = statuses.iter_mut().find(|s| s.action_id == action_id) {
+        *previous = status.clone();
+    } else {
+        statuses.push(status.clone());
+    }
+    publish_status(statuses);
+    Ok(status)
+}
+
 /// 注销全部全局快捷键（配置变更 / 应用退出路径）。
 pub fn unregister_all() {
     let Some(&raw) = WND_HWND.get() else {
@@ -158,6 +208,9 @@ pub fn unregister_all() {
 
 /// 注册单个组合键。返回 Err(原因代号) 表示未生效。
 fn register_one(hwnd: HWND, hotkey_id: i32, entry: &ResolvedGlobalHotkey) -> Result<(), String> {
+    if !super::is_supported_global_hotkey(&entry.modifiers, &entry.key) {
+        return Err("invalid".to_string());
+    }
     let (fs, known_mods) = fs_modifiers(&entry.modifiers);
     if !known_mods {
         return Err("invalid".to_string());
@@ -193,7 +246,7 @@ fn fs_modifiers(modifiers: &[String]) -> (HOT_KEY_MODIFIERS, bool) {
     (fs, true)
 }
 
-/// 主键名 → VK 码。白名单：字母 / 数字 / F1-F12 / 空格。
+/// 主键名 → VK 码。白名单：字母 / 数字 / F1-F11 / 空格。
 fn vk_for_key(key: &str) -> Option<u32> {
     let lower = key.to_lowercase();
     let mut chars = lower.chars();
@@ -211,7 +264,7 @@ fn vk_for_key(key: &str) -> Option<u32> {
     if let Some(n) = lower
         .strip_prefix('f')
         .and_then(|num| num.parse::<u32>().ok())
-        .filter(|n| (1..=12).contains(n))
+        .filter(|n| (1..=11).contains(n))
     {
         return Some(VK_F1.0 as u32 + n - 1);
     }
@@ -253,7 +306,8 @@ mod tests {
         assert_eq!(vk_for_key("a"), Some(0x41));
         assert_eq!(vk_for_key("S"), Some(0x53));
         assert_eq!(vk_for_key("5"), Some(0x35));
-        assert_eq!(vk_for_key("f12"), Some(VK_F1.0 as u32 + 11));
+        assert_eq!(vk_for_key("f11"), Some(VK_F1.0 as u32 + 10));
+        assert_eq!(vk_for_key("f12"), None);
         assert_eq!(vk_for_key(" "), Some(VK_SPACE.0 as u32));
         assert_eq!(vk_for_key("space"), Some(VK_SPACE.0 as u32));
         // 非白名单主键拒绝

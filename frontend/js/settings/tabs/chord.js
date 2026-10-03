@@ -24,11 +24,14 @@ import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {normalizeCombo, renderComboHTML} from "../../shared/kbd.js";
+import {canRetryGlobalHotkey, globalHotkeyStatusTextKey, normalizeRecordedGlobalHotkey} from "../../shared/global-hotkey.js";
 
 let actionsLoadRevision = 0;
 
 /** 最近一次全局快捷键注册状态（actionId → status，0.22.12）。 */
 let globalStatuses = new Map();
+const globalRetries = new Set();
+let globalStatusRevision = 0;
 
 /**
  * 初始化 Chord 动作 Tab
@@ -59,6 +62,7 @@ export function initChordTab() {
 
     // 0.22.12：全局快捷键注册状态回显（保存配置 → hook 线程重注册 → 事件）
     listen(EVENTS.GLOBAL_HOTKEY_STATUS, (event) => {
+        ++globalStatusRevision;
         const list = Array.isArray(event.payload) ? event.payload : [];
         globalStatuses = new Map(list.map((s) => [s.actionId, s]));
         updateGlobalStatusDom();
@@ -102,11 +106,12 @@ async function loadChordActions() {
     }
 
     try {
+        const statusRevision = globalStatusRevision;
         const statuses = await invoke("get_global_hotkey_statuses");
         if (revision !== actionsLoadRevision) return;
-        globalStatuses = new Map(
-            (Array.isArray(statuses) ? statuses : []).map((s) => [s.actionId, s]),
-        );
+        if (statusRevision === globalStatusRevision) {
+            globalStatuses = new Map((Array.isArray(statuses) ? statuses : []).map((s) => [s.actionId, s]));
+        }
     } catch (e) {
         console.warn("load global hotkey statuses failed:", e);
     }
@@ -284,19 +289,50 @@ function renderGlobalBlock(a, binding, chordCombo) {
 function globalStatusBlockHtml(id, enabled) {
     if (!enabled) return "";
     const status = globalStatuses.get(id);
-    if (!status) {
-        // 动作被禁用等场景：后端不注册，无状态条目
-        return "";
+    const pending = globalRetries.has(id);
+    const key = pending ? "chord.global.retrying" : globalHotkeyStatusTextKey(status);
+    const className = status?.registered ? "is-ok" : status ? "is-warn" : "";
+    const retry = canRetryGlobalHotkey(status)
+        ? `<button type="button" class="btn-small chord-global-retry" data-id="${escapeAttr(id)}" ${pending ? "disabled" : ""}>${t(pending ? "chord.global.retrying" : "chord.global.retry")}</button>`
+        : "";
+    const help = !pending && status?.reason === "occupied"
+        ? `<span class="chord-global-status-help">${t("chord.global.status.occupied_hint")}</span>` : "";
+    return `<span class="chord-global-status-line ${className}" role="status">${t(key)}</span>${retry}${help}`;
+}
+
+/** 每条绑定单独重试；换键/关开关/重新加载后丢弃旧请求结果。 */
+async function retryGlobalBinding(id) {
+    if (globalRetries.has(id) || !canRetryGlobalHotkey(globalStatuses.get(id))) return;
+    const revision = globalBindingRevisions.get(id);
+    const loadRevision = actionsLoadRevision;
+    const statusRevision = globalStatusRevision;
+    let failure = null;
+    globalRetries.add(id);
+    updateGlobalStatusDom();
+    try {
+        const status = await invoke("retry_global_hotkey", {actionId: id});
+        if (revision === globalBindingRevisions.get(id) && loadRevision === actionsLoadRevision
+            && statusRevision === globalStatusRevision) {
+            globalStatuses.set(id, status);
+        }
+    } catch (err) {
+        if (revision !== globalBindingRevisions.get(id) || loadRevision !== actionsLoadRevision) return;
+        console.warn("retry global hotkey failed:", err);
+        failure = normalizeError(err).message;
+    } finally {
+        globalRetries.delete(id);
+        updateGlobalStatusDom();
     }
-    if (status.registered) {
-        return `<span class="chord-global-status-line is-ok">${t("chord.global.status.active")}</span>`;
-    }
-    const key = status.reason === "occupied"
-        ? "chord.global.status.occupied"
-        : status.reason === "invalid"
-            ? "chord.global.status.invalid"
-            : "chord.global.status.error";
-    return `<span class="chord-global-status-line is-warn">${t(key)}</span>`;
+    if (failure) showGlobalStatusMessage(id, failure);
+}
+
+function bindGlobalRetryButtons(container) {
+    container.querySelectorAll(".chord-global-retry").forEach((btn) => {
+        btn.onclick = (event) => {
+            event.stopPropagation();
+            retryGlobalBinding(btn.dataset.id);
+        };
+    });
 }
 
 /**
@@ -322,6 +358,7 @@ function updateGlobalStatusDom() {
             ?.querySelector(".chord-global-toggle")?.checked;
         el.innerHTML = globalStatusBlockHtml(id, enabled);
     });
+    bindGlobalRetryButtons(document);
 }
 
 /** 最近一次后端已确认的全局快捷键绑定（actionId → binding.global 或 null）。
@@ -503,6 +540,7 @@ function showGlobalStatusMessage(id, msg) {
         const current = el.querySelector(".is-warn");
         if (current && current.textContent === msg) {
             el.innerHTML = globalStatusBlockHtml(id, true);
+            bindGlobalRetryButtons(el);
         }
         // 消息清除后递增 revision，使后续漏取消的 timer 不误操作
         statusMessageRevisions.set(id, msgRev + 1);
@@ -513,8 +551,7 @@ function showGlobalStatusMessage(id, msg) {
 /**
  * 0.22.12：全局快捷键自定义组合键录制（校验放宽）。
  *
- * 校验规则：修饰键 ≥1 且含 Ctrl/Alt/Win 任一（Shift 单独不算，防劫持打字），
- * 主键限字母 / 数字 / F1-F12 / 空格。不符合则提示无效并保持原组合。
+ * 校验规则：单独 F1–F11，或 Ctrl/Alt/Win + 字母/数字/F1–F11/空格。
  */
 async function startGlobalRecording(btn) {
     const id = btn.dataset.id;
@@ -532,30 +569,13 @@ async function startGlobalRecording(btn) {
             comboEl.textContent = t("chord.global.recording");
         });
 
-        const ALIAS = {
-            lctrl: "ctrl", rctrl: "ctrl", control: "ctrl",
-            lalt: "alt", ralt: "alt",
-            lshift: "shift", rshift: "shift",
-            meta: "meta", win: "meta", super: "meta",
-        };
-        const mods = (Array.isArray(result.modifiers) ? result.modifiers : [])
-            .map((m) => ALIAS[m] || m);
-        const hasUsableMod = mods.some((m) => m === "ctrl" || m === "alt" || m === "meta");
-        const key = typeof result.key === "string" ? result.key.toLowerCase() : "";
-        const keyOk = /^[a-z0-9]$/.test(key)
-            || /^f([1-9]|1[0-2])$/.test(key)
-            || key === " ";
-
-        if (!hasUsableMod || !keyOk) {
+        const combo = normalizeRecordedGlobalHotkey(result);
+        if (!combo) {
             flashCombo(comboEl, origCombo, t("chord.global.invalid"));
             return;
         }
 
-        // 修饰键按 canonical 名去重（后端 HotkeyCombo 会再归一化，这里保持干净）
-        const canonical = [];
-        for (const m of ["ctrl", "alt", "shift", "meta"]) {
-            if (mods.includes(m)) canonical.push(m);
-        }
+        const {modifiers: canonical, key} = combo;
         const ok = await saveGlobalBinding(id, {
             mode: "custom",
             modifiers: canonical,
@@ -914,7 +934,9 @@ function bindRowEvents(container) {
         });
     });
 
-    // 自定义组合键录制（校验放宽：≥1 个 Ctrl/Alt/Win + 字母/数字/F1-F12/空格）
+    bindGlobalRetryButtons(container);
+
+    // 自定义全局键录制（单独 F1–F11 或 Ctrl/Alt/Win 组合键）
     container.querySelectorAll(".chord-global-record").forEach((btn) => {
         btn.addEventListener("click", async (e) => {
             e.stopPropagation();
@@ -1146,6 +1168,10 @@ function escapeAttr(str) {
 // ── 测试导出（仅用于单元测试纯逻辑，生产代码不依赖）────────────────────────────
 
 export const __test__ = {
+    retryGlobalBinding,
+    globalStatusBlockHtml,
+    globalRetries,
+    get globalStatuses() { return globalStatuses; },
     saveGlobalBinding,
     rollbackGlobalBindingUI,
     showGlobalStatusMessage,

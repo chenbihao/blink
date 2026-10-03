@@ -315,7 +315,7 @@ impl BindingConflict {
                 format!("全局快捷键 {} 与主热键冲突，请更换组合", self.combo)
             }
             BindingConflictKind::GlobalVsChordKey => format!(
-                "全局快捷键 {} 与动作（{}）的 Chord 键相同，请改用「跟随触发键」或更换组合",
+                "全局快捷键 {} 与动作（{}）的 Chord 键相同，请改用「跟随 Chord 键位」或更换组合",
                 self.combo,
                 self.actions.join(", ")
             ),
@@ -367,6 +367,25 @@ impl ChordBindings {
 }
 
 impl ChordRegistry {
+    /// 冲突提示使用功能名称，稳定 action id 留在协议与配置中。
+    pub fn action_label(&self, id: &str, language: &str) -> String {
+        self.actions
+            .iter()
+            .find(|a| a.id() == id)
+            .map(|a| a.label().resolve(language))
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    pub fn describe_binding_conflict(&self, conflict: &BindingConflict, language: &str) -> String {
+        let mut display = conflict.clone();
+        display.actions = conflict
+            .actions
+            .iter()
+            .map(|id| self.action_label(id, language))
+            .collect();
+        display.describe()
+    }
+
     /// 解析各动作的生效全局组合键（0.22.12）。
     ///
     /// voice_input（`ChordTarget::VoiceInteraction`，Hold 语义）不参与；
@@ -1216,6 +1235,22 @@ mod tests {
         assert_eq!(
             conflicts[0].actions,
             vec!["chat".to_string(), "screenshot".to_string()]
+        );
+    }
+
+    #[test]
+    fn conflict_feedback_uses_action_labels_without_mutating_ids() {
+        let registry = build_default_registry();
+        let mut bindings = ChordBindings::default();
+        bindings.screenshot.key = "q".to_string();
+        let conflict = &registry.binding_conflicts(&bindings)[0];
+        let message = registry.describe_binding_conflict(conflict, "zh");
+        assert!(message.contains("AI 对话"));
+        assert!(message.contains(&registry.action_label("screenshot", "zh")));
+        assert_eq!(conflict.actions, vec!["chat", "screenshot"]);
+        assert_eq!(
+            registry.action_label("unknown-action", "zh"),
+            "unknown-action"
         );
     }
 

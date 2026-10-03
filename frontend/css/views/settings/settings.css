@@ -1278,6 +1278,16 @@ input[type="number"]::-webkit-outer-spin-button {
 /* 注册状态行：已生效 / 未生效（红框条，与引擎页冲突条同语义） */
 .chord-global-status {
     min-height: 18px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+}
+
+.chord-global-status-help {
+    flex-basis: 100%;
+    color: var(--text-sub);
+    font-size: var(--text-sm);
 }
 
 .chord-global-status-line {
