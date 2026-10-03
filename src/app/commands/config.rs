@@ -3,11 +3,24 @@
 use crate::domain::event_names::EventNames;
 use tauri::{Emitter, Manager};
 
+static INPUT_BINDING_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 获取完整配置。
 #[tauri::command]
-pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig {
+pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::get_config(pool).await
+    // IPC 刷新不能将损坏/读取失败伪装成默认偏好。
+    use crate::app::config::{
+        AppearanceConfig, ChordConfig, ConfigStore, DisableConfig, HotkeyConfig,
+    };
+    ConfigStore::get_checked::<AppearanceConfig>(pool).await?;
+    ConfigStore::get_checked::<HotkeyConfig>(pool).await?;
+    ConfigStore::get_checked::<ChordConfig>(pool).await?;
+    ConfigStore::get_checked::<DisableConfig>(pool).await?;
+    let cfg = crate::app::config::get_config(pool).await;
+    let mut value = serde_json::to_value(cfg).map_err(|e| e.to_string())?;
+    value["auto_start_registration_skipped"] = serde_json::json!(cfg!(debug_assertions));
+    Ok(value)
 }
 
 /// 泛型配置写入（0.8.6 P1-C 前端泛型化）。
@@ -34,7 +47,35 @@ pub async fn set_config(
     app: tauri::AppHandle,
     key: String,
     value: serde_json::Value,
+    expected: Option<serde_json::Value>,
+) -> Result<(), crate::app::command_error::CommandError> {
+    set_config_value(app, key, value, expected)
+        .await
+        .map_err(|message| {
+            let code = [
+                "config_conflict",
+                "autostart_failed",
+                "autostart_restore_failed",
+            ]
+            .into_iter()
+            .find(|code| message.starts_with(&format!("{code}:")))
+            .unwrap_or("config_update_failed");
+            crate::app::command_error::CommandError::new(code, &message, true)
+        })
+}
+
+async fn set_config_value(
+    app: tauri::AppHandle,
+    key: String,
+    value: serde_json::Value,
+    expected: Option<serde_json::Value>,
 ) -> Result<(), String> {
+    // 跨分片冲突检查与写入同序，避免主热键和 Chord 并发检查通过后撞键。
+    let _bindings_guard = if matches!(key.as_str(), "hotkey" | "chord_bindings") {
+        Some(INPUT_BINDING_UPDATE_LOCK.lock().await)
+    } else {
+        None
+    };
     let pool = &app.state::<crate::infra::data::DbPools>().config;
 
     match key.as_str() {
@@ -50,7 +91,6 @@ pub async fn set_config(
             // 托盘菜单是 Rust 侧静态构建的（不走前端 i18n），切语言后需主动重建。
             // on_menu_event 挂在 TrayIcon 上，set_menu 不影响 id 路由。
             crate::app::tray::rebuild_menu(&app, &language);
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!(%language, "语言已更新");
         }
         "log_level" => {
@@ -67,20 +107,11 @@ pub async fn set_config(
         }
         "auto_start" => {
             let auto_start: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_auto_start(pool, auto_start).await?;
-            // dev 模式跳过注册表写入（原因同 main.rs 启动同步逻辑）：
-            // current_exe() 是 debug 构建（console 子系统），写入 Run 键后开机弹控制台。
-            // 配置 DB 仍正常记录偏好，release 下 set_config 才真正写注册表。
-            if !cfg!(debug_assertions) {
-                use tauri_plugin_autostart::ManagerExt;
-                let manager = app.autolaunch();
-                if auto_start {
-                    manager.enable().map_err(|e| e.to_string())?;
-                } else {
-                    manager.disable().map_err(|e| e.to_string())?;
-                }
-            }
-            tracing::info!(auto_start, "开机自启配置已更新");
+            let expected = expected
+                .map(serde_json::from_value::<bool>)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            crate::app::autostart::update(&app, auto_start, expected).await?;
         }
         // 0.22.13：引导向导版本标记。storage 页「重新显示引导」置 0；
         // 完成/跳过向导走 complete_onboarding 命令（版本常量唯一真源在后端）。
@@ -165,10 +196,28 @@ pub async fn set_config(
         "chord_toggles" => {
             let v: crate::app::config::ChordTogglesUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_chord_toggles(pool, v.chord_enabled, v.chord_hint_visible)
-                .await?;
+            let expected: Option<crate::app::config::ChordTogglesUpdate> = expected
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            crate::app::config::ConfigStore::update::<crate::app::config::ChordConfig>(
+                pool,
+                |cfg| {
+                    if expected.as_ref().is_some_and(|old| {
+                        old.chord_enabled != cfg.chord_enabled
+                            || old.chord_hint_visible != cfg.chord_hint_visible
+                    }) {
+                        return Err(
+                            "config_conflict: Chord 开关已被其他窗口修改，请重新读取后重试".into(),
+                        );
+                    }
+                    cfg.chord_enabled = v.chord_enabled;
+                    cfg.chord_hint_visible = v.chord_hint_visible;
+                    Ok(())
+                },
+            )
+            .await?;
             crate::app::config::refresh_input_config(&app).await;
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!(v.chord_enabled, v.chord_hint_visible, "Chord 开关已更新");
         }
         "chord_bindings" => {
@@ -204,9 +253,13 @@ pub async fn set_config(
             {
                 return Err(registry.describe_binding_conflict(conflict, &language));
             }
-            crate::app::config::update_chord_bindings(pool, bindings.clone()).await?;
+            let expected = expected
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            crate::app::config::update_chord_bindings_checked(pool, bindings.clone(), expected)
+                .await?;
             crate::app::config::refresh_input_config(&app).await;
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!("Chord 键位绑定已更新");
         }
         "clipboard_config" => {
@@ -248,10 +301,29 @@ pub async fn set_config(
             );
         }
         "disabled_chord_actions" => {
-            let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_disabled_chord_actions(pool, disabled.clone()).await?;
+            let mut disabled: Vec<String> =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            disabled.sort();
+            disabled.dedup();
+            let expected: Option<Vec<String>> = expected
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            crate::app::config::ConfigStore::update::<crate::app::config::DisableConfig>(
+                pool,
+                |cfg| {
+                    if expected
+                        .as_ref()
+                        .is_some_and(|old| old != &cfg.disabled_chord_actions)
+                    {
+                        return Err("config_conflict: 功能启用状态已变化，请重新读取后重试".into());
+                    }
+                    cfg.disabled_chord_actions = disabled.clone();
+                    Ok(())
+                },
+            )
+            .await?;
             crate::app::config::refresh_input_config(&app).await;
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!(
                 count = disabled.len(),
                 ?disabled,
@@ -488,15 +560,41 @@ pub async fn set_config(
         }
     }
 
+    let shard = match key.as_str() {
+        "language" | "log_level" | "ai_http_body_log" | "onboarding_version" => {
+            Some("app.appearance")
+        }
+        "hotkey" | "tap_threshold" | "grace_period" => Some("app.hotkey"),
+        "chord_toggles" | "chord_bindings" => Some("app.chord"),
+        "disabled_builtin_actions" | "disabled_context_bindings" | "disabled_chord_actions" => {
+            Some("app.disable")
+        }
+        _ => None,
+    };
+    if let Some(shard) = shard {
+        crate::app::setting_service::emit_changed(&app, shard);
+    }
     Ok(())
 }
 
 /// 恢复默认配置。
 #[tauri::command]
 pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let _bindings_guard = INPUT_BINDING_UPDATE_LOCK.lock().await;
     let config = crate::app::config::AppConfig::default();
-    crate::app::config::save_config(pool, &config).await
+    crate::app::autostart::reset(&app, &config).await?;
+    crate::app::config::refresh_input_config(&app).await;
+    for key in [
+        "app.appearance",
+        "app.hotkey",
+        "app.chord",
+        "app.disable",
+        "app.search",
+        "app.suggestion",
+    ] {
+        crate::app::setting_service::emit_changed(&app, key);
+    }
+    Ok(())
 }
 
 /// 完成（或跳过）当前引导向导（0.22.13）。
@@ -508,6 +606,7 @@ pub async fn complete_onboarding(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let version = crate::domain::config::ONBOARDING_VERSION;
     crate::app::config::update_onboarding_version(pool, version).await?;
+    crate::app::setting_service::emit_changed(&app, "app.appearance");
     tracing::info!(version, "引导向导已完成/跳过");
     Ok(())
 }
@@ -539,7 +638,7 @@ pub async fn get_config_section(
 
 /// 泛型配置写入（0.8.6 §8.1.3）。
 ///
-/// 前端 `invoke("set_config_section", { key: "app_config", value: {...} })` → 写入 SQLite。
+/// 前端 `invoke("set_config_section", { key: "engine:custom", value: {...} })` → 写入 SQLite。
 /// 写入成功后 emit `blink://config-changed` 事件，前端各模块按需订阅。
 ///
 /// **幂等性**：直接覆盖写，不需要先读后写。
@@ -549,6 +648,13 @@ pub async fn set_config_section(
     key: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
+    // 共享 AppConfig 的运行期写入必须经过字段更新、冲突校验和系统副作用。
+    if matches!(
+        key.as_str(),
+        "app_config" | "app.appearance" | "app.hotkey" | "app.chord" | "app.disable"
+    ) {
+        return Err("共享配置请使用 set_config 字段更新；恢复默认请使用 reset_config".into());
+    }
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let json = serde_json::to_string(&value).map_err(|e| format!("序列化失败: {e}"))?;
     crate::infra::data::history::set_config(pool, &key, &json)

@@ -14,7 +14,7 @@ use sqlx::SqlitePool;
 
 use super::types::*;
 
-use crate::config::app_config::{get_config, save_config};
+use crate::config::{ConfigStore, DisableConfig};
 
 /// 批量执行 binding 操作，写回各 binding store。
 ///
@@ -31,8 +31,8 @@ use crate::config::app_config::{get_config, save_config};
 pub async fn apply_binding_batch(pool: &SqlitePool, ops: &[BindingOp]) -> Vec<ApplyBindingResult> {
     let mut results = Vec::with_capacity(ops.len());
 
-    // 预加载当前配置（减少 DB 读次数——所有操作共享一份快照，最后一次性写回）
-    let mut config = get_config(pool).await;
+    // 生成操作结果；持久化在最新 DisableConfig 上应用同一组字段变更。
+    let mut config = crate::config::AppConfig::default();
 
     for op in ops {
         let result = apply_single_op(&mut config, op);
@@ -40,7 +40,30 @@ pub async fn apply_binding_batch(pool: &SqlitePool, ops: &[BindingOp]) -> Vec<Ap
     }
 
     // 一次性写回
-    if let Err(e) = save_config(pool, &config).await {
+    if let Err(e) = ConfigStore::update(pool, |disable: &mut DisableConfig| {
+        for op in ops {
+            let (list, id) = match op.kind {
+                BindingKind::SearchKeyword => (
+                    &mut disable.disabled_builtin_actions,
+                    op.binding_id.as_str(),
+                ),
+                BindingKind::ContextBinding => (
+                    &mut disable.disabled_context_bindings,
+                    op.binding_id.as_str(),
+                ),
+                BindingKind::ChordKey => (
+                    &mut disable.disabled_chord_actions,
+                    op.binding_id
+                        .strip_prefix("chord.")
+                        .unwrap_or(&op.binding_id),
+                ),
+            };
+            apply_to_disabled_list(list, id, op.op)?;
+        }
+        Ok(())
+    })
+    .await
+    {
         tracing::warn!(error = %e, "apply_binding_batch: 配置写回失败");
         // 标记所有操作为失败
         for result in &mut results {
@@ -131,6 +154,41 @@ impl IntoResult for Result<(), String> {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+
+    #[tokio::test]
+    async fn concurrent_batch_updates_merge_without_rewriting_appearance() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)")
+            .execute(&pool).await.unwrap();
+        crate::config::save_config(&pool, &AppConfig::default())
+            .await
+            .unwrap();
+        let first = [BindingOp {
+            op: BindingOpKind::Disable,
+            kind: BindingKind::ChordKey,
+            binding_id: "chord.chat".into(),
+        }];
+        let second = [BindingOp {
+            op: BindingOpKind::Disable,
+            kind: BindingKind::ChordKey,
+            binding_id: "chord.screenshot".into(),
+        }];
+        let (first, second, appearance) = tokio::join!(
+            apply_binding_batch(&pool, &first),
+            apply_binding_batch(&pool, &second),
+            crate::config::update_auto_start(&pool, true),
+        );
+        assert!(first[0].success);
+        assert!(second[0].success);
+        appearance.unwrap();
+        let config = crate::config::get_config(&pool).await;
+        assert!(config.auto_start);
+        assert_eq!(config.disabled_chord_actions, vec!["chat", "screenshot"]);
+    }
 
     #[test]
     fn enable_removes_from_disabled() {

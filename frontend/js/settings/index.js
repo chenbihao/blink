@@ -6,12 +6,15 @@
  */
 
 import {applyTheme} from "../shared/theme.js";
-import {applyI18n, onLangChange, setLang, t} from "../i18n/index.js";
+import {applyI18n, getLang, onLangChange, setLang, t} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
 import {hideSettingsWindow, loadConfig} from "./shared/ipc.js";
 import {setCurrentConfig} from "./shared/state.js";
-import {initGeneralTab} from "./tabs/general.js";
-import {initHotkeyTab} from "./tabs/hotkey.js";
+import {EVENTS} from "../shared/event-names.js";
+import {listen} from "../shared/tauri.js";
+import {affectsSharedConfig, connectConfigActivity, createConfigRefresher} from "../shared/config-sync.js";
+import {initGeneralTab, applyGeneralConfig} from "./tabs/general.js";
+import {initHotkeyTab, applyHotkeyConfig} from "./tabs/hotkey.js";
 import {initEnginesTab} from "./tabs/engines.js";
 import {initPluginsTab} from "./tabs/plugins.js";
 import {initCapabilitiesTab} from "./tabs/capabilities.js";
@@ -22,7 +25,7 @@ import {initDebugTab} from "./tabs/debug.js";
 import {initAboutTab} from "./tabs/about.js";
 import {initAITab} from "./tabs/ai.js";
 import {initVoiceTab} from "./tabs/voice.js";
-import {initChordTab} from "./tabs/chord.js";
+import {initChordTab, refreshChordActions} from "./tabs/chord.js";
 import {initMcPTab} from "./tabs/mcp.js";
 import {initMcpServerSection} from "./tabs/mcp-server.js";
 import {createLocalEngineController} from "./tabs/engines/local-runtime.js";
@@ -597,10 +600,24 @@ export function waitForEngineCard(engineId, timeoutMs = 5000) {
  * 应用配置到 UI
  * @param {Object} cfg - 配置对象
  */
+let configReady = false;
+let configListening = false;
+let chordConfigSnapshot = "";
+const configRefresher = createConfigRefresher({read: loadConfig, apply: applyConfigToUI});
+connectConfigActivity(configRefresher);
+
 function applyConfigToUI(cfg) {
-    // 各 Tab 模块内部处理各自的 UI 更新
-    // 这里只处理全局状态
     setCurrentConfig(cfg);
+    if (!configReady) return;
+    if (cfg.language && cfg.language !== getLang()) { setLang(cfg.language); applyI18n(); }
+    applyGeneralConfig(cfg);
+    applyHotkeyConfig(cfg);
+    applyTheme(cfg.theme || "auto");
+    const chordSnapshot = JSON.stringify([cfg.chord_bindings, cfg.disabled_chord_actions, cfg.hotkey, cfg.chord_enabled, cfg.clipboard]);
+    if (chordConfigSnapshot !== chordSnapshot) {
+        chordConfigSnapshot = chordSnapshot;
+        refreshChordActions();
+    }
 }
 
 /**
@@ -611,9 +628,13 @@ async function init() {
         // 图标 sprite 先注入（await 保证首屏无 FOUC —— tab 初始化时 innerHTML 拼图标就能立即用）
         await ensureSpriteLoaded();
 
-        // 加载配置
-        const cfg = await loadConfig();
-        applyConfigToUI(cfg);
+        // 监听先于首读；事件与 focus 共用一个刷新入口。
+        await listen(EVENTS.CONFIG_CHANGED, (event) => {
+            if (affectsSharedConfig(event.payload)) configRefresher.refresh();
+        }).catch((error) => console.warn("settings config listener unavailable; focus will reload:", error));
+        configListening = true;
+        configRefresher.refresh();
+        const cfg = await configRefresher.ready();
 
         // 应用主题
         applyTheme(cfg.theme || "auto");
@@ -640,6 +661,8 @@ async function init() {
         initChordTab();
         initMcPTab();
         initMcpServerSection();
+        configReady = true;
+        applyConfigToUI(cfg);
 
         // 如果设置页打开时引擎 Tab 已是激活状态，立即 mount runtime
         const enginesTabBtn = document.querySelector('.tab[data-tab="engines"]');
@@ -708,12 +731,7 @@ document.addEventListener("keydown", (e) => {
 
 // 窗口 shown 事件刷新配置（只刷新当前激活 tab，避免所有探测同时运行）
 window.addEventListener("focus", async () => {
-    try {
-        const cfg = await loadConfig();
-        applyConfigToUI(cfg);
-    } catch (e) {
-        console.error("Failed to refresh config on focus:", e);
-    }
+    if (configListening) { await configRefresher.refresh(); refreshChordActions(); }
 
     // 只刷新当前激活 tab 的 runtime（如果当前在 engines tab）
     if (_leActive && _leController && _leController.isMounted()) {

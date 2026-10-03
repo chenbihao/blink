@@ -63,14 +63,24 @@ pub async fn update_managed_setting(
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     match setting_id {
         ManagedSettingId::Theme => {
-            let mut cfg = ConfigStore::get::<AppearanceConfig>(pool).await;
-            cfg.theme = value.as_str().unwrap().to_string();
-            save_appearance(app, &cfg).await?;
+            update_appearance(app, |cfg| {
+                if json!(cfg.theme) != expected_old_value {
+                    return Err("config_conflict: 主题已变化，请重新读取".into());
+                }
+                cfg.theme = value.as_str().unwrap().to_string();
+                Ok(())
+            })
+            .await?;
         }
         ManagedSettingId::WindowOpacity => {
-            let mut cfg = ConfigStore::get::<AppearanceConfig>(pool).await;
-            cfg.window_opacity = value.as_f64().unwrap();
-            save_appearance(app, &cfg).await?;
+            update_appearance(app, |cfg| {
+                if json!(cfg.window_opacity) != expected_old_value {
+                    return Err("config_conflict: 透明度已变化，请重新读取".into());
+                }
+                cfg.window_opacity = value.as_f64().unwrap();
+                Ok(())
+            })
+            .await?;
         }
         ManagedSettingId::SearchHistoryEnabled
         | ManagedSettingId::SearchHistoryDays
@@ -156,9 +166,11 @@ pub async fn apply_general_config(
 ) -> Result<(), String> {
     let _guard = SETTING_UPDATE_LOCK.lock().await;
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let mut appearance = ConfigStore::get::<AppearanceConfig>(pool).await;
-    appearance.theme = general.theme.clone();
-    save_appearance(app, &appearance).await?;
+    update_appearance(app, |cfg| {
+        cfg.theme = general.theme.clone();
+        Ok(())
+    })
+    .await?;
 
     let search = SearchConfig {
         search_history_enabled: general.search_history_enabled,
@@ -172,10 +184,11 @@ pub async fn apply_general_config(
 
 pub async fn apply_window_opacity(app: &tauri::AppHandle, opacity: f64) -> Result<(), String> {
     let _guard = SETTING_UPDATE_LOCK.lock().await;
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let mut cfg = ConfigStore::get::<AppearanceConfig>(pool).await;
-    cfg.window_opacity = opacity.clamp(0.2, 1.0);
-    save_appearance(app, &cfg).await
+    update_appearance(app, |cfg| {
+        cfg.window_opacity = opacity.clamp(0.2, 1.0);
+        Ok(())
+    })
+    .await
 }
 
 pub async fn apply_autosuggest(
@@ -203,9 +216,12 @@ pub async fn apply_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> R
     save_clipboard(app, cfg).await
 }
 
-async fn save_appearance(app: &tauri::AppHandle, cfg: &AppearanceConfig) -> Result<(), String> {
+async fn update_appearance(
+    app: &tauri::AppHandle,
+    edit: impl Fn(&mut AppearanceConfig) -> Result<(), String>,
+) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    ConfigStore::set(pool, cfg).await?;
+    ConfigStore::update(pool, edit).await?;
     emit_changed(app, "app.appearance");
     Ok(())
 }
@@ -266,7 +282,7 @@ async fn save_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result
     Ok(())
 }
 
-fn emit_changed(app: &tauri::AppHandle, key: &str) {
+pub(crate) fn emit_changed(app: &tauri::AppHandle, key: &str) {
     if let Err(error) = app.emit(EventNames::CONFIG_CHANGED, json!({ "key": key })) {
         tracing::warn!(%key, %error, "配置已持久化，但变更事件发送失败");
     }

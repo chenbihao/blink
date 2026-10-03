@@ -294,9 +294,20 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
     // 一律迁为 0（未完成当前版引导）——老用户升级后补看一次新版向导，
     // 完成/跳过后写回 ONBOARDING_VERSION。迁移即持久化。
     if appearance.onboarding_version.is_none() {
-        appearance.onboarding_version = Some(0);
-        ConfigStore::set(pool, &appearance).await
-            .unwrap_or_else(|e| tracing::warn!(error = %e, "onboarding_version 迁移写回失败（内存中已生效，下次读取重试）"));
+        match ConfigStore::update::<AppearanceConfig>(pool, |cfg| {
+            if cfg.onboarding_version.is_none() {
+                cfg.onboarding_version = Some(0);
+            }
+            Ok(())
+        })
+        .await
+        {
+            Ok(current) => appearance = current,
+            Err(error) => {
+                appearance.onboarding_version = Some(0);
+                tracing::warn!(%error, "onboarding_version 迁移写回失败（下次读取重试）");
+            }
+        }
         tracing::info!(
             version = appearance.onboarding_version,
             "appearance 分片一次性迁移：存量记录 → onboarding_version=0"
@@ -460,6 +471,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
 
 /// 保存完整配置（拆分回 6 分片 + clipboard 独立 KV）。
 pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), String> {
+    let mut shards = Vec::new();
     let hotkey_shard = HotkeyConfig {
         modifiers: config.hotkey.modifiers.clone(),
         key: config.hotkey.key.clone(),
@@ -467,130 +479,143 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
         tap_threshold: config.tap_threshold,
         grace_period: config.grace_period,
     };
-    ConfigStore::set(pool, &hotkey_shard).await?;
+    shards.push(encoded(&hotkey_shard)?);
 
-    ConfigStore::set(
-        pool,
-        &AppearanceConfig {
-            theme: config.theme.clone(),
-            language: config.language.clone(),
-            auto_start: config.auto_start,
-            log_level: config.log_level.clone(),
-            window_opacity: config.window_opacity,
-            ai_http_body_log: config.ai_http_body_log,
-            onboarding_version: Some(config.onboarding_version),
-        },
-    )
-    .await?;
+    shards.push(encoded(&AppearanceConfig {
+        theme: config.theme.clone(),
+        language: config.language.clone(),
+        auto_start: config.auto_start,
+        log_level: config.log_level.clone(),
+        window_opacity: config.window_opacity,
+        ai_http_body_log: config.ai_http_body_log,
+        onboarding_version: Some(config.onboarding_version),
+    })?);
 
-    ConfigStore::set(
-        pool,
-        &SearchConfig {
-            search_history_enabled: config.search_history_enabled,
-            search_history_days: config.search_history_days,
-            max_results: config.max_results,
-            page_size: config.page_size,
-            surface_takeover_enabled: config.surface_takeover_enabled,
-        },
-    )
-    .await?;
+    shards.push(encoded(&SearchConfig {
+        search_history_enabled: config.search_history_enabled,
+        search_history_days: config.search_history_days,
+        max_results: config.max_results,
+        page_size: config.page_size,
+        surface_takeover_enabled: config.surface_takeover_enabled,
+    })?);
 
-    ConfigStore::set(
-        pool,
-        &SuggestionConfig {
-            autosuggest_enabled: config.autosuggest_enabled,
-            autosuggest_min_score: config.autosuggest_min_score,
-            autosuggest_tab_key: config.autosuggest_tab_key.clone(),
-            proactive_enabled: config.proactive_enabled,
-            empty_query_topn: config.empty_query_topn,
-            completion_enabled: config.completion_enabled,
-            context_suggestion_enabled: config.context_suggestion_enabled,
-            ai_suggestion_enabled: config.ai_suggestion_enabled,
-            secondary_enabled: config.secondary_enabled,
-            suppress_repeated: config.suppress_repeated,
-            // 未映射进 AppConfig 门面的字段（0.24 secondary_min_rank 等）保留 KV 现值
-            ..ConfigStore::get::<SuggestionConfig>(pool).await
-        },
-    )
-    .await?;
+    shards.push(encoded(&SuggestionConfig {
+        autosuggest_enabled: config.autosuggest_enabled,
+        autosuggest_min_score: config.autosuggest_min_score,
+        autosuggest_tab_key: config.autosuggest_tab_key.clone(),
+        proactive_enabled: config.proactive_enabled,
+        empty_query_topn: config.empty_query_topn,
+        completion_enabled: config.completion_enabled,
+        context_suggestion_enabled: config.context_suggestion_enabled,
+        ai_suggestion_enabled: config.ai_suggestion_enabled,
+        secondary_enabled: config.secondary_enabled,
+        suppress_repeated: config.suppress_repeated,
+        // 未映射进 AppConfig 门面的字段（0.24 secondary_min_rank 等）保留 KV 现值
+        ..ConfigStore::get::<SuggestionConfig>(pool).await
+    })?);
 
-    ConfigStore::set(
-        pool,
-        &ChordConfig {
-            chord_enabled: config.chord_enabled,
-            chord_hint_visible: config.chord_hint_visible,
-            bindings: config.chord_bindings.clone(),
-        },
-    )
-    .await?;
+    shards.push(encoded(&ChordConfig {
+        chord_enabled: config.chord_enabled,
+        chord_hint_visible: config.chord_hint_visible,
+        bindings: config.chord_bindings.clone(),
+    })?);
 
-    ConfigStore::set(
-        pool,
-        &DisableConfig {
-            disabled_builtin_actions: config.disabled_builtin_actions.clone(),
-            disabled_context_bindings: config.disabled_context_bindings.clone(),
-            disabled_chord_actions: config.disabled_chord_actions.clone(),
-        },
-    )
-    .await?;
+    shards.push(encoded(&DisableConfig {
+        disabled_builtin_actions: config.disabled_builtin_actions.clone(),
+        disabled_context_bindings: config.disabled_context_bindings.clone(),
+        disabled_chord_actions: config.disabled_chord_actions.clone(),
+    })?);
 
-    ConfigStore::set(pool, &config.clipboard).await?;
+    shards.push(encoded(&config.clipboard)?);
 
-    Ok(())
+    blink_infra::data::config::set_configs(pool, &shards)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn encoded<T: super::store::ConfigKey>(value: &T) -> Result<(String, String), String> {
+    Ok((
+        T::KEY.to_string(),
+        serde_json::to_string(value).map_err(|e| e.to_string())?,
+    ))
 }
 
 // ── 分项更新函数 ────────────────────────────────────────────────────────────────
 
 pub async fn update_hotkey(pool: &SqlitePool, hotkey: HotkeyConfig) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.hotkey.modifiers = hotkey.modifiers;
-    config.hotkey.key = hotkey.key;
-    config.hotkey.display = hotkey.display;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut HotkeyConfig| {
+        config.modifiers = hotkey.modifiers.clone();
+        config.key = hotkey.key.clone();
+        config.display = hotkey.display.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_tap_threshold(pool: &SqlitePool, threshold: u64) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.tap_threshold = threshold;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut HotkeyConfig| {
+        config.tap_threshold = threshold;
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_grace_period(pool: &SqlitePool, period: u64) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.grace_period = period;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut HotkeyConfig| {
+        config.grace_period = period;
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_auto_start(pool: &SqlitePool, auto_start: bool) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.auto_start = auto_start;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut AppearanceConfig| {
+        config.auto_start = auto_start;
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 /// 0.22.13：更新引导向导已完成版本（完成/跳过向导写 `ONBOARDING_VERSION`，
 /// storage 页「重新显示引导」写 0）。镜像 update_auto_start 模式。
 pub async fn update_onboarding_version(pool: &SqlitePool, version: u32) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.onboarding_version = version;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut AppearanceConfig| {
+        config.onboarding_version = Some(version);
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_language(pool: &SqlitePool, language: String) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.language = language;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut AppearanceConfig| {
+        config.language = language.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.log_level = level;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut AppearanceConfig| {
+        config.log_level = level.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_ai_http_body_log(pool: &SqlitePool, enabled: bool) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.ai_http_body_log = enabled;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut AppearanceConfig| {
+        config.ai_http_body_log = enabled;
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn get_disabled_builtin_actions(pool: &SqlitePool) -> Vec<String> {
@@ -604,9 +629,12 @@ pub async fn update_disabled_builtin_actions(
     let mut normalized = disabled;
     normalized.sort();
     normalized.dedup();
-    let mut config = get_config(pool).await;
-    config.disabled_builtin_actions = normalized;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut DisableConfig| {
+        config.disabled_builtin_actions = normalized.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 #[allow(dead_code)]
@@ -621,9 +649,12 @@ pub async fn update_disabled_context_bindings(
     let mut normalized = disabled;
     normalized.sort();
     normalized.dedup();
-    let mut config = get_config(pool).await;
-    config.disabled_context_bindings = normalized;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut DisableConfig| {
+        config.disabled_context_bindings = normalized.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn get_disabled_chord_actions(pool: &SqlitePool) -> Vec<String> {
@@ -645,9 +676,12 @@ pub async fn update_disabled_chord_actions(
     let mut normalized = disabled;
     normalized.sort();
     normalized.dedup();
-    let mut config = get_config(pool).await;
-    config.disabled_chord_actions = normalized;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut DisableConfig| {
+        config.disabled_chord_actions = normalized.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 #[allow(dead_code)]
@@ -661,19 +695,39 @@ pub async fn update_chord_toggles(
     chord_enabled: bool,
     chord_hint_visible: bool,
 ) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.chord_enabled = chord_enabled;
-    config.chord_hint_visible = chord_hint_visible;
-    save_config(pool, &config).await
+    ConfigStore::update(pool, |config: &mut ChordConfig| {
+        config.chord_enabled = chord_enabled;
+        config.chord_hint_visible = chord_hint_visible;
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn update_chord_bindings(
     pool: &SqlitePool,
     bindings: crate::chord::ChordBindings,
 ) -> Result<(), String> {
-    let mut chord = get_chord_config(pool).await;
-    chord.bindings = bindings;
-    ConfigStore::set(pool, &chord).await
+    update_chord_bindings_checked(pool, bindings, None).await
+}
+
+pub async fn update_chord_bindings_checked(
+    pool: &SqlitePool,
+    bindings: crate::chord::ChordBindings,
+    expected: Option<crate::chord::ChordBindings>,
+) -> Result<(), String> {
+    ConfigStore::update(pool, |chord: &mut ChordConfig| {
+        if expected
+            .as_ref()
+            .is_some_and(|previous| previous != &chord.bindings)
+        {
+            return Err("config_conflict: 快捷键配置已被其他窗口修改，请重新读取后重试".into());
+        }
+        chord.bindings = bindings.clone();
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 // ── 引擎配置（通用 API）─────────────────────────────────────────────────────────
@@ -856,6 +910,84 @@ mod tests {
         assert!(parsed.autosuggest_enabled);
         assert!((parsed.autosuggest_min_score - 0.7).abs() < 1e-9);
         assert_eq!(parsed.autosuggest_tab_key, "Tab");
+    }
+
+    #[tokio::test]
+    async fn concurrent_field_updates_preserve_other_shards_and_fields() {
+        let pool = in_memory_pool().await;
+        save_config(&pool, &AppConfig::default()).await.unwrap();
+        let (auto_start, onboarding, chord, language, theme) = tokio::join!(
+            update_auto_start(&pool, true),
+            update_onboarding_version(&pool, 99),
+            update_chord_toggles(&pool, false, false),
+            update_language(&pool, "en".into()),
+            ConfigStore::update::<AppearanceConfig>(&pool, |cfg| {
+                cfg.theme = "dark".into();
+                Ok(())
+            }),
+        );
+        auto_start.unwrap();
+        onboarding.unwrap();
+        chord.unwrap();
+        language.unwrap();
+        theme.unwrap();
+        let loaded = get_config(&pool).await;
+        assert!(loaded.auto_start);
+        assert_eq!(loaded.onboarding_version, 99);
+        assert_eq!(loaded.theme, "dark");
+        assert_eq!(loaded.language, "en");
+        assert!(!loaded.chord_enabled);
+        assert!(!loaded.chord_hint_visible);
+        assert_eq!(loaded.hotkey.display, "Alt+Space");
+    }
+
+    #[tokio::test]
+    async fn update_preserves_unknown_fields_and_rejects_corrupt_shard() {
+        let pool = in_memory_pool().await;
+        blink_infra::data::config::set_config(
+            &pool,
+            "app.appearance",
+            r#"{"auto_start":false,"future_option":42}"#,
+        )
+        .await
+        .unwrap();
+        update_auto_start(&pool, true).await.unwrap();
+        let raw = blink_infra::data::config::config_value(&pool, "app.appearance")
+            .await
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["future_option"], 42);
+        blink_infra::data::config::set_config(&pool, "app.appearance", "invalid")
+            .await
+            .unwrap();
+        assert!(update_auto_start(&pool, false).await.is_err());
+        assert_eq!(
+            blink_infra::data::config::config_value(&pool, "app.appearance")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_compare_and_set_rejects_other_window_update() {
+        let pool = in_memory_pool().await;
+        let original = crate::chord::ChordBindings::default();
+        let mut first = original.clone();
+        first.chat = crate::chord::ChordBinding {
+            key: "b".into(),
+            ..Default::default()
+        };
+        update_chord_bindings_checked(&pool, first.clone(), Some(original.clone()))
+            .await
+            .unwrap();
+        let error = update_chord_bindings_checked(&pool, original.clone(), Some(original))
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("config_conflict:"));
+        assert_eq!(get_chord_config(&pool).await.bindings, first);
     }
 
     #[tokio::test]

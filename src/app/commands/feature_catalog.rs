@@ -5,7 +5,6 @@
 
 use tauri::Manager;
 
-use crate::domain::event_names::EventNames;
 use crate::domain::feature_catalog::{
     ApplyBindingResult, BindingOp, FeatureCatalogAggregator, FeatureCatalogItem,
     apply_binding_batch,
@@ -77,13 +76,17 @@ pub async fn apply_binding_ops(
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let results = apply_binding_batch(pool, &ops).await;
 
-    // 广播配置变更——前端所有按 key 订阅的模块自动刷新
-    use tauri::Emitter;
-    let _ = app.emit(
-        EventNames::CONFIG_CHANGED,
-        serde_json::json!({ "source": "feature_catalog" }),
-    );
-
+    if results.iter().any(|result| result.success) {
+        crate::app::config::refresh_input_config(&app).await;
+        let config = crate::app::config::get_config(pool).await;
+        if let Some(service) =
+            app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+        {
+            service.update_disabled_builtin_actions(config.disabled_builtin_actions);
+            service.update_disabled_context_bindings(config.disabled_context_bindings);
+        }
+        crate::app::setting_service::emit_changed(&app, "app.disable");
+    }
     Ok(results)
 }
 

@@ -25,6 +25,8 @@
  *   永不进 SQLite / IPC value 序列化路径。
  */
 
+import {withConfigActivity} from "./config-sync.js";
+
 import {invoke} from "./tauri.js";
 
 /**
@@ -33,8 +35,10 @@ import {invoke} from "./tauri.js";
  * @param {*} value - 配置值（类型由 key 决定）
  * @returns {Promise<void>}
  */
-export async function saveConfig(key, value) {
-    return invoke("set_config", {key, value});
+export async function saveConfig(key, value, options = {}) {
+    const args = {key, value};
+    if (Object.hasOwn(options, "expected")) args.expected = options.expected;
+    return withConfigActivity(key, () => invoke("set_config", args));
 }
 
 /**

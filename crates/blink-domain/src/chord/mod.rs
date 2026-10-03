@@ -63,7 +63,7 @@ pub enum GlobalBinding {
 }
 
 /// 单个 chord 动作的键位绑定（0.10.7）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChordBinding {
     /// 主键（与 hotkey 配置同命名：`" "` / `"a"` / `"c"` 等）。
     /// 空字符串表示用动作的 `default_key()` 兜底。
@@ -111,7 +111,7 @@ fn default_alt_modifiers() -> Vec<String> {
 /// **0.11 review W3 修复**：`semantic` 从 `ChordSemantic` 改为 `Option<ChordSemantic>`，
 /// 解决了"无法区分用户显式设 Tap 与未设置"的歧义——voice_input 重绑 key 后不再
 /// 静默从 Hold 降级 Tap。`None` 明确表示"未设置，走 default"。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChordBindings {
     #[serde(default)]
     pub voice_input: ChordBinding,

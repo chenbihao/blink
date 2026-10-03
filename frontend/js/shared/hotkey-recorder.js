@@ -1,5 +1,7 @@
 //! 快捷键录制握手：后端 recorder armed 后才通知调用方展示“正在录制”。
 
+import {withConfigActivity} from "./config-sync.js";
+
 import {EVENTS} from "./event-names.js";
 import {invoke, listen} from "./tauri.js";
 
@@ -10,7 +12,11 @@ let nextRequestId = 0;
  * @param {() => void} onReady 后端 recorder armed 后调用。
  * @returns {Promise<{modifiers: string[], key: string, display: string}>}
  */
-export async function recordHotkey(onReady) {
+export function recordHotkey(onReady) {
+    return withConfigActivity("hotkey_recording", () => recordHotkeyImpl(onReady));
+}
+
+async function recordHotkeyImpl(onReady) {
     const requestId = `${Date.now()}-${++nextRequestId}`;
     const startedAt = performance.now();
     console.info("[hotkey-recorder] requested", {requestId});

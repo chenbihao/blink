@@ -141,6 +141,8 @@ function makeElement(tag) {
 // Mock document
 const chordContainer = makeElement("div");
 chordContainer.id = "chord-actions-container";
+const siblingNodes = new Map();
+chordContainer.before = (node) => siblingNodes.set(node.id, node);
 
 globalThis.document = {
     createElement: makeElement,
@@ -149,7 +151,7 @@ globalThis.document = {
     body: makeElement("body"),
     getElementById(id) {
         if (id === "chord-actions-container") return chordContainer;
-        return null;
+        return siblingNodes.get(id) ?? null;
     },
     querySelector(sel) {
         if (sel && sel.startsWith(".chord-global-status")) return null;
@@ -179,6 +181,7 @@ Object.defineProperty(globalThis, "navigator", {
 // Mock invoke — 用于 chord.js 的 saveGlobalBinding
 let mockConfig = {};
 let mockSaveConfigShouldFail = false;
+let mockBeforeSave = null;
 let mockRetry = () => Promise.resolve({actionId: "screenshot", registered: false, reason: "occupied"});
 
 // set_config 需要写回 mockConfig，以模拟后端持久化（串行化测试需要）
@@ -218,6 +221,7 @@ globalThis.window.__TAURI__ = {
                 if (mockSaveConfigShouldFail) {
                     return Promise.reject({code: "conflict", message: "快捷键被占用", retryable: false});
                 }
+                if (mockBeforeSave) return Promise.resolve(mockBeforeSave(args)).then(() => setMockConfigValue(args.key, args.value));
                 setMockConfigValue(args?.key, args?.value);
                 return Promise.resolve(null);
             }
@@ -385,6 +389,44 @@ describe("saveGlobalBinding — revision token 竞态防护", () => {
             {mode: "follow_chord"},
             "screenshot global 保留第二个写入",
         );
+    });
+
+    test("在途旧保存成功也推进 confirmed，后一笔基于真实成功状态校验", async () => {
+        __test__.resetChordBindingsWriteChain();
+        mockConfig = {chord_bindings: {chat: {key: "a", modifiers: ["alt"]}}};
+        __test__.replaceConfirmedGlobalBindings(mockConfig.chord_bindings);
+        mockSaveConfigShouldFail = false;
+        let finishFirst, calls = 0;
+        mockBeforeSave = (args) => {
+            assert.deepEqual(args.expected, mockConfig.chord_bindings);
+            if (++calls === 1) return new Promise((resolve) => { finishFirst = resolve; });
+        };
+        try {
+            const first = __test__.saveGlobalBinding("chat", {mode: "follow_chord"});
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const second = __test__.saveGlobalBinding("chat", {mode: "custom", modifiers: [], key: "f1"});
+            finishFirst();
+            assert.deepEqual(await Promise.all([first, second]), [false, true]);
+            assert.deepEqual(mockConfig.chord_bindings.chat.global, {mode: "custom", modifiers: [], key: "f1"});
+        } finally { mockBeforeSave = null; }
+    });
+
+    test("用户所见绑定落后于另一窗口时，返回冲突并保留新绑定", async () => {
+        __test__.resetChordBindingsWriteChain();
+        const visible = {chat: {key: "a", modifiers: ["alt"], global: {mode: "follow_chord"}}};
+        __test__.replaceConfirmedGlobalBindings(visible);
+        mockConfig = {chord_bindings: structuredClone(visible)};
+        mockConfig.chord_bindings.chat.global = {mode: "custom", modifiers: [], key: "f1"};
+        mockSaveConfigShouldFail = false;
+        mockBeforeSave = (args) => {
+            assert.deepEqual(args.expected, visible);
+            throw {code: "config_conflict", message: "绑定已被其他窗口修改，请重新读取后重试"};
+        };
+        try {
+            assert.equal(await __test__.saveGlobalBinding("chat", null), false);
+            assert.equal(mockConfig.chord_bindings.chat.global.key, "f1");
+            assert.match(siblingNodes.get("chord-save-error").textContent, /重新读取/);
+        } finally { mockBeforeSave = null; }
     });
 
     test("初始后端配置会建立 confirmed 回滚快照", () => {

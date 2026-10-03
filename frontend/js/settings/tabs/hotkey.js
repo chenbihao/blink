@@ -294,7 +294,7 @@ function renderCheatsheet(cfg) {
  * （拆自原 settings.js applyConfigToUI 的 hotkey 段）
  * @param {Object} cfg - get_config 返回的配置对象
  */
-function applyHotkeyConfig(cfg) {
+export function applyHotkeyConfig(cfg) {
     if (!cfg) return;
 
     // 快捷键显示
@@ -302,6 +302,8 @@ function applyHotkeyConfig(cfg) {
     if (hotkeyBtn && cfg.hotkey) {
         renderHotkeyInto(hotkeyBtn, cfg.hotkey.display || "Alt+Space");
     }
+
+    renderCheatsheet(cfg);
 
     // tap 阈值
     const tapSlider = document.getElementById("tap-threshold");

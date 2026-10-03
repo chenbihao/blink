@@ -28,6 +28,64 @@ pub trait ConfigKey:
 pub struct ConfigStore;
 
 impl ConfigStore {
+    pub async fn get_checked<T: ConfigKey>(pool: &SqlitePool) -> Result<T, String> {
+        match blink_infra::data::config::config_value(pool, T::KEY)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(raw) => {
+                serde_json::from_str(&raw).map_err(|e| format!("配置 {} 无效: {e}", T::KEY))
+            }
+            None => Ok(T::default()),
+        }
+    }
+    /// 只修改目标分片。冲突重读最新值再应用字段变更，保留未知字段。
+    /// 闭包可能重复调用，必须无外部副作用；损坏的分片禁止默认值回写。
+    pub async fn update<T: ConfigKey>(
+        pool: &SqlitePool,
+        update: impl Fn(&mut T) -> Result<(), String>,
+    ) -> Result<T, String> {
+        for _ in 0..16 {
+            let previous = blink_infra::data::config::config_value(pool, T::KEY)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut current: T = match previous.as_deref() {
+                Some(raw) => serde_json::from_str(raw)
+                    .map_err(|e| format!("配置 {} 无效，未写入: {e}", T::KEY))?,
+                None => T::default(),
+            };
+            update(&mut current)?;
+            let mut next = previous
+                .as_deref()
+                .map(serde_json::from_str::<serde_json::Value>)
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|| serde_json::json!({}));
+            let fields = serde_json::to_value(&current).map_err(|e| e.to_string())?;
+            if let (Some(target), Some(fields)) = (next.as_object_mut(), fields.as_object()) {
+                target.extend(fields.clone());
+            } else {
+                next = fields;
+            }
+            let json = serde_json::to_string(&next).map_err(|e| e.to_string())?;
+            if blink_infra::data::config::compare_set_config(
+                pool,
+                T::KEY,
+                previous.as_deref(),
+                &json,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            {
+                return Ok(current);
+            }
+        }
+        Err(format!(
+            "config_conflict: 配置 {} 已变化，请重新读取后重试",
+            T::KEY
+        ))
+    }
+
     /// 读取配置分片。不存在或解析失败返回 `T::default()`。
     #[allow(dead_code)]
     pub async fn get<T: ConfigKey>(pool: &SqlitePool) -> T {

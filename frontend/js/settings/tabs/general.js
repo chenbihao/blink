@@ -4,8 +4,9 @@
  */
 
 import {applyTheme} from "../../shared/theme.js";
-import {applyI18n, setLang} from "../../i18n/index.js";
+import {applyI18n, setLang, t} from "../../i18n/index.js";
 import {buildChordTogglesPayload, saveConfig} from "../../shared/config-keys.js";
+import {commandErrorText} from "../../shared/tauri.js";
 import {getCurrentConfig} from "../shared/state.js";
 
 /**
@@ -20,12 +21,23 @@ export function initGeneralTab(cfg) {
     const autoStartCheckbox = document.getElementById("auto-start");
     if (autoStartCheckbox) {
         autoStartCheckbox.addEventListener("change", async (e) => {
+            const desired = e.target.checked;
+            const expected = getCurrentConfig()?.auto_start === true;
+            autoStartCheckbox.disabled = true;
+            autoStartCheckbox.setAttribute("aria-busy", "true");
+            showAutoStartStatus(t("config.auto_start.pending"));
             try {
-                await saveConfig("auto_start", e.target.checked);
+                await saveConfig("auto_start", desired, {expected});
                 const currentConfig = getCurrentConfig();
-                if (currentConfig) currentConfig.auto_start = e.target.checked;
+                if (currentConfig) currentConfig.auto_start = desired;
+                showAutoStartStatus(currentConfig?.auto_start_registration_skipped ? t("config.auto_start.debug") : "");
             } catch (err) {
+                autoStartCheckbox.checked = expected;
+                showAutoStartStatus(commandErrorText(err, t("config.save_failed")), true);
                 console.error("update_auto_start failed:", err);
+            } finally {
+                autoStartCheckbox.disabled = false;
+                autoStartCheckbox.removeAttribute("aria-busy");
             }
         });
     }
@@ -276,7 +288,8 @@ function initChordToggles() {
         const chordEnabled = document.getElementById("chord-enabled")?.checked === true;
         const chordHintVisible = document.getElementById("chord-hint-visible")?.checked === true;
         try {
-            await saveConfig("chord_toggles", buildChordTogglesPayload(chordEnabled, chordHintVisible));
+            const last = getCurrentConfig();
+            await saveConfig("chord_toggles", buildChordTogglesPayload(chordEnabled, chordHintVisible), {expected: buildChordTogglesPayload(last?.chord_enabled, last?.chord_hint_visible !== false)});
             const currentConfig = getCurrentConfig();
             if (currentConfig) {
                 currentConfig.chord_enabled = chordEnabled;
@@ -323,7 +336,7 @@ function initChordToggles() {
  * （拆自原 settings.js applyConfigToUI 的 general 字段段；setLang/applyTheme 由 index.js 统一处理）
  * @param {Object} cfg - get_config 返回的配置对象
  */
-function applyGeneralConfig(cfg) {
+export function applyGeneralConfig(cfg) {
     if (!cfg) return;
 
     // 主题 / 语言 / 日志级别
@@ -337,6 +350,8 @@ function applyGeneralConfig(cfg) {
     // 自动启动（false 也是有效值，用 !== undefined 守卫）
     const autoStart = document.getElementById("auto-start");
     if (autoStart && cfg.auto_start !== undefined) autoStart.checked = cfg.auto_start;
+
+    if (cfg.auto_start_registration_skipped && !autoStart?.disabled && document.getElementById("auto-start-status")?.dataset?.failed !== "true") showAutoStartStatus(t("config.auto_start.debug"));
 
     // 搜索历史
     const shEnabled = document.getElementById("search-history-enabled");
@@ -387,4 +402,21 @@ function applyGeneralConfig(cfg) {
     if (chordEnabled) chordEnabled.checked = cfg.chord_enabled === true;
     const chordHint = document.getElementById("chord-hint-visible");
     if (chordHint) chordHint.checked = cfg.chord_hint_visible !== false;
+}
+
+function showAutoStartStatus(message, error = false) {
+    const checkbox = document.getElementById("auto-start");
+    if (!checkbox) return;
+    let status = document.getElementById("auto-start-status");
+    if (!status) {
+        status = document.createElement("div");
+        status.id = "auto-start-status";
+        status.className = "setting-hint";
+        status.setAttribute("role", "status");
+        checkbox.closest(".setting-row")?.after(status);
+    }
+    status.textContent = message;
+    status.dataset.failed = String(error);
+    status.hidden = !message;
+    status.classList.toggle("is-error", error);
 }

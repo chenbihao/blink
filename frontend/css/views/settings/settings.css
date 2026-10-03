@@ -420,6 +420,11 @@ a.external-link:hover {
     line-height: var(--leading-normal);
 }
 
+#auto-start-status.is-error,
+#chord-save-error {
+    color: var(--red);
+}
+
 .setting-row input[type="range"] {
     width: 200px;
     accent-color: var(--accent);

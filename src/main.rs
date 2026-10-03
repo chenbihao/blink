@@ -348,13 +348,16 @@ fn main() {
             {
                 use tauri_plugin_autostart::ManagerExt;
                 let manager = app.autolaunch();
-                let _ = if cfg!(debug_assertions) {
+                let result = if cfg!(debug_assertions) {
                     manager.disable()
                 } else if app_config.auto_start {
                     manager.enable()
                 } else {
                     manager.disable()
                 };
+                if let Err(error) = result {
+                    tracing::warn!(%error, desired = app_config.auto_start, "启动时自启动状态同步失败");
+                }
             }
 
             // 主窗口启动即隐藏；注册焦点事件

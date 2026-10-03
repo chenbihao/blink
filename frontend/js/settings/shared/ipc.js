@@ -4,16 +4,14 @@
  */
 
 import {invoke} from "../../shared/tauri.js";
-import {setCurrentConfig} from "./state.js";
+import {saveConfig} from "../../shared/config-keys.js";
 
 /**
- * 加载配置并更新共享状态
+ * 加载配置（提交由入口的刷新版本检查负责）
  * @returns {Promise<Object>} 配置对象
  */
 export async function loadConfig() {
-    const cfg = await invoke("get_config");
-    setCurrentConfig(cfg);
-    return cfg;
+    return invoke("get_config");
 }
 
 /**
@@ -22,7 +20,7 @@ export async function loadConfig() {
  * @param {*} value - 配置值
  */
 export async function saveConfigToBackend(key, value) {
-    await invoke("set_config", {key, value});
+    await saveConfig(key, value);
 }
 
 /**

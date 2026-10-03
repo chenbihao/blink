@@ -13,10 +13,12 @@
  */
 
 import {commandErrorText, getCurrentWindow, invoke, listen} from "./shared/tauri.js";
-import {applyI18nFromConfig, onLangChange, t} from "./i18n/index.js";
+import {applyI18n, getLang, onLangChange, setLang, t} from "./i18n/index.js";
 import {normalizeCombo, renderCombo} from "./shared/kbd.js";
 import {EVENTS} from "./shared/event-names.js";
 import {canRetryGlobalHotkey, configuredGlobalHotkey, globalHotkeyStatusTextKey} from "./shared/global-hotkey.js";
+import {applyTheme} from "./shared/theme.js";
+import {affectsSharedConfig, connectConfigActivity, createConfigRefresher, withConfigActivity} from "./shared/config-sync.js";
 import {buildChordTogglesPayload, saveConfig} from "./shared/config-keys.js";
 import {
     estimateEtaMs,
@@ -109,6 +111,7 @@ const chordGlobalRevisions = new Map();
 const confirmedChordGlobal = new Map();
 let globalHotkeyStatuses = new Map();
 let globalStatusRevision = 0;
+let disabledChordActions = new Set();
 const globalRetries = new Set();
 /** OCR 引导 UI 状态：idle | checking | not-installed | installing | ready | failed | unavailable。 */
 let ocrState = "idle";
@@ -267,9 +270,9 @@ function updateGlobalHotkeyStatusDom() {
         const pending = globalRetries.has(id);
         const text = document.createElement("span");
         text.className = status?.registered ? "is-ok" : status ? "is-warn" : "";
-        text.textContent = t(pending ? "chord.global.retrying" : globalHotkeyStatusTextKey(status));
+        text.textContent = t(disabledChordActions.has(id) ? "config.chord.disabled" : pending ? "chord.global.retrying" : globalHotkeyStatusTextKey(status));
         el.appendChild(text);
-        if (canRetryGlobalHotkey(status)) {
+        if (!disabledChordActions.has(id) && canRetryGlobalHotkey(status)) {
             const retry = document.createElement("button");
             retry.type = "button";
             retry.className = "btn-small";
@@ -355,7 +358,7 @@ function renderToggles() {
         label.textContent = t(item.labelKey);
         const desc = document.createElement("span");
         desc.className = "welcome-toggle-desc";
-        desc.textContent = t(item.descKey);
+        desc.textContent = t(item.id === "auto_start" && autoStartRegistrationSkipped ? "config.auto_start.debug" : item.descKey);
         text.appendChild(label);
         text.appendChild(desc);
 
@@ -363,7 +366,12 @@ function renderToggles() {
         wrap.className = "welcome-switch";
         const input = document.createElement("input");
         input.type = "checkbox";
+        input.dataset.toggleId = item.id;
         input.checked = toggleValues[item.id] === true;
+        if (item.id === "auto_start") {
+            input.disabled = autoStartPending;
+            if (autoStartPending) desc.textContent = t("config.auto_start.pending");
+        }
         input.addEventListener("change", () => applyToggle(item.id, input.checked));
         const slider = document.createElement("span");
         slider.className = "welcome-switch-slider";
@@ -381,11 +389,21 @@ function renderToggles() {
  *  chord_toggles 写入通过 chordTogglesWriteChain 串行化，
  *  确保并发切换不会导致后端覆盖（last-writer-wins 数据丢失）。 */
 async function applyToggle(id, enabled) {
+    if (id === "auto_start" && autoStartPending) return;
     const prevValue = toggleValues[id];
+    if (id === "auto_start") {
+        autoStartPending = true;
+        const input = document.querySelector('[data-toggle-id="auto_start"]');
+        if (input) {
+            input.disabled = true; input.setAttribute("aria-busy", "true");
+            const desc = input.closest(".welcome-toggle-row")?.querySelector(".welcome-toggle-desc");
+            if (desc) desc.textContent = t("config.auto_start.pending");
+        }
+    }
     toggleValues[id] = enabled;
     try {
         if (id === "auto_start") {
-            await invoke("set_config", {key: "auto_start", value: enabled});
+            await saveConfig("auto_start", enabled, {expected: prevValue === true});
         } else if (id === "chord_enabled") {
             // chord_toggles 是结构体分片：通过串行化链写入，
             // 每次都从最新 toggleValues 构造 payload，避免并发覆盖 chord_hint_visible
@@ -397,7 +415,7 @@ async function applyToggle(id, enabled) {
             await new Promise((resolve, reject) => {
                 chordTogglesWriteChain = chordTogglesWriteChain.then(async () => {
                     try {
-                        await invoke("set_config", {key: "chord_toggles", value: payload});
+                        await saveConfig("chord_toggles", payload, {expected: buildChordTogglesPayload(chordToggleConfirmed.chord_enabled, chordToggleConfirmed.chord_hint_visible)});
                         resolve();
                     } catch (err) {
                         reject(err);
@@ -425,6 +443,16 @@ async function applyToggle(id, enabled) {
         renderToggles();
         // 向用户显示可理解的错误
         showWelcomeError(commandErrorText(e, t("welcome.error.save_failed")));
+    } finally {
+        if (id === "auto_start") {
+            autoStartPending = false;
+            const input = document.querySelector('[data-toggle-id="auto_start"]');
+            if (input) {
+                input.disabled = false; input.removeAttribute("aria-busy");
+                const desc = input.closest(".welcome-toggle-row")?.querySelector(".welcome-toggle-desc");
+                if (desc) desc.textContent = t(autoStartRegistrationSkipped ? "config.auto_start.debug" : TOGGLES.find((item) => item.id === "auto_start").descKey);
+            }
+        }
     }
 }
 
@@ -466,7 +494,11 @@ function setGlobalRowVisual(row, isOn) {
  *  串行执行（并发 read-modify-write 会 last-writer-wins 丢其他动作的字段）；
  *  每个动作独立 revision，被新请求取代的旧响应不更新 UI。
  *  失败时从 confirmedChordGlobal 真源回滚，不重新 get_config。 */
-async function applyChordGlobal(id, enabled) {
+function applyChordGlobal(id, enabled) {
+    return withConfigActivity("chord_bindings", () => applyChordGlobalImpl(id, enabled));
+}
+
+async function applyChordGlobalImpl(id, enabled) {
     const rev = (chordGlobalRevisions.get(id) ?? 0) + 1;
     chordGlobalRevisions.set(id, rev);
     chordGlobalValues[id] = enabled;
@@ -480,11 +512,16 @@ async function applyChordGlobal(id, enabled) {
                 const fullCfg = await invoke("get_config");
                 if (rev !== chordGlobalRevisions.get(id)) return resolve("superseded");
                 const next = applyChordGlobalToBindings(fullCfg?.chord_bindings, id, enabled);
-                await saveConfig("chord_bindings", next);
-                if (rev !== chordGlobalRevisions.get(id)) return resolve("superseded");
-                // 保存成功：推进已确认状态与本地快照（后续渲染按实际键位显示）
+                const expected = JSON.parse(JSON.stringify(fullCfg?.chord_bindings ?? {}));
+                const visible = chordBindingsConfig[id]?.global;
+                if (expected[id] && visible) expected[id].global = visible;
+                else if (expected[id]) delete expected[id].global;
+                else if (visible) expected[id] = {key: "", modifiers: ["alt"], global: visible};
+                await saveConfig("chord_bindings", next, {expected});
+                // 已落库的成功必须推进 confirmed，即使 UI revision 已更新。
                 confirmedChordGlobal.set(id, enabled);
                 chordBindingsConfig = next;
+                if (rev !== chordGlobalRevisions.get(id)) return resolve("superseded");
                 resolve("ok");
             } catch (err) {
                 failure = err;
@@ -767,40 +804,57 @@ async function finish() {
     getCurrentWindow()?.close();
 }
 
+let autoStartPending = false;
+let autoStartRegistrationSkipped = false;
+let welcomeReady = false;
+let welcomeConfigInitialized = false;
+let welcomeConfigSnapshot = "";
+const welcomeConfigRefresher = createConfigRefresher({
+    read: () => invoke("get_config"),
+    apply: applyWelcomeConfig,
+    onError: (error) => { console.error("welcome config refresh failed:", error); showWelcomeError(commandErrorText(error, t("config.save_failed"))); },
+});
+connectConfigActivity(welcomeConfigRefresher);
+
+function applyWelcomeConfig(cfg) {
+    MAIN_SHORTCUT.combo = cfg.hotkey?.display || "Alt+Space";
+    toggleValues = {auto_start: cfg.auto_start === true, chord_enabled: cfg.chord_enabled === true, chord_hint_visible: cfg.chord_hint_visible !== false};
+    autoStartRegistrationSkipped = cfg.auto_start_registration_skipped === true;
+    chordToggleConfirmed = {chord_enabled: toggleValues.chord_enabled, chord_hint_visible: toggleValues.chord_hint_visible};
+    chordBindingsConfig = cfg.chord_bindings ?? {};
+    disabledChordActions = new Set(cfg.disabled_chord_actions ?? []);
+    for (const {id} of CHORD_SHORTCUTS) {
+        chordGlobalRevisions.set(id, (chordGlobalRevisions.get(id) ?? 0) + 1);
+        const enabled = chordBindingsConfig[id]?.global != null;
+        chordGlobalValues[id] = enabled;
+        confirmedChordGlobal.set(id, enabled);
+    }
+    applyTheme(cfg.theme || "auto");
+    if (!welcomeConfigInitialized || (cfg.language && cfg.language !== getLang())) {
+        if (cfg.language) setLang(cfg.language);
+        applyI18n();
+    }
+    welcomeConfigInitialized = true;
+    const snapshot = JSON.stringify([MAIN_SHORTCUT.combo, toggleValues, chordBindingsConfig, cfg.disabled_chord_actions, autoStartRegistrationSkipped]);
+    if (welcomeReady && snapshot !== welcomeConfigSnapshot) { renderShortcuts(); renderToggles(); }
+    welcomeConfigSnapshot = snapshot;
+}
+
 // ── 初始化 ────────────────────────────────────────────────────────────────
 
 async function init() {
-    await applyI18nFromConfig();
+    await listen(EVENTS.CONFIG_CHANGED, (event) => {
+        if (affectsSharedConfig(event.payload)) welcomeConfigRefresher.refresh();
+    }).catch((error) => console.warn("welcome config listener unavailable; focus will reload:", error));
+    window.addEventListener("focus", () => welcomeConfigRefresher.refresh());
+    welcomeConfigRefresher.refresh();
+    await welcomeConfigRefresher.ready();
 
     await listen(EVENTS.GLOBAL_HOTKEY_STATUS, (event) => {
         ++globalStatusRevision;
         globalHotkeyStatuses = new Map((Array.isArray(event.payload) ? event.payload : []).map((s) => [s.actionId, s]));
         updateGlobalHotkeyStatusDom();
     }).catch((error) => console.error("welcome: listen global hotkey status failed:", error));
-
-    // 读取开关初始值（get_config 一次拿全量，向导会话内够用）
-    try {
-        const cfg = await invoke("get_config");
-        MAIN_SHORTCUT.combo = cfg.hotkey?.display || "Alt+Space";
-        toggleValues = {
-            auto_start: cfg.auto_start === true,
-            chord_enabled: cfg.chord_enabled === true,
-            chord_hint_visible: cfg.chord_hint_visible === false ? false : true,
-        };
-        chordToggleConfirmed = {
-            chord_enabled: toggleValues.chord_enabled,
-            chord_hint_visible: toggleValues.chord_hint_visible,
-        };
-        // 第 1 步全局快捷键开关初值（chord_bindings.global 字段存在即开启）
-        chordBindingsConfig = cfg.chord_bindings ?? {};
-        for (const {id} of CHORD_SHORTCUTS) {
-            const enabled = chordBindingsConfig[id]?.global != null;
-            chordGlobalValues[id] = enabled;
-            confirmedChordGlobal.set(id, enabled);
-        }
-    } catch (e) {
-        console.error("welcome: get_config failed:", e);
-    }
 
     try {
         const revision = globalStatusRevision;
@@ -812,6 +866,7 @@ async function init() {
         console.error("welcome: get global hotkey statuses failed:", error);
     }
 
+    welcomeReady = true;
     renderShortcuts();
     renderToggles();
     renderOcrStatus();

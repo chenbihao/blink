@@ -1,5 +1,9 @@
 /** English dictionary. Flat dotted keys, must align with zh.js. */
 export const en = {
+    "config.auto_start.pending": "Saving startup preference…",
+    "config.auto_start.debug": "Development builds save this preference without registering system startup. Release builds apply it.",
+    "config.save_failed": "Save failed. Reload the configuration and retry.",
+    "config.chord.disabled": "This feature is disabled; its global shortcut is not registered.",
     // ── Sidebar tabs ──
     "tab.general": "General",
     "tab.hotkey": "Hotkey",

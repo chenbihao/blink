@@ -6,9 +6,13 @@
 //! 现有调用点（`history::get_config` 等）无需改动。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use sqlx::SqlitePool;
+
+static CONFIG_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 // ── 内存缓存 ──────────────────────────────────────────────────────────────
 //
@@ -27,10 +31,10 @@ fn config_cache() -> &'static RwLock<HashMap<String, String>> {
 
 /// 获取配置值。
 pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
+    let generation = CACHE_GENERATION.load(Ordering::Acquire);
     // 生产环境：先查内存缓存（隔离模式跳过——多 pool 并行测试会互相污染）。
     // 0.25.1 crate 化：cfg(not(test)) 对依赖 crate 失效，改运行时开关。
-    if crate::runtime_mode::is_production()
-    {
+    if crate::runtime_mode::is_production() {
         if let Ok(cache) = config_cache().read()
             && let Some(val) = cache.get(key)
         {
@@ -44,10 +48,11 @@ pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
         .await
         .ok()??;
     // 回填缓存
-    if crate::runtime_mode::is_production()
-    {
+    if crate::runtime_mode::is_production() {
         if let Ok(mut cache) = config_cache().write() {
-            cache.insert(key.to_string(), row.0.clone());
+            if generation == CACHE_GENERATION.load(Ordering::Acquire) {
+                cache.insert(key.to_string(), row.0.clone());
+            }
         }
     }
     Some(row.0)
@@ -55,6 +60,7 @@ pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
 
 /// 设置配置值（存在则更新，不存在则插入）。
 pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
         "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3)
@@ -65,9 +71,9 @@ pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(),
     .bind(now)
     .execute(pool)
     .await?;
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
     // 同步更新缓存
-    if crate::runtime_mode::is_production()
-    {
+    if crate::runtime_mode::is_production() {
         if let Ok(mut cache) = config_cache().write() {
             cache.insert(key.to_string(), value.to_string());
         }
@@ -77,15 +83,81 @@ pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(),
 
 /// 删除配置值（0.8.8 §8.7：`AppConfig` 分片迁移完毕后清理旧 `app_config` 单 key）。
 pub async fn delete_config(pool: &SqlitePool, key: &str) -> Result<(), sqlx::Error> {
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     sqlx::query("DELETE FROM config WHERE key = ?1")
         .bind(key)
         .execute(pool)
         .await?;
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
     // 移除缓存
-    if crate::runtime_mode::is_production()
-    {
+    if crate::runtime_mode::is_production() {
         if let Ok(mut cache) = config_cache().write() {
             cache.remove(key);
+        }
+    }
+    Ok(())
+}
+
+/// 从库读取更新基线；不将读取失败当作不存在，也不消费可能过期的缓存。
+pub async fn config_value(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM config WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// 条件写入与缓存更新同序；跨进程写入也由 SQL expected-value 检查保护。
+pub async fn compare_set_config(
+    pool: &SqlitePool,
+    key: &str,
+    expected: Option<&str>,
+    value: &str,
+) -> Result<bool, sqlx::Error> {
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+    let now = chrono::Utc::now().timestamp();
+    let result = if let Some(expected) = expected {
+        sqlx::query("UPDATE config SET value = ?1, updated_at = ?2 WHERE key = ?3 AND value = ?4")
+            .bind(value)
+            .bind(now)
+            .bind(key)
+            .bind(expected)
+            .execute(pool)
+            .await?
+    } else {
+        sqlx::query("INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO NOTHING")
+            .bind(key).bind(value).bind(now).execute(pool).await?
+    };
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    if crate::runtime_mode::is_production() {
+        if let Ok(mut cache) = config_cache().write() {
+            cache.insert(key.to_string(), value.to_string());
+        }
+    }
+    Ok(true)
+}
+
+/// 明确的全量保存（迁移/重置）一次事务提交，失败不留下部分分片。
+pub async fn set_configs(
+    pool: &SqlitePool,
+    values: &[(String, String)],
+) -> Result<(), sqlx::Error> {
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+    let mut tx = pool.begin().await?;
+    for (key, value) in values {
+        sqlx::query("INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3")
+            .bind(key).bind(value).bind(chrono::Utc::now().timestamp()).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    if crate::runtime_mode::is_production() {
+        if let Ok(mut cache) = config_cache().write() {
+            for (key, value) in values {
+                cache.insert(key.clone(), value.clone());
+            }
         }
     }
     Ok(())
@@ -198,6 +270,53 @@ mod tests {
         .await
         .expect("create config table");
         pool
+    }
+
+    #[tokio::test]
+    async fn compare_set_rejects_stale_and_missing_baselines() {
+        let pool = in_memory_pool().await;
+        assert!(
+            compare_set_config(&pool, "key", None, "first")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !compare_set_config(&pool, "key", None, "lost")
+                .await
+                .unwrap()
+        );
+        assert!(
+            compare_set_config(&pool, "key", Some("first"), "second")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !compare_set_config(&pool, "key", Some("first"), "lost")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            config_value(&pool, "key").await.unwrap().as_deref(),
+            Some("second")
+        );
+    }
+
+    #[tokio::test]
+    async fn full_save_rolls_back_every_shard_on_failure() {
+        let pool = in_memory_pool().await;
+        set_config(&pool, "appearance", "original").await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_chord BEFORE INSERT ON config WHEN NEW.key = 'chord' BEGIN SELECT RAISE(ABORT, 'rejected'); END")
+            .execute(&pool).await.unwrap();
+        let values = vec![
+            ("appearance".into(), "changed".into()),
+            ("chord".into(), "bad".into()),
+        ];
+        assert!(set_configs(&pool, &values).await.is_err());
+        assert_eq!(
+            config_value(&pool, "appearance").await.unwrap().as_deref(),
+            Some("original")
+        );
+        assert!(config_value(&pool, "chord").await.unwrap().is_none());
     }
 
     #[tokio::test]

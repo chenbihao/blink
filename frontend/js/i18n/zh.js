@@ -1,5 +1,9 @@
 /** 中文字典。扁平点分 key，与 en.js 必须对齐。 */
 export const zh = {
+    "config.auto_start.pending": "正在保存自启动设置…",
+    "config.auto_start.debug": "开发版本仅保存偏好，不注册系统自启动；正式版本将应用此设置。",
+    "config.save_failed": "保存失败，请重新读取配置后重试。",
+    "config.chord.disabled": "此功能已禁用，全局快捷键暂不注册。",
     // ── 侧边 Tab ──
     "tab.general": "通用",
     "tab.hotkey": "快捷键",
