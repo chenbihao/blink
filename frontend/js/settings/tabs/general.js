@@ -7,6 +7,7 @@ import {applyTheme} from "../../shared/theme.js";
 import {applyI18n, setLang, t} from "../../i18n/index.js";
 import {buildChordTogglesPayload, saveConfig} from "../../shared/config-keys.js";
 import {commandErrorText} from "../../shared/tauri.js";
+import {withConfigActivity} from "../../shared/config-sync.js";
 import {getCurrentConfig} from "../shared/state.js";
 
 /**
@@ -284,26 +285,38 @@ function initAutosuggestion() {
  * 初始化 Chord 总控设置
  */
 function initChordToggles() {
-    async function saveChordToggles() {
+    let writeChain = Promise.resolve();
+    let revision = 0;
+    function saveChordToggles() {
+        const currentRevision = ++revision;
         const chordEnabled = document.getElementById("chord-enabled")?.checked === true;
         const chordHintVisible = document.getElementById("chord-hint-visible")?.checked === true;
-        try {
-            const last = getCurrentConfig();
-            await saveConfig("chord_toggles", buildChordTogglesPayload(chordEnabled, chordHintVisible), {expected: buildChordTogglesPayload(last?.chord_enabled, last?.chord_hint_visible !== false)});
-            const currentConfig = getCurrentConfig();
-            if (currentConfig) {
-                currentConfig.chord_enabled = chordEnabled;
-                currentConfig.chord_hint_visible = chordHintVisible;
-            }
-        } catch (err) {
-            // 回滚 checkbox 到最后一次后端已确认状态
-            const currentConfig = getCurrentConfig();
-            const ce = document.getElementById("chord-enabled");
-            const ch = document.getElementById("chord-hint-visible");
-            if (ce) ce.checked = currentConfig?.chord_enabled === true;
-            if (ch) ch.checked = currentConfig?.chord_hint_visible !== false;
-            console.error("update_chord_toggles failed:", err);
-        }
+        // 排队期间也保护本地意图；下一笔 CAS 使用上一笔已确认的基线。
+        return withConfigActivity("chord_toggles", () => {
+            writeChain = writeChain.then(async () => {
+                try {
+                    const last = getCurrentConfig();
+                    await saveConfig("chord_toggles", buildChordTogglesPayload(chordEnabled, chordHintVisible), {expected: buildChordTogglesPayload(last?.chord_enabled, last?.chord_hint_visible !== false)});
+                    const currentConfig = getCurrentConfig();
+                    if (currentConfig) {
+                        currentConfig.chord_enabled = chordEnabled;
+                        currentConfig.chord_hint_visible = chordHintVisible;
+                    }
+                    if (currentRevision === revision) showChordToggleStatus("");
+                } catch (err) {
+                    console.error("update_chord_toggles failed:", err);
+                    if (currentRevision !== revision) return;
+                    // 回滚 checkbox 到最后一次后端已确认状态。
+                    const currentConfig = getCurrentConfig();
+                    const ce = document.getElementById("chord-enabled");
+                    const ch = document.getElementById("chord-hint-visible");
+                    if (ce) ce.checked = currentConfig?.chord_enabled === true;
+                    if (ch) ch.checked = currentConfig?.chord_hint_visible !== false;
+                    showChordToggleStatus(commandErrorText(err, t("config.save_failed")));
+                }
+            });
+            return writeChain;
+        });
     }
 
     async function saveClipboardEnabled() {
@@ -405,12 +418,20 @@ export function applyGeneralConfig(cfg) {
 }
 
 function showAutoStartStatus(message, error = false) {
-    const checkbox = document.getElementById("auto-start");
+    showSettingStatus("auto-start", "auto-start-status", message, error);
+}
+
+function showChordToggleStatus(message) {
+    showSettingStatus("chord-enabled", "chord-toggle-status", message, !!message);
+}
+
+function showSettingStatus(controlId, statusId, message, error) {
+    const checkbox = document.getElementById(controlId);
     if (!checkbox) return;
-    let status = document.getElementById("auto-start-status");
+    let status = document.getElementById(statusId);
     if (!status) {
         status = document.createElement("div");
-        status.id = "auto-start-status";
+        status.id = statusId;
         status.className = "setting-hint";
         status.setAttribute("role", "status");
         checkbox.closest(".setting-row")?.after(status);

@@ -13,6 +13,7 @@ import {setCurrentConfig} from "./shared/state.js";
 import {EVENTS} from "../shared/event-names.js";
 import {listen} from "../shared/tauri.js";
 import {affectsSharedConfig, connectConfigActivity, createConfigRefresher} from "../shared/config-sync.js";
+import {createConfigLoadNotice} from "../shared/config-load-notice.js";
 import {initGeneralTab, applyGeneralConfig} from "./tabs/general.js";
 import {initHotkeyTab, applyHotkeyConfig} from "./tabs/hotkey.js";
 import {initEnginesTab} from "./tabs/engines.js";
@@ -603,10 +604,16 @@ export function waitForEngineCard(engineId, timeoutMs = 5000) {
 let configReady = false;
 let configListening = false;
 let chordConfigSnapshot = "";
-const configRefresher = createConfigRefresher({read: loadConfig, apply: applyConfigToUI});
+let initialization = null;
+const configLoadNotice = createConfigLoadNotice(document.querySelector(".content"), () => configReady ? configRefresher.refresh() : init());
+const configRefresher = createConfigRefresher({read: loadConfig, apply: applyConfigToUI, onError: (error) => {
+    console.error("settings config refresh failed:", error);
+    configLoadNotice.show(error);
+}});
 connectConfigActivity(configRefresher);
 
 function applyConfigToUI(cfg) {
+    configLoadNotice.clear();
     setCurrentConfig(cfg);
     if (!configReady) return;
     if (cfg.language && cfg.language !== getLang()) { setLang(cfg.language); applyI18n(); }
@@ -623,16 +630,27 @@ function applyConfigToUI(cfg) {
 /**
  * 初始化设置页
  */
-async function init() {
+function init() {
+    if (configReady) return Promise.resolve();
+    if (!initialization) initialization = initializeSettings().finally(() => { initialization = null; });
+    return initialization;
+}
+
+async function initializeSettings() {
     try {
         // 图标 sprite 先注入（await 保证首屏无 FOUC —— tab 初始化时 innerHTML 拼图标就能立即用）
         await ensureSpriteLoaded();
 
         // 监听先于首读；事件与 focus 共用一个刷新入口。
-        await listen(EVENTS.CONFIG_CHANGED, (event) => {
-            if (affectsSharedConfig(event.payload)) configRefresher.refresh();
-        }).catch((error) => console.warn("settings config listener unavailable; focus will reload:", error));
-        configListening = true;
+        if (!configListening) {
+            await listen(EVENTS.CONFIG_CHANGED, (event) => {
+                if (affectsSharedConfig(event.payload)) {
+                    if (!configReady) init();
+                    configRefresher.refresh();
+                }
+            }).catch((error) => console.warn("settings config listener unavailable; focus will reload:", error));
+            configListening = true;
+        }
         configRefresher.refresh();
         const cfg = await configRefresher.ready();
 
@@ -700,6 +718,7 @@ async function init() {
         console.log("Settings initialized");
     } catch (e) {
         console.error("Failed to initialize settings:", e);
+        configLoadNotice.show(e);
     }
 }
 
@@ -731,7 +750,8 @@ document.addEventListener("keydown", (e) => {
 
 // 窗口 shown 事件刷新配置（只刷新当前激活 tab，避免所有探测同时运行）
 window.addEventListener("focus", async () => {
-    if (configListening) { await configRefresher.refresh(); refreshChordActions(); }
+    if (!configReady) await init();
+    else if (configListening) { await configRefresher.refresh(); refreshChordActions(); }
 
     // 只刷新当前激活 tab 的 runtime（如果当前在 engines tab）
     if (_leActive && _leController && _leController.isMounted()) {

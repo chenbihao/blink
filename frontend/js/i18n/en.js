@@ -3,6 +3,8 @@ export const en = {
     "config.auto_start.pending": "Saving startup preference…",
     "config.auto_start.debug": "Development builds save this preference without registering system startup. Release builds apply it.",
     "config.save_failed": "Save failed. Reload the configuration and retry.",
+    "config.load_failed": "Could not read the configuration: {err}. Retry, or close and reopen this window.",
+    "config.reload": "Reload configuration",
     "config.chord.disabled": "This feature is disabled; its global shortcut is not registered.",
     // ── Sidebar tabs ──
     "tab.general": "General",
@@ -532,7 +534,7 @@ export const en = {
     // Device
     // Model
     "voice.local.model.label": "Model",
-    "voice.local.model.empty": "No models available",
+    "voice.local.model.empty": "No installed models available",
     // 0.22.9 Handoff 09: read-only model display follows engine-card switch transaction
     "voice.local.model.switching": "Switching · {model}",
     // Log
@@ -1753,16 +1755,6 @@ export const en = {
     "local_engine.model.compatibility.compatible": "Compatible",
     "local_engine.model.compatibility.incompatible": "Incompatible",
 
-    // ── Model operation kind (reuse install/repair, add delete) ──
-    "local_engine.operation.delete": "Delete",
-
-    // ── Model operation stage (partially overlap engine stages, add preparing/promoting/done/cancelled/failed) ──
-    "local_engine.operation.stage.preparing": "Preparing",
-    "local_engine.operation.stage.promoting": "Promoting",
-    "local_engine.operation.stage.done": "Done",
-    "local_engine.operation.stage.cancelled": "Cancelled",
-    "local_engine.operation.stage.failed": "Failed",
-
     // ── Delete conflict (structured) ──
     "local_engine.model.conflict.title": "Cannot delete",
     "local_engine.model.conflict.referenced_by_config": "Config {field}={value} references this model",
@@ -1807,7 +1799,6 @@ export const en = {
     "local_engine.log.source.instance": "Instance",
 
     // ── Voice tab local model selector (0.22.6 H4) ──
-    "voice.local.model.empty": "No installed models available",
     "voice.local.model.goto_engines_install": "Go to Engines to install",
     "voice.local.model.goto_engines_hint": "Download a FunASR model from the Engines tab first",
     "voice.local.model.restart_hint": "Model switched — restart the service in Engines to load the new model",

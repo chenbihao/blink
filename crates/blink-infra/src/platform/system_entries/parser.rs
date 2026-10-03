@@ -9,6 +9,7 @@ pub(super) struct Record {
     pub icon: String,
     pub link: String,
     pub page: String,
+    pub setting_id: String,
     pub host: String,
     pub conditional: bool,
 }
@@ -21,6 +22,7 @@ pub(super) fn parse(xml: &str) -> Result<Vec<Record>, String> {
     let mut current = None::<Record>;
     let mut tag = Vec::new();
     let mut page_node = false;
+    let mut setting_node = false;
     let mut depth = 0usize;
     loop {
         match reader.read_event().map_err(|e| format!("设置 XML: {e}"))? {
@@ -56,11 +58,15 @@ pub(super) fn parse(xml: &str) -> Result<Vec<Record>, String> {
                     && e.attributes()
                         .flatten()
                         .any(|a| a.key.as_ref() == b"Type" && a.value.as_ref() == b"Page");
+                setting_node = tag == b"Node"
+                    && e.attributes()
+                        .flatten()
+                        .any(|a| a.key.as_ref() == b"Type" && a.value.as_ref() == b"Setting");
             }
             Event::Text(e) => {
                 let text = e.decode().map_err(|e| e.to_string())?;
                 if let Some(record) = &mut current {
-                    append(record, &tag, page_node, &text);
+                    append(record, &tag, page_node, setting_node, &text);
                 }
             }
             Event::GeneralRef(e) => {
@@ -68,7 +74,7 @@ pub(super) fn parse(xml: &str) -> Result<Vec<Record>, String> {
                 let escaped = format!("&{name};");
                 let text = quick_xml::escape::unescape(&escaped).map_err(|e| e.to_string())?;
                 if let Some(record) = &mut current {
-                    append(record, &tag, page_node, &text);
+                    append(record, &tag, page_node, setting_node, &text);
                 }
             }
             Event::End(e) => {
@@ -89,14 +95,19 @@ pub(super) fn parse(xml: &str) -> Result<Vec<Record>, String> {
                         &mut record.icon,
                         &mut record.link,
                         &mut record.page,
+                        &mut record.setting_id,
                         &mut record.host,
                     ] {
                         *field = field.trim().to_string();
+                    }
+                    if !record.setting_id.is_empty() {
+                        record.id = record.setting_id.clone();
                     }
                     records.push(record);
                 }
                 tag.clear();
                 page_node = false;
+                setting_node = false;
             }
             Event::DocType(_) => return Err("设置 XML 不支持 DTD".into()),
             Event::Eof => break,
@@ -109,24 +120,52 @@ pub(super) fn parse(xml: &str) -> Result<Vec<Record>, String> {
     Ok(records)
 }
 
-fn append(record: &mut Record, tag: &[u8], page_node: bool, text: &str) {
+fn append(record: &mut Record, tag: &[u8], page_node: bool, setting_node: bool, text: &str) {
     match tag {
         b"Filename" => {
             if record.id.trim().is_empty() {
                 record.id.push_str(text);
             }
         }
-        b"SettingID" => record.id = text.into(),
+        b"SettingID" => record.setting_id.push_str(text),
         b"Description" => record.title.push_str(text),
         b"Keywords" | b"HighKeywords" => record.keywords.push_str(text),
         b"Icon" => record.icon.push_str(text),
         b"DeepLink" => record.link.push_str(text),
         b"PageID" if text.trim().starts_with("SettingsPage") => set_page(record, text),
         b"Node" if page_node => set_page(record, text),
+        b"Node" if setting_node => set_setting(record, text),
         b"HostID" => record.host.push_str(text),
         b"Condition" => record.conditional = true,
         _ => (),
     }
+}
+
+fn set_setting(record: &mut Record, text: &str) {
+    let value = text.trim();
+    if record.setting_id.is_empty() || record.setting_id == value {
+        record.setting_id = value.into();
+    } else {
+        record.conditional = true;
+    }
+}
+
+/// 页面路径只是父级定位；子设置必须有明确维护的目标，不能退回父页面。
+pub(super) fn record_target(record: &Record) -> Option<LaunchTarget> {
+    if !record.link.trim().is_empty() {
+        return target(&record.link);
+    }
+    let uri = match record.setting_id.as_str() {
+        "SystemSettings_StorageSense_DisksAndVolumesLink"
+            if record.page == "SettingsPageStorageSenseStorageOverview" =>
+        {
+            "ms-settings:disksandvolumes"
+        }
+        // 只有身份本身指向整个页面时，才使用页面映射。
+        "" if record.id == record.page => settings_uri(&record.page)?,
+        _ => return None,
+    };
+    Some(LaunchTarget::Uri(uri.into()))
 }
 
 fn set_page(record: &mut Record, text: &str) {
@@ -174,10 +213,10 @@ fn canonical(name: &str) -> Option<LaunchTarget> {
 }
 
 /// 受支持的系统命令集合；未知命令不进入可执行目录。
-pub(super) fn target(link: &str, page: &str) -> Option<LaunchTarget> {
+pub(super) fn target(link: &str) -> Option<LaunchTarget> {
     let link = link.trim();
     if link.is_empty() {
-        return settings_uri(page).map(|uri| LaunchTarget::Uri(uri.into()));
+        return None;
     }
     if link.starts_with("ms-settings:") {
         return super::supported_uri(link).then(|| LaunchTarget::Uri(link.into()));
@@ -271,10 +310,7 @@ mod tests {
     #[test]
     fn modern_pages_and_unknown_conditions_are_not_guessed() {
         let records = parse(r#"<PCSettings><SearchableContent><Filename>modern-id</Filename><SettingIdentity><PageID>SettingsPageAudio</PageID><SettingPaths><Path><Node Type="Page">SettingsPageAudio</Node></Path></SettingPaths></SettingIdentity><SettingInformation><Description>声音</Description><HighKeywords>扬声器</HighKeywords><Keywords>音量</Keywords></SettingInformation></SearchableContent><SearchableContent><Filename>ambiguous</Filename><SettingPaths><Node Type="Page">SettingsPageAudio</Node><Node Type="Page">SettingsPagePCSystemDisplay</Node></SettingPaths></SearchableContent><SearchableContent><Filename>conditional</Filename><Condition/></SearchableContent></PCSettings>"#).unwrap();
-        assert_eq!(
-            target("", &records[0].page),
-            Some(LaunchTarget::Uri("ms-settings:sound".into()))
-        );
+        assert_eq!(record_target(&records[0]), None);
         assert_eq!(records[0].keywords, "扬声器;音量;");
         assert!(records[1].conditional && records[2].conditional);
         assert!(parse("<PCSettings><SearchableContent></SearchableContent>").is_err());
@@ -283,29 +319,56 @@ mod tests {
     #[test]
     fn targets_are_typed_and_unknown_commands_are_rejected() {
         assert_eq!(
-            target(
-                "%windir%\\system32\\rundll32.exe sysdm.cpl,EditEnvironmentVariables",
-                ""
-            ),
+            target("%windir%\\system32\\rundll32.exe sysdm.cpl,EditEnvironmentVariables"),
             Some(LaunchTarget::Program {
                 file: "rundll32.exe".into(),
                 parameters: "sysdm.cpl,EditEnvironmentVariables".into()
             })
         );
-        assert!(target("cmd.exe /c echo hello", "").is_none());
-        assert!(target("C:\\other\\taskmgr.exe", "").is_none());
-        assert!(target("rundll32.exe evil.dll,Entry", "").is_none());
-        assert!(target("", "UnknownPage").is_none());
-        assert!(target("Microsoft.DoesNotExist", "").is_none());
-        assert!(target("ms-settings:unknown-page", "").is_none());
-        assert!(target("shell:AppsFolder/unknown", "").is_none());
+        assert!(target("cmd.exe /c echo hello").is_none());
+        assert!(target("C:\\other\\taskmgr.exe").is_none());
+        assert!(target("rundll32.exe evil.dll,Entry").is_none());
+        assert!(target("").is_none());
+        assert!(target("Microsoft.DoesNotExist").is_none());
+        assert!(target("ms-settings:unknown-page").is_none());
+        assert!(target("shell:AppsFolder/unknown").is_none());
         assert!(matches!(
-            target("Microsoft.System", ""),
+            target("Microsoft.System"),
             Some(LaunchTarget::Program { .. })
         ));
         assert!(matches!(
-            target("", "SettingsPageDisplay"),
+            record_target(&Record {
+                id: "SettingsPageDisplay".into(),
+                page: "SettingsPageDisplay".into(),
+                ..Default::default()
+            }),
             Some(LaunchTarget::Uri(_))
         ));
+    }
+
+    #[test]
+    fn modern_setting_identity_resolves_its_own_page_and_unknown_children_are_skipped() {
+        let rows = parse(r#"<PCSettings><SearchableContent><Filename>disk-alias-1</Filename><SettingIdentity><PageID>SettingsPageStorageSenseStorageOverview</PageID><SettingPaths><Path><Node Type="Page">SettingsPageStorageSenseStorageOverview</Node><Node Type="Setting">SystemSettings_StorageSense_DisksAndVolumesLink</Node></Path></SettingPaths></SettingIdentity><SettingInformation><Description>创建虚拟磁盘</Description><Keywords>创建 vhd 设置</Keywords></SettingInformation></SearchableContent><SearchableContent><Filename>disk-alias-2</Filename><SettingID>SystemSettings_StorageSense_DisksAndVolumesLink</SettingID><PageID>SettingsPageStorageSenseStorageOverview</PageID><Description>初始化磁盘</Description></SearchableContent></PCSettings>"#).unwrap();
+        assert_eq!(rows[0].id, rows[1].id);
+        for row in &rows {
+            assert_eq!(
+                record_target(row),
+                Some(LaunchTarget::Uri("ms-settings:disksandvolumes".into()))
+            );
+        }
+        let mut unknown = Record {
+            id: "unknown-child".into(),
+            setting_id: "SystemSettings_StorageSense_Unknown".into(),
+            page: "SettingsPageStorageSenseStorageOverview".into(),
+            ..Default::default()
+        };
+        assert!(record_target(&unknown).is_none());
+        unknown.link = "ms-settings:disksandvolumes".into();
+        assert_eq!(
+            record_target(&unknown),
+            Some(LaunchTarget::Uri(unknown.link.clone()))
+        );
+        unknown.link = "cmd.exe /c evil".into();
+        assert!(record_target(&unknown).is_none());
     }
 }

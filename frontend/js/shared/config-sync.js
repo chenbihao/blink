@@ -1,8 +1,8 @@
 /** 单飞配置读取；旧响应（含错误）不能提交，写入或编辑期间延后回填。 */
 export function createConfigRefresher({read, apply, onError = console.error}) {
     let generation = 0, dirty = false, running = null, holds = 0, latest;
-    let resolveReady;
-    const firstCommit = new Promise((resolve) => { resolveReady = resolve; });
+    let committed = false, initialFailed = false, initialError;
+    let readyWaiters = [];
     async function drain() {
         while (dirty && holds === 0) {
             dirty = false;
@@ -12,9 +12,19 @@ export function createConfigRefresher({read, apply, onError = console.error}) {
                 if (revision !== generation || holds > 0) { dirty = true; continue; }
                 apply(value);
                 latest = value;
-                resolveReady();
+                committed = true;
+                initialFailed = false;
+                initialError = undefined;
+                for (const waiter of readyWaiters) waiter.resolve(value);
+                readyWaiters = [];
             } catch (error) {
                 if (revision !== generation) { dirty = true; continue; }
+                if (!committed) {
+                    initialFailed = true;
+                    initialError = error;
+                    for (const waiter of readyWaiters) waiter.reject(error);
+                    readyWaiters = [];
+                }
                 onError(error);
             }
         }
@@ -28,8 +38,12 @@ export function createConfigRefresher({read, apply, onError = console.error}) {
         return running;
     }
     return {
-        async ready() { await firstCommit; return latest; },
-        refresh() { generation++; dirty = true; return schedule(); },
+        ready() {
+            if (committed) return Promise.resolve(latest);
+            if (initialFailed) return Promise.reject(initialError);
+            return new Promise((resolve, reject) => readyWaiters.push({resolve, reject}));
+        },
+        refresh() { initialFailed = false; initialError = undefined; generation++; dirty = true; return schedule(); },
         hold() {
             generation++; holds++; dirty = true;
             let released = false;

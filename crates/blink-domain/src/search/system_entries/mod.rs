@@ -351,6 +351,13 @@ fn convert(discovery: Discovery) -> Vec<Entry> {
             target: raw.target,
         });
     }
+    // 多份 XML 常重复同一标题/关键词；合并后只预计算一次，避免增加搜索热路径工作量。
+    for entry in &mut entries {
+        let mut seen = std::collections::HashSet::from([entry.title.to_lowercase()]);
+        entry
+            .aliases
+            .retain(|alias| !alias.trim().is_empty() && seen.insert(alias.to_lowercase()));
+    }
     entries
 }
 #[cfg(test)]
@@ -538,6 +545,38 @@ mod tests {
             max_us = samples[99],
             "系统入口快照只读回放完成（不含窗口/IPC/历史）"
         );
+    }
+    #[test]
+    fn duplicate_setting_variants_merge_titles_keywords_and_history_identity() {
+        let entries = convert(Discovery {
+            entries: [
+                ("装载卷的访问路径", "添加访问路径"),
+                ("创建虚拟磁盘", "创建 vhd 设置"),
+                ("初始化磁盘", "初始化硬盘"),
+                ("创建虚拟磁盘", "创建 vhd 设置"),
+            ]
+            .into_iter()
+            .map(|(title, keyword)| platform::DiscoveredEntry {
+                id: "systemsettings_storagesense_disksandvolumeslink".into(),
+                title: title.into(),
+                keywords: vec![keyword.into()],
+                icon: String::new(),
+                target: LaunchTarget::Uri("ms-settings:disksandvolumes".into()),
+            })
+            .collect(),
+            ..Default::default()
+        });
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].aliases.len(), 5);
+        assert_eq!(entries[0].history_key, entries[0].id);
+        let service = SystemEntries::new(StartMenuConfig {
+            discover_system_settings: true,
+            ..Default::default()
+        });
+        service.finish(0, ready(entries));
+        for query in ["创建虚拟磁盘", "创建 vhd 设置", "初始化硬盘"] {
+            assert_eq!(service.search(query, "zh").len(), 1, "{query}");
+        }
     }
     #[test]
     fn different_settings_on_same_page_keep_their_own_identity() {

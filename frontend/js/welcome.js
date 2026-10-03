@@ -19,6 +19,7 @@ import {EVENTS} from "./shared/event-names.js";
 import {canRetryGlobalHotkey, configuredGlobalHotkey, globalHotkeyStatusTextKey} from "./shared/global-hotkey.js";
 import {applyTheme} from "./shared/theme.js";
 import {affectsSharedConfig, connectConfigActivity, createConfigRefresher, withConfigActivity} from "./shared/config-sync.js";
+import {createConfigLoadNotice} from "./shared/config-load-notice.js";
 import {buildChordTogglesPayload, saveConfig} from "./shared/config-keys.js";
 import {
     estimateEtaMs,
@@ -809,14 +810,18 @@ let autoStartRegistrationSkipped = false;
 let welcomeReady = false;
 let welcomeConfigInitialized = false;
 let welcomeConfigSnapshot = "";
+let welcomeInitialization = null;
+let welcomeListening = false;
+const configLoadNotice = createConfigLoadNotice(document.querySelector(".welcome-body"), () => welcomeReady ? welcomeConfigRefresher.refresh() : init(), "welcome-btn");
 const welcomeConfigRefresher = createConfigRefresher({
     read: () => invoke("get_config"),
     apply: applyWelcomeConfig,
-    onError: (error) => { console.error("welcome config refresh failed:", error); showWelcomeError(commandErrorText(error, t("config.save_failed"))); },
+    onError: (error) => { console.error("welcome config refresh failed:", error); configLoadNotice.show(error); },
 });
 connectConfigActivity(welcomeConfigRefresher);
 
 function applyWelcomeConfig(cfg) {
+    configLoadNotice.clear();
     MAIN_SHORTCUT.combo = cfg.hotkey?.display || "Alt+Space";
     toggleValues = {auto_start: cfg.auto_start === true, chord_enabled: cfg.chord_enabled === true, chord_hint_visible: cfg.chord_hint_visible !== false};
     autoStartRegistrationSkipped = cfg.auto_start_registration_skipped === true;
@@ -842,11 +847,24 @@ function applyWelcomeConfig(cfg) {
 
 // ── 初始化 ────────────────────────────────────────────────────────────────
 
-async function init() {
-    await listen(EVENTS.CONFIG_CHANGED, (event) => {
-        if (affectsSharedConfig(event.payload)) welcomeConfigRefresher.refresh();
-    }).catch((error) => console.warn("welcome config listener unavailable; focus will reload:", error));
-    window.addEventListener("focus", () => welcomeConfigRefresher.refresh());
+function init() {
+    if (welcomeReady) return Promise.resolve();
+    if (!welcomeInitialization) welcomeInitialization = initializeWelcome()
+        .catch((error) => { console.error("welcome init failed:", error); configLoadNotice.show(error); })
+        .finally(() => { welcomeInitialization = null; });
+    return welcomeInitialization;
+}
+
+async function initializeWelcome() {
+    if (!welcomeListening) {
+        await listen(EVENTS.CONFIG_CHANGED, (event) => {
+            if (affectsSharedConfig(event.payload)) {
+                if (!welcomeReady) init();
+                welcomeConfigRefresher.refresh();
+            }
+        }).catch((error) => console.warn("welcome config listener unavailable; focus will reload:", error));
+        welcomeListening = true;
+    }
     welcomeConfigRefresher.refresh();
     await welcomeConfigRefresher.ready();
 
@@ -877,7 +895,10 @@ async function init() {
         renderOcrStatus();
         goToStep(currentStep); // 刷新底部按钮文案
     });
+}
 
+/** 导航/退出不依赖配置读取成功；只绑定一次，重试不重复注册。 */
+function initNavigation() {
     // 导航按钮
     document.getElementById("back-btn")?.addEventListener("click", () => goToStep(prevStep(currentStep)));
     document.getElementById("next-btn")?.addEventListener("click", () => {
@@ -899,7 +920,9 @@ async function init() {
         }
     });
 
-    goToStep(0);
+    goToStep(currentStep);
 }
 
-init().catch((e) => console.error("welcome init failed:", e));
+initNavigation();
+window.addEventListener("focus", () => welcomeReady ? welcomeConfigRefresher.refresh() : init());
+init();

@@ -1,9 +1,5 @@
 use super::{DiscoveredEntry, Discovery, LaunchTarget, parser};
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    time::UNIX_EPOCH,
-};
+use std::{collections::HashMap, path::PathBuf, time::UNIX_EPOCH};
 use windows::{
     Win32::{
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
@@ -205,7 +201,6 @@ pub fn discover() -> Result<Option<Discovery>, String> {
         };
     }
     let mut result = Discovery::default();
-    let mut seen = HashSet::new();
     let mut availability = HashMap::new();
     for path in paths {
         let records = (|| {
@@ -247,14 +242,12 @@ pub fn discover() -> Result<Option<Discovery>, String> {
                 result.skipped += 1;
                 continue;
             }
-            let Some(target) =
-                parser::target(&record.link, &record.page).filter(|target| match target {
-                    LaunchTarget::Uri(uri) => *availability
-                        .entry(uri.clone())
-                        .or_insert_with(|| available(target)),
-                    _ => available(target),
-                })
-            else {
+            let Some(target) = parser::record_target(&record).filter(|target| match target {
+                LaunchTarget::Uri(uri) => *availability
+                    .entry(uri.clone())
+                    .or_insert_with(|| available(target)),
+                _ => available(target),
+            }) else {
                 result.skipped += 1;
                 continue;
             };
@@ -262,9 +255,7 @@ pub fn discover() -> Result<Option<Discovery>, String> {
                 result.skipped += 1;
                 continue;
             };
-            if !seen.insert(record.id.to_ascii_lowercase()) {
-                continue;
-            }
+            // 保留同身份的标题/关键词变体，统一交由 domain 合并成一个入口。
             let icon = expand(record.icon.split(',').next().unwrap_or(""));
             result.entries.push(DiscoveredEntry {
                 id: record.id.to_ascii_lowercase(),

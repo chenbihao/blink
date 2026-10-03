@@ -381,6 +381,7 @@ let confirmedGlobalBindings = new Map();
 const confirmedChordKeys = new Map();
 let confirmedDisabledChordActions = [];
 let disabledSaveRevision = 0;
+let disabledWriteChain = Promise.resolve();
 
 function replaceConfirmedGlobalBindings(bindings) {
     confirmedGlobalBindings.clear();
@@ -797,7 +798,7 @@ function renderScreenshotDetail(cfg) {
 function bindRowEvents(container) {
     // ── 启用/禁用开关 ──
     // 注意：开关在 header 内，必须 stopPropagation 防止点开关也触发展开。
-    async function saveDisabled() {
+    function saveDisabled() {
         const revision = ++disabledSaveRevision;
         showChordSaveError("");
         const disabled = Array.from(
@@ -805,13 +806,18 @@ function bindRowEvents(container) {
         )
             .filter((el) => !el.checked)
             .map((el) => el.dataset.id).sort();
-        try {
-            await saveConfig("disabled_chord_actions", disabled, {expected: confirmedDisabledChordActions});
-            confirmedDisabledChordActions = disabled;
-        } catch (e) {
-            console.error("set_disabled_chord_actions failed:", e);
-            if (revision === disabledSaveRevision) showChordSaveError(normalizeError(e).message);
-        }
+        return withConfigActivity("disabled_chord_actions", () => {
+            disabledWriteChain = disabledWriteChain.then(async () => {
+                try {
+                    await saveConfig("disabled_chord_actions", disabled, {expected: confirmedDisabledChordActions});
+                    confirmedDisabledChordActions = disabled;
+                } catch (e) {
+                    console.error("set_disabled_chord_actions failed:", e);
+                    if (revision === disabledSaveRevision) showChordSaveError(normalizeError(e).message);
+                }
+            });
+            return disabledWriteChain;
+        });
     }
 
     container.querySelectorAll(".action-toggle").forEach((el) => {
@@ -822,7 +828,7 @@ function bindRowEvents(container) {
         el.addEventListener("change", (e) => {
             const row = e.target.closest(".action-list-row");
             if (row) row.classList.toggle("is-disabled", !e.target.checked);
-            saveDisabled();
+            return saveDisabled();
         });
     });
 
@@ -1233,6 +1239,7 @@ function escapeAttr(str) {
 // ── 测试导出（仅用于单元测试纯逻辑，生产代码不依赖）────────────────────────────
 
 export const __test__ = {
+    bindRowEvents,
     retryGlobalBinding,
     globalStatusBlockHtml,
     globalRetries,

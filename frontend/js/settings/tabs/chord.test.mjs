@@ -241,6 +241,38 @@ globalThis.window.__TAURI__ = {
 const chordModule = await import("./chord.js");
 const __test__ = chordModule.__test__;
 
+test("动作禁用列表的连续点击串行 CAS，保留两个动作的最终状态", async () => {
+    mockConfig = {disabled_chord_actions: []};
+    mockSaveConfigShouldFail = false;
+    const toggles = ["chat", "screenshot"].map(id => {
+        const el = makeElement("input");
+        el.checked = true; el.dataset.id = id; el.closest = () => null;
+        return el;
+    });
+    const container = makeElement("div");
+    container.querySelectorAll = selector => selector === ".chord-action-toggle" ? toggles : [];
+    __test__.bindRowEvents(container);
+    let finish;
+    const requests = [];
+    mockBeforeSave = async args => {
+        requests.push(args);
+        if (requests.length === 1) await new Promise(resolve => { finish = resolve; });
+        assert.deepEqual(args.expected, mockConfig.disabled_chord_actions);
+    };
+    try {
+        toggles[0].checked = false;
+        const first = toggles[0]._listeners.change[0]({target: toggles[0]});
+        await new Promise(resolve => setTimeout(resolve, 0));
+        toggles[1].checked = false;
+        const second = toggles[1]._listeners.change[0]({target: toggles[1]});
+        assert.equal(requests.length, 1);
+        finish();
+        await Promise.all([first, second]);
+        assert.deepEqual(mockConfig.disabled_chord_actions, ["chat", "screenshot"]);
+        assert.equal(requests.length, 2);
+    } finally { mockBeforeSave = null; }
+});
+
 describe("全局键注册重试", () => {
     test("占用未变化时仍结束等待，可再次重试", async () => {
         __test__.globalStatuses.set("screenshot", {registered: false, reason: "occupied"});

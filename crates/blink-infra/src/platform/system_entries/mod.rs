@@ -122,6 +122,7 @@ pub(super) fn supported_uri(uri: &str) -> bool {
             | "ms-settings:windowsupdate"
             | "ms-settings:recovery"
             | "ms-settings:storagesense"
+            | "ms-settings:disksandvolumes"
             | "ms-settings:about"
             | "ms-settings:privacy-microphone"
             | "ms-settings:privacy-webcam"

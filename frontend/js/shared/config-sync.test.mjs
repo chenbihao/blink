@@ -59,6 +59,27 @@ test("旧请求错误不回滚新值，也不显示过期错误", async () => {
     assert.deepEqual(errors, []);
 });
 
+test("首读失败结束所有初始化等待；重试成功后可继续初始化", async () => {
+    let fail = true, shown;
+    const error = new Error("app.chord damaged");
+    const refresh = createConfigRefresher({
+        read: async () => { if (fail) throw error; return {chord_enabled: true}; },
+        apply: (value) => { shown = value; }, onError() {},
+    });
+    const first = assert.rejects(refresh.ready(), error);
+    const second = assert.rejects(refresh.ready(), error);
+    await refresh.refresh();
+    await Promise.all([first, second]);
+    await assert.rejects(refresh.ready(), error);
+    assert.equal(shown, undefined);
+    fail = false;
+    const retry = refresh.refresh();
+    const ready = refresh.ready();
+    await retry;
+    assert.deepEqual(await ready, {chord_enabled: true});
+    assert.deepEqual(shown, {chord_enabled: true});
+});
+
 test("保存、录制、编辑期间推迟回填；结束后读最新值，不循环发请求", async () => {
     let persisted = "initial", shown, reads = 0;
     const refresh = createConfigRefresher({read: async () => { reads++; return persisted; }, apply: (v) => { shown = v; }});

@@ -3,6 +3,8 @@ export const zh = {
     "config.auto_start.pending": "正在保存自启动设置…",
     "config.auto_start.debug": "开发版本仅保存偏好，不注册系统自启动；正式版本将应用此设置。",
     "config.save_failed": "保存失败，请重新读取配置后重试。",
+    "config.load_failed": "配置读取失败：{err}。请重试，或关闭窗口后再打开。",
+    "config.reload": "重新读取配置",
     "config.chord.disabled": "此功能已禁用，全局快捷键暂不注册。",
     // ── 侧边 Tab ──
     "tab.general": "通用",
@@ -530,7 +532,7 @@ export const zh = {
 
     // 模型
     "voice.local.model.label": "模型",
-    "voice.local.model.empty": "暂无可用模型",
+    "voice.local.model.empty": "没有可用的已安装模型",
     // 0.22.9 Handoff 09：模型只读展示跟随引擎页切换事务
     "voice.local.model.switching": "切换中 · {model}",
     // 高级选项
@@ -1542,7 +1544,7 @@ export const zh = {
     "local_engine.operation.stage.completed": "已完成",
     "local_engine.operation.stage.cancelled": "已取消",
     "local_engine.operation.stage.failed": "已失败",
-    "local_engine.operation.stage.done": "完成",
+    "local_engine.operation.stage.done": "已完成",
 
     "local_engine.backend.requested": "请求设备",
     "local_engine.backend.resolved": "解析配置",
@@ -1749,16 +1751,6 @@ export const zh = {
     "local_engine.model.compatibility.compatible": "兼容",
     "local_engine.model.compatibility.incompatible": "不兼容",
 
-    // ── 模型操作种类（与引擎操作种类复用 install/repair，新增 delete）──
-    "local_engine.operation.delete": "删除",
-
-    // ── 模型操作阶段（与引擎操作阶段部分重叠，新增 preparing/promoting/done/cancelled/failed）──
-    "local_engine.operation.stage.preparing": "准备中",
-    "local_engine.operation.stage.promoting": "提升中",
-    "local_engine.operation.stage.done": "已完成",
-    "local_engine.operation.stage.cancelled": "已取消",
-    "local_engine.operation.stage.failed": "已失败",
-
     // ── 删除冲突（结构化）──
     "local_engine.model.conflict.title": "无法删除",
     "local_engine.model.conflict.referenced_by_config": "配置 {field}={value} 引用了此模型",
@@ -1803,7 +1795,6 @@ export const zh = {
     "local_engine.log.source.instance": "实例",
 
     // ── 语音页本地模型选择器（0.22.6 H4）──
-    "voice.local.model.empty": "没有可用的已安装模型",
     "voice.local.model.goto_engines_install": "前往引擎页安装",
     "voice.local.model.goto_engines_hint": "需要先在引擎页下载 FunASR 模型",
     "voice.local.model.restart_hint": "模型已切换，请在引擎页重启服务以加载新模型",
