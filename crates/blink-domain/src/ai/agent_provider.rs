@@ -26,13 +26,14 @@
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-// 0.42: Agent runtime 迁移到 rig-agent crate
+// 0.42: Agent runtime 迁移到 rig-agent crate；0.43: 流式事件模型改为
+// rig-core `StreamEvent`/`Item`，model 句柄为 `DynModel<Completion>`
 use rig_agent::agent::{Agent, AgentBuilder, MultiTurnStreamItem, StreamingResult};
-use rig_agent::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig_agent::tool::DynamicTool;
-use rig_core::client::CompletionClient;
-use rig_core::completion::CompletionModel;
+use rig_core::driver::DynModel;
 use rig_core::memory::ConversationMemory;
+use rig_core::operation::Completion;
+use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent, StreamedUserContent};
 #[cfg(test)]
 use rig_core::memory::InMemoryConversationMemory;
 
@@ -205,7 +206,7 @@ impl AgentProvider {
         let agent = match entry.kind {
             ProviderKind::OpenAICompatible => {
                 let client = build_openai_client(&key_str, entry.base_url.as_deref())?;
-                let m = client.completion_model(&model.id);
+                let m = client.completion(&model.id);
                 ChatAgent::Agent(build_agent(
                     m,
                     preamble,
@@ -218,7 +219,7 @@ impl AgentProvider {
             }
             ProviderKind::AnthropicMessages => {
                 let client = build_anthropic_client(&key_str, entry.base_url.as_deref())?;
-                let m = client.completion_model(&model.id);
+                let m = client.completion(&model.id);
                 // Anthropic max_tokens 必填，兜底 4096
                 let anthropic_max_tokens =
                     default_max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
@@ -240,7 +241,7 @@ impl AgentProvider {
             }
             ProviderKind::GeminiGenerateContent => {
                 let client = build_gemini_client(&key_str, entry.base_url.as_deref())?;
-                let m = client.completion_model(&model.id);
+                let m = client.completion(&model.id);
                 ChatAgent::Agent(build_agent(
                     m,
                     preamble,
@@ -253,7 +254,7 @@ impl AgentProvider {
             }
             ProviderKind::OllamaHttp => {
                 let client = build_ollama_client(entry.base_url.as_deref())?;
-                let m = client.completion_model(&model.id);
+                let m = client.completion(&model.id);
                 ChatAgent::Agent(build_agent(
                     m,
                     preamble,
@@ -399,7 +400,7 @@ impl AgentProvider {
     /// `run_stream` 的变体——接受 thinking_patch + rig 一等 `max_tokens`。
     ///
     /// thinking_patch 走 `merge_additional_params`（各供应商 thinking 字段的标准注入路径），
-    /// `max_tokens` 走 rig builder 的 `.max_tokens(u64)` 一等参数（rig 原生映射各协议字段）。
+    /// `max_tokens` 走 runner 的 `.max_tokens(u64)` 一等参数（rig 原生映射各协议字段）。
     async fn run_stream_with_max_tokens(
         agent: &Agent,
         conversation_id: &str,
@@ -412,52 +413,25 @@ impl AgentProvider {
         let timeout_ms =
             crate::config::ai_config::get_ai_config().effective_hard_timeout_ms();
         let idle_timeout = Duration::from_millis(timeout_ms as u64);
-        let stream_builder = {
-            let builder = agent.stream_prompt(user_msg).conversation(conversation_id);
-            // max_tokens 走 rig 一等参数——rig 0.42 对各协议原生映射：
-            // Gemini → generationConfig.maxOutputTokens、Ollama → options.num_predict、
-            // OpenAI/Anthropic → max_tokens
-            let builder = builder.max_tokens(max_tokens);
-            if let Some(serde_json::Value::Object(map)) = thinking_patch {
-                builder.merge_additional_params(map.clone())
-            } else {
-                builder
-            }
-        };
-        let stream = match tokio::time::timeout(idle_timeout, stream_builder).await {
-            Ok(stream) => stream,
-            Err(_) => {
-                tracing::warn!(
-                    target: blink_infra::utils::perf::ai_slo::TARGET,
-                    conversation = %conversation_id,
-                    timeout_ms,
-                    "run_stream_with_max_tokens: 等待模型首个响应超时"
-                );
-                let _ = tx.send(ChatStreamChunk::Error {
-                    message: format!(
-                        "AI 请求超时（{timeout_ms} 毫秒），请重试或在设置中调整硬超时"
-                    ),
-                });
-                return;
-            }
-        };
+        // 0.43: agent.prompt() → AgentRunner 同步构造（memory load 等发生在首次 poll）；
+        // max_tokens 走 rig 一等参数——rig 对各协议原生映射：
+        // Gemini → generationConfig.maxOutputTokens、Ollama → options.num_predict、
+        // OpenAI/Anthropic → max_tokens
+        let mut runner = agent
+            .prompt(rig_core::completion::Message::user(user_msg))
+            .conversation(conversation_id)
+            .max_tokens(max_tokens);
+        if let Some(serde_json::Value::Object(map)) = thinking_patch {
+            runner = runner.merge_additional_params(map.clone());
+        }
+        let stream = runner.stream();
         // 复用 run_stream 的消费循环——传入已构造的 stream
         Self::consume_stream(stream, conversation_id, tx, model_name, idle_timeout).await;
     }
 
     /// 泛型 stream 消费--4 个 `ChatAgent` arm 共用,每个 arm 具体化 M。
     ///
-    /// 消费 `MultiTurnStreamItem`(`#[non_exhaustive]`,须 `Ok(_)` 兜底):
-    /// - `StreamAssistantItem(Text)` -> `ChatStreamChunk::Text`
-    /// - `StreamAssistantItem(Reasoning)` -> `ChatStreamChunk::Thinking`
-    /// - `StreamAssistantItem(ReasoningDelta)` -> `ChatStreamChunk::Thinking`
-    /// - `StreamAssistantItem(ToolCall)` -> `ChatStreamChunk::ToolCall { tool, call_id }`
-    ///   (保留 `internal_call_id` 供与 ToolResult 配对)
-    /// - `StreamUserItem(ToolResult)` -> `ChatStreamChunk::ToolResult { call_id, summary }`
-    ///   (0.12.2 新增:rig tool loop 内部 tool 执行结果,摘要前 200 字符)
-    /// - `FinalResponse(resp)` -> `ChatStreamChunk::Done { input_tokens, output_tokens }`
-    ///   (0.12.2: 从 `resp.usage()` 提取,`u64` 截断到 `u32`,与 `map_rig_response` 一致)
-    /// - `Err` -> `ChatStreamChunk::Error`
+    /// 消费 `MultiTurnStreamItem` 的完整映射见 `consume_stream` 文档。
     ///
     /// **中断**:调用方 drop `tx`(或 task 被 abort)即中断,stream 被 drop 后 rig 内部
     /// reqwest task 自动 abort(与主窗口 `RigProvider::stream` 一致)。
@@ -472,44 +446,29 @@ impl AgentProvider {
         let timeout_ms =
             crate::config::ai_config::get_ai_config().effective_hard_timeout_ms();
         let idle_timeout = Duration::from_millis(timeout_ms as u64);
-        // 阶段 2：注入按 provider + 开关状态算好的 thinking 补丁（见 thinking_request_patch）
-        let stream_builder = {
-            let builder = agent.stream_prompt(user_msg).conversation(conversation_id);
-            if let Some(serde_json::Value::Object(map)) = thinking_patch {
-                // merge_additional_params 需要所有权 Map，模板很小，clone 无成本
-                builder.merge_additional_params(map.clone())
-            } else {
-                builder
-            }
-        };
-        let stream = match tokio::time::timeout(idle_timeout, stream_builder).await {
-            Ok(stream) => stream,
-            Err(_) => {
-                tracing::warn!(
-                    target: blink_infra::utils::perf::ai_slo::TARGET,
-                    conversation = %conversation_id,
-                    timeout_ms,
-                    "run_stream: 等待模型首个响应超时"
-                );
-                let _ = tx.send(ChatStreamChunk::Error {
-                    message: format!(
-                        "AI 请求超时（{timeout_ms} 毫秒），请重试或在设置中调整硬超时"
-                    ),
-                });
-                return;
-            }
-        };
+        // 0.43: agent.prompt() → AgentRunner 同步构造；thinking 补丁注入
+        // merge_additional_params（各供应商 thinking 字段的标准注入路径）。
+        // 阶段 2：首个 item（含 memory load + 建连 + 模型排队）受 consume_stream
+        // 的 idle timeout 保护。
+        let mut runner = agent
+            .prompt(rig_core::completion::Message::user(user_msg))
+            .conversation(conversation_id);
+        if let Some(serde_json::Value::Object(map)) = thinking_patch {
+            runner = runner.merge_additional_params(map.clone());
+        }
+        let stream = runner.stream();
         Self::consume_stream(stream, conversation_id, tx, model_name, idle_timeout).await;
     }
 
     /// 消费已构造的 `MultiTurnStream`——`run_stream` 与 `run_stream_with_max_tokens` 共用。
     ///
-    /// 消费 `MultiTurnStreamItem`（`#[non_exhaustive]`，须 `Ok(_)` 兜底）：
-    /// - `StreamAssistantItem(Text)` -> `ChatStreamChunk::Text`
-    /// - `StreamAssistantItem(Reasoning/ReasoningDelta)` -> `ChatStreamChunk::Thinking`
-    /// - `StreamAssistantItem(ToolCall)` -> `ChatStreamChunk::ToolCall { tool, call_id }`
+    /// 消费 `MultiTurnStreamItem`（0.43 事件模型，未知变体兜底 continue）：
+    /// - `StreamAssistantItem(Event(Text))` -> `ChatStreamChunk::Text`
+    /// - `StreamAssistantItem(Event(Reasoning))` -> `ChatStreamChunk::Thinking`
+    /// - `ToolCall`（turn 提交时报告，rig 定型的完整调用）-> `ChatStreamChunk::ToolCall`
+    ///   （0.43 起 tool call 从专用变体取，不再从流式 delta 拼装）
     /// - `StreamUserItem(ToolResult)` -> `ChatStreamChunk::ToolResult { call_id, summary }`
-    /// - `FinalResponse(resp)` -> `ChatStreamChunk::Done { input_tokens, output_tokens }`
+    /// - `FinalResponse(resp)` -> `ChatStreamChunk::Done`（0.43: usage 为整轮聚合，计数 Option 化）
     /// - `Err` -> `ChatStreamChunk::Error`
     ///
     /// **中断**：调用方 drop `tx`（或 task 被 abort）即中断，stream 被 drop 后 rig 内部
@@ -544,18 +503,17 @@ impl AgentProvider {
             };
             let chunk = match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
-                    StreamedAssistantContent::Text(t) => {
+                    RigStreamItem::Event(RigStreamEvent::Text { text, .. }) => {
                         has_content = true;
                         tracing::trace!(
                             conversation = %conversation_id,
-                            text = single_line(&t.text),
+                            text = single_line(&text),
                             "consume_stream: text delta"
                         );
-                        ChatStreamChunk::Text { text: t.text }
+                        ChatStreamChunk::Text { text }
                     }
-                    StreamedAssistantContent::Reasoning { reasoning, .. } => {
+                    RigStreamItem::Event(RigStreamEvent::Reasoning { text, .. }) => {
                         has_content = true;
-                        let text = reasoning.display_text();
                         tracing::trace!(
                             conversation = %conversation_id,
                             thinking = single_line(&text),
@@ -563,61 +521,78 @@ impl AgentProvider {
                         );
                         ChatStreamChunk::Thinking { text }
                     }
-                    StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                        has_content = true;
-                        tracing::trace!(
-                            conversation = %conversation_id,
-                            thinking = single_line(&reasoning),
-                            "consume_stream: thinking delta"
-                        );
-                        ChatStreamChunk::Thinking { text: reasoning }
-                    }
-                    StreamedAssistantContent::ToolCall {
-                        tool_call,
-                        internal_call_id,
-                    } => {
-                        has_content = true;
-                        let tool = tool_call.function.name.clone();
-                        let arguments = tool_call.function.arguments.to_string();
-                        tracing::debug!(
-                            conversation = %conversation_id,
-                            tool = %tool,
-                            call_id = %internal_call_id,
-                            args_chars = arguments.chars().count(),
-                            "consume_stream: tool call"
-                        );
-                        ChatStreamChunk::ToolCall {
-                            tool,
-                            call_id: internal_call_id,
-                            arguments,
+                    // Start / Arguments / Unknown——正文由专用变体或 FinalResponse 携带；
+                    // End 中定型的 Reasoning 整块（部分 provider/mock 走整块而非增量）
+                    // 转为一条完整 Thinking，ToolCall 的定型由专用 ToolCall 变体携带
+                    RigStreamItem::Event(RigStreamEvent::End { content, .. }) => {
+                        if let rig_core::completion::AssistantContent::Reasoning(sealed) = &content
+                            && let Some(reasoning) = sealed.open(sealed.issuer())
+                        {
+                            has_content = true;
+                            let text = reasoning.display_text();
+                            ChatStreamChunk::Thinking { text }
+                        } else {
+                            continue;
                         }
                     }
                     _ => continue,
                 },
+                Ok(MultiTurnStreamItem::ToolCall { tool_call }) => {
+                    has_content = true;
+                    let tool = tool_call.function.name.to_string();
+                    let call_id = tool_call.id.to_string();
+                    let arguments = tool_call.function.arguments.to_string();
+                    tracing::debug!(
+                        conversation = %conversation_id,
+                        tool = %tool,
+                        call_id = %call_id,
+                        args_chars = arguments.chars().count(),
+                        "consume_stream: tool call"
+                    );
+                    ChatStreamChunk::ToolCall {
+                        tool,
+                        call_id,
+                        arguments,
+                    }
+                }
+                Ok(MultiTurnStreamItem::ToolExecutionCommitted { .. }) => continue,
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
-                    internal_call_id,
                 })) => {
                     has_content = true;
+                    let call_id = tool_result.call.to_string();
                     let summary = summarize_tool_result(&tool_result);
                     let success = !summary.is_empty();
                     tracing::debug!(
                         conversation = %conversation_id,
-                        call_id = %internal_call_id,
+                        call_id = %call_id,
                         success,
                         summary_chars = summary.chars().count(),
                         "consume_stream: tool result"
                     );
                     ChatStreamChunk::ToolResult {
-                        call_id: internal_call_id,
+                        call_id,
                         success,
                         summary,
                     }
                 }
+                Ok(MultiTurnStreamItem::CompletionCall(_)) => continue,
+                Ok(MultiTurnStreamItem::ModelTurnRetried { turn }) => {
+                    tracing::debug!(
+                        conversation = %conversation_id,
+                        turn,
+                        "consume_stream: 模型回合被 hook 驳回重试，临时输出将被重置"
+                    );
+                    continue;
+                }
                 Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
                     done_sent = true;
-                    let usage = resp.usage();
-                    if !has_content && usage.input_tokens == 0 && usage.output_tokens == 0 {
+                    // 0.43: usage 为整轮聚合，计数 Option<u64>（None = 未报告，视同 0）
+                    let usage = resp.usage;
+                    if !has_content
+                        && usage.input_tokens.unwrap_or(0) == 0
+                        && usage.output_tokens.unwrap_or(0) == 0
+                    {
                         tracing::warn!(
                             conversation = %conversation_id,
                             "consume_stream: 收到空 FinalResponse（0 token + 无内容），\
@@ -633,10 +608,6 @@ impl AgentProvider {
                             model_name: model_name.clone(),
                         }
                     }
-                }
-                Ok(_) => {
-                    tracing::trace!("consume_stream: unknown MultiTurnStreamItem variant, skipped");
-                    continue;
                 }
                 Err(e) => {
                     let msg = format!("{e}");
@@ -758,7 +729,7 @@ pub fn summarize_tool_result( // 0.25.4 crate 化：pub(crate) → pub（bin 侧
     }
 }
 
-/// 构造 `Agent`（0.42: Agent 不再是泛型，ModelHandle 内部擦除具体 model 类型）。
+/// 构造 `Agent`（0.42: Agent 不再是泛型；0.43: model 句柄为 `DynModel<Completion>`）。
 ///
 /// `default_temperature` / `default_max_tokens` 从 `ModelEntry` 来，
 /// 构造时固化到 `AgentBuilder`，rig Agent 内部生成 `CompletionRequest` 时使用。
@@ -774,7 +745,7 @@ fn build_agent<M>(
     default_max_tokens: Option<u64>,
 ) -> Agent
 where
-    M: CompletionModel + 'static,
+    M: Into<DynModel<Completion>>,
 {
     // 0.42: AgentBuilder 使用 typestate 模式（NoToolConfig → WithBuilderTools → Agent）。
     // typestate 不能在 if 中条件性改变类型，所以分两条路径构建：
@@ -804,11 +775,11 @@ where
         .default_max_turns(MAX_TURNS)
         .dynamic_tools(tools);
 
-    // 0.42: MCP tools 通过 rmcp_tools 注册（McpTool 是 pub(crate)，只能走此路径）
-    // rmcp_tools 接受 (Vec<Tool>, ServerSink)，但每个 server 的 tools 需要分开注册
-    // 因为不同 tool 可能来自不同 server（不同 ServerSink）
+    // 0.43: MCP 集成拆到 rig-rmcp——`McpTool::from_mcp_server` 包装后经 `From` 转为
+    // DynamicTool 逐个注册（每个 server 独立 ServerSink，须分开转换）；
+    // 默认带 rig-rmcp 的 DEFAULT_MCP_TOOL_TIMEOUT（300s）单次调用上限。
     for (tool, client) in mcp_tools {
-        builder = builder.rmcp_tools(vec![tool], client);
+        builder = builder.dynamic_tool(rig_rmcp::McpTool::from_mcp_server(tool, client).into());
     }
 
     if let Some(temp) = default_temperature {
@@ -958,9 +929,9 @@ mod tests {
     async fn run_stream_done_carries_usage() {
         use rig_core::completion::Usage as RigUsage;
         let usage = RigUsage {
-            input_tokens: 150,
-            output_tokens: 80,
-            total_tokens: 230,
+            input_tokens: Some(150),
+            output_tokens: Some(80),
+            total_tokens: Some(230),
             ..Default::default()
         };
         let model = MockCompletionModel::from_stream_turns(vec![vec![
@@ -995,9 +966,9 @@ mod tests {
     async fn run_stream_done_truncates_oversized_usage() {
         use rig_core::completion::Usage as RigUsage;
         let usage = RigUsage {
-            input_tokens: u64::from(u32::MAX) + 1000, // 超 u32 范围
-            output_tokens: 50,
-            total_tokens: 0,
+            input_tokens: Some(u64::from(u32::MAX) + 1000), // 超 u32 范围
+            output_tokens: Some(50),
+            total_tokens: Some(0),
             ..Default::default()
         };
         let model = MockCompletionModel::from_stream_turns(vec![vec![
@@ -1082,14 +1053,14 @@ mod tests {
     #[test]
     fn summarize_tool_result_truncates_and_handles_image() {
         use rig_core::completion::message::{
-            DocumentSourceKind, Image, Text, ToolCallId, ToolResult, ToolResultContent,
+            CallId, DocumentSourceKind, Image, Text, ToolResult, ToolResultContent,
         };
+        use rig_core::message::ToolName;
 
         // 短文本不截断
         let short = ToolResult {
-            call: ToolCallId::new_or_mint("1"),
-            provider: None,
-            name: "test".into(),
+            call: CallId::from_wire("1"),
+            name: ToolName::try_from("test").unwrap(),
             content: vec![ToolResultContent::Text(Text::new("ok"))],
         };
         assert_eq!(summarize_tool_result(&short), "ok");
@@ -1097,9 +1068,8 @@ mod tests {
         // 长文本截断到 50000 字符 + 省略号
         let long_text = "x".repeat(60000);
         let long = ToolResult {
-            call: ToolCallId::new_or_mint("2"),
-            provider: None,
-            name: "test".into(),
+            call: CallId::from_wire("2"),
+            name: ToolName::try_from("test").unwrap(),
             content: vec![ToolResultContent::Text(Text::new(long_text))],
         };
         let summary = summarize_tool_result(&long);
@@ -1108,9 +1078,8 @@ mod tests {
 
         // 图片转占位
         let img = ToolResult {
-            call: ToolCallId::new_or_mint("3"),
-            provider: None,
-            name: "test".into(),
+            call: CallId::from_wire("3"),
+            name: ToolName::try_from("test").unwrap(),
             content: vec![ToolResultContent::Image(Image {
                 data: DocumentSourceKind::Url("http://example.com/x.png".into()),
                 media_type: None,
@@ -1300,13 +1269,13 @@ mod tests {
             "search_apps",
             "搜索应用",
             serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}}),
-            |_ctx, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+            |_args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
         );
         let tool2 = DynamicTool::new(
             "open_url",
             "打开网址",
             serde_json::json!({"type":"object","properties":{"url":{"type":"string"}}}),
-            |_ctx, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+            |_args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
         );
 
         let infos = build_tool_prompt_infos(&[tool1, tool2], &[]);
@@ -1339,7 +1308,7 @@ mod tests {
             "test_tool",
             "测试工具",
             serde_json::json!({"type":"object"}),
-            |_ctx, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+            |_args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
         );
 
         let entry = ProviderEntry {

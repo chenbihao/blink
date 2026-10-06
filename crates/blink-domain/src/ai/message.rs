@@ -168,7 +168,7 @@ pub struct Usage {
     #[serde(default)]
     pub reasoning_tokens: u32,
     /// 供应商是否报告了 usage。`false` = 未报告（零值是哨兵，不是真实零消耗）。
-    /// 使用 Rig `Usage::has_values()` 语义：Rig Usage 全零时 `reported = false`。
+    /// 0.43 起使用 Rig `Usage::is_reported()` 语义：任一计数 `Some` 即视为已报告。
     #[serde(default)]
     pub reported: bool,
 }
@@ -176,22 +176,27 @@ pub struct Usage {
 impl Usage {
     /// 从 Rig `Usage` 构造——**全仓唯一 from_rig_usage 映射**。
     ///
-    /// 安全饱和转换 u64 → u32。
-    /// `reported` 使用 Rig `Usage::has_values()` 语义：
-    /// - Rig Usage 全零（= `new()`）→ `reported = false`（供应商未报告）
-    /// - Rig Usage 任一字段非零 → `reported = true`
+    /// 安全饱和转换 u64 → u32。0.43 起 Rig 各计数为 `Option<u64>`
+    /// （`None` = 供应商未报告该计数），统一 `unwrap_or(0)` 落到我们的 u32 字段；
+    /// `reported` 使用 Rig `Usage::is_reported()` 语义：
+    /// - 任一计数 `Some` → `reported = true`
+    /// - 全部 `None` → `reported = false`（供应商未报告）
     ///
     /// 这覆盖了 cache-only / reasoning-only / tool-use-only 等部分报告场景。
     pub fn from_rig_usage(rig_usage: &rig_core::completion::Usage) -> Self {
         Self {
-            input_tokens: saturate_u64_to_u32(rig_usage.input_tokens),
-            output_tokens: saturate_u64_to_u32(rig_usage.output_tokens),
-            total_tokens: saturate_u64_to_u32(rig_usage.total_tokens),
-            cached_input_tokens: saturate_u64_to_u32(rig_usage.cached_input_tokens),
-            cache_creation_input_tokens: saturate_u64_to_u32(rig_usage.cache_creation_input_tokens),
-            tool_use_prompt_tokens: saturate_u64_to_u32(rig_usage.tool_use_prompt_tokens),
-            reasoning_tokens: saturate_u64_to_u32(rig_usage.reasoning_tokens),
-            reported: rig_usage.has_values(),
+            input_tokens: saturate_u64_to_u32(rig_usage.input_tokens.unwrap_or(0)),
+            output_tokens: saturate_u64_to_u32(rig_usage.output_tokens.unwrap_or(0)),
+            total_tokens: saturate_u64_to_u32(rig_usage.total_tokens.unwrap_or(0)),
+            cached_input_tokens: saturate_u64_to_u32(rig_usage.cached_input_tokens.unwrap_or(0)),
+            cache_creation_input_tokens: saturate_u64_to_u32(
+                rig_usage.cache_creation_input_tokens.unwrap_or(0),
+            ),
+            tool_use_prompt_tokens: saturate_u64_to_u32(
+                rig_usage.tool_use_prompt_tokens.unwrap_or(0),
+            ),
+            reasoning_tokens: saturate_u64_to_u32(rig_usage.reasoning_tokens.unwrap_or(0)),
+            reported: rig_usage.is_reported(),
         }
     }
 

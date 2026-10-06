@@ -545,7 +545,7 @@ impl CapabilityTool {
             cap_id.clone(),
             schema.description.clone(),
             schema.to_rig_tool().parameters,
-            move |_ctx, args_value| {
+            move |args_value| {
                 let cap_id = cap_id.clone();
                 let emitter = emitter.clone();
                 let chat_service = chat_service.clone();

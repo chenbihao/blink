@@ -1178,13 +1178,13 @@ mod tests {
     #[test]
     fn full_usage_from_rig_usage_maps_all_seven_fields() {
         let rig_usage = rig_core::completion::Usage {
-            input_tokens: 100,
-            output_tokens: 50,
-            total_tokens: 150,
-            cached_input_tokens: 30,
-            cache_creation_input_tokens: 10,
-            tool_use_prompt_tokens: 200,
-            reasoning_tokens: 25,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            total_tokens: Some(150),
+            cached_input_tokens: Some(30),
+            cache_creation_input_tokens: Some(10),
+            tool_use_prompt_tokens: Some(200),
+            reasoning_tokens: Some(25),
         };
 
         let full = Usage::from_rig_usage(&rig_usage);
@@ -1202,13 +1202,13 @@ mod tests {
     #[test]
     fn full_usage_u64_overflow_saturates() {
         let rig_usage = rig_core::completion::Usage {
-            input_tokens: u64::MAX,
-            output_tokens: u64::MAX,
-            total_tokens: u64::MAX,
-            cached_input_tokens: u64::MAX,
-            cache_creation_input_tokens: u64::MAX,
-            tool_use_prompt_tokens: u64::MAX,
-            reasoning_tokens: u64::MAX,
+            input_tokens: Some(u64::MAX),
+            output_tokens: Some(u64::MAX),
+            total_tokens: Some(u64::MAX),
+            cached_input_tokens: Some(u64::MAX),
+            cache_creation_input_tokens: Some(u64::MAX),
+            tool_use_prompt_tokens: Some(u64::MAX),
+            reasoning_tokens: Some(u64::MAX),
         };
 
         let full = Usage::from_rig_usage(&rig_usage);

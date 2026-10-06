@@ -624,10 +624,13 @@ pub async fn promote_ephemeral_conversation(
 
     // 3. write to persistent memory (SqliteConversationMemory)
     //    ConversationMemory::append 内部自动 create_conversation (INSERT OR IGNORE) + 逐条 append
+    //    0.43: ConversationMemory 的 id 类型为 &ConversationId
     let persistent = chat.persistent_memory().clone();
+    use rig_core::id::ConversationId;
     use rig_core::memory::ConversationMemory;
+    let conv_id = ConversationId::new(conversation_id.as_str());
     persistent
-        .append(&conversation_id, messages)
+        .append(&conv_id, messages)
         .await
         .map_err(|e| format!("写入持久对话失败: {e}"))?;
 

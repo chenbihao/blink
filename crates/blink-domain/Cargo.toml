@@ -33,9 +33,10 @@ open = "5.3.5"
 pinyin = "0.11.0"
 regex = "1.11"
 reqwest = { version = "0.13", features = ["json", "stream"] }
-# rig-core/agent + rmcp：AI/MCP 域（与根同版本/feature）
-rig-agent = { version = "0.42", features = ["rmcp", "test-utils"] }
-rig-core = { version = "0.42", features = ["test-utils"] }
+# rig-core/agent/rmcp：AI/MCP 域（与根同版本/feature；0.43 起 MCP 集成走 rig-rmcp）
+rig-agent = { version = "0.43", features = ["test-utils"] }
+rig-core = { version = "0.43", features = ["test-utils"] }
+rig-rmcp = { version = "0.43" }
 rmcp = { version = "2", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }

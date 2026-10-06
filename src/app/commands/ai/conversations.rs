@@ -153,10 +153,13 @@ pub async fn get_chat_messages(
                     match c {
                         AssistantContent::Text(t) => text.push_str(&t.text),
                         AssistantContent::Reasoning(r) => {
-                            thinking.push_str(&r.display_text());
+                            // 0.43: Reasoning 被 Sealed 包裹——用签发方身份打开读取展示文本
+                            if let Some(reasoning) = r.open(r.issuer()) {
+                                thinking.push_str(&reasoning.display_text());
+                            }
                         }
                         AssistantContent::ToolCall(tc) => {
-                            tool = Some(tc.function.name.clone());
+                            tool = Some(tc.function.name.to_string());
                             tool_args = Some(tc.function.arguments.to_string());
                         }
                         _ => {}

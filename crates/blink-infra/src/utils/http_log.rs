@@ -21,10 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::Bytes;
 use futures::StreamExt;
 use rig_core::http_client::{
-    Error as HttpClientError, HttpClientExt, LazyBody, Method, MultipartForm, Request, Response,
-    StreamingResponse, Uri, sse::BoxedStream,
+    BoxedStream, Error as HttpClientError, HeaderMap, HttpClientExt, LazyBody, Method,
+    MultipartForm, Request, Response, StreamingResponse, Uri,
 };
 use rig_core::wasm_compat::WasmCompatSend;
+use rig_reqwest::ReqwestClient;
 
 /// 请求/响应体日志 target（`blink` 子级，自动继承全局级别过滤）。
 const TARGET: &str = "blink::ai::http";
@@ -47,10 +48,33 @@ fn body_log_enabled() -> bool {
 
 /// 带请求/响应体日志的 HTTP client 包装。
 ///
-/// 内部持有 `reqwest::Client`（Arc 后端，clone 廉价），`Default` = `reqwest::Client::new()`，
+/// 内部持有 `rig_reqwest::ReqwestClient`（rig 0.43 起默认 transport 拆到 rig-reqwest；
+/// `Default` 即 rig 的进程共享 client，包装共享 reqwest 连接池，clone 廉价），
 /// 满足 rig `Client<H>` 对 `H: Clone + Debug + Default` 的约束。
 #[derive(Debug, Clone, Default)]
-pub struct LoggingHttpClient(pub reqwest::Client);
+pub struct LoggingHttpClient(pub ReqwestClient);
+
+/// 共享 reqwest client 未构建成功（reqwest builder 失败，极罕见）时 send 报的占位错误。
+#[derive(Debug)]
+struct SharedClientUnavailable;
+
+impl std::fmt::Display for SharedClientUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "进程共享 reqwest client 不可用")
+    }
+}
+
+impl std::error::Error for SharedClientUnavailable {}
+
+impl LoggingHttpClient {
+    /// 取内部 reqwest client（共享 client 构建失败时返回错误，与 rig-reqwest 语义一致）。
+    fn inner_client(&self) -> Result<reqwest::Client, HttpClientError> {
+        self.0
+            .inner()
+            .cloned()
+            .ok_or_else(|| HttpClientError::instance(SharedClientUnavailable))
+    }
+}
 
 impl HttpClientExt for LoggingHttpClient {
     fn send<T, U>(
@@ -67,8 +91,9 @@ impl HttpClientExt for LoggingHttpClient {
         if do_log {
             log_request(&parts.method, &parts.uri, &bytes);
         }
-        let client = self.0.clone();
+        let client = self.inner_client();
         async move {
+            let client = client?;
             let response = client
                 .request(parts.method, parts.uri.to_string())
                 .headers(parts.headers)
@@ -125,8 +150,9 @@ impl HttpClientExt for LoggingHttpClient {
         if do_log {
             log_request(&parts.method, &parts.uri, &bytes);
         }
-        let client = self.0.clone();
+        let client = self.inner_client();
         async move {
+            let client = client?;
             let request = client
                 .request(parts.method, parts.uri.to_string())
                 .headers(parts.headers)
@@ -175,15 +201,16 @@ fn log_request(method: &Method, uri: &Uri, bytes: &Bytes) {
     );
 }
 
-/// 非 2xx 错误：读响应体文本拼进错误（与 rig `non_success_status_error` 一致，保证 blink
-/// 现有 `map_rig_error` 的 4xx/5xx 诊断路径不受影响）。
+/// 非 2xx 错误：读响应体文本拼进错误（0.43 起保留 status/headers/body 三元组，
+/// blink 现有 `map_rig_error` 的 4xx/5xx 诊断路径不受影响）。
 async fn non_success_error(response: reqwest::Response) -> HttpClientError {
     let status = response.status();
+    let headers: HeaderMap = response.headers().clone();
     let message = response
         .text()
         .await
         .unwrap_or_else(|error| format!("failed to read error response body: {error}"));
-    HttpClientError::InvalidStatusCodeWithMessage(status, message)
+    HttpClientError::non_success_with_details(status, headers, message)
 }
 
 /// UTF-8 lossy + 截断，供日志单行展示。

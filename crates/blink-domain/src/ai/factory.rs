@@ -24,7 +24,8 @@
 
 use std::sync::Arc;
 
-use rig_core::client::CompletionClient;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 use crate::ai::provider::{AIError, AIProvider};
 use crate::ai::registry::ProviderFactory;
@@ -59,8 +60,8 @@ impl ProviderFactory for NoopFactory {
 /// 每次 `build` 都:
 /// 1. 从 CM 读密钥(缺 → SecretMissing)
 /// 2. 按 `entry.kind` 构造 rig `Client`(base_url 可覆盖)
-/// 3. `client.completion_model(&model.id)` 得到具体 `CompletionModel`
-/// 4. 包进 `RigProvider<M>` → 擦除 `Arc<dyn AIProvider>`
+/// 3. `client.completion(&model.id)` 得到 `Model<W>`，擦除为 `DynModel<Completion>`
+/// 4. 包进 `RigProvider` → 擦除 `Arc<dyn AIProvider>`
 ///
 /// **密钥生命周期**:`load_secret` → `expose_for_rig(&s)` **只一次** →
 /// 传给 rig `.api_key(k)`。返回后 `SecretString` Drop 走 zeroize。
@@ -134,86 +135,59 @@ impl ProviderFactory for RigFactory {
 pub(crate) fn build_openai_client(
     key: &str,
     base_url: Option<&str>,
-) -> Result<
-    rig_core::providers::openai::CompletionsClient<
-        blink_infra::utils::http_log::LoggingHttpClient,
-    >,
-    AIError,
-> {
+) -> Result<rig_core::providers::openai::OpenAI, AIError> {
     use rig_core::providers::openai;
     let url = base_url.filter(|s| !s.is_empty()).ok_or_else(|| {
         AIError::Provider(
             "OpenAI Compatible 协议必须配 base_url(如 https://api.openai.com/v1)".into(),
         )
     })?;
-    // 0.21.16: 注入 LoggingHttpClient——trace 级别打印真实请求/响应体（wire JSON），
+    // 0.21.16/0.43: 注入 LoggingHttpClient——trace 级别打印真实请求/响应体（wire JSON），
     // 排查 provider 兼容问题（如本地 qwen 思考块）。平时零开销透传。
-    openai::CompletionsClient::builder()
-        .api_key(key)
-        .base_url(url)
-        .http_client(blink_infra::utils::http_log::LoggingHttpClient::default())
-        .build()
-        .map_err(|_| AIError::Provider("openai-compatible client 构造失败".into()))
+    // 0.43: OpenAIConfig + connect(http)——client 不再携带 HTTP 泛型参数。
+    Ok(openai::OpenAIConfig::new(key)
+        .with_base_url(url)
+        .connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
 }
 
 /// 构造 Anthropic Messages 协议的 rig client（0.12.1 抽出）。
 pub(crate) fn build_anthropic_client(
     key: &str,
     base_url: Option<&str>,
-) -> Result<
-    rig_core::providers::anthropic::Client<blink_infra::utils::http_log::LoggingHttpClient>,
-    AIError,
-> {
+) -> Result<rig_core::providers::anthropic::Anthropic, AIError> {
     use rig_core::providers::anthropic;
-    let mut builder = anthropic::Client::builder()
-        .api_key(key)
-        // 0.21.16: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
-        .http_client(blink_infra::utils::http_log::LoggingHttpClient::default());
+    let mut config = anthropic::AnthropicConfig::new(key);
     if let Some(url) = base_url.filter(|s| !s.is_empty()) {
-        builder = builder.base_url(url);
+        config = config.with_base_url(url);
     }
-    builder
-        .build()
-        .map_err(|_| AIError::Provider("anthropic client 构造失败".into()))
+    // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
+    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
 }
 
 /// 构造 Google Gemini 协议的 rig client（0.12.1 抽出）。
-/// rig 0.42 gemini builder 不支持 base_url（端点固定 googleapis.com），用户填的忽略。
+/// rig 0.42+ gemini 不支持 base_url（端点固定 googleapis.com），用户填的忽略。
 pub(crate) fn build_gemini_client(
     key: &str,
     _base_url: Option<&str>,
-) -> Result<
-    rig_core::providers::gemini::Client<blink_infra::utils::http_log::LoggingHttpClient>,
-    AIError,
-> {
+) -> Result<rig_core::providers::gemini::Gemini, AIError> {
     use rig_core::providers::gemini;
-    gemini::Client::builder()
-        .api_key(key)
-        // 0.21.16: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
-        .http_client(blink_infra::utils::http_log::LoggingHttpClient::default())
-        .build()
-        .map_err(|_| AIError::Provider("gemini client 构造失败".into()))
+    // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
+    Ok(gemini::GeminiConfig::new(key)
+        .connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
 }
 
 /// 构造 ollama 本地推理的 rig client（0.12.1 抽出）。
-/// 无需 API Key（OllamaApiKey::default()=None），base_url 默认 localhost:11434。
+/// 无需 API Key（本地服务），base_url 默认 localhost:11434。
 pub(crate) fn build_ollama_client(
     base_url: Option<&str>,
-) -> Result<
-    rig_core::providers::ollama::Client<blink_infra::utils::http_log::LoggingHttpClient>,
-    AIError,
-> {
+) -> Result<rig_core::providers::ollama::Ollama, AIError> {
     use rig_core::providers::ollama;
-    let mut builder = ollama::Client::builder()
-        .api_key(ollama::OllamaApiKey::default())
-        // 0.21.16: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
-        .http_client(blink_infra::utils::http_log::LoggingHttpClient::default());
+    let mut config = ollama::OllamaConfig::new();
     if let Some(url) = base_url.filter(|s| !s.is_empty()) {
-        builder = builder.base_url(url);
+        config = config.with_base_url(url);
     }
-    builder
-        .build()
-        .map_err(|e| AIError::Provider(format!("ollama client 构造失败: {e}")))
+    // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
+    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
 }
 
 /// OpenAI Chat Completions 协议——**通用兼容层**(0.9.2 第二步)。
@@ -238,7 +212,7 @@ fn build_openai_compatible(
     // 第三方 Key 打去 OpenAI 官方必 401 且极难自诊断(前端已有校验;这里是双重保险,
     // 防止老配置迁移 / 手动编辑 db 绕过前端)。
     let client = build_openai_client(key, base_url)?;
-    let rig_model = client.completion_model(&model.id);
+    let rig_model: DynModel<Completion> = client.completion(&model.id).into();
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OpenAICompatible,
         model.id.clone(),
@@ -260,7 +234,7 @@ fn build_anthropic(
     model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
     let client = build_anthropic_client(key, base_url)?;
-    let rig_model = client.completion_model(&model.id);
+    let rig_model: DynModel<Completion> = client.completion(&model.id).into();
     Ok(Arc::new(RigProvider::new(
         ProviderKind::AnthropicMessages,
         model.id.clone(),
@@ -286,7 +260,7 @@ fn build_gemini(
     model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
     let client = build_gemini_client(key, base_url)?;
-    let rig_model = client.completion_model(&model.id);
+    let rig_model: DynModel<Completion> = client.completion(&model.id).into();
     Ok(Arc::new(RigProvider::new(
         ProviderKind::GeminiGenerateContent,
         model.id.clone(),
@@ -330,7 +304,7 @@ fn build_ollama(
         );
     }
 
-    let rig_model = client.completion_model(&model.id);
+    let rig_model: DynModel<Completion> = client.completion(&model.id).into();
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OllamaHttp,
         model.id.clone(),

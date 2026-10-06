@@ -40,7 +40,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, Reasoning, Text, UserContent};
+use rig_core::completion::message::{AssistantContent, Issuer, Reasoning, Sealed, Text, UserContent};
+use rig_core::id::ConversationId;
 use rig_core::memory::{ConversationMemory, MemoryError};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -794,10 +795,18 @@ impl SqliteConversationMemory {
     }
 
     /// 构造部分 assistant 消息（Reasoning 在前、Text 在后，与 rig 落库顺序一致）。
+    ///
+    /// 0.43: Reasoning 被 `Sealed` 包裹（只由签发方在重放时打开）。这里是我们
+    /// 本地拼接的**实况部分回复**，无法得知来源 provider——用 `blink` 作签发方，
+    /// provider wire 重放时不会打开（即崩溃恢复后部分思考不回传模型），
+    /// 文本本身仍完整落库/回显 UI。
     fn build_assistant_message(text: &str, thinking: &str) -> Message {
         let mut content: Vec<AssistantContent> = Vec::new();
         if !thinking.is_empty() {
-            content.push(AssistantContent::Reasoning(Reasoning::new(thinking)));
+            content.push(AssistantContent::Reasoning(Sealed::new(
+                Issuer::from("blink"),
+                Reasoning::new(thinking),
+            )));
         }
         if !text.is_empty() {
             content.push(AssistantContent::Text(Text::new(text)));
@@ -933,8 +942,9 @@ fn drop_leading_orphan_tool_results(messages: &mut Vec<Message>) {
 impl ConversationMemory for SqliteConversationMemory {
     fn load<'a>(
         &'a self,
-        conversation_id: &'a str,
+        conversation_id: &'a ConversationId,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
+        let conversation_id = conversation_id.as_str();
         Box::pin(async move {
             let result = self.load_inner(conversation_id).await?;
             Ok(result.messages)
@@ -943,11 +953,12 @@ impl ConversationMemory for SqliteConversationMemory {
 
     fn append<'a>(
         &'a self,
-        conversation_id: &'a str,
+        conversation_id: &'a ConversationId,
         messages: Vec<Message>,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         let pool = self.pool.clone();
         let live_turns = &self.live_turns;
+        let conversation_id = conversation_id.as_str();
 
         Box::pin(async move {
             // 合并实况回合（0.21.16）：删除流式期间写出的部分 assistant 行，
@@ -1020,9 +1031,10 @@ impl ConversationMemory for SqliteConversationMemory {
 
     fn clear<'a>(
         &'a self,
-        conversation_id: &'a str,
+        conversation_id: &'a ConversationId,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         let pool = self.pool.clone();
+        let conversation_id = conversation_id.as_str();
         Box::pin(async move {
             blink_infra::data::conversations::clear_messages(&pool, conversation_id)
                 .await
@@ -1089,8 +1101,9 @@ impl Default for EphemeralConversationMemory {
 impl ConversationMemory for EphemeralConversationMemory {
     fn load<'a>(
         &'a self,
-        conversation_id: &'a str,
+        conversation_id: &'a ConversationId,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
+        let conversation_id = conversation_id.as_str();
         Box::pin(async move {
             Ok(self
                 .conversations
@@ -1104,9 +1117,10 @@ impl ConversationMemory for EphemeralConversationMemory {
 
     fn append<'a>(
         &'a self,
-        conversation_id: &'a str,
+        conversation_id: &'a ConversationId,
         messages: Vec<Message>,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
+        let conversation_id = conversation_id.as_str();
         Box::pin(async move {
             let mut convs = self.conversations.write().await;
             let vec = convs.entry(conversation_id.to_string()).or_default();
@@ -1123,8 +1137,9 @@ impl ConversationMemory for EphemeralConversationMemory {
 
     fn clear<'a>(
         &'a self,
-        conversation_id: &'a str,
+        conversation_id: &'a ConversationId,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
+        let conversation_id = conversation_id.as_str();
         Box::pin(async move {
             self.conversations.write().await.remove(conversation_id);
             Ok(())
@@ -1176,18 +1191,18 @@ mod tests {
         // 1. 发出即保存：预写当前 user → pending 标记 + DB 写入
         mem.persist_user_message("c1", "hello", &[]).await.unwrap();
         // 2. load：应丢弃预写 user（rig 会把 prompt 追加一次）
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(
             loaded.is_empty(),
             "load 不应带出预写 user（避免与 rig 追加的 prompt 重复）: {loaded:?}"
         );
 
         // 3. 完成：rig append [user, assistant] → 跳过预写 user，补写 assistant，清标记
-        mem.append("c1", vec![user_msg("hello"), assistant_msg("hi")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("hello"), assistant_msg("hi")])
             .await
             .unwrap();
         // 4. load：标记已清，预写 user 作为普通历史出现
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
             texts,
@@ -1197,7 +1212,7 @@ mod tests {
 
         // 5. 第二轮：预写 world → load 只丢 world，hello/hi 仍在历史
         mem.persist_user_message("c1", "world", &[]).await.unwrap();
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
             texts,
@@ -1206,10 +1221,10 @@ mod tests {
         );
 
         // 6. 第二轮完成 → 历史四段完整
-        mem.append("c1", vec![user_msg("world"), assistant_msg("world reply")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("world"), assistant_msg("world reply")])
             .await
             .unwrap();
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
             texts,
@@ -1242,14 +1257,14 @@ mod tests {
                            （以上为本地音频附件，可用 transcribe_audio 能力转写后处理）\n\
                            转写这个附件";
         mem.append(
-            "c1",
+            &ConversationId::new("c1"),
             vec![user_msg(model_input), assistant_msg("好的，我来转写")],
         )
         .await
         .unwrap();
 
         // 3. 历史：只有一条干净的可见正文 user + assistant，无技术块/无重复
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
             texts,
@@ -1266,12 +1281,12 @@ mod tests {
         // 4. 下一轮无附件：行为与既有语义一致（文本匹配路径已由位置语义覆盖）
         mem.persist_user_message("c1", "总结一下", &[]).await.unwrap();
         mem.append(
-            "c1",
+            &ConversationId::new("c1"),
             vec![user_msg("总结一下"), assistant_msg("总结完成")],
         )
         .await
         .unwrap();
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
             texts,
@@ -1317,14 +1332,14 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         // 空对话 load 返回空
-        assert!(mem.load("c1").await.unwrap().is_empty());
+        assert!(mem.load(&ConversationId::new("c1")).await.unwrap().is_empty());
 
         // append 两条
-        mem.append("c1", vec![user_msg("hello"), assistant_msg("hi")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("hello"), assistant_msg("hi")])
             .await
             .unwrap();
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(loaded.len(), 2);
     }
 
@@ -1333,11 +1348,11 @@ mod tests {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool);
 
-        mem.append("a", vec![user_msg("hi a")]).await.unwrap();
-        mem.append("b", vec![user_msg("hi b")]).await.unwrap();
+        mem.append(&ConversationId::new("a"), vec![user_msg("hi a")]).await.unwrap();
+        mem.append(&ConversationId::new("b"), vec![user_msg("hi b")]).await.unwrap();
 
-        assert_eq!(mem.load("a").await.unwrap().len(), 1);
-        assert_eq!(mem.load("b").await.unwrap().len(), 1);
+        assert_eq!(mem.load(&ConversationId::new("a")).await.unwrap().len(), 1);
+        assert_eq!(mem.load(&ConversationId::new("b")).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1345,9 +1360,9 @@ mod tests {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool);
 
-        mem.append("c", vec![user_msg("x")]).await.unwrap();
-        mem.clear("c").await.unwrap();
-        assert!(mem.load("c").await.unwrap().is_empty());
+        mem.append(&ConversationId::new("c"), vec![user_msg("x")]).await.unwrap();
+        mem.clear(&ConversationId::new("c")).await.unwrap();
+        assert!(mem.load(&ConversationId::new("c")).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1370,12 +1385,12 @@ mod tests {
 
         // 写入 30 条消息
         for i in 0..30 {
-            mem.append("c1", vec![user_msg(&format!("msg {i}"))])
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&format!("msg {i}"))])
                 .await
                 .unwrap();
         }
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         // 滑动窗口只返回最近 20 条
         assert_eq!(loaded.len(), 20);
 
@@ -1398,7 +1413,7 @@ mod tests {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool);
 
-        mem.append("c1", vec![user_msg("Hello world this is a test")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("Hello world this is a test")])
             .await
             .unwrap();
 
@@ -1418,7 +1433,7 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         let long_text = "x".repeat(100);
-        mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+        mem.append(&ConversationId::new("c1"), vec![user_msg(&long_text)]).await.unwrap();
 
         let convs = blink_infra::data::conversations::list_conversations(&mem.pool)
             .await
@@ -1442,16 +1457,16 @@ mod tests {
             content: vec![rig_core::completion::message::AssistantContent::ToolCall(
                 ToolCall::from_wire(
                     "call_1",
-                    ToolFunction::new("search".to_string(), serde_json::json!({"q": "test"})),
+                    ToolFunction::new(rig_core::message::ToolName::try_from("search").unwrap(), serde_json::json!({"q": "test"})),
                 ),
             )],
         };
 
-        mem.append("c1", vec![user_msg("search for test"), assistant_with_tool])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("search for test"), assistant_with_tool])
             .await
             .unwrap();
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(loaded.len(), 2);
 
         // 第二条是 assistant 消息，应包含 ToolCall
@@ -1472,10 +1487,10 @@ mod tests {
         let inner = std::sync::Arc::new(SqliteConversationMemory::new(pool));
         let mem: std::sync::Arc<dyn ConversationMemory> = inner.clone();
 
-        mem.append("c", vec![user_msg("hello")]).await.unwrap();
-        assert_eq!(mem.load("c").await.unwrap().len(), 1);
-        mem.clear("c").await.unwrap();
-        assert!(mem.load("c").await.unwrap().is_empty());
+        mem.append(&ConversationId::new("c"), vec![user_msg("hello")]).await.unwrap();
+        assert_eq!(mem.load(&ConversationId::new("c")).await.unwrap().len(), 1);
+        mem.clear(&ConversationId::new("c")).await.unwrap();
+        assert!(mem.load(&ConversationId::new("c")).await.unwrap().is_empty());
     }
 
     #[test]
@@ -1488,9 +1503,8 @@ mod tests {
         fn tool_result_msg(id: &str) -> Message {
             Message::User {
                 content: vec![UserContent::ToolResult(ToolResult {
-                    call: rig_core::message::ToolCallId::new_or_mint(id),
-                    provider: None,
-                    name: id.to_string(),
+                    call: rig_core::message::CallId::from_wire(id),
+                    name: rig_core::message::ToolName::try_from(id).unwrap(),
                     content: vec![ToolResultContent::text("ok")],
                 })],
             }
@@ -1540,7 +1554,7 @@ mod tests {
                 content: vec![rig_core::completion::message::AssistantContent::ToolCall(
                     ToolCall::from_wire(
                         "call_1",
-                        ToolFunction::new("search".to_string(), serde_json::json!({})),
+                        ToolFunction::new(rig_core::message::ToolName::try_from("search").unwrap(), serde_json::json!({})),
                     ),
                 )],
             };
@@ -1675,10 +1689,10 @@ mod tests {
             let long_text = format!(
                 "message {i:03} with substantial content to increase token count significantly"
             );
-            mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&long_text)]).await.unwrap();
         }
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         // 应该被压缩——返回的消息数应远少于 30
         assert!(
             loaded.len() < 30,
@@ -1705,12 +1719,12 @@ mod tests {
         let mem = SqliteConversationMemory::with_config(pool, config);
 
         for i in 0..10 {
-            mem.append("c1", vec![user_msg(&format!("msg {i}"))])
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&format!("msg {i}"))])
                 .await
                 .unwrap();
         }
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         // FixedCount 模式应严格返回 window_size 条
         assert_eq!(
             loaded.len(),
@@ -1741,11 +1755,11 @@ mod tests {
             let long_text = format!(
                 "message {i:03} with enough content to exceed the very small token limit we set"
             );
-            mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&long_text)]).await.unwrap();
         }
 
         // load 应返回裁剪后的窗口
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(loaded.len() < 20, "Should be truncated");
 
         // DB 应保留完整历史
@@ -1776,7 +1790,7 @@ mod tests {
         // 写入 10 条中等长度消息
         for i in 0..10 {
             mem.append(
-                "c1",
+                &ConversationId::new("c1"),
                 vec![user_msg(&format!("message {i:03} with moderate content"))],
             )
             .await
@@ -1785,12 +1799,12 @@ mod tests {
 
         // 大 limit → 不裁剪
         mem.update_context_limit(Some(100_000)).await;
-        let loaded_big = mem.load("c1").await.unwrap();
+        let loaded_big = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(loaded_big.len(), 10, "Large limit should not truncate");
 
         // 小 limit → 裁剪
         mem.update_context_limit(Some(50)).await;
-        let loaded_small = mem.load("c1").await.unwrap();
+        let loaded_small = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(loaded_small.len() < 10, "Small limit should truncate");
     }
 
@@ -1857,11 +1871,11 @@ mod tests {
         // 写入大量消息使窗口裁剪发生
         for i in 0..20 {
             let long_text = format!("message_{i:03} with substantial content about topic_{i}");
-            mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&long_text)]).await.unwrap();
         }
 
         // load 应裁剪，被裁剪的消息应归档到 FTS5
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(loaded.len() < 20, "应被裁剪");
 
         // 验证 FTS5 中有归档记录——搜索一个早期消息的关键词
@@ -1898,19 +1912,19 @@ mod tests {
         // 写入一些关于 Rust 的消息，让它们被裁剪并归档
         for i in 0..15 {
             let text = format!("讨论 Rust async runtime topic_{i:03} with details");
-            mem.append("c1", vec![user_msg(&text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&text)]).await.unwrap();
         }
 
         // 第一次 load 触发归档
-        let _ = mem.load("c1").await.unwrap();
+        let _ = mem.load(&ConversationId::new("c1")).await.unwrap();
 
         // 再追加一条关于 Rust 的消息（OR 语义下，任一关键词命中即召回）
-        mem.append("c1", vec![user_msg("Rust async runtime")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("Rust async runtime")])
             .await
             .unwrap();
 
         // 第二次 load 应召回相关的旧消息并注入 <memory> 块
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
 
         // 检查是否有 <memory> 系统消息
         let has_memory = loaded.iter().any(|m| {
@@ -1943,15 +1957,15 @@ mod tests {
 
         for i in 0..15 {
             let text = format!("讨论 Rust topic_{i:03} with details");
-            mem.append("c1", vec![user_msg(&text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&text)]).await.unwrap();
         }
 
-        let _ = mem.load("c1").await.unwrap();
-        mem.append("c1", vec![user_msg("Rust details")])
+        let _ = mem.load(&ConversationId::new("c1")).await.unwrap();
+        mem.append(&ConversationId::new("c1"), vec![user_msg("Rust details")])
             .await
             .unwrap();
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         let has_memory = loaded.iter().any(|m| {
             if let Message::System { content } = m {
                 content.contains("<memory>")
@@ -1987,7 +2001,7 @@ mod tests {
             let long_text = format!(
                 "message {i:03} with enough content to exceed the very small token limit we set"
             );
-            mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&long_text)]).await.unwrap();
         }
 
         let result = mem.load_with_stats("c1").await.unwrap();
@@ -2016,10 +2030,10 @@ mod tests {
         // 写入消息触发归档
         for i in 0..15 {
             let text = format!("讨论 Rust topic_{i:03} with details");
-            mem.append("c1", vec![user_msg(&text)]).await.unwrap();
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&text)]).await.unwrap();
         }
-        let _ = mem.load("c1").await.unwrap(); // 第一次 load 归档
-        mem.append("c1", vec![user_msg("Rust details")])
+        let _ = mem.load(&ConversationId::new("c1")).await.unwrap(); // 第一次 load 归档
+        mem.append(&ConversationId::new("c1"), vec![user_msg("Rust details")])
             .await
             .unwrap();
 
@@ -2045,7 +2059,7 @@ mod tests {
         config.write().await.context_limit = Some(100_000);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
-        mem.append("c1", vec![user_msg("short message")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("short message")])
             .await
             .unwrap();
 
@@ -2061,14 +2075,14 @@ mod tests {
         let mem = EphemeralConversationMemory::new();
 
         // 空对话 load 返回空
-        assert!(mem.load("c1").await.unwrap().is_empty());
+        assert!(mem.load(&ConversationId::new("c1")).await.unwrap().is_empty());
 
         // append 两条消息
-        mem.append("c1", vec![user_msg("hello"), assistant_msg("hi")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("hello"), assistant_msg("hi")])
             .await
             .unwrap();
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(loaded.len(), 2);
     }
 
@@ -2076,27 +2090,27 @@ mod tests {
     async fn ephemeral_isolation_between_conversations() {
         let mem = EphemeralConversationMemory::new();
 
-        mem.append("a", vec![user_msg("hi a")]).await.unwrap();
-        mem.append("b", vec![user_msg("hi b")]).await.unwrap();
+        mem.append(&ConversationId::new("a"), vec![user_msg("hi a")]).await.unwrap();
+        mem.append(&ConversationId::new("b"), vec![user_msg("hi b")]).await.unwrap();
 
-        assert_eq!(mem.load("a").await.unwrap().len(), 1);
-        assert_eq!(mem.load("b").await.unwrap().len(), 1);
+        assert_eq!(mem.load(&ConversationId::new("a")).await.unwrap().len(), 1);
+        assert_eq!(mem.load(&ConversationId::new("b")).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn ephemeral_clear_removes_history() {
         let mem = EphemeralConversationMemory::new();
 
-        mem.append("c", vec![user_msg("x")]).await.unwrap();
-        mem.clear("c").await.unwrap();
-        assert!(mem.load("c").await.unwrap().is_empty());
+        mem.append(&ConversationId::new("c"), vec![user_msg("x")]).await.unwrap();
+        mem.clear(&ConversationId::new("c")).await.unwrap();
+        assert!(mem.load(&ConversationId::new("c")).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn ephemeral_export_messages_returns_clone() {
         let mem = EphemeralConversationMemory::new();
 
-        mem.append("c1", vec![user_msg("hello"), assistant_msg("world")])
+        mem.append(&ConversationId::new("c1"), vec![user_msg("hello"), assistant_msg("world")])
             .await
             .unwrap();
 
@@ -2105,7 +2119,7 @@ mod tests {
         assert_eq!(exported.len(), 2);
 
         // 内部状态不变
-        assert_eq!(mem.load("c1").await.unwrap().len(), 2);
+        assert_eq!(mem.load(&ConversationId::new("c1")).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -2118,11 +2132,11 @@ mod tests {
     async fn ephemeral_remove_deletes_conversation() {
         let mem = EphemeralConversationMemory::new();
 
-        mem.append("c1", vec![user_msg("hello")]).await.unwrap();
-        assert_eq!(mem.load("c1").await.unwrap().len(), 1);
+        mem.append(&ConversationId::new("c1"), vec![user_msg("hello")]).await.unwrap();
+        assert_eq!(mem.load(&ConversationId::new("c1")).await.unwrap().len(), 1);
 
         mem.remove("c1").await;
-        assert!(mem.load("c1").await.unwrap().is_empty());
+        assert!(mem.load(&ConversationId::new("c1")).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2134,12 +2148,12 @@ mod tests {
         let ephemeral_mem = EphemeralConversationMemory::new();
 
         ephemeral_mem
-            .append("ephemeral-1", vec![user_msg("temp message")])
+            .append(&ConversationId::new("ephemeral-1"), vec![user_msg("temp message")])
             .await
             .unwrap();
 
         // SQLite 中同 ID 对话仍为空
-        assert!(sqlite_mem.load("ephemeral-1").await.unwrap().is_empty());
+        assert!(sqlite_mem.load(&ConversationId::new("ephemeral-1")).await.unwrap().is_empty());
     }
 
     // ── 0.42: 旧版消息格式安全加载测试 ──────────────────────────────────
@@ -2186,7 +2200,7 @@ mod tests {
             .unwrap();
 
         // load 应跳过损坏行，返回 2 条正常消息（而非报错）
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(
             loaded.len(),
             2,
@@ -2208,7 +2222,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = mem.load("c2").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c2")).await.unwrap();
         assert!(
             loaded.is_empty(),
             "全部损坏时应返回空 Vec，实际: {} 条",
@@ -2242,7 +2256,7 @@ mod tests {
         // 写入 10 条中等长度消息
         for i in 0..10 {
             mem.append(
-                "c1",
+                &ConversationId::new("c1"),
                 vec![user_msg(&format!("message {i:03} with moderate content"))],
             )
             .await
@@ -2252,7 +2266,7 @@ mod tests {
         // 1. context_limit 大 + history_budget 小 → 应裁剪
         mem.update_context_limit(Some(100_000)).await;
         mem.update_history_budget(Some(50)).await;
-        let loaded_small_budget = mem.load("c1").await.unwrap();
+        let loaded_small_budget = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(
             loaded_small_budget.len() < 10,
             "history_budget=50 应触发裁剪，实际: {} 条",
@@ -2261,7 +2275,7 @@ mod tests {
 
         // 2. history_budget 大 → 不裁剪
         mem.update_history_budget(Some(100_000)).await;
-        let loaded_big_budget = mem.load("c1").await.unwrap();
+        let loaded_big_budget = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(
             loaded_big_budget.len(),
             10,
@@ -2291,7 +2305,7 @@ mod tests {
         // 写入 10 条中等长度消息
         for i in 0..10 {
             mem.append(
-                "c1",
+                &ConversationId::new("c1"),
                 vec![user_msg(&format!("message {i:03} with moderate content"))],
             )
             .await
@@ -2301,13 +2315,13 @@ mod tests {
         // 注入小 history_budget → 裁剪
         mem.update_context_limit(Some(100_000)).await;
         mem.update_history_budget(Some(50)).await;
-        let loaded_with_budget = mem.load("c1").await.unwrap();
+        let loaded_with_budget = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(loaded_with_budget.len() < 10, "history_budget=50 应裁剪");
 
         // 模型切换 → update_context_limit 应使 history_budget 失效
         // 新 context_limit 仍是 100_000（大窗口），裁剪应回到 context_limit 基准 → 不裁剪
         mem.update_context_limit(Some(100_000)).await;
-        let loaded_after_switch = mem.load("c1").await.unwrap();
+        let loaded_after_switch = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(
             loaded_after_switch.len(),
             10,
@@ -2336,7 +2350,7 @@ mod tests {
         // 写入消息
         for i in 0..10 {
             mem.append(
-                "c1",
+                &ConversationId::new("c1"),
                 vec![user_msg(&format!("message {i:03} with moderate content"))],
             )
             .await
@@ -2374,7 +2388,7 @@ mod tests {
         drop(cfg);
 
         // 行为验证：history_budget=50 仍生效 → 裁剪
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(
             loaded.len() < 10,
             "apply_config 后 history_budget 仍应驱动裁剪"
@@ -2405,7 +2419,7 @@ mod tests {
             .unwrap();
 
         // load 应返回 4 条：q1, partial1, q2, partial2
-        let loaded = mem.load("c").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c")).await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
             texts,
@@ -2428,12 +2442,12 @@ mod tests {
 
         // 写入 80 条 user 消息（编号 0..80）
         for i in 0..80 {
-            mem.append("c1", vec![user_msg(&format!("msg {i}"))])
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&format!("msg {i}"))])
                 .await
                 .unwrap();
         }
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert!(
             loaded.len() <= MAX_EPHEMERAL_MESSAGES,
             "load 不应超过上限 {MAX_EPHEMERAL_MESSAGES}，实际: {}",
@@ -2465,9 +2479,8 @@ mod tests {
         fn tool_result_msg(id: &str) -> Message {
             Message::User {
                 content: vec![UserContent::ToolResult(ToolResult {
-                    call: rig_core::message::ToolCallId::new_or_mint(id),
-                    provider: None,
-                    name: id.to_string(),
+                    call: rig_core::message::CallId::from_wire(id),
+                    name: rig_core::message::ToolName::try_from(id).unwrap(),
                     content: vec![ToolResultContent::text("ok")],
                 })],
             }
@@ -2477,13 +2490,13 @@ mod tests {
         // 裁剪后丢前 2 条，剩 49 条 ToolResult + 1 条 user
         // 但 drop_leading_orphan_tool_results 会继续丢弃开头的孤立 ToolResult
         for i in 0..51 {
-            mem.append("c1", vec![tool_result_msg(&format!("r{i}"))])
+            mem.append(&ConversationId::new("c1"), vec![tool_result_msg(&format!("r{i}"))])
                 .await
                 .unwrap();
         }
-        mem.append("c1", vec![user_msg("hello")]).await.unwrap();
+        mem.append(&ConversationId::new("c1"), vec![user_msg("hello")]).await.unwrap();
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         // 裁剪 + 丢弃孤立 ToolResult 后，首条不应是纯 ToolResult
         let first = &loaded[0];
         let is_pure_tool_result = match first {
@@ -2701,12 +2714,12 @@ mod tests {
 
         // 写入 5 条消息
         for i in 0..5 {
-            mem.append("c1", vec![user_msg(&format!("msg {i}"))])
+            mem.append(&ConversationId::new("c1"), vec![user_msg(&format!("msg {i}"))])
                 .await
                 .unwrap();
         }
 
-        let loaded = mem.load("c1").await.unwrap();
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(loaded.len(), 5, "FixedCount 模式应返回全部 5 条消息");
     }
 

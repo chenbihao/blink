@@ -1,4 +1,4 @@
-//! `RigProvider` —— 用 rig-core `CompletionModel` 实体承载 `AIProvider` trait。
+//! `RigProvider` —— 用 rig-core `DynModel<Completion>` 实体承载 `AIProvider` trait。
 //!
 //! ## 位置在架构里的意义
 //!
@@ -6,25 +6,24 @@
 //! `execution/schema.rs::to_rig_tool`)。上层调用方 `use crate::ai::AIProvider`
 //! 拿到 `Arc<dyn AIProvider>` 时,rig 类型编译期就没了——§2.6 类型收窄编译期钉死。
 //!
-//! `RigProvider<M>` 是**泛型**而非 `Box<dyn CompletionModel>`——rig 0.39
-//! `CompletionModel: Clone + WasmCompatSend + WasmCompatSync` 且有 3 个关联类型
-//! (`Response / StreamingResponse / Client`),**不 object-safe**。
-//! `RigFactory` 按 `ProviderKind` 实例化具体 `RigProvider<openai::…::CompletionModel>` /
-//! `RigProvider<anthropic::…::CompletionModel>` 等,再擦除到 `Arc<dyn AIProvider>`。
+//! **0.43: 不再泛型**——rig 0.42 的 `CompletionModel`(3 关联类型非 object-safe)
+//! 在 0.43 被 `Model<W>`(wire+transport 对)与 `DynModel<Op>`(擦除句柄)取代。
+//! `RigProvider` 直接持 `DynModel<Completion>`,四种 provider 的 model 在 factory
+//! 处统一擦除,本文件不再有泛型参数(与对话窗口 `AgentProvider` 的 `ChatAgent` 同一思路)。
 //!
 //! ## 硬超时(§3.3 骨架层)
 //!
-//! rig 的 `CompletionError::HttpError` 没有 timeout 语义(`http_client::Error` 8 变体
-//! 都没有 timeout),不能指望 rig 自己报超时。**必须外层 `tokio::time::timeout`
-//! 包住 `model.completion(request)`**——这是 spike `skeleton.rs:19` 已验证的模式,
-//! future drop 时 in-flight reqwest task 自动 abort,<100ms 释放。
+//! rig 的传输错误没有 timeout 语义,不能指望 rig 自己报超时。**必须外层
+//! `tokio::time::timeout` 包住 `model.call(request)`**——这是 spike
+//! `skeleton.rs:19` 已验证的模式,future drop 时 in-flight reqwest task 自动
+//! abort,<100ms 释放。
 //!
-//! ## 流式两阶段超时(0.9.7+)
+//! ## 流式两阶段超时(0.9.7+ → 0.43 退化)
 //!
-//! `stream()` 的超时不是一把包住全过程的硬超时,而是分两阶段:
-//! - **Phase 1(连接)**:`model.stream()` 建立连接——用完整 deadline 作硬超时
-//! - **Phase 2(chunk 循环)**:每个 chunk 的等待用 deadline 作 **idle timeout**
-//!   (两个 chunk 之间的最大间隔)。token 持续到达则不超时,只有 stall 才判超时。
+//! 0.42 时代 `stream()` 分两阶段(建连硬超时 + chunk 循环 idle 超时)。
+//! 0.43 起 `model.stream()` **同步返回 lazy 流**(连接发生在首次 poll),
+//! 两阶段合一:逐 item 的等待用 deadline 作 **idle timeout**——token 持续到达
+//! 则不超时,只有 stall 才判超时;首个 item(含建连+模型排队)同样受 deadline 保护。
 //!
 //! 这修复了"流式返回到一半触发硬超时"的问题——AI 正在工作(持续吐 token)不应
 //! 被打断。idle timeout 与连接超时复用同一 `timeout_ms`,未来可拆分独立配置。
@@ -46,12 +45,15 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rig_core::completion::{
-    AssistantContent, CompletionError, CompletionModel as RigCompletionModel,
-    CompletionRequest as RigCompletionRequest, FinishReason as RigFinishReason,
+    AssistantContent, CompletionRequest as RigCompletionRequest, FinishReason as RigFinishReason,
     Message as RigMessage,
 };
-use rig_core::message::{ToolCall as RigToolCall, ToolFunction as RigToolFunc};
-use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
+use rig_core::driver::DynModel;
+use rig_core::error::ProviderError;
+use rig_core::message::{CallId as RigCallId, ToolCall as RigToolCall, ToolFunction as RigToolFunc, ToolName as RigToolName};
+use rig_core::operation::Completion;
+use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent};
+use rig_core::ProviderResponseError;
 use tokio::sync::mpsc;
 
 use crate::ai::message::{
@@ -64,21 +66,18 @@ use crate::config::ai_config::{
 };
 use blink_infra::platform::secret::SecretString;
 
-/// rig-core 承载的 `AIProvider` 实体。泛型 M 由 factory 按 `ProviderKind` 敲定。
+/// rig-core 承载的 `AIProvider` 实体（0.43 起持擦除后的 `DynModel<Completion>`，不再泛型）。
 ///
 /// **字段可见性**:`pub(crate)` 不 re-export——`use crate::ai::AIProvider`
 /// 的上层拿不到具体类型,只能通过 `Arc<dyn AIProvider>` 消费。
 ///
-/// **无 PhantomData**:`model: M` 字段已经消耗了泛型参数 M,不需要额外的
-/// `PhantomData<M>`(那是"仅带类型标记但不实际持有 M"时的模板,与此处场景无关)。
-///
 /// **0.9.4 Step 1 模型级参数默认值**:`default_temperature / default_max_tokens /
 /// custom_parameters` 三个字段承载 `ModelEntry` 里的调用参数。构造时一次固化,
 /// `complete()` 时用 request 值 fallback 到这里(见 `build_rig_request`)。
-pub(crate) struct RigProvider<M: RigCompletionModel> {
+pub(crate) struct RigProvider {
     kind: ProviderKind,
     model_id: String,
-    model: M,
+    model: DynModel<Completion>,
     default_timeout_ms: u32,
     // 0.9.4 Step 1:模型级参数默认值——None 表示"不覆盖,请求方决定"
     default_temperature: Option<f32>,
@@ -92,7 +91,7 @@ pub(crate) struct RigProvider<M: RigCompletionModel> {
     thinking_off_patch: Option<serde_json::Value>,
 }
 
-impl<M: RigCompletionModel> RigProvider<M> {
+impl RigProvider {
     /// 构造——`RigFactory` 在挑好 rig client + model_id 后调这个。
     ///
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
@@ -104,7 +103,7 @@ impl<M: RigCompletionModel> RigProvider<M> {
     pub(crate) fn new(
         kind: ProviderKind,
         model_id: impl Into<String>,
-        model: M,
+        model: DynModel<Completion>,
         default_timeout_ms: Option<u32>,
         default_temperature: Option<f32>,
         default_max_tokens: Option<u32>,
@@ -163,10 +162,7 @@ fn build_custom_params_json(params: &[CustomParam]) -> Option<serde_json::Value>
 }
 
 #[async_trait]
-impl<M> AIProvider for RigProvider<M>
-where
-    M: RigCompletionModel + Send + Sync + 'static,
-{
+impl AIProvider for RigProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
     }
@@ -190,7 +186,7 @@ where
 
         let start = Instant::now();
         // 外层 tokio::time::timeout —— rig 自己不报 timeout(见文件顶注)
-        let result = tokio::time::timeout(deadline, self.model.completion(rig_req)).await;
+        let result = tokio::time::timeout(deadline, self.model.call(rig_req)).await;
         let elapsed = start.elapsed().as_millis() as u32;
 
         match result {
@@ -202,14 +198,14 @@ where
 
     /// 流式 completion —— 调 rig `model.stream()` 逐 chunk 通过 channel 发送。
     ///
-    /// **两阶段超时**(见文件顶注「流式两阶段超时」):
-    /// - Phase 1:`model.stream()` 建立连接——用完整 deadline 作硬超时
-    /// - Phase 2:逐 chunk 循环——每个 chunk 的等待用 deadline 作 idle timeout
+    /// **idle 超时**（0.43 起 stream() 同步返回 lazy 流，两阶段退化为单阶段）:
+    /// 每个 item 的等待用 deadline 作 idle timeout——token 持续到达则不超时;
+    /// 只有 item 间隔超过 deadline 才判 stall 超时。首个 item(含建连+模型排队)
+    /// 同样受 deadline 保护。
     ///
-    /// 只要 token 持续到达,总时长不限;只有 chunk 间出现 deadline 长的 stall 才超时。
-    ///
-    /// **tool_calls 收集**:流式过程中 Text chunk 实时发送;tool_calls 在流结束后
-    /// 通过 `StreamChunk::Done` 一次性返回(调用方统一处理)。
+    /// **tool_calls 收集**:流式过程中 Text 事件实时发送;tool_calls 在 part End
+    /// 定型时(0.43: `StreamEvent::End` 携带 `AssistantContent::ToolCall`)收集,
+    /// 流结束后通过 `StreamChunk::Done` 一次性返回(调用方统一处理)。
     async fn stream(
         &self,
         req: CompletionRequest,
@@ -229,43 +225,42 @@ where
 
         let start = Instant::now();
 
-        // ── Phase 1: 建立连接,等首个响应 ──────────────────────────────
-        // 用完整 deadline 作硬超时——AI 在 deadline 内没开始返回(连接慢/排队),判超时。
-        let mut streaming_resp =
-            match tokio::time::timeout(deadline, self.model.stream(rig_req)).await {
-                Err(_) => return Err(AIError::Timeout), // 连接阶段超时
-                Ok(Err(rig_err)) => return Err(map_rig_error(rig_err)),
-                Ok(Ok(resp)) => resp,
-            };
+        // 0.43: stream() 同步构造 lazy 流（编码错误在此同步返回）；
+        // 建连发生在首次 poll，由下方循环的 idle timeout 覆盖。
+        let mut streaming_resp = self.model.stream(rig_req).map_err(map_rig_error)?;
 
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-        // ── Phase 2: 逐 chunk 消费,每个 chunk 用 deadline 作 idle timeout ──
-        // token 持续到达则不超时;只有两个 chunk 间隔超过 deadline 才判 stall 超时。
+        // ── 逐 item 消费,每个 item 用 deadline 作 idle timeout ──
+        // token 持续到达则不超时;只有两个 item 间隔超过 deadline 才判 stall 超时。
         loop {
             let chunk_result =
                 match tokio::time::timeout(deadline, StreamExt::next(&mut streaming_resp)).await {
-                    Err(_) => return Err(AIError::Timeout), // chunk 间 idle 超时
+                    Err(_) => return Err(AIError::Timeout), // item 间 idle 超时
                     Ok(None) => break,                      // 流正常结束
                     Ok(Some(result)) => result,
                 };
 
             match chunk_result {
-                Ok(raw_choice) => match raw_choice {
-                    RigStreamChunk::Text(t) => {
-                        if tx.send(StreamChunk::Text(t.text)).is_err() {
+                Ok(item) => match item {
+                    RigStreamItem::Event(RigStreamEvent::Text { text, .. }) => {
+                        if tx.send(StreamChunk::Text(text)).is_err() {
                             // 接收端已关闭(调用方 drop 了)——提前终止
                             return Ok(());
                         }
                     }
-                    RigStreamChunk::ToolCall { tool_call: tc, .. } => {
-                        tool_calls.push(ToolCall {
-                            id: tc.id.to_string(),
-                            name: tc.function.name.clone(),
-                            arguments: tc.function.arguments.clone(),
-                        });
+                    RigStreamItem::Event(RigStreamEvent::End { content, .. }) => {
+                        // 0.43: tool call 在 part End 定型时收集
+                        if let AssistantContent::ToolCall(tc) = content {
+                            tool_calls.push(ToolCall {
+                                id: tc.id.to_string(),
+                                name: tc.function.name.to_string(),
+                                arguments: tc.function.arguments.clone(),
+                            });
+                        }
                     }
-                    _ => {} // ToolCallDelta / Reasoning / Final 等忽略
+                    // Reasoning / Start / Arguments / Unknown——主窗口不消费
+                    _ => {}
                 },
                 Err(e) => return Err(map_rig_error(e)),
             }
@@ -324,7 +319,8 @@ fn build_rig_request(
     custom_params: Option<&serde_json::Value>,
     thinking_off_patch: Option<&serde_json::Value>,
 ) -> Result<RigCompletionRequest, AIError> {
-    // 抽 system → preamble;user 消息进 chat_history
+    // 抽 system → 请求头 System 消息;user 消息进 chat_history
+    // (0.43: CompletionRequest 无 preamble 字段,system 以 Message::System 置于 chat_history 首)
     let mut preamble: Option<String> = None;
     let mut user_msgs: Vec<RigMessage> = Vec::new();
     // 0.42: 建立 tool_call_id → tool_name 映射，供后续 Role::Tool 消息查询。
@@ -341,7 +337,7 @@ fn build_rig_request(
                     None => m.content.clone(),
                 });
             }
-            Role::User => user_msgs.push(RigMessage::from(m.content.as_str())),
+            Role::User => user_msgs.push(RigMessage::user(&m.content)),
             Role::Assistant => {
                 // 0.11.4 Turn 2 回流:assistant 消息携带 tool_call_id + JSON content
                 // content 格式: {"name":"search_apps","arguments":{...}}
@@ -356,9 +352,12 @@ fn build_rig_request(
                     {
                         // 记录 tool_call_id → name 映射，供后续 Role::Tool 查询
                         tool_name_map.insert(tc_id.clone(), name.to_string());
+                        let tool_name = RigToolName::try_from(name).map_err(|_| {
+                            AIError::Serialization("assistant tool_call 的 name 为空".into())
+                        })?;
                         let tool_call = RigToolCall::from_wire(
                             tc_id.clone(),
-                            RigToolFunc::new(name.to_string(), arguments.clone()),
+                            RigToolFunc::new(tool_name, arguments.clone()),
                         );
                         user_msgs.push(RigMessage::Assistant {
                             id: None,
@@ -394,7 +393,14 @@ fn build_rig_request(
                              0.42 要求 tool_result 携带真实工具名,请检查 tool 执行回流路径"
                         ))
                     })?;
-                user_msgs.push(RigMessage::tool_result(id, &name, &m.content));
+                // 0.43: tool_result 显式接 CallId + ToolName（空名在 try_from 处拒绝）
+                let call_id = RigCallId::from_wire(id.clone());
+                let tool_name = RigToolName::try_from(name.as_str()).map_err(|_| {
+                    AIError::Serialization(format!(
+                        "ToolResult 的 tool_name 为空（tool_call_id={id}）"
+                    ))
+                })?;
+                user_msgs.push(RigMessage::tool_result(call_id, tool_name, &m.content));
             }
         }
     }
@@ -405,7 +411,11 @@ fn build_rig_request(
             "CompletionRequest.messages 至少需一条 user 消息".into(),
         ));
     }
-    let chat_history = user_msgs;
+    let mut chat_history = user_msgs;
+    // 0.43: system 作为 Message::System 置于 chat_history 首（原 preamble 字段已删）
+    if let Some(preamble) = preamble {
+        chat_history.insert(0, RigMessage::system(preamble));
+    }
 
     // ToolSchema → rig::ToolDefinition(唯一 tool 类型投影)
     let tools = req.tools.iter().map(|s| s.to_rig_tool()).collect();
@@ -426,7 +436,6 @@ fn build_rig_request(
 
     Ok(RigCompletionRequest {
         model: None,
-        preamble,
         chat_history,
         documents: Vec::new(),
         tools,
@@ -487,7 +496,7 @@ pub(crate) fn map_rig_response(
             AssistantContent::Text(t) => texts.push(t.text.clone()),
             AssistantContent::ToolCall(tc) => tool_calls.push(ToolCall {
                 id: tc.id.to_string(),
-                name: tc.function.name.clone(),
+                name: tc.function.name.to_string(),
                 arguments: tc.function.arguments.clone(),
             }),
             // 0.9.2 主窗口不消费 reasoning / image
@@ -528,78 +537,91 @@ pub(crate) fn map_rig_response(
 
 // ── 错误映射:rig → 我们的(保守 + 有诊断价值) ────────────────────────────
 
-/// rig `CompletionError` → `AIError`——**保守透传状态码 + 脱敏响应体片段**。
+/// rig `ProviderError` → `AIError`——**保守透传状态码 + 脱敏响应体片段**。
 ///
-/// ## rig 0.39 的错误路径实际情况
+/// ## rig 0.43 的错误路径实际情况
 ///
-/// 摸清 rig 0.39 源码后:**所有 4xx/5xx 都归到 `HttpError`**,不走 `ProviderError`——
-/// rig `client.send()` 底层在响应非 2xx 时直接返回
-/// `http_client::Error::InvalidStatusCodeWithMessage(status, body_text)`,openai 层根本
-/// 走不到 `is_success()` 分支。真正的错误信息(model 不存在 / 密钥无效 / 配额用尽)
-/// 全在 `HttpError` 内层的 message 里。
-///
-/// 之前把整个 HttpError 一律说成"传输失败"完全没诊断价值,这版把它拆开:
-/// - **有 status code**:透传 status(200/401/404/500 非敏感)+ 脱敏后的 message 前缀
-/// - **无 status code**(纯连接层错):还是"传输失败"提示
+/// 0.43 起非 2xx 响应被保留为 `ProviderError::ProviderResponse`（status+body+headers
+/// 三元组），传输层失败（无响应）走 `ProviderError::Http`，401/403 单独归
+/// `InvalidAuthentication`。真正的错误信息（model 不存在 / 密钥无效 / 配额用尽）
+/// 全在 ProviderResponse 的 body 里。
 ///
 /// ## 脱敏铁则
 ///
 /// message 里可能包含 URL / user-id / 密钥哈希——`sanitize_message` 负责掐掉,
 /// 只保留诊断字段(常见供应商都在响应 body 放 `error.message` / `error.type`)。
-pub(crate) fn map_rig_error(e: CompletionError) -> AIError {
+pub(crate) fn map_rig_error(e: ProviderError) -> AIError {
+    use rig_core::error::ProviderError as PE;
     match e {
-        // HTTP 层:大概率是 4xx/5xx(rig 把非 2xx 全塞这里)——拆内层拿 status + message
-        CompletionError::HttpError(inner) => map_http_error(inner),
+        // 传输层失败（无 provider 回复）：连接重置/超时/响应不可读
+        PE::Http(inner) => map_http_error(inner.as_ref()),
         // JSON 序列化/反序列化——参数或响应结构失配
-        CompletionError::JsonError(_) => {
+        PE::Json(_) => {
             AIError::Serialization("响应结构无法解析(供应商可能未返回标准 JSON)".into())
         }
         // URL 构造错误——通常是 base_url 配错(用户可 debug)
-        CompletionError::UrlError(_) => AIError::Provider("base_url 格式无效".into()),
-        // 请求构造错误(reqwest builder 层)——提取底层错误信息帮助诊断
-        CompletionError::RequestError(e) => AIError::Network(format!(
+        PE::Url(_) => AIError::Provider("base_url 格式无效".into()),
+        // 请求构造错误——提取底层错误信息帮助诊断
+        PE::Request(e) => AIError::Network(format!(
             "请求构造失败: {}",
             sanitize_message(&e.to_string())
         )),
-        // 供应商返回结构解析失败——最常见:model_id 不匹配供应商
-        CompletionError::ResponseError(_) => {
+        // 回复解码成功但不对应请求——最常见:model_id 不匹配供应商
+        PE::Response(_) => {
             AIError::Serialization("响应结构不匹配(检查供应商类型与 model_id 是否一致)".into())
         }
-        // rig 直接 emit 的 ProviderError(理论上罕见——见文档顶注)
-        CompletionError::ProviderError(msg) => {
+        // rig 直接 emit 的 provider 失败（无保留回复）
+        PE::Provider(msg) => {
             AIError::Provider(format!("供应商错误: {}", sanitize_message(&msg)))
         }
-        // 0.42: 新增的 ProviderResponse 错误变体
-        CompletionError::ProviderResponse(_) => AIError::Provider("供应商响应解析失败".into()),
+        // 供应商保留的失败回复（非 2xx + body，或 2xx 错误信封）
+        PE::ProviderResponse(resp) => map_provider_response(resp),
+        // 401/403——供应商拒绝凭证
+        PE::InvalidAuthentication(resp) => map_provider_response(resp),
+        // 流被提前截断（帧耗尽/运行时停止）
+        PE::Truncated => AIError::Network("流被提前关闭".into()),
+        // 中继失败——保守归 Provider（Display 即原始 report，脱敏后透传前缀）
+        PE::Relayed(report) => {
+            AIError::Provider(format!("供应商错误: {}", sanitize_message(&report.to_string())))
+        }
+        // 其余（CacheExpired / MismatchedDimensions / MalformedToolInput /
+        // DuplicateCallId）主窗口不消费,通用兜底
+        _ => AIError::Provider("供应商请求失败".into()),
     }
 }
 
-/// 把 rig 的 `http_client::Error` 拆成用户可读诊断。
+/// `ProviderResponseError`（保留的供应商失败回复）→ 用户可读诊断。
 ///
-/// 关键分支:
-/// - `InvalidStatusCodeWithMessage(status, msg)`:4xx/5xx——**主流路径**,rig 把
-///   响应体全文塞在 msg 里。我们透传 status + 脱敏后的 msg 前 200 字符
-/// - `InvalidStatusCode(status)`:2xx 外但没 body(极少见)
-/// - `Instance(_)`:底层 reqwest 错误(DNS/TCP/TLS/超时)——归网络
-/// - 其他:归网络,通用提示
-///
-/// **同时**在 debug 级别打完整脱敏 message,方便用户在设置页开 debug 后自查。
-fn map_http_error(e: rig_core::http_client::Error) -> AIError {
-    use rig_core::http_client::Error as H;
-    match e {
-        H::InvalidStatusCodeWithMessage(status, msg) => {
-            let clean = sanitize_message(&msg);
+/// 有 status code 时透传 status + 脱敏 body 片段（复用 4xx/5xx 诊断表）；
+/// 无 status code（gRPC/SDK 传输）时给通用提示。
+fn map_provider_response(resp: ProviderResponseError) -> AIError {
+    let clean = sanitize_message(&resp.body);
+    match resp.status {
+        Some(status) => {
             // debug 级别打完整 message(截断到 500 字符防日志爆),用户开 debug 后能自查
             tracing::debug!(
                 target: blink_infra::utils::perf::ai_slo::TARGET,
-                "AI 供应商 HTTP {status} 响应体片段: {}",
+                "AI 供应商 HTTP {} 响应体片段: {}",
+                status.as_u16(),
                 truncate_chars(&clean, 500),
             );
             AIError::Provider(diagnose_status(status.as_u16(), &clean))
         }
-        H::InvalidStatusCode(status) => {
-            AIError::Provider(format!("供应商返回状态 {status}(无响应体)"))
-        }
+        None => AIError::Provider(format!(
+            "供应商响应错误: {}",
+            truncate_chars(&clean, 120)
+        )),
+    }
+}
+
+/// 把 rig 的 `http_client::Error` 拆成用户可读诊断（传输层失败，无 provider 回复）。
+///
+/// 关键分支:
+/// - `Instance(_)`:底层 reqwest 错误(DNS/TCP/TLS/超时)——归网络
+/// - 其他:归网络,通用提示
+fn map_http_error(e: &rig_core::http_client::Error) -> AIError {
+    use rig_core::http_client::Error as H;
+    match e {
         H::Instance(inner) => {
             // reqwest 层错误——DNS/TCP/TLS/连接超时等。inner 的 Display 可能含 URL,
             // 但**base_url 是用户自己填的,不敏感**,可以放心透传前缀
@@ -616,14 +638,10 @@ fn map_http_error(e: rig_core::http_client::Error) -> AIError {
         }
         H::StreamEnded => AIError::Network("流被提前关闭".into()),
         H::NoHeaders => AIError::Network("无法读取响应头".into()),
-        // 0.42: 新增的 InvalidStatusCodeWithDetails 变体（字段：status, body, headers）
+        // 带状态的失败回复按惯例已被 rig 归到 ProviderError::ProviderResponse，
+        // 这里兜底同样走 4xx/5xx 诊断
         H::InvalidStatusCodeWithDetails { status, body, .. } => {
             let clean = sanitize_message(&body);
-            tracing::debug!(
-                target: blink_infra::utils::perf::ai_slo::TARGET,
-                "AI 供应商 HTTP {status} 响应体片段: {}",
-                truncate_chars(&clean, 500),
-            );
             AIError::Provider(diagnose_status(status.as_u16(), &clean))
         }
     }
@@ -792,10 +810,9 @@ mod tests {
         model_id: &str,
         reasoning_effort: Option<&str>,
     ) -> Option<serde_json::Value> {
-        use rig_agent::prelude::CompletionClient;
         let client =
             crate::ai::factory::build_openai_client("sk-test", Some(base_url)).unwrap();
-        let rig_model = client.completion_model(model_id);
+        let rig_model: DynModel<Completion> = client.completion(model_id).into();
         RigProvider::new(
             ProviderKind::OpenAICompatible,
             model_id,
@@ -864,8 +881,9 @@ mod tests {
         };
         let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
             .unwrap();
-        assert_eq!(rig.preamble.as_deref(), Some("You are helpful."));
-        assert_eq!(rig.chat_history.len(), 1);
+        assert_eq!(rig.system_instructions(), Some("You are helpful."));
+        // 0.43: system 以 Message::System 进 chat_history 首（原 preamble 字段已删）
+        assert_eq!(rig.chat_history.len(), 2);
     }
 
     #[test]
@@ -884,7 +902,8 @@ mod tests {
         };
         let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
             .unwrap();
-        assert_eq!(rig.preamble.as_deref(), Some("a\nb"));
+        assert_eq!(rig.system_instructions(), Some("a
+b"));
     }
 
     #[test]
@@ -965,9 +984,9 @@ mod tests {
         };
         let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
             .unwrap();
-        assert_eq!(rig.preamble.as_deref(), Some("feedback prompt"));
-        // system 不进 chat_history;4 条消息中 1 条 system → chat_history 3 条
-        assert_eq!(rig.chat_history.len(), 3);
+        assert_eq!(rig.system_instructions(), Some("feedback prompt"));
+        // system 进 chat_history;4 条消息中 1 条 system → chat_history 4 条（0.43 语义）
+        assert_eq!(rig.chat_history.len(), 4);
         // 验证 assistant 消息不是被拒绝的
         let _ = Role::Assistant; // 确保导入可用
     }
@@ -1181,20 +1200,18 @@ mod tests {
 
     // ── map_rig_response ────────────────────────────────────────────────
 
-    /// 构造一个仅含 text 的 rig response（0.42: CompletionResponse 不再是泛型）
+    /// 构造一个仅含 text 的 rig response（0.43: raw 载荷 + Option 计数）
     fn rig_text_resp(text: &str) -> RigResp {
         RigResp::new(
             vec![AssistantContent::Text(RigText::new(text))],
             RigUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                total_tokens: 15,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                total_tokens: Some(15),
+                ..Default::default()
             },
             "test",
+            serde_json::json!({}),
         )
     }
 
@@ -1202,18 +1219,11 @@ mod tests {
         RigResp::new(
             vec![AssistantContent::ToolCall(RigToolCall::from_wire(
                 "call_abc",
-                RigToolFunc::new(name.into(), args),
+                RigToolFunc::new(RigToolName::try_from(name).unwrap(), args),
             ))],
-            RigUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                total_tokens: 0,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
-            },
+            RigUsage::default(),
             "test",
+            serde_json::json!({}),
         )
     }
 
@@ -1253,23 +1263,11 @@ mod tests {
             AssistantContent::Text(RigText::new("intro")),
             AssistantContent::ToolCall(RigToolCall::from_wire(
                 "c1",
-                RigToolFunc::new("do".into(), json!({})),
+                RigToolFunc::new(RigToolName::try_from("do").unwrap(), json!({})),
             )),
             AssistantContent::Text(RigText::new("outro")),
         ];
-        let rig = RigResp::new(
-            items,
-            RigUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                total_tokens: 0,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            "test",
-        );
+        let rig = RigResp::new(items, RigUsage::default(), "test", serde_json::json!({}));
         let ours = map_rig_response(rig, 42);
         assert_eq!(ours.text.as_deref(), Some("intro\noutro"));
         assert_eq!(ours.tool_calls.len(), 1);
@@ -1279,8 +1277,8 @@ mod tests {
 
     #[test]
     fn map_error_json_decode_stays_generic() {
-        // ProviderError 分支:message 会脱敏 sk-* 后透传作诊断
-        let err = CompletionError::ProviderError("sk-secret-1234 leaked".into());
+        // ProviderError::Provider 分支:message 会脱敏 sk-* 后透传作诊断
+        let err = ProviderError::Provider("sk-secret-1234 leaked".into());
         let ours = map_rig_error(err);
         match ours {
             AIError::Provider(msg) => {
@@ -1296,7 +1294,7 @@ mod tests {
 
     #[test]
     fn map_error_response_error_stays_generic() {
-        let err = CompletionError::ResponseError("choices[0].message.content missing".into());
+        let err = ProviderError::Response("choices[0].message.content missing".into());
         let ours = map_rig_error(err);
         match ours {
             AIError::Serialization(msg) => {

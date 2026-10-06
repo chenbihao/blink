@@ -74,15 +74,17 @@ png = "0.17"
 open = "5.3.5"
 pinyin = "0.11.0"
 regex = "1.11"
-# rig-core 0.42:portable provider/message/tool contracts。0.42 起 Agent runtime 拆到 rig-agent。
-# default features 已含 derive+reqwest+rustls;test-utils 供单测 mock 模型。
-# rmcp feature 已转移到 rig-agent（rig-core 0.42 无 rmcp feature）。
-rig-core = { version = "0.42", features = ["test-utils"] }
-# rig-agent 0.42:Agent runtime（builder/stream/hook/tool registry/MCP 集成）。
-# rmcp feature: 让 AgentBuilder 支持 rmcp_tool(s) 注册 + McpClientHandler 自动刷新。
+# rig-core 0.43:portable provider/message/tool contracts。0.42 起 Agent runtime 拆到 rig-agent，
+# 0.43 起默认 HTTP transport 拆到 rig-reqwest（rig-core 不再自带 reqwest/tokio）。
+# default features 已含 derive;test-utils 供单测 mock 模型。
+rig-core = { version = "0.43", features = ["test-utils"] }
+# rig-agent 0.43:Agent runtime（builder/stream/hook/tool registry）。0.43 起 MCP 集成拆到 rig-rmcp。
 # test-utils: mock 模型/工具供单测。
-rig-agent = { version = "0.42", features = ["rmcp", "test-utils"] }
-# rmcp 2.x: MCP 协议 Rust 实现（rig-agent 0.42 依赖 rmcp 2）。
+rig-agent = { version = "0.43", features = ["test-utils"] }
+# rig-rmcp 0.43:MCP tool 适配（McpTool/McpClientHandler/tools_from_server + AgentBuilder 扩展注册），
+# 依赖 rmcp 2——0.43 起 rig-agent 不再有 rmcp feature，rmcp_tools 注册路径由本 crate 提供。
+rig-rmcp = { version = "0.43" }
+# rmcp 2.x: MCP 协议 Rust 实现（rig-rmcp 0.43 依赖 rmcp 2；MCP client/server 双向共用）。
 # - client + transport-child-process: MCP client 拉起外部 server 子进程走 stdio JSON-RPC
 # - server + transport-io: MCP server 暴露 Blink 能力给外部 client（stdio 传输）
 # - transport-streamable-http-client-reqwest: MCP client 支持 Streamable HTTP 远程 server
