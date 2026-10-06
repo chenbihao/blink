@@ -4,9 +4,8 @@
 
 // 0.25.1 crate 化：layout/types 已下沉 blink-infra，glob 经多层 re-export 失效，
 // 改为显式导入（其余类型经 mod.rs 的 pub use 由 super::* 提供）。
-use blink_infra::platform::ocr::layout::{
-    group_words_into_lines, join_words_smart, rect_union,
-};
+// 0.25.10：rect_union 移出导入——下方边界测试均以 super::layout:: 全限定路径调用。
+use blink_infra::platform::ocr::layout::{group_words_into_lines, join_words_smart};
 use super::*;
 
 #[tokio::test]

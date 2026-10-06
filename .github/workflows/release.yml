@@ -75,6 +75,9 @@ jobs:
           # 生成；公钥已写入 tauri.conf.json，私钥只存在于本 secret 与本地
           # ~/.tauri/blink-updater.key，丢失将无法为后续版本签发更新。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 密钥为空密码生成——必须显式提供空密码，否则 CI 无交互终端，
+          # tauri 解密私钥时的 "expect a prompt for password" 会直接失败
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
 
       # ── 验证产物 ────────────────────────────────────────────────────────────
       - name: 校验构建产物

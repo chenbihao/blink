@@ -5,8 +5,6 @@
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
-
         /// 用 **实际的** clap Cli::command().render_help() 输出（而非模拟文本），
         /// 走完整链路：help 文本 → parse_help_output → generate_skill_md →
         /// parse_skill_md → SkillRegistry → summaries + match_triggers。
