@@ -114,6 +114,9 @@ tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.4.2"
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-dialog = "2.7.1"
+# 0.25.10 应用内一键更新：检测/下载/验签/静默安装（NSIS passive）。
+# 2.13 起要求 tauri ^2.12，当前 tauri 2.11.5 锁 2.12.0（要求 ^2.10）
+tauri-plugin-updater = "2.12.0"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

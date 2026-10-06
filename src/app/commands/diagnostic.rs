@@ -1,6 +1,8 @@
 //! diagnostic 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
+use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
 
 /// 设置页-存储：获取四库统计信息（0.12.0 DB 四层拆分）。
@@ -255,6 +257,26 @@ pub fn get_app_info() -> serde_json::Value {
     })
 }
 
+/// 读取全局代理配置（`engine:_global_proxy` → `{http, https}`），返回代理 URL。
+///
+/// 0.25.10 从 check_update 内联块提取：`install_update`（下载安装）与
+/// 检查更新共用——国内直连 GitHub 极易超时，用户代理配置要覆盖全更新链路。
+async fn global_proxy_url(app: &tauri::AppHandle) -> Option<String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let cfg = crate::app::config::get_engine_config(pool, "_global_proxy").await;
+    cfg.and_then(|v| {
+        let https = v
+            .get("https")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty());
+        let http = v
+            .get("http")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty());
+        https.or(http).map(|s| s.to_string())
+    })
+}
+
 /// 设置页-关于：检查 GitHub 最新 Release 版本。
 ///
 /// 流程：请求 GitHub API `/repos/{owner/repo}/releases/latest` →
@@ -279,21 +301,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
     let api_url = format!("https://api.github.com/repos/{repo_path}/releases/latest");
 
     // 读取全局代理配置，与插件 HTTP 请求共用
-    let proxy_url = {
-        let pool = &app.state::<crate::infra::data::DbPools>().config;
-        let cfg = crate::app::config::get_engine_config(pool, "_global_proxy").await;
-        cfg.and_then(|v| {
-            let https = v
-                .get("https")
-                .and_then(|s| s.as_str())
-                .filter(|s| !s.is_empty());
-            let http = v
-                .get("http")
-                .and_then(|s| s.as_str())
-                .filter(|s| !s.is_empty());
-            https.or(http).map(|s| s.to_string())
-        })
-    };
+    let proxy_url = global_proxy_url(&app).await;
 
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -363,6 +371,187 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         "release_url": release_url,
         "release_notes": release_notes,
     })
+}
+
+// ── 0.25.10 应用内一键更新（tauri-plugin-updater）──────────────────────────
+
+/// 一键更新任务互斥标志——防止重复点击造成并发下载/安装。
+/// 成功路径上进程会被安装器 exit(0) 接管，标志无需复位也无害（进程即终态）；
+/// 所有可返回的错误路径与防御分支都显式复位。
+static UPDATE_INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// 进度事件发送 helper（stage: downloading / installing / failed）。
+fn emit_update_progress(
+    app: &tauri::AppHandle,
+    stage: &str,
+    downloaded: u64,
+    total: Option<u64>,
+    error: Option<&str>,
+) {
+    if let Err(e) = app.emit(
+        crate::infra::event_names::EventNames::UPDATE_INSTALL_PROGRESS,
+        serde_json::json!({
+            "stage": stage,
+            "downloaded": downloaded,
+            "total": total,
+            "error": error,
+        }),
+    ) {
+        tracing::debug!(%e, "emit UPDATE_INSTALL_PROGRESS 失败");
+    }
+}
+
+/// 构建 updater（注入全局代理与 endpoint 候选链）并检查是否有可用更新。
+///
+/// endpoint 候选链：主站 latest.json → 加速代理（签名只校验文件字节，与源无关）。
+/// 本函数内部可用 `?` 自由早退——互斥标志的复位统一由调用方负责。
+async fn check_updater_update(
+    app: &tauri::AppHandle,
+) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let proxy_url = global_proxy_url(app).await;
+    let endpoint = format!(
+        "{}/releases/latest/download/latest.json",
+        env!("CARGO_PKG_REPOSITORY").trim_end_matches('/')
+    );
+    let endpoints = crate::infra::utils::mirrors::github_proxy_candidates(&endpoint)
+        .iter()
+        .map(|u| tauri::Url::parse(u).map_err(|e| format!("更新地址无效 {u}: {e}")))
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut builder = app.updater_builder();
+    builder = builder
+        .endpoints(endpoints)
+        .map_err(|e| format!("更新地址配置失败: {e}"))?;
+    if let Some(ref proxy) = proxy_url {
+        match tauri::Url::parse(proxy) {
+            Ok(u) => builder = builder.proxy(u),
+            Err(e) => tracing::warn!(proxy = %proxy, %e, "install_update: 代理配置无效，回退直连"),
+        }
+    }
+    builder = builder.on_before_exit(|| {
+        tracing::info!("install_update: 应用即将退出，由安装器接管（passive 安装 + 自动重启）");
+    });
+
+    let updater = builder
+        .build()
+        .map_err(|e| format!("更新器初始化失败: {e}"))?;
+    updater
+        .check()
+        .await
+        .map_err(|e| format!("检查更新失败: {e}"))
+}
+
+/// 设置页-关于：一键下载并安装更新。
+///
+/// 流程：拉取 latest.json（主站 → 加速代理候选链，见
+/// `infra::utils::mirrors::github_proxy_candidates`）→ minisign 验签（公钥嵌在
+/// tauri.conf.json）→ 版本比较（仅升不降）→ 下载（进度经 `UPDATE_INSTALL_PROGRESS`
+/// 事件推送，≥200ms 节流）→ 启动 NSIS 安装器（passive 进度条）→ 应用退出，
+/// 安装完成后自动重启。
+///
+/// 检查在本 command 内同步执行：返回 `{status: "no_update"}` 或
+/// `{status: "started", version}`；下载/安装在后台任务进行，结果只通过事件
+/// 表达——检查阶段失败走 invoke 错误通道，下载阶段失败走 failed 事件
+/// （此时 invoke 已返回，只能靠事件）。
+#[tauri::command]
+pub async fn install_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    // debug 构建（cargo tauri dev / xtask release --debug）没有安装器注册信息，
+    // 安装器无法完成覆盖安装，直接给出可行动的错误而不是让插件报 cryptic 错误
+    if cfg!(debug_assertions) {
+        return Err("开发模式不支持应用内更新（未走安装器），请使用 release 安装包".into());
+    }
+
+    if UPDATE_INSTALL_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("更新任务进行中，请等待完成或重启应用".into());
+    }
+
+    // 检查阶段：任何失败路径（含无更新）都必须复位互斥标志后再返回
+    let update = match check_updater_update(&app).await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+            tracing::debug!("install_update: 无可用更新");
+            return Ok(serde_json::json!({ "status": "no_update" }));
+        }
+        Err(e) => {
+            UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+            tracing::warn!(%e, "install_update: 检查更新失败");
+            return Err(e);
+        }
+    };
+    let target_version = update.version.clone();
+    tracing::info!(version = %target_version, "install_update: 开始下载更新");
+
+    let version_for_task = target_version.clone();
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // 共享进度快照：下载闭包写入，下载完成闭包与错误路径读取。
+        // Cell/Mutex 保证闭包仍满足 Send（跨 await 持有）。
+        let progress = std::sync::Arc::new(std::sync::Mutex::new((0u64, None::<u64>)));
+        let last_emit = std::cell::Cell::new(None::<std::time::Instant>);
+
+        let prog_chunk = progress.clone();
+        let app_chunk = app_for_task.clone();
+        let prog_finish = progress.clone();
+        let app_for_finish = app_for_task.clone();
+        let result = update
+            .download_and_install(
+                move |chunk, total| {
+                    let mut p = prog_chunk.lock().unwrap();
+                    // 插件回调给 usize，内部统一 u64 计数
+                    p.0 = p.0.saturating_add(chunk as u64);
+                    p.1 = total;
+                    drop(p);
+                    // 节流：≥200ms 才发一条，避免 IPC 事件洪泛
+                    let now = std::time::Instant::now();
+                    if last_emit
+                        .get()
+                        .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_millis(200))
+                    {
+                        last_emit.set(Some(now));
+                        let p = prog_chunk.lock().unwrap();
+                        emit_update_progress(&app_chunk, "downloading", p.0, p.1, None);
+                    }
+                },
+                move || {
+                    // 下载完成 → 安装器即将启动、进程即将退出；发 installing 终态
+                    let (downloaded, total) = *prog_finish.lock().unwrap();
+                    emit_update_progress(&app_for_finish, "installing", downloaded, total, None);
+                },
+            )
+            .await;
+
+        match result {
+            Ok(()) => {
+                // Windows 上安装阶段进程会被 exit(0)，正常不应到达这里；
+                // 防御性复位，避免标志位卡死
+                UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+                tracing::info!(
+                    version = %version_for_task,
+                    "install_update: 下载安装流程返回（预期进程已被安装器接管）"
+                );
+            }
+            Err(e) => {
+                UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+                tracing::warn!(version = %version_for_task, error = %e, "install_update: 下载/安装失败");
+                let (downloaded, total) = *progress.lock().unwrap();
+                emit_update_progress(
+                    &app_for_task,
+                    "failed",
+                    downloaded,
+                    total,
+                    Some(&e.to_string()),
+                );
+            }
+        }
+    });
+
+    Ok(serde_json::json!({ "status": "started", "version": target_version }))
 }
 
 /// 打开当天日志文件（资源管理器中定位；文件不存在则打开文件夹）。

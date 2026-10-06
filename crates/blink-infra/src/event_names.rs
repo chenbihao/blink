@@ -241,4 +241,19 @@ impl EventNames {
     /// 截图控件吸附 hints 流式推送（0.18.x）。
     /// payload: `ControlHintsEvent { generation, kind: "batch"|"done", depth, hints, ... }`
     pub const SCREENSHOT_CONTROL_HINTS: &str = "blink://screenshot-control-hints";
+
+    // ── 应用更新（0.25.10）──
+    /// 应用内一键更新（tauri-plugin-updater）安装进度。payload:
+    /// `{ stage, downloaded, total, error? }`。
+    ///
+    /// - `stage: "downloading"`：下载中，`downloaded`/`total` 为字节计数
+    ///   （`total` 为 null 表示大小未知；进度已节流 ≥200ms/条）。
+    /// - `stage: "installing"`：下载完成，安装器已启动，应用即将退出并由
+    ///   NSIS 以 passive 模式完成安装后自动重启。
+    /// - `stage: "failed"`：检查/下载/验签/启动安装器任一环节失败，
+    ///   `error` 为用户可读的原因。
+    ///
+    /// 发送方是 `install_update` command 的后台任务；应用退出后本事件
+    /// 不再产生，前端以「应用自动重启」作为成功终点。
+    pub const UPDATE_INSTALL_PROGRESS: &str = "blink://update-install-progress";
 }

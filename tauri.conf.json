@@ -35,11 +35,23 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "resources": ["plugins/builtin/**/*", "resources/bin/funasr-worker/**/*"],
     "windows": {
       "nsis": {
         "installerHooks": "nsis/uninstall-cleanup.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyMzAzN0VCNUZGQTVBQTEKUldTaFd2cGY2emN3SWowREx4bHNFN2RTSG1QZ0Z1dUtnaE5PclRIUFMrNnVHTW8wTCsyTGdkL08K",
+      "endpoints": [
+        "https://github.com/chenbihao/blink/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

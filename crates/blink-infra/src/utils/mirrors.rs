@@ -104,13 +104,23 @@ fn is_github_release_url(url: &str) -> bool {
         && rest.len() > idx + GH_RELEASE_MID.len()
 }
 
-/// GitHub release 候选：主站 → 前缀式加速代理。
-fn github_release_candidates(primary_url: &str) -> Vec<String> {
-    let mut candidates = vec![primary_url.to_string()];
+/// GitHub 任意直链的加速代理候选（前缀式：`{proxy}/{完整原链}`）。
+///
+/// `download_candidates` 只识别 `releases/download/{tag}/{file}` 形态；
+/// updater 的 latest.json endpoint 是 `releases/latest/download/{file}`（latest
+/// 重定向形态），同属 GitHub 直链，需要相同的「主站在前、代理降级在后」候选链。
+/// 签名校验只针对文件字节与下载源无关，走代理候选不放宽供应链约束。
+pub fn github_proxy_candidates(url: &str) -> Vec<String> {
+    let mut candidates = vec![url.to_string()];
     for proxy in GH_PROXY_HOSTS {
-        candidates.push(format!("{proxy}/{primary_url}"));
+        candidates.push(format!("{proxy}/{url}"));
     }
     candidates
+}
+
+/// GitHub release 候选：主站 → 前缀式加速代理。
+fn github_release_candidates(primary_url: &str) -> Vec<String> {
+    github_proxy_candidates(primary_url)
 }
 
 /// raw.githubusercontent 候选：主站 → jsDelivr（路径改写）。
@@ -180,6 +190,23 @@ mod tests {
         // 每个代理都是完整原链拼接
         for (proxy, cand) in GH_PROXY_HOSTS.iter().zip(c.iter().skip(1)) {
             assert!(cand.starts_with(&format!("{proxy}/https://github.com/")));
+        }
+    }
+
+    #[test]
+    fn latest_json_endpoint_gets_proxy_candidates() {
+        // updater 的 latest.json endpoint 是 latest 重定向形态，不在
+        // download_candidates 的识别范围内，直接走 github_proxy_candidates
+        let endpoint = "https://github.com/chenbihao/blink/releases/latest/download/latest.json";
+        let c = github_proxy_candidates(endpoint);
+        assert_eq!(c.len(), 1 + GH_PROXY_HOSTS.len());
+        assert_eq!(c[0], endpoint);
+        assert_eq!(
+            c[1],
+            format!("https://ghfast.top/{endpoint}")
+        );
+        for (proxy, cand) in GH_PROXY_HOSTS.iter().zip(c.iter().skip(1)) {
+            assert_eq!(cand, &format!("{proxy}/{endpoint}"));
         }
     }
 

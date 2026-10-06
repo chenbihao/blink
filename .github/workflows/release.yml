@@ -66,9 +66,15 @@ jobs:
           echo "--- Cargo.toml ---"
           grep '^version' Cargo.toml | head -1
 
-      # 本地与 CI 共用唯一发布入口：worker → 插件 → 校验 → Tauri 打包。
+      # 本地与 CI 共用唯一发布入口：worker → 插件 → 校验 → Tauri 打包 → latest.json。
       - name: Build release
         run: cargo xtask release
+        env:
+          # 0.25.10：createUpdaterArtifacts 开启后，tauri build 需要对 NSIS/MSI
+          # 产物签名生成 .sig（minisign）。私钥由 `cargo tauri signer generate`
+          # 生成；公钥已写入 tauri.conf.json，私钥只存在于本 secret 与本地
+          # ~/.tauri/blink-updater.key，丢失将无法为后续版本签发更新。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       # ── 验证产物 ────────────────────────────────────────────────────────────
       - name: 校验构建产物
@@ -109,5 +115,8 @@ jobs:
           files: |
             ${{ steps.release-artifacts.outputs.msi }}
             ${{ steps.release-artifacts.outputs.nsis }}
+            # 0.25.10：updater 静态清单（指向 NSIS 安装包 + minisign 签名），
+            # 应用端经 releases/latest/download/latest.json 拉取，publish 后生效
+            target/release/bundle/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

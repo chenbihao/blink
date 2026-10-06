@@ -323,6 +323,11 @@ export const en = {
     "about.update.latest": "Already up to date",
     "about.update.failed": "Check failed, please try later",
     "about.update.no_notes": "No release notes for this version",
+    "about.update.install": "Install now",
+    "about.update.preparing": "Fetching update…",
+    "about.update.downloading": "Downloading update… {percent}%",
+    "about.update.downloading_no_size": "Downloading update… {downloaded}",
+    "about.update.installing": "Download complete. Installing — the app will restart shortly…",
 
     // ── Network tab (dynamic) ──
     "network.title": "Global Network Proxy",

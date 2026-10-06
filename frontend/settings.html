@@ -2627,7 +2627,12 @@
                 <label class="setting-label" data-i18n="about.version.label">版本</label>
                 <span class="value" id="about-version">—</span>
                 <button class="about-check-btn" data-i18n="about.update.check" id="about-check-update">检查更新</button>
+                <button class="about-check-btn about-install-btn" data-i18n="about.update.install" id="about-install-update" hidden>一键更新</button>
                 <span class="about-update" hidden id="about-update"></span>
+            </div>
+            <!-- 0.25.10：一键更新下载进度条（检查到新版本并点击安装后显示） -->
+            <div class="about-update-progress" hidden id="about-update-progress">
+                <div class="about-update-progress-bar" id="about-update-progress-bar"></div>
             </div>
             <div class="release-notes" hidden id="about-release-notes"></div>
             <div class="setting-row">

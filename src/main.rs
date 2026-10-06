@@ -58,6 +58,10 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        // 0.25.10：应用内一键更新（check/download/验签/静默安装）。
+        // 仅 install_update command 走 UpdaterExt 构造 updater（可注入代理与镜像候选
+        // endpoints），前端不直接调插件 API，无需 updater capability。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // 自定义协议：http://blink-icon.localhost/<url-encoded-path>（Windows）—— 按需懒加载应用图标 PNG。
         // 前端 <img src> 直接引用，图标提取移出搜索热路径（见 search/icon.rs）。
         .register_asynchronous_uri_scheme_protocol("blink-icon", |_ctx, request, responder| {
@@ -1502,6 +1506,7 @@ app::commands::generate_palette_schemes,
             app::commands::cleanup_all_data,
             app::commands::get_app_info,
             app::commands::check_update,
+            app::commands::install_update, // 0.25.10 应用内一键更新
             app::commands::resize_window,
             app::commands::get_config,
             app::commands::set_config,

@@ -279,6 +279,38 @@ body {
     text-decoration: underline;
 }
 
+/* 0.25.10：一键更新下载进度条（版本行下方细条，出现/消失单次跳变可接受） */
+.about-update-progress {
+    margin-top: var(--space-sm, 8px);
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface);
+    overflow: hidden;
+}
+
+.about-update-progress-bar {
+    height: 100%;
+    width: 0;
+    border-radius: 2px;
+    background: var(--accent);
+    transition: width var(--transition-base);
+}
+
+/* total 未知时的不确定态：满宽 + 呼吸动画，不用假百分比 */
+@keyframes about-update-progress-pulse {
+    0%,
+    100% {
+        opacity: 0.4;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
+.about-update-progress-indeterminate {
+    animation: about-update-progress-pulse 1.2s ease-in-out infinite;
+}
+
 /* 0.17.1：release notes 展示区 */
 .release-notes {
     margin-top: var(--space-sm, 8px);

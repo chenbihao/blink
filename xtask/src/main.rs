@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //!   cargo xtask plugins        编译 Rust 插件（仅编译到 target/release，不复制到 bin）
-//!   cargo xtask release        构建 GGUF worker + 插件 + 资源校验 + cargo tauri build
+//!   cargo xtask release        构建 GGUF worker + 插件 + 资源校验 + cargo tauri build + updater latest.json
 //!   cargo xtask prebuild       一键首次开发前置：GGUF worker + debug 插件（产物就绪自动跳过）
 //!   cargo xtask release --debug 同上，但用 debug profile（DevTools 可用，F12 打开）
 //!   cargo xtask release-check   仅运行 release 资源前置校验（不打包）
@@ -389,6 +389,178 @@ fn extract_toml_version(content: &str) -> Option<String> {
 fn extract_json_version(content: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(content).ok()?;
     json.get("version")?.as_str().map(|s| s.to_string())
+}
+
+// ── 0.25.10 应用内更新：签名私钥注入与 latest.json 生成 ─────────────────────
+
+/// updater 签名私钥的本地默认路径（仓库外，不入 Git）。
+/// CI 走 TAURI_SIGNING_PRIVATE_KEY secret 注入；本地 `cargo xtask release`
+/// 从这里读取并以子进程 env 注入（两个入口共用同一把钥匙）。
+fn updater_local_key_path() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".tauri").join("blink-updater.key")
+}
+
+/// `cargo tauri build`（0.25.10 起 createUpdaterArtifacts 开启，必须能拿到签名私钥）。
+///
+/// 私钥解析优先级：环境变量（CI secret / 用户手动导出）→ 本地
+/// `~/.tauri/blink-updater.key`。都没有则 panic 给出可行动指引——与其让
+/// tauri build 在签名阶段报 cryptic 错误，不如在入口拦住。
+/// 私钥带密码时由调用方自行导出 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本仓库密钥无密码）。
+fn run_tauri_build(root: &Path, debug: bool) {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["tauri", "build"]);
+    if debug {
+        cmd.arg("--debug");
+    }
+    cmd.current_dir(root);
+    // 空 env 视为未设置——CI secret 缺失时 GitHub 会注入空串，不能据此跳过回退
+    let env_key = std::env::var("TAURI_SIGNING_PRIVATE_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    if let Some(key) = env_key {
+        cmd.env("TAURI_SIGNING_PRIVATE_KEY", key.trim());
+    } else {
+        let key_path = updater_local_key_path();
+        match std::fs::read_to_string(&key_path) {
+            Ok(key) => {
+                cmd.env("TAURI_SIGNING_PRIVATE_KEY", key.trim());
+                println!("🔑 已从 {} 加载 updater 签名私钥", key_path.display());
+            }
+            Err(e) => panic!(
+                "createUpdaterArtifacts 已开启但找不到 updater 签名私钥。\n\
+                 - 本地构建：`cargo tauri signer generate -w \"{}\"` 生成（或把已有私钥放到该路径）\n\
+                 - CI：在 GitHub secrets 配置 TAURI_SIGNING_PRIVATE_KEY\n\
+                 读取 {} 失败: {e}",
+                key_path.display(),
+                key_path.display()
+            ),
+        }
+    }
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("启动 cargo tauri build 失败: {e}"));
+    if !status.success() {
+        panic!("cargo tauri build 失败，exit: {status}");
+    }
+}
+
+/// 从 Cargo.toml 文本提取 `[package].repository`（latest.json 资产 URL 基址）。
+fn extract_toml_repository(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("repository") && trimmed.contains('=') {
+            if let Some(start) = trimmed.find('"') {
+                if let Some(end) = trimmed.rfind('"') {
+                    if end > start {
+                        return Some(trimmed[start + 1..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// updater latest.json 内容组装（纯函数，便于测试）。
+///
+/// - `version`：纯 semver（CI 由 Git tag 同步写入 tauri.conf.json / Cargo.toml）
+/// - `signature`：NSIS 安装包 `.sig` 文件内容（minisign 签名文本）
+/// - `url`：GitHub release 资产直链。插件不支持对资产 URL 做镜像改写——
+///   latest.json 拉取走主站 → 代理候选链，资产下载走主站直链，
+///   代理场景由全局代理配置（updater_builder().proxy）覆盖。
+fn build_latest_json(version: &str, repo_url: &str, signature: &str, pub_date: &str) -> String {
+    let asset = format!("Blink_{version}_x64-setup.exe");
+    let url = format!(
+        "{}/releases/download/v{version}/{asset}",
+        repo_url.trim_end_matches('/')
+    );
+    let body = serde_json::json!({
+        "version": version,
+        "notes": "",
+        "pub_date": pub_date,
+        "platforms": {
+            "windows-x86_64": {
+                "signature": signature.trim(),
+                "url": url,
+            }
+        }
+    });
+    serde_json::to_string_pretty(&body).expect("latest.json 序列化失败")
+}
+
+/// epoch 秒 → RFC3339 UTC 文本（`1970-01-01T00:00:00Z` 形态）。
+/// xtask 不引 chrono，民用时换算用 Howard Hinnant civil_from_days 反演。
+fn epoch_to_rfc3339(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mth <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// 当前 UTC 时间的 RFC3339 文本（latest.json 的 pub_date 字段）。
+fn rfc3339_now_utc() -> String {
+    epoch_to_rfc3339(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
+/// 生成 updater latest.json（仅 release profile 打包后执行）。
+///
+/// 读取 tauri.conf.json 版本 + NSIS 产物 `.sig`，写
+/// `target/release/bundle/latest.json`，由 CI release 步骤随安装包一起上传。
+/// `releases/latest/download/latest.json` 只在 release publish 后生效
+/// （draft 不计入 latest），发布时记得 publish。
+fn generate_updater_latest_json() {
+    let root = workspace_root();
+    let conf = std::fs::read_to_string(root.join("tauri.conf.json"))
+        .unwrap_or_else(|e| panic!("读取 tauri.conf.json 失败: {e}"));
+    let version = extract_json_version(&conf)
+        .unwrap_or_else(|| panic!("tauri.conf.json 未找到 version 字段"));
+
+    let bundle_dir = root.join("target").join("release").join("bundle");
+    let nsis_dir = bundle_dir.join("nsis");
+    let setup = nsis_dir.join(format!("Blink_{version}_x64-setup.exe"));
+    let sig_path = nsis_dir.join(format!("Blink_{version}_x64-setup.exe.sig"));
+    if !setup.exists() {
+        panic!("未找到 NSIS 安装包 {}，无法生成 latest.json", setup.display());
+    }
+    let signature = std::fs::read_to_string(&sig_path).unwrap_or_else(|e| {
+        panic!(
+            "读取签名 {} 失败: {e}（createUpdaterArtifacts 未生效或签名密钥不符）",
+            sig_path.display()
+        )
+    });
+
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap_or_else(|e| panic!("读取根 Cargo.toml 失败: {e}"));
+    let repo_url = extract_toml_repository(&manifest).unwrap_or_else(|| {
+        panic!("根 Cargo.toml 缺少 [package].repository，无法确定 latest.json 资产地址")
+    });
+
+    let json = build_latest_json(&version, &repo_url, &signature, &rfc3339_now_utc());
+    let out_path = bundle_dir.join("latest.json");
+    std::fs::write(&out_path, format!("{json}\n"))
+        .unwrap_or_else(|e| panic!("写入 {} 失败: {e}", out_path.display()));
+    println!(
+        "✅ latest.json 已生成: {}（随 release 上传，publish 后对用户生效）",
+        out_path.display()
+    );
 }
 
 /// release 资源前置校验总入口。
@@ -1125,11 +1297,12 @@ fn main() {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
             // 总步数 = 1（GGUF worker）+ 插件数（每插件一步）+ 1（资源校验）+ 1（Tauri 打包）
+            // + 1（updater latest.json，仅 release profile——debug 包不进更新链路）
             let plugin_count = discover_rust_plugins().len();
-            let total = 1 + plugin_count + 2;
+            let total = 1 + plugin_count + 2 + usize::from(!debug);
             let mut step = Some(StepProgress::new(total));
             println!(
-                "🚀 release 流程共 {total} 步：GGUF worker → 插件 ×{plugin_count} → 资源校验 → Tauri 打包"
+                "🚀 release 流程共 {total} 步：GGUF worker → 插件 ×{plugin_count} → 资源校验 → Tauri 打包 → latest.json"
             );
             step_advance(&mut step, "🔨 构建 GGUF STT worker（funasr-worker）");
             funasr_worker::build_workers(); // release 唯一入口必须自行生成 gitignore 的 worker 产物
@@ -1138,10 +1311,13 @@ fn main() {
             let root = workspace_root();
             if debug {
                 step_advance(&mut step, "📦 cargo tauri build --debug（DevTools 可用）");
-                run("cargo", &["tauri", "build", "--debug"], &root);
+                run_tauri_build(&root, true);
             } else {
                 step_advance(&mut step, "📦 cargo tauri build");
-                run("cargo", &["tauri", "build"], &root);
+                run_tauri_build(&root, false);
+                // 0.25.10：updater 静态清单（含 .sig 内容与资产 URL），随 release 上传
+                step_advance(&mut step, "📝 生成 updater latest.json");
+                generate_updater_latest_json();
             }
         }
         "release-check" => check_release_resources(&mut None), // 仅运行 release 资源前置校验
@@ -1432,7 +1608,7 @@ mod supply_chain_tests {
 
 #[cfg(test)]
 mod version_consistency_tests {
-    use super::{extract_json_version, extract_toml_version};
+    use super::{extract_json_version, extract_toml_repository, extract_toml_version};
 
     #[test]
     fn extract_toml_version_finds_package_version() {
@@ -1460,6 +1636,57 @@ edition = "2024"
     fn extract_json_version_returns_none_when_missing() {
         let json = r#"{"productName": "Blink"}"#;
         assert_eq!(extract_json_version(json), None);
+    }
+
+    /// 0.25.10：latest.json 内容形状——version/签名/资产 URL/pub_date。
+    #[test]
+    fn build_latest_json_shape() {
+        let json = super::build_latest_json(
+            "0.25.10",
+            "https://github.com/chenbihao/blink",
+            "dW50cnVzdGVk...c2ln",
+            "2026-10-06T00:00:00Z",
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).expect("必须是合法 JSON");
+        assert_eq!(v["version"], "0.25.10");
+        assert_eq!(
+            v["platforms"]["windows-x86_64"]["url"],
+            "https://github.com/chenbihao/blink/releases/download/v0.25.10/Blink_0.25.10_x64-setup.exe"
+        );
+        assert_eq!(v["platforms"]["windows-x86_64"]["signature"], "dW50cnVzdGVk...c2ln");
+        assert_eq!(v["pub_date"], "2026-10-06T00:00:00Z");
+        assert!(v["notes"].is_string());
+        // 仅声明当前发布平台，避免插件在未知平台上误判
+        assert_eq!(v["platforms"].as_object().unwrap().len(), 1);
+    }
+
+    /// 0.25.10：repository 提取（latest.json 资产基址）。
+    #[test]
+    fn extract_toml_repository_finds_package_repository() {
+        let toml = "[package]\nname = \"blink\"\nrepository = \"https://github.com/chenbihao/blink\"\n";
+        assert_eq!(
+            extract_toml_repository(toml),
+            Some("https://github.com/chenbihao/blink".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_toml_repository_returns_none_when_missing() {
+        let toml = "[package]\nname = \"blink\"\n";
+        assert_eq!(extract_toml_repository(toml), None);
+    }
+
+    /// 0.25.10：epoch → RFC3339 民用时换算（跨闰年与闰世纪边界）。
+    #[test]
+    fn epoch_to_rfc3339_known_values() {
+        assert_eq!(super::epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(super::epoch_to_rfc3339(86400), "1970-01-02T00:00:00Z");
+        // 已知锚点：2024-01-01 00:00:00 UTC
+        assert_eq!(super::epoch_to_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
+        // 闰世纪边界：2000-03-01 00:00:00 UTC（2000 年是闰年）
+        assert_eq!(super::epoch_to_rfc3339(951_868_800), "2000-03-01T00:00:00Z");
+        // 当天内时分秒
+        assert_eq!(super::epoch_to_rfc3339(1_704_067_200 + 3661), "2024-01-01T01:01:01Z");
     }
 
     /// 负向测试：当 Cargo.toml 与 tauri.conf.json 版本分叉时，

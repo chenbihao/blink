@@ -180,4 +180,15 @@ export const EVENTS = Object.freeze({
     // ── 截图（0.18.x）──
     /** 截图控件吸附 hints 流式推送 */
     SCREENSHOT_CONTROL_HINTS: 'blink://screenshot-control-hints',
+
+    // ── 应用更新（0.25.10）──
+    /**
+     * 应用内一键更新（tauri-plugin-updater）安装进度。
+     * payload: { stage, downloaded, total, error? }
+     * stage: "downloading"（下载中，字节进度已节流 ≥200ms/条）
+     *      | "installing"（安装器已启动，应用即将退出并自动重启）
+     *      | "failed"（任一环节失败，error 为用户可读原因）。
+     * 应用退出后事件不再产生，以「应用自动重启」作为成功终点。
+     */
+    UPDATE_INSTALL_PROGRESS: 'blink://update-install-progress',
 });
