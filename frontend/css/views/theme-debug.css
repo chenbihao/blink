@@ -2,13 +2,37 @@
    只服务 theme-debug.html 的布局壳；所有样本一律使用真实组件/视图 CSS，
    本文件只定义页面骨架与调试专属标注样式，颜色全部走语义 token。 */
 
-/* 主窗 reset 对 body 设了 height:100% + overflow:hidden（固定尺寸启动器专用）；
-   调试台是长滚动页，这里放开（scoped 到本页，不影响其他窗口）。 */
+/* 主窗 reset 对 html/body 设了 height:100% + overflow:hidden（固定尺寸启动器专用）；
+   调试台是长滚动页，整体放开恢复文档流滚动与原生滚动条（scoped 到本页）。 */
+html,
 body {
     height: auto;
-    overflow-y: auto;
+    overflow: visible;
+}
+
+body {
     background: var(--bg);
     color: var(--text);
+    /* token 化滚动条：两主题都与底色可辨 */
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-2) transparent;
+}
+
+body::-webkit-scrollbar {
+    width: 10px;
+}
+
+body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+body::-webkit-scrollbar-thumb {
+    background: var(--surface-2);
+    border-radius: 5px;
+}
+
+body::-webkit-scrollbar-thumb:hover {
+    background: var(--text-faint);
 }
 
 .td-root {
@@ -38,13 +62,36 @@ body {
     margin: 0;
     font-size: var(--text-lg);
     font-weight: var(--weight-semibold);
+    white-space: nowrap;
+}
+
+.td-header-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden; /* 极窄窗口下整块裁切，不挤压右侧控件 */
+}
+
+.td-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0; /* 切换控件占位稳定，不随左侧文本伸缩 */
+    min-width: 0;
 }
 
 .td-current-theme {
+    display: inline-block;
     font-family: var(--font-mono, Consolas, monospace);
     font-size: var(--text-xs, 12px);
     color: var(--text-dim);
     margin-left: 10px;
+    /* 主题名长短不一（nvchad-chadracula-evondev vs light），固定宽度彻底消除布局推挤；
+       截断/留白由本元素承担，完整值走 title 悬浮查看 */
+    width: 30ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
 }
 
 .td-theme-select {
@@ -59,6 +106,10 @@ body {
 .td-sync-note {
     font-size: var(--text-xs, 12px);
     color: var(--text-dim);
+    min-width: 0; /* 窄窗口下允许省略，保住 select 位置 */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* ── 区块卡片 ─────────────────────────────────────────────────────────────── */

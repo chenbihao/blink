@@ -31,9 +31,10 @@ pub use windows::{
     spawn_main_window_caret_refine,
     set_main_ai_active, set_sticky_close_fallback, show_chat_window, show_content_editor_window,
     show_image_editor_window, show_main_window, show_pin_window, show_screenshot_overlay,
-    show_sticky_manager_window, show_sticky_window, show_voice_overlay, show_welcome_window,
-    signal_sticky_close_ack, start_watchdog, take_chat_prefill, take_context_menu_payload,
-    unhide_after_screenshot, update_grace_period, update_sticky_taskbar, wait_frame_after_hide,
+    show_sticky_manager_window, show_sticky_window, show_theme_debug_window, show_voice_overlay,
+    show_welcome_window, signal_sticky_close_ack, start_watchdog, take_chat_prefill,
+    take_context_menu_payload, unhide_after_screenshot, update_grace_period, update_sticky_taskbar,
+    wait_frame_after_hide,
 };
 
 // 0.15.8：智能窗口吸附——枚举可吸附窗口

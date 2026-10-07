@@ -191,6 +191,10 @@ export const en = {
 
     // ── Debug tab: logging ──
     "debug.section.log": "Logging · Troubleshooting",
+    "debug.section.theme": "Theme · Inspector",
+    "debug.theme.label": "Theme inspector",
+    "debug.theme.hint": "Single-page acceptance for all themes: WCAG contrast checks, token swatches and real component rendering; switch themes in-page",
+    "debug.theme.open": "Open theme inspector",
     "debug.section.perf": "Performance · Recent samples",
     "log.level.label": "Log level",
     "log.level.error": "error (errors only)",

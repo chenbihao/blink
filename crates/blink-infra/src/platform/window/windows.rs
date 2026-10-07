@@ -1742,6 +1742,64 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 主题调试窗口（0.25.11）：设置页"调试"Tab 按需打开。
+///
+/// 纯静态单页验收工具（theme-debug.html），**不预热不常驻**——仅此入口按需创建，
+/// 不参与 Alt+Space 主链路，故不适用 §1.4 的预热范围。close = prevent_close + hide
+/// 外壳复用（与 sticky-manager 一致），重复打开免建窗；IS_APP_EXITING 时正常关闭。
+pub fn show_theme_debug_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
+
+    const LABEL: &str = "theme-debug";
+    let (win, is_new) = get_or_create_window(app, LABEL, || {
+        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("theme-debug.html".into()))
+            .title("Blink 主题调试台")
+            .inner_size(1040.0, 860.0)
+            .min_inner_size(720.0, 560.0)
+            .decorations(true)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(true)
+            .visible(true)
+            // 中性灰底：CSS 加载后由页面 var(--bg) 覆盖，两主题都不突兀（同 sticky-manager 0.17.7 取舍）
+            .background_color(Color(51, 51, 51, 255))
+            .center()
+            .build()
+    })
+    .map_err(|e| {
+        tracing::warn!(error = %e, "theme-debug window: 创建失败");
+        e
+    })?;
+
+    if is_new {
+        // prevent_close + hide——与 sticky-manager 一致的外壳复用模式
+        let app_clone = app.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if IS_APP_EXITING.load(Ordering::SeqCst) {
+                    return; // 应用退出：不 prevent_close
+                }
+                api.prevent_close();
+                if let Some(w) = app_clone.get_webview_window(LABEL) {
+                    let _ = w.hide();
+                }
+                tracing::debug!("theme-debug window: CloseRequested → prevent_close + hide");
+            }
+        });
+    } else {
+        win.show()
+            .map_err(|e| format!("显示主题调试窗口失败: {e}"))?;
+    }
+    let _ = win.unminimize();
+    win.set_focus()
+        .map_err(|e| format!("聚焦主题调试窗口失败: {e}"))?;
+
+    tracing::info!("theme-debug window: 已显示");
+    Ok(())
+}
+
 /// 0.17.3：显示首次启动引导窗口。
 ///
 /// 独立窗口（label "welcome"），0.22.13 分步向导改 560×560 居中，有标题栏（decorations: true），

@@ -20,6 +20,7 @@ let _langChangeRegistered = false;
 export function initDebugTab() {
     initLogSettings();
     initPerfStats();
+    initThemeDebug();
 
     // 语言切换时用缓存数据重渲染性能统计（no_data / unit.ms / stats 等带参数文案）
     if (!_langChangeRegistered) {
@@ -28,6 +29,21 @@ export function initDebugTab() {
             if (_cachedOverview) renderPerfStats(_cachedOverview);
         });
     }
+}
+
+// ── 主题调试台（0.25.11）────────────────────────────────────────────────────
+
+/** 打开主题调试窗口（theme-debug.html，后端 close=hide 外壳复用）。 */
+function initThemeDebug() {
+    const btn = document.getElementById("open-theme-debug");
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+        try {
+            await invoke("show_theme_debug_cmd");
+        } catch (err) {
+            console.error("show_theme_debug_cmd failed:", err);
+        }
+    });
 }
 
 // ── 日志 ────────────────────────────────────────────────────────────────────

@@ -192,6 +192,10 @@ export const zh = {
 
     // ── 调试 Tab：日志 ──
     "debug.section.log": "日志 · 排查现场",
+    "debug.section.theme": "主题 · 调试台",
+    "debug.theme.label": "主题调试台",
+    "debug.theme.hint": "单页验收全部主题：WCAG 对比度体检、token 色板与真实组件渲染；页内可切换任意主题",
+    "debug.theme.open": "打开主题调试页",
     "debug.section.perf": "性能统计 · 最近采样",
     "log.level.label": "日志级别",
     "log.level.error": "error（仅错误）",

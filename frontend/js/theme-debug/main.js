@@ -327,17 +327,38 @@ async function init() {
 
     buildThemeSelect(select);
 
+    const applyFromSelect = () => {
+        applyTheme(select.value);
+        refresh();
+    };
+
     const refresh = () => {
         const attr = document.documentElement.getAttribute("data-theme");
-        current.textContent = attr ? `data-theme="${attr}"` : "data-theme 未设（回落 :root 深色）";
+        // 定宽格里只放主题名本身（最长 nvchad-chadracula-evondev = 25ch 恰好放得下），
+        // data-theme 包装与回退解释放 title 悬浮
+        const label = attr || ":root（深色）";
+        current.textContent = label;
+        current.title = attr ? `data-theme="${attr}"` : "data-theme 未设，回落 :root 深色（Catppuccin Mocha）";
         renderContrastTable(contrastTable);
         renderSwatches(swatches);
     };
 
-    select.addEventListener("change", () => {
-        applyTheme(select.value);
-        refresh();
-    });
+    select.addEventListener("change", applyFromSelect);
+
+    // 悬停滚轮直接切换主题（对齐原生 combo 的滚轮习惯）：按 deltaY 累积过阈值再步进，
+    // 鼠标滚轮一格一步、触控板小幅滚动累积，避免惯性一路刷穿 93+ 主题
+    let wheelAcc = 0;
+    select.addEventListener("wheel", (e) => {
+        e.preventDefault(); // 悬停在主题上时滚轮归主题切换，不滚页面
+        wheelAcc += e.deltaY;
+        if (Math.abs(wheelAcc) < 40) return;
+        const step = wheelAcc > 0 ? 1 : -1;
+        wheelAcc = 0;
+        const next = Math.min(select.options.length - 1, Math.max(0, select.selectedIndex + step));
+        if (next === select.selectedIndex) return;
+        select.selectedIndex = next;
+        applyFromSelect();
+    }, { passive: false });
 
     try {
         await ensureSpriteLoaded();

@@ -1507,6 +1507,7 @@ app::commands::generate_palette_schemes,
             app::commands::get_app_info,
             app::commands::check_update,
             app::commands::install_update, // 0.25.10 应用内一键更新
+            app::commands::show_theme_debug_cmd, // 0.25.11 主题调试台入口
             app::commands::resize_window,
             app::commands::get_config,
             app::commands::set_config,

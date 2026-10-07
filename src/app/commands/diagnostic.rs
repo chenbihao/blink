@@ -967,3 +967,12 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
         "failed_count": failed_count,
     })
 }
+
+/// 打开主题调试窗口（0.25.11）：设置页"调试"Tab 入口。
+///
+/// 纯静态单页验收工具（theme-debug.html），窗口 close=hide 外壳复用、不预热不常驻，
+/// 不参与 Alt+Space 主链路。
+#[tauri::command]
+pub async fn show_theme_debug_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    crate::infra::platform::window::show_theme_debug_window(&app)
+}
