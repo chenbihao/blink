@@ -10,15 +10,16 @@
 //! HoldRelease 事件 → stop_recording()
 //!   → stop AudioCapture
 //!   → SttEngine::finalize() → 最终文本
-//!   → G1: emit EventNames::CHORD_FILL_QUERY(文本)
+//!   → G1/AI: emit EventNames::VOICE_FINAL {text, target}（前端 sink 自决后续动作）
 //!     G2: 渐进上屏（0.23.13）——Draft 定稿按保留窗口分批 inject_text，
 //!         终态只补交剩余
 //!     G3: emit EventNames::VOICE_PARTIAL(target="chat", 文本)
 //! ```
 //!
-//! ## G1/G2/G3 区分
+//! ## G1/AI/G2/G3 区分
 //!
-//! - hold 时主窗口可见(先 tap 出窗)→ G1: 文字填 #query
+//! - hold 时主窗口可见(先 tap 出窗)→ 按输入状态机的 ai_mode 细分：
+//!   G1(文字填主窗 #query) / AI(文字填主窗 #ai-query 追问框)
 //! - hold 时 chat 窗口可见 → G3: 文字填 chat composer textarea
 //! - hold 时主窗口 + chat 均不可见 → G2: 文字注入前台应用
 
@@ -44,6 +45,12 @@ use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 pub enum VoiceTarget {
     /// G1: 文字填进 blink 主窗口 #query
     MainWindow,
+    /// 主窗 AI 模式:文字填进主窗口 #ai-query 追问框。
+    ///
+    /// 0.25.13: 主窗内部模式对语音选路可见——ai_mode 状态已由前端经
+    /// `update_main_input_context` 持续上报到输入状态机，hold 时直接读取，
+    /// 无需新增 IPC 通道。
+    MainWindowAi,
     /// G2: 文字注入前台应用光标处
     ForegroundApp,
     /// G3: 文字填进 chat 窗口 composer textarea（0.12.2 §4.3）
@@ -64,6 +71,7 @@ impl VoiceTarget {
     pub fn as_str(&self) -> &'static str {
         match self {
             VoiceTarget::MainWindow => "g1",
+            VoiceTarget::MainWindowAi => "ai",
             VoiceTarget::ForegroundApp => "g2",
             VoiceTarget::ChatWindow => "chat",
             VoiceTarget::Editor => "editor",
@@ -529,7 +537,9 @@ impl VoiceService {
                 return false;
             }
 
-            // 判断 G1/G2/G3：主窗口可见->G1，chat 窗口可见->G3，否则->G2
+            // 判断 G1/AI/G2/G3：主窗口可见时按输入状态机的 ai_mode 细分
+            // （前端进/出 AI 模式时经 update_main_input_context 上报，此处只读），
+            // chat 窗口可见->G3，否则->G2
             let main_visible = self
                 .app
                 .get_webview_window("main")
@@ -541,7 +551,13 @@ impl VoiceService {
                 .map(|w| w.is_visible().unwrap_or(false))
                 .unwrap_or(false);
             target = if main_visible {
-                VoiceTarget::MainWindow
+                let ai_mode =
+                    crate::infra::platform::hotkey::get_latest_view_ai_mode();
+                if ai_mode {
+                    VoiceTarget::MainWindowAi
+                } else {
+                    VoiceTarget::MainWindow
+                }
             } else if chat_visible {
                 VoiceTarget::ChatWindow
             } else {
@@ -1666,12 +1682,12 @@ impl VoiceService {
         self.session.lock().unwrap().recording
     }
 
-    /// 交付最终识别文本到目标（G1/G2/G3）。
+    /// 交付最终识别文本到目标（G1/AI/G2/G3）。
     ///
     /// 0.22.9：从旧 `stop_recording` 的内联交付逻辑提取为独立方法。
     /// 0.22.15：改为调用统一的 `deliver_final` 函数，消除两份近似分支。
     ///
-    /// - G1: emit `CHORD_FILL_QUERY` + `VOICE_RECORDING_END`
+    /// - G1/AI: emit `VOICE_FINAL {text, target}` + `VOICE_RECORDING_END`
     /// - G2: spawn 后台 inject_text（脱离 effect 循环，恢复焦点 + 注入）
     /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
     async fn deliver_final_text(&self, target: VoiceTarget, final_text: String) {
@@ -1961,7 +1977,9 @@ fn log_stream_stats(
 /// 0.22.15：统一交付最终文本——供 `deliver_final_text`（stop 路径）
 /// 和 `consume_stt_events`（事件路径）共用，避免两份近似分支。
 ///
-/// - G1: emit `CHORD_FILL_QUERY` + `VOICE_RECORDING_END`
+/// - G1/AI: emit `VOICE_FINAL {text, target}` + `VOICE_RECORDING_END`
+///   （0.25.13：G1 交付从 chord 时代命名的 chord-fill-query 裸字符串迁到
+///   带 target 的统一终稿通道；"填入后是否触发搜索/发送"由前端输入面自决）
 /// - G2: spawn 后台 inject_text
 /// - G3: emit `VOICE_PARTIAL(target="chat")` + `VOICE_RECORDING_END`
 fn deliver_final(
@@ -1991,12 +2009,12 @@ fn deliver_final(
     );
 
     match target {
-        VoiceTarget::MainWindow => {
+        VoiceTarget::MainWindow | VoiceTarget::MainWindowAi => {
             let _ = app.emit(
-                EventNames::CHORD_FILL_QUERY,
-                serde_json::Value::String(text.to_string()),
+                EventNames::VOICE_FINAL,
+                serde_json::json!({ "text": text, "target": target.as_str() }),
             );
-            tracing::debug!("G1: 文字已 emit chord-fill-query");
+            tracing::debug!(target = target.as_str(), "终稿已 emit voice-final");
             let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
         }
         VoiceTarget::ForegroundApp => {
@@ -3760,8 +3778,12 @@ mod tests {
         handle.abort();
         let _ = handle.await;
 
-        // ── G1 / G3：Legacy 交付路径 + final_delivery 闸门恰好一次 ──
-        for target in [VoiceTarget::MainWindow, VoiceTarget::ChatWindow] {
+        // ── G1 / AI / G3：Legacy 交付路径 + final_delivery 闸门恰好一次 ──
+        for target in [
+            VoiceTarget::MainWindow,
+            VoiceTarget::MainWindowAi,
+            VoiceTarget::ChatWindow,
+        ] {
             assert_eq!(
                 timeout_recovery_path(target),
                 TimeoutRecoveryPath::LegacyDeliverFinal,

@@ -11,7 +11,7 @@
 //!    └─── VoiceService ────────────┘
 //!              ↓ partial text
 //!              ↓ final text
-//!         G1: emit chord-fill-query
+//!         G1/AI: emit voice-final {text, target}
 //!         G2: inject_text()
 //! ```
 //!

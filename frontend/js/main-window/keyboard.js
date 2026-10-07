@@ -186,6 +186,12 @@ function onEscape(e) {
         e.preventDefault();
         // AiMode 下 ESC 退出 AI 模式（不 hide 窗口）
         if (aiMode.isActive()) {
+            // 0.25.13: 录音中 ESC 交给后端 VoiceCancel 取消录音（hook 状态机
+            // 对 ESC 产生 VoiceCancel 与 ai_mode 无关），前端不退出 AI 模式，
+            // RECORDING_END 会把追问框恢复为录音前文本
+            if (document.body.classList.contains("voice-active")) {
+                return;
+            }
             aiMode.exitAiMode();
             return;
         }

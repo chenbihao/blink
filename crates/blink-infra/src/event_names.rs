@@ -30,7 +30,6 @@ impl EventNames {
     pub const RESULTS: &str = "blink://results";
 
     // ── Chord ──
-    pub const CHORD_FILL_QUERY: &str = "blink://chord-fill-query";
     /// Chord 触发后要求前端进入独占模式。
     /// payload: `{ mode: "clipboard", preserveQuery?: boolean }`。
     /// 前端据此切换模式状态机，不走 search pipeline。
@@ -59,6 +58,10 @@ impl EventNames {
     pub const VOICE_RECORDING_END: &str = "blink://voice-recording-end";
     pub const VOICE_LEVEL: &str = "blink://voice-level";
     pub const VOICE_PARTIAL: &str = "blink://voice-partial";
+    /// 语音识别终稿统一交付通道（0.25.13 起，接替原 G1 专用 chord-fill-query）。
+    /// payload: `{ text, target }`——是否触发后续动作（搜索/发送）由前端
+    /// 对应输入面的听写 sink 自决，后端只负责投递。
+    pub const VOICE_FINAL: &str = "blink://voice-final";
     pub const VOICE_ERROR: &str = "blink://voice-error";
     /// 0.23.14 G2 注入交付确认。payload: `{ target: "g2", epoch, confirmed }`。
     /// 注入 worker 成功 ack 后下发；`confirmed` 为 ack 后剩余的待交付文本

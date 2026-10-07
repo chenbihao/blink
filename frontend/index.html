@@ -60,6 +60,19 @@
         <div id="ai-input-bar">
             <input autocomplete="off" data-i18n-placeholder="ai.followup_placeholder" id="ai-query" placeholder="追问…"
                    spellcheck="false" type="text"/>
+            <!-- 0.25.13 AI 听写指示器：录音中显示音量波动条 + "语音输入中"。
+                 与搜索模式的 #voice-indicator 同 class 样式，各输入面自持实例，
+                 dictation.js 按活跃 sink 解析。 -->
+            <div class="voice-indicator hidden" id="ai-voice-indicator">
+                <div class="voice-wave">
+                    <div class="vw-bar"></div>
+                    <div class="vw-bar"></div>
+                    <div class="vw-bar"></div>
+                    <div class="vw-bar"></div>
+                    <div class="vw-bar"></div>
+                </div>
+                <span class="voice-label" data-i18n="voice.indicator.recording">语音输入中</span>
+            </div>
         </div>
         <div id="ai-display">
             <div id="ai-tool-line"></div>

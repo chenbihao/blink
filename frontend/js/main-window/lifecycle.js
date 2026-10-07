@@ -14,37 +14,12 @@ import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
-import {
-    applyFinal,
-    applyPartial,
-    beginRecording,
-    createVoiceTranscriptState,
-    endRecording,
-    getFinalQuery,
-    hasResult,
-} from "./voice-transcript-state.js";
+import * as dictation from "./dictation.js";
 import {applyGlassOpacityFromConfigData, applyThemeFromConfigData} from "../shared/theme.js";
-import {applyI18nFromConfigData, t} from "../i18n/index.js";
+import {applyI18nFromConfigData} from "../i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {
-    // voice-error 的 3s 自动隐藏定时器 ID。
-    // VOICE_RECORDING_END / VOICE_RECORDING_START / SHOWN 会通过 clearVoiceError 提前清除，
-    // 避免松键后 chord 提示被 voice-error CSS 隐藏 2-3 秒。
-    let voiceErrorTimer = null;
-
-    // 0.22.15: 语音转写纯状态模块——从事件接线中提取状态逻辑
-    let voiceState = createVoiceTranscriptState();
-
-    /** 清除 voice-error 状态：取消定时器 + 移除 body 类。 */
-    function clearVoiceError() {
-        if (voiceErrorTimer) {
-            clearTimeout(voiceErrorTimer);
-            voiceErrorTimer = null;
-        }
-        document.body.classList.remove("voice-error");
-    }
-
     listen(EVENTS.SHOWN, () => {
         // 0.20-fix: 防御性清理 readOnly 残留（HIDDEN 已调 forceClearReadOnly，但双保险）
         // 0.21.x: 但 chord 待命态（Alt 按下）必须保留 readOnly——SHOWN 时机窗内
@@ -74,14 +49,11 @@ export function init() {
         queryEl.value = "";
         // 先解冻 ghost（上次录音可能残留 frozen），再 reset 让 ghost.clear 正常清 DOM
         ghost.unfreeze();
-        // 清除语音状态（voice-active / voice-error），确保唤起时 chord 提示不被残留状态隐藏
-        clearVoiceError();
-        document.body.classList.remove("voice-active");
+        // 清除语音残留（voice-active / voice-error / 指示器），确保唤起时 chord 提示不被隐藏
+        dictation.resetOnShown();
         search.reset(); // 作废在途搜索请求
         results.clear();
         cmdMode.reset(); // 0.18.6: 复位命令模式
-        const vi = document.getElementById("voice-indicator");
-        if (vi) vi.classList.add("hidden");
         queryEl.focus();
         // 异步刷新主题/透明度/语言/结果数/chord——只调一次 get_config 分发给各模块
         // （原实现每个模块各自 invoke get_config，每次唤起 5×7=35 次无谓 DB 查询）
@@ -144,193 +116,6 @@ export function init() {
         if (mode === "clipboard") {
             clipboardMode.enter({preserveQuery});
         }
-    });
-
-    // 0.10 语音录音开始 → G1 隐藏 Ghost overlay + 显示语音指示器
-    // 注意：不清空 Cheat Sheet 内容——CSS body.voice-active 已隐藏它，
-    // 录音结束后移除 voice-active 即可恢复显示。
-    listen(EVENTS.VOICE_RECORDING_START, (event) => {
-        const {target} = event.payload ?? {};
-        if (target !== "g1") return;
-        // 清除可能残留的 voice-error 状态（上一次录音出错后 3s 定时器可能仍在运行）
-        clearVoiceError();
-        // 0.22.15: 初始化语音转写状态，保存 baseQuery（空录音/失败/取消时恢复）
-        // 使用后端传入的 epoch，使前端 epoch 与后端 epoch 同步
-        const epoch = event.payload?.epoch ?? 0;
-        voiceState = beginRecording(voiceState, queryEl.value, epoch);
-        document.body.classList.add("voice-active");
-        ghost.freeze(); // voice-partial 独占 overlay，search 不覆写
-        // 显示语音指示器
-        if (voiceIndicator) {
-            voiceIndicator.classList.remove("hidden");
-            // 录音开始：波形切回绿色（移除加载态蓝色 + 错误态红色）
-            voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading", "voice-error");
-        }
-    });
-
-    // 0.10 语音状态提示（模型加载中等，非错误性质）
-    // 注意：不设 voice-active——只有真正录音（voice-recording-start）才设，
-    // 避免模型加载中隐藏 Chord 提示。
-    listen(EVENTS.VOICE_STATUS, (event) => {
-        const {message, target} = event.payload ?? {};
-        if (target !== "g1" || !message) return;
-        if (voiceIndicator) {
-            voiceIndicator.classList.remove("hidden");
-            const label = voiceIndicator.querySelector(".voice-label");
-            if (label) label.textContent = message;
-            // 模型加载中：波形转蓝色（清除可能残留的错误态红色）
-            voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-error");
-            voiceIndicator.querySelector(".voice-wave")?.classList.add("voice-loading");
-        }
-    });
-
-    // 0.10 语音输入:G1 流式 partial 文字实时更新 #query
-    // (G2 的 partial 由 mini overlay 窗口处理,主窗口不可见时不接收)
-    // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
-    // 0.10.5: G1 应用 G2 的预上屏双色渲染——confirmed 填 #query，preview 走 Ghost overlay
-    // 0.10.6: 同步更新 .ghost-typed 为 confirmed 文本——freeze 后 renderToDom 不执行，
-    //         .ghost-typed 保持空白导致 preview 影子出现在输入框最左边而非 confirmed 之后
-    // 0.10.7: 录音期间不再 dispatch input 事件——伪流式引擎第一句时 confirmed 为空，
-    //         dispatch input 会触发 onInput → fetchContextSuggestions → search_apps("")
-    //         产生大量无意义空 query 搜索（每个音频 chunk 一次，~70ms 内 6 次）。
-    //         搜索结果在 freeze 期间 ghost.update 不写 DOM，纯无用功。
-    //         录音结束后由 chord-fill-query（正常结束）填入 final_text 并 dispatch input
-    //         触发一次完整搜索，取消时 ESC 隐藏窗口自动清空，无需录音中触发。
-    listen(EVENTS.VOICE_PARTIAL, (event) => {
-        const payload = event.payload ?? {};
-        if (payload.target !== "g1") return;
-
-        // 0.22.15: 通过纯状态模块处理，空 partial 是 no-op
-        voiceState = applyPartial(voiceState, payload);
-        const confirmed = voiceState.confirmed;
-        const preview = voiceState.preview;
-
-        if (confirmed || preview) {
-            // confirmed 填入输入框（已定稿文本）
-            queryEl.value = confirmed;
-            // 光标移到末尾 → 浏览器自动滚动 input 到文本末尾（超长时关键）
-            queryEl.setSelectionRange(confirmed.length, confirmed.length);
-            // preview 走 Ghost overlay（灰色半透明，与 G2 预上屏视觉效果一致）
-            // ghost 已 freeze，search 的 ghost.update 不会覆写此处
-            const ghostTyped = document.querySelector("#ghost-overlay .ghost-typed");
-            const ghostSuggest = document.querySelector("#ghost-overlay .ghost-suggest");
-            if (ghostTyped) {
-                ghostTyped.textContent = confirmed;
-            }
-            if (ghostSuggest) {
-                ghostSuggest.textContent = preview ? ` ${preview}` : "";
-                ghostSuggest.classList.add("voice-preview-text");
-            }
-            requestAnimationFrame(() => ghost.scrollWithMargin());
-        } else if (payload.text) {
-            // 兼容旧格式（真流式 / 非流式引擎）
-            queryEl.value = payload.text;
-        }
-        // 不 dispatch input —— 录音期间不触发搜索
-    });
-
-    // 0.10 G1 录音音量波动条
-    const voiceIndicator = document.getElementById("voice-indicator");
-    const vwBars = voiceIndicator?.querySelectorAll(".vw-bar") ?? [];
-    listen(EVENTS.VOICE_LEVEL, (event) => {
-        const {level, target} = event.payload ?? {};
-        if (target !== "g1") return;
-        if (voiceIndicator?.classList.contains("hidden")) {
-            voiceIndicator?.classList.remove("hidden");
-        }
-        const lv = Math.max(0, Math.min(1, level || 0));
-        vwBars.forEach((bar, i) => {
-            const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
-            // jitter 独立于 lv：即使安静时也有微妙呼吸感
-            const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.08;
-            const h = Math.max(4, (lv * factor + jitter) * 20);
-            bar.style.height = h + "px";
-        });
-    });
-
-    // 0.22.15: 恢复 G1 终稿 listener——chord-fill-query 是语音终稿交付通道。
-    // 之前在 e5806c29 把剪贴板改为独立 CHORD_ENTER_MODE 时被一并删除，
-    // 导致 G1 正常终稿写不到 #query。此处恢复，调用 search.fillQuery 只搜一次。
-    listen(EVENTS.CHORD_FILL_QUERY, (event) => {
-        // payload 可以是 string 或 {text}，兼容两种格式
-        const text = typeof event.payload === "string"
-            ? event.payload
-            : event.payload?.text ?? "";
-        if (!text) return;
-        // 0.22.15 fix: 先通过状态模块标记终稿已交付，使 hasResult() 返回 true，
-        // 防止 VOICE_RECORDING_END 用 baseQuery 覆盖已填入的终稿文本
-        voiceState = applyFinal(voiceState, {text});
-        search.fillQuery(text);
-    });
-
-    // 0.10 录音结束 → 隐藏 G1 指示器 + 解冻 Ghost overlay（恢复 search 建议）
-    // 同时清除 voice-error 状态——松键后 voice-active 和 voice-error 都应立即移除，
-    // 让 chord 提示能立刻恢复显示。否则 voice-error 的 3s 定时器会让 chord 提示
-    // 在语音动画消失后仍被隐藏 2-3 秒。
-    listen(EVENTS.VOICE_RECORDING_END, () => {
-        clearVoiceError();
-        document.body.classList.remove("voice-active");
-        // 0.22.15: 通过状态模块结束录音
-        voiceState = endRecording(voiceState);
-        // 如果终稿非空，CHORD_FILL_QUERY listener 已调用 applyFinal + fillQuery 搜索；
-        // 如果终稿为空但有 confirmed/preview，用 getFinalQuery 取最终文本
-        // 如果都没有，恢复 baseQuery（空录音/失败/取消时）
-        if (!hasResult(voiceState)) {
-            queryEl.value = voiceState.baseQuery;
-            ghost.syncTypedText(voiceState.baseQuery);
-        } else {
-            // 有结果但 CHORD_FILL_QUERY 未到达（如 confirmed-only 路径），
-            // 用 getFinalQuery 确保 query 文本正确
-            const finalText = getFinalQuery(voiceState);
-            if (finalText && queryEl.value !== finalText) {
-                queryEl.value = finalText;
-                ghost.syncTypedText(finalText);
-            }
-        }
-        ghost.unfreeze(); // 恢复 ghost.update DOM 写入 + 清除 voice-preview-text + 重绘当前 suggestion
-        if (voiceIndicator) {
-            voiceIndicator.classList.add("hidden");
-            vwBars.forEach((bar) => (bar.style.height = "4px"));
-            // 恢复语音指示器标签默认文案 + 清除加载态/错误态
-            voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading", "voice-error");
-            const label = voiceIndicator.querySelector(".voice-label");
-            if (label) label.textContent = t("voice.indicator.recording");
-        }
-    });
-
-    // 0.10 语音错误提示（STT 未配置 / 服务未启动等）
-    // 设计铁则：所有语音状态统一在波形动画区域展示——
-    // 绿色=录音中 · 蓝色=加载中 · 红色=错误。错误信息显示在 .voice-label 文本上。
-    listen(EVENTS.VOICE_ERROR, (event) => {
-        const {message, target} = event.payload ?? {};
-        if (target !== "g1" || !message) return;
-        document.body.classList.remove("voice-active");
-        // 添加 voice-error 标记——隐藏 chord 提示，避免错误文案与 chord 键帽重叠
-        document.body.classList.add("voice-error");
-        ghost.unfreeze(); // 确保解冻（错误可能发生在录音中）
-        // 在语音指示器上显示错误信息 + 红色波形
-        if (voiceIndicator) {
-            voiceIndicator.classList.remove("hidden");
-            const label = voiceIndicator.querySelector(".voice-label");
-            if (label) label.textContent = message;
-            const wave = voiceIndicator.querySelector(".voice-wave");
-            if (wave) {
-                wave.classList.remove("voice-loading"); // 清除可能残留的加载态
-                wave.classList.add("voice-error");
-            }
-        }
-        // 3s 后隐藏指示器 + 恢复默认文案 + 移除 voice-error 标记
-        // 若期间收到 VOICE_RECORDING_END / VOICE_RECORDING_START，clearVoiceError 会取消此定时器
-        voiceErrorTimer = setTimeout(() => {
-            voiceErrorTimer = null;
-            document.body.classList.remove("voice-error");
-            if (voiceIndicator) {
-                voiceIndicator.classList.add("hidden");
-                voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-error");
-                const label = voiceIndicator.querySelector(".voice-label");
-                if (label) label.textContent = t("voice.indicator.recording");
-            }
-        }, 3000);
     });
 
     // 0.9.2.1：剪贴板变化 / 选区就绪 → AwarenessSnapshot 已局部刷新 → 用当前

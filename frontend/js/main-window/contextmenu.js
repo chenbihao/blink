@@ -24,6 +24,7 @@ import {
     triggerChord
 } from "../shared/api.js";
 import {retrigger} from "./search.js";
+import * as ghost from "./ghost.js";
 import {getLang, t} from "../i18n/index.js";
 import {showActionError} from "./action-error.js";
 import {normalizeError} from "../shared/tauri.js";
@@ -228,6 +229,9 @@ function unifiedMenu() {
                     const end = queryEl.selectionEnd || 0;
                     queryEl.value = queryEl.value.slice(0, start) + text + queryEl.value.slice(end);
                     queryEl.selectionStart = queryEl.selectionEnd = start + text.length;
+                    // 0.25.12: 设值重置 scrollLeft 且程序化选区不触发自动滚动——
+                    // 长文本粘贴后显式滚到末尾，光标（插入点）可见
+                    ghost.scrollWithMargin();
                     queryEl.dispatchEvent(new Event("input", {bubbles: true}));
                 }
             } catch (e) {

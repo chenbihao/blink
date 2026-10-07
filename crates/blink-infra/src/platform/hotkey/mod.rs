@@ -98,6 +98,8 @@ pub fn send_effect(effect: InputEffect) {
 
 static LATEST_ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static LATEST_WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
+/// 主窗前端视图 ai_mode（0.25.13：语音选路读——主窗可见时据此细分 G1/AI target）。
+static LATEST_VIEW_AI_MODE: AtomicBool = AtomicBool::new(false);
 static LATEST_CHORD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LATEST_UI_REVISION: AtomicU64 = AtomicU64::new(0);
 
@@ -117,6 +119,16 @@ pub fn get_latest_ui_state() -> InputUiState {
         window_visible: LATEST_WINDOW_VISIBLE.load(Ordering::SeqCst),
         exclusive_chord_active: LATEST_CHORD_ACTIVE.load(Ordering::SeqCst),
     }
+}
+
+/// hook 线程在每次 reduce 后回写视图 ai_mode（`apply_reduce_result` 调用）。
+pub fn set_latest_view_ai_mode(ai_mode: bool) {
+    LATEST_VIEW_AI_MODE.store(ai_mode, Ordering::SeqCst);
+}
+
+/// 读取最新视图 ai_mode 快照（主线程调用，如语音 hold 选路 G1/AI 细分）。
+pub fn get_latest_view_ai_mode() -> bool {
+    LATEST_VIEW_AI_MODE.load(Ordering::SeqCst)
 }
 
 // ── Config snapshot 存储（供 windows.rs 初始化用）─────────────────────────────

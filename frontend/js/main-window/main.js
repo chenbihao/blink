@@ -16,6 +16,7 @@ import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
+import * as dictation from "./dictation.js";
 import {applyGlassOpacityFromConfig, applyThemeFromConfig} from "../shared/theme.js";
 import {applyI18nFromConfig} from "../i18n/index.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
@@ -45,6 +46,7 @@ lifecycle.init();
 contextmenu.init();
 chord.init(); // 预热 chord 配置 + 动作集（完成后 notify 订阅者）
 aiMode.init(); // 0.17.6: AI 模式初始化（注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听）
+dictation.init(); // 0.25.13: 听写会话控制器（VOICE_* 事件接线，按 target 分发到各输入面 sink）
 cmdMode.init(); // 0.18.6: 命令模式初始化（ModeHeader 投影由 enter/exit 触发）
 clipboardMode.init(); // 0.19.15: 剪贴板模式初始化（ModeHeader 投影由 enter/exit 触发）
 inputState.init(); // 输入状态桥接初始化（注册 listener + register_main_input_view）

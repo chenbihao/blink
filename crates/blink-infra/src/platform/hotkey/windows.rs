@@ -30,7 +30,7 @@ use super::recorder_diag::{self, HookMsgKind};
 use super::{
     ControlMsg, HookKeyEvent, InputEffect, InputEvent, InputSource, InputState, ModifierKey,
     NormalizedRawModifier, Propagation, WindowTransitionReason, drain_control_messages,
-    get_config_snapshot, send_effect, set_latest_ui_state, state,
+    get_config_snapshot, send_effect, set_latest_ui_state, set_latest_view_ai_mode, state,
 };
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -606,6 +606,7 @@ fn apply_reduce_result(state: &InputState, result: &state::ReduceResult) {
     {
         set_latest_ui_state(ui);
     }
+    set_latest_view_ai_mode(state.view.ai_mode);
     manage_hold_timer(state);
     // 更新诊断快照（try_lock 不阻塞）
     diagnostics::update_state_snapshot(state);

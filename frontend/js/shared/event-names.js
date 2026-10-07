@@ -24,7 +24,6 @@ export const EVENTS = Object.freeze({
     RESULTS: 'blink://results',
 
     // ── Chord ──
-    CHORD_FILL_QUERY: 'blink://chord-fill-query',
     /** Chord 触发后要求前端进入独占模式。payload: { mode: "clipboard", preserveQuery?: boolean }。 */
     CHORD_ENTER_MODE: 'blink://chord-enter-mode',
     /** 跟随 Chord 的全局快捷键在主窗可见时命中。payload: { actionId, key }。 */
@@ -46,6 +45,8 @@ export const EVENTS = Object.freeze({
     VOICE_RECORDING_END: 'blink://voice-recording-end',
     VOICE_LEVEL: 'blink://voice-level',
     VOICE_PARTIAL: 'blink://voice-partial',
+    /** 语音终稿统一交付（0.25.13，接替 chord-fill-query）。payload: { text, target }。 */
+    VOICE_FINAL: 'blink://voice-final',
     VOICE_STATUS: 'blink://voice-status',
     VOICE_ERROR: 'blink://voice-error',
     /**

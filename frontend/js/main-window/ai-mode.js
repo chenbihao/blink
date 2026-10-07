@@ -51,6 +51,7 @@ import * as suggestionBar from "./suggestion-bar.js";
 import * as search from "./search.js";
 import * as results from "./results.js";
 import * as modeHeader from "./mode-header.js";
+import * as dictation from "./dictation.js";
 
 // ── 状态 ──────────────────────────────────────────────────────────────────────
 
@@ -79,9 +80,50 @@ export function init() {
     // 注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听
     listen(EVENTS.CHAT_STREAM, handleStreamEvent);
     listen(EVENTS.CHAT_CONFIRM_ACTION, handleConfirmEvent);
+    // 0.25.13: 注册 AI 追问框听写 sink——语音事件接线在 dictation.js
+    dictation.registerSink("ai", aiDictationSink);
     // 监听 #ai-display 手动滚动（用户上滚时暂停自动跟随）
     bindScrollListener();
 }
+
+// ── AI 听写 sink（0.25.13）────────────────────────────────────────────────
+// 追问框的语音文本落位。只落已定稿文本（confirmed）——追问框没有 ghost
+// 预览层，未定稿 preview 不进真输入框；终稿只填入不自动发送，与手动输入
+// 一致，由用户确认后回车提交（防误识别直接发出）。
+const aiDictationSink = {
+    currentText: () => aiQueryEl.value,
+
+    indicatorEl: () => document.querySelector("#ai-input-bar .voice-indicator"),
+
+    begin() {
+        aiQueryEl.focus();
+    },
+
+    partial(view) {
+        const text = view.text ?? view.confirmed ?? "";
+        aiQueryEl.value = text;
+        aiQueryEl.setSelectionRange(text.length, text.length);
+    },
+
+    final(text) {
+        aiQueryEl.value = text;
+        aiQueryEl.setSelectionRange(text.length, text.length);
+        aiQueryEl.focus();
+    },
+
+    restore(baseText) {
+        aiQueryEl.value = baseText;
+        aiQueryEl.setSelectionRange(baseText.length, baseText.length);
+    },
+
+    settle(text) {
+        if (aiQueryEl.value === text) return;
+        aiQueryEl.value = text;
+        aiQueryEl.setSelectionRange(text.length, text.length);
+    },
+
+    end() {},
+};
 
 /** 当前是否处于 AI 模式。 */
 export function isActive() {

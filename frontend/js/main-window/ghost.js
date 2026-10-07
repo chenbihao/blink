@@ -67,6 +67,11 @@ export function syncScroll() {
  * 因此文本溢出时直接滚到 `maxScroll`（文本末尾贴右边缘可见），
  * 影子文本被 `overflow: hidden` 裁切——文本可见性优先于影子可见性。
  * 文本不溢出时不做任何事（maxScroll <= 0），影子和文本都自然可见。
+ *
+ * 0.25.12 例外：语音录音中（body.voice-active）CSS 给 #query/#ghost-overlay
+ * 加 padding-right 避让带（宽度 = 语音指示器实测宽 + 间距，lifecycle 写入
+ * --voice-avoid-w）——滚动区计入右 padding（Chromium 实测），maxScroll 随之
+ * 增大，文本末尾自然停在指示器左侧。预留靠真实空间，不靠滚过去。
  */
 export function scrollWithMargin(_ratio = 0.8) {
     const maxScroll = queryEl.scrollWidth - queryEl.clientWidth;

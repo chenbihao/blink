@@ -12,6 +12,7 @@ import * as ghost from "./ghost.js";
 import * as suggestionBar from "./suggestion-bar.js";
 import * as cmdMode from "./command-mode.js";
 import * as clipboardMode from "./clipboard-mode.js";
+import * as dictation from "./dictation.js";
 
 /** 防抖间隔。后端搜索实测 ~1ms（纯内存），仅用于合并极快连打。 */
 const DEBOUNCE_MS = 40;
@@ -60,6 +61,8 @@ let isComposing = false;
 
 /** 绑定输入监听 + async 增量结果监听（blink://results）。 */
 export function init() {
+    // 0.25.13: 注册 G1（搜索框）听写 sink——语音事件接线在 dictation.js
+    dictation.registerSink("g1", dictationSink);
     queryEl.addEventListener("input", onInput);
     // IME 组字感知：避免中文拼音中间态触发无效搜索
     queryEl.addEventListener("compositionstart", () => {
@@ -163,7 +166,7 @@ export async function fetchContextSuggestions() {
 /**
  * 程序化填充 query 并立即搜索（跳过 40ms 防抖）。
  *
- * 用于 chord-fill-query（Alt+C 剪贴板等）——后端直接填入完整 query，
+ * 用于 G1 听写终稿（voice-final）等程序化填入——后端直接填入完整 query，
  * 不是用户逐字输入，无需防抖合并。跳过防抖可省 ~40ms 延迟。
  *
  * 竞态防护：++seq 作废在途请求；用户在结果返回前开始输入也会作废此结果。
@@ -171,7 +174,12 @@ export async function fetchContextSuggestions() {
 export async function fillQuery(text) {
     clearTimeout(timer);
     queryEl.value = text;
+    // 0.25.12: 程序化设值/设选区不触发浏览器自动滚动（实测 Chromium 无焦点移动不滚、
+    // 有焦点也不滚），超长文本（voice 终稿 voice-final）视图会停在开头、
+    // 末尾光标不可见——显式设光标到末尾并滚动（scrollWithMargin 内部同步 ghost overlay）
+    queryEl.setSelectionRange(text.length, text.length);
     ghost.syncTypedText(text);
+    ghost.scrollWithMargin();
     const mySeq = ++seq;
     try {
         const resp = await searchApps(text, mySeq);
@@ -237,3 +245,64 @@ function onInput() {
         }
     }, DEBOUNCE_MS);
 }
+
+// ── G1 听写 sink（0.25.13）────────────────────────────────────────────────
+// 搜索框的语音文本落位。partial 期间 ghost overlay 被 freeze 独占：
+// confirmed 填 #query，preview 复用 ghost-suggest 显示灰色预览（G2 预上屏视觉）。
+export const dictationSink = {
+    currentText: () => queryEl.value,
+
+    indicatorEl: () => document.querySelector("#search-mode .voice-indicator"),
+
+    begin() {
+        ghost.freeze(); // voice-partial 独占 overlay，search 不覆写
+    },
+
+    partial(view) {
+        const confirmed = view.text ?? view.confirmed ?? "";
+        const preview = view.text != null ? "" : view.preview ?? "";
+        // confirmed 填入输入框（已定稿文本）
+        queryEl.value = confirmed;
+        // 光标移到末尾 → 浏览器自动滚动 input 到文本末尾（超长时关键）
+        queryEl.setSelectionRange(confirmed.length, confirmed.length);
+        // preview 走 Ghost overlay（灰色半透明）。ghost 已 freeze，
+        // search 的 ghost.update 不会覆写此处
+        const ghostTyped = document.querySelector("#ghost-overlay .ghost-typed");
+        const ghostSuggest = document.querySelector("#ghost-overlay .ghost-suggest");
+        if (ghostTyped) {
+            ghostTyped.textContent = confirmed;
+        }
+        if (ghostSuggest) {
+            ghostSuggest.textContent = preview ? ` ${preview}` : "";
+            ghostSuggest.classList.add("voice-preview-text");
+        }
+        requestAnimationFrame(() => ghost.scrollWithMargin());
+    },
+
+    final(text) {
+        // G1 语义：终稿填入并触发一次完整搜索
+        fillQuery(text);
+    },
+
+    restore(baseText) {
+        queryEl.value = baseText;
+        // 0.25.12: 设值会重置 scrollLeft 且程序化选区不触发自动滚动——
+        // baseQuery 超长（空录音/取消恢复）时同样显式跟随到末尾
+        queryEl.setSelectionRange(baseText.length, baseText.length);
+        ghost.syncTypedText(baseText);
+        ghost.scrollWithMargin();
+    },
+
+    settle(text) {
+        if (queryEl.value === text) return;
+        queryEl.value = text;
+        queryEl.setSelectionRange(text.length, text.length);
+        ghost.syncTypedText(text);
+        ghost.scrollWithMargin();
+    },
+
+    end() {
+        // 恢复 ghost.update DOM 写入 + 清除 voice-preview-text + 重绘当前 suggestion
+        ghost.unfreeze();
+    },
+};

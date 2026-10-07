@@ -201,6 +201,28 @@ body.voice-error #ghost-overlay .ghost-chord {
     opacity: 0.6;
 }
 
+/* ── 0.25.12 语音录音中输入框右侧避让带 ──────────────────────────────────────
+   语音指示器绝对定位盖在输入框右端上，partial 追加的文本贴右缘时新字被波形
+   动画遮挡。录音中给 #query 与 #ghost-overlay 同步加大 padding-right（二者
+   padding 镜像约定不变）；input 滚动区计入右 padding（Chromium 实测），
+   ghost.scrollWithMargin 的 maxScroll 随之增大——文本末尾自然停在指示器
+   左侧，滚动逻辑零改动。带宽由 lifecycle.js 在录音开始/状态提示时按指示器
+   实测写入 --voice-avoid-w（指示器宽 + 间距），fallback 兜底 JS 未就绪场景。 */
+body.voice-active #query,
+body.voice-active #ghost-overlay {
+    padding-right: calc(var(--space-md) + var(--voice-avoid-w, 84px));
+}
+
+/* 避让带内不渲染灰字：voice preview（ghost-suggest）从确认文本末尾起排，
+   内联溢出会画进右 padding 区（overflow:hidden 裁在 padding 盒沿而非内容盒沿），
+   仅加 padding 挡不住它。clip-path 把 overlay 裁切沿收到避让带内侧——灰字在
+   带沿截断，不穿到语音指示器下方：短文本（不滚动）时灰字最多显示到带沿，
+   长文本（滚到 maxScroll）时灰字恰在正式文本末尾处截断即不可见——单行输入区
+   空间不足时预览让位，正式文本优先（G2 浮窗才有完整双层展示）。 */
+body.voice-active #ghost-overlay {
+    clip-path: inset(0 calc(var(--space-md) + var(--voice-avoid-w, 84px)) 0 0);
+}
+
 .voice-indicator {
     position: absolute;
     right: var(--space-md);

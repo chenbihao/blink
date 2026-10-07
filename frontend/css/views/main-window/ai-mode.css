@@ -31,6 +31,14 @@
     padding: var(--space-xs) var(--space-md);
     background: var(--accent-bg);
     border-radius: var(--radius-md);
+    position: relative; /* AI 听写指示器的绝对定位上下文（0.25.13） */
+}
+
+/* 0.25.13: 录音中追问框右侧避让带——与主窗 #query 同机制（指示器盖在右端上，
+   带宽由 dictation.js 按指示器实测写入 --voice-avoid-w）。#ai-query 左右
+   padding 为 0（横侧留白由容器承担），只需补指示器宽 + 间距。 */
+body.voice-active #ai-query {
+    padding-right: var(--voice-avoid-w, 84px);
 }
 
 /* ── AI 模式指示器 ──
@@ -230,6 +238,10 @@
     --md-blockquote-bg: transparent;
     --md-table-border: var(--surface);
     --md-table-head-bg: var(--surface);
+    /* Cherry vendor 给 .cherry 容器自带 box-shadow: var(--shadow-md)
+       （其 :root 令牌 --shadow-md = 0 4px 12px rgba(0,0,0,.15)），
+       回复区是透明平铺正文而非卡片，阴影清零 */
+    box-shadow: none;
     background: transparent !important;
     color: var(--text) !important;
 }
@@ -593,6 +605,7 @@
     --md-blockquote-bg: transparent;
     --md-table-border: var(--surface);
     --md-table-head-bg: var(--surface);
+    box-shadow: none; /* 同上：清掉 vendor .cherry 容器自带阴影 */
     background: transparent !important;
     color: var(--text) !important;
 }
