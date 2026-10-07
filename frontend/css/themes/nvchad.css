@@ -1745,3 +1745,106 @@
     --border-glow: rgba(255, 255, 255, 0.05);
     --danger-hover-bg: rgba(191, 97, 106, 0.12);
 }
+
+/* ── Catppuccin 配色系列 ────────────────────────────────────────────────────
+   https://catppuccin.com/
+   Mocha / Macchiato / Frappé / Latte 四款官方风味；accent 统一取品牌 mauve，
+   状态色底沿用本文件系列内共享惯例（同 nord 系列一套状态面）。 */
+
+/* Mocha 摩卡 — 最深底色 */
+[data-theme="catppuccin-mocha"] {
+    --bg: #1e1e2e;
+    --bg-sidebar: #181825;
+    --bg-deep: #11111b;
+    --surface: #313244;
+    --surface-2: #45475a;
+    --text: #cdd6f4;
+    --text-sub: #a6adc8;
+    --text-dim: #6c7086;
+    --text-faint: #585b70;
+    --accent: #cba6f7;
+    --accent-bg: rgba(203, 166, 247, 0.15);
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --red-bg: #45273a;
+    --red-border: #6c3a5a;
+    --green-bg: #2a3f4e;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
+    --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+/* Macchiato 玛奇朵 */
+[data-theme="catppuccin-macchiato"] {
+    --bg: #24273a;
+    --bg-sidebar: #1e2030;
+    --bg-deep: #181926;
+    --surface: #363a4f;
+    --surface-2: #494d64;
+    --text: #cad3f5;
+    --text-sub: #b8c0e0;
+    --text-dim: #6e738d;
+    --text-faint: #5b6078;
+    --accent: #c6a0f6;
+    --accent-bg: rgba(198, 160, 246, 0.15);
+    --green: #a6da95;
+    --red: #ed8796;
+    --red-bg: #45273a;
+    --red-border: #6c3a5a;
+    --green-bg: #2a3f4e;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
+    --danger-hover-bg: rgba(237, 135, 150, 0.12);
+}
+
+/* Frappé 奶油 */
+[data-theme="catppuccin-frappe"] {
+    --bg: #303446;
+    --bg-sidebar: #292c3c;
+    --bg-deep: #232634;
+    --surface: #414559;
+    --surface-2: #51576d;
+    --text: #c6d0f5;
+    --text-sub: #b5bfe2;
+    --text-dim: #737994;
+    --text-faint: #626880;
+    --accent: #ca9ee6;
+    --accent-bg: rgba(202, 158, 230, 0.15);
+    --green: #a6d189;
+    --red: #e78284;
+    --red-bg: #45273a;
+    --red-border: #6c3a5a;
+    --green-bg: #2a3f4e;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --border-glow: rgba(255, 255, 255, 0.05);
+    --danger-hover-bg: rgba(231, 130, 132, 0.12);
+}
+
+/* Latte 拿铁 — 浅色。dim/accent/green 取官方值或 0.25.11 浅色可读性专项同款
+   AA 调整值：text-dim 官方 overlay0 #6c6f85 仅 4.37:1，沿用 light.css 调整值；
+   accent mauve #8839ef 官方原值即达 4.7:1，green 沿用 light.css 向黑缩放值 */
+[data-theme="catppuccin-latte"] {
+    --bg: #eff1f5;
+    --bg-sidebar: #e6e9ef;
+    --bg-deep: #dce0e8;
+    --surface: #ccd0da;
+    --surface-2: #bcc0cc;
+    --text: #4c4f69;
+    --text-sub: #5c5f77;
+    --text-dim: #696c82;
+    --text-faint: #7c7f93;
+    --accent: #8839ef;
+    --accent-bg: rgba(136, 57, 239, 0.10);
+    --green: #317b21;
+    --red: #d20f39;
+    --red-bg: #e6d2da;
+    --red-border: #d2b3c2;
+    --green-bg: #dcead9;
+    --shadow: rgba(0, 0, 0, 0.18);
+    --shadow-strong: rgba(0, 0, 0, 0.35);
+    --border-glow: rgba(0, 0, 0, 0.06);
+    --danger-hover-bg: rgba(210, 15, 57, 0.1);
+}
