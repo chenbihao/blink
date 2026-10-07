@@ -115,11 +115,12 @@ jobs:
           prerelease: false
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # 0.25.10：latest.json 是 updater 静态清单（指向 NSIS 安装包 + minisign 签名），
+          # 应用端经 releases/latest/download/latest.json 拉取，publish 后生效。
+          # 注意：files 的 | 块内不能写 YAML 注释——块标量把注释行当文件模式匹配（首发踩过）
           files: |
             ${{ steps.release-artifacts.outputs.msi }}
             ${{ steps.release-artifacts.outputs.nsis }}
-            # 0.25.10：updater 静态清单（指向 NSIS 安装包 + minisign 签名），
-            # 应用端经 releases/latest/download/latest.json 拉取，publish 后生效
             target/release/bundle/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
