@@ -22,6 +22,7 @@
     --warning: #fab387; /* Catppuccin Mocha peach -- 警告态（迁移失败等） */
     --warning-bg: #3a2e3a;
     --warning-border: #5a4858;
+    --yellow: #e5c07b; /* Catppuccin Mocha yellow -- 提示黄（主窗错误项等） */
     --shadow: rgba(0, 0, 0, 0.6);
     --shadow-strong: rgba(0, 0, 0, 0.6);
     --border-glow: rgba(255, 255, 255, 0.05);

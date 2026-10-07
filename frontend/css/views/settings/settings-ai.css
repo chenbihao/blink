@@ -1359,7 +1359,7 @@
     width: 15px;
     height: 15px;
     margin: 0;
-    border: 1px solid var(--surface-3, var(--surface-2));
+    border: 1px solid var(--surface-2);
     border-radius: 4px;
     background: var(--surface);
     display: grid;
@@ -1505,7 +1505,7 @@
 }
 
 .btn-continue:hover {
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-2);
     filter: brightness(1.05);
 }
 
@@ -1525,11 +1525,11 @@
 .ai-prompt-tokens {
     font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
     font-weight: var(--weight-medium, 500);
-    color: var(--text-secondary, #666);
+    color: var(--text-sub);
 }
 
 .ai-prompt-tokens--warn {
-    color: var(--amber, #d97706);
+    color: var(--warning);
 }
 
 .ai-prompt-tokens--over {
@@ -1538,7 +1538,7 @@
 }
 
 .ai-prompt-meta {
-    color: var(--text-tertiary, #999);
+    color: var(--text-dim);
     font-size: var(--text-xs, 12px);
 }
 
@@ -1592,18 +1592,19 @@
 }
 
 .ai-cap-chat {
-    background: var(--blue-bg, rgba(59, 130, 246, 0.15));
-    color: var(--blue, #3b82f6);
+    background: var(--accent-bg);
+    color: var(--accent);
 }
 
 .ai-cap-embedding {
-    background: var(--green-bg, rgba(34, 197, 94, 0.15));
-    color: var(--green, #22c55e);
+    background: var(--green-bg);
+    color: var(--green);
 }
 
 .ai-cap-stt {
-    background: var(--purple-bg, rgba(168, 85, 247, 0.15));
-    color: var(--purple, #a855f7);
+    /* 0.25.11: 原 --purple(-bg) 未定义恒落 Mocha 常量，改 tint-purple 混 --text 使文字随主题保对比度 */
+    background: color-mix(in srgb, var(--tint-purple) 15%, transparent);
+    color: color-mix(in srgb, var(--tint-purple) 65%, var(--text));
 }
 
 /* 模型表格能力列 */
@@ -1638,7 +1639,7 @@
     width: 16px;
     height: 16px;
     margin: 0;
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface-2);
     border-radius: var(--radius-sm);
     background: var(--surface);
     cursor: pointer;
@@ -1758,8 +1759,8 @@
     min-height: 360px;
     max-height: 50vh;
     resize: vertical;
-    background: var(--bg-elevated, var(--surface-1, #1e1e1e));
-    border: 1px solid var(--surface-2, #333);
+    background: var(--bg-deep);
+    border: 1px solid var(--surface-2);
     border-radius: var(--radius-md, 6px);
     padding: var(--space-sm, 8px) var(--space-md, 12px);
     font-family: var(--font-mono, "Cascadia Code", "Fira Code", monospace);
@@ -1771,7 +1772,7 @@
 
 .skill-edit-textarea:focus {
     outline: none;
-    border-color: var(--accent, var(--blue, #3b82f6));
+    border-color: var(--accent);
 }
 
 .skill-list {
@@ -1885,8 +1886,8 @@
 /* 0.13.7: CLI 来源徽章——替代冗长的整行路径文本，hover 显示完整路径。
    用紫色调区分于来源/触发徽章，呼应「AI 生成」语义。 */
 .skill-badge-cli {
-    background: var(--purple-bg, rgba(168, 85, 247, 0.12));
-    color: var(--purple, #a855f7);
+    background: color-mix(in srgb, var(--tint-purple) 12%, transparent);
+    color: color-mix(in srgb, var(--tint-purple) 65%, var(--text));
     cursor: help;
 }
 
@@ -2124,8 +2125,8 @@
 .mcp-config-block {
     position: relative;
     margin-top: var(--space-xs, 8px);
-    background: var(--bg-elevated, var(--surface-1, #1e1e1e));
-    border: 1px solid var(--surface-2, #333);
+    background: var(--bg-deep);
+    border: 1px solid var(--surface-2);
     border-radius: var(--radius-md, 6px);
     overflow: hidden;
 }
@@ -2175,7 +2176,7 @@
     align-items: flex-start;
     gap: 6px;
     margin-top: 8px;
-    color: var(--text-muted, var(--text-dim));
+    color: var(--text-dim);
     font-size: 12px;
 }
 
@@ -2184,7 +2185,7 @@
     height: 14px;
     flex-shrink: 0;
     margin-top: 1px;
-    color: var(--amber, #d97706);
+    color: var(--warning);
 }
 
 /* ── CLI 能力识别 ─────────────────────────────────────────────────────────── */

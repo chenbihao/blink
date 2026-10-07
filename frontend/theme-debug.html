@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Blink 主题调试台</title>
+    <link href="css/entries/theme-debug.css" rel="stylesheet"/>
+</head>
+<body>
+<div class="td-root">
+    <header class="td-header">
+        <div>
+            <h1>主题调试台<span class="td-current-theme" id="td-current"></span></h1>
+        </div>
+        <div class="td-sample-row">
+            <label>主题
+                <select class="td-theme-select" id="td-theme-select"></select>
+            </label>
+            <span class="td-sync-note">目录与 settings.html 的 #theme 手工同步（js/theme-debug/themes.js）；URL 可带 ?theme=light 直达</span>
+        </div>
+    </header>
+
+    <main>
+        <section class="td-card">
+            <h2>对比度体检（WCAG）</h2>
+            <p class="td-note">正文阈值 4.5:1，大字/UI 组件 3.0:1（spec-frontend §3.2）；ghost 提示（--text-faint）按"刻意弱化"只要求 3.0。切换主题后实时重算。</p>
+            <table class="td-contrast-table" id="td-contrast-table"></table>
+        </section>
+
+        <section class="td-card">
+            <h2>语义 token 色板</h2>
+            <p class="td-note">getComputedStyle 实时取值；显示"未定义"即 token 断供，需要修 tokens/themes。</p>
+            <div class="td-swatches" id="td-swatches"></div>
+        </section>
+
+        <section class="td-card">
+            <h2>文字层级</h2>
+            <div class="td-type">
+                <p>正文 --text：如果用户按快捷键后不能立即输入，其他所有功能都没有意义。</p>
+                <p class="td-type-sub">次要 --text-sub：历史按 ln(hit+1)*0.3 加权，上限 0.8。</p>
+                <p class="td-type-dim">弱化 --text-dim：图标提取不进搜索热路径，由自定义协议按需提供。</p>
+                <p class="td-type-faint">ghost --text-faint：稳定视觉重量，弱信号绝不撑布局。</p>
+            </div>
+        </section>
+
+        <section class="td-card">
+            <h2>状态色文字</h2>
+            <p class="td-note">0.25.11 起 light 主题状态色向黑缩放保色相，正文场景全部 ≥4.5:1（见上方体检表）。</p>
+            <div class="td-status">
+                <span class="td-status-green">--green 成功 / 计算结果</span>
+                <span class="td-status-red">--red 失败 / 危险</span>
+                <span class="td-status-warning">--warning 警告 / 挂起</span>
+                <span class="td-status-yellow">--yellow 主窗错误项</span>
+                <span class="td-status-accent">--accent 强调 / 链接</span>
+            </div>
+        </section>
+
+        <section class="td-card">
+            <h2>主窗结果列表（真实视图 CSS）</h2>
+            <div class="td-mainwin-mock">
+                <div id="suggestion-bar"></div>
+                <ul id="results"></ul>
+                <div id="statusbar"></div>
+                <div id="transient-feedback" class="feedback-info">已复制到剪贴板</div>
+            </div>
+        </section>
+
+        <section class="td-card">
+            <h2>对话窗口（真实视图 CSS）</h2>
+            <div class="td-chat-mock" id="td-chat"></div>
+        </section>
+
+        <section class="td-card">
+            <h2>组件样本（components 层真实 CSS）</h2>
+            <div class="td-samples" id="td-components"></div>
+        </section>
+
+        <section class="td-card">
+            <h2>主题无关窗口（设计豁免，勿"修复"）</h2>
+            <p class="td-note td-note-narrow">
+                截图 overlay（chord-screenshot.css）与钉图（pin.css）保持暗色自持 palette——浮层叠在任意屏幕内容上，
+                固定深色才能保证任意底材可读，见 0.25 §3.5 豁免；便签（sticky）自持彩色卡片；
+                截图标注/取色器等 JS 画布绘制色同样不随主题。以上均不进入本页体检范围。
+            </p>
+        </section>
+    </main>
+</div>
+<script src="js/theme-debug/main.js" type="module"></script>
+</body>
+</html>

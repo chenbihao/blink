@@ -86,7 +86,7 @@
     height: 32px;
     border-radius: 50%;
     background: var(--surface-2);
-    border: 1px solid var(--surface-3, var(--surface-2));
+    border: 1px solid var(--surface-2);
     color: var(--text);
     display: flex;
     align-items: center;
@@ -113,7 +113,7 @@
 
 .ai-scroll-bottom-btn:hover {
     opacity: 1;
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-2);
 }
 
 /* ── 工具行（单行替换式）── */
@@ -294,7 +294,7 @@
 
 #ai-content th,
 #ai-content td {
-    border: 1px solid var(--border, var(--text-faint));
+    border: 1px solid var(--text-faint);
     padding: var(--space-xs) var(--space-sm);
     text-align: left;
 }
@@ -498,7 +498,7 @@
 
 /* ── 多轮追问折叠摘要（0.17.6a）── */
 .ai-round-summary {
-    border-left: 2px solid var(--border, var(--text-faint));
+    border-left: 2px solid var(--text-faint);
     padding-left: var(--space-sm);
     margin-bottom: var(--space-xs);
     opacity: 0.85;

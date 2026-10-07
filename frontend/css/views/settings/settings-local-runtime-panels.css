@@ -709,7 +709,7 @@
 /* 0.22.7：模型选择状态标记（非按钮） */
 #engines .le-model-btn-current {
     color: var(--accent);
-    border-color: var(--accent-border, var(--accent));
+    border-color: var(--accent);
     font-weight: 500;
 }
 

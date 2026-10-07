@@ -1,0 +1,275 @@
+/* ── 主题调试台视图（0.25.11）────────────────────────────────────────────────
+   只服务 theme-debug.html 的布局壳；所有样本一律使用真实组件/视图 CSS，
+   本文件只定义页面骨架与调试专属标注样式，颜色全部走语义 token。 */
+
+/* 主窗 reset 对 body 设了 height:100% + overflow:hidden（固定尺寸启动器专用）；
+   调试台是长滚动页，这里放开（scoped 到本页，不影响其他窗口）。 */
+body {
+    height: auto;
+    overflow-y: auto;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.td-root {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 20px 24px 48px;
+}
+
+/* ── 顶栏 ─────────────────────────────────────────────────────────────────── */
+
+.td-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 0;
+    margin-bottom: 16px;
+    background: var(--bg-glass);
+    backdrop-filter: var(--blur-glass);
+    border-bottom: 1px solid var(--surface);
+}
+
+.td-header h1 {
+    margin: 0;
+    font-size: var(--text-lg);
+    font-weight: var(--weight-semibold);
+}
+
+.td-current-theme {
+    font-family: var(--font-mono, Consolas, monospace);
+    font-size: var(--text-xs, 12px);
+    color: var(--text-dim);
+    margin-left: 10px;
+}
+
+.td-theme-select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: var(--text-sm, 13px);
+}
+
+.td-sync-note {
+    font-size: var(--text-xs, 12px);
+    color: var(--text-dim);
+}
+
+/* ── 区块卡片 ─────────────────────────────────────────────────────────────── */
+
+.td-card {
+    background: var(--bg);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-lg);
+    padding: 18px 20px;
+    margin-bottom: 20px;
+}
+
+.td-card > h2 {
+    margin: 0 0 4px;
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
+}
+
+.td-note {
+    margin: 0 0 14px;
+    font-size: var(--text-xs, 12px);
+    color: var(--text-dim);
+}
+
+.td-note-narrow {
+    max-width: 720px;
+}
+
+/* ── 对比度体检表 ─────────────────────────────────────────────────────────── */
+
+.td-contrast-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm, 13px);
+}
+
+.td-contrast-table th,
+.td-contrast-table td {
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--surface);
+}
+
+.td-contrast-table th {
+    color: var(--text-dim);
+    font-weight: var(--weight-medium);
+    font-size: var(--text-xs, 12px);
+}
+
+.td-contrast-fg {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.td-contrast-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid var(--surface-2);
+    flex-shrink: 0;
+}
+
+.td-contrast-mono {
+    font-family: var(--font-mono, Consolas, monospace);
+    color: var(--text-sub);
+}
+
+.td-verdict {
+    font-family: var(--font-mono, Consolas, monospace);
+    font-weight: var(--weight-semibold);
+}
+
+.td-verdict-pass {
+    color: var(--green);
+}
+
+.td-verdict-large {
+    color: var(--yellow);
+}
+
+.td-verdict-fail {
+    color: var(--red);
+}
+
+/* ── token 色板 ───────────────────────────────────────────────────────────── */
+
+.td-swatches {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 10px;
+}
+
+.td-swatch {
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.td-swatch-color {
+    height: 44px;
+    border-bottom: 1px solid var(--surface);
+}
+
+.td-swatch-meta {
+    padding: 6px 8px;
+}
+
+.td-swatch-name {
+    display: block;
+    font-family: var(--font-mono, Consolas, monospace);
+    font-size: var(--text-xs, 12px);
+    color: var(--text);
+}
+
+.td-swatch-value {
+    display: block;
+    font-family: var(--font-mono, Consolas, monospace);
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+/* ── 文字层级 / 状态色文字 ────────────────────────────────────────────────── */
+
+.td-type p {
+    margin: 4px 0;
+}
+
+.td-type-sub {
+    color: var(--text-sub);
+}
+
+.td-type-dim {
+    color: var(--text-dim);
+}
+
+.td-type-faint {
+    color: var(--text-faint);
+}
+
+.td-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    font-size: var(--text-md);
+}
+
+.td-status-green {
+    color: var(--green);
+}
+
+.td-status-red {
+    color: var(--red);
+}
+
+.td-status-warning {
+    color: var(--warning);
+}
+
+.td-status-yellow {
+    color: var(--yellow);
+}
+
+.td-status-accent {
+    color: var(--accent);
+}
+
+/* ── 主窗 / 对话模拟区（真实视图 CSS 渲染，容器只提供边界）──────────────── */
+
+.td-mainwin-mock {
+    position: relative; /* 承接 #transient-feedback 的 absolute 定位 */
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.td-chat-mock {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+}
+
+/* ── 组件样本区 ───────────────────────────────────────────────────────────── */
+
+.td-samples {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 18px;
+}
+
+.td-samples-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 14px;
+    border: 1px dashed var(--surface-2);
+    border-radius: var(--radius-md);
+}
+
+.td-samples-block > .td-block-label {
+    font-size: var(--text-xs, 12px);
+    color: var(--text-dim);
+}
+
+.td-sample-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}

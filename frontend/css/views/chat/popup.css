@@ -35,7 +35,8 @@
 }
 
 .composer-bar-popup::-webkit-scrollbar-thumb:hover {
-    background: var(--surface-3, #45475a);
+    /* 0.25.11: 原 --surface-3 未定义恒落 Mocha 常量（浅色下滚条 hover 变深色块），改 text-faint 两主题都有 hover 增量 */
+    background: var(--text-faint);
 }
 
 @keyframes cbp-fade-in {
@@ -112,7 +113,8 @@
 }
 
 .cbp-collapsible-header:hover {
-    background: var(--surface-0, #181825);
+    /* 0.25.11: 原 --surface-0 未定义恒落 #181825（浅色下 hover 出现深色块压浅字），对齐 chat 交互面的 surface-2 hover 档 */
+    background: var(--surface-2);
     border-radius: 4px;
     padding: 4px 6px;
     margin: 0 -6px;

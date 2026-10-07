@@ -1,0 +1,46 @@
+/* ── 主题调试台 entry（0.25.11）───────────────────────────────────────────────
+   加载顺序铁则：reset → tokens → themes → base → components → views
+   theme-debug.html 只需 <link href="css/entries/theme-debug.css">
+   全部主题文件都引入，页内下拉可切换任意主题做单页验收。 */
+
+/* reset */
+@import '../base/reset.css';
+
+/* token 层（含 vendor/open-props） */
+@import '../tokens/index.css';
+
+/* 主题变量（全部引入，data-theme 切换） */
+@import '../themes/dark.css';
+@import '../themes/light.css';
+@import '../themes/gruvbox.css';
+@import '../themes/neutral.css';
+@import '../themes/nvchad.css';
+@import '../themes/genshin.css';
+
+/* base 排版 */
+@import '../base/typography.css';
+
+/* 组件（调试台样本用真实组件 CSS 渲染） */
+@import '../components/icon.css';
+@import '../components/button.css';
+@import '../components/input.css';
+@import '../components/checkbox.css';
+@import '../components/toggle.css';
+@import '../components/radio.css';
+@import '../components/chip.css';
+@import '../components/badge.css';
+@import '../components/card.css';
+@import '../components/kbd.css';
+@import '../components/spinner.css';
+@import '../components/form-row.css';
+
+/* 真实窗口视图 CSS（主窗结果列表/状态栏/建议条 + 对话气泡/工具卡） */
+@import '../views/main-window/result-item.css';
+@import '../views/main-window/statusbar.css';
+@import '../views/main-window/suggestion-bar.css';
+@import '../views/main-window/transient-feedback.css';
+@import '../views/chat/bubble.css';
+@import '../views/chat/tool-card.css';
+
+/* 页面自身 */
+@import '../views/theme-debug.css';

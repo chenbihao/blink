@@ -173,7 +173,7 @@
     height: 36px;
     border-radius: 50%;
     background: var(--surface-2);
-    border: 1px solid var(--surface-3, var(--surface-2));
+    border: 1px solid var(--surface-2);
     color: var(--text);
     display: flex;
     align-items: center;
@@ -200,6 +200,6 @@
 
 .chat-scroll-bottom-btn:hover {
     opacity: 1;
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-2);
 }
 
