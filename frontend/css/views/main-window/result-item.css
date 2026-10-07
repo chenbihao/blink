@@ -158,10 +158,11 @@ body.alt-active #results li .item-badge {
     opacity: var(--opacity-faint);
 }
 
-/* AI 错误项：徽章也变黄，视觉一致 */
+/* AI 错误项：徽章换 error 语义色（red on red-bg，dark 5.65 / light 3.77，≥3 chip 线），
+   不再黄字压 accent 蓝底（dark 1.22:1 且黄蓝互振刺眼）；行内错误文字仍走 --yellow */
 #results li.ai-item.error-item .ai-icon-badge {
-    color: var(--yellow);
-    border-color: var(--yellow);
+    color: var(--red);
+    background: var(--red-bg);
     opacity: 1;
 }
 

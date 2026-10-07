@@ -1687,11 +1687,17 @@
     --text-faint: #616d82;
     --accent: #5e81ac;
     --accent-bg: rgba(94, 129, 172, 0.12);
-    --green: #a3be8c;
-    --red: #bf616a;
+    /* 状态色按 0.25.11 浅色可读性口径向黑缩放保 nord 色相（原 nord 原色在浅底
+       green 1.77 / red 3.55，warning/yellow 继承 Mocha 深色值仅 ~1.5:1） */
+    --green: #607053;
+    --red: #a2525a;
     --red-bg: #e6d2d2;
     --red-border: #d2b3b3;
     --green-bg: #d2e3d2;
+    --warning: #8a6150; /* nord 红/黄中间调向黑缩放，作浅底警告文字 */
+    --warning-bg: #f6e8dc;
+    --warning-border: #e2cbbd;
+    --yellow: #786847; /* nord aurora 黄向黑缩放 — 提示黄（主窗错误项等） */
     --shadow: rgba(0, 0, 0, 0.18);
     --shadow-strong: rgba(0, 0, 0, 0.35);
     --border-glow: rgba(0, 0, 0, 0.06);
@@ -1825,7 +1831,8 @@
 
 /* Latte 拿铁 — 浅色。dim/accent/green 取官方值或 0.25.11 浅色可读性专项同款
    AA 调整值：text-dim 官方 overlay0 #6c6f85 仅 4.37:1，沿用 light.css 调整值；
-   accent mauve #8839ef 官方原值即达 4.7:1，green 沿用 light.css 向黑缩放值 */
+   accent mauve #8839ef 官方原值即达 4.7:1，green 沿用 light.css 向黑缩放值。
+   warning/yellow 必须覆盖 ：root 的 Mocha 深色值（浅底继承仅 ~1.5:1），与 light.css 同值 */
 [data-theme="catppuccin-latte"] {
     --bg: #eff1f5;
     --bg-sidebar: #e6e9ef;
@@ -1843,6 +1850,10 @@
     --red-bg: #e6d2da;
     --red-border: #d2b3c2;
     --green-bg: #dcead9;
+    --warning: #b94908;
+    --warning-bg: #ffeede;
+    --warning-border: #fdd9bd;
+    --yellow: #976014;
     --shadow: rgba(0, 0, 0, 0.18);
     --shadow-strong: rgba(0, 0, 0, 0.35);
     --border-glow: rgba(0, 0, 0, 0.06);

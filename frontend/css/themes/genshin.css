@@ -112,8 +112,11 @@
     --text-sub: #bccae0;
     --text-dim: #f7f6f8;
     --text-faint: #c7b0be;
-    --accent: #ae6b81;
-    --accent-bg: rgba(174, 107, 129, 0.15);
+    /* 原 #ae6b81 对 bg 仅 2.15:1、对 surface-2（加载 spinner 轨道）仅 1.02:1，加载动画不可见；
+       换冰蓝（与 text-sub 同族，对 bg 5.63:1 / spinner 弧对轨道 2.57:1），on-accent 同步覆深墨字 */
+    --accent: #b8d4ea;
+    --accent-bg: rgba(184, 212, 234, 0.15);
+    --on-accent: #4a1a2c;
 }
 
 [data-theme="genshin-klee"] {
@@ -140,8 +143,11 @@
     --text-sub: #aad4f8;
     --text-dim: #f2f7fb;
     --text-faint: #f3f7fb;
-    --accent: #d55276;
-    --accent-bg: rgba(213, 82, 118, 0.15);
+    /* 原 #d55276 与 bg #5184b2 亮度几乎相等（对比 1:1），粉蓝同明度互振刺眼；
+       提亮为淡粉拉开明度（vs bg 3.08:1），accent 实底随之变浅，on-accent 覆盖为深墨字 */
+    --accent: #ffd9e6;
+    --accent-bg: rgba(255, 217, 230, 0.15);
+    --on-accent: #2c4a66;
 }
 
 [data-theme="genshin-sucrose"] {
