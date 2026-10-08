@@ -126,10 +126,11 @@ async function readChordActions() {
             ocrDebug: sc?.ocrDebug === true,
             controlSnap: sc?.controlSnap === true,
             windowEdgeSnap: sc?.windowEdgeSnap ?? 10,
+            preselectionCutout: sc?.preselectionCutout !== false,
         };
     } catch (e) {
         console.warn("load screenshot config failed:", e);
-        screenshotCfg = {prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: true, windowEdgeSnap: 10};
+        screenshotCfg = {prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: true, windowEdgeSnap: 10, preselectionCutout: true};
     }
 
     // 后端配置是已确认状态的真源。每次完整加载时重建快照，确保首次保存
@@ -711,6 +712,7 @@ function renderScreenshotDetail(cfg) {
         controlSnapDeadlineMs: 1000,
         controlSnapMinSize: 50,
         windowEdgeSnap: 10,
+        preselectionCutout: true,
     };
     return `<div class="chord-screenshot-detail">
 <div class="chord-field">
@@ -719,6 +721,15 @@ function renderScreenshotDetail(cfg) {
 </label>
 <label class="switch switch-sm">
 <input type="checkbox" class="screenshot-field" data-field="prewarm_ocr" ${cfg.prewarmOcr !== false ? "checked" : ""} />
+<span class="slider"></span>
+</label>
+</div>
+<div class="chord-field">
+<label class="setting-label chord-field-label">${t("chord.screenshot.preselection_cutout.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.preselection_cutout.hint"))}">ⓘ</span>
+</label>
+<label class="switch switch-sm">
+<input type="checkbox" class="screenshot-field" data-field="preselection_cutout" ${cfg.preselectionCutout !== false ? "checked" : ""} />
 <span class="slider"></span>
 </label>
 </div>
@@ -1189,6 +1200,7 @@ async function saveScreenshotDetail(container) {
         const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
         const ocrDebug = detail.querySelector('[data-field="ocr_debug"]')?.checked === true;
         const controlSnap = detail.querySelector('[data-field="control_snap"]')?.checked === true;
+        const preselectionCutout = detail.querySelector('[data-field="preselection_cutout"]')?.checked !== false;
         const controlSnapDepth = parseInt(detail.querySelector('[data-field="control_snap_depth"]')?.value, 10) || 15;
         const controlSnapDeadlineMs = parseInt(detail.querySelector('[data-field="control_snap_deadline_ms"]')?.value, 10) || 1000;
         const controlSnapMinSize = parseInt(detail.querySelector('[data-field="control_snap_min_size"]')?.value, 10) || 50;
@@ -1198,6 +1210,7 @@ async function saveScreenshotDetail(container) {
             scrollDebug,
             ocrDebug,
             controlSnap,
+            preselectionCutout,
             controlSnapDepth,
             controlSnapDeadlineMs,
             controlSnapMinSize,

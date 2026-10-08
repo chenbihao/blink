@@ -23,6 +23,7 @@ import * as annot from './annotation-engine.js';
 import {cssPointToScreen, cssRectToBitmap, formatSelectionInfo, monitorDprAtCss} from './ss-selection-geometry.js';
 import {applyFloatingUiScaleAt} from './ss-display.js';
 import {hideLiveSelection} from './ss-live-selection.js';
+import {hideCutoutMask} from './ss-preselection-hint.js';
 
 /** 取截图底图来源：优先用 screenshotOffscreen（canvas→canvas 无解码开销） */
 function getScreenshotSource() {
@@ -72,11 +73,15 @@ export function drawStaticBase() {
 export function drawDimmed() {
     // 0.23.15：canvas 提交与实时层隐藏必须同一帧，避免闪白 / 双蒙版
     hideLiveSelection();
+    // 0.25.14：DOM 挖洞遮罩同帧让位给 canvas 整屏暗罩，避免双暗
+    hideCutoutMask();
     drawStaticBase();
     const {interactionCtx, interactionCanvas} = ss;
     if (!interactionCtx || !interactionCanvas) return;
     interactionCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     interactionCtx.fillRect(0, 0, interactionCanvas.width, interactionCanvas.height);
+    // 0.25.14 A2：标记整屏暗罩已提交——懒加载屏的局部重绘以此为前提
+    ss._dimmedReady = true;
 }
 
 /**
@@ -92,6 +97,9 @@ export function drawDimmed() {
  */
 export function drawFinalSelection() {
     hideLiveSelection();
+    // 0.25.14：吸附确认路径预选挖洞遮罩可能仍在显示——与 canvas 挖洞（同 rect
+    // 同色）叠加会双暗，必须在 canvas 提交前同帧隐藏
+    hideCutoutMask();
     const {interactionCtx, interactionCanvas, selCss} = ss;
     if (!selCss || !interactionCtx || !interactionCanvas) return;
     // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
@@ -149,6 +157,21 @@ export function drawFinalSelection() {
             interactionCtx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
         }
     }
+}
+
+/**
+ * 局部重绘主 canvas 底图区域（0.25.14 A2：多屏懒加载专用）。
+ *
+ * 某块屏的 BGRA 就绪并 putImageData 进 offscreen 后，只把该屏矩形从 offscreen
+ * 刷到主 canvas，替代全屏 drawDimmed（drawImage+fillRect 全屏 ×(N-1) 次）。
+ * 只动底图层——interaction-canvas 的暗罩与挖洞遮罩 DOM 不变，半透明遮罩下
+ * 新底图自然透出。坐标是 canvas 位图像素（物理），与 offscreen 内偏移同系。
+ */
+export function redrawBaseRegion(x, y, w, h) {
+    const {ctx} = ss;
+    const src = getScreenshotSource();
+    if (!ctx || !src || w <= 0 || h <= 0) return;
+    ctx.drawImage(src, x, y, w, h, x, y, w, h);
 }
 
 /**

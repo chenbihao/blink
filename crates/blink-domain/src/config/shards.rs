@@ -408,6 +408,10 @@ pub struct ScreenshotConfig {
     /// 保证在控件铺满窗口时仍能选到整窗）。默认 10。范围 1-200。
     #[serde(default = "default_window_edge_snap")]
     pub window_edge_snap: u32,
+    /// 预选挖洞遮罩（0.25.14：智能吸附预选框内部不再被整屏暗罩盖住，框内提亮、
+    /// 框外保持暗罩，对标 PixPin）。默认开启；关闭后回退整屏暗罩视觉。
+    #[serde(default = "default_true")]
+    pub preselection_cutout: bool,
 }
 
 impl Default for ScreenshotConfig {
@@ -421,6 +425,7 @@ impl Default for ScreenshotConfig {
             control_snap_deadline_ms: default_control_snap_deadline_ms(),
             control_snap_min_size: default_control_snap_min_size(),
             window_edge_snap: default_window_edge_snap(),
+            preselection_cutout: true,
         }
     }
 }
@@ -686,5 +691,23 @@ mod tests {
     fn suggestion_config_empty_json_defaults() {
         let c: SuggestionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(c, SuggestionConfig::default());
+    }
+
+    /// 0.25.14：旧分片（无 preselection_cutout 字段）反序列化必须默认开启挖洞，
+    /// 升级零迁移；显式 false 保持关闭。
+    #[test]
+    fn screenshot_config_legacy_json_keeps_cutout_default() {
+        let legacy = r#"{"prewarm_ocr":true,"window_edge_snap":10}"#;
+        let c: ScreenshotConfig = serde_json::from_str(legacy).unwrap();
+        assert!(c.preselection_cutout, "旧配置缺字段应默认开启挖洞遮罩");
+        let off = r#"{"prewarm_ocr":true,"preselectionCutout":false}"#;
+        let c: ScreenshotConfig = serde_json::from_str(off).unwrap();
+        assert!(!c.preselection_cutout, "显式关闭（camelCase）应保持关闭");
+        let empty: ScreenshotConfig = serde_json::from_str("{}").unwrap();
+        let default = ScreenshotConfig::default();
+        assert_eq!(empty.prewarm_ocr, default.prewarm_ocr);
+        assert_eq!(empty.control_snap, default.control_snap);
+        assert_eq!(empty.window_edge_snap, default.window_edge_snap);
+        assert_eq!(empty.preselection_cutout, default.preselection_cutout);
     }
 }

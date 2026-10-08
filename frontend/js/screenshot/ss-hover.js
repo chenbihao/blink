@@ -27,6 +27,22 @@ let hoveredIndex = -1;
 let desktopHintRect = null;
 
 /**
+ * 窗口列表是否已完成本轮加载（成功或失败均视为完成；会话清场重置）。
+ *
+ * 0.25.14-fix：列表在 maybeStartCaptureHints 门控后异步加载（后端 EnumWindows
+ * ~5-15ms + IPC），完成前的 mousemove 若照常走 hit-test 会全部落空并触发
+ * **桌面回退**——把「列表未就绪」误判为「鼠标在桌面」，整屏挖洞（全屏提亮）
+ * 与随后到位的窗口预选形成「暗→闪亮→暗」。未加载完成时 updateWindowHover
+ * 不做任何预选，整屏暗罩保持到第一次真实预选出现（遮罩与预选框同帧切换）。
+ */
+let windowsLoaded = false;
+
+/** 窗口列表是否已就绪（诊断与测试用只读探针） */
+export function areWindowsLoaded() {
+    return windowsLoaded;
+}
+
+/**
  * 加载可吸附窗口列表（overlay 加载时调一次）。
  * 物理坐标 → CSS 坐标转换在此一次完成。
  * 支持会话 generation 防止过期回流。
@@ -52,12 +68,28 @@ export async function loadPickableWindows(requestGen, fetchWindows = screenshotW
             window.innerWidth,
             window.innerHeight,
         );
+        windowsLoaded = true;
 
         console.info('[screenshot] loadPickableWindows done', {
             count: pickableWindows.length,
             fetchMs: Math.round(_tFetchEnd - _t0),
             totalMs: Math.round(performance.now() - _t0)
         });
+
+        // 0.25.14-fix：列表就绪后立即在真实光标位置补一次预选（含 hint 与挖洞
+        // 遮罩的同步激活），不等下一个 mousemove——Alt+A 唤起时用户通常不动
+        // 鼠标，等 move 才出预选框会有「预选迟到一拍」的观感。
+        // 位置真源是后端注入的 show 时刻光标（__blinkScreenMeta.cursorX/Y，
+        // 虚拟屏幕物理坐标，rectScreenToCss 换算 CSS）；无效（-1 哨兵/旧版本
+        // 后端）时跳过，等第一个 mousemove。门控与 pointermove 预选分支一致：
+        // 拖选中/标注中/选区交互中不插（防实线选区与虚线预选框同屏——0.15.8
+        // 避免的形态；A1 让拖选可能早于列表就绪开始，此门必须留）。
+        const metaNow = window.__blinkScreenMeta || {};
+        if (metaNow.cursorX != null && metaNow.cursorY != null
+            && !ss.isAnnotating && !ss.isDragging && !ss.selectionInteraction) {
+            const cssPos = rectScreenToCss({x: metaNow.cursorX, y: metaNow.cursorY}, metaNow);
+            updateWindowHover(cssPos.x, cssPos.y);
+        }
     } catch (e) {
         // 旧请求的失败与旧请求的成功一样，都不能覆盖新一代列表。
         if (requestGen !== ss.windowListGen) {
@@ -66,6 +98,9 @@ export async function loadPickableWindows(requestGen, fetchWindows = screenshotW
         }
         console.warn('[screenshot] loadPickableWindows 失败', e);
         pickableWindows = [];
+        // 失败也视为「加载完成」：预选系统降级为桌面回退（与空列表语义一致），
+        // 不能因加载失败永远不出现预选（僵死比降级更差）。
+        windowsLoaded = true;
     }
 }
 
@@ -92,6 +127,7 @@ export function clearPickableWindows() {
     pickableWindows = [];
     hoveredIndex = -1;
     desktopHintRect = null;
+    windowsLoaded = false;
     ss.windowListGen++;
     resetPreselectionHint();
 }
@@ -125,6 +161,10 @@ export function updateWindowHover(cssX, cssY, options) {
         }
         return false;
     }
+
+    // 0.25.14-fix：列表未加载完成时不做任何预选（含桌面回退）——见 windowsLoaded
+    // 声明处的时序说明。返回 false 让 pointermove 侧的控件链路也一并静默。
+    if (!windowsLoaded) return false;
 
     // 0.15.8 R1：从索引 0 开始正序遍历——EnumWindows 返回前景到背景，
     // 第一个命中即为最前景窗口。

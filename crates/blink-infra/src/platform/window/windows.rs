@@ -1157,6 +1157,19 @@ fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) ->
 /// **跨 DPI 屏关键**：物理尺寸 **不能读 `outer_size()`**——它反映的是
 /// 「窗口当前所在屏」的 DPI 换算结果，而我们要去的可能是另一块 DPI 不同的屏。
 /// 一旦 `set_position` 把窗口移过去，Windows 发 `WM_DPICHANGED` 让 winit
+/// 取当前光标的虚拟屏幕物理像素坐标（0.25.14-fix：注入截图 overlay 会话，
+/// 供前端窗口列表就绪后的主动补预选定位）。
+fn cursor_pos_virtual() -> Option<(i32, i32)> {
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt).is_ok() {
+            Some((pt.x, pt.y))
+        } else {
+            None
+        }
+    }
+}
+
 /// 按目标屏 DPI **rescale 尺寸但不动位置**，就会视觉偏移。
 /// 正确做法：`GetDpiForMonitor(目标屏) × 基准逻辑尺寸` 直接算目标屏物理尺寸，
 /// 位置随之对齐——首次跨屏也一步到位。
@@ -2791,6 +2804,16 @@ pub fn show_screenshot_overlay(
     // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
     let t0 = std::time::Instant::now();
 
+    // 0.25.14-fix：注入 show 时刻的真实光标位置（虚拟屏幕物理像素坐标，
+    // 副屏在左侧时为负值——不能用 -1 做哨兵）。前端窗口列表就绪后的
+    // 「主动补预选」用它定位——Alt+A 唤起时用户通常不动鼠标，等第一个
+    // mousemove 才出预选框会有「预选迟到一拍」的观感。拿不到光标时
+    // 注入 null（合法 JS 字面量），前端跳过补选。
+    let (cursor_x_js, cursor_y_js) = match cursor_pos_virtual() {
+        Some((x, y)) => (x.to_string(), y.to_string()),
+        None => ("null".to_string(), "null".to_string()),
+    };
+
     // 注入原始物理显示器矩形（physicalDisplays），前端用 canvas 实测 renderScale 转换 CSS。
     // overlayDpi 仅诊断用，不参与坐标变换。
     // **复用窗口时序**：place → inject meta → show → focus → 单次原子 session init。
@@ -2834,7 +2857,7 @@ pub fn show_screenshot_overlay(
         );
         let fg_hwnd = crate::platform::screenshot::session_fg_hwnd().unwrap_or(0);
         let session_js = format!(
-            "window.__blinkStartScreenshotSession && window.__blinkStartScreenshotSession({{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }}, {});",
+            "window.__blinkStartScreenshotSession && window.__blinkStartScreenshotSession({{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, cursorX: {}, cursorY: {}, physicalDisplays: {} }}, {});",
             meta.virtual_x,
             meta.virtual_y,
             meta.width,
@@ -2842,6 +2865,8 @@ pub fn show_screenshot_overlay(
             overlay_dpi,
             fg_hwnd,
             active_display,
+            cursor_x_js,
+            cursor_y_js,
             displays_json,
             active_display,
         );
@@ -2930,7 +2955,7 @@ pub fn show_screenshot_overlay(
     let fg_hwnd = crate::platform::screenshot::session_fg_hwnd().unwrap_or(0);
     let active_display = crate::platform::screenshot::active_display_index();
     let session_js = format!(
-        "window.__blinkStartScreenshotSession({{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }}, {});",
+        "window.__blinkStartScreenshotSession({{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, cursorX: {}, cursorY: {}, physicalDisplays: {} }}, {});",
         meta.virtual_x,
         meta.virtual_y,
         meta.width,
@@ -2938,6 +2963,8 @@ pub fn show_screenshot_overlay(
         overlay_dpi,
         fg_hwnd,
         active_display,
+        cursor_x_js,
+        cursor_y_js,
         displays_json,
         active_display,
     );

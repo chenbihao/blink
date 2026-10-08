@@ -20,6 +20,12 @@ export const ss = {
     liveMaskLeft: null,
     liveMaskRight: null,
     liveBorderEl: null,
+    // 0.25.14：预选挖洞遮罩层——预选阶段由 ss-preselection-hint.js 驱动
+    preMaskEl: null,
+    preMaskTop: null,
+    preMaskBottom: null,
+    preMaskLeft: null,
+    preMaskRight: null,
     annotCanvas: null,
     annotCtx: null,
     toolbar: null,
@@ -61,7 +67,8 @@ export const ss = {
         controlSnapDepth: 15,
         controlSnapDeadlineMs: 1000,
         controlSnapMinSize: 50,
-        windowEdgeSnap: 10
+        windowEdgeSnap: 10,
+        preselectionCutout: true
     },
     selectionRevision: 0,
     translationRevision: 0,
@@ -83,6 +90,13 @@ export const ss = {
     pendingSnap: null, // null | { startX, startY, winRect, pointerId }
     // 0.15.8 R2：吸附窗口的 HWND，供长截图优先使用
     snappedHwnd: null,
+    // 0.25.14 A1：截图就绪前的拖选起点缓存——P5 暗罩可见但 ss.screenshot 未赋值时
+    // pointerdown 不再丢弃，记 { startX, startY, endX, endY, pointerId } 并 capture；
+    // 就绪后首个仍按住的 pointermove 衔接为正常 isDragging，松手视为放弃。
+    _predragStart: null,
+    // 0.25.14 A2：整屏暗罩是否已提交（drawDimmed 跑过）。懒加载屏的局部重绘
+    // 以此为前提——否则会把 resetState 画的 P5 纯黑罩擦出一块无暗罩的亮斑。
+    _dimmedReady: false,
 
     // ── OCR 阅读模式状态 ──────────────────────────────────────
     reading: null,             // 阅读模式数据 { words, lines, charRanges }
@@ -350,6 +364,12 @@ export function initDOM() {
     ss.liveMaskLeft = document.getElementById('live-mask-left');
     ss.liveMaskRight = document.getElementById('live-mask-right');
     ss.liveBorderEl = document.getElementById('live-border');
+    // 0.25.14：预选挖洞遮罩层（四块）
+    ss.preMaskEl = document.getElementById('preselection-mask');
+    ss.preMaskTop = document.getElementById('pre-mask-top');
+    ss.preMaskBottom = document.getElementById('pre-mask-bottom');
+    ss.preMaskLeft = document.getElementById('pre-mask-left');
+    ss.preMaskRight = document.getElementById('pre-mask-right');
     ss.hitCanvas = document.getElementById('ocr-hit-canvas');
     ss.hitCtx = ss.hitCanvas ? ss.hitCanvas.getContext('2d') : null;
     // 0.20.6：精调状态提示元素

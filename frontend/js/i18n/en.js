@@ -443,6 +443,8 @@ export const en = {
     // ── Screenshot config (0.11.10-b) ──
     "chord.screenshot.prewarm_ocr.label": "Prewarm OCR",
     "chord.screenshot.prewarm_ocr.hint": "Run OCR in the background right after selection so [Identify]/[Translate] respond instantly; turn off on battery",
+    "chord.screenshot.preselection_cutout.label": "Preselection highlight",
+    "chord.screenshot.preselection_cutout.hint": "While hovering during smart snap, the area inside the preselection box stays at original brightness instead of being dimmed (outside stays dimmed); hovering the desktop brightens the whole screen. Turn off to restore the full-screen dim mask",
     "chord.screenshot.scroll_debug.label": "Long screenshot diagnostics",
     "chord.screenshot.scroll_debug.hint": "Show matching diagnostics and retain replay frames for the current session; files are written to Blink logs only when exported",
     "chord.screenshot.ocr_debug.label": "OCR Diagnostics",

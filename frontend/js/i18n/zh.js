@@ -444,6 +444,8 @@ export const zh = {
     // ── 截图配置（0.11.10-b）──
     "chord.screenshot.prewarm_ocr.label": "预热 OCR",
     "chord.screenshot.prewarm_ocr.hint": "选区拖完后立即后台识别文字，点[识别]/[翻译]秒响应；笔电场景可关掉省电",
+    "chord.screenshot.preselection_cutout.label": "预选区提亮",
+    "chord.screenshot.preselection_cutout.hint": "智能吸附悬停时，预选框内部不再压暗罩、保持原亮度（框外仍暗），桌面悬停时整屏提亮；关闭后回退为整屏暗罩",
     "chord.screenshot.scroll_debug.label": "长截图诊断",
     "chord.screenshot.scroll_debug.hint": "显示长截图匹配信息并保留当前会话的回放帧；仅点击导出后才写入 Blink 日志目录",
     "chord.screenshot.ocr_debug.label": "OCR 诊断",

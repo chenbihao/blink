@@ -156,6 +156,9 @@ function updateSizeHint(rect) {
     if (!sizeHint) return;
     // canvas-backed 来源（长截图 / 剪贴板图片编辑）不显示截图坐标提示
     if (ss.editorSession?.canvasBacked) return;
+    // 0.25.14：零尺寸矩形（手动框选按下瞬间的零洞激活）不显示尺寸提示——
+    // 0×0 无信息量，首个 pointermove 即更新为真实几何
+    if (rect.w < 1 || rect.h < 1) return;
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const bmp = cssRectToBitmap(rect, meta);
     const screenPos = cssPointToScreen(rect.x, rect.y, meta);

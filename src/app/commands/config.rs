@@ -552,6 +552,7 @@ async fn set_config_value(
                 prewarm_ocr = sc.prewarm_ocr,
                 scroll_debug = sc.scroll_debug,
                 window_edge_snap = sc.window_edge_snap,
+                preselection_cutout = sc.preselection_cutout,
                 "截图配置已更新"
             );
         }

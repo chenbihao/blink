@@ -59,10 +59,13 @@ import {
     drawFinalSelection,
     redrawAnnotFull,
     redrawAnnotPreview,
+    redrawBaseRegion,
     syncInteractionCanvasSize
 } from "./ss-draw.js";
 // 0.23.15：拖动期间的实时选区预览（单一调度入口）
 import {resetLiveSelection, updateLiveSelection} from "./ss-live-selection.js";
+// 0.25.14：预选挖洞遮罩消隐（resetState 清场用，防旧会话几何残留）
+import {hideCutoutMask} from "./ss-preselection-hint.js";
 // 0.23.15：Pointer Events 的 capture / 采样 / 中断判定（纯逻辑，可单测）
 import {capturePointer, hasActiveDragInteraction, pointerPoint, releasePointer} from "./ss-pointer.js";
 import {invalidateDisplaysCache, positionToolbar} from "./ss-display.js";
@@ -480,6 +483,7 @@ function cleanupSessionVisuals() {
     ss.isDragging = false;
     ss.selectionInteraction = null;
     ss.pendingSnap = null;
+    ss._predragStart = null;
     try {
         hidePixelMagnifier();
     } catch (e) {
@@ -537,6 +541,19 @@ function resetState() {
     // 0.15.8 R2：清除 pending-snap 状态
     ss.pendingSnap = null;
     ss.snappedHwnd = null;
+    // 0.25.14 A1：清就绪前拖选缓存——会话切换后旧 capture 的指针回调不得重建拖选
+    ss._predragStart = null;
+    // 0.25.14 A2：暗罩提交标志随会话重置（新一轮以 rAF drawDimmed 为准）
+    ss._dimmedReady = false;
+    // 0.25.14-fix：清最后鼠标位置——窗口列表就绪后的「主动补预选」用它定位，
+    // 旧会话残留会让新会话在错误位置闪一个预选框
+    ss._lastMagnifierPos = null;
+    // 0.25.14：挖洞遮罩随会话清场隐藏，防旧几何在下一会话首帧残留
+    try {
+        hideCutoutMask();
+    } catch (e) {
+        console.warn('[screenshot] resetState: hideCutoutMask failed', e);
+    }
     ss.selectionRevision++;
     ss.translationRevision++;
     canvas.style.cursor = 'crosshair';
@@ -801,8 +818,13 @@ async function loadScreenshot() {
         // A+B 优化：offscreen canvas 建为完整虚拟桌面尺寸，
         // 逐显示器 putImageData 到各自偏移位置。
         const {canvas} = ss;
-        canvas.width = w;
-        canvas.height = h;
+        // 0.25.14-fix：同值跳过赋值——canvas.width/height 赋值即使同值也会清空
+        // 画布（HTML 规范），会把 P5 暗罩清掉形成约一帧的全透明（透出真桌面，
+        // 用户观感为「暗→闪亮→暗」）。同值时保留 P5，由随后的 rAF drawDimmed
+        // 在同一帧内以 drawStaticBase 的 clearRect+drawImage 原子替换为截图态。
+        // 尺寸真变化的会话（显示器配置变更）仍会清空，透明一帧不可避免，可接受。
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
 
         ss.screenshotOffscreen = document.createElement('canvas');
         ss.screenshotOffscreen.width = w;
@@ -892,10 +914,20 @@ async function loadScreenshot() {
                         monitor: i,
                         ms: Math.round(performance.now() - _tLazy)
                     });
-                    // 仅在暗色蒙版态（未拖选/未标注）时刷新主 canvas，
-                    // 拖选中/标注中不调 drawDimmed（下次 mousemove/redraw 会自然读到新数据）
-                    if (!ss.isDragging && !ss.isAnnotating && !ss.selectionInteraction) {
-                        drawDimmed();
+                    // 0.25.14 A2：暗色蒙版态（未拖选/未标注）时只局部重绘该屏底图，
+                    // 替代全屏 drawDimmed——N 屏省 N-1 次全屏 drawImage+fillRect；
+                    // interaction 层的暗罩/挖洞遮罩不动，半透明遮罩下新底图自然透出。
+                    // _dimmedReady 前提：整屏暗罩尚未提交（P5 纯黑期）时不擦——
+                    // 否则会把黑罩擦出一块无暗罩亮斑，等 rAF drawDimmed 全量覆盖。
+                    // 拖选中/标注中不刷（下次 mousemove/redraw 自然读到新数据）。
+                    if (ss._dimmedReady
+                        && !ss.isDragging && !ss.isAnnotating && !ss.selectionInteraction) {
+                        redrawBaseRegion(
+                            _disp.x - (meta.vx || 0),
+                            _disp.y - (meta.vy || 0),
+                            _disp.w,
+                            _disp.h
+                        );
                     }
                 })
                 .catch(e => console.warn('[screenshot] lazy monitor load failed', e));
@@ -936,6 +968,9 @@ function loadEditorConfig(includeCaptureHints) {
                 ss.screenshotConfig.controlSnapDeadlineMs = val.controlSnapDeadlineMs ?? 1000;
                 ss.screenshotConfig.controlSnapMinSize = val.controlSnapMinSize ?? 50;
                 ss.screenshotConfig.windowEdgeSnap = val.windowEdgeSnap ?? 10;
+                // 0.25.14：预选挖洞遮罩开关——`!== false` 语义（默认开，学 prewarmOcr），
+                // 不能用 controlSnap 的 `=== true`（那是默认关语义，全新安装会失效）
+                ss.screenshotConfig.preselectionCutout = val.preselectionCutout !== false;
                 refreshDiagnosticsVisibility();
                 refreshOcrDiagnosticsVisibility();
                 // 0.18.x：配置加载完成，触发统一门控
@@ -1422,7 +1457,24 @@ canvas.addEventListener('pointerdown', (e) => {
         const delta = _screenshotReadyTs > 0 ? Math.round(performance.now() - _screenshotReadyTs) : -1;
         console.debug('[screenshot] first pointerdown', {hasScreenshot: !!ss.screenshot, deltaSinceReady: delta});
     }
-    if (!ss.screenshot && !ss._imagePan) return;
+    // 0.25.14 A1：截图未就绪（P5 暗罩可见、底图仍在加载）时不丢弃左键按下——
+    // 缓存拖选起点并 capture 指针，就绪后首个仍按住的 pointermove 衔接为正常
+    // isDragging。此前 `!ss.screenshot → return` 是「等遮罩下来才能拖」的直接
+    // 机制：ready 前的按下全部无效。松手（pointerup）视为放弃。
+    if (!ss.screenshot && !ss._imagePan) {
+        if (e.button === 0 && !ss.editorSession.canvasBacked) {
+            const prePoint = pointerPoint(e);
+            ss._predragStart = {
+                startX: prePoint.offsetX,
+                startY: prePoint.offsetY,
+                endX: prePoint.offsetX,
+                endY: prePoint.offsetY,
+                pointerId: e.pointerId,
+            };
+            capturePointer(canvas, e);
+        }
+        return;
+    }
 
     const tool = annot.getTool();
 
@@ -1510,6 +1562,12 @@ canvas.addEventListener('pointerdown', (e) => {
     // 手动框选开始时立即关闭预选区虚线框，避免实线选区与虚线预选区同时出现
     clearHover();
     clearControlHover();
+    // 0.25.14：clearHover 会立即隐藏预选挖洞遮罩，而 interaction-canvas 的整屏
+    // 暗罩也已在此前被挖洞激活清掉——若等首个 pointermove 才 activate live-selection，
+    // 中间有一帧「无任何遮罩」的全亮。此处在同一 task 以零矩形激活实时层接管
+    // （清 canvas + 显示四块遮罩，零洞=全屏暗，色值与挖洞遮罩一致），按下瞬间
+    // 视觉连续，首个 move 只更新几何。
+    updateLiveSelection({x: point.offsetX, y: point.offsetY, w: 0, h: 0});
     // 0.23.15：capture 让"拖出 canvas 边缘再松手"由浏览器保证送达
     capturePointer(canvas, e);
     ss.isDragging = true;
@@ -1523,6 +1581,42 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
     // 0.15.7：长图平移拖拽
     if (moveLongImagePan(e)) return;
+
+    // 0.25.14 A1：就绪前拖选缓存的衔接/更新（见 pointerdown 的 A1 注释）。
+    // ready 前只更新缓存终点；ready 后首个仍按住（buttons&1）的 move 衔接为
+    // 正常 isDragging 并落地首帧选区预览；已松手则放弃缓存。
+    if (ss._predragStart) {
+        const st = ss._predragStart;
+        if (!(e.buttons & 1)) {
+            ss._predragStart = null;
+        } else if (ss.screenshot && !ss.editorSession.canvasBacked) {
+            ss._predragStart = null;
+            ss.startX = st.startX;
+            ss.startY = st.startY;
+            const p = pointerPoint(e);
+            ss.endX = p.offsetX;
+            ss.endY = p.offsetY;
+            ss.isDragging = true;
+            ss.sent = false;
+            // ready 前窗口列表未加载（hint 门控依赖 screenshotReady），无需 clearHover
+            updateLiveSelection(
+                computeDragRect(ss.startX, ss.startY, p.offsetX, p.offsetY, !!p.shiftKey)
+            );
+            return;
+        }
+        if (ss._predragStart) {
+            const p = pointerPoint(e);
+            st.endX = p.offsetX;
+            st.endY = p.offsetY;
+            // ready 前也显示拖选框：live-selection 层不依赖底图，P5 黑罩上即有
+            // 蓝框几何反馈（洞内仍是黑底，底图 ready 后自然透亮）。renderScale
+            // 尚未实测同步时 getRenderScale 兜底 devicePixelRatio，无 NaN。
+            updateLiveSelection(
+                computeDragRect(st.startX, st.startY, p.offsetX, p.offsetY, !!p.shiftKey)
+            );
+        }
+        return;
+    }
 
     if (!ss.screenshot && !ss.editorSession.canvasBacked) return;
 
@@ -1658,6 +1752,8 @@ canvas.addEventListener('pointerleave', () => {
         clearHover();
         clearControlHover();
     }
+    // 0.25.14 A1：就绪前缓存拖选同样随离场作废（capture 抑制期外才可能到达）
+    ss._predragStart = null;
     if (!ss.selectionInteraction) {
         ss.canvas.style.cursor = ss._imagePan && annot.getTool() === 'select'
             ? 'grab'
@@ -1669,6 +1765,12 @@ canvas.addEventListener('pointerup', (e) => {
     // 0.23.15：先取消未落地的实时预览 rAF 并复位实时层；canvas 提交由下面各条路径
     // 在同一 JS task 内同步完成。两者同帧生效，因此不会闪白、双边框或短暂无蒙版。
     resetLiveSelection();
+    // 0.25.14 A1：就绪前按下后松手（未衔接成拖选）——放弃缓存拖选并释放 capture
+    if (ss._predragStart) {
+        ss._predragStart = null;
+        releasePointer(canvas, e);
+        return;
+    }
     // 0.15.7：长图平移结束
     if (endLongImagePan()) {
         releasePointer(canvas, e);
@@ -1863,6 +1965,7 @@ function abortSelectionInteraction(e = null) {
 canvas.addEventListener('pointercancel', (e) => {
     // 指针被系统或浏览器回收（触屏手势介入、窗口被抢占等）：按取消处理，
     // 不把半程结果变成最终选区
+    ss._predragStart = null; // 0.25.14 A1：capture 随 cancel 释放，缓存作废
     if (!hasActiveDragInteraction(ss)) return;
     console.debug('[screenshot] pointercancel → abort selection interaction');
     abortSelectionInteraction(e);
@@ -1871,6 +1974,7 @@ canvas.addEventListener('pointercancel', (e) => {
 canvas.addEventListener('lostpointercapture', (e) => {
     // capture 被隐式释放（正常 pointerup 之后也会触发）。只有仍存在未结束的拖选时
     // 才视为异常中断，避免把正常提交二次处理成取消。
+    ss._predragStart = null; // 0.25.14 A1：pointerup 未清到此处仍持有 = 异常中断
     if (!hasActiveDragInteraction(ss)) return;
     console.debug('[screenshot] lostpointercapture with active drag → abort');
     abortSelectionInteraction(e);

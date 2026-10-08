@@ -4,7 +4,7 @@
 
 > 📖 **文档入口**：[docs/README.md](docs/README.md)（文档体系总览）→ [docs/product.md](docs/product.md)（产品是什么、为什么）→ [docs/specs/](docs/specs/)（怎么做·铁则）→ [docs/phases/](docs/phases/)（各版做了什么）。
 
-更新时间 20260914
+更新时间 20261008
 
 ---
 
@@ -101,6 +101,7 @@ cargo test -p blink-domain-stt
 |---|---|
 | **改完自审** | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告 |
 | **关键节点打日志** | 关键节点需要打日志，量适中等级合适；开发流程可打临时日志排查，收尾时清理 |
+| **phase 版本同步** | 每次新增 phase 子版本小节（如 0.25.14）时，**同步**把根 `Cargo.toml` 与 `tauri.conf.json` 的 `version` 更新为该子版本号（两处必须一致）。tauri.conf 版本进安装包与 `latest.json` 更新链路（0.25.10），漏更会导致版本漂移与更新提示失效——0.25.9–0.25.13 期间停在 0.25.8 即此坑 |
 
 ---
 

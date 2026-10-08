@@ -1977,6 +1977,77 @@ body.image-editor-mode #canvas.long-image-editing {
 
 /* ── 统一智能吸附预选框 ──────────────────────
    窗口与控件共用一个元素：几何位置连续形变，层级变化只切换语义色。 */
+
+/* 0.25.14：预选挖洞遮罩——智能吸附预选阶段的「框外暗、框内透」，与上面的
+   预选框边框同 rect 同生命周期（js/screenshot/ss-preselection-hint.js 驱动）。
+   几何锚定纪律与 #live-mask-* 相同：上/下铺满整宽，左/右只覆盖洞高；
+   未写维度留 auto，避免与 JS 写入维度形成过度约束（见 #live-mask-right 注释）。
+   遮罩色与 drawDimmed / .live-selection-mask 同值（0.45），三态切换无跳色；
+   属截图 overlay 暗色自持 palette 豁免（0.25.11 §3.5 决策 4）。 */
+.preselection-mask {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    /* 位于 #interaction-canvas（z=1）之上、#annot-canvas（z=2）之下；
+       DOM 顺序在 #live-selection 之前，两者互斥由状态机保证 */
+    z-index: 1;
+}
+
+.preselection-mask-block {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+#pre-mask-top {
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 0;
+    /* 0.25.14-fix：挖洞与预选框形变动画一致——四块各自过渡被 JS 写入的推导
+       维度，曲线/时长与 .preselection-hint 的几何 transition 完全相同
+       （0.13s cubic-bezier(0.25,0.46,0.45,0.94)），洞边界与边框每帧重合。
+       这里允许 transition 与 #live-mask-* 的「几何禁止过渡」铁则不同：那条
+       铁则针对拖动逐帧写入（过渡＝实线滞后鼠标），预选是低频离散跳变
+       （跨窗口/层级边界），平滑过渡正是要的效果。过渡期间每帧重绘遮罩
+       面积（~8 帧），预选切换频率下可接受。 */
+    transition: height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* 只写 top；高度由 top + bottom 双锚定推出 */
+#pre-mask-bottom {
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: 0;
+    transition: top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* 写 top / height / width */
+#pre-mask-left {
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    transition:
+        top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+        height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+        width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* 只写 top / height / left；宽度由 left + right 双锚定推出（不得声明 width） */
+#pre-mask-right {
+    top: 0;
+    right: 0;
+    height: 0;
+    transition:
+        top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+        height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+        left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
 .preselection-hint {
     --preselection-color: var(--preselection-window);
     position: fixed;
